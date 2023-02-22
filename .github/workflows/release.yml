@@ -1,0 +1,303 @@
+name: release
+
+# Builds portable binaries and attaches them to a GitHub Release.
+# Fires when a release is published; also runnable by hand against an existing
+# release tag via the Actions tab (workflow_dispatch).
+#
+# Build specifics mirror the upstream engine's release CI: distributables are
+# PORTABLE, never -march=native on x86 (a native binary can SIGILL on an older
+# CPU).
+#   Linux   : static musl, x86-64-v2 (SSE4.2, ~2009+) or armv8-a — one
+#             self-contained binary that runs on any distro (no glibc
+#             dependency) and any mainstream CPU of its arch. Source builds
+#             (`make`) stay native/fast. Static musl cannot dlopen, so it has
+#             no `2:`, FFI or TLS (q says `'static-dlopen` and names the
+#             download that can): every Linux arch also ships a -glibc build.
+#             arm64 builds natively on GitHub's ubuntu-24.04-arm runners.
+#   Windows : mingw-w64 cross-compile (no -march; target CPU unknown).
+#   macOS   : native on the arm64 runner (Apple Silicon; a safe floor, no x86
+#             optional-ISA traps).
+#   wasm    : emscripten (emsdk) -> peachq-wasm.tar.gz (the browser REPL's servable directory);
+#             its own `wasm` job (not the binary matrix — different packaging).
+#
+# Every platform also ships a FAT archive, `peachq-<target>-duckdb.*`: q + the
+# DuckDB shared library beside it + the httpfs and aws extensions under
+# extensions/v<ver>/<platform>/, so DuckDB and S3 work out of the box, offline.
+# Windows and macOS q are already dynamic, so their fat archive is the SAME
+# binary plus the bundle. Static musl has no dlopen, so fat Linux is its own
+# glibc-DYNAMIC build at the manylinux_2_28 baseline (glibc >= 2.28: RHEL/Rocky
+# 8+, Debian 10+, Ubuntu 20.04+), with libstdc++/libgcc linked in so glibc is
+# its only dynamic dependency. Every DuckDB artifact is sha256-pinned below.
+# That same glibc q, without the DuckDB bundle, is `peachq-linux-<arch>-glibc`.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and attach binaries to
+        required: true
+
+permissions:
+  contents: write
+
+# THE pin table — the one place the fat steps read: DuckDB's version and the
+# sha256 of every artifact they bundle (the library zip per platform, DuckDB's
+# licence, the two extension gzips per platform). Bump the version and every
+# sha together; a mismatch fails the fetch.
+env:
+  DUCKDB_VERSION: 1.5.5
+  DUCKDB_SHA_LICENSE: 7e17fd31249fa875cb3b1c5e05c6c3e99b75509f6a2804ca176c217834de1dcb
+  DUCKDB_SHA_LIB_linux_amd64: 1fb8ce388157d84a25abe685a8a2520bf00c00321821968e4bb398fd766e7abb
+  DUCKDB_SHA_LIB_linux_arm64: abe4f6f005ee0b448a058322f4263584b4bd1b6faf7ab4637b79eeaf978f8e9c
+  DUCKDB_SHA_LIB_windows_amd64: 8375eb1fcf2212e8a0817950354815d4dde9dd383c2d9fa7b8975b71e278c1bd
+  DUCKDB_SHA_LIB_osx_arm64: 7b5b8915cc382d0708636fe6385c0cdad5a61c9ff8ba2638b3e2141640783155
+  DUCKDB_SHA_httpfs_linux_amd64: 7cdd52a3135388718884a9b71e3987ba723002121e8e9de399c4ed619d824a05
+  DUCKDB_SHA_aws_linux_amd64: 7454a7830b21e678f1700c6cc428540be3a688e959c81515fd1bfc0a538db3b3
+  DUCKDB_SHA_httpfs_linux_arm64: 0820e0b5b74efaa23608c239df8e744a68943318d530b483a529eace19cb5475
+  DUCKDB_SHA_aws_linux_arm64: c0c2ff813d07a1f69a3c06fb69663b93299f1145dbaab9aaeee1be4003da7170
+  DUCKDB_SHA_httpfs_windows_amd64: bb4a9f2721c43439006e6e776364a748d2469f92dfe5e5ebe365ed10e2be0e78
+  DUCKDB_SHA_aws_windows_amd64: a9dc3b3d5d5e04f503f69b0b6d4be74b3c28db386ed24b560d2b474bb8305e4d
+  DUCKDB_SHA_httpfs_osx_arm64: 758acc0b0c4fbf09506f387ff6f52826b1038b7b6849ded39928d2f992945230
+  DUCKDB_SHA_aws_osx_arm64: 2bde12c71c010ef3e4e510504dce276eb4ae77dea150ade1a4de632832604bbf
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # duckdb = DuckDB's extension-platform string; set only on the rows that
+        # ship a fat archive (the thin musl Linux binary cannot dlopen).
+        # manylinux = the glibc-dynamic build image; its rows also ship -glibc.
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+            march: x86-64-v2
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            march: armv8-a
+          - target: linux-x86_64-duckdb
+            os: ubuntu-latest
+            march: x86-64-v2
+            manylinux: manylinux_2_28_x86_64
+            duckdb: linux_amd64
+            lib: libduckdb-linux-amd64.zip
+            libfile: libduckdb.so
+          - target: linux-arm64-duckdb
+            os: ubuntu-24.04-arm
+            march: armv8-a
+            manylinux: manylinux_2_28_aarch64
+            duckdb: linux_arm64
+            lib: libduckdb-linux-arm64.zip
+            libfile: libduckdb.so
+          - target: windows-x86_64
+            os: ubuntu-latest      # mingw-w64 cross-compile
+            duckdb: windows_amd64
+            lib: libduckdb-windows-amd64.zip
+            libfile: duckdb.dll
+          - target: macos-arm64
+            os: macos-latest
+            duckdb: osx_arm64
+            lib: libduckdb-osx-universal.zip
+            libfile: libduckdb.dylib
+    steps:
+      - name: Resolve tag
+        id: v
+        run: |
+          tag="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
+          echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.v.outputs.tag }}
+
+      - name: Install mingw-w64 (Windows target)
+        if: matrix.target == 'windows-x86_64'
+        # g++ too: RE2 is C++ and is linked into q.exe on every platform since
+        # #439, so the C compiler alone fails at bitmap256.cc with Error 127.
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+      # musl-tools ships musl-gcc but NO musl g++, and since #439 RE2 (C++) is
+      # linked into q on every platform — so CC=musl-gcc with the host g++ drags
+      # glibc's libstdc++.a into a musl link and fails on __libc_single_threaded
+      # / __isoc23_strtoul. Alpine's gcc/g++ ARE musl-native, so build in a
+      # throwaway container and keep checkout/upload on the host runner (node
+      # actions are glibc-built and will not run inside Alpine). --user keeps the
+      # outputs owned by the runner for the packaging step.
+      - name: Build — Linux (static musl, portable ${{ matrix.march }})
+        if: startsWith(matrix.target, 'linux-') && !matrix.manylinux
+        run: |
+          docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$PWD:/src" -w /src alpine:3.20 sh -euc '
+              apk add --no-cache build-base linux-headers >/dev/null
+              make q RAY_VERSION="${{ steps.v.outputs.ver }}" LDFLAGS="-static -s" RAY_MARCH=${{ matrix.march }}
+              chown -R "$HOST_UID:$HOST_GID" build q'
+
+      # The fat Linux q must dlopen libduckdb.so, so it is glibc-DYNAMIC: built
+      # against glibc 2.28 (manylinux_2_28, libduckdb's own floor) with the C++
+      # runtime linked in (RAY_CXX_STATIC=1), and the link is checked — glibc
+      # must be the only thing it NEEDs.
+      - name: Build — Linux (glibc-dynamic, ${{ matrix.manylinux }}, portable ${{ matrix.march }})
+        if: matrix.manylinux
+        run: |
+          docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$PWD:/src" -w /src quay.io/pypa/${{ matrix.manylinux }} sh -euc '
+              make q RAY_VERSION="${{ steps.v.outputs.ver }}" LDFLAGS="-s" RAY_MARCH=${{ matrix.march }} RAY_CXX_STATIC=1
+              objdump -p q | grep NEEDED
+              ! objdump -p q | grep NEEDED | grep -qv -e "libc.so" -e "libm.so" -e "libpthread.so" -e "libdl.so" -e "ld-linux"
+              chown -R "$HOST_UID:$HOST_GID" build q'
+
+      - name: Build — Windows (mingw cross)
+        if: matrix.target == 'windows-x86_64'
+        run: make win RAY_VERSION="${{ steps.v.outputs.ver }}"
+
+      - name: Build — macOS (native arm64)
+        if: matrix.target == 'macos-arm64'
+        run: make q RAY_VERSION="${{ steps.v.outputs.ver }}" RAY_MARCH=native
+
+      - name: Smoke (native targets)
+        if: matrix.target != 'windows-x86_64'
+        run: |
+          out="$(printf '2+3\n' | ./q)"; echo "$out"; echo "$out" | grep -q 5
+
+      # The static build must say why a library load fails, and point at the download that works.
+      - name: Smoke — static build points at the -glibc download
+        if: startsWith(matrix.target, 'linux-') && !matrix.manylinux
+        run: |
+          out="$(printf '`:./nolib 2:(`f;1)\n' | ./q 2>&1 || true)"; echo "$out"
+          echo "$out" | grep -qF "'static-dlopen: "
+          echo "$out" | grep -qF "https://peachq.org/docs/basics/errors#static-dlopen"
+
+      - name: Fetch DuckDB ${{ env.DUCKDB_VERSION }} + httpfs + aws (sha256-pinned)
+        if: matrix.duckdb
+        run: |
+          set -eu
+          v="$DUCKDB_VERSION"; p="${{ matrix.duckdb }}"
+          sha() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -d' ' -f1; }
+          pin() { want="$(printenv "DUCKDB_SHA_$2")"; got="$(sha "$1")"
+                  [ "$got" = "$want" ] || { echo "$1: sha256 $got, pinned DUCKDB_SHA_$2=$want"; exit 1; }; }
+          mkdir -p "duckdb/extensions/v$v/$p"
+          curl -fsSL -o duckdb/lib.zip "https://github.com/duckdb/duckdb/releases/download/v$v/${{ matrix.lib }}"
+          pin duckdb/lib.zip "LIB_$p"
+          unzip -oq duckdb/lib.zip "${{ matrix.libfile }}" -d duckdb
+          curl -fsSL -o duckdb/LICENSE-duckdb.txt "https://raw.githubusercontent.com/duckdb/duckdb/v$v/LICENSE"
+          pin duckdb/LICENSE-duckdb.txt LICENSE
+          for e in httpfs aws; do
+            curl -fsSL -o "duckdb/$e.gz" "https://extensions.duckdb.org/v$v/$p/$e.duckdb_extension.gz"
+            pin "duckdb/$e.gz" "${e}_$p"
+            gunzip -c "duckdb/$e.gz" > "duckdb/extensions/v$v/$p/$e.duckdb_extension"
+          done
+          ls -lR duckdb
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p dist
+          t="${{ matrix.target }}"
+          case "$t" in
+            linux-*-duckdb) tar -czf "dist/peachq-${t%-duckdb}-glibc.tar.gz" q LICENSE NOTICE README.md ;;
+            windows-x86_64) zip -j  dist/peachq-windows-x86_64.zip q.exe LICENSE NOTICE README.md ;;
+            *)              tar -czf "dist/peachq-$t.tar.gz"       q LICENSE NOTICE README.md ;;
+          esac
+          if [ -n "${{ matrix.duckdb }}" ]; then
+            fat="peachq-${t%-duckdb}-duckdb"
+            mkdir fat
+            cp -R duckdb/extensions fat/
+            cp "duckdb/${{ matrix.libfile }}" duckdb/LICENSE-duckdb.txt LICENSE NOTICE README.md fat/
+            files="${{ matrix.libfile }} extensions LICENSE NOTICE README.md LICENSE-duckdb.txt"
+            case "$t" in
+              windows-x86_64) cp q.exe fat/ && (cd fat && zip -qr "../dist/$fat.zip" q.exe $files) ;;
+              *)              cp q fat/ && tar -czf "dist/$fat.tar.gz" -C fat q $files ;;
+            esac
+          fi
+          (cd dist && for f in peachq-*; do shasum -a 256 "$f" > "$f.sha256" 2>/dev/null || sha256sum "$f" > "$f.sha256"; done)
+          ls -l dist
+
+      # The fat archive is proven as SHIPPED: unpacked, with PEACHQ_DUCKDB_LIB
+      # and QHOME unset, so the library is found beside q; LOAD with autoinstall
+      # and autoload off proves the bundle, not the network. Any miss exits
+      # non-zero and fails the job. (Windows: no runner can execute q.exe here;
+      # verified by hand after a release.)
+      - name: Smoke — fat archive (unpacked, env unset)
+        if: matrix.duckdb && matrix.target != 'windows-x86_64'
+        run: |
+          set -eu
+          mkdir smoke && tar -xzf dist/peachq-*-duckdb.tar.gz -C smoke
+          printf 'want:"v%s"\n' "$DUCKDB_VERSION" > smoke/smoke.q
+          cat >> smoke/smoke.q <<'Q'
+          if[not 5~2+3; -2 "arith"; exit 1]
+          \l pq
+          h:.duckdb.main[]
+          v:first exec v from h "SELECT version() AS v"
+          if[not v~want; -2 "duckdb version: ",v," want ",want; exit 2]
+          h "SET autoinstall_known_extensions=false"
+          h "SET autoload_known_extensions=false"
+          {@[{h x};"LOAD ",x;{[x;e] -2 "LOAD ",x,": ",.duckdb.err[]; exit 3}[x]]} each ("httpfs";"aws")
+          t:([] a:1 2 3; b:`x`y`z)
+          `:x.csv set t
+          r:select from `:x.csv
+          if[not (3~count r) and ((exec a from r)~1 2 3) and (`$exec b from r)~`x`y`z; -2 "csv round trip"; show r; exit 4]
+          -1 "fat smoke ok: DuckDB ",v," from beside q; httpfs + aws loaded from the bundle";
+          exit 0
+          Q
+          cd smoke && env -u PEACHQ_DUCKDB_LIB -u QHOME ./q < smoke.q
+
+      # The -glibc archive is proven as shipped: unpacked, it loads a `2:` extension built against KX's k.h.
+      - name: Smoke — glibc archive loads a C extension (2:)
+        if: matrix.manylinux
+        run: |
+          set -eu
+          t="${{ matrix.target }}"
+          mkdir glibc && tar -xzf "dist/peachq-${t%-duckdb}-glibc.tar.gz" -C glibc
+          printf '#include "k.h"\nK add(K x, K y) { return kj(x->j + y->j); }\n' > glibc/add.c
+          gcc -shared -fPIC -DKXVER=3 -Ithird_party glibc/add.c -o glibc/add.so
+          printf 'f:`:./add 2:(`add;2)\nif[not 5~f[2;3]; -2 "2: add"; exit 1]\n-1 "glibc smoke ok: 2: loaded add.so";\nexit 0\n' > glibc/smoke.q
+          cd glibc && env -u QHOME ./q smoke.q
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.v.outputs.tag }}" dist/* --clobber -R "$GITHUB_REPOSITORY"
+
+  # Browser WebAssembly build — separate job (emscripten toolchain, and the
+  # output is a servable directory, not a single-binary tarball like the matrix).
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: v
+        run: |
+          tag="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.v.outputs.tag }}
+
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Build — wasm (emscripten)
+        run: |
+          # Generated bootstrap headers; Makefile.wasm assumes they exist. The
+          # path moved from src/qlang/*_gen.h to $(GEN_DIR)/qlang/ — ask the
+          # Makefile for the group rather than naming one file, so a new
+          # generated header never breaks the release again.
+          make gen-headers
+          make -f Makefile.wasm wasm
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p dist
+          # the whole servable directory: runtime, Worker, client, reference page, files/ + files.json
+          tar -C build/wasm/www -czf dist/peachq-wasm.tar.gz .
+          (cd dist && f=peachq-wasm.tar.gz && { shasum -a 256 "$f" > "$f.sha256" 2>/dev/null || sha256sum "$f" > "$f.sha256"; })
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.v.outputs.tag }}" dist/* --clobber -R "$GITHUB_REPOSITORY"

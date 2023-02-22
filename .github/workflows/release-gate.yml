@@ -1,0 +1,84 @@
+name: release-gate
+
+# Single-source version release loop. VERSION (a plain file) is the source of
+# truth. On every push to main, if VERSION names a version that has no GitHub
+# Release yet, cut it. Publishing the release triggers release.yml, which builds
+# and attaches the portable binaries.
+#
+# The gate uses a "does the release already exist?" check rather than a
+# `paths:` filter so it stays correct even when the mirror force-pushes (which
+# rewrites every SHA and would defeat a path diff).
+#
+# Cutting a release does NOT by itself build one — see the note on cut() below.
+#
+# RE-CUTTING. A release whose build failed is left with a tag but ZERO assets, and
+# because the gate is "exists? then nothing to do", the fix would never publish:
+# the tag stays pinned to the broken commit and every later push is a no-op. So an
+# EMPTY release (no assets) is treated as a failed attempt and re-cut against the
+# current SHA. A release that HAS assets is published output and is never touched
+# automatically — re-cut that deliberately with workflow_dispatch force=true.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Re-cut the release for VERSION even if it already has assets
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write   # gh workflow run (dispatching release.yml) hits the Actions API
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cut a release if VERSION is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(tr -d ' \t\r\n' < VERSION 2>/dev/null || true)"
+          if [ -z "$ver" ]; then
+            echo "no VERSION file present — nothing to do"
+            exit 0
+          fi
+          tag="v$ver"
+          force="${{ inputs.force }}"
+          # Cut the release, then EXPLICITLY dispatch the builder. Publishing from a
+          # workflow does not fire release.yml's `on: release: [published]`: events
+          # triggered by the default GITHUB_TOKEN do not create new workflow runs.
+          # That is why every gate-cut release (v0.44, v0.51, v0.52) sat at zero
+          # assets until someone pressed the button by hand. workflow_dispatch is the
+          # documented EXCEPTION to that rule, so this call does start a run.
+          cut() {
+            echo "cutting $tag at $GITHUB_SHA"
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "peachq $tag" --generate-notes
+            echo "dispatching release.yml for $tag"
+            gh workflow run release.yml -R "$GITHUB_REPOSITORY" -f tag="$tag"
+          }
+          if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "VERSION=$ver has no release"
+            cut
+            exit 0
+          fi
+          assets="$(gh release view "$tag" -R "$GITHUB_REPOSITORY" \
+                      --json assets -q '.assets | length')"
+          if [ "$force" = "true" ]; then
+            echo "release $tag exists with $assets asset(s) — force re-cut requested"
+          elif [ "$assets" -eq 0 ]; then
+            echo "release $tag exists but has NO assets — treating as a failed build, re-cutting"
+          else
+            echo "release $tag already exists with $assets asset(s) — nothing to do"
+            exit 0
+          fi
+          # Delete release AND tag so the recreate re-points at the current SHA and
+          # publishes afresh (release.yml fires on `published`, so it rebuilds).
+          gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes
+          git push origin ":refs/tags/$tag" || true
+          cut
