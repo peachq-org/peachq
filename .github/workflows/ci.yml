@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (portable baseline)
+        run: make RAY_MARCH=x86-64-v3
+
+      - name: Smoke test
+        run: |
+          out="$(printf '2+3\n' | ./q)"
+          echo "q) 2+3 => $out"
+          echo "$out" | grep -q 5
+
+  # The release builds macos-arm64; compile it on every sync so a mac-only break shows before a cut.
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (native arm64, as the release)
+        run: make q RAY_MARCH=native
+
+      - name: Smoke test
+        run: |
+          out="$(printf '2+3\n' | ./q)"; echo "$out"; echo "$out" | grep -q 5
+          printf 'if[not 0<.Q.w[]`mphy;-2"mphy is 0";exit 1]\n' | ./q
