@@ -1,0 +1,42 @@
+name: release-gate
+
+# Single-source version release loop. VERSION (a plain file) is the source of
+# truth. On every push to main, if VERSION names a version that has no GitHub
+# Release yet, cut it. Publishing the release triggers release.yml, which builds
+# and attaches the portable binaries.
+#
+# The gate uses a "does the release already exist?" check rather than a
+# `paths:` filter so it stays correct even when the mirror force-pushes (which
+# rewrites every SHA and would defeat a path diff).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cut a release if VERSION is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(tr -d ' \t\r\n' < VERSION 2>/dev/null || true)"
+          if [ -z "$ver" ]; then
+            echo "no VERSION file present — nothing to do"
+            exit 0
+          fi
+          tag="v$ver"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists — nothing to do"
+          else
+            echo "VERSION=$ver has no release — creating $tag"
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "peachq $tag" --generate-notes
+          fi

@@ -1,0 +1,20 @@
+# Build artifacts
+*.o
+*.d
+*.a
+*.so
+*.dylib
+*.exe
+
+# Binaries
+/q
+/rayforce
+
+# Generated embedded-bootstrap header (codegen'd from src/qlang/dotq.q)
+src/qlang/dotq_gen.h
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
