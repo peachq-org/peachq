@@ -1,0 +1,96 @@
+name: release
+
+# Builds portable binaries and attaches them to a GitHub Release.
+# Fires when a release is published; also runnable by hand against an existing
+# release tag via the Actions tab (workflow_dispatch).
+#
+# Build specifics mirror the upstream engine's release CI: distributables are
+# PORTABLE, never -march=native on x86 (a native binary can SIGILL on an older
+# CPU).
+#   Linux   : static musl, x86-64-v2 (SSE4.2, ~2009+) — one self-contained
+#             binary that runs on any distro (no glibc dependency) and any
+#             mainstream x86-64 CPU. Source builds (`make`) stay native/fast.
+#   Windows : mingw-w64 cross-compile (no -march; target CPU unknown).
+#   macOS   : native on the arm64 runner (Apple Silicon; a safe floor, no x86
+#             optional-ISA traps).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and attach binaries to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+          - target: windows-x86_64
+            os: ubuntu-latest      # mingw-w64 cross-compile
+          - target: macos-arm64
+            os: macos-latest
+    steps:
+      - name: Resolve tag
+        id: v
+        run: |
+          tag="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
+          echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.v.outputs.tag }}
+
+      - name: Install mingw-w64 (Windows target)
+        if: matrix.target == 'windows-x86_64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Install musl (Linux target)
+        if: matrix.target == 'linux-x86_64'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build — Linux (static musl, portable x86-64-v2)
+        if: matrix.target == 'linux-x86_64'
+        run: make q RAY_VERSION="${{ steps.v.outputs.ver }}" CC=musl-gcc LDFLAGS='-static -s' RAY_MARCH=x86-64-v2
+
+      - name: Build — Windows (mingw cross)
+        if: matrix.target == 'windows-x86_64'
+        run: make win RAY_VERSION="${{ steps.v.outputs.ver }}"
+
+      - name: Build — macOS (native arm64)
+        if: matrix.target == 'macos-arm64'
+        run: make q RAY_VERSION="${{ steps.v.outputs.ver }}" RAY_MARCH=native
+
+      - name: Smoke (native targets)
+        if: matrix.target != 'windows-x86_64'
+        run: |
+          out="$(printf '2+3\n' | ./q)"; echo "$out"; echo "$out" | grep -q 5
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p dist
+          case "${{ matrix.target }}" in
+            linux-x86_64)
+              tar -czf "dist/peachq-linux-x86_64.tar.gz" q LICENSE NOTICE README.md ;;
+            macos-arm64)
+              tar -czf "dist/peachq-macos-arm64.tar.gz"  q LICENSE NOTICE README.md ;;
+            windows-x86_64)
+              zip -j "dist/peachq-windows-x86_64.zip"     q.exe LICENSE NOTICE README.md ;;
+          esac
+          (cd dist && for f in peachq-*; do shasum -a 256 "$f" > "$f.sha256" 2>/dev/null || sha256sum "$f" > "$f.sha256"; done)
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.v.outputs.tag }}" dist/* --clobber -R "$GITHUB_REPOSITORY"
