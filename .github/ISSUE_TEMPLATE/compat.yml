@@ -1,0 +1,59 @@
+name: Compatibility difference
+description: A check, test or expression where peachq's result differs from another q engine's.
+title: "Compatibility: "
+labels: [compat]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for comparing! A report of what another engine printed is welcome as a lead, even if you are not
+        sure which result is right: we check each one against the published q documentation. Please leave out
+        anything private.
+  - type: input
+    id: check
+    attributes:
+      label: Check, test or expression
+      description: The test's name (such as `.mathTest.testMid`), or the q you ran.
+    validations:
+      required: true
+  - type: textarea
+    id: engines
+    attributes:
+      label: Engines and versions
+      description: For each engine, its `.z.K`, `.z.k` and `.z.v` (where defined), and the arguments it ran with.
+      placeholder: |
+        peachq: .z.K=5 .z.k=2026.11.15 .z.v=0.92.20261115; args=-classic
+        kx: .z.K=4.1 .z.k=2024.10.16; args=
+    validations:
+      required: true
+  - type: textarea
+    id: other
+    attributes:
+      label: The other engine's result
+      description: What it printed or returned, or its error.
+      render: q
+    validations:
+      required: true
+  - type: textarea
+    id: peachq
+    attributes:
+      label: peachq's result
+      render: q
+    validations:
+      required: true
+  - type: dropdown
+    id: classic
+    attributes:
+      label: Did peachq run with -classic?
+      description: "`-classic` gives kdb+'s console display and error text; qci uses it by default."
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: A smaller example, the OS, a link to the project or its CI run.
