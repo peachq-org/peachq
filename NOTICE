@@ -1,0 +1,34 @@
+peachq
+Copyright (c) 2026 Ryan Hamilton
+
+This product is a fork of the rayforce array engine.
+Copyright (c) 2025 Anton Kundenko <singaraiona@gmail.com>
+Licensed under the MIT License (see LICENSE).
+
+This product bundles third-party software under the following terms.
+
+--------------------------------------------------------------------------------
+q parser (src/qlang/) — derived from kparser
+--------------------------------------------------------------------------------
+kparser
+Copyright 2026 Charlie Skelton
+
+Licensed under the Apache License, Version 2.0.
+
+You may obtain a copy of the Apache License, Version 2.0 at:
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+yyjson (third_party/yyjson/) — JSON parsing
+--------------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the conditions in the yyjson LICENSE file bundled at
+third_party/yyjson/LICENSE.
