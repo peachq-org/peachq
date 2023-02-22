@@ -1,0 +1,78 @@
+name: release-gate
+
+# Cuts peachq releases. VERSION (a plain file) names the version; every cut gets its OWN tag carrying the cut day
+# in UTC, v<VERSION>.<YYYYMMDD> — exactly "v",.z.v`version of the binaries release.yml builds from it. This clock is
+# the ONE source of that date. Tags never move: once a release is published, GitHub's immutable releases lock its
+# tag and assets, so a re-release is a new cut with a new tag.
+#
+#   push to main       cuts only a VERSION that has no tag yet (neither a legacy v<VERSION> nor any dated cut)
+#   workflow_dispatch  cuts a new dated release of VERSION — the re-release; at most one per UTC day
+#
+# A cut is: tag at this commit -> a DRAFT release on it -> release.yml dispatched AT the tag, which builds, attests
+# and only then publishes. When today's tag already exists: a PUBLISHED release is refused (cut tomorrow, or bump
+# VERSION); an unpublished one — a cut whose build failed or never started — is resumed at the tag's own commit.
+#
+# The existence check (not a paths: filter) stays correct when the mirror force-pushes and rewrites every SHA.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write   # gh workflow run (dispatching release.yml) hits the Actions API
+
+concurrency:
+  group: release-gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cut a dated release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          ver="$(tr -d ' \t\r\n' < VERSION 2>/dev/null || true)"
+          if [ -z "$ver" ]; then
+            echo "no VERSION file present — nothing to do"
+            exit 0
+          fi
+          [[ "$ver" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::VERSION '$ver' is not X.Y or X.Y.Z"; exit 1; }
+          tag="v$ver.$(date -u +%Y%m%d)"
+
+          if [ "$EVENT" = push ]; then
+            refs="$(gh api "repos/$R/git/matching-refs/tags/v$ver" -q '.[].ref')"
+            prior="$(printf '%s\n' "$refs" | grep -E "^refs/tags/v${ver//./\\.}(\.[0-9]{8})?$" || true)"
+            if [ -n "$prior" ]; then
+              echo "VERSION $ver is already cut ($(echo $prior | sed 's#refs/tags/##g')) — nothing to do"
+              exit 0
+            fi
+          fi
+
+          state="$(gh api --paginate "repos/$R/releases" \
+                   -q ".[] | select(.tag_name == \"$tag\") | if .draft then \"draft\" else \"published\" end")"
+          if [ "$state" = published ]; then
+            echo "::error::$tag is already published: one cut per VERSION per UTC day. Cut tomorrow, or bump VERSION."
+            exit 1
+          fi
+          if sha="$(gh api "repos/$R/git/ref/tags/$tag" -q .object.sha 2>/dev/null)"; then
+            echo "::warning::$tag exists unpublished at $sha — resuming that cut at its own commit (main is $GITHUB_SHA)"
+          else
+            gh api "repos/$R/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+            echo "tagged $tag at $GITHUB_SHA"
+          fi
+          if [ -z "$state" ]; then
+            gh release create "$tag" -R "$R" --draft --verify-tag --title "peachq $tag" --generate-notes
+          fi
+          # An event this GITHUB_TOKEN causes never starts another workflow; workflow_dispatch is the documented
+          # exception. --ref puts the run AT the tag, so its provenance names the tag's commit — the one it builds.
+          echo "dispatching release.yml at $tag"
+          gh workflow run release.yml -R "$R" --ref "$tag"
