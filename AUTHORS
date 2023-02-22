@@ -1,0 +1,31 @@
+peachq authors and credits
+===========================
+
+peachq is a q-language frontend built on the rayforce array engine. The bulk of
+the codebase is the rayforce engine, and the project would not exist without it.
+
+The rayforce engine
+-------------------
+Created by Anton Kundenko <singaraiona@gmail.com>, with contributions from:
+
+  Anton Kundenko   <singaraiona@gmail.com>
+  Serhii Savchuk   <ser.vasilich@hotmail.com>
+  Hetoku           <volonter84@gmail.com>
+  Aspirational     <dovganchin@gmail.com>
+
+(The commit history preserves every upstream author's name and email verbatim;
+run `git shortlog -sne` to see the full contribution breakdown.)
+
+The q layer
+-----------
+The q parser, q datatypes/semantics, lowering pass, registry, formatter, IPC
+wire, and build were written by:
+
+  Ryan Hamilton    <ryanhamilton@users.noreply.github.com>
+
+Bundled third-party code
+------------------------
+  yyjson                              — MIT (see third_party/yyjson/LICENSE)
+  q parser (derived from a reference) — Apache-2.0 (see NOTICE)
+
+See LICENSE for the project license (MIT) and NOTICE for third-party terms.

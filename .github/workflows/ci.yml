@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (portable baseline)
+        run: make RAY_MARCH=x86-64-v3
+
+      - name: Smoke test
+        run: |
+          out="$(printf '2+3\n' | ./q)"
+          echo "q) 2+3 => $out"
+          echo "$out" | grep -q 5

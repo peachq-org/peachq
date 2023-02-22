@@ -1,0 +1,51 @@
+name: Bug report
+description: Report q that behaves differently from what you expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing peachq! A short, runnable example helps us most.
+  - type: textarea
+    id: got
+    attributes:
+      label: What went wrong
+      description: |
+        Paste the q that misbehaves, **including the version banner** printed when `q` starts. For example:
+
+        ```q
+        peachq 0.41
+        q)2 + 3
+        6
+        ```
+      render: q
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What I expected
+      description: |
+        The result you expected. For example:
+
+        ```q
+        q)2 + 3
+        5
+        ```
+      render: q
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: peachq version
+      placeholder: v0.41
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / arch
+      placeholder: e.g. Linux x86-64, macOS arm64, Windows x86-64
+    validations:
+      required: true

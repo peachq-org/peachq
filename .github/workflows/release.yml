@@ -1,0 +1,361 @@
+name: release
+
+# Builds portable binaries and attaches them to a GitHub Release.
+# Fires when a release is published; also runnable by hand against an existing
+# release tag via the Actions tab (workflow_dispatch).
+#
+# Build specifics mirror the upstream engine's release CI: distributables are
+# PORTABLE, never -march=native on x86 (a native binary can SIGILL on an older
+# CPU).
+#   Linux   : static musl, x86-64-v2 (SSE4.2, ~2009+) or armv8-a — one
+#             self-contained binary that runs on any distro (no glibc
+#             dependency) and any mainstream CPU of its arch. Source builds
+#             (`make`) stay native/fast. Static musl cannot dlopen, so it has
+#             no `2:`, FFI or TLS (q says `'static-dlopen` and names the
+#             download that can): every Linux arch also ships a -glibc build.
+#             arm64 builds natively on GitHub's ubuntu-24.04-arm runners.
+#   Windows : mingw-w64 cross-compile (no -march; target CPU unknown).
+#   macOS   : native on the arm64 runner (Apple Silicon; a safe floor, no x86
+#             optional-ISA traps).
+#   wasm    : emscripten (emsdk) -> peachq-wasm.tar.gz (the browser REPL's servable directory);
+#             its own `wasm` job (not the binary matrix — different packaging).
+#
+# Every platform also ships a FAT archive, `peachq-<target>-duckdb.*`: q + the
+# DuckDB shared library beside it + the httpfs, aws and ducklake extensions under
+# extensions/v<ver>/<platform>/, so DuckDB, S3 and DuckLake work out of the box, offline.
+# Beside q too, Confluent's prebuilt librdkafka for .kafka, with the licences of
+# what it carries (on Windows, its dependent DLLs beside it).
+# Windows and macOS q are already dynamic, so their fat archive is the SAME
+# binary plus the bundle. Static musl has no dlopen, so fat Linux is its own
+# glibc-DYNAMIC build at the manylinux_2_28 baseline (glibc >= 2.28: RHEL/Rocky
+# 8+, Debian 10+, Ubuntu 20.04+), with libstdc++/libgcc linked in so glibc is
+# its only dynamic dependency. Every bundled artifact is sha256-pinned below.
+# That same glibc q, without the DuckDB bundle, is `peachq-linux-<arch>-glibc`.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and attach binaries to
+        required: true
+
+permissions:
+  contents: write
+
+# THE pin table — the one place the fat steps read, one group per bundled
+# library. DuckDB's: its version, where its library archives live, the commit
+# its licence is read at, and the sha256 of every artifact they bundle (the
+# library archive per platform, DuckDB's licence, the three extension gzips per
+# platform). Bump a group's version and its every sha together; a mismatch
+# fails the fetch. DuckDB publishes no checksums for its release assets: the shas
+# are of what was downloaded at the pin.
+env:
+  DUCKDB_VERSION: 2.0.0
+  DUCKDB_LIB_BASE: https://github.com/duckdb/duckdb/releases/download/v2.0.0
+  DUCKDB_REF: v2.0.0
+  DUCKDB_SHA_LICENSE: 075c33400ffcb0c586dd106a029d3e733e9da3693f8fcb9cebfc651c8a2f14e3
+  DUCKDB_SHA_LIB_linux_amd64: 993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1
+  DUCKDB_SHA_LIB_linux_arm64: c60eecf91143ca6bbac55c4f4d40dc22520488b0ac257c86e0fe9a2b451cf2b7
+  DUCKDB_SHA_LIB_windows_amd64: 2b83169128239de5f45fe21de80f99bf436e53aa4bb24020dd951a1ba8d4b95f
+  DUCKDB_SHA_LIB_osx_arm64: 14cd63180614cfd961f7959146ecd9087527ff20b67311efdc3fa1c29c18204d
+  DUCKDB_SHA_httpfs_linux_amd64: ee6c7d7e60a5da1b6f6bf6156b4298b55ddce0496a5bfe628bd6ab6d47eb8e3e
+  DUCKDB_SHA_aws_linux_amd64: f6e8b47c1f0aba8313fd571dc179ecf766c8c6c88842b04efbe54b5d9340f7bc
+  DUCKDB_SHA_ducklake_linux_amd64: ff1c730a5d5a7cb14ed9547ba15c259c24805eb4cf12c17727c2a4faffe1ada7
+  DUCKDB_SHA_httpfs_linux_arm64: f524888fc7d74cc0c6c4a8f7ed5beedac5b12e71cb426503f882c72ce6afbd43
+  DUCKDB_SHA_aws_linux_arm64: 73c715031b8e47c6e29700697d7df654517d53d9e26442b1e672d1672bfe767d
+  DUCKDB_SHA_ducklake_linux_arm64: 9bc52b440b5830fe9d2706bc82ee019530846a57dbb60de8ffd36e84d8f3717e
+  DUCKDB_SHA_httpfs_windows_amd64: 39ff17b8403d45c6a3dce9cc8f0f9ff76c00ec94703a84977d65fd493341407d
+  DUCKDB_SHA_aws_windows_amd64: b47b9c3e1a6afb2145d8ac38ed15d44b7e89194f0c46b2429c39a719239d2baf
+  DUCKDB_SHA_ducklake_windows_amd64: 60a1b09cd0fbead1ffe5e11c32f8d5c7b859e4c4250d67708a551c7b33924ce8
+  DUCKDB_SHA_httpfs_osx_arm64: 6aea2d728cb7eedb978ca264ce190e31284271e9ea4f68b2424bf20806b46638
+  DUCKDB_SHA_aws_osx_arm64: 957801b0fba913fc3f493a9fdd7bb9f1c22950247e8ee25f1a9d81138b71cb5a
+  DUCKDB_SHA_ducklake_osx_arm64: 493c618c0ae5998409145f8467a885e70ef9d3b6312934b86b306817b27dd38c
+  # librdkafka for .kafka: Confluent's prebuilt redist NuGet package (OpenSSL, libcurl, zstd and zlib compiled in,
+  # on Windows the DLLs beside it; no GSSAPI). The nupkg sha pins every file taken from it; the four licences it
+  # lacks are read at the tags librdkafka's own build (mklove) pins for those dependencies — the Windows DLLs are
+  # the same versions but OpenSSL 3.3.2, whose LICENSE.txt is byte-identical — bump them with RDKAFKA_VERSION.
+  RDKAFKA_VERSION: 2.12.1
+  RDKAFKA_SHA_NUPKG: fb8ab52785f5e4d779bd683158524b556cbd3e74eaa3202135dc96418ce70c57
+  RDKAFKA_LICENSE_openssl: openssl/openssl/openssl-3.0.15/LICENSE.txt
+  RDKAFKA_LICENSE_curl: curl/curl/curl-8_10_1/COPYING
+  RDKAFKA_LICENSE_zstd: facebook/zstd/v1.5.6/LICENSE
+  RDKAFKA_LICENSE_zlib: madler/zlib/v1.3.1/LICENSE
+  RDKAFKA_SHA_LICENSE_openssl: 7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a
+  RDKAFKA_SHA_LICENSE_curl: adb1fc06547fd136244179809f7b7c2d2ae6c4534f160aa513af9b6a12866a32
+  RDKAFKA_SHA_LICENSE_zstd: 7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8
+  RDKAFKA_SHA_LICENSE_zlib: 845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # duckdb = DuckDB's extension-platform string; set only on the rows that
+        # ship a fat archive (the thin musl Linux binary cannot dlopen).
+        # rdkafka = the librdkafka file inside the nupkg; centos8- on x64 because the default
+        # needs libsasl2.so.3. rdkafka_deps = the DLLs it imports, from the same nupkg directory
+        # (Windows only; msvcp140 serves only librdkafkacpp, which is not shipped).
+        # manylinux = the glibc-dynamic build image; its rows also ship -glibc.
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+            march: x86-64-v2
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            march: armv8-a
+          - target: linux-x86_64-duckdb
+            os: ubuntu-latest
+            march: x86-64-v2
+            manylinux: manylinux_2_28_x86_64
+            duckdb: linux_amd64
+            lib: duckdb-shared-libs-linux-amd64.tar.gz
+            libfile: libduckdb.so
+            rdkafka: runtimes/linux-x64/native/centos8-librdkafka.so
+          - target: linux-arm64-duckdb
+            os: ubuntu-24.04-arm
+            march: armv8-a
+            manylinux: manylinux_2_28_aarch64
+            duckdb: linux_arm64
+            lib: duckdb-shared-libs-linux-arm64.tar.gz
+            libfile: libduckdb.so
+            rdkafka: runtimes/linux-arm64/native/librdkafka.so
+          - target: windows-x86_64
+            os: ubuntu-latest      # mingw-w64 cross-compile
+            duckdb: windows_amd64
+            lib: duckdb-shared-libs-windows-amd64.tar.gz
+            libfile: duckdb.dll
+            rdkafka: runtimes/win-x64/native/librdkafka.dll
+            rdkafka_deps: libcrypto-3-x64.dll libssl-3-x64.dll libcurl.dll zlib1.dll zstd.dll vcruntime140.dll
+          - target: macos-arm64
+            os: macos-latest
+            duckdb: osx_arm64
+            lib: duckdb-shared-libs-osx-universal.tar.gz
+            libfile: libduckdb.dylib
+            rdkafka: runtimes/osx-arm64/native/librdkafka.dylib
+    steps:
+      - name: Resolve tag
+        id: v
+        run: |
+          tag="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
+          echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.v.outputs.tag }}
+
+      - name: Install mingw-w64 (Windows target)
+        if: matrix.target == 'windows-x86_64'
+        # g++ too: RE2 is C++ and is linked into q.exe on every platform since
+        # #439, so the C compiler alone fails at bitmap256.cc with Error 127.
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+      # musl-tools ships musl-gcc but NO musl g++, and since #439 RE2 (C++) is
+      # linked into q on every platform — so CC=musl-gcc with the host g++ drags
+      # glibc's libstdc++.a into a musl link and fails on __libc_single_threaded
+      # / __isoc23_strtoul. Alpine's gcc/g++ ARE musl-native, so build in a
+      # throwaway container and keep checkout/upload on the host runner (node
+      # actions are glibc-built and will not run inside Alpine). --user keeps the
+      # outputs owned by the runner for the packaging step.
+      - name: Build — Linux (static musl, portable ${{ matrix.march }})
+        if: startsWith(matrix.target, 'linux-') && !matrix.manylinux
+        run: |
+          docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$PWD:/src" -w /src alpine:3.20 sh -euc '
+              apk add --no-cache build-base linux-headers >/dev/null
+              make q RAY_VERSION="${{ steps.v.outputs.ver }}" LDFLAGS="-static -s" RAY_MARCH=${{ matrix.march }}
+              chown -R "$HOST_UID:$HOST_GID" build q'
+
+      # The fat Linux q must dlopen libduckdb.so, so it is glibc-DYNAMIC: built
+      # against glibc 2.28 (manylinux_2_28, libduckdb's own floor) with the C++
+      # runtime linked in (RAY_CXX_STATIC=1), and the link is checked — glibc
+      # must be the only thing it NEEDs.
+      - name: Build — Linux (glibc-dynamic, ${{ matrix.manylinux }}, portable ${{ matrix.march }})
+        if: matrix.manylinux
+        run: |
+          docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$PWD:/src" -w /src quay.io/pypa/${{ matrix.manylinux }} sh -euc '
+              make q RAY_VERSION="${{ steps.v.outputs.ver }}" LDFLAGS="-s" RAY_MARCH=${{ matrix.march }} RAY_CXX_STATIC=1
+              objdump -p q | grep NEEDED
+              ! objdump -p q | grep NEEDED | grep -qv -e "libc.so" -e "libm.so" -e "libpthread.so" -e "libdl.so" -e "ld-linux"
+              chown -R "$HOST_UID:$HOST_GID" build q'
+
+      - name: Build — Windows (mingw cross)
+        if: matrix.target == 'windows-x86_64'
+        run: make win RAY_VERSION="${{ steps.v.outputs.ver }}"
+
+      - name: Build — macOS (native arm64)
+        if: matrix.target == 'macos-arm64'
+        run: make q RAY_VERSION="${{ steps.v.outputs.ver }}" RAY_MARCH=native
+
+      - name: Smoke (native targets)
+        if: matrix.target != 'windows-x86_64'
+        run: |
+          out="$(printf '2+3\n' | ./q)"; echo "$out"; echo "$out" | grep -q 5
+
+      # The static build must say why a library load fails, and point at the download that works.
+      - name: Smoke — static build points at the -glibc download
+        if: startsWith(matrix.target, 'linux-') && !matrix.manylinux
+        run: |
+          out="$(printf '`:./nolib 2:(`f;1)\n' | ./q 2>&1 || true)"; echo "$out"
+          echo "$out" | grep -qF "'static-dlopen: "
+          echo "$out" | grep -qF "https://peachq.org/docs/basics/errors#static-dlopen"
+
+      - name: Fetch DuckDB ${{ env.DUCKDB_VERSION }} + httpfs + aws + ducklake, librdkafka ${{ env.RDKAFKA_VERSION }} (sha256-pinned)
+        if: matrix.duckdb
+        run: |
+          set -eu
+          v="$DUCKDB_VERSION"; p="${{ matrix.duckdb }}"
+          sha() { { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | cut -d' ' -f1; }
+          pin() { want="$(printenv "$2")"; got="$(sha "$1")"
+                  [ "$got" = "$want" ] || { echo "$1: sha256 $got, pinned $2=$want"; exit 1; }; }
+          mkdir -p "duckdb/extensions/v$v/$p"
+          lib="${{ matrix.lib }}"
+          curl -fsSL -o "duckdb/$lib" "$DUCKDB_LIB_BASE/$lib"
+          pin "duckdb/$lib" "DUCKDB_SHA_LIB_$p"
+          case "$lib" in
+            *.zip)    unzip -oq "duckdb/$lib" "${{ matrix.libfile }}" -d duckdb ;;
+            *.tar.gz) tar -xzf "duckdb/$lib" -C duckdb "${{ matrix.libfile }}" ;;
+          esac
+          curl -fsSL -o duckdb/LICENSE-duckdb.txt "https://raw.githubusercontent.com/duckdb/duckdb/$DUCKDB_REF/LICENSE"
+          pin duckdb/LICENSE-duckdb.txt DUCKDB_SHA_LICENSE
+          for e in httpfs aws ducklake; do
+            curl -fsSL -o "duckdb/$e.gz" "https://extensions.duckdb.org/v$v/$p/$e.duckdb_extension.gz"
+            pin "duckdb/$e.gz" "DUCKDB_SHA_${e}_$p"
+            gunzip -c "duckdb/$e.gz" > "duckdb/extensions/v$v/$p/$e.duckdb_extension"
+          done
+          ls -lR duckdb
+          rk="${{ matrix.rdkafka }}"
+          if [ -n "$rk" ]; then
+            mkdir rdkafka
+            curl -fsSL -o rdkafka.nupkg "https://www.nuget.org/api/v2/package/librdkafka.redist/$RDKAFKA_VERSION"
+            pin rdkafka.nupkg RDKAFKA_SHA_NUPKG
+            case "$rk" in *.dylib) so=librdkafka.1.dylib ;; *.dll) so=librdkafka.dll ;; *) so=librdkafka.so.1 ;; esac
+            unzip -p rdkafka.nupkg "$rk" > "rdkafka/$so"
+            for d in ${{ matrix.rdkafka_deps }}; do unzip -p rdkafka.nupkg "$(dirname "$rk")/$d" > "rdkafka/$d"; done
+            unzip -p rdkafka.nupkg LICENSES.txt > rdkafka/LICENSE-librdkafka.txt
+            for l in openssl curl zstd zlib; do
+              curl -fsSL -o "rdkafka/LICENSE-$l.txt" "https://raw.githubusercontent.com/$(printenv "RDKAFKA_LICENSE_$l")"
+              pin "rdkafka/LICENSE-$l.txt" "RDKAFKA_SHA_LICENSE_$l"
+            done
+            ls -l rdkafka
+          fi
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p dist
+          t="${{ matrix.target }}"
+          case "$t" in
+            linux-*-duckdb) tar -czf "dist/peachq-${t%-duckdb}-glibc.tar.gz" q LICENSE NOTICE README.md ;;
+            windows-x86_64) zip -j  dist/peachq-windows-x86_64.zip q.exe LICENSE NOTICE README.md ;;
+            *)              tar -czf "dist/peachq-$t.tar.gz"       q LICENSE NOTICE README.md ;;
+          esac
+          if [ -n "${{ matrix.duckdb }}" ]; then
+            fat="peachq-${t%-duckdb}-duckdb"
+            mkdir fat
+            cp -R duckdb/extensions fat/
+            cp "duckdb/${{ matrix.libfile }}" duckdb/LICENSE-duckdb.txt LICENSE NOTICE README.md fat/
+            files="${{ matrix.libfile }} extensions LICENSE NOTICE README.md LICENSE-duckdb.txt"
+            if [ -d rdkafka ]; then cp rdkafka/* fat/ && files="$files $(cd rdkafka && echo *)"; fi
+            case "$t" in
+              windows-x86_64) cp q.exe fat/ && (cd fat && zip -qr "../dist/$fat.zip" q.exe $files) ;;
+              *)              cp q fat/ && tar -czf "dist/$fat.tar.gz" -C fat q $files ;;
+            esac
+          fi
+          (cd dist && for f in peachq-*; do shasum -a 256 "$f" > "$f.sha256" 2>/dev/null || sha256sum "$f" > "$f.sha256"; done)
+          ls -l dist
+
+      # The fat archive is proven as SHIPPED: unpacked, with PEACHQ_DUCKDB_LIB,
+      # PEACHQ_KAFKA_LIB and QHOME unset, so both libraries are found beside q;
+      # LOAD with autoinstall and autoload off proves the bundle, not the network.
+      # Any miss exits non-zero and fails the job. (Windows: no runner can execute
+      # q.exe here; verified by hand after a release, .kafka.version[] included.)
+      - name: Smoke — fat archive (unpacked, env unset)
+        if: matrix.duckdb && matrix.target != 'windows-x86_64'
+        run: |
+          set -eu
+          mkdir smoke && tar -xzf dist/peachq-*-duckdb.tar.gz -C smoke
+          printf 'want:"v%s"\nwantkafka:"%s"\n' "$DUCKDB_VERSION" "$RDKAFKA_VERSION" > smoke/smoke.q
+          cat >> smoke/smoke.q <<'Q'
+          if[not 5~2+3; -2 "arith"; exit 1]
+          \l pq
+          h:.duckdb.main[]
+          v:first exec v from h "SELECT version() AS v"
+          if[not v~want; -2 "duckdb version: ",v," want ",want; exit 2]
+          h "SET autoinstall_known_extensions=false"
+          h "SET autoload_known_extensions=false"
+          {@[{h x};"LOAD ",x;{[x;e] -2 "LOAD ",x,": ",.duckdb.err[]; exit 3}[x]]} each ("httpfs";"aws";"ducklake")
+          t:([] a:1 2 3; b:`x`y`z)
+          `:x.csv set t
+          r:select from `:x.csv
+          if[not (3~count r) and ((exec a from r)~1 2 3) and (`$exec b from r)~`x`y`z; -2 "csv round trip"; show r; exit 4]
+          k:@[.kafka.version;::;{-2 "kafka: ",x; exit 5}]
+          if[not k~wantkafka; -2 "librdkafka version: ",k," want ",wantkafka; exit 6]
+          -1 "fat smoke ok: DuckDB ",v," and librdkafka ",k," from beside q; httpfs + aws + ducklake loaded from the bundle";
+          exit 0
+          Q
+          cd smoke && env -u PEACHQ_DUCKDB_LIB -u PEACHQ_KAFKA_LIB -u QHOME ./q < smoke.q
+
+      # The -glibc archive is proven as shipped: unpacked, it loads a `2:` extension built against KX's k.h.
+      - name: Smoke — glibc archive loads a C extension (2:)
+        if: matrix.manylinux
+        run: |
+          set -eu
+          t="${{ matrix.target }}"
+          mkdir glibc && tar -xzf "dist/peachq-${t%-duckdb}-glibc.tar.gz" -C glibc
+          printf '#include "k.h"\nK add(K x, K y) { return kj(x->j + y->j); }\n' > glibc/add.c
+          gcc -shared -fPIC -DKXVER=3 -Ithird_party glibc/add.c -o glibc/add.so
+          printf 'f:`:./add 2:(`add;2)\nif[not 5~f[2;3]; -2 "2: add"; exit 1]\n-1 "glibc smoke ok: 2: loaded add.so";\nexit 0\n' > glibc/smoke.q
+          cd glibc && env -u QHOME ./q smoke.q
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.v.outputs.tag }}" dist/* --clobber -R "$GITHUB_REPOSITORY"
+
+  # Browser WebAssembly build — separate job (emscripten toolchain, and the
+  # output is a servable directory, not a single-binary tarball like the matrix).
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: v
+        run: |
+          tag="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.v.outputs.tag }}
+
+      # The emscripten the browser DuckDB shim (wasm/q_wasm_duckdb.c) was verified on; move it only with a browser re-run.
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.10
+
+      - name: Build — wasm (emscripten)
+        run: |
+          # Generated bootstrap headers; Makefile.wasm assumes they exist. The
+          # path moved from src/qlang/*_gen.h to $(GEN_DIR)/qlang/ — ask the
+          # Makefile for the group rather than naming one file, so a new
+          # generated header never breaks the release again.
+          make gen-headers
+          make -f Makefile.wasm wasm
+
+      - name: Package
+        run: |
+          set -eu
+          mkdir -p dist
+          # the whole servable directory: runtime, Worker, client, reference page, files/ + files.json
+          tar -C build/wasm/www -czf dist/peachq-wasm.tar.gz .
+          (cd dist && f=peachq-wasm.tar.gz && { shasum -a 256 "$f" > "$f.sha256" 2>/dev/null || sha256sum "$f" > "$f.sha256"; })
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.v.outputs.tag }}" dist/* --clobber -R "$GITHUB_REPOSITORY"
