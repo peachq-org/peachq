@@ -4,8 +4,8 @@ RELEASE_CFLAGS = -fPIC -Wall -Wextra -Werror -Wpedantic -std=c17 -O3 -march=nati
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -march=native
 # CFLAGS = $(DEBUG_CFLAGS)
 CFLAGS = $(RELEASE_CFLAGS)
-HEADERS = core/format.h core/storm.h
-OBJECTS = format.o storm.o
+HEADERS = core/format.h core/storm.h core/monad.h
+OBJECTS = format.o monad.o storm.o
 TARGET = stormdb
 
 %.o: core/%.c $(HEADERS)
