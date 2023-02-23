@@ -1,27 +1,9 @@
-#define SIZE 2
-
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include "storm.h"
-
-typedef long long ssize_t;
-
-typedef struct vec
-{
-    float data[SIZE];
-} vec;
-
-vec add(vec a, vec b)
-{
-    vec result;
-    for (int i = 0; i < SIZE; ++i)
-    {
-        result.data[i] = a.data[i] + b.data[i];
-    }
-    return result;
-}
+#include "format.h"
 
 int main()
 {
@@ -38,5 +20,19 @@ int main()
 
     // free(line);
     // fclose(stream);
+
+    str buffer;
+    i64 vec[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    g0 value = new_vector_i64(vec, 12);
+    // g0 value = new_scalar_i64(9223372036854775807);
+    Result res = g0_fmt(&buffer, value);
+    if (res == Ok)
+    {
+        printf("%s\n", buffer);
+    }
+
+    result_fmt(&buffer, res);
+    printf("Result: %s\n", buffer);
+
     return 0;
 }
