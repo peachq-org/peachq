@@ -6,10 +6,10 @@ DEBUG_CFLAGS =  -Icore -Iapp -fPIC -Wall -Wextra -std=c17 -g -O0 -march=native
 # CFLAGS = $(DEBUG_CFLAGS)
 CFLAGS = $(RELEASE_CFLAGS)
 CORE_HEADERS = core/format.h core/storm.h core/monad.h core/alloc.h core/vm.h
-APP_HEADERS = app/lex.h app/parse.h
-APP_SOURCES = app/lex.c app/parse.c app/main.c
+APP_HEADERS = app/parse.h
+APP_SOURCES = app/parse.c app/main.c
 CORE_OBJECTS = core/alloc.o core/format.o core/monad.o core/storm.o core/vm.o
-APP_OBJECTS = app/lex.o app/parse.o app/main.o
+APP_OBJECTS = app/parse.o app/main.o
 TARGET = stormdb
 
 app: $(APP_OBJECTS) lib
