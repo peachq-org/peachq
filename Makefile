@@ -1,10 +1,10 @@
-CC=clang
+CC=gcc
 AR=ar
 # RELEASE_CFLAGS = -fPIC -Wall -Wextra -Werror -Wpedantic -std=c17 -O3 -march=native
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wpedantic -std=c17 -O3 -march=native
-DEBUG_CFLAGS =  -Icore -Iapp -fPIC -Wall -Wextra -std=c17 -g -O0 -march=native
-# CFLAGS = $(DEBUG_CFLAGS)
-CFLAGS = $(RELEASE_CFLAGS)
+DEBUG_CFLAGS =  -Icore -Iapp -fPIC -Wall -Wextra -std=c17 -g -O0
+CFLAGS = $(DEBUG_CFLAGS)
+# CFLAGS = $(RELEASE_CFLAGS)
 CORE_HEADERS = core/format.h core/storm.h core/monad.h core/alloc.h core/vm.h
 APP_HEADERS = app/parse.h
 APP_SOURCES = app/parse.c app/main.c
