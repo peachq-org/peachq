@@ -1,14 +1,13 @@
-CC=gcc
+CC=clang
 AR=ar
 # RELEASE_CFLAGS = -fPIC -Wall -Wextra -Werror -Wpedantic -std=c17 -O3 -march=native
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wpedantic -std=c17 -O3 -march=native
-DEBUG_CFLAGS =  -Icore -Iapp -fPIC -Wall -Wextra -std=c17 -g -O0
-CFLAGS = $(DEBUG_CFLAGS)
-# CFLAGS = $(RELEASE_CFLAGS)
-CORE_HEADERS = core/format.h core/storm.h core/monad.h core/alloc.h core/vm.h
+DEBUG_CFLAGS =  -fPIC -Wall -Wextra -std=c17 -g -O0
+# CFLAGS = $(DEBUG_CFLAGS)
+CFLAGS = $(RELEASE_CFLAGS)
+CORE_HEADERS = core/symbols.h core/format.h core/storm.h core/monad.h core/alloc.h core/vm.h
 APP_HEADERS = app/parse.h
-APP_SOURCES = app/parse.c app/main.c
-CORE_OBJECTS = core/alloc.o core/format.o core/monad.o core/storm.o core/vm.o
+CORE_OBJECTS = core/symbols.o core/alloc.o core/format.o core/monad.o core/storm.o core/vm.o
 APP_OBJECTS = app/parse.o app/main.o
 TARGET = stormdb
 
