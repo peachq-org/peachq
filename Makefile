@@ -9,7 +9,7 @@ CFLAGS = $(RELEASE_CFLAGS)
 CORE_HEADERS = core/string.h core/mmap.h core/hash.h core/symbols.h\
  core/format.h core/bitspire.h core/monad.h core/alloc.h core/vm.h
 APP_HEADERS = app/parse.h
-CORE_OBJECTS = core/string.o core/hash.o core/symbols.o core/alloc.o\
+CORE_OBJECTS = core/string.o core/vector.o core/hash.o core/symbols.o core/alloc.o\
  core/format.o core/monad.o core/bitspire.o core/vm.o
 APP_OBJECTS = app/parse.o app/main.o
 TESTS_OBJECTS = app/parse.o app/tests.o
