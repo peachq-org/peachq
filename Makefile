@@ -4,13 +4,13 @@ AR=ar
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wpedantic -std=c17 -O3 -march=native
 # RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wpedantic -std=c17 -O3 -march=native -g -pg
 DEBUG_CFLAGS =  -fPIC -Wall -Wextra -std=c17 -g -O0
-# CFLAGS = $(DEBUG_CFLAGS)
-CFLAGS = $(RELEASE_CFLAGS)
-CORE_HEADERS = core/string.h core/mmap.h core/hash.h core/symbols.h\
+CFLAGS = $(DEBUG_CFLAGS)
+# CFLAGS = $(RELEASE_CFLAGS)
+CORE_HEADERS = core/vector.h core/string.h core/mmap.h core/hash.h core/symbols.h\
  core/format.h core/bitspire.h core/monad.h core/alloc.h core/vm.h
 APP_HEADERS = app/parse.h
-CORE_OBJECTS = core/string.o core/vector.o core/hash.o core/symbols.o core/alloc.o\
- core/format.o core/monad.o core/bitspire.o core/vm.o
+CORE_OBJECTS = core/vector.o core/string.o core/hash.o core/symbols.o\
+ core/alloc.o core/format.o core/monad.o core/bitspire.o core/vm.o
 APP_OBJECTS = app/parse.o app/main.o
 TESTS_OBJECTS = app/parse.o app/tests.o
 TARGET = bitspire
