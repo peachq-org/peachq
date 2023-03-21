@@ -8,11 +8,11 @@ CFLAGS = $(DEBUG_CFLAGS)
 # CFLAGS = $(RELEASE_CFLAGS)
 CORE_HEADERS = core/util.h core/vector.h core/string.h core/mmap.h core/hash.h\
  core/symbols.h core/format.h core/rayforce.h core/monad.h core/alloc.h core/runtime.h\
- core/dict.h core/parse.h core/vm.h
+ core/dict.h core/parse.h core/vm.h core/debuginfo.h
 APP_HEADERS = app/parse.h
 CORE_OBJECTS = core/vector.o core/string.o core/hash.o core/symbols.o\
  core/alloc.o core/format.o core/monad.o core/rayforce.o core/parse.o\
- core/runtime.o core/dict.o core/vm.o
+ core/runtime.o core/dict.o core/vm.o core/debuginfo.o
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = app/tests.o
 TARGET = rayforce
