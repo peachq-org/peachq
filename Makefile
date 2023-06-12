@@ -1,7 +1,7 @@
 CC=clang
 AR=ar
 # RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg -DSYS_MALLOC
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -fassociative-math -ftree-vectorize -m64
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -fassociative-math -ftree-vectorize -m64 -DSYS_MALLOC
 # DEBUG_CFLAGS =  -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
 DEBUG_CFLAGS =  -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -m64 -fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address -DSYS_MALLOC
 CORE_HEADERS = core/mmap.h core/timestamp.h core/guid.h core/sort.h core/cast.h core/ops.h core/util.h\
