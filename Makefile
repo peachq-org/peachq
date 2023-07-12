@@ -7,13 +7,13 @@ DEBUG_CFLAGS =  -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -m64 -fno-omit-frame
 CORE_HEADERS = core/mmap.h core/timestamp.h core/guid.h core/group.h core/sort.h core/cast.h core/ops.h core/util.h\
  core/vector.h core/string.h core/set.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/alloc.h\
  core/runtime.h core/dict.h core/parse.h core/vm.h core/debuginfo.h core/cc.h core/env.h core/lambda.h\
- core/unary.h core/binary.h
+ core/unary.h core/binary.h core/vary.h
 APP_HEADERS = app/parse.h
 CORE_OBJECTS = core/timestamp.o core/guid.o core/group.o core/sort.o core/ops.o core/util.o core/vector.o core/string.o\
  core/set.o core/hash.o core/symbols.o\
  core/alloc.o core/format.o core/rayforce.o core/parse.o core/runtime.o core/dict.o\
  core/vm.o core/debuginfo.o core/cc.o core/env.o core/lambda.o\
- core/unary.o core/binary.o
+ core/unary.o core/binary.o core/vary.o
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = app/tests.o
 TARGET = rayforce
