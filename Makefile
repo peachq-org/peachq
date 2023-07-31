@@ -1,4 +1,4 @@
-CC = gcc
+CC = clang
 AR = ar
 # RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg -fno-omit-frame-pointer\
 #  -fsanitize=undefined -fsanitize=address
