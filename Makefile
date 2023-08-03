@@ -10,10 +10,10 @@ CORE_HEADERS = core/fs.h core/mmap.h core/serde.h core/timestamp.h core/guid.h c
  core/rayforce.h core/heap.h core/runtime.h core/parse.h core/vm.h core/nfo.h core/cc.h\
  core/env.h core/lambda.h core/unary.h core/binary.h core/vary.h
 APP_HEADERS = app/parse.h
-CORE_OBJECTS = core/fs.o core/serde.o core/timestamp.o core/guid.o core/sort.o core/ops.o\
- core/util.o core/string.o core/hash.o core/symbols.o core/heap.o core/format.o core/rayforce.o\
- core/parse.o core/runtime.o core/vm.o core/nfo.o core/cc.o core/env.o core/lambda.o\
- core/unary.o core/binary.o core/vary.o
+CORE_OBJECTS = core/fs.o core/mmap.o core/serde.o core/timestamp.o core/guid.o core/sort.o\
+ core/ops.o core/util.o core/string.o core/hash.o core/symbols.o core/heap.o core/format.o\
+ core/rayforce.o core/parse.o core/runtime.o core/vm.o core/nfo.o core/cc.o core/env.o\
+ core/lambda.o core/unary.o core/binary.o core/vary.o
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = app/tests.o
 TARGET = rayforce
