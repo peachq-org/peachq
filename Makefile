@@ -49,7 +49,7 @@ clean:
 	-rm -f *.o
 	-rm -f core/*.o
 	-rm -f app/*.o
-	-rm -f $(TARGET)
+	-rm -f $(TARGET).*
 	-rm -f lib$(TARGET).a
 	-rm core/*.gch
 	-rm app/*.gch
