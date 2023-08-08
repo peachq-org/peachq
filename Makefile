@@ -51,8 +51,8 @@ clean:
 	-rm -f app/*.o
 	-rm -f $(TARGET).*
 	-rm -f lib$(TARGET).a
-	-rm core/*.gch
-	-rm app/*.gch
+	-rm -f core/*.gch
+	-rm -f app/*.gch
 	-rm -f $(TARGET).S
 	-rm -f $(TARGET).test
 	-rm -rf *.out
