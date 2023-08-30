@@ -24,10 +24,10 @@ default: debug
 all: default
 
 app: $(APP_OBJECTS) lib
-	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) -L. -l$(TARGET) 
+	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) -L. -l$(TARGET) -lm
 
 tests: $(TESTS_OBJECTS) lib
-	$(CC) $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) 
+	$(CC) $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) -lm
 	./$(TARGET).test
 
 %.o: %.c
