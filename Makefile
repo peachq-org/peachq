@@ -11,7 +11,6 @@ CORE_HEADERS =  core/poll.h core/fs.h core/mmap.h core/serde.h core/timestamp.h 
  core/env.h core/lambda.h core/unary.h core/binary.h core/vary.h core/sock.h\
  core/math.h core/rel.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
  core/misc.h core/queue.h
-APP_HEADERS = app/parse.h
 CORE_OBJECTS = core/poll.o core/fs.o core/mmap.o core/serde.o core/timestamp.o core/guid.o core/sort.o\
  core/ops.o core/util.o core/string.o core/hash.o core/symbols.o core/heap.o core/format.o\
  core/rayforce.o core/parse.o core/runtime.o core/vm.o core/nfo.o core/cc.o core/env.o\
@@ -19,7 +18,7 @@ CORE_OBJECTS = core/poll.o core/fs.o core/mmap.o core/serde.o core/timestamp.o c
  core/rel.o core/items.o core/logic.o core/compose.o core/order.o core/io.o core/misc.o\
  core/queue.o
 APP_OBJECTS = app/main.o
-TESTS_OBJECTS = app/tests.o
+TESTS_OBJECTS = tests/main.o
 TARGET = rayforce
 # windows flags
 # LIBS = -lm -lws2_32 -lkernel32
@@ -57,6 +56,7 @@ clean:
 	-rm -f *.o
 	-rm -f core/*.o
 	-rm -f app/*.o
+	-rm -rf tests/*.o
 	-rm -f $(TARGET).*
 	-rm -f lib$(TARGET).a
 	-rm -f core/*.gch
