@@ -1,7 +1,8 @@
 CC = clang
 AR = ar
 # RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -fassociative-math -ftree-vectorize -m64
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -fassociative-math -fno-math-errno\
+ -funsafe-math-optimizations -ffinite-math-only -ftree-vectorize -funroll-loops -flto -m64
 # DEBUG_CFLAGS =  -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -m64 -fno-omit-frame-pointer\
  -fsanitize=undefined -fsanitize=address
