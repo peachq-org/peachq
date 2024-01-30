@@ -1,11 +1,10 @@
 CC = clang
 AR = ar
 # RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -fassociative-math -ftree-vectorize\
+RELEASE_CFLAGS = -fPIC -Wall -Wpedantic -Wextra -std=c17 -Ofast -march=native -fassociative-math -ftree-vectorize\
  -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -m64
 # DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
-DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -m64 -fno-omit-frame-pointer\
- -fsanitize=undefined -fsanitize=address
+DEBUG_CFLAGS = -fPIC -Wall -Wpedantic -Wextra -std=c17 -g -O0 -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
 CORE_HEADERS = core/poll.h core/sys.h core/fs.h core/mmap.h core/serde.h core/timestamp.h\
  core/guid.h core/sort.h core/ops.h core/util.h core/string.h core/hash.h core/symbols.h\
  core/format.h core/rayforce.h core/heap.h core/runtime.h core/parse.h core/eval.h core/nfo.h\
