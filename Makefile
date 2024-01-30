@@ -56,6 +56,10 @@ debug: app
 release: CFLAGS = $(RELEASE_CFLAGS) 
 release: app
 
+dll: CFLAGS = $(RELEASE_CFLAGS)
+dll: $(CORE_OBJECTS)
+	$(CC) $(CFLAGS) -shared -fPIC -o lib$(TARGET).so $(CORE_OBJECTS) $(LIBS) $(LFLAGS)
+
 clean:
 	-rm -f *.o
 	-rm -f core/*.o
@@ -68,3 +72,4 @@ clean:
 	-rm -f $(TARGET).S
 	-rm -f $(TARGET).test
 	-rm -rf *.out
+	-rm -rf *.so
