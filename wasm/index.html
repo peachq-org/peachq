@@ -47,10 +47,11 @@
 </head>
 
 <body>
+  <!-- Adjust your HTML to include a static prompt next to the input field -->
   <div id="container" onclick="document.getElementById('input').focus();">
     <div id="output"></div>
-    <div class="input-line">
-      <span class="prompt">&gt;</span>
+    <div>
+      <span style="color: green;">&gt;</span>
       <input id="input" type="text" autofocus
         onkeydown="if(event.keyCode === 13) {handleInput(this.value); this.value='';}">
     </div>
@@ -59,7 +60,7 @@
   <script src="rayforce.js"></script>
   <script>
     function handleInput(input) {
-      appendOutput(`> ${input}`);
+      appendOutput(input);
       Module.ccall('wasm_repl', 'null', ['string'], [input]);
       document.getElementById('input').focus(); // Refocus on the input field
     }
