@@ -65,6 +65,15 @@ chkleak: CC = gcc
 chkleak: app
 	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET)
 
+wasm: CFLAGS = -fPIC -Wall -std=c17 -O3 -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops
+wasm: CC = emcc 
+wasm: $(APP_OBJECTS) emlib
+	emcc $(CFLAGS) -o wasm/$(TARGET).js $(CORE_OBJECTS) wasm/main.c -s EXPORTED_FUNCTIONS='["_main", "_wasm_repl"]' \
+	-s "EXPORTED_RUNTIME_METHODS=['ccall', 'cwrap']" -s ALLOW_MEMORY_GROWTH=1 -L. -l$(TARGET) $(LIBS) -DSYS_MALLOC
+
+emlib: $(CORE_OBJECTS)
+	emar rc lib$(TARGET).a $(CORE_OBJECTS)
+
 clean:
 	-rm -f *.o
 	-rm -f core/*.o
@@ -78,6 +87,8 @@ clean:
 	-rm -f $(TARGET).test
 	-rm -rf *.out
 	-rm -rf *.so
+	-rm -f wasm/$(TARGET).js
+	-rm -f wasm/$(TARGET).wasm
 
 # trigger github to make a nightly build
 nightly:
