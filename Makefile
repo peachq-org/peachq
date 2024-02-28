@@ -66,7 +66,7 @@ chkleak: app
 	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET)
 
 # wasm: CFLAGS = -O0
-wasm: CFLAGS = -fPIC -Wall -std=c17 -O3 -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops
+wasm: CFLAGS = -fPIC -Wall -std=c17 -O3 -msimd128 -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops
 wasm: CC = emcc 
 wasm: AR = emar
 wasm: $(APP_OBJECTS) lib
