@@ -46,6 +46,7 @@ nil_t print_logo(nil_t)
 
 EMSCRIPTEN_KEEPALIVE i32_t main(i32_t argc, str_t argv[])
 {
+    atexit(runtime_cleanup);
     runtime_init(argc, argv);
     print_logo();
 
