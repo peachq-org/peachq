@@ -70,7 +70,7 @@ wasm: CFLAGS = -fPIC -Wall -std=c17 -O3 -msimd128 -fassociative-math -ftree-vect
 wasm: CC = emcc 
 wasm: AR = emar
 wasm: $(APP_OBJECTS) lib
-	$(CC) $(CFLAGS) -o wasm/$(TARGET).js $(CORE_OBJECTS) wasm/main.c -s EXPORTED_FUNCTIONS='["_main", "_wasm_repl"]' \
+	$(CC) $(CFLAGS) -o $(TARGET).js $(CORE_OBJECTS) app/wasm.c -s EXPORTED_FUNCTIONS='["_main", "_wasm_repl"]' \
 	-s "EXPORTED_RUNTIME_METHODS=['ccall', 'cwrap']" -s ALLOW_MEMORY_GROWTH=1 -L. -l$(TARGET) $(LIBS) 
 # -DSYS_MALLOC -g
 
@@ -87,8 +87,8 @@ clean:
 	-rm -f $(TARGET).test
 	-rm -rf *.out
 	-rm -rf *.so
-	-rm -f wasm/$(TARGET).js
-	-rm -f wasm/$(TARGET).wasm
+	-rm -f $(TARGET).js
+	-rm -f $(TARGET).wasm
 
 # trigger github to make a nightly build
 nightly:
