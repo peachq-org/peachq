@@ -28,13 +28,16 @@ TARGET = rayforce
 LIBS = -lm
 CFLAGS = $(DEBUG_CFLAGS)
 LFLAGS = -rdynamic
+PYTHON = python3.10
 
 default: debug
 
 all: default
 
-app: $(APP_OBJECTS) lib
-	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
+obj: $(CORE_OBJECTS)
+
+app: $(APP_OBJECTS) obj
+	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) $(LIBS) $(LFLAGS)
 
 tests: CFLAGS = $(RELEASE_CFLAGS)
 tests: $(TESTS_OBJECTS) lib
@@ -73,12 +76,16 @@ wasm: $(APP_OBJECTS) lib
 	-s "EXPORTED_FUNCTIONS=['_main', '_version', '_null', '_drop_obj', '_clone_obj', '_drop_raw', '_parseval', '_obj_fmt']" \
 	-s "EXPORTED_RUNTIME_METHODS=['ccall', 'cwrap']" -s ALLOW_MEMORY_GROWTH=1 -L. -l$(TARGET) $(LIBS)
 
+python: CFLAGS = $(RELEASE_CFLAGS)
+python: $(CORE_OBJECTS)
+	swig -python $(TARGET).i
+	$(CC) $(CFLAGS) -shared -fPIC $(CORE_OBJECTS) $(TARGET)_wrap.c -o _$(TARGET).so -I/usr/include/$(PYTHON) -l$(PYTHON) -rdynamic
+
 clean:
 	-rm -f *.o
 	-rm -f core/*.o
 	-rm -f app/*.o
 	-rm -rf tests/*.o
-	-rm -f $(TARGET).*
 	-rm -f lib$(TARGET).a
 	-rm -f core/*.gch
 	-rm -f app/*.gch
@@ -88,6 +95,9 @@ clean:
 	-rm -rf *.so
 	-rm -f $(TARGET).js
 	-rm -f $(TARGET).wasm
+	-rm -rf __pycache__/
+	-rm -f $(TARGET)_wrap.*
+	-rm -f $(TARGET).py
 
 # trigger github to make a nightly build
 nightly:
