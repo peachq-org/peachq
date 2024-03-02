@@ -79,7 +79,7 @@ wasm: $(APP_OBJECTS) lib
 python: CFLAGS = $(RELEASE_CFLAGS)
 python: $(CORE_OBJECTS)
 	swig -python $(TARGET).i
-	$(CC) $(CFLAGS) -shared -fPIC $(CORE_OBJECTS) $(TARGET)_wrap.c -o _$(TARGET).so -I/usr/include/$(PYTHON) -l$(PYTHON) -rdynamic
+	$(CC) $(CFLAGS) -shared -fPIC $(CORE_OBJECTS) $(TARGET)_wrap.c -o _$(TARGET).so -I/usr/include/$(PYTHON) -l$(PYTHON) $(LIBS) $(LFLAGS)
 
 clean:
 	-rm -f *.o
