@@ -1,6 +1,6 @@
 CC = clang
 AR = ar
-# RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg
+PROFILER = gprof
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -fassociative-math -ftree-vectorize\
  -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -m64
 # DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
@@ -67,6 +67,14 @@ chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
 chkleak: CC = gcc
 chkleak: app
 	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET)
+
+# Example: make clean && make profile SCRIPT=examples/update.rfl
+profile: CC = gcc
+profile: CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg
+profile: SCRIPT =
+profile: app
+	./$(TARGET) $(SCRIPT)
+	$(PROFILER) $(TARGET) gmon.out > profile.txt
 
 wasm: CFLAGS = -fPIC -Wall -std=c17 -O3 -msimd128 -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -DSYS_MALLOC
 wasm: CC = emcc 
