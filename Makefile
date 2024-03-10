@@ -25,7 +25,7 @@ TARGET = rayforce
 # windows flags
 # LIBS = -lm -lws2_32 -lkernel32
 # nix flags
-LIBS = -lm
+LIBS = -lm -ldl
 CFLAGS = $(DEBUG_CFLAGS)
 LFLAGS = -rdynamic
 PYTHON = python3.10
