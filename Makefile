@@ -41,7 +41,7 @@ app: $(APP_OBJECTS) obj
 
 # tests: CC = gcc
 # tests: CFLAGS = $(DEBUG_CFLAGS)
-tests: CFLAGS = $(RELEASE_CFLAGS)
+tests: CFLAGS = $(RELEASE_CFLAGS) -DSTOP_ON_FAIL=$(STOP_ON_FAIL)
 tests: $(TESTS_OBJECTS) lib
 	$(CC) $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
 	./$(TARGET).test
