@@ -11,14 +11,14 @@ CORE_HEADERS = core/runtime.h core/poll.h core/sys.h core/fs.h core/mmap.h core/
  core/env.h core/lambda.h core/unary.h core/binary.h core/vary.h core/sock.h core/error.h\
  core/math.h core/rel.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
  core/misc.h core/queue.h core/freelist.h core/update.h core/join.h core/query.h core/cond.h\
- core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.h
+ core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.h core/channel.h
 CORE_OBJECTS = core/runtime.o core/poll.o core/sys.o core/fs.o core/mmap.o core/serde.o core/timestamp.o\
  core/guid.o core/sort.o core/ops.o core/util.o core/string.o core/hash.o core/symbols.o\
  core/format.o core/rayforce.o core/heap.o core/parse.o core/eval.o core/nfo.o core/timer.o\
  core/env.o core/lambda.o core/unary.o core/binary.o core/vary.o core/sock.o core/error.o\
  core/math.o core/rel.o core/items.o core/logic.o core/compose.o core/order.o core/io.o\
  core/misc.o core/queue.o core/freelist.o core/update.o core/join.o core/query.o core/cond.o\
- core/iter.o core/dynlib.o core/aggr.o core/index.o core/group.o core/filter.o
+ core/iter.o core/dynlib.o core/aggr.o core/index.o core/group.o core/filter.o core/channel.o
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = tests/main.o
 TARGET = rayforce
