@@ -67,15 +67,16 @@ dll: $(CORE_OBJECTS)
 
 chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
 chkleak: CC = gcc
+chkleak: TARGET_ARGS =
 chkleak: app
-	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET)
+	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET) $(TARGET_ARGS)
 
 # Example: make clean && make profile SCRIPT=examples/update.rfl
 profile: CC = gcc
 profile: CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg
-profile: SCRIPT =
+profile: TARGET_ARGS =
 profile: app
-	./$(TARGET) $(SCRIPT)
+	./$(TARGET) $(TARGET_ARGS)
 	$(PROFILER) $(TARGET) gmon.out > profile.txt
 
 wasm: CFLAGS = -fPIC -Wall -std=c17 -O3 -msimd128 -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -DSYS_MALLOC
