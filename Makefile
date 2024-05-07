@@ -86,7 +86,9 @@ wasm: AR = emar
 wasm: $(APP_OBJECTS) lib
 	$(CC) $(CFLAGS) -o $(TARGET).js $(CORE_OBJECTS) \
 	-s "EXPORTED_FUNCTIONS=['_main', '_version', '_null', '_drop_obj', '_clone_obj', '_eval_str', '_obj_fmt', '_strof_obj']" \
-	-s "EXPORTED_RUNTIME_METHODS=['ccall', 'cwrap']" -s ALLOW_MEMORY_GROWTH=1 -L. -l$(TARGET) $(LIBS)
+	-s "EXPORTED_RUNTIME_METHODS=['ccall', 'cwrap', 'FS']" -s ALLOW_MEMORY_GROWTH=1 \
+	--preload-file examples@/examples \
+	-L. -l$(TARGET) $(LIBS)
 
 python: CFLAGS = $(RELEASE_CFLAGS)
 python: $(CORE_OBJECTS)
