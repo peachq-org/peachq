@@ -14,7 +14,7 @@ CORE_HEADERS = core/runtime.h core/poll.h core/sys.h core/fs.h core/mmap.h core/
  core/math.h core/rel.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
  core/misc.h core/queue.h core/freelist.h core/update.h core/join.h core/query.h core/cond.h\
  core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.h core/atomic.h core/mpmc.h\
- core/thread.h core/pool.h
+ core/thread.h core/pool.h core/term.h
 CORE_OBJECTS = core/runtime.o core/poll.o core/sys.o core/fs.o core/mmap.o core/serde.o core/timestamp.o\
  core/guid.o core/sort.o core/ops.o core/util.o core/string.o core/hash.o core/symbols.o\
  core/format.o core/rayforce.o core/heap.o core/parse.o core/eval.o core/nfo.o core/timer.o\
@@ -22,7 +22,7 @@ CORE_OBJECTS = core/runtime.o core/poll.o core/sys.o core/fs.o core/mmap.o core/
  core/math.o core/rel.o core/items.o core/logic.o core/compose.o core/order.o core/io.o\
  core/misc.o core/queue.o core/freelist.o core/update.o core/join.o core/query.o core/cond.o\
  core/iter.o core/dynlib.o core/aggr.o core/index.o core/group.o core/filter.o core/atomic.o core/mpmc.o\
- core/thread.o core/pool.o
+ core/thread.o core/pool.o core/term.o
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = tests/main.o
 TARGET = rayforce
