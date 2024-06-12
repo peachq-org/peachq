@@ -13,17 +13,16 @@ endif
 
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
-LIBS = -lm -ldl
+LIBS = -lm -ldl -lpthread
 endif
 
 ifeq ($(OS),darwin)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
-LIBS = -lm -ldl
+LIBS = -lm -ldl -lpthread
 endif
 
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -Ofast -fsigned-char -march=native -fassociative-math -ftree-vectorize\
- -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -mfma -mpclmul -mbmi2\
- -fno-unwind-tables -m64
+ -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -fno-unwind-tables -m64
 CORE_HEADERS = core/runtime.h core/poll.h core/sys.h core/fs.h core/mmap.h core/serde.h core/timestamp.h\
  core/guid.h core/sort.h core/ops.h core/util.h core/string.h core/hash.h core/symbols.h\
  core/format.h core/rayforce.h core/heap.h core/parse.h core/eval.h core/nfo.h core/timer.h\
