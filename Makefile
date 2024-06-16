@@ -3,11 +3,14 @@ STD = c17
 AR = ar
 PROFILER = gprof
 
+ifeq ($(OS),)
 OS := $(shell uname -s | tr "[:upper:]" "[:lower:]")
+endif
+
 $(info OS="$(OS)")
 
-ifeq ($(OS),mingw64_nt-10.0-22000)
-DEBUG_CFLAGS="-fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC"
+ifeq ($(OS),Windows_NT)
+DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG
 LIBS = -lm -lws2_32 -lkernel32
 endif
 
