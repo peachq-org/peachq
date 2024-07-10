@@ -15,7 +15,7 @@ LIBS = -lm -lws2_32 -lkernel32
 endif
 
 ifeq ($(OS),linux)
-DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
+DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
 LIBS = -lm -ldl -lpthread
 endif
 
