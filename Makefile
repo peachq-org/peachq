@@ -85,7 +85,8 @@ dll: CFLAGS = $(RELEASE_CFLAGS)
 dll: $(CORE_OBJECTS)
 	$(CC) -include core/def.h $(CFLAGS) -shared -fPIC -o lib$(TARGET).so $(CORE_OBJECTS) $(LIBS) $(LFLAGS)
 
-chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
+# chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
+chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG
 chkleak: CC = gcc
 chkleak: TARGET_ARGS =
 chkleak: app
