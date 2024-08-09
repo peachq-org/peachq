@@ -10,7 +10,7 @@ endif
 $(info OS="$(OS)")
 
 ifeq ($(OS),Windows_NT)
-DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG
+DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -DDEBUG
 LIBS = -lm -lws2_32 -lkernel32
 endif
 
