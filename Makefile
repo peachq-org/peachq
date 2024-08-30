@@ -67,6 +67,8 @@ tests: $(TESTS_OBJECTS) lib
 %.o: %.c
 	$(CC) -include core/def.h -c $^ $(CFLAGS) -o $@
 
+lib: CFLAGS = $(DEBUG_CFLAGS) -DSYS_MALLOC
+#lib: CFLAGS = $(RELEASE_CFLAGS) -DSYS_MALLOC
 lib: $(CORE_OBJECTS)
 	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
 
