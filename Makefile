@@ -57,9 +57,9 @@ obj: $(CORE_OBJECTS)
 app: $(APP_OBJECTS) obj
 	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) $(LIBS) $(LFLAGS)
 
-# tests: CC = gcc
+tests: CC = gcc
 # tests: CFLAGS = $(DEBUG_CFLAGS)
-tests: CFLAGS = $(RELEASE_CFLAGS) -DSTOP_ON_FAIL=$(STOP_ON_FAIL) -DDEBUG
+tests: -DSTOP_ON_FAIL=$(STOP_ON_FAIL) -DDEBUG
 tests: $(TESTS_OBJECTS) lib
 	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
 	./$(TARGET).test
@@ -67,8 +67,7 @@ tests: $(TESTS_OBJECTS) lib
 %.o: %.c
 	$(CC) -include core/def.h -c $^ $(CFLAGS) -o $@
 
-lib: CFLAGS = $(DEBUG_CFLAGS) -DSYS_MALLOC
-#lib: CFLAGS = $(RELEASE_CFLAGS) -DSYS_MALLOC
+lib: CFLAGS = $(RELEASE_CFLAGS)
 lib: $(CORE_OBJECTS)
 	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
 
@@ -80,10 +79,6 @@ debug: app
 
 release: CFLAGS = $(RELEASE_CFLAGS) 
 release: app
-
-dll: CFLAGS = $(RELEASE_CFLAGS)
-dll: $(CORE_OBJECTS)
-	$(CC) -include core/def.h $(CFLAGS) -shared -fPIC -o lib$(TARGET).so $(CORE_OBJECTS) $(LIBS) $(LFLAGS)
 
 chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
 chkleak: CC = gcc
