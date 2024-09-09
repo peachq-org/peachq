@@ -71,6 +71,10 @@ lib: CFLAGS = $(RELEASE_CFLAGS)
 lib: $(CORE_OBJECTS)
 	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
 
+lib-debug: CFLAGS = $(DEBUG_CFLAGS) -DSYS_MALLOC
+lib-debug: $(CORE_OBJECTS)
+	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
+
 disasm: release
 	objdump -d $(TARGET) -l > $(TARGET).S
 
