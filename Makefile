@@ -41,7 +41,7 @@ CORE_OBJECTS = core/poll.o core/runtime.o core/sys.o core/fs.o core/mmap.o core/
  core/math.o core/cmp.o core/items.o core/logic.o core/compose.o core/order.o core/io.o\
  core/misc.o core/queue.o core/freelist.o core/update.o core/join.o core/query.o core/cond.o\
  core/iter.o core/dynlib.o core/aggr.o core/index.o core/group.o core/filter.o core/atomic.o\
- core/thread.o core/pool.o core/term.o core/fdmap.c
+ core/thread.o core/pool.o core/term.o core/fdmap.o
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = tests/main.o
 TARGET = rayforce
