@@ -24,7 +24,7 @@ DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-cha
 LIBS = -lm -ldl -lpthread
 endif
 
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -Ofast -fsigned-char -march=native -fassociative-math -ftree-vectorize\
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native -fassociative-math -ftree-vectorize\
  -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -fno-unwind-tables -m64
 CORE_HEADERS = core/poll.h core/runtime.h core/sys.h core/fs.h core/mmap.h core/fd.h core/serde.h\
  core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h core/string.h core/hash.h core/symbols.h\
@@ -92,7 +92,7 @@ chkleak: app
 
 # Example: make clean && make profile SCRIPT=examples/update.rfl
 profile: CC = gcc
-profile: CFLAGS = -fPIC -Wall -Wextra -std=c17 -Ofast -march=native -g -pg
+profile: CFLAGS = -fPIC -Wall -Wextra -std=c17 -O3 -march=native -g -pg
 profile: TARGET_ARGS =
 profile: app
 	./$(TARGET) $(TARGET_ARGS)
