@@ -131,6 +131,7 @@ clean:
 	-rm -rf __pycache__/
 	-rm -f $(TARGET)_wrap.*
 	-rm -f $(TARGET).py
+	-rm -f $(TARGET)
 
 # trigger github to make a nightly build
 nightly:
