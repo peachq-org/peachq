@@ -27,7 +27,7 @@ endif
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -O3 -fsigned-char -march=native -fassociative-math -ftree-vectorize\
  -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -fno-unwind-tables -m64 -flto
 CORE_HEADERS = core/poll.h core/runtime.h core/sys.h core/fs.h core/mmap.h core/serde.h\
- core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
+ core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
  core/eval.h core/nfo.h core/chrono.h core/env.h core/lambda.h core/unary.h core/binary.h core/vary.h\
  core/sock.h core/error.h core/math.h core/cmp.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
@@ -35,7 +35,7 @@ CORE_HEADERS = core/poll.h core/runtime.h core/sys.h core/fs.h core/mmap.h core/
  core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.h core/atomic.h\
  core/thread.h core/pool.h core/term.h core/fdmap.h
 CORE_OBJECTS = core/poll.o core/runtime.o core/sys.o core/fs.o core/mmap.o core/serde.o\
- core/date.o core/time.o core/timestamp.o core/guid.o core/sort.o core/ops.o core/util.o\
+ core/temporal.o core/date.o core/time.o core/timestamp.o core/guid.o core/sort.o core/ops.o core/util.o\
  core/string.o core/hash.o core/symbols.o core/format.o core/rayforce.o core/heap.o core/parse.o\
  core/eval.o core/nfo.o core/chrono.o core/env.o core/lambda.o core/unary.o core/binary.o core/vary.o\
  core/sock.o core/error.o core/math.o core/cmp.o core/items.o core/logic.o core/compose.o core/order.o core/io.o\
