@@ -15,7 +15,7 @@ LIBS = -lm -lws2_32 -lkernel32
 endif
 
 ifeq ($(OS),linux)
-DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
+DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
 # These should be used if you want to use plugins
 # LIBS = -lm -ldl -lpthread -rdynamic 
@@ -47,7 +47,7 @@ CORE_OBJECTS = core/poll.o core/runtime.o core/sys.o core/os.o core/proc.o core/
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = tests/main.o
 TARGET = rayforce
-CFLAGS = $(DEBUG_CFLAGS)
+CFLAGS = $(RELEASE_CFLAGS)
 PYTHON = python3.10
 
 default: debug
@@ -110,11 +110,14 @@ wasm: $(APP_OBJECTS) lib
 	--preload-file examples@/examples \
 	-L. -l$(TARGET) $(LIBS)
 
-python: CFLAGS = $(RELEASE_CFLAGS)
-python: LFLAGS = -rdynamic
-python: $(CORE_OBJECTS)
-	swig -python $(TARGET).i
-	$(CC) -include core/def.h $(CFLAGS) -shared -fPIC $(CORE_OBJECTS) $(TARGET)_wrap.c -o _$(TARGET).so -I/usr/include/$(PYTHON) -l$(PYTHON) $(LIBS) $(LFLAGS)
+shared: CFLAGS += -fPIC
+shared: $(CORE_OBJECTS)
+	$(CC) -shared -o librayforce.so $(CORE_OBJECTS) $(LIBS)
+
+python: shared
+	cd python && python3 setup.py build_ext --inplace
+
+.PHONY: python shared
 
 clean:
 	-rm -f *.o
@@ -134,6 +137,15 @@ clean:
 	-rm -f $(TARGET)_wrap.*
 	-rm -f $(TARGET).py
 	-rm -f $(TARGET)
+	# Python-specific cleanup
+	-rm -rf python/build/
+	-rm -rf python/dist/
+	-rm -rf python/*.egg-info/
+	-rm -rf python/rayforce/__pycache__/
+	-rm -f python/rayforce/*.so
+	-rm -f python/rayforce/*.pyc
+	-rm -f python/rayforce/*.pyo
+	-rm -f python/rayforce/*.pyd
 
 # trigger github to make a nightly build
 nightly:
