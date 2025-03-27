@@ -71,7 +71,7 @@ bench: CC = gcc
 bench: CFLAGS = $(RELEASE_CFLAGS)
 bench: $(BENCH_OBJECTS) lib
 	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).bench $(BENCH_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
-	./$(TARGET).bench
+	./$(TARGET).bench $(BENCH)
 
 %.o: %.c
 	$(CC) -include core/def.h -c $^ $(CFLAGS) -o $@
