@@ -107,7 +107,7 @@ profile: app
 	./$(TARGET) $(TARGET_ARGS)
 	$(PROFILER) $(TARGET) gmon.out > profile.txt
 
-# Generate test coverage report
+# Generate test coverage report (requires lcov)
 coverage: CC = gcc
 coverage: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 --coverage
 coverage: $(TESTS_OBJECTS) coverage-lib
