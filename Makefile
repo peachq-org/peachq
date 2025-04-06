@@ -107,6 +107,23 @@ profile: app
 	./$(TARGET) $(TARGET_ARGS)
 	$(PROFILER) $(TARGET) gmon.out > profile.txt
 
+# Generate test coverage report
+coverage: CC = gcc
+coverage: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 --coverage
+coverage: $(TESTS_OBJECTS) coverage-lib
+	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
+	lcov --directory . --zerocounters
+	./$(TARGET).test
+	lcov --capture --directory . --output-file coverage.info
+	lcov --remove coverage.info '/usr/*' 'tests/*' --output-file coverage.info
+	lcov --list coverage.info
+	genhtml coverage.info --output-directory coverage_report
+	@echo "Coverage report generated in coverage_report/index.html"
+
+coverage-lib: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 --coverage
+coverage-lib: $(CORE_OBJECTS)
+	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
+
 wasm: CFLAGS = -fPIC -Wall -std=c17 -O3 -msimd128 -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -ffinite-math-only -funroll-loops -DSYS_MALLOC
 wasm: CC = emcc 
 wasm: AR = emar
@@ -146,6 +163,10 @@ clean:
 	-rm -f $(TARGET)_wrap.*
 	-rm -f $(TARGET).py
 	-rm -f $(TARGET)
+	-rm -f tests/*.gcno tests/*.gcda tests/*.gcov
+	-rm -f core/*.gcno core/*.gcda core/*.gcov
+	-rm -f coverage.info
+	-rm -rf coverage_report/
 	# Python-specific cleanup
 	-rm -rf python/build/
 	-rm -rf python/dist/
@@ -155,6 +176,7 @@ clean:
 	-rm -f python/rayforce/*.pyc
 	-rm -f python/rayforce/*.pyo
 	-rm -f python/rayforce/*.pyd
+	-rm -f .DS_Store # macOS
 
 # trigger github to make a nightly build
 nightly:
