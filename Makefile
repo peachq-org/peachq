@@ -27,7 +27,7 @@ LIBS = -lm -ldl -lpthread
 endif
 
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -O3 -fsigned-char -march=native -fassociative-math -ftree-vectorize\
- -fno-math-errno -funsafe-math-optimizations -funroll-loops -fno-unwind-tables -m64
+ -fno-math-errno -funsafe-math-optimizations -funroll-loops -fno-unwind-tables -m64 -flto
 CORE_HEADERS = core/poll.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
  core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
