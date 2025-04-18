@@ -136,10 +136,8 @@ wasm: $(APP_OBJECTS) lib
 	--preload-file examples@/examples \
 	-L. -l$(TARGET) $(LIBS)
 
-shared: CFLAGS += -fPIC
 shared: $(CORE_OBJECTS)
-	$(CC) -shared -o librayforce.so $(CORE_OBJECTS) $(LIBS)
-
+	$(CC) -shared -o librayforce.so $(CFLAGS) $(CORE_OBJECTS) $(LIBS)
 
 clean:
 	-rm -f *.o
