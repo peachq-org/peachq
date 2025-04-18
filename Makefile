@@ -2,6 +2,8 @@ CC = clang
 STD = c17
 AR = ar
 PROFILER = gprof
+PYTHON = python3.10
+SWIG = swig
 
 ifeq ($(OS),)
 OS := $(shell uname -s | tr "[:upper:]" "[:lower:]")
@@ -50,7 +52,6 @@ TESTS_OBJECTS = tests/main.o
 BENCH_OBJECTS = bench/main.o
 TARGET = rayforce
 CFLAGS = $(RELEASE_CFLAGS)
-PYTHON = python3.10
 
 default: debug
 
@@ -139,10 +140,6 @@ shared: CFLAGS += -fPIC
 shared: $(CORE_OBJECTS)
 	$(CC) -shared -o librayforce.so $(CORE_OBJECTS) $(LIBS)
 
-python: shared
-	cd python && python3 setup.py build_ext --inplace
-
-.PHONY: python shared
 
 clean:
 	-rm -f *.o
@@ -160,23 +157,11 @@ clean:
 	-rm -rf *.so
 	-rm -f $(TARGET).js
 	-rm -f $(TARGET).wasm
-	-rm -rf __pycache__/
-	-rm -f $(TARGET)_wrap.*
-	-rm -f $(TARGET).py
 	-rm -f $(TARGET)
 	-rm -f tests/*.gcno tests/*.gcda tests/*.gcov
 	-rm -f core/*.gcno core/*.gcda core/*.gcov
 	-rm -f coverage.info
 	-rm -rf coverage_report/
-	# Python-specific cleanup
-	-rm -rf python/build/
-	-rm -rf python/dist/
-	-rm -rf python/*.egg-info/
-	-rm -rf python/rayforce/__pycache__/
-	-rm -f python/rayforce/*.so
-	-rm -f python/rayforce/*.pyc
-	-rm -f python/rayforce/*.pyo
-	-rm -f python/rayforce/*.pyd
 	-rm -f .DS_Store # macOS
 
 # trigger github to make a nightly build
