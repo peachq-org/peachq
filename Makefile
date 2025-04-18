@@ -14,11 +14,13 @@ $(info OS="$(OS)")
 ifeq ($(OS),Windows_NT)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -DDEBUG
 LIBS = -lm -lws2_32 -lkernel32
+LIBNAME = rayforce.dll
 endif
 
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
+LIBNAME = rayforce.so
 # These should be used if you want to use plugins
 # LIBS = -lm -ldl -lpthread -rdynamic 
 endif
@@ -26,6 +28,7 @@ endif
 ifeq ($(OS),darwin)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
 LIBS = -lm -ldl -lpthread
+LIBNAME = librayforce.dylib
 endif
 
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -O3 -fassociative-math -fsigned-char\
@@ -137,7 +140,7 @@ wasm: $(APP_OBJECTS) lib
 	-L. -l$(TARGET) $(LIBS)
 
 shared: $(CORE_OBJECTS)
-	$(CC) -shared -o librayforce.so $(CFLAGS) $(CORE_OBJECTS) $(LIBS)
+	$(CC) -shared -o $(LIBNAME) $(CFLAGS) $(CORE_OBJECTS) $(LIBS)
 
 clean:
 	-rm -f *.o
@@ -153,6 +156,8 @@ clean:
 	-rm -f $(TARGET).bench
 	-rm -rf *.out
 	-rm -rf *.so
+	-rm -rf *.dylib
+	-rm -rf *.dll
 	-rm -f $(TARGET).js
 	-rm -f $(TARGET).wasm
 	-rm -f $(TARGET)
