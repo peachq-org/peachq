@@ -39,7 +39,7 @@ CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
  core/eval.h core/nfo.h core/chrono.h core/env.h core/lambda.h core/unary.h core/binary.h core/vary.h\
  core/sock.h core/error.h core/math.h core/cmp.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
- core/misc.h core/queue.h core/freelist.h core/update.h core/join.h core/query.h core/cond.h\
+ core/misc.h core/freelist.h core/update.h core/join.h core/query.h core/cond.h\
  core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.h core/atomic.h\
  core/thread.h core/pool.h core/progress.h core/term.h core/fdmap.h core/signal.h
 CORE_OBJECTS = core/poll.o core/ipc.o core/repl.o core/runtime.o core/sys.o core/os.o core/proc.o core/fs.o core/mmap.o core/serde.o\
@@ -47,7 +47,7 @@ CORE_OBJECTS = core/poll.o core/ipc.o core/repl.o core/runtime.o core/sys.o core
  core/string.o core/hash.o core/symbols.o core/format.o core/rayforce.o core/heap.o core/parse.o\
  core/eval.o core/nfo.o core/chrono.o core/env.o core/lambda.o core/unary.o core/binary.o core/vary.o\
  core/sock.o core/error.o core/math.o core/cmp.o core/items.o core/logic.o core/compose.o core/order.o core/io.o\
- core/misc.o core/queue.o core/freelist.o core/update.o core/join.o core/query.o core/cond.o\
+ core/misc.o core/freelist.o core/update.o core/join.o core/query.o core/cond.o\
  core/iter.o core/dynlib.o core/aggr.o core/index.o core/group.o core/filter.o core/atomic.o\
  core/thread.o core/pool.o core/progress.o core/term.o core/fdmap.o core/signal.o
 APP_OBJECTS = app/main.o
