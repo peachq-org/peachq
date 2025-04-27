@@ -18,7 +18,7 @@ LIBNAME = rayforce.dll
 endif
 
 ifeq ($(OS),linux)
-DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
+DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -Werror
 LIBS = -lm -ldl -lpthread
 LIBNAME = rayforce.so
 # These should be used if you want to use plugins
