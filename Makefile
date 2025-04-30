@@ -18,7 +18,7 @@ LIBNAME = rayforce.dll
 endif
 
 ifeq ($(OS),linux)
-DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
+DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -Werror
 LIBS = -lm -ldl -lpthread
 LIBNAME = rayforce.so
 # These should be used if you want to use plugins
@@ -41,7 +41,7 @@ CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core
  core/sock.h core/error.h core/math.h core/cmp.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
  core/misc.h core/freelist.h core/update.h core/join.h core/query.h core/cond.h\
  core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.h core/atomic.h\
- core/thread.h core/pool.h core/progress.h core/term.h core/fdmap.h core/signal.h
+ core/thread.h core/pool.h core/progress.h core/term.h core/fdmap.h core/signal.h core/log.h
 CORE_OBJECTS = core/poll.o core/ipc.o core/repl.o core/runtime.o core/sys.o core/os.o core/proc.o core/fs.o core/mmap.o core/serde.o\
  core/temporal.o core/date.o core/time.o core/timestamp.o core/guid.o core/sort.o core/ops.o core/util.o\
  core/string.o core/hash.o core/symbols.o core/format.o core/rayforce.o core/heap.o core/parse.o\
@@ -49,7 +49,7 @@ CORE_OBJECTS = core/poll.o core/ipc.o core/repl.o core/runtime.o core/sys.o core
  core/sock.o core/error.o core/math.o core/cmp.o core/items.o core/logic.o core/compose.o core/order.o core/io.o\
  core/misc.o core/freelist.o core/update.o core/join.o core/query.o core/cond.o\
  core/iter.o core/dynlib.o core/aggr.o core/index.o core/group.o core/filter.o core/atomic.o\
- core/thread.o core/pool.o core/progress.o core/term.o core/fdmap.o core/signal.o
+ core/thread.o core/pool.o core/progress.o core/term.o core/fdmap.o core/signal.o core/log.o
 APP_OBJECTS = app/main.o
 TESTS_OBJECTS = tests/main.o
 BENCH_OBJECTS = bench/main.o
