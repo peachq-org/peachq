@@ -20,9 +20,8 @@ endif
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
+LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed
 LIBNAME = rayforce.so
-# These should be used if you want to use plugins
-# LIBS = -lm -ldl -lpthread -rdynamic 
 endif
 
 ifeq ($(OS),darwin)
@@ -31,9 +30,9 @@ LIBS = -lm -ldl -lpthread
 LIBNAME = librayforce.dylib
 endif
 
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -O3 -fassociative-math -fsigned-char\
- -march=native -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -funroll-loops\
- -fno-unwind-tables -m64 -flto
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -O3 -march=native -fassociative-math -fsigned-char\
+ -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -funroll-loops\
+ -ffunction-sections -fdata-sections -fno-unwind-tables -DNDEBUG -m64
 CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
  core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
@@ -63,19 +62,19 @@ all: default
 obj: $(CORE_OBJECTS)
 
 app: $(APP_OBJECTS) obj
-	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) $(LIBS) $(LFLAGS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) $(LIBS) $(LDFLAGS)
 
 tests: CC = gcc
 # tests: CFLAGS = $(DEBUG_CFLAGS)
 tests: -DSTOP_ON_FAIL=$(STOP_ON_FAIL) -DDEBUG
 tests: $(TESTS_OBJECTS) lib
-	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
+	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LDFLAGS)
 	./$(TARGET).test
 
 bench: CC = gcc
 bench: CFLAGS = $(RELEASE_CFLAGS)
 bench: $(BENCH_OBJECTS) lib
-	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).bench $(BENCH_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
+	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).bench $(BENCH_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LDFLAGS)
 	BENCH=$(BENCH) ./$(TARGET).bench
 
 %.o: %.c
@@ -116,7 +115,7 @@ profile: app
 coverage: CC = gcc
 coverage: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 --coverage
 coverage: $(TESTS_OBJECTS) coverage-lib
-	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LFLAGS)
+	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LDFLAGS)
 	lcov --directory . --zerocounters
 	./$(TARGET).test
 	lcov --capture --directory . --output-file coverage.info --ignore-errors unused
