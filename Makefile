@@ -31,8 +31,9 @@ LIBNAME = librayforce.dylib
 endif
 
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -O3 -march=native -fassociative-math -fsigned-char\
- -fassociative-math -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -funroll-loops\
- -ffunction-sections -fdata-sections -fno-unwind-tables -DNDEBUG -m64
+ -ftree-vectorize -fno-math-errno -funsafe-math-optimizations -funroll-loops -ffast-math\
+ -fno-semantic-interposition -fno-asynchronous-unwind-tables -fno-exceptions -fomit-frame-pointer\
+ -fno-stack-protector -ffunction-sections -fdata-sections -fno-unwind-tables -DNDEBUG -m64
 CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
  core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
@@ -88,13 +89,14 @@ lib-debug: CFLAGS = $(DEBUG_CFLAGS) -DSYS_MALLOC
 lib-debug: $(CORE_OBJECTS)
 	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
 
+disasm: CC = gcc
+disasm: CFLAGS = $(RELEASE_CFLAGS) -fopt-info-vec-missed
 disasm: release
 	objdump -d $(TARGET) -l > $(TARGET).S
 
 debug: CFLAGS = $(DEBUG_CFLAGS)
 debug: app
 
-release: CFLAGS = $(RELEASE_CFLAGS) 
 release: app
 
 chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
