@@ -20,7 +20,7 @@ endif
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
-LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed
+RELEASE_LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed
 LIBNAME = rayforce.so
 endif
 
@@ -96,6 +96,7 @@ debug: CFLAGS = $(DEBUG_CFLAGS)
 debug: app
 
 release: CFLAGS = $(RELEASE_CFLAGS)
+release: LDFLAGS = $(RELEASE_LDFLAGS)
 release: app
 
 chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
