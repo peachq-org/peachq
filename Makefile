@@ -35,7 +35,7 @@ endif
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -mavx2 -mfma -mpclmul -mbmi2\
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math\
  -fomit-frame-pointer -fno-semantic-interposition -fno-unwind-tables -fno-asynchronous-unwind-tables\
- -fno-exceptions -fno-math-errno -fno-stack-protector -DNDEBUG -m64 -g0
+ -fno-exceptions -fno-trapping-math -fno-math-errno -fno-stack-protector -DNDEBUG -m64 -g0
 CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
  core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
