@@ -32,7 +32,7 @@ LIBS = -lm -ldl -lpthread
 LIBNAME = librayforce.dylib
 endif
 
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -mavx2 -mfma -mpclmul -mbmi2\
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math\
  -fomit-frame-pointer -fno-semantic-interposition -fno-unwind-tables -fno-asynchronous-unwind-tables\
  -fno-exceptions -fno-math-errno -fno-stack-protector -DNDEBUG -m64 -g0
@@ -67,8 +67,6 @@ obj: $(CORE_OBJECTS)
 app: $(APP_OBJECTS) obj
 	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) $(LIBS) $(LDFLAGS)
 
-tests: CC = gcc
-# tests: CFLAGS = $(DEBUG_CFLAGS)
 tests: -DSTOP_ON_FAIL=$(STOP_ON_FAIL) -DDEBUG
 tests: $(TESTS_OBJECTS) lib
 	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(TESTS_OBJECTS) -L. -l$(TARGET) $(LIBS) $(LDFLAGS)
