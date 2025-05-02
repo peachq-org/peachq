@@ -22,6 +22,7 @@ DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-cha
 LIBS = -lm -ldl -lpthread
 RELEASE_LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
  -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info
+DEBUG_LDFLAGS = -rdynamic
 LIBNAME = rayforce.so
 endif
 
@@ -94,6 +95,7 @@ disasm: release
 	objdump -d $(TARGET) -l > $(TARGET).S
 
 debug: CFLAGS = $(DEBUG_CFLAGS)
+debug: LDFLAGS = $(DEBUG_LDFLAGS)
 debug: app
 
 release: CFLAGS = $(RELEASE_CFLAGS)
