@@ -20,7 +20,8 @@ endif
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
-RELEASE_LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed
+RELEASE_LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
+ -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info
 LIBNAME = rayforce.so
 endif
 
@@ -30,10 +31,10 @@ LIBS = -lm -ldl -lpthread
 LIBNAME = librayforce.dylib
 endif
 
- RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -mavx2 -mfma -mpclmul -mbmi2\
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math\
  -fomit-frame-pointer -fno-semantic-interposition -fno-unwind-tables -fno-asynchronous-unwind-tables\
- -fno-exceptions -fno-math-errno -fno-stack-protector -DNDEBUG -m64
+ -fno-exceptions -fno-math-errno -fno-stack-protector -DNDEBUG -m64 -g0
 CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
  core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
@@ -174,3 +175,7 @@ nightly:
 	git tag -d nightly
 	git tag nightly
 	git push origin nightly
+
+strip: app
+	strip --strip-all --remove-section=.comment --remove-section=.note.gnu.build-id --remove-section=.note.gnu.property rayforce
+	@echo "Binary stripped successfully"
