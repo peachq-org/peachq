@@ -21,7 +21,7 @@ ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
 RELEASE_LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
- -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info
+ -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info -flto
 DEBUG_LDFLAGS = -rdynamic
 LIBNAME = rayforce.so
 endif
@@ -33,16 +33,16 @@ LIBNAME = librayforce.dylib
 endif
 
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -mavx2 -mfma -mpclmul -mbmi2\
- -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math\
- -fomit-frame-pointer -fno-semantic-interposition -fno-unwind-tables -fno-asynchronous-unwind-tables\
- -fno-exceptions -fno-trapping-math -fno-math-errno -fno-stack-protector -DNDEBUG -m64 -g0
+ -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math -ffp-contract=fast\
+ -fno-math-errno -mfpmath=sse -fno-strict-aliasing -falign-functions=64 -falign-loops=64 -m64\
+ -fsave-optimization-record
 CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
  core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
  core/eval.h core/nfo.h core/chrono.h core/env.h core/lambda.h core/unary.h core/binary.h core/vary.h\
  core/sock.h core/error.h core/math.h core/cmp.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
  core/misc.h core/freelist.h core/update.h core/join.h core/query.h core/cond.h core/option.h\
- core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.h core/atomic.h\
+ core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.o core/atomic.h\
  core/thread.h core/pool.h core/progress.h core/term.h core/fdmap.h core/signal.h core/log.h
 CORE_OBJECTS = core/poll.o core/ipc.o core/repl.o core/runtime.o core/sys.o core/os.o core/proc.o core/fs.o core/mmap.o core/serde.o\
  core/temporal.o core/date.o core/time.o core/timestamp.o core/guid.o core/sort.o core/ops.o core/util.o\
@@ -168,6 +168,10 @@ clean:
 	-rm -f coverage.info
 	-rm -rf coverage_report/
 	-rm -f .DS_Store # macOS
+	-rm -f core/*.opt.yaml
+	-rm -f app/*.opt.yaml
+	-rm -f tests/*.opt.yaml
+	-rm -f bench/*.opt.yaml
 
 # trigger github to make a nightly build
 nightly:
