@@ -21,7 +21,7 @@ ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
 RELEASE_LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
- -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info -flto
+ -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info
 DEBUG_LDFLAGS = -rdynamic
 LIBNAME = rayforce.so
 endif
@@ -33,9 +33,8 @@ LIBNAME = librayforce.dylib
 endif
 
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -mavx2 -mfma -mpclmul -mbmi2\
- -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math -ffp-contract=fast\
- -fno-math-errno -mfpmath=sse -fno-strict-aliasing -falign-functions=64 -falign-loops=64 -m64\
- -fsave-optimization-record
+ -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math -m64\
+ -flax-vector-conversions -fno-math-errno
 CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
  core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
  core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
@@ -89,6 +88,7 @@ lib-debug: CFLAGS = $(DEBUG_CFLAGS) -DSYS_MALLOC
 lib-debug: $(CORE_OBJECTS)
 	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
 
+disasm: RELEASE_CFLAGS += -fsave-optimization-record
 disasm: release
 	objdump -d $(TARGET) -l > $(TARGET).S
 
