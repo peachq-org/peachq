@@ -20,8 +20,8 @@ endif
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 LIBS = -lm -ldl -lpthread
-RELEASE_LDFLAGS = -Wl,--retain-symbols-file=rayforce.syms -rdynamic -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
- -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info
+RELEASE_LDFLAGS = -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
+ -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info -rdynamic
 DEBUG_LDFLAGS = -rdynamic
 LIBNAME = rayforce.so
 endif
@@ -179,7 +179,3 @@ nightly:
 	git tag -d nightly
 	git tag nightly
 	git push origin nightly
-
-strip: app
-	strip --strip-all --remove-section=.comment --remove-section=.note.gnu.build-id --remove-section=.note.gnu.property rayforce
-	@echo "Binary stripped successfully"
