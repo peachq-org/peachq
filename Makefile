@@ -100,8 +100,10 @@ release: CFLAGS = $(RELEASE_CFLAGS)
 release: LDFLAGS = $(RELEASE_LDFLAGS)
 release: app
 
-chkleak: CFLAGS = -fPIC -Wall -Wextra -std=c17 -g -O0 -DDEBUG -DSYS_MALLOC
 chkleak: CC = gcc
+chkleak: DEBUG_CFLAGS += -DDEBUG -DSYS_MALLOC
+chkleak: CFLAGS = $(DEBUG_CFLAGS)
+chkleak: LDFLAGS = $(DEBUG_LDFLAGS)
 chkleak: TARGET_ARGS =
 chkleak: app
 	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET) $(TARGET_ARGS)
