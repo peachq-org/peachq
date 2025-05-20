@@ -36,14 +36,6 @@ endif
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math -m64\
  -flax-vector-conversions -fno-math-errno
-CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
- core/temporal.h core/date.h core/time.h core/timestamp.h core/guid.h core/sort.h core/ops.h core/util.h\
- core/string.h core/hash.h core/symbols.h core/format.h core/rayforce.h core/heap.h core/parse.h\
- core/eval.h core/nfo.h core/chrono.h core/env.h core/lambda.h core/unary.h core/binary.h core/vary.h\
- core/sock.h core/error.h core/math.h core/cmp.h core/items.h core/logic.h core/compose.h core/order.h core/io.h\
- core/misc.h core/freelist.h core/update.h core/join.h core/query.h core/cond.h core/option.h\
- core/iter.h core/dynlib.h core/aggr.h core/index.h core/group.h core/filter.o core/atomic.h\
- core/thread.h core/pool.h core/progress.h core/term.h core/fdmap.h core/signal.h core/log.h
 CORE_OBJECTS = core/poll.o core/ipc.o core/repl.o core/runtime.o core/sys.o core/os.o core/proc.o core/fs.o core/mmap.o core/serde.o\
  core/temporal.o core/date.o core/time.o core/timestamp.o core/guid.o core/sort.o core/ops.o core/util.o\
  core/string.o core/hash.o core/symbols.o core/format.o core/rayforce.o core/heap.o core/parse.o\
