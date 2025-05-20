@@ -144,7 +144,6 @@ wasm: $(APP_OBJECTS) lib
 	--preload-file examples@/examples \
 	-L. -l$(TARGET) $(LIBS)
 
-shared: CFLAGS = $(RELEASE_CFLAGS) -fvisibility=hidden
 shared: LDFLAGS = $(RELEASE_LDFLAGS)
 shared: $(CORE_OBJECTS)
 	$(CC) -shared -o $(LIBNAME) $(CFLAGS) $(CORE_OBJECTS) $(LIBS) $(LDFLAGS)
