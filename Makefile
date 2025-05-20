@@ -18,7 +18,7 @@ LIBNAME = rayforce.dll
 endif
 
 ifeq ($(OS),linux)
-DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
+DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -fvisibility=hidden
 LIBS = -lm -ldl -lpthread
 RELEASE_LDFLAGS = -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
  -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info -rdynamic
@@ -32,7 +32,8 @@ LIBS = -lm -ldl -lpthread
 LIBNAME = librayforce.dylib
 endif
 
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -mavx2 -mfma -mpclmul -mbmi2\
+# -mavx2 -mfma -mpclmul -mbmi2
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -ffast-math -m64\
  -flax-vector-conversions -fno-math-errno
 CORE_HEADERS = core/poll.h core/ipc.h core/repl.h core/runtime.h core/sys.h core/os.h core/proc.h core/fs.h core/mmap.h core/serde.h\
@@ -143,8 +144,10 @@ wasm: $(APP_OBJECTS) lib
 	--preload-file examples@/examples \
 	-L. -l$(TARGET) $(LIBS)
 
+shared: CFLAGS = $(RELEASE_CFLAGS) -fvisibility=hidden
+shared: LDFLAGS = $(RELEASE_LDFLAGS)
 shared: $(CORE_OBJECTS)
-	$(CC) -shared -o $(LIBNAME) $(CFLAGS) $(CORE_OBJECTS) $(LIBS)
+	$(CC) -shared -o $(LIBNAME) $(CFLAGS) $(CORE_OBJECTS) $(LIBS) $(LDFLAGS)
 
 clean:
 	-rm -f *.o
