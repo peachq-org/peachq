@@ -71,11 +71,11 @@ bench: $(BENCH_OBJECTS) lib
 %.o: %.c
 	$(CC) -include core/def.h -c $^ $(CFLAGS) -o $@
 
-lib: CFLAGS = $(RELEASE_CFLAGS) -DRAYFORCE_EMBEDDED
+lib: CFLAGS = $(RELEASE_CFLAGS)
 lib: $(CORE_OBJECTS)
 	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
 
-lib-debug: CFLAGS = $(DEBUG_CFLAGS) -DSYS_MALLOC -DRAYFORCE_EMBEDDED
+lib-debug: CFLAGS = $(DEBUG_CFLAGS) -DSYS_MALLOC
 lib-debug: $(CORE_OBJECTS)
 	$(AR) rc lib$(TARGET).a $(CORE_OBJECTS)
 
@@ -134,7 +134,7 @@ wasm: $(APP_OBJECTS) lib
 	--preload-file examples@/examples \
 	-L. -l$(TARGET) $(LIBS)
 
-shared: CFLAGS = $(RELEASE_CFLAGS) -DRAYFORCE_EMBEDDED
+shared: CFLAGS = $(RELEASE_CFLAGS)
 shared: LDFLAGS = $(RELEASE_LDFLAGS)
 shared: $(CORE_OBJECTS)
 	$(CC) -shared -o $(LIBNAME) $(CFLAGS) $(CORE_OBJECTS) $(LIBS) $(LDFLAGS)
