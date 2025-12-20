@@ -25,7 +25,8 @@ ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -m64\
- -flax-vector-conversions -fno-math-errno
+ -flax-vector-conversions -fno-math-errno -ffunction-sections -fdata-sections\
+ -fno-unwind-tables -fno-asynchronous-unwind-tables
 LIBS = -lm -ldl -lpthread
 RELEASE_LDFLAGS = -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
  -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info\
@@ -39,7 +40,8 @@ ifeq ($(OS),darwin)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -m64\
- -flax-vector-conversions -fno-math-errno
+ -flax-vector-conversions -fno-math-errno -ffunction-sections -fdata-sections\
+ -fno-unwind-tables -fno-asynchronous-unwind-tables
 LIBS = -lm -ldl -lpthread
 LIBNAME = librayforce.dylib
 TARGET = rayforce
