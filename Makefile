@@ -30,8 +30,8 @@ RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native
 LIBS = -lm -ldl -lpthread
 RELEASE_LDFLAGS = -Wl,--strip-all -Wl,--gc-sections -Wl,--as-needed\
  -Wl,--build-id=none -Wl,--no-eh-frame-hdr -Wl,--no-ld-generated-unwind-info\
- -rdynamic
-DEBUG_LDFLAGS = -rdynamic
+ -Wl,--dynamic-list=rayforce.syms
+DEBUG_LDFLAGS = -Wl,--dynamic-list=rayforce.syms
 LIBNAME = rayforce.so
 TARGET = rayforce
 endif
