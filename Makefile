@@ -23,8 +23,8 @@ endif
 
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
- -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -m64\
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -Os -fsigned-char -march=native\
+ -fassociative-math -funsafe-math-optimizations -m64\
  -flax-vector-conversions -fno-math-errno -ffunction-sections -fdata-sections\
  -fno-unwind-tables -fno-asynchronous-unwind-tables
 LIBS = -lm -ldl -lpthread
@@ -38,8 +38,8 @@ endif
 
 ifeq ($(OS),darwin)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
-RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
- -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -m64\
+RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -Os -fsigned-char -march=native\
+ -fassociative-math -funsafe-math-optimizations -m64\
  -flax-vector-conversions -fno-math-errno -ffunction-sections -fdata-sections\
  -fno-unwind-tables -fno-asynchronous-unwind-tables
 LIBS = -lm -ldl -lpthread
