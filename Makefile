@@ -9,7 +9,9 @@ endif
 
 $(info OS="$(OS)")
 
-ifeq ($(OS),Windows_NT)
+# Windows detection (native Windows_NT, MSYS2 MinGW, or MSYS)
+IS_WINDOWS := $(filter Windows_NT,$(OS))$(findstring mingw,$(OS))$(findstring msys,$(OS))
+ifneq (,$(IS_WINDOWS))
 AR = llvm-ar
 DEBUG_CFLAGS = -Wall -Wextra -std=$(STD) -g -O0 -DDEBUG -D_CRT_SECURE_NO_WARNINGS
 RELEASE_CFLAGS = -Wall -Wextra -std=$(STD) -O3 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS \
@@ -76,6 +78,7 @@ app: $(APP_OBJECTS) obj
 	$(CC) $(CFLAGS) -o $(TARGET) $(CORE_OBJECTS) $(APP_OBJECTS) $(LIBS) $(LDFLAGS)
 
 tests: -DSTOP_ON_FAIL=$(STOP_ON_FAIL) -DDEBUG
+tests: LDFLAGS = $(DEBUG_LDFLAGS)
 tests: $(TESTS_OBJECTS) $(APP_COMMON) obj
 	$(CC) -include core/def.h $(CFLAGS) -o $(TARGET).test $(CORE_OBJECTS) $(APP_COMMON) $(TESTS_OBJECTS) $(LIBS) $(LDFLAGS)
 	./$(TARGET).test
