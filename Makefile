@@ -17,8 +17,8 @@ DEBUG_CFLAGS = -Wall -Wextra -std=$(STD) -g -O0 -DDEBUG -D_CRT_SECURE_NO_WARNING
 RELEASE_CFLAGS = -Wall -Wextra -std=$(STD) -O3 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS \
  -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -fno-math-errno
 LIBS = -lws2_32 -lmswsock -lkernel32
-DEBUG_LDFLAGS = -fuse-ld=lld
-RELEASE_LDFLAGS = -fuse-ld=lld
+DEBUG_LDFLAGS = -fuse-ld=lld -Wl,/DEF:rayforce.def -Wl,/IMPLIB:rayforce.lib
+RELEASE_LDFLAGS = -fuse-ld=lld -Wl,/DEF:rayforce.def -Wl,/IMPLIB:rayforce.lib
 LIBNAME = rayforce.dll
 TARGET = rayforce.exe
 endif
@@ -149,6 +149,7 @@ clean:
 	-rm -rf *.so
 	-rm -rf *.dylib
 	-rm -rf *.dll
+	-rm -f rayforce.lib
 	-rm -f $(TARGET).js
 	-rm -f $(TARGET).wasm
 	-rm -f $(TARGET)
