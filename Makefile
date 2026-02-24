@@ -15,7 +15,7 @@ ifneq (,$(IS_WINDOWS))
 AR = llvm-ar
 DEBUG_CFLAGS = -Wall -Wextra -std=$(STD) -g -O0 -DDEBUG -D_CRT_SECURE_NO_WARNINGS
 RELEASE_CFLAGS = -Wall -Wextra -std=$(STD) -O3 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS \
- -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -fno-math-errno
+ -fassociative-math -ftree-vectorize -funroll-loops -fno-math-errno
 LIBS = -lws2_32 -lmswsock -lkernel32
 DEBUG_LDFLAGS = -fuse-ld=lld -Wl,/DEF:rayforce.def -Wl,/IMPLIB:rayforce.lib
 RELEASE_LDFLAGS = -fuse-ld=lld -Wl,/DEF:rayforce.def -Wl,/IMPLIB:rayforce.lib
@@ -26,7 +26,7 @@ endif
 ifeq ($(OS),linux)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
- -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -m64\
+ -fassociative-math -ftree-vectorize -funroll-loops -m64\
  -flax-vector-conversions -fno-math-errno -fomit-frame-pointer -fno-stack-protector\
  -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables\
  -fmacro-prefix-map=$(PWD)/=
@@ -42,7 +42,7 @@ endif
 ifeq ($(OS),darwin)
 DEBUG_CFLAGS = -fPIC -Wall -Wextra -Wunused-function -std=$(STD) -g -O0 -march=native -fsigned-char -DDEBUG -m64 -fsanitize=undefined -fsanitize=address
 RELEASE_CFLAGS = -fPIC -Wall -Wextra -std=$(STD) -O3 -fsigned-char -march=native\
- -fassociative-math -ftree-vectorize -funsafe-math-optimizations -funroll-loops -m64\
+ -fassociative-math -ftree-vectorize -funroll-loops -m64\
  -flax-vector-conversions -fno-math-errno -fomit-frame-pointer -fno-stack-protector\
  -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables\
  -fmacro-prefix-map=$(PWD)/=
