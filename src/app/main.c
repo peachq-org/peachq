@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
      *   -t N             enable timeit at startup (N != 0 turns on)
      *   -r N             repl mode (1 = enabled, 0 = disabled)
      *   -i               interactive
-     * Plus rayforce2-specific:
+     * Plus rayforce-specific:
      *   -u PW / -U PW    auth password (plain / restricted)
      *   -h               help
      */
