@@ -742,7 +742,7 @@ ray_op_t* ray_sort_op(ray_graph_t* g, ray_op_t* table_node,
     if (nulls_first) {
         memcpy(ext->sort.nulls_first, nulls_first, nf_sz);
     } else {
-        /* Default: NULLS LAST for ASC, NULLS FIRST for DESC (PostgreSQL convention) */
+        /* Default: NULLS LAST for ASC, NULLS FIRST for DESC */
         for (uint8_t i = 0; i < n_cols; i++)
             ext->sort.nulls_first[i] = descs[i] ? 1 : 0;
     }
