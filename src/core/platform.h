@@ -30,7 +30,12 @@
 /* --------------------------------------------------------------------------
  * OS detection
  * -------------------------------------------------------------------------- */
-#if defined(__linux__)
+/* Detect WASM/Emscripten *before* Linux so we don't pull in Linux-only
+ * headers (madvise, sem_*, pthread) that emscripten's sysroot stubs out.
+ * platform.c provides a dedicated WASM arm with malloc/MEMFS shims. */
+#if defined(__EMSCRIPTEN__)
+  #define RAY_OS_WASM    1
+#elif defined(__linux__)
   #define RAY_OS_LINUX   1
 #elif defined(__APPLE__) && defined(__MACH__)
   #define RAY_OS_MACOS   1
@@ -157,6 +162,9 @@ extern _Atomic(uint32_t) ray_parallel_flag;
 #elif defined(RAY_OS_MACOS)
   #include <dispatch/dispatch.h>
   typedef dispatch_semaphore_t ray_sem_t;
+#elif defined(RAY_OS_WASM)
+  /* WASM is single-threaded by construction; semaphores are no-op stubs. */
+  typedef int32_t ray_sem_t;
 #else
   #include <semaphore.h>
   typedef sem_t ray_sem_t;
