@@ -27,17 +27,6 @@
  * Vector dispatch goes through the DAG executor. */
 
 ray_t* ray_add_fn(ray_t* a, ray_t* b) {
-    /* Hot path: non-null i64+i64 — recursive arithmetic, fib-like
-     * workloads.  Bypass the temporal/date type-walk below.  Profiled
-     * at ~11% of fib(35) inclusive cost; the type-walk burns ~15-20ns
-     * per call.  Null check kept inside the fast path because null
-     * atoms have type=-RAY_I64 too — only the nullmap bit distinguishes. */
-    if (RAY_LIKELY(a->type == -RAY_I64 && b->type == -RAY_I64)) {
-        if (RAY_LIKELY(!RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b)))
-            return make_i64(a->i64 + b->i64);
-        return ray_typed_null(-RAY_I64);
-    }
-
     /* Vector fast path — only when at least one operand is a typed vector */
 
     /* Temporal + integer arithmetic (only int types, not float) */
@@ -102,12 +91,6 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
 }
 
 ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
-    /* Hot path: non-null i64-i64 — see ray_add_fn for rationale. */
-    if (RAY_LIKELY(a->type == -RAY_I64 && b->type == -RAY_I64)) {
-        if (RAY_LIKELY(!RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b)))
-            return make_i64(a->i64 - b->i64);
-        return ray_typed_null(-RAY_I64);
-    }
 
     /* Temporal - int null propagation (both operands) */
     if (is_temporal(a) && is_numeric(b)) {
