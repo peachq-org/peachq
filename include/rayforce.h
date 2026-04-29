@@ -303,6 +303,15 @@ ray_t* ray_typed_null(int8_t type);
 /* ===== Vector API ===== */
 
 ray_t* ray_vec_new(int8_t type, int64_t capacity);
+
+/* RAY_SYM index width — encoded in the lower 2 bits of the vector's
+ * `attrs` byte.  Pick the smallest width that fits the destination
+ * symbol-table size; W64 is the safe default when growing globally. */
+#define RAY_SYM_W8    0  /* uint8_t  indices, ≤255 entries */
+#define RAY_SYM_W16   1  /* uint16_t indices, ≤65,535 */
+#define RAY_SYM_W32   2  /* uint32_t indices, ≤4,294,967,295 */
+#define RAY_SYM_W64   3  /* int64_t  indices, unbounded */
+
 ray_t* ray_sym_vec_new(uint8_t sym_width, int64_t capacity);  /* RAY_SYM with adaptive width */
 ray_t* ray_vec_append(ray_t* vec, const void* elem);
 ray_t* ray_vec_set(ray_t* vec, int64_t idx, const void* elem);
