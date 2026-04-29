@@ -702,7 +702,7 @@ void ray_graph_dump(ray_graph_t* g, ray_op_t* root, void* out);
 
 /* Sort columns and return index array (I64 vector of sorted indices).
  * Uses parallel radix sort for numerics, merge sort for strings/symbols.
- * descs/nulls_first may be NULL (all-asc / PostgreSQL null convention). */
+ * descs/nulls_first may be NULL (all-asc / nulls-last default). */
 ray_t* ray_sort_indices(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
                         uint8_t n_cols, int64_t nrows);
 
