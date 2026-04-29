@@ -456,7 +456,7 @@ ray_t* ray_index_attach_hash(ray_t** vp) {
  * Sort index — ascending permutation of row ids
  *
  * Delegates to the existing parallel sort builder.  Result is an I64 vec of
- * length parent->len with PostgreSQL null-handling (nulls last for asc).
+ * length parent->len with default null-handling (nulls last for asc).
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_index_attach_sort(ray_t** vp) {
