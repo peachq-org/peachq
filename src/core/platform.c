@@ -357,3 +357,108 @@ void ray_sem_signal(ray_sem_t* s) {
 }
 
 #endif /* RAY_OS_WINDOWS */
+
+/* ==========================================================================
+ * WASM (Emscripten)
+ *
+ * Single-threaded by construction.  VM allocs are plain malloc; mmap of
+ * files goes through MEMFS via mmap()/munmap() (still works in emscripten
+ * for files written into the in-memory FS).  Thread/semaphore ops are
+ * stubs — pool.c will see thread_count() == 1 and skip worker creation.
+ * ========================================================================== */
+#if defined(RAY_OS_WASM)
+
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include "mem/sys.h"
+
+void* ray_vm_alloc(size_t size) {
+    /* Emscripten provides MAP_ANONYMOUS; this is the cleanest way to get a
+     * page-aligned region the heap can hand out.  Falls back to aligned
+     * malloc if mmap is somehow refused (shouldn't happen on MEMFS). */
+    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        /* aligned_alloc requires size to be a multiple of alignment.
+         * Round up to a 64KB WASM page. */
+        size_t aligned = (size + 65535u) & ~(size_t)65535u;
+        p = aligned_alloc(65536, aligned);
+        return p;
+    }
+    return p;
+}
+
+void ray_vm_free(void* ptr, size_t size) {
+    if (!ptr) return;
+    if (munmap(ptr, size) != 0) free(ptr);
+}
+
+void* ray_vm_map_file(const char* path, size_t* out_size) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        if (out_size) *out_size = 0;
+        return NULL;
+    }
+
+    size_t len = (size_t)st.st_size;
+    void* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    close(fd);
+
+    if (p == MAP_FAILED) return NULL;
+    if (out_size) *out_size = len;
+    return p;
+}
+
+void ray_vm_unmap_file(void* ptr, size_t size) {
+    if (ptr) munmap(ptr, size);
+}
+
+/* madvise hints are advisory and have no analog on WASM — no-ops. */
+void ray_vm_advise_seq(void* ptr, size_t size)      { (void)ptr; (void)size; }
+void ray_vm_advise_willneed(void* ptr, size_t size) { (void)ptr; (void)size; }
+void ray_vm_release(void* ptr, size_t size)         { (void)ptr; (void)size; }
+
+void* ray_vm_alloc_aligned(size_t size, size_t alignment) {
+    /* aligned_alloc requires size to be a multiple of alignment per C17. */
+    size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
+    return aligned_alloc(alignment, aligned_size);
+}
+
+/* Threading — return errors / 1.  pool.c with n_workers==0 (the result of
+ * thread_count==1 ⇒ ncpu-1 == 0) never invokes thread_create. */
+ray_err_t ray_thread_create(ray_thread_t* t, ray_thread_fn fn, void* arg) {
+    (void)t; (void)fn; (void)arg;
+    return RAY_ERR_NYI;
+}
+
+ray_err_t ray_thread_join(ray_thread_t t) {
+    (void)t;
+    return RAY_OK;
+}
+
+uint32_t ray_thread_count(void) { return 1; }
+
+/* Semaphore — counter-only.  Single-threaded so wait never blocks (the
+ * counter must already be positive when wait fires). */
+ray_err_t ray_sem_init(ray_sem_t* s, uint32_t initial_value) {
+    *s = (int32_t)initial_value;
+    return RAY_OK;
+}
+
+void ray_sem_destroy(ray_sem_t* s) { (void)s; }
+
+void ray_sem_wait(ray_sem_t* s) {
+    if (*s > 0) (*s)--;
+}
+
+void ray_sem_signal(ray_sem_t* s) { (*s)++; }
+
+#endif /* RAY_OS_WASM */
