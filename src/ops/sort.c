@@ -2372,7 +2372,7 @@ static void radix_decode_into(void* dst, int8_t type, const uint64_t* sorted_key
  * cols:        array of n_cols vectors (sort keys, most significant first)
  * descs:       array of n_cols flags (0=asc, 1=desc), or NULL for all-asc
  * nulls_first: array of n_cols flags (0=nulls last, 1=nulls first), or NULL
- *              for PostgreSQL convention (nulls last for asc, nulls first for desc)
+ *              for default convention (nulls last for asc, nulls first for desc)
  * n_cols:      number of sort key columns (max 16)
  * nrows:       number of rows in each column
  * sorted_keys_out: if non-NULL, receives sorted radix keys (caller frees keys_hdr_out)
