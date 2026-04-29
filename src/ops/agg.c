@@ -25,6 +25,58 @@
 #include "ops/ops.h"
 #include "mem/heap.h"
 
+#include <stdlib.h>  /* qsort (introselect fallback) */
+
+static int dbl_cmp(const void* a, const void* b) {
+    double da = *(const double*)a, db = *(const double*)b;
+    return (da > db) - (da < db);
+}
+
+/* Partition vals[lo..hi] so that vals[k] holds the kth-smallest element,
+ * with everything to the left ≤ and everything to the right ≥.  Average
+ * O(n) (Hoare quickselect with median-of-three), worst-case O(n log n)
+ * via qsort fallback when recursion exceeds 2*log2(range).  Mirrors
+ * std::nth_element's contract; DuckDB's quantile path uses the same
+ * pattern (extension/core_functions/aggregate/holistic/quantile.cpp,
+ * quantile_sort_tree.hpp:191-195). */
+static void nth_element_dbl(double* a, int64_t lo, int64_t hi, int64_t k) {
+    int depth_limit = 0;
+    for (int64_t r = hi - lo + 1; r > 0; r >>= 1) depth_limit++;
+    depth_limit *= 2;
+    while (hi - lo > 16) {
+        if (depth_limit-- <= 0) {
+            qsort(a + lo, (size_t)(hi - lo + 1), sizeof(double), dbl_cmp);
+            return;
+        }
+        int64_t mid = lo + ((hi - lo) >> 1);
+        if (a[lo] > a[mid]) { double t = a[lo]; a[lo] = a[mid]; a[mid] = t; }
+        if (a[lo] > a[hi])  { double t = a[lo]; a[lo] = a[hi];  a[hi]  = t; }
+        if (a[mid] > a[hi]) { double t = a[mid]; a[mid] = a[hi]; a[hi] = t; }
+        /* Park pivot at hi-1; partition (lo, hi-1) with sentinels at both ends. */
+        { double t = a[mid]; a[mid] = a[hi - 1]; a[hi - 1] = t; }
+        double pivot = a[hi - 1];
+        int64_t i = lo, j = hi - 1;
+        for (;;) {
+            while (a[++i] < pivot) {}
+            while (a[--j] > pivot) {}
+            if (i >= j) break;
+            double t = a[i]; a[i] = a[j]; a[j] = t;
+        }
+        /* Restore pivot to its final resting position i. */
+        { double t = a[i]; a[i] = a[hi - 1]; a[hi - 1] = t; }
+        if      (k < i) hi = i - 1;
+        else if (k > i) lo = i + 1;
+        else            return;
+    }
+    /* Small range: insertion sort the slice covers vals[lo..hi]. */
+    for (int64_t i = lo + 1; i <= hi; i++) {
+        double key = a[i];
+        int64_t j = i - 1;
+        while (j >= lo && a[j] > key) { a[j + 1] = a[j]; j--; }
+        a[j + 1] = key;
+    }
+}
+
 /* ══════════════════════════════════════════
  * Aggregation builtins
  * ══════════════════════════════════════════ */
@@ -373,16 +425,21 @@ ray_t* ray_med_fn(ray_t* x) {
     int64_t cnt = scratch->len;
     if (cnt == 0) { ray_release(scratch); return ray_typed_null(-RAY_F64); }
 
-    /* Insertion sort */
-    for (int64_t i = 1; i < cnt; i++) {
-        double key = vals[i];
-        int64_t j = i - 1;
-        while (j >= 0 && vals[j] > key) { vals[j + 1] = vals[j]; j--; }
-        vals[j + 1] = key;
-    }
+    /* O(n) average partial-sort.  Two-call pattern from DuckDB's
+     * QuantileInterpolator::Operation (quantile_sort_tree.hpp:191-195):
+     * for odd n one nth_element places the middle; for even n a second
+     * nth_element on the right half locates the upper middle.  Replaces
+     * an O(n^2) insertion sort that hung for groups larger than ~10k. */
+    int64_t k = cnt / 2;
     double median;
-    if (cnt % 2 == 1) median = vals[cnt / 2];
-    else median = (vals[cnt / 2 - 1] + vals[cnt / 2]) / 2.0;
+    if (cnt % 2 == 1) {
+        nth_element_dbl(vals, 0, cnt - 1, k);
+        median = vals[k];
+    } else {
+        nth_element_dbl(vals, 0, cnt - 1, k - 1);
+        nth_element_dbl(vals, k, cnt - 1, k);
+        median = (vals[k - 1] + vals[k]) / 2.0;
+    }
     ray_release(scratch);
     return make_f64(median);
 }
