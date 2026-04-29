@@ -36,12 +36,15 @@
 #include "core/types.h"
 #include <stdbool.h>
 
-/* Symbol width encoding (lower 2 bits of attrs when type == RAY_SYM) */
+/* Symbol width encoding (lower 2 bits of attrs when type == RAY_SYM).
+ * RAY_SYM_W{8,16,32,64} are now declared in <rayforce.h> for embedders. */
 #define RAY_SYM_W_MASK   0x03
-#define RAY_SYM_W8       0x00   /* uint8_t  indices -- dict <= 255 entries */
-#define RAY_SYM_W16      0x01   /* uint16_t indices -- dict <= 65,535 */
-#define RAY_SYM_W32      0x02   /* uint32_t indices -- dict <= 4,294,967,295 */
-#define RAY_SYM_W64      0x03   /* uint64_t indices -- dict > 4B entries */
+#ifndef RAY_SYM_W8
+#define RAY_SYM_W8       0x00
+#define RAY_SYM_W16      0x01
+#define RAY_SYM_W32      0x02
+#define RAY_SYM_W64      0x03
+#endif
 
 /* Helper macros */
 #define RAY_IS_SYM(t)         ((t) == RAY_SYM)
