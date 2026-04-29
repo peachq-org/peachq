@@ -38,6 +38,7 @@
 
 #include <string.h>
 #include <math.h>
+#include <inttypes.h>
 
 /* ══════════════════════════════════════════
  * Select query — DAG bridge
@@ -1015,6 +1016,156 @@ static int is_agg_expr(ray_t* expr) {
     return resolve_agg_opcode(elems[0]->i64) != 0;
 }
 
+/* Walk expr and bind every column-ref symbol to its per-group slice in
+ * the current local scope.  Mirrors expr_bind_table_names but slices via
+ * idx_list (the group's row indices) instead of binding the full column.
+ * Used by the per-group fallback for non-streaming s: expressions.
+ *
+ * Repeated refs to the same column rebind the slice each time; that's
+ * wasteful but only on the slow path, and env_bind_local releases the
+ * previous binding on overwrite so there's no leak.  Dotted refs
+ * (`Timestamp.ss`) bind the head segment, matching expr_bind_table_names. */
+static void expr_bind_group_slices(ray_t* expr, ray_t* tbl, ray_t* idx_list) {
+    if (!expr) return;
+    if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
+        ray_t* col = ray_table_get_col(tbl, expr->i64);
+        if (col) {
+            ray_t* slice = ray_at_fn(col, idx_list);
+            if (slice && !RAY_IS_ERR(slice)) {
+                ray_env_set_local(expr->i64, slice);
+                ray_release(slice);  /* env retains its own ref */
+            }
+            return;
+        }
+        if (ray_sym_is_dotted(expr->i64)) {
+            const int64_t* segs;
+            int nsegs = ray_sym_segs(expr->i64, &segs);
+            if (nsegs >= 1) {
+                ray_t* head_col = ray_table_get_col(tbl, segs[0]);
+                if (head_col) {
+                    ray_t* slice = ray_at_fn(head_col, idx_list);
+                    if (slice && !RAY_IS_ERR(slice)) {
+                        ray_env_set_local(segs[0], slice);
+                        ray_release(slice);
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if (expr->type == RAY_LIST) {
+        ray_t** elems = (ray_t**)ray_data(expr);
+        int64_t n = ray_len(expr);
+        for (int64_t i = 0; i < n; i++)
+            expr_bind_group_slices(elems[i], tbl, idx_list);
+    }
+}
+
+/* Per-group eval for non-streaming s: expressions, eval-fallback flavor.
+ * `groups` is the LIST-of-(key,idx_list) layout used by the eval-level
+ * groupby path.  For each group, push a fresh scope, bind referenced
+ * columns to their slices, eval the expression, store the result as the
+ * group's cell.  Cells can be any shape — scalar, vector, list — and
+ * the caller may collapse homogeneous-scalar cells via maybe_collapse_to_typed. */
+static ray_t* nonagg_eval_per_group(ray_t* expr, ray_t* tbl,
+                                    ray_t* groups, int64_t n_groups) {
+    ray_t* list_col = ray_alloc(n_groups * sizeof(ray_t*));
+    if (!list_col) return ray_error("oom", NULL);
+    list_col->type = RAY_LIST;
+    list_col->len = 0;
+    ray_t** out = (ray_t**)ray_data(list_col);
+    ray_t** grp_items = (ray_t**)ray_data(groups);
+    for (int64_t gi = 0; gi < n_groups; gi++) {
+        ray_t* idx_list = grp_items[gi * 2 + 1];
+        if (ray_env_push_scope() != RAY_OK) {
+            ray_release(list_col);
+            return ray_error("oom", NULL);
+        }
+        expr_bind_group_slices(expr, tbl, idx_list);
+        ray_t* cell = ray_eval(expr);
+        ray_env_pop_scope();
+        if (!cell || RAY_IS_ERR(cell)) {
+            ray_release(list_col);
+            return cell ? cell : ray_error("domain", NULL);
+        }
+        out[gi] = cell;
+        list_col->len = gi + 1;
+    }
+    return list_col;
+}
+
+/* Per-group eval, DAG-fast-path flavor: groups expressed as a flat
+ * idx_buf with per-group offsets/grp_cnt arrays.  Materializes a fresh
+ * I64 idx vec per group to feed expr_bind_group_slices. */
+static ray_t* nonagg_eval_per_group_buf(ray_t* expr, ray_t* tbl,
+                                        const int64_t* idx_buf,
+                                        const int64_t* offsets,
+                                        const int64_t* grp_cnt,
+                                        int64_t n_groups) {
+    ray_t* list_col = ray_alloc(n_groups * sizeof(ray_t*));
+    if (!list_col) return ray_error("oom", NULL);
+    list_col->type = RAY_LIST;
+    list_col->len = 0;
+    ray_t** out = (ray_t**)ray_data(list_col);
+    for (int64_t gi = 0; gi < n_groups; gi++) {
+        ray_t* idx_vec = ray_vec_new(RAY_I64, grp_cnt[gi]);
+        if (!idx_vec || RAY_IS_ERR(idx_vec)) {
+            ray_release(list_col);
+            return ray_error("oom", NULL);
+        }
+        idx_vec->len = grp_cnt[gi];
+        if (grp_cnt[gi] > 0) {
+            memcpy(ray_data(idx_vec), &idx_buf[offsets[gi]],
+                   (size_t)grp_cnt[gi] * sizeof(int64_t));
+        }
+        if (ray_env_push_scope() != RAY_OK) {
+            ray_release(idx_vec); ray_release(list_col);
+            return ray_error("oom", NULL);
+        }
+        expr_bind_group_slices(expr, tbl, idx_vec);
+        ray_t* cell = ray_eval(expr);
+        ray_env_pop_scope();
+        ray_release(idx_vec);
+        if (!cell || RAY_IS_ERR(cell)) {
+            ray_release(list_col);
+            return cell ? cell : ray_error("domain", NULL);
+        }
+        out[gi] = cell;
+        list_col->len = gi + 1;
+    }
+    return list_col;
+}
+
+/* If every cell of a LIST column is a scalar atom of the same primitive
+ * type, repackage as a typed vec (releasing the list).  Otherwise return
+ * the list as-is.  Skips SYM/STR/GUID atoms — store_typed_elem handles
+ * them but the bookkeeping (sym table writes, GUID memcpy) is touchy
+ * enough that the caller can keep the list when those types appear. */
+static ray_t* maybe_collapse_to_typed(ray_t* list_col) {
+    if (!list_col || list_col->type != RAY_LIST) return list_col;
+    int64_t n = list_col->len;
+    if (n == 0) return list_col;
+    ray_t** cells = (ray_t**)ray_data(list_col);
+    int8_t t0 = cells[0]->type;
+    if (t0 >= 0) return list_col;  /* not an atom — leave as list */
+    if (t0 == -RAY_SYM || t0 == -RAY_STR || t0 == -RAY_GUID) return list_col;
+    for (int64_t i = 1; i < n; i++) {
+        if (cells[i]->type != t0) return list_col;
+    }
+    int8_t vt = (int8_t)(-t0);
+    ray_t* vec = ray_vec_new(vt, n);
+    if (!vec || RAY_IS_ERR(vec)) return list_col;
+    vec->len = n;
+    for (int64_t i = 0; i < n; i++) {
+        if (store_typed_elem(vec, i, cells[i]) != 0) {
+            ray_release(vec);
+            return list_col;
+        }
+    }
+    ray_release(list_col);
+    return vec;
+}
+
 /* Forward declarations for eval-level groupby fallback */
 
 /* (select {from: t [where: pred] [by: key] [col: expr ...]})
@@ -1901,12 +2052,26 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         is_indexable && full_val->len == eval_nrows;
 
                     if (refs_column && !full_is_row_aligned) {
-                        ray_release(full_val); ray_release(list_col);  /* len=0, walks nothing */
-                        for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
-                        ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
-                        return ray_error("length",
-                            "non-agg expression referencing a column "
-                            "produced a non-row-aligned result");
+                        /* Non-streaming aggregation fallback: the full-table
+                         * eval didn't produce a row-aligned shape (e.g. a
+                         * user lambda returned a scalar from a vector arg),
+                         * so collect per-group and post-apply the expression
+                         * to each group's slice.  Each cell can be any shape;
+                         * homogeneous-scalar cells collapse to a typed vec. */
+                        ray_release(full_val);
+                        ray_release(list_col);  /* len=0, walks nothing */
+                        ray_t* per_group = nonagg_eval_per_group(
+                            val_expr_item, eval_tbl, groups, n_groups);
+                        if (RAY_IS_ERR(per_group)) {
+                            for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
+                            ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                            return per_group;
+                        }
+                        per_group = maybe_collapse_to_typed(per_group);
+                        agg_names[n_agg_out] = kid;
+                        agg_results[n_agg_out] = per_group;
+                        n_agg_out++;
+                        continue;
                     }
 
                     ray_t** gi_items = (ray_t**)ray_data(groups);
@@ -3221,12 +3386,26 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         is_indexable && full_val->len == nrows;
 
                     if (refs_column && !full_is_row_aligned) {
+                        /* Non-streaming fallback: the expression didn't
+                         * produce a row-aligned full-table result (e.g. a
+                         * user lambda collapsed a vector to a scalar), so
+                         * collect per-group and post-apply.  Cells can be
+                         * any shape; homogeneous-scalar cells collapse to
+                         * a typed vec. */
                         ray_release(full_val);
                         ray_release(list_col);  /* len=0, walks nothing */
-                        scatter_err = ray_error("length",
-                            "non-agg expression referencing a column "
-                            "produced a non-row-aligned result");
-                        break;
+                        ray_t* per_group = nonagg_eval_per_group_buf(
+                            nonagg_exprs[ni], tbl, idx_buf, offsets, grp_cnt, n_groups);
+                        if (RAY_IS_ERR(per_group)) {
+                            scatter_err = per_group; break;
+                        }
+                        per_group = maybe_collapse_to_typed(per_group);
+                        result = ray_table_add_col(result, nonagg_names[ni], per_group);
+                        ray_release(per_group);
+                        if (RAY_IS_ERR(result)) {
+                            scatter_err = result; result = NULL; break;
+                        }
+                        continue;
                     }
 
                     int gather_ok = 1;
