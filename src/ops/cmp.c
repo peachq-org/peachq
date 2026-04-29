@@ -93,6 +93,17 @@ ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
 }
 
 ray_t* ray_lt_fn(ray_t* a, ray_t* b) {
+    /* Hot path: i64<i64 — fib-like workloads.  Profiled at ~11% of
+     * fib(35) inclusive cost; the type-walk below is wasted on pure-int.
+     * Null semantics (matches the slow path below): null < X → true,
+     * X < null → false, null < null → false. */
+    if (RAY_LIKELY(a->type == -RAY_I64 && b->type == -RAY_I64)) {
+        int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
+        if (RAY_LIKELY(!na && !nb))
+            return make_bool(a->i64 < b->i64 ? 1 : 0);
+        return make_bool(na && !nb ? 1 : 0);
+    }
+
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c < 0 ? 1 : 0); }
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) < 0 ? 1 : 0);
