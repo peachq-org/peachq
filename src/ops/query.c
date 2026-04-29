@@ -1016,154 +1016,346 @@ static int is_agg_expr(ray_t* expr) {
     return resolve_agg_opcode(elems[0]->i64) != 0;
 }
 
-/* Walk expr and bind every column-ref symbol to its per-group slice in
- * the current local scope.  Mirrors expr_bind_table_names but slices via
- * idx_list (the group's row indices) instead of binding the full column.
- * Used by the per-group fallback for non-streaming s: expressions.
- *
- * Repeated refs to the same column rebind the slice each time; that's
- * wasteful but only on the slow path, and env_bind_local releases the
- * previous binding on overwrite so there's no leak.  Dotted refs
- * (`Timestamp.ss`) bind the head segment, matching expr_bind_table_names. */
-static void expr_bind_group_slices(ray_t* expr, ray_t* tbl, ray_t* idx_list) {
-    if (!expr) return;
+/* True for `(fn arg ...)` where fn resolves to a RAY_UNARY marked
+ * RAY_FN_AGGR — i.e. a builtin aggregator (sum/avg/min/max/count and
+ * the non-whitelisted med/dev/var/stddev/etc).  Used to route these
+ * through the streaming-style per-group AGG branch rather than the
+ * full ray_eval per-group fallback.  This is a SUPERSET of is_agg_expr:
+ * it includes everything resolve_agg_opcode names plus the AGGR
+ * builtins that lack a streaming-engine opcode. */
+static int is_aggr_unary_call(ray_t* expr) {
+    if (!expr || expr->type != RAY_LIST) return 0;
+    int64_t n = ray_len(expr);
+    if (n < 2) return 0;
+    ray_t** elems = (ray_t**)ray_data(expr);
+    if (elems[0]->type != -RAY_SYM) return 0;
+    ray_t* fn_obj = ray_env_get(elems[0]->i64);
+    if (!fn_obj || fn_obj->type != RAY_UNARY) return 0;
+    return (fn_obj->attrs & RAY_FN_AGGR) != 0;
+}
+
+/* Walk expr once, gather unique column-ref symbol ids that resolve to
+ * columns of `tbl`.  Dotted refs (`Timestamp.ss`) record the head
+ * segment.  Caps at `max_out` entries (16 is plenty for s: clauses);
+ * returns the count gathered.  Used by the per-group fallback to slice
+ * each ref exactly once per group instead of re-walking the AST. */
+static int collect_col_refs(ray_t* expr, ray_t* tbl,
+                            int64_t* out_syms, int max_out, int n) {
+    if (!expr || n >= max_out) return n;
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
-        ray_t* col = ray_table_get_col(tbl, expr->i64);
-        if (col) {
-            ray_t* slice = ray_at_fn(col, idx_list);
-            if (slice && !RAY_IS_ERR(slice)) {
-                ray_env_set_local(expr->i64, slice);
-                ray_release(slice);  /* env retains its own ref */
-            }
-            return;
-        }
-        if (ray_sym_is_dotted(expr->i64)) {
+        int64_t want = -1;
+        if (ray_table_get_col(tbl, expr->i64)) {
+            want = expr->i64;
+        } else if (ray_sym_is_dotted(expr->i64)) {
             const int64_t* segs;
             int nsegs = ray_sym_segs(expr->i64, &segs);
-            if (nsegs >= 1) {
-                ray_t* head_col = ray_table_get_col(tbl, segs[0]);
-                if (head_col) {
-                    ray_t* slice = ray_at_fn(head_col, idx_list);
-                    if (slice && !RAY_IS_ERR(slice)) {
-                        ray_env_set_local(segs[0], slice);
-                        ray_release(slice);
-                    }
-                }
-            }
+            if (nsegs >= 1 && ray_table_get_col(tbl, segs[0])) want = segs[0];
         }
-        return;
+        if (want >= 0) {
+            for (int i = 0; i < n; i++) if (out_syms[i] == want) return n;
+            if (n < max_out) out_syms[n++] = want;
+        }
+        return n;
     }
     if (expr->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(expr);
-        int64_t n = ray_len(expr);
-        for (int64_t i = 0; i < n; i++)
-            expr_bind_group_slices(elems[i], tbl, idx_list);
+        int64_t cnt = ray_len(expr);
+        for (int64_t i = 0; i < cnt && n < max_out; i++)
+            n = collect_col_refs(elems[i], tbl, out_syms, max_out, n);
     }
+    return n;
 }
 
-/* Per-group eval for non-streaming s: expressions, eval-fallback flavor.
- * `groups` is the LIST-of-(key,idx_list) layout used by the eval-level
- * groupby path.  For each group, push a fresh scope, bind referenced
- * columns to their slices, eval the expression, store the result as the
- * group's cell.  Cells can be any shape — scalar, vector, list — and
- * the caller may collapse homogeneous-scalar cells via maybe_collapse_to_typed. */
-static ray_t* nonagg_eval_per_group(ray_t* expr, ray_t* tbl,
-                                    ray_t* groups, int64_t n_groups) {
+/* Bind a single column-id to a slice of its column under `idx_list`.
+ * Helper used inside the per-group hot loop (slices the table's column
+ * via ray_at_fn, hands the slice to env_bind_local which retains, then
+ * drops our ref).  Returns 0 on success, error ray_t* on failure. */
+static ray_t* bind_col_slice(int64_t sym, ray_t* col, ray_t* idx_list) {
+    ray_t* slice = ray_at_fn(col, idx_list);
+    if (!slice || RAY_IS_ERR(slice)) {
+        return slice ? slice : ray_error("oom", NULL);
+    }
+    ray_env_set_local(sym, slice);
+    ray_release(slice);
+    return NULL;
+}
+
+/* Convert a partly-filled typed vec (indices 0..fill-1 valid) back into
+ * a LIST of n_groups owned atom refs (only first `fill` initialized).
+ * Used by the per-group eval fallback when the probe-typed-direct path
+ * detects a mid-loop type mismatch and has to demote to a list. */
+static ray_t* typed_vec_to_list(ray_t* tv, int64_t fill, int64_t n_groups) {
     ray_t* list_col = ray_alloc(n_groups * sizeof(ray_t*));
     if (!list_col) return ray_error("oom", NULL);
     list_col->type = RAY_LIST;
     list_col->len = 0;
     ray_t** out = (ray_t**)ray_data(list_col);
-    ray_t** grp_items = (ray_t**)ray_data(groups);
-    for (int64_t gi = 0; gi < n_groups; gi++) {
-        ray_t* idx_list = grp_items[gi * 2 + 1];
-        if (ray_env_push_scope() != RAY_OK) {
-            ray_release(list_col);
-            return ray_error("oom", NULL);
-        }
-        expr_bind_group_slices(expr, tbl, idx_list);
-        ray_t* cell = ray_eval(expr);
-        ray_env_pop_scope();
-        if (!cell || RAY_IS_ERR(cell)) {
-            ray_release(list_col);
-            return cell ? cell : ray_error("domain", NULL);
-        }
-        out[gi] = cell;
-        list_col->len = gi + 1;
+    for (int64_t k = 0; k < fill; k++) {
+        int allocated = 0;
+        ray_t* atom = collection_elem(tv, k, &allocated);
+        if (!allocated && atom) ray_retain(atom);
+        out[k] = atom;
+        list_col->len = k + 1;
     }
     return list_col;
 }
 
-/* Per-group eval, DAG-fast-path flavor: groups expressed as a flat
- * idx_buf with per-group offsets/grp_cnt arrays.  Materializes a fresh
- * I64 idx vec per group to feed expr_bind_group_slices. */
+/* Inner per-group eval body shared by the LIST-`groups` and `idx_buf`
+ * variants.  Pre-collects unique column refs, pushes ONE local scope
+ * around the whole loop, and probes the first cell:
+ *   - scalar atom of a typed-vec primitive → write directly into a
+ *     pre-allocated typed vec (no list intermediate, no post-collapse);
+ *   - otherwise → collect into a LIST column.
+ * If the typed-direct path hits a mid-loop type mismatch, it demotes
+ * to a LIST cleanly (one-time cost).  `feeder` produces the per-group
+ * idx_list ray_t* (caller controls its lifetime / reuse); the closure
+ * over `feeder_state` lets the buf variant reuse a single I64 wrapper.
+ *
+ * Returns either a typed vec (homogeneous scalars) or a LIST col. */
+typedef ray_t* (*idx_feeder_fn)(int64_t gi, void* state);
+
+static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
+                                         idx_feeder_fn feeder, void* fstate,
+                                         int64_t n_groups) {
+    int64_t col_syms[16];
+    int n_cols = collect_col_refs(expr, tbl, col_syms, 16, 0);
+    ray_t* cols[16];
+    for (int i = 0; i < n_cols; i++)
+        cols[i] = ray_table_get_col(tbl, col_syms[i]);
+
+    if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
+
+    ray_t* result = NULL;       /* typed vec OR list col */
+    int direct_typed = 0;       /* non-zero → result is a typed vec */
+    int8_t typed_t = 0;         /* atom type sentinel for the typed path */
+
+    for (int64_t gi = 0; gi < n_groups; gi++) {
+        ray_t* idx_list = feeder(gi, fstate);
+        if (!idx_list) {
+            ray_env_pop_scope();
+            if (result) ray_release(result);
+            return ray_error("oom", NULL);
+        }
+        for (int i = 0; i < n_cols; i++) {
+            ray_t* err = bind_col_slice(col_syms[i], cols[i], idx_list);
+            if (err) {
+                ray_env_pop_scope();
+                if (result) ray_release(result);
+                return err;
+            }
+        }
+        ray_t* cell = ray_eval(expr);
+        if (!cell || RAY_IS_ERR(cell)) {
+            ray_env_pop_scope();
+            if (result) ray_release(result);
+            return cell ? cell : ray_error("domain", NULL);
+        }
+
+        if (gi == 0) {
+            int8_t t = cell->type;
+            int collapsable = (t < 0 && t != -RAY_SYM && t != -RAY_STR && t != -RAY_GUID);
+            if (collapsable) {
+                int8_t vt = (int8_t)(-t);
+                result = ray_vec_new(vt, n_groups);
+                if (!result || RAY_IS_ERR(result)) {
+                    ray_env_pop_scope(); ray_release(cell);
+                    return result ? result : ray_error("oom", NULL);
+                }
+                result->len = n_groups;
+                if (store_typed_elem(result, 0, cell) == 0) {
+                    direct_typed = 1; typed_t = t;
+                    ray_release(cell);
+                } else {
+                    /* type unsupported by store_typed_elem → fall to list */
+                    ray_release(result); result = NULL;
+                    collapsable = 0;
+                }
+            }
+            if (!collapsable) {
+                result = ray_alloc(n_groups * sizeof(ray_t*));
+                if (!result) {
+                    ray_env_pop_scope(); ray_release(cell);
+                    return ray_error("oom", NULL);
+                }
+                result->type = RAY_LIST;
+                result->len = 0;
+                ((ray_t**)ray_data(result))[0] = cell;
+                result->len = 1;
+            }
+            continue;
+        }
+
+        if (direct_typed) {
+            if (cell->type == typed_t && store_typed_elem(result, gi, cell) == 0) {
+                ray_release(cell);
+            } else {
+                /* Demote: convert typed vec [0..gi-1] to list, append cell, continue as list. */
+                ray_t* list_col = typed_vec_to_list(result, gi, n_groups);
+                ray_release(result);
+                if (RAY_IS_ERR(list_col)) {
+                    ray_env_pop_scope(); ray_release(cell);
+                    return list_col;
+                }
+                result = list_col;
+                ((ray_t**)ray_data(result))[gi] = cell;  /* takes ownership */
+                result->len = gi + 1;
+                direct_typed = 0;
+            }
+        } else {
+            ((ray_t**)ray_data(result))[gi] = cell;  /* takes ownership */
+            result->len = gi + 1;
+        }
+    }
+
+    ray_env_pop_scope();
+    return result;
+}
+
+/* idx_feeder for the eval-fallback's LIST `groups` layout. */
+typedef struct { ray_t** items; } groups_state_t;
+static ray_t* groups_idx_feed(int64_t gi, void* st) {
+    groups_state_t* s = (groups_state_t*)st;
+    return s->items[gi * 2 + 1];
+}
+
+static ray_t* nonagg_eval_per_group(ray_t* expr, ray_t* tbl,
+                                    ray_t* groups, int64_t n_groups) {
+    groups_state_t st = { .items = (ray_t**)ray_data(groups) };
+    return nonagg_eval_per_group_core(expr, tbl, groups_idx_feed, &st, n_groups);
+}
+
+/* idx_feeder for the DAG fast-path's idx_buf+offsets+grp_cnt layout.
+ * Reuses a single RAY_I64 wrapper across all groups: just retargets the
+ * data pointer-equivalent by memcpy'ing into its data area and adjusting
+ * `len`.  Saves n_groups vec allocs/frees. */
+typedef struct {
+    const int64_t* idx_buf;
+    const int64_t* offsets;
+    const int64_t* grp_cnt;
+    ray_t*         scratch;     /* RAY_I64 vec, sized to max grp_cnt */
+} buf_state_t;
+
+static ray_t* buf_idx_feed(int64_t gi, void* st) {
+    buf_state_t* s = (buf_state_t*)st;
+    int64_t cnt = s->grp_cnt[gi];
+    s->scratch->len = cnt;
+    if (cnt > 0) {
+        memcpy(ray_data(s->scratch), &s->idx_buf[s->offsets[gi]],
+               (size_t)cnt * sizeof(int64_t));
+    }
+    return s->scratch;
+}
+
 static ray_t* nonagg_eval_per_group_buf(ray_t* expr, ray_t* tbl,
                                         const int64_t* idx_buf,
                                         const int64_t* offsets,
                                         const int64_t* grp_cnt,
                                         int64_t n_groups) {
-    ray_t* list_col = ray_alloc(n_groups * sizeof(ray_t*));
-    if (!list_col) return ray_error("oom", NULL);
-    list_col->type = RAY_LIST;
-    list_col->len = 0;
-    ray_t** out = (ray_t**)ray_data(list_col);
+    int64_t max_cnt = 0;
+    for (int64_t gi = 0; gi < n_groups; gi++)
+        if (grp_cnt[gi] > max_cnt) max_cnt = grp_cnt[gi];
+    ray_t* scratch = ray_vec_new(RAY_I64, max_cnt > 0 ? max_cnt : 1);
+    if (!scratch || RAY_IS_ERR(scratch))
+        return scratch ? scratch : ray_error("oom", NULL);
+    buf_state_t st = { idx_buf, offsets, grp_cnt, scratch };
+    ray_t* res = nonagg_eval_per_group_core(expr, tbl, buf_idx_feed, &st, n_groups);
+    ray_release(scratch);
+    return res;
+}
+
+/* Streaming-style per-group AGG body, DAG flavor.  For an expression
+ * like `(med v)` (head is RAY_FN_AGGR + RAY_UNARY, second elem is a
+ * column ref or full-table-eval-able sub-expression), slice src per
+ * group via ray_at_fn, call the unary fn directly, store the scalar
+ * result into a pre-sized typed vec.  Mirrors the eval-fallback's AGG
+ * branch (`query.c:~1955`) but with the idx_buf+offsets+grp_cnt
+ * layout the DAG path produces. */
+static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
+                                       const int64_t* idx_buf,
+                                       const int64_t* offsets,
+                                       const int64_t* grp_cnt,
+                                       int64_t n_groups) {
+    ray_t** elems = (ray_t**)ray_data(expr);
+    ray_t* fn_name = elems[0];
+    ray_t* col_expr = elems[1];
+
+    ray_t* fn_obj = ray_env_get(fn_name->i64);
+    if (!fn_obj || fn_obj->type != RAY_UNARY)
+        return ray_error("type", NULL);
+    ray_unary_fn uf = (ray_unary_fn)(uintptr_t)fn_obj->i64;
+
+    /* Resolve the source column: either a direct column ref (no copy)
+     * or a full-table eval of the sub-expression. */
+    ray_t* src = NULL;
+    if (col_expr->type == -RAY_SYM && (col_expr->attrs & RAY_ATTR_NAME)) {
+        src = ray_table_get_col(tbl, col_expr->i64);
+        if (src) ray_retain(src);
+    }
+    if (!src) {
+        /* Bind table cols and eval — same pattern as the existing path. */
+        if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
+        expr_bind_table_names(col_expr, tbl);
+        src = ray_eval(col_expr);
+        ray_env_pop_scope();
+        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+    }
+
+    /* Reusable I64 idx wrapper. */
+    int64_t max_cnt = 0;
+    for (int64_t gi = 0; gi < n_groups; gi++)
+        if (grp_cnt[gi] > max_cnt) max_cnt = grp_cnt[gi];
+    ray_t* idx_vec = ray_vec_new(RAY_I64, max_cnt > 0 ? max_cnt : 1);
+    if (!idx_vec || RAY_IS_ERR(idx_vec)) {
+        ray_release(src);
+        return idx_vec ? idx_vec : ray_error("oom", NULL);
+    }
+
+    ray_t* agg_vec = NULL;
+    int8_t agg_atom_t = 0;
+
     for (int64_t gi = 0; gi < n_groups; gi++) {
-        ray_t* idx_vec = ray_vec_new(RAY_I64, grp_cnt[gi]);
-        if (!idx_vec || RAY_IS_ERR(idx_vec)) {
-            ray_release(list_col);
-            return ray_error("oom", NULL);
-        }
         idx_vec->len = grp_cnt[gi];
         if (grp_cnt[gi] > 0) {
             memcpy(ray_data(idx_vec), &idx_buf[offsets[gi]],
                    (size_t)grp_cnt[gi] * sizeof(int64_t));
         }
-        if (ray_env_push_scope() != RAY_OK) {
-            ray_release(idx_vec); ray_release(list_col);
-            return ray_error("oom", NULL);
-        }
-        expr_bind_group_slices(expr, tbl, idx_vec);
-        ray_t* cell = ray_eval(expr);
-        ray_env_pop_scope();
-        ray_release(idx_vec);
-        if (!cell || RAY_IS_ERR(cell)) {
-            ray_release(list_col);
-            return cell ? cell : ray_error("domain", NULL);
-        }
-        out[gi] = cell;
-        list_col->len = gi + 1;
-    }
-    return list_col;
-}
+        ray_t* subset = ray_at_fn(src, idx_vec);
+        if (!subset || RAY_IS_ERR(subset)) continue;
+        ray_t* agg_val = uf(subset);
+        ray_release(subset);
+        if (!agg_val || RAY_IS_ERR(agg_val)) continue;
 
-/* If every cell of a LIST column is a scalar atom of the same primitive
- * type, repackage as a typed vec (releasing the list).  Otherwise return
- * the list as-is.  Skips SYM/STR/GUID atoms — store_typed_elem handles
- * them but the bookkeeping (sym table writes, GUID memcpy) is touchy
- * enough that the caller can keep the list when those types appear. */
-static ray_t* maybe_collapse_to_typed(ray_t* list_col) {
-    if (!list_col || list_col->type != RAY_LIST) return list_col;
-    int64_t n = list_col->len;
-    if (n == 0) return list_col;
-    ray_t** cells = (ray_t**)ray_data(list_col);
-    int8_t t0 = cells[0]->type;
-    if (t0 >= 0) return list_col;  /* not an atom — leave as list */
-    if (t0 == -RAY_SYM || t0 == -RAY_STR || t0 == -RAY_GUID) return list_col;
-    for (int64_t i = 1; i < n; i++) {
-        if (cells[i]->type != t0) return list_col;
-    }
-    int8_t vt = (int8_t)(-t0);
-    ray_t* vec = ray_vec_new(vt, n);
-    if (!vec || RAY_IS_ERR(vec)) return list_col;
-    vec->len = n;
-    for (int64_t i = 0; i < n; i++) {
-        if (store_typed_elem(vec, i, cells[i]) != 0) {
-            ray_release(vec);
-            return list_col;
+        if (!agg_vec) {
+            agg_atom_t = agg_val->type;
+            int8_t vt = (int8_t)(-agg_atom_t);
+            agg_vec = ray_vec_new(vt, n_groups);
+            if (!agg_vec || RAY_IS_ERR(agg_vec)) {
+                ray_release(agg_val); ray_release(idx_vec); ray_release(src);
+                return agg_vec ? agg_vec : ray_error("oom", NULL);
+            }
+            agg_vec->len = n_groups;
         }
+        if (agg_val->type != agg_atom_t || store_typed_elem(agg_vec, gi, agg_val) != 0) {
+            /* Fallback: shouldn't happen for well-behaved aggregators; if it
+             * does, demote to a list so we don't return a partly-typed vec.
+             * Convert what we have so far to a list, then reattempt as a
+             * generic non-streaming eval. */
+            ray_release(agg_val);
+            ray_release(idx_vec); ray_release(src);
+            ray_release(agg_vec);
+            return nonagg_eval_per_group_buf(expr, tbl, idx_buf, offsets, grp_cnt, n_groups);
+        }
+        ray_release(agg_val);
     }
-    ray_release(list_col);
-    return vec;
+
+    ray_release(idx_vec); ray_release(src);
+    if (!agg_vec) {
+        /* No groups produced a value (all empty?) — return an empty typed
+         * vec sized n_groups; default to I64 for lack of a better guess. */
+        agg_vec = ray_vec_new(RAY_I64, n_groups);
+        if (agg_vec && !RAY_IS_ERR(agg_vec)) agg_vec->len = n_groups;
+    }
+    return agg_vec;
 }
 
 /* Forward declarations for eval-level groupby fallback */
@@ -1956,7 +2148,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id) continue;
                 ray_t* val_expr_item = dict_elems[i + 1];
 
-                if (is_agg_expr(val_expr_item)) {
+                if (is_aggr_unary_call(val_expr_item)) {
+                    /* Streaming-style per-group AGG branch.  Accepts both
+                     * the resolve_agg_opcode whitelist (sum/avg/min/max/...)
+                     * and the broader RAY_FN_AGGR + RAY_UNARY set
+                     * (med/dev/var/stddev/...) — for the eval-fallback path
+                     * the only thing the body needs is a unary fn pointer
+                     * to call directly with the per-group slice. */
                     ray_t** agg_elems = (ray_t**)ray_data(val_expr_item);
                     ray_t* agg_fn_name = agg_elems[0];
                     ray_t* agg_col_expr = agg_elems[1];
@@ -2067,7 +2265,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                             ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
                             return per_group;
                         }
-                        per_group = maybe_collapse_to_typed(per_group);
+                        /* core produces typed vec or list as appropriate */
                         agg_names[n_agg_out] = kid;
                         agg_results[n_agg_out] = per_group;
                         n_agg_out++;
@@ -3348,6 +3546,26 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
                 ray_t* scatter_err = NULL;
                 for (uint8_t ni = 0; ni < n_nonaggs && !scatter_err; ni++) {
+                    /* Streaming-style fast path for `(aggr_fn col_or_expr)`
+                     * where aggr_fn is RAY_FN_AGGR + RAY_UNARY (sum/avg/...,
+                     * med/dev/var/stddev/...).  Bypasses the full-table eval
+                     * + non-row-aligned fallback by slicing the source per
+                     * group and calling the unary fn directly into a typed
+                     * vec.  Equivalent perf-class to the streaming AGG path
+                     * the eval-fallback uses for the same shapes. */
+                    if (is_aggr_unary_call(nonagg_exprs[ni])) {
+                        ray_t* col = aggr_unary_per_group_buf(
+                            nonagg_exprs[ni], tbl,
+                            idx_buf, offsets, grp_cnt, n_groups);
+                        if (RAY_IS_ERR(col)) { scatter_err = col; break; }
+                        result = ray_table_add_col(result, nonagg_names[ni], col);
+                        ray_release(col);
+                        if (RAY_IS_ERR(result)) {
+                            scatter_err = result; result = NULL; break;
+                        }
+                        continue;
+                    }
+
                     if (ray_env_push_scope() != RAY_OK) {
                         scatter_err = ray_error("oom", NULL); break;
                     }
@@ -3399,7 +3617,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         if (RAY_IS_ERR(per_group)) {
                             scatter_err = per_group; break;
                         }
-                        per_group = maybe_collapse_to_typed(per_group);
+                        /* core produces typed vec or list as appropriate */
                         result = ray_table_add_col(result, nonagg_names[ni], per_group);
                         ray_release(per_group);
                         if (RAY_IS_ERR(result)) {
