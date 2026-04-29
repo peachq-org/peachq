@@ -5358,10 +5358,8 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
     }
     eargs[4] = (n >= 5) ? args[4] : NULL; /* agg dict stays unevaluated */
 
-    /* Detect rayforce calling convention:
-     * (window-join [eq+time keys] intervals left right {agg})
-     * vs teide convention:
-     * (window-join left right [eq-keys] time-sym) */
+    /* Rayforce calling convention:
+     * (window-join [eq+time keys] intervals left right {agg}) */
     if (n >= 5 && ray_is_vec(eargs[0]) && eargs[0]->type == RAY_SYM &&
         eargs[2]->type == RAY_TABLE && eargs[3]->type == RAY_TABLE) {
         /* Rayforce convention: implement at eval level.
