@@ -19,8 +19,7 @@ UNAME_S := $(shell uname -s)
 DEBUG_CFLAGS   = -fPIC $(WARNS) -std=$(STD) -g -O0 -march=native -DDEBUG \
   -fsanitize=address,undefined -fno-omit-frame-pointer
 RELEASE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -O3 -march=native \
-  -funroll-loops -fomit-frame-pointer -fno-math-errno \
-  -falign-functions=64 -falign-loops=32 -falign-jumps=32
+  -funroll-loops -fomit-frame-pointer -fno-math-errno
 
 ifeq ($(UNAME_S),Linux)
   LIBS            = -lm -lpthread
