@@ -80,13 +80,21 @@ static bool file_exists(const char* path) {
 #endif
 }
 
-/* Read fixed-size buffer in a loop — fread can short-read on signals. */
+/* Read fixed-size buffer in a loop — fread can short-read on signals.
+ * Returns SIZE_MAX on a real I/O error (vs. clean EOF) so the caller
+ * can distinguish "log ended cleanly" from "torn read mid-frame".  The
+ * difference matters: clean EOF after N entries means N replayed; an
+ * error mid-frame must abort with RAY_JREPLAY_IO so we don't open the
+ * log for append on top of a partially-replayed state. */
 static size_t read_full(FILE* f, void* buf, size_t want) {
     uint8_t* p = (uint8_t*)buf;
     size_t   got = 0;
     while (got < want) {
         size_t n = fread(p + got, 1, want - got, f);
-        if (n == 0) break;
+        if (n == 0) {
+            if (ferror(f)) return SIZE_MAX;
+            break;
+        }
         got += n;
     }
     return got;
@@ -196,6 +204,7 @@ ray_err_t ray_journal_replay(const char*           path,
         ray_ipc_header_t hdr;
         size_t r = read_full(f, &hdr, sizeof(hdr));
         if (r == 0) break;                          /* clean EOF */
+        if (r == SIZE_MAX)                          { status = RAY_JREPLAY_IO;      break; }
         if (r != sizeof(hdr))                       { status = RAY_JREPLAY_BADTAIL; break; }
         if (hdr.prefix  != RAY_SERDE_PREFIX)        { status = RAY_JREPLAY_BADTAIL; break; }
         if (hdr.version != RAY_SERDE_WIRE_VERSION)  { status = RAY_JREPLAY_BADTAIL; break; }
@@ -203,8 +212,10 @@ ray_err_t ray_journal_replay(const char*           path,
                                                     { status = RAY_JREPLAY_BADTAIL; break; }
 
         uint8_t* buf = (uint8_t*)ray_sys_alloc((size_t)hdr.size);
-        if (!buf)                                   { status = RAY_JREPLAY_IO; break; }
-        if (read_full(f, buf, (size_t)hdr.size) != (size_t)hdr.size) {
+        if (!buf)                                   { status = RAY_JREPLAY_OOM;     break; }
+        size_t pr = read_full(f, buf, (size_t)hdr.size);
+        if (pr == SIZE_MAX) { ray_sys_free(buf); status = RAY_JREPLAY_IO;      break; }
+        if (pr != (size_t)hdr.size) {
             ray_sys_free(buf);
             status = RAY_JREPLAY_BADTAIL;
             break;
@@ -216,7 +227,10 @@ ray_err_t ray_journal_replay(const char*           path,
         if (!decompress_if_needed(&hdr, buf, hdr.size,
                                   &payload, &pay_len, &owned)) {
             ray_sys_free(buf);
-            status = RAY_JREPLAY_BADTAIL;
+            /* Framing was intact (header parsed OK, payload size matched);
+             * "decode failed" is a content/code bug, NOT a tail truncation,
+             * so do not point the operator at `truncate to recover`. */
+            status = RAY_JREPLAY_DECOMP;
             break;
         }
 
@@ -226,12 +240,19 @@ ray_err_t ray_journal_replay(const char*           path,
         ray_sys_free(buf);
 
         if (!msg || RAY_IS_ERR(msg)) {
-            if (msg) ray_release(msg);
-            status = RAY_JREPLAY_BADTAIL;
+            if (msg) ray_error_free(msg);   /* ray_release is a no-op on errors */
+            status = RAY_JREPLAY_DESER;
             break;
         }
 
+        /* Re-impose the sender's restricted state for THIS frame.  Without
+         * this a `-U` client's writes silently elevate to full privilege
+         * across crash-restart, since replay runs in the main thread with
+         * no IPC connection context. */
+        bool prev_restricted = ray_eval_get_restricted();
+        ray_eval_set_restricted(hdr.flags & RAY_IPC_FLAG_RESTRICTED);
         ray_t* result = eval_one(msg);
+        ray_eval_set_restricted(prev_restricted);
         ray_release(msg);
 
         if (result && RAY_IS_ERR(result)) {
@@ -239,8 +260,10 @@ ray_err_t ray_journal_replay(const char*           path,
             fprintf(stderr, "log: WARN  chunk %lld raised: %s (during replay)\n",
                     (long long)chunks, code ? code : "?");
             errs++;
+            ray_error_free(result);
+        } else if (result && result != RAY_NULL_OBJ) {
+            ray_release(result);
         }
-        if (result && result != RAY_NULL_OBJ) ray_release(result);
 
         chunks++;
     }
@@ -252,7 +275,10 @@ ray_err_t ray_journal_replay(const char*           path,
     if (out_eval_errors) *out_eval_errors = errs;
     if (out_status)      *out_status      = status;
 
-    return (status == RAY_JREPLAY_OK) ? RAY_OK : RAY_ERR_DOMAIN;
+    if (status == RAY_JREPLAY_OK)  return RAY_OK;
+    if (status == RAY_JREPLAY_IO ||
+        status == RAY_JREPLAY_OOM) return RAY_ERR_IO;
+    return RAY_ERR_DOMAIN;
 }
 
 ray_err_t ray_journal_validate(const char* path,
@@ -344,8 +370,10 @@ ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
         g_journal.in_replay = prev_in_replay;
 
         if (!snap || RAY_IS_ERR(snap)) {
-            fprintf(stderr, "log: ERROR  failed to load snapshot %s\n", qdb_path);
-            if (snap) ray_release(snap);
+            const char* code = (snap && RAY_IS_ERR(snap)) ? ray_err_code(snap) : "io";
+            fprintf(stderr, "log: ERROR  failed to load snapshot %s (%s)\n",
+                    qdb_path, code ? code : "io");
+            if (snap) ray_error_free(snap);
             return RAY_ERR_IO;
         }
         if (snap->type != RAY_DICT) {
@@ -356,25 +384,49 @@ ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
         ray_t* keys = ray_dict_keys(snap);
         ray_t* vals = ray_dict_vals(snap);
         int64_t n = keys ? keys->len : 0;
+        int64_t bound = 0;
+        int64_t skipped = 0;
+        int64_t bind_errs = 0;
         for (int64_t i = 0; i < n; i++) {
-            int64_t sym_id;
-            if (keys->type == RAY_SYM) {
-                sym_id = ((int64_t*)ray_data(keys))[i];
-            } else {
-                continue;  /* unexpected key type — skip defensively */
+            if (!keys || keys->type != RAY_SYM) {
+                fprintf(stderr, "log: WARN  snapshot key vector has type %d, expected RAY_SYM — dropping %lld bindings\n",
+                        keys ? (int)keys->type : -1, (long long)(n - i));
+                skipped += n - i;
+                break;
             }
+            int64_t sym_id = ((int64_t*)ray_data(keys))[i];
             ray_t* v = ray_list_get(vals, i);
-            if (!v) continue;
-            ray_retain(v);
-            ray_err_t e = ray_env_bind(sym_id, v);
+            if (!v) {
+                fprintf(stderr, "log: WARN  snapshot value missing for sym %lld — skipping\n",
+                        (long long)sym_id);
+                skipped++;
+                continue;
+            }
+            /* MUST go through ray_env_set, NOT ray_env_bind: the former
+             * flips the slot's user flag, the latter installs as builtin
+             * and the value silently drops out of the next snapshot's
+             * ray_env_list_user filter — silent corruption across two
+             * restarts.  ray_env_set handles its own retain via
+             * env_bind_global_impl, so do NOT explicitly retain here
+             * (would leak one ref per binding). */
+            ray_err_t e = ray_env_set(sym_id, v);
             if (e != RAY_OK) {
                 fprintf(stderr, "log: WARN  snapshot bind for sym %lld failed (%d)\n",
                         (long long)sym_id, (int)e);
+                bind_errs++;
+                continue;
             }
+            bound++;
         }
         ray_release(snap);
-        fprintf(stderr, "log: loaded snapshot %s (%lld bindings)\n",
-                qdb_path, (long long)n);
+        fprintf(stderr, "log: loaded snapshot %s (%lld bound, %lld skipped, %lld errors)\n",
+                qdb_path, (long long)bound, (long long)skipped, (long long)bind_errs);
+        if (bind_errs > 0) {
+            /* Partial state is a footgun.  The caller should treat this as
+             * fatal and either restore from backup or skip the snapshot. */
+            fprintf(stderr, "log: ERROR  snapshot load left env in a partially-applied state\n");
+            return RAY_ERR_DOMAIN;
+        }
     }
 
     /* 2. Log — replay <base>.log if present. */
@@ -382,7 +434,13 @@ ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
         int64_t chunks = 0, errs = 0;
         ray_jreplay_status_t status = RAY_JREPLAY_OK;
         ray_journal_replay(g_journal.log_path, &chunks, &errs, &status);
-        if (status == RAY_JREPLAY_BADTAIL) {
+        switch (status) {
+        case RAY_JREPLAY_OK: {
+            fprintf(stderr, "log: replayed %lld entries (%lld eval errors) from %s\n",
+                    (long long)chunks, (long long)errs, g_journal.log_path);
+            break;
+        }
+        case RAY_JREPLAY_BADTAIL: {
             int64_t valid_chunks = 0, valid_bytes = 0;
             ray_journal_validate(g_journal.log_path, &valid_chunks, &valid_bytes);
             fprintf(stderr,
@@ -393,8 +451,25 @@ ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
                     (long long)valid_bytes, (long long)valid_bytes);
             return RAY_ERR_DOMAIN;
         }
-        fprintf(stderr, "log: replayed %lld entries (%lld eval errors) from %s\n",
-                (long long)chunks, (long long)errs, g_journal.log_path);
+        case RAY_JREPLAY_DESER:
+        case RAY_JREPLAY_DECOMP: {
+            fprintf(stderr,
+                    "log: ERROR replay failed at chunk %lld in %s: %s — framing\n"
+                    "log:       was intact so this is content/code mismatch, NOT\n"
+                    "log:       tail truncation.  Do NOT truncate the log; either\n"
+                    "log:       fix the version skew or restore from .qdb backup.\n",
+                    (long long)chunks, g_journal.log_path,
+                    status == RAY_JREPLAY_DECOMP ? "decompression failed" : "deserialization failed");
+            return RAY_ERR_DOMAIN;
+        }
+        case RAY_JREPLAY_OOM:
+        case RAY_JREPLAY_IO: {
+            fprintf(stderr, "log: ERROR replay aborted at chunk %lld in %s (%s)\n",
+                    (long long)chunks, g_journal.log_path,
+                    status == RAY_JREPLAY_OOM ? "out of memory" : "I/O failure");
+            return RAY_ERR_IO;
+        }
+        }
     }
 
     /* 3. Open log for append. */
@@ -403,9 +478,18 @@ ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
 
 ray_err_t ray_journal_close(void) {
     if (!g_journal.fp) return RAY_OK;
-    fflush(g_journal.fp);
-    fclose(g_journal.fp);
+    /* Check both fflush and fclose return — buffered ENOSPC slips
+     * through silently otherwise and the "best-effort durability at
+     * clean shutdown" promise becomes a lie.  Even on failure we null
+     * the fp so the journal isn't left in a half-open zombie state. */
+    int flush_rc = fflush(g_journal.fp);
+    int close_rc = fclose(g_journal.fp);
     g_journal.fp = NULL;
+    if (flush_rc != 0 || close_rc != 0) {
+        fprintf(stderr, "log: ERROR  journal close (flush rc=%d, close rc=%d)\n",
+                flush_rc, close_rc);
+        return RAY_ERR_IO;
+    }
     return RAY_OK;
 }
 
@@ -436,18 +520,42 @@ static void utc_stamp(char* buf, size_t bufsz) {
 ray_err_t ray_journal_roll(void) {
     if (!g_journal.fp) return RAY_ERR_DOMAIN;
 
-    fflush(g_journal.fp);
-    fclose(g_journal.fp);
-    g_journal.fp = NULL;
-
+    /* Build the archive name BEFORE closing the fp — if path build
+     * fails we can return without leaving the journal in a closed
+     * state that ray_journal_write_bytes silently no-ops on. */
     char stamp[64];
     utc_stamp(stamp, sizeof(stamp));
     char archive[RAY_JOURNAL_PATH_MAX];
     int  n = snprintf(archive, sizeof(archive), "%s.%s.log", g_journal.base, stamp);
     if (n <= 0 || (size_t)n >= sizeof(archive)) return RAY_ERR_DOMAIN;
 
-    if (ray_file_rename(g_journal.log_path, archive) != RAY_OK)
+    int flush_rc = fflush(g_journal.fp);
+    int close_rc = fclose(g_journal.fp);
+    g_journal.fp = NULL;
+    if (flush_rc != 0 || close_rc != 0) {
+        /* Don't rename a partial/possibly-corrupt log.  Try to reopen
+         * for append so subsequent writes still land somewhere. */
+        fprintf(stderr, "log: ERROR  roll: pre-rename flush/close failed (flush=%d close=%d)\n",
+                flush_rc, close_rc);
+        (void)open_log_for_append();   /* best-effort restore; fp may stay NULL */
         return RAY_ERR_IO;
+    }
+
+    if (ray_file_rename(g_journal.log_path, archive) != RAY_OK) {
+        /* Rename failed but the log file is still on disk under its
+         * original name.  Reopen for append so we don't silently
+         * disable journaling for the rest of the process. */
+        fprintf(stderr, "log: ERROR  roll: rename %s -> %s failed\n",
+                g_journal.log_path, archive);
+        (void)open_log_for_append();
+        return RAY_ERR_IO;
+    }
+
+    /* Durability: the rename itself is atomic but the directory entry
+     * may not survive a power loss without a parent fsync.  Best-
+     * effort — log if it fails but don't abort, the rename did
+     * succeed. */
+    (void)ray_file_sync_dir(archive);
 
     return open_log_for_append();
 }
@@ -473,24 +581,37 @@ ray_err_t ray_journal_snapshot(void) {
 
     ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, kept);
     if (!keys || RAY_IS_ERR(keys)) {
+        if (keys && RAY_IS_ERR(keys)) ray_error_free(keys);
         ray_sys_free(sym_ids); ray_sys_free(vals_buf);
         return RAY_ERR_OOM;
     }
     ray_t* vals = ray_list_new(kept);
     if (!vals || RAY_IS_ERR(vals)) {
+        if (vals && RAY_IS_ERR(vals)) ray_error_free(vals);
         ray_release(keys);
         ray_sys_free(sym_ids); ray_sys_free(vals_buf);
         return RAY_ERR_OOM;
     }
     for (int32_t i = 0; i < kept; i++) {
+        /* ray_vec_append returns an error sentinel on failure but the
+         * input `keys` was either mutated in place (rc==1, no cow) or
+         * cow'd and released internally — either way the caller still
+         * owns the original pointer which is now stale.  Take the
+         * pre-call pointer so we can release whichever survived. */
+        ray_t* prev_keys = keys;
         keys = ray_vec_append(keys, &sym_ids[i]);
         if (RAY_IS_ERR(keys)) {
+            ray_error_free(keys);
+            ray_release(prev_keys);
             ray_release(vals);
             ray_sys_free(sym_ids); ray_sys_free(vals_buf);
             return RAY_ERR_OOM;
         }
+        ray_t* prev_vals = vals;
         vals = ray_list_append(vals, vals_buf[i]);
         if (RAY_IS_ERR(vals)) {
+            ray_error_free(vals);
+            ray_release(prev_vals);
             ray_release(keys);
             ray_sys_free(sym_ids); ray_sys_free(vals_buf);
             return RAY_ERR_OOM;
@@ -500,7 +621,10 @@ ray_err_t ray_journal_snapshot(void) {
     ray_sys_free(vals_buf);
 
     ray_t* snap = ray_dict_new(keys, vals);
-    if (!snap || RAY_IS_ERR(snap)) return RAY_ERR_OOM;
+    if (!snap || RAY_IS_ERR(snap)) {
+        if (snap && RAY_IS_ERR(snap)) ray_error_free(snap);
+        return RAY_ERR_OOM;
+    }
 
     char qdb_path[RAY_JOURNAL_PATH_MAX];
     char qdb_tmp[RAY_JOURNAL_PATH_MAX];
@@ -513,9 +637,20 @@ ray_err_t ray_journal_snapshot(void) {
     /* ray_obj_save writes prefix-headered bytes (same wire framing). */
     ray_err_t e = ray_obj_save(snap, qdb_tmp);
     ray_release(snap);
-    if (e != RAY_OK) return e;
+    if (e != RAY_OK) {
+        /* Don't leave a half-written .qdb.tmp behind to confuse the
+         * next snapshot or the operator. */
+        remove(qdb_tmp);
+        return e;
+    }
 
-    if (ray_file_rename(qdb_tmp, qdb_path) != RAY_OK) return RAY_ERR_IO;
+    if (ray_file_rename(qdb_tmp, qdb_path) != RAY_OK) {
+        remove(qdb_tmp);
+        return RAY_ERR_IO;
+    }
+    /* Parent-dir fsync: rename(2) is atomic but the directory entry
+     * isn't durable across a power loss without it.  Best-effort. */
+    (void)ray_file_sync_dir(qdb_path);
 
     return ray_journal_roll();
 }
