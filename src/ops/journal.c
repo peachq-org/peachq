@@ -77,9 +77,14 @@ ray_t* ray_log_open_fn(ray_t** args, int64_t n) {
 
 /* (.log.write expr) — append a synthetic entry containing the
  * serialized form of `expr`.  Useful for users who want REPL-driven
- * mutations captured in the log alongside the IPC stream. */
+ * mutations captured in the log alongside the IPC stream.
+ *
+ * If the journal isn't open, ERROR rather than silently no-op — a
+ * silent no-op would lie to the user about durability ("I logged
+ * your change") when in fact nothing was persisted. */
 ray_t* ray_log_write_fn(ray_t* expr) {
-    if (!ray_journal_is_open()) return RAY_NULL_OBJ;
+    if (!ray_journal_is_open())
+        return ray_error("noopen", ".log.write: no journal open (start with -l/-L)");
     if (!expr) return ray_error("type", ".log.write expects an argument");
 
     int64_t pay_size = ray_serde_size(expr);
@@ -112,15 +117,33 @@ ray_t* ray_log_replay_fn(ray_t* path) {
     int64_t chunks = 0, errs = 0;
     ray_jreplay_status_t status = RAY_JREPLAY_OK;
     ray_journal_replay(p, &chunks, &errs, &status);
-    if (status == RAY_JREPLAY_BADTAIL) {
+    switch (status) {
+    case RAY_JREPLAY_OK:
+        return ray_i64(chunks);
+    case RAY_JREPLAY_BADTAIL: {
         int64_t valid_chunks = 0, valid_bytes = 0;
         ray_journal_validate(p, &valid_chunks, &valid_bytes);
-        return ray_error("badtail", "%s after %lld entries (valid bytes = %lld)",
+        return ray_error("badtail",
+                         "%s: framing broken after %lld entries (valid bytes = %lld)",
                          p, (long long)chunks, (long long)valid_bytes);
     }
-    if (status == RAY_JREPLAY_IO)
-        return ray_error("io", "%s: cannot read", p);
-    return ray_i64(chunks);
+    case RAY_JREPLAY_DESER:
+        return ray_error("deser",
+                         "%s: deserialization failed at chunk %lld — framing intact, content/version skew",
+                         p, (long long)chunks);
+    case RAY_JREPLAY_DECOMP:
+        return ray_error("decompress",
+                         "%s: decompression failed at chunk %lld — framing intact, do not truncate",
+                         p, (long long)chunks);
+    case RAY_JREPLAY_OOM:
+        return ray_error("oom",
+                         "%s: out of memory mid-replay after %lld entries",
+                         p, (long long)chunks);
+    case RAY_JREPLAY_IO:
+        return ray_error("io",
+                         "%s: I/O failure after %lld entries", p, (long long)chunks);
+    }
+    return ray_error("internal", "unknown replay status");
 }
 
 /* (.log.validate "path") -> (chunks; valid_bytes) — a 2-list. */
