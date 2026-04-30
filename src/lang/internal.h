@@ -423,6 +423,11 @@ ray_t* ray_sys_listen_fn(ray_t* x);
 ray_t* ray_sys_timeit_fn(ray_t** args, int64_t n);
 ray_t* ray_sys_env_fn(ray_t** args, int64_t n);
 ray_t* ray_getenv_fn(ray_t* x);
+/* Filesystem metadata under .os.* (issue #36).  Lean two: size +
+ * directory-list.  Existence/is-file/is-dir reachable via try on
+ * either of these, or via the shell fallback in .sys.cmd. */
+ray_t* ray_os_size_fn(ray_t* x);
+ray_t* ray_os_list_fn(ray_t* x);
 ray_t* ray_setenv_fn(ray_t* name, ray_t* val);
 ray_t* ray_quote_fn(ray_t** args, int64_t n);
 ray_t* ray_return_fn(ray_t* x);
