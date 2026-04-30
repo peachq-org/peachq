@@ -444,6 +444,11 @@ ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg);
 ray_t* ray_set_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_parted_fn(ray_t** args, int64_t n);
+/* Bulk-load entry points: walk a root directory, find every splayed
+ * (resp. parted) child, bind it as a Rayfall global, return the
+ * resulting {name → table} dict. */
+ray_t* ray_db_splayed_mount_fn(ray_t** args, int64_t n);
+ray_t* ray_db_parted_mount_fn(ray_t** args, int64_t n);
 ray_t* ray_guid_fn(ray_t* n_arg);
 
 /* Group (formerly static in eval.c, now extern for query.c) */
