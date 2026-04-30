@@ -98,6 +98,18 @@ bool ray_env_has_name(const char* name, int64_t len);
  * Returns count of entries written. */
 int32_t ray_env_list(int64_t* sym_ids, ray_t** vals, int32_t max_entries);
 
+/* Iterate ONLY user-defined bindings (slots last written via ray_env_set,
+ * not ray_env_bind).  Powers the journal snapshot — the .qdb file would
+ * otherwise carry every builtin, which is wasteful and breaks on reload
+ * because builtin function objects hold absolute pointers from the prior
+ * process.  A user `(set + 42)` over a builtin flips the slot to user-
+ * defined, so explicit overrides are preserved. */
+int32_t ray_env_list_user(int64_t* sym_ids, ray_t** vals, int32_t max_entries);
+
+/* Total number of bindings currently in the global env (builtins +
+ * user).  Useful for sizing buffers before ray_env_list. */
+int32_t ray_env_global_count(void);
+
 /* Local scope stack for lexical binding (let, do, lambda) */
 ray_err_t ray_env_push_scope(void);
 void ray_env_pop_scope(void);
