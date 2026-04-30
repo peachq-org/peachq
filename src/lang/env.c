@@ -91,6 +91,14 @@ static inline void env_unlock(void) {
 static struct {
     int64_t keys[ENV_CAP];
     ray_t*   vals[ENV_CAP];
+    /* Per-slot flag: 1 iff this binding was last written by user code
+     * (ray_env_set / ray_env_set_local-promoted-to-global), 0 if the
+     * latest writer was builtin registration (ray_env_bind / _flat).
+     * Powers ray_env_list_user, which the journal snapshot uses to
+     * pick which globals to dump to <base>.qdb.  A user `(set + 42)`
+     * over a builtin flips the slot to user=1 so the override is
+     * preserved across snapshot/restore. */
+    uint8_t  user[ENV_CAP];
     int32_t count;
 } g_env;
 
@@ -280,7 +288,7 @@ ray_t* ray_env_resolve(int64_t sym_id) {
  * ray_del_fn's contract via ray_env_set(sym, NULL) and also covers the
  * cascade-up case in env_set_dotted where every dict in a dotted path was
  * emptied by the delete. */
-static ray_err_t env_bind_global(int64_t sym_id, ray_t* val) {
+static ray_err_t env_bind_global_impl(int64_t sym_id, ray_t* val, int is_user) {
     env_lock();
     for (int32_t i = 0; i < g_env.count; i++) {
         if (g_env.keys[i] == sym_id) {
@@ -289,6 +297,7 @@ static ray_err_t env_bind_global(int64_t sym_id, ray_t* val) {
                 for (int32_t j = i; j + 1 < g_env.count; j++) {
                     g_env.keys[j] = g_env.keys[j + 1];
                     g_env.vals[j] = g_env.vals[j + 1];
+                    g_env.user[j] = g_env.user[j + 1];
                 }
                 g_env.count--;
                 env_unlock();
@@ -297,6 +306,12 @@ static ray_err_t env_bind_global(int64_t sym_id, ray_t* val) {
             if (g_env.vals[i]) ray_release(g_env.vals[i]);
             ray_retain(val);
             g_env.vals[i] = val;
+            /* User write upgrades a builtin slot to user-defined, so a
+             * (set + 42) override survives snapshot/restore.  A builtin
+             * re-bind (e.g. theoretical hot reload) leaves the existing
+             * flag alone — once user, always user, until the slot is
+             * deleted. */
+            if (is_user) g_env.user[i] = 1;
             env_unlock();
             return RAY_OK;
         }
@@ -312,9 +327,22 @@ static ray_err_t env_bind_global(int64_t sym_id, ray_t* val) {
     g_env.keys[g_env.count] = sym_id;
     ray_retain(val);
     g_env.vals[g_env.count] = val;
+    g_env.user[g_env.count] = is_user ? 1 : 0;
     g_env.count++;
     env_unlock();
     return RAY_OK;
+}
+
+/* Function-pointer-shaped wrapper used by env_set_dotted's bind_fn
+ * indirection — preserves the existing signature. */
+static ray_err_t env_bind_global(int64_t sym_id, ray_t* val) {
+    return env_bind_global_impl(sym_id, val, 0);
+}
+
+/* User-flagged sibling: identical except the slot is marked user=1.
+ * Used by ray_env_set and the dotted-set path it drives. */
+static ray_err_t env_bind_global_user(int64_t sym_id, ray_t* val) {
+    return env_bind_global_impl(sym_id, val, 1);
 }
 
 static ray_err_t env_bind_local(int64_t sym_id, ray_t* val) {
@@ -500,7 +528,13 @@ ray_err_t ray_env_bind_flat(int64_t sym_id, ray_t* val) {
 
 ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
     if (ray_sym_is_reserved(sym_id)) return RAY_ERR_RESERVED;
-    return ray_env_bind(sym_id, val);
+    /* Same machinery as ray_env_bind, but routes through the user-flagged
+     * binder so the journal snapshot can pick this slot.  Without this
+     * flip, env_bind_global would also be reached via ray_env_bind below
+     * and the slot would carry user=0 — leaving it out of <base>.qdb. */
+    if (ray_sym_is_dotted(sym_id))
+        return env_set_dotted(sym_id, val, lookup_global, env_bind_global_user);
+    return env_bind_global_user(sym_id, val);
 }
 
 ray_err_t ray_env_push_scope(void) {
@@ -529,6 +563,17 @@ int32_t ray_env_list(int64_t* sym_ids, ray_t** vals, int32_t max_entries) {
         vals[i] = g_env.vals[i];
     }
     return n;
+}
+
+int32_t ray_env_list_user(int64_t* sym_ids, ray_t** vals, int32_t max_entries) {
+    int32_t out = 0;
+    for (int32_t i = 0; i < g_env.count && out < max_entries; i++) {
+        if (!g_env.user[i]) continue;
+        sym_ids[out] = g_env.keys[i];
+        vals[out]    = g_env.vals[i];
+        out++;
+    }
+    return out;
 }
 
 /* ---- Prefix lookup ---- */
