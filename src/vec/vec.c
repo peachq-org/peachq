@@ -29,6 +29,17 @@
 #include "vec/str.h"
 #include "ops/idxop.h"
 #include <string.h>
+#include <stdlib.h>
+
+/* qsort comparator for (idx, original_k) pairs in ray_vec_insert_many.
+ * Sorts primarily by idx ascending; ties break by original k to preserve
+ * stable-sort semantics (matches the previous insertion-sort behaviour). */
+static int pair_cmp_idx_then_k(const void* a, const void* b) {
+    const int64_t* pa = (const int64_t*)a;
+    const int64_t* pb = (const int64_t*)b;
+    if (pa[0] != pb[0]) return (pa[0] > pb[0]) - (pa[0] < pb[0]);
+    return (pa[1] > pb[1]) - (pa[1] < pb[1]);
+}
 
 /* Public bitmap accessor — handles slice / ext / inline / HAS_INDEX
  * uniformly.  See vec.h for the contract. */
@@ -701,19 +712,12 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
         pairs[2 * k + 1] = k;
     }
 
-    /* Stable insertion sort by idx */
-    for (int64_t i = 1; i < N; i++) {
-        int64_t ki = pairs[2 * i];
-        int64_t ks = pairs[2 * i + 1];
-        int64_t j = i - 1;
-        while (j >= 0 && pairs[2 * j] > ki) {
-            pairs[2 * (j + 1)]     = pairs[2 * j];
-            pairs[2 * (j + 1) + 1] = pairs[2 * j + 1];
-            j--;
-        }
-        pairs[2 * (j + 1)]     = ki;
-        pairs[2 * (j + 1) + 1] = ks;
-    }
+    /* Stable sort the (idx, original_k) pairs by idx.  qsort isn't
+     * inherently stable, but a compound comparator on (idx, k) — where
+     * k is the original position — gives the same total order as a
+     * stable sort by idx alone.  Replaces an O(N^2) insertion sort
+     * that hangs for bulk-set updates with thousands+ of indices. */
+    qsort(pairs, (size_t)N, 2 * sizeof(int64_t), pair_cmp_idx_then_k);
 
     /* Allocate result */
     int64_t new_len = old_len + N;
