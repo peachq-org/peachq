@@ -36,6 +36,7 @@
 #include "lang/eval.h"
 #include "lang/nfo.h"
 #include "lang/parse.h"
+#include "lang/syscmd.h"
 #include "mem/heap.h"
 #include "ops/ops.h"
 #include "core/profile.h"
@@ -605,133 +606,52 @@ static void eval_and_print(ray_term_t* term, const char* input,
     if (profiling) profile_print(use_color);
 }
 
-static const char* type_label(ray_t* val) {
-    if (!val) return "nil";
-    switch (val->type) {
-    case RAY_UNARY:  return "builtin/1";
-    case RAY_BINARY: return "builtin/2";
-    case RAY_VARY:   return "builtin/n";
-    case RAY_LAMBDA: return "lambda";
-    case RAY_TABLE:       return "table";
-    case RAY_LIST:        return "list";
-    default:
-        if (ray_is_vec(val)) return "vector";
-        if (ray_is_atom(val)) return "atom";
-        return "?";
-    }
-}
-
-static bool cmd_match(const char* cmd, size_t clen,
-                      const char* name, size_t nlen,
-                      const char** arg, size_t* arg_len) {
-    if (clen < nlen) return false;
-    if (memcmp(cmd, name, nlen) != 0) return false;
-    if (clen == nlen) { *arg = NULL; *arg_len = 0; return true; }
-    if (cmd[nlen] != ' ') return false;
-    size_t off = nlen + 1;
-    while (off < clen && cmd[off] == ' ') off++;
-    *arg = cmd + off;
-    *arg_len = clen - off;
-    return true;
-}
+/* `type_label` and `cmd_match` were inlined into the previous bespoke
+ * `:t`/`:env`/`:clear` dispatcher.  The shared lang/syscmd registry
+ * subsumes both; their replacements live in lang/syscmd.c. */
 
 static bool handle_command(ray_repl_t* repl, const char* str, size_t len) {
     if (len == 0 || str[0] != ':') return false;
 
     bool color = (repl->term != NULL);
-    const char* cmd = str + 1;
-    size_t clen = len - 1;
-    const char* arg = NULL;
-    size_t arg_len = 0;
 
-    if (cmd_match(cmd, clen, "?", 1, &arg, &arg_len) ||
-        cmd_match(cmd, clen, "help", 4, &arg, &arg_len)) {
-        if (color) fprintf(stdout, "\033[1;33m");
-        fprintf(stdout, ". Commands list:");
-        if (color) fprintf(stdout, "\033[0m");
-        fprintf(stdout, "\n");
-        if (color) fprintf(stdout, "\033[90m");
-        fprintf(stdout,
-            "  :?         - Displays help.\n"
-            "  :t         - Toggle profiling on/off.\n"
-            "  :t 0|1     - Explicitly disable / enable profiling.\n"
-            "  :env       - Lists defined variables.\n"
-            "  :clear     - Clears screen.\n"
-            "  :q         - Exits the application.");
-        if (color) fprintf(stdout, "\033[0m");
-        fprintf(stdout, "\n");
-        return true;
-    }
+    /* Strip the leading `:`; the rest is "name args" — same shape the
+     * `.sys.cmd` builtin parses.  Route through the shared registry so
+     * REPL commands and Rayfall-level system commands stay in lockstep
+     * (any new entry in lang/syscmd.c shows up here automatically). */
+    ray_syscmd_ctx_t ctx = { repl, color };
+    ray_t* result = ray_syscmd_dispatch(str + 1, len - 1, &ctx, /*allow_shell=*/false);
 
-    if (cmd_match(cmd, clen, "t", 1, &arg, &arg_len) ||
-        cmd_match(cmd, clen, "timeit", 6, &arg, &arg_len)) {
-        /* ":t N"  (N != 0) -> enable profiler
-         * ":t 0"           -> disable profiler
-         * ":t"             -> toggle (convenience) */
-        if (arg && arg_len > 0) {
-            /* Parse a small integer prefix from arg. Reject anything
-             * else so ":t foo" doesn't silently turn profiling off. */
-            size_t i = 0;
-            while (i < arg_len && (arg[i] == ' ' || arg[i] == '\t')) i++;
-            int sign = 1;
-            if (i < arg_len && (arg[i] == '+' || arg[i] == '-')) {
-                if (arg[i] == '-') sign = -1;
-                i++;
-            }
-            if (i >= arg_len || arg[i] < '0' || arg[i] > '9') {
-                if (color) fprintf(stdout, "\033[1;33m");
-                fprintf(stdout, ". :t expects an integer (0 = off, 1 = on).");
-                if (color) fprintf(stdout, "\033[0m");
-                fprintf(stdout, "\n");
-                return true;
-            }
-            int64_t val = 0;
-            while (i < arg_len && arg[i] >= '0' && arg[i] <= '9') {
-                val = val * 10 + (arg[i] - '0');
-                i++;
-            }
-            val *= sign;
-            repl->timeit = (val != 0);
+    if (result && RAY_IS_ERR(result)) {
+        ray_err_t kind = ray_err_from_obj(result);
+        ray_release(result);
+        if (kind == RAY_ERR_DOMAIN) {
+            /* Unknown command — keep the v1-style hint so muscle memory
+             * for `:?` and `:t` still works on typos. */
+            if (color) fprintf(stdout, "\033[1;33m");
+            fprintf(stdout, ". Unknown command: %.*s.", (int)len, str);
+            if (color) fprintf(stdout, "\033[0m");
+            fprintf(stdout, "\n");
+            if (color) fprintf(stdout, "\033[90m");
+            fprintf(stdout, "Type :? for help.");
+            if (color) fprintf(stdout, "\033[0m");
+            fprintf(stdout, "\n");
         } else {
-            repl->timeit = !repl->timeit;
+            /* Real error from the handler — surface its message. */
+            if (color) fprintf(stdout, "\033[1;31m");
+            fprintf(stdout, ". error\n");
+            if (color) fprintf(stdout, "\033[0m");
         }
-        g_ray_profile.active = repl->timeit;
-        if (color) fprintf(stdout, "\033[1;33m");
-        fprintf(stdout, ". Timeit is %s.", repl->timeit ? "on" : "off");
-        if (color) fprintf(stdout, "\033[0m");
-        fprintf(stdout, "\n");
-        return true;
+    } else if (result && result != RAY_NULL_OBJ) {
+        /* Handler returned a value (e.g. listener id) — discard; the
+         * REPL surface for system commands is "do the thing", not
+         * "print the return value".  Real Rayfall expressions go
+         * through the regular eval path. */
+        ray_release(result);
     }
 
-    if (cmd_match(cmd, clen, "env", 3, &arg, &arg_len)) {
-        int64_t sym_ids[512];
-        ray_t* vals[512];
-        int32_t n = ray_env_list(sym_ids, vals, 512);
-        for (int32_t i = 0; i < n; i++) {
-            ray_t* s = ray_sym_str(sym_ids[i]);
-            const char* name = s ? ray_str_ptr(s) : "?";
-            fprintf(stdout, "  %-20s %s\n", name, type_label(vals[i]));
-        }
-        fprintf(stdout, "(%d entries)\n", n);
-        return true;
-    }
-
-    if (cmd_match(cmd, clen, "clear", 5, &arg, &arg_len)) {
-        if (color) {
-            fprintf(stdout, "\033[2J\033[H");
-            fflush(stdout);
-        }
-        return true;
-    }
-
-    if (color) fprintf(stdout, "\033[1;33m");
-    fprintf(stdout, ". Unknown command: %.*s.", (int)len, str);
-    if (color) fprintf(stdout, "\033[0m");
-    fprintf(stdout, "\n");
-    if (color) fprintf(stdout, "\033[90m");
-    fprintf(stdout, "Type :? for help.");
-    if (color) fprintf(stdout, "\033[0m");
-    fprintf(stdout, "\n");
+    /* Track timeit echoing so the prompt reflects current state. */
+    repl->timeit = g_ray_profile.active;
     return true;
 }
 

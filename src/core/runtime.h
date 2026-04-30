@@ -93,6 +93,7 @@ typedef struct ray_runtime_s {
     ray_vm_t       **vms;
     int32_t          n_vms;
     int64_t          mem_budget;   /* 80% of physical RAM, bytes */
+    void            *poll;         /* opaque ray_poll_t* — see ray_runtime_(set|get)_poll */
 } ray_runtime_t;
 
 /* Global runtime + per-thread VM */
@@ -102,6 +103,14 @@ extern _Thread_local ray_vm_t *__VM;
 /* Lifecycle */
 ray_runtime_t* ray_runtime_create(int argc, char** argv);
 void           ray_runtime_destroy(ray_runtime_t* rt);
+
+/* Main event-loop accessors.  The host (main.c) registers the poll it
+ * created; runtime-level builtins read it back through these to avoid
+ * pulling poll.h into runtime.h (and to keep TUs that include
+ * runtime.h decoupled from the eval-VM definition that conflicts with
+ * the unrelated `ray_vm_t` declared above). */
+void  ray_runtime_set_poll(void* poll);
+void* ray_runtime_get_poll(void);
 
 /* Persistent-consumer lifecycle: load the sym table from `sym_path` (if
  * present) before builtins register, so user-interned IDs keep the same
