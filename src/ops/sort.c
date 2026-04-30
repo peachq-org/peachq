@@ -3648,7 +3648,14 @@ ray_t* ray_xdesc_fn(ray_t* tbl, ray_t* keys) {
     return sort_table_by_keys(tbl, keys, 1);
 }
 
-/* (xrank n vec) — cross-rank: assign each element to one of n groups */
+/* (xrank n vec) — cross-rank: assign each element to one of n groups
+ * based on its sorted position.  Uses the same O(n log n) sort
+ * infrastructure as `rank` / `xasc` (radix-or-merge inside
+ * ray_sort_indices).  Replaces a per-element ray_vec_get-based
+ * insertion sort that was both correctness-broken (the boxed elem
+ * came back with type=0 so the comparison degenerated to 0.0 ≤ 0.0
+ * → always true → all elements bucketed into group 0) and
+ * algorithmically O(n^2). */
 ray_t* ray_xrank_fn(ray_t* n_obj, ray_t* vec) {
     if (!is_numeric(n_obj))
         return ray_error("type", "xrank: first arg must be integer");
@@ -3659,37 +3666,17 @@ ray_t* ray_xrank_fn(ray_t* n_obj, ray_t* vec) {
     int64_t len = ray_len(vec);
     if (n_groups <= 0 || len == 0) return ray_vec_new(RAY_I64, 0);
 
-    /* Build index array and sort by value */
-    int64_t* idx = (int64_t*)ray_sys_alloc(len * sizeof(int64_t));
-    if (!idx) return ray_error("oom", NULL);
-    for (int64_t i = 0; i < len; i++) idx[i] = i;
+    uint8_t desc = 0;
+    ray_t* idx = ray_sort_indices(&vec, &desc, NULL, 1, len);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
 
-    /* Simple insertion sort on values (works for all numeric types) */
-    for (int64_t i = 1; i < len; i++) {
-        int64_t key = idx[i];
-        ray_t* key_elem = ray_vec_get(vec, key);
-        int64_t j = i - 1;
-        while (j >= 0) {
-            ray_t* cmp_elem = ray_vec_get(vec, idx[j]);
-            double kv = key_elem ? (is_numeric(key_elem) ? (key_elem->type == -RAY_F64 ? key_elem->f64 : (double)as_i64(key_elem)) : 0.0) : 0.0;
-            double cv = cmp_elem ? (is_numeric(cmp_elem) ? (cmp_elem->type == -RAY_F64 ? cmp_elem->f64 : (double)as_i64(cmp_elem)) : 0.0) : 0.0;
-            if (cmp_elem) ray_release(cmp_elem);
-            if (cv <= kv) break;
-            idx[j + 1] = idx[j];
-            j--;
-        }
-        idx[j + 1] = key;
-        if (key_elem) ray_release(key_elem);
-    }
-
-    /* Assign groups: element at sorted position i gets group (i * n_groups / len) */
     ray_t* result = ray_vec_new(RAY_I64, len);
-    if (RAY_IS_ERR(result)) { ray_sys_free(idx); return result; }
+    if (!result || RAY_IS_ERR(result)) { ray_release(idx); return result ? result : ray_error("oom", NULL); }
     result->len = len;
+    const int64_t* idx_data = (const int64_t*)ray_data(idx);
     int64_t* out = (int64_t*)ray_data(result);
-    for (int64_t i = 0; i < len; i++) {
-        out[idx[i]] = i * n_groups / len;
-    }
-    ray_sys_free(idx);
+    for (int64_t i = 0; i < len; i++)
+        out[idx_data[i]] = i * n_groups / len;
+    ray_release(idx);
     return result;
 }
