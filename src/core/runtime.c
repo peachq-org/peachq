@@ -316,6 +316,20 @@ ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
     return runtime_create_impl(sym_path, out_sym_err);
 }
 
+/* ===== Main event loop accessors =====
+ * The poll is opaque to runtime.h (stored as `void*`) so adding it
+ * doesn't drag poll.h into every TU that includes runtime.h.  Set
+ * once by main.c after ray_poll_create; read by runtime-level
+ * builtins (.sys.listen, .sys.cmd "listen N"). */
+
+void ray_runtime_set_poll(void* poll) {
+    if (__RUNTIME) __RUNTIME->poll = poll;
+}
+
+void* ray_runtime_get_poll(void) {
+    return __RUNTIME ? __RUNTIME->poll : NULL;
+}
+
 /* ===== Memory Budget API ===== */
 
 int64_t ray_mem_budget(void) {
