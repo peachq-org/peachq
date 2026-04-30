@@ -118,6 +118,10 @@ int main(int argc, char** argv) {
         g_ray_profile.active = true;
 
     ray_poll_t* poll = ray_poll_create();
+    /* Publish the main poll into the runtime so runtime-level builtins
+     * (`.sys.cmd "listen N"`, `.sys.listen N`) can attach listeners to
+     * the same event loop the REPL/server is driving. */
+    if (poll) ray_runtime_set_poll(poll);
 
     if (poll && auth_pw) {
         size_t pw_len = strlen(auth_pw);
