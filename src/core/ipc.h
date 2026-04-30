@@ -45,6 +45,14 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define RAY_IPC_MSG_RESP   2
 
 #define RAY_IPC_FLAG_COMPRESSED 0x01
+/* Set by the journal hook in core/ipc.c eval_payload when the inbound
+ * IPC message arrived on a `-U` restricted connection.  Used ONLY for
+ * persisted log frames; the live IPC path ignores it (the connection's
+ * restricted state is the source of truth there).  Replay reads the
+ * bit to re-impose the original sender's restrictions, otherwise a
+ * crash + restart silently elevates restricted commands to full
+ * privilege. */
+#define RAY_IPC_FLAG_RESTRICTED 0x02
 #define RAY_IPC_MAX_CONNS 256
 
 /* ===== Poll-based IPC (new API) ===== */
