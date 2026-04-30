@@ -328,7 +328,7 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
         return ray_error("io", NULL);
 
     /* Load global symfile if present.  Tables without RAY_SYM columns
-     * never produce a global symfile (set-splayed only writes per-table
+     * never produce a global symfile (.db.splayed.set only writes per-table
      * sym files inside the leaf splayed dir), so a missing root-level
      * symfile is normal — not an error. */
     struct stat sym_st;
