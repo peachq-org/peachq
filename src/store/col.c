@@ -24,6 +24,7 @@
 #include "col.h"
 #include "core/platform.h"
 #include "mem/heap.h"
+#include "store/serde.h"
 #include "store/fileio.h"
 #include "table/sym.h"
 #include "ops/idxop.h"
@@ -81,6 +82,7 @@ static ray_err_t validate_sym_bounds(const void* data, int64_t len,
 
 /* Magic numbers for extended column formats */
 #define STR_LIST_MAGIC  0x4C525453U  /* "STRL" */
+#define STR_VEC_MAGIC   0x56525453U  /* "STRV" */
 #define LIST_MAGIC      0x4754534CU  /* "LSTG" */
 #define TABLE_MAGIC     0x4C425454U  /* "TTBL" */
 
@@ -184,6 +186,46 @@ static ray_t* col_load_str_list(const uint8_t* ptr, size_t remaining) {
         if (!list || RAY_IS_ERR(list)) return list;
     }
     return list;
+}
+
+/* --------------------------------------------------------------------------
+ * col_save_str_vec -- serialize a RAY_STR vector with Rayforce serde
+ *
+ * RAY_STR columns carry a string pool through the header union, so they cannot
+ * use the raw 32-byte column layout. Reuse the object wire format here; it
+ * already preserves pooled strings and external null bitmaps.
+ * -------------------------------------------------------------------------- */
+
+static ray_err_t col_save_str_vec(ray_t* vec, FILE* f) {
+    uint32_t magic = STR_VEC_MAGIC;
+    if (fwrite(&magic, 4, 1, f) != 1) return RAY_ERR_IO;
+
+    int64_t len = ray_serde_size(vec);
+    if (len <= 0) return RAY_ERR_IO;
+    ray_t* bytes = ray_vec_new(RAY_U8, len);
+    if (!bytes || RAY_IS_ERR(bytes)) return RAY_ERR_OOM;
+
+    int64_t wrote = ray_ser_raw((uint8_t*)ray_data(bytes), vec);
+    if (wrote != len) {
+        ray_release(bytes);
+        return RAY_ERR_IO;
+    }
+
+    size_t out = fwrite(ray_data(bytes), 1, (size_t)len, f);
+    ray_release(bytes);
+    return out == (size_t)len ? RAY_OK : RAY_ERR_IO;
+}
+
+static ray_t* col_load_str_vec(const uint8_t* ptr, size_t remaining) {
+    if (remaining > (size_t)INT64_MAX) return ray_error("range", NULL);
+    int64_t len = (int64_t)remaining;
+    ray_t* result = ray_de_raw((uint8_t*)ptr, &len);
+    if (!result || RAY_IS_ERR(result)) return result;
+    if (result->type != RAY_STR) {
+        ray_release(result);
+        return ray_error("type", NULL);
+    }
+    return result;
 }
 
 /* --------------------------------------------------------------------------
@@ -461,6 +503,16 @@ ray_err_t ray_col_save(ray_t* vec, const char* path) {
         FILE* f = fopen(tmp_path, "wb");
         if (!f) return RAY_ERR_IO;
         ray_err_t err = col_save_str_list(vec, f);
+        fclose(f);
+        if (err != RAY_OK) { remove(tmp_path); return err; }
+        goto fsync_and_rename;
+    }
+
+    /* String vector */
+    if (vec->type == RAY_STR) {
+        FILE* f = fopen(tmp_path, "wb");
+        if (!f) return RAY_ERR_IO;
+        ray_err_t err = col_save_str_vec(vec, f);
         fclose(f);
         if (err != RAY_OK) { remove(tmp_path); return err; }
         goto fsync_and_rename;
@@ -772,6 +824,11 @@ ray_t* ray_col_load(const char* path) {
 
         if (magic == STR_LIST_MAGIC) {
             ray_t* result = col_load_str_list((const uint8_t*)ptr + 4, mapped_size - 4);
+            ray_vm_unmap_file(ptr, mapped_size);
+            return result;
+        }
+        if (magic == STR_VEC_MAGIC) {
+            ray_t* result = col_load_str_vec((const uint8_t*)ptr + 4, mapped_size - 4);
             ray_vm_unmap_file(ptr, mapped_size);
             return result;
         }
