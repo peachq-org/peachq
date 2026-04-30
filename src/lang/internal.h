@@ -414,6 +414,14 @@ ray_t* ray_print_fn(ray_t** args, int64_t n);
 ray_t* ray_meta_fn(ray_t* x);
 ray_t* ray_gc_fn(ray_t** args, int64_t n);
 ray_t* ray_system_fn(ray_t* x);
+/* `.sys.cmd "name args"` — registry-dispatched system commands with
+ * shell fallback (see lang/syscmd.h). */
+ray_t* ray_syscmd_string_dispatch_fn(ray_t* x);
+/* Direct typed entry points sharing the syscmd registry. timeit and
+ * env are variadic so they accept the zero-arg toggle/list shape. */
+ray_t* ray_sys_listen_fn(ray_t* x);
+ray_t* ray_sys_timeit_fn(ray_t** args, int64_t n);
+ray_t* ray_sys_env_fn(ray_t** args, int64_t n);
 ray_t* ray_getenv_fn(ray_t* x);
 ray_t* ray_setenv_fn(ray_t* name, ray_t* val);
 ray_t* ray_quote_fn(ray_t** args, int64_t n);
