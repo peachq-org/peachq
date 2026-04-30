@@ -21,6 +21,10 @@
  *   SOFTWARE.
  */
 
+#ifndef RAY_OS_WINDOWS
+#  define _GNU_SOURCE   /* fileno() for fsync-after-fwrite below */
+#endif
+
 #include "serde.h"
 #include "store/col.h"
 #include "store/fileio.h"
@@ -28,6 +32,10 @@
 #include "mem/heap.h"
 #include "vec/str.h"
 #include "vec/vec.h"
+
+#ifndef RAY_OS_WINDOWS
+#  include <unistd.h>
+#endif
 #include "table/sym.h"
 #include "lang/env.h"
 #include <string.h>
@@ -911,30 +919,55 @@ ray_t* ray_de(ray_t* bytes) {
 
 ray_err_t ray_obj_save(ray_t* obj, const char* path) {
     ray_t* bytes = ray_ser(obj);
-    if (!bytes || RAY_IS_ERR(bytes)) return RAY_ERR_DOMAIN;
+    if (!bytes || RAY_IS_ERR(bytes)) {
+        if (bytes && RAY_IS_ERR(bytes)) ray_error_free(bytes);
+        return RAY_ERR_DOMAIN;
+    }
 
-    /* Write raw bytes to file */
     FILE* f = fopen(path, "wb");
     if (!f) { ray_release(bytes); return RAY_ERR_IO; }
 
     size_t total = (size_t)bytes->len;
     size_t n = fwrite(ray_data(bytes), 1, total, f);
-    fclose(f);
-    ray_release(bytes);
+    if (n != total) {
+        fclose(f); ray_release(bytes);
+        return RAY_ERR_IO;
+    }
 
-    return (n == total) ? RAY_OK : RAY_ERR_IO;
+    /* Durability: fflush + fsync BEFORE fclose so a buffered write
+     * hitting ENOSPC inside fclose doesn't slip through silently.
+     * Callers (esp. ray_journal_snapshot) write to a .tmp then rename
+     * — without this fsync the .tmp may be empty/partial on disk
+     * when the rename atomically swaps it in. */
+    if (fflush(f) != 0) {
+        fclose(f); ray_release(bytes);
+        return RAY_ERR_IO;
+    }
+#ifndef RAY_OS_WINDOWS
+    if (fsync(fileno(f)) != 0) {
+        fclose(f); ray_release(bytes);
+        return RAY_ERR_IO;
+    }
+#endif
+    /* fclose itself can fail (final flush of any platform-level
+     * buffer).  Check it. */
+    int close_rc = fclose(f);
+    ray_release(bytes);
+    return close_rc == 0 ? RAY_OK : RAY_ERR_IO;
 }
 
 ray_t* ray_obj_load(const char* path) {
-    /* Memory-map file, wrap as U8 vector, deserialize */
     FILE* f = fopen(path, "rb");
     if (!f) return ray_error("io", NULL);
 
-    fseek(f, 0, SEEK_END);
+    /* Check fseek/ftell return values — silent failures here let a
+     * truncated read through as "valid empty file" or worse. */
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return ray_error("io", "fseek end"); }
     long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (sz < 0) { fclose(f); return ray_error("io", "ftell"); }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return ray_error("io", "fseek set"); }
 
-    if (sz <= 0) { fclose(f); return ray_error("io", NULL); }
+    if (sz == 0) { fclose(f); return ray_error("io", "empty file"); }
 
     ray_t* buf = ray_vec_new(RAY_U8, sz);
     if (!buf || RAY_IS_ERR(buf)) { fclose(f); return buf; }
@@ -943,7 +976,7 @@ ray_t* ray_obj_load(const char* path) {
     size_t n = fread(ray_data(buf), 1, (size_t)sz, f);
     fclose(f);
 
-    if ((long)n != sz) { ray_release(buf); return ray_error("io", NULL); }
+    if ((long)n != sz) { ray_release(buf); return ray_error("io", "short read"); }
 
     ray_t* result = ray_de(buf);
     ray_release(buf);
