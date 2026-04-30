@@ -69,7 +69,7 @@ static const char* str_to_cpath(ray_t* s, char* buf, size_t bufsz) {
     return buf;
 }
 
-/* (set-splayed "dir" table) or (set-splayed "dir" table "sym_path") */
+/* (.db.splayed.set "dir" table) or (.db.splayed.set "dir" table "sym_path") */
 ray_t* ray_set_splayed_fn(ray_t** args, int64_t n) {
     if (n < 2 || n > 3) return ray_error("domain", NULL);
 
@@ -93,7 +93,7 @@ ray_t* ray_set_splayed_fn(ray_t** args, int64_t n) {
     return tbl;
 }
 
-/* (get-splayed "dir") or (get-splayed "dir" "sym_path") */
+/* (.db.splayed.get "dir") or (.db.splayed.get "dir" "sym_path") */
 ray_t* ray_get_splayed_fn(ray_t** args, int64_t n) {
     if (n < 1 || n > 2) return ray_error("domain", NULL);
 
@@ -110,7 +110,7 @@ ray_t* ray_get_splayed_fn(ray_t** args, int64_t n) {
     return ray_splay_load(dir, sym_path);
 }
 
-/* (get-parted "db_root" `table_name) -- load partitioned table */
+/* (.db.parted.get "db_root" `table_name) -- load partitioned table */
 ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
     if (n != 2) return ray_error("domain", NULL);
 
@@ -129,6 +129,188 @@ ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
     name[nlen] = '\0';
 
     return ray_read_parted(root, name);
+}
+
+/* ══════════════════════════════════════════
+ * Mount helpers (.db.splayed.mount / .db.parted.mount).
+ *
+ * `mount` walks a root directory, identifies child tables, loads each,
+ * binds it as a global named after the directory entry, and returns
+ * a `name → table` dict so callers can introspect what was loaded
+ * without re-scanning the filesystem.  Mirrors kdb's `\l /tmp/db/`
+ * but split into format-specific entry points so the discovery
+ * heuristics can be tighter (splayed: presence of `.d` schema;
+ * parted: presence of partition directories matching digit/dot).
+ * ══════════════════════════════════════════ */
+
+#include <sys/stat.h>
+#include <dirent.h>
+
+/* True when `dir` is a splayed-table directory: contains a `.d`
+ * schema file at its top.  Side-effect-free aside from a stat. */
+static int dir_is_splayed(const char* dir) {
+    char path[1024];
+    int n = snprintf(path, sizeof(path), "%s/.d", dir);
+    if (n <= 0 || n >= (int)sizeof(path)) return 0;
+    return access(path, F_OK) == 0;
+}
+
+/* True when `name` looks like a partition directory entry:
+ * non-empty, every char is a digit or `.`.  Matches the
+ * collect_part_dirs heuristic in store/part.c. */
+static int name_looks_partition(const char* name) {
+    if (!name || !name[0]) return 0;
+    for (const char* c = name; *c; c++)
+        if (!(*c == '.' || (*c >= '0' && *c <= '9'))) return 0;
+    return 1;
+}
+
+/* True when `dir` is a parted-table root: has at least one
+ * subdirectory whose name matches the partition heuristic. */
+static int dir_is_parted_root(const char* dir) {
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (strcmp(ent->d_name, "sym") == 0) continue;
+        if (!name_looks_partition(ent->d_name)) continue;
+        char child[2048];
+        int n = snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name);
+        if (n <= 0 || n >= (int)sizeof(child)) continue;
+        struct stat st;
+        if (stat(child, &st) == 0 && S_ISDIR(st.st_mode)) { found = 1; break; }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Bind `name` as a global pointing to `tbl` and append the (name, tbl)
+ * pair onto the building dict.  Both retain — the env keeps an owned
+ * ref, the returned dict gets its own refs. */
+static void mount_record(int64_t* names_buf, ray_t** vals_buf, int* count,
+                         int max, const char* name, size_t nlen, ray_t* tbl) {
+    if (*count >= max) return;
+    int64_t sym_id = ray_sym_intern(name, nlen);
+    ray_env_set(sym_id, tbl);
+    names_buf[*count] = sym_id;
+    ray_retain(tbl);
+    vals_buf[*count] = tbl;
+    (*count)++;
+}
+
+static ray_t* finalize_mount_dict(int64_t* names_buf, ray_t** vals_buf, int count) {
+    if (count == 0) return ray_dict_new(ray_list_new(0), ray_list_new(0));
+    ray_t* keys = ray_vec_new(RAY_SYM, count);
+    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : ray_error("oom", NULL);
+    keys->len = count;
+    int64_t* k = (int64_t*)ray_data(keys);
+    for (int i = 0; i < count; i++) k[i] = names_buf[i];
+    ray_t* vals = ray_list_new(count);
+    if (!vals || RAY_IS_ERR(vals)) { ray_release(keys); return vals ? vals : ray_error("oom", NULL); }
+    for (int i = 0; i < count; i++) {
+        vals = ray_list_append(vals, vals_buf[i]);
+        ray_release(vals_buf[i]);
+    }
+    return ray_dict_new(keys, vals);
+}
+
+/* (.db.splayed.mount "root") — for each immediate subdirectory of
+ * root that contains a `.d` schema file, load it as a splayed table
+ * and bind it as a global named after the subdirectory.  Returns a
+ * dict {name → table} of the bindings made. */
+ray_t* ray_db_splayed_mount_fn(ray_t** args, int64_t n) {
+    if (n != 1) return ray_error("domain", NULL);
+    char root[1024];
+    if (!str_to_cpath(args[0], root, sizeof(root))) return ray_error("type", NULL);
+
+    DIR* d = opendir(root);
+    if (!d) return ray_error("io", "cannot open directory");
+
+    int64_t names_buf[256];
+    ray_t*  vals_buf[256];
+    int     count = 0;
+
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        char child[2048];
+        int cn = snprintf(child, sizeof(child), "%s/%s", root, ent->d_name);
+        if (cn <= 0 || cn >= (int)sizeof(child)) continue;
+        struct stat st;
+        if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (!dir_is_splayed(child)) continue;
+        ray_t* tbl = ray_splay_load(child, NULL);
+        if (!tbl || RAY_IS_ERR(tbl)) {
+            if (tbl) ray_release(tbl);
+            continue;
+        }
+        mount_record(names_buf, vals_buf, &count, 256,
+                     ent->d_name, strlen(ent->d_name), tbl);
+        ray_release(tbl);  /* env_set retained; we no longer need our local ref */
+    }
+    closedir(d);
+    return finalize_mount_dict(names_buf, vals_buf, count);
+}
+
+/* (.db.parted.mount "root") — discover the table names under a
+ * partitioned root by inspecting the first partition directory, then
+ * load each name via ray_read_parted (zero-copy parted view) and
+ * bind it as a global.  Returns a dict {name → table}. */
+ray_t* ray_db_parted_mount_fn(ray_t** args, int64_t n) {
+    if (n != 1) return ray_error("domain", NULL);
+    char root[1024];
+    if (!str_to_cpath(args[0], root, sizeof(root))) return ray_error("type", NULL);
+
+    if (!dir_is_parted_root(root))
+        return ray_error("domain", "not a parted-table root (no partition directories found)");
+
+    /* Find the first partition directory to enumerate table names from. */
+    DIR* d = opendir(root);
+    if (!d) return ray_error("io", "cannot open directory");
+    char first_part[2048] = {0};
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (strcmp(ent->d_name, "sym") == 0) continue;
+        if (!name_looks_partition(ent->d_name)) continue;
+        int cn = snprintf(first_part, sizeof(first_part), "%s/%s", root, ent->d_name);
+        if (cn <= 0 || cn >= (int)sizeof(first_part)) { first_part[0] = '\0'; continue; }
+        struct stat st;
+        if (stat(first_part, &st) == 0 && S_ISDIR(st.st_mode)) break;
+        first_part[0] = '\0';
+    }
+    closedir(d);
+    if (!first_part[0])
+        return ray_error("io", "parted root has no readable partition");
+
+    /* Walk the first partition: every subdirectory is a table name. */
+    DIR* dp = opendir(first_part);
+    if (!dp) return ray_error("io", "cannot scan partition");
+
+    int64_t names_buf[256];
+    ray_t*  vals_buf[256];
+    int     count = 0;
+
+    while ((ent = readdir(dp)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        char tbl_in_part[3072];
+        int cn = snprintf(tbl_in_part, sizeof(tbl_in_part), "%s/%s", first_part, ent->d_name);
+        if (cn <= 0 || cn >= (int)sizeof(tbl_in_part)) continue;
+        struct stat st;
+        if (stat(tbl_in_part, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        ray_t* tbl = ray_read_parted(root, ent->d_name);
+        if (!tbl || RAY_IS_ERR(tbl)) {
+            if (tbl) ray_release(tbl);
+            continue;
+        }
+        mount_record(names_buf, vals_buf, &count, 256,
+                     ent->d_name, strlen(ent->d_name), tbl);
+        ray_release(tbl);
+    }
+    closedir(dp);
+    return finalize_mount_dict(names_buf, vals_buf, count);
 }
 
 /* xorshift64* — ~1ns per 64-bit word, vs rand()'s ~10ns for 1 byte.
