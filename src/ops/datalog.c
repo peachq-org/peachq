@@ -31,7 +31,9 @@
 #include "lang/env.h"
 #include "table/sym.h"
 #include "ops/ops.h"
+#include "ops/hash.h"          /* ray_hash_i64, ray_hash_combine */
 #include "ops/internal.h"      /* col_propagate_str_pool */
+#include "mem/sys.h"           /* ray_sys_alloc / ray_sys_free */
 #include <string.h>
 #include <stdio.h>
 
@@ -2398,19 +2400,82 @@ static ray_t* normalize_columns(ray_t* tbl, dl_rel_t* rel) {
  * Provenance helpers
  * ======================================================================== */
 
-/* Check if a row in `tbl` at position `row` matches any row in `ref`.
- * Both tables must have the same arity. Returns true if found. */
-static bool dl_row_in_table(ray_t* tbl, int64_t row, ray_t* ref) {
-    int64_t ncols = ray_table_ncols(tbl);
-    int64_t ref_rows = ray_table_nrows(ref);
-    for (int64_t r = 0; r < ref_rows; r++) {
-        bool match = true;
-        for (int64_t c = 0; c < ncols; c++) {
-            int64_t* td = (int64_t*)ray_data(ray_table_get_col_idx(tbl, c));
-            int64_t* rd = (int64_t*)ray_data(ray_table_get_col_idx(ref, c));
-            if (td[row] != rd[r]) { match = false; break; }
-        }
-        if (match) return true;
+/* Hash all columns of ref at row r into a single key. */
+static uint64_t dl_row_hash(int64_t** col_data, int64_t ncols, int64_t r) {
+    uint64_t h = ray_hash_i64(col_data[0][r]);
+    for (int64_t c = 1; c < ncols; c++)
+        h = ray_hash_combine(h, ray_hash_i64(col_data[c][r]));
+    return h;
+}
+
+/* Check if rows match across `ncols` columns. */
+static bool dl_row_eq(int64_t** a_cols, int64_t ar,
+                     int64_t** b_cols, int64_t br, int64_t ncols) {
+    for (int64_t c = 0; c < ncols; c++)
+        if (a_cols[c][ar] != b_cols[c][br]) return false;
+    return true;
+}
+
+/* Open-addressing hash set keyed by ref-row tuple.  Slot stores ref row
+ * index; lookup hashes the probe-row tuple and walks the probe chain.
+ * Replaces the per-call O(ref_rows) linear scan in dl_row_in_table —
+ * the previous shape was O(tbl_rows × ref_rows × ncols) which is
+ * quadratic for typical datalog provenance workloads. */
+typedef struct {
+    int64_t* slots;        /* row index, -1 = empty */
+    ray_t*   block;
+    int64_t  cap;
+    int64_t  mask;
+    int64_t** ref_cols;    /* cached column data ptrs for ref */
+    int64_t  ncols;
+} dl_rowset_t;
+
+static bool dl_rowset_init(dl_rowset_t* rs, ray_t* ref) {
+    int64_t ncols = ray_table_ncols(ref);
+    int64_t nrows = ray_table_nrows(ref);
+    rs->ncols = ncols;
+    rs->ref_cols = (int64_t**)ray_sys_alloc(sizeof(int64_t*) * (size_t)ncols);
+    if (!rs->ref_cols) return false;
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* col = ray_table_get_col_idx(ref, c);
+        rs->ref_cols[c] = col ? (int64_t*)ray_data(col) : NULL;
+    }
+    int64_t cap = 16;
+    while (cap < (nrows > 0 ? nrows * 2 : 16)) cap *= 2;
+    rs->block = ray_alloc((size_t)cap * sizeof(int64_t));
+    if (!rs->block || RAY_IS_ERR(rs->block)) {
+        ray_sys_free(rs->ref_cols);
+        rs->ref_cols = NULL;
+        return false;
+    }
+    rs->slots = (int64_t*)ray_data(rs->block);
+    rs->cap = cap;
+    rs->mask = cap - 1;
+    for (int64_t i = 0; i < cap; i++) rs->slots[i] = -1;
+
+    for (int64_t r = 0; r < nrows; r++) {
+        uint64_t h = dl_row_hash(rs->ref_cols, ncols, r);
+        int64_t s = (int64_t)(h & (uint64_t)rs->mask);
+        while (rs->slots[s] != -1) s = (s + 1) & rs->mask;
+        rs->slots[s] = r;
+    }
+    return true;
+}
+
+static void dl_rowset_destroy(dl_rowset_t* rs) {
+    if (rs->block) { ray_release(rs->block); rs->block = NULL; }
+    if (rs->ref_cols) { ray_sys_free(rs->ref_cols); rs->ref_cols = NULL; }
+}
+
+/* True if the row at `tbl_cols[..][row]` is present in the set. */
+static bool dl_rowset_contains(dl_rowset_t* rs, int64_t** tbl_cols, int64_t row) {
+    uint64_t h = dl_row_hash(tbl_cols, rs->ncols, row);
+    int64_t s = (int64_t)(h & (uint64_t)rs->mask);
+    while (rs->slots[s] != -1) {
+        int64_t r = rs->slots[s];
+        if (dl_row_eq(tbl_cols, row, rs->ref_cols, r, rs->ncols))
+            return true;
+        s = (s + 1) & rs->mask;
     }
     return false;
 }
@@ -2568,11 +2633,26 @@ static void dl_build_provenance(dl_program_t* prog) {
             ray_release(raw);
             if (!derived || RAY_IS_ERR(derived)) continue;
 
-            /* Mark rows in rel->table that appear in derived */
-            for (int64_t row = 0; row < nrows; row++) {
-                if (pd[row] >= 0) continue;  /* already attributed */
-                if (dl_row_in_table(rel->table, row, derived))
-                    pd[row] = r;
+            /* Mark rows in rel->table that appear in derived.  Build a
+             * hashset over `derived` once and probe per row of rel —
+             * was O(nrows × derived_rows × ncols), now O(nrows + derived_rows). */
+            dl_rowset_t rs;
+            if (dl_rowset_init(&rs, derived)) {
+                int64_t ncols_t = ray_table_ncols(rel->table);
+                int64_t** tbl_cols = (int64_t**)ray_sys_alloc(sizeof(int64_t*) * (size_t)ncols_t);
+                if (tbl_cols) {
+                    for (int64_t c = 0; c < ncols_t; c++) {
+                        ray_t* col = ray_table_get_col_idx(rel->table, c);
+                        tbl_cols[c] = col ? (int64_t*)ray_data(col) : NULL;
+                    }
+                    for (int64_t row = 0; row < nrows; row++) {
+                        if (pd[row] >= 0) continue;
+                        if (dl_rowset_contains(&rs, tbl_cols, row))
+                            pd[row] = r;
+                    }
+                    ray_sys_free(tbl_cols);
+                }
+                dl_rowset_destroy(&rs);
             }
             ray_release(derived);
         }
