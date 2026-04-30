@@ -57,8 +57,11 @@ typedef enum {
 
 typedef enum {
     RAY_JREPLAY_OK      = 0,
-    RAY_JREPLAY_BADTAIL = 1, /* truncated/corrupt frame — caller decides fatality */
-    RAY_JREPLAY_IO      = 2, /* file open / read failure                          */
+    RAY_JREPLAY_BADTAIL = 1, /* truncated frame / bad magic / version mismatch — framing broken */
+    RAY_JREPLAY_IO      = 2, /* file open / read I/O failure                                    */
+    RAY_JREPLAY_OOM     = 3, /* allocation failed mid-replay — transient, retryable             */
+    RAY_JREPLAY_DESER   = 4, /* header valid but ray_de_raw rejected the payload                */
+    RAY_JREPLAY_DECOMP  = 5, /* compressed payload, but decompression failed                    */
 } ray_jreplay_status_t;
 
 /* Open the journal: load <base>.qdb, replay <base>.log, open log for append.
