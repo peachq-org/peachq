@@ -1938,16 +1938,41 @@ vm_error_cleanup: {
  * to any `.`-prefixed name are refused by ray_env_set, so user code
  * can't drift them apart.  Only 2-level namespaces are in use; the
  * assert below guards against silent breakage if that changes. */
+/* Get-or-create a child dict by key on `parent`.  ray_dict_get
+ * returns an owned ref (or NULL if missing), so we either reuse it
+ * (after type-checking) or build a fresh subdict and upsert it.
+ * Returns the (possibly-COWd) parent; the child is handed back via
+ * `*out_child`, owned by the caller. */
+static ray_t* dict_get_or_create_subdict(ray_t* parent, ray_t* key,
+                                         ray_t** out_child) {
+    ray_t* existing = ray_dict_get(parent, key);
+    if (existing && !RAY_IS_ERR(existing) && existing->type == RAY_DICT) {
+        *out_child = existing;
+        return parent;
+    }
+    if (existing) ray_release(existing);
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 4);
+    ray_t* vals = ray_list_new(4);
+    assert(keys && !RAY_IS_ERR(keys) && vals && !RAY_IS_ERR(vals));
+    ray_t* child = ray_dict_new(keys, vals);
+    assert(child && !RAY_IS_ERR(child));
+    ray_retain(child);  /* caller retains; dict_upsert below also retains */
+    parent = ray_dict_upsert(parent, key, child);
+    *out_child = child;
+    return parent;
+}
+
 static void reg_bind(const char* name, ray_t* obj) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     if (name[0] == '.' && ray_sym_is_dotted(sym)) {
         const int64_t* segs;
         int nsegs = ray_sym_segs(sym, &segs);
-        assert(nsegs == 2 && "reg_bind only supports 2-level reserved namespaces");
-        int64_t root_sym = segs[0];     /* e.g. sym-id for `.sys` */
-        int64_t leaf_sym = segs[1];     /* e.g. sym-id for `gc`   */
+        assert(nsegs >= 2 && "reg_bind: dotted reserved name must have ≥ 2 segments");
 
-        /* 1. Maintain the .<ns> root dict. */
+        int64_t root_sym = segs[0];      /* e.g. `.sys` or `.db` */
+        int64_t leaf_sym = segs[nsegs-1];/* leaf action sym */
+
+        /* 1. Get-or-create the root dict bound at `.<ns>`. */
         ray_t* root = ray_env_get(root_sym);
         if (root) {
             ray_retain(root);
@@ -1958,18 +1983,51 @@ static void reg_bind(const char* name, ray_t* obj) {
             root = ray_dict_new(keys, vals);
             assert(root && !RAY_IS_ERR(root));
         }
-        ray_t* leaf_key = ray_sym(leaf_sym);
-        root = ray_dict_upsert(root, leaf_key, obj);
-        ray_release(leaf_key);
-        assert(root && !RAY_IS_ERR(root));
-        assert(ray_env_bind(root_sym, root) == RAY_OK);
-        ray_release(root);
 
-        /* 2. Flat binding under the full `.ns.action` sym so
-         *    ray_env_lookup_prefix (REPL completion + syntax
+        /* 2. For each intermediate segment, descend into (or create)
+         *    a sub-dict.  Two-level names skip this loop entirely
+         *    and fall through to the leaf upsert below.  After the
+         *    walk, `cur` points at the dict that should hold the
+         *    leaf; `chain[]` records the parents we still need to
+         *    write back so a COW upsert at the deepest level
+         *    propagates upward through every parent. */
+        enum { MAX_DEPTH = 4 };
+        ray_t* chain[MAX_DEPTH] = { root };
+        int64_t chain_keys[MAX_DEPTH] = { 0 };
+        int chain_len = 1;
+        ray_t* cur = root;
+        for (int i = 1; i < nsegs - 1; i++) {
+            assert(chain_len < MAX_DEPTH);
+            ray_t* mid_key = ray_sym(segs[i]);
+            ray_t* child = NULL;
+            cur = dict_get_or_create_subdict(cur, mid_key, &child);
+            ray_release(mid_key);
+            chain[chain_len - 1] = cur;
+            chain_keys[chain_len - 1] = segs[i];
+            chain[chain_len++] = child;
+            cur = child;
+        }
+
+        /* 3. Upsert the leaf into the deepest dict, then walk back up
+         *    re-upserting any COWd parents into their parents. */
+        ray_t* leaf_key = ray_sym(leaf_sym);
+        ray_t* deepest = ray_dict_upsert(cur, leaf_key, obj);
+        ray_release(leaf_key);
+        chain[chain_len - 1] = deepest;
+        for (int i = chain_len - 1; i > 0; i--) {
+            ray_t* parent_key = ray_sym(chain_keys[i - 1]);
+            chain[i - 1] = ray_dict_upsert(chain[i - 1], parent_key, chain[i]);
+            ray_release(parent_key);
+            ray_release(chain[i]);  /* dict_upsert retained */
+        }
+
+        /* 4. Bind the (possibly-COWd) root and the flat fully-qualified
+         *    name so ray_env_lookup_prefix (REPL completion / syntax
          *    highlighting) enumerates every reserved builtin by name.
-         *    ray_env_bind_flat skips the dotted-walk path — we don't
-         *    want this call to upsert into the `.sys` dict again. */
+         *    ray_env_bind_flat skips the dotted-walk so this doesn't
+         *    re-upsert into the same dict we just built. */
+        assert(ray_env_bind(root_sym, chain[0]) == RAY_OK);
+        ray_release(chain[0]);
         assert(ray_env_bind_flat(sym, obj) == RAY_OK);
         return;
     }
@@ -2154,9 +2212,15 @@ static void ray_register_builtins(void) {
     register_unary("de",         RAY_FN_NONE, ray_de_fn);
 
     /* Splayed / partitioned table I/O */
-    register_vary("set-splayed", RAY_FN_RESTRICTED, ray_set_splayed_fn);
-    register_vary("get-splayed", RAY_FN_NONE, ray_get_splayed_fn);
-    register_vary("get-parted",  RAY_FN_NONE, ray_get_parted_fn);
+    /* Database storage — splayed and parted table I/O.  Kept under a
+     * dedicated `.db.*` namespace so format-specific siblings stay
+     * grouped (set/get/mount per format) and there's room to grow
+     * without polluting the top-level builtin namespace. */
+    register_vary(".db.splayed.set",   RAY_FN_RESTRICTED, ray_set_splayed_fn);
+    register_vary(".db.splayed.get",   RAY_FN_NONE,       ray_get_splayed_fn);
+    register_vary(".db.splayed.mount", RAY_FN_NONE,       ray_db_splayed_mount_fn);
+    register_vary(".db.parted.get",    RAY_FN_NONE,       ray_get_parted_fn);
+    register_vary(".db.parted.mount",  RAY_FN_NONE,       ray_db_parted_mount_fn);
 
     /* GUID generation */
     register_unary("guid",       RAY_FN_NONE, ray_guid_fn);
