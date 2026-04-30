@@ -30,6 +30,9 @@
 #include "store/part.h"
 #include "core/ipc.h"
 #include <time.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
 #if !defined(RAY_OS_WINDOWS)
 #include <unistd.h>
 #endif
@@ -311,6 +314,102 @@ ray_t* ray_db_parted_mount_fn(ray_t** args, int64_t n) {
     }
     closedir(dp);
     return finalize_mount_dict(names_buf, vals_buf, count);
+}
+
+/* ══════════════════════════════════════════
+ * Filesystem metadata: .os.size / .os.list
+ *
+ * Issue #36 asked for size + existence + listing primitives.  We
+ * keep just two — `.os.size` and `.os.list` — because every other
+ * predicate (exists, is-file, is-dir) is reachable either via
+ * try-on-error against these or via the existing shell fallback
+ * (`(.sys.cmd "test -e p")` etc.).  Both errors are flagged "io"
+ * so a user wrapping the call in `try` can distinguish missing /
+ * wrong-kind from a domain mistake without introspecting the
+ * message.
+ * ══════════════════════════════════════════ */
+
+/* (.os.size "path") → i64 file size in bytes.  Errors with "io"
+ * when the path doesn't exist or names a directory — `try` it if
+ * the caller wants those treated as "not a file" rather than a
+ * hard error. */
+ray_t* ray_os_size_fn(ray_t* x) {
+    if (!ray_is_atom(x) || x->type != -RAY_STR)
+        return ray_error("type", ".os.size expects a string path");
+    char path[1024];
+    if (!str_to_cpath(x, path, sizeof(path))) return ray_error("type", NULL);
+
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return ray_error("io", "%s: %s", path, strerror(errno));
+    if (S_ISDIR(st.st_mode))
+        return ray_error("io", "%s: is a directory", path);
+    return ray_i64((int64_t)st.st_size);
+}
+
+/* qsort comparator for sorting directory entries by name.  Filesystem
+ * order from readdir is implementation-defined; sorting gives stable
+ * output for tests and predictable iteration in user code. */
+static int dir_entry_cmp(const void* a, const void* b) {
+    const char* sa = *(const char* const*)a;
+    const char* sb = *(const char* const*)b;
+    return strcmp(sa, sb);
+}
+
+/* (.os.list "path") → sym vec of entries, sorted, with `.` and `..`
+ * filtered out.  Errors with "io" if the path isn't a directory or
+ * doesn't exist — caller can use that as a file/dir discriminator
+ * via `try` when they don't want to shell out for the predicate. */
+ray_t* ray_os_list_fn(ray_t* x) {
+    if (!ray_is_atom(x) || x->type != -RAY_STR)
+        return ray_error("type", ".os.list expects a string path");
+    char path[1024];
+    if (!str_to_cpath(x, path, sizeof(path))) return ray_error("type", NULL);
+
+    DIR* d = opendir(path);
+    if (!d) return ray_error("io", "%s: %s", path, strerror(errno));
+
+    /* Collect names into a heap-allocated string array; capacity grows
+     * geometrically so big directories don't quadratic-realloc. */
+    char** names = NULL;
+    int64_t count = 0;
+    int64_t cap = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.' &&
+            (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
+            continue;
+        if (count >= cap) {
+            int64_t new_cap = cap == 0 ? 16 : cap * 2;
+            char** tmp = (char**)realloc(names, (size_t)new_cap * sizeof(char*));
+            if (!tmp) { closedir(d); for (int64_t i = 0; i < count; i++) free(names[i]); free(names); return ray_error("oom", NULL); }
+            names = tmp;
+            cap = new_cap;
+        }
+        size_t nlen = strlen(ent->d_name) + 1;
+        names[count] = (char*)malloc(nlen);
+        if (!names[count]) { closedir(d); for (int64_t i = 0; i < count; i++) free(names[i]); free(names); return ray_error("oom", NULL); }
+        memcpy(names[count], ent->d_name, nlen);
+        count++;
+    }
+    closedir(d);
+
+    qsort(names, (size_t)count, sizeof(char*), dir_entry_cmp);
+
+    ray_t* result = ray_vec_new(RAY_SYM, count);
+    if (!result || RAY_IS_ERR(result)) {
+        for (int64_t i = 0; i < count; i++) free(names[i]);
+        free(names);
+        return result ? result : ray_error("oom", NULL);
+    }
+    result->len = count;
+    int64_t* out = (int64_t*)ray_data(result);
+    for (int64_t i = 0; i < count; i++) {
+        out[i] = ray_sym_intern(names[i], strlen(names[i]));
+        free(names[i]);
+    }
+    free(names);
+    return result;
 }
 
 /* xorshift64* — ~1ns per 64-bit word, vs rand()'s ~10ns for 1 byte.
