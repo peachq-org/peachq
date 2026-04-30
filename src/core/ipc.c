@@ -27,6 +27,7 @@
 
 #include "core/ipc.h"
 #include "mem/sys.h"
+#include "store/journal.h"
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -236,6 +237,16 @@ static void send_response(ray_sock_t fd, ray_t* result)
 static ray_t* eval_payload(uint8_t* payload, size_t payload_len,
                            ray_ipc_header_t* hdr)
 {
+    /* Journal hook: log every inbound SYNC message (state-mutation
+     * channel in q's model) before evaluation, so a crash mid-handler
+     * still leaves the message on disk for replay.  We write the raw
+     * inbound bytes — header + payload — verbatim, no decompression
+     * round-trip.  Async messages and responses are not logged, so
+     * background pings and result frames don't pollute the log.
+     * No-op when no journal is open or during in-progress replay. */
+    if (ray_journal_is_open() && hdr->msgtype == RAY_IPC_MSG_SYNC)
+        ray_journal_write_bytes(hdr, payload, (int64_t)payload_len);
+
     uint8_t* decompressed = NULL;
     if (hdr->flags & RAY_IPC_FLAG_COMPRESSED) {
         if (payload_len < 4) return NULL;
