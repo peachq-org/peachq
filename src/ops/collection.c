@@ -27,7 +27,305 @@
 #include "core/types.h"
 #include "core/pool.h"
 #include "mem/sys.h"
+#include "ops/hash.h"
 #include <stdlib.h>
+#include <string.h>
+
+/* ══════════════════════════════════════════
+ * Open-addressing hash set used by distinct/union/except/sect/in
+ * to replace O(n×m) linear scans with O(n+m) hash lookups.
+ *
+ * Slots store the row index of the first occurrence in a single vec,
+ * or HS_EMPTY.  Hashing and equality are dispatched through a small
+ * vtable keyed by collection type so the same set can probe a typed
+ * vec or a boxed RAY_LIST without per-call boxing on the typed path.
+ * Nulls aggregate into a separate null-bucket flag, mirroring atom_eq
+ * (all nulls compare equal regardless of typed-null vs RAY_NULL_OBJ).
+ *
+ * Load factor capped at 0.5; growth doubles capacity.
+ * ══════════════════════════════════════════ */
+
+#define HS_EMPTY ((int64_t)-1)
+
+typedef struct hashset_t {
+    int64_t* slots;        /* cap entries; -1 = empty, else row index */
+    ray_t*   block;        /* backing alloc for slots */
+    int64_t  cap;          /* power of 2 */
+    int64_t  mask;         /* cap - 1 */
+    int64_t  count;        /* live entries (excl. null bucket) */
+    int      null_seen;    /* 1 if any null has been recorded */
+    int64_t  null_idx;     /* row index of first null encountered */
+    /* Cached typed-vec data pointers to avoid re-derefs in hot loops. */
+    ray_t*   src;          /* source vec or list */
+    int8_t   src_type;     /* ray_t.type */
+    bool     src_has_nulls;
+    void*    src_data;     /* pointer to typed data (or RAY_LIST elements) */
+} hashset_t;
+
+/* Hash a single row at index i in src.  Mirrors atom_eq's coercion
+ * rules: numeric types normalize through f64 so an I64 atom and an
+ * F64 atom holding the same value collide (boxed-list path only — a
+ * typed vec is homogeneous, so the dispatch picks one branch). */
+static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
+    switch (t) {
+        case RAY_I64:       return ray_hash_i64(((const int64_t*)data)[i]);
+        case RAY_I32:       return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
+        case RAY_I16:       return ray_hash_i64((int64_t)((const int16_t*)data)[i]);
+        case RAY_U8:        return ray_hash_i64((int64_t)((const uint8_t*)data)[i]);
+        case RAY_BOOL:      return ray_hash_i64((int64_t)((const bool*)data)[i]);
+        case RAY_F64:       return ray_hash_f64(((const double*)data)[i]);
+        case RAY_DATE:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
+        case RAY_TIME:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
+        case RAY_TIMESTAMP: return ray_hash_i64(((const int64_t*)data)[i]);
+        case RAY_SYM: {
+            uint64_t s = ray_read_sym(data, i, src->type, src->attrs);
+            return ray_hash_i64((int64_t)s);
+        }
+        case RAY_GUID:
+            return ray_hash_bytes((const uint8_t*)data + i * 16, 16);
+        case RAY_STR: {
+            size_t l = 0;
+            const char* p = ray_str_vec_get(src, i, &l);
+            return p ? ray_hash_bytes(p, l) : 0;
+        }
+        case RAY_LIST: {
+            ray_t** elems = (ray_t**)data;
+            ray_t* e = elems[i];
+            if (!e || RAY_ATOM_IS_NULL(e)) return 0;
+            /* Numeric coercion: hash as f64 so distinct numeric types
+             * holding the same value collide (atom_eq does the same). */
+            if (is_numeric(e)) return ray_hash_f64(as_f64(e));
+            switch (e->type) {
+                case -RAY_SYM:       return ray_hash_i64(e->i64);
+                case -RAY_DATE:
+                case -RAY_TIME:      return ray_hash_i64((int64_t)e->i32);
+                case -RAY_TIMESTAMP: return ray_hash_i64(e->i64);
+                case -RAY_GUID: {
+                    const uint8_t* g = e->obj
+                        ? (const uint8_t*)ray_data(e->obj)
+                        : (const uint8_t*)ray_data((ray_t*)e);
+                    return ray_hash_bytes(g, 16);
+                }
+                case -RAY_STR:
+                    return ray_hash_bytes(ray_str_ptr(e), ray_str_len(e));
+                default:
+                    /* Unknown / unsupported atom kind: hash by type tag. */
+                    return ray_hash_i64((int64_t)e->type);
+            }
+        }
+        default:
+            return ray_hash_i64(i);
+    }
+}
+
+/* Compare two rows for equality, dispatched the same way as the hash. */
+static int hs_eq_rows(ray_t* a_src, int64_t ai, int8_t at, void* a_data,
+                      ray_t* b_src, int64_t bi, int8_t bt, void* b_data) {
+    if (at == bt && at != RAY_LIST) {
+        switch (at) {
+            case RAY_I64:       return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
+            case RAY_I32:       return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
+            case RAY_I16:       return ((const int16_t*)a_data)[ai] == ((const int16_t*)b_data)[bi];
+            case RAY_U8:        return ((const uint8_t*)a_data)[ai] == ((const uint8_t*)b_data)[bi];
+            case RAY_BOOL:      return ((const bool*)a_data)[ai] == ((const bool*)b_data)[bi];
+            case RAY_F64:       return ((const double*)a_data)[ai] == ((const double*)b_data)[bi];
+            case RAY_DATE:
+            case RAY_TIME:      return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
+            case RAY_TIMESTAMP: return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
+            case RAY_SYM: {
+                uint64_t sa = ray_read_sym(a_data, ai, a_src->type, a_src->attrs);
+                uint64_t sb = ray_read_sym(b_data, bi, b_src->type, b_src->attrs);
+                return sa == sb;
+            }
+            case RAY_GUID:
+                return memcmp((const uint8_t*)a_data + ai * 16,
+                              (const uint8_t*)b_data + bi * 16, 16) == 0;
+            case RAY_STR: {
+                size_t al = 0, bl = 0;
+                const char* ap = ray_str_vec_get(a_src, ai, &al);
+                const char* bp = ray_str_vec_get(b_src, bi, &bl);
+                if (!ap) ap = "";
+                if (!bp) bp = "";
+                return al == bl && memcmp(ap, bp, al) == 0;
+            }
+        }
+    }
+    /* Fall back to atom_eq via boxed values.  Used for cross-type
+     * comparisons (e.g. except over typed I64 vs F64 vec) and the
+     * RAY_LIST path.  collection_elem allocates a temporary atom for
+     * typed vecs; the cost is paid only on collisions / mixed types. */
+    int alloc_a = 0, alloc_b = 0;
+    ray_t* a = collection_elem(a_src, ai, &alloc_a);
+    ray_t* b = collection_elem(b_src, bi, &alloc_b);
+    int eq = (a && b) ? atom_eq(a, b) : 0;
+    if (alloc_a && a) ray_release(a);
+    if (alloc_b && b) ray_release(b);
+    return eq;
+}
+
+/* True if the row at index i in src is null. */
+static inline int hs_row_is_null(ray_t* src, int64_t i, void* data) {
+    if (src->type == RAY_LIST) {
+        ray_t* e = ((ray_t**)data)[i];
+        return !e || RAY_ATOM_IS_NULL(e);
+    }
+    return (src->attrs & RAY_ATTR_HAS_NULLS) && ray_vec_is_null(src, i);
+}
+
+static bool hashset_init(hashset_t* hs, ray_t* src, int64_t hint) {
+    int64_t cap = 16;
+    /* Cap target: 2× hint to keep load factor under 0.5. */
+    while (cap < (hint > 0 ? hint * 2 : 16)) cap *= 2;
+    hs->block = ray_alloc((size_t)cap * sizeof(int64_t));
+    if (!hs->block || RAY_IS_ERR(hs->block)) { hs->block = NULL; return false; }
+    hs->slots = (int64_t*)ray_data(hs->block);
+    for (int64_t i = 0; i < cap; i++) hs->slots[i] = HS_EMPTY;
+    hs->cap = cap;
+    hs->mask = cap - 1;
+    hs->count = 0;
+    hs->null_seen = 0;
+    hs->null_idx = HS_EMPTY;
+    hs->src = src;
+    hs->src_type = src ? src->type : 0;
+    hs->src_has_nulls = src ? ((src->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
+    hs->src_data = src ? ray_data(src) : NULL;
+    return true;
+}
+
+static void hashset_destroy(hashset_t* hs) {
+    if (hs->block) { ray_release(hs->block); hs->block = NULL; }
+    hs->slots = NULL;
+}
+
+static bool hashset_grow(hashset_t* hs) {
+    int64_t old_cap = hs->cap;
+    int64_t* old_slots = hs->slots;
+    int64_t new_cap = old_cap * 2;
+    if (new_cap < old_cap) return false;
+    ray_t* nb = ray_alloc((size_t)new_cap * sizeof(int64_t));
+    if (!nb || RAY_IS_ERR(nb)) return false;
+    int64_t* ns = (int64_t*)ray_data(nb);
+    for (int64_t i = 0; i < new_cap; i++) ns[i] = HS_EMPTY;
+    int64_t mask = new_cap - 1;
+    for (int64_t i = 0; i < old_cap; i++) {
+        int64_t ridx = old_slots[i];
+        if (ridx == HS_EMPTY) continue;
+        uint64_t h = hs_hash_row(hs->src, ridx, hs->src_type, hs->src_data);
+        int64_t s = (int64_t)(h & (uint64_t)mask);
+        while (ns[s] != HS_EMPTY) s = (s + 1) & mask;
+        ns[s] = ridx;
+    }
+    ray_release(hs->block);
+    hs->block = nb;
+    hs->slots = ns;
+    hs->cap = new_cap;
+    hs->mask = mask;
+    return true;
+}
+
+/* Probe the set for the row (probe_src, probe_i).  Returns the stored
+ * row index from the build-side vec on hit, HS_EMPTY on miss. */
+static int64_t hashset_find_xrow(hashset_t* hs, ray_t* probe_src, int64_t probe_i,
+                                  int8_t probe_type, void* probe_data) {
+    if (hs_row_is_null(probe_src, probe_i, probe_data))
+        return hs->null_seen ? hs->null_idx : HS_EMPTY;
+    uint64_t h = hs_hash_row(probe_src, probe_i, probe_type, probe_data);
+    int64_t s = (int64_t)(h & (uint64_t)hs->mask);
+    while (hs->slots[s] != HS_EMPTY) {
+        int64_t stored = hs->slots[s];
+        if (hs_eq_rows(probe_src, probe_i, probe_type, probe_data,
+                       hs->src,    stored,   hs->src_type, hs->src_data))
+            return stored;
+        s = (s + 1) & hs->mask;
+    }
+    return HS_EMPTY;
+}
+
+/* qsort comparator state for distinct_sort_indices: thread-local so
+ * the standard qsort entry point can pull it without a context arg.
+ * Single-threaded VM-eval is the only caller, so TLS is fine. */
+static _Thread_local ray_t* g_dsort_src;
+static _Thread_local int8_t g_dsort_type;
+static _Thread_local const void* g_dsort_data;
+
+static int distinct_sort_cmp(const void* a, const void* b) {
+    int64_t ia = *(const int64_t*)a;
+    int64_t ib = *(const int64_t*)b;
+    switch (g_dsort_type) {
+        case RAY_I64: case RAY_TIMESTAMP: {
+            int64_t va = ((const int64_t*)g_dsort_data)[ia];
+            int64_t vb = ((const int64_t*)g_dsort_data)[ib];
+            return (va > vb) - (va < vb);
+        }
+        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+            int32_t va = ((const int32_t*)g_dsort_data)[ia];
+            int32_t vb = ((const int32_t*)g_dsort_data)[ib];
+            return (va > vb) - (va < vb);
+        }
+        case RAY_I16: {
+            int16_t va = ((const int16_t*)g_dsort_data)[ia];
+            int16_t vb = ((const int16_t*)g_dsort_data)[ib];
+            return (va > vb) - (va < vb);
+        }
+        case RAY_U8: case RAY_BOOL: {
+            uint8_t va = ((const uint8_t*)g_dsort_data)[ia];
+            uint8_t vb = ((const uint8_t*)g_dsort_data)[ib];
+            return (va > vb) - (va < vb);
+        }
+        case RAY_F64: {
+            double va = ((const double*)g_dsort_data)[ia];
+            double vb = ((const double*)g_dsort_data)[ib];
+            return (va > vb) - (va < vb);
+        }
+        default: {
+            /* Fall back to boxed compare for less-common element kinds. */
+            int alloc_a = 0, alloc_b = 0;
+            ray_t* a_e = collection_elem(g_dsort_src, ia, &alloc_a);
+            ray_t* b_e = collection_elem(g_dsort_src, ib, &alloc_b);
+            double va = a_e ? as_f64(a_e) : 0.0;
+            double vb = b_e ? as_f64(b_e) : 0.0;
+            if (alloc_a && a_e) ray_release(a_e);
+            if (alloc_b && b_e) ray_release(b_e);
+            return (va > vb) - (va < vb);
+        }
+    }
+}
+
+/* Sort `count` indices by their numeric value in `src`.  Preserves
+ * the existing `distinct` semantic of returning numeric output sorted. */
+static void distinct_sort_indices(ray_t* src, int64_t* idx, int64_t count) {
+    g_dsort_src = src;
+    g_dsort_type = src->type;
+    g_dsort_data = ray_data(src);
+    qsort(idx, (size_t)count, sizeof(int64_t), distinct_sort_cmp);
+}
+
+/* Insert row i (from the set's build-side src) if absent.
+ * Returns true if newly inserted, false if duplicate.  On grow OOM
+ * the set silently keeps the previous capacity (caller proceeds). */
+static bool hashset_insert(hashset_t* hs, int64_t i) {
+    if (hs_row_is_null(hs->src, i, hs->src_data)) {
+        if (hs->null_seen) return false;
+        hs->null_seen = 1;
+        hs->null_idx = i;
+        return true;
+    }
+    if (hs->count * 2 >= hs->cap) {
+        if (!hashset_grow(hs)) { /* fall through, may degrade */ }
+    }
+    uint64_t h = hs_hash_row(hs->src, i, hs->src_type, hs->src_data);
+    int64_t s = (int64_t)(h & (uint64_t)hs->mask);
+    while (hs->slots[s] != HS_EMPTY) {
+        int64_t stored = hs->slots[s];
+        if (hs_eq_rows(hs->src, i,      hs->src_type, hs->src_data,
+                       hs->src, stored, hs->src_type, hs->src_data))
+            return false;
+        s = (s + 1) & hs->mask;
+    }
+    hs->slots[s] = i;
+    hs->count++;
+    return true;
+}
 
 /* ══════════════════════════════════════════
  * Higher-order functions
@@ -424,51 +722,32 @@ ray_t* ray_distinct_fn(ray_t* x) {
         return ray_str(uniq, (size_t)nu);
     }
 
-    /* Typed vector path: deduplicate directly without boxing */
+    /* Typed vector path: deduplicate via hash set in O(n).
+     * The previous nested-loop scan was O(n^2); for a 100k vec it ran
+     * for ~3 minutes. */
     if (ray_is_vec(x)) {
         int64_t len = ray_len(x);
         if (len == 0) { ray_retain(x); return x; }
 
-        /* Build index array of first-occurrence positions */
         int64_t idx_stack[256];
         int64_t* idx = (len <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len * sizeof(int64_t));
         if (!idx) return ray_error("oom", NULL);
-        int64_t count = 0;
-        bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        bool seen_null = false;
 
-        for (int64_t i = 0; i < len; i++) {
-            if (has_nulls && ray_vec_is_null(x, i)) {
-                if (!seen_null) { seen_null = true; idx[count++] = i; }
-                continue;
-            }
-            int dup = 0;
-            for (int64_t j = 0; j < count; j++) {
-                if (has_nulls && ray_vec_is_null(x, idx[j])) continue;
-                int alloc_a = 0, alloc_b = 0;
-                ray_t* a = collection_elem(x, idx[j], &alloc_a);
-                ray_t* b = collection_elem(x, i, &alloc_b);
-                int eq = atom_eq(a, b);
-                if (alloc_a) ray_release(a);
-                if (alloc_b) ray_release(b);
-                if (eq) { dup = 1; break; }
-            }
-            if (!dup) idx[count++] = i;
+        hashset_t hs;
+        if (!hashset_init(&hs, x, len)) {
+            if (idx != idx_stack) ray_sys_free(idx);
+            return ray_error("oom", NULL);
         }
+        int64_t count = 0;
+        for (int64_t i = 0; i < len; i++) {
+            if (hashset_insert(&hs, i)) idx[count++] = i;
+        }
+        hashset_destroy(&hs);
 
-        /* Sort unique indices by value for numeric types */
-        if (x->type != RAY_SYM && x->type != RAY_GUID && x->type != RAY_STR) {
-            for (int64_t i = 0; i < count - 1; i++) {
-                for (int64_t j = i + 1; j < count; j++) {
-                    int alloc_a = 0, alloc_b = 0;
-                    ray_t* a = collection_elem(x, idx[i], &alloc_a);
-                    ray_t* b = collection_elem(x, idx[j], &alloc_b);
-                    double av = as_f64(a), bv = as_f64(b);
-                    if (alloc_a) ray_release(a);
-                    if (alloc_b) ray_release(b);
-                    if (av > bv) { int64_t t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
-                }
-            }
+        /* Sort unique indices by value for numeric/temporal types — preserves
+         * pre-existing distinct semantics.  qsort-based; was O(count^2). */
+        if (x->type != RAY_SYM && x->type != RAY_GUID && x->type != RAY_STR && count > 1) {
+            distinct_sort_indices(x, idx, count);
         }
 
         ray_t* result = gather_by_idx(x, idx, count);
@@ -566,6 +845,29 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
         if (vlen == 0) {
             /* Empty collection → return empty list */
             return ray_list_new(0);
+        }
+        /* Hash-based fast path: both sides are typed vecs of compatible
+         * shape and the result is a row-aligned bool vec.  Build a
+         * hashset over `vec` once, probe per element of `val`.  Was
+         * O(len(val)×len(vec)); now O(len(val)+len(vec)). */
+        if (ray_is_vec(val) && ray_is_vec(vec)) {
+            ray_t* result = ray_vec_new(RAY_BOOL, vlen);
+            if (RAY_IS_ERR(result)) return result;
+            result->len = vlen;
+            bool* out = (bool*)ray_data(result);
+            hashset_t hs;
+            if (!hashset_init(&hs, vec, vec->len)) {
+                ray_release(result);
+                return ray_error("oom", NULL);
+            }
+            for (int64_t j = 0; j < vec->len; j++) hashset_insert(&hs, j);
+            int8_t val_type = val->type;
+            void*  val_data = ray_data(val);
+            for (int64_t i = 0; i < vlen; i++) {
+                out[i] = hashset_find_xrow(&hs, val, i, val_type, val_data) != HS_EMPTY;
+            }
+            hashset_destroy(&hs);
+            return result;
         }
         /* Probe first element to check if result is scalar or vector */
         int alloc0 = 0;
@@ -667,39 +969,15 @@ ray_t* list_to_typed_vec(ray_t* list, int8_t orig_vec_type) {
     return vec;
 }
 
-/* Helper: check if element at index i in vec1 exists anywhere in vec2.
- * Works on typed vectors without boxing. */
-static bool vec_elem_in(ray_t* vec1, int64_t i, ray_t* vec2) {
-    bool v1_null = (vec1->attrs & RAY_ATTR_HAS_NULLS) && ray_vec_is_null(vec1, i);
-    int64_t len2 = vec2->len;
-    bool v2_has_nulls = (vec2->attrs & RAY_ATTR_HAS_NULLS) != 0;
-    int alloc_a = 0;
-    ray_t* a = v1_null ? NULL : collection_elem(vec1, i, &alloc_a);
-    for (int64_t j = 0; j < len2; j++) {
-        if (v1_null) {
-            if (v2_has_nulls && ray_vec_is_null(vec2, j)) {
-                if (alloc_a) ray_release(a);
-                return true;
-            }
-            continue;
-        }
-        if (v2_has_nulls && ray_vec_is_null(vec2, j)) continue;
-        int alloc_b = 0;
-        ray_t* b = collection_elem(vec2, j, &alloc_b);
-        int eq = atom_eq(a, b);
-        if (alloc_b) ray_release(b);
-        if (eq) { if (alloc_a) ray_release(a); return true; }
-    }
-    if (alloc_a) ray_release(a);
-    return false;
-}
+/* (vec_elem_in helper removed — replaced by hashset-based lookups in
+ * except/union/sect/in/distinct.) */
 
 /* (except vec1 vec2) — elements in vec1 not in vec2 */
 ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
     if (ray_is_lazy(vec1)) vec1 = ray_lazy_materialize(vec1);
     if (ray_is_lazy(vec2)) vec2 = ray_lazy_materialize(vec2);
 
-    /* Typed vector path: index-based without boxing */
+    /* Typed vector path: hash-based.  Was O(len1×len2); now O(len1+len2). */
     if (ray_is_vec(vec1) && (ray_is_vec(vec2) || ray_is_atom(vec2))) {
         int64_t len1 = vec1->len;
         int64_t idx_stack[256];
@@ -707,7 +985,7 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
         if (!idx) return ray_error("oom", NULL);
         int64_t count = 0;
         if (ray_is_atom(vec2)) {
-            /* Scalar: filter out matching elements */
+            /* Scalar: filter out matching elements (single compare per row). */
             for (int64_t i = 0; i < len1; i++) {
                 int alloc = 0;
                 ray_t* elem = collection_elem(vec1, i, &alloc);
@@ -716,10 +994,19 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
                 if (!eq) idx[count++] = i;
             }
         } else {
+            hashset_t hs;
+            if (!hashset_init(&hs, vec2, vec2->len)) {
+                if (idx != idx_stack) ray_sys_free(idx);
+                return ray_error("oom", NULL);
+            }
+            for (int64_t j = 0; j < vec2->len; j++) hashset_insert(&hs, j);
+            int8_t v1_type = vec1->type;
+            void*  v1_data = ray_data(vec1);
             for (int64_t i = 0; i < len1; i++) {
-                if (!vec_elem_in(vec1, i, vec2))
+                if (hashset_find_xrow(&hs, vec1, i, v1_type, v1_data) == HS_EMPTY)
                     idx[count++] = i;
             }
+            hashset_destroy(&hs);
         }
         ray_t* result = gather_by_idx(vec1, idx, count);
         if (idx != idx_stack) ray_sys_free(idx);
@@ -770,18 +1057,26 @@ ray_t* ray_union_fn(ray_t* vec1, ray_t* vec2) {
     if (ray_is_lazy(vec1)) vec1 = ray_lazy_materialize(vec1);
     if (ray_is_lazy(vec2)) vec2 = ray_lazy_materialize(vec2);
 
-    /* Typed vector path */
+    /* Typed vector path: hash-based.  Was O(len1×len2); now O(len1+len2). */
     if (ray_is_vec(vec1) && ray_is_vec(vec2)) {
         int64_t len2 = vec2->len;
-        /* Concat vec1 + non-duplicate elements of vec2 */
         int64_t idx_stack[256];
         int64_t* idx = (len2 <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len2 * sizeof(int64_t));
         if (!idx) return ray_error("oom", NULL);
+        hashset_t hs;
+        if (!hashset_init(&hs, vec1, vec1->len)) {
+            if (idx != idx_stack) ray_sys_free(idx);
+            return ray_error("oom", NULL);
+        }
+        for (int64_t j = 0; j < vec1->len; j++) hashset_insert(&hs, j);
+        int8_t v2_type = vec2->type;
+        void*  v2_data = ray_data(vec2);
         int64_t extra = 0;
         for (int64_t i = 0; i < len2; i++) {
-            if (!vec_elem_in(vec2, i, vec1))
+            if (hashset_find_xrow(&hs, vec2, i, v2_type, v2_data) == HS_EMPTY)
                 idx[extra++] = i;
         }
+        hashset_destroy(&hs);
         ray_t* part2 = gather_by_idx(vec2, idx, extra);
         if (idx != idx_stack) ray_sys_free(idx);
         if (RAY_IS_ERR(part2)) return part2;
@@ -824,17 +1119,26 @@ ray_t* ray_sect_fn(ray_t* vec1, ray_t* vec2) {
     if (ray_is_lazy(vec1)) vec1 = ray_lazy_materialize(vec1);
     if (ray_is_lazy(vec2)) vec2 = ray_lazy_materialize(vec2);
 
-    /* Typed vector path */
+    /* Typed vector path: hash-based.  Was O(len1×len2); now O(len1+len2). */
     if (ray_is_vec(vec1) && ray_is_vec(vec2)) {
         int64_t len1 = vec1->len;
         int64_t idx_stack[256];
         int64_t* idx = (len1 <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len1 * sizeof(int64_t));
         if (!idx) return ray_error("oom", NULL);
+        hashset_t hs;
+        if (!hashset_init(&hs, vec2, vec2->len)) {
+            if (idx != idx_stack) ray_sys_free(idx);
+            return ray_error("oom", NULL);
+        }
+        for (int64_t j = 0; j < vec2->len; j++) hashset_insert(&hs, j);
+        int8_t v1_type = vec1->type;
+        void*  v1_data = ray_data(vec1);
         int64_t count = 0;
         for (int64_t i = 0; i < len1; i++) {
-            if (vec_elem_in(vec1, i, vec2))
+            if (hashset_find_xrow(&hs, vec1, i, v1_type, v1_data) != HS_EMPTY)
                 idx[count++] = i;
         }
+        hashset_destroy(&hs);
         ray_t* result = gather_by_idx(vec1, idx, count);
         if (idx != idx_stack) ray_sys_free(idx);
         return result;
