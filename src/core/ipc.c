@@ -243,9 +243,32 @@ static ray_t* eval_payload(uint8_t* payload, size_t payload_len,
      * inbound bytes — header + payload — verbatim, no decompression
      * round-trip.  Async messages and responses are not logged, so
      * background pings and result frames don't pollute the log.
-     * No-op when no journal is open or during in-progress replay. */
-    if (ray_journal_is_open() && hdr->msgtype == RAY_IPC_MSG_SYNC)
-        ray_journal_write_bytes(hdr, payload, (int64_t)payload_len);
+     * No-op when no journal is open or during in-progress replay.
+     *
+     * RAY_IPC_FLAG_RESTRICTED is captured into a LOCAL header copy:
+     * we mark the persisted frame with the connection's restricted
+     * state at write time so replay can re-impose it.  Without this
+     * a `-U` client's writes silently elevate to full privilege on
+     * crash-recovery, since replay runs on the main thread with no
+     * IPC connection context.  The bit is meaningless on the live
+     * IPC wire and doesn't affect this handler's eval — that uses
+     * the connection's own flag set by the caller above us.
+     *
+     * If the journal write fails (disk full, EIO), we ABORT the
+     * eval and return an error to the client.  q's documented
+     * behaviour: "the message has not been logged so we cannot
+     * accept it".  Silently evaluating un-logged mutations defeats
+     * the entire durability premise of `-l`/`-L`. */
+    if (ray_journal_is_open() && hdr->msgtype == RAY_IPC_MSG_SYNC) {
+        ray_ipc_header_t log_hdr = *hdr;
+        if (ray_eval_get_restricted())
+            log_hdr.flags |= RAY_IPC_FLAG_RESTRICTED;
+        ray_err_t je = ray_journal_write_bytes(&log_hdr, payload, (int64_t)payload_len);
+        if (je != RAY_OK) {
+            fprintf(stderr, "log: ERROR  journal write failed (rc=%d) — refusing to evaluate\n", (int)je);
+            return ray_error("io", "journal write failed; mutation refused");
+        }
+    }
 
     uint8_t* decompressed = NULL;
     if (hdr->flags & RAY_IPC_FLAG_COMPRESSED) {
