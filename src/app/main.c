@@ -27,6 +27,7 @@
 #include "core/profile.h"
 #include "app/repl.h"
 #include "core/runtime.h"
+#include "store/journal.h"
 #include <rayforce.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +46,8 @@ int main(int argc, char** argv) {
     int timeit_init = 0;   /* -t N: enable profiler at startup */
     const char* auth_pw = NULL;
     bool auth_restricted = false;
+    const char* log_base = NULL;
+    ray_journal_mode_t log_mode = RAY_JOURNAL_OFF;
 
     /* Parse args. Supported flags:
      *   -f FILE          run script file
@@ -82,10 +85,18 @@ int main(int argc, char** argv) {
             auth_pw = argv[++i];
             auth_restricted = true;
         }
+        else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
+            log_base = argv[++i];
+            log_mode = RAY_JOURNAL_ASYNC;
+        }
+        else if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+            log_base = argv[++i];
+            log_mode = RAY_JOURNAL_SYNC;
+        }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stdout,
                 "usage: %s [-f file] [-p port] [-c cores] [-t 0|1] [-i]"
-                " [-u PW | -U PW] [file.rfl]\n"
+                " [-u PW | -U PW] [-l BASE | -L BASE] [file.rfl]\n"
                 "  -f, --file FILE     run script file (or pass as a positional arg)\n"
                 "  -p, --port PORT     listen for IPC clients on PORT\n"
                 "  -c, --cores N       worker-pool size (0 = auto: ncpu - 1, default)\n"
@@ -93,6 +104,8 @@ int main(int argc, char** argv) {
                 "  -i, --interactive   start the REPL even after running a file\n"
                 "  -u PW               set plain auth password\n"
                 "  -U PW               set restricted auth password\n"
+                "  -l BASE             enable journal logging (BASE.log + BASE.qdb)\n"
+                "  -L BASE             enable journal logging with fsync per write\n"
                 "  -h, --help          show this message\n",
                 argv[0]);
             ray_runtime_destroy(rt);
@@ -132,6 +145,21 @@ int main(int argc, char** argv) {
         poll->restricted = auth_restricted;
     }
 
+    /* Open journal BEFORE the IPC listener accepts any connection.
+     * Replay must complete with a stable global env, and any badtail
+     * is fatal — exit non-zero so a supervisor can flag the failure
+     * rather than silently coming up with a partially-applied state. */
+    if (log_base) {
+        ray_err_t le = ray_journal_open(log_base, log_mode);
+        if (le != RAY_OK) {
+            fprintf(stderr, "log: open failed for base=%s (rc=%d)\n",
+                    log_base, (int)le);
+            if (poll) ray_poll_destroy(poll);
+            ray_runtime_destroy(rt);
+            return 2;
+        }
+    }
+
     /* Start IPC server if port specified */
     if (port > 0) {
         if (poll && ray_ipc_listen(poll, port) >= 0)
@@ -160,6 +188,10 @@ int main(int argc, char** argv) {
     }
 
 done:
+    /* Flush + close the journal before the rest of the runtime tears
+     * down — fclose triggers a final fflush, which is what `-l` mode
+     * relies on for "best-effort" durability at clean shutdown. */
+    ray_journal_close();
     if (poll) ray_poll_destroy(poll);
     ray_runtime_destroy(rt);
     return rc;
