@@ -411,6 +411,56 @@ ray_t*  ray_dict_get(ray_t* d, ray_t* key_atom);         /* owned, NULL if missi
 ray_t*  ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val); /* COW; consumes d */
 ray_t*  ray_dict_remove(ray_t* d, ray_t* key_atom);             /* COW; consumes d */
 
+/* ===== Runtime + Rayfall Eval API =====
+ *
+ * Embedders build a runtime, optionally restoring a persisted symbol
+ * table, then evaluate Rayfall source strings against the global env.
+ *
+ * Tables and other ray_t* values can be exposed to Rayfall by interning
+ * a symbol name and binding via ray_env_set, then queried with
+ * ray_eval_str:
+ *
+ *   ray_runtime_t* rt = ray_runtime_create_with_sym(".sym");
+ *   int64_t name_id = ray_sym_intern("t", 1);
+ *   ray_env_set(name_id, my_table);            // rayforce retains
+ *   ray_t* result = ray_eval_str("select count from t");
+ *   if (RAY_IS_ERR(result)) { ... } else { ...; ray_release(result); }
+ *   ray_runtime_destroy(rt);
+ *
+ * Single-runtime: only one ray_runtime_t may be live at a time in the
+ * same process. Creating a second without destroying the first is
+ * undefined.  Symbols, env, and builtins are process-global; the
+ * runtime owns their lifetime. */
+
+typedef struct ray_runtime_s ray_runtime_t;
+
+/* Create a runtime with an empty symbol table. argc/argv are forwarded
+ * so embedders can hand off CLI flags; pass 0/NULL when not applicable. */
+ray_runtime_t* ray_runtime_create(int argc, char** argv);
+
+/* Create a runtime and pre-load the persisted symbol table at sym_path.
+ * Missing file or NULL is fine (symbols start empty). I/O or corrupt-
+ * file conditions are non-fatal: the runtime starts up and the caller
+ * can detect the issue via ray_runtime_create_with_sym_err if needed. */
+ray_runtime_t* ray_runtime_create_with_sym(const char* sym_path);
+
+/* As ray_runtime_create_with_sym, but writes the sym-load status to
+ * *out_sym_err. RAY_OK on success or absent file; non-zero on I/O,
+ * corrupt-file, or OOM during sym load.  Pass NULL to ignore. */
+ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
+                                                ray_err_t*  out_sym_err);
+
+/* Tear down the runtime: lang state, env, VMs, heap.  Always pair with
+ * exactly one ray_runtime_create* call. */
+void ray_runtime_destroy(ray_runtime_t* rt);
+
+/* Parse and evaluate a Rayfall source string against the global env.
+ * Returns NULL for void / null results, an error ray_t* on failure
+ * (test with RAY_IS_ERR and inspect with ray_err_code), or the result
+ * value otherwise.  Caller owns the returned reference; release with
+ * ray_release. */
+ray_t* ray_eval_str(const char* source);
+
 #ifdef __cplusplus
 }
 #endif

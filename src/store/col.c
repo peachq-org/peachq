@@ -724,6 +724,26 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
     void* ptr = ray_vm_map_file(path, &mapped_size);
     if (!ptr) return ray_error("io", NULL);
 
+    /* Reject extended-format files early.  STRV / STRL / LIST / TABLE
+     * encode their payload and cannot satisfy the raw 32-byte ray_t
+     * header contract that the rest of this validator assumes;
+     * ray_col_load handles them via the magic-dispatch fast path
+     * higher up.  Returning "nyi" here lets ray_col_mmap callers
+     * fall back to ray_col_load (see splay_load_impl).  This must
+     * come before the mapped_size < 32 check: 0-row STRV files are
+     * 14 bytes, 1-row STRV files with content < 10 bytes also fall
+     * under 32, and either would otherwise be rejected as "corrupt"
+     * with no fallback path. */
+    if (mapped_size >= 4) {
+        uint32_t magic;
+        memcpy(&magic, ptr, 4);
+        if (magic == STR_LIST_MAGIC || magic == STR_VEC_MAGIC ||
+            magic == LIST_MAGIC     || magic == TABLE_MAGIC) {
+            ray_vm_unmap_file(ptr, mapped_size);
+            return ray_error("nyi", NULL);
+        }
+    }
+
     if (mapped_size < 32) {
         ray_vm_unmap_file(ptr, mapped_size);
         return ray_error("corrupt", NULL);
