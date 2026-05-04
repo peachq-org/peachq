@@ -741,9 +741,20 @@ ray_t* call_fn1(ray_t* fn, ray_t* arg) {
     if (fn_is_restricted(fn)) return ray_error("access", "restricted");
     if (fn->type == RAY_UNARY) {
         ray_unary_fn f = (ray_unary_fn)(uintptr_t)fn->i64;
-        if ((fn->attrs & RAY_FN_ATOMIC) && is_collection(arg))
-            return atomic_map_unary(f, arg);
-        return f(arg);
+        ray_t* a = arg;
+        bool owned = false;
+        if (!(fn->attrs & RAY_FN_LAZY_AWARE) && ray_is_lazy(a)) {
+            a = ray_lazy_materialize(a);
+            if (!a || RAY_IS_ERR(a)) return a ? a : ray_error("type", NULL);
+            owned = true;
+        }
+        ray_t* r;
+        if ((fn->attrs & RAY_FN_ATOMIC) && is_collection(a))
+            r = atomic_map_unary(f, a);
+        else
+            r = f(a);
+        if (owned) ray_release(a);
+        return r;
     }
     if (fn->type == RAY_LAMBDA) {
         ray_t* args[1] = { arg };
@@ -757,9 +768,32 @@ ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b) {
     if (fn_is_restricted(fn)) return ray_error("access", "restricted");
     if (fn->type == RAY_BINARY) {
         ray_binary_fn f = (ray_binary_fn)(uintptr_t)fn->i64;
-        if ((fn->attrs & RAY_FN_ATOMIC) && (is_collection(a) || is_collection(b)))
-            return atomic_map_binary(f, a, b);
-        return f(a, b);
+        ray_t* la = a;
+        ray_t* lb = b;
+        bool owned_a = false, owned_b = false;
+        if (!(fn->attrs & RAY_FN_LAZY_AWARE)) {
+            if (ray_is_lazy(la)) {
+                la = ray_lazy_materialize(la);
+                if (!la || RAY_IS_ERR(la)) return la ? la : ray_error("type", NULL);
+                owned_a = true;
+            }
+            if (ray_is_lazy(lb)) {
+                lb = ray_lazy_materialize(lb);
+                if (!lb || RAY_IS_ERR(lb)) {
+                    if (owned_a) ray_release(la);
+                    return lb ? lb : ray_error("type", NULL);
+                }
+                owned_b = true;
+            }
+        }
+        ray_t* r;
+        if ((fn->attrs & RAY_FN_ATOMIC) && (is_collection(la) || is_collection(lb)))
+            r = atomic_map_binary(f, la, lb);
+        else
+            r = f(la, lb);
+        if (owned_a) ray_release(la);
+        if (owned_b) ray_release(lb);
+        return r;
     }
     if (fn->type == RAY_LAMBDA) {
         ray_t* args[2] = { a, b };
@@ -1542,7 +1576,18 @@ op_call1: {
     ray_t *fn_obj = POP();
     ray_unary_fn fn = (ray_unary_fn)(uintptr_t)fn_obj->i64;
     ray_t *result;
-    if (RAY_UNLIKELY(RAY_IS_NULL(arg))) {
+    /* Materialise lazy args for non-lazy-aware fns */
+    if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE) && arg && ray_is_lazy(arg)) {
+        ray_t *m = ray_lazy_materialize(arg);
+        ray_release(arg);
+        arg = m;
+        if (!arg || RAY_IS_ERR(arg)) {
+            ray_release(fn_obj);
+            vm_err_obj = arg ? arg : ray_error("type", NULL);
+            goto vm_error;
+        }
+    }
+    if (RAY_UNLIKELY(!arg || RAY_IS_NULL(arg))) {
         result = (fn == (ray_unary_fn)ray_nil_fn || fn == (ray_unary_fn)ray_type_fn)
                  ? fn(arg) : ray_error("type", NULL);
     } else if ((fn_obj->attrs & RAY_FN_ATOMIC) && arg->type >= 0)
@@ -1562,7 +1607,30 @@ op_call2: {
     ray_t *fn_obj = POP();
     ray_binary_fn fn = (ray_binary_fn)(uintptr_t)fn_obj->i64;
     ray_t *result;
-    if (RAY_UNLIKELY(RAY_IS_NULL(left) || RAY_IS_NULL(right))) {
+    /* Materialise lazy args for non-lazy-aware fns */
+    if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE)) {
+        if (left && ray_is_lazy(left)) {
+            ray_t *m = ray_lazy_materialize(left);
+            ray_release(left);
+            left = m;
+            if (!left || RAY_IS_ERR(left)) {
+                ray_release(right); ray_release(fn_obj);
+                vm_err_obj = left ? left : ray_error("type", NULL);
+                goto vm_error;
+            }
+        }
+        if (right && ray_is_lazy(right)) {
+            ray_t *m = ray_lazy_materialize(right);
+            ray_release(right);
+            right = m;
+            if (!right || RAY_IS_ERR(right)) {
+                ray_release(left); ray_release(fn_obj);
+                vm_err_obj = right ? right : ray_error("type", NULL);
+                goto vm_error;
+            }
+        }
+    }
+    if (RAY_UNLIKELY(!left || !right || RAY_IS_NULL(left) || RAY_IS_NULL(right))) {
         result = (fn == (ray_binary_fn)ray_eq_fn || fn == (ray_binary_fn)ray_neq_fn)
                  ? fn(left, right) : ray_error("type", NULL);
     /* Fast path: atoms have negative type — skip collection check entirely.
@@ -1665,12 +1733,30 @@ op_callf: {
         case RAY_UNARY:
             if (fn_is_restricted(fn_obj)) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("access", "restricted"); break; }
             if (n != 1) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("arity", "expected 1 arg, got %d", n); break; }
+            if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE) && fn_args[0] && ray_is_lazy(fn_args[0])) {
+                ray_t *m = ray_lazy_materialize(fn_args[0]);
+                ray_release(fn_args[0]);
+                fn_args[0] = m;
+                if (!fn_args[0] || RAY_IS_ERR(fn_args[0])) { result = fn_args[0] ? fn_args[0] : ray_error("type", NULL); fn_args[0] = NULL; break; }
+            }
             result = ((ray_unary_fn)(uintptr_t)fn_obj->i64)(fn_args[0]);
             ray_release(fn_args[0]);
             break;
         case RAY_BINARY:
             if (fn_is_restricted(fn_obj)) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("access", "restricted"); break; }
             if (n != 2) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("arity", "expected 2 args, got %d", n); break; }
+            if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE)) {
+                if (fn_args[0] && ray_is_lazy(fn_args[0])) {
+                    ray_t *m = ray_lazy_materialize(fn_args[0]);
+                    ray_release(fn_args[0]); fn_args[0] = m;
+                    if (!fn_args[0] || RAY_IS_ERR(fn_args[0])) { result = fn_args[0] ? fn_args[0] : ray_error("type", NULL); fn_args[0] = NULL; ray_release(fn_args[1]); fn_args[1] = NULL; break; }
+                }
+                if (fn_args[1] && ray_is_lazy(fn_args[1])) {
+                    ray_t *m = ray_lazy_materialize(fn_args[1]);
+                    ray_release(fn_args[1]); fn_args[1] = m;
+                    if (!fn_args[1] || RAY_IS_ERR(fn_args[1])) { result = fn_args[1] ? fn_args[1] : ray_error("type", NULL); ray_release(fn_args[0]); fn_args[0] = NULL; fn_args[1] = NULL; break; }
+                }
+            }
             result = ((ray_binary_fn)(uintptr_t)fn_obj->i64)(fn_args[0], fn_args[1]);
             ray_release(fn_args[0]);
             ray_release(fn_args[1]);
@@ -2103,13 +2189,16 @@ static void ray_register_builtins(void) {
     register_vary("fn",    RAY_FN_SPECIAL_FORM, ray_fn);
 
     /* Aggregation builtins */
-    register_unary("sum",   RAY_FN_AGGR, ray_sum_fn);
-    register_unary("count", RAY_FN_AGGR, ray_count_fn);
-    register_unary("avg",   RAY_FN_AGGR, ray_avg_fn);
-    register_unary("min",   RAY_FN_AGGR, ray_min_fn);
-    register_unary("max",   RAY_FN_AGGR, ray_max_fn);
-    register_unary("first", RAY_FN_NONE, ray_first_fn);
-    register_unary("last",  RAY_FN_NONE, ray_last_fn);
+    /* RAY_FN_LAZY_AWARE: these fns have 'if (ray_is_lazy(x)) return ray_lazy_append(...)' shells
+     * and must NOT have their args materialised by the dispatcher. */
+    register_unary("sum",   RAY_FN_AGGR | RAY_FN_LAZY_AWARE, ray_sum_fn);
+    register_unary("count", RAY_FN_AGGR | RAY_FN_LAZY_AWARE, ray_count_fn);
+    register_unary("avg",   RAY_FN_AGGR | RAY_FN_LAZY_AWARE, ray_avg_fn);
+    register_unary("min",   RAY_FN_AGGR | RAY_FN_LAZY_AWARE, ray_min_fn);
+    register_unary("max",   RAY_FN_AGGR | RAY_FN_LAZY_AWARE, ray_max_fn);
+    register_unary("first", RAY_FN_NONE | RAY_FN_LAZY_AWARE, ray_first_fn);
+    register_unary("last",  RAY_FN_NONE | RAY_FN_LAZY_AWARE, ray_last_fn);
+    /* med/dev/stddev/var materialise inline (no ray_lazy_append shell) — not LAZY_AWARE */
     register_unary("med",   RAY_FN_AGGR, ray_med_fn);
     register_unary("dev",        RAY_FN_AGGR, ray_dev_fn);
     register_unary("stddev",     RAY_FN_AGGR, ray_stddev_fn);
@@ -2526,6 +2615,13 @@ ray_t* ray_eval(ray_t* obj) {
             ray_t* arg = ray_eval(elems[1]);
             ray_release(head);
             if (arg && RAY_IS_ERR(arg)) { ret = arg; goto out; }
+            /* Materialise lazy arg for non-lazy-aware fns */
+            if (!(fn_attrs & RAY_FN_LAZY_AWARE) && arg && ray_is_lazy(arg)) {
+                ray_t* m = ray_lazy_materialize(arg);
+                ray_release(arg);
+                arg = m;
+                if (!arg || RAY_IS_ERR(arg)) { ret = arg ? arg : ray_error("type", NULL); goto out; }
+            }
             ray_t* result;
             if (!arg || RAY_IS_NULL(arg)) {
                 /* Only nil?/type/ser safely handle null */
@@ -2556,6 +2652,25 @@ ray_t* ray_eval(ray_t* obj) {
             if (right && RAY_IS_ERR(right)) {
                 ray_release(head); if (left) ray_release(left);
                 ret = right; goto out;
+            }
+            /* Materialise lazy args for non-lazy-aware fns */
+            if (!(fn_attrs & RAY_FN_LAZY_AWARE)) {
+                if (left && ray_is_lazy(left)) {
+                    ray_t* m = ray_lazy_materialize(left);
+                    ray_release(left); left = m;
+                    if (!left || RAY_IS_ERR(left)) {
+                        ray_release(head); if (right) ray_release(right);
+                        ret = left ? left : ray_error("type", NULL); goto out;
+                    }
+                }
+                if (right && ray_is_lazy(right)) {
+                    ray_t* m = ray_lazy_materialize(right);
+                    ray_release(right); right = m;
+                    if (!right || RAY_IS_ERR(right)) {
+                        ray_release(head); if (left) ray_release(left);
+                        ret = right ? right : ray_error("type", NULL); goto out;
+                    }
+                }
             }
             /* If either arg is NULL/void, only == and != can handle it */
             if (!left || !right || RAY_IS_NULL(left) || RAY_IS_NULL(right)) {
