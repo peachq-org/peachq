@@ -931,20 +931,23 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
              * For DESC NULLS FIRST → e=UINT64_MAX   (~e=0, smallest after flip)
              * For DESC NULLS LAST  → e=0            (~e=UINT64_MAX, largest after flip) */
             uint64_t null_e = (nf ^ desc) ? 0 : UINT64_MAX;
-            if (desc) {
+            /* Hoist has_nulls × desc into 4 specialised tight loops. */
+            if (desc && has_nulls) {
                 for (int64_t i = start; i < end; i++) {
-                    if (has_nulls && ray_vec_is_null(c->col, i))
-                        c->keys[i] = ~null_e;
-                    else
-                        c->keys[i] = ~((uint64_t)d[i] ^ ((uint64_t)1 << 63));
+                    if (ray_vec_is_null(c->col, i)) c->keys[i] = ~null_e;
+                    else c->keys[i] = ~((uint64_t)d[i] ^ ((uint64_t)1 << 63));
+                }
+            } else if (desc) {
+                for (int64_t i = start; i < end; i++)
+                    c->keys[i] = ~((uint64_t)d[i] ^ ((uint64_t)1 << 63));
+            } else if (has_nulls) {
+                for (int64_t i = start; i < end; i++) {
+                    if (ray_vec_is_null(c->col, i)) c->keys[i] = null_e;
+                    else c->keys[i] = (uint64_t)d[i] ^ ((uint64_t)1 << 63);
                 }
             } else {
-                for (int64_t i = start; i < end; i++) {
-                    if (has_nulls && ray_vec_is_null(c->col, i))
-                        c->keys[i] = null_e;
-                    else
-                        c->keys[i] = (uint64_t)d[i] ^ ((uint64_t)1 << 63);
-                }
+                for (int64_t i = start; i < end; i++)
+                    c->keys[i] = (uint64_t)d[i] ^ ((uint64_t)1 << 63);
             }
             break;
         }
@@ -980,20 +983,23 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
             bool nf = c->nulls_first;
             bool desc = c->desc;
             uint64_t null_e = (nf ^ desc) ? 0 : UINT64_MAX;
-            if (desc) {
+            /* Hoist has_nulls × desc into 4 specialised tight loops. */
+            if (desc && has_nulls) {
                 for (int64_t i = start; i < end; i++) {
-                    if (has_nulls && ray_vec_is_null(c->col, i))
-                        c->keys[i] = ~null_e;
-                    else
-                        c->keys[i] = ~((uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31)));
+                    if (ray_vec_is_null(c->col, i)) c->keys[i] = ~null_e;
+                    else c->keys[i] = ~((uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31)));
+                }
+            } else if (desc) {
+                for (int64_t i = start; i < end; i++)
+                    c->keys[i] = ~((uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31)));
+            } else if (has_nulls) {
+                for (int64_t i = start; i < end; i++) {
+                    if (ray_vec_is_null(c->col, i)) c->keys[i] = null_e;
+                    else c->keys[i] = (uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31));
                 }
             } else {
-                for (int64_t i = start; i < end; i++) {
-                    if (has_nulls && ray_vec_is_null(c->col, i))
-                        c->keys[i] = null_e;
-                    else
-                        c->keys[i] = (uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31));
-                }
+                for (int64_t i = start; i < end; i++)
+                    c->keys[i] = (uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31));
             }
             break;
         }
