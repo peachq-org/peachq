@@ -693,10 +693,9 @@ int atom_eq(ray_t* a, ray_t* b) {
 /* Forward declaration */
 ray_t* list_to_typed_vec(ray_t* list, int8_t orig_vec_type);
 
-/* Eager vector dedup — called directly by the DAG executor (OP_DISTINCT case)
- * and by ray_distinct_fn for non-lazy concrete vectors. Factored out so the
- * executor can call it without going through ray_distinct_fn (which would
- * hit the lazy-chain branch and infinite-loop). */
+/* Eager vector dedup — called by the DAG executor's OP_DISTINCT case.
+ * Factored out so the executor doesn't go through ray_distinct_fn, which
+ * is now a lazy producer for vectors and would re-wrap into a chain. */
 ray_t* distinct_vec_eager(ray_t* x) {
     int64_t len = ray_len(x);
     if (len == 0) { ray_retain(x); return x; }
