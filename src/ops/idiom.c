@@ -29,16 +29,43 @@
 #define RAY_IDIOM_OPCODE_CAP 128
 #define RAY_IDIOM_MAX_ROWS    64
 
-/* Sentinel row terminates the table; ray_idioms_count excludes it.
- * A zero-length array is a GNU extension rejected by clang -Werror under
- * C17, so we carry exactly one {0} sentinel and set ray_idioms_count = 0. */
-const ray_idiom_t ray_idioms[] = {
-    /* rows added in tasks 11–13 */
-    {0, 0, NULL, NULL, NULL}  /* sentinel */
-};
-const int ray_idioms_count = 0;  /* number of active rows, excluding sentinel */
+/* ---------------------------------------------------------------------------
+ * Rewrite functions — one per idiom row.
+ * ---------------------------------------------------------------------------
+ */
 
-_Static_assert(sizeof(ray_idioms) / sizeof(ray_idioms[0]) - 1 <= RAY_IDIOM_MAX_ROWS,
+/* (count (distinct v)) → OP_COUNT_DISTINCT(v)
+ *
+ * node     = OP_COUNT
+ * node->inputs[0] = OP_DISTINCT
+ * Returns  OP_COUNT_DISTINCT(distinct->inputs[0])
+ */
+static ray_op_t* rw_count_distinct(ray_graph_t* g, ray_op_t* node) {
+    ray_op_t* distinct = node->inputs[0];
+    if (!distinct || !distinct->inputs[0]) return NULL;
+    ray_op_t* src = distinct->inputs[0];
+
+    ray_op_t* repl = graph_alloc_node_opt(g);
+    if (!repl) return NULL;
+    repl->opcode    = OP_COUNT_DISTINCT;
+    repl->arity     = 1;
+    repl->inputs[0] = src;
+    repl->out_type  = RAY_I64;
+    repl->est_rows  = 1;
+    return repl;
+}
+
+/* ---------------------------------------------------------------------------
+ * Idiom table — one row per pattern.
+ * ---------------------------------------------------------------------------
+ */
+const ray_idiom_t ray_idioms[] = {
+    { OP_COUNT, OP_DISTINCT, NULL, rw_count_distinct,
+      "count(distinct) -> count_distinct" },
+};
+const int ray_idioms_count = (int)(sizeof(ray_idioms) / sizeof(ray_idioms[0]));
+
+_Static_assert(sizeof(ray_idioms) / sizeof(ray_idioms[0]) <= RAY_IDIOM_MAX_ROWS,
                "idiom row count exceeds dispatch index capacity");
 
 static int8_t first_idiom[RAY_IDIOM_OPCODE_CAP];
