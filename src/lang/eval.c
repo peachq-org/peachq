@@ -2772,5 +2772,9 @@ ray_t* ray_eval_str(const char* source) {
 
     ray_release(parsed);
     ray_release(nfo);
+    /* ray_eval_str is the public top-level boundary — materialise any lazy
+     * chain before returning to callers who expect a concrete value. */
+    if (ray_is_lazy(result))
+        result = ray_lazy_materialize(result);
     return result;
 }
