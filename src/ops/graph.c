@@ -669,6 +669,7 @@ ray_op_t* ray_avg(ray_graph_t* g, ray_op_t* a)    { return make_unary(g, OP_AVG,
 ray_op_t* ray_first(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_FIRST, a, a->out_type); }
 ray_op_t* ray_last(ray_graph_t* g, ray_op_t* a)   { return make_unary(g, OP_LAST, a, a->out_type); }
 ray_op_t* ray_count_distinct(ray_graph_t* g, ray_op_t* a) { return make_unary(g, OP_COUNT_DISTINCT, a, RAY_I64); }
+ray_op_t* ray_distinct_op(ray_graph_t* g, ray_op_t* a)   { return make_unary(g, OP_DISTINCT, a, a->out_type); }
 ray_op_t* ray_stddev(ray_graph_t* g, ray_op_t* a)     { return make_unary(g, OP_STDDEV, a, RAY_F64); }
 ray_op_t* ray_stddev_pop(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_STDDEV_POP, a, RAY_F64); }
 ray_op_t* ray_var(ray_graph_t* g, ray_op_t* a)         { return make_unary(g, OP_VAR, a, RAY_F64); }
@@ -1693,6 +1694,8 @@ ray_t* ray_lazy_append(ray_t* lazy, uint16_t opcode) {
         case OP_SUM:
         case OP_PROD:
             out_type = (prev->out_type == RAY_F64) ? RAY_F64 : RAY_I64; break;
+        case OP_DISTINCT:
+            out_type = prev->out_type; break;     /* distinct preserves type */
         default:
             out_type = prev->out_type; break;
     }
@@ -1700,6 +1703,11 @@ ray_t* ray_lazy_append(ray_t* lazy, uint16_t opcode) {
     ray_op_t* op = make_unary(g, opcode, prev, out_type);
     if (!op) return ray_error("oom", NULL);
     RAY_LAZY_OP(lazy) = op;
+    /* The VM's op_call1 always releases arg after calling fn(arg).  Since
+     * ray_lazy_append returns the SAME lazy object it received, the caller
+     * would see rc drop to 0 without this retain.  Retain here so the
+     * caller's release brings rc back to the pre-call level. */
+    ray_retain(lazy);
     return lazy;
 }
 
