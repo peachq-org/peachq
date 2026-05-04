@@ -87,7 +87,7 @@ static void nth_element_dbl(double* a, int64_t lo, int64_t hi, int64_t k) {
     if (!g) return ray_error("oom", NULL);                  \
     ray_op_t* in = ray_graph_input_vec(g, x);              \
     ray_op_t* op = ctor(g, in);                            \
-    return ray_lazy_materialize(ray_lazy_wrap(g, op));      \
+    return ray_lazy_wrap(g, op);                            \
 } while(0)
 
 /* DAG executor returns I64 for all integer types — cast back to original. */
