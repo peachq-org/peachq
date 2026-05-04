@@ -193,11 +193,17 @@ ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
         g_icols[i] = ray_table_get_col(grouped, idx_syms[i]);
     ray_t* g_pcol = ray_table_get_col(grouped, pivot_col_name->i64);
 
-    /* Collect distinct pivot values and index keys from grouped table */
+    /* Collect distinct pivot values and index keys from grouped table.
+     * ray_distinct_fn returns a lazy for concrete vecs; materialise here
+     * since pivot C-code needs a concrete result to iterate over. */
     ray_retain(g_pcol);
     ray_t* dvals = ray_distinct_fn(g_pcol);
     ray_release(g_pcol);
     if (RAY_IS_ERR(dvals)) { ray_release(grouped); return dvals; }
+    if (ray_is_lazy(dvals)) {
+        dvals = ray_lazy_materialize(dvals);
+        if (!dvals || RAY_IS_ERR(dvals)) { ray_release(grouped); return dvals ? dvals : ray_error("oom", NULL); }
+    }
     int64_t n_pv = ray_len(dvals);
 
     /* Re-scan original table to assign a grouped-row index to each
