@@ -3343,15 +3343,31 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
 
 /* ── Builtins ── */
 
+/* Shared eager kernel — called by OP_ASC executor and ray_asc_fn. */
+ray_t* asc_vec_eager(ray_t* x) {
+    int64_t n = ray_len(x);
+    uint8_t desc = 0;
+    return ray_sort(&x, &desc, NULL, 1, n);
+}
+
 /* (asc v) — sort vector ascending */
 ray_t* ray_asc_fn(ray_t* x) {
     if (!x || RAY_IS_ERR(x)) return x;
+
+    /* Extend an existing chain. */
+    if (ray_is_lazy(x)) return ray_lazy_append(x, OP_ASC);
+
     if (ray_is_atom(x)) { ray_retain(x); return x; }
     if (!ray_is_vec(x)) return ray_error("type", "asc expects a vector");
     int64_t n = ray_len(x);
     if (n <= 1) { ray_retain(x); return x; }
-    uint8_t desc = 0;
-    return ray_sort(&x, &desc, NULL, 1, n);
+
+    /* Concrete vector: start a fresh chain. */
+    ray_graph_t* g = ray_graph_new(NULL);
+    if (!g) return ray_error("oom", NULL);
+    ray_op_t* in = ray_graph_input_vec(g, x);
+    ray_op_t* op = ray_asc_op(g, in);
+    return ray_lazy_wrap(g, op);
 }
 
 /* (desc v) — sort vector descending */
