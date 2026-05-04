@@ -45,15 +45,17 @@ static void reduce_acc_init(reduce_acc_t* acc) {
 }
 
 /* Integer reduction loop — reads native type T, accumulates as i64.
- * `idx` is an optional int64 selection vector: when non-NULL, iterate
- * idx[start..end) and read d[idx[i]]; when NULL, iterate d[start..end)
- * directly.  The branch is loop-invariant so the compiler hoists it. */
-#define REDUCE_LOOP_I(T, base, start, end, acc, has_nulls, null_bm, idx) \
+ * HAS_NULLS and HAS_IDX must be integer literal constants (0 or 1) so the
+ * compiler dead-code-eliminates the corresponding branches in every
+ * specialisation.  reduce_range dispatches to the right combination before
+ * calling this macro so the hot path (no nulls, no idx) contains zero
+ * per-element runtime branches. */
+#define REDUCE_LOOP_I(T, base, start, end, acc, HAS_NULLS, null_bm, HAS_IDX, idx) \
     do { \
         const T* d = (const T*)(base); \
         for (int64_t i = start; i < end; i++) { \
-            int64_t row = (idx) ? (idx)[i] : i; \
-            if (has_nulls && (null_bm[row/8] >> (row%8)) & 1) { (acc)->null_count++; continue; } \
+            int64_t row = (HAS_IDX) ? (idx)[i] : i; \
+            if ((HAS_NULLS) && (null_bm[row/8] >> (row%8)) & 1) { (acc)->null_count++; continue; } \
             int64_t v = (int64_t)d[row]; \
             /* sum/sum_sq may overflow on signed arithmetic — use defined \
              * unsigned wrap (same semantic, no UBSan whine). */ \
@@ -67,13 +69,13 @@ static void reduce_acc_init(reduce_acc_t* acc) {
         } \
     } while (0)
 
-/* Float reduction loop — see REDUCE_LOOP_I for `idx` semantics. */
-#define REDUCE_LOOP_F(base, start, end, acc, has_nulls, null_bm, idx) \
+/* Float reduction loop — see REDUCE_LOOP_I for HAS_NULLS/HAS_IDX semantics. */
+#define REDUCE_LOOP_F(base, start, end, acc, HAS_NULLS, null_bm, HAS_IDX, idx) \
     do { \
         const double* d = (const double*)(base); \
         for (int64_t i = start; i < end; i++) { \
-            int64_t row = (idx) ? (idx)[i] : i; \
-            if (has_nulls && (null_bm[row/8] >> (row%8)) & 1) { (acc)->null_count++; continue; } \
+            int64_t row = (HAS_IDX) ? (idx)[i] : i; \
+            if ((HAS_NULLS) && (null_bm[row/8] >> (row%8)) & 1) { (acc)->null_count++; continue; } \
             double v = d[row]; \
             (acc)->sum_f += v; (acc)->sum_sq_f += v * v; (acc)->prod_f *= v; \
             if (v < (acc)->min_f) (acc)->min_f = v; \
@@ -83,33 +85,95 @@ static void reduce_acc_init(reduce_acc_t* acc) {
         } \
     } while (0)
 
+/* Dispatch helper: expand REDUCE_LOOP_I/F with compile-time 0/1 constants for
+ * HAS_NULLS and HAS_IDX based on the runtime pointers so the compiler can
+ * dead-code-eliminate the branches inside each specialisation. */
+#define DISPATCH_I(T, base, start, end, acc, has_nulls, null_bm, idx) \
+    do { \
+        if (!(has_nulls) && !(idx)) \
+            REDUCE_LOOP_I(T, base, start, end, acc, 0, null_bm, 0, idx); \
+        else if (!(has_nulls)) \
+            REDUCE_LOOP_I(T, base, start, end, acc, 0, null_bm, 1, idx); \
+        else if (!(idx)) \
+            REDUCE_LOOP_I(T, base, start, end, acc, 1, null_bm, 0, idx); \
+        else \
+            REDUCE_LOOP_I(T, base, start, end, acc, 1, null_bm, 1, idx); \
+    } while (0)
+
+#define DISPATCH_F(base, start, end, acc, has_nulls, null_bm, idx) \
+    do { \
+        if (!(has_nulls) && !(idx)) \
+            REDUCE_LOOP_F(base, start, end, acc, 0, null_bm, 0, idx); \
+        else if (!(has_nulls)) \
+            REDUCE_LOOP_F(base, start, end, acc, 0, null_bm, 1, idx); \
+        else if (!(idx)) \
+            REDUCE_LOOP_F(base, start, end, acc, 1, null_bm, 0, idx); \
+        else \
+            REDUCE_LOOP_F(base, start, end, acc, 1, null_bm, 1, idx); \
+    } while (0)
+
 static void reduce_range(ray_t* input, int64_t start, int64_t end,
                          reduce_acc_t* acc, bool has_nulls,
                          const uint8_t* null_bm, const int64_t* idx) {
     void* base = ray_data(input);
     switch (input->type) {
     case RAY_BOOL: case RAY_U8:
-        REDUCE_LOOP_I(uint8_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_I(uint8_t, base, start, end, acc, has_nulls, null_bm, idx); break;
     case RAY_I16:
-        REDUCE_LOOP_I(int16_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_I(int16_t, base, start, end, acc, has_nulls, null_bm, idx); break;
     case RAY_I32: case RAY_DATE: case RAY_TIME:
-        REDUCE_LOOP_I(int32_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_I(int32_t, base, start, end, acc, has_nulls, null_bm, idx); break;
     case RAY_I64: case RAY_TIMESTAMP:
-        REDUCE_LOOP_I(int64_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_I(int64_t, base, start, end, acc, has_nulls, null_bm, idx); break;
     case RAY_F64:
-        REDUCE_LOOP_F(base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_F(base, start, end, acc, has_nulls, null_bm, idx); break;
     case RAY_SYM: {
-        /* Adaptive-width SYM columns — use read_col_i64 */
-        for (int64_t i = start; i < end; i++) {
-            int64_t row = idx ? idx[i] : i;
-            if (has_nulls && (null_bm[row/8] >> (row%8)) & 1) { acc->null_count++; continue; }
-            int64_t v = read_col_i64(base, row, input->type, input->attrs);
-            acc->sum_i += v; acc->sum_sq_i += v * v;
-            acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
-            if (v < acc->min_i) acc->min_i = v;
-            if (v > acc->max_i) acc->max_i = v;
-            if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
-            acc->last_i = v; acc->cnt++;
+        /* Adaptive-width SYM columns — use read_col_i64.  Same 4-way dispatch
+         * to eliminate the per-element null/idx branches. */
+        if (!has_nulls && !idx) {
+            for (int64_t i = start; i < end; i++) {
+                int64_t v = read_col_i64(base, i, input->type, input->attrs);
+                acc->sum_i += v; acc->sum_sq_i += v * v;
+                acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
+                if (v < acc->min_i) acc->min_i = v;
+                if (v > acc->max_i) acc->max_i = v;
+                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
+                acc->last_i = v; acc->cnt++;
+            }
+        } else if (!has_nulls) {
+            for (int64_t i = start; i < end; i++) {
+                int64_t row = idx[i];
+                int64_t v = read_col_i64(base, row, input->type, input->attrs);
+                acc->sum_i += v; acc->sum_sq_i += v * v;
+                acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
+                if (v < acc->min_i) acc->min_i = v;
+                if (v > acc->max_i) acc->max_i = v;
+                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
+                acc->last_i = v; acc->cnt++;
+            }
+        } else if (!idx) {
+            for (int64_t i = start; i < end; i++) {
+                if ((null_bm[i/8] >> (i%8)) & 1) { acc->null_count++; continue; }
+                int64_t v = read_col_i64(base, i, input->type, input->attrs);
+                acc->sum_i += v; acc->sum_sq_i += v * v;
+                acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
+                if (v < acc->min_i) acc->min_i = v;
+                if (v > acc->max_i) acc->max_i = v;
+                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
+                acc->last_i = v; acc->cnt++;
+            }
+        } else {
+            for (int64_t i = start; i < end; i++) {
+                int64_t row = idx[i];
+                if ((null_bm[row/8] >> (row%8)) & 1) { acc->null_count++; continue; }
+                int64_t v = read_col_i64(base, row, input->type, input->attrs);
+                acc->sum_i += v; acc->sum_sq_i += v * v;
+                acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
+                if (v < acc->min_i) acc->min_i = v;
+                if (v > acc->max_i) acc->max_i = v;
+                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
+                acc->last_i = v; acc->cnt++;
+            }
         }
         break;
     }
