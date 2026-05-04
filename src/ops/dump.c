@@ -118,6 +118,7 @@ const char* ray_opcode_name(uint16_t op) {
         case OP_ANN_RERANK:    return "ANN_RERANK";
         case OP_KNN_RERANK:    return "KNN_RERANK";
         case OP_DISTINCT:      return "DISTINCT";
+        case OP_ASC:           return "ASC";
         default:               return "UNKNOWN";
     }
 }
