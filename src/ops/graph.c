@@ -1708,7 +1708,12 @@ ray_t* ray_lazy_materialize(ray_t* val) {
 
     ray_graph_t* g  = RAY_LAZY_GRAPH(val);
     ray_op_t*    op = RAY_LAZY_OP(val);
-    ray_t* result   = ray_execute(g, op);
+
+    /* Run the full optimizer pipeline before execution. ray_optimize
+       may return a different root (e.g. predicate pushdown). */
+    op = ray_optimize(g, op);
+
+    ray_t* result = ray_execute(g, op);
 
     ray_graph_free(g);
     /* Clear graph pointer before releasing to prevent double-free in
