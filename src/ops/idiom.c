@@ -24,6 +24,7 @@
 #include "idiom.h"
 #include "opt.h"
 #include "mem/sys.h"
+#include "mem/heap.h"
 #include <string.h>
 
 #define RAY_IDIOM_OPCODE_CAP 128
@@ -74,15 +75,81 @@ static ray_op_t* rw_count_passthrough(ray_graph_t* g, ray_op_t* node) {
     return repl;
 }
 
+/* True only when the input vector to (asc …) is statically known to
+   have no nulls. Walks one node — the input to the asc — and reads
+   its out_attrs (if tracked) or out_type+constness. Returns false on
+   uncertainty (safe default — slow path runs). */
+static bool pre_no_nulls_on_asc_input(ray_graph_t* g, ray_op_t* node) {
+    /* node = OP_FIRST (or OP_LAST); node->inputs[0] = OP_ASC;
+       inspect node->inputs[0]->inputs[0] (the source vector). */
+    ray_op_t* asc = node->inputs[0];
+    if (!asc || !asc->inputs[0]) return false;
+    ray_op_t* src = asc->inputs[0];
+
+    /* OP_CONST: read the literal from the ext data and check its attrs.
+       For other opcodes (computed inputs), bail — false negative is fine. */
+    if (src->opcode == OP_CONST) {
+        ray_op_ext_t* ext = find_ext(g, src->id);
+        if (!ext || !ext->literal) return false;
+        ray_t* lit = ext->literal;
+        /* Only safe to rewrite if the literal is a vector with no nulls. */
+        if (!ray_is_vec(lit)) return false;
+        return !(lit->attrs & RAY_ATTR_HAS_NULLS);
+    }
+
+    /* OP_SCAN: conservative — return false until the column-header attrs
+       can be read from the optimizer. Spec follow-up. */
+    return false;
+}
+
+/* (first (asc v)) → OP_MIN(v) — safe only when v is null-free.
+ * xasc puts nulls first, so first(asc(null-bearing)) = null;
+ * OP_MIN skips nulls and returns smallest non-null.  The precondition
+ * pre_no_nulls_on_asc_input ensures we only rewrite when null-free. */
+static ray_op_t* rw_first_asc_to_min(ray_graph_t* g, ray_op_t* node) {
+    ray_op_t* asc = node->inputs[0];
+    if (!asc || !asc->inputs[0]) return NULL;
+    ray_op_t* src = asc->inputs[0];
+
+    ray_op_t* repl = graph_alloc_node_opt(g);
+    if (!repl) return NULL;
+    repl->opcode    = OP_MIN;
+    repl->arity     = 1;
+    repl->inputs[0] = src;
+    repl->out_type  = src->out_type;
+    repl->est_rows  = 1;
+    return repl;
+}
+
+/* (last (asc v)) → OP_MAX(v) — same null-free precondition.
+ * xasc puts nulls first, so last(asc(null-free)) = largest element;
+ * OP_MAX also returns the largest non-null element — semantics match. */
+static ray_op_t* rw_last_asc_to_max(ray_graph_t* g, ray_op_t* node) {
+    ray_op_t* asc = node->inputs[0];
+    if (!asc || !asc->inputs[0]) return NULL;
+    ray_op_t* src = asc->inputs[0];
+
+    ray_op_t* repl = graph_alloc_node_opt(g);
+    if (!repl) return NULL;
+    repl->opcode    = OP_MAX;
+    repl->arity     = 1;
+    repl->inputs[0] = src;
+    repl->out_type  = src->out_type;
+    repl->est_rows  = 1;
+    return repl;
+}
+
 /* ---------------------------------------------------------------------------
  * Idiom table — one row per pattern.
  * ---------------------------------------------------------------------------
  */
 const ray_idiom_t ray_idioms[] = {
-    { OP_COUNT, OP_DISTINCT, NULL, rw_count_distinct,    "count(distinct) -> count_distinct" },
-    { OP_COUNT, OP_ASC,      NULL, rw_count_passthrough, "count(asc) -> count"               },
-    { OP_COUNT, OP_DESC,     NULL, rw_count_passthrough, "count(desc) -> count"              },
-    { OP_COUNT, OP_REVERSE,  NULL, rw_count_passthrough, "count(reverse) -> count"           },
+    { OP_COUNT, OP_DISTINCT, NULL,                      rw_count_distinct,    "count(distinct) -> count_distinct" },
+    { OP_COUNT, OP_ASC,      NULL,                      rw_count_passthrough, "count(asc) -> count"               },
+    { OP_COUNT, OP_DESC,     NULL,                      rw_count_passthrough, "count(desc) -> count"              },
+    { OP_COUNT, OP_REVERSE,  NULL,                      rw_count_passthrough, "count(reverse) -> count"           },
+    { OP_FIRST, OP_ASC,      pre_no_nulls_on_asc_input, rw_first_asc_to_min,  "first(asc) -> min  [no-nulls]"     },
+    { OP_LAST,  OP_ASC,      pre_no_nulls_on_asc_input, rw_last_asc_to_max,   "last(asc) -> max   [no-nulls]"     },
 };
 const int ray_idioms_count = (int)(sizeof(ray_idioms) / sizeof(ray_idioms[0]));
 
