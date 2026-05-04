@@ -2229,7 +2229,7 @@ static void ray_register_builtins(void) {
     register_binary("take",    RAY_FN_NONE, ray_take_fn);
     register_binary("at",      RAY_FN_NONE, ray_at_fn);
     register_binary("find",    RAY_FN_NONE, ray_find_fn);
-    register_unary("reverse",  RAY_FN_NONE, ray_reverse_fn);
+    register_unary("reverse",  RAY_FN_NONE | RAY_FN_LAZY_AWARE, ray_reverse_fn);
     register_unary("til",      RAY_FN_NONE, ray_til_fn);
 
     /* Sorting operations */

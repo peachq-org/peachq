@@ -221,6 +221,7 @@ void     ray_cancel(void);
 #define OP_DISTINCT       104   /* unique elements (preserves first occurrence) */
 #define OP_ASC            105   /* sort vector ascending                        */
 #define OP_DESC           106   /* sort vector descending                       */
+#define OP_REVERSE        107   /* reverse vector order                         */
 
 /* Opcodes — Misc */
 #define OP_ALIAS        70
@@ -545,6 +546,7 @@ ray_op_t* ray_count_distinct(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_distinct_op(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_asc_op(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_desc_op(ray_graph_t* g, ray_op_t* a);
+ray_op_t* ray_reverse_op(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_stddev(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_stddev_pop(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_var(ray_graph_t* g, ray_op_t* a);

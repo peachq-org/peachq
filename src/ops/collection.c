@@ -1718,52 +1718,67 @@ ray_t* ray_til_fn(ray_t* x) {
     return vec;
 }
 
-/* (reverse vec) — reverse a vector */
-ray_t* ray_reverse_fn(ray_t* x) {
-    if (ray_is_lazy(x)) x = ray_lazy_materialize(x);
-
-    /* Typed vector: reverse directly without boxing */
-    if (ray_is_vec(x)) {
-        int64_t len = x->len;
-        if (len <= 1) { ray_retain(x); return x; }
-        int8_t vtype = x->type;
-        if (vtype == RAY_STR) {
-            ray_t* result = ray_vec_new(RAY_STR, len);
-            if (RAY_IS_ERR(result)) return result;
-            bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-            for (int64_t i = 0; i < len; i++) {
-                if (has_nulls && ray_vec_is_null(x, len - 1 - i)) {
-                    result = ray_str_vec_append(result, "", 0);
-                    if (!RAY_IS_ERR(result))
-                        ray_vec_set_null(result, result->len - 1, true);
-                } else {
-                    size_t slen;
-                    const char* sp = ray_str_vec_get(x, len - 1 - i, &slen);
-                    result = ray_str_vec_append(result, sp ? sp : "", sp ? slen : 0);
-                }
-                if (RAY_IS_ERR(result)) return result;
-            }
-            return result;
-        }
-        ray_t* result = (vtype == RAY_SYM)
-            ? ray_sym_vec_new(x->attrs & RAY_SYM_W_MASK, len)
-            : ray_vec_new(vtype, len);
-        if (!result || RAY_IS_ERR(result)) return result ? result : ray_error("oom", NULL);
-        result->len = len;
-        int esz = ray_elem_size(vtype);
-        if (vtype == RAY_SYM) esz = ray_sym_elem_size(vtype, x->attrs);
-        char* src = (char*)ray_data(x);
-        char* dst = (char*)ray_data(result);
+/* Shared eager kernel — called by the OP_REVERSE executor. */
+ray_t* reverse_vec_eager(ray_t* x) {
+    int64_t len = x->len;
+    if (len <= 1) { ray_retain(x); return x; }
+    int8_t vtype = x->type;
+    if (vtype == RAY_STR) {
+        ray_t* result = ray_vec_new(RAY_STR, len);
+        if (RAY_IS_ERR(result)) return result;
         bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
         for (int64_t i = 0; i < len; i++) {
-            memcpy(dst + i * esz, src + (len - 1 - i) * esz, esz);
-            if (has_nulls && ray_vec_is_null(x, len - 1 - i))
-                ray_vec_set_null(result, i, true);
+            if (has_nulls && ray_vec_is_null(x, len - 1 - i)) {
+                result = ray_str_vec_append(result, "", 0);
+                if (!RAY_IS_ERR(result))
+                    ray_vec_set_null(result, result->len - 1, true);
+            } else {
+                size_t slen;
+                const char* sp = ray_str_vec_get(x, len - 1 - i, &slen);
+                result = ray_str_vec_append(result, sp ? sp : "", sp ? slen : 0);
+            }
+            if (RAY_IS_ERR(result)) return result;
         }
         return result;
     }
+    ray_t* result = (vtype == RAY_SYM)
+        ? ray_sym_vec_new(x->attrs & RAY_SYM_W_MASK, len)
+        : ray_vec_new(vtype, len);
+    if (!result || RAY_IS_ERR(result)) return result ? result : ray_error("oom", NULL);
+    result->len = len;
+    int esz = ray_elem_size(vtype);
+    if (vtype == RAY_SYM) esz = ray_sym_elem_size(vtype, x->attrs);
+    char* src = (char*)ray_data(x);
+    char* dst = (char*)ray_data(result);
+    bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    for (int64_t i = 0; i < len; i++) {
+        memcpy(dst + i * esz, src + (len - 1 - i) * esz, esz);
+        if (has_nulls && ray_vec_is_null(x, len - 1 - i))
+            ray_vec_set_null(result, i, true);
+    }
+    return result;
+}
 
-    /* Boxed list path */
+/* (reverse vec) — reverse a vector */
+ray_t* ray_reverse_fn(ray_t* x) {
+    if (!x || RAY_IS_ERR(x)) return x;
+
+    /* Extend an existing lazy chain. */
+    if (ray_is_lazy(x)) return ray_lazy_append(x, OP_REVERSE);
+
+    if (ray_is_atom(x)) { ray_retain(x); return x; }
+
+    /* Typed vector path: start a fresh lazy chain.  The DAG executor will
+     * call reverse_vec_eager() when the chain is materialised. */
+    if (ray_is_vec(x)) {
+        ray_graph_t* g = ray_graph_new(NULL);
+        if (!g) return ray_error("oom", NULL);
+        ray_op_t* in = ray_graph_input_vec(g, x);
+        ray_op_t* op = ray_reverse_op(g, in);
+        return ray_lazy_wrap(g, op);
+    }
+
+    /* Boxed list path — eager (DAG cannot yet express list reversal) */
     ray_t* _bx = NULL;
     x = unbox_vec_arg(x, &_bx);
     if (RAY_IS_ERR(x)) return x;
