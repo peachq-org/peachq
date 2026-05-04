@@ -693,12 +693,48 @@ int atom_eq(ray_t* a, ray_t* b) {
 /* Forward declaration */
 ray_t* list_to_typed_vec(ray_t* list, int8_t orig_vec_type);
 
+/* Eager vector dedup — called directly by the DAG executor (OP_DISTINCT case)
+ * and by ray_distinct_fn for non-lazy concrete vectors. Factored out so the
+ * executor can call it without going through ray_distinct_fn (which would
+ * hit the lazy-chain branch and infinite-loop). */
+ray_t* distinct_vec_eager(ray_t* x) {
+    int64_t len = ray_len(x);
+    if (len == 0) { ray_retain(x); return x; }
+
+    int64_t idx_stack[256];
+    int64_t* idx = (len <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len * sizeof(int64_t));
+    if (!idx) return ray_error("oom", NULL);
+
+    hashset_t hs;
+    if (!hashset_init(&hs, x, len)) {
+        if (idx != idx_stack) ray_sys_free(idx);
+        return ray_error("oom", NULL);
+    }
+    int64_t count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (hashset_insert(&hs, i)) idx[count++] = i;
+    }
+    hashset_destroy(&hs);
+
+    /* Sort unique indices by value for numeric/temporal types — preserves
+     * pre-existing distinct semantics.  qsort-based; was O(count^2). */
+    if (x->type != RAY_SYM && x->type != RAY_GUID && x->type != RAY_STR && count > 1) {
+        distinct_sort_indices(x, idx, count);
+    }
+
+    ray_t* result = gather_by_idx(x, idx, count);
+    if (idx != idx_stack) ray_sys_free(idx);
+    return result;
+}
+
 /* (distinct x) — remove duplicates. Dispatches on type:
  *   table → deduplicate rows (via DAG GROUP with zero aggs)
  *   vector → remove duplicate elements, preserving first occurrence
  *   string → unique chars, sorted */
 ray_t* ray_distinct_fn(ray_t* x) {
-    if (ray_is_lazy(x)) x = ray_lazy_materialize(x);
+    /* Extend an existing lazy chain — must come before the lazy-materialise
+     * guard so the chain is preserved rather than collapsed. */
+    if (ray_is_lazy(x)) return ray_lazy_append(x, OP_DISTINCT);
 
     /* Table distinct: dispatch to table-specific implementation */
     if (x->type == RAY_TABLE)
@@ -723,37 +759,14 @@ ray_t* ray_distinct_fn(ray_t* x) {
         return ray_str(uniq, (size_t)nu);
     }
 
-    /* Typed vector path: deduplicate via hash set in O(n).
-     * The previous nested-loop scan was O(n^2); for a 100k vec it ran
-     * for ~3 minutes. */
+    /* Typed vector path: start a fresh lazy chain.  The DAG executor will
+     * call distinct_vec_eager() when the chain is materialised. */
     if (ray_is_vec(x)) {
-        int64_t len = ray_len(x);
-        if (len == 0) { ray_retain(x); return x; }
-
-        int64_t idx_stack[256];
-        int64_t* idx = (len <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len * sizeof(int64_t));
-        if (!idx) return ray_error("oom", NULL);
-
-        hashset_t hs;
-        if (!hashset_init(&hs, x, len)) {
-            if (idx != idx_stack) ray_sys_free(idx);
-            return ray_error("oom", NULL);
-        }
-        int64_t count = 0;
-        for (int64_t i = 0; i < len; i++) {
-            if (hashset_insert(&hs, i)) idx[count++] = i;
-        }
-        hashset_destroy(&hs);
-
-        /* Sort unique indices by value for numeric/temporal types — preserves
-         * pre-existing distinct semantics.  qsort-based; was O(count^2). */
-        if (x->type != RAY_SYM && x->type != RAY_GUID && x->type != RAY_STR && count > 1) {
-            distinct_sort_indices(x, idx, count);
-        }
-
-        ray_t* result = gather_by_idx(x, idx, count);
-        if (idx != idx_stack) ray_sys_free(idx);
-        return result;
+        ray_graph_t* g = ray_graph_new(NULL);
+        if (!g) return ray_error("oom", NULL);
+        ray_op_t* in = ray_graph_input_vec(g, x);
+        ray_op_t* op = ray_distinct_op(g, in);
+        return ray_lazy_wrap(g, op);
     }
 
     ray_t* _bx = NULL;
