@@ -358,6 +358,11 @@ ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
         }
         ray_t* agg_val = call_fn1(agg_fn, subset);
         ray_release(subset);
+        /* The lambda result may be lazy (e.g. (fn [xs] (sum xs)) returns a
+         * lazy chain).  Materialise before storing into agg_results so
+         * list_to_typed_vec sees a concrete scalar. */
+        if (ray_is_lazy(agg_val))
+            agg_val = ray_lazy_materialize(agg_val);
         if (RAY_IS_ERR(agg_val)) {
             ray_free(sorted_hdr); ray_free(off_hdr);
             ray_free(agg_results); ray_release(gid_vec); ray_release(dvals); ray_release(grouped);
