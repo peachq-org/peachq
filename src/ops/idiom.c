@@ -1,0 +1,145 @@
+/*
+ *   Copyright (c) 2025-2026 Anton Kundenko <singaraiona@gmail.com>
+ *   All rights reserved.
+
+ *   Permission is hereby granted, free of charge, to any person obtaining a copy
+ *   of this software and associated documentation files (the "Software"), to deal
+ *   in the Software without restriction, including without limitation the rights
+ *   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *   copies of the Software, and to permit persons to whom the Software is
+ *   furnished to do so, subject to the following conditions:
+
+ *   The above copyright notice and this permission notice shall be included in all
+ *   copies or substantial portions of the Software.
+
+ *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *   SOFTWARE.
+ */
+
+#include "idiom.h"
+#include "opt.h"
+#include "mem/sys.h"
+#include <string.h>
+
+#define RAY_IDIOM_OPCODE_CAP 128
+#define RAY_IDIOM_MAX_ROWS    64
+
+/* Sentinel row terminates the table; ray_idioms_count excludes it.
+ * A zero-length array is a GNU extension rejected by clang -Werror under
+ * C17, so we carry exactly one {0} sentinel and set ray_idioms_count = 0. */
+const ray_idiom_t ray_idioms[] = {
+    /* rows added in tasks 11–13 */
+    {0, 0, NULL, NULL, NULL}  /* sentinel */
+};
+const int ray_idioms_count = 0;  /* number of active rows, excluding sentinel */
+
+_Static_assert(sizeof(ray_idioms) / sizeof(ray_idioms[0]) - 1 <= RAY_IDIOM_MAX_ROWS,
+               "idiom row count exceeds dispatch index capacity");
+
+static int8_t first_idiom[RAY_IDIOM_OPCODE_CAP];
+static int8_t next_idiom [RAY_IDIOM_MAX_ROWS];
+static bool   index_built;
+
+static void build_index(void) {
+    if (index_built) return;
+    memset(first_idiom, -1, sizeof(first_idiom));
+    memset(next_idiom,  -1, sizeof(next_idiom));
+    for (int i = 0; i < ray_idioms_count; i++) {
+        uint16_t op = ray_idioms[i].root_op;
+        if (op >= RAY_IDIOM_OPCODE_CAP) continue;
+        next_idiom[i]   = first_idiom[op];
+        first_idiom[op] = (int8_t)i;
+    }
+    index_built = true;
+}
+
+static bool is_ext_root(uint16_t opcode) {
+    return opcode == OP_GROUP || opcode == OP_SORT || opcode == OP_JOIN ||
+           opcode == OP_WINDOW || opcode == OP_WINDOW_JOIN || opcode == OP_SELECT;
+}
+
+static void try_rewrite(ray_graph_t* g, ray_op_t* node) {
+    if (!node || (node->flags & OP_FLAG_DEAD)) return;
+    if (is_ext_root(node->opcode)) return;
+    if (node->opcode >= RAY_IDIOM_OPCODE_CAP) return;
+
+    int idx = first_idiom[node->opcode];
+    while (idx >= 0) {
+        const ray_idiom_t* row = &ray_idioms[idx];
+        if (node->inputs[0] && node->inputs[0]->opcode == row->child0_op) {
+            if (!row->pre || row->pre(g, node)) {
+                ray_op_t* repl = row->rewrite(g, node);
+                if (repl) {
+                    /* UINT32_MAX sentinels: no nodes to skip during redirect */
+                    redirect_consumers(g, node->id, repl, UINT32_MAX, UINT32_MAX);
+                    node->flags |= OP_FLAG_DEAD;
+                    return;  /* first-match-wins */
+                }
+            }
+        }
+        idx = next_idiom[idx];
+    }
+}
+
+void ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
+    if (!g || !root || g->node_count == 0) return;
+    build_index();
+
+    /* Iterative post-order walk: children rewritten before parents so
+       a parent match sees the latest shape of its children. Two-stack
+       pattern — push roots onto stack1, drain into stack2 (reverse),
+       pop stack2 to get post-order. */
+    uint32_t nc = g->node_count;
+    if (nc > UINT32_MAX / 4) return;  /* overflow guard, mirrors fuse.c */
+
+    uint32_t cap = nc * 2;
+    uint32_t stk1_local[256], stk2_local[256];
+    uint32_t* stk1 = cap <= 256 ? stk1_local : (uint32_t*)ray_sys_alloc(cap * sizeof(uint32_t));
+    uint32_t* stk2 = cap <= 256 ? stk2_local : (uint32_t*)ray_sys_alloc(cap * sizeof(uint32_t));
+    if (!stk1 || !stk2) {
+        if (stk1 && stk1 != stk1_local) ray_sys_free(stk1);
+        if (stk2 && stk2 != stk2_local) ray_sys_free(stk2);
+        return;
+    }
+
+    /* Visited-bit guard against re-entry on shared subgraphs. */
+    uint8_t visited_local[256];
+    uint8_t* visited = nc <= 256 ? visited_local : (uint8_t*)ray_sys_alloc(nc);
+    if (!visited) {
+        if (stk1 != stk1_local) ray_sys_free(stk1);
+        if (stk2 != stk2_local) ray_sys_free(stk2);
+        return;
+    }
+    memset(visited, 0, nc);
+
+    int sp1 = 0, sp2 = 0;
+    stk1[sp1++] = root->id;
+    while (sp1 > 0) {
+        uint32_t nid = stk1[--sp1];
+        if (nid >= nc || visited[nid]) continue;
+        visited[nid] = 1;
+        stk2[sp2++] = nid;
+
+        ray_op_t* n = &g->nodes[nid];
+        if (n->flags & OP_FLAG_DEAD) continue;
+        for (int i = 0; i < n->arity && i < 2; i++) {
+            if (n->inputs[i] && sp1 < (int)cap)
+                stk1[sp1++] = n->inputs[i]->id;
+        }
+    }
+
+    /* Post-order: pop stk2 from top, call try_rewrite. */
+    while (sp2 > 0) {
+        uint32_t nid = stk2[--sp2];
+        try_rewrite(g, &g->nodes[nid]);
+    }
+
+    if (visited != visited_local) ray_sys_free(visited);
+    if (stk1 != stk1_local) ray_sys_free(stk1);
+    if (stk2 != stk2_local) ray_sys_free(stk2);
+}
