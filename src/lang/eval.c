@@ -2233,7 +2233,7 @@ static void ray_register_builtins(void) {
     register_unary("til",      RAY_FN_NONE, ray_til_fn);
 
     /* Sorting operations */
-    register_unary("asc",      RAY_FN_NONE, ray_asc_fn);
+    register_unary("asc",      RAY_FN_NONE | RAY_FN_LAZY_AWARE, ray_asc_fn);
     register_unary("desc",     RAY_FN_NONE, ray_desc_fn);
     register_unary("iasc",     RAY_FN_NONE, ray_iasc_fn);
     register_unary("idesc",    RAY_FN_NONE, ray_idesc_fn);
