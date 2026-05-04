@@ -27,9 +27,10 @@
 #include "ops.h"
 
 /* Un-staticed helpers exposed for use by idiom.c and future passes. */
-ray_op_t* graph_alloc_node_opt(ray_graph_t* g);
-void      redirect_consumers(ray_graph_t* g, uint32_t old_id,
-                             ray_op_t* new_target,
-                             uint32_t skip_a, uint32_t skip_b);
+ray_op_t*      graph_alloc_node_opt(ray_graph_t* g);
+void           redirect_consumers(ray_graph_t* g, uint32_t old_id,
+                                  ray_op_t* new_target,
+                                  uint32_t skip_a, uint32_t skip_b);
+ray_op_ext_t*  find_ext(ray_graph_t* g, uint32_t node_id);
 
 #endif /* RAY_OPT_H */
