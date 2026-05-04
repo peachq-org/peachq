@@ -27,6 +27,7 @@
 
 #include "core/ipc.h"
 #include "mem/sys.h"
+#include "ops/ops.h"
 #include "store/journal.h"
 #include <string.h>
 #include <stdio.h>
@@ -1138,6 +1139,10 @@ void ray_ipc_close(int64_t handle)
 
 ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
 {
+    if (ray_is_lazy(msg)) {
+        msg = ray_lazy_materialize(msg);
+        if (RAY_IS_ERR(msg)) return msg;
+    }
     { int64_t sr = client_send_msg(handle, msg, RAY_IPC_MSG_SYNC, 0);
       if (sr == -2) return ray_error("io", "connection closed");
       if (sr < 0) return ray_error("io", "ipc send failed"); }
@@ -1202,6 +1207,14 @@ ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
 
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
 {
+    if (ray_is_lazy(msg)) {
+        msg = ray_lazy_materialize(msg);
+        if (RAY_IS_ERR(msg)) {
+            ray_err_t code = ray_err_from_obj(msg);
+            ray_error_free(msg);
+            return code;
+        }
+    }
     if (client_send_msg(handle, msg, RAY_IPC_MSG_ASYNC, 0) < 0)
         return RAY_ERR_IO;
     return RAY_OK;
@@ -1214,6 +1227,10 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
  * otherwise — sync, blocking until response. */
 ray_t* ray_ipc_send_verbose(int64_t handle, ray_t* msg)
 {
+    if (ray_is_lazy(msg)) {
+        msg = ray_lazy_materialize(msg);
+        if (RAY_IS_ERR(msg)) return msg;
+    }
     { int64_t sr = client_send_msg(handle, msg, RAY_IPC_MSG_SYNC,
                                    RAY_IPC_FLAG_VERBOSE);
       if (sr == -2) return ray_error("io", "connection closed");
