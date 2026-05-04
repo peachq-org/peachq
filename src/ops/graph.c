@@ -670,6 +670,7 @@ ray_op_t* ray_first(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_FIRS
 ray_op_t* ray_last(ray_graph_t* g, ray_op_t* a)   { return make_unary(g, OP_LAST, a, a->out_type); }
 ray_op_t* ray_count_distinct(ray_graph_t* g, ray_op_t* a) { return make_unary(g, OP_COUNT_DISTINCT, a, RAY_I64); }
 ray_op_t* ray_distinct_op(ray_graph_t* g, ray_op_t* a)   { return make_unary(g, OP_DISTINCT, a, a->out_type); }
+ray_op_t* ray_asc_op(ray_graph_t* g, ray_op_t* a)       { return make_unary(g, OP_ASC, a, a->out_type); }
 ray_op_t* ray_stddev(ray_graph_t* g, ray_op_t* a)     { return make_unary(g, OP_STDDEV, a, RAY_F64); }
 ray_op_t* ray_stddev_pop(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_STDDEV_POP, a, RAY_F64); }
 ray_op_t* ray_var(ray_graph_t* g, ray_op_t* a)         { return make_unary(g, OP_VAR, a, RAY_F64); }
@@ -1696,6 +1697,8 @@ ray_t* ray_lazy_append(ray_t* lazy, uint16_t opcode) {
             out_type = (prev->out_type == RAY_F64) ? RAY_F64 : RAY_I64; break;
         case OP_DISTINCT:
             out_type = prev->out_type; break;     /* distinct preserves type */
+        case OP_ASC:
+            out_type = prev->out_type; break;     /* asc preserves type */
         default:
             out_type = prev->out_type; break;
     }
