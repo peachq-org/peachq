@@ -346,7 +346,9 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : ray_i64(merged.prod_i); break;
             case OP_MIN:   result = merged.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(merged.min_f) : ray_i64(merged.min_i)) : ray_typed_null(-in_type); break;
             case OP_MAX:   result = merged.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(merged.max_f) : ray_i64(merged.max_i)) : ray_typed_null(-in_type); break;
-            case OP_COUNT: result = ray_i64(merged.cnt); break;
+            /* COUNT returns total length including nulls — matches ray_count_fn's
+             * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
+            case OP_COUNT: result = ray_i64(scan_n); break;
             case OP_AVG:   result = merged.cnt > 0 ? ray_f64(in_type == RAY_F64 ? merged.sum_f / merged.cnt : (double)merged.sum_i / merged.cnt) : ray_typed_null(-RAY_F64); break;
             case OP_FIRST: result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.first_f) : ray_i64(merged.first_i)) : ray_typed_null(-in_type); break;
             case OP_LAST:  result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.last_f) : ray_i64(merged.last_i)) : ray_typed_null(-in_type); break;
@@ -383,7 +385,9 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : ray_i64(acc.prod_i);
         case OP_MIN:   return acc.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(acc.min_f) : ray_i64(acc.min_i)) : ray_typed_null(-in_type);
         case OP_MAX:   return acc.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(acc.max_f) : ray_i64(acc.max_i)) : ray_typed_null(-in_type);
-        case OP_COUNT: return ray_i64(acc.cnt);
+        /* COUNT returns total length including nulls — matches ray_count_fn's
+         * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
+        case OP_COUNT: return ray_i64(scan_n);
         case OP_AVG:   return acc.cnt > 0 ? ray_f64(in_type == RAY_F64 ? acc.sum_f / acc.cnt : (double)acc.sum_i / acc.cnt) : ray_typed_null(-RAY_F64);
         case OP_FIRST: return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.first_f) : ray_i64(acc.first_i)) : ray_typed_null(-in_type);
         case OP_LAST:  return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.last_f) : ray_i64(acc.last_i)) : ray_typed_null(-in_type);
