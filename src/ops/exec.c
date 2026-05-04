@@ -1035,6 +1035,18 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             return result;
         }
 
+        case OP_DESC: {
+            ray_t* input = exec_node(g, op->inputs[0]);
+            if (!input || RAY_IS_ERR(input)) return input;
+            if (!ray_is_vec(input)) {
+                ray_release(input);
+                return ray_error("type", "OP_DESC expects a vector input");
+            }
+            ray_t* result = desc_vec_eager(input);
+            ray_release(input);
+            return result;
+        }
+
         case OP_FILTER: {
             /* HAVING fusion: FILTER(GROUP) — evaluate the predicate against
              * the GROUP result rather than the original input table.
