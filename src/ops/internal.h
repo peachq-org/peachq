@@ -762,6 +762,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit)
 
 /* ── collection.c ── */
 ray_t* distinct_vec_eager(ray_t* x);
+ray_t* reverse_vec_eager(ray_t* x);
 
 /* ── sort.c ── */
 ray_t* asc_vec_eager(ray_t* x);
