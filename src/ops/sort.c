@@ -3370,15 +3370,31 @@ ray_t* ray_asc_fn(ray_t* x) {
     return ray_lazy_wrap(g, op);
 }
 
+/* Shared eager kernel — called by the OP_DESC executor. */
+ray_t* desc_vec_eager(ray_t* x) {
+    int64_t n = ray_len(x);
+    uint8_t desc = 1;
+    return ray_sort(&x, &desc, NULL, 1, n);
+}
+
 /* (desc v) — sort vector descending */
 ray_t* ray_desc_fn(ray_t* x) {
     if (!x || RAY_IS_ERR(x)) return x;
+
+    /* Extend an existing chain. */
+    if (ray_is_lazy(x)) return ray_lazy_append(x, OP_DESC);
+
     if (ray_is_atom(x)) { ray_retain(x); return x; }
     if (!ray_is_vec(x)) return ray_error("type", "desc expects a vector");
     int64_t n = ray_len(x);
     if (n <= 1) { ray_retain(x); return x; }
-    uint8_t desc = 1;
-    return ray_sort(&x, &desc, NULL, 1, n);
+
+    /* Concrete vector: start a fresh chain. */
+    ray_graph_t* g = ray_graph_new(NULL);
+    if (!g) return ray_error("oom", NULL);
+    ray_op_t* in = ray_graph_input_vec(g, x);
+    ray_op_t* op = ray_desc_op(g, in);
+    return ray_lazy_wrap(g, op);
 }
 
 /* (iasc v) — ascending sort indices */
