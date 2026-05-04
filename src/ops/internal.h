@@ -765,6 +765,7 @@ ray_t* distinct_vec_eager(ray_t* x);
 
 /* ── sort.c ── */
 ray_t* asc_vec_eager(ray_t* x);
+ray_t* desc_vec_eager(ray_t* x);
 
 /* Group HT types and helpers — shared with pivot (exec.c) */
 #define GHT_NEED_SUM   0x01
