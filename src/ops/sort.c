@@ -3343,7 +3343,7 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
 
 /* ── Builtins ── */
 
-/* Shared eager kernel — called by OP_ASC executor and ray_asc_fn. */
+/* Shared eager kernel — called by the OP_ASC executor. */
 ray_t* asc_vec_eager(ray_t* x) {
     int64_t n = ray_len(x);
     uint8_t desc = 0;
