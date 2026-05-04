@@ -933,16 +933,28 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
     if (ray_is_vec(vec) && ray_is_atom(val)) {
         int64_t len = vec->len;
         bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        for (int64_t i = 0; i < len; i++) {
-            if (has_nulls && ray_vec_is_null(vec, i)) {
-                if (RAY_ATOM_IS_NULL(val)) return make_bool(1);
-                continue;
+        bool val_null = RAY_ATOM_IS_NULL(val);
+        if (has_nulls) {
+            for (int64_t i = 0; i < len; i++) {
+                if (ray_vec_is_null(vec, i)) {
+                    if (val_null) return make_bool(1);
+                    continue;
+                }
+                int alloc = 0;
+                ray_t* elem = collection_elem(vec, i, &alloc);
+                int eq = atom_eq(val, elem);
+                if (alloc) ray_release(elem);
+                if (eq) return make_bool(1);
             }
-            int alloc = 0;
-            ray_t* elem = collection_elem(vec, i, &alloc);
-            int eq = atom_eq(val, elem);
-            if (alloc) ray_release(elem);
-            if (eq) return make_bool(1);
+        } else {
+            if (val_null) return make_bool(0); /* no nulls in vec, null val → no match */
+            for (int64_t i = 0; i < len; i++) {
+                int alloc = 0;
+                ray_t* elem = collection_elem(vec, i, &alloc);
+                int eq = atom_eq(val, elem);
+                if (alloc) ray_release(elem);
+                if (eq) return make_bool(1);
+            }
         }
         return make_bool(0);
     }
@@ -1669,17 +1681,29 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
         int64_t len = vec->len;
         bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
         bool val_null = RAY_ATOM_IS_NULL(val);
-        for (int64_t i = 0; i < len; i++) {
-            if (has_nulls && ray_vec_is_null(vec, i)) {
-                if (val_null) return make_i64(i);
-                continue;
+        if (has_nulls) {
+            for (int64_t i = 0; i < len; i++) {
+                if (ray_vec_is_null(vec, i)) {
+                    if (val_null) return make_i64(i);
+                    continue;
+                }
+                if (val_null) continue;
+                int alloc = 0;
+                ray_t* elem = collection_elem(vec, i, &alloc);
+                int eq = atom_eq(elem, val);
+                if (alloc) ray_release(elem);
+                if (eq) return make_i64(i);
             }
-            if (val_null) continue;
-            int alloc = 0;
-            ray_t* elem = collection_elem(vec, i, &alloc);
-            int eq = atom_eq(elem, val);
-            if (alloc) ray_release(elem);
-            if (eq) return make_i64(i);
+        } else {
+            if (!val_null) {
+                for (int64_t i = 0; i < len; i++) {
+                    int alloc = 0;
+                    ray_t* elem = collection_elem(vec, i, &alloc);
+                    int eq = atom_eq(elem, val);
+                    if (alloc) ray_release(elem);
+                    if (eq) return make_i64(i);
+                }
+            }
         }
         return ray_typed_null(-RAY_I64);
     }
@@ -1727,17 +1751,26 @@ ray_t* reverse_vec_eager(ray_t* x) {
         ray_t* result = ray_vec_new(RAY_STR, len);
         if (RAY_IS_ERR(result)) return result;
         bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        for (int64_t i = 0; i < len; i++) {
-            if (has_nulls && ray_vec_is_null(x, len - 1 - i)) {
-                result = ray_str_vec_append(result, "", 0);
-                if (!RAY_IS_ERR(result))
-                    ray_vec_set_null(result, result->len - 1, true);
-            } else {
+        if (has_nulls) {
+            for (int64_t i = 0; i < len; i++) {
+                if (ray_vec_is_null(x, len - 1 - i)) {
+                    result = ray_str_vec_append(result, "", 0);
+                    if (!RAY_IS_ERR(result))
+                        ray_vec_set_null(result, result->len - 1, true);
+                } else {
+                    size_t slen;
+                    const char* sp = ray_str_vec_get(x, len - 1 - i, &slen);
+                    result = ray_str_vec_append(result, sp ? sp : "", sp ? slen : 0);
+                }
+                if (RAY_IS_ERR(result)) return result;
+            }
+        } else {
+            for (int64_t i = 0; i < len; i++) {
                 size_t slen;
                 const char* sp = ray_str_vec_get(x, len - 1 - i, &slen);
                 result = ray_str_vec_append(result, sp ? sp : "", sp ? slen : 0);
+                if (RAY_IS_ERR(result)) return result;
             }
-            if (RAY_IS_ERR(result)) return result;
         }
         return result;
     }
@@ -1751,10 +1784,15 @@ ray_t* reverse_vec_eager(ray_t* x) {
     char* src = (char*)ray_data(x);
     char* dst = (char*)ray_data(result);
     bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-    for (int64_t i = 0; i < len; i++) {
-        memcpy(dst + i * esz, src + (len - 1 - i) * esz, esz);
-        if (has_nulls && ray_vec_is_null(x, len - 1 - i))
-            ray_vec_set_null(result, i, true);
+    if (has_nulls) {
+        for (int64_t i = 0; i < len; i++) {
+            memcpy(dst + i * esz, src + (len - 1 - i) * esz, esz);
+            if (ray_vec_is_null(x, len - 1 - i))
+                ray_vec_set_null(result, i, true);
+        }
+    } else {
+        for (int64_t i = 0; i < len; i++)
+            memcpy(dst + i * esz, src + (len - 1 - i) * esz, esz);
     }
     return result;
 }
