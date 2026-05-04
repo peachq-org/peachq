@@ -55,13 +55,34 @@ static ray_op_t* rw_count_distinct(ray_graph_t* g, ray_op_t* node) {
     return repl;
 }
 
+/* (count (X v)) → (count v)  for any X that preserves cardinality
+ * (asc, desc, reverse).  We wire OP_COUNT directly over X's input,
+ * letting the orphaned sort/reverse node be swept by pass_dce.
+ */
+static ray_op_t* rw_count_passthrough(ray_graph_t* g, ray_op_t* node) {
+    ray_op_t* inner = node->inputs[0];
+    if (!inner || !inner->inputs[0]) return NULL;
+    ray_op_t* src = inner->inputs[0];
+
+    ray_op_t* repl = graph_alloc_node_opt(g);
+    if (!repl) return NULL;
+    repl->opcode    = OP_COUNT;
+    repl->arity     = 1;
+    repl->inputs[0] = src;
+    repl->out_type  = RAY_I64;
+    repl->est_rows  = 1;
+    return repl;
+}
+
 /* ---------------------------------------------------------------------------
  * Idiom table — one row per pattern.
  * ---------------------------------------------------------------------------
  */
 const ray_idiom_t ray_idioms[] = {
-    { OP_COUNT, OP_DISTINCT, NULL, rw_count_distinct,
-      "count(distinct) -> count_distinct" },
+    { OP_COUNT, OP_DISTINCT, NULL, rw_count_distinct,    "count(distinct) -> count_distinct" },
+    { OP_COUNT, OP_ASC,      NULL, rw_count_passthrough, "count(asc) -> count"               },
+    { OP_COUNT, OP_DESC,     NULL, rw_count_passthrough, "count(desc) -> count"              },
+    { OP_COUNT, OP_REVERSE,  NULL, rw_count_passthrough, "count(reverse) -> count"           },
 };
 const int ray_idioms_count = (int)(sizeof(ray_idioms) / sizeof(ray_idioms[0]));
 
