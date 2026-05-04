@@ -744,7 +744,8 @@ ray_t* call_fn1(ray_t* fn, ray_t* arg) {
         ray_t* a = arg;
         bool owned = false;
         if (!(fn->attrs & RAY_FN_LAZY_AWARE) && ray_is_lazy(a)) {
-            a = ray_lazy_materialize(a);
+            ray_retain(a);               /* give materialise its own ref; arg is borrowed */
+            a = ray_lazy_materialize(a); /* consumes the retain we just added */
             if (!a || RAY_IS_ERR(a)) return a ? a : ray_error("type", NULL);
             owned = true;
         }
@@ -773,12 +774,14 @@ ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b) {
         bool owned_a = false, owned_b = false;
         if (!(fn->attrs & RAY_FN_LAZY_AWARE)) {
             if (ray_is_lazy(la)) {
-                la = ray_lazy_materialize(la);
+                ray_retain(la);               /* give materialise its own ref; a is borrowed */
+                la = ray_lazy_materialize(la); /* consumes the retain we just added */
                 if (!la || RAY_IS_ERR(la)) return la ? la : ray_error("type", NULL);
                 owned_a = true;
             }
             if (ray_is_lazy(lb)) {
-                lb = ray_lazy_materialize(lb);
+                ray_retain(lb);               /* give materialise its own ref; b is borrowed */
+                lb = ray_lazy_materialize(lb); /* consumes the retain we just added */
                 if (!lb || RAY_IS_ERR(lb)) {
                     if (owned_a) ray_release(la);
                     return lb ? lb : ray_error("type", NULL);
@@ -1576,11 +1579,11 @@ op_call1: {
     ray_t *fn_obj = POP();
     ray_unary_fn fn = (ray_unary_fn)(uintptr_t)fn_obj->i64;
     ray_t *result;
-    /* Materialise lazy args for non-lazy-aware fns */
+    /* Materialise lazy args for non-lazy-aware fns.
+     * arg is an owned ref (POPped from VM stack); ray_lazy_materialize consumes
+     * it internally — no extra ray_release needed here. */
     if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE) && arg && ray_is_lazy(arg)) {
-        ray_t *m = ray_lazy_materialize(arg);
-        ray_release(arg);
-        arg = m;
+        arg = ray_lazy_materialize(arg); /* consumes owned ref; result is new owned ref */
         if (!arg || RAY_IS_ERR(arg)) {
             ray_release(fn_obj);
             vm_err_obj = arg ? arg : ray_error("type", NULL);
@@ -1607,12 +1610,12 @@ op_call2: {
     ray_t *fn_obj = POP();
     ray_binary_fn fn = (ray_binary_fn)(uintptr_t)fn_obj->i64;
     ray_t *result;
-    /* Materialise lazy args for non-lazy-aware fns */
+    /* Materialise lazy args for non-lazy-aware fns.
+     * left/right are owned refs (POPped from VM stack); ray_lazy_materialize
+     * consumes them internally — no extra ray_release needed after the call. */
     if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE)) {
         if (left && ray_is_lazy(left)) {
-            ray_t *m = ray_lazy_materialize(left);
-            ray_release(left);
-            left = m;
+            left = ray_lazy_materialize(left); /* consumes owned ref */
             if (!left || RAY_IS_ERR(left)) {
                 ray_release(right); ray_release(fn_obj);
                 vm_err_obj = left ? left : ray_error("type", NULL);
@@ -1620,9 +1623,7 @@ op_call2: {
             }
         }
         if (right && ray_is_lazy(right)) {
-            ray_t *m = ray_lazy_materialize(right);
-            ray_release(right);
-            right = m;
+            right = ray_lazy_materialize(right); /* consumes owned ref */
             if (!right || RAY_IS_ERR(right)) {
                 ray_release(left); ray_release(fn_obj);
                 vm_err_obj = right ? right : ray_error("type", NULL);
@@ -1733,10 +1734,10 @@ op_callf: {
         case RAY_UNARY:
             if (fn_is_restricted(fn_obj)) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("access", "restricted"); break; }
             if (n != 1) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("arity", "expected 1 arg, got %d", n); break; }
+            /* fn_args[0] is an owned ref (POPped from VM stack); materialise
+             * consumes it — no extra ray_release after the call. */
             if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE) && fn_args[0] && ray_is_lazy(fn_args[0])) {
-                ray_t *m = ray_lazy_materialize(fn_args[0]);
-                ray_release(fn_args[0]);
-                fn_args[0] = m;
+                fn_args[0] = ray_lazy_materialize(fn_args[0]); /* consumes owned ref */
                 if (!fn_args[0] || RAY_IS_ERR(fn_args[0])) { result = fn_args[0] ? fn_args[0] : ray_error("type", NULL); fn_args[0] = NULL; break; }
             }
             result = ((ray_unary_fn)(uintptr_t)fn_obj->i64)(fn_args[0]);
@@ -1745,15 +1746,15 @@ op_callf: {
         case RAY_BINARY:
             if (fn_is_restricted(fn_obj)) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("access", "restricted"); break; }
             if (n != 2) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("arity", "expected 2 args, got %d", n); break; }
+            /* fn_args[0/1] are owned refs (POPped from VM stack); materialise
+             * consumes them — no extra ray_release after each call. */
             if (!(fn_obj->attrs & RAY_FN_LAZY_AWARE)) {
                 if (fn_args[0] && ray_is_lazy(fn_args[0])) {
-                    ray_t *m = ray_lazy_materialize(fn_args[0]);
-                    ray_release(fn_args[0]); fn_args[0] = m;
+                    fn_args[0] = ray_lazy_materialize(fn_args[0]); /* consumes owned ref */
                     if (!fn_args[0] || RAY_IS_ERR(fn_args[0])) { result = fn_args[0] ? fn_args[0] : ray_error("type", NULL); fn_args[0] = NULL; ray_release(fn_args[1]); fn_args[1] = NULL; break; }
                 }
                 if (fn_args[1] && ray_is_lazy(fn_args[1])) {
-                    ray_t *m = ray_lazy_materialize(fn_args[1]);
-                    ray_release(fn_args[1]); fn_args[1] = m;
+                    fn_args[1] = ray_lazy_materialize(fn_args[1]); /* consumes owned ref */
                     if (!fn_args[1] || RAY_IS_ERR(fn_args[1])) { result = fn_args[1] ? fn_args[1] : ray_error("type", NULL); ray_release(fn_args[0]); fn_args[0] = NULL; fn_args[1] = NULL; break; }
                 }
             }
@@ -2615,11 +2616,11 @@ ray_t* ray_eval(ray_t* obj) {
             ray_t* arg = ray_eval(elems[1]);
             ray_release(head);
             if (arg && RAY_IS_ERR(arg)) { ret = arg; goto out; }
-            /* Materialise lazy arg for non-lazy-aware fns */
+            /* Materialise lazy arg for non-lazy-aware fns.
+             * arg is an owned ref (returned from ray_eval); materialise
+             * consumes it — no extra ray_release needed after the call. */
             if (!(fn_attrs & RAY_FN_LAZY_AWARE) && arg && ray_is_lazy(arg)) {
-                ray_t* m = ray_lazy_materialize(arg);
-                ray_release(arg);
-                arg = m;
+                arg = ray_lazy_materialize(arg); /* consumes owned ref */
                 if (!arg || RAY_IS_ERR(arg)) { ret = arg ? arg : ray_error("type", NULL); goto out; }
             }
             ray_t* result;
@@ -2653,19 +2654,19 @@ ray_t* ray_eval(ray_t* obj) {
                 ray_release(head); if (left) ray_release(left);
                 ret = right; goto out;
             }
-            /* Materialise lazy args for non-lazy-aware fns */
+            /* Materialise lazy args for non-lazy-aware fns.
+             * left/right are owned refs (returned from ray_eval); materialise
+             * consumes them — no extra ray_release needed after each call. */
             if (!(fn_attrs & RAY_FN_LAZY_AWARE)) {
                 if (left && ray_is_lazy(left)) {
-                    ray_t* m = ray_lazy_materialize(left);
-                    ray_release(left); left = m;
+                    left = ray_lazy_materialize(left); /* consumes owned ref */
                     if (!left || RAY_IS_ERR(left)) {
                         ray_release(head); if (right) ray_release(right);
                         ret = left ? left : ray_error("type", NULL); goto out;
                     }
                 }
                 if (right && ray_is_lazy(right)) {
-                    ray_t* m = ray_lazy_materialize(right);
-                    ray_release(right); right = m;
+                    right = ray_lazy_materialize(right); /* consumes owned ref */
                     if (!right || RAY_IS_ERR(right)) {
                         ray_release(head); if (left) ray_release(left);
                         ret = right ? right : ray_error("type", NULL); goto out;
