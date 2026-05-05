@@ -634,6 +634,261 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     return ray_i64(total_distinct);
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * Parallel partitioned grouped count(distinct).
+ *
+ * The serial kernel further down uses a single global hash keyed by
+ * (gid, val).  At high (n_rows × n_groups) the hash exceeds L3 and
+ * every probe is a cache miss — Q14 (937 K rows × 611 K groups) lands
+ * at ~200 ms even though the per-row work is microscopic.
+ *
+ * Strategy: radix-partition (gid, val) pairs into P buckets by the high
+ * bits of the composite hash, dispatch dedup of each bucket to the
+ * worker pool.  Each bucket is sized to fit in L2, so hash probes hit
+ * cache.  The dedup writes per-group distinct counts into the shared
+ * `odata` via atomic increment.
+ *
+ * Three passes:
+ *   1. cdpg_hist_fn  – per-worker histogram of partition counts.
+ *   2. cdpg_scat_fn  – scatter (gid_p1, val) pairs into a partitioned
+ *                       buffer using per-worker per-partition cursors.
+ *   3. cdpg_dedup_fn – per-partition open-addressing dedup; atomic
+ *                       fetch-add into `odata[gid]`.
+ * ════════════════════════════════════════════════════════════════════ */
+
+#define CDPG_HASH(GID_P1, VAL) ({                                       \
+    uint64_t _h_ = (uint64_t)(VAL) * 0x9E3779B97F4A7C15ULL;             \
+    _h_ ^= (uint64_t)(GID_P1) * 0xBF58476D1CE4E5B9ULL;                  \
+    _h_ ^= _h_ >> 33;                                                    \
+    _h_ *= 0xC4CEB9FE1A85EC53ULL;                                        \
+    _h_;                                                                 \
+})
+
+typedef struct {
+    /* Inputs (read-only) */
+    int8_t          in_type;
+    uint8_t         in_attrs;
+    const void*     base;
+    const int64_t*  row_gid;
+    int64_t         n_rows;
+    int64_t         n_groups;
+    bool            has_nulls;
+    const uint8_t*  null_bm;
+    uint64_t        p_mask;          /* P - 1, P = number of partitions */
+    /* Pass 1 outputs / pass 2 inputs */
+    int64_t*        hist;            /* nw × P, per-worker partition counts */
+    int64_t*        cursor;          /* nw × P, per-worker scatter cursors */
+    int64_t*        part_off;        /* P + 1, prefix offsets */
+    /* Pass 2 outputs */
+    int64_t*        gids_out;        /* total_pass entries */
+    int64_t*        vals_out;
+    /* Pass 3 outputs */
+    int64_t*        odata;           /* n_groups, atomic per-group distinct count */
+} cdpg_ctx_t;
+
+/* Read column row r as int64.  Width-typed fast path; F64 bitcasts. */
+static inline int64_t cdpg_read(const void* base, int64_t r,
+                                int8_t in_type, uint8_t esz) {
+    if (in_type == RAY_F64) {
+        double fv = ((const double*)base)[r];
+        if (fv != fv) fv = (double)NAN;
+        else if (fv == 0.0) fv = 0.0;
+        int64_t v;
+        memcpy(&v, &fv, sizeof(int64_t));
+        return v;
+    }
+    switch (esz) {
+    case 1:  return (int64_t)((const uint8_t*)base)[r];
+    case 2:  return (int64_t)((const int16_t*)base)[r];
+    case 4:  return (int64_t)((const int32_t*)base)[r];
+    default: return ((const int64_t*)base)[r];
+    }
+}
+
+static void cdpg_hist_fn(void* ctx_, uint32_t worker_id,
+                         int64_t start, int64_t end) {
+    cdpg_ctx_t* x = (cdpg_ctx_t*)ctx_;
+    int64_t* hist = x->hist + (size_t)worker_id * (x->p_mask + 1);
+    uint8_t esz = ray_sym_elem_size(x->in_type, x->in_attrs);
+    for (int64_t r = start; r < end; r++) {
+        int64_t gid = x->row_gid[r];
+        if (gid < 0 || gid >= x->n_groups) continue;
+        if (x->has_nulls && x->null_bm &&
+            ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
+        int64_t val = cdpg_read(x->base, r, x->in_type, esz);
+        uint64_t h = CDPG_HASH(gid + 1, val);
+        hist[h & x->p_mask]++;
+    }
+}
+
+static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
+                         int64_t start, int64_t end) {
+    cdpg_ctx_t* x = (cdpg_ctx_t*)ctx_;
+    int64_t* cur = x->cursor + (size_t)worker_id * (x->p_mask + 1);
+    uint8_t esz = ray_sym_elem_size(x->in_type, x->in_attrs);
+    for (int64_t r = start; r < end; r++) {
+        int64_t gid = x->row_gid[r];
+        if (gid < 0 || gid >= x->n_groups) continue;
+        if (x->has_nulls && x->null_bm &&
+            ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
+        int64_t val = cdpg_read(x->base, r, x->in_type, esz);
+        int64_t gid_p1 = gid + 1;
+        uint64_t h = CDPG_HASH(gid_p1, val);
+        int64_t pos = cur[h & x->p_mask]++;
+        x->gids_out[pos] = gid_p1;
+        x->vals_out[pos] = val;
+    }
+}
+
+/* Per-partition dedup: open-addressing hash sized for the partition, then
+ * atomic fetch-add into odata[gid] for each new distinct (gid, val). */
+static void cdpg_dedup_fn(void* ctx_, uint32_t worker_id,
+                          int64_t start, int64_t end) {
+    (void)worker_id;
+    cdpg_ctx_t* x = (cdpg_ctx_t*)ctx_;
+    for (int64_t p = start; p < end; p++) {
+        int64_t off = x->part_off[p];
+        int64_t cnt = x->part_off[p + 1] - off;
+        if (cnt == 0) continue;
+
+        uint64_t cap = (uint64_t)cnt * 2;
+        if (cap < 32) cap = 32;
+        uint64_t c = 1;
+        while (c && c < cap) c <<= 1;
+        if (!c) continue;
+        cap = c;
+        uint64_t mask = cap - 1;
+
+        ray_t* k_hdr = NULL;
+        ray_t* v_hdr = NULL;
+        int64_t* slot_gid = (int64_t*)scratch_calloc(&k_hdr,
+                                                     (size_t)cap * sizeof(int64_t));
+        int64_t* slot_val = (int64_t*)scratch_alloc(&v_hdr,
+                                                    (size_t)cap * sizeof(int64_t));
+        if (!slot_gid || !slot_val) {
+            if (k_hdr) scratch_free(k_hdr);
+            if (v_hdr) scratch_free(v_hdr);
+            continue;
+        }
+
+        const int64_t* gids = x->gids_out + off;
+        const int64_t* vals = x->vals_out + off;
+        for (int64_t i = 0; i < cnt; i++) {
+            int64_t gid_p1 = gids[i];
+            int64_t val    = vals[i];
+            uint64_t h = CDPG_HASH(gid_p1, val);
+            uint64_t slot = h & mask;
+            for (;;) {
+                int64_t cur = slot_gid[slot];
+                if (cur == 0) {
+                    slot_gid[slot] = gid_p1;
+                    slot_val[slot] = val;
+                    __atomic_fetch_add(&x->odata[gid_p1 - 1], 1,
+                                       __ATOMIC_RELAXED);
+                    break;
+                }
+                if (cur == gid_p1 && slot_val[slot] == val) break;
+                slot = (slot + 1) & mask;
+            }
+        }
+        scratch_free(k_hdr);
+        scratch_free(v_hdr);
+    }
+}
+
+/* Returns the populated `out` vector on success, or NULL to fall through
+ * to the serial path on dispatch / allocation failure. */
+static ray_t* count_distinct_per_group_parallel(
+        ray_t* src, const int64_t* row_gid,
+        int64_t n_rows, int64_t n_groups, ray_t* out)
+{
+    ray_pool_t* pool = ray_pool_get();
+    if (!pool) return NULL;
+    uint32_t nw = ray_pool_total_workers(pool);
+    if (nw < 2) return NULL;
+
+    /* Partition count: balance per-partition L2 fit vs. dispatch overhead.
+     * 64 partitions on 28 workers gives 2.28 partitions per worker plus
+     * room for skew; per-partition dedup data ~2 × (n_rows/64) × 16 B
+     * which is well inside L2 even on 1 M-row inputs. */
+    uint8_t p_bits = 6;
+    uint64_t P = (uint64_t)1 << p_bits;
+    uint64_t p_mask = P - 1;
+
+    cdpg_ctx_t ctx = {
+        .in_type = src->type,
+        .in_attrs = src->attrs,
+        .base = ray_data(src),
+        .row_gid = row_gid,
+        .n_rows = n_rows,
+        .n_groups = n_groups,
+        .has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0,
+        .null_bm = NULL,
+        .p_mask = p_mask,
+        .odata = (int64_t*)ray_data(out),
+    };
+    if (ctx.has_nulls)
+        ctx.null_bm = ray_vec_nullmap_bytes(src, NULL, NULL);
+
+    /* Pass 1: histogram. */
+    ray_t* hist_hdr = NULL;
+    ctx.hist = (int64_t*)scratch_calloc(&hist_hdr,
+                                        (size_t)P * nw * sizeof(int64_t));
+    if (!ctx.hist) { return NULL; }
+    ray_pool_dispatch(pool, cdpg_hist_fn, &ctx, n_rows);
+
+    /* Compute partition prefix offsets and per-(worker, partition) cursors.
+     * Layout: out_buf is laid out as
+     *   partition_0 [worker_0 worker_1 …] partition_1 [worker_0 …] …
+     * so each (worker, partition) range is contiguous. */
+    ray_t* off_hdr = NULL;
+    ctx.part_off = (int64_t*)scratch_alloc(&off_hdr,
+                                           (size_t)(P + 1) * sizeof(int64_t));
+    ray_t* cur_hdr = NULL;
+    ctx.cursor = (int64_t*)scratch_alloc(&cur_hdr,
+                                         (size_t)P * nw * sizeof(int64_t));
+    if (!ctx.part_off || !ctx.cursor) {
+        if (off_hdr) scratch_free(off_hdr);
+        if (cur_hdr) scratch_free(cur_hdr);
+        scratch_free(hist_hdr);
+        return NULL;
+    }
+    int64_t total = 0;
+    for (uint64_t p = 0; p < P; p++) {
+        ctx.part_off[p] = total;
+        for (uint32_t w = 0; w < nw; w++) {
+            ctx.cursor[(size_t)w * P + p] = total;
+            total += ctx.hist[(size_t)w * P + p];
+        }
+    }
+    ctx.part_off[P] = total;
+
+    /* Pass 2: scatter (gid+1, val) pairs into partitioned out_buf. */
+    ray_t* gids_hdr = NULL;
+    ray_t* vals_hdr = NULL;
+    ctx.gids_out = (int64_t*)scratch_alloc(&gids_hdr,
+                                           (size_t)total * sizeof(int64_t));
+    ctx.vals_out = (int64_t*)scratch_alloc(&vals_hdr,
+                                           (size_t)total * sizeof(int64_t));
+    if (!ctx.gids_out || !ctx.vals_out) {
+        if (gids_hdr) scratch_free(gids_hdr);
+        if (vals_hdr) scratch_free(vals_hdr);
+        scratch_free(cur_hdr); scratch_free(off_hdr); scratch_free(hist_hdr);
+        return NULL;
+    }
+    if (total > 0)
+        ray_pool_dispatch(pool, cdpg_scat_fn, &ctx, n_rows);
+
+    /* Pass 3: per-partition dedup; atomic odata[gid]++ on each new pair. */
+    if (total > 0)
+        ray_pool_dispatch_n(pool, cdpg_dedup_fn, &ctx, (uint32_t)P);
+
+    scratch_free(vals_hdr); scratch_free(gids_hdr);
+    scratch_free(cur_hdr);  scratch_free(off_hdr);
+    scratch_free(hist_hdr);
+    return out;
+}
+
 /* Grouped count(distinct): single global hash keyed by (group_id, value).
  * One linear pass over all rows, O(n) total instead of O(per-group setup *
  * n_groups).  Returns an I64 vector of length n_groups with the per-group
@@ -669,6 +924,17 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
     int64_t* odata = (int64_t*)ray_data(out);
     memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
     if (n_rows == 0 || n_groups == 0) return out;
+
+    /* Parallel partitioned path for sizes where the serial global hash
+     * blows L3.  Threshold tuned so the partition / scatter / dedup
+     * dispatch overhead stays smaller than the cache-miss savings. */
+    if (n_rows >= 200000) {
+        ray_t* par = count_distinct_per_group_parallel(src, row_gid,
+                                                        n_rows, n_groups, out);
+        if (par) return par;
+        /* par == NULL → no pool / OOM in scratch alloc → fall through to
+         * serial path with the already-allocated `out` (still zeroed). */
+    }
 
     /* Pick capacity ≥ 2 × n_rows rounded up to power of two.  This bounds
      * load factor at 0.5 even when every (gid, val) pair is distinct. */
