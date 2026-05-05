@@ -324,6 +324,15 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         return ray_error("type", NULL);
     }
 
+    if (ray_is_atom(input)) {
+        if (op->opcode == OP_COUNT) {
+            if ((-input->type) == RAY_STR)
+                return ray_i64((int64_t)ray_str_len(input));
+            return ray_i64(1);
+        }
+        return ray_error("type", NULL);
+    }
+
     int8_t in_type = input->type;
     int64_t len = input->len;
 
