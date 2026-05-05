@@ -218,7 +218,275 @@ static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_t
      * and the last worker's last is the global last. */
 }
 
-/* Hash-based count distinct for integer/float columns */
+/* Hash mixing constants used by the count-distinct kernel and helpers. */
+#define CD_HASH_K1 0x9E3779B97F4A7C15ULL
+#define CD_HASH_K2 0xBF58476D1CE4E5B9ULL
+
+/* Per-partition hash-distinct.  Each worker is given a contiguous slice
+ * of partition payloads (already grouped by hash high bits) and counts
+ * distinct values within.  Since distinct values are guaranteed to fall
+ * into the same partition, the global distinct count is the sum of
+ * per-partition counts. */
+typedef struct {
+    int64_t* values;       /* concatenated partition payloads */
+    int64_t* part_off;     /* P+1 prefix sums, partition boundaries */
+    int64_t* part_count;   /* OUT: per-partition distinct count */
+} cd_part_ctx_t;
+
+static void cd_part_dedup_fn(void* ctx, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    (void)worker_id;
+    cd_part_ctx_t* x = (cd_part_ctx_t*)ctx;
+    for (int64_t p = start; p < end; p++) {
+        int64_t off = x->part_off[p];
+        int64_t cnt = x->part_off[p + 1] - off;
+        if (cnt == 0) { x->part_count[p] = 0; continue; }
+
+        uint64_t cap = (uint64_t)cnt * 2;
+        if (cap < 32) cap = 32;
+        uint64_t c = 1;
+        while (c && c < cap) c <<= 1;
+        if (!c) { x->part_count[p] = -1; continue; }
+        cap = c;
+        uint64_t mask = cap - 1;
+
+        ray_t* set_hdr  = NULL;
+        ray_t* used_hdr = NULL;
+        int64_t* set    = (int64_t*)scratch_alloc (&set_hdr,
+                                                   (size_t)cap * sizeof(int64_t));
+        uint8_t* used   = (uint8_t*)scratch_calloc(&used_hdr,
+                                                   (size_t)cap * sizeof(uint8_t));
+        if (!set || !used) {
+            if (set_hdr)  scratch_free(set_hdr);
+            if (used_hdr) scratch_free(used_hdr);
+            x->part_count[p] = -1;
+            continue;
+        }
+
+        int64_t* base = x->values + off;
+        int64_t distinct = 0;
+        for (int64_t i = 0; i < cnt; i++) {
+            int64_t v = base[i];
+            uint64_t h = (uint64_t)v * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t slot = h & mask;
+            while (used[slot]) {
+                if (set[slot] == v) goto cd_next;
+                slot = (slot + 1) & mask;
+            }
+            set[slot]  = v;
+            used[slot] = 1;
+            distinct++;
+            cd_next:;
+        }
+        scratch_free(set_hdr);
+        scratch_free(used_hdr);
+        x->part_count[p] = distinct;
+    }
+}
+
+/* Width-specialised value extraction for the partition pass.  Reading
+ * row-by-row through read_col_i64 was the dispatch overhead in the
+ * sequential path; specialising on the column width lets the autovec
+ * pass tighten the loop. */
+typedef struct {
+    const void* base;
+    int64_t*    counts;        /* P per-partition row counts (per worker) */
+    uint32_t    p_bits;
+    uint64_t    p_mask;
+    uint8_t     stride_log2;   /* log2(elem size) for plain int paths */
+    uint8_t     is_f64;
+    int8_t      type;
+    uint8_t     attrs;
+} cd_count_ctx_t;
+
+/* Count rows per partition (per worker, into worker-local slot).  Two
+ * passes: this one fills the histograms; the next does the scatter. */
+static void cd_hist_fn(void* ctx, uint32_t worker_id,
+                       int64_t start, int64_t end) {
+    cd_count_ctx_t* x = (cd_count_ctx_t*)ctx;
+    int64_t* hist = x->counts + (size_t)worker_id * (x->p_mask + 1);
+    const void* base = x->base;
+    int8_t in_type = x->type;
+    uint8_t in_attrs = x->attrs;
+    uint64_t p_mask = x->p_mask;
+    if (x->is_f64) {
+        const double* d = (const double*)base;
+        for (int64_t i = start; i < end; i++) {
+            double fv = d[i];
+            if (fv != fv) fv = (double)NAN;
+            else if (fv == 0.0) fv = 0.0;
+            int64_t val;
+            memcpy(&val, &fv, sizeof(int64_t));
+            uint64_t h = (uint64_t)val * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t p = (h ^ (h >> 33)) & p_mask;
+            hist[p]++;
+        }
+    } else if (in_type == RAY_I64 || in_type == RAY_TIMESTAMP) {
+        const int64_t* d = (const int64_t*)base;
+        for (int64_t i = start; i < end; i++) {
+            int64_t val = d[i];
+            uint64_t h = (uint64_t)val * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t p = (h ^ (h >> 33)) & p_mask;
+            hist[p]++;
+        }
+    } else if (in_type == RAY_I32 || in_type == RAY_DATE || in_type == RAY_TIME) {
+        const int32_t* d = (const int32_t*)base;
+        for (int64_t i = start; i < end; i++) {
+            int64_t val = d[i];
+            uint64_t h = (uint64_t)val * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t p = (h ^ (h >> 33)) & p_mask;
+            hist[p]++;
+        }
+    } else if (in_type == RAY_I16) {
+        const int16_t* d = (const int16_t*)base;
+        for (int64_t i = start; i < end; i++) {
+            int64_t val = d[i];
+            uint64_t h = (uint64_t)val * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t p = (h ^ (h >> 33)) & p_mask;
+            hist[p]++;
+        }
+    } else if (in_type == RAY_BOOL || in_type == RAY_U8) {
+        const uint8_t* d = (const uint8_t*)base;
+        for (int64_t i = start; i < end; i++) {
+            int64_t val = d[i];
+            uint64_t h = (uint64_t)val * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t p = (h ^ (h >> 33)) & p_mask;
+            hist[p]++;
+        }
+    } else if (in_type == RAY_SYM) {
+        for (int64_t i = start; i < end; i++) {
+            int64_t val = read_col_i64(base, i, in_type, in_attrs);
+            uint64_t h = (uint64_t)val * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t p = (h ^ (h >> 33)) & p_mask;
+            hist[p]++;
+        }
+    }
+}
+
+typedef struct {
+    const void* base;
+    int64_t*    out_buf;       /* concatenated payloads (output) */
+    int64_t*    cursor;        /* per-worker × P; advances per scatter */
+    uint32_t    p_bits;
+    uint64_t    p_mask;
+    uint8_t     is_f64;
+    int8_t      type;
+    uint8_t     attrs;
+} cd_scatter_ctx_t;
+
+static void cd_scatter_fn(void* ctx, uint32_t worker_id,
+                          int64_t start, int64_t end) {
+    cd_scatter_ctx_t* x = (cd_scatter_ctx_t*)ctx;
+    int64_t* cur = x->cursor + (size_t)worker_id * (x->p_mask + 1);
+    int64_t* out = x->out_buf;
+    const void* base = x->base;
+    int8_t in_type = x->type;
+    uint8_t in_attrs = x->attrs;
+    uint64_t p_mask = x->p_mask;
+    #define SCATTER_BODY(LOAD)                                                \
+        for (int64_t i = start; i < end; i++) {                               \
+            int64_t val = (LOAD);                                             \
+            uint64_t h = (uint64_t)val * CD_HASH_K1;                          \
+            h ^= h >> 33;                                                     \
+            uint64_t p = (h ^ (h >> 33)) & p_mask;                            \
+            out[cur[p]++] = val;                                              \
+        }
+    if (x->is_f64) {
+        const double* d = (const double*)base;
+        for (int64_t i = start; i < end; i++) {
+            double fv = d[i];
+            if (fv != fv) fv = (double)NAN;
+            else if (fv == 0.0) fv = 0.0;
+            int64_t val;
+            memcpy(&val, &fv, sizeof(int64_t));
+            uint64_t h = (uint64_t)val * CD_HASH_K1;
+            h ^= h >> 33;
+            uint64_t p = (h ^ (h >> 33)) & p_mask;
+            out[cur[p]++] = val;
+        }
+    } else if (in_type == RAY_I64 || in_type == RAY_TIMESTAMP) {
+        const int64_t* d = (const int64_t*)base;
+        SCATTER_BODY(d[i])
+    } else if (in_type == RAY_I32 || in_type == RAY_DATE || in_type == RAY_TIME) {
+        const int32_t* d = (const int32_t*)base;
+        SCATTER_BODY(d[i])
+    } else if (in_type == RAY_I16) {
+        const int16_t* d = (const int16_t*)base;
+        SCATTER_BODY(d[i])
+    } else if (in_type == RAY_BOOL || in_type == RAY_U8) {
+        const uint8_t* d = (const uint8_t*)base;
+        SCATTER_BODY(d[i])
+    } else { /* RAY_SYM */
+        SCATTER_BODY(read_col_i64(base, i, in_type, in_attrs))
+    }
+    #undef SCATTER_BODY
+}
+
+/* Sequential fallback for small inputs / when the pool isn't available.
+ * Same algorithm as the original: open-addressing hash set, single pass. */
+static int64_t cd_seq_count(int8_t in_type, uint8_t in_attrs,
+                            const void* base, int64_t len) {
+    uint64_t cap = (uint64_t)(len < 16 ? 32 : len) * 2;
+    uint64_t c = 1;
+    while (c && c < cap) c <<= 1;
+    if (!c) return -1;
+    cap = c;
+    uint64_t mask = cap - 1;
+
+    ray_t* set_hdr  = NULL;
+    ray_t* used_hdr = NULL;
+    int64_t* set    = (int64_t*)scratch_alloc (&set_hdr,  (size_t)cap * sizeof(int64_t));
+    uint8_t* used   = (uint8_t*)scratch_calloc(&used_hdr, (size_t)cap * sizeof(uint8_t));
+    if (!set || !used) {
+        if (set_hdr) scratch_free(set_hdr);
+        if (used_hdr) scratch_free(used_hdr);
+        return -1;
+    }
+    int64_t count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t val;
+        if (in_type == RAY_F64) {
+            double fv = ((const double*)base)[i];
+            if (fv != fv) fv = (double)NAN;
+            else if (fv == 0.0) fv = 0.0;
+            memcpy(&val, &fv, sizeof(int64_t));
+        } else {
+            val = read_col_i64(base, i, in_type, in_attrs);
+        }
+        uint64_t h = (uint64_t)val * CD_HASH_K1;
+        uint64_t slot = h & mask;
+        while (used[slot]) {
+            if (set[slot] == val) goto cd_seq_next;
+            slot = (slot + 1) & mask;
+        }
+        set[slot]  = val;
+        used[slot] = 1;
+        count++;
+        cd_seq_next:;
+    }
+    scratch_free(set_hdr);
+    scratch_free(used_hdr);
+    return count;
+}
+
+/* Hash-based count distinct for integer/float columns.
+ *
+ * Strategy:
+ *  - small inputs            → sequential single-pass hash set (low overhead).
+ *  - large inputs            → radix-partition by hash high bits across the
+ *                              worker pool, then dedup each partition in
+ *                              parallel.  Each partition fits L2, eliminating
+ *                              the cache-miss-per-probe pattern of one giant
+ *                              global set.  Distinct values land in the same
+ *                              partition, so the global count is the sum of
+ *                              per-partition counts. */
 ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     (void)g; (void)op;
     if (!input || RAY_IS_ERR(input)) return input;
@@ -228,7 +496,162 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
     if (len == 0) return ray_i64(0);
 
-    /* Only numeric/ordinal/sym column types are supported */
+    switch (in_type) {
+    case RAY_BOOL: case RAY_U8:
+    case RAY_I16: case RAY_I32: case RAY_I64:
+    case RAY_F64: case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
+    case RAY_SYM:
+        break;
+    case RAY_STR:
+    case RAY_GUID:
+    case RAY_LIST: {
+        /* The hash kernel only handles fixed-width scalar types.  For
+         * STR / GUID / LIST the rewrite-aware path is to delegate to
+         * distinct_vec_eager (which uses the row-aware hashset_t) and
+         * count its result.  Slower than the radix kernel but correct. */
+        ray_t* dist = distinct_vec_eager(input);
+        if (!dist || RAY_IS_ERR(dist)) return dist ? dist : ray_error("oom", NULL);
+        int64_t cnt = ray_len(dist);
+        ray_release(dist);
+        return ray_i64(cnt);
+    }
+    default:
+        return ray_error("type", NULL);
+    }
+
+    void* base = ray_data(input);
+    ray_pool_t* pool = ray_pool_get();
+
+    /* Small-input fast path: per-row dispatch overhead would dwarf the
+     * actual work. */
+    if (!pool || len < (1 << 16)) {
+        int64_t cnt = cd_seq_count(in_type, input->attrs, base, len);
+        if (cnt < 0) return ray_error("oom", NULL);
+        return ray_i64(cnt);
+    }
+
+    uint32_t nw = ray_pool_total_workers(pool);
+
+    /* Partition count: a small power of two ≥ nw, capped so per-partition
+     * sets stay in L2.  16 works well for nw=28; 32 for >32 workers.  */
+    uint32_t p_bits;
+    if (nw <= 8) p_bits = 4;       /* 16 partitions */
+    else if (nw <= 32) p_bits = 5;  /* 32 partitions */
+    else p_bits = 6;                /* 64 partitions */
+    uint64_t P = (uint64_t)1 << p_bits;
+    uint64_t p_mask = P - 1;
+
+    /* Pass 1: per-worker histogram (P × nw int64 cells). */
+    ray_t* hist_hdr = NULL;
+    int64_t* hist = (int64_t*)scratch_calloc(&hist_hdr,
+                                             (size_t)P * nw * sizeof(int64_t));
+    if (!hist) {
+        return ray_error("oom", NULL);
+    }
+    cd_count_ctx_t hctx = {
+        .base = base, .counts = hist,
+        .p_bits = p_bits, .p_mask = p_mask,
+        .stride_log2 = 0, .is_f64 = (in_type == RAY_F64),
+        .type = in_type, .attrs = input->attrs,
+    };
+    ray_pool_dispatch(pool, cd_hist_fn, &hctx, len);
+
+    /* Convert per-worker histograms into a global prefix sum.  Order:
+     * partition_0_worker_0, partition_0_worker_1, …, partition_1_worker_0, …
+     * so each (worker, partition) range is a contiguous slice of out_buf. */
+    ray_t* off_hdr = NULL;
+    int64_t* part_off = (int64_t*)scratch_alloc(&off_hdr,
+                                                (size_t)(P + 1) * sizeof(int64_t));
+    if (!part_off) { scratch_free(hist_hdr); return ray_error("oom", NULL); }
+    ray_t* cur_hdr = NULL;
+    int64_t* cursor = (int64_t*)scratch_alloc(&cur_hdr,
+                                              (size_t)P * nw * sizeof(int64_t));
+    if (!cursor) {
+        scratch_free(off_hdr); scratch_free(hist_hdr);
+        return ray_error("oom", NULL);
+    }
+
+    int64_t total = 0;
+    for (uint64_t p = 0; p < P; p++) {
+        part_off[p] = total;
+        for (uint32_t w = 0; w < nw; w++) {
+            cursor[(size_t)w * P + p] = total;
+            total += hist[(size_t)w * P + p];
+        }
+    }
+    part_off[P] = total;
+
+    /* Sanity: total must equal len. */
+    if (total != len) {
+        scratch_free(cur_hdr); scratch_free(off_hdr); scratch_free(hist_hdr);
+        return ray_error("nyi", "count_distinct: histogram mismatch");
+    }
+
+    /* Pass 2: scatter values into out_buf. */
+    ray_t* buf_hdr = NULL;
+    int64_t* out_buf = (int64_t*)scratch_alloc(&buf_hdr,
+                                               (size_t)len * sizeof(int64_t));
+    if (!out_buf) {
+        scratch_free(cur_hdr); scratch_free(off_hdr); scratch_free(hist_hdr);
+        return ray_error("oom", NULL);
+    }
+    cd_scatter_ctx_t sctx = {
+        .base = base, .out_buf = out_buf, .cursor = cursor,
+        .p_bits = p_bits, .p_mask = p_mask,
+        .is_f64 = (in_type == RAY_F64),
+        .type = in_type, .attrs = input->attrs,
+    };
+    ray_pool_dispatch(pool, cd_scatter_fn, &sctx, len);
+
+    /* Pass 3: dedup each partition in parallel.  Each partition gets one
+     * task — distinct values land in the same partition, so per-partition
+     * sums give the global distinct count. */
+    ray_t* pcnt_hdr = NULL;
+    int64_t* part_count = (int64_t*)scratch_alloc(&pcnt_hdr,
+                                                  (size_t)P * sizeof(int64_t));
+    if (!part_count) {
+        scratch_free(buf_hdr); scratch_free(cur_hdr);
+        scratch_free(off_hdr); scratch_free(hist_hdr);
+        return ray_error("oom", NULL);
+    }
+    cd_part_ctx_t dctx = {
+        .values = out_buf, .part_off = part_off, .part_count = part_count,
+    };
+    ray_pool_dispatch_n(pool, cd_part_dedup_fn, &dctx, (uint32_t)P);
+
+    int64_t total_distinct = 0;
+    for (uint64_t p = 0; p < P; p++) {
+        if (part_count[p] < 0) {
+            scratch_free(pcnt_hdr); scratch_free(buf_hdr); scratch_free(cur_hdr);
+            scratch_free(off_hdr); scratch_free(hist_hdr);
+            return ray_error("oom", NULL);
+        }
+        total_distinct += part_count[p];
+    }
+
+    scratch_free(pcnt_hdr); scratch_free(buf_hdr); scratch_free(cur_hdr);
+    scratch_free(off_hdr); scratch_free(hist_hdr);
+    return ray_i64(total_distinct);
+}
+
+/* Grouped count(distinct): single global hash keyed by (group_id, value).
+ * One linear pass over all rows, O(n) total instead of O(per-group setup *
+ * n_groups).  Returns an I64 vector of length n_groups with the per-group
+ * distinct count.  Rows whose row_gid[r] < 0 are skipped.
+ *
+ * Supported value types: integers / SYM / TIMESTAMP / DATE / TIME / F64.
+ * Caller is responsible for verifying the type up-front (it should match
+ * exec_count_distinct's whitelist) and returning NULL on miss so the
+ * legacy per-group fallback handles unsupported configs.
+ *
+ * Cap selection: 2 * n_rows rounded to power of 2.  Worst case all rows
+ * are distinct pairs → load factor 0.5, no rehash needed.  Slot stores
+ * gid+1 (so 0 means empty) and the int64-encoded value.  64-bit composite
+ * hash mixes both halves so rare-gid collisions don't cluster. */
+ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
+                                    int64_t n_rows, int64_t n_groups) {
+    if (!src || RAY_IS_ERR(src) || n_groups < 0) return ray_error("domain", NULL);
+    int8_t in_type = src->type;
     switch (in_type) {
     case RAY_BOOL: case RAY_U8:
     case RAY_I16: case RAY_I32: case RAY_I64:
@@ -236,62 +659,87 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     case RAY_SYM:
         break;
     default:
-        return ray_error("type", NULL);
+        return NULL; /* unsupported — caller falls back. */
     }
+    if (src->len < n_rows) return ray_error("domain", NULL);
 
-    /* Use a simple open-addressing hash set for int64 values */
-    uint64_t cap = (uint64_t)(len < 16 ? 32 : len) * 2;
-    /* Round up to power of 2 */
+    ray_t* out = ray_vec_new(RAY_I64, n_groups);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    out->len = n_groups;
+    int64_t* odata = (int64_t*)ray_data(out);
+    memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
+    if (n_rows == 0 || n_groups == 0) return out;
+
+    /* Pick capacity ≥ 2 * n_rows rounded up to power of two.  This bounds
+     * load factor at 0.5 even when every (gid,val) pair is distinct. */
+    uint64_t cap = (uint64_t)n_rows * 2;
+    if (cap < 32) cap = 32;
     uint64_t c = 1;
     while (c && c < cap) c <<= 1;
-    if (!c) return ray_error("oom", NULL); /* overflow: cap too large */
+    if (!c) { ray_release(out); return ray_error("oom", NULL); }
     cap = c;
+    uint64_t mask = cap - 1;
 
-    ray_t* set_hdr;
-    int64_t* set = (int64_t*)scratch_calloc(&set_hdr,
-                                             (size_t)cap * sizeof(int64_t));
-    ray_t* used_hdr;
-    uint8_t* used = (uint8_t*)scratch_calloc(&used_hdr,
-                                              (size_t)cap * sizeof(uint8_t));
-    if (!set || !used) {
-        if (set_hdr) scratch_free(set_hdr);
-        if (used_hdr) scratch_free(used_hdr);
+    /* Slot layout: parallel arrays of (gid_plus_one, value).  gid_plus_one
+     * == 0 means slot is empty; storing gid+1 lets us skip a separate
+     * `used` bitmap.  Both arrays are scratch_alloc so they go through
+     * the slab/heap fast path. */
+    ray_t* k_hdr = NULL;
+    ray_t* v_hdr = NULL;
+    int64_t* slot_gid = (int64_t*)scratch_calloc(&k_hdr,
+                                                 (size_t)cap * sizeof(int64_t));
+    int64_t* slot_val = (int64_t*)scratch_alloc(&v_hdr,
+                                                (size_t)cap * sizeof(int64_t));
+    if (!slot_gid || !slot_val) {
+        if (k_hdr) scratch_free(k_hdr);
+        if (v_hdr) scratch_free(v_hdr);
+        ray_release(out);
         return ray_error("oom", NULL);
     }
 
-    int64_t count = 0;
-    uint64_t mask = cap - 1;
-    void* base = ray_data(input);
+    void* base = ray_data(src);
+    bool has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    const uint8_t* null_bm = has_nulls ? ray_vec_nullmap_bytes(src, NULL, NULL)
+                                        : NULL;
 
-    for (int64_t i = 0; i < len; i++) {
+    for (int64_t r = 0; r < n_rows; r++) {
+        int64_t gid = row_gid[r];
+        if (gid < 0 || gid >= n_groups) continue;
+        if (has_nulls && null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
+
         int64_t val;
         if (in_type == RAY_F64) {
-            double fv = ((double*)base)[i];
-            /* Normalize: NaN → canonical NaN, -0.0 → +0.0 */
-            if (fv != fv) fv = (double)NAN;        /* canonical NaN */
-            else if (fv == 0.0) fv = 0.0;          /* +0.0 */
+            double fv = ((double*)base)[r];
+            if (fv != fv) fv = (double)NAN;
+            else if (fv == 0.0) fv = 0.0;
             memcpy(&val, &fv, sizeof(int64_t));
         } else {
-            val = read_col_i64(base, i, in_type, input->attrs);
+            val = read_col_i64(base, r, in_type, src->attrs);
         }
 
-        /* Open-addressing linear probe */
+        int64_t gid_p1 = gid + 1;
+        /* Mix gid and val so groups don't form long runs of collisions. */
         uint64_t h = (uint64_t)val * 0x9E3779B97F4A7C15ULL;
+        h ^= (uint64_t)gid_p1 * 0xBF58476D1CE4E5B9ULL;
+        h ^= h >> 33;
+        h *= 0xC4CEB9FE1A85EC53ULL;
         uint64_t slot = h & mask;
-        while (used[slot]) {
-            if (set[slot] == val) goto next_val;
+        for (;;) {
+            int64_t cur = slot_gid[slot];
+            if (cur == 0) {
+                slot_gid[slot] = gid_p1;
+                slot_val[slot] = val;
+                odata[gid]++;
+                break;
+            }
+            if (cur == gid_p1 && slot_val[slot] == val) break;
             slot = (slot + 1) & mask;
         }
-        /* New distinct value */
-        set[slot] = val;
-        used[slot] = 1;
-        count++;
-        next_val:;
     }
 
-    scratch_free(set_hdr);
-    scratch_free(used_hdr);
-    return ray_i64(count);
+    scratch_free(k_hdr);
+    scratch_free(v_hdr);
+    return out;
 }
 
 ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {

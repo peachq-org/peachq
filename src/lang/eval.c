@@ -875,10 +875,6 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
         case 1: for (int64_t i = 0; i < n; i++) dst[i] = src[idx[i]]; break;
         default: for (int64_t i = 0; i < n; i++) memcpy(dst + i*esz, src + idx[i]*esz, esz); break;
         }
-        if (vec->sym_dict) {
-            ray_retain(vec->sym_dict);
-            result->sym_dict = vec->sym_dict;
-        }
         if (has_nulls) {
             for (int64_t i = 0; i < n; i++)
                 if (ray_vec_is_null(vec, idx[i]))
@@ -2280,7 +2276,12 @@ static void ray_register_builtins(void) {
     register_vary("update",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_update_fn);
     register_vary("insert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_insert_fn);
     register_vary("upsert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_upsert_fn);
-    register_binary("xbar",    RAY_FN_ATOMIC, ray_xbar_fn);
+    /* xbar is registered NON-atomic so the call path lands in
+     * ray_xbar_fn(VEC, scalar) directly.  ray_xbar_fn handles the
+     * vector fast path itself (tight per-element loop, no per-atom
+     * allocation) and recurses through atomic_map_binary for the rare
+     * (collection, collection) zip case. */
+    register_binary("xbar",    RAY_FN_NONE,   ray_xbar_fn);
 
     /* Join operations */
     register_vary("left-join",   RAY_FN_NONE, ray_left_join_fn);
@@ -2294,6 +2295,8 @@ static void ray_register_builtins(void) {
     register_vary("println",    RAY_FN_NONE, ray_println_fn);
     register_vary("show",       RAY_FN_NONE, ray_show_fn);
     register_vary("format",     RAY_FN_NONE, ray_format_fn);
+    register_vary("read-csv",   RAY_FN_RESTRICTED, ray_read_csv_fn);
+    register_vary("write-csv",  RAY_FN_RESTRICTED, ray_write_csv_fn);
     register_vary(".csv.read",  RAY_FN_RESTRICTED, ray_read_csv_fn);
     register_vary(".csv.write", RAY_FN_RESTRICTED, ray_write_csv_fn);
     register_binary("as",       RAY_FN_NONE, ray_cast_fn);

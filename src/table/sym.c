@@ -834,6 +834,32 @@ uint32_t ray_sym_count(void) {
 }
 
 /* --------------------------------------------------------------------------
+ * ray_sym_strings_borrow
+ *
+ * Single-shot snapshot of the sym→string table for hot read-only
+ * scanners (LIKE, dictionary projection, …).  ray_sym_str takes a spin
+ * lock per call; iterating all 1.7M URL dict entries via ray_sym_str
+ * means 1.7M lock acquisitions.  This routine takes the lock once,
+ * captures the array pointer + length, drops the lock, and lets the
+ * caller iterate lock-free.
+ *
+ * Validity: only safe during read-only phases (no concurrent
+ * ray_sym_intern).  ray_sym_intern can realloc g_sym.strings, after
+ * which the returned pointer is dangling.  Today's pipeline is one
+ * pass: bulk-intern at CSV load, then run queries against the frozen
+ * table — exactly the contract this borrow form needs.
+ * -------------------------------------------------------------------------- */
+void ray_sym_strings_borrow(ray_t*** out_strings, uint32_t* out_count) {
+    if (out_strings) *out_strings = NULL;
+    if (out_count)   *out_count   = 0;
+    if (!atomic_load_explicit(&g_sym_inited, memory_order_acquire)) return;
+    sym_lock();
+    if (out_strings) *out_strings = g_sym.strings;
+    if (out_count)   *out_count   = g_sym.str_count;
+    sym_unlock();
+}
+
+/* --------------------------------------------------------------------------
  * ray_sym_ensure_cap -- pre-grow hash table and strings array
  *
  * Ensures the symbol table can hold at least `needed` total symbols without

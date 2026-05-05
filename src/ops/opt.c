@@ -2024,9 +2024,10 @@ ray_op_t* ray_optimize(ray_graph_t* g, ray_op_t* root) {
     pass_constant_fold(g, root);
     ray_profile_tick("constant fold");
 
-    /* Pass 3: Idiom rewrite */
+    /* Pass 3: Idiom rewrite (may replace the root, e.g. count(distinct)
+     * → count_distinct on a single-statement chain). */
     ray_profile_span_start("idiom");
-    ray_idiom_pass(g, root);
+    root = ray_idiom_pass(g, root);
     ray_profile_span_end("idiom");
     ray_profile_tick("idiom rewrite");
 

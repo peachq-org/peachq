@@ -23,11 +23,43 @@
 
 #include "ops/internal.h"
 #include "ops/glob.h"
+#include "core/pool.h"
 
 /* ============================================================================
  * OP_LIKE: glob pattern matching on STR / SYM columns.  See ops/glob.[ch].
  * Syntax: * (any), ? (one char), [abc] / [a-z] / [!abc] (character class).
  * ============================================================================ */
+
+/* Pattern-resolve worker for the SYM-LIKE fast path.  Runs over a
+ * range of sym_ids; for each marked-as-seen sid, runs the matcher and
+ * writes the answer to lut[sid].  Pure read-only on the inputs after
+ * the seen-mark phase, so workers are independent. */
+typedef struct {
+    ray_t**                    sym_strings;
+    uint8_t*                   seen;
+    uint8_t*                   lut;
+    const ray_glob_compiled_t* pc;
+    bool                       use_simple;
+    const char*                pat_str;
+    size_t                     pat_len;
+} like_resolve_ctx_t;
+
+static void like_resolve_fn(void* ctx, uint32_t worker_id,
+                            int64_t start, int64_t end) {
+    (void)worker_id;
+    like_resolve_ctx_t* x = (like_resolve_ctx_t*)ctx;
+    for (int64_t sid = start; sid < end; sid++) {
+        if (!x->seen[sid]) continue;
+        ray_t* str = x->sym_strings[sid];
+        if (!str) { x->lut[sid] = 0; continue; }
+        const char* sp = ray_str_ptr(str);
+        size_t sl = ray_str_len(str);
+        x->lut[sid] = (x->use_simple
+                       ? ray_glob_match_compiled(x->pc, sp, sl)
+                       : ray_glob_match(sp, sl, x->pat_str, x->pat_len))
+                      ? 1 : 0;
+    }
+}
 
 ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
     ray_t* input = exec_node(g, op->inputs[0]);
@@ -38,6 +70,13 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
     /* Get pattern string */
     const char* pat_str = ray_str_ptr(pat_v);
     size_t pat_len = ray_str_len(pat_v);
+
+    /* Pre-compile pattern into the simple-shape form when possible — the
+     * substring/prefix/suffix branches drive memmem/memcmp directly,
+     * roughly an order of magnitude faster than the iterative matcher
+     * for the very common `*literal*` shape. */
+    ray_glob_compiled_t pc = ray_glob_compile(pat_str, pat_len);
+    bool use_simple = pc.shape != RAY_GLOB_SHAPE_NONE;
 
     int64_t len = input->len;
     ray_t* result = ray_vec_new(RAY_BOOL, len);
@@ -55,17 +94,125 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
         for (int64_t i = 0; i < len; i++) {
             const char* sp = ray_str_t_ptr(&elems[i], pool);
             size_t sl = elems[i].len;
-            dst[i] = ray_glob_match(sp, sl, pat_str, pat_len) ? 1 : 0;
+            dst[i] = (use_simple
+                      ? ray_glob_match_compiled(&pc, sp, sl)
+                      : ray_glob_match(sp, sl, pat_str, pat_len)) ? 1 : 0;
         }
     } else if (RAY_IS_SYM(in_type)) {
+        /* Dictionary-cached fast path.
+         *
+         * Three-phase pipeline:
+         *   (1) seen-mark — single sequential row scan that flips a
+         *       byte in `seen[]` for every referenced sym_id.  Cheap;
+         *       just sets a byte per row.
+         *   (2) parallel pattern resolve — partition the dict_n range
+         *       across pool workers; for each sid where seen[sid]==1,
+         *       run the matcher and store the answer in lut[sid].
+         *   (3) parallel row projection — every row reads lut[sid_i].
+         *
+         * Splitting the resolve from the row scan lets phase (2) drive
+         * the pattern matcher (memmem on long URL strings) across the
+         * worker pool.  ray_sym_count is the GLOBAL dictionary so for
+         * a low-card column like BrowserCountry phase (1) keeps the
+         * resolve work bounded to that column's actual sym_ids. */
         const void* base = ray_data(input);
-        for (int64_t i = 0; i < len; i++) {
-            int64_t sym_id = ray_read_sym(base, i, in_type, input->attrs);
-            ray_t* s = ray_sym_str(sym_id);
-            if (!s) { dst[i] = 0; continue; }
-            const char* sp = ray_str_ptr(s);
-            size_t sl = ray_str_len(s);
-            dst[i] = ray_glob_match(sp, sl, pat_str, pat_len) ? 1 : 0;
+        ray_t** sym_strings = NULL;
+        uint32_t dict_n = 0;
+        ray_sym_strings_borrow(&sym_strings, &dict_n);
+        ray_t* lut_hdr = NULL;
+        ray_t* seen_hdr = NULL;
+        uint8_t* lut = NULL;
+        uint8_t* seen = NULL;
+        if (dict_n > 0) {
+            lut  = (uint8_t*)scratch_alloc (&lut_hdr,  (size_t)dict_n);
+            seen = (uint8_t*)scratch_calloc(&seen_hdr, (size_t)dict_n);
+        }
+        if (lut && seen) {
+            int sym_w = (int)(input->attrs & RAY_SYM_W_MASK);
+
+            /* Phase 1: mark used sym_ids.  Width-specialised. */
+            switch (sym_w) {
+            case RAY_SYM_W8: {
+                const uint8_t* d = (const uint8_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    uint64_t sid = d[i];
+                    if (sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
+            case RAY_SYM_W16: {
+                const uint16_t* d = (const uint16_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    uint64_t sid = d[i];
+                    if (sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
+            case RAY_SYM_W32: {
+                const uint32_t* d = (const uint32_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    uint64_t sid = d[i];
+                    if (sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
+            case RAY_SYM_W64:
+            default: {
+                const int64_t* d = (const int64_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    int64_t sid = d[i];
+                    if ((uint64_t)sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
+            }
+
+            /* Phase 2: parallel pattern resolve over the dict range. */
+            like_resolve_ctx_t rctx = {
+                .sym_strings = sym_strings, .seen = seen, .lut = lut,
+                .pc = &pc, .use_simple = use_simple,
+                .pat_str = pat_str, .pat_len = pat_len,
+            };
+            ray_pool_t* pool = ray_pool_get();
+            if (pool && (int64_t)dict_n >= 16384) {
+                ray_pool_dispatch(pool, like_resolve_fn, &rctx, (int64_t)dict_n);
+            } else {
+                like_resolve_fn(&rctx, 0, 0, (int64_t)dict_n);
+            }
+
+            /* Phase 3: row projection (sequential — already a tight
+             * gather over a 1-byte LUT).  Width-specialised. */
+            #define LIKE_ROW_PASS(LOAD)                                        \
+                for (int64_t i = 0; i < len; i++) {                            \
+                    int64_t sid = (LOAD);                                      \
+                    dst[i] = ((uint64_t)sid < (uint64_t)dict_n) ? lut[sid] : 0; \
+                }
+            switch (sym_w) {
+            case RAY_SYM_W8:  { const uint8_t*  d = base; LIKE_ROW_PASS(d[i]) break; }
+            case RAY_SYM_W16: { const uint16_t* d = base; LIKE_ROW_PASS(d[i]) break; }
+            case RAY_SYM_W32: { const uint32_t* d = base; LIKE_ROW_PASS(d[i]) break; }
+            case RAY_SYM_W64:
+            default:          { const int64_t*  d = base; LIKE_ROW_PASS(d[i]) break; }
+            }
+            #undef LIKE_ROW_PASS
+
+            scratch_free(lut_hdr);
+            scratch_free(seen_hdr);
+        } else {
+            /* OOM building the LUT: fall back to per-row scan. */
+            if (lut_hdr) scratch_free(lut_hdr);
+            if (seen_hdr) scratch_free(seen_hdr);
+            for (int64_t i = 0; i < len; i++) {
+                int64_t sym_id = ray_read_sym(base, i, in_type, input->attrs);
+                ray_t* s = (sym_strings && (uint64_t)sym_id < (uint64_t)dict_n)
+                           ? sym_strings[sym_id] : NULL;
+                if (!s) { dst[i] = 0; continue; }
+                const char* sp = ray_str_ptr(s);
+                size_t sl = ray_str_len(s);
+                dst[i] = (use_simple
+                          ? ray_glob_match_compiled(&pc, sp, sl)
+                          : ray_glob_match(sp, sl, pat_str, pat_len)) ? 1 : 0;
+            }
         }
     } else {
         memset(dst, 0, (size_t)len);
@@ -105,12 +252,43 @@ ray_t* exec_ilike(ray_graph_t* g, ray_op_t* op) {
             dst[i] = ray_glob_match_ci(sp, sl, pat_str, pat_len) ? 1 : 0;
         }
     } else if (RAY_IS_SYM(in_type)) {
+        /* Dictionary-cached fast path — see exec_like. */
         const void* base = ray_data(input);
-        for (int64_t i = 0; i < len; i++) {
-            int64_t sym_id = ray_read_sym(base, i, in_type, input->attrs);
-            ray_t* s = ray_sym_str(sym_id);
-            if (!s) { dst[i] = 0; continue; }
-            dst[i] = ray_glob_match_ci(ray_str_ptr(s), ray_str_len(s), pat_str, pat_len) ? 1 : 0;
+        uint32_t dict_n = ray_sym_count();
+        ray_t* lut_hdr = NULL;
+        ray_t* seen_hdr = NULL;
+        uint8_t* lut = NULL;
+        uint8_t* seen = NULL;
+        if (dict_n > 0) {
+            lut  = (uint8_t*)scratch_alloc (&lut_hdr,  (size_t)dict_n);
+            seen = (uint8_t*)scratch_calloc(&seen_hdr, (size_t)dict_n);
+        }
+        if (lut && seen) {
+            for (int64_t i = 0; i < len; i++) {
+                int64_t sid = ray_read_sym(base, i, in_type, input->attrs);
+                if ((uint64_t)sid >= (uint64_t)dict_n) { dst[i] = 0; continue; }
+                if (!seen[sid]) {
+                    ray_t* s = ray_sym_str(sid);
+                    if (!s) { lut[sid] = 0; }
+                    else {
+                        lut[sid] = ray_glob_match_ci(ray_str_ptr(s), ray_str_len(s),
+                                                     pat_str, pat_len) ? 1 : 0;
+                    }
+                    seen[sid] = 1;
+                }
+                dst[i] = lut[sid];
+            }
+            scratch_free(lut_hdr);
+            scratch_free(seen_hdr);
+        } else {
+            if (lut_hdr) scratch_free(lut_hdr);
+            if (seen_hdr) scratch_free(seen_hdr);
+            for (int64_t i = 0; i < len; i++) {
+                int64_t sym_id = ray_read_sym(base, i, in_type, input->attrs);
+                ray_t* s = ray_sym_str(sym_id);
+                if (!s) { dst[i] = 0; continue; }
+                dst[i] = ray_glob_match_ci(ray_str_ptr(s), ray_str_len(s), pat_str, pat_len) ? 1 : 0;
+            }
         }
     } else {
         memset(dst, 0, (size_t)len);
