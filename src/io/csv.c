@@ -595,6 +595,23 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
                                 int64_t* col_max_ids,
                                 uint8_t** col_nullmaps) {
     bool ok = true;
+
+    /* Empty TSV/CSV fields are flagged in the parse-time nullmap (see
+     * CSV_TYPE_STR branch of the parse loop) — that's correct for STR
+     * columns where the null/empty distinction matters, but for SYM
+     * columns it conflates with the "no value" sentinel and breaks the
+     * SQL-style `(!= col "")` filter (which never excludes nulls in the
+     * q/k value-vs-null comparison kernel).  Pre-intern "" once and
+     * remap null rows to that ID, clearing their null bit so the
+     * compare kernel takes the both-non-null branch.  Net effect: the
+     * CSV format's "field is empty" — which can't be distinguished from
+     * "field is missing" anyway — round-trips through Rayforce as the
+     * empty SYM, matching how DuckDB / Spark / polars treat the same
+     * input. */
+    int64_t empty_sym_id = ray_sym_intern_prehashed(
+        (uint32_t)ray_hash_bytes("", 0), "", 0);
+    if (empty_sym_id < 0) empty_sym_id = 0;  /* fall back to old behavior on intern failure */
+
     for (int c = 0; c < n_cols; c++) {
         if (col_types[c] != CSV_TYPE_STR) continue;
         /* RAY_STR columns are materialized directly; skip sym interning. */
@@ -602,7 +619,7 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
         csv_strref_t* refs = str_refs[c];
         uint32_t* ids = (uint32_t*)col_data[c];
         uint8_t* nm = col_nullmaps ? col_nullmaps[c] : NULL;
-        int64_t max_id = 0;
+        int64_t max_id = empty_sym_id;
 
         /* Pre-grow: upper bound is n_rows unique strings */
         uint32_t current = ray_sym_count();
@@ -611,7 +628,13 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
 
         for (int64_t r = 0; r < n_rows; r++) {
             if (nm && (nm[r >> 3] & (1u << (r & 7)))) {
-                ids[r] = 0;
+                ids[r] = (uint32_t)empty_sym_id;
+                /* Clear the null bit — this row now holds a real value
+                 * (the empty SYM).  Without this clear, fmt_raw_elem
+                 * still prints "0Ns" and ray_eq_fn still routes through
+                 * the null-vs-non-null branch (returning false for
+                 * `== ""` and true for `!= ""`). */
+                nm[r >> 3] &= (uint8_t)~(1u << (r & 7));
                 continue;
             }
             uint32_t hash = (uint32_t)ray_hash_bytes(refs[r].ptr, refs[r].len);
