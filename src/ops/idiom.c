@@ -75,6 +75,28 @@ static ray_op_t* rw_count_passthrough(ray_graph_t* g, ray_op_t* node) {
     return repl;
 }
 
+static ray_t* scan_source_col(ray_graph_t* g, ray_op_t* src) {
+    if (!g || !src || src->opcode != OP_SCAN) return NULL;
+
+    ray_op_ext_t* ext = find_ext(g, src->id);
+    if (!ext) return NULL;
+
+    uint16_t stored_table_id = 0;
+    memcpy(&stored_table_id, src->pad, sizeof(uint16_t));
+
+    ray_t* tbl = NULL;
+    if (stored_table_id > 0) {
+        uint16_t table_id = (uint16_t)(stored_table_id - 1);
+        if (g->tables && table_id < g->n_tables)
+            tbl = g->tables[table_id];
+    } else {
+        tbl = g->table;
+    }
+
+    if (!tbl) return NULL;
+    return ray_table_get_col(tbl, ext->sym);
+}
+
 /* True only when the input vector to (asc …) is statically known to
    have no nulls. Walks one node — the input to the asc — and reads
    its out_attrs (if tracked) or out_type+constness. Returns false on
@@ -97,8 +119,13 @@ static bool pre_no_nulls_on_asc_input(ray_graph_t* g, ray_op_t* node) {
         return !(lit->attrs & RAY_ATTR_HAS_NULLS);
     }
 
-    /* OP_SCAN: conservative — return false until the column-header attrs
-       can be read from the optimizer. Spec follow-up. */
+    if (src->opcode == OP_SCAN) {
+        ray_t* col = scan_source_col(g, src);
+        if (!col) return false;
+        if (!ray_is_vec(col) && !RAY_IS_PARTED(col->type)) return false;
+        return !(col->attrs & RAY_ATTR_HAS_NULLS);
+    }
+
     return false;
 }
 
