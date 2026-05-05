@@ -675,9 +675,13 @@ typedef struct {
     bool            has_nulls;
     const uint8_t*  null_bm;
     uint64_t        p_mask;          /* P - 1, P = number of partitions */
-    /* Pass 1 outputs / pass 2 inputs */
-    int64_t*        hist;            /* nw × P, per-worker partition counts */
-    int64_t*        cursor;          /* nw × P, per-worker scatter cursors */
+    /* Pass 1 outputs / pass 2 inputs.  Per-partition atomic counters,
+     * not per-worker — ray_pool_dispatch uses dynamic work stealing so
+     * the worker_id seen by hist for a given task isn't guaranteed to
+     * match the worker_id scatter sees for the same task.  Atomics on
+     * P=64 partitions with ~14 K rows each have negligible contention. */
+    int64_t*        hist;            /* P entries, atomic */
+    int64_t*        cursor;          /* P entries, atomic, init to part_off */
     int64_t*        part_off;        /* P + 1, prefix offsets */
     /* Pass 2 outputs */
     int64_t*        gids_out;        /* total_pass entries */
@@ -707,9 +711,14 @@ static inline int64_t cdpg_read(const void* base, int64_t r,
 
 static void cdpg_hist_fn(void* ctx_, uint32_t worker_id,
                          int64_t start, int64_t end) {
+    (void)worker_id;
     cdpg_ctx_t* x = (cdpg_ctx_t*)ctx_;
-    int64_t* hist = x->hist + (size_t)worker_id * (x->p_mask + 1);
     uint8_t esz = ray_sym_elem_size(x->in_type, x->in_attrs);
+    /* Local per-partition counts to amortise atomic adds.  Walk once
+     * locally, then push the deltas to the shared `hist` at the end. */
+    enum { CDPG_MAX_P = 256 };
+    int64_t local[CDPG_MAX_P] = {0};
+    uint64_t p_mask = x->p_mask;
     for (int64_t r = start; r < end; r++) {
         int64_t gid = x->row_gid[r];
         if (gid < 0 || gid >= x->n_groups) continue;
@@ -717,15 +726,21 @@ static void cdpg_hist_fn(void* ctx_, uint32_t worker_id,
             ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
         int64_t val = cdpg_read(x->base, r, x->in_type, esz);
         uint64_t h = CDPG_HASH(gid + 1, val);
-        hist[h & x->p_mask]++;
+        local[h & p_mask]++;
+    }
+    /* Push local deltas atomically into shared hist. */
+    for (uint64_t p = 0; p <= p_mask; p++) {
+        if (local[p])
+            __atomic_fetch_add(&x->hist[p], local[p], __ATOMIC_RELAXED);
     }
 }
 
 static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
                          int64_t start, int64_t end) {
+    (void)worker_id;
     cdpg_ctx_t* x = (cdpg_ctx_t*)ctx_;
-    int64_t* cur = x->cursor + (size_t)worker_id * (x->p_mask + 1);
     uint8_t esz = ray_sym_elem_size(x->in_type, x->in_attrs);
+    uint64_t p_mask = x->p_mask;
     for (int64_t r = start; r < end; r++) {
         int64_t gid = x->row_gid[r];
         if (gid < 0 || gid >= x->n_groups) continue;
@@ -734,7 +749,10 @@ static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
         int64_t val = cdpg_read(x->base, r, x->in_type, esz);
         int64_t gid_p1 = gid + 1;
         uint64_t h = CDPG_HASH(gid_p1, val);
-        int64_t pos = cur[h & x->p_mask]++;
+        /* Per-partition atomic cursor — handles concurrent scatter
+         * from any worker without per-worker layout dependencies. */
+        int64_t pos = __atomic_fetch_add(&x->cursor[h & p_mask], 1,
+                                         __ATOMIC_RELAXED);
         x->gids_out[pos] = gid_p1;
         x->vals_out[pos] = val;
     }
@@ -830,23 +848,24 @@ static ray_t* count_distinct_per_group_parallel(
     if (ctx.has_nulls)
         ctx.null_bm = ray_vec_nullmap_bytes(src, NULL, NULL);
 
-    /* Pass 1: histogram. */
+    if (P > 256) return NULL;  /* matches CDPG_MAX_P in cdpg_hist_fn */
+
+    /* Pass 1: histogram (per-partition atomic counters). */
     ray_t* hist_hdr = NULL;
     ctx.hist = (int64_t*)scratch_calloc(&hist_hdr,
-                                        (size_t)P * nw * sizeof(int64_t));
+                                        (size_t)P * sizeof(int64_t));
     if (!ctx.hist) { return NULL; }
     ray_pool_dispatch(pool, cdpg_hist_fn, &ctx, n_rows);
 
-    /* Compute partition prefix offsets and per-(worker, partition) cursors.
-     * Layout: out_buf is laid out as
-     *   partition_0 [worker_0 worker_1 …] partition_1 [worker_0 …] …
-     * so each (worker, partition) range is contiguous. */
+    /* Compute partition prefix offsets and initial cursors.  out_buf is
+     * laid out as [partition_0 entries | partition_1 entries | …] with
+     * cursor[p] starting at part_off[p] and advancing by 1 per scatter. */
     ray_t* off_hdr = NULL;
     ctx.part_off = (int64_t*)scratch_alloc(&off_hdr,
                                            (size_t)(P + 1) * sizeof(int64_t));
     ray_t* cur_hdr = NULL;
     ctx.cursor = (int64_t*)scratch_alloc(&cur_hdr,
-                                         (size_t)P * nw * sizeof(int64_t));
+                                         (size_t)P * sizeof(int64_t));
     if (!ctx.part_off || !ctx.cursor) {
         if (off_hdr) scratch_free(off_hdr);
         if (cur_hdr) scratch_free(cur_hdr);
@@ -856,10 +875,8 @@ static ray_t* count_distinct_per_group_parallel(
     int64_t total = 0;
     for (uint64_t p = 0; p < P; p++) {
         ctx.part_off[p] = total;
-        for (uint32_t w = 0; w < nw; w++) {
-            ctx.cursor[(size_t)w * P + p] = total;
-            total += ctx.hist[(size_t)w * P + p];
-        }
+        ctx.cursor[p]   = total;
+        total += ctx.hist[p];
     }
     ctx.part_off[P] = total;
 
