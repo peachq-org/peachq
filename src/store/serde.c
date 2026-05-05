@@ -889,12 +889,26 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_ser(ray_t* obj) {
+    bool owned = false;
+    if (ray_is_lazy(obj)) {
+        ray_retain(obj);
+        obj = ray_lazy_materialize(obj); /* consumes the retain */
+        if (RAY_IS_ERR(obj)) return obj;
+        owned = true;
+    }
+
     int64_t payload = ray_serde_size(obj);
-    if (payload <= 0) return ray_error("domain", payload < 0 ? "serialization overflow" : NULL);
+    if (payload <= 0) {
+        if (owned) ray_release(obj);
+        return ray_error("domain", payload < 0 ? "serialization overflow" : NULL);
+    }
 
     int64_t total = (int64_t)sizeof(ray_ipc_header_t) + payload;
     ray_t* buf = ray_vec_new(RAY_U8, total);
-    if (!buf || RAY_IS_ERR(buf)) return buf;
+    if (!buf || RAY_IS_ERR(buf)) {
+        if (owned) ray_release(obj);
+        return buf;
+    }
     buf->len = total;
 
     ray_ipc_header_t* hdr = (ray_ipc_header_t*)ray_data(buf);
@@ -908,9 +922,11 @@ ray_t* ray_ser(ray_t* obj) {
     int64_t written = ray_ser_raw((uint8_t*)ray_data(buf) + sizeof(ray_ipc_header_t), obj);
     if (written == 0) {
         ray_release(buf);
+        if (owned) ray_release(obj);
         return ray_error("domain", NULL);
     }
 
+    if (owned) ray_release(obj);
     return buf;
 }
 
