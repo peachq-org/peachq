@@ -13,6 +13,9 @@
 
 #include "ops/glob.h"
 
+#define _GNU_SOURCE
+#include <string.h>
+
 /* Lowercase an ASCII byte; non-ASCII passes through unchanged. */
 static inline char to_lower(char c) {
     return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
@@ -99,4 +102,97 @@ bool ray_glob_match(const char* s, size_t sn, const char* p, size_t pn) {
 
 bool ray_glob_match_ci(const char* s, size_t sn, const char* p, size_t pn) {
     return glob_impl(s, sn, p, pn, true);
+}
+
+ray_glob_compiled_t ray_glob_compile(const char* p, size_t pn) {
+    ray_glob_compiled_t c = { RAY_GLOB_SHAPE_NONE, NULL, 0 };
+
+    if (pn == 0) {
+        c.shape = RAY_GLOB_SHAPE_EXACT;
+        c.lit = p; c.lit_len = 0;
+        return c;
+    }
+
+    /* Strip a single leading and trailing '*'; classify by the residual
+     * pattern.  Any other glob metachar (`?`, `[`, or interior `*`)
+     * forces the general matcher. */
+    size_t lo = 0, hi = pn;
+    bool leading_star  = (p[0] == '*');
+    bool trailing_star = (pn > 0 && p[pn - 1] == '*' &&
+                          /* don't double-count single '*' as both */
+                          (pn > 1 || !leading_star));
+    if (leading_star)  lo = 1;
+    if (trailing_star) hi = pn - 1;
+
+    /* Ensure the residual has no glob metacharacters. */
+    for (size_t i = lo; i < hi; i++) {
+        char ch = p[i];
+        if (ch == '*' || ch == '?' || ch == '[') {
+            c.shape = RAY_GLOB_SHAPE_NONE;
+            return c;
+        }
+    }
+
+    c.lit     = p + lo;
+    c.lit_len = hi - lo;
+
+    if (leading_star && trailing_star) {
+        c.shape = (c.lit_len == 0) ? RAY_GLOB_SHAPE_ANY
+                                   : RAY_GLOB_SHAPE_CONTAINS;
+    } else if (leading_star) {
+        c.shape = RAY_GLOB_SHAPE_SUFFIX;
+    } else if (trailing_star) {
+        c.shape = RAY_GLOB_SHAPE_PREFIX;
+    } else {
+        c.shape = RAY_GLOB_SHAPE_EXACT;
+    }
+    return c;
+}
+
+bool ray_glob_match_compiled(const ray_glob_compiled_t* c,
+                             const char* s, size_t sn) {
+    switch (c->shape) {
+    case RAY_GLOB_SHAPE_ANY:
+        return true;
+    case RAY_GLOB_SHAPE_EXACT:
+        return sn == c->lit_len &&
+               (c->lit_len == 0 || memcmp(s, c->lit, c->lit_len) == 0);
+    case RAY_GLOB_SHAPE_PREFIX:
+        return sn >= c->lit_len &&
+               (c->lit_len == 0 || memcmp(s, c->lit, c->lit_len) == 0);
+    case RAY_GLOB_SHAPE_SUFFIX:
+        return sn >= c->lit_len &&
+               (c->lit_len == 0 ||
+                memcmp(s + sn - c->lit_len, c->lit, c->lit_len) == 0);
+    case RAY_GLOB_SHAPE_CONTAINS:
+        if (c->lit_len == 0) return true;
+        if (sn < c->lit_len) return false;
+        /* glibc's memmem is SIMD-accelerated; use it where available.
+         * Falls back to a portable Boyer-Moore-Horspool when not. */
+#if defined(__GLIBC__) || defined(__APPLE__) || defined(__FreeBSD__)
+        return memmem(s, sn, c->lit, c->lit_len) != NULL;
+#else
+        {
+            /* Portable fallback: short-needle byte scan with memchr. */
+            const char first = c->lit[0];
+            const char* haystack = s;
+            size_t remaining = sn;
+            while (remaining >= c->lit_len) {
+                const char* hit = (const char*)memchr(haystack, first,
+                                                      remaining - c->lit_len + 1);
+                if (!hit) return false;
+                if (memcmp(hit, c->lit, c->lit_len) == 0) return true;
+                size_t adv = (size_t)(hit - haystack) + 1;
+                haystack = hit + 1;
+                remaining -= adv;
+            }
+            return false;
+        }
+#endif
+    case RAY_GLOB_SHAPE_NONE:
+    default:
+        /* Caller contract violation — fall through to false rather than
+         * silently matching everything. */
+        return false;
+    }
 }

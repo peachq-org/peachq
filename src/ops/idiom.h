@@ -40,6 +40,11 @@ typedef struct {
 extern const ray_idiom_t ray_idioms[];
 extern const int         ray_idioms_count;
 
-void ray_idiom_pass(ray_graph_t* g, ray_op_t* root);
+/* Returns the (possibly updated) root.  When the rewrite replaces the
+ * root node itself (e.g. count(distinct) → count_distinct on a single-
+ * statement chain), the caller would otherwise hold a pointer to the
+ * dead OLD node.  Always assign the return value back to the caller's
+ * root pointer. */
+ray_op_t* ray_idiom_pass(ray_graph_t* g, ray_op_t* root);
 
 #endif /* RAY_IDIOM_H */
