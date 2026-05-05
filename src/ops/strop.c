@@ -22,6 +22,7 @@
  */
 
 #include "lang/internal.h"
+#include "ops/internal.h"
 #include "table/sym.h"
 #include "ops/glob.h"
 
@@ -202,6 +203,13 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
     const char* pat = ray_str_ptr(pattern);
     size_t pat_len = ray_str_len(pattern);
 
+    /* Pre-compile the pattern once.  Most ClickBench LIKE shapes are
+     * `*literal*` (substring) which collapses to a memmem call — the
+     * libc-provided implementation is SIMD on glibc/Apple/BSD.  When the
+     * shape is RAY_GLOB_SHAPE_NONE we keep the iterative matcher. */
+    ray_glob_compiled_t pc = ray_glob_compile(pat, pat_len);
+    bool use_simple = pc.shape != RAY_GLOB_SHAPE_NONE;
+
     /* Atom: single match */
     if (x->type == -RAY_STR || x->type == -RAY_SYM) {
         const char* s; size_t sl;
@@ -214,7 +222,8 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
             s  = ray_str_ptr(x);
             sl = ray_str_len(x);
         }
-        bool m = ray_glob_match(s, sl, pat, pat_len);
+        bool m = use_simple ? ray_glob_match_compiled(&pc, s, sl)
+                            : ray_glob_match(s, sl, pat, pat_len);
         if (sym_str) ray_release(sym_str);
         return make_bool(m ? 1 : 0);
     }
@@ -228,20 +237,118 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
         uint8_t* out = (uint8_t*)ray_data(result);
 
         if (x->type == RAY_SYM) {
-            int64_t* sym_ids = (int64_t*)ray_data(x);
-            for (int64_t i = 0; i < n; i++) {
-                ray_t* sym_str = ray_sym_str(sym_ids[i]);
-                const char* s = sym_str ? ray_str_ptr(sym_str) : "";
-                size_t sl = sym_str ? ray_str_len(sym_str) : 0;
-                out[i] = ray_glob_match(s, sl, pat, pat_len) ? 1 : 0;
-                if (sym_str) ray_release(sym_str);
+            /* SYM column is dictionary-encoded with adaptive widths
+             * (W8/W16/W32/W64).  Two bugs to avoid:
+             *   (a) Reading the column as int64_t* is wrong for any
+             *       width != W64 — must use ray_read_sym.
+             *   (b) ray_sym_str returns a borrowed pointer; releasing
+             *       it would decrement the global sym table entry.
+             *
+             * Fast path: a SYM column with N rows references at most
+             * D = ray_sym_count() distinct sym_ids.  Build a
+             * sym_id → bool LUT with a "seen" bitmap so each sym_id
+             * runs the glob matcher at most once.  For LIKE on URL
+             * (1.7M unique values, 5M rows) this turns an O(n_rows)
+             * pattern-scan into O(n_distinct + n_rows) — the second
+             * pass is a single byte load + table lookup per row. */
+            const void* base = ray_data(x);
+            int8_t in_type = x->type;
+            uint8_t in_attrs = x->attrs;
+
+            /* The global sym table can be much larger than the set of
+             * IDs this column references (e.g. BrowserCountry with 54
+             * uniques in a process that's also loaded URL with 1.7M
+             * uniques).  Lazy-resolve via the seen bitmap so we only
+             * match against sym_ids actually touched.  ray_sym_strings_borrow
+             * snapshots the strings array under one lock so each lookup
+             * is a plain pointer load. */
+            ray_t** sym_strings = NULL;
+            uint32_t dict_n = 0;
+            ray_sym_strings_borrow(&sym_strings, &dict_n);
+            ray_t* lut_hdr = NULL;
+            ray_t* seen_hdr = NULL;
+            uint8_t* lut = NULL;
+            uint8_t* seen = NULL;
+            if (dict_n > 0) {
+                lut  = (uint8_t*)scratch_alloc (&lut_hdr,  (size_t)dict_n);
+                seen = (uint8_t*)scratch_calloc(&seen_hdr, (size_t)dict_n);
+            }
+            if (lut && seen) {
+                /* First pass: discover the unique sym_ids referenced and
+                 * resolve each pattern match exactly once.  Second pass:
+                 * width-specialised LUT projection so the per-row loop
+                 * is a tight gather. */
+                int sym_w = (int)(in_attrs & RAY_SYM_W_MASK);
+                #define DICT_PASS(LOAD)                                       \
+                    for (int64_t i = 0; i < n; i++) {                         \
+                        int64_t sid = (LOAD);                                 \
+                        if ((uint64_t)sid >= (uint64_t)dict_n) continue;      \
+                        if (!seen[sid]) {                                     \
+                            ray_t* s = sym_strings[sid];                      \
+                            const char* sp = s ? ray_str_ptr(s) : "";         \
+                            size_t sl = s ? ray_str_len(s) : 0;               \
+                            lut[sid] = (use_simple                            \
+                                        ? ray_glob_match_compiled(&pc, sp, sl)\
+                                        : ray_glob_match(sp, sl, pat, pat_len)) \
+                                       ? 1 : 0;                               \
+                            seen[sid] = 1;                                    \
+                        }                                                     \
+                    }
+                #define ROW_PASS(LOAD)                                        \
+                    for (int64_t i = 0; i < n; i++) {                         \
+                        int64_t sid = (LOAD);                                 \
+                        out[i] = ((uint64_t)sid < (uint64_t)dict_n) ? lut[sid] : 0; \
+                    }
+                switch (sym_w) {
+                case RAY_SYM_W8: {
+                    const uint8_t* d = (const uint8_t*)base;
+                    DICT_PASS(d[i]) ROW_PASS(d[i]) break;
+                }
+                case RAY_SYM_W16: {
+                    const uint16_t* d = (const uint16_t*)base;
+                    DICT_PASS(d[i]) ROW_PASS(d[i]) break;
+                }
+                case RAY_SYM_W32: {
+                    const uint32_t* d = (const uint32_t*)base;
+                    DICT_PASS(d[i]) ROW_PASS(d[i]) break;
+                }
+                case RAY_SYM_W64:
+                default: {
+                    const int64_t* d = (const int64_t*)base;
+                    DICT_PASS(d[i]) ROW_PASS(d[i]) break;
+                }
+                }
+                #undef DICT_PASS
+                #undef ROW_PASS
+                scratch_free(lut_hdr);
+                scratch_free(seen_hdr);
+            } else {
+                /* OOM building the LUT: fall back to per-row scan.  Still
+                 * uses ray_read_sym for adaptive-width correctness. */
+                if (lut_hdr) scratch_free(lut_hdr);
+                if (seen_hdr) scratch_free(seen_hdr);
+                for (int64_t i = 0; i < n; i++) {
+                    int64_t sid = ray_read_sym(base, i, in_type, in_attrs);
+                    ray_t* s = (sym_strings && (uint64_t)sid < (uint64_t)dict_n)
+                               ? sym_strings[sid] : NULL;
+                    const char* sp = s ? ray_str_ptr(s) : "";
+                    size_t sl = s ? ray_str_len(s) : 0;
+                    out[i] = (use_simple
+                              ? ray_glob_match_compiled(&pc, sp, sl)
+                              : ray_glob_match(sp, sl, pat, pat_len)) ? 1 : 0;
+                }
             }
         } else {
             /* RAY_STR vector */
             for (int64_t i = 0; i < n; i++) {
                 size_t slen;
                 const char* s = ray_str_vec_get(x, i, &slen);
-                out[i] = (s && ray_glob_match(s, slen, pat, pat_len)) ? 1 : 0;
+                bool m = false;
+                if (s) {
+                    m = use_simple ? ray_glob_match_compiled(&pc, s, slen)
+                                   : ray_glob_match(s, slen, pat, pat_len);
+                }
+                out[i] = m ? 1 : 0;
             }
         }
         return result;
