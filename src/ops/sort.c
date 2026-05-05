@@ -3062,6 +3062,295 @@ str_msd_done:;
     return result;
 }
 
+static void topk_cmp_sift_down(const sort_cmp_ctx_t* ctx, int64_t* heap,
+                               int64_t n, int64_t root) {
+    for (;;) {
+        int64_t worst = root;
+        int64_t l = 2 * root + 1;
+        int64_t r = 2 * root + 2;
+        if (l < n && sort_cmp(ctx, heap[l], heap[worst]) > 0) worst = l;
+        if (r < n && sort_cmp(ctx, heap[r], heap[worst]) > 0) worst = r;
+        if (worst == root) break;
+        int64_t tmp = heap[root];
+        heap[root] = heap[worst];
+        heap[worst] = tmp;
+        root = worst;
+    }
+}
+
+/* Comparator-based top-K: works for any sort key types and any number of
+ * keys (1..n).  Used as the fallback when radix-encoded fast-path is not
+ * applicable (e.g. SYM, STR, multi-key).  O(n log K + K log K). */
+static ray_t* topk_indices_cmp(ray_t** cols, uint8_t* descs, uint8_t* nfs,
+                               uint8_t n_cols, int64_t nrows, int64_t k) {
+    if (!cols || n_cols == 0 || k <= 0 || nrows <= 0 || k >= nrows) return NULL;
+    for (uint8_t c = 0; c < n_cols; c++) if (!cols[c]) return NULL;
+
+    ray_t* idx = ray_vec_new(RAY_I64, k);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+    idx->len = k;
+    int64_t* heap = (int64_t*)ray_data(idx);
+    for (int64_t i = 0; i < k; i++) heap[i] = i;
+
+    sort_cmp_ctx_t ctx = {
+        .vecs = cols,
+        .desc = descs,
+        .nulls_first = nfs,
+        .n_sort = n_cols,
+    };
+
+    for (int64_t i = k / 2 - 1; i >= 0; i--)
+        topk_cmp_sift_down(&ctx, heap, k, i);
+
+    for (int64_t i = k; i < nrows; i++) {
+        if (sort_cmp(&ctx, i, heap[0]) >= 0) continue;
+        heap[0] = i;
+        topk_cmp_sift_down(&ctx, heap, k, 0);
+    }
+
+    for (int64_t i = 1; i < k; i++) {
+        int64_t v = heap[i];
+        int64_t j = i - 1;
+        while (j >= 0 && sort_cmp(&ctx, v, heap[j]) < 0) {
+            heap[j + 1] = heap[j];
+            j--;
+        }
+        heap[j + 1] = v;
+    }
+
+    return idx;
+}
+
+static ray_t* topk_indices_cmp_single(ray_t* col, uint8_t desc, uint8_t nf,
+                                      int64_t nrows, int64_t k) {
+    ray_t* cols[1] = { col };
+    uint8_t descs[1] = { desc };
+    uint8_t nfs[1] = { nf };
+    return topk_indices_cmp(cols, descs, nfs, 1, nrows, k);
+}
+
+/* --------------------------------------------------------------------------
+ * Top-K bounded-heap selection on a single sort key.
+ *
+ * Replaces a full O(n log n) sort + take-K with O(n log K + K log K) when
+ * K << n.  At plan time, the apply_sort_take / projection paths detect
+ * "single sort key + small atom take" and call this in lieu of OP_SORT +
+ * OP_HEAD.  Multi-key, take-range, or take-K-near-n cases keep the
+ * existing fused sort+limit path (which is already O(n log n) bounded
+ * with K-row gather).
+ *
+ * Implementation: encode each row's key to a uint64 (same encoding
+ * radix_encode_fn uses, so smaller key = earlier in ASC order, with DESC
+ * already pre-flipped).  Maintain a max-heap of K (key, original_idx)
+ * pairs; for each row r > K, if r's encoded key is smaller than the
+ * heap-top key, replace the top and sift down.  After the scan, sort
+ * the K (key, idx) pairs by key ascending — the result is the top-K
+ * indices in the user's requested order.
+ *
+ * Supported types: I64, I32, I16, U8, BOOL, F64, DATE, TIME,
+ * TIMESTAMP, plus SYM via a comparator heap.  STR/GUID fall through
+ * to the caller (return NULL → caller uses full sort).  Returns NULL
+ * on any unsupported configuration so the caller's fallback path
+ * handles it.
+ * -------------------------------------------------------------------------- */
+static ray_t* topk_indices_single(ray_t* col, uint8_t desc, uint8_t nf,
+                                  int64_t nrows, int64_t k) {
+    if (!col || k <= 0 || nrows <= 0) return NULL;
+    if (k >= nrows) return NULL; /* full sort is at least as good */
+
+    int8_t type = col->type;
+    /* Whitelist of types where radix_encode_fn produces an order-preserving
+     * uint64 — exactly the cases topk can handle without a comparator. */
+    bool ok = (type == RAY_I64 || type == RAY_TIMESTAMP || type == RAY_F64 ||
+               type == RAY_I32 || type == RAY_DATE || type == RAY_TIME ||
+               type == RAY_SYM || type == RAY_I16 ||
+               type == RAY_BOOL || type == RAY_U8);
+    if (!ok) return NULL;
+
+    if (type == RAY_SYM)
+        return topk_indices_cmp_single(col, desc, nf, nrows, k);
+
+    /* Encode all rows to a single uint64 key array. */
+    ray_t* keys_hdr = NULL;
+    uint64_t* keys = (uint64_t*)scratch_alloc(&keys_hdr,
+        (size_t)nrows * sizeof(uint64_t));
+    if (!keys) return NULL;
+
+    radix_encode_ctx_t enc = {
+        .keys        = keys,
+        .indices     = NULL,
+        .data        = ray_data(col),
+        .col         = col,
+        .type        = type,
+        .col_attrs   = col->attrs,
+        .desc        = desc != 0,
+        .nulls_first = nf != 0,
+        .enum_rank   = NULL,
+        .n_keys      = 1,
+    };
+    /* Single-threaded encode is plenty for the heap pass that follows;
+     * radix_encode_fn handles the type/desc/nulls dispatch correctly. */
+    radix_encode_fn(&enc, 0, 0, nrows);
+
+    /* Max-heap of K (key, idx) pairs.  Stored in two parallel arrays
+     * for cache locality on the comparison path. */
+    ray_t* hk_hdr = NULL;
+    ray_t* hi_hdr = NULL;
+    uint64_t* hk = (uint64_t*)scratch_alloc(&hk_hdr, (size_t)k * sizeof(uint64_t));
+    int64_t*  hi = (int64_t*)scratch_alloc(&hi_hdr, (size_t)k * sizeof(int64_t));
+    if (!hk || !hi) {
+        if (hk_hdr) scratch_free(hk_hdr);
+        if (hi_hdr) scratch_free(hi_hdr);
+        scratch_free(keys_hdr);
+        return NULL;
+    }
+
+    /* Seed with the first K rows. */
+    for (int64_t i = 0; i < k; i++) { hk[i] = keys[i]; hi[i] = i; }
+
+    /* Heapify (build max-heap on hk[]). */
+    for (int64_t i = k / 2 - 1; i >= 0; i--) {
+        int64_t idx = i;
+        for (;;) {
+            int64_t largest = idx;
+            int64_t l = 2 * idx + 1, r = 2 * idx + 2;
+            if (l < k && hk[l] > hk[largest]) largest = l;
+            if (r < k && hk[r] > hk[largest]) largest = r;
+            if (largest == idx) break;
+            uint64_t tk = hk[idx]; hk[idx] = hk[largest]; hk[largest] = tk;
+            int64_t  ti = hi[idx]; hi[idx] = hi[largest]; hi[largest] = ti;
+            idx = largest;
+        }
+    }
+
+    /* Scan remaining rows, push when the new key is strictly smaller
+     * than heap-top.  Sift the new root down to restore the max-heap. */
+    for (int64_t i = k; i < nrows; i++) {
+        if (keys[i] >= hk[0]) continue;
+        hk[0] = keys[i];
+        hi[0] = i;
+        int64_t idx = 0;
+        for (;;) {
+            int64_t largest = idx;
+            int64_t l = 2 * idx + 1, r = 2 * idx + 2;
+            if (l < k && hk[l] > hk[largest]) largest = l;
+            if (r < k && hk[r] > hk[largest]) largest = r;
+            if (largest == idx) break;
+            uint64_t tk = hk[idx]; hk[idx] = hk[largest]; hk[largest] = tk;
+            int64_t  ti = hi[idx]; hi[idx] = hi[largest]; hi[largest] = ti;
+            idx = largest;
+        }
+    }
+
+    /* The heap contains the K best (smallest key) rows but unsorted.
+     * Sort by key ascending so the gather order matches a full sort. */
+    key_heapsort(hk, hi, k);
+
+    /* Build the result I64 vec of indices. */
+    ray_t* result = ray_vec_new(RAY_I64, k);
+    if (!result || RAY_IS_ERR(result)) {
+        scratch_free(hk_hdr); scratch_free(hi_hdr);
+        scratch_free(keys_hdr);
+        return result ? result : ray_error("oom", NULL);
+    }
+    result->len = k;
+    memcpy(ray_data(result), hi, (size_t)k * sizeof(int64_t));
+
+    scratch_free(hk_hdr); scratch_free(hi_hdr);
+    scratch_free(keys_hdr);
+    return result;
+}
+
+/* Gather K rows of `tbl` at the given indices and return a new table.
+ * Used by both single-key and multi-key top-K paths.  Releases `idx`. */
+static ray_t* topk_gather_rows(ray_t* tbl, ray_t* idx, int64_t k) {
+    int64_t* idx_data = (int64_t*)ray_data(idx);
+    int64_t ncols = ray_table_ncols(tbl);
+
+    ray_t* result = ray_table_new(ncols);
+    if (!result || RAY_IS_ERR(result)) { ray_release(idx); return result; }
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* src = ray_table_get_col_idx(tbl, c);
+        int64_t name = ray_table_col_name(tbl, c);
+        if (!src) continue;
+        ray_t* dst;
+        if (src->type == RAY_LIST) {
+            dst = ray_list_new(k);
+            if (!dst || RAY_IS_ERR(dst)) {
+                ray_release(idx); ray_release(result);
+                return dst ? dst : ray_error("oom", NULL);
+            }
+            ray_t** sp = (ray_t**)ray_data(src);
+            ray_t** dp = (ray_t**)ray_data(dst);
+            for (int64_t i = 0; i < k; i++) {
+                dp[i] = sp[idx_data[i]];
+                if (dp[i]) ray_retain(dp[i]);
+            }
+            dst->len = k;
+        } else {
+            dst = gather_by_idx(src, idx_data, k);
+            if (!dst || RAY_IS_ERR(dst)) {
+                ray_release(idx); ray_release(result);
+                return dst ? dst : ray_error("oom", NULL);
+            }
+        }
+        result = ray_table_add_col(result, name, dst);
+        ray_release(dst);
+        if (RAY_IS_ERR(result)) { ray_release(idx); return result; }
+    }
+    ray_release(idx);
+    return result;
+}
+
+/* Public top-K gather: returns a new table of `k` rows of `tbl`, sorted by
+ * `col` in the requested direction.  When the inputs don't match the
+ * single-key fast-path (multi-key, unsupported type, etc.), returns NULL
+ * so the caller can fall back to the full-sort path. */
+ray_t* ray_topk_table(ray_t* tbl, ray_t* col, uint8_t desc, uint8_t nf,
+                      int64_t k) {
+    if (!tbl || tbl->type != RAY_TABLE || !col) return NULL;
+    int64_t nrows = ray_table_nrows(tbl);
+    if (k <= 0 || nrows <= 0) return NULL;
+    if (k >= nrows) return NULL;
+    int64_t ncols = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* src = ray_table_get_col_idx(tbl, c);
+        if (src && src->type == RAY_LIST) return NULL;
+    }
+
+    ray_t* idx = topk_indices_single(col, desc, nf, nrows, k);
+    if (!idx) return NULL;
+    return topk_gather_rows(tbl, idx, k);
+}
+
+/* Multi-key top-K: comparator-based bounded heap across `n_keys` columns.
+ * Falls back to a comparator heap (no radix encoding) since multi-key
+ * radix encoding requires uniform-width packed keys.  Returns NULL when
+ * the inputs aren't supported (n_keys==0, K>=nrows, LIST columns) so the
+ * caller can fall back to a full sort.  Cost is O(n_rows * n_keys * log K
+ * + K log K) in comparisons — wins decisively when K << n_rows even with
+ * the per-compare overhead.  All key columns must come from the same
+ * table; row indices are interpreted into each column at the same
+ * position. */
+ray_t* ray_topk_table_multi(ray_t* tbl, ray_t** key_cols, uint8_t* descs,
+                            uint8_t* nfs, uint8_t n_keys, int64_t k) {
+    if (!tbl || tbl->type != RAY_TABLE || !key_cols || n_keys == 0) return NULL;
+    int64_t nrows = ray_table_nrows(tbl);
+    if (k <= 0 || nrows <= 0 || k >= nrows) return NULL;
+    int64_t ncols = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* src = ray_table_get_col_idx(tbl, c);
+        if (src && src->type == RAY_LIST) return NULL;
+    }
+    for (uint8_t i = 0; i < n_keys; i++)
+        if (!key_cols[i] || key_cols[i]->len < nrows) return NULL;
+
+    ray_t* idx = topk_indices_cmp(key_cols, descs, nfs, n_keys, nrows, k);
+    if (!idx) return NULL;
+    if (RAY_IS_ERR(idx)) return idx;
+    return topk_gather_rows(tbl, idx, k);
+}
+
 ray_t* ray_sort_indices(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
                         uint8_t n_cols, int64_t nrows) {
     return sort_indices_ex(cols, descs, nulls_first, n_cols, nrows, NULL, NULL);
@@ -3125,6 +3414,58 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
     if (ncols > 4096) return ray_error("nyi", NULL); /* stack safety */
     uint8_t n_sort = ext->sort.n_cols;
     if (n_sort > 16) return ray_error("nyi", NULL); /* radix_encode_ctx_t limit */
+
+    /* ---- Top-K bounded-heap shortcut ----
+     * Triggered by the SORT+HEAD fusion (HEAD passes limit > 0).  When
+     * K is well below nrows (K << n) and every sort key is a direct
+     * OP_SCAN of a column on `tbl`, run a heap-based partial selection
+     * in O(n log K + K log K) instead of the full O(n log n) sort.
+     * Single key → radix-encoded fast path; multi-key → comparator
+     * heap (still O(n log K) in compares, big win when K << n).
+     * Falls through to the full sort whenever the topk path returns
+     * NULL (unsupported type, computed-key sort, etc.). */
+    if (limit > 0 && n_sort >= 1 && limit < nrows && limit <= 8192 &&
+        g && g->selection == NULL) {
+        ray_t* key_cols[16];
+        int    all_scan = 1;
+        for (uint8_t k = 0; k < n_sort; k++) {
+            ray_op_t* key_op = ext->sort.columns[k];
+            ray_op_ext_t* key_ext = find_ext(g, key_op->id);
+            if (key_ext && key_ext->base.opcode == OP_SCAN) {
+                key_cols[k] = ray_table_get_col(tbl, key_ext->sym);
+                if (!key_cols[k]) { all_scan = 0; break; }
+            } else {
+                all_scan = 0;
+                break;
+            }
+        }
+        if (all_scan) {
+            if (n_sort == 1) {
+                uint8_t desc = ext->sort.desc ? ext->sort.desc[0] : 0;
+                uint8_t nf   = ext->sort.nulls_first
+                              ? ext->sort.nulls_first[0]
+                              : !desc;
+                ray_t* topk_res = ray_topk_table(tbl, key_cols[0], desc, nf, limit);
+                if (topk_res && !RAY_IS_ERR(topk_res)) return topk_res;
+                if (topk_res && RAY_IS_ERR(topk_res)) ray_release(topk_res);
+            } else {
+                /* Default nulls-first to !desc per-key when caller
+                 * didn't supply a vector. */
+                uint8_t nfs[16];
+                for (uint8_t k = 0; k < n_sort; k++) {
+                    uint8_t d = ext->sort.desc ? ext->sort.desc[k] : 0;
+                    nfs[k] = ext->sort.nulls_first
+                             ? ext->sort.nulls_first[k]
+                             : !d;
+                }
+                ray_t* topk_res = ray_topk_table_multi(tbl, key_cols,
+                    ext->sort.desc, nfs, n_sort, limit);
+                if (topk_res && !RAY_IS_ERR(topk_res)) return topk_res;
+                if (topk_res && RAY_IS_ERR(topk_res)) ray_release(topk_res);
+            }
+            /* topk_res == NULL → unsupported config, fall through. */
+        }
+    }
 
     /* Resolve sort key vectors */
     ray_t* sort_vecs[n_sort > 0 ? n_sort : 1];
