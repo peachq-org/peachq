@@ -173,6 +173,7 @@ static dag_binary_ctor resolve_binary_dag(int64_t sym_id) {
         if (name[0] == 'i' && name[1] == 'n') return ray_in;
     } else if (len == 3) {
         if (memcmp(name, "and",  3) == 0) return ray_and;
+        if (memcmp(name, "div",  3) == 0) return ray_idiv;
     } else if (len == 4) {
         if (memcmp(name, "like", 4) == 0) return ray_like;
     } else if (len == 5) {
