@@ -758,6 +758,14 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
 /* ── group.c ── */
 ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input);
 ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input);
+
+/* Single-pass per-group count(distinct).  Returns I64 vec of length
+ * n_groups, or NULL if `src->type` isn't a supported scalar/SYM type
+ * (caller falls back to per-group exec_count_distinct).  Errors are
+ * returned as RAY_IS_ERR ray_t*. */
+ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
+                                    int64_t n_rows, int64_t n_groups);
+
 ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit);
 
 /* ── collection.c ── */

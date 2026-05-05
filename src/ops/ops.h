@@ -681,6 +681,20 @@ void ray_graph_dump(ray_graph_t* g, ray_op_t* root, void* out);
 ray_t* ray_sort_indices(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
                         uint8_t n_cols, int64_t nrows);
 
+/* Top-K bounded-heap path: returns a new K-row table of `tbl` ordered by
+ * `col` in the requested direction.  Returns NULL when the input doesn't
+ * fit the single-key fast path (unsupported type, K ≥ nrows, etc.) so
+ * the caller can fall back to a full sort.  Skips the full O(n log n)
+ * sort entirely — selection runs in O(n log K + K log K). */
+ray_t* ray_topk_table(ray_t* tbl, ray_t* col, uint8_t desc, uint8_t nf,
+                      int64_t k);
+
+/* Multi-key variant of ray_topk_table: bounded-heap selection on n_keys
+ * sort columns with per-key direction / nulls-first.  Same fallback
+ * contract — returns NULL when the inputs don't fit the fast path. */
+ray_t* ray_topk_table_multi(ray_t* tbl, ray_t** key_cols, uint8_t* descs,
+                            uint8_t* nfs, uint8_t n_keys, int64_t k);
+
 /* ===== Executor API ===== */
 
 ray_t* ray_execute(ray_graph_t* g, ray_op_t* root);
