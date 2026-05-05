@@ -492,7 +492,6 @@ ray_t* ray_nil_fn(ray_t* x);
 ray_t* ray_where_fn(ray_t* x);
 ray_t* ray_raze_fn(ray_t* x);
 ray_t* ray_within_fn(ray_t* vals, ray_t* range);
-ray_t* ray_fdiv_fn(ray_t* a, ray_t* b);
 
 /* Query bridge builtins (formerly in eval.c, now in ops/query.c) */
 ray_t* ray_select_fn(ray_t** args, int64_t n);
