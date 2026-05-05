@@ -51,6 +51,7 @@ const char* ray_opcode_name(uint16_t op) {
         case OP_SUB:           return "SUB";
         case OP_MUL:           return "MUL";
         case OP_DIV:           return "DIV";
+        case OP_IDIV:          return "IDIV";
         case OP_MOD:           return "MOD";
         case OP_EQ:            return "EQ";
         case OP_NE:            return "NE";
