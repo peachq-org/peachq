@@ -670,8 +670,8 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
     memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
     if (n_rows == 0 || n_groups == 0) return out;
 
-    /* Pick capacity ≥ 2 * n_rows rounded up to power of two.  This bounds
-     * load factor at 0.5 even when every (gid,val) pair is distinct. */
+    /* Pick capacity ≥ 2 × n_rows rounded up to power of two.  This bounds
+     * load factor at 0.5 even when every (gid, val) pair is distinct. */
     uint64_t cap = (uint64_t)n_rows * 2;
     if (cap < 32) cap = 32;
     uint64_t c = 1;
@@ -702,40 +702,103 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
     const uint8_t* null_bm = has_nulls ? ray_vec_nullmap_bytes(src, NULL, NULL)
                                         : NULL;
 
-    for (int64_t r = 0; r < n_rows; r++) {
-        int64_t gid = row_gid[r];
-        if (gid < 0 || gid >= n_groups) continue;
-        if (has_nulls && null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
+    /* Per-type read width — hoist the type dispatch out of the hot loop.
+     * read_col_i64 was branching on `in_type` every iteration plus paying
+     * an indirect call. */
+    uint8_t esz = ray_sym_elem_size(in_type, src->attrs);
 
-        int64_t val;
+    /* Macro: insert (val) for current row, given that (gid, val) is the
+     * candidate pair; expects local vars `slot`, `cur`, `gid_p1`. */
+    #define CD_INSERT(VAL_EXPR) do {                                    \
+        int64_t val = (VAL_EXPR);                                       \
+        int64_t gid_p1 = gid + 1;                                       \
+        uint64_t h = (uint64_t)val * 0x9E3779B97F4A7C15ULL;             \
+        h ^= (uint64_t)gid_p1 * 0xBF58476D1CE4E5B9ULL;                  \
+        h ^= h >> 33;                                                   \
+        h *= 0xC4CEB9FE1A85EC53ULL;                                     \
+        uint64_t slot = h & mask;                                       \
+        for (;;) {                                                      \
+            int64_t cur = slot_gid[slot];                               \
+            if (cur == 0) {                                             \
+                slot_gid[slot] = gid_p1;                                \
+                slot_val[slot] = val;                                   \
+                odata[gid]++;                                           \
+                break;                                                  \
+            }                                                           \
+            if (cur == gid_p1 && slot_val[slot] == val) break;          \
+            slot = (slot + 1) & mask;                                   \
+        }                                                               \
+    } while (0)
+
+    /* Specialised per-type loops.  Each version reads the column with a
+     * width-typed pointer dereference instead of dispatching through
+     * read_col_i64 every row.  The has_nulls / no-nulls split keeps the
+     * fast path branch-free for the common no-null SYM/I64 columns. */
+    if (!has_nulls) {
         if (in_type == RAY_F64) {
-            double fv = ((double*)base)[r];
-            if (fv != fv) fv = (double)NAN;
-            else if (fv == 0.0) fv = 0.0;
-            memcpy(&val, &fv, sizeof(int64_t));
-        } else {
-            val = read_col_i64(base, r, in_type, src->attrs);
-        }
-
-        int64_t gid_p1 = gid + 1;
-        /* Mix gid and val so groups don't form long runs of collisions. */
-        uint64_t h = (uint64_t)val * 0x9E3779B97F4A7C15ULL;
-        h ^= (uint64_t)gid_p1 * 0xBF58476D1CE4E5B9ULL;
-        h ^= h >> 33;
-        h *= 0xC4CEB9FE1A85EC53ULL;
-        uint64_t slot = h & mask;
-        for (;;) {
-            int64_t cur = slot_gid[slot];
-            if (cur == 0) {
-                slot_gid[slot] = gid_p1;
-                slot_val[slot] = val;
-                odata[gid]++;
-                break;
+            const double* d = (const double*)base;
+            for (int64_t r = 0; r < n_rows; r++) {
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= n_groups) continue;
+                double fv = d[r];
+                if (fv != fv) fv = (double)NAN;
+                else if (fv == 0.0) fv = 0.0;
+                int64_t v;
+                memcpy(&v, &fv, sizeof(int64_t));
+                CD_INSERT(v);
             }
-            if (cur == gid_p1 && slot_val[slot] == val) break;
-            slot = (slot + 1) & mask;
+        } else if (esz == 8) {
+            const int64_t* d = (const int64_t*)base;
+            for (int64_t r = 0; r < n_rows; r++) {
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= n_groups) continue;
+                CD_INSERT(d[r]);
+            }
+        } else if (esz == 4) {
+            const int32_t* d = (const int32_t*)base;
+            for (int64_t r = 0; r < n_rows; r++) {
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= n_groups) continue;
+                CD_INSERT((int64_t)d[r]);
+            }
+        } else if (esz == 2) {
+            const int16_t* d = (const int16_t*)base;
+            for (int64_t r = 0; r < n_rows; r++) {
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= n_groups) continue;
+                CD_INSERT((int64_t)d[r]);
+            }
+        } else { /* esz == 1 */
+            const uint8_t* d = (const uint8_t*)base;
+            for (int64_t r = 0; r < n_rows; r++) {
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= n_groups) continue;
+                CD_INSERT((int64_t)d[r]);
+            }
+        }
+    } else {
+        /* Has-nulls fallback: keep the per-row null bitmap probe and
+         * the generic read_col_i64 dispatch.  Adding eight specialised
+         * has-nulls loops costs more code than the small gain on
+         * already-rare null-bearing columns. */
+        for (int64_t r = 0; r < n_rows; r++) {
+            int64_t gid = row_gid[r];
+            if (gid < 0 || gid >= n_groups) continue;
+            if (null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
+            int64_t val;
+            if (in_type == RAY_F64) {
+                double fv = ((double*)base)[r];
+                if (fv != fv) fv = (double)NAN;
+                else if (fv == 0.0) fv = 0.0;
+                memcpy(&val, &fv, sizeof(int64_t));
+            } else {
+                val = read_col_i64(base, r, in_type, src->attrs);
+            }
+            CD_INSERT(val);
         }
     }
+
+    #undef CD_INSERT
 
     scratch_free(k_hdr);
     scratch_free(v_hdr);
