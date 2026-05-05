@@ -4506,8 +4506,20 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                             src_for_global = ray_table_get_col(tbl, cd_inner->i64);
                         }
                         if (src_for_global) {
-                            col = ray_count_distinct_per_group(
-                                src_for_global, row_gid, nrows, n_groups);
+                            /* Path selection: global-hash kernel scales
+                             * with n_rows (per-row probe of one shared
+                             * hash table); per-group-slice scales with
+                             * n_groups (per-group setup + small dedup).
+                             * Empirically the cross-over is around 50 K
+                             * groups on the local hardware — beyond
+                             * that, per-group setup overhead dominates. */
+                            if (n_groups <= 50000) {
+                                col = count_distinct_per_group_buf(
+                                    cd_inner, tbl, idx_buf, offsets, grp_cnt, n_groups);
+                            } else {
+                                col = ray_count_distinct_per_group(
+                                    src_for_global, row_gid, nrows, n_groups);
+                            }
                             /* col == NULL → unsupported type, fall through. */
                         }
                         if (src_owned && src_for_global) ray_release(src_for_global);
