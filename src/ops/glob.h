@@ -40,4 +40,47 @@
 bool ray_glob_match(const char* s, size_t sn, const char* p, size_t pn);
 bool ray_glob_match_ci(const char* s, size_t sn, const char* p, size_t pn);
 
+/* ---- Pre-compiled pattern fast path -------------------------------------
+ * Many LIKE workloads have very simple patterns (e.g. `*google*`).  When
+ * the pattern has no metacharacters except (optionally) a leading `*`
+ * and/or a trailing `*`, the match collapses to a literal substring /
+ * prefix / suffix / equality test that we can drive with memcmp /
+ * memmem — both libc-vectorised on modern glibc.  Detect the shape once
+ * up front, then run the entire dictionary (or row vector) through a
+ * single tight loop.
+ *
+ * Shapes:
+ *   RAY_GLOB_SHAPE_NONE     — pattern needs the full glob matcher
+ *   RAY_GLOB_SHAPE_EXACT    — no `*`/`?`/`[` — literal equality
+ *   RAY_GLOB_SHAPE_PREFIX   — `<lit>*`        — strncmp prefix
+ *   RAY_GLOB_SHAPE_SUFFIX   — `*<lit>`        — tail equality
+ *   RAY_GLOB_SHAPE_CONTAINS — `*<lit>*`       — memmem
+ *   RAY_GLOB_SHAPE_ANY      — pattern is "*"  — always true
+ * The compiled struct caches a pointer/length into the original
+ * pattern buffer, so the caller must keep the pattern alive while the
+ * compiled view is in use. */
+typedef enum {
+    RAY_GLOB_SHAPE_NONE = 0,
+    RAY_GLOB_SHAPE_EXACT,
+    RAY_GLOB_SHAPE_PREFIX,
+    RAY_GLOB_SHAPE_SUFFIX,
+    RAY_GLOB_SHAPE_CONTAINS,
+    RAY_GLOB_SHAPE_ANY,
+} ray_glob_shape_t;
+
+typedef struct {
+    ray_glob_shape_t shape;
+    const char*      lit;     /* literal substring inside the pattern */
+    size_t           lit_len;
+} ray_glob_compiled_t;
+
+/* Classify a pattern.  Returns the simplest matching shape; falls back
+ * to RAY_GLOB_SHAPE_NONE when the pattern needs the general matcher. */
+ray_glob_compiled_t ray_glob_compile(const char* p, size_t pn);
+
+/* Match a single string against a compiled simple-shape pattern.
+ * Caller must guarantee shape != RAY_GLOB_SHAPE_NONE. */
+bool ray_glob_match_compiled(const ray_glob_compiled_t* c,
+                             const char* s, size_t sn);
+
 #endif /* RAY_OPS_GLOB_H */
