@@ -359,6 +359,14 @@ int64_t  ray_sym_intern(const char* str, size_t len);
 int64_t  ray_sym_find(const char* str, size_t len);
 ray_t*    ray_sym_str(int64_t id);
 uint32_t ray_sym_count(void);
+
+/* Borrow a snapshot of the sym → string array.  Returns a pointer to
+ * the underlying ray_t** strings table along with its length; valid
+ * only while no concurrent ray_sym_intern occurs (i.e. read-only
+ * execution phases).  Lock is taken once for the snapshot and dropped
+ * before return — caller may iterate freely.  Both *out_strings and
+ * *out_count must be non-NULL. */
+void ray_sym_strings_borrow(ray_t*** out_strings, uint32_t* out_count);
 bool     ray_sym_ensure_cap(uint32_t needed);
 ray_err_t ray_sym_save(const char* path);
 ray_err_t ray_sym_load(const char* path);

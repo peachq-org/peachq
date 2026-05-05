@@ -205,10 +205,15 @@ static bool is_ext_root(uint16_t opcode) {
            opcode == OP_WINDOW || opcode == OP_WINDOW_JOIN || opcode == OP_SELECT;
 }
 
-static void try_rewrite(ray_graph_t* g, ray_op_t* node) {
-    if (!node || (node->flags & OP_FLAG_DEAD)) return;
-    if (is_ext_root(node->opcode)) return;
-    if (node->opcode >= RAY_IDIOM_OPCODE_CAP) return;
+/* Try one rewrite at `node`.  Returns the replacement when the rewrite
+ * fires, else NULL.  Caller redirects consumers and marks the old node
+ * dead — having the helper return the replacement also lets the pass
+ * track when the *root* was rewritten so the caller's root pointer can
+ * be bumped to the replacement. */
+static ray_op_t* try_rewrite(ray_graph_t* g, ray_op_t* node) {
+    if (!node || (node->flags & OP_FLAG_DEAD)) return NULL;
+    if (is_ext_root(node->opcode)) return NULL;
+    if (node->opcode >= RAY_IDIOM_OPCODE_CAP) return NULL;
 
     int idx = first_idiom[node->opcode];
     while (idx >= 0) {
@@ -220,16 +225,17 @@ static void try_rewrite(ray_graph_t* g, ray_op_t* node) {
                     /* UINT32_MAX sentinels: no nodes to skip during redirect */
                     redirect_consumers(g, node->id, repl, UINT32_MAX, UINT32_MAX);
                     node->flags |= OP_FLAG_DEAD;
-                    return;  /* first-match-wins */
+                    return repl;  /* first-match-wins */
                 }
             }
         }
         idx = next_idiom[idx];
     }
+    return NULL;
 }
 
-void ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
-    if (!g || !root || g->node_count == 0) return;
+ray_op_t* ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
+    if (!g || !root || g->node_count == 0) return root;
     build_index();
 
     /* Iterative post-order walk: children rewritten before parents so
@@ -237,7 +243,7 @@ void ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
        pattern — push roots onto stack1, drain into stack2 (reverse),
        pop stack2 to get post-order. */
     uint32_t nc = g->node_count;
-    if (nc > UINT32_MAX / 4) return;  /* overflow guard, mirrors fuse.c */
+    if (nc > UINT32_MAX / 4) return root;  /* overflow guard, mirrors fuse.c */
 
     uint32_t cap = nc * 2;
     uint32_t stk1_local[256], stk2_local[256];
@@ -246,7 +252,7 @@ void ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
     if (!stk1 || !stk2) {
         if (stk1 && stk1 != stk1_local) ray_sys_free(stk1);
         if (stk2 && stk2 != stk2_local) ray_sys_free(stk2);
-        return;
+        return root;
     }
 
     /* Visited-bit guard against re-entry on shared subgraphs. */
@@ -255,7 +261,7 @@ void ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
     if (!visited) {
         if (stk1 != stk1_local) ray_sys_free(stk1);
         if (stk2 != stk2_local) ray_sys_free(stk2);
-        return;
+        return root;
     }
     memset(visited, 0, nc);
 
@@ -275,13 +281,21 @@ void ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
         }
     }
 
-    /* Post-order: pop stk2 from top, call try_rewrite. */
+    /* Post-order: pop stk2 from top, call try_rewrite.  Track whether
+     * the root itself was rewritten — caller needs the new pointer to
+     * avoid executing the dead node. */
+    uint32_t root_id = root->id;
     while (sp2 > 0) {
         uint32_t nid = stk2[--sp2];
-        try_rewrite(g, &g->nodes[nid]);
+        ray_op_t* repl = try_rewrite(g, &g->nodes[nid]);
+        if (repl && nid == root_id) {
+            root = repl;
+            root_id = repl->id;
+        }
     }
 
     if (visited != visited_local) ray_sys_free(visited);
     if (stk1 != stk1_local) ray_sys_free(stk1);
     if (stk2 != stk2_local) ray_sys_free(stk2);
+    return root;
 }
