@@ -31,6 +31,7 @@
 #include "ops/ops.h"
 #include "ops/internal.h"
 #include "ops/hash.h"
+#include "ops/rowsel.h"
 #include "ops/temporal.h"
 #include "table/sym.h"
 #include "table/dict.h"
@@ -1954,6 +1955,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
      * plain RAY_SYM vector of the dict keys so the rest of
      * ray_select_fn sees a standard multi-key group-by. */
     ray_t* by_sym_vec_owned = NULL;
+
+    /* Selection saved across the path-A graph free for count(distinct
+     * col_ref) non-aggs.  Path B leaves this NULL because the
+     * materialised filtered_tbl already encodes the selection in row
+     * positions.  Declared here at function scope so the cleanup at
+     * the bottom of ray_select_fn can release it. */
+    ray_t* saved_selection = NULL;
     DICT_VIEW_DECL(byv);
     if (by_expr && by_expr->type == RAY_DICT) {
         DICT_VIEW_OPEN(by_expr, byv);
@@ -3223,15 +3231,30 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             return apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
         }
 
-        /* Pre-scan: any non-aggregation expressions?  If so and there's a
-         * WHERE, we must materialize the filtered table first so the
-         * post-DAG scatter evaluates on filtered data (matching agg semantics). */
-        int has_nonagg = 0;
+        /* Pre-scan: any non-aggregation expressions that need a flat
+         * (post-filter) table?  Most non-agg expressions evaluate via
+         * ray_eval over the whole table and require a materialized
+         * filtered_tbl when WHERE is present.
+         *
+         * The exception is `(count (distinct col_ref))`: its scatter
+         * runs through ray_count_distinct_per_group, which reads the
+         * source column directly and skips rows where row_gid[r] < 0.
+         * As long as the row→gid build masks filtered-out rows to -1
+         * (using the selection saved across the path-A graph free),
+         * count(distinct col_ref) doesn't need the materialization.
+         * That's worth ~100 ms on Q14 (937 K rows × 105 cols filtered
+         * → 937 K rows × 105 cols copy). */
+        int has_nonagg_needing_flat = 0;
         for (int64_t i = 0; i + 1 < dict_n; i += 2) {
             int64_t kid = dict_elems[i]->i64;
             if (kid == from_id || kid == where_id || kid == by_id ||
                 kid == take_id || kid == asc_id || kid == desc_id) continue;
-            if (!is_group_dag_agg_expr(dict_elems[i + 1])) { has_nonagg = 1; break; }
+            ray_t* expr = dict_elems[i + 1];
+            if (is_group_dag_agg_expr(expr)) continue;
+            ray_t* cd_inner = match_count_distinct(expr);
+            int is_simple_cd = cd_inner && cd_inner->type == -RAY_SYM &&
+                               (cd_inner->attrs & RAY_ATTR_NAME);
+            if (!is_simple_cd) { has_nonagg_needing_flat = 1; break; }
         }
 
         /* The post-DAG scatter needs a flat single-segment table: it
@@ -3239,7 +3262,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
          * input.  Detect parted tables up front — if the source is
          * parted and there's no WHERE to materialize it, return nyi. */
         int table_is_parted = 0;
-        if (has_nonagg) {
+        if (has_nonagg_needing_flat) {
             int64_t ncols = ray_table_ncols(tbl);
             for (int64_t c = 0; c < ncols; c++) {
                 ray_t* col = ray_table_get_col_idx(tbl, c);
@@ -3277,7 +3300,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
          * ignored before the filter was wired through the group
          * pipeline.) */
         if (where_expr) {
-            bool can_fuse = !has_nonagg && !table_is_parted;
+            bool can_fuse = !has_nonagg_needing_flat && !table_is_parted;
             if (can_fuse) {
                 root = ray_optimize(g, root);
                 /* exec_node populates g->selection as a side effect
@@ -3298,6 +3321,14 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                  * g->table still owns tbl via the graph, so this
                  * only drops the exec-node-side retain. */
                 ray_release(fres);
+                /* Retain a copy of the selection so it survives the
+                 * later ray_graph_free.  count(distinct col_ref) needs
+                 * this in the n_nonaggs scatter to mask filtered-out
+                 * rows in the row→gid build. */
+                if (g->selection) {
+                    saved_selection = g->selection;
+                    ray_retain(saved_selection);
+                }
             } else {
                 root = ray_optimize(g, root);
                 ray_t* fres = ray_execute(g, root);
@@ -4546,6 +4577,44 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 }
                 #undef KEY_READ
 
+                /* When path A was taken (no materialisation), the probe
+                 * above looked up gids for every row in the original
+                 * (unfiltered) table — including rows that the WHERE
+                 * clause filtered out.  Mask those rows to -1 here so
+                 * downstream count_distinct (and grp_cnt) only count
+                 * the surviving rows.  Walks the morsel-segmented
+                 * rowsel directly to avoid building a full bitmap. */
+                if (saved_selection) {
+                    ray_rowsel_t*   sm   = ray_rowsel_meta(saved_selection);
+                    const uint8_t*  flg  = ray_rowsel_flags(saved_selection);
+                    const uint32_t* offs = ray_rowsel_offsets(saved_selection);
+                    const uint16_t* lidx = ray_rowsel_idx(saved_selection);
+                    for (uint32_t seg = 0; seg < sm->n_segs; seg++) {
+                        int64_t s_lo = (int64_t)seg * RAY_MORSEL_ELEMS;
+                        int64_t s_hi = s_lo + RAY_MORSEL_ELEMS;
+                        if (s_hi > nrows) s_hi = nrows;
+                        uint8_t f = flg[seg];
+                        if (f == RAY_SEL_NONE) {
+                            for (int64_t r = s_lo; r < s_hi; r++) row_gid[r] = -1;
+                        } else if (f == RAY_SEL_ALL) {
+                            /* every row in this segment passed — leave gid */
+                        } else { /* RAY_SEL_MIX */
+                            uint8_t in_seg[RAY_MORSEL_ELEMS / 8] = {0};
+                            uint32_t off  = offs[seg];
+                            uint32_t cnt  = offs[seg + 1] - off;
+                            for (uint32_t i = 0; i < cnt; i++) {
+                                uint16_t loc = lidx[off + i];
+                                in_seg[loc >> 3] |= (uint8_t)(1u << (loc & 7));
+                            }
+                            for (int64_t r = s_lo; r < s_hi; r++) {
+                                uint16_t loc = (uint16_t)(r - s_lo);
+                                if (!(in_seg[loc >> 3] & (1u << (loc & 7))))
+                                    row_gid[r] = -1;
+                            }
+                        }
+                    }
+                }
+
                 memset(grp_cnt, 0, (size_t)n_groups * sizeof(int64_t));
                 for (int64_t r = 0; r < nrows; r++)
                     if (row_gid[r] >= 0) grp_cnt[row_gid[r]]++;
@@ -4793,6 +4862,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         result = apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
 
     if (by_sym_vec_owned) ray_release(by_sym_vec_owned);
+    if (saved_selection) ray_release(saved_selection);
 
     return result;
 }
