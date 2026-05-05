@@ -2647,6 +2647,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     /* ---- Scalar aggregate fast path (n_keys == 0): flat vector scan ---- */
     if (n_keys == 0 && nrows > 0) {
         uint8_t need_flags = DA_NEED_COUNT;
+        bool has_first_last = false;
         for (uint8_t a = 0; a < n_aggs; a++) {
             uint16_t aop = ext->agg_ops[a];
             if (aop == OP_SUM || aop == OP_PROD || aop == OP_AVG || aop == OP_FIRST || aop == OP_LAST)
@@ -2655,6 +2656,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                 { need_flags |= DA_NEED_SUM; need_flags |= DA_NEED_SUMSQ; }
             else if (aop == OP_MIN) need_flags |= DA_NEED_MIN;
             else if (aop == OP_MAX) need_flags |= DA_NEED_MAX;
+            if (aop == OP_FIRST || aop == OP_LAST) has_first_last = true;
         }
 
         void* agg_ptrs[vla_aggs];
@@ -2670,7 +2672,15 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         }
 
         ray_pool_t* sc_pool = ray_pool_get();
-        uint32_t sc_n = (sc_pool && nrows >= RAY_PARALLEL_THRESHOLD)
+        /* Pool dispatch is work-stealing: chunks may be processed out of
+         * row-index order across workers, so the "count[0]==1" sentinel
+         * scalar_accum_row uses for FIRST (and the always-overwrite for
+         * LAST) only yields the per-worker first/last, not the global
+         * one.  The merge step then picks worker[0]'s FIRST regardless
+         * of which range it actually covered.  Force serial execution
+         * when FIRST/LAST is in play; the DA path (which does track
+         * per-slot row bounds) is still preferred when we have keys. */
+        uint32_t sc_n = (sc_pool && nrows >= RAY_PARALLEL_THRESHOLD && !has_first_last)
                         ? ray_pool_total_workers(sc_pool) : 1;
 
         ray_t* sc_hdr;
