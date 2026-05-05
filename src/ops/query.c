@@ -3170,27 +3170,97 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             return apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
         }
     } else if (n_out > 0) {
-        /* Projection only (no group by) — select specific columns */
-        ray_op_t* col_ops[16];
-        uint8_t nc = 0;
+        /* No `by:` but explicit output expressions.
+         *
+         * Two sub-cases:
+         *   (a) All outputs are aggregates → scalar reduction.  Route
+         *       through ray_group(n_keys=0) so the result is ONE row,
+         *       not the input row count broadcast.  The naive ray_select
+         *       path lowers `(sum c)` to OP_SUM as a column expression;
+         *       OP_SELECT then broadcasts the scalar atom to nrows
+         *       (exec.c: vec->type < 0 → broadcast_scalar), producing
+         *       N copies of the same value.
+         *   (b) At least one non-agg output → keep the existing
+         *       projection (broadcast-as-column), matching q's
+         *       per-row evaluation semantics.
+         *
+         * Mixed agg+non-agg without `by:` continues to flow through (b);
+         * q's semantics there imply LIST/scalar mixing that is out of
+         * scope for this fix. */
+        int has_agg = 0;
+        int has_nonagg_out = 0;
         for (int64_t i = 0; i + 1 < dict_n; i += 2) {
             int64_t kid = dict_elems[i]->i64;
-            if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
-            if (nc < 16) {
-                col_ops[nc] = compile_expr_dag(g, dict_elems[i + 1]);
-                if (!col_ops[nc]) {
-                    /* Nearest-path resources must be freed here too — the
-                     * rerank handle/query buffers are held across the whole
-                     * ray_select_fn body, not just inside the nearest block. */
-                    if (nearest_handle_owned) ray_release(nearest_handle_owned);
-                    if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+            if (kid == from_id || kid == where_id || kid == by_id ||
+                kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
+            if (is_agg_expr(dict_elems[i + 1])) has_agg = 1;
+            else has_nonagg_out = 1;
+        }
+
+        if (has_agg && !has_nonagg_out && !nearest_expr) {
+            /* Scalar reduction.  Pre-execute the WHERE filter (already
+             * wired as ray_filter at the top) so OP_FILTER on the table
+             * input populates g->selection, which exec_group then
+             * honours in its n_keys==0 fast path. */
+            if (where_expr) {
+                root = ray_optimize(g, root);
+                ray_t* fres = exec_node(g, root);
+                if (!fres || RAY_IS_ERR(fres)) {
+                    if (g->selection) {
+                        ray_release(g->selection);
+                        g->selection = NULL;
+                    }
+                    ray_graph_free(g); ray_release(tbl);
+                    return fres ? fres : ray_error("domain", NULL);
+                }
+                ray_release(fres);
+            }
+
+            uint16_t  s_agg_ops[16];
+            ray_op_t* s_agg_ins[16];
+            uint8_t   s_n_aggs = 0;
+            for (int64_t i = 0; i + 1 < dict_n && s_n_aggs < 16; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                if (kid == from_id || kid == where_id || kid == by_id ||
+                    kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
+                ray_t*  val_expr  = dict_elems[i + 1];
+                ray_t** agg_elems = (ray_t**)ray_data(val_expr);
+                s_agg_ops[s_n_aggs] = resolve_agg_opcode(agg_elems[0]->i64);
+                s_agg_ins[s_n_aggs] = compile_expr_dag(g, agg_elems[1]);
+                if (!s_agg_ins[s_n_aggs]) {
+                    if (g->selection) {
+                        ray_release(g->selection);
+                        g->selection = NULL;
+                    }
                     ray_graph_free(g); ray_release(tbl);
                     return ray_error("domain", NULL);
                 }
-                nc++;
+                s_n_aggs++;
             }
+            root = ray_group(g, NULL, 0, s_agg_ops, s_agg_ins, s_n_aggs);
+        } else {
+            /* Projection only (no group by) — select specific columns */
+            ray_op_t* col_ops[16];
+            uint8_t nc = 0;
+            for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
+                if (nc < 16) {
+                    col_ops[nc] = compile_expr_dag(g, dict_elems[i + 1]);
+                    if (!col_ops[nc]) {
+                        /* Nearest-path resources must be freed here too — the
+                         * rerank handle/query buffers are held across the whole
+                         * ray_select_fn body, not just inside the nearest block. */
+                        if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                        if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                        ray_graph_free(g); ray_release(tbl);
+                        return ray_error("domain", NULL);
+                    }
+                    nc++;
+                }
+            }
+            root = ray_select(g, root, col_ops, nc);
         }
-        root = ray_select(g, root, col_ops, nc);
     }
 
     /* Sort: collect asc/desc columns in dict iteration order.
