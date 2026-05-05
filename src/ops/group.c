@@ -294,6 +294,26 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     return ray_i64(count);
 }
 
+static ray_t* reduction_i64_result(int64_t val, int8_t out_type) {
+    switch (out_type) {
+        case RAY_DATE:      return ray_date((int32_t)val);
+        case RAY_TIME:      return ray_time(val);
+        case RAY_TIMESTAMP: return ray_timestamp(val);
+        case RAY_I32:       return ray_i32((int32_t)val);
+        case RAY_I16:       return ray_i16((int16_t)val);
+        case RAY_U8:        return ray_u8((uint8_t)val);
+        default:            return ray_i64(val);
+    }
+}
+
+static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
+                                       double fval, int64_t ival) {
+    int8_t out_type = op->out_type ? op->out_type : in_type;
+    if (!found) return ray_typed_null(-out_type);
+    if (out_type == RAY_F64) return ray_f64(fval);
+    return reduction_i64_result(ival, out_type);
+}
+
 ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (!input || RAY_IS_ERR(input)) return input;
 
@@ -408,8 +428,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         switch (op->opcode) {
             case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : ray_i64(merged.sum_i); break;
             case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : ray_i64(merged.prod_i); break;
-            case OP_MIN:   result = merged.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(merged.min_f) : ray_i64(merged.min_i)) : ray_typed_null(-in_type); break;
-            case OP_MAX:   result = merged.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(merged.max_f) : ray_i64(merged.max_i)) : ray_typed_null(-in_type); break;
+            case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i); break;
+            case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i); break;
             /* COUNT returns total length including nulls — matches ray_count_fn's
              * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
             case OP_COUNT: result = ray_i64(scan_n); break;
@@ -447,8 +467,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     switch (op->opcode) {
         case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : ray_i64(acc.sum_i);
         case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : ray_i64(acc.prod_i);
-        case OP_MIN:   return acc.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(acc.min_f) : ray_i64(acc.min_i)) : ray_typed_null(-in_type);
-        case OP_MAX:   return acc.cnt > 0 ? (in_type == RAY_F64 ? ray_f64(acc.max_f) : ray_i64(acc.max_i)) : ray_typed_null(-in_type);
+        case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i);
+        case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i);
         /* COUNT returns total length including nulls — matches ray_count_fn's
          * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
         case OP_COUNT: return ray_i64(scan_n);
