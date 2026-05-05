@@ -1677,6 +1677,76 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
     return out;
 }
 
+/* Width-agnostic key reader: read row `idx` of a group-key column as
+ * int64_t.  Same coverage as the KEY_READ macro inside ray_select_fn,
+ * lifted to file scope so the parallel row→gid probe worker can use it. */
+static inline int64_t key_read_i64(const void* d, int64_t idx,
+                                   int8_t bt, uint8_t attrs) {
+    switch (bt) {
+    case RAY_BOOL:
+    case RAY_U8:        return ((const uint8_t*)d)[idx];
+    case RAY_I16:       return ((const int16_t*)d)[idx];
+    case RAY_I32:
+    case RAY_DATE:
+    case RAY_TIME:      return ((const int32_t*)d)[idx];
+    case RAY_I64:
+    case RAY_TIMESTAMP: return ((const int64_t*)d)[idx];
+    case RAY_F32: { uint32_t u;
+        memcpy(&u, &((const float*)d)[idx], 4);
+        return (int64_t)u; }
+    case RAY_F64: { int64_t u;
+        memcpy(&u, &((const double*)d)[idx], 8);
+        return u; }
+    case RAY_SYM:       return ray_read_sym(d, idx, bt, attrs);
+    default:            return 0; /* caller validates type */
+    }
+}
+
+/* Parallel row→gid probe.  Hash table is read-only by the time the probe
+ * runs (the insert phase that built it is single-threaded), so each
+ * worker can process its row range independently with no synchronisation.
+ *
+ * The probe's per-row work is one cache-cold load + a short linear-probe
+ * walk in a hash sized to 2 × n_groups.  At Q14 scale (611 K groups,
+ * ~18 MB hash) the serial loop spends most of its time waiting on cache
+ * misses; spreading the rows across 28 cores gives near-linear speedup
+ * because each core has its own cache hierarchy. */
+typedef struct {
+    /* Hash table contents (read-only). */
+    const int64_t* hk_keys;
+    const int32_t* hk_gid_p1;     /* one of these is non-NULL */
+    const int64_t* hk_gid64;
+    uint64_t       mask;
+    /* Group-key column being probed. */
+    const void* orig_key_data;
+    int8_t      okt;
+    uint8_t     okt_attrs;
+    /* Per-row output. */
+    int64_t* row_gid;
+} rgid_probe_ctx_t;
+
+static void rgid_probe_fn(void* ctx_, uint32_t worker_id,
+                          int64_t start, int64_t end) {
+    (void)worker_id;
+    rgid_probe_ctx_t* x = (rgid_probe_ctx_t*)ctx_;
+    int use_i64 = (x->hk_gid64 != NULL);
+    uint64_t mask = x->mask;
+    for (int64_t r = start; r < end; r++) {
+        int64_t rv = key_read_i64(x->orig_key_data, r, x->okt, x->okt_attrs);
+        uint64_t h = (uint64_t)rv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t s = h & mask;
+        int64_t found = -1;
+        for (;;) {
+            int64_t cur_p1 = use_i64 ? x->hk_gid64[s] : (int64_t)x->hk_gid_p1[s];
+            if (cur_p1 == 0) break;
+            if (x->hk_keys[s] == rv) { found = cur_p1 - 1; break; }
+            s = (s + 1) & mask;
+        }
+        x->row_gid[r] = found;
+    }
+}
+
 /* Forward declarations for eval-level groupby fallback */
 
 /* R8: cheap predicate for whether atom_broadcast_vec can handle this
@@ -4434,22 +4504,40 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         }
                     }
 
-                    /* Probe each row to assign its gid. */
-                    for (int64_t r = 0; r < nrows; r++) {
-                        int64_t rv;
-                        KEY_READ(rv, orig_key, okt, r);
-                        uint64_t h = (uint64_t)rv * 0x9E3779B97F4A7C15ULL;
-                        h ^= h >> 33;
-                        uint64_t s = h & mask;
-                        int64_t found = -1;
-                        for (;;) {
-                            int64_t cur_p1 = use_i64_gid ? hk_gid64[s]
-                                                         : (int64_t)hk_gid_p1[s];
-                            if (cur_p1 == 0) break;
-                            if (hk_keys[s] == rv) { found = cur_p1 - 1; break; }
-                            s = (s + 1) & mask;
+                    /* Probe each row to assign its gid.  Parallelise when
+                     * the input is large enough to amortise dispatch
+                     * overhead — the hash is read-only at this point so
+                     * workers don't need to synchronise. */
+                    ray_pool_t* pool = ray_pool_get();
+                    if (pool && nrows >= 200000 && ray_pool_total_workers(pool) >= 2) {
+                        rgid_probe_ctx_t pctx = {
+                            .hk_keys       = hk_keys,
+                            .hk_gid_p1     = use_i64_gid ? NULL : hk_gid_p1,
+                            .hk_gid64      = use_i64_gid ? hk_gid64 : NULL,
+                            .mask          = mask,
+                            .orig_key_data = ray_data(orig_key),
+                            .okt           = okt,
+                            .okt_attrs     = orig_key->attrs,
+                            .row_gid       = row_gid,
+                        };
+                        ray_pool_dispatch(pool, rgid_probe_fn, &pctx, nrows);
+                    } else {
+                        for (int64_t r = 0; r < nrows; r++) {
+                            int64_t rv;
+                            KEY_READ(rv, orig_key, okt, r);
+                            uint64_t h = (uint64_t)rv * 0x9E3779B97F4A7C15ULL;
+                            h ^= h >> 33;
+                            uint64_t s = h & mask;
+                            int64_t found = -1;
+                            for (;;) {
+                                int64_t cur_p1 = use_i64_gid ? hk_gid64[s]
+                                                             : (int64_t)hk_gid_p1[s];
+                                if (cur_p1 == 0) break;
+                                if (hk_keys[s] == rv) { found = cur_p1 - 1; break; }
+                                s = (s + 1) & mask;
+                            }
+                            row_gid[r] = found;
                         }
-                        row_gid[r] = found;
                     }
 
                     scratch_free(gk_keys_hdr);
