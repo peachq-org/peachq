@@ -1554,6 +1554,39 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
         return ray_dict_new(keys, vals);
     }
 
+    /* Table row selection by index vector: apply the row ids to each
+     * column and return a table.  Keep this before the generic collection
+     * fallback; otherwise a table indexed by millions of row ids becomes
+     * a LIST of row dictionaries. */
+    if (vec->type == RAY_TABLE && idx->type == RAY_I64) {
+        int64_t nrows = ray_table_nrows(vec);
+        int64_t nidx = ray_len(idx);
+        int64_t* ids = (int64_t*)ray_data(idx);
+        for (int64_t i = 0; i < nidx; i++) {
+            if (ids[i] < 0 || ids[i] >= nrows)
+                return ray_error("domain", NULL);
+        }
+
+        int64_t ncols = ray_table_ncols(vec);
+        ray_t* result = ray_table_new(ncols);
+        if (!result || RAY_IS_ERR(result)) return result ? result : ray_error("oom", NULL);
+        for (int64_t c = 0; c < ncols; c++) {
+            ray_t* col = ray_table_get_col_idx(vec, c);
+            int64_t name = ray_table_col_name(vec, c);
+            if (!col) continue;
+            ray_t* gathered = gather_by_idx(col, ids, nidx);
+            if (!gathered || RAY_IS_ERR(gathered)) {
+                ray_release(result);
+                return gathered ? gathered : ray_error("oom", NULL);
+            }
+            result = ray_table_add_col(result, name, gathered);
+            ray_release(gathered);
+            if (!result || RAY_IS_ERR(result))
+                return result ? result : ray_error("oom", NULL);
+        }
+        return result;
+    }
+
     /* Dict key access: (at dict key) → value or 0Nl if missing */
     if (vec->type == RAY_DICT) {
         ray_t* v = ray_dict_get(vec, idx);
