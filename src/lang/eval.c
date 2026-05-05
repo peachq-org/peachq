@@ -586,6 +586,94 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                 }
             }
         }
+    /* R7 fast path: (== or !=) of SYM-vec against a SYM atom.
+     *
+     * The DAG path above doesn't handle SYM (IS_NUM_TYPE excludes it),
+     * so without this, ray_neq_fn / ray_eq_fn fan out to one allocation
+     * per row in the slow loop.  At 5M rows the per-element bool atom
+     * thrash dominates: `(!= URL nu)` standalone takes 113 ms when the
+     * raw work is one i64 lookup + N width-truncated cmpneq.
+     *
+     * Handles either operand order; output is RAY_BOOL.  Nulls go
+     * through the q/k atom-vs-atom rules already in cmp.c (null≠value
+     * is true for NE) by applying the same logic per element. */
+    if (!force_boxed && (dag_opcode == OP_EQ || dag_opcode == OP_NE) &&
+        out_type == RAY_BOOL) {
+        int l_is_sym_vec = left_coll  && ray_is_vec(left)  && left->type  == RAY_SYM;
+        int r_is_sym_vec = right_coll && ray_is_vec(right) && right->type == RAY_SYM;
+        int l_is_sym_atom = !left_coll  && left  && left->type  == -RAY_SYM;
+        int r_is_sym_atom = !right_coll && right && right->type == -RAY_SYM;
+        if ((l_is_sym_vec && r_is_sym_atom) || (r_is_sym_vec && l_is_sym_atom)) {
+            ray_t* vv  = l_is_sym_vec ? left  : right;
+            ray_t* atom = l_is_sym_vec ? right : left;
+            int64_t n = vv->len;
+
+            ray_t* out = ray_vec_new(RAY_BOOL, n);
+            if (out && !RAY_IS_ERR(out)) {
+                out->len = n;
+                bool*    obuf = (bool*)ray_data(out);
+                const void* src = ray_data(vv);
+                int8_t  vt = vv->type;
+                uint8_t va = vv->attrs;
+                int     atom_null = RAY_ATOM_IS_NULL(atom);
+                int64_t target = atom_null ? 0 : atom->i64;
+                int     vec_has_nulls = (va & RAY_ATTR_HAS_NULLS) ? 1 : 0;
+                bool    invert = (dag_opcode == OP_NE);
+
+                if (atom_null && !vec_has_nulls) {
+                    /* Atom is null, vec has no nulls — every row is
+                     * "not equal" to the null atom (== false, != true). */
+                    bool fill = invert; /* != null → true; == null → false */
+                    for (int64_t i = 0; i < n; i++) obuf[i] = fill;
+                } else if (!atom_null && !vec_has_nulls) {
+                    /* Hot path: tight per-width loop, no per-element
+                     * null checks.  This is what ClickBench Q22..Q38
+                     * with R6-cleaned columns actually hit. */
+                    uint8_t w = (uint8_t)(va & RAY_SYM_W_MASK);
+                    if (w == RAY_SYM_W8) {
+                        const uint8_t* d = (const uint8_t*)src;
+                        uint8_t t8 = (uint8_t)target;
+                        for (int64_t i = 0; i < n; i++)
+                            obuf[i] = (d[i] == t8) ^ invert;
+                    } else if (w == RAY_SYM_W16) {
+                        const uint16_t* d = (const uint16_t*)src;
+                        uint16_t t16 = (uint16_t)target;
+                        for (int64_t i = 0; i < n; i++)
+                            obuf[i] = (d[i] == t16) ^ invert;
+                    } else if (w == RAY_SYM_W32) {
+                        const uint32_t* d = (const uint32_t*)src;
+                        uint32_t t32 = (uint32_t)target;
+                        for (int64_t i = 0; i < n; i++)
+                            obuf[i] = (d[i] == t32) ^ invert;
+                    } else { /* RAY_SYM_W64 */
+                        const int64_t* d = (const int64_t*)src;
+                        for (int64_t i = 0; i < n; i++)
+                            obuf[i] = (d[i] == target) ^ invert;
+                    }
+                } else {
+                    /* General path: vec may have nulls, atom may be null.
+                     * Apply q/k atom-rules per element so semantics match
+                     * the slow path exactly. */
+                    for (int64_t i = 0; i < n; i++) {
+                        int row_null = ray_vec_is_null(vv, i);
+                        int eq;
+                        if (row_null && atom_null)      eq = 1;
+                        else if (row_null || atom_null) eq = 0;
+                        else {
+                            int64_t row_id = ray_read_sym(src, i, vt, va);
+                            eq = (row_id == target);
+                        }
+                        obuf[i] = invert ? !eq : eq;
+                    }
+                }
+                ray_release(e0);
+                return out;
+            }
+            if (out) ray_release(out);
+            /* Fall through to slow path on allocation failure. */
+        }
+    }
+
     /* SLOW PATH: per-element scalar loop (fallback for mixed types, temporal, etc.) */
     if (!force_boxed &&
         (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
