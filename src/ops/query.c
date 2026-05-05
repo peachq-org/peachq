@@ -1679,6 +1679,124 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
 
 /* Forward declarations for eval-level groupby fallback */
 
+/* R8: cheap predicate for whether atom_broadcast_vec can handle this
+ * atom AND the atom is a self-evaluating literal (not a name binding
+ * that needs ray_eval to resolve to a column or computed value).  Used
+ * by the all-literal pre-check so we don't half-apply a partial set of
+ * broadcasts and then have to roll back.
+ *
+ * `RAY_ATTR_NAME` distinguishes `m2: m` (the SYM `m` references a
+ * column) from `one: 1` (the I64 literal 1).  Without that filter we'd
+ * eagerly broadcast the column reference and skip the per-group gather
+ * the chained passthrough relies on. */
+static int can_atom_broadcast(ray_t* a) {
+    if (!a || !ray_is_atom(a)) return 0;
+    if (a->attrs & RAY_ATTR_NAME) return 0;
+    int8_t vt = (int8_t)(-a->type);
+    switch (vt) {
+    case RAY_BOOL: case RAY_U8:
+    case RAY_I16:  case RAY_I32:
+    case RAY_I64:  case RAY_F64:
+    case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
+    case RAY_SYM:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* R8: build a typed N-cell vector all containing the value of atom `a`.
+ *
+ * The non-agg scatter path used to bind a `{lit: 1, c: count(...) by: K}`
+ * style query into a per-group RAY_LIST of N retained atoms, which
+ * ballooned Q35 from ~21 ms to ~140 ms (one ray_retain + list slot
+ * per group, scaling with output cardinality, not row count).  Allocate
+ * once and fill — Q35 falls back into parity with Q34.
+ *
+ * Returns NULL for atom types not yet handled (RAY_STR, RAY_GUID, F32);
+ * caller falls back to the per-cell LIST path. */
+static ray_t* atom_broadcast_vec(ray_t* a, int64_t n) {
+    if (!a || !ray_is_atom(a) || n <= 0) return NULL;
+    int8_t vec_type = (int8_t)(-a->type);
+    if (vec_type <= 0) return NULL;
+
+    ray_t* v;
+    if (vec_type == RAY_SYM) {
+        uint8_t w = (uint8_t)(a->attrs & RAY_SYM_W_MASK);
+        v = ray_sym_vec_new(w, n);
+    } else {
+        v = ray_vec_new(vec_type, n);
+    }
+    if (!v || RAY_IS_ERR(v)) return NULL;
+    v->len = n;
+
+    void* dst = ray_data(v);
+    switch (vec_type) {
+    case RAY_BOOL:
+    case RAY_U8: {
+        memset(dst, a->b8, (size_t)n);
+        break;
+    }
+    case RAY_I16: {
+        int16_t val = a->i16;
+        int16_t* d = (int16_t*)dst;
+        for (int64_t i = 0; i < n; i++) d[i] = val;
+        break;
+    }
+    case RAY_I32:
+    case RAY_DATE:
+    case RAY_TIME: {
+        int32_t val = a->i32;
+        int32_t* d = (int32_t*)dst;
+        for (int64_t i = 0; i < n; i++) d[i] = val;
+        break;
+    }
+    case RAY_I64:
+    case RAY_TIMESTAMP: {
+        int64_t val = a->i64;
+        int64_t* d = (int64_t*)dst;
+        for (int64_t i = 0; i < n; i++) d[i] = val;
+        break;
+    }
+    case RAY_F64: {
+        double val = a->f64;
+        double* d = (double*)dst;
+        for (int64_t i = 0; i < n; i++) d[i] = val;
+        break;
+    }
+    case RAY_SYM: {
+        /* SYM stores the ID in `i64` regardless of width; truncate per
+         * the vector's width attribute.  Width came from the atom and
+         * was carried by ray_sym_vec_new above. */
+        uint8_t w = (uint8_t)(a->attrs & RAY_SYM_W_MASK);
+        if (w == RAY_SYM_W8) {
+            memset(dst, (uint8_t)a->i64, (size_t)n);
+        } else if (w == RAY_SYM_W16) {
+            uint16_t val = (uint16_t)a->i64;
+            uint16_t* d = (uint16_t*)dst;
+            for (int64_t i = 0; i < n; i++) d[i] = val;
+        } else { /* W32 — default */
+            uint32_t val = (uint32_t)a->i64;
+            uint32_t* d = (uint32_t*)dst;
+            for (int64_t i = 0; i < n; i++) d[i] = val;
+        }
+        break;
+    }
+    default:
+        ray_release(v);
+        return NULL;
+    }
+
+    /* Propagate atom-null: an entirely-null broadcast keeps the null bit
+     * of every cell so `is_null` and aggregations behave the same as
+     * the LIST path would have. */
+    if (RAY_ATOM_IS_NULL(a)) {
+        v->attrs |= RAY_ATTR_HAS_NULLS;
+        memset(v->nullmap, 0xFF, 16);
+    }
+    return v;
+}
+
 /* (select {from: t [where: pred] [by: key] [col: expr ...]})
  * Special form — receives unevaluated dict arg. */
 ray_t* ray_select_fn(ray_t** args, int64_t n) {
@@ -4090,6 +4208,43 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         if (result && !RAY_IS_ERR(result) && result->type == RAY_TABLE) {
             int64_t n_groups = ray_table_nrows(result);
 
+            /* R8 fast path: every non-agg is a literal atom expression
+             * with no column refs.  Skip the entire row→gid mapping —
+             * each non-agg becomes a typed broadcast vec the same width
+             * as n_groups, no idx_buf or per-group slicing required.
+             *
+             * Q35 = `{one: 1, c: count(URL), by: URL desc: c take: 10}`
+             * is the canonical case: with all-literal nonaggs we go
+             * directly to apply_sort_take and the top-K fast path
+             * downstream of it. */
+            if (n_groups > 0) {
+                /* Pre-check ALL nonaggs first so we don't half-apply on
+                 * an unhandled atom type and then have to roll back. */
+                int all_broadcastable = 1;
+                for (uint8_t ni = 0; ni < n_nonaggs && all_broadcastable; ni++) {
+                    if (!can_atom_broadcast(nonagg_exprs[ni]))
+                        all_broadcastable = 0;
+                }
+                if (all_broadcastable) {
+                    for (uint8_t ni = 0; ni < n_nonaggs; ni++) {
+                        ray_t* col = atom_broadcast_vec(nonagg_exprs[ni], n_groups);
+                        if (!col) {
+                            /* can_atom_broadcast vetted these — anything
+                             * after that is an OOM in atom_broadcast_vec. */
+                            ray_release(result); ray_release(tbl);
+                            return ray_error("oom", NULL);
+                        }
+                        result = ray_table_add_col(result, nonagg_names[ni], col);
+                        ray_release(col);
+                        if (RAY_IS_ERR(result)) {
+                            ray_release(tbl);
+                            return result;
+                        }
+                    }
+                    goto nonagg_done;
+                }
+            }
+
             /* Resolve key sym — gated to single scalar key above. */
             int64_t ks = -1;
             if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME))
@@ -4463,6 +4618,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         continue;
                     }
 
+                    /* R8 fallback: a non-literal expression that
+                     * eval-collapses to an atom (constant within scope
+                     * but not a parser-direct literal) takes the existing
+                     * per-cell LIST broadcast.  The all-literal fast path
+                     * at the top of the n_nonaggs block already handles
+                     * the parser-literal case for Q35-shaped queries. */
+
                     int gather_ok = 1;
                     for (int64_t gi = 0; gi < n_groups; gi++) {
                         ray_t* cell;
@@ -4518,6 +4680,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     if (RAY_IS_ERR(result)) { ray_release(tbl); return result; }
                 }
             }
+        nonagg_done: ;  /* R8 fast-path target; nothing else to do here */
         }
     }
 
