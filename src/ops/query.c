@@ -4615,29 +4615,62 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     }
                 }
 
-                memset(grp_cnt, 0, (size_t)n_groups * sizeof(int64_t));
-                for (int64_t r = 0; r < nrows; r++)
-                    if (row_gid[r] >= 0) grp_cnt[row_gid[r]]++;
-
-                int64_t total = 0;
-                for (int64_t gi = 0; gi < n_groups; gi++) total += grp_cnt[gi];
-                ray_t* idx_hdr = ray_alloc((size_t)total * sizeof(int64_t));
-                if (!idx_hdr) {
-                    ray_free(gk_hdr); ray_free(rg_hdr); ray_free(cnt_hdr);
-                    ray_free(off_hdr); ray_free(pos_hdr);
-                    ray_release(result); ray_release(tbl);
-                    return ray_error("oom", NULL);
+                /* Decide whether the per-group-slice bookkeeping
+                 * (grp_cnt / offsets / pos / idx_buf) is needed.  It
+                 * powers count_distinct_per_group_buf, the streaming
+                 * aggr-unary path, nonagg_eval_per_group_buf, and the
+                 * full-table-eval+gather path.  When ALL non-aggs are
+                 * `count(distinct col_ref)` AND the n_groups gate
+                 * routes them to the global-hash kernel, none of those
+                 * consumers run — and building the slice index is dead
+                 * weight (~15-20 ms on Q14).
+                 *
+                 * The global-hash path is taken when:
+                 *   - the non-agg matches `match_count_distinct`,
+                 *   - the inner expression is a column ref (SYM atom
+                 *     with NAME attr), and
+                 *   - n_groups > 50 000 (the per-group-slice cross-
+                 *     over from the threshold dispatch above).
+                 *
+                 * If any non-agg falls outside that, we still need the
+                 * index. */
+                int needs_slice_idx = 0;
+                for (uint8_t ni = 0; ni < n_nonaggs && !needs_slice_idx; ni++) {
+                    ray_t* cd_inner = match_count_distinct(nonagg_exprs[ni]);
+                    int simple_cd_global = (cd_inner &&
+                                            cd_inner->type == -RAY_SYM &&
+                                            (cd_inner->attrs & RAY_ATTR_NAME) &&
+                                            n_groups > 50000);
+                    if (!simple_cd_global) needs_slice_idx = 1;
                 }
-                int64_t* idx_buf = (int64_t*)ray_data(idx_hdr);
 
-                offsets[0] = 0;
-                for (int64_t gi = 1; gi < n_groups; gi++)
-                    offsets[gi] = offsets[gi - 1] + grp_cnt[gi - 1];
+                int64_t* idx_buf = NULL;
+                ray_t*   idx_hdr = NULL;
+                if (needs_slice_idx) {
+                    memset(grp_cnt, 0, (size_t)n_groups * sizeof(int64_t));
+                    for (int64_t r = 0; r < nrows; r++)
+                        if (row_gid[r] >= 0) grp_cnt[row_gid[r]]++;
 
-                memcpy(pos, offsets, (size_t)n_groups * sizeof(int64_t));
-                for (int64_t r = 0; r < nrows; r++) {
-                    int64_t gi = row_gid[r];
-                    if (gi >= 0) idx_buf[pos[gi]++] = r;
+                    int64_t total = 0;
+                    for (int64_t gi = 0; gi < n_groups; gi++) total += grp_cnt[gi];
+                    idx_hdr = ray_alloc((size_t)total * sizeof(int64_t));
+                    if (!idx_hdr) {
+                        ray_free(gk_hdr); ray_free(rg_hdr); ray_free(cnt_hdr);
+                        ray_free(off_hdr); ray_free(pos_hdr);
+                        ray_release(result); ray_release(tbl);
+                        return ray_error("oom", NULL);
+                    }
+                    idx_buf = (int64_t*)ray_data(idx_hdr);
+
+                    offsets[0] = 0;
+                    for (int64_t gi = 1; gi < n_groups; gi++)
+                        offsets[gi] = offsets[gi - 1] + grp_cnt[gi - 1];
+
+                    memcpy(pos, offsets, (size_t)n_groups * sizeof(int64_t));
+                    for (int64_t r = 0; r < nrows; r++) {
+                        int64_t gi = row_gid[r];
+                        if (gi >= 0) idx_buf[pos[gi]++] = r;
+                    }
                 }
 
                 ray_t* scatter_err = NULL;
@@ -4827,7 +4860,8 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 }
 
                 ray_free(gk_hdr); ray_free(rg_hdr); ray_free(cnt_hdr);
-                ray_free(off_hdr); ray_free(pos_hdr); ray_free(idx_hdr);
+                ray_free(off_hdr); ray_free(pos_hdr);
+                if (idx_hdr) ray_free(idx_hdr);
 
                 if (scatter_err) {
                     if (result) ray_release(result);
