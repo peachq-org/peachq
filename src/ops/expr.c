@@ -1592,6 +1592,50 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         #undef BR_FAST
     }
 
+    /* Fast path: integer-vec vs integer-scalar arithmetic with
+     * matching output type (e.g. (- ClientIP 1) → I32 from I32 col).
+     * Same motivation as the BOOL fast path: the LV_READ macro chain
+     * downcasts to double then back, killing autovec.  Specialise on
+     * width here so the inner loop reduces to typed pointer
+     * dereferences.  Only safe when lhs type == out type so no
+     * narrowing or promotion is needed.  Hits Q36's `(- col const)`
+     * derived columns hard (3 of them × 5 M rows). */
+    if (!l_scalar && r_scalar &&
+        (op->opcode == OP_ADD || op->opcode == OP_SUB ||
+         op->opcode == OP_MUL || op->opcode == OP_MIN2 ||
+         op->opcode == OP_MAX2) &&
+        lhs->type == out_type &&
+        (out_type == RAY_I64 || out_type == RAY_TIMESTAMP ||
+         out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME ||
+         out_type == RAY_I16))
+    {
+        int64_t l_off = start;
+        void* l_data = resolve_vec_data(lhs, &l_off);
+        uint8_t l_esz = ray_sym_elem_size(lhs->type, lhs->attrs);
+        const uint8_t* lbase = (const uint8_t*)l_data + l_off * l_esz;
+        int64_t cv = r_i64;
+        uint16_t opc = op->opcode;
+
+        #define BR_AR_FAST(T) do {                                          \
+            const T* d = (const T*)lbase;                                   \
+            T* odst = (T*)dst;                                              \
+            T cvt = (T)cv;                                                  \
+            switch (opc) {                                                  \
+            case OP_ADD:  for (int64_t i = 0; i < n; i++) odst[i] = (T)((uint64_t)d[i] + (uint64_t)cvt); break; \
+            case OP_SUB:  for (int64_t i = 0; i < n; i++) odst[i] = (T)((uint64_t)d[i] - (uint64_t)cvt); break; \
+            case OP_MUL:  for (int64_t i = 0; i < n; i++) odst[i] = (T)((uint64_t)d[i] * (uint64_t)cvt); break; \
+            case OP_MIN2: for (int64_t i = 0; i < n; i++) odst[i] = d[i] < cvt ? d[i] : cvt; break; \
+            case OP_MAX2: for (int64_t i = 0; i < n; i++) odst[i] = d[i] > cvt ? d[i] : cvt; break; \
+            }                                                               \
+        } while (0)
+
+        if (l_esz == 8) { BR_AR_FAST(int64_t); return; }
+        if (l_esz == 4) { BR_AR_FAST(int32_t); return; }
+        if (l_esz == 2) { BR_AR_FAST(int16_t); return; }
+        #undef BR_AR_FAST
+    }
+
+
     /* Pointers into source data at offset start */
     double* lp_f64 = NULL; int64_t* lp_i64 = NULL; uint8_t* lp_bool = NULL;
     double* rp_f64 = NULL; int64_t* rp_i64 = NULL; uint8_t* rp_bool = NULL;
