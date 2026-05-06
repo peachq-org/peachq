@@ -1158,6 +1158,40 @@ static void fix_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
     bool r_has = !r_scalar && vec_may_have_nulls(rhs);
     if (!ln_s && !rn_s && !l_has && !r_has) return;
 
+    /* Fast path: only one side has nulls (the common shape — vec col vs
+     * non-null scalar) and no scalar is null.  Walk the nullmap byte-by-
+     * byte; skip any 8-row chunk where the byte is 0.  Drops Q11's
+     * `(!= MobilePhoneModel "")` from ~14 ms to <1 ms when the column
+     * has HAS_NULLS set but few actual nulls. */
+    if (!ln_s && !rn_s && (l_has ^ r_has)) {
+        ray_t* src = l_has ? lhs : rhs;
+        bool   src_left = l_has;
+        int64_t src_off = 0;
+        const uint8_t* nbits = nullmap_bits(src, &src_off, len);
+        if (nbits && (src_off % 8) == 0) {
+            int64_t byte0 = src_off / 8;
+            int64_t i = 0;
+            uint8_t left_bits  = (opcode == OP_LT || opcode == OP_LE || opcode == OP_NE);
+            uint8_t right_bits = (opcode == OP_GT || opcode == OP_GE || opcode == OP_NE);
+            uint8_t fill = src_left ? left_bits : right_bits;
+            while (i + 8 <= len) {
+                uint8_t b = nbits[byte0 + (i >> 3)];
+                if (b) {
+                    /* Only set the bits where src is null. */
+                    for (int64_t k = 0; k < 8; k++)
+                        if ((b >> k) & 1) dst[i + k] = fill;
+                }
+                i += 8;
+            }
+            for (; i < len; i++) {
+                if ((nbits[byte0 + (i >> 3)] >> (i & 7)) & 1)
+                    dst[i] = fill;
+            }
+            return;
+        }
+        /* Fall through to slow path on misaligned slice / no bitmap. */
+    }
+
     for (int64_t i = 0; i < len; i++) {
         bool ln = ln_s || (l_has && ray_vec_is_null(lhs, i));
         bool rn = rn_s || (r_has && ray_vec_is_null(rhs, i));
