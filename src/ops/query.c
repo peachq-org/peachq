@@ -1964,6 +1964,15 @@ typedef struct {
     uint8_t     okt_attrs;
     /* Per-row output. */
     int64_t* row_gid;
+    /* Optional selection — when non-NULL, skip rows that don't pass.
+     * Lets row_gid build and selection mask happen in one parallel pass
+     * (saves the serial sel_mask loop downstream).  Both can be NULL
+     * (full-table probe). */
+    ray_t*          selection;
+    const uint8_t*  sel_flg;
+    const uint32_t* sel_offs;
+    const uint16_t* sel_idx;
+    uint32_t        sel_n_segs;
 } rgid_probe_ctx_t;
 
 static void rgid_probe_fn(void* ctx_, uint32_t worker_id,
@@ -1972,6 +1981,82 @@ static void rgid_probe_fn(void* ctx_, uint32_t worker_id,
     rgid_probe_ctx_t* x = (rgid_probe_ctx_t*)ctx_;
     int use_i64 = (x->hk_gid64 != NULL);
     uint64_t mask = x->mask;
+
+    /* Fused selection-aware probe: when a rowsel is attached, walk per
+     * morsel segment and only do the HT probe for rows that actually
+     * passed the WHERE filter.  Filtered-out rows write -1 directly,
+     * skipping the (potentially expensive) hash + linear-probe lookup.
+     *
+     * This eliminates the separate serial sel_mask pass downstream that
+     * was costing ~3 ms on Q11 (5 M rows / 4880 segments scalar walk). */
+    if (x->selection) {
+        const uint8_t*  flg  = x->sel_flg;
+        const uint32_t* offs = x->sel_offs;
+        const uint16_t* lidx = x->sel_idx;
+        uint32_t seg_lo = (uint32_t)(start / RAY_MORSEL_ELEMS);
+        uint32_t seg_hi = (uint32_t)((end + RAY_MORSEL_ELEMS - 1) / RAY_MORSEL_ELEMS);
+        if (seg_hi > x->sel_n_segs) seg_hi = x->sel_n_segs;
+        for (uint32_t seg = seg_lo; seg < seg_hi; seg++) {
+            int64_t s_lo = (int64_t)seg * RAY_MORSEL_ELEMS;
+            int64_t s_hi = s_lo + RAY_MORSEL_ELEMS;
+            if (s_lo < start) s_lo = start;
+            if (s_hi > end)   s_hi = end;
+            uint8_t f = flg[seg];
+            if (f == RAY_SEL_NONE) {
+                for (int64_t r = s_lo; r < s_hi; r++) x->row_gid[r] = -1;
+                continue;
+            }
+            if (f == RAY_SEL_ALL) {
+                for (int64_t r = s_lo; r < s_hi; r++) {
+                    int64_t rv = key_read_i64(x->orig_key_data, r, x->okt, x->okt_attrs);
+                    uint64_t h = (uint64_t)rv * 0x9E3779B97F4A7C15ULL;
+                    h ^= h >> 33;
+                    uint64_t sl = h & mask;
+                    int64_t found = -1;
+                    for (;;) {
+                        int64_t cur_p1 = use_i64 ? x->hk_gid64[sl]
+                                                 : (int64_t)x->hk_gid_p1[sl];
+                        if (cur_p1 == 0) break;
+                        if (x->hk_keys[sl] == rv) { found = cur_p1 - 1; break; }
+                        sl = (sl + 1) & mask;
+                    }
+                    x->row_gid[r] = found;
+                }
+                continue;
+            }
+            /* RAY_SEL_MIX: build in-segment bitmap, then probe + mask. */
+            uint8_t in_seg[RAY_MORSEL_ELEMS / 8] = {0};
+            uint32_t off = offs[seg];
+            uint32_t cnt = offs[seg + 1] - off;
+            for (uint32_t i = 0; i < cnt; i++) {
+                uint16_t loc = lidx[off + i];
+                in_seg[loc >> 3] |= (uint8_t)(1u << (loc & 7));
+            }
+            int64_t base = (int64_t)seg * RAY_MORSEL_ELEMS;
+            for (int64_t r = s_lo; r < s_hi; r++) {
+                uint16_t loc = (uint16_t)(r - base);
+                if (!(in_seg[loc >> 3] & (1u << (loc & 7)))) {
+                    x->row_gid[r] = -1;
+                    continue;
+                }
+                int64_t rv = key_read_i64(x->orig_key_data, r, x->okt, x->okt_attrs);
+                uint64_t h = (uint64_t)rv * 0x9E3779B97F4A7C15ULL;
+                h ^= h >> 33;
+                uint64_t sl = h & mask;
+                int64_t found = -1;
+                for (;;) {
+                    int64_t cur_p1 = use_i64 ? x->hk_gid64[sl]
+                                             : (int64_t)x->hk_gid_p1[sl];
+                    if (cur_p1 == 0) break;
+                    if (x->hk_keys[sl] == rv) { found = cur_p1 - 1; break; }
+                    sl = (sl + 1) & mask;
+                }
+                x->row_gid[r] = found;
+            }
+        }
+        return;
+    }
+
     for (int64_t r = start; r < end; r++) {
         int64_t rv = key_read_i64(x->orig_key_data, r, x->okt, x->okt_attrs);
         uint64_t h = (uint64_t)rv * 0x9E3779B97F4A7C15ULL;
@@ -4932,6 +5017,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                  * O(nrows * n_groups) double loop dominated runtime —
                  * 5M * 730K ≈ 4T comparisons.  Build a value→gid hash
                  * instead so each row is one O(1) probe. */
+                int rgid_did_mask = 0;
                 {
                     /* Capacity: 2 * n_groups rounded up to power of 2.
                      * Slot stores gid+1 (0 = empty) and the int64 key. */
@@ -5015,8 +5101,21 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                             .okt           = okt,
                             .okt_attrs     = orig_key->attrs,
                             .row_gid       = row_gid,
+                            .selection     = saved_selection,
+                            .sel_flg       = NULL,
+                            .sel_offs      = NULL,
+                            .sel_idx       = NULL,
+                            .sel_n_segs    = 0,
                         };
+                        if (saved_selection) {
+                            ray_rowsel_t* sm = ray_rowsel_meta(saved_selection);
+                            pctx.sel_flg    = ray_rowsel_flags(saved_selection);
+                            pctx.sel_offs   = ray_rowsel_offsets(saved_selection);
+                            pctx.sel_idx    = ray_rowsel_idx(saved_selection);
+                            pctx.sel_n_segs = sm->n_segs;
+                        }
                         ray_pool_dispatch(pool, rgid_probe_fn, &pctx, nrows);
+                        rgid_did_mask = (saved_selection != NULL);
                     } else {
                         for (int64_t r = 0; r < nrows; r++) {
                             int64_t rv;
@@ -5048,8 +5147,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                  * clause filtered out.  Mask those rows to -1 here so
                  * downstream count_distinct (and grp_cnt) only count
                  * the surviving rows.  Walks the morsel-segmented
-                 * rowsel directly to avoid building a full bitmap. */
-                if (saved_selection) {
+                 * rowsel directly to avoid building a full bitmap.
+                 *
+                 * When the parallel rgid_probe path was taken with the
+                 * selection threaded through (rgid_did_mask), this
+                 * mask was already applied per-segment inside the probe
+                 * worker — skip the redundant serial walk. */
+                if (saved_selection && !rgid_did_mask) {
                     ray_rowsel_t*   sm   = ray_rowsel_meta(saved_selection);
                     const uint8_t*  flg  = ray_rowsel_flags(saved_selection);
                     const uint32_t* offs = ray_rowsel_offsets(saved_selection);
