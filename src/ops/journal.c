@@ -26,6 +26,7 @@
 #include "store/serde.h"
 #include "core/ipc.h"
 #include "mem/sys.h"
+#include "ops/ops.h"
 
 #include <string.h>
 
@@ -87,14 +88,32 @@ ray_t* ray_log_write_fn(ray_t* expr) {
         return ray_error("noopen", ".log.write: no journal open (start with -l/-L)");
     if (!expr) return ray_error("type", ".log.write expects an argument");
 
+    bool owned = false;
+    if (ray_is_lazy(expr)) {
+        ray_retain(expr);
+        expr = ray_lazy_materialize(expr); /* consumes the retain */
+        if (RAY_IS_ERR(expr)) return expr;
+        owned = true;
+    }
+
     int64_t pay_size = ray_serde_size(expr);
-    if (pay_size <= 0) return ray_error("domain", ".log.write: serde size 0");
+    if (pay_size <= 0) {
+        if (owned) ray_release(expr);
+        return ray_error("domain", ".log.write: serde size 0");
+    }
 
     uint8_t* payload = (uint8_t*)ray_sys_alloc((size_t)pay_size);
-    if (!payload) return ray_error("oom", NULL);
+    if (!payload) {
+        if (owned) ray_release(expr);
+        return ray_error("oom", NULL);
+    }
 
     int64_t written = ray_ser_raw(payload, expr);
-    if (written != pay_size) { ray_sys_free(payload); return ray_error("io", NULL); }
+    if (written != pay_size) {
+        ray_sys_free(payload);
+        if (owned) ray_release(expr);
+        return ray_error("io", NULL);
+    }
 
     ray_ipc_header_t hdr = {
         .prefix  = RAY_SERDE_PREFIX,
@@ -106,6 +125,7 @@ ray_t* ray_log_write_fn(ray_t* expr) {
     };
     ray_err_t e = ray_journal_write_bytes(&hdr, payload, pay_size);
     ray_sys_free(payload);
+    if (owned) ray_release(expr);
     return err_to_ray(e, "io");
 }
 
