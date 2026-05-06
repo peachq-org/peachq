@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include <stdio.h>
 
 static bool atom_to_numeric(ray_t* atom, double* out_f, int64_t* out_i, bool* out_is_f64) {
     if (!atom || !ray_is_atom(atom)) return false;
@@ -1475,6 +1476,87 @@ static void binary_range(ray_op_t* op, int8_t out_type,
     uint8_t out_esz = ray_elem_size(out_type);
     void* dst = (char*)ray_data(result) + start * out_esz;
     int64_t n = end - start;
+
+    /* Fast path: integer-family column vs integer scalar → bool comparison.
+     * The generic LV_READ/RV_READ macro chain below converts every operand
+     * to double then back to int64, killing autovectorisation and burning
+     * cycles on SYM-column-vs-resolved-sym-id comparisons (Q11's
+     * (!= MobilePhoneModel "") = 15 ms vs ~1 ms on the typed-pointer
+     * path).  Specialise on column width here so the inner loop reduces
+     * to a typed pointer dereference + compare + store. */
+    if (out_type == RAY_BOOL && !l_scalar && r_scalar &&
+        (op->opcode == OP_EQ || op->opcode == OP_NE ||
+         op->opcode == OP_LT || op->opcode == OP_LE ||
+         op->opcode == OP_GT || op->opcode == OP_GE) &&
+        (lhs->type == RAY_I64 || lhs->type == RAY_TIMESTAMP ||
+         lhs->type == RAY_I32 || lhs->type == RAY_DATE   ||
+         lhs->type == RAY_TIME || lhs->type == RAY_I16   ||
+         lhs->type == RAY_BOOL || lhs->type == RAY_U8    ||
+         RAY_IS_SYM(lhs->type)))
+    {
+        int64_t l_off = start;
+        void* l_data = resolve_vec_data(lhs, &l_off);
+        uint8_t l_esz = ray_sym_elem_size(lhs->type, lhs->attrs);
+        const uint8_t* lbase = (const uint8_t*)l_data + l_off * l_esz;
+        uint8_t* odst = (uint8_t*)dst;
+        int64_t cv = r_i64;
+        uint16_t opc = op->opcode;
+
+        #define BR_FAST(T, READ_T)                                              \
+            do {                                                                \
+                const T* d = (const T*)lbase;                                   \
+                T cvt = (T)cv;                                                  \
+                switch (opc) {                                                  \
+                case OP_EQ: for (int64_t i = 0; i < n; i++) odst[i] = (READ_T == cvt); break; \
+                case OP_NE: for (int64_t i = 0; i < n; i++) odst[i] = (READ_T != cvt); break; \
+                case OP_LT: for (int64_t i = 0; i < n; i++) odst[i] = (READ_T <  cvt); break; \
+                case OP_LE: for (int64_t i = 0; i < n; i++) odst[i] = (READ_T <= cvt); break; \
+                case OP_GT: for (int64_t i = 0; i < n; i++) odst[i] = (READ_T >  cvt); break; \
+                case OP_GE: for (int64_t i = 0; i < n; i++) odst[i] = (READ_T >= cvt); break; \
+                }                                                               \
+            } while (0)
+
+        if (l_esz == 8) {
+            if (RAY_IS_SYM(lhs->type)) {
+                BR_FAST(int64_t, d[i]);
+            } else if (lhs->type == RAY_I64 || lhs->type == RAY_TIMESTAMP) {
+                BR_FAST(int64_t, d[i]);
+            }
+            return;
+        } else if (l_esz == 4) {
+            /* SYM W32 stores unsigned IDs; for EQ/NE the unsigned compare
+             * gives the same result as the signed compare against r_i64
+             * (truncated to 32-bit).  For ordering ops we keep the signed
+             * compare (matches the previous generic-path semantics for
+             * I32/DATE/TIME). */
+            if (RAY_IS_SYM(lhs->type)) {
+                if (opc == OP_EQ || opc == OP_NE) {
+                    const uint32_t* d = (const uint32_t*)lbase;
+                    uint32_t cvu = (uint32_t)cv;
+                    if (opc == OP_EQ)
+                        for (int64_t i = 0; i < n; i++) odst[i] = (d[i] == cvu);
+                    else
+                        for (int64_t i = 0; i < n; i++) odst[i] = (d[i] != cvu);
+                    return;
+                }
+                BR_FAST(uint32_t, (int64_t)d[i]);
+            } else {
+                BR_FAST(int32_t, (int64_t)d[i]);
+            }
+            return;
+        } else if (l_esz == 2) {
+            if (RAY_IS_SYM(lhs->type)) {
+                BR_FAST(uint16_t, (int64_t)d[i]);
+            } else {
+                BR_FAST(int16_t, (int64_t)d[i]);
+            }
+            return;
+        } else if (l_esz == 1) {
+            BR_FAST(uint8_t, (int64_t)d[i]);
+            return;
+        }
+        #undef BR_FAST
+    }
 
     /* Pointers into source data at offset start */
     double* lp_f64 = NULL; int64_t* lp_i64 = NULL; uint8_t* lp_bool = NULL;
