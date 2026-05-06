@@ -2610,20 +2610,91 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
     /* Apply WHERE filter (unless folded into OP_FILTERED_GROUP). */
     if (where_expr) {
-        ray_op_t* pred = compile_expr_dag(g, where_expr);
-        if (!pred) {
-            ray_graph_free(g); ray_release(tbl);
-            return ray_error("domain",
-                "WHERE predicate not supported by DAG compiler — "
-                "most common causes: arity mismatch "
-                "(e.g. `(in v)` instead of `(in col v)`), "
-                "unknown function name, unsupported special form, "
-                "or a sub-expression the compiler can't lower");
+        /* When the WHERE is `(and a b c …)` and we're not folding into
+         * OP_FILTERED_GROUP, compile each conjunct as its own OP_FILTER.
+         * exec_filter on a TABLE input refines g->selection in place via
+         * ray_rowsel_refine, so subsequent conjuncts only need to make
+         * their predicate's output bool VALID for surviving rows — the
+         * refine pass only reads pred[r] when r is still in the rowsel.
+         *
+         * This unlocks short-circuit-style behaviour for predicate
+         * evaluators that opt into selection-aware execution
+         * (exec_like).  Cheap conjuncts (binary_range comparisons) still
+         * evaluate over the full table, but the AND-merge is replaced
+         * by progressively-refined rowsel chaining — saving the OP_AND
+         * binary AND-of-bool-vecs work. */
+        int and_chained = 0;
+        if (!can_fuse_phase1 && where_expr->type == RAY_LIST
+            && ray_len(where_expr) >= 3)
+        {
+            ray_t** elems = (ray_t**)ray_data(where_expr);
+            ray_t* head = elems[0];
+            if (head && head->type == -RAY_SYM) {
+                ray_t* hs = ray_sym_str(head->i64);
+                if (hs && ray_str_len(hs) == 3
+                    && memcmp(ray_str_ptr(hs), "and", 3) == 0)
+                {
+                    int64_t k = ray_len(where_expr) - 1;
+                    /* Each conjunct must be a vec-producing predicate —
+                     * compile to a non-OP_CONST node whose output type
+                     * resolves to a vector.  Pure-literal conjuncts
+                     * (e.g. `(== 1 0)`) compile to OP_CONST atoms that
+                     * the OP_FILTER lazy path doesn't handle; fall back
+                     * to the existing OP_AND tree, which ray_optimize
+                     * already constant-folds. */
+                    int all_ok = 1;
+                    ray_op_t* compiled[64];
+                    if (k > 64) all_ok = 0;
+                    /* Each conjunct must compile, must not be a pure
+                     * constant, and must transitively reference at
+                     * least one OP_SCAN (column read).  Pure-literal
+                     * conjuncts compile to atom/scalar outputs that the
+                     * lazy OP_FILTER path can't refine into a rowsel —
+                     * fall back to the OP_AND tree (ray_optimize already
+                     * constant-folds those). */
+                    for (int64_t i = 0; i < k && all_ok; i++) {
+                        ray_op_t* p = compile_expr_dag(g, elems[i + 1]);
+                        if (!p || p->opcode == OP_CONST) { all_ok = 0; break; }
+                        /* Walk the sub-DAG via stack DFS, looking for
+                         * any OP_SCAN.  Bound the depth to keep this
+                         * check cheap on degenerate trees. */
+                        int has_scan = 0;
+                        ray_op_t* stk[64];
+                        int sp = 0;
+                        stk[sp++] = p;
+                        while (sp > 0 && !has_scan) {
+                            ray_op_t* cur = stk[--sp];
+                            if (cur->opcode == OP_SCAN) { has_scan = 1; break; }
+                            for (uint8_t a = 0; a < cur->arity && sp < 64; a++)
+                                if (cur->inputs[a]) stk[sp++] = cur->inputs[a];
+                        }
+                        if (!has_scan) { all_ok = 0; break; }
+                        compiled[i] = p;
+                    }
+                    if (all_ok) {
+                        for (int64_t i = 0; i < k; i++)
+                            root = ray_filter(g, root, compiled[i]);
+                        and_chained = 1;
+                    }
+                }
+            }
         }
-        if (can_fuse_phase1) {
-            fused_pred_op = pred;  /* consumed by ray_filtered_group below */
-        } else {
-            root = ray_filter(g, root, pred);
+        if (!and_chained) {
+            ray_op_t* pred = compile_expr_dag(g, where_expr);
+            if (!pred) {
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("domain",
+                    "WHERE predicate not supported by DAG compiler — "
+                    "most common causes: arity mismatch "
+                    "(e.g. `(in v)` instead of `(in col v)`), "
+                    "unknown function name, unsupported special form, "
+                    "or a sub-expression the compiler can't lower");
+            }
+            if (can_fuse_phase1) {
+                fused_pred_op = pred;  /* consumed by ray_filtered_group below */
+            } else {
+                root = ray_filter(g, root, pred);
+            }
         }
     }
 
