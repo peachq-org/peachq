@@ -675,13 +675,19 @@ typedef struct {
     bool            has_nulls;
     const uint8_t*  null_bm;
     uint64_t        p_mask;          /* P - 1, P = number of partitions */
-    /* Pass 1 outputs / pass 2 inputs.  Per-partition atomic counters,
-     * not per-worker — ray_pool_dispatch uses dynamic work stealing so
-     * the worker_id seen by hist for a given task isn't guaranteed to
-     * match the worker_id scatter sees for the same task.  Atomics on
-     * P=64 partitions with ~14 K rows each have negligible contention. */
-    int64_t*        hist;            /* P entries, atomic */
-    int64_t*        cursor;          /* P entries, atomic, init to part_off */
+    /* Pass 1 outputs / pass 2 inputs.  Per-task counters: each worker
+     * writes to its own slice of hist[task_id * P] / cursor[task_id * P]
+     * so there's no atomic contention.  task_id is derived from `start`
+     * via the dispatch grain (matches ray_pool_dispatch's tasking).
+     *
+     * Earlier comment claimed P=64 atomic-cursor contention was
+     * negligible — it isn't.  Q11's parallel speedup was 1.2× (not 28×)
+     * because the per-row atomic_fetch_add on cursor[h & p_mask] in
+     * cdpg_scat_fn serialised through the partition cache lines. */
+    int64_t         grain;           /* task grain (matches pool dispatch) */
+    int64_t         n_tasks;         /* number of tasks in the dispatch */
+    int64_t*        hist;            /* [n_tasks * P] — per-task counts */
+    int64_t*        cursor;          /* [n_tasks * P] — per-task scat cursor */
     int64_t*        part_off;        /* P + 1, prefix offsets */
     /* Pass 2 outputs */
     int64_t*        gids_out;        /* total_pass entries */
@@ -714,11 +720,12 @@ static void cdpg_hist_fn(void* ctx_, uint32_t worker_id,
     (void)worker_id;
     cdpg_ctx_t* x = (cdpg_ctx_t*)ctx_;
     uint8_t esz = ray_sym_elem_size(x->in_type, x->in_attrs);
-    /* Local per-partition counts to amortise atomic adds.  Walk once
-     * locally, then push the deltas to the shared `hist` at the end. */
-    enum { CDPG_MAX_P = 256 };
-    int64_t local[CDPG_MAX_P] = {0};
     uint64_t p_mask = x->p_mask;
+    /* Per-task private hist slot — task_id is derived from `start` so
+     * scat_fn computes the SAME task_id and reads cursor[task_id*P+p]
+     * we wrote here.  No atomics: each task owns its row. */
+    int64_t task_id = start / x->grain;
+    int64_t* my_hist = &x->hist[task_id * (p_mask + 1)];
     for (int64_t r = start; r < end; r++) {
         int64_t gid = x->row_gid[r];
         if (gid < 0 || gid >= x->n_groups) continue;
@@ -726,12 +733,7 @@ static void cdpg_hist_fn(void* ctx_, uint32_t worker_id,
             ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
         int64_t val = cdpg_read(x->base, r, x->in_type, esz);
         uint64_t h = CDPG_HASH(gid + 1, val);
-        local[h & p_mask]++;
-    }
-    /* Push local deltas atomically into shared hist. */
-    for (uint64_t p = 0; p <= p_mask; p++) {
-        if (local[p])
-            __atomic_fetch_add(&x->hist[p], local[p], __ATOMIC_RELAXED);
+        my_hist[h & p_mask]++;
     }
 }
 
@@ -741,6 +743,11 @@ static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
     cdpg_ctx_t* x = (cdpg_ctx_t*)ctx_;
     uint8_t esz = ray_sym_elem_size(x->in_type, x->in_attrs);
     uint64_t p_mask = x->p_mask;
+    /* Each task uses its private cursor — pre-computed by the
+     * orchestrator from per-task hist counts so writes are guaranteed
+     * non-overlapping across tasks within the same partition. */
+    int64_t task_id = start / x->grain;
+    int64_t* my_cur = &x->cursor[task_id * (p_mask + 1)];
     for (int64_t r = start; r < end; r++) {
         int64_t gid = x->row_gid[r];
         if (gid < 0 || gid >= x->n_groups) continue;
@@ -749,10 +756,7 @@ static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
         int64_t val = cdpg_read(x->base, r, x->in_type, esz);
         int64_t gid_p1 = gid + 1;
         uint64_t h = CDPG_HASH(gid_p1, val);
-        /* Per-partition atomic cursor — handles concurrent scatter
-         * from any worker without per-worker layout dependencies. */
-        int64_t pos = __atomic_fetch_add(&x->cursor[h & p_mask], 1,
-                                         __ATOMIC_RELAXED);
+        int64_t pos = my_cur[h & p_mask]++;
         x->gids_out[pos] = gid_p1;
         x->vals_out[pos] = val;
     }
@@ -848,35 +852,55 @@ static ray_t* count_distinct_per_group_parallel(
     if (ctx.has_nulls)
         ctx.null_bm = ray_vec_nullmap_bytes(src, NULL, NULL);
 
-    if (P > 256) return NULL;  /* matches CDPG_MAX_P in cdpg_hist_fn */
+    if (P > 256) return NULL;
 
-    /* Pass 1: histogram (per-partition atomic counters). */
+    /* Match ray_pool_dispatch's task layout so task_id derived from
+     * `start / grain` inside the worker fn matches the row range the
+     * dispatch hands out.  Mirrors pool.c's TASK_GRAIN (8 morsels of
+     * 1024 rows each) and MAX_RING_CAP (65536) clamping logic. */
+    int64_t grain = (int64_t)RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS;
+    int64_t n_tasks = (n_rows + grain - 1) / grain;
+    if (n_tasks > 65536) {
+        n_tasks = 65536;
+        grain = (n_rows + n_tasks - 1) / n_tasks;
+    }
+    ctx.grain   = grain;
+    ctx.n_tasks = n_tasks;
+
+    /* Pass 1: per-task histograms — no atomics. */
     ray_t* hist_hdr = NULL;
     ctx.hist = (int64_t*)scratch_calloc(&hist_hdr,
-                                        (size_t)P * sizeof(int64_t));
+                                        (size_t)n_tasks * (size_t)P * sizeof(int64_t));
     if (!ctx.hist) { return NULL; }
     ray_pool_dispatch(pool, cdpg_hist_fn, &ctx, n_rows);
 
-    /* Compute partition prefix offsets and initial cursors.  out_buf is
-     * laid out as [partition_0 entries | partition_1 entries | …] with
-     * cursor[p] starting at part_off[p] and advancing by 1 per scatter. */
+    /* Compute global per-partition totals + prefix offsets, then per-task
+     * scatter cursors.  Layout invariant: tasks within a partition write
+     * to non-overlapping ranges, so scat_fn doesn't need atomics. */
     ray_t* off_hdr = NULL;
     ctx.part_off = (int64_t*)scratch_alloc(&off_hdr,
                                            (size_t)(P + 1) * sizeof(int64_t));
     ray_t* cur_hdr = NULL;
     ctx.cursor = (int64_t*)scratch_alloc(&cur_hdr,
-                                         (size_t)P * sizeof(int64_t));
+                                         (size_t)n_tasks * (size_t)P * sizeof(int64_t));
     if (!ctx.part_off || !ctx.cursor) {
         if (off_hdr) scratch_free(off_hdr);
         if (cur_hdr) scratch_free(cur_hdr);
         scratch_free(hist_hdr);
         return NULL;
     }
+    /* Two-step prefix: per-partition global offset, then per-(task,
+     * partition) cursor by walking tasks in order. */
     int64_t total = 0;
     for (uint64_t p = 0; p < P; p++) {
         ctx.part_off[p] = total;
-        ctx.cursor[p]   = total;
-        total += ctx.hist[p];
+        int64_t cum = total;
+        for (int64_t t = 0; t < n_tasks; t++) {
+            int64_t cnt = ctx.hist[t * P + p];
+            ctx.cursor[t * P + p] = cum;
+            cum += cnt;
+        }
+        total = cum;
     }
     ctx.part_off[P] = total;
 
