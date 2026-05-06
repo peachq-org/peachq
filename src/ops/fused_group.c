@@ -1078,20 +1078,6 @@ typedef struct {
     int64_t     sym;
 } mk_key_t;
 
-/* Multi-path shard: slot layout is 3 int64s per slot —
- * [0] = used flag (0 = empty, 1 = filled),
- * [1] = composite key low half (bits  0..63),
- * [2] = composite key high half (bits 64..127).
- *
- * The high half lets the multi path support keys whose total packed
- * width exceeds 8 bytes (Q31/Q32 with 2 × i64 keys, etc.).  When
- * total_bytes ≤ 8 the high half is always 0 — narrow code paths are
- * unchanged conceptually, just paying one extra zero-store and one
- * always-true hi-equality check on every probe.  Memory overhead per
- * slot is +50 % (24 B vs 16 B) which is well within the L2 budget
- * for typical bench workloads. */
-#define MK_SLOT_W 3
-
 typedef struct {
     int64_t* slots;
     int64_t* state;
@@ -1123,29 +1109,18 @@ typedef struct {
 
 /* ─── Composite key compose ────────────────────────────────────────── */
 
-static inline void mk_compose_key2(const mk_par_ctx_t* c, int64_t row,
-                                   int64_t* out_lo, int64_t* out_hi)
-{
+static inline int64_t mk_compose_key(const mk_par_ctx_t* c, int64_t row) {
     if (c->n_keys == 1) {
-        *out_lo = read_by_esz(c->k0_base, row, c->k0_esz);
-        *out_hi = 0;
-        return;
+        return read_by_esz(c->k0_base, row, c->k0_esz);
     }
-    uint64_t lo = 0, hi = 0;
+    uint64_t composite = 0;
     for (uint8_t k = 0; k < c->n_keys; k++) {
         const mk_key_t* kk = &c->keys[k];
         uint64_t v = (uint64_t)read_by_esz(kk->base, row, kk->esz);
         if (kk->esz < 8) v &= ((1ULL << (kk->esz * 8)) - 1);
-        if (kk->bit_off < 64) {
-            lo |= v << kk->bit_off;
-            uint8_t end = (uint8_t)(kk->bit_off + kk->esz * 8);
-            if (end > 64) hi |= v >> (64 - kk->bit_off);
-        } else {
-            hi |= v << (kk->bit_off - 64);
-        }
+        composite |= v << kk->bit_off;
     }
-    *out_lo = (int64_t)lo;
-    *out_hi = (int64_t)hi;
+    return (int64_t)composite;
 }
 
 /* ─── Per-row aggregator state init/accum ──────────────────────────── */
@@ -1239,7 +1214,7 @@ static inline void mk_state_merge(int64_t* dst, const int64_t* src,
 
 static int mk_shard_init(mk_shard_t* sh, uint64_t cap, uint8_t total_state) {
     sh->slots = (int64_t*)scratch_calloc(&sh->slots_hdr,
-                                         (size_t)cap * MK_SLOT_W * sizeof(int64_t));
+                                         (size_t)cap * 2 * sizeof(int64_t));
     sh->state = (int64_t*)scratch_calloc(&sh->state_hdr,
                                          (size_t)cap * total_state * sizeof(int64_t));
     if (!sh->slots || !sh->state) {
@@ -1263,7 +1238,7 @@ static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state) {
     if (new_cap > FP_SHARD_MAX_CAP) return -1;
     uint64_t new_mask = new_cap - 1;
     ray_t* ns_hdr = NULL; ray_t* nst_hdr = NULL;
-    int64_t* ns  = (int64_t*)scratch_calloc(&ns_hdr,  (size_t)new_cap * MK_SLOT_W * sizeof(int64_t));
+    int64_t* ns  = (int64_t*)scratch_calloc(&ns_hdr,  (size_t)new_cap * 2 * sizeof(int64_t));
     int64_t* nst = (int64_t*)scratch_calloc(&nst_hdr, (size_t)new_cap * total_state * sizeof(int64_t));
     if (!ns || !nst) {
         if (ns_hdr) scratch_free(ns_hdr);
@@ -1271,18 +1246,13 @@ static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state) {
         return -1;
     }
     for (uint64_t s = 0; s < sh->cap; s++) {
-        if (!sh->slots[s * MK_SLOT_W]) continue;
-        int64_t kv_lo = sh->slots[s * MK_SLOT_W + 1];
-        int64_t kv_hi = sh->slots[s * MK_SLOT_W + 2];
-        uint64_t h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
-        h ^= h >> 33;
-        h ^= (uint64_t)kv_hi * 0xBF58476D1CE4E5B9ULL;
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv = sh->slots[s * 2 + 1];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
         h ^= h >> 33;
         uint64_t t = h & new_mask;
-        while (ns[t * MK_SLOT_W]) t = (t + 1) & new_mask;
-        ns[t * MK_SLOT_W]     = 1;
-        ns[t * MK_SLOT_W + 1] = kv_lo;
-        ns[t * MK_SLOT_W + 2] = kv_hi;
+        while (ns[t * 2]) t = (t + 1) & new_mask;
+        ns[t * 2] = 1; ns[t * 2 + 1] = kv;
         for (uint8_t k = 0; k < total_state; k++)
             nst[t * total_state + k] = sh->state[s * total_state + k];
     }
@@ -1295,28 +1265,23 @@ static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state) {
 }
 
 static inline int mk_shard_upsert(mk_shard_t* sh, const mk_par_ctx_t* c,
-                                  int64_t kv_lo, int64_t kv_hi, int64_t row)
+                                  int64_t kv, int64_t row)
 {
     if (RAY_UNLIKELY(sh->n_filled * 2 >= (int64_t)sh->cap)) {
         if (mk_shard_grow(sh, c->total_state) != 0) return -1;
     }
-    uint64_t h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
-    h ^= h >> 33;
-    h ^= (uint64_t)kv_hi * 0xBF58476D1CE4E5B9ULL;
+    uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
     h ^= h >> 33;
     uint64_t s = h & sh->mask;
     for (;;) {
-        if (!sh->slots[s * MK_SLOT_W]) {
-            sh->slots[s * MK_SLOT_W]     = 1;
-            sh->slots[s * MK_SLOT_W + 1] = kv_lo;
-            sh->slots[s * MK_SLOT_W + 2] = kv_hi;
+        if (!sh->slots[s * 2]) {
+            sh->slots[s * 2] = 1; sh->slots[s * 2 + 1] = kv;
             mk_state_init_row(&sh->state[s * c->total_state],
                               c->aggs, c->n_aggs, row);
             sh->n_filled++;
             return 0;
         }
-        if (sh->slots[s * MK_SLOT_W + 1] == kv_lo &&
-            sh->slots[s * MK_SLOT_W + 2] == kv_hi) {
+        if (sh->slots[s * 2 + 1] == kv) {
             mk_state_accum_row(&sh->state[s * c->total_state],
                                c->aggs, c->n_aggs, row);
             return 0;
@@ -1393,18 +1358,14 @@ static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end)
         for (int64_t r = 0; r < mlen; r++) {
             if (!bits[r]) continue;
             int64_t source_row = base_row + r;
-            int64_t kv_lo, kv_hi;
-            mk_compose_key2(c, source_row, &kv_lo, &kv_hi);
-            uint64_t h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
-            h ^= h >> 33;
-            h ^= (uint64_t)kv_hi * 0xBF58476D1CE4E5B9ULL;
+            int64_t kv = mk_compose_key(c, source_row);
+            uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
             h ^= h >> 33;
             uint64_t s = h & mask;
             for (;;) {
-                if (!slots[s * MK_SLOT_W]) {
-                    slots[s * MK_SLOT_W]     = 1;
-                    slots[s * MK_SLOT_W + 1] = kv_lo;
-                    slots[s * MK_SLOT_W + 2] = kv_hi;
+                if (!slots[s * 2]) {
+                    slots[s * 2]     = 1;
+                    slots[s * 2 + 1] = kv;
                     /* Initialise this slot's state to per-agg sentinels.
                      * Pass 2 then runs uniform accumulate logic. */
                     int64_t* st = &state[s * total_state];
@@ -1426,8 +1387,7 @@ static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end)
                     sh->n_filled++;
                     break;
                 }
-                if (slots[s * MK_SLOT_W + 1] == kv_lo &&
-                    slots[s * MK_SLOT_W + 2] == kv_hi) break;
+                if (slots[s * 2 + 1] == kv) break;
                 s = (s + 1) & mask;
             }
             slot_idx[mi] = (uint32_t)s;
@@ -1512,7 +1472,7 @@ static ray_t* mk_materialize_agg(const mk_agg_t* a, const int64_t* gstate,
     if (is_avg) {
         double* d = (double*)dst;
         for (uint64_t s = 0; s < gcap; s++) {
-            if (!gslots[s * MK_SLOT_W]) continue;
+            if (!gslots[s * 2]) continue;
             int64_t sum = gstate[s * total_state + a->state_off    ];
             int64_t cnt = gstate[s * total_state + a->state_off + 1];
             d[gi++] = cnt ? (double)sum / (double)cnt : 0.0;
@@ -1520,12 +1480,12 @@ static ray_t* mk_materialize_agg(const mk_agg_t* a, const int64_t* gstate,
     } else if (out_type == RAY_I64) {
         int64_t* d = (int64_t*)dst;
         for (uint64_t s = 0; s < gcap; s++) {
-            if (!gslots[s * MK_SLOT_W]) continue;
+            if (!gslots[s * 2]) continue;
             d[gi++] = gstate[s * total_state + a->state_off];
         }
     } else {
         for (uint64_t s = 0; s < gcap; s++) {
-            if (!gslots[s * MK_SLOT_W]) continue;
+            if (!gslots[s * 2]) continue;
             int64_t v = gstate[s * total_state + a->state_off];
             write_col_i64(dst, gi++, v, out_type, a->in_attrs);
         }
@@ -1570,12 +1530,9 @@ static void mk_combine_hist_fn(void* vctx, uint32_t worker_id,
     int64_t* hist = c->hist + (size_t)w * (c->p_mask + 1);
     if (!sh->slots) return;
     for (uint64_t s = 0; s < sh->cap; s++) {
-        if (!sh->slots[s * MK_SLOT_W]) continue;
-        int64_t kv_lo = sh->slots[s * MK_SLOT_W + 1];
-        int64_t kv_hi = sh->slots[s * MK_SLOT_W + 2];
-        uint64_t h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
-        h ^= h >> 33;
-        h ^= (uint64_t)kv_hi * 0xBF58476D1CE4E5B9ULL;
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv = sh->slots[s * 2 + 1];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
         h ^= h >> 33;
         uint64_t p = h & c->p_mask;
         hist[p]++;
@@ -1590,24 +1547,19 @@ static void mk_combine_scat_fn(void* vctx, uint32_t worker_id,
     mk_shard_t* sh = &c->shards[w];
     int64_t* cur = c->sw_cursor + (size_t)w * (c->p_mask + 1);
     uint8_t total_state = c->total_state;
-    /* Packed entry layout: [kv_lo, kv_hi, state_0, state_1, ...]. */
-    int64_t stride = (int64_t)2 + total_state;
+    int64_t stride = (int64_t)1 + total_state;
     if (!sh->slots) return;
     for (uint64_t s = 0; s < sh->cap; s++) {
-        if (!sh->slots[s * MK_SLOT_W]) continue;
-        int64_t kv_lo = sh->slots[s * MK_SLOT_W + 1];
-        int64_t kv_hi = sh->slots[s * MK_SLOT_W + 2];
-        uint64_t h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
-        h ^= h >> 33;
-        h ^= (uint64_t)kv_hi * 0xBF58476D1CE4E5B9ULL;
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv = sh->slots[s * 2 + 1];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
         h ^= h >> 33;
         uint64_t p = h & c->p_mask;
         int64_t pos = cur[p]++;
         int64_t* dst = c->buf + pos * stride;
-        dst[0] = kv_lo;
-        dst[1] = kv_hi;
+        dst[0] = kv;
         const int64_t* sst = &sh->state[s * total_state];
-        for (uint8_t k = 0; k < total_state; k++) dst[2 + k] = sst[k];
+        for (uint8_t k = 0; k < total_state; k++) dst[1 + k] = sst[k];
     }
 }
 
@@ -1627,7 +1579,7 @@ static void mk_combine_dedup_fn(void* vctx, uint32_t worker_id,
     }
 
     uint8_t total_state = c->total_state;
-    int64_t in_stride = (int64_t)2 + total_state;
+    int64_t stride = (int64_t)1 + total_state;
 
     uint64_t cap = 256;
     while (cap < (uint64_t)(pcnt * 2)) cap <<= 1;
@@ -1636,8 +1588,7 @@ static void mk_combine_dedup_fn(void* vctx, uint32_t worker_id,
     ray_t* slots_hdr = NULL;
     ray_t* state_hdr = NULL;
     int64_t* slots = (int64_t*)scratch_calloc(&slots_hdr,
-                                              (size_t)cap * MK_SLOT_W *
-                                              sizeof(int64_t));
+                                              (size_t)cap * 2 * sizeof(int64_t));
     int64_t* state = (int64_t*)scratch_calloc(&state_hdr,
                                               (size_t)cap * total_state *
                                               sizeof(int64_t));
@@ -1649,29 +1600,24 @@ static void mk_combine_dedup_fn(void* vctx, uint32_t worker_id,
     }
 
     int64_t n_filled = 0;
-    const int64_t* in = c->buf + off * in_stride;
+    const int64_t* in = c->buf + off * stride;
     for (int64_t i = 0; i < pcnt; i++) {
-        const int64_t* ent = in + i * in_stride;
-        int64_t kv_lo = ent[0];
-        int64_t kv_hi = ent[1];
-        const int64_t* sst = ent + 2;
-        uint64_t h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
-        h ^= h >> 33;
-        h ^= (uint64_t)kv_hi * 0xBF58476D1CE4E5B9ULL;
+        const int64_t* ent = in + i * stride;
+        int64_t kv = ent[0];
+        const int64_t* sst = ent + 1;
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
         h ^= h >> 33;
         uint64_t t = (h >> c->p_bits) & mask;
         for (;;) {
-            if (!slots[t * MK_SLOT_W]) {
-                slots[t * MK_SLOT_W]     = 1;
-                slots[t * MK_SLOT_W + 1] = kv_lo;
-                slots[t * MK_SLOT_W + 2] = kv_hi;
+            if (!slots[t * 2]) {
+                slots[t * 2]     = 1;
+                slots[t * 2 + 1] = kv;
                 int64_t* dst = &state[t * total_state];
                 for (uint8_t k = 0; k < total_state; k++) dst[k] = sst[k];
                 n_filled++;
                 break;
             }
-            if (slots[t * MK_SLOT_W + 1] == kv_lo &&
-                slots[t * MK_SLOT_W + 2] == kv_hi) {
+            if (slots[t * 2 + 1] == kv) {
                 mk_state_merge(&state[t * total_state],
                                sst, c->aggs, c->n_aggs);
                 break;
@@ -1680,13 +1626,11 @@ static void mk_combine_dedup_fn(void* vctx, uint32_t worker_id,
         }
     }
 
-    /* Pack per-partition output: keys are stored as 2-int (lo, hi)
-     * pairs so the materialise step can decompose without re-hashing. */
+    /* Pack per-partition output. */
     ray_t* k_hdr = NULL;
     ray_t* s_hdr = NULL;
     int64_t* k_out = (int64_t*)scratch_alloc(&k_hdr,
-                                             (size_t)n_filled * 2 *
-                                             sizeof(int64_t));
+                                             (size_t)n_filled * sizeof(int64_t));
     int64_t* s_out = (int64_t*)scratch_alloc(&s_hdr,
                                              (size_t)n_filled * total_state *
                                              sizeof(int64_t));
@@ -1699,9 +1643,8 @@ static void mk_combine_dedup_fn(void* vctx, uint32_t worker_id,
     }
     int64_t out_idx = 0;
     for (uint64_t s = 0; s < cap; s++) {
-        if (slots[s * MK_SLOT_W]) {
-            k_out[out_idx * 2]     = slots[s * MK_SLOT_W + 1];
-            k_out[out_idx * 2 + 1] = slots[s * MK_SLOT_W + 2];
+        if (slots[s * 2]) {
+            k_out[out_idx] = slots[s * 2 + 1];
             int64_t* dst = &s_out[out_idx * total_state];
             const int64_t* src = &state[s * total_state];
             for (uint8_t k = 0; k < total_state; k++) dst[k] = src[k];
@@ -1754,8 +1697,7 @@ static int mk_combine_parallel(mk_par_ctx_t* c, uint32_t nw,
     ray_t* psh_hdr  = NULL;
     ray_t* pn_hdr   = NULL;
 
-    /* Scatter buffer entry layout: [kv_lo, kv_hi, state_0, ...]. */
-    int64_t stride = (int64_t)2 + total_state;
+    int64_t stride = (int64_t)1 + total_state;
     int64_t* hist  = (int64_t*)scratch_calloc(&hist_hdr,
         (size_t)nw * (size_t)P * sizeof(int64_t));
     int64_t* part_off = (int64_t*)scratch_alloc(&off_hdr,
@@ -1844,16 +1786,16 @@ static int mk_combine_parallel(mk_par_ctx_t* c, uint32_t nw,
 
     /* Concat per-partition outputs into a dense gs/gst pair so the
      * existing materialize loop in mk_combine_and_materialize works
-     * unchanged.  gs is laid out as [used, kv_lo, kv_hi] per slot
-     * (MK_SLOT_W stride) — pack tightly (cap == global_n, no empty
-     * slots). */
+     * unchanged.  gs is laid out as [used, kv] per slot — for the
+     * concat we set every used flag to 1 and pack tightly (cap ==
+     * global_n, no empty slots). */
     int64_t global_n = 0;
     for (uint64_t p = 0; p < P; p++) global_n += part_n[p];
 
     ray_t* gs_hdr = NULL;
     ray_t* gst_hdr = NULL;
     int64_t* gs  = (int64_t*)scratch_calloc(&gs_hdr,
-        (size_t)global_n * MK_SLOT_W * sizeof(int64_t));
+        (size_t)global_n * 2 * sizeof(int64_t));
     int64_t* gst = (int64_t*)scratch_alloc(&gst_hdr,
         (size_t)global_n * total_state * sizeof(int64_t));
     if (!gs || !gst) {
@@ -1876,9 +1818,8 @@ static int mk_combine_parallel(mk_par_ctx_t* c, uint32_t nw,
         int64_t* pk = part_keys[p];
         int64_t* ps = part_states[p];
         for (int64_t i = 0; i < pn; i++) {
-            gs[gi * MK_SLOT_W]     = 1;
-            gs[gi * MK_SLOT_W + 1] = pk[i * 2];
-            gs[gi * MK_SLOT_W + 2] = pk[i * 2 + 1];
+            gs[gi * 2]     = 1;
+            gs[gi * 2 + 1] = pk[i];
             int64_t* dst = &gst[gi * total_state];
             const int64_t* src = &ps[i * total_state];
             for (uint8_t k = 0; k < total_state; k++) dst[k] = src[k];
@@ -1933,7 +1874,7 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
     while (_gcap < (uint64_t)(total_local * 2) && _gcap < FP_SHARD_MAX_CAP) _gcap <<= 1;
     gcap = (int64_t)_gcap;
     uint64_t gmask = (uint64_t)gcap - 1;
-    gs  = (int64_t*)scratch_calloc(&gs_hdr,  (size_t)gcap * MK_SLOT_W * sizeof(int64_t));
+    gs  = (int64_t*)scratch_calloc(&gs_hdr,  (size_t)gcap * 2 * sizeof(int64_t));
     gst = (int64_t*)scratch_calloc(&gst_hdr, (size_t)gcap * total_state * sizeof(int64_t));
     if (!gs || !gst) {
         if (gs_hdr) scratch_free(gs_hdr);
@@ -1945,26 +1886,20 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
         mk_shard_t* sh = &shards[w];
         if (!sh->slots) continue;
         for (uint64_t s = 0; s < sh->cap; s++) {
-            if (!sh->slots[s * MK_SLOT_W]) continue;
-            int64_t kv_lo = sh->slots[s * MK_SLOT_W + 1];
-            int64_t kv_hi = sh->slots[s * MK_SLOT_W + 2];
-            uint64_t h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
-            h ^= h >> 33;
-            h ^= (uint64_t)kv_hi * 0xBF58476D1CE4E5B9ULL;
+            if (!sh->slots[s * 2]) continue;
+            int64_t kv = sh->slots[s * 2 + 1];
+            uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
             h ^= h >> 33;
             uint64_t t = h & gmask;
             for (;;) {
-                if (!gs[t * MK_SLOT_W]) {
-                    gs[t * MK_SLOT_W]     = 1;
-                    gs[t * MK_SLOT_W + 1] = kv_lo;
-                    gs[t * MK_SLOT_W + 2] = kv_hi;
+                if (!gs[t * 2]) {
+                    gs[t * 2] = 1; gs[t * 2 + 1] = kv;
                     for (uint8_t k = 0; k < total_state; k++)
                         gst[t * total_state + k] = sh->state[s * total_state + k];
                     global_n++;
                     break;
                 }
-                if (gs[t * MK_SLOT_W + 1] == kv_lo &&
-                    gs[t * MK_SLOT_W + 2] == kv_hi) {
+                if (gs[t * 2 + 1] == kv) {
                     mk_state_merge(&gst[t * total_state],
                                    &sh->state[s * total_state],
                                    c->aggs, n_aggs);
@@ -1999,24 +1934,15 @@ materialize:
     }
     int64_t gi = 0;
     for (int64_t s = 0; s < gcap; s++) {
-        if (!gs[s * MK_SLOT_W]) continue;
-        uint64_t lo = (uint64_t)gs[s * MK_SLOT_W + 1];
-        uint64_t hi = (uint64_t)gs[s * MK_SLOT_W + 2];
+        if (!gs[s * 2]) continue;
+        uint64_t composite = (uint64_t)gs[s * 2 + 1];
         for (uint8_t k = 0; k < n_keys; k++) {
             const mk_key_t* kk = &c->keys[k];
-            uint64_t mask = (kk->esz < 8)
-                          ? ((1ULL << (kk->esz * 8)) - 1)
-                          : ~(uint64_t)0;
             int64_t v;
-            if (kk->bit_off >= 64) {
-                v = (int64_t)((hi >> (kk->bit_off - 64)) & mask);
-            } else if ((uint8_t)(kk->bit_off + kk->esz * 8) <= 64) {
-                v = (int64_t)((lo >> kk->bit_off) & mask);
-            } else {
-                /* Spans 64-bit boundary: stitch low part of hi onto
-                 * high part of lo. */
-                uint8_t lo_take = 64 - kk->bit_off;
-                v = (int64_t)(((lo >> kk->bit_off) | (hi << lo_take)) & mask);
+            if (kk->esz >= 8) v = (int64_t)composite;
+            else {
+                uint64_t mask = (1ULL << (kk->esz * 8)) - 1;
+                v = (int64_t)((composite >> kk->bit_off) & mask);
             }
             write_col_i64(ray_data(key_cols[k]), gi, v, kk->type, kk->attrs);
         }
@@ -2121,7 +2047,7 @@ static int mk_compile(ray_graph_t* g, ray_op_ext_t* ext, ray_t* tbl,
         if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return -1;
         uint8_t esz = ray_sym_elem_size(col->type, col->attrs);
         total_bytes += esz;
-        if (total_bytes > 16) return -1;
+        if (total_bytes > 8) return -1;
         ctx->keys[k].type    = col->type;
         ctx->keys[k].attrs   = col->attrs;
         ctx->keys[k].esz     = esz;
