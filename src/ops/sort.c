@@ -32,22 +32,6 @@
  * -------------------------------------------------------------------------- */
 /* sort_cmp_ctx_t defined in exec_internal.h */
 
-/* Populate ctx->sym_strings/sym_count when any sort key is RAY_SYM, so
- * sort_cmp's SYM branch can use a lock-free dict snapshot.  See the
- * sort_cmp_ctx_t comment for why this matters under parallel sort. */
-static inline void sort_cmp_ctx_borrow_sym(sort_cmp_ctx_t* ctx) {
-    ctx->sym_strings = NULL;
-    ctx->sym_count   = 0;
-    if (!ctx->vecs) return;
-    for (uint8_t k = 0; k < ctx->n_sort; k++) {
-        ray_t* v = ctx->vecs[k];
-        if (v && RAY_IS_SYM(v->type)) {
-            ray_sym_strings_borrow(&ctx->sym_strings, &ctx->sym_count);
-            return;
-        }
-    }
-}
-
 int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
     for (uint8_t k = 0; k < ctx->n_sort; k++) {
         ray_t* col = ctx->vecs[k];
@@ -83,18 +67,8 @@ int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
         } else if (RAY_IS_SYM(col->type)) {
             int64_t va = ray_read_sym(ray_data(col), a, col->type, col->attrs);
             int64_t vb = ray_read_sym(ray_data(col), b, col->type, col->attrs);
-            ray_t *sa, *sb;
-            if (ctx->sym_strings) {
-                /* Lock-free path: caller has snapshotted the dict via
-                 * ray_sym_strings_borrow.  Avoids 12× contention when
-                 * parallel-sort workers all call ray_sym_str() (global
-                 * lock per call). */
-                sa = ((uint64_t)va < ctx->sym_count) ? ctx->sym_strings[va] : NULL;
-                sb = ((uint64_t)vb < ctx->sym_count) ? ctx->sym_strings[vb] : NULL;
-            } else {
-                sa = ray_sym_str(va);
-                sb = ray_sym_str(vb);
-            }
+            ray_t* sa = ray_sym_str(va);
+            ray_t* sb = ray_sym_str(vb);
             if (sa && sb) cmp = ray_str_cmp(sa, sb);
         } else if (col->type == RAY_I16) {
             int16_t va = ((int16_t*)ray_data(col))[a];
@@ -2828,7 +2802,6 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                             .vecs = col_arg, .desc = desc_arg,
                             .nulls_first = nf_arg, .n_sort = 1,
                         };
-                        sort_cmp_ctx_borrow_sym(&cctx);
                         uint32_t cur = 0;
                         r[sk_idx_data[0]] = 0;
                         for (int64_t i = 1; i < nrows; i++) {
@@ -2999,7 +2972,6 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
             .nulls_first = nulls_first,
             .n_sort = n_cols,
         };
-        sort_cmp_ctx_borrow_sym(&cmp_ctx);
 
         if (nrows <= 64) {
             sort_insertion(&cmp_ctx, indices, nrows);
@@ -3126,7 +3098,6 @@ static ray_t* topk_indices_cmp(ray_t** cols, uint8_t* descs, uint8_t* nfs,
         .nulls_first = nfs,
         .n_sort = n_cols,
     };
-    sort_cmp_ctx_borrow_sym(&ctx);
 
     for (int64_t i = k / 2 - 1; i >= 0; i--)
         topk_cmp_sift_down(&ctx, heap, k, i);
