@@ -2668,14 +2668,3 @@ ray_t* ray_within_fn(ray_t* vals, ray_t* range) {
     result->len = n;
     return result;
 }
-
-/* (div a b) -> float division (always returns f64) */
-ray_t* ray_fdiv_fn(ray_t* a, ray_t* b) {
-    if (!ray_is_atom(a) || !ray_is_atom(b)) return ray_error("type", NULL);
-    if (!is_numeric(a) || !is_numeric(b)) return ray_error("type", NULL);
-    /* Null propagation */
-    if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_F64);
-    double fa = as_f64(a), fb = as_f64(b);
-    if (fb == 0.0) return ray_typed_null(-RAY_F64);
-    return make_f64(fa / fb);
-}

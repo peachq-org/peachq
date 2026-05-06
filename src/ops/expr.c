@@ -99,7 +99,7 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
     }
 
     if (op->arity != 2 || !op->inputs[0] || !op->inputs[1]) return false;
-    if (op->opcode < OP_ADD || op->opcode > OP_MAX2) return false;
+    if ((op->opcode < OP_ADD || op->opcode > OP_MAX2) && op->opcode != OP_IDIV) return false;
 
     double lf = 0.0, rf = 0.0;
     int64_t li = 0, ri = 0;
@@ -116,6 +116,7 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
             case OP_SUB: r = lv - rv; break;
             case OP_MUL: r = lv * rv; break;
             case OP_DIV: r = rv != 0.0 ? lv / rv : NAN; break;
+            case OP_IDIV: r = rv != 0.0 ? floor(lv / rv) : NAN; break;
             case OP_MOD: { if (rv != 0.0) { r = fmod(lv, rv); if (r && ((r > 0) != (rv > 0))) r += rv; } else { r = NAN; } } break;
             case OP_MIN2: r = lv < rv ? lv : rv; break;
             case OP_MAX2: r = lv > rv ? lv : rv; break;
@@ -133,6 +134,10 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
         case OP_SUB: r = (int64_t)((uint64_t)li - (uint64_t)ri); break;
         case OP_MUL: r = (int64_t)((uint64_t)li * (uint64_t)ri); break;
         case OP_DIV:
+            if (ri==0) return false;
+            r = li/ri; if ((li^ri)<0 && r*ri!=li) r--;
+            break;
+        case OP_IDIV:
             if (ri==0) return false;
             r = li/ri; if ((li^ri)<0 && r*ri!=li) r--;
             break;
@@ -1698,6 +1703,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_SUB:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv-rv; } break;
             case OP_MUL:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv*rv; } break;
             case OP_DIV:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=rv!=0.0?lv/rv:NAN; } break;
+            case OP_IDIV: for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=rv!=0.0?floor(lv/rv):NAN; } break;
             case OP_MOD:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); double r; if(rv!=0.0){r=fmod(lv,rv);if(r&&((r>0)!=(rv>0)))r+=rv;}else r=NAN; odst[i]=r; } break;
             case OP_MIN2: for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv<rv?lv:rv; } break;
             case OP_MAX2: for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv>rv?lv:rv; } break;
@@ -1710,6 +1716,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_SUB: for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);odst[i]=(int64_t)((uint64_t)li-(uint64_t)ri);}break;
             case OP_MUL: for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);odst[i]=(int64_t)((uint64_t)li*(uint64_t)ri);}break;
             case OP_DIV: for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);int64_t r;if(ri==0||(ri==-1&&li==((int64_t)1<<63))){r=0;}else{r=li/ri;if((li^ri)<0&&r*ri!=li)r--;}odst[i]=r;}break;
+            case OP_IDIV:for(int64_t i=0;i<n;i++){double lv=LV_READ(i),rv=RV_READ(i);odst[i]=rv!=0.0?(int64_t)floor(lv/rv):0;}break;
             case OP_MOD: for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);int64_t r;if(ri==0||(ri==-1&&li==((int64_t)1<<63))){r=0;}else{r=li%ri;if(r&&(r^ri)<0)r+=ri;}odst[i]=r;}break;
             case OP_MIN2:for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);odst[i]=li<ri?li:ri;}break;
             case OP_MAX2:for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);odst[i]=li>ri?li:ri;}break;
@@ -1722,6 +1729,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_SUB: for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);odst[i]=(int32_t)((uint32_t)li-(uint32_t)ri);}break;
             case OP_MUL: for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);odst[i]=(int32_t)((uint32_t)li*(uint32_t)ri);}break;
             case OP_DIV: for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);int32_t r;if(ri==0||(ri==-1&&li==((int32_t)1<<31))){r=0;}else{r=li/ri;if((li^ri)<0&&r*ri!=li)r--;}odst[i]=r;}break;
+            case OP_IDIV:for(int64_t i=0;i<n;i++){double lv=LV_READ(i),rv=RV_READ(i);odst[i]=rv!=0.0?(int32_t)floor(lv/rv):0;}break;
             case OP_MOD: for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);int32_t r;if(ri==0||(ri==-1&&li==((int32_t)1<<31))){r=0;}else{r=li%ri;if(r&&(r^ri)<0)r+=ri;}odst[i]=r;}break;
             case OP_MIN2:for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);odst[i]=li<ri?li:ri;}break;
             case OP_MAX2:for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);odst[i]=li>ri?li:ri;}break;
@@ -1734,6 +1742,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_SUB: for(int64_t i=0;i<n;i++){int16_t li=(int16_t)LV_READ(i),ri=(int16_t)RV_READ(i);odst[i]=(int16_t)((uint16_t)li-(uint16_t)ri);}break;
             case OP_MUL: for(int64_t i=0;i<n;i++){int16_t li=(int16_t)LV_READ(i),ri=(int16_t)RV_READ(i);odst[i]=(int16_t)((uint16_t)li*(uint16_t)ri);}break;
             case OP_DIV: for(int64_t i=0;i<n;i++){int16_t li=(int16_t)LV_READ(i),ri=(int16_t)RV_READ(i);odst[i]=ri?li/ri:0;}break;
+            case OP_IDIV:for(int64_t i=0;i<n;i++){double lv=LV_READ(i),rv=RV_READ(i);odst[i]=rv!=0.0?(int16_t)floor(lv/rv):0;}break;
             case OP_MOD: for(int64_t i=0;i<n;i++){int16_t li=(int16_t)LV_READ(i),ri=(int16_t)RV_READ(i);odst[i]=ri?li%ri:0;}break;
             case OP_MIN2:for(int64_t i=0;i<n;i++){int16_t li=(int16_t)LV_READ(i),ri=(int16_t)RV_READ(i);odst[i]=li<ri?li:ri;}break;
             case OP_MAX2:for(int64_t i=0;i<n;i++){int16_t li=(int16_t)LV_READ(i),ri=(int16_t)RV_READ(i);odst[i]=li>ri?li:ri;}break;
@@ -1746,6 +1755,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_SUB: for(int64_t i=0;i<n;i++){uint8_t li=(uint8_t)LV_READ(i),ri=(uint8_t)RV_READ(i);odst[i]=li-ri;}break;
             case OP_MUL: for(int64_t i=0;i<n;i++){uint8_t li=(uint8_t)LV_READ(i),ri=(uint8_t)RV_READ(i);odst[i]=li*ri;}break;
             case OP_DIV: for(int64_t i=0;i<n;i++){uint8_t li=(uint8_t)LV_READ(i),ri=(uint8_t)RV_READ(i);odst[i]=ri?li/ri:0;}break;
+            case OP_IDIV:for(int64_t i=0;i<n;i++){double lv=LV_READ(i),rv=RV_READ(i);odst[i]=rv!=0.0?(uint8_t)floor(lv/rv):0;}break;
             case OP_MOD: for(int64_t i=0;i<n;i++){uint8_t li=(uint8_t)LV_READ(i),ri=(uint8_t)RV_READ(i);odst[i]=ri?li%ri:0;}break;
             case OP_MIN2:for(int64_t i=0;i<n;i++){uint8_t li=(uint8_t)LV_READ(i),ri=(uint8_t)RV_READ(i);odst[i]=li<ri?li:ri;}break;
             case OP_MAX2:for(int64_t i=0;i<n;i++){uint8_t li=(uint8_t)LV_READ(i),ri=(uint8_t)RV_READ(i);odst[i]=li>ri?li:ri;}break;
@@ -1954,7 +1964,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
     /* Div/mod: mark zero-divisor positions as null.
      * The morsel loop writes 0 for b==0 but can't set bitmap nulls. */
     uint16_t opc = op->opcode;
-    if (opc == OP_DIV || opc == OP_MOD) {
+    if (opc == OP_DIV || opc == OP_IDIV || opc == OP_MOD) {
         if (!r_scalar) {
             int8_t rt = rhs->type;
             if (rt == RAY_I64 || rt == RAY_TIMESTAMP) {
