@@ -2597,10 +2597,17 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     total_bytes += ray_sym_elem_size(kct, kc->attrs);
                 }
                 /* Single-key case fits unconditionally (one key column, one
-                 * slot).  Multi-key needs ≤ 8 bytes packed.  Single-agg COUNT
-                 * with a single key fires the count1 fast path which has no
-                 * size constraint. */
-                int fits = (n_keys_local == 1) || (total_bytes <= 8);
+                 * slot).  Multi-key narrow path (≤ 8 bytes packed) uses a
+                 * single int64 slot; the wide path (9..16 bytes) adds a
+                 * side kv_hi side array.  The wide path's extra hi compare
+                 * + extra memory traffic only pays back for single-COUNT
+                 * shapes (Q36, Q41); multi-agg high-card workloads (Q31,
+                 * Q32) regress against the regular FILTER+GROUP path, so
+                 * keep them on it. */
+                int wide_fits  = (total_bytes >  8 && total_bytes <= 16
+                                  && n_aggs_ok == 1 && has_only_count);
+                int narrow_fits = (total_bytes <= 8);
+                int fits = (n_keys_local == 1) || narrow_fits || wide_fits;
                 if (keys_ok && fits) {
                     /* Don't fire the multi path when n_keys == 1 AND not
                      * count-only: the multi path's per-row update has higher
@@ -2608,7 +2615,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                      * common-case wins. */
                     if (n_keys_local == 1 && n_aggs_ok == 1 && has_only_count) {
                         can_fuse_phase1 = 1;  /* will use count1 exec */
-                    } else if (total_bytes <= 8) {
+                    } else if (narrow_fits || wide_fits) {
                         can_fuse_phase1 = 1;  /* will use multi exec */
                     }
                 }
