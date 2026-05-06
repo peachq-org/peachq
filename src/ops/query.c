@@ -32,6 +32,7 @@
 #include "ops/internal.h"
 #include "ops/hash.h"
 #include "ops/rowsel.h"
+#include "ops/fused_group.h"
 #include "ops/temporal.h"
 #include "table/sym.h"
 #include "table/dict.h"
@@ -2080,7 +2081,51 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     uint8_t n_nonaggs = 0;
     int synth_count_col = 0;  /* 1 if we synthesized OP_COUNT for group boundaries */
 
-    /* Apply WHERE filter */
+    /* Phase-1 OP_FILTERED_GROUP gate.  When the (select … where … by …)
+     * shape matches the supported vocabulary, route through the fused
+     * operator instead of FILTER + GROUP.  We pre-scan the dict here so
+     * the WHERE block and the eager-filter step downstream can be
+     * short-circuited; the fused node consumes the predicate directly.
+     *
+     * Guard with RAYFORCE_DISABLE_FUSED_GROUP=1 for A/B comparisons. */
+    int can_fuse_phase1 = 0;
+    ray_op_t* fused_pred_op = NULL;  /* compiled below in the WHERE block */
+    {
+        const char* off_env = getenv("RAYFORCE_DISABLE_FUSED_GROUP");
+        int env_disabled = (off_env && off_env[0] == '1');
+        if (!env_disabled
+            && where_expr && by_expr && !nearest_expr
+            && by_expr->type == -RAY_SYM
+            && (by_expr->attrs & RAY_ATTR_NAME)
+            && ray_fused_group_supported(where_expr))
+        {
+            int n_count_aggs = 0;
+            int n_other = 0;
+            int64_t count_sym = ray_sym_intern("count", 5);
+            for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                if (kid == from_id || kid == where_id || kid == by_id ||
+                    kid == take_id || kid == asc_id || kid == desc_id ||
+                    kid == nearest_id) continue;
+                ray_t* val_expr = dict_elems[i + 1];
+                if (!is_group_dag_agg_expr(val_expr)) { n_other++; break; }
+                ray_t** ae = (ray_t**)ray_data(val_expr);
+                if (ae[0]->i64 != count_sym || ray_len(val_expr) < 2) {
+                    n_other++; break;
+                }
+                n_count_aggs++;
+            }
+            if (n_count_aggs == 1 && n_other == 0) {
+                ray_t* key_col = ray_table_get_col(tbl, by_expr->i64);
+                if (key_col && !RAY_IS_PARTED(key_col->type)
+                    && key_col->type != RAY_MAPCOMMON) {
+                    can_fuse_phase1 = 1;
+                }
+            }
+        }
+    }
+
+    /* Apply WHERE filter (unless folded into OP_FILTERED_GROUP). */
     if (where_expr) {
         ray_op_t* pred = compile_expr_dag(g, where_expr);
         if (!pred) {
@@ -2092,7 +2137,11 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 "unknown function name, unsupported special form, "
                 "or a sub-expression the compiler can't lower");
         }
-        root = ray_filter(g, root, pred);
+        if (can_fuse_phase1) {
+            fused_pred_op = pred;  /* consumed by ray_filtered_group below */
+        } else {
+            root = ray_filter(g, root, pred);
+        }
     }
 
     /* Apply NEAREST (ANN/KNN) re-ranking.  Mutually exclusive with
@@ -3299,7 +3348,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
          * WHERE clause on a `select ... by` query was silently
          * ignored before the filter was wired through the group
          * pipeline.) */
-        if (where_expr) {
+        if (where_expr && !can_fuse_phase1) {
             bool can_fuse = !has_nonagg_needing_flat && !table_is_parted;
             if (can_fuse) {
                 root = ray_optimize(g, root);
@@ -3393,7 +3442,20 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
         if (n_aggs > 0 || n_nonaggs > 0) {
             if (n_aggs > 0) {
-                root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
+                if (can_fuse_phase1 && fused_pred_op != NULL
+                    && n_aggs == 1 && n_nonaggs == 0
+                    && agg_ops[0] == OP_COUNT)
+                {
+                    /* All gate conditions held — emit the fused operator
+                     * instead of OP_GROUP.  Downstream rename + sort_take
+                     * still runs and treats the result as the standard
+                     * 2-column [key, count] table. */
+                    root = ray_filtered_group(g, fused_pred_op,
+                                              key_ops, n_keys,
+                                              agg_ops, agg_ins, n_aggs);
+                } else {
+                    root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
+                }
             } else {
                 /* No aggs but non-agg expressions exist — still need group
                  * boundaries.  Use GROUP+COUNT on the key to get group keys.
