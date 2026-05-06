@@ -2644,6 +2644,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                      * already constant-folds. */
                     int all_ok = 1;
                     ray_op_t* compiled[64];
+                    int       cost[64];
                     if (k > 64) all_ok = 0;
                     /* Each conjunct must compile, must not be a pure
                      * constant, and must transitively reference at
@@ -2651,29 +2652,77 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                      * conjuncts compile to atom/scalar outputs that the
                      * lazy OP_FILTER path can't refine into a rowsel —
                      * fall back to the OP_AND tree (ray_optimize already
-                     * constant-folds those). */
+                     * constant-folds those).  Compute a coarse cost
+                     * estimate per conjunct so we can sort cheap-first
+                     * (DuckDB ExpressionHeuristics-style); cheap
+                     * predicates make subsequent expensive ones evaluate
+                     * over a far smaller rowsel. */
                     for (int64_t i = 0; i < k && all_ok; i++) {
                         ray_op_t* p = compile_expr_dag(g, elems[i + 1]);
                         if (!p || p->opcode == OP_CONST) { all_ok = 0; break; }
                         /* Walk the sub-DAG via stack DFS, looking for
-                         * any OP_SCAN.  Bound the depth to keep this
-                         * check cheap on degenerate trees. */
+                         * any OP_SCAN; tally cost contributions along
+                         * the way.  Bound the depth to keep this check
+                         * cheap on degenerate trees. */
                         int has_scan = 0;
+                        int c = 0;
                         ray_op_t* stk[64];
                         int sp = 0;
                         stk[sp++] = p;
-                        while (sp > 0 && !has_scan) {
+                        while (sp > 0) {
                             ray_op_t* cur = stk[--sp];
-                            if (cur->opcode == OP_SCAN) { has_scan = 1; break; }
+                            if (cur->opcode == OP_SCAN) has_scan = 1;
+                            /* Coarse per-node cost: comparison ops are
+                             * cheap, OP_LIKE / OP_IN / function calls
+                             * are expensive.  Matches DuckDB's
+                             * ExpressionHeuristics ordering. */
+                            switch (cur->opcode) {
+                            case OP_LIKE:
+                                c += 50;  /* substring-search is ~10× a
+                                             plain compare */
+                                break;
+                            case OP_IN: case OP_NOT_IN:
+                                c += 20;
+                                break;
+                            case OP_NOT:
+                                c += 1;
+                                break;
+                            case OP_EQ: case OP_NE: case OP_LT: case OP_LE:
+                            case OP_GT: case OP_GE: case OP_AND: case OP_OR:
+                                c += 5;
+                                break;
+                            case OP_SCAN: case OP_CONST:
+                                break;  /* leaves — no compute cost */
+                            default:
+                                c += 5;
+                                break;
+                            }
                             for (uint8_t a = 0; a < cur->arity && sp < 64; a++)
                                 if (cur->inputs[a]) stk[sp++] = cur->inputs[a];
                         }
                         if (!has_scan) { all_ok = 0; break; }
                         compiled[i] = p;
+                        cost[i] = c;
                     }
                     if (all_ok) {
+                        /* Selection-sort by cost ascending — small k so
+                         * O(k²) is fine and avoids dragging a bigger
+                         * sort into the query path. */
+                        int order[64];
+                        for (int64_t i = 0; i < k; i++) order[i] = (int)i;
+                        for (int64_t i = 0; i < k - 1; i++) {
+                            int min_i = (int)i;
+                            for (int64_t j = i + 1; j < k; j++)
+                                if (cost[order[j]] < cost[order[min_i]])
+                                    min_i = (int)j;
+                            if (min_i != (int)i) {
+                                int tmp = order[i];
+                                order[i] = order[min_i];
+                                order[min_i] = tmp;
+                            }
+                        }
                         for (int64_t i = 0; i < k; i++)
-                            root = ray_filter(g, root, compiled[i]);
+                            root = ray_filter(g, root, compiled[order[i]]);
                         and_chained = 1;
                     }
                 }
