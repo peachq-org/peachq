@@ -2302,7 +2302,7 @@ static ray_t* table_distinct(ray_t* tbl) {
     }
 
     ray_op_t* dist = ray_distinct(g, keys, (uint8_t)ncols);
-    ray_optimize(g, dist);
+    dist = ray_optimize(g, dist);
     ray_t* deduped = ray_execute(g, dist);
     ray_graph_free(g);
     ray_release(canonical);
