@@ -2093,25 +2093,32 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     {
         const char* off_env = getenv("RAYFORCE_DISABLE_FUSED_GROUP");
         int env_disabled = (off_env && off_env[0] == '1');
-        /* Accept by_expr in either the scalar (-RAY_SYM with NAME) form or
-         * the 1-element RAY_SYM vector form.  The latter is what dict-form
-         * by-clauses become after the pre-evaluation step (e.g. Q43's
-         * `by: {M: (xbar EventTime …)}` rewrites to a [M] sym vector). */
+        /* by_expr forms accepted:
+         *   - scalar  -RAY_SYM with NAME    (single key, e.g. Q8/Q37)
+         *   - vector  RAY_SYM with len 1..16 (dict-form pre-evaluated)
+         * Multi-key cases (len > 1) only fire if the multi path can pack
+         * keys into ≤ 8 bytes total (composite int64 slot). */
         int single_key_scalar = by_expr && by_expr->type == -RAY_SYM
                               && (by_expr->attrs & RAY_ATTR_NAME);
-        int single_key_vec    = by_expr && by_expr->type == RAY_SYM
-                              && ray_len(by_expr) == 1;
-        int64_t by_key_sym = -1;
-        if (single_key_scalar) by_key_sym = by_expr->i64;
-        else if (single_key_vec) by_key_sym = ((int64_t*)ray_data(by_expr))[0];
+        int multi_key_vec     = by_expr && by_expr->type == RAY_SYM
+                              && ray_len(by_expr) >= 1
+                              && ray_len(by_expr) <= 16;
         if (!env_disabled
             && where_expr && by_expr && !nearest_expr
-            && by_key_sym >= 0
+            && (single_key_scalar || multi_key_vec)
             && ray_fused_group_supported(where_expr, tbl))
         {
-            int n_count_aggs = 0;
-            int n_other = 0;
+            /* Walk the dict aggs.  Accept any combination of count/sum/
+             * min/max/avg with non-COUNT requiring an integer/temporal
+             * input column. */
+            int n_aggs_ok  = 0;
+            int n_other    = 0;
+            int has_only_count = 1;
             int64_t count_sym = ray_sym_intern("count", 5);
+            int64_t sum_sym   = ray_sym_intern("sum",   3);
+            int64_t min_sym   = ray_sym_intern("min",   3);
+            int64_t max_sym   = ray_sym_intern("max",   3);
+            int64_t avg_sym   = ray_sym_intern("avg",   3);
             for (int64_t i = 0; i + 1 < dict_n; i += 2) {
                 int64_t kid = dict_elems[i]->i64;
                 if (kid == from_id || kid == where_id || kid == by_id ||
@@ -2120,16 +2127,74 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 ray_t* val_expr = dict_elems[i + 1];
                 if (!is_group_dag_agg_expr(val_expr)) { n_other++; break; }
                 ray_t** ae = (ray_t**)ray_data(val_expr);
-                if (ae[0]->i64 != count_sym || ray_len(val_expr) < 2) {
+                int64_t aid = ae[0]->i64;
+                int op_ok = (aid == count_sym || aid == sum_sym ||
+                             aid == min_sym   || aid == max_sym ||
+                             aid == avg_sym);
+                if (!op_ok || ray_len(val_expr) < 2) { n_other++; break; }
+                if (aid != count_sym) has_only_count = 0;
+                ray_t* ae1 = ae[1];
+                if (!ae1 || !((ae1->type == -RAY_SYM
+                               && (ae1->attrs & RAY_ATTR_NAME)))) {
                     n_other++; break;
                 }
-                n_count_aggs++;
+                if (aid != count_sym) {
+                    ray_t* in_col = ray_table_get_col(tbl, ae1->i64);
+                    if (!in_col) { n_other++; break; }
+                    int8_t ict = in_col->type;
+                    if (RAY_IS_PARTED(ict) || ict == RAY_MAPCOMMON)
+                        { n_other++; break; }
+                    if (ict != RAY_BOOL && ict != RAY_U8 && ict != RAY_I16
+                        && ict != RAY_I32 && ict != RAY_I64
+                        && ict != RAY_DATE && ict != RAY_TIME
+                        && ict != RAY_TIMESTAMP)
+                        { n_other++; break; }
+                }
+                n_aggs_ok++;
             }
-            if (n_count_aggs == 1 && n_other == 0) {
-                ray_t* key_col = ray_table_get_col(tbl, by_key_sym);
-                if (key_col && !RAY_IS_PARTED(key_col->type)
-                    && key_col->type != RAY_MAPCOMMON) {
-                    can_fuse_phase1 = 1;
+            if (n_aggs_ok >= 1 && n_aggs_ok <= 8 && n_other == 0) {
+                /* Validate keys: total packed bytes ≤ 8 for multi-key. */
+                int64_t key_syms_buf[16];
+                uint8_t n_keys_local = 0;
+                if (single_key_scalar) {
+                    key_syms_buf[0] = by_expr->i64;
+                    n_keys_local = 1;
+                } else {
+                    int64_t* sv = (int64_t*)ray_data(by_expr);
+                    n_keys_local = (uint8_t)ray_len(by_expr);
+                    for (uint8_t i = 0; i < n_keys_local; i++)
+                        key_syms_buf[i] = sv[i];
+                }
+                int keys_ok = 1;
+                int total_bytes = 0;
+                for (uint8_t i = 0; i < n_keys_local && keys_ok; i++) {
+                    ray_t* kc = ray_table_get_col(tbl, key_syms_buf[i]);
+                    if (!kc) { keys_ok = 0; break; }
+                    int8_t kct = kc->type;
+                    if (RAY_IS_PARTED(kct) || kct == RAY_MAPCOMMON)
+                        { keys_ok = 0; break; }
+                    if (kct != RAY_SYM && kct != RAY_BOOL && kct != RAY_U8
+                        && kct != RAY_I16 && kct != RAY_I32 && kct != RAY_I64
+                        && kct != RAY_DATE && kct != RAY_TIME
+                        && kct != RAY_TIMESTAMP)
+                        { keys_ok = 0; break; }
+                    total_bytes += ray_sym_elem_size(kct, kc->attrs);
+                }
+                /* Single-key case fits unconditionally (one key column, one
+                 * slot).  Multi-key needs ≤ 8 bytes packed.  Single-agg COUNT
+                 * with a single key fires the count1 fast path which has no
+                 * size constraint. */
+                int fits = (n_keys_local == 1) || (total_bytes <= 8);
+                if (keys_ok && fits) {
+                    /* Don't fire the multi path when n_keys == 1 AND not
+                     * count-only: the multi path's per-row update has higher
+                     * overhead than count1.  Specifically, count1 owns the
+                     * common-case wins. */
+                    if (n_keys_local == 1 && n_aggs_ok == 1 && has_only_count) {
+                        can_fuse_phase1 = 1;  /* will use count1 exec */
+                    } else if (total_bytes <= 8) {
+                        can_fuse_phase1 = 1;  /* will use multi exec */
+                    }
                 }
             }
         }
@@ -3452,14 +3517,19 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
         if (n_aggs > 0 || n_nonaggs > 0) {
             if (n_aggs > 0) {
+                int agg_kinds_ok = (n_aggs <= 8);
+                for (uint8_t i = 0; agg_kinds_ok && i < n_aggs; i++) {
+                    if (agg_ops[i] != OP_COUNT && agg_ops[i] != OP_SUM &&
+                        agg_ops[i] != OP_MIN   && agg_ops[i] != OP_MAX &&
+                        agg_ops[i] != OP_AVG)
+                        agg_kinds_ok = 0;
+                }
                 if (can_fuse_phase1 && fused_pred_op != NULL
-                    && n_aggs == 1 && n_nonaggs == 0
-                    && agg_ops[0] == OP_COUNT)
+                    && n_nonaggs == 0 && agg_kinds_ok)
                 {
-                    /* All gate conditions held — emit the fused operator
-                     * instead of OP_GROUP.  Downstream rename + sort_take
-                     * still runs and treats the result as the standard
-                     * 2-column [key, count] table. */
+                    /* exec_filtered_group dispatches: count1 (single key,
+                     * single COUNT) → Phase 3 fast path; everything else →
+                     * multi path with packed composite key. */
                     root = ray_filtered_group(g, fused_pred_op,
                                               key_ops, n_keys,
                                               agg_ops, agg_ins, n_aggs);
