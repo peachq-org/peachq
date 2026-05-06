@@ -22,6 +22,7 @@
  */
 
 #include "graph.h"
+#include "internal.h"   /* EXT_TRAIL, graph_alloc_ext_node_ex */
 #include "store/csr.h"
 #include "store/hnsw.h"
 #include "mem/sys.h"
@@ -136,7 +137,7 @@ static ray_op_t* graph_alloc_node(ray_graph_t* g) {
     return n;
 }
 
-static ray_op_ext_t* graph_alloc_ext_node_ex(ray_graph_t* g, size_t extra) {
+ray_op_ext_t* graph_alloc_ext_node_ex(ray_graph_t* g, size_t extra) {
     /* Extended nodes are 64 bytes; extra bytes appended for inline arrays */
     ray_op_ext_t* ext = (ray_op_ext_t*)ray_sys_alloc(sizeof(ray_op_ext_t) + extra);
     if (!ext) return NULL;
@@ -180,8 +181,8 @@ static ray_op_ext_t* graph_alloc_ext_node(ray_graph_t* g) {
     return graph_alloc_ext_node_ex(g, 0);
 }
 
-/* Pointer to trailing bytes after the ext node */
-#define EXT_TRAIL(ext) ((char*)((ext) + 1))
+/* EXT_TRAIL is now declared in ops/internal.h so other op modules can
+ * embed inline arrays the same way. */
 
 /* --------------------------------------------------------------------------
  * ray_graph_new / ray_graph_free
