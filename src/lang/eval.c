@@ -496,7 +496,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
 
     /* DAG executor — for F64 and comparisons */
     if (!force_boxed && dag_opcode > 0) {
-        int is_idiv = (dag_opcode == OP_DIV || dag_opcode == OP_MOD);
+        int is_idiv = (dag_opcode == OP_MOD);
         int is_cmp  = (dag_opcode >= OP_EQ && dag_opcode <= OP_GE);
 
         /* Classify operands: numeric/temporal vectors or scalars */
@@ -561,8 +561,6 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                     if (lop && rop) {
                         ray_op_t* root = ray_binop(g, dag_opcode, lop, rop);
                         if (root) {
-                            /* For integer floor-division: ray_binop sets F64 output
-                             * for OP_DIV; override to I64 for floor-div with null prop */
                             if (is_idiv) root->out_type = RAY_I64;
                             ray_t* result = ray_execute(g, root);
                             ray_graph_free(g);
@@ -571,13 +569,6 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                                 if (ray_is_vec(result) && result->type != out_type &&
                                     ray_elem_size(result->type) == ray_elem_size(out_type))
                                     result->type = out_type;
-                                /* Floor-div post-pass (OP_DIV only) */
-                                if (dag_opcode == OP_DIV && ray_is_vec(result) &&
-                                    result->type == RAY_F64) {
-                                    double* d = (double*)ray_data(result);
-                                    for (int64_t fi = 0; fi < result->len; fi++)
-                                        d[fi] = floor(d[fi]);
-                                }
                                 ray_release(e0);
                                 return result;
                             }
@@ -2113,7 +2104,7 @@ vm_error_cleanup: {
 
 
 /* ray_enlist_fn, ray_dict_fn, ray_nil_fn, ray_where_fn, ray_group_fn,
- * ray_concat_fn, ray_raze_fn, ray_within_fn, ray_fdiv_fn
+ * ray_concat_fn, ray_raze_fn, ray_within_fn
  * moved to ops/builtins.c */
 
 /* ══════════════════════════════════════════
@@ -2405,7 +2396,7 @@ static void ray_register_builtins(void) {
     register_binary("concat",   RAY_FN_NONE, ray_concat_fn);
     register_unary("raze",      RAY_FN_NONE, ray_raze_fn);
     register_binary("within",   RAY_FN_NONE, ray_within_fn);
-    register_binary("div",      RAY_FN_ATOMIC, ray_fdiv_fn);
+    register_binary("div",      RAY_FN_ATOMIC, ray_idiv_fn);
     register_binary("rand",     RAY_FN_NONE, ray_rand_fn);
     register_binary("bin",      RAY_FN_NONE, ray_bin_fn);
     register_binary("binr",     RAY_FN_NONE, ray_binr_fn);
