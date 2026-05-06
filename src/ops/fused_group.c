@@ -1493,6 +1493,357 @@ static ray_t* mk_materialize_agg(const mk_agg_t* a, const int64_t* gstate,
     return col;
 }
 
+/* Parallel combine for the multi-agg/multi-key path.  Same 3-pass radix
+ * scatter as count1: histogram per (shard, partition), scatter packed
+ * (kv + state[]) to a flat buffer using per-(shard, partition) cursors,
+ * dedup per partition.  Final materialize concatenates partition outputs.
+ *
+ * State per slot is `total_state` int64s, so the packed buffer width
+ * is (1 + total_state) int64s per entry: [kv, state_0, state_1, ...]. */
+typedef struct {
+    mk_shard_t*       shards;
+    uint32_t          nw;
+    uint8_t           total_state;
+    const mk_agg_t*   aggs;
+    uint8_t           n_aggs;
+    uint32_t          p_bits;
+    uint64_t          p_mask;
+    int64_t*          hist;            /* [nw * P] */
+    int64_t*          part_off;        /* [P + 1] */
+    int64_t*          sw_cursor;       /* [nw * P] */
+    int64_t*          buf;             /* [total_local * (1 + total_state)] */
+    /* Per-partition deduped output: kv array and packed state array */
+    int64_t**         part_keys;
+    int64_t**         part_states;     /* [P]: per-partition state[part_n[p] * total_state] */
+    ray_t**           part_keys_hdr;
+    ray_t**           part_states_hdr;
+    int64_t*          part_n;
+    _Atomic(uint32_t) oom;
+} mk_combine_par_ctx_t;
+
+static void mk_combine_hist_fn(void* vctx, uint32_t worker_id,
+                               int64_t start, int64_t end) {
+    (void)worker_id; (void)end;
+    mk_combine_par_ctx_t* c = (mk_combine_par_ctx_t*)vctx;
+    uint32_t w = (uint32_t)start;
+    mk_shard_t* sh = &c->shards[w];
+    int64_t* hist = c->hist + (size_t)w * (c->p_mask + 1);
+    if (!sh->slots) return;
+    for (uint64_t s = 0; s < sh->cap; s++) {
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv = sh->slots[s * 2 + 1];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t p = h & c->p_mask;
+        hist[p]++;
+    }
+}
+
+static void mk_combine_scat_fn(void* vctx, uint32_t worker_id,
+                               int64_t start, int64_t end) {
+    (void)worker_id; (void)end;
+    mk_combine_par_ctx_t* c = (mk_combine_par_ctx_t*)vctx;
+    uint32_t w = (uint32_t)start;
+    mk_shard_t* sh = &c->shards[w];
+    int64_t* cur = c->sw_cursor + (size_t)w * (c->p_mask + 1);
+    uint8_t total_state = c->total_state;
+    int64_t stride = (int64_t)1 + total_state;
+    if (!sh->slots) return;
+    for (uint64_t s = 0; s < sh->cap; s++) {
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv = sh->slots[s * 2 + 1];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t p = h & c->p_mask;
+        int64_t pos = cur[p]++;
+        int64_t* dst = c->buf + pos * stride;
+        dst[0] = kv;
+        const int64_t* sst = &sh->state[s * total_state];
+        for (uint8_t k = 0; k < total_state; k++) dst[1 + k] = sst[k];
+    }
+}
+
+static void mk_combine_dedup_fn(void* vctx, uint32_t worker_id,
+                                int64_t start, int64_t end) {
+    (void)worker_id; (void)end;
+    mk_combine_par_ctx_t* c = (mk_combine_par_ctx_t*)vctx;
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    uint64_t p = (uint64_t)start;
+    int64_t off  = c->part_off[p];
+    int64_t pcnt = c->part_off[p + 1] - off;
+    if (pcnt <= 0) {
+        c->part_keys[p]   = NULL;
+        c->part_states[p] = NULL;
+        c->part_n[p]      = 0;
+        return;
+    }
+
+    uint8_t total_state = c->total_state;
+    int64_t stride = (int64_t)1 + total_state;
+
+    uint64_t cap = 256;
+    while (cap < (uint64_t)(pcnt * 2)) cap <<= 1;
+    uint64_t mask = cap - 1;
+
+    ray_t* slots_hdr = NULL;
+    ray_t* state_hdr = NULL;
+    int64_t* slots = (int64_t*)scratch_calloc(&slots_hdr,
+                                              (size_t)cap * 2 * sizeof(int64_t));
+    int64_t* state = (int64_t*)scratch_calloc(&state_hdr,
+                                              (size_t)cap * total_state *
+                                              sizeof(int64_t));
+    if (!slots || !state) {
+        if (slots_hdr) scratch_free(slots_hdr);
+        if (state_hdr) scratch_free(state_hdr);
+        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+        return;
+    }
+
+    int64_t n_filled = 0;
+    const int64_t* in = c->buf + off * stride;
+    for (int64_t i = 0; i < pcnt; i++) {
+        const int64_t* ent = in + i * stride;
+        int64_t kv = ent[0];
+        const int64_t* sst = ent + 1;
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t t = (h >> c->p_bits) & mask;
+        for (;;) {
+            if (!slots[t * 2]) {
+                slots[t * 2]     = 1;
+                slots[t * 2 + 1] = kv;
+                int64_t* dst = &state[t * total_state];
+                for (uint8_t k = 0; k < total_state; k++) dst[k] = sst[k];
+                n_filled++;
+                break;
+            }
+            if (slots[t * 2 + 1] == kv) {
+                mk_state_merge(&state[t * total_state],
+                               sst, c->aggs, c->n_aggs);
+                break;
+            }
+            t = (t + 1) & mask;
+        }
+    }
+
+    /* Pack per-partition output. */
+    ray_t* k_hdr = NULL;
+    ray_t* s_hdr = NULL;
+    int64_t* k_out = (int64_t*)scratch_alloc(&k_hdr,
+                                             (size_t)n_filled * sizeof(int64_t));
+    int64_t* s_out = (int64_t*)scratch_alloc(&s_hdr,
+                                             (size_t)n_filled * total_state *
+                                             sizeof(int64_t));
+    if (!k_out || !s_out) {
+        if (k_hdr) scratch_free(k_hdr);
+        if (s_hdr) scratch_free(s_hdr);
+        scratch_free(slots_hdr); scratch_free(state_hdr);
+        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+        return;
+    }
+    int64_t out_idx = 0;
+    for (uint64_t s = 0; s < cap; s++) {
+        if (slots[s * 2]) {
+            k_out[out_idx] = slots[s * 2 + 1];
+            int64_t* dst = &s_out[out_idx * total_state];
+            const int64_t* src = &state[s * total_state];
+            for (uint8_t k = 0; k < total_state; k++) dst[k] = src[k];
+            out_idx++;
+        }
+    }
+    scratch_free(slots_hdr);
+    scratch_free(state_hdr);
+
+    c->part_keys[p]       = k_out;
+    c->part_states[p]     = s_out;
+    c->part_keys_hdr[p]   = k_hdr;
+    c->part_states_hdr[p] = s_hdr;
+    c->part_n[p]          = n_filled;
+}
+
+/* Build a virtual gs/gst pair from per-partition packed outputs so the
+ * existing materialize loop (key decompose + agg materialize) keeps
+ * working unchanged.  We just allocate the dense gs/gst arrays sized to
+ * global_n with no empty slots and walk them in order. */
+static int mk_combine_parallel(mk_par_ctx_t* c, uint32_t nw,
+                               int64_t** out_gs, ray_t** out_gs_hdr,
+                               int64_t** out_gst, ray_t** out_gst_hdr,
+                               int64_t* out_gcap, int64_t* out_global_n)
+{
+    mk_shard_t* shards = c->shards;
+    uint8_t total_state = c->total_state;
+
+    int64_t total_local = 0;
+    for (uint32_t w = 0; w < nw; w++) total_local += shards[w].n_filled;
+
+    if (total_local < 50000) return 0;  /* not worth parallelising */
+
+    ray_pool_t* pool = ray_pool_get();
+    if (!pool || ray_pool_total_workers(pool) < 2) return 0;
+    if (nw > 256) return 0;
+
+    uint32_t cnw = ray_pool_total_workers(pool);
+    uint32_t p_bits = (cnw < 8) ? 4 : 6;
+    uint64_t P = (uint64_t)1 << p_bits;
+    uint64_t p_mask = P - 1;
+
+    ray_t* hist_hdr = NULL;
+    ray_t* off_hdr  = NULL;
+    ray_t* cur_hdr  = NULL;
+    ray_t* buf_hdr  = NULL;
+    ray_t* pk_hdr   = NULL;
+    ray_t* ps_hdr   = NULL;
+    ray_t* pkh_hdr  = NULL;
+    ray_t* psh_hdr  = NULL;
+    ray_t* pn_hdr   = NULL;
+
+    int64_t stride = (int64_t)1 + total_state;
+    int64_t* hist  = (int64_t*)scratch_calloc(&hist_hdr,
+        (size_t)nw * (size_t)P * sizeof(int64_t));
+    int64_t* part_off = (int64_t*)scratch_alloc(&off_hdr,
+        (size_t)(P + 1) * sizeof(int64_t));
+    int64_t* sw_cursor = (int64_t*)scratch_alloc(&cur_hdr,
+        (size_t)nw * (size_t)P * sizeof(int64_t));
+    int64_t* buf = (int64_t*)scratch_alloc(&buf_hdr,
+        (size_t)total_local * (size_t)stride * sizeof(int64_t));
+    int64_t** part_keys = (int64_t**)scratch_calloc(&pk_hdr,
+        (size_t)P * sizeof(int64_t*));
+    int64_t** part_states = (int64_t**)scratch_calloc(&ps_hdr,
+        (size_t)P * sizeof(int64_t*));
+    ray_t**   part_keys_hdr = (ray_t**)scratch_calloc(&pkh_hdr,
+        (size_t)P * sizeof(ray_t*));
+    ray_t**   part_states_hdr = (ray_t**)scratch_calloc(&psh_hdr,
+        (size_t)P * sizeof(ray_t*));
+    int64_t*  part_n = (int64_t*)scratch_calloc(&pn_hdr,
+        (size_t)P * sizeof(int64_t));
+
+    if (!hist || !part_off || !sw_cursor || !buf || !part_keys ||
+        !part_states || !part_keys_hdr || !part_states_hdr || !part_n)
+    {
+        if (hist_hdr) scratch_free(hist_hdr);
+        if (off_hdr)  scratch_free(off_hdr);
+        if (cur_hdr)  scratch_free(cur_hdr);
+        if (buf_hdr)  scratch_free(buf_hdr);
+        if (pk_hdr)   scratch_free(pk_hdr);
+        if (ps_hdr)   scratch_free(ps_hdr);
+        if (pkh_hdr)  scratch_free(pkh_hdr);
+        if (psh_hdr)  scratch_free(psh_hdr);
+        if (pn_hdr)   scratch_free(pn_hdr);
+        return 0;
+    }
+
+    mk_combine_par_ctx_t pctx = {
+        .shards          = shards,
+        .nw              = nw,
+        .total_state     = total_state,
+        .aggs            = c->aggs,
+        .n_aggs          = c->n_aggs,
+        .p_bits          = p_bits,
+        .p_mask          = p_mask,
+        .hist            = hist,
+        .part_off        = part_off,
+        .sw_cursor       = sw_cursor,
+        .buf             = buf,
+        .part_keys       = part_keys,
+        .part_states     = part_states,
+        .part_keys_hdr   = part_keys_hdr,
+        .part_states_hdr = part_states_hdr,
+        .part_n          = part_n,
+        .oom             = 0,
+    };
+
+    ray_pool_dispatch_n(pool, mk_combine_hist_fn, &pctx, nw);
+
+    int64_t total = 0;
+    for (uint64_t p = 0; p < P; p++) {
+        part_off[p] = total;
+        int64_t cum = total;
+        for (uint32_t w = 0; w < nw; w++) {
+            int64_t cnt = hist[(size_t)w * P + p];
+            sw_cursor[(size_t)w * P + p] = cum;
+            cum += cnt;
+        }
+        total = cum;
+    }
+    part_off[P] = total;
+
+    ray_pool_dispatch_n(pool, mk_combine_scat_fn, &pctx, nw);
+    ray_pool_dispatch_n(pool, mk_combine_dedup_fn, &pctx, (uint32_t)P);
+
+    int oom = atomic_load_explicit(&pctx.oom, memory_order_relaxed) ? 1 : 0;
+    if (oom) {
+        for (uint64_t p = 0; p < P; p++) {
+            if (part_keys_hdr[p])   scratch_free(part_keys_hdr[p]);
+            if (part_states_hdr[p]) scratch_free(part_states_hdr[p]);
+        }
+        scratch_free(hist_hdr); scratch_free(off_hdr);
+        scratch_free(cur_hdr); scratch_free(buf_hdr);
+        scratch_free(pk_hdr); scratch_free(ps_hdr);
+        scratch_free(pkh_hdr); scratch_free(psh_hdr);
+        scratch_free(pn_hdr);
+        return 0;
+    }
+
+    /* Concat per-partition outputs into a dense gs/gst pair so the
+     * existing materialize loop in mk_combine_and_materialize works
+     * unchanged.  gs is laid out as [used, kv] per slot — for the
+     * concat we set every used flag to 1 and pack tightly (cap ==
+     * global_n, no empty slots). */
+    int64_t global_n = 0;
+    for (uint64_t p = 0; p < P; p++) global_n += part_n[p];
+
+    ray_t* gs_hdr = NULL;
+    ray_t* gst_hdr = NULL;
+    int64_t* gs  = (int64_t*)scratch_calloc(&gs_hdr,
+        (size_t)global_n * 2 * sizeof(int64_t));
+    int64_t* gst = (int64_t*)scratch_alloc(&gst_hdr,
+        (size_t)global_n * total_state * sizeof(int64_t));
+    if (!gs || !gst) {
+        if (gs_hdr) scratch_free(gs_hdr);
+        if (gst_hdr) scratch_free(gst_hdr);
+        for (uint64_t p = 0; p < P; p++) {
+            if (part_keys_hdr[p])   scratch_free(part_keys_hdr[p]);
+            if (part_states_hdr[p]) scratch_free(part_states_hdr[p]);
+        }
+        scratch_free(hist_hdr); scratch_free(off_hdr);
+        scratch_free(cur_hdr); scratch_free(buf_hdr);
+        scratch_free(pk_hdr); scratch_free(ps_hdr);
+        scratch_free(pkh_hdr); scratch_free(psh_hdr);
+        scratch_free(pn_hdr);
+        return 0;
+    }
+    int64_t gi = 0;
+    for (uint64_t p = 0; p < P; p++) {
+        int64_t  pn = part_n[p];
+        int64_t* pk = part_keys[p];
+        int64_t* ps = part_states[p];
+        for (int64_t i = 0; i < pn; i++) {
+            gs[gi * 2]     = 1;
+            gs[gi * 2 + 1] = pk[i];
+            int64_t* dst = &gst[gi * total_state];
+            const int64_t* src = &ps[i * total_state];
+            for (uint8_t k = 0; k < total_state; k++) dst[k] = src[k];
+            gi++;
+        }
+        if (part_keys_hdr[p])   scratch_free(part_keys_hdr[p]);
+        if (part_states_hdr[p]) scratch_free(part_states_hdr[p]);
+    }
+
+    scratch_free(hist_hdr); scratch_free(off_hdr);
+    scratch_free(cur_hdr); scratch_free(buf_hdr);
+    scratch_free(pk_hdr); scratch_free(ps_hdr);
+    scratch_free(pkh_hdr); scratch_free(psh_hdr);
+    scratch_free(pn_hdr);
+
+    *out_gs       = gs;
+    *out_gs_hdr   = gs_hdr;
+    *out_gst      = gst;
+    *out_gst_hdr  = gst_hdr;
+    *out_gcap     = global_n;
+    *out_global_n = global_n;
+    return 1;
+}
+
 static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
                                          const uint16_t* agg_op_ids)
 {
@@ -1504,18 +1855,33 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
     int64_t total_local = 0;
     for (uint32_t w = 0; w < nw; w++) total_local += shards[w].n_filled;
 
-    uint64_t gcap = 1024;
-    while (gcap < (uint64_t)(total_local * 2) && gcap < FP_SHARD_MAX_CAP) gcap <<= 1;
-    uint64_t gmask = gcap - 1;
-    ray_t* gs_hdr = NULL; ray_t* gst_hdr = NULL;
-    int64_t* gs  = (int64_t*)scratch_calloc(&gs_hdr,  (size_t)gcap * 2 * sizeof(int64_t));
-    int64_t* gst = (int64_t*)scratch_calloc(&gst_hdr, (size_t)gcap * total_state * sizeof(int64_t));
+    /* Try parallel combine first.  On success, jump straight to the
+     * materialize section with the already-built gs/gst arrays. */
+    int64_t* gs  = NULL;
+    int64_t* gst = NULL;
+    ray_t*   gs_hdr  = NULL;
+    ray_t*   gst_hdr = NULL;
+    int64_t  gcap     = 0;
+    int64_t  global_n = 0;
+    int parallel_ok = mk_combine_parallel(c, nw,
+                                          &gs, &gs_hdr,
+                                          &gst, &gst_hdr,
+                                          &gcap, &global_n);
+    if (parallel_ok) goto materialize;
+
+    {
+    uint64_t _gcap = 1024;
+    while (_gcap < (uint64_t)(total_local * 2) && _gcap < FP_SHARD_MAX_CAP) _gcap <<= 1;
+    gcap = (int64_t)_gcap;
+    uint64_t gmask = (uint64_t)gcap - 1;
+    gs  = (int64_t*)scratch_calloc(&gs_hdr,  (size_t)gcap * 2 * sizeof(int64_t));
+    gst = (int64_t*)scratch_calloc(&gst_hdr, (size_t)gcap * total_state * sizeof(int64_t));
     if (!gs || !gst) {
         if (gs_hdr) scratch_free(gs_hdr);
         if (gst_hdr) scratch_free(gst_hdr);
         return ray_error("oom", NULL);
     }
-    int64_t global_n = 0;
+    global_n = 0;
     for (uint32_t w = 0; w < nw; w++) {
         mk_shard_t* sh = &shards[w];
         if (!sh->slots) continue;
@@ -1543,6 +1909,9 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
             }
         }
     }
+    }
+
+materialize:
 
     /* Build n_keys key columns by decomposing the composite. */
     ray_t* key_cols[FP_MAX_KEYS];
@@ -1564,7 +1933,7 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
         return ray_error("oom", NULL);
     }
     int64_t gi = 0;
-    for (uint64_t s = 0; s < gcap; s++) {
+    for (int64_t s = 0; s < gcap; s++) {
         if (!gs[s * 2]) continue;
         uint64_t composite = (uint64_t)gs[s * 2 + 1];
         for (uint8_t k = 0; k < n_keys; k++) {
