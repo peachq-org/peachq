@@ -78,33 +78,98 @@ ray_op_t* ray_filtered_group(ray_graph_t* g, ray_op_t* pred,
     return &g->nodes[ext->base.id];
 }
 
-/* Phase-1 supported predicate shapes:
- *
- *   pred  = (== col const) | (!= col const)
- *   col   = name reference (-RAY_SYM with RAY_ATTR_NAME)
- *   const = scalar atom literal (any non-name atom)
- *
- * Inspects the Rayfall AST (RAY_LIST), not the DAG.  Caller passes the
- * `where:` value from the select dict. */
-int ray_fused_group_supported(ray_t* expr) {
-    if (!expr || expr->type != RAY_LIST) return 0;
-    if (ray_len(expr) != 3) return 0;
+/* Recognise a 2-character comparison operator: ==, !=, <=, >=.  Returns
+ * the FP_* code or -1 on miss. */
+static int fp_op_from_2char(const char* op, size_t len) {
+    if (len != 2) return -1;
+    if (op[1] == '=') {
+        if (op[0] == '=') return 0;  /* FP_EQ */
+        if (op[0] == '!') return 1;  /* FP_NE */
+        if (op[0] == '<') return 3;  /* FP_LE */
+        if (op[0] == '>') return 5;  /* FP_GE */
+    }
+    return -1;
+}
+
+/* Recognise a 1-character comparison operator: <, >. */
+static int fp_op_from_1char(const char* op, size_t len) {
+    if (len != 1) return -1;
+    if (op[0] == '<') return 2;  /* FP_LT */
+    if (op[0] == '>') return 4;  /* FP_GT */
+    return -1;
+}
+
+/* Is `expr` a phase-3 simple comparison form (op col const)?  Validates
+ * that the column exists in `tbl` and that ordering ops only target
+ * non-SYM columns.  Returns the FP_* code on success, or -1 on miss. */
+static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
+    if (!expr || expr->type != RAY_LIST) return -1;
+    if (ray_len(expr) != 3) return -1;
     ray_t** elems = (ray_t**)ray_data(expr);
-    if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
+    if (!elems[0] || elems[0]->type != -RAY_SYM) return -1;
     ray_t* op_sym = ray_sym_str(elems[0]->i64);
-    if (!op_sym) return 0;
+    if (!op_sym) return -1;
     size_t op_len = ray_str_len(op_sym);
     const char* op = ray_str_ptr(op_sym);
-    int is_eq = (op_len == 2 && op[0] == '=' && op[1] == '=');
-    int is_ne = (op_len == 2 && op[0] == '!' && op[1] == '=');
-    if (!is_eq && !is_ne) return 0;
+    int code = fp_op_from_2char(op, op_len);
+    if (code < 0) code = fp_op_from_1char(op, op_len);
+    if (code < 0) return -1;
+
     ray_t* lhs = elems[1];
     if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
-        return 0;
+        return -1;
     ray_t* rhs = elems[2];
     if (!rhs || !ray_is_atom(rhs) || (rhs->attrs & RAY_ATTR_NAME))
-        return 0;
-    return 1;
+        return -1;
+
+    /* Resolve column type to gate ordering ops. */
+    if (tbl) {
+        ray_t* col = ray_table_get_col(tbl, lhs->i64);
+        if (!col) return -1;
+        if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return -1;
+        int8_t ct = col->type;
+        int is_ord = (code >= 2);  /* LT/LE/GT/GE */
+        if (is_ord && ct == RAY_SYM) return -1;
+        /* F32/F64/STR not supported by phase-3 evaluator. */
+        if (ct != RAY_SYM && ct != RAY_BOOL && ct != RAY_U8
+            && ct != RAY_I16 && ct != RAY_I32 && ct != RAY_I64
+            && ct != RAY_DATE && ct != RAY_TIME && ct != RAY_TIMESTAMP)
+            return -1;
+    }
+    return code;
+}
+
+/* Phase-3 supported shapes:
+ *
+ *   pred  = simple_cmp | (and simple_cmp simple_cmp …)
+ *   simple_cmp = (op col const) where op ∈ {==, !=, <, <=, >, >=}
+ *   ordering ops require col to be a numeric/temporal (non-SYM) column.
+ *   AND fan-in is bounded by FP_PRED_MAX_CHILDREN. */
+#define FP_PRED_MAX_CHILDREN 8
+
+int ray_fused_group_supported(ray_t* expr, ray_t* tbl) {
+    if (!expr || expr->type != RAY_LIST) return 0;
+    int64_t n = ray_len(expr);
+    if (n < 2) return 0;
+    ray_t** elems = (ray_t**)ray_data(expr);
+    if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
+
+    /* Detect (and …). */
+    ray_t* head_sym = ray_sym_str(elems[0]->i64);
+    if (head_sym) {
+        size_t hlen = ray_str_len(head_sym);
+        const char* hstr = ray_str_ptr(head_sym);
+        if (hlen == 3 && memcmp(hstr, "and", 3) == 0) {
+            int64_t k = n - 1;
+            if (k < 1 || k > FP_PRED_MAX_CHILDREN) return 0;
+            for (int64_t i = 0; i < k; i++) {
+                if (fp_check_simple_cmp(elems[i + 1], tbl) < 0) return 0;
+            }
+            return 1;
+        }
+    }
+    /* Fall through: single simple cmp. */
+    return fp_check_simple_cmp(expr, tbl) >= 0 ? 1 : 0;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -117,7 +182,16 @@ int ray_fused_group_supported(ray_t* expr) {
  * row range; OP_NE flips the result via XOR.
  * ──────────────────────────────────────────────────────────────────────── */
 
-typedef enum { FP_EQ = 0, FP_NE = 1 } fp_op_t;
+/* Comparison opcodes — kept as integers so fp_check_simple_cmp can return
+ * them directly.  Order matters: ordering ops are >= FP_LT. */
+typedef enum {
+    FP_EQ = 0,
+    FP_NE = 1,
+    FP_LT = 2,
+    FP_LE = 3,
+    FP_GT = 4,
+    FP_GE = 5,
+} fp_op_t;
 
 typedef struct {
     fp_op_t      op;
@@ -130,56 +204,134 @@ typedef struct {
     int          cval_in_dict;  /* SYM only: 0 = const not in dict (folded) */
 } fp_cmp_t;
 
-/* Fill bits[0..end-start) with 0/1 based on `cmp` over rows [start, end). */
+typedef struct {
+    fp_cmp_t children[FP_PRED_MAX_CHILDREN];
+    uint8_t  n_children;
+} fp_pred_t;
+
+/* Inner-loop generator: specialise on element type and operator so the
+ * compiler can hoist the comparison and autovectorise the byte-store. */
+#define FP_RUN(T, OP) do {                                                  \
+    const T* d = (const T*)p->col_base + start;                              \
+    T cv = (T)cval;                                                          \
+    for (int64_t r = 0; r < n; r++) bits[r] = (uint8_t)(d[r] OP cv);         \
+} while (0)
+
+/* Fill bits[0..end-start) with 0/1 based on `cmp` over rows [start, end).
+ * Per-(esz, op) specialisation; SYM supports only EQ/NE. */
 static void fp_eval_cmp(const fp_cmp_t* p, int64_t start, int64_t end,
                         uint8_t* bits)
 {
-    uint8_t invert = (p->op == FP_NE) ? 1 : 0;
     int64_t n = end - start;
+    int64_t cval = p->cval;
+    fp_op_t op = p->op;
+    int8_t  ct = p->col_type;
+    uint8_t esz = p->col_esz;
 
-    /* SYM low-card fold: const not in dict ⇒ EQ all-zero / NE all-one. */
-    if (p->col_type == RAY_SYM && !p->cval_in_dict) {
-        memset(bits, invert, (size_t)n);
+    /* SYM low-card fold: const not in dict ⇒ EQ all-zero / NE all-one.
+     * Ordering ops are rejected at compile for SYM, so unreachable here. */
+    if (ct == RAY_SYM && !p->cval_in_dict) {
+        memset(bits, (op == FP_NE) ? 1 : 0, (size_t)n);
         return;
     }
 
-    int64_t cval = p->cval;
-    switch (p->col_esz) {
-    case 1: {
-        const uint8_t* d = (const uint8_t*)p->col_base + start;
-        uint8_t t = (uint8_t)cval;
-        for (int64_t r = 0; r < n; r++) bits[r] = (uint8_t)((d[r] == t) ^ invert);
-        break;
+    if (esz == 1) {
+        switch (op) {
+        case FP_EQ: FP_RUN(uint8_t, ==); break;
+        case FP_NE: FP_RUN(uint8_t, !=); break;
+        case FP_LT: FP_RUN(uint8_t, < ); break;
+        case FP_LE: FP_RUN(uint8_t, <=); break;
+        case FP_GT: FP_RUN(uint8_t, > ); break;
+        case FP_GE: FP_RUN(uint8_t, >=); break;
+        }
+        return;
     }
-    case 2: {
-        const uint16_t* d = (const uint16_t*)p->col_base + start;
-        uint16_t t = (uint16_t)cval;
-        for (int64_t r = 0; r < n; r++) bits[r] = (uint8_t)((d[r] == t) ^ invert);
-        break;
+    if (esz == 2) {
+        if (ct == RAY_SYM) {
+            switch (op) {
+            case FP_EQ: FP_RUN(uint16_t, ==); break;
+            case FP_NE: FP_RUN(uint16_t, !=); break;
+            default:    memset(bits, 0, (size_t)n); break;  /* unreachable */
+            }
+        } else {
+            switch (op) {
+            case FP_EQ: FP_RUN(int16_t, ==); break;
+            case FP_NE: FP_RUN(int16_t, !=); break;
+            case FP_LT: FP_RUN(int16_t, < ); break;
+            case FP_LE: FP_RUN(int16_t, <=); break;
+            case FP_GT: FP_RUN(int16_t, > ); break;
+            case FP_GE: FP_RUN(int16_t, >=); break;
+            }
+        }
+        return;
     }
-    case 4: {
-        const uint32_t* d = (const uint32_t*)p->col_base + start;
-        uint32_t t = (uint32_t)cval;
-        for (int64_t r = 0; r < n; r++) bits[r] = (uint8_t)((d[r] == t) ^ invert);
-        break;
+    if (esz == 4) {
+        if (ct == RAY_SYM) {
+            switch (op) {
+            case FP_EQ: FP_RUN(uint32_t, ==); break;
+            case FP_NE: FP_RUN(uint32_t, !=); break;
+            default:    memset(bits, 0, (size_t)n); break;  /* unreachable */
+            }
+        } else {
+            switch (op) {
+            case FP_EQ: FP_RUN(int32_t, ==); break;
+            case FP_NE: FP_RUN(int32_t, !=); break;
+            case FP_LT: FP_RUN(int32_t, < ); break;
+            case FP_LE: FP_RUN(int32_t, <=); break;
+            case FP_GT: FP_RUN(int32_t, > ); break;
+            case FP_GE: FP_RUN(int32_t, >=); break;
+            }
+        }
+        return;
     }
-    default: { /* 8 */
-        const int64_t* d = (const int64_t*)p->col_base + start;
-        for (int64_t r = 0; r < n; r++) bits[r] = (uint8_t)((d[r] == cval) ^ invert);
-        break;
+    /* Width 8: I64 / TIMESTAMP (or wide SYM, which we reject for ordering). */
+    switch (op) {
+    case FP_EQ: FP_RUN(int64_t, ==); break;
+    case FP_NE: FP_RUN(int64_t, !=); break;
+    case FP_LT: FP_RUN(int64_t, < ); break;
+    case FP_LE: FP_RUN(int64_t, <=); break;
+    case FP_GT: FP_RUN(int64_t, > ); break;
+    case FP_GE: FP_RUN(int64_t, >=); break;
     }
+}
+#undef FP_RUN
+
+/* Evaluate a (possibly ANDed) predicate over rows [start, end).  The
+ * first child writes directly into bits[]; subsequent children eval into
+ * a stack-resident tmp[] buffer and bitwise-AND into bits. */
+static void fp_eval_pred(const fp_pred_t* p, int64_t start, int64_t end,
+                         uint8_t* bits)
+{
+    int64_t n = end - start;
+    if (p->n_children == 0) {
+        memset(bits, 1, (size_t)n);
+        return;
+    }
+    fp_eval_cmp(&p->children[0], start, end, bits);
+    if (p->n_children == 1) return;
+    uint8_t tmp[RAY_MORSEL_ELEMS];
+    for (uint8_t i = 1; i < p->n_children; i++) {
+        fp_eval_cmp(&p->children[i], start, end, tmp);
+        for (int64_t r = 0; r < n; r++) bits[r] &= tmp[r];
     }
 }
 
-/* Compile predicate DAG node (OP_EQ / OP_NE with OP_SCAN lhs and OP_CONST
+/* Compile predicate DAG node (a comparison with OP_SCAN lhs and OP_CONST
  * rhs) against `tbl`.  Returns 0 on success, -1 if the shape can't be
  * handled (caller should bail and let the unfused path run). */
 static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
                           fp_cmp_t* out)
 {
     if (!pred_op || pred_op->arity != 2) return -1;
-    if (pred_op->opcode != OP_EQ && pred_op->opcode != OP_NE) return -1;
-    out->op = (pred_op->opcode == OP_EQ) ? FP_EQ : FP_NE;
+    switch (pred_op->opcode) {
+    case OP_EQ: out->op = FP_EQ; break;
+    case OP_NE: out->op = FP_NE; break;
+    case OP_LT: out->op = FP_LT; break;
+    case OP_LE: out->op = FP_LE; break;
+    case OP_GT: out->op = FP_GT; break;
+    case OP_GE: out->op = FP_GE; break;
+    default: return -1;
+    }
 
     ray_op_t* lhs = pred_op->inputs[0];
     ray_op_t* rhs = pred_op->inputs[1];
@@ -192,8 +344,11 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
 
     ray_t* col = ray_table_get_col(tbl, lext->sym);
     if (!col) return -1;
-    /* Phase 1: bail on parted / mapcommon.  The unfused path handles them. */
     if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return -1;
+    /* Ordering ops on SYM are meaningless (dict ID order != string order). */
+    if (col->type == RAY_SYM && (out->op == FP_LT || out->op == FP_LE ||
+                                 out->op == FP_GT || out->op == FP_GE))
+        return -1;
 
     out->col_type  = col->type;
     out->col_attrs = col->attrs;
@@ -229,6 +384,31 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
     return 0;
 }
 
+/* Walk the predicate DAG (an OP_AND tree of leaf comparisons) and collect
+ * leaves into `out->children`.  Phase 3: balanced binary OP_AND emitted
+ * by compile_expr_dag means we recurse on both inputs whenever we see an
+ * OP_AND node.  Returns 0 on success, -1 if a leaf can't be compiled or
+ * the fan-in exceeds FP_PRED_MAX_CHILDREN. */
+static int fp_compile_pred_dag(ray_graph_t* g, ray_op_t* node, ray_t* tbl,
+                               fp_pred_t* out)
+{
+    if (!node) return -1;
+    if (node->opcode == OP_AND) {
+        if (fp_compile_pred_dag(g, node->inputs[0], tbl, out) != 0) return -1;
+        if (fp_compile_pred_dag(g, node->inputs[1], tbl, out) != 0) return -1;
+        return 0;
+    }
+    if (out->n_children >= FP_PRED_MAX_CHILDREN) return -1;
+    return fp_compile_cmp(g, node, tbl, &out->children[out->n_children++]);
+}
+
+static int fp_compile_pred(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
+                           fp_pred_t* out)
+{
+    out->n_children = 0;
+    return fp_compile_pred_dag(g, pred_op, tbl, out);
+}
+
 /* ─────────────────────────────────────────────────────────────────────────
  * Phase-2 parallel fused exec.
  *
@@ -254,7 +434,7 @@ typedef struct {
 } fp_shard_t;
 
 typedef struct {
-    fp_cmp_t   pred;
+    fp_pred_t  pred;
     int8_t     kt;
     uint8_t    katt;
     uint8_t    kesz;
@@ -366,7 +546,7 @@ static void fp_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end)
         if (mend > end) mend = end;
         int64_t mlen = mend - row;
         uint8_t bits[RAY_MORSEL_ELEMS];
-        fp_eval_cmp(&c->pred, row, mend, bits);
+        fp_eval_pred(&c->pred, row, mend, bits);
         for (int64_t r = 0; r < mlen; r++) {
             if (!bits[r]) continue;
             int64_t kv = read_by_esz(c->kbase, row + r, c->kesz);
@@ -508,7 +688,7 @@ ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
     ray_op_t* pred_op = ext->base.inputs[0];
     fp_par_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
-    if (fp_compile_cmp(g, pred_op, tbl, &ctx.pred) != 0)
+    if (fp_compile_pred(g, pred_op, tbl, &ctx.pred) != 0)
         return ray_error("nyi", "fused_group: predicate shape unsupported");
 
     ray_op_t* key_op = ext->keys[0];
