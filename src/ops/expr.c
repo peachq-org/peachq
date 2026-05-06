@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "ops/rowsel.h"
 #include <stdio.h>
 
 static bool atom_to_numeric(ray_t* atom, double* out_f, int64_t* out_i, bool* out_is_f64) {
@@ -1806,19 +1807,48 @@ typedef struct {
     bool     r_scalar;
     double   l_f64, r_f64;
     int64_t  l_i64, r_i64;
+    /* Optional rowsel — when set, skip morsel segments that the prior
+     * WHERE conjuncts have already filtered out.  Output positions for
+     * filtered rows are left untouched (the caller's
+     * ray_rowsel_refine() never reads pred[r] for r ∉ existing rowsel).
+     * Drops the per-conjunct work proportional to selection narrowing. */
+    const uint8_t*  sel_flg;
+    const uint32_t* sel_offs;
+    const uint16_t* sel_idx;
+    uint32_t        sel_n_segs;
 } par_binary_ctx_t;
 
 static void par_binary_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
     (void)worker_id;
     par_binary_ctx_t* c = (par_binary_ctx_t*)ctx;
-    binary_range(c->op, c->out_type, c->lhs, c->rhs, c->result,
-                 c->l_scalar, c->r_scalar,
-                 c->l_f64, c->r_f64, c->l_i64, c->r_i64,
-                 start, end);
+    if (!c->sel_flg) {
+        binary_range(c->op, c->out_type, c->lhs, c->rhs, c->result,
+                     c->l_scalar, c->r_scalar,
+                     c->l_f64, c->r_f64, c->l_i64, c->r_i64,
+                     start, end);
+        return;
+    }
+    /* Selection-aware: walk per-morsel and skip RAY_SEL_NONE segments.
+     * For ALL/MIX run the dense binary_range over the whole segment;
+     * partial-segment row-masking would cost more than the saved work
+     * since binary_range is already a tight typed loop. */
+    uint32_t seg_lo = (uint32_t)(start / RAY_MORSEL_ELEMS);
+    uint32_t seg_hi = (uint32_t)((end + RAY_MORSEL_ELEMS - 1) / RAY_MORSEL_ELEMS);
+    if (seg_hi > c->sel_n_segs) seg_hi = c->sel_n_segs;
+    for (uint32_t seg = seg_lo; seg < seg_hi; seg++) {
+        int64_t s_lo = (int64_t)seg * RAY_MORSEL_ELEMS;
+        int64_t s_hi = s_lo + RAY_MORSEL_ELEMS;
+        if (s_lo < start) s_lo = start;
+        if (s_hi > end)   s_hi = end;
+        if (c->sel_flg[seg] == RAY_SEL_NONE) continue;
+        binary_range(c->op, c->out_type, c->lhs, c->rhs, c->result,
+                     c->l_scalar, c->r_scalar,
+                     c->l_f64, c->r_f64, c->l_i64, c->r_i64,
+                     s_lo, s_hi);
+    }
 }
 
 ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* rhs) {
-    (void)g;
     if (!lhs || RAY_IS_ERR(lhs)) return lhs;
     if (!rhs || RAY_IS_ERR(rhs)) return rhs;
 
@@ -1946,7 +1976,20 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             .l_scalar = l_scalar, .r_scalar = r_scalar,
             .l_f64 = l_f64_val, .r_f64 = r_f64_val,
             .l_i64 = l_i64_val, .r_i64 = r_i64_val,
+            .sel_flg    = NULL,
+            .sel_offs   = NULL,
+            .sel_idx    = NULL,
+            .sel_n_segs = 0,
         };
+        if (g && g->selection) {
+            ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+            if (sm->nrows == len) {
+                ctx.sel_flg    = ray_rowsel_flags(g->selection);
+                ctx.sel_offs   = ray_rowsel_offsets(g->selection);
+                ctx.sel_idx    = ray_rowsel_idx(g->selection);
+                ctx.sel_n_segs = sm->n_segs;
+            }
+        }
         ray_pool_dispatch(pool, par_binary_fn, &ctx, len);
     } else {
         binary_range(op, out_type, lhs, rhs, result,
