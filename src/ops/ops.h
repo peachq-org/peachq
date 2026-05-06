@@ -176,6 +176,10 @@ void     ray_cancel(void);
 #define OP_GROUP        62
 #define OP_JOIN         63
 #define OP_WINDOW_JOIN  64
+/* Fused filter+group: predicate evaluated on each morsel and group HT
+ * updated inline.  Produced by the planner for `(select … where … by …)`
+ * when the predicate shape is supported (see src/ops/fused_group.c). */
+#define OP_FILTERED_GROUP 65
 #define OP_SELECT       66
 #define OP_HEAD         67
 #define OP_TAIL         68
