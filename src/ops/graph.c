@@ -508,6 +508,7 @@ ray_op_t* ray_add(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary
 ray_op_t* ray_sub(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_SUB, a, b, promote(a->out_type, b->out_type)); }
 ray_op_t* ray_mul(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_MUL, a, b, promote(a->out_type, b->out_type)); }
 ray_op_t* ray_div(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_DIV, a, b, RAY_F64); }
+ray_op_t* ray_idiv(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_IDIV, a, b, RAY_I64); }
 ray_op_t* ray_mod(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_MOD, a, b, promote(a->out_type, b->out_type)); }
 
 ray_op_t* ray_eq(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_EQ, a, b, RAY_BOOL); }

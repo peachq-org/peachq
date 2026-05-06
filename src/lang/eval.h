@@ -192,6 +192,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b);
 ray_t* ray_sub_fn(ray_t* a, ray_t* b);
 ray_t* ray_mul_fn(ray_t* a, ray_t* b);
 ray_t* ray_div_fn(ray_t* a, ray_t* b);
+ray_t* ray_idiv_fn(ray_t* a, ray_t* b);
 ray_t* ray_mod_fn(ray_t* a, ray_t* b);
 
 /* Comparison */

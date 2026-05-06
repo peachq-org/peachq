@@ -90,22 +90,6 @@ static void nth_element_dbl(double* a, int64_t lo, int64_t hi, int64_t k) {
     return ray_lazy_wrap(g, op);                            \
 } while(0)
 
-/* DAG executor returns I64 for all integer types — cast back to original. */
-static ray_t* recast_i64_to_orig(ray_t* r, int8_t orig_type) {
-    if (!r || RAY_IS_ERR(r)) return r;
-    if (ray_is_atom(r) && r->type == -RAY_I64 && orig_type != RAY_I64 && orig_type != RAY_F64) {
-        int64_t v = r->i64;
-        ray_release(r);
-        if (orig_type == RAY_DATE) return ray_date((int32_t)v);
-        if (orig_type == RAY_TIME) return ray_time(v);
-        if (orig_type == RAY_TIMESTAMP) return ray_timestamp(v);
-        if (orig_type == RAY_I32) return make_i32((int32_t)v);
-        if (orig_type == RAY_I16) return make_i16((int16_t)v);
-        if (orig_type == RAY_U8) return make_u8((uint8_t)v);
-    }
-    return r;
-}
-
 ray_t* ray_sum_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_SUM);
     if (ray_is_atom(x)) {
@@ -216,15 +200,7 @@ ray_t* ray_avg_fn(ray_t* x) {
 ray_t* ray_min_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_MIN);
     if (ray_is_atom(x)) { ray_retain(x); return x; }
-    if (ray_is_vec(x)) {
-        int8_t orig_type = x->type;
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_min_op(g, in);
-        ray_t* r = ray_lazy_materialize(ray_lazy_wrap(g, op));
-        return recast_i64_to_orig(r, orig_type);
-    }
+    if (ray_is_vec(x)) AGG_VEC_VIA_DAG(x, ray_min_op);
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
     if (len == 0) return ray_error("domain", NULL);
@@ -245,15 +221,7 @@ ray_t* ray_min_fn(ray_t* x) {
 ray_t* ray_max_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_MAX);
     if (ray_is_atom(x)) { ray_retain(x); return x; }
-    if (ray_is_vec(x)) {
-        int8_t orig_type = x->type;
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_max_op(g, in);
-        ray_t* r = ray_lazy_materialize(ray_lazy_wrap(g, op));
-        return recast_i64_to_orig(r, orig_type);
-    }
+    if (ray_is_vec(x)) AGG_VEC_VIA_DAG(x, ray_max_op);
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
     if (len == 0) return ray_error("domain", NULL);
