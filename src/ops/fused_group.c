@@ -674,17 +674,12 @@ static ray_t* fp_combine_and_materialize(fp_shard_t* shards, uint32_t nw,
     return result;
 }
 
-ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
-    if (!g || !op) return ray_error("nyi", NULL);
-    ray_t* tbl = g->table;
-    if (!tbl || tbl->type != RAY_TABLE) return ray_error("type", NULL);
-
-    ray_op_ext_t* ext = find_ext(g, op->id);
-    if (!ext || ext->n_keys != 1 || ext->n_aggs != 1)
-        return ray_error("nyi", "fused_group: phase-2 single-key + single-agg only");
-    if (ext->agg_ops[0] != OP_COUNT)
-        return ray_error("nyi", "fused_group: phase-2 only OP_COUNT");
-
+/* Phase-3 fast path: single-key, single OP_COUNT.  Kept byte-for-byte
+ * stable so all previously-fired queries (Q8/Q37/Q38/Q43) maintain their
+ * cycle budget — this is the path that owns the parallel HT-shard wins. */
+static ray_t* exec_filtered_group_count1(ray_graph_t* g, ray_op_ext_t* ext,
+                                         ray_t* tbl)
+{
     ray_op_t* pred_op = ext->base.inputs[0];
     fp_par_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -734,4 +729,600 @@ ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
     for (uint32_t w = 0; w < nw; w++) fp_shard_free(&ctx.shards[w]);
     scratch_free(shards_hdr);
     return result;
+}
+
+
+/* ═════════════════════════════════════════════════════════════════════════
+ * Multi-agg / multi-key path
+ *
+ * Lives entirely separate from the count1 fast path above so that any
+ * struct or codegen quirks here cannot regress the queries that fire
+ * count1.  Triggered only when n_aggs > 1 OR n_keys > 1 OR the single
+ * agg isn't COUNT.
+ *
+ * Supports:
+ *   - Aggregates: COUNT, SUM, MIN, MAX, AVG (integer/temporal inputs)
+ *   - Keys: 1..16 keys, total packed bytes ≤ 8 (composite int64 slot)
+ *
+ * F32/F64 inputs and count(distinct) bail to the unfused path.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+#define FP_MAX_AGGS 8
+#define FP_MAX_KEYS 16
+
+typedef enum {
+    MK_AGG_COUNT = 0,
+    MK_AGG_SUM   = 1,
+    MK_AGG_MIN   = 2,
+    MK_AGG_MAX   = 3,
+    MK_AGG_AVG   = 4,
+} mk_agg_kind_t;
+
+typedef struct {
+    mk_agg_kind_t kind;
+    int8_t        in_type;
+    uint8_t       in_attrs;
+    uint8_t       in_esz;
+    const void*   in_base;
+    uint8_t       state_off;
+} mk_agg_t;
+
+typedef struct {
+    int8_t      type;
+    uint8_t     attrs;
+    uint8_t     esz;
+    uint8_t     bit_off;
+    const void* base;
+    int64_t     sym;
+} mk_key_t;
+
+typedef struct {
+    int64_t* slots;
+    int64_t* state;
+    ray_t*   slots_hdr;
+    ray_t*   state_hdr;
+    uint64_t cap;
+    uint64_t mask;
+    int64_t  n_filled;
+} mk_shard_t;
+
+typedef struct {
+    fp_pred_t   pred;
+    /* Hot key fast path for n_keys==1 — kbase/kesz live here so inner
+     * loop reads them off cache line shared with pred. */
+    const void* k0_base;
+    int8_t      k0_type;
+    uint8_t     k0_attrs;
+    uint8_t     k0_esz;
+    uint8_t     n_keys;
+    uint8_t     n_aggs;
+    uint8_t     total_state;
+    /* Cool fields (only touched once per dispatch or in cold paths). */
+    mk_shard_t* shards;
+    uint64_t    init_cap;
+    _Atomic(uint32_t) oom;
+    mk_key_t    keys[FP_MAX_KEYS];
+    mk_agg_t    aggs[FP_MAX_AGGS];
+} mk_par_ctx_t;
+
+/* ─── Composite key compose ────────────────────────────────────────── */
+
+static inline int64_t mk_compose_key(const mk_par_ctx_t* c, int64_t row) {
+    if (c->n_keys == 1) {
+        return read_by_esz(c->k0_base, row, c->k0_esz);
+    }
+    uint64_t composite = 0;
+    for (uint8_t k = 0; k < c->n_keys; k++) {
+        const mk_key_t* kk = &c->keys[k];
+        uint64_t v = (uint64_t)read_by_esz(kk->base, row, kk->esz);
+        if (kk->esz < 8) v &= ((1ULL << (kk->esz * 8)) - 1);
+        composite |= v << kk->bit_off;
+    }
+    return (int64_t)composite;
+}
+
+/* ─── Per-row aggregator state init/accum ──────────────────────────── */
+
+static inline void mk_state_init_row(int64_t* st, const mk_agg_t* aggs,
+                                     uint8_t n_aggs, int64_t row)
+{
+    for (uint8_t i = 0; i < n_aggs; i++) {
+        const mk_agg_t* a = &aggs[i];
+        switch (a->kind) {
+        case MK_AGG_COUNT:
+            st[a->state_off] = 1;
+            break;
+        case MK_AGG_SUM:
+        case MK_AGG_MIN:
+        case MK_AGG_MAX: {
+            int64_t v = read_by_esz(a->in_base, row, a->in_esz);
+            st[a->state_off] = v;
+            break;
+        }
+        case MK_AGG_AVG: {
+            int64_t v = read_by_esz(a->in_base, row, a->in_esz);
+            st[a->state_off    ] = v;
+            st[a->state_off + 1] = 1;
+            break;
+        }
+        }
+    }
+}
+
+static inline void mk_state_accum_row(int64_t* st, const mk_agg_t* aggs,
+                                      uint8_t n_aggs, int64_t row)
+{
+    for (uint8_t i = 0; i < n_aggs; i++) {
+        const mk_agg_t* a = &aggs[i];
+        switch (a->kind) {
+        case MK_AGG_COUNT:
+            st[a->state_off] += 1;
+            break;
+        case MK_AGG_SUM: {
+            int64_t v = read_by_esz(a->in_base, row, a->in_esz);
+            st[a->state_off] += v;
+            break;
+        }
+        case MK_AGG_MIN: {
+            int64_t v = read_by_esz(a->in_base, row, a->in_esz);
+            if (v < st[a->state_off]) st[a->state_off] = v;
+            break;
+        }
+        case MK_AGG_MAX: {
+            int64_t v = read_by_esz(a->in_base, row, a->in_esz);
+            if (v > st[a->state_off]) st[a->state_off] = v;
+            break;
+        }
+        case MK_AGG_AVG: {
+            int64_t v = read_by_esz(a->in_base, row, a->in_esz);
+            st[a->state_off    ] += v;
+            st[a->state_off + 1] += 1;
+            break;
+        }
+        }
+    }
+}
+
+static inline void mk_state_merge(int64_t* dst, const int64_t* src,
+                                  const mk_agg_t* aggs, uint8_t n_aggs)
+{
+    for (uint8_t i = 0; i < n_aggs; i++) {
+        const mk_agg_t* a = &aggs[i];
+        switch (a->kind) {
+        case MK_AGG_COUNT:
+        case MK_AGG_SUM:
+            dst[a->state_off] += src[a->state_off]; break;
+        case MK_AGG_MIN:
+            if (src[a->state_off] < dst[a->state_off])
+                dst[a->state_off] = src[a->state_off];
+            break;
+        case MK_AGG_MAX:
+            if (src[a->state_off] > dst[a->state_off])
+                dst[a->state_off] = src[a->state_off];
+            break;
+        case MK_AGG_AVG:
+            dst[a->state_off    ] += src[a->state_off    ];
+            dst[a->state_off + 1] += src[a->state_off + 1];
+            break;
+        }
+    }
+}
+
+/* ─── Shard mgmt for the multi path ─────────────────────────────────── */
+
+static int mk_shard_init(mk_shard_t* sh, uint64_t cap, uint8_t total_state) {
+    sh->slots = (int64_t*)scratch_calloc(&sh->slots_hdr,
+                                         (size_t)cap * 2 * sizeof(int64_t));
+    sh->state = (int64_t*)scratch_calloc(&sh->state_hdr,
+                                         (size_t)cap * total_state * sizeof(int64_t));
+    if (!sh->slots || !sh->state) {
+        if (sh->slots_hdr) { scratch_free(sh->slots_hdr); sh->slots_hdr = NULL; }
+        if (sh->state_hdr) { scratch_free(sh->state_hdr); sh->state_hdr = NULL; }
+        sh->slots = NULL; sh->state = NULL;
+        return -1;
+    }
+    sh->cap = cap; sh->mask = cap - 1; sh->n_filled = 0;
+    return 0;
+}
+
+static void mk_shard_free(mk_shard_t* sh) {
+    if (sh->slots_hdr) { scratch_free(sh->slots_hdr); sh->slots_hdr = NULL; }
+    if (sh->state_hdr) { scratch_free(sh->state_hdr); sh->state_hdr = NULL; }
+    sh->slots = NULL; sh->state = NULL;
+}
+
+static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state) {
+    uint64_t new_cap = sh->cap * 2;
+    if (new_cap > FP_SHARD_MAX_CAP) return -1;
+    uint64_t new_mask = new_cap - 1;
+    ray_t* ns_hdr = NULL; ray_t* nst_hdr = NULL;
+    int64_t* ns  = (int64_t*)scratch_calloc(&ns_hdr,  (size_t)new_cap * 2 * sizeof(int64_t));
+    int64_t* nst = (int64_t*)scratch_calloc(&nst_hdr, (size_t)new_cap * total_state * sizeof(int64_t));
+    if (!ns || !nst) {
+        if (ns_hdr) scratch_free(ns_hdr);
+        if (nst_hdr) scratch_free(nst_hdr);
+        return -1;
+    }
+    for (uint64_t s = 0; s < sh->cap; s++) {
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv = sh->slots[s * 2 + 1];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t t = h & new_mask;
+        while (ns[t * 2]) t = (t + 1) & new_mask;
+        ns[t * 2] = 1; ns[t * 2 + 1] = kv;
+        for (uint8_t k = 0; k < total_state; k++)
+            nst[t * total_state + k] = sh->state[s * total_state + k];
+    }
+    scratch_free(sh->slots_hdr);
+    scratch_free(sh->state_hdr);
+    sh->slots = ns; sh->state = nst;
+    sh->slots_hdr = ns_hdr; sh->state_hdr = nst_hdr;
+    sh->cap = new_cap; sh->mask = new_mask;
+    return 0;
+}
+
+static inline int mk_shard_upsert(mk_shard_t* sh, const mk_par_ctx_t* c,
+                                  int64_t kv, int64_t row)
+{
+    if (RAY_UNLIKELY(sh->n_filled * 2 >= (int64_t)sh->cap)) {
+        if (mk_shard_grow(sh, c->total_state) != 0) return -1;
+    }
+    uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 33;
+    uint64_t s = h & sh->mask;
+    for (;;) {
+        if (!sh->slots[s * 2]) {
+            sh->slots[s * 2] = 1; sh->slots[s * 2 + 1] = kv;
+            mk_state_init_row(&sh->state[s * c->total_state],
+                              c->aggs, c->n_aggs, row);
+            sh->n_filled++;
+            return 0;
+        }
+        if (sh->slots[s * 2 + 1] == kv) {
+            mk_state_accum_row(&sh->state[s * c->total_state],
+                               c->aggs, c->n_aggs, row);
+            return 0;
+        }
+        s = (s + 1) & sh->mask;
+    }
+}
+
+/* ─── Worker fn ──────────────────────────────────────────────────────── */
+
+static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end) {
+    mk_par_ctx_t* c = (mk_par_ctx_t*)raw;
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    mk_shard_t* sh = &c->shards[worker_id];
+    if (!sh->slots) {
+        if (mk_shard_init(sh, c->init_cap, c->total_state) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+    }
+    int64_t row = start;
+    while (row < end) {
+        int64_t mend = row + RAY_MORSEL_ELEMS;
+        if (mend > end) mend = end;
+        int64_t mlen = mend - row;
+        uint8_t bits[RAY_MORSEL_ELEMS];
+        fp_eval_pred(&c->pred, row, mend, bits);
+        for (int64_t r = 0; r < mlen; r++) {
+            if (!bits[r]) continue;
+            int64_t kv = mk_compose_key(c, row + r);
+            if (mk_shard_upsert(sh, c, kv, row + r) != 0) {
+                atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+                return;
+            }
+        }
+        row = mend;
+    }
+}
+
+/* ─── Materialize ───────────────────────────────────────────────────── */
+
+static ray_t* mk_materialize_agg(const mk_agg_t* a, const int64_t* gstate,
+                                 const int64_t* gslots, uint64_t gcap,
+                                 int64_t global_n, uint8_t total_state)
+{
+    int8_t out_type;
+    bool   is_avg = (a->kind == MK_AGG_AVG);
+    if (a->kind == MK_AGG_COUNT)      out_type = RAY_I64;
+    else if (is_avg)                  out_type = RAY_F64;
+    else if (a->kind == MK_AGG_SUM)   out_type = RAY_I64;
+    else                              out_type = a->in_type;  /* MIN/MAX */
+
+    ray_t* col = ray_vec_new(out_type, global_n);
+    if (!col || RAY_IS_ERR(col)) return col;
+    col->len = global_n;
+    void* dst = ray_data(col);
+    int64_t gi = 0;
+    if (is_avg) {
+        double* d = (double*)dst;
+        for (uint64_t s = 0; s < gcap; s++) {
+            if (!gslots[s * 2]) continue;
+            int64_t sum = gstate[s * total_state + a->state_off    ];
+            int64_t cnt = gstate[s * total_state + a->state_off + 1];
+            d[gi++] = cnt ? (double)sum / (double)cnt : 0.0;
+        }
+    } else if (out_type == RAY_I64) {
+        int64_t* d = (int64_t*)dst;
+        for (uint64_t s = 0; s < gcap; s++) {
+            if (!gslots[s * 2]) continue;
+            d[gi++] = gstate[s * total_state + a->state_off];
+        }
+    } else {
+        for (uint64_t s = 0; s < gcap; s++) {
+            if (!gslots[s * 2]) continue;
+            int64_t v = gstate[s * total_state + a->state_off];
+            write_col_i64(dst, gi++, v, out_type, a->in_attrs);
+        }
+    }
+    return col;
+}
+
+static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
+                                         const uint16_t* agg_op_ids)
+{
+    mk_shard_t* shards = c->shards;
+    uint8_t total_state = c->total_state;
+    uint8_t n_aggs = c->n_aggs;
+    uint8_t n_keys = c->n_keys;
+
+    int64_t total_local = 0;
+    for (uint32_t w = 0; w < nw; w++) total_local += shards[w].n_filled;
+
+    uint64_t gcap = 1024;
+    while (gcap < (uint64_t)(total_local * 2) && gcap < FP_SHARD_MAX_CAP) gcap <<= 1;
+    uint64_t gmask = gcap - 1;
+    ray_t* gs_hdr = NULL; ray_t* gst_hdr = NULL;
+    int64_t* gs  = (int64_t*)scratch_calloc(&gs_hdr,  (size_t)gcap * 2 * sizeof(int64_t));
+    int64_t* gst = (int64_t*)scratch_calloc(&gst_hdr, (size_t)gcap * total_state * sizeof(int64_t));
+    if (!gs || !gst) {
+        if (gs_hdr) scratch_free(gs_hdr);
+        if (gst_hdr) scratch_free(gst_hdr);
+        return ray_error("oom", NULL);
+    }
+    int64_t global_n = 0;
+    for (uint32_t w = 0; w < nw; w++) {
+        mk_shard_t* sh = &shards[w];
+        if (!sh->slots) continue;
+        for (uint64_t s = 0; s < sh->cap; s++) {
+            if (!sh->slots[s * 2]) continue;
+            int64_t kv = sh->slots[s * 2 + 1];
+            uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+            h ^= h >> 33;
+            uint64_t t = h & gmask;
+            for (;;) {
+                if (!gs[t * 2]) {
+                    gs[t * 2] = 1; gs[t * 2 + 1] = kv;
+                    for (uint8_t k = 0; k < total_state; k++)
+                        gst[t * total_state + k] = sh->state[s * total_state + k];
+                    global_n++;
+                    break;
+                }
+                if (gs[t * 2 + 1] == kv) {
+                    mk_state_merge(&gst[t * total_state],
+                                   &sh->state[s * total_state],
+                                   c->aggs, n_aggs);
+                    break;
+                }
+                t = (t + 1) & gmask;
+            }
+        }
+    }
+
+    /* Build n_keys key columns by decomposing the composite. */
+    ray_t* key_cols[FP_MAX_KEYS];
+    for (uint8_t k = 0; k < n_keys; k++) key_cols[k] = NULL;
+    int keys_ok = 1;
+    for (uint8_t k = 0; k < n_keys; k++) {
+        const mk_key_t* kk = &c->keys[k];
+        ray_t* col = (kk->type == RAY_SYM)
+                   ? ray_sym_vec_new(kk->attrs & RAY_SYM_W_MASK, global_n)
+                   : ray_vec_new(kk->type, global_n);
+        if (!col || RAY_IS_ERR(col)) { keys_ok = 0; break; }
+        col->len = global_n;
+        key_cols[k] = col;
+    }
+    if (!keys_ok) {
+        for (uint8_t k = 0; k < n_keys; k++)
+            if (key_cols[k] && !RAY_IS_ERR(key_cols[k])) ray_release(key_cols[k]);
+        scratch_free(gs_hdr); scratch_free(gst_hdr);
+        return ray_error("oom", NULL);
+    }
+    int64_t gi = 0;
+    for (uint64_t s = 0; s < gcap; s++) {
+        if (!gs[s * 2]) continue;
+        uint64_t composite = (uint64_t)gs[s * 2 + 1];
+        for (uint8_t k = 0; k < n_keys; k++) {
+            const mk_key_t* kk = &c->keys[k];
+            int64_t v;
+            if (kk->esz >= 8) v = (int64_t)composite;
+            else {
+                uint64_t mask = (1ULL << (kk->esz * 8)) - 1;
+                v = (int64_t)((composite >> kk->bit_off) & mask);
+            }
+            write_col_i64(ray_data(key_cols[k]), gi, v, kk->type, kk->attrs);
+        }
+        gi++;
+    }
+
+    /* Build agg columns. */
+    ray_t* agg_cols[FP_MAX_AGGS];
+    for (uint8_t i = 0; i < n_aggs; i++) agg_cols[i] = NULL;
+    int build_ok = 1;
+    for (uint8_t i = 0; i < n_aggs; i++) {
+        agg_cols[i] = mk_materialize_agg(&c->aggs[i], gst, gs, gcap,
+                                         global_n, total_state);
+        if (!agg_cols[i] || RAY_IS_ERR(agg_cols[i])) { build_ok = 0; break; }
+    }
+    scratch_free(gs_hdr); scratch_free(gst_hdr);
+    if (!build_ok) {
+        for (uint8_t k = 0; k < n_keys; k++) ray_release(key_cols[k]);
+        for (uint8_t i = 0; i < n_aggs; i++)
+            if (agg_cols[i] && !RAY_IS_ERR(agg_cols[i])) ray_release(agg_cols[i]);
+        return ray_error("oom", NULL);
+    }
+
+    ray_t* result = ray_table_new(n_keys + n_aggs);
+    if (!result || RAY_IS_ERR(result)) {
+        for (uint8_t k = 0; k < n_keys; k++) ray_release(key_cols[k]);
+        for (uint8_t i = 0; i < n_aggs; i++) ray_release(agg_cols[i]);
+        return ray_error("oom", NULL);
+    }
+    for (uint8_t k = 0; k < n_keys; k++)
+        result = ray_table_add_col(result, c->keys[k].sym, key_cols[k]);
+    for (uint8_t i = 0; i < n_aggs; i++) {
+        int64_t name;
+        switch (agg_op_ids[i]) {
+        case OP_COUNT: name = ray_sym_intern("count", 5); break;
+        case OP_SUM:   name = ray_sym_intern("sum",   3); break;
+        case OP_MIN:   name = ray_sym_intern("min",   3); break;
+        case OP_MAX:   name = ray_sym_intern("max",   3); break;
+        case OP_AVG:   name = ray_sym_intern("avg",   3); break;
+        default:       name = ray_sym_intern("agg",   3); break;
+        }
+        result = ray_table_add_col(result, name, agg_cols[i]);
+    }
+    for (uint8_t k = 0; k < n_keys; k++) ray_release(key_cols[k]);
+    for (uint8_t i = 0; i < n_aggs; i++) ray_release(agg_cols[i]);
+    return result;
+}
+
+/* ─── Compile + exec ────────────────────────────────────────────────── */
+
+static int mk_compile(ray_graph_t* g, ray_op_ext_t* ext, ray_t* tbl,
+                      mk_par_ctx_t* ctx)
+{
+    if (ext->n_aggs == 0 || ext->n_aggs > FP_MAX_AGGS) return -1;
+    if (ext->n_keys == 0 || ext->n_keys > FP_MAX_KEYS) return -1;
+    /* Aggs */
+    uint8_t state_off = 0;
+    for (uint8_t i = 0; i < ext->n_aggs; i++) {
+        mk_agg_t* a = &ctx->aggs[i];
+        memset(a, 0, sizeof(*a));
+        switch (ext->agg_ops[i]) {
+        case OP_COUNT: a->kind = MK_AGG_COUNT; break;
+        case OP_SUM:   a->kind = MK_AGG_SUM;   break;
+        case OP_MIN:   a->kind = MK_AGG_MIN;   break;
+        case OP_MAX:   a->kind = MK_AGG_MAX;   break;
+        case OP_AVG:   a->kind = MK_AGG_AVG;   break;
+        default: return -1;
+        }
+        a->state_off = state_off;
+        state_off += (a->kind == MK_AGG_AVG) ? 2 : 1;
+        if (a->kind == MK_AGG_COUNT) { a->in_type = -1; continue; }
+        ray_op_t* in_op = ext->agg_ins[i];
+        if (!in_op || in_op->opcode != OP_SCAN) return -1;
+        ray_op_ext_t* iext = find_ext(g, in_op->id);
+        if (!iext) return -1;
+        ray_t* col = ray_table_get_col(tbl, iext->sym);
+        if (!col) return -1;
+        if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return -1;
+        int8_t ct = col->type;
+        if (ct != RAY_BOOL && ct != RAY_U8 && ct != RAY_I16
+            && ct != RAY_I32 && ct != RAY_I64
+            && ct != RAY_DATE && ct != RAY_TIME && ct != RAY_TIMESTAMP)
+            return -1;
+        a->in_type = ct;
+        a->in_attrs = col->attrs;
+        a->in_esz = ray_sym_elem_size(ct, col->attrs);
+        a->in_base = ray_data(col);
+    }
+    ctx->total_state = state_off;
+    ctx->n_aggs = ext->n_aggs;
+
+    /* Keys */
+    uint8_t bit_off = 0;
+    int total_bytes = 0;
+    for (uint8_t k = 0; k < ext->n_keys; k++) {
+        ray_op_t* key_op = ext->keys[k];
+        if (!key_op || key_op->opcode != OP_SCAN) return -1;
+        ray_op_ext_t* kext = find_ext(g, key_op->id);
+        if (!kext) return -1;
+        ray_t* col = ray_table_get_col(tbl, kext->sym);
+        if (!col) return -1;
+        if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return -1;
+        uint8_t esz = ray_sym_elem_size(col->type, col->attrs);
+        total_bytes += esz;
+        if (total_bytes > 8) return -1;
+        ctx->keys[k].type    = col->type;
+        ctx->keys[k].attrs   = col->attrs;
+        ctx->keys[k].esz     = esz;
+        ctx->keys[k].bit_off = bit_off;
+        ctx->keys[k].base    = ray_data(col);
+        ctx->keys[k].sym     = kext->sym;
+        bit_off += (uint8_t)(esz * 8);
+    }
+    ctx->n_keys = ext->n_keys;
+    ctx->k0_type  = ctx->keys[0].type;
+    ctx->k0_attrs = ctx->keys[0].attrs;
+    ctx->k0_esz   = ctx->keys[0].esz;
+    ctx->k0_base  = ctx->keys[0].base;
+    return 0;
+}
+
+static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
+                                        ray_t* tbl)
+{
+    ray_op_t* pred_op = ext->base.inputs[0];
+    mk_par_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    if (fp_compile_pred(g, pred_op, tbl, &ctx.pred) != 0)
+        return ray_error("nyi", "fused_group: predicate shape unsupported");
+    if (mk_compile(g, ext, tbl, &ctx) != 0)
+        return ray_error("nyi", "fused_group: agg/key shape unsupported");
+
+    int64_t nrows = -1;
+    for (uint8_t k = 0; k < ext->n_keys; k++) {
+        ray_op_ext_t* kext = find_ext(g, ext->keys[k]->id);
+        if (kext) {
+            ray_t* col = ray_table_get_col(tbl, kext->sym);
+            if (col && nrows < 0) { nrows = col->len; break; }
+        }
+    }
+    if (nrows < 0) return ray_error("nyi", NULL);
+
+    ctx.init_cap = FP_SHARD_INIT_CAP;
+    atomic_store_explicit(&ctx.oom, 0, memory_order_relaxed);
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t nw = pool ? ray_pool_total_workers(pool) : 1;
+    ray_t* shards_hdr = NULL;
+    ctx.shards = (mk_shard_t*)scratch_calloc(&shards_hdr,
+                                             (size_t)nw * sizeof(mk_shard_t));
+    if (!ctx.shards) return ray_error("oom", NULL);
+
+    if (pool) ray_pool_dispatch(pool, mk_par_fn, &ctx, nrows);
+    else      mk_par_fn(&ctx, 0, 0, nrows);
+
+    if (atomic_load_explicit(&ctx.oom, memory_order_relaxed)) {
+        for (uint32_t w = 0; w < nw; w++) mk_shard_free(&ctx.shards[w]);
+        scratch_free(shards_hdr);
+        return ray_error("oom", "fused_group: shard OOM");
+    }
+
+    ray_t* result = mk_combine_and_materialize(&ctx, nw, ext->agg_ops);
+    for (uint32_t w = 0; w < nw; w++) mk_shard_free(&ctx.shards[w]);
+    scratch_free(shards_hdr);
+    return result;
+}
+
+/* ─── Public entry: dispatcher ──────────────────────────────────────── */
+
+ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
+    if (!g || !op) return ray_error("nyi", NULL);
+    ray_t* tbl = g->table;
+    if (!tbl || tbl->type != RAY_TABLE) return ray_error("type", NULL);
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext) return ray_error("nyi", NULL);
+
+    /* count1 fast path: single key, single OP_COUNT.  Unchanged from
+     * Phase 3 — guarantees zero regression on Q8/Q37/Q38/Q43. */
+    if (ext->n_keys == 1 && ext->n_aggs == 1
+        && ext->agg_ops[0] == OP_COUNT)
+        return exec_filtered_group_count1(g, ext, tbl);
+
+    /* Multi-agg or multi-key path — separate ctx, separate worker fn. */
+    return exec_filtered_group_multi(g, ext, tbl);
 }
