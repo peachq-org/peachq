@@ -79,9 +79,22 @@ int ray_str_cmp(ray_t* a, ray_t* b) {
     size_t alen = ray_str_len(a);
     size_t blen = ray_str_len(b);
 
+    /* Fast first-char rejection.  Sort comparators on SYM/STR columns
+     * (ORDER BY name, top-K key compare) hit this hot.  When the two
+     * strings differ on byte 0 — the common case for varied user
+     * inputs like SearchPhrase — we skip the memcmp call entirely.
+     * Per-byte loops in memcmp dominate the cost only when long
+     * strings share a prefix; first-byte short-circuit cuts sort
+     * compare cost on first-char-diverse data without slowing down
+     * the prefix-matching case (one extra load + branch). */
+    if (alen > 0 && blen > 0) {
+        int d = (int)(unsigned char)ap[0] - (int)(unsigned char)bp[0];
+        if (d != 0) return d;
+    }
+
     size_t minlen = alen < blen ? alen : blen;
     int cmp = 0;
-    if (minlen > 0) cmp = memcmp(ap, bp, minlen);
+    if (minlen > 1) cmp = memcmp(ap + 1, bp + 1, minlen - 1);
     if (cmp != 0) return cmp;
 
     if (alen < blen) return -1;
