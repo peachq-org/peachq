@@ -1562,19 +1562,30 @@ typedef struct {
 
 #define CDPG_BUF_HASH_K1 0x9E3779B97F4A7C15ULL
 
+/* DuckDB-style single-array HT: empty slot is encoded as 0; the
+ * (extremely rare) v == 0 input goes into a separate saw_zero flag.
+ * Compared to the previous (set + used) two-array layout this halves
+ * the memory footprint per slot (8 B vs 9 B) and — more importantly —
+ * collapses two cache-line accesses (used byte + set int64) into a
+ * single int64 read on the hot path.  Hits Q9-class queries where the
+ * per-group HT churn was thrashing L2. */
 #define CDPG_BUF_INSERT(VAL_EXPR) do {                              \
     int64_t v = (int64_t)(VAL_EXPR);                                \
+    if (RAY_UNLIKELY(v == 0)) {                                     \
+        if (!saw_zero) { saw_zero = 1; distinct++; }                \
+        break;                                                      \
+    }                                                               \
     uint64_t h = (uint64_t)v * CDPG_BUF_HASH_K1;                    \
     h ^= h >> 33;                                                   \
     uint64_t slot = h & mask;                                       \
     for (;;) {                                                      \
-        if (!used[slot]) {                                          \
-            set[slot]  = v;                                         \
-            used[slot] = 1;                                         \
+        int64_t cur = set[slot];                                    \
+        if (cur == 0) {                                             \
+            set[slot] = v;                                          \
             distinct++;                                             \
             break;                                                  \
         }                                                           \
-        if (set[slot] == v) break;                                  \
+        if (cur == v) break;                                        \
         slot = (slot + 1) & mask;                                   \
     }                                                               \
 } while (0)
@@ -1602,18 +1613,15 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
         uint64_t mask = cap - 1;
 
         ray_t* set_hdr  = NULL;
-        ray_t* used_hdr = NULL;
-        int64_t* set    = (int64_t*)scratch_alloc (&set_hdr,
+        int64_t* set    = (int64_t*)scratch_calloc(&set_hdr,
                                                    (size_t)cap * sizeof(int64_t));
-        uint8_t* used   = (uint8_t*)scratch_calloc(&used_hdr, (size_t)cap);
-        if (!set || !used) {
-            if (set_hdr) scratch_free(set_hdr);
-            if (used_hdr) scratch_free(used_hdr);
+        if (!set) {
             atomic_store_explicit(&ctx->oom, 1, memory_order_relaxed);
             return;
         }
 
         int64_t distinct = 0;
+        int saw_zero = 0;
         const uint8_t* null_bm = ctx->null_bm;
         bool has_nulls = ctx->has_nulls;
 
@@ -1672,7 +1680,6 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
         }
 
         scratch_free(set_hdr);
-        scratch_free(used_hdr);
         ctx->odata[gi] = distinct;
     }
 }
