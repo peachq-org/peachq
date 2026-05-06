@@ -443,6 +443,11 @@ static inline bool pool_cancelled(ray_pool_t* pool) {
  * struct.  Use EXT_TRAIL() to find the trailing bytes. */
 ray_op_ext_t* graph_alloc_ext_node_ex(ray_graph_t* g, size_t extra);
 
+/* Compile a Rayfall AST sub-expression to a DAG node.  Defined in
+ * query.c.  Used by fused_* operators that need to evaluate a small
+ * predicate without going through the full select planner. */
+ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr);
+
 /* Pointer to trailing bytes after an ext node. */
 #define EXT_TRAIL(ext) ((char*)((ext) + 1))
 
