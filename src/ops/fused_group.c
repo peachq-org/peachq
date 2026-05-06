@@ -41,9 +41,9 @@ ray_op_t* ray_filtered_group(ray_graph_t* g, ray_op_t* pred,
                              uint16_t* agg_ops, ray_op_t** agg_ins,
                              uint8_t n_aggs)
 {
-    if (!g || !pred) return NULL;
+    if (!g) return NULL;
 
-    uint32_t pred_id = pred->id;
+    uint32_t pred_id = pred ? pred->id : 0;
     uint32_t key_ids[256];
     uint32_t agg_ids[256];
     for (uint8_t i = 0; i < n_keys; i++) key_ids[i] = keys[i]->id;
@@ -60,9 +60,12 @@ ray_op_t* ray_filtered_group(ray_graph_t* g, ray_op_t* pred,
     if (!ext) return NULL;
 
     ext->base.opcode = OP_FILTERED_GROUP;
-    ext->base.arity = 1;  /* predicate; keys/aggs live in trail */
+    /* arity 1 when there's a real predicate, 0 for the const-true case
+     * (used by no-WHERE group-by — the count1/multi exec path treats a
+     * NULL inputs[0] as an empty fp_pred which evaluates to all-ones). */
+    ext->base.arity = pred ? 1 : 0;
     ext->base.out_type = RAY_TABLE;
-    ext->base.inputs[0] = &g->nodes[pred_id];
+    ext->base.inputs[0] = pred ? &g->nodes[pred_id] : NULL;
     if (n_keys > 0 && keys[0])
         ext->base.est_rows = g->nodes[key_ids[0]].est_rows / 10;
 
@@ -386,6 +389,9 @@ int fp_compile_pred(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
                     fp_pred_t* out)
 {
     out->n_children = 0;
+    /* No predicate → const-true.  fp_eval_pred memsets bits to 1
+     * when n_children == 0, so the worker treats every row as a hit. */
+    if (!pred_op) return 0;
     return fp_compile_pred_dag(g, pred_op, tbl, out);
 }
 
