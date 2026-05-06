@@ -22,7 +22,8 @@
  */
 
 #include "ops/fused_group.h"
-#include "lang/eval.h"   /* RAY_ATTR_NAME */
+#include "lang/eval.h"     /* RAY_ATTR_NAME */
+#include "core/pool.h"     /* ray_pool_get / ray_pool_dispatch */
 
 #include <string.h>
 
@@ -229,13 +230,270 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Phase-1 serial fused exec: single key + single OP_COUNT.
+ * Phase-2 parallel fused exec.
  *
- * Iterates over the source column in RAY_MORSEL_ELEMS-sized chunks,
- * evaluates the predicate into a stack-resident bits[] array, and updates
- * a single-shard linear-probe hash table keyed by the group column value.
- * Materialises the result as a 2-column TABLE.
+ * Per-worker linear-probe hash shards, populated by ray_pool_dispatch
+ * over morsel ranges.  Workers lazy-init their shard on first call,
+ * grow it 2× when load reaches 0.5, and update it inline as they walk
+ * the morsels.  After all workers finish, the main thread walks shard
+ * occupants in series and merges them into a global HT before
+ * materialising the 2-column [key, count] result table.
  * ──────────────────────────────────────────────────────────────────────── */
+
+#define FP_SHARD_INIT_CAP   1024ULL
+#define FP_SHARD_MAX_CAP    (1ULL << 26)   /* 64 M slots ≈ 1 GB per shard */
+
+typedef struct {
+    int64_t* slots;       /* cap × 2 (occupied flag, key) */
+    int64_t* counts;      /* cap */
+    ray_t*   slots_hdr;   /* scratch headers for cleanup */
+    ray_t*   counts_hdr;
+    uint64_t cap;
+    uint64_t mask;
+    int64_t  n_filled;
+} fp_shard_t;
+
+typedef struct {
+    fp_cmp_t   pred;
+    int8_t     kt;
+    uint8_t    katt;
+    uint8_t    kesz;
+    const void* kbase;
+    fp_shard_t* shards;     /* nw entries */
+    uint64_t   init_cap;
+    _Atomic(uint32_t) oom;  /* set by any worker on OOM; main bails */
+} fp_par_ctx_t;
+
+static int fp_shard_init(fp_shard_t* sh, uint64_t cap) {
+    sh->slots  = (int64_t*)scratch_calloc(&sh->slots_hdr,
+                                          (size_t)cap * 2 * sizeof(int64_t));
+    sh->counts = (int64_t*)scratch_calloc(&sh->counts_hdr,
+                                          (size_t)cap * sizeof(int64_t));
+    if (!sh->slots || !sh->counts) {
+        if (sh->slots_hdr)  { scratch_free(sh->slots_hdr);  sh->slots_hdr  = NULL; }
+        if (sh->counts_hdr) { scratch_free(sh->counts_hdr); sh->counts_hdr = NULL; }
+        sh->slots = NULL; sh->counts = NULL;
+        return -1;
+    }
+    sh->cap  = cap;
+    sh->mask = cap - 1;
+    sh->n_filled = 0;
+    return 0;
+}
+
+static void fp_shard_free(fp_shard_t* sh) {
+    if (sh->slots_hdr)  { scratch_free(sh->slots_hdr);  sh->slots_hdr  = NULL; }
+    if (sh->counts_hdr) { scratch_free(sh->counts_hdr); sh->counts_hdr = NULL; }
+    sh->slots = NULL; sh->counts = NULL;
+}
+
+/* Double cap and rehash in place.  Returns -1 on OOM (shard left intact). */
+static int fp_shard_grow(fp_shard_t* sh) {
+    uint64_t new_cap = sh->cap * 2;
+    if (new_cap > FP_SHARD_MAX_CAP) return -1;
+    uint64_t new_mask = new_cap - 1;
+    ray_t*   ns_hdr = NULL;
+    ray_t*   nc_hdr = NULL;
+    int64_t* ns = (int64_t*)scratch_calloc(&ns_hdr,
+                                           (size_t)new_cap * 2 * sizeof(int64_t));
+    int64_t* nc = (int64_t*)scratch_calloc(&nc_hdr,
+                                           (size_t)new_cap * sizeof(int64_t));
+    if (!ns || !nc) {
+        if (ns_hdr) scratch_free(ns_hdr);
+        if (nc_hdr) scratch_free(nc_hdr);
+        return -1;
+    }
+    for (uint64_t s = 0; s < sh->cap; s++) {
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv  = sh->slots[s * 2 + 1];
+        int64_t cnt = sh->counts[s];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t t = h & new_mask;
+        while (ns[t * 2]) t = (t + 1) & new_mask;
+        ns[t * 2]     = 1;
+        ns[t * 2 + 1] = kv;
+        nc[t]         = cnt;
+    }
+    scratch_free(sh->slots_hdr);
+    scratch_free(sh->counts_hdr);
+    sh->slots      = ns;
+    sh->counts     = nc;
+    sh->slots_hdr  = ns_hdr;
+    sh->counts_hdr = nc_hdr;
+    sh->cap        = new_cap;
+    sh->mask       = new_mask;
+    return 0;
+}
+
+/* Insert kv into shard, or bump count if already present.  Returns -1 on
+ * grow OOM. */
+static inline int fp_shard_upsert(fp_shard_t* sh, int64_t kv) {
+    if (RAY_UNLIKELY(sh->n_filled * 2 >= (int64_t)sh->cap)) {
+        if (fp_shard_grow(sh) != 0) return -1;
+    }
+    uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 33;
+    uint64_t s = h & sh->mask;
+    for (;;) {
+        if (!sh->slots[s * 2]) {
+            sh->slots[s * 2]     = 1;
+            sh->slots[s * 2 + 1] = kv;
+            sh->counts[s]        = 1;
+            sh->n_filled++;
+            return 0;
+        }
+        if (sh->slots[s * 2 + 1] == kv) { sh->counts[s]++; return 0; }
+        s = (s + 1) & sh->mask;
+    }
+}
+
+/* Worker: walk rows [start, end), eval predicate per-morsel, upsert
+ * passing rows into per-worker shard. */
+static void fp_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end) {
+    fp_par_ctx_t* c = (fp_par_ctx_t*)raw;
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    fp_shard_t* sh = &c->shards[worker_id];
+    if (!sh->slots) {
+        if (fp_shard_init(sh, c->init_cap) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+    }
+    int64_t row = start;
+    while (row < end) {
+        int64_t mend = row + RAY_MORSEL_ELEMS;
+        if (mend > end) mend = end;
+        int64_t mlen = mend - row;
+        uint8_t bits[RAY_MORSEL_ELEMS];
+        fp_eval_cmp(&c->pred, row, mend, bits);
+        for (int64_t r = 0; r < mlen; r++) {
+            if (!bits[r]) continue;
+            int64_t kv = read_by_esz(c->kbase, row + r, c->kesz);
+            if (fp_shard_upsert(sh, kv) != 0) {
+                atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+                return;
+            }
+        }
+        row = mend;
+    }
+}
+
+/* Combine: merge per-worker shards into a global linear-probe hash, then
+ * materialize the [key, count] result columns.  Caller frees shards
+ * afterwards. */
+static ray_t* fp_combine_and_materialize(fp_shard_t* shards, uint32_t nw,
+                                         int8_t kt, uint8_t katt,
+                                         int64_t key_sym)
+{
+    /* Sum local fills to size the global HT. */
+    int64_t total_local = 0;
+    for (uint32_t w = 0; w < nw; w++) total_local += shards[w].n_filled;
+    if (total_local == 0) {
+        /* Empty result.  Build a 2-col table with 0 rows. */
+        ray_t* k0 = (kt == RAY_SYM)
+                  ? ray_sym_vec_new(katt & RAY_SYM_W_MASK, 0)
+                  : ray_vec_new(kt, 0);
+        ray_t* c0 = ray_vec_new(RAY_I64, 0);
+        if (!k0 || !c0 || RAY_IS_ERR(k0) || RAY_IS_ERR(c0)) {
+            if (k0 && !RAY_IS_ERR(k0)) ray_release(k0);
+            if (c0 && !RAY_IS_ERR(c0)) ray_release(c0);
+            return ray_error("oom", NULL);
+        }
+        k0->len = 0; c0->len = 0;
+        ray_t* result = ray_table_new(2);
+        if (!result || RAY_IS_ERR(result)) {
+            ray_release(k0); ray_release(c0);
+            return ray_error("oom", NULL);
+        }
+        int64_t cnt_sym = ray_sym_intern("count", 5);
+        result = ray_table_add_col(result, key_sym, k0);
+        result = ray_table_add_col(result, cnt_sym, c0);
+        ray_release(k0); ray_release(c0);
+        return result;
+    }
+
+    /* Global cap: 2 × total_local rounded up to power of 2.  This is an
+     * upper bound (groups can collide across shards) so the global HT
+     * never has to grow. */
+    uint64_t gcap = 1024;
+    while (gcap < (uint64_t)(total_local * 2) && gcap < FP_SHARD_MAX_CAP) gcap <<= 1;
+    uint64_t gmask = gcap - 1;
+    ray_t* gs_hdr = NULL;
+    ray_t* gc_hdr = NULL;
+    int64_t* gs = (int64_t*)scratch_calloc(&gs_hdr,
+                                           (size_t)gcap * 2 * sizeof(int64_t));
+    int64_t* gc = (int64_t*)scratch_calloc(&gc_hdr,
+                                           (size_t)gcap * sizeof(int64_t));
+    if (!gs || !gc) {
+        if (gs_hdr) scratch_free(gs_hdr);
+        if (gc_hdr) scratch_free(gc_hdr);
+        return ray_error("oom", NULL);
+    }
+    int64_t global_n = 0;
+    for (uint32_t w = 0; w < nw; w++) {
+        fp_shard_t* sh = &shards[w];
+        if (!sh->slots) continue;
+        for (uint64_t s = 0; s < sh->cap; s++) {
+            if (!sh->slots[s * 2]) continue;
+            int64_t kv  = sh->slots[s * 2 + 1];
+            int64_t cnt = sh->counts[s];
+            uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+            h ^= h >> 33;
+            uint64_t t = h & gmask;
+            for (;;) {
+                if (!gs[t * 2]) {
+                    gs[t * 2]     = 1;
+                    gs[t * 2 + 1] = kv;
+                    gc[t]         = cnt;
+                    global_n++;
+                    break;
+                }
+                if (gs[t * 2 + 1] == kv) { gc[t] += cnt; break; }
+                t = (t + 1) & gmask;
+            }
+        }
+    }
+
+    /* Materialize. */
+    ray_t* k_out = (kt == RAY_SYM)
+                 ? ray_sym_vec_new(katt & RAY_SYM_W_MASK, global_n)
+                 : ray_vec_new(kt, global_n);
+    ray_t* c_out = ray_vec_new(RAY_I64, global_n);
+    if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
+        if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
+        if (c_out && !RAY_IS_ERR(c_out)) ray_release(c_out);
+        scratch_free(gs_hdr); scratch_free(gc_hdr);
+        return ray_error("oom", NULL);
+    }
+    k_out->len = global_n;
+    c_out->len = global_n;
+    void*    k_dst = ray_data(k_out);
+    int64_t* c_dst = (int64_t*)ray_data(c_out);
+    int64_t  gi    = 0;
+    for (uint64_t s = 0; s < gcap; s++) {
+        if (!gs[s * 2]) continue;
+        int64_t kv = gs[s * 2 + 1];
+        write_col_i64(k_dst, gi, kv, kt, katt);
+        c_dst[gi] = gc[s];
+        gi++;
+    }
+    scratch_free(gs_hdr);
+    scratch_free(gc_hdr);
+
+    ray_t* result = ray_table_new(2);
+    if (!result || RAY_IS_ERR(result)) {
+        ray_release(k_out); ray_release(c_out);
+        return ray_error("oom", NULL);
+    }
+    int64_t cnt_sym = ray_sym_intern("count", 5);
+    result = ray_table_add_col(result, key_sym, k_out);
+    result = ray_table_add_col(result, cnt_sym, c_out);
+    ray_release(k_out);
+    ray_release(c_out);
+    return result;
+}
+
 ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
     if (!g || !op) return ray_error("nyi", NULL);
     ray_t* tbl = g->table;
@@ -243,117 +501,57 @@ ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
 
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext || ext->n_keys != 1 || ext->n_aggs != 1)
-        return ray_error("nyi", "fused_group: phase-1 single-key + single-agg only");
+        return ray_error("nyi", "fused_group: phase-2 single-key + single-agg only");
     if (ext->agg_ops[0] != OP_COUNT)
-        return ray_error("nyi", "fused_group: phase-1 only OP_COUNT");
+        return ray_error("nyi", "fused_group: phase-2 only OP_COUNT");
 
     ray_op_t* pred_op = ext->base.inputs[0];
-    fp_cmp_t fp;
-    if (fp_compile_cmp(g, pred_op, tbl, &fp) != 0)
+    fp_par_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    if (fp_compile_cmp(g, pred_op, tbl, &ctx.pred) != 0)
         return ray_error("nyi", "fused_group: predicate shape unsupported");
 
-    /* Resolve key column.  Phase 1: must be an OP_SCAN on a non-parted col. */
     ray_op_t* key_op = ext->keys[0];
     if (!key_op || key_op->opcode != OP_SCAN)
-        return ray_error("nyi", "fused_group: phase-1 needs SCAN key");
+        return ray_error("nyi", "fused_group: phase-2 needs SCAN key");
     ray_op_ext_t* kext = find_ext(g, key_op->id);
     if (!kext) return ray_error("nyi", NULL);
     ray_t* key_col = ray_table_get_col(tbl, kext->sym);
     if (!key_col) return ray_error("schema", NULL);
     if (RAY_IS_PARTED(key_col->type) || key_col->type == RAY_MAPCOMMON)
-        return ray_error("nyi", "fused_group: phase-1 needs flat key column");
+        return ray_error("nyi", "fused_group: phase-2 needs flat key column");
 
     int64_t nrows = key_col->len;
-    int8_t  kt    = key_col->type;
-    uint8_t kesz  = ray_sym_elem_size(kt, key_col->attrs);
-    const void* kbase = ray_data(key_col);
+    ctx.kt    = key_col->type;
+    ctx.katt  = key_col->attrs;
+    ctx.kesz  = ray_sym_elem_size(ctx.kt, ctx.katt);
+    ctx.kbase = ray_data(key_col);
+    ctx.init_cap = FP_SHARD_INIT_CAP;
+    atomic_store_explicit(&ctx.oom, 0, memory_order_relaxed);
 
-    /* Single-shard hash table.  Cap = next power of two ≥ 2 × nrows, capped
-     * at 1<<20.  slots[s*2] is occupied flag; slots[s*2+1] is the key. */
-    uint64_t cap = 1024;
-    while (cap < (uint64_t)nrows && cap < (1ULL << 20)) cap <<= 1;
-    uint64_t mask = cap - 1;
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t nw = pool ? ray_pool_total_workers(pool) : 1;
+    ray_t* shards_hdr = NULL;
+    ctx.shards = (fp_shard_t*)scratch_calloc(&shards_hdr,
+                                             (size_t)nw * sizeof(fp_shard_t));
+    if (!ctx.shards) return ray_error("oom", NULL);
 
-    ray_t* k_hdr = NULL;
-    ray_t* c_hdr = NULL;
-    int64_t* slots  = (int64_t*)scratch_calloc(&k_hdr, (size_t)cap * 2 * sizeof(int64_t));
-    int64_t* counts = (int64_t*)scratch_calloc(&c_hdr, (size_t)cap * sizeof(int64_t));
-    if (!slots || !counts) {
-        if (k_hdr) scratch_free(k_hdr);
-        if (c_hdr) scratch_free(c_hdr);
-        return ray_error("oom", NULL);
+    if (pool) {
+        ray_pool_dispatch(pool, fp_par_fn, &ctx, nrows);
+    } else {
+        /* No pool: serial fallback. */
+        fp_par_fn(&ctx, 0, 0, nrows);
     }
 
-    for (int64_t row = 0; row < nrows; ) {
-        int64_t end = row + RAY_MORSEL_ELEMS;
-        if (end > nrows) end = nrows;
-        int64_t mlen = end - row;
-
-        uint8_t bits[RAY_MORSEL_ELEMS];
-        fp_eval_cmp(&fp, row, end, bits);
-
-        for (int64_t r = 0; r < mlen; r++) {
-            if (!bits[r]) continue;
-            int64_t kv = read_by_esz(kbase, row + r, kesz);
-            uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
-            h ^= h >> 33;
-            uint64_t s = h & mask;
-            for (;;) {
-                if (!slots[s * 2]) {
-                    slots[s * 2]     = 1;
-                    slots[s * 2 + 1] = kv;
-                    counts[s]        = 1;
-                    break;
-                }
-                if (slots[s * 2 + 1] == kv) { counts[s]++; break; }
-                s = (s + 1) & mask;
-            }
-        }
-        row = end;
+    if (atomic_load_explicit(&ctx.oom, memory_order_relaxed)) {
+        for (uint32_t w = 0; w < nw; w++) fp_shard_free(&ctx.shards[w]);
+        scratch_free(shards_hdr);
+        return ray_error("oom", "fused_group: shard OOM");
     }
 
-    /* Gather occupied slots into typed output columns. */
-    int64_t n_groups = 0;
-    for (uint64_t s = 0; s < cap; s++) if (slots[s * 2]) n_groups++;
-
-    ray_t* k_out = (kt == RAY_SYM)
-                 ? ray_sym_vec_new(key_col->attrs & RAY_SYM_W_MASK, n_groups)
-                 : ray_vec_new(kt, n_groups);
-    ray_t* c_out = ray_vec_new(RAY_I64, n_groups);
-    if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
-        if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
-        if (c_out && !RAY_IS_ERR(c_out)) ray_release(c_out);
-        scratch_free(k_hdr); scratch_free(c_hdr);
-        return ray_error("oom", NULL);
-    }
-    k_out->len = n_groups;
-    c_out->len = n_groups;
-
-    void*    k_dst = ray_data(k_out);
-    int64_t* c_dst = (int64_t*)ray_data(c_out);
-    int64_t  gi    = 0;
-    for (uint64_t s = 0; s < cap; s++) {
-        if (!slots[s * 2]) continue;
-        int64_t kv = slots[s * 2 + 1];
-        write_col_i64(k_dst, gi, kv, kt, key_col->attrs);
-        c_dst[gi] = counts[s];
-        gi++;
-    }
-
-    scratch_free(k_hdr);
-    scratch_free(c_hdr);
-
-    /* 2-column TABLE: <key_col_name>, <count>.  Phase 2 wires the count
-     * column name through the planner; phase 1 uses the literal "count". */
-    ray_t* result = ray_table_new(2);
-    if (!result || RAY_IS_ERR(result)) {
-        ray_release(k_out); ray_release(c_out);
-        return ray_error("oom", NULL);
-    }
-    int64_t cnt_sym = ray_sym_intern("count", 5);
-    result = ray_table_add_col(result, kext->sym, k_out);
-    result = ray_table_add_col(result, cnt_sym,   c_out);
-    ray_release(k_out);
-    ray_release(c_out);
+    ray_t* result = fp_combine_and_materialize(ctx.shards, nw,
+                                               ctx.kt, ctx.katt, kext->sym);
+    for (uint32_t w = 0; w < nw; w++) fp_shard_free(&ctx.shards[w]);
+    scratch_free(shards_hdr);
     return result;
 }
