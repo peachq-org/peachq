@@ -22,6 +22,9 @@
  */
 
 #include "ops/fused_group.h"
+#include "lang/eval.h"   /* RAY_ATTR_NAME */
+
+#include <string.h>
 
 /* Phase 0 stub — phase 1 fills in the real implementation, and the planner
  * doesn't emit OP_FILTERED_GROUP until ray_fused_group_supported returns 1. */
@@ -35,9 +38,33 @@ ray_op_t* ray_filtered_group(ray_graph_t* g, ray_op_t* pred,
     return NULL;
 }
 
+/* Phase-1 supported predicate shapes:
+ *
+ *   pred  = (== col const) | (!= col const)
+ *   col   = name reference (-RAY_SYM with RAY_ATTR_NAME)
+ *   const = scalar atom literal (any non-name atom)
+ *
+ * Inspects the Rayfall AST (RAY_LIST), not the DAG.  Caller passes the
+ * `where:` value from the select dict. */
 int ray_fused_group_supported(ray_t* expr) {
-    (void)expr;
-    return 0;
+    if (!expr || expr->type != RAY_LIST) return 0;
+    if (ray_len(expr) != 3) return 0;
+    ray_t** elems = (ray_t**)ray_data(expr);
+    if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
+    ray_t* op_sym = ray_sym_str(elems[0]->i64);
+    if (!op_sym) return 0;
+    size_t op_len = ray_str_len(op_sym);
+    const char* op = ray_str_ptr(op_sym);
+    int is_eq = (op_len == 2 && op[0] == '=' && op[1] == '=');
+    int is_ne = (op_len == 2 && op[0] == '!' && op[1] == '=');
+    if (!is_eq && !is_ne) return 0;
+    ray_t* lhs = elems[1];
+    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
+        return 0;
+    ray_t* rhs = elems[2];
+    if (!rhs || !ray_is_atom(rhs) || (rhs->attrs & RAY_ATTR_NAME))
+        return 0;
+    return 1;
 }
 
 ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
