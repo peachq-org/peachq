@@ -33,6 +33,7 @@
 #include "ops/hash.h"
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
+#include "ops/fused_topk.h"
 #include "ops/temporal.h"
 #include "table/sym.h"
 #include "table/dict.h"
@@ -518,7 +519,7 @@ static void cexpr_env_pop(ray_graph_t* g, int n) {
  * backing address may change. */
 
 /* Compile a Rayfall AST expression into a DAG node */
-static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
+ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     if (!expr) return NULL;
 
     /* Atom literal → const node.  Handle non-null scalar literals
@@ -1945,6 +1946,90 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     /* Simple case: no clauses at all → return table as-is */
     if (n_out == 0 && !where_expr && !by_expr && !take_expr && !has_sort && !nearest_expr)
         return tbl;
+
+    /* Fused filter + top-K: shape `(select {col1: c1 col2: c2 …
+     * from: T where: <pred> asc/desc: <key> take: <K>})` with no by/
+     * nearest clause and all output columns being plain SYM names of
+     * source columns.  Bypasses the FILTER → SORT_TAKE pipeline: streams
+     * predicate eval and bounded-heap insert in one pass, no
+     * intermediate filtered table materialised.  The biggest open gap
+     * vs DuckDB on ClickBench (Q25/Q26/Q27 are 2.5–4.5× slower without
+     * this fast path). */
+    if (where_expr && take_expr && has_sort && !by_expr && !nearest_expr) {
+        const char* off_env = getenv("RAYFORCE_DISABLE_FUSED_TOPK");
+        int env_disabled = (off_env && off_env[0] == '1');
+        if (!env_disabled && ray_fused_topk_supported(where_expr, tbl)) {
+            /* Walk the dict and check: exactly one asc/desc clause naming
+             * a single scalar column, take is an atom K, and every
+             * output column is a -RAY_SYM source-column reference (no
+             * agg, no expression). */
+            int64_t sort_key_syms[16];
+            uint8_t sort_descs[16];
+            uint8_t n_sort_keys = 0;
+            int     bad_clause = 0;
+            int64_t out_syms[64];
+            uint8_t n_out_syms = 0;
+            for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                ray_t*  v   = dict_elems[i + 1];
+                if (kid == from_id || kid == where_id || kid == take_id ||
+                    kid == nearest_id) continue;
+                if (kid == asc_id || kid == desc_id) {
+                    uint8_t is_desc = (kid == desc_id) ? 1 : 0;
+                    if (v && v->type == -RAY_SYM && (v->attrs & RAY_ATTR_NAME)) {
+                        if (n_sort_keys >= 16) { bad_clause = 1; break; }
+                        sort_key_syms[n_sort_keys] = v->i64;
+                        sort_descs[n_sort_keys] = is_desc;
+                        n_sort_keys++;
+                    } else if (v && v->type == RAY_SYM) {
+                        int64_t nv = ray_len(v);
+                        if (n_sort_keys + nv > 16) { bad_clause = 1; break; }
+                        int64_t* sv = (int64_t*)ray_data(v);
+                        for (int64_t kk = 0; kk < nv; kk++) {
+                            sort_key_syms[n_sort_keys] = sv[kk];
+                            sort_descs[n_sort_keys] = is_desc;
+                            n_sort_keys++;
+                        }
+                    } else {
+                        bad_clause = 1; break;
+                    }
+                    continue;
+                }
+                if (kid == by_id) { bad_clause = 1; break; }
+                /* Output column: trivial alias of a source column. */
+                if (n_out_syms >= 64) { bad_clause = 1; break; }
+                if (v && v->type == -RAY_SYM && (v->attrs & RAY_ATTR_NAME)
+                    && ray_table_get_col(tbl, v->i64) != NULL) {
+                    out_syms[n_out_syms++] = v->i64;
+                } else {
+                    bad_clause = 1;
+                    break;
+                }
+            }
+            if (!bad_clause && n_sort_keys > 0 && n_out_syms > 0) {
+                ray_t* tv = ray_eval(take_expr);
+                if (tv && !RAY_IS_ERR(tv) && ray_is_atom(tv) &&
+                    (tv->type == -RAY_I64 || tv->type == -RAY_I32)) {
+                    int64_t k = (tv->type == -RAY_I64) ? tv->i64 : tv->i32;
+                    ray_release(tv);
+                    if (k > 0 && k <= 8192 && k < ray_table_nrows(tbl)) {
+                        ray_t* res = ray_fused_topk_select(tbl, where_expr,
+                                                           sort_key_syms,
+                                                           sort_descs,
+                                                           n_sort_keys, k,
+                                                           out_syms, n_out_syms);
+                        if (res && !RAY_IS_ERR(res)) {
+                            ray_release(tbl);
+                            return res;
+                        }
+                        if (res && RAY_IS_ERR(res)) ray_release(res);
+                    }
+                } else if (tv) {
+                    ray_release(tv);
+                }
+            }
+        }
+    }
 
     /* Dict-form by-clause pre-evaluation: MUST happen before we
      * build the DAG, so the graph sees the augmented table with
