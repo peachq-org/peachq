@@ -26,16 +26,55 @@
 
 #include <string.h>
 
-/* Phase 0 stub — phase 1 fills in the real implementation, and the planner
- * doesn't emit OP_FILTERED_GROUP until ray_fused_group_supported returns 1. */
+/* Constructor — mirrors ray_group's trail layout (keys, agg_ops, agg_ins
+ * embedded in trailing bytes), and stashes the predicate root in
+ * base.inputs[0].  Reusing OP_GROUP's anonymous union variant means
+ * exec_filtered_group reads ext->n_keys / ext->keys[] / ext->agg_ops /
+ * ext->agg_ins exactly the way OP_GROUP does. */
 ray_op_t* ray_filtered_group(ray_graph_t* g, ray_op_t* pred,
                              ray_op_t** keys, uint8_t n_keys,
                              uint16_t* agg_ops, ray_op_t** agg_ins,
                              uint8_t n_aggs)
 {
-    (void)g; (void)pred; (void)keys; (void)n_keys;
-    (void)agg_ops; (void)agg_ins; (void)n_aggs;
-    return NULL;
+    if (!g || !pred) return NULL;
+
+    uint32_t pred_id = pred->id;
+    uint32_t key_ids[256];
+    uint32_t agg_ids[256];
+    for (uint8_t i = 0; i < n_keys; i++) key_ids[i] = keys[i]->id;
+    for (uint8_t i = 0; i < n_aggs; i++) agg_ids[i] = agg_ins[i]->id;
+
+    size_t keys_sz = (size_t)n_keys * sizeof(ray_op_t*);
+    size_t ops_sz  = (size_t)n_aggs * sizeof(uint16_t);
+    size_t ins_sz  = (size_t)n_aggs * sizeof(ray_op_t*);
+    size_t ops_off = keys_sz;
+    size_t ins_off = ops_off + ops_sz;
+    /* Round ins_off up to pointer alignment */
+    ins_off = (ins_off + sizeof(ray_op_t*) - 1) & ~(sizeof(ray_op_t*) - 1);
+    ray_op_ext_t* ext = graph_alloc_ext_node_ex(g, ins_off + ins_sz);
+    if (!ext) return NULL;
+
+    ext->base.opcode = OP_FILTERED_GROUP;
+    ext->base.arity = 1;  /* predicate; keys/aggs live in trail */
+    ext->base.out_type = RAY_TABLE;
+    ext->base.inputs[0] = &g->nodes[pred_id];
+    if (n_keys > 0 && keys[0])
+        ext->base.est_rows = g->nodes[key_ids[0]].est_rows / 10;
+
+    char* trail = EXT_TRAIL(ext);
+    ext->keys = (ray_op_t**)trail;
+    for (uint8_t i = 0; i < n_keys; i++)
+        ext->keys[i] = &g->nodes[key_ids[i]];
+    ext->agg_ops = (uint16_t*)(trail + ops_off);
+    if (ops_sz > 0) memcpy(ext->agg_ops, agg_ops, ops_sz);
+    ext->agg_ins = (ray_op_t**)(trail + ins_off);
+    for (uint8_t i = 0; i < n_aggs; i++)
+        ext->agg_ins[i] = &g->nodes[agg_ids[i]];
+    ext->n_keys = n_keys;
+    ext->n_aggs = n_aggs;
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
 }
 
 /* Phase-1 supported predicate shapes:
