@@ -2504,10 +2504,11 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     total_bytes += ray_sym_elem_size(kct, kc->attrs);
                 }
                 /* Single-key case fits unconditionally (one key column, one
-                 * slot).  Multi-key needs ≤ 8 bytes packed.  Single-agg COUNT
-                 * with a single key fires the count1 fast path which has no
-                 * size constraint. */
-                int fits = (n_keys_local == 1) || (total_bytes <= 8);
+                 * slot).  Multi-key needs ≤ 16 bytes packed (multi path
+                 * uses a 128-bit composite key — two int64 halves).  The
+                 * count1 fast path on a single key has no size constraint
+                 * since it works on a flat key column directly. */
+                int fits = (n_keys_local == 1) || (total_bytes <= 16);
                 if (keys_ok && fits) {
                     /* Don't fire the multi path when n_keys == 1 AND not
                      * count-only: the multi path's per-row update has higher
@@ -2515,7 +2516,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                      * common-case wins. */
                     if (n_keys_local == 1 && n_aggs_ok == 1 && has_only_count) {
                         can_fuse_phase1 = 1;  /* will use count1 exec */
-                    } else if (total_bytes <= 8) {
+                    } else if (total_bytes <= 16) {
                         can_fuse_phase1 = 1;  /* will use multi exec */
                     }
                 }
