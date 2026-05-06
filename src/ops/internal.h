@@ -434,8 +434,17 @@ static inline bool pool_cancelled(ray_pool_t* pool) {
     } while(0)
 
 /* ══════════════════════════════════════════
- * Graph helper: find extended node
+ * Graph helpers: ext-node allocation + lookup
  * ══════════════════════════════════════════ */
+
+/* Allocate an ext node (64 B + `extra` trailing bytes for inline arrays).
+ * Defined in graph.c.  Used by ray_*-style graph constructors that need
+ * to embed variable-length data (keys, agg lists, etc.) after the ext
+ * struct.  Use EXT_TRAIL() to find the trailing bytes. */
+ray_op_ext_t* graph_alloc_ext_node_ex(ray_graph_t* g, size_t extra);
+
+/* Pointer to trailing bytes after an ext node. */
+#define EXT_TRAIL(ext) ((char*)((ext) + 1))
 
 static inline ray_op_ext_t* find_ext(ray_graph_t* g, uint32_t node_id) {
     for (uint32_t i = 0; i < g->ext_count; i++) {
