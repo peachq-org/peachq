@@ -664,6 +664,19 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     _h_;                                                                 \
 })
 
+/* Partition hash: keyed on gid_p1 only.  This guarantees all rows for
+ * a given gid land in the same partition, so the dedup pass can update
+ * `odata[gid]` without atomics — each gid's distinct count is owned by
+ * exactly one task.  Independent of CDPG_HASH (which keys on the
+ * full (gid, val) pair so the per-partition open-addressing HT spreads
+ * evenly across slots). */
+#define CDPG_PART_HASH(GID_P1) ({                                       \
+    uint64_t _h_ = (uint64_t)(GID_P1) * 0xBF58476D1CE4E5B9ULL;          \
+    _h_ ^= _h_ >> 33;                                                    \
+    _h_ *= 0xC4CEB9FE1A85EC53ULL;                                        \
+    _h_;                                                                 \
+})
+
 typedef struct {
     /* Inputs (read-only) */
     int8_t          in_type;
@@ -731,10 +744,12 @@ static void cdpg_hist_fn(void* ctx_, uint32_t worker_id,
         if (gid < 0 || gid >= x->n_groups) continue;
         if (x->has_nulls && x->null_bm &&
             ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
-        int64_t val = cdpg_read(x->base, r, x->in_type, esz);
-        uint64_t h = CDPG_HASH(gid + 1, val);
+        /* Partition by gid (not gid×val) so the dedup pass can write to
+         * odata[gid] without atomics. */
+        uint64_t h = CDPG_PART_HASH(gid + 1);
         my_hist[h & p_mask]++;
     }
+    (void)esz;
 }
 
 static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
@@ -755,7 +770,7 @@ static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
             ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
         int64_t val = cdpg_read(x->base, r, x->in_type, esz);
         int64_t gid_p1 = gid + 1;
-        uint64_t h = CDPG_HASH(gid_p1, val);
+        uint64_t h = CDPG_PART_HASH(gid_p1);
         int64_t pos = my_cur[h & p_mask]++;
         x->gids_out[pos] = gid_p1;
         x->vals_out[pos] = val;
@@ -805,8 +820,10 @@ static void cdpg_dedup_fn(void* ctx_, uint32_t worker_id,
                 if (cur == 0) {
                     slot_gid[slot] = gid_p1;
                     slot_val[slot] = val;
-                    __atomic_fetch_add(&x->odata[gid_p1 - 1], 1,
-                                       __ATOMIC_RELAXED);
+                    /* Partition is keyed on gid (CDPG_PART_HASH), so
+                     * each gid is owned by exactly one task — drop the
+                     * atomic. */
+                    x->odata[gid_p1 - 1]++;
                     break;
                 }
                 if (cur == gid_p1 && slot_val[slot] == val) break;
@@ -920,7 +937,9 @@ static ray_t* count_distinct_per_group_parallel(
     if (total > 0)
         ray_pool_dispatch(pool, cdpg_scat_fn, &ctx, n_rows);
 
-    /* Pass 3: per-partition dedup; atomic odata[gid]++ on each new pair. */
+    /* Pass 3: per-partition dedup; partition is keyed on gid via
+     * CDPG_PART_HASH so each gid is owned by exactly one task — odata
+     * updates run without atomics. */
     if (total > 0)
         ray_pool_dispatch_n(pool, cdpg_dedup_fn, &ctx, (uint32_t)P);
 
