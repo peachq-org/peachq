@@ -632,14 +632,6 @@ typedef struct {
     uint8_t*     desc;
     uint8_t*     nulls_first;
     uint8_t      n_sort;
-    /* Optional borrowed snapshot of the SYM dict.  When non-NULL, sort_cmp
-     * uses this for SYM column compares instead of calling ray_sym_str()
-     * (which takes a global lock per call — a 12× slowdown when many
-     * parallel-sort workers contend on the same lock).  Caller is
-     * responsible for calling ray_sym_strings_borrow() before setup if
-     * any sort key is RAY_SYM and the sort runs across multiple threads. */
-    ray_t**       sym_strings;
-    uint32_t      sym_count;
 } sort_cmp_ctx_t;
 
 /* Radix pass context (shared across histogram + scatter phases) */
