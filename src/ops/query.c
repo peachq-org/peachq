@@ -2097,7 +2097,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             && where_expr && by_expr && !nearest_expr
             && by_expr->type == -RAY_SYM
             && (by_expr->attrs & RAY_ATTR_NAME)
-            && ray_fused_group_supported(where_expr))
+            && ray_fused_group_supported(where_expr, tbl))
         {
             int n_count_aggs = 0;
             int n_other = 0;
