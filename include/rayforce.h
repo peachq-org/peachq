@@ -469,6 +469,20 @@ void ray_runtime_destroy(ray_runtime_t* rt);
  * ray_release. */
 ray_t* ray_eval_str(const char* source);
 
+/* ===== IPC Client API =====
+ *
+ * Blocking client API for talking to a Rayforce IPC server. Handles are
+ * process-local integer slots returned by ray_ipc_connect and released by
+ * ray_ipc_close. ray_ipc_send performs a synchronous request/response
+ * exchange; ray_ipc_send_async sends a fire-and-forget frame. */
+
+int64_t   ray_ipc_connect(const char* host, uint16_t port,
+                          const char* user, const char* password);
+void      ray_ipc_close(int64_t handle);
+ray_t*    ray_ipc_send(int64_t handle, ray_t* msg);
+ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
+ray_t*    ray_ipc_send_verbose(int64_t handle, ray_t* msg);
+
 #ifdef __cplusplus
 }
 #endif
