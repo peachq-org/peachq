@@ -23,6 +23,7 @@
 
 #include "ops/internal.h"
 #include "ops/rowsel.h"
+#include "ops/fused_group.h"
 #include "mem/sys.h"
 
 /* Global profiler instance (zero-initialized = inactive) */
@@ -1229,6 +1230,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             }
             return result;
         }
+
+        case OP_FILTERED_GROUP:
+            return exec_filtered_group(g, op);
 
         case OP_PIVOT: {
             ray_t* tbl = g->table;
