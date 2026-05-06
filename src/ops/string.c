@@ -61,106 +61,6 @@ static void like_resolve_fn(void* ctx, uint32_t worker_id,
     }
 }
 
-/* Parallel phase 1 / phase 3 worker context.  seen[sid]=1 writes are
- * idempotent across threads; dst[i] writes are per-row partitioned. */
-typedef struct {
-    const void* base;       /* SYM column data (width-typed) */
-    uint8_t     sym_w;      /* RAY_SYM_W_MASK & attrs */
-    uint32_t    dict_n;
-    uint8_t*    seen;       /* phase 1 output */
-    const uint8_t* lut;     /* phase 3 input */
-    uint8_t*    dst;        /* phase 3 output */
-} like_par_ctx_t;
-
-static void like_seen_fn(void* ctx, uint32_t worker_id,
-                         int64_t start, int64_t end) {
-    (void)worker_id;
-    like_par_ctx_t* x = (like_par_ctx_t*)ctx;
-    uint32_t dict_n = x->dict_n;
-    uint8_t* seen   = x->seen;
-    const void* base = x->base;
-    switch (x->sym_w) {
-    case RAY_SYM_W8: {
-        const uint8_t* d = (const uint8_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            uint64_t sid = d[i];
-            if (sid < dict_n) seen[sid] = 1;
-        }
-        break;
-    }
-    case RAY_SYM_W16: {
-        const uint16_t* d = (const uint16_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            uint64_t sid = d[i];
-            if (sid < dict_n) seen[sid] = 1;
-        }
-        break;
-    }
-    case RAY_SYM_W32: {
-        const uint32_t* d = (const uint32_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            uint64_t sid = d[i];
-            if (sid < dict_n) seen[sid] = 1;
-        }
-        break;
-    }
-    case RAY_SYM_W64:
-    default: {
-        const int64_t* d = (const int64_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            int64_t sid = d[i];
-            if ((uint64_t)sid < dict_n) seen[sid] = 1;
-        }
-        break;
-    }
-    }
-}
-
-static void like_project_fn(void* ctx, uint32_t worker_id,
-                            int64_t start, int64_t end) {
-    (void)worker_id;
-    like_par_ctx_t* x = (like_par_ctx_t*)ctx;
-    uint32_t dict_n = x->dict_n;
-    const uint8_t* lut = x->lut;
-    uint8_t* dst = x->dst;
-    const void* base = x->base;
-    switch (x->sym_w) {
-    case RAY_SYM_W8: {
-        const uint8_t* d = (const uint8_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            uint64_t sid = d[i];
-            dst[i] = (sid < dict_n) ? lut[sid] : 0;
-        }
-        break;
-    }
-    case RAY_SYM_W16: {
-        const uint16_t* d = (const uint16_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            uint64_t sid = d[i];
-            dst[i] = (sid < dict_n) ? lut[sid] : 0;
-        }
-        break;
-    }
-    case RAY_SYM_W32: {
-        const uint32_t* d = (const uint32_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            uint64_t sid = d[i];
-            dst[i] = (sid < dict_n) ? lut[sid] : 0;
-        }
-        break;
-    }
-    case RAY_SYM_W64:
-    default: {
-        const int64_t* d = (const int64_t*)base;
-        for (int64_t i = start; i < end; i++) {
-            int64_t sid = d[i];
-            dst[i] = ((uint64_t)sid < dict_n) ? lut[sid] : 0;
-        }
-        break;
-    }
-    }
-}
-
 ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
     ray_t* input = exec_node(g, op->inputs[0]);
     ray_t* pat_v = exec_node(g, op->inputs[1]);
@@ -228,21 +128,43 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
             seen = (uint8_t*)scratch_calloc(&seen_hdr, (size_t)dict_n);
         }
         if (lut && seen) {
-            uint8_t sym_w = (uint8_t)(input->attrs & RAY_SYM_W_MASK);
-            ray_pool_t* pool = ray_pool_get();
-            int64_t par_threshold = 65536;
-            int parallel = (pool && len >= par_threshold);
+            int sym_w = (int)(input->attrs & RAY_SYM_W_MASK);
 
-            /* Phase 1: mark used sym_ids.  Idempotent byte writes — safe
-             * for parallel dispatch even without atomics. */
-            like_par_ctx_t pctx = {
-                .base = base, .sym_w = sym_w, .dict_n = dict_n,
-                .seen = seen, .lut = lut, .dst = dst,
-            };
-            if (parallel) {
-                ray_pool_dispatch(pool, like_seen_fn, &pctx, len);
-            } else {
-                like_seen_fn(&pctx, 0, 0, len);
+            /* Phase 1: mark used sym_ids.  Width-specialised. */
+            switch (sym_w) {
+            case RAY_SYM_W8: {
+                const uint8_t* d = (const uint8_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    uint64_t sid = d[i];
+                    if (sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
+            case RAY_SYM_W16: {
+                const uint16_t* d = (const uint16_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    uint64_t sid = d[i];
+                    if (sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
+            case RAY_SYM_W32: {
+                const uint32_t* d = (const uint32_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    uint64_t sid = d[i];
+                    if (sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
+            case RAY_SYM_W64:
+            default: {
+                const int64_t* d = (const int64_t*)base;
+                for (int64_t i = 0; i < len; i++) {
+                    int64_t sid = d[i];
+                    if ((uint64_t)sid < dict_n) seen[sid] = 1;
+                }
+                break;
+            }
             }
 
             /* Phase 2: parallel pattern resolve over the dict range. */
@@ -251,19 +173,28 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
                 .pc = &pc, .use_simple = use_simple,
                 .pat_str = pat_str, .pat_len = pat_len,
             };
+            ray_pool_t* pool = ray_pool_get();
             if (pool && (int64_t)dict_n >= 16384) {
                 ray_pool_dispatch(pool, like_resolve_fn, &rctx, (int64_t)dict_n);
             } else {
                 like_resolve_fn(&rctx, 0, 0, (int64_t)dict_n);
             }
 
-            /* Phase 3: row projection.  Per-row independent — trivially
-             * parallel. */
-            if (parallel) {
-                ray_pool_dispatch(pool, like_project_fn, &pctx, len);
-            } else {
-                like_project_fn(&pctx, 0, 0, len);
+            /* Phase 3: row projection (sequential — already a tight
+             * gather over a 1-byte LUT).  Width-specialised. */
+            #define LIKE_ROW_PASS(LOAD)                                        \
+                for (int64_t i = 0; i < len; i++) {                            \
+                    int64_t sid = (LOAD);                                      \
+                    dst[i] = ((uint64_t)sid < (uint64_t)dict_n) ? lut[sid] : 0; \
+                }
+            switch (sym_w) {
+            case RAY_SYM_W8:  { const uint8_t*  d = base; LIKE_ROW_PASS(d[i]) break; }
+            case RAY_SYM_W16: { const uint16_t* d = base; LIKE_ROW_PASS(d[i]) break; }
+            case RAY_SYM_W32: { const uint32_t* d = base; LIKE_ROW_PASS(d[i]) break; }
+            case RAY_SYM_W64:
+            default:          { const int64_t*  d = base; LIKE_ROW_PASS(d[i]) break; }
             }
+            #undef LIKE_ROW_PASS
 
             scratch_free(lut_hdr);
             scratch_free(seen_hdr);
