@@ -28,6 +28,8 @@
 
 #include <limits.h>
 #include <string.h>
+#include <time.h>
+#include <stdio.h>
 
 /* Constructor — mirrors ray_group's trail layout (keys, agg_ops, agg_ins
  * embedded in trailing bytes), and stashes the predicate root in
@@ -537,6 +539,166 @@ static void fp_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end)
     }
 }
 
+/* Parallel combine: 3-pass radix scatter.
+ *
+ *   Pass A (per shard, parallel): histogram slot counts per partition.
+ *   Pass B (per shard, parallel): scatter (kv, cnt) into a flat packed
+ *                                 buffer using the per-(shard, partition)
+ *                                 cursors derived from the histogram.
+ *   Pass C (per partition, parallel): dedup the partition's slice via a
+ *                                     private linear-probe HT, pack the
+ *                                     unique entries.
+ *
+ * The main thread concatenates per-partition outputs into the final
+ * (key, count) columns.  Eliminates the serial 22-28 ms merge on Q13's
+ * 700 K-group result. */
+typedef struct {
+    fp_shard_t*       shards;
+    uint32_t          nw;
+    uint32_t          p_bits;
+    uint64_t          p_mask;
+    int64_t           total_local;
+    int64_t*          hist;            /* [nw * P]: per-shard per-partition counts */
+    int64_t*          part_off;        /* [P + 1]: cumulative partition offsets */
+    int64_t*          sw_cursor;       /* [nw * P]: scatter cursors */
+    int64_t*          keys_buf;        /* [total_local]: packed keys */
+    int64_t*          counts_buf;      /* [total_local]: packed counts */
+    int64_t**         part_keys;       /* [P]: per-partition deduped keys */
+    int64_t**         part_counts;     /* [P]: per-partition deduped counts */
+    ray_t**           part_keys_hdr;
+    ray_t**           part_counts_hdr;
+    int64_t*          part_n;          /* [P]: deduped count */
+    _Atomic(uint32_t) oom;
+} fp_combine_par_ctx_t;
+
+static void fp_combine_hist_fn(void* vctx, uint32_t worker_id,
+                               int64_t start, int64_t end) {
+    (void)worker_id; (void)end;
+    fp_combine_par_ctx_t* c = (fp_combine_par_ctx_t*)vctx;
+    uint32_t w = (uint32_t)start;
+    fp_shard_t* sh = &c->shards[w];
+    int64_t* hist = c->hist + (size_t)w * (c->p_mask + 1);
+    if (!sh->slots) return;
+    for (uint64_t s = 0; s < sh->cap; s++) {
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv = sh->slots[s * 2 + 1];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t p = h & c->p_mask;
+        hist[p]++;
+    }
+}
+
+static void fp_combine_scat_fn(void* vctx, uint32_t worker_id,
+                               int64_t start, int64_t end) {
+    (void)worker_id; (void)end;
+    fp_combine_par_ctx_t* c = (fp_combine_par_ctx_t*)vctx;
+    uint32_t w = (uint32_t)start;
+    fp_shard_t* sh = &c->shards[w];
+    int64_t* cur = c->sw_cursor + (size_t)w * (c->p_mask + 1);
+    if (!sh->slots) return;
+    for (uint64_t s = 0; s < sh->cap; s++) {
+        if (!sh->slots[s * 2]) continue;
+        int64_t kv  = sh->slots[s * 2 + 1];
+        int64_t cnt = sh->counts[s];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t p = h & c->p_mask;
+        int64_t pos = cur[p]++;
+        c->keys_buf[pos]   = kv;
+        c->counts_buf[pos] = cnt;
+    }
+}
+
+static void fp_combine_dedup_fn(void* vctx, uint32_t worker_id,
+                                int64_t start, int64_t end) {
+    (void)worker_id; (void)end;
+    fp_combine_par_ctx_t* c = (fp_combine_par_ctx_t*)vctx;
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    uint64_t p = (uint64_t)start;
+    int64_t off  = c->part_off[p];
+    int64_t pcnt = c->part_off[p + 1] - off;
+    if (pcnt <= 0) {
+        c->part_keys[p]   = NULL;
+        c->part_counts[p] = NULL;
+        c->part_n[p]      = 0;
+        return;
+    }
+
+    uint64_t cap = 256;
+    while (cap < (uint64_t)(pcnt * 2)) cap <<= 1;
+    uint64_t mask = cap - 1;
+
+    ray_t* slots_hdr = NULL;
+    ray_t* cnts_hdr  = NULL;
+    int64_t* slots = (int64_t*)scratch_calloc(&slots_hdr,
+                                              (size_t)cap * 2 * sizeof(int64_t));
+    int64_t* cnts  = (int64_t*)scratch_calloc(&cnts_hdr,
+                                              (size_t)cap * sizeof(int64_t));
+    if (!slots || !cnts) {
+        if (slots_hdr) scratch_free(slots_hdr);
+        if (cnts_hdr)  scratch_free(cnts_hdr);
+        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+        return;
+    }
+
+    int64_t n_filled = 0;
+    const int64_t* k_in = c->keys_buf + off;
+    const int64_t* v_in = c->counts_buf + off;
+    for (int64_t i = 0; i < pcnt; i++) {
+        int64_t kv  = k_in[i];
+        int64_t cnt = v_in[i];
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        uint64_t t = (h >> c->p_bits) & mask;
+        for (;;) {
+            if (!slots[t * 2]) {
+                slots[t * 2]     = 1;
+                slots[t * 2 + 1] = kv;
+                cnts[t]          = cnt;
+                n_filled++;
+                break;
+            }
+            if (slots[t * 2 + 1] == kv) {
+                cnts[t] += cnt;
+                break;
+            }
+            t = (t + 1) & mask;
+        }
+    }
+
+    /* Pack into per-partition output. */
+    ray_t* k_hdr = NULL;
+    ray_t* c_hdr = NULL;
+    int64_t* k_out = (int64_t*)scratch_alloc(&k_hdr,
+                                             (size_t)n_filled * sizeof(int64_t));
+    int64_t* c_out = (int64_t*)scratch_alloc(&c_hdr,
+                                             (size_t)n_filled * sizeof(int64_t));
+    if (!k_out || !c_out) {
+        if (k_hdr) scratch_free(k_hdr);
+        if (c_hdr) scratch_free(c_hdr);
+        scratch_free(slots_hdr); scratch_free(cnts_hdr);
+        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+        return;
+    }
+    int64_t out_idx = 0;
+    for (uint64_t s = 0; s < cap; s++) {
+        if (slots[s * 2]) {
+            k_out[out_idx] = slots[s * 2 + 1];
+            c_out[out_idx] = cnts[s];
+            out_idx++;
+        }
+    }
+    scratch_free(slots_hdr);
+    scratch_free(cnts_hdr);
+
+    c->part_keys[p]       = k_out;
+    c->part_counts[p]     = c_out;
+    c->part_keys_hdr[p]   = k_hdr;
+    c->part_counts_hdr[p] = c_hdr;
+    c->part_n[p]          = n_filled;
+}
+
 /* Combine: merge per-worker shards into a global linear-probe hash, then
  * materialize the [key, count] result columns.  Caller frees shards
  * afterwards. */
@@ -569,6 +731,168 @@ static ray_t* fp_combine_and_materialize(fp_shard_t* shards, uint32_t nw,
         result = ray_table_add_col(result, cnt_sym, c0);
         ray_release(k0); ray_release(c0);
         return result;
+    }
+
+    /* Parallel combine for high-cardinality results: 3-pass radix scatter.
+     * Crossover at 50 K entries — below that, the serial walk has lower
+     * overhead than the dispatch + scratch alloc cost. */
+    ray_pool_t* cpool = ray_pool_get();
+    if (cpool && total_local >= 50000 &&
+        ray_pool_total_workers(cpool) >= 2 && nw <= 256)
+    {
+        uint32_t cnw = ray_pool_total_workers(cpool);
+        uint32_t p_bits = 6;  /* 64 partitions */
+        if (cnw < 8) p_bits = 4;
+        uint64_t P = (uint64_t)1 << p_bits;
+        uint64_t p_mask = P - 1;
+
+        ray_t* hist_hdr = NULL;
+        ray_t* off_hdr  = NULL;
+        ray_t* cur_hdr  = NULL;
+        ray_t* keys_hdr = NULL;
+        ray_t* cnts_hdr = NULL;
+        ray_t* pk_hdr   = NULL;
+        ray_t* pc_hdr   = NULL;
+        ray_t* pkh_hdr  = NULL;
+        ray_t* pch_hdr  = NULL;
+        ray_t* pn_hdr   = NULL;
+
+        int64_t* hist = (int64_t*)scratch_calloc(&hist_hdr,
+            (size_t)nw * (size_t)P * sizeof(int64_t));
+        int64_t* part_off = (int64_t*)scratch_alloc(&off_hdr,
+            (size_t)(P + 1) * sizeof(int64_t));
+        int64_t* sw_cursor = (int64_t*)scratch_alloc(&cur_hdr,
+            (size_t)nw * (size_t)P * sizeof(int64_t));
+        int64_t* keys_buf = (int64_t*)scratch_alloc(&keys_hdr,
+            (size_t)total_local * sizeof(int64_t));
+        int64_t* counts_buf = (int64_t*)scratch_alloc(&cnts_hdr,
+            (size_t)total_local * sizeof(int64_t));
+        int64_t** part_keys = (int64_t**)scratch_calloc(&pk_hdr,
+            (size_t)P * sizeof(int64_t*));
+        int64_t** part_counts = (int64_t**)scratch_calloc(&pc_hdr,
+            (size_t)P * sizeof(int64_t*));
+        ray_t**   part_keys_hdr = (ray_t**)scratch_calloc(&pkh_hdr,
+            (size_t)P * sizeof(ray_t*));
+        ray_t**   part_counts_hdr = (ray_t**)scratch_calloc(&pch_hdr,
+            (size_t)P * sizeof(ray_t*));
+        int64_t*  part_n = (int64_t*)scratch_calloc(&pn_hdr,
+            (size_t)P * sizeof(int64_t));
+
+        if (hist && part_off && sw_cursor && keys_buf && counts_buf &&
+            part_keys && part_counts && part_keys_hdr &&
+            part_counts_hdr && part_n)
+        {
+            fp_combine_par_ctx_t pctx = {
+                .shards          = shards,
+                .nw              = nw,
+                .p_bits          = p_bits,
+                .p_mask          = p_mask,
+                .total_local     = total_local,
+                .hist            = hist,
+                .part_off        = part_off,
+                .sw_cursor       = sw_cursor,
+                .keys_buf        = keys_buf,
+                .counts_buf      = counts_buf,
+                .part_keys       = part_keys,
+                .part_counts     = part_counts,
+                .part_keys_hdr   = part_keys_hdr,
+                .part_counts_hdr = part_counts_hdr,
+                .part_n          = part_n,
+                .oom             = 0,
+            };
+            ray_pool_dispatch_n(cpool, fp_combine_hist_fn, &pctx, nw);
+
+            /* Compute partition offsets + per-(shard,partition) cursors. */
+            int64_t total = 0;
+            for (uint64_t p = 0; p < P; p++) {
+                part_off[p] = total;
+                int64_t cum = total;
+                for (uint32_t w = 0; w < nw; w++) {
+                    int64_t cnt = hist[(size_t)w * P + p];
+                    sw_cursor[(size_t)w * P + p] = cum;
+                    cum += cnt;
+                }
+                total = cum;
+            }
+            part_off[P] = total;
+
+            ray_pool_dispatch_n(cpool, fp_combine_scat_fn, &pctx, nw);
+            ray_pool_dispatch_n(cpool, fp_combine_dedup_fn, &pctx, (uint32_t)P);
+
+            if (!atomic_load_explicit(&pctx.oom, memory_order_relaxed)) {
+                int64_t global_n = 0;
+                for (uint64_t p = 0; p < P; p++) global_n += part_n[p];
+
+                ray_t* k_out = (kt == RAY_SYM)
+                             ? ray_sym_vec_new(katt & RAY_SYM_W_MASK, global_n)
+                             : ray_vec_new(kt, global_n);
+                ray_t* c_out = ray_vec_new(RAY_I64, global_n);
+                if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
+                    if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
+                    if (c_out && !RAY_IS_ERR(c_out)) ray_release(c_out);
+                    for (uint64_t p = 0; p < P; p++) {
+                        if (part_keys_hdr[p])   scratch_free(part_keys_hdr[p]);
+                        if (part_counts_hdr[p]) scratch_free(part_counts_hdr[p]);
+                    }
+                    scratch_free(hist_hdr); scratch_free(off_hdr);
+                    scratch_free(cur_hdr); scratch_free(keys_hdr);
+                    scratch_free(cnts_hdr);
+                    scratch_free(pk_hdr); scratch_free(pc_hdr);
+                    scratch_free(pkh_hdr); scratch_free(pch_hdr);
+                    scratch_free(pn_hdr);
+                    return ray_error("oom", NULL);
+                }
+                k_out->len = global_n;
+                c_out->len = global_n;
+                void*    k_dst = ray_data(k_out);
+                int64_t* c_dst = (int64_t*)ray_data(c_out);
+                int64_t  gi    = 0;
+                for (uint64_t p = 0; p < P; p++) {
+                    int64_t  pn = part_n[p];
+                    int64_t* pk = part_keys[p];
+                    int64_t* pc = part_counts[p];
+                    for (int64_t i = 0; i < pn; i++) {
+                        write_col_i64(k_dst, gi, pk[i], kt, katt);
+                        c_dst[gi] = pc[i];
+                        gi++;
+                    }
+                    if (part_keys_hdr[p])   scratch_free(part_keys_hdr[p]);
+                    if (part_counts_hdr[p]) scratch_free(part_counts_hdr[p]);
+                }
+                scratch_free(hist_hdr); scratch_free(off_hdr);
+                scratch_free(cur_hdr); scratch_free(keys_hdr);
+                scratch_free(cnts_hdr);
+                scratch_free(pk_hdr); scratch_free(pc_hdr);
+                scratch_free(pkh_hdr); scratch_free(pch_hdr);
+                scratch_free(pn_hdr);
+
+                ray_t* result = ray_table_new(2);
+                if (!result || RAY_IS_ERR(result)) {
+                    ray_release(k_out); ray_release(c_out);
+                    return ray_error("oom", NULL);
+                }
+                int64_t cnt_sym = ray_sym_intern("count", 5);
+                result = ray_table_add_col(result, key_sym, k_out);
+                result = ray_table_add_col(result, cnt_sym, c_out);
+                ray_release(k_out); ray_release(c_out);
+                return result;
+            }
+            /* OOM during dedup pass — free per-partition outputs, fall through. */
+            for (uint64_t p = 0; p < P; p++) {
+                if (part_keys_hdr[p])   scratch_free(part_keys_hdr[p]);
+                if (part_counts_hdr[p]) scratch_free(part_counts_hdr[p]);
+            }
+        }
+        if (hist_hdr) scratch_free(hist_hdr);
+        if (off_hdr)  scratch_free(off_hdr);
+        if (cur_hdr)  scratch_free(cur_hdr);
+        if (keys_hdr) scratch_free(keys_hdr);
+        if (cnts_hdr) scratch_free(cnts_hdr);
+        if (pk_hdr)   scratch_free(pk_hdr);
+        if (pc_hdr)   scratch_free(pc_hdr);
+        if (pkh_hdr)  scratch_free(pkh_hdr);
+        if (pch_hdr)  scratch_free(pch_hdr);
+        if (pn_hdr)   scratch_free(pn_hdr);
     }
 
     /* Global cap: 2 × total_local rounded up to power of 2.  This is an
