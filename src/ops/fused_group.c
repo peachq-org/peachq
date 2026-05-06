@@ -25,6 +25,7 @@
 #include "lang/eval.h"     /* RAY_ATTR_NAME */
 #include "core/pool.h"     /* ray_pool_get / ray_pool_dispatch */
 
+#include <limits.h>
 #include <string.h>
 
 /* Constructor — mirrors ray_group's trail layout (keys, agg_ops, agg_ins
@@ -988,8 +989,26 @@ static inline int mk_shard_upsert(mk_shard_t* sh, const mk_par_ctx_t* c,
     }
 }
 
-/* ─── Worker fn ──────────────────────────────────────────────────────── */
-
+/* ─── Worker fn — DuckDB-style chunked vectorized aggregate update ───
+ *
+ * Per morsel we run two passes:
+ *
+ *   PASS 1 (probe): linear-probe the HT for every passing row.  On a
+ *   new slot we initialize the per-agg state to a per-kind sentinel
+ *   (0 for COUNT/SUM/AVG-sum, 0 for AVG-count, INT64_MAX for MIN,
+ *   INT64_MIN for MAX) so the accumulate-only update logic in pass 2
+ *   produces the correct first value without a separate "first row"
+ *   branch.  Pass 1 fills slot_idx[i] (HT slot for the i-th passing row)
+ *   and src_rows[i] (source row index) into stack-resident arrays.
+ *
+ *   PASS 2 (update): for each aggregate, run a tight per-agg loop over
+ *   match_count entries.  No per-row switch dispatch — the kind switch
+ *   is hoisted out of the loop, so each loop body is a single
+ *   accumulate operation against state[slot_idx[i] * total + off].
+ *
+ * Mirrors duckdb's GroupedAggregateHashTable::AddChunk path: probe
+ * first, then UpdateStates per aggregate.  Eliminates the O(rows × aggs)
+ * branch dispatch the per-row update did. */
 static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end) {
     mk_par_ctx_t* c = (mk_par_ctx_t*)raw;
     if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
@@ -1000,6 +1019,10 @@ static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end)
             return;
         }
     }
+
+    uint8_t  total_state = c->total_state;
+    uint8_t  n_aggs      = c->n_aggs;
+
     int64_t row = start;
     while (row < end) {
         int64_t mend = row + RAY_MORSEL_ELEMS;
@@ -1007,14 +1030,122 @@ static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end)
         int64_t mlen = mend - row;
         uint8_t bits[RAY_MORSEL_ELEMS];
         fp_eval_pred(&c->pred, row, mend, bits);
-        for (int64_t r = 0; r < mlen; r++) {
-            if (!bits[r]) continue;
-            int64_t kv = mk_compose_key(c, row + r);
-            if (mk_shard_upsert(sh, c, kv, row + r) != 0) {
+
+        /* Count passing rows up-front so we can pre-grow the shard if a
+         * worst-case (all new groups) chunk would push past load 0.5.
+         * This guarantees pass 1 never grows mid-chunk, which would
+         * invalidate the slot_idx[] we accumulate. */
+        int match_count = 0;
+        for (int64_t r = 0; r < mlen; r++) match_count += bits[r];
+        if (match_count == 0) { row = mend; continue; }
+
+        while (sh->n_filled + match_count > (int64_t)(sh->cap / 2)) {
+            if (mk_shard_grow(sh, total_state) != 0) {
                 atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
                 return;
             }
         }
+
+        /* PASS 1: probe; record slot_idx and src_rows for each passing row. */
+        uint32_t slot_idx[RAY_MORSEL_ELEMS];
+        int32_t  src_rows[RAY_MORSEL_ELEMS];   /* offset within morsel */
+        int64_t  base_row = row;
+        int64_t* slots = sh->slots;
+        int64_t* state = sh->state;
+        uint64_t mask  = sh->mask;
+        int      mi = 0;
+        for (int64_t r = 0; r < mlen; r++) {
+            if (!bits[r]) continue;
+            int64_t source_row = base_row + r;
+            int64_t kv = mk_compose_key(c, source_row);
+            uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+            h ^= h >> 33;
+            uint64_t s = h & mask;
+            for (;;) {
+                if (!slots[s * 2]) {
+                    slots[s * 2]     = 1;
+                    slots[s * 2 + 1] = kv;
+                    /* Initialise this slot's state to per-agg sentinels.
+                     * Pass 2 then runs uniform accumulate logic. */
+                    int64_t* st = &state[s * total_state];
+                    for (uint8_t a = 0; a < n_aggs; a++) {
+                        const mk_agg_t* ag = &c->aggs[a];
+                        switch (ag->kind) {
+                        case MK_AGG_COUNT:
+                        case MK_AGG_SUM:
+                            st[ag->state_off] = 0; break;
+                        case MK_AGG_MIN:
+                            st[ag->state_off] = INT64_MAX; break;
+                        case MK_AGG_MAX:
+                            st[ag->state_off] = INT64_MIN; break;
+                        case MK_AGG_AVG:
+                            st[ag->state_off    ] = 0;
+                            st[ag->state_off + 1] = 0; break;
+                        }
+                    }
+                    sh->n_filled++;
+                    break;
+                }
+                if (slots[s * 2 + 1] == kv) break;
+                s = (s + 1) & mask;
+            }
+            slot_idx[mi] = (uint32_t)s;
+            src_rows[mi] = (int32_t)r;
+            mi++;
+        }
+
+        /* PASS 2: per-agg vectorized update.  Each loop is branch-free
+         * across rows; the kind switch is amortized over match_count. */
+        for (uint8_t a = 0; a < n_aggs; a++) {
+            const mk_agg_t* ag = &c->aggs[a];
+            uint8_t off = ag->state_off;
+            switch (ag->kind) {
+            case MK_AGG_COUNT:
+                for (int i = 0; i < match_count; i++)
+                    state[slot_idx[i] * total_state + off]++;
+                break;
+            case MK_AGG_SUM: {
+                const void* in_base = ag->in_base;
+                uint8_t in_esz = ag->in_esz;
+                for (int i = 0; i < match_count; i++) {
+                    int64_t v = read_by_esz(in_base, base_row + src_rows[i], in_esz);
+                    state[slot_idx[i] * total_state + off] += v;
+                }
+                break;
+            }
+            case MK_AGG_MIN: {
+                const void* in_base = ag->in_base;
+                uint8_t in_esz = ag->in_esz;
+                for (int i = 0; i < match_count; i++) {
+                    int64_t v = read_by_esz(in_base, base_row + src_rows[i], in_esz);
+                    int64_t* p = &state[slot_idx[i] * total_state + off];
+                    if (v < *p) *p = v;
+                }
+                break;
+            }
+            case MK_AGG_MAX: {
+                const void* in_base = ag->in_base;
+                uint8_t in_esz = ag->in_esz;
+                for (int i = 0; i < match_count; i++) {
+                    int64_t v = read_by_esz(in_base, base_row + src_rows[i], in_esz);
+                    int64_t* p = &state[slot_idx[i] * total_state + off];
+                    if (v > *p) *p = v;
+                }
+                break;
+            }
+            case MK_AGG_AVG: {
+                const void* in_base = ag->in_base;
+                uint8_t in_esz = ag->in_esz;
+                for (int i = 0; i < match_count; i++) {
+                    int64_t v = read_by_esz(in_base, base_row + src_rows[i], in_esz);
+                    state[slot_idx[i] * total_state + off    ] += v;
+                    state[slot_idx[i] * total_state + off + 1] += 1;
+                }
+                break;
+            }
+            }
+        }
+
         row = mend;
     }
 }
