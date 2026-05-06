@@ -23,6 +23,7 @@
 
 #include "ops/internal.h"
 #include "ops/glob.h"
+#include "ops/rowsel.h"
 #include "core/pool.h"
 
 /* ============================================================================
@@ -53,7 +54,33 @@ typedef struct {
     uint8_t*    seen;
     uint64_t    dict_n;
     int         sym_w;
+    /* Optional rowsel — when non-NULL, skip rows already filtered out
+     * by an earlier WHERE conjunct.  Reduces seen[] population to just
+     * the surviving rows' sym_ids and short-circuits phase 2 work
+     * (resolve runs over the smaller seen set). */
+    const uint8_t*  sel_flg;
+    const uint32_t* sel_offs;
+    const uint16_t* sel_idx;
+    uint32_t        sel_n_segs;
+    int64_t         total_rows;
 } like_seen_ctx_t;
+
+/* Macro to mark seen[sid] for a single row at index `r`. */
+#define LIKE_SEEN_MARK_ROW(W) do {                                  \
+    if ((W) == RAY_SYM_W8) {                                         \
+        uint64_t sid = ((const uint8_t*)x->base)[r];                 \
+        if (sid < dict_n) seen[sid] = 1;                             \
+    } else if ((W) == RAY_SYM_W16) {                                 \
+        uint64_t sid = ((const uint16_t*)x->base)[r];                \
+        if (sid < dict_n) seen[sid] = 1;                             \
+    } else if ((W) == RAY_SYM_W32) {                                 \
+        uint64_t sid = ((const uint32_t*)x->base)[r];                \
+        if (sid < dict_n) seen[sid] = 1;                             \
+    } else {                                                         \
+        int64_t sid = ((const int64_t*)x->base)[r];                  \
+        if ((uint64_t)sid < dict_n) seen[sid] = 1;                   \
+    }                                                                \
+} while (0)
 
 static void like_seen_fn(void* vctx, uint32_t worker_id,
                          int64_t start, int64_t end) {
@@ -61,7 +88,49 @@ static void like_seen_fn(void* vctx, uint32_t worker_id,
     like_seen_ctx_t* x = (like_seen_ctx_t*)vctx;
     uint8_t* seen = x->seen;
     uint64_t dict_n = x->dict_n;
-    switch (x->sym_w) {
+    int sym_w = x->sym_w;
+
+    /* Selection-aware path: walk per morsel segment and only mark
+     * surviving rows.  When the segment is fully out, skip its row
+     * range entirely; when fully in, run the dense width-typed loop;
+     * MIX builds the per-segment in-bitmap and probes per row. */
+    if (x->sel_flg) {
+        const uint8_t*  flg  = x->sel_flg;
+        const uint32_t* offs = x->sel_offs;
+        const uint16_t* lidx = x->sel_idx;
+        uint32_t seg_lo = (uint32_t)(start / RAY_MORSEL_ELEMS);
+        uint32_t seg_hi = (uint32_t)((end + RAY_MORSEL_ELEMS - 1) / RAY_MORSEL_ELEMS);
+        if (seg_hi > x->sel_n_segs) seg_hi = x->sel_n_segs;
+        for (uint32_t seg = seg_lo; seg < seg_hi; seg++) {
+            int64_t s_lo = (int64_t)seg * RAY_MORSEL_ELEMS;
+            int64_t s_hi = s_lo + RAY_MORSEL_ELEMS;
+            if (s_lo < start) s_lo = start;
+            if (s_hi > end)   s_hi = end;
+            uint8_t f = flg[seg];
+            if (f == RAY_SEL_NONE) continue;
+            if (f == RAY_SEL_ALL) {
+                for (int64_t r = s_lo; r < s_hi; r++) LIKE_SEEN_MARK_ROW(sym_w);
+                continue;
+            }
+            uint8_t in_seg[RAY_MORSEL_ELEMS / 8] = {0};
+            uint32_t off = offs[seg];
+            uint32_t cnt = offs[seg + 1] - off;
+            for (uint32_t i = 0; i < cnt; i++) {
+                uint16_t loc = lidx[off + i];
+                in_seg[loc >> 3] |= (uint8_t)(1u << (loc & 7));
+            }
+            int64_t base = (int64_t)seg * RAY_MORSEL_ELEMS;
+            for (int64_t r = s_lo; r < s_hi; r++) {
+                uint16_t loc = (uint16_t)(r - base);
+                if (!(in_seg[loc >> 3] & (1u << (loc & 7)))) continue;
+                LIKE_SEEN_MARK_ROW(sym_w);
+            }
+        }
+        return;
+    }
+
+    /* No selection: dense width-typed loop. */
+    switch (sym_w) {
     case RAY_SYM_W8: {
         const uint8_t* d = (const uint8_t*)x->base;
         for (int64_t i = start; i < end; i++) {
@@ -97,6 +166,7 @@ static void like_seen_fn(void* vctx, uint32_t worker_id,
     }
     }
 }
+#undef LIKE_SEEN_MARK_ROW
 
 /* Worker for the SYM-LIKE row-projection phase.  Reads the per-sid
  * answer from `lut[]` and writes into the per-row bool destination.
@@ -108,7 +178,30 @@ typedef struct {
     const uint8_t* lut;
     uint64_t    dict_n;
     int         sym_w;
+    /* Optional rowsel — when non-NULL, leave dst[r] untouched for rows
+     * already filtered out (those positions don't matter to the caller
+     * since rowsel_refine only reads pred[r] for surviving rows). */
+    const uint8_t*  sel_flg;
+    const uint32_t* sel_offs;
+    const uint16_t* sel_idx;
+    uint32_t        sel_n_segs;
 } like_proj_ctx_t;
+
+#define LIKE_PROJ_SET_ROW(W) do {                                   \
+    if ((W) == RAY_SYM_W8) {                                         \
+        uint64_t sid = ((const uint8_t*)x->base)[r];                 \
+        dst[r] = (sid < dict_n) ? lut[sid] : 0;                      \
+    } else if ((W) == RAY_SYM_W16) {                                 \
+        uint64_t sid = ((const uint16_t*)x->base)[r];                \
+        dst[r] = (sid < dict_n) ? lut[sid] : 0;                      \
+    } else if ((W) == RAY_SYM_W32) {                                 \
+        uint64_t sid = ((const uint32_t*)x->base)[r];                \
+        dst[r] = (sid < dict_n) ? lut[sid] : 0;                      \
+    } else {                                                         \
+        int64_t sid = ((const int64_t*)x->base)[r];                  \
+        dst[r] = ((uint64_t)sid < dict_n) ? lut[sid] : 0;            \
+    }                                                                \
+} while (0)
 
 static void like_proj_fn(void* vctx, uint32_t worker_id,
                          int64_t start, int64_t end) {
@@ -117,7 +210,48 @@ static void like_proj_fn(void* vctx, uint32_t worker_id,
     uint8_t* dst = x->dst;
     const uint8_t* lut = x->lut;
     uint64_t dict_n = x->dict_n;
-    switch (x->sym_w) {
+    int sym_w = x->sym_w;
+
+    /* Selection-aware path: only project rows still in the rowsel.
+     * Rows filtered out by an earlier WHERE conjunct have dst[r]
+     * undefined — that's fine because ray_rowsel_refine ignores them
+     * when chaining the next selection. */
+    if (x->sel_flg) {
+        const uint8_t*  flg  = x->sel_flg;
+        const uint32_t* offs = x->sel_offs;
+        const uint16_t* lidx = x->sel_idx;
+        uint32_t seg_lo = (uint32_t)(start / RAY_MORSEL_ELEMS);
+        uint32_t seg_hi = (uint32_t)((end + RAY_MORSEL_ELEMS - 1) / RAY_MORSEL_ELEMS);
+        if (seg_hi > x->sel_n_segs) seg_hi = x->sel_n_segs;
+        for (uint32_t seg = seg_lo; seg < seg_hi; seg++) {
+            int64_t s_lo = (int64_t)seg * RAY_MORSEL_ELEMS;
+            int64_t s_hi = s_lo + RAY_MORSEL_ELEMS;
+            if (s_lo < start) s_lo = start;
+            if (s_hi > end)   s_hi = end;
+            uint8_t f = flg[seg];
+            if (f == RAY_SEL_NONE) continue;
+            if (f == RAY_SEL_ALL) {
+                for (int64_t r = s_lo; r < s_hi; r++) LIKE_PROJ_SET_ROW(sym_w);
+                continue;
+            }
+            uint8_t in_seg[RAY_MORSEL_ELEMS / 8] = {0};
+            uint32_t off = offs[seg];
+            uint32_t cnt = offs[seg + 1] - off;
+            for (uint32_t i = 0; i < cnt; i++) {
+                uint16_t loc = lidx[off + i];
+                in_seg[loc >> 3] |= (uint8_t)(1u << (loc & 7));
+            }
+            int64_t base = (int64_t)seg * RAY_MORSEL_ELEMS;
+            for (int64_t r = s_lo; r < s_hi; r++) {
+                uint16_t loc = (uint16_t)(r - base);
+                if (!(in_seg[loc >> 3] & (1u << (loc & 7)))) continue;
+                LIKE_PROJ_SET_ROW(sym_w);
+            }
+        }
+        return;
+    }
+
+    switch (sym_w) {
     case RAY_SYM_W8: {
         const uint8_t* d = (const uint8_t*)x->base;
         for (int64_t i = start; i < end; i++) {
@@ -153,6 +287,7 @@ static void like_proj_fn(void* vctx, uint32_t worker_id,
     }
     }
 }
+#undef LIKE_PROJ_SET_ROW
 
 /* Worker for the RAY_STR-LIKE parallel path.  Each task scans its
  * row range against the (pre-compiled) glob pattern; rows are
@@ -286,11 +421,23 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
              * may write 1 to the same byte concurrently — the value is
              * idempotent so the race is benign. */
             like_seen_ctx_t sctx = {
-                .base   = base,
-                .seen   = seen,
-                .dict_n = (uint64_t)dict_n,
-                .sym_w  = sym_w,
+                .base       = base,
+                .seen       = seen,
+                .dict_n     = (uint64_t)dict_n,
+                .sym_w      = sym_w,
+                .sel_flg    = NULL,
+                .sel_offs   = NULL,
+                .sel_idx    = NULL,
+                .sel_n_segs = 0,
+                .total_rows = len,
             };
+            if (g->selection) {
+                ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+                sctx.sel_flg    = ray_rowsel_flags(g->selection);
+                sctx.sel_offs   = ray_rowsel_offsets(g->selection);
+                sctx.sel_idx    = ray_rowsel_idx(g->selection);
+                sctx.sel_n_segs = sm->n_segs;
+            }
             if (pool && len >= 200000 && ray_pool_total_workers(pool) >= 2) {
                 ray_pool_dispatch(pool, like_seen_fn, &sctx, len);
             } else {
@@ -314,11 +461,15 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
              * serial on a W64 SYM column).  Width-specialised in the
              * worker fn so the inner load is a typed pointer dereference. */
             like_proj_ctx_t pctx = {
-                .base   = base,
-                .dst    = dst,
-                .lut    = lut,
-                .dict_n = (uint64_t)dict_n,
-                .sym_w  = sym_w,
+                .base       = base,
+                .dst        = dst,
+                .lut        = lut,
+                .dict_n     = (uint64_t)dict_n,
+                .sym_w      = sym_w,
+                .sel_flg    = sctx.sel_flg,
+                .sel_offs   = sctx.sel_offs,
+                .sel_idx    = sctx.sel_idx,
+                .sel_n_segs = sctx.sel_n_segs,
             };
             if (pool && len >= 200000 && ray_pool_total_workers(pool) >= 2) {
                 ray_pool_dispatch(pool, like_proj_fn, &pctx, len);
