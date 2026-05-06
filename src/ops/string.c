@@ -24,7 +24,6 @@
 #include "ops/internal.h"
 #include "ops/glob.h"
 #include "core/pool.h"
-#include <stdio.h>
 
 /* ============================================================================
  * OP_LIKE: glob pattern matching on STR / SYM columns.  See ops/glob.[ch].
