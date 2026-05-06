@@ -146,6 +146,7 @@ void     ray_cancel(void);
 #define OP_DATE_TRUNC   46
 #define OP_IN           47   /* binary: col in set_vec -> BOOL */
 #define OP_NOT_IN       48   /* binary: col not in set_vec -> BOOL */
+#define OP_IDIV         49   /* binary: integer floor division -> I64 */
 
 /* EXTRACT / DATE_TRUNC field identifiers */
 #define RAY_EXTRACT_YEAR    0
@@ -509,6 +510,7 @@ ray_op_t* ray_add(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_sub(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_mul(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_div(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
+ray_op_t* ray_idiv(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_mod(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_eq(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_ne(ray_graph_t* g, ray_op_t* a, ray_op_t* b);

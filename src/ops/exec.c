@@ -975,7 +975,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         case OP_LOG: case OP_EXP: case OP_CEIL: case OP_FLOOR: case OP_ROUND:
         case OP_ISNULL: case OP_CAST:
         /* Binary element-wise */
-        case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+        case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_IDIV: case OP_MOD:
         case OP_EQ: case OP_NE: case OP_LT: case OP_LE:
         case OP_GT: case OP_GE: case OP_AND: case OP_OR:
         case OP_MIN2: case OP_MAX2: {
@@ -2014,7 +2014,7 @@ static bool op_streamable(uint16_t opc) {
         case OP_LOG: case OP_EXP: case OP_CEIL: case OP_FLOOR: case OP_ROUND:
         case OP_ISNULL: case OP_CAST:
         /* Element-wise binary */
-        case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+        case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_IDIV: case OP_MOD:
         case OP_EQ: case OP_NE: case OP_LT: case OP_LE:
         case OP_GT: case OP_GE: case OP_AND: case OP_OR:
         case OP_MIN2: case OP_MAX2: case OP_IF: case OP_IN: case OP_NOT_IN:
