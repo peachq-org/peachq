@@ -22,8 +22,9 @@
  */
 
 #include "ops/fused_group.h"
-#include "lang/eval.h"     /* RAY_ATTR_NAME */
-#include "core/pool.h"     /* ray_pool_get / ray_pool_dispatch */
+#include "ops/fused_pred.h" /* fp_pred_t / fp_compile_pred / fp_eval_pred */
+#include "lang/eval.h"      /* RAY_ATTR_NAME */
+#include "core/pool.h"      /* ray_pool_get / ray_pool_dispatch */
 
 #include <limits.h>
 #include <string.h>
@@ -145,8 +146,7 @@ static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
  *   pred  = simple_cmp | (and simple_cmp simple_cmp …)
  *   simple_cmp = (op col const) where op ∈ {==, !=, <, <=, >, >=}
  *   ordering ops require col to be a numeric/temporal (non-SYM) column.
- *   AND fan-in is bounded by FP_PRED_MAX_CHILDREN. */
-#define FP_PRED_MAX_CHILDREN 8
+ *   AND fan-in is bounded by FP_PRED_MAX_CHILDREN (defined in fused_pred.h). */
 
 int ray_fused_group_supported(ray_t* expr, ray_t* tbl) {
     if (!expr || expr->type != RAY_LIST) return 0;
@@ -183,32 +183,9 @@ int ray_fused_group_supported(ray_t* expr, ray_t* tbl) {
  * row range; OP_NE flips the result via XOR.
  * ──────────────────────────────────────────────────────────────────────── */
 
-/* Comparison opcodes — kept as integers so fp_check_simple_cmp can return
- * them directly.  Order matters: ordering ops are >= FP_LT. */
-typedef enum {
-    FP_EQ = 0,
-    FP_NE = 1,
-    FP_LT = 2,
-    FP_LE = 3,
-    FP_GT = 4,
-    FP_GE = 5,
-} fp_op_t;
-
-typedef struct {
-    fp_op_t      op;
-    int8_t       col_type;
-    uint8_t      col_attrs;
-    uint8_t      col_esz;       /* element size in bytes */
-    const void*  col_base;
-    int64_t      col_len;
-    int64_t      cval;          /* I64-encoded constant; for SYM the dict ID */
-    int          cval_in_dict;  /* SYM only: 0 = const not in dict (folded) */
-} fp_cmp_t;
-
-typedef struct {
-    fp_cmp_t children[FP_PRED_MAX_CHILDREN];
-    uint8_t  n_children;
-} fp_pred_t;
+/* fp_op_t / fp_cmp_t / fp_pred_t / FP_PRED_MAX_CHILDREN are defined in
+ * fused_pred.h so fused_topk.c (and any future fused-* operator) can
+ * reuse the predicate evaluator without duplicating the types. */
 
 /* Inner-loop generator: specialise on element type and operator so the
  * compiler can hoist the comparison and autovectorise the byte-store. */
@@ -220,8 +197,8 @@ typedef struct {
 
 /* Fill bits[0..end-start) with 0/1 based on `cmp` over rows [start, end).
  * Per-(esz, op) specialisation; SYM supports only EQ/NE. */
-static void fp_eval_cmp(const fp_cmp_t* p, int64_t start, int64_t end,
-                        uint8_t* bits)
+void fp_eval_cmp(const fp_cmp_t* p, int64_t start, int64_t end,
+                 uint8_t* bits)
 {
     int64_t n = end - start;
     int64_t cval = p->cval;
@@ -300,8 +277,8 @@ static void fp_eval_cmp(const fp_cmp_t* p, int64_t start, int64_t end,
 /* Evaluate a (possibly ANDed) predicate over rows [start, end).  The
  * first child writes directly into bits[]; subsequent children eval into
  * a stack-resident tmp[] buffer and bitwise-AND into bits. */
-static void fp_eval_pred(const fp_pred_t* p, int64_t start, int64_t end,
-                         uint8_t* bits)
+void fp_eval_pred(const fp_pred_t* p, int64_t start, int64_t end,
+                  uint8_t* bits)
 {
     int64_t n = end - start;
     if (p->n_children == 0) {
@@ -403,8 +380,8 @@ static int fp_compile_pred_dag(ray_graph_t* g, ray_op_t* node, ray_t* tbl,
     return fp_compile_cmp(g, node, tbl, &out->children[out->n_children++]);
 }
 
-static int fp_compile_pred(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
-                           fp_pred_t* out)
+int fp_compile_pred(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
+                    fp_pred_t* out)
 {
     out->n_children = 0;
     return fp_compile_pred_dag(g, pred_op, tbl, out);
