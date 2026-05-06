@@ -5442,6 +5442,65 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 }
 
 /* (xbar col bucket) — time/value bucketing: floor(col/bucket)*bucket */
+/* Parallel inner loops for ray_xbar_fn fast path.  Dispatch one task per
+ * morsel range so 5M-row temporal columns scale across the worker pool
+ * (Q43's xbar was ~6ms serial, ~0.5ms with 28 workers). */
+typedef struct {
+    int8_t out_type;
+    const void* in;
+    void* out;
+    int64_t b;
+    int pow2;
+} xbar_par_ctx_t;
+
+static void xbar_par_fn(void* vctx, uint32_t worker_id,
+                        int64_t start, int64_t end) {
+    (void)worker_id;
+    xbar_par_ctx_t* c = (xbar_par_ctx_t*)vctx;
+    int64_t b = c->b;
+    if (c->out_type == RAY_I64 || c->out_type == RAY_TIMESTAMP) {
+        const int64_t* in = (const int64_t*)c->in;
+        int64_t* o = (int64_t*)c->out;
+        if (c->pow2) {
+            int64_t mask = ~(b - 1);
+            for (int64_t i = start; i < end; i++) o[i] = in[i] & mask;
+        } else {
+            for (int64_t i = start; i < end; i++) {
+                int64_t a = in[i];
+                int64_t q = a / b;
+                if ((a ^ b) < 0 && q * b != a) q--;
+                o[i] = q * b;
+            }
+        }
+    } else if (c->out_type == RAY_I32 || c->out_type == RAY_DATE ||
+               c->out_type == RAY_TIME) {
+        const int32_t* in = (const int32_t*)c->in;
+        int32_t* o = (int32_t*)c->out;
+        int32_t b32 = (int32_t)b;
+        if (c->pow2) {
+            int32_t mask = (int32_t)~((uint32_t)b32 - 1);
+            for (int64_t i = start; i < end; i++) o[i] = in[i] & mask;
+        } else {
+            for (int64_t i = start; i < end; i++) {
+                int32_t a = in[i];
+                int32_t q = a / b32;
+                if ((a ^ b32) < 0 && q * b32 != a) q--;
+                o[i] = q * b32;
+            }
+        }
+    } else { /* RAY_I16 */
+        const int16_t* in = (const int16_t*)c->in;
+        int16_t* o = (int16_t*)c->out;
+        int16_t b16 = (int16_t)b;
+        for (int64_t i = start; i < end; i++) {
+            int16_t a = in[i];
+            int16_t q = a / b16;
+            if ((a ^ b16) < 0 && q * b16 != a) q--;
+            o[i] = q * b16;
+        }
+    }
+}
+
 ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
     /* Vectorised fast path for `(xbar VEC scalar_int)` on integer or
      * temporal columns.  The generic atomic_map_binary path was
@@ -5449,7 +5508,8 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
      * recursively — at 5M rows this dominates (≥100 ms).  A direct
      * tight loop computes floor-div + multiply per element with no
      * allocations.  When the bucket is a power of two we lower the
-     * divide further to mask + arithmetic.
+     * divide further to mask + arithmetic.  Parallelised across the
+     * worker pool for large columns.
      *
      * Short-circuited only when both bucket and col are well-typed;
      * everything else falls through to the recursive
@@ -5468,64 +5528,62 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
         if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
         out->len = n;
 
-        /* Compute (q*b) where q = floor(a/b).  C division truncates
-         * toward zero; for negative dividend we adjust. */
         int8_t out_type = col->type;
+        int pow2 = 0;
         if (out_type == RAY_I64 || out_type == RAY_TIMESTAMP) {
-            const int64_t* in = (const int64_t*)ray_data(col);
-            int64_t* o = (int64_t*)ray_data(out);
-            if (b > 0 && (b & (b - 1)) == 0) {
-                /* Bucket is a power of two on a non-negative-friendly path:
-                 * a/b == a >> log2(b), but still need the floor adjustment
-                 * for negative inputs.  Use bitmask: q*b = a & ~(b-1) for
-                 * non-negative `a`.  For mixed-sign data this falls back
-                 * to the general path. */
-                int64_t mask = ~(b - 1);
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t a = in[i];
-                    /* Floor toward -inf for negative a too: a & mask. */
-                    o[i] = a & mask;
-                }
-            } else {
-                for (int64_t i = 0; i < n; i++) {
-                    int64_t a = in[i];
-                    int64_t q = a / b;
-                    if ((a ^ b) < 0 && q * b != a) q--;
-                    o[i] = q * b;
-                }
-            }
+            pow2 = (b > 0 && (b & (b - 1)) == 0);
         } else if (out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME) {
-            const int32_t* in = (const int32_t*)ray_data(col);
-            int32_t* o = (int32_t*)ray_data(out);
             int32_t b32 = (int32_t)b;
-            if (b32 > 0 && ((uint32_t)b32 & ((uint32_t)b32 - 1)) == 0) {
-                int32_t mask = (int32_t)~((uint32_t)b32 - 1);
-                for (int64_t i = 0; i < n; i++) o[i] = in[i] & mask;
-            } else {
-                for (int64_t i = 0; i < n; i++) {
-                    int32_t a = in[i];
-                    int32_t q = a / b32;
-                    if ((a ^ b32) < 0 && q * b32 != a) q--;
-                    o[i] = q * b32;
-                }
-            }
-        } else { /* RAY_I16 */
-            const int16_t* in = (const int16_t*)ray_data(col);
-            int16_t* o = (int16_t*)ray_data(out);
-            int16_t b16 = (int16_t)b;
-            for (int64_t i = 0; i < n; i++) {
-                int16_t a = in[i];
-                int16_t q = a / b16;
-                if ((a ^ b16) < 0 && q * b16 != a) q--;
-                o[i] = q * b16;
-            }
+            pow2 = (b32 > 0 && ((uint32_t)b32 & ((uint32_t)b32 - 1)) == 0);
         }
 
-        /* Propagate null bitmap if present. */
+        ray_pool_t* pool = ray_pool_get();
+        if (pool && n >= 200000 && ray_pool_total_workers(pool) >= 2) {
+            xbar_par_ctx_t ctx = {
+                .out_type = out_type,
+                .in       = ray_data(col),
+                .out      = ray_data(out),
+                .b        = b,
+                .pow2     = pow2,
+            };
+            ray_pool_dispatch(pool, xbar_par_fn, &ctx, n);
+        } else {
+            xbar_par_ctx_t ctx = {
+                .out_type = out_type,
+                .in       = ray_data(col),
+                .out      = ray_data(out),
+                .b        = b,
+                .pow2     = pow2,
+            };
+            xbar_par_fn(&ctx, 0, 0, n);
+        }
+
+        /* Propagate null bitmap if present.  Walk the source nullmap
+         * byte-by-byte and only clobber positions where the source is
+         * null — same trick as fix_null_comparisons.  Cheap for the
+         * common case of HAS_NULLS attr set with mostly-empty bitmap. */
         if (col->attrs & RAY_ATTR_HAS_NULLS) {
-            for (int64_t i = 0; i < n; i++)
-                if (ray_vec_is_null(col, i))
-                    ray_vec_set_null(out, i, true);
+            int64_t off_bits = 0, len_bits = 0;
+            const uint8_t* nbits = ray_vec_nullmap_bytes(col, &off_bits, &len_bits);
+            if (nbits && (off_bits % 8) == 0) {
+                int64_t byte0 = off_bits / 8;
+                for (int64_t i = 0; i + 8 <= n; i += 8) {
+                    uint8_t bb = nbits[byte0 + (i >> 3)];
+                    if (bb) {
+                        for (int64_t k = 0; k < 8; k++)
+                            if ((bb >> k) & 1)
+                                ray_vec_set_null(out, i + k, true);
+                    }
+                }
+                for (int64_t i = (n & ~7); i < n; i++) {
+                    if ((nbits[byte0 + (i >> 3)] >> (i & 7)) & 1)
+                        ray_vec_set_null(out, i, true);
+                }
+            } else {
+                for (int64_t i = 0; i < n; i++)
+                    if (ray_vec_is_null(col, i))
+                        ray_vec_set_null(out, i, true);
+            }
         }
         return out;
     }
