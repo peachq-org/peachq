@@ -44,10 +44,12 @@ ray_op_t* ray_filtered_group(ray_graph_t* g,
 
 /* Predicate-shape detection used by the planner before emitting the
  * fused op.  Returns 1 if `expr` (a Rayfall expression, not a DAG node)
- * can be evaluated by the per-morsel predicate evaluator.  Phase 1 accepts
- * only single comparisons against a constant on a single SYM/I64 column;
- * later phases extend the vocabulary. */
-int ray_fused_group_supported(ray_t* expr);
+ * can be evaluated by the per-morsel predicate evaluator against `tbl`.
+ *
+ * Phase 1 accepted single (== col const) / (!= col const) on flat
+ * SYM/integer columns.  Phase 3 adds (and pred1 pred2 …) of those, plus
+ * ordering comparisons (<, <=, >, >=) on numeric (non-SYM) columns. */
+int ray_fused_group_supported(ray_t* expr, ray_t* tbl);
 
 /* exec.c calls this for OP_FILTERED_GROUP nodes. */
 ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op);
