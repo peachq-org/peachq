@@ -24,6 +24,7 @@
 #include "ops/internal.h"
 #include "ops/glob.h"
 #include "core/pool.h"
+#include <stdio.h>
 
 /* ============================================================================
  * OP_LIKE: glob pattern matching on STR / SYM columns.  See ops/glob.[ch].
@@ -43,6 +44,142 @@ typedef struct {
     const char*                pat_str;
     size_t                     pat_len;
 } like_resolve_ctx_t;
+
+/* Worker for the SYM-LIKE seen-mark phase.  Marks `seen[sid] = 1` for
+ * every row's sym_id.  Multiple workers may write 1 to the same byte
+ * concurrently — the value is idempotent (always 1), so the data race
+ * is benign.  Width-specialised on the SYM dictionary width. */
+typedef struct {
+    const void* base;
+    uint8_t*    seen;
+    uint64_t    dict_n;
+    int         sym_w;
+} like_seen_ctx_t;
+
+static void like_seen_fn(void* vctx, uint32_t worker_id,
+                         int64_t start, int64_t end) {
+    (void)worker_id;
+    like_seen_ctx_t* x = (like_seen_ctx_t*)vctx;
+    uint8_t* seen = x->seen;
+    uint64_t dict_n = x->dict_n;
+    switch (x->sym_w) {
+    case RAY_SYM_W8: {
+        const uint8_t* d = (const uint8_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            uint64_t sid = d[i];
+            if (sid < dict_n) seen[sid] = 1;
+        }
+        break;
+    }
+    case RAY_SYM_W16: {
+        const uint16_t* d = (const uint16_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            uint64_t sid = d[i];
+            if (sid < dict_n) seen[sid] = 1;
+        }
+        break;
+    }
+    case RAY_SYM_W32: {
+        const uint32_t* d = (const uint32_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            uint64_t sid = d[i];
+            if (sid < dict_n) seen[sid] = 1;
+        }
+        break;
+    }
+    case RAY_SYM_W64:
+    default: {
+        const int64_t* d = (const int64_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            int64_t sid = d[i];
+            if ((uint64_t)sid < dict_n) seen[sid] = 1;
+        }
+        break;
+    }
+    }
+}
+
+/* Worker for the SYM-LIKE row-projection phase.  Reads the per-sid
+ * answer from `lut[]` and writes into the per-row bool destination.
+ * Workers write to disjoint slices of `dst`, so no synchronisation is
+ * needed.  Width-specialised on the SYM dictionary width. */
+typedef struct {
+    const void* base;
+    uint8_t*    dst;
+    const uint8_t* lut;
+    uint64_t    dict_n;
+    int         sym_w;
+} like_proj_ctx_t;
+
+static void like_proj_fn(void* vctx, uint32_t worker_id,
+                         int64_t start, int64_t end) {
+    (void)worker_id;
+    like_proj_ctx_t* x = (like_proj_ctx_t*)vctx;
+    uint8_t* dst = x->dst;
+    const uint8_t* lut = x->lut;
+    uint64_t dict_n = x->dict_n;
+    switch (x->sym_w) {
+    case RAY_SYM_W8: {
+        const uint8_t* d = (const uint8_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            uint64_t sid = d[i];
+            dst[i] = (sid < dict_n) ? lut[sid] : 0;
+        }
+        break;
+    }
+    case RAY_SYM_W16: {
+        const uint16_t* d = (const uint16_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            uint64_t sid = d[i];
+            dst[i] = (sid < dict_n) ? lut[sid] : 0;
+        }
+        break;
+    }
+    case RAY_SYM_W32: {
+        const uint32_t* d = (const uint32_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            uint64_t sid = d[i];
+            dst[i] = (sid < dict_n) ? lut[sid] : 0;
+        }
+        break;
+    }
+    case RAY_SYM_W64:
+    default: {
+        const int64_t* d = (const int64_t*)x->base;
+        for (int64_t i = start; i < end; i++) {
+            int64_t sid = d[i];
+            dst[i] = ((uint64_t)sid < dict_n) ? lut[sid] : 0;
+        }
+        break;
+    }
+    }
+}
+
+/* Worker for the RAY_STR-LIKE parallel path.  Each task scans its
+ * row range against the (pre-compiled) glob pattern; rows are
+ * independent so no synchronisation needed. */
+typedef struct {
+    const ray_str_t*           elems;
+    const char*                pool_data;
+    uint8_t*                   dst;
+    const ray_glob_compiled_t* pc;
+    bool                       use_simple;
+    const char*                pat_str;
+    size_t                     pat_len;
+} str_like_par_ctx_t;
+
+static void str_like_par_fn(void* vctx, uint32_t worker_id,
+                            int64_t start, int64_t end) {
+    (void)worker_id;
+    str_like_par_ctx_t* x = (str_like_par_ctx_t*)vctx;
+    for (int64_t i = start; i < end; i++) {
+        const char* sp = ray_str_t_ptr(&x->elems[i], x->pool_data);
+        size_t sl = x->elems[i].len;
+        x->dst[i] = (x->use_simple
+                     ? ray_glob_match_compiled(x->pc, sp, sl)
+                     : ray_glob_match(sp, sl, x->pat_str, x->pat_len)) ? 1 : 0;
+    }
+}
 
 static void like_resolve_fn(void* ctx, uint32_t worker_id,
                             int64_t start, int64_t end) {
@@ -89,14 +226,27 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
 
     int8_t in_type = input->type;
     if (in_type == RAY_STR) {
-        const ray_str_t* elems; const char* pool;
-        str_resolve(input, &elems, &pool);
-        for (int64_t i = 0; i < len; i++) {
-            const char* sp = ray_str_t_ptr(&elems[i], pool);
-            size_t sl = elems[i].len;
-            dst[i] = (use_simple
-                      ? ray_glob_match_compiled(&pc, sp, sl)
-                      : ray_glob_match(sp, sl, pat_str, pat_len)) ? 1 : 0;
+        /* Parallel substring/glob match over RAY_STR.  Q22/Q23 ClickBench
+         * are 5 M URL/Title columns × ~80 chars/row = ~400 MB scan,
+         * memory-bandwidth bound; the worker pool gives a 5-10× speedup
+         * since glob_match is independent per row. */
+        const ray_str_t* elems; const char* pool_data;
+        str_resolve(input, &elems, &pool_data);
+
+        str_like_par_ctx_t lctx = {
+            .elems      = elems,
+            .pool_data  = pool_data,
+            .dst        = dst,
+            .pc         = &pc,
+            .use_simple = use_simple,
+            .pat_str    = pat_str,
+            .pat_len    = pat_len,
+        };
+        ray_pool_t* str_pool = ray_pool_get();
+        if (str_pool && len >= 100000 && ray_pool_total_workers(str_pool) >= 2) {
+            ray_pool_dispatch(str_pool, str_like_par_fn, &lctx, len);
+        } else {
+            str_like_par_fn(&lctx, 0, 0, len);
         }
     } else if (RAY_IS_SYM(in_type)) {
         /* Dictionary-cached fast path.
@@ -130,41 +280,22 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
         if (lut && seen) {
             int sym_w = (int)(input->attrs & RAY_SYM_W_MASK);
 
-            /* Phase 1: mark used sym_ids.  Width-specialised. */
-            switch (sym_w) {
-            case RAY_SYM_W8: {
-                const uint8_t* d = (const uint8_t*)base;
-                for (int64_t i = 0; i < len; i++) {
-                    uint64_t sid = d[i];
-                    if (sid < dict_n) seen[sid] = 1;
-                }
-                break;
-            }
-            case RAY_SYM_W16: {
-                const uint16_t* d = (const uint16_t*)base;
-                for (int64_t i = 0; i < len; i++) {
-                    uint64_t sid = d[i];
-                    if (sid < dict_n) seen[sid] = 1;
-                }
-                break;
-            }
-            case RAY_SYM_W32: {
-                const uint32_t* d = (const uint32_t*)base;
-                for (int64_t i = 0; i < len; i++) {
-                    uint64_t sid = d[i];
-                    if (sid < dict_n) seen[sid] = 1;
-                }
-                break;
-            }
-            case RAY_SYM_W64:
-            default: {
-                const int64_t* d = (const int64_t*)base;
-                for (int64_t i = 0; i < len; i++) {
-                    int64_t sid = d[i];
-                    if ((uint64_t)sid < dict_n) seen[sid] = 1;
-                }
-                break;
-            }
+            ray_pool_t* pool = ray_pool_get();
+            /* Phase 1: mark used sym_ids.  Parallelised because for
+             * high-cardinality columns (URL on ClickBench) the seen-
+             * mark scan was a 5 ms-class serial pass.  Multiple workers
+             * may write 1 to the same byte concurrently — the value is
+             * idempotent so the race is benign. */
+            like_seen_ctx_t sctx = {
+                .base   = base,
+                .seen   = seen,
+                .dict_n = (uint64_t)dict_n,
+                .sym_w  = sym_w,
+            };
+            if (pool && len >= 200000 && ray_pool_total_workers(pool) >= 2) {
+                ray_pool_dispatch(pool, like_seen_fn, &sctx, len);
+            } else {
+                like_seen_fn(&sctx, 0, 0, len);
             }
 
             /* Phase 2: parallel pattern resolve over the dict range. */
@@ -173,28 +304,28 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
                 .pc = &pc, .use_simple = use_simple,
                 .pat_str = pat_str, .pat_len = pat_len,
             };
-            ray_pool_t* pool = ray_pool_get();
             if (pool && (int64_t)dict_n >= 16384) {
                 ray_pool_dispatch(pool, like_resolve_fn, &rctx, (int64_t)dict_n);
             } else {
                 like_resolve_fn(&rctx, 0, 0, (int64_t)dict_n);
             }
 
-            /* Phase 3: row projection (sequential — already a tight
-             * gather over a 1-byte LUT).  Width-specialised. */
-            #define LIKE_ROW_PASS(LOAD)                                        \
-                for (int64_t i = 0; i < len; i++) {                            \
-                    int64_t sid = (LOAD);                                      \
-                    dst[i] = ((uint64_t)sid < (uint64_t)dict_n) ? lut[sid] : 0; \
-                }
-            switch (sym_w) {
-            case RAY_SYM_W8:  { const uint8_t*  d = base; LIKE_ROW_PASS(d[i]) break; }
-            case RAY_SYM_W16: { const uint16_t* d = base; LIKE_ROW_PASS(d[i]) break; }
-            case RAY_SYM_W32: { const uint32_t* d = base; LIKE_ROW_PASS(d[i]) break; }
-            case RAY_SYM_W64:
-            default:          { const int64_t*  d = base; LIKE_ROW_PASS(d[i]) break; }
+            /* Phase 3: row projection — gather lut[sid] into the per-row
+             * bool dst.  Parallelised because it's a 5 M-row pass (~5 ms
+             * serial on a W64 SYM column).  Width-specialised in the
+             * worker fn so the inner load is a typed pointer dereference. */
+            like_proj_ctx_t pctx = {
+                .base   = base,
+                .dst    = dst,
+                .lut    = lut,
+                .dict_n = (uint64_t)dict_n,
+                .sym_w  = sym_w,
+            };
+            if (pool && len >= 200000 && ray_pool_total_workers(pool) >= 2) {
+                ray_pool_dispatch(pool, like_proj_fn, &pctx, len);
+            } else {
+                like_proj_fn(&pctx, 0, 0, len);
             }
-            #undef LIKE_ROW_PASS
 
             scratch_free(lut_hdr);
             scratch_free(seen_hdr);
