@@ -2093,10 +2093,20 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     {
         const char* off_env = getenv("RAYFORCE_DISABLE_FUSED_GROUP");
         int env_disabled = (off_env && off_env[0] == '1');
+        /* Accept by_expr in either the scalar (-RAY_SYM with NAME) form or
+         * the 1-element RAY_SYM vector form.  The latter is what dict-form
+         * by-clauses become after the pre-evaluation step (e.g. Q43's
+         * `by: {M: (xbar EventTime …)}` rewrites to a [M] sym vector). */
+        int single_key_scalar = by_expr && by_expr->type == -RAY_SYM
+                              && (by_expr->attrs & RAY_ATTR_NAME);
+        int single_key_vec    = by_expr && by_expr->type == RAY_SYM
+                              && ray_len(by_expr) == 1;
+        int64_t by_key_sym = -1;
+        if (single_key_scalar) by_key_sym = by_expr->i64;
+        else if (single_key_vec) by_key_sym = ((int64_t*)ray_data(by_expr))[0];
         if (!env_disabled
             && where_expr && by_expr && !nearest_expr
-            && by_expr->type == -RAY_SYM
-            && (by_expr->attrs & RAY_ATTR_NAME)
+            && by_key_sym >= 0
             && ray_fused_group_supported(where_expr, tbl))
         {
             int n_count_aggs = 0;
@@ -2116,7 +2126,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 n_count_aggs++;
             }
             if (n_count_aggs == 1 && n_other == 0) {
-                ray_t* key_col = ray_table_get_col(tbl, by_expr->i64);
+                ray_t* key_col = ray_table_get_col(tbl, by_key_sym);
                 if (key_col && !RAY_IS_PARTED(key_col->type)
                     && key_col->type != RAY_MAPCOMMON) {
                     can_fuse_phase1 = 1;
