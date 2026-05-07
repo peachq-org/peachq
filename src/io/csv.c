@@ -614,11 +614,13 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
      *                         empty-string token to mean "absent value".
      *                         This was the pre-2026-05 behaviour.
      *
-     * Round-trip warning: the SYM column type does not preserve a separate
-     * NULL sentinel — both branches end up with the same "" symbol on the
-     * value side; the only difference is whether the row's null bit is
-     * cleared.  See ROADMAP.md for the optional separate empty/null
-     * tracking proposal. */
+     * Round-trip warning: the SYM column type does not preserve a
+     * separate NULL sentinel — both branches end up with the same
+     * "" symbol on the value side; the only difference is whether
+     * the row's null bit is cleared.  Lifting this limitation would
+     * require either a reserved sym ID for "missing" or a parallel
+     * presence column; either change is out of scope for this fast
+     * path and is tracked separately. */
     const char* policy_env = getenv("RAYFORCE_CSV_EMPTY_SYM_NULL");
     int empty_sym_keep_null = (policy_env && policy_env[0] == '1') ? 1 : 0;
 
