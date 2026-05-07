@@ -469,6 +469,12 @@ void ray_runtime_destroy(ray_runtime_t* rt);
  * ray_release. */
 ray_t* ray_eval_str(const char* source);
 
+ray_t* ray_select(ray_t** args, int64_t n);
+ray_t* ray_update(ray_t** args, int64_t n);
+ray_t* ray_insert(ray_t** args, int64_t n);
+ray_t* ray_upsert(ray_t** args, int64_t n);
+ray_t* ray_fmt(ray_t* obj, int mode);
+
 /* ===== IPC Client API =====
  *
  * Blocking client API for talking to a Rayforce IPC server. Handles are
