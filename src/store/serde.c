@@ -39,6 +39,7 @@
 #endif
 #include "table/sym.h"
 #include "lang/env.h"
+#include "lang/eval.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -82,6 +83,36 @@ static size_t safe_strlen(const uint8_t* buf, int64_t max) {
 static int64_t null_bitmap_size(ray_t* v) {
     if (!(v->attrs & RAY_ATTR_HAS_NULLS)) return 0;
     return (v->len + 7) / 8;
+}
+
+static int64_t schema_names_serde_size(ray_t* schema) {
+    if (!schema || schema->type != RAY_I64) return 0;
+    int64_t size = 1 + 1 + 8;
+    int64_t* ids = (int64_t*)ray_data(schema);
+    for (int64_t i = 0; i < schema->len; i++) {
+        ray_t* s = ray_sym_str(ids[i]);
+        size += (s ? (int64_t)ray_str_len(s) : 0) + 1;
+    }
+    return size;
+}
+
+static int64_t ser_schema_names(uint8_t* buf, ray_t* schema) {
+    if (!schema || schema->type != RAY_I64) return 0;
+    buf[0] = (uint8_t)RAY_SYM;
+    buf[1] = RAY_SYM_W64;
+    memcpy(buf + 2, &schema->len, 8);
+    int64_t c = 10;
+    int64_t* ids = (int64_t*)ray_data(schema);
+    for (int64_t i = 0; i < schema->len; i++) {
+        ray_t* s = ray_sym_str(ids[i]);
+        if (s) {
+            size_t slen = ray_str_len(s);
+            memcpy(buf + c, ray_str_ptr(s), slen);
+            c += (int64_t)slen;
+        }
+        buf[c++] = '\0';
+    }
+    return c;
 }
 
 /* Write null bitmap bytes into buf. Returns bytes written.
@@ -215,7 +246,7 @@ int64_t ray_serde_size(ray_t* obj) {
     case RAY_TABLE: {
         /* type + attrs + schema(recursive) + cols(recursive RAY_LIST) */
         ray_t** slots = (ray_t**)ray_data(obj);
-        return 1 + 1 + ray_serde_size(slots[0]) + ray_serde_size(slots[1]);
+        return 1 + 1 + schema_names_serde_size(slots[0]) + ray_serde_size(slots[1]);
     }
     case RAY_DICT: {
         /* type + attrs + keys(recursive) + vals(recursive) */
@@ -276,6 +307,8 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
      * so (de (ser 0Nl)) roundtrips instead of decoding as plain 0. */
     if (type < 0) {
         uint8_t aflags = (uint8_t)(obj->nullmap[0] & 1);
+        if (type == -RAY_SYM && (obj->attrs & RAY_ATTR_NAME))
+            aflags |= RAY_ATTR_NAME;
         buf[0] = aflags;
         buf++;
         int8_t base = -type;
@@ -451,7 +484,7 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
         buf[0] = obj->attrs;
         buf++;
         ray_t** slots = (ray_t**)ray_data(obj);
-        c = ray_ser_raw(buf, slots[0]);          /* schema (RAY_I64 vector) */
+        c = ser_schema_names(buf, slots[0]);     /* schema names as RAY_SYM vector */
         c += ray_ser_raw(buf + c, slots[1]);     /* cols (RAY_LIST) */
         return 1 + 1 + c;
     }
@@ -571,7 +604,10 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
             *len -= (int64_t)slen + 1;
             if (is_null) return ray_typed_null(type);
             int64_t id = ray_sym_intern((const char*)buf, slen);
-            return ray_sym(id);
+            ray_t* s = ray_sym(id);
+            if (s && !RAY_IS_ERR(s) && (aflags & RAY_ATTR_NAME))
+                s->attrs |= RAY_ATTR_NAME;
+            return s;
         }
         case RAY_STR: {
             if (*len < 8) return ray_error("domain", NULL);
@@ -762,7 +798,8 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
         }
 
         /* Reconstruct table */
-        if (cols->type != RAY_LIST || schema->type != RAY_I64) {
+        if (cols->type != RAY_LIST ||
+            (schema->type != RAY_I64 && schema->type != RAY_SYM)) {
             ray_release(schema);
             ray_release(cols);
             return ray_error("domain", NULL);
@@ -776,10 +813,13 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
             return tbl;
         }
 
-        int64_t* name_ids = (int64_t*)ray_data(schema);
+        void* name_data = ray_data(schema);
         ray_t** col_ptrs = (ray_t**)ray_data(cols);
         for (int64_t i = 0; i < ncols && i < schema->len; i++) {
-            ray_t* new_tbl = ray_table_add_col(tbl, name_ids[i], col_ptrs[i]);
+            int64_t name_id = (schema->type == RAY_I64)
+                ? ((int64_t*)name_data)[i]
+                : ray_read_sym(name_data, i, RAY_SYM, schema->attrs);
+            ray_t* new_tbl = ray_table_add_col(tbl, name_id, col_ptrs[i]);
             if (!new_tbl || RAY_IS_ERR(new_tbl)) {
                 ray_release(tbl);
                 ray_release(schema);
