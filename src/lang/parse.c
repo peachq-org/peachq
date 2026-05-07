@@ -201,7 +201,12 @@ static ray_t* parse_number(ray_parser_t *p) {
         case 'p': p->pos += 3; return ray_typed_null(-RAY_TIMESTAMP);
         case 'l': p->pos += 3; return ray_typed_null(-RAY_I64);
         case 'f': p->pos += 3; return ray_typed_null(-RAY_F64);
-        case 's': p->pos += 3; return ray_typed_null(-RAY_SYM);
+        /* SYM has no typed null — sym 0 (the empty string, reserved
+         * by ray_sym_init) is the canonical "missing" value.  Parse
+         * `0Ns` as the empty symbol so legacy literal text stays
+         * accepted; new code should write `'` (parse_symbol below)
+         * for the same value. */
+        case 's': p->pos += 3; return ray_sym(0);
         }
         /* Bare 0N: only if the next char is not an identifier continuation
          * (letter/digit/underscore), else fall through to plain number. */
@@ -397,11 +402,12 @@ static ray_t* parse_symbol(ray_parser_t *p) {
     p->pos++; /* skip ' */
     const char *start = p->pos;
 
-    /* Empty symbol (bare tick at end or before terminator) */
+    /* Empty symbol (bare tick at end or before terminator) — the
+     * canonical empty SYM is sym 0 (reserved by ray_sym_init), not
+     * a typed null.  SYM columns are no-null by design. */
     if (*p->pos == 0 || *p->pos == ' ' || *p->pos == '\t' || *p->pos == '\n' ||
         *p->pos == ')' || *p->pos == ']' || *p->pos == '}') {
-        /* Null symbol 0Ns */
-        return ray_typed_null(-RAY_SYM);
+        return ray_sym(0);
     }
 
     /* Char literal: 'X' or '\n' etc. */
@@ -450,7 +456,7 @@ static ray_t* parse_symbol(ray_parser_t *p) {
     while (PA(*p->pos) == PA_ALPHA || PA(*p->pos) == PA_DIGIT || *p->pos == '_' || *p->pos == '.')
         p->pos++;
     size_t len = (size_t)(p->pos - start);
-    if (len == 0) return ray_typed_null(-RAY_SYM); /* empty symbol */
+    if (len == 0) return ray_sym(0);  /* empty symbol — sym 0 */
     int64_t id = ray_sym_intern(start, len);
     return ray_sym(id);
 }
