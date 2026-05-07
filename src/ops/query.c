@@ -1563,13 +1563,13 @@ typedef struct {
 
 #define CDPG_BUF_HASH_K1 0x9E3779B97F4A7C15ULL
 
-/* DuckDB-style single-array HT: empty slot is encoded as 0; the
- * (extremely rare) v == 0 input goes into a separate saw_zero flag.
- * Compared to the previous (set + used) two-array layout this halves
- * the memory footprint per slot (8 B vs 9 B) and — more importantly —
- * collapses two cache-line accesses (used byte + set int64) into a
- * single int64 read on the hot path.  Hits Q9-class queries where the
- * per-group HT churn was thrashing L2. */
+/* Single-array HT: empty slot is encoded as 0; the (extremely rare)
+ * v == 0 input goes into a separate saw_zero flag.  Compared to the
+ * previous (set + used) two-array layout this halves the memory
+ * footprint per slot (8 B vs 9 B) and — more importantly — collapses
+ * two cache-line accesses (used byte + set int64) into a single
+ * int64 read on the hot path.  Hits high-cardinality count_distinct
+ * grouped queries where the per-group HT churn was thrashing L2. */
 #define CDPG_BUF_INSERT(VAL_EXPR) do {                              \
     int64_t v = (int64_t)(VAL_EXPR);                                \
     if (RAY_UNLIKELY(v == 0)) {                                     \
@@ -2283,9 +2283,9 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
      * nearest clause and all output columns being plain SYM names of
      * source columns.  Bypasses the FILTER → SORT_TAKE pipeline: streams
      * predicate eval and bounded-heap insert in one pass, no
-     * intermediate filtered table materialised.  The biggest open gap
-     * vs DuckDB on ClickBench (Q25/Q26/Q27 are 2.5–4.5× slower without
-     * this fast path). */
+     * intermediate filtered table materialised.  Closes a large
+     * latency gap on ORDER BY + LIMIT shapes that were previously
+     * dominated by the filtered-table materialisation step. */
     if (where_expr && take_expr && has_sort && !by_expr && !nearest_expr) {
         const char* off_env = getenv("RAYFORCE_DISABLE_FUSED_TOPK");
         int env_disabled = (off_env && off_env[0] == '1');
@@ -2736,10 +2736,9 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                      * lazy OP_FILTER path can't refine into a rowsel —
                      * fall back to the OP_AND tree (ray_optimize already
                      * constant-folds those).  Compute a coarse cost
-                     * estimate per conjunct so we can sort cheap-first
-                     * (DuckDB ExpressionHeuristics-style); cheap
-                     * predicates make subsequent expensive ones evaluate
-                     * over a far smaller rowsel. */
+                     * estimate per conjunct so we can sort cheap-first;
+                     * cheap predicates make subsequent expensive ones
+                     * evaluate over a far smaller rowsel. */
                     for (int64_t i = 0; i < k && all_ok; i++) {
                         ray_op_t* p = compile_expr_dag(g, elems[i + 1]);
                         if (!p || p->opcode == OP_CONST) { all_ok = 0; break; }
@@ -2757,8 +2756,8 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                             if (cur->opcode == OP_SCAN) has_scan = 1;
                             /* Coarse per-node cost: comparison ops are
                              * cheap, OP_LIKE / OP_IN / function calls
-                             * are expensive.  Matches DuckDB's
-                             * ExpressionHeuristics ordering. */
+                             * are expensive.  Standard cheap-first
+                             * conjunct ordering. */
                             switch (cur->opcode) {
                             case OP_LIKE:
                                 c += 50;  /* substring-search is ~10× a
