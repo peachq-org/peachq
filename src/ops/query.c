@@ -1438,6 +1438,106 @@ static ray_t* nonagg_eval_per_group_buf(ray_t* expr, ray_t* tbl,
     return res;
 }
 
+static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
+    int64_t col_syms[16];
+    int n_cols = collect_col_refs(expr, tbl, col_syms, 16, 0);
+    ray_t* cols[16];
+    for (int i = 0; i < n_cols; i++)
+        cols[i] = ray_table_get_col(tbl, col_syms[i]);
+
+    if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
+
+    ray_t* result = NULL;
+    int direct_typed = 0;
+    int8_t typed_t = 0;
+
+    for (int64_t row = 0; row < nrows; row++) {
+        for (int i = 0; i < n_cols; i++) {
+            int allocated = 0;
+            ray_t* arg = collection_elem(cols[i], row, &allocated);
+            if (!arg || RAY_IS_ERR(arg)) {
+                ray_env_pop_scope();
+                if (result) ray_release(result);
+                return arg ? arg : ray_error("domain", NULL);
+            }
+            ray_env_set_local(col_syms[i], arg);
+            if (allocated) ray_release(arg);
+        }
+
+        ray_t* cell = ray_eval(expr);
+        if (!cell || RAY_IS_ERR(cell)) {
+            ray_env_pop_scope();
+            if (result) ray_release(result);
+            return cell ? cell : ray_error("domain", NULL);
+        }
+
+        if (row == 0) {
+            int8_t t = cell->type;
+            int collapsable = (t < 0 && t != -RAY_SYM && t != -RAY_STR && t != -RAY_GUID);
+            if (collapsable) {
+                result = ray_vec_new((int8_t)-t, nrows);
+                if (!result || RAY_IS_ERR(result)) {
+                    ray_env_pop_scope();
+                    ray_release(cell);
+                    return result ? result : ray_error("oom", NULL);
+                }
+                result->len = nrows;
+                if (store_typed_elem(result, 0, cell) == 0) {
+                    direct_typed = 1;
+                    typed_t = t;
+                    ray_release(cell);
+                } else {
+                    ray_release(result);
+                    result = NULL;
+                    collapsable = 0;
+                }
+            }
+            if (!collapsable) {
+                result = ray_alloc(nrows * sizeof(ray_t*));
+                if (!result) {
+                    ray_env_pop_scope();
+                    ray_release(cell);
+                    return ray_error("oom", NULL);
+                }
+                result->type = RAY_LIST;
+                result->len = 1;
+                ((ray_t**)ray_data(result))[0] = cell;
+            }
+            continue;
+        }
+
+        if (direct_typed) {
+            if (cell->type == typed_t && store_typed_elem(result, row, cell) == 0) {
+                ray_release(cell);
+            } else {
+                ray_t* list_col = typed_vec_to_list(result, row, nrows);
+                ray_release(result);
+                if (RAY_IS_ERR(list_col)) {
+                    ray_env_pop_scope();
+                    ray_release(cell);
+                    return list_col;
+                }
+                result = list_col;
+                ((ray_t**)ray_data(result))[row] = cell;
+                result->len = row + 1;
+                direct_typed = 0;
+            }
+        } else {
+            ((ray_t**)ray_data(result))[row] = cell;
+            result->len = row + 1;
+        }
+    }
+
+    ray_env_pop_scope();
+    if (!result) {
+        result = ray_alloc(0);
+        if (!result) return ray_error("oom", NULL);
+        result->type = RAY_LIST;
+        result->len = 0;
+    }
+    return result;
+}
+
 /* Streaming-style per-group AGG body, DAG flavor.  For an expression
  * like `(med v)` (head is RAY_FN_AGGR + RAY_UNARY, second elem is a
  * column ref or full-table-eval-able sub-expression), slice src per
@@ -2203,7 +2303,16 @@ static ray_t* atom_broadcast_vec(ray_t* a, int64_t n) {
 
 /* (select {from: t [where: pred] [by: key] [col: expr ...]})
  * Special form — receives unevaluated dict arg. */
+ray_t* ray_select(ray_t** args, int64_t n);
+ray_t* ray_update(ray_t** args, int64_t n);
+ray_t* ray_insert(ray_t** args, int64_t n);
+ray_t* ray_upsert(ray_t** args, int64_t n);
+
 ray_t* ray_select_fn(ray_t** args, int64_t n) {
+    return ray_select(args, n);
+}
+
+ray_t* ray_select(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
     ray_t* dict = args[0];
     if (!dict || dict->type != RAY_DICT)
@@ -3077,7 +3186,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     ray_graph_free(g); ray_release(tbl);
                     return ray_error("oom", NULL);
                 }
-                root = ray_select(g, root, col_ops, (uint8_t)nc);
+                root = ray_select_op(g, root, col_ops, (uint8_t)nc);
                 ray_sys_free(col_ops);
                 if (!root) {
                     if (nearest_handle_owned) ray_release(nearest_handle_owned);
@@ -4814,24 +4923,58 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             /* Projection only (no group by) — select specific columns */
             ray_op_t* col_ops[16];
             uint8_t nc = 0;
+            int use_eval_fallback = 0;
             for (int64_t i = 0; i + 1 < dict_n; i += 2) {
                 int64_t kid = dict_elems[i]->i64;
                 if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
                 if (nc < 16) {
                     col_ops[nc] = compile_expr_dag(g, dict_elems[i + 1]);
                     if (!col_ops[nc]) {
-                        /* Nearest-path resources must be freed here too — the
-                         * rerank handle/query buffers are held across the whole
-                         * ray_select_fn body, not just inside the nearest block. */
-                        if (nearest_handle_owned) ray_release(nearest_handle_owned);
-                        if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
-                        ray_graph_free(g); ray_release(tbl);
-                        return ray_error("domain", NULL);
+                        use_eval_fallback = 1;
+                        break;
                     }
                     nc++;
                 }
             }
-            root = ray_select(g, root, col_ops, nc);
+            if (use_eval_fallback) {
+                ray_t* result = ray_table_new(0);
+                if (!result || RAY_IS_ERR(result)) {
+                    if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                    if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                    ray_graph_free(g); ray_release(tbl);
+                    return result ? result : ray_error("oom", NULL);
+                }
+                int64_t nrows = ray_table_nrows(tbl);
+                for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+                    int64_t kid = dict_elems[i]->i64;
+                    if (kid == from_id || kid == where_id || kid == by_id ||
+                        kid == take_id || kid == asc_id || kid == desc_id ||
+                        kid == nearest_id) continue;
+                    ray_t* col = eval_expr_per_row(dict_elems[i + 1], tbl, nrows);
+                    if (!col || RAY_IS_ERR(col)) {
+                        ray_t* err = col ? col : ray_error("domain", NULL);
+                        ray_release(result);
+                        if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                        if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                        ray_graph_free(g); ray_release(tbl);
+                        return err;
+                    }
+                    result = ray_table_add_col(result, kid, col);
+                    ray_release(col);
+                    if (RAY_IS_ERR(result)) {
+                        if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                        if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                        ray_graph_free(g); ray_release(tbl);
+                        return result;
+                    }
+                }
+                if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                ray_graph_free(g); ray_release(tbl);
+                return apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
+            } else {
+                root = ray_select_op(g, root, col_ops, nc);
+            }
         }
     }
 
@@ -6001,6 +6144,10 @@ static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
 /* Forward declarations */
 
 ray_t* ray_update_fn(ray_t** args, int64_t n) {
+    return ray_update(args, n);
+}
+
+ray_t* ray_update(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
     ray_t* dict = args[0];
     if (!dict || dict->type != RAY_DICT)
@@ -6687,6 +6834,10 @@ no_where_add_col:
 
 /* (insert table (list val1 val2 ...)) — append a row to a table */
 ray_t* ray_insert_fn(ray_t** args, int64_t n) {
+    return ray_insert(args, n);
+}
+
+ray_t* ray_insert(ray_t** args, int64_t n) {
     if (n < 2) return ray_error("domain", NULL);
 
     /* Special form: detect 'sym (quoted symbol for in-place insert) */
@@ -7076,6 +7227,10 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
 /* (upsert table key_col (list val1 val2 ...)) — update row if key matches, else insert.
  * Special form: first arg may be 'sym for in-place, other args are evaluated. */
 ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
+    return ray_upsert(args, n);
+}
+
+ray_t* ray_upsert(ray_t** args, int64_t n) {
     if (n < 3) return ray_error("domain", NULL);
 
     /* Detect calling convention: already-evaluated args (from recursive call) vs raw parse tree */
