@@ -36,9 +36,8 @@ static int dbl_cmp(const void* a, const void* b) {
  * with everything to the left ≤ and everything to the right ≥.  Average
  * O(n) (Hoare quickselect with median-of-three), worst-case O(n log n)
  * via qsort fallback when recursion exceeds 2*log2(range).  Mirrors
- * std::nth_element's contract; DuckDB's quantile path uses the same
- * pattern (extension/core_functions/aggregate/holistic/quantile.cpp,
- * quantile_sort_tree.hpp:191-195). */
+ * std::nth_element's contract — the standard quantile/quickselect
+ * pattern. */
 static void nth_element_dbl(double* a, int64_t lo, int64_t hi, int64_t k) {
     int depth_limit = 0;
     for (int64_t r = hi - lo + 1; r > 0; r >>= 1) depth_limit++;
@@ -395,11 +394,11 @@ ray_t* ray_med_fn(ray_t* x) {
     int64_t cnt = scratch->len;
     if (cnt == 0) { ray_release(scratch); return ray_typed_null(-RAY_F64); }
 
-    /* O(n) average partial-sort.  Two-call pattern from DuckDB's
-     * QuantileInterpolator::Operation (quantile_sort_tree.hpp:191-195):
-     * for odd n one nth_element places the middle; for even n a second
-     * nth_element on the right half locates the upper middle.  Replaces
-     * an O(n^2) insertion sort that hung for groups larger than ~10k. */
+    /* O(n) average partial-sort.  Two-call quantile-interpolator
+     * pattern: for odd n one nth_element places the middle; for even
+     * n a second nth_element on the right half locates the upper
+     * middle.  Replaces an O(n^2) insertion sort that hung for
+     * groups larger than ~10k. */
     int64_t k = cnt / 2;
     double median;
     if (cnt % 2 == 1) {
