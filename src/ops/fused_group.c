@@ -2360,6 +2360,10 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
     }
 
 materialize:
+    ;  /* C requires a statement after a label; pre-C23 disallows a
+       * declaration in that position, and clang on macOS enforces it
+       * with -Werror,-Wc23-extensions.  Empty statement is the
+       * portable form. */
 
     /* Build n_keys key columns by decomposing the composite. */
     ray_t* key_cols[FP_MAX_KEYS];
