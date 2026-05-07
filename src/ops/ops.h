@@ -591,8 +591,8 @@ ray_op_t* ray_window_op(ray_graph_t* g, ray_op_t* table_node,
                        int64_t* func_params, uint8_t n_funcs,
                        uint8_t frame_type, uint8_t frame_start, uint8_t frame_end,
                        int64_t frame_start_n, int64_t frame_end_n);
-ray_op_t* ray_select(ray_graph_t* g, ray_op_t* input,
-                    ray_op_t** cols, uint8_t n_cols);
+ray_op_t* ray_select_op(ray_graph_t* g, ray_op_t* input,
+                        ray_op_t** cols, uint8_t n_cols);
 ray_op_t* ray_head(ray_graph_t* g, ray_op_t* input, int64_t n);
 ray_op_t* ray_tail(ray_graph_t* g, ray_op_t* input, int64_t n);
 ray_op_t* ray_alias(ray_graph_t* g, ray_op_t* input, const char* name);

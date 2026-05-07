@@ -1033,8 +1033,8 @@ ray_op_t* ray_window_op(ray_graph_t* g, ray_op_t* table_node,
     return &g->nodes[ext->base.id];
 }
 
-ray_op_t* ray_select(ray_graph_t* g, ray_op_t* input,
-                    ray_op_t** cols, uint8_t n_cols) {
+ray_op_t* ray_select_op(ray_graph_t* g, ray_op_t* input,
+                        ray_op_t** cols, uint8_t n_cols) {
     uint32_t input_id = input->id;
     uint32_t col_ids[256];
     for (uint8_t i = 0; i < n_cols; i++) col_ids[i] = cols[i]->id;
