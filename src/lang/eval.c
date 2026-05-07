@@ -2351,10 +2351,10 @@ static void ray_register_builtins(void) {
     /* table-distinct removed — distinct dispatches on type */
 
     /* Query operations */
-    register_vary("select",    RAY_FN_SPECIAL_FORM, ray_select_fn);
-    register_vary("update",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_update_fn);
-    register_vary("insert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_insert_fn);
-    register_vary("upsert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_upsert_fn);
+    register_vary("select",    RAY_FN_SPECIAL_FORM, ray_select);
+    register_vary("update",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_update);
+    register_vary("insert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_insert);
+    register_vary("upsert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_upsert);
     /* xbar is registered NON-atomic so the call path lands in
      * ray_xbar_fn(VEC, scalar) directly.  ray_xbar_fn handles the
      * vector fast path itself (tight per-element loop, no per-atom
