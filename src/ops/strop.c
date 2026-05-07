@@ -274,6 +274,18 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
                 seen = (uint8_t*)scratch_calloc(&seen_hdr, (size_t)dict_n);
             }
             if (lut && seen) {
+                /* Out-of-range sym IDs ("unknown" or "missing") match
+                 * the pattern as if the string were empty — same
+                 * semantics as the OOM fallback at line 332 below and
+                 * the atom case at line 217 above (sym_str==NULL → "").
+                 * Compute the empty-string match once so the row pass
+                 * can short-circuit out-of-range sids without taking
+                 * the matcher per row. */
+                uint8_t empty_match = (use_simple
+                                       ? ray_glob_match_compiled(&pc, "", 0)
+                                       : ray_glob_match("", 0, pat, pat_len))
+                                      ? 1 : 0;
+
                 /* First pass: discover the unique sym_ids referenced and
                  * resolve each pattern match exactly once.  Second pass:
                  * width-specialised LUT projection so the per-row loop
@@ -297,7 +309,9 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
                 #define ROW_PASS(LOAD)                                        \
                     for (int64_t i = 0; i < n; i++) {                         \
                         int64_t sid = (LOAD);                                 \
-                        out[i] = ((uint64_t)sid < (uint64_t)dict_n) ? lut[sid] : 0; \
+                        out[i] = ((uint64_t)sid < (uint64_t)dict_n)           \
+                                 ? lut[sid]                                   \
+                                 : empty_match;                               \
                     }
                 switch (sym_w) {
                 case RAY_SYM_W8: {
