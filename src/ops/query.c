@@ -2370,15 +2370,15 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     break;
                 }
             }
-            /* Sort keys still must NOT carry a nullmap: fpk_cmp doesn't
-             * implement null ordering yet, so a nullable sort key would
-             * give different ordering than the unfused null-aware sort.
-             * Output columns no longer block the gate — the fused
-             * materialiser propagates nullmaps via ray_vec_set_null. */
+            /* Sort keys: only verify the column exists.  Nulls are now
+             * handled by the null-aware leg in fpk_cmp (NULLS LAST for
+             * ASC, NULLS FIRST for DESC, matching sort.c's default).
+             * Output columns are also handled — the fused materialiser
+             * propagates nullmaps via ray_vec_set_null. */
             if (!bad_clause) {
                 for (uint8_t i = 0; i < n_sort_keys && !bad_clause; i++) {
                     ray_t* kc = ray_table_get_col(tbl, sort_key_syms[i]);
-                    if (!kc || (kc->attrs & RAY_ATTR_HAS_NULLS)) bad_clause = 1;
+                    if (!kc) bad_clause = 1;
                 }
             }
             if (!bad_clause && n_sort_keys > 0 && n_out_syms > 0) {
