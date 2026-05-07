@@ -50,12 +50,18 @@ int ray_fused_topk_supported(ray_t* where_expr, ray_t* tbl);
  *   sort_descs[]     - per-key direction: 0=asc, 1=desc.
  *   n_sort_keys      - number of sort keys.
  *   k                - top-K size.
- *   out_col_syms[]   - column name syms in output order.
+ *   out_col_syms[]   - source column name syms (one per output col).
+ *   out_alias_syms[] - alias under which to publish each output col;
+ *                       may be NULL when every alias matches the
+ *                       corresponding out_col_syms entry.
  *   n_out            - count of output cols.
  *
  * Bypasses the DAG entirely: the predicate is compiled inline against
  * `tbl`'s columns; per-worker bounded heaps are merged after the parallel
  * scan; rows are gathered from `tbl` by index for the final output.
+ * Source-column nullmaps are propagated to the output so a nullable
+ * select column survives a top-K gather (the planner gate previously
+ * disallowed this).
  *
  * Returns NULL on shape miss (errors during predicate compile etc.) so
  * the caller can fall back to the unfused FILTER + SORT_TAKE path. */
@@ -66,6 +72,7 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
                              uint8_t n_sort_keys,
                              int64_t k,
                              const int64_t* out_col_syms,
+                             const int64_t* out_alias_syms,
                              uint8_t n_out);
 
 #endif /* RAY_OPS_FUSED_TOPK_H */
