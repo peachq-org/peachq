@@ -1133,6 +1133,14 @@ static ray_t* exec_filtered_group_count1(ray_graph_t* g, ray_op_ext_t* ext,
     if (!key_col) return ray_error("schema", NULL);
     if (RAY_IS_PARTED(key_col->type) || key_col->type == RAY_MAPCOMMON)
         return ray_error("nyi", "fused_group: phase-2 needs flat key column");
+    /* Nullable key columns: count1's per-row HT probe reads the raw
+     * payload without the nullmap, so a stored sentinel for null
+     * would bucket as a real key value.  Mirrors the multi path's
+     * gate in mk_compile and the planner gate in query.c — included
+     * here too so direct C-API callers of ray_filtered_group() that
+     * bypass the planner don't see corrupted results. */
+    if (key_col->attrs & RAY_ATTR_HAS_NULLS)
+        return ray_error("nyi", "fused_group: nullable key not supported");
 
     int64_t nrows = key_col->len;
     ctx.kt    = key_col->type;
@@ -2588,30 +2596,55 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
 
 /* ─── Public entry: dispatcher ──────────────────────────────────────── */
 
-/* Graceful fallback: build a freshly-constructed FILTER + GROUP
- * subgraph from the inputs already on the fused node and execute it
- * via the regular DAG path.  Defense-in-depth — the planner gate
- * should be tight enough that the fused exec never sees an
- * unsupported shape, but if a future change introduces a divergence
- * we degrade to a slower-but-correct result instead of surfacing a
- * user-visible "nyi" error.
+/* Graceful fallback: rebuild the unfused FILTER + GROUP equivalent
+ * from the inputs on the fused node and execute it.  Defense-in-
+ * depth — the planner gates should be tight enough that the fused
+ * exec never sees an unsupported shape, but if a future change
+ * introduces a divergence we degrade to a slower-but-correct result
+ * instead of surfacing a user-visible "nyi" error.
  *
- * The original predicate / keys / agg-input ops are still present in
- * the graph (we don't tear down the OP_FILTERED_GROUP node), so the
- * unfused subgraph just references them. */
+ * Sequencing matters here.  Naively chaining `ray_execute(filter)`
+ * then `ray_execute(group)` doesn't preserve the filter: the outer
+ * `ray_execute` compacts and clears g->selection on return so the
+ * group call sees an unfiltered g->table.  The fix is to consume
+ * the materialised filtered table from the first call, swap it in
+ * as g->table for the group call, then restore.  ray_group reads
+ * g->table directly so that swap is the only thing that matters. */
 static ray_t* exec_filtered_group_fallback(ray_graph_t* g, ray_op_ext_t* ext) {
     if (!g || !ext) return ray_error("nyi", NULL);
-    ray_op_t* root = ray_const_table(g, g->table);
-    if (!root) return ray_error("oom", NULL);
+
+    ray_t* filtered_tbl = NULL;
     ray_op_t* pred = ext->base.inputs[0];
     if (pred) {
-        root = ray_filter(g, root, pred);
-        if (!root) return ray_error("oom", NULL);
+        ray_op_t* tbl_node = ray_const_table(g, g->table);
+        if (!tbl_node) return ray_error("oom", NULL);
+        ray_op_t* fnode = ray_filter(g, tbl_node, pred);
+        if (!fnode) return ray_error("oom", NULL);
+        ray_t* fres = ray_execute(g, fnode);
+        if (!fres) return ray_error("domain", NULL);
+        if (RAY_IS_ERR(fres)) return fres;
+        if (ray_is_lazy(fres)) {
+            ray_t* mat = ray_lazy_materialize(fres);
+            ray_release(fres);
+            fres = mat;
+        }
+        if (!fres || RAY_IS_ERR(fres))
+            return fres ? fres : ray_error("domain", NULL);
+        filtered_tbl = fres;  /* owned ref — released after group runs */
     }
-    root = ray_group(g, ext->keys, ext->n_keys,
-                     ext->agg_ops, ext->agg_ins, ext->n_aggs);
-    if (!root) return ray_error("oom", NULL);
-    return ray_execute(g, root);
+
+    ray_t*    saved_table = g->table;
+    if (filtered_tbl) g->table = filtered_tbl;
+
+    ray_op_t* gnode = ray_group(g, ext->keys, ext->n_keys,
+                                 ext->agg_ops, ext->agg_ins, ext->n_aggs);
+    ray_t* res = gnode ? ray_execute(g, gnode) : ray_error("oom", NULL);
+
+    if (filtered_tbl) {
+        g->table = saved_table;
+        ray_release(filtered_tbl);
+    }
+    return res;
 }
 
 ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
