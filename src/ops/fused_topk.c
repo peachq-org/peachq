@@ -152,7 +152,16 @@ static inline int fpk_cmp(const fpk_par_ctx_t* c, int64_t row_a, int64_t row_b) 
      * survivor (the one most likely to be evicted), so a row with
      * a higher source index ranks worse than a row with a lower
      * one.  Direction-independent: for both ASC and DESC top-K we
-     * want stable source-order semantics on ties. */
+     * want stable source-order semantics on ties.
+     *
+     * TODO: null-aware compare on the keys themselves.  Current
+     * planner gate refuses fused for sort keys with HAS_NULLS
+     * because this comparator reads the raw payload — adding a
+     * null-policy leg here (nulls last for ASC, first for DESC, or
+     * caller-specified via NULLS FIRST / LAST) would let the gate
+     * lift.  The materialiser already propagates nullmaps for
+     * non-key output columns; the missing piece is the comparator
+     * and the planner-level NULLS FIRST/LAST surface. */
     if (row_a > row_b) return  1;   /* a is worse — evict first */
     if (row_a < row_b) return -1;
     return 0;
@@ -232,6 +241,7 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
                              uint8_t n_sort_keys,
                              int64_t k,
                              const int64_t* out_col_syms,
+                             const int64_t* out_alias_syms,
                              uint8_t n_out)
 {
     if (!tbl || tbl->type != RAY_TABLE || k <= 0 || n_out == 0) return NULL;
@@ -340,7 +350,8 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
     }
     int build_ok = 1;
     for (uint8_t c = 0; c < n_out; c++) {
-        int64_t cs = out_col_syms[c];
+        int64_t cs    = out_col_syms[c];
+        int64_t alias = out_alias_syms ? out_alias_syms[c] : cs;
         ray_t* src = ray_table_get_col(tbl, cs);
         if (!src) { build_ok = 0; break; }
         ray_t* col = (src->type == RAY_SYM)
@@ -354,7 +365,17 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
             int64_t v = read_by_esz(ray_data(src), global_idx[i], esz);
             write_col_i64(dst, i, v, src->type, src->attrs);
         }
-        result = ray_table_add_col(result, cs, col);
+        /* Propagate the source nullmap so a nullable select column
+         * survives the top-K gather.  ray_vec_set_null lazily allocates
+         * dst's nullmap on the first set, so we only pay the alloc cost
+         * when there are actual nulls to copy. */
+        if (src->attrs & RAY_ATTR_HAS_NULLS) {
+            for (int32_t i = 0; i < global_n; i++) {
+                if (ray_vec_is_null(src, global_idx[i]))
+                    ray_vec_set_null(col, i, true);
+            }
+        }
+        result = ray_table_add_col(result, alias, col);
         ray_release(col);
     }
     ray_graph_free(g);
