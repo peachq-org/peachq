@@ -250,6 +250,24 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
     int64_t nrows = ray_table_nrows(tbl);
     if (nrows <= 0 || k >= nrows) return NULL;
 
+    /* Output column type gate.  The materialise loop reads via
+     * read_by_esz (which assumes a fixed-width scalar payload) and
+     * writes via write_col_i64 (which only handles BOOL/U8/I16/I32/
+     * I64/DATE/TIME/TIMESTAMP/SYM).  Variable-width types like
+     * RAY_STR or compound types like LIST/MAP/GUID would corrupt
+     * the output silently — gate the fused path off so the unfused
+     * FILTER + SORT + TAKE handles them. */
+    for (uint8_t c = 0; c < n_out; c++) {
+        ray_t* col = ray_table_get_col(tbl, out_col_syms[c]);
+        if (!col) return NULL;
+        int8_t ot = col->type;
+        if (RAY_IS_PARTED(ot) || ot == RAY_MAPCOMMON) return NULL;
+        if (ot != RAY_SYM && ot != RAY_BOOL && ot != RAY_U8
+            && ot != RAY_I16 && ot != RAY_I32 && ot != RAY_I64
+            && ot != RAY_DATE && ot != RAY_TIME && ot != RAY_TIMESTAMP)
+            return NULL;
+    }
+
     /* Resolve sort-key columns + decide if any need the SYM dict snapshot. */
     fpk_par_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
