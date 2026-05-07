@@ -41,7 +41,9 @@
 /* Post-load validation: reject if sym table is empty but table has RAY_SYM
  * columns, or if schema expected columns but none could be loaded. */
 static ray_err_t validate_sym_columns(ray_t* tbl, int64_t schema_ncols) {
-    if (ray_sym_count() != 0) return RAY_OK;
+    /* Sym table always has the empty string at ID 0 after init, so the
+     * baseline "no real symbols loaded" state is count == 1, not 0. */
+    if (ray_sym_count() > 1) return RAY_OK;
 
     int64_t nc = ray_table_ncols(tbl);
     if (schema_ncols > 0 && nc == 0) return RAY_ERR_CORRUPT;
