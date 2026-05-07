@@ -1180,9 +1180,21 @@ void ray_heap_init(void) {
     ray_tl_heap = h;
 }
 
+/* Forward decl — released before this heap's pools are munmap'd so a
+ * stale thread-local trace doesn't survive the destroy and crash a
+ * subsequent ray_eval_str → ray_clear_error_trace call when the next
+ * heap takes over.  Lives in src/lang/eval.c. */
+extern void ray_clear_error_trace(void);
+
 void ray_heap_destroy(void) {
     ray_heap_t* h = ray_tl_heap;
     if (!h) return;
+
+    /* Drop any thread-local refs into THIS heap's memory before we
+     * unmap its pools.  Ordering matters: release while the backing
+     * memory is still mapped; once the for-loop below munmap's the
+     * pools, dereferencing g_error_trace becomes UB. */
+    ray_clear_error_trace();
 
     uint16_t saved_id = h->id;
 
