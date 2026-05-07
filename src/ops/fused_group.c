@@ -1494,32 +1494,6 @@ static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state, uint8_t wide) {
     return 0;
 }
 
-static inline int mk_shard_upsert(mk_shard_t* sh, const mk_par_ctx_t* c,
-                                  int64_t kv, int64_t row)
-{
-    if (RAY_UNLIKELY(sh->n_filled * 2 >= (int64_t)sh->cap)) {
-        if (mk_shard_grow(sh, c->total_state, c->wide) != 0) return -1;
-    }
-    uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
-    h ^= h >> 33;
-    uint64_t s = h & sh->mask;
-    for (;;) {
-        if (!sh->slots[s * 2]) {
-            sh->slots[s * 2] = 1; sh->slots[s * 2 + 1] = kv;
-            mk_state_init_row(&sh->state[s * c->total_state],
-                              c->aggs, c->n_aggs, row);
-            sh->n_filled++;
-            return 0;
-        }
-        if (sh->slots[s * 2 + 1] == kv) {
-            mk_state_accum_row(&sh->state[s * c->total_state],
-                               c->aggs, c->n_aggs, row);
-            return 0;
-        }
-        s = (s + 1) & sh->mask;
-    }
-}
-
 /* ─── Worker fn — DuckDB-style chunked vectorized aggregate update ───
  *
  * Per morsel we run two passes:
