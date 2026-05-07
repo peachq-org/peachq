@@ -131,6 +131,11 @@ static ray_t* sym_str_arena(ray_arena_t* arena, const char* s, size_t len) {
     return v;
 }
 
+/* Forward decl — used from ray_sym_init below to reserve sym ID 0 as
+ * the canonical empty string.  Definition is further down with the
+ * other intern helpers. */
+static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len);
+
 /* --------------------------------------------------------------------------
  * ray_sym_init
  * -------------------------------------------------------------------------- */
@@ -190,6 +195,31 @@ ray_err_t ray_sym_init(void) {
         ray_sys_free(g_sym.buckets);
         g_sym.strings = NULL;
         g_sym.buckets = NULL;
+        atomic_store_explicit(&g_sym_inited, false, memory_order_release);
+        return RAY_ERR_OOM;
+    }
+
+    /* Reserve sym ID 0 as the empty string.  This makes the empty
+     * symbol the canonical "no value" representation for SYM columns:
+     * a missing CSV cell, a null-marked SYM atom, and an explicit ""
+     * literal all collapse to ID 0.  SYM columns therefore never need
+     * a parallel nullmap — RAY_ATTR_HAS_NULLS is structurally
+     * meaningless on SYM and is rejected on set.  Done before
+     * returning so every subsequent intern observes ID 0 as taken. */
+    int64_t empty_id = sym_intern_nolock(
+        (uint32_t)ray_hash_bytes("", 0), "", 0);
+    if (empty_id != 0) {
+        /* Should be unreachable — table just initialised, no other
+         * thread has touched it yet.  If it ever fires, fail loudly. */
+        ray_arena_destroy(g_sym.arena);
+        ray_sys_free(g_sym.segments);
+        ray_sys_free(g_sym.scanned);
+        ray_sys_free(g_sym.dotted);
+        ray_sys_free(g_sym.strings);
+        ray_sys_free(g_sym.buckets);
+        g_sym.arena = NULL;
+        g_sym.segments = NULL; g_sym.scanned = NULL; g_sym.dotted = NULL;
+        g_sym.strings = NULL; g_sym.buckets = NULL;
         atomic_store_explicit(&g_sym_inited, false, memory_order_release);
         return RAY_ERR_OOM;
     }
