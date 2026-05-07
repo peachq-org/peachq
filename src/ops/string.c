@@ -395,7 +395,7 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
             .pat_len    = pat_len,
         };
         ray_pool_t* str_pool = ray_pool_get();
-        if (str_pool && len >= LIKE_PAR_MIN_ROWS_SYM && ray_pool_total_workers(str_pool) >= 2) {
+        if (str_pool && len >= LIKE_PAR_MIN_ROWS_STR && ray_pool_total_workers(str_pool) >= 2) {
             ray_pool_dispatch(str_pool, str_like_par_fn, &lctx, len);
         } else {
             str_like_par_fn(&lctx, 0, 0, len);
@@ -456,7 +456,7 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
                 sctx.sel_idx    = ray_rowsel_idx(g->selection);
                 sctx.sel_n_segs = sm->n_segs;
             }
-            if (pool && len >= LIKE_PAR_MIN_ROWS_STR && ray_pool_total_workers(pool) >= 2) {
+            if (pool && len >= LIKE_PAR_MIN_ROWS_SYM && ray_pool_total_workers(pool) >= 2) {
                 ray_pool_dispatch(pool, like_seen_fn, &sctx, len);
             } else {
                 like_seen_fn(&sctx, 0, 0, len);
@@ -489,7 +489,7 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
                 .sel_idx    = sctx.sel_idx,
                 .sel_n_segs = sctx.sel_n_segs,
             };
-            if (pool && len >= LIKE_PAR_MIN_ROWS_STR && ray_pool_total_workers(pool) >= 2) {
+            if (pool && len >= LIKE_PAR_MIN_ROWS_SYM && ray_pool_total_workers(pool) >= 2) {
                 ray_pool_dispatch(pool, like_proj_fn, &pctx, len);
             } else {
                 like_proj_fn(&pctx, 0, 0, len);
