@@ -69,9 +69,15 @@ typedef struct {
     int8_t      type;
     uint8_t     attrs;
     uint8_t     esz;
-    uint8_t     desc;       /* 0 = asc, 1 = desc */
+    uint8_t     desc;        /* 0 = asc, 1 = desc */
+    /* When the column carries a nullmap, fpk_cmp consults it before
+     * reading the raw payload and orders nulls LAST for ASC, FIRST for
+     * DESC — matching sort.c's default null policy.  has_nulls is the
+     * compile-time flag that gates the per-row probe. */
+    uint8_t     has_nulls;
     int64_t     sym;
     const void* base;
+    ray_t*      col;         /* for ray_vec_is_null when has_nulls */
 } fpk_keyspec_t;
 
 typedef struct {
@@ -117,6 +123,19 @@ static inline int fpk_cmp(const fpk_par_ctx_t* c, int64_t row_a, int64_t row_b) 
     for (uint8_t k = 0; k < c->n_keys; k++) {
         const fpk_keyspec_t* ks = &c->keys[k];
         int cmp = 0;
+        /* Null-aware leg.  Default policy matches sort.c: NULLS LAST
+         * for ASC, NULLS FIRST for DESC.  In the max-heap-of-K-best
+         * comparator, "worse" → evicted first, so for ASC a null is
+         * worse than any non-null (so it goes last), and for DESC a
+         * null is better than any non-null (so it goes first).  Both
+         * legs short-circuit before the raw payload read. */
+        if (ks->has_nulls) {
+            bool a_null = ray_vec_is_null(ks->col, row_a);
+            bool b_null = ray_vec_is_null(ks->col, row_b);
+            if (a_null && b_null) continue;       /* tie on this key */
+            if (a_null) return ks->desc ? -1 : 1; /* a is null */
+            if (b_null) return ks->desc ?  1 : -1;
+        }
         if (ks->type == RAY_SYM) {
             uint32_t ia = (uint32_t)read_by_esz(ks->base, row_a, ks->esz);
             uint32_t ib = (uint32_t)read_by_esz(ks->base, row_b, ks->esz);
@@ -154,14 +173,13 @@ static inline int fpk_cmp(const fpk_par_ctx_t* c, int64_t row_a, int64_t row_b) 
      * one.  Direction-independent: for both ASC and DESC top-K we
      * want stable source-order semantics on ties.
      *
-     * TODO: null-aware compare on the keys themselves.  Current
-     * planner gate refuses fused for sort keys with HAS_NULLS
-     * because this comparator reads the raw payload — adding a
-     * null-policy leg here (nulls last for ASC, first for DESC, or
-     * caller-specified via NULLS FIRST / LAST) would let the gate
-     * lift.  The materialiser already propagates nullmaps for
-     * non-key output columns; the missing piece is the comparator
-     * and the planner-level NULLS FIRST/LAST surface. */
+     * Future: caller-specified NULLS FIRST / NULLS LAST.  The
+     * has_nulls leg above implements the default policy (LAST for
+     * ASC, FIRST for DESC).  An explicit NULLS FIRST/LAST clause
+     * in the query DSL would need to thread through fpk_keyspec_t
+     * as a third orientation flag and override the default leg —
+     * the call site already has all the data needed.  Tracked
+     * separately. */
     if (row_a > row_b) return  1;   /* a is worse — evict first */
     if (row_a < row_b) return -1;
     return 0;
@@ -302,12 +320,14 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
                                     ? col->slice_parent : col;
             if (dict_owner && dict_owner->sym_dict) return NULL;
         }
-        ctx.keys[i].type  = kt;
-        ctx.keys[i].attrs = col->attrs;
-        ctx.keys[i].esz   = ray_sym_elem_size(kt, col->attrs);
-        ctx.keys[i].desc  = sort_descs[i];
-        ctx.keys[i].sym   = sort_key_syms[i];
-        ctx.keys[i].base  = ray_data(col);
+        ctx.keys[i].type      = kt;
+        ctx.keys[i].attrs     = col->attrs;
+        ctx.keys[i].esz       = ray_sym_elem_size(kt, col->attrs);
+        ctx.keys[i].desc      = sort_descs[i];
+        ctx.keys[i].has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) ? 1 : 0;
+        ctx.keys[i].sym       = sort_key_syms[i];
+        ctx.keys[i].base      = ray_data(col);
+        ctx.keys[i].col       = col;
         if (kt == RAY_SYM) sym_needed = 1;
     }
     ctx.n_keys = n_sort_keys;
