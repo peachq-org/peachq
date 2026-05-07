@@ -2316,9 +2316,15 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     } else if (v && v->type == RAY_SYM) {
                         int64_t nv = ray_len(v);
                         if (n_sort_keys + nv > 16) { bad_clause = 1; break; }
-                        int64_t* sv = (int64_t*)ray_data(v);
+                        /* SYM vectors may be compact-width W8/W16/W32/W64.
+                         * Casting the data pointer to int64_t* is only
+                         * valid for W64; ray_read_sym does the width-
+                         * specialised load that resolves to the global
+                         * sym ID regardless of storage width. */
+                        const void* base = ray_data(v);
                         for (int64_t kk = 0; kk < nv; kk++) {
-                            sort_key_syms[n_sort_keys] = sv[kk];
+                            sort_key_syms[n_sort_keys] =
+                                ray_read_sym(base, kk, v->type, v->attrs);
                             sort_descs[n_sort_keys] = is_desc;
                             n_sort_keys++;
                         }
@@ -2330,12 +2336,22 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 if (kid == by_id) { bad_clause = 1; break; }
                 /* Output column must be a trivial projection of a source
                  * column.  The dict key is the alias the result publishes;
-                 * the value names the source column to gather from.  Both
-                 * are forwarded to the fused executor so renames like
-                 * `{alias: source_col}` produce the correct schema. */
+                 * the value names the source column to gather from.  The
+                 * source column's storage class must be one the fused
+                 * materialiser can gather/write — variable-width and
+                 * compound types fall back to the unfused path. */
                 if (n_out_syms >= 64) { bad_clause = 1; break; }
-                if (v && v->type == -RAY_SYM && (v->attrs & RAY_ATTR_NAME)
-                    && ray_table_get_col(tbl, v->i64) != NULL) {
+                if (v && v->type == -RAY_SYM && (v->attrs & RAY_ATTR_NAME)) {
+                    ray_t* oc = ray_table_get_col(tbl, v->i64);
+                    if (!oc) { bad_clause = 1; break; }
+                    int8_t ot = oc->type;
+                    if (RAY_IS_PARTED(ot) || ot == RAY_MAPCOMMON)
+                        { bad_clause = 1; break; }
+                    if (ot != RAY_SYM && ot != RAY_BOOL && ot != RAY_U8
+                        && ot != RAY_I16 && ot != RAY_I32 && ot != RAY_I64
+                        && ot != RAY_DATE && ot != RAY_TIME
+                        && ot != RAY_TIMESTAMP)
+                        { bad_clause = 1; break; }
                     out_syms[n_out_syms]    = v->i64;
                     out_aliases[n_out_syms] = kid;
                     n_out_syms++;
