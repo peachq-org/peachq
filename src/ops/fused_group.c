@@ -1322,65 +1322,11 @@ static inline uint64_t mk_hash_lo_hi(int64_t kv_lo, int64_t kv_hi) {
 
 /* ─── Per-row aggregator state init/accum ──────────────────────────── */
 
-static inline void mk_state_init_row(int64_t* st, const mk_agg_t* aggs,
-                                     uint8_t n_aggs, int64_t row)
-{
-    for (uint8_t i = 0; i < n_aggs; i++) {
-        const mk_agg_t* a = &aggs[i];
-        switch (a->kind) {
-        case MK_AGG_COUNT:
-            st[a->state_off] = 1;
-            break;
-        case MK_AGG_SUM:
-        case MK_AGG_MIN:
-        case MK_AGG_MAX: {
-            int64_t v = read_signed_by_esz(a->in_base, row, a->in_esz, a->in_unsigned);
-            st[a->state_off] = v;
-            break;
-        }
-        case MK_AGG_AVG: {
-            int64_t v = read_signed_by_esz(a->in_base, row, a->in_esz, a->in_unsigned);
-            st[a->state_off    ] = v;
-            st[a->state_off + 1] = 1;
-            break;
-        }
-        }
-    }
-}
-
-static inline void mk_state_accum_row(int64_t* st, const mk_agg_t* aggs,
-                                      uint8_t n_aggs, int64_t row)
-{
-    for (uint8_t i = 0; i < n_aggs; i++) {
-        const mk_agg_t* a = &aggs[i];
-        switch (a->kind) {
-        case MK_AGG_COUNT:
-            st[a->state_off] += 1;
-            break;
-        case MK_AGG_SUM: {
-            int64_t v = read_signed_by_esz(a->in_base, row, a->in_esz, a->in_unsigned);
-            st[a->state_off] += v;
-            break;
-        }
-        case MK_AGG_MIN: {
-            int64_t v = read_signed_by_esz(a->in_base, row, a->in_esz, a->in_unsigned);
-            if (v < st[a->state_off]) st[a->state_off] = v;
-            break;
-        }
-        case MK_AGG_MAX: {
-            int64_t v = read_signed_by_esz(a->in_base, row, a->in_esz, a->in_unsigned);
-            if (v > st[a->state_off]) st[a->state_off] = v;
-            break;
-        }
-        case MK_AGG_AVG: {
-            int64_t v = read_signed_by_esz(a->in_base, row, a->in_esz, a->in_unsigned);
-            st[a->state_off    ] += v;
-            st[a->state_off + 1] += 1;
-            break;
-        }
-        }
-    }
-}
+/* mk_state_init_row / mk_state_accum_row used to live here; both were
+ * only called from the now-deleted mk_shard_upsert helper.  The hot
+ * worker (mk_par_fn) inlines its own pass-1 init and pass-2 accumulate
+ * directly on the state[] storage so the kind switch can be hoisted
+ * out of the per-row loop. */
 
 static inline void mk_state_merge(int64_t* dst, const int64_t* src,
                                   const mk_agg_t* aggs, uint8_t n_aggs)
@@ -2467,9 +2413,9 @@ static int mk_compile(ray_graph_t* g, ray_op_ext_t* ext, ray_t* tbl,
         ray_t* col = ray_table_get_col(tbl, iext->sym);
         if (!col) return -1;
         if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return -1;
-        /* Aggregate inputs cannot carry nulls — the per-row read in
-         * mk_state_init_row / mk_state_accum_row treats every slot as
-         * a real value, so a stored sentinel for null would corrupt
+        /* Aggregate inputs cannot carry nulls — the inlined per-row
+         * init/accumulate in mk_par_fn treats every slot as a real
+         * value, so a stored sentinel for null would corrupt
          * SUM / MIN / MAX / AVG.  Bail to OP_GROUP, which has the
          * null-aware aggregate kernels. */
         if (col->attrs & RAY_ATTR_HAS_NULLS) return -1;
