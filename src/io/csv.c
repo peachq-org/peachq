@@ -596,36 +596,20 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
                                 uint8_t** col_nullmaps) {
     bool ok = true;
 
-    /* CSV/TSV import policy for SYM columns:
+    /* CSV/TSV import policy for SYM columns: empty fields write the
+     * canonical empty-symbol ID (always 0, reserved by ray_sym_init).
+     * SYM columns carry no nullmap by design — sym 0 is the
+     * representation of "missing", "empty", and "absent" all at once.
+     * The CSV format can't distinguish "missing field" from "empty
+     * string" anyway, so collapsing them is the only deterministic
+     * answer the parser can give.
      *
-     *   default              empty fields → empty-symbol "" (RAY_ATTR_HAS_NULLS
-     *                         cleared once the nullmap is fully drained).
-     *                         The file format itself can't distinguish
-     *                         "missing field" from "empty string", so
-     *                         we collapse them into a single
-     *                         deterministic value.
-     *
-     *   RAYFORCE_CSV_EMPTY_SYM_NULL=1
-     *                        empty fields → typed NULL (HAS_NULLS retained).
-     *                         Use when downstream code treats `(!= col "")`
-     *                         as "non-null and non-empty", or when the CSV
-     *                         was produced by a tool that uses an explicit
-     *                         empty-string token to mean "absent value".
-     *                         This was the pre-2026-05 behaviour.
-     *
-     * Round-trip warning: the SYM column type does not preserve a
-     * separate NULL sentinel — both branches end up with the same
-     * "" symbol on the value side; the only difference is whether
-     * the row's null bit is cleared.  Lifting this limitation would
-     * require either a reserved sym ID for "missing" or a parallel
-     * presence column; either change is out of scope for this fast
-     * path and is tracked separately. */
-    const char* policy_env = getenv("RAYFORCE_CSV_EMPTY_SYM_NULL");
-    int empty_sym_keep_null = (policy_env && policy_env[0] == '1') ? 1 : 0;
-
+     * Sym 0 is guaranteed to exist by ray_sym_init; the intern call
+     * here is a fast-path lookup that returns it without growing the
+     * dictionary. */
     int64_t empty_sym_id = ray_sym_intern_prehashed(
         (uint32_t)ray_hash_bytes("", 0), "", 0);
-    if (empty_sym_id < 0) empty_sym_id = 0;  /* fall back to old behavior on intern failure */
+    if (empty_sym_id < 0) empty_sym_id = 0;  /* shouldn't happen — sym 0 is reserved */
 
     for (int c = 0; c < n_cols; c++) {
         if (col_types[c] != CSV_TYPE_STR) continue;
@@ -643,21 +627,13 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
 
         for (int64_t r = 0; r < n_rows; r++) {
             if (nm && (nm[r >> 3] & (1u << (r & 7)))) {
+                /* Empty/missing field → sym 0 (the canonical empty
+                 * symbol).  Clear the parse-time null bit so the
+                 * post-pass attr-strip step doesn't leave HAS_NULLS
+                 * set on a SYM column — SYM columns are no-null by
+                 * design and ray_vec_set_null rejects them. */
                 ids[r] = (uint32_t)empty_sym_id;
-                if (!empty_sym_keep_null) {
-                    /* Default policy: clear the null bit — this row now
-                     * holds a real value (the empty SYM).  Without this
-                     * clear, fmt_raw_elem still prints "0Ns" and
-                     * ray_eq_fn still routes through the null-vs-non-
-                     * null branch (returning false for `== ""` and true
-                     * for `!= ""`). */
-                    nm[r >> 3] &= (uint8_t)~(1u << (r & 7));
-                }
-                /* RAYFORCE_CSV_EMPTY_SYM_NULL=1 path: keep the bit set,
-                 * so the column stays nullable and downstream null-
-                 * aware kernels treat the row as missing.  We still
-                 * write the empty-sym ID so the value side has a
-                 * deterministic placeholder. */
+                nm[r >> 3] &= (uint8_t)~(1u << (r & 7));
                 continue;
             }
             uint32_t hash = (uint32_t)ray_hash_bytes(refs[r].ptr, refs[r].len);
@@ -1445,34 +1421,18 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
 
     /* ---- 9c. Strip nullmaps from all-valid columns ----
      *
-     * Two cases qualify as "no nulls":
-     *   (a) col_had_null[c] is false — the parser never saw a null.
-     *   (b) col_had_null[c] is true (parser did see nulls) BUT step 9b's
-     *       csv_remap_empty_sym_to_id mapped every empty SYM null to the
-     *       empty-symbol ID, clearing each null bit.  In that case the
-     *       nullmap is all-zero post-remap and the column is, in fact,
-     *       null-free — but the stale HAS_NULLS attr was breaking
-     *       downstream gates that key on the attribute (e.g. fused
-     *       top-K's nullable gate).  Walk the actual nullmap to detect
-     *       case (b) and strip the attribute. */
+     * A column qualifies as "no nulls" if either:
+     *   - the parser never saw a null (col_had_null[c] == false), or
+     *   - it's a SYM column.  SYM is no-null by design — empty fields
+     *     were already remapped to sym 0 in step 9b, and SYM columns
+     *     never carry HAS_NULLS regardless of what the parse-time
+     *     nullmap looked like.
+     *
+     * For non-SYM columns where col_had_null is true, the nullmap
+     * stays. */
     for (int c = 0; c < ncols; c++) {
         ray_t* vec = col_vecs[c];
-        int strip = !col_had_null[c];
-        if (!strip && (vec->attrs & RAY_ATTR_HAS_NULLS)) {
-            const uint8_t* nm = (vec->attrs & RAY_ATTR_NULLMAP_EXT)
-                                ? (const uint8_t*)ray_data(vec->ext_nullmap)
-                                : vec->nullmap;
-            if (nm) {
-                int64_t nm_bytes = (vec->attrs & RAY_ATTR_NULLMAP_EXT)
-                                   ? ((vec->len + 7) / 8)
-                                   : 16;
-                int any_set = 0;
-                for (int64_t b = 0; b < nm_bytes; b++) {
-                    if (nm[b]) { any_set = 1; break; }
-                }
-                strip = !any_set;
-            }
-        }
+        int strip = !col_had_null[c] || vec->type == RAY_SYM;
         if (!strip) continue;
         if (vec->attrs & RAY_ATTR_NULLMAP_EXT) {
             ray_release(vec->ext_nullmap);
