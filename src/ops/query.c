@@ -2299,6 +2299,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             uint8_t n_sort_keys = 0;
             int     bad_clause = 0;
             int64_t out_syms[64];
+            int64_t out_aliases[64];
             uint8_t n_out_syms = 0;
             for (int64_t i = 0; i + 1 < dict_n; i += 2) {
                 int64_t kid = dict_elems[i]->i64;
@@ -2327,41 +2328,31 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     continue;
                 }
                 if (kid == by_id) { bad_clause = 1; break; }
-                /* Output column must be a *trivial* projection of a source
-                 * column — and the dict key (the output alias) must equal
-                 * the source column sym, since the fused materialiser names
-                 * output columns after the source.  Renamings like
-                 * `{alias: source_col}` would silently emit a column named
-                 * `source_col` instead of `alias`, which is a schema bug.
-                 * Until the fused exec accepts a separate aliases array,
-                 * gate the fused path off for any rename. */
+                /* Output column must be a trivial projection of a source
+                 * column.  The dict key is the alias the result publishes;
+                 * the value names the source column to gather from.  Both
+                 * are forwarded to the fused executor so renames like
+                 * `{alias: source_col}` produce the correct schema. */
                 if (n_out_syms >= 64) { bad_clause = 1; break; }
                 if (v && v->type == -RAY_SYM && (v->attrs & RAY_ATTR_NAME)
-                    && v->i64 == kid
                     && ray_table_get_col(tbl, v->i64) != NULL) {
-                    out_syms[n_out_syms++] = v->i64;
+                    out_syms[n_out_syms]    = v->i64;
+                    out_aliases[n_out_syms] = kid;
+                    n_out_syms++;
                 } else {
                     bad_clause = 1;
                     break;
                 }
             }
-            /* Nullable columns are not supported by the fused materialise:
-             * the fused path reads raw payload values and writes them back
-             * via write_col_i64 without propagating the source column's
-             * nullmap.  Sort key compares also bypass null ordering.  Gate
-             * fused off if any sort key or output column carries nulls so
-             * the unfused FILTER + SORT + TAKE path handles them.  Same
-             * rationale is applied to sort/output cols (not just sort keys)
-             * because materialised null sentinels would surface even if
-             * the column isn't on the sort path. */
+            /* Sort keys still must NOT carry a nullmap: fpk_cmp doesn't
+             * implement null ordering yet, so a nullable sort key would
+             * give different ordering than the unfused null-aware sort.
+             * Output columns no longer block the gate — the fused
+             * materialiser propagates nullmaps via ray_vec_set_null. */
             if (!bad_clause) {
                 for (uint8_t i = 0; i < n_sort_keys && !bad_clause; i++) {
                     ray_t* kc = ray_table_get_col(tbl, sort_key_syms[i]);
                     if (!kc || (kc->attrs & RAY_ATTR_HAS_NULLS)) bad_clause = 1;
-                }
-                for (uint8_t i = 0; i < n_out_syms && !bad_clause; i++) {
-                    ray_t* oc = ray_table_get_col(tbl, out_syms[i]);
-                    if (!oc || (oc->attrs & RAY_ATTR_HAS_NULLS)) bad_clause = 1;
                 }
             }
             if (!bad_clause && n_sort_keys > 0 && n_out_syms > 0) {
@@ -2375,7 +2366,9 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                                                            sort_key_syms,
                                                            sort_descs,
                                                            n_sort_keys, k,
-                                                           out_syms, n_out_syms);
+                                                           out_syms,
+                                                           out_aliases,
+                                                           n_out_syms);
                         if (res && !RAY_IS_ERR(res)) {
                             ray_release(tbl);
                             return res;
