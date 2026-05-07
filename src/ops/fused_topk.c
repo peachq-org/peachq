@@ -266,6 +266,17 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
             && ot != RAY_I16 && ot != RAY_I32 && ot != RAY_I64
             && ot != RAY_DATE && ot != RAY_TIME && ot != RAY_TIMESTAMP)
             return NULL;
+        /* SYM columns with a per-vector sym_dict store narrow-width
+         * indices into a LOCAL dictionary, not the global one.  The
+         * fused materialiser builds a fresh ray_sym_vec_new and copies
+         * raw IDs without propagating sym_dict (cf. sort.c:3642-3660 /
+         * rerank.c:174-188 which DO propagate it).  Falling back keeps
+         * the unfused gather, which propagates correctly. */
+        if (ot == RAY_SYM) {
+            const ray_t* dict_owner = (col->attrs & RAY_ATTR_SLICE)
+                                    ? col->slice_parent : col;
+            if (dict_owner && dict_owner->sym_dict) return NULL;
+        }
     }
 
     /* Resolve sort-key columns + decide if any need the SYM dict snapshot. */
@@ -281,6 +292,16 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
             && kt != RAY_I16 && kt != RAY_I32 && kt != RAY_I64
             && kt != RAY_DATE && kt != RAY_TIME && kt != RAY_TIMESTAMP)
             return NULL;
+        /* The SYM comparator (fpk_cmp) resolves dict IDs through the
+         * GLOBAL sym_strings snapshot (ctx.sym_strings).  A column with
+         * its own per-vector sym_dict stores LOCAL indices that don't
+         * map to the global table, so comparisons would order against
+         * the wrong strings.  Reject and fall back. */
+        if (kt == RAY_SYM) {
+            const ray_t* dict_owner = (col->attrs & RAY_ATTR_SLICE)
+                                    ? col->slice_parent : col;
+            if (dict_owner && dict_owner->sym_dict) return NULL;
+        }
         ctx.keys[i].type  = kt;
         ctx.keys[i].attrs = col->attrs;
         ctx.keys[i].esz   = ray_sym_elem_size(kt, col->attrs);
