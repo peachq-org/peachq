@@ -28,8 +28,9 @@
  * filtered-table materialization (the FILTER → SORT_TAKE pipeline writes
  * a 2.5M-row temp table; this skips it).
  *
- * Targets the ORDER BY + LIMIT cluster (Q25/Q26/Q27): currently the
- * widest gap vs DuckDB on ClickBench.
+ * Targets the ORDER BY + LIMIT cluster: previously the engine
+ * materialised a full filtered table and sorted it before applying
+ * TAKE; the heap-bounded merge here keeps only K rows in flight.
  *
  * Single sort key for now.  SYM keys go through the comparator path
  * (dict-id → string → memcmp).  Numeric keys do direct value compare.

@@ -1494,7 +1494,7 @@ static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state, uint8_t wide) {
     return 0;
 }
 
-/* ─── Worker fn — DuckDB-style chunked vectorized aggregate update ───
+/* ─── Worker fn — chunked vectorised aggregate update ───────────────
  *
  * Per morsel we run two passes:
  *
@@ -1511,9 +1511,8 @@ static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state, uint8_t wide) {
  *   is hoisted out of the loop, so each loop body is a single
  *   accumulate operation against state[slot_idx[i] * total + off].
  *
- * Mirrors duckdb's GroupedAggregateHashTable::AddChunk path: probe
- * first, then UpdateStates per aggregate.  Eliminates the O(rows × aggs)
- * branch dispatch the per-row update did. */
+ * Probe-then-update-per-aggregate eliminates the O(rows × aggs) branch
+ * dispatch the prior per-row update did. */
 static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end) {
     mk_par_ctx_t* c = (mk_par_ctx_t*)raw;
     if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
