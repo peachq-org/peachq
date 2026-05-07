@@ -2352,6 +2352,16 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         && ot != RAY_DATE && ot != RAY_TIME
                         && ot != RAY_TIMESTAMP)
                         { bad_clause = 1; break; }
+                    /* Local-dict SYM columns route through the unfused
+                     * path so the gather can propagate sym_dict (the
+                     * fused materialiser doesn't).  See ray_fused_topk_select
+                     * for the parallel executor-side gate. */
+                    if (ot == RAY_SYM) {
+                        const ray_t* dict_owner = (oc->attrs & RAY_ATTR_SLICE)
+                                                ? oc->slice_parent : oc;
+                        if (dict_owner && dict_owner->sym_dict)
+                            { bad_clause = 1; break; }
+                    }
                     out_syms[n_out_syms]    = v->i64;
                     out_aliases[n_out_syms] = kid;
                     n_out_syms++;
