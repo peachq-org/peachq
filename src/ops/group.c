@@ -1111,16 +1111,19 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
             int64_t gid = row_gid[r];
             if (gid < 0 || gid >= n_groups) continue;
             if (null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
-            int64_t val;
+            /* Use a different name from the macro's inner `val` so
+             * clang doesn't see an `int64_t val = (val);` self-init
+             * after macro expansion. */
+            int64_t row_val;
             if (in_type == RAY_F64) {
                 double fv = ((double*)base)[r];
                 if (fv != fv) fv = (double)NAN;
                 else if (fv == 0.0) fv = 0.0;
-                memcpy(&val, &fv, sizeof(int64_t));
+                memcpy(&row_val, &fv, sizeof(int64_t));
             } else {
-                val = read_col_i64(base, r, in_type, src->attrs);
+                row_val = read_col_i64(base, r, in_type, src->attrs);
             }
-            CD_INSERT(val);
+            CD_INSERT(row_val);
         }
     }
 
