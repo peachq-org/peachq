@@ -859,6 +859,13 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
     if (vec->attrs & RAY_ATTR_SLICE) return RAY_ERR_TYPE; /* cannot set null on slice — COW first */
     if (idx < 0 || idx >= vec->len) return RAY_ERR_RANGE;
 
+    /* SYM columns are no-null by design — sym ID 0 (the interned
+     * empty string, reserved by ray_sym_init) is the canonical
+     * "missing" / "empty" / "absent" value, and every SYM cell
+     * holds some valid ID.  Reject set-null on SYM so callers that
+     * mean "this row is missing" write 0 explicitly instead. */
+    if (vec->type == RAY_SYM) return RAY_ERR_TYPE;
+
     /* Mutation invalidates any attached accelerator index — drop it inline.
      * Caller must already hold a unique ref (set-null on a shared vec is a
      * bug regardless of indexing). */
@@ -1299,6 +1306,12 @@ ray_t* ray_embedding_new(int64_t nrows, int32_t dim) {
 bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     if (!vec || RAY_IS_ERR(vec)) return false;
     if (idx < 0 || idx >= vec->len) return false;
+
+    /* SYM columns are no-null by design — see ray_vec_set_null_checked
+     * for the rationale.  Short-circuit before slice/nullmap dispatch
+     * so any leftover HAS_NULLS attr from pre-policy code paths
+     * doesn't surface a phantom null. */
+    if (vec->type == RAY_SYM) return false;
 
     /* Slice: delegate to parent with adjusted index */
     if (vec->attrs & RAY_ATTR_SLICE) {
