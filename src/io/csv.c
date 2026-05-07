@@ -600,11 +600,10 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
      *
      *   default              empty fields → empty-symbol "" (RAY_ATTR_HAS_NULLS
      *                         cleared once the nullmap is fully drained).
-     *                         This matches the row-level semantics used by
-     *                         DuckDB / Spark / polars for CSV imports — the
-     *                         file format itself can't distinguish "missing
-     *                         field" from "empty string", so we collapse
-     *                         them into a single deterministic value.
+     *                         The file format itself can't distinguish
+     *                         "missing field" from "empty string", so
+     *                         we collapse them into a single
+     *                         deterministic value.
      *
      *   RAYFORCE_CSV_EMPTY_SYM_NULL=1
      *                        empty fields → typed NULL (HAS_NULLS retained).
