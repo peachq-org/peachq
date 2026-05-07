@@ -2287,9 +2287,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
      * latency gap on ORDER BY + LIMIT shapes that were previously
      * dominated by the filtered-table materialisation step. */
     if (where_expr && take_expr && has_sort && !by_expr && !nearest_expr) {
-        const char* off_env = getenv("RAYFORCE_DISABLE_FUSED_TOPK");
-        int env_disabled = (off_env && off_env[0] == '1');
-        if (!env_disabled && ray_fused_topk_supported(where_expr, tbl)) {
+        if (ray_fused_topk_supported(where_expr, tbl)) {
             /* Walk the dict and check: exactly one asc/desc clause naming
              * a single scalar column, take is an atom K, and every
              * output column is a -RAY_SYM source-column reference (no
@@ -2547,14 +2545,10 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
      * shape matches the supported vocabulary, route through the fused
      * operator instead of FILTER + GROUP.  We pre-scan the dict here so
      * the WHERE block and the eager-filter step downstream can be
-     * short-circuited; the fused node consumes the predicate directly.
-     *
-     * Guard with RAYFORCE_DISABLE_FUSED_GROUP=1 for A/B comparisons. */
+     * short-circuited; the fused node consumes the predicate directly. */
     int can_fuse_phase1 = 0;
     ray_op_t* fused_pred_op = NULL;  /* compiled below in the WHERE block */
     {
-        const char* off_env = getenv("RAYFORCE_DISABLE_FUSED_GROUP");
-        int env_disabled = (off_env && off_env[0] == '1');
         /* by_expr forms accepted:
          *   - scalar  -RAY_SYM with NAME    (single key, e.g. Q8/Q37)
          *   - vector  RAY_SYM with len 1..16 (dict-form pre-evaluated)
@@ -2565,8 +2559,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         int multi_key_vec     = by_expr && by_expr->type == RAY_SYM
                               && ray_len(by_expr) >= 1
                               && ray_len(by_expr) <= 16;
-        if (!env_disabled
-            && where_expr && by_expr && !nearest_expr
+        if (where_expr && by_expr && !nearest_expr
             && (single_key_scalar || multi_key_vec)
             && ray_fused_group_supported(where_expr, tbl))
         {
