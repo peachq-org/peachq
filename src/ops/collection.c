@@ -680,6 +680,25 @@ int atom_eq(ray_t* a, ray_t* b) {
     case -RAY_STR:
         return ray_str_len(a) == ray_str_len(b) &&
                memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) == 0;
+    case RAY_LIST: {
+        /* Structural compare: lists are equal iff same length AND every
+         * pair of elements is atom_eq.  Without this, two structurally-
+         * identical lists with different element pointers compared via
+         * the default branch's memcmp on ray_t** — i.e. pointer
+         * identity, never structurally equal — which broke (group LIST)
+         * (every row its own bucket) and dict/distinct fallbacks. */
+        if (a->len != b->len) return 0;
+        ray_t** ea = (ray_t**)ray_data(a);
+        ray_t** eb = (ray_t**)ray_data(b);
+        for (int64_t i = 0; i < a->len; i++) {
+            if (!ea[i] || !eb[i]) {
+                if (ea[i] != eb[i]) return 0;
+                continue;
+            }
+            if (!atom_eq(ea[i], eb[i])) return 0;
+        }
+        return 1;
+    }
     default:
         /* Vector equality: same type and length, element-wise comparison */
         if (a->type > 0 && a->type == b->type && a->len == b->len) {
