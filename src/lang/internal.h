@@ -323,6 +323,7 @@ ray_t* ray_abs_fn(ray_t* x);
 ray_t* ray_sqrt_fn(ray_t* x);
 ray_t* ray_log_fn(ray_t* x);
 ray_t* ray_exp_fn(ray_t* x);
+ray_t* ray_pow_fn(ray_t* x, ray_t* y);
 
 /* Collection helpers (formerly static in eval.c, now in collection.c) */
 int    atom_eq(ray_t* a, ray_t* b);
