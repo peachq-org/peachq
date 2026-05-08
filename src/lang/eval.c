@@ -2282,6 +2282,10 @@ static void ray_register_builtins(void) {
     register_unary_op("sqrt",  RAY_FN_ATOMIC, ray_sqrt_fn, OP_SQRT);
     register_unary_op("log",   RAY_FN_ATOMIC, ray_log_fn,  OP_LOG);
     register_unary_op("exp",   RAY_FN_ATOMIC, ray_exp_fn,  OP_EXP);
+    /* No DAG opcode yet — registered as plain binary atomic.  Vector
+     * broadcasting goes through the ray_eval atomic dispatch.  Adding
+     * OP_POW + libm-vectorised expr.c arms is a perf follow-up. */
+    register_binary("pow", RAY_FN_ATOMIC, ray_pow_fn);
 
     /* Special forms */
     register_binary("set", RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_set_fn);
