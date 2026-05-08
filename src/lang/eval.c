@@ -2286,6 +2286,11 @@ static void ray_register_builtins(void) {
      * broadcasting goes through the ray_eval atomic dispatch.  Adding
      * OP_POW + libm-vectorised expr.c arms is a perf follow-up. */
     register_binary("pow", RAY_FN_ATOMIC, ray_pow_fn);
+    /* Partial-sort top/bottom-N: O(N log K) bounded-heap fast path
+     * via topk_indices_single, falls back to full sort for unsupported
+     * types.  Per-group usage works through the eval-level scatter. */
+    register_binary("top", RAY_FN_NONE, ray_top_fn);
+    register_binary("bot", RAY_FN_NONE, ray_bot_fn);
 
     /* Special forms */
     register_binary("set", RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_set_fn);
