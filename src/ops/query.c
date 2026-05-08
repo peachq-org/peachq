@@ -1246,7 +1246,19 @@ static int collect_col_refs(ray_t* expr, ray_t* tbl,
  * via ray_at_fn, hands the slice to env_bind_local which retains, then
  * drops our ref).  Returns 0 on success, error ray_t* on failure. */
 static ray_t* bind_col_slice(int64_t sym, ray_t* col, ray_t* idx_list) {
-    ray_t* slice = ray_at_fn(col, idx_list);
+    /* For typed-vec col + RAY_I64 idx vec, gather directly so the bound
+     * slice is the same typed vector as the source — `(at v idx)` would
+     * box every element into a RAY_LIST of atoms, which breaks any
+     * per-group expression that expects a numeric vec (`desc`, `take`,
+     * `asc`, etc.).  Fall back to ray_at_fn for LIST inputs and other
+     * shapes the gather kernel doesn't cover. */
+    ray_t* slice = NULL;
+    if (col && ray_is_vec(col) && idx_list &&
+        idx_list->type == RAY_I64 && ray_is_vec(idx_list)) {
+        const int64_t* idx_data = (const int64_t*)ray_data(idx_list);
+        slice = gather_by_idx(col, (int64_t*)idx_data, ray_len(idx_list));
+    }
+    if (!slice) slice = ray_at_fn(col, idx_list);
     if (!slice || RAY_IS_ERR(slice)) {
         return slice ? slice : ray_error("oom", NULL);
     }
@@ -3283,24 +3295,20 @@ ray_t* ray_select(ray_t** args, int64_t n) {
         /* Non-aggregation expressions (arithmetic, lambda, etc.) are
          * handled post-DAG: aggs go through the parallel GROUP pipeline,
          * then non-agg results are evaluated on the full table and
-         * scattered per-group into LIST columns.  The scatter block
-         * only handles single scalar-key by-clauses — for multi-key
-         * or computed-key groupings, fall back to eval-level so the
-         * non-agg scatter has a well-defined row→group mapping. */
+         * scattered per-group into LIST columns.  The fast scatter only
+         * handles single scalar-key by-clauses — multi-key and
+         * computed-key shapes route through eval-level group, which
+         * gives the non-agg pass a well-defined row→group mapping
+         * (composite list keys group correctly via atom_eq's structural
+         * compare for RAY_LIST). */
         if (!use_eval_group && any_nonagg) {
-            /* Fast path requires a single scalar-named key column.
-             * Multi-key and computed-key by-clauses with non-agg
-             * expressions are not yet supported. */
             int single_scalar_key = 0;
             if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME)) {
                 single_scalar_key = 1;
             } else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1) {
                 single_scalar_key = 1;
             }
-            if (!single_scalar_key) {
-                ray_graph_free(g); ray_release(tbl);
-                return ray_error("nyi", "non-agg expression with multi-key or computed group key");
-            }
+            if (!single_scalar_key) use_eval_group = 1;
         }
         if (use_eval_group) {
             /* Apply WHERE filter first (if any), then eval-level groupby */
