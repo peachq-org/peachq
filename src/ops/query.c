@@ -1127,6 +1127,23 @@ static int is_agg_expr(ray_t* expr) {
     return resolve_agg_opcode(elems[0]->i64) != 0;
 }
 
+/* True iff the expression contains an aggregation call anywhere in
+ * its subtree.  Used by the post-DAG scatter to detect non-agg
+ * expressions whose subexpressions ARE aggregates (e.g.
+ * `(- (max v1) (min v2))`) — those must be evaluated per-group
+ * rather than broadcast from a single full-table eval, otherwise the
+ * inner aggs collapse globally and every group gets the same value. */
+static int expr_contains_agg(ray_t* expr) {
+    if (!expr) return 0;
+    if (expr->type != RAY_LIST) return 0;
+    if (is_agg_expr(expr)) return 1;
+    ray_t** elems = (ray_t**)ray_data(expr);
+    int64_t n = ray_len(expr);
+    for (int64_t i = 0; i < n; i++)
+        if (expr_contains_agg(elems[i])) return 1;
+    return 0;
+}
+
 static int expr_contains_call_named(ray_t* expr, const char* name, size_t name_len) {
     if (!expr) return 0;
     if (expr->type != RAY_LIST) return 0;
@@ -5763,7 +5780,12 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                         continue;
                     }
 
-                    if (is_agg_expr(nonagg_exprs[ni])) {
+                    /* Outer-agg or arith-of-aggs: must evaluate per group
+                     * — a single full-table eval collapses every nested
+                     * agg (max/min/sum/...) globally and broadcasts the
+                     * scalar across all groups. */
+                    if (is_agg_expr(nonagg_exprs[ni]) ||
+                        expr_contains_agg(nonagg_exprs[ni])) {
                         ray_t* per_group = nonagg_eval_per_group_buf(
                             nonagg_exprs[ni], tbl, idx_buf, offsets, grp_cnt, n_groups);
                         if (RAY_IS_ERR(per_group)) {
