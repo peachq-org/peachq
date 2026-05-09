@@ -2291,6 +2291,11 @@ static void ray_register_builtins(void) {
      * types.  Per-group usage works through the eval-level scatter. */
     register_binary("top", RAY_FN_NONE, ray_top_fn);
     register_binary("bot", RAY_FN_NONE, ray_bot_fn);
+    /* pearson_corr: 2-input scalar reducer.  Per-group usage routes
+     * through the eval-level scatter (head not in agg-opcode list,
+     * but expr_refs_row_column → row-aligned check → per-group eval
+     * fallback when full-table call collapses to a scalar). */
+    register_binary("pearson_corr", RAY_FN_NONE, ray_pearson_corr_fn);
 
     /* Special forms */
     register_binary("set", RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_set_fn);
