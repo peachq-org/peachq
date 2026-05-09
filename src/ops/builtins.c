@@ -34,6 +34,7 @@
 #include "core/types.h"
 #include "io/csv.h"
 #include "ops/ops.h"
+#include "ops/hash.h"
 #include "table/sym.h"
 #include "core/profile.h"
 #include "mem/sys.h"
@@ -1836,6 +1837,52 @@ static inline uint64_t hash_i64(int64_t v) {
     return mix64((uint64_t)v);
 }
 
+/* Hash a generic atom or list, mirroring atom_eq's structural compare.
+ * Used by the ray_group_fn LIST path to replace the historical O(N²)
+ * linear scan with an open-addressed hash table.  Cross-type numeric
+ * coercion goes through f64 so an I64 atom and an F64 atom holding the
+ * same value collide (matches atom_eq's `is_numeric → as_f64`).
+ *
+ * Mirrors the type dispatch in collection.c::hs_hash_row's RAY_LIST
+ * branch but recurses into nested lists — hs_hash_row's default tag-
+ * only fallback collapses every nested-list row to the same hash, so
+ * the existing path is degenerate for composite multi-key composites.
+ * Uses the canonical wyhash helpers from ops/hash.h, same as the
+ * pivot / datalog / join hashers. */
+static uint64_t atom_hash(ray_t* a) {
+    if (!a || RAY_ATOM_IS_NULL(a)) return 0;
+    if (is_numeric(a)) return ray_hash_f64(as_f64(a));
+    switch (a->type) {
+        case -RAY_SYM:       return ray_hash_i64(a->i64);
+        case -RAY_DATE:
+        case -RAY_TIME:      return ray_hash_i64((int64_t)a->i32);
+        case -RAY_TIMESTAMP: return ray_hash_i64(a->i64);
+        case -RAY_GUID: {
+            const uint8_t* g = a->obj
+                ? (const uint8_t*)ray_data(a->obj)
+                : (const uint8_t*)ray_data((ray_t*)a);
+            return ray_hash_bytes(g, 16);
+        }
+        case -RAY_STR:
+            return ray_hash_bytes(ray_str_ptr(a), ray_str_len(a));
+        case RAY_LIST: {
+            int64_t n = a->len;
+            ray_t** elems = (ray_t**)ray_data(a);
+            /* Seed with len so [] and a list of zeros differ. */
+            uint64_t h = ray_hash_i64(n);
+            for (int64_t i = 0; i < n; i++)
+                h = ray_hash_combine(h, atom_hash(elems[i]));
+            return h;
+        }
+        default:
+            /* Vec or unknown atom kind: fold type tag and length.  Two
+             * structurally-equal lists never reach here (RAY_LIST branch
+             * above) so we can't accidentally produce different hashes
+             * for atom_eq-equal pairs. */
+            return ray_hash_i64(((int64_t)a->type << 32) ^ (int64_t)a->len);
+    }
+}
+
 /* Context for GUID rehash: the 16-byte source base and, indirectly,
  * gvals — which stores the row_idx of the first occurrence per group. */
 typedef struct {
@@ -1852,6 +1899,14 @@ typedef struct { const int64_t* gvals; } ght_i64_ctx_t;
 static uint64_t ght_i64_hash_gi(uint32_t gi, void* ctx) {
     ght_i64_ctx_t* c = (ght_i64_ctx_t*)ctx;
     return hash_i64(c->gvals[gi]);
+}
+
+/* Context for the LIST-path rehash: gkeys holds atom pointers for each
+ * unique group (one slot per gi), recomputed on grow via atom_hash. */
+typedef struct { ray_t** gkeys; } ght_list_ctx_t;
+static uint64_t ght_list_hash_gi(uint32_t gi, void* ctx) {
+    ght_list_ctx_t* c = (ght_list_ctx_t*)ctx;
+    return atom_hash(c->gkeys[gi]);
 }
 
 /* Grow the per-group bookkeeping arrays used by ray_group_fn.
@@ -1878,6 +1933,37 @@ static bool group_grow(ray_t** val_block, ray_t** ivblock,
     return true;
 }
 
+/* Same as group_grow but also resizes the LIST-path's keys block
+ * (gkeys — ray_t* atom pointers, one per unique group).  Multi-key
+ * non-agg select-by lands here via composite-key LISTs and can
+ * exceed the initial 1024-slot cap on real workloads. */
+static bool group_grow_listkeys(ray_t** val_block, ray_t** ivblock, ray_t** kblock,
+                                int64_t** gvals, ray_t*** idx_vecs, ray_t*** gkeys,
+                                int64_t cur_count, int64_t* max_groups) {
+    int64_t new_max = *max_groups * 2;
+    if (new_max <= *max_groups) return false;
+    ray_t* new_val = ray_alloc((size_t)new_max * sizeof(int64_t));
+    if (!new_val || RAY_IS_ERR(new_val)) return false;
+    ray_t* new_iv = ray_alloc((size_t)new_max * sizeof(ray_t*));
+    if (!new_iv || RAY_IS_ERR(new_iv)) { ray_free(new_val); return false; }
+    ray_t* new_k = ray_alloc((size_t)new_max * sizeof(ray_t*));
+    if (!new_k || RAY_IS_ERR(new_k)) { ray_free(new_val); ray_free(new_iv); return false; }
+    memcpy(ray_data(new_val), *gvals,    (size_t)cur_count * sizeof(int64_t));
+    memcpy(ray_data(new_iv),  *idx_vecs, (size_t)cur_count * sizeof(ray_t*));
+    memcpy(ray_data(new_k),   *gkeys,    (size_t)cur_count * sizeof(ray_t*));
+    ray_free(*val_block);
+    ray_free(*ivblock);
+    ray_free(*kblock);
+    *val_block = new_val;
+    *ivblock   = new_iv;
+    *kblock    = new_k;
+    *gvals     = (int64_t*)ray_data(new_val);
+    *idx_vecs  = (ray_t**)ray_data(new_iv);
+    *gkeys     = (ray_t**)ray_data(new_k);
+    *max_groups = new_max;
+    return true;
+}
+
 ray_t* ray_group_fn(ray_t* x) {
     if (!ray_is_vec(x) && x->type != RAY_LIST)
         return ray_error("type", NULL);
@@ -1890,11 +1976,12 @@ ray_t* ray_group_fn(ray_t* x) {
         return ray_dict_new(keys, vals);
     }
 
-    /* Collect unique values; the scalar and RAY_GUID paths grow these
-     * arrays on demand via group_grow().  The RAY_LIST and RAY_STR
-     * paths below still cap at this initial size (they have their own
-     * side buffers that aren't yet wired into group_grow); starting at
-     * 1024 preserves their prior behaviour. */
+    /* Collect unique values; the scalar / RAY_GUID / RAY_LIST paths
+     * grow these arrays on demand (group_grow / group_grow_listkeys).
+     * The RAY_STR path below still caps at this initial size — its
+     * side buffer isn't yet wired into a grow helper, but the cap is
+     * unreachable in practice (RAY_STR is char-vector, ≤256 distinct
+     * 1-byte chars).  Starting at 1024 keeps the initial alloc cheap. */
     int64_t max_groups = n < 1024 ? n : 1024;
     ray_t* val_block = ray_alloc((size_t)(max_groups * sizeof(int64_t)));
     if (RAY_IS_ERR(val_block)) return val_block;
@@ -1907,32 +1994,66 @@ ray_t* ray_group_fn(ray_t* x) {
     idx_vecs = (ray_t**)ray_data(ivblock);
     int64_t ngroups = 0;
 
-    /* For LIST type, use atom_eq-based grouping with stored keys */
+    /* For LIST type, use atom_eq-based grouping with stored keys.
+     * Open-address hash table on atom_hash replaces the historical
+     * O(N²) linear scan over gkeys — multi-key non-agg select-by on
+     * H2O-scale tables (10M rows × 10k unique keys) is now linear. */
     if (x->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(x);
-        /* Store group keys as ray_t* pointers */
         ray_t* kblock = ray_alloc((size_t)(max_groups * sizeof(ray_t*)));
         if (RAY_IS_ERR(kblock)) { ray_free(val_block); ray_free(ivblock); return kblock; }
         ray_t** gkeys = (ray_t**)ray_data(kblock);
 
+        group_ht_t ht;
+        uint32_t seed_cap = (uint32_t)(n < 64 ? 64 : (n < 1048576 ? (n * 2) : 2097152));
+        if (!group_ht_init(&ht, seed_cap)) {
+            ray_free(val_block); ray_free(ivblock); ray_free(kblock);
+            return ray_error("oom", NULL);
+        }
+        ght_list_ctx_t lctx = { .gkeys = gkeys };
+
         for (int64_t i = 0; i < n; i++) {
             ray_t* elem = elems[i];
-            int64_t gi = -1;
-            for (int64_t g = 0; g < ngroups; g++) {
-                if (atom_eq(gkeys[g], elem)) { gi = g; break; }
+            uint64_t h = atom_hash(elem);
+            uint32_t slot = (uint32_t)(h & ht.mask);
+            uint32_t gi_found = GHT_EMPTY;
+            while (ht.slots[slot] != GHT_EMPTY) {
+                uint32_t gi_p = ht.slots[slot];
+                if (atom_eq(gkeys[gi_p], elem)) { gi_found = gi_p; break; }
+                slot = (slot + 1) & ht.mask;
             }
-            if (gi < 0) {
+            int64_t gi;
+            if (gi_found != GHT_EMPTY) {
+                gi = gi_found;
+            } else {
                 if (ngroups >= max_groups) {
-                    for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
-                    ray_free(val_block); ray_free(ivblock); ray_free(kblock);
-                    return ray_error("limit", NULL);
+                    if (!group_grow_listkeys(&val_block, &ivblock, &kblock,
+                                             &gvals, &idx_vecs, &gkeys,
+                                             ngroups, &max_groups)) {
+                        for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                        group_ht_free(&ht);
+                        ray_free(val_block); ray_free(ivblock); ray_free(kblock);
+                        return ray_error("oom", NULL);
+                    }
+                    lctx.gkeys = gkeys;
                 }
                 gi = ngroups++;
                 gkeys[gi] = elem;
                 idx_vecs[gi] = ray_vec_new(RAY_I64, 0);
+                ht.slots[slot] = (uint32_t)gi;
+                ht.count++;
+                if (ht.count * 2 > ht.cap) {
+                    if (!group_ht_grow(&ht, ght_list_hash_gi, &lctx)) {
+                        for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                        group_ht_free(&ht);
+                        ray_free(val_block); ray_free(ivblock); ray_free(kblock);
+                        return ray_error("oom", NULL);
+                    }
+                }
             }
             idx_vecs[gi] = ray_vec_append(idx_vecs[gi], &i);
         }
+        group_ht_free(&ht);
         /* Build dict: keys as RAY_LIST (heterogeneous atoms), vals as
          * RAY_LIST of I64 idx vectors. */
         ray_t* keys_lst = ray_list_new(ngroups);
