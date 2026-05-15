@@ -24,6 +24,7 @@
 #include "runtime.h"
 #include "mem/heap.h"
 #include "mem/sys.h"
+#include "table/sym.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +44,15 @@ extern void      ray_lang_destroy(void);
 
 ray_runtime_t *__RUNTIME = NULL;
 _Thread_local ray_vm_t *__VM = NULL;
+
+/* Persistent error message buffer.
+ *
+ * `__VM->err.msg` lives inside the VM struct, which is freed at the end of
+ * every eval (eval.c sets __VM = NULL right after `ray_free(vm_block)`). By
+ * the time the FFI caller reaches `ray_error_msg()`, the VM is gone. Stash a
+ * copy in a thread-local buffer that outlives the VM so callers can still
+ * read what went wrong. */
+static _Thread_local char ray_last_err_msg[256] = {0};
 
 /* Static null singleton — type RAY_NULL, ARENA flag makes retain/release no-ops */
 ray_t __ray_null = { .type = RAY_NULL, .attrs = RAY_ATTR_ARENA, .rc = 0, .len = 0 };
@@ -118,18 +128,21 @@ ray_err_t ray_err_from_obj(ray_t* err) {
 /* ===== Error API ===== */
 
 static ray_t* ray_verror(const char* code, const char* fmt, va_list ap) {
-    /* Populate / clear the per-VM message buffer FIRST.  On the deep-OOM
-     * path below we return the static __ray_oom sentinel, but that path
-     * still has to leave __VM->err.msg consistent with this call —
-     * otherwise ray_error_msg() returns text from whatever earlier error
-     * happened to land in the buffer last, which a user would naturally
-     * read as the message for THIS error.  The vsnprintf target is a
-     * fixed-size member of __VM (allocated at runtime-init), so this
-     * step does not depend on the heap and stays valid even when
-     * ray_alloc below fails. */
-    if (__VM) {
-        if (fmt) vsnprintf(__VM->err.msg, sizeof(__VM->err.msg), fmt, ap);
-        else     __VM->err.msg[0] = '\0';
+    /* Populate / clear the persistent message buffer FIRST.  On the
+     * deep-OOM path below we return the static __ray_oom sentinel, but
+     * that path still has to leave ray_error_msg() consistent with this
+     * call.  The buffer is thread-local storage, so this does not depend
+     * on the heap and stays valid even when ray_alloc below fails. */
+    if (fmt) {
+        va_list copy;
+        va_copy(copy, ap);
+        vsnprintf(ray_last_err_msg, sizeof(ray_last_err_msg), fmt, copy);
+        va_end(copy);
+        if (__VM)
+            memcpy(__VM->err.msg, ray_last_err_msg, sizeof(__VM->err.msg));
+    } else {
+        ray_last_err_msg[0] = '\0';
+        if (__VM) __VM->err.msg[0] = '\0';
     }
 
     ray_t* err = ray_alloc(0);
@@ -155,8 +168,9 @@ ray_t* ray_error(const char* code, const char* fmt, ...) {
         return err;
     }
     /* No format string — skip va_list entirely for portability.  Clear
-     * the per-VM message buffer FIRST so the deep-OOM sentinel path
+     * the persistent message buffer FIRST so the deep-OOM sentinel path
      * doesn't leave stale text from an earlier error visible. */
+    ray_last_err_msg[0] = '\0';
     if (__VM) __VM->err.msg[0] = '\0';
     ray_t* err = ray_alloc(0);
     if (!err) return &__ray_oom;  /* sentinel — see __ray_oom comment */
@@ -200,11 +214,12 @@ const char* ray_err_code(ray_t* err) {
 }
 
 const char* ray_error_msg(void) {
-    if (!__VM || !__VM->err.msg[0]) return NULL;
-    return __VM->err.msg;
+    if (!ray_last_err_msg[0]) return NULL;
+    return ray_last_err_msg;
 }
 
 void ray_error_clear(void) {
+    ray_last_err_msg[0] = '\0';
     if (__VM) __VM->err.msg[0] = '\0';
 }
 
@@ -341,6 +356,38 @@ bool ray_mem_pressure(void) {
     ray_mem_stats_t st;
     ray_mem_stats(&st);
     return (int64_t)(st.bytes_allocated + st.direct_bytes) > __RUNTIME->mem_budget;
+}
+
+int8_t ray_obj_type(ray_t* v) {
+    return v ? v->type : 0;
+}
+
+uint8_t ray_obj_attrs(ray_t* v) {
+    return v ? v->attrs : 0;
+}
+
+int64_t ray_vec_get_i64(ray_t* vec, int64_t idx) {
+    if (!vec || idx < 0 || idx >= vec->len) return 0;
+    if (vec->type == RAY_I64 || vec->type == RAY_DATE || vec->type == RAY_TIME || vec->type == RAY_TIMESTAMP) {
+        return ((const int64_t*)ray_data(vec))[idx];
+    }
+    if (vec->type == RAY_I32) return ((const int32_t*)ray_data(vec))[idx];
+    if (vec->type == RAY_I16) return ((const int16_t*)ray_data(vec))[idx];
+    if (vec->type == RAY_U8 || vec->type == RAY_BOOL) return ((const uint8_t*)ray_data(vec))[idx];
+    return 0;
+}
+
+double ray_vec_get_f64(ray_t* vec, int64_t idx) {
+    if (!vec || idx < 0 || idx >= vec->len) return 0.0;
+    if (vec->type == RAY_F64) return ((const double*)ray_data(vec))[idx];
+    if (vec->type == RAY_F32) return ((const float*)ray_data(vec))[idx];
+    return 0.0;
+}
+
+int64_t ray_vec_get_sym_id(ray_t* vec, int64_t idx) {
+    if (!vec || idx < 0 || idx >= vec->len) return 0;
+    if (vec->type != RAY_SYM) return 0;
+    return ray_read_sym(ray_data(vec), idx, vec->type, vec->attrs);
 }
 
 void ray_runtime_destroy(ray_runtime_t* rt) {
