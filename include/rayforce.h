@@ -304,6 +304,25 @@ ray_t* ray_timestamp(int64_t val);
 ray_t* ray_guid(const uint8_t* bytes);
 ray_t* ray_typed_null(int8_t type);
 
+/* ===== Null Sentinel Values =====
+ *
+ * Per-type null encoding for nullable scalar types.  Callers compare values
+ * directly (e.g. `x == NULL_I64`, `x != x` for NaN); there are no predicate
+ * macros or aliases.  Temporal types (DATE/TIME/TIMESTAMP) reuse NULL_I32 or
+ * NULL_I64 based on their storage width.  SYM null = sym ID 0; STR null =
+ * empty string (length 0); BOOL and U8 are non-nullable.
+ *
+ * These constants land in Phase 1 of the bitmap→sentinel migration.  Through
+ * Phase 3d (integer/temporal) and Phase 7 (full cutover) the bitmap bit
+ * `nullmap[0] & 1` is kept in sync with the sentinel value for atoms
+ * ("dual encoding"), so legacy bitmap-aware readers and new sentinel-aware
+ * readers agree.  After Phase 7 the bitmap arm is reclaimed for inline
+ * stats and the bit becomes a pure optimization hint. */
+#define NULL_I16  ((int16_t)INT16_MIN)
+#define NULL_I32  ((int32_t)INT32_MIN)
+#define NULL_I64  ((int64_t)INT64_MIN)
+#define NULL_F64  (__builtin_nan(""))
+
 /* Null bitmap check for atoms — bit 0 of nullmap[0] marks typed nulls.
  * Also matches RAY_NULL_OBJ (the untyped null singleton). */
 #define RAY_ATOM_IS_NULL(x) (RAY_IS_NULL(x) || ((x)->type < 0 && ((x)->nullmap[0] & 1)))
