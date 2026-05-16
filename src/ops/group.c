@@ -9268,3 +9268,588 @@ ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op) {
 
     return result;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * exec_group_pearson_rowform — dedicated single-pass per-group Pearson²
+ * with row-form emission.  Bypasses Anton's master-merge regression in
+ * the shared radix HT path by using a private morsel-scatter +
+ * per-partition open-addressing HT pipeline that mirrors
+ * exec_group_topk_rowform.
+ *
+ * Algorithm:
+ *   Phase 1: morsel-parallel scan reads (k0[,k1], x, y) per row,
+ *            composes hash from key(s), scatters fat entries into
+ *            per-(worker, partition) buffers — no contention.
+ *   Phase 2: RADIX_P parallel tasks build a per-partition HT.  Each
+ *            entry holds the fixed Pearson state (Σx, Σy, Σx², Σy²,
+ *            Σxy, cnt).  Each scatter entry probes/inserts and
+ *            accumulates in-place.
+ *   Phase 3: walk all partition HTs, compute r² from state, emit
+ *            (key0[, key1], r²) row form.
+ *
+ * Per-row scatter stride: 40 B (hash + 2×key + 2×val).  1-key shape
+ * writes 0 in key1 slot (wastes 8 B per row — acceptable; the
+ * dominant cost is HT work in phase 2, not scatter bandwidth).
+ * ════════════════════════════════════════════════════════════════════════ */
+
+#define GRPC_SCATTER_STRIDE 40u
+
+typedef struct {
+    char*    data;          /* [count * GRPC_SCATTER_STRIDE] */
+    uint32_t count;
+    uint32_t cap;
+    bool     oom;
+    ray_t*   _hdr;
+} grpc_scat_buf_t;
+
+/* Per-group Pearson accumulator state.  All sums kept as doubles
+ * (mirrors OP_PEARSON_CORR finalize formula in radix_phase3_fn). */
+typedef struct {
+    int64_t key0;
+    int64_t key1;
+    double  sum_x;
+    double  sum_y;
+    double  sumsq_x;
+    double  sumsq_y;
+    double  sumxy;
+    int64_t cnt;
+} grpc_entry_t;
+
+typedef struct {
+    uint32_t*       slots;        /* [cap]: packed (salt:8 | idx:24); GRPC_EMPTY = UINT32_MAX */
+    grpc_entry_t*   entries;      /* [entry_cap] */
+    uint32_t        count;
+    uint32_t        cap;          /* slot count, power of 2 */
+    uint32_t        entry_cap;    /* entries allocated */
+    bool            oom;
+    ray_t*          _slots_hdr;
+    ray_t*          _entries_hdr;
+} grpc_ht_t;
+
+#define GRPC_EMPTY     UINT32_MAX
+#define GRPC_PACK(salt, idx) (((uint32_t)(uint8_t)(salt) << 24) | ((idx) & 0xFFFFFF))
+#define GRPC_IDX(s)    ((s) & 0xFFFFFF)
+#define GRPC_SALT(s)   ((uint8_t)((s) >> 24))
+#define GRPC_HASH_SALT(h) ((uint8_t)((h) >> 56))
+
+static bool grpc_ht_init(grpc_ht_t* ht, uint32_t init_cap) {
+    memset(ht, 0, sizeof(*ht));
+    if (init_cap < 32) init_cap = 32;
+    uint32_t cap = 1;
+    while (cap < init_cap) cap <<= 1;
+    ht->cap = cap;
+    ht->entry_cap = cap / 2;
+    if (ht->entry_cap < 16) ht->entry_cap = 16;
+
+    ht->slots = (uint32_t*)scratch_alloc(&ht->_slots_hdr, (size_t)cap * 4);
+    if (!ht->slots) { ht->oom = true; return false; }
+    memset(ht->slots, 0xFF, (size_t)cap * 4);
+
+    ht->entries = (grpc_entry_t*)scratch_alloc(&ht->_entries_hdr,
+                                                (size_t)ht->entry_cap * sizeof(grpc_entry_t));
+    if (!ht->entries) { ht->oom = true; return false; }
+    return true;
+}
+
+static void grpc_ht_free(grpc_ht_t* ht) {
+    if (ht->_slots_hdr) scratch_free(ht->_slots_hdr);
+    if (ht->_entries_hdr) scratch_free(ht->_entries_hdr);
+    memset(ht, 0, sizeof(*ht));
+}
+
+static bool grpc_ht_grow_slots(grpc_ht_t* ht) {
+    uint32_t old_cap = ht->cap;
+    uint32_t new_cap = old_cap * 2;
+    ray_t* new_hdr = NULL;
+    uint32_t* new_slots = (uint32_t*)scratch_alloc(&new_hdr, (size_t)new_cap * 4);
+    if (!new_slots) { ht->oom = true; return false; }
+    memset(new_slots, 0xFF, (size_t)new_cap * 4);
+
+    uint32_t mask = new_cap - 1;
+    for (uint32_t i = 0; i < ht->count; i++) {
+        grpc_entry_t* e = &ht->entries[i];
+        /* Recompute hash from canonical keys. */
+        uint64_t h = ray_hash_i64(e->key0);
+        h = ray_hash_combine(h, ray_hash_i64(e->key1));
+        uint32_t p = (uint32_t)(h & mask);
+        uint8_t salt = GRPC_HASH_SALT(h);
+        for (;;) {
+            if (new_slots[p] == GRPC_EMPTY) {
+                new_slots[p] = GRPC_PACK(salt, i);
+                break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    scratch_free(ht->_slots_hdr);
+    ht->_slots_hdr = new_hdr;
+    ht->slots = new_slots;
+    ht->cap = new_cap;
+    return true;
+}
+
+static bool grpc_ht_grow_entries(grpc_ht_t* ht) {
+    uint32_t new_ecap = ht->entry_cap * 2;
+    grpc_entry_t* new_e = (grpc_entry_t*)scratch_realloc(&ht->_entries_hdr,
+                                          (size_t)ht->entry_cap * sizeof(grpc_entry_t),
+                                          (size_t)new_ecap * sizeof(grpc_entry_t));
+    if (!new_e) { ht->oom = true; return false; }
+    ht->entries = new_e;
+    ht->entry_cap = new_ecap;
+    return true;
+}
+
+/* Probe-or-insert: returns entry pointer initialized to zero on miss. */
+static inline grpc_entry_t*
+grpc_ht_get(grpc_ht_t* ht, uint64_t hash, int64_t k0, int64_t k1) {
+    if (ht->cap == 0 || (ht->count + 1) * 2 > ht->cap) {
+        if (!grpc_ht_grow_slots(ht)) return NULL;
+    }
+    if (ht->count >= ht->entry_cap) {
+        if (!grpc_ht_grow_entries(ht)) return NULL;
+    }
+    uint32_t mask = ht->cap - 1;
+    uint32_t p = (uint32_t)(hash & mask);
+    uint8_t salt = GRPC_HASH_SALT(hash);
+    for (;;) {
+        uint32_t s = ht->slots[p];
+        if (s == GRPC_EMPTY) {
+            uint32_t idx = ht->count++;
+            ht->slots[p] = GRPC_PACK(salt, idx);
+            grpc_entry_t* e = &ht->entries[idx];
+            memset(e, 0, sizeof(*e));
+            e->key0 = k0;
+            e->key1 = k1;
+            return e;
+        }
+        if (GRPC_SALT(s) == salt) {
+            grpc_entry_t* e = &ht->entries[GRPC_IDX(s)];
+            if (e->key0 == k0 && e->key1 == k1)
+                return e;
+        }
+        p = (p + 1) & mask;
+    }
+}
+
+/* ─── Phase 1 ──────────────────────────────────────────────────────────
+ * Per-worker scan: read (k0[, k1], x, y) per row, hash, scatter into
+ * partition buckets.  Skips rows with null x, y, or any key. */
+
+typedef struct {
+    const void* k0_data;
+    const void* k1_data;       /* NULL if n_keys == 1 */
+    const void* x_data;
+    const void* y_data;
+    int8_t      k0_type;
+    int8_t      k1_type;
+    int8_t      x_type;
+    int8_t      y_type;
+    uint8_t     k0_attrs;
+    uint8_t     k1_attrs;
+    const uint8_t* k0_null_bm;
+    const uint8_t* k1_null_bm;
+    const uint8_t* x_null_bm;
+    const uint8_t* y_null_bm;
+    uint8_t     n_keys;
+    uint8_t     x_is_f64;
+    uint8_t     y_is_f64;
+    grpc_scat_buf_t* bufs;        /* [n_workers * RADIX_P] */
+    uint32_t    n_workers;
+} grpc_phase1_ctx_t;
+
+static inline bool grpc_is_null(const uint8_t* nbm, int64_t row) {
+    return (nbm[row >> 3] >> (row & 7)) & 1;
+}
+
+static inline double grpc_val_read_dbl(const void* base, int8_t t, int64_t row,
+                                        int is_f64) {
+    if (is_f64) {
+        double v; memcpy(&v, (const char*)base + (size_t)row*8, 8); return v;
+    }
+    /* Cast int → double (matches OP_PEARSON_CORR finalize). */
+    return (double)read_col_i64(base, row, t, 0);
+}
+
+static inline void grpc_scat_push(grpc_scat_buf_t* buf, uint64_t hash,
+                                   int64_t k0, int64_t k1,
+                                   double x, double y) {
+    if (__builtin_expect(buf->count >= buf->cap, 0)) {
+        uint32_t old_cap = buf->cap ? buf->cap : 64;
+        uint32_t new_cap = old_cap * 2;
+        char* new_data = (char*)scratch_realloc(&buf->_hdr,
+            (size_t)buf->cap * GRPC_SCATTER_STRIDE,
+            (size_t)new_cap * GRPC_SCATTER_STRIDE);
+        if (!new_data) { buf->oom = true; return; }
+        buf->data = new_data;
+        buf->cap = new_cap;
+    }
+    char* dst = buf->data + (size_t)buf->count * GRPC_SCATTER_STRIDE;
+    memcpy(dst,      &hash, 8);
+    memcpy(dst + 8,  &k0,   8);
+    memcpy(dst + 16, &k1,   8);
+    memcpy(dst + 24, &x,    8);
+    memcpy(dst + 32, &y,    8);
+    buf->count++;
+}
+
+static void grpc_phase1_fn(void* ctx_v, uint32_t worker_id,
+                           int64_t start, int64_t end) {
+    grpc_phase1_ctx_t* c = (grpc_phase1_ctx_t*)ctx_v;
+    grpc_scat_buf_t* my_bufs = &c->bufs[(size_t)worker_id * RADIX_P];
+
+    for (int64_t r = start; r < end; r++) {
+        if (c->x_null_bm && grpc_is_null(c->x_null_bm, r)) continue;
+        if (c->y_null_bm && grpc_is_null(c->y_null_bm, r)) continue;
+        if (c->k0_null_bm && grpc_is_null(c->k0_null_bm, r)) continue;
+        if (c->n_keys == 2 && c->k1_null_bm && grpc_is_null(c->k1_null_bm, r))
+            continue;
+        int64_t k0 = read_col_i64(c->k0_data, r, c->k0_type, c->k0_attrs);
+        int64_t k1 = 0;
+        uint64_t h = ray_hash_i64(k0);
+        if (c->n_keys == 2) {
+            k1 = read_col_i64(c->k1_data, r, c->k1_type, c->k1_attrs);
+            h = ray_hash_combine(h, ray_hash_i64(k1));
+        } else {
+            h = ray_hash_combine(h, ray_hash_i64(0));
+        }
+        double x = grpc_val_read_dbl(c->x_data, c->x_type, r, c->x_is_f64);
+        double y = grpc_val_read_dbl(c->y_data, c->y_type, r, c->y_is_f64);
+        uint32_t part = RADIX_PART(h);
+        grpc_scat_push(&my_bufs[part], h, k0, k1, x, y);
+    }
+}
+
+/* ─── Phase 2 ──────────────────────────────────────────────────────────
+ * RADIX_P tasks.  Each builds a partition HT and accumulates Pearson
+ * state from the scatter entries in its partition. */
+
+typedef struct {
+    grpc_scat_buf_t* bufs;
+    uint32_t        n_workers;
+    grpc_ht_t*      part_hts;
+    int64_t*        part_emit_rows;  /* [RADIX_P]: grp count per partition */
+} grpc_phase2_ctx_t;
+
+static void grpc_phase2_fn(void* ctx_v, uint32_t worker_id,
+                           int64_t start, int64_t end) {
+    (void)worker_id;
+    grpc_phase2_ctx_t* c = (grpc_phase2_ctx_t*)ctx_v;
+
+    for (int64_t pi = start; pi < end; pi++) {
+        uint32_t p = (uint32_t)pi;
+        grpc_ht_t* ph = &c->part_hts[p];
+        if (!grpc_ht_init(ph, 8192)) return;
+
+        for (uint32_t w = 0; w < c->n_workers; w++) {
+            grpc_scat_buf_t* buf = &c->bufs[(size_t)w * RADIX_P + p];
+            if (!buf->data || buf->oom) continue;
+            uint32_t nbuf = buf->count;
+            const char* base = buf->data;
+
+            /* Stride-ahead prefetch on slot array. */
+            enum { PF_DIST = 8 };
+            uint32_t pf_end = (nbuf < PF_DIST) ? nbuf : PF_DIST;
+            uint32_t mask = ph->cap - 1;
+            for (uint32_t j = 0; j < pf_end; j++) {
+                uint64_t h;
+                memcpy(&h, base + (size_t)j * GRPC_SCATTER_STRIDE, 8);
+                __builtin_prefetch(&ph->slots[(uint32_t)(h & mask)], 0, 1);
+            }
+            for (uint32_t i = 0; i < nbuf; i++) {
+                if (i + PF_DIST < nbuf) {
+                    uint64_t hpf;
+                    memcpy(&hpf,
+                           base + (size_t)(i + PF_DIST) * GRPC_SCATTER_STRIDE, 8);
+                    __builtin_prefetch(&ph->slots[(uint32_t)(hpf & (ph->cap - 1))], 0, 1);
+                }
+                uint64_t h;
+                int64_t k0, k1;
+                double x, y;
+                const char* e = base + (size_t)i * GRPC_SCATTER_STRIDE;
+                memcpy(&h,  e,      8);
+                memcpy(&k0, e + 8,  8);
+                memcpy(&k1, e + 16, 8);
+                memcpy(&x,  e + 24, 8);
+                memcpy(&y,  e + 32, 8);
+                grpc_entry_t* me = grpc_ht_get(ph, h, k0, k1);
+                if (!me) return;
+                me->sum_x   += x;
+                me->sum_y   += y;
+                me->sumsq_x += x * x;
+                me->sumsq_y += y * y;
+                me->sumxy   += x * y;
+                me->cnt     += 1;
+            }
+        }
+
+        c->part_emit_rows[p] = (int64_t)ph->count;
+    }
+}
+
+/* Public entry: invoked from exec.c on OP_GROUP_PEARSON_ROWFORM. */
+ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext || ext->n_keys < 1 || ext->n_keys > 2 || ext->n_aggs != 1
+        || !ext->agg_ins || !ext->agg_ins2)
+        return ray_error("domain", "group_pearson_rowform: bad shape");
+
+    ray_t* tbl = g->table;
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
+
+    /* Resolve key vectors. */
+    ray_t* k_vecs[2] = { NULL, NULL };
+    int64_t k_syms[2] = { 0, 0 };
+    int8_t  k_types[2] = { 0, 0 };
+    uint8_t k_attrs[2] = { 0, 0 };
+    for (uint8_t k = 0; k < ext->n_keys; k++) {
+        ray_op_ext_t* kext = find_ext(g, ext->keys[k]->id);
+        if (!kext || kext->base.opcode != OP_SCAN)
+            return ray_error("domain", "group_pearson_rowform: non-scan key");
+        k_vecs[k] = ray_table_get_col(tbl, kext->sym);
+        if (!k_vecs[k])
+            return ray_error("domain", "group_pearson_rowform: key column missing");
+        k_syms[k] = kext->sym;
+        k_types[k] = k_vecs[k]->type;
+        k_attrs[k] = k_vecs[k]->attrs;
+        int8_t kt = k_types[k];
+        if (kt != RAY_I64 && kt != RAY_I32 && kt != RAY_I16 && kt != RAY_U8 &&
+            kt != RAY_BOOL && kt != RAY_DATE && kt != RAY_TIME &&
+            kt != RAY_TIMESTAMP && kt != RAY_SYM)
+            return ray_error("nyi", "group_pearson_rowform: key type");
+    }
+
+    /* Resolve x, y. */
+    ray_op_ext_t* xext = find_ext(g, ext->agg_ins[0]->id);
+    ray_op_ext_t* yext = find_ext(g, ext->agg_ins2[0]->id);
+    if (!xext || !yext || xext->base.opcode != OP_SCAN || yext->base.opcode != OP_SCAN)
+        return ray_error("domain", "group_pearson_rowform: non-scan val");
+    ray_t* x_vec = ray_table_get_col(tbl, xext->sym);
+    ray_t* y_vec = ray_table_get_col(tbl, yext->sym);
+    if (!x_vec || !y_vec)
+        return ray_error("domain", "group_pearson_rowform: val column missing");
+    int8_t xt = x_vec->type, yt = y_vec->type;
+    int xt_ok = (xt == RAY_I64 || xt == RAY_I32 || xt == RAY_I16 ||
+                 xt == RAY_U8 || xt == RAY_BOOL || xt == RAY_F64);
+    int yt_ok = (yt == RAY_I64 || yt == RAY_I32 || yt == RAY_I16 ||
+                 yt == RAY_U8 || yt == RAY_BOOL || yt == RAY_F64);
+    if (!xt_ok || !yt_ok)
+        return ray_error("nyi", "group_pearson_rowform: val type");
+
+    int64_t nrows = k_vecs[0]->len;
+    int64_t y_used_sym = yext->sym;
+    (void)y_used_sym;
+    /* Output sym for r² column: use y's name as default (the planner will
+     * supply a different name via the surrounding select; here we just
+     * preserve a valid sym). */
+    int64_t r2_sym = ray_sym_intern("r", 1);
+    if (nrows == 0) {
+        ray_t* out = ray_table_new((int64_t)ext->n_keys + 1);
+        for (uint8_t k = 0; k < ext->n_keys; k++) {
+            ray_t* ev = (k_types[k] == RAY_SYM)
+                ? ray_sym_vec_new(k_attrs[k] & RAY_SYM_W_MASK, 0)
+                : ray_vec_new(k_types[k], 0);
+            out = ray_table_add_col(out, k_syms[k], ev);
+            ray_release(ev);
+        }
+        ray_t* r2v = ray_vec_new(RAY_F64, 0);
+        out = ray_table_add_col(out, r2_sym, r2v);
+        ray_release(r2v);
+        return out;
+    }
+
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t n_workers = pool ? ray_pool_total_workers(pool) : 1;
+    bool parallel = pool && nrows >= 16384;
+    if (!parallel) n_workers = 1;
+
+    size_t n_bufs = (size_t)n_workers * RADIX_P;
+    ray_t* bufs_hdr = NULL;
+    grpc_scat_buf_t* bufs = (grpc_scat_buf_t*)scratch_calloc(&bufs_hdr,
+        n_bufs * sizeof(grpc_scat_buf_t));
+    if (!bufs) return ray_error("oom", NULL);
+
+    uint32_t init_cap = 256;
+    for (size_t i = 0; i < n_bufs; i++) {
+        bufs[i].data = (char*)scratch_alloc(&bufs[i]._hdr,
+            (size_t)init_cap * GRPC_SCATTER_STRIDE);
+        if (!bufs[i].data) {
+            for (size_t j = 0; j <= i; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+        bufs[i].cap = init_cap;
+    }
+
+    grpc_phase1_ctx_t p1 = {
+        .k0_data    = ray_data(k_vecs[0]),
+        .k1_data    = (ext->n_keys == 2) ? ray_data(k_vecs[1]) : NULL,
+        .x_data     = ray_data(x_vec),
+        .y_data     = ray_data(y_vec),
+        .k0_type    = k_types[0],
+        .k1_type    = k_types[1],
+        .x_type     = xt,
+        .y_type     = yt,
+        .k0_attrs   = k_attrs[0],
+        .k1_attrs   = k_attrs[1],
+        .k0_null_bm = (k_vecs[0]->attrs & RAY_ATTR_HAS_NULLS)
+                      ? ray_vec_nullmap_bytes(k_vecs[0], NULL, NULL) : NULL,
+        .k1_null_bm = (ext->n_keys == 2 && (k_vecs[1]->attrs & RAY_ATTR_HAS_NULLS))
+                      ? ray_vec_nullmap_bytes(k_vecs[1], NULL, NULL) : NULL,
+        .x_null_bm  = (x_vec->attrs & RAY_ATTR_HAS_NULLS)
+                      ? ray_vec_nullmap_bytes(x_vec, NULL, NULL) : NULL,
+        .y_null_bm  = (y_vec->attrs & RAY_ATTR_HAS_NULLS)
+                      ? ray_vec_nullmap_bytes(y_vec, NULL, NULL) : NULL,
+        .n_keys     = ext->n_keys,
+        .x_is_f64   = (xt == RAY_F64) ? 1 : 0,
+        .y_is_f64   = (yt == RAY_F64) ? 1 : 0,
+        .bufs       = bufs,
+        .n_workers  = n_workers,
+    };
+
+    if (parallel) {
+        ray_pool_dispatch(pool, grpc_phase1_fn, &p1, nrows);
+    } else {
+        grpc_phase1_fn(&p1, 0, 0, nrows);
+    }
+
+    for (size_t i = 0; i < n_bufs; i++) {
+        if (bufs[i].oom) {
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    /* Phase 2. */
+    ray_t* phts_hdr = NULL;
+    grpc_ht_t* part_hts = (grpc_ht_t*)scratch_calloc(&phts_hdr,
+                                (size_t)RADIX_P * sizeof(grpc_ht_t));
+    ray_t* per_hdr = NULL;
+    int64_t* part_emit_rows = (int64_t*)scratch_calloc(&per_hdr,
+                                (size_t)RADIX_P * sizeof(int64_t));
+    if (!part_hts || !part_emit_rows) {
+        if (phts_hdr) scratch_free(phts_hdr);
+        if (per_hdr)  scratch_free(per_hdr);
+        for (size_t j = 0; j < n_bufs; j++)
+            if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+        scratch_free(bufs_hdr);
+        return ray_error("oom", NULL);
+    }
+    grpc_phase2_ctx_t p2 = {
+        .bufs = bufs,
+        .n_workers = n_workers,
+        .part_hts = part_hts,
+        .part_emit_rows = part_emit_rows,
+    };
+    if (parallel) {
+        ray_pool_dispatch_n(pool, grpc_phase2_fn, &p2, RADIX_P);
+    } else {
+        grpc_phase2_fn(&p2, 0, 0, RADIX_P);
+    }
+
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        if (part_hts[p].oom) {
+            for (uint32_t i = 0; i < RADIX_P; i++) grpc_ht_free(&part_hts[i]);
+            scratch_free(phts_hdr); scratch_free(per_hdr);
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    /* Phase 3 — emit row form.  Allocate output columns sized to total
+     * entries, fill sequentially by walking partitions in order. */
+    int64_t total_rows = 0;
+    for (uint32_t p = 0; p < RADIX_P; p++) total_rows += part_emit_rows[p];
+
+    ray_t* k0_out = (k_types[0] == RAY_SYM)
+        ? ray_sym_vec_new(k_attrs[0] & RAY_SYM_W_MASK, total_rows)
+        : ray_vec_new(k_types[0], total_rows);
+    ray_t* k1_out = NULL;
+    if (ext->n_keys == 2)
+        k1_out = (k_types[1] == RAY_SYM)
+            ? ray_sym_vec_new(k_attrs[1] & RAY_SYM_W_MASK, total_rows)
+            : ray_vec_new(k_types[1], total_rows);
+    ray_t* r2_out = ray_vec_new(RAY_F64, total_rows);
+    if (!k0_out || !r2_out || (ext->n_keys == 2 && !k1_out)) {
+        if (k0_out) ray_release(k0_out);
+        if (k1_out) ray_release(k1_out);
+        if (r2_out) ray_release(r2_out);
+        for (uint32_t i = 0; i < RADIX_P; i++) grpc_ht_free(&part_hts[i]);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        for (size_t j = 0; j < n_bufs; j++)
+            if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+        scratch_free(bufs_hdr);
+        return ray_error("oom", NULL);
+    }
+    k0_out->len = total_rows;
+    if (k1_out) k1_out->len = total_rows;
+    r2_out->len = total_rows;
+
+    void* k0_data_out = ray_data(k0_out);
+    void* k1_data_out = k1_out ? ray_data(k1_out) : NULL;
+    double* r2_data = (double*)ray_data(r2_out);
+
+    int64_t row = 0;
+    /* Mark r² as nullable since cnt<2 / degenerate cases emit NaN. */
+    bool r2_has_nulls = false;
+    ray_t* r2_nbm_hdr = NULL;
+    uint8_t* r2_nbm = NULL;
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        grpc_ht_t* ph = &part_hts[p];
+        for (uint32_t i = 0; i < ph->count; i++) {
+            grpc_entry_t* e = &ph->entries[i];
+            write_col_i64(k0_data_out, row, e->key0, k_types[0], k_attrs[0]);
+            if (k1_data_out)
+                write_col_i64(k1_data_out, row, e->key1, k_types[1], k_attrs[1]);
+
+            double r2 = 0.0 / 0.0;   /* NaN by default */
+            if (e->cnt >= 2) {
+                double n = (double)e->cnt;
+                double num = n * e->sumxy - e->sum_x * e->sum_y;
+                double dx  = n * e->sumsq_x - e->sum_x * e->sum_x;
+                double dy  = n * e->sumsq_y - e->sum_y * e->sum_y;
+                if (dx > 0.0 && dy > 0.0) {
+                    double r = num / sqrt(dx * dy);
+                    r2 = r * r;
+                }
+            }
+            r2_data[row] = r2;
+            row++;
+        }
+    }
+    (void)r2_has_nulls; (void)r2_nbm_hdr; (void)r2_nbm;
+
+    /* Build output table.  Columns: keys then r². */
+    ray_t* result = ray_table_new((int64_t)ext->n_keys + 1);
+    if (!result || RAY_IS_ERR(result)) {
+        ray_release(k0_out);
+        if (k1_out) ray_release(k1_out);
+        ray_release(r2_out);
+        for (uint32_t i = 0; i < RADIX_P; i++) grpc_ht_free(&part_hts[i]);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        for (size_t j = 0; j < n_bufs; j++)
+            if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+        scratch_free(bufs_hdr);
+        return result ? result : ray_error("oom", NULL);
+    }
+    result = ray_table_add_col(result, k_syms[0], k0_out);
+    if (k1_out)
+        result = ray_table_add_col(result, k_syms[1], k1_out);
+    result = ray_table_add_col(result, r2_sym, r2_out);
+    ray_release(k0_out);
+    if (k1_out) ray_release(k1_out);
+    ray_release(r2_out);
+
+    for (uint32_t i = 0; i < RADIX_P; i++) grpc_ht_free(&part_hts[i]);
+    scratch_free(phts_hdr);
+    scratch_free(per_hdr);
+    for (size_t j = 0; j < n_bufs; j++)
+        if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+    scratch_free(bufs_hdr);
+
+    return result;
+}

@@ -5923,8 +5923,61 @@ by_dict_done:
                                            agg_k, n_aggs);
                     }
                 } else if (has_binary_agg) {
-                    root = ray_group2(g, key_ops, n_keys, agg_ops,
-                                       agg_ins, agg_ins2, n_aggs);
+                    /* Fast path: dedicated row-form per-group Pearson² for
+                     * the exact shape `(select (pearson_corr x y) from T
+                     * by [k0] or [k0 k1])` with no other aggs / non-aggs /
+                     * where.  Bypasses Anton-merge slowdown that affects
+                     * OP_PEARSON_CORR via the shared radix HT path.  q9
+                     * canonical (id2 SYM + id4 I64; v1 I64, v2 I64) hits
+                     * this. */
+                    int prf_ok = 0;
+                    if (n_aggs == 1 && n_nonaggs == 0
+                        && !where_expr
+                        && agg_ops[0] == OP_PEARSON_CORR
+                        && (n_keys == 1 || n_keys == 2)
+                        && key_ops[0] && key_ops[0]->opcode == OP_SCAN
+                        && agg_ins[0] && agg_ins[0]->opcode == OP_SCAN
+                        && agg_ins2[0] && agg_ins2[0]->opcode == OP_SCAN
+                        && (n_keys == 1 || (key_ops[1] && key_ops[1]->opcode == OP_SCAN)))
+                    {
+                        prf_ok = 1;
+                        for (uint8_t k = 0; k < n_keys && prf_ok; k++) {
+                            ray_op_ext_t* kext = find_ext(g, key_ops[k]->id);
+                            ray_t* kc = (kext && tbl) ? ray_table_get_col(tbl, kext->sym) : NULL;
+                            if (!kc) { prf_ok = 0; break; }
+                            int8_t kt = kc->type;
+                            int kt_ok = (kt == RAY_I64 || kt == RAY_I32 ||
+                                         kt == RAY_I16 || kt == RAY_U8 ||
+                                         kt == RAY_BOOL || kt == RAY_DATE ||
+                                         kt == RAY_TIME || kt == RAY_TIMESTAMP ||
+                                         kt == RAY_SYM);
+                            if (!kt_ok) prf_ok = 0;
+                        }
+                        if (prf_ok) {
+                            ray_op_ext_t* xext = find_ext(g, agg_ins[0]->id);
+                            ray_op_ext_t* yext = find_ext(g, agg_ins2[0]->id);
+                            ray_t* xc = (xext && tbl) ? ray_table_get_col(tbl, xext->sym) : NULL;
+                            ray_t* yc = (yext && tbl) ? ray_table_get_col(tbl, yext->sym) : NULL;
+                            if (!xc || !yc) prf_ok = 0;
+                            else {
+                                int8_t xt = xc->type, yt = yc->type;
+                                int xt_ok = (xt == RAY_I64 || xt == RAY_I32 ||
+                                             xt == RAY_I16 || xt == RAY_U8 ||
+                                             xt == RAY_BOOL || xt == RAY_F64);
+                                int yt_ok = (yt == RAY_I64 || yt == RAY_I32 ||
+                                             yt == RAY_I16 || yt == RAY_U8 ||
+                                             yt == RAY_BOOL || yt == RAY_F64);
+                                if (!xt_ok || !yt_ok) prf_ok = 0;
+                            }
+                        }
+                    }
+                    if (prf_ok) {
+                        root = ray_group_pearson_rowform(g, key_ops, n_keys,
+                                                          agg_ins[0], agg_ins2[0]);
+                    } else {
+                        root = ray_group2(g, key_ops, n_keys, agg_ops,
+                                           agg_ins, agg_ins2, n_aggs);
+                    }
                 } else {
                     root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
                 }

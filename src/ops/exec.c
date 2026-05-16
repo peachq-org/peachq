@@ -1240,6 +1240,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         case OP_GROUP_BOTK_ROWFORM:
             return exec_group_topk_rowform(g, op);
 
+        case OP_GROUP_PEARSON_ROWFORM:
+            return exec_group_pearson_rowform(g, op);
+
         case OP_PIVOT: {
             ray_t* tbl = g->table;
             ray_t* owned_tbl = NULL;
