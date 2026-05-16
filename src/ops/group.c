@@ -10279,3 +10279,650 @@ ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op) {
 
     return result;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * exec_group_median_stddev_rowform — dedicated per-group median(v) + std(v)
+ * with row-form emission.  Same morsel-scatter + per-partition HT pattern
+ * as exec_group_pearson_rowform / exec_group_maxmin_rowform, extended with
+ * a per-partition append-only F64 value buffer for the holistic quantile
+ * kernel.  Closes q6 canonical (median(v3), std(v3) by id4, id5).
+ *
+ * Bypasses the shared OP_GROUP path's two-stage holistic fill (reprobe +
+ * histogram + scatter) by computing both aggregates from a single radix
+ * pipeline:
+ *   Phase 1 (parallel): scatter rows into per-(worker,partition) bufs
+ *           as (hash, key0, key1, v3) fat entries.
+ *   Phase 2 (parallel per partition):
+ *           Pass 1 — probe HT, accumulate {cnt, sum, sumsq} per group.
+ *           Cumsum cnt → per-group offsets into the partition's v_buf.
+ *           Pass 2 — re-walk entries, scatter v3 into v_buf at the
+ *                    bucketed position for each group.
+ *           Result: per-partition v_buf is group-contiguous, ready for
+ *           a per-group quickselect (no cross-partition scatter).
+ *   Phase 3 (parallel per partition):
+ *           For each group, run ray_median_dbl_inplace on its slice and
+ *           emit median + std(sample) into the output columns.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+#define GRPMS_SCATTER_STRIDE 32u
+
+typedef struct {
+    char*    data;
+    uint32_t count;
+    uint32_t cap;
+    bool     oom;
+    ray_t*   _hdr;
+} grpms_scat_buf_t;
+
+typedef struct {
+    int64_t  key0;
+    int64_t  key1;
+    int64_t  cnt;      /* count of non-null v3 added */
+    double   sum;
+    double   sumsq;
+    uint32_t val_off;  /* offset into ph->v_buf for this group's slice */
+    uint32_t val_pos;  /* cursor during Phase 2 Pass 2 (scatter v3) */
+} grpms_entry_t;
+
+typedef struct {
+    uint32_t*       slots;
+    grpms_entry_t*  entries;
+    uint32_t        count;
+    uint32_t        cap;          /* slot count, power of 2 */
+    uint32_t        entry_cap;
+    double*         v_buf;        /* sized to total_cnt over the partition */
+    uint32_t        v_buf_cap;
+    bool            oom;
+    ray_t*          _slots_hdr;
+    ray_t*          _entries_hdr;
+    ray_t*          _v_buf_hdr;
+} grpms_ht_t;
+
+#define GRPMS_EMPTY     UINT32_MAX
+#define GRPMS_PACK(salt, idx) (((uint32_t)(uint8_t)(salt) << 24) | ((idx) & 0xFFFFFF))
+#define GRPMS_IDX(s)    ((s) & 0xFFFFFF)
+#define GRPMS_SALT(s)   ((uint8_t)((s) >> 24))
+#define GRPMS_HASH_SALT(h) ((uint8_t)((h) >> 56))
+
+static bool grpms_ht_init(grpms_ht_t* ht, uint32_t init_cap) {
+    memset(ht, 0, sizeof(*ht));
+    if (init_cap < 32) init_cap = 32;
+    uint32_t cap = 1;
+    while (cap < init_cap) cap <<= 1;
+    ht->cap = cap;
+    ht->entry_cap = cap / 2;
+    if (ht->entry_cap < 16) ht->entry_cap = 16;
+    ht->slots = (uint32_t*)scratch_alloc(&ht->_slots_hdr, (size_t)cap * 4);
+    if (!ht->slots) { ht->oom = true; return false; }
+    memset(ht->slots, 0xFF, (size_t)cap * 4);
+    ht->entries = (grpms_entry_t*)scratch_alloc(&ht->_entries_hdr,
+                                (size_t)ht->entry_cap * sizeof(grpms_entry_t));
+    if (!ht->entries) { ht->oom = true; return false; }
+    return true;
+}
+
+static void grpms_ht_free(grpms_ht_t* ht) {
+    if (ht->_slots_hdr)   scratch_free(ht->_slots_hdr);
+    if (ht->_entries_hdr) scratch_free(ht->_entries_hdr);
+    if (ht->_v_buf_hdr)   scratch_free(ht->_v_buf_hdr);
+    memset(ht, 0, sizeof(*ht));
+}
+
+static bool grpms_ht_grow_slots(grpms_ht_t* ht) {
+    uint32_t old_cap = ht->cap, new_cap = old_cap * 2;
+    ray_t* new_hdr = NULL;
+    uint32_t* new_slots = (uint32_t*)scratch_alloc(&new_hdr, (size_t)new_cap * 4);
+    if (!new_slots) { ht->oom = true; return false; }
+    memset(new_slots, 0xFF, (size_t)new_cap * 4);
+    uint32_t mask = new_cap - 1;
+    for (uint32_t i = 0; i < ht->count; i++) {
+        grpms_entry_t* e = &ht->entries[i];
+        uint64_t h = ray_hash_combine(ray_hash_i64(e->key0), ray_hash_i64(e->key1));
+        uint32_t pp = (uint32_t)(h & mask);
+        uint8_t salt = GRPMS_HASH_SALT(h);
+        for (;;) {
+            if (new_slots[pp] == GRPMS_EMPTY) {
+                new_slots[pp] = GRPMS_PACK(salt, i); break;
+            }
+            pp = (pp + 1) & mask;
+        }
+    }
+    scratch_free(ht->_slots_hdr);
+    ht->_slots_hdr = new_hdr; ht->slots = new_slots; ht->cap = new_cap;
+    return true;
+}
+
+static bool grpms_ht_grow_entries(grpms_ht_t* ht) {
+    uint32_t new_ecap = ht->entry_cap * 2;
+    grpms_entry_t* new_e = (grpms_entry_t*)scratch_realloc(&ht->_entries_hdr,
+                                (size_t)ht->entry_cap * sizeof(grpms_entry_t),
+                                (size_t)new_ecap * sizeof(grpms_entry_t));
+    if (!new_e) { ht->oom = true; return false; }
+    ht->entries = new_e; ht->entry_cap = new_ecap;
+    return true;
+}
+
+static inline grpms_entry_t*
+grpms_ht_get(grpms_ht_t* ht, uint64_t hash, int64_t k0, int64_t k1) {
+    if (ht->cap == 0 || (ht->count + 1) * 2 > ht->cap) {
+        if (!grpms_ht_grow_slots(ht)) return NULL;
+    }
+    if (ht->count >= ht->entry_cap) {
+        if (!grpms_ht_grow_entries(ht)) return NULL;
+    }
+    uint32_t mask = ht->cap - 1;
+    uint32_t pp = (uint32_t)(hash & mask);
+    uint8_t salt = GRPMS_HASH_SALT(hash);
+    for (;;) {
+        uint32_t s = ht->slots[pp];
+        if (s == GRPMS_EMPTY) {
+            uint32_t idx = ht->count++;
+            ht->slots[pp] = GRPMS_PACK(salt, idx);
+            grpms_entry_t* e = &ht->entries[idx];
+            e->key0 = k0; e->key1 = k1;
+            e->cnt = 0; e->sum = 0.0; e->sumsq = 0.0;
+            e->val_off = 0; e->val_pos = 0;
+            return e;
+        }
+        if (GRPMS_SALT(s) == salt) {
+            grpms_entry_t* e = &ht->entries[GRPMS_IDX(s)];
+            if (e->key0 == k0 && e->key1 == k1) return e;
+        }
+        pp = (pp + 1) & mask;
+    }
+}
+
+/* Lookup-only variant for Pass 2 (HT fully built; never inserts). */
+static inline grpms_entry_t*
+grpms_ht_lookup(grpms_ht_t* ht, uint64_t hash, int64_t k0, int64_t k1) {
+    uint32_t mask = ht->cap - 1;
+    uint32_t pp = (uint32_t)(hash & mask);
+    uint8_t salt = GRPMS_HASH_SALT(hash);
+    for (;;) {
+        uint32_t s = ht->slots[pp];
+        if (s == GRPMS_EMPTY) return NULL;
+        if (GRPMS_SALT(s) == salt) {
+            grpms_entry_t* e = &ht->entries[GRPMS_IDX(s)];
+            if (e->key0 == k0 && e->key1 == k1) return e;
+        }
+        pp = (pp + 1) & mask;
+    }
+}
+
+typedef struct {
+    const void* k0_data;
+    const void* k1_data;
+    const void* v_data;
+    int8_t      k0_type;
+    int8_t      k1_type;
+    int8_t      v_type;
+    uint8_t     k0_attrs;
+    uint8_t     k1_attrs;
+    grpms_scat_buf_t* bufs;
+    uint32_t    n_workers;
+} grpms_phase1_ctx_t;
+
+static inline void grpms_scat_push(grpms_scat_buf_t* buf, uint64_t hash,
+                                    int64_t k0, int64_t k1, int64_t v_bits) {
+    if (__builtin_expect(buf->count >= buf->cap, 0)) {
+        uint32_t old_cap = buf->cap ? buf->cap : 64;
+        uint32_t new_cap = old_cap * 2;
+        char* new_data = (char*)scratch_realloc(&buf->_hdr,
+            (size_t)buf->cap * GRPMS_SCATTER_STRIDE,
+            (size_t)new_cap * GRPMS_SCATTER_STRIDE);
+        if (!new_data) { buf->oom = true; return; }
+        buf->data = new_data; buf->cap = new_cap;
+    }
+    char* dst = buf->data + (size_t)buf->count * GRPMS_SCATTER_STRIDE;
+    memcpy(dst,      &hash,   8);
+    memcpy(dst + 8,  &k0,     8);
+    memcpy(dst + 16, &k1,     8);
+    memcpy(dst + 24, &v_bits, 8);
+    buf->count++;
+}
+
+static void grpms_phase1_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    grpms_phase1_ctx_t* c = (grpms_phase1_ctx_t*)ctx_v;
+    grpms_scat_buf_t* my_bufs = &c->bufs[(size_t)worker_id * RADIX_P];
+    bool v_is_f64 = (c->v_type == RAY_F64);
+
+    for (int64_t r = start; r < end; r++) {
+        int64_t k0 = read_col_i64(c->k0_data, r, c->k0_type, c->k0_attrs);
+        int64_t k1 = read_col_i64(c->k1_data, r, c->k1_type, c->k1_attrs);
+        int64_t v_bits;
+        if (v_is_f64) {
+            memcpy(&v_bits, &((const double*)c->v_data)[r], 8);
+        } else {
+            int64_t vi = read_col_i64(c->v_data, r, c->v_type, 0);
+            double vd = (double)vi;
+            memcpy(&v_bits, &vd, 8);
+        }
+        uint64_t h = ray_hash_combine(ray_hash_i64(k0), ray_hash_i64(k1));
+        uint32_t part = RADIX_PART(h);
+        grpms_scat_push(&my_bufs[part], h, k0, k1, v_bits);
+    }
+}
+
+typedef struct {
+    grpms_scat_buf_t* bufs;
+    uint32_t        n_workers;
+    grpms_ht_t*     part_hts;
+    int64_t*        part_emit_rows;
+} grpms_phase2_ctx_t;
+
+static void grpms_phase2_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    (void)worker_id;
+    grpms_phase2_ctx_t* c = (grpms_phase2_ctx_t*)ctx_v;
+    for (int64_t pi = start; pi < end; pi++) {
+        uint32_t p = (uint32_t)pi;
+        grpms_ht_t* ph = &c->part_hts[p];
+
+        /* Estimate initial HT cap from total entries for this partition. */
+        uint32_t total_entries = 0;
+        for (uint32_t w = 0; w < c->n_workers; w++)
+            total_entries += c->bufs[(size_t)w * RADIX_P + p].count;
+        if (total_entries == 0) { c->part_emit_rows[p] = 0; continue; }
+        uint32_t init_ht = 64;
+        while (init_ht < total_entries / 4 && init_ht < (1u << 20)) init_ht <<= 1;
+        if (!grpms_ht_init(ph, init_ht)) return;
+
+        /* Pass 1: probe, accumulate {cnt, sum, sumsq}. */
+        for (uint32_t w = 0; w < c->n_workers; w++) {
+            grpms_scat_buf_t* buf = &c->bufs[(size_t)w * RADIX_P + p];
+            if (!buf->data || buf->oom) continue;
+            const char* base = buf->data;
+            uint32_t nbuf = buf->count;
+            enum { PF_DIST = 8 };
+            uint32_t pf_end = (nbuf < PF_DIST) ? nbuf : PF_DIST;
+            uint32_t mask = ph->cap - 1;
+            for (uint32_t j = 0; j < pf_end; j++) {
+                uint64_t h; memcpy(&h, base + (size_t)j * GRPMS_SCATTER_STRIDE, 8);
+                __builtin_prefetch(&ph->slots[(uint32_t)(h & mask)], 0, 1);
+            }
+            for (uint32_t i = 0; i < nbuf; i++) {
+                if (i + PF_DIST < nbuf) {
+                    uint64_t hpf;
+                    memcpy(&hpf, base + (size_t)(i + PF_DIST) * GRPMS_SCATTER_STRIDE, 8);
+                    __builtin_prefetch(&ph->slots[(uint32_t)(hpf & (ph->cap - 1))], 0, 1);
+                }
+                uint64_t h;
+                int64_t k0, k1, v_bits;
+                const char* e = base + (size_t)i * GRPMS_SCATTER_STRIDE;
+                memcpy(&h,      e,      8);
+                memcpy(&k0,     e + 8,  8);
+                memcpy(&k1,     e + 16, 8);
+                memcpy(&v_bits, e + 24, 8);
+                grpms_entry_t* me = grpms_ht_get(ph, h, k0, k1);
+                if (!me) return;
+                double v; memcpy(&v, &v_bits, 8);
+                me->cnt++;
+                me->sum   += v;
+                me->sumsq += v * v;
+            }
+        }
+
+        /* Cumsum cnt → val_off; allocate v_buf. */
+        uint32_t total_v = 0;
+        for (uint32_t g = 0; g < ph->count; g++) {
+            ph->entries[g].val_off = total_v;
+            ph->entries[g].val_pos = total_v;
+            total_v += (uint32_t)ph->entries[g].cnt;
+        }
+        ph->v_buf_cap = total_v;
+        ph->v_buf = (double*)scratch_alloc(&ph->_v_buf_hdr,
+                                            (size_t)(total_v > 0 ? total_v : 1) * sizeof(double));
+        if (!ph->v_buf) { ph->oom = true; return; }
+
+        /* Pass 2: probe (lookup only — HT is full), scatter v into v_buf. */
+        for (uint32_t w = 0; w < c->n_workers; w++) {
+            grpms_scat_buf_t* buf = &c->bufs[(size_t)w * RADIX_P + p];
+            if (!buf->data || buf->oom) continue;
+            const char* base = buf->data;
+            uint32_t nbuf = buf->count;
+            enum { PF_DIST = 8 };
+            uint32_t pf_end = (nbuf < PF_DIST) ? nbuf : PF_DIST;
+            uint32_t mask = ph->cap - 1;
+            for (uint32_t j = 0; j < pf_end; j++) {
+                uint64_t h; memcpy(&h, base + (size_t)j * GRPMS_SCATTER_STRIDE, 8);
+                __builtin_prefetch(&ph->slots[(uint32_t)(h & mask)], 0, 1);
+            }
+            for (uint32_t i = 0; i < nbuf; i++) {
+                if (i + PF_DIST < nbuf) {
+                    uint64_t hpf;
+                    memcpy(&hpf, base + (size_t)(i + PF_DIST) * GRPMS_SCATTER_STRIDE, 8);
+                    __builtin_prefetch(&ph->slots[(uint32_t)(hpf & (ph->cap - 1))], 0, 1);
+                }
+                uint64_t h;
+                int64_t k0, k1, v_bits;
+                const char* e = base + (size_t)i * GRPMS_SCATTER_STRIDE;
+                memcpy(&h,      e,      8);
+                memcpy(&k0,     e + 8,  8);
+                memcpy(&k1,     e + 16, 8);
+                memcpy(&v_bits, e + 24, 8);
+                grpms_entry_t* me = grpms_ht_lookup(ph, h, k0, k1);
+                if (!me) continue;        /* shouldn't happen after Pass 1 */
+                double v; memcpy(&v, &v_bits, 8);
+                ph->v_buf[me->val_pos++] = v;
+            }
+        }
+
+        c->part_emit_rows[p] = (int64_t)ph->count;
+    }
+}
+
+typedef struct {
+    grpms_ht_t*     part_hts;
+    const int64_t*  part_offsets;   /* [RADIX_P+1] */
+    int8_t          k0_type;
+    int8_t          k1_type;
+    uint8_t         k0_attrs;
+    uint8_t         k1_attrs;
+    void*           k0_out;
+    void*           k1_out;
+    double*         med_out;
+    double*         std_out;
+    int64_t*        cnt_out;        /* NULL when caller doesn't want a count col */
+    ray_t*          std_vec;        /* for null bit writes when cnt<=1 */
+} grpms_phase3_ctx_t;
+
+static void grpms_phase3_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    (void)worker_id;
+    grpms_phase3_ctx_t* c = (grpms_phase3_ctx_t*)ctx_v;
+    for (int64_t pi = start; pi < end; pi++) {
+        uint32_t p = (uint32_t)pi;
+        grpms_ht_t* ph = &c->part_hts[p];
+        int64_t base_row = c->part_offsets[p];
+        for (uint32_t g = 0; g < ph->count; g++) {
+            grpms_entry_t* e = &ph->entries[g];
+            int64_t out_row = base_row + (int64_t)g;
+            write_col_i64(c->k0_out, out_row, e->key0, c->k0_type, c->k0_attrs);
+            write_col_i64(c->k1_out, out_row, e->key1, c->k1_type, c->k1_attrs);
+
+            /* Median: quickselect on the group's slice (in-place). */
+            int64_t n = e->cnt;
+            if (n <= 0) {
+                c->med_out[out_row] = 0.0;
+            } else {
+                double* slice = ph->v_buf + e->val_off;
+                c->med_out[out_row] = ray_median_dbl_inplace(slice, n);
+            }
+
+            /* Stddev (sample): sqrt((sumsq - sum²/n) / (n-1)); NaN/null when n<2. */
+            if (n < 2) {
+                c->std_out[out_row] = 0.0;
+                ray_vec_set_null(c->std_vec, out_row, true);
+            } else {
+                double nd = (double)n;
+                double var = (e->sumsq - e->sum * e->sum / nd) / (nd - 1.0);
+                if (var < 0.0) var = 0.0;     /* fp noise guard */
+                c->std_out[out_row] = sqrt(var);
+            }
+            if (c->cnt_out) c->cnt_out[out_row] = n;
+        }
+    }
+}
+
+ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op) {
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext || ext->n_keys != 2 ||
+        (ext->n_aggs != 2 && ext->n_aggs != 3) || !ext->agg_ins)
+        return ray_error("domain", "group_median_stddev_rowform: bad shape");
+    bool with_count = (ext->n_aggs == 3);
+
+    ray_t* tbl = g->table;
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
+
+    /* Resolve keys. */
+    ray_op_ext_t* k0ext = find_ext(g, ext->keys[0]->id);
+    ray_op_ext_t* k1ext = find_ext(g, ext->keys[1]->id);
+    ray_op_ext_t* vext  = find_ext(g, ext->agg_ins[0]->id);
+    if (!k0ext || !k1ext || !vext
+        || k0ext->base.opcode != OP_SCAN
+        || k1ext->base.opcode != OP_SCAN
+        || vext->base.opcode != OP_SCAN)
+        return ray_error("domain", "group_median_stddev_rowform: non-scan child");
+
+    ray_t* k0_vec = ray_table_get_col(tbl, k0ext->sym);
+    ray_t* k1_vec = ray_table_get_col(tbl, k1ext->sym);
+    ray_t* v_vec  = ray_table_get_col(tbl, vext->sym);
+    if (!k0_vec || !k1_vec || !v_vec)
+        return ray_error("domain", "group_median_stddev_rowform: column missing");
+
+    int8_t k0t = k0_vec->type, k1t = k1_vec->type, vt = v_vec->type;
+    int kt_ok = 1;
+    int8_t kts[2] = { k0t, k1t };
+    for (int i = 0; i < 2; i++) {
+        int8_t kt = kts[i];
+        if (kt != RAY_I64 && kt != RAY_I32 && kt != RAY_I16 && kt != RAY_U8 &&
+            kt != RAY_BOOL && kt != RAY_DATE && kt != RAY_TIME &&
+            kt != RAY_TIMESTAMP && kt != RAY_SYM)
+            kt_ok = 0;
+    }
+    int vt_ok = (vt == RAY_I64 || vt == RAY_I32 || vt == RAY_I16 ||
+                 vt == RAY_U8 || vt == RAY_BOOL || vt == RAY_F64);
+    if (!kt_ok || !vt_ok)
+        return ray_error("nyi", "group_median_stddev_rowform: type");
+
+    /* Planner gates non-nullable; defensive guard here too. */
+    if ((k0_vec->attrs & RAY_ATTR_HAS_NULLS) ||
+        (k1_vec->attrs & RAY_ATTR_HAS_NULLS) ||
+        (v_vec->attrs & RAY_ATTR_HAS_NULLS))
+        return ray_error("nyi", "group_median_stddev_rowform: nullable");
+
+    int64_t nrows = k0_vec->len;
+    int64_t med_sym = ray_sym_intern("v_median", 8);
+    int64_t std_sym = ray_sym_intern("v_std",    5);
+    int64_t cnt_sym = ray_sym_intern("v_count",  7);
+    int64_t ncols   = with_count ? 5 : 4;
+    if (nrows == 0) {
+        ray_t* out = ray_table_new(ncols);
+        ray_t* k0e = (k0t == RAY_SYM) ? ray_sym_vec_new(k0_vec->attrs & RAY_SYM_W_MASK, 0)
+                                       : ray_vec_new(k0t, 0);
+        ray_t* k1e = (k1t == RAY_SYM) ? ray_sym_vec_new(k1_vec->attrs & RAY_SYM_W_MASK, 0)
+                                       : ray_vec_new(k1t, 0);
+        ray_t* mev = ray_vec_new(RAY_F64, 0);
+        ray_t* sdv = ray_vec_new(RAY_F64, 0);
+        out = ray_table_add_col(out, k0ext->sym, k0e);
+        out = ray_table_add_col(out, k1ext->sym, k1e);
+        out = ray_table_add_col(out, med_sym, mev);
+        out = ray_table_add_col(out, std_sym, sdv);
+        if (with_count) {
+            ray_t* cnv = ray_vec_new(RAY_I64, 0);
+            out = ray_table_add_col(out, cnt_sym, cnv);
+            ray_release(cnv);
+        }
+        ray_release(k0e); ray_release(k1e); ray_release(mev); ray_release(sdv);
+        return out;
+    }
+
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t n_workers = pool ? ray_pool_total_workers(pool) : 1;
+    bool parallel = pool && nrows >= 16384;
+    if (!parallel) n_workers = 1;
+
+    size_t n_bufs = (size_t)n_workers * RADIX_P;
+    ray_t* bufs_hdr = NULL;
+    grpms_scat_buf_t* bufs = (grpms_scat_buf_t*)scratch_calloc(&bufs_hdr,
+        n_bufs * sizeof(grpms_scat_buf_t));
+    if (!bufs) return ray_error("oom", NULL);
+
+    uint32_t init_cap = 256;
+    for (size_t i = 0; i < n_bufs; i++) {
+        bufs[i].data = (char*)scratch_alloc(&bufs[i]._hdr,
+            (size_t)init_cap * GRPMS_SCATTER_STRIDE);
+        if (!bufs[i].data) {
+            for (size_t j = 0; j <= i; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+        bufs[i].cap = init_cap;
+    }
+
+    grpms_phase1_ctx_t p1 = {
+        .k0_data = ray_data(k0_vec),
+        .k1_data = ray_data(k1_vec),
+        .v_data  = ray_data(v_vec),
+        .k0_type = k0t,
+        .k1_type = k1t,
+        .v_type  = vt,
+        .k0_attrs = k0_vec->attrs,
+        .k1_attrs = k1_vec->attrs,
+        .bufs = bufs,
+        .n_workers = n_workers,
+    };
+    if (parallel) {
+        ray_pool_dispatch(pool, grpms_phase1_fn, &p1, nrows);
+    } else {
+        grpms_phase1_fn(&p1, 0, 0, nrows);
+    }
+
+    for (size_t i = 0; i < n_bufs; i++) {
+        if (bufs[i].oom) {
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    /* Phase 2. */
+    ray_t* phts_hdr = NULL;
+    grpms_ht_t* part_hts = (grpms_ht_t*)scratch_calloc(&phts_hdr,
+                                (size_t)RADIX_P * sizeof(grpms_ht_t));
+    ray_t* per_hdr = NULL;
+    int64_t* part_emit_rows = (int64_t*)scratch_calloc(&per_hdr,
+                                (size_t)RADIX_P * sizeof(int64_t));
+    if (!part_hts || !part_emit_rows) {
+        if (phts_hdr) scratch_free(phts_hdr);
+        if (per_hdr)  scratch_free(per_hdr);
+        for (size_t j = 0; j < n_bufs; j++)
+            if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+        scratch_free(bufs_hdr);
+        return ray_error("oom", NULL);
+    }
+    grpms_phase2_ctx_t p2 = {
+        .bufs = bufs,
+        .n_workers = n_workers,
+        .part_hts = part_hts,
+        .part_emit_rows = part_emit_rows,
+    };
+    if (parallel) {
+        ray_pool_dispatch_n(pool, grpms_phase2_fn, &p2, RADIX_P);
+    } else {
+        grpms_phase2_fn(&p2, 0, 0, RADIX_P);
+    }
+
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        if (part_hts[p].oom) {
+            for (uint32_t i = 0; i < RADIX_P; i++) grpms_ht_free(&part_hts[i]);
+            scratch_free(phts_hdr); scratch_free(per_hdr);
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    /* Scatter bufs no longer needed — release before Phase 3 to lower peak RSS. */
+    for (size_t j = 0; j < n_bufs; j++)
+        if (bufs[j]._hdr) { scratch_free(bufs[j]._hdr); bufs[j]._hdr = NULL; }
+    scratch_free(bufs_hdr); bufs_hdr = NULL; bufs = NULL;
+
+    /* Prefix sum → part_offsets. */
+    ray_t* po_hdr = NULL;
+    int64_t* part_offsets = (int64_t*)scratch_alloc(&po_hdr,
+                                (size_t)(RADIX_P + 1) * sizeof(int64_t));
+    if (!part_offsets) {
+        for (uint32_t i = 0; i < RADIX_P; i++) grpms_ht_free(&part_hts[i]);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        return ray_error("oom", NULL);
+    }
+    int64_t total_rows = 0;
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        part_offsets[p] = total_rows;
+        total_rows += part_emit_rows[p];
+    }
+    part_offsets[RADIX_P] = total_rows;
+
+    /* Allocate output columns. */
+    ray_t* k0_out = (k0t == RAY_SYM)
+        ? ray_sym_vec_new(k0_vec->attrs & RAY_SYM_W_MASK, total_rows)
+        : ray_vec_new(k0t, total_rows);
+    ray_t* k1_out = (k1t == RAY_SYM)
+        ? ray_sym_vec_new(k1_vec->attrs & RAY_SYM_W_MASK, total_rows)
+        : ray_vec_new(k1t, total_rows);
+    ray_t* med_out = ray_vec_new(RAY_F64, total_rows);
+    ray_t* std_out = ray_vec_new(RAY_F64, total_rows);
+    ray_t* cnt_out = with_count ? ray_vec_new(RAY_I64, total_rows) : NULL;
+    if (!k0_out || !k1_out || !med_out || !std_out ||
+        (with_count && !cnt_out) ||
+        RAY_IS_ERR(k0_out) || RAY_IS_ERR(k1_out) ||
+        RAY_IS_ERR(med_out) || RAY_IS_ERR(std_out) ||
+        (with_count && RAY_IS_ERR(cnt_out))) {
+        if (k0_out) ray_release(k0_out);
+        if (k1_out) ray_release(k1_out);
+        if (med_out) ray_release(med_out);
+        if (std_out) ray_release(std_out);
+        if (cnt_out) ray_release(cnt_out);
+        for (uint32_t i = 0; i < RADIX_P; i++) grpms_ht_free(&part_hts[i]);
+        scratch_free(po_hdr);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        return ray_error("oom", NULL);
+    }
+    k0_out->len = total_rows;
+    k1_out->len = total_rows;
+    med_out->len = total_rows;
+    std_out->len = total_rows;
+    if (cnt_out) cnt_out->len = total_rows;
+
+    /* Phase 3: per partition, emit keys + median + stddev. */
+    grpms_phase3_ctx_t p3 = {
+        .part_hts = part_hts,
+        .part_offsets = part_offsets,
+        .k0_type = k0t,
+        .k1_type = k1t,
+        .k0_attrs = k0_vec->attrs,
+        .k1_attrs = k1_vec->attrs,
+        .k0_out = ray_data(k0_out),
+        .k1_out = ray_data(k1_out),
+        .med_out = (double*)ray_data(med_out),
+        .std_out = (double*)ray_data(std_out),
+        .cnt_out = cnt_out ? (int64_t*)ray_data(cnt_out) : NULL,
+        .std_vec = std_out,
+    };
+    if (parallel) {
+        ray_pool_dispatch_n(pool, grpms_phase3_fn, &p3, RADIX_P);
+    } else {
+        grpms_phase3_fn(&p3, 0, 0, RADIX_P);
+    }
+
+    /* Build output table. */
+    ray_t* result = ray_table_new(ncols);
+    if (!result || RAY_IS_ERR(result)) {
+        ray_release(k0_out); ray_release(k1_out);
+        ray_release(med_out); ray_release(std_out);
+        if (cnt_out) ray_release(cnt_out);
+        for (uint32_t i = 0; i < RADIX_P; i++) grpms_ht_free(&part_hts[i]);
+        scratch_free(po_hdr);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        return result ? result : ray_error("oom", NULL);
+    }
+    result = ray_table_add_col(result, k0ext->sym, k0_out);
+    result = ray_table_add_col(result, k1ext->sym, k1_out);
+    result = ray_table_add_col(result, med_sym, med_out);
+    result = ray_table_add_col(result, std_sym, std_out);
+    if (cnt_out) result = ray_table_add_col(result, cnt_sym, cnt_out);
+    ray_release(k0_out); ray_release(k1_out);
+    ray_release(med_out); ray_release(std_out);
+    if (cnt_out) ray_release(cnt_out);
+
+    for (uint32_t i = 0; i < RADIX_P; i++) grpms_ht_free(&part_hts[i]);
+    scratch_free(po_hdr);
+    scratch_free(phts_hdr); scratch_free(per_hdr);
+
+    return result;
+}

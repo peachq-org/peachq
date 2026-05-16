@@ -839,6 +839,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit)
 ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op);
 ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op);
 ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op);
+ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op);
 
 /* ── collection.c ── */
 ray_t* distinct_vec_eager(ray_t* x);
