@@ -6076,6 +6076,51 @@ by_dict_done:
                             if (k0_ok && k1_ok && vt_ok) ms_ok = 1;
                         }
                     }
+                    /* Fast path: dedicated multi-key sum(v)+count(v) for
+                     * shape `(select (sum v) (count v) from T by k1..kN)`
+                     * where N ∈ {3..8}.  Closes canonical H2O q10. */
+                    int sc_ok = 0;
+                    if (!mm_ok && !ms_ok && n_keys >= 3 && n_keys <= 8
+                        && n_aggs == 2 && n_nonaggs == 0 && !where_expr
+                        && agg_ops[0] == OP_SUM && agg_ops[1] == OP_COUNT
+                        && agg_ins[0] && agg_ins[0]->opcode == OP_SCAN
+                        && agg_ins[1] && agg_ins[1]->opcode == OP_SCAN)
+                    {
+                        int all_scan_keys = 1;
+                        for (uint8_t k = 0; k < n_keys && all_scan_keys; k++)
+                            if (!key_ops[k] || key_ops[k]->opcode != OP_SCAN)
+                                all_scan_keys = 0;
+                        if (all_scan_keys) {
+                            ray_op_ext_t* vext = find_ext(g, agg_ins[0]->id);
+                            ray_t* vc = (vext && tbl) ? ray_table_get_col(tbl, vext->sym) : NULL;
+                            int all_keys_typed = 1;
+                            int all_keys_nonnull = 1;
+                            for (uint8_t k = 0; k < n_keys; k++) {
+                                ray_op_ext_t* kxt = find_ext(g, key_ops[k]->id);
+                                ray_t* kc = (kxt && tbl) ? ray_table_get_col(tbl, kxt->sym) : NULL;
+                                if (!kc) { all_keys_typed = 0; break; }
+                                int8_t kt = kc->type;
+                                int kt_ok = (kt == RAY_I64 || kt == RAY_I32 ||
+                                             kt == RAY_I16 || kt == RAY_U8 ||
+                                             kt == RAY_BOOL || kt == RAY_DATE ||
+                                             kt == RAY_TIME || kt == RAY_TIMESTAMP ||
+                                             kt == RAY_SYM);
+                                if (!kt_ok) { all_keys_typed = 0; break; }
+                                if (kc->attrs & RAY_ATTR_HAS_NULLS) {
+                                    all_keys_nonnull = 0;
+                                    break;
+                                }
+                            }
+                            if (vc && all_keys_typed && all_keys_nonnull
+                                && !(vc->attrs & RAY_ATTR_HAS_NULLS)) {
+                                int8_t vt = vc->type;
+                                int vt_ok = (vt == RAY_I64 || vt == RAY_I32 ||
+                                             vt == RAY_I16 || vt == RAY_U8 ||
+                                             vt == RAY_BOOL || vt == RAY_F64);
+                                if (vt_ok) sc_ok = 1;
+                            }
+                        }
+                    }
                     if (mm_ok) {
                         root = ray_group_maxmin_rowform(g, key_ops[0],
                                                          agg_ins[0], agg_ins[1]);
@@ -6083,6 +6128,9 @@ by_dict_done:
                         root = ray_group_median_stddev_rowform(g, key_ops,
                                                                 agg_ins[0],
                                                                 ms_with_count);
+                    } else if (sc_ok) {
+                        root = ray_group_sum_count_rowform(g, key_ops,
+                                                            n_keys, agg_ins[0]);
                     } else {
                         root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
                     }

@@ -1249,6 +1249,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         case OP_GROUP_MEDIAN_STDDEV_ROWFORM:
             return exec_group_median_stddev_rowform(g, op);
 
+        case OP_GROUP_SUM_COUNT_ROWFORM:
+            return exec_group_sum_count_rowform(g, op);
+
         case OP_PIVOT: {
             ray_t* tbl = g->table;
             ray_t* owned_tbl = NULL;
