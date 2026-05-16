@@ -214,6 +214,13 @@ void     ray_cancel(void);
  * (key0, key1, r²) directly.  Bypasses Anton-merge slowdown that
  * affects OP_PEARSON_CORR via the shared radix HT path.  1 or 2 keys. */
 #define OP_GROUP_PEARSON_ROWFORM 111
+/* Dedicated single-pass per-group MAX(x)+MIN(y) with row-form emission
+ * for the canonical shape `(select (max x) (min y) from t by k)`.
+ * Bypasses Anton-merge slowdown on the shared radix HT path.  Closes
+ * the first stage of H2O canonical q7 (max(v1)-min(v2) per id3); the
+ * second stage is element-wise arithmetic on the small result.  1 key,
+ * 2 fixed-state aggs (MAX, MIN), integer x/y. */
+#define OP_GROUP_MAXMIN_ROWFORM 112
 
 /* Opcodes — Graph */
 #define OP_EXPAND        80   /* 1-hop CSR neighbor expansion       */
@@ -623,6 +630,10 @@ ray_op_t* ray_group_topk_rowform(ray_graph_t* g, ray_op_t* key,
  * (key0, [key1,] r2) table where r² = corr(x, y)² per group. */
 ray_op_t* ray_group_pearson_rowform(ray_graph_t* g, ray_op_t** keys,
                                      uint8_t n_keys, ray_op_t* x, ray_op_t* y);
+/* Dedicated per-group max(x) + min(y) with row-form emission.  See
+ * OP_GROUP_MAXMIN_ROWFORM comment.  Output: (key, max_x, min_y). */
+ray_op_t* ray_group_maxmin_rowform(ray_graph_t* g, ray_op_t* key,
+                                    ray_op_t* x, ray_op_t* y);
 ray_op_t* ray_distinct(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys);
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
