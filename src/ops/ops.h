@@ -206,6 +206,14 @@ void     ray_cancel(void);
  * partition in phase 2; emit a 2-column table (key, value) in row form. */
 #define OP_GROUP_TOPK_ROWFORM  91
 #define OP_GROUP_BOTK_ROWFORM 110
+/* Dedicated single-pass per-group Pearson² with row-form emission for
+ * the canonical shape `(select (pearson_corr x y) from t by [k0 k1])`.
+ * Two-phase parallel: per-worker scatter into RADIX_P partitions in
+ * phase 1; per-partition open-addressing HT with fixed Pearson state
+ * (Σx, Σy, Σx², Σy², Σxy, cnt) in phase 2; emit a 3-column table
+ * (key0, key1, r²) directly.  Bypasses Anton-merge slowdown that
+ * affects OP_PEARSON_CORR via the shared radix HT path.  1 or 2 keys. */
+#define OP_GROUP_PEARSON_ROWFORM 111
 
 /* Opcodes — Graph */
 #define OP_EXPAND        80   /* 1-hop CSR neighbor expansion       */
@@ -609,6 +617,12 @@ ray_op_t* ray_group3(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys,
  * (type-matched to `val`), both flat — one row per (group, kept-value). */
 ray_op_t* ray_group_topk_rowform(ray_graph_t* g, ray_op_t* key,
                                   ray_op_t* val, int64_t k, uint8_t desc);
+/* Dedicated per-group Pearson² with row-form emission.  See
+ * OP_GROUP_PEARSON_ROWFORM comment above.  keys[0..n_keys) are the
+ * group-by columns (1 or 2); x and y are the two value columns.  Output:
+ * (key0, [key1,] r2) table where r² = corr(x, y)² per group. */
+ray_op_t* ray_group_pearson_rowform(ray_graph_t* g, ray_op_t** keys,
+                                     uint8_t n_keys, ray_op_t* x, ray_op_t* y);
 ray_op_t* ray_distinct(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys);
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
