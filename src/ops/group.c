@@ -9853,3 +9853,429 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
 
     return result;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * exec_group_maxmin_rowform — dedicated per-group max(x) + min(y) with
+ * row-form emission.  Same morsel-scatter + per-partition HT pattern
+ * as exec_group_pearson_rowform.  Closes q7's first stage
+ * (max(v1) + min(v2) by id3).  Integer x/y; SYM/I64 key.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+#define GRPMM_SCATTER_STRIDE 32u
+
+typedef struct {
+    char*    data;
+    uint32_t count;
+    uint32_t cap;
+    bool     oom;
+    ray_t*   _hdr;
+} grpmm_scat_buf_t;
+
+typedef struct {
+    int64_t key;
+    int64_t max_x;
+    int64_t min_y;
+    int64_t cnt;
+} grpmm_entry_t;
+
+typedef struct {
+    uint32_t*       slots;
+    grpmm_entry_t*  entries;
+    uint32_t        count;
+    uint32_t        cap;
+    uint32_t        entry_cap;
+    bool            oom;
+    ray_t*          _slots_hdr;
+    ray_t*          _entries_hdr;
+} grpmm_ht_t;
+
+#define GRPMM_EMPTY     UINT32_MAX
+#define GRPMM_PACK(salt, idx) (((uint32_t)(uint8_t)(salt) << 24) | ((idx) & 0xFFFFFF))
+#define GRPMM_IDX(s)    ((s) & 0xFFFFFF)
+#define GRPMM_SALT(s)   ((uint8_t)((s) >> 24))
+#define GRPMM_HASH_SALT(h) ((uint8_t)((h) >> 56))
+
+static bool grpmm_ht_init(grpmm_ht_t* ht, uint32_t init_cap) {
+    memset(ht, 0, sizeof(*ht));
+    if (init_cap < 32) init_cap = 32;
+    uint32_t cap = 1;
+    while (cap < init_cap) cap <<= 1;
+    ht->cap = cap;
+    ht->entry_cap = cap / 2;
+    if (ht->entry_cap < 16) ht->entry_cap = 16;
+    ht->slots = (uint32_t*)scratch_alloc(&ht->_slots_hdr, (size_t)cap * 4);
+    if (!ht->slots) { ht->oom = true; return false; }
+    memset(ht->slots, 0xFF, (size_t)cap * 4);
+    ht->entries = (grpmm_entry_t*)scratch_alloc(&ht->_entries_hdr,
+                                (size_t)ht->entry_cap * sizeof(grpmm_entry_t));
+    if (!ht->entries) { ht->oom = true; return false; }
+    return true;
+}
+
+static void grpmm_ht_free(grpmm_ht_t* ht) {
+    if (ht->_slots_hdr) scratch_free(ht->_slots_hdr);
+    if (ht->_entries_hdr) scratch_free(ht->_entries_hdr);
+    memset(ht, 0, sizeof(*ht));
+}
+
+static bool grpmm_ht_grow_slots(grpmm_ht_t* ht) {
+    uint32_t old_cap = ht->cap, new_cap = old_cap * 2;
+    ray_t* new_hdr = NULL;
+    uint32_t* new_slots = (uint32_t*)scratch_alloc(&new_hdr, (size_t)new_cap * 4);
+    if (!new_slots) { ht->oom = true; return false; }
+    memset(new_slots, 0xFF, (size_t)new_cap * 4);
+    uint32_t mask = new_cap - 1;
+    for (uint32_t i = 0; i < ht->count; i++) {
+        grpmm_entry_t* e = &ht->entries[i];
+        uint64_t h = ray_hash_i64(e->key);
+        uint32_t p = (uint32_t)(h & mask);
+        uint8_t salt = GRPMM_HASH_SALT(h);
+        for (;;) {
+            if (new_slots[p] == GRPMM_EMPTY) {
+                new_slots[p] = GRPMM_PACK(salt, i); break;
+            }
+            p = (p + 1) & mask;
+        }
+    }
+    scratch_free(ht->_slots_hdr);
+    ht->_slots_hdr = new_hdr; ht->slots = new_slots; ht->cap = new_cap;
+    return true;
+}
+
+static bool grpmm_ht_grow_entries(grpmm_ht_t* ht) {
+    uint32_t new_ecap = ht->entry_cap * 2;
+    grpmm_entry_t* new_e = (grpmm_entry_t*)scratch_realloc(&ht->_entries_hdr,
+                                (size_t)ht->entry_cap * sizeof(grpmm_entry_t),
+                                (size_t)new_ecap * sizeof(grpmm_entry_t));
+    if (!new_e) { ht->oom = true; return false; }
+    ht->entries = new_e; ht->entry_cap = new_ecap;
+    return true;
+}
+
+static inline grpmm_entry_t*
+grpmm_ht_get(grpmm_ht_t* ht, uint64_t hash, int64_t k) {
+    if (ht->cap == 0 || (ht->count + 1) * 2 > ht->cap) {
+        if (!grpmm_ht_grow_slots(ht)) return NULL;
+    }
+    if (ht->count >= ht->entry_cap) {
+        if (!grpmm_ht_grow_entries(ht)) return NULL;
+    }
+    uint32_t mask = ht->cap - 1;
+    uint32_t p = (uint32_t)(hash & mask);
+    uint8_t salt = GRPMM_HASH_SALT(hash);
+    for (;;) {
+        uint32_t s = ht->slots[p];
+        if (s == GRPMM_EMPTY) {
+            uint32_t idx = ht->count++;
+            ht->slots[p] = GRPMM_PACK(salt, idx);
+            grpmm_entry_t* e = &ht->entries[idx];
+            e->key = k;
+            e->max_x = INT64_MIN;
+            e->min_y = INT64_MAX;
+            e->cnt = 0;
+            return e;
+        }
+        if (GRPMM_SALT(s) == salt) {
+            grpmm_entry_t* e = &ht->entries[GRPMM_IDX(s)];
+            if (e->key == k) return e;
+        }
+        p = (p + 1) & mask;
+    }
+}
+
+typedef struct {
+    const void* k_data;
+    const void* x_data;
+    const void* y_data;
+    int8_t      k_type;
+    int8_t      x_type;
+    int8_t      y_type;
+    uint8_t     k_attrs;
+    const uint8_t* k_null_bm;
+    const uint8_t* x_null_bm;
+    const uint8_t* y_null_bm;
+    grpmm_scat_buf_t* bufs;
+    uint32_t    n_workers;
+} grpmm_phase1_ctx_t;
+
+static inline void grpmm_scat_push(grpmm_scat_buf_t* buf, uint64_t hash,
+                                    int64_t k, int64_t x, int64_t y) {
+    if (__builtin_expect(buf->count >= buf->cap, 0)) {
+        uint32_t old_cap = buf->cap ? buf->cap : 64;
+        uint32_t new_cap = old_cap * 2;
+        char* new_data = (char*)scratch_realloc(&buf->_hdr,
+            (size_t)buf->cap * GRPMM_SCATTER_STRIDE,
+            (size_t)new_cap * GRPMM_SCATTER_STRIDE);
+        if (!new_data) { buf->oom = true; return; }
+        buf->data = new_data; buf->cap = new_cap;
+    }
+    char* dst = buf->data + (size_t)buf->count * GRPMM_SCATTER_STRIDE;
+    memcpy(dst,      &hash, 8);
+    memcpy(dst + 8,  &k,    8);
+    memcpy(dst + 16, &x,    8);
+    memcpy(dst + 24, &y,    8);
+    buf->count++;
+}
+
+static void grpmm_phase1_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    grpmm_phase1_ctx_t* c = (grpmm_phase1_ctx_t*)ctx_v;
+    grpmm_scat_buf_t* my_bufs = &c->bufs[(size_t)worker_id * RADIX_P];
+
+    for (int64_t r = start; r < end; r++) {
+        if (c->x_null_bm && (c->x_null_bm[r >> 3] >> (r & 7)) & 1) continue;
+        if (c->y_null_bm && (c->y_null_bm[r >> 3] >> (r & 7)) & 1) continue;
+        if (c->k_null_bm && (c->k_null_bm[r >> 3] >> (r & 7)) & 1) continue;
+        int64_t k = read_col_i64(c->k_data, r, c->k_type, c->k_attrs);
+        int64_t x = read_col_i64(c->x_data, r, c->x_type, 0);
+        int64_t y = read_col_i64(c->y_data, r, c->y_type, 0);
+        uint64_t h = ray_hash_i64(k);
+        uint32_t part = RADIX_PART(h);
+        grpmm_scat_push(&my_bufs[part], h, k, x, y);
+    }
+}
+
+typedef struct {
+    grpmm_scat_buf_t* bufs;
+    uint32_t        n_workers;
+    grpmm_ht_t*     part_hts;
+    int64_t*        part_emit_rows;
+} grpmm_phase2_ctx_t;
+
+static void grpmm_phase2_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    (void)worker_id;
+    grpmm_phase2_ctx_t* c = (grpmm_phase2_ctx_t*)ctx_v;
+    for (int64_t pi = start; pi < end; pi++) {
+        uint32_t p = (uint32_t)pi;
+        grpmm_ht_t* ph = &c->part_hts[p];
+        if (!grpmm_ht_init(ph, 8192)) return;
+        for (uint32_t w = 0; w < c->n_workers; w++) {
+            grpmm_scat_buf_t* buf = &c->bufs[(size_t)w * RADIX_P + p];
+            if (!buf->data || buf->oom) continue;
+            uint32_t nbuf = buf->count;
+            const char* base = buf->data;
+            enum { PF_DIST = 8 };
+            uint32_t pf_end = (nbuf < PF_DIST) ? nbuf : PF_DIST;
+            uint32_t mask = ph->cap - 1;
+            for (uint32_t j = 0; j < pf_end; j++) {
+                uint64_t h; memcpy(&h, base + (size_t)j * GRPMM_SCATTER_STRIDE, 8);
+                __builtin_prefetch(&ph->slots[(uint32_t)(h & mask)], 0, 1);
+            }
+            for (uint32_t i = 0; i < nbuf; i++) {
+                if (i + PF_DIST < nbuf) {
+                    uint64_t hpf;
+                    memcpy(&hpf, base + (size_t)(i + PF_DIST) * GRPMM_SCATTER_STRIDE, 8);
+                    __builtin_prefetch(&ph->slots[(uint32_t)(hpf & (ph->cap - 1))], 0, 1);
+                }
+                uint64_t h;
+                int64_t k, x, y;
+                const char* e = base + (size_t)i * GRPMM_SCATTER_STRIDE;
+                memcpy(&h, e,      8);
+                memcpy(&k, e + 8,  8);
+                memcpy(&x, e + 16, 8);
+                memcpy(&y, e + 24, 8);
+                grpmm_entry_t* me = grpmm_ht_get(ph, h, k);
+                if (!me) return;
+                if (me->cnt == 0) {
+                    me->max_x = x;
+                    me->min_y = y;
+                } else {
+                    if (x > me->max_x) me->max_x = x;
+                    if (y < me->min_y) me->min_y = y;
+                }
+                me->cnt++;
+            }
+        }
+        c->part_emit_rows[p] = (int64_t)ph->count;
+    }
+}
+
+ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op) {
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext || ext->n_keys != 1 || ext->n_aggs != 2 || !ext->agg_ins)
+        return ray_error("domain", "group_maxmin_rowform: bad shape");
+
+    ray_t* tbl = g->table;
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
+
+    ray_op_ext_t* kext = find_ext(g, ext->keys[0]->id);
+    ray_op_ext_t* xext = find_ext(g, ext->agg_ins[0]->id);
+    ray_op_ext_t* yext = find_ext(g, ext->agg_ins[1]->id);
+    if (!kext || !xext || !yext ||
+        kext->base.opcode != OP_SCAN ||
+        xext->base.opcode != OP_SCAN ||
+        yext->base.opcode != OP_SCAN)
+        return ray_error("domain", "group_maxmin_rowform: non-scan child");
+
+    ray_t* k_vec = ray_table_get_col(tbl, kext->sym);
+    ray_t* x_vec = ray_table_get_col(tbl, xext->sym);
+    ray_t* y_vec = ray_table_get_col(tbl, yext->sym);
+    if (!k_vec || !x_vec || !y_vec)
+        return ray_error("domain", "group_maxmin_rowform: column missing");
+
+    int8_t kt = k_vec->type, xt = x_vec->type, yt = y_vec->type;
+    int kt_ok = (kt == RAY_I64 || kt == RAY_I32 || kt == RAY_I16 ||
+                 kt == RAY_U8  || kt == RAY_BOOL || kt == RAY_DATE ||
+                 kt == RAY_TIME || kt == RAY_TIMESTAMP || kt == RAY_SYM);
+    int xt_int = (xt == RAY_I64 || xt == RAY_I32 || xt == RAY_I16 ||
+                  xt == RAY_U8 || xt == RAY_BOOL);
+    int yt_int = (yt == RAY_I64 || yt == RAY_I32 || yt == RAY_I16 ||
+                  yt == RAY_U8 || yt == RAY_BOOL);
+    if (!kt_ok || !xt_int || !yt_int)
+        return ray_error("nyi", "group_maxmin_rowform: type");
+
+    int64_t nrows = k_vec->len;
+    if (nrows == 0) {
+        ray_t* out = ray_table_new(3);
+        ray_t* k0 = (kt == RAY_SYM)
+            ? ray_sym_vec_new(k_vec->attrs & RAY_SYM_W_MASK, 0)
+            : ray_vec_new(kt, 0);
+        ray_t* x0 = ray_vec_new(xt, 0);
+        ray_t* y0 = ray_vec_new(yt, 0);
+        out = ray_table_add_col(out, kext->sym, k0);
+        out = ray_table_add_col(out, xext->sym, x0);
+        out = ray_table_add_col(out, yext->sym, y0);
+        ray_release(k0); ray_release(x0); ray_release(y0);
+        return out;
+    }
+
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t n_workers = pool ? ray_pool_total_workers(pool) : 1;
+    bool parallel = pool && nrows >= 16384;
+    if (!parallel) n_workers = 1;
+
+    size_t n_bufs = (size_t)n_workers * RADIX_P;
+    ray_t* bufs_hdr = NULL;
+    grpmm_scat_buf_t* bufs = (grpmm_scat_buf_t*)scratch_calloc(&bufs_hdr,
+                                n_bufs * sizeof(grpmm_scat_buf_t));
+    if (!bufs) return ray_error("oom", NULL);
+    uint32_t init_cap = 256;
+    for (size_t i = 0; i < n_bufs; i++) {
+        bufs[i].data = (char*)scratch_alloc(&bufs[i]._hdr,
+            (size_t)init_cap * GRPMM_SCATTER_STRIDE);
+        if (!bufs[i].data) {
+            for (size_t j = 0; j <= i; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+        bufs[i].cap = init_cap;
+    }
+
+    grpmm_phase1_ctx_t p1 = {
+        .k_data = ray_data(k_vec),
+        .x_data = ray_data(x_vec),
+        .y_data = ray_data(y_vec),
+        .k_type = kt, .x_type = xt, .y_type = yt,
+        .k_attrs = k_vec->attrs,
+        .k_null_bm = (k_vec->attrs & RAY_ATTR_HAS_NULLS)
+                     ? ray_vec_nullmap_bytes(k_vec, NULL, NULL) : NULL,
+        .x_null_bm = (x_vec->attrs & RAY_ATTR_HAS_NULLS)
+                     ? ray_vec_nullmap_bytes(x_vec, NULL, NULL) : NULL,
+        .y_null_bm = (y_vec->attrs & RAY_ATTR_HAS_NULLS)
+                     ? ray_vec_nullmap_bytes(y_vec, NULL, NULL) : NULL,
+        .bufs = bufs,
+        .n_workers = n_workers,
+    };
+    if (parallel)
+        ray_pool_dispatch(pool, grpmm_phase1_fn, &p1, nrows);
+    else
+        grpmm_phase1_fn(&p1, 0, 0, nrows);
+
+    for (size_t i = 0; i < n_bufs; i++) {
+        if (bufs[i].oom) {
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    ray_t* phts_hdr = NULL;
+    grpmm_ht_t* part_hts = (grpmm_ht_t*)scratch_calloc(&phts_hdr,
+                                (size_t)RADIX_P * sizeof(grpmm_ht_t));
+    ray_t* per_hdr = NULL;
+    int64_t* part_emit_rows = (int64_t*)scratch_calloc(&per_hdr,
+                                (size_t)RADIX_P * sizeof(int64_t));
+    if (!part_hts || !part_emit_rows) {
+        if (phts_hdr) scratch_free(phts_hdr);
+        if (per_hdr) scratch_free(per_hdr);
+        for (size_t j = 0; j < n_bufs; j++)
+            if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+        scratch_free(bufs_hdr);
+        return ray_error("oom", NULL);
+    }
+    grpmm_phase2_ctx_t p2 = {
+        .bufs = bufs, .n_workers = n_workers,
+        .part_hts = part_hts, .part_emit_rows = part_emit_rows,
+    };
+    if (parallel)
+        ray_pool_dispatch_n(pool, grpmm_phase2_fn, &p2, RADIX_P);
+    else
+        grpmm_phase2_fn(&p2, 0, 0, RADIX_P);
+
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        if (part_hts[p].oom) {
+            for (uint32_t i = 0; i < RADIX_P; i++) grpmm_ht_free(&part_hts[i]);
+            scratch_free(phts_hdr); scratch_free(per_hdr);
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    int64_t total_rows = 0;
+    for (uint32_t p = 0; p < RADIX_P; p++) total_rows += part_emit_rows[p];
+
+    ray_t* k_out = (kt == RAY_SYM)
+        ? ray_sym_vec_new(k_vec->attrs & RAY_SYM_W_MASK, total_rows)
+        : ray_vec_new(kt, total_rows);
+    ray_t* x_out = ray_vec_new(xt, total_rows);
+    ray_t* y_out = ray_vec_new(yt, total_rows);
+    if (!k_out || !x_out || !y_out) {
+        if (k_out) ray_release(k_out);
+        if (x_out) ray_release(x_out);
+        if (y_out) ray_release(y_out);
+        for (uint32_t i = 0; i < RADIX_P; i++) grpmm_ht_free(&part_hts[i]);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        for (size_t j = 0; j < n_bufs; j++)
+            if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+        scratch_free(bufs_hdr);
+        return ray_error("oom", NULL);
+    }
+    k_out->len = total_rows;
+    x_out->len = total_rows;
+    y_out->len = total_rows;
+
+    void* k_dst = ray_data(k_out);
+    void* x_dst = ray_data(x_out);
+    void* y_dst = ray_data(y_out);
+
+    int64_t row = 0;
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        grpmm_ht_t* ph = &part_hts[p];
+        for (uint32_t i = 0; i < ph->count; i++) {
+            grpmm_entry_t* e = &ph->entries[i];
+            write_col_i64(k_dst, row, e->key, kt, k_vec->attrs);
+            write_col_i64(x_dst, row, e->max_x, xt, 0);
+            write_col_i64(y_dst, row, e->min_y, yt, 0);
+            row++;
+        }
+    }
+
+    ray_t* result = ray_table_new(3);
+    result = ray_table_add_col(result, kext->sym, k_out);
+    result = ray_table_add_col(result, xext->sym, x_out);
+    result = ray_table_add_col(result, yext->sym, y_out);
+    ray_release(k_out); ray_release(x_out); ray_release(y_out);
+
+    for (uint32_t i = 0; i < RADIX_P; i++) grpmm_ht_free(&part_hts[i]);
+    scratch_free(phts_hdr); scratch_free(per_hdr);
+    for (size_t j = 0; j < n_bufs; j++)
+        if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+    scratch_free(bufs_hdr);
+
+    return result;
+}

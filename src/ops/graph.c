@@ -960,6 +960,48 @@ ray_op_t* ray_group_pearson_rowform(ray_graph_t* g, ray_op_t** keys,
     return &g->nodes[ext->base.id];
 }
 
+/* Dedicated per-group max(x) + min(y) with row-form emission.  Mirror
+ * of ray_group_pearson_rowform with 1 key and 2 fixed-state aggs
+ * (OP_MAX and OP_MIN). */
+ray_op_t* ray_group_maxmin_rowform(ray_graph_t* g, ray_op_t* key,
+                                    ray_op_t* x, ray_op_t* y) {
+    if (!g || !key || !x || !y) return NULL;
+
+    size_t keys_sz = sizeof(ray_op_t*);
+    size_t ops_sz  = 2 * sizeof(uint16_t);
+    size_t ins_sz  = 2 * sizeof(ray_op_t*);
+    size_t ops_off = keys_sz;
+    ops_off = (ops_off + sizeof(uint16_t) - 1) & ~(sizeof(uint16_t) - 1);
+    size_t ins_off = ops_off + ops_sz;
+    ins_off = (ins_off + sizeof(ray_op_t*) - 1) & ~(sizeof(ray_op_t*) - 1);
+
+    ray_op_ext_t* ext = graph_alloc_ext_node_ex(g, ins_off + ins_sz);
+    if (!ext) return NULL;
+
+    ext->base.opcode   = OP_GROUP_MAXMIN_ROWFORM;
+    ext->base.arity    = 0;
+    ext->base.out_type = RAY_TABLE;
+    ext->base.est_rows = key->est_rows;
+    ext->base.inputs[0] = key;
+
+    char* trail = EXT_TRAIL(ext);
+    ext->keys = (ray_op_t**)trail;
+    ext->keys[0] = key;
+    ext->agg_ops = (uint16_t*)(trail + ops_off);
+    ext->agg_ops[0] = OP_MAX;
+    ext->agg_ops[1] = OP_MIN;
+    ext->agg_ins = (ray_op_t**)(trail + ins_off);
+    ext->agg_ins[0] = x;
+    ext->agg_ins[1] = y;
+    ext->agg_ins2 = NULL;
+    ext->agg_k = NULL;
+    ext->n_keys = 1;
+    ext->n_aggs = 2;
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
                        ray_op_t* pivot_col,
