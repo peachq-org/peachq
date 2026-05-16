@@ -6012,9 +6012,77 @@ by_dict_done:
                             if (kt_ok && xt_int && yt_int) mm_ok = 1;
                         }
                     }
+                    /* Fast path: dedicated row-form per-group median(v)+std(v)
+                     * for shape `(select (median v) (std v) [(count v)]
+                     * from T by k0 k1)`.  Optional 3rd COUNT agg matches
+                     * the canonical Python adapter wrapper (null surrogate
+                     * for std(n<=1)).  Bypasses radix HT slowdown + holistic
+                     * reprobe; closes canonical H2O q6. */
+                    int ms_ok = 0;
+                    int ms_with_count = 0;
+                    /* All aggs must reference the same source column —
+                     * compare by SYM, not node id, because each Column
+                     * builder creates a fresh OP_SCAN node even when
+                     * they alias the same column name. */
+                    int ms_aggs_same_col = 0;
+                    if (n_aggs == 2 || n_aggs == 3) {
+                        ray_op_ext_t* v0e = agg_ins[0] ? find_ext(g, agg_ins[0]->id) : NULL;
+                        ray_op_ext_t* v1e = agg_ins[1] ? find_ext(g, agg_ins[1]->id) : NULL;
+                        ray_op_ext_t* v2e = (n_aggs == 3 && agg_ins[2])
+                                            ? find_ext(g, agg_ins[2]->id) : v0e;
+                        ms_aggs_same_col = (v0e && v1e && v2e
+                                            && v0e->sym == v1e->sym
+                                            && v0e->sym == v2e->sym) ? 1 : 0;
+                    }
+                    if (!mm_ok && n_keys == 2 && n_nonaggs == 0
+                        && !where_expr
+                        && (n_aggs == 2 || n_aggs == 3)
+                        && agg_ops[0] == OP_MEDIAN && agg_ops[1] == OP_STDDEV
+                        && (n_aggs == 2 || agg_ops[2] == OP_COUNT)
+                        && key_ops[0] && key_ops[0]->opcode == OP_SCAN
+                        && key_ops[1] && key_ops[1]->opcode == OP_SCAN
+                        && agg_ins[0] && agg_ins[0]->opcode == OP_SCAN
+                        && agg_ins[1] && agg_ins[1]->opcode == OP_SCAN
+                        && (n_aggs == 2 ||
+                            (agg_ins[2] && agg_ins[2]->opcode == OP_SCAN))
+                        && ms_aggs_same_col)
+                    {
+                        ms_with_count = (n_aggs == 3) ? 1 : 0;
+                        ray_op_ext_t* k0ext = find_ext(g, key_ops[0]->id);
+                        ray_op_ext_t* k1ext = find_ext(g, key_ops[1]->id);
+                        ray_op_ext_t* vxt   = find_ext(g, agg_ins[0]->id);
+                        ray_t* k0c = (k0ext && tbl) ? ray_table_get_col(tbl, k0ext->sym) : NULL;
+                        ray_t* k1c = (k1ext && tbl) ? ray_table_get_col(tbl, k1ext->sym) : NULL;
+                        ray_t* vc  = (vxt && tbl)   ? ray_table_get_col(tbl, vxt->sym)   : NULL;
+                        if (k0c && k1c && vc
+                            && !(k0c->attrs & RAY_ATTR_HAS_NULLS)
+                            && !(k1c->attrs & RAY_ATTR_HAS_NULLS)
+                            && !(vc->attrs  & RAY_ATTR_HAS_NULLS))
+                        {
+                            int8_t k0t = k0c->type, k1t = k1c->type, vt = vc->type;
+                            int k0_ok = (k0t == RAY_I64 || k0t == RAY_I32 ||
+                                         k0t == RAY_I16 || k0t == RAY_U8 ||
+                                         k0t == RAY_BOOL || k0t == RAY_DATE ||
+                                         k0t == RAY_TIME || k0t == RAY_TIMESTAMP ||
+                                         k0t == RAY_SYM);
+                            int k1_ok = (k1t == RAY_I64 || k1t == RAY_I32 ||
+                                         k1t == RAY_I16 || k1t == RAY_U8 ||
+                                         k1t == RAY_BOOL || k1t == RAY_DATE ||
+                                         k1t == RAY_TIME || k1t == RAY_TIMESTAMP ||
+                                         k1t == RAY_SYM);
+                            int vt_ok = (vt == RAY_I64 || vt == RAY_I32 ||
+                                         vt == RAY_I16 || vt == RAY_U8 ||
+                                         vt == RAY_BOOL || vt == RAY_F64);
+                            if (k0_ok && k1_ok && vt_ok) ms_ok = 1;
+                        }
+                    }
                     if (mm_ok) {
                         root = ray_group_maxmin_rowform(g, key_ops[0],
                                                          agg_ins[0], agg_ins[1]);
+                    } else if (ms_ok) {
+                        root = ray_group_median_stddev_rowform(g, key_ops,
+                                                                agg_ins[0],
+                                                                ms_with_count);
                     } else {
                         root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
                     }
