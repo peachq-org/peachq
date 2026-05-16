@@ -229,6 +229,13 @@ void     ray_cancel(void);
  * fill.  Closes H2O canonical q6.  2 keys, both aggs on the same
  * column, non-nullable inputs. */
 #define OP_GROUP_MEDIAN_STDDEV_ROWFORM 113
+/* Dedicated multi-key (N=3..8) per-group sum(v)+count(v) with row-form
+ * emission for canonical shape `(select (sum v) (count v) from t by
+ * k1 k2 .. kN)`.  Bypasses the shared OP_GROUP path's direct-array
+ * eligibility scans, rowsel + nullable defensive checks, and Anton-
+ * merge regressions.  Closes H2O canonical q10 (6-key composite with
+ * ~10M unique groups, essentially a row-dedup workload). */
+#define OP_GROUP_SUM_COUNT_ROWFORM 114
 
 /* Opcodes — Graph */
 #define OP_EXPAND        80   /* 1-hop CSR neighbor expansion       */
@@ -648,6 +655,11 @@ ray_op_t* ray_group_maxmin_rowform(ray_graph_t* g, ray_op_t* key,
  * (key0, key1, v_median, v_std). */
 ray_op_t* ray_group_median_stddev_rowform(ray_graph_t* g, ray_op_t** keys,
                                            ray_op_t* v, int with_count);
+/* Dedicated multi-key per-group sum(v)+count(v) with row-form emission.
+ * See OP_GROUP_SUM_COUNT_ROWFORM comment.  N keys (3..8); v is the
+ * value column for sum (count counts non-null v rows). */
+ray_op_t* ray_group_sum_count_rowform(ray_graph_t* g, ray_op_t** keys,
+                                       uint8_t n_keys, ray_op_t* v);
 ray_op_t* ray_distinct(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys);
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
