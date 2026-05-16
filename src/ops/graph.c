@@ -1002,6 +1002,52 @@ ray_op_t* ray_group_maxmin_rowform(ray_graph_t* g, ray_op_t* key,
     return &g->nodes[ext->base.id];
 }
 
+/* Dedicated per-group median(v) + std(v) with row-form emission.  Mirror
+ * of ray_group_maxmin_rowform with 2 keys and 2 aggs on the same
+ * value column (OP_MEDIAN and OP_STDDEV). */
+ray_op_t* ray_group_median_stddev_rowform(ray_graph_t* g, ray_op_t** keys,
+                                           ray_op_t* v, int with_count) {
+    if (!g || !keys || !keys[0] || !keys[1] || !v) return NULL;
+
+    uint8_t n_aggs = with_count ? 3 : 2;
+    size_t keys_sz = 2 * sizeof(ray_op_t*);
+    size_t ops_sz  = (size_t)n_aggs * sizeof(uint16_t);
+    size_t ins_sz  = (size_t)n_aggs * sizeof(ray_op_t*);
+    size_t ops_off = keys_sz;
+    ops_off = (ops_off + sizeof(uint16_t) - 1) & ~(sizeof(uint16_t) - 1);
+    size_t ins_off = ops_off + ops_sz;
+    ins_off = (ins_off + sizeof(ray_op_t*) - 1) & ~(sizeof(ray_op_t*) - 1);
+
+    ray_op_ext_t* ext = graph_alloc_ext_node_ex(g, ins_off + ins_sz);
+    if (!ext) return NULL;
+
+    ext->base.opcode   = OP_GROUP_MEDIAN_STDDEV_ROWFORM;
+    ext->base.arity    = 0;
+    ext->base.out_type = RAY_TABLE;
+    ext->base.est_rows = keys[0]->est_rows;
+    ext->base.inputs[0] = keys[0];
+
+    char* trail = EXT_TRAIL(ext);
+    ext->keys = (ray_op_t**)trail;
+    ext->keys[0] = keys[0];
+    ext->keys[1] = keys[1];
+    ext->agg_ops = (uint16_t*)(trail + ops_off);
+    ext->agg_ops[0] = OP_MEDIAN;
+    ext->agg_ops[1] = OP_STDDEV;
+    if (with_count) ext->agg_ops[2] = OP_COUNT;
+    ext->agg_ins = (ray_op_t**)(trail + ins_off);
+    ext->agg_ins[0] = v;
+    ext->agg_ins[1] = v;
+    if (with_count) ext->agg_ins[2] = v;
+    ext->agg_ins2 = NULL;
+    ext->agg_k = NULL;
+    ext->n_keys = 2;
+    ext->n_aggs = n_aggs;
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
                        ray_op_t* pivot_col,
