@@ -911,6 +911,55 @@ ray_op_t* ray_group_topk_rowform(ray_graph_t* g, ray_op_t* key,
     return &g->nodes[ext->base.id];
 }
 
+/* Dedicated per-group Pearson² with row-form emission.  Mirrors the
+ * OP_GROUP ext-node layout (1-2 keys + 2 agg inputs x, y) so downstream
+ * optimiser passes can introspect ext->keys / ext->agg_ins the same
+ * way they do for OP_GROUP, but with a distinct opcode that exec.c
+ * routes to exec_group_pearson_rowform. */
+ray_op_t* ray_group_pearson_rowform(ray_graph_t* g, ray_op_t** keys,
+                                     uint8_t n_keys, ray_op_t* x, ray_op_t* y) {
+    if (!g || !keys || n_keys < 1 || n_keys > 2 || !x || !y) return NULL;
+    for (uint8_t k = 0; k < n_keys; k++)
+        if (!keys[k]) return NULL;
+
+    size_t keys_sz = (size_t)n_keys * sizeof(ray_op_t*);
+    size_t ops_sz  = sizeof(uint16_t);
+    size_t ins_sz  = sizeof(ray_op_t*);
+    size_t ins2_sz = sizeof(ray_op_t*);
+    size_t ops_off = keys_sz;
+    /* align */
+    ops_off = (ops_off + sizeof(uint16_t) - 1) & ~(sizeof(uint16_t) - 1);
+    size_t ins_off = ops_off + ops_sz;
+    ins_off = (ins_off + sizeof(ray_op_t*) - 1) & ~(sizeof(ray_op_t*) - 1);
+    size_t ins2_off = ins_off + ins_sz;
+    ins2_off = (ins2_off + sizeof(ray_op_t*) - 1) & ~(sizeof(ray_op_t*) - 1);
+
+    ray_op_ext_t* ext = graph_alloc_ext_node_ex(g, ins2_off + ins2_sz);
+    if (!ext) return NULL;
+
+    ext->base.opcode   = OP_GROUP_PEARSON_ROWFORM;
+    ext->base.arity    = 0;
+    ext->base.out_type = RAY_TABLE;
+    ext->base.est_rows = keys[0]->est_rows;
+    ext->base.inputs[0] = keys[0];
+
+    char* trail = EXT_TRAIL(ext);
+    ext->keys = (ray_op_t**)trail;
+    for (uint8_t k = 0; k < n_keys; k++) ext->keys[k] = keys[k];
+    ext->agg_ops = (uint16_t*)(trail + ops_off);
+    ext->agg_ops[0] = OP_PEARSON_CORR;
+    ext->agg_ins = (ray_op_t**)(trail + ins_off);
+    ext->agg_ins[0] = x;
+    ext->agg_ins2 = (ray_op_t**)(trail + ins2_off);
+    ext->agg_ins2[0] = y;
+    ext->agg_k = NULL;
+    ext->n_keys = n_keys;
+    ext->n_aggs = 1;
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
                        ray_op_t* pivot_col,
