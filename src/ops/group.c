@@ -10926,3 +10926,570 @@ ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op) {
 
     return result;
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * exec_group_sum_count_rowform — dedicated multi-key (N=3..8) group-by
+ * with SUM(v) + COUNT(v).  Specialized for canonical H2O q10 shape
+ * `(select (sum v) (count v) from t by k1 k2 .. kN)`.  Bypasses Anton-
+ * merge slowdown on the shared OP_GROUP path: skips agg_strlen probes,
+ * direct-array eligibility scans (which always fail on q10's 6-key
+ * composite), rowsel branches, nullable defensive checks, and the
+ * holistic-fill scaffolding.  Inputs gated non-nullable; integer/SYM
+ * keys; integer or F64 v.  Variadic key count via VLA-style entries
+ * (stride = (N + 2) × 8).
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* Entry layout: hash (8) + keys[N] (N*8) + v (8).  Stride = 16 + 8N. */
+typedef struct {
+    char*    data;
+    uint32_t count;
+    uint32_t cap;
+    bool     oom;
+    ray_t*   _hdr;
+} grpsc_scat_buf_t;
+
+/* HT entry: keys[N] (N*8) + cnt (8) + sum (8).  Stride = 16 + 8N. */
+typedef struct {
+    uint32_t*   slots;
+    char*       entries;      /* variable-size rows */
+    uint32_t    count;
+    uint32_t    cap;          /* slot count, pow2 */
+    uint32_t    entry_cap;
+    uint16_t    entry_stride;
+    uint8_t     n_keys;
+    bool        oom;
+    ray_t*      _slots_hdr;
+    ray_t*      _entries_hdr;
+} grpsc_ht_t;
+
+#define GRPSC_EMPTY     UINT32_MAX
+#define GRPSC_PACK(salt, idx) (((uint32_t)(uint8_t)(salt) << 24) | ((idx) & 0xFFFFFF))
+#define GRPSC_IDX(s)    ((s) & 0xFFFFFF)
+#define GRPSC_SALT(s)   ((uint8_t)((s) >> 24))
+#define GRPSC_HASH_SALT(h) ((uint8_t)((h) >> 56))
+
+static inline int64_t* grpsc_entry_keys(grpsc_ht_t* ht, uint32_t idx) {
+    return (int64_t*)(ht->entries + (size_t)idx * ht->entry_stride);
+}
+static inline int64_t* grpsc_entry_cnt(grpsc_ht_t* ht, uint32_t idx) {
+    return (int64_t*)(ht->entries + (size_t)idx * ht->entry_stride
+                      + (size_t)ht->n_keys * 8);
+}
+static inline double* grpsc_entry_sum(grpsc_ht_t* ht, uint32_t idx) {
+    return (double*)(ht->entries + (size_t)idx * ht->entry_stride
+                     + (size_t)ht->n_keys * 8 + 8);
+}
+
+static bool grpsc_ht_init(grpsc_ht_t* ht, uint32_t init_cap, uint8_t n_keys) {
+    memset(ht, 0, sizeof(*ht));
+    if (init_cap < 32) init_cap = 32;
+    uint32_t cap = 1;
+    while (cap < init_cap) cap <<= 1;
+    ht->cap = cap;
+    ht->n_keys = n_keys;
+    ht->entry_stride = (uint16_t)((size_t)n_keys * 8 + 16);
+    ht->entry_cap = cap / 2;
+    if (ht->entry_cap < 16) ht->entry_cap = 16;
+    ht->slots = (uint32_t*)scratch_alloc(&ht->_slots_hdr, (size_t)cap * 4);
+    if (!ht->slots) { ht->oom = true; return false; }
+    memset(ht->slots, 0xFF, (size_t)cap * 4);
+    ht->entries = (char*)scratch_alloc(&ht->_entries_hdr,
+                                       (size_t)ht->entry_cap * ht->entry_stride);
+    if (!ht->entries) { ht->oom = true; return false; }
+    return true;
+}
+
+static void grpsc_ht_free(grpsc_ht_t* ht) {
+    if (ht->_slots_hdr)   scratch_free(ht->_slots_hdr);
+    if (ht->_entries_hdr) scratch_free(ht->_entries_hdr);
+    memset(ht, 0, sizeof(*ht));
+}
+
+/* Hash the keys[N] tuple — combines per-key i64 hashes. */
+static inline uint64_t grpsc_hash_keys(const int64_t* keys, uint8_t n) {
+    uint64_t h = ray_hash_i64(keys[0]);
+    for (uint8_t i = 1; i < n; i++)
+        h = ray_hash_combine(h, ray_hash_i64(keys[i]));
+    return h;
+}
+
+static bool grpsc_ht_grow_slots(grpsc_ht_t* ht) {
+    uint32_t old_cap = ht->cap, new_cap = old_cap * 2;
+    ray_t* new_hdr = NULL;
+    uint32_t* new_slots = (uint32_t*)scratch_alloc(&new_hdr, (size_t)new_cap * 4);
+    if (!new_slots) { ht->oom = true; return false; }
+    memset(new_slots, 0xFF, (size_t)new_cap * 4);
+    uint32_t mask = new_cap - 1;
+    for (uint32_t i = 0; i < ht->count; i++) {
+        const int64_t* k = grpsc_entry_keys(ht, i);
+        uint64_t h = grpsc_hash_keys(k, ht->n_keys);
+        uint32_t pp = (uint32_t)(h & mask);
+        uint8_t salt = GRPSC_HASH_SALT(h);
+        for (;;) {
+            if (new_slots[pp] == GRPSC_EMPTY) {
+                new_slots[pp] = GRPSC_PACK(salt, i); break;
+            }
+            pp = (pp + 1) & mask;
+        }
+    }
+    scratch_free(ht->_slots_hdr);
+    ht->_slots_hdr = new_hdr; ht->slots = new_slots; ht->cap = new_cap;
+    return true;
+}
+
+static bool grpsc_ht_grow_entries(grpsc_ht_t* ht) {
+    uint32_t new_ecap = ht->entry_cap * 2;
+    char* new_e = (char*)scratch_realloc(&ht->_entries_hdr,
+                                (size_t)ht->entry_cap * ht->entry_stride,
+                                (size_t)new_ecap * ht->entry_stride);
+    if (!new_e) { ht->oom = true; return false; }
+    ht->entries = new_e; ht->entry_cap = new_ecap;
+    return true;
+}
+
+/* Probe-or-insert.  `keys_in` points to N consecutive int64s.  Returns
+ * the entry index (always valid) or UINT32_MAX on OOM. */
+static inline uint32_t
+grpsc_ht_get(grpsc_ht_t* ht, uint64_t hash, const int64_t* keys_in) {
+    if (ht->cap == 0 || (ht->count + 1) * 2 > ht->cap) {
+        if (!grpsc_ht_grow_slots(ht)) return UINT32_MAX;
+    }
+    if (ht->count >= ht->entry_cap) {
+        if (!grpsc_ht_grow_entries(ht)) return UINT32_MAX;
+    }
+    uint8_t n = ht->n_keys;
+    size_t key_bytes = (size_t)n * 8;
+    uint32_t mask = ht->cap - 1;
+    uint32_t pp = (uint32_t)(hash & mask);
+    uint8_t salt = GRPSC_HASH_SALT(hash);
+    for (;;) {
+        uint32_t s = ht->slots[pp];
+        if (s == GRPSC_EMPTY) {
+            uint32_t idx = ht->count++;
+            ht->slots[pp] = GRPSC_PACK(salt, idx);
+            int64_t* dst_keys = grpsc_entry_keys(ht, idx);
+            memcpy(dst_keys, keys_in, key_bytes);
+            *grpsc_entry_cnt(ht, idx) = 0;
+            *grpsc_entry_sum(ht, idx) = 0.0;
+            return idx;
+        }
+        if (GRPSC_SALT(s) == salt) {
+            uint32_t idx = GRPSC_IDX(s);
+            const int64_t* eks = grpsc_entry_keys(ht, idx);
+            if (memcmp(eks, keys_in, key_bytes) == 0) return idx;
+        }
+        pp = (pp + 1) & mask;
+    }
+}
+
+typedef struct {
+    const void** key_data;      /* [n_keys] base pointers */
+    const int8_t* key_types;    /* [n_keys] */
+    const uint8_t* key_attrs;   /* [n_keys] */
+    const void*  v_data;
+    int8_t       v_type;
+    uint8_t      n_keys;
+    grpsc_scat_buf_t* bufs;
+    uint32_t     n_workers;
+    uint16_t     entry_stride;
+} grpsc_phase1_ctx_t;
+
+static inline void grpsc_scat_push(grpsc_scat_buf_t* buf, uint16_t stride,
+                                    uint64_t hash, const int64_t* keys,
+                                    uint8_t n, int64_t v_bits) {
+    if (__builtin_expect(buf->count >= buf->cap, 0)) {
+        uint32_t old_cap = buf->cap ? buf->cap : 64;
+        uint32_t new_cap = old_cap * 2;
+        char* new_data = (char*)scratch_realloc(&buf->_hdr,
+            (size_t)buf->cap * stride,
+            (size_t)new_cap * stride);
+        if (!new_data) { buf->oom = true; return; }
+        buf->data = new_data; buf->cap = new_cap;
+    }
+    char* dst = buf->data + (size_t)buf->count * stride;
+    memcpy(dst, &hash, 8);
+    memcpy(dst + 8, keys, (size_t)n * 8);
+    memcpy(dst + 8 + (size_t)n * 8, &v_bits, 8);
+    buf->count++;
+}
+
+static void grpsc_phase1_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    grpsc_phase1_ctx_t* c = (grpsc_phase1_ctx_t*)ctx_v;
+    grpsc_scat_buf_t* my_bufs = &c->bufs[(size_t)worker_id * RADIX_P];
+    uint8_t n = c->n_keys;
+    uint16_t stride = c->entry_stride;
+    bool v_is_f64 = (c->v_type == RAY_F64);
+    int64_t keys[8];
+
+    for (int64_t r = start; r < end; r++) {
+        for (uint8_t k = 0; k < n; k++)
+            keys[k] = read_col_i64(c->key_data[k], r,
+                                    c->key_types[k], c->key_attrs[k]);
+        int64_t v_bits;
+        if (v_is_f64) {
+            memcpy(&v_bits, &((const double*)c->v_data)[r], 8);
+        } else {
+            int64_t vi = read_col_i64(c->v_data, r, c->v_type, 0);
+            double vd = (double)vi;
+            memcpy(&v_bits, &vd, 8);
+        }
+        uint64_t h = grpsc_hash_keys(keys, n);
+        uint32_t part = RADIX_PART(h);
+        grpsc_scat_push(&my_bufs[part], stride, h, keys, n, v_bits);
+    }
+}
+
+typedef struct {
+    grpsc_scat_buf_t* bufs;
+    uint32_t        n_workers;
+    grpsc_ht_t*     part_hts;
+    int64_t*        part_emit_rows;
+    uint8_t         n_keys;
+    uint16_t        entry_stride;
+} grpsc_phase2_ctx_t;
+
+static void grpsc_phase2_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    (void)worker_id;
+    grpsc_phase2_ctx_t* c = (grpsc_phase2_ctx_t*)ctx_v;
+    uint8_t n = c->n_keys;
+    uint16_t stride = c->entry_stride;
+    size_t key_bytes = (size_t)n * 8;
+    for (int64_t pi = start; pi < end; pi++) {
+        uint32_t p = (uint32_t)pi;
+        grpsc_ht_t* ph = &c->part_hts[p];
+
+        /* Estimate HT size from partition's total entry count. */
+        uint32_t total_entries = 0;
+        for (uint32_t w = 0; w < c->n_workers; w++)
+            total_entries += c->bufs[(size_t)w * RADIX_P + p].count;
+        if (total_entries == 0) { c->part_emit_rows[p] = 0; continue; }
+
+        /* q10 worst case: nearly all entries are distinct, so load
+         * factor 0.5 ≈ 2× total_entries.  Cap at 16M (24-bit). */
+        uint32_t init_ht = 256;
+        while (init_ht < total_entries * 2 && init_ht < (1u << 24))
+            init_ht <<= 1;
+        if (!grpsc_ht_init(ph, init_ht, n)) return;
+
+        for (uint32_t w = 0; w < c->n_workers; w++) {
+            grpsc_scat_buf_t* buf = &c->bufs[(size_t)w * RADIX_P + p];
+            if (!buf->data || buf->oom) continue;
+            const char* base = buf->data;
+            uint32_t nbuf = buf->count;
+            enum { PF_DIST = 8 };
+            uint32_t pf_end = (nbuf < PF_DIST) ? nbuf : PF_DIST;
+            uint32_t mask = ph->cap - 1;
+            for (uint32_t j = 0; j < pf_end; j++) {
+                uint64_t h; memcpy(&h, base + (size_t)j * stride, 8);
+                __builtin_prefetch(&ph->slots[(uint32_t)(h & mask)], 0, 1);
+            }
+            for (uint32_t i = 0; i < nbuf; i++) {
+                if (i + PF_DIST < nbuf) {
+                    uint64_t hpf;
+                    memcpy(&hpf, base + (size_t)(i + PF_DIST) * stride, 8);
+                    __builtin_prefetch(&ph->slots[(uint32_t)(hpf & (ph->cap - 1))], 0, 1);
+                }
+                uint64_t h;
+                const char* e = base + (size_t)i * stride;
+                memcpy(&h, e, 8);
+                const int64_t* keys_in = (const int64_t*)(const void*)(e + 8);
+                int64_t v_bits;
+                memcpy(&v_bits, e + 8 + key_bytes, 8);
+                uint32_t idx = grpsc_ht_get(ph, h, keys_in);
+                if (idx == UINT32_MAX) return;
+                double v; memcpy(&v, &v_bits, 8);
+                (*grpsc_entry_cnt(ph, idx))++;
+                *grpsc_entry_sum(ph, idx) += v;
+            }
+        }
+        c->part_emit_rows[p] = (int64_t)ph->count;
+    }
+}
+
+typedef struct {
+    grpsc_ht_t*     part_hts;
+    const int64_t*  part_offsets;   /* [RADIX_P+1] */
+    const int8_t*   key_types;      /* [n_keys] */
+    const uint8_t*  key_attrs;      /* [n_keys] */
+    void**          key_outs;       /* [n_keys] data pointers */
+    int64_t*        cnt_out;
+    double*         sum_out;
+    uint8_t         n_keys;
+} grpsc_phase3_ctx_t;
+
+static void grpsc_phase3_fn(void* ctx_v, uint32_t worker_id,
+                             int64_t start, int64_t end) {
+    (void)worker_id;
+    grpsc_phase3_ctx_t* c = (grpsc_phase3_ctx_t*)ctx_v;
+    uint8_t n = c->n_keys;
+    for (int64_t pi = start; pi < end; pi++) {
+        uint32_t p = (uint32_t)pi;
+        grpsc_ht_t* ph = &c->part_hts[p];
+        int64_t base_row = c->part_offsets[p];
+        for (uint32_t g = 0; g < ph->count; g++) {
+            int64_t out_row = base_row + (int64_t)g;
+            const int64_t* eks = grpsc_entry_keys(ph, g);
+            for (uint8_t k = 0; k < n; k++) {
+                write_col_i64(c->key_outs[k], out_row, eks[k],
+                              c->key_types[k], c->key_attrs[k]);
+            }
+            c->sum_out[out_row] = *grpsc_entry_sum(ph, g);
+            c->cnt_out[out_row] = *grpsc_entry_cnt(ph, g);
+        }
+    }
+}
+
+ray_t* exec_group_sum_count_rowform(ray_graph_t* g, ray_op_t* op) {
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext || ext->n_keys < 3 || ext->n_keys > 8 ||
+        ext->n_aggs != 2 || !ext->agg_ins)
+        return ray_error("domain", "group_sum_count_rowform: bad shape");
+
+    ray_t* tbl = g->table;
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
+
+    uint8_t n_keys = ext->n_keys;
+
+    /* Resolve keys + v. */
+    ray_op_ext_t* kexts[8];
+    ray_t* k_vecs[8];
+    int64_t k_syms[8];
+    int8_t k_types[8];
+    uint8_t k_attrs[8];
+    for (uint8_t k = 0; k < n_keys; k++) {
+        kexts[k] = find_ext(g, ext->keys[k]->id);
+        if (!kexts[k] || kexts[k]->base.opcode != OP_SCAN)
+            return ray_error("domain", "group_sum_count_rowform: non-scan key");
+        k_vecs[k] = ray_table_get_col(tbl, kexts[k]->sym);
+        if (!k_vecs[k])
+            return ray_error("domain", "group_sum_count_rowform: key column missing");
+        k_syms[k] = kexts[k]->sym;
+        k_types[k] = k_vecs[k]->type;
+        k_attrs[k] = k_vecs[k]->attrs;
+        int8_t kt = k_types[k];
+        if (kt != RAY_I64 && kt != RAY_I32 && kt != RAY_I16 && kt != RAY_U8 &&
+            kt != RAY_BOOL && kt != RAY_DATE && kt != RAY_TIME &&
+            kt != RAY_TIMESTAMP && kt != RAY_SYM)
+            return ray_error("nyi", "group_sum_count_rowform: key type");
+        if (k_vecs[k]->attrs & RAY_ATTR_HAS_NULLS)
+            return ray_error("nyi", "group_sum_count_rowform: nullable key");
+    }
+
+    /* agg[0] = SUM(v), agg[1] = COUNT(any).  COUNT input is ignored
+     * since gate guarantees non-null v (count of rows in group). */
+    ray_op_ext_t* vext = find_ext(g, ext->agg_ins[0]->id);
+    if (!vext || vext->base.opcode != OP_SCAN)
+        return ray_error("domain", "group_sum_count_rowform: non-scan val");
+    ray_t* v_vec = ray_table_get_col(tbl, vext->sym);
+    if (!v_vec)
+        return ray_error("domain", "group_sum_count_rowform: val column missing");
+    int8_t vt = v_vec->type;
+    int vt_ok = (vt == RAY_I64 || vt == RAY_I32 || vt == RAY_I16 ||
+                 vt == RAY_U8 || vt == RAY_BOOL || vt == RAY_F64);
+    if (!vt_ok)
+        return ray_error("nyi", "group_sum_count_rowform: val type");
+    if (v_vec->attrs & RAY_ATTR_HAS_NULLS)
+        return ray_error("nyi", "group_sum_count_rowform: nullable val");
+
+    int64_t nrows = k_vecs[0]->len;
+    int64_t sum_sym = ray_sym_intern("v_sum",   5);
+    int64_t cnt_sym = ray_sym_intern("v_count", 7);
+    int64_t ncols   = (int64_t)n_keys + 2;
+    if (nrows == 0) {
+        ray_t* out = ray_table_new(ncols);
+        for (uint8_t k = 0; k < n_keys; k++) {
+            ray_t* ev = (k_types[k] == RAY_SYM)
+                ? ray_sym_vec_new(k_attrs[k] & RAY_SYM_W_MASK, 0)
+                : ray_vec_new(k_types[k], 0);
+            out = ray_table_add_col(out, k_syms[k], ev);
+            ray_release(ev);
+        }
+        ray_t* sv = ray_vec_new(RAY_F64, 0);
+        ray_t* cv = ray_vec_new(RAY_I64, 0);
+        out = ray_table_add_col(out, sum_sym, sv);
+        out = ray_table_add_col(out, cnt_sym, cv);
+        ray_release(sv); ray_release(cv);
+        return out;
+    }
+
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t n_workers = pool ? ray_pool_total_workers(pool) : 1;
+    bool parallel = pool && nrows >= 16384;
+    if (!parallel) n_workers = 1;
+
+    uint16_t entry_stride = (uint16_t)((size_t)n_keys * 8 + 16);
+
+    size_t n_bufs = (size_t)n_workers * RADIX_P;
+    ray_t* bufs_hdr = NULL;
+    grpsc_scat_buf_t* bufs = (grpsc_scat_buf_t*)scratch_calloc(&bufs_hdr,
+        n_bufs * sizeof(grpsc_scat_buf_t));
+    if (!bufs) return ray_error("oom", NULL);
+
+    uint32_t init_cap = 256;
+    for (size_t i = 0; i < n_bufs; i++) {
+        bufs[i].data = (char*)scratch_alloc(&bufs[i]._hdr,
+            (size_t)init_cap * entry_stride);
+        if (!bufs[i].data) {
+            for (size_t j = 0; j <= i; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+        bufs[i].cap = init_cap;
+    }
+
+    const void* key_data[8];
+    for (uint8_t k = 0; k < n_keys; k++) key_data[k] = ray_data(k_vecs[k]);
+
+    grpsc_phase1_ctx_t p1 = {
+        .key_data = key_data,
+        .key_types = k_types,
+        .key_attrs = k_attrs,
+        .v_data = ray_data(v_vec),
+        .v_type = vt,
+        .n_keys = n_keys,
+        .bufs = bufs,
+        .n_workers = n_workers,
+        .entry_stride = entry_stride,
+    };
+    if (parallel) ray_pool_dispatch(pool, grpsc_phase1_fn, &p1, nrows);
+    else          grpsc_phase1_fn(&p1, 0, 0, nrows);
+
+    for (size_t i = 0; i < n_bufs; i++) {
+        if (bufs[i].oom) {
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    ray_t* phts_hdr = NULL;
+    grpsc_ht_t* part_hts = (grpsc_ht_t*)scratch_calloc(&phts_hdr,
+                                (size_t)RADIX_P * sizeof(grpsc_ht_t));
+    ray_t* per_hdr = NULL;
+    int64_t* part_emit_rows = (int64_t*)scratch_calloc(&per_hdr,
+                                (size_t)RADIX_P * sizeof(int64_t));
+    if (!part_hts || !part_emit_rows) {
+        if (phts_hdr) scratch_free(phts_hdr);
+        if (per_hdr)  scratch_free(per_hdr);
+        for (size_t j = 0; j < n_bufs; j++)
+            if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+        scratch_free(bufs_hdr);
+        return ray_error("oom", NULL);
+    }
+    grpsc_phase2_ctx_t p2 = {
+        .bufs = bufs,
+        .n_workers = n_workers,
+        .part_hts = part_hts,
+        .part_emit_rows = part_emit_rows,
+        .n_keys = n_keys,
+        .entry_stride = entry_stride,
+    };
+    if (parallel) ray_pool_dispatch_n(pool, grpsc_phase2_fn, &p2, RADIX_P);
+    else          grpsc_phase2_fn(&p2, 0, 0, RADIX_P);
+
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        if (part_hts[p].oom) {
+            for (uint32_t i = 0; i < RADIX_P; i++) grpsc_ht_free(&part_hts[i]);
+            scratch_free(phts_hdr); scratch_free(per_hdr);
+            for (size_t j = 0; j < n_bufs; j++)
+                if (bufs[j]._hdr) scratch_free(bufs[j]._hdr);
+            scratch_free(bufs_hdr);
+            return ray_error("oom", NULL);
+        }
+    }
+
+    for (size_t j = 0; j < n_bufs; j++)
+        if (bufs[j]._hdr) { scratch_free(bufs[j]._hdr); bufs[j]._hdr = NULL; }
+    scratch_free(bufs_hdr); bufs_hdr = NULL; bufs = NULL;
+
+    ray_t* po_hdr = NULL;
+    int64_t* part_offsets = (int64_t*)scratch_alloc(&po_hdr,
+                                (size_t)(RADIX_P + 1) * sizeof(int64_t));
+    if (!part_offsets) {
+        for (uint32_t i = 0; i < RADIX_P; i++) grpsc_ht_free(&part_hts[i]);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        return ray_error("oom", NULL);
+    }
+    int64_t total_rows = 0;
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        part_offsets[p] = total_rows;
+        total_rows += part_emit_rows[p];
+    }
+    part_offsets[RADIX_P] = total_rows;
+
+    /* Allocate output columns. */
+    ray_t* key_outs[8] = {0};
+    for (uint8_t k = 0; k < n_keys; k++) {
+        key_outs[k] = (k_types[k] == RAY_SYM)
+            ? ray_sym_vec_new(k_attrs[k] & RAY_SYM_W_MASK, total_rows)
+            : ray_vec_new(k_types[k], total_rows);
+        if (!key_outs[k] || RAY_IS_ERR(key_outs[k])) {
+            for (uint8_t j = 0; j <= k; j++)
+                if (key_outs[j]) ray_release(key_outs[j]);
+            for (uint32_t i = 0; i < RADIX_P; i++) grpsc_ht_free(&part_hts[i]);
+            scratch_free(po_hdr);
+            scratch_free(phts_hdr); scratch_free(per_hdr);
+            return ray_error("oom", NULL);
+        }
+        key_outs[k]->len = total_rows;
+    }
+    ray_t* sum_out = ray_vec_new(RAY_F64, total_rows);
+    ray_t* cnt_out = ray_vec_new(RAY_I64, total_rows);
+    if (!sum_out || !cnt_out || RAY_IS_ERR(sum_out) || RAY_IS_ERR(cnt_out)) {
+        for (uint8_t k = 0; k < n_keys; k++)
+            if (key_outs[k]) ray_release(key_outs[k]);
+        if (sum_out) ray_release(sum_out);
+        if (cnt_out) ray_release(cnt_out);
+        for (uint32_t i = 0; i < RADIX_P; i++) grpsc_ht_free(&part_hts[i]);
+        scratch_free(po_hdr);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        return ray_error("oom", NULL);
+    }
+    sum_out->len = total_rows;
+    cnt_out->len = total_rows;
+
+    void* key_out_data[8];
+    for (uint8_t k = 0; k < n_keys; k++) key_out_data[k] = ray_data(key_outs[k]);
+
+    grpsc_phase3_ctx_t p3 = {
+        .part_hts = part_hts,
+        .part_offsets = part_offsets,
+        .key_types = k_types,
+        .key_attrs = k_attrs,
+        .key_outs = key_out_data,
+        .cnt_out = (int64_t*)ray_data(cnt_out),
+        .sum_out = (double*)ray_data(sum_out),
+        .n_keys = n_keys,
+    };
+    if (parallel) ray_pool_dispatch_n(pool, grpsc_phase3_fn, &p3, RADIX_P);
+    else          grpsc_phase3_fn(&p3, 0, 0, RADIX_P);
+
+    ray_t* result = ray_table_new(ncols);
+    if (!result || RAY_IS_ERR(result)) {
+        for (uint8_t k = 0; k < n_keys; k++)
+            if (key_outs[k]) ray_release(key_outs[k]);
+        ray_release(sum_out); ray_release(cnt_out);
+        for (uint32_t i = 0; i < RADIX_P; i++) grpsc_ht_free(&part_hts[i]);
+        scratch_free(po_hdr);
+        scratch_free(phts_hdr); scratch_free(per_hdr);
+        return result ? result : ray_error("oom", NULL);
+    }
+    for (uint8_t k = 0; k < n_keys; k++) {
+        result = ray_table_add_col(result, k_syms[k], key_outs[k]);
+    }
+    result = ray_table_add_col(result, sum_sym, sum_out);
+    result = ray_table_add_col(result, cnt_sym, cnt_out);
+    for (uint8_t k = 0; k < n_keys; k++) ray_release(key_outs[k]);
+    ray_release(sum_out); ray_release(cnt_out);
+
+    for (uint32_t i = 0; i < RADIX_P; i++) grpsc_ht_free(&part_hts[i]);
+    scratch_free(po_hdr);
+    scratch_free(phts_hdr); scratch_free(per_hdr);
+
+    return result;
+}
+
