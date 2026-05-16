@@ -97,6 +97,7 @@ const char* ray_opcode_name(uint16_t op) {
         case OP_GROUP_BOTK_ROWFORM: return "GROUP_BOTK_ROWFORM";
         case OP_GROUP_PEARSON_ROWFORM: return "GROUP_PEARSON_ROWFORM";
         case OP_GROUP_MAXMIN_ROWFORM: return "GROUP_MAXMIN_ROWFORM";
+        case OP_GROUP_MEDIAN_STDDEV_ROWFORM: return "GROUP_MEDIAN_STDDEV_ROWFORM";
         case OP_FILTERED_GROUP:return "FILTERED_GROUP";
         case OP_PIVOT:         return "PIVOT";
         case OP_ANTIJOIN:      return "ANTIJOIN";
