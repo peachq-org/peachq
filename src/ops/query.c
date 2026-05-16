@@ -5979,7 +5979,45 @@ by_dict_done:
                                            agg_ins, agg_ins2, n_aggs);
                     }
                 } else {
-                    root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
+                    /* Fast path: dedicated row-form per-group max(x)+min(y)
+                     * for shape `(select (max x) (min y) from T by k)`.
+                     * Bypasses radix HT slowdown; closes q7 first stage. */
+                    int mm_ok = 0;
+                    if (n_aggs == 2 && n_keys == 1 && n_nonaggs == 0
+                        && !where_expr
+                        && agg_ops[0] == OP_MAX && agg_ops[1] == OP_MIN
+                        && key_ops[0] && key_ops[0]->opcode == OP_SCAN
+                        && agg_ins[0] && agg_ins[0]->opcode == OP_SCAN
+                        && agg_ins[1] && agg_ins[1]->opcode == OP_SCAN)
+                    {
+                        ray_op_ext_t* kext = find_ext(g, key_ops[0]->id);
+                        ray_op_ext_t* xext = find_ext(g, agg_ins[0]->id);
+                        ray_op_ext_t* yext = find_ext(g, agg_ins[1]->id);
+                        ray_t* kc = (kext && tbl) ? ray_table_get_col(tbl, kext->sym) : NULL;
+                        ray_t* xc = (xext && tbl) ? ray_table_get_col(tbl, xext->sym) : NULL;
+                        ray_t* yc = (yext && tbl) ? ray_table_get_col(tbl, yext->sym) : NULL;
+                        if (kc && xc && yc) {
+                            int8_t kt = kc->type, xt = xc->type, yt = yc->type;
+                            int kt_ok = (kt == RAY_I64 || kt == RAY_I32 ||
+                                         kt == RAY_I16 || kt == RAY_U8 ||
+                                         kt == RAY_BOOL || kt == RAY_DATE ||
+                                         kt == RAY_TIME || kt == RAY_TIMESTAMP ||
+                                         kt == RAY_SYM);
+                            int xt_int = (xt == RAY_I64 || xt == RAY_I32 ||
+                                          xt == RAY_I16 || xt == RAY_U8 ||
+                                          xt == RAY_BOOL);
+                            int yt_int = (yt == RAY_I64 || yt == RAY_I32 ||
+                                          yt == RAY_I16 || yt == RAY_U8 ||
+                                          yt == RAY_BOOL);
+                            if (kt_ok && xt_int && yt_int) mm_ok = 1;
+                        }
+                    }
+                    if (mm_ok) {
+                        root = ray_group_maxmin_rowform(g, key_ops[0],
+                                                         agg_ins[0], agg_ins[1]);
+                    } else {
+                        root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
+                    }
                 }
             } else {
                 /* No aggs but non-agg expressions exist — still need group
