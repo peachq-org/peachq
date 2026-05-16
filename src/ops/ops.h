@@ -221,6 +221,14 @@ void     ray_cancel(void);
  * second stage is element-wise arithmetic on the small result.  1 key,
  * 2 fixed-state aggs (MAX, MIN), integer x/y. */
 #define OP_GROUP_MAXMIN_ROWFORM 112
+/* Dedicated single-pass per-group MEDIAN(v)+STDDEV(v) with row-form
+ * emission for canonical shape `(select (median v) (std v) from t by
+ * k0 k1)`.  Phase 2 builds per-partition HT + group-contiguous F64
+ * v_buf in two passes; Phase 3 runs ray_median_dbl_inplace per group.
+ * Bypasses the shared OP_GROUP path's reprobe-and-histogram holistic
+ * fill.  Closes H2O canonical q6.  2 keys, both aggs on the same
+ * column, non-nullable inputs. */
+#define OP_GROUP_MEDIAN_STDDEV_ROWFORM 113
 
 /* Opcodes — Graph */
 #define OP_EXPAND        80   /* 1-hop CSR neighbor expansion       */
@@ -634,6 +642,12 @@ ray_op_t* ray_group_pearson_rowform(ray_graph_t* g, ray_op_t** keys,
  * OP_GROUP_MAXMIN_ROWFORM comment.  Output: (key, max_x, min_y). */
 ray_op_t* ray_group_maxmin_rowform(ray_graph_t* g, ray_op_t* key,
                                     ray_op_t* x, ray_op_t* y);
+/* Dedicated per-group median(v) + std(v) with row-form emission.  See
+ * OP_GROUP_MEDIAN_STDDEV_ROWFORM comment.  keys[0..1] are two group
+ * columns; v is the value column for both aggregates.  Output:
+ * (key0, key1, v_median, v_std). */
+ray_op_t* ray_group_median_stddev_rowform(ray_graph_t* g, ray_op_t** keys,
+                                           ray_op_t* v, int with_count);
 ray_op_t* ray_distinct(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys);
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
