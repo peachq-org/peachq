@@ -1048,6 +1048,50 @@ ray_op_t* ray_group_median_stddev_rowform(ray_graph_t* g, ray_op_t** keys,
     return &g->nodes[ext->base.id];
 }
 
+/* Dedicated multi-key per-group sum(v) + count(v) with row-form
+ * emission.  N keys (3..8) packed inline in the ext node trail.  Mirror
+ * of ray_group_median_stddev_rowform extended for variadic keys. */
+ray_op_t* ray_group_sum_count_rowform(ray_graph_t* g, ray_op_t** keys,
+                                       uint8_t n_keys, ray_op_t* v) {
+    if (!g || !keys || !v || n_keys < 3 || n_keys > 8) return NULL;
+    for (uint8_t k = 0; k < n_keys; k++)
+        if (!keys[k]) return NULL;
+
+    size_t keys_sz = (size_t)n_keys * sizeof(ray_op_t*);
+    size_t ops_sz  = 2 * sizeof(uint16_t);
+    size_t ins_sz  = 2 * sizeof(ray_op_t*);
+    size_t ops_off = keys_sz;
+    ops_off = (ops_off + sizeof(uint16_t) - 1) & ~(sizeof(uint16_t) - 1);
+    size_t ins_off = ops_off + ops_sz;
+    ins_off = (ins_off + sizeof(ray_op_t*) - 1) & ~(sizeof(ray_op_t*) - 1);
+
+    ray_op_ext_t* ext = graph_alloc_ext_node_ex(g, ins_off + ins_sz);
+    if (!ext) return NULL;
+
+    ext->base.opcode   = OP_GROUP_SUM_COUNT_ROWFORM;
+    ext->base.arity    = 0;
+    ext->base.out_type = RAY_TABLE;
+    ext->base.est_rows = keys[0]->est_rows;
+    ext->base.inputs[0] = keys[0];
+
+    char* trail = EXT_TRAIL(ext);
+    ext->keys = (ray_op_t**)trail;
+    for (uint8_t k = 0; k < n_keys; k++) ext->keys[k] = keys[k];
+    ext->agg_ops = (uint16_t*)(trail + ops_off);
+    ext->agg_ops[0] = OP_SUM;
+    ext->agg_ops[1] = OP_COUNT;
+    ext->agg_ins = (ray_op_t**)(trail + ins_off);
+    ext->agg_ins[0] = v;
+    ext->agg_ins[1] = v;
+    ext->agg_ins2 = NULL;
+    ext->agg_k = NULL;
+    ext->n_keys = n_keys;
+    ext->n_aggs = 2;
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
                        ray_op_t* pivot_col,
