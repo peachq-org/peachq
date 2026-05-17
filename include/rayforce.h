@@ -316,6 +316,13 @@ ray_t* ray_typed_null(int8_t type);
  * Phase 2 wired NULL_F64 into the CSV parser, ray_typed_null, and the
  * I64→F64 UPDATE cast — null F64 slots now hold NaN alongside the
  * nullmap bit.  Phase 3a–d will follow for integer and temporal types.
+ * Known Phase 3 work (out of scope for Phase 2): grouped AVG / VAR /
+ * STDDEV use count[gid] as the divisor without excluding null rows;
+ * grouped FIRST / LAST / MIN / MAX / PROD on all-null F64 groups can
+ * return DBL_MAX / -DBL_MAX / 0.0 or propagate NaN through products
+ * instead of producing a typed null.  Fixing these requires per-(group,
+ * agg) non-null counts and result-side null-finalization, both deferred
+ * to Phase 3 when the bitmap arm is removed.
  * Through Phase 7 (full cutover) the bitmap bit `nullmap[0] & 1` is
  * kept in sync with the sentinel value for atoms ("dual encoding"), so
  * legacy bitmap-aware readers and new sentinel-aware readers agree.
