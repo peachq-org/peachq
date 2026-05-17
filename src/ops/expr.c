@@ -941,14 +941,15 @@ static void expr_full_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t e
 /* Post-pass for the fused unary path: |INT64_MIN| and -INT64_MIN don't fit in
  * i64 (signed-overflow; k/q convention surfaces this as typed null).  The
  * element-wise loop uses unsigned wrap, so any overflow position lands as
- * INT64_MIN in data.  Convert each such position to typed-null: zero data[i]
- * (preserve "null position is 0" invariant) and set the null bit.  Caller
- * must invoke single-threaded — after pool dispatch joins. */
+ * INT64_MIN in data.  Post Phase 3a-1, INT64_MIN IS the canonical NULL_I64
+ * sentinel — the dual-encoding contract requires the payload to *remain*
+ * INT64_MIN while the null bit is set.  So we only need to flip the bitmap
+ * bit; the payload is already correct.  Caller must invoke single-threaded
+ * — after pool dispatch joins. */
 static void mark_i64_overflow_as_null(ray_t* result, int64_t off, int64_t len) {
     int64_t* d = (int64_t*)ray_data(result) + off;
     for (int64_t i = 0; i < len; i++) {
-        if (RAY_UNLIKELY(d[i] == INT64_MIN)) {
-            d[i] = 0;
+        if (RAY_UNLIKELY(d[i] == NULL_I64)) {
             ray_vec_set_null(result, off + i, true);
         }
     }
