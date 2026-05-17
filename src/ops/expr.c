@@ -295,6 +295,11 @@ bool try_linear_sumavg_input_i64(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
     for (uint8_t i = 0; i < lin.n_terms; i++) {
         ray_t* col = ray_table_get_col(tbl, lin.syms[i]);
         if (!col || !type_is_linear_i64_col(col->type)) return false;
+        /* Phase 3a: scalar_sum_linear_i64_fn reads slots raw via
+         * scalar_i64_at; any nullable term would poison the sum with
+         * NULL_I{16,32,64} sentinels.  Refuse the fast plan and let
+         * the caller fall back to the generic masked path. */
+        if (col->attrs & RAY_ATTR_HAS_NULLS) return false;
         out_plan->term_ptrs[i] = ray_data(col);
         out_plan->term_types[i] = col->type;
         out_plan->coeff_i64[i] = lin.coeff_i64[i];
@@ -936,14 +941,15 @@ static void expr_full_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t e
 /* Post-pass for the fused unary path: |INT64_MIN| and -INT64_MIN don't fit in
  * i64 (signed-overflow; k/q convention surfaces this as typed null).  The
  * element-wise loop uses unsigned wrap, so any overflow position lands as
- * INT64_MIN in data.  Convert each such position to typed-null: zero data[i]
- * (preserve "null position is 0" invariant) and set the null bit.  Caller
- * must invoke single-threaded — after pool dispatch joins. */
+ * INT64_MIN in data.  Post Phase 3a-1, INT64_MIN IS the canonical NULL_I64
+ * sentinel — the dual-encoding contract requires the payload to *remain*
+ * INT64_MIN while the null bit is set.  So we only need to flip the bitmap
+ * bit; the payload is already correct.  Caller must invoke single-threaded
+ * — after pool dispatch joins. */
 static void mark_i64_overflow_as_null(ray_t* result, int64_t off, int64_t len) {
     int64_t* d = (int64_t*)ray_data(result) + off;
     for (int64_t i = 0; i < len; i++) {
-        if (RAY_UNLIKELY(d[i] == INT64_MIN)) {
-            d[i] = 0;
+        if (RAY_UNLIKELY(d[i] == NULL_I64)) {
             ray_vec_set_null(result, off + i, true);
         }
     }
@@ -1227,6 +1233,32 @@ static void set_all_null(ray_t* result, int64_t len) {
         result->attrs |= RAY_ATTR_HAS_NULLS;
     } else {
         for (int64_t i = 0; i < len; i++) ray_vec_set_null(result, i, true);
+    }
+    /* Phase 2/3a dual-encoding: results must also carry the matching
+     * width sentinel in every payload slot so raw-payload consumers see
+     * the null marker without consulting the bitmap. */
+    switch (result->type) {
+        case RAY_F64: {
+            double* d = (double*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_F64;
+            break;
+        }
+        case RAY_I64: case RAY_TIMESTAMP: {
+            int64_t* d = (int64_t*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_I64;
+            break;
+        }
+        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+            int32_t* d = (int32_t*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_I32;
+            break;
+        }
+        case RAY_I16: {
+            int16_t* d = (int16_t*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_I16;
+            break;
+        }
+        default: break;
     }
 }
 
