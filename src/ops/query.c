@@ -8024,10 +8024,15 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         promoted = ray_vec_append(promoted, &v);
                         if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return promoted; }
                     }
-                    /* Carry the nullmap across the I64→F64 promotion. */
-                    for (int64_t r = 0; r < nr; r++)
-                        if (ray_vec_is_null(expr_vec, r))
+                    /* Carry the nullmap across the I64→F64 promotion;
+                     * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                    double* dst = (double*)ray_data(promoted);
+                    for (int64_t r = 0; r < nr; r++) {
+                        if (ray_vec_is_null(expr_vec, r)) {
                             ray_vec_set_null(promoted, r, true);
+                            dst[r] = NULL_F64;
+                        }
+                    }
                     ray_release(expr_vec);
                     expr_vec = promoted;
                 }
@@ -8222,10 +8227,15 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     promoted = ray_vec_append(promoted, &v);
                     if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return promoted; }
                 }
-                /* Carry the nullmap across the I64→F64 promotion. */
-                for (int64_t r = 0; r < nr; r++)
-                    if (ray_vec_is_null(expr_vec, r))
+                /* Carry the nullmap across the I64→F64 promotion;
+                 * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                double* dst = (double*)ray_data(promoted);
+                for (int64_t r = 0; r < nr; r++) {
+                    if (ray_vec_is_null(expr_vec, r)) {
                         ray_vec_set_null(promoted, r, true);
+                        dst[r] = NULL_F64;
+                    }
+                }
                 ray_release(expr_vec);
                 expr_vec = promoted;
             }
