@@ -323,6 +323,17 @@ static uint16_t resolve_agg_opcode(int64_t sym_id) {
     if (len == 7 && memcmp(name, "dev_pop",      7) == 0) return OP_STDDEV_POP;
     if (len == 7 && memcmp(name, "var_pop",      7) == 0) return OP_VAR_POP;
     if (len == 10 && memcmp(name, "stddev_pop", 10) == 0) return OP_STDDEV_POP;
+    if (len == 12 && memcmp(name, "pearson_corr", 12) == 0) return OP_PEARSON_CORR;
+    /* Holistic — DAG path skips accumulator slot, fills via post-radix
+     * pass over row_gid+grp_cnt (see exec_group + ray_median_per_group_buf). */
+    if (len == 3 && memcmp(name, "med",    3) == 0) return OP_MEDIAN;
+    if (len == 6 && memcmp(name, "median", 6) == 0) return OP_MEDIAN;
+    /* Holistic, binary-shape (col + K literal).  K compiled-time literal,
+     * not a DAG input — extracted from the dict expr at planner time and
+     * stored in agg_k[].  See ray_topk_per_group_buf for the per-group
+     * bounded-heap kernel. */
+    if (len == 3 && memcmp(name, "top",    3) == 0) return OP_TOP_N;
+    if (len == 3 && memcmp(name, "bot",    3) == 0) return OP_BOT_N;
     return 0;
 }
 
@@ -1237,6 +1248,7 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
                     case OP_STDDEV_POP:  return ray_stddev_pop(g, arg);
                     case OP_VAR:         return ray_var(g, arg);
                     case OP_VAR_POP:     return ray_var_pop(g, arg);
+                    case OP_MEDIAN:      return ray_median(g, arg);
                     default: return NULL;
                 }
             }
@@ -1342,6 +1354,23 @@ static int is_agg_expr(ray_t* expr) {
     ray_t** elems = (ray_t**)ray_data(expr);
     if (elems[0]->type != -RAY_SYM) return 0;
     return resolve_agg_opcode(elems[0]->i64) != 0;
+}
+
+/* True iff the expression contains an aggregation call anywhere in
+ * its subtree.  Used by the post-DAG scatter to detect non-agg
+ * expressions whose subexpressions ARE aggregates (e.g.
+ * `(- (max v1) (min v2))`) — those must be evaluated per-group
+ * rather than broadcast from a single full-table eval, otherwise the
+ * inner aggs collapse globally and every group gets the same value. */
+static int expr_contains_agg(ray_t* expr) {
+    if (!expr) return 0;
+    if (expr->type != RAY_LIST) return 0;
+    if (is_agg_expr(expr)) return 1;
+    ray_t** elems = (ray_t**)ray_data(expr);
+    int64_t n = ray_len(expr);
+    for (int64_t i = 0; i < n; i++)
+        if (expr_contains_agg(elems[i])) return 1;
+    return 0;
 }
 
 static int expr_contains_call_named(ray_t* expr, const char* name, size_t name_len) {
@@ -1738,6 +1767,14 @@ static bool bounded_multikey_count_take_candidate(ray_t** dict_elems, int64_t di
     return n_count_out > 0;
 }
 
+/* NOTE: binary-aggregator gates (is_aggr_binary_call /
+ * is_streaming_aggr_binary_call) are not needed at the planner-call
+ * sites for the canonical fast path — `(pearson_corr x y)` flows
+ * through is_agg_expr → is_group_dag_agg_expr → the OP_GROUP planning
+ * block that emits ray_group2.  Eval-fallback (aggr_unary_per_group_buf
+ * twin for two-input shapes, LIST keys, etc.) will need them; add
+ * alongside that path when it's wired. */
+
 /* Detect `(count (distinct <inner>))` exactly — the only shape that
  * routes through the OP_COUNT_DISTINCT fast path per group.  Returns
  * the inner expression on success, NULL otherwise.  More complex
@@ -1804,7 +1841,19 @@ static int collect_col_refs(ray_t* expr, ray_t* tbl,
  * via ray_at_fn, hands the slice to env_bind_local which retains, then
  * drops our ref).  Returns 0 on success, error ray_t* on failure. */
 static ray_t* bind_col_slice(int64_t sym, ray_t* col, ray_t* idx_list) {
-    ray_t* slice = ray_at_fn(col, idx_list);
+    /* For typed-vec col + RAY_I64 idx vec, gather directly so the bound
+     * slice is the same typed vector as the source — `(at v idx)` would
+     * box every element into a RAY_LIST of atoms, which breaks any
+     * per-group expression that expects a numeric vec (`desc`, `take`,
+     * `asc`, etc.).  Fall back to ray_at_fn for LIST inputs and other
+     * shapes the gather kernel doesn't cover. */
+    ray_t* slice = NULL;
+    if (col && ray_is_vec(col) && idx_list &&
+        idx_list->type == RAY_I64 && ray_is_vec(idx_list)) {
+        const int64_t* idx_data = (const int64_t*)ray_data(idx_list);
+        slice = gather_by_idx(col, (int64_t*)idx_data, ray_len(idx_list));
+    }
+    if (!slice) slice = ray_at_fn(col, idx_list);
     if (!slice || RAY_IS_ERR(slice)) {
         return slice ? slice : ray_error("oom", NULL);
     }
@@ -2189,6 +2238,59 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
         if (agg_vec && !RAY_IS_ERR(agg_vec)) agg_vec->len = n_groups;
     }
     return agg_vec;
+}
+
+/* Recognise `(med col)`.  Used to gate the fast median per-group path
+ * below — `med` is RAY_FN_AGGR + RAY_UNARY so it normally routes
+ * through aggr_unary_per_group_buf, which allocates one ray vector
+ * per group via ray_at_fn and then another scratch inside ray_med_fn.
+ * For 10k+ groups that's 20k+ allocs; the bucket-scatter path skips it. */
+static int is_med_call(ray_t* expr) {
+    if (!expr || expr->type != RAY_LIST) return 0;
+    if (ray_len(expr) != 2) return 0;
+    ray_t** elems = (ray_t**)ray_data(expr);
+    if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
+    ray_t* nm = ray_sym_str(elems[0]->i64);
+    if (!nm) return 0;
+    return ray_str_len(nm) == 3 && memcmp(ray_str_ptr(nm), "med", 3) == 0;
+}
+
+/* Fast median per group: read values straight out of the source column
+ * via idx_buf+offsets+grp_cnt into a reusable double scratch buffer
+ * sized at max group, then ray_median_dbl_inplace.  Returns the f64
+ * median vec of length n_groups, or NULL on type miss (caller falls
+ * back to the generic aggr_unary_per_group_buf path). */
+/* Thin wrapper around the parallel ray_median_per_group_buf kernel
+ * (src/ops/group.c).  Resolves the source column from `(med col_expr)`,
+ * then delegates to the kernel which runs one ray_pool_dispatch_n task
+ * per group — gathers values into a shared scratch buffer and runs
+ * ray_median_dbl_inplace in parallel.  See the kernel header comment
+ * for the design and why it matches DuckDB's holistic quantile
+ * approach without paying their per-group vector-grow cost. */
+static ray_t* aggr_med_per_group_buf(ray_t* expr, ray_t* tbl,
+                                     const int64_t* idx_buf,
+                                     const int64_t* offsets,
+                                     const int64_t* grp_cnt,
+                                     int64_t n_groups) {
+    ray_t** elems = (ray_t**)ray_data(expr);
+    ray_t* col_expr = elems[1];
+
+    ray_t* src = NULL;
+    if (col_expr->type == -RAY_SYM && (col_expr->attrs & RAY_ATTR_NAME)) {
+        src = ray_table_get_col(tbl, col_expr->i64);
+        if (src) ray_retain(src);
+    }
+    if (!src) {
+        if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
+        expr_bind_table_names(col_expr, tbl);
+        src = ray_eval(col_expr);
+        ray_env_pop_scope();
+        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+    }
+
+    ray_t* out = ray_median_per_group_buf(src, idx_buf, offsets, grp_cnt, n_groups);
+    ray_release(src);
+    return out;  /* NULL → unsupported type; caller falls back */
 }
 
 /* Per-group count(distinct) parallel kernel — one task per group, each
@@ -4441,24 +4543,20 @@ by_dict_done:
         /* Non-aggregation expressions (arithmetic, lambda, etc.) are
          * handled post-DAG: aggs go through the parallel GROUP pipeline,
          * then non-agg results are evaluated on the full table and
-         * scattered per-group into LIST columns.  The scatter block
-         * only handles single scalar-key by-clauses — for multi-key
-         * or computed-key groupings, fall back to eval-level so the
-         * non-agg scatter has a well-defined row→group mapping. */
+         * scattered per-group into LIST columns.  The fast scatter only
+         * handles single scalar-key by-clauses — multi-key and
+         * computed-key shapes route through eval-level group, which
+         * gives the non-agg pass a well-defined row→group mapping
+         * (composite list keys group correctly via atom_eq's structural
+         * compare for RAY_LIST). */
         if (!use_eval_group && any_nonagg) {
-            /* Fast path requires a single scalar-named key column.
-             * Multi-key and computed-key by-clauses with non-agg
-             * expressions are not yet supported. */
             int single_scalar_key = 0;
             if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME)) {
                 single_scalar_key = 1;
             } else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1) {
                 single_scalar_key = 1;
             }
-            if (!single_scalar_key) {
-                ray_graph_free(g); ray_release(tbl);
-                return ray_error("nyi", "non-agg expression with multi-key or computed group key");
-            }
+            if (!single_scalar_key) use_eval_group = 1;
         }
         if (use_eval_group) {
             /* Apply WHERE filter first (if any), then eval-level groupby */
@@ -4776,26 +4874,72 @@ by_dict_done:
 
                         ray_t* agg_vec = NULL;
                         ray_t** grp_items = (ray_t**)ray_data(groups);
-                        for (int64_t gi = 0; gi < out_groups; gi++) {
-                            ray_t* idx_list = grp_items[gi * 2 + 1];
-                            ray_t* subset = ray_at_fn(src_col_val, idx_list);
-                            if (!subset || RAY_IS_ERR(subset)) continue;
-                            ray_t* agg_val = NULL;
-                            ray_t* fn_obj = ray_env_get(agg_fn_name->i64);
-                            if (fn_obj && fn_obj->type == RAY_UNARY) {
-                                ray_unary_fn uf = (ray_unary_fn)(uintptr_t)fn_obj->i64;
-                                agg_val = uf(subset);
+
+                        /* Median fast path: flatten `groups` LIST<(key,
+                         * idx_list)> into the (idx_buf, offsets, grp_cnt)
+                         * layout that ray_median_per_group_buf expects,
+                         * then run the parallel kernel (one task per
+                         * group via ray_pool_dispatch_n, shared flat
+                         * scratch buffer of size sum(grp_cnt), per-task
+                         * quickselect on its slice).  Numeric inputs
+                         * only — returns NULL on type miss → fall back
+                         * to the generic per-group ray_at_fn + ray_med_fn
+                         * loop below.  Uses out_groups so a preapplied
+                         * take limits the work to the kept prefix. */
+                        if (is_med_call(val_expr_item)) {
+                            ray_t* ix_hdr = NULL;
+                            ray_t* off_hdr = NULL;
+                            ray_t* cnt_hdr = NULL;
+                            int64_t total = 0;
+                            for (int64_t gi = 0; gi < out_groups; gi++)
+                                total += ray_len(grp_items[gi * 2 + 1]);
+                            int64_t* ix  = (int64_t*)scratch_alloc(&ix_hdr,
+                                (size_t)(total > 0 ? total : 1) * sizeof(int64_t));
+                            int64_t* off = (int64_t*)scratch_alloc(&off_hdr,
+                                (size_t)(out_groups > 0 ? out_groups : 1) * sizeof(int64_t));
+                            int64_t* cnt = (int64_t*)scratch_alloc(&cnt_hdr,
+                                (size_t)(out_groups > 0 ? out_groups : 1) * sizeof(int64_t));
+                            if (ix && off && cnt) {
+                                int64_t pos = 0;
+                                for (int64_t gi = 0; gi < out_groups; gi++) {
+                                    ray_t* idx_list = grp_items[gi * 2 + 1];
+                                    int64_t c = ray_len(idx_list);
+                                    off[gi] = pos;
+                                    cnt[gi] = c;
+                                    if (c > 0)
+                                        memcpy(ix + pos, ray_data(idx_list),
+                                               (size_t)c * sizeof(int64_t));
+                                    pos += c;
+                                }
+                                agg_vec = ray_median_per_group_buf(
+                                    src_col_val, ix, off, cnt, out_groups);
                             }
-                            ray_release(subset);
-                            if (!agg_val || RAY_IS_ERR(agg_val)) continue;
-                            if (!agg_vec) {
-                                int8_t vt = -(agg_val->type);
-                                agg_vec = ray_vec_new(vt, out_groups);
-                                if (!agg_vec || RAY_IS_ERR(agg_vec)) { ray_release(agg_val); break; }
-                                agg_vec->len = out_groups;
+                            if (ix_hdr) scratch_free(ix_hdr);
+                            if (off_hdr) scratch_free(off_hdr);
+                            if (cnt_hdr) scratch_free(cnt_hdr);
+                        }
+                        if (!agg_vec) {
+                            for (int64_t gi = 0; gi < out_groups; gi++) {
+                                ray_t* idx_list = grp_items[gi * 2 + 1];
+                                ray_t* subset = ray_at_fn(src_col_val, idx_list);
+                                if (!subset || RAY_IS_ERR(subset)) continue;
+                                ray_t* agg_val = NULL;
+                                ray_t* fn_obj = ray_env_get(agg_fn_name->i64);
+                                if (fn_obj && fn_obj->type == RAY_UNARY) {
+                                    ray_unary_fn uf = (ray_unary_fn)(uintptr_t)fn_obj->i64;
+                                    agg_val = uf(subset);
+                                }
+                                ray_release(subset);
+                                if (!agg_val || RAY_IS_ERR(agg_val)) continue;
+                                if (!agg_vec) {
+                                    int8_t vt = -(agg_val->type);
+                                    agg_vec = ray_vec_new(vt, out_groups);
+                                    if (!agg_vec || RAY_IS_ERR(agg_vec)) { ray_release(agg_val); break; }
+                                    agg_vec->len = out_groups;
+                                }
+                                store_typed_elem(agg_vec, gi, agg_val);
+                                ray_release(agg_val);
                             }
-                            store_typed_elem(agg_vec, gi, agg_val);
-                            ray_release(agg_val);
                         }
                         ray_release(src_col_val);
                         agg_names[n_agg_out] = kid;
@@ -5163,6 +5307,52 @@ by_dict_done:
                     /* For each group, compute aggregation */
                     ray_t* agg_vec = NULL;
                     ray_t** grp_items = (ray_t**)ray_data(groups);
+
+                    /* Median fast path — flatten `groups` into
+                     * (idx_buf, offsets, grp_cnt) then call the parallel
+                     * ray_median_per_group_buf kernel.  See twin site
+                     * above for the design rationale. */
+                    if (is_med_call(val_expr_item)) {
+                        ray_t* ix_hdr = NULL;
+                        ray_t* off_hdr = NULL;
+                        ray_t* cnt_hdr = NULL;
+                        int64_t total = 0;
+                        for (int64_t gi = 0; gi < n_groups; gi++)
+                            total += ray_len(grp_items[gi * 2 + 1]);
+                        int64_t* ix  = (int64_t*)scratch_alloc(&ix_hdr,
+                            (size_t)(total > 0 ? total : 1) * sizeof(int64_t));
+                        int64_t* off = (int64_t*)scratch_alloc(&off_hdr,
+                            (size_t)n_groups * sizeof(int64_t));
+                        int64_t* cnt = (int64_t*)scratch_alloc(&cnt_hdr,
+                            (size_t)n_groups * sizeof(int64_t));
+                        if (ix && off && cnt) {
+                            int64_t pos = 0;
+                            for (int64_t gi = 0; gi < n_groups; gi++) {
+                                ray_t* idx_list = grp_items[gi * 2 + 1];
+                                int64_t c = ray_len(idx_list);
+                                off[gi] = pos;
+                                cnt[gi] = c;
+                                if (c > 0)
+                                    memcpy(ix + pos, ray_data(idx_list),
+                                           (size_t)c * sizeof(int64_t));
+                                pos += c;
+                            }
+                            agg_vec = ray_median_per_group_buf(
+                                src_col_val, ix, off, cnt, n_groups);
+                        }
+                        if (ix_hdr) scratch_free(ix_hdr);
+                        if (off_hdr) scratch_free(off_hdr);
+                        if (cnt_hdr) scratch_free(cnt_hdr);
+                        if (agg_vec && !RAY_IS_ERR(agg_vec)) {
+                            ray_release(src_col_val);
+                            agg_names[n_agg_out] = kid;
+                            agg_results[n_agg_out] = agg_vec;
+                            n_agg_out++;
+                            continue;
+                        }
+                        agg_vec = NULL;  /* type miss → fall through */
+                    }
+
                     for (int64_t gi = 0; gi < n_groups; gi++) {
                         ray_t* idx_list = grp_items[gi * 2 + 1];
                         ray_t* subset = ray_at_fn(src_col_val, idx_list);
@@ -5603,10 +5793,19 @@ by_dict_done:
         }
 
         /* Collect aggregation expressions from output columns.
-         * Non-agg expressions are tracked separately for post-DAG scatter. */
+         * Non-agg expressions are tracked separately for post-DAG scatter.
+         * agg_ins2[] is parallel to agg_ins[] — NULL for unary aggs,
+         * non-NULL for binary aggs (currently OP_PEARSON_CORR).  The
+         * has_binary_agg flag selects ray_group2 below.  agg_k[] carries
+         * a scalar literal alongside the column for holistic aggs that
+         * take K (top/bot); zero in unrelated slots. */
         uint16_t agg_ops[16];
         ray_op_t* agg_ins[16];
+        ray_op_t* agg_ins2[16];
+        int64_t agg_k[16];
         uint8_t n_aggs = 0;
+        int has_binary_agg = 0;
+        int has_agg_k = 0;
 
         for (int64_t i = 0; i + 1 < dict_n; i += 2) {
             int64_t kid = dict_elems[i]->i64;
@@ -5615,10 +5814,30 @@ by_dict_done:
             ray_t* val_expr = dict_elems[i + 1];
             if (is_group_dag_agg_expr(val_expr) && n_aggs < 16) {
                 ray_t** agg_elems = (ray_t**)ray_data(val_expr);
-                agg_ops[n_aggs] = resolve_agg_opcode(agg_elems[0]->i64);
+                uint16_t op = resolve_agg_opcode(agg_elems[0]->i64);
+                agg_ops[n_aggs] = op;
                 /* Compile the aggregation input (the column reference) */
                 agg_ins[n_aggs] = compile_expr_dag(g, agg_elems[1]);
                 if (!agg_ins[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                agg_ins2[n_aggs] = NULL;
+                agg_k[n_aggs] = 0;
+                if (op == OP_PEARSON_CORR) {
+                    if (ray_len(val_expr) < 3) { ray_graph_free(g); ray_release(tbl); return ray_error("arity", NULL); }
+                    agg_ins2[n_aggs] = compile_expr_dag(g, agg_elems[2]);
+                    if (!agg_ins2[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                    has_binary_agg = 1;
+                } else if (op == OP_TOP_N || op == OP_BOT_N) {
+                    if (ray_len(val_expr) < 3) { ray_graph_free(g); ray_release(tbl); return ray_error("arity", NULL); }
+                    ray_t* k_expr = agg_elems[2];
+                    int64_t k_val;
+                    if (k_expr->type == -RAY_I64)       k_val = k_expr->i64;
+                    else if (k_expr->type == -RAY_I32)  k_val = (int64_t)(int32_t)k_expr->i64;
+                    else { ray_graph_free(g); ray_release(tbl); return ray_error("type", "top/bot K must be integer literal"); }
+                    if (k_val < 1) { ray_graph_free(g); ray_release(tbl); return ray_error("range", "top/bot K must be >= 1"); }
+                    if (k_val > 1024) { ray_graph_free(g); ray_release(tbl); return ray_error("range", "top/bot K capped at 1024"); }
+                    agg_k[n_aggs] = k_val;
+                    has_agg_k = 1;
+                }
                 n_aggs++;
             } else if (!is_group_dag_agg_expr(val_expr) && n_nonaggs < 16) {
                 if (is_single_group_key_projection(by_expr, val_expr))
@@ -5639,14 +5858,73 @@ by_dict_done:
                         agg_kinds_ok = 0;
                 }
                 if (can_fuse_phase1 && fused_pred_op != NULL
-                    && n_nonaggs == 0 && agg_kinds_ok)
+                    && n_nonaggs == 0 && agg_kinds_ok
+                    && !has_binary_agg && !has_agg_k)
                 {
                     /* exec_filtered_group dispatches: count1 (single key,
                      * single COUNT) → Phase 3 fast path; everything else →
-                     * multi path with packed composite key. */
+                     * multi path with packed composite key.  Skipped when
+                     * any agg is binary (filtered-group fusion only knows
+                     * about unary aggs) or holistic with a K param. */
                     root = ray_filtered_group(g, fused_pred_op,
                                               key_ops, n_keys,
                                               agg_ops, agg_ins, n_aggs);
+                } else if (has_agg_k) {
+                    /* Fast path: dedicated row-form emit for the exact
+                     * shape `(select (top|bot col K) from T by single_key)`.
+                     * Avoids the OP_GROUP + radix-HT + LIST<K> + adapter-
+                     * side explode pipeline; two-phase parallel hashed
+                     * top-K with direct (key, val) row emission.  Falls
+                     * through to ray_group3 for any unsupported shape.
+                     *
+                     * Restricted to non-SYM key/val column types — SYM
+                     * columns and LIST/STR/GUID stay on the OP_TOP_N path
+                     * so prior callers depending on LIST-cell output
+                     * (existing rfl tests) keep their semantics.  q8
+                     * canonical (I64 id6 + F64 v3) hits this path. */
+                    int rowform_ok = 0;
+                    if (n_aggs == 1 && n_keys == 1 && n_nonaggs == 0
+                        && !where_expr
+                        && (agg_ops[0] == OP_TOP_N || agg_ops[0] == OP_BOT_N)
+                        && agg_k[0] >= 1 && agg_k[0] <= 255
+                        && key_ops[0] && key_ops[0]->opcode == OP_SCAN
+                        && agg_ins[0] && agg_ins[0]->opcode == OP_SCAN)
+                    {
+                        /* Resolve key/val column types from the bound
+                         * table — only route numeric/temporal types
+                         * the executor handles. */
+                        ray_op_ext_t* kext = find_ext(g, key_ops[0]->id);
+                        ray_op_ext_t* vext = find_ext(g, agg_ins[0]->id);
+                        ray_t* kc = (kext && tbl) ? ray_table_get_col(tbl, kext->sym) : NULL;
+                        ray_t* vc = (vext && tbl) ? ray_table_get_col(tbl, vext->sym) : NULL;
+                        if (kc && vc) {
+                            int8_t kt = kc->type, vt = vc->type;
+                            int kt_ok = (kt == RAY_I64 || kt == RAY_I32 ||
+                                         kt == RAY_I16 || kt == RAY_U8 ||
+                                         kt == RAY_BOOL || kt == RAY_DATE ||
+                                         kt == RAY_TIME || kt == RAY_TIMESTAMP ||
+                                         kt == RAY_F64);
+                            int vt_ok = (vt == RAY_I64 || vt == RAY_I32 ||
+                                         vt == RAY_I16 || vt == RAY_U8 ||
+                                         vt == RAY_BOOL || vt == RAY_DATE ||
+                                         vt == RAY_TIME || vt == RAY_TIMESTAMP ||
+                                         vt == RAY_F64);
+                            if (kt_ok && vt_ok) rowform_ok = 1;
+                        }
+                    }
+                    if (rowform_ok) {
+                        uint8_t desc = (agg_ops[0] == OP_TOP_N) ? 1 : 0;
+                        root = ray_group_topk_rowform(g, key_ops[0],
+                                                      agg_ins[0],
+                                                      agg_k[0], desc);
+                    } else {
+                        root = ray_group3(g, key_ops, n_keys, agg_ops,
+                                           agg_ins, has_binary_agg ? agg_ins2 : NULL,
+                                           agg_k, n_aggs);
+                    }
+                } else if (has_binary_agg) {
+                    root = ray_group2(g, key_ops, n_keys, agg_ops,
+                                       agg_ins, agg_ins2, n_aggs);
                 } else {
                     root = ray_group(g, key_ops, n_keys, agg_ops, agg_ins, n_aggs);
                 }
@@ -6286,15 +6564,19 @@ by_dict_done:
 
             uint16_t  s_agg_ops[16];
             ray_op_t* s_agg_ins[16];
+            ray_op_t* s_agg_ins2[16];
             uint8_t   s_n_aggs = 0;
+            int       s_has_binary = 0;
             for (int64_t i = 0; i + 1 < dict_n && s_n_aggs < 16; i += 2) {
                 int64_t kid = dict_elems[i]->i64;
                 if (kid == from_id || kid == where_id || kid == by_id ||
                     kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
                 ray_t*  val_expr  = dict_elems[i + 1];
                 ray_t** agg_elems = (ray_t**)ray_data(val_expr);
-                s_agg_ops[s_n_aggs] = resolve_agg_opcode(agg_elems[0]->i64);
+                uint16_t op = resolve_agg_opcode(agg_elems[0]->i64);
+                s_agg_ops[s_n_aggs] = op;
                 s_agg_ins[s_n_aggs] = compile_expr_dag(g, agg_elems[1]);
+                s_agg_ins2[s_n_aggs] = NULL;
                 if (!s_agg_ins[s_n_aggs]) {
                     if (g->selection) {
                         ray_release(g->selection);
@@ -6303,9 +6585,27 @@ by_dict_done:
                     ray_graph_free(g); ray_release(tbl);
                     return ray_error("domain", NULL);
                 }
+                if (op == OP_PEARSON_CORR) {
+                    if (ray_len(val_expr) < 3) {
+                        if (g->selection) { ray_release(g->selection); g->selection = NULL; }
+                        ray_graph_free(g); ray_release(tbl);
+                        return ray_error("arity", NULL);
+                    }
+                    s_agg_ins2[s_n_aggs] = compile_expr_dag(g, agg_elems[2]);
+                    if (!s_agg_ins2[s_n_aggs]) {
+                        if (g->selection) { ray_release(g->selection); g->selection = NULL; }
+                        ray_graph_free(g); ray_release(tbl);
+                        return ray_error("domain", NULL);
+                    }
+                    s_has_binary = 1;
+                }
                 s_n_aggs++;
             }
-            root = ray_group(g, NULL, 0, s_agg_ops, s_agg_ins, s_n_aggs);
+            if (s_has_binary)
+                root = ray_group2(g, NULL, 0, s_agg_ops, s_agg_ins,
+                                   s_agg_ins2, s_n_aggs);
+            else
+                root = ray_group(g, NULL, 0, s_agg_ops, s_agg_ins, s_n_aggs);
         } else {
             /* Projection only (no group by) — select specific columns */
             ray_op_t* col_ops[16];
@@ -7175,9 +7475,22 @@ by_dict_done:
                      * vec.  Equivalent perf-class to the streaming AGG path
                      * the eval-fallback uses for the same shapes. */
                     if (is_streaming_aggr_unary_call(nonagg_exprs[ni])) {
-                        ray_t* col = aggr_unary_per_group_buf(
-                            nonagg_exprs[ni], tbl,
-                            idx_buf, offsets, grp_cnt, n_groups);
+                        ray_t* col = NULL;
+                        /* `(med col)` fast path — bucket-scatter values
+                         * into a reused scratch and quickselect, skipping
+                         * the per-group ray_at_fn + ray_med_fn scratch
+                         * allocations.  NULL → unsupported input type
+                         * (LIST/STR/etc); fall back to the generic
+                         * aggr_unary_per_group_buf path below. */
+                        if (is_med_call(nonagg_exprs[ni])) {
+                            col = aggr_med_per_group_buf(nonagg_exprs[ni], tbl,
+                                idx_buf, offsets, grp_cnt, n_groups);
+                        }
+                        if (!col) {
+                            col = aggr_unary_per_group_buf(
+                                nonagg_exprs[ni], tbl,
+                                idx_buf, offsets, grp_cnt, n_groups);
+                        }
                         if (RAY_IS_ERR(col)) { scatter_err = col; break; }
                         result = ray_table_add_col(result, nonagg_names[ni], col);
                         ray_release(col);
@@ -7187,7 +7500,12 @@ by_dict_done:
                         continue;
                     }
 
-                    if (is_agg_expr(nonagg_exprs[ni])) {
+                    /* Outer-agg or arith-of-aggs: must evaluate per group
+                     * — a single full-table eval collapses every nested
+                     * agg (max/min/sum/...) globally and broadcasts the
+                     * scalar across all groups. */
+                    if (is_agg_expr(nonagg_exprs[ni]) ||
+                        expr_contains_agg(nonagg_exprs[ni])) {
                         ray_t* per_group = nonagg_eval_per_group_buf(
                             nonagg_exprs[ni], tbl, idx_buf, offsets, grp_cnt, n_groups);
                         if (RAY_IS_ERR(per_group)) {
@@ -9736,7 +10054,8 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
             case OP_COUNT: rt = RAY_I64; break;
             case OP_AVG:
             case OP_VAR: case OP_VAR_POP:
-            case OP_STDDEV: case OP_STDDEV_POP: rt = RAY_F64; break;
+            case OP_STDDEV: case OP_STDDEV_POP:
+            case OP_MEDIAN: rt = RAY_F64; break;
             case OP_SUM: case OP_PROD:
                 rt = agg_is_float[a] ? RAY_F64 : RAY_I64; break;
             default: /* MIN/MAX/FIRST/LAST */ rt = t; break;
