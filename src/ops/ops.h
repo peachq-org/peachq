@@ -195,6 +195,17 @@ void     ray_cancel(void);
 #define OP_ILIKE        76
 #define OP_PIVOT        77   /* single-pass pivot table            */
 #define OP_ANTIJOIN     78   /* anti-semi-join (left rows with no right match) */
+#define OP_PEARSON_CORR 79   /* Pearson correlation per group (binary input) */
+#define OP_MEDIAN       88   /* exact median per group (bucket-scatter + quickselect) */
+#define OP_TOP_N        89   /* per-group largest K values (bounded max-heap) */
+#define OP_BOT_N        90   /* per-group smallest K values (bounded min-heap) */
+/* Dedicated single-pass per-group top-K / bot-K with row-form emission.
+ * Replaces the OP_GROUP + radix-HT + LIST<K>-cell + explode pipeline for
+ * the canonical shape `(select (top|bot col K) from t by single_key)`.
+ * Two-phase parallel: per-worker bounded heaps in phase 1; merge by hash
+ * partition in phase 2; emit a 2-column table (key, value) in row form. */
+#define OP_GROUP_TOPK_ROWFORM  91
+#define OP_GROUP_BOTK_ROWFORM 110
 
 /* Opcodes — Graph */
 #define OP_EXPAND        80   /* 1-hop CSR neighbor expansion       */
@@ -287,6 +298,16 @@ typedef struct ray_op_ext {
             uint8_t    n_aggs;
             uint16_t*  agg_ops;
             ray_op_t**  agg_ins;
+            /* Optional second input per agg — non-NULL only for binary
+             * aggregators (currently: OP_PEARSON_CORR). NULL for all
+             * unary aggs and for the whole pointer when no binary agg
+             * is present in this group. */
+            ray_op_t**  agg_ins2;
+            /* Optional integer parameter per agg — used by holistic
+             * aggregators that take a scalar literal alongside the
+             * column (currently OP_TOP_N / OP_BOT_N: K).  NULL for
+             * groups whose aggs all take no scalar param. */
+            int64_t*    agg_k;
         };
         struct {               /* OP_SORT: multi-column sort */
             ray_op_t**  columns;
@@ -557,6 +578,8 @@ ray_op_t* ray_stddev(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_stddev_pop(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_var(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_var_pop(ray_graph_t* g, ray_op_t* a);
+ray_op_t* ray_pearson_corr(ray_graph_t* g, ray_op_t* x, ray_op_t* y);
+ray_op_t* ray_median(ray_graph_t* g, ray_op_t* a);
 
 /* Structural ops */
 ray_op_t* ray_filter(ray_graph_t* g, ray_op_t* input, ray_op_t* predicate);
@@ -565,6 +588,27 @@ ray_op_t* ray_sort_op(ray_graph_t* g, ray_op_t* table_node,
                      uint8_t n_cols);
 ray_op_t* ray_group(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys,
                    uint16_t* agg_ops, ray_op_t** agg_ins, uint8_t n_aggs);
+/* Variant accepting an optional second-input column per agg.  agg_ins2
+ * is parallel to agg_ins (length n_aggs); slots are NULL for unary aggs
+ * and non-NULL only for binary aggregators (currently OP_PEARSON_CORR). */
+ray_op_t* ray_group2(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys,
+                     uint16_t* agg_ops, ray_op_t** agg_ins,
+                     ray_op_t** agg_ins2, uint8_t n_aggs);
+/* Variant accepting an optional integer scalar per agg (e.g. top/bot K).
+ * agg_k is parallel to agg_ins (length n_aggs); slots are 0 for aggs
+ * that take no scalar param.  Pass NULL for agg_ins2 / agg_k if not used. */
+ray_op_t* ray_group3(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys,
+                     uint16_t* agg_ops, ray_op_t** agg_ins,
+                     ray_op_t** agg_ins2, const int64_t* agg_k,
+                     uint8_t n_aggs);
+/* Dedicated per-group top-K / bot-K with row-form emission.  Replaces
+ * the OP_GROUP + post-radix LIST-cell + explode pipeline for the
+ * canonical shape `(select (top|bot col K) from t by single_key)`.
+ * Pass desc=1 for top-K, desc=0 for bot-K.  Result is a 2-column
+ * table: the key column (type-matched to `key`) and the value column
+ * (type-matched to `val`), both flat — one row per (group, kept-value). */
+ray_op_t* ray_group_topk_rowform(ray_graph_t* g, ray_op_t* key,
+                                  ray_op_t* val, int64_t k, uint8_t desc);
 ray_op_t* ray_distinct(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys);
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
