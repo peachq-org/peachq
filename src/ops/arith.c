@@ -391,3 +391,20 @@ ray_t* ray_exp_fn(ray_t* x) {
     if (is_numeric(x)) return make_f64(exp(as_f64(x)));
     return ray_error("type", NULL);
 }
+
+/* pow: x raised to y, returns f64.
+ *
+ * Atomic binary — broadcasts over numeric vectors via the same
+ * RAY_FN_ATOMIC dispatch the other binary atomic ops use.  Result is
+ * always F64; integer bases with integer exponents still go through
+ * libm pow() so semantics match polars/numpy for fractional exponents
+ * (e.g. (pow 2 0.5) → 1.41…).
+ *
+ * Null propagation: either operand null → typed F64 null. */
+ray_t* ray_pow_fn(ray_t* x, ray_t* y) {
+    if (RAY_ATOM_IS_NULL(x) || RAY_ATOM_IS_NULL(y))
+        return ray_typed_null(-RAY_F64);
+    if (!is_numeric(x) || !is_numeric(y))
+        return ray_error("type", NULL);
+    return make_f64(pow(as_f64(x), as_f64(y)));
+}

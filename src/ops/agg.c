@@ -546,6 +546,26 @@ ray_t* ray_med_fn(ray_t* x) {
 static ray_t* var_stddev_core(ray_t* x, int sample, int take_sqrt);
 
 
+/* In-place exact median over a flat double buffer.  Caller owns the
+ * buffer; we permute its elements via nth_element_dbl.  Returns NaN
+ * if n <= 0 (caller must filter that case if a typed-null is needed).
+ *
+ * Used by the per-group median fast path in query.c which avoids the
+ * full ray_med_fn slice-allocation cost — see aggr_med_per_group_buf. */
+double ray_median_dbl_inplace(double* a, int64_t n) {
+    if (n <= 0) return 0.0;
+    if (n == 1) return a[0];
+    int64_t k = n / 2;
+    if (n % 2 == 1) {
+        nth_element_dbl(a, 0, n - 1, k);
+        return a[k];
+    }
+    nth_element_dbl(a, 0, n - 1, k - 1);
+    nth_element_dbl(a, k, n - 1, k);
+    return (a[k - 1] + a[k]) / 2.0;
+}
+
+
 ray_t* ray_dev_fn(ray_t* x) { return var_stddev_core(x, 0, 1); }
 
 /* Shared core for variance / stddev in sample or population mode.
@@ -608,3 +628,73 @@ ray_t* ray_stddev_fn(ray_t* x)     { return var_stddev_core(x, 1, 1); }
 ray_t* ray_stddev_pop_fn(ray_t* x) { return var_stddev_core(x, 0, 1); }
 ray_t* ray_var_fn(ray_t* x)        { return var_stddev_core(x, 1, 0); }
 ray_t* ray_var_pop_fn(ray_t* x)    { return var_stddev_core(x, 0, 0); }
+
+/* (pearson_corr x y) — Pearson correlation coefficient between two
+ * numeric vectors of equal length.  Single-pass formulation:
+ *
+ *   r = (n·Σxy − Σx·Σy) / sqrt((n·Σx² − Σx²)(n·Σy² − Σy²))
+ *
+ * Returns F64 in [-1.0, 1.0], NaN when either side has zero variance
+ * (constant column) or when n < 2 (correlation undefined).  Type-
+ * coerces narrow ints / temporal types to F64 via as_f64 so the
+ * single fp accumulator handles every numeric column type.  Nulls in
+ * either vector skip the row from BOTH sums (pairwise complete-case
+ * deletion, matching polars / pandas pearson_corr default).
+ *
+ * Per-group usage: routed through the eval-level scatter — the
+ * planner's expr_refs_row_column sees x and y as column refs, the
+ * non-agg full-table eval collapses the call to a scalar, and the
+ * non-row-aligned fallback re-runs the call on each group's slice. */
+ray_t* ray_pearson_corr_fn(ray_t* x, ray_t* y) {
+    if (!x || RAY_IS_ERR(x) || !y || RAY_IS_ERR(y))
+        return ray_error("type", NULL);
+    if (!ray_is_vec(x) || !ray_is_vec(y))
+        return ray_error("type", "pearson_corr expects two vectors");
+    if (ray_len(x) != ray_len(y))
+        return ray_error("length", "pearson_corr: vectors must have equal length");
+
+    int64_t n = ray_len(x);
+    /* Boxed read covers every numeric/temporal type at the cost of an
+     * atom alloc per row.  First-pass simplicity matters more than
+     * peak throughput; type-specialised loops are a perf follow-up.
+     * We bail with type error on the first non-numeric cell. */
+    int64_t cnt = 0;
+    double sx = 0.0, sy = 0.0, sxy = 0.0, sxx = 0.0, syy = 0.0;
+    for (int64_t i = 0; i < n; i++) {
+        int xa = 0, ya = 0;
+        ray_t* xe = collection_elem(x, i, &xa);
+        ray_t* ye = collection_elem(y, i, &ya);
+        if (!xe || !ye || RAY_IS_ERR(xe) || RAY_IS_ERR(ye)) {
+            if (xa && xe) ray_release(xe);
+            if (ya && ye) ray_release(ye);
+            return ray_error("type", NULL);
+        }
+        int xn = RAY_ATOM_IS_NULL(xe);
+        int yn = RAY_ATOM_IS_NULL(ye);
+        if (!xn && !yn) {
+            if (!is_numeric(xe) || !is_numeric(ye)) {
+                if (xa) ray_release(xe);
+                if (ya) ray_release(ye);
+                return ray_error("type", "pearson_corr: numeric vectors only");
+            }
+            double xv = as_f64(xe);
+            double yv = as_f64(ye);
+            sx  += xv;
+            sy  += yv;
+            sxy += xv * yv;
+            sxx += xv * xv;
+            syy += yv * yv;
+            cnt++;
+        }
+        if (xa) ray_release(xe);
+        if (ya) ray_release(ye);
+    }
+
+    if (cnt < 2) return make_f64(NAN);
+    double dn = (double)cnt;
+    double num = dn * sxy - sx * sy;
+    double dx  = dn * sxx - sx * sx;
+    double dy  = dn * syy - sy * sy;
+    if (dx <= 0.0 || dy <= 0.0) return make_f64(NAN);
+    return make_f64(num / sqrt(dx * dy));
+}

@@ -809,7 +809,34 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input);
 ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
                                     int64_t n_rows, int64_t n_groups);
 
+/* Parallel exact median per group via ray_pool_dispatch_n.  idx_buf is
+ * the group-contiguous row-index layout produced by the upstream
+ * group-by phase (already prefix-summed; offsets[g]..offsets[g]+
+ * grp_cnt[g] is group g's slice).  Returns F64 vec of n_groups, NULL
+ * on unsupported source type (caller falls back to serial). */
+ray_t* ray_median_per_group_buf(ray_t* src,
+                                const int64_t* idx_buf,
+                                const int64_t* offsets,
+                                const int64_t* grp_cnt,
+                                int64_t n_groups);
+
+/* Parallel per-group bounded top-K / bot-K via ray_pool_dispatch_n.
+ * Reuses the same idx_buf/offsets/grp_cnt layout as
+ * ray_median_per_group_buf.  K must be >= 1; cells shorter than K when
+ * grp_cnt[gi] < K (matches the standalone topk_take_vec convention).
+ * desc=1 → top (K largest, descending), desc=0 → bot (K smallest,
+ * ascending).  Returns ray_list_new(n_groups), each cell is a vec of
+ * the same type as `src`.  NULL on unsupported source type. */
+ray_t* ray_topk_per_group_buf(ray_t* src,
+                              int64_t k,
+                              uint8_t desc,
+                              const int64_t* idx_buf,
+                              const int64_t* offsets,
+                              const int64_t* grp_cnt,
+                              int64_t n_groups);
+
 ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit);
+ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op);
 
 /* ── collection.c ── */
 ray_t* distinct_vec_eager(ray_t* x);
@@ -820,10 +847,13 @@ ray_t* asc_vec_eager(ray_t* x);
 ray_t* desc_vec_eager(ray_t* x);
 
 /* Group HT types and helpers — shared with pivot (exec.c) */
-#define GHT_NEED_SUM   0x01
-#define GHT_NEED_MIN   0x02
-#define GHT_NEED_MAX   0x04
-#define GHT_NEED_SUMSQ 0x08
+#define GHT_NEED_SUM     0x01
+#define GHT_NEED_MIN     0x02
+#define GHT_NEED_MAX     0x04
+#define GHT_NEED_SUMSQ   0x08
+/* OP_PEARSON_CORR per-group accumulators: x-side piggybacks on SUM and
+ * SUMSQ blocks; this flag enables the y-side blocks (Σy, Σy², Σxy). */
+#define GHT_NEED_PEARSON 0x10
 
 typedef struct {
     uint16_t entry_stride;
@@ -851,6 +881,24 @@ typedef struct {
      * index of the row the entry was built from. */
     uint16_t off_first_row;
     uint16_t off_last_row;
+    /* OP_PEARSON_CORR y-side accumulators.  Allocated when
+     * GHT_NEED_PEARSON is set; for an OP_PEARSON_CORR agg at slot s the
+     * x-side accumulators live at off_sum[s] (Σx) and off_sumsq[s] (Σx²),
+     * the y-side at these three offsets at the same slot index. */
+    uint16_t off_sum_y;
+    uint16_t off_sumsq_y;
+    uint16_t off_sumxy;
+    /* Per-agg "binary input" bitset: bit a set iff agg a takes two
+     * inputs (OP_PEARSON_CORR).  Drives phase-1 packing — binary aggs
+     * pack TWO consecutive 8-byte values per row (x then y) starting at
+     * agg_val_slot[a]. */
+    uint8_t  agg_is_binary;
+    /* Holistic aggregators (OP_MEDIAN): no accumulator slot reserved,
+     * agg_val_slot[a] == -1, phase-1 doesn't pack a value, phase-3
+     * skips emitting from the row layout.  A separate post-radix pass
+     * runs ray_median_per_group_buf over the source column using a
+     * row_gid+grp_cnt-derived idx_buf. */
+    uint8_t  agg_is_holistic;
     /* Wide-key support: bit k set iff key k does not fit in 8 bytes
      * (e.g. RAY_GUID = 16 B).  For wide keys the 8-byte key slot
      * stores a source-row index and the actual key bytes live in the
@@ -911,8 +959,11 @@ void ray_group_emit_filter_set(ray_group_emit_filter_t filter);
  * space (number of passing rows), not the source column length.
  * When match_idx is NULL, `row = i` — iterating directly over source
  * column rows (no selection). */
+/* agg_vecs2 is the optional y-side input column per agg (NULL when no
+ * binary aggs).  Phase 1 packs (x, y) consecutively for binary aggs. */
 void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
                       uint8_t* key_attrs, ray_t** key_vecs, ray_t** agg_vecs,
+                      ray_t** agg_vecs2,
                       uint8_t* agg_strlen,
                       ray_t* rowsel,
                       int64_t start, int64_t end,
