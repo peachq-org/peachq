@@ -889,7 +889,7 @@ ray_t* exec_strlen(ray_graph_t* g, ray_op_t* op) {
         str_resolve(input, &elems, &pool);
         for (int64_t i = 0; i < len; i++) {
             if (ray_vec_is_null((ray_t*)input, i)) {
-                dst[i] = 0;
+                dst[i] = NULL_I64;
                 ray_vec_set_null(result, i, true);
                 continue;
             }
@@ -898,7 +898,7 @@ ray_t* exec_strlen(ray_graph_t* g, ray_op_t* op) {
     } else {
         for (int64_t i = 0; i < len; i++) {
             if (ray_vec_is_null((ray_t*)input, i)) {
-                dst[i] = 0;
+                dst[i] = NULL_I64;
                 ray_vec_set_null(result, i, true);
                 continue;
             }
