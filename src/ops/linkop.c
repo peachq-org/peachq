@@ -266,11 +266,34 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
         }
     }
 
-    /* Phase 2 dual encoding: NaN-fill F64 null payload slots. */
-    if (out_type == RAY_F64) {
-        double* d = (double*)ray_data(result);
-        for (int64_t i = 0; i < n; i++)
-            if (ray_vec_is_null(result, i)) d[i] = NULL_F64;
+    /* Phase 2/3a dual encoding: fill correct-width sentinel into null
+     * payload slots so consumers reading raw payload honor the contract. */
+    switch (out_type) {
+        case RAY_F64: {
+            double* d = (double*)ray_data(result);
+            for (int64_t i = 0; i < n; i++)
+                if (ray_vec_is_null(result, i)) d[i] = NULL_F64;
+            break;
+        }
+        case RAY_I64: case RAY_TIMESTAMP: {
+            int64_t* d = (int64_t*)ray_data(result);
+            for (int64_t i = 0; i < n; i++)
+                if (ray_vec_is_null(result, i)) d[i] = NULL_I64;
+            break;
+        }
+        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+            int32_t* d = (int32_t*)ray_data(result);
+            for (int64_t i = 0; i < n; i++)
+                if (ray_vec_is_null(result, i)) d[i] = NULL_I32;
+            break;
+        }
+        case RAY_I16: {
+            int16_t* d = (int16_t*)ray_data(result);
+            for (int64_t i = 0; i < n; i++)
+                if (ray_vec_is_null(result, i)) d[i] = NULL_I16;
+            break;
+        }
+        default: break;
     }
 
     /* Type-specific metadata propagation.
