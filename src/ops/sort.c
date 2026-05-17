@@ -3400,6 +3400,61 @@ ray_t* ray_topk_table_multi(ray_t* tbl, ray_t** key_cols, uint8_t* descs,
     return topk_gather_rows(tbl, idx, k);
 }
 
+/* (top vec n)  / (bot vec n) — partial-sort first N largest/smallest
+ * elements of a numeric vector, returning a typed vec of the same
+ * type as the input (or LIST/SYM passthrough via the comparator
+ * heap).  O(N log K) when K << len via the same bounded-heap path
+ * that ray_topk_table uses; falls back to full-sort + take when the
+ * heap path declines (k >= len, unsupported types). */
+static ray_t* topk_take_vec(ray_t* v, int64_t k, uint8_t desc) {
+    if (!v) return ray_error("type", NULL);
+    if (ray_is_lazy(v)) v = ray_lazy_materialize(v);
+    if (!ray_is_vec(v)) return ray_error("type", "top/bot expects a vector");
+    int64_t len = ray_len(v);
+    if (k <= 0) return ray_vec_new(v->type, 0);
+
+    /* k >= len → just full-sort the input.  Doesn't lose perf vs the
+     * heap path (k log k bookkeeping) since the heap path needs the
+     * full sort anyway when k == len. */
+    if (k >= len) {
+        return desc ? ray_desc_fn(v) : ray_asc_fn(v);
+    }
+
+    /* Try the bounded-heap fast path.  Default nulls-last for ASC,
+     * nulls-first for DESC (matches sort defaults so the gathered
+     * non-null prefix is always K elements when nulls fit). */
+    uint8_t nf = desc ? 1 : 0;
+    ray_t* idx = topk_indices_single(v, desc, nf, len, k);
+    if (idx && !RAY_IS_ERR(idx)) {
+        const int64_t* idata = (const int64_t*)ray_data(idx);
+        ray_t* out = gather_by_idx(v, (int64_t*)idata, k);
+        ray_release(idx);
+        if (out && !RAY_IS_ERR(out)) return out;
+    } else if (idx && RAY_IS_ERR(idx)) {
+        return idx;
+    }
+
+    /* Fallback: full sort then take.  STR / GUID / LIST / SYM-with-
+     * STR-compare reach this — still O(N log N) but correct. */
+    ray_t* sorted = desc ? ray_desc_fn(v) : ray_asc_fn(v);
+    if (!sorted || RAY_IS_ERR(sorted)) return sorted;
+    ray_t* k_atom = ray_i64(k);
+    ray_t* out = ray_take_fn(sorted, k_atom);
+    ray_release(sorted);
+    ray_release(k_atom);
+    return out;
+}
+
+ray_t* ray_top_fn(ray_t* v, ray_t* n_obj) {
+    if (!is_numeric(n_obj)) return ray_error("type", "top: n must be integer");
+    return topk_take_vec(v, as_i64(n_obj), /*desc=*/1);
+}
+
+ray_t* ray_bot_fn(ray_t* v, ray_t* n_obj) {
+    if (!is_numeric(n_obj)) return ray_error("type", "bot: n must be integer");
+    return topk_take_vec(v, as_i64(n_obj), /*desc=*/0);
+}
+
 ray_t* ray_sort_indices(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
                         uint8_t n_cols, int64_t nrows) {
     return sort_indices_ex(cols, descs, nulls_first, n_cols, nrows, NULL, NULL);
