@@ -8458,12 +8458,22 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     /* Null-bit propagation: memcpy above only copies values,
                      * not the nullmap.  Carry over orig_col's nulls for the
                      * untouched rows, and pull expr_vec's nulls in for the
-                     * masked rows.  Without this, casting a null F64 expr
-                     * back to an I64 column silently produces 0. */
+                     * masked rows.  Phase 3a dual encoding: also overwrite the
+                     * destination payload with the dest-width sentinel — casting
+                     * a NaN/INT_MIN sentinel produces implementation-defined
+                     * garbage that wouldn't match the dual-encoding contract. */
                     for (int64_t r = 0; r < nrows; r++) {
                         ray_t* src = mask[r] ? expr_vec : orig_col;
-                        if (ray_vec_is_null(src, r))
+                        if (ray_vec_is_null(src, r)) {
                             ray_vec_set_null(new_col, r, true);
+                            switch (ct) {
+                                case RAY_F64:                              ((double*)ray_data(new_col))[r]  = NULL_F64; break;
+                                case RAY_I64: case RAY_TIMESTAMP:          ((int64_t*)ray_data(new_col))[r] = NULL_I64; break;
+                                case RAY_I32: case RAY_DATE: case RAY_TIME:((int32_t*)ray_data(new_col))[r] = NULL_I32; break;
+                                case RAY_I16:                              ((int16_t*)ray_data(new_col))[r] = NULL_I16; break;
+                                default: break;
+                            }
+                        }
                     }
                     ray_release(expr_vec);
                     result = ray_table_add_col(result, col_name, new_col);
@@ -8533,6 +8543,31 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     if (RAY_ATOM_IS_NULL(expr_vec)) {
                         for (int64_t r = 0; r < nrows; r++)
                             ray_vec_set_null(bcast, r, true);
+                        /* Phase 2/3a dual encoding: fill correct-width
+                         * sentinel into payload. */
+                        switch (ct) {
+                            case RAY_F64: {
+                                double* d = (double*)ray_data(bcast);
+                                for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
+                                break;
+                            }
+                            case RAY_I64: case RAY_TIMESTAMP: {
+                                int64_t* d = (int64_t*)ray_data(bcast);
+                                for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I64;
+                                break;
+                            }
+                            case RAY_I32: case RAY_DATE: case RAY_TIME: {
+                                int32_t* d = (int32_t*)ray_data(bcast);
+                                for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I32;
+                                break;
+                            }
+                            case RAY_I16: {
+                                int16_t* d = (int16_t*)ray_data(bcast);
+                                for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I16;
+                                break;
+                            }
+                            default: break;
+                        }
                     }
                     ray_release(expr_vec);
                     expr_vec = bcast;
@@ -8549,10 +8584,15 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         promoted = ray_vec_append(promoted, &v);
                         if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return promoted; }
                     }
-                    /* Carry the nullmap across the I64→F64 promotion. */
-                    for (int64_t r = 0; r < nr; r++)
-                        if (ray_vec_is_null(expr_vec, r))
+                    /* Carry the nullmap across the I64→F64 promotion;
+                     * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                    double* dst = (double*)ray_data(promoted);
+                    for (int64_t r = 0; r < nr; r++) {
+                        if (ray_vec_is_null(expr_vec, r)) {
                             ray_vec_set_null(promoted, r, true);
+                            dst[r] = NULL_F64;
+                        }
+                    }
                     ray_release(expr_vec);
                     expr_vec = promoted;
                 }
@@ -8731,6 +8771,31 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 if (RAY_ATOM_IS_NULL(expr_vec)) {
                     for (int64_t r = 0; r < nrows; r++)
                         ray_vec_set_null(bcast, r, true);
+                    /* Phase 2/3a dual encoding: fill correct-width
+                     * sentinel into payload. */
+                    switch (ct) {
+                        case RAY_F64: {
+                            double* d = (double*)ray_data(bcast);
+                            for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
+                            break;
+                        }
+                        case RAY_I64: case RAY_TIMESTAMP: {
+                            int64_t* d = (int64_t*)ray_data(bcast);
+                            for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I64;
+                            break;
+                        }
+                        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+                            int32_t* d = (int32_t*)ray_data(bcast);
+                            for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I32;
+                            break;
+                        }
+                        case RAY_I16: {
+                            int16_t* d = (int16_t*)ray_data(bcast);
+                            for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I16;
+                            break;
+                        }
+                        default: break;
+                    }
                 }
                 ray_release(expr_vec);
                 expr_vec = bcast;
@@ -8747,10 +8812,15 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     promoted = ray_vec_append(promoted, &v);
                     if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return promoted; }
                 }
-                /* Carry the nullmap across the I64→F64 promotion. */
-                for (int64_t r = 0; r < nr; r++)
-                    if (ray_vec_is_null(expr_vec, r))
+                /* Carry the nullmap across the I64→F64 promotion;
+                 * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                double* dst = (double*)ray_data(promoted);
+                for (int64_t r = 0; r < nr; r++) {
+                    if (ray_vec_is_null(expr_vec, r)) {
                         ray_vec_set_null(promoted, r, true);
+                        dst[r] = NULL_F64;
+                    }
+                }
                 ray_release(expr_vec);
                 expr_vec = promoted;
             }
@@ -8823,6 +8893,31 @@ no_where_add_col:
             if (RAY_ATOM_IS_NULL(expr_vec)) {
                 for (int64_t r = 0; r < nrows; r++)
                     ray_vec_set_null(bcast, r, true);
+                /* Phase 2/3a dual encoding: fill correct-width
+                 * sentinel into payload. */
+                switch (ct) {
+                    case RAY_F64: {
+                        double* d = (double*)ray_data(bcast);
+                        for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
+                        break;
+                    }
+                    case RAY_I64: case RAY_TIMESTAMP: {
+                        int64_t* d = (int64_t*)ray_data(bcast);
+                        for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I64;
+                        break;
+                    }
+                    case RAY_I32: case RAY_DATE: case RAY_TIME: {
+                        int32_t* d = (int32_t*)ray_data(bcast);
+                        for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I32;
+                        break;
+                    }
+                    case RAY_I16: {
+                        int16_t* d = (int16_t*)ray_data(bcast);
+                        for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I16;
+                        break;
+                    }
+                    default: break;
+                }
             }
             ray_release(expr_vec);
             expr_vec = bcast;
