@@ -8251,12 +8251,22 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     /* Null-bit propagation: memcpy above only copies values,
                      * not the nullmap.  Carry over orig_col's nulls for the
                      * untouched rows, and pull expr_vec's nulls in for the
-                     * masked rows.  Without this, casting a null F64 expr
-                     * back to an I64 column silently produces 0. */
+                     * masked rows.  Phase 3a dual encoding: also overwrite the
+                     * destination payload with the dest-width sentinel — casting
+                     * a NaN/INT_MIN sentinel produces implementation-defined
+                     * garbage that wouldn't match the dual-encoding contract. */
                     for (int64_t r = 0; r < nrows; r++) {
                         ray_t* src = mask[r] ? expr_vec : orig_col;
-                        if (ray_vec_is_null(src, r))
+                        if (ray_vec_is_null(src, r)) {
                             ray_vec_set_null(new_col, r, true);
+                            switch (ct) {
+                                case RAY_F64:                              ((double*)ray_data(new_col))[r]  = NULL_F64; break;
+                                case RAY_I64: case RAY_TIMESTAMP:          ((int64_t*)ray_data(new_col))[r] = NULL_I64; break;
+                                case RAY_I32: case RAY_DATE: case RAY_TIME:((int32_t*)ray_data(new_col))[r] = NULL_I32; break;
+                                case RAY_I16:                              ((int16_t*)ray_data(new_col))[r] = NULL_I16; break;
+                                default: break;
+                            }
+                        }
                     }
                     ray_release(expr_vec);
                     result = ray_table_add_col(result, col_name, new_col);
