@@ -932,7 +932,7 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                         case CSV_TYPE_I16:  ((int16_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_I32:  ((int32_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_I64:  ((int64_t*)ctx->col_data[c])[row] = 0; break;
-                        case CSV_TYPE_F64:  ((double*)ctx->col_data[c])[row] = 0.0; break;
+                        case CSV_TYPE_F64:  ((double*)ctx->col_data[c])[row] = NULL_F64; break;
                         case CSV_TYPE_DATE: ((int32_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIME: ((int32_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIMESTAMP:
@@ -1019,7 +1019,8 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                 case CSV_TYPE_F64: {
                     bool is_null;
                     double v = fast_f64(fld, flen, &is_null);
-                    ((double*)ctx->col_data[c])[row] = v;
+                    /* Phase 2 dual encoding: payload is NaN whenever nullmap bit is set. */
+                    ((double*)ctx->col_data[c])[row] = is_null ? NULL_F64 : v;
                     if (is_null) {
                         ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         my_had_null[c] = true;
@@ -1129,7 +1130,7 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                         case CSV_TYPE_I16:  ((int16_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_I32:  ((int32_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_I64:  ((int64_t*)col_data[c])[row] = 0; break;
-                        case CSV_TYPE_F64:  ((double*)col_data[c])[row] = 0.0; break;
+                        case CSV_TYPE_F64:  ((double*)col_data[c])[row] = NULL_F64; break;
                         case CSV_TYPE_DATE: ((int32_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIME: ((int32_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIMESTAMP:
@@ -1210,7 +1211,8 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                 case CSV_TYPE_F64: {
                     bool is_null;
                     double v = fast_f64(fld, flen, &is_null);
-                    ((double*)col_data[c])[row] = v;
+                    /* Phase 2 dual encoding: payload is NaN whenever nullmap bit is set. */
+                    ((double*)col_data[c])[row] = is_null ? NULL_F64 : v;
                     if (is_null) {
                         col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         col_had_null[c] = true;
