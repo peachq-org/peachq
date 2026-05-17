@@ -266,6 +266,13 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
         }
     }
 
+    /* Phase 2 dual encoding: NaN-fill F64 null payload slots. */
+    if (out_type == RAY_F64) {
+        double* d = (double*)ray_data(result);
+        for (int64_t i = 0; i < n; i++)
+            if (ray_vec_is_null(result, i)) d[i] = NULL_F64;
+    }
+
     /* Type-specific metadata propagation.
      *   RAY_STR: share the source pool so ray_str_t pool_offs are valid.
      *   RAY_SYM: if the source column carries a local sym_dict, share it.
