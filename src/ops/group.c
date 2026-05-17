@@ -2816,12 +2816,25 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
                 if (null_mask & (int64_t)(1u << k)) {
                     if (c->key_cols && c->key_cols[k])
                         grp_set_null(c->key_cols[k], di);
-                    /* Phase 2 dual encoding: NaN-fill F64 null key slot. */
-                    if (c->key_types[k] == RAY_F64) {
-                        char* dst = c->key_dsts[k];
-                        uint8_t esz = c->key_esizes[k];
-                        double nan_val = NULL_F64;
-                        memcpy(dst + (size_t)di * esz, &nan_val, 8);
+                    /* Phase 2/3a dual encoding: fill correct-width sentinel. */
+                    char* dst = c->key_dsts[k];
+                    uint8_t esz = c->key_esizes[k];
+                    size_t off = (size_t)di * esz;
+                    int8_t kt = c->key_types[k];
+                    switch (kt) {
+                        case RAY_F64: {
+                            double v = NULL_F64; memcpy(dst + off, &v, 8); break;
+                        }
+                        case RAY_I64: case RAY_TIMESTAMP: {
+                            int64_t v = NULL_I64; memcpy(dst + off, &v, 8); break;
+                        }
+                        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+                            int32_t v = NULL_I32; memcpy(dst + off, &v, 4); break;
+                        }
+                        case RAY_I16: {
+                            int16_t v = NULL_I16; memcpy(dst + off, &v, 2); break;
+                        }
+                        default: break;
                     }
                     continue;
                 }
@@ -7502,8 +7515,18 @@ build_from_final_ht:
             int64_t null_mask = rkeys[n_keys];
             if (null_mask & (int64_t)(1u << k)) {
                 ray_vec_set_null(new_col, (int64_t)gi, true);
-                if (kt == RAY_F64)
-                    ((double*)ray_data(new_col))[gi] = NULL_F64;
+                /* Phase 2/3a dual encoding: fill correct-width sentinel. */
+                switch (kt) {
+                    case RAY_F64:
+                        ((double*)ray_data(new_col))[gi] = NULL_F64; break;
+                    case RAY_I64: case RAY_TIMESTAMP:
+                        ((int64_t*)ray_data(new_col))[gi] = NULL_I64; break;
+                    case RAY_I32: case RAY_DATE: case RAY_TIME:
+                        ((int32_t*)ray_data(new_col))[gi] = NULL_I32; break;
+                    case RAY_I16:
+                        ((int16_t*)ray_data(new_col))[gi] = NULL_I16; break;
+                    default: break;
+                }
                 continue;
             }
             if (is_wide) {
