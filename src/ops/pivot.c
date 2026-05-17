@@ -522,6 +522,8 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             memcpy(&ent_nmask, ix_entry_p + 8 + (size_t)n_idx * 8, 8);
             if (ent_nmask & (int64_t)(1u << k)) {
                 ray_vec_set_null(new_col, (int64_t)r, true);
+                if (kt == RAY_F64)
+                    ((double*)ray_data(new_col))[r] = NULL_F64;
                 continue;
             }
             if (idx_wide[k]) {
