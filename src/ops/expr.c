@@ -1233,12 +1233,31 @@ static void set_all_null(ray_t* result, int64_t len) {
     } else {
         for (int64_t i = 0; i < len; i++) ray_vec_set_null(result, i, true);
     }
-    /* Phase 2 dual-encoding: F64 results must also carry NULL_F64 in every
-     * payload slot so raw-double consumers see NaN without consulting the
-     * bitmap. */
-    if (result->type == RAY_F64) {
-        double* d = (double*)ray_data(result);
-        for (int64_t i = 0; i < len; i++) d[i] = NULL_F64;
+    /* Phase 2/3a dual-encoding: results must also carry the matching
+     * width sentinel in every payload slot so raw-payload consumers see
+     * the null marker without consulting the bitmap. */
+    switch (result->type) {
+        case RAY_F64: {
+            double* d = (double*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_F64;
+            break;
+        }
+        case RAY_I64: case RAY_TIMESTAMP: {
+            int64_t* d = (int64_t*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_I64;
+            break;
+        }
+        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+            int32_t* d = (int32_t*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_I32;
+            break;
+        }
+        case RAY_I16: {
+            int16_t* d = (int16_t*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_I16;
+            break;
+        }
+        default: break;
     }
 }
 
