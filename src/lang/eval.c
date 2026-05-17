@@ -2490,6 +2490,22 @@ static void ray_register_builtins(void) {
     register_unary_op("sqrt",  RAY_FN_ATOMIC, ray_sqrt_fn, OP_SQRT);
     register_unary_op("log",   RAY_FN_ATOMIC, ray_log_fn,  OP_LOG);
     register_unary_op("exp",   RAY_FN_ATOMIC, ray_exp_fn,  OP_EXP);
+    /* No DAG opcode yet — registered as plain binary atomic.  Vector
+     * broadcasting goes through the ray_eval atomic dispatch.  Adding
+     * OP_POW + libm-vectorised expr.c arms is a perf follow-up. */
+    register_binary("pow", RAY_FN_ATOMIC, ray_pow_fn);
+    /* Partial-sort top/bottom-N: O(N log K) bounded-heap fast path
+     * via topk_indices_single, falls back to full sort for unsupported
+     * types.  Per-group usage works through the eval-level scatter. */
+    register_binary("top", RAY_FN_NONE, ray_top_fn);
+    register_binary("bot", RAY_FN_NONE, ray_bot_fn);
+    /* pearson_corr: 2-input scalar reducer.  Marked AGGR + LAZY_AWARE so
+     * the planner picks it up via is_streaming_aggr_binary_call and lowers
+     * a `(pearson_corr x y)` reference inside `(select ... by ...)` to an
+     * OP_PEARSON_CORR DAG node — single-pass vectorized hash-agg.  The
+     * ray_pearson_corr_fn body remains the fallback for non-vectorizable
+     * shapes (LIST inputs, eval-level scatter on unsupported key types). */
+    register_binary("pearson_corr", RAY_FN_AGGR | RAY_FN_LAZY_AWARE, ray_pearson_corr_fn);
 
     /* Special forms */
     register_binary("set", RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_set_fn);
