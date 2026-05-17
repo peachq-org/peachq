@@ -158,7 +158,7 @@ ray_t* ray_temporal_extract(ray_t* input, int field) {
         if (src_has_nulls) {
             for (int64_t i = 0; i < len; i++) {
                 if (ray_vec_is_null(input, i)) {
-                    out[i] = 0;
+                    out[i] = NULL_I64;
                     ray_vec_set_null(result, i, true);
                     continue;
                 }
@@ -173,7 +173,7 @@ ray_t* ray_temporal_extract(ray_t* input, int field) {
         if (src_has_nulls) {
             for (int64_t i = 0; i < len; i++) {
                 if (ray_vec_is_null(input, i)) {
-                    out[i] = 0;
+                    out[i] = NULL_I64;
                     ray_vec_set_null(result, i, true);
                     continue;
                 }
@@ -280,7 +280,7 @@ ray_t* ray_temporal_truncate(ray_t* input, int kind) {
         if (src_has_nulls) {
             for (int64_t i = 0; i < len; i++) {
                 if (ray_vec_is_null(input, i)) {
-                    out[i] = 0; ray_vec_set_null(result, i, true); continue;
+                    out[i] = NULL_I64; ray_vec_set_null(result, i, true); continue;
                 }
                 int64_t us = rte_to_us(t, (int64_t)d32[i]);
                 int64_t r = us % bucket;
@@ -298,7 +298,7 @@ ray_t* ray_temporal_truncate(ray_t* input, int kind) {
         if (src_has_nulls) {
             for (int64_t i = 0; i < len; i++) {
                 if (ray_vec_is_null(input, i)) {
-                    out[i] = 0; ray_vec_set_null(result, i, true); continue;
+                    out[i] = NULL_I64; ray_vec_set_null(result, i, true); continue;
                 }
                 int64_t us = rte_to_us(t, d64[i]);
                 int64_t r = us % bucket;
@@ -366,7 +366,7 @@ ray_t* exec_extract(ray_graph_t* g, ray_op_t* op) {
             int64_t n = m.morsel_len;                                       \
             for (int64_t i = 0; i < n; i++) {                              \
                 if (HAS_NULLS && ray_vec_is_null(input, off + i)) {        \
-                    out[off + i] = 0;                                       \
+                    out[off + i] = NULL_I64;                                \
                     ray_vec_set_null(result, off + i, true);                \
                     continue;                                               \
                 }                                                           \
@@ -518,7 +518,7 @@ ray_t* exec_date_trunc(ray_graph_t* g, ray_op_t* op) {
             int64_t n = m.morsel_len;                                       \
             for (int64_t i = 0; i < n; i++) {                              \
                 if (HAS_NULLS && ray_vec_is_null(input, off + i)) {        \
-                    out[off + i] = 0;                                       \
+                    out[off + i] = NULL_I64;                                \
                     ray_vec_set_null(result, off + i, true);                \
                     continue;                                               \
                 }                                                           \
