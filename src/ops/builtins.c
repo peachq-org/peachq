@@ -1837,8 +1837,13 @@ ray_t* ray_enlist_fn(ray_t** args, int64_t n) {
             d[i] = (args[i]->type == -RAY_F64) ? args[i]->f64 : (double)args[i]->i64;
         vec->len = n;
         for (int64_t i = 0; i < n; i++) {
-            if (RAY_ATOM_IS_NULL(args[i]))
+            if (RAY_ATOM_IS_NULL(args[i])) {
+                /* Dual-encoding contract: the (double)NULL_I64 cast above
+                 * produces a large finite value (~-9.22e18), not NaN.  Stamp
+                 * the F64 sentinel so the payload matches the bitmap bit. */
+                d[i] = NULL_F64;
                 ray_vec_set_null(vec, i, true);
+            }
         }
         return vec;
     }
@@ -2637,8 +2642,26 @@ ray_t* ray_group_fn(ray_t* x) {
          * the first row index suffices. */
         if (idx_vecs[g] && idx_vecs[g]->len > 0) {
             int64_t first_row = ((int64_t*)ray_data(idx_vecs[g]))[0];
-            if (ray_vec_is_null(x, first_row))
+            if (ray_vec_is_null(x, first_row)) {
                 ray_vec_set_null(keys_vec, g, true);
+                /* Dual-encoding contract: the payload at slot g must hold
+                 * the width-correct null sentinel so sentinel-aware readers
+                 * agree with the bitmap. */
+                void* base = ray_data(keys_vec);
+                switch (key_type) {
+                    case RAY_I64: case RAY_TIMESTAMP:
+                        ((int64_t*)base)[g] = NULL_I64; break;
+                    case RAY_I32: case RAY_DATE: case RAY_TIME:
+                        ((int32_t*)base)[g] = NULL_I32; break;
+                    case RAY_I16:
+                        ((int16_t*)base)[g] = NULL_I16; break;
+                    case RAY_F64:
+                        ((double*)base)[g] = NULL_F64; break;
+                    case RAY_F32:
+                        ((float*)base)[g] = (float)NULL_F64; break;
+                    default: break; /* SYM/BOOL/U8: no sentinel slot */
+                }
+            }
         }
     }
 
