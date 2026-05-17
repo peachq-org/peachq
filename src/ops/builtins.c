@@ -755,16 +755,40 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
             if (le[j] && RAY_ATOM_IS_NULL(le[j]))
                 ray_vec_set_null(vec, j, true);
     }
-    /* Phase 2 dual-encoding: for F64 destinations, the cast loop wrote a
-     * payload value (e.g. (double)0 from a null I64 source) into every
-     * slot, oblivious to null status.  Now that the bitmap is populated,
-     * overwrite each null slot's payload with NULL_F64 so consumers that
-     * read the raw double (without consulting the bitmap) see NaN. */
-    if (vec->type == RAY_F64 && (vec->attrs & RAY_ATTR_HAS_NULLS)) {
-        double* d = (double*)ray_data(vec);
-        for (int64_t j = 0; j < vec->len; j++)
-            if (ray_vec_is_null(vec, j))
-                d[j] = NULL_F64;
+    /* Phase 2/3a dual encoding: when the destination has nulls, fill each
+     * null payload slot with the correct-width sentinel so consumers that
+     * read the raw payload (without consulting the bitmap) honor the null
+     * contract.  Narrowing casts (Hazard 3) require writing the dest-width
+     * sentinel directly — propagating through the cast macro produces
+     * (int16_t)NULL_I32 = 0 etc., which collides with a legitimate value. */
+    if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+        switch (vec->type) {
+            case RAY_F64: {
+                double* d = (double*)ray_data(vec);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (ray_vec_is_null(vec, j)) d[j] = NULL_F64;
+                break;
+            }
+            case RAY_I64: case RAY_TIMESTAMP: {
+                int64_t* d = (int64_t*)ray_data(vec);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (ray_vec_is_null(vec, j)) d[j] = NULL_I64;
+                break;
+            }
+            case RAY_I32: case RAY_DATE: case RAY_TIME: {
+                int32_t* d = (int32_t*)ray_data(vec);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (ray_vec_is_null(vec, j)) d[j] = NULL_I32;
+                break;
+            }
+            case RAY_I16: {
+                int16_t* d = (int16_t*)ray_data(vec);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (ray_vec_is_null(vec, j)) d[j] = NULL_I16;
+                break;
+            }
+            default: break;
+        }
     }
     return vec;
 }
