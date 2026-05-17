@@ -755,6 +755,17 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
             if (le[j] && RAY_ATOM_IS_NULL(le[j]))
                 ray_vec_set_null(vec, j, true);
     }
+    /* Phase 2 dual-encoding: for F64 destinations, the cast loop wrote a
+     * payload value (e.g. (double)0 from a null I64 source) into every
+     * slot, oblivious to null status.  Now that the bitmap is populated,
+     * overwrite each null slot's payload with NULL_F64 so consumers that
+     * read the raw double (without consulting the bitmap) see NaN. */
+    if (vec->type == RAY_F64 && (vec->attrs & RAY_ATTR_HAS_NULLS)) {
+        double* d = (double*)ray_data(vec);
+        for (int64_t j = 0; j < vec->len; j++)
+            if (ray_vec_is_null(vec, j))
+                d[j] = NULL_F64;
+    }
     return vec;
 }
 

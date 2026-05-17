@@ -1228,6 +1228,13 @@ static void set_all_null(ray_t* result, int64_t len) {
     } else {
         for (int64_t i = 0; i < len; i++) ray_vec_set_null(result, i, true);
     }
+    /* Phase 2 dual-encoding: F64 results must also carry NULL_F64 in every
+     * payload slot so raw-double consumers see NaN without consulting the
+     * bitmap. */
+    if (result->type == RAY_F64) {
+        double* d = (double*)ray_data(result);
+        for (int64_t i = 0; i < len; i++) d[i] = NULL_F64;
+    }
 }
 
 /* Propagate null bitmaps for binary ops: null in either operand → null in result. */
