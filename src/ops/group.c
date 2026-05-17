@@ -2278,6 +2278,13 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
                 if (null_mask & (int64_t)(1u << k)) {
                     if (c->key_cols && c->key_cols[k])
                         grp_set_null(c->key_cols[k], di);
+                    /* Phase 2 dual encoding: NaN-fill F64 null key slot. */
+                    if (c->key_types[k] == RAY_F64) {
+                        char* dst = c->key_dsts[k];
+                        uint8_t esz = c->key_esizes[k];
+                        double nan_val = NULL_F64;
+                        memcpy(dst + (size_t)di * esz, &nan_val, 8);
+                    }
                     continue;
                 }
                 int64_t kv = rkeys[k];
@@ -7112,12 +7119,12 @@ batch_fail:
                     const double* sv = (const double*)ray_data(sum_col);
                     for (int64_t r = 0; r < nrows; r++) {
                         double n = (double)cv[r];
-                        if (n <= 0) { out[r] = 0.0; ray_vec_set_null(out_col, r, true); continue; }
+                        if (n <= 0) { out[r] = NULL_F64; ray_vec_set_null(out_col, r, true); continue; }
                         double mean = sv[r] / n;
                         double var_pop = sq[r] / n - mean * mean;
                         if (var_pop < 0) var_pop = 0;
                         bool insuf = (orig_op == OP_VAR || orig_op == OP_STDDEV) && n <= 1;
-                        if (insuf) { out[r] = 0.0; ray_vec_set_null(out_col, r, true); continue; }
+                        if (insuf) { out[r] = NULL_F64; ray_vec_set_null(out_col, r, true); continue; }
                         if (orig_op == OP_VAR_POP)         out[r] = var_pop;
                         else if (orig_op == OP_VAR)         out[r] = var_pop * n / (n - 1);
                         else if (orig_op == OP_STDDEV_POP)  out[r] = sqrt(var_pop);
@@ -7127,12 +7134,12 @@ batch_fail:
                     const int64_t* sv = (const int64_t*)ray_data(sum_col);
                     for (int64_t r = 0; r < nrows; r++) {
                         double n = (double)cv[r];
-                        if (n <= 0) { out[r] = 0.0; ray_vec_set_null(out_col, r, true); continue; }
+                        if (n <= 0) { out[r] = NULL_F64; ray_vec_set_null(out_col, r, true); continue; }
                         double mean = (double)sv[r] / n;
                         double var_pop = sq[r] / n - mean * mean;
                         if (var_pop < 0) var_pop = 0;
                         bool insuf = (orig_op == OP_VAR || orig_op == OP_STDDEV) && n <= 1;
-                        if (insuf) { out[r] = 0.0; ray_vec_set_null(out_col, r, true); continue; }
+                        if (insuf) { out[r] = NULL_F64; ray_vec_set_null(out_col, r, true); continue; }
                         if (orig_op == OP_VAR_POP)         out[r] = var_pop;
                         else if (orig_op == OP_VAR)         out[r] = var_pop * n / (n - 1);
                         else if (orig_op == OP_STDDEV_POP)  out[r] = sqrt(var_pop);
