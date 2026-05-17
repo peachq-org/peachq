@@ -2567,7 +2567,7 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                     case OP_STDDEV: case OP_STDDEV_POP: {
                         int64_t cnt = counts[gi];
                         bool insuf = (agg_op == OP_VAR || agg_op == OP_STDDEV) ? cnt <= 1 : cnt <= 0;
-                        if (insuf) { v = 0.0; ray_vec_set_null(new_col, gi, true); break; }
+                        if (insuf) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
                         double sum_val = is_f64 ? sum_f64[idx] : (double)sum_i64[idx];
                         double sq_val = sumsq_f64 ? sumsq_f64[idx] : 0.0;
                         double mean = sum_val / cnt;
@@ -6257,7 +6257,10 @@ skip_top_count_filter:
                     const char* row = ph->rows + (size_t)gi * rs;
                     int64_t cnt = *(const int64_t*)(const void*)row;
                     bool insuf = (op == OP_VAR || op == OP_STDDEV) ? cnt <= 1 : cnt <= 0;
-                    if (insuf) ray_vec_set_null(agg_outs[a].vec, off + gi, true);
+                    if (insuf) {
+                        ray_vec_set_null(agg_outs[a].vec, off + gi, true);
+                        ((double*)ray_data(agg_outs[a].vec))[off + gi] = NULL_F64;
+                    }
                 }
             }
         }
@@ -6378,6 +6381,8 @@ build_from_final_ht:
             int64_t null_mask = rkeys[n_keys];
             if (null_mask & (int64_t)(1u << k)) {
                 ray_vec_set_null(new_col, (int64_t)gi, true);
+                if (kt == RAY_F64)
+                    ((double*)ray_data(new_col))[gi] = NULL_F64;
                 continue;
             }
             if (is_wide) {
