@@ -2336,7 +2336,7 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
                         case OP_VAR: case OP_VAR_POP:
                         case OP_STDDEV: case OP_STDDEV_POP: {
                             bool insuf = (op == OP_VAR || op == OP_STDDEV) ? cnt <= 1 : cnt <= 0;
-                            if (insuf) { v = 0.0; grp_set_null(ao->vec, di); break; }
+                            if (insuf) { v = NULL_F64; grp_set_null(ao->vec, di); break; }
                             double sum_val = sf ? ROW_RD_F64(row, ly->off_sum, s)
                                                 : (double)ROW_RD_I64(row, ly->off_sum, s);
                             double sq_val = ly->off_sumsq ? ROW_RD_F64(row, ly->off_sumsq, s) : 0.0;
@@ -3165,9 +3165,16 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
         uint16_t op = c->agg_ops[a];
         bool is_f = (c->agg_types[a] == RAY_F64);
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
-            if (is_f) acc->sum[a].f += fv;
-            else acc->sum[a].i += iv;
-            if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
+            if (is_f) {
+                /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
+                if (RAY_LIKELY(fv == fv)) {
+                    acc->sum[a].f += fv;
+                    if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
+                }
+            } else {
+                acc->sum[a].i += iv;
+                if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
+            }
         } else if (op == OP_PROD) {
             if (is_f) {
                 if (acc->count[0] == 1) acc->sum[a].f = fv;
@@ -3178,15 +3185,17 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
             }
         } else if (op == OP_FIRST) {
             if (acc->count[0] == 1) {
-                if (is_f) acc->sum[a].f = fv; else acc->sum[a].i = iv;
+                if (is_f) { if (fv == fv) acc->sum[a].f = fv; }
+                else acc->sum[a].i = iv;
             }
         } else if (op == OP_LAST) {
-            if (is_f) acc->sum[a].f = fv; else acc->sum[a].i = iv;
+            if (is_f) { if (fv == fv) acc->sum[a].f = fv; }
+            else acc->sum[a].i = iv;
         } else if (op == OP_MIN) {
-            if (is_f) { if (fv < acc->min_val[a].f) acc->min_val[a].f = fv; }
+            if (is_f) { if (fv == fv && fv < acc->min_val[a].f) acc->min_val[a].f = fv; }
             else      { if (iv < acc->min_val[a].i) acc->min_val[a].i = iv; }
         } else if (op == OP_MAX) {
-            if (is_f) { if (fv > acc->max_val[a].f) acc->max_val[a].f = fv; }
+            if (is_f) { if (fv == fv && fv > acc->max_val[a].f) acc->max_val[a].f = fv; }
             else      { if (iv > acc->max_val[a].i) acc->max_val[a].i = iv; }
         }
     }
@@ -3223,9 +3232,11 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             size_t idx = base + a;
             if (c->agg_strlen && c->agg_strlen[a])
                 acc->sum[idx].i += group_strlen_at(c->agg_cols[a], r);
-            else if (f64m & (1u << a))
-                acc->sum[idx].f += ((const double*)c->agg_ptrs[a])[r];
-            else
+            else if (f64m & (1u << a)) {
+                /* Phase 2 dual encoding: NaN payload = null, skip from sum. */
+                double v = ((const double*)c->agg_ptrs[a])[r];
+                if (RAY_LIKELY(v == v)) acc->sum[idx].f += v;
+            } else
                 acc->sum[idx].i += read_col_i64(c->agg_ptrs[a], r,
                                                 c->agg_types[a], 0);
         }
@@ -3252,9 +3263,16 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
         }
         uint16_t op = c->agg_ops[a];
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
-            if (c->agg_types[a] == RAY_F64) acc->sum[idx].f += fv;
-            else acc->sum[idx].i = (int64_t)((uint64_t)acc->sum[idx].i + (uint64_t)iv);
-            if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
+            if (c->agg_types[a] == RAY_F64) {
+                /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
+                if (RAY_LIKELY(fv == fv)) {
+                    acc->sum[idx].f += fv;
+                    if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
+                }
+            } else {
+                acc->sum[idx].i = (int64_t)((uint64_t)acc->sum[idx].i + (uint64_t)iv);
+                if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
+            }
         } else if (op == OP_PROD) {
             if (c->agg_types[a] == RAY_F64) {
                 if (acc->count[gid] == 1) acc->sum[idx].f = fv;
@@ -3265,23 +3283,29 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             }
         } else if (op == OP_FIRST) {
             if (fl_take_first) {
-                if (c->agg_types[a] == RAY_F64) acc->sum[idx].f = fv;
-                else acc->sum[idx].i = iv;
+                if (c->agg_types[a] == RAY_F64) {
+                    /* Phase 2 dual encoding: skip NaN so first stays a real value. */
+                    if (fv == fv) acc->sum[idx].f = fv;
+                } else acc->sum[idx].i = iv;
             }
         } else if (op == OP_LAST) {
             if (fl_take_last) {
-                if (c->agg_types[a] == RAY_F64) acc->sum[idx].f = fv;
-                else acc->sum[idx].i = iv;
+                if (c->agg_types[a] == RAY_F64) {
+                    /* Phase 2 dual encoding: skip NaN so last stays a real value. */
+                    if (fv == fv) acc->sum[idx].f = fv;
+                } else acc->sum[idx].i = iv;
             }
         } else if (op == OP_MIN) {
             if (c->agg_types[a] == RAY_F64) {
-                if (fv < acc->min_val[idx].f) acc->min_val[idx].f = fv;
+                /* Phase 2 dual encoding: NaN comparisons are always false, but
+                 * make the skip explicit. */
+                if (fv == fv && fv < acc->min_val[idx].f) acc->min_val[idx].f = fv;
             } else {
                 if (iv < acc->min_val[idx].i) acc->min_val[idx].i = iv;
             }
         } else if (op == OP_MAX) {
             if (c->agg_types[a] == RAY_F64) {
-                if (fv > acc->max_val[idx].f) acc->max_val[idx].f = fv;
+                if (fv == fv && fv > acc->max_val[idx].f) acc->max_val[idx].f = fv;
             } else {
                 if (iv > acc->max_val[idx].i) acc->max_val[idx].i = iv;
             }
@@ -6459,7 +6483,7 @@ build_from_final_ht:
                     case OP_VAR: case OP_VAR_POP:
                     case OP_STDDEV: case OP_STDDEV_POP: {
                         bool insuf = (agg_op == OP_VAR || agg_op == OP_STDDEV) ? cnt <= 1 : cnt <= 0;
-                        if (insuf) { v = 0.0; ray_vec_set_null(new_col, gi, true); break; }
+                        if (insuf) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
                         double sum_val = is_f64 ? ROW_RD_F64(row, ly->off_sum, s)
                                                 : (double)ROW_RD_I64(row, ly->off_sum, s);
                         double sq_val = ly->off_sumsq ? ROW_RD_F64(row, ly->off_sumsq, s) : 0.0;
