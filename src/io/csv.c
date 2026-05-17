@@ -932,7 +932,7 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                         case CSV_TYPE_I16:  ((int16_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_I32:  ((int32_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_I64:  ((int64_t*)ctx->col_data[c])[row] = 0; break;
-                        case CSV_TYPE_F64:  ((double*)ctx->col_data[c])[row] = 0.0; break;
+                        case CSV_TYPE_F64:  ((double*)ctx->col_data[c])[row] = NULL_F64; break;
                         case CSV_TYPE_DATE: ((int32_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIME: ((int32_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIMESTAMP:
@@ -946,8 +946,14 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                             break;
                         default: break;
                     }
-                    ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                    my_had_null[c] = true;
+                    /* BOOL/U8 are non-nullable (Phase 1 lockdown).  Empty
+                     * cells store the default 0/false above and skip the
+                     * nullmap mark. */
+                    if (ctx->col_types[c] != CSV_TYPE_BOOL &&
+                        ctx->col_types[c] != CSV_TYPE_U8) {
+                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
+                        my_had_null[c] = true;
+                    }
                 }
                 break;
             }
@@ -963,13 +969,12 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
 
             switch (ctx->col_types[c]) {
                 case CSV_TYPE_BOOL: {
+                    /* BOOL is non-nullable (Phase 1).  fast_bool returns 0
+                     * for empty / unparseable input; we store it as-is and
+                     * never mark a nullmap bit. */
                     bool is_null;
                     uint8_t v = fast_bool(fld, flen, &is_null);
                     ((uint8_t*)ctx->col_data[c])[row] = v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
                     break;
                 }
                 case CSV_TYPE_I64: {
@@ -983,13 +988,12 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                     break;
                 }
                 case CSV_TYPE_U8: {
+                    /* U8 is non-nullable (Phase 1).  fast_i64 returns 0 for
+                     * empty / unparseable input; we store it as-is and
+                     * never mark a nullmap bit. */
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
                     ((uint8_t*)ctx->col_data[c])[row] = (uint8_t)v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
                     break;
                 }
                 case CSV_TYPE_I16: {
@@ -1015,7 +1019,8 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                 case CSV_TYPE_F64: {
                     bool is_null;
                     double v = fast_f64(fld, flen, &is_null);
-                    ((double*)ctx->col_data[c])[row] = v;
+                    /* Phase 2 dual encoding: payload is NaN whenever nullmap bit is set. */
+                    ((double*)ctx->col_data[c])[row] = is_null ? NULL_F64 : v;
                     if (is_null) {
                         ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         my_had_null[c] = true;
@@ -1125,7 +1130,7 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                         case CSV_TYPE_I16:  ((int16_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_I32:  ((int32_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_I64:  ((int64_t*)col_data[c])[row] = 0; break;
-                        case CSV_TYPE_F64:  ((double*)col_data[c])[row] = 0.0; break;
+                        case CSV_TYPE_F64:  ((double*)col_data[c])[row] = NULL_F64; break;
                         case CSV_TYPE_DATE: ((int32_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIME: ((int32_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIMESTAMP:
@@ -1139,8 +1144,12 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                             break;
                         default: break;
                     }
-                    col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                    col_had_null[c] = true;
+                    /* BOOL/U8 are non-nullable (Phase 1 lockdown). */
+                    if (col_types[c] != CSV_TYPE_BOOL &&
+                        col_types[c] != CSV_TYPE_U8) {
+                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
+                        col_had_null[c] = true;
+                    }
                 }
                 break;
             }
@@ -1156,13 +1165,10 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
 
             switch (col_types[c]) {
                 case CSV_TYPE_BOOL: {
+                    /* BOOL is non-nullable (Phase 1 lockdown). */
                     bool is_null;
                     uint8_t v = fast_bool(fld, flen, &is_null);
                     ((uint8_t*)col_data[c])[row] = v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
                     break;
                 }
                 case CSV_TYPE_I64: {
@@ -1176,13 +1182,10 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                     break;
                 }
                 case CSV_TYPE_U8: {
+                    /* U8 is non-nullable (Phase 1 lockdown). */
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
                     ((uint8_t*)col_data[c])[row] = (uint8_t)v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
                     break;
                 }
                 case CSV_TYPE_I16: {
@@ -1208,7 +1211,8 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                 case CSV_TYPE_F64: {
                     bool is_null;
                     double v = fast_f64(fld, flen, &is_null);
-                    ((double*)col_data[c])[row] = v;
+                    /* Phase 2 dual encoding: payload is NaN whenever nullmap bit is set. */
+                    ((double*)col_data[c])[row] = is_null ? NULL_F64 : v;
                     if (is_null) {
                         col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         col_had_null[c] = true;
