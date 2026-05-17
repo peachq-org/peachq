@@ -312,12 +312,15 @@ ray_t* ray_typed_null(int8_t type);
  * NULL_I64 based on their storage width.  SYM null = sym ID 0; STR null =
  * empty string (length 0); BOOL and U8 are non-nullable.
  *
- * These constants land in Phase 1 of the bitmap→sentinel migration.  Through
- * Phase 3d (integer/temporal) and Phase 7 (full cutover) the bitmap bit
- * `nullmap[0] & 1` is kept in sync with the sentinel value for atoms
- * ("dual encoding"), so legacy bitmap-aware readers and new sentinel-aware
- * readers agree.  After Phase 7 the bitmap arm is reclaimed for inline
- * stats and the bit becomes a pure optimization hint. */
+ * Phase 1 added the constants and locked BOOL/U8 down as non-nullable.
+ * Phase 2 wired NULL_F64 into the CSV parser, ray_typed_null, and the
+ * I64→F64 UPDATE cast — null F64 slots now hold NaN alongside the
+ * nullmap bit.  Phase 3a–d will follow for integer and temporal types.
+ * Through Phase 7 (full cutover) the bitmap bit `nullmap[0] & 1` is
+ * kept in sync with the sentinel value for atoms ("dual encoding"), so
+ * legacy bitmap-aware readers and new sentinel-aware readers agree.
+ * After Phase 7 the bitmap arm is reclaimed for inline stats and the
+ * bit becomes a pure optimization hint. */
 #define NULL_I16  ((int16_t)INT16_MIN)
 #define NULL_I32  ((int32_t)INT32_MIN)
 #define NULL_I64  ((int64_t)INT64_MIN)
