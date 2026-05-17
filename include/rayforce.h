@@ -328,13 +328,17 @@ ray_t* ray_typed_null(int8_t type);
  * rather than nullmap consultation for cache-line efficiency; the
  * tradeoff (a user-stored INT_MIN in a HAS_NULLS column is dropped)
  * is bounded by dual encoding keeping the bitmap as source of truth.
- * Known Phase 3 work (out of scope for Phase 2/3a): grouped AVG / VAR /
- * STDDEV use count[gid] as the divisor without excluding null rows;
- * grouped FIRST / LAST / MIN / MAX / PROD on all-null F64 groups can
- * return DBL_MAX / -DBL_MAX / 0.0 or propagate NaN through products
- * instead of producing a typed null.  Fixing these requires per-(group,
- * agg) non-null counts and result-side null-finalization, both deferred
- * to Phase 3 when the bitmap arm is removed.
+ * Phase 3b closed the documented finalization gaps in the
+ * scalar and direct-array (DA) grouped accumulators: per-(group, agg)
+ * non-null counts (`nn_count[gid * n_aggs + a]`) drive AVG / VAR /
+ * STDDEV divisors and gate MIN / MAX / PROD / FIRST / LAST result
+ * emission — all-null groups now produce a typed null (NULL_F64 /
+ * NULL_I64 plus the nullmap bit) instead of leaking the accumulator
+ * seed (DBL_MAX / -DBL_MAX / 0 / product identity).  FIRST/LAST also
+ * gained "skip null rows" semantics: a null prefix no longer advances
+ * acc->first_row[gid].  The multi-key radix HT (accum_from_entry,
+ * ~line 2155) still inherits the pre-existing nullable-agg gap noted
+ * at the sparse-path fallback (~line 5728).
  * Through Phase 7 (full cutover) the bitmap bit `nullmap[0] & 1` is
  * kept in sync with the sentinel value for atoms ("dual encoding"), so
  * legacy bitmap-aware readers and new sentinel-aware readers agree.
