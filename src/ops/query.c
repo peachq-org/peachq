@@ -8008,6 +8008,12 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     if (RAY_ATOM_IS_NULL(expr_vec)) {
                         for (int64_t r = 0; r < nrows; r++)
                             ray_vec_set_null(bcast, r, true);
+                        /* Phase 2 dual encoding: NaN-fill F64 payload
+                         * alongside the nullmap. */
+                        if (ct == RAY_F64) {
+                            double* d = (double*)ray_data(bcast);
+                            for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
+                        }
                     }
                     ray_release(expr_vec);
                     expr_vec = bcast;
@@ -8211,6 +8217,12 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 if (RAY_ATOM_IS_NULL(expr_vec)) {
                     for (int64_t r = 0; r < nrows; r++)
                         ray_vec_set_null(bcast, r, true);
+                    /* Phase 2 dual encoding: NaN-fill F64 payload
+                     * alongside the nullmap. */
+                    if (ct == RAY_F64) {
+                        double* d = (double*)ray_data(bcast);
+                        for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
+                    }
                 }
                 ray_release(expr_vec);
                 expr_vec = bcast;
@@ -8308,6 +8320,12 @@ no_where_add_col:
             if (RAY_ATOM_IS_NULL(expr_vec)) {
                 for (int64_t r = 0; r < nrows; r++)
                     ray_vec_set_null(bcast, r, true);
+                /* Phase 2 dual encoding: NaN-fill F64 payload
+                 * alongside the nullmap. */
+                if (ct == RAY_F64) {
+                    double* d = (double*)ray_data(bcast);
+                    for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
+                }
             }
             ray_release(expr_vec);
             expr_vec = bcast;
