@@ -304,6 +304,51 @@ ray_t* ray_timestamp(int64_t val);
 ray_t* ray_guid(const uint8_t* bytes);
 ray_t* ray_typed_null(int8_t type);
 
+/* ===== Null Sentinel Values =====
+ *
+ * Per-type null encoding for nullable scalar types.  Callers compare values
+ * directly (e.g. `x == NULL_I64`, `x != x` for NaN); there are no predicate
+ * macros or aliases.  Temporal types (DATE/TIME/TIMESTAMP) reuse NULL_I32 or
+ * NULL_I64 based on their storage width.  SYM null = sym ID 0; STR null =
+ * empty string (length 0); BOOL and U8 are non-nullable.
+ *
+ * Phase 1 added the constants and locked BOOL/U8 down as non-nullable.
+ * Phase 2 wired NULL_F64 into the CSV parser, ray_typed_null, and the
+ * I64→F64 UPDATE cast — null F64 slots now hold NaN alongside the
+ * nullmap bit.
+ * Phase 3a generalized this to integer / temporal types (I16, I32, I64,
+ * DATE, TIME, TIMESTAMP).  Producer surface mirrors Phase 2 — CSV
+ * parser, ray_typed_null, cast_vec_copy_nulls, set_all_null,
+ * store_typed_elem (lang/internal.h), UPDATE atom broadcast (3 sites),
+ * UPDATE WHERE numeric-promo cast, group-by key scatter (serial +
+ * parallel + grpt TOP_N), pivot key scatter, linkop deref.  The
+ * grouped-aggregation consumer (da_accum_row + scalar_accum_row) gained
+ * per-agg integer-null guards in the SUM/AVG/STDDEV/VAR/PROD/MIN/MAX/
+ * FIRST/LAST arms — sentinel-compare (`v != precomputed_sentinel`)
+ * rather than nullmap consultation for cache-line efficiency; the
+ * tradeoff (a user-stored INT_MIN in a HAS_NULLS column is dropped)
+ * is bounded by dual encoding keeping the bitmap as source of truth.
+ * Phase 3b closed the documented finalization gaps in the
+ * scalar and direct-array (DA) grouped accumulators: per-(group, agg)
+ * non-null counts (`nn_count[gid * n_aggs + a]`) drive AVG / VAR /
+ * STDDEV divisors and gate MIN / MAX / PROD / FIRST / LAST result
+ * emission — all-null groups now produce a typed null (NULL_F64 /
+ * NULL_I64 plus the nullmap bit) instead of leaking the accumulator
+ * seed (DBL_MAX / -DBL_MAX / 0 / product identity).  FIRST/LAST also
+ * gained "skip null rows" semantics: a null prefix no longer advances
+ * acc->first_row[gid].  The multi-key radix HT (accum_from_entry,
+ * ~line 2155) still inherits the pre-existing nullable-agg gap noted
+ * at the sparse-path fallback (~line 5728).
+ * Through Phase 7 (full cutover) the bitmap bit `nullmap[0] & 1` is
+ * kept in sync with the sentinel value for atoms ("dual encoding"), so
+ * legacy bitmap-aware readers and new sentinel-aware readers agree.
+ * After Phase 7 the bitmap arm is reclaimed for inline stats and the
+ * bit becomes a pure optimization hint. */
+#define NULL_I16  ((int16_t)INT16_MIN)
+#define NULL_I32  ((int32_t)INT32_MIN)
+#define NULL_I64  ((int64_t)INT64_MIN)
+#define NULL_F64  (__builtin_nan(""))
+
 /* Null bitmap check for atoms — bit 0 of nullmap[0] marks typed nulls.
  * Also matches RAY_NULL_OBJ (the untyped null singleton). */
 #define RAY_ATOM_IS_NULL(x) (RAY_IS_NULL(x) || ((x)->type < 0 && ((x)->nullmap[0] & 1)))
