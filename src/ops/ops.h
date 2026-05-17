@@ -206,6 +206,36 @@ void     ray_cancel(void);
  * partition in phase 2; emit a 2-column table (key, value) in row form. */
 #define OP_GROUP_TOPK_ROWFORM  91
 #define OP_GROUP_BOTK_ROWFORM 110
+/* Dedicated single-pass per-group Pearson² with row-form emission for
+ * the canonical shape `(select (pearson_corr x y) from t by [k0 k1])`.
+ * Two-phase parallel: per-worker scatter into RADIX_P partitions in
+ * phase 1; per-partition open-addressing HT with fixed Pearson state
+ * (Σx, Σy, Σx², Σy², Σxy, cnt) in phase 2; emit a 3-column table
+ * (key0, key1, r²) directly.  Bypasses Anton-merge slowdown that
+ * affects OP_PEARSON_CORR via the shared radix HT path.  1 or 2 keys. */
+#define OP_GROUP_PEARSON_ROWFORM 111
+/* Dedicated single-pass per-group MAX(x)+MIN(y) with row-form emission
+ * for the canonical shape `(select (max x) (min y) from t by k)`.
+ * Bypasses Anton-merge slowdown on the shared radix HT path.  Closes
+ * the first stage of H2O canonical q7 (max(v1)-min(v2) per id3); the
+ * second stage is element-wise arithmetic on the small result.  1 key,
+ * 2 fixed-state aggs (MAX, MIN), integer x/y. */
+#define OP_GROUP_MAXMIN_ROWFORM 112
+/* Dedicated single-pass per-group MEDIAN(v)+STDDEV(v) with row-form
+ * emission for canonical shape `(select (median v) (std v) from t by
+ * k0 k1)`.  Phase 2 builds per-partition HT + group-contiguous F64
+ * v_buf in two passes; Phase 3 runs ray_median_dbl_inplace per group.
+ * Bypasses the shared OP_GROUP path's reprobe-and-histogram holistic
+ * fill.  Closes H2O canonical q6.  2 keys, both aggs on the same
+ * column, non-nullable inputs. */
+#define OP_GROUP_MEDIAN_STDDEV_ROWFORM 113
+/* Dedicated multi-key (N=3..8) per-group sum(v)+count(v) with row-form
+ * emission for canonical shape `(select (sum v) (count v) from t by
+ * k1 k2 .. kN)`.  Bypasses the shared OP_GROUP path's direct-array
+ * eligibility scans, rowsel + nullable defensive checks, and Anton-
+ * merge regressions.  Closes H2O canonical q10 (6-key composite with
+ * ~10M unique groups, essentially a row-dedup workload). */
+#define OP_GROUP_SUM_COUNT_ROWFORM 114
 
 /* Opcodes — Graph */
 #define OP_EXPAND        80   /* 1-hop CSR neighbor expansion       */
@@ -609,6 +639,27 @@ ray_op_t* ray_group3(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys,
  * (type-matched to `val`), both flat — one row per (group, kept-value). */
 ray_op_t* ray_group_topk_rowform(ray_graph_t* g, ray_op_t* key,
                                   ray_op_t* val, int64_t k, uint8_t desc);
+/* Dedicated per-group Pearson² with row-form emission.  See
+ * OP_GROUP_PEARSON_ROWFORM comment above.  keys[0..n_keys) are the
+ * group-by columns (1 or 2); x and y are the two value columns.  Output:
+ * (key0, [key1,] r2) table where r² = corr(x, y)² per group. */
+ray_op_t* ray_group_pearson_rowform(ray_graph_t* g, ray_op_t** keys,
+                                     uint8_t n_keys, ray_op_t* x, ray_op_t* y);
+/* Dedicated per-group max(x) + min(y) with row-form emission.  See
+ * OP_GROUP_MAXMIN_ROWFORM comment.  Output: (key, max_x, min_y). */
+ray_op_t* ray_group_maxmin_rowform(ray_graph_t* g, ray_op_t* key,
+                                    ray_op_t* x, ray_op_t* y);
+/* Dedicated per-group median(v) + std(v) with row-form emission.  See
+ * OP_GROUP_MEDIAN_STDDEV_ROWFORM comment.  keys[0..1] are two group
+ * columns; v is the value column for both aggregates.  Output:
+ * (key0, key1, v_median, v_std). */
+ray_op_t* ray_group_median_stddev_rowform(ray_graph_t* g, ray_op_t** keys,
+                                           ray_op_t* v, int with_count);
+/* Dedicated multi-key per-group sum(v)+count(v) with row-form emission.
+ * See OP_GROUP_SUM_COUNT_ROWFORM comment.  N keys (3..8); v is the
+ * value column for sum (count counts non-null v rows). */
+ray_op_t* ray_group_sum_count_rowform(ray_graph_t* g, ray_op_t** keys,
+                                       uint8_t n_keys, ray_op_t* v);
 ray_op_t* ray_distinct(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys);
 ray_op_t* ray_pivot_op(ray_graph_t* g,
                        ray_op_t** index_cols, uint8_t n_index,
