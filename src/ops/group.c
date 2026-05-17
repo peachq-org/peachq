@@ -3071,6 +3071,12 @@ typedef struct {
     da_val_t* max_val;   /* MAX [n_slots * n_aggs] */
     double*   sumsq_f64; /* sum-of-squares for STDDEV/VAR */
     int64_t*  count;     /* group counts [n_slots] */
+    int64_t*  nn_count;  /* per-(group, agg) non-null counts [n_slots * n_aggs];
+                          * incremented inside the F64 NaN-skip / integer
+                          * sentinel-skip guards.  Drives null-aware divisors
+                          * (AVG/VAR/STDDEV) and all-null finalization
+                          * (MIN/MAX/PROD/FIRST/LAST).  NULL when none of the
+                          * aggs needs null tracking (no HAS_NULLS columns). */
     int64_t*  first_row; /* min row index seen per slot (FIRST) [n_slots] */
     int64_t*  last_row;  /* max row index seen per slot (LAST)  [n_slots] */
     /* Arena headers */
@@ -3079,6 +3085,7 @@ typedef struct {
     ray_t* _h_max;
     ray_t* _h_sumsq;
     ray_t* _h_count;
+    ray_t* _h_nn_count;
     ray_t* _h_first_row;
     ray_t* _h_last_row;
 } da_accum_t;
@@ -3089,12 +3096,17 @@ static inline void da_accum_free(da_accum_t* a) {
     scratch_free(a->_h_max);
     scratch_free(a->_h_sumsq);
     scratch_free(a->_h_count);
+    scratch_free(a->_h_nn_count);
     scratch_free(a->_h_first_row);
     scratch_free(a->_h_last_row);
 }
 
 /* Unified agg result emitter — used by both DA and HT paths.
- * Arrays indexed by [gi * n_aggs + a], counts by [gi]. */
+ * Arrays indexed by [gi * n_aggs + a], counts by [gi].  nn_counts (if
+ * non-NULL) carries the per-(group, agg) non-null row count: AVG/VAR/
+ * STDDEV use it as the divisor and MIN/MAX/PROD/FIRST/LAST emit a typed
+ * null when it is zero.  Pass NULL to keep the legacy count[gid]-divisor
+ * behaviour (callers without HAS_NULLS aggs need not allocate it). */
 static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t* ext,
                               ray_t* const* agg_vecs, uint32_t grp_count,
                               uint8_t n_aggs,
@@ -3103,7 +3115,8 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                               const int64_t* min_i64,  const int64_t* max_i64,
                               const int64_t* counts,
                               const agg_affine_t* affine,
-                              const double*  sumsq_f64) {
+                              const double*  sumsq_f64,
+                              const int64_t* nn_counts) {
     for (uint8_t a = 0; a < n_aggs; a++) {
         uint16_t agg_op = ext->agg_ops[a];
         ray_t* agg_col = agg_vecs[a];
@@ -3125,6 +3138,11 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
         new_col->len = (int64_t)grp_count;
         for (uint32_t gi = 0; gi < grp_count; gi++) {
             size_t idx = (size_t)gi * n_aggs + a;
+            /* nn_counts[idx] == 0 means the group is all-null for this
+             * agg column — null-aware operators (MIN/MAX/PROD/FIRST/LAST/
+             * AVG/VAR/STDDEV) must surface a typed null instead of leaking
+             * the accumulator seed (DBL_MAX / -DBL_MAX / 0). */
+            int64_t nn = nn_counts ? nn_counts[idx] : counts[gi];
             if (out_type == RAY_F64) {
                 double v;
                 switch (agg_op) {
@@ -3134,20 +3152,27 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                             v += affine[a].bias_f64 * counts[gi];
                         break;
                     case OP_PROD:
+                        if (nn == 0) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
                         v = is_f64 ? sum_f64[idx] : (double)sum_i64[idx];
                         break;
                     case OP_AVG:
-                        v = is_f64 ? sum_f64[idx] / counts[gi] : (double)sum_i64[idx] / counts[gi];
+                        if (nn == 0) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
+                        v = is_f64 ? sum_f64[idx] / nn : (double)sum_i64[idx] / nn;
                         if (affine && affine[a].enabled)
                             v += affine[a].bias_f64;
                         break;
-                    case OP_MIN: v = is_f64 ? min_f64[idx] : (double)min_i64[idx]; break;
-                    case OP_MAX: v = is_f64 ? max_f64[idx] : (double)max_i64[idx]; break;
+                    case OP_MIN:
+                        if (nn == 0) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
+                        v = is_f64 ? min_f64[idx] : (double)min_i64[idx]; break;
+                    case OP_MAX:
+                        if (nn == 0) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
+                        v = is_f64 ? max_f64[idx] : (double)max_i64[idx]; break;
                     case OP_FIRST: case OP_LAST:
+                        if (nn == 0) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
                         v = is_f64 ? sum_f64[idx] : (double)sum_i64[idx]; break;
                     case OP_VAR: case OP_VAR_POP:
                     case OP_STDDEV: case OP_STDDEV_POP: {
-                        int64_t cnt = counts[gi];
+                        int64_t cnt = nn;
                         bool insuf = (agg_op == OP_VAR || agg_op == OP_STDDEV) ? cnt <= 1 : cnt <= 0;
                         if (insuf) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
                         double sum_val = is_f64 ? sum_f64[idx] : (double)sum_i64[idx];
@@ -3172,11 +3197,19 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                         if (affine && affine[a].enabled)
                             v += affine[a].bias_i64 * counts[gi];
                         break;
-                    case OP_PROD:  v = sum_i64[idx]; break;
+                    case OP_PROD:
+                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        v = sum_i64[idx]; break;
                     case OP_COUNT: v = counts[gi]; break;
-                    case OP_MIN:   v = min_i64[idx]; break;
-                    case OP_MAX:   v = max_i64[idx]; break;
-                    case OP_FIRST: case OP_LAST: v = sum_i64[idx]; break;
+                    case OP_MIN:
+                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        v = min_i64[idx]; break;
+                    case OP_MAX:
+                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        v = max_i64[idx]; break;
+                    case OP_FIRST: case OP_LAST:
+                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        v = sum_i64[idx]; break;
                     default:       v = 0; break;
                 }
                 ((int64_t*)ray_data(new_col))[gi] = v;
@@ -3748,6 +3781,11 @@ static void scalar_sum_linear_i64_fn(void* ctx, uint32_t worker_id, int64_t star
 static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r) {
     uint8_t n_aggs = c->n_aggs;
     acc->count[0]++;
+    /* Per-(group, agg) non-null counters drive AVG/VAR/STDDEV divisors
+     * and all-null finalization for MIN/MAX/PROD/FIRST/LAST.  Only
+     * allocated when at least one agg can produce a null
+     * (acc->nn_count != NULL). */
+    int64_t* nn = acc->nn_count;
     for (uint8_t a = 0; a < n_aggs; a++) {
         double fv; int64_t iv;
         if (c->agg_linear && c->agg_linear[a].enabled) {
@@ -3772,39 +3810,61 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
         /* Phase 3a dual encoding: NULL_I* sentinel = null. */
         bool int_null = !is_f && (c->agg_int_null_mask & (1u << a)) &&
                         iv == c->agg_int_null_sentinel[a];
+        bool is_null = is_f ? !(fv == fv) : int_null;
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
             if (is_f) {
                 /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
                 if (RAY_LIKELY(fv == fv)) {
                     acc->sum[a].f += fv;
                     if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
+                    if (nn) nn[a]++;
                 }
             } else if (RAY_LIKELY(!int_null)) {
                 acc->sum[a].i += iv;
                 if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
+                if (nn) nn[a]++;
             }
         } else if (op == OP_PROD) {
+            /* "First non-null" marker: nn[a]==0 when nn is tracked,
+             * otherwise count[0]==1 (always non-null without nn). */
+            bool first_seen = nn ? (nn[a] == 0) : (acc->count[0] == 1);
             if (is_f) {
-                if (acc->count[0] == 1) acc->sum[a].f = fv;
-                else acc->sum[a].f *= fv;
+                if (fv == fv) {
+                    if (first_seen) acc->sum[a].f = fv;
+                    else acc->sum[a].f *= fv;
+                    if (nn) nn[a]++;
+                }
             } else if (RAY_LIKELY(!int_null)) {
-                if (acc->count[0] == 1) acc->sum[a].i = iv;
+                if (first_seen) acc->sum[a].i = iv;
                 else acc->sum[a].i = (int64_t)((uint64_t)acc->sum[a].i * (uint64_t)iv);
+                if (nn) nn[a]++;
             }
         } else if (op == OP_FIRST) {
-            if (acc->count[0] == 1) {
-                if (is_f) { if (fv == fv) acc->sum[a].f = fv; }
-                else if (!int_null) acc->sum[a].i = iv;
+            /* Only commit the value AND advance the "first non-null seen"
+             * marker when the row is non-null — otherwise a null at row 0
+             * would block every later non-null row. */
+            if (!is_null) {
+                bool first_seen = nn ? (nn[a] == 0) : (acc->count[0] == 1);
+                if (first_seen) {
+                    if (is_f) acc->sum[a].f = fv;
+                    else acc->sum[a].i = iv;
+                }
+                if (nn) nn[a]++;
             }
         } else if (op == OP_LAST) {
-            if (is_f) { if (fv == fv) acc->sum[a].f = fv; }
-            else if (!int_null) acc->sum[a].i = iv;
+            if (!is_null) {
+                if (is_f) acc->sum[a].f = fv;
+                else acc->sum[a].i = iv;
+                if (nn) nn[a]++;
+            }
         } else if (op == OP_MIN) {
             if (is_f) { if (fv == fv && fv < acc->min_val[a].f) acc->min_val[a].f = fv; }
             else if (!int_null) { if (iv < acc->min_val[a].i) acc->min_val[a].i = iv; }
+            if (!is_null && nn) nn[a]++;
         } else if (op == OP_MAX) {
             if (is_f) { if (fv == fv && fv > acc->max_val[a].f) acc->max_val[a].f = fv; }
             else if (!int_null) { if (iv > acc->max_val[a].i) acc->max_val[a].i = iv; }
+            if (!is_null && nn) nn[a]++;
         }
     }
 }
@@ -3836,15 +3896,17 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
         if (!acc->sum) return;
         uint32_t f64m = c->agg_f64_mask;
         uint32_t inm = c->agg_int_null_mask;
+        int64_t* nn = acc->nn_count;
         for (uint8_t a = 0; a < n_aggs; a++) {
             if (!c->agg_ptrs[a]) continue;
             size_t idx = base + a;
-            if (c->agg_strlen && c->agg_strlen[a])
+            if (c->agg_strlen && c->agg_strlen[a]) {
                 acc->sum[idx].i += group_strlen_at(c->agg_cols[a], r);
-            else if (f64m & (1u << a)) {
+                if (nn) nn[idx]++;
+            } else if (f64m & (1u << a)) {
                 /* Phase 2 dual encoding: NaN payload = null, skip from sum. */
                 double v = ((const double*)c->agg_ptrs[a])[r];
-                if (RAY_LIKELY(v == v)) acc->sum[idx].f += v;
+                if (RAY_LIKELY(v == v)) { acc->sum[idx].f += v; if (nn) nn[idx]++; }
             } else {
                 /* Phase 3a dual encoding: NULL_I* sentinel = null, skip from sum.
                  * Only paid when the source column actually advertises nulls.
@@ -3856,8 +3918,10 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                  * narrow window where HAS_NULLS is set AND a non-null cell holds the
                  * sentinel value. */
                 int64_t v = read_col_i64(c->agg_ptrs[a], r, c->agg_types[a], 0);
-                if (RAY_LIKELY(!((inm >> a) & 1) || v != c->agg_int_null_sentinel[a]))
+                if (RAY_LIKELY(!((inm >> a) & 1) || v != c->agg_int_null_sentinel[a])) {
                     acc->sum[idx].i += v;
+                    if (nn) nn[idx]++;
+                }
             }
         }
         return;
@@ -3867,10 +3931,22 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
      * dispatch is work-stealing: tasks may be claimed by a single worker
      * out of index order, so rows do NOT arrive in monotonic order within
      * a worker.  Use explicit min/max comparison against r and update the
-     * stored value only when the new row beats the current bound. */
+     * stored value only when the new row beats the current bound.
+     *
+     * Multi-FIRST limitation: first_row[gid] is shared across all FIRST
+     * aggs in this group, so two FIRST aggs A and B on different columns
+     * with disjoint null patterns can race — whichever non-null lands
+     * first stakes first_row and the other agg never gets a chance.
+     * The result for the "loser" agg is a typed null (nn[idx] stays 0),
+     * which is strictly safer than the previous behaviour (leaked the
+     * 0 calloc seed) but still not the true first-non-null value.  Fix
+     * would require per-(group, agg) first_row arrays.  Out of scope for
+     * this phase; documented for future work. */
     bool fl_take_first = (acc->first_row && r < acc->first_row[gid]);
     bool fl_take_last  = (acc->last_row  && r > acc->last_row[gid]);
+    bool first_advanced = false, last_advanced = false;
 
+    int64_t* nn = acc->nn_count;
     for (uint8_t a = 0; a < n_aggs; a++) {
         if (!c->agg_ptrs[a]) continue;
         size_t idx = base + a;
@@ -3882,64 +3958,83 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             da_read_val(c->agg_ptrs[a], c->agg_types[a], 0, r, &fv, &iv);
         }
         uint16_t op = c->agg_ops[a];
+        bool is_f = (c->agg_types[a] == RAY_F64);
         /* Phase 3a dual encoding: NULL_I* sentinel = null.  Bit set in
          * agg_int_null_mask AND value equal to per-agg sentinel means
          * this row is null for an integer aggregation column. */
         bool int_null = (c->agg_int_null_mask & (1u << a)) &&
                         iv == c->agg_int_null_sentinel[a];
+        bool is_null = is_f ? !(fv == fv) : int_null;
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
-            if (c->agg_types[a] == RAY_F64) {
+            if (is_f) {
                 /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
                 if (RAY_LIKELY(fv == fv)) {
                     acc->sum[idx].f += fv;
                     if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
+                    if (nn) nn[idx]++;
                 }
             } else if (RAY_LIKELY(!int_null)) {
                 acc->sum[idx].i = (int64_t)((uint64_t)acc->sum[idx].i + (uint64_t)iv);
                 if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
+                if (nn) nn[idx]++;
             }
         } else if (op == OP_PROD) {
-            if (c->agg_types[a] == RAY_F64) {
-                if (acc->count[gid] == 1) acc->sum[idx].f = fv;
-                else acc->sum[idx].f *= fv;
+            /* "First non-null" marker: nn[idx]==0 when nn is tracked,
+             * otherwise count[gid]==1 (always non-null without nn). */
+            bool first_seen = nn ? (nn[idx] == 0) : (acc->count[gid] == 1);
+            if (is_f) {
+                if (fv == fv) {
+                    if (first_seen) acc->sum[idx].f = fv;
+                    else acc->sum[idx].f *= fv;
+                    if (nn) nn[idx]++;
+                }
             } else if (RAY_LIKELY(!int_null)) {
-                if (acc->count[gid] == 1) acc->sum[idx].i = iv;
+                if (first_seen) acc->sum[idx].i = iv;
                 else acc->sum[idx].i = (int64_t)((uint64_t)acc->sum[idx].i * (uint64_t)iv);
+                if (nn) nn[idx]++;
             }
         } else if (op == OP_FIRST) {
-            if (fl_take_first) {
-                if (c->agg_types[a] == RAY_F64) {
-                    /* Phase 2 dual encoding: skip NaN so first stays a real value. */
-                    if (fv == fv) acc->sum[idx].f = fv;
-                } else if (!int_null) acc->sum[idx].i = iv;
+            /* Only stake the first-row claim when this row's value for the
+             * agg column is actually non-null — a null prefix would block
+             * later non-null rows otherwise. */
+            if (fl_take_first && !is_null) {
+                if (is_f) acc->sum[idx].f = fv;
+                else acc->sum[idx].i = iv;
+                first_advanced = true;
+                if (nn) nn[idx]++;
             }
         } else if (op == OP_LAST) {
-            if (fl_take_last) {
-                if (c->agg_types[a] == RAY_F64) {
-                    /* Phase 2 dual encoding: skip NaN so last stays a real value. */
-                    if (fv == fv) acc->sum[idx].f = fv;
-                } else if (!int_null) acc->sum[idx].i = iv;
+            if (fl_take_last && !is_null) {
+                if (is_f) acc->sum[idx].f = fv;
+                else acc->sum[idx].i = iv;
+                last_advanced = true;
+                if (nn) nn[idx]++;
             }
         } else if (op == OP_MIN) {
-            if (c->agg_types[a] == RAY_F64) {
+            if (is_f) {
                 /* Phase 2 dual encoding: NaN comparisons are always false, but
                  * make the skip explicit. */
                 if (fv == fv && fv < acc->min_val[idx].f) acc->min_val[idx].f = fv;
             } else if (!int_null) {
                 if (iv < acc->min_val[idx].i) acc->min_val[idx].i = iv;
             }
+            if (!is_null && nn) nn[idx]++;
         } else if (op == OP_MAX) {
-            if (c->agg_types[a] == RAY_F64) {
+            if (is_f) {
                 if (fv == fv && fv > acc->max_val[idx].f) acc->max_val[idx].f = fv;
             } else if (!int_null) {
                 if (iv > acc->max_val[idx].i) acc->max_val[idx].i = iv;
             }
+            if (!is_null && nn) nn[idx]++;
         }
     }
 
-    /* Commit row-index bounds after value writes. */
-    if (fl_take_first) acc->first_row[gid] = r;
-    if (fl_take_last)  acc->last_row[gid]  = r;
+    /* Commit row-index bounds only when an OP_FIRST/OP_LAST actually
+     * accepted this row's value.  An all-null row at the smallest index
+     * must NOT advance first_row[gid] — otherwise the next non-null row
+     * loses the FIRST race. */
+    if (first_advanced) acc->first_row[gid] = r;
+    if (last_advanced)  acc->last_row[gid]  = r;
 }
 
 static void da_accum_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
@@ -4068,17 +4163,21 @@ static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
                 for (uint8_t a = 0; a < n_aggs; a++) {
                     size_t idx = base + a;
                     uint16_t aop = c->agg_ops ? c->agg_ops[a] : OP_SUM;
+                    /* nn_count is per-(group, agg); count is per group.
+                     * Fall back to count when nn_count is absent. */
+                    int64_t mnn = merged->nn_count ? merged->nn_count[idx] : merged->count[s];
+                    int64_t wnn = wa->nn_count ? wa->nn_count[idx] : wa->count[s];
                     if (aop == OP_FIRST) {
-                        /* Keep worker 0 value; take from w only if merged has no data */
-                        if (merged->count[s] == 0 && wa->count[s] > 0)
+                        /* Keep worker 0 value; take from w only if merged has no non-null value */
+                        if (mnn == 0 && wnn > 0)
                             merged->sum[idx] = wa->sum[idx];
                     } else if (aop == OP_LAST) {
-                        /* Overwrite with last worker that has data */
-                        if (wa->count[s] > 0)
+                        /* Overwrite with last worker that has a non-null value */
+                        if (wnn > 0)
                             merged->sum[idx] = wa->sum[idx];
                     } else if (aop == OP_PROD) {
-                        if (wa->count[s] > 0) {
-                            if (merged->count[s] == 0)
+                        if (wnn > 0) {
+                            if (mnn == 0)
                                 merged->sum[idx] = wa->sum[idx];
                             else if (agg_types[a] == RAY_F64)
                                 merged->sum[idx].f *= wa->sum[idx].f;
@@ -4114,6 +4213,10 @@ static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
                             merged->max_val[idx].i = wa->max_val[idx].i;
                     }
                 }
+            }
+            if (merged->nn_count && wa->nn_count) {
+                for (uint8_t a = 0; a < n_aggs; a++)
+                    merged->nn_count[base + a] += wa->nn_count[base + a];
             }
             merged->count[s] += wa->count[s];
         }
@@ -4935,6 +5038,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         int8_t agg_types[vla_aggs];
         int64_t sc_int_null_sentinel[vla_aggs];
         uint32_t sc_int_null_mask = 0;
+        bool sc_any_nullable = false;
         for (uint8_t a = 0; a < n_aggs; a++) {
             if (agg_vecs[a]) {
                 agg_ptrs[a]  = ray_data(agg_vecs[a]);
@@ -4950,6 +5054,9 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                                           t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP);
                 if (is_sentinel_typed && (agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS))
                     sc_int_null_mask |= (1u << a);
+                if ((agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS) &&
+                    (agg_vecs[a]->type == RAY_F64 || is_sentinel_typed))
+                    sc_any_nullable = true;
             } else {
                 agg_ptrs[a]  = NULL;
                 agg_types[a] = 0;
@@ -5008,6 +5115,11 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             sc_acc[w].count = (int64_t*)scratch_calloc(&sc_acc[w]._h_count,
                 1 * sizeof(int64_t));
             if (!sc_acc[w].count) { alloc_ok = false; break; }
+            if (sc_any_nullable) {
+                sc_acc[w].nn_count = (int64_t*)scratch_calloc(
+                    &sc_acc[w]._h_nn_count, n_aggs * sizeof(int64_t));
+                if (!sc_acc[w].nn_count) { alloc_ok = false; break; }
+            }
         }
         if (!alloc_ok) {
             for (uint32_t w = 0; w < sc_n; w++) da_accum_free(&sc_acc[w]);
@@ -5073,15 +5185,19 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             if (need_flags & DA_NEED_SUM) {
                 for (uint8_t a = 0; a < n_aggs; a++) {
                     uint16_t merge_op = ext->agg_ops[a];
+                    /* nn_count is per-agg; count is per worker.  Fall back
+                     * to count when nn_count is absent (no nullable aggs). */
+                    int64_t mnn = m->nn_count ? m->nn_count[a] : m->count[0];
+                    int64_t wnn = wa->nn_count ? wa->nn_count[a] : wa->count[0];
                     if (merge_op == OP_FIRST) {
-                        if (m->count[0] == 0 && wa->count[0] > 0)
+                        if (mnn == 0 && wnn > 0)
                             m->sum[a] = wa->sum[a];
                     } else if (merge_op == OP_LAST) {
-                        if (wa->count[0] > 0)
+                        if (wnn > 0)
                             m->sum[a] = wa->sum[a];
                     } else if (merge_op == OP_PROD) {
-                        if (wa->count[0] > 0) {
-                            if (m->count[0] == 0)
+                        if (wnn > 0) {
+                            if (mnn == 0)
                                 m->sum[a] = wa->sum[a];
                             else if (agg_types[a] == RAY_F64)
                                 m->sum[a].f *= wa->sum[a].f;
@@ -5122,6 +5238,10 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     }
                 }
             }
+            if (m->nn_count && wa->nn_count) {
+                for (uint8_t a = 0; a < n_aggs; a++)
+                    m->nn_count[a] += wa->nn_count[a];
+            }
             m->count[0] += wa->count[0];
         }
         for (uint32_t w = 1; w < sc_n; w++) da_accum_free(&sc_acc[w]);
@@ -5142,7 +5262,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                          (double*)m->sum, (int64_t*)m->sum,
                          (double*)m->min_val, (double*)m->max_val,
                          (int64_t*)m->min_val, (int64_t*)m->max_val,
-                         m->count, agg_affine, m->sumsq_f64);
+                         m->count, agg_affine, m->sumsq_f64, m->nn_count);
 
         da_accum_free(&sc_acc[0]); scratch_free(sc_hdr);
         for (uint8_t a = 0; a < n_aggs; a++)
@@ -5308,6 +5428,11 @@ da_path:;
             int64_t da_int_null_sentinel[vla_aggs];
             uint32_t agg_f64_mask = 0;
             uint32_t da_int_null_mask = 0;
+            /* Phase 3 follow-up: track whether any agg column can produce
+             * a null so we can allocate per-(group, agg) non-null counts
+             * only when required.  F64 with HAS_NULLS uses NaN-skip; sentinel-
+             * typed integers with HAS_NULLS use sentinel-skip. */
+            bool da_any_nullable = false;
             for (uint8_t a = 0; a < n_aggs; a++) {
                 if (agg_vecs[a]) {
                     agg_ptrs[a]  = ray_data(agg_vecs[a]);
@@ -5325,6 +5450,9 @@ da_path:;
                                               t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP);
                     if (is_sentinel_typed && (agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS))
                         da_int_null_mask |= (1u << a);
+                    if ((agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS) &&
+                        (agg_vecs[a]->type == RAY_F64 || is_sentinel_typed))
+                        da_any_nullable = true;
                 } else {
                     agg_ptrs[a]  = NULL;
                     agg_types[a] = 0;
@@ -5344,6 +5472,9 @@ da_path:;
             if (need_flags & DA_NEED_MIN) arrays_per_agg += 2;
             if (need_flags & DA_NEED_MAX) arrays_per_agg += 2;
             if (need_flags & DA_NEED_SUMSQ) arrays_per_agg += 1;
+            /* Phase 3 follow-up: nullable aggs add a per-(group, agg)
+             * non-null count array.  ~8 bytes per (group, agg). */
+            if (da_any_nullable) arrays_per_agg += 1;
             uint64_t per_worker_bytes = (uint64_t)n_slots * (arrays_per_agg * n_aggs + 1u) * 8u;
             if ((uint64_t)da_n_workers * per_worker_bytes > DA_MEM_BUDGET)
                 da_n_workers = 1;
@@ -5388,6 +5519,11 @@ da_path:;
                 accums[w].count = (int64_t*)scratch_calloc(&accums[w]._h_count,
                     n_slots * sizeof(int64_t));
                 if (!accums[w].count) { alloc_ok = false; break; }
+                if (da_any_nullable) {
+                    accums[w].nn_count = (int64_t*)scratch_calloc(
+                        &accums[w]._h_nn_count, total * sizeof(int64_t));
+                    if (!accums[w].nn_count) { alloc_ok = false; break; }
+                }
                 if (da_has_first_last) {
                     accums[w].first_row = (int64_t*)scratch_alloc(
                         &accums[w]._h_first_row, n_slots * sizeof(int64_t));
@@ -5481,8 +5617,13 @@ da_path:;
                                     if (agg_types[a] == RAY_F64) merged->sum[idx].f += wa->sum[idx].f;
                                     else merged->sum[idx].i += wa->sum[idx].i;
                                 } else if (aop == OP_PROD) {
-                                    if (wa->count[s] > 0) {
-                                        if (merged->count[s] == 0)
+                                    /* Use per-(group, agg) non-null counts when
+                                     * available so an all-null worker doesn't
+                                     * fold a stale seed into the merged product. */
+                                    int64_t mnn = merged->nn_count ? merged->nn_count[idx] : merged->count[s];
+                                    int64_t wnn = wa->nn_count ? wa->nn_count[idx] : wa->count[s];
+                                    if (wnn > 0) {
+                                        if (mnn == 0)
                                             merged->sum[idx] = wa->sum[idx];
                                         else if (agg_types[a] == RAY_F64)
                                             merged->sum[idx].f *= wa->sum[idx].f;
@@ -5523,6 +5664,10 @@ da_path:;
                             }
                         }
                     }
+                    if (merged->nn_count && wa->nn_count) {
+                        for (size_t i = 0; i < total; i++)
+                            merged->nn_count[i] += wa->nn_count[i];
+                    }
                     for (uint32_t s = 0; s < n_slots; s++)
                         merged->count[s] += wa->count[s];
                 }
@@ -5551,15 +5696,17 @@ da_path:;
                             for (uint8_t a = 0; a < n_aggs; a++) {
                                 size_t idx = base + a;
                                 uint16_t aop = ext->agg_ops[a];
+                                int64_t mnn = merged->nn_count ? merged->nn_count[idx] : merged->count[s];
+                                int64_t wnn = wa->nn_count ? wa->nn_count[idx] : wa->count[s];
                                 if (aop == OP_FIRST) {
-                                    if (merged->count[s] == 0 && wa->count[s] > 0)
+                                    if (mnn == 0 && wnn > 0)
                                         merged->sum[idx] = wa->sum[idx];
                                 } else if (aop == OP_LAST) {
-                                    if (wa->count[s] > 0)
+                                    if (wnn > 0)
                                         merged->sum[idx] = wa->sum[idx];
                                 } else if (aop == OP_PROD) {
-                                    if (wa->count[s] > 0) {
-                                        if (merged->count[s] == 0)
+                                    if (wnn > 0) {
+                                        if (mnn == 0)
                                             merged->sum[idx] = wa->sum[idx];
                                         else if (agg_types[a] == RAY_F64)
                                             merged->sum[idx].f *= wa->sum[idx].f;
@@ -5597,6 +5744,10 @@ da_path:;
                             }
                         }
                     }
+                    if (merged->nn_count && wa->nn_count) {
+                        for (size_t i = 0; i < total; i++)
+                            merged->nn_count[i] += wa->nn_count[i];
+                    }
                     for (uint32_t s = 0; s < n_slots; s++)
                         merged->count[s] += wa->count[s];
                 }
@@ -5612,6 +5763,7 @@ da_path:;
             da_val_t* da_max_val  = merged->max_val;  /* may be NULL if !DA_NEED_MAX */
             double*   da_sumsq   = merged->sumsq_f64; /* may be NULL if !DA_NEED_SUMSQ */
             int64_t*  da_count   = merged->count;
+            int64_t*  da_nn_count = merged->nn_count; /* may be NULL when no agg can be null */
 
             uint32_t all_grp_count = 0;
             for (uint32_t s = 0; s < n_slots; s++)
@@ -5661,13 +5813,16 @@ da_path:;
             /* Agg columns — compact sparse DA arrays into dense, then emit */
             size_t dense_total = (size_t)grp_count * n_aggs;
             ray_t *_h_dsum = NULL, *_h_dmin = NULL, *_h_dmax = NULL;
-            ray_t *_h_dsq = NULL, *_h_dcnt = NULL;
+            ray_t *_h_dsq = NULL, *_h_dcnt = NULL, *_h_dnn = NULL;
             da_val_t* dense_sum     = da_sum     ? (da_val_t*)scratch_alloc(&_h_dsum, dense_total * sizeof(da_val_t)) : NULL;
             da_val_t* dense_min_val = da_min_val ? (da_val_t*)scratch_alloc(&_h_dmin, dense_total * sizeof(da_val_t)) : NULL;
             da_val_t* dense_max_val = da_max_val ? (da_val_t*)scratch_alloc(&_h_dmax, dense_total * sizeof(da_val_t)) : NULL;
             double*   dense_sumsq   = da_sumsq   ? (double*)scratch_alloc(&_h_dsq, dense_total * sizeof(double)) : NULL;
             int64_t*  dense_counts  = grp_count
                 ? (int64_t*)scratch_alloc(&_h_dcnt, grp_count * sizeof(int64_t))
+                : NULL;
+            int64_t*  dense_nn_counts = (da_nn_count && grp_count)
+                ? (int64_t*)scratch_alloc(&_h_dnn, dense_total * sizeof(int64_t))
                 : NULL;
 
             uint32_t gi = 0;
@@ -5681,6 +5836,7 @@ da_path:;
                     if (dense_min_val) dense_min_val[di] = da_min_val[si];
                     if (dense_max_val) dense_max_val[di] = da_max_val[si];
                     if (dense_sumsq)   dense_sumsq[di]   = da_sumsq[si];
+                    if (dense_nn_counts) dense_nn_counts[di] = da_nn_count[si];
                 }
                 gi++;
             }
@@ -5689,11 +5845,13 @@ da_path:;
                              (double*)dense_sum, (int64_t*)dense_sum,
                              (double*)dense_min_val, (double*)dense_max_val,
                              (int64_t*)dense_min_val, (int64_t*)dense_max_val,
-                             dense_counts, agg_affine, dense_sumsq);
+                             dense_counts, agg_affine, dense_sumsq,
+                             dense_nn_counts);
 
             scratch_free(_h_dsum); scratch_free(_h_dmin);
             scratch_free(_h_dmax);
             scratch_free(_h_dsq); scratch_free(_h_dcnt);
+            scratch_free(_h_dnn);
 
             da_accum_free(&accums[0]); scratch_free(accums_hdr);
             for (uint8_t a = 0; a < n_aggs; a++)
@@ -6005,10 +6163,14 @@ dyn_dense_done:
                     int64_t name_id = key_ext ? key_ext->sym : 0;
                     result = ray_table_add_col(result, name_id, key_col);
                     ray_release(key_col);
+                    /* nn_counts == NULL: this fast path rejected HAS_NULLS
+                     * inputs at the sp_eligible gate (~line 5737), so every
+                     * row is non-null and the legacy count-based divisor is
+                     * correct. */
                     emit_agg_columns(&result, g, ext, agg_vecs, grp_count, n_aggs,
                                      (double*)dense_sum, (int64_t*)dense_sum,
                                      NULL, NULL, NULL, NULL,
-                                     dense_count, agg_affine, NULL);
+                                     dense_count, agg_affine, NULL, NULL);
 
                     scratch_free(_h_sum); scratch_free(_h_cnt);
                     scratch_free(range_sum_hdr); scratch_free(cnt_hdr);
@@ -6202,10 +6364,13 @@ dyn_dense_done:
                     result = ray_table_add_col(result, name_id, key_col);
                     ray_release(key_col);
 
+                    /* nn_counts == NULL: same null-free guard as above; the
+                     * emit-filter range path only runs when sp_eligible was
+                     * true. */
                     emit_agg_columns(&result, g, ext, agg_vecs, grp_count, n_aggs,
                                      (double*)dense_sum, (int64_t*)dense_sum,
                                      NULL, NULL, NULL, NULL,
-                                     dense_count, agg_affine, NULL);
+                                     dense_count, agg_affine, NULL, NULL);
 
                     scratch_free(_h_sum);
                     scratch_free(_h_cnt);
@@ -6420,10 +6585,13 @@ dyn_dense_done:
             result = ray_table_add_col(result, name_id, key_col);
             ray_release(key_col);
 
+            /* nn_counts == NULL: sparse HT path only handles SUM/AVG/COUNT
+             * and is gated to null-free agg columns (sp_eligible guard at
+             * ~line 5737), so counts[gi] is the correct divisor. */
             emit_agg_columns(&result, g, ext, agg_vecs, grp_count, n_aggs,
                              (double*)dense_sum, (int64_t*)dense_sum,
                              NULL, NULL, NULL, NULL,
-                             dense_count, agg_affine, NULL);
+                             dense_count, agg_affine, NULL, NULL);
 
             scratch_free(_h_sum);
             scratch_free(_h_cnt);
