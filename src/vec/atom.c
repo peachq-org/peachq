@@ -180,7 +180,8 @@ ray_t* ray_typed_null(int8_t type) {
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;
     v->type = type;
-    v->i64 = 0;
+    if (type == -RAY_F64) v->f64 = NULL_F64;
+    else                  v->i64 = 0;
     v->nullmap[0] |= 1;
     return v;
 }
