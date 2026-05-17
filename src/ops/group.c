@@ -1273,7 +1273,7 @@ static void med_per_group_fn(void* ctx_v, uint32_t worker_id,
             }
         }
         if (actual == 0) {
-            c->out_data[g] = 0.0;
+            c->out_data[g] = NULL_F64;
             ray_vec_set_null(c->out, g, true);
         } else {
             c->out_data[g] = ray_median_dbl_inplace(slice, actual);
