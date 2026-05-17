@@ -295,6 +295,11 @@ bool try_linear_sumavg_input_i64(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
     for (uint8_t i = 0; i < lin.n_terms; i++) {
         ray_t* col = ray_table_get_col(tbl, lin.syms[i]);
         if (!col || !type_is_linear_i64_col(col->type)) return false;
+        /* Phase 3a: scalar_sum_linear_i64_fn reads slots raw via
+         * scalar_i64_at; any nullable term would poison the sum with
+         * NULL_I{16,32,64} sentinels.  Refuse the fast plan and let
+         * the caller fall back to the generic masked path. */
+        if (col->attrs & RAY_ATTR_HAS_NULLS) return false;
         out_plan->term_ptrs[i] = ray_data(col);
         out_plan->term_types[i] = col->type;
         out_plan->coeff_i64[i] = lin.coeff_i64[i];
