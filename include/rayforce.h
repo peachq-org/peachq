@@ -315,8 +315,20 @@ ray_t* ray_typed_null(int8_t type);
  * Phase 1 added the constants and locked BOOL/U8 down as non-nullable.
  * Phase 2 wired NULL_F64 into the CSV parser, ray_typed_null, and the
  * I64→F64 UPDATE cast — null F64 slots now hold NaN alongside the
- * nullmap bit.  Phase 3a–d will follow for integer and temporal types.
- * Known Phase 3 work (out of scope for Phase 2): grouped AVG / VAR /
+ * nullmap bit.
+ * Phase 3a generalized this to integer / temporal types (I16, I32, I64,
+ * DATE, TIME, TIMESTAMP).  Producer surface mirrors Phase 2 — CSV
+ * parser, ray_typed_null, cast_vec_copy_nulls, set_all_null,
+ * store_typed_elem (lang/internal.h), UPDATE atom broadcast (3 sites),
+ * UPDATE WHERE numeric-promo cast, group-by key scatter (serial +
+ * parallel + grpt TOP_N), pivot key scatter, linkop deref.  The
+ * grouped-aggregation consumer (da_accum_row + scalar_accum_row) gained
+ * per-agg integer-null guards in the SUM/AVG/STDDEV/VAR/PROD/MIN/MAX/
+ * FIRST/LAST arms — sentinel-compare (`v != precomputed_sentinel`)
+ * rather than nullmap consultation for cache-line efficiency; the
+ * tradeoff (a user-stored INT_MIN in a HAS_NULLS column is dropped)
+ * is bounded by dual encoding keeping the bitmap as source of truth.
+ * Known Phase 3 work (out of scope for Phase 2/3a): grouped AVG / VAR /
  * STDDEV use count[gid] as the divisor without excluding null rows;
  * grouped FIRST / LAST / MIN / MAX / PROD on all-null F64 groups can
  * return DBL_MAX / -DBL_MAX / 0.0 or propagate NaN through products
