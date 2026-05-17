@@ -277,8 +277,23 @@ static inline int64_t elem_as_i64(ray_t* elem) {
  * Returns 0 on success, -1 if the element type doesn't match. */
 static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
     if (RAY_ATOM_IS_NULL(elem)) {
-        int esz = ray_elem_size(vec->type);
-        memset((char*)ray_data(vec) + i * esz, 0, esz);
+        /* Phase 2/3a dual-encoding: payload must carry the width-correct
+         * sentinel alongside the nullmap bit. */
+        switch (vec->type) {
+            case RAY_F64:
+                ((double*)ray_data(vec))[i] = NULL_F64; break;
+            case RAY_I64: case RAY_TIMESTAMP:
+                ((int64_t*)ray_data(vec))[i] = NULL_I64; break;
+            case RAY_I32: case RAY_DATE: case RAY_TIME:
+                ((int32_t*)ray_data(vec))[i] = NULL_I32; break;
+            case RAY_I16:
+                ((int16_t*)ray_data(vec))[i] = NULL_I16; break;
+            default: {
+                int esz = ray_elem_size(vec->type);
+                memset((char*)ray_data(vec) + i * esz, 0, esz);
+                break;
+            }
+        }
         ray_vec_set_null(vec, i, true);
         return 0;
     }
