@@ -1127,7 +1127,19 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             goto oom;
         }
         result_vecs[f]->len = nrows;
-        memset(ray_data(result_vecs[f]), 0, (size_t)nrows * 8);
+        /* Pre-stamp every slot with the width-correct null sentinel.  The
+         * per-partition compute loops below write valid values into
+         * "active" slots and call win_set_null on null-producing slots
+         * without re-writing the payload — so the only way to honor the
+         * dual-encoding contract for those bitmap-only nulls is to make
+         * the payload already match the sentinel up front. */
+        if (is_f64[f]) {
+            double* d = (double*)ray_data(result_vecs[f]);
+            for (int64_t i = 0; i < nrows; i++) d[i] = NULL_F64;
+        } else {
+            int64_t* d = (int64_t*)ray_data(result_vecs[f]);
+            for (int64_t i = 0; i < nrows; i++) d[i] = NULL_I64;
+        }
     }
 
     /* Order key vectors start at sort_vecs[n_part] */
