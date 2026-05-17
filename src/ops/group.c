@@ -3264,6 +3264,8 @@ typedef struct {
     uint8_t        n_aggs;
     uint8_t        need_flags;   /* DA_NEED_* bitmask */
     uint32_t       agg_f64_mask; /* bitmask: bit a set if agg[a] is RAY_F64 */
+    uint32_t       agg_int_null_mask; /* bitmask: bit a set if agg[a] is an integer col with HAS_NULLS */
+    int64_t*       agg_int_null_sentinel; /* per-agg int sentinel (NULL_I64 etc) when bit set in mask */
     bool           all_sum;      /* true when all ops are SUM/AVG/COUNT (no MIN/MAX/FIRST/LAST) */
     uint32_t       n_slots;
     const int64_t* match_idx;    /* NULL = no selection */
@@ -3644,6 +3646,18 @@ static ray_t* materialize_broadcast_input(ray_t* src, int64_t nrows) {
     }
 }
 
+/* Per-type integer null sentinel for an aggregation column.  Returns 0 for
+ * non-nullable / non-integer types (BOOL, U8, SYM, F64) since 0 will never
+ * match a read_col_i64 value flagged as null via agg_int_null_mask. */
+static inline int64_t agg_int_null_sentinel_for(int8_t t) {
+    switch (t) {
+        case RAY_I64: case RAY_TIMESTAMP:            return NULL_I64;
+        case RAY_I32: case RAY_DATE: case RAY_TIME:  return (int64_t)NULL_I32;
+        case RAY_I16:                                return (int64_t)NULL_I16;
+        default:                                     return 0;
+    }
+}
+
 /* ---- Scalar aggregate (n_keys==0): one flat scan, no GID, no hash ---- */
 typedef struct {
     void**         agg_ptrs;
@@ -3659,6 +3673,9 @@ typedef struct {
     /* per-worker accumulators (1 slot each) */
     da_accum_t*    accums;
     uint32_t       n_accums;
+    /* Phase 3a: per-agg integer-null sentinel + mask (mirrors da_ctx_t). */
+    uint32_t       agg_int_null_mask;
+    int64_t*       agg_int_null_sentinel;
 } scalar_ctx_t;
 
 static inline int64_t scalar_i64_at(const void* ptr, int8_t type, int64_t r) {
@@ -3739,6 +3756,9 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
         }
         uint16_t op = c->agg_ops[a];
         bool is_f = (c->agg_types[a] == RAY_F64);
+        /* Phase 3a dual encoding: NULL_I* sentinel = null. */
+        bool int_null = !is_f && (c->agg_int_null_mask & (1u << a)) &&
+                        iv == c->agg_int_null_sentinel[a];
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
             if (is_f) {
                 /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
@@ -3746,7 +3766,7 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
                     acc->sum[a].f += fv;
                     if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
                 }
-            } else {
+            } else if (RAY_LIKELY(!int_null)) {
                 acc->sum[a].i += iv;
                 if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
             }
@@ -3754,24 +3774,24 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
             if (is_f) {
                 if (acc->count[0] == 1) acc->sum[a].f = fv;
                 else acc->sum[a].f *= fv;
-            } else {
+            } else if (RAY_LIKELY(!int_null)) {
                 if (acc->count[0] == 1) acc->sum[a].i = iv;
                 else acc->sum[a].i = (int64_t)((uint64_t)acc->sum[a].i * (uint64_t)iv);
             }
         } else if (op == OP_FIRST) {
             if (acc->count[0] == 1) {
                 if (is_f) { if (fv == fv) acc->sum[a].f = fv; }
-                else acc->sum[a].i = iv;
+                else if (!int_null) acc->sum[a].i = iv;
             }
         } else if (op == OP_LAST) {
             if (is_f) { if (fv == fv) acc->sum[a].f = fv; }
-            else acc->sum[a].i = iv;
+            else if (!int_null) acc->sum[a].i = iv;
         } else if (op == OP_MIN) {
             if (is_f) { if (fv == fv && fv < acc->min_val[a].f) acc->min_val[a].f = fv; }
-            else      { if (iv < acc->min_val[a].i) acc->min_val[a].i = iv; }
+            else if (!int_null) { if (iv < acc->min_val[a].i) acc->min_val[a].i = iv; }
         } else if (op == OP_MAX) {
             if (is_f) { if (fv == fv && fv > acc->max_val[a].f) acc->max_val[a].f = fv; }
-            else      { if (iv > acc->max_val[a].i) acc->max_val[a].i = iv; }
+            else if (!int_null) { if (iv > acc->max_val[a].i) acc->max_val[a].i = iv; }
         }
     }
 }
@@ -3802,6 +3822,7 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
          * COUNT-only queries have acc->sum==NULL; count[gid]++ above suffices. */
         if (!acc->sum) return;
         uint32_t f64m = c->agg_f64_mask;
+        uint32_t inm = c->agg_int_null_mask;
         for (uint8_t a = 0; a < n_aggs; a++) {
             if (!c->agg_ptrs[a]) continue;
             size_t idx = base + a;
@@ -3811,9 +3832,20 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                 /* Phase 2 dual encoding: NaN payload = null, skip from sum. */
                 double v = ((const double*)c->agg_ptrs[a])[r];
                 if (RAY_LIKELY(v == v)) acc->sum[idx].f += v;
-            } else
-                acc->sum[idx].i += read_col_i64(c->agg_ptrs[a], r,
-                                                c->agg_types[a], 0);
+            } else {
+                /* Phase 3a dual encoding: NULL_I* sentinel = null, skip from sum.
+                 * Only paid when the source column actually advertises nulls.
+                 *
+                 * Phase 3a hazard: this sentinel-compare drops user-stored INT_MIN
+                 * values in HAS_NULLS columns. The plan accepted this tradeoff for
+                 * the cache-line cost of nullmap consultation — dual encoding keeps
+                 * the bitmap as source of truth, so the corruption is bounded to the
+                 * narrow window where HAS_NULLS is set AND a non-null cell holds the
+                 * sentinel value. */
+                int64_t v = read_col_i64(c->agg_ptrs[a], r, c->agg_types[a], 0);
+                if (RAY_LIKELY(!((inm >> a) & 1) || v != c->agg_int_null_sentinel[a]))
+                    acc->sum[idx].i += v;
+            }
         }
         return;
     }
@@ -3837,6 +3869,11 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             da_read_val(c->agg_ptrs[a], c->agg_types[a], 0, r, &fv, &iv);
         }
         uint16_t op = c->agg_ops[a];
+        /* Phase 3a dual encoding: NULL_I* sentinel = null.  Bit set in
+         * agg_int_null_mask AND value equal to per-agg sentinel means
+         * this row is null for an integer aggregation column. */
+        bool int_null = (c->agg_int_null_mask & (1u << a)) &&
+                        iv == c->agg_int_null_sentinel[a];
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
             if (c->agg_types[a] == RAY_F64) {
                 /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
@@ -3844,7 +3881,7 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                     acc->sum[idx].f += fv;
                     if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
                 }
-            } else {
+            } else if (RAY_LIKELY(!int_null)) {
                 acc->sum[idx].i = (int64_t)((uint64_t)acc->sum[idx].i + (uint64_t)iv);
                 if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
             }
@@ -3852,7 +3889,7 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             if (c->agg_types[a] == RAY_F64) {
                 if (acc->count[gid] == 1) acc->sum[idx].f = fv;
                 else acc->sum[idx].f *= fv;
-            } else {
+            } else if (RAY_LIKELY(!int_null)) {
                 if (acc->count[gid] == 1) acc->sum[idx].i = iv;
                 else acc->sum[idx].i = (int64_t)((uint64_t)acc->sum[idx].i * (uint64_t)iv);
             }
@@ -3861,27 +3898,27 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                 if (c->agg_types[a] == RAY_F64) {
                     /* Phase 2 dual encoding: skip NaN so first stays a real value. */
                     if (fv == fv) acc->sum[idx].f = fv;
-                } else acc->sum[idx].i = iv;
+                } else if (!int_null) acc->sum[idx].i = iv;
             }
         } else if (op == OP_LAST) {
             if (fl_take_last) {
                 if (c->agg_types[a] == RAY_F64) {
                     /* Phase 2 dual encoding: skip NaN so last stays a real value. */
                     if (fv == fv) acc->sum[idx].f = fv;
-                } else acc->sum[idx].i = iv;
+                } else if (!int_null) acc->sum[idx].i = iv;
             }
         } else if (op == OP_MIN) {
             if (c->agg_types[a] == RAY_F64) {
                 /* Phase 2 dual encoding: NaN comparisons are always false, but
                  * make the skip explicit. */
                 if (fv == fv && fv < acc->min_val[idx].f) acc->min_val[idx].f = fv;
-            } else {
+            } else if (!int_null) {
                 if (iv < acc->min_val[idx].i) acc->min_val[idx].i = iv;
             }
         } else if (op == OP_MAX) {
             if (c->agg_types[a] == RAY_F64) {
                 if (fv == fv && fv > acc->max_val[idx].f) acc->max_val[idx].f = fv;
-            } else {
+            } else if (!int_null) {
                 if (iv > acc->max_val[idx].i) acc->max_val[idx].i = iv;
             }
         }
@@ -4883,13 +4920,27 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
 
         void* agg_ptrs[vla_aggs];
         int8_t agg_types[vla_aggs];
+        int64_t sc_int_null_sentinel[vla_aggs];
+        uint32_t sc_int_null_mask = 0;
         for (uint8_t a = 0; a < n_aggs; a++) {
             if (agg_vecs[a]) {
                 agg_ptrs[a]  = ray_data(agg_vecs[a]);
                 agg_types[a] = agg_vecs[a]->type;
+                sc_int_null_sentinel[a] = agg_int_null_sentinel_for(agg_vecs[a]->type);
+                /* Only set the int-null mask bit for storage types whose
+                 * sentinel is meaningful.  BOOL/U8/SYM use 0 as their default
+                 * "sentinel" which collides with legitimate values
+                 * (FALSE / zero byte / SYM id 0); gating those would silently
+                 * drop real rows from SUM/MIN/MAX.  F64 has its own NaN path. */
+                int8_t t = agg_vecs[a]->type;
+                bool is_sentinel_typed = (t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+                                          t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP);
+                if (is_sentinel_typed && (agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS))
+                    sc_int_null_mask |= (1u << a);
             } else {
                 agg_ptrs[a]  = NULL;
                 agg_types[a] = 0;
+                sc_int_null_sentinel[a] = 0;
             }
         }
 
@@ -4964,15 +5015,26 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             .rowsel     = rowsel,
             .accums     = sc_acc,
             .n_accums   = sc_n,
+            .agg_int_null_mask = sc_int_null_mask,
+            .agg_int_null_sentinel = sc_int_null_sentinel,
         };
 
         /* Pick specialized tight loop when possible, else generic.
          * The specialized scalar_sum_*_fn variants don't honour
          * match_idx — they read data[r] directly — so they're only
-         * safe when no selection is in flight. */
+         * safe when no selection is in flight.  They also read the
+         * slot raw, so they require null-free input: Phase 3a stores
+         * NULL_I{16,32,64} sentinels in null slots which would poison
+         * the sum.  Fall back to the generic masked path when the
+         * source vector advertises nulls.  (try_linear_sumavg_input_i64
+         * already refuses to build a linear plan when any term column
+         * has nulls, so agg_linear[0].enabled implies null-free.) */
         typedef void (*scalar_fn_t)(void*, uint32_t, int64_t, int64_t);
         scalar_fn_t sc_fn = scalar_accum_fn;
-        if (n_aggs == 1 && !match_idx && !rowsel && agg_ptrs[0] != NULL) {
+        bool agg0_has_nulls = (sc_int_null_mask & 1u) != 0 ||
+            (agg_vecs[0] && agg_vecs[0]->type == RAY_F64 &&
+             (agg_vecs[0]->attrs & RAY_ATTR_HAS_NULLS));
+        if (n_aggs == 1 && !match_idx && !rowsel && agg_ptrs[0] != NULL && !agg0_has_nulls) {
             uint16_t op0 = ext->agg_ops[0];
             int8_t   t0  = agg_types[0];
             if ((op0 == OP_SUM || op0 == OP_AVG) &&
@@ -5230,16 +5292,30 @@ da_path:;
 
             void* agg_ptrs[vla_aggs];
             int8_t agg_types[vla_aggs];
+            int64_t da_int_null_sentinel[vla_aggs];
             uint32_t agg_f64_mask = 0;
+            uint32_t da_int_null_mask = 0;
             for (uint8_t a = 0; a < n_aggs; a++) {
                 if (agg_vecs[a]) {
                     agg_ptrs[a]  = ray_data(agg_vecs[a]);
                     agg_types[a] = agg_vecs[a]->type;
                     if (agg_vecs[a]->type == RAY_F64)
                         agg_f64_mask |= (1u << a);
+                    da_int_null_sentinel[a] = agg_int_null_sentinel_for(agg_vecs[a]->type);
+                    /* Only set the int-null mask bit for storage types whose
+                     * sentinel is meaningful.  BOOL/U8/SYM use 0 as their default
+                     * "sentinel" which collides with legitimate values
+                     * (FALSE / zero byte / SYM id 0); gating those would silently
+                     * drop real rows from SUM/MIN/MAX.  F64 has its own NaN path. */
+                    int8_t t = agg_vecs[a]->type;
+                    bool is_sentinel_typed = (t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+                                              t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP);
+                    if (is_sentinel_typed && (agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS))
+                        da_int_null_mask |= (1u << a);
                 } else {
                     agg_ptrs[a]  = NULL;
                     agg_types[a] = 0;
+                    da_int_null_sentinel[a] = 0;
                 }
             }
 
@@ -5343,6 +5419,8 @@ da_path:;
                 .n_aggs      = n_aggs,
                 .need_flags  = need_flags,
                 .agg_f64_mask = agg_f64_mask,
+                .agg_int_null_mask = da_int_null_mask,
+                .agg_int_null_sentinel = da_int_null_sentinel,
                 .all_sum     = all_sum,
                 .n_slots     = n_slots,
                 .match_idx   = match_idx,
@@ -5633,8 +5711,21 @@ da_path:;
             if (op == OP_COUNT) continue;
             if (op != OP_SUM && op != OP_AVG)
                 sp_eligible = false;
-            else
-                sp_need_sum = true;
+            else {
+                /* Phase 3a: the single-key sparse aggregation path reads agg
+                 * slots raw via read_col_i64 / direct double load; nullable
+                 * input columns would poison the sum with NULL_I* or NULL_F64
+                 * sentinels.  Fall back to slower paths that mask nulls
+                 * properly.  Scope note: this gate covers the scalar
+                 * dispatcher and this single-key sparse path only; the
+                 * multi-key radix HT (accum_from_entry, ~line 2155) inherits
+                 * Phase 2's pre-existing nullable-agg gap and is out of scope
+                 * for this commit. */
+                if (agg_vecs[a] && (agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS))
+                    sp_eligible = false;
+                else
+                    sp_need_sum = true;
+            }
         }
 
         if (sp_eligible) {
