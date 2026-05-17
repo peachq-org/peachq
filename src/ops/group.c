@@ -9160,18 +9160,37 @@ static void grpt_phase3_fn(void* ctx_v, uint32_t worker_id,
             for (int64_t j = 0; j < kept; j++) {
                 /* Key write — replicate same key across kept rows. */
                 if (e->has_null_key) {
-                    /* Write 0 placeholder then mark null on the output
-                     * column.  ray_vec_set_null is not threadsafe across
-                     * workers for the same word; but each partition
-                     * writes a contiguous row range so two partitions
-                     * never touch the same nullmap word — unless a row
-                     * range straddles an 8-row boundary that another
+                    /* Write width-correct sentinel then mark null on the
+                     * output column.  Phase 2/3a dual encoding: payload
+                     * must hold INT_MIN/NaN per type, not 0.
+                     * ray_vec_set_null is not threadsafe across workers
+                     * for the same word; but each partition writes a
+                     * contiguous row range so two partitions never touch
+                     * the same nullmap word — unless a row range
+                     * straddles an 8-row boundary that another
                      * partition's range also touches.  In practice the
                      * null-key case at most produces K rows and
                      * partitions are large; we serialise null-key
                      * writes by routing the null-key entry into the
                      * sequential final-pass below. */
-                    grpt_write_key(c->key_out, row + j, 0, kesz);
+                    int64_t null_bits = 0;
+                    switch (c->key_type) {
+                        case RAY_F64: {
+                            double v = NULL_F64;
+                            memcpy(&null_bits, &v, 8);
+                            break;
+                        }
+                        case RAY_I64: case RAY_TIMESTAMP:
+                            null_bits = NULL_I64; break;
+                        case RAY_I32: case RAY_DATE: case RAY_TIME:
+                            null_bits = (int64_t)NULL_I32; break;
+                        case RAY_I16:
+                            null_bits = (int64_t)NULL_I16; break;
+                        default:
+                            /* BOOL/U8 — non-nullable per Phase 1, keep 0. */
+                            null_bits = 0; break;
+                    }
+                    grpt_write_key(c->key_out, row + j, null_bits, kesz);
                     if (c->key_vec)
                         ray_vec_set_null(c->key_vec, row + j, true);
                 } else {
