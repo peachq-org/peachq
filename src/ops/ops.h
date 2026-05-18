@@ -452,7 +452,12 @@ typedef struct {
     uint32_t elem_size;    /* bytes per element */
     int64_t  morsel_len;   /* elements in current morsel (<=RAY_MORSEL_ELEMS) */
     void*    morsel_ptr;   /* pointer to current morsel data */
-    uint8_t* null_bits;    /* current morsel null bitmap (or NULL) */
+    uint8_t* null_bits;    /* current morsel null bitmap (or NULL).
+                            * Points into null_bits_buf below when the
+                            * source uses sentinels (synthesized per
+                            * morsel) or into the source's bitmap for
+                            * BOOL/U8 legacy path. */
+    uint8_t  null_bits_buf[RAY_MORSEL_ELEMS / 8]; /* synthesis scratch */
 } ray_morsel_t;
 
 /* ===== Selection Bitmap (RAY_SEL) ===== */

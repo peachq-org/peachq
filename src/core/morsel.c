@@ -68,37 +68,41 @@ bool ray_morsel_next(ray_morsel_t* m) {
     m->morsel_len = remaining < RAY_MORSEL_ELEMS ? remaining : RAY_MORSEL_ELEMS;
     m->morsel_ptr = (uint8_t*)ray_data(m->vec) + (size_t)m->offset * m->elem_size;
 
-    /* Null bitmap: only if HAS_NULLS.
-     * M5: null_bits points to the byte containing bit (m->offset).
-     * Callers must account for (m->offset % 8) bit offset within the
-     * first byte of null_bits when testing individual null bits.
+    /* Null bitmap: synthesized per-morsel from sentinel reads.
+     * null_bits points to a buffer offset (0,1,...) — caller indexes
+     * starting at bit (m->offset & 7) just like the previous
+     * source-bitmap layout did.  We mirror the (m->offset / 8) byte
+     * offset by computing into &null_bits_buf[m->offset / 8].
      *
-     * HAS_INDEX path: when an accelerator index is attached, the parent's
-     * 16-byte nullmap union holds the index pointer instead of bitmap data
-     * (or ext_nullmap pointer).  The original bytes are preserved inside
-     * ix->saved_nullmap.  Route through that snapshot here so null-aware
-     * loops still see the correct bits. */
+     * Synthesizing on demand sidesteps the source bitmap entirely:
+     * sentinel-supporting types (F64 / F32 / integer & temporal /
+     * STR / GUID) have the source bitmap stripped, so reading it
+     * directly would give stale zeros.  Cost is one O(morsel_len)
+     * sentinel scan per chunk; cheap given morsel_len <= 1024. */
     m->null_bits = NULL;
     if (m->vec->attrs & RAY_ATTR_HAS_NULLS) {
-        if (m->vec->attrs & RAY_ATTR_HAS_INDEX) {
-            ray_index_t* ix = ray_index_payload(m->vec->index);
-            if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
-                ray_t* ext;
-                memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
-                m->null_bits = (uint8_t*)ray_data(ext) + (m->offset / 8);
-            } else if (m->offset < 128) {
-                m->null_bits = ix->saved_nullmap + (m->offset / 8);
-            }
-        } else if (m->vec->attrs & RAY_ATTR_NULLMAP_EXT) {
-            /* External bitmap: point to correct byte offset */
-            ray_t* ext = m->vec->ext_nullmap;
-            m->null_bits = (uint8_t*)ray_data(ext) + (m->offset / 8);
-        } else if (m->offset < 128) {
-            /* Inline bitmap is 16 bytes = 128 bits; vectors with HAS_NULLS
-             * and >128 elements must use external nullmap (RAY_ATTR_NULLMAP_EXT).
-             * Returns null_bits=NULL for offset>=128 when using inline bitmap. */
-            m->null_bits = m->vec->nullmap + (m->offset / 8);
+        int64_t bit0 = m->offset & 7;
+        int64_t base_byte = m->offset / 8;
+        int64_t total_bits = bit0 + m->morsel_len;
+        int64_t nbytes = (total_bits + 7) / 8;
+        if ((size_t)nbytes > sizeof(m->null_bits_buf)) {
+            /* Defensive — RAY_MORSEL_ELEMS bounds morsel_len to 1024
+             * (=128 bytes), well within the 128-byte buffer.  Bail to
+             * a NULL null_bits if a future MORSEL grows beyond. */
+            return true;
         }
+        memset(m->null_bits_buf, 0, (size_t)nbytes);
+        for (int64_t k = 0; k < m->morsel_len; k++) {
+            if (ray_vec_is_null(m->vec, m->offset + k)) {
+                int64_t b = bit0 + k;
+                m->null_bits_buf[b >> 3] |= (uint8_t)(1u << (b & 7));
+            }
+        }
+        /* Mimic the prior contract: pointer addresses the byte that
+         * holds bit (m->offset).  Callers index into it starting at
+         * bit (m->offset & 7). */
+        m->null_bits = m->null_bits_buf;
+        (void)base_byte;
     }
 
     return true;
