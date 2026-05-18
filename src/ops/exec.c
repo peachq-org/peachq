@@ -262,7 +262,7 @@ void gather_fn(void* raw, uint32_t wid, int64_t start, int64_t end) {
 #define PG_BSIZE  (1 << PG_BSHIFT)   /* 16384 */
 #define PG_MIN    (PG_BSIZE * 8)     /* 131072 — below this, routing overhead > benefit */
 
-/* Phase 1+2 use dispatch_n with explicit task-to-range mapping so that
+/* Pass 1+2 use dispatch_n with explicit task-to-range mapping so that
  * histogram and scatter have consistent per-task assignments regardless
  * of which worker picks up each task (work-stealing is non-deterministic). */
 
@@ -326,7 +326,7 @@ static void pg_route_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
     }
 }
 
-/* Phase 3: per-block gather — one task per source block */
+/* Pass 3: per-block gather — one task per source block */
 typedef struct {
     const int32_t* rdest;
     const int32_t* rsrc;
@@ -434,14 +434,14 @@ void partitioned_gather(ray_pool_t* pool, const int64_t* idx, int64_t n,
         return;
     }
 
-    /* Phase 1: parallel histogram (dispatch_n for deterministic task→range) */
+    /* Pass 1: parallel histogram (dispatch_n for deterministic task→range) */
     pg_hist_ctx_t hctx = {
         .idx = idx, .hist = hist, .n_parts = n_parts,
         .n = n, .n_tasks = nw,
     };
     ray_pool_dispatch_n(pool, pg_hist_fn, &hctx, nw);
 
-    /* Phase 2: prefix sum → per-task scatter offsets + partition boundaries */
+    /* Pass 2: prefix sum → per-task scatter offsets + partition boundaries */
     int64_t running = 0;
     for (int64_t p = 0; p < n_parts; p++) {
         part_off[p] = running;
@@ -452,7 +452,7 @@ void partitioned_gather(ray_pool_t* pool, const int64_t* idx, int64_t n,
     }
     part_off[n_parts] = running;
 
-    /* Phase 3: parallel route (same task→range mapping as histogram) */
+    /* Pass 3: parallel route (same task→range mapping as histogram) */
     pg_route_ctx_t rctx = {
         .idx = idx, .rdest = rdest, .rsrc = rsrc,
         .offsets = offsets, .n_parts = n_parts,
@@ -460,7 +460,7 @@ void partitioned_gather(ray_pool_t* pool, const int64_t* idx, int64_t n,
     };
     ray_pool_dispatch_n(pool, pg_route_fn, &rctx, nw);
 
-    /* Phase 4: parallel per-block gather */
+    /* Pass 4: parallel per-block gather */
     pg_block_ctx_t bctx = {
         .rdest = rdest, .rsrc = rsrc, .part_off = part_off,
         .srcs = srcs, .dsts = dsts, .esz = esz, .ncols = ncols,
