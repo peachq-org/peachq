@@ -79,12 +79,6 @@ static size_t safe_strlen(const uint8_t* buf, int64_t max) {
     return (size_t)max;
 }
 
-/* Null bitmap size for a vector (0 if no nulls) */
-static int64_t null_bitmap_size(ray_t* v) {
-    if (!(v->attrs & RAY_ATTR_HAS_NULLS)) return 0;
-    return (v->len + 7) / 8;
-}
-
 static int64_t schema_names_serde_size(ray_t* schema) {
     if (!schema || schema->type != RAY_I64) return 0;
     int64_t size = 1 + 1 + 8;
@@ -113,48 +107,6 @@ static int64_t ser_schema_names(uint8_t* buf, ray_t* schema) {
         buf[c++] = '\0';
     }
     return c;
-}
-
-/* Write null bitmap bytes into buf. Returns bytes written.
- * Derives the bits from sentinel reads (ray_vec_is_null) rather than
- * the legacy bitmap, so the encoder stays correct once the bitmap arm
- * is reclaimed.  ray_vec_is_null itself dispatches sentinel-vs-bitmap
- * per type, working uniformly across the sentinel-supported numeric
- * and temporal types and the bitmap-backed BOOL / U8 holdouts. */
-static int64_t ser_null_bitmap(uint8_t* buf, ray_t* v) {
-    int64_t bsz = null_bitmap_size(v);
-    if (bsz <= 0) return 0;
-
-    memset(buf, 0, (size_t)bsz);
-    if (!(v->attrs & RAY_ATTR_HAS_NULLS)) return bsz;
-
-    for (int64_t i = 0; i < v->len; i++) {
-        if (ray_vec_is_null(v, i))
-            buf[i >> 3] |= (uint8_t)(1u << (i & 7));
-    }
-    return bsz;
-}
-
-/* Restore null bitmap from buf into vector. Returns bytes consumed. */
-static int64_t de_null_bitmap(const uint8_t* buf, int64_t avail, ray_t* v) {
-    int64_t bsz = (v->len + 7) / 8;
-    if (avail < bsz) return -1;
-
-    v->attrs |= RAY_ATTR_HAS_NULLS;
-
-    if (v->type == RAY_STR || v->len > 128) {
-        /* Must use external nullmap (STR always, others when > 128 elements) */
-        ray_t* ext = ray_vec_new(RAY_U8, bsz);
-        if (!ext || RAY_IS_ERR(ext)) return -1;
-        ext->len = bsz;
-        memcpy(ray_data(ext), buf, (size_t)bsz);
-        v->attrs |= RAY_ATTR_NULLMAP_EXT;
-        v->ext_nullmap = ext;
-    } else {
-        /* Inline nullmap */
-        memcpy(v->nullmap, buf, (size_t)bsz);
-    }
-    return bsz;
 }
 
 /* --------------------------------------------------------------------------
@@ -199,24 +151,24 @@ int64_t ray_serde_size(ray_t* obj) {
 
     /* NULL object: type=LIST with len=0, but we check for actual NULL semantics */
 
-    /* Vectors — format: type(1) + attrs(1) + len(8) + data + nullmap */
-    int64_t nbm = null_bitmap_size(obj);
+    /* Vectors — format: type(1) + attrs(1) + len(8) + data.
+     * Null state is sentinel-encoded in the payload — no bitmap region. */
 
     /* Overflow guard: worst case is GUID at 16 bytes/elem */
     if (obj->len > (INT64_MAX - 32) / 16) return -1;
 
     switch (type) {
     case RAY_BOOL:
-    case RAY_U8:        return 1 + 1 + 8 + obj->len + nbm;
-    case RAY_I16:       return 1 + 1 + 8 + obj->len * 2 + nbm;
+    case RAY_U8:        return 1 + 1 + 8 + obj->len;
+    case RAY_I16:       return 1 + 1 + 8 + obj->len * 2;
     case RAY_I32:
     case RAY_DATE:
     case RAY_TIME:
-    case RAY_F32:       return 1 + 1 + 8 + obj->len * 4 + nbm;
+    case RAY_F32:       return 1 + 1 + 8 + obj->len * 4;
     case RAY_I64:
     case RAY_TIMESTAMP:
-    case RAY_F64:       return 1 + 1 + 8 + obj->len * 8 + nbm;
-    case RAY_GUID:      return 1 + 1 + 8 + obj->len * 16 + nbm;
+    case RAY_F64:       return 1 + 1 + 8 + obj->len * 8;
+    case RAY_GUID:      return 1 + 1 + 8 + obj->len * 16;
     case RAY_SYM: {
         int64_t size = 1 + 1 + 8;
         int64_t* ids = (int64_t*)ray_data(obj);
@@ -224,14 +176,14 @@ int64_t ray_serde_size(ray_t* obj) {
             ray_t* s = ray_sym_str(ids[i]);
             size += (s ? (int64_t)ray_str_len(s) : 0) + 1;
         }
-        return size + nbm;
+        return size;
     }
     case RAY_STR: {
         int64_t size = 1 + 1 + 8;
         ray_str_t* elems = (ray_str_t*)ray_data(obj);
         for (int64_t i = 0; i < obj->len; i++)
             size += 8 + elems[i].len; /* i64 length + raw bytes */
-        return size + nbm;
+        return size;
     }
     case RAY_LIST: {
         int64_t size = 1 + 1 + 8;
@@ -373,7 +325,7 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
     /* Vectors and compound types */
     int64_t c;
 
-    /* Attrs byte: preserve HAS_NULLS, clear SLICE/NULLMAP_EXT/ARENA (internal flags) */
+    /* Attrs byte: preserve HAS_NULLS; clear SLICE / ARENA (internal flags). */
     uint8_t wire_attrs = obj->attrs & (RAY_ATTR_HAS_NULLS);
 
     switch (type) {
@@ -383,7 +335,6 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
         memcpy(buf, &obj->len, 8); buf += 8;
         memcpy(buf, ray_data(obj), obj->len);
         c = 1 + 1 + 8 + obj->len;
-        c += ser_null_bitmap(buf + obj->len, obj);
         return c;
     }
     case RAY_I16: {
@@ -392,7 +343,6 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
         int64_t dsz = obj->len * 2;
         memcpy(buf, ray_data(obj), dsz);
         c = 1 + 1 + 8 + dsz;
-        c += ser_null_bitmap(buf + dsz, obj);
         return c;
     }
     case RAY_I32:
@@ -404,7 +354,6 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
         int64_t dsz = obj->len * 4;
         memcpy(buf, ray_data(obj), dsz);
         c = 1 + 1 + 8 + dsz;
-        c += ser_null_bitmap(buf + dsz, obj);
         return c;
     }
     case RAY_I64:
@@ -415,7 +364,6 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
         int64_t dsz = obj->len * 8;
         memcpy(buf, ray_data(obj), dsz);
         c = 1 + 1 + 8 + dsz;
-        c += ser_null_bitmap(buf + dsz, obj);
         return c;
     }
     case RAY_GUID: {
@@ -424,7 +372,6 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
         int64_t dsz = obj->len * 16;
         memcpy(buf, ray_data(obj), dsz);
         c = 1 + 1 + 8 + dsz;
-        c += ser_null_bitmap(buf + dsz, obj);
         return c;
     }
     case RAY_SYM: {
@@ -442,7 +389,6 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
             buf[c] = '\0';
             c++;
         }
-        c += ser_null_bitmap(buf + c, obj);
         return 1 + 1 + 8 + c;
     }
 
@@ -460,7 +406,6 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
             memcpy(buf + c, p, (size_t)slen);
             c += slen;
         }
-        c += ser_null_bitmap(buf + c, obj);
         return 1 + 1 + 8 + c;
     }
 
@@ -653,13 +598,7 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
         buf += data_bytes;
         *len -= data_bytes;
 
-        /* Restore null bitmap if present */
-        if (attrs & RAY_ATTR_HAS_NULLS) {
-            int64_t consumed = de_null_bitmap(buf, *len, vec);
-            if (consumed < 0) { ray_release(vec); return ray_error("domain", NULL); }
-            buf += consumed;
-            *len -= consumed;
-        }
+        if (attrs & RAY_ATTR_HAS_NULLS) vec->attrs |= RAY_ATTR_HAS_NULLS;
         return vec;
     }
 
@@ -689,12 +628,7 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
             *len -= (int64_t)slen + 1;
         }
 
-        if (attrs & RAY_ATTR_HAS_NULLS) {
-            int64_t consumed = de_null_bitmap(buf, *len, vec);
-            if (consumed < 0) { ray_release(vec); return ray_error("domain", NULL); }
-            buf += consumed;
-            *len -= consumed;
-        }
+        if (attrs & RAY_ATTR_HAS_NULLS) vec->attrs |= RAY_ATTR_HAS_NULLS;
         return vec;
     }
 
@@ -724,12 +658,7 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
             *len -= slen;
         }
 
-        if (attrs & RAY_ATTR_HAS_NULLS) {
-            int64_t consumed = de_null_bitmap(buf, *len, vec);
-            if (consumed < 0) { ray_release(vec); return ray_error("domain", NULL); }
-            buf += consumed;
-            *len -= consumed;
-        }
+        if (attrs & RAY_ATTR_HAS_NULLS) vec->attrs |= RAY_ATTR_HAS_NULLS;
         return vec;
     }
 
