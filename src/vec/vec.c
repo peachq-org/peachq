@@ -922,9 +922,11 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
     vec_drop_index_inplace(vec);
 
     /* Dual-encoding write: bitmap remains alongside the sentinel until
-     * morsel.c (null_bits iteration), idxop.c (saved_nullmap snapshot
-     * on index attach), and store/col.c (on-disk bitmap segment) are
-     * converted to sentinel-aware — see design doc Stage 3''. */
+     * the bitmap-API tests (test/test_index.c, test/test_store.c,
+     * test/test_morsel.c) covering ext_nullmap snapshot semantics
+     * are either deleted (testing removed functionality) or updated
+     * to assert sentinel-based round-trip behavior.  Blocked on user
+     * approval to remove obsolete tests. */
     if (is_null) {
         void* p = ray_data(vec);
         switch (vec->type) {
