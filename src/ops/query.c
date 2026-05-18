@@ -2330,23 +2330,23 @@ typedef struct {
  * int64 read on the hot path.  Hits high-cardinality count_distinct
  * grouped queries where the per-group HT churn was thrashing L2. */
 #define CDPG_BUF_INSERT(VAL_EXPR) do {                              \
-    int64_t v = (int64_t)(VAL_EXPR);                                \
-    if (RAY_UNLIKELY(v == 0)) {                                     \
+    int64_t _ins_v = (int64_t)(VAL_EXPR);                           \
+    if (RAY_UNLIKELY(_ins_v == 0)) {                                \
         if (!saw_zero) { saw_zero = 1; distinct++; }                \
         break;                                                      \
     }                                                               \
-    uint64_t h = (uint64_t)v * CDPG_BUF_HASH_K1;                    \
-    h ^= h >> 33;                                                   \
-    uint64_t slot = h & mask;                                       \
+    uint64_t _ins_h = (uint64_t)_ins_v * CDPG_BUF_HASH_K1;          \
+    _ins_h ^= _ins_h >> 33;                                         \
+    uint64_t _ins_slot = _ins_h & mask;                             \
     for (;;) {                                                      \
-        int64_t cur = set[slot];                                    \
-        if (cur == 0) {                                             \
-            set[slot] = v;                                          \
+        int64_t _ins_cur = set[_ins_slot];                          \
+        if (_ins_cur == 0) {                                        \
+            set[_ins_slot] = _ins_v;                                \
             distinct++;                                             \
             break;                                                  \
         }                                                           \
-        if (cur == v) break;                                        \
-        slot = (slot + 1) & mask;                                   \
+        if (_ins_cur == _ins_v) break;                              \
+        _ins_slot = (_ins_slot + 1) & mask;                         \
     }                                                               \
 } while (0)
 
