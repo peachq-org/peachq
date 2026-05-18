@@ -908,6 +908,39 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      * bug regardless of indexing). */
     vec_drop_index_inplace(vec);
 
+    /* Dual-encoding write: when marking a slot null, ALSO stamp the
+     * type-correct NULL_* sentinel into the payload so sentinel-based
+     * readers see it.  Caller is responsible for the payload on
+     * is_null=false (we have no way to know the prior real value),
+     * so the clear path only touches the bitmap bit below.
+     *
+     * STR uses len==0 as its sentinel (handled by the ext-alloc path
+     * below — the inline-pointer-pair arm of the union means we can't
+     * touch the payload here without aliasing str_pool/str_ext_null).
+     * SYM was rejected above. */
+    if (is_null) {
+        void* p = ray_data(vec);
+        switch (vec->type) {
+            case RAY_F64:
+                ((double*)p)[idx] = NULL_F64;
+                break;
+            case RAY_I64:
+            case RAY_TIMESTAMP:
+                ((int64_t*)p)[idx] = NULL_I64;
+                break;
+            case RAY_I32:
+            case RAY_DATE:
+            case RAY_TIME:
+                ((int32_t*)p)[idx] = NULL_I32;
+                break;
+            case RAY_I16:
+                ((int16_t*)p)[idx] = NULL_I16;
+                break;
+            default:
+                break;
+        }
+    }
+
     /* Mark HAS_NULLS if setting a null (defer for RAY_STR until ext alloc succeeds) */
     if (is_null && vec->type != RAY_STR) vec->attrs |= RAY_ATTR_HAS_NULLS;
 
