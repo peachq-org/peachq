@@ -1462,10 +1462,18 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     }
 
 #ifdef RAYFORCE_NULL_AUDIT
-    bool sentinel_says = sentinel_is_null(vec, idx);
-    if (bitmap_says != sentinel_says)
-        null_audit_report(vec, idx, bitmap_says, sentinel_says,
-                          __builtin_return_address(0));
+    /* BOOL/U8 are non-nullable per Phase 1.  Tests that exercise
+     * ray_vec_set_null on these types pre-date the lockdown — they
+     * mark the bitmap but there is no NULL_BOOL / NULL_U8 sentinel.
+     * Suppress audit for these to focus on real producer gaps; the
+     * legacy tests get cleaned up at Stage 1 exit (BOOL/U8 set-null
+     * will be rejected with RAY_ERR_TYPE like SYM is today). */
+    if (vec->type != RAY_BOOL && vec->type != RAY_U8) {
+        bool sentinel_says = sentinel_is_null(vec, idx);
+        if (bitmap_says != sentinel_says)
+            null_audit_report(vec, idx, bitmap_says, sentinel_says,
+                              __builtin_return_address(0));
+    }
 #endif
 
     return bitmap_says;
