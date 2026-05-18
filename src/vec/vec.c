@@ -43,9 +43,9 @@ static int pair_cmp_idx_then_k(const void* a, const void* b) {
 
 /* Sentinel-based per-element null test.  Caller guarantees v is a
  * non-slice vector (type > 0) and idx is in range.  Returns true iff
- * payload[idx] equals the type-correct NULL_* sentinel.  F64 uses
+ * payload[idx] equals the type-correct NULL_* sentinel.  F64/F32 use
  * (x != x) to detect any NaN bit pattern.  BOOL/U8 are non-nullable
- * per Phase 1 and return false. */
+ * and return false. */
 static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
     const void* p = ray_data((ray_t*)v);
     switch (v->type) {
@@ -87,73 +87,6 @@ static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
     }
 }
 
-/* Public bitmap accessor — handles slice / ext / inline / HAS_INDEX
- * uniformly.  See vec.h for the contract. */
-const uint8_t* ray_vec_nullmap_bytes(const ray_t* v,
-                                     int64_t* bit_offset_out,
-                                     int64_t* len_bits_out) {
-    if (bit_offset_out) *bit_offset_out = 0;
-    if (len_bits_out)   *len_bits_out   = 0;
-    if (!v) return NULL;
-
-    /* Slice: HAS_NULLS / HAS_INDEX live on the parent — redirect first,
-     * THEN test for nulls.  Reading v->attrs & HAS_NULLS here would
-     * incorrectly drop a sliced view of a nullable column. */
-    const ray_t* target = v;
-    int64_t off = 0;
-    if (v->attrs & RAY_ATTR_SLICE) {
-        target = v->slice_parent;
-        off = v->slice_offset;
-        if (!target) return NULL;
-    }
-    if (!(target->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
-
-    if (bit_offset_out) *bit_offset_out = off;
-
-    if (target->attrs & RAY_ATTR_HAS_INDEX) {
-        const ray_index_t* ix = ray_index_payload(target->index);
-        if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
-            ray_t* ext;
-            memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
-            if (len_bits_out) *len_bits_out = ext->len * 8;
-            return (const uint8_t*)ray_data(ext);
-        }
-        if (len_bits_out) *len_bits_out = 128;
-        return ix->saved_nullmap;
-    }
-    if (target->attrs & RAY_ATTR_NULLMAP_EXT) {
-        if (len_bits_out) *len_bits_out = target->ext_nullmap->len * 8;
-        return (const uint8_t*)ray_data(target->ext_nullmap);
-    }
-    /* Inline path: RAY_STR's bytes 0-15 hold str_pool/str_ext_null, not
-     * bits — so RAY_STR with HAS_NULLS must always have NULLMAP_EXT. */
-    if (target->type == RAY_STR) return NULL;
-    if (len_bits_out) *len_bits_out = 128;
-    return target->nullmap;
-}
-
-/* Internal compatibility wrapper for the older two-out-param form used
- * inside vec.c.  Returns the inline pointer (16-byte buffer) when nulls
- * live inline, or NULL when they live in *ext_out. */
-static inline const uint8_t* vec_inline_nullmap(const ray_t* v, ray_t** ext_nullmap_ref) {
-    *ext_nullmap_ref = NULL;
-    if (v->attrs & RAY_ATTR_HAS_INDEX) {
-        const ray_index_t* ix = ray_index_payload(v->index);
-        if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
-            ray_t* ext;
-            memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
-            *ext_nullmap_ref = ext;
-            return NULL;
-        }
-        return ix->saved_nullmap;
-    }
-    if (v->attrs & RAY_ATTR_NULLMAP_EXT) {
-        *ext_nullmap_ref = v->ext_nullmap;
-        return NULL;
-    }
-    return v->nullmap;
-}
-
 /* True if v has any nulls.  HAS_NULLS is preserved on the parent across
  * index attach/detach (see attach_finalize), so this is the same one-bit
  * test in both indexed and non-indexed cases. */
@@ -164,8 +97,7 @@ static inline bool vec_any_nulls(const ray_t* v) {
 /* In-place drop of attached index — caller must hold a unique ref (rc==1)
  * on `v` itself.  Used by mutation paths to invalidate the (now stale)
  * index before writing.  HAS_NULLS was preserved through the attachment
- * so it needs no restoration; only NULLMAP_EXT (cleared at attach time)
- * is reinstated from saved_attrs.
+ * so it needs no restoration.
  *
  * Shared-index case: `v` may share its index ray_t with another vec
  * (e.g. after ray_cow followed by ray_retain_owned_refs, both copies
@@ -177,14 +109,13 @@ static inline void vec_drop_index_inplace(ray_t* v) {
     if (!(v->attrs & RAY_ATTR_HAS_INDEX)) return;
     ray_t* idx = v->index;
     ray_index_t* ix = ray_index_payload(idx);
-    uint8_t saved = ix->saved_attrs;
     bool shared = ray_atomic_load(&idx->rc) > 1;
 
     if (shared) {
         /* Take our own retained references to the saved-pointer slots
-         * (ext_nullmap / str_pool / sym_dict etc.) so the bytes we copy
-         * into v->nullmap are validly owned by v.  Leave the index's
-         * snapshot intact for the other holder. */
+         * (str_pool / sym_dict etc.) so the bytes we copy into v->nullmap
+         * are validly owned by v.  Leave the index's snapshot intact for
+         * the other holder. */
         ray_index_retain_saved(ix);
     }
     memcpy(v->nullmap, ix->saved_nullmap, 16);
@@ -196,7 +127,6 @@ static inline void vec_drop_index_inplace(ray_t* v) {
         ix->saved_attrs = 0;
     }
     v->attrs &= (uint8_t)~RAY_ATTR_HAS_INDEX;
-    if (saved & RAY_ATTR_NULLMAP_EXT) v->attrs |= RAY_ATTR_NULLMAP_EXT;
     ray_release(idx);
 }
 
@@ -894,10 +824,13 @@ ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
 }
 
 /* --------------------------------------------------------------------------
- * Null bitmap operations
+ * Null state operations
  *
- * Inline: for vectors with <=128 elements, bits stored in nullmap[16] (128 bits).
- * External: for >128 elements, allocate a U8 vector bitmap via ext_nullmap.
+ * Null state is encoded in-band via the type-correct NULL_* sentinel in
+ * the payload (F64/F32 NaN, NULL_I64 / NULL_I32 / NULL_I16, ray_str_t{0,0},
+ * 16 zero bytes for GUID).  A vec-level RAY_ATTR_HAS_NULLS flag is a
+ * cheap fast-path gate; ray_vec_is_null reads the payload as source of
+ * truth.  BOOL/U8/SYM are non-nullable.
  * -------------------------------------------------------------------------- */
 
 ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
@@ -1310,68 +1243,6 @@ ray_t* ray_embedding_new(int64_t nrows, int32_t dim) {
     return v;
 }
 
-#ifdef RAYFORCE_NULL_AUDIT
-/* Sentinel-migration finish: instrumented build mode.  When RAYFORCE_NULL_AUDIT
- * is defined, ray_vec_is_null cross-checks the bitmap answer against the
- * sentinel answer (sentinel_is_null) and logs the first divergence per
- * unique call site to stderr.  Production behavior is unchanged: the
- * bitmap answer is still returned; the audit is observation only. */
-#include <execinfo.h>
-#include <pthread.h>
-#include <stdio.h>
-
-static pthread_mutex_t null_audit_lock = PTHREAD_MUTEX_INITIALIZER;
-static void* null_audit_seen_callers[128];
-static int null_audit_seen_count = 0;
-
-static void null_audit_report(const ray_t* vec, int64_t idx,
-                              bool bitmap_says, bool sentinel_says,
-                              void* caller) {
-    pthread_mutex_lock(&null_audit_lock);
-    for (int i = 0; i < null_audit_seen_count; i++) {
-        if (null_audit_seen_callers[i] == caller) {
-            pthread_mutex_unlock(&null_audit_lock);
-            return;
-        }
-    }
-    if (null_audit_seen_count < 128)
-        null_audit_seen_callers[null_audit_seen_count++] = caller;
-    fprintf(stderr,
-            "NULL_AUDIT divergence: type=%d idx=%lld bitmap=%d sentinel=%d caller=%p\n",
-            (int)vec->type, (long long)idx,
-            (int)bitmap_says, (int)sentinel_says, caller);
-    void* bt[24];
-    int n = backtrace(bt, 24);
-    backtrace_symbols_fd(bt, n, 2);
-    fputs("---\n", stderr);
-    pthread_mutex_unlock(&null_audit_lock);
-}
-#endif
-
-/* Read the legacy nullmap bit (inline or ext) for vec[idx].  Internal
- * helper; used by both the sentinel-less fallback (BOOL/U8/GUID/F32) and
- * the audit cross-check.  Caller has already done SYM short-circuit and
- * slice delegation, and confirmed vec_any_nulls(vec). */
-static inline bool read_nullmap_bit(ray_t* vec, int64_t idx) {
-    ray_t* ext = NULL;
-    const uint8_t* inline_bits = vec_inline_nullmap(vec, &ext);
-    if (ext) {
-        int64_t byte_idx = idx / 8;
-        if (byte_idx >= ext->len) return false;
-        const uint8_t* bits = (const uint8_t*)ray_data(ext);
-        return ((bits[byte_idx] >> (idx % 8)) & 1) != 0;
-    }
-    if (vec->type == RAY_STR) {
-        /* STR with HAS_NULLS must always be NULLMAP_EXT; the inline path
-         * means no nulls present. */
-        return false;
-    }
-    if (idx >= 128) return false;
-    int byte_idx = (int)(idx / 8);
-    int bit_idx = (int)(idx % 8);
-    return ((inline_bits[byte_idx] >> bit_idx) & 1) != 0;
-}
-
 bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     if (!vec || RAY_IS_ERR(vec)) return false;
     if (idx < 0 || idx >= vec->len) return false;
@@ -1392,12 +1263,9 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     /* Vec-level fast-path gate: HAS_NULLS clear means no null anywhere. */
     if (!vec_any_nulls(vec)) return false;
 
-    /* Types with a defined NULL_* sentinel use the payload as source of
-     * truth.  Types without a sentinel (BOOL/U8/F32) keep the legacy
-     * bitmap path until the Phase 1 lockdown extends to a clean
-     * rejection at the producer (ray_vec_set_null_checked).  This split
-     * is intentional and matches the design at
-     * docs/superpowers/specs/2026-05-18-sentinel-migration-finish-design.md. */
+    /* Sentinels are the sole source of truth.  BOOL/U8 are non-nullable
+     * (rejected at the producer) so they can never reach here with
+     * HAS_NULLS set; the default arm is unreachable in practice. */
     switch (vec->type) {
         case RAY_F64:
         case RAY_F32:
@@ -1406,20 +1274,9 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
         case RAY_I16:
         case RAY_STR:
         case RAY_GUID:
-        {
-            bool sentinel_says = sentinel_is_null(vec, idx);
-#ifdef RAYFORCE_NULL_AUDIT
-            bool bitmap_says = read_nullmap_bit(vec, idx);
-            if (bitmap_says != sentinel_says)
-                null_audit_report(vec, idx, bitmap_says, sentinel_says,
-                                  __builtin_return_address(0));
-#endif
-            return sentinel_says;
-        }
+            return sentinel_is_null(vec, idx);
         default:
-            /* BOOL, U8, F32, and any other type without a sentinel
-             * convention.  Bitmap remains the source of truth here. */
-            return read_nullmap_bit(vec, idx);
+            return false;
     }
 }
 

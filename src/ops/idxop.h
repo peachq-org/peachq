@@ -43,7 +43,7 @@
  */
 
 #include <rayforce.h>
-#include "mem/heap.h"  /* RAY_ATTR_HAS_INDEX, RAY_ATTR_NULLMAP_EXT */
+#include "mem/heap.h"  /* RAY_ATTR_HAS_INDEX */
 
 /* Index kinds.  Stored in ray_index_t.kind. */
 typedef enum {
@@ -57,16 +57,16 @@ typedef enum {
 /* The payload stored inside data[] of a RAY_INDEX ray_t. */
 typedef struct {
     uint8_t  kind;            /* ray_idx_kind_t */
-    uint8_t  saved_attrs;     /* parent attrs & (HAS_NULLS|NULLMAP_EXT) at attach */
-    int8_t   parent_type;     /* parent->type (for restore-time pointer interp) */
+    uint8_t  saved_attrs;     /* parent attrs & HAS_NULLS at attach */
+    int8_t   parent_type;     /* parent->type (recorded for diagnostics) */
     uint8_t  reserved;
     int64_t  built_for_len;   /* parent->len at attach (mismatch -> stale) */
 
-    /* Raw 16-byte snapshot of parent->nullmap union at attach time.
-     * Restored verbatim on detach.  When this contains pointers
-     * (ext_nullmap, str_pool, sym_dict, str_ext_null) they are owned
-     * by THIS ray_t for the duration of the attachment; release-side
-     * of RAY_INDEX walks these based on (parent_type, saved_attrs). */
+    /* Raw 16-byte snapshot of parent->nullmap union at attach time,
+     * restored verbatim on detach.  For the numeric vector types that
+     * may attach an index (see prepare_attach) this snapshot holds no
+     * owned ray_t* refs: bytes 0-7 are unused and bytes 8-15 carry the
+     * link_target int64 when HAS_LINK is set. */
     uint8_t  saved_nullmap[16];
 
     /* Kind-specific payload.  All ray_t* fields are owning refs. */
