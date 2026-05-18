@@ -636,10 +636,10 @@ static ray_t* parse_vector(ray_parser_t *p) {
         for (int32_t i = 0; i < count; i++) {
             if (RAY_ATOM_IS_NULL(elems[i])) {
                 ray_vec_set_null(vec, i, true);
-                /* Phase 2 dual-encoding: a non-F64 typed null (0Nl/0Ni/0Nh)
-                 * carries i64 = 0, so the cast above wrote 0.0 to the slot.
-                 * Overwrite with NULL_F64 so raw-payload consumers see NaN.
-                 * Null F64 atoms already carry NULL_F64 from ray_typed_null. */
+                /* A non-F64 typed null (0Nl/0Ni/0Nh) carries i64 = 0, so
+                 * the cast above wrote 0.0 to the slot.  Overwrite with
+                 * NULL_F64 so raw-payload consumers see NaN.  Null F64
+                 * atoms already carry NULL_F64 from ray_typed_null. */
                 d[i] = NULL_F64;
             }
             ray_release(elems[i]);
