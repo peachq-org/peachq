@@ -1419,14 +1419,38 @@ static void null_audit_report(const ray_t* vec, int64_t idx,
 }
 #endif
 
+/* Read the legacy nullmap bit (inline or ext) for vec[idx].  Internal
+ * helper; used by both the sentinel-less fallback (BOOL/U8/GUID/F32) and
+ * the audit cross-check.  Caller has already done SYM short-circuit and
+ * slice delegation, and confirmed vec_any_nulls(vec). */
+static inline bool read_nullmap_bit(ray_t* vec, int64_t idx) {
+    ray_t* ext = NULL;
+    const uint8_t* inline_bits = vec_inline_nullmap(vec, &ext);
+    if (ext) {
+        int64_t byte_idx = idx / 8;
+        if (byte_idx >= ext->len) return false;
+        const uint8_t* bits = (const uint8_t*)ray_data(ext);
+        return ((bits[byte_idx] >> (idx % 8)) & 1) != 0;
+    }
+    if (vec->type == RAY_STR) {
+        /* STR with HAS_NULLS must always be NULLMAP_EXT; the inline path
+         * means no nulls present. */
+        return false;
+    }
+    if (idx >= 128) return false;
+    int byte_idx = (int)(idx / 8);
+    int bit_idx = (int)(idx % 8);
+    return ((inline_bits[byte_idx] >> bit_idx) & 1) != 0;
+}
+
 bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     if (!vec || RAY_IS_ERR(vec)) return false;
     if (idx < 0 || idx >= vec->len) return false;
 
     /* SYM columns are no-null by design — see ray_vec_set_null_checked
-     * for the rationale.  Short-circuit before slice/nullmap dispatch
-     * so any leftover HAS_NULLS attr from pre-policy code paths
-     * doesn't surface a phantom null. */
+     * for the rationale.  Sentinel check is bypassed here; consumers
+     * that need sym-null detection (e.g. dict.c key handling) test the
+     * sym id directly. */
     if (vec->type == RAY_SYM) return false;
 
     /* Slice: delegate to parent with adjusted index */
@@ -1436,50 +1460,36 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
         return ray_vec_is_null(parent, pidx);
     }
 
+    /* Vec-level fast-path gate: HAS_NULLS clear means no null anywhere. */
     if (!vec_any_nulls(vec)) return false;
 
-    bool bitmap_says;
-    ray_t* ext = NULL;
-    const uint8_t* inline_bits = vec_inline_nullmap(vec, &ext);
-    if (ext) {
-        int64_t byte_idx = idx / 8;
-        if (byte_idx >= ext->len) bitmap_says = false;
-        else {
-            const uint8_t* bits = (const uint8_t*)ray_data(ext);
-            bitmap_says = ((bits[byte_idx] >> (idx % 8)) & 1) != 0;
-        }
-    } else if (vec->type == RAY_STR) {
-        /* RAY_STR's inline 16 bytes hold str_pool/str_ext_null pointers,
-         * not bit storage — STR with HAS_NULLS must always have NULLMAP_EXT.
-         * Reaching here with HAS_NULLS set but no ext means no nulls. */
-        bitmap_says = false;
-    } else if (idx >= 128) {
-        bitmap_says = false;
-    } else {
-        int byte_idx = (int)(idx / 8);
-        int bit_idx = (int)(idx % 8);
-        bitmap_says = ((inline_bits[byte_idx] >> bit_idx) & 1) != 0;
-    }
-
+    /* Types with a defined NULL_* sentinel use the payload as source of
+     * truth.  Types without a sentinel (BOOL/U8/GUID/F32) keep the
+     * legacy bitmap path until the Phase 1 lockdown extends to a clean
+     * rejection at the producer (ray_vec_set_null_checked).  This split
+     * is intentional and matches the design at
+     * docs/superpowers/specs/2026-05-18-sentinel-migration-finish-design.md. */
+    switch (vec->type) {
+        case RAY_F64:
+        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I16:
+        case RAY_STR:
+        {
+            bool sentinel_says = sentinel_is_null(vec, idx);
 #ifdef RAYFORCE_NULL_AUDIT
-    /* BOOL/U8 are non-nullable per Phase 1.  Tests that exercise
-     * ray_vec_set_null on these types pre-date the lockdown — they
-     * mark the bitmap but there is no NULL_BOOL / NULL_U8 sentinel.
-     * GUID has no defined NULL_GUID sentinel (a separate design
-     * decision for after this migration).  Suppress audit for these
-     * to focus on real producer gaps.  Stage 1 exit-gate task: lock
-     * ray_vec_set_null_checked to reject BOOL/U8 like it rejects SYM,
-     * and pick a GUID null convention (likely all-zeros). */
-    if (vec->type != RAY_BOOL && vec->type != RAY_U8 &&
-        vec->type != RAY_GUID) {
-        bool sentinel_says = sentinel_is_null(vec, idx);
-        if (bitmap_says != sentinel_says)
-            null_audit_report(vec, idx, bitmap_says, sentinel_says,
-                              __builtin_return_address(0));
-    }
+            bool bitmap_says = read_nullmap_bit(vec, idx);
+            if (bitmap_says != sentinel_says)
+                null_audit_report(vec, idx, bitmap_says, sentinel_says,
+                                  __builtin_return_address(0));
 #endif
-
-    return bitmap_says;
+            return sentinel_says;
+        }
+        default:
+            /* BOOL, U8, GUID, F32, and any other type without a sentinel
+             * convention.  Bitmap remains the source of truth here. */
+            return read_nullmap_bit(vec, idx);
+    }
 }
 
 /* --------------------------------------------------------------------------
