@@ -921,32 +921,53 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      * bug regardless of indexing). */
     vec_drop_index_inplace(vec);
 
-    /* Dual-encoding write: bitmap remains alongside the sentinel until
-     * the bitmap-API tests (test/test_index.c, test/test_store.c,
-     * test/test_morsel.c) covering ext_nullmap snapshot semantics
-     * are either deleted (testing removed functionality) or updated
-     * to assert sentinel-based round-trip behavior.  Blocked on user
-     * approval to remove obsolete tests. */
-    if (is_null) {
-        void* p = ray_data(vec);
-        switch (vec->type) {
-            case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
-            case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
-            case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
-            case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
-            case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
-            case RAY_STR:
-                memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
-                break;
-            case RAY_GUID:
-                memset((uint8_t*)p + idx * 16, 0, 16);
-                break;
-            default: break;
+    /* Sentinel-supporting types: write the type-correct NULL_* into
+     * the payload and set HAS_NULLS.  The per-element bitmap is no
+     * longer the source of truth — all readers go through
+     * ray_vec_is_null (sentinel-based) or morsel's synthesis path
+     * (also sentinel-derived).  Skip the bitmap write entirely.
+     * BOOL/U8 fall through to the legacy bitmap path below until
+     * Phase 1 lockdown lands.  Caller owns the payload on
+     * is_null=false (we have no way to know the prior real value);
+     * the clear path is a no-op for sentinel types. */
+    bool type_uses_sentinel = false;
+    switch (vec->type) {
+        case RAY_F64: case RAY_F32:
+        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I16:
+        case RAY_STR:
+        case RAY_GUID:
+            type_uses_sentinel = true;
+            break;
+        default:
+            break;
+    }
+    if (type_uses_sentinel) {
+        if (is_null) {
+            void* p = ray_data(vec);
+            switch (vec->type) {
+                case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
+                case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
+                case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
+                case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
+                case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
+                case RAY_STR:
+                    memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
+                    break;
+                case RAY_GUID:
+                    memset((uint8_t*)p + idx * 16, 0, 16);
+                    break;
+                default: break;
+            }
+            vec->attrs |= RAY_ATTR_HAS_NULLS;
         }
+        return RAY_OK;
     }
 
-    /* Mark HAS_NULLS if setting a null (defer for RAY_STR until ext alloc succeeds) */
-    if (is_null && vec->type != RAY_STR) vec->attrs |= RAY_ATTR_HAS_NULLS;
+    /* Legacy bitmap path: BOOL / U8 still rely on the per-element
+     * bitmap until their lockdown lands. */
+    if (is_null) vec->attrs |= RAY_ATTR_HAS_NULLS;
 
     if (!(vec->attrs & RAY_ATTR_NULLMAP_EXT)) {
         /* RAY_STR uses bytes 8-15 for str_pool, HAS_LINK uses bytes 8-15 for
