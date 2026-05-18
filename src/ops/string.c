@@ -619,7 +619,7 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
             int sym_w = (int)(input->attrs & RAY_SYM_W_MASK);
 
             ray_pool_t* pool = ray_pool_get();
-            /* Phase 1: mark used sym_ids.  Parallelised because for
+            /* Pass 1: mark used sym_ids.  Parallelised because for
              * high-cardinality text columns the seen-
              * mark scan was a 5 ms-class serial pass.  Multiple workers
              * may write 1 to the same byte concurrently — the value is
@@ -648,7 +648,7 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
                 like_seen_fn(&sctx, 0, 0, len);
             }
 
-            /* Phase 2: parallel pattern resolve over the dict range. */
+            /* Pass 2: parallel pattern resolve over the dict range. */
             like_resolve_ctx_t rctx = {
                 .sym_strings = sym_strings, .seen = seen, .lut = lut,
                 .pc = &pc, .use_simple = use_simple,
@@ -660,7 +660,7 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
                 like_resolve_fn(&rctx, 0, 0, (int64_t)dict_n);
             }
 
-            /* Phase 3: row projection — gather lut[sid] into the per-row
+            /* Pass 3: row projection — gather lut[sid] into the per-row
              * bool dst.  Parallelised because it's a 5 M-row pass (~5 ms
              * serial on a W64 SYM column).  Width-specialised in the
              * worker fn so the inner load is a typed pointer dereference. */
