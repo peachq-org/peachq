@@ -909,7 +909,11 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      * empty string, reserved by ray_sym_init) is the canonical
      * "missing" / "empty" / "absent" value, and every SYM cell
      * holds some valid ID.  Reject set-null on SYM so callers that
-     * mean "this row is missing" write 0 explicitly instead. */
+     * mean "this row is missing" write 0 explicitly instead.
+     *
+     * BOOL / U8 are non-nullable per Phase 1 but legacy tests still
+     * exercise the bitmap API on them; the lockdown is deferred to a
+     * later session where the impacted tests can be cleaned up. */
     if (vec->type == RAY_SYM) return RAY_ERR_TYPE;
 
     /* Mutation invalidates any attached accelerator index — drop it inline.
@@ -923,43 +927,26 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      * is_null=false (we have no way to know the prior real value),
      * so the clear path only touches the bitmap bit below.
      *
-     * SYM was rejected above (no-null by design). */
+     * The bitmap write below this block stays in place until every
+     * ray_vec_nullmap_bytes consumer (propagate_nulls fast path,
+     * group.c radix HT, idxop save/restore, morsel iter, serde) is
+     * sentinel-aware — see design doc Stage B / Stage 3' for that
+     * cleanup.  Until then sentinel + bitmap are dual-written. */
     if (is_null) {
         void* p = ray_data(vec);
         switch (vec->type) {
-            case RAY_F64:
-                ((double*)p)[idx] = NULL_F64;
-                break;
-            case RAY_F32:
-                ((float*)p)[idx] = NULL_F32;
-                break;
-            case RAY_I64:
-            case RAY_TIMESTAMP:
-                ((int64_t*)p)[idx] = NULL_I64;
-                break;
-            case RAY_I32:
-            case RAY_DATE:
-            case RAY_TIME:
-                ((int32_t*)p)[idx] = NULL_I32;
-                break;
-            case RAY_I16:
-                ((int16_t*)p)[idx] = NULL_I16;
-                break;
+            case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
+            case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
+            case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
+            case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
+            case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
             case RAY_STR:
-                /* STR null = empty string (len=0).  Zero the entire
-                 * element so any prior pool_off / data bytes don't
-                 * leave stale pointers behind.  Dead bytes in the pool
-                 * become unreferenced but the pool itself is not
-                 * compacted here — same behavior as replacing a long
-                 * string with a short one. */
                 memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
                 break;
             case RAY_GUID:
-                /* GUID null = 16 all-zero bytes (canonical convention). */
                 memset((uint8_t*)p + idx * 16, 0, 16);
                 break;
-            default:
-                break;
+            default: break;
         }
     }
 
