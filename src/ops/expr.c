@@ -1098,8 +1098,57 @@ static uint8_t* nullmap_bits_mut(ray_t* dst) {
     return dst->nullmap;
 }
 
+/* Stamp the type-correct NULL_* sentinel into dst's payload at every slot
+ * where the bitmap byte indicates null.  Used after the bulk-OR fast path
+ * in propagate_nulls so the dest dual-encoding contract is honored without
+ * paying per-element bit math in the hot path. */
+static void stamp_sentinels_from_bitmap(ray_t* dst, const uint8_t* dbits,
+                                        int64_t dbit_off, int64_t len) {
+    void* p = ray_data(dst);
+    switch (dst->type) {
+        case RAY_F64: {
+            double* d = (double*)p;
+            for (int64_t i = 0; i < len; i++)
+                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
+                    d[i] = NULL_F64;
+            break;
+        }
+        case RAY_I64:
+        case RAY_TIMESTAMP: {
+            int64_t* d = (int64_t*)p;
+            for (int64_t i = 0; i < len; i++)
+                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
+                    d[i] = NULL_I64;
+            break;
+        }
+        case RAY_I32:
+        case RAY_DATE:
+        case RAY_TIME: {
+            int32_t* d = (int32_t*)p;
+            for (int64_t i = 0; i < len; i++)
+                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
+                    d[i] = NULL_I32;
+            break;
+        }
+        case RAY_I16: {
+            int16_t* d = (int16_t*)p;
+            for (int64_t i = 0; i < len; i++)
+                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
+                    d[i] = NULL_I16;
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 /* OR-merge null bitmap from src into dst. Fast byte-level path when possible,
- * element-level fallback for misaligned slices or RAY_STR without ext nullmap. */
+ * element-level fallback for misaligned slices or RAY_STR without ext nullmap.
+ *
+ * Both paths honor the dual-encoding contract: after marking a slot null in
+ * the bitmap, the dest payload is stamped with the type-correct NULL_*
+ * sentinel (the slow path goes through ray_vec_set_null which already
+ * dual-writes; the fast path stamps in a post-pass). */
 static void propagate_nulls(ray_t* src, ray_t* dst, int64_t len) {
     int64_t src_off = 0;
     const uint8_t* sbits = nullmap_bits(src, &src_off, len);
@@ -1118,6 +1167,10 @@ static void propagate_nulls(ray_t* src, ray_t* dst, int64_t len) {
         for (int64_t b = 0; b < nbytes; b++)
             dbits[b] |= sbits[byte_start + b];
         dst->attrs |= RAY_ATTR_HAS_NULLS;
+        /* Dual-encoding sentinel stamp.  dbits is dst-relative (dst is a
+         * freshly allocated non-slice vec per nullmap_bits_mut contract),
+         * so dbit_off=0. */
+        stamp_sentinels_from_bitmap(dst, dbits, 0, len);
         return;
     }
 
