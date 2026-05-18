@@ -34,36 +34,6 @@
 #include <string.h>
 
 /* --------------------------------------------------------------------------
- * Promote inline nullmap to ext-nullmap before attaching a link.
- *
- * A linked column places its int64 target sym at nullmap-union bytes 8-15.
- * If the column has inline nulls and >64 elements, those bytes hold real
- * bitmap bits that would be clobbered.  Promote up front to keep nulls
- * intact.  Mirrors the promotion logic in ray_vec_set_null_checked. */
-static ray_err_t promote_inline_to_ext(ray_t* vec) {
-    if (!(vec->attrs & RAY_ATTR_HAS_NULLS)) return RAY_OK;
-    if (vec->attrs & RAY_ATTR_NULLMAP_EXT)  return RAY_OK;
-
-    int64_t bitmap_len = (vec->len + 7) / 8;
-    if (bitmap_len < 1) bitmap_len = 1;
-    ray_t* ext = ray_vec_new(RAY_U8, bitmap_len);
-    if (!ext || RAY_IS_ERR(ext)) return RAY_ERR_OOM;
-    ext->len = bitmap_len;
-
-    /* Copy existing inline bits (16 bytes max) into ext. */
-    int64_t copy = bitmap_len < 16 ? bitmap_len : 16;
-    memcpy(ray_data(ext), vec->nullmap, (size_t)copy);
-    if (bitmap_len > 16) {
-        memset((char*)ray_data(ext) + 16, 0, (size_t)(bitmap_len - 16));
-    }
-    /* Now overwrite bytes 0-7 with the ext_nullmap pointer.  Bytes 8-15
-     * become don't-care — caller is about to write link_target there. */
-    vec->ext_nullmap = ext;
-    vec->attrs |= RAY_ATTR_NULLMAP_EXT;
-    return RAY_OK;
-}
-
-/* --------------------------------------------------------------------------
  * ray_link_attach
  * -------------------------------------------------------------------------- */
 
@@ -107,11 +77,9 @@ ray_t* ray_link_attach(ray_t** vp, int64_t target_sym_id) {
     if (!v || RAY_IS_ERR(v)) return v;
     *vp = v;
 
-    /* Promote nulls to ext if necessary so bytes 8-15 are free. */
-    ray_err_t err = promote_inline_to_ext(v);
-    if (err != RAY_OK) return ray_error(ray_err_code_str(err), "link: oom");
-
-    /* Replace any existing link (idempotent re-attach with new target). */
+    /* Nulls live as sentinels in the payload — bytes 0-15 of the union
+     * carry no per-element data, so we can write link_target into
+     * bytes 8-15 unconditionally. */
     v->link_target = target_sym_id;
     v->attrs |= RAY_ATTR_HAS_LINK;
 
@@ -299,17 +267,13 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     /* Type-specific metadata propagation.
      *   RAY_STR: share the source pool so ray_str_t pool_offs are valid.
      *   RAY_SYM: if the source column carries a local sym_dict, share it.
-     *
-     * sym_dict aliases bytes 8-15 of the nullmap union.  It is only a
-     * real pointer when the column doesn't have inline nulls clobbering
-     * those bytes, i.e. either no nulls or NULLMAP_EXT.  Mirrors the
-     * guard pattern in src/ops/sort.c:3307 and src/ops/rerank.c:182. */
+     *     sym_dict aliases bytes 8-15 of the nullmap union and is safe
+     *     to read on any non-slice SYM vec — sentinel-encoded nulls
+     *     don't consume those bytes. */
     if (out_type == RAY_STR) {
         col_propagate_str_pool(result, target_col);
     } else if (out_type == RAY_SYM) {
         if (col_owner && !(col_owner->attrs & RAY_ATTR_SLICE) &&
-            (!(col_owner->attrs & RAY_ATTR_HAS_NULLS) ||
-             (col_owner->attrs & RAY_ATTR_NULLMAP_EXT)) &&
             col_owner->sym_dict) {
             ray_retain(col_owner->sym_dict);
             result->sym_dict = col_owner->sym_dict;
