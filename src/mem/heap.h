@@ -63,9 +63,7 @@
  * Overlapping bit values are safe because consumers always check the type tag
  * before interpreting attrs.
  *
- * Bit 0x20 on vectors is reserved: an older external-bitmap nullmap arm
- * lived here and the on-disk format guard in src/store/col.c still rejects
- * legacy columns that carry it.
+ * Bit 0x20 on vectors is reserved for future use.
  */
 
 #ifndef RAY_ATTR_SLICE

@@ -2428,7 +2428,7 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
                 if (has_nulls && v == NULL_I16) continue;
                 CDPG_BUF_INSERT((int64_t)v);
             }
-        } else { /* esz == 1 — BOOL/U8 non-nullable per Phase 1 */
+        } else { /* esz == 1 — BOOL/U8 are non-nullable */
             const uint8_t* d = (const uint8_t*)ctx->base;
             for (int64_t i = 0; i < cnt; i++) {
                 CDPG_BUF_INSERT((int64_t)d[idxs[i]]);
@@ -5854,7 +5854,7 @@ by_dict_done:
                     && !has_binary_agg && !has_agg_k)
                 {
                     /* exec_filtered_group dispatches: count1 (single key,
-                     * single COUNT) → Phase 3 fast path; everything else →
+                     * single COUNT) → Pass 3 fast path; everything else →
                      * multi path with packed composite key.  Skipped when
                      * any agg is binary (filtered-group fusion only knows
                      * about unary aggs) or holistic with a K param. */
@@ -8016,10 +8016,8 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
             xbar_par_fn(&ctx, 0, 0, n);
         }
 
-        /* Propagate null bitmap if present.  Walk the source nullmap
-         * per-element via ray_vec_is_null (sentinel-based after the
-         * Phase 7 migration).  The previous byte-aligned bulk-bitmap
-         * walk is gone with the bitmap arm. */
+        /* Propagate nulls if present.  Walk per-element via
+         * ray_vec_is_null (sentinel-based). */
         if (col->attrs & RAY_ATTR_HAS_NULLS) {
             for (int64_t i = 0; i < n; i++)
                 if (ray_vec_is_null(col, i))
@@ -8429,13 +8427,13 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         else if (ct == RAY_F64 && expr_type == RAY_I64)
                             ((double*)ray_data(new_col))[r] = (double)((int64_t*)ray_data(expr_vec))[r];
                     }
-                    /* Null-bit propagation: memcpy above only copies values,
-                     * not the nullmap.  Carry over orig_col's nulls for the
-                     * untouched rows, and pull expr_vec's nulls in for the
-                     * masked rows.  Phase 3a dual encoding: also overwrite the
-                     * destination payload with the dest-width sentinel — casting
-                     * a NaN/INT_MIN sentinel produces implementation-defined
-                     * garbage that wouldn't match the dual-encoding contract. */
+                    /* Null propagation: the memcpy above only copies values,
+                     * so re-flag null rows here — orig_col's nulls for the
+                     * untouched rows, expr_vec's nulls for the masked rows.
+                     * Also overwrite the destination payload with the
+                     * dest-width sentinel: casting a NaN/INT_MIN sentinel
+                     * across widths produces implementation-defined garbage
+                     * that wouldn't match the typed null encoding. */
                     for (int64_t r = 0; r < nrows; r++) {
                         ray_t* src = mask[r] ? expr_vec : orig_col;
                         if (ray_vec_is_null(src, r)) {
@@ -8512,13 +8510,12 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     /* Preserve typed-null markers across broadcast.  Without
                      * this, (update {a: 0N from: t}) silently writes plain
                      * zeros into the I64 column — the value bits get copied
-                     * but the null bitmap doesn't, so (nil? a) reports false
+                     * but HAS_NULLS is not set, so (nil? a) reports false
                      * on what should be null cells. */
                     if (RAY_ATOM_IS_NULL(expr_vec)) {
                         for (int64_t r = 0; r < nrows; r++)
                             ray_vec_set_null(bcast, r, true);
-                        /* Phase 2/3a dual encoding: fill correct-width
-                         * sentinel into payload. */
+                        /* Fill the correct-width sentinel into the payload. */
                         switch (ct) {
                             case RAY_F64: {
                                 double* d = (double*)ray_data(bcast);
@@ -8558,8 +8555,8 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         promoted = ray_vec_append(promoted, &v);
                         if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return promoted; }
                     }
-                    /* Carry the nullmap across the I64→F64 promotion;
-                     * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                    /* Carry nulls across the I64→F64 promotion and overwrite
+                     * the slot with NULL_F64 (NaN) so the payload encodes null. */
                     double* dst = (double*)ray_data(promoted);
                     for (int64_t r = 0; r < nr; r++) {
                         if (ray_vec_is_null(expr_vec, r)) {
@@ -8745,8 +8742,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 if (RAY_ATOM_IS_NULL(expr_vec)) {
                     for (int64_t r = 0; r < nrows; r++)
                         ray_vec_set_null(bcast, r, true);
-                    /* Phase 2/3a dual encoding: fill correct-width
-                     * sentinel into payload. */
+                    /* Fill the correct-width sentinel into the payload. */
                     switch (ct) {
                         case RAY_F64: {
                             double* d = (double*)ray_data(bcast);
@@ -8786,8 +8782,8 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     promoted = ray_vec_append(promoted, &v);
                     if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return promoted; }
                 }
-                /* Carry the nullmap across the I64→F64 promotion;
-                 * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                /* Carry nulls across the I64→F64 promotion and overwrite
+                 * the slot with NULL_F64 (NaN) so the payload encodes null. */
                 double* dst = (double*)ray_data(promoted);
                 for (int64_t r = 0; r < nr; r++) {
                     if (ray_vec_is_null(expr_vec, r)) {
@@ -8867,8 +8863,7 @@ no_where_add_col:
             if (RAY_ATOM_IS_NULL(expr_vec)) {
                 for (int64_t r = 0; r < nrows; r++)
                     ray_vec_set_null(bcast, r, true);
-                /* Phase 2/3a dual encoding: fill correct-width
-                 * sentinel into payload. */
+                /* Fill the correct-width sentinel into the payload. */
                 switch (ct) {
                     case RAY_F64: {
                         double* d = (double*)ray_data(bcast);

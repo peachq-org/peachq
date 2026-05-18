@@ -1274,18 +1274,18 @@ void ray_heap_gc(void) {
 
     bool safe = (atomic_load_explicit(&ray_parallel_flag, memory_order_relaxed) == 0);
 
-    /* Phase 1: Flush main heap's foreign blocks and slab caches.
+    /* Pass 1: Flush main heap's foreign blocks and slab caches.
      * When safe (workers idle), return foreign blocks to their owners
      * so worker pools become reusable. */
     heap_flush_foreign(h, safe);
     heap_flush_slabs(h);
 
     if (safe) {
-        /* Phase 2: Return foreign blocks absorbed onto our freelists
+        /* Pass 2: Return foreign blocks absorbed onto our freelists
          * back to their owning worker heaps. */
         heap_return_foreign_freelist(h);
 
-        /* Phase 3: Skip worker heaps — we cannot safely touch their
+        /* Pass 3: Skip worker heaps — we cannot safely touch their
          * foreign lists or slab caches because workers may still be
          * between pending-- and sem_wait, calling ray_free which
          * modifies wh->foreign and wh->slabs.  Workers flush their
@@ -1293,7 +1293,7 @@ void ray_heap_gc(void) {
          * TODO: full cross-heap reclamation requires a worker
          * quiescence barrier. */
 
-        /* Phase 4: Reclaim OVERSIZED empty pools.
+        /* Pass 4: Reclaim OVERSIZED empty pools.
          * Standard pools (pool_order == RAY_HEAP_POOL_ORDER) are never
          * munmapped — physical pages released via madvise (phase 5)
          * re-fault cheaply on next query.
@@ -1303,7 +1303,7 @@ void ray_heap_gc(void) {
          * Emptiness is computed by walking all heaps' freelists and slab
          * caches to sum free capacity within the pool. This avoids atomic
          * live_count operations on the alloc/free hot path. */
-        /* Phase 4: Reclaim oversized empty pools.
+        /* Pass 4: Reclaim oversized empty pools.
          *
          * For each candidate pool (owned by heap gh), count free bytes from:
          *   (a) gh's own freelist + slab cache — safe, only gh modifies these
@@ -1419,8 +1419,8 @@ void ray_heap_gc(void) {
             }
         }
 
-        /* Phase 5: Release physical pages from free blocks in every
-         * idle heap.  Phase 2 may have returned blocks to worker-owned
+        /* Pass 5: Release physical pages from free blocks in every
+         * idle heap.  Pass 2 may have returned blocks to worker-owned
          * freelists; releasing only the caller heap leaves those worker
          * pages resident across large query repetitions. */
         for (int hid = 0; hid < RAY_HEAP_REGISTRY_SIZE; hid++) {
