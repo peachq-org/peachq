@@ -746,6 +746,12 @@ static int cast_match(const char* tname, size_t tlen, const char* target) {
 
 /* Helper: copy null bitmap from source vec/list to destination vec. */
 static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
+    /* BOOL / U8 destinations are non-nullable per Phase 1 — there is
+     * no slot for a null marker.  Casting a nullable source to one
+     * of these types silently collapses the null to the type's zero
+     * value (already written by the cast loop). */
+    if (vec->type == RAY_BOOL || vec->type == RAY_U8) return vec;
+
     if (ray_is_vec(val)) {
         if (ray_vec_copy_nulls(vec, val) != RAY_OK)
             { ray_release(vec); return ray_error("oom", NULL); }
