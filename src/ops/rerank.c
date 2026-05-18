@@ -174,15 +174,11 @@ static ray_t* gather_rows_with_dist(ray_t* tbl,
             /* RAY_SYM: propagate the per-vector sym_dict so narrow-width
              * local indices resolve against the same dictionary.  For
              * sliced SYM columns the sym_dict lives on the slice_parent
-             * (the slice's own union slot holds slice_parent/offset).
-             * Guards against the inline-nullmap aliasing mirror sort.c:3307. */
+             * (the slice's own union slot holds slice_parent/offset). */
             if (ct == RAY_SYM) {
                 const ray_t* dict_owner = (src_col->attrs & RAY_ATTR_SLICE)
                                         ? src_col->slice_parent : src_col;
-                if (dict_owner &&
-                    (!(dict_owner->attrs & RAY_ATTR_HAS_NULLS) ||
-                     (dict_owner->attrs & RAY_ATTR_NULLMAP_EXT)) &&
-                    dict_owner->sym_dict) {
+                if (dict_owner && dict_owner->sym_dict) {
                     ray_retain(dict_owner->sym_dict);
                     new_col->sym_dict = dict_owner->sym_dict;
                 }
