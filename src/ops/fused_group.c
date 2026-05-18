@@ -308,7 +308,7 @@ int ray_fused_group_supported(ray_t* expr, ray_t* tbl) {
 /* ─────────────────────────────────────────────────────────────────────────
  * Per-morsel predicate evaluator
  *
- * Phase 1 only handles a single comparison `(== col const)` / `(!= col const)`
+ * Pass 1 only handles a single comparison `(== col const)` / `(!= col const)`
  * against an SYM or numeric column.  The compiled state is built once at
  * exec entry (column resolution + constant decode) and reused for every
  * morsel.  fp_eval_cmp writes 0/1 into bits[0..n) for the corresponding
@@ -707,7 +707,7 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
 }
 
 /* Walk the predicate DAG (an OP_AND tree of leaf comparisons) and collect
- * leaves into `out->children`.  Phase 3: balanced binary OP_AND emitted
+ * leaves into `out->children`.  Pass 3: balanced binary OP_AND emitted
  * by compile_expr_dag means we recurse on both inputs whenever we see an
  * OP_AND node.  Returns 0 on success, -1 if a leaf can't be compiled or
  * the fan-in exceeds FP_PRED_MAX_CHILDREN. */
@@ -3130,7 +3130,7 @@ ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
     if (!ext) return ray_error("nyi", NULL);
 
     /* count1 fast path: single key, single OP_COUNT.  Unchanged from
-     * Phase 3 — guarantees zero regression on Q8/Q37/Q38/Q43.
+     * Pass 3 — guarantees zero regression on Q8/Q37/Q38/Q43.
      * If the fused exec rejects the shape (planner / executor gate
      * divergence), fall back to the unfused FILTER + GROUP subgraph. */
     ray_t* res;

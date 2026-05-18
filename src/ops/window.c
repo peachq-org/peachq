@@ -572,7 +572,7 @@ static void win_par_fn(void* arg, uint32_t worker_id,
 }
 
 /* Parallel gather of partition key values into contiguous array.
- * Eliminates random-access reads during Phase 2 boundary detection. */
+ * Eliminates random-access reads during Pass 2 boundary detection. */
 typedef struct {
     const int64_t* sorted_idx;
     uint64_t*      pkey_sorted;
@@ -707,7 +707,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
     }
 
-    /* --- Phase 1: Sort by (partition_keys ++ order_keys) --- */
+    /* --- Pass 1: Sort by (partition_keys ++ order_keys) --- */
     ray_t* radix_itmp_hdr = NULL;
     ray_t* win_enum_rank_hdrs[n_sort > 0 ? n_sort : 1];
     memset(win_enum_rank_hdrs, 0, sizeof(win_enum_rank_hdrs));
@@ -1015,7 +1015,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
     }
 
-    /* --- Phase 2: Find partition boundaries --- */
+    /* --- Pass 2: Find partition boundaries --- */
     /* Overallocate part_offsets to worst case (single-pass, no counting pass) */
     ray_t* poff_hdr = NULL;
     int64_t* part_offsets = (int64_t*)scratch_alloc(&poff_hdr,
@@ -1103,7 +1103,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
     }
 
-    /* --- Phase 3: Allocate result vectors and compute per-partition --- */
+    /* --- Pass 3: Allocate result vectors and compute per-partition --- */
     for (uint8_t f = 0; f < n_funcs; f++) {
         uint8_t kind = ext->window.func_kinds[f];
         ray_t* fvec = func_vecs[f];
@@ -1130,9 +1130,8 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         /* Pre-stamp every slot with the width-correct null sentinel.  The
          * per-partition compute loops below write valid values into
          * "active" slots and call win_set_null on null-producing slots
-         * without re-writing the payload — so the only way to honor the
-         * dual-encoding contract for those bitmap-only nulls is to make
-         * the payload already match the sentinel up front. */
+         * without re-writing the payload — pre-stamping ensures every
+         * null slot already holds the correct sentinel. */
         if (is_f64[f]) {
             double* d = (double*)ray_data(result_vecs[f]);
             for (int64_t i = 0; i < nrows; i++) d[i] = NULL_F64;
@@ -1183,7 +1182,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             win_finalize_nulls(result_vecs[f]);
     }
 
-    /* --- Phase 4: Build result table --- */
+    /* --- Pass 4: Build result table --- */
     ray_t* result = ray_table_new(ncols + n_funcs);
     if (!result || RAY_IS_ERR(result)) {
         for (uint8_t f = 0; f < n_funcs; f++) ray_release(result_vecs[f]);
