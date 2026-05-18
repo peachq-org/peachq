@@ -71,6 +71,11 @@ static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
             }
         case RAY_STR:
             return ((const ray_str_t*)p)[idx].len == 0;
+        case RAY_GUID: {
+            /* GUID null = 16 all-zero bytes (canonical convention). */
+            static const uint8_t Z[16] = {0};
+            return memcmp((const uint8_t*)p + idx * 16, Z, 16) == 0;
+        }
         case RAY_BOOL:
         case RAY_U8:
         default:
@@ -942,6 +947,10 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
                  * string with a short one. */
                 memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
                 break;
+            case RAY_GUID:
+                /* GUID null = 16 all-zero bytes (canonical convention). */
+                memset((uint8_t*)p + idx * 16, 0, 16);
+                break;
             default:
                 break;
         }
@@ -1464,8 +1473,8 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     if (!vec_any_nulls(vec)) return false;
 
     /* Types with a defined NULL_* sentinel use the payload as source of
-     * truth.  Types without a sentinel (BOOL/U8/GUID/F32) keep the
-     * legacy bitmap path until the Phase 1 lockdown extends to a clean
+     * truth.  Types without a sentinel (BOOL/U8/F32) keep the legacy
+     * bitmap path until the Phase 1 lockdown extends to a clean
      * rejection at the producer (ray_vec_set_null_checked).  This split
      * is intentional and matches the design at
      * docs/superpowers/specs/2026-05-18-sentinel-migration-finish-design.md. */
@@ -1475,6 +1484,7 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
         case RAY_I32: case RAY_DATE: case RAY_TIME:
         case RAY_I16:
         case RAY_STR:
+        case RAY_GUID:
         {
             bool sentinel_says = sentinel_is_null(vec, idx);
 #ifdef RAYFORCE_NULL_AUDIT
@@ -1486,7 +1496,7 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
             return sentinel_says;
         }
         default:
-            /* BOOL, U8, GUID, F32, and any other type without a sentinel
+            /* BOOL, U8, F32, and any other type without a sentinel
              * convention.  Bitmap remains the source of truth here. */
             return read_nullmap_bit(vec, idx);
     }
