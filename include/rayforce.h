@@ -347,6 +347,7 @@ ray_t* ray_typed_null(int8_t type);
 #define NULL_I16  ((int16_t)INT16_MIN)
 #define NULL_I32  ((int32_t)INT32_MIN)
 #define NULL_I64  ((int64_t)INT64_MIN)
+#define NULL_F32  ((float)__builtin_nanf(""))
 #define NULL_F64  (__builtin_nan(""))
 
 /* Atom null check.  RAY_NULL_OBJ is the untyped null singleton.
@@ -358,6 +359,11 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
     if (x->type >= 0) return false;
     switch (-x->type) {
         case RAY_F64:       return x->f64 != x->f64;
+        case RAY_F32: {
+            /* F32 atoms reuse the f64 union slot — see ray_f32 / atom.c. */
+            float f = (float)x->f64;
+            return f != f;
+        }
         case RAY_I64:
         case RAY_TIMESTAMP: return x->i64 == NULL_I64;
         case RAY_I32:
