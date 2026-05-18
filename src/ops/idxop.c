@@ -111,70 +111,24 @@ static ray_t* ray_index_alloc(ray_idx_kind_t kind, int8_t parent_type, int64_t p
     return idx;
 }
 
-/* Reading saved-nullmap pointers: typed views into the 16-byte snapshot. */
-static inline ray_t* saved_lo_ptr(ray_index_t* ix) {
-    ray_t* p; memcpy(&p, &ix->saved_nullmap[0], sizeof(p)); return p;
-}
-static inline ray_t* saved_hi_ptr(ray_index_t* ix) {
-    ray_t* p; memcpy(&p, &ix->saved_nullmap[8], sizeof(p)); return p;
-}
-static inline void saved_lo_clear(ray_index_t* ix) {
-    memset(&ix->saved_nullmap[0], 0, 8);
-}
-static inline void saved_hi_clear(ray_index_t* ix) {
-    memset(&ix->saved_nullmap[8], 0, 8);
-}
-
 /* --------------------------------------------------------------------------
  * Saved-nullmap retain / release
  *
- * The saved 16 bytes hold pointers iff (parent_type, saved_attrs) say so:
- *   - saved_attrs & NULLMAP_EXT  => low 8 bytes are an owning ray_t* (ext nullmap)
- *                                   *except* RAY_STR uses the same slot for
- *                                   str_ext_null (also an owning ref) — same
- *                                   semantics, same ownership.
- *   - parent_type == RAY_STR     => high 8 bytes are str_pool (owning ref)
- *   - parent_type == RAY_SYM and saved_attrs & NULLMAP_EXT
- *                                => high 8 bytes are sym_dict (owning ref)
- *
- * For all other type/attr combos the bytes are inline bitmap data, not
- * pointers, and we leave them alone.
- * -------------------------------------------------------------------------- */
+ * The 16 byte snapshot preserves the parent's original nullmap-union bytes
+ * across attach/detach.  Since index attach is restricted to numeric
+ * types (see prepare_attach), the snapshot contains either:
+ *   - all-zero bytes (no link, no nulls), or
+ *   - bytes 8-15 hold an int64 link_target (HAS_LINK on I32/I64 cols).
+ * Neither case carries an owning ray_t* reference, so retain/release
+ * are no-ops.  The functions remain to preserve the heap.c / vec.c
+ * call sites symmetric with the pre-migration layout. */
 
 void ray_index_release_saved(ray_index_t* ix) {
-    if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
-        ray_t* lo = saved_lo_ptr(ix);
-        if (lo && !RAY_IS_ERR(lo)) ray_release(lo);
-        saved_lo_clear(ix);
-    }
-    if (ix->parent_type == RAY_STR) {
-        ray_t* hi = saved_hi_ptr(ix);
-        if (hi && !RAY_IS_ERR(hi)) ray_release(hi);
-        saved_hi_clear(ix);
-    } else if (ix->parent_type == RAY_SYM &&
-               (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT)) {
-        /* RAY_SYM stores sym_dict at high 8 bytes only when an ext nullmap
-         * is present (otherwise the inline bitmap occupies both halves and
-         * sym_dict isn't materialized in the union slot). */
-        ray_t* hi = saved_hi_ptr(ix);
-        if (hi && !RAY_IS_ERR(hi)) ray_release(hi);
-        saved_hi_clear(ix);
-    }
+    (void)ix;
 }
 
 void ray_index_retain_saved(ray_index_t* ix) {
-    if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
-        ray_t* lo = saved_lo_ptr(ix);
-        if (lo && !RAY_IS_ERR(lo)) ray_retain(lo);
-    }
-    if (ix->parent_type == RAY_STR) {
-        ray_t* hi = saved_hi_ptr(ix);
-        if (hi && !RAY_IS_ERR(hi)) ray_retain(hi);
-    } else if (ix->parent_type == RAY_SYM &&
-               (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT)) {
-        ray_t* hi = saved_hi_ptr(ix);
-        if (hi && !RAY_IS_ERR(hi)) ray_retain(hi);
-    }
+    (void)ix;
 }
 
 /* --------------------------------------------------------------------------
@@ -311,39 +265,32 @@ static ray_err_t zone_scan(ray_t* v, ray_index_t* ix) {
 /* --------------------------------------------------------------------------
  * Attach
  *
- * The 16-byte snapshot must be taken AFTER the scan (so the scan reads the
- * parent's normal nullmap) but BEFORE we overwrite parent->nullmap with the
- * index pointer.  Ownership transfer: pointers in the snapshot (ext_nullmap,
- * str_pool, sym_dict) move from parent to ix.  We do NOT retain them here —
- * the existing refs simply move.  Symmetrically, when we install the index
- * pointer in parent->nullmap, we transfer that single ref to the parent
- * (no extra retain).
+ * The 16-byte snapshot preserves the parent's nullmap-union bytes across
+ * the attachment so detach can restore them byte-for-byte.  For numeric
+ * vectors (the only types that may attach) bytes 0-7 are unused and
+ * bytes 8-15 carry link_target when HAS_LINK is set — no owned pointers
+ * either way.  We do NOT retain anything here; the index pointer install
+ * at bytes 0-7 transfers a single ref to the parent (no extra retain).
  * -------------------------------------------------------------------------- */
 
 static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
     ray_index_t* ix = ray_index_payload(idx);
     /* Snapshot the parent's 16 raw bytes verbatim. */
     memcpy(ix->saved_nullmap, parent->nullmap, 16);
-    ix->saved_attrs = parent->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT);
+    ix->saved_attrs = parent->attrs & RAY_ATTR_HAS_NULLS;
 
     /* Install the index pointer — overwrites bytes 0-7 with the index ptr.
      * Bytes 8-15 carry link_target when HAS_LINK is set; preserve them.
-     * Otherwise zero _idx_pad as a tidy default. */
-    parent->index    = idx;
-    if (!(parent->attrs & RAY_ATTR_HAS_LINK)) parent->_idx_pad = NULL;
-    parent->attrs   |= RAY_ATTR_HAS_INDEX;
-    /* Clear NULLMAP_EXT on the parent: vec->ext_nullmap is now the index
-     * pointer, not a U8 nullmap vec, so naive readers that gate on
-     * NULLMAP_EXT and dereference ext_nullmap would read garbage.  The
-     * displaced ext-nullmap pointer is preserved inside ix->saved_nullmap[0..7]
-     * and accessed via the HAS_INDEX-aware helpers in vec.c / morsel.c.
+     * Otherwise zero _idx_pad as a tidy default.
      *
      * IMPORTANT: HAS_NULLS is *preserved* on the parent so the many call
      * sites that use it as a cheap "do I need null logic at all?" gate
-     * continue to give correct answers.  The actual null bits are read
-     * via ray_vec_is_null / ray_morsel_next, both of which check
-     * HAS_INDEX first and route through the saved snapshot. */
-    parent->attrs   &= (uint8_t)~RAY_ATTR_NULLMAP_EXT;
+     * continue to give correct answers.  The actual null state is read
+     * via ray_vec_is_null (sentinel-based), which is unaffected by the
+     * index pointer overlay at bytes 0-7. */
+    parent->index    = idx;
+    if (!(parent->attrs & RAY_ATTR_HAS_LINK)) parent->_idx_pad = NULL;
+    parent->attrs   |= RAY_ATTR_HAS_INDEX;
     return parent;
 }
 
@@ -565,10 +512,8 @@ ray_t* ray_index_drop(ray_t** vp) {
 
     /* Shared-index case: another vec may share this RAY_INDEX block via
      * ray_alloc_copy (rc>1).  Don't clobber the snapshot in that case —
-     * the other holder still reads it.  Copy our own retained refs to
-     * the saved-pointer slots so the bytes we move into v->nullmap are
-     * owned by v.  See vec_drop_index_inplace for the same pattern. */
-    uint8_t saved = ix->saved_attrs;
+     * the other holder still reads it.  See vec_drop_index_inplace for
+     * the same pattern. */
     bool shared = ray_atomic_load(&idx->rc) > 1;
     if (shared) {
         ray_index_retain_saved(ix);
@@ -579,11 +524,9 @@ ray_t* ray_index_drop(ray_t** vp) {
         ix->saved_attrs = 0;
     }
 
-    /* Restore parent attrs.  HAS_NULLS was preserved through the attachment
-     * so we don't need to OR it back in; only NULLMAP_EXT (which we cleared
-     * at attach time) needs to be reinstated from saved_attrs. */
+    /* Restore parent attrs.  HAS_NULLS was preserved through the
+     * attachment so it needs no restoration. */
     v->attrs &= (uint8_t)~RAY_ATTR_HAS_INDEX;
-    if (saved & RAY_ATTR_NULLMAP_EXT) v->attrs |= RAY_ATTR_NULLMAP_EXT;
 
     /* Release the index.  Per-kind children are released by the RAY_INDEX
      * branch of ray_release_owned_refs (added in heap.c). */

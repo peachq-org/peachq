@@ -46,8 +46,8 @@ ray_op_t* ray_filtered_group(ray_graph_t* g,
  * fused op.  Returns 1 if `expr` (a Rayfall expression, not a DAG node)
  * can be evaluated by the per-morsel predicate evaluator against `tbl`.
  *
- * Phase 1 accepted single (== col const) / (!= col const) on flat
- * SYM/integer columns.  Phase 3 adds (and pred1 pred2 …) of those, plus
+ * Pass 1 accepted single (== col const) / (!= col const) on flat
+ * SYM/integer columns.  Pass 3 adds (and pred1 pred2 …) of those, plus
  * ordering comparisons (<, <=, >, >=) on numeric (non-SYM) columns. */
 int ray_fused_group_supported(ray_t* expr, ray_t* tbl);
 

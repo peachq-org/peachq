@@ -332,7 +332,7 @@ ray_t* ray_rowsel_to_indices(ray_t* sel) {
 /* refine: walk `existing`'s surviving rows, test pred at each, emit a
  * new selection.  Sequential — chained filters are typically applied
  * to already-shrunk row sets where parallelism doesn't pay back the
- * dispatch overhead.  Phase 2 will revisit if measurement says
+ * dispatch overhead.  Pass 2 will revisit if measurement says
  * otherwise. */
 ray_t* ray_rowsel_refine(ray_t* existing, ray_t* pred) {
     if (!existing) return ray_rowsel_from_pred(pred);
