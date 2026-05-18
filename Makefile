@@ -98,6 +98,27 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
 	./$(TARGET).test
 
+# Sentinel-null migration audit build.  Defines RAYFORCE_NULL_AUDIT,
+# which instruments ray_vec_is_null to cross-check the bitmap answer
+# against the sentinel answer (sentinel_is_null).  Every divergence
+# (bitmap=1, sentinel=0 — meaning some producer set the bitmap bit
+# without writing the type-correct NULL_* into the payload) is logged
+# to stderr with a backtrace, deduplicated by call-site return address.
+# Behavior is otherwise unchanged: bitmap remains the authoritative
+# answer.  Use this target during the migration to catalog producer
+# gaps before flipping ray_vec_is_null to sentinel-based reads.
+#
+# Sample workflow:
+#   make audit 2> audit.log
+#   grep "NULL_AUDIT divergence" audit.log | wc -l   # count divergences
+#   # Resolve the absolute caller addresses via the +offset entries in
+#   # each backtrace and addr2line -e rayforce.test 0x<offset>.
+audit: CFLAGS = $(DEBUG_CFLAGS) -DRAYFORCE_NULL_AUDIT
+audit: LDFLAGS = $(DEBUG_LDFLAGS)
+audit: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
+	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
+	./$(TARGET).test
+
 # Coverage report.  Builds both binaries with clang source-based
 # instrumentation, runs the test suite (writing one .profraw per
 # process — the test binary AND every IPC server it spawns —
