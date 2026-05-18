@@ -1088,6 +1088,9 @@ static inline void par_set_null(ray_t* vec, int64_t idx) {
         case RAY_F64:
             ((double*)p)[idx] = NULL_F64;
             break;
+        case RAY_F32:
+            ((float*)p)[idx] = NULL_F32;
+            break;
         case RAY_I64:
         case RAY_TIMESTAMP:
             ((int64_t*)p)[idx] = NULL_I64;

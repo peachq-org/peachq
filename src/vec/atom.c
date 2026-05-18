@@ -195,6 +195,7 @@ ray_t* ray_typed_null(int8_t type) {
     v->type = type;
     switch (type) {
         case -RAY_F64:                                 v->f64 = NULL_F64; break;
+        case -RAY_F32:                                 v->f64 = (double)NULL_F32; break;
         case -RAY_I64: case -RAY_TIMESTAMP:            v->i64 = NULL_I64; break;
         case -RAY_I32: case -RAY_DATE: case -RAY_TIME: v->i32 = NULL_I32; break;
         case -RAY_I16:                                 v->i16 = NULL_I16; break;
