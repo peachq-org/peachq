@@ -921,120 +921,30 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      * bug regardless of indexing). */
     vec_drop_index_inplace(vec);
 
-    /* Sentinel-supporting types: write the type-correct NULL_* into
-     * the payload and set HAS_NULLS.  The per-element bitmap is no
-     * longer the source of truth — all readers go through
-     * ray_vec_is_null (sentinel-based) or morsel's synthesis path
-     * (also sentinel-derived).  Skip the bitmap write entirely.
-     * BOOL/U8 fall through to the legacy bitmap path below until
-     * Phase 1 lockdown lands.  Caller owns the payload on
-     * is_null=false (we have no way to know the prior real value);
-     * the clear path is a no-op for sentinel types. */
-    bool type_uses_sentinel = false;
-    switch (vec->type) {
-        case RAY_F64: case RAY_F32:
-        case RAY_I64: case RAY_TIMESTAMP:
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
-        case RAY_I16:
-        case RAY_STR:
-        case RAY_GUID:
-            type_uses_sentinel = true;
-            break;
-        default:
-            break;
-    }
-    if (type_uses_sentinel) {
-        if (is_null) {
-            void* p = ray_data(vec);
-            switch (vec->type) {
-                case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
-                case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
-                case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
-                case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
-                case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
-                case RAY_STR:
-                    memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
-                    break;
-                case RAY_GUID:
-                    memset((uint8_t*)p + idx * 16, 0, 16);
-                    break;
-                default: break;
-            }
-            vec->attrs |= RAY_ATTR_HAS_NULLS;
+    /* Every remaining vec type uses a sentinel: F64/F32/I64/TIMESTAMP/
+     * I32/DATE/TIME/I16/STR/GUID.  Write the type-correct NULL_* into
+     * the payload and set HAS_NULLS.  ray_vec_is_null (the sole reader)
+     * recovers null state from the payload.  Caller owns the payload on
+     * is_null=false (we have no way to know the prior real value); the
+     * clear path is a no-op. */
+    if (is_null) {
+        void* p = ray_data(vec);
+        switch (vec->type) {
+            case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
+            case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
+            case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
+            case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
+            case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
+            case RAY_STR:
+                memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
+                break;
+            case RAY_GUID:
+                memset((uint8_t*)p + idx * 16, 0, 16);
+                break;
+            default: return RAY_ERR_TYPE;
         }
-        return RAY_OK;
+        vec->attrs |= RAY_ATTR_HAS_NULLS;
     }
-
-    /* Legacy bitmap path: BOOL / U8 still rely on the per-element
-     * bitmap until their lockdown lands. */
-    if (is_null) vec->attrs |= RAY_ATTR_HAS_NULLS;
-
-    if (!(vec->attrs & RAY_ATTR_NULLMAP_EXT)) {
-        /* RAY_STR uses bytes 8-15 for str_pool, HAS_LINK uses bytes 8-15 for
-         * link_target — both must skip the inline-128 path to avoid
-         * aliasing corruption.  Otherwise <=128 elements go inline. */
-        bool can_inline = (vec->type != RAY_STR) && idx < 128 &&
-                          !(vec->attrs & RAY_ATTR_HAS_LINK);
-        if (can_inline) {
-            /* Inline nullmap path (<=128 elements, non-STR, non-linked) */
-            int byte_idx = (int)(idx / 8);
-            int bit_idx = (int)(idx % 8);
-            if (is_null)
-                vec->nullmap[byte_idx] |= (uint8_t)(1u << bit_idx);
-            else
-                vec->nullmap[byte_idx] &= (uint8_t)~(1u << bit_idx);
-            return RAY_OK;
-        }
-        /* Need to promote to external nullmap */
-        int64_t bitmap_len = (vec->len + 7) / 8;
-        ray_t* ext = ray_vec_new(RAY_U8, bitmap_len);
-        if (!ext || RAY_IS_ERR(ext)) return RAY_ERR_OOM;
-        ext->len = bitmap_len;
-        if (vec->type == RAY_STR || (vec->attrs & RAY_ATTR_HAS_LINK)) {
-            /* Bytes 0-15 contain pointers/sym, not bits — start ext zeroed.
-             * (Linked vecs reach here only when adding their first null,
-             *  since promote_inline_to_ext in linkop.c covers the
-             *  pre-existing-nulls case at attach time.) */
-            memset(ray_data(ext), 0, (size_t)bitmap_len);
-        } else {
-            /* Copy existing inline bits */
-            memcpy(ray_data(ext), vec->nullmap, 16);
-            /* Zero remaining bytes */
-            if (bitmap_len > 16)
-                memset((char*)ray_data(ext) + 16, 0, (size_t)(bitmap_len - 16));
-        }
-        vec->attrs |= RAY_ATTR_NULLMAP_EXT;
-        if (is_null) vec->attrs |= RAY_ATTR_HAS_NULLS;
-        vec->ext_nullmap = ext;
-    }
-
-    /* External nullmap path */
-    ray_t* ext = vec->ext_nullmap;
-    /* Grow external bitmap if needed */
-    int64_t needed_bytes = (idx / 8) + 1;
-    if (needed_bytes > ext->len) {
-        int64_t new_len = (vec->len + 7) / 8;
-        if (new_len < needed_bytes) new_len = needed_bytes;
-        size_t new_data_size = (size_t)new_len;
-        int64_t old_len = ext->len;
-        ray_t* new_ext = ray_scratch_realloc(ext, new_data_size);
-        if (!new_ext || RAY_IS_ERR(new_ext)) return RAY_ERR_OOM;
-        /* Zero new bytes */
-        if (new_len > old_len)
-            memset((char*)ray_data(new_ext) + old_len, 0,
-                   (size_t)(new_len - old_len));
-        new_ext->len = new_len;
-        vec->ext_nullmap = new_ext;
-        ext = new_ext;
-    }
-
-    uint8_t* bits = (uint8_t*)ray_data(ext);
-    int byte_idx = (int)(idx / 8);
-    int bit_idx = (int)(idx % 8);
-    if (is_null)
-        bits[byte_idx] |= (uint8_t)(1u << bit_idx);
-    else
-        bits[byte_idx] &= (uint8_t)~(1u << bit_idx);
     return RAY_OK;
 }
 
