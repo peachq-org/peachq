@@ -921,17 +921,10 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      * bug regardless of indexing). */
     vec_drop_index_inplace(vec);
 
-    /* Dual-encoding write: when marking a slot null, ALSO stamp the
-     * type-correct NULL_* sentinel into the payload so sentinel-based
-     * readers see it.  Caller is responsible for the payload on
-     * is_null=false (we have no way to know the prior real value),
-     * so the clear path only touches the bitmap bit below.
-     *
-     * The bitmap write below this block stays in place until every
-     * ray_vec_nullmap_bytes consumer (propagate_nulls fast path,
-     * group.c radix HT, idxop save/restore, morsel iter, serde) is
-     * sentinel-aware — see design doc Stage B / Stage 3' for that
-     * cleanup.  Until then sentinel + bitmap are dual-written. */
+    /* Dual-encoding write: bitmap remains alongside the sentinel until
+     * morsel.c (null_bits iteration), idxop.c (saved_nullmap snapshot
+     * on index attach), and store/col.c (on-disk bitmap segment) are
+     * converted to sentinel-aware — see design doc Stage 3''. */
     if (is_null) {
         void* p = ray_data(vec);
         switch (vec->type) {
