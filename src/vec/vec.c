@@ -1347,9 +1347,9 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     if (idx < 0 || idx >= vec->len) return false;
 
     /* SYM columns are no-null by design — see ray_vec_set_null_checked
-     * for the rationale.  Short-circuit before slice/nullmap dispatch
-     * so any leftover HAS_NULLS attr from pre-policy code paths
-     * doesn't surface a phantom null. */
+     * for the rationale.  Sentinel check is bypassed here; consumers
+     * that need sym-null detection (e.g. dict.c key handling) test the
+     * sym id directly. */
     if (vec->type == RAY_SYM) return false;
 
     /* Slice: delegate to parent with adjusted index */
@@ -1359,27 +1359,11 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
         return ray_vec_is_null(parent, pidx);
     }
 
+    /* Vec-level fast-path gate: HAS_NULLS clear means no null anywhere. */
     if (!vec_any_nulls(vec)) return false;
 
-    ray_t* ext = NULL;
-    const uint8_t* inline_bits = vec_inline_nullmap(vec, &ext);
-    if (ext) {
-        int64_t byte_idx = idx / 8;
-        if (byte_idx >= ext->len) return false;
-        const uint8_t* bits = (const uint8_t*)ray_data(ext);
-        return (bits[byte_idx] >> (idx % 8)) & 1;
-    }
-
-    /* Inline nullmap path.  RAY_STR's inline 16 bytes hold str_pool/str_ext_null
-     * (or, when an index is attached, were the same and are now in the index
-     * snapshot).  Either way, RAY_STR uses ext nullmap exclusively for its
-     * null bits, which is handled above; if the inline path is taken for
-     * RAY_STR, no nulls are present. */
-    if (vec->type == RAY_STR) return false;
-    if (idx >= 128) return false;
-    int byte_idx = (int)(idx / 8);
-    int bit_idx = (int)(idx % 8);
-    return (inline_bits[byte_idx] >> bit_idx) & 1;
+    /* Sentinel check on the payload — the post-Phase-7 source of truth. */
+    return sentinel_is_null(vec, idx);
 }
 
 /* --------------------------------------------------------------------------
