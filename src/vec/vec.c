@@ -41,71 +41,50 @@ static int pair_cmp_idx_then_k(const void* a, const void* b) {
     return (pa[1] > pb[1]) - (pa[1] < pb[1]);
 }
 
-/* Public bitmap accessor — handles slice / ext / inline / HAS_INDEX
- * uniformly.  See vec.h for the contract. */
-const uint8_t* ray_vec_nullmap_bytes(const ray_t* v,
-                                     int64_t* bit_offset_out,
-                                     int64_t* len_bits_out) {
-    if (bit_offset_out) *bit_offset_out = 0;
-    if (len_bits_out)   *len_bits_out   = 0;
-    if (!v) return NULL;
-
-    /* Slice: HAS_NULLS / HAS_INDEX live on the parent — redirect first,
-     * THEN test for nulls.  Reading v->attrs & HAS_NULLS here would
-     * incorrectly drop a sliced view of a nullable column. */
-    const ray_t* target = v;
-    int64_t off = 0;
-    if (v->attrs & RAY_ATTR_SLICE) {
-        target = v->slice_parent;
-        off = v->slice_offset;
-        if (!target) return NULL;
-    }
-    if (!(target->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
-
-    if (bit_offset_out) *bit_offset_out = off;
-
-    if (target->attrs & RAY_ATTR_HAS_INDEX) {
-        const ray_index_t* ix = ray_index_payload(target->index);
-        if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
-            ray_t* ext;
-            memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
-            if (len_bits_out) *len_bits_out = ext->len * 8;
-            return (const uint8_t*)ray_data(ext);
+/* Sentinel-based per-element null test.  Caller guarantees v is a
+ * non-slice vector (type > 0) and idx is in range.  Returns true iff
+ * payload[idx] equals the type-correct NULL_* sentinel.  F64/F32 use
+ * (x != x) to detect any NaN bit pattern.  BOOL/U8 are non-nullable
+ * and return false. */
+static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
+    const void* p = ray_data((ray_t*)v);
+    switch (v->type) {
+        case RAY_F64: {
+            double x = ((const double*)p)[idx];
+            return x != x;
         }
-        if (len_bits_out) *len_bits_out = 128;
-        return ix->saved_nullmap;
-    }
-    if (target->attrs & RAY_ATTR_NULLMAP_EXT) {
-        if (len_bits_out) *len_bits_out = target->ext_nullmap->len * 8;
-        return (const uint8_t*)ray_data(target->ext_nullmap);
-    }
-    /* Inline path: RAY_STR's bytes 0-15 hold str_pool/str_ext_null, not
-     * bits — so RAY_STR with HAS_NULLS must always have NULLMAP_EXT. */
-    if (target->type == RAY_STR) return NULL;
-    if (len_bits_out) *len_bits_out = 128;
-    return target->nullmap;
-}
-
-/* Internal compatibility wrapper for the older two-out-param form used
- * inside vec.c.  Returns the inline pointer (16-byte buffer) when nulls
- * live inline, or NULL when they live in *ext_out. */
-static inline const uint8_t* vec_inline_nullmap(const ray_t* v, ray_t** ext_nullmap_ref) {
-    *ext_nullmap_ref = NULL;
-    if (v->attrs & RAY_ATTR_HAS_INDEX) {
-        const ray_index_t* ix = ray_index_payload(v->index);
-        if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
-            ray_t* ext;
-            memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
-            *ext_nullmap_ref = ext;
-            return NULL;
+        case RAY_F32: {
+            float x = ((const float*)p)[idx];
+            return x != x;
         }
-        return ix->saved_nullmap;
+        case RAY_I64:
+        case RAY_TIMESTAMP:
+            return ((const int64_t*)p)[idx] == NULL_I64;
+        case RAY_I32:
+        case RAY_DATE:
+        case RAY_TIME:
+            return ((const int32_t*)p)[idx] == NULL_I32;
+        case RAY_I16:
+            return ((const int16_t*)p)[idx] == NULL_I16;
+        case RAY_SYM:
+            switch (v->attrs & 0x3) {
+                case RAY_SYM_W8:  return ((const uint8_t*)p)[idx]  == 0;
+                case RAY_SYM_W16: return ((const uint16_t*)p)[idx] == 0;
+                case RAY_SYM_W32: return ((const uint32_t*)p)[idx] == 0;
+                default:          return ((const int64_t*)p)[idx]  == 0;
+            }
+        case RAY_STR:
+            return ((const ray_str_t*)p)[idx].len == 0;
+        case RAY_GUID: {
+            /* GUID null = 16 all-zero bytes (canonical convention). */
+            static const uint8_t Z[16] = {0};
+            return memcmp((const uint8_t*)p + idx * 16, Z, 16) == 0;
+        }
+        case RAY_BOOL:
+        case RAY_U8:
+        default:
+            return false;
     }
-    if (v->attrs & RAY_ATTR_NULLMAP_EXT) {
-        *ext_nullmap_ref = v->ext_nullmap;
-        return NULL;
-    }
-    return v->nullmap;
 }
 
 /* True if v has any nulls.  HAS_NULLS is preserved on the parent across
@@ -118,8 +97,7 @@ static inline bool vec_any_nulls(const ray_t* v) {
 /* In-place drop of attached index — caller must hold a unique ref (rc==1)
  * on `v` itself.  Used by mutation paths to invalidate the (now stale)
  * index before writing.  HAS_NULLS was preserved through the attachment
- * so it needs no restoration; only NULLMAP_EXT (cleared at attach time)
- * is reinstated from saved_attrs.
+ * so it needs no restoration.
  *
  * Shared-index case: `v` may share its index ray_t with another vec
  * (e.g. after ray_cow followed by ray_retain_owned_refs, both copies
@@ -131,14 +109,13 @@ static inline void vec_drop_index_inplace(ray_t* v) {
     if (!(v->attrs & RAY_ATTR_HAS_INDEX)) return;
     ray_t* idx = v->index;
     ray_index_t* ix = ray_index_payload(idx);
-    uint8_t saved = ix->saved_attrs;
     bool shared = ray_atomic_load(&idx->rc) > 1;
 
     if (shared) {
         /* Take our own retained references to the saved-pointer slots
-         * (ext_nullmap / str_pool / sym_dict etc.) so the bytes we copy
-         * into v->nullmap are validly owned by v.  Leave the index's
-         * snapshot intact for the other holder. */
+         * (str_pool / sym_dict etc.) so the bytes we copy into v->nullmap
+         * are validly owned by v.  Leave the index's snapshot intact for
+         * the other holder. */
         ray_index_retain_saved(ix);
     }
     memcpy(v->nullmap, ix->saved_nullmap, 16);
@@ -150,7 +127,6 @@ static inline void vec_drop_index_inplace(ray_t* v) {
         ix->saved_attrs = 0;
     }
     v->attrs &= (uint8_t)~RAY_ATTR_HAS_INDEX;
-    if (saved & RAY_ATTR_NULLMAP_EXT) v->attrs |= RAY_ATTR_NULLMAP_EXT;
     ray_release(idx);
 }
 
@@ -848,10 +824,13 @@ ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
 }
 
 /* --------------------------------------------------------------------------
- * Null bitmap operations
+ * Null state operations
  *
- * Inline: for vectors with <=128 elements, bits stored in nullmap[16] (128 bits).
- * External: for >128 elements, allocate a U8 vector bitmap via ext_nullmap.
+ * Null state is encoded in-band via the type-correct NULL_* sentinel in
+ * the payload (F64/F32 NaN, NULL_I64 / NULL_I32 / NULL_I16, ray_str_t{0,0},
+ * 16 zero bytes for GUID).  A vec-level RAY_ATTR_HAS_NULLS flag is a
+ * cheap fast-path gate; ray_vec_is_null reads the payload as source of
+ * truth.  BOOL/U8/SYM are non-nullable.
  * -------------------------------------------------------------------------- */
 
 ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
@@ -859,87 +838,45 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
     if (vec->attrs & RAY_ATTR_SLICE) return RAY_ERR_TYPE; /* cannot set null on slice — COW first */
     if (idx < 0 || idx >= vec->len) return RAY_ERR_RANGE;
 
-    /* SYM columns are no-null by design — sym ID 0 (the interned
-     * empty string, reserved by ray_sym_init) is the canonical
-     * "missing" / "empty" / "absent" value, and every SYM cell
-     * holds some valid ID.  Reject set-null on SYM so callers that
-     * mean "this row is missing" write 0 explicitly instead. */
-    if (vec->type == RAY_SYM) return RAY_ERR_TYPE;
+    /* Types that don't accept set-null:
+     *   - SYM: sym ID 0 (interned empty string, reserved by
+     *     ray_sym_init) is the canonical "missing" value; callers
+     *     write 0 directly.
+     *   - BOOL / U8: non-nullable; they have nowhere to store a
+     *     null, so reject to keep the producer surface clean. */
+    if (vec->type == RAY_SYM ||
+        vec->type == RAY_BOOL ||
+        vec->type == RAY_U8) return RAY_ERR_TYPE;
 
     /* Mutation invalidates any attached accelerator index — drop it inline.
      * Caller must already hold a unique ref (set-null on a shared vec is a
      * bug regardless of indexing). */
     vec_drop_index_inplace(vec);
 
-    /* Mark HAS_NULLS if setting a null (defer for RAY_STR until ext alloc succeeds) */
-    if (is_null && vec->type != RAY_STR) vec->attrs |= RAY_ATTR_HAS_NULLS;
-
-    if (!(vec->attrs & RAY_ATTR_NULLMAP_EXT)) {
-        /* RAY_STR uses bytes 8-15 for str_pool, HAS_LINK uses bytes 8-15 for
-         * link_target — both must skip the inline-128 path to avoid
-         * aliasing corruption.  Otherwise <=128 elements go inline. */
-        bool can_inline = (vec->type != RAY_STR) && idx < 128 &&
-                          !(vec->attrs & RAY_ATTR_HAS_LINK);
-        if (can_inline) {
-            /* Inline nullmap path (<=128 elements, non-STR, non-linked) */
-            int byte_idx = (int)(idx / 8);
-            int bit_idx = (int)(idx % 8);
-            if (is_null)
-                vec->nullmap[byte_idx] |= (uint8_t)(1u << bit_idx);
-            else
-                vec->nullmap[byte_idx] &= (uint8_t)~(1u << bit_idx);
-            return RAY_OK;
+    /* Every remaining vec type uses a sentinel: F64/F32/I64/TIMESTAMP/
+     * I32/DATE/TIME/I16/STR/GUID.  Write the type-correct NULL_* into
+     * the payload and set HAS_NULLS.  ray_vec_is_null (the sole reader)
+     * recovers null state from the payload.  Caller owns the payload on
+     * is_null=false (we have no way to know the prior real value); the
+     * clear path is a no-op. */
+    if (is_null) {
+        void* p = ray_data(vec);
+        switch (vec->type) {
+            case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
+            case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
+            case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
+            case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
+            case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
+            case RAY_STR:
+                memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
+                break;
+            case RAY_GUID:
+                memset((uint8_t*)p + idx * 16, 0, 16);
+                break;
+            default: return RAY_ERR_TYPE;
         }
-        /* Need to promote to external nullmap */
-        int64_t bitmap_len = (vec->len + 7) / 8;
-        ray_t* ext = ray_vec_new(RAY_U8, bitmap_len);
-        if (!ext || RAY_IS_ERR(ext)) return RAY_ERR_OOM;
-        ext->len = bitmap_len;
-        if (vec->type == RAY_STR || (vec->attrs & RAY_ATTR_HAS_LINK)) {
-            /* Bytes 0-15 contain pointers/sym, not bits — start ext zeroed.
-             * (Linked vecs reach here only when adding their first null,
-             *  since promote_inline_to_ext in linkop.c covers the
-             *  pre-existing-nulls case at attach time.) */
-            memset(ray_data(ext), 0, (size_t)bitmap_len);
-        } else {
-            /* Copy existing inline bits */
-            memcpy(ray_data(ext), vec->nullmap, 16);
-            /* Zero remaining bytes */
-            if (bitmap_len > 16)
-                memset((char*)ray_data(ext) + 16, 0, (size_t)(bitmap_len - 16));
-        }
-        vec->attrs |= RAY_ATTR_NULLMAP_EXT;
-        if (is_null) vec->attrs |= RAY_ATTR_HAS_NULLS;
-        vec->ext_nullmap = ext;
+        vec->attrs |= RAY_ATTR_HAS_NULLS;
     }
-
-    /* External nullmap path */
-    ray_t* ext = vec->ext_nullmap;
-    /* Grow external bitmap if needed */
-    int64_t needed_bytes = (idx / 8) + 1;
-    if (needed_bytes > ext->len) {
-        int64_t new_len = (vec->len + 7) / 8;
-        if (new_len < needed_bytes) new_len = needed_bytes;
-        size_t new_data_size = (size_t)new_len;
-        int64_t old_len = ext->len;
-        ray_t* new_ext = ray_scratch_realloc(ext, new_data_size);
-        if (!new_ext || RAY_IS_ERR(new_ext)) return RAY_ERR_OOM;
-        /* Zero new bytes */
-        if (new_len > old_len)
-            memset((char*)ray_data(new_ext) + old_len, 0,
-                   (size_t)(new_len - old_len));
-        new_ext->len = new_len;
-        vec->ext_nullmap = new_ext;
-        ext = new_ext;
-    }
-
-    uint8_t* bits = (uint8_t*)ray_data(ext);
-    int byte_idx = (int)(idx / 8);
-    int bit_idx = (int)(idx % 8);
-    if (is_null)
-        bits[byte_idx] |= (uint8_t)(1u << bit_idx);
-    else
-        bits[byte_idx] &= (uint8_t)~(1u << bit_idx);
     return RAY_OK;
 }
 
@@ -1310,9 +1247,9 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     if (idx < 0 || idx >= vec->len) return false;
 
     /* SYM columns are no-null by design — see ray_vec_set_null_checked
-     * for the rationale.  Short-circuit before slice/nullmap dispatch
-     * so any leftover HAS_NULLS attr from pre-policy code paths
-     * doesn't surface a phantom null. */
+     * for the rationale.  Sentinel check is bypassed here; consumers
+     * that need sym-null detection (e.g. dict.c key handling) test the
+     * sym id directly. */
     if (vec->type == RAY_SYM) return false;
 
     /* Slice: delegate to parent with adjusted index */
@@ -1322,40 +1259,37 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
         return ray_vec_is_null(parent, pidx);
     }
 
+    /* Vec-level fast-path gate: HAS_NULLS clear means no null anywhere. */
     if (!vec_any_nulls(vec)) return false;
 
-    ray_t* ext = NULL;
-    const uint8_t* inline_bits = vec_inline_nullmap(vec, &ext);
-    if (ext) {
-        int64_t byte_idx = idx / 8;
-        if (byte_idx >= ext->len) return false;
-        const uint8_t* bits = (const uint8_t*)ray_data(ext);
-        return (bits[byte_idx] >> (idx % 8)) & 1;
+    /* Sentinels are the sole source of truth.  BOOL/U8 are non-nullable
+     * (rejected at the producer) so they can never reach here with
+     * HAS_NULLS set; the default arm is unreachable in practice. */
+    switch (vec->type) {
+        case RAY_F64:
+        case RAY_F32:
+        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I16:
+        case RAY_STR:
+        case RAY_GUID:
+            return sentinel_is_null(vec, idx);
+        default:
+            return false;
     }
-
-    /* Inline nullmap path.  RAY_STR's inline 16 bytes hold str_pool/str_ext_null
-     * (or, when an index is attached, were the same and are now in the index
-     * snapshot).  Either way, RAY_STR uses ext nullmap exclusively for its
-     * null bits, which is handled above; if the inline path is taken for
-     * RAY_STR, no nulls are present. */
-    if (vec->type == RAY_STR) return false;
-    if (idx >= 128) return false;
-    int byte_idx = (int)(idx / 8);
-    int bit_idx = (int)(idx % 8);
-    return (inline_bits[byte_idx] >> bit_idx) & 1;
 }
 
 /* --------------------------------------------------------------------------
- * ray_vec_copy_nulls — bulk-copy null bitmap from src to dst
+ * ray_vec_copy_nulls — copy null state from src to dst
  *
  * dst must have the same len as src (or at least as many elements).
- * Handles inline, external, and slice source bitmaps.
+ * Handles direct and slice sources.
  * -------------------------------------------------------------------------- */
 
 ray_err_t ray_vec_copy_nulls(ray_t* dst, const ray_t* src) {
     if (!dst || !src) return RAY_ERR_TYPE;
 
-    /* Use ray_vec_is_null which handles slices, inline, and external bitmaps
+    /* Use ray_vec_is_null which handles slices and sentinel reads
      * transparently. For non-null sources this returns immediately. */
     bool has_any = false;
     if (src->attrs & RAY_ATTR_SLICE) {
