@@ -1088,18 +1088,6 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
  * Null bitmap propagation for element-wise ops
  * ============================================================================ */
 
-/* Writable null bitmap pointer for freshly allocated (non-slice) dst vector.
- * Returns NULL if inline nullmap cannot cover dst->len (prevents overflow).
- * Used by set_all_null to mass-mark bitmap; will go away when bitmap arm
- * is fully reclaimed. */
-static uint8_t* nullmap_bits_mut(ray_t* dst) {
-    if (dst->attrs & RAY_ATTR_NULLMAP_EXT)
-        return (uint8_t*)ray_data(dst->ext_nullmap);
-    if (dst->type == RAY_STR) return NULL;
-    if (dst->len > 128) return NULL; /* inline can only cover 128 bits */
-    return dst->nullmap;
-}
-
 /* Propagate nulls from src into dst element-wise.  ray_vec_set_null
  * dual-writes (sentinel + bitmap), and ray_vec_is_null reads the
  * sentinel as source of truth, so the resulting dst is correct under
@@ -1201,17 +1189,7 @@ static void fix_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
  * reclaimed. */
 static void set_all_null(ray_t* result, int64_t len) {
     result->attrs |= RAY_ATTR_HAS_NULLS;
-    /* Ensure ext nullmap is allocated for large vecs (dual-encoding
-     * holdover — bitmap consumers like store/serde recv side still
-     * read it).  ray_vec_set_null on the last slot forces promotion. */
-    if (len > 128 && !(result->attrs & RAY_ATTR_NULLMAP_EXT))
-        ray_vec_set_null(result, len - 1, true);
-    /* Fill the per-element bitmap so legacy bitmap readers see all-null
-     * even before we strip the bitmap arm.  No-op for STR/SYM types
-     * whose null state is sentinel-only. */
-    uint8_t* dbits = nullmap_bits_mut(result);
-    if (dbits) memset(dbits, 0xFF, (size_t)((len + 7) / 8));
-    /* Sentinel payload fill — the post-Phase-7 source of truth. */
+    /* Sentinel payload fill — the sole source of truth. */
     switch (result->type) {
         case RAY_F64: {
             double* d = (double*)ray_data(result);
