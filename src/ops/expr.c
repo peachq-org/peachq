@@ -692,6 +692,8 @@ static void expr_exec_binary(uint8_t opcode, int8_t dt, void* dp,
             } break;
             case OP_MIN2: for (int64_t j = 0; j < n; j++) d[j] = a[j] < b[j] ? a[j] : b[j]; break;
             case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
+            case OP_AND:  for (int64_t j = 0; j < n; j++) d[j] = (a[j] && b[j]) ? 1 : 0; break;
+            case OP_OR:   for (int64_t j = 0; j < n; j++) d[j] = (a[j] || b[j]) ? 1 : 0; break;
             default: break;
         }
     } else if (dt == RAY_I32 || dt == RAY_DATE || dt == RAY_TIME) {
@@ -778,6 +780,10 @@ static void expr_exec_binary(uint8_t opcode, int8_t dt, void* dp,
                 case OP_LE: for (int64_t j = 0; j < n; j++) d[j] = a[j]<=b[j]; break;
                 case OP_GT: for (int64_t j = 0; j < n; j++) d[j] = a[j]>b[j]; break;
                 case OP_GE: for (int64_t j = 0; j < n; j++) d[j] = a[j]>=b[j]; break;
+                /* BOOL cols are loaded as I64 abstract via expr_load_i64;
+                 * AND/OR on such inputs lands here with dt=BOOL t1=t2=I64. */
+                case OP_AND: for (int64_t j = 0; j < n; j++) d[j] = (a[j] && b[j]) ? 1 : 0; break;
+                case OP_OR:  for (int64_t j = 0; j < n; j++) d[j] = (a[j] || b[j]) ? 1 : 0; break;
                 default: break;
             }
         } else { /* both bool */
@@ -808,6 +814,8 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
                 case OP_CEIL:  for (int64_t j = 0; j < n; j++) d[j] = ceil(a[j]); break;
                 case OP_FLOOR: for (int64_t j = 0; j < n; j++) d[j] = floor(a[j]); break;
                 case OP_ROUND: for (int64_t j = 0; j < n; j++) d[j] = round(a[j]); break;
+                /* OP_CAST F64→F64: same-buffer-issue as I64→I64 (see below). */
+                case OP_CAST:  memcpy(d, a, (size_t)n * sizeof(double)); break;
                 default: break;
             }
         } else { /* CAST i64→f64 */
@@ -822,8 +830,21 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
                 /* Unsigned negation avoids UB on INT64_MIN */
                 case OP_NEG: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)(-(uint64_t)a[j]); break;
                 case OP_ABS: for (int64_t j = 0; j < n; j++) d[j] = a[j] < 0 ? (int64_t)(-(uint64_t)a[j]) : a[j]; break;
+                /* OP_CAST I64→I64 is logically a no-op, but src and dst are
+                 * separate scratch buffers: the dst slot must still receive
+                 * the data.  SCAN U8/BOOL/I16/I32 columns get loaded into
+                 * the I64 abstract via expr_load_i64; any subsequent
+                 * `(as 'I64 col)` lands in this branch and would otherwise
+                 * leave dst un-initialised (the post-Phase-1 lockdown
+                 * removed the HAS_NULLS shortcut that previously rejected
+                 * fused compilation for these columns). */
+                case OP_CAST: memcpy(d, a, (size_t)n * sizeof(int64_t)); break;
                 default: break;
             }
+        } else if (t1 == RAY_BOOL) {
+            /* CAST bool→i64 — BOOL scratch is 1 byte per elem (0/1). */
+            const uint8_t* a = (const uint8_t*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = a[j];
         } else { /* CAST f64→i64 — clamp to avoid out-of-range UB */
             const double* a = (const double*)ap;
             for (int64_t j = 0; j < n; j++)

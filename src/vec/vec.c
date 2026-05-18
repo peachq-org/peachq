@@ -905,17 +905,16 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
     if (vec->attrs & RAY_ATTR_SLICE) return RAY_ERR_TYPE; /* cannot set null on slice — COW first */
     if (idx < 0 || idx >= vec->len) return RAY_ERR_RANGE;
 
-    /* SYM columns are no-null by design — sym ID 0 (the interned
-     * empty string, reserved by ray_sym_init) is the canonical
-     * "missing" / "empty" / "absent" value, and every SYM cell
-     * holds some valid ID.  Reject set-null on SYM so callers that
-     * mean "this row is missing" write 0 explicitly instead.
-     *
-     * BOOL / U8 are non-nullable per Phase 1 but legacy tests still
-     * exercise the bitmap API on them; the lockdown is deferred to a
-     * later session (~11 tests to update in place per the migration
-     * test-handling convention). */
-    if (vec->type == RAY_SYM) return RAY_ERR_TYPE;
+    /* Types that don't accept set-null:
+     *   - SYM: sym ID 0 (interned empty string, reserved by
+     *     ray_sym_init) is the canonical "missing" value; callers
+     *     write 0 directly.
+     *   - BOOL / U8: locked down as non-nullable at Phase 1.  With
+     *     the bitmap arm reclaimed they have nowhere to store a
+     *     null — reject so the producer surface stays clean. */
+    if (vec->type == RAY_SYM ||
+        vec->type == RAY_BOOL ||
+        vec->type == RAY_U8) return RAY_ERR_TYPE;
 
     /* Mutation invalidates any attached accelerator index — drop it inline.
      * Caller must already hold a unique ref (set-null on a shared vec is a
