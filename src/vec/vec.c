@@ -41,6 +41,43 @@ static int pair_cmp_idx_then_k(const void* a, const void* b) {
     return (pa[1] > pb[1]) - (pa[1] < pb[1]);
 }
 
+/* Sentinel-based per-element null test.  Caller guarantees v is a
+ * non-slice vector (type > 0) and idx is in range.  Returns true iff
+ * payload[idx] equals the type-correct NULL_* sentinel.  F64 uses
+ * (x != x) to detect any NaN bit pattern.  BOOL/U8 are non-nullable
+ * per Phase 1 and return false. */
+static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
+    const void* p = ray_data((ray_t*)v);
+    switch (v->type) {
+        case RAY_F64: {
+            double x = ((const double*)p)[idx];
+            return x != x;
+        }
+        case RAY_I64:
+        case RAY_TIMESTAMP:
+            return ((const int64_t*)p)[idx] == NULL_I64;
+        case RAY_I32:
+        case RAY_DATE:
+        case RAY_TIME:
+            return ((const int32_t*)p)[idx] == NULL_I32;
+        case RAY_I16:
+            return ((const int16_t*)p)[idx] == NULL_I16;
+        case RAY_SYM:
+            switch (v->attrs & 0x3) {
+                case RAY_SYM_W8:  return ((const uint8_t*)p)[idx]  == 0;
+                case RAY_SYM_W16: return ((const uint16_t*)p)[idx] == 0;
+                case RAY_SYM_W32: return ((const uint32_t*)p)[idx] == 0;
+                default:          return ((const int64_t*)p)[idx]  == 0;
+            }
+        case RAY_STR:
+            return ((const ray_str_t*)p)[idx].len == 0;
+        case RAY_BOOL:
+        case RAY_U8:
+        default:
+            return false;
+    }
+}
+
 /* Public bitmap accessor — handles slice / ext / inline / HAS_INDEX
  * uniformly.  See vec.h for the contract. */
 const uint8_t* ray_vec_nullmap_bytes(const ray_t* v,
