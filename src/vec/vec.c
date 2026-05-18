@@ -53,6 +53,10 @@ static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
             double x = ((const double*)p)[idx];
             return x != x;
         }
+        case RAY_F32: {
+            float x = ((const float*)p)[idx];
+            return x != x;
+        }
         case RAY_I64:
         case RAY_TIMESTAMP:
             return ((const int64_t*)p)[idx] == NULL_I64;
@@ -926,6 +930,9 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
             case RAY_F64:
                 ((double*)p)[idx] = NULL_F64;
                 break;
+            case RAY_F32:
+                ((float*)p)[idx] = NULL_F32;
+                break;
             case RAY_I64:
             case RAY_TIMESTAMP:
                 ((int64_t*)p)[idx] = NULL_I64;
@@ -1480,6 +1487,7 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
      * docs/superpowers/specs/2026-05-18-sentinel-migration-finish-design.md. */
     switch (vec->type) {
         case RAY_F64:
+        case RAY_F32:
         case RAY_I64: case RAY_TIMESTAMP:
         case RAY_I32: case RAY_DATE: case RAY_TIME:
         case RAY_I16:
