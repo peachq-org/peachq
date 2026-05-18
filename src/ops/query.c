@@ -2311,7 +2311,6 @@ typedef struct {
     uint8_t         in_attrs;
     const void*     base;
     bool            has_nulls;
-    const uint8_t*  null_bm;
     uint8_t         esz;        /* 1/2/4/8 */
     bool            is_f64;
     const int64_t*  idx_buf;
@@ -2331,23 +2330,23 @@ typedef struct {
  * int64 read on the hot path.  Hits high-cardinality count_distinct
  * grouped queries where the per-group HT churn was thrashing L2. */
 #define CDPG_BUF_INSERT(VAL_EXPR) do {                              \
-    int64_t v = (int64_t)(VAL_EXPR);                                \
-    if (RAY_UNLIKELY(v == 0)) {                                     \
+    int64_t _ins_v = (int64_t)(VAL_EXPR);                           \
+    if (RAY_UNLIKELY(_ins_v == 0)) {                                \
         if (!saw_zero) { saw_zero = 1; distinct++; }                \
         break;                                                      \
     }                                                               \
-    uint64_t h = (uint64_t)v * CDPG_BUF_HASH_K1;                    \
-    h ^= h >> 33;                                                   \
-    uint64_t slot = h & mask;                                       \
+    uint64_t _ins_h = (uint64_t)_ins_v * CDPG_BUF_HASH_K1;          \
+    _ins_h ^= _ins_h >> 33;                                         \
+    uint64_t _ins_slot = _ins_h & mask;                             \
     for (;;) {                                                      \
-        int64_t cur = set[slot];                                    \
-        if (cur == 0) {                                             \
-            set[slot] = v;                                          \
+        int64_t _ins_cur = set[_ins_slot];                          \
+        if (_ins_cur == 0) {                                        \
+            set[_ins_slot] = _ins_v;                                \
             distinct++;                                             \
             break;                                                  \
         }                                                           \
-        if (cur == v) break;                                        \
-        slot = (slot + 1) & mask;                                   \
+        if (_ins_cur == _ins_v) break;                              \
+        _ins_slot = (_ins_slot + 1) & mask;                         \
     }                                                               \
 } while (0)
 
@@ -2383,28 +2382,26 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
 
         int64_t distinct = 0;
         int saw_zero = 0;
-        const uint8_t* null_bm = ctx->null_bm;
         bool has_nulls = ctx->has_nulls;
 
         if (ctx->is_f64) {
             const double* d = (const double*)ctx->base;
             for (int64_t i = 0; i < cnt; i++) {
                 int64_t r = idxs[i];
-                if (has_nulls && null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
                 double fv = d[r];
-                if (fv != fv) fv = (double)NAN;
-                else if (fv == 0.0) fv = 0.0;
+                if (has_nulls && fv != fv) continue;
+                if (fv == 0.0) fv = 0.0;
                 int64_t vbits = 0;
                 memcpy(&vbits, &fv, sizeof(int64_t));
                 CDPG_BUF_INSERT(vbits);
             }
         } else if (ctx->esz == 8) {
             const int64_t* d = (const int64_t*)ctx->base;
-            if (has_nulls && null_bm) {
+            if (has_nulls) {
                 for (int64_t i = 0; i < cnt; i++) {
-                    int64_t r = idxs[i];
-                    if ((null_bm[r/8] >> (r%8)) & 1) continue;
-                    CDPG_BUF_INSERT(d[r]);
+                    int64_t v = d[idxs[i]];
+                    if (v == NULL_I64) continue;
+                    CDPG_BUF_INSERT(v);
                 }
             } else {
                 for (int64_t i = 0; i < cnt; i++) {
@@ -2413,11 +2410,11 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
             }
         } else if (ctx->esz == 4) {
             const int32_t* d = (const int32_t*)ctx->base;
-            if (has_nulls && null_bm) {
+            if (has_nulls) {
                 for (int64_t i = 0; i < cnt; i++) {
-                    int64_t r = idxs[i];
-                    if ((null_bm[r/8] >> (r%8)) & 1) continue;
-                    CDPG_BUF_INSERT((int64_t)d[r]);
+                    int32_t v = d[idxs[i]];
+                    if (v == NULL_I32) continue;
+                    CDPG_BUF_INSERT((int64_t)v);
                 }
             } else {
                 for (int64_t i = 0; i < cnt; i++) {
@@ -2427,16 +2424,14 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
         } else if (ctx->esz == 2) {
             const int16_t* d = (const int16_t*)ctx->base;
             for (int64_t i = 0; i < cnt; i++) {
-                int64_t r = idxs[i];
-                if (has_nulls && null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
-                CDPG_BUF_INSERT((int64_t)d[r]);
+                int16_t v = d[idxs[i]];
+                if (has_nulls && v == NULL_I16) continue;
+                CDPG_BUF_INSERT((int64_t)v);
             }
-        } else { /* esz == 1 */
+        } else { /* esz == 1 — BOOL/U8 are non-nullable */
             const uint8_t* d = (const uint8_t*)ctx->base;
             for (int64_t i = 0; i < cnt; i++) {
-                int64_t r = idxs[i];
-                if (has_nulls && null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
-                CDPG_BUF_INSERT((int64_t)d[r]);
+                CDPG_BUF_INSERT((int64_t)d[idxs[i]]);
             }
         }
 
@@ -2597,7 +2592,6 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
                 .in_attrs  = src->attrs,
                 .base      = ray_data(src),
                 .has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0,
-                .null_bm   = NULL,
                 .esz       = ray_sym_elem_size(st, src->attrs),
                 .is_f64    = (st == RAY_F64),
                 .idx_buf   = idx_buf,
@@ -2606,8 +2600,6 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
                 .odata     = odata,
                 .oom       = 0,
             };
-            if (pctx.has_nulls)
-                pctx.null_bm = ray_vec_nullmap_bytes(src, NULL, NULL);
             ray_pool_dispatch_n(pool, cdpg_buf_par_fn, &pctx, (uint32_t)n_groups);
             if (!atomic_load_explicit(&pctx.oom, memory_order_relaxed)) {
                 ray_release(src);
@@ -5862,7 +5854,7 @@ by_dict_done:
                     && !has_binary_agg && !has_agg_k)
                 {
                     /* exec_filtered_group dispatches: count1 (single key,
-                     * single COUNT) → Phase 3 fast path; everything else →
+                     * single COUNT) → Pass 3 fast path; everything else →
                      * multi path with packed composite key.  Skipped when
                      * any agg is binary (filtered-group fusion only knows
                      * about unary aggs) or holistic with a K param. */
@@ -8024,32 +8016,12 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
             xbar_par_fn(&ctx, 0, 0, n);
         }
 
-        /* Propagate null bitmap if present.  Walk the source nullmap
-         * byte-by-byte and only clobber positions where the source is
-         * null — same trick as fix_null_comparisons.  Cheap for the
-         * common case of HAS_NULLS attr set with mostly-empty bitmap. */
+        /* Propagate nulls if present.  Walk per-element via
+         * ray_vec_is_null (sentinel-based). */
         if (col->attrs & RAY_ATTR_HAS_NULLS) {
-            int64_t off_bits = 0, len_bits = 0;
-            const uint8_t* nbits = ray_vec_nullmap_bytes(col, &off_bits, &len_bits);
-            if (nbits && (off_bits % 8) == 0) {
-                int64_t byte0 = off_bits / 8;
-                for (int64_t i = 0; i + 8 <= n; i += 8) {
-                    uint8_t bb = nbits[byte0 + (i >> 3)];
-                    if (bb) {
-                        for (int64_t k = 0; k < 8; k++)
-                            if ((bb >> k) & 1)
-                                ray_vec_set_null(out, i + k, true);
-                    }
-                }
-                for (int64_t i = (n & ~7); i < n; i++) {
-                    if ((nbits[byte0 + (i >> 3)] >> (i & 7)) & 1)
-                        ray_vec_set_null(out, i, true);
-                }
-            } else {
-                for (int64_t i = 0; i < n; i++)
-                    if (ray_vec_is_null(col, i))
-                        ray_vec_set_null(out, i, true);
-            }
+            for (int64_t i = 0; i < n; i++)
+                if (ray_vec_is_null(col, i))
+                    ray_vec_set_null(out, i, true);
         }
         return out;
     }
@@ -8455,13 +8427,13 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         else if (ct == RAY_F64 && expr_type == RAY_I64)
                             ((double*)ray_data(new_col))[r] = (double)((int64_t*)ray_data(expr_vec))[r];
                     }
-                    /* Null-bit propagation: memcpy above only copies values,
-                     * not the nullmap.  Carry over orig_col's nulls for the
-                     * untouched rows, and pull expr_vec's nulls in for the
-                     * masked rows.  Phase 3a dual encoding: also overwrite the
-                     * destination payload with the dest-width sentinel — casting
-                     * a NaN/INT_MIN sentinel produces implementation-defined
-                     * garbage that wouldn't match the dual-encoding contract. */
+                    /* Null propagation: the memcpy above only copies values,
+                     * so re-flag null rows here — orig_col's nulls for the
+                     * untouched rows, expr_vec's nulls for the masked rows.
+                     * Also overwrite the destination payload with the
+                     * dest-width sentinel: casting a NaN/INT_MIN sentinel
+                     * across widths produces implementation-defined garbage
+                     * that wouldn't match the typed null encoding. */
                     for (int64_t r = 0; r < nrows; r++) {
                         ray_t* src = mask[r] ? expr_vec : orig_col;
                         if (ray_vec_is_null(src, r)) {
@@ -8538,13 +8510,12 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     /* Preserve typed-null markers across broadcast.  Without
                      * this, (update {a: 0N from: t}) silently writes plain
                      * zeros into the I64 column — the value bits get copied
-                     * but the null bitmap doesn't, so (nil? a) reports false
+                     * but HAS_NULLS is not set, so (nil? a) reports false
                      * on what should be null cells. */
                     if (RAY_ATOM_IS_NULL(expr_vec)) {
                         for (int64_t r = 0; r < nrows; r++)
                             ray_vec_set_null(bcast, r, true);
-                        /* Phase 2/3a dual encoding: fill correct-width
-                         * sentinel into payload. */
+                        /* Fill the correct-width sentinel into the payload. */
                         switch (ct) {
                             case RAY_F64: {
                                 double* d = (double*)ray_data(bcast);
@@ -8584,8 +8555,8 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         promoted = ray_vec_append(promoted, &v);
                         if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return promoted; }
                     }
-                    /* Carry the nullmap across the I64→F64 promotion;
-                     * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                    /* Carry nulls across the I64→F64 promotion and overwrite
+                     * the slot with NULL_F64 (NaN) so the payload encodes null. */
                     double* dst = (double*)ray_data(promoted);
                     for (int64_t r = 0; r < nr; r++) {
                         if (ray_vec_is_null(expr_vec, r)) {
@@ -8771,8 +8742,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 if (RAY_ATOM_IS_NULL(expr_vec)) {
                     for (int64_t r = 0; r < nrows; r++)
                         ray_vec_set_null(bcast, r, true);
-                    /* Phase 2/3a dual encoding: fill correct-width
-                     * sentinel into payload. */
+                    /* Fill the correct-width sentinel into the payload. */
                     switch (ct) {
                         case RAY_F64: {
                             double* d = (double*)ray_data(bcast);
@@ -8812,8 +8782,8 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     promoted = ray_vec_append(promoted, &v);
                     if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return promoted; }
                 }
-                /* Carry the nullmap across the I64→F64 promotion;
-                 * Phase 2 dual encoding: also overwrite the slot with NaN. */
+                /* Carry nulls across the I64→F64 promotion and overwrite
+                 * the slot with NULL_F64 (NaN) so the payload encodes null. */
                 double* dst = (double*)ray_data(promoted);
                 for (int64_t r = 0; r < nr; r++) {
                     if (ray_vec_is_null(expr_vec, r)) {
@@ -8893,8 +8863,7 @@ no_where_add_col:
             if (RAY_ATOM_IS_NULL(expr_vec)) {
                 for (int64_t r = 0; r < nrows; r++)
                     ray_vec_set_null(bcast, r, true);
-                /* Phase 2/3a dual encoding: fill correct-width
-                 * sentinel into payload. */
+                /* Fill the correct-width sentinel into the payload. */
                 switch (ct) {
                     case RAY_F64: {
                         double* d = (double*)ray_data(bcast);

@@ -143,7 +143,7 @@ ray_t* exec_expand(ray_graph_t* g, ray_op_t* op, ray_t* src_vec) {
     /* Helper to expand one CSR direction */
     #define EXPAND_DIR(csr_ptr) do { \
         ray_csr_t* csr = (csr_ptr); \
-        /* Phase 1: count total output pairs */ \
+        /* Pass 1: count total output pairs */ \
         int64_t total = 0; \
         for (int64_t i = 0; i < n_src; i++) { \
             int64_t node = src_data[i]; \
@@ -153,7 +153,7 @@ ray_t* exec_expand(ray_graph_t* g, ray_op_t* op, ray_t* src_vec) {
             if (node >= 0 && node < csr->n_nodes) \
                 total += ray_csr_degree(csr, node); \
         } \
-        /* Phase 2: fill */ \
+        /* Pass 2: fill */ \
         ray_t* d_src = ray_vec_new(RAY_I64, total > 0 ? total : 1); \
         ray_t* d_dst = ray_vec_new(RAY_I64, total > 0 ? total : 1); \
         if (!d_src || RAY_IS_ERR(d_src) || !d_dst || RAY_IS_ERR(d_dst)) { \
@@ -1163,7 +1163,7 @@ ray_t* exec_wco_join(ray_graph_t* g, ray_op_t* op) {
 
 /* --------------------------------------------------------------------------
  * exec_louvain: community detection via Louvain modularity optimization.
- * Phase 1 only (no graph contraction).
+ * Pass 1 only (no graph contraction).
  * Maximizes modularity Q = (1/2m) * SUM[(A_ij - k_i*k_j/2m) * delta(c_i, c_j)]
  * Treats graph as undirected. Uses forward+reverse CSR.
  * -------------------------------------------------------------------------- */
