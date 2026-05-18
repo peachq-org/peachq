@@ -1067,29 +1067,10 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
  * Null bitmap propagation for element-wise ops
  * ============================================================================ */
 
-/* Resolve the raw null bitmap pointer and bit offset for a vector.
- * Returns NULL if the vector has no null bits, or if the inline nullmap
- * cannot cover the requested range (prevents overread). */
-static const uint8_t* nullmap_bits(ray_t* v, int64_t* bit_offset, int64_t len) {
-    ray_t* target = v;
-    int64_t off = 0;
-    if (v->attrs & RAY_ATTR_SLICE) {
-        target = v->slice_parent;
-        off = v->slice_offset;
-    }
-    if (!(target->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
-    int64_t resolved_off = 0, len_bits = 0;
-    const uint8_t* bits = ray_vec_nullmap_bytes(target, &resolved_off, &len_bits);
-    if (!bits) return NULL;
-    *bit_offset = off + resolved_off;
-    /* Caller assumes inline buffer means 128-bit coverage; reject ranges
-     * that would overrun it just like the original guard. */
-    if (len_bits == 128 && off + len > 128) return NULL;
-    return bits;
-}
-
 /* Writable null bitmap pointer for freshly allocated (non-slice) dst vector.
- * Returns NULL if inline nullmap cannot cover dst->len (prevents overflow). */
+ * Returns NULL if inline nullmap cannot cover dst->len (prevents overflow).
+ * Used by set_all_null to mass-mark bitmap; will go away when bitmap arm
+ * is fully reclaimed. */
 static uint8_t* nullmap_bits_mut(ray_t* dst) {
     if (dst->attrs & RAY_ATTR_NULLMAP_EXT)
         return (uint8_t*)ray_data(dst->ext_nullmap);
@@ -1098,83 +1079,14 @@ static uint8_t* nullmap_bits_mut(ray_t* dst) {
     return dst->nullmap;
 }
 
-/* Stamp the type-correct NULL_* sentinel into dst's payload at every slot
- * where the bitmap byte indicates null.  Used after the bulk-OR fast path
- * in propagate_nulls so the dest dual-encoding contract is honored without
- * paying per-element bit math in the hot path. */
-static void stamp_sentinels_from_bitmap(ray_t* dst, const uint8_t* dbits,
-                                        int64_t dbit_off, int64_t len) {
-    void* p = ray_data(dst);
-    switch (dst->type) {
-        case RAY_F64: {
-            double* d = (double*)p;
-            for (int64_t i = 0; i < len; i++)
-                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
-                    d[i] = NULL_F64;
-            break;
-        }
-        case RAY_I64:
-        case RAY_TIMESTAMP: {
-            int64_t* d = (int64_t*)p;
-            for (int64_t i = 0; i < len; i++)
-                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
-                    d[i] = NULL_I64;
-            break;
-        }
-        case RAY_I32:
-        case RAY_DATE:
-        case RAY_TIME: {
-            int32_t* d = (int32_t*)p;
-            for (int64_t i = 0; i < len; i++)
-                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
-                    d[i] = NULL_I32;
-            break;
-        }
-        case RAY_I16: {
-            int16_t* d = (int16_t*)p;
-            for (int64_t i = 0; i < len; i++)
-                if ((dbits[(dbit_off + i) >> 3] >> ((dbit_off + i) & 7)) & 1)
-                    d[i] = NULL_I16;
-            break;
-        }
-        default:
-            break;
-    }
-}
-
-/* OR-merge null bitmap from src into dst. Fast byte-level path when possible,
- * element-level fallback for misaligned slices or RAY_STR without ext nullmap.
- *
- * Both paths honor the dual-encoding contract: after marking a slot null in
- * the bitmap, the dest payload is stamped with the type-correct NULL_*
- * sentinel (the slow path goes through ray_vec_set_null which already
- * dual-writes; the fast path stamps in a post-pass). */
+/* Propagate nulls from src into dst element-wise.  ray_vec_set_null
+ * dual-writes (sentinel + bitmap), and ray_vec_is_null reads the
+ * sentinel as source of truth, so the resulting dst is correct under
+ * both the current dual-encoded state and the future bitmap-stripped
+ * state.  No bitmap-pointer fast path: the previous bulk-OR was tied
+ * to ray_vec_nullmap_bytes and breaks once the bitmap arm goes away. */
 static void propagate_nulls(ray_t* src, ray_t* dst, int64_t len) {
-    int64_t src_off = 0;
-    const uint8_t* sbits = nullmap_bits(src, &src_off, len);
-    if (!sbits) goto slow; /* no accessible bitmap — use element path */
-
-    /* Ensure dst has ext nullmap for large vectors */
-    if (len > 128 && !(dst->attrs & RAY_ATTR_NULLMAP_EXT))
-        ray_vec_set_null(dst, len - 1, false); /* force ext alloc */
-    uint8_t* dbits = nullmap_bits_mut(dst);
-    if (!dbits) goto slow; /* ext alloc failed or RAY_STR */
-
-    /* Bulk OR — both bitmaps are byte-accessible and src is byte-aligned */
-    if ((src_off % 8) == 0) {
-        int64_t byte_start = src_off / 8;
-        int64_t nbytes = (len + 7) / 8;
-        for (int64_t b = 0; b < nbytes; b++)
-            dbits[b] |= sbits[byte_start + b];
-        dst->attrs |= RAY_ATTR_HAS_NULLS;
-        /* Dual-encoding sentinel stamp.  dbits is dst-relative (dst is a
-         * freshly allocated non-slice vec per nullmap_bits_mut contract),
-         * so dbit_off=0. */
-        stamp_sentinels_from_bitmap(dst, dbits, 0, len);
-        return;
-    }
-
-slow:
+    if (!(src->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE))) return;
     for (int64_t i = 0; i < len; i++) {
         if (ray_vec_is_null(src, i))
             ray_vec_set_null(dst, i, true);
@@ -1223,38 +1135,22 @@ static void fix_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
     bool r_has = !r_scalar && vec_may_have_nulls(rhs);
     if (!ln_s && !rn_s && !l_has && !r_has) return;
 
-    /* Fast path: only one side has nulls (the common shape — vec col vs
-     * non-null scalar) and no scalar is null.  Walk the nullmap byte-by-
-     * byte; skip any 8-row chunk where the byte is 0.  Drops Q11's
-     * `(!= MobilePhoneModel "")` from ~14 ms to <1 ms when the column
-     * has HAS_NULLS set but few actual nulls. */
+    /* One-sided null fast path: only one side has nulls (the common
+     * shape — vec col vs non-null scalar) and no scalar is null.  Scan
+     * src elements via ray_vec_is_null (sentinel-based), set the
+     * comparison's fill value per null cell.  Was previously a byte-
+     * level bitmap walk; the bitmap arm is being reclaimed so the
+     * scan now runs per element. */
     if (!ln_s && !rn_s && (l_has ^ r_has)) {
         ray_t* src = l_has ? lhs : rhs;
         bool   src_left = l_has;
-        int64_t src_off = 0;
-        const uint8_t* nbits = nullmap_bits(src, &src_off, len);
-        if (nbits && (src_off % 8) == 0) {
-            int64_t byte0 = src_off / 8;
-            int64_t i = 0;
-            uint8_t left_bits  = (opcode == OP_LT || opcode == OP_LE || opcode == OP_NE);
-            uint8_t right_bits = (opcode == OP_GT || opcode == OP_GE || opcode == OP_NE);
-            uint8_t fill = src_left ? left_bits : right_bits;
-            while (i + 8 <= len) {
-                uint8_t b = nbits[byte0 + (i >> 3)];
-                if (b) {
-                    /* Only set the bits where src is null. */
-                    for (int64_t k = 0; k < 8; k++)
-                        if ((b >> k) & 1) dst[i + k] = fill;
-                }
-                i += 8;
-            }
-            for (; i < len; i++) {
-                if ((nbits[byte0 + (i >> 3)] >> (i & 7)) & 1)
-                    dst[i] = fill;
-            }
-            return;
+        uint8_t left_bits  = (opcode == OP_LT || opcode == OP_LE || opcode == OP_NE);
+        uint8_t right_bits = (opcode == OP_GT || opcode == OP_GE || opcode == OP_NE);
+        uint8_t fill = src_left ? left_bits : right_bits;
+        for (int64_t i = 0; i < len; i++) {
+            if (ray_vec_is_null(src, i)) dst[i] = fill;
         }
-        /* Fall through to slow path on misaligned slice / no bitmap. */
+        return;
     }
 
     for (int64_t i = 0; i < len; i++) {
@@ -1276,20 +1172,25 @@ static void fix_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
     }
 }
 
-/* Set all elements in result as null (scalar null broadcast). */
+/* Set all elements in result as null (scalar null broadcast).
+ * Writes the type-correct sentinel into every payload slot and sets
+ * HAS_NULLS.  Sentinel is the source of truth post-migration; the
+ * per-element bitmap is set by ray_vec_set_null on the final slot
+ * just to keep the dual-encoding contract until the bitmap arm is
+ * reclaimed. */
 static void set_all_null(ray_t* result, int64_t len) {
+    result->attrs |= RAY_ATTR_HAS_NULLS;
+    /* Ensure ext nullmap is allocated for large vecs (dual-encoding
+     * holdover — bitmap consumers like store/serde recv side still
+     * read it).  ray_vec_set_null on the last slot forces promotion. */
     if (len > 128 && !(result->attrs & RAY_ATTR_NULLMAP_EXT))
-        ray_vec_set_null(result, len - 1, false); /* force ext alloc */
+        ray_vec_set_null(result, len - 1, true);
+    /* Fill the per-element bitmap so legacy bitmap readers see all-null
+     * even before we strip the bitmap arm.  No-op for STR/SYM types
+     * whose null state is sentinel-only. */
     uint8_t* dbits = nullmap_bits_mut(result);
-    if (dbits) {
-        memset(dbits, 0xFF, (size_t)((len + 7) / 8));
-        result->attrs |= RAY_ATTR_HAS_NULLS;
-    } else {
-        for (int64_t i = 0; i < len; i++) ray_vec_set_null(result, i, true);
-    }
-    /* Phase 2/3a dual-encoding: results must also carry the matching
-     * width sentinel in every payload slot so raw-payload consumers see
-     * the null marker without consulting the bitmap. */
+    if (dbits) memset(dbits, 0xFF, (size_t)((len + 7) / 8));
+    /* Sentinel payload fill — the post-Phase-7 source of truth. */
     switch (result->type) {
         case RAY_F64: {
             double* d = (double*)ray_data(result);
@@ -1299,6 +1200,11 @@ static void set_all_null(ray_t* result, int64_t len) {
         case RAY_I64: case RAY_TIMESTAMP: {
             int64_t* d = (int64_t*)ray_data(result);
             for (int64_t i = 0; i < len; i++) d[i] = NULL_I64;
+            break;
+        }
+        case RAY_F32: {
+            float* d = (float*)ray_data(result);
+            for (int64_t i = 0; i < len; i++) d[i] = NULL_F32;
             break;
         }
         case RAY_I32: case RAY_DATE: case RAY_TIME: {
@@ -1311,6 +1217,14 @@ static void set_all_null(ray_t* result, int64_t len) {
             for (int64_t i = 0; i < len; i++) d[i] = NULL_I16;
             break;
         }
+        case RAY_STR: {
+            ray_str_t* s = (ray_str_t*)ray_data(result);
+            memset(s, 0, (size_t)len * sizeof(ray_str_t));
+            break;
+        }
+        case RAY_GUID:
+            memset(ray_data(result), 0, (size_t)len * 16);
+            break;
         default: break;
     }
 }
