@@ -725,8 +725,7 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
                                 const csv_type_t* col_types,
                                 const int8_t* resolved_types,
                                 void** col_data, int64_t n_rows,
-                                int64_t* col_max_ids,
-                                uint8_t** col_nullmaps) {
+                                int64_t* col_max_ids) {
     bool ok = true;
 
     /* CSV/TSV import policy for SYM columns: empty fields write the
@@ -751,7 +750,6 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
         csv_strref_t* refs = str_refs[c];
         if (!refs) continue;
         uint32_t* ids = (uint32_t*)col_data[c];
-        uint8_t* nm = col_nullmaps ? col_nullmaps[c] : NULL;
         int64_t max_id = empty_sym_id;
 
         /* Pre-grow: upper bound is n_rows unique strings */
@@ -760,14 +758,10 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
             return false;  /* OOM: cannot grow sym table */
 
         for (int64_t r = 0; r < n_rows; r++) {
-            if (nm && (nm[r >> 3] & (1u << (r & 7)))) {
+            if (refs[r].ptr == NULL) {
                 /* Empty/missing field → sym 0 (the canonical empty
-                 * symbol).  Clear the parse-time null bit so the
-                 * post-pass attr-strip step doesn't leave HAS_NULLS
-                 * set on a SYM column — SYM columns are no-null by
-                 * design and ray_vec_set_null rejects them. */
+                 * symbol).  SYM columns are no-null by design. */
                 ids[r] = (uint32_t)empty_sym_id;
-                nm[r >> 3] &= (uint8_t)~(1u << (r & 7));
                 continue;
             }
             int64_t id = ray_sym_intern_no_split_unlocked(refs[r].ptr, refs[r].len);
@@ -803,12 +797,10 @@ static void csv_free_escaped_strrefs(csv_strref_t** str_refs, int n_cols,
  * that ray_str_vec_set would take for a freshly-owned vector. */
 static bool csv_fill_str_cols(csv_strref_t** str_refs, int n_cols,
                               const int8_t* resolved_types,
-                              ray_t** col_vecs, int64_t n_rows,
-                              uint8_t** col_nullmaps) {
+                              ray_t** col_vecs, int64_t n_rows) {
     for (int c = 0; c < n_cols; c++) {
         if (resolved_types[c] != RAY_STR) continue;
         csv_strref_t* refs = str_refs[c];
-        uint8_t* nm = col_nullmaps ? col_nullmaps[c] : NULL;
         ray_t* vec = col_vecs[c];
         ray_str_t* dst = (ray_str_t*)ray_data(vec);
 
@@ -817,7 +809,7 @@ static bool csv_fill_str_cols(csv_strref_t** str_refs, int n_cols,
          * wouldn't fit in the u32 offset field. */
         uint64_t pool_bytes = 0;
         for (int64_t r = 0; r < n_rows; r++) {
-            if (nm && (nm[r >> 3] & (1u << (r & 7)))) continue;
+            if (refs[r].ptr == NULL) continue;
             uint32_t l = refs[r].len;
             if (l > RAY_STR_INLINE_MAX) pool_bytes += l;
         }
@@ -836,7 +828,7 @@ static bool csv_fill_str_cols(csv_strref_t** str_refs, int n_cols,
 
         for (int64_t r = 0; r < n_rows; r++) {
             memset(&dst[r], 0, sizeof(ray_str_t));
-            if (nm && (nm[r >> 3] & (1u << (r & 7)))) continue;
+            if (refs[r].ptr == NULL) continue;
             const char* p = refs[r].ptr;
             uint32_t l = refs[r].len;
             dst[r].len = l;
@@ -871,7 +863,6 @@ typedef struct {
     ray_t**           col_vecs;
     int64_t           n_rows;
     int64_t*          sym_max_ids;
-    uint8_t**         col_nullmaps;
     bool              fill_ok;
     bool              intern_ok;
 } csv_finalize_ctx_t;
@@ -882,11 +873,11 @@ static void csv_finalize_task(void* arg, uint32_t worker_id,
     csv_finalize_ctx_t* ctx = (csv_finalize_ctx_t*)arg;
     if (start == 0) {
         ctx->fill_ok = csv_fill_str_cols(ctx->str_refs, ctx->n_cols,
-            ctx->resolved_types, ctx->col_vecs, ctx->n_rows, ctx->col_nullmaps);
+            ctx->resolved_types, ctx->col_vecs, ctx->n_rows);
     } else {
         ctx->intern_ok = csv_intern_strings(ctx->str_refs, ctx->n_cols,
             ctx->parse_types, ctx->resolved_types, ctx->col_data,
-            ctx->n_rows, ctx->sym_max_ids, ctx->col_nullmaps);
+            ctx->n_rows, ctx->sym_max_ids);
     }
 }
 
@@ -905,7 +896,6 @@ typedef struct {
     const int8_t*     resolved_types;
     void**            col_data;     /* non-const: workers write parsed values into columns */
     csv_strref_t**    str_refs;     /* [n_cols] — strref arrays for string columns, NULL for others */
-    uint8_t**         col_nullmaps;
     bool*             worker_had_null; /* [n_workers * n_cols] */
 } csv_par_ctx_t;
 
@@ -929,9 +919,6 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                     switch (ctx->col_types[c]) {
                         case CSV_TYPE_BOOL: ((uint8_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_U8:   ((uint8_t*)ctx->col_data[c])[row] = 0; break;
-                        /* Phase 3a dual encoding: integer/temporal nulls
-                         * carry the width-correct INT_MIN sentinel in the
-                         * payload alongside the nullmap bit. */
                         case CSV_TYPE_I16:  ((int16_t*)ctx->col_data[c])[row] = NULL_I16; break;
                         case CSV_TYPE_I32:  ((int32_t*)ctx->col_data[c])[row] = NULL_I32; break;
                         case CSV_TYPE_I64:  ((int64_t*)ctx->col_data[c])[row] = NULL_I64; break;
@@ -949,12 +936,9 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                             break;
                         default: break;
                     }
-                    /* BOOL/U8 are non-nullable (Phase 1 lockdown).  Empty
-                     * cells store the default 0/false above and skip the
-                     * nullmap mark. */
+                    /* BOOL/U8 are non-nullable; empty cells store 0/false. */
                     if (ctx->col_types[c] != CSV_TYPE_BOOL &&
                         ctx->col_types[c] != CSV_TYPE_U8) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         my_had_null[c] = true;
                     }
                 }
@@ -972,9 +956,8 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
 
             switch (ctx->col_types[c]) {
                 case CSV_TYPE_BOOL: {
-                    /* BOOL is non-nullable (Phase 1).  fast_bool returns 0
-                     * for empty / unparseable input; we store it as-is and
-                     * never mark a nullmap bit. */
+                    /* BOOL is non-nullable; fast_bool returns 0 for
+                     * empty / unparseable input and we store it as-is. */
                     bool is_null;
                     uint8_t v = fast_bool(fld, flen, &is_null);
                     ((uint8_t*)ctx->col_data[c])[row] = v;
@@ -983,18 +966,13 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                 case CSV_TYPE_I64: {
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I64 whenever nullmap bit is set. */
                     ((int64_t*)ctx->col_data[c])[row] = is_null ? NULL_I64 : v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
+                    if (is_null) my_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_U8: {
-                    /* U8 is non-nullable (Phase 1).  fast_i64 returns 0 for
-                     * empty / unparseable input; we store it as-is and
-                     * never mark a nullmap bit. */
+                    /* U8 is non-nullable; fast_i64 returns 0 for
+                     * empty / unparseable input and we store it as-is. */
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
                     ((uint8_t*)ctx->col_data[c])[row] = (uint8_t)v;
@@ -1003,67 +981,43 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                 case CSV_TYPE_I16: {
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I16 whenever nullmap bit is set. */
                     ((int16_t*)ctx->col_data[c])[row] = is_null ? NULL_I16 : (int16_t)v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
+                    if (is_null) my_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_I32: {
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I32 whenever nullmap bit is set. */
                     ((int32_t*)ctx->col_data[c])[row] = is_null ? NULL_I32 : (int32_t)v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
+                    if (is_null) my_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_F64: {
                     bool is_null;
                     double v = fast_f64(fld, flen, &is_null);
-                    /* Phase 2 dual encoding: payload is NaN whenever nullmap bit is set. */
                     ((double*)ctx->col_data[c])[row] = is_null ? NULL_F64 : v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
+                    if (is_null) my_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_DATE: {
                     bool is_null;
                     int32_t v = fast_date(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I32 whenever nullmap bit is set. */
                     ((int32_t*)ctx->col_data[c])[row] = is_null ? NULL_I32 : v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
+                    if (is_null) my_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_TIME: {
                     bool is_null;
                     int32_t v = fast_time(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I32 whenever nullmap bit is set. */
                     ((int32_t*)ctx->col_data[c])[row] = is_null ? NULL_I32 : v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
+                    if (is_null) my_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_TIMESTAMP: {
                     bool is_null;
                     int64_t v = fast_timestamp(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I64 whenever nullmap bit is set. */
                     ((int64_t*)ctx->col_data[c])[row] = is_null ? NULL_I64 : v;
-                    if (is_null) {
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        my_had_null[c] = true;
-                    }
+                    if (is_null) my_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_GUID: {
@@ -1072,7 +1026,6 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                     fast_guid(fld, flen, slot, &is_null);
                     if (is_null) {
                         memset(slot, 0, 16);
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         my_had_null[c] = true;
                     }
                     break;
@@ -1081,7 +1034,6 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                     if (flen == 0) {
                         ctx->str_refs[c][row].ptr = NULL;
                         ctx->str_refs[c][row].len = 0;
-                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         my_had_null[c] = true;
                     } else {
                         /* fld may point into esc_buf (stack) or dyn_esc
@@ -1119,7 +1071,7 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                               const int8_t* resolved_types,
                               void** col_data,
                               csv_strref_t** str_refs,
-                              uint8_t** col_nullmaps, bool* col_had_null) {
+                              bool* col_had_null) {
     char esc_buf[8192];
     const char* buf_end = buf + buf_size;
 
@@ -1136,9 +1088,6 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                     switch (col_types[c]) {
                         case CSV_TYPE_BOOL: ((uint8_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_U8:   ((uint8_t*)col_data[c])[row] = 0; break;
-                        /* Phase 3a dual encoding: integer/temporal nulls
-                         * carry the width-correct INT_MIN sentinel in the
-                         * payload alongside the nullmap bit. */
                         case CSV_TYPE_I16:  ((int16_t*)col_data[c])[row] = NULL_I16; break;
                         case CSV_TYPE_I32:  ((int32_t*)col_data[c])[row] = NULL_I32; break;
                         case CSV_TYPE_I64:  ((int64_t*)col_data[c])[row] = NULL_I64; break;
@@ -1156,10 +1105,9 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                             break;
                         default: break;
                     }
-                    /* BOOL/U8 are non-nullable (Phase 1 lockdown). */
+                    /* BOOL/U8 are non-nullable; empty cells store 0/false. */
                     if (col_types[c] != CSV_TYPE_BOOL &&
                         col_types[c] != CSV_TYPE_U8) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         col_had_null[c] = true;
                     }
                 }
@@ -1177,7 +1125,7 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
 
             switch (col_types[c]) {
                 case CSV_TYPE_BOOL: {
-                    /* BOOL is non-nullable (Phase 1 lockdown). */
+                    /* BOOL is non-nullable. */
                     bool is_null;
                     uint8_t v = fast_bool(fld, flen, &is_null);
                     ((uint8_t*)col_data[c])[row] = v;
@@ -1186,16 +1134,12 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                 case CSV_TYPE_I64: {
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I64 whenever nullmap bit is set. */
                     ((int64_t*)col_data[c])[row] = is_null ? NULL_I64 : v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
+                    if (is_null) col_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_U8: {
-                    /* U8 is non-nullable (Phase 1 lockdown). */
+                    /* U8 is non-nullable. */
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
                     ((uint8_t*)col_data[c])[row] = (uint8_t)v;
@@ -1204,67 +1148,43 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                 case CSV_TYPE_I16: {
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I16 whenever nullmap bit is set. */
                     ((int16_t*)col_data[c])[row] = is_null ? NULL_I16 : (int16_t)v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
+                    if (is_null) col_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_I32: {
                     bool is_null;
                     int64_t v = fast_i64(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I32 whenever nullmap bit is set. */
                     ((int32_t*)col_data[c])[row] = is_null ? NULL_I32 : (int32_t)v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
+                    if (is_null) col_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_F64: {
                     bool is_null;
                     double v = fast_f64(fld, flen, &is_null);
-                    /* Phase 2 dual encoding: payload is NaN whenever nullmap bit is set. */
                     ((double*)col_data[c])[row] = is_null ? NULL_F64 : v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
+                    if (is_null) col_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_DATE: {
                     bool is_null;
                     int32_t v = fast_date(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I32 whenever nullmap bit is set. */
                     ((int32_t*)col_data[c])[row] = is_null ? NULL_I32 : v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
+                    if (is_null) col_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_TIME: {
                     bool is_null;
                     int32_t v = fast_time(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I32 whenever nullmap bit is set. */
                     ((int32_t*)col_data[c])[row] = is_null ? NULL_I32 : v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
+                    if (is_null) col_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_TIMESTAMP: {
                     bool is_null;
                     int64_t v = fast_timestamp(fld, flen, &is_null);
-                    /* Phase 3a dual encoding: payload is NULL_I64 whenever nullmap bit is set. */
                     ((int64_t*)col_data[c])[row] = is_null ? NULL_I64 : v;
-                    if (is_null) {
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
-                        col_had_null[c] = true;
-                    }
+                    if (is_null) col_had_null[c] = true;
                     break;
                 }
                 case CSV_TYPE_GUID: {
@@ -1273,7 +1193,6 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                     fast_guid(fld, flen, slot, &is_null);
                     if (is_null) {
                         memset(slot, 0, 16);
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         col_had_null[c] = true;
                     }
                     break;
@@ -1282,7 +1201,6 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                     if (flen == 0) {
                         str_refs[c][row].ptr = NULL;
                         str_refs[c][row].len = 0;
-                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         col_had_null[c] = true;
                     } else {
                         /* fld may point into esc_buf (stack) or dyn_esc
@@ -1329,31 +1247,8 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
         col_data[c] = ray_data(col_vecs[c]);
     }
 
-    uint8_t* col_nullmaps[CSV_MAX_COLS];
     bool col_had_null[CSV_MAX_COLS];
     if (ncols > 0) memset(col_had_null, 0, (size_t)ncols * sizeof(bool));
-
-    for (int c = 0; c < ncols; c++) {
-        ray_t* vec = col_vecs[c];
-        bool force_ext = (resolved_types[c] == RAY_STR);
-        if (n_rows <= 128 && !force_ext) {
-            vec->attrs |= RAY_ATTR_HAS_NULLS;
-            memset(vec->nullmap, 0, 16);
-            col_nullmaps[c] = vec->nullmap;
-        } else {
-            size_t bmp_bytes = ((size_t)n_rows + 7) / 8;
-            ray_t* ext = ray_vec_new(RAY_U8, (int64_t)bmp_bytes);
-            if (!ext || RAY_IS_ERR(ext)) {
-                for (int j = 0; j < ncols; j++) ray_release(col_vecs[j]);
-                return NULL;
-            }
-            ext->len = (int64_t)bmp_bytes;
-            memset(ray_data(ext), 0, bmp_bytes);
-            vec->ext_nullmap = ext;
-            vec->attrs |= RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT;
-            col_nullmaps[c] = (uint8_t*)ray_data(ext);
-        }
-    }
 
     csv_type_t parse_types[CSV_MAX_COLS];
     for (int c = 0; c < ncols; c++) {
@@ -1423,7 +1318,6 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
                     .resolved_types   = resolved_types,
                     .col_data         = col_data,
                     .str_refs         = str_ref_bufs,
-                    .col_nullmaps     = col_nullmaps,
                     .worker_had_null  = worker_had_null_buf,
                 };
 
@@ -1442,7 +1336,7 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
         if (!use_parallel) {
             csv_parse_serial(buf, file_size, row_offsets, n_rows,
                              ncols, delimiter, parse_types, resolved_types, col_data,
-                             str_ref_bufs, col_nullmaps, col_had_null);
+                             str_ref_bufs, col_had_null);
         }
     }
 
@@ -1456,7 +1350,6 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
             .col_vecs       = col_vecs,
             .n_rows         = n_rows,
             .sym_max_ids    = sym_max_ids,
-            .col_nullmaps   = col_nullmaps,
             .fill_ok        = true,
             .intern_ok      = true,
         };
@@ -1489,14 +1382,10 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
 
     for (int c = 0; c < ncols; c++) {
         ray_t* vec = col_vecs[c];
-        int strip = !col_had_null[c] || vec->type == RAY_SYM;
-        if (!strip) continue;
-        if (vec->attrs & RAY_ATTR_NULLMAP_EXT) {
-            ray_release(vec->ext_nullmap);
-            vec->ext_nullmap = NULL;
-        }
-        vec->attrs &= (uint8_t)~(RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT);
-        if (vec->type != RAY_STR) memset(vec->nullmap, 0, 16);
+        if (col_had_null[c] && vec->type != RAY_SYM)
+            vec->attrs |= RAY_ATTR_HAS_NULLS;
+        else
+            vec->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
     }
 
     for (int c = 0; c < ncols; c++) {
@@ -1515,15 +1404,7 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
             uint16_t* d = (uint16_t*)dst;
             for (int64_t r = 0; r < n_rows; r++) d[r] = (uint16_t)src[r];
         }
-        if (col_vecs[c]->attrs & RAY_ATTR_HAS_NULLS) {
-            narrow->attrs |= (col_vecs[c]->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT));
-            if (col_vecs[c]->attrs & RAY_ATTR_NULLMAP_EXT) {
-                narrow->ext_nullmap = col_vecs[c]->ext_nullmap;
-                ray_retain(narrow->ext_nullmap);
-            } else {
-                memcpy(narrow->nullmap, col_vecs[c]->nullmap, 16);
-            }
-        }
+        narrow->attrs |= (col_vecs[c]->attrs & RAY_ATTR_HAS_NULLS);
         ray_release(col_vecs[c]);
         col_vecs[c] = narrow;
         col_data[c] = dst;
@@ -1726,34 +1607,8 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
         col_data[c] = ray_data(col_vecs[c]);
     }
 
-    /* ---- 8b. Pre-allocate nullmaps for all columns ---- */
-    uint8_t* col_nullmaps[CSV_MAX_COLS];
     bool col_had_null[CSV_MAX_COLS];
     if (ncols > 0) memset(col_had_null, 0, (size_t)ncols * sizeof(bool));
-
-    for (int c = 0; c < ncols; c++) {
-        ray_t* vec = col_vecs[c];
-        /* RAY_STR aliases bytes 8-15 of the header with str_pool — inline
-         * nullmap would corrupt the pool pointer, so force external. */
-        bool force_ext = (resolved_types[c] == RAY_STR);
-        if (n_rows <= 128 && !force_ext) {
-            vec->attrs |= RAY_ATTR_HAS_NULLS;
-            memset(vec->nullmap, 0, 16);
-            col_nullmaps[c] = vec->nullmap;
-        } else {
-            size_t bmp_bytes = ((size_t)n_rows + 7) / 8;
-            ray_t* ext = ray_vec_new(RAY_U8, (int64_t)bmp_bytes);
-            if (!ext || RAY_IS_ERR(ext)) {
-                for (int j = 0; j <= c; j++) ray_release(col_vecs[j]);
-                goto fail_offsets;
-            }
-            ext->len = (int64_t)bmp_bytes;
-            memset(ray_data(ext), 0, bmp_bytes);
-            vec->ext_nullmap = ext;
-            vec->attrs |= RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT;
-            col_nullmaps[c] = (uint8_t*)ray_data(ext);
-        }
-    }
 
     /* Build csv_type_t array for parse functions (maps td types → csv types) */
     csv_type_t parse_types[CSV_MAX_COLS];
@@ -1826,7 +1681,6 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
                     .resolved_types   = resolved_types,
                     .col_data         = col_data,
                     .str_refs         = str_ref_bufs,
-                    .col_nullmaps     = col_nullmaps,
                     .worker_had_null  = worker_had_null_buf,
                 };
 
@@ -1846,7 +1700,7 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
         if (!use_parallel) {
             csv_parse_serial(buf, file_size, row_offsets, n_rows,
                              ncols, delimiter, parse_types, resolved_types, col_data,
-                             str_ref_bufs, col_nullmaps, col_had_null);
+                             str_ref_bufs, col_had_null);
         }
     }
 
@@ -1865,7 +1719,6 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
             .col_vecs       = col_vecs,
             .n_rows         = n_rows,
             .sym_max_ids    = sym_max_ids,
-            .col_nullmaps   = col_nullmaps,
             .fill_ok        = true,
             .intern_ok      = true,
         };
@@ -1897,28 +1750,17 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
     csv_free_escaped_strrefs(str_ref_bufs, ncols, parse_types, n_rows, buf, file_size);
     for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
 
-    /* ---- 9c. Strip nullmaps from all-valid columns ----
+    /* ---- 9c. Set HAS_NULLS for columns that saw a null ----
      *
-     * A column qualifies as "no nulls" if either:
-     *   - the parser never saw a null (col_had_null[c] == false), or
-     *   - it's a SYM column.  SYM is no-null by design — empty fields
-     *     were already remapped to sym 0 in step 9b, and SYM columns
-     *     never carry HAS_NULLS regardless of what the parse-time
-     *     nullmap looked like.
-     *
-     * For non-SYM columns where col_had_null is true, the nullmap
-     * stays. */
+     * Sentinels in the payload carry the null state; HAS_NULLS is the
+     * vec-level fast-path bit.  SYM columns are no-null by design —
+     * empty fields were already remapped to sym 0 in step 9b. */
     for (int c = 0; c < ncols; c++) {
         ray_t* vec = col_vecs[c];
-        int strip = !col_had_null[c] || vec->type == RAY_SYM;
-        if (!strip) continue;
-        if (vec->attrs & RAY_ATTR_NULLMAP_EXT) {
-            ray_release(vec->ext_nullmap);
-            vec->ext_nullmap = NULL;
-        }
-        vec->attrs &= (uint8_t)~(RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT);
-        /* RAY_STR stores str_pool in bytes 8-15 of the header — don't wipe. */
-        if (vec->type != RAY_STR) memset(vec->nullmap, 0, 16);
+        if (col_had_null[c] && vec->type != RAY_SYM)
+            vec->attrs |= RAY_ATTR_HAS_NULLS;
+        else
+            vec->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
     }
 
     /* ---- 10. Narrow sym columns to optimal width ---- */
@@ -1938,16 +1780,7 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
             uint16_t* d = (uint16_t*)dst;
             for (int64_t r = 0; r < n_rows; r++) d[r] = (uint16_t)src[r];
         }
-        /* Transfer nullmap to narrowed vector */
-        if (col_vecs[c]->attrs & RAY_ATTR_HAS_NULLS) {
-            narrow->attrs |= (col_vecs[c]->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT));
-            if (col_vecs[c]->attrs & RAY_ATTR_NULLMAP_EXT) {
-                narrow->ext_nullmap = col_vecs[c]->ext_nullmap;
-                ray_retain(narrow->ext_nullmap);
-            } else {
-                memcpy(narrow->nullmap, col_vecs[c]->nullmap, 16);
-            }
-        }
+        narrow->attrs |= (col_vecs[c]->attrs & RAY_ATTR_HAS_NULLS);
         ray_release(col_vecs[c]);
         col_vecs[c] = narrow;
         col_data[c] = dst;
@@ -1990,16 +1823,12 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
 
 typedef struct {
     FILE* fp;
-    FILE* null_fp;
     char path[1024];
     char tmp_path[1024];
-    char null_tmp_path[1024];
     int8_t type;
     uint8_t attrs;
     int64_t rows;
     bool had_nulls;
-    uint8_t null_acc;
-    uint8_t null_bits;
 } csv_splayed_col_writer_t;
 
 static ray_err_t csv_splayed_writer_open(csv_splayed_col_writer_t* w,
@@ -2023,60 +1852,11 @@ static ray_err_t csv_splayed_writer_open(csv_splayed_col_writer_t* w,
     if (n < 0 || (size_t)n >= sizeof(w->path)) return RAY_ERR_RANGE;
     n = snprintf(w->tmp_path, sizeof(w->tmp_path), "%s.tmp", w->path);
     if (n < 0 || (size_t)n >= sizeof(w->tmp_path)) return RAY_ERR_RANGE;
-    n = snprintf(w->null_tmp_path, sizeof(w->null_tmp_path), "%s.nulltmp", w->path);
-    if (n < 0 || (size_t)n >= sizeof(w->null_tmp_path)) return RAY_ERR_RANGE;
 
     w->fp = fopen(w->tmp_path, "wb+");
     if (!w->fp) return RAY_ERR_IO;
     ray_t zero = {0};
     if (fwrite(&zero, 1, 32, w->fp) != 32) return RAY_ERR_IO;
-    return RAY_OK;
-}
-
-static ray_err_t csv_splayed_writer_null_bit(csv_splayed_col_writer_t* w,
-                                             bool is_null) {
-    if (!w->null_fp) {
-        w->null_fp = fopen(w->null_tmp_path, "wb");
-        if (!w->null_fp) return RAY_ERR_IO;
-    }
-    if (is_null) w->null_acc |= (uint8_t)(1u << w->null_bits);
-    w->null_bits++;
-    if (w->null_bits == 8) {
-        if (fwrite(&w->null_acc, 1, 1, w->null_fp) != 1) return RAY_ERR_IO;
-        w->null_acc = 0;
-        w->null_bits = 0;
-    }
-    return RAY_OK;
-}
-
-static ray_err_t csv_splayed_writer_zero_nulls(csv_splayed_col_writer_t* w,
-                                               int64_t count) {
-    if (count <= 0) return RAY_OK;
-    if (!w->null_fp) {
-        w->null_fp = fopen(w->null_tmp_path, "wb");
-        if (!w->null_fp) return RAY_ERR_IO;
-    }
-
-    while (count > 0 && w->null_bits != 0) {
-        w->null_bits++;
-        if (w->null_bits == 8) {
-            if (fwrite(&w->null_acc, 1, 1, w->null_fp) != 1) return RAY_ERR_IO;
-            w->null_acc = 0;
-            w->null_bits = 0;
-        }
-        count--;
-    }
-
-    uint8_t zeros[8192] = {0};
-    int64_t bytes = count / 8;
-    while (bytes > 0) {
-        size_t chunk = (bytes > (int64_t)sizeof(zeros)) ? sizeof(zeros) : (size_t)bytes;
-        if (fwrite(zeros, 1, chunk, w->null_fp) != chunk) return RAY_ERR_IO;
-        bytes -= (int64_t)chunk;
-    }
-
-    w->null_bits = (uint8_t)(count & 7);
-    w->null_acc = 0;
     return RAY_OK;
 }
 
@@ -2104,20 +1884,7 @@ static ray_err_t csv_splayed_writer_append(csv_splayed_col_writer_t* w,
         size_t bytes = (size_t)n * (size_t)esz;
         if (bytes && fwrite(ray_data(col), 1, bytes, w->fp) != bytes)
             return RAY_ERR_IO;
-        if (col->attrs & RAY_ATTR_HAS_NULLS) {
-            if (!w->had_nulls) {
-                ray_err_t err = csv_splayed_writer_zero_nulls(w, w->rows);
-                if (err != RAY_OK) return err;
-            }
-            w->had_nulls = true;
-            for (int64_t i = 0; i < n; i++) {
-                ray_err_t err = csv_splayed_writer_null_bit(w, ray_vec_is_null(col, i));
-                if (err != RAY_OK) return err;
-            }
-        } else if (w->had_nulls) {
-            ray_err_t err = csv_splayed_writer_zero_nulls(w, n);
-            if (err != RAY_OK) return err;
-        }
+        if (col->attrs & RAY_ATTR_HAS_NULLS) w->had_nulls = true;
     }
     w->rows += n;
     return RAY_OK;
@@ -2126,27 +1893,6 @@ static ray_err_t csv_splayed_writer_append(csv_splayed_col_writer_t* w,
 static ray_err_t csv_splayed_writer_close(csv_splayed_col_writer_t* w) {
     if (!w->fp) return RAY_OK;
     ray_err_t err = RAY_OK;
-    if (w->null_fp && w->null_bits) {
-        if (fwrite(&w->null_acc, 1, 1, w->null_fp) != 1) err = RAY_ERR_IO;
-        w->null_acc = 0;
-        w->null_bits = 0;
-    }
-    if (w->null_fp && fclose(w->null_fp) != 0 && err == RAY_OK) err = RAY_ERR_IO;
-    w->null_fp = NULL;
-
-    if (err == RAY_OK && w->had_nulls) {
-        FILE* nf = fopen(w->null_tmp_path, "rb");
-        if (!nf) err = RAY_ERR_IO;
-        else {
-            char buf[65536];
-            size_t nr;
-            while ((nr = fread(buf, 1, sizeof(buf), nf)) > 0) {
-                if (fwrite(buf, 1, nr, w->fp) != nr) { err = RAY_ERR_IO; break; }
-            }
-            if (ferror(nf) && err == RAY_OK) err = RAY_ERR_IO;
-            fclose(nf);
-        }
-    }
 
     if (err == RAY_OK) {
         ray_t hdr = {0};
@@ -2154,8 +1900,7 @@ static ray_err_t csv_splayed_writer_close(csv_splayed_col_writer_t* w) {
         hdr.attrs = w->attrs;
         hdr.len = w->rows;
         hdr.rc = (w->type == RAY_SYM) ? ray_sym_count() : 0;
-        if (w->had_nulls)
-            hdr.attrs |= RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT;
+        if (w->had_nulls) hdr.attrs |= RAY_ATTR_HAS_NULLS;
         if (fseek(w->fp, 0, SEEK_SET) != 0 ||
             fwrite(&hdr, 1, 32, w->fp) != 32)
             err = RAY_ERR_IO;
@@ -2163,7 +1908,6 @@ static ray_err_t csv_splayed_writer_close(csv_splayed_col_writer_t* w) {
 
     if (fclose(w->fp) != 0 && err == RAY_OK) err = RAY_ERR_IO;
     w->fp = NULL;
-    remove(w->null_tmp_path);
     if (err == RAY_OK) err = ray_file_rename(w->tmp_path, w->path);
     if (err != RAY_OK) remove(w->tmp_path);
     return err;
@@ -2171,11 +1915,8 @@ static ray_err_t csv_splayed_writer_close(csv_splayed_col_writer_t* w) {
 
 static void csv_splayed_writer_abort(csv_splayed_col_writer_t* w) {
     if (w->fp) fclose(w->fp);
-    if (w->null_fp) fclose(w->null_fp);
     w->fp = NULL;
-    w->null_fp = NULL;
     remove(w->tmp_path);
-    remove(w->null_tmp_path);
 }
 
 ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool header,
