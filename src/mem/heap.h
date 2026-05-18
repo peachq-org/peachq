@@ -56,19 +56,21 @@
  *   Bit  0x04       -RAY_I64 atoms:  RAY_ATTR_HNSW (HNSW handle in .i64)
  *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in nullmap[0..7])
  *   Bit  0x10       vectors:         RAY_ATTR_SLICE
- *   Bit  0x20       vectors:         RAY_ATTR_NULLMAP_EXT
  *   Bit  0x20       -RAY_SYM:        RAY_ATTR_NAME (variable reference)
- *   Bit  0x40       vectors:         RAY_ATTR_HAS_NULLS
+ *   Bit  0x40       vectors:         RAY_ATTR_HAS_NULLS (sentinel-encoded; payload is truth)
  *   Bit  0x80       all types:       RAY_ATTR_ARENA (arena-allocated, no refcount)
  *
  * Overlapping bit values are safe because consumers always check the type tag
  * before interpreting attrs.
+ *
+ * Bit 0x20 on vectors is reserved: an older external-bitmap nullmap arm
+ * lived here and the on-disk format guard in src/store/col.c still rejects
+ * legacy columns that carry it.
  */
 
 #ifndef RAY_ATTR_SLICE
 #define RAY_ATTR_SLICE        0x10
 #endif
-#define RAY_ATTR_NULLMAP_EXT  0x20
 #define RAY_ATTR_HAS_NULLS    0x40
 #define RAY_ATTR_ARENA        0x80
 
@@ -93,32 +95,21 @@
  *
  * Coexists with HAS_INDEX: bytes 0-7 carry the index pointer (or saved
  * nullmap), bytes 8-15 carry the link sym; both bits can be set on the
- * same column.  A linked vec with nulls is forced to RAY_ATTR_NULLMAP_EXT
- * because the inline 128-bit bitmap would alias the link-target slot.
+ * same column.
  *
  * Same numeric value as RAY_ATTR_HNSW (HNSW handles are -RAY_I64 atoms,
  * the type tag disambiguates). */
 #define RAY_ATTR_HAS_LINK     0x04
 
 /* Vector carries an attached accelerator index in nullmap[0..7] (a ray_t*
- * of type RAY_INDEX).  The original 16-byte nullmap union content (inline
- * bitmap, ext_nullmap, str_ext_null/str_pool, sym_dict) is preserved inside
- * the index ray_t and restored on detach.
+ * of type RAY_INDEX).  The original 16-byte nullmap union content
+ * (slice_offset, str_pool, sym_dict, link_target) is preserved inside the
+ * index ray_t and restored on detach.
  *
- * Attribute-bit invariant when HAS_INDEX is set:
- *   - HAS_NULLS is *preserved* (not cleared).  Many call sites use it as a
- *     cheap "do I need null-aware logic?" gate; clearing it would silently
- *     break correctness for nullable columns.  The bit is authoritative.
- *   - NULLMAP_EXT is *cleared*.  The parent's ext_nullmap field is now the
- *     index pointer, not a U8 bitmap vec; readers that gate on NULLMAP_EXT
- *     and dereference ext_nullmap directly would otherwise read garbage.
- *     The displaced ext-nullmap pointer (if any) lives in
- *     ix->saved_nullmap[0..7]; ix->saved_attrs records the original
- *     NULLMAP_EXT bit for restoration on detach.
- *
- * Direct nullmap-byte readers (morsel iteration, ray_vec_is_null) MUST
- * check HAS_INDEX first and route through ix->saved_nullmap / saved_attrs.
- * See src/ops/idxop.h. */
+ * HAS_NULLS is preserved on the parent across attach/detach; many call
+ * sites use it as a cheap "do I need null-aware logic?" gate.  Null state
+ * itself is sentinel-encoded in the payload (see src/vec/vec.c) so the
+ * index pointer overlay at bytes 0-7 does not affect ray_vec_is_null. */
 #define RAY_ATTR_HAS_INDEX    0x08
 
 /* ===== Internal Allocator Variants ===== */

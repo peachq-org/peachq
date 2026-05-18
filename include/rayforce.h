@@ -113,7 +113,12 @@ typedef enum {
 typedef union ray_t {
     /* Allocated: object header */
     struct {
-        /* Bytes 0-15: nullable bitmask / slice / ext nullmap / index */
+        /* Bytes 0-15: slice / sym_dict / str_pool / index union.  Null
+         * state is sentinel-encoded in the payload (see src/vec/vec.c);
+         * this 16-byte slot no longer carries any bitmap bits.  The
+         * `nullmap` field name is retained for historical raw-byte
+         * access.  The `ext_nullmap` field name is reserved (unused but
+         * kept so the struct layout matches the on-disk header). */
         union {
             uint8_t  nullmap[16];
             struct { union ray_t* slice_parent; int64_t slice_offset; };
@@ -125,8 +130,8 @@ typedef union ray_t {
             struct { union ray_t* index;        union ray_t* _idx_pad; };
             /* RAY_ATTR_HAS_LINK (vectors, RAY_I32/RAY_I64 only): bytes 8-15
              * hold an int64 sym ID naming the target table.  link_lo[8]
-             * aliases bytes 0-7 (inline nullmap bits OR ext_nullmap pointer
-             * OR HAS_INDEX index pointer, depending on the other arm in use).
+             * aliases bytes 0-7 (slice_parent / sym_dict-pointer /
+             * HAS_INDEX index pointer, depending on the active arm).
              * See ops/linkop.h. */
             struct { uint8_t link_lo[8];        int64_t link_target; };
         };

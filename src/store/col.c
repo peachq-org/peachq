@@ -577,9 +577,8 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
             memset(header.nullmap + 8, 0, 8);
         }
 
-        /* Clear slice flag and any lingering NULLMAP_EXT (the bitmap arm
-         * is gone — sentinel payload is the on-disk null encoding). */
-        header.attrs &= (uint8_t)~(RAY_ATTR_SLICE | RAY_ATTR_NULLMAP_EXT);
+        /* Clear slice flag — slices are materialized on save. */
+        header.attrs &= (uint8_t)~RAY_ATTR_SLICE;
         if (!(header.attrs & RAY_ATTR_HAS_NULLS))
             memset(header.nullmap, 0, 16);
 
@@ -865,12 +864,15 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
         out->tail_offset = 32 + data_size;
     }
 
-    /* NULLMAP_EXT files belong to the pre-sentinel-migration format —
-     * the bitmap arm is gone, so we can't restore them.  Reject. */
-    if (hdr->attrs & RAY_ATTR_NULLMAP_EXT) {
+    /* Legacy on-disk format used 0x20 to mark an external bitmap segment
+     * after the data section.  The sentinel migration dropped that arm
+     * entirely; we can't restore those files, so reject them up front. */
+    #define LEGACY_DISK_NULLMAP_EXT_BIT 0x20
+    if (hdr->attrs & LEGACY_DISK_NULLMAP_EXT_BIT) {
         ray_vm_unmap_file(ptr, mapped_size);
         return ray_error("corrupt", NULL);
     }
+    #undef LEGACY_DISK_NULLMAP_EXT_BIT
 
     /* RAY_SYM: fast-reject via sym count in header rc field.
      * Use memcpy (not atomic_load) since file data is not atomic storage. */
