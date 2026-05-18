@@ -336,7 +336,7 @@ uint8_t compute_key_nbytes(ray_pool_t* pool, const uint64_t* keys,
 
 /* radix_pass_ctx_t defined in exec_internal.h */
 
-/* Phase 1: histogram — each task counts byte values in its fixed range */
+/* Pass 1: histogram — each task counts byte values in its fixed range */
 static void radix_hist_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
     (void)wid; (void)end;
     radix_pass_ctx_t* c = (radix_pass_ctx_t*)arg;
@@ -359,7 +359,7 @@ static void radix_hist_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
         h[(keys[i] >> shift) & 0xFF]++;
 }
 
-/* Phase 3: scatter with software write-combining (SWC).
+/* Pass 3: scatter with software write-combining (SWC).
  * Buffers entries per bucket before flushing, converting random writes
  * into sequential bursts that are friendlier to the cache hierarchy. */
 #define SWC_N 8  /* entries per bucket buffer; 8*8=64B per bucket = 32KB total */
@@ -453,7 +453,7 @@ int64_t* radix_sort_run(ray_pool_t* pool,
             .hist = hist, .offsets = offsets,
         };
 
-        /* Phase 1: parallel histogram */
+        /* Pass 1: parallel histogram */
         if (pool && n_tasks > 1)
             ray_pool_dispatch_n(pool, radix_hist_fn, &ctx, n_tasks);
         else
@@ -469,7 +469,7 @@ int64_t* radix_sort_run(ray_pool_t* pool,
         }
         if (uniform) continue; /* all same byte — skip this pass */
 
-        /* Phase 2: prefix sum → per-task scatter offsets */
+        /* Pass 2: prefix sum → per-task scatter offsets */
         int64_t running = 0;
         for (int b = 0; b < 256; b++) {
             for (uint32_t t = 0; t < n_tasks; t++) {
@@ -478,7 +478,7 @@ int64_t* radix_sort_run(ray_pool_t* pool,
             }
         }
 
-        /* Phase 3: parallel scatter */
+        /* Pass 3: parallel scatter */
         if (pool && n_tasks > 1)
             ray_pool_dispatch_n(pool, radix_scatter_fn, &ctx, n_tasks);
         else
@@ -589,7 +589,7 @@ uint64_t* packed_radix_sort_run(ray_pool_t* pool,
             .hist = hist, .offsets = offsets,
         };
 
-        /* Phase 1: parallel histogram (reuses existing radix_hist_fn) */
+        /* Pass 1: parallel histogram (reuses existing radix_hist_fn) */
         if (pool && n_tasks > 1)
             ray_pool_dispatch_n(pool, radix_hist_fn, &ctx, n_tasks);
         else
@@ -605,7 +605,7 @@ uint64_t* packed_radix_sort_run(ray_pool_t* pool,
         }
         if (uniform) continue;
 
-        /* Phase 2: prefix sum */
+        /* Pass 2: prefix sum */
         int64_t running = 0;
         for (int b = 0; b < 256; b++) {
             for (uint32_t t = 0; t < n_tasks; t++) {
@@ -614,7 +614,7 @@ uint64_t* packed_radix_sort_run(ray_pool_t* pool,
             }
         }
 
-        /* Phase 3: packed scatter (half the traffic of dual-array scatter) */
+        /* Pass 3: packed scatter (half the traffic of dual-array scatter) */
         if (pool && n_tasks > 1)
             ray_pool_dispatch_n(pool, packed_scatter_fn, &ctx, n_tasks);
         else
@@ -838,7 +838,7 @@ int64_t* msd_radix_sort_run(ray_pool_t* pool,
         .hist = hist, .offsets = offsets,
     };
 
-    /* Phase 1: parallel histogram */
+    /* Pass 1: parallel histogram */
     if (pool && n_tasks > 1)
         ray_pool_dispatch_n(pool, radix_hist_fn, &ctx, n_tasks);
     else
@@ -860,7 +860,7 @@ int64_t* msd_radix_sort_run(ray_pool_t* pool,
                                     n, n_bytes - 1, sorted_keys_out);
     }
 
-    /* Phase 2: prefix sum → per-task scatter offsets + bucket boundaries */
+    /* Pass 2: prefix sum → per-task scatter offsets + bucket boundaries */
     int64_t bucket_offsets[257];
     {
         int64_t running = 0;
@@ -874,7 +874,7 @@ int64_t* msd_radix_sort_run(ray_pool_t* pool,
         bucket_offsets[256] = running;
     }
 
-    /* Phase 3: parallel scatter with SWC */
+    /* Pass 3: parallel scatter with SWC */
     if (pool && n_tasks > 1)
         ray_pool_dispatch_n(pool, radix_scatter_fn, &ctx, n_tasks);
     else
@@ -1775,11 +1775,11 @@ static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
                             .n_tasks = n_tasks, .hist = hist, .offsets = off,
                         };
 
-                        /* Phase 1: parallel histogram. */
+                        /* Pass 1: parallel histogram. */
                         ray_pool_dispatch_n(pool_p, strsort_top_hist_fn,
                                             &tctx, n_tasks);
 
-                        /* Phase 2: sequential prefix-sum.  For each bucket
+                        /* Pass 2: sequential prefix-sum.  For each bucket
                          * b, the starting offset is the sum of all counts
                          * in earlier buckets plus all counts in earlier
                          * tasks for this bucket. */
@@ -1797,7 +1797,7 @@ static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
                             sum += bc;
                         }
 
-                        /* Phase 3: parallel scatter into tmp. */
+                        /* Pass 3: parallel scatter into tmp. */
                         ray_pool_dispatch_n(pool_p, strsort_top_scatter_fn,
                                             &tctx, n_tasks);
 
@@ -1805,7 +1805,7 @@ static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
                         scratch_free(hist_hdr);
                         scratch_free(off_hdr);
 
-                        /* Phase 4: parallel per-bucket recursive sort. */
+                        /* Pass 4: parallel per-bucket recursive sort. */
                         strsort_bucket_ctx_t bctx = {
                             .keys        = tmp,
                             .starts      = bucket_starts,
@@ -3761,14 +3761,10 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
         if (!col) continue;
         col_propagate_str_pool(new_cols[c], col);
         /* sym_dict lives in bytes 8-15 of the header union, which also
-         * hold inline-nullmap bits and slice_offset. Only read it when
-         * the header layout actually exposes the sym_dict/ext_nullmap
-         * interpretation: no slice, and either no nulls or external
-         * nullmap. Otherwise those bytes are bitmap payload / slice
-         * metadata and dereferencing them hands ray_retain garbage. */
+         * hold slice_offset for slices.  Skip slices to avoid reading
+         * the offset as a pointer. */
         if (col->type == RAY_SYM &&
             !(col->attrs & RAY_ATTR_SLICE) &&
-            (!(col->attrs & RAY_ATTR_HAS_NULLS) || (col->attrs & RAY_ATTR_NULLMAP_EXT)) &&
             col->sym_dict) {
             ray_retain(col->sym_dict);
             new_cols[c]->sym_dict = col->sym_dict;
@@ -4092,14 +4088,10 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
         if (!col) continue;
         col_propagate_str_pool(new_cols[c], col);
         /* sym_dict lives in bytes 8-15 of the header union, which also
-         * hold inline-nullmap bits and slice_offset. Only read it when
-         * the header layout actually exposes the sym_dict/ext_nullmap
-         * interpretation: no slice, and either no nulls or external
-         * nullmap. Otherwise those bytes are bitmap payload / slice
-         * metadata and dereferencing them hands ray_retain garbage. */
+         * hold slice_offset for slices.  Skip slices to avoid reading
+         * the offset as a pointer. */
         if (col->type == RAY_SYM &&
             !(col->attrs & RAY_ATTR_SLICE) &&
-            (!(col->attrs & RAY_ATTR_HAS_NULLS) || (col->attrs & RAY_ATTR_NULLMAP_EXT)) &&
             col->sym_dict) {
             ray_retain(col->sym_dict);
             new_cols[c]->sym_dict = col->sym_dict;
