@@ -313,7 +313,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     uint32_t grp_count = pg.total_grps;
     if (grp_count == 0) { pivot_ingest_free(&pg); return ray_table_new(0); }
 
-    /* Phase 2: Collect distinct pivot values and distinct index keys.
+    /* Pass 2: Collect distinct pivot values and distinct index keys.
      * Each group row layout: [hash:8][key0:8]...[keyN-1:8][null_mask:8][accum...]
      * where the keys region holds n_idx index keys + 1 pivot key,
      * followed by the key-null bitmap written by group_rows_range. */
@@ -492,7 +492,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
     }
 
-    /* Phase 3: Build output table */
+    /* Pass 3: Build output table */
     ray_progress_update("pivot", "scatter", 0, (uint64_t)pv_count);
     bool val_is_f64 = vcol->type == RAY_F64;
     int8_t out_agg_type;
@@ -522,7 +522,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             memcpy(&ent_nmask, ix_entry_p + 8 + (size_t)n_idx * 8, 8);
             if (ent_nmask & (int64_t)(1u << k)) {
                 ray_vec_set_null(new_col, (int64_t)r, true);
-                /* Phase 2/3a dual encoding: fill correct-width sentinel. */
+                /* Fill the correct-width sentinel. */
                 switch (kt) {
                     case RAY_F64:
                         ((double*)ray_data(new_col))[r] = NULL_F64; break;

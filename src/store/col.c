@@ -864,16 +864,6 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
         out->tail_offset = 32 + data_size;
     }
 
-    /* Legacy on-disk format used 0x20 to mark an external bitmap segment
-     * after the data section.  The sentinel migration dropped that arm
-     * entirely; we can't restore those files, so reject them up front. */
-    #define LEGACY_DISK_NULLMAP_EXT_BIT 0x20
-    if (hdr->attrs & LEGACY_DISK_NULLMAP_EXT_BIT) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-    #undef LEGACY_DISK_NULLMAP_EXT_BIT
-
     /* RAY_SYM: fast-reject via sym count in header rc field.
      * Use memcpy (not atomic_load) since file data is not atomic storage. */
     if (hdr->type == RAY_SYM) {

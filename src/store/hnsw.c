@@ -519,13 +519,13 @@ ray_hnsw_t* ray_hnsw_build(const float* vectors, int64_t n_nodes, int32_t dim,
         const float* vec = vectors + i * dim;
         int32_t node_level = idx->node_level[i];
 
-        /* Phase 1: Greedy descent from top layer to node_level+1 */
+        /* Pass 1: Greedy descent from top layer to node_level+1 */
         int64_t ep = idx->entry_point;
         for (int32_t l = idx->n_layers - 1; l > node_level; l--) {
             ep = hnsw_greedy_closest(idx, vec, ep, l);
         }
 
-        /* Phase 2: Insert into layers [node_level ... 0] */
+        /* Pass 2: Insert into layers [node_level ... 0] */
         for (int32_t l = node_level; l >= 0; l--) {
             ray_hnsw_layer_t* layer = &idx->layers[l];
             int64_t M_max_l = layer->M_max;
@@ -667,13 +667,13 @@ int64_t ray_hnsw_search(const ray_hnsw_t* idx,
     if (ef_search < k) ef_search = (int32_t)k;
     if (idx->n_nodes == 0) return 0;
 
-    /* Phase 1: Greedy descent from top layer to layer 1 */
+    /* Pass 1: Greedy descent from top layer to layer 1 */
     int64_t ep = idx->entry_point;
     for (int32_t l = idx->n_layers - 1; l >= 1; l--) {
         ep = hnsw_greedy_closest(idx, query, ep, l);
     }
 
-    /* Phase 2: Beam search on layer 0 with ef_search width */
+    /* Pass 2: Beam search on layer 0 with ef_search width */
     hnsw_cand_t* results = (hnsw_cand_t*)ray_sys_alloc(
         (size_t)ef_search * sizeof(hnsw_cand_t));
     if (!results) return -1;  /* OOM — caller must propagate error. */
