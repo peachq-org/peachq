@@ -718,8 +718,6 @@ static void propagate_sym_dict(ray_t* dst, const ray_t* src) {
     const ray_t* owner = (src->attrs & RAY_ATTR_SLICE) ? src->slice_parent : src;
     if (owner &&
         !(owner->attrs & RAY_ATTR_SLICE) &&
-        (!(owner->attrs & RAY_ATTR_HAS_NULLS) ||
-         (owner->attrs & RAY_ATTR_NULLMAP_EXT)) &&
         owner->sym_dict) {
         ray_retain(owner->sym_dict);
         dst->sym_dict = owner->sym_dict;

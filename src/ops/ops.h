@@ -223,8 +223,8 @@ void     ray_cancel(void);
 #define OP_GROUP_MAXMIN_ROWFORM 112
 /* Dedicated single-pass per-group MEDIAN(v)+STDDEV(v) with row-form
  * emission for canonical shape `(select (median v) (std v) from t by
- * k0 k1)`.  Phase 2 builds per-partition HT + group-contiguous F64
- * v_buf in two passes; Phase 3 runs ray_median_dbl_inplace per group.
+ * k0 k1)`.  Pass 2 builds per-partition HT + group-contiguous F64
+ * v_buf in two passes; Pass 3 runs ray_median_dbl_inplace per group.
  * Bypasses the shared OP_GROUP path's reprobe-and-histogram holistic
  * fill.  Closes H2O canonical q6.  2 keys, both aggs on the same
  * column, non-nullable inputs. */
@@ -452,7 +452,12 @@ typedef struct {
     uint32_t elem_size;    /* bytes per element */
     int64_t  morsel_len;   /* elements in current morsel (<=RAY_MORSEL_ELEMS) */
     void*    morsel_ptr;   /* pointer to current morsel data */
-    uint8_t* null_bits;    /* current morsel null bitmap (or NULL) */
+    uint8_t* null_bits;    /* current morsel null bitmap (or NULL).
+                            * Points into null_bits_buf below when the
+                            * source uses sentinels (synthesized per
+                            * morsel) or into the source's bitmap for
+                            * BOOL/U8 legacy path. */
+    uint8_t  null_bits_buf[RAY_MORSEL_ELEMS / 8]; /* synthesis scratch */
 } ray_morsel_t;
 
 /* ===== Selection Bitmap (RAY_SEL) ===== */
