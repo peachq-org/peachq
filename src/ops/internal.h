@@ -964,7 +964,7 @@ void ray_group_emit_filter_set(ray_group_emit_filter_t filter);
  * When match_idx is NULL, `row = i` — iterating directly over source
  * column rows (no selection). */
 /* agg_vecs2 is the optional y-side input column per agg (NULL when no
- * binary aggs).  Phase 1 packs (x, y) consecutively for binary aggs. */
+ * binary aggs).  Pass 1 packs (x, y) consecutively for binary aggs. */
 void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
                       uint8_t* key_attrs, ray_t** key_vecs, ray_t** agg_vecs,
                       ray_t** agg_vecs2,
@@ -1070,60 +1070,76 @@ ray_t* exec_node(ray_graph_t* g, ray_op_t* op);
  * Thread-safe null bitmap helpers (parallel group/window)
  * ══════════════════════════════════════════ */
 
-/* Atomically set a null bit. For idx >= 128 without ext nullmap, falls back
- * to ray_vec_set_null (lazy alloc). Safe because OOM forces sequential path. */
+/* Parallel-safe null marker.  Writes the type-correct NULL_* sentinel
+ * into payload[idx] and atomically ORs HAS_NULLS into vec->attrs.
+ * Payload write needs no synchronisation — different threads call this
+ * with different idx, so each per-slot store is uncontended.  attrs OR
+ * is atomic so the read-modify-write on the shared attrs byte is safe.
+ *
+ * BOOL/U8/SYM are non-nullable (rejected at the producer surface) and
+ * are no-ops here.  STR/GUID don't appear in parallel aggregation/window
+ * output columns and likewise no-op. */
 static inline void par_set_null(ray_t* vec, int64_t idx) {
-    if (!(vec->attrs & RAY_ATTR_NULLMAP_EXT)) {
-        if (idx >= 128) {
-            ray_vec_set_null(vec, idx, true);
-            return;
-        }
-        int byte_idx = (int)(idx / 8);
-        int bit_idx  = (int)(idx % 8);
-        __atomic_fetch_or(&vec->nullmap[byte_idx],
-                          (uint8_t)(1u << bit_idx), __ATOMIC_RELAXED);
-        return;
+    void* p = ray_data(vec);
+    switch (vec->type) {
+        case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
+        case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
+        case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
+        case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
+        case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
+        default: return;
     }
-    ray_t* ext = vec->ext_nullmap;
-    uint8_t* bits = (uint8_t*)ray_data(ext);
-    int byte_idx = (int)(idx / 8);
-    int bit_idx  = (int)(idx % 8);
-    __atomic_fetch_or(&bits[byte_idx],
-                      (uint8_t)(1u << bit_idx), __ATOMIC_RELAXED);
+    __atomic_fetch_or(&vec->attrs, (uint8_t)RAY_ATTR_HAS_NULLS,
+                      __ATOMIC_RELAXED);
 }
 
-/* Pre-allocate external nullmap so parallel threads can set bits safely.
- *
- * Probe at idx>=128 (not idx=0): ray_vec_set_null_checked(vec, 0, true)
- * stays in the inline-nullmap path because the inline 16-byte bitmap
- * fits idx<128 — so it never promotes to ext_nullmap.  par_set_null
- * for idx>=128 would then race-crash on lazy ext alloc.  Probing at
- * len-1 forces the promotion path. */
+/* No-op kept for symmetry with the historical bitmap-promotion helper.
+ * Sentinel writes are unconditional and need no pre-allocation. */
 static inline ray_err_t par_prepare_nullmap(ray_t* vec) {
-    if (vec->len <= 128) return RAY_OK;
-    int64_t probe = vec->len - 1;  /* >= 128, forces ext promotion */
-    ray_err_t err = ray_vec_set_null_checked(vec, probe, true);
-    if (err != RAY_OK) return err;
-    ray_vec_set_null_checked(vec, probe, false);
-    vec->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
+    (void)vec;
     return RAY_OK;
 }
 
-/* Scan nullmap after parallel execution; set RAY_ATTR_HAS_NULLS if any bit set. */
+/* Scan payload after parallel execution and set RAY_ATTR_HAS_NULLS if
+ * any element carries the type-correct NULL_* sentinel.  This catches
+ * the case where par_set_null's atomic OR raced with another thread's
+ * load before it took effect — the scan is the post-hoc authoritative
+ * check.  No-op for non-sentinel types. */
 static inline void par_finalize_nulls(ray_t* vec) {
-    if (vec->attrs & RAY_ATTR_NULLMAP_EXT) {
-        ray_t* ext = vec->ext_nullmap;
-        uint8_t* bits = (uint8_t*)ray_data(ext);
-        int64_t nbytes = (vec->len + 7) / 8;
-        for (int64_t i = 0; i < nbytes; i++) {
-            if (bits[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+    int64_t n = vec->len;
+    const void* p = ray_data(vec);
+    switch (vec->type) {
+        case RAY_F64: {
+            const double* d = (const double*)p;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] != d[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
         }
-    } else {
-        int64_t nbytes = (vec->len + 7) / 8;
-        if (nbytes > 16) nbytes = 16;
-        for (int64_t i = 0; i < nbytes; i++) {
-            if (vec->nullmap[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+        case RAY_F32: {
+            const float* d = (const float*)p;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] != d[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
         }
+        case RAY_I64: case RAY_TIMESTAMP: {
+            const int64_t* d = (const int64_t*)p;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] == NULL_I64) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
+        }
+        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+            const int32_t* d = (const int32_t*)p;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] == NULL_I32) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
+        }
+        case RAY_I16: {
+            const int16_t* d = (const int16_t*)p;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] == NULL_I16) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
+        }
+        default: return;
     }
 }
 

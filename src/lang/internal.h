@@ -277,8 +277,7 @@ static inline int64_t elem_as_i64(ray_t* elem) {
  * Returns 0 on success, -1 if the element type doesn't match. */
 static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
     if (RAY_ATOM_IS_NULL(elem)) {
-        /* Phase 2/3a dual-encoding: payload must carry the width-correct
-         * sentinel alongside the nullmap bit. */
+        /* Payload carries the width-correct sentinel. */
         switch (vec->type) {
             case RAY_F64:
                 ((double*)ray_data(vec))[i] = NULL_F64; break;

@@ -177,11 +177,25 @@ ray_t* ray_timestamp(int64_t val) {
 
 ray_t* ray_typed_null(int8_t type) {
     if (type >= 0) return ray_error("type", NULL);
+    /* GUID null is the canonical all-zero 16-byte value: allocate the
+     * U8 payload buffer up front (same shape as ray_guid) so consumers
+     * can deref obj without a NULL check.  Other types use the payload
+     * union — the sentinel write below is the source of truth; the
+     * nullmap[0] bit is retained for atom types without a sentinel
+     * (BOOL/U8/F32). */
+    if (type == -RAY_GUID) {
+        static const uint8_t NULL_GUID_BYTES[16] = {0};
+        ray_t* v = ray_guid(NULL_GUID_BYTES);
+        if (RAY_IS_ERR(v)) return v;
+        v->nullmap[0] |= 1;
+        return v;
+    }
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;
     v->type = type;
     switch (type) {
         case -RAY_F64:                                 v->f64 = NULL_F64; break;
+        case -RAY_F32:                                 v->f64 = (double)NULL_F32; break;
         case -RAY_I64: case -RAY_TIMESTAMP:            v->i64 = NULL_I64; break;
         case -RAY_I32: case -RAY_DATE: case -RAY_TIME: v->i32 = NULL_I32; break;
         case -RAY_I16:                                 v->i16 = NULL_I16; break;

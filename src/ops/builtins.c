@@ -744,8 +744,14 @@ static int cast_match(const char* tname, size_t tlen, const char* target) {
     return 1;
 }
 
-/* Helper: copy null bitmap from source vec/list to destination vec. */
+/* Helper: copy null state from source vec/list to destination vec. */
 static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
+    /* BOOL / U8 destinations are non-nullable — there is no slot for a
+     * null marker.  Casting a nullable source to one of these types
+     * silently collapses the null to the type's zero value (already
+     * written by the cast loop). */
+    if (vec->type == RAY_BOOL || vec->type == RAY_U8) return vec;
+
     if (ray_is_vec(val)) {
         if (ray_vec_copy_nulls(vec, val) != RAY_OK)
             { ray_release(vec); return ray_error("oom", NULL); }
@@ -754,37 +760,42 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
         for (int64_t j = 0; j < vec->len; j++)
             if (le[j] && RAY_ATOM_IS_NULL(le[j]))
                 ray_vec_set_null(vec, j, true);
+        /* ray_vec_set_null writes the sentinel into the payload, so the
+         * LIST branch needs no post-fill. */
+        return vec;
     }
-    /* Phase 2/3a dual encoding: when the destination has nulls, fill each
-     * null payload slot with the correct-width sentinel so consumers that
-     * read the raw payload (without consulting the bitmap) honor the null
-     * contract.  Narrowing casts (Hazard 3) require writing the dest-width
+    /* VEC source: ray_vec_copy_nulls bulk-copies the source's HAS_NULLS
+     * state into the destination, but never touches the payload — the
+     * cast loop already filled the dest payload with raw cast results.
+     * For each null source slot, overwrite the dest payload with the
+     * dest-width sentinel so consumers reading the raw payload honor the
+     * null contract.  Narrowing casts require writing the dest-width
      * sentinel directly — propagating through the cast macro produces
      * (int16_t)NULL_I32 = 0 etc., which collides with a legitimate value. */
-    if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+    if (val->attrs & RAY_ATTR_HAS_NULLS) {
         switch (vec->type) {
             case RAY_F64: {
                 double* d = (double*)ray_data(vec);
                 for (int64_t j = 0; j < vec->len; j++)
-                    if (ray_vec_is_null(vec, j)) d[j] = NULL_F64;
+                    if (ray_vec_is_null(val, j)) d[j] = NULL_F64;
                 break;
             }
             case RAY_I64: case RAY_TIMESTAMP: {
                 int64_t* d = (int64_t*)ray_data(vec);
                 for (int64_t j = 0; j < vec->len; j++)
-                    if (ray_vec_is_null(vec, j)) d[j] = NULL_I64;
+                    if (ray_vec_is_null(val, j)) d[j] = NULL_I64;
                 break;
             }
             case RAY_I32: case RAY_DATE: case RAY_TIME: {
                 int32_t* d = (int32_t*)ray_data(vec);
                 for (int64_t j = 0; j < vec->len; j++)
-                    if (ray_vec_is_null(vec, j)) d[j] = NULL_I32;
+                    if (ray_vec_is_null(val, j)) d[j] = NULL_I32;
                 break;
             }
             case RAY_I16: {
                 int16_t* d = (int16_t*)ray_data(vec);
                 for (int64_t j = 0; j < vec->len; j++)
-                    if (ray_vec_is_null(vec, j)) d[j] = NULL_I16;
+                    if (ray_vec_is_null(val, j)) d[j] = NULL_I16;
                 break;
             }
             default: break;
