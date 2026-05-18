@@ -1070,43 +1070,35 @@ ray_t* exec_node(ray_graph_t* g, ray_op_t* op);
  * Thread-safe null bitmap helpers (parallel group/window)
  * ══════════════════════════════════════════ */
 
-/* Atomically set a null bit AND write the type-correct sentinel into the
- * payload slot.  For idx >= 128 without ext nullmap, falls back to
- * ray_vec_set_null (lazy alloc — safe because OOM forces sequential path).
+/* Parallel-safe null marker.  For sentinel-supporting types writes the
+ * NULL_* sentinel into payload[idx] and atomically ORs HAS_NULLS into
+ * vec->attrs.  Payload write needs no synchronisation — different
+ * threads call this with different idx, so each per-slot store is
+ * uncontended.  attrs OR is atomic so the read-modify-write on the
+ * shared attrs byte is safe.
  *
- * Payload write needs no synchronisation: different threads call this with
- * different idx, so each per-slot store is uncontended.  Bitmap bit set is
- * atomic because multiple slots can share a byte. */
+ * BOOL/U8 fall through to the legacy bitmap path (lazy ext alloc, bit
+ * OR'd atomically) until Phase 1 lockdown lands. */
 static inline void par_set_null(ray_t* vec, int64_t idx) {
-    /* Sentinel-write side of the dual-encoding contract.  Window/group
-     * parallel kernels overwrote the payload with 0 / 0.0 before calling
-     * par_set_null; this stamp restores the type-correct sentinel so
-     * sentinel-based readers see the null.  STR/SYM/BOOL/U8 use their
-     * own null conventions (or are non-nullable) — no payload stamp here. */
+    bool type_uses_sentinel = false;
     void* p = ray_data(vec);
     switch (vec->type) {
-        case RAY_F64:
-            ((double*)p)[idx] = NULL_F64;
-            break;
-        case RAY_F32:
-            ((float*)p)[idx] = NULL_F32;
-            break;
-        case RAY_I64:
-        case RAY_TIMESTAMP:
-            ((int64_t*)p)[idx] = NULL_I64;
-            break;
-        case RAY_I32:
-        case RAY_DATE:
-        case RAY_TIME:
-            ((int32_t*)p)[idx] = NULL_I32;
-            break;
-        case RAY_I16:
-            ((int16_t*)p)[idx] = NULL_I16;
-            break;
-        default:
-            break;
+        case RAY_F64:                          ((double*)p)[idx] = NULL_F64; type_uses_sentinel = true; break;
+        case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; type_uses_sentinel = true; break;
+        case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; type_uses_sentinel = true; break;
+        case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; type_uses_sentinel = true; break;
+        case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; type_uses_sentinel = true; break;
+        default: break;
+    }
+    if (type_uses_sentinel) {
+        __atomic_fetch_or(&vec->attrs, (uint8_t)RAY_ATTR_HAS_NULLS,
+                          __ATOMIC_RELAXED);
+        return;
     }
 
+    /* Legacy bitmap path for BOOL/U8.  For idx >= 128 without ext
+     * nullmap, falls back to ray_vec_set_null (lazy alloc — safe
+     * because OOM forces the sequential path). */
     if (!(vec->attrs & RAY_ATTR_NULLMAP_EXT)) {
         if (idx >= 128) {
             ray_vec_set_null(vec, idx, true);
