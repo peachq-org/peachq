@@ -234,8 +234,8 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
         }
     }
 
-    /* Phase 2/3a dual encoding: fill correct-width sentinel into null
-     * payload slots so consumers reading raw payload honor the contract. */
+    /* Fill correct-width sentinel into null payload slots so consumers
+     * reading raw payload honor the contract. */
     switch (out_type) {
         case RAY_F64: {
             double* d = (double*)ray_data(result);
