@@ -116,25 +116,22 @@ static int64_t ser_schema_names(uint8_t* buf, ray_t* schema) {
 }
 
 /* Write null bitmap bytes into buf. Returns bytes written.
- * Uses ray_vec_nullmap_bytes so HAS_INDEX, slice, ext, and inline storage
- * forms all serialize the correct bits.  bit_offset is non-zero only for
- * slices, which (per pre-existing serde behaviour) are saved as if they
- * had no nulls — null_bitmap_size returns 0 since the slice's own attrs
- * lack HAS_NULLS — so we never reach this with off>0. */
+ * Derives the bits from sentinel reads (ray_vec_is_null) rather than
+ * the legacy bitmap, so the encoder stays correct once the bitmap arm
+ * is reclaimed.  ray_vec_is_null itself dispatches sentinel-vs-bitmap
+ * per type, working uniformly across the sentinel-supported numeric
+ * and temporal types and the bitmap-backed BOOL / U8 holdouts. */
 static int64_t ser_null_bitmap(uint8_t* buf, ray_t* v) {
     int64_t bsz = null_bitmap_size(v);
     if (bsz <= 0) return 0;
 
-    int64_t bit_off = 0, len_bits = 0;
-    const uint8_t* bits = ray_vec_nullmap_bytes(v, &bit_off, &len_bits);
-    if (!bits || bit_off != 0) {
-        memset(buf, 0, (size_t)bsz);
-        return bsz;
+    memset(buf, 0, (size_t)bsz);
+    if (!(v->attrs & RAY_ATTR_HAS_NULLS)) return bsz;
+
+    for (int64_t i = 0; i < v->len; i++) {
+        if (ray_vec_is_null(v, i))
+            buf[i >> 3] |= (uint8_t)(1u << (i & 7));
     }
-    int64_t avail_bytes = (len_bits + 7) / 8;
-    int64_t copy = bsz < avail_bytes ? bsz : avail_bytes;
-    memcpy(buf, bits, (size_t)copy);
-    if (copy < bsz) memset(buf + copy, 0, (size_t)(bsz - copy));
     return bsz;
 }
 
