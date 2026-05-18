@@ -913,7 +913,8 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      *
      * BOOL / U8 are non-nullable per Phase 1 but legacy tests still
      * exercise the bitmap API on them; the lockdown is deferred to a
-     * later session where the impacted tests can be cleaned up. */
+     * later session (~11 tests to update in place per the migration
+     * test-handling convention). */
     if (vec->type == RAY_SYM) return RAY_ERR_TYPE;
 
     /* Mutation invalidates any attached accelerator index — drop it inline.
