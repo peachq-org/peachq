@@ -559,18 +559,14 @@ static void ray_release_owned_refs(ray_t* v) {
     }
 
     /* Vector with attached index: nullmap[0..7] holds an owning ref to
-     * the index ray_t.  The index owns the displaced ext_nullmap/str_pool/
-     * sym_dict, so we must NOT also try to release those off the parent —
-     * they aren't there anymore.  Skip the NULLMAP_EXT and STR_pool branches. */
+     * the index ray_t.  The index owns the displaced str_pool / sym_dict,
+     * so we must NOT also try to release those off the parent — they
+     * aren't there anymore.  Skip the STR_pool branch. */
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
         if (v->index && !RAY_IS_ERR(v->index))
             ray_release(v->index);
         return;
     }
-
-    if ((v->attrs & RAY_ATTR_NULLMAP_EXT) &&
-        v->ext_nullmap && !RAY_IS_ERR(v->ext_nullmap))
-        ray_release(v->ext_nullmap);
 
     if (v->type == RAY_STR && v->str_pool && !RAY_IS_ERR(v->str_pool))
         ray_release(v->str_pool);
@@ -677,10 +673,6 @@ bool ray_retain_owned_refs(ray_t* v) {
         return true;
     }
 
-    if ((v->attrs & RAY_ATTR_NULLMAP_EXT) &&
-        v->ext_nullmap && !RAY_IS_ERR(v->ext_nullmap))
-        ray_retain(v->ext_nullmap);
-
     if (v->type == RAY_STR && v->str_pool && !RAY_IS_ERR(v->str_pool))
         ray_retain(v->str_pool);
 
@@ -777,11 +769,6 @@ static void ray_detach_owned_refs(ray_t* v) {
         v->_idx_pad = NULL;
         v->attrs   &= (uint8_t)~RAY_ATTR_HAS_INDEX;
         return;
-    }
-
-    if (v->attrs & RAY_ATTR_NULLMAP_EXT) {
-        v->ext_nullmap = NULL;
-        v->attrs &= (uint8_t)~RAY_ATTR_NULLMAP_EXT;
     }
 
     if (v->type == RAY_STR) {
@@ -942,8 +929,6 @@ void ray_free(ray_t* v) {
                     pool_len = (size_t)v->str_pool->len;
                 data_size += 32 + pool_len;
             }
-            if (v->attrs & RAY_ATTR_NULLMAP_EXT)
-                data_size += ((size_t)v->len + 7) / 8;
             size_t mapped_size = (data_size + 4095) & ~(size_t)4095;
             ray_vm_unmap_file(v, mapped_size);
         } else {
