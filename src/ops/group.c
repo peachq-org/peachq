@@ -54,8 +54,8 @@ static void reduce_acc_init(reduce_acc_t* acc) {
  *
  * NULL_SENT is the type-correct NULL_* sentinel value for T (NULL_I16,
  * NULL_I32, NULL_I64).  For BOOL/U8 the sentinel slot is unused
- * (those types are non-nullable per Phase 1; dispatcher pins
- * HAS_NULLS=0) so any value works; we pass 0 for compileability. */
+ * (those types are non-nullable; dispatcher pins HAS_NULLS=0) so any
+ * value works; we pass 0 for compileability. */
 #define REDUCE_LOOP_I(T, NULL_SENT, base, start, end, acc, HAS_NULLS, HAS_IDX, idx) \
     do { \
         const T* d = (const T*)(base); \
@@ -126,10 +126,8 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
     void* base = ray_data(input);
     switch (input->type) {
     case RAY_BOOL: case RAY_U8: {
-        /* No sentinel for BOOL/U8 (Phase 1 lockdown deferred); use
-         * ray_vec_is_null which falls back to the legacy bitmap path
-         * for these types.  Cold path — most BOOL/U8 reductions have
-         * has_nulls=false and skip the per-element check. */
+        /* BOOL/U8 are non-nullable; has_nulls is always false here,
+         * so the per-element null check is dead code in practice. */
         const uint8_t* d = (const uint8_t*)base;
         for (int64_t i = start; i < end; i++) {
             int64_t row = idx ? idx[i] : i;
@@ -1295,8 +1293,8 @@ static inline double med_read_as_f64(const void* base, int8_t t, int64_t row) {
 }
 
 /* Type-correct sentinel null check for the med_par paths.  U8 is
- * non-nullable per Phase 1; med only accepts the listed types so
- * SYM/STR/GUID/F32 never reach here. */
+ * non-nullable; med only accepts the listed types so SYM/STR/GUID/F32
+ * never reach here. */
 static inline bool med_is_null(const void* base, int8_t t, int64_t row) {
     switch (t) {
         case RAY_F64: { double v; memcpy(&v, (const char*)base + (size_t)row * 8, 8); return v != v; }
@@ -2612,12 +2610,12 @@ static void group_rows_range_existing(group_ht_t* ht, void** key_data,
 /* ============================================================================
  * Radix-partitioned parallel group-by
  *
- * Phase 1 (parallel): Each worker reads keys+agg values from original columns,
+ * Pass 1 (parallel): Each worker reads keys+agg values from original columns,
  *         packs into fat entries (hash, keys, agg_vals), scatters into
  *         thread-local per-partition buffers.
- * Phase 2 (parallel): Each partition is aggregated independently using
+ * Pass 2 (parallel): Each partition is aggregated independently using
  *         inline data — no original column access needed.
- * Phase 3: Build result columns from inline group rows.
+ * Pass 3: Build result columns from inline group rows.
  * ============================================================================ */
 
 #define RADIX_BITS  8
@@ -2670,7 +2668,7 @@ typedef struct {
     uint8_t      nullable_mask;   /* bit k = key k column may contain nulls */
     ray_t**       agg_vecs;
     /* Second input column per agg; NULL when no binary aggs in this
-     * OP_GROUP.  Phase 1 reads agg_vecs2[a] alongside agg_vecs[a] and
+     * OP_GROUP.  Pass 1 reads agg_vecs2[a] alongside agg_vecs[a] and
      * packs (x, y) consecutively into the entry agg_vals area for any
      * agg whose layout bit agg_is_binary is set. */
     ray_t**       agg_vecs2;
@@ -2800,7 +2798,7 @@ static void group_rows_indirect(group_ht_t* ht, const int8_t* key_types,
     }
 }
 
-/* Phase 3: build result columns from inline group rows */
+/* Pass 3: build result columns from inline group rows */
 typedef struct {
     int8_t  out_type;
     bool    src_f64;
@@ -2862,7 +2860,7 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
                 if (null_mask & (int64_t)(1u << k)) {
                     if (c->key_cols && c->key_cols[k])
                         grp_set_null(c->key_cols[k], di);
-                    /* Phase 2/3a dual encoding: fill correct-width sentinel. */
+                    /* Fill the correct-width sentinel. */
                     char* dst = c->key_dsts[k];
                     uint8_t esz = c->key_esizes[k];
                     size_t off = (size_t)di * esz;
@@ -3001,7 +2999,7 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
     }
 }
 
-/* Phase 2: aggregate each partition independently using inline data */
+/* Pass 2: aggregate each partition independently using inline data */
 typedef struct {
     int8_t*      key_types;
     uint8_t      n_keys;
@@ -3765,7 +3763,7 @@ typedef struct {
     /* per-worker accumulators (1 slot each) */
     da_accum_t*    accums;
     uint32_t       n_accums;
-    /* Phase 3a: per-agg integer-null sentinel + mask (mirrors da_ctx_t). */
+    /* Per-agg integer-null sentinel + mask (mirrors da_ctx_t). */
     uint32_t       agg_int_null_mask;
     int64_t*       agg_int_null_sentinel;
 } scalar_ctx_t;
@@ -3853,13 +3851,13 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
         }
         uint16_t op = c->agg_ops[a];
         bool is_f = (c->agg_types[a] == RAY_F64);
-        /* Phase 3a dual encoding: NULL_I* sentinel = null. */
+        /* NULL_I* sentinel = null. */
         bool int_null = !is_f && (c->agg_int_null_mask & (1u << a)) &&
                         iv == c->agg_int_null_sentinel[a];
         bool is_null = is_f ? !(fv == fv) : int_null;
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
             if (is_f) {
-                /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
+                /* NaN payload = null, skip from sum/sumsq. */
                 if (RAY_LIKELY(fv == fv)) {
                     acc->sum[a].f += fv;
                     if (acc->sumsq_f64) acc->sumsq_f64[a] += fv * fv;
@@ -3950,19 +3948,15 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                 acc->sum[idx].i += group_strlen_at(c->agg_cols[a], r);
                 if (nn) nn[idx]++;
             } else if (f64m & (1u << a)) {
-                /* Phase 2 dual encoding: NaN payload = null, skip from sum. */
+                /* NaN payload = null, skip from sum. */
                 double v = ((const double*)c->agg_ptrs[a])[r];
                 if (RAY_LIKELY(v == v)) { acc->sum[idx].f += v; if (nn) nn[idx]++; }
             } else {
-                /* Phase 3a dual encoding: NULL_I* sentinel = null, skip from sum.
-                 * Only paid when the source column actually advertises nulls.
-                 *
-                 * Phase 3a hazard: this sentinel-compare drops user-stored INT_MIN
-                 * values in HAS_NULLS columns. The plan accepted this tradeoff for
-                 * the cache-line cost of nullmap consultation — dual encoding keeps
-                 * the bitmap as source of truth, so the corruption is bounded to the
-                 * narrow window where HAS_NULLS is set AND a non-null cell holds the
-                 * sentinel value. */
+                /* NULL_I* sentinel = null, skip from sum.  Only paid when
+                 * the source column actually advertises nulls.  A user-stored
+                 * INT_MIN value in a HAS_NULLS column is indistinguishable
+                 * from a null and is dropped — this is the standard cost of
+                 * sentinel-based null encoding for integers. */
                 int64_t v = read_col_i64(c->agg_ptrs[a], r, c->agg_types[a], 0);
                 if (RAY_LIKELY(!((inm >> a) & 1) || v != c->agg_int_null_sentinel[a])) {
                     acc->sum[idx].i += v;
@@ -3984,10 +3978,9 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
      * with disjoint null patterns can race — whichever non-null lands
      * first stakes first_row and the other agg never gets a chance.
      * The result for the "loser" agg is a typed null (nn[idx] stays 0),
-     * which is strictly safer than the previous behaviour (leaked the
-     * 0 calloc seed) but still not the true first-non-null value.  Fix
-     * would require per-(group, agg) first_row arrays.  Out of scope for
-     * this phase; documented for future work. */
+     * which is strictly safer than leaking the 0 calloc seed but still
+     * not the true first-non-null value.  Fix would require per-(group,
+     * agg) first_row arrays — documented for future work. */
     bool fl_take_first = (acc->first_row && r < acc->first_row[gid]);
     bool fl_take_last  = (acc->last_row  && r > acc->last_row[gid]);
     bool first_advanced = false, last_advanced = false;
@@ -4005,15 +3998,15 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
         }
         uint16_t op = c->agg_ops[a];
         bool is_f = (c->agg_types[a] == RAY_F64);
-        /* Phase 3a dual encoding: NULL_I* sentinel = null.  Bit set in
-         * agg_int_null_mask AND value equal to per-agg sentinel means
-         * this row is null for an integer aggregation column. */
+        /* NULL_I* sentinel = null.  Bit set in agg_int_null_mask AND
+         * value equal to per-agg sentinel means this row is null for
+         * an integer aggregation column. */
         bool int_null = (c->agg_int_null_mask & (1u << a)) &&
                         iv == c->agg_int_null_sentinel[a];
         bool is_null = is_f ? !(fv == fv) : int_null;
         if (op == OP_SUM || op == OP_AVG || op == OP_STDDEV || op == OP_STDDEV_POP || op == OP_VAR || op == OP_VAR_POP) {
             if (is_f) {
-                /* Phase 2 dual encoding: NaN payload = null, skip from sum/sumsq. */
+                /* NaN payload = null, skip from sum/sumsq. */
                 if (RAY_LIKELY(fv == fv)) {
                     acc->sum[idx].f += fv;
                     if (acc->sumsq_f64) acc->sumsq_f64[idx] += fv * fv;
@@ -4058,8 +4051,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             }
         } else if (op == OP_MIN) {
             if (is_f) {
-                /* Phase 2 dual encoding: NaN comparisons are always false, but
-                 * make the skip explicit. */
+                /* NaN comparisons are always false, but make the skip
+                 * explicit. */
                 if (fv == fv && fv < acc->min_val[idx].f) acc->min_val[idx].f = fv;
             } else if (!int_null) {
                 if (iv < acc->min_val[idx].i) acc->min_val[idx].i = iv;
@@ -5194,12 +5187,12 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
          * The specialized scalar_sum_*_fn variants don't honour
          * match_idx — they read data[r] directly — so they're only
          * safe when no selection is in flight.  They also read the
-         * slot raw, so they require null-free input: Phase 3a stores
-         * NULL_I{16,32,64} sentinels in null slots which would poison
-         * the sum.  Fall back to the generic masked path when the
-         * source vector advertises nulls.  (try_linear_sumavg_input_i64
-         * already refuses to build a linear plan when any term column
-         * has nulls, so agg_linear[0].enabled implies null-free.) */
+         * slot raw, so they require null-free input: NULL_I{16,32,64}
+         * sentinels in null slots would poison the sum.  Fall back to
+         * the generic masked path when the source vector advertises
+         * nulls.  (try_linear_sumavg_input_i64 already refuses to build
+         * a linear plan when any term column has nulls, so
+         * agg_linear[0].enabled implies null-free.) */
         typedef void (*scalar_fn_t)(void*, uint32_t, int64_t, int64_t);
         scalar_fn_t sc_fn = scalar_accum_fn;
         bool agg0_has_nulls = (sc_int_null_mask & 1u) != 0 ||
@@ -5474,10 +5467,10 @@ da_path:;
             int64_t da_int_null_sentinel[vla_aggs];
             uint32_t agg_f64_mask = 0;
             uint32_t da_int_null_mask = 0;
-            /* Phase 3 follow-up: track whether any agg column can produce
-             * a null so we can allocate per-(group, agg) non-null counts
-             * only when required.  F64 with HAS_NULLS uses NaN-skip; sentinel-
-             * typed integers with HAS_NULLS use sentinel-skip. */
+            /* Track whether any agg column can produce a null so we can
+             * allocate per-(group, agg) non-null counts only when required.
+             * F64 with HAS_NULLS uses NaN-skip; sentinel-typed integers
+             * with HAS_NULLS use sentinel-skip. */
             bool da_any_nullable = false;
             for (uint8_t a = 0; a < n_aggs; a++) {
                 if (agg_vecs[a]) {
@@ -5518,8 +5511,8 @@ da_path:;
             if (need_flags & DA_NEED_MIN) arrays_per_agg += 2;
             if (need_flags & DA_NEED_MAX) arrays_per_agg += 2;
             if (need_flags & DA_NEED_SUMSQ) arrays_per_agg += 1;
-            /* Phase 3 follow-up: nullable aggs add a per-(group, agg)
-             * non-null count array.  ~8 bytes per (group, agg). */
+            /* Nullable aggs add a per-(group, agg) non-null count array.
+             * ~8 bytes per (group, agg). */
             if (da_any_nullable) arrays_per_agg += 1;
             uint64_t per_worker_bytes = (uint64_t)n_slots * (arrays_per_agg * n_aggs + 1u) * 8u;
             if ((uint64_t)da_n_workers * per_worker_bytes > DA_MEM_BUDGET)
@@ -5929,15 +5922,12 @@ da_path:;
             if (op != OP_SUM && op != OP_AVG)
                 sp_eligible = false;
             else {
-                /* Phase 3a: the single-key sparse aggregation path reads agg
-                 * slots raw via read_col_i64 / direct double load; nullable
-                 * input columns would poison the sum with NULL_I* or NULL_F64
-                 * sentinels.  Fall back to slower paths that mask nulls
-                 * properly.  Scope note: this gate covers the scalar
-                 * dispatcher and this single-key sparse path only; the
-                 * multi-key radix HT (accum_from_entry, ~line 2155) inherits
-                 * Phase 2's pre-existing nullable-agg gap and is out of scope
-                 * for this commit. */
+                /* The single-key sparse aggregation path reads agg slots
+                 * raw via read_col_i64 / direct double load; nullable
+                 * input columns would poison the sum with NULL_I* or
+                 * NULL_F64 sentinels.  Fall back to slower paths that
+                 * mask nulls properly.  (The multi-key radix HT at
+                 * accum_from_entry inherits the same nullable-agg gap.) */
                 if (agg_vecs[a] && (agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS))
                     sp_eligible = false;
                 else
@@ -7233,7 +7223,7 @@ skip_top_count_filter:
                 p1_nullable |= (uint8_t)(1u << k);
         }
 
-        /* Phase 1: parallel hash + copy keys/agg values into fat entries */
+        /* Pass 1: parallel hash + copy keys/agg values into fat entries */
         radix_phase1_ctx_t p1ctx = {
             .key_data      = key_data,
             .key_types     = key_types,
@@ -7266,7 +7256,7 @@ skip_top_count_filter:
             }
         }
 
-        /* Phase 2: parallel per-partition aggregation (no column access) */
+        /* Pass 2: parallel per-partition aggregation (no column access) */
         part_hts = (group_ht_t*)scratch_calloc(&part_hts_hdr,
             RADIX_P * sizeof(group_ht_t));
         if (!part_hts) {
@@ -7385,7 +7375,7 @@ skip_top_count_filter:
         for (uint8_t k = 0; k < n_keys; k++)
             if (key_cols[k]) grp_prepare_nullmap(key_cols[k]);
 
-        /* Phase 3: parallel key gather + agg result building from inline rows */
+        /* Pass 3: parallel key gather + agg result building from inline rows */
         {
             radix_phase3_ctx_t p3ctx = {
                 .part_hts     = part_hts,
@@ -7729,7 +7719,7 @@ build_from_final_ht:
             int64_t null_mask = rkeys[n_keys];
             if (null_mask & (int64_t)(1u << k)) {
                 ray_vec_set_null(new_col, (int64_t)gi, true);
-                /* Phase 2/3a dual encoding: fill correct-width sentinel. */
+                /* Fill the correct-width sentinel. */
                 switch (kt) {
                     case RAY_F64:
                         ((double*)ray_data(new_col))[gi] = NULL_F64; break;
@@ -8232,9 +8222,9 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
 
     /* ---- Batched incremental merge ----
      * Process partitions in batches of MERGE_BATCH.  After each batch:
-     *   Phase 1: exec_group each partition in batch → batch_partials[]
-     *   Phase 2: concat (running + batch_partials + MAPCOMMON) → merge_tbl
-     *   Phase 3: merge GROUP BY → new running
+     *   Pass 1: exec_group each partition in batch → batch_partials[]
+     *   Pass 2: concat (running + batch_partials + MAPCOMMON) → merge_tbl
+     *   Pass 3: merge GROUP BY → new running
      * Bounds peak memory to O(MERGE_BATCH × groups_per_partition). */
 #define MERGE_BATCH 8
 
@@ -8252,7 +8242,7 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
         if (batch_end > n_parts) batch_end = n_parts;
         int32_t batch_n = batch_end - batch_start;
 
-        /* Phase 1: exec_group each partition in this batch */
+        /* Pass 1: exec_group each partition in this batch */
         ray_t* bp[MERGE_BATCH];
         memset(bp, 0, sizeof(bp));
 
@@ -8336,7 +8326,7 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             }
         }
 
-        /* Phase 2: concat (running + batch_partials + MAPCOMMON) */
+        /* Pass 2: concat (running + batch_partials + MAPCOMMON) */
         int64_t mrows = running ? ray_table_nrows(running) : 0;
         for (int32_t i = 0; i < batch_n; i++)
             mrows += ray_table_nrows(bp[i]);
@@ -8450,7 +8440,7 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             bp[i] = NULL;
         }
 
-        /* Phase 3: merge GROUP BY */
+        /* Pass 3: merge GROUP BY */
         ray_graph_t* mg = ray_graph_new(merge_tbl);
         if (!mg) goto batch_fail;
 
@@ -8852,19 +8842,19 @@ void pivot_ingest_free(pivot_ingest_t* out) {
  *
  * Three-phase parallel design.
  *
- * Phase 1 (parallel rows): each worker scatters fat entries
+ * Pass 1 (parallel rows): each worker scatters fat entries
  *  (hash:8, key_bits:8, val_bits:8) into per-(worker, partition) buffers
  *  using the same 8-bit radix the OP_GROUP path uses (RADIX_P=256).  No
  *  hashmap in this phase — pure streaming write.  Per-partition data fits
  *  in L2 by construction.
  *
- * Phase 2 (parallel partitions): RADIX_P tasks.  Each partition iterates
+ * Pass 2 (parallel partitions): RADIX_P tasks.  Each partition iterates
  *  all worker buffers for its partition slot, probing a partition-local
  *  open-addressing hashmap.  Entries hold a bounded K-slot heap (min-heap
  *  for top, max-heap for bot — root = worst-of-kept).  No cross-partition
  *  contention.
  *
- * Phase 3 (parallel partitions): each partition heapsort-drains its heap
+ * Pass 3 (parallel partitions): each partition heapsort-drains its heap
  *  entries into the pre-allocated output columns at its row range.  Row
  *  ranges come from a prefix-sum over per-partition kept-counts.
  *
@@ -8875,8 +8865,8 @@ void pivot_ingest_free(pivot_ingest_t* out) {
  *    explode in user code.
  * ============================================================================ */
 
-/* Scatter entry: 3 × 8 bytes = 24 bytes per row.  Phase 1 writes these
- * sequentially into per-partition buffers; Phase 2 reads them linearly.
+/* Scatter entry: 3 × 8 bytes = 24 bytes per row.  Pass 1 writes these
+ * sequentially into per-partition buffers; Pass 2 reads them linearly.
  *   word 0: hash (used for HT probe and salt extraction)
  *   word 1: key bits (canonical int64 — reinterp to double for F64)
  *   word 2: val bits (canonical int64 — reinterp to double for F64) */
@@ -9089,7 +9079,7 @@ static inline void grpt_heap_push_i64(int64_t* heap, uint8_t* kept_p,
     }
 }
 
-/* ─── Phase 1 ──────────────────────────────────────────────────────────
+/* ─── Pass 1 ──────────────────────────────────────────────────────────
  * Per-worker scan: read (key, val) per row, dispatch into per-worker
  * hashmap.  Specialized inner loops for (key_type, val_type) so the
  * branch out of `topk_read_*` lifts out of the hot loop.  The dominant
@@ -9244,7 +9234,7 @@ static void grpt_phase1_fn(void* ctx_v, uint32_t worker_id,
     }
 }
 
-/* ─── Phase 2 ──────────────────────────────────────────────────────────
+/* ─── Pass 2 ──────────────────────────────────────────────────────────
  * Per-partition aggregation.  RADIX_P tasks.  Each task iterates all
  * per-worker scatter buffers for its partition slot, probes a
  * partition-local hashmap, and applies bounded-heap insert.  HT size
@@ -9329,7 +9319,7 @@ static void grpt_phase2_fn(void* ctx_v, uint32_t worker_id,
     }
 }
 
-/* ─── Phase 3 ──────────────────────────────────────────────────────────
+/* ─── Pass 3 ──────────────────────────────────────────────────────────
  * Per-partition emit.  Walk merged hashmap, sort each heap in-place
  * (heapsort: swap root with tail, sift, repeat), then write rows. */
 
@@ -9401,18 +9391,14 @@ static void grpt_phase3_fn(void* ctx_v, uint32_t worker_id,
                 /* Key write — replicate same key across kept rows. */
                 if (e->has_null_key) {
                     /* Write width-correct sentinel then mark null on the
-                     * output column.  Phase 2/3a dual encoding: payload
-                     * must hold INT_MIN/NaN per type, not 0.
-                     * ray_vec_set_null is not threadsafe across workers
-                     * for the same word; but each partition writes a
-                     * contiguous row range so two partitions never touch
-                     * the same nullmap word — unless a row range
-                     * straddles an 8-row boundary that another
-                     * partition's range also touches.  In practice the
-                     * null-key case at most produces K rows and
-                     * partitions are large; we serialise null-key
-                     * writes by routing the null-key entry into the
-                     * sequential final-pass below. */
+                     * output column.  Payload must hold INT_MIN/NaN per
+                     * type, not 0.  ray_vec_set_null is not threadsafe
+                     * across workers for the same HAS_NULLS write; each
+                     * partition writes a contiguous row range so two
+                     * partitions normally don't collide, but the null-key
+                     * case (at most K rows, partitions large) is routed
+                     * into the sequential final-pass below to serialise
+                     * its null write. */
                     int64_t null_bits = 0;
                     switch (c->key_type) {
                         case RAY_F64: {
@@ -9427,7 +9413,7 @@ static void grpt_phase3_fn(void* ctx_v, uint32_t worker_id,
                         case RAY_I16:
                             null_bits = (int64_t)NULL_I16; break;
                         default:
-                            /* BOOL/U8 — non-nullable per Phase 1, keep 0. */
+                            /* BOOL/U8 — non-nullable, keep 0. */
                             null_bits = 0; break;
                     }
                     grpt_write_key(c->key_out, row + j, null_bits, kesz);
@@ -9564,7 +9550,7 @@ ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op) {
         }
     }
 
-    /* Phase 2: per-partition HT build. */
+    /* Pass 2: per-partition HT build. */
     ray_t* phts_hdr = NULL;
     grpt_ht_t* part_hts = (grpt_ht_t*)scratch_calloc(&phts_hdr,
                                 (size_t)RADIX_P * sizeof(grpt_ht_t));
@@ -9686,14 +9672,14 @@ ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op) {
  * exec_group_topk_rowform.
  *
  * Algorithm:
- *   Phase 1: morsel-parallel scan reads (k0[,k1], x, y) per row,
+ *   Pass 1: morsel-parallel scan reads (k0[,k1], x, y) per row,
  *            composes hash from key(s), scatters fat entries into
  *            per-(worker, partition) buffers — no contention.
- *   Phase 2: RADIX_P parallel tasks build a per-partition HT.  Each
+ *   Pass 2: RADIX_P parallel tasks build a per-partition HT.  Each
  *            entry holds the fixed Pearson state (Σx, Σy, Σx², Σy²,
  *            Σxy, cnt).  Each scatter entry probes/inserts and
  *            accumulates in-place.
- *   Phase 3: walk all partition HTs, compute r² from state, emit
+ *   Pass 3: walk all partition HTs, compute r² from state, emit
  *            (key0[, key1], r²) row form.
  *
  * Per-row scatter stride: 40 B (hash + 2×key + 2×val).  1-key shape
@@ -9840,7 +9826,7 @@ grpc_ht_get(grpc_ht_t* ht, uint64_t hash, int64_t k0, int64_t k1) {
     }
 }
 
-/* ─── Phase 1 ──────────────────────────────────────────────────────────
+/* ─── Pass 1 ──────────────────────────────────────────────────────────
  * Per-worker scan: read (k0[, k1], x, y) per row, hash, scatter into
  * partition buckets.  Skips rows with null x, y, or any key. */
 
@@ -9948,7 +9934,7 @@ static void grpc_phase1_fn(void* ctx_v, uint32_t worker_id,
     }
 }
 
-/* ─── Phase 2 ──────────────────────────────────────────────────────────
+/* ─── Pass 2 ──────────────────────────────────────────────────────────
  * RADIX_P tasks.  Each builds a partition HT and accumulates Pearson
  * state from the scatter entries in its partition. */
 
@@ -10147,7 +10133,7 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
         }
     }
 
-    /* Phase 2. */
+    /* Pass 2. */
     ray_t* phts_hdr = NULL;
     grpc_ht_t* part_hts = (grpc_ht_t*)scratch_calloc(&phts_hdr,
                                 (size_t)RADIX_P * sizeof(grpc_ht_t));
@@ -10185,7 +10171,7 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
         }
     }
 
-    /* Phase 3 — emit row form.  Allocate output columns sized to total
+    /* Pass 3 — emit row form.  Allocate output columns sized to total
      * entries, fill sequentially by walking partitions in order. */
     int64_t total_rows = 0;
     for (uint32_t p = 0; p < RADIX_P; p++) total_rows += part_emit_rows[p];
@@ -10712,16 +10698,16 @@ ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op) {
  * Bypasses the shared OP_GROUP path's two-stage holistic fill (reprobe +
  * histogram + scatter) by computing both aggregates from a single radix
  * pipeline:
- *   Phase 1 (parallel): scatter rows into per-(worker,partition) bufs
+ *   Pass 1 (parallel): scatter rows into per-(worker,partition) bufs
  *           as (hash, key0, key1, v3) fat entries.
- *   Phase 2 (parallel per partition):
+ *   Pass 2 (parallel per partition):
  *           Pass 1 — probe HT, accumulate {cnt, sum, sumsq} per group.
  *           Cumsum cnt → per-group offsets into the partition's v_buf.
  *           Pass 2 — re-walk entries, scatter v3 into v_buf at the
  *                    bucketed position for each group.
  *           Result: per-partition v_buf is group-contiguous, ready for
  *           a per-group quickselect (no cross-partition scatter).
- *   Phase 3 (parallel per partition):
+ *   Pass 3 (parallel per partition):
  *           For each group, run ray_median_dbl_inplace on its slice and
  *           emit median + std(sample) into the output columns.
  * ════════════════════════════════════════════════════════════════════════ */
@@ -10743,7 +10729,7 @@ typedef struct {
     double   sum;
     double   sumsq;
     uint32_t val_off;  /* offset into ph->v_buf for this group's slice */
-    uint32_t val_pos;  /* cursor during Phase 2 Pass 2 (scatter v3) */
+    uint32_t val_pos;  /* cursor during Pass 2 Pass 2 (scatter v3) */
 } grpms_entry_t;
 
 typedef struct {
@@ -11211,7 +11197,7 @@ ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op) {
         }
     }
 
-    /* Phase 2. */
+    /* Pass 2. */
     ray_t* phts_hdr = NULL;
     grpms_ht_t* part_hts = (grpms_ht_t*)scratch_calloc(&phts_hdr,
                                 (size_t)RADIX_P * sizeof(grpms_ht_t));
@@ -11249,7 +11235,7 @@ ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op) {
         }
     }
 
-    /* Scatter bufs no longer needed — release before Phase 3 to lower peak RSS. */
+    /* Scatter bufs no longer needed — release before Pass 3 to lower peak RSS. */
     for (size_t j = 0; j < n_bufs; j++)
         if (bufs[j]._hdr) { scratch_free(bufs[j]._hdr); bufs[j]._hdr = NULL; }
     scratch_free(bufs_hdr); bufs_hdr = NULL; bufs = NULL;
@@ -11301,7 +11287,7 @@ ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op) {
     std_out->len = total_rows;
     if (cnt_out) cnt_out->len = total_rows;
 
-    /* Phase 3: per partition, emit keys + median + stddev. */
+    /* Pass 3: per partition, emit keys + median + stddev. */
     grpms_phase3_ctx_t p3 = {
         .part_hts = part_hts,
         .part_offsets = part_offsets,
