@@ -914,10 +914,7 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      * is_null=false (we have no way to know the prior real value),
      * so the clear path only touches the bitmap bit below.
      *
-     * STR uses len==0 as its sentinel (handled by the ext-alloc path
-     * below — the inline-pointer-pair arm of the union means we can't
-     * touch the payload here without aliasing str_pool/str_ext_null).
-     * SYM was rejected above. */
+     * SYM was rejected above (no-null by design). */
     if (is_null) {
         void* p = ray_data(vec);
         switch (vec->type) {
@@ -935,6 +932,15 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
                 break;
             case RAY_I16:
                 ((int16_t*)p)[idx] = NULL_I16;
+                break;
+            case RAY_STR:
+                /* STR null = empty string (len=0).  Zero the entire
+                 * element so any prior pool_off / data bytes don't
+                 * leave stale pointers behind.  Dead bytes in the pool
+                 * become unreferenced but the pool itself is not
+                 * compacted here — same behavior as replacing a long
+                 * string with a short one. */
+                memset(&((ray_str_t*)p)[idx], 0, sizeof(ray_str_t));
                 break;
             default:
                 break;
