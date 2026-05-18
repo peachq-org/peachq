@@ -295,10 +295,10 @@ bool try_linear_sumavg_input_i64(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
     for (uint8_t i = 0; i < lin.n_terms; i++) {
         ray_t* col = ray_table_get_col(tbl, lin.syms[i]);
         if (!col || !type_is_linear_i64_col(col->type)) return false;
-        /* Phase 3a: scalar_sum_linear_i64_fn reads slots raw via
-         * scalar_i64_at; any nullable term would poison the sum with
-         * NULL_I{16,32,64} sentinels.  Refuse the fast plan and let
-         * the caller fall back to the generic masked path. */
+        /* scalar_sum_linear_i64_fn reads slots raw via scalar_i64_at;
+         * any nullable term would poison the sum with NULL_I{16,32,64}
+         * sentinels.  Refuse the fast plan and let the caller fall back
+         * to the generic masked path. */
         if (col->attrs & RAY_ATTR_HAS_NULLS) return false;
         out_plan->term_ptrs[i] = ray_data(col);
         out_plan->term_types[i] = col->type;
@@ -467,7 +467,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 if (!col) return false;
                 if (col->type == RAY_MAPCOMMON) return false;
                 if (col->type == RAY_STR) return false; /* RAY_STR needs string comparison path */
-                if (col->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)) return false; /* nullable cols need bitmap-aware path */
+                if (col->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)) return false; /* nullable cols need the null-aware path */
                 out->regs[r].kind = REG_SCAN;
                 if (RAY_IS_PARTED(col->type)) {
                     int8_t base = (int8_t)RAY_PARTED_BASETYPE(col->type);
@@ -488,7 +488,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
             } else if (node->opcode == OP_CONST) {
                 ray_op_ext_t* ext = find_ext(g, node->id);
                 if (!ext || !ext->literal) return false;
-                if (RAY_ATOM_IS_NULL(ext->literal)) return false; /* null constants need bitmap-aware path */
+                if (RAY_ATOM_IS_NULL(ext->literal)) return false; /* null constants need the null-aware path */
                 double cf; int64_t ci; bool is_f64;
                 if (!atom_to_numeric(ext->literal, &cf, &ci, &is_f64)) {
                     /* Try resolving string constant to symbol intern ID —
@@ -835,9 +835,7 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
                  * the data.  SCAN U8/BOOL/I16/I32 columns get loaded into
                  * the I64 abstract via expr_load_i64; any subsequent
                  * `(as 'I64 col)` lands in this branch and would otherwise
-                 * leave dst un-initialised (the post-Phase-1 lockdown
-                 * removed the HAS_NULLS shortcut that previously rejected
-                 * fused compilation for these columns). */
+                 * leave dst un-initialised. */
                 case OP_CAST: memcpy(d, a, (size_t)n * sizeof(int64_t)); break;
                 default: break;
             }
@@ -962,11 +960,10 @@ static void expr_full_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t e
 /* Post-pass for the fused unary path: |INT64_MIN| and -INT64_MIN don't fit in
  * i64 (signed-overflow; k/q convention surfaces this as typed null).  The
  * element-wise loop uses unsigned wrap, so any overflow position lands as
- * INT64_MIN in data.  Post Phase 3a-1, INT64_MIN IS the canonical NULL_I64
- * sentinel — the dual-encoding contract requires the payload to *remain*
- * INT64_MIN while the null bit is set.  So we only need to flip the bitmap
- * bit; the payload is already correct.  Caller must invoke single-threaded
- * — after pool dispatch joins. */
+ * INT64_MIN in data.  Since INT64_MIN IS the canonical NULL_I64 sentinel,
+ * the payload is already correct — we just flip HAS_NULLS via
+ * ray_vec_set_null.  Caller must invoke single-threaded (after pool
+ * dispatch joins). */
 static void mark_i64_overflow_as_null(ray_t* result, int64_t off, int64_t len) {
     int64_t* d = (int64_t*)ray_data(result) + off;
     for (int64_t i = 0; i < len; i++) {
@@ -1089,11 +1086,9 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
  * ============================================================================ */
 
 /* Propagate nulls from src into dst element-wise.  ray_vec_set_null
- * dual-writes (sentinel + bitmap), and ray_vec_is_null reads the
- * sentinel as source of truth, so the resulting dst is correct under
- * both the current dual-encoded state and the future bitmap-stripped
- * state.  No bitmap-pointer fast path: the previous bulk-OR was tied
- * to ray_vec_nullmap_bytes and breaks once the bitmap arm goes away. */
+ * writes the type-correct sentinel, and ray_vec_is_null reads it back —
+ * the per-element walk is required since there is no per-row bitmap to
+ * bulk-OR. */
 static void propagate_nulls(ray_t* src, ray_t* dst, int64_t len) {
     if (!(src->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE))) return;
     for (int64_t i = 0; i < len; i++) {
@@ -1147,9 +1142,7 @@ static void fix_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
     /* One-sided null fast path: only one side has nulls (the common
      * shape — vec col vs non-null scalar) and no scalar is null.  Scan
      * src elements via ray_vec_is_null (sentinel-based), set the
-     * comparison's fill value per null cell.  Was previously a byte-
-     * level bitmap walk; the bitmap arm is being reclaimed so the
-     * scan now runs per element. */
+     * comparison's fill value per null cell. */
     if (!ln_s && !rn_s && (l_has ^ r_has)) {
         ray_t* src = l_has ? lhs : rhs;
         bool   src_left = l_has;
@@ -1183,10 +1176,7 @@ static void fix_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
 
 /* Set all elements in result as null (scalar null broadcast).
  * Writes the type-correct sentinel into every payload slot and sets
- * HAS_NULLS.  Sentinel is the source of truth post-migration; the
- * per-element bitmap is set by ray_vec_set_null on the final slot
- * just to keep the dual-encoding contract until the bitmap arm is
- * reclaimed. */
+ * HAS_NULLS. */
 static void set_all_null(ray_t* result, int64_t len) {
     result->attrs |= RAY_ATTR_HAS_NULLS;
     /* Sentinel payload fill — the sole source of truth. */
