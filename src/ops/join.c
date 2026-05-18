@@ -47,10 +47,10 @@ static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
  * Radix-partitioned hash join
  *
  * Four-phase pipeline:
- *   Phase 1: Partition both sides by radix bits of hash (parallel)
- *   Phase 2: Per-partition build + probe with open-addressing HT (parallel)
- *   Phase 3: Gather output columns from matched pairs (parallel)
- *   Phase 4: Fallback to chained HT for small joins (< RAY_PARALLEL_THRESHOLD)
+ *   Pass 1: Partition both sides by radix bits of hash (parallel)
+ *   Pass 2: Per-partition build + probe with open-addressing HT (parallel)
+ *   Pass 3: Gather output columns from matched pairs (parallel)
+ *   Pass 4: Fallback to chained HT for small joins (< RAY_PARALLEL_THRESHOLD)
  * ============================================================================ */
 
 /* Partition entry: row index + cached hash */
@@ -360,9 +360,9 @@ static join_radix_part_t* join_radix_partition(ray_pool_t* pool, int64_t nrows,
  * Join execution (parallel hash join)
  *
  * Three-phase pipeline:
- *   Phase 1 (sequential): Build chained hash table on right side
- *   Phase 2 (parallel):   Two-pass probe — count matches, prefix-sum, fill
- *   Phase 3 (parallel):   Column gather — assemble result columns
+ *   Pass 1 (sequential): Build chained hash table on right side
+ *   Pass 2 (parallel):   Two-pass probe — count matches, prefix-sum, fill
+ *   Pass 3 (parallel):   Column gather — assemble result columns
  * ============================================================================ */
 
 /* Key equality helper — shared by count + fill phases */
@@ -646,7 +646,7 @@ typedef struct {
     int64_t      sjoin_key_max;
 } join_probe_ctx_t;
 
-/* Phase 2a: count matches per morsel */
+/* Pass 2a: count matches per morsel */
 static void join_count_fn(void* raw, uint32_t wid, int64_t task_start, int64_t task_end) {
     (void)wid; (void)task_end;
     join_probe_ctx_t* c = (join_probe_ctx_t*)raw;
@@ -688,7 +688,7 @@ static void join_count_fn(void* raw, uint32_t wid, int64_t task_start, int64_t t
     c->morsel_counts[tid] = count;
 }
 
-/* Phase 2b: fill match pairs using pre-computed offsets */
+/* Pass 2b: fill match pairs using pre-computed offsets */
 static void join_fill_fn(void* raw, uint32_t wid, int64_t task_start, int64_t task_end) {
     (void)wid; (void)task_end;
     join_probe_ctx_t* c = (join_probe_ctx_t*)raw;
@@ -1087,7 +1087,7 @@ chained_ht_fallback:;
     }
     CHECK_CANCEL_GOTO(pool, join_cleanup);
 
-    /* Phase 1.5: S-Join semijoin filter extraction.
+    /* Pass 1.5: S-Join semijoin filter extraction.
      * Build a RAY_SEL bitmap of all distinct right-side key values that
      * appear in the hash table. This can be used to skip left-side rows
      * whose key cannot match any right-side row.
@@ -1116,7 +1116,7 @@ chained_ht_fallback:;
         }
     }
 
-    /* Phase 2: Parallel probe (two-pass: count → prefix-sum → fill) */
+    /* Pass 2: Parallel probe (two-pass: count → prefix-sum → fill) */
     uint32_t n_tasks = (uint32_t)((left_rows + JOIN_MORSEL - 1) / JOIN_MORSEL);
     if (n_tasks == 0) n_tasks = 1;
 
@@ -1233,7 +1233,7 @@ chained_ht_fallback:;
     }
 
 join_gather:;
-    /* Phase 3: Build result table with parallel column gather.
+    /* Pass 3: Build result table with parallel column gather.
      * Use multi_gather for batched column access when possible (non-nullable
      * indices), falling back to per-column gather for nullable RIGHT columns. */
     int64_t left_ncols = ray_table_ncols(left_table);

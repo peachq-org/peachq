@@ -842,9 +842,8 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      *   - SYM: sym ID 0 (interned empty string, reserved by
      *     ray_sym_init) is the canonical "missing" value; callers
      *     write 0 directly.
-     *   - BOOL / U8: locked down as non-nullable at Phase 1.  With
-     *     the bitmap arm reclaimed they have nowhere to store a
-     *     null — reject so the producer surface stays clean. */
+     *   - BOOL / U8: non-nullable; they have nowhere to store a
+     *     null, so reject to keep the producer surface clean. */
     if (vec->type == RAY_SYM ||
         vec->type == RAY_BOOL ||
         vec->type == RAY_U8) return RAY_ERR_TYPE;
@@ -1281,16 +1280,16 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
 }
 
 /* --------------------------------------------------------------------------
- * ray_vec_copy_nulls — bulk-copy null bitmap from src to dst
+ * ray_vec_copy_nulls — copy null state from src to dst
  *
  * dst must have the same len as src (or at least as many elements).
- * Handles inline, external, and slice source bitmaps.
+ * Handles direct and slice sources.
  * -------------------------------------------------------------------------- */
 
 ray_err_t ray_vec_copy_nulls(ray_t* dst, const ray_t* src) {
     if (!dst || !src) return RAY_ERR_TYPE;
 
-    /* Use ray_vec_is_null which handles slices, inline, and external bitmaps
+    /* Use ray_vec_is_null which handles slices and sentinel reads
      * transparently. For non-null sources this returns immediately. */
     bool has_any = false;
     if (src->attrs & RAY_ATTR_SLICE) {
