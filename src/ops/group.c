@@ -1128,8 +1128,6 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
 
     void* base = ray_data(src);
     bool has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0;
-    const uint8_t* null_bm = has_nulls ? ray_vec_nullmap_bytes(src, NULL, NULL)
-                                        : NULL;
 
     /* Per-type read width — hoist the type dispatch out of the hot loop.
      * read_col_i64 was branching on `in_type` every iteration plus paying
@@ -1213,7 +1211,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
         for (int64_t r = 0; r < n_rows; r++) {
             int64_t gid = row_gid[r];
             if (gid < 0 || gid >= n_groups) continue;
-            if (null_bm && ((null_bm[r/8] >> (r%8)) & 1)) continue;
+            if (cdpg_is_null(base, r, in_type, esz)) continue;
             /* Use a different name from the macro's inner `val` so
              * clang doesn't see an `int64_t val = (val);` self-init
              * after macro expansion. */
@@ -1277,7 +1275,6 @@ typedef struct {
     const void*    base;        /* ray_data(src) */
     int8_t         src_type;
     bool           has_nulls;
-    const uint8_t* null_bm;
     const int64_t* idx_buf;
     const int64_t* offsets;
     const int64_t* grp_cnt;
@@ -1297,6 +1294,20 @@ static inline double med_read_as_f64(const void* base, int8_t t, int64_t row) {
     }
 }
 
+/* Type-correct sentinel null check for the med_par paths.  U8 is
+ * non-nullable per Phase 1; med only accepts the listed types so
+ * SYM/STR/GUID/F32 never reach here. */
+static inline bool med_is_null(const void* base, int8_t t, int64_t row) {
+    switch (t) {
+        case RAY_F64: { double v; memcpy(&v, (const char*)base + (size_t)row * 8, 8); return v != v; }
+        case RAY_I64: return ((const int64_t*)base)[row] == NULL_I64;
+        case RAY_I32: return ((const int32_t*)base)[row] == NULL_I32;
+        case RAY_I16: return ((const int16_t*)base)[row] == NULL_I16;
+        case RAY_U8:  return false;  /* non-nullable */
+        default:      return false;
+    }
+}
+
 static void med_per_group_fn(void* ctx_v, uint32_t worker_id,
                              int64_t start, int64_t end) {
     (void)worker_id;
@@ -1306,10 +1317,10 @@ static void med_per_group_fn(void* ctx_v, uint32_t worker_id,
         int64_t off = c->offsets[g];
         double* slice = c->scratch_pool + off;
         int64_t actual = 0;
-        if (c->has_nulls && c->null_bm) {
+        if (c->has_nulls) {
             for (int64_t i = 0; i < cnt; i++) {
                 int64_t row = c->idx_buf[off + i];
-                if ((c->null_bm[row >> 3] >> (row & 7)) & 1) continue;
+                if (med_is_null(c->base, c->src_type, row)) continue;
                 slice[actual++] = med_read_as_f64(c->base, c->src_type, row);
             }
         } else {
@@ -1356,8 +1367,6 @@ ray_t* ray_median_per_group_buf(ray_t* src,
         .base = ray_data(src),
         .src_type = t,
         .has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0,
-        .null_bm = (src->attrs & RAY_ATTR_HAS_NULLS)
-                   ? ray_vec_nullmap_bytes(src, NULL, NULL) : NULL,
         .idx_buf = idx_buf,
         .offsets = offsets,
         .grp_cnt = grp_cnt,
@@ -1411,7 +1420,6 @@ typedef struct {
     const void*    base;
     int8_t         src_type;
     bool           has_nulls;
-    const uint8_t* null_bm;
     int64_t        k;
     uint8_t        desc;
     const int64_t* idx_buf;
@@ -1519,8 +1527,7 @@ static void topk_per_group_fn(void* ctx_v, uint32_t worker_id,
             for (int64_t i = 0; i < cnt && kept < K; i++) {
                 int64_t row = idxs[i];
                 init_end = i + 1;
-                if (c->has_nulls && c->null_bm &&
-                    ((c->null_bm[row >> 3] >> (row & 7)) & 1)) continue;
+                if (c->has_nulls && med_is_null(c->base, c->src_type, row)) continue;
                 dst[kept++] = topk_read_f64(c->base, row);
             }
             if (kept == K) {
@@ -1528,8 +1535,7 @@ static void topk_per_group_fn(void* ctx_v, uint32_t worker_id,
                     topk_sift_down_dbl(dst, K, j, max_heap);
                 for (int64_t i = init_end; i < cnt; i++) {
                     int64_t row = idxs[i];
-                    if (c->has_nulls && c->null_bm &&
-                        ((c->null_bm[row >> 3] >> (row & 7)) & 1)) continue;
+                    if (c->has_nulls && med_is_null(c->base, c->src_type, row)) continue;
                     double v = topk_read_f64(c->base, row);
                     if (desc ? (v > dst[0]) : (v < dst[0])) {
                         dst[0] = v;
@@ -1564,8 +1570,7 @@ static void topk_per_group_fn(void* ctx_v, uint32_t worker_id,
             for (int64_t i = 0; i < cnt && kept < K; i++) {
                 int64_t row = idxs[i];
                 init_end = i + 1;
-                if (c->has_nulls && c->null_bm &&
-                    ((c->null_bm[row >> 3] >> (row & 7)) & 1)) continue;
+                if (c->has_nulls && med_is_null(c->base, c->src_type, row)) continue;
                 heap[kept++] = topk_read_i64(c->base, t, row);
             }
             if (kept == K) {
@@ -1573,8 +1578,7 @@ static void topk_per_group_fn(void* ctx_v, uint32_t worker_id,
                     topk_sift_down_i64(heap, K, j, max_heap);
                 for (int64_t i = init_end; i < cnt; i++) {
                     int64_t row = idxs[i];
-                    if (c->has_nulls && c->null_bm &&
-                        ((c->null_bm[row >> 3] >> (row & 7)) & 1)) continue;
+                    if (c->has_nulls && med_is_null(c->base, c->src_type, row)) continue;
                     int64_t v = topk_read_i64(c->base, t, row);
                     if (desc ? (v > heap[0]) : (v < heap[0])) {
                         heap[0] = v;
@@ -1641,8 +1645,6 @@ ray_t* ray_topk_per_group_buf(ray_t* src,
         .base = ray_data(src),
         .src_type = t,
         .has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0,
-        .null_bm = (src->attrs & RAY_ATTR_HAS_NULLS)
-                   ? ray_vec_nullmap_bytes(src, NULL, NULL) : NULL,
         .k = k,
         .desc = desc,
         .idx_buf = idx_buf,
@@ -1712,9 +1714,9 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     int8_t in_type = input->type;
     int64_t len = input->len;
 
-    /* Resolve null bitmap once before dispatching.  ray_vec_nullmap_bytes
-     * handles slice / ext / inline / HAS_INDEX uniformly so this works on
-     * vectors that carry an attached accelerator index. */
+    /* Sentinel-based per-element null detection happens inside
+     * REDUCE_LOOP_I/F via the type-correct NULL_* constant; the
+     * has_nulls attribute below is the vec-level fast-path gate. */
     bool has_nulls = (input->attrs & RAY_ATTR_HAS_NULLS) != 0;
 
     /* Selection-aware reduction: when a lazy WHERE filter has installed
@@ -9099,8 +9101,10 @@ typedef struct {
     const void* val_data;
     int8_t      key_type;
     int8_t      val_type;
-    const uint8_t* key_null_bm;
-    const uint8_t* val_null_bm;
+    uint8_t     key_attrs;     /* for SYM width via ray_sym_elem_size */
+    uint8_t     val_attrs;
+    bool        key_has_nulls;
+    bool        val_has_nulls;
     int         val_is_f64;
     /* outputs: per-worker × per-partition scatter buffers */
     grpt_scat_buf_t* bufs;       /* [n_workers * RADIX_P] */
@@ -9142,8 +9146,30 @@ static inline uint64_t grpt_key_hash(int64_t bits, int8_t t) {
     return ray_hash_i64(bits);
 }
 
-static inline bool grpt_is_null(const uint8_t* nbm, int64_t row) {
-    return (nbm[row >> 3] >> (row & 7)) & 1;
+/* Type-correct sentinel null check for the grpt paths.  Uses the same
+ * type dispatch as cdpg_is_null; duplicated locally to keep the helper
+ * inline at hot-loop scope. */
+static inline bool grpt_is_null(const void* base, int8_t t, uint8_t attrs,
+                                int64_t row) {
+    switch (t) {
+        case RAY_F64: { double f; memcpy(&f, (const char*)base + (size_t)row*8, 8); return f != f; }
+        case RAY_F32: { float  f; memcpy(&f, (const char*)base + (size_t)row*4, 4); return f != f; }
+        case RAY_I64: case RAY_TIMESTAMP:
+            return ((const int64_t*)base)[row] == NULL_I64;
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+            return ((const int32_t*)base)[row] == NULL_I32;
+        case RAY_I16:
+            return ((const int16_t*)base)[row] == NULL_I16;
+        case RAY_SYM:
+            switch (ray_sym_elem_size(t, attrs)) {
+                case 1:  return ((const uint8_t*) base)[row] == 0;
+                case 2:  return ((const uint16_t*)base)[row] == 0;
+                case 4:  return ((const uint32_t*)base)[row] == 0;
+                default: return ((const int64_t*) base)[row] == 0;
+            }
+        default:  /* BOOL/U8 non-nullable */
+            return false;
+    }
 }
 
 static inline int64_t grpt_val_read(const void* base, int8_t t, int64_t row,
@@ -9193,13 +9219,15 @@ static void grpt_phase1_fn(void* ctx_v, uint32_t worker_id,
     int val_is_f64 = c->val_is_f64;
     const void* kbase = c->key_data;
     const void* vbase = c->val_data;
-    const uint8_t* knbm = c->key_null_bm;
-    const uint8_t* vnbm = c->val_null_bm;
+    uint8_t kattrs = c->key_attrs;
+    uint8_t vattrs = c->val_attrs;
+    bool knulls = c->key_has_nulls;
+    bool vnulls = c->val_has_nulls;
 
     for (int64_t r = start; r < end; r++) {
         /* Skip null value rows (match standalone `top` and DuckDB WHERE
          * v IS NOT NULL). */
-        if (vnbm && grpt_is_null(vnbm, r)) continue;
+        if (vnulls && grpt_is_null(vbase, vt, vattrs, r)) continue;
         /* Skip null keys too: matches the OP_TOP_N path's effective
          * behaviour and DuckDB's groupby semantics where NULL keys form
          * a discarded group (we mirror DuckDB which drops null-key rows
@@ -9207,7 +9235,7 @@ static void grpt_phase1_fn(void* ctx_v, uint32_t worker_id,
          * correctness impact on the bench path; small-data fixtures with
          * null id6 are routed away by the type-restriction in the
          * planner (no SYM keys). */
-        if (knbm && grpt_is_null(knbm, r)) continue;
+        if (knulls && grpt_is_null(kbase, kt, kattrs, r)) continue;
         int64_t key_bits = grpt_key_read(kbase, kt, r);
         uint64_t h = grpt_key_hash(key_bits, kt);
         int64_t val_bits = grpt_val_read(vbase, vt, r, val_is_f64);
@@ -9511,10 +9539,10 @@ ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op) {
         .val_data = ray_data(val_vec),
         .key_type = kt,
         .val_type = vt,
-        .key_null_bm = (key_vec->attrs & RAY_ATTR_HAS_NULLS)
-                       ? ray_vec_nullmap_bytes(key_vec, NULL, NULL) : NULL,
-        .val_null_bm = (val_vec->attrs & RAY_ATTR_HAS_NULLS)
-                       ? ray_vec_nullmap_bytes(val_vec, NULL, NULL) : NULL,
+        .key_attrs = key_vec->attrs,
+        .val_attrs = val_vec->attrs,
+        .key_has_nulls = (key_vec->attrs & RAY_ATTR_HAS_NULLS) != 0,
+        .val_has_nulls = (val_vec->attrs & RAY_ATTR_HAS_NULLS) != 0,
         .val_is_f64 = (vt == RAY_F64) ? 1 : 0,
         .bufs = bufs,
         .n_workers = n_workers,
@@ -9827,10 +9855,10 @@ typedef struct {
     int8_t      y_type;
     uint8_t     k0_attrs;
     uint8_t     k1_attrs;
-    const uint8_t* k0_null_bm;
-    const uint8_t* k1_null_bm;
-    const uint8_t* x_null_bm;
-    const uint8_t* y_null_bm;
+    bool        k0_has_nulls;
+    bool        k1_has_nulls;
+    bool        x_has_nulls;
+    bool        y_has_nulls;
     uint8_t     n_keys;
     uint8_t     x_is_f64;
     uint8_t     y_is_f64;
@@ -9838,8 +9866,28 @@ typedef struct {
     uint32_t    n_workers;
 } grpc_phase1_ctx_t;
 
-static inline bool grpc_is_null(const uint8_t* nbm, int64_t row) {
-    return (nbm[row >> 3] >> (row & 7)) & 1;
+/* Type-correct sentinel null check for grpc paths.  Identical shape to
+ * grpt_is_null; duplicated here to keep the hot loop inline-local. */
+static inline bool grpc_is_null(const void* base, int8_t t, uint8_t attrs,
+                                int64_t row) {
+    switch (t) {
+        case RAY_F64: { double f; memcpy(&f, (const char*)base + (size_t)row*8, 8); return f != f; }
+        case RAY_F32: { float  f; memcpy(&f, (const char*)base + (size_t)row*4, 4); return f != f; }
+        case RAY_I64: case RAY_TIMESTAMP:
+            return ((const int64_t*)base)[row] == NULL_I64;
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+            return ((const int32_t*)base)[row] == NULL_I32;
+        case RAY_I16:
+            return ((const int16_t*)base)[row] == NULL_I16;
+        case RAY_SYM:
+            switch (ray_sym_elem_size(t, attrs)) {
+                case 1:  return ((const uint8_t*) base)[row] == 0;
+                case 2:  return ((const uint16_t*)base)[row] == 0;
+                case 4:  return ((const uint32_t*)base)[row] == 0;
+                default: return ((const int64_t*) base)[row] == 0;
+            }
+        default: return false;
+    }
 }
 
 static inline double grpc_val_read_dbl(const void* base, int8_t t, int64_t row,
@@ -9879,11 +9927,11 @@ static void grpc_phase1_fn(void* ctx_v, uint32_t worker_id,
     grpc_scat_buf_t* my_bufs = &c->bufs[(size_t)worker_id * RADIX_P];
 
     for (int64_t r = start; r < end; r++) {
-        if (c->x_null_bm && grpc_is_null(c->x_null_bm, r)) continue;
-        if (c->y_null_bm && grpc_is_null(c->y_null_bm, r)) continue;
-        if (c->k0_null_bm && grpc_is_null(c->k0_null_bm, r)) continue;
-        if (c->n_keys == 2 && c->k1_null_bm && grpc_is_null(c->k1_null_bm, r))
-            continue;
+        if (c->x_has_nulls  && grpc_is_null(c->x_data,  c->x_type,  0,             r)) continue;
+        if (c->y_has_nulls  && grpc_is_null(c->y_data,  c->y_type,  0,             r)) continue;
+        if (c->k0_has_nulls && grpc_is_null(c->k0_data, c->k0_type, c->k0_attrs,   r)) continue;
+        if (c->n_keys == 2 && c->k1_has_nulls &&
+            grpc_is_null(c->k1_data, c->k1_type, c->k1_attrs, r)) continue;
         int64_t k0 = read_col_i64(c->k0_data, r, c->k0_type, c->k0_attrs);
         int64_t k1 = 0;
         uint64_t h = ray_hash_i64(k0);
@@ -10073,14 +10121,10 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
         .y_type     = yt,
         .k0_attrs   = k_attrs[0],
         .k1_attrs   = k_attrs[1],
-        .k0_null_bm = (k_vecs[0]->attrs & RAY_ATTR_HAS_NULLS)
-                      ? ray_vec_nullmap_bytes(k_vecs[0], NULL, NULL) : NULL,
-        .k1_null_bm = (ext->n_keys == 2 && (k_vecs[1]->attrs & RAY_ATTR_HAS_NULLS))
-                      ? ray_vec_nullmap_bytes(k_vecs[1], NULL, NULL) : NULL,
-        .x_null_bm  = (x_vec->attrs & RAY_ATTR_HAS_NULLS)
-                      ? ray_vec_nullmap_bytes(x_vec, NULL, NULL) : NULL,
-        .y_null_bm  = (y_vec->attrs & RAY_ATTR_HAS_NULLS)
-                      ? ray_vec_nullmap_bytes(y_vec, NULL, NULL) : NULL,
+        .k0_has_nulls = (k_vecs[0]->attrs & RAY_ATTR_HAS_NULLS) != 0,
+        .k1_has_nulls = (ext->n_keys == 2 && (k_vecs[1]->attrs & RAY_ATTR_HAS_NULLS)) != 0,
+        .x_has_nulls  = (x_vec->attrs & RAY_ATTR_HAS_NULLS) != 0,
+        .y_has_nulls  = (y_vec->attrs & RAY_ATTR_HAS_NULLS) != 0,
         .n_keys     = ext->n_keys,
         .x_is_f64   = (xt == RAY_F64) ? 1 : 0,
         .y_is_f64   = (yt == RAY_F64) ? 1 : 0,
@@ -10372,9 +10416,9 @@ typedef struct {
     int8_t      x_type;
     int8_t      y_type;
     uint8_t     k_attrs;
-    const uint8_t* k_null_bm;
-    const uint8_t* x_null_bm;
-    const uint8_t* y_null_bm;
+    bool        k_has_nulls;
+    bool        x_has_nulls;
+    bool        y_has_nulls;
     grpmm_scat_buf_t* bufs;
     uint32_t    n_workers;
 } grpmm_phase1_ctx_t;
@@ -10404,9 +10448,9 @@ static void grpmm_phase1_fn(void* ctx_v, uint32_t worker_id,
     grpmm_scat_buf_t* my_bufs = &c->bufs[(size_t)worker_id * RADIX_P];
 
     for (int64_t r = start; r < end; r++) {
-        if (c->x_null_bm && (c->x_null_bm[r >> 3] >> (r & 7)) & 1) continue;
-        if (c->y_null_bm && (c->y_null_bm[r >> 3] >> (r & 7)) & 1) continue;
-        if (c->k_null_bm && (c->k_null_bm[r >> 3] >> (r & 7)) & 1) continue;
+        if (c->x_has_nulls && grpc_is_null(c->x_data, c->x_type, 0, r)) continue;
+        if (c->y_has_nulls && grpc_is_null(c->y_data, c->y_type, 0, r)) continue;
+        if (c->k_has_nulls && grpc_is_null(c->k_data, c->k_type, c->k_attrs, r)) continue;
         int64_t k = read_col_i64(c->k_data, r, c->k_type, c->k_attrs);
         int64_t x = read_col_i64(c->x_data, r, c->x_type, 0);
         int64_t y = read_col_i64(c->y_data, r, c->y_type, 0);
@@ -10550,12 +10594,9 @@ ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op) {
         .y_data = ray_data(y_vec),
         .k_type = kt, .x_type = xt, .y_type = yt,
         .k_attrs = k_vec->attrs,
-        .k_null_bm = (k_vec->attrs & RAY_ATTR_HAS_NULLS)
-                     ? ray_vec_nullmap_bytes(k_vec, NULL, NULL) : NULL,
-        .x_null_bm = (x_vec->attrs & RAY_ATTR_HAS_NULLS)
-                     ? ray_vec_nullmap_bytes(x_vec, NULL, NULL) : NULL,
-        .y_null_bm = (y_vec->attrs & RAY_ATTR_HAS_NULLS)
-                     ? ray_vec_nullmap_bytes(y_vec, NULL, NULL) : NULL,
+        .k_has_nulls = (k_vec->attrs & RAY_ATTR_HAS_NULLS) != 0,
+        .x_has_nulls = (x_vec->attrs & RAY_ATTR_HAS_NULLS) != 0,
+        .y_has_nulls = (y_vec->attrs & RAY_ATTR_HAS_NULLS) != 0,
         .bufs = bufs,
         .n_workers = n_workers,
     };
