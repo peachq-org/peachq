@@ -48,16 +48,22 @@ static void reduce_acc_init(reduce_acc_t* acc) {
 /* Integer reduction loop — reads native type T, accumulates as i64.
  * HAS_NULLS and HAS_IDX must be integer literal constants (0 or 1) so the
  * compiler dead-code-eliminates the corresponding branches in every
- * specialisation.  reduce_range dispatches to the right combination before
- * calling this macro so the hot path (no nulls, no idx) contains zero
- * per-element runtime branches. */
-#define REDUCE_LOOP_I(T, base, start, end, acc, HAS_NULLS, null_bm, HAS_IDX, idx) \
+ * specialisation.  reduce_range dispatches to the right combination
+ * before calling this macro so the hot path (no nulls, no idx) contains
+ * zero per-element runtime branches.
+ *
+ * NULL_SENT is the type-correct NULL_* sentinel value for T (NULL_I16,
+ * NULL_I32, NULL_I64).  For BOOL/U8 the sentinel slot is unused
+ * (those types are non-nullable per Phase 1; dispatcher pins
+ * HAS_NULLS=0) so any value works; we pass 0 for compileability. */
+#define REDUCE_LOOP_I(T, NULL_SENT, base, start, end, acc, HAS_NULLS, HAS_IDX, idx) \
     do { \
         const T* d = (const T*)(base); \
         for (int64_t i = start; i < end; i++) { \
             int64_t row = (HAS_IDX) ? (idx)[i] : i; \
-            if ((HAS_NULLS) && (null_bm[row/8] >> (row%8)) & 1) { (acc)->null_count++; continue; } \
-            int64_t v = (int64_t)d[row]; \
+            T raw = d[row]; \
+            if ((HAS_NULLS) && raw == (T)(NULL_SENT)) { (acc)->null_count++; continue; } \
+            int64_t v = (int64_t)raw; \
             /* sum/sum_sq may overflow on signed arithmetic — use defined \
              * unsigned wrap (same semantic, no UBSan whine). */ \
             (acc)->sum_i    = (int64_t)((uint64_t)(acc)->sum_i    + (uint64_t)v); \
@@ -70,14 +76,15 @@ static void reduce_acc_init(reduce_acc_t* acc) {
         } \
     } while (0)
 
-/* Float reduction loop — see REDUCE_LOOP_I for HAS_NULLS/HAS_IDX semantics. */
-#define REDUCE_LOOP_F(base, start, end, acc, HAS_NULLS, null_bm, HAS_IDX, idx) \
+/* Float reduction loop — see REDUCE_LOOP_I for HAS_NULLS/HAS_IDX semantics.
+ * F64 null = NaN (NULL_F64); detect via v != v (only NaN fails self-equality). */
+#define REDUCE_LOOP_F(base, start, end, acc, HAS_NULLS, HAS_IDX, idx) \
     do { \
         const double* d = (const double*)(base); \
         for (int64_t i = start; i < end; i++) { \
             int64_t row = (HAS_IDX) ? (idx)[i] : i; \
-            if ((HAS_NULLS) && (null_bm[row/8] >> (row%8)) & 1) { (acc)->null_count++; continue; } \
             double v = d[row]; \
+            if ((HAS_NULLS) && v != v) { (acc)->null_count++; continue; } \
             (acc)->sum_f += v; (acc)->sum_sq_f += v * v; (acc)->prod_f *= v; \
             if (v < (acc)->min_f) (acc)->min_f = v; \
             if (v > (acc)->max_f) (acc)->max_f = v; \
@@ -89,48 +96,68 @@ static void reduce_acc_init(reduce_acc_t* acc) {
 /* Dispatch helper: expand REDUCE_LOOP_I/F with compile-time 0/1 constants for
  * HAS_NULLS and HAS_IDX based on the runtime pointers so the compiler can
  * dead-code-eliminate the branches inside each specialisation. */
-#define DISPATCH_I(T, base, start, end, acc, has_nulls, null_bm, idx) \
+#define DISPATCH_I(T, NULL_SENT, base, start, end, acc, has_nulls, idx) \
     do { \
         if (!(has_nulls) && !(idx)) \
-            REDUCE_LOOP_I(T, base, start, end, acc, 0, null_bm, 0, idx); \
+            REDUCE_LOOP_I(T, NULL_SENT, base, start, end, acc, 0, 0, idx); \
         else if (!(has_nulls)) \
-            REDUCE_LOOP_I(T, base, start, end, acc, 0, null_bm, 1, idx); \
+            REDUCE_LOOP_I(T, NULL_SENT, base, start, end, acc, 0, 1, idx); \
         else if (!(idx)) \
-            REDUCE_LOOP_I(T, base, start, end, acc, 1, null_bm, 0, idx); \
+            REDUCE_LOOP_I(T, NULL_SENT, base, start, end, acc, 1, 0, idx); \
         else \
-            REDUCE_LOOP_I(T, base, start, end, acc, 1, null_bm, 1, idx); \
+            REDUCE_LOOP_I(T, NULL_SENT, base, start, end, acc, 1, 1, idx); \
     } while (0)
 
-#define DISPATCH_F(base, start, end, acc, has_nulls, null_bm, idx) \
+#define DISPATCH_F(base, start, end, acc, has_nulls, idx) \
     do { \
         if (!(has_nulls) && !(idx)) \
-            REDUCE_LOOP_F(base, start, end, acc, 0, null_bm, 0, idx); \
+            REDUCE_LOOP_F(base, start, end, acc, 0, 0, idx); \
         else if (!(has_nulls)) \
-            REDUCE_LOOP_F(base, start, end, acc, 0, null_bm, 1, idx); \
+            REDUCE_LOOP_F(base, start, end, acc, 0, 1, idx); \
         else if (!(idx)) \
-            REDUCE_LOOP_F(base, start, end, acc, 1, null_bm, 0, idx); \
+            REDUCE_LOOP_F(base, start, end, acc, 1, 0, idx); \
         else \
-            REDUCE_LOOP_F(base, start, end, acc, 1, null_bm, 1, idx); \
+            REDUCE_LOOP_F(base, start, end, acc, 1, 1, idx); \
     } while (0)
 
 static void reduce_range(ray_t* input, int64_t start, int64_t end,
                          reduce_acc_t* acc, bool has_nulls,
-                         const uint8_t* null_bm, const int64_t* idx) {
+                         const int64_t* idx) {
     void* base = ray_data(input);
     switch (input->type) {
-    case RAY_BOOL: case RAY_U8:
-        DISPATCH_I(uint8_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+    case RAY_BOOL: case RAY_U8: {
+        /* No sentinel for BOOL/U8 (Phase 1 lockdown deferred); use
+         * ray_vec_is_null which falls back to the legacy bitmap path
+         * for these types.  Cold path — most BOOL/U8 reductions have
+         * has_nulls=false and skip the per-element check. */
+        const uint8_t* d = (const uint8_t*)base;
+        for (int64_t i = start; i < end; i++) {
+            int64_t row = idx ? idx[i] : i;
+            if (has_nulls && ray_vec_is_null(input, row)) { acc->null_count++; continue; }
+            int64_t v = (int64_t)d[row];
+            acc->sum_i    = (int64_t)((uint64_t)acc->sum_i    + (uint64_t)v);
+            acc->sum_sq_i = (int64_t)((uint64_t)acc->sum_sq_i + (uint64_t)v * (uint64_t)v);
+            acc->prod_i   = (int64_t)((uint64_t)acc->prod_i   * (uint64_t)v);
+            if (v < acc->min_i) acc->min_i = v;
+            if (v > acc->max_i) acc->max_i = v;
+            if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
+            acc->last_i = v; acc->cnt++;
+        }
+        break;
+    }
     case RAY_I16:
-        DISPATCH_I(int16_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_I(int16_t, NULL_I16, base, start, end, acc, has_nulls, idx); break;
     case RAY_I32: case RAY_DATE: case RAY_TIME:
-        DISPATCH_I(int32_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_I(int32_t, NULL_I32, base, start, end, acc, has_nulls, idx); break;
     case RAY_I64: case RAY_TIMESTAMP:
-        DISPATCH_I(int64_t, base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_I(int64_t, NULL_I64, base, start, end, acc, has_nulls, idx); break;
     case RAY_F64:
-        DISPATCH_F(base, start, end, acc, has_nulls, null_bm, idx); break;
+        DISPATCH_F(base, start, end, acc, has_nulls, idx); break;
     case RAY_SYM: {
-        /* Adaptive-width SYM columns — use read_col_i64.  Same 4-way dispatch
-         * to eliminate the per-element null/idx branches. */
+        /* Adaptive-width SYM columns — read_col_i64 produces the i64
+         * sym id; id 0 is the canonical null sym (interned empty string
+         * reserved at ray_sym_init).  Same 4-way dispatch to eliminate
+         * the per-element null/idx branches. */
         if (!has_nulls && !idx) {
             for (int64_t i = start; i < end; i++) {
                 int64_t v = read_col_i64(base, i, input->type, input->attrs);
@@ -154,8 +181,8 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
             }
         } else if (!idx) {
             for (int64_t i = start; i < end; i++) {
-                if ((null_bm[i/8] >> (i%8)) & 1) { acc->null_count++; continue; }
                 int64_t v = read_col_i64(base, i, input->type, input->attrs);
+                if (v == 0) { acc->null_count++; continue; }
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
                 if (v < acc->min_i) acc->min_i = v;
@@ -166,8 +193,8 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
         } else {
             for (int64_t i = start; i < end; i++) {
                 int64_t row = idx[i];
-                if ((null_bm[row/8] >> (row%8)) & 1) { acc->null_count++; continue; }
                 int64_t v = read_col_i64(base, row, input->type, input->attrs);
+                if (v == 0) { acc->null_count++; continue; }
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
                 if (v < acc->min_i) acc->min_i = v;
@@ -187,14 +214,13 @@ typedef struct {
     ray_t*         input;
     reduce_acc_t*  accs;   /* one per worker */
     bool           has_nulls;
-    const uint8_t* null_bm;
     const int64_t* idx;    /* NULL = no selection; else int64[total_pass] */
 } par_reduce_ctx_t;
 
 static void par_reduce_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
     par_reduce_ctx_t* c = (par_reduce_ctx_t*)ctx;
     reduce_range(c->input, start, end, &c->accs[worker_id],
-                 c->has_nulls, c->null_bm, c->idx);
+                 c->has_nulls, c->idx);
 }
 
 static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_type) {
@@ -743,7 +769,6 @@ typedef struct {
     int64_t         n_rows;
     int64_t         n_groups;
     bool            has_nulls;
-    const uint8_t*  null_bm;
     uint64_t        p_mask;          /* P - 1, P = number of partitions */
     /* Pass 1 outputs / pass 2 inputs.  Per-task counters: each worker
      * writes to its own slice of hist[task_id * P] / cursor[task_id * P]
@@ -765,6 +790,32 @@ typedef struct {
     /* Pass 3 outputs */
     int64_t*        odata;           /* n_groups, atomic per-group distinct count */
 } cdpg_ctx_t;
+
+/* Type-correct null check for the column row r.  Mirrors sentinel_is_null
+ * but specialised for cdpg's pre-resolved (base, in_type, esz) ctx so the
+ * hot loop avoids the ray_t pointer indirection. */
+static inline bool cdpg_is_null(const void* base, int64_t r,
+                                int8_t in_type, uint8_t esz) {
+    switch (in_type) {
+        case RAY_F64: { double f = ((const double*)base)[r]; return f != f; }
+        case RAY_F32: { float  f = ((const float*) base)[r]; return f != f; }
+        case RAY_I64: case RAY_TIMESTAMP:
+            return ((const int64_t*)base)[r] == NULL_I64;
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+            return ((const int32_t*)base)[r] == NULL_I32;
+        case RAY_I16:
+            return ((const int16_t*)base)[r] == NULL_I16;
+        case RAY_SYM:
+            switch (esz) {
+                case 1:  return ((const uint8_t*) base)[r] == 0;
+                case 2:  return ((const uint16_t*)base)[r] == 0;
+                case 4:  return ((const uint32_t*)base)[r] == 0;
+                default: return ((const int64_t*) base)[r] == 0;
+            }
+        default:  /* BOOL / U8 — non-nullable */
+            return false;
+    }
+}
 
 /* Read column row r as int64.  Width-typed fast path; F64 bitcasts. */
 static inline int64_t cdpg_read(const void* base, int64_t r,
@@ -799,8 +850,7 @@ static void cdpg_hist_fn(void* ctx_, uint32_t worker_id,
     for (int64_t r = start; r < end; r++) {
         int64_t gid = x->row_gid[r];
         if (gid < 0 || gid >= x->n_groups) continue;
-        if (x->has_nulls && x->null_bm &&
-            ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
+        if (x->has_nulls && cdpg_is_null(x->base, r, x->in_type, esz)) continue;
         /* Partition by gid (not gid×val) so the dedup pass can write to
          * odata[gid] without atomics. */
         uint64_t h = CDPG_PART_HASH(gid + 1);
@@ -823,8 +873,7 @@ static void cdpg_scat_fn(void* ctx_, uint32_t worker_id,
     for (int64_t r = start; r < end; r++) {
         int64_t gid = x->row_gid[r];
         if (gid < 0 || gid >= x->n_groups) continue;
-        if (x->has_nulls && x->null_bm &&
-            ((x->null_bm[r/8] >> (r%8)) & 1)) continue;
+        if (x->has_nulls && cdpg_is_null(x->base, r, x->in_type, esz)) continue;
         int64_t val = cdpg_read(x->base, r, x->in_type, esz);
         int64_t gid_p1 = gid + 1;
         uint64_t h = CDPG_PART_HASH(gid_p1);
@@ -919,12 +968,9 @@ static ray_t* count_distinct_per_group_parallel(
         .n_rows = n_rows,
         .n_groups = n_groups,
         .has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0,
-        .null_bm = NULL,
         .p_mask = p_mask,
         .odata = (int64_t*)ray_data(out),
     };
-    if (ctx.has_nulls)
-        ctx.null_bm = ray_vec_nullmap_bytes(src, NULL, NULL);
 
     if (P > 256) return NULL;
 
@@ -1670,7 +1716,6 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
      * handles slice / ext / inline / HAS_INDEX uniformly so this works on
      * vectors that carry an attached accelerator index. */
     bool has_nulls = (input->attrs & RAY_ATTR_HAS_NULLS) != 0;
-    const uint8_t* null_bm = ray_vec_nullmap_bytes(input, NULL, NULL);
 
     /* Selection-aware reduction: when a lazy WHERE filter has installed
      * g->selection on the graph and the column we're reducing matches
@@ -1710,12 +1755,12 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         if (op->opcode == OP_FIRST) {
             for (int64_t i = 0; i < scan_n; i++) {
                 int64_t r = sel_idx ? sel_idx[i] : i;
-                if (!has_nulls || !((null_bm[r/8] >> (r%8)) & 1)) { row = r; break; }
+                if (!has_nulls || !ray_vec_is_null(input, r)) { row = r; break; }
             }
         } else {
             for (int64_t i = scan_n - 1; i >= 0; i--) {
                 int64_t r = sel_idx ? sel_idx[i] : i;
-                if (!has_nulls || !((null_bm[r/8] >> (r%8)) & 1)) { row = r; break; }
+                if (!has_nulls || !ray_vec_is_null(input, r)) { row = r; break; }
             }
         }
         if (sel_idx_block) ray_release(sel_idx_block);
@@ -1735,8 +1780,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         for (uint32_t i = 0; i < nw; i++) reduce_acc_init(&accs[i]);
 
         par_reduce_ctx_t ctx = { .input = input, .accs = accs,
-                                 .has_nulls = has_nulls, .null_bm = null_bm,
-                                 .idx = sel_idx };
+                                 .has_nulls = has_nulls, .idx = sel_idx };
         ray_pool_dispatch(pool, par_reduce_fn, &ctx, scan_n);
 
         /* Merge: worker 0 is the base, merge the rest in order */
@@ -1800,7 +1844,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
     reduce_acc_t acc;
     reduce_acc_init(&acc);
-    reduce_range(input, 0, scan_n, &acc, has_nulls, null_bm, sel_idx);
+    reduce_range(input, 0, scan_n, &acc, has_nulls, sel_idx);
     if (sel_idx_block) ray_release(sel_idx_block);
 
     switch (op->opcode) {
