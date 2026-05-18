@@ -1070,9 +1070,40 @@ ray_t* exec_node(ray_graph_t* g, ray_op_t* op);
  * Thread-safe null bitmap helpers (parallel group/window)
  * ══════════════════════════════════════════ */
 
-/* Atomically set a null bit. For idx >= 128 without ext nullmap, falls back
- * to ray_vec_set_null (lazy alloc). Safe because OOM forces sequential path. */
+/* Atomically set a null bit AND write the type-correct sentinel into the
+ * payload slot.  For idx >= 128 without ext nullmap, falls back to
+ * ray_vec_set_null (lazy alloc — safe because OOM forces sequential path).
+ *
+ * Payload write needs no synchronisation: different threads call this with
+ * different idx, so each per-slot store is uncontended.  Bitmap bit set is
+ * atomic because multiple slots can share a byte. */
 static inline void par_set_null(ray_t* vec, int64_t idx) {
+    /* Sentinel-write side of the dual-encoding contract.  Window/group
+     * parallel kernels overwrote the payload with 0 / 0.0 before calling
+     * par_set_null; this stamp restores the type-correct sentinel so
+     * sentinel-based readers see the null.  STR/SYM/BOOL/U8 use their
+     * own null conventions (or are non-nullable) — no payload stamp here. */
+    void* p = ray_data(vec);
+    switch (vec->type) {
+        case RAY_F64:
+            ((double*)p)[idx] = NULL_F64;
+            break;
+        case RAY_I64:
+        case RAY_TIMESTAMP:
+            ((int64_t*)p)[idx] = NULL_I64;
+            break;
+        case RAY_I32:
+        case RAY_DATE:
+        case RAY_TIME:
+            ((int32_t*)p)[idx] = NULL_I32;
+            break;
+        case RAY_I16:
+            ((int16_t*)p)[idx] = NULL_I16;
+            break;
+        default:
+            break;
+    }
+
     if (!(vec->attrs & RAY_ATTR_NULLMAP_EXT)) {
         if (idx >= 128) {
             ray_vec_set_null(vec, idx, true);
