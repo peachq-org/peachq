@@ -1342,6 +1342,44 @@ ray_t* ray_embedding_new(int64_t nrows, int32_t dim) {
     return v;
 }
 
+#ifdef RAYFORCE_NULL_AUDIT
+/* Sentinel-migration finish: instrumented build mode.  When RAYFORCE_NULL_AUDIT
+ * is defined, ray_vec_is_null cross-checks the bitmap answer against the
+ * sentinel answer (sentinel_is_null) and logs the first divergence per
+ * unique call site to stderr.  Production behavior is unchanged: the
+ * bitmap answer is still returned; the audit is observation only. */
+#include <execinfo.h>
+#include <pthread.h>
+#include <stdio.h>
+
+static pthread_mutex_t null_audit_lock = PTHREAD_MUTEX_INITIALIZER;
+static void* null_audit_seen_callers[128];
+static int null_audit_seen_count = 0;
+
+static void null_audit_report(const ray_t* vec, int64_t idx,
+                              bool bitmap_says, bool sentinel_says,
+                              void* caller) {
+    pthread_mutex_lock(&null_audit_lock);
+    for (int i = 0; i < null_audit_seen_count; i++) {
+        if (null_audit_seen_callers[i] == caller) {
+            pthread_mutex_unlock(&null_audit_lock);
+            return;
+        }
+    }
+    if (null_audit_seen_count < 128)
+        null_audit_seen_callers[null_audit_seen_count++] = caller;
+    fprintf(stderr,
+            "NULL_AUDIT divergence: type=%d idx=%lld bitmap=%d sentinel=%d caller=%p\n",
+            (int)vec->type, (long long)idx,
+            (int)bitmap_says, (int)sentinel_says, caller);
+    void* bt[24];
+    int n = backtrace(bt, 24);
+    backtrace_symbols_fd(bt, n, 2);
+    fputs("---\n", stderr);
+    pthread_mutex_unlock(&null_audit_lock);
+}
+#endif
+
 bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     if (!vec || RAY_IS_ERR(vec)) return false;
     if (idx < 0 || idx >= vec->len) return false;
@@ -1361,25 +1399,37 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
 
     if (!vec_any_nulls(vec)) return false;
 
+    bool bitmap_says;
     ray_t* ext = NULL;
     const uint8_t* inline_bits = vec_inline_nullmap(vec, &ext);
     if (ext) {
         int64_t byte_idx = idx / 8;
-        if (byte_idx >= ext->len) return false;
-        const uint8_t* bits = (const uint8_t*)ray_data(ext);
-        return (bits[byte_idx] >> (idx % 8)) & 1;
+        if (byte_idx >= ext->len) bitmap_says = false;
+        else {
+            const uint8_t* bits = (const uint8_t*)ray_data(ext);
+            bitmap_says = ((bits[byte_idx] >> (idx % 8)) & 1) != 0;
+        }
+    } else if (vec->type == RAY_STR) {
+        /* RAY_STR's inline 16 bytes hold str_pool/str_ext_null pointers,
+         * not bit storage — STR with HAS_NULLS must always have NULLMAP_EXT.
+         * Reaching here with HAS_NULLS set but no ext means no nulls. */
+        bitmap_says = false;
+    } else if (idx >= 128) {
+        bitmap_says = false;
+    } else {
+        int byte_idx = (int)(idx / 8);
+        int bit_idx = (int)(idx % 8);
+        bitmap_says = ((inline_bits[byte_idx] >> bit_idx) & 1) != 0;
     }
 
-    /* Inline nullmap path.  RAY_STR's inline 16 bytes hold str_pool/str_ext_null
-     * (or, when an index is attached, were the same and are now in the index
-     * snapshot).  Either way, RAY_STR uses ext nullmap exclusively for its
-     * null bits, which is handled above; if the inline path is taken for
-     * RAY_STR, no nulls are present. */
-    if (vec->type == RAY_STR) return false;
-    if (idx >= 128) return false;
-    int byte_idx = (int)(idx / 8);
-    int bit_idx = (int)(idx % 8);
-    return (inline_bits[byte_idx] >> bit_idx) & 1;
+#ifdef RAYFORCE_NULL_AUDIT
+    bool sentinel_says = sentinel_is_null(vec, idx);
+    if (bitmap_says != sentinel_says)
+        null_audit_report(vec, idx, bitmap_says, sentinel_says,
+                          __builtin_return_address(0));
+#endif
+
+    return bitmap_says;
 }
 
 /* --------------------------------------------------------------------------
