@@ -349,9 +349,44 @@ ray_t* ray_typed_null(int8_t type);
 #define NULL_I64  ((int64_t)INT64_MIN)
 #define NULL_F64  (__builtin_nan(""))
 
-/* Null bitmap check for atoms — bit 0 of nullmap[0] marks typed nulls.
- * Also matches RAY_NULL_OBJ (the untyped null singleton). */
-#define RAY_ATOM_IS_NULL(x) (RAY_IS_NULL(x) || ((x)->type < 0 && ((x)->nullmap[0] & 1)))
+/* Atom null check.  RAY_NULL_OBJ is the untyped null singleton.
+ * Typed atoms with a defined NULL_* sentinel use payload-compare;
+ * types without a sentinel (BOOL/U8/F32) fall back to the
+ * nullmap[0]&1 bit that ray_typed_null still writes. */
+static inline bool ray_atom_is_null_fn(const union ray_t* x) {
+    if (RAY_IS_NULL(x)) return true;
+    if (x->type >= 0) return false;
+    switch (-x->type) {
+        case RAY_F64:       return x->f64 != x->f64;
+        case RAY_I64:
+        case RAY_TIMESTAMP: return x->i64 == NULL_I64;
+        case RAY_I32:
+        case RAY_DATE:
+        case RAY_TIME:      return x->i32 == NULL_I32;
+        case RAY_I16:       return x->i16 == NULL_I16;
+        case RAY_SYM:       return x->i64 == 0;
+        case RAY_STR:
+            /* STR atom null = empty string.  Atoms use SSO (slen + sdata)
+             * for len<=7 and a pool pointer (obj) for longer strings; the
+             * union overlap means a non-zero obj pointer has a low byte
+             * that ALSO reads as slen via the SSO arm.  Only when slen==0
+             * AND obj==NULL is the atom genuinely the empty string (see
+             * is_sso in src/vec/str.c). */
+            return x->slen == 0 && x->obj == NULL;
+        case RAY_GUID: {
+            /* GUID null = 16 all-zero bytes in obj's U8 buffer.
+             * obj is always populated by ray_guid / ray_typed_null —
+             * a NULL obj indicates corruption; treat as null
+             * defensively. */
+            if (!x->obj) return true;
+            const uint8_t* b = (const uint8_t*)((char*)x->obj + sizeof(union ray_t));
+            for (int i = 0; i < 16; i++) if (b[i]) return false;
+            return true;
+        }
+        default:            return (x->nullmap[0] & 1) != 0;
+    }
+}
+#define RAY_ATOM_IS_NULL(x) ray_atom_is_null_fn(x)
 
 /* ===== Vector API ===== */
 
