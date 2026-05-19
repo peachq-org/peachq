@@ -1171,6 +1171,17 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
          * Balanced tree (rather than left-fold) keeps the canonical
          * shape symmetric and minimises dependency-chain depth, which
          * future OoO / parallel-instruction executors can exploit. */
+        /* (and X) / (or X) — single conjunct = identity.  Matches the
+         * eval-level monoid identity rule in ray_and_vary_fn /
+         * ray_or_vary_fn; without it, `where: (and X)` would fall
+         * through to compile_expr_dag returning NULL → domain error. */
+        if (n == 2) {
+            bool is_and1 = (fname_len == 3 && memcmp(fname, "and", 3) == 0);
+            bool is_or1  = (fname_len == 2 && memcmp(fname, "or",  2) == 0);
+            if (is_and1 || is_or1) {
+                return compile_expr_dag(g, elems[1]);
+            }
+        }
         if (n >= 4) {
             bool is_and = (fname_len == 3 && memcmp(fname, "and", 3) == 0);
             bool is_or  = (fname_len == 2 && memcmp(fname, "or",  2) == 0);
