@@ -2003,6 +2003,21 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
             if (result) ray_release(result);
             return cell ? cell : ray_error("domain", NULL);
         }
+        /* Materialise lazy cells before storing.  Per-group projection
+         * eval can return a RAY_LAZY (e.g. (reverse v) returns a fresh
+         * lazy chain).  Lazy values stored as-is in a LIST get their
+         * graph stolen by the first ray_lazy_materialize via fmt_obj,
+         * leaving subsequent reads with a half-dead lazy whose execute
+         * fails with "nyi".  Eager materialisation here keeps each cell
+         * concrete and re-readable. */
+        if (ray_is_lazy(cell)) {
+            cell = ray_lazy_materialize(cell);
+            if (!cell || RAY_IS_ERR(cell)) {
+                ray_env_pop_scope();
+                if (result) ray_release(result);
+                return cell ? cell : ray_error("domain", NULL);
+            }
+        }
 
         if (gi == 0) {
             int8_t t = cell->type;
