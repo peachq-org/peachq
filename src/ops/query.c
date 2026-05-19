@@ -313,7 +313,7 @@ static uint16_t resolve_agg_opcode(int64_t sym_id) {
     if (len == 3 && memcmp(name, "avg",   3) == 0) return OP_AVG;
     if (len == 3 && memcmp(name, "min",   3) == 0) return OP_MIN;
     if (len == 3 && memcmp(name, "max",   3) == 0) return OP_MAX;
-    if (len == 3 && memcmp(name, "dev",   3) == 0) return OP_STDDEV;
+    if (len == 3 && memcmp(name, "dev",   3) == 0) return OP_STDDEV_POP;
     if (len == 3 && memcmp(name, "var",   3) == 0) return OP_VAR;
     if (len == 4 && memcmp(name, "prod",  4) == 0) return OP_PROD;
     if (len == 4 && memcmp(name, "last",  4) == 0) return OP_LAST;
