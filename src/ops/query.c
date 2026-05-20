@@ -313,7 +313,7 @@ static uint16_t resolve_agg_opcode(int64_t sym_id) {
     if (len == 3 && memcmp(name, "avg",   3) == 0) return OP_AVG;
     if (len == 3 && memcmp(name, "min",   3) == 0) return OP_MIN;
     if (len == 3 && memcmp(name, "max",   3) == 0) return OP_MAX;
-    if (len == 3 && memcmp(name, "dev",   3) == 0) return OP_STDDEV;
+    if (len == 3 && memcmp(name, "dev",   3) == 0) return OP_STDDEV_POP;
     if (len == 3 && memcmp(name, "var",   3) == 0) return OP_VAR;
     if (len == 4 && memcmp(name, "prod",  4) == 0) return OP_PROD;
     if (len == 4 && memcmp(name, "last",  4) == 0) return OP_LAST;
@@ -1171,6 +1171,17 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
          * Balanced tree (rather than left-fold) keeps the canonical
          * shape symmetric and minimises dependency-chain depth, which
          * future OoO / parallel-instruction executors can exploit. */
+        /* (and X) / (or X) — single conjunct = identity.  Matches the
+         * eval-level monoid identity rule in ray_and_vary_fn /
+         * ray_or_vary_fn; without it, `where: (and X)` would fall
+         * through to compile_expr_dag returning NULL → domain error. */
+        if (n == 2) {
+            bool is_and1 = (fname_len == 3 && memcmp(fname, "and", 3) == 0);
+            bool is_or1  = (fname_len == 2 && memcmp(fname, "or",  2) == 0);
+            if (is_and1 || is_or1) {
+                return compile_expr_dag(g, elems[1]);
+            }
+        }
         if (n >= 4) {
             bool is_and = (fname_len == 3 && memcmp(fname, "and", 3) == 0);
             bool is_or  = (fname_len == 2 && memcmp(fname, "or",  2) == 0);
@@ -1782,6 +1793,77 @@ static bool bounded_multikey_count_take_candidate(ray_t** dict_elems, int64_t di
  * expr is full-table-evaluable.  Anything where the outer call is
  * not a plain `(count …)` or the inner is not a plain `(distinct …)`
  * is rejected so the eval fallback handles it. */
+/* AST-level idiom rewrites for per-group aggregator slot.
+ *
+ * Mirrors the DAG-level rewrites in src/ops/idiom.c, but at the AST
+ * stage — idiom.c's DAG pass walks `inputs[]` only, so it never reaches
+ * agg subtrees that live in OP_GROUP's ext->agg_ins[].  Without this,
+ * `(select {m: (first (asc v)) by: k from: T})` errors `domain` while
+ * the equivalent `(min v)` works.
+ *
+ * Patterns recognised (parallel to idiom.c's ray_idioms table):
+ *   (first (asc col))    -> (min col)    if col is null-free
+ *   (last  (asc col))    -> (max col)    if col is null-free
+ *   (count (asc col))    -> (count col)
+ *   (count (desc col))   -> (count col)
+ *   (count (reverse col))-> (count col)
+ *
+ * The null-free precondition for first/last matches idiom.c's
+ * pre_no_nulls_on_asc_input — first(asc null-bearing) returns the null
+ * (xasc puts nulls first) while min(...) skips nulls.
+ *
+ * On match: *op_out and *arg_out point to the simpler op + col expr;
+ * caller builds agg_ins[i] from *arg_out.  Returns true if rewritten. */
+static bool simplify_agg_idiom(ray_t* val_expr, ray_t* tbl,
+                                uint16_t* op_out, ray_t** arg_out) {
+    if (!val_expr || val_expr->type != RAY_LIST || ray_len(val_expr) < 2) return false;
+    ray_t** outer = (ray_t**)ray_data(val_expr);
+    if (!outer[0] || outer[0]->type != -RAY_SYM) return false;
+    ray_t* outer_nm = ray_sym_str(outer[0]->i64);
+    if (!outer_nm) return false;
+    const char* op_s = ray_str_ptr(outer_nm);
+    size_t op_n = ray_str_len(outer_nm);
+
+    ray_t* inner = outer[1];
+    if (!inner || inner->type != RAY_LIST || ray_len(inner) < 2) return false;
+    ray_t** inner_e = (ray_t**)ray_data(inner);
+    if (!inner_e[0] || inner_e[0]->type != -RAY_SYM) return false;
+    ray_t* inner_nm = ray_sym_str(inner_e[0]->i64);
+    if (!inner_nm) return false;
+    const char* wrap_s = ray_str_ptr(inner_nm);
+    size_t wrap_n = ray_str_len(inner_nm);
+    ray_t* col_expr = inner_e[1];
+
+    bool wrap_is_asc     = (wrap_n == 3 && memcmp(wrap_s, "asc", 3) == 0);
+    bool wrap_is_desc    = (wrap_n == 4 && memcmp(wrap_s, "desc", 4) == 0);
+    bool wrap_is_reverse = (wrap_n == 7 && memcmp(wrap_s, "reverse", 7) == 0);
+    if (!wrap_is_asc && !wrap_is_desc && !wrap_is_reverse) return false;
+
+    /* (count (asc|desc|reverse col)) -> (count col) — cardinality preserved */
+    if (op_n == 5 && memcmp(op_s, "count", 5) == 0) {
+        *op_out = OP_COUNT;
+        *arg_out = col_expr;
+        return true;
+    }
+
+    /* (first|last (asc col)) -> (min|max col) — only when col is null-free */
+    if (!wrap_is_asc) return false;
+    bool is_first = (op_n == 5 && memcmp(op_s, "first", 5) == 0);
+    bool is_last  = (op_n == 4 && memcmp(op_s, "last",  4) == 0);
+    if (!is_first && !is_last) return false;
+
+    /* Null-free precondition: col_expr must be a column ref naming a
+     * null-free col of tbl.  Mirrors idiom.c:pre_no_nulls_on_asc_input. */
+    if (!col_expr || col_expr->type != -RAY_SYM || !(col_expr->attrs & RAY_ATTR_NAME))
+        return false;
+    ray_t* col = ray_table_get_col(tbl, col_expr->i64);
+    if (!col || (col->attrs & RAY_ATTR_HAS_NULLS)) return false;
+
+    *op_out = is_first ? OP_MIN : OP_MAX;
+    *arg_out = col_expr;
+    return true;
+}
+
 static ray_t* match_count_distinct(ray_t* expr) {
     if (!expr || expr->type != RAY_LIST) return NULL;
     int64_t n = ray_len(expr);
@@ -1931,6 +2013,21 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
             ray_env_pop_scope();
             if (result) ray_release(result);
             return cell ? cell : ray_error("domain", NULL);
+        }
+        /* Materialise lazy cells before storing.  Per-group projection
+         * eval can return a RAY_LAZY (e.g. (reverse v) returns a fresh
+         * lazy chain).  Lazy values stored as-is in a LIST get their
+         * graph stolen by the first ray_lazy_materialize via fmt_obj,
+         * leaving subsequent reads with a half-dead lazy whose execute
+         * fails with "nyi".  Eager materialisation here keeps each cell
+         * concrete and re-readable. */
+        if (ray_is_lazy(cell)) {
+            cell = ray_lazy_materialize(cell);
+            if (!cell || RAY_IS_ERR(cell)) {
+                ray_env_pop_scope();
+                if (result) ray_release(result);
+                return cell ? cell : ray_error("domain", NULL);
+            }
         }
 
         if (gi == 0) {
@@ -5807,9 +5904,21 @@ by_dict_done:
             if (is_group_dag_agg_expr(val_expr) && n_aggs < 16) {
                 ray_t** agg_elems = (ray_t**)ray_data(val_expr);
                 uint16_t op = resolve_agg_opcode(agg_elems[0]->i64);
+                ray_t* agg_arg = agg_elems[1];
+                /* AST-level idiom rewrite — see simplify_agg_idiom comment.
+                 * Resolves (first (asc col)) / (last (asc col)) and
+                 * (count (asc|desc|reverse col)) before agg_ins is built. */
+                {
+                    uint16_t new_op;
+                    ray_t* new_arg;
+                    if (simplify_agg_idiom(val_expr, tbl, &new_op, &new_arg)) {
+                        op = new_op;
+                        agg_arg = new_arg;
+                    }
+                }
                 agg_ops[n_aggs] = op;
                 /* Compile the aggregation input (the column reference) */
-                agg_ins[n_aggs] = compile_expr_dag(g, agg_elems[1]);
+                agg_ins[n_aggs] = compile_expr_dag(g, agg_arg);
                 if (!agg_ins[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
                 agg_ins2[n_aggs] = NULL;
                 agg_k[n_aggs] = 0;
