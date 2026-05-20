@@ -273,9 +273,13 @@ static ray_t* eval_and_short(ray_t* arg) {
 }
 
 ray_t* ray_and_vary_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("arity", "expected at least 2 args, got %lld", (long long)n);
+    if (n < 1) return ray_error("arity", "expected at least 1 arg, got %lld", (long long)n);
     ray_t* acc = eval_and_short(args[0]);
     if (!acc || RAY_IS_ERR(acc)) return acc;
+    /* Single arg = identity: (and X) == X, (or X) == X — monoid identity
+     * rule (Scheme/Haskell).  Enables programmatic AST construction like
+     * `(cons 'and preds)` where preds may have length 1. */
+    if (n == 1) return acc;
     /* Short-circuit only when the running result is a *scalar* falsy.
      * If acc is a vector, subsequent args still need element-wise
      * combination (so `(and vec false)` broadcasts to all-false vector
@@ -295,9 +299,11 @@ ray_t* ray_and_vary_fn(ray_t** args, int64_t n) {
 }
 
 ray_t* ray_or_vary_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("arity", "expected at least 2 args, got %lld", (long long)n);
+    if (n < 1) return ray_error("arity", "expected at least 1 arg, got %lld", (long long)n);
     ray_t* acc = eval_and_short(args[0]);
     if (!acc || RAY_IS_ERR(acc)) return acc;
+    /* Single arg = identity — see ray_and_vary_fn for rationale. */
+    if (n == 1) return acc;
     /* Short-circuit only on scalar truthy accumulator (see AND comment). */
     if (ray_is_atom(acc) && is_truthy(acc)) return acc;
     for (int64_t i = 1; i < n; i++) {
