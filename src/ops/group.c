@@ -1675,6 +1675,7 @@ static ray_t* reduction_i64_result(int64_t val, int8_t out_type) {
         case RAY_I32:       return ray_i32((int32_t)val);
         case RAY_I16:       return ray_i16((int16_t)val);
         case RAY_U8:        return ray_u8((uint8_t)val);
+        case RAY_SYM:       return ray_sym(val);
         default:            return ray_i64(val);
     }
 }
