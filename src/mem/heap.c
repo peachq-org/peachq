@@ -1197,6 +1197,35 @@ void ray_heap_destroy(void) {
      * from other heaps' freelists, which races with concurrent worker
      * destruction during ray_pool_free(). */
 
+    /* Purge any of h's blocks from every other heap's foreign list
+     * BEFORE we munmap.  Without this, foreign lists outlive h with
+     * dangling pointers into unmapped memory and crash on the next
+     * ray_heap_gc has_foreign walk or heap_flush_foreign. */
+    for (int fh_id = 0; fh_id < RAY_HEAP_REGISTRY_SIZE; fh_id++) {
+        ray_heap_t* fh_heap = ray_heap_registry[fh_id];
+        if (!fh_heap || fh_heap == h) continue;
+        ray_t** pp = &fh_heap->foreign;
+        ray_t* curr = *pp;
+        while (curr) {
+            ray_t* next = curr->fl_next;
+            bool in_h = false;
+            for (uint32_t i = 0; i < h->pool_count; i++) {
+                uintptr_t pb = (uintptr_t)h->pools[i].base;
+                uintptr_t pe = pb + BSIZEOF(h->pools[i].pool_order);
+                if ((uintptr_t)curr >= pb && (uintptr_t)curr < pe) {
+                    in_h = true;
+                    break;
+                }
+            }
+            if (in_h) {
+                *pp = next;
+            } else {
+                pp = &curr->fl_next;
+            }
+            curr = next;
+        }
+    }
+
     /* Munmap all tracked pools.  File-backed pools also need their fd
      * closed and their tempfile unlinked so the swap directory doesn't
      * accumulate orphans. */
@@ -1402,6 +1431,28 @@ void ray_heap_gc(void) {
                         gh->slabs[si].stack[dst++] = sb;
                     }
                     gh->slabs[si].count = dst;
+                }
+
+                /* Purge any [pb, pe) blocks from every other heap's foreign
+                 * list BEFORE munmap.  The has_foreign check above is racy
+                 * vs concurrent ray_free, and any block left here becomes
+                 * a dangling pointer that crashes subsequent Pass 4 walks
+                 * at fb->fl_next.  Reading fl_next is safe here because
+                 * the pool is still mapped. */
+                for (int fh_id = 0; fh_id < RAY_HEAP_REGISTRY_SIZE; fh_id++) {
+                    ray_heap_t* fh_heap = ray_heap_registry[fh_id];
+                    if (!fh_heap || fh_heap == gh) continue;
+                    ray_t** pp = &fh_heap->foreign;
+                    ray_t* curr = *pp;
+                    while (curr) {
+                        ray_t* next = curr->fl_next;
+                        if ((uintptr_t)curr >= pb && (uintptr_t)curr < pe) {
+                            *pp = next;
+                        } else {
+                            pp = &curr->fl_next;
+                        }
+                        curr = next;
+                    }
                 }
 
                 ray_vm_free(phdr->vm_base, BSIZEOF(po));
