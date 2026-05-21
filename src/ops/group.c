@@ -3361,6 +3361,8 @@ typedef struct {
     uint32_t       n_slots;
     const int64_t* match_idx;    /* NULL = no selection */
     ray_t*         rowsel;
+    ray_t**        sym_strings;  /* borrowed sym snapshot for strlen-on-SYM aggs */
+    uint32_t       sym_count;
 } da_ctx_t;
 
 typedef struct {
@@ -3946,7 +3948,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             if (!c->agg_ptrs[a]) continue;
             size_t idx = base + a;
             if (c->agg_strlen && c->agg_strlen[a]) {
-                acc->sum[idx].i += group_strlen_at(c->agg_cols[a], r);
+                acc->sum[idx].i += group_strlen_at_cached(
+                    c->agg_cols[a], r, c->sym_strings, c->sym_count);
                 if (nn) nn[idx]++;
             } else if (f64m & (1u << a)) {
                 /* NaN payload = null, skip from sum. */
@@ -3992,7 +3995,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
         size_t idx = base + a;
         double fv; int64_t iv;
         if (c->agg_strlen && c->agg_strlen[a]) {
-            iv = group_strlen_at(c->agg_cols[a], r);
+            iv = group_strlen_at_cached(c->agg_cols[a], r,
+                                        c->sym_strings, c->sym_count);
             fv = (double)iv;
         } else {
             da_read_val(c->agg_ptrs[a], c->agg_types[a], 0, r, &fv, &iv);
@@ -5590,8 +5594,23 @@ da_path:;
             for (uint8_t k = 0; k < n_keys; k++)
                 da_key_esz[k] = ray_sym_elem_size(key_types[k], key_attrs[k]);
 
+            /* strlen-on-SYM aggs (e.g. avg(strlen URL)) read the sym
+             * string per row.  ray_sym_str takes a lock per call — 10M
+             * rows = 10M locked dict lookups.  Borrow the sym snapshot
+             * once and let da_accum_row index it lock-free. */
+            ray_t** da_sym_strings = NULL;
+            uint32_t da_sym_count = 0;
+            for (uint8_t a = 0; a < n_aggs; a++) {
+                if (agg_strlen[a] && agg_vecs[a] &&
+                    agg_vecs[a]->type == RAY_SYM) {
+                    ray_sym_strings_borrow(&da_sym_strings, &da_sym_count);
+                    break;
+                }
+            }
             da_ctx_t da_ctx = {
                 .accums      = accums,
+                .sym_strings = da_sym_strings,
+                .sym_count   = da_sym_count,
                 .n_accums    = da_n_workers,
                 .key_ptrs    = key_data,
                 .key_types   = key_types,
@@ -6427,6 +6446,7 @@ dyn_dense_done:
             if (use_emit_filter &&
                 (emit_filter.min_count_exclusive > 0 ||
                  emit_filter.top_count_take > 0)) {
+                if (n_scan > (1 << 21)) goto ht_path;
                 uint64_t expected = (uint64_t)nrows / 64u;
                 if (expected < 4096) expected = 4096;
                 if (expected > (1u << 20)) expected = (1u << 20);
@@ -11909,4 +11929,3 @@ ray_t* exec_group_sum_count_rowform(ray_graph_t* g, ray_op_t* op) {
 
     return result;
 }
-
