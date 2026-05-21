@@ -2255,9 +2255,19 @@ vm_error_cleanup: {
             if (v) ray_release(v);
         }
 
-        /* Get error value — prefer vm_err_obj (VM-detected errors like
-         * arity mismatch) over __raise_val (user raise expressions) */
-        ray_t *err_val = vm_err_obj ? vm_err_obj : __raise_val;
+        /* Get error value.  If __raise_val is set, a user (raise x)
+         * just ran — its value is the real payload the handler must
+         * see.  vm_err_obj is the generic error-sentinel returned
+         * from ray_raise_fn (or a VM-detected error like arity);
+         * release it if we picked __raise_val.  For VM-only errors,
+         * __raise_val stays NULL and vm_err_obj is used. */
+        ray_t *err_val;
+        if (__raise_val) {
+            if (vm_err_obj) ray_release(vm_err_obj);
+            err_val = __raise_val;
+        } else {
+            err_val = vm_err_obj;
+        }
         vm_err_obj = NULL;
         __raise_val = NULL;
         if (!err_val) err_val = make_i64(0);
