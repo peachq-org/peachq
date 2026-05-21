@@ -23,6 +23,18 @@
 
 #include "ops/internal.h"
 
+/* For a SYM-scalar broadcast input (atom -RAY_SYM, or a 1-elem
+ * RAY_SYM_W{8,16,32,64} vec used as scalar), return the sym ID.
+ * Hides the atom/vec dispatch: ray_t->i64 aliases ray_t->len, so
+ * reading `v->i64` on a vec silently yields `len` (= 1) instead of
+ * the element value.  Always use this helper to read the sym ID
+ * from a then_v/else_v that may be either atom or 1-elem vec. */
+static inline int64_t sym_scalar_id(ray_t* v) {
+    return ray_is_atom(v)
+        ? v->i64
+        : ray_read_sym(ray_data(v), 0, v->type, v->attrs);
+}
+
 /* ============================================================================
  * OP_IF: ternary select  result[i] = cond[i] ? then[i] : else[i]
  * ============================================================================ */
@@ -109,8 +121,8 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
                     } else if (then_v->type == RAY_STR) {
                         sp = ray_str_vec_get(then_v, 0, &sl);
                         if (!sp) { sp = ""; sl = 0; }
-                    } else if (RAY_IS_SYM(then_v->type)) {
-                        ray_t* s = ray_sym_str(then_v->i64);
+                    } else if (RAY_IS_SYM(then_v->type) || then_v->type == -RAY_SYM) {
+                        ray_t* s = ray_sym_str(sym_scalar_id(then_v));
                         sp = s ? ray_str_ptr(s) : "";
                         sl = s ? ray_str_len(s) : 0;
                     } else { sp = ""; sl = 0; }
@@ -132,8 +144,8 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
                     } else if (else_v->type == RAY_STR) {
                         sp = ray_str_vec_get(else_v, 0, &sl);
                         if (!sp) { sp = ""; sl = 0; }
-                    } else if (RAY_IS_SYM(else_v->type)) {
-                        ray_t* s = ray_sym_str(else_v->i64);
+                    } else if (RAY_IS_SYM(else_v->type) || else_v->type == -RAY_SYM) {
+                        ray_t* s = ray_sym_str(sym_scalar_id(else_v));
                         sp = s ? ray_str_ptr(s) : "";
                         sl = s ? ray_str_len(s) : 0;
                     } else { sp = ""; sl = 0; }
@@ -159,14 +171,14 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
             if (then_v->type == -RAY_STR) {
                 t_scalar = ray_sym_intern(ray_str_ptr(then_v), ray_str_len(then_v));
             } else {
-                t_scalar = then_v->i64;
+                t_scalar = sym_scalar_id(then_v);
             }
         }
         if (else_scalar) {
             if (else_v->type == -RAY_STR) {
                 e_scalar = ray_sym_intern(ray_str_ptr(else_v), ray_str_len(else_v));
             } else {
-                e_scalar = else_v->i64;
+                e_scalar = sym_scalar_id(else_v);
             }
         }
         int64_t* dst = (int64_t*)ray_data(result);
