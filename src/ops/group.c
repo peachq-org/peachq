@@ -6721,6 +6721,14 @@ ht_path:;
                 uint64_t want = ((uint64_t)n_scan * 4u) / 3u;
                 uint32_t cap = 256;
                 while ((uint64_t)cap < want && cap < (1u << 28)) cap <<= 1;
+                /* This fused top-count path open-addresses into one
+                 * monolithic table sized to the row count.  It only wins
+                 * while the slot arrays stay cache-resident; for a
+                 * high-row-count composite group-by the table is hundreds
+                 * of MB and every probe is a cache miss.  Above the
+                 * threshold, bail to the radix-partitioned path, which
+                 * groups each cache-sized partition locally. */
+                if (cap > (1u << 19)) goto skip_top_count_filter;
                 if (supported && (uint64_t)cap >= want) {
                     ray_t *hk[5] = { NULL, NULL, NULL, NULL, NULL };
                     ray_t *hc = NULL;
