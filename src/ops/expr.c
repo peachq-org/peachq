@@ -852,10 +852,50 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
         }
     } else if (dt == RAY_BOOL) {
         uint8_t* d = (uint8_t*)dp;
-        const uint8_t* a = (const uint8_t*)ap;
-        switch (opcode) {
-            case OP_NOT: for (int64_t j = 0; j < n; j++) d[j] = !a[j]; break;
-            default: break;
+        if (opcode == OP_CAST) {
+            /* (as 'BOOL ...) — truthy semantics, not truncation. */
+            if (t1 == RAY_F64) {
+                const double* a = (const double*)ap;
+                for (int64_t j = 0; j < n; j++) d[j] = (a[j] != 0.0) ? 1 : 0;
+            } else {
+                const int64_t* a = (const int64_t*)ap;
+                for (int64_t j = 0; j < n; j++) d[j] = a[j] ? 1 : 0;
+            }
+        } else {
+            const uint8_t* a = (const uint8_t*)ap;
+            switch (opcode) {
+                case OP_NOT: for (int64_t j = 0; j < n; j++) d[j] = !a[j]; break;
+                default: break;
+            }
+        }
+    } else if (dt == RAY_I32) {
+        /* OP_CAST narrow output — src came from I64/F64 scratch (filled
+         * by REG_CONST or REG_SCAN widening); truncate to int32_t. */
+        int32_t* d = (int32_t*)dp;
+        if (t1 == RAY_F64) {
+            const double* a = (const double*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = (int32_t)a[j];
+        } else {
+            const int64_t* a = (const int64_t*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = (int32_t)a[j];
+        }
+    } else if (dt == RAY_I16) {
+        int16_t* d = (int16_t*)dp;
+        if (t1 == RAY_F64) {
+            const double* a = (const double*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = (int16_t)a[j];
+        } else {
+            const int64_t* a = (const int64_t*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = (int16_t)a[j];
+        }
+    } else if (dt == RAY_U8) {
+        uint8_t* d = (uint8_t*)dp;
+        if (t1 == RAY_F64) {
+            const double* a = (const double*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = (uint8_t)a[j];
+        } else {
+            const int64_t* a = (const int64_t*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = (uint8_t)a[j];
         }
     }
 }
@@ -1387,6 +1427,67 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                     uint8_t* src = (uint8_t*)m.morsel_ptr;
                     double* dst = (double*)((char*)ray_data(result) + out_off * sizeof(double));
                     for (int64_t i = 0; i < n; i++) dst[i] = (double)src[i];
+                    out_off += n;
+                }
+            }
+        } else if (in_type == RAY_I64) {
+            /* Narrowing I64 → I32/I16/U8/BOOL: truncate. */
+            if (out_type == RAY_I32) {
+                while (ray_morsel_next(&m)) {
+                    int64_t n = m.morsel_len;
+                    int64_t* src = (int64_t*)m.morsel_ptr;
+                    int32_t* dst = (int32_t*)((char*)ray_data(result) + out_off * sizeof(int32_t));
+                    for (int64_t i = 0; i < n; i++) dst[i] = (int32_t)src[i];
+                    out_off += n;
+                }
+            } else if (out_type == RAY_I16) {
+                while (ray_morsel_next(&m)) {
+                    int64_t n = m.morsel_len;
+                    int64_t* src = (int64_t*)m.morsel_ptr;
+                    int16_t* dst = (int16_t*)((char*)ray_data(result) + out_off * sizeof(int16_t));
+                    for (int64_t i = 0; i < n; i++) dst[i] = (int16_t)src[i];
+                    out_off += n;
+                }
+            } else if (out_type == RAY_U8 || out_type == RAY_BOOL) {
+                while (ray_morsel_next(&m)) {
+                    int64_t n = m.morsel_len;
+                    int64_t* src = (int64_t*)m.morsel_ptr;
+                    uint8_t* dst = (uint8_t*)((char*)ray_data(result) + out_off);
+                    /* BOOL: collapse non-zero to 1; U8: low byte. */
+                    if (out_type == RAY_BOOL)
+                        for (int64_t i = 0; i < n; i++) dst[i] = src[i] ? 1 : 0;
+                    else
+                        for (int64_t i = 0; i < n; i++) dst[i] = (uint8_t)src[i];
+                    out_off += n;
+                }
+            }
+        } else if (in_type == RAY_F64) {
+            /* Narrowing F64 → I32/I16/U8/BOOL: float truncation. */
+            if (out_type == RAY_I32) {
+                while (ray_morsel_next(&m)) {
+                    int64_t n = m.morsel_len;
+                    double* src = (double*)m.morsel_ptr;
+                    int32_t* dst = (int32_t*)((char*)ray_data(result) + out_off * sizeof(int32_t));
+                    for (int64_t i = 0; i < n; i++) dst[i] = (int32_t)src[i];
+                    out_off += n;
+                }
+            } else if (out_type == RAY_I16) {
+                while (ray_morsel_next(&m)) {
+                    int64_t n = m.morsel_len;
+                    double* src = (double*)m.morsel_ptr;
+                    int16_t* dst = (int16_t*)((char*)ray_data(result) + out_off * sizeof(int16_t));
+                    for (int64_t i = 0; i < n; i++) dst[i] = (int16_t)src[i];
+                    out_off += n;
+                }
+            } else if (out_type == RAY_U8 || out_type == RAY_BOOL) {
+                while (ray_morsel_next(&m)) {
+                    int64_t n = m.morsel_len;
+                    double* src = (double*)m.morsel_ptr;
+                    uint8_t* dst = (uint8_t*)((char*)ray_data(result) + out_off);
+                    if (out_type == RAY_BOOL)
+                        for (int64_t i = 0; i < n; i++) dst[i] = (src[i] != 0.0) ? 1 : 0;
+                    else
+                        for (int64_t i = 0; i < n; i++) dst[i] = (uint8_t)src[i];
                     out_off += n;
                 }
             }
