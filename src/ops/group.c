@@ -7214,12 +7214,7 @@ ht_path:;
 
 skip_top_count_filter:
 
-    /* radix_phase1_fn honours c->rowsel (skips non-passing rows during the
-     * scatter), so a WHERE filter is fine here — the partitioned data only
-     * ever contains passing rows.  Allowing rowsel routes filtered composite
-     * group-bys (q30/q31) onto the cache-friendly radix path instead of the
-     * monolithic hash. */
-    if (pool && nrows >= RAY_PARALLEL_THRESHOLD && n_total > 1) {
+    if (pool && nrows >= RAY_PARALLEL_THRESHOLD && n_total > 1 && !rowsel) {
         size_t n_bufs = (size_t)n_total * RADIX_P;
         radix_bufs = (radix_buf_t*)scratch_calloc(&radix_bufs_hdr,
             n_bufs * sizeof(radix_buf_t));
