@@ -566,23 +566,14 @@ ray_t* ray_vec_insert_at(ray_t* vec, int64_t idx, const void* elem) {
 
     vec->len = old_len + 1;
 
-    /* Shift null bitmap bits [idx..old_len) up by one; clear bit at idx.
-     * Walk from tail backward so we don't overwrite unread bits. */
-    if (vec->attrs & RAY_ATTR_HAS_NULLS) {
-        for (int64_t i = old_len - 1; i >= idx; i--) {
-            bool was_null = ray_vec_is_null(vec, i);
-            if (was_null) {
-                ray_err_t err = ray_vec_set_null_checked(vec, i + 1, true);
-                if (err != RAY_OK) goto fail_oom;
-            } else {
-                ray_err_t err = ray_vec_set_null_checked(vec, i + 1, false);
-                if (err != RAY_OK) goto fail_oom;
-            }
-        }
-        /* New element is not null */
-        ray_err_t err = ray_vec_set_null_checked(vec, idx, false);
-        if (err != RAY_OK) goto fail_oom;
-    }
+    /* Null info for every type that accepts HAS_NULLS is sentinel-encoded
+     * in the payload (see ray_vec_is_null + ray_vec_set_null_checked).
+     * The memmove above moved the data — including any null sentinels —
+     * to their new slots, so no separate bitmap shift is needed.  The
+     * caller-supplied `elem` lands at idx; if it carries a NULL_*
+     * sentinel the HAS_NULLS bit is already set on `vec` (we don't clear
+     * it — we have no cheap way to detect "this insert removed the last
+     * null"; HAS_NULLS being a strict over-approximation is harmless). */
 
     return vec;
 
