@@ -422,6 +422,7 @@ ray_t* ray_list_insert_many(ray_t* list, ray_t* idxs, ray_t* vals);
 ray_err_t ray_sym_init(void);
 void     ray_sym_destroy(void);
 int64_t  ray_sym_intern(const char* str, size_t len);
+int64_t  ray_sym_intern_runtime(const char* str, size_t len);
 int64_t  ray_sym_find(const char* str, size_t len);
 ray_t*    ray_sym_str(int64_t id);
 uint32_t ray_sym_count(void);
