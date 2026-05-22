@@ -498,6 +498,64 @@ void fp_eval_cmp(const fp_cmp_t* p, int64_t start, int64_t end,
 }
 #undef FP_RUN
 
+static inline int64_t fp_cmp_read_i64_at(const fp_cmp_t* p, int64_t row) {
+    const void* base = p->col_base;
+    if (p->col_type == RAY_SYM || p->col_type == RAY_BOOL || p->col_type == RAY_U8)
+        return read_by_esz(base, row, p->col_esz);
+    switch (p->col_esz) {
+    case 1:  return (int64_t)((const uint8_t*)base)[row];
+    case 2:  return (int64_t)((const int16_t*)base)[row];
+    case 4:  return (int64_t)((const int32_t*)base)[row];
+    default: return ((const int64_t*)base)[row];
+    }
+}
+
+static inline uint8_t fp_eval_cmp_one(const fp_cmp_t* p, int64_t row) {
+    if (p->fold)
+        return (uint8_t)(p->fold == FP_FOLD_TRUE);
+    if (p->col_type == RAY_SYM && !p->cval_in_dict)
+        return (uint8_t)(p->op == FP_NE);
+    if (p->op == FP_LIKE)
+        return 0;
+
+    int64_t v = fp_cmp_read_i64_at(p, row);
+    if (p->op == FP_IN) {
+        uint8_t hit = 0;
+        for (uint8_t j = 0; j < p->n_cvals; j++)
+            hit |= (uint8_t)(v == p->cvals[j]);
+        return hit;
+    }
+
+    switch (p->op) {
+    case FP_EQ: return (uint8_t)(v == p->cval);
+    case FP_NE: return (uint8_t)(v != p->cval);
+    case FP_LT: return (uint8_t)(v <  p->cval);
+    case FP_LE: return (uint8_t)(v <= p->cval);
+    case FP_GT: return (uint8_t)(v >  p->cval);
+    case FP_GE: return (uint8_t)(v >= p->cval);
+    case FP_LIKE:
+    case FP_IN:
+        break;
+    }
+    return 0;
+}
+
+static void fp_eval_cmp_masked(const fp_cmp_t* p, int64_t start, int64_t end,
+                               uint8_t* bits)
+{
+    int64_t n = end - start;
+    if (p->op == FP_LIKE) {
+        uint8_t tmp[RAY_MORSEL_ELEMS];
+        fp_eval_cmp(p, start, end, tmp);
+        for (int64_t r = 0; r < n; r++) bits[r] &= tmp[r];
+        return;
+    }
+    for (int64_t r = 0; r < n; r++) {
+        if (bits[r] && !fp_eval_cmp_one(p, start + r))
+            bits[r] = 0;
+    }
+}
+
 /* Evaluate a (possibly ANDed) predicate over rows [start, end).  The
  * first child writes directly into bits[]; subsequent children eval into
  * a stack-resident tmp[] buffer and bitwise-AND into bits. */
@@ -511,10 +569,18 @@ void fp_eval_pred(const fp_pred_t* p, int64_t start, int64_t end,
     }
     fp_eval_cmp(&p->children[0], start, end, bits);
     if (p->n_children == 1) return;
-    uint8_t tmp[RAY_MORSEL_ELEMS];
-    for (uint8_t i = 1; i < p->n_children; i++) {
-        fp_eval_cmp(&p->children[i], start, end, tmp);
-        for (int64_t r = 0; r < n; r++) bits[r] &= tmp[r];
+    uint8_t use_masked = 0;
+    for (uint8_t i = 0; i < p->n_children; i++)
+        use_masked |= (uint8_t)(p->children[i].op == FP_IN);
+    if (use_masked) {
+        for (uint8_t i = 1; i < p->n_children; i++)
+            fp_eval_cmp_masked(&p->children[i], start, end, bits);
+    } else {
+        uint8_t tmp[RAY_MORSEL_ELEMS];
+        for (uint8_t i = 1; i < p->n_children; i++) {
+            fp_eval_cmp(&p->children[i], start, end, tmp);
+            for (int64_t r = 0; r < n; r++) bits[r] &= tmp[r];
+        }
     }
 }
 
@@ -731,6 +797,30 @@ static int fp_compile_pred_dag(ray_graph_t* g, ray_op_t* node, ray_t* tbl,
     return 0;
 }
 
+static int fp_cmp_selectivity_score(const fp_cmp_t* c) {
+    if (c->fold == FP_FOLD_FALSE) return 0;
+    if (c->op == FP_EQ && c->col_esz >= 8) return 1;
+    if (c->op == FP_EQ) return 2;
+    if (c->op == FP_IN) return 3;
+    if (c->op == FP_LT || c->op == FP_LE || c->op == FP_GT || c->op == FP_GE)
+        return 4;
+    if (c->op == FP_NE) return 5;
+    return 6;
+}
+
+static void fp_pred_order_children(fp_pred_t* p) {
+    for (uint8_t i = 1; i < p->n_children; i++) {
+        fp_cmp_t v = p->children[i];
+        int vs = fp_cmp_selectivity_score(&v);
+        uint8_t j = i;
+        while (j > 0 && fp_cmp_selectivity_score(&p->children[j - 1]) > vs) {
+            p->children[j] = p->children[j - 1];
+            j--;
+        }
+        p->children[j] = v;
+    }
+}
+
 int fp_compile_pred(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
                     fp_pred_t* out)
 {
@@ -739,7 +829,10 @@ int fp_compile_pred(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
     /* No predicate → const-true.  fp_eval_pred memsets bits to 1
      * when n_children == 0, so the worker treats every row as a hit. */
     if (!pred_op) return 0;
-    return fp_compile_pred_dag(g, pred_op, tbl, out);
+    int rc = fp_compile_pred_dag(g, pred_op, tbl, out);
+    if (rc == 0 && out->n_children > 1)
+        fp_pred_order_children(out);
+    return rc;
 }
 
 void fp_pred_cleanup(fp_pred_t* p) {
@@ -810,6 +903,8 @@ static int64_t fp_count_emit_keep_min(int64_t total_groups,
                                       const int64_t* used_key_slots,
                                       const int64_t* counts,
                                       uint64_t n_slots);
+static void fp_count_heap_consider(int64_t* heap, int64_t* hn,
+                                   int64_t cap, int64_t count);
 
 static int fp_shard_init(fp_shard_t* sh, uint64_t cap) {
     sh->slots  = (int64_t*)scratch_calloc(&sh->slots_hdr,
@@ -933,8 +1028,195 @@ typedef struct {
     uint8_t          kesz;
     uint32_t         n_slots;
     int32_t          bias;
+    uint8_t          pred_key_ne_zero;
     int64_t*         counts;  /* [n_workers * n_slots] */
 } fp_direct_count_ctx_t;
+
+typedef struct {
+    const int16_t* key;
+    uint32_t       n_slots;
+    int32_t        bias;
+    uint32_t*      counts;  /* [n_workers * n_slots] */
+} fp_i16_ne0_u32_count_ctx_t;
+
+static void fp_i16_ne0_u32_count_fn(void* raw, uint32_t worker_id,
+                                    int64_t start, int64_t end) {
+    fp_i16_ne0_u32_count_ctx_t* c = (fp_i16_ne0_u32_count_ctx_t*)raw;
+    const int16_t* k = c->key;
+    uint32_t* counts = c->counts + (size_t)worker_id * c->n_slots;
+    int32_t bias = c->bias;
+    for (int64_t i = start; i < end; i++) {
+        int16_t v = k[i];
+        if (v)
+            counts[(uint32_t)((int32_t)v + bias)]++;
+    }
+}
+
+static uint32_t fp_i32_hash_slot(int32_t key, uint32_t mask) {
+    uint64_t h = (uint64_t)(int64_t)key * 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 33;
+    return (uint32_t)h & mask;
+}
+
+static void fp_i32_mg_rebuild(const int32_t* keys, const uint32_t* counts,
+                              uint32_t n, uint32_t* ht, uint32_t hcap) {
+    memset(ht, 0, (size_t)hcap * sizeof(uint32_t));
+    uint32_t mask = hcap - 1;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!counts[i]) continue;
+        uint32_t slot = fp_i32_hash_slot(keys[i], mask);
+        while (ht[slot]) slot = (slot + 1u) & mask;
+        ht[slot] = i + 1u;
+    }
+}
+
+static uint32_t fp_i32_mg_lookup(const int32_t* keys, const uint32_t* ht,
+                                 uint32_t hmask, int32_t key) {
+    uint32_t slot = fp_i32_hash_slot(key, hmask);
+    while (ht[slot]) {
+        uint32_t idx = ht[slot] - 1u;
+        if (keys[idx] == key) return idx + 1u;
+        slot = (slot + 1u) & hmask;
+    }
+    return 0;
+}
+
+static ray_t* fp_try_i32_mg_top_count(const fp_par_ctx_t* ctx, int64_t nrows,
+                                      int64_t key_sym,
+                                      ray_group_emit_filter_t emit_filter) {
+    if (ctx->kt != RAY_I32 || ctx->pred.n_children != 0 ||
+        emit_filter.top_count_take <= 0 || nrows <= 0 ||
+        nrows > UINT32_MAX)
+        return NULL;
+
+    const uint32_t cap = 8192;
+    const uint32_t hcap = cap * 2u;
+    const int32_t* data = (const int32_t*)ctx->kbase;
+    ray_t *keys_hdr = NULL, *cnt_hdr = NULL, *exact_hdr = NULL, *ht_hdr = NULL;
+    int32_t* keys = (int32_t*)scratch_alloc(&keys_hdr, cap * sizeof(int32_t));
+    uint32_t* counts = (uint32_t*)scratch_calloc(&cnt_hdr, cap * sizeof(uint32_t));
+    uint32_t* exact = (uint32_t*)scratch_calloc(&exact_hdr, cap * sizeof(uint32_t));
+    uint32_t* ht = (uint32_t*)scratch_calloc(&ht_hdr, hcap * sizeof(uint32_t));
+    if (!keys || !counts || !exact || !ht) {
+        if (keys_hdr) scratch_free(keys_hdr);
+        if (cnt_hdr) scratch_free(cnt_hdr);
+        if (exact_hdr) scratch_free(exact_hdr);
+        if (ht_hdr) scratch_free(ht_hdr);
+        return NULL;
+    }
+
+    uint32_t n = 0;
+    uint32_t decrements = 0;
+    uint32_t hmask = hcap - 1u;
+    for (int64_t r = 0; r < nrows; r++) {
+        int32_t key = data[r];
+        uint32_t found = fp_i32_mg_lookup(keys, ht, hmask, key);
+        if (found) {
+            counts[found - 1u]++;
+            continue;
+        }
+        if (n < cap) {
+            uint32_t idx = n++;
+            keys[idx] = key;
+            counts[idx] = 1;
+            uint32_t slot = fp_i32_hash_slot(key, hmask);
+            while (ht[slot]) slot = (slot + 1u) & hmask;
+            ht[slot] = idx + 1u;
+            continue;
+        }
+        uint32_t out = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t c = counts[i];
+            if (c > 1) {
+                counts[out] = c - 1u;
+                keys[out] = keys[i];
+                out++;
+            }
+        }
+        n = out;
+        decrements++;
+        fp_i32_mg_rebuild(keys, counts, n, ht, hcap);
+    }
+
+    memset(exact, 0, cap * sizeof(uint32_t));
+    for (int64_t r = 0; r < nrows; r++) {
+        uint32_t found = fp_i32_mg_lookup(keys, ht, hmask, data[r]);
+        if (found) exact[found - 1u]++;
+    }
+
+    int64_t k_take = emit_filter.top_count_take;
+    if (k_take > 1024) k_take = 1024;
+    int64_t heap[1024];
+    int64_t heap_n = 0;
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!exact[i]) continue;
+        nonzero++;
+        fp_count_heap_consider(heap, &heap_n, k_take, (int64_t)exact[i]);
+    }
+    if (heap_n == 0) {
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return NULL;
+    }
+    int64_t keep_min = emit_filter.min_count_exclusive + 1;
+    if (heap_n == k_take && heap[0] > keep_min)
+        keep_min = heap[0];
+
+    /* Misra-Gries guarantees every key with count > n/(cap+1) survives.
+     * If the output cutoff is not above that bound, an omitted key could
+     * tie the emitted tail, so fall back to the full exact path. */
+    if (decrements && keep_min <= nrows / (int64_t)(cap + 1u)) {
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return NULL;
+    }
+
+    uint32_t out_n = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if ((int64_t)exact[i] >= keep_min) out_n++;
+    if (!out_n || (decrements && nonzero < (uint32_t)k_take)) {
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return NULL;
+    }
+
+    ray_t* k_out = ray_vec_new(ctx->kt, out_n);
+    ray_t* c_out = ray_vec_new(RAY_I64, out_n);
+    if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
+        if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
+        if (c_out && !RAY_IS_ERR(c_out)) ray_release(c_out);
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return ray_error("oom", NULL);
+    }
+    k_out->len = out_n;
+    c_out->len = out_n;
+    int32_t* kd = (int32_t*)ray_data(k_out);
+    int64_t* cd = (int64_t*)ray_data(c_out);
+    uint32_t oi = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if ((int64_t)exact[i] < keep_min) continue;
+        kd[oi] = keys[i];
+        cd[oi] = exact[i];
+        oi++;
+    }
+    scratch_free(keys_hdr); scratch_free(cnt_hdr);
+    scratch_free(exact_hdr); scratch_free(ht_hdr);
+
+    ray_t* result = ray_table_new(2);
+    if (!result || RAY_IS_ERR(result)) {
+        ray_release(k_out);
+        ray_release(c_out);
+        return ray_error("oom", NULL);
+    }
+    int64_t cnt_sym = ray_sym_intern("count", 5);
+    result = ray_table_add_col(result, key_sym, k_out);
+    result = ray_table_add_col(result, cnt_sym, c_out);
+    ray_release(k_out);
+    ray_release(c_out);
+    return result;
+}
 
 static void fp_direct_count_fn(void* raw, uint32_t worker_id,
                                int64_t start, int64_t end) {
@@ -945,6 +1227,24 @@ static void fp_direct_count_fn(void* raw, uint32_t worker_id,
         int64_t mend = row + RAY_MORSEL_ELEMS;
         if (mend > end) mend = end;
         int64_t mlen = mend - row;
+        if (c->pred_key_ne_zero) {
+            if (c->kt == RAY_I16) {
+                const int16_t* k = (const int16_t*)c->kbase + row;
+                for (int64_t r = 0; r < mlen; r++)
+                    if (k[r]) counts[(uint32_t)((int32_t)k[r] + c->bias)]++;
+            } else if (c->kt == RAY_SYM) {
+                for (int64_t r = 0; r < mlen; r++) {
+                    uint32_t key = (uint32_t)read_by_esz(c->kbase, row + r, c->kesz);
+                    if (key) counts[key]++;
+                }
+            } else {
+                const uint8_t* k = (const uint8_t*)c->kbase + row;
+                for (int64_t r = 0; r < mlen; r++)
+                    if (k[r]) counts[(uint32_t)k[r]]++;
+            }
+            row = mend;
+            continue;
+        }
         uint8_t bits[RAY_MORSEL_ELEMS];
         fp_eval_pred(c->pred, row, mend, bits);
         if (c->kt == RAY_I16) {
@@ -971,9 +1271,228 @@ static ray_t* fp_try_direct_count1(const fp_par_ctx_t* ctx, int64_t nrows,
     } else if (ctx->kt == RAY_I16) {
         n_slots = 65536;
         bias = 32768;
+    } else if (ctx->kt == RAY_I32) {
+        ray_group_emit_filter_t emit_filter = ray_group_emit_filter_get();
+        if (emit_filter.enabled && emit_filter.agg_index == 0 &&
+            emit_filter.top_count_take > 0) {
+            ray_t* mg = fp_try_i32_mg_top_count(ctx, nrows, key_sym, emit_filter);
+            if (mg) return mg;
+        }
+        return NULL;
+    } else if (ctx->kt == RAY_SYM) {
+        uint64_t max_key = 0;
+        for (int64_t i = 0; i < nrows; i++) {
+            uint64_t key = (uint64_t)read_by_esz(ctx->kbase, i, ctx->kesz);
+            if (key > max_key)
+                max_key = key;
+        }
+        if (max_key >= UINT32_MAX)
+            return NULL;
+        n_slots = (uint32_t)(max_key + 1);
+        if (n_slots == 0)
+            return NULL;
     } else {
         return NULL;
     }
+
+    uint8_t pred_key_ne_zero = 0;
+    if (ctx->pred.n_children == 1) {
+        const fp_cmp_t* cmp = &ctx->pred.children[0];
+        pred_key_ne_zero = cmp->op == FP_NE &&
+            cmp->fold == FP_FOLD_NONE &&
+            cmp->cval == 0 &&
+            cmp->col_base == ctx->kbase &&
+            cmp->col_type == ctx->kt &&
+            ray_sym_elem_size(cmp->col_type, cmp->col_attrs) == ctx->kesz;
+    }
+
+    ray_group_emit_filter_t emit_filter = ray_group_emit_filter_get();
+    bool use_emit_filter = emit_filter.enabled && emit_filter.agg_index == 0;
+    if (ctx->kt == RAY_I16 && pred_key_ne_zero && use_emit_filter &&
+        emit_filter.top_count_take > 0 && nrows <= UINT32_MAX) {
+        const int16_t* key16 = (const int16_t*)ctx->kbase;
+        ray_t* counts_hdr = NULL;
+        uint32_t* counts = (uint32_t*)scratch_calloc(&counts_hdr,
+            (size_t)nw * (size_t)n_slots * sizeof(uint32_t));
+        if (!counts) return ray_error("oom", NULL);
+
+        fp_i16_ne0_u32_count_ctx_t c32 = {
+            .key = key16,
+            .n_slots = n_slots,
+            .bias = bias,
+            .counts = counts,
+        };
+        ray_pool_t* pool = ray_pool_get();
+        if (pool) ray_pool_dispatch(pool, fp_i16_ne0_u32_count_fn, &c32, nrows);
+        else      fp_i16_ne0_u32_count_fn(&c32, 0, 0, nrows);
+
+        ray_t* totals_hdr = NULL;
+        uint32_t* totals = (uint32_t*)scratch_calloc(&totals_hdr,
+            (size_t)n_slots * sizeof(uint32_t));
+        if (!totals) {
+            scratch_free(counts_hdr);
+            return ray_error("oom", NULL);
+        }
+        int64_t total_groups = 0;
+        for (uint32_t s = 0; s < n_slots; s++) {
+            uint32_t total = 0;
+            for (uint32_t w = 0; w < nw; w++)
+                total += counts[(size_t)w * n_slots + s];
+            totals[s] = total;
+            if (total) total_groups++;
+        }
+
+        int64_t k_take = emit_filter.top_count_take;
+        int64_t keep_min = emit_filter.min_count_exclusive + 1;
+        if (total_groups > k_take && k_take > 0) {
+            int64_t heap[1024];
+            int64_t heap_n = 0;
+            if (k_take > (int64_t)(sizeof(heap) / sizeof(heap[0])))
+                k_take = (int64_t)(sizeof(heap) / sizeof(heap[0]));
+            for (uint32_t s = 0; s < n_slots; s++) {
+                uint32_t total = totals[s];
+                if ((int64_t)total >= keep_min)
+                    fp_count_heap_consider(heap, &heap_n, k_take, (int64_t)total);
+            }
+            if (heap_n == k_take && heap[0] > keep_min)
+                keep_min = heap[0];
+        }
+
+        int64_t out_n = 0;
+        for (uint32_t s = 0; s < n_slots; s++)
+            if ((int64_t)totals[s] >= keep_min) out_n++;
+
+        ray_t* k_out = ray_vec_new(ctx->kt, out_n);
+        ray_t* c_out = ray_vec_new(RAY_I64, out_n);
+        if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
+            if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
+            if (c_out && !RAY_IS_ERR(c_out)) ray_release(c_out);
+            scratch_free(totals_hdr);
+            scratch_free(counts_hdr);
+            return ray_error("oom", NULL);
+        }
+        k_out->len = out_n;
+        c_out->len = out_n;
+        void* k_dst = ray_data(k_out);
+        int64_t* c_dst = (int64_t*)ray_data(c_out);
+        int64_t oi = 0;
+        for (uint32_t s = 0; s < n_slots; s++) {
+            uint32_t total = totals[s];
+            if ((int64_t)total < keep_min) continue;
+            write_col_i64(k_dst, oi, (int64_t)s - bias, ctx->kt, ctx->katt);
+            c_dst[oi++] = (int64_t)total;
+        }
+        scratch_free(totals_hdr);
+        scratch_free(counts_hdr);
+
+        ray_t* result = ray_table_new(2);
+        if (!result || RAY_IS_ERR(result)) {
+            ray_release(k_out);
+            ray_release(c_out);
+            return ray_error("oom", NULL);
+        }
+        int64_t cnt_sym = ray_sym_intern("count", 5);
+        result = ray_table_add_col(result, key_sym, k_out);
+        result = ray_table_add_col(result, cnt_sym, c_out);
+        ray_release(k_out);
+        ray_release(c_out);
+        return result;
+    }
+    if (ctx->kt == RAY_SYM && pred_key_ne_zero && use_emit_filter &&
+        emit_filter.top_count_take > 0) {
+        if ((uint64_t)n_slots > (256ULL << 20) / sizeof(uint32_t))
+            return NULL;
+        ray_t* counts_hdr = NULL;
+        uint32_t* counts = (uint32_t*)scratch_calloc(&counts_hdr,
+            (size_t)n_slots * sizeof(uint32_t));
+        if (!counts) return ray_error("oom", NULL);
+
+        for (int64_t i = 0; i < nrows; i++) {
+            uint32_t key = (uint32_t)read_by_esz(ctx->kbase, i, ctx->kesz);
+            if (key)
+                counts[key]++;
+        }
+
+        int64_t k_take = emit_filter.top_count_take;
+        uint32_t heap[1024];
+        int64_t heap_n = 0;
+        if (k_take > (int64_t)(sizeof(heap) / sizeof(heap[0])))
+            k_take = (int64_t)(sizeof(heap) / sizeof(heap[0]));
+        int64_t total_groups = 0;
+        uint32_t keep_min = emit_filter.min_count_exclusive > 0
+            ? (uint32_t)(emit_filter.min_count_exclusive + 1)
+            : 1u;
+        for (uint32_t s = 0; s < n_slots; s++) {
+            uint32_t c = counts[s];
+            if (!c) continue;
+            total_groups++;
+            if (heap_n < k_take) {
+                int64_t j = heap_n++;
+                heap[j] = c;
+                while (j > 0) {
+                    int64_t p = (j - 1) >> 1;
+                    if (heap[p] <= heap[j]) break;
+                    uint32_t tmp = heap[p]; heap[p] = heap[j]; heap[j] = tmp;
+                    j = p;
+                }
+            } else if (k_take > 0 && c > heap[0]) {
+                heap[0] = c;
+                int64_t j = 0;
+                for (;;) {
+                    int64_t l = j * 2 + 1, r = l + 1, m = j;
+                    if (l < heap_n && heap[l] < heap[m]) m = l;
+                    if (r < heap_n && heap[r] < heap[m]) m = r;
+                    if (m == j) break;
+                    uint32_t tmp = heap[m]; heap[m] = heap[j]; heap[j] = tmp;
+                    j = m;
+                }
+            }
+        }
+        if (heap_n == k_take && heap_n > 0 && heap[0] > keep_min)
+            keep_min = heap[0];
+
+        int64_t out_n = 0;
+        for (uint32_t s = 0; s < n_slots; s++)
+            if (counts[s] >= keep_min) out_n++;
+
+        ray_t* k_out = ray_sym_vec_new(ctx->katt & RAY_SYM_W_MASK, out_n);
+        ray_t* c_out = ray_vec_new(RAY_I64, out_n);
+        if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
+            if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
+            if (c_out && !RAY_IS_ERR(c_out)) ray_release(c_out);
+            scratch_free(counts_hdr);
+            return ray_error("oom", NULL);
+        }
+        k_out->len = out_n;
+        c_out->len = out_n;
+        void* k_dst = ray_data(k_out);
+        int64_t* c_dst = (int64_t*)ray_data(c_out);
+        int64_t oi = 0;
+        for (uint32_t s = 0; s < n_slots; s++) {
+            uint32_t c = counts[s];
+            if (c < keep_min) continue;
+            write_col_i64(k_dst, oi, (int64_t)s, ctx->kt, ctx->katt);
+            c_dst[oi++] = (int64_t)c;
+        }
+        scratch_free(counts_hdr);
+
+        ray_t* result = ray_table_new(2);
+        if (!result || RAY_IS_ERR(result)) {
+            ray_release(k_out);
+            ray_release(c_out);
+            return ray_error("oom", NULL);
+        }
+        int64_t cnt_sym = ray_sym_intern("count", 5);
+        result = ray_table_add_col(result, key_sym, k_out);
+        result = ray_table_add_col(result, cnt_sym, c_out);
+        ray_release(k_out);
+        ray_release(c_out);
+        (void)total_groups;
+        return result;
+    }
+
+    if (ctx->kt == RAY_SYM)
+        return NULL;
 
     ray_t* counts_hdr = NULL;
     int64_t* counts = (int64_t*)scratch_calloc(&counts_hdr,
@@ -987,6 +1506,7 @@ static ray_t* fp_try_direct_count1(const fp_par_ctx_t* ctx, int64_t nrows,
         .kesz = ctx->kesz,
         .n_slots = n_slots,
         .bias = bias,
+        .pred_key_ne_zero = pred_key_ne_zero,
         .counts = counts,
     };
 
@@ -995,8 +1515,6 @@ static ray_t* fp_try_direct_count1(const fp_par_ctx_t* ctx, int64_t nrows,
     else      fp_direct_count_fn(&dctx, 0, 0, nrows);
 
     int64_t out_n = 0;
-    ray_group_emit_filter_t emit_filter = ray_group_emit_filter_get();
-    bool use_emit_filter = emit_filter.enabled && emit_filter.agg_index == 0;
     int64_t keep_min = emit_filter.min_count_exclusive + 1;
     ray_t* totals_hdr = NULL;
     int64_t* totals = NULL;
@@ -1692,14 +2210,27 @@ typedef struct {
     int8_t        in_type;
     uint8_t       in_attrs;
     uint8_t       in_esz;
+    uint8_t       in_strlen;
     /* 1 when in_type stores an unsigned narrow value (U8/BOOL); 0 for
      * signed widths (I16/I32/I64/DATE/TIME/TIMESTAMP).  Used to
      * sign-extend correctly in SUM/MIN/MAX/AVG so a stored -1 reads as
      * -1 and not 65535. */
     uint8_t       in_unsigned;
     const void*   in_base;
+    ray_t**       sym_strings;
+    uint32_t      sym_count;
     uint8_t       state_off;
 } mk_agg_t;
+
+static inline int64_t mk_read_agg_i64(const mk_agg_t* ag, int64_t row) {
+    if (ag->in_strlen) {
+        uint64_t id = (uint64_t)read_by_esz(ag->in_base, row, ag->in_esz);
+        if (id < ag->sym_count && ag->sym_strings && ag->sym_strings[id])
+            return (int64_t)ray_str_len(ag->sym_strings[id]);
+        return 0;
+    }
+    return read_signed_by_esz(ag->in_base, row, ag->in_esz, ag->in_unsigned);
+}
 
 typedef struct {
     int8_t      type;
@@ -1741,6 +2272,11 @@ typedef struct {
     mk_key_t    keys[FP_MAX_KEYS];
     mk_agg_t    aggs[FP_MAX_AGGS];
 } mk_par_ctx_t;
+
+typedef struct {
+    mk_par_ctx_t* ctx;
+    uint8_t       eq_idx;
+} mk_eq_i64_count_ctx_t;
 
 /* ─── Composite key compose ────────────────────────────────────────── */
 
@@ -1923,6 +2459,104 @@ static int mk_shard_grow(mk_shard_t* sh, uint8_t total_state, uint8_t wide) {
     return 0;
 }
 
+static inline int mk_count_upsert_row(mk_par_ctx_t* c, mk_shard_t* sh,
+                                      int64_t row) {
+    if (sh->n_filled + 1 > (int64_t)(sh->cap / 2)) {
+        if (mk_shard_grow(sh, c->total_state, c->wide) != 0)
+            return -1;
+    }
+
+    int64_t* slots = sh->slots;
+    int64_t* state = sh->state;
+    uint64_t mask = sh->mask;
+    uint64_t s;
+    if (!c->wide) {
+        int64_t kv = mk_compose_key(c, row);
+        uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+        h ^= h >> 33;
+        s = h & mask;
+        for (;;) {
+            if (!slots[s * 2]) {
+                slots[s * 2] = 1;
+                slots[s * 2 + 1] = kv;
+                state[s * c->total_state] = 1;
+                sh->n_filled++;
+                return 0;
+            }
+            if (slots[s * 2 + 1] == kv) {
+                state[s * c->total_state]++;
+                return 0;
+            }
+            s = (s + 1) & mask;
+        }
+    }
+
+    int64_t kv_lo, kv_hi;
+    mk_compose_key2(c, row, &kv_lo, &kv_hi);
+    uint64_t h = mk_hash_lo_hi(kv_lo, kv_hi);
+    s = h & mask;
+    for (;;) {
+        if (!slots[s * 2]) {
+            slots[s * 2] = 1;
+            slots[s * 2 + 1] = kv_lo;
+            sh->slots_hi[s] = kv_hi;
+            state[s * c->total_state] = 1;
+            sh->n_filled++;
+            return 0;
+        }
+        if (slots[s * 2 + 1] == kv_lo && sh->slots_hi[s] == kv_hi) {
+            state[s * c->total_state]++;
+            return 0;
+        }
+        s = (s + 1) & mask;
+    }
+}
+
+static int mk_find_i64_eq_child(const fp_pred_t* pred) {
+    for (uint8_t i = 0; i < pred->n_children; i++) {
+        const fp_cmp_t* cmp = &pred->children[i];
+        if (cmp->op == FP_EQ && cmp->fold == FP_FOLD_NONE &&
+            cmp->col_base && cmp->col_esz == 8 &&
+            cmp->col_type != RAY_SYM)
+            return (int)i;
+    }
+    return -1;
+}
+
+static void mk_eq_i64_count_fn(void* raw, uint32_t worker_id,
+                               int64_t start, int64_t end) {
+    mk_eq_i64_count_ctx_t* fc = (mk_eq_i64_count_ctx_t*)raw;
+    mk_par_ctx_t* c = fc->ctx;
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    mk_shard_t* sh = &c->shards[worker_id];
+    if (!sh->slots) {
+        if (mk_shard_init(sh, c->init_cap, c->total_state, c->wide) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+    }
+
+    const fp_cmp_t* eq = &c->pred.children[fc->eq_idx];
+    const int64_t* eq_col = (const int64_t*)eq->col_base;
+    int64_t eq_val = eq->cval;
+    for (int64_t row = start; row < end; row++) {
+        if (eq_col[row] != eq_val) continue;
+        uint8_t pass = 1;
+        for (uint8_t i = 0; i < c->pred.n_children; i++) {
+            if (i == fc->eq_idx) continue;
+            if (!fp_eval_cmp_one(&c->pred.children[i], row)) {
+                pass = 0;
+                break;
+            }
+        }
+        if (!pass) continue;
+        if (mk_count_upsert_row(c, sh, row) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
 /* ─── Worker fn — chunked vectorised aggregate update ───────────────
  *
  * Per morsel we run two passes:
@@ -2084,51 +2718,31 @@ static void mk_par_fn(void* raw, uint32_t worker_id, int64_t start, int64_t end)
                     state[slot_idx[i] * total_state + off]++;
                 break;
             case MK_AGG_SUM: {
-                const void* in_base = ag->in_base;
-                uint8_t in_esz = ag->in_esz;
-                int     in_uns = ag->in_unsigned;
                 for (int i = 0; i < match_count; i++) {
-                    int64_t v = read_signed_by_esz(in_base,
-                                                   base_row + src_rows[i],
-                                                   in_esz, in_uns);
+                    int64_t v = mk_read_agg_i64(ag, base_row + src_rows[i]);
                     state[slot_idx[i] * total_state + off] += v;
                 }
                 break;
             }
             case MK_AGG_MIN: {
-                const void* in_base = ag->in_base;
-                uint8_t in_esz = ag->in_esz;
-                int     in_uns = ag->in_unsigned;
                 for (int i = 0; i < match_count; i++) {
-                    int64_t v = read_signed_by_esz(in_base,
-                                                   base_row + src_rows[i],
-                                                   in_esz, in_uns);
+                    int64_t v = mk_read_agg_i64(ag, base_row + src_rows[i]);
                     int64_t* p = &state[slot_idx[i] * total_state + off];
                     if (v < *p) *p = v;
                 }
                 break;
             }
             case MK_AGG_MAX: {
-                const void* in_base = ag->in_base;
-                uint8_t in_esz = ag->in_esz;
-                int     in_uns = ag->in_unsigned;
                 for (int i = 0; i < match_count; i++) {
-                    int64_t v = read_signed_by_esz(in_base,
-                                                   base_row + src_rows[i],
-                                                   in_esz, in_uns);
+                    int64_t v = mk_read_agg_i64(ag, base_row + src_rows[i]);
                     int64_t* p = &state[slot_idx[i] * total_state + off];
                     if (v > *p) *p = v;
                 }
                 break;
             }
             case MK_AGG_AVG: {
-                const void* in_base = ag->in_base;
-                uint8_t in_esz = ag->in_esz;
-                int     in_uns = ag->in_unsigned;
                 for (int i = 0; i < match_count; i++) {
-                    int64_t v = read_signed_by_esz(in_base,
-                                                   base_row + src_rows[i],
-                                                   in_esz, in_uns);
+                    int64_t v = mk_read_agg_i64(ag, base_row + src_rows[i]);
                     state[slot_idx[i] * total_state + off    ] += v;
                     state[slot_idx[i] * total_state + off + 1] += 1;
                 }
@@ -2959,12 +3573,19 @@ static int mk_compile(ray_graph_t* g, ray_op_ext_t* ext, ray_t* tbl,
         state_off += (a->kind == MK_AGG_AVG) ? 2 : 1;
         if (a->kind == MK_AGG_COUNT) { a->in_type = -1; continue; }
         ray_op_t* in_op = ext->agg_ins[i];
+        uint8_t in_strlen = 0;
+        if (in_op && in_op->opcode == OP_STRLEN && in_op->arity == 1 &&
+            in_op->inputs[0]) {
+            in_strlen = 1;
+            in_op = in_op->inputs[0];
+        }
         if (!in_op || in_op->opcode != OP_SCAN) return -1;
         ray_op_ext_t* iext = find_ext(g, in_op->id);
         if (!iext) return -1;
         ray_t* col = ray_table_get_col(tbl, iext->sym);
         if (!col) return -1;
         if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return -1;
+        if (in_strlen && col->type != RAY_SYM) return -1;
         /* Aggregate inputs cannot carry nulls — the inlined per-row
          * init/accumulate in mk_par_fn treats every slot as a real
          * value, so a stored sentinel for null would corrupt
@@ -2972,15 +3593,18 @@ static int mk_compile(ray_graph_t* g, ray_op_ext_t* ext, ray_t* tbl,
          * null-aware aggregate kernels. */
         if (col->attrs & RAY_ATTR_HAS_NULLS) return -1;
         int8_t ct = col->type;
-        if (ct != RAY_BOOL && ct != RAY_U8 && ct != RAY_I16
+        if (!in_strlen && ct != RAY_BOOL && ct != RAY_U8 && ct != RAY_I16
             && ct != RAY_I32 && ct != RAY_I64
             && ct != RAY_DATE && ct != RAY_TIME && ct != RAY_TIMESTAMP)
             return -1;
         a->in_type = ct;
         a->in_attrs = col->attrs;
         a->in_esz = ray_sym_elem_size(ct, col->attrs);
+        a->in_strlen = in_strlen;
         a->in_base = ray_data(col);
         a->in_unsigned = (ct == RAY_BOOL || ct == RAY_U8) ? 1 : 0;
+        if (in_strlen)
+            ray_sym_strings_borrow(&a->sym_strings, &a->sym_count);
     }
     ctx->total_state = state_off;
     ctx->n_aggs = ext->n_aggs;
@@ -3054,8 +3678,23 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
                                              (size_t)nw * sizeof(mk_shard_t));
     if (!ctx.shards) return ray_error("oom", NULL);
 
-    if (pool) ray_pool_dispatch(pool, mk_par_fn, &ctx, nrows);
-    else      mk_par_fn(&ctx, 0, 0, nrows);
+    int eq_i64_idx = -1;
+    if (ctx.n_aggs == 1 && ctx.aggs[0].kind == MK_AGG_COUNT &&
+        ctx.pred.n_children > 1) {
+        eq_i64_idx = mk_find_i64_eq_child(&ctx.pred);
+    }
+    if (eq_i64_idx >= 0) {
+        mk_eq_i64_count_ctx_t fctx = {
+            .ctx = &ctx,
+            .eq_idx = (uint8_t)eq_i64_idx,
+        };
+        if (pool) ray_pool_dispatch(pool, mk_eq_i64_count_fn, &fctx, nrows);
+        else      mk_eq_i64_count_fn(&fctx, 0, 0, nrows);
+    } else if (pool) {
+        ray_pool_dispatch(pool, mk_par_fn, &ctx, nrows);
+    } else {
+        mk_par_fn(&ctx, 0, 0, nrows);
+    }
 
     if (atomic_load_explicit(&ctx.oom, memory_order_relaxed)) {
         for (uint32_t w = 0; w < nw; w++) mk_shard_free(&ctx.shards[w]);
