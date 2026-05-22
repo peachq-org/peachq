@@ -481,7 +481,7 @@ static ray_t* parse_name(ray_parser_t *p) {
     /* null is handled as a name that resolves to NULL at eval time */
 
     /* Return as name symbol (with RAY_ATTR_NAME flag) */
-    int64_t id = ray_sym_intern(start, len);
+    int64_t id = ray_sym_intern_runtime(start, len);
     ray_t* s = ray_sym(id);
     if (!RAY_IS_ERR(s)) s->attrs |= RAY_ATTR_NAME;
     return s;
@@ -693,7 +693,7 @@ static ray_t* parse_dict(ray_parser_t *p) {
             p->col += (int32_t)(p->pos - kstart);
             size_t klen = (size_t)(p->pos - kstart);
             if (klen == 0) { ray_release(key_list); ray_release(vals); return ray_error("parse", NULL); }
-            int64_t kid = ray_sym_intern(kstart, klen);
+            int64_t kid = ray_sym_intern_runtime(kstart, klen);
             key_atom = ray_sym(kid);
             if (RAY_IS_ERR(key_atom)) { ray_release(key_list); ray_release(vals); return key_atom; }
             all_str = false;
@@ -803,7 +803,7 @@ static ray_t* parse_expr(ray_parser_t *p) {
                 p->pos++;
             size_t klen = (size_t)(p->pos - kstart);
             if (klen == 0) { result = ray_error("parse", "empty keyword"); break; }
-            int64_t kid = ray_sym_intern(kstart, klen);
+            int64_t kid = ray_sym_intern_runtime(kstart, klen);
             result = ray_sym(kid);
             break;
         }
