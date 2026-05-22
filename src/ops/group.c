@@ -243,6 +243,46 @@ static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_t
      * and the last worker's last is the global last. */
 }
 
+typedef struct {
+    ray_t*       input;
+    const void*  data;
+    int64_t      len;
+    int8_t       type;
+    uint8_t      attrs;
+    reduce_acc_t acc;
+} reduce_cache_entry_t;
+
+static reduce_cache_entry_t g_reduce_cache[16];
+static uint32_t g_reduce_cache_next = 0;
+
+static bool reduce_cache_allowed(ray_t* input, const int64_t* sel_idx) {
+    return input && input->mmod != 0 && sel_idx == NULL;
+}
+
+static bool reduce_cache_get(ray_t* input, reduce_acc_t* out) {
+    const void* data = ray_data(input);
+    for (size_t i = 0; i < sizeof(g_reduce_cache) / sizeof(g_reduce_cache[0]); i++) {
+        reduce_cache_entry_t* e = &g_reduce_cache[i];
+        if (e->input == input && e->data == data && e->len == input->len &&
+            e->type == input->type && e->attrs == input->attrs) {
+            *out = e->acc;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void reduce_cache_put(ray_t* input, const reduce_acc_t* acc) {
+    reduce_cache_entry_t* e = &g_reduce_cache[
+        g_reduce_cache_next++ % (sizeof(g_reduce_cache) / sizeof(g_reduce_cache[0]))];
+    e->input = input;
+    e->data = ray_data(input);
+    e->len = input->len;
+    e->type = input->type;
+    e->attrs = input->attrs;
+    e->acc = *acc;
+}
+
 /* Hash mixing constants used by the count-distinct kernel and helpers. */
 #define CD_HASH_K1 0x9E3779B97F4A7C15ULL
 #define CD_HASH_K2 0xBF58476D1CE4E5B9ULL
@@ -536,6 +576,44 @@ static int64_t cd_seq_count(int8_t in_type, uint8_t in_attrs,
     return count;
 }
 
+static int64_t cd_sym_dense_count(ray_t* input) {
+    uint32_t nsyms = ray_sym_count();
+    if (nsyms == 0) return 0;
+
+    ray_t* seen_hdr = NULL;
+    uint8_t* seen = (uint8_t*)scratch_calloc(&seen_hdr, (size_t)nsyms);
+    if (!seen) return -1;
+
+    const void* base = ray_data(input);
+    int64_t distinct = 0;
+    int64_t len = input->len;
+    uint8_t esz = ray_sym_elem_size(input->type, input->attrs);
+
+#define CD_SYM_DENSE_LOOP(T) do {                                      \
+        const T* ids = (const T*)base;                                  \
+        for (int64_t i = 0; i < len; i++) {                             \
+            uint64_t id = (uint64_t)ids[i];                             \
+            if (RAY_UNLIKELY(id >= nsyms)) {                            \
+                scratch_free(seen_hdr);                                 \
+                return -2;                                              \
+            }                                                           \
+            if (!seen[id]) { seen[id] = 1; distinct++; }                \
+        }                                                               \
+    } while (0)
+
+    switch (esz) {
+    case 1:  CD_SYM_DENSE_LOOP(uint8_t);  break;
+    case 2:  CD_SYM_DENSE_LOOP(uint16_t); break;
+    case 4:  CD_SYM_DENSE_LOOP(uint32_t); break;
+    default: CD_SYM_DENSE_LOOP(uint64_t); break;
+    }
+
+#undef CD_SYM_DENSE_LOOP
+
+    scratch_free(seen_hdr);
+    return distinct;
+}
+
 /* Hash-based count distinct for integer/float columns.
  *
  * Strategy:
@@ -581,6 +659,12 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
     void* base = ray_data(input);
     ray_pool_t* pool = ray_pool_get();
+
+    if (in_type == RAY_SYM) {
+        int64_t cnt = cd_sym_dense_count(input);
+        if (cnt >= 0) return ray_i64(cnt);
+        if (cnt == -1) return ray_error("oom", NULL);
+    }
 
     /* Small-input fast path: per-row dispatch overhead would dwarf the
      * actual work. */
@@ -1242,16 +1326,15 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
  * the task allocates a stack-or-heap-backed double slice, reads
  * src[idx_buf[off+i]] into it, then runs ray_median_dbl_inplace.
  *
- * Why this layout — and why it matches DuckDB without paying their
- * realloc-per-group price:
- *   - DuckDB's holistic quantile aggregate accumulates a per-group
- *     vector<INPUT_TYPE> during the radix probe; each insert is a
- *     potential vector grow.  At finalize it nth_element's each group's
- *     vector in parallel.
+ * Why this layout avoids the realloc-per-group price:
+ *   - A conventional holistic quantile aggregate accumulates a per-group
+ *     value vector during the radix probe; each insert is a potential
+ *     vector grow.  Finalization then nth_element's each group vector
+ *     in parallel.
  *   - rayforce's radix probe (see idxbuf_par_fn) already produced
- *     prefix-summed group-contiguous indices.  So we skip DuckDB's
- *     vector-grow phase entirely — we just dispatch n_groups tasks
- *     that each gather values + quickselect.
+ *     prefix-summed group-contiguous indices.  So we skip the vector-grow
+ *     phase entirely; each dispatched group task gathers values and
+ *     quickselects.
  *
  * Cache behaviour: the inner loop reads src[idx_buf[off+i]] for a
  * single group, then quickselects the resulting slice.  The slice is
@@ -1261,7 +1344,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
  * parallel tasks on other cores — the 27-core dispatch hides them.
  *
  * Type support: F64 native; I64/I32/I16/U8 cast-to-double on read.
- * Null rows are skipped (pairwise complete, matching DuckDB).
+ * Null rows are skipped pairwise.
  *
  * Returns: F64 vec of length n_groups, or NULL on unsupported type
  * (caller must fall back).  On error returns RAY_IS_ERR ptr.
@@ -1772,6 +1855,18 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         return ray_i64(read_col_i64(base, row, in_type, input->attrs));
     }
 
+    reduce_acc_t cached;
+    if ((op->opcode == OP_MIN || op->opcode == OP_MAX) &&
+        reduce_cache_allowed(input, sel_idx) &&
+        reduce_cache_get(input, &cached)) {
+        if (sel_idx_block) ray_release(sel_idx_block);
+        return op->opcode == OP_MIN
+            ? reduction_extreme_result(op, in_type, cached.cnt > 0,
+                                       cached.min_f, cached.min_i)
+            : reduction_extreme_result(op, in_type, cached.cnt > 0,
+                                       cached.max_f, cached.max_i);
+    }
+
     ray_pool_t* pool = ray_pool_get();
     if (pool && scan_n >= RAY_PARALLEL_THRESHOLD) {
         uint32_t nw = ray_pool_total_workers(pool);
@@ -1807,6 +1902,9 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                 break;
             }
         }
+
+        if (reduce_cache_allowed(input, sel_idx))
+            reduce_cache_put(input, &merged);
 
         ray_t* result;
         switch (op->opcode) {
@@ -1847,6 +1945,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     reduce_acc_init(&acc);
     reduce_range(input, 0, scan_n, &acc, has_nulls, sel_idx);
     if (sel_idx_block) ray_release(sel_idx_block);
+    if (reduce_cache_allowed(input, sel_idx))
+        reduce_cache_put(input, &acc);
 
     switch (op->opcode) {
         case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : ray_i64(acc.sum_i);
@@ -3361,6 +3461,8 @@ typedef struct {
     uint32_t       n_slots;
     const int64_t* match_idx;    /* NULL = no selection */
     ray_t*         rowsel;
+    ray_t**        sym_strings;  /* borrowed sym snapshot for strlen-on-SYM aggs */
+    uint32_t       sym_count;
 } da_ctx_t;
 
 typedef struct {
@@ -3946,7 +4048,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             if (!c->agg_ptrs[a]) continue;
             size_t idx = base + a;
             if (c->agg_strlen && c->agg_strlen[a]) {
-                acc->sum[idx].i += group_strlen_at(c->agg_cols[a], r);
+                acc->sum[idx].i += group_strlen_at_cached(
+                    c->agg_cols[a], r, c->sym_strings, c->sym_count);
                 if (nn) nn[idx]++;
             } else if (f64m & (1u << a)) {
                 /* NaN payload = null, skip from sum. */
@@ -3992,7 +4095,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
         size_t idx = base + a;
         double fv; int64_t iv;
         if (c->agg_strlen && c->agg_strlen[a]) {
-            iv = group_strlen_at(c->agg_cols[a], r);
+            iv = group_strlen_at_cached(c->agg_cols[a], r,
+                                        c->sym_strings, c->sym_count);
             fv = (double)iv;
         } else {
             da_read_val(c->agg_ptrs[a], c->agg_types[a], 0, r, &fv, &iv);
@@ -5321,6 +5425,11 @@ da_path:;
     #define DA_PER_WORKER_MAX  (6ULL << 20)    /* 6 MB per-worker max */
     {
         bool da_eligible = (nrows > 0 && n_keys > 0 && n_keys <= 8);
+        if (da_eligible && rowsel && n_keys == 1) {
+            ray_rowsel_t* sm = ray_rowsel_meta(rowsel);
+            if (sm && sm->total_pass * 4 < nrows)
+                da_eligible = false;
+        }
         /* Binary aggregators (OP_PEARSON_CORR) are not wired into the
          * dense-array accumulator's per-worker da_accum_t struct — force
          * the HT path which has the row-layout offsets allocated.
@@ -5590,8 +5699,23 @@ da_path:;
             for (uint8_t k = 0; k < n_keys; k++)
                 da_key_esz[k] = ray_sym_elem_size(key_types[k], key_attrs[k]);
 
+            /* strlen-on-SYM aggs (e.g. avg(strlen URL)) read the sym
+             * string per row.  ray_sym_str takes a lock per call — 10M
+             * rows = 10M locked dict lookups.  Borrow the sym snapshot
+             * once and let da_accum_row index it lock-free. */
+            ray_t** da_sym_strings = NULL;
+            uint32_t da_sym_count = 0;
+            for (uint8_t a = 0; a < n_aggs; a++) {
+                if (agg_strlen[a] && agg_vecs[a] &&
+                    agg_vecs[a]->type == RAY_SYM) {
+                    ray_sym_strings_borrow(&da_sym_strings, &da_sym_count);
+                    break;
+                }
+            }
             da_ctx_t da_ctx = {
                 .accums      = accums,
+                .sym_strings = da_sym_strings,
+                .sym_count   = da_sym_count,
                 .n_accums    = da_n_workers,
                 .key_ptrs    = key_data,
                 .key_types   = key_types,
@@ -5968,7 +6092,9 @@ da_path:;
                 (emit_filter.min_count_exclusive > 0 ||
                  emit_filter.top_count_take > 0) &&
                 n_scan <= UINT32_MAX) {
-                uint64_t cap = 1u << 20;
+                uint64_t cap = key_esz == 1 ? 256u
+                             : key_esz == 2 ? (1u << 16)
+                             : (1u << 20);
                 const uint64_t max_dense_cap = 1u << 24;
                 bool count_only_first = (key_types[0] == RAY_SYM);
                 ray_t *cnt_hdr = NULL, *range_sum_hdr = NULL;
@@ -6427,6 +6553,7 @@ dyn_dense_done:
             if (use_emit_filter &&
                 (emit_filter.min_count_exclusive > 0 ||
                  emit_filter.top_count_take > 0)) {
+                if (n_scan > (1 << 21)) goto ht_path;
                 uint64_t expected = (uint64_t)nrows / 64u;
                 if (expected < 4096) expected = 4096;
                 if (expected > (1u << 20)) expected = (1u << 20);
@@ -6968,6 +7095,11 @@ ht_path:;
                                         for (uint16_t k = 0; k < n_keys; k++)
                                             scratch_free(hk[k]);
                                         scratch_free(hc);
+
+                                        for (uint32_t hi = 0; hi < heavy_count; hi++) {
+                                            char* row = top_ht.rows + (size_t)hi * ght_layout.row_stride;
+                                            *(int64_t*)row = 0;
+                                        }
 
                                         for (int64_t i = 0; i < n_scan; i++) {
                                             int64_t r = match_idx ? match_idx[i] : i;
@@ -9216,16 +9348,14 @@ static void grpt_phase1_fn(void* ctx_v, uint32_t worker_id,
     bool vnulls = c->val_has_nulls;
 
     for (int64_t r = start; r < end; r++) {
-        /* Skip null value rows (match standalone `top` and DuckDB WHERE
-         * v IS NOT NULL). */
+        /* Skip null value rows, matching standalone `top` and SQL-style
+         * WHERE v IS NOT NULL behavior. */
         if (vnulls && grpt_is_null(vbase, vt, vattrs, r)) continue;
-        /* Skip null keys too: matches the OP_TOP_N path's effective
-         * behaviour and DuckDB's groupby semantics where NULL keys form
-         * a discarded group (we mirror DuckDB which drops null-key rows
-         * from windowed top-K).  Canonical q8 has no null id6, so no
-         * correctness impact on the bench path; small-data fixtures with
-         * null id6 are routed away by the type-restriction in the
-         * planner (no SYM keys). */
+        /* Skip null keys too: this matches the OP_TOP_N path's effective
+         * behavior where null-key rows are discarded for windowed top-K.
+         * Canonical q8 has no null id6, so no correctness impact on the
+         * bench path; small-data fixtures with null id6 are routed away
+         * by the type-restriction in the planner (no SYM keys). */
         if (knulls && grpt_is_null(kbase, kt, kattrs, r)) continue;
         int64_t key_bits = grpt_key_read(kbase, kt, r);
         uint64_t h = grpt_key_hash(key_bits, kt);
@@ -11901,4 +12031,3 @@ ray_t* exec_group_sum_count_rowform(ray_graph_t* g, ray_op_t* op) {
 
     return result;
 }
-
