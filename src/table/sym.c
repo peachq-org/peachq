@@ -91,6 +91,7 @@ typedef struct {
 
 static sym_table_t g_sym;
 static _Atomic(bool) g_sym_inited = false;
+static bool sym_lazy_materialize_to_locked(uint32_t target_id);
 
 /* Spinlock protecting g_sym mutations in ray_sym_intern */
 static _Atomic(int) g_sym_lock = 0;
@@ -143,7 +144,8 @@ static ray_t* sym_str_arena(ray_arena_t* arena, const char* s, size_t len) {
 /* Forward decl — used from ray_sym_init below to reserve sym ID 0 as
  * the canonical empty string.  Definition is further down with the
  * other intern helpers. */
-static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len);
+static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len,
+                                 bool search_lazy);
 
 /* --------------------------------------------------------------------------
  * ray_sym_init
@@ -216,7 +218,7 @@ ray_err_t ray_sym_init(void) {
      * meaningless on SYM and is rejected on set.  Done before
      * returning so every subsequent intern observes ID 0 as taken. */
     int64_t empty_id = sym_intern_nolock(
-        (uint32_t)ray_hash_bytes("", 0), "", 0);
+        (uint32_t)ray_hash_bytes("", 0), "", 0, true);
     if (empty_id != 0) {
         /* Should be unreachable — table just initialised, no other
          * thread has touched it yet.  If it ever fires, fail loudly. */
@@ -366,7 +368,8 @@ static bool sym_grow_str_cap(uint32_t new_cap) {
  * that are defined further down in the file.  ray_sym_bytes_upper is
  * declared in sym.h as a public inline so both the intern path and the
  * test suite can refer to the same formula. */
-static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len);
+static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len,
+                                 bool search_lazy);
 static int64_t sym_probe(uint32_t hash, const char* str, size_t len);
 static int64_t sym_commit_new(uint32_t hash, const char* str, size_t len);
 static bool    sym_reserve_capacity(uint32_t new_sym_count, size_t arena_bytes);
@@ -557,6 +560,12 @@ static int64_t sym_commit_new(uint32_t hash, const char* str, size_t len) {
 static int64_t sym_intern_nolock_noseg(uint32_t hash, const char* str, size_t len) {
     int64_t existing = sym_probe(hash, str, len);
     if (existing >= 0) return existing;
+    if (g_sym.lazy_map && g_sym.lazy_next_id < g_sym.persisted_count) {
+        if (!sym_lazy_materialize_to_locked(g_sym.persisted_count - 1))
+            return -1;
+        existing = sym_probe(hash, str, len);
+        if (existing >= 0) return existing;
+    }
     return sym_commit_new(hash, str, len);
 }
 
@@ -662,9 +671,16 @@ static bool sym_lazy_materialize_to_locked(uint32_t target_id) {
  * which commits the main sym without a cache on purpose.  A cache-OOM
  * there is tolerated (scanned bit stays clear → future interns retry).
  * -------------------------------------------------------------------------- */
-static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len) {
+static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len,
+                                 bool search_lazy) {
     /* Phase A.1: probe main. */
     int64_t existing = sym_probe(hash, str, len);
+    if (search_lazy && existing < 0 && g_sym.lazy_map &&
+        g_sym.lazy_next_id < g_sym.persisted_count) {
+        if (!sym_lazy_materialize_to_locked(g_sym.persisted_count - 1))
+            return -1;
+        existing = sym_probe(hash, str, len);
+    }
     if (existing >= 0) {
         (void)sym_cache_segments((uint32_t)existing, str, len);
         return existing;
@@ -779,7 +795,16 @@ int64_t ray_sym_intern(const char* str, size_t len) {
     if (!atomic_load_explicit(&g_sym_inited, memory_order_acquire)) return -1;
     uint32_t hash = (uint32_t)ray_hash_bytes(str, len);
     sym_lock();
-    int64_t id = sym_intern_nolock(hash, str, len);
+    int64_t id = sym_intern_nolock(hash, str, len, true);
+    sym_unlock();
+    return id;
+}
+
+int64_t ray_sym_intern_runtime(const char* str, size_t len) {
+    if (!atomic_load_explicit(&g_sym_inited, memory_order_acquire)) return -1;
+    uint32_t hash = (uint32_t)ray_hash_bytes(str, len);
+    sym_lock();
+    int64_t id = sym_intern_nolock(hash, str, len, false);
     sym_unlock();
     return id;
 }
@@ -793,7 +818,7 @@ int64_t ray_sym_intern(const char* str, size_t len) {
 
 int64_t ray_sym_intern_prehashed(uint32_t hash, const char* str, size_t len) {
     if (!atomic_load_explicit(&g_sym_inited, memory_order_acquire)) return -1;
-    return sym_intern_nolock(hash, str, len);
+    return sym_intern_nolock(hash, str, len, true);
 }
 
 /* --------------------------------------------------------------------------
@@ -885,7 +910,17 @@ int64_t ray_sym_find(const char* str, size_t len) {
 
     for (;;) {
         uint64_t e = g_sym.buckets[slot];
-        if (e == 0) { sym_unlock(); return -1; }  /* empty -- not found */
+        if (e == 0) {
+            if (g_sym.lazy_map && g_sym.lazy_next_id < g_sym.persisted_count) {
+                if (sym_lazy_materialize_to_locked(g_sym.persisted_count - 1)) {
+                    mask = g_sym.bucket_cap - 1;
+                    slot = hash & mask;
+                    continue;
+                }
+            }
+            sym_unlock();
+            return -1;
+        }  /* empty -- not found */
 
         uint32_t e_hash = (uint32_t)(e >> 32);
         if (e_hash == hash) {
