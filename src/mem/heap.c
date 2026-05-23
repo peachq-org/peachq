@@ -559,7 +559,7 @@ static void ray_release_owned_refs(ray_t* v) {
     }
 
     /* Vector with attached index: nullmap[0..7] holds an owning ref to
-     * the index ray_t.  The index owns the displaced str_pool / sym_dict,
+     * the index ray_t.  The index owns the displaced str_pool,
      * so we must NOT also try to release those off the parent — they
      * aren't there anymore.  Skip the STR_pool branch. */
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
