@@ -113,7 +113,7 @@ typedef enum {
 typedef union ray_t {
     /* Allocated: object header */
     struct {
-        /* Bytes 0-15: slice / sym_dict / str_pool / index / link arm.
+        /* Bytes 0-15: slice / str_pool / index / link arm.
          * Null state is sentinel-encoded in the payload (see
          * src/vec/vec.c); this 16-byte slot carries no bitmap bits.
          * The `nullmap` name is retained as the raw-byte view used by
@@ -123,7 +123,6 @@ typedef union ray_t {
         union {
             uint8_t  nullmap[16];
             struct { union ray_t* slice_parent;  int64_t slice_offset; };
-            struct { uint8_t _aux_sym_lo[8];     union ray_t* sym_dict; };
             struct { uint8_t _aux_str_lo[8];     union ray_t* str_pool; };
             /* RAY_ATTR_HAS_INDEX (vectors): ray_t* of type RAY_INDEX
              * carrying the accelerator payload and the saved nullmap
