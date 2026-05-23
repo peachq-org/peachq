@@ -113,7 +113,7 @@ static inline void vec_drop_index_inplace(ray_t* v) {
 
     if (shared) {
         /* Take our own retained references to the saved-pointer slots
-         * (str_pool / sym_dict etc.) so the bytes we copy into v->nullmap
+         * (str_pool etc.) so the bytes we copy into v->nullmap
          * are validly owned by v.  Leave the index's snapshot intact for
          * the other holder. */
         ray_index_retain_saved(ix);

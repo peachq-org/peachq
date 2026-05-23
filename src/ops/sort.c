@@ -3754,21 +3754,12 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
         }
     }
 
-    /* Propagate str_pool / sym_dict / null bitmaps from source columns */
+    /* Propagate str_pool / null bitmaps from source columns */
     for (int64_t c = 0; c < ncols; c++) {
         if (!new_cols[c]) continue;
         ray_t* col = ray_table_get_col_idx(tbl, c);
         if (!col) continue;
         col_propagate_str_pool(new_cols[c], col);
-        /* sym_dict lives in bytes 8-15 of the header union, which also
-         * hold slice_offset for slices.  Skip slices to avoid reading
-         * the offset as a pointer. */
-        if (col->type == RAY_SYM &&
-            !(col->attrs & RAY_ATTR_SLICE) &&
-            col->sym_dict) {
-            ray_retain(col->sym_dict);
-            new_cols[c]->sym_dict = col->sym_dict;
-        }
         /* Gather null bits in sorted order */
         bool src_has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) ||
                              ((col->attrs & RAY_ATTR_SLICE) && col->slice_parent &&
@@ -3963,8 +3954,8 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
     /* Pre-allocate all output columns, then do a parallel multi-column
      * gather — same fast path exec_sort uses.  LIST columns are gathered
      * element-wise with retain; all other columns go through the
-     * partitioned_gather / multi_gather_fn paths.  Null bits, str_pool,
-     * and sym_dict are propagated after the gather runs.
+     * partitioned_gather / multi_gather_fn paths.  Null bits and
+     * str_pool are propagated after the gather runs.
      *
      * Heap-allocate the per-column scratch arrays so the fast path
      * handles arbitrarily wide tables — avoids a VLA stack blow-up
@@ -4078,7 +4069,7 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
         }
     }
 
-    /* Propagate str_pool / sym_dict / null bitmaps from source columns.
+    /* Propagate str_pool / null bitmaps from source columns.
      * Null propagation was the reason this function got rewritten in
      * commit 87981c8; do it explicitly here instead of relying on
      * gather_by_idx. */
@@ -4087,15 +4078,6 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
         ray_t* col = ray_table_get_col_idx(tbl, c);
         if (!col) continue;
         col_propagate_str_pool(new_cols[c], col);
-        /* sym_dict lives in bytes 8-15 of the header union, which also
-         * hold slice_offset for slices.  Skip slices to avoid reading
-         * the offset as a pointer. */
-        if (col->type == RAY_SYM &&
-            !(col->attrs & RAY_ATTR_SLICE) &&
-            col->sym_dict) {
-            ray_retain(col->sym_dict);
-            new_cols[c]->sym_dict = col->sym_dict;
-        }
         bool src_has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) ||
                              ((col->attrs & RAY_ATTR_SLICE) && col->slice_parent &&
                               (col->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
