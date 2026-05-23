@@ -6107,6 +6107,25 @@ by_dict_done:
         }
     }
 
+    /* Pre-compute the top-count-take emit filter so the no-WHERE
+     * count-key DAG decision (around line 7541) can see it.  The
+     * actual thread-local set is still deferred to immediately
+     * before ray_execute (see below) so state-leakage on error
+     * paths in between is bounded.  Without this hoist the decision
+     * read at compile time always sees an unset filter and the
+     * fp_try_i32_mg_top_count fast path is unreachable for
+     * `select count by k take N desc` shapes. */
+    ray_group_emit_filter_t pre_top_emit = {0};
+    bool pre_top_emit_matched = false;
+    if (by_expr) {
+        ray_group_emit_filter_t cur_emit = ray_group_emit_filter_get();
+        if (!cur_emit.enabled &&
+            match_group_desc_count_take(dict_elems, dict_n, from_id, where_id,
+                                        by_id, take_id, asc_id, desc_id,
+                                        &pre_top_emit))
+            pre_top_emit_matched = true;
+    }
+
     /* GROUP BY */
     if (by_expr) {
         /* Resolve a "single key" sym id when by_expr is either a
@@ -7537,7 +7556,14 @@ by_dict_done:
                         agg_kinds_ok = 0;
                 }
                 int no_where_count_key_ok = 0;
-                ray_group_emit_filter_t no_where_emit = ray_group_emit_filter_get();
+                /* Use the pre-computed filter when available so this
+                 * read agrees with what will actually be installed
+                 * just before ray_execute.  Falling back to a live
+                 * get() preserves behaviour for any caller that
+                 * pre-set the filter outside ray_select. */
+                ray_group_emit_filter_t no_where_emit = pre_top_emit_matched
+                    ? pre_top_emit
+                    : ray_group_emit_filter_get();
                 if (!where_expr && n_keys == 1 && no_where_emit.enabled &&
                     no_where_emit.agg_index == 0 &&
                     no_where_emit.top_count_take > 0) {
@@ -8645,19 +8671,16 @@ by_dict_done:
         }
     }
 
+    /* Install the pre-computed top-count emit filter just before
+     * ray_execute reads it (and the DAG built above which already
+     * consumed pre_top_emit via the no_where_count_key_ok check).
+     * No re-running of match_group_desc_count_take needed. */
     ray_group_emit_filter_t prev_self_emit = {0};
     bool self_emit_set = false;
-    if (by_expr) {
-        ray_group_emit_filter_t cur_emit = ray_group_emit_filter_get();
-        ray_group_emit_filter_t top_emit = {0};
-        if (!cur_emit.enabled &&
-            match_group_desc_count_take(dict_elems, dict_n, from_id, where_id,
-                                        by_id, take_id, asc_id, desc_id,
-                                        &top_emit)) {
-            prev_self_emit = cur_emit;
-            ray_group_emit_filter_set(top_emit);
-            self_emit_set = true;
-        }
+    if (pre_top_emit_matched) {
+        prev_self_emit = ray_group_emit_filter_get();
+        ray_group_emit_filter_set(pre_top_emit);
+        self_emit_set = true;
     }
 
     /* Optimize and execute */
