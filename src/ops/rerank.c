@@ -171,19 +171,6 @@ static ray_t* gather_rows_with_dist(ray_t* tbl,
              * pooled long-string data). */
             if (ct == RAY_STR) col_propagate_str_pool(new_col, src_col);
 
-            /* RAY_SYM: propagate the per-vector sym_dict so narrow-width
-             * local indices resolve against the same dictionary.  For
-             * sliced SYM columns the sym_dict lives on the slice_parent
-             * (the slice's own union slot holds slice_parent/offset). */
-            if (ct == RAY_SYM) {
-                const ray_t* dict_owner = (src_col->attrs & RAY_ATTR_SLICE)
-                                        ? src_col->slice_parent : src_col;
-                if (dict_owner && dict_owner->sym_dict) {
-                    ray_retain(dict_owner->sym_dict);
-                    new_col->sym_dict = dict_owner->sym_dict;
-                }
-            }
-
             /* Null bitmap: the shared col_propagate_nulls_gather only
              * inspects src's own attrs — for a sliced src it misses
              * HAS_NULLS on the parent.  Mirror sort.c:3315's slice-aware
