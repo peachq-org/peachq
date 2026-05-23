@@ -853,13 +853,21 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
     } else if (dt == RAY_BOOL) {
         uint8_t* d = (uint8_t*)dp;
         if (opcode == OP_CAST) {
-            /* (as 'BOOL ...) — truthy semantics, not truncation. */
+            /* (as 'BOOL ...) — truthy semantics, but treat null sentinel
+             * as false (BOOL is non-nullable, so we can't preserve null
+             * structurally; a SQL-style "missing → not true" mapping is
+             * the least-surprising convention).  For F64, NULL_F64 = NaN:
+             * the IEEE `NaN != 0.0` is true, so add an explicit NaN check
+             * (`a[j] == a[j]` is false iff NaN).  For I64, NULL_I64 =
+             * INT64_MIN is a regular non-zero value, so skip it. */
             if (t1 == RAY_F64) {
                 const double* a = (const double*)ap;
-                for (int64_t j = 0; j < n; j++) d[j] = (a[j] != 0.0) ? 1 : 0;
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] != 0.0 && a[j] == a[j]) ? 1 : 0;
             } else {
                 const int64_t* a = (const int64_t*)ap;
-                for (int64_t j = 0; j < n; j++) d[j] = a[j] ? 1 : 0;
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] != 0 && a[j] != NULL_I64) ? 1 : 0;
             }
         } else {
             const uint8_t* a = (const uint8_t*)ap;
@@ -1358,12 +1366,27 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             out_off += n;
         }
     } else if (in_type == RAY_I64 && out_type == RAY_BOOL) {
-        /* ISNULL over a non-null vec: always false */
-        while (ray_morsel_next(&m)) {
-            int64_t n = m.morsel_len;
-            uint8_t* dst = (uint8_t*)((char*)ray_data(result) + out_off);
-            for (int64_t i = 0; i < n; i++) dst[i] = 0;
-            out_off += n;
+        if (opc == OP_ISNULL) {
+            /* ISNULL over a non-null vec: always false here; the
+             * null-propagation pass at the end of the function sets
+             * dst[i]=1 for null rows of the input. */
+            while (ray_morsel_next(&m)) {
+                int64_t n = m.morsel_len;
+                uint8_t* dst = (uint8_t*)((char*)ray_data(result) + out_off);
+                for (int64_t i = 0; i < n; i++) dst[i] = 0;
+                out_off += n;
+            }
+        } else if (opc == OP_CAST) {
+            /* (as 'BOOL i64_col) — truthy semantics; NULL_I64 = INT64_MIN
+             * sentinel is non-zero but logically missing, so skip it. */
+            while (ray_morsel_next(&m)) {
+                int64_t n = m.morsel_len;
+                int64_t* src = (int64_t*)m.morsel_ptr;
+                uint8_t* dst = (uint8_t*)((char*)ray_data(result) + out_off);
+                for (int64_t i = 0; i < n; i++)
+                    dst[i] = (src[i] != 0 && src[i] != NULL_I64) ? 1 : 0;
+                out_off += n;
+            }
         }
     } else if (in_type == RAY_BOOL && opc == OP_NOT) {
         while (ray_morsel_next(&m)) {
@@ -1485,7 +1508,11 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                     double* src = (double*)m.morsel_ptr;
                     uint8_t* dst = (uint8_t*)((char*)ray_data(result) + out_off);
                     if (out_type == RAY_BOOL)
-                        for (int64_t i = 0; i < n; i++) dst[i] = (src[i] != 0.0) ? 1 : 0;
+                        /* NaN (NULL_F64 sentinel) is "missing"; IEEE
+                         * `NaN != 0.0` is true so add an explicit
+                         * `src[i] == src[i]` to filter NaN to false. */
+                        for (int64_t i = 0; i < n; i++)
+                            dst[i] = (src[i] != 0.0 && src[i] == src[i]) ? 1 : 0;
                     else
                         for (int64_t i = 0; i < n; i++) dst[i] = (uint8_t)src[i];
                     out_off += n;
