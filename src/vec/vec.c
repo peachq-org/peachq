@@ -288,6 +288,15 @@ ray_t* ray_vec_set(ray_t* vec, int64_t idx, const void* elem) {
  * ray_vec_get
  * -------------------------------------------------------------------------- */
 
+/* Out-of-line slice arm for ray_data_fn (declared in rayforce.h).  Kept
+ * here so the single instantiation lives next to other slice handling
+ * code, and llvm-cov sees the rare slice path once rather than as a
+ * dead inline copy in every TU that includes the public header. */
+void* ray_data_slice_path(ray_t* v) {
+    return (char*)v->slice_parent->data
+           + v->slice_offset * ray_type_sizes[(uint8_t)v->type];
+}
+
 void* ray_vec_get(ray_t* vec, int64_t idx) {
     if (!vec || RAY_IS_ERR(vec)) return NULL;
     if (vec->type == RAY_STR) return NULL;
