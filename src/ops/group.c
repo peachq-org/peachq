@@ -45,6 +45,27 @@ static void reduce_acc_init(reduce_acc_t* acc) {
     acc->cnt = 0; acc->null_count = 0; acc->has_first = false;
 }
 
+/* Lexicographic SYM compare — resolves both sym_ids to strings via the
+ * global intern table and memcmps.  Used by SYM MIN/MAX so the result is
+ * consistent with asc/desc (sort.c uses build_enum_rank for the same
+ * lex semantic).  Sym-id comparison would expose intern-order which is
+ * a global session state — not a stable, user-visible ordering. */
+static inline bool sym_lex_lt(int64_t a, int64_t b) {
+    if (a == b) return false;
+    ray_t* sa = ray_sym_str(a);
+    ray_t* sb = ray_sym_str(b);
+    if (!sa || !sb) return a < b;
+    const char* pa = ray_str_ptr(sa);
+    const char* pb = ray_str_ptr(sb);
+    size_t la = ray_str_len(sa);
+    size_t lb = ray_str_len(sb);
+    size_t m = la < lb ? la : lb;
+    int c = memcmp(pa, pb, m);
+    if (c != 0) return c < 0;
+    return la < lb;
+}
+static inline bool sym_lex_gt(int64_t a, int64_t b) { return sym_lex_lt(b, a); }
+
 /* Integer reduction loop — reads native type T, accumulates as i64.
  * HAS_NULLS and HAS_IDX must be integer literal constants (0 or 1) so the
  * compiler dead-code-eliminates the corresponding branches in every
@@ -154,15 +175,18 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
     case RAY_SYM: {
         /* Adaptive-width SYM columns — read_col_i64 produces the i64
          * sym id; id 0 is the canonical null sym (interned empty string
-         * reserved at ray_sym_init).  Same 4-way dispatch to eliminate
-         * the per-element null/idx branches. */
+         * reserved at ray_sym_init).  MIN/MAX use sym_lex_lt/gt so the
+         * order is by string content (matches asc/desc), not by intern
+         * id.  Same 4-way dispatch to eliminate the per-element
+         * null/idx branches. */
         if (!has_nulls && !idx) {
             for (int64_t i = start; i < end; i++) {
                 int64_t v = read_col_i64(base, i, input->type, input->attrs);
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
-                if (v < acc->min_i) acc->min_i = v;
-                if (v > acc->max_i) acc->max_i = v;
+                if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
+                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -172,8 +196,9 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 int64_t v = read_col_i64(base, row, input->type, input->attrs);
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
-                if (v < acc->min_i) acc->min_i = v;
-                if (v > acc->max_i) acc->max_i = v;
+                if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
+                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -183,8 +208,9 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 if (v == 0) { acc->null_count++; continue; }
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
-                if (v < acc->min_i) acc->min_i = v;
-                if (v > acc->max_i) acc->max_i = v;
+                if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
+                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -195,8 +221,9 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 if (v == 0) { acc->null_count++; continue; }
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
-                if (v < acc->min_i) acc->min_i = v;
-                if (v > acc->max_i) acc->max_i = v;
+                if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
+                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -233,8 +260,17 @@ static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_t
         dst->sum_i    = (int64_t)((uint64_t)dst->sum_i    + (uint64_t)src->sum_i);
         dst->sum_sq_i = (int64_t)((uint64_t)dst->sum_sq_i + (uint64_t)src->sum_sq_i);
         dst->prod_i   = (int64_t)((uint64_t)dst->prod_i   * (uint64_t)src->prod_i);
-        if (src->min_i < dst->min_i) dst->min_i = src->min_i;
-        if (src->max_i > dst->max_i) dst->max_i = src->max_i;
+        if (in_type == RAY_SYM) {
+            /* Lex compare for SYM min/max (see sym_lex_lt). */
+            if (src->cnt > 0) {
+                if (dst->cnt == 0) { dst->min_i = src->min_i; dst->max_i = src->max_i; }
+                else { if (sym_lex_lt(src->min_i, dst->min_i)) dst->min_i = src->min_i;
+                       if (sym_lex_gt(src->max_i, dst->max_i)) dst->max_i = src->max_i; }
+            }
+        } else {
+            if (src->min_i < dst->min_i) dst->min_i = src->min_i;
+            if (src->max_i > dst->max_i) dst->max_i = src->max_i;
+        }
     }
     dst->cnt += src->cnt;
     dst->null_count += src->null_count;
@@ -1852,7 +1888,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             return ray_typed_null(-in_type);
         void* base = ray_data(input);
         if (in_type == RAY_F64) return ray_f64(((const double*)base)[row]);
-        return ray_i64(read_col_i64(base, row, in_type, input->attrs));
+        return reduction_i64_result(read_col_i64(base, row, in_type, input->attrs), in_type);
     }
 
     reduce_acc_t cached;
@@ -1916,8 +1952,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
              * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
             case OP_COUNT: result = ray_i64(scan_n); break;
             case OP_AVG:   result = merged.cnt > 0 ? ray_f64(in_type == RAY_F64 ? merged.sum_f / merged.cnt : (double)merged.sum_i / merged.cnt) : ray_typed_null(-RAY_F64); break;
-            case OP_FIRST: result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.first_f) : ray_i64(merged.first_i)) : ray_typed_null(-in_type); break;
-            case OP_LAST:  result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.last_f) : ray_i64(merged.last_i)) : ray_typed_null(-in_type); break;
+            case OP_FIRST: result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.first_f) : reduction_i64_result(merged.first_i, in_type)) : ray_typed_null(-in_type); break;
+            case OP_LAST:  result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.last_f) : reduction_i64_result(merged.last_i, in_type)) : ray_typed_null(-in_type); break;
             case OP_VAR: case OP_VAR_POP:
             case OP_STDDEV: case OP_STDDEV_POP: {
                 bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? merged.cnt <= 1 : merged.cnt <= 0;
@@ -1957,8 +1993,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
          * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
         case OP_COUNT: return ray_i64(scan_n);
         case OP_AVG:   return acc.cnt > 0 ? ray_f64(in_type == RAY_F64 ? acc.sum_f / acc.cnt : (double)acc.sum_i / acc.cnt) : ray_typed_null(-RAY_F64);
-        case OP_FIRST: return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.first_f) : ray_i64(acc.first_i)) : ray_typed_null(-in_type);
-        case OP_LAST:  return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.last_f) : ray_i64(acc.last_i)) : ray_typed_null(-in_type);
+        case OP_FIRST: return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.first_f) : reduction_i64_result(acc.first_i, in_type)) : ray_typed_null(-in_type);
+        case OP_LAST:  return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.last_f) : reduction_i64_result(acc.last_i, in_type)) : ray_typed_null(-in_type);
         case OP_VAR: case OP_VAR_POP:
         case OP_STDDEV: case OP_STDDEV_POP: {
             bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? acc.cnt <= 1 : acc.cnt <= 0;
@@ -2035,6 +2071,8 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
             ly.agg_val_slot[a] = (int8_t)nv;
             if (agg_vecs[a]->type == RAY_F64)
                 ly.agg_is_f64 |= (1u << a);
+            if (agg_vecs[a]->type == RAY_SYM)
+                ly.agg_is_sym |= (1u << a);
             nv++;
             /* Binary aggregator (OP_PEARSON_CORR): the y-side input
              * occupies the very next slot so phase1 packs (x, y)
@@ -2341,8 +2379,18 @@ static inline void accum_from_entry(char* row, const char* entry,
                 else if (ly->agg_is_prod & amask) { ROW_WR_I64(row, ly->off_sum, s) = (int64_t)((uint64_t)ROW_RD_I64(row, ly->off_sum, s) * (uint64_t)v); }
                 else { ROW_WR_I64(row, ly->off_sum, s) += v; }
             }
-            if (nf & GHT_NEED_MIN) { int64_t* p = &ROW_WR_I64(row, ly->off_min, s); if (v < *p) *p = v; }
-            if (nf & GHT_NEED_MAX) { int64_t* p = &ROW_WR_I64(row, ly->off_max, s); if (v > *p) *p = v; }
+            if (nf & GHT_NEED_MIN) {
+                int64_t* p = &ROW_WR_I64(row, ly->off_min, s);
+                if (ly->agg_is_sym & amask) {
+                    if (*p == INT64_MAX || sym_lex_lt(v, *p)) *p = v;
+                } else if (v < *p) *p = v;
+            }
+            if (nf & GHT_NEED_MAX) {
+                int64_t* p = &ROW_WR_I64(row, ly->off_max, s);
+                if (ly->agg_is_sym & amask) {
+                    if (*p == INT64_MIN || sym_lex_gt(v, *p)) *p = v;
+                } else if (v > *p) *p = v;
+            }
             if (nf & GHT_NEED_SUMSQ) { ROW_WR_F64(row, ly->off_sumsq, s) += (double)v * (double)v; }
             /* PEARSON y-side (i64 input branch): y was packed via
              * read_col_i64 — reinterpret as int64 then cast to double. */
@@ -3949,7 +3997,8 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
                 iv = group_strlen_at(c->agg_cols[a], r);
                 fv = (double)iv;
             } else {
-                da_read_val(c->agg_ptrs[a], c->agg_types[a], 0, r, &fv, &iv);
+                uint8_t attrs = c->agg_cols[a] ? c->agg_cols[a]->attrs : 0;
+                da_read_val(c->agg_ptrs[a], c->agg_types[a], attrs, r, &fv, &iv);
             }
         }
         uint16_t op = c->agg_ops[a];
@@ -4006,10 +4055,19 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
             }
         } else if (op == OP_MIN) {
             if (is_f) { if (fv == fv && fv < acc->min_val[a].f) acc->min_val[a].f = fv; }
+            else if (c->agg_types[a] == RAY_SYM) {
+                /* Lex compare for SYM; INT64_MAX = "not seen yet". */
+                if (acc->min_val[a].i == INT64_MAX || sym_lex_lt(iv, acc->min_val[a].i))
+                    acc->min_val[a].i = iv;
+            }
             else if (!int_null) { if (iv < acc->min_val[a].i) acc->min_val[a].i = iv; }
             if (!is_null && nn) nn[a]++;
         } else if (op == OP_MAX) {
             if (is_f) { if (fv == fv && fv > acc->max_val[a].f) acc->max_val[a].f = fv; }
+            else if (c->agg_types[a] == RAY_SYM) {
+                if (acc->max_val[a].i == INT64_MIN || sym_lex_gt(iv, acc->max_val[a].i))
+                    acc->max_val[a].i = iv;
+            }
             else if (!int_null) { if (iv > acc->max_val[a].i) acc->max_val[a].i = iv; }
             if (!is_null && nn) nn[a]++;
         }
@@ -4061,7 +4119,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                  * INT_MIN value in a HAS_NULLS column is indistinguishable
                  * from a null and is dropped — this is the standard cost of
                  * sentinel-based null encoding for integers. */
-                int64_t v = read_col_i64(c->agg_ptrs[a], r, c->agg_types[a], 0);
+                uint8_t v_attrs = c->agg_cols[a] ? c->agg_cols[a]->attrs : 0;
+                int64_t v = read_col_i64(c->agg_ptrs[a], r, c->agg_types[a], v_attrs);
                 if (RAY_LIKELY(!((inm >> a) & 1) || v != c->agg_int_null_sentinel[a])) {
                     acc->sum[idx].i += v;
                     if (nn) nn[idx]++;
@@ -4099,7 +4158,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                                         c->sym_strings, c->sym_count);
             fv = (double)iv;
         } else {
-            da_read_val(c->agg_ptrs[a], c->agg_types[a], 0, r, &fv, &iv);
+            uint8_t attrs = c->agg_cols[a] ? c->agg_cols[a]->attrs : 0;
+            da_read_val(c->agg_ptrs[a], c->agg_types[a], attrs, r, &fv, &iv);
         }
         uint16_t op = c->agg_ops[a];
         bool is_f = (c->agg_types[a] == RAY_F64);
@@ -4159,6 +4219,10 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                 /* NaN comparisons are always false, but make the skip
                  * explicit. */
                 if (fv == fv && fv < acc->min_val[idx].f) acc->min_val[idx].f = fv;
+            } else if (c->agg_types[a] == RAY_SYM) {
+                /* Lex compare for SYM; INT64_MAX = "not seen yet". */
+                if (acc->min_val[idx].i == INT64_MAX || sym_lex_lt(iv, acc->min_val[idx].i))
+                    acc->min_val[idx].i = iv;
             } else if (!int_null) {
                 if (iv < acc->min_val[idx].i) acc->min_val[idx].i = iv;
             }
@@ -4166,6 +4230,9 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
         } else if (op == OP_MAX) {
             if (is_f) {
                 if (fv == fv && fv > acc->max_val[idx].f) acc->max_val[idx].f = fv;
+            } else if (c->agg_types[a] == RAY_SYM) {
+                if (acc->max_val[idx].i == INT64_MIN || sym_lex_gt(iv, acc->max_val[idx].i))
+                    acc->max_val[idx].i = iv;
             } else if (!int_null) {
                 if (iv > acc->max_val[idx].i) acc->max_val[idx].i = iv;
             }
@@ -4340,6 +4407,11 @@ static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
                     if (agg_types[a] == RAY_F64) {
                         if (wa->min_val[idx].f < merged->min_val[idx].f)
                             merged->min_val[idx].f = wa->min_val[idx].f;
+                    } else if (agg_types[a] == RAY_SYM) {
+                        if (wa->min_val[idx].i != INT64_MAX &&
+                            (merged->min_val[idx].i == INT64_MAX ||
+                             sym_lex_lt(wa->min_val[idx].i, merged->min_val[idx].i)))
+                            merged->min_val[idx].i = wa->min_val[idx].i;
                     } else {
                         if (wa->min_val[idx].i < merged->min_val[idx].i)
                             merged->min_val[idx].i = wa->min_val[idx].i;
@@ -4352,6 +4424,11 @@ static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
                     if (agg_types[a] == RAY_F64) {
                         if (wa->max_val[idx].f > merged->max_val[idx].f)
                             merged->max_val[idx].f = wa->max_val[idx].f;
+                    } else if (agg_types[a] == RAY_SYM) {
+                        if (wa->max_val[idx].i != INT64_MIN &&
+                            (merged->max_val[idx].i == INT64_MIN ||
+                             sym_lex_gt(wa->max_val[idx].i, merged->max_val[idx].i)))
+                            merged->max_val[idx].i = wa->max_val[idx].i;
                     } else {
                         if (wa->max_val[idx].i > merged->max_val[idx].i)
                             merged->max_val[idx].i = wa->max_val[idx].i;
@@ -5365,6 +5442,11 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     if (agg_types[a] == RAY_F64) {
                         if (wa->min_val[a].f < m->min_val[a].f)
                             m->min_val[a].f = wa->min_val[a].f;
+                    } else if (agg_types[a] == RAY_SYM) {
+                        if (wa->min_val[a].i != INT64_MAX &&
+                            (m->min_val[a].i == INT64_MAX ||
+                             sym_lex_lt(wa->min_val[a].i, m->min_val[a].i)))
+                            m->min_val[a].i = wa->min_val[a].i;
                     } else {
                         if (wa->min_val[a].i < m->min_val[a].i)
                             m->min_val[a].i = wa->min_val[a].i;
@@ -5376,6 +5458,11 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     if (agg_types[a] == RAY_F64) {
                         if (wa->max_val[a].f > m->max_val[a].f)
                             m->max_val[a].f = wa->max_val[a].f;
+                    } else if (agg_types[a] == RAY_SYM) {
+                        if (wa->max_val[a].i != INT64_MIN &&
+                            (m->max_val[a].i == INT64_MIN ||
+                             sym_lex_gt(wa->max_val[a].i, m->max_val[a].i)))
+                            m->max_val[a].i = wa->max_val[a].i;
                     } else {
                         if (wa->max_val[a].i > m->max_val[a].i)
                             m->max_val[a].i = wa->max_val[a].i;
@@ -8438,7 +8525,12 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             for (uint8_t j = 0; j < n_std; j++) {
                 uint8_t sq = std_sq_slot[j];
                 ray_op_t* x = pagg_ins[sq];
-                pagg_ins[sq] = ray_mul(pg, x, x);
+                /* STDDEV/VAR is inherently F64 (mean, sqrt).  Cast input to
+                 * F64 before squaring so SUM(x²) is F64 across partitions —
+                 * readout below assumes F64 sumsq.  Also avoids I64 overflow
+                 * for large x (matters near INT_MAX). */
+                ray_op_t* xf = (x->out_type == RAY_F64) ? x : ray_cast(pg, x, RAY_F64);
+                pagg_ins[sq] = ray_mul(pg, xf, xf);
             }
 
             ray_op_t* proot = ray_group(pg, pkeys, n_part_keys,
