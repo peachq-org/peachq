@@ -34,7 +34,6 @@
 #endif
 
 #include "exec.h"
-#include "hash.h"
 #include "core/pool.h"
 #include "core/profile.h"
 #include "store/csr.h"
