@@ -867,6 +867,7 @@ typedef struct {
     uint8_t  n_agg_vals;
     uint8_t  need_flags;
     uint8_t  agg_is_f64;
+    uint8_t  agg_is_sym;   /* lex compare for MIN/MAX (sym_lex_lt) */
     uint8_t  agg_is_first;
     uint8_t  agg_is_last;
     uint8_t  agg_is_prod;
