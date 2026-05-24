@@ -200,10 +200,15 @@ void ray_error_free(ray_t* err);
  * Only types 1-14 (vectors) have non-zero entries. */
 extern const uint8_t ray_type_sizes[256];
 
+/* Out-of-line slice deref: keeps the hot path of ray_data_fn (a single
+ * load + return) trivially inlinable while the rare slice arm lives in
+ * one TU (vec.c) — avoids N inline instantiations of the slice branch
+ * across every translation unit that includes this header. */
+void* ray_data_slice_path(ray_t* v);
+
 static inline void* ray_data_fn(ray_t* v) {
     if (__builtin_expect(!!(v->attrs & RAY_ATTR_SLICE), 0))
-        return (char*)v->slice_parent->data
-               + v->slice_offset * ray_type_sizes[(uint8_t)v->type];
+        return ray_data_slice_path(v);
     return (void*)v->data;
 }
 #define ray_slice_data(v) ray_data_fn(v)  /* alias — ray_data is always slice-safe */
