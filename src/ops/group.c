@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "ops/hash.h"
 #include "ops/rowsel.h"
 #include "lang/internal.h"  /* for ray_median_dbl_inplace */
 
