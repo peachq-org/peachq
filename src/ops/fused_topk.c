@@ -292,16 +292,6 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
             && kt != RAY_I16 && kt != RAY_I32 && kt != RAY_I64
             && kt != RAY_DATE && kt != RAY_TIME && kt != RAY_TIMESTAMP)
             return NULL;
-        /* The SYM comparator (fpk_cmp) resolves dict IDs through the
-         * GLOBAL sym_strings snapshot (ctx.sym_strings).  A column with
-         * its own per-vector sym_dict stores LOCAL indices that don't
-         * map to the global table, so comparisons would order against
-         * the wrong strings.  Reject and fall back. */
-        if (kt == RAY_SYM) {
-            const ray_t* dict_owner = (col->attrs & RAY_ATTR_SLICE)
-                                    ? col->slice_parent : col;
-            if (dict_owner && dict_owner->sym_dict) return NULL;
-        }
         ctx.keys[i].type      = kt;
         ctx.keys[i].attrs     = col->attrs;
         ctx.keys[i].esz       = ray_sym_elem_size(kt, col->attrs);
