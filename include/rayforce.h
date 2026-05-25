@@ -113,7 +113,7 @@ typedef enum {
 typedef union ray_t {
     /* Allocated: object header */
     struct {
-        /* Bytes 0-15: slice / sym_dict / str_pool / index / link arm.
+        /* Bytes 0-15: slice / str_pool / index / link arm.
          * Null state is sentinel-encoded in the payload (see
          * src/vec/vec.c); this 16-byte slot carries no bitmap bits.
          * The `nullmap` name is retained as the raw-byte view used by
@@ -123,7 +123,6 @@ typedef union ray_t {
         union {
             uint8_t  nullmap[16];
             struct { union ray_t* slice_parent;  int64_t slice_offset; };
-            struct { uint8_t _aux_sym_lo[8];     union ray_t* sym_dict; };
             struct { uint8_t _aux_str_lo[8];     union ray_t* str_pool; };
             /* RAY_ATTR_HAS_INDEX (vectors): ray_t* of type RAY_INDEX
              * carrying the accelerator payload and the saved nullmap
@@ -201,10 +200,15 @@ void ray_error_free(ray_t* err);
  * Only types 1-14 (vectors) have non-zero entries. */
 extern const uint8_t ray_type_sizes[256];
 
+/* Out-of-line slice deref: keeps the hot path of ray_data_fn (a single
+ * load + return) trivially inlinable while the rare slice arm lives in
+ * one TU (vec.c) — avoids N inline instantiations of the slice branch
+ * across every translation unit that includes this header. */
+void* ray_data_slice_path(ray_t* v);
+
 static inline void* ray_data_fn(ray_t* v) {
     if (__builtin_expect(!!(v->attrs & RAY_ATTR_SLICE), 0))
-        return (char*)v->slice_parent->data
-               + v->slice_offset * ray_type_sizes[(uint8_t)v->type];
+        return ray_data_slice_path(v);
     return (void*)v->data;
 }
 #define ray_slice_data(v) ray_data_fn(v)  /* alias — ray_data is always slice-safe */
