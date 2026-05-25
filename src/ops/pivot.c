@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "ops/hash.h"
 
 /* For a SYM-scalar broadcast input (atom -RAY_SYM, or a 1-elem
  * RAY_SYM_W{8,16,32,64} vec used as scalar), return the sym ID.

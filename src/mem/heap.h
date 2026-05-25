@@ -84,8 +84,8 @@
 #define RAY_ATTR_HNSW         0x04
 
 /* Vector is a linked column.  The 8 bytes of the nullmap union at offset
- * 8 (i.e. parent->_idx_pad / parent->slice_offset / parent->sym_dict /
- * parent->str_pool slot, depending on which arm is in use) hold an int64
+ * 8 (i.e. parent->_idx_pad / parent->slice_offset / parent->str_pool
+ * slot, depending on which arm is in use) hold an int64
  * sym ID naming the target table.  Resolved against the global env at
  * deref time.  Restricted to RAY_I32 / RAY_I64 vectors — STR/SYM/SLICE
  * already use bytes 8-15 for their own pointers/data so HAS_LINK on
@@ -101,7 +101,7 @@
 
 /* Vector carries an attached accelerator index in nullmap[0..7] (a ray_t*
  * of type RAY_INDEX).  The original 16-byte nullmap union content
- * (slice_offset, str_pool, sym_dict, link_target) is preserved inside the
+ * (slice_offset, str_pool, link_target) is preserved inside the
  * index ray_t and restored on detach.
  *
  * HAS_NULLS is preserved on the parent across attach/detach; many call

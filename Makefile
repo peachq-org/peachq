@@ -122,12 +122,12 @@ coverage:
 		-instr-profile=coverage.profdata \
 		-format=html -output-dir=coverage_html \
 		-show-line-counts-or-regions \
-		-ignore-filename-regex='test/.*|/usr/.*'
+		-ignore-filename-regex='test/.*|/usr/.*|.*_alloc_stub\.c|include/rayforce\.h'
 	@echo
 	@echo "=== coverage summary ==="
 	@llvm-cov report ./$(TARGET).test \
 		-instr-profile=coverage.profdata \
-		-ignore-filename-regex='test/.*|/usr/.*' 2>/dev/null | tail -3
+		-ignore-filename-regex='test/.*|/usr/.*|.*_alloc_stub\.c|include/rayforce\.h' 2>/dev/null | tail -3
 	@echo
 	@echo "→ coverage_html/index.html"
 

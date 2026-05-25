@@ -111,7 +111,7 @@ static inline ray_index_t* ray_index_payload(ray_t* idx) {
 
 /* Build an accelerator and attach.  Numeric types only for v1
  * (BOOL/U8/I16/I32/I64/F32/F64/DATE/TIME/TIMESTAMP — RAY_STR/RAY_SYM/RAY_GUID
- * deferred until the str_pool/sym_dict displacement sweep is complete).
+ * deferred until the str_pool displacement sweep is complete).
  * On success, *vp is the (possibly new) parent vector with HAS_INDEX set.
  * On failure, *vp is unchanged and a RAY_ERROR is returned. */
 ray_t* ray_index_attach_zone (ray_t** vp);
