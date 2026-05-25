@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "ops/hash.h"
 
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
