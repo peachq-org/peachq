@@ -166,7 +166,7 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     int64_t target_n = target_col->len;
     int8_t  out_type = target_col->type;
 
-    /* Resolve through slices: SYM-width and (later) sym_dict / str_pool
+    /* Resolve through slices: SYM-width and (later) str_pool
      * all live on the slice_parent's attrs/union, never on the slice
      * itself.  The slice contributes only its [slice_offset, len) view.
      * Compute the canonical width and base-pointer once here so the
@@ -265,19 +265,9 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     }
 
     /* Type-specific metadata propagation.
-     *   RAY_STR: share the source pool so ray_str_t pool_offs are valid.
-     *   RAY_SYM: if the source column carries a local sym_dict, share it.
-     *     sym_dict aliases bytes 8-15 of the nullmap union and is safe
-     *     to read on any non-slice SYM vec — sentinel-encoded nulls
-     *     don't consume those bytes. */
+     *   RAY_STR: share the source pool so ray_str_t pool_offs are valid. */
     if (out_type == RAY_STR) {
         col_propagate_str_pool(result, target_col);
-    } else if (out_type == RAY_SYM) {
-        if (col_owner && !(col_owner->attrs & RAY_ATTR_SLICE) &&
-            col_owner->sym_dict) {
-            ray_retain(col_owner->sym_dict);
-            result->sym_dict = col_owner->sym_dict;
-        }
     }
     return result;
 }

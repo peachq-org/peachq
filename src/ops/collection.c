@@ -713,17 +713,6 @@ int atom_eq(ray_t* a, ray_t* b) {
 /* Forward declaration */
 ray_t* list_to_typed_vec(ray_t* list, int8_t orig_vec_type);
 
-static void propagate_sym_dict(ray_t* dst, const ray_t* src) {
-    if (!dst || !src || dst->type != RAY_SYM || src->type != RAY_SYM) return;
-    const ray_t* owner = (src->attrs & RAY_ATTR_SLICE) ? src->slice_parent : src;
-    if (owner &&
-        !(owner->attrs & RAY_ATTR_SLICE) &&
-        owner->sym_dict) {
-        ray_retain(owner->sym_dict);
-        dst->sym_dict = owner->sym_dict;
-    }
-}
-
 /* Eager vector dedup — called by the DAG executor's OP_DISTINCT case.
  * Factored out so the executor doesn't go through ray_distinct_fn, which
  * is now a lazy producer for vectors and would re-wrap into a chain. */
@@ -1348,7 +1337,6 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
              * source's str_pool by pool_off — propagate the pool ray_t
              * (with retain) so the result owns a valid backing store. */
             if (vtype == RAY_STR) col_propagate_str_pool(result, vec);
-            if (vtype == RAY_SYM) propagate_sym_dict(result, vec);
             /* Propagate null bitmap — check parent's flag for slices */
             bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) ||
                              ((vec->attrs & RAY_ATTR_SLICE) && vec->slice_parent &&
@@ -1544,7 +1532,6 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
          * past the SSO threshold, tripping the assertion in
          * ray_str_t_ptr / strsort_repack_window / strkey_cmp. */
         if (vtype == RAY_STR) col_propagate_str_pool(result, vec);
-        if (vtype == RAY_SYM) propagate_sym_dict(result, vec);
         /* Propagate null bitmap — check parent's flag for slices */
         bool has_nulls = len > 0 &&
                          ((vec->attrs & RAY_ATTR_HAS_NULLS) ||

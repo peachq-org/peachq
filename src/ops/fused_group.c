@@ -515,8 +515,37 @@ static inline uint8_t fp_eval_cmp_one(const fp_cmp_t* p, int64_t row) {
         return (uint8_t)(p->fold == FP_FOLD_TRUE);
     if (p->col_type == RAY_SYM && !p->cval_in_dict)
         return (uint8_t)(p->op == FP_NE);
-    if (p->op == FP_LIKE)
+    if (p->op == FP_LIKE) {
+        if (p->col_type == RAY_SYM) {
+            uint64_t sid = (uint64_t)read_by_esz(p->col_base, row, p->col_esz);
+            if (sid >= p->like_lut_count || !p->like_lut || !p->like_sym_strings)
+                return 0;
+            uint8_t state = p->like_lut[sid];
+            if (!state) {
+                ray_t* s = p->like_sym_strings[sid];
+                uint8_t match = 0;
+                if (s) {
+                    const char* sp = ray_str_ptr(s);
+                    size_t sl = ray_str_len(s);
+                    match = (p->pat_compiled.shape != RAY_GLOB_SHAPE_NONE)
+                          ? (uint8_t)ray_glob_match_compiled(&p->pat_compiled, sp, sl)
+                          : (uint8_t)ray_glob_match(sp, sl, p->pat_str, p->pat_len);
+                }
+                state = (uint8_t)(match ? 2 : 1);
+                p->like_lut[sid] = state;
+            }
+            return (uint8_t)(state == 2);
+        }
+        if (p->col_type == RAY_STR) {
+            size_t sl = 0;
+            const char* sp = ray_str_vec_get(p->col_obj, row, &sl);
+            if (!sp) sp = "";
+            return (p->pat_compiled.shape != RAY_GLOB_SHAPE_NONE)
+                 ? (uint8_t)ray_glob_match_compiled(&p->pat_compiled, sp, sl)
+                 : (uint8_t)ray_glob_match(sp, sl, p->pat_str, p->pat_len);
+        }
         return 0;
+    }
 
     int64_t v = fp_cmp_read_i64_at(p, row);
     if (p->op == FP_IN) {
