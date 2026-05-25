@@ -27,16 +27,9 @@
 #include "../ops/ops.h"
 #include "../table/sym.h"
 
-/* Weak stub for ray_alloc — replaced by buddy allocator at link time.
- * Uses ray_vm_alloc (mmap) — page-aligned and zero-filled. */
-__attribute__((weak))
-ray_t* ray_alloc(size_t size) {
-    if (size < 32) size = 32;
-    size = (size + 4095) & ~(size_t)4095;
-    void* p = ray_vm_alloc(size);
-    if (!p) return ray_error("oom", NULL);
-    return (ray_t*)p;
-}
+/* ray_alloc weak fallback lives in block_alloc_stub.c so this file can
+ * be cleanly measured for coverage — the stub is dead-by-link in any
+ * build that includes the buddy allocator (the normal case). */
 
 size_t ray_block_size(ray_t* v) {
     if (ray_is_atom(v)) return 32;

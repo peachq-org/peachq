@@ -1151,13 +1151,6 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
                 if (ray_vec_is_null(vec, idx[i]))
                     ray_vec_set_null(result, i, true);
         }
-        const ray_t* dict_owner = (vec->attrs & RAY_ATTR_SLICE) ? vec->slice_parent : vec;
-        if (dict_owner &&
-            !(dict_owner->attrs & RAY_ATTR_SLICE) &&
-            dict_owner->sym_dict) {
-            ray_retain(dict_owner->sym_dict);
-            result->sym_dict = dict_owner->sym_dict;
-        }
         return result;
     }
 

@@ -229,8 +229,16 @@ int ray_temporal_trunc_from_sym(int64_t sym_id) {
     const char* p = ray_str_ptr(s);
     size_t n = ray_str_len(s);
     if (!p) return -1;
-    if (n == 4 && memcmp(p, "date", 4) == 0) return RAY_EXTRACT_DAY;
-    if (n == 4 && memcmp(p, "time", 4) == 0) return RAY_EXTRACT_SECOND;
+    if (n == 4 && memcmp(p, "date",  4) == 0) return RAY_EXTRACT_DAY;
+    if (n == 4 && memcmp(p, "time",  4) == 0) return RAY_EXTRACT_SECOND;
+    if (n == 5 && memcmp(p, "month", 5) == 0) return RAY_EXTRACT_MONTH;
+    if (n == 4 && memcmp(p, "hour",  4) == 0) return RAY_EXTRACT_HOUR;
+    if (n == 4 && memcmp(p, "year",  4) == 0) return RAY_EXTRACT_YEAR;
+    /* "minute" intentionally NOT added — it collides with the extract
+     * binding ("minute" → RAY_EXTRACT_MINUTE in
+     * ray_temporal_field_from_sym), which query.c tries first.  The
+     * DATE_TRUNC_INNER MINUTE case remains unreachable; covering it
+     * would need a distinct trunc syntax (e.g. (trunc 'minute ts)). */
     return -1;
 }
 
