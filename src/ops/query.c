@@ -1729,22 +1729,39 @@ static bool match_group_desc_count_take(ray_t** dict_elems, int64_t dict_n,
                                         int64_t by_id, int64_t take_id,
                                         int64_t asc_id, int64_t desc_id,
                                         ray_group_emit_filter_t* out) {
+    /* Detects `(select … by … <asc:|desc:> AGGCOL take: N)` where AGGCOL
+     * is the name of an output agg col with op ∈ {COUNT, SUM, MIN, MAX}
+     * and N is a positive atom ≤ 1024.  Returns the filter pre-filled so
+     * the consumer (group/fused_group materialize) can heap-extract the
+     * top-N groups by AGGCOL.value before emitting rows.  AVG and
+     * higher-order aggs (STDDEV/VAR/PEARSON/MEDIAN) fall through — their
+     * ordering doesn't reduce to a single int64 row slot read.
+     *
+     * The 1024 cap matches the stack-resident heap budget shared by the
+     * three concrete consumer sites (mk_apply_count_emit_filter,
+     * v2_emit's per-partition compact, the n_keys>1 macro path).  Larger
+     * N drops through to the full sort + take so the heap doesn't
+     * overflow the stack. */
     ray_t* take_expr = NULL;
-    int64_t desc_name = -1;
+    int64_t order_name = -1;
+    uint8_t want_desc = 1;
+    bool seen_dir = false;
     for (int64_t i = 0; i + 1 < dict_n; i += 2) {
         int64_t kid = dict_elems[i]->i64;
         if (kid == take_id) take_expr = dict_elems[i + 1];
-        else if (kid == desc_id) {
+        else if (kid == desc_id || kid == asc_id) {
+            if (seen_dir) return false;  /* both asc: and desc: → ambiguous */
+            seen_dir = true;
             ray_t* v = dict_elems[i + 1];
             if (!v || v->type != -RAY_SYM) return false;
-            desc_name = v->i64;
-        } else if (kid == asc_id) {
-            return false;
+            order_name = v->i64;
+            want_desc = (kid == desc_id) ? 1 : 0;
         }
     }
     int64_t take_n = 0;
-    if (desc_name < 0 || !positive_take_i64(take_expr, &take_n))
+    if (order_name < 0 || !positive_take_i64(take_expr, &take_n))
         return false;
+    if (take_n > 1024) return false;
 
     uint8_t agg_index = 0;
     for (int64_t i = 0; i + 1 < dict_n; i += 2) {
@@ -1757,11 +1774,15 @@ static bool match_group_desc_count_take(ray_t** dict_elems, int64_t dict_n,
             continue;
         ray_t** ae = (ray_t**)ray_data(val);
         uint16_t op = resolve_agg_opcode(ae[0]->i64);
-        if (kid == desc_name && op == OP_COUNT) {
+        if (kid == order_name &&
+            (op == OP_COUNT || op == OP_SUM ||
+             op == OP_MIN   || op == OP_MAX)) {
             out->enabled = 1;
             out->agg_index = agg_index;
             out->min_count_exclusive = 0;
             out->top_count_take = take_n;
+            out->agg_op = op;
+            out->desc = want_desc;
             return true;
         }
         agg_index++;
