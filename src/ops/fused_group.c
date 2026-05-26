@@ -2619,6 +2619,257 @@ static int mk_find_i64_eq_child(const fp_pred_t* pred) {
     return -1;
 }
 
+/* Find an FP_EQ predicate child whose column carries a fresh
+ * RAY_IDX_HASH — i.e. one we can serve via O(matches) hash probe
+ * instead of O(n) scan.  Constraints mirror hash_probe_setup
+ * (idxop.c): no nulls, no fold, same built-for-len, type covers cval.
+ * Returns the child index, or -1 if none qualifies. */
+static int mk_find_hash_eq_child(const fp_pred_t* pred) {
+    for (uint8_t i = 0; i < pred->n_children; i++) {
+        const fp_cmp_t* cmp = &pred->children[i];
+        if (cmp->op != FP_EQ || cmp->fold != FP_FOLD_NONE) continue;
+        if (cmp->col_type == RAY_SYM) continue;  /* hash idx not attached to dict cols */
+        if (cmp->col_attrs & RAY_ATTR_HAS_NULLS) continue;
+        ray_t* co = cmp->col_obj;
+        if (!co || !ray_index_has(co)) continue;
+        if (ray_index_kind(co) != RAY_IDX_HASH) continue;
+        ray_index_t* ix = ray_index_payload(co->index);
+        if (ix->built_for_len != co->len) continue;
+        return (int)i;
+    }
+    return -1;
+}
+
+/* Worker that walks the RAY_IDX_HASH chain on `c->pred.children[eq_idx]`
+ * and applies the COUNT-aggregator path to each matching row that also
+ * passes the remaining predicate children.  Replaces the O(n)
+ * mk_eq_i64_count_fn scan.  Runs on worker 0 only — the chain walk
+ * isn't parallelised, since match counts on a point lookup are tiny
+ * and the dispatch overhead would dominate. */
+static void mk_eq_hash_count_fn(mk_par_ctx_t* c, uint8_t eq_idx) {
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    mk_shard_t* sh = &c->shards[0];
+    if (!sh->slots) {
+        if (mk_shard_init(sh, c->init_cap, c->total_state, c->wide) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+    }
+    const fp_cmp_t* eq = &c->pred.children[eq_idx];
+    ray_t* col = eq->col_obj;
+    ray_index_t* ix = ray_index_payload(col->index);
+    const uint64_t mask  = ix->u.hash.mask;
+    const int64_t* tbl   = (const int64_t*)ray_data(ix->u.hash.table);
+    const int64_t* chn   = (const int64_t*)ray_data(ix->u.hash.chain);
+    int64_t key = eq->cval;
+
+    /* Recompute the same hash the builder used.  numeric_key_word for
+     * an int* column zero/sign-extends to int64 then runs mix64 over
+     * the bit pattern.  We match by width here. */
+    uint64_t kbits;
+    switch (eq->col_esz) {
+    case 1:  kbits = (uint64_t)(uint8_t)key;             break;
+    case 2:  kbits = (uint64_t)(int64_t)(int16_t)key;    break;
+    case 4:  kbits = (uint64_t)(int64_t)(int32_t)key;    break;
+    default: kbits = (uint64_t)key;                      break;
+    }
+    /* mix64 inline — match idxop.c:mix64 byte-for-byte. */
+    uint64_t h = kbits;
+    h ^= h >> 30; h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27; h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
+    int64_t rid = tbl[h & mask] - 1;
+
+    while (rid >= 0) {
+        if (fp_cmp_read_i64_at(eq, rid) == key) {
+            uint8_t pass = 1;
+            for (uint8_t i = 0; i < c->pred.n_children; i++) {
+                if (i == eq_idx) continue;
+                if (!fp_eval_cmp_one(&c->pred.children[i], rid)) {
+                    pass = 0;
+                    break;
+                }
+            }
+            if (pass) {
+                if (mk_count_upsert_row(c, sh, rid) != 0) {
+                    atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+                    return;
+                }
+            }
+        }
+        rid = chn[rid] - 1;
+    }
+}
+
+/* mk_par worker analog: walk the hash chain instead of scanning rows.
+ * For each matching row that passes the remaining predicate children,
+ * upsert into shard 0 and run the per-agg accumulate inline.  This
+ * mirrors mk_par_fn's PASS-1 / PASS-2 split but per-row (matches are
+ * sparse, so a morsel-shaped batch is overkill — match count is
+ * usually < 10).  Runs on a single thread for the same reason. */
+static void mk_par_hash_fn(mk_par_ctx_t* c, uint8_t eq_idx) {
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    mk_shard_t* sh = &c->shards[0];
+    uint8_t wide        = c->wide;
+    uint8_t total_state = c->total_state;
+    uint8_t n_aggs      = c->n_aggs;
+    if (!sh->slots) {
+        if (mk_shard_init(sh, c->init_cap, total_state, wide) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+    }
+    const fp_cmp_t* eq = &c->pred.children[eq_idx];
+    ray_t* col = eq->col_obj;
+    ray_index_t* ix = ray_index_payload(col->index);
+    const uint64_t mask = ix->u.hash.mask;
+    const int64_t* tbl  = (const int64_t*)ray_data(ix->u.hash.table);
+    const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
+    int64_t key = eq->cval;
+
+    uint64_t kbits;
+    switch (eq->col_esz) {
+    case 1:  kbits = (uint64_t)(uint8_t)key;             break;
+    case 2:  kbits = (uint64_t)(int64_t)(int16_t)key;    break;
+    case 4:  kbits = (uint64_t)(int64_t)(int32_t)key;    break;
+    default: kbits = (uint64_t)key;                      break;
+    }
+    uint64_t h = kbits;
+    h ^= h >> 30; h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 27; h *= 0x94d049bb133111ebULL;
+    h ^= h >> 31;
+    int64_t rid = tbl[h & mask] - 1;
+
+    while (rid >= 0) {
+        if (fp_cmp_read_i64_at(eq, rid) == key) {
+            uint8_t pass = 1;
+            for (uint8_t i = 0; i < c->pred.n_children; i++) {
+                if (i == eq_idx) continue;
+                if (!fp_eval_cmp_one(&c->pred.children[i], rid)) {
+                    pass = 0;
+                    break;
+                }
+            }
+            if (pass) {
+                /* Grow check + HT probe + per-agg accumulate.  Single
+                 * row at a time (no morsel batching) — matches are
+                 * sparse, and the existing batched path's per-batch
+                 * shard-grow loop would still re-fire here. */
+                if (sh->n_filled + 1 > (int64_t)(sh->cap / 2)) {
+                    if (mk_shard_grow(sh, total_state, wide) != 0) {
+                        atomic_store_explicit(&c->oom, 1,
+                                              memory_order_relaxed);
+                        return;
+                    }
+                }
+                int64_t* slots = sh->slots;
+                int64_t* state = sh->state;
+                uint64_t shm = sh->mask;
+                uint64_t s;
+                if (!wide) {
+                    int64_t kv = mk_compose_key(c, rid);
+                    uint64_t hk = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+                    hk ^= hk >> 33;
+                    s = hk & shm;
+                    for (;;) {
+                        if (!slots[s * 2]) {
+                            slots[s * 2]     = 1;
+                            slots[s * 2 + 1] = kv;
+                            int64_t* st = &state[s * total_state];
+                            for (uint8_t a = 0; a < n_aggs; a++) {
+                                const mk_agg_t* ag = &c->aggs[a];
+                                switch (ag->kind) {
+                                case MK_AGG_COUNT:
+                                case MK_AGG_SUM:
+                                    st[ag->state_off] = 0; break;
+                                case MK_AGG_MIN:
+                                    st[ag->state_off] = INT64_MAX; break;
+                                case MK_AGG_MAX:
+                                    st[ag->state_off] = INT64_MIN; break;
+                                case MK_AGG_AVG:
+                                    st[ag->state_off    ] = 0;
+                                    st[ag->state_off + 1] = 0; break;
+                                }
+                            }
+                            sh->n_filled++;
+                            break;
+                        }
+                        if (slots[s * 2 + 1] == kv) break;
+                        s = (s + 1) & shm;
+                    }
+                } else {
+                    int64_t kv_lo, kv_hi;
+                    mk_compose_key2(c, rid, &kv_lo, &kv_hi);
+                    uint64_t hk = mk_hash_lo_hi(kv_lo, kv_hi);
+                    s = hk & shm;
+                    int64_t* slots_hi = sh->slots_hi;
+                    for (;;) {
+                        if (!slots[s * 2]) {
+                            slots[s * 2]     = 1;
+                            slots[s * 2 + 1] = kv_lo;
+                            slots_hi[s]      = kv_hi;
+                            int64_t* st = &state[s * total_state];
+                            for (uint8_t a = 0; a < n_aggs; a++) {
+                                const mk_agg_t* ag = &c->aggs[a];
+                                switch (ag->kind) {
+                                case MK_AGG_COUNT:
+                                case MK_AGG_SUM:
+                                    st[ag->state_off] = 0; break;
+                                case MK_AGG_MIN:
+                                    st[ag->state_off] = INT64_MAX; break;
+                                case MK_AGG_MAX:
+                                    st[ag->state_off] = INT64_MIN; break;
+                                case MK_AGG_AVG:
+                                    st[ag->state_off    ] = 0;
+                                    st[ag->state_off + 1] = 0; break;
+                                }
+                            }
+                            sh->n_filled++;
+                            break;
+                        }
+                        if (slots[s * 2 + 1] == kv_lo &&
+                            slots_hi[s] == kv_hi) break;
+                        s = (s + 1) & shm;
+                    }
+                }
+                /* Per-agg accumulate for this row. */
+                int64_t* st = &state[s * total_state];
+                for (uint8_t a = 0; a < n_aggs; a++) {
+                    const mk_agg_t* ag = &c->aggs[a];
+                    uint8_t off = ag->state_off;
+                    switch (ag->kind) {
+                    case MK_AGG_COUNT:
+                        st[off]++;
+                        break;
+                    case MK_AGG_SUM: {
+                        int64_t v = mk_read_agg_i64(ag, rid);
+                        st[off] += v;
+                        break;
+                    }
+                    case MK_AGG_MIN: {
+                        int64_t v = mk_read_agg_i64(ag, rid);
+                        if (v < st[off]) st[off] = v;
+                        break;
+                    }
+                    case MK_AGG_MAX: {
+                        int64_t v = mk_read_agg_i64(ag, rid);
+                        if (v > st[off]) st[off] = v;
+                        break;
+                    }
+                    case MK_AGG_AVG: {
+                        int64_t v = mk_read_agg_i64(ag, rid);
+                        st[off    ] += v;
+                        st[off + 1] += 1;
+                        break;
+                    }
+                    }
+                }
+            }
+        }
+        rid = chn[rid] - 1;
+    }
+}
+
 static void mk_eq_i64_count_fn(void* raw, uint32_t worker_id,
                                int64_t start, int64_t end) {
     mk_eq_i64_count_ctx_t* fc = (mk_eq_i64_count_ctx_t*)raw;
@@ -3860,7 +4111,17 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
         ctx.pred.n_children > 1) {
         eq_i64_idx = mk_find_i64_eq_child(&ctx.pred);
     }
-    if (eq_i64_idx >= 0) {
+    /* Hash-index probe: if any FP_EQ child sits on a column with a
+     * fresh RAY_IDX_HASH, walk the chain instead of scanning rows.
+     * Single-thread — match counts on a point lookup are too small
+     * to justify pool dispatch. */
+    int hash_eq_idx = mk_find_hash_eq_child(&ctx.pred);
+    if (hash_eq_idx >= 0 && ctx.n_aggs == 1 &&
+        ctx.aggs[0].kind == MK_AGG_COUNT) {
+        mk_eq_hash_count_fn(&ctx, (uint8_t)hash_eq_idx);
+    } else if (hash_eq_idx >= 0) {
+        mk_par_hash_fn(&ctx, (uint8_t)hash_eq_idx);
+    } else if (eq_i64_idx >= 0) {
         mk_eq_i64_count_ctx_t fctx = {
             .ctx = &ctx,
             .eq_idx = (uint8_t)eq_i64_idx,
