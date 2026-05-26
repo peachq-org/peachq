@@ -87,147 +87,6 @@ static int64_t dict_key_id(ray_t* dict, const char* key) {
     return -1;
 }
 
-typedef struct {
-    ray_t*   tbl;
-    int64_t  nrows;
-    uint64_t hash;
-    uint64_t from_hash;
-    uint64_t env_gen;
-    ray_t*   result;
-} select_cache_entry_t;
-
-#define SELECT_CACHE_N 512
-static select_cache_entry_t g_select_cache[SELECT_CACHE_N];
-static uint16_t g_select_cache_next = 0;
-
-static uint64_t hash_mix_u64(uint64_t h, uint64_t v) {
-    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-    return h ? h : 0x9e3779b97f4a7c15ull;
-}
-
-static uint64_t ray_expr_hash(ray_t* x) {
-    if (!x) return 0x1234abcd5678ef00ull;
-    uint64_t h = hash_mix_u64(0xcbf29ce484222325ull, (uint64_t)(uint8_t)x->type);
-    h = hash_mix_u64(h, (uint64_t)x->attrs);
-    h = hash_mix_u64(h, (x->type == -RAY_STR)
-                        ? (uint64_t)ray_str_len(x)
-                        : (uint64_t)x->len);
-    if (x->type == RAY_LIST) {
-        ray_t** elems = (ray_t**)ray_data(x);
-        for (int64_t i = 0; i < x->len; i++)
-            h = hash_mix_u64(h, ray_expr_hash(elems[i]));
-    } else if (x->type == RAY_DICT) {
-        ray_t* keys = ray_dict_keys(x);
-        ray_t* vals = ray_dict_vals(x);
-        h = hash_mix_u64(h, ray_expr_hash(keys));
-        h = hash_mix_u64(h, ray_expr_hash(vals));
-    } else if (x->type == RAY_STR) {
-        size_t n = 0;
-        const char* s = ray_str_vec_get(x, 0, &n);
-        for (size_t i = 0; s && i < n; i++)
-            h = hash_mix_u64(h, (unsigned char)s[i]);
-    } else if (x->type == -RAY_STR) {
-        const char* s = ray_str_ptr(x);
-        size_t n = ray_str_len(x);
-        for (size_t i = 0; s && i < n; i++)
-            h = hash_mix_u64(h, (unsigned char)s[i]);
-    } else if (x->type == RAY_SYM || x->type == -RAY_SYM ||
-               x->type == RAY_I64 || x->type == -RAY_I64 ||
-               x->type == RAY_TIMESTAMP || x->type == -RAY_TIMESTAMP) {
-        h = hash_mix_u64(h, (uint64_t)x->i64);
-    } else if (x->type == RAY_I32 || x->type == -RAY_I32 ||
-               x->type == RAY_DATE || x->type == -RAY_DATE ||
-               x->type == RAY_TIME || x->type == -RAY_TIME) {
-        h = hash_mix_u64(h, (uint64_t)(uint32_t)x->i32);
-    } else if (x->type == RAY_I16 || x->type == -RAY_I16) {
-        h = hash_mix_u64(h, (uint64_t)(uint16_t)x->i16);
-    } else if (x->type == RAY_U8 || x->type == -RAY_U8 ||
-               x->type == RAY_BOOL || x->type == -RAY_BOOL) {
-        h = hash_mix_u64(h, (uint64_t)x->u8);
-    } else if (x->type == RAY_F64 || x->type == -RAY_F64) {
-        uint64_t bits = 0;
-        memcpy(&bits, &x->f64, sizeof(bits));
-        h = hash_mix_u64(h, bits);
-    }
-    return h;
-}
-
-static ray_t* select_cache_get(ray_t* tbl, int64_t nrows,
-                               uint64_t hash, uint64_t from_hash) {
-    if (!g_ray_profile.active) return NULL;
-    if (!hash) return NULL;
-    for (uint16_t i = 0; i < SELECT_CACHE_N; i++) {
-        select_cache_entry_t* e = &g_select_cache[i];
-        if (e->result && e->env_gen == ray_env_generation() &&
-            e->nrows == nrows && e->hash == hash &&
-            (e->tbl == tbl || (from_hash && e->from_hash == from_hash))) {
-            ray_retain(e->result);
-            return e->result;
-        }
-    }
-    return NULL;
-}
-
-static void select_expr_cache_put(uint64_t hash, uint64_t from_hash,
-                                  ray_t* result);
-
-static void select_cache_put(ray_t* tbl, int64_t nrows,
-                             uint64_t hash, uint64_t from_hash,
-                             ray_t* result) {
-    if (!g_ray_profile.active) return;
-    if (!tbl || !hash || !result || RAY_IS_ERR(result)) return;
-    select_cache_entry_t* e =
-        &g_select_cache[g_select_cache_next++ % SELECT_CACHE_N];
-    if (e->result) ray_release(e->result);
-    e->tbl = tbl;
-    e->nrows = nrows;
-    e->hash = hash;
-    e->from_hash = from_hash;
-    e->env_gen = ray_env_generation();
-    e->result = result;
-    ray_retain(e->result);
-    select_expr_cache_put(hash, from_hash, result);
-}
-
-typedef struct {
-    uint64_t hash;
-    uint64_t from_hash;
-    uint64_t env_gen;
-    ray_t*   result;
-} select_expr_cache_entry_t;
-
-#define SELECT_EXPR_CACHE_N 1024
-static select_expr_cache_entry_t g_select_expr_cache[SELECT_EXPR_CACHE_N];
-static uint16_t g_select_expr_cache_next = 0;
-
-static ray_t* select_expr_cache_get(uint64_t hash, uint64_t from_hash) {
-    if (!g_ray_profile.active) return NULL;
-    if (!hash) return NULL;
-    for (uint16_t i = 0; i < SELECT_EXPR_CACHE_N; i++) {
-        select_expr_cache_entry_t* e = &g_select_expr_cache[i];
-        if (e->result && e->env_gen == ray_env_generation() &&
-            e->hash == hash && e->from_hash == from_hash) {
-            ray_retain(e->result);
-            return e->result;
-        }
-    }
-    return NULL;
-}
-
-static void select_expr_cache_put(uint64_t hash, uint64_t from_hash,
-                                  ray_t* result) {
-    if (!g_ray_profile.active) return;
-    if (!hash || !result || RAY_IS_ERR(result)) return;
-    select_expr_cache_entry_t* e =
-        &g_select_expr_cache[g_select_expr_cache_next++ % SELECT_EXPR_CACHE_N];
-    if (e->result) ray_release(e->result);
-    e->hash = hash;
-    e->from_hash = from_hash;
-    e->env_gen = ray_env_generation();
-    e->result = result;
-    ray_retain(e->result);
-}
-
 /* Flatten a RAY_DICT (keys SYM vec + vals LIST) into a transient
  * [k0,v0,k1,v1,...] array view so the existing dict-walking loops in
  * ray_select_fn et al. can iterate without rewriting every site.
@@ -4980,12 +4839,6 @@ ray_t* ray_select(ray_t** args, int64_t n) {
     /* Evaluate 'from:' to get the source table */
     ray_t* from_expr = dict_get(dict, "from");
     if (!from_expr) return ray_error("domain", NULL);
-    uint64_t select_cache_hash_value = ray_expr_hash(dict);
-    uint64_t select_cache_from_hash = ray_expr_hash(from_expr);
-    ray_t* expr_cached = select_expr_cache_get(select_cache_hash_value,
-                                               select_cache_from_hash);
-    if (expr_cached)
-        return expr_cached;
     ray_t* where_expr = dict_get(dict, "where");
     ray_group_emit_filter_t prev_emit_filter = ray_group_emit_filter_get();
     ray_group_emit_filter_t emit_filter = {0};
@@ -4998,14 +4851,6 @@ ray_t* ray_select(ray_t** args, int64_t n) {
         ray_group_emit_filter_set(prev_emit_filter);
     if (RAY_IS_ERR(tbl)) return tbl;
     if (tbl->type != RAY_TABLE) { ray_release(tbl); return ray_error("type", NULL); }
-    int64_t select_cache_nrows = ray_table_nrows(tbl);
-    ray_t* select_cached = select_cache_get(tbl, select_cache_nrows,
-                                            select_cache_hash_value,
-                                            select_cache_from_hash);
-    if (select_cached) {
-        ray_release(tbl);
-        return select_cached;
-    }
 
     ray_t* by_expr = dict_get(dict, "by");
     ray_t* take_expr = dict_get(dict, "take");
@@ -6424,9 +6269,6 @@ by_dict_done:
                         ray_free(vals_hdr); ray_free(null_hdr); ray_free(cnt_hdr);
                         if (eval_tbl != tbl) ray_release(eval_tbl);
                         ray_release(tbl);
-                        select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                         return result;
                     }
                 }
@@ -6687,16 +6529,10 @@ by_dict_done:
                 if (eval_tbl != tbl) ray_release(eval_tbl);
                 ray_release(tbl);
                 if (take_preapplied) {
-                    select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                     return result;
                 }
                 result = apply_sort_take(result, dict_elems, dict_n,
                                          asc_id, desc_id, take_id);
-                select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                 return result;
             }
 
@@ -6887,9 +6723,6 @@ by_dict_done:
                 }
                 res = apply_sort_take(res, dict_elems, dict_n,
                                       asc_id, desc_id, take_id);
-                select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, res);
                 return res;
             }
 
@@ -7301,9 +7134,6 @@ by_dict_done:
             ray_release(tbl);
             result = apply_sort_take(result, dict_elems, dict_n,
                                      asc_id, desc_id, take_id);
-            select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
             return result;
         }
 
@@ -8449,9 +8279,6 @@ by_dict_done:
             ray_release(tbl);
             result = apply_sort_take(result, dict_elems, dict_n,
                                      asc_id, desc_id, take_id);
-            select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
             return result;
         }
     } else if (n_out > 0) {
@@ -8599,9 +8426,6 @@ by_dict_done:
                 ray_graph_free(g); ray_release(tbl);
                 result = apply_sort_take(result, dict_elems, dict_n,
                                          asc_id, desc_id, take_id);
-                select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                 return result;
             } else {
                 root = ray_select_op(g, root, col_ops, nc);
@@ -9638,8 +9462,6 @@ by_dict_done:
     if (by_sym_vec_owned) ray_release(by_sym_vec_owned);
     if (saved_selection) ray_release(saved_selection);
 
-    select_cache_put(tbl, select_cache_nrows, select_cache_hash_value,
-                     select_cache_from_hash, result);
     return result;
 }
 
