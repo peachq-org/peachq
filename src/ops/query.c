@@ -8097,6 +8097,31 @@ by_dict_done:
                             }
                         }
                         if (src_for_global) {
+                            /* Streaming per-group HLL: skips the idx_buf
+                             * scatter and re-walk by running one pass
+                             * over (row_gid, hash(src[r])).  Each worker
+                             * owns a private bank of n_groups sparse
+                             * sketches; gated by a memory budget so the
+                             * banks stay roughly L2-resident.  Falls
+                             * through to the buf-form on type miss / OOM. */
+                            if (n_groups >= 16 && n_groups <= 500
+                                && nrows >= (1 << 20)
+                                && !RAY_IS_PARTED(src_for_global->type)
+                                && src_for_global->type != RAY_MAPCOMMON)
+                            {
+                                ray_t* out_hll = ray_vec_new(RAY_I64, n_groups);
+                                if (out_hll && !RAY_IS_ERR(out_hll)) {
+                                    out_hll->len = n_groups;
+                                    int64_t* odata = (int64_t*)ray_data(out_hll);
+                                    if (ray_count_distinct_approx_pg_stream(
+                                            src_for_global, row_gid, nrows,
+                                            n_groups, 14, odata) == 0) {
+                                        col = out_hll;
+                                    } else {
+                                        ray_release(out_hll);
+                                    }
+                                }
+                            }
                             /* Path selection: global-hash kernel scales
                              * with n_rows (per-row probe of one shared
                              * hash table); per-group-slice scales with
@@ -8107,12 +8132,14 @@ by_dict_done:
                              * so keep them on the single-pass kernel and
                              * avoid slicing through the partition layout
                              * again. */
-                            if (n_groups <= 50000) {
-                                col = count_distinct_per_group_buf(
-                                    cd_inner, tbl, idx_buf, offsets, grp_cnt, n_groups);
-                            } else {
-                                col = ray_count_distinct_per_group(
-                                    src_for_global, row_gid, nrows, n_groups);
+                            if (!col) {
+                                if (n_groups <= 50000) {
+                                    col = count_distinct_per_group_buf(
+                                        cd_inner, tbl, idx_buf, offsets, grp_cnt, n_groups);
+                                } else {
+                                    col = ray_count_distinct_per_group(
+                                        src_for_global, row_gid, nrows, n_groups);
+                                }
                             }
                             /* col == NULL → unsupported type, fall through. */
                         }
