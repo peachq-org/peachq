@@ -44,30 +44,137 @@ int ray_hll_init(ray_hll_t* h, uint8_t p) {
     return 0;
 }
 
+void ray_hll_init_sparse(ray_hll_t* h, uint8_t p,
+                          uint32_t* sparse_buf, uint32_t sparse_cap,
+                          uint8_t* dense_buf) {
+    if (!h) return;
+    if (p < 4) p = 4;
+    if (p > 18) p = 18;
+    memset(h, 0, sizeof(*h));
+    h->p = p;
+    h->m = 1u << p;
+    /* Encode caller-owned dense buffer as a tagged pointer in _hdr —
+     * low bit set ⇒ caller-owned (skip free), clear ⇒ scratch ray_t*.
+     * promote_to_dense recovers it; ray_hll_free skips the scratch_free.
+     * Stack allocations on x86-64 are at least 8-byte aligned for arrays
+     * of this size, so the low bit is always free for tagging. */
+    assert(((uintptr_t)dense_buf & 1u) == 0);
+    uintptr_t tagged = (uintptr_t)dense_buf | (uintptr_t)1;
+    h->_hdr = (ray_t*)tagged;
+    h->sparse_keys = sparse_buf;
+    h->sparse_count = 0;
+    h->sparse_cap = sparse_cap;
+}
+
+/* Recover the caller-owned dense buffer (NULL if none).  Used by
+ * promote_to_dense to install regs without a scratch alloc. */
+static inline uint8_t* hll_caller_dense_buf(const ray_hll_t* h) {
+    uintptr_t tagged = (uintptr_t)h->_hdr;
+    if (!(tagged & 1)) return NULL;
+    return (uint8_t*)(tagged & ~(uintptr_t)1);
+}
+
+void ray_hll_promote_to_dense(ray_hll_t* h) {
+    if (!h || h->regs) return;       /* already dense */
+    uint8_t* dense = hll_caller_dense_buf(h);
+    if (!dense) {
+        /* No caller buffer — fall back to scratch alloc.  Used by
+         * merge paths that promote a sparse src whose owner is the
+         * caller's stack but dst is heap-resident; we materialise a
+         * fresh dense buffer through the scratch arena. */
+        ray_t* hdr = NULL;
+        dense = (uint8_t*)scratch_calloc(&hdr, (size_t)h->m);
+        if (!dense) {
+            /* OOM during promote.  Leave sparse; caller's estimate
+             * will overflow into a small under-count.  This branch is
+             * extremely rare (the dense buffer is 16 KB at P=14). */
+            return;
+        }
+        h->_hdr = hdr;
+    } else {
+        /* Caller-owned: clear and install. */
+        memset(dense, 0, (size_t)h->m);
+        h->_hdr = NULL;  /* drop tagged pointer; no longer needed */
+    }
+    h->regs = dense;
+    /* Replay sparse entries into dense (max). */
+    uint32_t* sk = h->sparse_keys;
+    uint32_t  n  = h->sparse_count;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t v = sk[i];
+        uint32_t idx = v >> 8;
+        uint8_t  rho = (uint8_t)(v & 0xFF);
+        if (rho > dense[idx]) dense[idx] = rho;
+    }
+    h->sparse_keys = NULL;
+    h->sparse_count = 0;
+    h->sparse_cap = 0;
+}
+
 void ray_hll_free(ray_hll_t* h) {
     if (!h) return;
-    if (h->_hdr) scratch_free(h->_hdr);
+    /* Only free if _hdr is a real scratch handle (low bit clear, non-NULL).
+     * Tagged caller-owned buffers and NULL _hdr are both no-ops. */
+    uintptr_t tagged = (uintptr_t)h->_hdr;
+    if (h->_hdr && !(tagged & 1)) scratch_free(h->_hdr);
     h->regs = NULL;
     h->_hdr = NULL;
+    h->sparse_keys = NULL;
+    h->sparse_count = 0;
+    h->sparse_cap = 0;
     h->m = 0;
     h->p = 0;
 }
 
 void ray_hll_reset(ray_hll_t* h) {
-    if (h && h->regs) memset(h->regs, 0, (size_t)h->m);
+    if (!h) return;
+    if (h->regs) {
+        memset(h->regs, 0, (size_t)h->m);
+        return;
+    }
+    if (h->sparse_keys) {
+        /* Don't memset the sparse buffer — entries are only read up to
+         * sparse_count, so clearing the count is enough. */
+        h->sparse_count = 0;
+    }
+}
+
+/* Merge a sparse src into a dense dst.  Each src entry contributes a
+ * rho-update at its idx slot. */
+static inline void hll_merge_sparse_into_dense(uint8_t* d,
+                                               const uint32_t* sk,
+                                               uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t v = sk[i];
+        uint32_t idx = v >> 8;
+        uint8_t  rho = (uint8_t)(v & 0xFF);
+        if (rho > d[idx]) d[idx] = rho;
+    }
 }
 
 void ray_hll_merge(ray_hll_t* dst, const ray_hll_t* src) {
-    if (!dst || !src || !dst->regs || !src->regs) return;
+    if (!dst || !src) return;
     if (dst->m != src->m) return;     /* mismatched precision — caller bug */
-    const uint8_t* s = src->regs;
-    uint8_t*       d = dst->regs;
-    uint32_t       m = dst->m;
-    /* Branchless max — keeps the hot per-shard merge in vector regs.
-     * The compiler usually auto-vectorises this to a packed-max sequence. */
-    for (uint32_t i = 0; i < m; i++) {
-        uint8_t a = d[i], b = s[i];
-        d[i] = a > b ? a : b;
+    /* Promote dst to dense first if needed (cheap: at most 256 entries).
+     * dst's caller-owned dense buffer (if any) gets used; otherwise
+     * promote_to_dense scratch-allocates. */
+    if (!dst->regs) {
+        ray_hll_promote_to_dense(dst);
+        if (!dst->regs) return;       /* promote OOM — best-effort skip */
+    }
+    if (src->regs) {
+        const uint8_t* s = src->regs;
+        uint8_t*       d = dst->regs;
+        uint32_t       m = dst->m;
+        /* Branchless max — keeps the hot per-shard merge in vector regs.
+         * The compiler usually auto-vectorises this to a packed-max sequence. */
+        for (uint32_t i = 0; i < m; i++) {
+            uint8_t a = d[i], b = s[i];
+            d[i] = a > b ? a : b;
+        }
+    } else if (src->sparse_keys) {
+        hll_merge_sparse_into_dense(dst->regs, src->sparse_keys,
+                                    src->sparse_count);
     }
 }
 
@@ -77,7 +184,7 @@ void ray_hll_merge(ray_hll_t* dst, const ray_hll_t* src) {
  * already gives a clean estimate below E ≤ 2.5·m, which is where the raw
  * mean diverges from truth. */
 int64_t ray_hll_estimate(const ray_hll_t* h) {
-    if (!h || !h->regs) return 0;
+    if (!h) return 0;
     uint32_t m = h->m;
     if (m == 0) return 0;
 
@@ -90,13 +197,34 @@ int64_t ray_hll_estimate(const ray_hll_t* h) {
     else              alpha_m = 0.7213 / (1.0 + 1.079 / (double)m);
 
     /* Sum of 2^-reg[i].  Count zero registers for the linear-counting
-     * fallback at small cardinalities (when V > 0 and E ≤ 2.5·m). */
+     * fallback at small cardinalities (when V > 0 and E ≤ 2.5·m).
+     * Sparse mode: only iterate the entries (each rho>=1 by construction);
+     * the remaining (m - sparse_count) registers contribute 2^0 = 1 each
+     * and count as zero registers. */
     double   sum_inv  = 0.0;
     uint32_t n_zeros  = 0;
-    for (uint32_t i = 0; i < m; i++) {
-        uint8_t r = h->regs[i];
-        sum_inv += ldexp(1.0, -(int)r);   /* 2^-r */
-        n_zeros += (r == 0);
+    if (h->regs) {
+        for (uint32_t i = 0; i < m; i++) {
+            uint8_t r = h->regs[i];
+            sum_inv += ldexp(1.0, -(int)r);   /* 2^-r */
+            n_zeros += (r == 0);
+        }
+    } else if (h->sparse_keys) {
+        uint32_t n = h->sparse_count;
+        const uint32_t* sk = h->sparse_keys;
+        /* Each entry stores a unique register idx (linear-probe dedup
+         * guarantees this).  Unset registers contribute 2^0 = 1.0 each
+         * and count as zeros. */
+        sum_inv = (double)(m - n);
+        n_zeros = m - n;
+        for (uint32_t i = 0; i < n; i++) {
+            uint8_t r = (uint8_t)(sk[i] & 0xFF);
+            sum_inv += ldexp(1.0, -(int)r);
+        }
+    } else {
+        /* Uninitialised — all m registers are conceptually zero. */
+        sum_inv = (double)m;
+        n_zeros = m;
     }
 
     double raw = alpha_m * (double)m * (double)m / sum_inv;
@@ -316,12 +444,21 @@ static void cda_pg_buf_task(void* raw, uint32_t worker_id, int64_t start, int64_
 
     /* One private HLL per task (allocated on stack so we never touch
      * the shared scratch arena from a worker thread).  P≤14 → m≤16384,
-     * fits comfortably in the default 8 MiB worker stack. */
-    uint8_t regs[1u << 14];
-    ray_hll_t sk = { .p = c->p, .m = c->m, .regs = regs, ._hdr = NULL };
+     * fits comfortably in the default 8 MiB worker stack.
+     *
+     * Sparse start: the sketch begins in sparse mode using sparse_buf
+     * (256 entries, 1 KB).  Groups with few distinct values never touch
+     * the dense register array; once the sparse cap is hit on a group,
+     * promote_to_dense moves it into the stack regs[] buffer.  The
+     * dense buffer is unconditionally allocated on the stack so the
+     * promotion path is alloc-free. */
+    uint8_t  regs[1u << 14];
+    uint32_t sparse_buf[RAY_HLL_SPARSE_CAP];
+    ray_hll_t sk;
 
     for (int64_t g = start; g < end; g++) {
-        memset(regs, 0, c->m);
+        ray_hll_init_sparse(&sk, c->p, sparse_buf,
+                            RAY_HLL_SPARSE_CAP, regs);
         int64_t s = c->offsets[g];
         int64_t e = s + c->counts[g];
         if (t == RAY_I64 || t == RAY_TIMESTAMP) {
@@ -433,7 +570,17 @@ int ray_count_distinct_approx_pg_buf(ray_t* src,
     };
     ray_pool_t* pool = ray_pool_get();
     if (pool && ray_pool_total_workers(pool) >= 2 && n_groups >= 4) {
-        ray_pool_dispatch_n(pool, cda_pg_buf_task, &ctx, (uint32_t)n_groups);
+        /* dispatch_n issues exactly n_groups tasks of [i, i+1), but the
+         * task ring is hard-capped at 65536 so n_groups > 65536 would
+         * silently drop trailing groups.  For high-cardinality grouping
+         * use element-based dispatch — each worker gets a range of
+         * groups, processes them serially, and reuses its stack sketch
+         * across the range. */
+        if (n_groups <= 65536) {
+            ray_pool_dispatch_n(pool, cda_pg_buf_task, &ctx, (uint32_t)n_groups);
+        } else {
+            ray_pool_dispatch(pool, cda_pg_buf_task, &ctx, n_groups);
+        }
     } else {
         cda_pg_buf_task(&ctx, 0, 0, n_groups);
     }
