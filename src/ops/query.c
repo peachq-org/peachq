@@ -4272,13 +4272,8 @@ by_dict_done:
                 /* Single-key case fits unconditionally (one key column, one
                  * slot).  Multi-key narrow path (≤ 8 bytes packed) uses a
                  * single int64 slot; the wide path (9..16 bytes) adds a
-                 * side kv_hi side array.  The wide path's extra hi compare
-                 * + extra memory traffic only pays back for single-COUNT
-                 * shapes (Q36, Q41); multi-agg high-card workloads (Q31,
-                 * Q32) regress against the regular FILTER+GROUP path, so
-                 * keep them on it. */
-                int wide_fits  = (total_bytes >  8 && total_bytes <= 16
-                                  && n_aggs_ok == 1 && has_only_count);
+                 * side kv_hi side array. */
+                int wide_fits  = (total_bytes >  8 && total_bytes <= 16);
                 int narrow_fits = (total_bytes <= 8);
                 int fits = (n_keys_local == 1) || narrow_fits || wide_fits;
                 if (keys_ok && fits) {
