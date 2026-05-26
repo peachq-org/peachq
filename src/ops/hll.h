@@ -195,4 +195,26 @@ int ray_count_distinct_approx_pg_buf(ray_t* src,
                                       int64_t n_groups,
                                       uint8_t p, int64_t* out);
 
+/* Streaming per-group HLL — single pass over (row_gid[r], hashes[r])
+ * directly accumulating into n_groups sketches per worker, skipping
+ * the (idx_buf + offsets + counts) CSR scatter that the _pg_buf entry
+ * point requires.  Each worker owns a private bank of n_groups sparse
+ * sketches; after the pass, banks are merged element-wise (max) into
+ * worker 0's bank and the estimates are written to out[gid].
+ *
+ * Memory: per worker = n_groups * (sparse_cap*4 + (1<<p)) bytes; at
+ * p=14 that's ~17 KB per group.  Caller must gate on a memory budget
+ * — this kernel does not validate `n_groups` against available memory.
+ *
+ * Supported types: BOOL / U8 / I16 / I32 / I64 / F64 / DATE / TIME /
+ * TIMESTAMP / SYM.  Returns 0 on success, -1 on unsupported type,
+ * OOM, or empty input.  Caller falls back to _pg_buf (which itself
+ * falls back to exact partitioned dedup) on failure. */
+int ray_count_distinct_approx_pg_stream(ray_t* src,
+                                         const int64_t* row_gid,
+                                         int64_t n_rows,
+                                         int64_t n_groups,
+                                         uint8_t p,
+                                         int64_t* out);
+
 #endif /* RAY_OPS_HLL_H */
