@@ -1354,7 +1354,8 @@ static ray_t* fp_try_i32_mg_top_count(const fp_par_ctx_t* ctx, int64_t nrows,
 static ray_t* fp_try_i64_mg_top_count(const fp_par_ctx_t* ctx, int64_t nrows,
                                       int64_t key_sym,
                                       ray_group_emit_filter_t emit_filter) {
-    if (ctx->kt != RAY_I64 || ctx->pred.n_children != 0 ||
+    if (ctx->kt != RAY_I64 && ctx->kt != RAY_TIMESTAMP) return NULL;
+    if (ctx->pred.n_children != 0 ||
         emit_filter.top_count_take <= 0 || nrows <= 0)
         return NULL;
 
