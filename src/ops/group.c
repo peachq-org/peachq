@@ -5599,9 +5599,24 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         }
     }
     ray_group_emit_filter_t emit_filter = ray_group_emit_filter_get();
+    /* Historical: enabled only for OP_COUNT (the min_count_exclusive
+     * heavy-hitter filter and the top_count_take heap).  The
+     * top_count_take heap path now also accepts SUM/MIN/MAX — those
+     * fire through the v2_emit per-partition compact below, which
+     * reads the agg's int64 row slot directly.  The non-COUNT paths
+     * (sparse_i64 range-counting, the n_keys>1 macro fast path) still
+     * gate on COUNT because they DON'T have the agg value available
+     * outside the row slot. */
     bool use_emit_filter = emit_filter.enabled &&
         emit_filter.agg_index < n_aggs &&
         ext->agg_ops[emit_filter.agg_index] == OP_COUNT;
+    bool use_topn_filter = emit_filter.enabled &&
+        emit_filter.top_count_take > 0 &&
+        emit_filter.agg_index < n_aggs &&
+        (ext->agg_ops[emit_filter.agg_index] == OP_COUNT ||
+         ext->agg_ops[emit_filter.agg_index] == OP_SUM   ||
+         ext->agg_ops[emit_filter.agg_index] == OP_MIN   ||
+         ext->agg_ops[emit_filter.agg_index] == OP_MAX);
 
     /* ---- Scalar aggregate fast path (n_keys == 0): flat vector scan ---- */
     if (n_keys == 0 && nrows > 0) {
@@ -7989,6 +8004,178 @@ v2_done:;
         }
 
 v2_emit:;
+        /* Top-N aware compaction: when the (select … by … desc: c take: N)
+         * shape is in flight (use_emit_filter + top_count_take, COUNT agg),
+         * the global answer is the N rows with the largest count across
+         * all partitions.  Run a global bounded-heap (size N) over the
+         * union of per-partition rows here, then in-place compact each
+         * partition's row array to contain only globally-surviving rows.
+         * Phase3 below then emits N rows total instead of total_grps —
+         * the major win for high-cardinality keys like UserID/URL where
+         * total_grps is in the millions but N is ≤ 1024.
+         *
+         * Implementation notes:
+         *  - The bounded heap orders by count (the agg at COUNT slot, the
+         *    first int64 in each row).  Equal counts are stable: the
+         *    first row seen wins.  Final per-partition row order is
+         *    preserved so apply_sort_take below can do the final
+         *    arrange-by-agg deterministically.
+         *  - We also handle the "fewer total rows than N" case — compact
+         *    becomes a no-op.
+         *  - Only fires when emit_filter.top_count_take > 0; existing
+         *    min_count_exclusive-only filters fall through unchanged. */
+        if (use_topn_filter) {
+            int64_t k_take = emit_filter.top_count_take;
+            uint32_t total_pre = 0;
+            for (uint32_t p = 0; p < RADIX_P; p++)
+                total_pre += part_hts[p].grp_count;
+            /* Resolve the in-row offset of the order-by agg's value.  For
+             * COUNT it's the leading int64 at offset 0; for SUM/MIN/MAX
+             * it's the per-slot int64 in off_sum/off_min/off_max.  F64
+             * agg outputs (sum over an F64 column) compare by bitcast —
+             * for IEEE 754 the bit pattern preserves ordering for finite
+             * positive values; mixed-sign and NaN cases drop the heap
+             * back to a wider comparator.  To stay correct we exclude
+             * F64-output aggs from this fast path (the COUNT count is
+             * always I64, and SUM/MIN/MAX over an integer column keep
+             * an I64 slot — agg_is_f64 marks the SUM-over-F64 case). */
+            uint16_t order_op = emit_filter.agg_op
+                ? emit_filter.agg_op
+                : (uint16_t)OP_COUNT;
+            uint8_t  agg_index_local = emit_filter.agg_index;
+            uint16_t order_off = 0;  /* default: COUNT at row+0 */
+            bool order_is_f64 = false;
+            if (agg_index_local < n_aggs &&
+                (ght_layout.agg_is_f64 & (1u << agg_index_local)))
+                order_is_f64 = true;
+            int8_t agg_slot = ght_layout.agg_val_slot[agg_index_local];
+            if (order_op == OP_SUM) {
+                if (agg_slot < 0 || order_is_f64) goto topn_compact_skip;
+                order_off = (uint16_t)(ght_layout.off_sum
+                                       + (uint16_t)agg_slot * 8u);
+            } else if (order_op == OP_MIN) {
+                if (agg_slot < 0 || order_is_f64) goto topn_compact_skip;
+                if (ght_layout.agg_is_sym & (1u << agg_index_local))
+                    goto topn_compact_skip;
+                order_off = (uint16_t)(ght_layout.off_min
+                                       + (uint16_t)agg_slot * 8u);
+            } else if (order_op == OP_MAX) {
+                if (agg_slot < 0 || order_is_f64) goto topn_compact_skip;
+                if (ght_layout.agg_is_sym & (1u << agg_index_local))
+                    goto topn_compact_skip;
+                order_off = (uint16_t)(ght_layout.off_max
+                                       + (uint16_t)agg_slot * 8u);
+            }
+            uint8_t desc_dir = emit_filter.desc ? 1 : 0;
+            /* COUNT defaults to desc when the filter struct's desc bit
+             * isn't set (old single-bit filter shape).  Producer code in
+             * query.c sets it explicitly. */
+            if (order_op == OP_COUNT && !emit_filter.desc) desc_dir = 1;
+            if ((int64_t)total_pre > k_take && k_take > 0 && k_take <= 1024) {
+                /* Stack heap: (val, part, gid) triples.  k_take ≤ 1024
+                 * caps the footprint at 1024 * 16 B = 16 KiB.  The heap
+                 * invariant flips by direction: min-heap for desc (we
+                 * evict the smallest to keep the largest N), max-heap
+                 * for asc (evict the largest to keep the smallest N). */
+                int64_t hval[1024];
+                uint32_t hpart[1024];
+                uint32_t hgid[1024];
+                int64_t hn = 0;
+                /* For top-N largest (desc=1): min-heap.  Root is smallest;
+                 * incoming v replaces root iff v > root.  Heap invariant:
+                 * parent ≤ child (so swap when parent > child).
+                 *
+                 * For top-N smallest (desc=0): max-heap.  Root is largest;
+                 * incoming v replaces root iff v < root.  Heap invariant:
+                 * parent ≥ child (so swap when parent < child).
+                 *
+                 * TOPN_NEEDS_SWAP(parent, child) := does the parent
+                 * violate the invariant relative to child? */
+                #define TOPN_NEEDS_SWAP(parent, child) \
+                    (desc_dir ? ((parent) > (child)) : ((parent) < (child)))
+                #define TOPN_SHOULD_REPLACE(new_v, root_v) \
+                    (desc_dir ? ((new_v) > (root_v)) : ((new_v) < (root_v)))
+                for (uint32_t p = 0; p < RADIX_P; p++) {
+                    group_ht_t* ph = &part_hts[p];
+                    uint16_t rs = ph->layout.row_stride;
+                    uint32_t gc = ph->grp_count;
+                    for (uint32_t gi = 0; gi < gc; gi++) {
+                        const char* row = ph->rows + (size_t)gi * rs;
+                        int64_t v = *(const int64_t*)(const void*)
+                                    (row + order_off);
+                        if (hn < k_take) {
+                            int64_t j = hn++;
+                            hval[j] = v; hpart[j] = p; hgid[j] = gi;
+                            /* Sift up: bubble new entry toward root while
+                             * parent violates invariant. */
+                            while (j > 0) {
+                                int64_t pr = (j - 1) >> 1;
+                                if (!TOPN_NEEDS_SWAP(hval[pr], hval[j])) break;
+                                int64_t tc = hval[pr]; hval[pr] = hval[j]; hval[j] = tc;
+                                uint32_t tp = hpart[pr]; hpart[pr] = hpart[j]; hpart[j] = tp;
+                                uint32_t tg = hgid[pr]; hgid[pr] = hgid[j]; hgid[j] = tg;
+                                j = pr;
+                            }
+                        } else if (TOPN_SHOULD_REPLACE(v, hval[0])) {
+                            hval[0] = v; hpart[0] = p; hgid[0] = gi;
+                            int64_t j = 0;
+                            /* Sift down: find the child that should be
+                             * promoted (the one most violating the
+                             * invariant) and swap. */
+                            for (;;) {
+                                int64_t l = j * 2 + 1, r = l + 1, m = j;
+                                if (l < hn && TOPN_NEEDS_SWAP(hval[m], hval[l])) m = l;
+                                if (r < hn && TOPN_NEEDS_SWAP(hval[m], hval[r])) m = r;
+                                if (m == j) break;
+                                int64_t tc = hval[m]; hval[m] = hval[j]; hval[j] = tc;
+                                uint32_t tp = hpart[m]; hpart[m] = hpart[j]; hpart[j] = tp;
+                                uint32_t tg = hgid[m]; hgid[m] = hgid[j]; hgid[j] = tg;
+                                j = m;
+                            }
+                        }
+                    }
+                }
+                #undef TOPN_NEEDS_SWAP
+                #undef TOPN_SHOULD_REPLACE
+                if (hn > 0) {
+                    /* Build per-partition keep lists (sorted asc by gid so
+                     * the in-place compact below is a single forward sweep). */
+                    uint16_t keep_n[RADIX_P];
+                    for (uint32_t p = 0; p < RADIX_P; p++) keep_n[p] = 0;
+                    /* Cap per-partition kept count at hn (≤ k_take ≤ 1024). */
+                    uint32_t kgid[RADIX_P][1024];
+                    for (int64_t i = 0; i < hn; i++) {
+                        uint32_t p = hpart[i];
+                        uint16_t kn = keep_n[p];
+                        /* Insertion-sort into kgid[p][] keeping asc order. */
+                        uint16_t j = kn;
+                        while (j > 0 && kgid[p][j - 1] > hgid[i]) {
+                            kgid[p][j] = kgid[p][j - 1];
+                            j--;
+                        }
+                        kgid[p][j] = hgid[i];
+                        keep_n[p] = (uint16_t)(kn + 1);
+                    }
+                    /* In-place compact each partition. */
+                    for (uint32_t p = 0; p < RADIX_P; p++) {
+                        group_ht_t* ph = &part_hts[p];
+                        uint16_t rs = ph->layout.row_stride;
+                        uint16_t kn = keep_n[p];
+                        if (kn == ph->grp_count) continue;  /* all kept */
+                        if (kn == 0) { ph->grp_count = 0; continue; }
+                        for (uint16_t i = 0; i < kn; i++) {
+                            uint32_t src = kgid[p][i];
+                            if (src == (uint32_t)i) continue;
+                            memmove(ph->rows + (size_t)i * rs,
+                                    ph->rows + (size_t)src * rs, rs);
+                        }
+                        ph->grp_count = kn;
+                    }
+                }
+            }
+            topn_compact_skip:;
+        }
+
         /* Prefix offsets */
         uint32_t part_offsets[RADIX_P + 1];
         part_offsets[0] = 0;

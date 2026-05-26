@@ -3218,49 +3218,122 @@ static void mk_apply_count_emit_filter(const mk_par_ctx_t* c,
                                        int64_t* gs, int64_t* gst,
                                        int64_t gcap, int64_t* global_n)
 {
+    /* Two-mode emit-filter pass over the deduped (gs, gst) layout:
+     *
+     *  1. min_count_exclusive (heavy-hitter): drop rows whose COUNT
+     *     value is at or below the threshold.  Only fires for COUNT.
+     *
+     *  2. top_count_take (top-N): drop rows that aren't in the top-N
+     *     ordered by the configured agg op (COUNT/SUM/MIN/MAX).  Both
+     *     desc (largest N) and asc (smallest N) are supported.  The
+     *     producer (query.c's match_group_desc_count_take) sets
+     *     emit_filter.agg_op and emit_filter.desc accordingly; an
+     *     unset agg_op defaults to OP_COUNT for the historical
+     *     single-mode filter.
+     *
+     * AVG / STDDEV / VAR / PEARSON / MEDIAN are excluded — their
+     * ordering doesn't reduce to a single int64 row-slot read, so
+     * filters over those aggs must fall back to the post-materialize
+     * sort + take path.  SYM-typed MIN/MAX are similarly excluded
+     * because the stored value is an interned id whose natural order
+     * is not the lexicographic order users expect (a mismatch only
+     * relevant when the desc:/asc: orders the output). */
     ray_group_emit_filter_t emit_filter = ray_group_emit_filter_get();
     if (!emit_filter.enabled || emit_filter.agg_index >= c->n_aggs)
         return;
 
-    const mk_agg_t* count_agg = &c->aggs[emit_filter.agg_index];
-    if (count_agg->kind != MK_AGG_COUNT)
-        return;
-
-    int64_t keep_min = emit_filter.min_count_exclusive + 1;
+    const mk_agg_t* order_agg = &c->aggs[emit_filter.agg_index];
+    uint16_t order_op = emit_filter.agg_op
+        ? emit_filter.agg_op
+        : (uint16_t)OP_COUNT;
+    /* min_count_exclusive remains COUNT-only — it represents a
+     * heavy-hitter threshold inherited from the WHERE clause and
+     * doesn't generalize to SUM/MIN/MAX semantics. */
+    int64_t keep_min = (order_op == OP_COUNT)
+        ? emit_filter.min_count_exclusive + 1
+        : 1;
     int64_t k_take = emit_filter.top_count_take;
+    uint8_t desc_dir = emit_filter.desc;
+    if (order_op == OP_COUNT && !emit_filter.desc) desc_dir = 1;
+
+    /* Map order_op → mk_agg kind, reject incompatible shapes. */
+    if (order_op == OP_COUNT) {
+        if (order_agg->kind != MK_AGG_COUNT) return;
+    } else if (order_op == OP_SUM) {
+        if (order_agg->kind != MK_AGG_SUM) return;
+    } else if (order_op == OP_MIN) {
+        if (order_agg->kind != MK_AGG_MIN) return;
+        if (order_agg->in_type == RAY_SYM) return;
+    } else if (order_op == OP_MAX) {
+        if (order_agg->kind != MK_AGG_MAX) return;
+        if (order_agg->in_type == RAY_SYM) return;
+    } else {
+        return;
+    }
+
     if (k_take > 0 && k_take < *global_n) {
         ray_t* heap_hdr = NULL;
         int64_t* heap = (int64_t*)scratch_alloc(&heap_hdr,
                                                 (size_t)k_take * sizeof(int64_t));
         if (heap) {
             int64_t heap_n = 0;
+            /* For desc (top-N largest): min-heap, root = smallest.
+             * For asc  (top-N smallest): max-heap, root = largest. */
+            #define MK_TOPN_NEEDS_SWAP(parent, child) \
+                (desc_dir ? ((parent) > (child)) : ((parent) < (child)))
+            #define MK_TOPN_SHOULD_REPLACE(nv, rv) \
+                (desc_dir ? ((nv) > (rv)) : ((nv) < (rv)))
             for (int64_t s = 0; s < gcap; s++) {
                 if (!gs[s * 2]) continue;
-                int64_t cnt = gst[(size_t)s * c->total_state + count_agg->state_off];
+                int64_t v = gst[(size_t)s * c->total_state + order_agg->state_off];
                 if (heap_n < k_take) {
                     int64_t j = heap_n++;
-                    heap[j] = cnt;
+                    heap[j] = v;
                     while (j > 0) {
                         int64_t p = (j - 1) >> 1;
-                        if (heap[p] <= heap[j]) break;
+                        if (!MK_TOPN_NEEDS_SWAP(heap[p], heap[j])) break;
                         int64_t tmp = heap[p]; heap[p] = heap[j]; heap[j] = tmp;
                         j = p;
                     }
-                } else if (cnt > heap[0]) {
-                    heap[0] = cnt;
+                } else if (MK_TOPN_SHOULD_REPLACE(v, heap[0])) {
+                    heap[0] = v;
                     int64_t j = 0;
                     for (;;) {
                         int64_t l = j * 2 + 1, r = l + 1, m = j;
-                        if (l < heap_n && heap[l] < heap[m]) m = l;
-                        if (r < heap_n && heap[r] < heap[m]) m = r;
+                        if (l < heap_n && MK_TOPN_NEEDS_SWAP(heap[m], heap[l])) m = l;
+                        if (r < heap_n && MK_TOPN_NEEDS_SWAP(heap[m], heap[r])) m = r;
                         if (m == j) break;
                         int64_t tmp = heap[m]; heap[m] = heap[j]; heap[j] = tmp;
                         j = m;
                     }
                 }
             }
-            if (heap_n == k_take && heap[0] > keep_min)
-                keep_min = heap[0];
+            #undef MK_TOPN_NEEDS_SWAP
+            #undef MK_TOPN_SHOULD_REPLACE
+            if (heap_n == k_take) {
+                /* heap[0] is the worst surviving value.  Compute a
+                 * scalar threshold so the compaction sweep below can
+                 * read it without checking direction per row. */
+                int64_t threshold = heap[0];
+                int64_t kept = 0;
+                for (int64_t s = 0; s < gcap; s++) {
+                    if (!gs[s * 2]) continue;
+                    int64_t v = gst[(size_t)s * c->total_state + order_agg->state_off];
+                    bool survives = desc_dir ? (v >= threshold) : (v <= threshold);
+                    if (!survives) {
+                        gs[s * 2] = 0;
+                    } else if (order_op == OP_COUNT && v < keep_min) {
+                        /* min_count_exclusive threshold combines with top-N
+                         * by AND — drop rows that fail either. */
+                        gs[s * 2] = 0;
+                    } else {
+                        kept++;
+                    }
+                }
+                *global_n = kept;
+                scratch_free(heap_hdr);
+                return;
+            }
             scratch_free(heap_hdr);
         }
     }
@@ -3271,7 +3344,7 @@ static void mk_apply_count_emit_filter(const mk_par_ctx_t* c,
     int64_t kept = 0;
     for (int64_t s = 0; s < gcap; s++) {
         if (!gs[s * 2]) continue;
-        int64_t cnt = gst[(size_t)s * c->total_state + count_agg->state_off];
+        int64_t cnt = gst[(size_t)s * c->total_state + order_agg->state_off];
         if (cnt < keep_min) {
             gs[s * 2] = 0;
         } else {
