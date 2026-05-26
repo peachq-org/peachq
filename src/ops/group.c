@@ -5145,13 +5145,21 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     agg_owned[a] = 1;
                     goto resolve_ins2;
                 }
+                if (vec && RAY_IS_ERR(vec)) ray_release(vec);
             }
             /* Fallback: full recursive evaluation */
             ray_t* saved_table = g->table;
             g->table = tbl;
             ray_t* vec = exec_node(g, agg_input_op);
             g->table = saved_table;
-            if (vec && !RAY_IS_ERR(vec)) {
+            if (vec && RAY_IS_ERR(vec)) {
+                for (uint8_t i = 0; i < a; i++)
+                    { if (agg_owned[i] && agg_vecs[i]) ray_release(agg_vecs[i]); if (agg_owned2[i] && agg_vecs2[i]) ray_release(agg_vecs2[i]); }
+                for (uint8_t k = 0; k < n_keys; k++)
+                    if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+                return vec;
+            }
+            if (vec) {
                 agg_vecs[a] = vec;
                 agg_owned[a] = 1;
             }
@@ -5177,6 +5185,8 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                         agg_vecs2[a] = vec;
                         agg_owned2[a] = 1;
                         compiled2 = 1;
+                    } else if (vec) {
+                        ray_release(vec);
                     }
                 }
                 if (!compiled2) {
@@ -5184,7 +5194,15 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     g->table = tbl;
                     ray_t* vec = exec_node(g, agg_input_op2);
                     g->table = saved_table;
-                    if (vec && !RAY_IS_ERR(vec)) {
+                    if (vec && RAY_IS_ERR(vec)) {
+                        if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
+                        for (uint8_t i = 0; i < a; i++)
+                            { if (agg_owned[i] && agg_vecs[i]) ray_release(agg_vecs[i]); if (agg_owned2[i] && agg_vecs2[i]) ray_release(agg_vecs2[i]); }
+                        for (uint8_t k = 0; k < n_keys; k++)
+                            if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+                        return vec;
+                    }
+                    if (vec) {
                         agg_vecs2[a] = vec;
                         agg_owned2[a] = 1;
                     }
