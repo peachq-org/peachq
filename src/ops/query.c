@@ -3625,6 +3625,89 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
     return ray_i64(nrows);
 }
 
+/* Walk `expr` and collect column-name symbols (RAY_ATTR_NAME atoms that
+ * resolve to a real column in `tbl`).  Also follows the head of dotted
+ * names so a `Timestamp.date` reference contributes its base column.
+ * `out_syms` is treated as an append-only set (dedup against existing
+ * entries) up to `max_out`; returns the new count.  Used to determine
+ * the subset of input columns the rest of a (select …) clause actually
+ * touches, so a prefilter materialise can skip everything else. */
+static int collect_col_refs_set(ray_t* expr, ray_t* tbl,
+                                int64_t* out_syms, int max_out, int n) {
+    if (!expr || n >= max_out) return n;
+    if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
+        int64_t want = -1;
+        if (ray_table_get_col(tbl, expr->i64)) {
+            want = expr->i64;
+        } else if (ray_sym_is_dotted(expr->i64)) {
+            const int64_t* segs;
+            int nsegs = ray_sym_segs(expr->i64, &segs);
+            if (nsegs >= 1 && ray_table_get_col(tbl, segs[0])) want = segs[0];
+        }
+        if (want >= 0) {
+            for (int i = 0; i < n; i++) if (out_syms[i] == want) return n;
+            if (n < max_out) out_syms[n++] = want;
+        }
+        return n;
+    }
+    if (expr->type == RAY_LIST) {
+        ray_t** elems = (ray_t**)ray_data(expr);
+        int64_t cnt = ray_len(expr);
+        for (int64_t i = 0; i < cnt && n < max_out; i++)
+            n = collect_col_refs_set(elems[i], tbl, out_syms, max_out, n);
+        return n;
+    }
+    if (expr->type == RAY_DICT) {
+        DICT_VIEW_DECL(dv);
+        DICT_VIEW_OPEN(expr, dv);
+        if (DICT_VIEW_OVERFLOW(dv)) return n;
+        for (int64_t i = 0; i + 1 < dv_n && n < max_out; i += 2)
+            n = collect_col_refs_set(dv[i + 1], tbl, out_syms, max_out, n);
+        return n;
+    }
+    if (expr->type == RAY_SYM) {
+        /* Sym vector — each element is a column name (e.g. multi-col
+         * asc:/desc:/by: tuples).  Pull syms out at the storage width. */
+        const void* base = ray_data(expr);
+        int8_t  vt = expr->type;
+        uint8_t va = expr->attrs;
+        int64_t len = ray_len(expr);
+        for (int64_t i = 0; i < len && n < max_out; i++) {
+            int64_t s = ray_read_sym(base, i, vt, va);
+            if (ray_table_get_col(tbl, s)) {
+                int dup = 0;
+                for (int j = 0; j < n; j++) if (out_syms[j] == s) { dup = 1; break; }
+                if (!dup && n < max_out) out_syms[n++] = s;
+            }
+        }
+        return n;
+    }
+    return n;
+}
+
+/* Build a narrow projection of `src_tbl` containing only the columns in
+ * `keep_syms[0..n_keep)`, preserving the original column order.
+ * Schema/cols share the source vec/list headers (retain'd internally
+ * by ray_table_add_col); no row data is copied — projection is a
+ * metadata-only operation.  Returns an owned ray_t* or an error. */
+static ray_t* project_table_cols(ray_t* src_tbl, const int64_t* keep_syms,
+                                 int n_keep) {
+    ray_t* nt = ray_table_new(n_keep);
+    if (!nt || RAY_IS_ERR(nt)) return nt ? nt : ray_error("oom", NULL);
+    for (int i = 0; i < n_keep; i++) {
+        ray_t* col = ray_table_get_col(src_tbl, keep_syms[i]);
+        if (!col) { ray_release(nt); return ray_error("domain", NULL); }
+        ray_t* nt2 = ray_table_add_col(nt, keep_syms[i], col);
+        if (!nt2 || RAY_IS_ERR(nt2)) {
+            if (nt2 && nt2 != nt) ray_release(nt2);
+            else ray_release(nt);
+            return nt2 ? nt2 : ray_error("oom", NULL);
+        }
+        nt = nt2;
+    }
+    return nt;
+}
+
 ray_t* ray_select(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
     ray_t* dict = args[0];
@@ -3972,23 +4055,85 @@ ray_t* ray_select(ray_t** args, int64_t n) {
             match_group_desc_count_take(dict_elems, dict_n, from_id, where_id,
                                         by_id, take_id, asc_id, desc_id,
                                         &prefilter_top_count);
+        /* Computed by-val + WHERE: eagerly evaluating a non-trivial
+         * group key (e.g. q42's `(xbar EventTime 60000000000)`) over
+         * every input row wastes work proportional to the WHERE's
+         * selectivity.  Project the input table down to just the
+         * columns the rest of the (select …) clause actually touches
+         * (WHERE refs, by-val refs, agg-input refs, sort-key refs),
+         * filter the narrow projection through WHERE once, then
+         * evaluate by-val expressions on the small dense result.  The
+         * downstream group/sort/take then sees a fully-filtered table
+         * — fewer rows, fewer columns, no per-row redundant work.
+         *
+         * Narrowing matters: for wide tables (ClickBench's `hits` has
+         * ~100 cols) materialising the full filtered table dominates
+         * what was meant to be a cheap prefilter (single-col filter
+         * is O(passing × esz), full filter is ~50× that).
+         *
+         * The matcher gate (top-N-by-agg) constrains where this fires
+         * to shapes where the prefilter's cost can be amortised — the
+         * downstream group materialisation and top-N extraction
+         * benefit from operating on a small filtered slice.  Broader
+         * shapes that already have an efficient fused-filter+group
+         * path (OP_FILTERED_GROUP) would lose more in the duplicated
+         * filter work than they'd save in the smaller by-val eval. */
         if (where_expr && prefilter_computed_by) {
-            ray_graph_t* fg = ray_graph_new(tbl);
+            int64_t keep_syms[256];
+            int n_keep = 0;
+            n_keep = collect_col_refs_set(where_expr, tbl,
+                                          keep_syms, 256, n_keep);
+            for (int64_t i = 0; i + 1 < dict_n && n_keep < 256; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                if (kid == from_id || kid == where_id || kid == take_id ||
+                    kid == nearest_id) continue;
+                /* asc:/desc:/by: keep the value's referenced source cols
+                 * (the by-dict's dict val may be a computed expression
+                 * referencing other source cols, the asc/desc value is
+                 * a -RAY_SYM or RAY_SYM vec of source col names).  All
+                 * other entries are output cols — agg or non-agg
+                 * expressions whose refs we also need post-filter. */
+                n_keep = collect_col_refs_set(dict_elems[i + 1], tbl,
+                                              keep_syms, 256, n_keep);
+            }
+            int can_project = (n_keep > 0 && n_keep < 256 &&
+                               n_keep < ray_table_ncols(tbl));
+            ray_t* narrow_tbl = NULL;
+            if (can_project) {
+                narrow_tbl = project_table_cols(tbl, keep_syms, n_keep);
+                if (!narrow_tbl || RAY_IS_ERR(narrow_tbl)) {
+                    if (narrow_tbl) ray_release(narrow_tbl);
+                    narrow_tbl = NULL;
+                    can_project = 0;
+                }
+            }
+            ray_t* prefilter_input = can_project ? narrow_tbl : tbl;
+            ray_graph_t* fg = ray_graph_new(prefilter_input);
             if (!fg) {
+                if (narrow_tbl) ray_release(narrow_tbl);
                 ray_release(tbl);
                 return ray_error("oom", NULL);
             }
-            ray_op_t* froot = ray_const_table(fg, tbl);
+            ray_op_t* froot = ray_const_table(fg, prefilter_input);
             ray_op_t* pred = compile_expr_dag(fg, where_expr);
             if (!pred) {
                 ray_graph_free(fg);
+                if (narrow_tbl) ray_release(narrow_tbl);
                 ray_release(tbl);
                 return ray_error("domain", NULL);
             }
             froot = ray_filter(fg, froot, pred);
-            froot = ray_optimize(fg, froot);
+            /* Deliberately skip ray_optimize: its predicate pushdown
+             * pass splits OP_AND into chained OP_FILTERs, each
+             * materialising a per-conjunct bool vec and refining a
+             * rowsel.  For wide AND-of-comparison WHEREs that costs
+             * one parallel pass per conjunct (~50MB of intermediate
+             * bool-vec writes for q42's 5-clause WHERE on 10M rows).
+             * Single ray_filter with the unsplit AND-tree evaluates
+             * the whole predicate inline in one parallel pass. */
             ray_t* filtered = ray_execute(fg, froot);
             ray_graph_free(fg);
+            if (narrow_tbl) ray_release(narrow_tbl);
             if (!filtered || RAY_IS_ERR(filtered)) {
                 ray_release(tbl);
                 return filtered ? filtered : ray_error("domain", NULL);
