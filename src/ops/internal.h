@@ -953,6 +953,20 @@ typedef struct {
     uint8_t agg_index;
     int64_t min_count_exclusive;
     int64_t top_count_take;
+    /* Agg op of the filtered agg.  When 0 (the default for the
+     * historical COUNT-only filter), consumers MUST treat it as
+     * OP_COUNT.  When non-zero, must equal ext->agg_ops[agg_index].
+     * Supported here: OP_COUNT, OP_SUM, OP_MIN, OP_MAX.  AVG and
+     * higher-order aggs (STDDEV/VAR/PEARSON/MEDIAN) are excluded
+     * because their ordering doesn't reduce to a single int64 read
+     * from the row slot — they fall through to the full sort + take. */
+    uint16_t agg_op;
+    /* Direction: 1 = top-N largest (desc), 0 = top-N smallest (asc).
+     * For COUNT/SUM/MAX the natural ordering is largest-first; for
+     * MIN it's smallest-first.  Both directions are supported per
+     * agg kind so `desc: min_value take: N` (the N groups with the
+     * largest min) is also expressible. */
+    uint8_t  desc;
 } ray_group_emit_filter_t;
 ray_group_emit_filter_t ray_group_emit_filter_get(void);
 void ray_group_emit_filter_set(ray_group_emit_filter_t filter);
