@@ -587,3 +587,264 @@ int ray_count_distinct_approx_pg_buf(ray_t* src,
     if (atomic_load_explicit(&ctx.oom, memory_order_relaxed)) return -1;
     return 0;
 }
+
+/* ---- Streaming per-group HLL ----------------------------------------- */
+
+/* Streaming kernel layout
+ * -----------------------
+ * Each worker owns a contiguous *bank* of n_groups HLL sketches.  Memory
+ * for a bank is one slab allocated up-front (sketches + sparse keys +
+ * dense regs) so the per-row hot loop is alloc-free.  Each sketch starts
+ * sparse; ray_hll_add transparently promotes to its caller-owned dense
+ * buffer once the sparse cap is exceeded.
+ *
+ * After the streaming pass, banks are merged element-wise (max) into
+ * bank[0] and the per-group estimates are written to out[gid].
+ */
+
+typedef struct {
+    /* Per-worker bank base pointers.  Each bank holds n_groups sketches
+     * whose `sparse_keys` / dense slots point into the per-worker pool. */
+    ray_hll_t**      banks;          /* [n_workers] */
+    /* Constant inputs. */
+    const ray_t*     vec;
+    const int64_t*   row_gid;
+    int64_t          n_rows;
+    int64_t          n_groups;
+    int8_t           type;
+    uint8_t          attrs;
+    bool             has_nulls;
+    uint8_t          p;
+    uint32_t         m;
+} cda_pg_stream_ctx_t;
+
+/* Worker per-row body — picks up the bank for this worker, decodes the
+ * column-type once into a local pointer, and updates bank[gid] for each
+ * row in the assigned range. */
+static void cda_pg_stream_task(void* raw, uint32_t worker_id,
+                               int64_t start, int64_t end) {
+    cda_pg_stream_ctx_t* c = (cda_pg_stream_ctx_t*)raw;
+    ray_hll_t* bank = c->banks[worker_id];
+    if (!bank) return;
+    const void*    base    = ray_data((ray_t*)c->vec);
+    const int64_t* row_gid = c->row_gid;
+    int64_t        ng      = c->n_groups;
+    int8_t         t       = c->type;
+    bool           hn      = c->has_nulls;
+    const int64_t  CHK     = 65535;
+
+    if (t == RAY_I64 || t == RAY_TIMESTAMP) {
+        const int64_t* d = (const int64_t*)base;
+        for (int64_t r = start; r < end; r++) {
+            if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+            int64_t gid = row_gid[r];
+            if (gid < 0 || gid >= ng) continue;
+            int64_t v = d[r];
+            if (hn && v == NULL_I64) continue;
+            ray_hll_add(&bank[gid], ray_hash_i64(v));
+        }
+    } else if (t == RAY_I32 || t == RAY_DATE || t == RAY_TIME) {
+        const int32_t* d = (const int32_t*)base;
+        for (int64_t r = start; r < end; r++) {
+            if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+            int64_t gid = row_gid[r];
+            if (gid < 0 || gid >= ng) continue;
+            int32_t v = d[r];
+            if (hn && v == NULL_I32) continue;
+            ray_hll_add(&bank[gid], ray_hash_i64((int64_t)v));
+        }
+    } else if (t == RAY_I16) {
+        const int16_t* d = (const int16_t*)base;
+        for (int64_t r = start; r < end; r++) {
+            if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+            int64_t gid = row_gid[r];
+            if (gid < 0 || gid >= ng) continue;
+            int16_t v = d[r];
+            if (hn && v == NULL_I16) continue;
+            ray_hll_add(&bank[gid], ray_hash_i64((int64_t)v));
+        }
+    } else if (t == RAY_BOOL || t == RAY_U8) {
+        const uint8_t* d = (const uint8_t*)base;
+        for (int64_t r = start; r < end; r++) {
+            if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+            int64_t gid = row_gid[r];
+            if (gid < 0 || gid >= ng) continue;
+            ray_hll_add(&bank[gid], ray_hash_i64((int64_t)d[r]));
+        }
+    } else if (t == RAY_F64) {
+        const double* d = (const double*)base;
+        for (int64_t r = start; r < end; r++) {
+            if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+            int64_t gid = row_gid[r];
+            if (gid < 0 || gid >= ng) continue;
+            double v = d[r];
+            if (v != v) continue;
+            ray_hll_add(&bank[gid], ray_hash_f64(v));
+        }
+    } else if (RAY_IS_SYM(t)) {
+        uint8_t w = c->attrs & RAY_SYM_W_MASK;
+        if (w == RAY_SYM_W64) {
+            const int64_t* d = (const int64_t*)base;
+            for (int64_t r = start; r < end; r++) {
+                if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= ng) continue;
+                int64_t v = d[r]; if (v == 0) continue;
+                ray_hll_add(&bank[gid], ray_hash_i64(v));
+            }
+        } else if (w == RAY_SYM_W32) {
+            const uint32_t* d = (const uint32_t*)base;
+            for (int64_t r = start; r < end; r++) {
+                if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= ng) continue;
+                uint32_t v = d[r]; if (v == 0) continue;
+                ray_hll_add(&bank[gid], ray_hash_i64((int64_t)v));
+            }
+        } else if (w == RAY_SYM_W16) {
+            const uint16_t* d = (const uint16_t*)base;
+            for (int64_t r = start; r < end; r++) {
+                if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= ng) continue;
+                uint16_t v = d[r]; if (v == 0) continue;
+                ray_hll_add(&bank[gid], ray_hash_i64((int64_t)v));
+            }
+        } else {
+            const uint8_t* d = (const uint8_t*)base;
+            for (int64_t r = start; r < end; r++) {
+                if (((r - start) & CHK) == 0 && ray_interrupted()) return;
+                int64_t gid = row_gid[r];
+                if (gid < 0 || gid >= ng) continue;
+                uint8_t v = d[r]; if (v == 0) continue;
+                ray_hll_add(&bank[gid], ray_hash_i64((int64_t)v));
+            }
+        }
+    }
+}
+
+int ray_count_distinct_approx_pg_stream(ray_t* src,
+                                         const int64_t* row_gid,
+                                         int64_t n_rows,
+                                         int64_t n_groups,
+                                         uint8_t p, int64_t* out)
+{
+    if (!src || RAY_IS_ERR(src) || !row_gid || !out) return -1;
+    if (n_rows <= 0 || n_groups <= 0) return -1;
+    int8_t t = src->type;
+    bool hashable = (t == RAY_I64 || t == RAY_I32 || t == RAY_I16 ||
+                      t == RAY_U8 || t == RAY_BOOL || t == RAY_F64 ||
+                      t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP ||
+                      RAY_IS_SYM(t));
+    if (!hashable) return -1;
+    if (p < 4) p = 4;
+    if (p > 14) p = 14;
+    uint32_t m = 1u << p;
+
+    /* Choose worker count from the existing parallel threshold; the pool
+     * dispatcher partitions n_rows into morsels across n_workers + main. */
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t nw = (pool && n_rows >= RAY_PARALLEL_THRESHOLD)
+                  ? ray_pool_total_workers(pool) : 1;
+
+    /* Allocate per-worker banks.  One slab per worker: sketches array,
+     * then sparse-key pool (n_groups * RAY_HLL_SPARSE_CAP * 4 bytes),
+     * then dense-regs pool (n_groups * m bytes).  Pre-allocating dense
+     * means promotion in the hot loop is a memset + replay, alloc-free. */
+    ray_t* banks_hdr = NULL;
+    ray_hll_t** banks = (ray_hll_t**)scratch_calloc(
+        &banks_hdr, (size_t)nw * sizeof(ray_hll_t*));
+    if (!banks) return -1;
+
+    /* Per-worker scratch headers, freed at end. */
+    ray_t** slab_hdrs_array = NULL;
+    ray_t* slab_hdrs_hdr = NULL;
+    slab_hdrs_array = (ray_t**)scratch_calloc(
+        &slab_hdrs_hdr, (size_t)nw * sizeof(ray_t*));
+    if (!slab_hdrs_array) {
+        scratch_free(banks_hdr);
+        return -1;
+    }
+
+    size_t sketches_bytes = (size_t)n_groups * sizeof(ray_hll_t);
+    size_t sparse_bytes   = (size_t)n_groups *
+                             RAY_HLL_SPARSE_CAP * sizeof(uint32_t);
+    size_t dense_bytes    = (size_t)n_groups * (size_t)m;
+    size_t per_worker     = sketches_bytes + sparse_bytes + dense_bytes;
+
+    bool oom = false;
+    for (uint32_t w = 0; w < nw; w++) {
+        ray_t* slab_hdr = NULL;
+        uint8_t* slab = (uint8_t*)scratch_alloc(&slab_hdr, per_worker);
+        if (!slab) { oom = true; break; }
+        slab_hdrs_array[w] = slab_hdr;
+        ray_hll_t* sketches = (ray_hll_t*)slab;
+        uint32_t*  sparse   = (uint32_t*)(slab + sketches_bytes);
+        uint8_t*   dense    = slab + sketches_bytes + sparse_bytes;
+        /* Init each sketch sparse, pointed at its slice of the pools. */
+        for (int64_t g = 0; g < n_groups; g++) {
+            ray_hll_init_sparse(&sketches[g], p,
+                                sparse + (size_t)g * RAY_HLL_SPARSE_CAP,
+                                RAY_HLL_SPARSE_CAP,
+                                dense + (size_t)g * m);
+        }
+        banks[w] = sketches;
+    }
+    if (oom) {
+        for (uint32_t w = 0; w < nw; w++) {
+            if (slab_hdrs_array[w]) scratch_free(slab_hdrs_array[w]);
+        }
+        scratch_free(slab_hdrs_hdr);
+        scratch_free(banks_hdr);
+        return -1;
+    }
+
+    cda_pg_stream_ctx_t ctx = {
+        .banks    = banks,
+        .vec      = src,
+        .row_gid  = row_gid,
+        .n_rows   = n_rows,
+        .n_groups = n_groups,
+        .type     = t,
+        .attrs    = src->attrs,
+        .has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0,
+        .p        = p,
+        .m        = m,
+    };
+
+    if (nw > 1) {
+        ray_pool_dispatch(pool, cda_pg_stream_task, &ctx, n_rows);
+    } else {
+        cda_pg_stream_task(&ctx, 0, 0, n_rows);
+    }
+
+    /* Merge worker banks into bank[0], then estimate per group.
+     *
+     * Per gid: merge bank[1..nw-1][gid] into bank[0][gid].  ray_hll_merge
+     * handles both (sparse|dense) × (sparse|dense) combinations and
+     * promotes dst as needed.  After merge, bank[0][gid] estimate is the
+     * answer.  We merge gid-by-gid (rather than worker-by-worker over all
+     * gids) so a finished dst stays hot across estimation. */
+    for (int64_t g = 0; g < n_groups; g++) {
+        ray_hll_t* dst = &banks[0][g];
+        for (uint32_t w = 1; w < nw; w++) {
+            ray_hll_merge(dst, &banks[w][g]);
+        }
+        out[g] = ray_hll_estimate(dst);
+    }
+
+    /* Free per-worker slabs.  Caller-owned sparse + dense buffers were
+     * not separately allocated, so ray_hll_free is a no-op on each
+     * sketch (low-bit-tagged _hdr or NULL _hdr).  Promotion-time scratch
+     * allocations (when promote_to_dense needed an arena dense buf — only
+     * possible if the caller's tagged buf had been cleared, which doesn't
+     * happen here since dense was provided up-front) are owned by the
+     * sketch's _hdr; if any are present, ray_hll_free releases them. */
+    for (uint32_t w = 0; w < nw; w++) {
+        for (int64_t g = 0; g < n_groups; g++) ray_hll_free(&banks[w][g]);
+        scratch_free(slab_hdrs_array[w]);
+    }
+    scratch_free(slab_hdrs_hdr);
+    scratch_free(banks_hdr);
+    return 0;
+}
