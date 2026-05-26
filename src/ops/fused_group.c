@@ -1154,6 +1154,37 @@ static uint32_t fp_i32_hash_slot(int32_t key, uint32_t mask) {
     return (uint32_t)h & mask;
 }
 
+static uint32_t fp_i64_hash_slot(int64_t key, uint32_t mask) {
+    uint64_t h = (uint64_t)key * 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 33;
+    h *= 0xC2B2AE3D27D4EB4FULL;
+    h ^= h >> 29;
+    return (uint32_t)h & mask;
+}
+
+static void fp_i64_mg_rebuild(const int64_t* keys, const uint32_t* counts,
+                              uint32_t n, uint32_t* ht, uint32_t hcap) {
+    memset(ht, 0, (size_t)hcap * sizeof(uint32_t));
+    uint32_t mask = hcap - 1;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!counts[i]) continue;
+        uint32_t slot = fp_i64_hash_slot(keys[i], mask);
+        while (ht[slot]) slot = (slot + 1u) & mask;
+        ht[slot] = i + 1u;
+    }
+}
+
+static uint32_t fp_i64_mg_lookup(const int64_t* keys, const uint32_t* ht,
+                                 uint32_t hmask, int64_t key) {
+    uint32_t slot = fp_i64_hash_slot(key, hmask);
+    while (ht[slot]) {
+        uint32_t idx = ht[slot] - 1u;
+        if (keys[idx] == key) return idx + 1u;
+        slot = (slot + 1u) & hmask;
+    }
+    return 0;
+}
+
 static void fp_i32_mg_rebuild(const int32_t* keys, const uint32_t* counts,
                               uint32_t n, uint32_t* ht, uint32_t hcap) {
     memset(ht, 0, (size_t)hcap * sizeof(uint32_t));
@@ -1314,6 +1345,145 @@ static ray_t* fp_try_i32_mg_top_count(const fp_par_ctx_t* ctx, int64_t nrows,
     return result;
 }
 
+/* I64 mirror of fp_try_i32_mg_top_count for top-K-by-count over an
+ * I64 key column.  Misra-Gries with cap = 8192 candidates guarantees
+ * every key with count > nrows / 8193 survives the first pass; the
+ * second pass exact-counts the survivors and a min-heap picks the
+ * top K.  Falls back to NULL when the safety bound is violated, or
+ * when fewer than K candidates have non-zero exact counts. */
+static ray_t* fp_try_i64_mg_top_count(const fp_par_ctx_t* ctx, int64_t nrows,
+                                      int64_t key_sym,
+                                      ray_group_emit_filter_t emit_filter) {
+    if (ctx->kt != RAY_I64 || ctx->pred.n_children != 0 ||
+        emit_filter.top_count_take <= 0 || nrows <= 0)
+        return NULL;
+
+    const uint32_t cap = 8192;
+    const uint32_t hcap = cap * 2u;
+    const int64_t* data = (const int64_t*)ctx->kbase;
+    ray_t *keys_hdr = NULL, *cnt_hdr = NULL, *exact_hdr = NULL, *ht_hdr = NULL;
+    int64_t* keys = (int64_t*)scratch_alloc(&keys_hdr, cap * sizeof(int64_t));
+    uint32_t* counts = (uint32_t*)scratch_calloc(&cnt_hdr, cap * sizeof(uint32_t));
+    uint32_t* exact = (uint32_t*)scratch_calloc(&exact_hdr, cap * sizeof(uint32_t));
+    uint32_t* ht = (uint32_t*)scratch_calloc(&ht_hdr, hcap * sizeof(uint32_t));
+    if (!keys || !counts || !exact || !ht) {
+        if (keys_hdr) scratch_free(keys_hdr);
+        if (cnt_hdr) scratch_free(cnt_hdr);
+        if (exact_hdr) scratch_free(exact_hdr);
+        if (ht_hdr) scratch_free(ht_hdr);
+        return NULL;
+    }
+
+    uint32_t n = 0;
+    uint32_t decrements = 0;
+    uint32_t hmask = hcap - 1u;
+    for (int64_t r = 0; r < nrows; r++) {
+        int64_t key = data[r];
+        uint32_t found = fp_i64_mg_lookup(keys, ht, hmask, key);
+        if (found) {
+            counts[found - 1u]++;
+            continue;
+        }
+        if (n < cap) {
+            uint32_t idx = n++;
+            keys[idx] = key;
+            counts[idx] = 1;
+            uint32_t slot = fp_i64_hash_slot(key, hmask);
+            while (ht[slot]) slot = (slot + 1u) & hmask;
+            ht[slot] = idx + 1u;
+            continue;
+        }
+        uint32_t out = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t c = counts[i];
+            if (c > 1) {
+                counts[out] = c - 1u;
+                keys[out] = keys[i];
+                out++;
+            }
+        }
+        n = out;
+        decrements++;
+        fp_i64_mg_rebuild(keys, counts, n, ht, hcap);
+    }
+
+    memset(exact, 0, cap * sizeof(uint32_t));
+    for (int64_t r = 0; r < nrows; r++) {
+        uint32_t found = fp_i64_mg_lookup(keys, ht, hmask, data[r]);
+        if (found) exact[found - 1u]++;
+    }
+
+    int64_t k_take = emit_filter.top_count_take;
+    if (k_take > 1024) k_take = 1024;
+    int64_t heap[1024];
+    int64_t heap_n = 0;
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!exact[i]) continue;
+        nonzero++;
+        fp_count_heap_consider(heap, &heap_n, k_take, (int64_t)exact[i]);
+    }
+    if (heap_n == 0) {
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return NULL;
+    }
+    int64_t keep_min = emit_filter.min_count_exclusive + 1;
+    if (heap_n == k_take && heap[0] > keep_min)
+        keep_min = heap[0];
+
+    if (decrements && keep_min <= nrows / (int64_t)(cap + 1u)) {
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return NULL;
+    }
+
+    uint32_t out_n = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if ((int64_t)exact[i] >= keep_min) out_n++;
+    if (!out_n || (decrements && nonzero < (uint32_t)k_take)) {
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return NULL;
+    }
+
+    ray_t* k_out = ray_vec_new(ctx->kt, out_n);
+    ray_t* c_out = ray_vec_new(RAY_I64, out_n);
+    if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
+        if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
+        if (c_out && !RAY_IS_ERR(c_out)) ray_release(c_out);
+        scratch_free(keys_hdr); scratch_free(cnt_hdr);
+        scratch_free(exact_hdr); scratch_free(ht_hdr);
+        return ray_error("oom", NULL);
+    }
+    k_out->len = out_n;
+    c_out->len = out_n;
+    int64_t* kd = (int64_t*)ray_data(k_out);
+    int64_t* cd = (int64_t*)ray_data(c_out);
+    uint32_t oi = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if ((int64_t)exact[i] < keep_min) continue;
+        kd[oi] = keys[i];
+        cd[oi] = exact[i];
+        oi++;
+    }
+    scratch_free(keys_hdr); scratch_free(cnt_hdr);
+    scratch_free(exact_hdr); scratch_free(ht_hdr);
+
+    ray_t* result = ray_table_new(2);
+    if (!result || RAY_IS_ERR(result)) {
+        ray_release(k_out);
+        ray_release(c_out);
+        return ray_error("oom", NULL);
+    }
+    int64_t cnt_sym = ray_sym_intern("count", 5);
+    result = ray_table_add_col(result, key_sym, k_out);
+    result = ray_table_add_col(result, cnt_sym, c_out);
+    ray_release(k_out);
+    ray_release(c_out);
+    return result;
+}
+
 static void fp_direct_count_fn(void* raw, uint32_t worker_id,
                                int64_t start, int64_t end) {
     fp_direct_count_ctx_t* c = (fp_direct_count_ctx_t*)raw;
@@ -1372,6 +1542,19 @@ static ray_t* fp_try_direct_count1(const fp_par_ctx_t* ctx, int64_t nrows,
         if (emit_filter.enabled && emit_filter.agg_index == 0 &&
             emit_filter.top_count_take > 0) {
             ray_t* mg = fp_try_i32_mg_top_count(ctx, nrows, key_sym, emit_filter);
+            if (mg) return mg;
+        }
+        return NULL;
+    } else if (ctx->kt == RAY_I64 || ctx->kt == RAY_TIMESTAMP) {
+        /* I64/TIMESTAMP top-K via Misra-Gries.  The slot-array path
+         * for I32/I16/U8/BOOL would need 16 GB for the full I64
+         * domain; MG with cap = 8 K candidates costs ~256 KB and
+         * exact-counts the survivors in a second pass.  Falls back
+         * to the partition path when the safety bound is violated. */
+        ray_group_emit_filter_t emit_filter = ray_group_emit_filter_get();
+        if (emit_filter.enabled && emit_filter.agg_index == 0 &&
+            emit_filter.top_count_take > 0) {
+            ray_t* mg = fp_try_i64_mg_top_count(ctx, nrows, key_sym, emit_filter);
             if (mg) return mg;
         }
         return NULL;
