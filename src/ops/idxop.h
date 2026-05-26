@@ -167,6 +167,31 @@ static inline ray_idx_kind_t ray_index_kind(const ray_t* v) {
  * or RAY_NULL_OBJ when no index is attached. */
 ray_t* ray_index_info(ray_t* v);
 
+/* ===== Hash-index point-lookup probe =====
+ *
+ * Build a ray_rowsel directly from a hash probe on `col`'s
+ * RAY_IDX_HASH for rows where the payload equals `key`.  Bypasses
+ * the intermediate BOOL pred vec entirely — touches O(matches)
+ * memory instead of O(rows), which is the whole reason to ship
+ * this fast path.
+ *
+ * Returns:
+ *   - A fresh rowsel block (rc=1) on success — install on
+ *     g->selection.  The block carries per-segment NONE/MIX/ALL
+ *     flags and the morsel-local indices for matching rows.
+ *     Pure NONE blocks (no matches) are returned as a valid empty
+ *     rowsel rather than NULL — NULL is the "all-pass" sentinel
+ *     in the consumer and would let every row through.
+ *   - NULL when the column is not eligible: no index, wrong kind,
+ *     built_for_len mismatch (stale), type mismatch, or out-of-
+ *     range key.  Caller must fall back to the full scan path.
+ *
+ * Eligibility (and the canonical hashing used) match
+ * ray_index_attach_hash: BOOL/U8/I16/I32/I64/DATE/TIME/TIMESTAMP.
+ * Floats are intentionally not supported — equality on F32/F64
+ * has NaN / -0 semantics the unfused compare kernel handles. */
+ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
+
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */
 
