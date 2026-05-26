@@ -1149,6 +1149,85 @@ static ray_t* count_distinct_per_group_parallel(
     return out;
 }
 
+/* Approximate per-group count(distinct) via HyperLogLog with sparse
+ * representation.  Builds (idx_buf, offsets, counts) from row_gid on the
+ * fly and delegates to ray_count_distinct_approx_pg_buf.
+ *
+ * Memory: each task sketch starts sparse (1 KB) and converts to dense
+ * (16 KB) only for groups that exceed RAY_HLL_SPARSE_CAP unique values.
+ * Total concurrent memory is bounded by n_workers × 17 KB regardless of
+ * n_groups — that's the property that lets us run HLL at n_groups > 50K
+ * where the dense-only sketch would have needed multi-GB.
+ *
+ * Returns the populated `out` vector on success, NULL on type miss /
+ * dispatch failure.  Caller (ray_count_distinct_per_group) falls back
+ * to the exact partitioned dedup. */
+static ray_t* count_distinct_per_group_hll(ray_t* src, const int64_t* row_gid,
+                                           int64_t n_rows, int64_t n_groups,
+                                           ray_t* out) {
+    if (!src || n_rows <= 0 || n_groups <= 0) return NULL;
+    /* Build group-major idx_buf: for each group g, idx_buf[offsets[g] ..
+     * offsets[g] + counts[g]) lists the source row indices in that group.
+     * Serial two-pass; for n_rows = 10 M this is ~80 MB of int64 reads
+     * twice ≈ 25 ms on the bench box.  The HLL pass itself dominates. */
+    ray_t* cnt_hdr = NULL;
+    ray_t* off_hdr = NULL;
+    int64_t* counts  = (int64_t*)scratch_calloc(&cnt_hdr,
+                                                 (size_t)n_groups * sizeof(int64_t));
+    int64_t* offsets = (int64_t*)scratch_alloc(&off_hdr,
+                                                 (size_t)n_groups * sizeof(int64_t));
+    if (!counts || !offsets) {
+        if (cnt_hdr) scratch_free(cnt_hdr);
+        if (off_hdr) scratch_free(off_hdr);
+        return NULL;
+    }
+    /* Pass 1: histogram. */
+    int64_t total = 0;
+    for (int64_t r = 0; r < n_rows; r++) {
+        int64_t g = row_gid[r];
+        if (g >= 0 && g < n_groups) counts[g]++;
+    }
+    /* Prefix sums → offsets. */
+    for (int64_t g = 0; g < n_groups; g++) {
+        offsets[g] = total;
+        total += counts[g];
+    }
+    if (total == 0) {
+        scratch_free(cnt_hdr); scratch_free(off_hdr);
+        return out;
+    }
+    ray_t* idx_hdr = NULL;
+    int64_t* idx_buf = (int64_t*)scratch_alloc(&idx_hdr,
+                                                 (size_t)total * sizeof(int64_t));
+    if (!idx_buf) {
+        scratch_free(cnt_hdr); scratch_free(off_hdr);
+        return NULL;
+    }
+    /* Pass 2: scatter into group-major buf using a cursor copy of offsets. */
+    ray_t* pos_hdr = NULL;
+    int64_t* pos = (int64_t*)scratch_alloc(&pos_hdr,
+                                            (size_t)n_groups * sizeof(int64_t));
+    if (!pos) {
+        scratch_free(idx_hdr); scratch_free(cnt_hdr); scratch_free(off_hdr);
+        return NULL;
+    }
+    memcpy(pos, offsets, (size_t)n_groups * sizeof(int64_t));
+    for (int64_t r = 0; r < n_rows; r++) {
+        int64_t g = row_gid[r];
+        if (g >= 0 && g < n_groups) idx_buf[pos[g]++] = r;
+    }
+    scratch_free(pos_hdr);
+
+    int64_t* odata = (int64_t*)ray_data(out);
+    int rc = ray_count_distinct_approx_pg_buf(src, idx_buf, offsets, counts,
+                                              n_groups, RAY_HLL_DEFAULT_P, odata);
+    scratch_free(idx_hdr);
+    scratch_free(cnt_hdr);
+    scratch_free(off_hdr);
+    if (rc != 0) return NULL;
+    return out;
+}
+
 /* Grouped count(distinct): single global hash keyed by (group_id, value).
  * One linear pass over all rows, O(n) total instead of O(per-group setup *
  * n_groups).  Returns an I64 vector of length n_groups with the per-group
@@ -1185,12 +1264,22 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
     memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
     if (n_rows == 0 || n_groups == 0) return out;
 
-    /* This callsite only fires when n_groups > 50 000 (the buf-form
-     * caller catches the low-cardinality majority); per-group HLL at
-     * those group counts exceeds any reasonable memory budget
-     * (50 000 · 16 KB · n_workers ≈ multi-GB), so there's no
-     * approximate path here — fall straight through to the exact
-     * partitioned dedup. */
+    /* Approximate path: when n_rows clears the HLL threshold (same as
+     * the buf-form caller — 1 M rows), build a group-major idx layout
+     * and run the sparse-HLL per-group kernel.  Sparse-representation
+     * HLL makes this memory-bounded regardless of n_groups: each task
+     * holds one sketch that's ≤ 17 KB total (1 KB sparse + 16 KB
+     * dense, allocated together on the stack), so concurrent footprint
+     * is n_workers × 17 KB instead of n_groups × 16 KB.  Returns a
+     * ~0.8 % std-error estimate; callers that need exact counts at
+     * this scale must not hit this gate. */
+    if (n_rows >= (1 << 20)) {
+        ray_t* approx = count_distinct_per_group_hll(src, row_gid,
+                                                     n_rows, n_groups, out);
+        if (approx) return approx;
+        /* Fall through on dispatch failure — counts not yet written. */
+        memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
+    }
 
     /* Parallel partitioned path for sizes where the serial global hash
      * blows L3.  Threshold tuned so the partition / scatter / dedup
