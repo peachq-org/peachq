@@ -1286,6 +1286,7 @@ static void propagate_nulls_binary(ray_t* lhs, ray_t* rhs, ray_t* result,
 ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     (void)g;
     if (!input || RAY_IS_ERR(input)) return input;
+    if (!ray_is_vec(input)) return ray_error("type", NULL);
     int64_t len = input->len;
     int8_t in_type = input->type;
     int8_t out_type = op->out_type;
@@ -2024,6 +2025,20 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             binary_range_str(op, lhs, rhs, result, l_scalar, r_scalar, 0, len);
             fix_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len, op->opcode);
             return result;
+        }
+    }
+
+    /* Reject string atom in arithmetic context (only comparisons are valid). */
+    {
+        bool l_atom_str = (l_scalar && lhs->type == -RAY_STR);
+        bool r_atom_str = (r_scalar && rhs->type == -RAY_STR);
+        if (l_atom_str || r_atom_str) {
+            uint16_t opc = op->opcode;
+            bool is_cmp = (opc >= OP_EQ && opc <= OP_GE);
+            if (!is_cmp && !RAY_IS_SYM(lhs->type) && !RAY_IS_SYM(rhs->type)) {
+                ray_release(result);
+                return ray_error("type", NULL);
+            }
         }
     }
 
