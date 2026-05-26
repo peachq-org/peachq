@@ -1228,6 +1228,113 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
     }
 }
 
+/* Per-column elem size for the hash-attach cap.  Mirrors the integer
+ * shapes accepted by ray_index_attach_hash (BOOL/U8/I16/I32/I64/DATE/
+ * TIME/TIMESTAMP); returns 0 for floats and dict-backed types so the
+ * caller skips them. */
+static int csv_hash_elem_size(int8_t t) {
+    switch (t) {
+    case RAY_BOOL: case RAY_U8:                       return 1;
+    case RAY_I16:                                     return 2;
+    case RAY_I32: case RAY_DATE:                      return 4;
+    case RAY_I64: case RAY_TIME: case RAY_TIMESTAMP:  return 8;
+    default:                                          return 0;
+    }
+}
+
+/* Decide whether `v` is a good candidate for an auto-attached hash
+ * index, using only its (already-attached) chunk_zone as the entropy
+ * proxy.  A column is "random-shaped" when each chunk's [min, max]
+ * covers more than half the global range — i.e. there's effectively
+ * no clustering, so the per-chunk zone-skip never excludes a chunk
+ * and the only way to accelerate `col == K` is by hashing.
+ *
+ * The memory cap rejects columns where the hash index (table+chain
+ * arrays — ~24 bytes/row at default load factor) would be much larger
+ * than the data itself.  We use 5× the column's data bytes as the
+ * budget: this comfortably admits I32/I64 numeric IDs (where the
+ * index is 3–5× the data) while still excluding narrow types like
+ * BOOL/U8/I16 where the index would dwarf the column.
+ *
+ * Returns 1 to attach, 0 to skip. */
+static int csv_should_attach_hash(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return 0;
+    int esz = csv_hash_elem_size(v->type);
+    if (esz == 0) return 0;
+    /* Need a chunk_zone we can read for entropy estimation. */
+    if (!(v->attrs & RAY_ATTR_HAS_INDEX) || !v->index) return 0;
+    ray_index_t* ix = ray_index_payload(v->index);
+    if (ix->kind != RAY_IDX_CHUNK_ZONE || ix->u.chunk_zone.is_f64) return 0;
+    uint32_t n_chunks = ix->u.chunk_zone.n_chunks;
+    if (n_chunks < 4) return 0;
+    const int64_t* mins = (const int64_t*)ray_data(ix->u.chunk_zone.mins);
+    const int64_t* maxs = (const int64_t*)ray_data(ix->u.chunk_zone.maxs);
+
+    /* Whole-column [gmin, gmax] from the chunk extrema, ignoring empty
+     * chunks (mn > mx, set by the chunk_zone scan when a chunk is fully
+     * null). */
+    int64_t gmin = INT64_MAX, gmax = INT64_MIN;
+    for (uint32_t g = 0; g < n_chunks; g++) {
+        if (mins[g] > maxs[g]) continue;
+        if (mins[g] < gmin) gmin = mins[g];
+        if (maxs[g] > gmax) gmax = maxs[g];
+    }
+    if (gmin == INT64_MAX || gmax == INT64_MIN) return 0;
+    /* Compute (gmax - gmin) in uint64 space — the signed subtraction
+     * overflows when the range spans the full I64 width (e.g. UserID
+     * hashing to both sign halves).  Reinterpret as uint64 first;
+     * 2's-complement wrap gives the correct |gmax - gmin|. */
+    uint64_t global_range = (uint64_t)gmax - (uint64_t)gmin;
+    if (global_range == 0) return 0;  /* constant column — pointless */
+
+    /* Average per-chunk span / global range — selectivity proxy.
+     * Sum the per-chunk spans as doubles so the accumulation can't
+     * overflow when chunks span the full I64 width (uint64 sum
+     * across ~150 chunks each ~1.8e19 wide overflows; double has
+     * ~15 significant decimal digits, plenty for this coarse ratio).
+     *
+     * Threshold = 0.2.  The strict 0.5 cut documented in the design
+     * note cleanly catches uniformly-random hashed columns (ratio
+     * ~1.0) but excludes mildly-clustered numeric IDs like UserID
+     * (~0.26 on the ClickBench hits data: user sessions cluster
+     * consecutively so chunk spans don't fully cover the I64 range).
+     * For point lookups on those columns chunk_zone still prunes
+     * most chunks but ~30 % can hold the key — a 30 % full-column
+     * scan, not a real win.  Dropping to 0.2 admits UserID while
+     * still excluding tightly-clustered keys (CounterID/EventDate
+     * at <0.01) where chunk_zone already gives 99 %+ pruning. */
+    double dgr = (double)global_range;
+    double span_sum = 0.0;
+    uint32_t n_eff = 0;
+    for (uint32_t g = 0; g < n_chunks; g++) {
+        if (mins[g] > maxs[g]) continue;
+        uint64_t span = (uint64_t)maxs[g] - (uint64_t)mins[g];
+        span_sum += (double)span;
+        n_eff++;
+    }
+    if (n_eff < 4) return 0;
+    double mean_ratio = (span_sum / (double)n_eff) / dgr;
+    if (mean_ratio <= 0.2) return 0;
+
+    /* Memory cap: ray_index_attach_hash allocates a power-of-two
+     * `cap = next_pow2(2*n)` int64 table plus an n-entry int64
+     * chain.  Skip when the index would cost more than 5× the
+     * column's payload — keeps narrow integer types (where the
+     * index dwarfs the data) out of the index set while admitting
+     * I32 / I64 numeric IDs.  Done in int64 arithmetic (we cap n
+     * to anything that would overflow at the row counts we accept). */
+    int64_t n = v->len;
+    if (n <= 0) return 0;
+    uint64_t cap = 8;
+    uint64_t want = (uint64_t)(2 * n);
+    while (cap < want) cap <<= 1;
+    uint64_t aux_bytes  = cap * 8u + (uint64_t)n * 8u;
+    uint64_t data_bytes = (uint64_t)n * (uint64_t)esz;
+    if (aux_bytes > 5u * data_bytes) return 0;
+
+    return 1;
+}
+
 static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
                                    const int64_t* row_offsets, int64_t n_rows,
                                    int ncols, char delimiter,
@@ -1415,7 +1522,12 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
      * indexing — gives the reduce min/max and the filter chunk-skip paths
      * an O(n_chunks) scan instead of O(n_rows).  Attach is best-effort:
      * unsupported types (RAY_STR/RAY_SYM/RAY_GUID in v1) just stay
-     * unindexed and the consumer falls back to a row scan. */
+     * unindexed and the consumer falls back to a row scan.
+     *
+     * After the chunk_zone attaches we re-walk the same columns and
+     * upgrade the high-entropy ones to a hash index (the chunk_zone
+     * stays as well — it's the entropy signal we just measured).  See
+     * csv_should_attach_hash for the selectivity + memory cap. */
     for (int c = 0; c < ncols; c++) {
         ray_t* v = col_vecs[c];
         if (!v || RAY_IS_ERR(v)) continue;
@@ -1423,6 +1535,17 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
         ray_t* r = ray_index_attach_chunk_zone(&v, 16);
         if (r && !RAY_IS_ERR(r)) col_vecs[c] = v;  /* attach succeeded */
         /* On failure the original column stays in col_vecs[c]; ignore. */
+    }
+    for (int c = 0; c < ncols; c++) {
+        ray_t* v = col_vecs[c];
+        if (!csv_should_attach_hash(v)) continue;
+        /* ray_index_attach_hash drops any existing index on the
+         * column first; the chunk_zone we just built is sacrificed
+         * for the hash.  That's the right trade — once the column
+         * is known to be high-entropy, chunk-skip never fires
+         * anyway, so the chunk_zone is dead weight. */
+        ray_t* r = ray_index_attach_hash(&v);
+        if (r && !RAY_IS_ERR(r)) col_vecs[c] = v;
     }
 
     ray_t* tbl = ray_table_new(ncols);
@@ -1805,12 +1928,20 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
     {
         /* Best-effort per-chunk zone index attach (see comment on the
          * matching loop in build_table_from_cols) — unsupported types
-         * fall through to the unindexed path inside the consumer. */
+         * fall through to the unindexed path inside the consumer.
+         * Second pass upgrades high-entropy columns to a hash index;
+         * see csv_should_attach_hash. */
         for (int c = 0; c < ncols; c++) {
             ray_t* v = col_vecs[c];
             if (!v || RAY_IS_ERR(v)) continue;
             if (v->len < (1 << 16)) continue;
             ray_t* r = ray_index_attach_chunk_zone(&v, 16);
+            if (r && !RAY_IS_ERR(r)) col_vecs[c] = v;
+        }
+        for (int c = 0; c < ncols; c++) {
+            ray_t* v = col_vecs[c];
+            if (!csv_should_attach_hash(v)) continue;
+            ray_t* r = ray_index_attach_hash(&v);
             if (r && !RAY_IS_ERR(r)) col_vecs[c] = v;
         }
 
