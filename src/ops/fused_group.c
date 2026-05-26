@@ -4187,8 +4187,17 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
     /* Hash-index probe: if any FP_EQ child sits on a column with a
      * fresh RAY_IDX_HASH, walk the chain instead of scanning rows.
      * Single-thread — match counts on a point lookup are too small
-     * to justify pool dispatch. */
-    int hash_eq_idx = mk_find_hash_eq_child(&ctx.pred);
+     * to justify pool dispatch.
+     *
+     * Multi-predicate filters fall through: queries that combine a
+     * hash-indexed eq with one or more other predicates (e.g. a
+     * chunk-zone-clustered CounterID/EventDate range) win more from
+     * the parallel chunk-skip scan in mk_eq_i64_count_fn /
+     * mk_par_fn than from a hash chain walk forced into single-
+     * threaded execution. */
+    int hash_eq_idx = (ctx.pred.n_children == 1)
+                          ? mk_find_hash_eq_child(&ctx.pred)
+                          : -1;
     if (hash_eq_idx >= 0 && ctx.n_aggs == 1 &&
         ctx.aggs[0].kind == MK_AGG_COUNT) {
         mk_eq_hash_count_fn(&ctx, (uint8_t)hash_eq_idx);
