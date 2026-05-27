@@ -843,3 +843,12 @@ ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg) {
         return ray_error("type", "message not serializable");
     return ray_ipc_send(h, msg);
 }
+
+/* (.ipc.handle) → i64 current connection handle inside any `.ipc.on.*`
+ * hook, or -1 outside any hook.  Registered variadic so both
+ * `(.ipc.handle)` (no args) and `(.ipc.handle 0)` (one arg, ignored)
+ * work — matches the convention of `.sys.gc` / `.sys.info`. */
+ray_t* ray_ipc_handle_fn(ray_t** args, int64_t n) {
+    (void)args; (void)n;
+    return make_i64(ray_ipc_current_handle());
+}
