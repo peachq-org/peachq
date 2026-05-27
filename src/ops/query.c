@@ -2741,21 +2741,65 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
     out->len = n_groups;
     int64_t* odata = (int64_t*)ray_data(out);
 
-    /* HyperLogLog approximate path — one task per group, each task with
-     * a private stack-resident sketch (~16 KB).  Triggered when the
-     * total inflated row count across all groups is large enough that
-     * the exact per-group dedup HT becomes memory-bandwidth-bound;
-     * 1 M rows is the same threshold the global path in
-     * exec_count_distinct uses.  Returns within ~0.8 % std error. */
-    /* HyperLogLog approximate path — one task per group, each task with
-     * a private stack-resident sketch (~16 KB).  Triggered when the
-     * total inflated row count across all groups is large enough that
-     * the exact per-group dedup HT becomes memory-bandwidth-bound;
-     * 1 M rows is the same threshold the global path in
-     * exec_count_distinct uses.  Returns within ~0.8 % std error. */
+    /* Streaming HLL — one parallel pass over rows (each worker owns a
+     * private bank of n_groups sparse sketches) instead of n_groups
+     * separate tasks each rebuilding a sketch.  Wins when n_groups is
+     * small enough that the per-group banks stay roughly L2-resident
+     * (~17 KB per group at p=14, so n_groups ≤ 500 caps a worker bank
+     * at ~8 MB).  Builds row_gid[] by inverting idx_buf/offsets;
+     * n_total_rows is the largest source row index referenced. */
     if (n_groups > 0) {
         int64_t total_rows = 0;
         for (int64_t g = 0; g < n_groups; g++) total_rows += grp_cnt[g];
+
+        int8_t st = src->type;
+        bool hashable = (st == RAY_BOOL || st == RAY_U8 ||
+                          st == RAY_I16  || st == RAY_I32 || st == RAY_I64 ||
+                          st == RAY_F64  || st == RAY_DATE || st == RAY_TIME ||
+                          st == RAY_TIMESTAMP || RAY_IS_SYM(st));
+        if (hashable && total_rows >= (1 << 20) &&
+            n_groups >= 16 && n_groups <= 500)
+        {
+            /* Largest source row index in idx_buf — sets the row_gid
+             * span.  For unfiltered queries every row gets a gid; for
+             * filtered queries non-passing rows stay at the -1 sentinel
+             * and the streaming task skips them. */
+            int64_t n_max_row = 0;
+            for (int64_t gi = 0; gi < n_groups; gi++) {
+                int64_t end_off = offsets[gi] + grp_cnt[gi];
+                for (int64_t j = offsets[gi]; j < end_off; j++) {
+                    if (idx_buf[j] >= n_max_row) n_max_row = idx_buf[j] + 1;
+                }
+            }
+            if (n_max_row > 0) {
+                ray_t* rg_hdr = NULL;
+                int64_t* row_gid = (int64_t*)scratch_alloc(&rg_hdr,
+                    (size_t)n_max_row * sizeof(int64_t));
+                if (row_gid) {
+                    for (int64_t r = 0; r < n_max_row; r++) row_gid[r] = -1;
+                    for (int64_t gi = 0; gi < n_groups; gi++) {
+                        int64_t end_off = offsets[gi] + grp_cnt[gi];
+                        for (int64_t j = offsets[gi]; j < end_off; j++) {
+                            row_gid[idx_buf[j]] = gi;
+                        }
+                    }
+                    if (ray_count_distinct_approx_pg_stream(
+                            src, row_gid, n_max_row, n_groups, 14, odata) == 0)
+                    {
+                        scratch_free(rg_hdr);
+                        ray_release(src);
+                        return out;
+                    }
+                    scratch_free(rg_hdr);
+                    memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
+                }
+            }
+        }
+
+        /* Per-group HLL fallback — one task per group, private sketch
+         * per task.  Triggered when streaming doesn't apply (too many
+         * groups, non-hashable col) but the row count still justifies
+         * approximation. */
         if (total_rows >= (1 << 20)) {
             if (ray_count_distinct_approx_pg_buf(src, idx_buf, offsets,
                                                   grp_cnt, n_groups,
