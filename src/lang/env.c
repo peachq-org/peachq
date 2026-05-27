@@ -130,9 +130,52 @@ static _Thread_local int32_t scope_depth = 0;
 int32_t ray_env_scope_depth(void) { return scope_depth; }
 int32_t ray_env_global_count(void) { return g_env.count; }
 
+/* The five connection-hook sym ids carved out of the reserved-name reject.
+ * Populated lazily on first probe; idempotent — ray_sym_intern is content-
+ * keyed, so repeated calls return the same id.  The carve-out applies ONLY
+ * to these five names; everything else under `.ipc.*` (open/send/close/
+ * handle) stays unsettable, as do all `.sys.*` / `.os.*` / etc.
+ * Lambda parameters with these names remain forbidden — that's pure
+ * shadowing with no legitimate use. */
+static int64_t g_ipc_hook_syms[5] = {0};
+static bool    g_ipc_hook_syms_ready = false;
+
+static void ipc_hook_syms_ensure(void) {
+    if (g_ipc_hook_syms_ready) return;
+    g_ipc_hook_syms[0] = ray_sym_intern(".ipc.on.open",  strlen(".ipc.on.open"));
+    g_ipc_hook_syms[1] = ray_sym_intern(".ipc.on.close", strlen(".ipc.on.close"));
+    g_ipc_hook_syms[2] = ray_sym_intern(".ipc.on.sync",  strlen(".ipc.on.sync"));
+    g_ipc_hook_syms[3] = ray_sym_intern(".ipc.on.async", strlen(".ipc.on.async"));
+    g_ipc_hook_syms[4] = ray_sym_intern(".ipc.on.auth",  strlen(".ipc.on.auth"));
+    g_ipc_hook_syms_ready = true;
+}
+
+bool ray_sym_is_ipc_hook(int64_t sym_id) {
+    ipc_hook_syms_ensure();
+    for (int i = 0; i < 5; i++)
+        if (g_ipc_hook_syms[i] == sym_id) return true;
+    return false;
+}
+
+int64_t ray_sym_ipc_hook(int idx) {
+    if (idx < 0 || idx >= 5) return -1;
+    ipc_hook_syms_ensure();
+    return g_ipc_hook_syms[idx];
+}
+
 ray_err_t ray_env_init(void) {
     memset(&g_env, 0, sizeof(g_env));
     scope_depth = 0;
+    /* The IPC hook sym IDs are interned lazily on first probe via
+     * `ipc_hook_syms_ensure`.  We deliberately do NOT pre-intern here:
+     * single-char operator names (`+`, `-`, `*`, …) are registered just
+     * after `ray_env_init` returns, and they need the low sym-ID slots.
+     * Several call sites (notably `resolve` on tables of small ints)
+     * depend on those low IDs corresponding to operator chars so the
+     * "slen < 2 / operator-char" guard rejects them.  Stealing IDs 1-5
+     * for long dotted names would silently promote `[1 2 3]` columns to
+     * SYM.  Lazy interning runs after all builtin registration, so the
+     * hook syms land safely past the operator block. */
     return RAY_OK;
 }
 
@@ -143,6 +186,12 @@ void ray_env_destroy(void) {
         if (g_env.vals[i]) ray_release(g_env.vals[i]);
     }
     memset(&g_env, 0, sizeof(g_env));
+    /* Invalidate the IPC hook sym cache: the runtime destroy path tears
+     * down the sym table too, so the cached sym IDs in `g_ipc_hook_syms`
+     * are stale by the time the next runtime spins up.  Reset the flag
+     * so the next ray_env_init re-interns fresh IDs from the new sym
+     * table. */
+    g_ipc_hook_syms_ready = false;
 }
 
 /* Flat (non-dotted) lookup — scope stack top-down, then global env.
@@ -541,7 +590,11 @@ ray_err_t ray_env_bind_flat(int64_t sym_id, ray_t* val) {
 }
 
 ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
-    if (ray_sym_is_reserved(sym_id)) return RAY_ERR_RESERVED;
+    /* Reserved-namespace gate, with a narrow carve-out for the five IPC
+     * connection hooks.  Everything else under `.ipc.*` and all other
+     * dotted system namespaces remain unsettable. */
+    if (ray_sym_is_reserved(sym_id) && !ray_sym_is_ipc_hook(sym_id))
+        return RAY_ERR_RESERVED;
     /* Same machinery as ray_env_bind, but routes through the user-flagged
      * binder so the journal snapshot can pick this slot.  Without this
      * flip, env_bind_global would also be reached via ray_env_bind below
@@ -662,8 +715,11 @@ ray_err_t ray_env_set_local(int64_t sym_id, ray_t* val) {
     /* Reserved names (.sys.*, .os.*, .csv.*, .ipc.*) can only be
      * populated by builtin registration (ray_env_bind).  Refuse at
      * every user-reachable binding path so `(let .sys.gc 99)` or a
-     * lambda parameter named `.sys.gc` cannot shadow the builtin. */
-    if (ray_sym_is_reserved(sym_id)) return RAY_ERR_RESERVED;
+     * lambda parameter named `.sys.gc` cannot shadow the builtin.
+     * Narrow carve-out: the five `.ipc.on.*` connection-hook syms are
+     * user-settable here too, matching the global `ray_env_set` path. */
+    if (ray_sym_is_reserved(sym_id) && !ray_sym_is_ipc_hook(sym_id))
+        return RAY_ERR_RESERVED;
     if (scope_depth <= 0) return ray_env_set(sym_id, val);
     if (ray_sym_is_dotted(sym_id)) {
         return env_set_dotted(sym_id, val, lookup_top_frame, env_bind_local);
