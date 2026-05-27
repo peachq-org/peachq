@@ -425,14 +425,17 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
             rng->len = 2;
             ray_t* sliced = ray_take_fn(result, rng);
             ray_release(result);
-            ray_heap_gc();
+            /* No explicit GC here — every top-level statement (run_piped
+             * / repl) finishes with a ray_heap_gc() that catches the
+             * freed intermediates anyway.  The inner call was double-
+             * counting on benchmark loops where the same query runs
+             * back-to-back. */
             ray_release(rng);
             return sliced;
         }
         if (ray_is_vec(tv) && (tv->type == RAY_I64 || tv->type == RAY_I32) && tv->len == 2) {
             ray_t* sliced = ray_take_fn(result, tv);
             ray_release(result);
-            ray_heap_gc();
             ray_release(tv);
             return sliced;
         }
