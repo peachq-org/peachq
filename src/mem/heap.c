@@ -1262,7 +1262,11 @@ void ray_heap_destroy(void) {
  * -------------------------------------------------------------------------- */
 
 static void heap_return_foreign_freelist(ray_heap_t* h) {
+    /* avail bit (set on insert, cleared on remove) tells us which
+     * freelist orders have any blocks at all — skip the empty ones. */
+    if (!h->avail) return;
     for (int order = RAY_ORDER_MIN; order < RAY_HEAP_FL_SIZE; order++) {
+        if (!(h->avail & (1ULL << order))) continue;
         ray_fl_head_t* head = &h->freelist[order];
         ray_t* blk = head->fl_next;
         while (blk != (ray_t*)head) {
