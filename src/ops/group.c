@@ -8040,7 +8040,7 @@ v2_done:;
             scratch_free(radix_bufs_hdr);
             radix_bufs = NULL;
             radix_bufs_hdr = NULL;
-            ray_heap_gc();
+            /* No explicit GC — top-level statement GC catches it. */
         }
 
 v2_emit:;
@@ -9019,7 +9019,10 @@ cleanup:
         if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
     if (match_idx_block) ray_release(match_idx_block);
 
-    ray_heap_gc();
+    /* No explicit GC — top-level statement runner (run_piped / repl)
+     * calls ray_heap_gc() once per statement, catching every
+     * intermediate freed above.  The duplicate inner call doubled the
+     * per-query GC cost on bench loops. */
 
     return result;
 }
