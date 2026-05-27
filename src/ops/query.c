@@ -534,7 +534,9 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
                         }
                         if (topk && !RAY_IS_ERR(topk)) {
                             ray_release(result);
-                            ray_heap_gc();
+                            /* No explicit GC — the top-level statement
+                             * runner's ray_heap_gc() reclaims the freed
+                             * intermediates one call later. */
                             return topk;
                         }
                         if (topk && RAY_IS_ERR(topk)) ray_release(topk);
