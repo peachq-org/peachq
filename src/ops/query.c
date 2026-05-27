@@ -7945,6 +7945,23 @@ by_dict_done:
                  *
                  * If any non-agg falls outside that, we still need the
                  * index. */
+                /* Decide whether we need to materialise the per-group
+                 * idx_buf scatter.  Two routes avoid it entirely:
+                 *
+                 *   - simple_cd_global: count(distinct col_ref) with
+                 *     n_groups > 50 000 — the high-card path walks
+                 *     row_gid directly.
+                 *   - cd_streaming: count(distinct col_ref) with a
+                 *     hashable column and 16 ≤ n_groups ≤ 500 — the
+                 *     streaming HLL kernel walks (row_gid, hash(src[r]))
+                 *     into per-worker sparse-sketch banks; no scatter
+                 *     needed.  Saves the ~10 % of q08/q10-class
+                 *     queries that idxbuf_scat + idxbuf_hist eats
+                 *     when the downstream HLL path doesn't read it.
+                 *
+                 * Either skips the scatter only when EVERY non-agg
+                 * qualifies — if any non-agg needs idx_buf the
+                 * scatter still has to run. */
                 int needs_slice_idx = 0;
                 for (uint8_t ni = 0; ni < n_nonaggs && !needs_slice_idx; ni++) {
                     ray_t* cd_inner = match_count_distinct(nonagg_exprs[ni]);
@@ -7952,7 +7969,24 @@ by_dict_done:
                                             cd_inner->type == -RAY_SYM &&
                                             (cd_inner->attrs & RAY_ATTR_NAME) &&
                                             n_groups > 50000);
-                    if (!simple_cd_global) needs_slice_idx = 1;
+                    int cd_streaming = 0;
+                    if (cd_inner && cd_inner->type == -RAY_SYM &&
+                        (cd_inner->attrs & RAY_ATTR_NAME) &&
+                        n_groups >= 16 && n_groups <= 500 &&
+                        nrows >= (1 << 20)) {
+                        ray_t* sc = ray_table_get_col(tbl, cd_inner->i64);
+                        if (sc && !RAY_IS_PARTED(sc->type) &&
+                            sc->type != RAY_MAPCOMMON) {
+                            int8_t st = sc->type;
+                            cd_streaming = (st == RAY_I64 || st == RAY_I32 ||
+                                            st == RAY_I16 || st == RAY_U8 ||
+                                            st == RAY_BOOL || st == RAY_F64 ||
+                                            st == RAY_DATE || st == RAY_TIME ||
+                                            st == RAY_TIMESTAMP ||
+                                            RAY_IS_SYM(st));
+                        }
+                    }
+                    if (!simple_cd_global && !cd_streaming) needs_slice_idx = 1;
                 }
 
                 int64_t* idx_buf = NULL;
