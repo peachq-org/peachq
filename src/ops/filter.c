@@ -597,7 +597,34 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
         ray_t* col = ray_table_get_col_idx(tbl, c);
         col_names[c] = ray_table_col_name(tbl, c);
         if (!col || RAY_IS_ERR(col)) { new_cols[c] = NULL; continue; }
-        if (col->type == RAY_MAPCOMMON) { new_cols[c] = NULL; continue; }
+        if (col->type == RAY_MAPCOMMON) {
+            ray_t** mc_ptrs = (ray_t**)ray_data(col);
+            ray_t* kv = mc_ptrs[0];
+            ray_t* rc = mc_ptrs[1];
+            if (!kv || !rc || col->len < 2) { new_cols[c] = NULL; continue; }
+            int64_t n_parts = kv->len;
+            int8_t kv_type = kv->type;
+            size_t esz = (size_t)ray_sym_elem_size(kv_type, kv->attrs);
+            const char* kdata = (const char*)ray_data(kv);
+            const int64_t* counts = (const int64_t*)ray_data(rc);
+            ray_t* flat = ray_vec_new(kv_type, pass_count);
+            if (!flat || RAY_IS_ERR(flat)) { new_cols[c] = NULL; continue; }
+            flat->len = pass_count;
+            char* out_mc = (char*)ray_data(flat);
+            for (int64_t i = 0; i < pass_count; i++) {
+                int64_t row_i = match_idx[i];
+                int64_t cum = 0;
+                int64_t pi = 0;
+                for (; pi < n_parts - 1; pi++) {
+                    cum += counts[pi];
+                    if (row_i < cum) break;
+                }
+                memcpy(out_mc + (size_t)i * esz, kdata + (size_t)pi * esz, esz);
+            }
+            new_cols[c] = flat;
+            valid_ncols++;
+            continue;
+        }
         int8_t ct = RAY_IS_PARTED(col->type)
                   ? (int8_t)RAY_PARTED_BASETYPE(col->type) : col->type;
         uint8_t ca = 0;
