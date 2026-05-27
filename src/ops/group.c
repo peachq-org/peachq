@@ -441,7 +441,7 @@ static void cd_hist_fn(void* ctx, uint32_t worker_id,
         for (int64_t i = start; i < end; i++) {
             double fv = d[i];
             if (fv != fv) fv = (double)NAN;
-            else if (fv == 0.0) fv = 0.0;
+            else fv = clear_neg_zero(fv);
             int64_t val;
             memcpy(&val, &fv, sizeof(int64_t));
             uint64_t h = (uint64_t)val * CD_HASH_K1;
@@ -540,7 +540,7 @@ static void cd_scatter_fn(void* ctx, uint32_t worker_id,
         for (int64_t i = start; i < end; i++) {
             double fv = d[i];
             if (fv != fv) fv = (double)NAN;
-            else if (fv == 0.0) fv = 0.0;
+            else fv = clear_neg_zero(fv);
             int64_t val;
             memcpy(&val, &fv, sizeof(int64_t));
             uint64_t h = (uint64_t)val * CD_HASH_K1;
@@ -592,7 +592,7 @@ static int64_t cd_seq_count(int8_t in_type, uint8_t in_attrs,
         if (in_type == RAY_F64) {
             double fv = ((const double*)base)[i];
             if (fv != fv) fv = (double)NAN;
-            else if (fv == 0.0) fv = 0.0;
+            else fv = clear_neg_zero(fv);
             memcpy(&val, &fv, sizeof(int64_t));
         } else {
             val = read_col_i64(base, i, in_type, in_attrs);
@@ -942,7 +942,7 @@ static inline int64_t cdpg_read(const void* base, int64_t r,
     if (in_type == RAY_F64) {
         double fv = ((const double*)base)[r];
         if (fv != fv) fv = (double)NAN;
-        else if (fv == 0.0) fv = 0.0;
+        else fv = clear_neg_zero(fv);
         int64_t v;
         memcpy(&v, &fv, sizeof(int64_t));
         return v;
@@ -1288,7 +1288,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
                 if (gid < 0 || gid >= n_groups) continue;
                 double fv = d[r];
                 if (fv != fv) fv = (double)NAN;
-                else if (fv == 0.0) fv = 0.0;
+                else fv = clear_neg_zero(fv);
                 int64_t v;
                 memcpy(&v, &fv, sizeof(int64_t));
                 CD_INSERT(v);
@@ -1338,7 +1338,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
             if (in_type == RAY_F64) {
                 double fv = ((double*)base)[r];
                 if (fv != fv) fv = (double)NAN;
-                else if (fv == 0.0) fv = 0.0;
+                else fv = clear_neg_zero(fv);
                 memcpy(&row_val, &fv, sizeof(int64_t));
             } else {
                 row_val = read_col_i64(base, r, in_type, src->attrs);
@@ -9350,7 +9350,7 @@ static inline int64_t grpt_key_read(const void* base, int8_t t, int64_t row) {
     switch (t) {
         case RAY_F64: {
             double v; memcpy(&v, (const char*)base + (size_t)row*8, 8);
-            if (v == 0.0) v = 0.0;   /* normalize -0.0 → +0.0 to match hash */
+            v = clear_neg_zero(v);
             int64_t bits; memcpy(&bits, &v, 8); return bits;
         }
         case RAY_I64: case RAY_TIMESTAMP:
