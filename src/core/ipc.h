@@ -63,6 +63,16 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define RAY_IPC_FLAG_VERBOSE    0x04
 #define RAY_IPC_MAX_CONNS 256
 
+/* ===== Connection hooks (.ipc.on.*) ===== */
+
+/* Current connection handle, readable from Rayfall via the `.ipc.handle`
+ * builtin while a `.ipc.on.*` hook is on the stack.  Set/restored by the
+ * server around every hook invocation; defaults to -1 outside any hook.
+ * Thread-local — IPC dispatch is single-threaded today, but the storage
+ * class keeps the value scoped to the dispatch thread should that ever
+ * change. */
+int64_t ray_ipc_current_handle(void);
+
 /* ===== Poll-based IPC (new API) ===== */
 
 /* Register IPC listener on poll. Returns selector id or -1. */
