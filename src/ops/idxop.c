@@ -22,6 +22,7 @@
  */
 
 #include "idxop.h"
+#include "ops/internal.h"
 #include "mem/heap.h"
 #include "mem/cow.h"
 #include "vec/vec.h"
@@ -53,7 +54,7 @@ static uint64_t numeric_key_word(const uint8_t* base, int8_t type, int64_t i) {
         double v;
         if (es == 4) { float t; memcpy(&t, base + i*4, 4); v = (double)t; }
         else         {           memcpy(&v, base + i*8, 8);                }
-        if (v == 0.0) v = 0.0;          /* canonicalise -0.0 -> +0.0 */
+        v = clear_neg_zero(v);
         if (v != v) {                   /* NaN: per-row bucket via row hash */
             return (uint64_t)i * 0x9E3779B97F4A7C15ULL;
         }
