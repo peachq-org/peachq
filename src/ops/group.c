@@ -441,7 +441,7 @@ static void cd_hist_fn(void* ctx, uint32_t worker_id,
         for (int64_t i = start; i < end; i++) {
             double fv = d[i];
             if (fv != fv) fv = (double)NAN;
-            else if (fv == 0.0) fv = 0.0;
+            else fv = clear_neg_zero(fv);
             int64_t val;
             memcpy(&val, &fv, sizeof(int64_t));
             uint64_t h = (uint64_t)val * CD_HASH_K1;
@@ -540,7 +540,7 @@ static void cd_scatter_fn(void* ctx, uint32_t worker_id,
         for (int64_t i = start; i < end; i++) {
             double fv = d[i];
             if (fv != fv) fv = (double)NAN;
-            else if (fv == 0.0) fv = 0.0;
+            else fv = clear_neg_zero(fv);
             int64_t val;
             memcpy(&val, &fv, sizeof(int64_t));
             uint64_t h = (uint64_t)val * CD_HASH_K1;
@@ -592,7 +592,7 @@ static int64_t cd_seq_count(int8_t in_type, uint8_t in_attrs,
         if (in_type == RAY_F64) {
             double fv = ((const double*)base)[i];
             if (fv != fv) fv = (double)NAN;
-            else if (fv == 0.0) fv = 0.0;
+            else fv = clear_neg_zero(fv);
             memcpy(&val, &fv, sizeof(int64_t));
         } else {
             val = read_col_i64(base, i, in_type, in_attrs);
@@ -942,7 +942,7 @@ static inline int64_t cdpg_read(const void* base, int64_t r,
     if (in_type == RAY_F64) {
         double fv = ((const double*)base)[r];
         if (fv != fv) fv = (double)NAN;
-        else if (fv == 0.0) fv = 0.0;
+        else fv = clear_neg_zero(fv);
         int64_t v;
         memcpy(&v, &fv, sizeof(int64_t));
         return v;
@@ -1288,7 +1288,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
                 if (gid < 0 || gid >= n_groups) continue;
                 double fv = d[r];
                 if (fv != fv) fv = (double)NAN;
-                else if (fv == 0.0) fv = 0.0;
+                else fv = clear_neg_zero(fv);
                 int64_t v;
                 memcpy(&v, &fv, sizeof(int64_t));
                 CD_INSERT(v);
@@ -1338,7 +1338,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
             if (in_type == RAY_F64) {
                 double fv = ((double*)base)[r];
                 if (fv != fv) fv = (double)NAN;
-                else if (fv == 0.0) fv = 0.0;
+                else fv = clear_neg_zero(fv);
                 memcpy(&row_val, &fv, sizeof(int64_t));
             } else {
                 row_val = read_col_i64(base, r, in_type, src->attrs);
@@ -5145,13 +5145,21 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     agg_owned[a] = 1;
                     goto resolve_ins2;
                 }
+                if (vec && RAY_IS_ERR(vec)) ray_release(vec);
             }
             /* Fallback: full recursive evaluation */
             ray_t* saved_table = g->table;
             g->table = tbl;
             ray_t* vec = exec_node(g, agg_input_op);
             g->table = saved_table;
-            if (vec && !RAY_IS_ERR(vec)) {
+            if (vec && RAY_IS_ERR(vec)) {
+                for (uint8_t i = 0; i < a; i++)
+                    { if (agg_owned[i] && agg_vecs[i]) ray_release(agg_vecs[i]); if (agg_owned2[i] && agg_vecs2[i]) ray_release(agg_vecs2[i]); }
+                for (uint8_t k = 0; k < n_keys; k++)
+                    if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+                return vec;
+            }
+            if (vec) {
                 agg_vecs[a] = vec;
                 agg_owned[a] = 1;
             }
@@ -5177,6 +5185,8 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                         agg_vecs2[a] = vec;
                         agg_owned2[a] = 1;
                         compiled2 = 1;
+                    } else if (vec) {
+                        ray_release(vec);
                     }
                 }
                 if (!compiled2) {
@@ -5184,7 +5194,15 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     g->table = tbl;
                     ray_t* vec = exec_node(g, agg_input_op2);
                     g->table = saved_table;
-                    if (vec && !RAY_IS_ERR(vec)) {
+                    if (vec && RAY_IS_ERR(vec)) {
+                        if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
+                        for (uint8_t i = 0; i < a; i++)
+                            { if (agg_owned[i] && agg_vecs[i]) ray_release(agg_vecs[i]); if (agg_owned2[i] && agg_vecs2[i]) ray_release(agg_vecs2[i]); }
+                        for (uint8_t k = 0; k < n_keys; k++)
+                            if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+                        return vec;
+                    }
+                    if (vec) {
                         agg_vecs2[a] = vec;
                         agg_owned2[a] = 1;
                     }
@@ -9332,7 +9350,7 @@ static inline int64_t grpt_key_read(const void* base, int8_t t, int64_t row) {
     switch (t) {
         case RAY_F64: {
             double v; memcpy(&v, (const char*)base + (size_t)row*8, 8);
-            if (v == 0.0) v = 0.0;   /* normalize -0.0 → +0.0 to match hash */
+            v = clear_neg_zero(v);
             int64_t bits; memcpy(&bits, &v, 8); return bits;
         }
         case RAY_I64: case RAY_TIMESTAMP:
