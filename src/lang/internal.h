@@ -470,6 +470,7 @@ ray_t* ray_de_fn(ray_t* val);
 ray_t* ray_hopen_fn(ray_t* x);
 ray_t* ray_hclose_fn(ray_t* x);
 ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg);
+ray_t* ray_ipc_handle_fn(ray_t** args, int64_t n);
 ray_t* ray_set_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_parted_fn(ray_t** args, int64_t n);

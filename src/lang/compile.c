@@ -236,11 +236,18 @@ static void compile_list(compiler_t *c, ray_t *ast) {
          * ray_env_set_local enforces on the tree-walking path.
          * Setting c->error aborts bytecode emission; call_lambda
          * then falls back to the tree-walking interpreter which
-         * raises the proper `reserve` error via ray_let_fn. */
+         * raises the proper `reserve` error via ray_let_fn.
+         * The five `.ipc.on.*` connection-hook names are exempt —
+         * they're user-settable, so a `let .ipc.on.open ...` in a
+         * compiled body must emit the same OP_STOREENV as any other
+         * local binding.  Without this, the bytecode path would
+         * abort and silently fall back to the interpreter on every
+         * such write. */
         if (sym_id == sf_let && n == 3) {
             ray_t *name_obj = elems[1];
             if (name_obj->type != -RAY_SYM ||
-                ray_sym_is_reserved(name_obj->i64)) {
+                (ray_sym_is_reserved(name_obj->i64) &&
+                 !ray_sym_is_ipc_hook(name_obj->i64))) {
                 c->error = true;
                 return;
             }
