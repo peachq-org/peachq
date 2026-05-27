@@ -3928,7 +3928,7 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
                 int64_t r = idxs[i];
                 double fv = d[r];
                 if (has_nulls && fv != fv) continue;
-                if (fv == 0.0) fv = 0.0;
+                fv = clear_neg_zero(fv);
                 int64_t vbits = 0;
                 memcpy(&vbits, &fv, sizeof(int64_t));
                 CDPG_BUF_INSERT(vbits);
