@@ -2477,6 +2477,16 @@ static ray_t* exec_filtered_group_count1(ray_graph_t* g, ray_op_ext_t* ext,
 #define FP_MAX_AGGS 8
 #define FP_MAX_KEYS 16
 
+/* v2 path: per-(worker, partition) hash tables.  Each worker hashes its
+ * rows once and routes by RADIX_PART(h) to one of MK_RADIX_P small
+ * shards rather than a single fat per-worker shard.  Smaller shards stay
+ * cache-resident; the merge step is per-partition and trivially parallel.
+ * Mirrors the design in group.c (radix_v2_phase1_fn / _phase2_fn). */
+#define MK_RADIX_BITS 5
+#define MK_RADIX_P    (1u << MK_RADIX_BITS)
+#define MK_RADIX_MASK (MK_RADIX_P - 1u)
+#define MK_RADIX_PART(h) (((uint32_t)((h) >> 16)) & MK_RADIX_MASK)
+
 typedef enum {
     MK_AGG_COUNT = 0,
     MK_AGG_SUM   = 1,
@@ -2546,7 +2556,8 @@ typedef struct {
     uint8_t     total_state;
     uint8_t     wide;        /* 1 when total_bytes > 8 (uses kv_hi side array) */
     /* Cool fields (only touched once per dispatch or in cold paths). */
-    mk_shard_t* shards;
+    mk_shard_t* shards;       /* v1: [n_workers] single shard per worker */
+    mk_shard_t* wpart_shards; /* v2: [n_workers * MK_RADIX_P] partitioned */
     uint64_t    init_cap;
     _Atomic(uint32_t) oom;
     mk_key_t    keys[FP_MAX_KEYS];
@@ -3155,6 +3166,193 @@ static void mk_eq_i64_count_fn(void* raw, uint32_t worker_id,
                 return;
             }
         }
+    }
+}
+
+/* ─── v2 worker fn — per-(worker, partition) shards ─────────────────
+ *
+ * Like mk_par_fn but routes every passing row by RADIX_PART(hash) into
+ * one of MK_RADIX_P small per-(worker, partition) shards.  Each small
+ * shard stays cache-resident as it fills, so the probe never walks a
+ * 5–10 MB monolithic per-worker shard.  Pass-1 (probe) and pass-2
+ * (agg update) are fused per-row here: any partition may grow on any
+ * row, so a deferred pass-2 over recorded slot indexes would dereference
+ * stale slots after a rehash.  Combine merges per partition. */
+static inline void mk_v2_apply_agg_inline(mk_par_ctx_t* c, int64_t* state_slot,
+                                          int64_t source_row,
+                                          uint8_t n_aggs, uint8_t total_state)
+{
+    (void)total_state;
+    for (uint8_t a = 0; a < n_aggs; a++) {
+        const mk_agg_t* ag = &c->aggs[a];
+        uint8_t off = ag->state_off;
+        switch (ag->kind) {
+        case MK_AGG_COUNT:
+            state_slot[off]++;
+            break;
+        case MK_AGG_SUM: {
+            int64_t v = mk_read_agg_i64(ag, source_row);
+            state_slot[off] += v;
+            break;
+        }
+        case MK_AGG_MIN: {
+            int64_t v = mk_read_agg_i64(ag, source_row);
+            if (v < state_slot[off]) state_slot[off] = v;
+            break;
+        }
+        case MK_AGG_MAX: {
+            int64_t v = mk_read_agg_i64(ag, source_row);
+            if (v > state_slot[off]) state_slot[off] = v;
+            break;
+        }
+        case MK_AGG_AVG: {
+            int64_t v = mk_read_agg_i64(ag, source_row);
+            state_slot[off    ] += v;
+            state_slot[off + 1] += 1;
+            break;
+        }
+        }
+    }
+}
+
+static void mk_par_v2_fn(void* raw, uint32_t worker_id,
+                         int64_t start, int64_t end)
+{
+    mk_par_ctx_t* c = (mk_par_ctx_t*)raw;
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    uint8_t wide        = c->wide;
+    uint8_t total_state = c->total_state;
+    uint8_t n_aggs      = c->n_aggs;
+    mk_shard_t* my_shards = &c->wpart_shards[(size_t)worker_id * MK_RADIX_P];
+
+    int64_t row = start;
+    while (row < end) {
+        int64_t mend = row + RAY_MORSEL_ELEMS;
+        if (mend > end) mend = end;
+        int64_t mlen = mend - row;
+        uint8_t bits[RAY_MORSEL_ELEMS];
+        fp_eval_pred(&c->pred, row, mend, bits);
+
+        int match_count = 0;
+        for (int64_t r = 0; r < mlen; r++) match_count += bits[r];
+        if (match_count == 0) { row = mend; continue; }
+        int64_t base_row = row;
+
+        if (!wide) {
+            for (int64_t r = 0; r < mlen; r++) {
+                if (!bits[r]) continue;
+                int64_t source_row = base_row + r;
+                int64_t kv = mk_compose_key(c, source_row);
+                uint64_t h = (uint64_t)kv * 0x9E3779B97F4A7C15ULL;
+                h ^= h >> 33;
+                uint32_t p = MK_RADIX_PART(h);
+                mk_shard_t* sh = &my_shards[p];
+                if (!sh->slots) {
+                    if (mk_shard_init(sh, c->init_cap, total_state, wide) != 0) {
+                        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+                        return;
+                    }
+                }
+                if (sh->n_filled + 1 > (int64_t)(sh->cap / 2)) {
+                    if (mk_shard_grow(sh, total_state, wide) != 0) {
+                        atomic_store_explicit(&c->oom, 1,
+                                              memory_order_relaxed);
+                        return;
+                    }
+                }
+                int64_t* slots = sh->slots;
+                int64_t* state = sh->state;
+                uint64_t mask  = sh->mask;
+                uint64_t s = h & mask;
+                for (;;) {
+                    if (!slots[s * 2]) {
+                        slots[s * 2]     = 1;
+                        slots[s * 2 + 1] = kv;
+                        int64_t* st = &state[s * total_state];
+                        for (uint8_t a = 0; a < n_aggs; a++) {
+                            const mk_agg_t* ag = &c->aggs[a];
+                            switch (ag->kind) {
+                            case MK_AGG_COUNT:
+                            case MK_AGG_SUM:
+                                st[ag->state_off] = 0; break;
+                            case MK_AGG_MIN:
+                                st[ag->state_off] = INT64_MAX; break;
+                            case MK_AGG_MAX:
+                                st[ag->state_off] = INT64_MIN; break;
+                            case MK_AGG_AVG:
+                                st[ag->state_off    ] = 0;
+                                st[ag->state_off + 1] = 0; break;
+                            }
+                        }
+                        sh->n_filled++;
+                        break;
+                    }
+                    if (slots[s * 2 + 1] == kv) break;
+                    s = (s + 1) & mask;
+                }
+                mk_v2_apply_agg_inline(c, &state[s * total_state],
+                                       source_row, n_aggs, total_state);
+            }
+        } else {
+            for (int64_t r = 0; r < mlen; r++) {
+                if (!bits[r]) continue;
+                int64_t source_row = base_row + r;
+                int64_t kv_lo, kv_hi;
+                mk_compose_key2(c, source_row, &kv_lo, &kv_hi);
+                uint64_t h = mk_hash_lo_hi(kv_lo, kv_hi);
+                uint32_t p = MK_RADIX_PART(h);
+                mk_shard_t* sh = &my_shards[p];
+                if (!sh->slots) {
+                    if (mk_shard_init(sh, c->init_cap, total_state, wide) != 0) {
+                        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+                        return;
+                    }
+                }
+                if (sh->n_filled + 1 > (int64_t)(sh->cap / 2)) {
+                    if (mk_shard_grow(sh, total_state, wide) != 0) {
+                        atomic_store_explicit(&c->oom, 1,
+                                              memory_order_relaxed);
+                        return;
+                    }
+                }
+                int64_t* slots = sh->slots;
+                int64_t* slots_hi = sh->slots_hi;
+                int64_t* state = sh->state;
+                uint64_t mask  = sh->mask;
+                uint64_t s = h & mask;
+                for (;;) {
+                    if (!slots[s * 2]) {
+                        slots[s * 2]     = 1;
+                        slots[s * 2 + 1] = kv_lo;
+                        slots_hi[s]      = kv_hi;
+                        int64_t* st = &state[s * total_state];
+                        for (uint8_t a = 0; a < n_aggs; a++) {
+                            const mk_agg_t* ag = &c->aggs[a];
+                            switch (ag->kind) {
+                            case MK_AGG_COUNT:
+                            case MK_AGG_SUM:
+                                st[ag->state_off] = 0; break;
+                            case MK_AGG_MIN:
+                                st[ag->state_off] = INT64_MAX; break;
+                            case MK_AGG_MAX:
+                                st[ag->state_off] = INT64_MIN; break;
+                            case MK_AGG_AVG:
+                                st[ag->state_off    ] = 0;
+                                st[ag->state_off + 1] = 0; break;
+                            }
+                        }
+                        sh->n_filled++;
+                        break;
+                    }
+                    if (slots[s * 2 + 1] == kv_lo && slots_hi[s] == kv_hi) break;
+                    s = (s + 1) & mask;
+                }
+                mk_v2_apply_agg_inline(c, &state[s * total_state],
+                                       source_row, n_aggs, total_state);
+            }
+        }
+
+        row = mend;
     }
 }
 
@@ -4346,22 +4544,6 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
     atomic_store_explicit(&ctx.oom, 0, memory_order_relaxed);
     ray_pool_t* pool = ray_pool_get();
     uint32_t nw = pool ? ray_pool_total_workers(pool) : 1;
-    /* Pre-size each worker shard a bit larger than the 1024-slot default
-     * so high-cardinality queries don't pay log2(target/1024) rehashes.
-     * The cap stays modest (16 K slots ≈ ~750 KB per shard with a 4-slot
-     * agg state) so very selective predicates that produce a handful of
-     * groups don't burn RAM up front.  Sparse keys still grow on-demand. */
-    {
-        uint64_t expected = (uint64_t)nrows / ((uint64_t)nw * 16u);
-        uint64_t init_cap = FP_SHARD_INIT_CAP;
-        while (init_cap < expected * 2u && init_cap < (1ULL << 14))
-            init_cap <<= 1;
-        ctx.init_cap = init_cap;
-    }
-    ray_t* shards_hdr = NULL;
-    ctx.shards = (mk_shard_t*)scratch_calloc(&shards_hdr,
-                                             (size_t)nw * sizeof(mk_shard_t));
-    if (!ctx.shards) return ray_error("oom", NULL);
 
     int eq_i64_idx = -1;
     if (ctx.n_aggs == 1 && ctx.aggs[0].kind == MK_AGG_COUNT &&
@@ -4382,6 +4564,61 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
     int hash_eq_idx = (ctx.pred.n_children == 1)
                           ? mk_find_hash_eq_child(&ctx.pred)
                           : -1;
+
+    /* v2 gate: pre-partitioned shards win on high-cardinality multi-key
+     * group-bys (q30/q31/q32 family) by keeping each per-(worker,
+     * partition) shard cache-resident.  Exclude shapes where v1's
+     * existing fast paths already win:
+     *   - hash-eq or eq_i64 chunk-skip scans (single-shard inserts)
+     *   - n_aggs == 0 (degenerate)
+     *   - n_keys == 1: v1's hot k0_base path is already L1-friendly
+     *   - SYM keys: existing tuned SYM path beats v2 (q33/q34)
+     *   - nullable agg input: v1's existing nullmask path; v2 does not
+     *     yet track per-agg null counts during merge
+     * Multi-key with COUNT/SUM/AVG aggs (no MIN/MAX): the v2 partition
+     * shards cleanly merge by summing state slots. */
+    bool v2_ok = (hash_eq_idx < 0 && eq_i64_idx < 0 &&
+                  ctx.n_aggs >= 1 && ctx.n_keys >= 2);
+    for (uint8_t k = 0; k < ctx.n_keys && v2_ok; k++) {
+        if (ctx.keys[k].type == RAY_SYM) v2_ok = false;
+    }
+    for (uint8_t a = 0; a < ctx.n_aggs && v2_ok; a++) {
+        mk_agg_kind_t kk = ctx.aggs[a].kind;
+        if (kk != MK_AGG_COUNT && kk != MK_AGG_SUM && kk != MK_AGG_AVG) {
+            v2_ok = false;
+        }
+        if (ctx.aggs[a].in_attrs & RAY_ATTR_HAS_NULLS) v2_ok = false;
+    }
+
+    /* Init capacity per shard.
+     * v1 (single shard per worker): pre-size to a fraction of nrows so
+     * high-cardinality scans pay fewer rehashes.
+     * v2 (MK_RADIX_P shards per worker): each partition holds ~1/256 of
+     * the worker's groups.  Start at 256 slots — matches group.c v2's
+     * design (~64 KB per partition with a 4-slot agg state) and keeps
+     * the upfront allocation total to a few MB instead of tens of MB.
+     * Sparse keys still grow on-demand. */
+    if (v2_ok) {
+        ctx.init_cap = 256;
+    } else {
+        uint64_t expected = (uint64_t)nrows / ((uint64_t)nw * 16u);
+        uint64_t init_cap = FP_SHARD_INIT_CAP;
+        while (init_cap < expected * 2u && init_cap < (1ULL << 14))
+            init_cap <<= 1;
+        ctx.init_cap = init_cap;
+    }
+
+    /* Allocate the shard array.  v2 uses nw * MK_RADIX_P slots, all
+     * stored in the same array — combine_and_materialize iterates
+     * `nw_effective` shards, which equals nw for v1 and nw * MK_RADIX_P
+     * for v2.  Both layouts use the same mk_shard_t per slot. */
+    uint32_t nw_effective = v2_ok ? (nw * MK_RADIX_P) : nw;
+    ray_t* shards_hdr = NULL;
+    ctx.shards = (mk_shard_t*)scratch_calloc(
+        &shards_hdr, (size_t)nw_effective * sizeof(mk_shard_t));
+    if (!ctx.shards) return ray_error("oom", NULL);
+    if (v2_ok) ctx.wpart_shards = ctx.shards;
+
     if (hash_eq_idx >= 0 && ctx.n_aggs == 1 &&
         ctx.aggs[0].kind == MK_AGG_COUNT) {
         mk_eq_hash_count_fn(&ctx, (uint8_t)hash_eq_idx);
@@ -4394,6 +4631,10 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
         };
         if (pool) ray_pool_dispatch(pool, mk_eq_i64_count_fn, &fctx, nrows);
         else      mk_eq_i64_count_fn(&fctx, 0, 0, nrows);
+    } else if (v2_ok && pool) {
+        ray_pool_dispatch(pool, mk_par_v2_fn, &ctx, nrows);
+    } else if (v2_ok) {
+        mk_par_v2_fn(&ctx, 0, 0, nrows);
     } else if (pool) {
         ray_pool_dispatch(pool, mk_par_fn, &ctx, nrows);
     } else {
@@ -4401,13 +4642,16 @@ static ray_t* exec_filtered_group_multi(ray_graph_t* g, ray_op_ext_t* ext,
     }
 
     if (atomic_load_explicit(&ctx.oom, memory_order_relaxed)) {
-        for (uint32_t w = 0; w < nw; w++) mk_shard_free(&ctx.shards[w]);
+        for (uint32_t w = 0; w < nw_effective; w++)
+            mk_shard_free(&ctx.shards[w]);
         scratch_free(shards_hdr);
         return ray_error("oom", "fused_group: shard OOM");
     }
 
-    ray_t* result = mk_combine_and_materialize(&ctx, nw, ext->agg_ops);
-    for (uint32_t w = 0; w < nw; w++) mk_shard_free(&ctx.shards[w]);
+    ray_t* result = mk_combine_and_materialize(&ctx, nw_effective,
+                                               ext->agg_ops);
+    for (uint32_t w = 0; w < nw_effective; w++)
+        mk_shard_free(&ctx.shards[w]);
     scratch_free(shards_hdr);
     return result;
 }
