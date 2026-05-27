@@ -69,6 +69,27 @@ ray_err_t ray_env_bind_flat(int64_t sym_id, ray_t* val);
  * installer) refuse such names so system bindings can't be shadowed. */
 bool ray_sym_is_reserved(int64_t sym_id);
 
+/* True if a symbol is one of the five user-settable IPC connection-hook
+ * names: `.ipc.on.open`, `.ipc.on.close`, `.ipc.on.sync`, `.ipc.on.async`,
+ * `.ipc.on.auth`.  These are the narrow carve-out from the reserved-name
+ * reject in `ray_env_set` / `ray_env_set_local` and the compile-time `let`
+ * guard; everything else under `.ipc.*` stays unsettable.  Lazy-interned
+ * on first probe — idempotent within one sym-table lifetime; the cache
+ * is invalidated in `ray_env_destroy` so it survives runtime cycles. */
+bool ray_sym_is_ipc_hook(int64_t sym_id);
+
+/* Stable index → sym-id accessor for the five IPC hook names.  Used by
+ * `src/core/ipc.c` to look up hook bindings from `g_env` without having
+ * to maintain its own duplicate cache (and its own stale-cache bug
+ * across runtime cycles).  `idx` must be one of:
+ *   0 = .ipc.on.open
+ *   1 = .ipc.on.close
+ *   2 = .ipc.on.sync
+ *   3 = .ipc.on.async
+ *   4 = .ipc.on.auth
+ * Out-of-range returns -1. */
+int64_t ray_sym_ipc_hook(int idx);
+
 /* Resolve a name for a Rayfall expression (tree-walking eval or bytecode
  * op_resolve): returns an OWNED ref (rc >= 1) that the caller must
  * release, or NULL if undefined.  Unlike ray_env_get which returns a
