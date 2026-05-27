@@ -34,6 +34,12 @@
 #include "core/types.h"
 #include "io/csv.h"
 #include "ops/ops.h"
+
+static inline double clear_neg_zero(double v) {
+    uint64_t bits; memcpy(&bits, &v, 8);
+    if (bits == UINT64_C(0x8000000000000000)) v = 0.0;
+    return v;
+}
 #include "ops/hash.h"
 #include "store/part.h"
 #include "store/splay.h"
@@ -91,7 +97,7 @@ void ray_lang_print(FILE* fp, ray_t* val) {
     case -RAY_I64:  fprintf(fp, "%ld", (long)val->i64); break;
     case -RAY_F64: {
         double fv = val->f64;
-        if (fv == 0.0 && signbit(fv)) fv = 0.0;
+        fv = clear_neg_zero(fv);
         fprintf(fp, "%g", fv);
         break;
     }
@@ -177,7 +183,7 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
                 tlen = snprintf(tmp, sizeof(tmp), "%ld", (long)a->i64);
             } else if (a->type == -RAY_F64) {
                 double fv = a->f64;
-                if (fv == 0.0 && signbit(fv)) fv = 0.0;
+                fv = clear_neg_zero(fv);
                 tlen = snprintf(tmp, sizeof(tmp), "%g", fv);
             } else if (a->type == -RAY_BOOL) {
                 tlen = snprintf(tmp, sizeof(tmp), "%s", a->b8 ? "true" : "false");
@@ -1343,7 +1349,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         }
         if (val->type == -RAY_F64) {
             double fv = val->f64;
-            if (fv == 0.0 && signbit(fv)) fv = 0.0;
+            fv = clear_neg_zero(fv);
             char buf[32]; int n2 = snprintf(buf, sizeof(buf), "%g", fv);
             return ray_str(buf, (size_t)n2);
         }
@@ -1399,7 +1405,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             else if (val->type == -RAY_I32) n2 = snprintf(buf, sizeof(buf), "%d", (int)val->i32);
             else if (val->type == -RAY_F64) {
                 double fv = val->f64;
-                if (fv == 0.0 && signbit(fv)) fv = 0.0;
+                fv = clear_neg_zero(fv);
                 n2 = snprintf(buf, sizeof(buf), "%.17g", fv);
             }
             else n2 = snprintf(buf, sizeof(buf), "%lld", (long long)as_i64(val));
@@ -2556,7 +2562,7 @@ ray_t* ray_group_fn(ray_t* x) {
                 idx_vecs[gi_nan] = ray_vec_append(idx_vecs[gi_nan], &i);
                 continue;
             }
-            if (f == 0.0) f = 0.0;   /* canonicalise -0.0 → +0.0 */
+            f = clear_neg_zero(f);
             memcpy(&v, &f, sizeof(v));
         } else
             v = i;
