@@ -3225,6 +3225,22 @@ static void mk_par_v2_fn(void* raw, uint32_t worker_id,
     uint8_t n_aggs      = c->n_aggs;
     mk_shard_t* my_shards = &c->wpart_shards[(size_t)worker_id * MK_RADIX_P];
 
+    /* Eager partition init.  Upfront cost: MK_RADIX_P × init_cap shards
+     * per worker (~256 × 256 × ~30 B = 2 MB for 4-slot state per worker;
+     * 16 MB across 8 workers — comfortably L3-resident).  Saves a per-row
+     * branch (~10M iterations on q31/q32-class queries) for the rest of
+     * the scan.  ray_pool_dispatch reuses the same task across morsel
+     * slices but assigns a fresh worker_id per task call, so guard with
+     * the slots check so re-entry skips. */
+    for (uint32_t p = 0; p < MK_RADIX_P; p++) {
+        if (my_shards[p].slots) continue;
+        if (mk_shard_init(&my_shards[p], c->init_cap,
+                          total_state, wide) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+    }
+
     int64_t row = start;
     while (row < end) {
         int64_t mend = row + RAY_MORSEL_ELEMS;
@@ -3247,12 +3263,6 @@ static void mk_par_v2_fn(void* raw, uint32_t worker_id,
                 h ^= h >> 33;
                 uint32_t p = MK_RADIX_PART(h);
                 mk_shard_t* sh = &my_shards[p];
-                if (!sh->slots) {
-                    if (mk_shard_init(sh, c->init_cap, total_state, wide) != 0) {
-                        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
-                        return;
-                    }
-                }
                 if (sh->n_filled + 1 > (int64_t)(sh->cap / 2)) {
                     if (mk_shard_grow(sh, total_state, wide) != 0) {
                         atomic_store_explicit(&c->oom, 1,
@@ -3302,12 +3312,6 @@ static void mk_par_v2_fn(void* raw, uint32_t worker_id,
                 uint64_t h = mk_hash_lo_hi(kv_lo, kv_hi);
                 uint32_t p = MK_RADIX_PART(h);
                 mk_shard_t* sh = &my_shards[p];
-                if (!sh->slots) {
-                    if (mk_shard_init(sh, c->init_cap, total_state, wide) != 0) {
-                        atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
-                        return;
-                    }
-                }
                 if (sh->n_filled + 1 > (int64_t)(sh->cap / 2)) {
                     if (mk_shard_grow(sh, total_state, wide) != 0) {
                         atomic_store_explicit(&c->oom, 1,
