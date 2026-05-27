@@ -1143,4 +1143,13 @@ static inline void par_finalize_nulls(ray_t* vec) {
     }
 }
 
+/* Canonicalise IEEE 754 -0.0 → +0.0 via bit-level check.
+ * Immune to -fno-signed-zeros (which makes `if (f==0) f=0` a no-op).
+ * Used at output / hash-key boundaries only — not in hot SIMD loops. */
+static inline double clear_neg_zero(double v) {
+    uint64_t bits; memcpy(&bits, &v, 8);
+    if (bits == UINT64_C(0x8000000000000000)) v = 0.0;
+    return v;
+}
+
 #endif /* RAY_EXEC_INTERNAL_H */

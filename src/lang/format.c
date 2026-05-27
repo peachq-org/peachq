@@ -26,6 +26,7 @@
 #include "table/sym.h"
 #include "lang/eval.h"
 #include "ops/ops.h"    /* RAY_LAZY, ray_lazy_materialize */
+#include "ops/internal.h"
 #include "mem/heap.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -188,7 +189,7 @@ static void fmt_i64(fmt_buf_t* b, int64_t val) {
 }
 
 static void fmt_f64(fmt_buf_t* b, double val) {
-    if (val == -0.0 && signbit(val)) val = 0.0; /* normalize -0.0 */
+    val = clear_neg_zero(val);
     if (val == 0.0) {
         /* Zero: format as "0.0" (after trailing-zero strip) */
         char tmp[16];
