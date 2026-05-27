@@ -4207,6 +4207,320 @@ static int mk_combine_parallel(mk_par_ctx_t* c, uint32_t nw,
     return 1;
 }
 
+/* ─── v2 per-partition combine ──────────────────────────────────────
+ *
+ * Shards in c->wpart_shards are already RADIX-partitioned (each holds
+ * only entries whose hash routes to that partition).  The v1 combine
+ * had to histogram + scatter before per-partition dedup; here we go
+ * straight to per-partition dedup — task p just walks all workers'
+ * shard at index w*MK_RADIX_P+p and merges into a single target HT.
+ * Per-partition tasks are fully independent: each task only writes
+ * to its own target HT and its own slot in the part_* arrays. */
+
+typedef struct {
+    mk_par_ctx_t*     ctx;
+    uint32_t          nw;            /* workers per partition */
+    uint8_t           total_state;
+    uint8_t           wide;
+    const mk_agg_t*   aggs;
+    uint8_t           n_aggs;
+    /* Per-partition output buffers (MK_RADIX_P slots). */
+    int64_t**         part_keys;     /* [P]: kv_lo array, size part_n[p] */
+    int64_t**         part_keys_hi;  /* [P]: kv_hi array, NULL when narrow */
+    int64_t**         part_states;   /* [P]: state[part_n[p] * total_state] */
+    ray_t**           part_keys_hdr;
+    ray_t**           part_keys_hi_hdr;
+    ray_t**           part_states_hdr;
+    int64_t*          part_n;
+    _Atomic(uint32_t) oom;
+} mk_combine_v2_ctx_t;
+
+static void mk_combine_v2_part_fn(void* vctx, uint32_t worker_id,
+                                  int64_t start, int64_t end)
+{
+    (void)worker_id;
+    mk_combine_v2_ctx_t* c = (mk_combine_v2_ctx_t*)vctx;
+    if (atomic_load_explicit(&c->oom, memory_order_relaxed)) return;
+    uint8_t total_state = c->total_state;
+    uint8_t wide        = c->wide;
+    uint8_t n_aggs      = c->n_aggs;
+    uint32_t nw         = c->nw;
+
+    for (int64_t p = start; p < end; p++) {
+        /* Upper bound on the merged partition: sum of worker fills (some
+         * keys may appear in multiple workers; the merge folds those, so
+         * final n_filled ≤ total). */
+        int64_t total = 0;
+        for (uint32_t w = 0; w < nw; w++) {
+            total += c->ctx->wpart_shards[(size_t)w * MK_RADIX_P + p].n_filled;
+        }
+        if (total == 0) {
+            c->part_n[p] = 0;
+            continue;
+        }
+
+        /* Target HT sized to fit `total` at load ≤ 0.5; pow-of-2. */
+        uint64_t cap = 256;
+        while (cap < (uint64_t)(total * 2)) cap <<= 1;
+
+        mk_shard_t target;
+        memset(&target, 0, sizeof(target));
+        if (mk_shard_init(&target, cap, total_state, wide) != 0) {
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+
+        /* Merge each worker's shard for this partition into target. */
+        for (uint32_t w = 0; w < nw; w++) {
+            mk_shard_t* src = &c->ctx->wpart_shards[(size_t)w * MK_RADIX_P + p];
+            if (!src->slots) continue;
+            int64_t* src_slots = src->slots;
+            int64_t* src_slots_hi = src->slots_hi;
+            int64_t* src_state = src->state;
+            uint64_t src_cap = src->cap;
+            int64_t* tgt_slots = target.slots;
+            int64_t* tgt_slots_hi = target.slots_hi;
+            int64_t* tgt_state = target.state;
+            uint64_t tgt_mask = target.mask;
+
+            for (uint64_t s = 0; s < src_cap; s++) {
+                if (!src_slots[s * 2]) continue;
+                int64_t kv_lo = src_slots[s * 2 + 1];
+                int64_t kv_hi = wide ? src_slots_hi[s] : 0;
+                uint64_t h;
+                if (wide) {
+                    h = mk_hash_lo_hi(kv_lo, kv_hi);
+                } else {
+                    h = (uint64_t)kv_lo * 0x9E3779B97F4A7C15ULL;
+                    h ^= h >> 33;
+                }
+                uint64_t t = h & tgt_mask;
+                const int64_t* sst = &src_state[s * total_state];
+                for (;;) {
+                    if (!tgt_slots[t * 2]) {
+                        tgt_slots[t * 2]     = 1;
+                        tgt_slots[t * 2 + 1] = kv_lo;
+                        if (wide) tgt_slots_hi[t] = kv_hi;
+                        int64_t* dst = &tgt_state[t * total_state];
+                        for (uint8_t k = 0; k < total_state; k++)
+                            dst[k] = sst[k];
+                        target.n_filled++;
+                        break;
+                    }
+                    if (tgt_slots[t * 2 + 1] == kv_lo &&
+                        (!wide || tgt_slots_hi[t] == kv_hi))
+                    {
+                        mk_state_merge(&tgt_state[t * total_state],
+                                       sst, c->aggs, n_aggs);
+                        break;
+                    }
+                    t = (t + 1) & tgt_mask;
+                }
+            }
+        }
+
+        /* Pack target into dense per-partition output arrays. */
+        int64_t pn = target.n_filled;
+        c->part_n[p] = pn;
+        c->part_keys[p] = (int64_t*)scratch_alloc(
+            &c->part_keys_hdr[p], (size_t)pn * sizeof(int64_t));
+        if (wide) {
+            c->part_keys_hi[p] = (int64_t*)scratch_alloc(
+                &c->part_keys_hi_hdr[p], (size_t)pn * sizeof(int64_t));
+        }
+        c->part_states[p] = (int64_t*)scratch_alloc(
+            &c->part_states_hdr[p],
+            (size_t)pn * total_state * sizeof(int64_t));
+        if (!c->part_keys[p] || (wide && !c->part_keys_hi[p]) ||
+            !c->part_states[p])
+        {
+            mk_shard_free(&target);
+            atomic_store_explicit(&c->oom, 1, memory_order_relaxed);
+            return;
+        }
+        int64_t gi = 0;
+        int64_t* tgt_slots = target.slots;
+        int64_t* tgt_slots_hi = target.slots_hi;
+        int64_t* tgt_state = target.state;
+        for (uint64_t t = 0; t < target.cap; t++) {
+            if (!tgt_slots[t * 2]) continue;
+            c->part_keys[p][gi] = tgt_slots[t * 2 + 1];
+            if (wide) c->part_keys_hi[p][gi] = tgt_slots_hi[t];
+            const int64_t* src = &tgt_state[t * total_state];
+            int64_t* dst = &c->part_states[p][gi * total_state];
+            for (uint8_t k = 0; k < total_state; k++) dst[k] = src[k];
+            gi++;
+        }
+
+        mk_shard_free(&target);
+    }
+}
+
+/* Drives the v2 per-partition combine.  Returns 1 on success (fills
+ * out_* with a dense gs/gst layout identical to mk_combine_parallel),
+ * 0 on failure (caller falls back to the slow path). */
+static int mk_combine_v2_parallel(mk_par_ctx_t* c, uint32_t nw,
+                                  int64_t** out_gs, ray_t** out_gs_hdr,
+                                  int64_t** out_gs_hi, ray_t** out_gs_hi_hdr,
+                                  int64_t** out_gst, ray_t** out_gst_hdr,
+                                  int64_t* out_gcap, int64_t* out_global_n)
+{
+    uint8_t total_state = c->total_state;
+    uint8_t wide = c->wide;
+    ray_pool_t* pool = ray_pool_get();
+
+    /* Per-partition state arrays (MK_RADIX_P slots each). */
+    ray_t* pk_hdr = NULL;
+    ray_t* pkhi_hdr = NULL;
+    ray_t* ps_hdr = NULL;
+    ray_t* pkh_hdr = NULL;
+    ray_t* pkhh_hdr = NULL;
+    ray_t* psh_hdr = NULL;
+    ray_t* pn_hdr = NULL;
+    int64_t** part_keys = (int64_t**)scratch_calloc(
+        &pk_hdr, (size_t)MK_RADIX_P * sizeof(int64_t*));
+    int64_t** part_keys_hi = wide
+        ? (int64_t**)scratch_calloc(&pkhi_hdr,
+                                    (size_t)MK_RADIX_P * sizeof(int64_t*))
+        : NULL;
+    int64_t** part_states = (int64_t**)scratch_calloc(
+        &ps_hdr, (size_t)MK_RADIX_P * sizeof(int64_t*));
+    ray_t**   part_keys_hdr = (ray_t**)scratch_calloc(
+        &pkh_hdr, (size_t)MK_RADIX_P * sizeof(ray_t*));
+    ray_t**   part_keys_hi_hdr = wide
+        ? (ray_t**)scratch_calloc(&pkhh_hdr,
+                                  (size_t)MK_RADIX_P * sizeof(ray_t*))
+        : NULL;
+    ray_t**   part_states_hdr = (ray_t**)scratch_calloc(
+        &psh_hdr, (size_t)MK_RADIX_P * sizeof(ray_t*));
+    int64_t*  part_n = (int64_t*)scratch_calloc(
+        &pn_hdr, (size_t)MK_RADIX_P * sizeof(int64_t));
+
+    if (!part_keys || !part_states || !part_keys_hdr ||
+        !part_states_hdr || !part_n ||
+        (wide && (!part_keys_hi || !part_keys_hi_hdr)))
+    {
+        if (pk_hdr)   scratch_free(pk_hdr);
+        if (pkhi_hdr) scratch_free(pkhi_hdr);
+        if (ps_hdr)   scratch_free(ps_hdr);
+        if (pkh_hdr)  scratch_free(pkh_hdr);
+        if (pkhh_hdr) scratch_free(pkhh_hdr);
+        if (psh_hdr)  scratch_free(psh_hdr);
+        if (pn_hdr)   scratch_free(pn_hdr);
+        return 0;
+    }
+
+    mk_combine_v2_ctx_t pctx = {
+        .ctx              = c,
+        .nw               = nw,
+        .total_state      = total_state,
+        .wide             = wide,
+        .aggs             = c->aggs,
+        .n_aggs           = c->n_aggs,
+        .part_keys        = part_keys,
+        .part_keys_hi     = part_keys_hi,
+        .part_states      = part_states,
+        .part_keys_hdr    = part_keys_hdr,
+        .part_keys_hi_hdr = part_keys_hi_hdr,
+        .part_states_hdr  = part_states_hdr,
+        .part_n           = part_n,
+        .oom              = 0,
+    };
+
+    if (pool && ray_pool_total_workers(pool) >= 2) {
+        ray_pool_dispatch_n(pool, mk_combine_v2_part_fn, &pctx,
+                            (uint32_t)MK_RADIX_P);
+    } else {
+        mk_combine_v2_part_fn(&pctx, 0, 0, (int64_t)MK_RADIX_P);
+    }
+
+    if (atomic_load_explicit(&pctx.oom, memory_order_relaxed)) {
+        for (uint64_t p = 0; p < MK_RADIX_P; p++) {
+            if (part_keys_hdr[p])    scratch_free(part_keys_hdr[p]);
+            if (part_keys_hi_hdr && part_keys_hi_hdr[p])
+                scratch_free(part_keys_hi_hdr[p]);
+            if (part_states_hdr[p])  scratch_free(part_states_hdr[p]);
+        }
+        scratch_free(pk_hdr); if (pkhi_hdr) scratch_free(pkhi_hdr);
+        scratch_free(ps_hdr);
+        scratch_free(pkh_hdr); if (pkhh_hdr) scratch_free(pkhh_hdr);
+        scratch_free(psh_hdr);
+        scratch_free(pn_hdr);
+        return 0;
+    }
+
+    /* Concat per-partition outputs into dense gs/gs_hi/gst. */
+    int64_t global_n = 0;
+    for (uint64_t p = 0; p < MK_RADIX_P; p++) global_n += part_n[p];
+
+    ray_t* gs_hdr = NULL;
+    ray_t* gs_hi_hdr = NULL;
+    ray_t* gst_hdr = NULL;
+    int64_t* gs = (int64_t*)scratch_calloc(
+        &gs_hdr, (size_t)global_n * 2 * sizeof(int64_t));
+    int64_t* gs_hi = wide
+        ? (int64_t*)scratch_alloc(&gs_hi_hdr,
+                                  (size_t)global_n * sizeof(int64_t))
+        : NULL;
+    int64_t* gst = (int64_t*)scratch_alloc(
+        &gst_hdr, (size_t)global_n * total_state * sizeof(int64_t));
+    if (!gs || (wide && !gs_hi) || !gst) {
+        if (gs_hdr)    scratch_free(gs_hdr);
+        if (gs_hi_hdr) scratch_free(gs_hi_hdr);
+        if (gst_hdr)   scratch_free(gst_hdr);
+        for (uint64_t p = 0; p < MK_RADIX_P; p++) {
+            if (part_keys_hdr[p])    scratch_free(part_keys_hdr[p]);
+            if (part_keys_hi_hdr && part_keys_hi_hdr[p])
+                scratch_free(part_keys_hi_hdr[p]);
+            if (part_states_hdr[p])  scratch_free(part_states_hdr[p]);
+        }
+        scratch_free(pk_hdr); if (pkhi_hdr) scratch_free(pkhi_hdr);
+        scratch_free(ps_hdr);
+        scratch_free(pkh_hdr); if (pkhh_hdr) scratch_free(pkhh_hdr);
+        scratch_free(psh_hdr);
+        scratch_free(pn_hdr);
+        return 0;
+    }
+
+    int64_t gi = 0;
+    for (uint64_t p = 0; p < MK_RADIX_P; p++) {
+        int64_t pn = part_n[p];
+        if (pn == 0) continue;
+        const int64_t* pk = part_keys[p];
+        const int64_t* pkhi = part_keys_hi ? part_keys_hi[p] : NULL;
+        const int64_t* ps = part_states[p];
+        for (int64_t i = 0; i < pn; i++) {
+            gs[gi * 2]     = 1;
+            gs[gi * 2 + 1] = pk[i];
+            if (wide) gs_hi[gi] = pkhi[i];
+            int64_t* dst = &gst[gi * total_state];
+            const int64_t* src = &ps[i * total_state];
+            for (uint8_t k = 0; k < total_state; k++) dst[k] = src[k];
+            gi++;
+        }
+        if (part_keys_hdr[p])    scratch_free(part_keys_hdr[p]);
+        if (part_keys_hi_hdr && part_keys_hi_hdr[p])
+            scratch_free(part_keys_hi_hdr[p]);
+        if (part_states_hdr[p])  scratch_free(part_states_hdr[p]);
+    }
+
+    scratch_free(pk_hdr); if (pkhi_hdr) scratch_free(pkhi_hdr);
+    scratch_free(ps_hdr);
+    scratch_free(pkh_hdr); if (pkhh_hdr) scratch_free(pkhh_hdr);
+    scratch_free(psh_hdr);
+    scratch_free(pn_hdr);
+
+    *out_gs        = gs;
+    *out_gs_hdr    = gs_hdr;
+    *out_gs_hi     = gs_hi;
+    *out_gs_hi_hdr = gs_hi_hdr;
+    *out_gst       = gst;
+    *out_gst_hdr   = gst_hdr;
+    *out_gcap      = global_n;
+    *out_global_n  = global_n;
+    return 1;
+}
+
 static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
                                          const uint16_t* agg_op_ids)
 {
@@ -4220,7 +4534,13 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
     for (uint32_t w = 0; w < nw; w++) total_local += shards[w].n_filled;
 
     /* Try parallel combine first.  On success, jump straight to the
-     * materialize section with the already-built gs/gs_hi/gst arrays. */
+     * materialize section with the already-built gs/gs_hi/gst arrays.
+     *
+     * v2 path: when wpart_shards is set, shards are pre-partitioned by
+     * RADIX_PART(h).  mk_combine_v2_parallel skips the histogram/scatter
+     * passes entirely — each partition is dedupped independently and
+     * the per-(worker, partition) shards already have the right entries.
+     * v1 path: mk_combine_parallel histogram+scatter+dedup. */
     int64_t* gs    = NULL;
     int64_t* gs_hi = NULL;
     int64_t* gst   = NULL;
@@ -4229,11 +4549,30 @@ static ray_t* mk_combine_and_materialize(mk_par_ctx_t* c, uint32_t nw,
     ray_t*   gst_hdr   = NULL;
     int64_t  gcap     = 0;
     int64_t  global_n = 0;
-    int parallel_ok = mk_combine_parallel(c, nw,
+    int parallel_ok = 0;
+    /* v2 combine target HT scales with per-partition cardinality
+     * (total_local / MK_RADIX_P).  For very-high-card queries (q32:
+     * ~10M unique groups → ~313K per partition → ~1 M-slot HT × 32
+     * partitions ≈ 768 MB allocated) the per-partition HTs blow the
+     * working set out of cache; v1's scatter-then-dedup is bounded
+     * by smaller per-combine-partition slices and wins.  ~16 K
+     * entries per partition keeps each target HT in L2 (~1.5 MB
+     * with 4-slot state). */
+    int v2_combine_ok = c->wpart_shards != NULL &&
+        ((uint64_t)total_local / MK_RADIX_P) <= (1ULL << 14);
+    if (v2_combine_ok) {
+        parallel_ok = mk_combine_v2_parallel(c, nw / MK_RADIX_P,
+                                             &gs, &gs_hdr,
+                                             &gs_hi, &gs_hi_hdr,
+                                             &gst, &gst_hdr,
+                                             &gcap, &global_n);
+    } else {
+        parallel_ok = mk_combine_parallel(c, nw,
                                           &gs, &gs_hdr,
                                           &gs_hi, &gs_hi_hdr,
                                           &gst, &gst_hdr,
                                           &gcap, &global_n);
+    }
     if (parallel_ok) goto materialize;
 
     {
