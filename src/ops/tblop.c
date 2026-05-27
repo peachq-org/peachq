@@ -490,7 +490,7 @@ ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
             char buf[64]; int len = snprintf(buf, sizeof(buf), "%ld", (long)pval->i64);
             col_sym = ray_sym_intern(buf, (size_t)len);
         } else if (pval->type == -RAY_F64) {
-            double fv = pval->f64; if (fv == 0.0 && signbit(fv)) fv = 0.0;
+            double fv = clear_neg_zero(pval->f64);
             char buf[64]; int len = snprintf(buf, sizeof(buf), "%g", fv);
             col_sym = ray_sym_intern(buf, (size_t)len);
         } else if (pval->type == -RAY_BOOL) {
