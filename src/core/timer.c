@@ -23,15 +23,24 @@
 
 #include "core/timer.h"
 #include "mem/sys.h"
-#include <stdint.h>
-#include <stdio.h>
 #include <string.h>
+#if defined(RAY_OS_WINDOWS)
+#include <windows.h>
+#else
 #include <time.h>
+#endif
 
 int64_t ray_time_now_ms(void) {
+#if defined(RAY_OS_WINDOWS)
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    return (int64_t)(cnt.QuadPart / freq.QuadPart * 1000);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
+#endif
 }
 
 ray_timers_t* ray_timers_create(int64_t initial_cap) {
