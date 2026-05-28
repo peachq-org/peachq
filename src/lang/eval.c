@@ -2866,8 +2866,10 @@ static void ray_register_builtins(void) {
     /* row — single row from table */
     register_binary("row",       RAY_FN_NONE, ray_row_fn);
 
-    /* timer — high-res monotonic nanosecond timestamp */
-    register_unary("timer",      RAY_FN_NONE, ray_timer_fn);
+    /* .time.* — monotonic clock and scheduled timers */
+    register_vary (".time.now",       RAY_FN_NONE,       ray_time_now_fn);
+    register_vary (".time.timer.set", RAY_FN_RESTRICTED, ray_time_timer_set_fn);
+    register_unary(".time.timer.del", RAY_FN_RESTRICTED, ray_time_timer_del_fn);
 
     /* env — list all global environment bindings */
     register_unary("env",        RAY_FN_NONE, ray_env_fn);
