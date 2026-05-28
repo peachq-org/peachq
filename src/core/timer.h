@@ -70,4 +70,10 @@ void ray_timers_fire_expired(ray_timers_t* t);
 /* Current monotonic time in milliseconds. */
 int64_t ray_time_now_ms(void);
 
+/* TEST-ONLY: pump the timer heap for up to `budget_ms` milliseconds.
+ * Sleeps in small slices and calls ray_timers_fire_expired between
+ * slices.  Not intended for production code — ray_poll_run is the
+ * real driver. */
+void ray_timers_pump_for(ray_timers_t* t, int64_t budget_ms);
+
 #endif /* RAY_TIMER_H */
