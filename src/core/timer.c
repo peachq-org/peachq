@@ -37,7 +37,11 @@ int64_t ray_time_now_ms(void) {
     LARGE_INTEGER freq, cnt;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&cnt);
-    return (int64_t)(cnt.QuadPart / freq.QuadPart * 1000);
+    /* Split the multiply to avoid losing sub-second precision: integer
+     * cnt/freq alone rounds to whole seconds before scaling. */
+    int64_t sec = cnt.QuadPart / freq.QuadPart;
+    int64_t rem = cnt.QuadPart % freq.QuadPart;
+    return sec * 1000 + (rem * 1000) / freq.QuadPart;
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
