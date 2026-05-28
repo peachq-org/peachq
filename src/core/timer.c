@@ -86,7 +86,7 @@ static void heap_up(ray_timer_t** heap, int64_t i) {
     }
 }
 
-/* Used by ray_timers_del (Task 3) and ray_timers_fire_expired (Task 4). */
+/* Used by the delete and fire-expired paths. */
 static __attribute__((unused)) void heap_down(ray_timer_t** heap, int64_t n, int64_t i) {
     for (;;) {
         int64_t l = 2 * i + 1;
@@ -113,7 +113,7 @@ static bool heap_grow(ray_timers_t* t) {
 }
 
 int64_t ray_timers_add(ray_timers_t* t, int64_t tic_ms, int64_t num, ray_t* fn) {
-    if (!t) return -1;
+    if (!t || !fn) return -1;
     if (t->n >= t->cap && !heap_grow(t)) return -1;
 
     ray_timer_t* timer = (ray_timer_t*)ray_sys_alloc(sizeof(ray_timer_t));
