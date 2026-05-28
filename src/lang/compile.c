@@ -49,6 +49,7 @@ typedef struct {
 
     ray_t    *dbg_obj;   /* I64 vector: pairs of [offset, span.id] */
     int32_t   dbg_len;
+    int32_t  trap_depth;  /* open OP_TRAP frames in current lambda */
 } compiler_t;
 
 static void compile_expr(compiler_t *c, ray_t *ast);
@@ -310,7 +311,9 @@ static void compile_list(compiler_t *c, ray_t *ast) {
             if (err_slot < 0) { c->error = true; return; }
 
             int32_t trap_pos = emit_jump(c, OP_TRAP);
+            c->trap_depth++;
             compile_expr(c, elems[1]);       /* body */
+            c->trap_depth--;
             emit(c, OP_TRAP_END);
             int32_t jmp_pos = emit_jump(c, OP_JMP);
             patch_jump(c, trap_pos);         /* handler starts here */
