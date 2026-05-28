@@ -2846,7 +2846,7 @@ static void ray_register_builtins(void) {
     register_vary("quote",       RAY_FN_SPECIAL_FORM, ray_quote_fn);
 
     /* return — early return (identity) */
-    register_unary("return",     RAY_FN_NONE, ray_return_fn);
+    register_vary("return",      RAY_FN_NONE, ray_return_fn);
 
     /* args — command line arguments */
     register_unary("args",       RAY_FN_NONE, ray_args_fn);
