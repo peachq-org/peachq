@@ -2845,7 +2845,7 @@ static void ray_register_builtins(void) {
     /* quote — special form (unevaluated argument) */
     register_vary("quote",       RAY_FN_SPECIAL_FORM, ray_quote_fn);
 
-    /* return — early return (identity) */
+    /* return — early exit from compiled lambda (0 args → null, 1 arg → value) */
     register_vary("return",      RAY_FN_NONE, ray_return_fn);
 
     /* args — command line arguments */
