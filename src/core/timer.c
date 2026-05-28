@@ -64,10 +64,71 @@ void ray_timers_destroy(ray_timers_t* t) {
     ray_sys_free(t);
 }
 
-/* Stubs — implemented in later tasks. */
+/* Min-heap ordering: lower exp_ms wins; ties broken by lower id. */
+static int heap_less(const ray_timer_t* a, const ray_timer_t* b) {
+    if (a->exp_ms != b->exp_ms) return a->exp_ms < b->exp_ms;
+    return a->id < b->id;
+}
+
+static void heap_swap(ray_timer_t** heap, int64_t i, int64_t j) {
+    ray_timer_t* tmp = heap[i];
+    heap[i] = heap[j];
+    heap[j] = tmp;
+}
+
+static void heap_up(ray_timer_t** heap, int64_t i) {
+    while (i > 0) {
+        int64_t parent = (i - 1) / 2;
+        if (heap_less(heap[i], heap[parent])) {
+            heap_swap(heap, i, parent);
+            i = parent;
+        } else break;
+    }
+}
+
+/* Used by ray_timers_del (Task 3) and ray_timers_fire_expired (Task 4). */
+static __attribute__((unused)) void heap_down(ray_timer_t** heap, int64_t n, int64_t i) {
+    for (;;) {
+        int64_t l = 2 * i + 1;
+        int64_t r = 2 * i + 2;
+        int64_t best = i;
+        if (l < n && heap_less(heap[l], heap[best])) best = l;
+        if (r < n && heap_less(heap[r], heap[best])) best = r;
+        if (best == i) break;
+        heap_swap(heap, i, best);
+        i = best;
+    }
+}
+
+static bool heap_grow(ray_timers_t* t) {
+    int64_t new_cap = t->cap * 2;
+    ray_timer_t** new_heap = (ray_timer_t**)ray_sys_alloc(
+        (size_t)new_cap * sizeof(ray_timer_t*));
+    if (!new_heap) return false;
+    memcpy(new_heap, t->heap, (size_t)t->n * sizeof(ray_timer_t*));
+    ray_sys_free(t->heap);
+    t->heap = new_heap;
+    t->cap = new_cap;
+    return true;
+}
+
 int64_t ray_timers_add(ray_timers_t* t, int64_t tic_ms, int64_t num, ray_t* fn) {
-    (void)t; (void)tic_ms; (void)num; (void)fn;
-    return -1;
+    if (!t) return -1;
+    if (t->n >= t->cap && !heap_grow(t)) return -1;
+
+    ray_timer_t* timer = (ray_timer_t*)ray_sys_alloc(sizeof(ray_timer_t));
+    if (!timer) return -1;
+    timer->id     = t->next_id++;
+    timer->tic_ms = tic_ms;
+    timer->exp_ms = ray_time_now_ms() + tic_ms;
+    timer->num    = num;
+    timer->fn     = fn;
+    ray_retain(fn);
+
+    t->heap[t->n] = timer;
+    heap_up(t->heap, t->n);
+    t->n++;
+    return timer->id;
 }
 
 bool ray_timers_del(ray_timers_t* t, int64_t id) {
