@@ -24,10 +24,12 @@
 #if defined(__linux__)
 
 #include "core/poll.h"
+#include "core/timer.h"
 #include "mem/sys.h"
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 
 #define RAY_POLL_MAX_EVENTS 64
@@ -74,6 +76,10 @@ void ray_poll_destroy(ray_poll_t* poll)
 
     if (poll->sels) ray_sys_free(poll->sels);
     close((int)poll->fd);
+    if (poll->timers) {
+        ray_timers_destroy((ray_timers_t*)poll->timers);
+        poll->timers = NULL;
+    }
     ray_sys_free(poll);
 }
 
@@ -157,7 +163,20 @@ int64_t ray_poll_run(ray_poll_t* poll)
     struct epoll_event events[RAY_POLL_MAX_EVENTS];
 
     while (poll->code < 0) {
-        int n = epoll_wait((int)poll->fd, events, RAY_POLL_MAX_EVENTS, -1);
+        int wait_ms = -1;
+        if (poll->timers) {
+            int64_t deadline = ray_timers_next_deadline_ms(
+                (ray_timers_t*)poll->timers);
+            if (deadline != INT64_MAX) {
+                int64_t now = ray_time_now_ms();
+                int64_t delta = deadline - now;
+                if (delta < 0) delta = 0;
+                if (delta > INT_MAX) delta = INT_MAX;
+                wait_ms = (int)delta;
+            }
+        }
+
+        int n = epoll_wait((int)poll->fd, events, RAY_POLL_MAX_EVENTS, wait_ms);
         if (n < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -242,6 +261,9 @@ int64_t ray_poll_run(ray_poll_t* poll)
 
         next_event:;
         }
+
+        if (poll->timers)
+            ray_timers_fire_expired((ray_timers_t*)poll->timers);
     }
 
     return poll->code;
