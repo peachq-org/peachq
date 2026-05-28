@@ -586,10 +586,15 @@ ray_t* ray_quote_fn(ray_t** args, int64_t n) {
     return args[0];
 }
 
-/* (return x) -- early return from function (identity in Rayfall) */
-ray_t* ray_return_fn(ray_t* x) {
-    ray_retain(x);
-    return x;
+/* (return) | (return x) — early exit from enclosing compiled lambda.
+ * Outside a compiled lambda (e.g. value position: (map return xs), or
+ * REPL top-level) this collapses to: identity for one arg, null for
+ * zero, domain error otherwise. The early-exit semantics are emitted
+ * by the bytecode compiler — see compile.c. */
+ray_t* ray_return_fn(ray_t** args, int64_t n) {
+    if (n == 0) return RAY_NULL_OBJ;
+    if (n == 1) { ray_retain(args[0]); return args[0]; }
+    return ray_error("domain", "return expects 0 or 1 argument");
 }
 
 /* (args) -- return command-line arguments as a list of strings */
