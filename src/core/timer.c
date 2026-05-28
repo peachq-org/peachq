@@ -22,7 +22,9 @@
  */
 
 #include "core/timer.h"
+#include "lang/internal.h"
 #include "mem/sys.h"
+#include <stdio.h>
 #include <string.h>
 #if defined(RAY_OS_WINDOWS)
 #include <windows.h>
@@ -155,5 +157,61 @@ int64_t ray_timers_next_deadline_ms(ray_timers_t* t) {
 }
 
 void ray_timers_fire_expired(ray_timers_t* t) {
-    (void)t;
+    if (!t || t->n == 0) return;
+
+    int64_t now = ray_time_now_ms();
+
+    while (t->n > 0 && t->heap[0]->exp_ms <= now) {
+        /* Pop the head: swap with tail, sift down. */
+        ray_timer_t* timer = t->heap[0];
+        t->n--;
+        if (t->n > 0) {
+            t->heap[0] = t->heap[t->n];
+            heap_down(t->heap, t->n, 0);
+        }
+
+        /* Fire the callback.  call_fn1 borrows fn and arg; caller
+         * releases both.  The result (if any) is a new ref the caller
+         * must release. */
+        ray_t* arg    = make_i64(now);
+        ray_t* result = call_fn1(timer->fn, arg);
+        ray_release(arg);
+        if (result) {
+            if (RAY_IS_ERR(result)) {
+                ray_t* msg = ray_fmt(result, 0);
+                if (msg && ray_str_ptr(msg)) {
+                    fprintf(stderr, "timer %lld: %.*s\n",
+                            (long long)timer->id,
+                            (int)ray_str_len(msg),
+                            ray_str_ptr(msg));
+                }
+                if (msg) ray_release(msg);
+                ray_error_free(result);
+            } else {
+                ray_release(result);
+            }
+        }
+
+        /* Re-schedule or free. */
+        if (timer->num == 0) {
+            /* Forever: re-push. */
+            timer->exp_ms += timer->tic_ms;
+            t->heap[t->n] = timer;
+            heap_up(t->heap, t->n);
+            t->n++;
+        } else if (timer->num > 1) {
+            timer->num--;
+            timer->exp_ms += timer->tic_ms;
+            t->heap[t->n] = timer;
+            heap_up(t->heap, t->n);
+            t->n++;
+        } else {
+            /* num == 1: last fire just happened. */
+            ray_release(timer->fn);
+            ray_sys_free(timer);
+        }
+
+        /* Refresh `now` in case callbacks took meaningful time. */
+        now = ray_time_now_ms();
+    }
 }
