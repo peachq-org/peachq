@@ -91,6 +91,7 @@ struct ray_poll {
     uint32_t         sel_cap;
     char             auth_secret[256]; /* password from -u/-U, empty = no auth */
     bool             restricted;       /* true if -U (read-only IPC mode) */
+    void*            timers;           /* opaque ray_timers_t*; lazily allocated */
 };
 
 /* ===== API ===== */
