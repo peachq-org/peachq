@@ -24,6 +24,7 @@
 #if defined(__APPLE__)
 
 #include "core/poll.h"
+#include "core/timer.h"
 #include "mem/sys.h"
 #include <sys/event.h>
 #include <unistd.h>
@@ -75,6 +76,10 @@ void ray_poll_destroy(ray_poll_t* poll)
 
     if (poll->sels) ray_sys_free(poll->sels);
     close((int)poll->fd);
+    if (poll->timers) {
+        ray_timers_destroy((ray_timers_t*)poll->timers);
+        poll->timers = NULL;
+    }
     ray_sys_free(poll);
 }
 
@@ -161,8 +166,23 @@ int64_t ray_poll_run(ray_poll_t* poll)
     struct kevent events[RAY_POLL_MAX_EVENTS];
 
     while (poll->code < 0) {
+        struct timespec  ts;
+        struct timespec* timeout = NULL;
+        if (poll->timers) {
+            int64_t deadline = ray_timers_next_deadline_ms(
+                (ray_timers_t*)poll->timers);
+            if (deadline != INT64_MAX) {
+                int64_t now = ray_time_now_ms();
+                int64_t delta = deadline - now;
+                if (delta < 0) delta = 0;
+                ts.tv_sec  = (time_t)(delta / 1000);
+                ts.tv_nsec = (long)((delta % 1000) * 1000000L);
+                timeout = &ts;
+            }
+        }
+
         int n = kevent((int)poll->fd, NULL, 0, events,
-                       RAY_POLL_MAX_EVENTS, NULL);
+                       RAY_POLL_MAX_EVENTS, timeout);
         if (n < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -240,6 +260,9 @@ int64_t ray_poll_run(ray_poll_t* poll)
 
         next_event:;
         }
+
+        if (poll->timers)
+            ray_timers_fire_expired((ray_timers_t*)poll->timers);
     }
 
     return poll->code;
