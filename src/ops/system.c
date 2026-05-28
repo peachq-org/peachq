@@ -23,6 +23,7 @@
 
 #include "lang/internal.h"
 #include "lang/env.h"
+#include "lang/eval.h"  /* LAMBDA_PARAMS */
 #include "lang/parse.h"
 #include "ops/ops.h"    /* ray_is_lazy, ray_lazy_materialize */
 #include "mem/heap.h"
@@ -31,6 +32,12 @@
 #include "store/splay.h"
 #include "store/part.h"
 #include "core/ipc.h"
+#include "core/poll.h"
+#include "core/timer.h"
+
+/* Forward decl: avoids pulling core/runtime.h (which conflicts with
+ * lang/eval.h's ray_vm_t typedef in this TU). */
+void* ray_runtime_get_poll(void);
 #include <time.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -646,12 +653,52 @@ ray_t* ray_remove_fn(ray_t* dict, ray_t* key) {
     return ray_dict_remove(dict, key);
 }
 
-/* (timer) -- return high-res timestamp in nanoseconds for benchmarking */
-ray_t* ray_timer_fn(ray_t* x) {
-    (void)x;
-    clock_t t = clock();
-    int64_t nanos = (int64_t)((double)t / (double)CLOCKS_PER_SEC * 1e9);
-    return make_i64(nanos);
+/* (.time.now) -- current monotonic time in milliseconds */
+ray_t* ray_time_now_fn(ray_t** args, int64_t n) {
+    (void)args;
+    if (n != 0) return ray_error("domain", ".time.now takes no arguments");
+    return make_i64(ray_time_now_ms());
+}
+
+/* (.time.timer.set ms num fn) -- schedule fn to fire every ms; returns id */
+ray_t* ray_time_timer_set_fn(ray_t** args, int64_t n) {
+    if (n != 3)
+        return ray_error("domain", ".time.timer.set expects 3 arguments");
+    if (args[0]->type != -RAY_I64) return ray_error("type", "ms must be i64");
+    if (args[1]->type != -RAY_I64) return ray_error("type", "num must be i64");
+    if (args[2]->type != RAY_LAMBDA)
+        return ray_error("type", "fn must be a lambda");
+
+    int64_t ms  = args[0]->i64;
+    int64_t num = args[1]->i64;
+    if (ms  < 0) return ray_error("domain", "ms must be non-negative");
+    if (num < 0) return ray_error("domain", "num must be non-negative");
+
+    /* Check lambda arity: declared params list must have exactly 1 element. */
+    ray_t* params = LAMBDA_PARAMS(args[2]);
+    if (!params || ray_len(params) != 1)
+        return ray_error("domain", "fn must accept exactly 1 argument");
+
+    ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
+    if (!poll) return ray_error("domain", "no poll loop active");
+
+    if (!poll->timers) {
+        poll->timers = ray_timers_create(16);
+        if (!poll->timers) return ray_error("oom", NULL);
+    }
+
+    int64_t id = ray_timers_add((ray_timers_t*)poll->timers, ms, num, args[2]);
+    if (id < 0) return ray_error("oom", NULL);
+    return make_i64(id);
+}
+
+/* (.time.timer.del id) -- cancel a timer; returns null */
+ray_t* ray_time_timer_del_fn(ray_t* id) {
+    if (id->type != -RAY_I64) return ray_error("type", "id must be i64");
+    ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
+    if (!poll || !poll->timers) return RAY_NULL_OBJ;
+    ray_timers_del((ray_timers_t*)poll->timers, id->i64);
+    return RAY_NULL_OBJ;
 }
 
 /* (env) -- return dict of all global environment bindings */
