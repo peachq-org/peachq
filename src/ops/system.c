@@ -694,7 +694,7 @@ ray_t* ray_time_timer_set_fn(ray_t** args, int64_t n) {
 
 /* (.time.timer.del id) -- cancel a timer; returns null */
 ray_t* ray_time_timer_del_fn(ray_t* id) {
-    if (id->type != -RAY_I64) return ray_error("type", "id must be i64");
+    if (!id || id->type != -RAY_I64) return ray_error("type", "id must be i64");
     ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
     if (!poll || !poll->timers) return RAY_NULL_OBJ;
     ray_timers_del((ray_timers_t*)poll->timers, id->i64);
