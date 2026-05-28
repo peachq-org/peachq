@@ -21,6 +21,13 @@
  *   SOFTWARE.
  */
 
+/* clock_gettime, CLOCK_MONOTONIC, and nanosleep require POSIX.1-2001+
+ * exposure on glibc.  macOS exposes them by default; Windows uses the
+ * QueryPerformanceCounter/Sleep branch below and ignores this. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "core/timer.h"
 #include "lang/internal.h"
 #include "mem/sys.h"
