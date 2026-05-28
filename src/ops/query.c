@@ -2696,6 +2696,209 @@ static ray_t* query_materialize_parted_col(ray_t* col) {
     return flat;
 }
 
+/* Planner rewrite for `(select {K: K c: (count (distinct X)) from: T
+ * [where: W] by: K [desc: c take: N]})`.
+ *
+ * Original execution: outer group-by K builds idx_buf → per-group dedup
+ * over X (via cdpg_buf_par_fn or per-group HLL).  That pays the outer
+ * group-by + idx_buf scatter even when the per-group dedup is the
+ * dominant cost.
+ *
+ * Rewrite: group by (K, X) once — this deduplicates (K, X) tuples in a
+ * single pass that lands on the v2 multi-key kernel — then count rows
+ * per K on the (typically much smaller) dedup table.  For q08 on the
+ * 10M-row hits table, the (K, X) pass produces ~700 K tuples; the final
+ * group-by walks just that.
+ *
+ * Returns NULL on shape miss (caller falls through to the existing
+ * count-distinct path); returns a result table on success.  Gates:
+ *  - single scalar K column (not SYM, no nulls)
+ *  - cd_inner is a column ref X (not SYM, no nulls) — composite key
+ *    fits in 16 bytes (v2's wide-key cap)
+ *  - K + X ≤ 16 bytes packed
+ *  - WHERE optional; if present, must be supported by the fused predicate
+ *  - desc/take optional, must be on the cd output column when present */
+static ray_t* try_count_distinct_v2_rewrite(
+    ray_t* tbl,
+    ray_t* by_expr,
+    ray_t* where_expr,
+    ray_t** dict_elems, int64_t dict_n,
+    int64_t from_id, int64_t where_id, int64_t by_id,
+    int64_t take_id, int64_t asc_id, int64_t desc_id,
+    int64_t nearest_id)
+{
+    if (!tbl || tbl->type != RAY_TABLE) return NULL;
+    if (!by_expr || by_expr->type != -RAY_SYM ||
+        !(by_expr->attrs & RAY_ATTR_NAME))
+        return NULL;
+    int64_t K_sym = by_expr->i64;
+
+    /* Walk the dict — accept exactly one `(count (distinct col_ref))`
+     * agg and an optional identity key projection.  Any other agg /
+     * projection / take-on-something-else aborts the rewrite. */
+    int64_t cd_X_sym = -1;
+    int64_t cd_c_sym = -1;
+    int n_cd = 0, n_other = 0;
+    int saw_key_proj = 0;
+    int64_t desc_col_sym = -1;  /* if desc:, its column-sym target */
+    int64_t asc_col_sym  = -1;
+    int     has_take = 0;
+    int64_t take_n   = -1;
+    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+        int64_t kid = dict_elems[i]->i64;
+        ray_t*  val = dict_elems[i + 1];
+        if (kid == from_id || kid == where_id || kid == by_id ||
+            kid == nearest_id) continue;
+        if (kid == take_id) {
+            int64_t v;
+            if (atom_i64_const(val, &v) && v > 0) {
+                has_take = 1;
+                take_n   = v;
+            } else {
+                return NULL;  /* non-trivial take */
+            }
+            continue;
+        }
+        if (kid == asc_id) {
+            if (val && val->type == -RAY_SYM && (val->attrs & RAY_ATTR_NAME))
+                asc_col_sym = val->i64;
+            else return NULL;
+            continue;
+        }
+        if (kid == desc_id) {
+            if (val && val->type == -RAY_SYM && (val->attrs & RAY_ATTR_NAME))
+                desc_col_sym = val->i64;
+            else return NULL;
+            continue;
+        }
+        ray_t* cd_inner = match_count_distinct(val);
+        if (cd_inner && cd_inner->type == -RAY_SYM &&
+            (cd_inner->attrs & RAY_ATTR_NAME))
+        {
+            cd_X_sym = cd_inner->i64;
+            cd_c_sym = kid;
+            n_cd++;
+        } else if (is_single_group_key_projection(by_expr, val)) {
+            saw_key_proj++;
+        } else {
+            n_other++;
+        }
+    }
+    if (n_cd != 1 || n_other > 0) return NULL;
+    if (cd_X_sym < 0 || cd_c_sym < 0) return NULL;
+
+    /* desc/asc must target the count output column. */
+    if (desc_col_sym >= 0 && desc_col_sym != cd_c_sym) return NULL;
+    if (asc_col_sym  >= 0 && asc_col_sym  != cd_c_sym) return NULL;
+    if (desc_col_sym >= 0 && asc_col_sym  >= 0) return NULL;
+
+    /* Type checks on K and X.  v2 multi-key composite path requires
+     * non-SYM, non-nullable, packed ≤ 16 bytes (wide-key cap). */
+    ray_t* K_col = ray_table_get_col(tbl, K_sym);
+    ray_t* X_col = ray_table_get_col(tbl, cd_X_sym);
+    if (!K_col || !X_col) return NULL;
+    int8_t kct = K_col->type, xct = X_col->type;
+    if (RAY_IS_PARTED(kct) || kct == RAY_MAPCOMMON) return NULL;
+    if (RAY_IS_PARTED(xct) || xct == RAY_MAPCOMMON) return NULL;
+    if (kct == RAY_SYM || xct == RAY_SYM) return NULL;
+    if (K_col->attrs & RAY_ATTR_HAS_NULLS) return NULL;
+    if (X_col->attrs & RAY_ATTR_HAS_NULLS) return NULL;
+    int K_esz = ray_sym_elem_size(kct, K_col->attrs);
+    int X_esz = ray_sym_elem_size(xct, X_col->attrs);
+    if (K_esz + X_esz > 16) return NULL;
+    /* Restrict to integer/temporal — matches mk_compile's accepted shapes. */
+    int kct_ok = (kct == RAY_BOOL || kct == RAY_U8 || kct == RAY_I16 ||
+                  kct == RAY_I32  || kct == RAY_I64 ||
+                  kct == RAY_DATE || kct == RAY_TIME || kct == RAY_TIMESTAMP);
+    int xct_ok = (xct == RAY_BOOL || xct == RAY_U8 || xct == RAY_I16 ||
+                  xct == RAY_I32  || xct == RAY_I64 ||
+                  xct == RAY_DATE || xct == RAY_TIME || xct == RAY_TIMESTAMP);
+    if (!kct_ok || !xct_ok) return NULL;
+
+    if (where_expr && !ray_fused_group_supported(where_expr, tbl))
+        return NULL;
+
+    /* === Inner pass: group by (K, X) on the source table === */
+    ray_graph_t* g_in = ray_graph_new(tbl);
+    if (!g_in) return NULL;
+    ray_t* K_name = ray_sym_str(K_sym);
+    ray_t* X_name = ray_sym_str(cd_X_sym);
+    if (!K_name || !X_name) { ray_graph_free(g_in); return NULL; }
+    ray_op_t* K_scan = ray_scan(g_in, ray_str_ptr(K_name));
+    ray_op_t* X_scan = ray_scan(g_in, ray_str_ptr(X_name));
+    if (!K_scan || !X_scan) { ray_graph_free(g_in); return NULL; }
+    ray_op_t* keys_in[2] = { K_scan, X_scan };
+    uint16_t  agg_ops_in[1] = { OP_COUNT };
+    ray_op_t* agg_ins_in[1] = { K_scan };  /* count agg input is irrelevant */
+    ray_op_t* inner;
+    if (where_expr) {
+        ray_op_t* pred = compile_expr_dag(g_in, where_expr);
+        if (!pred) { ray_graph_free(g_in); return NULL; }
+        inner = ray_filtered_group(g_in, pred, keys_in, 2,
+                                   agg_ops_in, agg_ins_in, 1);
+    } else {
+        inner = ray_group(g_in, keys_in, 2, agg_ops_in, agg_ins_in, 1);
+    }
+    if (!inner) { ray_graph_free(g_in); return NULL; }
+    ray_t* dedup = ray_execute(g_in, inner);
+    ray_graph_free(g_in);
+    if (!dedup) return NULL;
+    if (RAY_IS_ERR(dedup)) return dedup;
+    if (dedup->type != RAY_TABLE) { ray_release(dedup); return NULL; }
+
+    /* === Outer pass: group dedup table by K with COUNT, ordered === */
+    ray_graph_t* g_out = ray_graph_new(dedup);
+    if (!g_out) { ray_release(dedup); return ray_error("oom", NULL); }
+    ray_op_t* K_scan2 = ray_scan(g_out, ray_str_ptr(K_name));
+    if (!K_scan2) { ray_graph_free(g_out); ray_release(dedup); return NULL; }
+    ray_op_t* keys_out[1] = { K_scan2 };
+    uint16_t  agg_ops_out[1] = { OP_COUNT };
+    ray_op_t* agg_ins_out[1] = { K_scan2 };
+
+    /* Apply desc:c take:N via the group emit_filter so the second pass
+     * can heap-trim to top-N without materialising every (K, count) row. */
+    ray_group_emit_filter_t prev_emit = ray_group_emit_filter_get();
+    ray_group_emit_filter_t emit_f = {0};
+    int emit_set = 0;
+    if (desc_col_sym == cd_c_sym && has_take && take_n > 0) {
+        emit_f.enabled = true;
+        emit_f.agg_index = 0;
+        emit_f.top_count_take = take_n;
+        emit_f.min_count_exclusive = 0;
+        ray_group_emit_filter_set(emit_f);
+        emit_set = 1;
+    }
+    ray_op_t* outer = ray_group(g_out, keys_out, 1,
+                                agg_ops_out, agg_ins_out, 1);
+    if (!outer) {
+        if (emit_set) ray_group_emit_filter_set(prev_emit);
+        ray_graph_free(g_out);
+        ray_release(dedup);
+        return ray_error("oom", NULL);
+    }
+    ray_t* result = ray_execute(g_out, outer);
+    if (emit_set) ray_group_emit_filter_set(prev_emit);
+    ray_graph_free(g_out);
+    ray_release(dedup);
+    if (!result || RAY_IS_ERR(result)) return result;
+    if (result->type != RAY_TABLE) return result;
+
+    /* Rename the default "count" output column to the user's c_sym
+     * (e.g. q08's `u:`).  ray_group writes its agg under the literal
+     * "count" sym; rewrite the slot's name in place. */
+    int64_t count_sym = ray_sym_intern("count", 5);
+    if (count_sym != cd_c_sym) {
+        int64_t nc = ray_table_ncols(result);
+        for (int64_t ci = 0; ci < nc; ci++) {
+            if (ray_table_col_name(result, ci) == count_sym) {
+                ray_table_set_col_name(result, ci, cd_c_sym);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
 /* Per-group count(distinct) using the existing OP_COUNT_DISTINCT kernel.
  * Mirrors aggr_unary_per_group_buf but slices the source column once per
  * group and calls exec_count_distinct directly — bypasses the full
@@ -3823,6 +4026,22 @@ ray_t* ray_select(ray_t** args, int64_t n) {
             ray_release(tbl);
             return ray_error("domain",
                 "select: `nearest` cannot be combined with `by`");
+        }
+    }
+
+    /* Count-distinct planner rewrite: `(select {K: K c: (count (distinct X))
+     * from: T [where: W] by: K [desc: c take: N]})` decomposes cleanly to
+     * a two-stage group-by — first dedup (K, X) pairs, then count rows
+     * per K.  The dedup pass lands on the v2 multi-key kernel; the
+     * second pass walks a much smaller table.  Skips the outer-group +
+     * idx_buf scatter that the per-group dedup path otherwise pays. */
+    if (!nearest_expr) {
+        ray_t* rw = try_count_distinct_v2_rewrite(
+            tbl, by_expr, where_expr, dict_elems, dict_n,
+            from_id, where_id, by_id, take_id, asc_id, desc_id, nearest_id);
+        if (rw) {
+            ray_release(tbl);
+            return rw;
         }
     }
 
