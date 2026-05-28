@@ -87,7 +87,7 @@ static void heap_up(ray_timer_t** heap, int64_t i) {
 }
 
 /* Used by the delete and fire-expired paths. */
-static __attribute__((unused)) void heap_down(ray_timer_t** heap, int64_t n, int64_t i) {
+static void heap_down(ray_timer_t** heap, int64_t n, int64_t i) {
     for (;;) {
         int64_t l = 2 * i + 1;
         int64_t r = 2 * i + 2;
@@ -132,7 +132,20 @@ int64_t ray_timers_add(ray_timers_t* t, int64_t tic_ms, int64_t num, ray_t* fn) 
 }
 
 bool ray_timers_del(ray_timers_t* t, int64_t id) {
-    (void)t; (void)id;
+    if (!t) return false;
+    for (int64_t i = 0; i < t->n; i++) {
+        if (t->heap[i]->id != id) continue;
+        ray_release(t->heap[i]->fn);
+        ray_sys_free(t->heap[i]);
+        t->n--;
+        if (i < t->n) {
+            t->heap[i] = t->heap[t->n];
+            /* Rebalance: may need to sift up or down. */
+            heap_down(t->heap, t->n, i);
+            heap_up(t->heap, i);
+        }
+        return true;
+    }
     return false;
 }
 
