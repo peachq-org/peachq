@@ -215,3 +215,18 @@ void ray_timers_fire_expired(ray_timers_t* t) {
         now = ray_time_now_ms();
     }
 }
+
+void ray_timers_pump_for(ray_timers_t* t, int64_t budget_ms) {
+    if (!t || budget_ms <= 0) return;
+    int64_t end = ray_time_now_ms() + budget_ms;
+    while (ray_time_now_ms() < end) {
+        ray_timers_fire_expired(t);
+#if defined(RAY_OS_WINDOWS)
+        Sleep(1);
+#else
+        struct timespec slice = { 0, 1000000L };  /* 1 ms */
+        nanosleep(&slice, NULL);
+#endif
+    }
+    ray_timers_fire_expired(t);
+}
