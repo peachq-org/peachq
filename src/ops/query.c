@@ -8824,9 +8824,9 @@ static void xbar_par_fn(void* vctx, uint32_t worker_id,
         } else {
             for (int64_t i = start; i < end; i++) {
                 int32_t a = in[i];
-                int32_t q = a / b32;
+                int64_t q = (int64_t)a / b32;
                 if ((a ^ b32) < 0 && q * b32 != a) q--;
-                o[i] = q * b32;
+                o[i] = (int32_t)(q * b32);
             }
         }
     } else { /* RAY_I16 */

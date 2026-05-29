@@ -810,7 +810,10 @@ ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
     v->attrs = sym_w;
     memset(v->nullmap, 0, 16);
 
-    memcpy(ray_data(v), data, data_size);
+    if (data_size) {
+        if (!data) { ray_release(v); return ray_error("domain", NULL); }
+        memcpy(ray_data(v), data, data_size);
+    }
 
     /* LIST/TABLE elements are child pointers — retain them */
     if (type == RAY_LIST || type == RAY_TABLE) {
