@@ -560,7 +560,11 @@ ray_t* ray_system_fn(ray_t* x) {
 /* (getenv name) -- get environment variable */
 ray_t* ray_getenv_fn(ray_t* x) {
     if (x->type != -RAY_STR) return ray_error("type", "getenv expects a string");
-    const char* name = ray_str_ptr(x);
+    /* ray strings are length-prefixed and NOT NUL-terminated when pooled
+     * (len > RAY_STR_INLINE_MAX), so the raw ray_str_ptr cannot be handed
+     * to libc getenv directly — copy into a NUL-terminated buffer first. */
+    char namebuf[256];
+    const char* name = str_to_cpath(x, namebuf, sizeof(namebuf));
     if (!name) return ray_error("domain", NULL);
     const char* val = getenv(name);
     return val ? ray_str(val, strlen(val)) : ray_str("", 0);
@@ -573,14 +577,24 @@ extern int setenv(const char*, const char*, int);
 ray_t* ray_setenv_fn(ray_t* name, ray_t* val) {
     if (name->type != -RAY_STR || val->type != -RAY_STR)
         return ray_error("type", "setenv expects two strings");
-    const char* n = ray_str_ptr(name);
-    const char* v = ray_str_ptr(val);
-    if (!n || !v) return ray_error("domain", NULL);
+    /* libc setenv needs NUL-terminated args; ray strings are not
+     * NUL-terminated when pooled (len > RAY_STR_INLINE_MAX). */
+    char namebuf[256];
+    const char* n = str_to_cpath(name, namebuf, sizeof(namebuf));
+    if (!n) return ray_error("domain", NULL);
+    char valbuf[4096];
+    size_t vlen = ray_str_len(val);
+    if (vlen >= sizeof(valbuf)) return ray_error("range", "setenv value too long");
+    const char* vp = ray_str_ptr(val);
+    if (!vp) return ray_error("domain", NULL);
+    if (vlen) memcpy(valbuf, vp, vlen);
+    valbuf[vlen] = '\0';
 #if defined(RAY_OS_WINDOWS)
-    _putenv_s(n, v);
+    _putenv_s(n, valbuf);
 #else
-    setenv(n, v, 1);
+    setenv(n, valbuf, 1);
 #endif
+    ray_retain(val);
     return val;
 }
 
