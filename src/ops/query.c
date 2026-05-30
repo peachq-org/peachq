@@ -3713,6 +3713,50 @@ static ray_t* project_table_cols(ray_t* src_tbl, const int64_t* keep_syms,
     return nt;
 }
 
+/* Narrow the result of a computed by-val expression when the AST head is
+ * a known small-output temporal extract — minute/hh/ss/dd/dow/mm (0..59
+ * etc.), doy/yyyy (0..366, year): all fit in I16.
+ *
+ * Why: mk_compile packs composite by-keys into a 16-byte slot.  An I64
+ * column for minute() (0..59) blows the budget on q18's
+ * {UserID(8B), minute(8B), SearchPhrase(SYM 2-4B)} → exec_group fallback.
+ * Narrowing to I16 brings the composite under 16 bytes and unlocks the
+ * fused mk_ path while keeping decimal display (U8 prints as 0x2F hex
+ * which is unreadable for a minute value).
+ *
+ * Skips when col has nulls — the I64 null sentinel does not survive a
+ * downcast. */
+static ray_t* narrow_known_small_extract_result(ray_t* expr, ray_t* col) {
+    if (!col || col->type != RAY_I64 || !ray_is_vec(col)) return col;
+    if (col->attrs & RAY_ATTR_HAS_NULLS) return col;
+    if (!expr || expr->type != RAY_LIST || ray_len(expr) < 1) return col;
+    ray_t** e = (ray_t**)ray_data(expr);
+    if (!e[0] || e[0]->type != -RAY_SYM) return col;
+    ray_t* head = ray_sym_str(e[0]->i64);
+    if (!head) return col;
+    size_t hn = ray_str_len(head);
+    const char* hp = ray_str_ptr(head);
+    int known = 0;
+    if      (hn == 6 && memcmp(hp, "minute", 6) == 0) known = 1;
+    else if (hn == 2 && memcmp(hp, "hh",     2) == 0) known = 1;
+    else if (hn == 2 && memcmp(hp, "ss",     2) == 0) known = 1;
+    else if (hn == 2 && memcmp(hp, "dd",     2) == 0) known = 1;
+    else if (hn == 3 && memcmp(hp, "dow",    3) == 0) known = 1;
+    else if (hn == 2 && memcmp(hp, "mm",     2) == 0) known = 1;
+    else if (hn == 3 && memcmp(hp, "doy",    3) == 0) known = 1;
+    else if (hn == 4 && memcmp(hp, "yyyy",   4) == 0) known = 1;
+    if (!known) return col;
+
+    int64_t len = ray_len(col);
+    ray_t* out = ray_vec_new(RAY_I16, len);
+    if (!out || RAY_IS_ERR(out)) return col;
+    out->len = len;
+    const int64_t* src = (const int64_t*)ray_data(col);
+    int16_t* dst = (int16_t*)ray_data(out);
+    for (int64_t i = 0; i < len; i++) dst[i] = (int16_t)src[i];
+    return out;
+}
+
 ray_t* ray_select(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
     ray_t* dict = args[0];
@@ -4254,6 +4298,15 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                 ray_release(col_vec);
                 fail_err = ray_error("length", "by-dict val must be a column vector");
                 failed = true; break;
+            }
+            /* Narrow I64 results of known-small temporal extracts (minute,
+             * hour, day-of-week, etc.) to U8/I16.  Keeps q18-shaped
+             * composite by-keys under mk_compile's 16-byte budget so they
+             * fuse instead of falling to exec_group. */
+            ray_t* narrowed = narrow_known_small_extract_result(v, col_vec);
+            if (narrowed != col_vec) {
+                ray_release(col_vec);
+                col_vec = narrowed;
             }
             ray_t* new_tbl = ray_table_add_col(tbl, k->i64, col_vec);
             ray_release(col_vec);
