@@ -2804,6 +2804,7 @@ static void ray_register_builtins(void) {
     register_vary (".sys.timeit", RAY_FN_NONE,       ray_sys_timeit_fn);
     register_unary(".sys.listen", RAY_FN_RESTRICTED, ray_sys_listen_fn);
     register_vary (".sys.env",    RAY_FN_NONE,       ray_sys_env_fn);
+    register_vary (".sys.args",   RAY_FN_NONE,       ray_sys_args_fn);
 
     /* OS env / process interaction under `.os.*` */
     register_unary( ".os.getenv", RAY_FN_RESTRICTED,  ray_getenv_fn);
