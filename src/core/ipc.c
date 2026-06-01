@@ -366,7 +366,7 @@ static ray_t* eval_payload_core(uint8_t* payload, size_t payload_len,
                                 ray_ipc_header_t* hdr)
 {
     /* Journal hook: log every inbound SYNC message (state-mutation
-     * channel in q's model) before evaluation, so a crash mid-handler
+     * channel in the IPC model) before evaluation, so a crash mid-handler
      * still leaves the message on disk for replay.  We write the raw
      * inbound bytes — header + payload — verbatim, no decompression
      * round-trip.  Async messages and responses are not logged, so
@@ -383,7 +383,7 @@ static ray_t* eval_payload_core(uint8_t* payload, size_t payload_len,
      * the connection's own flag set by the caller above us.
      *
      * If the journal write fails (disk full, EIO), we ABORT the
-     * eval and return an error to the client.  q's documented
+     * eval and return an error to the client.  The documented
      * behaviour: "the message has not been logged so we cannot
      * accept it".  Silently evaluating un-logged mutations defeats
      * the entire durability premise of `-l`/`-L`. */
