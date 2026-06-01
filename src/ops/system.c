@@ -38,6 +38,8 @@
 /* Forward decl: avoids pulling core/runtime.h (which conflicts with
  * lang/eval.h's ray_vm_t typedef in this TU). */
 void* ray_runtime_get_poll(void);
+void  ray_runtime_set_sys_args(void* dict);
+void* ray_runtime_get_sys_args(void);
 #include <time.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -809,6 +811,86 @@ ray_t* ray_sysinfo_fn(ray_t** args, int64_t n) {
     ray_t* v1 = make_i64(1);
     vals = ray_list_append(vals, v1); ray_release(v1);
 #endif
+
+    return ray_dict_new(keys, vals);
+}
+
+/* Parse argv into the .sys.args dict.  Recognized launcher flags become
+ * typed top-level entries (i64 / bool / str); everything after `--` becomes
+ * a str->str `user` subdict via `-k v` / `--k v` pairing.  Auth passwords
+ * (-u/-U) are intentionally NOT exposed. */
+ray_t* ray_build_sys_args(int argc, char** argv) {
+    const char* file = "";
+    const char* log  = "";
+    int64_t port = 0, cores = 0;
+    bool timeit = false, interactive = false;
+    int user_start = -1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) { user_start = i + 1; break; }
+        else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interactive") == 0)
+            interactive = true;
+        else if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) && i + 1 < argc)
+            port = (int64_t)atoll(argv[++i]);
+        else if ((strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--cores") == 0) && i + 1 < argc) {
+            long long v = atoll(argv[++i]); if (v < 0) v = 0; cores = (int64_t)v;
+        }
+        else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--timeit") == 0) && i + 1 < argc)
+            timeit = (atoll(argv[++i]) != 0);
+        else if ((strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--file") == 0) && i + 1 < argc)
+            file = argv[++i];
+        else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) i++;   /* skip secret */
+        else if (strcmp(argv[i], "-U") == 0 && i + 1 < argc) i++;   /* skip secret */
+        else if ((strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "-L") == 0) && i + 1 < argc)
+            log = argv[++i];
+        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { /* ignore */ }
+        else file = argv[i];
+    }
+
+    /* user subdict (built by upsert so dup keys collapse, last wins) */
+    ray_t* uk = ray_sym_vec_new(RAY_SYM_W64, 0);
+    ray_t* uv = ray_list_new(0);
+    ray_t* user = ray_dict_new(uk, uv);
+    if (user_start >= 0) {
+        for (int i = user_start; i < argc; ) {
+            const char* tok = argv[i];
+            if (tok[0] == '-') {
+                const char* name = tok; while (*name == '-') name++;
+                if (*name == '\0') { i++; continue; }   /* lone - / -- */
+                const char* value = "";
+                if (i + 1 < argc && argv[i + 1][0] != '-') { value = argv[i + 1]; i += 2; }
+                else i += 1;
+                ray_t* ka = ray_sym(ray_sym_intern(name, strlen(name)));
+                ray_t* va = ray_str(value, strlen(value));
+                ray_t* nu = ray_dict_upsert(user, ka, va);
+                ray_release(ka); ray_release(va);
+                if (!RAY_IS_ERR(nu)) user = nu;
+            } else {
+                i++;   /* bare value with no key — ignore */
+            }
+        }
+    }
+
+    /* top-level dict: 7 entries (file, port, cores, timeit, interactive, log, user) */
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 7);
+    ray_t* vals = ray_list_new(7);
+
+    int64_t k;
+    ray_t* v;
+    k = ray_sym_intern("file", 4);        keys = ray_vec_append(keys, &k);
+    v = ray_str(file, strlen(file));      vals = ray_list_append(vals, v); ray_release(v);
+    k = ray_sym_intern("port", 4);        keys = ray_vec_append(keys, &k);
+    v = ray_i64(port);                    vals = ray_list_append(vals, v); ray_release(v);
+    k = ray_sym_intern("cores", 5);       keys = ray_vec_append(keys, &k);
+    v = ray_i64(cores);                   vals = ray_list_append(vals, v); ray_release(v);
+    k = ray_sym_intern("timeit", 6);      keys = ray_vec_append(keys, &k);
+    v = ray_bool(timeit);                 vals = ray_list_append(vals, v); ray_release(v);
+    k = ray_sym_intern("interactive", 11);keys = ray_vec_append(keys, &k);
+    v = ray_bool(interactive);            vals = ray_list_append(vals, v); ray_release(v);
+    k = ray_sym_intern("log", 3);         keys = ray_vec_append(keys, &k);
+    v = ray_str(log, strlen(log));        vals = ray_list_append(vals, v); ray_release(v);
+    k = ray_sym_intern("user", 4);        keys = ray_vec_append(keys, &k);
+    vals = ray_list_append(vals, user);   ray_release(user);
 
     return ray_dict_new(keys, vals);
 }
