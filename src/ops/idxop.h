@@ -61,14 +61,20 @@ typedef enum {
      * provably excludes/includes the constant.  See chunk_zone arm
      * of ray_index_t.u below. */
     RAY_IDX_CHUNK_ZONE = 5,
+    RAY_IDX_PART       = 6,
 } ray_idx_kind_t;
+
+/* Marker bits stored in ray_index_t.markers (block-resident attributes
+ * that have no dedicated attrs bit).  sorted lives in attrs (RAY_ATTR_SORTED),
+ * not here. */
+#define RAY_MARK_UNIQUE  0x01
 
 /* The payload stored inside data[] of a RAY_INDEX ray_t. */
 typedef struct {
     uint8_t  kind;            /* ray_idx_kind_t */
     uint8_t  saved_attrs;     /* parent attrs & HAS_NULLS at attach */
     int8_t   parent_type;     /* parent->type (recorded for diagnostics) */
-    uint8_t  reserved;
+    uint8_t  markers;         /* RAY_MARK_* bits (block-resident attr flags) */
     int64_t  built_for_len;   /* parent->len at attach (mismatch -> stale) */
 
     /* Raw 16-byte snapshot of parent->nullmap union at attach time,
@@ -121,6 +127,12 @@ typedef struct {
             uint8_t  is_f64;
             uint8_t  _pad[2];
         } chunk_zone;
+        struct {                /* RAY_IDX_PART */
+            ray_t*  keys;       /* distinct partition values, in ascending block order */
+            ray_t*  starts;     /* RAY_I64, row offset where each part begins */
+            ray_t*  lens;       /* RAY_I64, row count of each part */
+            int64_t n_parts;
+        } part;
     } u;
 } ray_index_t;
 
@@ -161,6 +173,14 @@ static inline bool ray_index_has(const ray_t* v) {
 static inline ray_idx_kind_t ray_index_kind(const ray_t* v) {
     if (!ray_index_has(v)) return RAY_IDX_NONE;
     return (ray_idx_kind_t)ray_index_payload(v->index)->kind;
+}
+
+/* --- Semantic attribute markers (see mem/heap.h: RAY_ATTR_SORTED) --- */
+
+/* True iff v is a vector flagged sorted (non-descending). */
+static inline bool ray_attr_is_sorted(const ray_t* v) {
+    return v && !RAY_IS_ERR((ray_t*)v) && ray_is_vec(v)
+        && (v->attrs & RAY_ATTR_SORTED);
 }
 
 /* Returns a fresh RAY_DICT with {kind, length, ...kind-specific...}
