@@ -166,7 +166,7 @@ static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
     return -RAY_I64;
 }
 
-/* Promote integer type following right-operand's type (K/q semantics for sub) */
+/* Promote integer type following right-operand's type (integer-promotion convention for sub) */
 static inline int8_t promote_int_type_right(ray_t* a, ray_t* b) {
     (void)a;
     int8_t bt = b->type;
@@ -483,7 +483,7 @@ ray_t* ray_db_splayed_mount_fn(ray_t** args, int64_t n);
 ray_t* ray_db_parted_mount_fn(ray_t** args, int64_t n);
 ray_t* ray_guid_fn(ray_t* n_arg);
 
-/* Transaction-log journaling (.log.*) — q's -l/-L feature.
+/* Transaction-log journaling (.log.*) — the -l/-L feature.
  * Implementations live in src/ops/journal.c; the on-disk machinery
  * is src/store/journal.c. */
 ray_t* ray_log_open_fn(ray_t** args, int64_t n);
