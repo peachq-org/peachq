@@ -94,6 +94,7 @@ typedef struct ray_runtime_s {
     int32_t          n_vms;
     int64_t          mem_budget;   /* 80% of physical RAM, bytes */
     void            *poll;         /* opaque ray_poll_t* — see ray_runtime_(set|get)_poll */
+    void            *sys_args;     /* opaque ray_t* dict — see ray_runtime_(set|get)_sys_args */
 } ray_runtime_t;
 
 /* Global runtime + per-thread VM */
@@ -111,6 +112,13 @@ void           ray_runtime_destroy(ray_runtime_t* rt);
  * the unrelated `ray_vm_t` declared above). */
 void  ray_runtime_set_poll(void* poll);
 void* ray_runtime_get_poll(void);
+
+/* Application arguments.  The host (main.c) builds a dict from argv via
+ * ray_build_sys_args and registers it here; the `.sys.args` builtin reads
+ * it back.  set takes ownership (released in ray_runtime_destroy). */
+void   ray_runtime_set_sys_args(void* dict);
+void*  ray_runtime_get_sys_args(void);
+ray_t* ray_build_sys_args(int argc, char** argv);
 
 /* Persistent-consumer lifecycle: load the sym table from `sym_path` (if
  * present) before builtins register, so user-interned IDs keep the same
