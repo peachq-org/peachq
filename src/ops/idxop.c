@@ -30,8 +30,10 @@
 #include "table/sym.h"
 #include "lang/eval.h"
 #include "ops/ops.h"
+#include "ops/rowsel.h"
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* Width of one element of a numeric vector type, or 0 if unsupported. */
 static int numeric_elem_size(int8_t t) {
@@ -155,6 +157,17 @@ void ray_index_release_payload(ray_index_t* ix) {
             ray_release(ix->u.bloom.bits);
         ix->u.bloom.bits = NULL;
         break;
+    case RAY_IDX_CHUNK_ZONE:
+        if (ix->u.chunk_zone.mins && !RAY_IS_ERR(ix->u.chunk_zone.mins))
+            ray_release(ix->u.chunk_zone.mins);
+        if (ix->u.chunk_zone.maxs && !RAY_IS_ERR(ix->u.chunk_zone.maxs))
+            ray_release(ix->u.chunk_zone.maxs);
+        if (ix->u.chunk_zone.null_bits && !RAY_IS_ERR(ix->u.chunk_zone.null_bits))
+            ray_release(ix->u.chunk_zone.null_bits);
+        ix->u.chunk_zone.mins = NULL;
+        ix->u.chunk_zone.maxs = NULL;
+        ix->u.chunk_zone.null_bits = NULL;
+        break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
         break;
@@ -176,6 +189,14 @@ void ray_index_retain_payload(ray_index_t* ix) {
     case RAY_IDX_BLOOM:
         if (ix->u.bloom.bits && !RAY_IS_ERR(ix->u.bloom.bits))
             ray_retain(ix->u.bloom.bits);
+        break;
+    case RAY_IDX_CHUNK_ZONE:
+        if (ix->u.chunk_zone.mins && !RAY_IS_ERR(ix->u.chunk_zone.mins))
+            ray_retain(ix->u.chunk_zone.mins);
+        if (ix->u.chunk_zone.maxs && !RAY_IS_ERR(ix->u.chunk_zone.maxs))
+            ray_retain(ix->u.chunk_zone.maxs);
+        if (ix->u.chunk_zone.null_bits && !RAY_IS_ERR(ix->u.chunk_zone.null_bits))
+            ray_retain(ix->u.chunk_zone.null_bits);
         break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
@@ -264,6 +285,107 @@ static ray_err_t zone_scan(ray_t* v, ray_index_t* ix) {
 }
 
 /* --------------------------------------------------------------------------
+ * Chunk-zone scan -- per-(1<<chunk_log2)-row min/max + null flag
+ *
+ * For each chunk g in [0, n_chunks) the scan computes the chunk's min and
+ * max value across its row range and sets the chunk's null-bit if any row
+ * in that chunk is a null sentinel.  Whole-column extrema fall out as
+ * min(mins[*]) / max(maxs[*]) so the reduce min/max path can consume this
+ * index without needing a separate column-wide zone.
+ * -------------------------------------------------------------------------- */
+
+static ray_err_t chunk_zone_scan_int(ray_t* v, ray_index_t* ix,
+                                     int elem_size) {
+    uint32_t n_chunks = ix->u.chunk_zone.n_chunks;
+    uint8_t  log2     = ix->u.chunk_zone.chunk_log2;
+    int64_t  csz      = 1LL << log2;
+    int64_t  n        = v->len;
+    int64_t* mins     = (int64_t*)ray_data(ix->u.chunk_zone.mins);
+    int64_t* maxs     = (int64_t*)ray_data(ix->u.chunk_zone.maxs);
+    uint8_t* nbits    = (uint8_t*)ray_data(ix->u.chunk_zone.null_bits);
+    const uint8_t* base = (const uint8_t*)ray_data(v);
+
+    for (uint32_t g = 0; g < n_chunks; g++) {
+        int64_t s = (int64_t)g * csz;
+        int64_t e = s + csz; if (e > n) e = n;
+        int64_t mn = INT64_MAX, mx = INT64_MIN;
+        bool any_null = false;
+        for (int64_t i = s; i < e; i++) {
+            if (ray_vec_is_null(v, i)) { any_null = true; continue; }
+            int64_t val = 0;
+            switch (elem_size) {
+            case 1: val = (int64_t)base[i]; break;
+            case 2: { int16_t t; memcpy(&t, base + i*2, 2); val = (int64_t)t; break; }
+            case 4: { int32_t t; memcpy(&t, base + i*4, 4); val = (int64_t)t; break; }
+            case 8: { int64_t t; memcpy(&t, base + i*8, 8); val = t;          break; }
+            default: return RAY_ERR_TYPE;
+            }
+            if (val < mn) mn = val;
+            if (val > mx) mx = val;
+        }
+        /* Empty (all-null) chunks keep mn=INT64_MAX / mx=INT64_MIN so
+         * the reduce path's min(mins[*]) / max(maxs[*]) ignores them. */
+        mins[g] = mn;
+        maxs[g] = mx;
+        if (any_null) nbits[g >> 3] |= (uint8_t)(1u << (g & 7));
+    }
+    return RAY_OK;
+}
+
+static ray_err_t chunk_zone_scan_float(ray_t* v, ray_index_t* ix,
+                                       int elem_size) {
+    uint32_t n_chunks = ix->u.chunk_zone.n_chunks;
+    uint8_t  log2     = ix->u.chunk_zone.chunk_log2;
+    int64_t  csz      = 1LL << log2;
+    int64_t  n        = v->len;
+    double*  mins     = (double*)ray_data(ix->u.chunk_zone.mins);
+    double*  maxs     = (double*)ray_data(ix->u.chunk_zone.maxs);
+    uint8_t* nbits    = (uint8_t*)ray_data(ix->u.chunk_zone.null_bits);
+    const uint8_t* base = (const uint8_t*)ray_data(v);
+
+    for (uint32_t g = 0; g < n_chunks; g++) {
+        int64_t s = (int64_t)g * csz;
+        int64_t e = s + csz; if (e > n) e = n;
+        double mn = INFINITY, mx = -INFINITY;
+        bool any_null = false;
+        for (int64_t i = s; i < e; i++) {
+            if (ray_vec_is_null(v, i)) { any_null = true; continue; }
+            double val = 0.0;
+            if (elem_size == 4) {
+                float t; memcpy(&t, base + i*4, 4); val = (double)t;
+            } else {
+                memcpy(&val, base + i*8, 8);
+            }
+            if (isnan(val)) { any_null = true; continue; }
+            if (val < mn) mn = val;
+            if (val > mx) mx = val;
+        }
+        /* Empty (all-null) chunks keep mn=+inf / mx=-inf so reduce
+         * (min/max across mins[]/maxs[]) ignores them. */
+        mins[g] = mn;
+        maxs[g] = mx;
+        if (any_null) nbits[g >> 3] |= (uint8_t)(1u << (g & 7));
+    }
+    return RAY_OK;
+}
+
+static ray_err_t chunk_zone_scan(ray_t* v, ray_index_t* ix) {
+    switch (v->type) {
+    case RAY_BOOL:
+    case RAY_U8:        return chunk_zone_scan_int(v, ix, 1);
+    case RAY_I16:       return chunk_zone_scan_int(v, ix, 2);
+    case RAY_I32:
+    case RAY_DATE:      return chunk_zone_scan_int(v, ix, 4);
+    case RAY_I64:
+    case RAY_TIME:
+    case RAY_TIMESTAMP: return chunk_zone_scan_int(v, ix, 8);
+    case RAY_F32:       return chunk_zone_scan_float(v, ix, 4);
+    case RAY_F64:       return chunk_zone_scan_float(v, ix, 8);
+    default:            return RAY_ERR_NYI;
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Attach
  *
  * The 16-byte snapshot preserves the parent's nullmap-union bytes across
@@ -336,6 +458,59 @@ ray_t* ray_index_attach_zone(ray_t** vp) {
     return attach_finalize(v, idx);
 }
 
+ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2) {
+    ray_t* v = prepare_attach(vp, "chunk_zone");
+    if (RAY_IS_ERR(v)) return v;
+
+    if (chunk_log2 == 0) chunk_log2 = 16;          /* default 64 K rows / chunk */
+    if (chunk_log2 < 8 || chunk_log2 > 22)
+        return ray_error("domain", "chunk_zone: chunk_log2 out of range [8, 22]");
+    int64_t csz = 1LL << chunk_log2;
+    /* No point indexing a column smaller than one chunk — fall back to
+     * the column-wide zone (or no index at all) at that size. */
+    if (v->len < csz)
+        return ray_error("domain", "chunk_zone: column has fewer rows than one chunk");
+
+    uint32_t n_chunks = (uint32_t)((v->len + csz - 1) / csz);
+
+    ray_t* idx = ray_index_alloc(RAY_IDX_CHUNK_ZONE, v->type, v->len);
+    if (!idx || RAY_IS_ERR(idx)) return idx;
+    ray_index_t* ix = ray_index_payload(idx);
+    ix->u.chunk_zone.n_chunks   = n_chunks;
+    ix->u.chunk_zone.chunk_log2 = chunk_log2;
+    ix->u.chunk_zone.is_f64     = (v->type == RAY_F64 || v->type == RAY_F32) ? 1 : 0;
+
+    int8_t arr_type = ix->u.chunk_zone.is_f64 ? RAY_F64 : RAY_I64;
+    ray_t* mins = ray_vec_new(arr_type, (int64_t)n_chunks);
+    ray_t* maxs = ray_vec_new(arr_type, (int64_t)n_chunks);
+    int64_t nb_len = (int64_t)((n_chunks + 7) / 8);
+    ray_t* nbits = ray_vec_new(RAY_U8, nb_len);
+    if (!mins || RAY_IS_ERR(mins) || !maxs || RAY_IS_ERR(maxs) ||
+        !nbits || RAY_IS_ERR(nbits))
+    {
+        if (mins && !RAY_IS_ERR(mins)) ray_release(mins);
+        if (maxs && !RAY_IS_ERR(maxs)) ray_release(maxs);
+        if (nbits && !RAY_IS_ERR(nbits)) ray_release(nbits);
+        ray_release(idx);
+        return ray_error("oom", "chunk_zone: arrays alloc");
+    }
+    mins->len  = (int64_t)n_chunks;
+    maxs->len  = (int64_t)n_chunks;
+    nbits->len = nb_len;
+    memset(ray_data(nbits), 0, (size_t)nb_len);
+    ix->u.chunk_zone.mins      = mins;
+    ix->u.chunk_zone.maxs      = maxs;
+    ix->u.chunk_zone.null_bits = nbits;
+
+    ray_err_t err = chunk_zone_scan(v, ix);
+    if (err != RAY_OK) {
+        ray_release(idx);   /* releases mins/maxs/nbits via release_payload */
+        return ray_error(ray_err_code_str(err),
+                         "chunk_zone scan failed for type %d", (int)v->type);
+    }
+    return attach_finalize(v, idx);
+}
+
 /* --------------------------------------------------------------------------
  * Hash index — chained open addressing
  *
@@ -398,6 +573,207 @@ ray_t* ray_index_attach_hash(ray_t** vp) {
     ix->u.hash.n_keys = n_keys;
 
     return attach_finalize(v, idx);
+}
+
+/* --------------------------------------------------------------------------
+ * Hash-index point-lookup probe — public entry point for the eq-filter
+ * fast path (ray_index_hash_eq_rowsel).
+ *
+ * Callers present the index with an int64 key; we mix64 it with the
+ * same hash the builder used, walk the bucket chain, collect matches,
+ * and emit a ray_rowsel sized for O(matches) memory (no intermediate
+ * row-wide BOOL pred vec).
+ *
+ * Type matrix.  An index built on column type T accepts a key only
+ * when T's storage width covers it without truncation — i.e. asking
+ * for `u8_col == 300` would never match, so we fail eligibility and
+ * the caller falls back to the scan (which folds out-of-range via
+ * fp_fold_t).  Float keys are not supported here — equality on
+ * F32/F64 has NaN / -0 semantics the unfused engine handles. */
+
+static int hash_key_in_range(int8_t t, int64_t k) {
+    switch (t) {
+    case RAY_BOOL: case RAY_U8:        return k >= 0 && k <= UINT8_MAX;
+    case RAY_I16:                      return k >= INT16_MIN && k <= INT16_MAX;
+    case RAY_I32: case RAY_DATE:       return k >= INT32_MIN && k <= INT32_MAX;
+    case RAY_I64:
+    case RAY_TIME:
+    case RAY_TIMESTAMP:                return 1;
+    default:                           return 0;
+    }
+}
+
+/* Read row `i` of a numeric column as int64 for equality compare. */
+static int64_t hash_col_read_i64(const uint8_t* base, int8_t t, int64_t i) {
+    int es;
+    switch (t) {
+    case RAY_BOOL: case RAY_U8:        es = 1; break;
+    case RAY_I16:                      es = 2; break;
+    case RAY_I32: case RAY_DATE:       es = 4; break;
+    case RAY_I64:
+    case RAY_TIME:
+    case RAY_TIMESTAMP:                es = 8; break;
+    default:                           return 0;
+    }
+    switch (es) {
+    case 1:  return (int64_t)base[i];
+    case 2:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
+    case 4:  { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
+    default: { int64_t v; memcpy(&v, base + i*8, 8); return v;          }
+    }
+}
+
+/* Validate eligibility, return the index payload + computed start row.
+ * On miss leaves *start = -1 so the caller can short-circuit. */
+static ray_index_t* hash_probe_setup(ray_t* col, int64_t key,
+                                     int64_t* start_rid) {
+    *start_rid = -1;
+    if (!col || RAY_IS_ERR(col) || !ray_is_vec(col)) return NULL;
+    if (!(col->attrs & RAY_ATTR_HAS_INDEX) || !col->index) return NULL;
+    ray_index_t* ix = ray_index_payload(col->index);
+    if (ix->kind != RAY_IDX_HASH) return NULL;
+    if (ix->built_for_len != col->len) return NULL;
+    if (!hash_key_in_range(col->type, key)) return NULL;
+    if (numeric_elem_size(col->type) == 0) return NULL;
+    if (!ix->u.hash.table || !ix->u.hash.chain) return NULL;
+
+    /* Mirror numeric_key_word for an int64 key: the canonical hash
+     * input is the raw bit pattern of the storage width.  We zero-
+     * extend U8/BOOL and sign-extend others up to int64; mix64 then
+     * folds them — the builder did the same on a per-row basis. */
+    int es = numeric_elem_size(col->type);
+    uint64_t kbits = 0;
+    switch (es) {
+    case 1: kbits = (uint64_t)(uint8_t)key;                  break;
+    case 2: kbits = (uint64_t)(int64_t)(int16_t)key;         break;
+    case 4: kbits = (uint64_t)(int64_t)(int32_t)key;         break;
+    default: kbits = (uint64_t)key;                          break;
+    }
+    uint64_t h = mix64(kbits);
+    uint64_t slot = h & ix->u.hash.mask;
+    const int64_t* tbl = (const int64_t*)ray_data(ix->u.hash.table);
+    *start_rid = tbl[slot] - 1;
+    return ix;
+}
+
+/* qsort comparator: ascending int64 row ids, used by the rowsel
+ * builder to put matches into per-segment order. */
+static int hash_match_cmp_i64(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a;
+    int64_t y = *(const int64_t*)b;
+    return (x > y) - (x < y);
+}
+
+ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
+    int64_t rid = -1;
+    ray_index_t* ix = hash_probe_setup(col, key, &rid);
+    if (!ix) return NULL;
+
+    int64_t n = col->len;
+    /* Collect matching row ids.  The chain length is bounded by the
+     * bucket fill factor; for keys appearing rarely the bound is tight
+     * (~1 row).  For highly-duplicated keys it can degenerate to O(n)
+     * — but only if the value really occurs that many times, in which
+     * case the existing scan path also reads the same number of rows.
+     * We size the collect buffer dynamically; cap at n to bound memory
+     * in the pathological case. */
+    const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    int8_t t = col->type;
+
+    int64_t mcap = 16;
+    int64_t mcnt = 0;
+    ray_t* match_hdr = ray_alloc(mcap * (int64_t)sizeof(int64_t));
+    if (!match_hdr) return NULL;
+    int64_t* matches = (int64_t*)ray_data(match_hdr);
+
+    while (rid >= 0) {
+        if (hash_col_read_i64(base, t, rid) == key) {
+            if (mcnt == mcap) {
+                int64_t new_cap = mcap * 2;
+                if (new_cap > n) new_cap = n + 1;  /* defensive bound */
+                ray_t* new_hdr = ray_alloc(new_cap * (int64_t)sizeof(int64_t));
+                if (!new_hdr) { ray_release(match_hdr); return NULL; }
+                memcpy(ray_data(new_hdr), matches,
+                       (size_t)mcnt * sizeof(int64_t));
+                ray_release(match_hdr);
+                match_hdr = new_hdr;
+                matches = (int64_t*)ray_data(match_hdr);
+                mcap = new_cap;
+            }
+            matches[mcnt++] = rid;
+        }
+        rid = chn[rid] - 1;
+    }
+
+    /* Sort ascending so we can fill seg_flags / seg_offsets / idx[]
+     * in a single linear pass.  qsort dominates only when matches are
+     * many — in that case the hash probe itself is the larger cost
+     * and this is still O(matches log matches). */
+    if (mcnt > 1)
+        qsort(matches, (size_t)mcnt, sizeof(int64_t), hash_match_cmp_i64);
+
+    /* Count idx_count = # of MIX segments × matches in that segment.
+     * For a hash probe a segment is either NONE (no matches) or MIX
+     * (≥1 match; never ALL unless every row in the segment matched,
+     * which would require duplicate-key density > MORSEL_ELEMS in one
+     * 1024-row window — vanishingly rare and indistinguishable in the
+     * consumer from a normal MIX). */
+    ray_t* block = ray_rowsel_new(n, mcnt, mcnt);
+    if (!block) { ray_release(match_hdr); return NULL; }
+
+    uint32_t n_segs = ray_rowsel_meta(block)->n_segs;
+    uint8_t*  seg_flags   = ray_rowsel_flags(block);
+    uint32_t* seg_offsets = ray_rowsel_offsets(block);
+    uint16_t* idx_arr     = ray_rowsel_idx(block);
+
+    /* All segments default to NONE; the loop below flips MIX where
+     * a match lands.  ray_alloc does NOT zero the data area
+     * (only the 32-byte header), so explicit init is required. */
+    memset(seg_flags, RAY_SEL_NONE, (size_t)n_segs);
+    /* seg_offsets is built by linear sweep below — initialize to a
+     * sentinel that the sweep will overwrite. */
+    /* (no memset needed; the sweep writes every entry [0..n_segs]) */
+
+    /* Single sweep over the sorted matches: emit per-segment offsets
+     * and morsel-local indices into idx_arr.  cur_seg tracks the
+     * segment we're filling; gaps get RAY_SEL_NONE and zero spans. */
+    int64_t mi = 0;
+    uint32_t cum = 0;
+    for (uint32_t s = 0; s < n_segs; s++) {
+        seg_offsets[s] = cum;
+        int64_t seg_start = (int64_t)s * RAY_MORSEL_ELEMS;
+        int64_t seg_end   = seg_start + RAY_MORSEL_ELEMS;
+        if (seg_end > n) seg_end = n;
+        uint32_t pc = 0;
+        while (mi < mcnt && matches[mi] < seg_end) {
+            idx_arr[cum + pc] = (uint16_t)(matches[mi] - seg_start);
+            pc++;
+            mi++;
+        }
+        if (pc == 0) {
+            seg_flags[s] = RAY_SEL_NONE;
+        } else if ((int64_t)pc == seg_end - seg_start) {
+            seg_flags[s] = RAY_SEL_ALL;
+            /* Roll back the indices — ALL segments contribute zero
+             * idx[] entries in the rowsel contract. */
+            cum -= pc;  /* idx_arr writes for this seg get overwritten
+                          by the next MIX segment's writes; idx_count
+                          was sized for all matches, so this is safe. */
+        } else {
+            seg_flags[s] = RAY_SEL_MIX;
+            cum += pc;
+        }
+    }
+    seg_offsets[n_segs] = cum;
+    /* Adjust meta total_pass / idx layout — ALL-segment rows count
+     * toward total_pass but not idx_count.  We initially passed
+     * (mcnt, mcnt); fix up if any ALL segments collapsed. */
+    ray_rowsel_meta(block)->total_pass = mcnt;
+    (void)cum;
+
+    ray_release(match_hdr);
+    return block;
 }
 
 /* --------------------------------------------------------------------------
@@ -541,11 +917,12 @@ ray_t* ray_index_drop(ray_t** vp) {
 
 static const char* kind_name(ray_idx_kind_t k) {
     switch (k) {
-    case RAY_IDX_HASH:  return "hash";
-    case RAY_IDX_SORT:  return "sort";
-    case RAY_IDX_ZONE:  return "zone";
-    case RAY_IDX_BLOOM: return "bloom";
-    default:            return "none";
+    case RAY_IDX_HASH:       return "hash";
+    case RAY_IDX_SORT:       return "sort";
+    case RAY_IDX_ZONE:       return "zone";
+    case RAY_IDX_BLOOM:      return "bloom";
+    case RAY_IDX_CHUNK_ZONE: return "chunk_zone";
+    default:                 return "none";
     }
 }
 
@@ -626,6 +1003,14 @@ ray_t* ray_index_info(ray_t* v) {
         r = dict_append_sym_i64(&keys, &vals, "k", (int64_t)ix->u.bloom.k);
         if (RAY_IS_ERR(r)) goto fail;
         r = dict_append_sym_i64(&keys, &vals, "n_keys", ix->u.bloom.n_keys);
+        if (RAY_IS_ERR(r)) goto fail;
+        break;
+    case RAY_IDX_CHUNK_ZONE:
+        r = dict_append_sym_i64(&keys, &vals, "n_chunks",
+                                (int64_t)ix->u.chunk_zone.n_chunks);
+        if (RAY_IS_ERR(r)) goto fail;
+        r = dict_append_sym_i64(&keys, &vals, "chunk_log2",
+                                (int64_t)ix->u.chunk_zone.chunk_log2);
         if (RAY_IS_ERR(r)) goto fail;
         break;
     case RAY_IDX_NONE:
