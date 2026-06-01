@@ -2115,11 +2115,22 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
                      0, len);
     }
 
-    /* Null propagation from inputs */
-    if (op_propagates_null(op->opcode))
-        propagate_nulls_binary(lhs, rhs, result, l_scalar, r_scalar, len);
-    else
-        fix_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len, op->opcode);
+    /* Null propagation from inputs.  Skipped when str_resolved: we resolved
+     * a string constant to an integer sym id and compared it by value against
+     * a SYM column.  SYM columns carry no nulls (id 0 / the interned empty
+     * string is a real value — see ray_sym_init / ray_vec_is_null), and the
+     * resolved string atom must NOT be treated as null here.  Otherwise the
+     * empty-string literal "" — for which RAY_ATOM_IS_NULL is true (slen==0,
+     * obj==NULL) yet which resolves to the valid sym id 0 — would take the
+     * null-comparison fill: `!= col ""` passing every row and `== col ""`
+     * matching none, instead of selecting the empty-string rows by value
+     * (which silently drops a `(!= symcol "")` WHERE predicate). */
+    if (!str_resolved) {
+        if (op_propagates_null(op->opcode))
+            propagate_nulls_binary(lhs, rhs, result, l_scalar, r_scalar, len);
+        else
+            fix_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len, op->opcode);
+    }
 
     /* Div/mod: mark zero-divisor positions as null.
      * The morsel loop writes 0 for b==0 but can't set bitmap nulls. */
