@@ -779,7 +779,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
      * raw work is one i64 lookup + N width-truncated cmpneq.
      *
      * Handles either operand order; output is RAY_BOOL.  Nulls go
-     * through the q/k atom-vs-atom rules already in cmp.c (null≠value
+     * through the atom-vs-atom rules already in cmp.c (null≠value
      * is true for NE) by applying the same logic per element. */
     if (!force_boxed && (dag_opcode == OP_EQ || dag_opcode == OP_NE) &&
         out_type == RAY_BOOL) {
@@ -835,7 +835,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                     }
                 } else {
                     /* General path: vec may have nulls, atom may be null.
-                     * Apply q/k atom-rules per element so semantics match
+                     * Apply atom-rules per element so semantics match
                      * the slow path exactly. */
                     for (int64_t i = 0; i < n; i++) {
                         int row_null = ray_vec_is_null(vv, i);
@@ -885,7 +885,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
 
     /* Determine scalar int type for list+scalar coercion.
      * When a boxed list is combined with a scalar, integer results
-     * are coerced to the scalar's integer type (K/q semantics). */
+     * are coerced to the scalar's integer type (integer-promotion convention). */
     int8_t scalar_int_type = 0;
     if (force_boxed) {
         ray_t* scalar = (!left_coll) ? left : (!right_coll ? right : NULL);
@@ -2688,7 +2688,7 @@ static void ray_register_builtins(void) {
     register_vary (".sys.gc",   RAY_FN_NONE,        ray_gc_fn);
     register_unary(".sys.exec", RAY_FN_RESTRICTED,  ray_system_fn);
     /* Registry-dispatched system commands.  `.sys.cmd "name args"` is
-     * the kdb-style entry point; the per-command direct builtins below
+     * the colon-command entry point; the per-command direct builtins below
      * skip the string parse for callers that already have a typed arg
      * in hand.  All share the table in lang/syscmd.c. */
     register_unary(".sys.cmd",    RAY_FN_RESTRICTED, ray_syscmd_string_dispatch_fn);
@@ -2721,7 +2721,7 @@ static void ray_register_builtins(void) {
     register_unary(".repl.connect",    RAY_FN_RESTRICTED, ray_repl_connect_fn);
     register_vary( ".repl.disconnect", RAY_FN_RESTRICTED, ray_repl_disconnect_fn);
 
-    /* Transaction-log journaling under `.log.*` — q/kdb's -l/-L feature.
+    /* Transaction-log journaling under `.log.*` — the -l/-L feature.
      * The CLI flags -l <base> / -L <base> call ray_journal_open() at
      * startup; these builtins expose the same machinery to Rayfall code
      * for manual control (open from a script, snapshot on demand, etc). */
