@@ -2883,14 +2883,18 @@ static ray_t* try_count_distinct_v2_rewrite(
     if (!result || RAY_IS_ERR(result)) return result;
     if (result->type != RAY_TABLE) return result;
 
-    /* Rename the default "count" output column to the user's c_sym
-     * (e.g. q08's `u:`).  ray_group writes its agg under the literal
-     * "count" sym; rewrite the slot's name in place. */
-    int64_t count_sym = ray_sym_intern("count", 5);
-    if (count_sym != cd_c_sym) {
+    /* Rename the count output column to the user's requested c_sym alias.
+     * The outer pass counts the key column, so ray_group names the agg
+     * output "<key>_count" (after its input column) — NOT the literal
+     * "count" this code originally searched for, which left the result
+     * column misnamed (the "<key>_count" default instead of the alias).
+     * The result holds exactly the key column plus this one count
+     * column, so rename whichever non-key column it is. */
+    if (K_sym != cd_c_sym) {
         int64_t nc = ray_table_ncols(result);
         for (int64_t ci = 0; ci < nc; ci++) {
-            if (ray_table_col_name(result, ci) == count_sym) {
+            int64_t cn = ray_table_col_name(result, ci);
+            if (cn != K_sym && cn != cd_c_sym) {
                 ray_table_set_col_name(result, ci, cd_c_sym);
                 break;
             }
