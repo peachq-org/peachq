@@ -2739,7 +2739,6 @@ static ray_t* try_count_distinct_v2_rewrite(
     int64_t cd_X_sym = -1;
     int64_t cd_c_sym = -1;
     int n_cd = 0, n_other = 0;
-    int saw_key_proj = 0;
     int64_t desc_col_sym = -1;  /* if desc:, its column-sym target */
     int64_t asc_col_sym  = -1;
     int     has_take = 0;
@@ -2779,7 +2778,7 @@ static ray_t* try_count_distinct_v2_rewrite(
             cd_c_sym = kid;
             n_cd++;
         } else if (is_single_group_key_projection(by_expr, val)) {
-            saw_key_proj++;
+            /* identity key projection (e.g. {K: K}) — accepted, no-op */
         } else {
             n_other++;
         }
