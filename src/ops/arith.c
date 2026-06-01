@@ -303,7 +303,7 @@ ray_t* ray_neg_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
     if (x->type == -RAY_F64) return make_f64(-x->f64);
     /* INT_MIN is the lone overflow case for signed negation: -INT_MIN
-     * doesn't fit in the same width.  Per k/q convention, surface this
+     * doesn't fit in the same width.  By convention, surface this
      * as a typed null of the same width — preserving type, avoiding UB,
      * and giving the caller a `nil?`-detectable signal that overflow
      * happened.  Consistent with how `(neg 0Ni) → 0Ni` propagates. */

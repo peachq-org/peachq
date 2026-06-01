@@ -1266,9 +1266,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             {
                 ray_op_ext_t* gext = find_ext(g, op->id);
                 if (gext && gext->n_keys == 1) {
-                    ray_op_ext_t* kx = find_ext(g, gext->keys[0]->id);
+                    ray_op_ext_t* kext = find_ext(g, gext->keys[0]->id);
                     int64_t src_sym = ray_sym_intern("_src", 4);
-                    if (kx && kx->base.opcode == OP_SCAN && kx->sym == src_sym) {
+                    if (kext && kext->base.opcode == OP_SCAN && kext->sym == src_sym) {
                         /* Find the factorized OP_EXPAND connected to this GROUP.
                          * The expand must be the one whose output the GROUP
                          * is scanning (connected via OP_SCAN inputs). */

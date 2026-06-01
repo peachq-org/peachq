@@ -7466,7 +7466,7 @@ by_dict_done:
          *       per-row evaluation semantics.
          *
          * Mixed agg+non-agg without `by:` continues to flow through (b);
-         * q's semantics there imply LIST/scalar mixing that is out of
+         * the semantics there imply LIST/scalar mixing that is out of
          * scope for this fix. */
         int has_agg = 0;
         int has_nonagg_out = 0;
