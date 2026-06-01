@@ -2853,6 +2853,11 @@ static void ray_register_builtins(void) {
     register_unary (".idx.has?",   RAY_FN_NONE, ray_idx_has_fn);
     register_unary (".idx.info",   RAY_FN_NONE, ray_idx_info_fn);
 
+    /* Semantic attributes (see src/ops/idxop.c: (.attr.*) family) */
+    register_binary(".attr.set",   RAY_FN_NONE, ray_attr_set_fn);
+    register_unary (".attr.get",   RAY_FN_NONE, ray_attr_get_fn);
+    register_unary (".attr.drop",  RAY_FN_NONE, ray_attr_drop_fn);
+
     /* Linked columns (see src/ops/linkop.h) */
     register_binary(".col.link",   RAY_FN_NONE, ray_col_link_fn);
     register_unary (".col.unlink", RAY_FN_NONE, ray_col_unlink_fn);
