@@ -47,11 +47,20 @@
 
 /* Index kinds.  Stored in ray_index_t.kind. */
 typedef enum {
-    RAY_IDX_NONE  = 0,
-    RAY_IDX_HASH  = 1,
-    RAY_IDX_SORT  = 2,
-    RAY_IDX_ZONE  = 3,
-    RAY_IDX_BLOOM = 4,
+    RAY_IDX_NONE       = 0,
+    RAY_IDX_HASH       = 1,
+    RAY_IDX_SORT       = 2,
+    RAY_IDX_ZONE       = 3,
+    RAY_IDX_BLOOM      = 4,
+    /* Per-chunk min/max + null bit, one entry per (1 << chunk_log2) rows.
+     * The whole-column zone is derivable as
+     *   min(chunk_mins)/max(chunk_maxs) over the entries, so this
+     *   subsumes RAY_IDX_ZONE wherever it's used in the reduce path.
+     * Built at column ingest (csv.read); read by the min/max reduce
+     * and by the predicate planner to skip chunks whose [min,max]
+     * provably excludes/includes the constant.  See chunk_zone arm
+     * of ray_index_t.u below. */
+    RAY_IDX_CHUNK_ZONE = 5,
 } ray_idx_kind_t;
 
 /* The payload stored inside data[] of a RAY_INDEX ray_t. */
@@ -99,6 +108,19 @@ typedef struct {
             uint32_t _pad;
             int64_t  n_keys;    /* number of non-null rows added */
         } bloom;
+        struct {                /* RAY_IDX_CHUNK_ZONE */
+            /* mins / maxs hold n_chunks entries.  For integer / temporal
+             * column types they are RAY_I64 vecs storing the per-chunk
+             * extrema as int64; for RAY_F64 columns they are RAY_F64
+             * vecs.  is_f64 disambiguates at read time. */
+            ray_t*   mins;
+            ray_t*   maxs;
+            ray_t*   null_bits;   /* RAY_U8 vec, packed: bit i = chunk i has any null */
+            uint32_t n_chunks;
+            uint8_t  chunk_log2;  /* chunk size = 1 << chunk_log2 (default 16 → 64 K rows) */
+            uint8_t  is_f64;
+            uint8_t  _pad[2];
+        } chunk_zone;
     } u;
 } ray_index_t;
 
@@ -118,6 +140,10 @@ ray_t* ray_index_attach_zone (ray_t** vp);
 ray_t* ray_index_attach_hash (ray_t** vp);
 ray_t* ray_index_attach_sort (ray_t** vp);
 ray_t* ray_index_attach_bloom(ray_t** vp);
+/* Build per-chunk min/max + null bit at chunk_size = 1 << chunk_log2.
+ * Passing 0 picks the default (16 → 64 K rows / chunk).  Only valid on
+ * numeric and temporal vectors; SYM/STR/GUID return RAY_ERR_NYI. */
+ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2);
 
 /* Drop any attached index from *vp.  No-op if none.  Restores the
  * pre-attach nullmap state byte-for-byte.  Returns *vp. */
@@ -140,6 +166,31 @@ static inline ray_idx_kind_t ray_index_kind(const ray_t* v) {
 /* Returns a fresh RAY_DICT with {kind, length, ...kind-specific...}
  * or RAY_NULL_OBJ when no index is attached. */
 ray_t* ray_index_info(ray_t* v);
+
+/* ===== Hash-index point-lookup probe =====
+ *
+ * Build a ray_rowsel directly from a hash probe on `col`'s
+ * RAY_IDX_HASH for rows where the payload equals `key`.  Bypasses
+ * the intermediate BOOL pred vec entirely — touches O(matches)
+ * memory instead of O(rows), which is the whole reason to ship
+ * this fast path.
+ *
+ * Returns:
+ *   - A fresh rowsel block (rc=1) on success — install on
+ *     g->selection.  The block carries per-segment NONE/MIX/ALL
+ *     flags and the morsel-local indices for matching rows.
+ *     Pure NONE blocks (no matches) are returned as a valid empty
+ *     rowsel rather than NULL — NULL is the "all-pass" sentinel
+ *     in the consumer and would let every row through.
+ *   - NULL when the column is not eligible: no index, wrong kind,
+ *     built_for_len mismatch (stale), type mismatch, or out-of-
+ *     range key.  Caller must fall back to the full scan path.
+ *
+ * Eligibility (and the canonical hashing used) match
+ * ray_index_attach_hash: BOOL/U8/I16/I32/I64/DATE/TIME/TIMESTAMP.
+ * Floats are intentionally not supported — equality on F32/F64
+ * has NaN / -0 semantics the unfused compare kernel handles. */
+ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
 
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */
