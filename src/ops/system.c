@@ -864,7 +864,12 @@ ray_t* ray_build_sys_args(int argc, char** argv) {
                 ray_t* va = ray_str(value, strlen(value));
                 ray_t* nu = ray_dict_upsert(user, ka, va);
                 ray_release(ka); ray_release(va);
-                if (!RAY_IS_ERR(nu)) user = nu;
+                if (RAY_IS_ERR(nu)) {
+                    ray_release(nu);                              /* drop the error obj */
+                    user = ray_dict_new(ray_sym_vec_new(RAY_SYM_W64, 0), ray_list_new(0));
+                    break;                                        /* `user` already freed by upsert */
+                }
+                user = nu;
             } else {
                 i++;   /* bare value with no key — ignore */
             }
