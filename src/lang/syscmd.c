@@ -263,7 +263,7 @@ const ray_syscmd_t* ray_syscmd_table(size_t* out_count) {
  * can then re-coerce via arg_as_i64 etc.) and calls the handler.
  *
  * On miss with allow_shell=true, falls through to system() so users
- * can do `(.sys.cmd "ls -la")` the kdb way.  With allow_shell=false
+ * can do `(.sys.cmd "ls -la")` as a shell escape.  With allow_shell=false
  * (REPL path), returns "domain" so a typo'd `:foo` doesn't hand the
  * shell anything by accident.
  * ══════════════════════════════════════════ */

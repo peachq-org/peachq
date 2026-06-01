@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-/* Transaction-log journaling — q/kdb's `-l` / `-L` ported to Rayforce.
+/* Transaction-log journaling — the `-l` / `-L` feature.
  *
  * Wire format: every entry is a complete IPC message (16-byte
  * ray_ipc_header_t followed by serialized payload), so log frames
@@ -36,7 +36,7 @@
  * After open, the IPC dispatch hook (eval_payload in core/ipc.c) calls
  * ray_journal_write_bytes() for every inbound sync message before
  * evaluating it.  Async messages and responses are not journaled,
- * matching q's policy of journaling only the .z.ps stream.
+ * journaling only the .z.ps stream.
  *
  * Replay is single-threaded by construction (it runs from main, before
  * the poll loop starts) so the module is intentionally not thread-safe;
@@ -94,7 +94,7 @@ ray_err_t ray_journal_replay(const char*           path,
                              int64_t*              out_eval_errors,
                              ray_jreplay_status_t* out_status);
 
-/* Validate (parse but don't eval) — q's `-11!(-2; file)` analogue.
+/* Validate (parse but don't eval) frames without evaluating.
  * *out_chunks counts valid entries; *out_valid_bytes is the byte
  * offset of the first bad header (== file size on a clean log). */
 ray_err_t ray_journal_validate(const char* path,
