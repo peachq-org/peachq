@@ -1730,6 +1730,8 @@ static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
         [OP_RESOLVE_W]  = &&op_resolve_w,
         [OP_TRAP]       = &&op_trap,
         [OP_TRAP_END]   = &&op_trap_end,
+        [OP_STOREGLOBAL]   = &&op_storeglobal,
+        [OP_STOREGLOBAL_W] = &&op_storeglobal_w,
     };
 
     /* Arity check before allocating VM state */
@@ -1845,6 +1847,35 @@ op_resolve_w: {
     if (!val) goto vm_error_name;
     if (RAY_IS_ERR(val)) { vm_err_obj = val; goto vm_error; }
     PUSH(val);
+    DISPATCH();
+}
+
+op_storeglobal: {
+    uint8_t idx = code[ip++];
+    ray_t *name_obj = cpool[idx];
+    /* `set` returns its value, so the result must stay on the stack;
+     * PEEK rather than POP.  ray_env_set retains its own ref. */
+    ray_t *val = PEEK();
+    ray_err_t err = ray_env_set(name_obj->i64, val);
+    if (err != RAY_OK) {
+        ray_release(POP());
+        vm_err_obj = ray_error(ray_err_code_str(err), NULL);
+        goto vm_error;
+    }
+    DISPATCH();
+}
+
+op_storeglobal_w: {
+    uint16_t idx = (uint16_t)((code[ip] << 8) | code[ip + 1]);
+    ip += 2;
+    ray_t *name_obj = cpool[idx];
+    ray_t *val = PEEK();
+    ray_err_t err = ray_env_set(name_obj->i64, val);
+    if (err != RAY_OK) {
+        ray_release(POP());
+        vm_err_obj = ray_error(ray_err_code_str(err), NULL);
+        goto vm_error;
+    }
     DISPATCH();
 }
 
