@@ -168,6 +168,11 @@ void ray_index_release_payload(ray_index_t* ix) {
         ix->u.chunk_zone.maxs = NULL;
         ix->u.chunk_zone.null_bits = NULL;
         break;
+    case RAY_IDX_PART:
+        /* TODO(Task 4): release u.part.{keys,starts,lens} once the part
+         * builder populates them.  Until then a PART block has no child
+         * vectors, so this is a safe no-op. */
+        break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
         break;
@@ -197,6 +202,11 @@ void ray_index_retain_payload(ray_index_t* ix) {
             ray_retain(ix->u.chunk_zone.maxs);
         if (ix->u.chunk_zone.null_bits && !RAY_IS_ERR(ix->u.chunk_zone.null_bits))
             ray_retain(ix->u.chunk_zone.null_bits);
+        break;
+    case RAY_IDX_PART:
+        /* TODO(Task 4): retain u.part.{keys,starts,lens} once the part
+         * builder populates them.  Until then a PART block has no child
+         * vectors, so this is a safe no-op. */
         break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
@@ -1012,6 +1022,10 @@ ray_t* ray_index_info(ray_t* v) {
         r = dict_append_sym_i64(&keys, &vals, "chunk_log2",
                                 (int64_t)ix->u.chunk_zone.chunk_log2);
         if (RAY_IS_ERR(r)) goto fail;
+        break;
+    case RAY_IDX_PART:
+        /* TODO(Task 4): emit n_parts (and update kind_name to "part") once
+         * the part builder lands.  Diagnostic-only; no memory hazard. */
         break;
     case RAY_IDX_NONE:
         break;

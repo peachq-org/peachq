@@ -57,14 +57,22 @@
  *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in nullmap[0..7])
  *   Bit  0x10       vectors:         RAY_ATTR_SLICE
  *   Bit  0x20       -RAY_SYM:        RAY_ATTR_NAME (variable reference)
+ *   Bit  0x20       vectors:         RAY_ATTR_SORTED (non-descending order marker)
  *   Bit  0x40       vectors:         RAY_ATTR_HAS_NULLS (sentinel-encoded; payload is truth)
  *   Bit  0x80       all types:       RAY_ATTR_ARENA (arena-allocated, no refcount)
  *
  * Overlapping bit values are safe because consumers always check the type tag
  * before interpreting attrs.
  *
- * Bit 0x20 on vectors is reserved for future use.
+ * Bit 0x20 on vectors is now RAY_ATTR_SORTED (see below).
  */
+
+/* RAY_ATTR_SORTED (vectors): the vector's elements are known to be in
+ * non-descending order.  A pure marker — no backing structure, no
+ * allocation.  Set only via (.attr.set 'sorted v) after an O(n) verify
+ * scan, so it never lies.  0x20 is free for vectors (it means NAME only
+ * on -RAY_SYM atoms).  Order-aware operators (asof-join) may trust it. */
+#define RAY_ATTR_SORTED  0x20
 
 #ifndef RAY_ATTR_SLICE
 #define RAY_ATTR_SLICE        0x10
