@@ -239,4 +239,8 @@ ray_t* ray_idx_drop_fn (ray_t* v);  /* (.idx.drop  v) -> v with index removed */
 ray_t* ray_idx_has_fn  (ray_t* v);  /* (.idx.has?  v) -> 0b/1b */
 ray_t* ray_idx_info_fn (ray_t* v);  /* (.idx.info  v) -> dict of metadata */
 
+ray_t* ray_attr_set_fn (ray_t* name, ray_t* v); /* (.attr.set 'name v) */
+ray_t* ray_attr_get_fn (ray_t* v);              /* (.attr.get v) -> sym vec */
+ray_t* ray_attr_drop_fn(ray_t* v);              /* (.attr.drop v) -> v cleared */
+
 #endif /* RAY_IDXOP_H */
