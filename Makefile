@@ -13,6 +13,11 @@ BUILD_DATE := $(shell date -u +%Y-%m-%d)
 WARNS   = -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter
 DEFS    = -DRAYFORCE_GIT_COMMIT=\"$(GIT_HASH)\" -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
 INCLUDES = -Iinclude -Isrc
+# Header-dependency tracking: -MMD emits a .d makefile fragment next to
+# each .o listing the headers it included (user headers only, not system);
+# -MP adds a phony target per header so deleting a header doesn't break the
+# build with a "no rule to make" error.  The fragments are -included below.
+DEPFLAGS = -MMD -MP
 
 UNAME_S := $(shell uname -s)
 
@@ -63,11 +68,18 @@ MAIN_OBJ = $(MAIN_SRC:.c=.o)
 TEST_SRC = $(wildcard test/*.c)
 TEST_OBJ = $(TEST_SRC:.c=.o)
 
-# Default target
+# Auto-generated header dependencies (one .d per .o, see DEPFLAGS).
+# The fragments are -included at the very END of this file — including
+# them here would let a .d's first rule (e.g. `foo.o: ...`) become the
+# default goal, so bare `make` would build one object instead of `debug`.
+DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
+
+# Default target (pinned so an -included .d fragment can't steal it).
+.DEFAULT_GOAL := default
 default: debug
 
 %.o: %.c
-	$(CC) -c $(CFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 # Main binary — shared by debug/release/test (test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as a server, so test depends on it too).
@@ -133,6 +145,7 @@ coverage:
 
 clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ)
+	-rm -f $(DEPS)
 	-rm -f $(TARGET) $(TARGET).test lib$(TARGET).a
 	-rm -rf build build_release
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
@@ -142,3 +155,8 @@ clean:
 	-rm -rf coverage_html
 
 .PHONY: default debug release lib test coverage clean
+
+# Header dependencies last: .d fragments only add prerequisites to the
+# object targets above, and being last they can't hijack the default goal.
+# -include silently skips any that don't exist yet (first build).
+-include $(DEPS)
