@@ -1006,7 +1006,7 @@ static void expr_full_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t e
 }
 
 /* Post-pass for the fused unary path: |INT64_MIN| and -INT64_MIN don't fit in
- * i64 (signed-overflow; k/q convention surfaces this as typed null).  The
+ * i64 (signed-overflow; by convention this surfaces as typed null).  The
  * element-wise loop uses unsigned wrap, so any overflow position lands as
  * INT64_MIN in data.  Since INT64_MIN IS the canonical NULL_I64 sentinel,
  * the payload is already correct — we just flip HAS_NULLS via
@@ -1536,7 +1536,7 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     }
 
     /* OP_NEG/OP_ABS over i64: |INT64_MIN| and -INT64_MIN don't fit — surface
-     * as typed null (k/q convention).  Loop above used unsigned wrap, so
+     * as typed null (by convention).  Loop above used unsigned wrap, so
      * overflow positions land as INT64_MIN in data; convert them to null. */
     if (out_type == RAY_I64 && in_type == RAY_I64 &&
         (op->opcode == OP_NEG || op->opcode == OP_ABS))
