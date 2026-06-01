@@ -89,7 +89,10 @@ void ray_lang_print(FILE* fp, ray_t* val) {
     if (ray_is_lazy(val))
         val = ray_lazy_materialize(val);
     if (!val || RAY_IS_ERR(val)) { fprintf(fp, "error"); return; }
-    if (RAY_ATOM_IS_NULL(val)) {
+    /* STR has no distinct null — empty and null strings are the same
+     * value and print as empty content (handled by the -RAY_STR case),
+     * not a null literal. */
+    if (val->type != -RAY_STR && RAY_ATOM_IS_NULL(val)) {
         fprintf(fp, "%s", null_literal_str(val->type));
         return;
     }
@@ -177,7 +180,7 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
             int tlen = 0;
             if (!a || RAY_IS_ERR(a)) {
                 tlen = snprintf(tmp, sizeof(tmp), "error");
-            } else if (RAY_ATOM_IS_NULL(a)) {
+            } else if (a->type != -RAY_STR && RAY_ATOM_IS_NULL(a)) {
                 tlen = snprintf(tmp, sizeof(tmp), "%s", null_literal_str(a->type));
             } else if (a->type == -RAY_I64) {
                 tlen = snprintf(tmp, sizeof(tmp), "%ld", (long)a->i64);
