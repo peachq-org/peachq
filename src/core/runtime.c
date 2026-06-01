@@ -345,6 +345,16 @@ void* ray_runtime_get_poll(void) {
     return __RUNTIME ? __RUNTIME->poll : NULL;
 }
 
+void ray_runtime_set_sys_args(void* dict) {
+    if (!__RUNTIME) return;
+    if (__RUNTIME->sys_args) ray_release((ray_t*)__RUNTIME->sys_args);
+    __RUNTIME->sys_args = dict;
+}
+
+void* ray_runtime_get_sys_args(void) {
+    return __RUNTIME ? __RUNTIME->sys_args : NULL;
+}
+
 /* ===== Memory Budget API ===== */
 
 int64_t ray_mem_budget(void) {
@@ -405,6 +415,8 @@ void ray_runtime_destroy(ray_runtime_t* rt) {
         ray_sys_free(vm);
     }
     ray_sys_free(rt->vms);
+
+    if (rt->sys_args) { ray_release((ray_t*)rt->sys_args); rt->sys_args = NULL; }
 
     __VM = NULL;
     __RUNTIME = NULL;
