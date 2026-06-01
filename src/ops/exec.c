@@ -24,6 +24,7 @@
 #include "ops/internal.h"
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
+#include "ops/idxop.h"
 #include "mem/heap.h"
 #include "mem/sys.h"
 
@@ -856,6 +857,61 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
  * Recursive executor
  * ============================================================================ */
 
+/* Decode an OP_EQ predicate `pred_op` against g->table.  When the
+ * predicate has shape (== col_scan const_int) and `col_scan` resolves
+ * to a column in g->table that is non-null, non-parted, and carries a
+ * fresh RAY_IDX_HASH, write the column pointer to *out_col and the
+ * decoded int64 key to *out_key, returning 1.  Returns 0 on any
+ * miss — the caller falls through to the regular scan-based pred
+ * evaluation. */
+static int hash_index_eq_decode(ray_graph_t* g, ray_op_t* pred_op,
+                                ray_t** out_col, int64_t* out_key) {
+    if (!pred_op || pred_op->opcode != OP_EQ || pred_op->arity != 2)
+        return 0;
+    ray_op_t* lhs = pred_op->inputs[0];
+    ray_op_t* rhs = pred_op->inputs[1];
+    if (!lhs || !rhs) return 0;
+    if (lhs->opcode != OP_SCAN || rhs->opcode != OP_CONST) return 0;
+    ray_op_ext_t* lext = find_ext(g, lhs->id);
+    ray_op_ext_t* rext = find_ext(g, rhs->id);
+    if (!lext || !rext || !rext->literal) return 0;
+    uint16_t stored_table_id = 0;
+    memcpy(&stored_table_id, lext->base.pad, sizeof(uint16_t));
+    if (stored_table_id != 0) return 0;  /* non-default table — skip */
+    ray_t* tbl = g->table;
+    if (!tbl) return 0;
+    ray_t* col = ray_table_get_col(tbl, lext->sym);
+    if (!col || RAY_IS_ERR(col)) return 0;
+    if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return 0;
+    /* Nullable columns: the hash chain skipped null rows, so the
+     * resulting selection would mismatch the unfused null-aware
+     * compare for the col == col semantics rare-but-required case.
+     * Bail and let the existing compare run. */
+    if (col->attrs & RAY_ATTR_HAS_NULLS) return 0;
+    if (!ray_index_has(col)) return 0;
+    if (ray_index_kind(col) != RAY_IDX_HASH) return 0;
+    ray_index_t* ix = ray_index_payload(col->index);
+    if (ix->built_for_len != col->len) return 0;
+
+    ray_t* cv = rext->literal;
+    if (!cv) return 0;
+    int64_t key = 0;
+    switch (cv->type) {
+    case -RAY_I64:
+    case -RAY_TIMESTAMP: key = cv->i64;                  break;
+    case -RAY_I32:
+    case -RAY_DATE:
+    case -RAY_TIME:      key = (int64_t)cv->i32;         break;
+    case -RAY_I16:       key = (int64_t)cv->i16;         break;
+    case -RAY_BOOL:
+    case -RAY_U8:        key = (int64_t)cv->b8;          break;
+    default: return 0;  /* floats / sym / str — not eligible */
+    }
+    *out_col = col;
+    *out_key = key;
+    return 1;
+}
+
 /* Is this opcode a "heavy" pipeline breaker worth profiling? */
 static inline bool op_is_heavy(uint16_t opc) {
     return opc == OP_FILTER || opc == OP_SORT || opc == OP_GROUP ||
@@ -1122,8 +1178,31 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             }
 
             ray_t* input = exec_node(g, op->inputs[0]);
-            ray_t* pred  = exec_node(g, op->inputs[1]);
-            if (!input || RAY_IS_ERR(input)) { if (pred && !RAY_IS_ERR(pred)) ray_release(pred); return input; }
+            if (!input || RAY_IS_ERR(input)) return input;
+            /* Hash-index point-lookup fast path: when the predicate is
+             * `col == K` on a column with RAY_IDX_HASH attached and
+             * built for the column's current length, install the
+             * matching rowsel on g->selection directly — bypasses
+             * both the O(rows) compare AND the O(rows) BOOL→rowsel
+             * scan.  Only fires for the lazy TABLE-input case with no
+             * pre-existing selection (the entry shape downstream
+             * group-by / sort already expects). */
+            if (input->type == RAY_TABLE && !g->selection) {
+                ray_t* col = NULL;
+                int64_t key = 0;
+                if (hash_index_eq_decode(g, op->inputs[1], &col, &key)) {
+                    ray_t* sel = ray_index_hash_eq_rowsel(col, key);
+                    if (sel) {
+                        g->selection = sel;
+                        return input;
+                    }
+                    /* sel == NULL: column was eligible at decode time
+                     * but allocation failed.  Fall through to the
+                     * scan path below — defensive (no functional
+                     * difference in the common case). */
+                }
+            }
+            ray_t* pred = exec_node(g, op->inputs[1]);
             if (!pred || RAY_IS_ERR(pred)) { ray_release(input); return pred; }
 
             /* Lazy filter: convert predicate to a rowsel (morsel-local
@@ -1362,7 +1441,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 }
                 ray_t* result = exec_sort(g, child_op, tbl, n);
                 if (sort_input != g->table) ray_release(sort_input);
-                if (result && !RAY_IS_ERR(result)) ray_heap_gc();
+                /* Top-level statement GC catches intermediates. */
                 return result;
             }
 
@@ -1431,7 +1510,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 ray_release(pred);
                 if (filter_input != saved_table)
                     ray_release(filter_input);
-                if (result && !RAY_IS_ERR(result)) ray_heap_gc();
+                /* Top-level statement GC catches intermediates. */
                 return result;
             } else {
                 input = exec_node(g, op->inputs[0]);
