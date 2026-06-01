@@ -346,7 +346,8 @@ static const char* null_literal(int8_t type) {
     case RAY_TIME:      return "0Nt";
     case RAY_TIMESTAMP: return "0Np";
     case RAY_SYM:       return "0Ns";
-    case RAY_STR:       return "0Nc";
+    /* RAY_STR has no null literal: empty and null strings both render
+     * as "" (handled directly by the STR paths, never via this table). */
     case RAY_GUID:      return "0Ng";
     default:            return "null";
     }
@@ -355,8 +356,10 @@ static const char* null_literal(int8_t type) {
 /* ===== Vector element formatter ===== */
 
 static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
-    /* Check for null */
-    if (ray_vec_is_null(vec, idx)) {
+    /* Check for null.  STR is the exception — a string element has no
+     * distinct null (empty and null are the same value), so it renders
+     * as "" via the RAY_STR case below rather than a 0Nc literal. */
+    if (vec->type != RAY_STR && ray_vec_is_null(vec, idx)) {
         fmt_puts(b, null_literal(vec->type));
         return;
     }
@@ -381,11 +384,9 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     case RAY_STR: {
         size_t slen = 0;
         const char* p = ray_str_vec_get(vec, idx, &slen);
-        if (p) {
-            fmt_putc(b, '"');
-            fmt_putn(b, p, (int32_t)slen);
-            fmt_putc(b, '"');
-        }
+        fmt_putc(b, '"');
+        if (p) fmt_putn(b, p, (int32_t)slen);
+        fmt_putc(b, '"');
         break;
     }
     case RAY_GUID:
@@ -1006,8 +1007,11 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
 
     int8_t type = obj->type;
     if (type < 0) {
-        /* Typed null atom: null bit set → display as 0Nx */
-        if (RAY_ATOM_IS_NULL(obj)) {
+        /* Typed null atom: null bit set → display as 0Nx.  STR is the
+         * exception — it has no distinct null (empty and null are the
+         * same value), so it always falls through to fmt_str_atom and
+         * renders as "", never 0Nc (which the parser cannot read back). */
+        if (-type != RAY_STR && RAY_ATOM_IS_NULL(obj)) {
             fmt_puts(b, null_literal(-type));
             return;
         }
