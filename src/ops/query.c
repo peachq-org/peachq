@@ -34,6 +34,7 @@
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
 #include "ops/fused_topk.h"
+#include "ops/hll.h"
 #include "ops/temporal.h"
 #include "core/profile.h"
 #include "table/sym.h"
@@ -85,147 +86,6 @@ static int64_t dict_key_id(ray_t* dict, const char* key) {
             return sid;
     }
     return -1;
-}
-
-typedef struct {
-    ray_t*   tbl;
-    int64_t  nrows;
-    uint64_t hash;
-    uint64_t from_hash;
-    uint64_t env_gen;
-    ray_t*   result;
-} select_cache_entry_t;
-
-#define SELECT_CACHE_N 512
-static select_cache_entry_t g_select_cache[SELECT_CACHE_N];
-static uint16_t g_select_cache_next = 0;
-
-static uint64_t hash_mix_u64(uint64_t h, uint64_t v) {
-    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-    return h ? h : 0x9e3779b97f4a7c15ull;
-}
-
-static uint64_t ray_expr_hash(ray_t* x) {
-    if (!x) return 0x1234abcd5678ef00ull;
-    uint64_t h = hash_mix_u64(0xcbf29ce484222325ull, (uint64_t)(uint8_t)x->type);
-    h = hash_mix_u64(h, (uint64_t)x->attrs);
-    h = hash_mix_u64(h, (x->type == -RAY_STR)
-                        ? (uint64_t)ray_str_len(x)
-                        : (uint64_t)x->len);
-    if (x->type == RAY_LIST) {
-        ray_t** elems = (ray_t**)ray_data(x);
-        for (int64_t i = 0; i < x->len; i++)
-            h = hash_mix_u64(h, ray_expr_hash(elems[i]));
-    } else if (x->type == RAY_DICT) {
-        ray_t* keys = ray_dict_keys(x);
-        ray_t* vals = ray_dict_vals(x);
-        h = hash_mix_u64(h, ray_expr_hash(keys));
-        h = hash_mix_u64(h, ray_expr_hash(vals));
-    } else if (x->type == RAY_STR) {
-        size_t n = 0;
-        const char* s = ray_str_vec_get(x, 0, &n);
-        for (size_t i = 0; s && i < n; i++)
-            h = hash_mix_u64(h, (unsigned char)s[i]);
-    } else if (x->type == -RAY_STR) {
-        const char* s = ray_str_ptr(x);
-        size_t n = ray_str_len(x);
-        for (size_t i = 0; s && i < n; i++)
-            h = hash_mix_u64(h, (unsigned char)s[i]);
-    } else if (x->type == RAY_SYM || x->type == -RAY_SYM ||
-               x->type == RAY_I64 || x->type == -RAY_I64 ||
-               x->type == RAY_TIMESTAMP || x->type == -RAY_TIMESTAMP) {
-        h = hash_mix_u64(h, (uint64_t)x->i64);
-    } else if (x->type == RAY_I32 || x->type == -RAY_I32 ||
-               x->type == RAY_DATE || x->type == -RAY_DATE ||
-               x->type == RAY_TIME || x->type == -RAY_TIME) {
-        h = hash_mix_u64(h, (uint64_t)(uint32_t)x->i32);
-    } else if (x->type == RAY_I16 || x->type == -RAY_I16) {
-        h = hash_mix_u64(h, (uint64_t)(uint16_t)x->i16);
-    } else if (x->type == RAY_U8 || x->type == -RAY_U8 ||
-               x->type == RAY_BOOL || x->type == -RAY_BOOL) {
-        h = hash_mix_u64(h, (uint64_t)x->u8);
-    } else if (x->type == RAY_F64 || x->type == -RAY_F64) {
-        uint64_t bits = 0;
-        memcpy(&bits, &x->f64, sizeof(bits));
-        h = hash_mix_u64(h, bits);
-    }
-    return h;
-}
-
-static ray_t* select_cache_get(ray_t* tbl, int64_t nrows,
-                               uint64_t hash, uint64_t from_hash) {
-    if (!g_ray_profile.active) return NULL;
-    if (!hash) return NULL;
-    for (uint16_t i = 0; i < SELECT_CACHE_N; i++) {
-        select_cache_entry_t* e = &g_select_cache[i];
-        if (e->result && e->env_gen == ray_env_generation() &&
-            e->nrows == nrows && e->hash == hash &&
-            (e->tbl == tbl || (from_hash && e->from_hash == from_hash))) {
-            ray_retain(e->result);
-            return e->result;
-        }
-    }
-    return NULL;
-}
-
-static void select_expr_cache_put(uint64_t hash, uint64_t from_hash,
-                                  ray_t* result);
-
-static void select_cache_put(ray_t* tbl, int64_t nrows,
-                             uint64_t hash, uint64_t from_hash,
-                             ray_t* result) {
-    if (!g_ray_profile.active) return;
-    if (!tbl || !hash || !result || RAY_IS_ERR(result)) return;
-    select_cache_entry_t* e =
-        &g_select_cache[g_select_cache_next++ % SELECT_CACHE_N];
-    if (e->result) ray_release(e->result);
-    e->tbl = tbl;
-    e->nrows = nrows;
-    e->hash = hash;
-    e->from_hash = from_hash;
-    e->env_gen = ray_env_generation();
-    e->result = result;
-    ray_retain(e->result);
-    select_expr_cache_put(hash, from_hash, result);
-}
-
-typedef struct {
-    uint64_t hash;
-    uint64_t from_hash;
-    uint64_t env_gen;
-    ray_t*   result;
-} select_expr_cache_entry_t;
-
-#define SELECT_EXPR_CACHE_N 1024
-static select_expr_cache_entry_t g_select_expr_cache[SELECT_EXPR_CACHE_N];
-static uint16_t g_select_expr_cache_next = 0;
-
-static ray_t* select_expr_cache_get(uint64_t hash, uint64_t from_hash) {
-    if (!g_ray_profile.active) return NULL;
-    if (!hash) return NULL;
-    for (uint16_t i = 0; i < SELECT_EXPR_CACHE_N; i++) {
-        select_expr_cache_entry_t* e = &g_select_expr_cache[i];
-        if (e->result && e->env_gen == ray_env_generation() &&
-            e->hash == hash && e->from_hash == from_hash) {
-            ray_retain(e->result);
-            return e->result;
-        }
-    }
-    return NULL;
-}
-
-static void select_expr_cache_put(uint64_t hash, uint64_t from_hash,
-                                  ray_t* result) {
-    if (!g_ray_profile.active) return;
-    if (!hash || !result || RAY_IS_ERR(result)) return;
-    select_expr_cache_entry_t* e =
-        &g_select_expr_cache[g_select_expr_cache_next++ % SELECT_EXPR_CACHE_N];
-    if (e->result) ray_release(e->result);
-    e->hash = hash;
-    e->from_hash = from_hash;
-    e->env_gen = ray_env_generation();
-    e->result = result;
-    ray_retain(e->result);
 }
 
 /* Flatten a RAY_DICT (keys SYM vec + vals LIST) into a transient
@@ -565,14 +425,17 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
             rng->len = 2;
             ray_t* sliced = ray_take_fn(result, rng);
             ray_release(result);
-            ray_heap_gc();
+            /* No explicit GC here — every top-level statement (run_piped
+             * / repl) finishes with a ray_heap_gc() that catches the
+             * freed intermediates anyway.  The inner call was double-
+             * counting on benchmark loops where the same query runs
+             * back-to-back. */
             ray_release(rng);
             return sliced;
         }
         if (ray_is_vec(tv) && (tv->type == RAY_I64 || tv->type == RAY_I32) && tv->len == 2) {
             ray_t* sliced = ray_take_fn(result, tv);
             ray_release(result);
-            ray_heap_gc();
             ray_release(tv);
             return sliced;
         }
@@ -671,7 +534,9 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
                         }
                         if (topk && !RAY_IS_ERR(topk)) {
                             ray_release(result);
-                            ray_heap_gc();
+                            /* No explicit GC — the top-level statement
+                             * runner's ray_heap_gc() reclaims the freed
+                             * intermediates one call later. */
                             return topk;
                         }
                         if (topk && RAY_IS_ERR(topk)) ray_release(topk);
@@ -1634,1260 +1499,6 @@ static int atom_i64_const(ray_t* v, int64_t* out) {
     }
 }
 
-typedef struct {
-    const void* base;
-    int8_t type;
-    uint8_t attrs;
-    int op;
-    int64_t rhs;
-} xbar_count_clause_t;
-
-typedef struct {
-    int64_t key;
-    int64_t count;
-} xbar_count_pair_t;
-
-typedef struct {
-    uint32_t key;
-    uint32_t count;
-} i16x2_count_pair_t;
-
-typedef struct {
-    int32_t key;
-    uint32_t count;
-} i32_count_pair_t;
-
-typedef struct {
-    int16_t key;
-    uint32_t count;
-} i16_count_pair_t;
-
-typedef struct {
-    const int64_t* key_data;
-    int64_t bucket;
-    xbar_count_clause_t clauses[16];
-    uint8_t n_clauses;
-    uint32_t cap;
-    int64_t* keys;
-    uint32_t* counts;
-    uint8_t* used;
-    _Atomic int overflow;
-} xbar_count_ctx_t;
-
-typedef struct {
-    const int16_t* key0;
-    const int16_t* key1;
-    xbar_count_clause_t clauses[16];
-    uint8_t n_clauses;
-    uint32_t cap;
-    uint32_t* keys;
-    uint32_t* counts;
-    uint8_t* used;
-    _Atomic int overflow;
-} i16x2_count_ctx_t;
-
-typedef struct {
-    const int16_t* key;
-    uint32_t* counts;
-} i16_ne0_count_ctx_t;
-
-typedef struct {
-    const int32_t* group;
-    const int64_t* distinct;
-    uint32_t cap;
-    int32_t* groups;
-    int64_t* values;
-    uint8_t* used;
-    _Atomic int overflow;
-} i32_i64_cd_ctx_t;
-
-static int xbar_count_pair_cmp(const void* a, const void* b) {
-    const xbar_count_pair_t* pa = (const xbar_count_pair_t*)a;
-    const xbar_count_pair_t* pb = (const xbar_count_pair_t*)b;
-    return (pa->key > pb->key) - (pa->key < pb->key);
-}
-
-static int i16x2_count_pair_desc_cmp(const void* a, const void* b) {
-    const i16x2_count_pair_t* pa = (const i16x2_count_pair_t*)a;
-    const i16x2_count_pair_t* pb = (const i16x2_count_pair_t*)b;
-    if (pa->count != pb->count)
-        return (pa->count < pb->count) - (pa->count > pb->count);
-    return (pa->key > pb->key) - (pa->key < pb->key);
-}
-
-static int i32_count_pair_desc_cmp(const void* a, const void* b) {
-    const i32_count_pair_t* pa = (const i32_count_pair_t*)a;
-    const i32_count_pair_t* pb = (const i32_count_pair_t*)b;
-    if (pa->count != pb->count)
-        return (pa->count < pb->count) - (pa->count > pb->count);
-    return (pa->key > pb->key) - (pa->key < pb->key);
-}
-
-static int i16_count_pair_desc_cmp(const void* a, const void* b) {
-    const i16_count_pair_t* pa = (const i16_count_pair_t*)a;
-    const i16_count_pair_t* pb = (const i16_count_pair_t*)b;
-    if (pa->count != pb->count)
-        return (pa->count < pb->count) - (pa->count > pb->count);
-    return (pa->key > pb->key) - (pa->key < pb->key);
-}
-
-static uint64_t xbar_count_hash_i64(int64_t v) {
-    uint64_t h = (uint64_t)v;
-    h ^= h >> 33;
-    h *= 0xff51afd7ed558ccdULL;
-    h ^= h >> 33;
-    h *= 0xc4ceb9fe1a85ec53ULL;
-    h ^= h >> 33;
-    return h;
-}
-
-static uint32_t count_hash_u32(uint32_t v) {
-    uint32_t h = v;
-    h ^= h >> 16;
-    h *= 0x7feb352dU;
-    h ^= h >> 15;
-    h *= 0x846ca68bU;
-    h ^= h >> 16;
-    return h;
-}
-
-static uint64_t count_hash_i32_i64(int32_t g, int64_t v) {
-    uint64_t h = (uint64_t)(uint32_t)g * 0x9E3779B97F4A7C15ULL;
-    uint64_t x = (uint64_t)v;
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    h ^= x + 0xBF58476D1CE4E5B9ULL + (h << 6) + (h >> 2);
-    h ^= h >> 33;
-    return h;
-}
-
-static void xbar_count_worker_fn(void* raw, uint32_t worker_id,
-                                 int64_t start, int64_t end) {
-    xbar_count_ctx_t* ctx = (xbar_count_ctx_t*)raw;
-    uint32_t cap = ctx->cap;
-    uint32_t mask = cap - 1u;
-    int64_t* keys = ctx->keys + (size_t)worker_id * cap;
-    uint32_t* counts = ctx->counts + (size_t)worker_id * cap;
-    uint8_t* used = ctx->used + (size_t)worker_id * cap;
-    int64_t n_groups = 0;
-    int64_t bucket = ctx->bucket;
-
-    for (int64_t r = start; r < end; r++) {
-        uint8_t pass = 1;
-        for (uint8_t ci = 0; ci < ctx->n_clauses; ci++) {
-            const xbar_count_clause_t* c = &ctx->clauses[ci];
-            int64_t v = read_col_i64(c->base, r, c->type, c->attrs);
-            if (c->op == 1) pass &= (uint8_t)(v == c->rhs);
-            else if (c->op == 2) pass &= (uint8_t)(v >= c->rhs);
-            else pass &= (uint8_t)(v <= c->rhs);
-            if (!pass) break;
-        }
-        if (!pass) continue;
-        int64_t ts = ctx->key_data[r];
-        int64_t q = ts / bucket;
-        if ((ts ^ bucket) < 0 && q * bucket != ts) q--;
-        int64_t k = q * bucket;
-        uint32_t slot = (uint32_t)xbar_count_hash_i64(k) & mask;
-        while (used[slot] && keys[slot] != k)
-            slot = (slot + 1u) & mask;
-        if (!used[slot]) {
-            if (n_groups >= (int64_t)(cap / 2)) {
-                atomic_store_explicit(&ctx->overflow, 1, memory_order_relaxed);
-                return;
-            }
-            used[slot] = 1;
-            keys[slot] = k;
-            n_groups++;
-        }
-        counts[slot]++;
-    }
-}
-
-static void i16x2_count_worker_fn(void* raw, uint32_t worker_id,
-                                  int64_t start, int64_t end) {
-    i16x2_count_ctx_t* ctx = (i16x2_count_ctx_t*)raw;
-    uint32_t cap = ctx->cap;
-    uint32_t mask = cap - 1u;
-    uint32_t* keys = ctx->keys + (size_t)worker_id * cap;
-    uint32_t* counts = ctx->counts + (size_t)worker_id * cap;
-    uint8_t* used = ctx->used + (size_t)worker_id * cap;
-    int64_t n_groups = 0;
-
-    for (int64_t r = start; r < end; r++) {
-        uint8_t pass = 1;
-        for (uint8_t ci = 0; ci < ctx->n_clauses; ci++) {
-            const xbar_count_clause_t* c = &ctx->clauses[ci];
-            int64_t v = read_col_i64(c->base, r, c->type, c->attrs);
-            if (c->op == 1) pass &= (uint8_t)(v == c->rhs);
-            else if (c->op == 2) pass &= (uint8_t)(v >= c->rhs);
-            else pass &= (uint8_t)(v <= c->rhs);
-            if (!pass) break;
-        }
-        if (!pass) continue;
-        uint32_t k = ((uint32_t)(uint16_t)ctx->key0[r] << 16) |
-                     (uint32_t)(uint16_t)ctx->key1[r];
-        uint32_t slot = count_hash_u32(k) & mask;
-        while (used[slot] && keys[slot] != k)
-            slot = (slot + 1u) & mask;
-        if (!used[slot]) {
-            if (n_groups >= (int64_t)(cap / 2)) {
-                atomic_store_explicit(&ctx->overflow, 1, memory_order_relaxed);
-                return;
-            }
-            used[slot] = 1;
-            keys[slot] = k;
-            n_groups++;
-        }
-        counts[slot]++;
-    }
-}
-
-static void i16_ne0_count_worker_fn(void* raw, uint32_t worker_id,
-                                    int64_t start, int64_t end) {
-    i16_ne0_count_ctx_t* ctx = (i16_ne0_count_ctx_t*)raw;
-    uint32_t* counts = ctx->counts + (size_t)worker_id * 65536u;
-    const int16_t* key = ctx->key;
-    for (int64_t r = start; r < end; r++) {
-        int16_t v = key[r];
-        if (v)
-            counts[(uint32_t)((int32_t)v + 32768)]++;
-    }
-}
-
-static void i32_i64_cd_worker_fn(void* raw, uint32_t worker_id,
-                                 int64_t start, int64_t end) {
-    i32_i64_cd_ctx_t* ctx = (i32_i64_cd_ctx_t*)raw;
-    uint32_t cap = ctx->cap;
-    uint32_t mask = cap - 1u;
-    int32_t* groups = ctx->groups + (size_t)worker_id * cap;
-    int64_t* values = ctx->values + (size_t)worker_id * cap;
-    uint8_t* used = ctx->used + (size_t)worker_id * cap;
-    int64_t n_filled = 0;
-
-    for (int64_t r = start; r < end; r++) {
-        int32_t g = ctx->group[r];
-        int64_t v = ctx->distinct[r];
-        uint32_t slot = (uint32_t)count_hash_i32_i64(g, v) & mask;
-        while (used[slot] && (groups[slot] != g || values[slot] != v))
-            slot = (slot + 1u) & mask;
-        if (!used[slot]) {
-            if (n_filled >= (int64_t)(cap * 7u / 10u)) {
-                atomic_store_explicit(&ctx->overflow, 1, memory_order_relaxed);
-                return;
-            }
-            used[slot] = 1;
-            groups[slot] = g;
-            values[slot] = v;
-            n_filled++;
-        }
-    }
-}
-
-static int sym_name_eq(int64_t sym, const char* name, size_t len) {
-    ray_t* s = ray_sym_str(sym);
-    return s && ray_str_len(s) == len &&
-           memcmp(ray_str_ptr(s), name, len) == 0;
-}
-
-static int parse_xbar_count_clause(ray_t* tbl, ray_t* expr,
-                                   xbar_count_clause_t* clauses,
-                                   uint8_t* n_clauses) {
-    if (!expr || expr->type != RAY_LIST || ray_len(expr) < 3) return 0;
-    ray_t** elems = (ray_t**)ray_data(expr);
-    if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
-    ray_t* head = ray_sym_str(elems[0]->i64);
-    if (!head) return 0;
-    const char* hn = ray_str_ptr(head);
-    size_t hl = ray_str_len(head);
-    if (hl == 3 && memcmp(hn, "and", 3) == 0) {
-        for (int64_t i = 1; i < ray_len(expr); i++)
-            if (!parse_xbar_count_clause(tbl, elems[i], clauses, n_clauses))
-                return 0;
-        return 1;
-    }
-    if (ray_len(expr) != 3 || *n_clauses >= 16) return 0;
-    int op = 0;
-    if (hl == 2 && memcmp(hn, "==", 2) == 0) op = 1;
-    else if (hl == 2 && memcmp(hn, ">=", 2) == 0) op = 2;
-    else if (hl == 2 && memcmp(hn, "<=", 2) == 0) op = 3;
-    else return 0;
-
-    ray_t* lhs = elems[1];
-    ray_t* rhs = elems[2];
-    int64_t rhs_i = 0;
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME) ||
-        !atom_i64_const(rhs, &rhs_i))
-        return 0;
-    ray_t* col = ray_table_get_col(tbl, lhs->i64);
-    if (!col || !ray_is_vec(col) || RAY_IS_PARTED(col->type) ||
-        col->type == RAY_MAPCOMMON || (col->attrs & RAY_ATTR_HAS_NULLS))
-        return 0;
-    int8_t ct = col->type;
-    if (ct != RAY_BOOL && ct != RAY_U8 && ct != RAY_I16 &&
-        ct != RAY_I32 && ct != RAY_I64 && ct != RAY_DATE &&
-        ct != RAY_TIME && ct != RAY_TIMESTAMP)
-        return 0;
-    clauses[*n_clauses] = (xbar_count_clause_t){
-        .base = ray_data(col),
-        .type = ct,
-        .attrs = col->attrs,
-        .op = op,
-        .rhs = rhs_i,
-    };
-    (*n_clauses)++;
-    return 1;
-}
-
-static int count_clause_score(const xbar_count_clause_t* c) {
-    if (c->op == 1 && ray_sym_elem_size(c->type, c->attrs) >= 8) return 0;
-    if (c->op == 1) return 1;
-    return 2;
-}
-
-static void order_count_clauses(xbar_count_clause_t* clauses, uint8_t n) {
-    for (uint8_t i = 1; i < n; i++) {
-        xbar_count_clause_t v = clauses[i];
-        int vs = count_clause_score(&v);
-        uint8_t j = i;
-        while (j > 0 && count_clause_score(&clauses[j - 1]) > vs) {
-            clauses[j] = clauses[j - 1];
-            j--;
-        }
-        clauses[j] = v;
-    }
-}
-
-static int xbar_clause_cache_eq(const xbar_count_clause_t* a, uint8_t an,
-                                const xbar_count_clause_t* b, uint8_t bn) {
-    if (an != bn) return 0;
-    for (uint8_t i = 0; i < an; i++) {
-        if (a[i].base != b[i].base || a[i].type != b[i].type ||
-            a[i].attrs != b[i].attrs || a[i].op != b[i].op ||
-            a[i].rhs != b[i].rhs)
-            return 0;
-    }
-    return 1;
-}
-
-static int match_i16_key_ne_zero(ray_t* where_expr, int64_t key_sym) {
-    if (!where_expr || where_expr->type != RAY_LIST || ray_len(where_expr) != 3)
-        return 0;
-    ray_t** e = (ray_t**)ray_data(where_expr);
-    if (!e[0] || e[0]->type != -RAY_SYM ||
-        !sym_name_eq(e[0]->i64, "!=", 2))
-        return 0;
-    ray_t* lhs = e[1];
-    int64_t rhs = 0;
-    return lhs && lhs->type == -RAY_SYM && (lhs->attrs & RAY_ATTR_NAME) &&
-           lhs->i64 == key_sym && atom_i64_const(e[2], &rhs) && rhs == 0;
-}
-
-static ray_t* try_i16_ne0_count_desc_select(ray_t* tbl, ray_t* where_expr,
-                                            ray_t* by_expr, ray_t* take_expr,
-                                            ray_t** dict_elems,
-                                            int64_t dict_n,
-                                            int64_t from_id,
-                                            int64_t where_id,
-                                            int64_t by_id,
-                                            int64_t take_id,
-                                            int64_t asc_id,
-                                            int64_t desc_id,
-                                            int64_t nearest_id) {
-    if (!tbl || tbl->type != RAY_TABLE || !where_expr || !by_expr ||
-        !take_expr || by_expr->type != -RAY_SYM ||
-        !(by_expr->attrs & RAY_ATTR_NAME))
-        return NULL;
-    int64_t key_sym = by_expr->i64;
-    int64_t take_n = 0;
-    if (!atom_i64_const(take_expr, &take_n) || take_n <= 0 || take_n > 1024)
-        return NULL;
-    if (!match_i16_key_ne_zero(where_expr, key_sym))
-        return NULL;
-
-    int64_t count_alias = -1;
-    int saw_desc = 0;
-    int saw_key_projection = 0;
-    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-        int64_t kid = dict_elems[i]->i64;
-        ray_t* v = dict_elems[i + 1];
-        if (kid == from_id || kid == where_id || kid == by_id ||
-            kid == take_id || kid == nearest_id)
-            continue;
-        if (kid == desc_id) {
-            if (!v || v->type != -RAY_SYM)
-                return NULL;
-            saw_desc = 1;
-            continue;
-        }
-        if (kid == asc_id) return NULL;
-        if (v && v->type == -RAY_SYM && (v->attrs & RAY_ATTR_NAME) &&
-            kid == key_sym && v->i64 == key_sym) {
-            saw_key_projection = 1;
-            continue;
-        }
-        if (count_alias >= 0 || !v || v->type != RAY_LIST || ray_len(v) != 2)
-            return NULL;
-        ray_t** ae = (ray_t**)ray_data(v);
-        if (!ae[0] || ae[0]->type != -RAY_SYM ||
-            !sym_name_eq(ae[0]->i64, "count", 5))
-            return NULL;
-        ray_t* arg = ae[1];
-        if (!arg || arg->type != -RAY_SYM || !(arg->attrs & RAY_ATTR_NAME) ||
-            arg->i64 != key_sym)
-            return NULL;
-        count_alias = kid;
-    }
-    if (!saw_desc || !saw_key_projection || count_alias < 0)
-        return NULL;
-
-    ray_t* col = ray_table_get_col(tbl, key_sym);
-    if (!col || !ray_is_vec(col) || col->type != RAY_I16 ||
-        (col->attrs & RAY_ATTR_HAS_NULLS))
-        return NULL;
-
-    static ray_t* cache_result = NULL;
-    static ray_t* cache_tbl = NULL;
-    static ray_t* cache_col = NULL;
-    static int64_t cache_len = -1;
-    static int64_t cache_key_sym = -1;
-    static int64_t cache_count_alias = -1;
-    static int64_t cache_take = -1;
-    if (cache_result && cache_tbl == tbl && cache_col == col &&
-        cache_len == col->len && cache_key_sym == key_sym &&
-        cache_count_alias == count_alias && cache_take == take_n) {
-        ray_retain(cache_result);
-        return cache_result;
-    }
-
-    ray_pool_t* pool = ray_pool_get();
-    uint32_t nw = pool ? ray_pool_total_workers(pool) : 1;
-    if (nw == 0) nw = 1;
-    ray_t* counts_hdr = NULL;
-    uint32_t* counts = (uint32_t*)scratch_calloc(&counts_hdr,
-        (size_t)nw * 65536u * sizeof(uint32_t));
-    if (!counts)
-        return ray_error("oom", NULL);
-
-    i16_ne0_count_ctx_t ctx = {
-        .key = (const int16_t*)ray_data(col),
-        .counts = counts,
-    };
-    int64_t nrows = ray_table_nrows(tbl);
-    if (pool && nrows >= RAY_PARALLEL_THRESHOLD)
-        ray_pool_dispatch(pool, i16_ne0_count_worker_fn, &ctx, nrows);
-    else
-        i16_ne0_count_worker_fn(&ctx, 0, 0, nrows);
-
-    i16_count_pair_t top[1024];
-    int64_t top_n = 0;
-    for (uint32_t s = 0; s < 65536u; s++) {
-        uint32_t total = 0;
-        for (uint32_t w = 0; w < nw; w++)
-            total += counts[(size_t)w * 65536u + s];
-        if (!total) continue;
-        i16_count_pair_t cand = {
-            .key = (int16_t)((int32_t)s - 32768),
-            .count = total,
-        };
-        if (top_n < take_n) {
-            top[top_n++] = cand;
-            continue;
-        }
-        int64_t min_i = 0;
-        for (int64_t i = 1; i < top_n; i++) {
-            if (top[i].count < top[min_i].count ||
-                (top[i].count == top[min_i].count && top[i].key > top[min_i].key))
-                min_i = i;
-        }
-        if (cand.count > top[min_i].count ||
-            (cand.count == top[min_i].count && cand.key < top[min_i].key))
-            top[min_i] = cand;
-    }
-    scratch_free(counts_hdr);
-    qsort(top, (size_t)top_n, sizeof(i16_count_pair_t),
-          i16_count_pair_desc_cmp);
-
-    int64_t out_n = top_n;
-    ray_t* key_out = ray_vec_new(RAY_I16, out_n);
-    ray_t* cnt_out = ray_vec_new(RAY_I64, out_n);
-    if (!key_out || !cnt_out || RAY_IS_ERR(key_out) || RAY_IS_ERR(cnt_out)) {
-        if (key_out && !RAY_IS_ERR(key_out)) ray_release(key_out);
-        if (cnt_out && !RAY_IS_ERR(cnt_out)) ray_release(cnt_out);
-        return ray_error("oom", NULL);
-    }
-    key_out->len = out_n;
-    cnt_out->len = out_n;
-    int16_t* ko = (int16_t*)ray_data(key_out);
-    int64_t* co = (int64_t*)ray_data(cnt_out);
-    for (int64_t i = 0; i < out_n; i++) {
-        ko[i] = top[i].key;
-        co[i] = (int64_t)top[i].count;
-    }
-
-    ray_t* out = ray_table_new(2);
-    if (!out || RAY_IS_ERR(out)) {
-        ray_release(key_out); ray_release(cnt_out);
-        return out ? out : ray_error("oom", NULL);
-    }
-    out = ray_table_add_col(out, key_sym, key_out);
-    out = ray_table_add_col(out, count_alias, cnt_out);
-    ray_release(key_out); ray_release(cnt_out);
-    if (cache_result)
-        ray_release(cache_result);
-    cache_result = out;
-    cache_tbl = tbl;
-    cache_col = col;
-    cache_len = col->len;
-    cache_key_sym = key_sym;
-    cache_count_alias = count_alias;
-    cache_take = take_n;
-    ray_retain(cache_result);
-    return out;
-}
-
-static ray_t* try_i32_i64_count_distinct_select(ray_t* tbl, ray_t* where_expr,
-                                                ray_t* by_expr,
-                                                ray_t* take_expr,
-                                                ray_t** dict_elems,
-                                                int64_t dict_n,
-                                                int64_t from_id,
-                                                int64_t where_id,
-                                                int64_t by_id,
-                                                int64_t take_id,
-                                                int64_t asc_id,
-                                                int64_t desc_id,
-                                                int64_t nearest_id) {
-    if (!tbl || tbl->type != RAY_TABLE || where_expr || !by_expr ||
-        !take_expr || by_expr->type != -RAY_SYM ||
-        !(by_expr->attrs & RAY_ATTR_NAME))
-        return NULL;
-
-    int64_t take_n = 0;
-    if (!atom_i64_const(take_expr, &take_n) || take_n <= 0 || take_n > 1024)
-        return NULL;
-
-    int64_t group_sym = by_expr->i64;
-    int64_t distinct_sym = -1;
-    int64_t count_alias = -1;
-    int saw_desc = 0;
-    int saw_group_projection = 0;
-    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-        int64_t kid = dict_elems[i]->i64;
-        ray_t* v = dict_elems[i + 1];
-        if (kid == from_id || kid == where_id || kid == by_id ||
-            kid == take_id || kid == nearest_id)
-            continue;
-        if (kid == desc_id) {
-            if (!v || v->type != -RAY_SYM)
-                return NULL;
-            saw_desc = 1;
-            continue;
-        }
-        if (kid == asc_id) return NULL;
-        if (v && v->type == -RAY_SYM && (v->attrs & RAY_ATTR_NAME) &&
-            kid == group_sym && v->i64 == group_sym) {
-            saw_group_projection = 1;
-            continue;
-        }
-        if (count_alias >= 0 || !v || v->type != RAY_LIST || ray_len(v) != 2)
-            return NULL;
-        ray_t** ae = (ray_t**)ray_data(v);
-        if (!ae[0] || ae[0]->type != -RAY_SYM ||
-            !sym_name_eq(ae[0]->i64, "count", 5))
-            return NULL;
-        ray_t* inner = ae[1];
-        if (!inner || inner->type != RAY_LIST || ray_len(inner) != 2)
-            return NULL;
-        ray_t** ie = (ray_t**)ray_data(inner);
-        if (!ie[0] || ie[0]->type != -RAY_SYM ||
-            !sym_name_eq(ie[0]->i64, "distinct", 8))
-            return NULL;
-        ray_t* arg = ie[1];
-        if (!arg || arg->type != -RAY_SYM || !(arg->attrs & RAY_ATTR_NAME))
-            return NULL;
-        distinct_sym = arg->i64;
-        count_alias = kid;
-    }
-    if (!saw_desc || !saw_group_projection || count_alias < 0 ||
-        distinct_sym < 0)
-        return NULL;
-
-    ray_t* gcol = ray_table_get_col(tbl, group_sym);
-    ray_t* dcol = ray_table_get_col(tbl, distinct_sym);
-    if (!gcol || !dcol || !ray_is_vec(gcol) || !ray_is_vec(dcol) ||
-        gcol->type != RAY_I32 || dcol->type != RAY_I64 ||
-        (gcol->attrs & RAY_ATTR_HAS_NULLS) ||
-        (dcol->attrs & RAY_ATTR_HAS_NULLS))
-        return NULL;
-
-    static ray_t* cache_result = NULL;
-    static ray_t* cache_tbl = NULL;
-    static int64_t cache_len = -1;
-    static int64_t cache_group_sym = -1;
-    static int64_t cache_distinct_sym = -1;
-    static int64_t cache_count_alias = -1;
-    static int64_t cache_take = -1;
-    if (cache_result && cache_tbl == tbl && cache_len == gcol->len &&
-        cache_group_sym == group_sym && cache_distinct_sym == distinct_sym &&
-        cache_count_alias == count_alias && cache_take == take_n) {
-        ray_retain(cache_result);
-        return cache_result;
-    }
-
-    int64_t nrows = ray_table_nrows(tbl);
-    ray_pool_t* pool = ray_pool_get();
-    uint32_t nw = pool ? ray_pool_total_workers(pool) : 1;
-    if (nw == 0) nw = 1;
-    const uint32_t local_cap = 1u << 20;
-    ray_t *lg_hdr = NULL, *lv_hdr = NULL, *lu_hdr = NULL;
-    int32_t* lg = (int32_t*)scratch_calloc(&lg_hdr,
-        (size_t)nw * local_cap * sizeof(int32_t));
-    int64_t* lv = (int64_t*)scratch_calloc(&lv_hdr,
-        (size_t)nw * local_cap * sizeof(int64_t));
-    uint8_t* lu = (uint8_t*)scratch_calloc(&lu_hdr, (size_t)nw * local_cap);
-    if (!lg || !lv || !lu) {
-        if (lg_hdr) scratch_free(lg_hdr);
-        if (lv_hdr) scratch_free(lv_hdr);
-        if (lu_hdr) scratch_free(lu_hdr);
-        return ray_error("oom", NULL);
-    }
-
-    i32_i64_cd_ctx_t ctx = {
-        .group = (const int32_t*)ray_data(gcol),
-        .distinct = (const int64_t*)ray_data(dcol),
-        .cap = local_cap,
-        .groups = lg,
-        .values = lv,
-        .used = lu,
-    };
-    atomic_store_explicit(&ctx.overflow, 0, memory_order_relaxed);
-    if (pool && nrows >= RAY_PARALLEL_THRESHOLD)
-        ray_pool_dispatch(pool, i32_i64_cd_worker_fn, &ctx, nrows);
-    else
-        i32_i64_cd_worker_fn(&ctx, 0, 0, nrows);
-    if (atomic_load_explicit(&ctx.overflow, memory_order_relaxed)) {
-        scratch_free(lg_hdr); scratch_free(lv_hdr); scratch_free(lu_hdr);
-        return NULL;
-    }
-
-    const uint32_t gcap = 1u << 23;
-    const uint32_t gmask = gcap - 1u;
-    ray_t *gg_hdr = NULL, *gv_hdr = NULL, *gu_hdr = NULL;
-    int32_t* gg = (int32_t*)scratch_calloc(&gg_hdr, (size_t)gcap * sizeof(int32_t));
-    int64_t* gv = (int64_t*)scratch_calloc(&gv_hdr, (size_t)gcap * sizeof(int64_t));
-    uint8_t* gu = (uint8_t*)scratch_calloc(&gu_hdr, (size_t)gcap);
-    if (!gg || !gv || !gu) {
-        scratch_free(lg_hdr); scratch_free(lv_hdr); scratch_free(lu_hdr);
-        if (gg_hdr) scratch_free(gg_hdr);
-        if (gv_hdr) scratch_free(gv_hdr);
-        if (gu_hdr) scratch_free(gu_hdr);
-        return ray_error("oom", NULL);
-    }
-
-    int64_t global_n = 0;
-    for (uint32_t w = 0; w < nw; w++) {
-        int32_t* wg = lg + (size_t)w * local_cap;
-        int64_t* wv = lv + (size_t)w * local_cap;
-        uint8_t* wu = lu + (size_t)w * local_cap;
-        for (uint32_t s = 0; s < local_cap; s++) {
-            if (!wu[s]) continue;
-            int32_t g = wg[s];
-            int64_t v = wv[s];
-            uint32_t slot = (uint32_t)count_hash_i32_i64(g, v) & gmask;
-            while (gu[slot] && (gg[slot] != g || gv[slot] != v))
-                slot = (slot + 1u) & gmask;
-            if (!gu[slot]) {
-                if (global_n >= (int64_t)(gcap * 7u / 10u)) {
-                    scratch_free(gg_hdr); scratch_free(gv_hdr); scratch_free(gu_hdr);
-                    scratch_free(lg_hdr); scratch_free(lv_hdr); scratch_free(lu_hdr);
-                    return NULL;
-                }
-                gu[slot] = 1;
-                gg[slot] = g;
-                gv[slot] = v;
-                global_n++;
-            }
-        }
-    }
-    scratch_free(lg_hdr); scratch_free(lv_hdr); scratch_free(lu_hdr);
-
-    const uint32_t rcap = 4096;
-    const uint32_t rmask = rcap - 1u;
-    int32_t rkeys[4096];
-    uint32_t rcounts[4096];
-    uint8_t rused[4096];
-    memset(rused, 0, sizeof(rused));
-    int64_t region_n = 0;
-    for (uint32_t s = 0; s < gcap; s++) {
-        if (!gu[s]) continue;
-        int32_t g = gg[s];
-        uint32_t slot = count_hash_u32((uint32_t)g) & rmask;
-        while (rused[slot] && rkeys[slot] != g)
-            slot = (slot + 1u) & rmask;
-        if (!rused[slot]) {
-            if (region_n >= (int64_t)(rcap / 2)) {
-                scratch_free(gg_hdr); scratch_free(gv_hdr); scratch_free(gu_hdr);
-                return NULL;
-            }
-            rused[slot] = 1;
-            rkeys[slot] = g;
-            rcounts[slot] = 0;
-            region_n++;
-        }
-        rcounts[slot]++;
-    }
-    scratch_free(gg_hdr); scratch_free(gv_hdr); scratch_free(gu_hdr);
-
-    ray_t* pairs_hdr = NULL;
-    i32_count_pair_t* pairs = (i32_count_pair_t*)scratch_alloc(
-        &pairs_hdr, (size_t)region_n * sizeof(i32_count_pair_t));
-    if (!pairs && region_n > 0)
-        return ray_error("oom", NULL);
-    int64_t pi = 0;
-    for (uint32_t s = 0; s < rcap; s++) {
-        if (!rused[s]) continue;
-        pairs[pi++] = (i32_count_pair_t){ .key = rkeys[s], .count = rcounts[s] };
-    }
-    qsort(pairs, (size_t)region_n, sizeof(i32_count_pair_t),
-          i32_count_pair_desc_cmp);
-
-    int64_t out_n = region_n < take_n ? region_n : take_n;
-    ray_t* key_out = ray_vec_new(RAY_I32, out_n);
-    ray_t* cnt_out = ray_vec_new(RAY_I64, out_n);
-    if (!key_out || !cnt_out || RAY_IS_ERR(key_out) || RAY_IS_ERR(cnt_out)) {
-        if (key_out && !RAY_IS_ERR(key_out)) ray_release(key_out);
-        if (cnt_out && !RAY_IS_ERR(cnt_out)) ray_release(cnt_out);
-        scratch_free(pairs_hdr);
-        return ray_error("oom", NULL);
-    }
-    key_out->len = out_n;
-    cnt_out->len = out_n;
-    int32_t* ko = (int32_t*)ray_data(key_out);
-    int64_t* co = (int64_t*)ray_data(cnt_out);
-    for (int64_t i = 0; i < out_n; i++) {
-        ko[i] = pairs[i].key;
-        co[i] = (int64_t)pairs[i].count;
-    }
-    scratch_free(pairs_hdr);
-
-    ray_t* out = ray_table_new(2);
-    if (!out || RAY_IS_ERR(out)) {
-        ray_release(key_out); ray_release(cnt_out);
-        return out ? out : ray_error("oom", NULL);
-    }
-    out = ray_table_add_col(out, group_sym, key_out);
-    out = ray_table_add_col(out, count_alias, cnt_out);
-    ray_release(key_out); ray_release(cnt_out);
-    if (cache_result)
-        ray_release(cache_result);
-    cache_result = out;
-    cache_tbl = tbl;
-    cache_len = gcol->len;
-    cache_group_sym = group_sym;
-    cache_distinct_sym = distinct_sym;
-    cache_count_alias = count_alias;
-    cache_take = take_n;
-    ray_retain(cache_result);
-    return out;
-}
-
-static ray_t* try_i16x2_count_desc_select(ray_t* tbl, ray_t* where_expr,
-                                          ray_t* by_expr, ray_t* take_expr,
-                                          ray_t** dict_elems, int64_t dict_n,
-                                          int64_t from_id, int64_t where_id,
-                                          int64_t by_id, int64_t take_id,
-                                          int64_t asc_id, int64_t desc_id,
-                                          int64_t nearest_id) {
-    if (!tbl || tbl->type != RAY_TABLE || !where_expr || !by_expr ||
-        !take_expr || by_expr->type != RAY_DICT)
-        return NULL;
-
-    int64_t take_n = 0;
-    if (!atom_i64_const(take_expr, &take_n) || take_n <= 0 || take_n > 1000000)
-        return NULL;
-
-    DICT_VIEW_DECL(bv);
-    DICT_VIEW_OPEN(by_expr, bv);
-    if (DICT_VIEW_OVERFLOW(bv) || bv_n != 4) return NULL;
-    ray_t* key0_atom = bv[0];
-    ray_t* key0_val = bv[1];
-    ray_t* key1_atom = bv[2];
-    ray_t* key1_val = bv[3];
-    if (!key0_atom || key0_atom->type != -RAY_SYM ||
-        !key1_atom || key1_atom->type != -RAY_SYM ||
-        !key0_val || key0_val->type != -RAY_SYM ||
-        !key1_val || key1_val->type != -RAY_SYM ||
-        !(key0_val->attrs & RAY_ATTR_NAME) ||
-        !(key1_val->attrs & RAY_ATTR_NAME) ||
-        key0_atom->i64 != key0_val->i64 ||
-        key1_atom->i64 != key1_val->i64)
-        return NULL;
-
-    int64_t count_alias = -1;
-    int saw_desc = 0;
-    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-        int64_t kid = dict_elems[i]->i64;
-        ray_t* v = dict_elems[i + 1];
-        if (kid == from_id || kid == where_id || kid == by_id ||
-            kid == take_id || kid == nearest_id)
-            continue;
-        if (kid == desc_id) {
-            if (!v || v->type != -RAY_SYM)
-                return NULL;
-            saw_desc = 1;
-            continue;
-        }
-        if (kid == asc_id) return NULL;
-        if (count_alias >= 0 || !is_group_dag_agg_expr(v)) return NULL;
-        ray_t** ae = (ray_t**)ray_data(v);
-        if (!ae[0] || ae[0]->type != -RAY_SYM ||
-            !sym_name_eq(ae[0]->i64, "count", 5))
-            return NULL;
-        count_alias = kid;
-    }
-    if (!saw_desc || count_alias < 0) return NULL;
-
-    ray_t* col0 = ray_table_get_col(tbl, key0_atom->i64);
-    ray_t* col1 = ray_table_get_col(tbl, key1_atom->i64);
-    if (!col0 || !col1 || !ray_is_vec(col0) || !ray_is_vec(col1) ||
-        col0->type != RAY_I16 || col1->type != RAY_I16 ||
-        (col0->attrs & RAY_ATTR_HAS_NULLS) ||
-        (col1->attrs & RAY_ATTR_HAS_NULLS))
-        return NULL;
-
-    xbar_count_clause_t clauses[16];
-    uint8_t n_clauses = 0;
-    if (!parse_xbar_count_clause(tbl, where_expr, clauses, &n_clauses) ||
-        n_clauses == 0)
-        return NULL;
-    order_count_clauses(clauses, n_clauses);
-
-    static ray_t* cache_result = NULL;
-    static ray_t* cache_tbl = NULL;
-    static ray_t* cache_col0 = NULL;
-    static ray_t* cache_col1 = NULL;
-    static int64_t cache_len = -1;
-    static int64_t cache_key0 = -1;
-    static int64_t cache_key1 = -1;
-    static int64_t cache_count_alias = -1;
-    static int64_t cache_take = -1;
-    static uint8_t cache_n_clauses = 0;
-    static xbar_count_clause_t cache_clauses[16];
-    if (cache_result && cache_tbl == tbl && cache_col0 == col0 &&
-        cache_col1 == col1 && cache_len == col0->len &&
-        cache_key0 == key0_atom->i64 && cache_key1 == key1_atom->i64 &&
-        cache_count_alias == count_alias && cache_take == take_n &&
-        xbar_clause_cache_eq(cache_clauses, cache_n_clauses,
-                             clauses, n_clauses)) {
-        ray_retain(cache_result);
-        return cache_result;
-    }
-
-    int64_t nrows = ray_table_nrows(tbl);
-    const uint32_t cap = 4096;
-    const uint32_t mask = cap - 1u;
-    ray_pool_t* pool = ray_pool_get();
-    uint32_t nw = pool ? ray_pool_total_workers(pool) : 1;
-    if (nw == 0) nw = 1;
-
-    ray_t *keys_hdr = NULL, *counts_hdr = NULL, *used_hdr = NULL;
-    uint32_t* keys = (uint32_t*)scratch_calloc(&keys_hdr,
-        (size_t)nw * cap * sizeof(uint32_t));
-    uint32_t* counts = (uint32_t*)scratch_calloc(&counts_hdr,
-        (size_t)nw * cap * sizeof(uint32_t));
-    uint8_t* used = (uint8_t*)scratch_calloc(&used_hdr, (size_t)nw * cap);
-    if (!keys || !counts || !used) {
-        if (keys_hdr) scratch_free(keys_hdr);
-        if (counts_hdr) scratch_free(counts_hdr);
-        if (used_hdr) scratch_free(used_hdr);
-        return ray_error("oom", NULL);
-    }
-
-    i16x2_count_ctx_t ctx = {
-        .key0 = (const int16_t*)ray_data(col0),
-        .key1 = (const int16_t*)ray_data(col1),
-        .n_clauses = n_clauses,
-        .cap = cap,
-        .keys = keys,
-        .counts = counts,
-        .used = used,
-    };
-    memcpy(ctx.clauses, clauses, sizeof(clauses));
-    atomic_store_explicit(&ctx.overflow, 0, memory_order_relaxed);
-    if (pool && nrows >= RAY_PARALLEL_THRESHOLD)
-        ray_pool_dispatch(pool, i16x2_count_worker_fn, &ctx, nrows);
-    else
-        i16x2_count_worker_fn(&ctx, 0, 0, nrows);
-    if (atomic_load_explicit(&ctx.overflow, memory_order_relaxed)) {
-        scratch_free(keys_hdr);
-        scratch_free(counts_hdr);
-        scratch_free(used_hdr);
-        return NULL;
-    }
-
-    ray_t *mkeys_hdr = NULL, *mcounts_hdr = NULL, *mused_hdr = NULL;
-    uint32_t* mkeys = (uint32_t*)scratch_calloc(&mkeys_hdr, cap * sizeof(uint32_t));
-    uint32_t* mcounts = (uint32_t*)scratch_calloc(&mcounts_hdr, cap * sizeof(uint32_t));
-    uint8_t* mused = (uint8_t*)scratch_calloc(&mused_hdr, cap);
-    if (!mkeys || !mcounts || !mused) {
-        scratch_free(keys_hdr); scratch_free(counts_hdr); scratch_free(used_hdr);
-        if (mkeys_hdr) scratch_free(mkeys_hdr);
-        if (mcounts_hdr) scratch_free(mcounts_hdr);
-        if (mused_hdr) scratch_free(mused_hdr);
-        return ray_error("oom", NULL);
-    }
-
-    int64_t n_groups = 0;
-    for (uint32_t w = 0; w < nw; w++) {
-        uint32_t* wk = keys + (size_t)w * cap;
-        uint32_t* wc = counts + (size_t)w * cap;
-        uint8_t* wu = used + (size_t)w * cap;
-        for (uint32_t s = 0; s < cap; s++) {
-            if (!wu[s]) continue;
-            uint32_t k = wk[s];
-            uint32_t slot = count_hash_u32(k) & mask;
-            while (mused[slot] && mkeys[slot] != k)
-                slot = (slot + 1u) & mask;
-            if (!mused[slot]) {
-                if (n_groups >= (int64_t)(cap / 2)) {
-                    scratch_free(mkeys_hdr); scratch_free(mcounts_hdr);
-                    scratch_free(mused_hdr); scratch_free(keys_hdr);
-                    scratch_free(counts_hdr); scratch_free(used_hdr);
-                    return NULL;
-                }
-                mused[slot] = 1;
-                mkeys[slot] = k;
-                n_groups++;
-            }
-            mcounts[slot] += wc[s];
-        }
-    }
-
-    int64_t out_n = n_groups < take_n ? n_groups : take_n;
-    ray_t* pairs_hdr = NULL;
-    i16x2_count_pair_t* pairs = (i16x2_count_pair_t*)scratch_alloc(
-        &pairs_hdr, (size_t)n_groups * sizeof(i16x2_count_pair_t));
-    if (!pairs && n_groups > 0) {
-        scratch_free(mkeys_hdr); scratch_free(mcounts_hdr); scratch_free(mused_hdr);
-        scratch_free(keys_hdr); scratch_free(counts_hdr); scratch_free(used_hdr);
-        return ray_error("oom", NULL);
-    }
-    int64_t pi = 0;
-    for (uint32_t s = 0; s < cap; s++) {
-        if (!mused[s]) continue;
-        pairs[pi++] = (i16x2_count_pair_t){ .key = mkeys[s], .count = mcounts[s] };
-    }
-    qsort(pairs, (size_t)n_groups, sizeof(i16x2_count_pair_t),
-          i16x2_count_pair_desc_cmp);
-
-    ray_t* key0_out = ray_vec_new(RAY_I16, out_n);
-    ray_t* key1_out = ray_vec_new(RAY_I16, out_n);
-    ray_t* cnt_out = ray_vec_new(RAY_I64, out_n);
-    if (!key0_out || !key1_out || !cnt_out ||
-        RAY_IS_ERR(key0_out) || RAY_IS_ERR(key1_out) || RAY_IS_ERR(cnt_out)) {
-        if (key0_out && !RAY_IS_ERR(key0_out)) ray_release(key0_out);
-        if (key1_out && !RAY_IS_ERR(key1_out)) ray_release(key1_out);
-        if (cnt_out && !RAY_IS_ERR(cnt_out)) ray_release(cnt_out);
-        scratch_free(pairs_hdr);
-        scratch_free(mkeys_hdr); scratch_free(mcounts_hdr); scratch_free(mused_hdr);
-        scratch_free(keys_hdr); scratch_free(counts_hdr); scratch_free(used_hdr);
-        return ray_error("oom", NULL);
-    }
-    key0_out->len = out_n;
-    key1_out->len = out_n;
-    cnt_out->len = out_n;
-    int16_t* k0o = (int16_t*)ray_data(key0_out);
-    int16_t* k1o = (int16_t*)ray_data(key1_out);
-    int64_t* co = (int64_t*)ray_data(cnt_out);
-    for (int64_t i = 0; i < out_n; i++) {
-        uint32_t k = pairs[i].key;
-        k0o[i] = (int16_t)(uint16_t)(k >> 16);
-        k1o[i] = (int16_t)(uint16_t)k;
-        co[i] = (int64_t)pairs[i].count;
-    }
-    scratch_free(pairs_hdr);
-    scratch_free(mkeys_hdr); scratch_free(mcounts_hdr); scratch_free(mused_hdr);
-    scratch_free(keys_hdr); scratch_free(counts_hdr); scratch_free(used_hdr);
-
-    ray_t* out = ray_table_new(3);
-    if (!out || RAY_IS_ERR(out)) {
-        ray_release(key0_out); ray_release(key1_out); ray_release(cnt_out);
-        return out ? out : ray_error("oom", NULL);
-    }
-    out = ray_table_add_col(out, key0_atom->i64, key0_out);
-    out = ray_table_add_col(out, key1_atom->i64, key1_out);
-    out = ray_table_add_col(out, count_alias, cnt_out);
-    ray_release(key0_out); ray_release(key1_out); ray_release(cnt_out);
-    if (cache_result)
-        ray_release(cache_result);
-    cache_result = out;
-    cache_tbl = tbl;
-    cache_col0 = col0;
-    cache_col1 = col1;
-    cache_len = col0->len;
-    cache_key0 = key0_atom->i64;
-    cache_key1 = key1_atom->i64;
-    cache_count_alias = count_alias;
-    cache_take = take_n;
-    cache_n_clauses = n_clauses;
-    memcpy(cache_clauses, clauses, sizeof(clauses));
-    ray_retain(cache_result);
-    return out;
-}
-
-static ray_t* try_xbar_count_select(ray_t* tbl, ray_t* where_expr,
-                                    ray_t* by_expr, ray_t* take_expr,
-                                    ray_t** dict_elems, int64_t dict_n,
-                                    int64_t from_id, int64_t where_id,
-                                    int64_t by_id, int64_t take_id,
-                                    int64_t asc_id, int64_t desc_id,
-                                    int64_t nearest_id) {
-    if (!tbl || tbl->type != RAY_TABLE || !where_expr || !by_expr ||
-        !take_expr)
-        return NULL;
-
-    int64_t take_n = 0;
-    if (!atom_i64_const(take_expr, &take_n) || take_n <= 0 || take_n > 1000000)
-        return NULL;
-
-    if (!by_expr || by_expr->type != RAY_DICT) return NULL;
-    DICT_VIEW_DECL(bv);
-    DICT_VIEW_OPEN(by_expr, bv);
-    if (DICT_VIEW_OVERFLOW(bv) || bv_n != 2) return NULL;
-    ray_t* key_atom = bv[0];
-    ray_t* xbar_expr = bv[1];
-    if (!key_atom || key_atom->type != -RAY_SYM ||
-        !xbar_expr || xbar_expr->type != RAY_LIST ||
-        ray_len(xbar_expr) != 3)
-        return NULL;
-    ray_t** xe = (ray_t**)ray_data(xbar_expr);
-    if (!xe[0] || xe[0]->type != -RAY_SYM ||
-        !sym_name_eq(xe[0]->i64, "xbar", 4))
-        return NULL;
-    if (!xe[1] || xe[1]->type != -RAY_SYM ||
-        !(xe[1]->attrs & RAY_ATTR_NAME))
-        return NULL;
-    int64_t bucket = 0;
-    if (!atom_i64_const(xe[2], &bucket) || bucket <= 0) return NULL;
-
-    int64_t count_alias = -1;
-    int saw_asc = 0;
-    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-        int64_t kid = dict_elems[i]->i64;
-        ray_t* v = dict_elems[i + 1];
-        if (kid == from_id || kid == where_id || kid == by_id ||
-            kid == take_id || kid == nearest_id)
-            continue;
-        if (kid == asc_id) {
-            if (!v || v->type != -RAY_SYM || v->i64 != key_atom->i64)
-                return NULL;
-            saw_asc = 1;
-            continue;
-        }
-        if (kid == desc_id) return NULL;
-        if (count_alias >= 0 || !is_group_dag_agg_expr(v)) return NULL;
-        ray_t** ae = (ray_t**)ray_data(v);
-        if (!ae[0] || ae[0]->type != -RAY_SYM ||
-            !sym_name_eq(ae[0]->i64, "count", 5))
-            return NULL;
-        count_alias = kid;
-    }
-    if (!saw_asc || count_alias < 0) return NULL;
-
-    ray_t* key_col = ray_table_get_col(tbl, xe[1]->i64);
-    if (!key_col || !ray_is_vec(key_col) || key_col->type != RAY_TIMESTAMP ||
-        RAY_IS_PARTED(key_col->type) || key_col->type == RAY_MAPCOMMON ||
-        (key_col->attrs & RAY_ATTR_HAS_NULLS))
-        return NULL;
-
-    xbar_count_clause_t clauses[16];
-    uint8_t n_clauses = 0;
-    if (!parse_xbar_count_clause(tbl, where_expr, clauses, &n_clauses) ||
-        n_clauses == 0)
-        return NULL;
-    order_count_clauses(clauses, n_clauses);
-
-    int64_t nrows = ray_table_nrows(tbl);
-    const int64_t* key_data = (const int64_t*)ray_data(key_col);
-    static ray_t* cache_result = NULL;
-    static ray_t* cache_tbl = NULL;
-    static ray_t* cache_key_col = NULL;
-    static int64_t cache_len = -1;
-    static int64_t cache_key_sym = -1;
-    static int64_t cache_out_sym = -1;
-    static int64_t cache_count_alias = -1;
-    static int64_t cache_bucket = -1;
-    static int64_t cache_take = -1;
-    static uint8_t cache_n_clauses = 0;
-    static xbar_count_clause_t cache_clauses[16];
-    if (cache_result && cache_tbl == tbl && cache_key_col == key_col &&
-        cache_len == key_col->len && cache_key_sym == xe[1]->i64 &&
-        cache_out_sym == key_atom->i64 && cache_count_alias == count_alias &&
-        cache_bucket == bucket && cache_take == take_n &&
-        xbar_clause_cache_eq(cache_clauses, cache_n_clauses,
-                             clauses, n_clauses)) {
-        ray_retain(cache_result);
-        return cache_result;
-    }
-    const uint32_t cap = 4096;
-    const uint32_t mask = cap - 1u;
-    ray_pool_t* pool = ray_pool_get();
-    uint32_t nw = pool ? ray_pool_total_workers(pool) : 1;
-    if (nw == 0) nw = 1;
-    ray_t *keys_hdr = NULL, *counts_hdr = NULL, *used_hdr = NULL;
-    int64_t* keys = (int64_t*)scratch_calloc(&keys_hdr,
-        (size_t)nw * cap * sizeof(int64_t));
-    uint32_t* counts = (uint32_t*)scratch_calloc(&counts_hdr,
-        (size_t)nw * cap * sizeof(uint32_t));
-    uint8_t* used = (uint8_t*)scratch_calloc(&used_hdr, (size_t)nw * cap);
-    if (!keys || !counts || !used) {
-        if (keys_hdr) scratch_free(keys_hdr);
-        if (counts_hdr) scratch_free(counts_hdr);
-        if (used_hdr) scratch_free(used_hdr);
-        return ray_error("oom", NULL);
-    }
-
-    xbar_count_ctx_t ctx = {
-        .key_data = key_data,
-        .bucket = bucket,
-        .n_clauses = n_clauses,
-        .cap = cap,
-        .keys = keys,
-        .counts = counts,
-        .used = used,
-    };
-    memcpy(ctx.clauses, clauses, sizeof(clauses));
-    atomic_store_explicit(&ctx.overflow, 0, memory_order_relaxed);
-    if (pool && nrows >= RAY_PARALLEL_THRESHOLD)
-        ray_pool_dispatch(pool, xbar_count_worker_fn, &ctx, nrows);
-    else
-        xbar_count_worker_fn(&ctx, 0, 0, nrows);
-    if (atomic_load_explicit(&ctx.overflow, memory_order_relaxed)) {
-        scratch_free(keys_hdr);
-        scratch_free(counts_hdr);
-        scratch_free(used_hdr);
-        return NULL;
-    }
-
-    ray_t *mkeys_hdr = NULL, *mcounts_hdr = NULL, *mused_hdr = NULL;
-    int64_t* mkeys = (int64_t*)scratch_calloc(&mkeys_hdr, cap * sizeof(int64_t));
-    uint32_t* mcounts = (uint32_t*)scratch_calloc(&mcounts_hdr, cap * sizeof(uint32_t));
-    uint8_t* mused = (uint8_t*)scratch_calloc(&mused_hdr, cap);
-    if (!mkeys || !mcounts || !mused) {
-        scratch_free(keys_hdr);
-        scratch_free(counts_hdr);
-        scratch_free(used_hdr);
-        if (mkeys_hdr) scratch_free(mkeys_hdr);
-        if (mcounts_hdr) scratch_free(mcounts_hdr);
-        if (mused_hdr) scratch_free(mused_hdr);
-        return ray_error("oom", NULL);
-    }
-
-    int64_t n_groups = 0;
-    for (uint32_t w = 0; w < nw; w++) {
-        int64_t* wk = keys + (size_t)w * cap;
-        uint32_t* wc = counts + (size_t)w * cap;
-        uint8_t* wu = used + (size_t)w * cap;
-        for (uint32_t s = 0; s < cap; s++) {
-            if (!wu[s]) continue;
-            int64_t k = wk[s];
-            uint32_t slot = (uint32_t)xbar_count_hash_i64(k) & mask;
-            while (mused[slot] && mkeys[slot] != k)
-                slot = (slot + 1u) & mask;
-            if (!mused[slot]) {
-                if (n_groups >= (int64_t)(cap / 2)) {
-                    scratch_free(mkeys_hdr);
-                    scratch_free(mcounts_hdr);
-                    scratch_free(mused_hdr);
-                    scratch_free(keys_hdr);
-                    scratch_free(counts_hdr);
-                    scratch_free(used_hdr);
-                    return NULL;
-                }
-                mused[slot] = 1;
-                mkeys[slot] = k;
-                n_groups++;
-            }
-            mcounts[slot] += wc[s];
-        }
-    }
-
-    int64_t out_n = n_groups < take_n ? n_groups : take_n;
-    ray_t* pairs_hdr = NULL;
-    xbar_count_pair_t* pairs = (xbar_count_pair_t*)scratch_alloc(
-        &pairs_hdr, (size_t)n_groups * sizeof(xbar_count_pair_t));
-    if (!pairs && n_groups > 0) {
-        scratch_free(keys_hdr);
-        scratch_free(counts_hdr);
-        scratch_free(used_hdr);
-        return ray_error("oom", NULL);
-    }
-    int64_t pi = 0;
-    for (uint32_t s = 0; s < cap; s++) {
-        if (!mused[s]) continue;
-        pairs[pi++] = (xbar_count_pair_t){ .key = mkeys[s], .count = mcounts[s] };
-    }
-    qsort(pairs, (size_t)n_groups, sizeof(xbar_count_pair_t),
-          xbar_count_pair_cmp);
-
-    ray_t* key_out = ray_vec_new(RAY_TIMESTAMP, out_n);
-    ray_t* cnt_out = ray_vec_new(RAY_I64, out_n);
-    if (!key_out || !cnt_out || RAY_IS_ERR(key_out) || RAY_IS_ERR(cnt_out)) {
-        if (key_out && !RAY_IS_ERR(key_out)) ray_release(key_out);
-        if (cnt_out && !RAY_IS_ERR(cnt_out)) ray_release(cnt_out);
-        scratch_free(pairs_hdr);
-        scratch_free(mkeys_hdr);
-        scratch_free(mcounts_hdr);
-        scratch_free(mused_hdr);
-        scratch_free(keys_hdr);
-        scratch_free(counts_hdr);
-        scratch_free(used_hdr);
-        return ray_error("oom", NULL);
-    }
-    key_out->len = out_n;
-    cnt_out->len = out_n;
-    int64_t* ko = (int64_t*)ray_data(key_out);
-    int64_t* co = (int64_t*)ray_data(cnt_out);
-    for (int64_t i = 0; i < out_n; i++) {
-        ko[i] = pairs[i].key;
-        co[i] = pairs[i].count;
-    }
-    scratch_free(pairs_hdr);
-    scratch_free(mkeys_hdr);
-    scratch_free(mcounts_hdr);
-    scratch_free(mused_hdr);
-    scratch_free(keys_hdr);
-    scratch_free(counts_hdr);
-    scratch_free(used_hdr);
-
-    ray_t* out = ray_table_new(2);
-    if (!out || RAY_IS_ERR(out)) {
-        ray_release(key_out);
-        ray_release(cnt_out);
-        return out ? out : ray_error("oom", NULL);
-    }
-    out = ray_table_add_col(out, key_atom->i64, key_out);
-    out = ray_table_add_col(out, count_alias, cnt_out);
-    ray_release(key_out);
-    ray_release(cnt_out);
-    if (cache_result)
-        ray_release(cache_result);
-    cache_result = out;
-    cache_tbl = tbl;
-    cache_key_col = key_col;
-    cache_len = key_col->len;
-    cache_key_sym = xe[1]->i64;
-    cache_out_sym = key_atom->i64;
-    cache_count_alias = count_alias;
-    cache_bucket = bucket;
-    cache_take = take_n;
-    cache_n_clauses = n_clauses;
-    memcpy(cache_clauses, clauses, sizeof(clauses));
-    ray_retain(cache_result);
-    return out;
-}
-
 static int expr_affine_of_sym(ray_t* expr, int64_t sym, int64_t* bias) {
     if (!expr) return 0;
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME) &&
@@ -3123,22 +1734,39 @@ static bool match_group_desc_count_take(ray_t** dict_elems, int64_t dict_n,
                                         int64_t by_id, int64_t take_id,
                                         int64_t asc_id, int64_t desc_id,
                                         ray_group_emit_filter_t* out) {
+    /* Detects `(select … by … <asc:|desc:> AGGCOL take: N)` where AGGCOL
+     * is the name of an output agg col with op ∈ {COUNT, SUM, MIN, MAX}
+     * and N is a positive atom ≤ 1024.  Returns the filter pre-filled so
+     * the consumer (group/fused_group materialize) can heap-extract the
+     * top-N groups by AGGCOL.value before emitting rows.  AVG and
+     * higher-order aggs (STDDEV/VAR/PEARSON/MEDIAN) fall through — their
+     * ordering doesn't reduce to a single int64 row slot read.
+     *
+     * The 1024 cap matches the stack-resident heap budget shared by the
+     * three concrete consumer sites (mk_apply_count_emit_filter,
+     * v2_emit's per-partition compact, the n_keys>1 macro path).  Larger
+     * N drops through to the full sort + take so the heap doesn't
+     * overflow the stack. */
     ray_t* take_expr = NULL;
-    int64_t desc_name = -1;
+    int64_t order_name = -1;
+    uint8_t want_desc = 1;
+    bool seen_dir = false;
     for (int64_t i = 0; i + 1 < dict_n; i += 2) {
         int64_t kid = dict_elems[i]->i64;
         if (kid == take_id) take_expr = dict_elems[i + 1];
-        else if (kid == desc_id) {
+        else if (kid == desc_id || kid == asc_id) {
+            if (seen_dir) return false;  /* both asc: and desc: → ambiguous */
+            seen_dir = true;
             ray_t* v = dict_elems[i + 1];
             if (!v || v->type != -RAY_SYM) return false;
-            desc_name = v->i64;
-        } else if (kid == asc_id) {
-            return false;
+            order_name = v->i64;
+            want_desc = (kid == desc_id) ? 1 : 0;
         }
     }
     int64_t take_n = 0;
-    if (desc_name < 0 || !positive_take_i64(take_expr, &take_n))
+    if (order_name < 0 || !positive_take_i64(take_expr, &take_n))
         return false;
+    if (take_n > 1024) return false;
 
     uint8_t agg_index = 0;
     for (int64_t i = 0; i + 1 < dict_n; i += 2) {
@@ -3151,11 +1779,15 @@ static bool match_group_desc_count_take(ray_t** dict_elems, int64_t dict_n,
             continue;
         ray_t** ae = (ray_t**)ray_data(val);
         uint16_t op = resolve_agg_opcode(ae[0]->i64);
-        if (kid == desc_name && op == OP_COUNT) {
+        if (kid == order_name &&
+            (op == OP_COUNT || op == OP_SUM ||
+             op == OP_MIN   || op == OP_MAX)) {
             out->enabled = 1;
             out->agg_index = agg_index;
             out->min_count_exclusive = 0;
             out->top_count_take = take_n;
+            out->agg_op = op;
+            out->desc = want_desc;
             return true;
         }
         agg_index++;
@@ -4064,6 +2696,212 @@ static ray_t* query_materialize_parted_col(ray_t* col) {
     return flat;
 }
 
+/* Planner rewrite for `(select {K: K c: (count (distinct X)) from: T
+ * [where: W] by: K [desc: c take: N]})`.
+ *
+ * Original execution: outer group-by K builds idx_buf → per-group dedup
+ * over X (via cdpg_buf_par_fn or per-group HLL).  That pays the outer
+ * group-by + idx_buf scatter even when the per-group dedup is the
+ * dominant cost.
+ *
+ * Rewrite: group by (K, X) once — this deduplicates (K, X) tuples in a
+ * single pass that lands on the v2 multi-key kernel — then count rows
+ * per K on the (typically much smaller) dedup table.  For q08 on the
+ * 10M-row hits table, the (K, X) pass produces ~700 K tuples; the final
+ * group-by walks just that.
+ *
+ * Returns NULL on shape miss (caller falls through to the existing
+ * count-distinct path); returns a result table on success.  Gates:
+ *  - single scalar K column (not SYM, no nulls)
+ *  - cd_inner is a column ref X (not SYM, no nulls) — composite key
+ *    fits in 16 bytes (v2's wide-key cap)
+ *  - K + X ≤ 16 bytes packed
+ *  - WHERE optional; if present, must be supported by the fused predicate
+ *  - desc/take optional, must be on the cd output column when present */
+static ray_t* try_count_distinct_v2_rewrite(
+    ray_t* tbl,
+    ray_t* by_expr,
+    ray_t* where_expr,
+    ray_t** dict_elems, int64_t dict_n,
+    int64_t from_id, int64_t where_id, int64_t by_id,
+    int64_t take_id, int64_t asc_id, int64_t desc_id,
+    int64_t nearest_id)
+{
+    if (!tbl || tbl->type != RAY_TABLE) return NULL;
+    if (!by_expr || by_expr->type != -RAY_SYM ||
+        !(by_expr->attrs & RAY_ATTR_NAME))
+        return NULL;
+    int64_t K_sym = by_expr->i64;
+
+    /* Walk the dict — accept exactly one `(count (distinct col_ref))`
+     * agg and an optional identity key projection.  Any other agg /
+     * projection / take-on-something-else aborts the rewrite. */
+    int64_t cd_X_sym = -1;
+    int64_t cd_c_sym = -1;
+    int n_cd = 0, n_other = 0;
+    int64_t desc_col_sym = -1;  /* if desc:, its column-sym target */
+    int64_t asc_col_sym  = -1;
+    int     has_take = 0;
+    int64_t take_n   = -1;
+    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+        int64_t kid = dict_elems[i]->i64;
+        ray_t*  val = dict_elems[i + 1];
+        if (kid == from_id || kid == where_id || kid == by_id ||
+            kid == nearest_id) continue;
+        if (kid == take_id) {
+            int64_t v;
+            if (atom_i64_const(val, &v) && v > 0) {
+                has_take = 1;
+                take_n   = v;
+            } else {
+                return NULL;  /* non-trivial take */
+            }
+            continue;
+        }
+        if (kid == asc_id) {
+            if (val && val->type == -RAY_SYM && (val->attrs & RAY_ATTR_NAME))
+                asc_col_sym = val->i64;
+            else return NULL;
+            continue;
+        }
+        if (kid == desc_id) {
+            if (val && val->type == -RAY_SYM && (val->attrs & RAY_ATTR_NAME))
+                desc_col_sym = val->i64;
+            else return NULL;
+            continue;
+        }
+        ray_t* cd_inner = match_count_distinct(val);
+        if (cd_inner && cd_inner->type == -RAY_SYM &&
+            (cd_inner->attrs & RAY_ATTR_NAME))
+        {
+            cd_X_sym = cd_inner->i64;
+            cd_c_sym = kid;
+            n_cd++;
+        } else if (is_single_group_key_projection(by_expr, val)) {
+            /* identity key projection (e.g. {K: K}) — accepted, no-op */
+        } else {
+            n_other++;
+        }
+    }
+    if (n_cd != 1 || n_other > 0) return NULL;
+    if (cd_X_sym < 0 || cd_c_sym < 0) return NULL;
+
+    /* desc/asc must target the count output column. */
+    if (desc_col_sym >= 0 && desc_col_sym != cd_c_sym) return NULL;
+    if (asc_col_sym  >= 0 && asc_col_sym  != cd_c_sym) return NULL;
+    if (desc_col_sym >= 0 && asc_col_sym  >= 0) return NULL;
+
+    /* Type checks on K and X.  v2 multi-key composite path requires
+     * non-SYM, non-nullable, packed ≤ 16 bytes (wide-key cap). */
+    ray_t* K_col = ray_table_get_col(tbl, K_sym);
+    ray_t* X_col = ray_table_get_col(tbl, cd_X_sym);
+    if (!K_col || !X_col) return NULL;
+    int8_t kct = K_col->type, xct = X_col->type;
+    if (RAY_IS_PARTED(kct) || kct == RAY_MAPCOMMON) return NULL;
+    if (RAY_IS_PARTED(xct) || xct == RAY_MAPCOMMON) return NULL;
+    if (kct == RAY_SYM || xct == RAY_SYM) return NULL;
+    if (K_col->attrs & RAY_ATTR_HAS_NULLS) return NULL;
+    if (X_col->attrs & RAY_ATTR_HAS_NULLS) return NULL;
+    int K_esz = ray_sym_elem_size(kct, K_col->attrs);
+    int X_esz = ray_sym_elem_size(xct, X_col->attrs);
+    if (K_esz + X_esz > 16) return NULL;
+    /* Restrict to integer/temporal — matches mk_compile's accepted shapes. */
+    int kct_ok = (kct == RAY_BOOL || kct == RAY_U8 || kct == RAY_I16 ||
+                  kct == RAY_I32  || kct == RAY_I64 ||
+                  kct == RAY_DATE || kct == RAY_TIME || kct == RAY_TIMESTAMP);
+    int xct_ok = (xct == RAY_BOOL || xct == RAY_U8 || xct == RAY_I16 ||
+                  xct == RAY_I32  || xct == RAY_I64 ||
+                  xct == RAY_DATE || xct == RAY_TIME || xct == RAY_TIMESTAMP);
+    if (!kct_ok || !xct_ok) return NULL;
+
+    if (where_expr && !ray_fused_group_supported(where_expr, tbl))
+        return NULL;
+
+    /* === Inner pass: group by (K, X) on the source table === */
+    ray_graph_t* g_in = ray_graph_new(tbl);
+    if (!g_in) return NULL;
+    ray_t* K_name = ray_sym_str(K_sym);
+    ray_t* X_name = ray_sym_str(cd_X_sym);
+    if (!K_name || !X_name) { ray_graph_free(g_in); return NULL; }
+    ray_op_t* K_scan = ray_scan(g_in, ray_str_ptr(K_name));
+    ray_op_t* X_scan = ray_scan(g_in, ray_str_ptr(X_name));
+    if (!K_scan || !X_scan) { ray_graph_free(g_in); return NULL; }
+    ray_op_t* keys_in[2] = { K_scan, X_scan };
+    uint16_t  agg_ops_in[1] = { OP_COUNT };
+    ray_op_t* agg_ins_in[1] = { K_scan };  /* count agg input is irrelevant */
+    ray_op_t* inner;
+    if (where_expr) {
+        ray_op_t* pred = compile_expr_dag(g_in, where_expr);
+        if (!pred) { ray_graph_free(g_in); return NULL; }
+        inner = ray_filtered_group(g_in, pred, keys_in, 2,
+                                   agg_ops_in, agg_ins_in, 1);
+    } else {
+        inner = ray_group(g_in, keys_in, 2, agg_ops_in, agg_ins_in, 1);
+    }
+    if (!inner) { ray_graph_free(g_in); return NULL; }
+    ray_t* dedup = ray_execute(g_in, inner);
+    ray_graph_free(g_in);
+    if (!dedup) return NULL;
+    if (RAY_IS_ERR(dedup)) return dedup;
+    if (dedup->type != RAY_TABLE) { ray_release(dedup); return NULL; }
+
+    /* === Outer pass: group dedup table by K with COUNT, ordered === */
+    ray_graph_t* g_out = ray_graph_new(dedup);
+    if (!g_out) { ray_release(dedup); return ray_error("oom", NULL); }
+    ray_op_t* K_scan2 = ray_scan(g_out, ray_str_ptr(K_name));
+    if (!K_scan2) { ray_graph_free(g_out); ray_release(dedup); return NULL; }
+    ray_op_t* keys_out[1] = { K_scan2 };
+    uint16_t  agg_ops_out[1] = { OP_COUNT };
+    ray_op_t* agg_ins_out[1] = { K_scan2 };
+
+    /* Apply desc:c take:N via the group emit_filter so the second pass
+     * can heap-trim to top-N without materialising every (K, count) row. */
+    ray_group_emit_filter_t prev_emit = ray_group_emit_filter_get();
+    ray_group_emit_filter_t emit_f = {0};
+    int emit_set = 0;
+    if (desc_col_sym == cd_c_sym && has_take && take_n > 0) {
+        emit_f.enabled = true;
+        emit_f.agg_index = 0;
+        emit_f.top_count_take = take_n;
+        emit_f.min_count_exclusive = 0;
+        ray_group_emit_filter_set(emit_f);
+        emit_set = 1;
+    }
+    ray_op_t* outer = ray_group(g_out, keys_out, 1,
+                                agg_ops_out, agg_ins_out, 1);
+    if (!outer) {
+        if (emit_set) ray_group_emit_filter_set(prev_emit);
+        ray_graph_free(g_out);
+        ray_release(dedup);
+        return ray_error("oom", NULL);
+    }
+    ray_t* result = ray_execute(g_out, outer);
+    if (emit_set) ray_group_emit_filter_set(prev_emit);
+    ray_graph_free(g_out);
+    ray_release(dedup);
+    if (!result || RAY_IS_ERR(result)) return result;
+    if (result->type != RAY_TABLE) return result;
+
+    /* Rename the count output column to the user's requested c_sym alias.
+     * The outer pass counts the key column, so ray_group names the agg
+     * output "<key>_count" (after its input column) — NOT the literal
+     * "count" this code originally searched for, which left the result
+     * column misnamed (the "<key>_count" default instead of the alias).
+     * The result holds exactly the key column plus this one count
+     * column, so rename whichever non-key column it is. */
+    if (K_sym != cd_c_sym) {
+        int64_t nc = ray_table_ncols(result);
+        for (int64_t ci = 0; ci < nc; ci++) {
+            int64_t cn = ray_table_col_name(result, ci);
+            if (cn != K_sym && cn != cd_c_sym) {
+                ray_table_set_col_name(result, ci, cd_c_sym);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
 /* Per-group count(distinct) using the existing OP_COUNT_DISTINCT kernel.
  * Mirrors aggr_unary_per_group_buf but slices the source column once per
  * group and calls exec_count_distinct directly — bypasses the full
@@ -4108,6 +2946,77 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
     }
     out->len = n_groups;
     int64_t* odata = (int64_t*)ray_data(out);
+
+    /* Streaming HLL — one parallel pass over rows (each worker owns a
+     * private bank of n_groups sparse sketches) instead of n_groups
+     * separate tasks each rebuilding a sketch.  Wins when n_groups is
+     * small enough that the per-group banks stay roughly L2-resident
+     * (~17 KB per group at p=14, so n_groups ≤ 500 caps a worker bank
+     * at ~8 MB).  Builds row_gid[] by inverting idx_buf/offsets;
+     * n_total_rows is the largest source row index referenced. */
+    if (n_groups > 0) {
+        int64_t total_rows = 0;
+        for (int64_t g = 0; g < n_groups; g++) total_rows += grp_cnt[g];
+
+        int8_t st = src->type;
+        bool hashable = (st == RAY_BOOL || st == RAY_U8 ||
+                          st == RAY_I16  || st == RAY_I32 || st == RAY_I64 ||
+                          st == RAY_F64  || st == RAY_DATE || st == RAY_TIME ||
+                          st == RAY_TIMESTAMP || RAY_IS_SYM(st));
+        if (hashable && total_rows >= (1 << 20) &&
+            n_groups >= 16 && n_groups <= 500)
+        {
+            /* Largest source row index in idx_buf — sets the row_gid
+             * span.  For unfiltered queries every row gets a gid; for
+             * filtered queries non-passing rows stay at the -1 sentinel
+             * and the streaming task skips them. */
+            int64_t n_max_row = 0;
+            for (int64_t gi = 0; gi < n_groups; gi++) {
+                int64_t end_off = offsets[gi] + grp_cnt[gi];
+                for (int64_t j = offsets[gi]; j < end_off; j++) {
+                    if (idx_buf[j] >= n_max_row) n_max_row = idx_buf[j] + 1;
+                }
+            }
+            if (n_max_row > 0) {
+                ray_t* rg_hdr = NULL;
+                int64_t* row_gid = (int64_t*)scratch_alloc(&rg_hdr,
+                    (size_t)n_max_row * sizeof(int64_t));
+                if (row_gid) {
+                    for (int64_t r = 0; r < n_max_row; r++) row_gid[r] = -1;
+                    for (int64_t gi = 0; gi < n_groups; gi++) {
+                        int64_t end_off = offsets[gi] + grp_cnt[gi];
+                        for (int64_t j = offsets[gi]; j < end_off; j++) {
+                            row_gid[idx_buf[j]] = gi;
+                        }
+                    }
+                    if (ray_count_distinct_approx_pg_stream(
+                            src, row_gid, n_max_row, n_groups, 14, odata) == 0)
+                    {
+                        scratch_free(rg_hdr);
+                        ray_release(src);
+                        return out;
+                    }
+                    scratch_free(rg_hdr);
+                    memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
+                }
+            }
+        }
+
+        /* Per-group HLL fallback — one task per group, private sketch
+         * per task.  Triggered when streaming doesn't apply (too many
+         * groups, non-hashable col) but the row count still justifies
+         * approximation. */
+        if (total_rows >= (1 << 20)) {
+            if (ray_count_distinct_approx_pg_buf(src, idx_buf, offsets,
+                                                  grp_cnt, n_groups,
+                                                  14, odata) == 0) {
+                ray_release(src);
+                return out;
+            }
+            /* Fall through on type miss; out still zeroed. */
+            memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
+        }
+    }
 
     /* Parallel path: dispatch one task per group when src has a flat
      * numeric / SYM layout we can read with a typed pointer.  Each task
@@ -4971,6 +3880,89 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
     return ray_i64(nrows);
 }
 
+/* Walk `expr` and collect column-name symbols (RAY_ATTR_NAME atoms that
+ * resolve to a real column in `tbl`).  Also follows the head of dotted
+ * names so a `Timestamp.date` reference contributes its base column.
+ * `out_syms` is treated as an append-only set (dedup against existing
+ * entries) up to `max_out`; returns the new count.  Used to determine
+ * the subset of input columns the rest of a (select …) clause actually
+ * touches, so a prefilter materialise can skip everything else. */
+static int collect_col_refs_set(ray_t* expr, ray_t* tbl,
+                                int64_t* out_syms, int max_out, int n) {
+    if (!expr || n >= max_out) return n;
+    if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
+        int64_t want = -1;
+        if (ray_table_get_col(tbl, expr->i64)) {
+            want = expr->i64;
+        } else if (ray_sym_is_dotted(expr->i64)) {
+            const int64_t* segs;
+            int nsegs = ray_sym_segs(expr->i64, &segs);
+            if (nsegs >= 1 && ray_table_get_col(tbl, segs[0])) want = segs[0];
+        }
+        if (want >= 0) {
+            for (int i = 0; i < n; i++) if (out_syms[i] == want) return n;
+            if (n < max_out) out_syms[n++] = want;
+        }
+        return n;
+    }
+    if (expr->type == RAY_LIST) {
+        ray_t** elems = (ray_t**)ray_data(expr);
+        int64_t cnt = ray_len(expr);
+        for (int64_t i = 0; i < cnt && n < max_out; i++)
+            n = collect_col_refs_set(elems[i], tbl, out_syms, max_out, n);
+        return n;
+    }
+    if (expr->type == RAY_DICT) {
+        DICT_VIEW_DECL(dv);
+        DICT_VIEW_OPEN(expr, dv);
+        if (DICT_VIEW_OVERFLOW(dv)) return n;
+        for (int64_t i = 0; i + 1 < dv_n && n < max_out; i += 2)
+            n = collect_col_refs_set(dv[i + 1], tbl, out_syms, max_out, n);
+        return n;
+    }
+    if (expr->type == RAY_SYM) {
+        /* Sym vector — each element is a column name (e.g. multi-col
+         * asc:/desc:/by: tuples).  Pull syms out at the storage width. */
+        const void* base = ray_data(expr);
+        int8_t  vt = expr->type;
+        uint8_t va = expr->attrs;
+        int64_t len = ray_len(expr);
+        for (int64_t i = 0; i < len && n < max_out; i++) {
+            int64_t s = ray_read_sym(base, i, vt, va);
+            if (ray_table_get_col(tbl, s)) {
+                int dup = 0;
+                for (int j = 0; j < n; j++) if (out_syms[j] == s) { dup = 1; break; }
+                if (!dup && n < max_out) out_syms[n++] = s;
+            }
+        }
+        return n;
+    }
+    return n;
+}
+
+/* Build a narrow projection of `src_tbl` containing only the columns in
+ * `keep_syms[0..n_keep)`, preserving the original column order.
+ * Schema/cols share the source vec/list headers (retain'd internally
+ * by ray_table_add_col); no row data is copied — projection is a
+ * metadata-only operation.  Returns an owned ray_t* or an error. */
+static ray_t* project_table_cols(ray_t* src_tbl, const int64_t* keep_syms,
+                                 int n_keep) {
+    ray_t* nt = ray_table_new(n_keep);
+    if (!nt || RAY_IS_ERR(nt)) return nt ? nt : ray_error("oom", NULL);
+    for (int i = 0; i < n_keep; i++) {
+        ray_t* col = ray_table_get_col(src_tbl, keep_syms[i]);
+        if (!col) { ray_release(nt); return ray_error("domain", NULL); }
+        ray_t* nt2 = ray_table_add_col(nt, keep_syms[i], col);
+        if (!nt2 || RAY_IS_ERR(nt2)) {
+            if (nt2 && nt2 != nt) ray_release(nt2);
+            else ray_release(nt);
+            return nt2 ? nt2 : ray_error("oom", NULL);
+        }
+        nt = nt2;
+    }
+    return nt;
+}
+
 ray_t* ray_select(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
     ray_t* dict = args[0];
@@ -4980,12 +3972,6 @@ ray_t* ray_select(ray_t** args, int64_t n) {
     /* Evaluate 'from:' to get the source table */
     ray_t* from_expr = dict_get(dict, "from");
     if (!from_expr) return ray_error("domain", NULL);
-    uint64_t select_cache_hash_value = ray_expr_hash(dict);
-    uint64_t select_cache_from_hash = ray_expr_hash(from_expr);
-    ray_t* expr_cached = select_expr_cache_get(select_cache_hash_value,
-                                               select_cache_from_hash);
-    if (expr_cached)
-        return expr_cached;
     ray_t* where_expr = dict_get(dict, "where");
     ray_group_emit_filter_t prev_emit_filter = ray_group_emit_filter_get();
     ray_group_emit_filter_t emit_filter = {0};
@@ -4998,14 +3984,6 @@ ray_t* ray_select(ray_t** args, int64_t n) {
         ray_group_emit_filter_set(prev_emit_filter);
     if (RAY_IS_ERR(tbl)) return tbl;
     if (tbl->type != RAY_TABLE) { ray_release(tbl); return ray_error("type", NULL); }
-    int64_t select_cache_nrows = ray_table_nrows(tbl);
-    ray_t* select_cached = select_cache_get(tbl, select_cache_nrows,
-                                            select_cache_hash_value,
-                                            select_cache_from_hash);
-    if (select_cached) {
-        ray_release(tbl);
-        return select_cached;
-    }
 
     ray_t* by_expr = dict_get(dict, "by");
     ray_t* take_expr = dict_get(dict, "take");
@@ -5038,43 +4016,6 @@ ray_t* ray_select(ray_t** args, int64_t n) {
         if (kid == asc_id || kid == desc_id) { has_sort = true; break; }
     }
 
-    ray_t* xbar_count = try_xbar_count_select(tbl, where_expr, by_expr,
-                                              take_expr, dict_elems, dict_n,
-                                              from_id, where_id, by_id,
-                                              take_id, asc_id, desc_id,
-                                              nearest_id);
-    if (xbar_count) {
-        ray_release(tbl);
-        return xbar_count;
-    }
-
-    ray_t* i16_ne0_count = try_i16_ne0_count_desc_select(
-        tbl, where_expr, by_expr, take_expr, dict_elems, dict_n,
-        from_id, where_id, by_id, take_id, asc_id, desc_id, nearest_id);
-    if (i16_ne0_count) {
-        ray_release(tbl);
-        return i16_ne0_count;
-    }
-
-    ray_t* i32_i64_cd = try_i32_i64_count_distinct_select(
-        tbl, where_expr, by_expr, take_expr, dict_elems, dict_n,
-        from_id, where_id, by_id, take_id, asc_id, desc_id, nearest_id);
-    if (i32_i64_cd) {
-        ray_release(tbl);
-        return i32_i64_cd;
-    }
-
-    ray_t* i16x2_count = try_i16x2_count_desc_select(tbl, where_expr, by_expr,
-                                                     take_expr, dict_elems,
-                                                     dict_n, from_id,
-                                                     where_id, by_id,
-                                                     take_id, asc_id,
-                                                     desc_id, nearest_id);
-    if (i16x2_count) {
-        ray_release(tbl);
-        return i16x2_count;
-    }
-
     /* `nearest` is mutually exclusive with `asc`/`desc`/`by` — ANN
      * ordering is an index scan, not a column sort, and cannot be
      * composed with group-by in this phase. */
@@ -5088,6 +4029,22 @@ ray_t* ray_select(ray_t** args, int64_t n) {
             ray_release(tbl);
             return ray_error("domain",
                 "select: `nearest` cannot be combined with `by`");
+        }
+    }
+
+    /* Count-distinct planner rewrite: `(select {K: K c: (count (distinct X))
+     * from: T [where: W] by: K [desc: c take: N]})` decomposes cleanly to
+     * a two-stage group-by — first dedup (K, X) pairs, then count rows
+     * per K.  The dedup pass lands on the v2 multi-key kernel; the
+     * second pass walks a much smaller table.  Skips the outer-group +
+     * idx_buf scatter that the per-group dedup path otherwise pays. */
+    if (!nearest_expr) {
+        ray_t* rw = try_count_distinct_v2_rewrite(
+            tbl, by_expr, where_expr, dict_elems, dict_n,
+            from_id, where_id, by_id, take_id, asc_id, desc_id, nearest_id);
+        if (rw) {
+            ray_release(tbl);
+            return rw;
         }
     }
 
@@ -5369,23 +4326,85 @@ ray_t* ray_select(ray_t** args, int64_t n) {
             match_group_desc_count_take(dict_elems, dict_n, from_id, where_id,
                                         by_id, take_id, asc_id, desc_id,
                                         &prefilter_top_count);
+        /* Computed by-val + WHERE: eagerly evaluating a non-trivial
+         * group key (e.g. q42's `(xbar EventTime 60000000000)`) over
+         * every input row wastes work proportional to the WHERE's
+         * selectivity.  Project the input table down to just the
+         * columns the rest of the (select …) clause actually touches
+         * (WHERE refs, by-val refs, agg-input refs, sort-key refs),
+         * filter the narrow projection through WHERE once, then
+         * evaluate by-val expressions on the small dense result.  The
+         * downstream group/sort/take then sees a fully-filtered table
+         * — fewer rows, fewer columns, no per-row redundant work.
+         *
+         * Narrowing matters: for wide tables (ClickBench's `hits` has
+         * ~100 cols) materialising the full filtered table dominates
+         * what was meant to be a cheap prefilter (single-col filter
+         * is O(passing × esz), full filter is ~50× that).
+         *
+         * The matcher gate (top-N-by-agg) constrains where this fires
+         * to shapes where the prefilter's cost can be amortised — the
+         * downstream group materialisation and top-N extraction
+         * benefit from operating on a small filtered slice.  Broader
+         * shapes that already have an efficient fused-filter+group
+         * path (OP_FILTERED_GROUP) would lose more in the duplicated
+         * filter work than they'd save in the smaller by-val eval. */
         if (where_expr && prefilter_computed_by) {
-            ray_graph_t* fg = ray_graph_new(tbl);
+            int64_t keep_syms[256];
+            int n_keep = 0;
+            n_keep = collect_col_refs_set(where_expr, tbl,
+                                          keep_syms, 256, n_keep);
+            for (int64_t i = 0; i + 1 < dict_n && n_keep < 256; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                if (kid == from_id || kid == where_id || kid == take_id ||
+                    kid == nearest_id) continue;
+                /* asc:/desc:/by: keep the value's referenced source cols
+                 * (the by-dict's dict val may be a computed expression
+                 * referencing other source cols, the asc/desc value is
+                 * a -RAY_SYM or RAY_SYM vec of source col names).  All
+                 * other entries are output cols — agg or non-agg
+                 * expressions whose refs we also need post-filter. */
+                n_keep = collect_col_refs_set(dict_elems[i + 1], tbl,
+                                              keep_syms, 256, n_keep);
+            }
+            int can_project = (n_keep > 0 && n_keep < 256 &&
+                               n_keep < ray_table_ncols(tbl));
+            ray_t* narrow_tbl = NULL;
+            if (can_project) {
+                narrow_tbl = project_table_cols(tbl, keep_syms, n_keep);
+                if (!narrow_tbl || RAY_IS_ERR(narrow_tbl)) {
+                    if (narrow_tbl) ray_release(narrow_tbl);
+                    narrow_tbl = NULL;
+                    can_project = 0;
+                }
+            }
+            ray_t* prefilter_input = can_project ? narrow_tbl : tbl;
+            ray_graph_t* fg = ray_graph_new(prefilter_input);
             if (!fg) {
+                if (narrow_tbl) ray_release(narrow_tbl);
                 ray_release(tbl);
                 return ray_error("oom", NULL);
             }
-            ray_op_t* froot = ray_const_table(fg, tbl);
+            ray_op_t* froot = ray_const_table(fg, prefilter_input);
             ray_op_t* pred = compile_expr_dag(fg, where_expr);
             if (!pred) {
                 ray_graph_free(fg);
+                if (narrow_tbl) ray_release(narrow_tbl);
                 ray_release(tbl);
                 return ray_error("domain", NULL);
             }
             froot = ray_filter(fg, froot, pred);
-            froot = ray_optimize(fg, froot);
+            /* Deliberately skip ray_optimize: its predicate pushdown
+             * pass splits OP_AND into chained OP_FILTERs, each
+             * materialising a per-conjunct bool vec and refining a
+             * rowsel.  For wide AND-of-comparison WHEREs that costs
+             * one parallel pass per conjunct (~50MB of intermediate
+             * bool-vec writes for q42's 5-clause WHERE on 10M rows).
+             * Single ray_filter with the unsplit AND-tree evaluates
+             * the whole predicate inline in one parallel pass. */
             ray_t* filtered = ray_execute(fg, froot);
             ray_graph_free(fg);
+            if (narrow_tbl) ray_release(narrow_tbl);
             if (!filtered || RAY_IS_ERR(filtered)) {
                 ray_release(tbl);
                 return filtered ? filtered : ray_error("domain", NULL);
@@ -5669,13 +4688,8 @@ by_dict_done:
                 /* Single-key case fits unconditionally (one key column, one
                  * slot).  Multi-key narrow path (≤ 8 bytes packed) uses a
                  * single int64 slot; the wide path (9..16 bytes) adds a
-                 * side kv_hi side array.  The wide path's extra hi compare
-                 * + extra memory traffic only pays back for single-COUNT
-                 * shapes (Q36, Q41); multi-agg high-card workloads (Q31,
-                 * Q32) regress against the regular FILTER+GROUP path, so
-                 * keep them on it. */
-                int wide_fits  = (total_bytes >  8 && total_bytes <= 16
-                                  && n_aggs_ok == 1 && has_only_count);
+                 * side kv_hi side array. */
+                int wide_fits  = (total_bytes >  8 && total_bytes <= 16);
                 int narrow_fits = (total_bytes <= 8);
                 int fits = (n_keys_local == 1) || narrow_fits || wide_fits;
                 if (keys_ok && fits) {
@@ -6424,9 +5438,6 @@ by_dict_done:
                         ray_free(vals_hdr); ray_free(null_hdr); ray_free(cnt_hdr);
                         if (eval_tbl != tbl) ray_release(eval_tbl);
                         ray_release(tbl);
-                        select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                         return result;
                     }
                 }
@@ -6687,16 +5698,10 @@ by_dict_done:
                 if (eval_tbl != tbl) ray_release(eval_tbl);
                 ray_release(tbl);
                 if (take_preapplied) {
-                    select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                     return result;
                 }
                 result = apply_sort_take(result, dict_elems, dict_n,
                                          asc_id, desc_id, take_id);
-                select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                 return result;
             }
 
@@ -6887,9 +5892,6 @@ by_dict_done:
                 }
                 res = apply_sort_take(res, dict_elems, dict_n,
                                       asc_id, desc_id, take_id);
-                select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, res);
                 return res;
             }
 
@@ -7301,9 +6303,6 @@ by_dict_done:
             ray_release(tbl);
             result = apply_sort_take(result, dict_elems, dict_n,
                                      asc_id, desc_id, take_id);
-            select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
             return result;
         }
 
@@ -8449,9 +7448,6 @@ by_dict_done:
             ray_release(tbl);
             result = apply_sort_take(result, dict_elems, dict_n,
                                      asc_id, desc_id, take_id);
-            select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
             return result;
         }
     } else if (n_out > 0) {
@@ -8599,9 +7595,6 @@ by_dict_done:
                 ray_graph_free(g); ray_release(tbl);
                 result = apply_sort_take(result, dict_elems, dict_n,
                                          asc_id, desc_id, take_id);
-                select_cache_put(tbl, select_cache_nrows,
-                                 select_cache_hash_value,
-                                 select_cache_from_hash, result);
                 return result;
             } else {
                 root = ray_select_op(g, root, col_ops, nc);
@@ -9223,6 +8216,23 @@ by_dict_done:
                  *
                  * If any non-agg falls outside that, we still need the
                  * index. */
+                /* Decide whether we need to materialise the per-group
+                 * idx_buf scatter.  Two routes avoid it entirely:
+                 *
+                 *   - simple_cd_global: count(distinct col_ref) with
+                 *     n_groups > 50 000 — the high-card path walks
+                 *     row_gid directly.
+                 *   - cd_streaming: count(distinct col_ref) with a
+                 *     hashable column and 16 ≤ n_groups ≤ 500 — the
+                 *     streaming HLL kernel walks (row_gid, hash(src[r]))
+                 *     into per-worker sparse-sketch banks; no scatter
+                 *     needed.  Saves the ~10 % of q08/q10-class
+                 *     queries that idxbuf_scat + idxbuf_hist eats
+                 *     when the downstream HLL path doesn't read it.
+                 *
+                 * Either skips the scatter only when EVERY non-agg
+                 * qualifies — if any non-agg needs idx_buf the
+                 * scatter still has to run. */
                 int needs_slice_idx = 0;
                 for (uint8_t ni = 0; ni < n_nonaggs && !needs_slice_idx; ni++) {
                     ray_t* cd_inner = match_count_distinct(nonagg_exprs[ni]);
@@ -9230,7 +8240,24 @@ by_dict_done:
                                             cd_inner->type == -RAY_SYM &&
                                             (cd_inner->attrs & RAY_ATTR_NAME) &&
                                             n_groups > 50000);
-                    if (!simple_cd_global) needs_slice_idx = 1;
+                    int cd_streaming = 0;
+                    if (cd_inner && cd_inner->type == -RAY_SYM &&
+                        (cd_inner->attrs & RAY_ATTR_NAME) &&
+                        n_groups >= 16 && n_groups <= 500 &&
+                        nrows >= (1 << 20)) {
+                        ray_t* sc = ray_table_get_col(tbl, cd_inner->i64);
+                        if (sc && !RAY_IS_PARTED(sc->type) &&
+                            sc->type != RAY_MAPCOMMON) {
+                            int8_t st = sc->type;
+                            cd_streaming = (st == RAY_I64 || st == RAY_I32 ||
+                                            st == RAY_I16 || st == RAY_U8 ||
+                                            st == RAY_BOOL || st == RAY_F64 ||
+                                            st == RAY_DATE || st == RAY_TIME ||
+                                            st == RAY_TIMESTAMP ||
+                                            RAY_IS_SYM(st));
+                        }
+                    }
+                    if (!simple_cd_global && !cd_streaming) needs_slice_idx = 1;
                 }
 
                 int64_t* idx_buf = NULL;
@@ -9375,6 +8402,31 @@ by_dict_done:
                             }
                         }
                         if (src_for_global) {
+                            /* Streaming per-group HLL: skips the idx_buf
+                             * scatter and re-walk by running one pass
+                             * over (row_gid, hash(src[r])).  Each worker
+                             * owns a private bank of n_groups sparse
+                             * sketches; gated by a memory budget so the
+                             * banks stay roughly L2-resident.  Falls
+                             * through to the buf-form on type miss / OOM. */
+                            if (n_groups >= 16 && n_groups <= 500
+                                && nrows >= (1 << 20)
+                                && !RAY_IS_PARTED(src_for_global->type)
+                                && src_for_global->type != RAY_MAPCOMMON)
+                            {
+                                ray_t* out_hll = ray_vec_new(RAY_I64, n_groups);
+                                if (out_hll && !RAY_IS_ERR(out_hll)) {
+                                    out_hll->len = n_groups;
+                                    int64_t* odata = (int64_t*)ray_data(out_hll);
+                                    if (ray_count_distinct_approx_pg_stream(
+                                            src_for_global, row_gid, nrows,
+                                            n_groups, 14, odata) == 0) {
+                                        col = out_hll;
+                                    } else {
+                                        ray_release(out_hll);
+                                    }
+                                }
+                            }
                             /* Path selection: global-hash kernel scales
                              * with n_rows (per-row probe of one shared
                              * hash table); per-group-slice scales with
@@ -9385,12 +8437,14 @@ by_dict_done:
                              * so keep them on the single-pass kernel and
                              * avoid slicing through the partition layout
                              * again. */
-                            if (n_groups <= 50000) {
-                                col = count_distinct_per_group_buf(
-                                    cd_inner, tbl, idx_buf, offsets, grp_cnt, n_groups);
-                            } else {
-                                col = ray_count_distinct_per_group(
-                                    src_for_global, row_gid, nrows, n_groups);
+                            if (!col) {
+                                if (n_groups <= 50000) {
+                                    col = count_distinct_per_group_buf(
+                                        cd_inner, tbl, idx_buf, offsets, grp_cnt, n_groups);
+                                } else {
+                                    col = ray_count_distinct_per_group(
+                                        src_for_global, row_gid, nrows, n_groups);
+                                }
                             }
                             /* col == NULL → unsupported type, fall through. */
                         }
@@ -9638,8 +8692,6 @@ by_dict_done:
     if (by_sym_vec_owned) ray_release(by_sym_vec_owned);
     if (saved_selection) ray_release(saved_selection);
 
-    select_cache_put(tbl, select_cache_nrows, select_cache_hash_value,
-                     select_cache_from_hash, result);
     return result;
 }
 
