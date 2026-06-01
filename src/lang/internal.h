@@ -455,7 +455,6 @@ ray_t* ray_os_list_fn(ray_t* x);
 ray_t* ray_setenv_fn(ray_t* name, ray_t* val);
 ray_t* ray_quote_fn(ray_t** args, int64_t n);
 ray_t* ray_return_fn(ray_t** args, int64_t n);
-ray_t* ray_args_fn(ray_t* x);
 ray_t* ray_rc_fn(ray_t* x);
 ray_t* ray_diverse_fn(ray_t* x);
 ray_t* ray_get_fn(ray_t* dict, ray_t* key);
