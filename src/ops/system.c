@@ -606,15 +606,6 @@ ray_t* ray_return_fn(ray_t** args, int64_t n) {
     return ray_error("domain", "return expects 0 or 1 argument");
 }
 
-/* (args) -- return command-line arguments as a list of strings */
-ray_t* ray_args_fn(ray_t* x) {
-    (void)x;
-    /* Return empty list -- CLI args not wired into eval context */
-    ray_t* list = ray_list_new(0);
-    if (!list) return ray_error("oom", NULL);
-    return list;
-}
-
 /* (rc x) -- return reference count of object */
 ray_t* ray_rc_fn(ray_t* x) {
     if (!x || RAY_IS_ERR(x)) return make_i64(0);
