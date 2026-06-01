@@ -151,8 +151,9 @@ ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
  * `mount` walks a root directory, identifies child tables, loads each,
  * binds it as a global named after the directory entry, and returns
  * a `name → table` dict so callers can introspect what was loaded
- * without re-scanning the filesystem.  Mirrors kdb's `\l /tmp/db/`
- * but split into format-specific entry points so the discovery
+ * without re-scanning the filesystem.  Loads every binding from a
+ * directory into the global env, split into format-specific entry
+ * points so the discovery
  * heuristics can be tighter (splayed: presence of `.d` schema;
  * parted: presence of partition directories matching digit/dot).
  * ══════════════════════════════════════════ */

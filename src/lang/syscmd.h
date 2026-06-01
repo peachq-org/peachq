@@ -38,8 +38,8 @@
  * string "1" or the integer 1.
  *
  * Unknown command names dispatched through `.sys.cmd` fall through to
- * the host shell via system(2) — matches the kdb+ `system "..."`
- * convention so existing muscle memory works.
+ * the host shell via system(2) — a shell escape, like a `system "..."`
+ * call, so existing muscle memory works.
  */
 
 #ifndef RAY_LANG_SYSCMD_H

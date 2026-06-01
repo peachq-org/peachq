@@ -43,8 +43,8 @@ ray_t* ray_log_write_fn(ray_t* expr);
  * offset of the last good entry. */
 ray_t* ray_log_replay_fn(ray_t* path);
 
-/* (.log.validate "path") -> (chunks; valid_bytes) pair.  Maps to
- * q's `-11!(-2; file)` — count valid frames without evaluating. */
+/* (.log.validate "path") -> (chunks; valid_bytes) pair.  Validates
+ * frames (parse but don't eval) — count valid frames without evaluating. */
 ray_t* ray_log_validate_fn(ray_t* path);
 
 /* (.log.roll) — close and rename current log to <base>.<UTC>.log,

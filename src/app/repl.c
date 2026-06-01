@@ -542,7 +542,7 @@ void ray_repl_destroy(ray_repl_t* repl) {
  * remote rayforce via ray_ipc_send_verbose() instead of ray_eval_str.
  * This is a thin per-line redirect on top of the existing .ipc.* family
  * — no new wire path, no separate event loop.  Single session at a
- * time (matches kdb+'s remote-mode UX); reconnect to a different
+ * time (matches a typical remote-REPL UX); reconnect to a different
  * address closes the previous handle automatically.
  *
  * State lives in this file so eval_and_print can check it without
