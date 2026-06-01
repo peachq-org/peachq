@@ -1262,7 +1262,11 @@ void ray_heap_destroy(void) {
  * -------------------------------------------------------------------------- */
 
 static void heap_return_foreign_freelist(ray_heap_t* h) {
+    /* avail bit (set on insert, cleared on remove) tells us which
+     * freelist orders have any blocks at all — skip the empty ones. */
+    if (!h->avail) return;
     for (int order = RAY_ORDER_MIN; order < RAY_HEAP_FL_SIZE; order++) {
+        if (!(h->avail & (1ULL << order))) continue;
         ray_fl_head_t* head = &h->freelist[order];
         ray_t* blk = head->fl_next;
         while (blk != (ray_t*)head) {
@@ -1473,11 +1477,21 @@ void ray_heap_gc(void) {
         /* Pass 5: Release physical pages from free blocks in every
          * idle heap.  Pass 2 may have returned blocks to worker-owned
          * freelists; releasing only the caller heap leaves those worker
-         * pages resident across large query repetitions. */
+         * pages resident across large query repetitions.
+         *
+         * Use each heap's avail bitmap (set on insert, cleared on
+         * remove) to skip the entire walk when no order >= 13 has any
+         * free block.  Tiny-query workloads — where the per-statement
+         * GC fires before any large allocation has been freed —
+         * complete pass 5 without entering the body. */
+        uint64_t large_orders_mask = ~((1ULL << 13) - 1);
         for (int hid = 0; hid < RAY_HEAP_REGISTRY_SIZE; hid++) {
             ray_heap_t* gh = ray_heap_registry[hid];
             if (!gh) continue;
+            uint64_t avail = gh->avail & large_orders_mask;
+            if (!avail) continue;
             for (int i = 13; i < RAY_HEAP_FL_SIZE; i++) {
+                if (!(avail & (1ULL << i))) continue;
                 ray_fl_head_t* head = &gh->freelist[i];
                 ray_t* blk = head->fl_next;
                 while (blk != (ray_t*)head) {
