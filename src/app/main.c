@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stdout,
                 "usage: %s [-f file] [-p port] [-c cores] [-t 0|1] [-i]"
-                " [-u PW | -U PW] [-l BASE | -L BASE] [file.rfl]\n"
+                " [-u PW | -U PW] [-l BASE | -L BASE] [file.rfl] [-- app args]\n"
                 "  -f, --file FILE     run script file (or pass as a positional arg)\n"
                 "  -p, --port PORT     listen for IPC clients on PORT\n"
                 "  -c, --cores N       worker-pool size (0 = auto: ncpu - 1, default)\n"
@@ -109,6 +109,8 @@ int main(int argc, char** argv) {
                 "  -l BASE             enable journal logging (BASE.log + BASE.qdb)\n"
                 "  -L BASE             enable journal logging with fsync per write\n"
                 "  -h, --help          show this message\n"
+                "  --                  pass following args to the app; read\n"
+                "                      them in Rayfall via (.sys.args)\n"
                 "\nFor a remote REPL, start rayforce locally and call\n"
                 "(.repl.connect \"host:port\") inside the REPL.\n"
                 "\nRunning as a service:\n"
@@ -123,9 +125,14 @@ int main(int argc, char** argv) {
             ray_runtime_destroy(rt);
             return 0;
         }
+        else if (strcmp(argv[i], "--") == 0)
+            break;   /* stop flag parsing; remaining tokens are app args */
         else
             file = argv[i];
     }
+
+    /* Expose the full command line to Rayfall via (.sys.args). */
+    ray_runtime_set_sys_args(ray_build_sys_args(argc, argv));
 
     /* Initialise the worker pool before anything else that might use it
      * (file load, REPL eval, builtins).  If -c wasn't given, leave the
