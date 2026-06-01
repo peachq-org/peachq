@@ -900,6 +900,15 @@ ray_t* ray_build_sys_args(int argc, char** argv) {
     return ray_dict_new(keys, vals);
 }
 
+/* (.sys.args) -- return the application-arguments dict (empty if unset) */
+ray_t* ray_sys_args_fn(ray_t** args, int64_t n) {
+    (void)args;
+    if (n != 0) return ray_error("domain", ".sys.args takes no arguments");
+    ray_t* d = (ray_t*)ray_runtime_get_sys_args();
+    if (d) { ray_retain(d); return d; }
+    return ray_dict_new(ray_sym_vec_new(RAY_SYM_W64, 0), ray_list_new(0));
+}
+
 /* ══════════════════════════════════════════
  * IPC builtins
  * ══════════════════════════════════════════ */
