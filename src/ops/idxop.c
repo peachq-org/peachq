@@ -74,6 +74,54 @@ static uint64_t numeric_key_word(const uint8_t* base, int8_t type, int64_t i) {
     return (uint64_t)k;
 }
 
+/* Returns true iff numeric vector v is non-descending.  v1 scope: rejects
+ * (returns false) if any null or NaN is present — callers turn false into a
+ * verify error.  Caller has already ensured numeric_elem_size(v->type) > 0. */
+static bool vec_is_ascending(const ray_t* v) {
+    int64_t n = v->len;
+    if (n < 2) return true;
+    if (v->attrs & RAY_ATTR_HAS_NULLS) {
+        for (int64_t i = 0; i < n; i++)
+            if (ray_vec_is_null((ray_t*)v, i)) return false;
+    }
+    const uint8_t* b = (const uint8_t*)ray_data((ray_t*)v);
+    switch (v->type) {
+    case RAY_BOOL: case RAY_U8: {
+        const uint8_t* p = b;
+        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        return true;
+    }
+    case RAY_I16: {
+        const int16_t* p = (const int16_t*)b;
+        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        return true;
+    }
+    case RAY_I32: case RAY_DATE: {
+        const int32_t* p = (const int32_t*)b;
+        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        return true;
+    }
+    case RAY_I64: case RAY_TIME: case RAY_TIMESTAMP: {
+        const int64_t* p = (const int64_t*)b;
+        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        return true;
+    }
+    case RAY_F32: {
+        const float* p = (const float*)b;
+        for (int64_t i = 0; i < n; i++) if (p[i] != p[i]) return false; /* NaN */
+        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        return true;
+    }
+    case RAY_F64: {
+        const double* p = (const double*)b;
+        for (int64_t i = 0; i < n; i++) if (p[i] != p[i]) return false; /* NaN */
+        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        return true;
+    }
+    default: return false;
+    }
+}
+
 /* 64-bit avalanche mix (splittable hash from Stafford / xxhash). */
 static inline uint64_t mix64(uint64_t x) {
     x ^= x >> 30;
@@ -1074,4 +1122,83 @@ ray_t* ray_idx_has_fn(ray_t* v) {
 
 ray_t* ray_idx_info_fn(ray_t* v) {
     return ray_index_info(v);
+}
+
+/* --------------------------------------------------------------------------
+ * Semantic attributes — (.attr.*) family.  See docs spec
+ * 2026-06-01-column-attributes-design.md.
+ * -------------------------------------------------------------------------- */
+
+static ray_t* attr_set_unique (ray_t* v) { (void)v; return ray_error("nyi", "unique: not yet implemented"); }
+static ray_t* attr_set_grouped(ray_t* v) { (void)v; return ray_error("nyi", "grouped: not yet implemented"); }
+static ray_t* attr_set_parted (ray_t* v) { (void)v; return ray_error("nyi", "parted: not yet implemented"); }
+
+/* Set the sorted marker after verifying.  Borrowed v in, owning ref out. */
+static ray_t* attr_set_sorted(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("type", "attr: null");
+    if (!ray_is_vec(v))
+        return ray_error("type", "sorted: attribute applies to vectors only");
+    if (numeric_elem_size(v->type) == 0)
+        return ray_error("nyi", "sorted: only numeric vectors supported in v1 (type %d)",
+                         (int)v->type);
+    if (!vec_is_ascending(v))
+        return ray_error("domain", "sorted: column is not in non-descending order");
+    ray_retain(v);
+    ray_t* w = ray_cow(v);
+    if (!w || RAY_IS_ERR(w)) return w ? w : ray_error("oom", NULL);
+    w->attrs |= RAY_ATTR_SORTED;
+    return w;
+}
+
+/* (.attr.get v) -> symbol vector of attributes held (sorted, unique, grouped,
+ * parted), or the empty symbol vector. */
+ray_t* ray_attr_get_fn(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return v;
+    ray_t* syms = ray_vec_new(RAY_SYM, 4);
+    if (!syms || RAY_IS_ERR(syms)) return syms ? syms : ray_error("oom", NULL);
+    syms->len = 0;
+    int64_t* out = (int64_t*)ray_data(syms);
+    if (ray_attr_is_sorted(v))
+        out[syms->len++] = ray_sym_intern_runtime("sorted", 6);
+    if (ray_index_has(v)) {
+        ray_index_t* ix = ray_index_payload(v->index);
+        if (ix->markers & RAY_MARK_UNIQUE)
+            out[syms->len++] = ray_sym_intern_runtime("unique", 6);
+        if (ix->kind == RAY_IDX_HASH)
+            out[syms->len++] = ray_sym_intern_runtime("grouped", 7);
+        else if (ix->kind == RAY_IDX_PART)
+            out[syms->len++] = ray_sym_intern_runtime("parted", 6);
+    }
+    return syms;
+}
+
+/* (.attr.drop v) -> v with all attributes and any backing index removed. */
+ray_t* ray_attr_drop_fn(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return v;
+    ray_t* w = v;
+    ray_retain(w);
+    if (w->attrs & RAY_ATTR_HAS_INDEX) {
+        ray_t* r = ray_index_drop(&w);
+        if (RAY_IS_ERR(r)) { ray_release(w); return r; }
+    }
+    if (w->attrs & RAY_ATTR_SORTED) {
+        ray_t* c = ray_cow(w);
+        if (!c || RAY_IS_ERR(c)) return c ? c : ray_error("oom", NULL);
+        c->attrs &= ~RAY_ATTR_SORTED;
+        w = c;
+    }
+    return w;
+}
+
+/* (.attr.set 'name v) — dispatch on the symbol name. */
+ray_t* ray_attr_set_fn(ray_t* name, ray_t* v) {
+    if (RAY_IS_ERR(name)) return name;
+    if (!name || name->type != -RAY_SYM)
+        return ray_error("type", "attr.set: first arg must be a symbol");
+    int64_t id = name->i64;
+    if (id == ray_sym_intern_runtime("sorted", 6))  return attr_set_sorted(v);
+    if (id == ray_sym_intern_runtime("unique", 6))   return attr_set_unique(v);
+    if (id == ray_sym_intern_runtime("grouped", 7))  return attr_set_grouped(v);
+    if (id == ray_sym_intern_runtime("parted", 6))   return attr_set_parted(v);
+    return ray_error("domain", "attr.set: unknown attribute (want sorted/unique/grouped/parted)");
 }
