@@ -2849,9 +2849,6 @@ static void ray_register_builtins(void) {
     /* return — early exit from compiled lambda (0 args → null, 1 arg → value) */
     register_vary("return",      RAY_FN_NONE, ray_return_fn);
 
-    /* args — command line arguments */
-    register_unary("args",       RAY_FN_NONE, ray_args_fn);
-
     /* rc — reference count */
     register_unary("rc",         RAY_FN_NONE, ray_rc_fn);
 
