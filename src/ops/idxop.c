@@ -246,9 +246,10 @@ void ray_index_release_payload(ray_index_t* ix) {
         ix->u.chunk_zone.null_bits = NULL;
         break;
     case RAY_IDX_PART:
-        /* TODO(Task 4): release u.part.{keys,starts,lens} once the part
-         * builder populates them.  Until then a PART block has no child
-         * vectors, so this is a safe no-op. */
+        if (ix->u.part.keys   && !RAY_IS_ERR(ix->u.part.keys))   ray_release(ix->u.part.keys);
+        if (ix->u.part.starts && !RAY_IS_ERR(ix->u.part.starts)) ray_release(ix->u.part.starts);
+        if (ix->u.part.lens   && !RAY_IS_ERR(ix->u.part.lens))   ray_release(ix->u.part.lens);
+        ix->u.part.keys = ix->u.part.starts = ix->u.part.lens = NULL;
         break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
@@ -281,9 +282,9 @@ void ray_index_retain_payload(ray_index_t* ix) {
             ray_retain(ix->u.chunk_zone.null_bits);
         break;
     case RAY_IDX_PART:
-        /* TODO(Task 4): retain u.part.{keys,starts,lens} once the part
-         * builder populates them.  Until then a PART block has no child
-         * vectors, so this is a safe no-op. */
+        if (ix->u.part.keys   && !RAY_IS_ERR(ix->u.part.keys))   ray_retain(ix->u.part.keys);
+        if (ix->u.part.starts && !RAY_IS_ERR(ix->u.part.starts)) ray_retain(ix->u.part.starts);
+        if (ix->u.part.lens   && !RAY_IS_ERR(ix->u.part.lens))   ray_retain(ix->u.part.lens);
         break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
@@ -966,6 +967,80 @@ ray_t* ray_index_attach_bloom(ray_t** vp) {
 }
 
 /* --------------------------------------------------------------------------
+ * Part index — contiguous ascending value-blocks
+ *
+ * Build a RAY_IDX_PART index, verifying the column is laid out as contiguous,
+ * ascending value-blocks.  Non-descending order is necessary AND sufficient:
+ * it guarantees each distinct value occupies exactly one contiguous run.
+ * v1: numeric vectors only (enforced by prepare_attach).
+ * -------------------------------------------------------------------------- */
+
+static ray_t* ray_index_attach_part(ray_t** vp) {
+    ray_t* v = prepare_attach(vp, "part");
+    if (RAY_IS_ERR(v)) return v;
+    int64_t n = v->len;
+
+    if (!vec_is_ascending(v))
+        return ray_error("domain", "parted: column is not laid out as ascending value-blocks");
+
+    const uint8_t* base = (const uint8_t*)ray_data(v);
+    int es = numeric_elem_size(v->type);
+
+    /* Row i starts a new value-block iff it differs from i-1.  vec_is_ascending
+     * above already rejected any null/NaN, so numeric_key_word's NaN branch is
+     * unreachable here and its equality is exact for every accepted type.  Used
+     * by both the count and the fill loop so they cannot drift out of sync. */
+    #define PART_NEW_BLOCK(i) \
+        (numeric_key_word(base, v->type, (i)) != numeric_key_word(base, v->type, (i)-1))
+
+    /* Count runs of equal values. */
+    int64_t nparts = (n > 0) ? 1 : 0;
+    for (int64_t i = 1; i < n; i++)
+        if (PART_NEW_BLOCK(i))
+            nparts++;
+
+    int64_t cap = nparts > 0 ? nparts : 1;
+    ray_t* starts = ray_vec_new(RAY_I64, cap);
+    ray_t* lens   = ray_vec_new(RAY_I64, cap);
+    ray_t* keys   = ray_vec_new(v->type, cap);
+    if (RAY_IS_ERR(starts) || RAY_IS_ERR(lens) || RAY_IS_ERR(keys)) {
+        if (!RAY_IS_ERR(starts)) ray_release(starts);
+        if (!RAY_IS_ERR(lens))   ray_release(lens);
+        if (!RAY_IS_ERR(keys))   ray_release(keys);
+        return ray_error("oom", NULL);
+    }
+    starts->len = lens->len = keys->len = nparts;
+    int64_t* st = (int64_t*)ray_data(starts);
+    int64_t* ln = (int64_t*)ray_data(lens);
+    uint8_t* kb = (uint8_t*)ray_data(keys);
+
+    int64_t p = 0, run_start = 0;
+    for (int64_t i = 1; i <= n; i++) {
+        bool boundary = (i == n) || PART_NEW_BLOCK(i);
+        if (boundary && n > 0) {
+            st[p] = run_start;
+            ln[p] = i - run_start;
+            memcpy(kb + (size_t)p*es, base + (size_t)run_start*es, (size_t)es);
+            p++;
+            run_start = i;
+        }
+    }
+    #undef PART_NEW_BLOCK
+
+    ray_t* idx = ray_index_alloc(RAY_IDX_PART, v->type, n);
+    if (!idx || RAY_IS_ERR(idx)) {
+        ray_release(starts); ray_release(lens); ray_release(keys);
+        return idx ? idx : ray_error("oom", NULL);
+    }
+    ray_index_t* ix = ray_index_payload(idx);
+    ix->u.part.keys    = keys;
+    ix->u.part.starts  = starts;
+    ix->u.part.lens    = lens;
+    ix->u.part.n_parts = nparts;
+    return attach_finalize(v, idx);
+}
+
+/* --------------------------------------------------------------------------
  * Detach (drop)
  *
  * Restore the parent's 16-byte nullmap union from the saved snapshot, then
@@ -1027,6 +1102,7 @@ static const char* kind_name(ray_idx_kind_t k) {
     case RAY_IDX_ZONE:       return "zone";
     case RAY_IDX_BLOOM:      return "bloom";
     case RAY_IDX_CHUNK_ZONE: return "chunk_zone";
+    case RAY_IDX_PART:       return "part";
     default:                 return "none";
     }
 }
@@ -1119,8 +1195,8 @@ ray_t* ray_index_info(ray_t* v) {
         if (RAY_IS_ERR(r)) goto fail;
         break;
     case RAY_IDX_PART:
-        /* TODO(Task 4): emit n_parts (and update kind_name to "part") once
-         * the part builder lands.  Diagnostic-only; no memory hazard. */
+        r = dict_append_sym_i64(&keys, &vals, "n_parts", ix->u.part.n_parts);
+        if (RAY_IS_ERR(r)) goto fail;
         break;
     case RAY_IDX_NONE:
         break;
@@ -1212,23 +1288,30 @@ static ray_t* attr_set_unique(ray_t* v) {
     return attach_finalize(w, idx);
 }
 
-/* grouped == hash index.  attach_via->prepare_attach drops any existing
- * index (including a marker-only block), so capture the markers first and
- * re-apply them to the fresh hash block (which is sole-owned post-attach).
+/* Build a backing index via `fn` (drop-and-rebuild through prepare_attach),
+ * carrying any block-resident markers across the rebuild.  Used by grouped and
+ * parted, which replace the backing index but must preserve markers such as
+ * unique.  Only RAY_MARK_UNIQUE exists today; revisit the blanket carry if a
+ * marker is ever added that should NOT survive replacing the backing index.
  * The sorted marker lives in attrs (not the block) and survives attach. */
-static ray_t* attr_set_grouped(ray_t* v) {
-    /* Carry all block-resident markers across the index rebuild.  Only
-     * RAY_MARK_UNIQUE exists today; revisit if a marker is ever added that
-     * should NOT survive replacing the backing index. */
+static ray_t* attach_backing_index_carry_markers(ray_t* v, ray_t* (*fn)(ray_t**)) {
     uint8_t carry = (v && !RAY_IS_ERR(v) && ray_index_has(v))
                     ? ray_index_payload(v->index)->markers : 0;
-    ray_t* w = attach_via(v, ray_index_attach_hash);
+    ray_t* w = attach_via(v, fn);
     if (w && !RAY_IS_ERR(w) && carry && (w->attrs & RAY_ATTR_HAS_INDEX))
         ray_index_payload(w->index)->markers |= carry;
     return w;
 }
 
-static ray_t* attr_set_parted (ray_t* v) { (void)v; return ray_error("nyi", "parted: not yet implemented"); }
+/* grouped == hash index. */
+static ray_t* attr_set_grouped(ray_t* v) {
+    return attach_backing_index_carry_markers(v, ray_index_attach_hash);
+}
+
+/* parted == contiguous ascending value-block index. */
+static ray_t* attr_set_parted(ray_t* v) {
+    return attach_backing_index_carry_markers(v, ray_index_attach_part);
+}
 
 /* Set the sorted marker after verifying.  Borrowed v in, owning ref out. */
 static ray_t* attr_set_sorted(ray_t* v) {
