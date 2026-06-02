@@ -40,9 +40,8 @@ static int numeric_elem_size(int8_t t) {
     switch (t) {
     case RAY_BOOL: case RAY_U8:                       return 1;
     case RAY_I16:                                     return 2;
-    case RAY_I32: case RAY_DATE: case RAY_F32:        return 4;
-    case RAY_I64: case RAY_TIME: case RAY_TIMESTAMP:
-    case RAY_F64:                                     return 8;
+    case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_F32:  return 4;
+    case RAY_I64: case RAY_TIMESTAMP: case RAY_F64:            return 8;
     default:                                          return 0;
     }
 }
@@ -96,12 +95,12 @@ static bool vec_is_ascending(const ray_t* v) {
         for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
         return true;
     }
-    case RAY_I32: case RAY_DATE: {
+    case RAY_I32: case RAY_DATE: case RAY_TIME: {  /* TIME is 4-byte int32 */
         const int32_t* p = (const int32_t*)b;
         for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
         return true;
     }
-    case RAY_I64: case RAY_TIME: case RAY_TIMESTAMP: {
+    case RAY_I64: case RAY_TIMESTAMP: {
         const int64_t* p = (const int64_t*)b;
         for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
         return true;
