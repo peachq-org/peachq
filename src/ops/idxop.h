@@ -39,7 +39,10 @@
  * carry an index, must be COW'd to rc==1 by the caller's path.
  *
  * Mutation invalidates: any in-place write to the parent vector must
- * call ray_index_drop() first — a stale index is a wrong-answer bug.
+ * call ray_index_drop() first AND clear RAY_ATTR_SORTED — a stale index
+ * or a stale sorted marker is a wrong-answer bug (e.g. an asof-join that
+ * trusts a false ordering claim).  Operators that build a fresh result
+ * vector get this for free (fresh vectors start at attrs==0, no index).
  */
 
 #include <rayforce.h>
