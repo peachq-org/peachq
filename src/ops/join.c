@@ -1567,7 +1567,9 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
  * merge expects, so that side's sort can be skipped.  Caller must have
  * checked ray_index_kind(keycol)==RAY_IDX_PART, and must separately ensure
  * the time column has no nulls (null-keyed rows must sort last, which the
- * identity order would not do). */
+ * identity order would not do).  Caller must also confirm the index's
+ * built_for_len matches the current column length, so the part ranges
+ * (starts/lens) are in-bounds for the time array indexed here. */
 static bool asof_time_sorted_within_parts(const ray_t* keycol, const int64_t* tvals) {
     ray_index_t* ix = ray_index_payload(((ray_t*)keycol)->index);
     const int64_t* st = (const int64_t*)ray_data(ix->u.part.starts);
@@ -1715,11 +1717,15 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         || (n_eq == 1
             && !(lt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
             && ray_index_kind(lt_eq[0]) == RAY_IDX_PART
+            /* reject a stale part index (parent length changed since build) */
+            && ray_index_payload(lt_eq[0]->index)->built_for_len == lt_eq[0]->len
             && asof_time_sorted_within_parts(lt_eq[0], lt_time));
     bool r_presorted = (n_eq == 0 && ray_attr_is_sorted(rt_time_vec))
         || (n_eq == 1
             && !(rt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
             && ray_index_kind(rt_eq[0]) == RAY_IDX_PART
+            /* reject a stale part index (parent length changed since build) */
+            && ray_index_payload(rt_eq[0]->index)->built_for_len == rt_eq[0]->len
             && asof_time_sorted_within_parts(rt_eq[0], rt_time));
 
     /* Bottom-up mergesort on index arrays — O(N log N) */
