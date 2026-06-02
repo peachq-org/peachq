@@ -139,6 +139,36 @@ static uint64_t next_pow2(uint64_t n) {
     return p;
 }
 
+/* True iff all non-null rows are distinct.  Open-addressing probe over a
+ * power-of-two table sized ~2x the row count.  v1: numeric vectors only.
+ * Returns false on OOM so the caller raises a verify error (conservative). */
+static bool vec_all_distinct(const ray_t* v) {
+    int64_t n = v->len;
+    if (n < 2) return true;
+    uint64_t cap = next_pow2((uint64_t)n * 2 + 1);
+    if (cap < 16) cap = 16;
+    uint64_t mask = cap - 1;
+    /* Transient scratch table, deliberately off-heap (freed before return);
+     * it is never an owned ray_t, unlike the persistent hash-index table. */
+    int64_t* slot = (int64_t*)calloc((size_t)cap, sizeof(int64_t)); /* 0 = empty; store i+1 */
+    if (!slot) return false;
+    const uint8_t* base = (const uint8_t*)ray_data((ray_t*)v);
+    bool ok = true;
+    for (int64_t i = 0; i < n && ok; i++) {
+        if (ray_vec_is_null((ray_t*)v, i)) continue;
+        uint64_t hi = numeric_key_word(base, v->type, i);
+        uint64_t h = mix64(hi) & mask;
+        for (;;) {
+            int64_t cur = slot[h];
+            if (cur == 0) { slot[h] = i + 1; break; }
+            if (numeric_key_word(base, v->type, cur - 1) == hi) { ok = false; break; } /* dup */
+            h = (h + 1) & mask;
+        }
+    }
+    free(slot);
+    return ok;
+}
+
 /* --------------------------------------------------------------------------
  * Index ray_t allocation / destruction helpers
  *
@@ -259,6 +289,24 @@ void ray_index_retain_payload(ray_index_t* ix) {
     case RAY_IDX_NONE:
         break;
     }
+}
+
+/* Deep-clone a RAY_INDEX block, sharing (retaining) its payload child vectors.
+ * ray_alloc_copy CANNOT be used here: a RAY_INDEX block's type (97) is outside
+ * the vector-type range, so ray_alloc_copy computes data_size==0 and copies
+ * only the 32-byte header, silently dropping the ray_index_t payload (kind,
+ * markers, child pointers).  Used when a marker must be set on an index block
+ * that is shared after copy-on-write. */
+static ray_t* clone_index_block(ray_t* blk) {
+    ray_index_t* src = ray_index_payload(blk);
+    ray_t* nb = ray_index_alloc((ray_idx_kind_t)src->kind, src->parent_type,
+                                src->built_for_len);
+    if (!nb || RAY_IS_ERR(nb)) return nb ? nb : ray_error("oom", NULL);
+    ray_index_t* dst = ray_index_payload(nb);
+    memcpy(dst, src, sizeof(ray_index_t));   /* kind, markers, saved_nullmap, union */
+    ray_index_retain_payload(dst);           /* child vectors now referenced twice */
+    ray_index_retain_saved(dst);             /* no-op for numeric, kept symmetric */
+    return nb;
 }
 
 /* --------------------------------------------------------------------------
@@ -1128,8 +1176,58 @@ ray_t* ray_idx_info_fn(ray_t* v) {
  * 2026-06-01-column-attributes-design.md.
  * -------------------------------------------------------------------------- */
 
-static ray_t* attr_set_unique (ray_t* v) { (void)v; return ray_error("nyi", "unique: not yet implemented"); }
-static ray_t* attr_set_grouped(ray_t* v) { (void)v; return ray_error("nyi", "grouped: not yet implemented"); }
+/* unique: verify distinctness, then set a block-resident marker bit.  If the
+ * column already carries an index block, clone it (it is shared post-cow) and
+ * mark the clone; otherwise attach a marker-only block (kind NONE). */
+static ray_t* attr_set_unique(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("type", "attr: null");
+    if (!ray_is_vec(v))
+        return ray_error("type", "unique: attribute applies to vectors only");
+    if (numeric_elem_size(v->type) == 0)
+        return ray_error("nyi", "unique: only numeric vectors supported in v1 (type %d)", (int)v->type);
+    if (v->attrs & RAY_ATTR_SLICE)
+        return ray_error("type", "unique: cannot attribute a slice; materialize first");
+    if (!vec_all_distinct(v))
+        return ray_error("domain", "unique: column contains duplicate values");
+
+    ray_retain(v);
+    ray_t* w = ray_cow(v);
+    if (!w || RAY_IS_ERR(w)) return w ? w : ray_error("oom", NULL);
+
+    if (w->attrs & RAY_ATTR_HAS_INDEX) {
+        /* Post-cow w->index is SHARED with the original (ray_cow retains the
+         * block, it does not deep-copy it).  Clone it before mutating markers
+         * so the original's block is untouched.  Then the clone is sole-owned. */
+        ray_t* nb = clone_index_block(w->index);
+        if (!nb || RAY_IS_ERR(nb)) { ray_release(w); return nb ? nb : ray_error("oom", NULL); }
+        ray_release(w->index);
+        w->index = nb;
+        ray_index_payload(nb)->markers |= RAY_MARK_UNIQUE;
+        return w;
+    }
+    /* No backing index: attach a marker-only block (kind NONE). */
+    ray_t* idx = ray_index_alloc(RAY_IDX_NONE, w->type, w->len);
+    if (!idx || RAY_IS_ERR(idx)) { ray_release(w); return idx ? idx : ray_error("oom", NULL); }
+    ray_index_payload(idx)->markers = RAY_MARK_UNIQUE;
+    return attach_finalize(w, idx);
+}
+
+/* grouped == hash index.  attach_via->prepare_attach drops any existing
+ * index (including a marker-only block), so capture the markers first and
+ * re-apply them to the fresh hash block (which is sole-owned post-attach).
+ * The sorted marker lives in attrs (not the block) and survives attach. */
+static ray_t* attr_set_grouped(ray_t* v) {
+    /* Carry all block-resident markers across the index rebuild.  Only
+     * RAY_MARK_UNIQUE exists today; revisit if a marker is ever added that
+     * should NOT survive replacing the backing index. */
+    uint8_t carry = (v && !RAY_IS_ERR(v) && ray_index_has(v))
+                    ? ray_index_payload(v->index)->markers : 0;
+    ray_t* w = attach_via(v, ray_index_attach_hash);
+    if (w && !RAY_IS_ERR(w) && carry && (w->attrs & RAY_ATTR_HAS_INDEX))
+        ray_index_payload(w->index)->markers |= carry;
+    return w;
+}
+
 static ray_t* attr_set_parted (ray_t* v) { (void)v; return ray_error("nyi", "parted: not yet implemented"); }
 
 /* Set the sorted marker after verifying.  Borrowed v in, owning ref out. */
