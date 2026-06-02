@@ -222,12 +222,30 @@ static void compile_list(compiler_t *c, ray_t *ast) {
     if (head->type == -RAY_SYM && (head->attrs & RAY_ATTR_NAME)) {
         int64_t sym_id = head->i64;
 
-        /* (set name value) — dynamic eval (set modifies global env) */
+        /* (set name value) — bind in the global env.  Compile the value
+         * expression (so parameter/local slot references resolve in the
+         * current frame), then emit OP_STOREGLOBAL to bind the result by
+         * name.  The value is left on the stack as the form's result.
+         *
+         * This previously emitted OP_CALLD on the whole form, which
+         * tree-walked the value against the global env and so could not
+         * see a compiled lambda's slot-bound parameters: `(fn [a] (set b a))`
+         * raised `name: 'a' undefined`.  A non-symbol name aborts bytecode
+         * emission and falls back to the interpreter, which raises the
+         * proper `type` error via ray_set_fn. */
         if (sym_id == sf_set && n == 3) {
-            int32_t idx = add_constant(c, ast);
-            emit_const(c, idx);
-            emit(c, OP_CALLD);
-            emit(c, 0);
+            ray_t *name_obj = elems[1];
+            if (name_obj->type != -RAY_SYM) { c->error = true; return; }
+            compile_expr(c, elems[2]);
+            int32_t idx = add_constant(c, name_obj);
+            if (idx < 256) {
+                emit(c, OP_STOREGLOBAL);
+                emit(c, (uint8_t)idx);
+            } else {
+                emit(c, OP_STOREGLOBAL_W);
+                emit(c, (uint8_t)(idx >> 8));
+                emit(c, (uint8_t)(idx & 0xFF));
+            }
             return;
         }
 
