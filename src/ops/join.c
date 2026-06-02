@@ -23,6 +23,7 @@
 
 #include "ops/internal.h"
 #include "ops/hash.h"
+#include "ops/idxop.h"
 
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
@@ -1679,6 +1680,13 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     for (int64_t i = 0; i < left_n; i++) li_idx[i] = i;
     for (int64_t i = 0; i < right_n; i++) ri_idx[i] = i;
 
+    /* asof fast-path: with no equality keys, a time column already carrying the
+     * verified `sorted` marker is non-descending with no nulls, so the identity
+     * index order IS the sorted order — skip that side's mergesort entirely
+     * (O(n+m) instead of O(n log n)).  Falls back to sort-merge otherwise. */
+    bool l_presorted = (n_eq == 0) && ray_attr_is_sorted(lt_time_vec);
+    bool r_presorted = (n_eq == 0) && ray_attr_is_sorted(rt_time_vec);
+
     /* Bottom-up mergesort on index arrays — O(N log N) */
     {
         int64_t max_n = left_n > right_n ? left_n : right_n;
@@ -1696,6 +1704,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         }
 
         /* Sort left indices by (nulls-last, eq_keys, time) */
+        if (!l_presorted)
         for (int64_t width = 1; width < left_n; width *= 2) {
             for (int64_t lo = 0; lo < left_n; lo += 2 * width) {
                 int64_t mid = lo + width;
@@ -1727,6 +1736,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         }
 
         /* Sort right indices by (nulls-last, eq_keys, time) */
+        if (!r_presorted)
         for (int64_t width = 1; width < right_n; width *= 2) {
             for (int64_t lo = 0; lo < right_n; lo += 2 * width) {
                 int64_t mid = lo + width;
