@@ -23,6 +23,7 @@
 
 #include "ops/internal.h"
 #include "ops/hash.h"
+#include "ops/idxop.h"
 
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
@@ -1558,6 +1559,29 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
  * optionally partitioned by equality keys. O(N+M) after sorting.
  * ============================================================================ */
 
+/* True iff `tvals` (a side's time values, already expanded to int64) is
+ * non-descending within every part described by keycol's RAY_IDX_PART index.
+ * The part index guarantees rows are already grouped into contiguous,
+ * ascending key value-blocks; if time is also non-descending inside each
+ * block, the natural row order already equals the (key, time) order the
+ * merge expects, so that side's sort can be skipped.  Caller must have
+ * checked ray_index_kind(keycol)==RAY_IDX_PART, and must separately ensure
+ * the time column has no nulls (null-keyed rows must sort last, which the
+ * identity order would not do).  Caller must also confirm the index's
+ * built_for_len matches the current column length, so the part ranges
+ * (starts/lens) are in-bounds for the time array indexed here. */
+static bool asof_time_sorted_within_parts(const ray_t* keycol, const int64_t* tvals) {
+    ray_index_t* ix = ray_index_payload(((ray_t*)keycol)->index);
+    const int64_t* st = (const int64_t*)ray_data(ix->u.part.starts);
+    const int64_t* ln = (const int64_t*)ray_data(ix->u.part.lens);
+    for (int64_t p = 0; p < ix->u.part.n_parts; p++) {
+        int64_t s = st[p], e = st[p] + ln[p];
+        for (int64_t i = s + 1; i < e; i++)
+            if (tvals[i] < tvals[i - 1]) return false;
+    }
+    return true;
+}
+
 ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                                ray_t* left_table, ray_t* right_table) {
     ray_op_ext_t* ext = find_ext(g, op->id);
@@ -1679,14 +1703,40 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     for (int64_t i = 0; i < left_n; i++) li_idx[i] = i;
     for (int64_t i = 0; i < right_n; i++) ri_idx[i] = i;
 
+    /* asof fast-path: a side can skip its mergesort when its rows already sit
+     * in the (eq-key, time) order the merge expects.  Two cases:
+     *   - un-partitioned (n_eq==0): the time column carries the verified
+     *     `sorted` marker (non-descending, no nulls), so identity order == sorted.
+     *   - partitioned (n_eq==1): the single equality key is `parted` (rows
+     *     grouped into contiguous, ascending value-blocks) AND the time column
+     *     has no nulls AND is non-descending within each part — so identity
+     *     order already equals (key, time) order.
+     * Either way we fill the index array with the identity permutation and skip
+     * the O(n log n) sort.  Falls back to sort-merge otherwise; never wrong. */
+    bool l_presorted = (n_eq == 0 && ray_attr_is_sorted(lt_time_vec))
+        || (n_eq == 1
+            && !(lt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
+            && ray_index_kind(lt_eq[0]) == RAY_IDX_PART
+            /* reject a stale part index (parent length changed since build) */
+            && ray_index_payload(lt_eq[0]->index)->built_for_len == lt_eq[0]->len
+            && asof_time_sorted_within_parts(lt_eq[0], lt_time));
+    bool r_presorted = (n_eq == 0 && ray_attr_is_sorted(rt_time_vec))
+        || (n_eq == 1
+            && !(rt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
+            && ray_index_kind(rt_eq[0]) == RAY_IDX_PART
+            /* reject a stale part index (parent length changed since build) */
+            && ray_index_payload(rt_eq[0]->index)->built_for_len == rt_eq[0]->len
+            && asof_time_sorted_within_parts(rt_eq[0], rt_time));
+
     /* Bottom-up mergesort on index arrays — O(N log N) */
     {
         int64_t max_n = left_n > right_n ? left_n : right_n;
+        bool need_tmp = (!l_presorted || !r_presorted) && max_n > 0;
         ray_t* tmp_hdr = NULL;
-        int64_t* tmp = max_n > 0
+        int64_t* tmp = need_tmp
             ? (int64_t*)scratch_alloc(&tmp_hdr, (size_t)max_n * sizeof(int64_t))
             : NULL;
-        if (!tmp && max_n > 0) {
+        if (!tmp && need_tmp) {
             scratch_free(li_hdr); scratch_free(ri_hdr);
             if (lt_null_hdr) scratch_free(lt_null_hdr);
             if (rt_null_hdr) scratch_free(rt_null_hdr);
@@ -1696,7 +1746,8 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         }
 
         /* Sort left indices by (nulls-last, eq_keys, time) */
-        for (int64_t width = 1; width < left_n; width *= 2) {
+        if (!l_presorted) {
+            for (int64_t width = 1; width < left_n; width *= 2) {
             for (int64_t lo = 0; lo < left_n; lo += 2 * width) {
                 int64_t mid = lo + width;
                 int64_t hi = lo + 2 * width;
@@ -1724,10 +1775,12 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                 while (b < hi) tmp[t++] = li_idx[b++];
                 for (int64_t c = lo; c < hi; c++) li_idx[c] = tmp[c];
             }
+            }
         }
 
         /* Sort right indices by (nulls-last, eq_keys, time) */
-        for (int64_t width = 1; width < right_n; width *= 2) {
+        if (!r_presorted) {
+            for (int64_t width = 1; width < right_n; width *= 2) {
             for (int64_t lo = 0; lo < right_n; lo += 2 * width) {
                 int64_t mid = lo + width;
                 int64_t hi = lo + 2 * width;
@@ -1754,6 +1807,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                 while (a < mid) tmp[t++] = ri_idx[a++];
                 while (b < hi) tmp[t++] = ri_idx[b++];
                 for (int64_t c = lo; c < hi; c++) ri_idx[c] = tmp[c];
+            }
             }
         }
 

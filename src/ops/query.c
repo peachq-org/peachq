@@ -11490,7 +11490,9 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
 }
 
 /* (asof-join [key1 key2 ... timeKey] leftTable rightTable)
- * Last key is the time/asof column, rest are equality keys. */
+ * Last key is the time/asof column, rest are equality keys.  The equality
+ * keys are OPTIONAL: a lone time key (asof-join [timeKey] L R) performs an
+ * un-partitioned asof over all rows. */
 ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
     if (n < 3) return ray_error("arity", NULL);
     ray_t* keys_vec   = args[0];
@@ -11500,10 +11502,11 @@ ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
     if (left_tbl->type != RAY_TABLE || right_tbl->type != RAY_TABLE)
         return ray_error("type", NULL);
 
-    /* Keys vector must be a SYM vector with at least 2 elements (eq + time) */
+    /* Keys vector must be a SYM vector with at least 1 element: the time key;
+     * any preceding keys are equality (partition) keys. */
     ray_t* _bxk = NULL;
     keys_vec = unbox_vec_arg(keys_vec, &_bxk);
-    if (!is_list(keys_vec) || ray_len(keys_vec) < 2) {
+    if (!is_list(keys_vec) || ray_len(keys_vec) < 1) {
         if (_bxk) ray_release(_bxk);
         return ray_error("domain", NULL);
     }
