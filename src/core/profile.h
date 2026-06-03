@@ -59,19 +59,9 @@ typedef struct {
     int64_t              ts;   /* nanoseconds (monotonic) */
 } ray_prof_span_t;
 
-/* Progress callback — set by REPL to render progress bar.
- * Called at morsel boundaries; receives done/total/label. */
-typedef void (*ray_progress_fn)(int64_t done, int64_t total, const char* label);
-
 typedef struct {
     bool              active;
     int32_t           n;
-    /* Progress tracking */
-    int64_t           progress_total;
-    int64_t           progress_done;
-    const char*       progress_label;
-    int64_t           progress_last_render; /* ns timestamp of last render */
-    ray_progress_fn   progress_cb;          /* set by REPL; NULL = no-op  */
     ray_prof_span_t   spans[RAY_PROFILE_SPANS_MAX];
 } ray_profile_t;
 
@@ -93,10 +83,6 @@ static inline int64_t ray_profile_now_ns(void) {
 
 static inline void ray_profile_reset(void) {
     g_ray_profile.n = 0;
-    g_ray_profile.progress_total = 0;
-    g_ray_profile.progress_done = 0;
-    g_ray_profile.progress_label = NULL;
-    g_ray_profile.progress_last_render = 0;
 }
 
 static inline void ray_profile_span_start(const char* name) {
@@ -124,38 +110,6 @@ static inline void ray_profile_tick(const char* msg) {
     s->type = RAY_PROF_SPAN_TICK;
     s->msg  = msg;
     s->ts   = ray_profile_now_ns();
-}
-
-/* Progress bar — called between morsels / pipeline stages */
-static inline void ray_profile_progress_begin(const char* label, int64_t total) {
-    if (!g_ray_profile.active) return;
-    g_ray_profile.progress_label = label;
-    g_ray_profile.progress_total = total;
-    g_ray_profile.progress_done  = 0;
-}
-
-/* Throttled: renders at most every 100ms to avoid terminal spam */
-#define RAY_PROGRESS_RENDER_INTERVAL_NS (100 * 1000000LL)
-
-static inline void ray_profile_progress_advance(int64_t delta) {
-    if (!g_ray_profile.active) return;
-    g_ray_profile.progress_done += delta;
-    if (g_ray_profile.progress_cb && g_ray_profile.progress_total > 0) {
-        int64_t now = ray_profile_now_ns();
-        if (now - g_ray_profile.progress_last_render > RAY_PROGRESS_RENDER_INTERVAL_NS) {
-            g_ray_profile.progress_last_render = now;
-            g_ray_profile.progress_cb(g_ray_profile.progress_done,
-                                      g_ray_profile.progress_total,
-                                      g_ray_profile.progress_label);
-        }
-    }
-}
-
-static inline void ray_profile_progress_end(void) {
-    if (!g_ray_profile.active) return;
-    g_ray_profile.progress_label = NULL;
-    g_ray_profile.progress_total = 0;
-    g_ray_profile.progress_done  = 0;
 }
 
 #endif /* RAY_PROFILE_H */
