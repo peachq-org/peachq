@@ -332,6 +332,7 @@ typedef struct ray_heap {
     ray_fl_head_t    freelist[RAY_HEAP_FL_SIZE];   /* circular sentinel per order */
     ray_mem_stats_t  stats;
     uint32_t        pool_count;                  /* number of tracked pools */
+    uint32_t        last_pool_idx;               /* MRU pool index for warm-first ray_free */
     ray_pool_entry_t pools[RAY_MAX_POOLS];         /* pool tracking for destroy/merge */
     struct ray_heap* pending_next;                /* link for pending-merge LIFO queue */
     char            swap_path[256];              /* dir for file-backed pool fallback (RAY_HEAP_SWAP env, default "./") */
