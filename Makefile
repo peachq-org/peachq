@@ -109,6 +109,12 @@ bench-alloc:
 		bench/alloc/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS) -lpthread
 	./bench-alloc
 
+# Allocator micro-benchmark with the cross-thread free queue ENABLED (P5 A/B).
+bench-alloc-tfq:
+	$(CC) $(RELEASE_CFLAGS) -DRAY_THREAD_FREE_QUEUE=1 $(DEFS) $(INCLUDES) -o bench-alloc-tfq \
+		bench/alloc/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS) -lpthread
+	./bench-alloc-tfq
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
@@ -162,7 +168,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib bench-alloc test coverage clean
+.PHONY: default debug release lib bench-alloc bench-alloc-tfq test coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
