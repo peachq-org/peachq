@@ -253,17 +253,6 @@ static inline void col_propagate_str_pool_parted(ray_t* dst, ray_t** segs, int64
     }
 }
 
-/* Check if all non-NULL STR segments share the same str_pool pointer. */
-static inline bool parted_str_single_pool(ray_t** segs, int64_t n_segs) {
-    ray_t* pool = NULL;
-    for (int64_t i = 0; i < n_segs; i++) {
-        if (!segs[i] || segs[i]->type != RAY_STR || !segs[i]->str_pool) continue;
-        if (!pool) pool = segs[i]->str_pool;
-        else if (segs[i]->str_pool != pool) return false;
-    }
-    return true;
-}
-
 /* ---- Null bitmap propagation helpers ---- */
 
 /* Propagate nulls from src to dst via index array: dst[r] gets src's null
