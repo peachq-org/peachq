@@ -359,6 +359,17 @@ static bool heap_add_pool(ray_heap_t* h, uint8_t order) {
         mem = (void*)aligned;
     }
 
+    /* Enable transparent huge pages on anon pools (Linux).  Self-aligned
+     * 32MB pools are 2MB-aligned, hence THP-eligible.  Never on file-backed
+     * swap mappings.  Env RAY_HEAP_HUGEPAGE=0 disables (THP-jitter-averse
+     * deployments). */
+    uint8_t pool_hugepage = 0;
+    if (swap_fd < 0) {  /* anon pool only */
+        const char* hp = getenv("RAY_HEAP_HUGEPAGE");
+        if (!(hp && hp[0] == '0'))
+            pool_hugepage = ray_vm_hugepage(mem, pool_size) ? 1 : 0;
+    }
+
     /* --- Write pool header at offset 0 --- */
     ray_t* hdr_block = (ray_t*)mem;
     memset(hdr_block, 0, BSIZEOF(RAY_ORDER_MIN));
@@ -385,6 +396,7 @@ static bool heap_add_pool(ray_heap_t* h, uint8_t order) {
     h->pools[h->pool_count].base       = mem;
     h->pools[h->pool_count].pool_order = pool_order;
     h->pools[h->pool_count].backed     = (swap_fd >= 0) ? 1 : 0;
+    h->pools[h->pool_count].hugepage   = pool_hugepage;
     h->pools[h->pool_count].swap_fd    = swap_fd;
     h->pools[h->pool_count].swap_path  = swap_path;  /* NULL when not backed */
     h->pool_count++;
