@@ -2799,18 +2799,20 @@ static ray_t* try_count_distinct_v2_rewrite(
     int8_t kct = K_col->type, xct = X_col->type;
     if (RAY_IS_PARTED(kct) || kct == RAY_MAPCOMMON) return NULL;
     if (RAY_IS_PARTED(xct) || xct == RAY_MAPCOMMON) return NULL;
-    if (kct == RAY_SYM || xct == RAY_SYM) return NULL;
     if (K_col->attrs & RAY_ATTR_HAS_NULLS) return NULL;
     if (X_col->attrs & RAY_ATTR_HAS_NULLS) return NULL;
     int K_esz = ray_sym_elem_size(kct, K_col->attrs);
     int X_esz = ray_sym_elem_size(xct, X_col->attrs);
     if (K_esz + X_esz > 16) return NULL;
-    /* Restrict to integer/temporal — matches mk_compile's accepted shapes. */
-    int kct_ok = (kct == RAY_BOOL || kct == RAY_U8 || kct == RAY_I16 ||
-                  kct == RAY_I32  || kct == RAY_I64 ||
+    /* Accept SYM in addition to integer/temporal — mk_compile composite
+     * already packs SYM by its storage width.  Inner pass groups (K, X)
+     * as a composite int64; outer materialise rebuilds the K column as
+     * SYM if K was SYM. */
+    int kct_ok = (kct == RAY_SYM  || kct == RAY_BOOL || kct == RAY_U8 ||
+                  kct == RAY_I16  || kct == RAY_I32  || kct == RAY_I64 ||
                   kct == RAY_DATE || kct == RAY_TIME || kct == RAY_TIMESTAMP);
-    int xct_ok = (xct == RAY_BOOL || xct == RAY_U8 || xct == RAY_I16 ||
-                  xct == RAY_I32  || xct == RAY_I64 ||
+    int xct_ok = (xct == RAY_SYM  || xct == RAY_BOOL || xct == RAY_U8 ||
+                  xct == RAY_I16  || xct == RAY_I32  || xct == RAY_I64 ||
                   xct == RAY_DATE || xct == RAY_TIME || xct == RAY_TIMESTAMP);
     if (!kct_ok || !xct_ok) return NULL;
 
@@ -2899,7 +2901,13 @@ static ray_t* try_count_distinct_v2_rewrite(
             }
         }
     }
-    return result;
+    /* Apply the user's desc:/asc:/take: clauses on the dedup'd, counted
+     * output.  The emit_filter trims to top-N during the outer pass but
+     * leaves rows in HT-iteration order, so without this final sort the
+     * `desc: c` ordering is silently dropped — the result set is right
+     * but its row order isn't.  apply_sort_take is a no-op when the
+     * clauses are absent. */
+    return apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
 }
 
 /* Per-group count(distinct) using the existing OP_COUNT_DISTINCT kernel.
