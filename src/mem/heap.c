@@ -233,9 +233,24 @@ static void heap_coalesce(ray_heap_t* h, ray_t* blk,
                           uintptr_t pool_base, uint8_t pool_order) {
     uint8_t order = blk->order;
 
-    /* During parallel execution, skip coalescing entirely — buddies may
-     * belong to other heaps' freelists, and fl_remove would corrupt them. */
+    /* During parallel execution, coalesce only same-pool buddies owned by
+     * THIS heap.  blk is local (this path runs only for local frees), and
+     * buddies stay in-pool (ray_buddy_of XORs within the pool), so a free
+     * (rc==0) buddy lives only on our own freelist — which only we touch
+     * during parallel.  rc!=0 excludes in-flight cross-thread frees.  The
+     * heap_id guard is belt-and-suspenders against unexpected aliasing. */
     if (atomic_load_explicit(&ray_parallel_flag, memory_order_relaxed) != 0) {
+        for (;; order++) {
+            if (order >= pool_order) break;
+            ray_t* buddy = ray_buddy_of(blk, order, pool_base);
+            if (ray_atomic_load(&buddy->rc) != 0 || buddy->order != order) break;
+            ray_pool_hdr_t* bphdr = ray_pool_of(buddy);
+            if (!bphdr || bphdr->heap_id != h->id) break;
+            fl_remove(buddy);
+            if (fl_empty(&h->freelist[order]))
+                h->avail &= ~(1ULL << order);
+            blk = (buddy < blk) ? buddy : blk;
+        }
         heap_insert_block(h, blk, order);
         return;
     }
