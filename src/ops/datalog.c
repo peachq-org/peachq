@@ -2413,36 +2413,6 @@ static ray_t* table_antijoin(ray_t* left, ray_t* right) {
     return restore_names(raw, left);
 }
 
-/* Normalize column names of a table to match the target relation's naming scheme.
- * Returns a new owned table with correct names (shares column data).
- * Currently unused but retained for future use by external callers. */
-static ray_t* normalize_columns(ray_t* tbl, dl_rel_t* rel)
-    __attribute__((unused));
-static ray_t* normalize_columns(ray_t* tbl, dl_rel_t* rel) {
-    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
-    int64_t ncols = ray_table_ncols(tbl);
-    if (ncols != rel->arity) {
-        /* Arity mismatch — can't normalize */
-        ray_retain(tbl);
-        return tbl;
-    }
-    /* Check if already correct */
-    bool ok = true;
-    for (int c = 0; c < rel->arity; c++) {
-        if (ray_table_col_name(tbl, c) != rel->col_names[c]) { ok = false; break; }
-    }
-    if (ok) { ray_retain(tbl); return tbl; }
-
-    /* Rebuild with correct names, sharing column data */
-    ray_t* out = ray_table_new(rel->arity);
-    for (int c = 0; c < rel->arity; c++) {
-        ray_t* col = ray_table_get_col_idx(tbl, c);
-        if (col)
-            out = ray_table_add_col(out, rel->col_names[c], col);
-    }
-    return out;
-}
-
 /* ========================================================================
  * Provenance helpers
  * ======================================================================== */
