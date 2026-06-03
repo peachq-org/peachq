@@ -416,7 +416,12 @@ ray_t* ray_os_list_fn(ray_t* x) {
     }
     closedir(d);
 
-    qsort(names, (size_t)count, sizeof(char*), dir_entry_cmp);
+    /* qsort(NULL, 0, ...) is undefined behaviour per C11 §7.22.5.2/2
+     * even when nmemb == 0 (UBSan flags it via qsort's nonnull attr).
+     * Skip the call when the directory was empty — an empty array is
+     * already sorted. */
+    if (count > 0)
+        qsort(names, (size_t)count, sizeof(char*), dir_entry_cmp);
 
     ray_t* result = ray_vec_new(RAY_SYM, count);
     if (!result || RAY_IS_ERR(result)) {
