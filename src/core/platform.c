@@ -118,6 +118,15 @@ void* ray_vm_alloc_aligned(size_t size, size_t alignment) {
     return (void*)aligned;
 }
 
+bool ray_vm_hugepage(void* ptr, size_t size) {
+#if defined(MADV_HUGEPAGE)
+    if (!ptr) return false;
+    return madvise(ptr, size, MADV_HUGEPAGE) == 0;
+#else
+    (void)ptr; (void)size; return false;
+#endif
+}
+
 /* --------------------------------------------------------------------------
  * Threading
  * -------------------------------------------------------------------------- */
@@ -289,6 +298,8 @@ void* ray_vm_alloc_aligned(size_t size, size_t alignment) {
     return (void*)aligned;
 }
 
+bool ray_vm_hugepage(void* ptr, size_t size) { (void)ptr; (void)size; return false; }
+
 /* --------------------------------------------------------------------------
  * Threading
  * -------------------------------------------------------------------------- */
@@ -426,6 +437,8 @@ void* ray_vm_alloc_aligned(size_t size, size_t alignment) {
     size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
     return aligned_alloc(alignment, aligned_size);
 }
+
+bool ray_vm_hugepage(void* ptr, size_t size) { (void)ptr; (void)size; return false; }
 
 /* Threading — return errors / 1.  pool.c with n_workers==0 (the result of
  * thread_count==1 ⇒ ncpu-1 == 0) never invokes thread_create. */
