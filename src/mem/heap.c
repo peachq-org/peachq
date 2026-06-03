@@ -955,46 +955,52 @@ void ray_free(ray_t* v) {
     size_t block_size = BSIZEOF(order);
 #endif
 
-    /* O(1) ownership check via pool header heap_id.
-     * ray_pool_of() derives pool base in O(1) via self-aligned AND mask.
-     * Pool header stores heap_id stamped at pool creation. */
-    ray_pool_hdr_t* phdr = ray_pool_of(v);
-    if (!phdr) return;
-    bool is_local = (phdr->heap_id == h->id);
-
-    /* Slab fast path (same heap only) */
-    if (IS_SLAB_ORDER(order) && is_local) {
-        int idx = SLAB_INDEX(order);
-        if (h->slabs[idx].count < RAY_SLAB_CACHE_SIZE) {
-            /* Mark rc=1 so buddy coalescing skips slab-cached blocks.
-             * Blocks freed via ray_release arrive with rc=0; without this,
-             * a buddy being freed would see rc==0 and incorrectly merge
-             * with the slab-cached block, causing overlapping allocations.
-             * Must be atomic: buddy coalescing on another thread reads rc. */
-            ray_atomic_store(&v->rc, 1);
-            h->slabs[idx].stack[h->slabs[idx].count++] = v;
-            RAY_STAT(h->stats.free_count++);
-            RAY_STAT(h->stats.bytes_allocated -= block_size);
-            return;
-        }
+    /* Warm-first ownership check: probe the MRU pool, then scan the warm
+     * h->pools[] array.  A hit proves the block is local and yields
+     * pool base+order WITHOUT reading the cold pool header 32MB away.
+     * Only a full miss falls through to the foreign path.  heap_find_pool
+     * returning >=0 is equivalent to the old phdr->heap_id == h->id check. */
+    int pidx = -1;
+    if (h->last_pool_idx < h->pool_count) {
+        uintptr_t pb = (uintptr_t)h->pools[h->last_pool_idx].base;
+        uintptr_t pe = pb + BSIZEOF(h->pools[h->last_pool_idx].pool_order);
+        if ((uintptr_t)v >= pb && (uintptr_t)v < pe)
+            pidx = (int)h->last_pool_idx;
     }
+    if (pidx < 0) pidx = heap_find_pool(h, v);
 
-    /* Foreign: different heap — enqueue to foreign list for later
-     * return to the owner during GC (flush with return_to_owner=true).
-     * Do NOT adjust any heap's bytes_allocated here: the block stays
-     * counted on the owning heap until properly returned and coalesced. */
-    if (!is_local) {
-        v->fl_next = h->foreign;
-        h->foreign = v;
+    if (pidx >= 0) {
+        /* Local block — base+order from the warm pools array. */
+        h->last_pool_idx = (uint32_t)pidx;
+        uintptr_t pool_base  = (uintptr_t)h->pools[pidx].base;
+        uint8_t   pool_order = h->pools[pidx].pool_order;
+
+        /* Slab fast path */
+        if (IS_SLAB_ORDER(order)) {
+            int idx = SLAB_INDEX(order);
+            if (h->slabs[idx].count < RAY_SLAB_CACHE_SIZE) {
+                /* rc=1 so buddy coalescing skips slab-cached blocks (a buddy
+                 * freed concurrently reads rc; rc==0 would wrongly merge). */
+                ray_atomic_store(&v->rc, 1);
+                h->slabs[idx].stack[h->slabs[idx].count++] = v;
+                RAY_STAT(h->stats.free_count++);
+                RAY_STAT(h->stats.bytes_allocated -= block_size);
+                return;
+            }
+        }
+
+        heap_coalesce(h, v, pool_base, pool_order);
         RAY_STAT(h->stats.free_count++);
+        RAY_STAT(h->stats.bytes_allocated -= block_size);
         return;
     }
 
-    /* Local block — coalesce with buddy */
-    heap_coalesce(h, v, (uintptr_t)phdr, phdr->pool_order);
-
+    /* Foreign: not in any of our pools — enqueue to the foreign list for
+     * return to the owner during GC.  Do NOT adjust bytes_allocated: the
+     * block stays counted on the owning heap until returned and coalesced. */
+    v->fl_next = h->foreign;
+    h->foreign = v;
     RAY_STAT(h->stats.free_count++);
-    RAY_STAT(h->stats.bytes_allocated -= block_size);
 }
 
 /* --------------------------------------------------------------------------
