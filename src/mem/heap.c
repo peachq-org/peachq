@@ -508,28 +508,6 @@ static void heap_flush_foreign(ray_heap_t* h, bool return_to_owner) {
     h->foreign = NULL;
 }
 
-#if RAY_THREAD_FREE_QUEUE
-/* Drain this heap's MPSC thread-free stack: steal the whole chain atomically
- * (single consumer = the owner) and coalesce each block locally.  Safe on the
- * alloc slow path and at GC; uses the parallel-safe heap_coalesce. */
-static void heap_drain_thread_free(ray_heap_t* h) {
-    ray_t* blk = atomic_exchange_explicit(&h->thread_free_head, NULL,
-                                          memory_order_acquire);
-    while (blk) {
-        ray_t* next = blk->fl_next;
-        int pidx = heap_find_pool(h, blk);
-        if (pidx >= 0) {
-            uintptr_t pb = (uintptr_t)h->pools[pidx].base;
-            uint8_t   po = h->pools[pidx].pool_order;
-            RAY_STAT(h->stats.bytes_allocated -= BSIZEOF(blk->order));
-            heap_coalesce(h, blk, pb, po);
-        }
-        /* pidx<0 ⇒ pool reclaimed/merged away ⇒ block already invalid ⇒ drop. */
-        blk = next;
-    }
-}
-#endif
-
 /* --------------------------------------------------------------------------
  * Owned-reference helpers
  * -------------------------------------------------------------------------- */
@@ -902,9 +880,6 @@ ray_t* ray_alloc(size_t data_size) {
 
     if (RAY_UNLIKELY(candidates == 0)) {
         heap_flush_foreign(h, false);  /* always local in ray_alloc */
-#if RAY_THREAD_FREE_QUEUE
-        heap_drain_thread_free(h);     /* reclaim cross-thread frees */
-#endif
 
         candidates = h->avail & (UINT64_MAX << order);
 
@@ -1047,38 +1022,11 @@ void ray_free(ray_t* v) {
         return;
     }
 
-    /* Foreign: not in any of our pools. */
-#if RAY_THREAD_FREE_QUEUE
-    /* Push onto the owning heap's MPSC stack so the owner reclaims it
-     * continuously, not only at GC.  Owner derived from the (cold) pool
-     * header — acceptable on this already-slow cross-thread path. */
-    {
-        ray_pool_hdr_t* phdr = ray_pool_of(v);
-        ray_heap_t* owner = phdr
-            ? ray_heap_registry[phdr->heap_id % RAY_HEAP_REGISTRY_SIZE]
-            : NULL;
-        if (owner && phdr && owner->id == phdr->heap_id) {
-            ray_atomic_store(&v->rc, 1);  /* free-guard; owner clears on drain */
-            ray_t* head = atomic_load_explicit(&owner->thread_free_head,
-                                               memory_order_relaxed);
-            do {
-                v->fl_next = head;
-            } while (!atomic_compare_exchange_weak_explicit(
-                         &owner->thread_free_head, &head, v,
-                         memory_order_release, memory_order_relaxed));
-        } else {
-            /* Owner gone — fall back to the local foreign list. */
-            v->fl_next = h->foreign;
-            h->foreign = v;
-        }
-    }
-#else
-    /* Enqueue to the foreign list for return to the owner during GC.  Do NOT
-     * adjust bytes_allocated: the block stays counted on the owning heap until
-     * returned and coalesced. */
+    /* Foreign: not in any of our pools.  Enqueue to the foreign list for
+     * return to the owner during GC.  Do NOT adjust bytes_allocated: the
+     * block stays counted on the owning heap until returned and coalesced. */
     v->fl_next = h->foreign;
     h->foreign = v;
-#endif
     RAY_STAT(h->stats.free_count++);
 }
 
@@ -1303,12 +1251,6 @@ void ray_heap_destroy(void) {
     /* Unregister from global heap registry */
     ray_heap_registry[h->id % RAY_HEAP_REGISTRY_SIZE] = NULL;
 
-#if RAY_THREAD_FREE_QUEUE
-    /* Drain any cross-thread frees still queued on us before unmapping our
-     * pools.  We unregistered above, so no new pushes can target this heap. */
-    heap_drain_thread_free(h);
-#endif
-
     /* Skip flush_slabs and flush_foreign — all pools are about to be
      * munmap'd. Flushing would coalesce blocks and fl_remove buddies
      * from other heaps' freelists, which races with concurrent worker
@@ -1428,9 +1370,6 @@ void ray_heap_gc(void) {
      * When safe (workers idle), return foreign blocks to their owners
      * so worker pools become reusable. */
     heap_flush_foreign(h, safe);
-#if RAY_THREAD_FREE_QUEUE
-    heap_drain_thread_free(h);
-#endif
     heap_flush_slabs(h);
 
     if (safe) {
@@ -1649,12 +1588,6 @@ void ray_heap_release_pages(void) {
 void ray_heap_merge(ray_heap_t* src) {
     ray_heap_t* dst = ray_tl_heap;
     if (!dst || !src) return;
-#if RAY_THREAD_FREE_QUEUE
-    /* Drain any cross-thread frees still queued on src into src's own
-     * freelists BEFORE migrating them to dst — otherwise those blocks are
-     * lost when the caller frees the src heap struct. */
-    heap_drain_thread_free(src);
-#endif
 
     /* Merge stats: dst inherits src's outstanding allocations so that
      * future local frees of those blocks correctly decrement dst. */
