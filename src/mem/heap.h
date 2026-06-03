@@ -329,7 +329,6 @@ typedef struct ray_heap {
     uint64_t        avail;                       /* bitmask: bit N set = freelist[N] non-empty */
     uint16_t        id;                          /* heap identity (for cross-thread free) */
     ray_t*           foreign;                     /* cross-heap freed blocks (lock-free LIFO via fl_next) */
-    _Atomic(ray_t*)  thread_free_head;           /* MPSC stack of cross-thread freed blocks (RAY_THREAD_FREE_QUEUE) */
     ray_slab_t       slabs[RAY_SLAB_ORDERS];       /* small-block slab caches */
     uint32_t        slab_cap[RAY_SLAB_ORDERS];   /* runtime push cap per slab order (byte-budgeted) */
     ray_fl_head_t    freelist[RAY_HEAP_FL_SIZE];   /* circular sentinel per order */
