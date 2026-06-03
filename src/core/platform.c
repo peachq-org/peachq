@@ -102,8 +102,17 @@ void ray_vm_release_block(void* blk, size_t bsize, bool hugepage) {
         return;
     }
     /* THP pool: release only the whole 2MB-aligned interior so a partial
-     * MADV_DONTNEED does not shatter the transparent huge page. */
+     * MADV_DONTNEED does not shatter the transparent huge page.
+     *
+     * Crucially, never discard the block's FIRST page: the free-list links
+     * (fl_prev/fl_next at offset 0-15) live there and the block stays linked
+     * after release, so dropping that page zeroes the links and corrupts the
+     * free-list for every later traversal (alloc, GC).  When blk is itself
+     * 2MB-aligned the rounded-up start equals blk and would MADV_DONTNEED the
+     * header; advance past the first 2MB region so the header survives — we
+     * still release only whole 2MB regions, so no THP shatter. */
     uintptr_t s = ((uintptr_t)blk + (2u << 20) - 1) & ~((uintptr_t)(2u << 20) - 1);
+    if (s == (uintptr_t)blk) s += (2u << 20);
     uintptr_t e = ((uintptr_t)blk + bsize) & ~((uintptr_t)(2u << 20) - 1);
     if (e > s) ray_vm_release((void*)s, e - s);
 }
