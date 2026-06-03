@@ -140,6 +140,10 @@ void* ray_vm_map_file(const char* path, size_t* out_size);
 void  ray_vm_unmap_file(void* ptr, size_t size);
 void  ray_vm_advise_seq(void* ptr, size_t size);
 void  ray_vm_release(void* ptr, size_t size);
+/* Release physical pages for a free block.  When hugepage is true, only the
+ * 2MB-aligned interior is released so a partial MADV_DONTNEED does not
+ * shatter the transparent huge page. */
+void ray_vm_release_block(void* blk, size_t bsize, bool hugepage);
 void* ray_vm_alloc_aligned(size_t size, size_t alignment);
 /* Hint the kernel to back [ptr, ptr+size) with huge pages.  Returns true
  * if the hint was issued (Linux THP); false where unsupported (macOS, WASM,

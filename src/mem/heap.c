@@ -1540,8 +1540,9 @@ void ray_heap_gc(void) {
                 ray_t* blk = head->fl_next;
                 while (blk != (ray_t*)head) {
                     size_t bsize = BSIZEOF(i);
-                    if (bsize > 4096)
-                        ray_vm_release((char*)blk + 4096, bsize - 4096);
+                    int rpidx = heap_find_pool(gh, blk);
+                    bool hp = (rpidx >= 0) ? (gh->pools[rpidx].hugepage != 0) : false;
+                    ray_vm_release_block(blk, bsize, hp);
                     blk = blk->fl_next;
                 }
             }
@@ -1558,8 +1559,9 @@ void ray_heap_release_pages(void) {
         ray_t* blk = head->fl_next;
         while (blk != (ray_t*)head) {
             size_t bsize = BSIZEOF(i);
-            if (bsize > 4096)
-                ray_vm_release((char*)blk + 4096, bsize - 4096);
+            int rpidx = heap_find_pool(h, blk);
+            bool hp = (rpidx >= 0) ? (h->pools[rpidx].hugepage != 0) : false;
+            ray_vm_release_block(blk, bsize, hp);
             blk = blk->fl_next;
         }
     }
