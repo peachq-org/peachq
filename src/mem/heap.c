@@ -978,7 +978,7 @@ void ray_free(ray_t* v) {
         /* Slab fast path */
         if (IS_SLAB_ORDER(order)) {
             int idx = SLAB_INDEX(order);
-            if (h->slabs[idx].count < RAY_SLAB_CACHE_SIZE) {
+            if (h->slabs[idx].count < h->slab_cap[idx]) {
                 /* rc=1 so buddy coalescing skips slab-cached blocks (a buddy
                  * freed concurrently reads rc; rc==0 would wrongly merge). */
                 ray_atomic_store(&v->rc, 1);
@@ -1164,6 +1164,26 @@ void ray_heap_init(void) {
     /* Initialize circular sentinel freelists */
     for (int i = 0; i < RAY_HEAP_FL_SIZE; i++)
         fl_init(&h->freelist[i]);
+
+    /* Per-order slab push caps from the byte budget (env-overridable).
+     * cap[o] = clamp(budget / 2^o, 1, RAY_SLAB_CACHE_SIZE): large orders
+     * keep fewer entries, giving a predictable per-thread RSS ceiling. */
+    {
+        size_t budget = RAY_SLAB_BUDGET;
+        const char* b = getenv("RAY_SLAB_BUDGET");
+        if (b && *b) {
+            char* end = NULL;
+            unsigned long long bv = strtoull(b, &end, 10);
+            if (end && *end == '\0' && bv > 0) budget = (size_t)bv;
+        }
+        for (int i = 0; i < RAY_SLAB_ORDERS; i++) {
+            size_t bsize = BSIZEOF(RAY_SLAB_MIN + i);
+            size_t cap = budget / bsize;
+            if (cap < 1) cap = 1;
+            if (cap > RAY_SLAB_CACHE_SIZE) cap = RAY_SLAB_CACHE_SIZE;
+            h->slab_cap[i] = (uint32_t)cap;
+        }
+    }
 
     /* Resolve swap directory for file-backed pool fallback.  RAY_HEAP_SWAP
      * env var overrides the default ("./"); we always ensure a trailing
