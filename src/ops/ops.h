@@ -106,6 +106,14 @@ void     ray_cancel(void);
 #  endif
 #endif
 
+/* Cross-thread free queue: when 1, cross-thread frees push to the OWNER
+ * heap's atomic MPSC stack (drained continuously by the owner) instead of
+ * the freeing heap's foreign list (returned only at GC).  Default off until
+ * validated under TSan + the producer-consumer bench. */
+#ifndef RAY_THREAD_FREE_QUEUE
+#  define RAY_THREAD_FREE_QUEUE 0
+#endif
+
 /* ===== Parallel Threshold ===== */
 
 #define RAY_PARALLEL_THRESHOLD  (64 * RAY_MORSEL_ELEMS)
