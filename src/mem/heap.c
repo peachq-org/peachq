@@ -1449,7 +1449,10 @@ void ray_heap_gc(void) {
         /* Pass 4: Reclaim OVERSIZED empty pools.
          * Standard pools (pool_order == RAY_HEAP_POOL_ORDER) are never
          * munmapped — physical pages released via madvise (phase 5)
-         * re-fault cheaply on next query.
+         * re-fault cheaply on next query.  (On THP-backed pools, phase 5
+         * only releases the 2MB-aligned interior of a free block, so
+         * sub-2MB free blocks keep their pages resident — the deliberate
+         * no-shatter tradeoff; disable per-deployment with RAY_HEAP_HUGEPAGE=0.)
          * Only oversized pools (pool_order > RAY_HEAP_POOL_ORDER) are
          * candidates — these are one-off large allocations.
          *
@@ -1666,7 +1669,7 @@ void ray_heap_merge(ray_heap_t* src) {
 
     /* Transfer slabs: fit into dst cache, coalesce overflow */
     for (int i = 0; i < RAY_SLAB_ORDERS; i++) {
-        while (src->slabs[i].count > 0 && dst->slabs[i].count < RAY_SLAB_CACHE_SIZE)
+        while (src->slabs[i].count > 0 && dst->slabs[i].count < dst->slab_cap[i])
             dst->slabs[i].stack[dst->slabs[i].count++] =
                 src->slabs[i].stack[--src->slabs[i].count];
         while (src->slabs[i].count > 0) {

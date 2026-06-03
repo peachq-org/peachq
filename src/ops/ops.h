@@ -95,15 +95,14 @@ void     ray_cancel(void);
 #define RAY_ORDER_MIN  6
 #define RAY_ORDER_MAX  30
 
-/* Heap statistics: informational only (ray_mem_stats).  GC computes
- * pool-emptiness from freelists, not stats, so stats are safe to compile
- * out of the release hot path.  Default on for DEBUG builds. */
+/* Heap statistics are USER-VISIBLE — the `sys` introspection fields
+ * (alloc-count / bytes-allocated / peak-bytes / slab-hits) and
+ * ray_mem_pressure() read them — so they must be maintained in every build,
+ * including release.  The macro is retained as a single switch (and to keep
+ * the RAY_STAT-only `block_size` local guarded) in case a future split makes
+ * some counters purely internal; today it is unconditionally on. */
 #ifndef RAY_MEM_STATS
-#  ifdef DEBUG
-#    define RAY_MEM_STATS 1
-#  else
-#    define RAY_MEM_STATS 0
-#  endif
+#  define RAY_MEM_STATS 1
 #endif
 
 /* Cross-thread free queue: when 1, cross-thread frees push to the OWNER
