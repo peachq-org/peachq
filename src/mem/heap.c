@@ -1549,11 +1549,19 @@ void ray_heap_gc(void) {
                 ray_fl_head_t* head = &gh->freelist[i];
                 ray_t* blk = head->fl_next;
                 while (blk != (ray_t*)head) {
+                    /* Capture fl_next BEFORE release: ray_vm_release_block's
+                     * THP path MADV_DONTNEEDs the 2MB-aligned interior, which
+                     * for a 2MB-aligned block includes the first page holding
+                     * fl_next.  Reading blk->fl_next afterwards faults in a
+                     * zero page → NULL → SEGV next iteration (Linux only;
+                     * macOS has no THP so the block's pages are never
+                     * discarded out from under the walk). */
+                    ray_t* next = blk->fl_next;
                     size_t bsize = BSIZEOF(i);
                     int rpidx = heap_find_pool(gh, blk);
                     bool hp = (rpidx >= 0) ? (gh->pools[rpidx].hugepage != 0) : false;
                     ray_vm_release_block(blk, bsize, hp);
-                    blk = blk->fl_next;
+                    blk = next;
                 }
             }
         }
@@ -1568,11 +1576,14 @@ void ray_heap_release_pages(void) {
         ray_fl_head_t* head = &h->freelist[i];
         ray_t* blk = head->fl_next;
         while (blk != (ray_t*)head) {
+            /* Capture fl_next before release — the THP release path can
+             * discard the page holding it.  See ray_heap_gc pass 5. */
+            ray_t* next = blk->fl_next;
             size_t bsize = BSIZEOF(i);
             int rpidx = heap_find_pool(h, blk);
             bool hp = (rpidx >= 0) ? (h->pools[rpidx].hugepage != 0) : false;
             ray_vm_release_block(blk, bsize, hp);
-            blk = blk->fl_next;
+            blk = next;
         }
     }
 }
