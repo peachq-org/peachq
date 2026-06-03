@@ -141,6 +141,10 @@ void  ray_vm_unmap_file(void* ptr, size_t size);
 void  ray_vm_advise_seq(void* ptr, size_t size);
 void  ray_vm_release(void* ptr, size_t size);
 void* ray_vm_alloc_aligned(size_t size, size_t alignment);
+/* Hint the kernel to back [ptr, ptr+size) with huge pages.  Returns true
+ * if the hint was issued (Linux THP); false where unsupported (macOS, WASM,
+ * Windows). */
+bool ray_vm_hugepage(void* ptr, size_t size);
 
 /* --------------------------------------------------------------------------
  * Threading API
