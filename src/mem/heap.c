@@ -203,14 +203,6 @@ RAY_INLINE void heap_insert_block(ray_heap_t* h, ray_t* blk, uint8_t order) {
     h->avail |= (1ULL << order);
 }
 
-/* heap_remove_block: currently unused — retained for future coalescing paths */
-static void __attribute__((unused))
-heap_remove_block(ray_heap_t* h, ray_t* blk, uint8_t order) {
-    fl_remove(blk);  /* circular unlink — works across heaps */
-    if (fl_empty(&h->freelist[order]))
-        h->avail &= ~(1ULL << order);
-}
-
 RAY_INLINE void heap_split_block(ray_heap_t* h, ray_t* blk,
                                 uint8_t target_order, uint8_t block_order) {
     while (block_order > target_order) {
