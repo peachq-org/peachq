@@ -101,6 +101,14 @@ lib: CFLAGS = $(RELEASE_CFLAGS)
 lib: $(LIB_OBJ)
 	$(AR) rc lib$(TARGET).a $(LIB_OBJ)
 
+# Allocator micro-benchmark (release-optimized, linked against lib objects).
+# Compile all sources fresh with RELEASE_CFLAGS so the benchmark measures
+# the release allocator, not a sanitizer-instrumented debug build.
+bench-alloc:
+	$(CC) $(RELEASE_CFLAGS) $(DEFS) $(INCLUDES) -o bench-alloc \
+		bench/alloc/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS) -lpthread
+	./bench-alloc
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
@@ -154,7 +162,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib test coverage clean
+.PHONY: default debug release lib bench-alloc test coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
