@@ -88,14 +88,18 @@ _Static_assert(sizeof(ray_pool_hdr_t) <= 16,
  * -------------------------------------------------------------------------- */
 RAY_TLS ray_heap_t*     ray_tl_heap  = NULL;
 
-/* Stats tracking — always enabled (plain integer ops, negligible vs atomics).
+/* Stats tracking — gated by RAY_MEM_STATS (1 in DEBUG builds, 0 in release).
  * All stats go through the per-heap struct (ray_tl_heap->stats) so that
  * heap merges keep bytes_allocated accurate.
  *
  * bytes_allocated is only modified by the owning thread (alloc/local-free)
  * or by the main thread during GC flush (return_to_owner=true, workers idle).
  * No atomics needed. */
-#define RAY_STAT(x) (x)
+#if RAY_MEM_STATS
+#  define RAY_STAT(x) (x)
+#else
+#  define RAY_STAT(x) ((void)0)
+#endif
 
 /* --------------------------------------------------------------------------
  * Bitmap-based heap ID allocator (atomic CAS, reusable IDs)
@@ -947,7 +951,9 @@ void ray_free(ray_t* v) {
 
     if (order < RAY_ORDER_MIN || order > RAY_HEAP_MAX_ORDER) return;
 
+#if RAY_MEM_STATS
     size_t block_size = BSIZEOF(order);
+#endif
 
     /* O(1) ownership check via pool header heap_id.
      * ray_pool_of() derives pool base in O(1) via self-aligned AND mask.
