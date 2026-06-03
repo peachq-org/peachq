@@ -96,6 +96,18 @@ void ray_vm_release(void* ptr, size_t size) {
 #endif
 }
 
+void ray_vm_release_block(void* blk, size_t bsize, bool hugepage) {
+    if (!hugepage) {
+        if (bsize > 4096) ray_vm_release((char*)blk + 4096, bsize - 4096);
+        return;
+    }
+    /* THP pool: release only the whole 2MB-aligned interior so a partial
+     * MADV_DONTNEED does not shatter the transparent huge page. */
+    uintptr_t s = ((uintptr_t)blk + (2u << 20) - 1) & ~((uintptr_t)(2u << 20) - 1);
+    uintptr_t e = ((uintptr_t)blk + bsize) & ~((uintptr_t)(2u << 20) - 1);
+    if (e > s) ray_vm_release((void*)s, e - s);
+}
+
 void* ray_vm_alloc_aligned(size_t size, size_t alignment) {
     size_t total = size + alignment;
     void* mem = mmap(NULL, total, PROT_READ | PROT_WRITE,
@@ -288,6 +300,11 @@ void ray_vm_release(void* ptr, size_t size) {
     DiscardVirtualMemory(ptr, size);
 }
 
+void ray_vm_release_block(void* blk, size_t bsize, bool hugepage) {
+    (void)hugepage;
+    if (bsize > 4096) ray_vm_release((char*)blk + 4096, bsize - 4096);
+}
+
 void* ray_vm_alloc_aligned(size_t size, size_t alignment) {
     /* Over-allocate, find aligned offset. Can't trim on Windows, so the
      * pool header's vm_base field stores the original base for VirtualFree. */
@@ -431,6 +448,11 @@ void ray_vm_unmap_file(void* ptr, size_t size) {
 /* madvise hints are advisory and have no analog on WASM — no-ops. */
 void ray_vm_advise_seq(void* ptr, size_t size)      { (void)ptr; (void)size; }
 void ray_vm_release(void* ptr, size_t size)         { (void)ptr; (void)size; }
+
+void ray_vm_release_block(void* blk, size_t bsize, bool hugepage) {
+    (void)hugepage;
+    if (bsize > 4096) ray_vm_release((char*)blk + 4096, bsize - 4096);
+}
 
 void* ray_vm_alloc_aligned(size_t size, size_t alignment) {
     /* aligned_alloc requires size to be a multiple of alignment per C17. */
