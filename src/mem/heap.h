@@ -246,7 +246,8 @@ typedef struct {
     int      swap_fd;      /* fd when backed=1; -1 otherwise */
     uint8_t  pool_order;   /* pool order for munmap sizing */
     uint8_t  backed;       /* 0 = anon mmap, 1 = file-backed swap */
-    uint8_t  _pad[2];
+    uint8_t  hugepage;     /* 1 = THP hint issued (Linux); 0 otherwise */
+    uint8_t  _pad[1];
 } ray_pool_entry_t;
 
 /* --------------------------------------------------------------------------
