@@ -1646,6 +1646,12 @@ void ray_heap_release_pages(void) {
 void ray_heap_merge(ray_heap_t* src) {
     ray_heap_t* dst = ray_tl_heap;
     if (!dst || !src) return;
+#if RAY_THREAD_FREE_QUEUE
+    /* Drain any cross-thread frees still queued on src into src's own
+     * freelists BEFORE migrating them to dst — otherwise those blocks are
+     * lost when the caller frees the src heap struct. */
+    heap_drain_thread_free(src);
+#endif
 
     /* Merge stats: dst inherits src's outstanding allocations so that
      * future local frees of those blocks correctly decrement dst. */
