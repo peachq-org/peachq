@@ -87,6 +87,17 @@ void     ray_cancel(void);
 #define RAY_ORDER_MIN  6
 #define RAY_ORDER_MAX  30
 
+/* Heap statistics: informational only (ray_mem_stats).  GC computes
+ * pool-emptiness from freelists, not stats, so stats are safe to compile
+ * out of the release hot path.  Default on for DEBUG builds. */
+#ifndef RAY_MEM_STATS
+#  ifdef DEBUG
+#    define RAY_MEM_STATS 1
+#  else
+#    define RAY_MEM_STATS 0
+#  endif
+#endif
+
 /* ===== Parallel Threshold ===== */
 
 #define RAY_PARALLEL_THRESHOLD  (64 * RAY_MORSEL_ELEMS)
