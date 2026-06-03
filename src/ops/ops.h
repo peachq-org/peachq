@@ -79,8 +79,16 @@ void     ray_cancel(void);
 
 /* ===== Slab Cache Constants ===== */
 
-#define RAY_SLAB_CACHE_SIZE  64
-#define RAY_SLAB_ORDERS      5
+#define RAY_SLAB_CACHE_SIZE  64                 /* max entries per slab order (array size) */
+#define RAY_SLAB_ORDERS      11                 /* orders 6..16 (64B..64KB), covers morsels */
+
+/* Per-thread byte budget per slab order.  Runtime cap[o] =
+ * clamp(RAY_SLAB_BUDGET / 2^o, 1, RAY_SLAB_CACHE_SIZE), so large orders
+ * keep fewer entries — a predictable RSS ceiling.  Override via env
+ * RAY_SLAB_BUDGET at heap init. */
+#ifndef RAY_SLAB_BUDGET
+#  define RAY_SLAB_BUDGET (1u << 20)            /* 1 MB per order per thread */
+#endif
 
 /* ===== Heap Allocator Constants ===== */
 
