@@ -193,11 +193,6 @@ static void render_progress_full(int64_t done, int64_t total,
     fflush(stderr);
 }
 
-/* Profiler push API — keeps the old signature for CSV loader. */
-static void render_progress(int64_t done, int64_t total, const char* label) {
-    render_progress_full(done, total, label, NULL, 0.0, 0, 0);
-}
-
 static void clear_progress(void) {
     /* \e[2K clears the entire current line (not just from cursor to
      * end, which is what \e[K would do). \e[0G moves the cursor to
@@ -690,7 +685,6 @@ static void eval_and_print(ray_term_t* term, const char* input,
 
     if (profiling) {
         ray_profile_reset();
-        g_ray_profile.progress_cb = render_progress;
         ray_profile_span_start("top-level");
     }
 
@@ -734,8 +728,6 @@ static void eval_and_print(ray_term_t* term, const char* input,
 
     if (profiling) {
         ray_profile_span_end("top-level");
-        if (g_ray_profile.progress_total > 0) clear_progress();
-        g_ray_profile.progress_cb = NULL;
     }
 
     if (ray_term_interrupted()) {
