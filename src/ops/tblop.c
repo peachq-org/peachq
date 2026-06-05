@@ -57,14 +57,43 @@ uint16_t pivot_fn_to_agg_op(ray_t* fn) {
  * pivot
  * ══════════════════════════════════════════ */
 
+/* Build a shallow copy of `tbl` whose F64 pivot-key column has -0.0 collapsed
+ * to +0.0, so 0.0/-0.0 form one pivot group/column.  Done ONCE here (a cold
+ * pivot path) over the key column, never per-row in the group-by key-build, so
+ * the -fno-signed-zeros vectorization of the hot group-by path stays intact.
+ * Returns NULL when the column has no -0.0 (caller uses the original table),
+ * or RAY_ERR on allocation failure. */
+static ray_t* pivot_normalize_f64_key(ray_t* tbl, int64_t pcol_name) {
+    ray_t* pcol = ray_table_get_col(tbl, pcol_name);
+    if (!pcol || pcol->type != RAY_F64) return NULL;
+    int64_t nr = pcol->len;
+    const double* src = (const double*)ray_data(pcol);
+    bool any_neg0 = false;
+    for (int64_t i = 0; i < nr; i++) {
+        double nz = clear_neg_zero(src[i]);
+        if (memcmp(&nz, &src[i], sizeof(double)) != 0) { any_neg0 = true; break; }
+    }
+    if (!any_neg0) return NULL;
+    ray_t* norm = ray_vec_new(RAY_F64, nr);
+    if (!norm || RAY_IS_ERR(norm)) return norm ? norm : ray_error("oom", NULL);
+    norm->len = nr;
+    double* dst = (double*)ray_data(norm);
+    for (int64_t i = 0; i < nr; i++) dst[i] = clear_neg_zero(src[i]);
+    int64_t ncols = ray_table_ncols(tbl);
+    ray_t* wt = ray_table_new(ncols);
+    if (!wt || RAY_IS_ERR(wt)) { ray_release(norm); return wt ? wt : ray_error("oom", NULL); }
+    for (int64_t c = 0; c < ncols && !RAY_IS_ERR(wt); c++) {
+        int64_t cn = ray_table_col_name(tbl, c);
+        ray_t* cv = (cn == pcol_name) ? norm : ray_table_get_col_idx(tbl, c);
+        wt = ray_table_add_col(wt, cn, cv);
+    }
+    ray_release(norm);
+    return wt;
+}
+
 /* (pivot table index_col pivot_col value_col agg_fn) — pivot table */
-ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
-    if (n != 5) return ray_error("arity", "pivot expects 5 arguments: table, index, pivot-col, value-col, agg-fn");
-    ray_t* tbl            = args[0];
-    ray_t* index_arg      = args[1];   /* sym atom or list of syms */
-    ray_t* pivot_col_name = args[2];   /* sym atom */
-    ray_t* value_col_name = args[3];   /* sym atom */
-    ray_t* agg_fn         = args[4];   /* function */
+static ray_t* pivot_fn_impl(ray_t* tbl, ray_t* index_arg, ray_t* pivot_col_name,
+                            ray_t* value_col_name, ray_t* agg_fn) {
 
     if (tbl->type != RAY_TABLE)
         return ray_error("type", "pivot: first argument must be a table");
@@ -516,6 +545,26 @@ fb_cleanup:
     ray_release(dvals);
     ray_release(grouped);
     return result;
+}
+
+/* (pivot table index_col pivot_col value_col agg_fn) — pivot table.
+ * Thin wrapper: collapse -0.0 -> +0.0 in an F64 pivot key ONCE up front (so
+ * the DAG fast path and the generic fallback both group 0.0/-0.0 together),
+ * then run the pivot on the normalized table. */
+ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
+    if (n != 5) return ray_error("arity", "pivot expects 5 arguments: table, index, pivot-col, value-col, agg-fn");
+    ray_t* tbl            = args[0];
+    ray_t* pivot_col_name = args[2];
+    if (tbl->type == RAY_TABLE && pivot_col_name->type == -RAY_SYM) {
+        ray_t* wt = pivot_normalize_f64_key(tbl, pivot_col_name->i64);
+        if (wt) {
+            if (RAY_IS_ERR(wt)) return wt;
+            ray_t* res = pivot_fn_impl(wt, args[1], pivot_col_name, args[3], args[4]);
+            ray_release(wt);
+            return res;
+        }
+    }
+    return pivot_fn_impl(tbl, args[1], pivot_col_name, args[3], args[4]);
 }
 
 /* ══════════════════════════════════════════
