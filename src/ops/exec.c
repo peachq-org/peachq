@@ -2244,6 +2244,37 @@ ray_t* ray_execute(ray_graph_t* g, ray_op_t* root) {
     return r;
 }
 
+/* Flatten one parted/mapcommon column into a dense vector (mirrors the
+ * OP_SCAN cold-path flatten at the top of this file).  Returns an owned
+ * flat vector or a RAY_ERR.  Precondition: col is RAY_MAPCOMMON or
+ * RAY_IS_PARTED. */
+static ray_t* flatten_parted_col(ray_t* col) {
+    if (col->type == RAY_MAPCOMMON)
+        return materialize_mapcommon(col);
+    int8_t base = (int8_t)RAY_PARTED_BASETYPE(col->type);
+    ray_t** segs = (ray_t**)ray_data(col);
+    int64_t total = ray_parted_nrows(col);
+    if (base == RAY_STR)
+        return parted_flatten_str(segs, col->len, total);
+    uint8_t sba = (base == RAY_SYM) ? parted_first_attrs(segs, col->len) : 0;
+    ray_t* flat = typed_vec_new(base, sba, total);
+    if (!flat || RAY_IS_ERR(flat)) return ray_error("oom", NULL);
+    flat->len = total;
+    size_t esz = (size_t)ray_sym_elem_size(base, sba);
+    int64_t off = 0;
+    for (int64_t s = 0; s < col->len; s++) {
+        if (!segs[s] || segs[s]->len <= 0) continue;
+        if (parted_seg_esz_ok(segs[s], base, (uint8_t)esz))
+            memcpy((char*)ray_data(flat) + off * esz,
+                   ray_data(segs[s]), (size_t)segs[s]->len * esz);
+        else
+            memset((char*)ray_data(flat) + off * esz, 0,
+                   (size_t)segs[s]->len * esz);
+        off += segs[s]->len;
+    }
+    return flat;
+}
+
 static ray_t* ray_execute_inner(ray_graph_t* g, ray_op_t* root) {
     if (!g || !root) return ray_error("nyi", NULL);
 
@@ -2290,6 +2321,43 @@ static ray_t* ray_execute_inner(ray_graph_t* g, ray_op_t* root) {
             ray_release(g->selection);
             g->selection = NULL;
             result = compacted;
+        } else if (result && !RAY_IS_ERR(result) && result->type == RAY_TABLE) {
+            /* All-pass / no-selection finalization: an OP_FILTER whose
+             * predicate matched every row (or a select with no where:)
+             * returns the SOURCE table verbatim.  A parted/splayed source
+             * still holds segmented (RAY_IS_PARTED) / RAY_MAPCOMMON columns
+             * that the partial-filter path would have flattened via
+             * sel_compact.  Build a flattened copy (never mutating the
+             * possibly-stored source) so downstream at/count/first see dense
+             * columns, matching the partial-filter path. */
+            int64_t ncols = ray_table_ncols(result);
+            bool any_parted = false;
+            for (int64_t c = 0; c < ncols; c++) {
+                ray_t* col = ray_table_get_col_idx(result, c);
+                if (col && (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON)) {
+                    any_parted = true; break;
+                }
+            }
+            if (any_parted) {
+                ray_t* out = ray_table_new(ncols);
+                for (int64_t c = 0; out && !RAY_IS_ERR(out) && c < ncols; c++) {
+                    ray_t* col = ray_table_get_col_idx(result, c);
+                    int64_t name = ray_table_col_name(result, c);
+                    if (col && (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON)) {
+                        ray_t* flat = flatten_parted_col(col);
+                        if (!flat || RAY_IS_ERR(flat)) {
+                            ray_release(out); ray_release(result);
+                            return flat ? flat : ray_error("oom", NULL);
+                        }
+                        out = ray_table_add_col(out, name, flat);
+                        ray_release(flat);
+                    } else if (col) {
+                        out = ray_table_add_col(out, name, col);
+                    }
+                }
+                ray_release(result);
+                result = out;
+            }
         }
         return result;
     }
