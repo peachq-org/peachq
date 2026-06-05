@@ -7387,8 +7387,18 @@ ht_path:;
     ray_t* part_hts_hdr = NULL;
     group_ht_t*  part_hts   = NULL;
 
+    /* Top-K candidate finder (this block) is single-threaded — it builds
+     * one SoA hash table sized to n_scan*4/3 and scans the full input
+     * sequentially.  For uniform high-cardinality inputs (e.g. ClickBench
+     * q32 — 10M rows, ~10M distinct composite keys) the SoA HT is hundreds
+     * of MB, every probe is an L3/DRAM miss, and the single-threaded scan
+     * is dominated by latency.  The parallel radix_v2 path below partitions
+     * the keys across workers with cache-resident shards and runs ~3-4×
+     * faster on such inputs.  Gate the TopK shortcut on input size so it
+     * only fires where Pass-1's skip-the-unneeded-aggs trade is worth a
+     * full single-threaded scan. */
     if (use_emit_filter && emit_filter.top_count_take > 0 &&
-        n_keys > 1) {
+        n_keys > 1 && n_scan <= 1000000) {
         bool top_count_nonselective = false;
         if (n_keys >= 2 && n_keys <= 5) {
             bool supported = true;
