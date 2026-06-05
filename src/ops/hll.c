@@ -407,12 +407,22 @@ ray_t* ray_count_distinct_approx(ray_t* x) {
         scratch_free(shards_hdr);
         return ray_error("oom", "count_distinct_approx: HLL alloc failed");
     }
-    /* Merge per-worker shards into shard[0], then estimate. */
-    for (uint32_t w = 1; w < nw; w++) {
-        if (shards[w].regs)
-            ray_hll_merge(&shards[0], &shards[w]);
+    /* Merge per-worker shards into the first INITIALIZED shard, then estimate.
+     * Under dynamic worker scheduling a thread (including worker 0) may process
+     * no chunk, leaving its shard zero-initialized (regs==NULL, m==0).  Merging
+     * INTO such a shard fails ray_hll_merge's precision check (0 != m) and
+     * silently skips every merge, yielding a spurious 0 estimate.  Pick the
+     * first shard that actually saw data as the merge base. */
+    uint32_t base = 0;
+    while (base < nw && !shards[base].regs) base++;
+    int64_t est = 0;
+    if (base < nw) {
+        for (uint32_t w = base + 1; w < nw; w++) {
+            if (shards[w].regs)
+                ray_hll_merge(&shards[base], &shards[w]);
+        }
+        est = ray_hll_estimate(&shards[base]);
     }
-    int64_t est = shards[0].regs ? ray_hll_estimate(&shards[0]) : 0;
     for (uint32_t w = 0; w < nw; w++) ray_hll_free(&shards[w]);
     scratch_free(shards_hdr);
     return ray_i64(est);
