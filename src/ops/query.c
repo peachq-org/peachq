@@ -5348,6 +5348,15 @@ by_dict_done:
                     asc_id, desc_id, ray_table_nrows(tbl), 1024)) {
                 use_eval_group = 1;
             }
+            /* No-agg-no-nonagg multi-key (`select {by: [k1 k2]}`): the DAG
+             * no-agg branch's computed-key fallback re-evaluates the by
+             * SYM-vector as a literal symbol list — ignoring WHERE and the
+             * real key columns, so it returns one group per key NAME instead
+             * of per distinct composite value.  Route to eval-level grouping
+             * (mirrors the GUID n_out==0 case above), which groups the
+             * filtered rows by the actual composite key. */
+            if (!use_eval_group && n_out == 0)
+                use_eval_group = 1;
         }
         /* Non-aggregation expressions (arithmetic, lambda, etc.) are
          * handled post-DAG: aggs go through the parallel GROUP pipeline,
@@ -5822,6 +5831,79 @@ by_dict_done:
                         result = ray_table_add_col(result, agg_names[ai], agg_results[ai]);
                         ray_release(agg_results[ai]);
                         if (RAY_IS_ERR(result)) { ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return result; }
+                    }
+                }
+
+                /* No-agg-no-nonagg form (`select {by:[k1 k2]}`): carry the
+                 * first-of-group value of every non-key column, matching the
+                 * single-key first-of-group semantics — otherwise the multi-key
+                 * shape would return only the key columns and silently drop the
+                 * rest.  grp_items[gi*2+1] is the I64 row-index list of group
+                 * gi; its first element is that group's first row. */
+                if (n_out == 0 && out_groups > 0) {
+                    ray_t* fi_hdr = ray_alloc((size_t)out_groups * sizeof(int64_t));
+                    if (!fi_hdr) {
+                        ray_release(result); ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                        return ray_error("oom", NULL);
+                    }
+                    int64_t* fi = (int64_t*)ray_data(fi_hdr);
+                    for (int64_t gi = 0; gi < out_groups; gi++) {
+                        ray_t* il = grp_items[gi * 2 + 1];
+                        fi[gi] = (il && ray_len(il) > 0) ? ((int64_t*)ray_data(il))[0] : 0;
+                    }
+                    int64_t nc = ray_table_ncols(eval_tbl);
+                    for (int64_t c = 0; c < nc && !RAY_IS_ERR(result); c++) {
+                        int64_t cn = ray_table_col_name(eval_tbl, c);
+                        bool is_key = false;
+                        for (int64_t k = 0; k < nk; k++) if (key_syms[k] == cn) { is_key = true; break; }
+                        if (is_key) continue;
+                        ray_t* sc = ray_table_get_col_idx(eval_tbl, c);
+                        if (!sc) continue;
+                        ray_t* dst = NULL;
+                        if (sc->type == RAY_STR) {
+                            dst = ray_vec_new(RAY_STR, out_groups);
+                            bool src_has_nulls = (sc->attrs & RAY_ATTR_HAS_NULLS) != 0;
+                            for (int64_t gi = 0; gi < out_groups && dst && !RAY_IS_ERR(dst); gi++) {
+                                if (src_has_nulls && ray_vec_is_null(sc, fi[gi])) {
+                                    dst = ray_str_vec_append(dst, "", 0);
+                                    if (dst && !RAY_IS_ERR(dst)) ray_vec_set_null(dst, dst->len - 1, true);
+                                } else {
+                                    size_t slen = 0;
+                                    const char* sp = ray_str_vec_get(sc, fi[gi], &slen);
+                                    dst = ray_str_vec_append(dst, sp ? sp : "", sp ? slen : 0);
+                                }
+                            }
+                        } else if (sc->type == RAY_LIST) {
+                            dst = ray_alloc((size_t)out_groups * sizeof(ray_t*));
+                            if (dst) {
+                                dst->type = RAY_LIST; dst->len = out_groups;
+                                ray_t** dout = (ray_t**)ray_data(dst);
+                                ray_t** sitems = (ray_t**)ray_data(sc);
+                                for (int64_t gi = 0; gi < out_groups; gi++) { dout[gi] = sitems[fi[gi]]; ray_retain(dout[gi]); }
+                            }
+                        } else {
+                            dst = ray_vec_new(sc->type, out_groups);
+                            if (dst && !RAY_IS_ERR(dst)) {
+                                dst->len = out_groups;
+                                for (int64_t gi = 0; gi < out_groups; gi++) {
+                                    int a = 0; ray_t* v = collection_elem(sc, fi[gi], &a);
+                                    store_typed_elem(dst, gi, v);
+                                    if (a) ray_release(v);
+                                }
+                            }
+                        }
+                        if (!dst || RAY_IS_ERR(dst)) {
+                            if (dst) ray_release(dst);
+                            ray_free(fi_hdr); ray_release(result); ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                            return ray_error("oom", NULL);
+                        }
+                        result = ray_table_add_col(result, cn, dst);
+                        ray_release(dst);
+                    }
+                    ray_free(fi_hdr);
+                    if (RAY_IS_ERR(result)) {
+                        ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                        return result;
                     }
                 }
 
@@ -9528,7 +9610,11 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                             ray_vec_set_null(new_col, new_col->len - 1, true);
                     }
                 } else {
-                    size_t elem_sz = (ct == RAY_BOOL) ? 1 : 8;
+                    /* Source stride must match the column's true element
+                     * width: orig_col/expr_vec are typed buffers, so an I32
+                     * column strides 4 bytes, not 8.  A hardcoded 8 read
+                     * past-end and mis-indexed the surviving (unmasked) rows. */
+                    size_t elem_sz = ray_elem_size(ct);
                     uint8_t* orig_data = (uint8_t*)ray_data(orig_col);
                     uint8_t* expr_data = (uint8_t*)ray_data(expr_vec);
                     for (int64_t r = 0; r < nrows; r++) {
