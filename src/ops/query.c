@@ -4420,11 +4420,40 @@ ray_t* ray_select(ray_t** args, int64_t n) {
         }
         ray_group_emit_filter_t prefilter_top_count;
         memset(&prefilter_top_count, 0, sizeof(prefilter_top_count));
-        bool prefilter_computed_by =
-            has_computed_by_val &&
+        bool prefilter_top_n_match =
             match_group_desc_count_take(dict_elems, dict_n, from_id, where_id,
                                         by_id, take_id, asc_id, desc_id,
                                         &prefilter_top_count);
+        bool prefilter_computed_by =
+            has_computed_by_val && prefilter_top_n_match;
+        /* Multi-key WHERE shape — same kind of win even with bare-ref
+         * by-vals when at least one aggregate has a *distinct* input
+         * column (SUM / MIN / MAX / AVG on something other than a
+         * by-key).  mk_par_v2's wide composite path then reads those
+         * extra inputs from the *original* wide table at the sparse
+         * positions left by the WHERE filter; for ClickBench-class
+         * 100-col tables with selective WHEREs (q30/q31 ~14%) the
+         * gather wastes a cache line per touched column per passing
+         * row.  Count-only shapes (q14: SearchEngineID/SearchPhrase
+         * keys, count of SearchPhrase) don't carry the extra agg col
+         * — narrowing costs the projection without saving the gather. */
+        bool prefilter_multi_key_where = false;
+        if (prefilter_top_n_match && !has_computed_by_val && nk >= 2) {
+            int64_t count_sym = ray_sym_intern("count", 5);
+            for (int64_t i = 0; i + 1 < dict_n &&
+                                !prefilter_multi_key_where; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                if (kid == from_id || kid == where_id || kid == by_id ||
+                    kid == take_id || kid == asc_id || kid == desc_id ||
+                    kid == nearest_id) continue;
+                ray_t* val = dict_elems[i + 1];
+                if (!is_group_dag_agg_expr(val)) continue;
+                ray_t** ae = (ray_t**)ray_data(val);
+                if (!ae[0] || ae[0]->type != -RAY_SYM) continue;
+                if (ae[0]->i64 == count_sym) continue;
+                prefilter_multi_key_where = true;  /* sum/min/max/avg */
+            }
+        }
         /* Computed by-val + WHERE: eagerly evaluating a non-trivial
          * group key (e.g. q42's `(xbar EventTime 60000000000)`) over
          * every input row wastes work proportional to the WHERE's
@@ -4439,16 +4468,8 @@ ray_t* ray_select(ray_t** args, int64_t n) {
          * Narrowing matters: for wide tables (ClickBench's `hits` has
          * ~100 cols) materialising the full filtered table dominates
          * what was meant to be a cheap prefilter (single-col filter
-         * is O(passing × esz), full filter is ~50× that).
-         *
-         * The matcher gate (top-N-by-agg) constrains where this fires
-         * to shapes where the prefilter's cost can be amortised — the
-         * downstream group materialisation and top-N extraction
-         * benefit from operating on a small filtered slice.  Broader
-         * shapes that already have an efficient fused-filter+group
-         * path (OP_FILTERED_GROUP) would lose more in the duplicated
-         * filter work than they'd save in the smaller by-val eval. */
-        if (where_expr && prefilter_computed_by) {
+         * is O(passing × esz), full filter is ~50× that). */
+        if (where_expr && (prefilter_computed_by || prefilter_multi_key_where)) {
             int64_t keep_syms[256];
             int n_keep = 0;
             n_keep = collect_col_refs_set(where_expr, tbl,
