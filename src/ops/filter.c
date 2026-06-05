@@ -635,17 +635,41 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
             } else ca = col->attrs;
         }
         if (RAY_IS_PARTED(col->type)) has_parted = true;
-        ray_t* nc = typed_vec_new(ct, ca, pass_count);
+        /* RAY_LIST == 0; typed_vec_new/ray_vec_new reject type <= 0, which
+         * would leave new_cols[c] NULL and silently DROP the LIST column.
+         * Allocate it as a proper list; its elements are gathered (with a
+         * retain) in the dedicated LIST pass below. */
+        ray_t* nc = (ct == RAY_LIST)
+                  ? ray_list_new(pass_count)
+                  : typed_vec_new(ct, ca, pass_count);
         if (!nc || RAY_IS_ERR(nc)) { new_cols[c] = NULL; continue; }
         nc->len = pass_count;
         new_cols[c] = nc;
         valid_ncols++;
     }
 
+    /* LIST columns: gather element pointers with a retain.  The byte-copy
+     * gather paths below copy raw esz bytes (8-byte ray_t* pointers) without
+     * retaining — that would alias source elements and double-free on
+     * release — so LIST columns are filled here and skipped there. */
+    for (int64_t c = 0; c < ncols; c++) {
+        if (!new_cols[c]) continue;
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        if (!col || col->type != RAY_LIST) continue;
+        ray_t** d = (ray_t**)ray_data(new_cols[c]);
+        ray_t** s = (ray_t**)ray_data(col);
+        for (int64_t i = 0; i < pass_count; i++) {
+            ray_t* e = s[match_idx[i]];
+            d[i] = e;
+            if (e) ray_retain(e);
+        }
+    }
+
     if (has_parted) {
         for (int64_t c = 0; c < ncols; c++) {
             ray_t* col = ray_table_get_col_idx(tbl, c);
             if (!col || !new_cols[c]) continue;
+            if (col->type == RAY_LIST) continue;  /* gathered above with retain */
             if (RAY_IS_PARTED(col->type)) {
                 int8_t pbase = (int8_t)RAY_PARTED_BASETYPE(col->type);
                 if (pbase == RAY_STR) {
@@ -669,6 +693,7 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
         for (int64_t c = 0; c < ncols; c++) {
             if (!new_cols[c]) continue;
             ray_t* col = ray_table_get_col_idx(tbl, c);
+            if (col->type == RAY_LIST) continue;  /* gathered above with retain */
             int64_t ci = mgctx.ncols;
             mgctx.srcs[ci] = (char*)ray_data(col);
             mgctx.dsts[ci] = (char*)ray_data(new_cols[c]);
@@ -680,6 +705,7 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
         for (int64_t c = 0; c < ncols; c++) {
             ray_t* col = ray_table_get_col_idx(tbl, c);
             if (!col || !new_cols[c]) continue;
+            if (col->type == RAY_LIST) continue;  /* gathered above with retain */
             gather_ctx_t gctx = {
                 .idx = match_idx, .src_col = col, .dst_col = new_cols[c],
                 .esz = col_esz(col), .nullable = false,
@@ -690,6 +716,7 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
         for (int64_t c = 0; c < ncols; c++) {
             ray_t* col = ray_table_get_col_idx(tbl, c);
             if (!col || !new_cols[c]) continue;
+            if (col->type == RAY_LIST) continue;  /* gathered above with retain */
             uint8_t esz = col_esz(col);
             char* src = (char*)ray_data(col);
             char* dst = (char*)ray_data(new_cols[c]);
@@ -701,7 +728,10 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
     for (int64_t c = 0; c < ncols; c++) {
         if (!new_cols[c]) continue;
         ray_t* scol = ray_table_get_col_idx(tbl, c);
-        if (scol && RAY_IS_PARTED(scol->type)) {
+        if (scol && scol->type == RAY_LIST) {
+            /* LIST elements already gathered+retained; no str-pool / null
+             * bitmap to propagate. */
+        } else if (scol && RAY_IS_PARTED(scol->type)) {
             int8_t pb = (int8_t)RAY_PARTED_BASETYPE(scol->type);
             if (pb != RAY_STR) {
                 ray_t** sp = (ray_t**)ray_data(scol);
