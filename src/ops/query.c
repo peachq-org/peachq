@@ -5348,6 +5348,15 @@ by_dict_done:
                     asc_id, desc_id, ray_table_nrows(tbl), 1024)) {
                 use_eval_group = 1;
             }
+            /* No-agg-no-nonagg multi-key (`select {by: [k1 k2]}`): the DAG
+             * no-agg branch's computed-key fallback re-evaluates the by
+             * SYM-vector as a literal symbol list — ignoring WHERE and the
+             * real key columns, so it returns one group per key NAME instead
+             * of per distinct composite value.  Route to eval-level grouping
+             * (mirrors the GUID n_out==0 case above), which groups the
+             * filtered rows by the actual composite key. */
+            if (!use_eval_group && n_out == 0)
+                use_eval_group = 1;
         }
         /* Non-aggregation expressions (arithmetic, lambda, etc.) are
          * handled post-DAG: aggs go through the parallel GROUP pipeline,
@@ -9528,7 +9537,11 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                             ray_vec_set_null(new_col, new_col->len - 1, true);
                     }
                 } else {
-                    size_t elem_sz = (ct == RAY_BOOL) ? 1 : 8;
+                    /* Source stride must match the column's true element
+                     * width: orig_col/expr_vec are typed buffers, so an I32
+                     * column strides 4 bytes, not 8.  A hardcoded 8 read
+                     * past-end and mis-indexed the surviving (unmasked) rows. */
+                    size_t elem_sz = ray_elem_size(ct);
                     uint8_t* orig_data = (uint8_t*)ray_data(orig_col);
                     uint8_t* expr_data = (uint8_t*)ray_data(expr_vec);
                     for (int64_t r = 0; r < nrows; r++) {
