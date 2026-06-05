@@ -3706,6 +3706,8 @@ static inline void da_accum_free(da_accum_t* a) {
     scratch_free(a->_h_last_row);
 }
 
+static inline int64_t agg_int_null_sentinel_for(int8_t t);
+
 /* Unified agg result emitter — used by both DA and HT paths.
  * Arrays indexed by [gi * n_aggs + a], counts by [gi].  nn_counts (if
  * non-NULL) carries the per-(group, agg) non-null row count: AVG/VAR/
@@ -3796,6 +3798,10 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                 ((double*)ray_data(new_col))[gi] = v;
             } else {
                 int64_t v;
+                /* Null sentinel must match out_type's width: NULL_I64 truncated
+                 * into a narrow (I32/I16) slot by topk_write_i64 collapses to 0
+                 * and shadows the null. */
+                int64_t int_null = agg_int_null_sentinel_for(out_type);
                 switch (agg_op) {
                     case OP_SUM:
                         v = sum_i64[idx];
@@ -3803,21 +3809,27 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                             v += affine[a].bias_i64 * counts[gi];
                         break;
                     case OP_PROD:
-                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        if (nn == 0) { v = int_null; ray_vec_set_null(new_col, gi, true); break; }
                         v = sum_i64[idx]; break;
                     case OP_COUNT: v = counts[gi]; break;
                     case OP_MIN:
-                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        if (nn == 0) { v = int_null; ray_vec_set_null(new_col, gi, true); break; }
                         v = min_i64[idx]; break;
                     case OP_MAX:
-                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        if (nn == 0) { v = int_null; ray_vec_set_null(new_col, gi, true); break; }
                         v = max_i64[idx]; break;
                     case OP_FIRST: case OP_LAST:
-                        if (nn == 0) { v = NULL_I64; ray_vec_set_null(new_col, gi, true); break; }
+                        if (nn == 0) { v = int_null; ray_vec_set_null(new_col, gi, true); break; }
                         v = sum_i64[idx]; break;
                     default:       v = 0; break;
                 }
-                ((int64_t*)ray_data(new_col))[gi] = v;
+                /* MIN/MAX/FIRST/LAST/PROD keep out_type = agg_col->type, so
+                 * new_col may be a narrow-int (I32/I16/U8) or adaptive-width
+                 * SYM vector.  Store at new_col's true element width — a fixed
+                 * 8-byte int64 store overshoots narrow slots, leaving every
+                 * group past index 0 unwritten (correct only at gi==0). */
+                topk_write_i64(ray_data(new_col), gi, v,
+                               ray_sym_elem_size(out_type, new_col->attrs));
             }
         }
         /* Generate unique column name: base_name + agg suffix (e.g. "v1_sum") */
@@ -5686,7 +5698,16 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
          ext->agg_ops[emit_filter.agg_index] == OP_MAX);
 
     /* ---- Scalar aggregate fast path (n_keys == 0): flat vector scan ---- */
-    if (n_keys == 0 && nrows > 0) {
+    /* Binary aggregators (OP_PEARSON_CORR) carry cross-term row slots
+     * (off_sum_y / off_sumsq_y / off_sumxy) and a y-side input that the
+     * scalar da_accum_t path neither allocates nor reads — mirror the
+     * DA-path guard below and fall through to the HT path which computes
+     * them. Without this the Pearson slot accumulates nothing and emit
+     * falls to its integer default, returning 0. */
+    bool sc_has_binary = false;
+    for (uint8_t a = 0; a < n_aggs; a++)
+        if (ext->agg_ops[a] == OP_PEARSON_CORR) { sc_has_binary = true; break; }
+    if (n_keys == 0 && nrows > 0 && !sc_has_binary) {
         uint8_t need_flags = DA_NEED_COUNT;
         bool has_first_last = false;
         for (uint8_t a = 0; a < n_aggs; a++) {
@@ -8942,7 +8963,11 @@ build_from_final_ht:
                     case OP_FIRST: case OP_LAST: v = ROW_RD_I64(row, ly->off_sum, s); break;
                     default:       v = 0; break;
                 }
-                ((int64_t*)ray_data(new_col))[gi] = v;
+                /* Narrow-int / adaptive-width SYM store: see the matching
+                 * comment in the DA emit path above. A fixed int64 store
+                 * corrupts groups past index 0 for I32/I16/U8 out_types. */
+                topk_write_i64(ray_data(new_col), gi, v,
+                               ray_sym_elem_size(out_type, new_col->attrs));
             }
         }
 
