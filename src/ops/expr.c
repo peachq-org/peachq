@@ -843,6 +843,16 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
             /* CAST bool→i64 — BOOL scratch is 1 byte per elem (0/1). */
             const uint8_t* a = (const uint8_t*)ap;
             for (int64_t j = 0; j < n; j++) d[j] = a[j];
+        } else if (t1 == RAY_I32 || t1 == RAY_DATE || t1 == RAY_TIME) {
+            /* CAST i32→i64 — narrow scratch is 4 bytes per elem.  This is the
+             * path a promoted `(as 'I32 const)` operand takes before an i64
+             * compare; reading it as double (the f64 fallback below) would
+             * reinterpret the 4-byte payload and collapse small values to 0. */
+            const int32_t* a = (const int32_t*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = a[j];
+        } else if (t1 == RAY_I16) {
+            const int16_t* a = (const int16_t*)ap;
+            for (int64_t j = 0; j < n; j++) d[j] = a[j];
         } else { /* CAST f64→i64 — clamp to avoid out-of-range UB */
             const double* a = (const double*)ap;
             for (int64_t j = 0; j < n; j++)
