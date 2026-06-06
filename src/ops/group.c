@@ -6134,6 +6134,45 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             ray_release(atom);
         }
 
+        /* Whole-table median has no n_keys==0 accumulator, so emit_agg_columns
+         * left its column at the integer default (0).  Recompute it over the
+         * whole (optionally selected) column as a single group via the same
+         * per-group kernel the by-group path uses, matching the scalar `med`
+         * builtin.  (top/bot are not handled here: the no-by planner does not
+         * carry the K argument, so they keep their scalar-builtin form.) */
+        {
+            bool any_med = false;
+            for (uint8_t a = 0; a < n_aggs; a++)
+                if (ext->agg_ops[a] == OP_MEDIAN) { any_med = true; break; }
+            if (any_med) {
+                ray_t* hsel_blk = NULL; const int64_t* hsel = NULL; int64_t hscan = nrows;
+                if (g->selection) {
+                    ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+                    if (sm && sm->nrows == nrows) {
+                        hsel_blk = ray_rowsel_to_indices(g->selection);
+                        hsel = hsel_blk ? (const int64_t*)ray_data(hsel_blk) : NULL;
+                        hscan = sm->total_pass;
+                    }
+                }
+                ray_t* ix_hdr = NULL;
+                int64_t* idxb = (int64_t*)scratch_alloc(&ix_hdr,
+                    (size_t)(hscan > 0 ? hscan : 1) * sizeof(int64_t));
+                if (idxb) {
+                    for (int64_t i = 0; i < hscan; i++) idxb[i] = hsel ? hsel[i] : i;
+                    int64_t offs[1] = {0};
+                    int64_t cnts[1] = {hscan};
+                    for (uint8_t a = 0; a < n_aggs; a++) {
+                        if (ext->agg_ops[a] != OP_MEDIAN || !agg_vecs[a]) continue;
+                        ray_t* hv = ray_median_per_group_buf(agg_vecs[a], idxb, offs, cnts, 1);
+                        if (hv && !RAY_IS_ERR(hv)) ray_table_set_col_idx(result, a, hv);
+                        if (hv) ray_release(hv);
+                    }
+                    scratch_free(ix_hdr);
+                }
+                if (hsel_blk) ray_release(hsel_blk);
+            }
+        }
+
         da_accum_free(&sc_acc[0]); scratch_free(sc_hdr);
         for (uint8_t a = 0; a < n_aggs; a++)
             { if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]); if (agg_owned2[a] && agg_vecs2[a]) ray_release(agg_vecs2[a]); }
