@@ -11425,16 +11425,18 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
             if (k1_data_out)
                 write_col_i64(k1_data_out, row, e->key1, k_types[1], k_attrs[1]);
 
+            /* Emit the signed Pearson correlation r — NOT r².  The scalar
+             * pearson_corr builtin and the general radix HT finalize both
+             * return r = cov / (σx·σy); squaring it here collapsed -1 and +1
+             * to the same 1.0, so by-group correlation lost its sign. */
             double r2 = 0.0 / 0.0;   /* NaN by default */
             if (e->cnt >= 2) {
                 double n = (double)e->cnt;
                 double num = n * e->sumxy - e->sum_x * e->sum_y;
                 double dx  = n * e->sumsq_x - e->sum_x * e->sum_x;
                 double dy  = n * e->sumsq_y - e->sum_y * e->sum_y;
-                if (dx > 0.0 && dy > 0.0) {
-                    double r = num / sqrt(dx * dy);
-                    r2 = r * r;
-                }
+                if (dx > 0.0 && dy > 0.0)
+                    r2 = num / sqrt(dx * dy);
             }
             r2_data[row] = r2;
             row++;
