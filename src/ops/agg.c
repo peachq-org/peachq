@@ -226,6 +226,9 @@ ray_t* ray_sum_fn(ray_t* x) {
         ray_retain(x); return x;
     }
     if (ray_is_vec(x)) {
+        /* sum of a non-numeric column (SYM / STR / GUID / LIST) is undefined —
+         * otherwise the typed paths below sum the raw element ids / bytes. */
+        if (!agg_parted_numeric_base(x->type)) return ray_error("type", NULL);
         if (x->type == RAY_DATE) return ray_error("type", NULL);
         /* Narrow/temporal types need specific return constructors that the
          * DAG executor doesn't provide — use scalar path for these. */
@@ -309,7 +312,13 @@ ray_t* ray_avg_fn(ray_t* x) {
         if (is_numeric(x)) return make_f64(as_f64(x));
         ray_retain(x); return x;
     }
-    if (ray_is_vec(x)) AGG_VEC_VIA_DAG(x, ray_avg);
+    if (ray_is_vec(x)) {
+        /* avg of a non-numeric column (SYM / STR / GUID / LIST) is undefined —
+         * the DAG path would otherwise silently average the raw element ids /
+         * bytes (e.g. avg of a SYM column returned the mean dictionary id). */
+        if (!agg_parted_numeric_base(x->type)) return ray_error("type", NULL);
+        AGG_VEC_VIA_DAG(x, ray_avg);
+    }
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
     if (len == 0) return ray_error("domain", NULL);
