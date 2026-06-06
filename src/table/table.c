@@ -156,6 +156,28 @@ ray_t* ray_table_get_col_idx(ray_t* tbl, int64_t idx) {
 }
 
 /* --------------------------------------------------------------------------
+ * ray_table_set_col_idx — replace the column vector at slot `idx`.  COWs the
+ * cols list, releases the previous column and retains `col_vec`.  No-op when
+ * idx is out of range.  Used to override a column an aggregate emitter built
+ * with the wrong representation (e.g. wide STR/GUID min/max post-fill).
+ * -------------------------------------------------------------------------- */
+
+void ray_table_set_col_idx(ray_t* tbl, int64_t idx, ray_t* col_vec) {
+    if (!tbl || RAY_IS_ERR(tbl) || !col_vec) return;
+    ray_t** slots = tbl_slots(tbl);
+    ray_t* cols = slots[1];
+    if (!cols || RAY_IS_ERR(cols)) return;
+    if (idx < 0 || idx >= cols->len) return;
+    cols = ray_cow(cols);
+    if (!cols || RAY_IS_ERR(cols)) return;
+    slots[1] = cols;
+    ray_t** cv = (ray_t**)ray_data(cols);
+    ray_retain(col_vec);
+    ray_release(cv[idx]);
+    cv[idx] = col_vec;
+}
+
+/* --------------------------------------------------------------------------
  * ray_table_col_name — sym id at slot `idx`, -1 on out-of-range.
  * -------------------------------------------------------------------------- */
 

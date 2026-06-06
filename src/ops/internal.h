@@ -823,6 +823,16 @@ ray_t* ray_topk_per_group_buf(ray_t* src,
                               const int64_t* grp_cnt,
                               int64_t n_groups);
 
+/* Per-group min/max/first/last for wide element types (STR/GUID).  Same
+ * idx_buf/offsets/grp_cnt layout as the median/topk kernels; materialises the
+ * winning element per group into a typed result column.  Returns NULL for a
+ * non-wide src (caller falls back to the numeric path). */
+ray_t* ray_wide_minmax_per_group_buf(ray_t* src, uint16_t op,
+                                     const int64_t* idx_buf,
+                                     const int64_t* offsets,
+                                     const int64_t* grp_cnt,
+                                     int64_t n_groups);
+
 ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit);
 ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op);
 ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op);
@@ -892,6 +902,10 @@ typedef struct {
      * runs ray_median_per_group_buf over the source column using a
      * row_gid+grp_cnt-derived idx_buf. */
     uint8_t  agg_is_holistic;
+    /* Subset of agg_is_holistic: bit a set iff agg a is a wide-element
+     * (STR/GUID) min/max/first/last resolved via the per-group winner
+     * scan (ray_wide_minmax_per_group_buf) instead of a numeric kernel. */
+    uint8_t  agg_is_wide;
     /* Wide-key support: bit k set iff key k does not fit in 8 bytes
      * (e.g. RAY_GUID = 16 B).  For wide keys the 8-byte key slot
      * stores a source-row index and the actual key bytes live in the
