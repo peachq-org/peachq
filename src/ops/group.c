@@ -2011,6 +2011,7 @@ ray_t* ray_wide_minmax_per_group_buf(ray_t* src, uint16_t op,
 
 static ray_t* reduction_i64_result(int64_t val, int8_t out_type) {
     switch (out_type) {
+        case RAY_BOOL:      return ray_bool((bool)val);
         case RAY_DATE:      return ray_date((int32_t)val);
         case RAY_TIME:      return ray_time(val);
         case RAY_TIMESTAMP: return ray_timestamp(val);
