@@ -1283,6 +1283,14 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             if (agg_op) {
                 ray_op_t* arg = compile_expr_dag(g, elems[1]);
                 if (!arg) return NULL;
+                /* Canonical aggregand type-admission (same table as the scalar
+                 * builtins): reject non-numeric (SYM/STR/GUID) and, for sum,
+                 * absolute-temporal (DATE/TIMESTAMP) inputs at plan time so the
+                 * DAG path never silently aggregates raw symbol ids / string
+                 * bytes / date counts.  Returning NULL routes the select to the
+                 * eval-level path, where the scalar builtin raises `type`. */
+                if (arg->out_type > 0 && !agg_type_admitted(agg_op, arg->out_type))
+                    return NULL;
                 switch (agg_op) {
                     case OP_SUM:         return ray_sum(g, arg);
                     case OP_AVG:         return ray_avg(g, arg);
@@ -6750,6 +6758,13 @@ by_dict_done:
                 /* Compile the aggregation input (the column reference) */
                 agg_ins[n_aggs] = compile_expr_dag(g, agg_arg);
                 if (!agg_ins[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                /* Canonical aggregand type-admission (matches the scalar
+                 * builtins): reject non-numeric / absolute-temporal inputs so a
+                 * by-group sum/avg/var never silently folds symbol ids etc. */
+                if (agg_ins[n_aggs]->out_type > 0 &&
+                    !agg_type_admitted(op, agg_ins[n_aggs]->out_type)) {
+                    ray_graph_free(g); ray_release(tbl); return ray_error("type", NULL);
+                }
                 agg_ins2[n_aggs] = NULL;
                 agg_k[n_aggs] = 0;
                 if (op == OP_PEARSON_CORR) {
@@ -7756,6 +7771,16 @@ by_dict_done:
                     }
                     ray_graph_free(g); ray_release(tbl);
                     return ray_error("domain", NULL);
+                }
+                /* Canonical aggregand type-admission (same table as the scalar
+                 * builtins): reject non-numeric (SYM/STR/GUID) and, for sum,
+                 * absolute-temporal (DATE/TIMESTAMP) inputs so the DAG never
+                 * silently aggregates raw symbol ids / string bytes / dates. */
+                if (s_agg_ins[s_n_aggs]->out_type > 0 &&
+                    !agg_type_admitted(op, s_agg_ins[s_n_aggs]->out_type)) {
+                    if (g->selection) { ray_release(g->selection); g->selection = NULL; }
+                    ray_graph_free(g); ray_release(tbl);
+                    return ray_error("type", NULL);
                 }
                 if (op == OP_PEARSON_CORR) {
                     if (ray_len(val_expr) < 3) {

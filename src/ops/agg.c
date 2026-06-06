@@ -226,10 +226,9 @@ ray_t* ray_sum_fn(ray_t* x) {
         ray_retain(x); return x;
     }
     if (ray_is_vec(x)) {
-        /* sum of a non-numeric column (SYM / STR / GUID / LIST) is undefined —
-         * otherwise the typed paths below sum the raw element ids / bytes. */
-        if (!agg_parted_numeric_base(x->type)) return ray_error("type", NULL);
-        if (x->type == RAY_DATE) return ray_error("type", NULL);
+        /* Canonical admission: numeric + TIME (duration); DATE/TIMESTAMP are
+         * absolute points and SYM/STR/GUID are non-numeric → type error. */
+        if (!agg_type_admitted(OP_SUM, x->type)) return ray_error("type", NULL);
         /* Narrow/temporal types need specific return constructors that the
          * DAG executor doesn't provide — use scalar path for these. */
         if (x->type == RAY_I32 || x->type == RAY_I16 || x->type == RAY_U8 ||
@@ -313,10 +312,9 @@ ray_t* ray_avg_fn(ray_t* x) {
         ray_retain(x); return x;
     }
     if (ray_is_vec(x)) {
-        /* avg of a non-numeric column (SYM / STR / GUID / LIST) is undefined —
-         * the DAG path would otherwise silently average the raw element ids /
-         * bytes (e.g. avg of a SYM column returned the mean dictionary id). */
-        if (!agg_parted_numeric_base(x->type)) return ray_error("type", NULL);
+        /* Canonical admission: numeric + temporal (→ F64); SYM/STR/GUID are
+         * non-numeric → type error (the DAG path otherwise averaged raw ids). */
+        if (!agg_type_admitted(OP_AVG, x->type)) return ray_error("type", NULL);
         AGG_VEC_VIA_DAG(x, ray_avg);
     }
     if (!is_list(x)) return ray_error("type", NULL);
@@ -546,8 +544,16 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
     } else if (x->type == RAY_I16) {
         int16_t* d = (int16_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
-    } else if (x->type == RAY_U8) {
+    } else if (x->type == RAY_U8 || x->type == RAY_BOOL) {
         uint8_t* d = (uint8_t*)ray_data(x);
+        for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
+    } else if (x->type == RAY_DATE || x->type == RAY_TIME) {
+        /* temporal stored as int32 days/ms — avg/var/stddev compute over the
+         * raw counts (result F64), per the canonical admission table. */
+        int32_t* d = (int32_t*)ray_data(x);
+        for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
+    } else if (x->type == RAY_TIMESTAMP) {
+        int64_t* d = (int64_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
     } else {
         ray_release(scratch);
