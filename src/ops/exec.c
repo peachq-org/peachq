@@ -1084,6 +1084,18 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 input = compacted;
                 own_input = true;
             }
+            /* Canonical aggregand type-admission — reject non-admitted element
+             * types (SYM/STR/GUID everywhere; DATE/TIMESTAMP for sum) so the
+             * DAG reduction matches the scalar builtins instead of aggregating
+             * raw ids / bytes / date counts. */
+            if (input && input->type != RAY_TABLE) {
+                int8_t et = RAY_IS_PARTED(input->type)
+                          ? (int8_t)RAY_PARTED_BASETYPE(input->type) : input->type;
+                if (et > 0 && !agg_type_admitted(op->opcode, et)) {
+                    if (own_input) ray_release(input);
+                    return ray_error("type", NULL);
+                }
+            }
             ray_t* result = exec_reduction(g, op, input);
             if (own_input) ray_release(input);
             return result;

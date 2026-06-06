@@ -255,6 +255,39 @@ void     ray_cancel(void);
  * ~10M unique groups, essentially a row-dedup workload). */
 #define OP_GROUP_SUM_COUNT_ROWFORM 114
 
+/* Canonical aggregand type-admission — shared by the scalar builtins
+ * (ray_sum_fn / ray_avg_fn / ray_var_fn / ...) and the DAG/group executors so
+ * BOTH paths accept exactly the same element types for each aggregate:
+ *   sum  : numeric (BOOL/U8/I16/I32/I64/F64) + TIME (a duration-like ms count)
+ *   prod : numeric only
+ *   avg / var / var_pop / stddev / stddev_pop : numeric + temporal (result F64)
+ *   min / max / first / last / count and everything else : any type
+ * `t` is the positive element/column type.  DATE/TIMESTAMP are absolute points
+ * (summing them is meaningless → rejected); SYM/STR/GUID are non-numeric. */
+static inline bool agg_type_admitted(uint16_t op, int8_t t) {
+    /* Parted columns carry a +RAY_PARTED_BASE-encoded tag; admit on the base
+     * element type so a parted numeric column aggregates like a flat one. */
+    if (RAY_IS_PARTED(t)) t = (int8_t)RAY_PARTED_BASETYPE(t);
+    /* Reject only the element types we KNOW are inadmissible; defer unknown
+     * wrappers (e.g. RAY_MAPCOMMON) and out_type==0 to the runtime so a
+     * plan-time guard never false-rejects a column it can't classify. */
+    bool nonnum   = (t == RAY_SYM || t == RAY_STR || t == RAY_GUID);
+    bool temporal = (t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP);
+    switch (op) {
+        /* sum: numeric + TIME (duration-like ms count).  SYM/STR/GUID and the
+         * absolute temporals DATE/TIMESTAMP are meaningless to sum → reject. */
+        case OP_SUM:  return !(nonnum || t == RAY_DATE || t == RAY_TIMESTAMP);
+        /* prod: numeric only — reject non-numeric and every temporal. */
+        case OP_PROD: return !(nonnum || temporal);
+        /* avg / var / stddev: numeric + temporal → F64; reject SYM/STR/GUID. */
+        case OP_AVG:
+        case OP_VAR: case OP_VAR_POP:
+        case OP_STDDEV: case OP_STDDEV_POP:
+            return !nonnum;
+        default: return true;
+    }
+}
+
 /* Opcodes — Graph */
 #define OP_EXPAND        80   /* 1-hop CSR neighbor expansion       */
 #define OP_VAR_EXPAND    81   /* variable-length BFS/DFS            */
