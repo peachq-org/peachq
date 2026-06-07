@@ -86,35 +86,58 @@ static inline bool sym_lex_gt(int64_t a, int64_t b) { return sym_lex_lt(b, a); }
 static inline bool agg_is_wide_type(int8_t t) {
     return t == RAY_STR || t == RAY_GUID;
 }
-/* Sign of element[a] vs element[b]: <0, 0, >0 (memcmp semantics). */
-static int wide_elem_cmp(ray_t* v, int64_t a, int64_t b) {
-    if (v->type == RAY_GUID) {
-        const uint8_t* d = (const uint8_t*)ray_data(v);
-        return memcmp(d + (size_t)a * 16, d + (size_t)b * 16, 16);
-    }
-    /* RAY_STR */
-    size_t la = 0, lb = 0;
-    const char* sa = ray_str_vec_get(v, a, &la);
-    const char* sb = ray_str_vec_get(v, b, &lb);
-    size_t m = la < lb ? la : lb;
-    int c = (m && sa && sb) ? memcmp(sa, sb, m) : 0;
-    if (c) return c;
-    return (la > lb) - (la < lb);
-}
 /* Scan rows [optionally via sel] and return the winning row index for
- * op (OP_MIN/OP_MAX/OP_FIRST/OP_LAST), or -1 if every scanned row is null. */
+ * op (OP_MIN/OP_MAX/OP_FIRST/OP_LAST), or -1 if every scanned row is null.
+ *
+ * The element type (STR vs GUID) and the operator are resolved ONCE here,
+ * before any loop — the inner loops carry no type/op switch.  first/last are
+ * pure positional scans (no value comparison); min/max run a single
+ * type-specialised compare loop whose direction (want_min) is hoisted out.
+ * (sel/has_nulls remain a predictable per-row branch, exactly as the integer
+ * reduce loops below do; the goal is no *type/op dispatch* inside the loop.) */
 static int64_t wide_winner_row(ray_t* input, uint16_t op,
                                const int64_t* sel, int64_t scan_n,
                                bool has_nulls) {
+    /* first/last: positional — return the first/last non-null row, no compare. */
+    if (op == OP_FIRST) {
+        for (int64_t i = 0; i < scan_n; i++) {
+            int64_t row = sel ? sel[i] : i;
+            if (!has_nulls || !ray_vec_is_null(input, row)) return row;
+        }
+        return -1;
+    }
+    if (op == OP_LAST) {
+        for (int64_t i = scan_n - 1; i >= 0; i--) {
+            int64_t row = sel ? sel[i] : i;
+            if (!has_nulls || !ray_vec_is_null(input, row)) return row;
+        }
+        return -1;
+    }
+    /* min/max: one type-specialised compare loop, direction hoisted out. */
+    const bool want_min = (op == OP_MIN);
     int64_t best = -1;
-    for (int64_t i = 0; i < scan_n; i++) {
-        int64_t row = sel ? sel[i] : i;
-        if (has_nulls && ray_vec_is_null(input, row)) continue;
-        if (op == OP_FIRST) return row;
-        if (op == OP_LAST)  { best = row; continue; }
-        if (best < 0) { best = row; continue; }
-        int c = wide_elem_cmp(input, row, best);
-        if ((op == OP_MIN && c < 0) || (op == OP_MAX && c > 0)) best = row;
+    if (input->type == RAY_GUID) {
+        const uint8_t* d = (const uint8_t*)ray_data(input);
+        for (int64_t i = 0; i < scan_n; i++) {
+            int64_t row = sel ? sel[i] : i;
+            if (has_nulls && ray_vec_is_null(input, row)) continue;
+            if (best < 0) { best = row; continue; }
+            int c = memcmp(d + (size_t)row * 16, d + (size_t)best * 16, 16);
+            if (want_min ? (c < 0) : (c > 0)) best = row;
+        }
+    } else {  /* RAY_STR — lexicographic over the pooled bytes */
+        for (int64_t i = 0; i < scan_n; i++) {
+            int64_t row = sel ? sel[i] : i;
+            if (has_nulls && ray_vec_is_null(input, row)) continue;
+            if (best < 0) { best = row; continue; }
+            size_t la = 0, lb = 0;
+            const char* sa = ray_str_vec_get(input, row,  &la);
+            const char* sb = ray_str_vec_get(input, best, &lb);
+            size_t m = la < lb ? la : lb;
+            int c = (m && sa && sb) ? memcmp(sa, sb, m) : 0;
+            if (!c) c = (la > lb) - (la < lb);
+            if (want_min ? (c < 0) : (c > 0)) best = row;
+        }
     }
     return best;
 }
@@ -6159,7 +6182,9 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                 int64_t* idxb = (int64_t*)scratch_alloc(&ix_hdr,
                     (size_t)(hscan > 0 ? hscan : 1) * sizeof(int64_t));
                 if (idxb) {
-                    for (int64_t i = 0; i < hscan; i++) idxb[i] = hsel ? hsel[i] : i;
+                    /* selection branch hoisted out of the fill loop */
+                    if (hsel) { for (int64_t i = 0; i < hscan; i++) idxb[i] = hsel[i]; }
+                    else      { for (int64_t i = 0; i < hscan; i++) idxb[i] = i; }
                     int64_t offs[1] = {0};
                     int64_t cnts[1] = {hscan};
                     for (uint8_t a = 0; a < n_aggs; a++) {
