@@ -71,6 +71,17 @@ typedef enum {
  * hint and exit non-zero. */
 ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode);
 
+/* Phases 1+2 of recovery: load <base>.qdb then replay <base>.log.  Does
+ * NOT open the journal for writing.  Composed into ray_journal_open (the
+ * -l/-L startup recovery path); not invoked directly by any caller, and
+ * NOT used by the .log.open verb. */
+ray_err_t ray_journal_recover(const char* base);
+
+/* Open <base>.log for append in `mode` WITHOUT loading the snapshot or
+ * replaying.  This is what the .log.open verb calls (resume appending
+ * without surprising re-execution of the whole log). */
+ray_err_t ray_journal_open_append(const char* base, ray_journal_mode_t mode);
+
 /* True iff a journal is currently open for append. */
 bool ray_journal_is_open(void);
 
