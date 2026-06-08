@@ -52,12 +52,21 @@ struct ray_pool {
     uint32_t           n_workers;     /* number of background threads (nproc - 1) */
     _Atomic(uint32_t)  shutdown;
 
-    /* SPMC task ring (single producer = main, multi consumer = workers + main) */
+    /* SPMC task ring (single producer = main, multi consumer = workers + main).
+     *
+     * Claiming uses two MONOTONIC 64-bit cursors that are never reset, which
+     * eliminates the cross-dispatch reset race: a worker that wakes late on a
+     * surplus semaphore signal can no longer claim a half-republished slot,
+     * because there is no republish — each dispatch carves a fresh window
+     * [base, base+n) off the high-water mark.  A ticket maps to ring slot
+     * (ticket & (task_cap-1)); consecutive dispatches' windows never alias a
+     * live slot because the prior window is fully claimed before the next
+     * publishes.  Workers claim via a bounded CAS (never overshoot task_limit)
+     * so the cursor stays exact across dispatches; 64-bit so it never wraps. */
     ray_pool_task_t*    tasks;         /* ring buffer [task_cap] */
     uint32_t           task_cap;      /* power of 2 */
-    uint32_t           task_head;     /* next to write (main only, no atomic needed) */
-    _Atomic(uint32_t)  task_tail;     /* next to claim (workers, atomic_fetch_add) */
-    _Atomic(uint32_t)  task_count;    /* total tasks submitted this dispatch */
+    _Atomic(uint64_t)  task_claim;    /* next ticket to claim (bounded CAS) */
+    _Atomic(uint64_t)  task_limit;    /* published end of current window */
 
     /* Barrier */
     _Atomic(uint32_t)  pending;       /* decremented by each task completion */
