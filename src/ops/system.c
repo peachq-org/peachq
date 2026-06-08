@@ -1003,6 +1003,23 @@ ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg) {
     return ray_ipc_send(h, msg);
 }
 
+/* (.ipc.post handle msg) → null on local send, error on failure.
+ * Async fire-and-forget counterpart to (.ipc.send ...): the server runs
+ * the message through `.ipc.on.async` (or default eval) and sends NO
+ * response, so only a LOCAL send failure is observable here. */
+ray_t* ray_hpost_fn(ray_t* handle, ray_t* msg) {
+    if (!ray_is_atom(handle) || (handle->type != -RAY_I64 && handle->type != -RAY_I32))
+        return ray_error("type", NULL);
+    int64_t h = (handle->type == -RAY_I64) ? handle->i64 : handle->i32;
+    /* Validate message is serializable (reject builtins, etc.) */
+    if (ray_serde_size(msg) <= 0)
+        return ray_error("type", "message not serializable");
+    ray_err_t rc = ray_ipc_send_async(h, msg);
+    if (rc != RAY_OK)
+        return ray_error("io", "ipc async send failed");
+    return RAY_NULL_OBJ;
+}
+
 /* (.ipc.handle) → i64 current connection handle inside any `.ipc.on.*`
  * hook, or -1 outside any hook.  Registered variadic so both
  * `(.ipc.handle)` (no args) and `(.ipc.handle 0)` (one arg, ignored)
