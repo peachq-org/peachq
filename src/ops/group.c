@@ -74,6 +74,83 @@ static inline bool sym_lex_lt(int64_t a, int64_t b) {
 }
 static inline bool sym_lex_gt(int64_t a, int64_t b) { return sym_lex_lt(b, a); }
 
+/* ── Wide-element (STR/GUID) min/max/first/last ──────────────────────────
+ * STR (a 16-byte ray_str_t: pool pointer + length) and GUID (16 raw bytes)
+ * do not fit the 8-byte integer reduce accumulators, so the int64 fast paths
+ * silently truncate them to a single byte.  These helpers instead track the
+ * WINNING ROW INDEX — by content comparison (lexicographic for STR, byte
+ * order for GUID) for min/max, or by position for first/last — and the caller
+ * materialises that element with collection_elem.  This matches the scalar
+ * first/last builtins and gives min/max real lexical results, unifying the
+ * scalar and DAG aggregation paths for wide element types. */
+static inline bool agg_is_wide_type(int8_t t) {
+    return t == RAY_STR || t == RAY_GUID;
+}
+/* Scan rows [optionally via sel] and return the winning row index for
+ * op (OP_MIN/OP_MAX/OP_FIRST/OP_LAST), or -1 if every scanned row is null.
+ *
+ * The element type (STR vs GUID) and the operator are resolved ONCE here,
+ * before any loop — the inner loops carry no type/op switch.  first/last are
+ * pure positional scans (no value comparison); min/max run a single
+ * type-specialised compare loop whose direction (want_min) is hoisted out.
+ * (sel/has_nulls remain a predictable per-row branch, exactly as the integer
+ * reduce loops below do; the goal is no *type/op dispatch* inside the loop.) */
+static int64_t wide_winner_row(ray_t* input, uint16_t op,
+                               const int64_t* sel, int64_t scan_n,
+                               bool has_nulls) {
+    /* first/last: positional — return the first/last non-null row, no compare. */
+    if (op == OP_FIRST) {
+        for (int64_t i = 0; i < scan_n; i++) {
+            int64_t row = sel ? sel[i] : i;
+            if (!has_nulls || !ray_vec_is_null(input, row)) return row;
+        }
+        return -1;
+    }
+    if (op == OP_LAST) {
+        for (int64_t i = scan_n - 1; i >= 0; i--) {
+            int64_t row = sel ? sel[i] : i;
+            if (!has_nulls || !ray_vec_is_null(input, row)) return row;
+        }
+        return -1;
+    }
+    /* min/max: one type-specialised compare loop, direction hoisted out. */
+    const bool want_min = (op == OP_MIN);
+    int64_t best = -1;
+    if (input->type == RAY_GUID) {
+        const uint8_t* d = (const uint8_t*)ray_data(input);
+        for (int64_t i = 0; i < scan_n; i++) {
+            int64_t row = sel ? sel[i] : i;
+            if (has_nulls && ray_vec_is_null(input, row)) continue;
+            if (best < 0) { best = row; continue; }
+            int c = memcmp(d + (size_t)row * 16, d + (size_t)best * 16, 16);
+            if (want_min ? (c < 0) : (c > 0)) best = row;
+        }
+    } else {  /* RAY_STR — lexicographic over the pooled bytes */
+        for (int64_t i = 0; i < scan_n; i++) {
+            int64_t row = sel ? sel[i] : i;
+            if (has_nulls && ray_vec_is_null(input, row)) continue;
+            if (best < 0) { best = row; continue; }
+            size_t la = 0, lb = 0;
+            const char* sa = ray_str_vec_get(input, row,  &la);
+            const char* sb = ray_str_vec_get(input, best, &lb);
+            size_t m = la < lb ? la : lb;
+            int c = (m && sa && sb) ? memcmp(sa, sb, m) : 0;
+            if (!c) c = (la > lb) - (la < lb);
+            if (want_min ? (c < 0) : (c > 0)) best = row;
+        }
+    }
+    return best;
+}
+/* Whole-table (optionally selected) min/max/first/last over a wide column. */
+static ray_t* agg_wide_reduce(ray_t* input, uint16_t op,
+                              const int64_t* sel, int64_t scan_n,
+                              bool has_nulls) {
+    int64_t best = wide_winner_row(input, op, sel, scan_n, has_nulls);
+    if (best < 0) return ray_typed_null(-input->type);
+    int alloc;
+    return collection_elem(input, best, &alloc);
+}
+
 /* Integer reduction loop — reads native type T, accumulates as i64.
  * HAS_NULLS and HAS_IDX must be integer literal constants (0 or 1) so the
  * compiler dead-code-eliminates the corresponding branches in every
@@ -1910,8 +1987,54 @@ ray_t* ray_topk_per_group_buf(ray_t* src,
     return out;
 }
 
+/* ─── ray_wide_minmax_per_group_buf ───────────────────────────────────────
+ *
+ * Per-group min/max/first/last for wide element types (STR/GUID) that don't
+ * fit the 8-byte integer accumulators.  Same idx_buf/offsets/grp_cnt layout
+ * as the median/topk kernels — produced by exec_group's group-contiguous row
+ * gather — but instead of a numeric quickselect it finds the winning row per
+ * group (lexicographic for STR, byte order for GUID; positional for
+ * first/last) and materialises that element into a typed result column.
+ *
+ * Runs SERIAL: ray_str_vec_set COW-mutates the result vector and its shared
+ * string pool, so concurrent group writers would corrupt the pool.  Wide
+ * min/max is a cold path, not a vectorised bench kernel, so this is fine. */
+ray_t* ray_wide_minmax_per_group_buf(ray_t* src, uint16_t op,
+                                     const int64_t* idx_buf,
+                                     const int64_t* offsets,
+                                     const int64_t* grp_cnt,
+                                     int64_t n_groups) {
+    if (!src || RAY_IS_ERR(src) || n_groups < 0) return NULL;
+    if (!agg_is_wide_type(src->type)) return NULL;  /* caller falls back */
+    bool has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0;
+
+    ray_t* out = col_vec_new(src, n_groups);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    out->len = n_groups;
+
+    for (int64_t g = 0; g < n_groups; g++) {
+        int64_t cnt = grp_cnt[g];
+        int64_t off = offsets[g];
+        int64_t best = wide_winner_row(src, op, &idx_buf[off], cnt, has_nulls);
+        if (best < 0) { ray_vec_set_null(out, g, true); continue; }
+        int alloc;
+        ray_t* e = collection_elem(src, best, &alloc);
+        if (src->type == RAY_STR) {
+            ray_t* nv = ray_str_vec_set(out, g, ray_str_ptr(e), ray_str_len(e));
+            if (alloc) ray_release(e);
+            if (!nv || RAY_IS_ERR(nv)) { if (nv != out) ray_release(out); return nv ? nv : ray_error("oom", NULL); }
+            out = nv;
+        } else {  /* RAY_GUID — fixed 16-byte in-place store */
+            store_typed_elem(out, g, e);
+            if (alloc) ray_release(e);
+        }
+    }
+    return out;
+}
+
 static ray_t* reduction_i64_result(int64_t val, int8_t out_type) {
     switch (out_type) {
+        case RAY_BOOL:      return ray_bool((bool)val);
         case RAY_DATE:      return ray_date((int32_t)val);
         case RAY_TIME:      return ray_time(val);
         case RAY_TIMESTAMP: return ray_timestamp(val);
@@ -1987,6 +2110,17 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         }
     }
 
+    /* Wide element types (STR/GUID) overflow the 8-byte reduce
+     * accumulators; resolve min/max/first/last by materialising the
+     * winning row instead.  COUNT keeps the generic length-based path. */
+    if (agg_is_wide_type(in_type) &&
+        (op->opcode == OP_MIN || op->opcode == OP_MAX ||
+         op->opcode == OP_FIRST || op->opcode == OP_LAST)) {
+        ray_t* r = agg_wide_reduce(input, op->opcode, sel_idx, scan_n, has_nulls);
+        if (sel_idx_block) ray_release(sel_idx_block);
+        return r;
+    }
+
     /* O(1) short-circuit: first/last on numeric columns don't need a
      * full reduction pass.  Non-numeric types (STR, GUID) fall through
      * to the serial reduction path below. */
@@ -2053,7 +2187,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
         ray_t* result;
         switch (op->opcode) {
-            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : ray_i64(merged.sum_i); break;
+            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : (in_type == RAY_TIME ? ray_time(merged.sum_i) : ray_i64(merged.sum_i)); break;
             case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : ray_i64(merged.prod_i); break;
             case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i); break;
             case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i); break;
@@ -2092,7 +2226,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (sel_idx_block) ray_release(sel_idx_block);
 
     switch (op->opcode) {
-        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : ray_i64(acc.sum_i);
+        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : (in_type == RAY_TIME ? ray_time(acc.sum_i) : ray_i64(acc.sum_i));
         case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : ray_i64(acc.prod_i);
         case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i);
         case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i);
@@ -2168,11 +2302,20 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
          * row_gid+grp_cnt gathers per-group slices and runs quickselect
          * (median) or a bounded heap (top/bot); see
          * ray_median_per_group_buf / ray_topk_per_group_buf. */
+        /* Wide-element (STR/GUID) min/max/first/last also reserve no
+         * row-layout slot: the 8-byte accumulators can't hold a 16-byte
+         * GUID or a pooled string, so they are resolved by the same
+         * post-radix per-group pass via ray_wide_minmax_per_group_buf. */
+        bool wide_mm = agg_ops && agg_vecs[a] &&
+                       agg_is_wide_type(agg_vecs[a]->type) &&
+                       (agg_ops[a] == OP_MIN  || agg_ops[a] == OP_MAX ||
+                        agg_ops[a] == OP_FIRST || agg_ops[a] == OP_LAST);
         bool holistic = agg_ops && (agg_ops[a] == OP_MEDIAN ||
                                     agg_ops[a] == OP_TOP_N ||
-                                    agg_ops[a] == OP_BOT_N);
+                                    agg_ops[a] == OP_BOT_N || wide_mm);
         if (holistic) {
             ly.agg_is_holistic |= (uint8_t)(1u << a);
+            if (wide_mm) ly.agg_is_wide |= (uint8_t)(1u << a);
             ly.agg_val_slot[a] = -1;
         } else if (agg_vecs[a]) {
             ly.agg_val_slot[a] = (int8_t)nv;
@@ -2191,7 +2334,9 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
         } else {
             ly.agg_val_slot[a] = -1;
         }
-        if (agg_ops) {
+        if (agg_ops && !wide_mm) {
+            /* wide first/last are resolved holistically and need no
+             * entry-tail row slot, so they are excluded here. */
             if (agg_ops[a] == OP_FIRST) ly.agg_is_first |= (1u << a);
             if (agg_ops[a] == OP_LAST)  ly.agg_is_last  |= (1u << a);
             if (agg_ops[a] == OP_PROD)  ly.agg_is_prod  |= (1u << a);
@@ -3735,7 +3880,20 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
             case OP_VAR: case OP_VAR_POP:
                 out_type = RAY_F64; break;
             case OP_COUNT: out_type = RAY_I64; break;
-            case OP_SUM: case OP_PROD:
+            case OP_SUM: {
+                /* sum preserves TIME (a duration-like temporal): time+time is
+                 * a time, matching the scalar ray_sum_fn.  Other integer
+                 * families widen to I64; DATE/TIMESTAMP are rejected at
+                 * type-admission so never reach here.  The affine/linear SUM
+                 * fast paths leave agg_col NULL (they aggregate without
+                 * materializing the input vector), so recover the source type
+                 * from the aggregation input op when the vector is absent. */
+                int8_t src_t = agg_col ? agg_col->type
+                             : (ext->agg_ins[a] ? ext->agg_ins[a]->out_type : 0);
+                out_type = is_f64 ? RAY_F64 : (src_t == RAY_TIME ? RAY_TIME : RAY_I64);
+                break;
+            }
+            case OP_PROD:
                 out_type = is_f64 ? RAY_F64 : RAY_I64; break;
             default:
                 out_type = agg_col ? agg_col->type : RAY_I64; break;
@@ -5961,6 +6119,86 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                          (int64_t*)m->min_val, (int64_t*)m->max_val,
                          m->count, agg_affine, m->sumsq_f64, m->nn_count);
 
+        /* Wide-element (STR/GUID) min/max/first/last overflow emit_agg_columns'
+         * fixed-width slots (it truncated them to 1 byte above).  Recompute
+         * those 1-row columns by materialising the winning row — mirroring
+         * exec_reduction — and override them in the result table. */
+        for (uint8_t a = 0; a < n_aggs; a++) {
+            uint16_t aop = ext->agg_ops[a];
+            if (!(agg_vecs[a] && agg_is_wide_type(agg_vecs[a]->type) &&
+                  (aop == OP_MIN || aop == OP_MAX ||
+                   aop == OP_FIRST || aop == OP_LAST)))
+                continue;
+            ray_t* wsel_blk = NULL; const int64_t* wsel = NULL; int64_t wscan = nrows;
+            if (g->selection) {
+                ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+                if (sm && sm->nrows == nrows) {
+                    wsel_blk = ray_rowsel_to_indices(g->selection);
+                    wsel = wsel_blk ? (const int64_t*)ray_data(wsel_blk) : NULL;
+                    wscan = sm->total_pass;
+                }
+            }
+            bool hn = (agg_vecs[a]->attrs & RAY_ATTR_HAS_NULLS) != 0;
+            ray_t* atom = agg_wide_reduce(agg_vecs[a], aop, wsel, wscan, hn);
+            if (wsel_blk) ray_release(wsel_blk);
+            ray_t* col = col_vec_new(agg_vecs[a], 1);
+            if (col && !RAY_IS_ERR(col)) {
+                col->len = 1;
+                if (RAY_ATOM_IS_NULL(atom)) {
+                    ray_vec_set_null(col, 0, true);
+                } else if (agg_vecs[a]->type == RAY_STR) {
+                    ray_t* nv = ray_str_vec_set(col, 0, ray_str_ptr(atom), ray_str_len(atom));
+                    if (nv && !RAY_IS_ERR(nv)) col = nv;
+                } else {
+                    store_typed_elem(col, 0, atom);
+                }
+                ray_table_set_col_idx(result, a, col);
+                ray_release(col);
+            }
+            ray_release(atom);
+        }
+
+        /* Whole-table median has no n_keys==0 accumulator, so emit_agg_columns
+         * left its column at the integer default (0).  Recompute it over the
+         * whole (optionally selected) column as a single group via the same
+         * per-group kernel the by-group path uses, matching the scalar `med`
+         * builtin.  (top/bot are not handled here: the no-by planner does not
+         * carry the K argument, so they keep their scalar-builtin form.) */
+        {
+            bool any_med = false;
+            for (uint8_t a = 0; a < n_aggs; a++)
+                if (ext->agg_ops[a] == OP_MEDIAN) { any_med = true; break; }
+            if (any_med) {
+                ray_t* hsel_blk = NULL; const int64_t* hsel = NULL; int64_t hscan = nrows;
+                if (g->selection) {
+                    ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+                    if (sm && sm->nrows == nrows) {
+                        hsel_blk = ray_rowsel_to_indices(g->selection);
+                        hsel = hsel_blk ? (const int64_t*)ray_data(hsel_blk) : NULL;
+                        hscan = sm->total_pass;
+                    }
+                }
+                ray_t* ix_hdr = NULL;
+                int64_t* idxb = (int64_t*)scratch_alloc(&ix_hdr,
+                    (size_t)(hscan > 0 ? hscan : 1) * sizeof(int64_t));
+                if (idxb) {
+                    /* selection branch hoisted out of the fill loop */
+                    if (hsel) { for (int64_t i = 0; i < hscan; i++) idxb[i] = hsel[i]; }
+                    else      { for (int64_t i = 0; i < hscan; i++) idxb[i] = i; }
+                    int64_t offs[1] = {0};
+                    int64_t cnts[1] = {hscan};
+                    for (uint8_t a = 0; a < n_aggs; a++) {
+                        if (ext->agg_ops[a] != OP_MEDIAN || !agg_vecs[a]) continue;
+                        ray_t* hv = ray_median_per_group_buf(agg_vecs[a], idxb, offs, cnts, 1);
+                        if (hv && !RAY_IS_ERR(hv)) ray_table_set_col_idx(result, a, hv);
+                        if (hv) ray_release(hv);
+                    }
+                    scratch_free(ix_hdr);
+                }
+                if (hsel_blk) ray_release(hsel_blk);
+            }
+        }
+
         da_accum_free(&sc_acc[0]); scratch_free(sc_hdr);
         for (uint8_t a = 0; a < n_aggs; a++)
             { if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]); if (agg_owned2[a] && agg_vecs2[a]) ray_release(agg_vecs2[a]); }
@@ -5990,10 +6228,17 @@ da_path:;
          * no per-row accumulator at all — they need the post-radix
          * row_gid+grp_cnt pass which only the HT path provides. */
         for (uint8_t a = 0; a < n_aggs && da_eligible; a++) {
-            if (ext->agg_ops[a] == OP_PEARSON_CORR) da_eligible = false;
-            if (ext->agg_ops[a] == OP_MEDIAN)       da_eligible = false;
-            if (ext->agg_ops[a] == OP_TOP_N)        da_eligible = false;
-            if (ext->agg_ops[a] == OP_BOT_N)        da_eligible = false;
+            uint16_t aop = ext->agg_ops[a];
+            if (aop == OP_PEARSON_CORR) da_eligible = false;
+            if (aop == OP_MEDIAN)       da_eligible = false;
+            if (aop == OP_TOP_N)        da_eligible = false;
+            if (aop == OP_BOT_N)        da_eligible = false;
+            /* Wide-element (STR/GUID) min/max/first/last need the holistic
+             * post-fill; the DA emit (emit_agg_columns) would truncate them. */
+            if (agg_vecs[a] && agg_is_wide_type(agg_vecs[a]->type) &&
+                (aop == OP_MIN || aop == OP_MAX ||
+                 aop == OP_FIRST || aop == OP_LAST))
+                da_eligible = false;
         }
         for (uint8_t k = 0; k < n_keys && da_eligible; k++) {
             if (!key_data[k]) { da_eligible = false; break; }
@@ -8328,7 +8573,14 @@ v2_emit:;
                 case OP_MEDIAN:
                     out_type = RAY_F64; break;
                 case OP_COUNT: out_type = RAY_I64; break;
-                case OP_SUM: case OP_PROD:
+                case OP_SUM:
+                    /* sum preserves TIME (duration-like); other integer
+                     * families widen to I64.  DATE/TIMESTAMP rejected at
+                     * type-admission. */
+                    out_type = is_f64 ? RAY_F64
+                             : (agg_col && agg_col->type == RAY_TIME ? RAY_TIME : RAY_I64);
+                    break;
+                case OP_PROD:
                     out_type = is_f64 ? RAY_F64 : RAY_I64; break;
                 default:
                     out_type = agg_col ? agg_col->type : RAY_I64; break;
@@ -8507,6 +8759,11 @@ v2_emit:;
                             aop == OP_TOP_N ? 1 : 0,
                             idx_buf, offsets, grp_cnt, n_groups);
                         err_tag = "top/bot: type";
+                    } else if (aop == OP_MIN || aop == OP_MAX ||
+                               aop == OP_FIRST || aop == OP_LAST) {
+                        hol_vec = ray_wide_minmax_per_group_buf(
+                            agg_vecs[a], aop, idx_buf, offsets, grp_cnt, n_groups);
+                        err_tag = "minmax: type";
                     }
                     if (!hol_vec) {
                         if (hist_hdr) scratch_free(hist_hdr);
@@ -8839,6 +9096,11 @@ build_from_final_ht:
                                 aop == OP_TOP_N ? 1 : 0,
                                 idx_buf_s, offsets_s, grp_cnt_s,
                                 (int64_t)grp_count);
+                        } else if (aop == OP_MIN || aop == OP_MAX ||
+                                   aop == OP_FIRST || aop == OP_LAST) {
+                            hol_vec = ray_wide_minmax_per_group_buf(
+                                agg_vecs[a], aop, idx_buf_s, offsets_s,
+                                grp_cnt_s, (int64_t)grp_count);
                         }
                         med_out[a] = hol_vec;  /* NULL or RAY_IS_ERR handled below */
                     }
@@ -8866,14 +9128,29 @@ build_from_final_ht:
             case OP_MEDIAN:
                 out_type = RAY_F64; break;
             case OP_COUNT: out_type = RAY_I64; break;
-            case OP_SUM: case OP_PROD:
+            case OP_SUM: {
+                /* sum preserves TIME (a duration-like temporal): time+time is
+                 * a time, matching the scalar ray_sum_fn.  Other integer
+                 * families widen to I64; DATE/TIMESTAMP are rejected at
+                 * type-admission so never reach here.  The affine/linear SUM
+                 * fast paths leave agg_col NULL (they aggregate without
+                 * materializing the input vector), so recover the source type
+                 * from the aggregation input op when the vector is absent. */
+                int8_t src_t = agg_col ? agg_col->type
+                             : (ext->agg_ins[a] ? ext->agg_ins[a]->out_type : 0);
+                out_type = is_f64 ? RAY_F64 : (src_t == RAY_TIME ? RAY_TIME : RAY_I64);
+                break;
+            }
+            case OP_PROD:
                 out_type = is_f64 ? RAY_F64 : RAY_I64; break;
             default:
                 out_type = agg_col ? agg_col->type : RAY_I64; break;
         }
         ray_t* new_col;
-        bool is_holistic = (agg_op == OP_MEDIAN || agg_op == OP_TOP_N ||
-                            agg_op == OP_BOT_N);
+        /* Drive off the layout bitmask, not the op literal: wide-element
+         * (STR/GUID) min/max/first/last are holistic too and their column
+         * lives in med_out[a], not the truncating row-layout read below. */
+        bool is_holistic = (ly->agg_is_holistic & (1u << a)) != 0;
         if (is_holistic && med_out && med_out[a]
             && !RAY_IS_ERR(med_out[a])) {
             new_col = med_out[a];
@@ -11213,16 +11490,18 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
             if (k1_data_out)
                 write_col_i64(k1_data_out, row, e->key1, k_types[1], k_attrs[1]);
 
+            /* Emit the signed Pearson correlation r — NOT r².  The scalar
+             * pearson_corr builtin and the general radix HT finalize both
+             * return r = cov / (σx·σy); squaring it here collapsed -1 and +1
+             * to the same 1.0, so by-group correlation lost its sign. */
             double r2 = 0.0 / 0.0;   /* NaN by default */
             if (e->cnt >= 2) {
                 double n = (double)e->cnt;
                 double num = n * e->sumxy - e->sum_x * e->sum_y;
                 double dx  = n * e->sumsq_x - e->sum_x * e->sum_x;
                 double dy  = n * e->sumsq_y - e->sum_y * e->sum_y;
-                if (dx > 0.0 && dy > 0.0) {
-                    double r = num / sqrt(dx * dy);
-                    r2 = r * r;
-                }
+                if (dx > 0.0 && dy > 0.0)
+                    r2 = num / sqrt(dx * dy);
             }
             r2_data[row] = r2;
             row++;
