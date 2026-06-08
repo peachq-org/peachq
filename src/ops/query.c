@@ -5371,7 +5371,16 @@ by_dict_done:
                     break;
                 }
             }
+            /* The bounded-multikey count-take candidate uses an
+             * eval-level single-threaded scan with O(found) per-row
+             * group lookup.  Profitable on small inputs (skips the
+             * full DAG group HT construction) but at 10M rows × multi-
+             * key composite (ClickBench q17), the serial scan loses
+             * to the parallel mk_par_v2 filtered_group below.  Gate
+             * on table size — let big inputs through to the fused
+             * multi-key path. */
             if (!use_eval_group &&
+                ray_table_nrows(tbl) < 100000 &&
                 bounded_multikey_count_take_candidate(
                     dict_elems, dict_n, from_id, where_id, by_id, take_id,
                     asc_id, desc_id, ray_table_nrows(tbl), 1024)) {
