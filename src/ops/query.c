@@ -1314,35 +1314,19 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     return NULL;
 }
 
-/* Walk an expression tree and bind any name-symbols that match table columns
- * into the current local scope. Recurses into list sub-expressions. */
-static void expr_bind_table_names(ray_t* expr, ray_t* tbl) {
-    if (!expr) return;
-    if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
-        /* Plain column reference — bind the column into local scope. */
-        ray_t* col = ray_table_get_col(tbl, expr->i64);
-        if (col) { ray_env_set_local(expr->i64, col); return; }
-        /* Dotted reference (e.g. `Timestamp.ss`) — the whole dotted
-         * sym isn't a column name, but its HEAD segment might be.
-         * Bind the head so ray_env_resolve's dotted walk can reach
-         * it when ray_eval fires on this expression.  Non-column
-         * heads (globals, locals) fall through to env_resolve's
-         * normal scope-chain lookup. */
-        if (ray_sym_is_dotted(expr->i64)) {
-            const int64_t* segs;
-            int nsegs = ray_sym_segs(expr->i64, &segs);
-            if (nsegs >= 1) {
-                ray_t* head_col = ray_table_get_col(tbl, segs[0]);
-                if (head_col) ray_env_set_local(segs[0], head_col);
-            }
-        }
-        return;
-    }
-    if (expr->type == RAY_LIST) {
-        ray_t** elems = (ray_t**)ray_data(expr);
-        int64_t n = ray_len(expr);
-        for (int64_t i = 0; i < n; i++)
-            expr_bind_table_names(elems[i], tbl);
+/* Mount every column of `tbl` into the current (already-pushed) local scope
+ * as name -> vector, so query expressions resolve column references by
+ * ordinary name lookup — including references produced at runtime that a
+ * static AST walk could not see.  ray_env_set_local retains each column;
+ * the matching ray_env_pop_scope releases them all at once.  Columns whose
+ * names are reserved cannot occur for a real table column, so a rejected
+ * bind is simply skipped. */
+static void bind_all_columns(ray_t* tbl) {
+    int64_t ncols = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < ncols; c++) {
+        int64_t cn = ray_table_col_name(tbl, c);
+        ray_t*  cv = ray_table_get_col_idx(tbl, c);
+        if (cv) ray_env_set_local(cn, cv);
     }
 }
 
@@ -2354,7 +2338,7 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
     if (!src) {
         /* Bind table cols and eval — same pattern as the existing path. */
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        expr_bind_table_names(col_expr, tbl);
+        bind_all_columns(tbl);
         src = ray_eval(col_expr);
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
@@ -2460,7 +2444,7 @@ static ray_t* aggr_med_per_group_buf(ray_t* expr, ray_t* tbl,
     }
     if (!src) {
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        expr_bind_table_names(col_expr, tbl);
+        bind_all_columns(tbl);
         src = ray_eval(col_expr);
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
@@ -2990,7 +2974,7 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
     }
     if (!src) {
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        expr_bind_table_names(inner_expr, tbl);
+        bind_all_columns(tbl);
         src = ray_eval(inner_expr);
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
@@ -3216,7 +3200,7 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
     }
     if (!src) {
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        expr_bind_table_names(inner_expr, tbl);
+        bind_all_columns(tbl);
         src = ray_eval(inner_expr);
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
@@ -6336,7 +6320,7 @@ by_dict_done:
                         ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
                         return ray_error("oom", NULL);
                     }
-                    expr_bind_table_names(val_expr_item, eval_tbl);
+                    bind_all_columns(eval_tbl);
                     ray_t* full_val = ray_eval(val_expr_item);
                     ray_env_pop_scope();
                     if (RAY_IS_ERR(full_val)) {
@@ -8788,7 +8772,7 @@ by_dict_done:
                     if (ray_env_push_scope() != RAY_OK) {
                         scatter_err = ray_error("oom", NULL); break;
                     }
-                    expr_bind_table_names(nonagg_exprs[ni], tbl);
+                    bind_all_columns(tbl);
                     ray_t* full_val = ray_eval(nonagg_exprs[ni]);
                     ray_env_pop_scope();
                     if (!full_val || RAY_IS_ERR(full_val)) {
