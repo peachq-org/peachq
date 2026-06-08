@@ -2984,6 +2984,31 @@ ray_t* ray_eval(ray_t* obj) {
     ray_t* head = ray_eval(elems[0]);
     if (RAY_IS_ERR(head)) { ret = head; goto out; }
 
+    /* A symbol in functional position names the function to apply.  A name
+     * head (e.g. from `(quote f)`) already resolved during head-eval above;
+     * this handles a literal-symbol head (e.g. from `(list 'f 1)`), which
+     * would otherwise fall through to the `type` error below. */
+    if (head->type == -RAY_SYM) {
+        ray_t* fn = ray_env_resolve(head->i64);
+        if (!fn) {
+            ray_t* ns = ray_sym_str(head->i64);
+            if (ns) {
+                ret = ray_error("name", "'%.*s' undefined",
+                                (int)ray_str_len(ns), ray_str_ptr(ns));
+                ray_release(ns);
+            } else {
+                ret = ray_error("name", NULL);
+            }
+            ray_release(head);
+            goto out;
+        }
+        /* env_resolve may also surface a real error (e.g. nyi from a
+         * dotted-target deref) — propagate it directly. */
+        if (RAY_IS_ERR(fn)) { ray_release(head); ret = fn; goto out; }
+        ray_release(head);
+        head = fn;   /* env_resolve hands back an owned ref; no extra retain. */
+    }
+
     int64_t n = ray_len(obj);
 
     switch (head->type) {
