@@ -346,20 +346,17 @@ static ray_err_t open_log_for_append(void) {
     return RAY_OK;
 }
 
-ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
+/* Phases 1+2 of recovery: load <base>.qdb then replay <base>.log.  Does
+ * NOT open the journal for writing.  Used by -l/-L startup; NOT by the
+ * .log.open verb (which opens for append only). */
+ray_err_t ray_journal_recover(const char* base) {
     if (!base || !*base) return RAY_ERR_DOMAIN;
-    if (g_journal.fp) return RAY_ERR_DOMAIN;   /* already open */
-
-    size_t blen = strlen(base);
-    if (blen + 5 >= sizeof(g_journal.base)) return RAY_ERR_DOMAIN;
-
-    memcpy(g_journal.base, base, blen + 1);
-    g_journal.mode = mode;
-    if (!path_join_ext(g_journal.log_path, sizeof(g_journal.log_path), base, ".log"))
-        return RAY_ERR_DOMAIN;
 
     char qdb_path[RAY_JOURNAL_PATH_MAX];
+    char log_path[RAY_JOURNAL_PATH_MAX];
     if (!path_join_ext(qdb_path, sizeof(qdb_path), base, ".qdb"))
+        return RAY_ERR_DOMAIN;
+    if (!path_join_ext(log_path, sizeof(log_path), base, ".log"))
         return RAY_ERR_DOMAIN;
 
     /* 1. Snapshot — load <base>.qdb if present. */
@@ -430,24 +427,24 @@ ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
     }
 
     /* 2. Log — replay <base>.log if present. */
-    if (file_exists(g_journal.log_path)) {
+    if (file_exists(log_path)) {
         int64_t chunks = 0, errs = 0;
         ray_jreplay_status_t status = RAY_JREPLAY_OK;
-        ray_journal_replay(g_journal.log_path, &chunks, &errs, &status);
+        ray_journal_replay(log_path, &chunks, &errs, &status);
         switch (status) {
         case RAY_JREPLAY_OK: {
             fprintf(stderr, "log: replayed %lld entries (%lld eval errors) from %s\n",
-                    (long long)chunks, (long long)errs, g_journal.log_path);
+                    (long long)chunks, (long long)errs, log_path);
             break;
         }
         case RAY_JREPLAY_BADTAIL: {
             int64_t valid_chunks = 0, valid_bytes = 0;
-            ray_journal_validate(g_journal.log_path, &valid_chunks, &valid_bytes);
+            ray_journal_validate(log_path, &valid_chunks, &valid_bytes);
             fprintf(stderr,
                     "log: ERROR badtail in %s after %lld entries (valid bytes = %lld)\n"
                     "log: hint: truncate the file at offset %lld to recover the\n"
                     "log:       valid prefix, then restart\n",
-                    g_journal.log_path, (long long)chunks,
+                    log_path, (long long)chunks,
                     (long long)valid_bytes, (long long)valid_bytes);
             return RAY_ERR_DOMAIN;
         }
@@ -458,22 +455,48 @@ ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
                     "log:       was intact so this is content/code mismatch, NOT\n"
                     "log:       tail truncation.  Do NOT truncate the log; either\n"
                     "log:       fix the version skew or restore from .qdb backup.\n",
-                    (long long)chunks, g_journal.log_path,
+                    (long long)chunks, log_path,
                     status == RAY_JREPLAY_DECOMP ? "decompression failed" : "deserialization failed");
             return RAY_ERR_DOMAIN;
         }
         case RAY_JREPLAY_OOM:
         case RAY_JREPLAY_IO: {
             fprintf(stderr, "log: ERROR replay aborted at chunk %lld in %s (%s)\n",
-                    (long long)chunks, g_journal.log_path,
+                    (long long)chunks, log_path,
                     status == RAY_JREPLAY_OOM ? "out of memory" : "I/O failure");
             return RAY_ERR_IO;
         }
         }
     }
 
-    /* 3. Open log for append. */
+    return RAY_OK;
+}
+
+/* Phase 3 + state setup: open <base>.log for append in `mode`.  Does NOT
+ * load the snapshot or replay.  Used by the .log.open verb and by -l/-L
+ * startup (after ray_journal_recover). */
+ray_err_t ray_journal_open_append(const char* base, ray_journal_mode_t mode) {
+    if (!base || !*base) return RAY_ERR_DOMAIN;
+    if (g_journal.fp) return RAY_ERR_DOMAIN;   /* already open */
+
+    size_t blen = strlen(base);
+    if (blen + 5 >= sizeof(g_journal.base)) return RAY_ERR_DOMAIN;
+
+    memcpy(g_journal.base, base, blen + 1);
+    g_journal.mode = mode;
+    if (!path_join_ext(g_journal.log_path, sizeof(g_journal.log_path), base, ".log"))
+        return RAY_ERR_DOMAIN;
+
     return open_log_for_append();
+}
+
+ray_err_t ray_journal_open(const char* base, ray_journal_mode_t mode) {
+    if (!base || !*base) return RAY_ERR_DOMAIN;
+    if (g_journal.fp) return RAY_ERR_DOMAIN;   /* already open */
+
+    ray_err_t re = ray_journal_recover(base);
+    if (re != RAY_OK) return re;
+    return ray_journal_open_append(base, mode);
 }
 
 ray_err_t ray_journal_close(void) {
