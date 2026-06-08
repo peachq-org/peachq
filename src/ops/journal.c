@@ -72,7 +72,7 @@ ray_t* ray_log_open_fn(ray_t** args, int64_t n) {
     if (!str_to_cpath(args[1], base, sizeof(base)))
         return ray_error("type", ".log.open base path too long or not a string");
 
-    ray_err_t e = ray_journal_open(base, mode);
+    ray_err_t e = ray_journal_open_append(base, mode);
     return err_to_ray(e, "io");
 }
 
