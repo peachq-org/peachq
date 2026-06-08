@@ -474,7 +474,25 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
  * ray_de_raw — deserialize from buffer
  * -------------------------------------------------------------------------- */
 
+/* Bound the recursion depth so a corrupted record encoding pathologically
+ * deep nesting returns an error instead of overflowing the C stack.  Mirrors
+ * the eval-depth ceiling (RAY_EVAL_MAX_DEPTH).  Thread-local: ray_de_raw may
+ * run on worker-pool threads. */
+#define RAY_DE_MAX_DEPTH 512
+static _Thread_local int g_de_depth = 0;
+
+static ray_t* de_raw_inner(uint8_t* buf, int64_t* len);
+
 ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
+    if (g_de_depth >= RAY_DE_MAX_DEPTH)
+        return ray_error("domain", "serde: nesting too deep");
+    g_de_depth++;
+    ray_t* r = de_raw_inner(buf, len);
+    g_de_depth--;
+    return r;
+}
+
+static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     if (*len < 1) return NULL;
 
     int8_t type = (int8_t)buf[0];
