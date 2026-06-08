@@ -459,6 +459,7 @@ ray_t*       ray_table_get_col(ray_t* tbl, int64_t name_id);
 ray_t*       ray_table_get_col_idx(ray_t* tbl, int64_t idx);
 int64_t     ray_table_col_name(ray_t* tbl, int64_t idx);
 void        ray_table_set_col_name(ray_t* tbl, int64_t idx, int64_t name_id);
+void        ray_table_set_col_idx(ray_t* tbl, int64_t idx, ray_t* col_vec);
 int64_t     ray_table_ncols(ray_t* tbl);
 int64_t     ray_table_nrows(ray_t* tbl);
 ray_t*       ray_table_schema(ray_t* tbl);
