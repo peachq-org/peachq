@@ -503,7 +503,7 @@ static void fmt_dict(fmt_buf_t* b, ray_t* dict, int mode) {
         if (i > 0) fmt_putc(b, ' ');
         /* Render key: synthesize an atom view from the keys vector.  When
          * the source slot is flagged null in the keys' bitmap, set the
-         * synthesized atom's nullmap bit 0 so fmt_obj renders the proper
+         * synthesized atom's aux bit 0 so fmt_obj renders the proper
          * null literal.  Without this, nullable GUID/STR/sym keys render
          * as their underlying bytes (e.g. the 16-zero-byte GUID), losing
          * null semantics. */
@@ -556,7 +556,7 @@ static void fmt_dict(fmt_buf_t* b, ray_t* dict, int mode) {
             /* Borrowed — do NOT release. */
             k_atom = ((ray_t**)ray_data(keys))[i];
         }
-        if (k_is_null && k_atom) k_atom->nullmap[0] |= 1;
+        if (k_is_null && k_atom) k_atom->aux[0] |= 1;
         if (k_atom) fmt_obj(b, k_atom, mode);
         fmt_putc(b, ':');
 
@@ -610,7 +610,7 @@ static void fmt_dict(fmt_buf_t* b, ray_t* dict, int mode) {
                     break;
                 default: break;
             }
-            if (v_is_null && v_atom) v_atom->nullmap[0] |= 1;
+            if (v_is_null && v_atom) v_atom->aux[0] |= 1;
             if (v_atom) fmt_obj(b, v_atom, mode);
             if (v_owned && v_atom) ray_release(v_atom);
         }
