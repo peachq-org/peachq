@@ -996,7 +996,7 @@ static void fmt_table(fmt_buf_t* b, ray_t* tbl, int mode) {
 /* ===== Core dispatch ===== */
 
 static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
-    if (!obj || RAY_IS_NULL(obj)) { fmt_puts(b, "null"); return; }
+    if (!obj || RAY_IS_NULL(obj)) { fmt_puts(b, "null"); return; } /* keep !obj: ray_fmt(NULL) is a public entry point, receives genuine-absence C NULL, not a value; also renders list/dict elements, which may be C NULL */
     if (RAY_IS_ERR(obj)) {
         char code[8] = {0};
         memcpy(code, obj->sdata, obj->slen < 7 ? obj->slen : 7);
