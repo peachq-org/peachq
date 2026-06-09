@@ -1126,12 +1126,12 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
         if (RAY_IS_ERR(fast)) { ray_release(vec); return fast; }
         if (fast != NULL) {
             /* Close the cancellation gap that surrounds the post-cast
-             * nullmap copy.  cast_vec_copy_nulls runs after the
+             * null-bitmap copy.  cast_vec_copy_nulls runs after the
              * cancel-aware fast cast — for nullable inputs it does a
              * bitmap copy (and a per-element scan on RAY_LIST inputs
              * of length n2).  A cancel arriving in that window would
              * otherwise be masked by the success return.  Pre-check
-             * gates the nullmap work; post-check catches a cancel
+             * gates the null-bitmap work; post-check catches a cancel
              * landing during it. */
             ray_pool_t* fp = ray_pool_get();
 #define _FP_CANCELLED() ((fp && atomic_load_explicit(&fp->cancelled, \

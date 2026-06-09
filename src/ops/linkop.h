@@ -33,7 +33,7 @@
  * single array access, no hash probe.
  *
  * Storage: RAY_ATTR_HAS_LINK = 0x04 set on the column; the int64 sym ID
- * naming the target lives at bytes 8-15 of the nullmap union (the
+ * naming the target lives at bytes 8-15 of the aux union (the
  * `link_target` field).  See include/rayforce.h for the union layout
  * and src/mem/heap.h for the attr-bit semantics.
  *
