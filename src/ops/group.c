@@ -8807,7 +8807,7 @@ v2_emit:;
         /* Finalize null flags after parallel execution.  Holistic slots
          * are filled by the post-radix pass into a fresh column; we
          * already updated agg_outs[a].vec to track it.  For RAY_LIST
-         * cells (OP_TOP_N / OP_BOT_N) the per-cell nullmap is not
+         * cells (OP_TOP_N / OP_BOT_N) the per-cell null state is not
          * consulted downstream — finalize is a no-op-y read of attrs. */
         for (uint8_t a = 0; a < n_aggs; a++) {
             if (!agg_cols[a]) continue;
