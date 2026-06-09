@@ -304,7 +304,7 @@ static ray_t* clone_index_block(ray_t* blk) {
                                 src->built_for_len);
     if (!nb || RAY_IS_ERR(nb)) return nb ? nb : ray_error("oom", NULL);
     ray_index_t* dst = ray_index_payload(nb);
-    memcpy(dst, src, sizeof(ray_index_t));   /* kind, markers, saved_nullmap, union */
+    memcpy(dst, src, sizeof(ray_index_t));   /* kind, markers, saved_aux, union */
     ray_index_retain_payload(dst);           /* child vectors now referenced twice */
     ray_index_retain_saved(dst);             /* no-op for numeric, kept symmetric */
     return nb;
@@ -505,7 +505,7 @@ static ray_err_t chunk_zone_scan(ray_t* v, ray_index_t* ix) {
 static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
     ray_index_t* ix = ray_index_payload(idx);
     /* Snapshot the parent's 16 raw bytes verbatim. */
-    memcpy(ix->saved_nullmap, parent->aux, 16);
+    memcpy(ix->saved_aux, parent->aux, 16);
     ix->saved_attrs = parent->attrs & RAY_ATTR_HAS_NULLS;
 
     /* Install the index pointer — overwrites bytes 0-7 with the index ptr.
@@ -1075,9 +1075,9 @@ ray_t* ray_index_drop(ray_t** vp) {
     if (shared) {
         ray_index_retain_saved(ix);
     }
-    memcpy(v->aux, ix->saved_nullmap, 16);
+    memcpy(v->aux, ix->saved_aux, 16);
     if (!shared) {
-        memset(ix->saved_nullmap, 0, 16);
+        memset(ix->saved_aux, 0, 16);
         ix->saved_attrs = 0;
     }
 
