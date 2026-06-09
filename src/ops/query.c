@@ -4808,6 +4808,7 @@ by_dict_done:
                 }
                 int keys_ok = 1;
                 int total_bytes = 0;
+                bool has_sym_key = false;
                 for (uint8_t i = 0; i < n_keys_local && keys_ok; i++) {
                     ray_t* kc = ray_table_get_col(tbl, key_syms_buf[i]);
                     if (!kc) { keys_ok = 0; break; }
@@ -4826,7 +4827,24 @@ by_dict_done:
                      * OP_GROUP, which buckets null keys separately. */
                     if (kc->attrs & RAY_ATTR_HAS_NULLS)
                         { keys_ok = 0; break; }
+                    if (kct == RAY_SYM) has_sym_key = true;
                     total_bytes += ray_sym_elem_size(kct, kc->attrs);
+                }
+                /* SYM keys disable v2 radix-partitioned shards
+                 * (see fused_group.c v2_ok gate), so multi-key SYM
+                 * falls to v1 mk_par_fn — single shard per worker.
+                 * On q18 (no-WHERE, 10M rows × ~2M unique composite
+                 * keys) the shard reaches ~70 MB, every probe is an
+                 * L3 miss.  exec_group's radix scatter (256 partitions,
+                 * per-partition HTs fit L2) runs ~4× faster on this
+                 * shape.  Gate only fires for the no-WHERE case: a
+                 * WHERE-filtered SYM multi-key (q14) already lands on
+                 * a much smaller post-filter row set where the v1
+                 * single-shard fits L2 and the fused fast-path wins. */
+                if (has_sym_key && n_keys_local >= 2 &&
+                    !where_expr &&
+                    ray_table_nrows(tbl) >= 1000000) {
+                    keys_ok = 0;
                 }
                 /* Single-key case fits unconditionally (one key column, one
                  * slot).  Multi-key narrow path (≤ 8 bytes packed) uses a
