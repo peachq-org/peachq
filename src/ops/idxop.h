@@ -85,7 +85,7 @@ typedef struct {
      * may attach an index (see prepare_attach) this snapshot holds no
      * owned ray_t* refs: bytes 0-7 are unused and bytes 8-15 carry the
      * link_target int64 when HAS_LINK is set. */
-    uint8_t  saved_nullmap[16];
+    uint8_t  saved_aux[16];
 
     /* Kind-specific payload.  All ray_t* fields are owning refs. */
     union {
