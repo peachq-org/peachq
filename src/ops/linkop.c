@@ -88,7 +88,7 @@ ray_t* ray_link_attach(ray_t** vp, int64_t target_sym_id) {
      * the snapshot so a future index-drop restores the link too. */
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
         ray_index_t* ix = ray_index_payload(v->index);
-        memcpy(&ix->saved_nullmap[8], &target_sym_id, 8);
+        memcpy(&ix->saved_aux[8], &target_sym_id, 8);
     }
     return v;
 }
@@ -111,7 +111,7 @@ ray_t* ray_link_detach(ray_t** vp) {
 
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
         ray_index_t* ix = ray_index_payload(v->index);
-        memset(&ix->saved_nullmap[8], 0, 8);
+        memset(&ix->saved_aux[8], 0, 8);
     }
     return v;
 }
