@@ -43,7 +43,7 @@
                                       forces concrete args. */
 
 /* AST name flag (distinguishes symbol literal from variable reference) */
-#define RAY_ATTR_NAME        0x20  /* ray_t SYM atom with this flag = name reference */
+#define ATTR_QUOTED  0x20  /* -RAY_SYM atom: name reference (polarity flips in a later commit) */
 
 /* Function type signatures */
 typedef ray_t* (*ray_unary_fn)(ray_t*);
