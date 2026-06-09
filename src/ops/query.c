@@ -4330,7 +4330,7 @@ ray_t* ray_select(ray_t** args, int64_t n) {
              * handled by the null-aware leg in fpk_cmp (NULLS LAST for
              * ASC, NULLS FIRST for DESC, matching sort.c's default).
              * Output columns are also handled — the fused materialiser
-             * propagates nullmaps via ray_vec_set_null. */
+             * propagates null bitmaps via ray_vec_set_null. */
             if (!bad_clause) {
                 for (uint8_t i = 0; i < n_sort_keys && !bad_clause; i++) {
                     ray_t* kc = ray_table_get_col(tbl, sort_key_syms[i]);
