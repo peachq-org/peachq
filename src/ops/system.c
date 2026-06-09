@@ -609,13 +609,23 @@ ray_t* ray_setenv_fn(ray_t* name, ray_t* val) {
  * ══════════════════════════════════════════ */
 
 /* (quote expr) -- special form, returns argument unevaluated.
- * Pure pass-through: it relies on the unflagged-name-ref default
- * (ATTR_QUOTED clear) so `(quote x)` hands the bare name `x` straight
- * back, and `x` still resolves as a name reference at eval. */
+ * A bare-name symbol argument becomes a LITERAL symbol (≡ the tick form
+ * 'x): return a flag-set COPY — args[0] is the shared unevaluated AST
+ * node, re-evaluated in loops / reused lambda bodies, so never mutate it
+ * in place.  ray_sym() freshly allocates (mirrors parse.c's tick path),
+ * so setting ATTR_QUOTED on the copy is safe.  Already-literal symbols
+ * and all non-symbol values pass through unchanged. */
 ray_t* ray_quote_fn(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", "quote expects 1 argument");
-    ray_retain(args[0]);
-    return args[0];
+    ray_t* a = args[0];
+    if (a->type == -RAY_SYM && !(a->attrs & ATTR_QUOTED)) {
+        ray_t* q = ray_sym(a->i64);
+        if (RAY_IS_ERR(q)) return q;
+        q->attrs |= ATTR_QUOTED;
+        return q;
+    }
+    ray_retain(a);
+    return a;
 }
 
 /* (return) | (return x) — early exit from enclosing compiled lambda.
