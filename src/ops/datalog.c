@@ -3458,8 +3458,8 @@ static bool dl_is_triple_pattern(ray_t* clause) {
     if (ce[0]->type == -RAY_I64) return true;
     if (dl_is_wildcard(ce[0]) && ce[1]->type == -RAY_SYM && !is_dl_var(ce[1]))
         return true;  /* _ is always wildcard -- reserved, never a predicate */
-    /* Quoted symbol (no RAY_ATTR_NAME) in position 0 + non-var symbol in position 1 */
-    if (ce[0]->type == -RAY_SYM && !(ce[0]->attrs & RAY_ATTR_NAME)) {
+    /* Quoted symbol (no ATTR_QUOTED) in position 0 + non-var symbol in position 1 */
+    if (ce[0]->type == -RAY_SYM && !(ce[0]->attrs & ATTR_QUOTED)) {
         if (ce[1]->type == -RAY_SYM && !is_dl_var(ce[1]))
             return true;
     }
