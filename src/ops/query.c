@@ -3934,8 +3934,9 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
 }
 
 /* Walk `expr` and collect column-name symbols (unflagged name-ref atoms,
- * ATTR_QUOTED clear, that resolve to a real column in `tbl`).  Also follows the head of dotted
- * names so a `Timestamp.date` reference contributes its base column.
+ * ATTR_QUOTED clear, that resolve to a real column in `tbl`).  Also follows
+ * the head of dotted names so a `Timestamp.date` reference contributes its
+ * base column.
  * `out_syms` is treated as an append-only set (dedup against existing
  * entries) up to `max_out`; returns the new count.  Used to determine
  * the subset of input columns the rest of a (select …) clause actually
