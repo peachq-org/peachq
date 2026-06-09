@@ -2967,6 +2967,19 @@ ray_t* ray_eval(ray_t* obj) {
             /* env_resolve hands back an owned ref; no extra retain. */
             ret = val; goto out;
         }
+        /* Literal symbol (ATTR_QUOTED set).  Inside a query, a literal that
+         * names a from-table COLUMN resolves to that column (B3 Part 2).  We
+         * consult ONLY the active query table's column set — never the env
+         * scope chain — so a literal never captures a lambda/let local, and
+         * the rule fires only while a query is active (ray_active_query_table
+         * is NULL otherwise).  A literal naming no column returns itself. */
+        if (obj->type == -RAY_SYM) {
+            ray_t* qt = ray_active_query_table();
+            if (qt && qt->type == RAY_TABLE) {
+                ray_t* col = ray_table_get_col(qt, obj->i64);
+                if (col) { ray_retain(col); ret = col; goto out; }
+            }
+        }
         ray_retain(obj);
         ret = obj; goto out;
     }

@@ -863,6 +863,14 @@ ray_op_t* ray_graph_input_vec(ray_graph_t* g, ray_t* vec);
 ray_t*    ray_lazy_wrap(ray_graph_t* g, ray_op_t* op);
 ray_t*    ray_lazy_append(ray_t* lazy, uint16_t opcode);
 
+/* Active query from-table during tree-walk evaluation of query expressions
+ * (B3 Part 2).  Set by bind_all_columns while a query's columns are mounted
+ * in the local env, cleared/restored on scope pop.  The evaluator consults
+ * this — and ONLY this — to resolve a literal symbol to a from-table column,
+ * so a literal never captures a lambda/let local and resolution fires only
+ * inside a query.  Returns NULL when no query is active. */
+ray_t* ray_active_query_table(void);
+
 #ifdef __cplusplus
 }
 #endif
