@@ -206,7 +206,12 @@ static ray_t* parse_number(ray_parser_t *p) {
          * `0Ns` as the empty symbol so legacy literal text stays
          * accepted; new code should write `'` (parse_symbol below)
          * for the same value. */
-        case 's': p->pos += 3; return ray_sym(0);
+        case 's': {
+            p->pos += 3;
+            ray_t* s = ray_sym(0);  /* 0Ns is the literal empty symbol (legacy spelling of ') */
+            if (!RAY_IS_ERR(s)) s->attrs |= ATTR_QUOTED;
+            return s;
+        }
         }
         /* Bare 0N: only if the next char is not an identifier continuation
          * (letter/digit/underscore), else fall through to plain number. */
@@ -407,7 +412,9 @@ static ray_t* parse_symbol(ray_parser_t *p) {
      * a typed null.  SYM columns are no-null by design. */
     if (*p->pos == 0 || *p->pos == ' ' || *p->pos == '\t' || *p->pos == '\n' ||
         *p->pos == ')' || *p->pos == ']' || *p->pos == '}') {
-        return ray_sym(0);
+        ray_t* s = ray_sym(0);
+        if (!RAY_IS_ERR(s)) s->attrs |= ATTR_QUOTED;   /* bare ' is a literal symbol */
+        return s;
     }
 
     /* Char literal: 'X' or '\n' etc. */
@@ -456,9 +463,10 @@ static ray_t* parse_symbol(ray_parser_t *p) {
     while (PA(*p->pos) == PA_ALPHA || PA(*p->pos) == PA_DIGIT || *p->pos == '_' || *p->pos == '.')
         p->pos++;
     size_t len = (size_t)(p->pos - start);
-    if (len == 0) return ray_sym(0);  /* empty symbol — sym 0 */
-    int64_t id = ray_sym_intern(start, len);
-    return ray_sym(id);
+    int64_t id = (len == 0) ? 0 : ray_sym_intern(start, len);  /* empty symbol — sym 0 */
+    ray_t* s = ray_sym(id);
+    if (!RAY_IS_ERR(s)) s->attrs |= ATTR_QUOTED;   /* 'x is a literal symbol */
+    return s;
 }
 
 /* ── Name parsing ── */
@@ -480,10 +488,10 @@ static ray_t* parse_name(ray_parser_t *p) {
     if (len == 5 && memcmp(start, "false", 5) == 0) return ray_bool(false);
     /* null is handled as a name that resolves to NULL at eval time */
 
-    /* Return as name symbol (with ATTR_QUOTED flag) */
+    /* Return as name symbol — a bare identifier is a name reference:
+     * the unflagged default (ATTR_QUOTED CLEAR). */
     int64_t id = ray_sym_intern_runtime(start, len);
     ray_t* s = ray_sym(id);
-    if (!RAY_IS_ERR(s)) s->attrs |= ATTR_QUOTED;
     return s;
 }
 
@@ -521,7 +529,7 @@ static ray_t* parse_vector(ray_parser_t *p) {
     }
 
     /* Determine element types.
-     * Name references (ATTR_QUOTED) must stay as boxed atoms because
+     * Name references (the unflagged default, ATTR_QUOTED clear) must stay as boxed atoms because
      * the evaluator, compiler, and fn-builder dereference them as ray_t*. */
     int8_t first_type = elems[0]->type;
     bool homogeneous = true;
@@ -531,9 +539,8 @@ static ray_t* parse_vector(ray_parser_t *p) {
 
     for (int32_t i = 0; i < count; i++) {
         /* Inside [...], names are symbol literals, not variable references */
-        if (elems[i]->attrs & ATTR_QUOTED) {
-            elems[i]->attrs &= ~ATTR_QUOTED;
-            /* type is already -RAY_SYM from parse_expr */
+        if (elems[i]->type == -RAY_SYM) {
+            elems[i]->attrs |= ATTR_QUOTED;   /* names inside [...] are literal symbols */
         }
         if (i == 0) continue;
         int8_t t = elems[i]->type;
@@ -805,6 +812,7 @@ static ray_t* parse_expr(ray_parser_t *p) {
             if (klen == 0) { result = ray_error("parse", "empty keyword"); break; }
             int64_t kid = ray_sym_intern_runtime(kstart, klen);
             result = ray_sym(kid);
+            if (!RAY_IS_ERR(result)) result->attrs |= ATTR_QUOTED;  /* :name is a literal symbol (like 'name) */
             break;
         }
         default:        result = parse_name(p); break;  /* operators like +, *, etc. */
@@ -865,7 +873,7 @@ static ray_t* parse_source(ray_parser_t *p) {
         return ray_error("oom", NULL);
     }
     do_sym->type = -RAY_SYM;
-    do_sym->attrs = ATTR_QUOTED;
+    do_sym->attrs = 0;   /* the `do` head is a name reference that resolves to the do special form */
     do_sym->i64 = ray_sym_intern("do", 2);
     elems[0] = do_sym;
     for (int32_t i = 0; i < count; i++)
