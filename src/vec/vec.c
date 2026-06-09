@@ -118,12 +118,12 @@ static inline void vec_drop_index_inplace(ray_t* v) {
          * the other holder. */
         ray_index_retain_saved(ix);
     }
-    memcpy(v->aux, ix->saved_nullmap, 16);
+    memcpy(v->aux, ix->saved_aux, 16);
     if (!shared) {
         /* Sole owner: about to release idx, so neutralize its snapshot
          * to prevent ray_index_release_saved from double-releasing the
          * pointers we just transferred to v. */
-        memset(ix->saved_nullmap, 0, 16);
+        memset(ix->saved_aux, 0, 16);
         ix->saved_attrs = 0;
     }
     v->attrs &= (uint8_t)~RAY_ATTR_HAS_INDEX;
