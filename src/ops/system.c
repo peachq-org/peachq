@@ -608,7 +608,10 @@ ray_t* ray_setenv_fn(ray_t* name, ray_t* val) {
  * timer, env, internals, memstat, sysinfo
  * ══════════════════════════════════════════ */
 
-/* (quote expr) -- special form, returns argument unevaluated */
+/* (quote expr) -- special form, returns argument unevaluated.
+ * Pure pass-through: it relies on the unflagged-name-ref default
+ * (ATTR_QUOTED clear) so `(quote x)` hands the bare name `x` straight
+ * back, and `x` still resolves as a name reference at eval. */
 ray_t* ray_quote_fn(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", "quote expects 1 argument");
     ray_retain(args[0]);

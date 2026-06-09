@@ -256,8 +256,8 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
      * so (de (ser 0Nl)) roundtrips instead of decoding as plain 0. */
     if (type < 0) {
         uint8_t aflags = (uint8_t)(obj->nullmap[0] & 1);
-        if (type == -RAY_SYM && (obj->attrs & RAY_ATTR_NAME))
-            aflags |= RAY_ATTR_NAME;
+        if (type == -RAY_SYM && (obj->attrs & ATTR_QUOTED))
+            aflags |= ATTR_QUOTED;
         buf[0] = aflags;
         buf++;
         int8_t base = -type;
@@ -565,8 +565,8 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
             if (is_null) return ray_typed_null(type);
             int64_t id = ray_sym_intern((const char*)buf, slen);
             ray_t* s = ray_sym(id);
-            if (s && !RAY_IS_ERR(s) && (aflags & RAY_ATTR_NAME))
-                s->attrs |= RAY_ATTR_NAME;
+            if (s && !RAY_IS_ERR(s) && (aflags & ATTR_QUOTED))
+                s->attrs |= ATTR_QUOTED;
             return s;
         }
         case RAY_STR: {
