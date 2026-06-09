@@ -782,7 +782,7 @@ static void ray_detach_owned_refs(ray_t* v) {
         case RAY_IDX_BLOOM: ix->u.bloom.bits = NULL; break;
         default: break;
         }
-        memset(ix->saved_nullmap, 0, 16);
+        memset(ix->saved_aux, 0, 16);
         ix->saved_attrs = 0;
         return;
     }
