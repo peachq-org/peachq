@@ -1718,7 +1718,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
 /* ray_type_name moved to internal.h */
 
 ray_t* ray_type_fn(ray_t* val) {
-    if (!val || RAY_IS_NULL(val)) return ray_sym(ray_sym_intern("null", 4));
+    RAY_ASSERT_VALUE(val);
+    if (RAY_IS_NULL(val)) return ray_sym(ray_sym_intern("null", 4));
     const char* name = ray_type_name(val->type);
     int64_t id = ray_sym_intern(name, strlen(name));
     return ray_sym(id);
@@ -1986,7 +1987,8 @@ ray_t* ray_dict_fn(ray_t* keys, ray_t* vals) {
 
 /* (nil? x) -> true if x is null */
 ray_t* ray_nil_fn(ray_t* x) {
-    if (!x || RAY_IS_NULL(x)) return ray_bool(true);
+    RAY_ASSERT_VALUE(x);
+    if (RAY_IS_NULL(x)) return ray_bool(true);
     if (ray_is_atom(x) && RAY_ATOM_IS_NULL(x)) return ray_bool(true);
     return ray_bool(false);
 }
@@ -2114,6 +2116,9 @@ static inline uint64_t hash_i64(int64_t v) {
  * Uses the canonical wyhash helpers from ops/hash.h, same as the
  * pivot / datalog / join hashers. */
 static uint64_t atom_hash(ray_t* a) {
+    /* List-element position: elements may be a bare C NULL (ray_list_set stores
+     * NULL unretained; ray_list_get is out-of-range), mirroring atom_eq's
+     * C-NULL-tolerant element handling — so keep the !a guard, not RAY_ASSERT_VALUE. */
     if (!a || RAY_ATOM_IS_NULL(a)) return 0;
     if (is_numeric(a)) return ray_hash_f64(as_f64(a));
     switch (a->type) {
