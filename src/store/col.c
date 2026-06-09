@@ -564,7 +564,7 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
         if (vec->attrs & RAY_ATTR_HAS_INDEX) {
             ray_index_t* ix = ray_index_payload(vec->index);
             header.attrs &= ~RAY_ATTR_HAS_INDEX;
-            memcpy(header.aux, ix->saved_nullmap, 16);
+            memcpy(header.aux, ix->saved_aux, 16);
         }
 
         /* HAS_LINK rebase: target sym ID lives at header.aux[8..15],
