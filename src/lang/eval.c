@@ -2934,8 +2934,8 @@ ray_t* ray_eval(ray_t* obj) {
 
     /* Atoms: return themselves (retain) */
     if (ray_is_atom(obj)) {
-        /* Name reference: resolve from env */
-        if (obj->type == -RAY_SYM && (obj->attrs & ATTR_QUOTED)) {
+        /* Name reference: resolve from env (unflagged default; ATTR_QUOTED clear) */
+        if (obj->type == -RAY_SYM && !(obj->attrs & ATTR_QUOTED)) {
             /* Check for null keyword — compare by string, not cached sym_id,
              * because sym table may be reinitialized between test runs */
             {

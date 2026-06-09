@@ -809,7 +809,7 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
      * / let bindings and takes precedence so formals shadow columns
      * naturally.  Global env is a last resort — it catches cases
      * like `(set threshold 50)` used inside a lambda body. */
-    if (expr->type == -RAY_SYM && (expr->attrs & ATTR_QUOTED)) {
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED)) {
         ray_op_t* bound = cexpr_env_lookup(g, expr->i64);
         if (bound) return bound;
         ray_t* s = ray_sym_str(expr->i64);
@@ -872,7 +872,7 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         return ray_scan(g, ray_str_ptr(s));
     }
 
-    /* Symbol literal (no ATTR_QUOTED) → const atom node. */
+    /* Symbol literal (ATTR_QUOTED set; name refs handled above) → const atom node. */
     if (expr->type == -RAY_SYM)
         return ray_const_atom(g, expr);
 
@@ -958,7 +958,7 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
          * branch: local cexpr_env > table columns > globals.  A
          * column named `f` isn't callable, but we still must honor
          * shadowing so the exec-time error is consistent. */
-        if (head->type == -RAY_SYM && (head->attrs & ATTR_QUOTED) &&
+        if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED) &&
             cexpr_env_lookup(g, head->i64) == NULL &&
             !(g->table && g->table->type == RAY_TABLE &&
               ray_table_get_col(g->table, head->i64))) {
@@ -1354,7 +1354,7 @@ static int is_agg_expr(ray_t* expr);  /* defined below */
  * an agg" pattern users actually write. */
 static int expr_refs_row_column(ray_t* expr, ray_t* tbl) {
     if (!expr) return 0;
-    if (expr->type == -RAY_SYM && (expr->attrs & ATTR_QUOTED)) {
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED)) {
         if (ray_table_get_col(tbl, expr->i64)) return 1;
         /* Dotted name whose head is a column is a row-aligned ref —
          * `Timestamp.ss` flows through row-by-row the same as plain
@@ -1446,7 +1446,7 @@ static int is_group_dag_agg_expr(ray_t* expr) {
 
 static int is_single_group_key_projection(ray_t* by_expr, ray_t* val_expr) {
     int64_t key_id = -1;
-    if (by_expr && by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED)) {
+    if (by_expr && by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED)) {
         key_id = by_expr->i64;
     } else if (by_expr && by_expr->type == RAY_SYM && ray_len(by_expr) == 1) {
         key_id = ((int64_t*)ray_data(by_expr))[0];
@@ -1455,7 +1455,7 @@ static int is_single_group_key_projection(ray_t* by_expr, ray_t* val_expr) {
     return key_id >= 0 &&
            val_expr &&
            val_expr->type == -RAY_SYM &&
-           (val_expr->attrs & ATTR_QUOTED) &&
+           !(val_expr->attrs & ATTR_QUOTED) &&
            val_expr->i64 == key_id;
 }
 
@@ -1468,14 +1468,15 @@ static int is_strlen_name_expr(ray_t* expr, int64_t* out_sym) {
         memcmp(ray_str_ptr(head), "strlen", 6) != 0)
         return 0;
     ray_t* arg = elems[1];
-    if (!arg || arg->type != -RAY_SYM || !(arg->attrs & ATTR_QUOTED))
+    if (!arg || arg->type != -RAY_SYM || (arg->attrs & ATTR_QUOTED))
         return 0;
     if (out_sym) *out_sym = arg->i64;
     return 1;
 }
 
 static int atom_i64_const(ray_t* v, int64_t* out) {
-    if (!v || !ray_is_atom(v) || (v->attrs & ATTR_QUOTED) ||
+    if (!v || !ray_is_atom(v) ||
+        (v->type == -RAY_SYM && !(v->attrs & ATTR_QUOTED)) ||
         RAY_ATOM_IS_NULL(v))
         return 0;
     switch (v->type) {
@@ -1493,7 +1494,7 @@ static int atom_i64_const(ray_t* v, int64_t* out) {
 
 static int expr_affine_of_sym(ray_t* expr, int64_t sym, int64_t* bias) {
     if (!expr) return 0;
-    if (expr->type == -RAY_SYM && (expr->attrs & ATTR_QUOTED) &&
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED) &&
         expr->i64 == sym) {
         *bias = 0;
         return 1;
@@ -1505,9 +1506,9 @@ static int expr_affine_of_sym(ray_t* expr, int64_t sym, int64_t* bias) {
     if (!op || ray_str_len(op) != 1) return 0;
     char opc = ray_str_ptr(op)[0];
     int lhs_sym = e[1] && e[1]->type == -RAY_SYM &&
-                  (e[1]->attrs & ATTR_QUOTED) && e[1]->i64 == sym;
+                  !(e[1]->attrs & ATTR_QUOTED) && e[1]->i64 == sym;
     int rhs_sym = e[2] && e[2]->type == -RAY_SYM &&
-                  (e[2]->attrs & ATTR_QUOTED) && e[2]->i64 == sym;
+                  !(e[2]->attrs & ATTR_QUOTED) && e[2]->i64 == sym;
     int64_t c = 0;
     if (opc == '+') {
         if (lhs_sym && atom_i64_const(e[2], &c)) {
@@ -1557,9 +1558,10 @@ static bool parse_gt_name_i64(ray_t* expr, int64_t* out_name, int64_t* out_thres
     ray_t* op = ray_sym_str(e[0]->i64);
     if (!op || ray_str_len(op) != 1 || ray_str_ptr(op)[0] != '>')
         return false;
-    if (!e[1] || e[1]->type != -RAY_SYM || !(e[1]->attrs & ATTR_QUOTED))
+    if (!e[1] || e[1]->type != -RAY_SYM || (e[1]->attrs & ATTR_QUOTED))
         return false;
-    if (!e[2] || !ray_is_atom(e[2]) || (e[2]->attrs & ATTR_QUOTED))
+    if (!e[2] || !ray_is_atom(e[2]) ||
+        (e[2]->type == -RAY_SYM && !(e[2]->attrs & ATTR_QUOTED)))
         return false;
     int64_t threshold;
     switch (e[2]->type) {
@@ -1580,7 +1582,7 @@ static bool parse_gt_name_i64(ray_t* expr, int64_t* out_name, int64_t* out_thres
 static bool can_defer_single_key_where(ray_t* by_expr, ray_t* where_expr,
                                        ray_t* tbl) {
     if (!by_expr || !where_expr || !tbl ||
-        by_expr->type != -RAY_SYM || !(by_expr->attrs & ATTR_QUOTED) ||
+        by_expr->type != -RAY_SYM || (by_expr->attrs & ATTR_QUOTED) ||
         where_expr->type != RAY_LIST || ray_len(where_expr) != 3)
         return false;
 
@@ -1601,15 +1603,16 @@ static bool can_defer_single_key_where(ray_t* by_expr, ray_t* where_expr,
     ray_t* lhs = e[1];
     ray_t* rhs = e[2];
     bool lhs_key = lhs && lhs->type == -RAY_SYM &&
-                   (lhs->attrs & ATTR_QUOTED) &&
+                   !(lhs->attrs & ATTR_QUOTED) &&
                    lhs->i64 == by_expr->i64;
     bool rhs_key = rhs && rhs->type == -RAY_SYM &&
-                   (rhs->attrs & ATTR_QUOTED) &&
+                   !(rhs->attrs & ATTR_QUOTED) &&
                    rhs->i64 == by_expr->i64;
     if (lhs_key == rhs_key) return false;
 
     ray_t* atom = lhs_key ? rhs : lhs;
-    if (!atom || !ray_is_atom(atom) || (atom->attrs & ATTR_QUOTED) ||
+    if (!atom || !ray_is_atom(atom) ||
+        (atom->type == -RAY_SYM && !(atom->attrs & ATTR_QUOTED)) ||
         RAY_ATOM_IS_NULL(atom))
         return false;
 
@@ -1919,7 +1922,7 @@ static bool simplify_agg_idiom(ray_t* val_expr, ray_t* tbl,
 
     /* Null-free precondition: col_expr must be a column ref naming a
      * null-free col of tbl.  Mirrors idiom.c:pre_no_nulls_on_asc_input. */
-    if (!col_expr || col_expr->type != -RAY_SYM || !(col_expr->attrs & ATTR_QUOTED))
+    if (!col_expr || col_expr->type != -RAY_SYM || (col_expr->attrs & ATTR_QUOTED))
         return false;
     ray_t* col = ray_table_get_col(tbl, col_expr->i64);
     if (!col || (col->attrs & RAY_ATTR_HAS_NULLS)) return false;
@@ -1959,7 +1962,7 @@ static ray_t* match_count_distinct(ray_t* expr) {
 static int collect_col_refs(ray_t* expr, ray_t* tbl,
                             int64_t* out_syms, int max_out, int n) {
     if (!expr || n >= max_out) return n;
-    if (expr->type == -RAY_SYM && (expr->attrs & ATTR_QUOTED)) {
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED)) {
         int64_t want = -1;
         if (ray_table_get_col(tbl, expr->i64)) {
             want = expr->i64;
@@ -2331,7 +2334,7 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
     /* Resolve the source column: either a direct column ref (no copy)
      * or a full-table eval of the sub-expression. */
     ray_t* src = NULL;
-    if (col_expr->type == -RAY_SYM && (col_expr->attrs & ATTR_QUOTED)) {
+    if (col_expr->type == -RAY_SYM && !(col_expr->attrs & ATTR_QUOTED)) {
         src = ray_table_get_col(tbl, col_expr->i64);
         if (src) ray_retain(src);
     }
@@ -2438,7 +2441,7 @@ static ray_t* aggr_med_per_group_buf(ray_t* expr, ray_t* tbl,
     ray_t* col_expr = elems[1];
 
     ray_t* src = NULL;
-    if (col_expr->type == -RAY_SYM && (col_expr->attrs & ATTR_QUOTED)) {
+    if (col_expr->type == -RAY_SYM && !(col_expr->attrs & ATTR_QUOTED)) {
         src = ray_table_get_col(tbl, col_expr->i64);
         if (src) ray_retain(src);
     }
@@ -2728,7 +2731,7 @@ static ray_t* try_count_distinct_v2_rewrite(
     int64_t K_syms[15];  /* leave room for X in the composite */
     int n_K = 0;
     if (by_expr && by_expr->type == -RAY_SYM &&
-        (by_expr->attrs & ATTR_QUOTED)) {
+        !(by_expr->attrs & ATTR_QUOTED)) {
         K_syms[n_K++] = by_expr->i64;
     } else if (by_expr && by_expr->type == RAY_DICT) {
         DICT_VIEW_DECL(byv);
@@ -2738,7 +2741,7 @@ static ray_t* try_count_distinct_v2_rewrite(
         if (pairs == 0 || pairs > 15) return NULL;
         for (int64_t i = 0; i < pairs; i++) {
             ray_t* v = byv[i * 2 + 1];
-            if (!v || v->type != -RAY_SYM || !(v->attrs & ATTR_QUOTED))
+            if (!v || v->type != -RAY_SYM || (v->attrs & ATTR_QUOTED))
                 return NULL;  /* non-column-ref value — out of scope */
             K_syms[n_K++] = v->i64;
         }
@@ -2772,26 +2775,26 @@ static ray_t* try_count_distinct_v2_rewrite(
             continue;
         }
         if (kid == asc_id) {
-            if (val && val->type == -RAY_SYM && (val->attrs & ATTR_QUOTED))
+            if (val && val->type == -RAY_SYM && !(val->attrs & ATTR_QUOTED))
                 asc_col_sym = val->i64;
             else return NULL;
             continue;
         }
         if (kid == desc_id) {
-            if (val && val->type == -RAY_SYM && (val->attrs & ATTR_QUOTED))
+            if (val && val->type == -RAY_SYM && !(val->attrs & ATTR_QUOTED))
                 desc_col_sym = val->i64;
             else return NULL;
             continue;
         }
         ray_t* cd_inner = match_count_distinct(val);
         if (cd_inner && cd_inner->type == -RAY_SYM &&
-            (cd_inner->attrs & ATTR_QUOTED))
+            !(cd_inner->attrs & ATTR_QUOTED))
         {
             cd_X_sym = cd_inner->i64;
             cd_c_sym = kid;
             n_cd++;
         } else if (val && val->type == -RAY_SYM &&
-                   (val->attrs & ATTR_QUOTED)) {
+                   !(val->attrs & ATTR_QUOTED)) {
             /* identity key projection (e.g. {K: K} or one element of a
              * multi-key dict) — accepted iff the referenced column is
              * one of the by keys. */
@@ -2968,7 +2971,7 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
      * or a full-table eval of the inner sub-expression. */
     ray_t* src = NULL;
     if (inner_expr && inner_expr->type == -RAY_SYM &&
-        (inner_expr->attrs & ATTR_QUOTED)) {
+        !(inner_expr->attrs & ATTR_QUOTED)) {
         src = ray_table_get_col(tbl, inner_expr->i64);
         if (src) ray_retain(src);
     }
@@ -3194,7 +3197,7 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
 
     ray_t* src = NULL;
     if (inner_expr && inner_expr->type == -RAY_SYM &&
-        (inner_expr->attrs & ATTR_QUOTED)) {
+        !(inner_expr->attrs & ATTR_QUOTED)) {
         src = ray_table_get_col(tbl, inner_expr->i64);
         if (src) ray_retain(src);
     }
@@ -3433,13 +3436,14 @@ static void rgid_probe_fn(void* ctx_, uint32_t worker_id,
  * by the all-literal pre-check so we don't half-apply a partial set of
  * broadcasts and then have to roll back.
  *
- * `ATTR_QUOTED` distinguishes `m2: m` (the SYM `m` references a
- * column) from `one: 1` (the I64 literal 1).  Without that filter we'd
+ * A name reference (unflagged -RAY_SYM, ATTR_QUOTED clear) distinguishes
+ * `m2: m` (the SYM `m` references a column) from `one: 1` (the I64 literal
+ * 1) and from `lit: 'm` (a quoted/literal symbol).  Without that filter we'd
  * eagerly broadcast the column reference and skip the per-group gather
  * the chained passthrough relies on. */
 static int can_atom_broadcast(ray_t* a) {
     if (!a || !ray_is_atom(a)) return 0;
-    if (a->attrs & ATTR_QUOTED) return 0;
+    if (a->type == -RAY_SYM && !(a->attrs & ATTR_QUOTED)) return 0;
     int8_t vt = (int8_t)(-a->type);
     switch (vt) {
     case RAY_BOOL: case RAY_U8:
@@ -3741,15 +3745,17 @@ static int try_count_simple_compare(ray_t* tbl, ray_t* where_expr, int64_t* out_
 
     ray_t* col_expr = we[1];
     ray_t* rhs_expr = we[2];
-    if (col_expr && ray_is_atom(col_expr) && !(col_expr->attrs & ATTR_QUOTED) &&
-        rhs_expr && rhs_expr->type == -RAY_SYM && (rhs_expr->attrs & ATTR_QUOTED)) {
+    if (col_expr && ray_is_atom(col_expr) &&
+        !(col_expr->type == -RAY_SYM && !(col_expr->attrs & ATTR_QUOTED)) &&
+        rhs_expr && rhs_expr->type == -RAY_SYM && !(rhs_expr->attrs & ATTR_QUOTED)) {
         col_expr = we[2];
         rhs_expr = we[1];
         op = count_cmp_flip(op);
     }
-    if (!col_expr || col_expr->type != -RAY_SYM || !(col_expr->attrs & ATTR_QUOTED))
+    if (!col_expr || col_expr->type != -RAY_SYM || (col_expr->attrs & ATTR_QUOTED))
         return 0;
-    if (!rhs_expr || !ray_is_atom(rhs_expr) || (rhs_expr->attrs & ATTR_QUOTED) ||
+    if (!rhs_expr || !ray_is_atom(rhs_expr) ||
+        (rhs_expr->type == -RAY_SYM && !(rhs_expr->attrs & ATTR_QUOTED)) ||
         RAY_ATOM_IS_NULL(rhs_expr))
         return 0;
 
@@ -3927,8 +3933,8 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
     return ray_i64(nrows);
 }
 
-/* Walk `expr` and collect column-name symbols (ATTR_QUOTED atoms that
- * resolve to a real column in `tbl`).  Also follows the head of dotted
+/* Walk `expr` and collect column-name symbols (unflagged name-ref atoms,
+ * ATTR_QUOTED clear, that resolve to a real column in `tbl`).  Also follows the head of dotted
  * names so a `Timestamp.date` reference contributes its base column.
  * `out_syms` is treated as an append-only set (dedup against existing
  * entries) up to `max_out`; returns the new count.  Used to determine
@@ -3937,7 +3943,7 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
 static int collect_col_refs_set(ray_t* expr, ray_t* tbl,
                                 int64_t* out_syms, int max_out, int n) {
     if (!expr || n >= max_out) return n;
-    if (expr->type == -RAY_SYM && (expr->attrs & ATTR_QUOTED)) {
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED)) {
         int64_t want = -1;
         if (ray_table_get_col(tbl, expr->i64)) {
             want = expr->i64;
@@ -4181,7 +4187,7 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                     kid == nearest_id) continue;
                 if (kid == asc_id || kid == desc_id) {
                     uint8_t is_desc = (kid == desc_id) ? 1 : 0;
-                    if (v && v->type == -RAY_SYM && (v->attrs & ATTR_QUOTED)) {
+                    if (v && v->type == -RAY_SYM && !(v->attrs & ATTR_QUOTED)) {
                         if (n_sort_keys >= 16) { bad_clause = 1; break; }
                         sort_key_syms[n_sort_keys] = v->i64;
                         sort_descs[n_sort_keys] = is_desc;
@@ -4211,7 +4217,7 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                  * column.  The dict key is the alias the result publishes;
                  * the value names the source column to gather from. */
                 if (n_out_syms >= 255) { bad_clause = 1; break; }
-                if (v && v->type == -RAY_SYM && (v->attrs & ATTR_QUOTED)) {
+                if (v && v->type == -RAY_SYM && !(v->attrs & ATTR_QUOTED)) {
                     ray_t* oc = ray_table_get_col(tbl, v->i64);
                     if (!oc) { bad_clause = 1; break; }
                     int8_t ot = oc->type;
@@ -4332,7 +4338,7 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                 dep_candidate = false;
                 break;
             }
-            if (v && v->type == -RAY_SYM && (v->attrs & ATTR_QUOTED)) {
+            if (v && v->type == -RAY_SYM && !(v->attrs & ATTR_QUOTED)) {
                 if (base_sym < 0) {
                     base_sym = v->i64;
                     base_key_name = k->i64;
@@ -4700,7 +4706,7 @@ by_dict_done:
          * Multi-key cases (len > 1) only fire if the multi path can pack
          * keys into ≤ 8 bytes total (composite int64 slot). */
         int single_key_scalar = by_expr && by_expr->type == -RAY_SYM
-                              && (by_expr->attrs & ATTR_QUOTED);
+                              && !(by_expr->attrs & ATTR_QUOTED);
         int multi_key_vec     = by_expr && by_expr->type == RAY_SYM
                               && ray_len(by_expr) >= 1
                               && ray_len(by_expr) <= 16;
@@ -4747,7 +4753,7 @@ by_dict_done:
                 ray_t* ae1 = ae[1];
                 int64_t agg_col_sym = -1;
                 int agg_strlen = 0;
-                if (ae1 && ae1->type == -RAY_SYM && (ae1->attrs & ATTR_QUOTED)) {
+                if (ae1 && ae1->type == -RAY_SYM && !(ae1->attrs & ATTR_QUOTED)) {
                     agg_col_sym = ae1->i64;
                 } else if ((aid == sum_sym || aid == avg_sym) &&
                            is_strlen_name_expr(ae1, &agg_col_sym)) {
@@ -5310,7 +5316,7 @@ by_dict_done:
          * read `by_expr->i64` directly, which is garbage when by_expr
          * is a vector — use by_key_sym instead. */
         int64_t by_key_sym = -1;
-        if (by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED))
+        if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED))
             by_key_sym = by_expr->i64;
         else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
             by_key_sym = ((int64_t*)ray_data(by_expr))[0];
@@ -5409,7 +5415,7 @@ by_dict_done:
          * compare for RAY_LIST). */
         if (!use_eval_group && any_nonagg) {
             int single_scalar_key = 0;
-            if (by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED)) {
+            if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED)) {
                 single_scalar_key = 1;
             } else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1) {
                 single_scalar_key = 1;
@@ -5717,7 +5723,7 @@ by_dict_done:
                         ray_t* agg_fn_name = agg_elems[0];
                         ray_t* agg_col_expr = agg_elems[1];
                         ray_t* src_col_val = NULL;
-                        if (agg_col_expr->type == -RAY_SYM && (agg_col_expr->attrs & ATTR_QUOTED)) {
+                        if (agg_col_expr->type == -RAY_SYM && !(agg_col_expr->attrs & ATTR_QUOTED)) {
                             src_col_val = ray_table_get_col(eval_tbl, agg_col_expr->i64);
                             if (src_col_val) ray_retain(src_col_val);
                         }
@@ -6228,7 +6234,7 @@ by_dict_done:
 
                     /* Resolve source column from filtered table */
                     ray_t* src_col_val = NULL;
-                    if (agg_col_expr->type == -RAY_SYM && (agg_col_expr->attrs & ATTR_QUOTED)) {
+                    if (agg_col_expr->type == -RAY_SYM && !(agg_col_expr->attrs & ATTR_QUOTED)) {
                         src_col_val = ray_table_get_col(eval_tbl, agg_col_expr->i64);
                         if (src_col_val) ray_retain(src_col_val);
                     }
@@ -6591,7 +6597,7 @@ by_dict_done:
             if (is_group_dag_agg_expr(expr)) continue;
             ray_t* cd_inner = match_count_distinct(expr);
             int is_simple_cd = cd_inner && cd_inner->type == -RAY_SYM &&
-                               (cd_inner->attrs & ATTR_QUOTED);
+                               !(cd_inner->attrs & ATTR_QUOTED);
             if (!is_simple_cd) { has_nonagg_needing_flat = 1; break; }
         }
 
@@ -6827,7 +6833,7 @@ by_dict_done:
                     no_where_emit.agg_index == 0 &&
                     no_where_emit.top_count_take > 0) {
                     int64_t ksym = -1;
-                    if (by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED))
+                    if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED))
                         ksym = by_expr->i64;
                     else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
                         ksym = ((int64_t*)ray_data(by_expr))[0];
@@ -7182,7 +7188,7 @@ by_dict_done:
              * return NULL for the non-existent "Timestamp.date" column and
              * the subsequent deref would crash. */
             int64_t key_sym = -1;
-            if (by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED)
+            if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED)
                 && !ray_sym_is_dotted(by_expr->i64))
                 key_sym = by_expr->i64;
             else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
@@ -7215,7 +7221,7 @@ by_dict_done:
                         int64_t ck_name = -1;
                         int64_t ck_full = -1;
                         int64_t ck_head = -1;
-                        if (by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED)) {
+                        if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED)) {
                             ck_full = by_expr->i64;
                             if (ray_sym_is_dotted(by_expr->i64)) {
                                 const int64_t* segs;
@@ -7227,7 +7233,7 @@ by_dict_done:
                         } else if (by_expr->type == RAY_LIST && by_expr->len >= 2) {
                             ray_t** be = (ray_t**)ray_data(by_expr);
                             for (int64_t i = by_expr->len - 1; i >= 1; i--) {
-                                if (be[i]->type == -RAY_SYM && (be[i]->attrs & ATTR_QUOTED)) {
+                                if (be[i]->type == -RAY_SYM && !(be[i]->attrs & ATTR_QUOTED)) {
                                     ck_name = be[i]->i64;
                                     break;
                                 }
@@ -7361,7 +7367,7 @@ by_dict_done:
                 int64_t ckey_name = -1;
                 int64_t ckey_full = -1;       /* full dotted sym, for collision fallback */
                 int64_t ckey_head = -1;       /* head segment of dotted expr (input column) */
-                if (by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED)) {
+                if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED)) {
                     ckey_full = by_expr->i64;
                     if (ray_sym_is_dotted(by_expr->i64)) {
                         const int64_t* segs;
@@ -7376,7 +7382,7 @@ by_dict_done:
                 } else if (by_expr->type == RAY_LIST && by_expr->len >= 2) {
                     ray_t** be = (ray_t**)ray_data(by_expr);
                     for (int64_t i = by_expr->len - 1; i >= 1; i--) {
-                        if (be[i]->type == -RAY_SYM && (be[i]->attrs & ATTR_QUOTED)) {
+                        if (be[i]->type == -RAY_SYM && !(be[i]->attrs & ATTR_QUOTED)) {
                             ckey_name = be[i]->i64;
                             break;
                         }
@@ -8164,7 +8170,7 @@ by_dict_done:
 
             /* Resolve key sym — gated to single scalar key above. */
             int64_t ks = -1;
-            if (by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED))
+            if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED))
                 ks = by_expr->i64;
             else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
                 ks = ((int64_t*)ray_data(by_expr))[0];
@@ -8511,11 +8517,11 @@ by_dict_done:
                     ray_t* cd_inner = match_count_distinct(nonagg_exprs[ni]);
                     int simple_cd_global = (cd_inner &&
                                             cd_inner->type == -RAY_SYM &&
-                                            (cd_inner->attrs & ATTR_QUOTED) &&
+                                            !(cd_inner->attrs & ATTR_QUOTED) &&
                                             n_groups > 50000);
                     int cd_streaming = 0;
                     if (cd_inner && cd_inner->type == -RAY_SYM &&
-                        (cd_inner->attrs & ATTR_QUOTED) &&
+                        !(cd_inner->attrs & ATTR_QUOTED) &&
                         n_groups >= 16 && n_groups <= 500 &&
                         nrows >= (1 << 20)) {
                         ray_t* sc = ray_table_get_col(tbl, cd_inner->i64);
@@ -8658,7 +8664,7 @@ by_dict_done:
                         ray_t* src_for_global = NULL;
                         int    src_owned = 0;
                         if (cd_inner->type == -RAY_SYM &&
-                            (cd_inner->attrs & ATTR_QUOTED)) {
+                            !(cd_inner->attrs & ATTR_QUOTED)) {
                             src_for_global = ray_table_get_col(tbl, cd_inner->i64);
                         }
                         if (src_for_global && n_groups > 50000) {
@@ -9994,8 +10000,8 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
     /* Detect calling convention: already-evaluated args (from upsert) vs raw parse tree */
     int already_eval = (tbl_raw && tbl_raw->type == RAY_TABLE);
 
-    if (!already_eval && tbl_raw && tbl_raw->type == -RAY_SYM && !(tbl_raw->attrs & ATTR_QUOTED)) {
-        /* Quoted symbol 'sym (no ATTR_QUOTED) — in-place insert */
+    if (!already_eval && tbl_raw && tbl_raw->type == -RAY_SYM && (tbl_raw->attrs & ATTR_QUOTED)) {
+        /* Quoted/literal symbol 'sym (ATTR_QUOTED set) — in-place insert */
         inplace_sym = tbl_raw->i64;
         tbl = ray_env_get(inplace_sym);
         if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
@@ -10385,7 +10391,7 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
     int already_eval = (tbl_raw && tbl_raw->type == RAY_TABLE);
     ray_t* tbl;
 
-    if (!already_eval && tbl_raw && tbl_raw->type == -RAY_SYM && !(tbl_raw->attrs & ATTR_QUOTED)) {
+    if (!already_eval && tbl_raw && tbl_raw->type == -RAY_SYM && (tbl_raw->attrs & ATTR_QUOTED)) {
         inplace_sym = tbl_raw->i64;
         tbl = ray_env_get(inplace_sym);
         if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
@@ -11321,8 +11327,8 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
                 /* (op col) aggregation form */
                 if (expr->type == RAY_LIST && expr->len >= 2) {
                     ray_t** ae = (ray_t**)ray_data(expr);
-                    if (!(ae[0]->type == -RAY_SYM && (ae[0]->attrs & ATTR_QUOTED))) continue;
-                    if (!(ae[1]->type == -RAY_SYM && (ae[1]->attrs & ATTR_QUOTED))) continue;
+                    if (!(ae[0]->type == -RAY_SYM && !(ae[0]->attrs & ATTR_QUOTED))) continue;
+                    if (!(ae[1]->type == -RAY_SYM && !(ae[1]->attrs & ATTR_QUOTED))) continue;
                     agg_names[n_agg]   = kname_id;
                     agg_ops[n_agg]     = resolve_agg_opcode(ae[0]->i64);
                     agg_src_ids[n_agg] = ae[1]->i64;
@@ -11331,7 +11337,7 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
                     continue;
                 }
                 /* Bare column reference — legacy map-group form, emitted as null column */
-                if (expr->type == -RAY_SYM && (expr->attrs & ATTR_QUOTED)) {
+                if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED)) {
                     agg_names[n_agg]   = kname_id;
                     agg_ops[n_agg]     = OP_MIN;
                     agg_src_ids[n_agg] = expr->i64;
