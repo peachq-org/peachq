@@ -188,10 +188,11 @@ static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
     if (code < 0) return -1;
 
     ray_t* lhs = elems[1];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & ATTR_QUOTED))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return -1;
     ray_t* rhs = elems[2];
-    if (!rhs || !ray_is_atom(rhs) || (rhs->attrs & ATTR_QUOTED))
+    if (!rhs || !ray_is_atom(rhs) ||
+        (rhs->type == -RAY_SYM && !(rhs->attrs & ATTR_QUOTED)))
         return -1;
 
     /* Resolve column type to gate ordering ops AND verify the column
@@ -228,7 +229,7 @@ static int fp_check_like(ray_t* expr, ray_t* tbl) {
         || memcmp(ray_str_ptr(op_sym), "like", 4) != 0)
         return 0;
     ray_t* lhs = elems[1];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & ATTR_QUOTED))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return 0;
     if (!fp_expr_const_str(elems[2])) return 0;
     if (tbl) {
@@ -256,9 +257,9 @@ static int fp_check_in(ray_t* expr, ray_t* tbl) {
         return 0;
     ray_t* lhs = elems[1];
     ray_t* rhs = elems[2];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & ATTR_QUOTED))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return 0;
-    if (!rhs || !ray_is_vec(rhs) || (rhs->attrs & ATTR_QUOTED))
+    if (!rhs || !ray_is_vec(rhs) || (rhs->attrs & RAY_ATTR_SORTED))
         return 0;
     if (ray_len(rhs) > 16) return 0;
     if (!fp_int_family(rhs->type)) return 0;
