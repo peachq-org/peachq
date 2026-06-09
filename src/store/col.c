@@ -91,7 +91,7 @@ static size_t col_str_pool_payload_len(const ray_t* vec);
 
 /* --------------------------------------------------------------------------
  * Column file format:
- *   Bytes 0-15:  nullmap union arm (atom flags / HAS_INDEX saved bytes)
+ *   Bytes 0-15:  aux union arm (atom flags / HAS_INDEX saved bytes)
  *   Bytes 16-31: mmod=0, order=0, type, attrs, rc=0, len
  *   Bytes 32+:   raw element data
  *
@@ -557,30 +557,30 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
         header.rc = (vec->type == RAY_SYM) ? ray_sym_count() : 0;
 
         /* HAS_INDEX rebase: an attached accelerator index displaces the
-         * 16-byte nullmap union with an index pointer.  Persist the
+         * 16-byte aux union with an index pointer.  Persist the
          * pre-attach state — strip HAS_INDEX and copy the saved bytes
          * back into the on-disk header.  Sentinels in the payload
          * carry the null state, so there is no bitmap to append. */
         if (vec->attrs & RAY_ATTR_HAS_INDEX) {
             ray_index_t* ix = ray_index_payload(vec->index);
             header.attrs &= ~RAY_ATTR_HAS_INDEX;
-            memcpy(header.nullmap, ix->saved_nullmap, 16);
+            memcpy(header.aux, ix->saved_nullmap, 16);
         }
 
-        /* HAS_LINK rebase: target sym ID lives at header.nullmap[8..15],
+        /* HAS_LINK rebase: target sym ID lives at header.aux[8..15],
          * but sym IDs are process-local — the on-disk file would be
          * useless across runs.  Strip the bit and zero the slot; the
          * sidecar `.link` file (written below after rename) carries the
          * target table name in text form for portable restoration. */
         if (vec->attrs & RAY_ATTR_HAS_LINK) {
             header.attrs &= (uint8_t)~RAY_ATTR_HAS_LINK;
-            memset(header.nullmap + 8, 0, 8);
+            memset(header.aux + 8, 0, 8);
         }
 
         /* Clear slice flag — slices are materialized on save. */
         header.attrs &= (uint8_t)~RAY_ATTR_SLICE;
         if (!(header.attrs & RAY_ATTR_HAS_NULLS))
-            memset(header.nullmap, 0, 16);
+            memset(header.aux, 0, 16);
 
         size_t written = fwrite(&header, 1, 32, f);
         if (written != 32) { fclose(f); remove(tmp_path); return RAY_ERR_IO; }

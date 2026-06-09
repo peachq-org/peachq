@@ -192,9 +192,9 @@ static ray_t* ray_index_alloc(ray_idx_kind_t kind, int8_t parent_type, int64_t p
 }
 
 /* --------------------------------------------------------------------------
- * Saved-nullmap retain / release
+ * Saved-aux retain / release
  *
- * The 16 byte snapshot preserves the parent's original nullmap-union bytes
+ * The 16 byte snapshot preserves the parent's original aux-union bytes
  * across attach/detach.  Since index attach is restricted to numeric
  * types (see prepare_attach), the snapshot contains either:
  *   - all-zero bytes (no link, no nulls), or
@@ -313,7 +313,7 @@ static ray_t* clone_index_block(ray_t* blk) {
 /* --------------------------------------------------------------------------
  * Zone scan -- compute min/max + null count
  *
- * Reads the parent vector before the nullmap is displaced.  Integer paths
+ * Reads the parent vector before the aux is displaced.  Integer paths
  * cover BOOL/U8/I16/I32/I64/DATE/TIME/TIMESTAMP (all stored in int slots);
  * float paths cover F32/F64.  RAY_SYM/STR/GUID return RAY_ERR_NYI for now;
  * those types will get string-aware min/max in the P4 zone work.
@@ -494,7 +494,7 @@ static ray_err_t chunk_zone_scan(ray_t* v, ray_index_t* ix) {
 /* --------------------------------------------------------------------------
  * Attach
  *
- * The 16-byte snapshot preserves the parent's nullmap-union bytes across
+ * The 16-byte snapshot preserves the parent's aux-union bytes across
  * the attachment so detach can restore them byte-for-byte.  For numeric
  * vectors (the only types that may attach) bytes 0-7 are unused and
  * bytes 8-15 carry link_target when HAS_LINK is set — no owned pointers
@@ -505,7 +505,7 @@ static ray_err_t chunk_zone_scan(ray_t* v, ray_index_t* ix) {
 static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
     ray_index_t* ix = ray_index_payload(idx);
     /* Snapshot the parent's 16 raw bytes verbatim. */
-    memcpy(ix->saved_nullmap, parent->nullmap, 16);
+    memcpy(ix->saved_nullmap, parent->aux, 16);
     ix->saved_attrs = parent->attrs & RAY_ATTR_HAS_NULLS;
 
     /* Install the index pointer — overwrites bytes 0-7 with the index ptr.
@@ -1043,9 +1043,9 @@ static ray_t* ray_index_attach_part(ray_t** vp) {
 /* --------------------------------------------------------------------------
  * Detach (drop)
  *
- * Restore the parent's 16-byte nullmap union from the saved snapshot, then
+ * Restore the parent's 16-byte aux union from the saved snapshot, then
  * release the index ray_t.  The release path of RAY_INDEX would otherwise
- * also try to release the saved-nullmap pointers, so we clear the saved
+ * also try to release the saved-aux pointers, so we clear the saved
  * snapshot and saved_attrs first to neutralize that — ownership is moving
  * back to the parent.
  * -------------------------------------------------------------------------- */
@@ -1075,7 +1075,7 @@ ray_t* ray_index_drop(ray_t** vp) {
     if (shared) {
         ray_index_retain_saved(ix);
     }
-    memcpy(v->nullmap, ix->saved_nullmap, 16);
+    memcpy(v->aux, ix->saved_nullmap, 16);
     if (!shared) {
         memset(ix->saved_nullmap, 0, 16);
         ix->saved_attrs = 0;
