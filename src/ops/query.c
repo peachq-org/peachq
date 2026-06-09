@@ -872,9 +872,20 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         return ray_scan(g, ray_str_ptr(s));
     }
 
-    /* Symbol literal (ATTR_QUOTED set; name refs handled above) → const atom node. */
-    if (expr->type == -RAY_SYM)
+    /* Symbol literal (ATTR_QUOTED set; name refs handled above).  Inside a
+     * query, a literal symbol that names a from-table COLUMN resolves to that
+     * column (B3 Part 2): we consult ONLY g->table's column set — never the
+     * local/global env — so a literal never captures a lambda/let local and
+     * the rule fires only when a query table is bound.  A literal naming no
+     * column stays a const atom node. */
+    if (expr->type == -RAY_SYM) {
+        if (g->table && g->table->type == RAY_TABLE &&
+            ray_table_get_col(g->table, expr->i64)) {
+            ray_t* s = ray_sym_str(expr->i64);
+            if (s) return ray_scan(g, ray_str_ptr(s));
+        }
         return ray_const_atom(g, expr);
+    }
 
     /* Other atom literal types → const atom node.  Also falls
      * through to here for typed null I64/F64/BOOL/STR atoms
@@ -1321,13 +1332,29 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
  * the matching ray_env_pop_scope releases them all at once.  Columns whose
  * names are reserved cannot occur for a real table column, so a rejected
  * bind is simply skipped. */
-static void bind_all_columns(ray_t* tbl) {
+/* Active query from-table for tree-walk literal-column resolution (B3
+ * Part 2).  bind_all_columns sets it (returning the previous value); each
+ * caller restores that saved value via `g_active_query_table = _aqt;`
+ * before every matching ray_env_pop_scope (including error returns).
+ * Column-membership scoped and query-only by construction — see
+ * ray_active_query_table. */
+static _Thread_local ray_t* g_active_query_table = NULL;
+
+ray_t* ray_active_query_table(void) { return g_active_query_table; }
+
+/* Mount columns AND publish `tbl` as the active query table; returns the
+ * previously-active table so the caller can restore it after the matching
+ * ray_env_pop_scope (sub-selects nest, so save/restore is required). */
+static ray_t* bind_all_columns(ray_t* tbl) {
+    ray_t* prev = g_active_query_table;
+    g_active_query_table = tbl;
     int64_t ncols = ray_table_ncols(tbl);
     for (int64_t c = 0; c < ncols; c++) {
         int64_t cn = ray_table_col_name(tbl, c);
         ray_t*  cv = ray_table_get_col_idx(tbl, c);
         if (cv) ray_env_set_local(cn, cv);
     }
+    return prev;
 }
 
 static int is_agg_expr(ray_t* expr);  /* defined below */
@@ -2057,6 +2084,14 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
 
     if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
 
+    /* B3 Part 2: publish `tbl` as the active query table so a literal
+     * column-name symbol inside `expr` resolves to its column during the
+     * tree-walk eval below (mirrors the DAG path's bind_all_columns).  Save
+     * the previous value and restore it before EVERY exit from this scope
+     * (including error returns), exactly as the bind_all_columns sites do. */
+    ray_t* _aqt = g_active_query_table;
+    g_active_query_table = tbl;
+
     ray_t* result = NULL;       /* typed vec OR list col */
     int direct_typed = 0;       /* non-zero → result is a typed vec */
     int8_t typed_t = 0;         /* atom type sentinel for the typed path */
@@ -2064,6 +2099,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
     for (int64_t gi = 0; gi < n_groups; gi++) {
         ray_t* idx_list = feeder(gi, fstate);
         if (!idx_list) {
+            g_active_query_table = _aqt;
             ray_env_pop_scope();
             if (result) ray_release(result);
             return ray_error("oom", NULL);
@@ -2071,6 +2107,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
         for (int i = 0; i < n_cols; i++) {
             ray_t* err = bind_col_slice(col_syms[i], cols[i], idx_list);
             if (err) {
+                g_active_query_table = _aqt;
                 ray_env_pop_scope();
                 if (result) ray_release(result);
                 return err;
@@ -2078,6 +2115,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
         }
         ray_t* cell = ray_eval(expr);
         if (!cell || RAY_IS_ERR(cell)) {
+            g_active_query_table = _aqt;
             ray_env_pop_scope();
             if (result) ray_release(result);
             return cell ? cell : ray_error("domain", NULL);
@@ -2092,6 +2130,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
         if (ray_is_lazy(cell)) {
             cell = ray_lazy_materialize(cell);
             if (!cell || RAY_IS_ERR(cell)) {
+                g_active_query_table = _aqt;
                 ray_env_pop_scope();
                 if (result) ray_release(result);
                 return cell ? cell : ray_error("domain", NULL);
@@ -2105,6 +2144,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
                 int8_t vt = (int8_t)(-t);
                 result = ray_vec_new(vt, n_groups);
                 if (!result || RAY_IS_ERR(result)) {
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope(); ray_release(cell);
                     return result ? result : ray_error("oom", NULL);
                 }
@@ -2121,6 +2161,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
             if (!collapsable) {
                 result = ray_alloc(n_groups * sizeof(ray_t*));
                 if (!result) {
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope(); ray_release(cell);
                     return ray_error("oom", NULL);
                 }
@@ -2140,6 +2181,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
                 ray_t* list_col = typed_vec_to_list(result, gi, n_groups);
                 ray_release(result);
                 if (RAY_IS_ERR(list_col)) {
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope(); ray_release(cell);
                     return list_col;
                 }
@@ -2154,6 +2196,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
         }
     }
 
+    g_active_query_table = _aqt;
     ray_env_pop_scope();
     return result;
 }
@@ -2219,6 +2262,14 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
 
     if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
 
+    /* B3 Part 2: publish `tbl` as the active query table so a literal
+     * column-name symbol inside `expr` resolves to its column during the
+     * tree-walk eval below (mirrors the DAG path's bind_all_columns).  Save
+     * the previous value and restore it before EVERY exit from this scope
+     * (including error returns), exactly as the bind_all_columns sites do. */
+    ray_t* _aqt = g_active_query_table;
+    g_active_query_table = tbl;
+
     ray_t* result = NULL;
     int direct_typed = 0;
     int8_t typed_t = 0;
@@ -2228,6 +2279,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
             int allocated = 0;
             ray_t* arg = collection_elem(cols[i], row, &allocated);
             if (!arg || RAY_IS_ERR(arg)) {
+                g_active_query_table = _aqt;
                 ray_env_pop_scope();
                 if (result) ray_release(result);
                 return arg ? arg : ray_error("domain", NULL);
@@ -2238,6 +2290,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
 
         ray_t* cell = ray_eval(expr);
         if (!cell || RAY_IS_ERR(cell)) {
+            g_active_query_table = _aqt;
             ray_env_pop_scope();
             if (result) ray_release(result);
             return cell ? cell : ray_error("domain", NULL);
@@ -2249,6 +2302,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
             if (collapsable) {
                 result = ray_vec_new((int8_t)-t, nrows);
                 if (!result || RAY_IS_ERR(result)) {
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope();
                     ray_release(cell);
                     return result ? result : ray_error("oom", NULL);
@@ -2267,6 +2321,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
             if (!collapsable) {
                 result = ray_alloc(nrows * sizeof(ray_t*));
                 if (!result) {
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope();
                     ray_release(cell);
                     return ray_error("oom", NULL);
@@ -2285,6 +2340,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
                 ray_t* list_col = typed_vec_to_list(result, row, nrows);
                 ray_release(result);
                 if (RAY_IS_ERR(list_col)) {
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope();
                     ray_release(cell);
                     return list_col;
@@ -2300,6 +2356,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
         }
     }
 
+    g_active_query_table = _aqt;
     ray_env_pop_scope();
     if (!result) {
         result = ray_alloc(0);
@@ -2341,8 +2398,9 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
     if (!src) {
         /* Bind table cols and eval — same pattern as the existing path. */
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        bind_all_columns(tbl);
+        ray_t* _aqt = bind_all_columns(tbl);
         src = ray_eval(col_expr);
+        g_active_query_table = _aqt;
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
     }
@@ -2447,8 +2505,9 @@ static ray_t* aggr_med_per_group_buf(ray_t* expr, ray_t* tbl,
     }
     if (!src) {
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        bind_all_columns(tbl);
+        ray_t* _aqt = bind_all_columns(tbl);
         src = ray_eval(col_expr);
+        g_active_query_table = _aqt;
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
     }
@@ -2977,8 +3036,9 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
     }
     if (!src) {
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        bind_all_columns(tbl);
+        ray_t* _aqt = bind_all_columns(tbl);
         src = ray_eval(inner_expr);
+        g_active_query_table = _aqt;
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
     }
@@ -3203,8 +3263,9 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
     }
     if (!src) {
         if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-        bind_all_columns(tbl);
+        ray_t* _aqt = bind_all_columns(tbl);
         src = ray_eval(inner_expr);
+        g_active_query_table = _aqt;
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
     }
@@ -3759,6 +3820,17 @@ static int try_count_simple_compare(ray_t* tbl, ray_t* where_expr, int64_t* out_
         RAY_ATOM_IS_NULL(rhs_expr))
         return 0;
 
+    /* B3 Part 2: a QUOTED -RAY_SYM rhs that NAMES a from-table column does
+     * NOT compare against the literal symbol — inside a query it resolves to
+     * that column (the in-query collision rule applied by the full select
+     * path).  This fast path only knows how to compare against a constant, so
+     * bail out and let the materialised select path handle the column→column
+     * comparison consistently.  A quoted sym naming no column stays a literal
+     * and is handled here as before. */
+    if (rhs_expr->type == -RAY_SYM && (rhs_expr->attrs & ATTR_QUOTED) &&
+        ray_table_get_col(tbl, rhs_expr->i64))
+        return 0;
+
     ray_t* col = ray_table_get_col(tbl, col_expr->i64);
     if (!col || col->len != ray_table_nrows(tbl)) return 0;
     if ((col->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)) != 0) return 0;
@@ -4306,6 +4378,28 @@ ray_t* ray_select(ray_t** args, int64_t n) {
     int64_t dep_key_names[16];
     int64_t dep_key_biases[16];
     uint8_t n_dep_keys = 0;
+
+    /* B3 Part 2: a LITERAL scalar by-key symbol (`by: 'g`) resolves like a
+     * name-ref — the same column-only, query-only rule the projection/where
+     * paths apply.  The dozens of downstream by-key checks expect a name-ref
+     * (ATTR_QUOTED clear), so normalize ANY literal scalar by-key to a
+     * name-ref once, here — regardless of whether the column exists.  A
+     * literal naming a column then resolves to it; a literal naming no
+     * column produces the SAME clean "column not found" error as a bare
+     * `by: nonexistent` (rather than flowing into ray_elem_size on a literal
+     * symbol and tripping UBSan).  The owned name-ref rides in
+     * by_sym_vec_owned and is released with the other owned by-forms at
+     * function exit.  Multi-key (RAY_DICT/list) and dotted by-forms are not
+     * scalar -RAY_SYM literals and are left untouched. */
+    if (by_expr && by_expr->type == -RAY_SYM && (by_expr->attrs & ATTR_QUOTED)) {
+        ray_t* nref = ray_sym(by_expr->i64);
+        if (nref && !RAY_IS_ERR(nref)) {
+            by_sym_vec_owned = nref;
+            by_expr = nref;
+        } else if (nref) {
+            ray_release(nref);
+        }
+    }
 
     /* Selection saved across the path-A graph free for count(distinct
      * col_ref) non-aggs.  Path B leaves this NULL because the
@@ -6345,8 +6439,9 @@ by_dict_done:
                         ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
                         return ray_error("oom", NULL);
                     }
-                    bind_all_columns(eval_tbl);
+                    ray_t* _aqt = bind_all_columns(eval_tbl);
                     ray_t* full_val = ray_eval(val_expr_item);
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope();
                     if (RAY_IS_ERR(full_val)) {
                         for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
@@ -8797,8 +8892,9 @@ by_dict_done:
                     if (ray_env_push_scope() != RAY_OK) {
                         scatter_err = ray_error("oom", NULL); break;
                     }
-                    bind_all_columns(tbl);
+                    ray_t* _aqt = bind_all_columns(tbl);
                     ray_t* full_val = ray_eval(nonagg_exprs[ni]);
+                    g_active_query_table = _aqt;
                     ray_env_pop_scope();
                     if (!full_val || RAY_IS_ERR(full_val)) {
                         scatter_err = full_val ? full_val : ray_error("domain", NULL);
