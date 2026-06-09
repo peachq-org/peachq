@@ -368,7 +368,7 @@ ray_t* ray_resolve_fn(ray_t** args, int64_t n) {
         if (tbl->type == -RAY_SYM) {
             ray_t* val = ray_env_get(tbl->i64);
             ray_release(tbl);
-            if (!val) return NULL;
+            if (!val) return RAY_NULL_OBJ;
             ray_retain(val);
             return val;
         }
