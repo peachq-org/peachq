@@ -529,8 +529,9 @@ static ray_t* parse_vector(ray_parser_t *p) {
     }
 
     /* Determine element types.
-     * Name references (the unflagged default, ATTR_QUOTED clear) must stay as boxed atoms because
-     * the evaluator, compiler, and fn-builder dereference them as ray_t*. */
+     * Name references (the unflagged default, ATTR_QUOTED clear) must stay
+     * as boxed atoms because the evaluator, compiler, and fn-builder
+     * dereference them as ray_t*. */
     int8_t first_type = elems[0]->type;
     bool homogeneous = true;
     bool has_float = (first_type == -RAY_F64);
