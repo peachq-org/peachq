@@ -480,10 +480,10 @@ static ray_t* parse_name(ray_parser_t *p) {
     if (len == 5 && memcmp(start, "false", 5) == 0) return ray_bool(false);
     /* null is handled as a name that resolves to NULL at eval time */
 
-    /* Return as name symbol (with RAY_ATTR_NAME flag) */
+    /* Return as name symbol (with ATTR_QUOTED flag) */
     int64_t id = ray_sym_intern_runtime(start, len);
     ray_t* s = ray_sym(id);
-    if (!RAY_IS_ERR(s)) s->attrs |= RAY_ATTR_NAME;
+    if (!RAY_IS_ERR(s)) s->attrs |= ATTR_QUOTED;
     return s;
 }
 
@@ -521,7 +521,7 @@ static ray_t* parse_vector(ray_parser_t *p) {
     }
 
     /* Determine element types.
-     * Name references (RAY_ATTR_NAME) must stay as boxed atoms because
+     * Name references (ATTR_QUOTED) must stay as boxed atoms because
      * the evaluator, compiler, and fn-builder dereference them as ray_t*. */
     int8_t first_type = elems[0]->type;
     bool homogeneous = true;
@@ -531,8 +531,8 @@ static ray_t* parse_vector(ray_parser_t *p) {
 
     for (int32_t i = 0; i < count; i++) {
         /* Inside [...], names are symbol literals, not variable references */
-        if (elems[i]->attrs & RAY_ATTR_NAME) {
-            elems[i]->attrs &= ~RAY_ATTR_NAME;
+        if (elems[i]->attrs & ATTR_QUOTED) {
+            elems[i]->attrs &= ~ATTR_QUOTED;
             /* type is already -RAY_SYM from parse_expr */
         }
         if (i == 0) continue;
@@ -865,7 +865,7 @@ static ray_t* parse_source(ray_parser_t *p) {
         return ray_error("oom", NULL);
     }
     do_sym->type = -RAY_SYM;
-    do_sym->attrs = RAY_ATTR_NAME;
+    do_sym->attrs = ATTR_QUOTED;
     do_sym->i64 = ray_sym_intern("do", 2);
     elems[0] = do_sym;
     for (int32_t i = 0; i < count; i++)
