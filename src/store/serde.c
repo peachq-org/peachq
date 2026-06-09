@@ -500,7 +500,7 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     (*len)--;
 
     /* Null */
-    if ((uint8_t)type == RAY_SERDE_NULL) return NULL;
+    if ((uint8_t)type == RAY_SERDE_NULL) return RAY_NULL_OBJ;
 
     /* Atoms — read 1-byte flags (typed-null bit) before the value.  If
      * the null bit is set we always return ray_typed_null(type) regardless
@@ -700,16 +700,15 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
         int64_t saved = *len;
         for (int64_t i = 0; i < l; i++) {
             elems[i] = ray_de_raw(buf + (saved - *len), len);
-            /* A NULL element is the in-band representation of
-             * RAY_NULL_OBJ on the wire (ray_ser_raw writes SERDE_NULL
-             * for the null singleton; ray_de_raw returns C NULL for
-             * that marker).  Lists must round-trip them — e.g. an IPC
-             * VERBOSE response is `[captured_str, result]` where
-             * `result` is RAY_NULL_OBJ for any (println ...) /
-             * (set ...) eval.  Rejecting NULL here would error the
-             * whole frame as "domain".  Substitute the singleton so
-             * downstream code (ray_lang_print, etc.) sees a valid
-             * pointer instead of a raw NULL. */
+            /* The SERDE_NULL wire marker now deserializes to RAY_NULL_OBJ
+             * directly (de_raw_inner returns the singleton), so the guard
+             * below only catches a genuine buffer-underrun NULL.  Either way
+             * we substitute the singleton so lists round-trip nulls and
+             * downstream code (ray_lang_print, etc.) always sees a valid
+             * pointer — e.g. an IPC VERBOSE response is `[captured_str,
+             * result]` where `result` is RAY_NULL_OBJ for any (println ...) /
+             * (set ...) eval; rejecting NULL would error the whole frame as
+             * "domain". */
             if (!elems[i]) {
                 elems[i] = RAY_NULL_OBJ;
             } else if (RAY_IS_ERR(elems[i])) {
