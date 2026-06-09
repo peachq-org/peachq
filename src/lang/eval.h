@@ -51,10 +51,10 @@ typedef ray_t* (*ray_unary_fn)(ray_t*);
 typedef ray_t* (*ray_binary_fn)(ray_t*, ray_t*);
 typedef ray_t* (*ray_vary_fn)(ray_t**, int64_t);
 
-/* DAG opcode stored in nullmap[0..1] for binary builtins with DAG-exec paths.
+/* DAG opcode stored in aux[0..1] for binary builtins with DAG-exec paths.
  * Eliminates dispatch table lookups in atomic_map_binary — just read the opcode. */
-#define RAY_FN_OPCODE(fn)        (*(uint16_t*)(fn)->nullmap)
-#define RAY_FN_SET_OPCODE(fn,op) (*(uint16_t*)(fn)->nullmap = (uint16_t)(op))
+#define RAY_FN_OPCODE(fn)        (*(uint16_t*)(fn)->aux)
+#define RAY_FN_SET_OPCODE(fn,op) (*(uint16_t*)(fn)->aux = (uint16_t)(op))
 
 /* ===== VM Bytecode Opcodes ===== */
 

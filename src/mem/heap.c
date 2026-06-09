@@ -81,7 +81,7 @@ static int heap_preallocate(int fd, off_t offset, off_t len) {
  * Static asserts
  * -------------------------------------------------------------------------- */
 _Static_assert(sizeof(ray_pool_hdr_t) <= 16,
-               "ray_pool_hdr_t must fit in nullmap (16 bytes)");
+               "ray_pool_hdr_t must fit in aux (16 bytes)");
 
 /* --------------------------------------------------------------------------
  * Thread-local state
@@ -384,7 +384,7 @@ static bool heap_add_pool(ray_heap_t* h, uint8_t order) {
     hdr_block->order = RAY_ORDER_MIN;
     ray_atomic_store(&hdr_block->rc, 1);  /* sentinel: never free */
 
-    ray_pool_hdr_t* hdr = (ray_pool_hdr_t*)hdr_block;  /* overlay on nullmap */
+    ray_pool_hdr_t* hdr = (ray_pool_hdr_t*)hdr_block;  /* overlay on aux */
     hdr->heap_id    = h->id;
     hdr->pool_order = pool_order;
     hdr->vm_base    = mem;  /* on POSIX, same as aligned base */
@@ -571,7 +571,7 @@ static void ray_release_owned_refs(ray_t* v) {
         return;
     }
 
-    /* RAY_INDEX block: release per-kind payload children + saved-nullmap
+    /* RAY_INDEX block: release per-kind payload children + saved-aux
      * pointers.  Must run before the LIST/TABLE compound checks below
      * (which would mistreat the data[] payload as child pointers). */
     if (v->type == RAY_INDEX) {
@@ -581,7 +581,7 @@ static void ray_release_owned_refs(ray_t* v) {
         return;
     }
 
-    /* Vector with attached index: nullmap[0..7] holds an owning ref to
+    /* Vector with attached index: aux[0..7] holds an owning ref to
      * the index ray_t.  The index owns the displaced str_pool,
      * so we must NOT also try to release those off the parent — they
      * aren't there anymore.  Skip the STR_pool branch. */
