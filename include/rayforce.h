@@ -113,19 +113,19 @@ typedef enum {
 typedef union ray_t {
     /* Allocated: object header */
     struct {
-        /* Bytes 0-15: slice / str_pool / index / link arm.
-         * Null state is sentinel-encoded in the payload (see
-         * src/vec/vec.c); this 16-byte slot carries no bitmap bits.
-         * The `nullmap` name is retained as the raw-byte view used by
-         * atoms (nullmap[0]&1), envs (builtin name @ nullmap[2..15]),
-         * tables / dicts / lists / str-pools (zero-init), and the col
-         * on-disk header. */
+        /* Bytes 0-15: slice / str_pool / index / link arm.  Null state is
+         * sentinel-encoded in the payload (see src/vec/vec.c); this 16-byte
+         * slot carries no bitmap bits.  `aux` is the raw-byte view used by
+         * atoms (aux[0]&1 typed-null bit), envs (builtin name @ aux[2..15]),
+         * functions (DAG opcode @ aux[0..1]), str-pools (dead-bytes @
+         * aux[0..3]), tables/dicts/lists (zero-init), and the on-disk col
+         * header. */
         union {
-            uint8_t  nullmap[16];
+            uint8_t  aux[16];
             struct { union ray_t* slice_parent;  int64_t slice_offset; };
             struct { uint8_t _aux_str_lo[8];     union ray_t* str_pool; };
             /* RAY_ATTR_HAS_INDEX (vectors): ray_t* of type RAY_INDEX
-             * carrying the accelerator payload and the saved nullmap
+             * carrying the accelerator payload and the saved aux
              * bytes.  _idx_pad is reserved (must be NULL).  See
              * ops/idxop.h. */
             struct { union ray_t* index;         union ray_t* _idx_pad; };
@@ -329,7 +329,7 @@ ray_t* ray_typed_null(int8_t type);
 /* Atom null check.  RAY_NULL_OBJ is the untyped null singleton.
  * Typed atoms with a defined NULL_* sentinel use payload-compare;
  * types without a sentinel (BOOL/U8/F32) fall back to the
- * nullmap[0]&1 bit written by ray_typed_null. */
+ * aux[0]&1 bit written by ray_typed_null. */
 static inline bool ray_atom_is_null_fn(const union ray_t* x) {
     if (RAY_IS_NULL(x)) return true;
     if (x->type >= 0) return false;
@@ -365,7 +365,7 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
             for (int i = 0; i < 16; i++) if (b[i]) return false;
             return true;
         }
-        default:            return (x->nullmap[0] & 1) != 0;
+        default:            return (x->aux[0] & 1) != 0;
     }
 }
 #define RAY_ATOM_IS_NULL(x) ray_atom_is_null_fn(x)

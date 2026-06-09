@@ -181,13 +181,13 @@ ray_t* ray_typed_null(int8_t type) {
      * U8 payload buffer up front (same shape as ray_guid) so consumers
      * can deref obj without a NULL check.  Other types use the payload
      * union — the sentinel write below is the source of truth; the
-     * nullmap[0] bit is retained for atom types without a sentinel
+     * aux[0] bit is retained for atom types without a sentinel
      * (BOOL/U8/F32). */
     if (type == -RAY_GUID) {
         static const uint8_t NULL_GUID_BYTES[16] = {0};
         ray_t* v = ray_guid(NULL_GUID_BYTES);
         if (RAY_IS_ERR(v)) return v;
-        v->nullmap[0] |= 1;
+        v->aux[0] |= 1;
         return v;
     }
     ray_t* v = ray_alloc(0);
@@ -201,7 +201,7 @@ ray_t* ray_typed_null(int8_t type) {
         case -RAY_I16:                                 v->i16 = NULL_I16; break;
         default:                                       v->i64 = 0; break;
     }
-    v->nullmap[0] |= 1;
+    v->aux[0] |= 1;
     return v;
 }
 

@@ -393,7 +393,7 @@ static ray_t* atomic_map_binary_parted(ray_binary_fn fn, uint16_t dag_opcode,
     out->type = RAY_LIST;
     out->len = 0;
     out->attrs = 0;
-    memset(out->nullmap, 0, sizeof(out->nullmap));
+    memset(out->aux, 0, sizeof(out->aux));
     ray_t** dst = (ray_t**)ray_data(out);
     ray_t** lsegs = left_parted ? (ray_t**)ray_data(left) : NULL;
     ray_t** rsegs = right_parted ? (ray_t**)ray_data(right) : NULL;
