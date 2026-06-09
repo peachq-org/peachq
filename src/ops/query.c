@@ -3010,76 +3010,11 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
     out->len = n_groups;
     int64_t* odata = (int64_t*)ray_data(out);
 
-    /* Streaming HLL — one parallel pass over rows (each worker owns a
-     * private bank of n_groups sparse sketches) instead of n_groups
-     * separate tasks each rebuilding a sketch.  Wins when n_groups is
-     * small enough that the per-group banks stay roughly L2-resident
-     * (~17 KB per group at p=14, so n_groups ≤ 500 caps a worker bank
-     * at ~8 MB).  Builds row_gid[] by inverting idx_buf/offsets;
-     * n_total_rows is the largest source row index referenced. */
-    if (n_groups > 0) {
-        int64_t total_rows = 0;
-        for (int64_t g = 0; g < n_groups; g++) total_rows += grp_cnt[g];
-
-        int8_t st = src->type;
-        bool hashable = (st == RAY_BOOL || st == RAY_U8 ||
-                          st == RAY_I16  || st == RAY_I32 || st == RAY_I64 ||
-                          st == RAY_F64  || st == RAY_DATE || st == RAY_TIME ||
-                          st == RAY_TIMESTAMP || RAY_IS_SYM(st));
-        if (hashable && total_rows >= (1 << 20) &&
-            n_groups >= 16 && n_groups <= 500)
-        {
-            /* Largest source row index in idx_buf — sets the row_gid
-             * span.  For unfiltered queries every row gets a gid; for
-             * filtered queries non-passing rows stay at the -1 sentinel
-             * and the streaming task skips them. */
-            int64_t n_max_row = 0;
-            for (int64_t gi = 0; gi < n_groups; gi++) {
-                int64_t end_off = offsets[gi] + grp_cnt[gi];
-                for (int64_t j = offsets[gi]; j < end_off; j++) {
-                    if (idx_buf[j] >= n_max_row) n_max_row = idx_buf[j] + 1;
-                }
-            }
-            if (n_max_row > 0) {
-                ray_t* rg_hdr = NULL;
-                int64_t* row_gid = (int64_t*)scratch_alloc(&rg_hdr,
-                    (size_t)n_max_row * sizeof(int64_t));
-                if (row_gid) {
-                    for (int64_t r = 0; r < n_max_row; r++) row_gid[r] = -1;
-                    for (int64_t gi = 0; gi < n_groups; gi++) {
-                        int64_t end_off = offsets[gi] + grp_cnt[gi];
-                        for (int64_t j = offsets[gi]; j < end_off; j++) {
-                            row_gid[idx_buf[j]] = gi;
-                        }
-                    }
-                    if (ray_count_distinct_approx_pg_stream(
-                            src, row_gid, n_max_row, n_groups, 14, odata) == 0)
-                    {
-                        scratch_free(rg_hdr);
-                        ray_release(src);
-                        return out;
-                    }
-                    scratch_free(rg_hdr);
-                    memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
-                }
-            }
-        }
-
-        /* Per-group HLL fallback — one task per group, private sketch
-         * per task.  Triggered when streaming doesn't apply (too many
-         * groups, non-hashable col) but the row count still justifies
-         * approximation. */
-        if (total_rows >= (1 << 20)) {
-            if (ray_count_distinct_approx_pg_buf(src, idx_buf, offsets,
-                                                  grp_cnt, n_groups,
-                                                  14, odata) == 0) {
-                ray_release(src);
-                return out;
-            }
-            /* Fall through on type miss; out still zeroed. */
-            memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
-        }
-    }
+    /* COUNT(DISTINCT col) per group is EXACT.  Streaming HLL +
+     * per-group HLL buf fast paths returned approximation here and
+     * have been removed.  HLL remains in the codebase for explicit
+     * opt-in approximate entries and internal cardinality estimation
+     * only.  Exact parallel dedup follows below. */
 
     /* Parallel path: dispatch one task per group when src has a flat
      * numeric / SYM layout we can read with a typed pointer.  Each task
@@ -8673,31 +8608,11 @@ by_dict_done:
                             }
                         }
                         if (src_for_global) {
-                            /* Streaming per-group HLL: skips the idx_buf
-                             * scatter and re-walk by running one pass
-                             * over (row_gid, hash(src[r])).  Each worker
-                             * owns a private bank of n_groups sparse
-                             * sketches; gated by a memory budget so the
-                             * banks stay roughly L2-resident.  Falls
-                             * through to the buf-form on type miss / OOM. */
-                            if (n_groups >= 16 && n_groups <= 500
-                                && nrows >= (1 << 20)
-                                && !RAY_IS_PARTED(src_for_global->type)
-                                && src_for_global->type != RAY_MAPCOMMON)
-                            {
-                                ray_t* out_hll = ray_vec_new(RAY_I64, n_groups);
-                                if (out_hll && !RAY_IS_ERR(out_hll)) {
-                                    out_hll->len = n_groups;
-                                    int64_t* odata = (int64_t*)ray_data(out_hll);
-                                    if (ray_count_distinct_approx_pg_stream(
-                                            src_for_global, row_gid, nrows,
-                                            n_groups, 14, odata) == 0) {
-                                        col = out_hll;
-                                    } else {
-                                        ray_release(out_hll);
-                                    }
-                                }
-                            }
+                            /* COUNT(DISTINCT) is exact per SQL/DSL
+                             * semantics — the streaming HLL fast path
+                             * here silently returned an approximate
+                             * result and was removed.  Exact dedup
+                             * follows below. */
                             /* Path selection: global-hash kernel scales
                              * with n_rows (per-row probe of one shared
                              * hash table); per-group-slice scales with
