@@ -1913,7 +1913,8 @@ op_call1: {
             goto vm_error;
         }
     }
-    if (RAY_UNLIKELY(!arg || RAY_IS_NULL(arg))) {
+    RAY_ASSERT_VALUE(arg);
+    if (RAY_UNLIKELY(RAY_IS_NULL(arg))) {
         result = (fn == (ray_unary_fn)ray_nil_fn || fn == (ray_unary_fn)ray_type_fn)
                  ? fn(arg) : ray_error("type", NULL);
     } else if ((fn_obj->attrs & RAY_FN_ATOMIC) && arg->type >= 0)
@@ -1954,7 +1955,8 @@ op_call2: {
             }
         }
     }
-    if (RAY_UNLIKELY(!left || !right || RAY_IS_NULL(left) || RAY_IS_NULL(right))) {
+    RAY_ASSERT_VALUE(left); RAY_ASSERT_VALUE(right);
+    if (RAY_UNLIKELY(RAY_IS_NULL(left) || RAY_IS_NULL(right))) {
         result = (fn == (ray_binary_fn)ray_eq_fn || fn == (ray_binary_fn)ray_neq_fn)
                  ? fn(left, right) : ray_error("type", NULL);
     /* Fast path: atoms have negative type — skip collection check entirely.
@@ -3059,7 +3061,8 @@ ray_t* ray_eval(ray_t* obj) {
                 if (!arg || RAY_IS_ERR(arg)) { ret = arg ? arg : ray_error("type", NULL); goto out; }
             }
             ray_t* result;
-            if (!arg || RAY_IS_NULL(arg)) {
+            RAY_ASSERT_VALUE(arg);
+            if (RAY_IS_NULL(arg)) {
                 /* Only nil?/type/ser safely handle null */
                 result = (fn == (ray_unary_fn)ray_nil_fn || fn == (ray_unary_fn)ray_type_fn ||
                           fn == (ray_unary_fn)ray_ser_fn) ? fn(arg) : ray_error("type", NULL);
@@ -3109,7 +3112,8 @@ ray_t* ray_eval(ray_t* obj) {
                 }
             }
             /* If either arg is NULL/void, only == and != can handle it */
-            if (!left || !right || RAY_IS_NULL(left) || RAY_IS_NULL(right)) {
+            RAY_ASSERT_VALUE(left); RAY_ASSERT_VALUE(right);
+            if (RAY_IS_NULL(left) || RAY_IS_NULL(right)) {
                 if (fn == (ray_binary_fn)ray_eq_fn || fn == (ray_binary_fn)ray_neq_fn) {
                     ray_release(head);
                     ray_t* result = fn(left, right);
