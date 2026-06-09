@@ -56,7 +56,7 @@
  *   Bit  0x04       -RAY_I64 atoms:  RAY_ATTR_HNSW (HNSW handle in .i64)
  *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in nullmap[0..7])
  *   Bit  0x10       vectors:         RAY_ATTR_SLICE
- *   Bit  0x20       -RAY_SYM:        RAY_ATTR_NAME (variable reference)
+ *   Bit  0x20       -RAY_SYM:        ATTR_QUOTED (variable reference)
  *   Bit  0x20       vectors:         RAY_ATTR_SORTED (non-descending order marker)
  *   Bit  0x40       vectors:         RAY_ATTR_HAS_NULLS (sentinel-encoded; payload is truth)
  *   Bit  0x80       all types:       RAY_ATTR_ARENA (arena-allocated, no refcount)
