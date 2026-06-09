@@ -24,7 +24,7 @@
 #include "ops/fused_group.h"
 #include "ops/fused_pred.h" /* fp_pred_t / fp_compile_pred / fp_eval_pred */
 #include "ops/idxop.h"      /* RAY_IDX_CHUNK_ZONE chunk-skip in fp_eval_cmp */
-#include "lang/eval.h"      /* RAY_ATTR_NAME */
+#include "lang/eval.h"      /* ATTR_QUOTED */
 #include "core/pool.h"      /* ray_pool_get / ray_pool_dispatch */
 
 #include <limits.h>
@@ -157,7 +157,7 @@ static int fp_col_supported(const ray_t* col) {
 
 static int fp_expr_const_str(ray_t* expr) {
     if (!expr) return 0;
-    if (expr->type == -RAY_STR && !(expr->attrs & RAY_ATTR_NAME)) return 1;
+    if (expr->type == -RAY_STR && !(expr->attrs & ATTR_QUOTED)) return 1;
     if (expr->type != RAY_LIST || ray_len(expr) < 2) return 0;
     ray_t** elems = (ray_t**)ray_data(expr);
     if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
@@ -188,10 +188,11 @@ static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
     if (code < 0) return -1;
 
     ray_t* lhs = elems[1];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return -1;
     ray_t* rhs = elems[2];
-    if (!rhs || !ray_is_atom(rhs) || (rhs->attrs & RAY_ATTR_NAME))
+    if (!rhs || !ray_is_atom(rhs) ||
+        (rhs->type == -RAY_SYM && !(rhs->attrs & ATTR_QUOTED)))
         return -1;
 
     /* Resolve column type to gate ordering ops AND verify the column
@@ -228,7 +229,7 @@ static int fp_check_like(ray_t* expr, ray_t* tbl) {
         || memcmp(ray_str_ptr(op_sym), "like", 4) != 0)
         return 0;
     ray_t* lhs = elems[1];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return 0;
     if (!fp_expr_const_str(elems[2])) return 0;
     if (tbl) {
@@ -256,9 +257,9 @@ static int fp_check_in(ray_t* expr, ray_t* tbl) {
         return 0;
     ray_t* lhs = elems[1];
     ray_t* rhs = elems[2];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return 0;
-    if (!rhs || !ray_is_vec(rhs) || (rhs->attrs & RAY_ATTR_NAME))
+    if (!rhs || !ray_is_vec(rhs) || (rhs->attrs & RAY_ATTR_SORTED))
         return 0;
     if (ray_len(rhs) > 16) return 0;
     if (!fp_int_family(rhs->type)) return 0;
