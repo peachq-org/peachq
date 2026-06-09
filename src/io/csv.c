@@ -731,7 +731,7 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
 
     /* CSV/TSV import policy for SYM columns: empty fields write the
      * canonical empty-symbol ID (always 0, reserved by ray_sym_init).
-     * SYM columns carry no nullmap by design — sym 0 is the
+     * SYM columns carry no null bitmap by design — sym 0 is the
      * representation of "missing", "empty", and "absent" all at once.
      * The CSV format can't distinguish "missing field" from "empty
      * string" anyway, so collapsing them is the only deterministic
@@ -2734,7 +2734,7 @@ static void csv_col_info_init(csv_col_info_t* ci, ray_t* col) {
     ci->attrs = ci->data_owner ? ci->data_owner->attrs : 0;
     ci->data  = ci->data_owner ? ray_data(ci->data_owner) : NULL;
     /* has_nulls must consult the slice_parent, since a slice view
-     * never carries its own nullmap — ray_vec_is_null handles the
+     * never carries its own null bitmap — ray_vec_is_null handles the
      * redirect but we still want a fast bypass when neither has nulls. */
     ci->has_nulls = false;
     if (col && (col->attrs & RAY_ATTR_HAS_NULLS)) ci->has_nulls = true;

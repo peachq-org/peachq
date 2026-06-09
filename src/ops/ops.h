@@ -35,7 +35,7 @@ extern "C" {
 
 #define RAY_SEL       14   /* selection bitmap (lazy filter) */
 
-/* Lazy DAG handle (atom-only; stored inline in nullmap region) */
+/* Lazy DAG handle (atom-only; stored inline in aux region) */
 #define RAY_LAZY      104
 
 /* ===== Forward Declarations (internal types) ===== */
@@ -856,8 +856,8 @@ ray_t* ray_execute(ray_graph_t* g, ray_op_t* root);
 
 /* ===== Lazy DAG Handle (Internal) ===== */
 
-#define RAY_LAZY_GRAPH(p) (*(ray_graph_t**)((p)->nullmap))
-#define RAY_LAZY_OP(p)    (*(ray_op_t**)(((p)->nullmap) + 8))
+#define RAY_LAZY_GRAPH(p) (*(ray_graph_t**)((p)->aux))
+#define RAY_LAZY_OP(p)    (*(ray_op_t**)(((p)->aux) + 8))
 
 ray_op_t* ray_graph_input_vec(ray_graph_t* g, ray_t* vec);
 ray_t*    ray_lazy_wrap(ray_graph_t* g, ray_op_t* op);
