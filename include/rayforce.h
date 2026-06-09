@@ -165,6 +165,15 @@ typedef union ray_t {
 extern ray_t __ray_null;
 #define RAY_NULL_OBJ  (&__ray_null)
 #define RAY_IS_NULL(p) ((p) == RAY_NULL_OBJ)
+/* A value position (an eval'd / builtin-returned ray_t*) is never a bare C NULL —
+ * value-null is always RAY_NULL_OBJ. Assert that invariant in debug/ASan builds;
+ * compile to nothing in release. Placed BEFORE any null test that may deref,
+ * because RAY_ATOM_IS_NULL/ray_atom_is_null_fn deref x->type on non-singleton input. */
+#ifdef DEBUG
+#define RAY_ASSERT_VALUE(x) assert((x) != NULL && "value-null must be RAY_NULL_OBJ, not C NULL")
+#else
+#define RAY_ASSERT_VALUE(x) ((void)0)
+#endif
 
 /* Global last-resort OOM error sentinel — returned by ray_error when its
  * own ray_alloc fails (deep OOM, e.g. heap can't even satisfy the 32-byte
