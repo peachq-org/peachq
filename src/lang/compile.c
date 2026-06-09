@@ -218,8 +218,8 @@ static void compile_list(compiler_t *c, ray_t *ast) {
 
     init_sf_syms();
 
-    /* Check for special forms by name */
-    if (head->type == -RAY_SYM && (head->attrs & ATTR_QUOTED)) {
+    /* Check for special forms by name (name ref = unflagged default) */
+    if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED)) {
         int64_t sym_id = head->i64;
 
         /* (set name value) — bind in the global env.  Compile the value
@@ -370,7 +370,7 @@ static void compile_list(compiler_t *c, ray_t *ast) {
     }
 
     /* Self-recursive call: emit OP_CALLS (lean frame reuse, no fn object) */
-    if (head->type == -RAY_SYM && (head->attrs & ATTR_QUOTED) &&
+    if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED) &&
         head->i64 == sf_self) {
         int64_t argc = n - 1;
         if (argc > 64) { c->error = true; return; }
@@ -383,7 +383,7 @@ static void compile_list(compiler_t *c, ray_t *ast) {
 
     /* Look up head at compile time to determine call type */
     ray_t *fn = NULL;
-    if (head->type == -RAY_SYM && (head->attrs & ATTR_QUOTED))
+    if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED))
         fn = ray_env_get(head->i64);
 
     /* Unrecognized special form: dynamic eval on entire form */
@@ -444,7 +444,7 @@ static void compile_expr(compiler_t *c, ray_t *ast) {
     EMIT_DBG(c, ast);
 
     if (ray_is_atom(ast)) {
-        if (ast->type == -RAY_SYM && (ast->attrs & ATTR_QUOTED)) {
+        if (ast->type == -RAY_SYM && !(ast->attrs & ATTR_QUOTED)) {
             int32_t slot = find_local(c, ast->i64);
             if (slot >= 0) {
                 emit(c, OP_LOADENV);
