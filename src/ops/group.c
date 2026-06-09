@@ -3225,7 +3225,6 @@ typedef struct {
 
 /* Aliases for shared parallel null helpers from internal.h */
 #define grp_set_null       par_set_null
-#define grp_prepare_nullmap par_prepare_nullmap
 #define grp_finalize_nulls par_finalize_nulls
 
 typedef struct {
@@ -8604,15 +8603,6 @@ v2_emit:;
             };
         }
 
-        /* Pre-allocate nullmaps for agg result vectors (parallel safety) */
-        bool nullmap_prep_ok[n_aggs];
-        for (uint8_t a = 0; a < n_aggs; a++)
-            nullmap_prep_ok[a] = agg_cols[a] && (grp_prepare_nullmap(agg_outs[a].vec) == RAY_OK);
-
-        /* Pre-prepare nullmaps on output key columns for parallel null writes */
-        for (uint8_t k = 0; k < n_keys; k++)
-            if (key_cols[k]) grp_prepare_nullmap(key_cols[k]);
-
         /* Pass 3: parallel key gather + agg result building from inline rows */
         {
             radix_phase3_ctx_t p3ctx = {
@@ -8812,30 +8802,6 @@ v2_emit:;
             if (off_hdr)  scratch_free(off_hdr);
             if (idx_hdr)  scratch_free(idx_hdr);
             scratch_free(rg_hdr);
-        }
-
-        /* Fixup: if nullmap prep failed for any VAR/STDDEV agg, re-scan
-         * hash tables sequentially to ensure all null bits were set */
-        for (uint8_t a = 0; a < n_aggs; a++) {
-            if (nullmap_prep_ok[a] || !agg_cols[a]) continue;
-            uint16_t op = agg_outs[a].agg_op;
-            if (op != OP_VAR && op != OP_VAR_POP &&
-                op != OP_STDDEV && op != OP_STDDEV_POP) continue;
-            for (uint32_t p = 0; p < RADIX_P; p++) {
-                group_ht_t* ph = &part_hts[p];
-                uint32_t gc = ph->grp_count;
-                uint32_t off = part_offsets[p];
-                uint16_t rs = ph->layout.row_stride;
-                for (uint32_t gi = 0; gi < gc; gi++) {
-                    const char* row = ph->rows + (size_t)gi * rs;
-                    int64_t cnt = *(const int64_t*)(const void*)row;
-                    bool insuf = (op == OP_VAR || op == OP_STDDEV) ? cnt <= 1 : cnt <= 0;
-                    if (insuf) {
-                        ray_vec_set_null(agg_outs[a].vec, off + gi, true);
-                        ((double*)ray_data(agg_outs[a].vec))[off + gi] = NULL_F64;
-                    }
-                }
-            }
         }
 
         /* Finalize null flags after parallel execution.  Holistic slots
