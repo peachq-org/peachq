@@ -848,7 +848,7 @@ ray_t* ray_alloc(size_t data_size) {
             ray_t* v = h->slabs[idx].stack[--h->slabs[idx].count];
 
             /* Zero full 32-byte header (hot path).
-             * Nullmap (bytes 0-15) must be cleared for null-bit correctness. */
+             * Null bitmap (bytes 0-15) must be cleared for null-bit correctness. */
             memset(v, 0, 32);
             v->order = order;
             if (RAY_UNLIKELY(ray_rc_sync))
