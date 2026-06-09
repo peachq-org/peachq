@@ -209,7 +209,7 @@ int64_t ray_serde_size(ray_t* obj) {
     case RAY_UNARY:
     case RAY_BINARY:
     case RAY_VARY: {
-        /* Serialize by name (null-terminated string in nullmap) */
+        /* Serialize by name (null-terminated string in aux) */
         const char* name = ray_fn_name(obj);
         size_t nlen = strlen(name); if (nlen > 15) nlen = 15;
         return 1 + (int64_t)nlen + 1; /* type + name + null terminator */
@@ -252,10 +252,10 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
     buf++;
 
     /* Atoms — format: type(1) + flags(1) + value-bytes.  `flags` bit 0
-     * carries the typed-null marker (nullmap[0] & 1 on the source atom)
+     * carries the typed-null marker (aux[0] & 1 on the source atom)
      * so (de (ser 0Nl)) roundtrips instead of decoding as plain 0. */
     if (type < 0) {
-        uint8_t aflags = (uint8_t)(obj->nullmap[0] & 1);
+        uint8_t aflags = (uint8_t)(obj->aux[0] & 1);
         if (type == -RAY_SYM && (obj->attrs & ATTR_QUOTED))
             aflags |= ATTR_QUOTED;
         buf[0] = aflags;
