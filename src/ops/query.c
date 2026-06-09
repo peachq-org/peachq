@@ -789,7 +789,7 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     /* Atom literal → const node.  Handle non-null scalar literals
      * via the dedicated ctors that carry just the raw value; typed
      * null atoms (e.g. `0Nl`, `0Nf`) must go through ray_const_atom
-     * so the null flag in atom->nullmap rides along — otherwise
+     * so the null flag in atom->aux rides along — otherwise
      * downstream comparisons lose the null-ness and fall back to
      * sentinel-value equality. */
     if (expr->type == -RAY_I64 && !RAY_ATOM_IS_NULL(expr))
@@ -3617,7 +3617,7 @@ static ray_t* atom_broadcast_vec(ray_t* a, int64_t n) {
      * the LIST path would have. */
     if (RAY_ATOM_IS_NULL(a)) {
         v->attrs |= RAY_ATTR_HAS_NULLS;
-        memset(v->nullmap, 0xFF, 16);
+        memset(v->aux, 0xFF, 16);
     }
     return v;
 }
@@ -5682,7 +5682,7 @@ by_dict_done:
                                     default: atom = ray_i64(key_vals[off]); break;
                                 }
                                 if (atom) {
-                                    if (key_null[off]) atom->nullmap[0] |= 1;
+                                    if (key_null[off]) atom->aux[0] |= 1;
                                     store_typed_elem(key_vec, gi, atom);
                                     ray_release(atom);
                                 }
@@ -9749,7 +9749,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 /* Merge: use expr_vec for matching rows, orig_col for non-matching.
                  * Null-bit propagation applies to STR/SYM as well — a null in
                  * either the orig column (unmasked rows) or the expr (masked
-                 * rows) must travel into new_col's nullmap. */
+                 * rows) must travel into new_col's null state. */
                 if (ct == RAY_STR) {
                     for (int64_t r = 0; r < nrows; r++) {
                         ray_t* src_vec = mask[r] ? expr_vec : orig_col;
@@ -9785,7 +9785,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         /* Propagate null bit from whichever side supplied
                          * the value.  Without this, masking in a typed-null
                          * broadcast would copy zero bytes into the slot but
-                         * leave the destination's nullmap clear → silent
+                         * leave the destination's null state clear → silent
                          * loss of null marker. */
                         if (ray_vec_is_null(src_vec, r))
                             ray_vec_set_null(new_col, new_col->len - 1, true);
@@ -11721,7 +11721,7 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
         }
 
         /* Pre-size each result vector and allocate a 1-byte-per-row null
-         * staging array — writers index by lr without touching the nullmap. */
+         * staging array — writers index by lr without touching nulls. */
         ray_t*   null_stage_hdr[WJ_MAX_AGG] = {0};
         uint8_t* null_stage[WJ_MAX_AGG]     = {0};
         for (int64_t a = 0; a < n_agg; a++) {
