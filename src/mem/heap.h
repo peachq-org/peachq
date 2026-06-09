@@ -56,7 +56,7 @@
  *   Bit  0x04       -RAY_I64 atoms:  RAY_ATTR_HNSW (HNSW handle in .i64)
  *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in nullmap[0..7])
  *   Bit  0x10       vectors:         RAY_ATTR_SLICE
- *   Bit  0x20       -RAY_SYM:        RAY_ATTR_NAME (variable reference)
+ *   Bit  0x20       -RAY_SYM:        ATTR_QUOTED (quoted/literal symbol; default = name reference)
  *   Bit  0x20       vectors:         RAY_ATTR_SORTED (non-descending order marker)
  *   Bit  0x40       vectors:         RAY_ATTR_HAS_NULLS (sentinel-encoded; payload is truth)
  *   Bit  0x80       all types:       RAY_ATTR_ARENA (arena-allocated, no refcount)
@@ -70,8 +70,8 @@
 /* RAY_ATTR_SORTED (vectors): the vector's elements are known to be in
  * non-descending order.  A pure marker — no backing structure, no
  * allocation.  Set only via (.attr.set 'sorted v) after an O(n) verify
- * scan, so it never lies.  0x20 is free for vectors (it means NAME only
- * on -RAY_SYM atoms).  Order-aware operators (asof-join) may trust it. */
+ * scan, so it never lies.  0x20 is free for vectors (on -RAY_SYM atoms
+ * the same bit is ATTR_QUOTED).  Order-aware operators (asof-join) may trust it. */
 #define RAY_ATTR_SORTED  0x20
 
 #ifndef RAY_ATTR_SLICE
