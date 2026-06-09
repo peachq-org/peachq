@@ -1333,9 +1333,11 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
  * names are reserved cannot occur for a real table column, so a rejected
  * bind is simply skipped. */
 /* Active query from-table for tree-walk literal-column resolution (B3
- * Part 2).  bind_all_columns sets it; the matching pop must restore the
- * saved value (see ACTIVE_QUERY_TABLE_RESTORE).  Column-membership scoped
- * and query-only by construction — see ray_active_query_table. */
+ * Part 2).  bind_all_columns sets it (returning the previous value); each
+ * caller restores that saved value via `g_active_query_table = _aqt;`
+ * before every matching ray_env_pop_scope (including error returns).
+ * Column-membership scoped and query-only by construction — see
+ * ray_active_query_table. */
 static _Thread_local ray_t* g_active_query_table = NULL;
 
 ray_t* ray_active_query_table(void) { return g_active_query_table; }
