@@ -467,7 +467,8 @@ static void fmt_error_with_trace(FILE* fp, ray_t* err, ray_t* trace, bool use_co
 
 /* Pretty-print a result value */
 static void repl_print_result(FILE* fp, ray_t* val, bool use_color) {
-    if (!val || RAY_IS_NULL(val)) return;
+    RAY_ASSERT_VALUE(val);
+    if (RAY_IS_NULL(val)) return;
     if (RAY_IS_ERR(val)) {
         ray_t* trace = ray_get_error_trace();
         if (trace && ray_len(trace) > 0) {
