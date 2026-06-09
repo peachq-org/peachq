@@ -2943,7 +2943,7 @@ ray_t* ray_eval(ray_t* obj) {
                 if (name_str && ray_str_len(name_str) == 4 &&
                     memcmp(ray_str_ptr(name_str), "null", 4) == 0) {
                     ray_release(name_str);
-                    ret = NULL; goto out;
+                    ret = RAY_NULL_OBJ; goto out;
                 }
                 if (name_str) ray_release(name_str);
             }
