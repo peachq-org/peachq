@@ -70,8 +70,8 @@
 /* RAY_ATTR_SORTED (vectors): the vector's elements are known to be in
  * non-descending order.  A pure marker — no backing structure, no
  * allocation.  Set only via (.attr.set 'sorted v) after an O(n) verify
- * scan, so it never lies.  0x20 is free for vectors (it means NAME only
- * on -RAY_SYM atoms).  Order-aware operators (asof-join) may trust it. */
+ * scan, so it never lies.  0x20 is free for vectors (on -RAY_SYM atoms
+ * the same bit is ATTR_QUOTED).  Order-aware operators (asof-join) may trust it. */
 #define RAY_ATTR_SORTED  0x20
 
 #ifndef RAY_ATTR_SLICE
