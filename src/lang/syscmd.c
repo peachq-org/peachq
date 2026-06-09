@@ -57,6 +57,9 @@ static inline int ray_is_atom_local(ray_t* x) { return x && !RAY_IS_ERR(x) && x-
  * ══════════════════════════════════════════ */
 
 static int arg_is_null(const ray_t* arg) {
+    /* Not an eval/builtin value position: arg is a freshly-built syscmd
+     * argument that can be a bare C NULL on deep-OOM (ray_str alloc fail) —
+     * keep the !arg guard rather than RAY_ASSERT_VALUE. */
     return !arg || RAY_IS_NULL(arg);
 }
 
