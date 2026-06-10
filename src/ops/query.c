@@ -51,8 +51,49 @@
  * Select query — DAG bridge
  * ══════════════════════════════════════════ */
 
+/* A SYM id taken from `col`'s cells, re-expressed in the RUNTIME domain
+ * (sym-domain Phase 2).  Fresh SYM atoms / output vecs built in this
+ * file are runtime-domain, and dict-key / column-name comparisons pit
+ * cell ids against runtime name-ids — both need the cell id translated.
+ * Fast path: a runtime-domain column's ids ARE runtime ids — raw copy
+ * (exact no-op while every domain is the runtime singleton). */
+static inline int64_t sym_id_runtime(ray_t* col, int64_t id) {
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
+    if (dom == ray_sym_runtime_domain()) return id;
+    ray_t* s = ray_sym_domain_str(dom, id);
+    return s ? ray_sym_intern(ray_str_ptr(s), ray_str_len(s)) : -1;
+}
+
+static inline int64_t sym_cell_runtime_id(ray_t* v, int64_t i) {
+    return sym_id_runtime(v, ray_read_sym(ray_data(v), i, v->type, v->attrs));
+}
+
+/* The vec whose domain represents `col`'s SYM cell-id space: the col
+ * itself, its first SYM segment (PARTED — all partitions resolve over
+ * the root symfile's domain), or the MAPCOMMON keys vec.  NULL when
+ * `col` carries no SYM cells. */
+static ray_t* sym_domain_rep(ray_t* col) {
+    if (!col) return NULL;
+    if (col->type == RAY_SYM) return col;
+    if (RAY_IS_PARTED(col->type) &&
+        RAY_PARTED_BASETYPE(col->type) == RAY_SYM) {
+        ray_t** segs = (ray_t**)ray_data(col);
+        for (int64_t i = 0; i < col->len; i++)
+            if (segs[i] && segs[i]->type == RAY_SYM) return segs[i];
+        return NULL;
+    }
+    if (col->type == RAY_MAPCOMMON) {
+        ray_t** ptrs = (ray_t**)ray_data(col);
+        return (ptrs[0] && ptrs[0]->type == RAY_SYM) ? ptrs[0] : NULL;
+    }
+    return NULL;
+}
+
 /* Helper: look up a key in a select-clause dict (RAY_DICT).
- * Returns the value expression (unevaluated), or NULL if not found. */
+ * Returns the value expression (unevaluated), or NULL if not found.
+ * Dict keys are CELL-DATA of the keys vec — resolve through its domain
+ * (clause dicts are parser-built and runtime-domain today; evaluated
+ * user dicts may carry any domain). */
 static ray_t* dict_get(ray_t* dict, const char* key) {
     if (!dict || dict->type != RAY_DICT) return NULL;
     size_t key_len = strlen(key);
@@ -60,11 +101,9 @@ static ray_t* dict_get(ray_t* dict, const char* key) {
     ray_t* vals = ray_dict_vals(dict);
     if (!keys || keys->type != RAY_SYM || !vals || vals->type != RAY_LIST)
         return NULL;
-    const void* kbase = ray_data(keys);
     ray_t** vptrs = (ray_t**)ray_data(vals);
     for (int64_t i = 0; i < keys->len; i++) {
-        int64_t sid = ray_read_sym(kbase, i, RAY_SYM, keys->attrs);
-        ray_t* s = ray_sym_str(sid);
+        ray_t* s = ray_sym_vec_cell(keys, i);
         if (s && ray_str_len(s) == key_len &&
             memcmp(ray_str_ptr(s), key, key_len) == 0)
             return vptrs[i];
@@ -72,18 +111,21 @@ static ray_t* dict_get(ray_t* dict, const char* key) {
     return NULL;
 }
 
+/* Returns the RUNTIME id of `key` when the dict contains it, -1 when
+ * absent.  Callers compare the result against dict_pair_view key atoms
+ * (runtime-domain by the atom rule) and ray_sym_intern'd clause names —
+ * so the match must be reported in the runtime domain, not as a raw
+ * cell id. */
 static int64_t dict_key_id(ray_t* dict, const char* key) {
     if (!dict || dict->type != RAY_DICT) return -1;
     size_t key_len = strlen(key);
     ray_t* keys = ray_dict_keys(dict);
     if (!keys || keys->type != RAY_SYM) return -1;
-    const void* kbase = ray_data(keys);
     for (int64_t i = 0; i < keys->len; i++) {
-        int64_t sid = ray_read_sym(kbase, i, RAY_SYM, keys->attrs);
-        ray_t* s = ray_sym_str(sid);
+        ray_t* s = ray_sym_vec_cell(keys, i);
         if (s && ray_str_len(s) == key_len &&
             memcmp(ray_str_ptr(s), key, key_len) == 0)
-            return sid;
+            return ray_sym_intern(key, key_len);
     }
     return -1;
 }
@@ -111,12 +153,14 @@ static void dict_pair_view(ray_t* d, ray_t* key_atoms, ray_t** out_elems, int64_
     if (!keys || keys->type != RAY_SYM || !vals || vals->type != RAY_LIST) return;
     int64_t n = keys->len;
     if (n > DICT_VIEW_MAX) { *out_n = -1; return; }
-    void* kbase = ray_data(keys);
     ray_t** vptrs = (ray_t**)ray_data(vals);
     for (int64_t i = 0; i < n; i++) {
         memset(&key_atoms[i], 0, sizeof(ray_t));
         key_atoms[i].type = -RAY_SYM;
-        key_atoms[i].i64  = ray_read_sym(kbase, i, RAY_SYM, keys->attrs);
+        /* cell-data flows into a SYM ATOM — atoms are runtime-domain by
+         * design, so re-express the cell id there (raw-copy fast path
+         * while the keys vec is runtime-domain). */
+        key_atoms[i].i64  = sym_cell_runtime_id(keys, i);
         out_elems[i*2]   = &key_atoms[i];
         out_elems[i*2+1] = vptrs[i];
     }
@@ -157,7 +201,9 @@ static ray_t* groups_to_pair_list(ray_t* d) {
         } else {
             void* base = ray_data(keys);
             switch (keys->type) {
-                case RAY_SYM: k = ray_sym(ray_read_sym(base, i, RAY_SYM, keys->attrs)); break;
+                /* group-key cell becomes a SYM ATOM: runtime-domain by
+                 * the atom rule (no-op while keys is runtime-domain). */
+                case RAY_SYM: k = ray_sym(sym_cell_runtime_id(keys, i)); break;
                 case RAY_I64:
                 case RAY_TIMESTAMP: k = ray_i64(((int64_t*)base)[i]); break;
                 case RAY_I32:
@@ -478,8 +524,8 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
             } else if (ray_is_vec(val) && val->type == RAY_SYM) {
                 for (int64_t c = 0; c < val->len; c++) {
                     if (n_keys >= TOPK_MAX_KEYS) { bad_clause = 1; break; }
-                    key_syms[n_keys] = ray_read_sym(ray_data(val), c,
-                                                    val->type, val->attrs);
+                    /* cell-data → runtime name id (column lookup below) */
+                    key_syms[n_keys] = sym_cell_runtime_id(val, c);
                     key_descs[n_keys] = is_desc;
                     n_keys++;
                 }
@@ -573,8 +619,8 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
                 n_sort++;
             } else if (ray_is_vec(val) && val->type == RAY_SYM) {
                 for (int64_t c = 0; c < val->len && n_sort < 16; c++) {
-                    int64_t sid = ray_read_sym(ray_data(val), c, val->type, val->attrs);
-                    ray_t* s = ray_sym_str(sid);
+                    /* cell-data: resolve through the vec's domain */
+                    ray_t* s = ray_sym_vec_cell(val, c);
                     sort_keys[n_sort] = ray_scan(g, ray_str_ptr(s));
                     sort_descs[n_sort] = is_desc;
                     n_sort++;
@@ -3289,6 +3335,9 @@ static inline int64_t key_read_i64(const void* d, int64_t idx,
     case RAY_F64: { int64_t u;
         memcpy(&u, &((const double*)d)[idx], 8);
         return u; }
+    /* SYM: raw index — callers compare cells of the source column
+     * against cells of a group-key column DERIVED from it (same
+     * domain by construction), never against foreign-domain ids. */
     case RAY_SYM:       return ray_read_sym(d, idx, bt, attrs);
     default:            return 0; /* caller validates type */
     }
@@ -3989,12 +4038,10 @@ static int collect_col_refs_set(ray_t* expr, ray_t* tbl,
     if (expr->type == RAY_SYM) {
         /* Sym vector — each element is a column name (e.g. multi-col
          * asc:/desc:/by: tuples).  Pull syms out at the storage width. */
-        const void* base = ray_data(expr);
-        int8_t  vt = expr->type;
-        uint8_t va = expr->attrs;
         int64_t len = ray_len(expr);
         for (int64_t i = 0; i < len && n < max_out; i++) {
-            int64_t s = ray_read_sym(base, i, vt, va);
+            /* cell-data → runtime name id (column lookup) */
+            int64_t s = sym_cell_runtime_id(expr, i);
             if (ray_table_get_col(tbl, s)) {
                 int dup = 0;
                 for (int j = 0; j < n; j++) if (out_syms[j] == s) { dup = 1; break; }
@@ -4208,15 +4255,13 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                     } else if (v && v->type == RAY_SYM) {
                         int64_t nv = ray_len(v);
                         if (n_sort_keys + nv > 16) { bad_clause = 1; break; }
-                        /* SYM vectors may be compact-width W8/W16/W32/W64.
-                         * Casting the data pointer to int64_t* is only
-                         * valid for W64; ray_read_sym does the width-
-                         * specialised load that resolves to the global
-                         * sym ID regardless of storage width. */
-                        const void* base = ray_data(v);
+                        /* SYM vectors may be compact-width W8/W16/W32/W64;
+                         * sym_cell_runtime_id does the width-specialised
+                         * load AND re-expresses the cell id as a runtime
+                         * name id for the column lookups below. */
                         for (int64_t kk = 0; kk < nv; kk++) {
                             sort_key_syms[n_sort_keys] =
-                                ray_read_sym(base, kk, v->type, v->attrs);
+                                sym_cell_runtime_id(v, kk);
                             sort_descs[n_sort_keys] = is_desc;
                             n_sort_keys++;
                         }
@@ -5599,6 +5644,13 @@ by_dict_done:
                                 ray_release(tbl);
                                 return key_vec ? key_vec : ray_error("oom", NULL);
                             }
+                            /* key_vals holds RAW cell ids read from ONE
+                             * source column — the output resolves over
+                             * that column's dictionary.  (The ray_sym()
+                             * atoms below are transient carriers into
+                             * store_typed_elem, not escaping results.) */
+                            if (kt == RAY_SYM)
+                                ray_sym_vec_adopt_domain(key_vec, sym_domain_rep(src));
                             key_vec->len = found;
                             for (int64_t gi = 0; gi < found; gi++) {
                                 size_t off = (size_t)gi * (size_t)nk + (size_t)k;
@@ -6125,6 +6177,9 @@ by_dict_done:
                          * memcpy the same esz on both sides. */
                         dst = ray_sym_vec_new(sc->attrs & RAY_SYM_W_MASK, ngroups);
                         if (dst && !RAY_IS_ERR(dst)) {
+                            /* raw-copies cell ids from ONE source column —
+                             * the output resolves over its dictionary */
+                            ray_sym_vec_adopt_domain(dst, sym_domain_rep(sc));
                             dst->len = ngroups;
                             uint8_t esz = ray_sym_elem_size(sct, dst->attrs);
                             const char* sb = (const char*)ray_data(sc);
@@ -6755,11 +6810,11 @@ by_dict_done:
         uint8_t n_keys = 0;
 
         if (by_expr->type == RAY_SYM) {
-            /* Multiple keys as SYM vector: [col1 col2 ...] */
+            /* Multiple keys as SYM vector: [col1 col2 ...] —
+             * cell-data resolved through the vec's domain. */
             int64_t nk = ray_len(by_expr);
-            int64_t* sym_ids = (int64_t*)ray_data(by_expr);
             for (int64_t i = 0; i < nk && n_keys < 16; i++) {
-                ray_t* name_str = ray_sym_str(sym_ids[i]);
+                ray_t* name_str = ray_sym_vec_cell(by_expr, i);
                 if (!name_str) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
                 key_ops[n_keys] = ray_scan(g, ray_str_ptr(name_str));
                 if (!key_ops[n_keys]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
@@ -7194,9 +7249,9 @@ by_dict_done:
                 n_keys = 0;
                 if (by_expr->type == RAY_SYM) {
                     int64_t nk = ray_len(by_expr);
-                    int64_t* sym_ids = (int64_t*)ray_data(by_expr);
                     for (int64_t i = 0; i < nk && n_keys < 16; i++) {
-                        ray_t* ns = ray_sym_str(sym_ids[i]);
+                        /* cell-data via the vec's domain */
+                        ray_t* ns = ray_sym_vec_cell(by_expr, i);
                         if (ns) key_ops[n_keys++] = ray_scan(g, ray_str_ptr(ns));
                     }
                 } else {
@@ -7940,10 +7995,9 @@ by_dict_done:
                 sort_descs[n_sort] = is_desc;
                 n_sort++;
             } else if (ray_is_vec(val) && val->type == RAY_SYM) {
-                /* Multiple column names */
+                /* Multiple column names — cell-data via the vec's domain */
                 for (int64_t c = 0; c < val->len && n_sort < 16; c++) {
-                    int64_t sid = ray_read_sym(ray_data(val), c, val->type, val->attrs);
-                    ray_t* s = ray_sym_str(sid);
+                    ray_t* s = ray_sym_vec_cell(val, c);
                     sort_keys[n_sort] = ray_scan(g, ray_str_ptr(s));
                     sort_descs[n_sort] = is_desc;
                     n_sort++;
@@ -8050,6 +8104,10 @@ by_dict_done:
                                 int esz = ray_elem_size(col->type);
                                 ray_t* new_col = ray_vec_new(col->type, nrows_r);
                                 if (RAY_IS_ERR(new_col)) { ok = 0; break; }
+                                /* row-reversal raw-copies cell ids from ONE
+                                 * source column — keep its dictionary */
+                                if (col->type == RAY_SYM)
+                                    ray_sym_vec_adopt_domain(new_col, col);
                                 new_col->len = nrows_r;
                                 char* src = (char*)ray_data(col);
                                 char* dst = (char*)ray_data(new_col);
@@ -8267,6 +8325,9 @@ by_dict_done:
                         (dst) = ((const int32_t*)_d)[idx]; break;              \
                     case RAY_TIMESTAMP:                                        \
                         (dst) = ((const int64_t*)_d)[idx]; break;              \
+                    /* SYM: raw index — scan_key vs grp_key, where grp_key  \
+                     * is gathered FROM scan_key (same domain), never a     \
+                     * foreign-domain id. */                                   \
                     case RAY_SYM:                                              \
                         (dst) = ray_read_sym(_d, (idx), (base_type),           \
                                              (vec)->attrs); break;             \
@@ -9304,6 +9365,10 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     int8_t ct = full_col->type;
                     ray_t* sub_col = ray_vec_new(ct, gsize);
                     if (RAY_IS_ERR(sub_col)) { ray_release(sub_tbl); ray_release(out_col); ray_release(result); ray_release(groups); ray_release(tbl); return sub_col; }
+                    /* per-group gather raw-copies cell ids from ONE
+                     * source column — keep its dictionary */
+                    if (ct == RAY_SYM)
+                        ray_sym_vec_adopt_domain(sub_col, full_col);
                     sub_col->len = gsize;
                     int esz = ray_elem_size(ct);
                     char* src = (char*)ray_data(full_col);
@@ -9655,9 +9720,13 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                             ray_vec_set_null(new_col, new_col->len - 1, true);
                     }
                 } else if (ct == RAY_SYM) {
+                    /* The merged output MIXES cells of TWO source vecs
+                     * (orig_col / expr_vec) — re-express each cell in the
+                     * runtime domain (raw-copy fast path while both are
+                     * runtime-domain). */
                     for (int64_t r = 0; r < nrows; r++) {
                         ray_t* src_vec = mask[r] ? expr_vec : orig_col;
-                        int64_t sym_val = ray_read_sym(ray_data(src_vec), r, src_vec->type, src_vec->attrs);
+                        int64_t sym_val = sym_cell_runtime_id(src_vec, r);
                         new_col = ray_vec_append(new_col, &sym_val);
                         if (RAY_IS_ERR(new_col)) { ray_release(expr_vec); ray_release(result); ray_release(mask_vec); ray_release(tbl); return new_col; }
                         if (ray_vec_is_null(src_vec, r))
@@ -10231,7 +10300,10 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
             int64_t col_name = ray_table_col_name(tbl, c);
             dv[c] = NULL;
             for (int64_t d = 0; d < dict_len; d++) {
-                int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
+                /* dict-key cell vs runtime column NAME id: translate the
+                 * cell into the runtime domain before comparing (raw
+                 * compare while the dict keys are runtime-domain). */
+                int64_t dk = sym_cell_runtime_id(dkeys, d);
                 if (dk != col_name) continue;
                 if (dvals->type == RAY_LIST) {
                     dv[c] = ((ray_t**)ray_data(dvals))[d];
@@ -10246,7 +10318,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
         }
         /* Verify all dict keys exist as table columns */
         for (int64_t d = 0; d < dict_len; d++) {
-            int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
+            int64_t dk = sym_cell_runtime_id(dkeys, d);
             int found_in_tbl = 0;
             for (int64_t c = 0; c < ncols; c++) {
                 if (ray_table_col_name(tbl, c) == dk) { found_in_tbl = 1; break; }
@@ -10302,8 +10374,11 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                 if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
             }
         } else if (ct == RAY_SYM) {
+            /* The output MIXES orig_col cells with the appended row value
+             * (a runtime-domain atom) — re-express each copied cell in
+             * the runtime domain (raw-copy fast path pre-flip). */
             for (int64_t r = 0; r < nrows; r++) {
-                int64_t sym_val = ray_read_sym(ray_data(orig_col), r, orig_col->type, orig_col->attrs);
+                int64_t sym_val = sym_cell_runtime_id(orig_col, r);
                 new_col = ray_vec_append(new_col, &sym_val);
                 if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
                 if (src_has_nulls && ray_vec_is_null(orig_col, r))
@@ -10537,7 +10612,8 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
             for (int64_t i = 0; i < ncols; i++)
                 if (ray_table_col_name(tbl, i) == cn) tbl_matches++;
             for (int64_t d = 0; d < n_pairs; d++) {
-                int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
+                /* dict-key cell vs runtime column NAME id (see insert) */
+                int64_t dk = sym_cell_runtime_id(dkeys, d);
                 if (dk == cn) dict_matches++;
             }
             if (tbl_matches != 1 || dict_matches != 1) {
@@ -10555,7 +10631,7 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
             int64_t col_name = ray_table_col_name(tbl, c);
             drl[c] = NULL;
             for (int64_t d = 0; d < n_pairs; d++) {
-                int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
+                int64_t dk = sym_cell_runtime_id(dkeys, d);
                 if (dk != col_name) continue;
                 if (dvals->type == RAY_LIST) {
                     drl[c] = ((ray_t**)ray_data(dvals))[d];
@@ -10637,7 +10713,13 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         return cur_tbl;
     }
 
-    /* Type-check key columns before searching */
+    /* Type-check key columns before searching.  For SYM keys, resolve
+     * the literal key atom (runtime-domain by design) into each key
+     * column's OWN domain once: cells below compare as raw indices
+     * against this per-column want-id.  Absent from the column's
+     * domain → -1 → matches nothing → insert path (correct).  Exact
+     * no-op while the column is runtime-domain (want == atom->i64). */
+    int64_t key_sym_want[16];
     for (int64_t k = 0; k < n_key_cols; k++) {
         int64_t kci = key_col_indices[k];
         ray_t* key_col = ray_table_get_col_idx(tbl, kci);
@@ -10650,6 +10732,17 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         if (kt == RAY_SYM && key_atom->type != -RAY_SYM) {
             ray_release(tbl); ray_release(key_sym); ray_release(row);
             return ray_error("type", NULL);
+        }
+        key_sym_want[k] = -1;
+        if (kt == RAY_SYM) {
+            if (ray_sym_vec_domain(key_col) == ray_sym_runtime_domain()) {
+                key_sym_want[k] = key_atom->i64;
+            } else {
+                ray_t* ks = ray_sym_str(key_atom->i64);
+                key_sym_want[k] = ks
+                    ? ray_sym_vec_lookup(key_col, ray_str_ptr(ks), ray_str_len(ks))
+                    : -1;
+            }
         }
     }
 
@@ -10666,7 +10759,8 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
                 double needle = (key_atom->type == -RAY_F64) ? key_atom->f64 : (double)key_atom->i64;
                 if (((double*)ray_data(key_col))[r] != needle) match = 0;
             } else if (kt == RAY_SYM) {
-                if (ray_read_sym(ray_data(key_col), r, key_col->type, key_col->attrs) != key_atom->i64) match = 0;
+                /* raw index compare against the domain-resolved want id */
+                if (ray_read_sym(ray_data(key_col), r, key_col->type, key_col->attrs) != key_sym_want[k]) match = 0;
             } else if (kt == RAY_STR) {
                 const char* ns = ray_str_ptr(key_atom);
                 size_t nl = ray_str_len(key_atom);
@@ -10728,11 +10822,14 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
                 if (RAY_IS_ERR(new_col)) { ray_release(result); ray_release(tbl); ray_release(key_sym); ray_release(row); return new_col; }
             }
         } else if (ct == RAY_SYM) {
+            /* MIXES orig_col cells with the replacement row value (a
+             * runtime-domain atom) — re-express copied cells in the
+             * runtime domain (raw-copy fast path pre-flip). */
             for (int64_t r = 0; r < nrows; r++) {
                 if (r == match_row && has_new_val) {
                     new_col = append_atom_to_col(new_col, row_elems[c]);
                 } else {
-                    int64_t sym_val = ray_read_sym(ray_data(orig_col), r, orig_col->type, orig_col->attrs);
+                    int64_t sym_val = sym_cell_runtime_id(orig_col, r);
                     new_col = ray_vec_append(new_col, &sym_val);
                 }
                 if (RAY_IS_ERR(new_col)) { ray_release(result); ray_release(tbl); ray_release(key_sym); ray_release(row); return new_col; }
@@ -11270,10 +11367,12 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
 
         int64_t nkeys = ray_len(keys_vec);
         if (nkeys < 2) return ray_error("domain", NULL);
-        int64_t* key_ids = (int64_t*)ray_data(keys_vec);
 
-        /* Last key is the time key, rest are equality keys */
-        int64_t time_key = key_ids[nkeys - 1];
+        /* Last key is the time key, rest are equality keys.  keys_vec is
+         * an EVALUATED user vec (any width, any domain) — read cells via
+         * the domain-aware width-specialised helper and re-express them
+         * as runtime name ids for the column lookups below. */
+        int64_t time_key = sym_cell_runtime_id(keys_vec, nkeys - 1);
         int64_t n_eq = nkeys - 1;
 
         int64_t left_nrows = ray_table_nrows(left_tbl);
@@ -11287,8 +11386,9 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
         /* Get equality columns */
         ray_t* left_eq[16], *right_eq[16];
         for (int64_t e = 0; e < n_eq && e < 16; e++) {
-            left_eq[e] = ray_table_get_col(left_tbl, key_ids[e]);
-            right_eq[e] = ray_table_get_col(right_tbl, key_ids[e]);
+            int64_t eq_key = sym_cell_runtime_id(keys_vec, e);
+            left_eq[e] = ray_table_get_col(left_tbl, eq_key);
+            right_eq[e] = ray_table_get_col(right_tbl, eq_key);
             if (!left_eq[e] || !right_eq[e]) return ray_error("domain", NULL);
         }
 
@@ -11312,7 +11412,8 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
             int64_t adn = (dkeys && dkeys->type == RAY_SYM) ? dkeys->len : 0;
             ray_t** lvals = (dvals && dvals->type == RAY_LIST) ? (ray_t**)ray_data(dvals) : NULL;
             for (int64_t di = 0; di < adn && n_agg < WJ_MAX_AGG; di++) {
-                int64_t kname_id = ray_read_sym(ray_data(dkeys), di, RAY_SYM, dkeys->attrs);
+                /* dict-key cell becomes an output column NAME — runtime */
+                int64_t kname_id = sym_cell_runtime_id(dkeys, di);
                 ray_t* expr = lvals ? lvals[di] : NULL;
                 if (!expr) continue;
                 /* (op col) aggregation form */
