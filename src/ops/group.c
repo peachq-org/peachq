@@ -673,8 +673,14 @@ static int64_t cd_seq_count(int8_t in_type, uint8_t in_attrs,
 }
 
 static int64_t cd_sym_dense_count(ray_t* input) {
-    uint32_t nsyms = ray_sym_count();
-    if (nsyms == 0) return 0;
+    /* Cell ids are positions in the COLUMN's domain — size seen[] by that
+     * domain's count, not the global intern count (a FILE-domain position
+     * can exceed the global count → spurious -2 bail; and the global count
+     * can dwarf the column's domain → oversized calloc).  Identical value
+     * while the domain is the runtime singleton. */
+    int64_t dom_n = ray_sym_domain_count(ray_sym_vec_domain(input));
+    uint32_t nsyms = (dom_n > 0 && dom_n <= UINT32_MAX) ? (uint32_t)dom_n : 0;
+    if (nsyms == 0) return dom_n == 0 ? 0 : -2;
 
     ray_t* seen_hdr = NULL;
     uint8_t* seen = (uint8_t*)scratch_calloc(&seen_hdr, (size_t)nsyms);
@@ -6612,6 +6618,14 @@ da_path:;
                             if (agg_types[a] == RAY_F64) {
                                 if (wa->min_val[i].f < merged->min_val[i].f)
                                     merged->min_val[i].f = wa->min_val[i].f;
+                            } else if (agg_types[a] == RAY_SYM) {
+                                /* Lexicographic merge — mirrors da_merge_fn.
+                                 * INT64_MAX is the "no value seen" seed. */
+                                if (wa->min_val[i].i != INT64_MAX &&
+                                    (merged->min_val[i].i == INT64_MAX ||
+                                     sym_lex_lt(ray_sym_vec_domain(agg_vecs[a]),
+                                                wa->min_val[i].i, merged->min_val[i].i)))
+                                    merged->min_val[i].i = wa->min_val[i].i;
                             } else {
                                 if (wa->min_val[i].i < merged->min_val[i].i)
                                     merged->min_val[i].i = wa->min_val[i].i;
@@ -6624,6 +6638,14 @@ da_path:;
                             if (agg_types[a] == RAY_F64) {
                                 if (wa->max_val[i].f > merged->max_val[i].f)
                                     merged->max_val[i].f = wa->max_val[i].f;
+                            } else if (agg_types[a] == RAY_SYM) {
+                                /* Lexicographic merge — mirrors da_merge_fn.
+                                 * INT64_MIN is the "no value seen" seed. */
+                                if (wa->max_val[i].i != INT64_MIN &&
+                                    (merged->max_val[i].i == INT64_MIN ||
+                                     sym_lex_gt(ray_sym_vec_domain(agg_vecs[a]),
+                                                wa->max_val[i].i, merged->max_val[i].i)))
+                                    merged->max_val[i].i = wa->max_val[i].i;
                             } else {
                                 if (wa->max_val[i].i > merged->max_val[i].i)
                                     merged->max_val[i].i = wa->max_val[i].i;
@@ -6693,6 +6715,14 @@ da_path:;
                             if (agg_types[a] == RAY_F64) {
                                 if (wa->min_val[i].f < merged->min_val[i].f)
                                     merged->min_val[i].f = wa->min_val[i].f;
+                            } else if (agg_types[a] == RAY_SYM) {
+                                /* Lexicographic merge — mirrors da_merge_fn.
+                                 * INT64_MAX is the "no value seen" seed. */
+                                if (wa->min_val[i].i != INT64_MAX &&
+                                    (merged->min_val[i].i == INT64_MAX ||
+                                     sym_lex_lt(ray_sym_vec_domain(agg_vecs[a]),
+                                                wa->min_val[i].i, merged->min_val[i].i)))
+                                    merged->min_val[i].i = wa->min_val[i].i;
                             } else {
                                 if (wa->min_val[i].i < merged->min_val[i].i)
                                     merged->min_val[i].i = wa->min_val[i].i;
@@ -6705,6 +6735,14 @@ da_path:;
                             if (agg_types[a] == RAY_F64) {
                                 if (wa->max_val[i].f > merged->max_val[i].f)
                                     merged->max_val[i].f = wa->max_val[i].f;
+                            } else if (agg_types[a] == RAY_SYM) {
+                                /* Lexicographic merge — mirrors da_merge_fn.
+                                 * INT64_MIN is the "no value seen" seed. */
+                                if (wa->max_val[i].i != INT64_MIN &&
+                                    (merged->max_val[i].i == INT64_MIN ||
+                                     sym_lex_gt(ray_sym_vec_domain(agg_vecs[a]),
+                                                wa->max_val[i].i, merged->max_val[i].i)))
+                                    merged->max_val[i].i = wa->max_val[i].i;
                             } else {
                                 if (wa->max_val[i].i > merged->max_val[i].i)
                                     merged->max_val[i].i = wa->max_val[i].i;
