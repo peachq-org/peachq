@@ -262,6 +262,22 @@ static inline struct ray_sym_domain_s* ray_sym_vec_domain(ray_t* v) {
     return d ? d : ray_sym_runtime_domain();
 }
 
+/* Domain resolution primitives (full API + docs: src/table/domain.h).
+ * Declared here so the inline cell-resolution helpers next to
+ * ray_read_sym (src/table/sym.h) compile without internal headers.
+ *   str:  borrowed string atom for position `pos` (NULL if out of range);
+ *   find: position of the bytes in the domain, -1 if absent. */
+ray_t*  ray_sym_domain_str(struct ray_sym_domain_s* dom, int64_t pos);
+int64_t ray_sym_domain_find(struct ray_sym_domain_s* dom, const char* str, size_t len);
+
+/* An output SYM vector built by COPYING cell ids from `in` (group keys,
+ * filtered selections) must resolve over the same dictionary: release
+ * out's previous non-singleton domain ref, copy the pointer, retain the
+ * new non-singleton.  No-op unless both are RAY_SYM vectors (and never
+ * touches slice headers — their aux bytes are parent/offset).  Defined
+ * in src/vec/vec.c. */
+void ray_sym_vec_adopt_domain(ray_t* out, ray_t* in);
+
 /* ===== Introspection helpers (FFI-safe access for foreign consumers) ===== */
 
 int8_t   ray_obj_type(ray_t* v);
