@@ -52,28 +52,8 @@
  * ══════════════════════════════════════════ */
 
 /* sym_id_runtime / sym_cell_runtime_id (cell id → runtime-domain id)
- * are shared from lang/internal.h since the Task-3 chokepoint fixes. */
-
-/* The vec whose domain represents `col`'s SYM cell-id space: the col
- * itself, its first SYM segment (PARTED — all partitions resolve over
- * the root symfile's domain), or the MAPCOMMON keys vec.  NULL when
- * `col` carries no SYM cells. */
-static ray_t* sym_domain_rep(ray_t* col) {
-    if (!col) return NULL;
-    if (col->type == RAY_SYM) return col;
-    if (RAY_IS_PARTED(col->type) &&
-        RAY_PARTED_BASETYPE(col->type) == RAY_SYM) {
-        ray_t** segs = (ray_t**)ray_data(col);
-        for (int64_t i = 0; i < col->len; i++)
-            if (segs[i] && segs[i]->type == RAY_SYM) return segs[i];
-        return NULL;
-    }
-    if (col->type == RAY_MAPCOMMON) {
-        ray_t** ptrs = (ray_t**)ray_data(col);
-        return (ptrs[0] && ptrs[0]->type == RAY_SYM) ? ptrs[0] : NULL;
-    }
-    return NULL;
-}
+ * and sym_domain_rep (PARTED/MAPCOMMON domain representative) are
+ * shared from lang/internal.h since the Task-3/4 sweeps. */
 
 /* Helper: look up a key in a select-clause dict (RAY_DICT).
  * Returns the value expression (unevaluated), or NULL if not found.

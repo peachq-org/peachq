@@ -26,6 +26,7 @@
 #include "ops/rowsel.h"
 #include "ops/hll.h"        /* approximate count-distinct via HyperLogLog */
 #include "lang/internal.h"  /* for ray_median_dbl_inplace */
+#include "table/domain.h"   /* sym-domain resolution (ray_sym_domain_count) */
 
 /* ============================================================================
  * Reduction execution
@@ -53,15 +54,21 @@ static void reduce_acc_init(reduce_acc_t* acc) {
     acc->cnt = 0; acc->null_count = 0; acc->has_first = false;
 }
 
-/* Lexicographic SYM compare — resolves both sym_ids to strings via the
- * global intern table and memcmps.  Used by SYM MIN/MAX so the result is
- * consistent with asc/desc (sort.c uses build_enum_rank for the same
- * lex semantic).  Sym-id comparison would expose intern-order which is
- * a global session state — not a stable, user-visible ordering. */
-static inline bool sym_lex_lt(int64_t a, int64_t b) {
+/* Lexicographic SYM compare — resolves both sym_ids to strings and
+ * memcmps.  Used by SYM MIN/MAX so the result is consistent with
+ * asc/desc (sort.c uses build_enum_rank for the same lex semantic).
+ * Sym-id comparison would expose intern-order which is a global session
+ * state — not a stable, user-visible ordering.
+ *
+ * Both ids are CELL-DATA of one SYM column, so they resolve through
+ * that COLUMN's domain (sym-domain Phase 2) — pass
+ * ray_sym_vec_domain(col).  Exact no-op while the domain is the runtime
+ * singleton (ray_sym_domain_str delegates to ray_sym_str). */
+static inline bool sym_lex_lt(struct ray_sym_domain_s* dom,
+                              int64_t a, int64_t b) {
     if (a == b) return false;
-    ray_t* sa = ray_sym_str(a);
-    ray_t* sb = ray_sym_str(b);
+    ray_t* sa = ray_sym_domain_str(dom, a);
+    ray_t* sb = ray_sym_domain_str(dom, b);
     if (!sa || !sb) return a < b;
     const char* pa = ray_str_ptr(sa);
     const char* pb = ray_str_ptr(sb);
@@ -72,7 +79,10 @@ static inline bool sym_lex_lt(int64_t a, int64_t b) {
     if (c != 0) return c < 0;
     return la < lb;
 }
-static inline bool sym_lex_gt(int64_t a, int64_t b) { return sym_lex_lt(b, a); }
+static inline bool sym_lex_gt(struct ray_sym_domain_s* dom,
+                              int64_t a, int64_t b) {
+    return sym_lex_lt(dom, b, a);
+}
 
 /* ── Wide-element (STR/GUID) min/max/first/last ──────────────────────────
  * STR (a 16-byte ray_str_t: pool pointer + length) and GUID (16 raw bytes)
@@ -266,14 +276,15 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
          * order is by string content (matches asc/desc), not by intern
          * id.  Same 4-way dispatch to eliminate the per-element
          * null/idx branches. */
+        struct ray_sym_domain_s* dom = ray_sym_vec_domain(input);
         if (!has_nulls && !idx) {
             for (int64_t i = start; i < end; i++) {
                 int64_t v = read_col_i64(base, i, input->type, input->attrs);
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
-                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
-                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
+                else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -284,8 +295,8 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
-                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
-                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
+                else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -296,8 +307,8 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
-                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
-                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
+                else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -309,8 +320,8 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 acc->sum_i += v; acc->sum_sq_i += v * v;
                 acc->prod_i = (int64_t)((uint64_t)acc->prod_i * (uint64_t)v);
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
-                else { if (sym_lex_lt(v, acc->min_i)) acc->min_i = v;
-                       if (sym_lex_gt(v, acc->max_i)) acc->max_i = v; }
+                else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
+                       if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
                 if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
                 acc->last_i = v; acc->cnt++;
             }
@@ -335,7 +346,8 @@ static void par_reduce_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t 
                  c->has_nulls, c->idx);
 }
 
-static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_type) {
+static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_type,
+                         struct ray_sym_domain_s* sym_dom) {
     if (in_type == RAY_F64) {
         dst->sum_f += src->sum_f;
         dst->sum_sq_f += src->sum_sq_f;
@@ -352,8 +364,8 @@ static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_t
             /* Lex compare for SYM min/max (see sym_lex_lt). */
             if (src->cnt > 0) {
                 if (dst->cnt == 0) { dst->min_i = src->min_i; dst->max_i = src->max_i; }
-                else { if (sym_lex_lt(src->min_i, dst->min_i)) dst->min_i = src->min_i;
-                       if (sym_lex_gt(src->max_i, dst->max_i)) dst->max_i = src->max_i; }
+                else { if (sym_lex_lt(sym_dom, src->min_i, dst->min_i)) dst->min_i = src->min_i;
+                       if (sym_lex_gt(sym_dom, src->max_i, dst->max_i)) dst->max_i = src->max_i; }
             }
         } else {
             if (src->min_i < dst->min_i) dst->min_i = src->min_i;
@@ -1979,7 +1991,11 @@ ray_t* ray_wide_minmax_per_group_buf(ray_t* src, uint16_t op,
     return out;
 }
 
-static ray_t* reduction_i64_result(int64_t val, int8_t out_type) {
+/* `src` is the reduced SYM column when out_type == RAY_SYM (NULL
+ * otherwise): the accumulated value is a CELL id in src's domain, and
+ * the result is a SYM ATOM — runtime-domain by the atom rule — so it
+ * must be re-expressed (raw copy while src is runtime-domain). */
+static ray_t* reduction_i64_result(int64_t val, int8_t out_type, ray_t* src) {
     switch (out_type) {
         case RAY_BOOL:      return ray_bool((bool)val);
         case RAY_DATE:      return ray_date((int32_t)val);
@@ -1988,17 +2004,17 @@ static ray_t* reduction_i64_result(int64_t val, int8_t out_type) {
         case RAY_I32:       return ray_i32((int32_t)val);
         case RAY_I16:       return ray_i16((int16_t)val);
         case RAY_U8:        return ray_u8((uint8_t)val);
-        case RAY_SYM:       return ray_sym(val);
+        case RAY_SYM:       return ray_sym(src ? sym_id_runtime(src, val) : val);
         default:            return ray_i64(val);
     }
 }
 
 static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
-                                       double fval, int64_t ival) {
+                                       double fval, int64_t ival, ray_t* src) {
     int8_t out_type = op->out_type ? op->out_type : in_type;
     if (!found) return ray_typed_null(-out_type);
     if (out_type == RAY_F64) return ray_f64(fval);
-    return reduction_i64_result(ival, out_type);
+    return reduction_i64_result(ival, out_type, out_type == RAY_SYM ? src : NULL);
 }
 
 ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
@@ -2093,7 +2109,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             return ray_typed_null(-in_type);
         void* base = ray_data(input);
         if (in_type == RAY_F64) return ray_f64(((const double*)base)[row]);
-        return reduction_i64_result(read_col_i64(base, row, in_type, input->attrs), in_type);
+        return reduction_i64_result(read_col_i64(base, row, in_type, input->attrs), in_type,
+                                    in_type == RAY_SYM ? input : NULL);
     }
 
     ray_pool_t* pool = ray_pool_get();
@@ -2114,7 +2131,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         merged = accs[0];
         for (uint32_t i = 1; i < nw; i++) {
             if (!accs[i].has_first) continue;
-            reduce_merge(&merged, &accs[i], in_type);
+            reduce_merge(&merged, &accs[i], in_type, ray_sym_vec_domain(input));
         }
         /* first = accs[first worker with data], last = accs[last worker with data] */
         for (uint32_t i = 0; i < nw; i++) {
@@ -2136,14 +2153,14 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         switch (op->opcode) {
             case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : (in_type == RAY_TIME ? ray_time(merged.sum_i) : ray_i64(merged.sum_i)); break;
             case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : ray_i64(merged.prod_i); break;
-            case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i); break;
-            case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i); break;
+            case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i, input); break;
+            case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i, input); break;
             /* COUNT returns total length including nulls — matches ray_count_fn's
              * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
             case OP_COUNT: result = ray_i64(scan_n); break;
             case OP_AVG:   result = merged.cnt > 0 ? ray_f64(in_type == RAY_F64 ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt) : ray_typed_null(-RAY_F64); break;
-            case OP_FIRST: result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.first_f) : reduction_i64_result(merged.first_i, in_type)) : ray_typed_null(-in_type); break;
-            case OP_LAST:  result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.last_f) : reduction_i64_result(merged.last_i, in_type)) : ray_typed_null(-in_type); break;
+            case OP_FIRST: result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.first_f) : reduction_i64_result(merged.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
+            case OP_LAST:  result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.last_f) : reduction_i64_result(merged.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
             case OP_VAR: case OP_VAR_POP:
             case OP_STDDEV: case OP_STDDEV_POP: {
                 bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? merged.cnt <= 1 : merged.cnt <= 0;
@@ -2175,14 +2192,14 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     switch (op->opcode) {
         case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : (in_type == RAY_TIME ? ray_time(acc.sum_i) : ray_i64(acc.sum_i));
         case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : ray_i64(acc.prod_i);
-        case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i);
-        case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i);
+        case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i, input);
+        case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i, input);
         /* COUNT returns total length including nulls — matches ray_count_fn's
          * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
         case OP_COUNT: return ray_i64(scan_n);
         case OP_AVG:   return acc.cnt > 0 ? ray_f64(in_type == RAY_F64 ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt) : ray_typed_null(-RAY_F64);
-        case OP_FIRST: return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.first_f) : reduction_i64_result(acc.first_i, in_type)) : ray_typed_null(-in_type);
-        case OP_LAST:  return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.last_f) : reduction_i64_result(acc.last_i, in_type)) : ray_typed_null(-in_type);
+        case OP_FIRST: return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.first_f) : reduction_i64_result(acc.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
+        case OP_LAST:  return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.last_f) : reduction_i64_result(acc.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
         case OP_VAR: case OP_VAR_POP:
         case OP_STDDEV: case OP_STDDEV_POP: {
             bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? acc.cnt <= 1 : acc.cnt <= 0;
@@ -2268,8 +2285,12 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
             ly.agg_val_slot[a] = (int8_t)nv;
             if (agg_vecs[a]->type == RAY_F64)
                 ly.agg_is_f64 |= (1u << a);
-            if (agg_vecs[a]->type == RAY_SYM)
+            if (agg_vecs[a]->type == RAY_SYM) {
                 ly.agg_is_sym |= (1u << a);
+                /* lex MIN/MAX resolves cell ids through the COLUMN's
+                 * domain (borrowed; the agg vec outlives the layout). */
+                ly.agg_dom[a] = ray_sym_vec_domain(agg_vecs[a]);
+            }
             nv++;
             /* Binary aggregator (OP_PEARSON_CORR): the y-side input
              * occupies the very next slot so phase1 packs (x, y)
@@ -2581,13 +2602,13 @@ static inline void accum_from_entry(char* row, const char* entry,
             if (nf & GHT_NEED_MIN) {
                 int64_t* p = &ROW_WR_I64(row, ly->off_min, s);
                 if (ly->agg_is_sym & amask) {
-                    if (*p == INT64_MAX || sym_lex_lt(v, *p)) *p = v;
+                    if (*p == INT64_MAX || sym_lex_lt(ly->agg_dom[a], v, *p)) *p = v;
                 } else if (v < *p) *p = v;
             }
             if (nf & GHT_NEED_MAX) {
                 int64_t* p = &ROW_WR_I64(row, ly->off_max, s);
                 if (ly->agg_is_sym & amask) {
-                    if (*p == INT64_MIN || sym_lex_gt(v, *p)) *p = v;
+                    if (*p == INT64_MIN || sym_lex_gt(ly->agg_dom[a], v, *p)) *p = v;
                 } else if (v > *p) *p = v;
             }
             if (nf & GHT_NEED_SUMSQ) { ROW_WR_F64(row, ly->off_sumsq, s) += (double)v * (double)v; }
@@ -3846,6 +3867,11 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
         }
         ray_t* new_col = ray_vec_new(out_type, (int64_t)grp_count);
         if (!new_col || RAY_IS_ERR(new_col)) continue;
+        /* SYM MIN/MAX/FIRST/LAST: the emitted values are RAW cell ids
+         * accumulated from ONE source column — the output resolves over
+         * that column's dictionary (no-op while runtime-domain). */
+        if (out_type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_col, sym_domain_rep(agg_col));
         new_col->len = (int64_t)grp_count;
         for (uint32_t gi = 0; gi < grp_count; gi++) {
             size_t idx = (size_t)gi * n_aggs + a;
@@ -4310,11 +4336,11 @@ static inline int64_t group_strlen_at(const ray_t* col, int64_t row) {
         str_resolve(col, &elems, &pool);
         return (int64_t)elems[row].len;
     }
-    const char* sp;
-    size_t sl;
-    (void)sp;
-    sym_elem(col, row, &sp, &sl);
-    return (int64_t)sl;
+    /* SYM cell: resolve through the COLUMN's domain (sym-domain Phase 2)
+     * — sym_elem resolves via the global table, wrong for FILE-domain
+     * columns. */
+    ray_t* s = ray_sym_vec_cell((ray_t*)col, row);
+    return s ? (int64_t)ray_str_len(s) : 0;
 }
 
 static inline int64_t group_strlen_at_cached(const ray_t* col, int64_t row,
@@ -4328,7 +4354,11 @@ static inline int64_t group_strlen_at_cached(const ray_t* col, int64_t row,
         str_resolve(col, &elems, &pool);
         return (int64_t)elems[row].len;
     }
-    if (col->type == RAY_SYM && sym_strings) {
+    /* The lock-free cache is a borrow of the GLOBAL sym table — only
+     * valid when this column's cell ids ARE global ids (runtime domain).
+     * FILE-domain columns fall through to the domain-aware resolver. */
+    if (col->type == RAY_SYM && sym_strings &&
+        ray_sym_vec_domain((ray_t*)col) == ray_sym_runtime_domain()) {
         int64_t sym_id = ray_read_sym(ray_data((ray_t*)col), row,
                                       col->type, col->attrs);
         if (sym_id < 0 || (uint64_t)sym_id >= sym_count) return 0;
@@ -4585,7 +4615,8 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
             if (is_f) { if (fv == fv && fv < acc->min_val[a].f) acc->min_val[a].f = fv; }
             else if (c->agg_types[a] == RAY_SYM) {
                 /* Lex compare for SYM; INT64_MAX = "not seen yet". */
-                if (acc->min_val[a].i == INT64_MAX || sym_lex_lt(iv, acc->min_val[a].i))
+                if (acc->min_val[a].i == INT64_MAX ||
+                    sym_lex_lt(ray_sym_vec_domain(c->agg_cols[a]), iv, acc->min_val[a].i))
                     acc->min_val[a].i = iv;
             }
             else if (!int_null) { if (iv < acc->min_val[a].i) acc->min_val[a].i = iv; }
@@ -4593,7 +4624,8 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
         } else if (op == OP_MAX) {
             if (is_f) { if (fv == fv && fv > acc->max_val[a].f) acc->max_val[a].f = fv; }
             else if (c->agg_types[a] == RAY_SYM) {
-                if (acc->max_val[a].i == INT64_MIN || sym_lex_gt(iv, acc->max_val[a].i))
+                if (acc->max_val[a].i == INT64_MIN ||
+                    sym_lex_gt(ray_sym_vec_domain(c->agg_cols[a]), iv, acc->max_val[a].i))
                     acc->max_val[a].i = iv;
             }
             else if (!int_null) { if (iv > acc->max_val[a].i) acc->max_val[a].i = iv; }
@@ -4749,7 +4781,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                 if (fv == fv && fv < acc->min_val[idx].f) acc->min_val[idx].f = fv;
             } else if (c->agg_types[a] == RAY_SYM) {
                 /* Lex compare for SYM; INT64_MAX = "not seen yet". */
-                if (acc->min_val[idx].i == INT64_MAX || sym_lex_lt(iv, acc->min_val[idx].i))
+                if (acc->min_val[idx].i == INT64_MAX ||
+                    sym_lex_lt(ray_sym_vec_domain(c->agg_cols[a]), iv, acc->min_val[idx].i))
                     acc->min_val[idx].i = iv;
             } else if (!int_null) {
                 if (iv < acc->min_val[idx].i) acc->min_val[idx].i = iv;
@@ -4759,7 +4792,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
             if (is_f) {
                 if (fv == fv && fv > acc->max_val[idx].f) acc->max_val[idx].f = fv;
             } else if (c->agg_types[a] == RAY_SYM) {
-                if (acc->max_val[idx].i == INT64_MIN || sym_lex_gt(iv, acc->max_val[idx].i))
+                if (acc->max_val[idx].i == INT64_MIN ||
+                    sym_lex_gt(ray_sym_vec_domain(c->agg_cols[a]), iv, acc->max_val[idx].i))
                     acc->max_val[idx].i = iv;
             } else if (!int_null) {
                 if (iv > acc->max_val[idx].i) acc->max_val[idx].i = iv;
@@ -4882,6 +4916,7 @@ typedef struct {
     uint8_t     n_aggs;
     const int8_t* agg_types;  /* per-agg value type (for typed merge) */
     const uint16_t* agg_ops;  /* per-agg opcode (for FIRST/LAST merge) */
+    ray_t* const* agg_cols;   /* per-agg input vec (SYM lex via its domain) */
 } da_merge_ctx_t;
 
 static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
@@ -4938,7 +4973,8 @@ static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
                     } else if (agg_types[a] == RAY_SYM) {
                         if (wa->min_val[idx].i != INT64_MAX &&
                             (merged->min_val[idx].i == INT64_MAX ||
-                             sym_lex_lt(wa->min_val[idx].i, merged->min_val[idx].i)))
+                             sym_lex_lt(ray_sym_vec_domain(c->agg_cols[a]),
+                                        wa->min_val[idx].i, merged->min_val[idx].i)))
                             merged->min_val[idx].i = wa->min_val[idx].i;
                     } else {
                         if (wa->min_val[idx].i < merged->min_val[idx].i)
@@ -4955,7 +4991,8 @@ static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
                     } else if (agg_types[a] == RAY_SYM) {
                         if (wa->max_val[idx].i != INT64_MIN &&
                             (merged->max_val[idx].i == INT64_MIN ||
-                             sym_lex_gt(wa->max_val[idx].i, merged->max_val[idx].i)))
+                             sym_lex_gt(ray_sym_vec_domain(c->agg_cols[a]),
+                                        wa->max_val[idx].i, merged->max_val[idx].i)))
                             merged->max_val[idx].i = wa->max_val[idx].i;
                     } else {
                         if (wa->max_val[idx].i > merged->max_val[idx].i)
@@ -5241,7 +5278,12 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
             int8_t bt = RAY_PARTED_BASETYPE(pcol->type);
             int64_t card;
             if (RAY_IS_SYM(bt)) {
-                uint32_t sym_n = ray_sym_count();
+                /* seg0's cell ids are positions in ITS domain — size the
+                 * presence bitmap by that domain's count, not the global
+                 * intern count (a FILE-domain position can exceed the
+                 * global count → OOB).  Identical value pre-flip. */
+                int64_t dom_n = ray_sym_domain_count(ray_sym_vec_domain(seg0));
+                uint32_t sym_n = (dom_n > 0 && dom_n <= UINT32_MAX) ? (uint32_t)dom_n : 0;
                 if (sym_n == 0 || sym_n > 4194304) { est_groups = rows_per_part; break; }
                 size_t bwords = ((size_t)sym_n + 63) / 64;
                 ray_t* bits_hdr = NULL;
@@ -5373,6 +5415,11 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
                     ray_release(flat_tbl);
                     return ray_error("oom", NULL);
                 }
+                /* segment cells are memcpy'd raw — all partitions
+                 * resolve over the root symfile's domain (PARTED
+                 * contract); adopt it from the first SYM segment. */
+                if (base_type == RAY_SYM)
+                    ray_sym_vec_adopt_domain(flat, sym_domain_rep(col));
                 flat->len = total_rows;
 
                 size_t elem_size = (size_t)ray_sym_elem_size(base_type, base_attrs);
@@ -6015,7 +6062,8 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     } else if (agg_types[a] == RAY_SYM) {
                         if (wa->min_val[a].i != INT64_MAX &&
                             (m->min_val[a].i == INT64_MAX ||
-                             sym_lex_lt(wa->min_val[a].i, m->min_val[a].i)))
+                             sym_lex_lt(ray_sym_vec_domain(agg_vecs[a]),
+                                        wa->min_val[a].i, m->min_val[a].i)))
                             m->min_val[a].i = wa->min_val[a].i;
                     } else {
                         if (wa->min_val[a].i < m->min_val[a].i)
@@ -6031,7 +6079,8 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                     } else if (agg_types[a] == RAY_SYM) {
                         if (wa->max_val[a].i != INT64_MIN &&
                             (m->max_val[a].i == INT64_MIN ||
-                             sym_lex_gt(wa->max_val[a].i, m->max_val[a].i)))
+                             sym_lex_gt(ray_sym_vec_domain(agg_vecs[a]),
+                                        wa->max_val[a].i, m->max_val[a].i)))
                             m->max_val[a].i = wa->max_val[a].i;
                     } else {
                         if (wa->max_val[a].i > m->max_val[a].i)
@@ -6597,6 +6646,7 @@ da_path:;
                     .n_aggs        = n_aggs,
                     .agg_types     = agg_types,
                     .agg_ops       = ext->agg_ops,
+                    .agg_cols      = agg_vecs,
                 };
                 ray_pool_dispatch(da_pool, da_merge_fn, &merge_ctx, (int64_t)n_slots);
             } else {
@@ -6712,6 +6762,11 @@ da_path:;
                 if (!src_col) continue;
                 ray_t* key_col = col_vec_new(src_col, (int64_t)grp_count);
                 if (!key_col || RAY_IS_ERR(key_col)) continue;
+                /* group keys are RAW cell ids reconstructed from the DA
+                 * slot — the output resolves over the source column's
+                 * dictionary (no-op while runtime-domain). */
+                if (key_col->type == RAY_SYM)
+                    ray_sym_vec_adopt_domain(key_col, sym_domain_rep(src_col));
                 key_col->len = (int64_t)grp_count;
                 uint32_t gi = 0;
                 for (uint32_t s = 0; s < n_slots; s++) {
@@ -6972,6 +7027,9 @@ dyn_dense_done:
                     }
 
                     ray_t* key_col = col_vec_new(key_vecs[0], (int64_t)grp_count);
+                    if (key_col && !RAY_IS_ERR(key_col) && key_col->type == RAY_SYM)
+                        /* raw cell ids from key_vecs[0] — adopt its domain */
+                        ray_sym_vec_adopt_domain(key_col, sym_domain_rep(key_vecs[0]));
                     if (!key_col || RAY_IS_ERR(key_col)) {
                         scratch_free(range_sum_hdr); scratch_free(cnt_hdr);
                         ray_release(result);
@@ -7195,6 +7253,9 @@ dyn_dense_done:
                     }
 
                     ray_t* key_col = col_vec_new(key_vecs[0], (int64_t)grp_count);
+                    if (key_col && !RAY_IS_ERR(key_col) && key_col->type == RAY_SYM)
+                        /* raw cell ids from key_vecs[0] — adopt its domain */
+                        ray_sym_vec_adopt_domain(key_col, sym_domain_rep(key_vecs[0]));
                     if (!key_col || RAY_IS_ERR(key_col)) {
                         scratch_free(range_sum_hdr);
                         scratch_free(cnt_hdr);
@@ -7391,6 +7452,9 @@ dyn_dense_done:
             }
 
             ray_t* key_col = col_vec_new(key_vecs[0], (int64_t)grp_count);
+            if (key_col && !RAY_IS_ERR(key_col) && key_col->type == RAY_SYM)
+                /* raw cell ids from key_vecs[0] — adopt its domain */
+                ray_sym_vec_adopt_domain(key_col, sym_domain_rep(key_vecs[0]));
             if (!key_col || RAY_IS_ERR(key_col)) {
                 sparse_i64_free(&sp_ht);
                 ray_release(result);
@@ -8491,9 +8555,12 @@ v2_emit:;
             if (!src_col) continue;
             uint8_t esz = ray_sym_elem_size(src_col->type, src_col->attrs);
             ray_t* new_col;
-            if (src_col->type == RAY_SYM)
+            if (src_col->type == RAY_SYM) {
                 new_col = ray_sym_vec_new(src_col->attrs & RAY_SYM_W_MASK, (int64_t)total_grps);
-            else
+                /* raw key cell ids copied from src_col — adopt its domain */
+                if (new_col && !RAY_IS_ERR(new_col))
+                    ray_sym_vec_adopt_domain(new_col, sym_domain_rep(src_col));
+            } else
                 new_col = ray_vec_new(src_col->type, (int64_t)total_grps);
             if (!new_col || RAY_IS_ERR(new_col)) continue;
             new_col->len = (int64_t)total_grps;
@@ -8537,6 +8604,10 @@ v2_emit:;
                 memset(&agg_outs[a], 0, sizeof(agg_outs[a]));
                 continue;
             }
+            /* SYM MIN/MAX/FIRST/LAST emit RAW cell ids accumulated from
+             * agg_col — the output resolves over its dictionary. */
+            if (out_type == RAY_SYM)
+                ray_sym_vec_adopt_domain(new_col, sym_domain_rep(agg_col));
             new_col->len = (int64_t)total_grps;
             agg_cols[a] = new_col;
             agg_outs[a] = (agg_out_t){
@@ -8863,6 +8934,10 @@ build_from_final_ht:
 
         ray_t* new_col = col_vec_new(src_col, (int64_t)grp_count);
         if (!new_col || RAY_IS_ERR(new_col)) continue;
+        /* HT rows hold RAW key cell ids copied from src_col — the
+         * output resolves over its dictionary (no-op while runtime). */
+        if (new_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_col, sym_domain_rep(src_col));
         new_col->len = (int64_t)grp_count;
 
         bool is_wide = (ly->wide_key_mask & (1u << k)) != 0;
@@ -9074,6 +9149,10 @@ build_from_final_ht:
         } else {
             new_col = ray_vec_new(out_type, (int64_t)grp_count);
             if (!new_col || RAY_IS_ERR(new_col)) continue;
+            /* SYM MIN/MAX/FIRST/LAST emit RAW cell ids accumulated from
+             * agg_col — the output resolves over its dictionary. */
+            if (out_type == RAY_SYM)
+                ray_sym_vec_adopt_domain(new_col, sym_domain_rep(agg_col));
             new_col->len = (int64_t)grp_count;
         }
 
@@ -9546,6 +9625,11 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             size_t esz = (size_t)col_esz(tref);
             ray_t* flat = col_vec_new(tref, mrows);
             if (!flat || RAY_IS_ERR(flat)) goto batch_fail;
+            /* raw cell ids memcpy'd from running/partial/MAPCOMMON key
+             * vecs — all resolve over the same dictionary (PARTED
+             * contract: one root symfile domain), represented by tref. */
+            if (flat->type == RAY_SYM)
+                ray_sym_vec_adopt_domain(flat, sym_domain_rep(tref));
             flat->len = mrows;
             char* out = (char*)ray_data(flat);
             int64_t off = 0;
@@ -9596,6 +9680,10 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             size_t esz = (size_t)col_esz(tref);
             ray_t* flat = col_vec_new(tref, mrows);
             if (!flat || RAY_IS_ERR(flat)) goto batch_fail;
+            /* SYM FIRST/LAST/MIN/MAX partials carry raw cell ids — same
+             * single-dictionary contract as the key flats above. */
+            if (flat->type == RAY_SYM)
+                ray_sym_vec_adopt_domain(flat, sym_domain_rep(tref));
             flat->len = mrows;
             char* out = (char*)ray_data(flat);
             int64_t off = 0;
@@ -11249,6 +11337,8 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
             ray_t* ev = (k_types[k] == RAY_SYM)
                 ? ray_sym_vec_new(k_attrs[k] & RAY_SYM_W_MASK, 0)
                 : ray_vec_new(k_types[k], 0);
+            if (ev && !RAY_IS_ERR(ev) && k_types[k] == RAY_SYM)
+                ray_sym_vec_adopt_domain(ev, k_vecs[k]);
             out = ray_table_add_col(out, k_syms[k], ev);
             ray_release(ev);
         }
@@ -11365,11 +11455,18 @@ ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op) {
     ray_t* k0_out = (k_types[0] == RAY_SYM)
         ? ray_sym_vec_new(k_attrs[0] & RAY_SYM_W_MASK, total_rows)
         : ray_vec_new(k_types[0], total_rows);
+    /* group keys are RAW cell ids copied from the key columns — the
+     * outputs resolve over their dictionaries (no-op while runtime). */
+    if (k0_out && !RAY_IS_ERR(k0_out) && k_types[0] == RAY_SYM)
+        ray_sym_vec_adopt_domain(k0_out, k_vecs[0]);
     ray_t* k1_out = NULL;
-    if (ext->n_keys == 2)
+    if (ext->n_keys == 2) {
         k1_out = (k_types[1] == RAY_SYM)
             ? ray_sym_vec_new(k_attrs[1] & RAY_SYM_W_MASK, total_rows)
             : ray_vec_new(k_types[1], total_rows);
+        if (k1_out && !RAY_IS_ERR(k1_out) && k_types[1] == RAY_SYM)
+            ray_sym_vec_adopt_domain(k1_out, k_vecs[1]);
+    }
     ray_t* r2_out = ray_vec_new(RAY_F64, total_rows);
     if (!k0_out || !r2_out || (ext->n_keys == 2 && !k1_out)) {
         if (k0_out) ray_release(k0_out);
@@ -11730,6 +11827,8 @@ ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op) {
         ray_t* k0 = (kt == RAY_SYM)
             ? ray_sym_vec_new(k_vec->attrs & RAY_SYM_W_MASK, 0)
             : ray_vec_new(kt, 0);
+        if (k0 && !RAY_IS_ERR(k0) && kt == RAY_SYM)
+            ray_sym_vec_adopt_domain(k0, k_vec);
         ray_t* x0 = ray_vec_new(xt, 0);
         ray_t* y0 = ray_vec_new(yt, 0);
         out = ray_table_add_col(out, kext->sym, k0);
@@ -11828,6 +11927,9 @@ ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op) {
     ray_t* k_out = (kt == RAY_SYM)
         ? ray_sym_vec_new(k_vec->attrs & RAY_SYM_W_MASK, total_rows)
         : ray_vec_new(kt, total_rows);
+    /* raw key cell ids copied from k_vec — adopt its dictionary */
+    if (k_out && !RAY_IS_ERR(k_out) && kt == RAY_SYM)
+        ray_sym_vec_adopt_domain(k_out, k_vec);
     ray_t* x_out = ray_vec_new(xt, total_rows);
     ray_t* y_out = ray_vec_new(yt, total_rows);
     if (!k_out || !x_out || !y_out) {
@@ -12317,8 +12419,12 @@ ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op) {
         ray_t* out = ray_table_new(ncols);
         ray_t* k0e = (k0t == RAY_SYM) ? ray_sym_vec_new(k0_vec->attrs & RAY_SYM_W_MASK, 0)
                                        : ray_vec_new(k0t, 0);
+        if (k0e && !RAY_IS_ERR(k0e) && k0t == RAY_SYM)
+            ray_sym_vec_adopt_domain(k0e, k0_vec);
         ray_t* k1e = (k1t == RAY_SYM) ? ray_sym_vec_new(k1_vec->attrs & RAY_SYM_W_MASK, 0)
                                        : ray_vec_new(k1t, 0);
+        if (k1e && !RAY_IS_ERR(k1e) && k1t == RAY_SYM)
+            ray_sym_vec_adopt_domain(k1e, k1_vec);
         ray_t* mev = ray_vec_new(RAY_F64, 0);
         ray_t* sdv = ray_vec_new(RAY_F64, 0);
         out = ray_table_add_col(out, k0ext->sym, k0e);
@@ -12448,9 +12554,14 @@ ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op) {
     ray_t* k0_out = (k0t == RAY_SYM)
         ? ray_sym_vec_new(k0_vec->attrs & RAY_SYM_W_MASK, total_rows)
         : ray_vec_new(k0t, total_rows);
+    /* raw key cell ids copied from k0_vec/k1_vec — adopt dictionaries */
+    if (k0_out && !RAY_IS_ERR(k0_out) && k0t == RAY_SYM)
+        ray_sym_vec_adopt_domain(k0_out, k0_vec);
     ray_t* k1_out = (k1t == RAY_SYM)
         ? ray_sym_vec_new(k1_vec->attrs & RAY_SYM_W_MASK, total_rows)
         : ray_vec_new(k1t, total_rows);
+    if (k1_out && !RAY_IS_ERR(k1_out) && k1t == RAY_SYM)
+        ray_sym_vec_adopt_domain(k1_out, k1_vec);
     ray_t* med_out = ray_vec_new(RAY_F64, total_rows);
     ray_t* std_out = ray_vec_new(RAY_F64, total_rows);
     ray_t* cnt_out = with_count ? ray_vec_new(RAY_I64, total_rows) : NULL;
@@ -12899,6 +13010,8 @@ ray_t* exec_group_sum_count_rowform(ray_graph_t* g, ray_op_t* op) {
             ray_t* ev = (k_types[k] == RAY_SYM)
                 ? ray_sym_vec_new(k_attrs[k] & RAY_SYM_W_MASK, 0)
                 : ray_vec_new(k_types[k], 0);
+            if (ev && !RAY_IS_ERR(ev) && k_types[k] == RAY_SYM)
+                ray_sym_vec_adopt_domain(ev, k_vecs[k]);
             out = ray_table_add_col(out, k_syms[k], ev);
             ray_release(ev);
         }
@@ -13023,6 +13136,9 @@ ray_t* exec_group_sum_count_rowform(ray_graph_t* g, ray_op_t* op) {
         key_outs[k] = (k_types[k] == RAY_SYM)
             ? ray_sym_vec_new(k_attrs[k] & RAY_SYM_W_MASK, total_rows)
             : ray_vec_new(k_types[k], total_rows);
+        /* raw key cell ids copied from k_vecs[k] — adopt its dictionary */
+        if (key_outs[k] && !RAY_IS_ERR(key_outs[k]) && k_types[k] == RAY_SYM)
+            ray_sym_vec_adopt_domain(key_outs[k], k_vecs[k]);
         if (!key_outs[k] || RAY_IS_ERR(key_outs[k])) {
             for (uint8_t j = 0; j <= k; j++)
                 if (key_outs[j]) ray_release(key_outs[j]);
