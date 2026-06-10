@@ -213,6 +213,30 @@ ray_t* ray_sym_vec_new(uint8_t sym_width, int64_t capacity) {
 }
 
 /* --------------------------------------------------------------------------
+ * ray_sym_vec_adopt_domain
+ *
+ * An output SYM vec whose cells were COPIED from `in` must resolve over
+ * the same dictionary.  Retain-before-release so adopting a vec's own
+ * domain is safe; retain/release are no-ops on the runtime singleton, so
+ * this is free on the hot (all-runtime) path.  Slice headers keep
+ * parent/offset in the aux bytes — never write a domain into one (the
+ * accessor resolves through slice_parent anyway).
+ * -------------------------------------------------------------------------- */
+
+void ray_sym_vec_adopt_domain(ray_t* out, ray_t* in) {
+    if (!out || !in) return;
+    if (out->type != RAY_SYM || in->type != RAY_SYM) return;
+    if (out->attrs & RAY_ATTR_SLICE) return;
+
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(in);
+    if (out->sym_domain == dom) return;
+
+    ray_sym_domain_retain(dom);
+    ray_sym_domain_release(out->sym_domain);
+    out->sym_domain = dom;
+}
+
+/* --------------------------------------------------------------------------
  * ray_vec_append
  * -------------------------------------------------------------------------- */
 
