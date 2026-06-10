@@ -2797,8 +2797,9 @@ static void csv_write_cell(csv_writer_t* w, const csv_col_info_t* ci, int64_t r)
         csv_write_timestamp(w, ((const int64_t*)d)[dr]);
         break;
     case RAY_SYM: {
-        int64_t sym = ray_read_sym(d, dr, t, ci->attrs);
-        ray_t* s = ray_sym_str(sym);
+        /* cell-data: resolve through the column's domain (data_owner is
+         * the slice parent when sliced — same data, same dictionary). */
+        ray_t* s = ray_sym_vec_cell(ci->data_owner, dr);
         if (s) csv_write_str(w, ray_str_ptr(s), ray_str_len(s));
         /* unknown sym id -> empty field rather than a phantom value */
         break;
