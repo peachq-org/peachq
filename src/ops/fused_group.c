@@ -1679,8 +1679,15 @@ static ray_t* fp_try_direct_count1(const fp_par_ctx_t* ctx, int64_t nrows,
         ray_release(c_out);
         return result;
     }
-    if (ctx->kt == RAY_SYM && pred_key_ne_zero && use_emit_filter &&
-        emit_filter.top_count_take > 0) {
+    /* SYM direct-count slot-array path.  Fires when either
+     *   - pred_key_ne_zero: WHERE filters empty-string sym up front, or
+     *   - no WHERE: count every row, including the empty sym at slot 0.
+     * The downstream top-K heap ranks slot 0 against the rest, so a
+     * heavy empty sym (q22/q21 shape) ends up in the result legitimately,
+     * and a sparse empty sym just disappears below keep_min. */
+    if (ctx->kt == RAY_SYM && use_emit_filter &&
+        emit_filter.top_count_take > 0 &&
+        (pred_key_ne_zero || ctx->pred.n_children == 0)) {
         if ((uint64_t)n_slots > (256ULL << 20) / sizeof(uint32_t))
             return NULL;
         ray_t* counts_hdr = NULL;
@@ -1688,10 +1695,16 @@ static ray_t* fp_try_direct_count1(const fp_par_ctx_t* ctx, int64_t nrows,
             (size_t)n_slots * sizeof(uint32_t));
         if (!counts) return ray_error("oom", NULL);
 
-        for (int64_t i = 0; i < nrows; i++) {
-            uint32_t key = (uint32_t)read_by_esz(ctx->kbase, i, ctx->kesz);
-            if (key)
+        if (pred_key_ne_zero) {
+            for (int64_t i = 0; i < nrows; i++) {
+                uint32_t key = (uint32_t)read_by_esz(ctx->kbase, i, ctx->kesz);
+                if (key) counts[key]++;
+            }
+        } else {
+            for (int64_t i = 0; i < nrows; i++) {
+                uint32_t key = (uint32_t)read_by_esz(ctx->kbase, i, ctx->kesz);
                 counts[key]++;
+            }
         }
 
         int64_t k_take = emit_filter.top_count_take;
