@@ -34,7 +34,7 @@
  * Splayed table: directory of column files + .d schema file
  *
  * Format:
- *   dir/.d        — I64 vector of column name symbol IDs
+ *   dir/.d        — RAY_STR vector of column names (self-describing)
  *   dir/<colname> — column file per column
  *
  * No symlink check: local-trust file format; path traversal checks
@@ -81,13 +81,41 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
 
     int64_t ncols = ray_table_ncols(tbl);
 
-    /* Save .d schema file */
-    ray_t* schema = ray_table_schema(tbl);
-    if (schema) {
+    /* Save .d schema file — RAY_STR vector of column names.  Self-
+     * describing: loading never depends on a symfile.  Lists exactly the
+     * columns whose files are written (same safety filter as below). */
+    ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
+    if (!schema || RAY_IS_ERR(schema)) {
+        if (schema) ray_release(schema);
+        return RAY_ERR_OOM;
+    }
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        if (!col) continue;
+        ray_t* name_atom = ray_sym_str(ray_table_col_name(tbl, c));
+        if (!name_atom) continue;
+        const char* name = ray_str_ptr(name_atom);
+        size_t name_len  = ray_str_len(name_atom);
+        if (name_len == 0 || name[0] == '.' ||
+            memchr(name, '/', name_len) || memchr(name, '\\', name_len) ||
+            memchr(name, '\0', name_len))
+            continue; /* file is skipped below; keep .d consistent */
+        schema = ray_str_vec_append(schema, name, name_len);
+        if (!schema || RAY_IS_ERR(schema)) {
+            if (schema) ray_release(schema);
+            return RAY_ERR_OOM;
+        }
+    }
+    {
         char path[1024];
         int path_len = snprintf(path, sizeof(path), "%s/.d", dir);
-        if (path_len < 0 || (size_t)path_len >= sizeof(path)) return RAY_ERR_RANGE;
-        ray_err_t err = durable ? ray_col_save(schema, path) : ray_col_save_bulk(schema, path);
+        if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+            ray_release(schema);
+            return RAY_ERR_RANGE;
+        }
+        ray_err_t err = durable ? ray_col_save(schema, path)
+                                : ray_col_save_bulk(schema, path);
+        ray_release(schema);
         if (err != RAY_OK) return err;
     }
 
@@ -164,8 +192,13 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
         return schema;
     }
 
+    if (schema->type != RAY_STR) {
+        ray_release(schema);
+        return ray_error("corrupt",
+            "splayed %s: .d is not a string vector (pre-cleanup format?)", dir);
+    }
+
     int64_t ncols = schema->len;
-    int64_t* name_ids = (int64_t*)ray_data(schema);
 
     ray_t* tbl = ray_table_new(ncols);
     if (!tbl || RAY_IS_ERR(tbl)) {
@@ -175,31 +208,28 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
 
     /* Load each column */
     for (int64_t c = 0; c < ncols; c++) {
-        int64_t name_id = name_ids[c];
-        ray_t* name_atom = ray_sym_str(name_id);
-        if (!name_atom) {
-            /* Schema references a sym ID that doesn't exist — sym table
-             * is stale or wrong for this data. */
-            if (trace)
-                fprintf(stderr, "splayed.get: missing schema symbol col=%" PRId64 " id=%" PRId64 "\n",
-                        c, name_id);
+        size_t name_len = 0;
+        const char* name = ray_str_vec_get(schema, c, &name_len);
+        if (!name) {
             ray_release(schema);
             ray_release(tbl);
-            return ray_error("corrupt", NULL);
+            return ray_error("corrupt", "splayed %s: unreadable .d entry %lld",
+                             dir, (long long)c);
         }
 
-        const char* name = ray_str_ptr(name_atom);
-        size_t name_len = ray_str_len(name_atom);
-
         /* Reject names with path separators, traversal, or starting with '.'
-         * — these indicate a stale/wrong sym file, not a column to skip. */
+         * — these indicate a corrupt/hand-tampered .d. */
         if (name_len == 0 || name[0] == '.' ||
             memchr(name, '/', name_len) || memchr(name, '\\', name_len) ||
             memchr(name, '\0', name_len)) {
             ray_release(schema);
             ray_release(tbl);
-            return ray_error("corrupt", NULL);
+            return ray_error("corrupt",
+                "splayed %s: invalid column name in .d entry %lld",
+                dir, (long long)c);
         }
+
+        int64_t name_id = ray_sym_intern(name, name_len);
 
         path_len = snprintf(path, sizeof(path), "%s/%.*s", dir, (int)name_len, name);
         if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
