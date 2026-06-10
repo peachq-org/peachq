@@ -1110,13 +1110,6 @@ static inline void par_set_null(ray_t* vec, int64_t idx) {
                       __ATOMIC_RELAXED);
 }
 
-/* No-op kept for symmetry with the historical bitmap-promotion helper.
- * Sentinel writes are unconditional and need no pre-allocation. */
-static inline ray_err_t par_prepare_nullmap(ray_t* vec) {
-    (void)vec;
-    return RAY_OK;
-}
-
 /* Scan payload after parallel execution and set RAY_ATTR_HAS_NULLS if
  * any element carries the type-correct NULL_* sentinel.  This catches
  * the case where par_set_null's atomic OR raced with another thread's
