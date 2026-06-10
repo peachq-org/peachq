@@ -1521,6 +1521,8 @@ ray_t* ray_fn(ray_t** args, int64_t n) {
     if (params_list) {
         int64_t nparams = ray_len(params_list);
         if (params_list->type == RAY_SYM) {
+            /* name-ids: stays global — param lists are parser-built
+             * runtime SYM vecs of BINDING names, not data cells. */
             int64_t* ids = (int64_t*)ray_data(params_list);
             for (int64_t i = 0; i < nparams; i++)
                 if (ray_sym_is_reserved(ids[i]))
