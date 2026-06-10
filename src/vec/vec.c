@@ -25,6 +25,7 @@
 #include "core/platform.h"
 #include "mem/heap.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include "vec/embedding.h"
 #include "vec/str.h"
 #include "ops/idxop.h"
@@ -202,6 +203,11 @@ ray_t* ray_sym_vec_new(uint8_t sym_width, int64_t capacity) {
     v->len = 0;
     v->attrs = sym_width;  /* lower 2 bits encode width */
     memset(v->aux, 0, 16);
+    /* Every SYM vec carries a non-NULL resolution domain.  This is the
+     * single chokepoint all runtime SYM vec construction funnels through;
+     * loaded columns are patched in src/store/col.c.  The singleton is
+     * immortal — no retain needed. */
+    v->sym_domain = ray_sym_runtime_domain();
 
     return v;
 }
@@ -460,6 +466,17 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     result->attrs = out_attrs;
     memset(result->aux, 0, 16);
 
+    /* SYM: propagate the resolution domain — inputs agree → that domain;
+     * mixed → runtime (Phase 1: inputs are always runtime; cross-domain
+     * concat materializes per the domain spec in a later phase). */
+    if (result->type == RAY_SYM) {
+        struct ray_sym_domain_s* da = ray_sym_vec_domain(a);
+        struct ray_sym_domain_s* db = ray_sym_vec_domain(b);
+        struct ray_sym_domain_s* dom = (da == db) ? da : ray_sym_runtime_domain();
+        ray_sym_domain_retain(dom);
+        result->sym_domain = dom;
+    }
+
     /* For SYM with mismatched widths, widen element-by-element */
     if (a->type == RAY_SYM && a_esz != b_esz) {
         void* dst = ray_data(result);
@@ -710,6 +727,12 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
     result->len = new_len;
     result->attrs = vec->attrs & RAY_SYM_W_MASK;
     memset(result->aux, 0, 16);
+    if (result->type == RAY_SYM) {
+        /* Fresh SYM result inherits the source vec's domain. */
+        struct ray_sym_domain_s* dom = ray_sym_vec_domain(vec);
+        ray_sym_domain_retain(dom);
+        result->sym_domain = dom;
+    }
 
     /* Source pointers */
     const char* src_base = (vec->attrs & RAY_ATTR_SLICE)
@@ -809,6 +832,8 @@ ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
     v->len = count;
     v->attrs = sym_w;
     memset(v->aux, 0, 16);
+    if (type == RAY_SYM)
+        v->sym_domain = ray_sym_runtime_domain();  /* immortal — no retain */
 
     if (data_size) {
         if (!data) { ray_release(v); return ray_error("domain", NULL); }
