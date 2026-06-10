@@ -34,7 +34,7 @@
  * offset 0 of each self-aligned pool (first min-block reserved).
  * Pool base is derived in O(1): ptr & ~(pool_size - 1).
  *
- * Free-list prev/next overlay nullmap bytes 0-15 of ray_t (unused when free).
+ * Free-list prev/next overlay aux bytes 0-15 of ray_t (unused when free).
  * rc == 0 indicates a free block (replaces the old ray_blk_t.used flag).
  *
  * Cross-thread free uses a foreign_blocks list (checked via pool heap_id).
@@ -54,9 +54,9 @@
  *   Bits 0x01-0x10  function objects (RAY_UNARY/BINARY/VARY): RAY_FN_* flags
  *   Bit  0x02       -RAY_I64 atoms:  RAY_ATTR_GRAPH (ray_rel_t* CSR handle in .i64)
  *   Bit  0x04       -RAY_I64 atoms:  RAY_ATTR_HNSW (HNSW handle in .i64)
- *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in nullmap[0..7])
+ *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in aux[0..7])
  *   Bit  0x10       vectors:         RAY_ATTR_SLICE
- *   Bit  0x20       -RAY_SYM:        RAY_ATTR_NAME (variable reference)
+ *   Bit  0x20       -RAY_SYM:        ATTR_QUOTED (quoted/literal symbol; default = name reference)
  *   Bit  0x20       vectors:         RAY_ATTR_SORTED (non-descending order marker)
  *   Bit  0x40       vectors:         RAY_ATTR_HAS_NULLS (sentinel-encoded; payload is truth)
  *   Bit  0x80       all types:       RAY_ATTR_ARENA (arena-allocated, no refcount)
@@ -70,8 +70,8 @@
 /* RAY_ATTR_SORTED (vectors): the vector's elements are known to be in
  * non-descending order.  A pure marker — no backing structure, no
  * allocation.  Set only via (.attr.set 'sorted v) after an O(n) verify
- * scan, so it never lies.  0x20 is free for vectors (it means NAME only
- * on -RAY_SYM atoms).  Order-aware operators (asof-join) may trust it. */
+ * scan, so it never lies.  0x20 is free for vectors (on -RAY_SYM atoms
+ * the same bit is ATTR_QUOTED).  Order-aware operators (asof-join) may trust it. */
 #define RAY_ATTR_SORTED  0x20
 
 #ifndef RAY_ATTR_SLICE
@@ -91,7 +91,7 @@
  * Checked by HNSW builtins before dereferencing.  User must (hnsw-free h). */
 #define RAY_ATTR_HNSW         0x04
 
-/* Vector is a linked column.  The 8 bytes of the nullmap union at offset
+/* Vector is a linked column.  The 8 bytes of the aux union at offset
  * 8 (i.e. parent->_idx_pad / parent->slice_offset / parent->str_pool
  * slot, depending on which arm is in use) hold an int64
  * sym ID naming the target table.  Resolved against the global env at
@@ -100,15 +100,15 @@
  * those types would alias.
  *
  * Coexists with HAS_INDEX: bytes 0-7 carry the index pointer (or saved
- * nullmap), bytes 8-15 carry the link sym; both bits can be set on the
+ * aux), bytes 8-15 carry the link sym; both bits can be set on the
  * same column.
  *
  * Same numeric value as RAY_ATTR_HNSW (HNSW handles are -RAY_I64 atoms,
  * the type tag disambiguates). */
 #define RAY_ATTR_HAS_LINK     0x04
 
-/* Vector carries an attached accelerator index in nullmap[0..7] (a ray_t*
- * of type RAY_INDEX).  The original 16-byte nullmap union content
+/* Vector carries an attached accelerator index in aux[0..7] (a ray_t*
+ * of type RAY_INDEX).  The original 16-byte aux union content
  * (slice_offset, str_pool, link_target) is preserved inside the
  * index ray_t and restored on detach.
  *
@@ -192,7 +192,7 @@ typedef struct {
 } ray_pool_hdr_t;
 
 _Static_assert(sizeof(ray_pool_hdr_t) <= 16,
-               "ray_pool_hdr_t must fit in ray_t nullmap (16 bytes)");
+               "ray_pool_hdr_t must fit in ray_t aux (16 bytes)");
 
 /* --------------------------------------------------------------------------
  * Circular sentinel freelist (Rayforce-style)
