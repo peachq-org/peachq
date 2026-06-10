@@ -580,6 +580,11 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
         if (idx_vecs[k]->type == RAY_STR)
             col_propagate_str_pool(new_col, idx_vecs[k]);
+        /* Output-vec rule (Task-2 review): a SYM index column raw-copies
+         * cell ids from its source, so it must resolve over the source's
+         * dictionary.  No-op while every domain is the runtime singleton. */
+        if (new_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_col, idx_vecs[k]);
 
         ray_op_ext_t* ie = find_ext(g, ext->pivot.index_cols[k]->id);
         result = ray_table_add_col(result, ie->sym, new_col);
