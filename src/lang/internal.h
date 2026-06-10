@@ -222,6 +222,22 @@ static inline int is_collection(ray_t* x) {
     return x && !RAY_IS_ERR(x) && (x->type == RAY_LIST || ray_is_vec(x));
 }
 
+/* A SYM id taken from `col`'s cells, re-expressed in the RUNTIME domain
+ * (sym-domain Phase 2).  SYM atoms are runtime-domain by design, so any
+ * cell id flowing into an atom must be translated.  Fast path: a
+ * runtime-domain column's ids ARE runtime ids — raw copy (exact no-op
+ * while every domain is the runtime singleton). */
+static inline int64_t sym_id_runtime(ray_t* col, int64_t id) {
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
+    if (dom == ray_sym_runtime_domain()) return id;
+    ray_t* s = ray_sym_domain_str(dom, id);
+    return s ? ray_sym_intern(ray_str_ptr(s), ray_str_len(s)) : -1;
+}
+
+static inline int64_t sym_cell_runtime_id(ray_t* v, int64_t i) {
+    return sym_id_runtime(v, ray_read_sym(ray_data(v), i, v->type, v->attrs));
+}
+
 /* Extract the i-th element of a collection as a ray_t* atom.
  * For boxed lists, returns the stored pointer (no alloc).
  * For typed vectors, allocates a new atom.  Caller must release
@@ -241,7 +257,9 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
         case RAY_I32:       return ray_i32(((int32_t*)d)[i]);
         case RAY_I16:       return ray_i16(((int16_t*)d)[i]);
         case RAY_BOOL:      return ray_bool(((bool*)d)[i]);
-        case RAY_SYM:       return ray_sym(ray_read_sym(d, i, coll->type, coll->attrs));
+        /* Atom rule (Task-3 review): the cell id is a position in the
+         * COLUMN's domain; the atom must carry the runtime id. */
+        case RAY_SYM:       return ray_sym(sym_cell_runtime_id(coll, i));
         case RAY_U8:        return ray_u8(((uint8_t*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
         case RAY_TIME:      return ray_time((int64_t)((int32_t*)d)[i]);
@@ -306,6 +324,9 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIME:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIMESTAMP: ((int64_t*)ray_data(vec))[i]   = elem_as_i64(elem); return 0;
+        /* NOTE(flip): assumes runtime-domain target; the atom's i64 is a
+         * runtime id, written raw.  Task 7 must handle FILE-domain targets
+         * (reverse lookup into the vec's domain) on the save/encode path. */
         case RAY_SYM:       ray_write_sym(ray_data(vec), i, (uint64_t)elem->i64, vec->type, vec->attrs); return 0;
         case RAY_GUID:      if (elem->obj) memcpy(((uint8_t*)ray_data(vec)) + i * 16, ray_data(elem->obj), 16); return 0;
         default: return -1;

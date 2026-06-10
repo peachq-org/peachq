@@ -51,22 +51,8 @@
  * Select query — DAG bridge
  * ══════════════════════════════════════════ */
 
-/* A SYM id taken from `col`'s cells, re-expressed in the RUNTIME domain
- * (sym-domain Phase 2).  Fresh SYM atoms / output vecs built in this
- * file are runtime-domain, and dict-key / column-name comparisons pit
- * cell ids against runtime name-ids — both need the cell id translated.
- * Fast path: a runtime-domain column's ids ARE runtime ids — raw copy
- * (exact no-op while every domain is the runtime singleton). */
-static inline int64_t sym_id_runtime(ray_t* col, int64_t id) {
-    struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
-    if (dom == ray_sym_runtime_domain()) return id;
-    ray_t* s = ray_sym_domain_str(dom, id);
-    return s ? ray_sym_intern(ray_str_ptr(s), ray_str_len(s)) : -1;
-}
-
-static inline int64_t sym_cell_runtime_id(ray_t* v, int64_t i) {
-    return sym_id_runtime(v, ray_read_sym(ray_data(v), i, v->type, v->attrs));
-}
+/* sym_id_runtime / sym_cell_runtime_id (cell id → runtime-domain id)
+ * are shared from lang/internal.h since the Task-3 chokepoint fixes. */
 
 /* The vec whose domain represents `col`'s SYM cell-id space: the col
  * itself, its first SYM segment (PARTED — all partitions resolve over
