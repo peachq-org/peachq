@@ -102,7 +102,7 @@ static inline bool vec_any_nulls(const ray_t* v) {
  * Shared-index case: `v` may share its index ray_t with another vec
  * (e.g. after ray_cow followed by ray_retain_owned_refs, both copies
  * point at the same RAY_INDEX with rc==2).  We must NOT clobber the
- * saved-nullmap bytes inside a shared index — the other holder still
+ * saved-aux bytes inside a shared index — the other holder still
  * reads them.  Detect rc>1 and copy the saved pointers via
  * ray_index_retain_saved instead of moving them out. */
 static inline void vec_drop_index_inplace(ray_t* v) {
@@ -113,17 +113,17 @@ static inline void vec_drop_index_inplace(ray_t* v) {
 
     if (shared) {
         /* Take our own retained references to the saved-pointer slots
-         * (str_pool etc.) so the bytes we copy into v->nullmap
+         * (str_pool etc.) so the bytes we copy into v->aux
          * are validly owned by v.  Leave the index's snapshot intact for
          * the other holder. */
         ray_index_retain_saved(ix);
     }
-    memcpy(v->nullmap, ix->saved_nullmap, 16);
+    memcpy(v->aux, ix->saved_aux, 16);
     if (!shared) {
         /* Sole owner: about to release idx, so neutralize its snapshot
          * to prevent ray_index_release_saved from double-releasing the
          * pointers we just transferred to v. */
-        memset(ix->saved_nullmap, 0, 16);
+        memset(ix->saved_aux, 0, 16);
         ix->saved_attrs = 0;
     }
     v->attrs &= (uint8_t)~RAY_ATTR_HAS_INDEX;
@@ -170,7 +170,7 @@ ray_t* ray_vec_new(int8_t type, int64_t capacity) {
     v->type = type;
     v->len = 0;
     v->attrs = 0;
-    memset(v->nullmap, 0, 16);
+    memset(v->aux, 0, 16);
     if (type == RAY_STR) v->str_pool = NULL;
 
     return v;
@@ -201,7 +201,7 @@ ray_t* ray_sym_vec_new(uint8_t sym_width, int64_t capacity) {
     v->type = RAY_SYM;
     v->len = 0;
     v->attrs = sym_width;  /* lower 2 bits encode width */
-    memset(v->nullmap, 0, 16);
+    memset(v->aux, 0, 16);
 
     return v;
 }
@@ -458,7 +458,7 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     result->type = a->type;
     result->len = total_len;
     result->attrs = out_attrs;
-    memset(result->nullmap, 0, 16);
+    memset(result->aux, 0, 16);
 
     /* For SYM with mismatched widths, widen element-by-element */
     if (a->type == RAY_SYM && a_esz != b_esz) {
@@ -533,7 +533,7 @@ ray_t* ray_vec_insert_at(ray_t* vec, int64_t idx, const void* elem) {
     vec = ray_cow(vec);
     if (!vec || RAY_IS_ERR(vec)) return vec;
 
-    /* In-place insert mutates len + data + nullmap; any attached
+    /* In-place insert mutates len + data + aux; any attached
      * accelerator index is now stale. */
     vec_drop_index_inplace(vec);
 
@@ -709,7 +709,7 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
     result->type = vec->type;
     result->len = new_len;
     result->attrs = vec->attrs & RAY_SYM_W_MASK;
-    memset(result->nullmap, 0, 16);
+    memset(result->aux, 0, 16);
 
     /* Source pointers */
     const char* src_base = (vec->attrs & RAY_ATTR_SLICE)
@@ -808,7 +808,7 @@ ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
     v->type = type;
     v->len = count;
     v->attrs = sym_w;
-    memset(v->nullmap, 0, 16);
+    memset(v->aux, 0, 16);
 
     if (data_size) {
         if (!data) { ray_release(v); return ray_error("domain", NULL); }
@@ -925,21 +925,21 @@ static ray_t* str_pool_cow(ray_t* vec) {
 /* --------------------------------------------------------------------------
  * String pool dead-byte tracking
  *
- * Dead bytes are stored as a uint32_t in the pool block's nullmap[0..3],
+ * Dead bytes are stored as a uint32_t in the pool block's aux[0..3],
  * which is otherwise unused (the pool is a raw CHAR vector).
  * -------------------------------------------------------------------------- */
 
 static inline uint32_t str_pool_dead(ray_t* vec) {
     if (!vec->str_pool) return 0;
     uint32_t d;
-    memcpy(&d, vec->str_pool->nullmap, 4);
+    memcpy(&d, vec->str_pool->aux, 4);
     return d;
 }
 
 static inline void str_pool_add_dead(ray_t* vec, uint32_t bytes) {
     uint32_t d = str_pool_dead(vec);
     d = (d > UINT32_MAX - bytes) ? UINT32_MAX : d + bytes;
-    memcpy(vec->str_pool->nullmap, &d, 4);
+    memcpy(vec->str_pool->aux, &d, 4);
 }
 
 /* --------------------------------------------------------------------------
@@ -1211,7 +1211,7 @@ ray_t* ray_str_vec_compact(ray_t* vec) {
     if (!new_pool || RAY_IS_ERR(new_pool)) return vec;
     new_pool->type = RAY_U8;
     new_pool->len = 0;
-    memset(new_pool->nullmap, 0, 16);
+    memset(new_pool->aux, 0, 16);
 
     char* old_base = (char*)ray_data(vec->str_pool);
     char* new_base = (char*)ray_data(new_pool);

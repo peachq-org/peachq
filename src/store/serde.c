@@ -209,7 +209,7 @@ int64_t ray_serde_size(ray_t* obj) {
     case RAY_UNARY:
     case RAY_BINARY:
     case RAY_VARY: {
-        /* Serialize by name (null-terminated string in nullmap) */
+        /* Serialize by name (null-terminated string in aux) */
         const char* name = ray_fn_name(obj);
         size_t nlen = strlen(name); if (nlen > 15) nlen = 15;
         return 1 + (int64_t)nlen + 1; /* type + name + null terminator */
@@ -252,12 +252,12 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
     buf++;
 
     /* Atoms — format: type(1) + flags(1) + value-bytes.  `flags` bit 0
-     * carries the typed-null marker (nullmap[0] & 1 on the source atom)
+     * carries the typed-null marker (aux[0] & 1 on the source atom)
      * so (de (ser 0Nl)) roundtrips instead of decoding as plain 0. */
     if (type < 0) {
-        uint8_t aflags = (uint8_t)(obj->nullmap[0] & 1);
-        if (type == -RAY_SYM && (obj->attrs & RAY_ATTR_NAME))
-            aflags |= RAY_ATTR_NAME;
+        uint8_t aflags = (uint8_t)(obj->aux[0] & 1);
+        if (type == -RAY_SYM && (obj->attrs & ATTR_QUOTED))
+            aflags |= ATTR_QUOTED;
         buf[0] = aflags;
         buf++;
         int8_t base = -type;
@@ -500,7 +500,7 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     (*len)--;
 
     /* Null */
-    if ((uint8_t)type == RAY_SERDE_NULL) return NULL;
+    if ((uint8_t)type == RAY_SERDE_NULL) return RAY_NULL_OBJ;
 
     /* Atoms — read 1-byte flags (typed-null bit) before the value.  If
      * the null bit is set we always return ray_typed_null(type) regardless
@@ -565,8 +565,8 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
             if (is_null) return ray_typed_null(type);
             int64_t id = ray_sym_intern((const char*)buf, slen);
             ray_t* s = ray_sym(id);
-            if (s && !RAY_IS_ERR(s) && (aflags & RAY_ATTR_NAME))
-                s->attrs |= RAY_ATTR_NAME;
+            if (s && !RAY_IS_ERR(s) && (aflags & ATTR_QUOTED))
+                s->attrs |= ATTR_QUOTED;
             return s;
         }
         case RAY_STR: {
@@ -700,16 +700,15 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
         int64_t saved = *len;
         for (int64_t i = 0; i < l; i++) {
             elems[i] = ray_de_raw(buf + (saved - *len), len);
-            /* A NULL element is the in-band representation of
-             * RAY_NULL_OBJ on the wire (ray_ser_raw writes SERDE_NULL
-             * for the null singleton; ray_de_raw returns C NULL for
-             * that marker).  Lists must round-trip them — e.g. an IPC
-             * VERBOSE response is `[captured_str, result]` where
-             * `result` is RAY_NULL_OBJ for any (println ...) /
-             * (set ...) eval.  Rejecting NULL here would error the
-             * whole frame as "domain".  Substitute the singleton so
-             * downstream code (ray_lang_print, etc.) sees a valid
-             * pointer instead of a raw NULL. */
+            /* The SERDE_NULL wire marker now deserializes to RAY_NULL_OBJ
+             * directly (de_raw_inner returns the singleton), so the guard
+             * below only catches a genuine buffer-underrun NULL.  Either way
+             * we substitute the singleton so lists round-trip nulls and
+             * downstream code (ray_lang_print, etc.) always sees a valid
+             * pointer — e.g. an IPC VERBOSE response is `[captured_str,
+             * result]` where `result` is RAY_NULL_OBJ for any (println ...) /
+             * (set ...) eval; rejecting NULL would error the whole frame as
+             * "domain". */
             if (!elems[i]) {
                 elems[i] = RAY_NULL_OBJ;
             } else if (RAY_IS_ERR(elems[i])) {
