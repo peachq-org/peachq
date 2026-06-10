@@ -105,7 +105,10 @@ static ray_t* pivot_fn_impl(ray_t* tbl, ray_t* index_arg, ray_t* pivot_col_name,
         agg_fn->type != RAY_VARY)
         return ray_error("type", "pivot: agg-fn must be a function");
 
-    /* Determine index columns */
+    /* Determine index columns.  idx_syms are column NAME ids: atoms are
+     * runtime-domain by design and collection_elem re-expresses SYM vec
+     * cells into runtime atoms (the Task-3 chokepoint), so the
+     * ray_sym_str / ray_table_get_col calls below stay global. */
     int64_t idx_syms[16];
     int64_t n_idx = 0;
     if (index_arg->type == -RAY_SYM) {
