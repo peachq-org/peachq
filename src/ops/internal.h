@@ -866,6 +866,12 @@ typedef struct {
     uint8_t  need_flags;
     uint8_t  agg_is_f64;
     uint8_t  agg_is_sym;   /* lex compare for MIN/MAX (sym_lex_lt) */
+    /* Per-agg SYM resolution domain (sym-domain Phase 2): the domain of
+     * agg_vecs[a] when it is a SYM column, NULL otherwise.  Borrowed —
+     * the agg input vec outlives every layout use.  accum_from_entry's
+     * lex MIN/MAX resolves cell ids through it (cell ids are positions
+     * in the COLUMN's domain, not the global intern table). */
+    struct ray_sym_domain_s* agg_dom[8];
     uint8_t  agg_is_first;
     uint8_t  agg_is_last;
     uint8_t  agg_is_prod;
