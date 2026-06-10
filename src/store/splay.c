@@ -44,8 +44,31 @@
  * (rejecting '/', '\\', '..', leading '.') cover main attack vector.
  * -------------------------------------------------------------------------- */
 
-/* Post-load validation: reject if sym table is empty but table has RAY_SYM
- * columns, or if schema expected columns but none could be loaded. */
+/* True when `v` is or contains symbol data (sym vec, sym atom, or a list
+ * nesting either) — anything that serializes raw sym ids and therefore
+ * needs the dictionary persisted. */
+static bool vec_has_syms(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return false;
+    if (v->type == RAY_SYM || v->type == -RAY_SYM) return true;
+    if (v->type == RAY_LIST) {
+        ray_t** items = (ray_t**)ray_data(v);
+        for (int64_t i = 0; i < v->len; i++)
+            if (vec_has_syms(items[i])) return true;
+    }
+    return false;
+}
+
+/* True when the table has at least one column carrying symbol data. */
+static bool table_has_sym_cols(ray_t* tbl) {
+    int64_t nc = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < nc; c++)
+        if (vec_has_syms(ray_table_get_col_idx(tbl, c))) return true;
+    return false;
+}
+
+/* Post-load validation: reject if sym table is empty but table has symbol
+ * columns (incl. symbols nested in lists), or if schema expected columns
+ * but none could be loaded. */
 static ray_err_t validate_sym_columns(ray_t* tbl, int64_t schema_ncols,
                                       uint32_t sym_count_at_entry) {
     /* Sym table always has the empty string at ID 0 after init, so the
@@ -57,27 +80,14 @@ static ray_err_t validate_sym_columns(ray_t* tbl, int64_t schema_ncols,
     int64_t nc = ray_table_ncols(tbl);
     if (schema_ncols > 0 && nc == 0) return RAY_ERR_CORRUPT;
 
-    for (int64_t c = 0; c < nc; c++) {
-        ray_t* col = ray_table_get_col_idx(tbl, c);
-        if (col && col->type == RAY_SYM) return RAY_ERR_CORRUPT;
-    }
+    for (int64_t c = 0; c < nc; c++)
+        if (vec_has_syms(ray_table_get_col_idx(tbl, c))) return RAY_ERR_CORRUPT;
     return RAY_OK;
 }
 
 /* --------------------------------------------------------------------------
  * ray_splay_save — save a table to a splayed table directory
  * -------------------------------------------------------------------------- */
-
-/* True when the table has at least one RAY_SYM column (those are the only
- * columns that reference the symbol dictionary). */
-static bool table_has_sym_cols(ray_t* tbl) {
-    int64_t nc = ray_table_ncols(tbl);
-    for (int64_t c = 0; c < nc; c++) {
-        ray_t* col = ray_table_get_col_idx(tbl, c);
-        if (col && col->type == RAY_SYM) return true;
-    }
-    return false;
-}
 
 /* True when `name` (len bytes) names a column of `tbl` that passes the
  * on-disk name-safety filter. */
@@ -144,7 +154,13 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
 
     int64_t ncols = ray_table_ncols(tbl);
 
-    /* 2. Column files (and the schema names they correspond to). */
+    /* 2. Column files (and the schema names they correspond to).
+     * NOTE: overwriting an existing dir rewrites columns in place; a crash
+     * mid-loop leaves old .d + a mix of old/new column files.  Ragged
+     * lengths are caught at load (column-length check); equal-length
+     * mixed-generation rows are inherent to in-place overwrite and would
+     * need staged writes — out of scope (fresh-dir crashes degrade to a
+     * visibly missing table via the .d-last commit marker). */
     ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
     if (!schema || RAY_IS_ERR(schema)) {
         if (schema) ray_release(schema);
@@ -309,6 +325,17 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
             ray_release(schema);
             ray_release(tbl);
             return col ? col : ray_error("io", NULL);
+        }
+
+        if (c > 0 && col->len != ray_table_nrows(tbl)) {
+            ray_t* err = ray_error("corrupt",
+                "splayed %s: column '%.*s' has %lld rows, expected %lld "
+                "(torn overwrite?)", dir, (int)name_len, name,
+                (long long)col->len, (long long)ray_table_nrows(tbl));
+            ray_release(col);
+            ray_release(schema);
+            ray_release(tbl);
+            return err;
         }
 
         ray_t* new_df = ray_table_add_col(tbl, name_id, col);
