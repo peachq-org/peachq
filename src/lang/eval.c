@@ -1151,6 +1151,11 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
                 if (ray_vec_is_null(vec, idx[i]))
                     ray_vec_set_null(result, i, true);
         }
+        /* Output-vec rule (Task-3 review): the gather raw-copies cell ids
+         * from a single source vec, so the output must resolve over the
+         * source's dictionary.  No-op while every domain is the runtime
+         * singleton. */
+        ray_sym_vec_adopt_domain(result, vec);
         return result;
     }
 
