@@ -43,17 +43,18 @@
                                       forces concrete args. */
 
 /* AST name flag (distinguishes symbol literal from variable reference) */
-#define RAY_ATTR_NAME        0x20  /* ray_t SYM atom with this flag = name reference */
+#define ATTR_QUOTED  0x20  /* -RAY_SYM atom with this flag SET = quoted/literal symbol;
+                              CLEAR (default) = name reference, resolved at eval. */
 
 /* Function type signatures */
 typedef ray_t* (*ray_unary_fn)(ray_t*);
 typedef ray_t* (*ray_binary_fn)(ray_t*, ray_t*);
 typedef ray_t* (*ray_vary_fn)(ray_t**, int64_t);
 
-/* DAG opcode stored in nullmap[0..1] for binary builtins with DAG-exec paths.
+/* DAG opcode stored in aux[0..1] for binary builtins with DAG-exec paths.
  * Eliminates dispatch table lookups in atomic_map_binary — just read the opcode. */
-#define RAY_FN_OPCODE(fn)        (*(uint16_t*)(fn)->nullmap)
-#define RAY_FN_SET_OPCODE(fn,op) (*(uint16_t*)(fn)->nullmap = (uint16_t)(op))
+#define RAY_FN_OPCODE(fn)        (*(uint16_t*)(fn)->aux)
+#define RAY_FN_SET_OPCODE(fn,op) (*(uint16_t*)(fn)->aux = (uint16_t)(op))
 
 /* ===== VM Bytecode Opcodes ===== */
 

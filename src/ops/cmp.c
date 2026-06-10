@@ -163,8 +163,9 @@ int is_comparable(ray_t* x) {
 }
 
 ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
-    /* Handle all null forms (C NULL, RAY_NULL_OBJ, typed null atoms) */
-    int na = (!a || RAY_ATOM_IS_NULL(a)), nb = (!b || RAY_ATOM_IS_NULL(b));
+    /* Handle null forms (RAY_NULL_OBJ, typed null atoms) */
+    RAY_ASSERT_VALUE(a); RAY_ASSERT_VALUE(b);
+    int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
     if (na && nb) return make_bool(1);
     if (na || nb) return make_bool(0);
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c == 0 ? 1 : 0); }
@@ -184,8 +185,9 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
 }
 
 ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
-    /* Handle all null forms (C NULL, RAY_NULL_OBJ, typed null atoms) */
-    int na = (!a || RAY_ATOM_IS_NULL(a)), nb = (!b || RAY_ATOM_IS_NULL(b));
+    /* Handle null forms (RAY_NULL_OBJ, typed null atoms) */
+    RAY_ASSERT_VALUE(a); RAY_ASSERT_VALUE(b);
+    int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
     if (na && nb) return make_bool(0);
     if (na || nb) return make_bool(1);
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c != 0 ? 1 : 0); }
