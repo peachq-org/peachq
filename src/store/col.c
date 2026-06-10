@@ -101,6 +101,19 @@ static size_t col_str_pool_payload_len(const ray_t* vec);
  * (NULL_F64/NULL_I64/...).  There is no separate bitmap region.
  * -------------------------------------------------------------------------- */
 
+/* Allowlist of attr bits the save path legitimately persists (col_save_impl
+ * strips HAS_INDEX / HAS_LINK / SLICE before writing the header; what
+ * survives is the SYM width bits, SORTED, and HAS_NULLS).  Disk attrs are
+ * untrusted: runtime-only bits like HAS_INDEX/HAS_LINK/SLICE route aux
+ * bytes as owned pointers (ray_release_owned_refs would release an
+ * attacker-controlled pointer), and ARENA would defeat refcounting.
+ * Loaders must mask loaded attrs to this set immediately after header
+ * materialization, BEFORE any error path can release the object.  Link
+ * sidecar reattach (try_load_link_sidecar) runs after masking and sets
+ * HAS_LINK with a freshly interned sym ID, so legit links are unaffected. */
+#define COL_DISK_ATTRS_MASK \
+    ((uint8_t)(RAY_SYM_W_MASK | RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS))
+
 /* Explicit allowlist of types that are safe to serialize as raw bytes.
  * Fixed-size scalar types plus RAY_STR.  RAY_STR has a pointer-bearing pool
  * in memory, but the column format stores the fixed 16-byte descriptors and
@@ -384,7 +397,9 @@ static ray_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
                 memcpy(ray_data(vec->str_pool), *pp, (size_t)pool_size);
             }
             *pp += pool_size; *remaining -= (size_t)pool_size;
-            vec->attrs = attrs;
+            /* Stream attrs byte is untrusted — same allowlist as the
+             * column-file loaders (COL_DISK_ATTRS_MASK). */
+            vec->attrs = attrs & COL_DISK_ATTRS_MASK;
         }
 
         if (type == RAY_SYM) {
@@ -761,7 +776,9 @@ static ray_t* col_copy_str_pool(const col_mapped_t* cm) {
     memcpy(pool, src, 32 + cm->str_pool_size);
     pool->order = saved_order;
     pool->mmod = saved_mmod;
-    pool->attrs &= (uint8_t)~RAY_ATTR_SLICE;
+    /* Pool header attrs are untrusted disk bytes (save writes 0) — mask
+     * to the persisted allowlist, see COL_DISK_ATTRS_MASK. */
+    pool->attrs &= COL_DISK_ATTRS_MASK;
     ray_atomic_store(&pool->rc, 1);
     return pool;
 }
@@ -958,10 +975,12 @@ ray_t* ray_col_load(const char* path) {
 
     ray_vm_unmap_file(cm.mapped, cm.mapped_size);
 
-    /* Fix up header for buddy-allocated block */
+    /* Fix up header for buddy-allocated block.  Mask attrs to the
+     * persisted allowlist (covers the old SLICE strip) — see
+     * COL_DISK_ATTRS_MASK.  Must precede the SYM release path below. */
     vec->mmod = 0;
     vec->order = saved_order;
-    vec->attrs &= ~RAY_ATTR_SLICE;
+    vec->attrs &= COL_DISK_ATTRS_MASK;
     ray_atomic_store(&vec->rc, 1);
 
     /* RAY_SYM: validate sym count footer + bounds check */
@@ -1035,17 +1054,21 @@ static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count) {
         }
     }
 
-    /* Patch header -- MAP_PRIVATE COW: only the header page gets copied */
+    /* Patch header -- MAP_PRIVATE COW: only the header page gets copied.
+     * Mask attrs to the persisted allowlist (covers the old SLICE strip)
+     * — see COL_DISK_ATTRS_MASK.  Must precede the link-sidecar reattach
+     * below and any release of the loaded header. */
     vec->mmod = 1;
     vec->order = 0;
-    vec->attrs &= ~RAY_ATTR_SLICE;
+    vec->attrs &= COL_DISK_ATTRS_MASK;
     ray_atomic_store(&vec->rc, 1);
 
     if (vec->type == RAY_STR) {
         ray_t* pool = (ray_t*)((char*)cm.mapped + cm.str_pool_offset);
         pool->mmod = 2;
         pool->order = 0;
-        pool->attrs &= (uint8_t)~RAY_ATTR_SLICE;
+        /* Untrusted disk attrs — mask, see COL_DISK_ATTRS_MASK. */
+        pool->attrs &= COL_DISK_ATTRS_MASK;
         ray_atomic_store(&pool->rc, 1);
         vec->str_pool = pool;
     }
