@@ -324,7 +324,7 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
         mapcommon->type = RAY_MAPCOMMON;
         mapcommon->len = 2;
         mapcommon->attrs = mc_type;
-        memset(mapcommon->nullmap, 0, 16);
+        memset(mapcommon->aux, 0, 16);
 
         ray_t** mc_ptrs = (ray_t**)ray_data(mapcommon);
         mc_ptrs[0] = key_values;  ray_retain(key_values);
@@ -361,7 +361,7 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
         parted->type = RAY_PARTED_BASE + first_seg->type;
         parted->len = part_count;
         parted->attrs = 0;
-        memset(parted->nullmap, 0, 16);
+        memset(parted->aux, 0, 16);
 
         ray_t** segs = (ray_t**)ray_data(parted);
         for (int64_t p = 0; p < part_count; p++) {

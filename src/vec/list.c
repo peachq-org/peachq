@@ -53,7 +53,7 @@ ray_t* ray_list_new(int64_t capacity) {
     list->type = RAY_LIST;
     list->len = 0;
     list->attrs = 0;
-    memset(list->nullmap, 0, 16);
+    memset(list->aux, 0, 16);
 
     return list;
 }
@@ -269,7 +269,7 @@ ray_t* ray_list_insert_many(ray_t* list, ray_t* idxs, ray_t* vals) {
     result->type = RAY_LIST;
     result->len = new_len;
     result->attrs = 0;
-    memset(result->nullmap, 0, 16);
+    memset(result->aux, 0, 16);
 
     ray_t** src_slots = (ray_t**)ray_data(list);
     ray_t** val_slots = (ray_t**)ray_data(vals);
