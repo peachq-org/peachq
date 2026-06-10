@@ -27,16 +27,16 @@
 #include <rayforce.h>
 #include "lang/eval.h"
 
-/* Create function objects. Name stored inline in nullmap[0..15].
+/* Create function objects. Name stored inline in aux[0..15].
  * The function pointer is in the i64 field. */
 ray_t* ray_fn_unary(const char* name, uint8_t fn_attrs, ray_unary_fn fn);
 ray_t* ray_fn_binary(const char* name, uint8_t fn_attrs, ray_binary_fn fn);
 ray_t* ray_fn_vary(const char* name, uint8_t fn_attrs, ray_vary_fn fn);
 
-/* Read builtin name from nullmap[2..15] (null-terminated, max 13 chars).
+/* Read builtin name from aux[2..15] (null-terminated, max 13 chars).
  * Bytes 0-1 reserved for DAG opcode on all function types. */
 static inline const char* ray_fn_name(const ray_t* fn) {
-    return (const char*)fn->nullmap + 2;
+    return (const char*)fn->aux + 2;
 }
 
 /* Global environment: symbol -> function object dict */

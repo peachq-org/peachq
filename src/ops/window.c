@@ -105,7 +105,6 @@ static inline int64_t win_read_i64(ray_t* col, int64_t row) {
 
 /* Aliases for shared parallel null helpers from internal.h */
 #define win_set_null       par_set_null
-#define win_prepare_nullmap par_prepare_nullmap
 #define win_finalize_nulls par_finalize_nulls
 
 /* Resolve a graph op node to a column vector from tbl */
@@ -1145,17 +1144,8 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     ray_t** order_vecs = n_order > 0 ? &sort_vecs[n_part] : NULL;
 
     {
-        /* Pre-allocate nullmaps so win_set_null works in both paths.
-         * On OOM, force sequential path where win_set_null falls back
-         * to single-threaded ray_vec_set_null. */
-        bool nullmaps_ok = true;
-        for (uint8_t f = 0; f < n_funcs; f++) {
-            if (win_prepare_nullmap(result_vecs[f]) != RAY_OK)
-                nullmaps_ok = false;
-        }
-
         ray_pool_t* p3pool = ray_pool_get();
-        if (p3pool && n_parts > 1 && nullmaps_ok) {
+        if (p3pool && n_parts > 1) {
             win_par_ctx_t pctx = {
                 .order_vecs = order_vecs, .n_order = n_order,
                 .func_vecs = func_vecs, .func_kinds = ext->window.func_kinds,

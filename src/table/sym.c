@@ -214,7 +214,7 @@ ray_err_t ray_sym_init(void) {
      * symbol the canonical "no value" representation for SYM columns:
      * a missing CSV cell, a null-marked SYM atom, and an explicit ""
      * literal all collapse to ID 0.  SYM columns therefore never need
-     * a parallel nullmap — RAY_ATTR_HAS_NULLS is structurally
+     * a parallel null bitmap — RAY_ATTR_HAS_NULLS is structurally
      * meaningless on SYM and is rejected on set.  Done before
      * returning so every subsequent intern observes ID 0 as taken. */
     int64_t empty_id = sym_intern_nolock(

@@ -393,7 +393,7 @@ static ray_t* atomic_map_binary_parted(ray_binary_fn fn, uint16_t dag_opcode,
     out->type = RAY_LIST;
     out->len = 0;
     out->attrs = 0;
-    memset(out->nullmap, 0, sizeof(out->nullmap));
+    memset(out->aux, 0, sizeof(out->aux));
     ray_t** dst = (ray_t**)ray_data(out);
     ray_t** lsegs = left_parted ? (ray_t**)ray_data(left) : NULL;
     ray_t** rsegs = right_parted ? (ray_t**)ray_data(right) : NULL;
@@ -1913,7 +1913,8 @@ op_call1: {
             goto vm_error;
         }
     }
-    if (RAY_UNLIKELY(!arg || RAY_IS_NULL(arg))) {
+    RAY_ASSERT_VALUE(arg);
+    if (RAY_UNLIKELY(RAY_IS_NULL(arg))) {
         result = (fn == (ray_unary_fn)ray_nil_fn || fn == (ray_unary_fn)ray_type_fn)
                  ? fn(arg) : ray_error("type", NULL);
     } else if ((fn_obj->attrs & RAY_FN_ATOMIC) && arg->type >= 0)
@@ -1954,7 +1955,8 @@ op_call2: {
             }
         }
     }
-    if (RAY_UNLIKELY(!left || !right || RAY_IS_NULL(left) || RAY_IS_NULL(right))) {
+    RAY_ASSERT_VALUE(left); RAY_ASSERT_VALUE(right);
+    if (RAY_UNLIKELY(RAY_IS_NULL(left) || RAY_IS_NULL(right))) {
         result = (fn == (ray_binary_fn)ray_eq_fn || fn == (ray_binary_fn)ray_neq_fn)
                  ? fn(left, right) : ray_error("type", NULL);
     /* Fast path: atoms have negative type — skip collection check entirely.
@@ -2934,8 +2936,8 @@ ray_t* ray_eval(ray_t* obj) {
 
     /* Atoms: return themselves (retain) */
     if (ray_is_atom(obj)) {
-        /* Name reference: resolve from env */
-        if (obj->type == -RAY_SYM && (obj->attrs & RAY_ATTR_NAME)) {
+        /* Name reference: resolve from env (unflagged default; ATTR_QUOTED clear) */
+        if (obj->type == -RAY_SYM && !(obj->attrs & ATTR_QUOTED)) {
             /* Check for null keyword — compare by string, not cached sym_id,
              * because sym table may be reinitialized between test runs */
             {
@@ -2943,7 +2945,7 @@ ray_t* ray_eval(ray_t* obj) {
                 if (name_str && ray_str_len(name_str) == 4 &&
                     memcmp(ray_str_ptr(name_str), "null", 4) == 0) {
                     ray_release(name_str);
-                    ret = NULL; goto out;
+                    ret = RAY_NULL_OBJ; goto out;
                 }
                 if (name_str) ray_release(name_str);
             }
@@ -2966,6 +2968,19 @@ ray_t* ray_eval(ray_t* obj) {
             if (RAY_IS_ERR(val)) { ret = val; goto out; }
             /* env_resolve hands back an owned ref; no extra retain. */
             ret = val; goto out;
+        }
+        /* Literal symbol (ATTR_QUOTED set).  Inside a query, a literal that
+         * names a from-table COLUMN resolves to that column (B3 Part 2).  We
+         * consult ONLY the active query table's column set — never the env
+         * scope chain — so a literal never captures a lambda/let local, and
+         * the rule fires only while a query is active (ray_active_query_table
+         * is NULL otherwise).  A literal naming no column returns itself. */
+        if (obj->type == -RAY_SYM) {
+            ray_t* qt = ray_active_query_table();
+            if (qt && qt->type == RAY_TABLE) {
+                ray_t* col = ray_table_get_col(qt, obj->i64);
+                if (col) { ray_retain(col); ret = col; goto out; }
+            }
         }
         ray_retain(obj);
         ret = obj; goto out;
@@ -3046,7 +3061,8 @@ ray_t* ray_eval(ray_t* obj) {
                 if (!arg || RAY_IS_ERR(arg)) { ret = arg ? arg : ray_error("type", NULL); goto out; }
             }
             ray_t* result;
-            if (!arg || RAY_IS_NULL(arg)) {
+            RAY_ASSERT_VALUE(arg);
+            if (RAY_IS_NULL(arg)) {
                 /* Only nil?/type/ser safely handle null */
                 result = (fn == (ray_unary_fn)ray_nil_fn || fn == (ray_unary_fn)ray_type_fn ||
                           fn == (ray_unary_fn)ray_ser_fn) ? fn(arg) : ray_error("type", NULL);
@@ -3096,7 +3112,8 @@ ray_t* ray_eval(ray_t* obj) {
                 }
             }
             /* If either arg is NULL/void, only == and != can handle it */
-            if (!left || !right || RAY_IS_NULL(left) || RAY_IS_NULL(right)) {
+            RAY_ASSERT_VALUE(left); RAY_ASSERT_VALUE(right);
+            if (RAY_IS_NULL(left) || RAY_IS_NULL(right)) {
                 if (fn == (ray_binary_fn)ray_eq_fn || fn == (ray_binary_fn)ray_neq_fn) {
                     ray_release(head);
                     ray_t* result = fn(left, right);
