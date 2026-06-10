@@ -3549,10 +3549,15 @@ static ray_t* atom_broadcast_vec(ray_t* a, int64_t n) {
 
     /* Propagate atom-null: an entirely-null broadcast keeps the null bit
      * of every cell so `is_null` and aggregations behave the same as
-     * the LIST path would have. */
+     * the LIST path would have.  The aux memset is a bitmap-era residue
+     * (no vec-level consumer reads aux null bits since the sentinel
+     * migration); it MUST skip RAY_SYM, whose aux bytes 8-15 now carry
+     * the resolution-domain pointer — clobbering it would corrupt the
+     * header and crash the owned-ref release on free. */
     if (RAY_ATOM_IS_NULL(a)) {
         v->attrs |= RAY_ATTR_HAS_NULLS;
-        memset(v->aux, 0xFF, 16);
+        if (vec_type != RAY_SYM)
+            memset(v->aux, 0xFF, 16);
     }
     return v;
 }
