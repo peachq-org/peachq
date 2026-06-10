@@ -2011,16 +2011,36 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         return ray_error("type", NULL);
     }
 
-    /* Atom input: count returns 1 (or the string length for RAY_STR
-     * since strings are length-prefixed atoms).  Other reductions on
-     * a scalar are a type error — they need a column. */
+    /* Atom input: a reduction of a scalar sub-expression (e.g.
+     * (sum (max v)), (sum (count (distinct v)))) reaches here when the
+     * reduction is compiled as a DAG node whose input materialises to an
+     * atom.  Delegate to the scalar builtin so the DAG agrees with the
+     * direct scalar form — (sum 6) and (sum (max v)) must behave the same.
+     * The builtins handle the atom in place (no recursion back here) and
+     * return an owned value without consuming `input` (the caller releases
+     * it).  COUNT keeps its column-cardinality semantics (1 / strlen). */
     if (ray_is_atom(input)) {
-        if (op->opcode == OP_COUNT) {
-            if ((-input->type) == RAY_STR)
-                return ray_i64((int64_t)ray_str_len(input));
-            return ray_i64(1);
+        switch (op->opcode) {
+            case OP_COUNT:
+                if ((-input->type) == RAY_STR)
+                    return ray_i64((int64_t)ray_str_len(input));
+                return ray_i64(1);
+            case OP_SUM:        return ray_sum_fn(input);
+            case OP_AVG:        return ray_avg_fn(input);
+            case OP_MIN:        return ray_min_fn(input);
+            case OP_MAX:        return ray_max_fn(input);
+            case OP_FIRST:      return ray_first_fn(input);
+            case OP_LAST:       return ray_last_fn(input);
+            case OP_MEDIAN:     return ray_med_fn(input);
+            case OP_VAR:        return ray_var_fn(input);
+            case OP_VAR_POP:    return ray_var_pop_fn(input);
+            case OP_STDDEV:     return ray_stddev_fn(input);
+            case OP_STDDEV_POP: return ray_stddev_pop_fn(input);
+            /* OP_PROD has no scalar builtin; prod of a single element is
+             * that element. */
+            case OP_PROD:       ray_retain(input); return input;
+            default:            return ray_error("type", NULL);
         }
-        return ray_error("type", NULL);
     }
 
     int8_t in_type = input->type;
