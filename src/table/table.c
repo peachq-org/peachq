@@ -73,7 +73,7 @@ ray_t* ray_table_new(int64_t ncols) {
     tbl->type  = RAY_TABLE;
     tbl->attrs = 0;
     tbl->len   = 2;
-    memset(tbl->nullmap, 0, 16);
+    memset(tbl->aux, 0, 16);
     memset(ray_data(tbl), 0, TBL_DATA_SIZE);
 
     ray_t* schema = ray_vec_new(RAY_I64, ncols);
