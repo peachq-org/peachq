@@ -357,6 +357,11 @@ ray_t* ray_map_fn(ray_t** args, int64_t n) {
         ray_t** elems = (ray_t**)ray_data(vec);
         for (int64_t i = 0; i < len; i++) {
             out[i] = call_fn1(fn, elems[i]);
+            /* Materialise a lazy result (e.g. the lambda returned
+             * (count (distinct x)) — distinct/count of a vec is lazy).  A LIST
+             * of unforced lazy nodes breaks every downstream consumer that
+             * doesn't force per element (sum, ==, +). */
+            if (ray_is_lazy(out[i])) out[i] = ray_lazy_materialize(out[i]);
             if (RAY_IS_ERR(out[i])) {
                 for (int64_t j = 0; j < i; j++) ray_release(out[j]);
                 result->len = 0; ray_release(result); if (_bx) ray_release(_bx);
@@ -385,6 +390,7 @@ ray_t* ray_map_fn(ray_t** args, int64_t n) {
     ray_t** elems = (ray_t**)ray_data(vec);
     for (int64_t i = 0; i < len; i++) {
         out[i] = call_fn2(fn, val, elems[i]);
+        if (ray_is_lazy(out[i])) out[i] = ray_lazy_materialize(out[i]);
         if (RAY_IS_ERR(out[i])) {
             for (int64_t j = 0; j < i; j++) ray_release(out[j]);
             result->len = 0; ray_release(result); if (_bx) ray_release(_bx);
