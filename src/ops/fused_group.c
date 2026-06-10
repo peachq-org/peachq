@@ -24,7 +24,7 @@
 #include "ops/fused_group.h"
 #include "ops/fused_pred.h" /* fp_pred_t / fp_compile_pred / fp_eval_pred */
 #include "ops/idxop.h"      /* RAY_IDX_CHUNK_ZONE chunk-skip in fp_eval_cmp */
-#include "lang/eval.h"      /* RAY_ATTR_NAME */
+#include "lang/eval.h"      /* ATTR_QUOTED */
 #include "core/pool.h"      /* ray_pool_get / ray_pool_dispatch */
 
 #include <limits.h>
@@ -143,7 +143,7 @@ static int fp_atom_col_compatible(int8_t atom_type, int8_t col_type) {
 }
 
 /* Reject columns the fused per-row compare can't read safely.
- * Currently: any column carrying a non-empty nullmap (RAY_ATTR_HAS_NULLS).
+ * Currently: any column carrying nulls (RAY_ATTR_HAS_NULLS).
  * The fused evaluator reads raw payload bytes — for nullable columns it
  * would compare the sentinel value rather than treating the slot as
  * null, producing a different result from the unfused null-aware
@@ -157,7 +157,7 @@ static int fp_col_supported(const ray_t* col) {
 
 static int fp_expr_const_str(ray_t* expr) {
     if (!expr) return 0;
-    if (expr->type == -RAY_STR && !(expr->attrs & RAY_ATTR_NAME)) return 1;
+    if (expr->type == -RAY_STR && !(expr->attrs & ATTR_QUOTED)) return 1;
     if (expr->type != RAY_LIST || ray_len(expr) < 2) return 0;
     ray_t** elems = (ray_t**)ray_data(expr);
     if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
@@ -188,10 +188,11 @@ static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
     if (code < 0) return -1;
 
     ray_t* lhs = elems[1];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return -1;
     ray_t* rhs = elems[2];
-    if (!rhs || !ray_is_atom(rhs) || (rhs->attrs & RAY_ATTR_NAME))
+    if (!rhs || !ray_is_atom(rhs) ||
+        (rhs->type == -RAY_SYM && !(rhs->attrs & ATTR_QUOTED)))
         return -1;
 
     /* Resolve column type to gate ordering ops AND verify the column
@@ -228,7 +229,7 @@ static int fp_check_like(ray_t* expr, ray_t* tbl) {
         || memcmp(ray_str_ptr(op_sym), "like", 4) != 0)
         return 0;
     ray_t* lhs = elems[1];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return 0;
     if (!fp_expr_const_str(elems[2])) return 0;
     if (tbl) {
@@ -256,9 +257,9 @@ static int fp_check_in(ray_t* expr, ray_t* tbl) {
         return 0;
     ray_t* lhs = elems[1];
     ray_t* rhs = elems[2];
-    if (!lhs || lhs->type != -RAY_SYM || !(lhs->attrs & RAY_ATTR_NAME))
+    if (!lhs || lhs->type != -RAY_SYM || (lhs->attrs & ATTR_QUOTED))
         return 0;
-    if (!rhs || !ray_is_vec(rhs) || (rhs->attrs & RAY_ATTR_NAME))
+    if (!rhs || !ray_is_vec(rhs) || (rhs->attrs & RAY_ATTR_SORTED))
         return 0;
     if (ray_len(rhs) > 16) return 0;
     if (!fp_int_family(rhs->type)) return 0;
@@ -778,7 +779,7 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
     if (col->type == RAY_SYM && (out->op == FP_LT || out->op == FP_LE ||
                                  out->op == FP_GT || out->op == FP_GE))
         return -1;
-    /* Reject nullable columns — fp_eval_cmp doesn't read the nullmap,
+    /* Reject nullable columns — fp_eval_cmp doesn't read the null bitmap,
      * so a comparison against a stored sentinel slot would diverge from
      * the unfused null-aware kernel. */
     if (!fp_col_supported(col)) return -1;
@@ -2425,7 +2426,7 @@ static ray_t* exec_filtered_group_count1(ray_graph_t* g, ray_op_ext_t* ext,
     if (RAY_IS_PARTED(key_col->type) || key_col->type == RAY_MAPCOMMON)
         return ray_error("nyi", "fused_group: phase-2 needs flat key column");
     /* Nullable key columns: count1's per-row HT probe reads the raw
-     * payload without the nullmap, so a stored sentinel for null
+     * payload without the null bitmap, so a stored sentinel for null
      * would bucket as a real key value.  Mirrors the multi path's
      * gate in mk_compile and the planner gate in query.c — included
      * here too so direct C-API callers of ray_filtered_group() that
