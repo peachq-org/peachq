@@ -2235,13 +2235,25 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
         return err;
     }
 
-    ray_t* schema = ray_vec_new(RAY_I64, ncols);
+    ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
     if (!schema || RAY_IS_ERR(schema)) {
         munmap(buf, file_size);
         return schema ? ray_err_from_obj(schema) : RAY_ERR_OOM;
     }
-    schema->len = ncols;
-    memcpy(ray_data(schema), col_name_ids, (size_t)ncols * sizeof(int64_t));
+    for (int c = 0; c < ncols; c++) {
+        ray_t* na = ray_sym_str(col_name_ids[c]);
+        if (!na) {
+            ray_release(schema);
+            munmap(buf, file_size);
+            return RAY_ERR_CORRUPT;
+        }
+        schema = ray_str_vec_append(schema, ray_str_ptr(na), ray_str_len(na));
+        if (!schema || RAY_IS_ERR(schema)) {
+            if (schema) ray_release(schema);
+            munmap(buf, file_size);
+            return RAY_ERR_OOM;
+        }
+    }
     char schema_path[1024];
     int sn = snprintf(schema_path, sizeof(schema_path), "%s/.d", dir);
     if (sn < 0 || (size_t)sn >= sizeof(schema_path))
