@@ -538,7 +538,7 @@ ray_t* broadcast_scalar(ray_t* atom, int64_t nrows) {
     }
     /* Propagate null state from the source atom.  A typed-null atom
      * (e.g. 0Nf returned by VAR/STDDEV with cnt<=1) carries its null
-     * bit in atom->nullmap[0] & 1.  Without this propagation, the
+     * bit in atom->aux[0] & 1.  Without this propagation, the
      * scalar-select pipeline
      *   exec_reduction → ray_typed_null(-RAY_F64) → broadcast_scalar
      * would silently surface a stray 0.0 at (at result 0) instead of

@@ -28,10 +28,10 @@
  * idxop.h -- Per-vector accelerator indices.
  *
  * A vector with RAY_ATTR_HAS_INDEX set carries a child ray_t of type
- * RAY_INDEX in its nullmap[0..7] slot.  The index ray_t holds:
+ * RAY_INDEX in its aux[0..7] slot.  The index ray_t holds:
  *   - the kind (hash / sort / zone / bloom)
  *   - kind-specific payload (keys vec, perm vec, min/max, bloom bits)
- *   - a snapshot of the parent's original 16-byte nullmap union plus
+ *   - a snapshot of the parent's original 16-byte aux union plus
  *     the relevant attrs bits, so detach can restore the vector to its
  *     pre-attach state byte-for-byte.
  *
@@ -80,12 +80,12 @@ typedef struct {
     uint8_t  markers;         /* RAY_MARK_* bits (block-resident attr flags) */
     int64_t  built_for_len;   /* parent->len at attach (mismatch -> stale) */
 
-    /* Raw 16-byte snapshot of parent->nullmap union at attach time,
+    /* Raw 16-byte snapshot of parent->aux union at attach time,
      * restored verbatim on detach.  For the numeric vector types that
      * may attach an index (see prepare_attach) this snapshot holds no
      * owned ray_t* refs: bytes 0-7 are unused and bytes 8-15 carry the
      * link_target int64 when HAS_LINK is set. */
-    uint8_t  saved_nullmap[16];
+    uint8_t  saved_aux[16];
 
     /* Kind-specific payload.  All ray_t* fields are owning refs. */
     union {
@@ -161,7 +161,7 @@ ray_t* ray_index_attach_bloom(ray_t** vp);
 ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2);
 
 /* Drop any attached index from *vp.  No-op if none.  Restores the
- * pre-attach nullmap state byte-for-byte.  Returns *vp. */
+ * pre-attach aux state byte-for-byte.  Returns *vp. */
 ray_t* ray_index_drop(ray_t** vp);
 
 /* ===== Introspection ===== */
@@ -218,11 +218,11 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */
 
-/* Release the saved-nullmap pointers carried by a RAY_INDEX ray_t.
+/* Release the saved-aux pointers carried by a RAY_INDEX ray_t.
  * Invoked from ray_release_owned_refs when the index ray_t is freed. */
 void ray_index_release_saved(ray_index_t* ix);
 
-/* Retain the saved-nullmap pointers carried by a RAY_INDEX ray_t.
+/* Retain the saved-aux pointers carried by a RAY_INDEX ray_t.
  * Invoked from ray_retain_owned_refs after a copy of the index ray_t. */
 void ray_index_retain_saved(ray_index_t* ix);
 

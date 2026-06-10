@@ -59,7 +59,7 @@ int ray_fused_topk_supported(ray_t* where_expr, ray_t* tbl);
  * Bypasses the DAG entirely: the predicate is compiled inline against
  * `tbl`'s columns; per-worker bounded heaps are merged after the parallel
  * scan; rows are gathered from `tbl` by index for the final output.
- * Source-column nullmaps are propagated to the output so a nullable
+ * Source-column null bitmaps are propagated to the output so a nullable
  * select column survives a top-K gather (the planner gate previously
  * disallowed this).
  *

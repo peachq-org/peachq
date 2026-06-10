@@ -26,19 +26,20 @@
 #include "table/dict.h"
 #include "ops/temporal.h"
 #include "ops/linkop.h"
+#include "mem/sys.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* ---- Function constructors ---- */
 
-/* Builtin name stored inline in nullmap[2..15] (max 13 chars + null).
+/* Builtin name stored inline in aux[2..15] (max 13 chars + null).
  * Bytes 0-1 reserved for DAG opcode (any type, not just binary). */
 static void fn_set_name(ray_t* obj, const char* name) {
-    memset(obj->nullmap, 0, 16);
+    memset(obj->aux, 0, 16);
     size_t len = strlen(name);
     if (len > 13) len = 13;
-    memcpy(obj->nullmap + 2, name, len);
+    memcpy(obj->aux + 2, name, len);
 }
 
 ray_t* ray_fn_unary(const char* name, uint8_t fn_attrs, ray_unary_fn fn) {
@@ -108,9 +109,12 @@ static struct {
 #define FRAME_CAP  64
 
 typedef struct {
-    int64_t keys[FRAME_CAP];
-    ray_t*   vals[FRAME_CAP];
-    int32_t count;
+    int64_t  keys_inline[FRAME_CAP];
+    ray_t*   vals_inline[FRAME_CAP];
+    int64_t* keys;     /* -> keys_inline, or heap once grown past FRAME_CAP */
+    ray_t**  vals;     /* -> vals_inline, or heap once grown */
+    int32_t  cap;
+    int32_t  count;
 } ray_scope_frame_t;
 
 static _Thread_local ray_scope_frame_t scope_stack[SCOPE_CAP];
@@ -414,7 +418,23 @@ static ray_err_t env_bind_local(int64_t sym_id, ray_t* val) {
         }
     }
     if (val == NULL) return RAY_OK;
-    if (f->count >= FRAME_CAP) return RAY_ERR_OOM;
+    if (f->count >= f->cap) {
+        int32_t new_cap = f->cap * 2;
+        int64_t* nk = (int64_t*)ray_sys_alloc(sizeof(int64_t) * (size_t)new_cap);
+        ray_t**  nv = (ray_t**)ray_sys_alloc(sizeof(ray_t*)  * (size_t)new_cap);
+        if (!nk || !nv) {
+            if (nk) ray_sys_free(nk);
+            if (nv) ray_sys_free(nv);
+            return RAY_ERR_OOM;
+        }
+        memcpy(nk, f->keys, sizeof(int64_t) * (size_t)f->count);
+        memcpy(nv, f->vals, sizeof(ray_t*)  * (size_t)f->count);
+        if (f->keys != f->keys_inline) ray_sys_free(f->keys);
+        if (f->vals != f->vals_inline) ray_sys_free(f->vals);
+        f->keys = nk;
+        f->vals = nv;
+        f->cap = new_cap;
+    }
     f->keys[f->count] = sym_id;
     ray_retain(val);
     f->vals[f->count] = val;
@@ -592,7 +612,11 @@ ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
 
 ray_err_t ray_env_push_scope(void) {
     if (scope_depth >= SCOPE_CAP) return RAY_ERR_OOM;
-    scope_stack[scope_depth].count = 0;
+    ray_scope_frame_t* f = &scope_stack[scope_depth];
+    f->keys = f->keys_inline;
+    f->vals = f->vals_inline;
+    f->cap = FRAME_CAP;
+    f->count = 0;
     scope_depth++;
     return RAY_OK;
 }
@@ -604,6 +628,11 @@ void ray_env_pop_scope(void) {
     for (int32_t i = 0; i < f->count; i++) {
         if (f->vals[i]) ray_release(f->vals[i]);
     }
+    if (f->keys != f->keys_inline) ray_sys_free(f->keys);
+    if (f->vals != f->vals_inline) ray_sys_free(f->vals);
+    f->keys = f->keys_inline;
+    f->vals = f->vals_inline;
+    f->cap = FRAME_CAP;
     f->count = 0;
 }
 
