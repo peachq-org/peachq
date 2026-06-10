@@ -29,6 +29,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* --------------------------------------------------------------------------
  * Splayed table: directory of column files + .d schema file
@@ -65,6 +68,60 @@ static ray_err_t validate_sym_columns(ray_t* tbl, int64_t schema_ncols,
  * ray_splay_save — save a table to a splayed table directory
  * -------------------------------------------------------------------------- */
 
+/* True when the table has at least one RAY_SYM column (those are the only
+ * columns that reference the symbol dictionary). */
+static bool table_has_sym_cols(ray_t* tbl) {
+    int64_t nc = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        if (col && col->type == RAY_SYM) return true;
+    }
+    return false;
+}
+
+/* True when `name` (len bytes) names a column of `tbl` that passes the
+ * on-disk name-safety filter. */
+static bool table_has_col_named(ray_t* tbl, const char* name, size_t len) {
+    int64_t nc = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* na = ray_sym_str(ray_table_col_name(tbl, c));
+        if (!na) continue;
+        if (ray_str_len(na) == len && memcmp(ray_str_ptr(na), name, len) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Remove regular files in `dir` that are not part of the just-written
+ * table: not ".d", not "sym"/"sym.lk", not a current column.  Runs after
+ * the .d commit so a stale wider-schema file can never shadow a column
+ * (the historical "error: corrupt on re-set" bug). */
+static void splay_sweep_stale(ray_t* tbl, const char* dir) {
+    DIR* d = opendir(dir);
+    if (!d) return;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char* n = ent->d_name;
+        if (n[0] == '.') continue; /* ".", "..", ".d" */
+        if (strcmp(n, "sym") == 0 || strcmp(n, "sym.lk") == 0) continue;
+        size_t nlen = strlen(n);
+        if (table_has_col_named(tbl, n, nlen)) continue;
+        /* `<col>.link` sidecars (store/col.c) belong to their column: keep
+         * them while the column is current; ray_col_save already removes a
+         * stale sidecar when the column itself is rewritten without a link. */
+        if (nlen > 5 && memcmp(n + nlen - 5, ".link", 5) == 0 &&
+            table_has_col_named(tbl, n, nlen - 5))
+            continue;
+        char p[1024];
+        int pl = snprintf(p, sizeof(p), "%s/%s", dir, n);
+        if (pl <= 0 || (size_t)pl >= sizeof(p)) continue;
+        struct stat st;
+        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        unlink(p);
+    }
+    closedir(d);
+}
+
 static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_path,
                                  bool durable) {
     if (!tbl || RAY_IS_ERR(tbl)) return RAY_ERR_TYPE;
@@ -76,17 +133,18 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
     ray_err_t mkdir_err = ray_mkdir_p(dir);
     if (mkdir_err != RAY_OK) return mkdir_err;
 
-    /* Save symbol table if sym_path provided */
-    if (sym_path) {
-        ray_err_t sym_err = durable ? ray_sym_save(sym_path) : ray_sym_save_bulk(sym_path);
+    /* 1. Symfile FIRST — column data must never reference symbols that are
+     *    not persisted.  Skipped entirely for symbol-free tables: nothing
+     *    to enumerate (spec: no-symbol-columns exemption). */
+    if (sym_path && table_has_sym_cols(tbl)) {
+        ray_err_t sym_err = durable ? ray_sym_save(sym_path)
+                                    : ray_sym_save_bulk(sym_path);
         if (sym_err != RAY_OK) return sym_err;
     }
 
     int64_t ncols = ray_table_ncols(tbl);
 
-    /* Save .d schema file — RAY_STR vector of column names.  Self-
-     * describing: loading never depends on a symfile.  Lists exactly the
-     * columns whose files are written (same safety filter as below). */
+    /* 2. Column files (and the schema names they correspond to). */
     ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
     if (!schema || RAY_IS_ERR(schema)) {
         if (schema) ray_release(schema);
@@ -102,13 +160,31 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
         if (name_len == 0 || name[0] == '.' ||
             memchr(name, '/', name_len) || memchr(name, '\\', name_len) ||
             memchr(name, '\0', name_len))
-            continue; /* file is skipped below; keep .d consistent */
+            continue; /* unsafe name: no file, no .d entry */
+
+        char path[1024];
+        int path_len = snprintf(path, sizeof(path), "%s/%.*s", dir,
+                                (int)name_len, name);
+        if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+            ray_release(schema);
+            return RAY_ERR_RANGE;
+        }
+        ray_err_t err = durable ? ray_col_save(col, path)
+                                : ray_col_save_bulk(col, path);
+        if (err != RAY_OK) {
+            /* No .d written yet: the dir stays in its previous committed
+             * state (old .d) or uncommitted state (no .d) — never torn. */
+            ray_release(schema);
+            return err;
+        }
         schema = ray_str_vec_append(schema, name, name_len);
         if (!schema || RAY_IS_ERR(schema)) {
             if (schema) ray_release(schema);
             return RAY_ERR_OOM;
         }
     }
+
+    /* 3. .d LAST — the commit marker. */
     {
         char path[1024];
         int path_len = snprintf(path, sizeof(path), "%s/.d", dir);
@@ -122,34 +198,8 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
         if (err != RAY_OK) return err;
     }
 
-    /* Save each column */
-    for (int64_t c = 0; c < ncols; c++) {
-        ray_t* col = ray_table_get_col_idx(tbl, c);
-        int64_t name_id = ray_table_col_name(tbl, c);
-        if (!col) continue;
-
-        /* Get column name string */
-        ray_t* name_atom = ray_sym_str(name_id);
-        if (!name_atom) continue;
-
-        const char* name = ray_str_ptr(name_atom);
-        size_t name_len = ray_str_len(name_atom);
-
-        /* Reject names with path separators, traversal, or starting with '.' */
-        if (name_len == 0 || name[0] == '.' ||
-            memchr(name, '/', name_len) || memchr(name, '\\', name_len) ||
-            memchr(name, '\0', name_len))
-            continue;
-
-        char path[1024];
-        int path_len = snprintf(path, sizeof(path), "%s/%.*s", dir, (int)name_len, name);
-        if (path_len < 0 || (size_t)path_len >= sizeof(path)) return RAY_ERR_RANGE;
-
-        ray_err_t err = durable ? ray_col_save(col, path) : ray_col_save_bulk(col, path);
-        /* On partial failure, columns 0..c-1 remain on disk.
-         * Caller should clean up or use atomic rename for safe writes. */
-        if (err != RAY_OK) return err;
-    }
+    /* 4. Sweep files that are no longer part of the table. */
+    splay_sweep_stale(tbl, dir);
 
     return RAY_OK;
 }
