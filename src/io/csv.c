@@ -2245,7 +2245,7 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
         if (!na) {
             ray_release(schema);
             munmap(buf, file_size);
-            return RAY_ERR_CORRUPT;
+            return RAY_ERR_OOM;
         }
         schema = ray_str_vec_append(schema, ray_str_ptr(na), ray_str_len(na));
         if (!schema || RAY_IS_ERR(schema)) {

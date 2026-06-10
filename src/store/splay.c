@@ -43,10 +43,13 @@
 
 /* Post-load validation: reject if sym table is empty but table has RAY_SYM
  * columns, or if schema expected columns but none could be loaded. */
-static ray_err_t validate_sym_columns(ray_t* tbl, int64_t schema_ncols) {
+static ray_err_t validate_sym_columns(ray_t* tbl, int64_t schema_ncols,
+                                      uint32_t sym_count_at_entry) {
     /* Sym table always has the empty string at ID 0 after init, so the
-     * baseline "no real symbols loaded" state is count == 1, not 0. */
-    if (ray_sym_count() > 1) return RAY_OK;
+     * baseline "no real symbols loaded" state is count == 1, not 0.
+     * The count is snapshotted BEFORE the load loop: loading interns the
+     * column names from .d, which must not mask an unpopulated table. */
+    if (sym_count_at_entry > 1) return RAY_OK;
 
     int64_t nc = ray_table_ncols(tbl);
     if (schema_ncols > 0 && nc == 0) return RAY_ERR_CORRUPT;
@@ -206,6 +209,8 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
         return tbl;
     }
 
+    uint32_t sym_count_at_entry = ray_sym_count();
+
     /* Load each column */
     for (int64_t c = 0; c < ncols; c++) {
         size_t name_len = 0;
@@ -269,7 +274,7 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
 
     ray_release(schema);
 
-    ray_err_t sym_check = validate_sym_columns(tbl, ncols);
+    ray_err_t sym_check = validate_sym_columns(tbl, ncols, sym_count_at_entry);
     if (sym_check != RAY_OK) {
         ray_release(tbl);
         return ray_error(ray_err_code_str(sym_check), NULL);
