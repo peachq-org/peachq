@@ -27,6 +27,7 @@
 #include "store/serde.h"
 #include "store/fileio.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include "ops/idxop.h"
 #include "vec/str.h"
 #include <string.h>
@@ -582,6 +583,14 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
         if (!(header.attrs & RAY_ATTR_HAS_NULLS))
             memset(header.aux, 0, 16);
 
+        /* RAY_SYM: aux bytes 8-15 hold the runtime-only domain pointer
+         * (rayforce.h), which must never reach disk — zero the slot
+         * unconditionally (SYM aux carried no on-disk state before the
+         * domain pointer either, so the file bytes are unchanged).
+         * Load/mmap reattach the domain below. */
+        if (vec->type == RAY_SYM)
+            memset(header.aux, 0, 16);
+
         size_t written = fwrite(&header, 1, 32, f);
         if (written != 32) { fclose(f); remove(tmp_path); return RAY_ERR_IO; }
 
@@ -957,6 +966,13 @@ ray_t* ray_col_load(const char* path) {
 
     /* RAY_SYM: validate sym count footer + bounds check */
     if (vec->type == RAY_SYM) {
+        /* The header memcpy above copied the on-disk aux (zeroed by save,
+         * but old/foreign files are untrusted) — attach the resolution
+         * domain BEFORE any release path can run owned-ref handling over
+         * a garbage pointer.  Phase 1: columns store global sym ids, so
+         * the runtime domain is the correct domain; FILE-domain
+         * attachment flips here in Phase 2 with save-side encoding. */
+        vec->sym_domain = ray_sym_runtime_domain();
         ray_err_t sym_err = validate_sym_bounds(ray_data(vec), vec->len,
                                                 vec->attrs, ray_sym_count());
         if (sym_err != RAY_OK) {
@@ -1033,6 +1049,13 @@ static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count) {
         ray_atomic_store(&pool->rc, 1);
         vec->str_pool = pool;
     }
+
+    /* RAY_SYM: attach the resolution domain (header page is MAP_PRIVATE
+     * COW, same mechanism as the str_pool patch above).  Phase 1 attaches
+     * the runtime singleton — today's columns store global sym ids;
+     * FILE-domain attachment flips here in Phase 2. */
+    if (vec->type == RAY_SYM)
+        vec->sym_domain = ray_sym_runtime_domain();
 
     /* Reattach link sidecar if present.  Without this, linked columns
      * round-tripped through splay-mmap (splay.c:184) lose HAS_LINK
