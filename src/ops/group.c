@@ -725,15 +725,6 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
      * and constant-memory per worker.  Below the threshold the exact
      * path is fast enough and avoids approximation entirely — so small
      * tests still match `len-after-distinct` byte-for-byte. */
-    if (len >= (1 << 20)) {
-        bool hashable = (in_type == RAY_I64 || in_type == RAY_I32 ||
-                          in_type == RAY_I16 || in_type == RAY_U8 ||
-                          in_type == RAY_BOOL || in_type == RAY_F64 ||
-                          in_type == RAY_DATE || in_type == RAY_TIME ||
-                          in_type == RAY_TIMESTAMP || in_type == RAY_STR ||
-                          RAY_IS_SYM(in_type));
-        if (hashable) return ray_count_distinct_approx(input);
-    }
 
     switch (in_type) {
     case RAY_BOOL: case RAY_U8:
@@ -1248,7 +1239,7 @@ static ray_t* count_distinct_per_group_parallel(
  * Returns the populated `out` vector on success, NULL on type miss /
  * dispatch failure.  Caller (ray_count_distinct_per_group) falls back
  * to the exact partitioned dedup. */
-static ray_t* count_distinct_per_group_hll(ray_t* src, const int64_t* row_gid,
+__attribute__((unused)) static ray_t* count_distinct_per_group_hll(ray_t* src, const int64_t* row_gid,
                                            int64_t n_rows, int64_t n_groups,
                                            ray_t* out) {
     if (!src || n_rows <= 0 || n_groups <= 0) return NULL;
@@ -1359,53 +1350,9 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
      * is n_workers × 17 KB instead of n_groups × 16 KB.  Returns a
      * ~0.8 % std-error estimate; callers that need exact counts at
      * this scale must not hit this gate. */
-    if (n_rows >= (1 << 20)) {
-        /* Streaming HLL: skip the (idx_buf + offsets + counts) CSR build
-         * by accumulating directly into n_groups sketches per worker in
-         * a single pass over (row_gid[r], val[r]).  The CSR build cost
-         * (two passes of int64 reads over n_rows) is ~30 % of wall time
-         * on q10/q08 ClickBench, while the HLL pass itself is ~7 %.
-         *
-         * Gated on a per-worker memory budget: each worker keeps a bank
-         * of n_groups sketches whose sparse + dense buffers come from
-         * one pre-allocated slab.  At P=14 that's ~17 KB per group;
-         * with the 8 MB-per-worker budget below, n_groups must be ≤
-         * 482 (at one worker) and shrinks pro-rata with worker count
-         * — i.e. the *total* concurrent footprint is bounded at
-         * n_workers * 8 MB ≤ ~64 MB on a 16-thread box.
-         *
-         * Lower bound (n_groups < 16) avoids the dispatch overhead of
-         * n_workers-fold bank merges when there's only a handful of
-         * groups — the CSR path's per-group task dispatch dominates
-         * there anyway, but the streaming bank merge has its own fixed
-         * cost.  Below the bound we fall through to the CSR HLL path. */
-        const size_t RAY_HLL_STREAM_BUDGET_PER_WORKER = (size_t)8 * 1024 * 1024;
-        /* Per-sketch slab footprint at the precision the kernel uses
-         * (RAY_HLL_DEFAULT_P → m = 16384).  sizeof(ray_hll_t) is small
-         * relative to the buffers; rounded into the count. */
-        size_t hll_per_group =
-            sizeof(ray_hll_t) +
-            RAY_HLL_SPARSE_CAP * sizeof(uint32_t) +
-            ((size_t)1u << RAY_HLL_DEFAULT_P);
-        bool stream_ok = (n_groups >= 16) &&
-                         ((size_t)n_groups * hll_per_group
-                          <= RAY_HLL_STREAM_BUDGET_PER_WORKER);
-        if (stream_ok) {
-            int rc = ray_count_distinct_approx_pg_stream(
-                src, row_gid, n_rows, n_groups,
-                RAY_HLL_DEFAULT_P, odata);
-            if (rc == 0) return out;
-            /* Streaming failed (OOM / unsupported type) — fall through
-             * to the CSR HLL path with odata still zeroed. */
-            memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
-        }
-
-        ray_t* approx = count_distinct_per_group_hll(src, row_gid,
-                                                     n_rows, n_groups, out);
-        if (approx) return approx;
-        /* Fall through on dispatch failure — counts not yet written. */
-        memset(odata, 0, (size_t)n_groups * sizeof(int64_t));
-    }
+    /* COUNT(DISTINCT col) per group is EXACT.  Earlier streaming HLL
+     * and CSR HLL fast paths returned approximation; removed.  The
+     * partitioned exact path below handles all sizes. */
 
     /* Parallel partitioned path for sizes where the serial global hash
      * blows L3.  Threshold tuned so the partition / scatter / dedup
