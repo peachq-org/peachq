@@ -2673,13 +2673,11 @@ static void ray_register_builtins(void) {
     /* Splayed / partitioned table I/O */
     /* Database storage — splayed and parted table I/O.  Kept under a
      * dedicated `.db.*` namespace so format-specific siblings stay
-     * grouped (set/get/mount per format) and there's room to grow
+     * grouped (set/get per format) and there's room to grow
      * without polluting the top-level builtin namespace. */
     register_vary(".db.splayed.set",   RAY_FN_RESTRICTED, ray_set_splayed_fn);
     register_vary(".db.splayed.get",   RAY_FN_NONE,       ray_get_splayed_fn);
-    register_vary(".db.splayed.mount", RAY_FN_NONE,       ray_db_splayed_mount_fn);
     register_vary(".db.parted.get",    RAY_FN_NONE,       ray_get_parted_fn);
-    register_vary(".db.parted.mount",  RAY_FN_NONE,       ray_db_parted_mount_fn);
 
     /* GUID generation */
     register_unary("guid",       RAY_FN_NONE, ray_guid_fn);
