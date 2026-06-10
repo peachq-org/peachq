@@ -87,6 +87,27 @@ static inline void ray_write_sym(void* data, int64_t row, uint64_t val, int8_t t
     }
 }
 
+/* ---- Domain-aware cell resolution (sym-domain architecture, Phase 2) ----
+ * A SYM cell id is a position in the COLUMN'S domain (ray_sym_vec_domain),
+ * not necessarily the global intern table — exact no-ops while every
+ * domain is the runtime singleton.  Use these for ids read from vector
+ * cell data; name-ids / SYM-atom i64s / config lookups stay on the global
+ * ray_sym_str / ray_sym_find.  ray_sym_domain_str/find are declared in
+ * <rayforce.h> next to ray_sym_vec_domain. */
+
+/* Resolve one cell of a SYM vector through ITS domain.  Borrowed atom
+ * (valid for the domain's lifetime; do not release). */
+static inline ray_t* ray_sym_vec_cell(ray_t* vec, int64_t row) {
+    int64_t pos = ray_read_sym(ray_data(vec), row, RAY_SYM, vec->attrs);
+    return ray_sym_domain_str(ray_sym_vec_domain(vec), pos);
+}
+
+/* Position of `s` in the vector's domain, -1 if absent (literal lookup
+ * for filters: absent literal matches nothing — correct). */
+static inline int64_t ray_sym_vec_lookup(ray_t* vec, const char* s, size_t n) {
+    return ray_sym_domain_find(ray_sym_vec_domain(vec), s, n);
+}
+
 /* Intern with pre-computed wyhash, no lock.
  * Caller must guarantee single-threaded access. */
 int64_t ray_sym_intern_prehashed(uint32_t hash, const char* str, size_t len);
