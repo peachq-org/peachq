@@ -46,7 +46,7 @@ static ray_t* dict_alloc_block(ray_t* keys, ray_t* vals) {
     d->type  = RAY_DICT;
     d->attrs = 0;
     d->len   = 2;
-    memset(d->nullmap, 0, 16);
+    memset(d->aux, 0, 16);
     ray_t** slots = ray_dict_slots(d);
     slots[0] = keys;
     slots[1] = vals;
