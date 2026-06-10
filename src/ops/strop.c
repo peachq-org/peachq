@@ -157,7 +157,7 @@ ray_t* ray_split_fn(ray_t* str, ray_t* delim) {
     if (str->type == RAY_LIST &&
         ray_is_vec(delim) && (delim->type == RAY_I64 || delim->type == RAY_I16 || delim->type == RAY_I32)) {
         int64_t nidx = delim->len;
-        if (nidx == 0) return NULL; /* null for empty indices */
+        if (nidx == 0) return RAY_NULL_OBJ; /* null for empty indices */
         int64_t idx_buf[256];
         if (nidx > 256) return ray_error("limit", NULL);
         for (int64_t ii = 0; ii < nidx; ii++) {
@@ -215,7 +215,7 @@ ray_t* ray_split_fn(ray_t* str, ray_t* delim) {
     if ((ray_is_vec(str) || (ray_is_atom(str) && (-str->type) == RAY_STR)) &&
         ray_is_vec(delim) && (delim->type == RAY_I64 || delim->type == RAY_I16 || delim->type == RAY_I32)) {
         int64_t nidx = delim->len;
-        if (nidx == 0) return NULL; /* null for empty indices */
+        if (nidx == 0) return RAY_NULL_OBJ; /* null for empty indices */
         /* Extract indices as i64 */
         int64_t idx_buf[256];
         if (nidx > 256) return ray_error("limit", NULL);

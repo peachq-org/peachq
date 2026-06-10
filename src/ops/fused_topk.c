@@ -72,7 +72,7 @@ typedef struct {
     uint8_t     attrs;
     uint8_t     esz;
     uint8_t     desc;        /* 0 = asc, 1 = desc */
-    /* When the column carries a nullmap, fpk_cmp consults it before
+    /* When the column carries nulls, fpk_cmp consults them before
      * reading the raw payload and orders nulls LAST for ASC, FIRST for
      * DESC — matching sort.c's default null policy.  has_nulls is the
      * compile-time flag that gates the per-row probe. */
