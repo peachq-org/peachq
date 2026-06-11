@@ -465,6 +465,12 @@ static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
                                                             * ignores null_aware param (unlike other clauses)
                                                             * — sentinel handling is baked into the kernel */
     }
+    /* I64 comparisons and AND/OR: null-aware kernel handles NULL_I64 sentinel inline. */
+    if (dt == RAY_BOOL && t1 == RAY_I64 &&
+        ((op >= OP_EQ && op <= OP_GE) || op == OP_AND || op == OP_OR))
+        return true;
+    /* ISNULL: sentinel read in both F64 (NaN) and I64 (NULL_I64) arms; always capable. */
+    if (op == OP_ISNULL) return true;
     return false;
 }
 
@@ -608,7 +614,8 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 if (op == OP_CAST)
                     ot = node->out_type;
                 else if ((op >= OP_EQ && op <= OP_GE) ||
-                    op == OP_AND || op == OP_OR || op == OP_NOT)
+                    op == OP_AND || op == OP_OR || op == OP_NOT ||
+                    op == OP_ISNULL)
                     ot = RAY_BOOL;
                 else if (t1 == RAY_F64 || t2 == RAY_F64 || op == OP_DIV ||
                          op == OP_SQRT || op == OP_LOG || op == OP_EXP)
@@ -824,7 +831,6 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
 static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void* dp,
                               int8_t t1, const void* ap,
                               int8_t t2, const void* bp, int64_t n) {
-    (void)null_aware; /* Task 6 will use this for integer arithmetic */
     (void)t2;
     if (dt == RAY_F64) {
         double* d = (double*)dp;
@@ -943,23 +949,46 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
         } else if (t1 == RAY_I64) {
             const int64_t* a = (const int64_t*)ap;
             const int64_t* b = (const int64_t*)bp;
-            /* Plain comparison — null handling via bitmap post-pass.
-             * Values at null positions are zero (from vector init), which
-             * compares correctly for null-as-minimum semantics when both
-             * input null bitmaps are propagated to the result. */
-            switch (opcode) {
-                case OP_EQ: for (int64_t j = 0; j < n; j++) d[j] = a[j]==b[j]; break;
-                case OP_NE: for (int64_t j = 0; j < n; j++) d[j] = a[j]!=b[j]; break;
-                case OP_LT: for (int64_t j = 0; j < n; j++) d[j] = a[j]<b[j]; break;
-                case OP_LE: for (int64_t j = 0; j < n; j++) d[j] = a[j]<=b[j]; break;
-                case OP_GT: for (int64_t j = 0; j < n; j++) d[j] = a[j]>b[j]; break;
-                case OP_GE: for (int64_t j = 0; j < n; j++) d[j] = a[j]>=b[j]; break;
-                /* BOOL cols are loaded as I64 abstract via expr_load_i64;
-                 * AND/OR on such inputs lands here with dt=BOOL t1=t2=I64. */
-                case OP_AND: for (int64_t j = 0; j < n; j++) d[j] = (a[j] && b[j]) ? 1 : 0; break;
-                case OP_OR:  for (int64_t j = 0; j < n; j++) d[j] = (a[j] || b[j]) ? 1 : 0; break;
-                default: break;
+            /* Null-aware I64 comparisons: NULL_I64 = INT64_MIN sentinel.
+             * Truth table matches the fallback (fix_null_comparisons + op_propagates_null):
+             *   null == null → 1;  null < non-null → 1;  non-null > null → 1
+             *   null == non-null → 0;  non-null < null → 0
+             *   null != null → 0;  null != non-null → 1;  non-null != null → 1
+             *   AND/OR with any null operand → 0 (false) */
+            #define I64_ISN(x) ((x) == NULL_I64)
+            if (null_aware) {
+                switch (opcode) {
+                    case OP_EQ: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])&&I64_ISN(b[j]))?1:(I64_ISN(a[j])||I64_ISN(b[j]))?0:a[j]==b[j]; break;
+                    case OP_NE: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])&&I64_ISN(b[j]))?0:(I64_ISN(a[j])||I64_ISN(b[j]))?1:a[j]!=b[j]; break;
+                    case OP_LT: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])&&I64_ISN(b[j]))?0:I64_ISN(a[j])?1:I64_ISN(b[j])?0:a[j]<b[j]; break;
+                    case OP_LE: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])&&I64_ISN(b[j]))?1:I64_ISN(a[j])?1:I64_ISN(b[j])?0:a[j]<=b[j]; break;
+                    case OP_GT: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])&&I64_ISN(b[j]))?0:I64_ISN(b[j])?1:I64_ISN(a[j])?0:a[j]>b[j]; break;
+                    case OP_GE: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])&&I64_ISN(b[j]))?1:I64_ISN(b[j])?1:I64_ISN(a[j])?0:a[j]>=b[j]; break;
+                    /* AND/OR: null on either side → false (0) */
+                    case OP_AND: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?0:(a[j]&&b[j])?1:0; break;
+                    case OP_OR:  for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?0:(a[j]||b[j])?1:0; break;
+                    default: break;
+                }
+            } else {
+                /* Plain comparison — null handling via bitmap post-pass.
+                 * Values at null positions are zero (from vector init), which
+                 * compares correctly for null-as-minimum semantics when both
+                 * input null bitmaps are propagated to the result. */
+                switch (opcode) {
+                    case OP_EQ: for (int64_t j = 0; j < n; j++) d[j] = a[j]==b[j]; break;
+                    case OP_NE: for (int64_t j = 0; j < n; j++) d[j] = a[j]!=b[j]; break;
+                    case OP_LT: for (int64_t j = 0; j < n; j++) d[j] = a[j]<b[j]; break;
+                    case OP_LE: for (int64_t j = 0; j < n; j++) d[j] = a[j]<=b[j]; break;
+                    case OP_GT: for (int64_t j = 0; j < n; j++) d[j] = a[j]>b[j]; break;
+                    case OP_GE: for (int64_t j = 0; j < n; j++) d[j] = a[j]>=b[j]; break;
+                    /* BOOL cols are loaded as I64 abstract via expr_load_i64;
+                     * AND/OR on such inputs lands here with dt=BOOL t1=t2=I64. */
+                    case OP_AND: for (int64_t j = 0; j < n; j++) d[j] = (a[j] && b[j]) ? 1 : 0; break;
+                    case OP_OR:  for (int64_t j = 0; j < n; j++) d[j] = (a[j] || b[j]) ? 1 : 0; break;
+                    default: break;
+                }
             }
+            #undef I64_ISN
         } else { /* both bool */
             const uint8_t* a = (const uint8_t*)ap;
             const uint8_t* b = (const uint8_t*)bp;
@@ -1055,7 +1084,18 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
         }
     } else if (dt == RAY_BOOL) {
         uint8_t* d = (uint8_t*)dp;
-        if (opcode == OP_CAST) {
+        if (opcode == OP_ISNULL) {
+            /* ISNULL: 1 where input is the type-correct null sentinel, else 0.
+             * Null-free lanes → all false (correctly).  Works regardless of
+             * null_aware since we always read the sentinel directly. */
+            if (t1 == RAY_F64) {
+                const double* a = (const double*)ap;
+                for (int64_t j = 0; j < n; j++) d[j] = (a[j] != a[j]) ? 1 : 0;
+            } else {
+                const int64_t* a = (const int64_t*)ap;
+                for (int64_t j = 0; j < n; j++) d[j] = (a[j] == NULL_I64) ? 1 : 0;
+            }
+        } else if (opcode == OP_CAST) {
             /* (as 'BOOL ...) — truthy semantics, but treat null sentinel
              * as false (BOOL is non-nullable, so we can't preserve null
              * structurally; a SQL-style "missing → not true" mapping is
