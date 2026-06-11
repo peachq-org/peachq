@@ -77,6 +77,11 @@ typedef struct {
      * DESC — matching sort.c's default null policy.  has_nulls is the
      * compile-time flag that gates the per-row probe. */
     uint8_t     has_nulls;
+    /* SYM keys only: 1 when the column's domain is the runtime
+     * singleton — cell ids then index the borrowed global snapshot
+     * (ctx.sym_strings).  0 routes the compare through the column's
+     * own domain (ray_sym_domain_str). */
+    uint8_t     dom_runtime;
     int64_t     sym;
     const void* base;
     ray_t*      col;         /* for ray_vec_is_null when has_nulls */
@@ -94,11 +99,14 @@ typedef struct {
     int64_t*       heap_idx;       /* [nw * k] */
     int32_t*       heap_n;         /* [nw] */
     ray_t*         tbl;
-    /* Lock-free snapshot of the SYM dict — populated once per query for
-     * any RAY_SYM sort key.  ray_sym_str() takes a global lock per call,
-     * which on the SYM heap-compare hot path turns 28-way parallel into
-     * 12× *slower* due to lock contention.  Borrowing the strings array
-     * once lets workers index into it without the lock. */
+    /* Lock-free snapshot of the GLOBAL SYM dict — populated once per
+     * query for any runtime-domain RAY_SYM sort key.  ray_sym_str()
+     * takes a global lock per call, which on the SYM heap-compare hot
+     * path turns 28-way parallel into 12× *slower* due to lock
+     * contention.  Borrowing the strings array once lets workers index
+     * into it without the lock.  Non-runtime-domain keys bypass the
+     * snapshot and resolve per compare via ray_sym_domain_str (locked;
+     * a per-domain snapshot is a flip-time optimization if needed). */
     ray_t**        sym_strings;
     uint32_t       sym_count;
     _Atomic(uint32_t) oom;
@@ -139,12 +147,23 @@ static inline int fpk_cmp(const fpk_par_ctx_t* c, int64_t row_a, int64_t row_b) 
             if (b_null) return ks->desc ?  1 : -1;
         }
         if (ks->type == RAY_SYM) {
+            /* cell-data: ids resolve over the COLUMN's domain.  Runtime-
+             * domain columns use the lock-free global snapshot; other
+             * domains resolve through ray_sym_domain_str. */
             uint32_t ia = (uint32_t)read_by_esz(ks->base, row_a, ks->esz);
             uint32_t ib = (uint32_t)read_by_esz(ks->base, row_b, ks->esz);
             if (ia == ib) continue;
-            if (ia >= c->sym_count || ib >= c->sym_count) continue;
-            ray_t* sa = c->sym_strings[ia];
-            ray_t* sb = c->sym_strings[ib];
+            ray_t* sa;
+            ray_t* sb;
+            if (ks->dom_runtime) {
+                if (ia >= c->sym_count || ib >= c->sym_count) continue;
+                sa = c->sym_strings[ia];
+                sb = c->sym_strings[ib];
+            } else {
+                struct ray_sym_domain_s* dom = ray_sym_vec_domain(ks->col);
+                sa = ray_sym_domain_str(dom, (int64_t)ia);
+                sb = ray_sym_domain_str(dom, (int64_t)ib);
+            }
             if (!sa || !sb) continue;
             cmp = ray_str_cmp(sa, sb);
         } else if (ks->esz == 8) {
@@ -297,10 +316,13 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
         ctx.keys[i].esz       = ray_sym_elem_size(kt, col->attrs);
         ctx.keys[i].desc      = sort_descs[i];
         ctx.keys[i].has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) ? 1 : 0;
+        ctx.keys[i].dom_runtime =
+            (kt == RAY_SYM &&
+             ray_sym_vec_domain(col) == ray_sym_runtime_domain()) ? 1 : 0;
         ctx.keys[i].sym       = sort_key_syms[i];
         ctx.keys[i].base      = ray_data(col);
         ctx.keys[i].col       = col;
-        if (kt == RAY_SYM) sym_needed = 1;
+        if (ctx.keys[i].dom_runtime) sym_needed = 1;
     }
     ctx.n_keys = n_sort_keys;
     ctx.k      = k;

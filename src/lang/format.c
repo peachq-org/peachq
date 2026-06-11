@@ -248,16 +248,20 @@ static void fmt_guid(fmt_buf_t* b, const uint8_t* bytes) {
     }
 }
 
-static void fmt_sym(fmt_buf_t* b, int64_t sym_id) {
-    ray_t* s = ray_sym_str(sym_id);
+/* Render a resolved sym string atom (borrowed — sym/domain atoms are
+ * owned by their table/domain; never released here). */
+static void fmt_sym_atom(fmt_buf_t* b, ray_t* s) {
     if (s && !RAY_IS_ERR(s)) {
-        const char* p = ray_str_ptr(s);
-        size_t      n = ray_str_len(s);
-        fmt_putn(b, p, (int32_t)n);
-        ray_release(s);
+        fmt_putn(b, ray_str_ptr(s), (int32_t)ray_str_len(s));
     } else {
         fmt_puts(b, "0Ns");
     }
+}
+
+/* Global-table resolution: SYM-atom i64s and name-ids only.  Vector
+ * CELLS resolve through the column's domain via ray_sym_vec_cell. */
+static void fmt_sym(fmt_buf_t* b, int64_t sym_id) {
+    fmt_sym_atom(b, ray_sym_str(sym_id));
 }
 
 /* ===== Date/time/timestamp helpers ===== */
@@ -376,11 +380,10 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     case RAY_DATE:      fmt_date(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_TIME:      fmt_time(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_TIMESTAMP: fmt_timestamp(b, ((int64_t*)ray_data(vec))[idx]); break;
-    case RAY_SYM: {
-        int64_t sym_id = ray_read_sym(ray_data(vec), idx, vec->type, vec->attrs);
-        fmt_sym(b, sym_id);
+    case RAY_SYM:
+        /* cell-data: resolve through the column's domain */
+        fmt_sym_atom(b, ray_sym_vec_cell(vec, idx));
         break;
-    }
     case RAY_STR: {
         size_t slen = 0;
         const char* p = ray_str_vec_get(vec, idx, &slen);
@@ -513,8 +516,12 @@ static void fmt_dict(fmt_buf_t* b, ray_t* dict, int mode) {
         memset(&k_atom_storage, 0, sizeof(k_atom_storage));
         bool k_owned = false;   /* true if k_atom is a fresh allocation */
         if (keys->type == RAY_SYM) {
+            /* cell-data: resolve through the keys vector's domain, then
+             * re-intern so the synthesized atom stays runtime-domain
+             * (exact no-op while the domain is the runtime singleton). */
+            ray_t* ks = ray_sym_vec_cell(keys, i);
             k_atom_storage.type = -RAY_SYM;
-            k_atom_storage.i64  = ray_read_sym(ray_data(keys), i, RAY_SYM, keys->attrs);
+            k_atom_storage.i64  = ks ? ray_sym_intern(ray_str_ptr(ks), ray_str_len(ks)) : -1;
             k_atom = &k_atom_storage;
         } else if (keys->type == RAY_STR) {
             size_t slen = 0;
@@ -594,9 +601,12 @@ static void fmt_dict(fmt_buf_t* b, ray_t* dict, int mode) {
                 case RAY_F64:       v_storage.type = -RAY_F64;
                                     v_storage.f64  = ((double*)ray_data(vals))[i];
                                     v_atom = &v_storage; break;
-                case RAY_SYM:       v_storage.type = -RAY_SYM;
-                                    v_storage.i64  = ray_read_sym(ray_data(vals), i, RAY_SYM, vals->attrs);
+                case RAY_SYM: {     /* cell-data: domain-resolve + re-intern (see keys) */
+                                    ray_t* vs = ray_sym_vec_cell(vals, i);
+                                    v_storage.type = -RAY_SYM;
+                                    v_storage.i64  = vs ? ray_sym_intern(ray_str_ptr(vs), ray_str_len(vs)) : -1;
                                     v_atom = &v_storage; break;
+                }
                 case RAY_STR: {
                     size_t vl = 0;
                     const char* vp = ray_str_vec_get(vals, i, &vl);
