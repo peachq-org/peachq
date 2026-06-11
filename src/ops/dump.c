@@ -221,10 +221,6 @@ static void dump_node(FILE* f, ray_graph_t* g, ray_op_t* node, int depth) {
     /* Output type */
     fprintf(f, " -> %s", type_name(node->out_type));
 
-    /* Flags */
-    if (node->flags & OP_FLAG_FUSED)
-        fprintf(f, " [fused]");
-
     /* Estimated rows */
     if (node->est_rows > 0)
         fprintf(f, " ~%u rows", node->est_rows);
