@@ -557,7 +557,7 @@ ray_op_t* ray_if(ray_graph_t* g, ray_op_t* cond, ray_op_t* then_val, ray_op_t* e
     ext->base.out_type = out_type;
     ext->base.est_rows = est;
     /* Store else_val as a node ID (not a pointer) in the literal field.
-     * Recovered via (uint32_t)(uintptr_t)ext->literal in fuse.c/exec.c. */
+     * Recovered via (uint32_t)(uintptr_t)ext->literal in expr.c/exec.c. */
     ext->literal = (ray_t*)(uintptr_t)else_id;
 
     g->nodes[ext->base.id] = ext->base;

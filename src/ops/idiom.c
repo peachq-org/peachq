@@ -243,7 +243,7 @@ ray_op_t* ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
        pattern — push roots onto stack1, drain into stack2 (reverse),
        pop stack2 to get post-order. */
     uint32_t nc = g->node_count;
-    if (nc > UINT32_MAX / 4) return root;  /* overflow guard, mirrors fuse.c */
+    if (nc > UINT32_MAX / 4) return root;  /* overflow guard, mirrors expr.c */
 
     uint32_t cap = nc * 2;
     uint32_t stk1_local[256], stk2_local[256];
