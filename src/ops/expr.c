@@ -455,7 +455,11 @@ static uint8_t expr_ensure_type(ray_expr_t* out, uint8_t src, int8_t target) {
 }
 
 /* Which (opcode, dst-type, src1-type) shapes have null-aware kernel
- * variants?  Landing per-family: Task 5 enables CAST and F64 families. */
+ * variants?  Landing per-family:
+ *   Task 5: CAST shapes + F64 arithmetic (IEEE-propagating, no variant needed)
+ *   Task 6: I64 BOOL comparisons + AND/OR + ISNULL
+ *   Task 7: I64 arithmetic (ADD/SUB/MUL/DIV/MOD/MIN2/MAX2/NEG/ABS) +
+ *            F64 MIN2/MAX2 (non-IEEE-propagating, variant added) */
 static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
     if (op == OP_CAST) {
         if (dt == RAY_F64 && t1 != RAY_F64) return true;  /* i64→f64: NaN map */
@@ -471,6 +475,17 @@ static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
         return true;
     /* ISNULL: sentinel read in both F64 (NaN) and I64 (NULL_I64) arms; always capable. */
     if (op == OP_ISNULL) return true;
+    /* Task 7: I64 arithmetic and unary ops.
+     * OP_ADD=20..OP_MOD=24, OP_MIN2=33, OP_MAX2=34 in the binary block.
+     * OP_NEG=10, OP_ABS=11 in the unary block.
+     * OP_IDIV=49 is NOT contiguous with OP_ADD..OP_MOD and has no I64 plain
+     * case in exec_elementwise_binary, so it is excluded. */
+    if (dt == RAY_I64 && t1 != RAY_F64 &&
+        ((op >= OP_ADD && op <= OP_MOD) || op == OP_MIN2 || op == OP_MAX2 ||
+         op == OP_NEG || op == OP_ABS))
+        return true;
+    /* Task 7: F64 MIN2/MAX2 — null-aware kernel variant added (NaN propagation). */
+    if (dt == RAY_F64 && (op == OP_MIN2 || op == OP_MAX2)) return true;
     return false;
 }
 
@@ -523,6 +538,14 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 if (col->type == RAY_MAPCOMMON) EXPR_BAIL(EXPR_BAIL_MAPCOMMON);
                 if (col->type == RAY_STR) EXPR_BAIL(EXPR_BAIL_STR); /* RAY_STR needs string comparison path */
                 if (col->attrs & RAY_ATTR_SLICE)     EXPR_BAIL(EXPR_BAIL_SLICE);
+                /* Length-1 columns used as scalar broadcasts are handled by the
+                 * fallback's exec_elementwise_binary (which has vec/scalar routing).
+                 * The fused evaluator reads exactly nrows elements from every scan
+                 * column — a length-1 column paired with nrows>1 would overread. */
+                if (!RAY_IS_PARTED(col->type)) {
+                    int64_t nrows = ray_table_nrows(tbl);
+                    if (col->len != nrows) EXPR_BAIL(EXPR_BAIL_OTHER);
+                }
                 /* sym-domain Phase 2: the fused program loads SYM cells
                  * as raw i64s and resolves STR literals via the GLOBAL
                  * intern table (ray_sym_find below) — only valid for
@@ -680,12 +703,11 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                         /* Arithmetic:
                          * F64 standard ops (ADD/SUB/MUL/DIV/MOD, NEG/ABS/SQRT/LOG/EXP/CEIL/FLOOR/ROUND): NaN propagates
                          *   via IEEE for free — no kernel variant needed.
-                         * F64 MIN2/MAX2 + F64 AND/OR/NOT: NOT IEEE-propagating —
-                         *   mark null_aware → capability choke fires until
-                         *   null-aware variants land.
-                         * Non-F64 arithmetic (ADD/SUB/MUL/DIV/MOD/…): I64
-                         *   comparison/AND/OR BOOL kernels are live; I64
-                         *   arithmetic variants still pending. */
+                         * F64 MIN2/MAX2: NOT IEEE-propagating — mark null_aware;
+                         *   null-aware kernel variant now live (Task 7).
+                         * F64 AND/OR/NOT: mark null_aware → capability choke fires → fallback.
+                         * Non-F64 arithmetic (ADD/SUB/MUL/DIV/MOD/MIN2/MAX2/NEG/ABS): I64
+                         *   null-aware arithmetic variants live (Task 7). */
                         bool f64_ieee_propagates = (ot == RAY_F64) &&
                             (op == OP_ADD || op == OP_SUB || op == OP_MUL ||
                              op == OP_DIV || op == OP_MOD ||
@@ -829,8 +851,27 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
 
 /* Execute a binary instruction over n elements.
  * Switch is OUTSIDE the loop so each case auto-vectorizes.
- * null_aware selects sentinel-checking kernel variants (currently: the I64
- * BOOL comparison/AND/OR block; i64 arithmetic variants land next). */
+ * null_aware selects sentinel-checking kernel variants.
+ *
+ * Step 2 — fallback semantics extracted from exec_elementwise_binary
+ * (exec.c → propagate_nulls_binary, fix_null_comparisons, zero-divisor pass):
+ *
+ * I64 arithmetic null truth table (null = NULL_I64 = INT64_MIN sentinel):
+ *   ADD/SUB/MUL:   null(a) || null(b)  → NULL_I64
+ *   DIV/MOD:       null(a) || null(b)  → NULL_I64  (propagate_nulls_binary first)
+ *                  b==0 (non-null)     → NULL_I64  (zero-divisor post-pass)
+ *                  b==-1 && a==INT64_MIN → NULL_I64 (overflow guard → 0 → zero-divisor pass marks null)
+ *   MIN2/MAX2 i64: null(a) || null(b)  → NULL_I64  (op_propagates_null=true for MIN2/MAX2)
+ *   NEG/ABS i64:   null(a)             → NULL_I64
+ *                  result==INT64_MIN   → NULL_I64  (overflow, handled by mark_i64_overflow_as_null)
+ *
+ * F64 MIN2/MAX2 null truth table (null = NaN, IEEE min/max does NOT propagate NaN):
+ *   null(a) || null(b) → NaN (propagate_nulls_binary fires after the loop)
+ *   non-null inputs    → plain comparison
+ *
+ * AND/OR on I64-dst: task derivation forces BOOL dst for AND/OR since Task 6,
+ *   so these I64-dst cases are unreachable for null_aware programs; left plain.
+ */
 static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void* dp,
                               int8_t t1, const void* ap,
                               int8_t t2, const void* bp, int64_t n) {
@@ -839,6 +880,23 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
         double* d = (double*)dp;
         const double* a = (const double*)ap;
         const double* b = (const double*)bp;
+        /* F64 MIN2/MAX2 null-aware variant: NaN (null sentinel) in either
+         * operand → NaN output.  IEEE min/max comparisons return false for NaN
+         * so we must check explicitly.  All other F64 ops rely on IEEE NaN
+         * propagation and need no null_aware variant. */
+        if (null_aware && (opcode == OP_MIN2 || opcode == OP_MAX2)) {
+            #define F64_ISN(x) ((x) != (x))
+            if (opcode == OP_MIN2)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (F64_ISN(a[j]) || F64_ISN(b[j])) ? NAN
+                          : (a[j] < b[j] ? a[j] : b[j]);
+            else
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (F64_ISN(a[j]) || F64_ISN(b[j])) ? NAN
+                          : (a[j] > b[j] ? a[j] : b[j]);
+            #undef F64_ISN
+            return;
+        }
         switch (opcode) {
             case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = a[j] + b[j]; break;
             case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = a[j] - b[j]; break;
@@ -857,6 +915,44 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
         int64_t* d = (int64_t*)dp;
         const int64_t* a = (const int64_t*)ap;
         const int64_t* b = (const int64_t*)bp;
+        /* Null-aware I64 arithmetic: NULL_I64 = INT64_MIN sentinel.
+         * Mirrors the fallback (propagate_nulls_binary + zero-divisor pass). */
+        #define I64_ISN(x) ((x) == NULL_I64)
+        if (null_aware) {
+            switch (opcode) {
+                case OP_ADD: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?NULL_I64:(int64_t)((uint64_t)a[j]+(uint64_t)b[j]); break;
+                case OP_SUB: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?NULL_I64:(int64_t)((uint64_t)a[j]-(uint64_t)b[j]); break;
+                case OP_MUL: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?NULL_I64:(int64_t)((uint64_t)a[j]*(uint64_t)b[j]); break;
+                /* DIV/MOD: null check FIRST (mirrors fallback's propagate_nulls_binary before
+                 * zero-divisor pass); then existing zero/overflow guards verbatim.
+                 * b==0 (non-null) → NULL_I64 mirrors fallback's zero-divisor post-pass.
+                 * b==-1 && a==INT64_MIN → overflow: direct NULL_I64 (vs fallback: loop writes 0
+                 * then zero-divisor pass marks null — same observable result). */
+                case OP_DIV: for (int64_t j=0;j<n;j++) {
+                    if (I64_ISN(a[j])||I64_ISN(b[j])) { d[j]=NULL_I64; continue; }
+                    if (b[j]==0||(b[j]==-1&&a[j]==((int64_t)1<<63))) { d[j]=NULL_I64; continue; }
+                    int64_t q=a[j]/b[j];
+                    if ((a[j]^b[j])<0&&q*b[j]!=a[j]) q--;
+                    d[j]=q;
+                } break;
+                case OP_MOD: for (int64_t j=0;j<n;j++) {
+                    if (I64_ISN(a[j])||I64_ISN(b[j])) { d[j]=NULL_I64; continue; }
+                    if (b[j]==0||(b[j]==-1&&a[j]==((int64_t)1<<63))) { d[j]=NULL_I64; continue; }
+                    int64_t m=a[j]%b[j];
+                    if (m&&(m^b[j])<0) m+=b[j];
+                    d[j]=m;
+                } break;
+                /* MIN2/MAX2: null in either → NULL_I64 (mirrors propagate_nulls_binary). */
+                case OP_MIN2: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?NULL_I64:(a[j]<b[j]?a[j]:b[j]); break;
+                case OP_MAX2: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?NULL_I64:(a[j]>b[j]?a[j]:b[j]); break;
+                /* AND/OR on I64-dst are unreachable for null_aware programs (dst is BOOL
+                 * since Task 6); fall through to the plain switch. */
+                default: break;
+            }
+            #undef I64_ISN
+            return;
+        }
+        #undef I64_ISN
         switch (opcode) {
             case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] + (uint64_t)b[j]); break;
             case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] - (uint64_t)b[j]); break;
@@ -1005,8 +1101,11 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
 }
 
 /* Execute a unary instruction over n elements.
- * null_aware: when true, CAST kernels map type-specific sentinels across the
- * type boundary (NULL_I32/NULL_I16 → NULL_I64, NULL_I64 → NULL_F64, etc.). */
+ * null_aware: when true, kernels check for the type-correct null sentinel
+ * and propagate it.  For CAST: maps type-specific sentinels across the type
+ * boundary (NULL_I32/NULL_I16 → NULL_I64, NULL_I64 → NULL_F64, etc.).
+ * For I64 NEG/ABS: null(a) → NULL_I64; non-null overflow still handled by
+ * the mark_i64_overflow_as_null post-pass (INT64_MIN result → null). */
 static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void* dp,
                              int8_t t1, const void* ap, int64_t n) {
     if (dt == RAY_F64) {
@@ -1038,6 +1137,19 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
         int64_t* d = (int64_t*)dp;
         if (t1 == RAY_I64) {
             const int64_t* a = (const int64_t*)ap;
+            /* Null-aware NEG/ABS: null(a) → NULL_I64.  Overflow (result==INT64_MIN)
+             * is handled by the mark_i64_overflow_as_null post-pass in expr_eval_full. */
+            if (null_aware) {
+                #define I64_ISN(x) ((x) == NULL_I64)
+                switch (opcode) {
+                    case OP_NEG: for (int64_t j=0;j<n;j++) d[j]=I64_ISN(a[j])?NULL_I64:(int64_t)(-(uint64_t)a[j]); break;
+                    case OP_ABS: for (int64_t j=0;j<n;j++) d[j]=I64_ISN(a[j])?NULL_I64:(a[j]<0?(int64_t)(-(uint64_t)a[j]):a[j]); break;
+                    case OP_CAST: memcpy(d, a, (size_t)n * sizeof(int64_t)); break;
+                    default: break;
+                }
+                #undef I64_ISN
+                return;
+            }
             switch (opcode) {
                 /* Unsigned negation avoids UB on INT64_MIN */
                 case OP_NEG: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)(-(uint64_t)a[j]); break;
