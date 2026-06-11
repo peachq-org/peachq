@@ -608,6 +608,18 @@ typedef struct {
 
 /* ── Expression compiler types ── */
 
+typedef enum {
+    EXPR_BAIL_ROOT = 0, EXPR_BAIL_SIZE, EXPR_BAIL_DEPTH, EXPR_BAIL_REGS,
+    EXPR_BAIL_INS, EXPR_BAIL_MAPCOMMON, EXPR_BAIL_STR, EXPR_BAIL_NULLS,
+    EXPR_BAIL_SLICE, EXPR_BAIL_SYM_DOMAIN, EXPR_BAIL_CONST,
+    EXPR_BAIL_NULL_SHAPE, EXPR_BAIL_OTHER, EXPR_BAIL__N
+} expr_bail_t;
+
+extern uint64_t ray_expr_bail_counts[EXPR_BAIL__N];
+extern uint64_t ray_expr_compile_ok;
+extern bool     ray_expr_disable;
+void ray_expr_stats_init(void);
+
 #define EXPR_MAX_REGS 16
 #define EXPR_MAX_INS  48
 #define EXPR_MORSEL   RAY_MORSEL_ELEMS
