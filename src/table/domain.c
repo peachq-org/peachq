@@ -33,11 +33,14 @@
  * growable in-memory tail (live interning + dirty flush) is Phase 2.
  *
  * Concurrency: one global spinlock guards the cache list, FILE-domain
- * refcounts and the lazily built structures (reverse index, atom
- * cache).  Domain opens and first-find index builds are rare; per-call
- * str/find take the lock briefly.  The runtime singleton never touches
- * the lock (immortal, delegates to sym.c's own locking).  Phase 2 can
- * move FILE domains to g_sym's lock-free-read structure if it matters.
+ * refcounts, the lazily built reverse index and the runtime-id LUT
+ * build.  Domain opens and first-find index builds are rare.  The two
+ * hot read paths are LOCK-FREE: ray_sym_domain_str reads the atom array
+ * materialized EAGERLY at open (a per-call spinlock would serialize
+ * parallel kernels — sym_lex_lt alone does 2 calls per compare per
+ * row), and ray_sym_domain_runtime_lut reads an atomically published
+ * array after its one-time sequential build.  The runtime singleton
+ * never touches the lock (immortal, delegates to sym.c's own locking).
  */
 
 #if defined(__APPLE__)
@@ -74,8 +77,16 @@ struct ray_sym_domain_s {
     uint64_t* offs;        /* count entries: offset of string bytes in map */
     uint32_t* lens;        /* count entries: string byte length */
 
-    /* FILE, lazy: per-position string atoms, owned by the domain. */
+    /* FILE: per-position string atoms, owned by the domain.  Materialized
+     * EAGERLY at open (atoms ≈ vocabulary size — small by design), so
+     * ray_sym_domain_str is a lock-free array read. */
     ray_t**   atoms;
+
+    /* FILE, lazy: position → runtime intern id.  Built ONCE on first
+     * request under g_dom_lock (the build INTERNS the vocabulary into the
+     * global table — sequential by contract, see the header), published
+     * with release semantics; reads are lock-free. */
+    _Atomic(int64_t*) runtime_lut;
 
     /* FILE, lazy: reverse index — (hash32 << 32) | (pos + 1), 0 = empty.
      * Same bucket encoding as g_sym (sym.c). */
@@ -165,6 +176,7 @@ static void dom_destroy(ray_sym_domain_t* d) {
         }
         free(d->atoms);
     }
+    free(atomic_load_explicit(&d->runtime_lut, memory_order_relaxed));
     free(d->buckets);
     free(d->offs);
     free(d->lens);
@@ -204,6 +216,29 @@ ray_sym_domain_t* ray_sym_domain_open(const char* path) {
         free(d->path);
         free(d);
         return NULL;
+    }
+
+    /* Position-0 reservation: every non-empty symfile must carry the
+     * empty string at position 0 (mirrors global id 0 — the SYM null;
+     * group kernels and null conventions treat id 0 as "" / null).  A
+     * vocabulary that starts with anything else is structurally corrupt
+     * for domain use.  Empty files (count == 0) are fine. */
+    if (d->count > 0 && d->lens[0] != 0) {
+        dom_destroy(d);
+        return NULL;
+    }
+
+    /* Eagerly materialize the whole borrowed-atom array so that
+     * ray_sym_domain_str is a lock-free array read.  Memory: one string
+     * atom per VOCABULARY entry (not per row) — small by design. */
+    if (d->count > 0) {
+        d->atoms = (ray_t**)calloc((size_t)d->count, sizeof(ray_t*));
+        if (!d->atoms) { dom_destroy(d); return NULL; }
+        for (int64_t i = 0; i < d->count; i++) {
+            ray_t* s = ray_str((const char*)d->map + d->offs[i], d->lens[i]);
+            if (!s || RAY_IS_ERR(s)) { dom_destroy(d); return NULL; }
+            d->atoms[i] = s;  /* owned by the domain; callers borrow */
+        }
     }
 
     /* Insert, unless another thread raced us to the same path — then keep
@@ -254,19 +289,40 @@ ray_t* ray_sym_domain_str(ray_sym_domain_t* dom, int64_t pos) {
 
     if (pos < 0 || pos >= dom->count) return NULL;
 
+    /* Lock-free: the atom array is fully materialized at open, immutable
+     * for the domain's lifetime (parallel kernels read this path). */
+    return dom->atoms[pos];
+}
+
+/* Empty-vocabulary FILE domains get a distinct non-NULL LUT so callers
+ * can branch on NULL == "runtime domain, ids pass through".  Never
+ * indexed: every position is out of range when count == 0. */
+static const int64_t g_empty_lut[1] = { -1 };
+
+const int64_t* ray_sym_domain_runtime_lut(ray_sym_domain_t* dom) {
+    if (!dom || dom->kind == DOM_RUNTIME) return NULL;
+
+    int64_t* lut = atomic_load_explicit(&dom->runtime_lut, memory_order_acquire);
+    if (lut) return lut;
+    if (dom->count == 0) return g_empty_lut;
+
     dom_lock();
-    if (!dom->atoms) {
-        dom->atoms = (ray_t**)calloc((size_t)dom->count, sizeof(ray_t*));
-        if (!dom->atoms) { dom_unlock(); return NULL; }
-    }
-    ray_t* s = dom->atoms[pos];
-    if (!s) {
-        s = ray_str((const char*)dom->map + dom->offs[pos], dom->lens[pos]);
-        if (!s || RAY_IS_ERR(s)) { dom_unlock(); return NULL; }
-        dom->atoms[pos] = s;  /* owned by the domain; callers borrow */
+    lut = atomic_load_explicit(&dom->runtime_lut, memory_order_relaxed);
+    if (!lut) {
+        lut = (int64_t*)malloc((size_t)dom->count * sizeof(int64_t));
+        if (!lut) { dom_unlock(); return NULL; }
+        /* THE sanctioned interning of a file vocabulary into the global
+         * table: one sequential pass over the VOCABULARY (never the
+         * rows).  Callers that hand ids to ray_pool_dispatch workers
+         * must request this LUT during sequential setup — interning
+         * inside a worker violates sym.c's frozen-table rule. */
+        for (int64_t i = 0; i < dom->count; i++)
+            lut[i] = ray_sym_intern((const char*)dom->map + dom->offs[i],
+                                    dom->lens[i]);
+        atomic_store_explicit(&dom->runtime_lut, lut, memory_order_release);
     }
     dom_unlock();
-    return s;
+    return lut;
 }
 
 /* Build the reverse index.  Called under the lock. */
