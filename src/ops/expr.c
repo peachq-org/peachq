@@ -455,11 +455,15 @@ static uint8_t expr_ensure_type(ray_expr_t* out, uint8_t src, int8_t target) {
 }
 
 /* Which (opcode, dst-type, src1-type) shapes have null-aware kernel
- * variants? Grows per-family as kernels land; anything not listed makes
- * the whole program bail to the fallback (never wrong results). */
+ * variants?  Landing per-family: Task 5 enables CAST and F64 families. */
 static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
-    (void)op; (void)dt; (void)t1;
-    return false; /* Task 5+ flips families on */
+    if (op == OP_CAST) {
+        if (dt == RAY_F64 && t1 != RAY_F64) return true;  /* i64→f64: NaN map */
+        if (dt == RAY_I64 && t1 == RAY_F64) return true;  /* f64→i64: NaN→NULL_I64 */
+        if (dt == RAY_I64 && t1 != RAY_F64) return true;  /* narrow widen: sentinel map */
+        if (dt == RAY_BOOL) return true;                   /* null→false, existing kernel */
+    }
+    return false;
 }
 
 /* Compile expression DAG into flat instruction array.
@@ -647,18 +651,36 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                     bool cmp    = (op >= OP_EQ && op <= OP_GE);
                     bool boolop = (op == OP_AND || op == OP_OR || op == OP_NOT);
                     if (cmp || boolop || op == OP_ISNULL) {
-                        /* definite-bool output; nullable input needs a kernel variant */
-                        ins_null_aware = true;
+                        /* Definite-bool output.
+                         * F64 comparisons (EQ/NE/LT/LE/GT/GE): already null-
+                         *   aware in the F64 BOOL block of expr_exec_binary
+                         *   (explicit NaN handling).  No kernel variant needed.
+                         * F64 AND/OR: the binary kernel has no NaN handling for
+                         *   these — NaN is truthy as a raw double.  Mark
+                         *   null_aware so the choke fires → fallback.
+                         * Integer lanes: need bitmap post-pass → null_aware. */
+                        ins_null_aware = (out->regs[s1].type != RAY_F64) ||
+                                         op == OP_ISNULL ||
+                                         op == OP_AND || op == OP_OR || op == OP_NOT;
                         dst_nullable = false;
                     } else if (op == OP_CAST) {
                         dst_nullable   = (ot != RAY_BOOL && ot != RAY_U8);
                         ins_null_aware = true;
                     } else {
-                        /* arithmetic (incl. F64 where NaN would propagate for free,
-                         * but the fused evaluator doesn't yet set HAS_NULLS on the
-                         * output — mark null_aware so the capability choke fires
-                         * until the matching kernel variant lands). */
-                        ins_null_aware = true;
+                        /* Arithmetic:
+                         * F64 standard ops (ADD/SUB/MUL/DIV/MOD): NaN propagates
+                         *   via IEEE for free — no kernel variant needed.
+                         * F64 MIN2/MAX2: NOT IEEE-propagating (comparison returns
+                         *   the non-NaN side) — mark null_aware → capability choke
+                         *   fires until a null-aware variant lands (Task 6).
+                         * Non-F64: needs kernel variant (Task 6). */
+                        bool f64_ieee_propagates = (ot == RAY_F64) &&
+                            (op == OP_ADD || op == OP_SUB || op == OP_MUL ||
+                             op == OP_DIV || op == OP_MOD ||
+                             op == OP_NEG || op == OP_ABS ||
+                             op == OP_SQRT || op == OP_LOG || op == OP_EXP ||
+                             op == OP_CEIL || op == OP_FLOOR || op == OP_ROUND);
+                        ins_null_aware = !f64_ieee_propagates;
                         dst_nullable   = true;
                     }
                     if (ot == RAY_U8)
@@ -705,11 +727,15 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
 
 /* ---- Morsel-batched expression evaluator ---- */
 
-/* Load SCAN column data into i64 scratch buffer with type conversion */
+/* Load SCAN column data into i64 scratch buffer with type conversion.
+ * has_nulls: if true, narrow sentinels are mapped to NULL_I64 during widen
+ * so kernels only ever see the canonical NULL_I64 (INT64_MIN) sentinel. */
 static void expr_load_i64(int64_t* dst, const void* data, int8_t col_type,
-                          uint8_t col_attrs, int64_t start, int64_t n) {
+                          uint8_t col_attrs, bool has_nulls,
+                          int64_t start, int64_t n) {
     switch (col_type) {
         case RAY_I64: case RAY_TIMESTAMP:
+            /* NULL_I64 already canonical in place — direct copy */
             memcpy(dst, (const int64_t*)data + start, (size_t)n * 8);
             break;
         case RAY_SYM: {
@@ -718,30 +744,47 @@ static void expr_load_i64(int64_t* dst, const void* data, int8_t col_type,
         } break;
         case RAY_I32: case RAY_DATE: case RAY_TIME: {
             const int32_t* s = (const int32_t*)data + start;
-            for (int64_t j = 0; j < n; j++) dst[j] = s[j];
+            if (has_nulls)
+                for (int64_t j = 0; j < n; j++)
+                    dst[j] = (s[j] == NULL_I32) ? NULL_I64 : (int64_t)s[j];
+            else
+                for (int64_t j = 0; j < n; j++) dst[j] = s[j];
         } break;
         case RAY_U8: case RAY_BOOL: {
+            /* U8/BOOL are non-nullable — no sentinel mapping needed */
             const uint8_t* s = (const uint8_t*)data + start;
             for (int64_t j = 0; j < n; j++) dst[j] = s[j];
         } break;
         case RAY_I16: {
             const int16_t* s = (const int16_t*)data + start;
-            for (int64_t j = 0; j < n; j++) dst[j] = s[j];
+            if (has_nulls)
+                for (int64_t j = 0; j < n; j++)
+                    dst[j] = (s[j] == NULL_I16) ? NULL_I64 : (int64_t)s[j];
+            else
+                for (int64_t j = 0; j < n; j++) dst[j] = s[j];
         } break;
         default: memset(dst, 0, (size_t)n * 8); break;
     }
 }
 
-/* Load SCAN column data into f64 scratch buffer with type conversion */
+/* Load SCAN column data into f64 scratch buffer with type conversion.
+ * has_nulls: if true, integer sentinels are mapped to NULL_F64 (NaN) so the
+ * f64 kernel receives the canonical NaN null and IEEE propagation works. */
 static void expr_load_f64(double* dst, const void* data, int8_t col_type,
-                          uint8_t col_attrs, int64_t start, int64_t n) {
+                          uint8_t col_attrs, bool has_nulls,
+                          int64_t start, int64_t n) {
     switch (col_type) {
         case RAY_F64:
+            /* NaN already canonical in place — direct copy */
             memcpy(dst, (const double*)data + start, (size_t)n * 8);
             break;
         case RAY_I64: case RAY_TIMESTAMP: {
             const int64_t* s = (const int64_t*)data + start;
-            for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
+            if (has_nulls)
+                for (int64_t j = 0; j < n; j++)
+                    dst[j] = (s[j] == NULL_I64) ? NULL_F64 : (double)s[j];
+            else
+                for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
         } break;
         case RAY_SYM: {
             for (int64_t j = 0; j < n; j++)
@@ -749,25 +792,36 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
         } break;
         case RAY_I32: case RAY_DATE: case RAY_TIME: {
             const int32_t* s = (const int32_t*)data + start;
-            for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
+            if (has_nulls)
+                for (int64_t j = 0; j < n; j++)
+                    dst[j] = (s[j] == NULL_I32) ? NULL_F64 : (double)s[j];
+            else
+                for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
         } break;
         case RAY_U8: case RAY_BOOL: {
+            /* U8/BOOL are non-nullable — no sentinel mapping needed */
             const uint8_t* s = (const uint8_t*)data + start;
             for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
         } break;
         case RAY_I16: {
             const int16_t* s = (const int16_t*)data + start;
-            for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
+            if (has_nulls)
+                for (int64_t j = 0; j < n; j++)
+                    dst[j] = (s[j] == NULL_I16) ? NULL_F64 : (double)s[j];
+            else
+                for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
         } break;
         default: memset(dst, 0, (size_t)n * 8); break;
     }
 }
 
 /* Execute a binary instruction over n elements.
- * Switch is OUTSIDE the loop so each case auto-vectorizes. */
-static void expr_exec_binary(uint8_t opcode, int8_t dt, void* dp,
+ * Switch is OUTSIDE the loop so each case auto-vectorizes.
+ * null_aware is reserved for Task 6 integer-arithmetic null kernels. */
+static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void* dp,
                               int8_t t1, const void* ap,
                               int8_t t2, const void* bp, int64_t n) {
+    (void)null_aware; /* Task 6 will use this for integer arithmetic */
     (void)t2;
     if (dt == RAY_F64) {
         double* d = (double*)dp;
@@ -915,8 +969,10 @@ static void expr_exec_binary(uint8_t opcode, int8_t dt, void* dp,
     }
 }
 
-/* Execute a unary instruction over n elements */
-static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
+/* Execute a unary instruction over n elements.
+ * null_aware: when true, CAST kernels map type-specific sentinels across the
+ * type boundary (NULL_I32/NULL_I16 → NULL_I64, NULL_I64 → NULL_F64, etc.). */
+static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void* dp,
                              int8_t t1, const void* ap, int64_t n) {
     if (dt == RAY_F64) {
         double* d = (double*)dp;
@@ -935,9 +991,13 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
                 case OP_CAST:  memcpy(d, a, (size_t)n * sizeof(double)); break;
                 default: break;
             }
-        } else { /* CAST i64→f64 */
+        } else { /* CAST i64→f64: with null_aware map NULL_I64 → NULL_F64 */
             const int64_t* a = (const int64_t*)ap;
-            for (int64_t j = 0; j < n; j++) d[j] = (double)a[j];
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] == NULL_I64) ? NULL_F64 : (double)a[j];
+            else
+                for (int64_t j = 0; j < n; j++) d[j] = (double)a[j];
         }
     } else if (dt == RAY_I64) {
         int64_t* d = (int64_t*)dp;
@@ -961,21 +1021,34 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
             const uint8_t* a = (const uint8_t*)ap;
             for (int64_t j = 0; j < n; j++) d[j] = a[j];
         } else if (t1 == RAY_I32 || t1 == RAY_DATE || t1 == RAY_TIME) {
-            /* CAST i32→i64 — narrow scratch is 4 bytes per elem.  This is the
-             * path a promoted `(as 'I32 const)` operand takes before an i64
-             * compare; reading it as double (the f64 fallback below) would
-             * reinterpret the 4-byte payload and collapse small values to 0. */
+            /* CAST i32→i64: with null_aware map NULL_I32 → NULL_I64. */
             const int32_t* a = (const int32_t*)ap;
-            for (int64_t j = 0; j < n; j++) d[j] = a[j];
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] == NULL_I32) ? NULL_I64 : (int64_t)a[j];
+            else
+                for (int64_t j = 0; j < n; j++) d[j] = a[j];
         } else if (t1 == RAY_I16) {
+            /* CAST i16→i64: with null_aware map NULL_I16 → NULL_I64. */
             const int16_t* a = (const int16_t*)ap;
-            for (int64_t j = 0; j < n; j++) d[j] = a[j];
-        } else { /* CAST f64→i64 — clamp to avoid out-of-range UB */
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] == NULL_I16) ? NULL_I64 : (int64_t)a[j];
+            else
+                for (int64_t j = 0; j < n; j++) d[j] = a[j];
+        } else { /* CAST f64→i64: clamp + null_aware NaN → NULL_I64 */
             const double* a = (const double*)ap;
-            for (int64_t j = 0; j < n; j++)
-                d[j] = (a[j] >= (double)INT64_MAX) ? INT64_MAX
-                     : (a[j] <= (double)INT64_MIN) ? INT64_MIN
-                     : (int64_t)a[j];
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] != a[j]) ? NULL_I64
+                         : (a[j] >= (double)INT64_MAX) ? INT64_MAX
+                         : (a[j] <= (double)INT64_MIN) ? INT64_MIN
+                         : (int64_t)a[j];
+            else
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] >= (double)INT64_MAX) ? INT64_MAX
+                         : (a[j] <= (double)INT64_MIN) ? INT64_MIN
+                         : (int64_t)a[j];
         }
     } else if (dt == RAY_BOOL) {
         uint8_t* d = (uint8_t*)dp;
@@ -1060,10 +1133,11 @@ static void* expr_eval_morsel(const ray_expr_t* expr, void** scratch,
                     rptrs[r] = (int64_t*)expr->regs[r].data + start;
                 } else {
                     rptrs[r] = scratch[r];
+                    bool hn = expr->regs[r].nullable;
                     if (rt == RAY_F64)
-                        expr_load_f64(scratch[r], expr->regs[r].data, ct, ca, start, n);
+                        expr_load_f64(scratch[r], expr->regs[r].data, ct, ca, hn, start, n);
                     else
-                        expr_load_i64(scratch[r], expr->regs[r].data, ct, ca, start, n);
+                        expr_load_i64(scratch[r], expr->regs[r].data, ct, ca, hn, start, n);
                 }
             }
                 break;
@@ -1089,11 +1163,11 @@ static void* expr_eval_morsel(const ray_expr_t* expr, void** scratch,
         const expr_ins_t* ins = &expr->ins[i];
         int8_t dt = expr->regs[ins->dst].type;
         if (ins->src2 != 0xFF) {
-            expr_exec_binary(ins->opcode, dt, rptrs[ins->dst],
+            expr_exec_binary(ins->opcode, ins->null_aware, dt, rptrs[ins->dst],
                              expr->regs[ins->src1].type, rptrs[ins->src1],
                              expr->regs[ins->src2].type, rptrs[ins->src2], n);
         } else {
-            expr_exec_unary(ins->opcode, dt, rptrs[ins->dst],
+            expr_exec_unary(ins->opcode, ins->null_aware, dt, rptrs[ins->dst],
                             expr->regs[ins->src1].type, rptrs[ins->src1], n);
         }
     }
@@ -1232,6 +1306,11 @@ static ray_t* expr_eval_full_parted(const ray_expr_t* expr, int64_t nrows) {
     }
     if (expr_last_op_overflows_i64(expr))
         mark_i64_overflow_as_null(out, 0, nrows);
+    /* Conservative "may contain nulls" — REQUIRED, not cosmetic: group.c
+     * feeds this vec to aggregates whose check-free fast path is gated on
+     * the attr; a missing attr with sentinel lanes = wrong aggregates. */
+    if (expr->regs[expr->out_reg].nullable)
+        out->attrs |= RAY_ATTR_HAS_NULLS;
     return out;
 }
 
@@ -1257,6 +1336,11 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
 
     if (expr_last_op_overflows_i64(expr))
         mark_i64_overflow_as_null(out, 0, nrows);
+    /* Conservative "may contain nulls" — REQUIRED, not cosmetic: group.c
+     * feeds this vec to aggregates whose check-free fast path is gated on
+     * the attr; a missing attr with sentinel lanes = wrong aggregates. */
+    if (expr->regs[expr->out_reg].nullable)
+        out->attrs |= RAY_ATTR_HAS_NULLS;
     return out;
 }
 
