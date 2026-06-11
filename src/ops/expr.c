@@ -544,7 +544,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                  * column — a length-1 column paired with nrows>1 would overread. */
                 if (!RAY_IS_PARTED(col->type)) {
                     int64_t nrows = ray_table_nrows(tbl);
-                    if (col->len != nrows) EXPR_BAIL(EXPR_BAIL_OTHER);
+                    if (col->len != nrows) EXPR_BAIL(EXPR_BAIL_OTHER); /* length-mismatch (scalar broadcast) */
                 }
                 /* sym-domain Phase 2: the fused program loads SYM cells
                  * as raw i64s and resolves STR literals via the GLOBAL
@@ -946,35 +946,35 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
                 case OP_MIN2: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?NULL_I64:(a[j]<b[j]?a[j]:b[j]); break;
                 case OP_MAX2: for (int64_t j=0;j<n;j++) d[j]=(I64_ISN(a[j])||I64_ISN(b[j]))?NULL_I64:(a[j]>b[j]?a[j]:b[j]); break;
                 /* AND/OR on I64-dst are unreachable for null_aware programs (dst is BOOL
-                 * since Task 6); fall through to the plain switch. */
+                 * since Task 6); guarded by expr_null_capable.
+                 * Capability/kernel desync guard — must stay in sync with expr_null_capable. */
+                default: memset(dp, 0, (size_t)n * 8); break;
+            }
+        } else {
+            switch (opcode) {
+                case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] + (uint64_t)b[j]); break;
+                case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] - (uint64_t)b[j]); break;
+                case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] * (uint64_t)b[j]); break;
+                case OP_DIV: for (int64_t j = 0; j < n; j++) {
+                    if (b[j]==0 || (b[j]==-1 && a[j]==((int64_t)1<<63))) { d[j]=0; continue; }
+                    int64_t q = a[j]/b[j];
+                    if ((a[j]^b[j])<0 && q*b[j]!=a[j]) q--;
+                    d[j] = q;
+                } break;
+                case OP_MOD: for (int64_t j = 0; j < n; j++) {
+                    if (b[j]==0 || (b[j]==-1 && a[j]==((int64_t)1<<63))) { d[j]=0; continue; }
+                    int64_t m = a[j]%b[j];
+                    if (m && (m^b[j])<0) m+=b[j];
+                    d[j] = m;
+                } break;
+                case OP_MIN2: for (int64_t j = 0; j < n; j++) d[j] = a[j] < b[j] ? a[j] : b[j]; break;
+                case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
+                case OP_AND:  for (int64_t j = 0; j < n; j++) d[j] = (a[j] && b[j]) ? 1 : 0; break;
+                case OP_OR:   for (int64_t j = 0; j < n; j++) d[j] = (a[j] || b[j]) ? 1 : 0; break;
                 default: break;
             }
-            #undef I64_ISN
-            return;
         }
         #undef I64_ISN
-        switch (opcode) {
-            case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] + (uint64_t)b[j]); break;
-            case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] - (uint64_t)b[j]); break;
-            case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] * (uint64_t)b[j]); break;
-            case OP_DIV: for (int64_t j = 0; j < n; j++) {
-                if (b[j]==0 || (b[j]==-1 && a[j]==((int64_t)1<<63))) { d[j]=0; continue; }
-                int64_t q = a[j]/b[j];
-                if ((a[j]^b[j])<0 && q*b[j]!=a[j]) q--;
-                d[j] = q;
-            } break;
-            case OP_MOD: for (int64_t j = 0; j < n; j++) {
-                if (b[j]==0 || (b[j]==-1 && a[j]==((int64_t)1<<63))) { d[j]=0; continue; }
-                int64_t m = a[j]%b[j];
-                if (m && (m^b[j])<0) m+=b[j];
-                d[j] = m;
-            } break;
-            case OP_MIN2: for (int64_t j = 0; j < n; j++) d[j] = a[j] < b[j] ? a[j] : b[j]; break;
-            case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
-            case OP_AND:  for (int64_t j = 0; j < n; j++) d[j] = (a[j] && b[j]) ? 1 : 0; break;
-            case OP_OR:   for (int64_t j = 0; j < n; j++) d[j] = (a[j] || b[j]) ? 1 : 0; break;
-            default: break;
-        }
     } else if (dt == RAY_I32 || dt == RAY_DATE || dt == RAY_TIME) {
         int32_t* d = (int32_t*)dp;
         const int32_t* a = (const int32_t*)ap;
