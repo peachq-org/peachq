@@ -31,6 +31,7 @@
 #include "ops/ops.h"
 #include "store/splay.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -211,14 +212,20 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
     if (sn < 0 || (size_t)sn >= sizeof(sym_path))
         return ray_error("io", NULL);
 
-    /* Load global symfile if present.  Tables without RAY_SYM columns
-     * never produce a global symfile (.db.splayed.set only writes per-table
-     * sym files inside the leaf splayed dir), so a missing root-level
-     * symfile is normal — not an error. */
+    /* Open root/sym ONCE as the shared FILE domain for every partition's
+     * SYM columns (sym-domain spec: partitions have no own symfiles; the
+     * parted view is index-coherent by construction).  Tables without
+     * RAY_SYM columns never produce a symfile, so a missing root-level
+     * symfile is normal — the loud "sym" error fires only if a SYM
+     * column is actually encountered (store/col.c). */
+    struct ray_sym_domain_s* dom = NULL;
     struct stat sym_st;
     if (stat(sym_path, &sym_st) == 0) {
-        ray_err_t sym_err = ray_sym_load(sym_path);
-        if (sym_err != RAY_OK) return ray_error(ray_err_code_str(sym_err), NULL);
+        dom = ray_sym_domain_open(sym_path);
+        if (!dom)
+            return ray_error("corrupt",
+                "symfile %s: unreadable or invalid (bad magic, torn record, "
+                "or missing \"\" at position 0)", sym_path);
     }
 
     /* Scan db_root for partition directories (skip "sym" entry) */
@@ -235,6 +242,7 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
         fprintf(stderr, "parted.get: parts=%" PRId64 "\n", part_count);
 
     /* Open each partition via ray_read_splayed */
+    ray_t* part_err = NULL;
     ray_t** part_tables = (ray_t**)ray_sys_alloc((size_t)part_count * sizeof(ray_t*));
     if (!part_tables) goto fail_dirs;
     memset(part_tables, 0, (size_t)part_count * sizeof(ray_t*));
@@ -246,13 +254,17 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
             part_tables[p] = NULL;
             goto fail_tables;
         }
-        part_tables[p] = ray_read_splayed(path, NULL);
+        part_tables[p] = ray_read_splayed_dom(path, dom);
         if (!part_tables[p] || RAY_IS_ERR(part_tables[p])) {
             if (trace)
                 fprintf(stderr, "parted.get: splayed load failed part=%" PRId64 " path=%s err=%s\n",
                         p, path,
                         part_tables[p] && RAY_IS_ERR(part_tables[p])
                             ? ray_err_code(part_tables[p]) : "io");
+            /* Propagate the partition's error verbatim — the loud "sym"
+             * error (SYM columns + no root/sym) must not degrade to a
+             * generic "io". */
+            part_err = part_tables[p]; /* error objects survive release */
             part_tables[p] = NULL;
             goto fail_tables;
         }
@@ -386,6 +398,7 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
     }
     ray_sys_free(part_tables);
     free(part_dirs);
+    if (dom) ray_sym_domain_release(dom); /* columns hold their own refs */
 
     return result;
 
@@ -402,6 +415,7 @@ fail_dirs:
     for (int64_t p = 0; p < part_count; p++)
         free(part_dirs[p]);
     free(part_dirs);
+    if (dom) ray_sym_domain_release(dom);
 
-    return ray_error("io", NULL);
+    return part_err ? part_err : ray_error("io", NULL);
 }
