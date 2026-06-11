@@ -5435,31 +5435,25 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
                 flat = parted_flatten_str(segs, col->len, total_rows);
             } else {
                 uint8_t base_attrs = (base_type == RAY_SYM)
-                                   ? parted_first_attrs(segs, col->len) : 0;
+                                   ? parted_sym_max_attrs(segs, col->len) : 0;
                 flat = typed_vec_new(base_type, base_attrs, total_rows);
                 if (!flat || RAY_IS_ERR(flat)) {
                     ray_release(flat_tbl);
                     return ray_error("oom", NULL);
                 }
-                /* segment cells are memcpy'd raw — all partitions
+                /* segment cells are copied id-preserving — all partitions
                  * resolve over the root symfile's domain (PARTED
                  * contract); adopt it from the first SYM segment. */
                 if (base_type == RAY_SYM)
                     ray_sym_vec_adopt_domain(flat, sym_domain_rep(col));
                 flat->len = total_rows;
 
-                size_t elem_size = (size_t)ray_sym_elem_size(base_type, base_attrs);
                 int64_t offset = 0;
                 for (int32_t p = 0; p < n_parts; p++) {
                     ray_t* seg = segs[p];
                     if (!seg || seg->len <= 0) continue;
-                    if (parted_seg_esz_ok(seg, base_type, (uint8_t)elem_size)) {
-                        memcpy((char*)ray_data(flat) + (size_t)offset * elem_size,
-                               ray_data(seg), (size_t)seg->len * elem_size);
-                    } else {
-                        memset((char*)ray_data(flat) + (size_t)offset * elem_size,
-                               0, (size_t)seg->len * elem_size);
-                    }
+                    parted_copy_cells(ray_data(flat), base_type, base_attrs,
+                                      offset, seg, 0, seg->len);
                     offset += seg->len;
                 }
             }
@@ -9680,11 +9674,32 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             }
             if (!tref) goto batch_fail;
 
-            size_t esz = (size_t)col_esz(tref);
-            ray_t* flat = col_vec_new(tref, mrows);
+            /* Per-partition group outputs keep their partition's SYM index
+             * width, so partials in one batch can legitimately differ —
+             * size the merged flat at the max width and convert per
+             * source (mixed-width parted tables). */
+            uint8_t out_attrs = tref->attrs;
+            if (tref->type == RAY_SYM) {
+                uint8_t w = tref->attrs & RAY_SYM_W_MASK;
+                if (running) {
+                    ray_t* rc = ray_table_get_col(running, key_syms[k]);
+                    if (rc && rc->type == RAY_SYM &&
+                        (rc->attrs & RAY_SYM_W_MASK) > w)
+                        w = rc->attrs & RAY_SYM_W_MASK;
+                }
+                for (int32_t i = 0; i < batch_n; i++) {
+                    ray_t* pc = is_mc ? NULL
+                              : ray_table_get_col(bp[i], key_syms[k]);
+                    if (pc && pc->type == RAY_SYM &&
+                        (pc->attrs & RAY_SYM_W_MASK) > w)
+                        w = pc->attrs & RAY_SYM_W_MASK;
+                }
+                out_attrs = w;
+            }
+            ray_t* flat = typed_vec_new(tref->type, out_attrs, mrows);
             if (!flat || RAY_IS_ERR(flat)) goto batch_fail;
-            /* raw cell ids memcpy'd from running/partial/MAPCOMMON key
-             * vecs — all resolve over the same dictionary (PARTED
+            /* cell ids copied id-preserving from running/partial/MAPCOMMON
+             * key vecs — all resolve over the same dictionary (PARTED
              * contract: one root symfile domain), represented by tref. */
             if (flat->type == RAY_SYM)
                 ray_sym_vec_adopt_domain(flat, sym_domain_rep(tref));
@@ -9696,7 +9711,8 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             if (running) {
                 ray_t* rc = ray_table_get_col(running, key_syms[k]);
                 if (rc && rc->len > 0) {
-                    memcpy(out, ray_data(rc), (size_t)rc->len * esz);
+                    parted_copy_cells(out, flat->type, out_attrs, 0,
+                                      rc, 0, rc->len);
                     off = rc->len;
                 }
             }
@@ -9709,16 +9725,15 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
                     int32_t p = batch_start + i;
                     ray_t* mc_col = ray_table_get_col(parted_tbl, key_syms[k]);
                     ray_t* mc_kv = ((ray_t**)ray_data(mc_col))[0];
-                    const char* kdata = (const char*)ray_data(mc_kv);
                     for (int64_t r = 0; r < pnrows; r++)
-                        memcpy(out + (size_t)(off + r) * esz,
-                               kdata + (size_t)p * esz, esz);
+                        parted_copy_cells(out, flat->type, out_attrs,
+                                          off + r, mc_kv, p, 1);
                     off += pnrows;
                 } else {
                     ray_t* pc = ray_table_get_col(bp[i], key_syms[k]);
                     if (pc && pc->len > 0) {
-                        memcpy(out + (size_t)off * esz,
-                               ray_data(pc), (size_t)pc->len * esz);
+                        parted_copy_cells(out, flat->type, out_attrs, off,
+                                          pc, 0, pc->len);
                         off += pc->len;
                     }
                 }
@@ -9735,8 +9750,21 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
                 : ray_table_get_col_idx(bp[0], (int64_t)n_part_keys + a);
             if (!tref) goto batch_fail;
 
-            size_t esz = (size_t)col_esz(tref);
-            ray_t* flat = col_vec_new(tref, mrows);
+            /* SYM partials (FIRST/LAST/MIN/MAX) keep their partition's
+             * index width — size at max width, convert per source. */
+            uint8_t out_attrs = tref->attrs;
+            if (tref->type == RAY_SYM) {
+                uint8_t w = tref->attrs & RAY_SYM_W_MASK;
+                for (int32_t i = 0; i < batch_n; i++) {
+                    ray_t* pc = ray_table_get_col_idx(bp[i],
+                                                     (int64_t)n_part_keys + a);
+                    if (pc && pc->type == RAY_SYM &&
+                        (pc->attrs & RAY_SYM_W_MASK) > w)
+                        w = pc->attrs & RAY_SYM_W_MASK;
+                }
+                out_attrs = w;
+            }
+            ray_t* flat = typed_vec_new(tref->type, out_attrs, mrows);
             if (!flat || RAY_IS_ERR(flat)) goto batch_fail;
             /* SYM FIRST/LAST/MIN/MAX partials carry raw cell ids — same
              * single-dictionary contract as the key flats above. */
@@ -9749,7 +9777,8 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             if (running) {
                 ray_t* rc = ray_table_get_col_idx(running, (int64_t)n_keys + a);
                 if (rc && rc->len > 0) {
-                    memcpy(out, ray_data(rc), (size_t)rc->len * esz);
+                    parted_copy_cells(out, flat->type, out_attrs, 0,
+                                      rc, 0, rc->len);
                     off = rc->len;
                 }
             }
@@ -9758,8 +9787,8 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
                 ray_t* pc = ray_table_get_col_idx(bp[i],
                                                  (int64_t)n_part_keys + a);
                 if (pc && pc->len > 0) {
-                    memcpy(out + (size_t)off * esz,
-                           ray_data(pc), (size_t)pc->len * esz);
+                    parted_copy_cells(out, flat->type, out_attrs, off,
+                                      pc, 0, pc->len);
                     off += pc->len;
                 }
             }
