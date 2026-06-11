@@ -469,7 +469,11 @@ static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
                                                             * ignores null_aware param (unlike other clauses)
                                                             * — sentinel handling is baked into the kernel */
         /* Task 8: narrowing demotion to I32/I16; null_aware arm writes
-         * NULL_I32/NULL_I16 for NULL_I64/NaN inputs. */
+         * NULL_I32/NULL_I16 for NULL_I64/NaN inputs.
+         * t1 is unconstrained here because scratch sources are exclusively
+         * RAY_I64/RAY_F64 lanes (register-widening invariant: REG_CONST and
+         * REG_SCAN always widen to I64 or F64), and the kernel handles both
+         * source types explicitly in the I32 and I16 branches. */
         if (dt == RAY_I32 || dt == RAY_I16) return true;
     }
     /* I64 comparisons and AND/OR: null-aware kernel handles NULL_I64 sentinel inline. */
@@ -1246,7 +1250,18 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
          *   calls ray_vec_set_null which writes NULL_I32 (INT32_MIN) into
          *   the data cell.  ray_vec_is_null is sentinel-based, so the
          *   null_aware arm must write NULL_I32 inline for null inputs.
-         *   No out-of-range clamping; truncation is the contract. */
+         *
+         * No out-of-range clamping is applied deliberately.  The fallback
+         * (exec_elementwise_unary) also performs bare truncation for out-of-
+         * range doubles; this is pre-existing UB shared by both paths.  On
+         * x86 the hardware F64→I32 conversion saturates to INT32_MIN for
+         * out-of-range values, which happens to equal NULL_I32 — so both
+         * the plain arm and this null_aware arm surface out-of-range inputs
+         * as null in practice.  Clamping only this arm would diverge from
+         * the fallback oracle without fixing the root UB.
+         * Contrast: F64→I64 clamps explicitly (see `dt == RAY_I64` branch
+         * above, ~line 1189) because INT64_MIN == NULL_I64 makes silent
+         * mis-nulling observable, so that arm deserves the guard. */
         int32_t* d = (int32_t*)dp;
         if (t1 == RAY_F64) {
             const double* a = (const double*)ap;
@@ -1265,7 +1280,14 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
         }
     } else if (dt == RAY_I16) {
         /* Fallback semantics identical to I32: plain truncation for
-         * non-null, NULL_I16 (INT16_MIN) sentinel written at null positions. */
+         * non-null, NULL_I16 (INT16_MIN) sentinel written at null positions.
+         *
+         * No out-of-range clamping for the same reason as the I32 arm above:
+         * the fallback performs bare truncation too (pre-existing UB shared
+         * by both paths), and on x86 the saturating hardware conversion
+         * coincidentally produces INT16_MIN == NULL_I16 for out-of-range
+         * doubles — keeping both arms behaviorally consistent.  Clamping
+         * only the null_aware arm would diverge from the fallback oracle. */
         int16_t* d = (int16_t*)dp;
         if (t1 == RAY_F64) {
             const double* a = (const double*)ap;
