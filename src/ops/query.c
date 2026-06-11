@@ -3813,6 +3813,16 @@ static int try_count_simple_compare(ray_t* tbl, ray_t* where_expr, int64_t* out_
     }
 
     int64_t rhs = count_atom_i64(rhs_expr);
+    /* SYM cells are positions in the COLUMN's domain; the literal atom
+     * carries a runtime id — re-express it (sym-domain Phase 2; no-op
+     * for runtime-domain columns).  Absent ⇒ -1: never equals any cell
+     * (cells are non-negative), so EQ counts 0 and NE counts all —
+     * exactly the absent-literal-matches-nothing contract. */
+    if (col->type == RAY_SYM &&
+        ray_sym_vec_domain(col) != ray_sym_runtime_domain()) {
+        ray_t* s = ray_sym_str(rhs);
+        rhs = s ? ray_sym_vec_lookup(col, ray_str_ptr(s), ray_str_len(s)) : -1;
+    }
     if (count_compare_cache_lookup(col, op, rhs, out_count))
         return 1;
 

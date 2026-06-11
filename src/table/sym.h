@@ -95,11 +95,21 @@ static inline void ray_write_sym(void* data, int64_t row, uint64_t val, int8_t t
  * ray_sym_str / ray_sym_find.  ray_sym_domain_str/find are declared in
  * <rayforce.h> next to ray_sym_vec_domain. */
 
+/* RAY_SYM_AUDIT=1 (cached once at ray_sym_init): cross-check every cell
+ * resolution and abort with full context on an invariant violation
+ * (unresolvable atom / position outside the domain).  Definitions in
+ * src/table/domain.c; OFF by default — one predictable branch. */
+extern uint8_t ray_g_sym_audit;
+void ray_sym_audit_cell(ray_t* vec, int64_t row, int64_t pos, ray_t* resolved);
+
 /* Resolve one cell of a SYM vector through ITS domain.  Borrowed atom
  * (valid for the domain's lifetime; do not release). */
 static inline ray_t* ray_sym_vec_cell(ray_t* vec, int64_t row) {
     int64_t pos = ray_read_sym(ray_data(vec), row, RAY_SYM, vec->attrs);
-    return ray_sym_domain_str(ray_sym_vec_domain(vec), pos);
+    ray_t* s = ray_sym_domain_str(ray_sym_vec_domain(vec), pos);
+    if (__builtin_expect(ray_g_sym_audit != 0, 0))
+        ray_sym_audit_cell(vec, row, pos, s);
+    return s;
 }
 
 /* Position of `s` in the vector's domain, -1 if absent (literal lookup

@@ -353,10 +353,37 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIME:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIMESTAMP: ((int64_t*)ray_data(vec))[i]   = elem_as_i64(elem); return 0;
-        /* NOTE(flip): assumes runtime-domain target; the atom's i64 is a
-         * runtime id, written raw.  Task 7 must handle FILE-domain targets
-         * (reverse lookup into the vec's domain) on the save/encode path. */
-        case RAY_SYM:       ray_write_sym(ray_data(vec), i, (uint64_t)elem->i64, vec->type, vec->attrs); return 0;
+        /* SYM atoms are runtime-domain by design.  Runtime-domain target:
+         * the id is written raw (today's behavior).  FILE-domain target
+         * (a loaded column mutated in place, e.g. alter's set path):
+         * reverse-lookup the atom's string in the vec's domain.  Absent
+         * symbol → -1: this in-memory write cannot be represented in the
+         * file vocabulary at the vec's width — per the spec's mutation
+         * boundary the producer should have re-expressed the vec to the
+         * runtime domain first (dict upsert does); callers treat -1 like
+         * any other type mismatch (fall back to a list or skip).  We
+         * deliberately do NOT intern into the shared domain here: growing
+         * a persistent vocabulary as a side effect of a transient cell
+         * write — and silently truncating positions wider than the vec —
+         * are both worse failure modes than declining. */
+        case RAY_SYM: {
+            uint64_t v = (uint64_t)elem->i64;
+            struct ray_sym_domain_s* dom = ray_sym_vec_domain(vec);
+            if (dom != ray_sym_runtime_domain()) {
+                ray_t* s = ray_sym_str(elem->i64);
+                if (!s) return -1;
+                int64_t pos = ray_sym_domain_find(dom, ray_str_ptr(s),
+                                                  ray_str_len(s));
+                if (pos < 0) return -1;
+                uint8_t w = vec->attrs & RAY_SYM_W_MASK;
+                if (w != RAY_SYM_W64 &&
+                    (uint64_t)pos > ((1ull << (8u << w)) - 1ull))
+                    return -1; /* position doesn't fit the column width */
+                v = (uint64_t)pos;
+            }
+            ray_write_sym(ray_data(vec), i, v, vec->type, vec->attrs);
+            return 0;
+        }
         case RAY_GUID:      if (elem->obj) memcpy(((uint8_t*)ray_data(vec)) + i * 16, ray_data(elem->obj), 16); return 0;
         default: return -1;
     }

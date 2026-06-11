@@ -723,10 +723,25 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
      * FILE-domain SYM cells via sym_cell_runtime_id inside the win_par_fn
      * workers — the FIRST LUT request interns the domain's vocabulary,
      * which must happen HERE, before any dispatch, never in a worker
-     * (sym.c's frozen-table rule).  No-op for runtime-domain columns. */
-    for (uint8_t f = 0; f < n_funcs; f++)
-        if (func_vecs[f] && func_vecs[f]->type == RAY_SYM)
-            (void)ray_sym_domain_runtime_lut(ray_sym_vec_domain(func_vecs[f]));
+     * (sym.c's frozen-table rule).  No-op for runtime-domain columns.
+     * LUT-build OOM is a loud error (7a-review hardening): silent -1
+     * translations would corrupt window outputs downstream. */
+    for (uint8_t f = 0; f < n_funcs; f++) {
+        if (!func_vecs[f] || func_vecs[f]->type != RAY_SYM) continue;
+        struct ray_sym_domain_s* fdom = ray_sym_vec_domain(func_vecs[f]);
+        if (fdom == ray_sym_runtime_domain()) continue;
+        if (!ray_sym_domain_runtime_lut(fdom)) {
+            ray_t* err = ray_error("oom",
+                "window: sym domain runtime-id LUT build failed");
+            for (uint8_t j = 0; j < n_funcs; j++)
+                if (func_owned[j] && func_vecs[j] && !RAY_IS_ERR(func_vecs[j]))
+                    ray_release(func_vecs[j]);
+            for (uint8_t j = 0; j < n_sort; j++)
+                if (sort_owned[j] && sort_vecs[j] && !RAY_IS_ERR(sort_vecs[j]))
+                    ray_release(sort_vecs[j]);
+            return err;
+        }
+    }
 
     /* --- Pass 1: Sort by (partition_keys ++ order_keys) --- */
     ray_t* radix_itmp_hdr = NULL;

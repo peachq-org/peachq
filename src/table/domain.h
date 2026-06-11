@@ -35,27 +35,36 @@
  *              points at it.  retain/release skip it entirely (no atomic
  *              churn on the vec free hot path).
  *
- *   FILE    -- a read-only mmapped symfile (the STRL format ray_sym_save
- *              writes), opened through a process-wide realpath-keyed
- *              refcounted cache: opening the same resolved path twice
- *              yields the SAME object — pointer equality is domain
- *              identity, always.  The reverse index (find) is built
- *              lazily on first use; per-position string atoms are
- *              materialized EAGERLY at open and owned by the domain
- *              (borrowed by callers, exactly like ray_sym_str), making
+ *   FILE    -- an mmapped symfile base (the STRL format) plus a growable
+ *              in-memory tail of appended symbols, opened through a
+ *              process-wide resolved-path-keyed refcounted cache:
+ *              opening the same resolved path twice yields the SAME
+ *              object — pointer equality is domain identity, always.
+ *              The reverse index (find) is built lazily on first use;
+ *              per-position string atoms are materialized EAGERLY at
+ *              open / append and owned by the domain (borrowed by
+ *              callers, exactly like ray_sym_str), making
  *              ray_sym_domain_str a lock-free array read.
  *
  * Position-0 reservation: position 0 of every non-empty FILE domain is
  * the empty string "" (mirrors global id 0 — the SYM null; group kernels
  * and null conventions treat id 0 as null).  ray_sym_domain_open
- * VALIDATES this and refuses (NULL) files that violate it; the save path
- * writes "" at file creation (Task 7b).  Empty vocabularies are fine.
+ * VALIDATES this and refuses (NULL) files that violate it; intern on an
+ * empty domain seeds "" at position 0 before the first real symbol, so
+ * newly created symfiles always carry it.  Empty vocabularies are fine.
  *
- * Phase 1 scope: FILE domains are READ-ONLY — base mapping only, no
- * growable in-memory tail yet.  ray_sym_domain_intern on a FILE domain
- * and ray_sym_domain_flush are declared for API completeness but return
- * -1 / RAY_ERR_NYI; the live-write path (in-memory tail, dirty flush
- * under flock, single-writer enforcement) lands in Phase 2.
+ * Growth (the flip, Task 7b): ray_sym_domain_intern find-or-appends into
+ * the shared object — append-only, positions are permanent.  Appends
+ * extend the published atom array by REPLACING it with a grown copy
+ * (atomic publish; replaced arrays are retired, not freed, so lock-free
+ * readers holding the old pointer stay valid for the domain's lifetime).
+ * ray_sym_domain_flush persists base+tail via tmp + atomic rename under
+ * the symfile's `.lk` flock and verifies the on-disk prefix still
+ * matches what this object knows (anything else is a loud
+ * concurrent-writer RAY_ERR_CORRUPT — never a silent remap).
+ * Note: the spec's hold-the-`.lk`-for-the-writer's-lifetime contract is
+ * deferred with multi-process writer stress (out of scope this phase);
+ * the flock is taken per flush.
  *
  * Lifecycle: FILE domains are refcounted.  Every attached SYM column
  * holds a ref (taken on attach and in ray_retain_owned_refs, dropped on
@@ -75,10 +84,19 @@ typedef struct ray_sym_domain_s ray_sym_domain_t;
 ray_sym_domain_t* ray_sym_runtime_domain(void);
 
 /* Open (or re-use from the cache) the FILE domain for `path` — a symfile
- * in the STRL format written by ray_sym_save.  Returns NULL on I/O or
- * format errors.  The returned object carries one reference per open;
- * release with ray_sym_domain_release. */
+ * in the STRL format.  Returns NULL on I/O or format errors.  The
+ * returned object carries one reference per open; release with
+ * ray_sym_domain_release.  A cache hit revalidates against the file:
+ * external append-only growth EXTENDS the shared object in place;
+ * any other divergence (shrunk / rewritten file, or growth while this
+ * process holds unflushed appends) returns NULL — loud, never a silent
+ * remap. */
 ray_sym_domain_t* ray_sym_domain_open(const char* path);
+
+/* Like ray_sym_domain_open, but a missing file yields a fresh EMPTY
+ * domain (vocabulary written on first flush).  The save path's
+ * open-or-create entry point. */
+ray_sym_domain_t* ray_sym_domain_open_or_create(const char* path);
 
 /* No-ops on the runtime singleton. */
 void ray_sym_domain_retain(ray_sym_domain_t* dom);
@@ -110,8 +128,11 @@ int64_t ray_sym_domain_find(ray_sym_domain_t* dom, const char* str, size_t len);
  * Returns NULL on OOM (FILE domains with a non-empty vocabulary). */
 const int64_t* ray_sym_domain_runtime_lut(ray_sym_domain_t* dom);
 
-/* Find-or-append.  RUNTIME: delegates to ray_sym_intern.  FILE: Phase 2
- * (in-memory tail append) — currently returns -1 (NYI). */
+/* Find-or-append.  RUNTIME: delegates to ray_sym_intern.  FILE:
+ * append-only in-memory tail over the mmapped base; an empty domain is
+ * seeded with "" at position 0 before the first real symbol.  Returns
+ * the position, or -1 on OOM.  Appends are visible to every holder of
+ * the shared object immediately; ray_sym_domain_flush persists them. */
 int64_t ray_sym_domain_intern(ray_sym_domain_t* dom, const char* str, size_t len);
 
 /* Number of entries in the domain. */
@@ -120,8 +141,19 @@ int64_t ray_sym_domain_count(ray_sym_domain_t* dom);
 /* Resolved (realpath) symfile path; NULL for the runtime domain. */
 const char* ray_sym_domain_path(ray_sym_domain_t* dom);
 
-/* Write the dirty in-memory tail to the symfile under flock, detecting
- * concurrent writers.  Phase 2 — currently returns RAY_ERR_NYI. */
+/* Write base + dirty tail to the symfile (tmp + atomic rename under the
+ * `.lk` flock).  Verifies the on-disk file still matches this object's
+ * persisted prefix first — divergence is a hard RAY_ERR_CORRUPT
+ * ("concurrent writer"), never a silent remap.  No-op (RAY_OK) when
+ * nothing new was interned.  RUNTIME: RAY_OK (the global table owns its
+ * own persistence). */
 ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable);
+
+/* RAY_SYM_AUDIT=1 support (cached at ray_sym_init): when set,
+ * ray_sym_vec_cell cross-checks every resolution and aborts with full
+ * context on an invariant violation (unresolvable atom / position out
+ * of domain range).  OFF by default — a single predictable branch. */
+extern uint8_t ray_g_sym_audit;
+void ray_sym_audit_cell(ray_t* vec, int64_t row, int64_t pos, ray_t* resolved);
 
 #endif /* RAY_DOMAIN_H */

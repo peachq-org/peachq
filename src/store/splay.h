@@ -26,10 +26,22 @@
 
 #include <rayforce.h>
 
-/* Splayed table I/O */
+struct ray_sym_domain_s;
+
+/* Splayed table I/O.
+ *
+ * sym_path names the table's symfile (domain): save distinct-merges the
+ * table's SYM vocabulary into it (append-only) and encodes SYM columns
+ * as positions; load attaches its FILE domain to every SYM column.
+ * Symbol-free tables neither write nor require a symfile; a SYM column
+ * with no resolvable symfile is a loud "sym" error. */
 ray_err_t ray_splay_save(ray_t* tbl, const char* dir, const char* sym_path);
 ray_err_t ray_splay_save_bulk(ray_t* tbl, const char* dir, const char* sym_path);
 ray_t*    ray_splay_load(const char* dir, const char* sym_path);
 ray_t*    ray_read_splayed(const char* dir, const char* sym_path);
+
+/* Partition loader entry: the parted reader opens root/sym ONCE and
+ * passes the shared domain to every partition's columns. */
+ray_t*    ray_read_splayed_dom(const char* dir, struct ray_sym_domain_s* dom);
 
 #endif /* RAY_SPLAY_H */
