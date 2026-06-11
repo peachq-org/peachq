@@ -134,6 +134,20 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
         dom = ray_sym_domain_open_or_create(sym_path);
         if (!dom) return RAY_ERR_IO;
 
+        /* Empty-vocabulary seeding: a 0-row SYM table merges nothing
+         * below, and ray_sym_domain_flush no-ops at count == disk_count
+         * (0 == 0 for a freshly created domain) — no symfile would be
+         * written and the table would be unloadable (loud "sym" on
+         * load).  Seed the position-0 "" up front so the flush always
+         * persists a count>=1 file whenever the table has SYM columns
+         * (this also satisfies the position-0 "" invariant; for a
+         * non-empty vocabulary the intern is a find hit, a no-op). */
+        if (ray_sym_domain_count(dom) == 0 &&
+            ray_sym_domain_intern(dom, "", 0) != 0) {
+            ray_sym_domain_release(dom);
+            return RAY_ERR_OOM;
+        }
+
         int64_t nc = ray_table_ncols(tbl);
         for (int64_t c = 0; c < nc; c++) {
             ray_t* col = ray_table_get_col_idx(tbl, c);
