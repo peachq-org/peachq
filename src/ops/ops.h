@@ -352,7 +352,6 @@ static inline bool agg_type_admitted(uint16_t op, int8_t t) {
 #define RAY_BOUND_UNBOUNDED_FOLLOWING  4
 
 /* Op flags */
-#define OP_FLAG_FUSED        0x01
 #define OP_FLAG_DEAD         0x02
 
 /* Operation node (32 bytes, fits one cache line) */
@@ -821,7 +820,6 @@ int64_t   ray_rel_n_nodes(ray_rel_t* rel, uint8_t direction);
 /* ===== Optimizer API ===== */
 
 ray_op_t* ray_optimize(ray_graph_t* g, ray_op_t* root);
-void     ray_fuse_pass(ray_graph_t* g, ray_op_t* root);
 
 /* ===== Plan Printer ===== */
 
