@@ -226,12 +226,19 @@ static inline int is_collection(ray_t* x) {
  * (sym-domain Phase 2).  SYM atoms are runtime-domain by design, so any
  * cell id flowing into an atom must be translated.  Fast path: a
  * runtime-domain column's ids ARE runtime ids — raw copy (exact no-op
- * while every domain is the runtime singleton). */
+ * while every domain is the runtime singleton).
+ *
+ * FILE-domain path: a lock-free read of the per-domain runtime-id LUT.
+ * The FIRST LUT request interns the vocabulary into the global table —
+ * sequential by contract: callers that translate inside parallel
+ * workers must warm the LUT in their sequential setup first (join and
+ * window setup do; see ray_sym_domain_runtime_lut in table/domain.h). */
 static inline int64_t sym_id_runtime(ray_t* col, int64_t id) {
     struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
     if (dom == ray_sym_runtime_domain()) return id;
-    ray_t* s = ray_sym_domain_str(dom, id);
-    return s ? ray_sym_intern(ray_str_ptr(s), ray_str_len(s)) : -1;
+    const int64_t* lut = ray_sym_domain_runtime_lut(dom);
+    if (!lut || id < 0 || id >= ray_sym_domain_count(dom)) return -1;
+    return lut[id];
 }
 
 static inline int64_t sym_cell_runtime_id(ray_t* v, int64_t i) {
