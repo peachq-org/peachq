@@ -330,12 +330,22 @@ static bool dom_extend_from_file_locked(ray_sym_domain_t* d, size_t st_size) {
             atomic_store_explicit(&d->count, fresh_count, memory_order_release);
             d->disk_count = fresh_count;
             d->disk_size = st_size;
-            /* Reverse index + LUT now cover a stale prefix: drop both. */
+            /* Reverse index + LUT now cover a stale prefix: drop both.
+             * A retire-OOM here would keep the stale LUT published over
+             * the grown count (OOB reads for lock-free consumers) — the
+             * same corner dom_append_locked hits; mirror its loud abort
+             * (the count is already published, there is no clean undo). */
             if (d->buckets) { free(d->buckets); d->buckets = NULL; d->bucket_mask = 0; }
             int64_t* lut = atomic_load_explicit(&d->runtime_lut, memory_order_relaxed);
             if (lut) {
-                if (dom_retire(d, lut))
-                    atomic_store_explicit(&d->runtime_lut, NULL, memory_order_release);
+                if (!dom_retire(d, lut)) {
+                    fprintf(stderr, "rayforce: sym domain '%s': OOM retiring "
+                                    "runtime LUT after external extend — cannot "
+                                    "keep id translation consistent\n",
+                            d->path ? d->path : "?");
+                    abort();
+                }
+                atomic_store_explicit(&d->runtime_lut, NULL, memory_order_release);
             }
         }
     }
