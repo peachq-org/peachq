@@ -719,6 +719,15 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
     }
 
+    /* Sequential runtime-id LUT warm-up: win_read_i64/f64 re-express
+     * FILE-domain SYM cells via sym_cell_runtime_id inside the win_par_fn
+     * workers — the FIRST LUT request interns the domain's vocabulary,
+     * which must happen HERE, before any dispatch, never in a worker
+     * (sym.c's frozen-table rule).  No-op for runtime-domain columns. */
+    for (uint8_t f = 0; f < n_funcs; f++)
+        if (func_vecs[f] && func_vecs[f]->type == RAY_SYM)
+            (void)ray_sym_domain_runtime_lut(ray_sym_vec_domain(func_vecs[f]));
+
     /* --- Pass 1: Sort by (partition_keys ++ order_keys) --- */
     ray_t* radix_itmp_hdr = NULL;
     ray_t* win_enum_rank_hdrs[n_sort > 0 ? n_sort : 1];
