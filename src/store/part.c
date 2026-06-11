@@ -236,7 +236,9 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
         if (trace)
             fprintf(stderr, "parted.get: collect dirs failed err=%s\n",
                     ray_err_code_str(collect_err));
-        return ray_error("io", NULL);
+        if (dom) ray_sym_domain_release(dom);
+        return ray_error(ray_err_code_str(collect_err),
+            "parted %s: cannot enumerate partition directories", db_root);
     }
     if (trace)
         fprintf(stderr, "parted.get: parts=%" PRId64 "\n", part_count);
@@ -252,6 +254,8 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
         int pn = snprintf(path, sizeof(path), "%s/%s/%s", db_root, part_dirs[p], table_name);
         if (pn < 0 || (size_t)pn >= sizeof(path)) {
             part_tables[p] = NULL;
+            part_err = ray_error("range", "parted %s: partition path %s/%s too long",
+                                 db_root, part_dirs[p], table_name);
             goto fail_tables;
         }
         part_tables[p] = ray_read_splayed_dom(path, dom);
@@ -275,10 +279,50 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
     if (ncols <= 0) {
         if (trace)
             fprintf(stderr, "parted.get: empty first partition\n");
+        part_err = ray_error("corrupt",
+            "parted %s: first partition %s/%s has no columns",
+            db_root, part_dirs[0], table_name);
         goto fail_tables;
     }
     if (trace)
         fprintf(stderr, "parted.get: ncols=%" PRId64 "\n", ncols);
+
+    /* Cross-partition schema validation: column association is by INDEX
+     * (see the data-column loop below), so every column a partition has
+     * must match the first partition's name and type at the same index.
+     * A partition MAY have fewer columns — the missing tail becomes NULL
+     * segments (supported ragged mode) — but never more, and never a
+     * renamed/retyped column (silent mis-association otherwise).  SYM
+     * index width (attrs) may legally differ per partition — partitions
+     * written at different dictionary sizes carry different index
+     * widths; compare types only. */
+    for (int64_t p = 1; p < part_count; p++) {
+        int64_t ncols_p = ray_table_ncols(part_tables[p]);
+        if (ncols_p > ncols) {
+            part_err = ray_error("corrupt",
+                "parted %s: partition %s/%s has %lld columns, "
+                "expected at most %lld (from %s)",
+                db_root, part_dirs[p], table_name,
+                (long long)ncols_p, (long long)ncols, part_dirs[0]);
+            goto fail_tables;
+        }
+        for (int64_t c = 0; c < ncols_p; c++) {
+            int64_t n0 = ray_table_col_name(part_tables[0], c);
+            int64_t np = ray_table_col_name(part_tables[p], c);
+            ray_t* c0 = ray_table_get_col_idx(part_tables[0], c);
+            ray_t* cp = ray_table_get_col_idx(part_tables[p], c);
+            if (n0 != np || !c0 || !cp || c0->type != cp->type) {
+                ray_t* na = ray_sym_str(np);
+                part_err = ray_error("corrupt",
+                    "parted %s: partition %s/%s column %lld ('%.*s') "
+                    "does not match partition %s (name/type mismatch)",
+                    db_root, part_dirs[p], table_name, (long long)c,
+                    na ? (int)ray_str_len(na) : 1,
+                    na ? ray_str_ptr(na) : "?", part_dirs[0]);
+                goto fail_tables;
+            }
+        }
+    }
 
     /* Infer MAPCOMMON sub-type from partition directory names */
     uint8_t mc_type = infer_mc_type(part_dirs, part_count);
