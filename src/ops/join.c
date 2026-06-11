@@ -53,6 +53,24 @@ static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
     return h;
 }
 
+/* hash_row_keys / join_keys_eq translate FILE-domain SYM cells through
+ * the per-domain runtime-id LUT and run inside ray_pool_dispatch
+ * workers.  The FIRST LUT request interns the domain's vocabulary into
+ * the global table — a sequential one-time cost that must be paid HERE,
+ * in join setup, never inside a worker (sym.c's frozen-table rule; a
+ * worker-side intern would also leak the joined vocabulary build into
+ * parallel execution).  No-op while every key is runtime-domain (LUT is
+ * NULL for the singleton). */
+static void join_warm_sym_luts(ray_t* const* l_vecs, ray_t* const* r_vecs,
+                               uint8_t n_keys) {
+    for (uint8_t k = 0; k < n_keys; k++) {
+        if (l_vecs[k] && l_vecs[k]->type == RAY_SYM)
+            (void)ray_sym_domain_runtime_lut(ray_sym_vec_domain(l_vecs[k]));
+        if (r_vecs[k] && r_vecs[k]->type == RAY_SYM)
+            (void)ray_sym_domain_runtime_lut(ray_sym_vec_domain(r_vecs[k]));
+    }
+}
+
 /* ============================================================================
  * Radix-partitioned hash join
  *
@@ -810,6 +828,9 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
             return ray_error("nyi", NULL);
     }
 
+    /* Sequential LUT warm-up BEFORE any dispatch (see join_warm_sym_luts). */
+    join_warm_sym_luts(l_key_vecs, r_key_vecs, n_keys);
+
     ray_pool_t* pool = ray_pool_get();
 
     /* Shared output state — used by both radix and chained HT paths */
@@ -1469,6 +1490,9 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
             return ray_error("nyi", NULL);
     }
 
+    /* Sequential LUT warm-up BEFORE the parallel build dispatch. */
+    join_warm_sym_luts(l_key_vecs, r_key_vecs, n_keys);
+
     /* Build chained hash table from right side */
     ray_t* ht_next_hdr = NULL;
     ray_t* ht_heads_hdr = NULL;
@@ -1609,22 +1633,24 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
  * -1: sorts first, matches nothing — right ids are ≥ 0).  Every left-side
  * eq read below goes through this reader, so the left sort, the partition
  * rewind and the merge walk all order by the right side's id space, while
- * right-side reads stay raw.  Pre-flip every domain is the runtime
- * singleton — plain raw read, byte-identical behavior.  (Cross-domain
- * translation is a per-read hash lookup; if a post-flip profile shows it
- * hot, build a per-key LUT at setup.) */
-static inline int64_t asof_eq_lread(ray_t* lc, ray_t* rc, int64_t row) {
+ * right-side reads stay raw (which is also why the per-domain RUNTIME-id
+ * LUT doesn't fit here: the target space is the RIGHT domain, not the
+ * global table).  `xlut` is the per-key left-position → right-position
+ * table built ONCE at setup (NULL for same-domain / non-SYM keys —
+ * pre-flip always, byte-identical raw read); `xn` is its entry count.
+ * No per-read hash lookups: the old str+find per read degenerated the
+ * absent-key rewind into O(L·R) hash probes. */
+static inline int64_t asof_eq_lread(ray_t* lc, const int64_t* xlut, int64_t xn,
+                                    int64_t row) {
     int64_t v = read_col_i64(ray_data(lc), row, lc->type, lc->attrs);
-    if (lc->type == RAY_SYM && rc->type == RAY_SYM) {
-        struct ray_sym_domain_s* ld = ray_sym_vec_domain(lc);
-        struct ray_sym_domain_s* rd = ray_sym_vec_domain(rc);
-        if (ld != rd) {
-            ray_t* s = ray_sym_domain_str(ld, v);
-            v = s ? ray_sym_domain_find(rd, ray_str_ptr(s), ray_str_len(s)) : -1;
-        }
-    }
+    if (xlut) v = (v >= 0 && v < xn) ? xlut[v] : -1;
     return v;
 }
+
+/* Cross-domain SYM eq key with an EMPTY left vocabulary: nothing can
+ * translate, but the reader still needs a non-NULL marker so raw left
+ * ids never leak into the right id space. */
+static const int64_t g_asof_empty_xlut[1] = { -1 };
 
 static bool asof_time_sorted_within_parts(const ray_t* keycol, const int64_t* tvals) {
     ray_index_t* ix = ray_index_payload(((ray_t*)keycol)->index);
@@ -1705,6 +1731,62 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         rt_eq[k] = rv;
     }
 
+    /* Cross-domain SYM eq keys: per-key LEFT→RIGHT position translation
+     * tables, built sequentially HERE — one pass over the LEFT
+     * vocabulary (never the rows) replacing the old per-read str+find
+     * hash lookups in asof_eq_lread.  Pre-flip both sides are the
+     * runtime singleton: no table is built, the reader's raw fast path
+     * is byte-identical. */
+    const int64_t* eq_xlut[256];
+    int64_t eq_xn[256];
+    ray_t* eq_xl_hdr = NULL;
+    {
+        int64_t xcnt[256];
+        size_t  xtotal = 0;
+        for (uint8_t k = 0; k < n_eq; k++) {
+            eq_xlut[k] = NULL;
+            eq_xn[k]   = 0;
+            xcnt[k]    = -1; /* -1 = same domain / non-SYM: raw reads */
+            if (lt_eq[k]->type == RAY_SYM && rt_eq[k]->type == RAY_SYM) {
+                struct ray_sym_domain_s* ld = ray_sym_vec_domain(lt_eq[k]);
+                struct ray_sym_domain_s* rd = ray_sym_vec_domain(rt_eq[k]);
+                if (ld != rd) {
+                    xcnt[k] = ray_sym_domain_count(ld);
+                    xtotal += (size_t)xcnt[k];
+                }
+            }
+        }
+        int64_t* blk = NULL;
+        if (xtotal > 0) {
+            blk = (int64_t*)scratch_alloc(&eq_xl_hdr, xtotal * sizeof(int64_t));
+            if (!blk) {
+                if (lt_time_hdr) scratch_free(lt_time_hdr);
+                if (rt_time_hdr) scratch_free(rt_time_hdr);
+                return ray_error("oom", NULL);
+            }
+        }
+        size_t xoff = 0;
+        for (uint8_t k = 0; k < n_eq; k++) {
+            if (xcnt[k] < 0) continue;       /* raw reads */
+            if (xcnt[k] == 0) {              /* empty left vocabulary */
+                eq_xlut[k] = g_asof_empty_xlut;
+                continue;
+            }
+            struct ray_sym_domain_s* ld = ray_sym_vec_domain(lt_eq[k]);
+            struct ray_sym_domain_s* rd = ray_sym_vec_domain(rt_eq[k]);
+            int64_t* lut = blk + xoff;
+            xoff += (size_t)xcnt[k];
+            for (int64_t p = 0; p < xcnt[k]; p++) {
+                ray_t* s = ray_sym_domain_str(ld, p);
+                lut[p] = s ? ray_sym_domain_find(rd, ray_str_ptr(s),
+                                                 ray_str_len(s))
+                           : -1;
+            }
+            eq_xlut[k] = lut;
+            eq_xn[k]   = xcnt[k];
+        }
+    }
+
     /* Precompute per-row "any key is null" bitsets.  Null-keyed rows must
      * not match — left rows fall through to the left-outer null fill,
      * right rows are skipped entirely during the merge walk.  SQL-style
@@ -1721,6 +1803,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         if (rt_null_hdr) scratch_free(rt_null_hdr);
         if (lt_time_hdr) scratch_free(lt_time_hdr);
         if (rt_time_hdr) scratch_free(rt_time_hdr);
+        if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
     if (left_n > 0) memset(lt_null, 0, (size_t)left_n);
@@ -1754,6 +1837,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         if (rt_null_hdr) scratch_free(rt_null_hdr);
         if (lt_time_hdr) scratch_free(lt_time_hdr);
         if (rt_time_hdr) scratch_free(rt_time_hdr);
+        if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
     for (int64_t i = 0; i < left_n; i++) li_idx[i] = i;
@@ -1775,9 +1859,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
      * Right-side reads stay raw: its shortcut is unaffected. */
     bool eq_xdomain = false;
     for (uint8_t k = 0; k < n_eq; k++)
-        if (lt_eq[k]->type == RAY_SYM && rt_eq[k]->type == RAY_SYM &&
-            ray_sym_vec_domain(lt_eq[k]) != ray_sym_vec_domain(rt_eq[k]))
-            eq_xdomain = true;
+        if (eq_xlut[k]) eq_xdomain = true;
 
     bool l_presorted = !eq_xdomain
         && ((n_eq == 0 && ray_attr_is_sorted(lt_time_vec))
@@ -1809,6 +1891,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             if (rt_null_hdr) scratch_free(rt_null_hdr);
             if (lt_time_hdr) scratch_free(lt_time_hdr);
             if (rt_time_hdr) scratch_free(rt_time_hdr);
+            if (eq_xl_hdr) scratch_free(eq_xl_hdr);
             return ray_error("oom", NULL);
         }
 
@@ -1829,8 +1912,8 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                     for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
                         /* asof_eq_lread: left sorts in the RIGHT side's
                          * id space when a SYM key pair spans domains. */
-                        int64_t va = asof_eq_lread(lt_eq[k2], rt_eq[k2], ai);
-                        int64_t vb = asof_eq_lread(lt_eq[k2], rt_eq[k2], bi);
+                        int64_t va = asof_eq_lread(lt_eq[k2], eq_xlut[k2], eq_xn[k2], ai);
+                        int64_t vb = asof_eq_lread(lt_eq[k2], eq_xlut[k2], eq_xn[k2], bi);
                         if (va < vb) cmp = -1;
                         else if (va > vb) cmp = 1;
                     }
@@ -1892,6 +1975,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         if (rt_null_hdr) scratch_free(rt_null_hdr);
         if (lt_time_hdr) scratch_free(lt_time_hdr);
         if (rt_time_hdr) scratch_free(rt_time_hdr);
+        if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
 
@@ -1933,7 +2017,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                     int eq_match = 1;
                     for (uint8_t k = 0; k < n_eq; k++) {
                         int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri_prev, rt_eq[k]->type, rt_eq[k]->attrs);
-                        int64_t lv = asof_eq_lread(lt_eq[k], rt_eq[k], li);
+                        int64_t lv = asof_eq_lread(lt_eq[k], eq_xlut[k], eq_xn[k], li);
                         if (rv < lv) { eq_match = 0; break; }
                     }
                     if (!eq_match) break;
@@ -1949,7 +2033,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             int eq_cmp = 0;
             for (uint8_t k = 0; k < n_eq && eq_cmp == 0; k++) {
                 int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri, rt_eq[k]->type, rt_eq[k]->attrs);
-                int64_t lv = asof_eq_lread(lt_eq[k], rt_eq[k], li);
+                int64_t lv = asof_eq_lread(lt_eq[k], eq_xlut[k], eq_xn[k], li);
                 if (rv < lv) eq_cmp = -1;
                 else if (rv > lv) eq_cmp = 1;
             }
@@ -1973,6 +2057,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     int64_t* match_orig = (int64_t*)scratch_alloc(&mo_hdr, (size_t)left_n * sizeof(int64_t));
     if (!match_orig && left_n > 0) {
         scratch_free(match_hdr); scratch_free(li_hdr); scratch_free(ri_hdr);
+        if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
     for (int64_t lp = 0; lp < left_n; lp++)
@@ -2026,6 +2111,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         if (rt_null_hdr) scratch_free(rt_null_hdr);
         if (lt_time_hdr) scratch_free(lt_time_hdr);
         if (rt_time_hdr) scratch_free(rt_time_hdr);
+        if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
     {
@@ -2100,5 +2186,6 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     if (rt_null_hdr) scratch_free(rt_null_hdr);
     if (lt_time_hdr) scratch_free(lt_time_hdr);
     if (rt_time_hdr) scratch_free(rt_time_hdr);
+    if (eq_xl_hdr) scratch_free(eq_xl_hdr);
     return out;
 }
