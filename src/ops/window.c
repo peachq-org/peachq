@@ -49,6 +49,11 @@ static inline bool win_keys_differ(ray_t* const* vecs, uint8_t n_keys,
                 ((const int32_t*)ray_data(col))[rb]) return true;
             break;
         case RAY_SYM:
+            /* Partition equality of two rows of ONE column: both ids
+             * live in the same domain, raw index compare is correct
+             * for any domain (sym-domain Phase 2 — no change).  Same
+             * holds for the pkey gathers / win_read_* SYM reads below:
+             * within-column equality and index-order keys stay raw. */
             if (ray_read_sym(ray_data(col), ra, col->type, col->attrs) !=
                 ray_read_sym(ray_data(col), rb, col->type, col->attrs)) return true;
             break;

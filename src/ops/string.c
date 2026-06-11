@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "table/domain.h"   /* sym-domain resolution (Phase 2) */
 #include "ops/glob.h"
 #include "ops/rowsel.h"
 #include "core/pool.h"
@@ -46,7 +47,11 @@
  * writes the answer to lut[sid].  Pure read-only on the inputs after
  * the seen-mark phase, so workers are independent. */
 typedef struct {
-    ray_t**                    sym_strings;
+    ray_t**                    sym_strings;  /* runtime-domain snapshot, or NULL */
+    /* sym_strings == NULL ⇒ FILE-domain column (sym-domain Phase 2):
+     * resolve each sid through `dom` instead.  The LUT is sized by
+     * that domain's count at setup (fused_group.c precedent). */
+    struct ray_sym_domain_s*   dom;
     uint8_t*                   seen;
     uint8_t*                   lut;
     const ray_glob_compiled_t* pc;
@@ -347,7 +352,8 @@ static void like_resolve_fn(void* ctx, uint32_t worker_id,
     like_resolve_ctx_t* x = (like_resolve_ctx_t*)ctx;
     for (int64_t sid = start; sid < end; sid++) {
         if (!x->seen[sid]) continue;
-        ray_t* str = x->sym_strings[sid];
+        ray_t* str = x->sym_strings ? x->sym_strings[sid]
+                                    : ray_sym_domain_str(x->dom, sid);
         if (!str) { x->lut[sid] = 0; continue; }
         const char* sp = ray_str_ptr(str);
         size_t sl = ray_str_len(str);
@@ -399,9 +405,28 @@ static void exec_like_parted_sym(ray_t* input, uint8_t* dst,
                                  const char* pat_str, size_t pat_len,
                                  int64_t total_len) {
     ray_t** segs = (ray_t**)ray_data(input);
+    /* Cell ids are positions in the COLUMN's domain (sym-domain
+     * Phase 2).  All partitions of a parted SYM column share ONE
+     * domain by construction (the root symfile) — take it from the
+     * first SYM segment.  Runtime domain: borrow the global string
+     * snapshot (lock-free per sid).  FILE domain: size the LUT by the
+     * domain's count and resolve via ray_sym_domain_str (fused_group
+     * precedent).  Pre-flip this is always the runtime branch. */
+    struct ray_sym_domain_s* dom = NULL;
+    for (int64_t s = 0; s < input->len; s++)
+        if (segs[s] && segs[s]->type == RAY_SYM) {
+            dom = ray_sym_vec_domain(segs[s]);
+            break;
+        }
     ray_t** sym_strings = NULL;
     uint32_t dict_n = 0;
-    ray_sym_strings_borrow(&sym_strings, &dict_n);
+    if (!dom || dom == ray_sym_runtime_domain()) {
+        dom = NULL;
+        ray_sym_strings_borrow(&sym_strings, &dict_n);
+    } else {
+        int64_t dn = ray_sym_domain_count(dom);
+        dict_n = (dn > 0 && dn <= (int64_t)UINT32_MAX) ? (uint32_t)dn : 0;
+    }
     ray_t* lut_hdr = NULL;
     ray_t* seen_hdr = NULL;
     uint8_t* lut = NULL;
@@ -437,7 +462,7 @@ static void exec_like_parted_sym(ray_t* input, uint8_t* dst,
         }
 
         like_resolve_ctx_t rctx = {
-            .sym_strings = sym_strings, .seen = seen, .lut = lut,
+            .sym_strings = sym_strings, .dom = dom, .seen = seen, .lut = lut,
             .pc = pc, .use_simple = use_simple,
             .pat_str = pat_str, .pat_len = pat_len,
         };
@@ -486,7 +511,8 @@ static void exec_like_parted_sym(ray_t* input, uint8_t* dst,
         const void* base = ray_data(seg);
         for (int64_t i = 0; i < seg->len; i++) {
             int64_t sym_id = ray_read_sym(base, i, seg->type, seg->attrs);
-            ray_t* str = (sym_strings && (uint64_t)sym_id < (uint64_t)dict_n)
+            ray_t* str = dom ? ray_sym_domain_str(dom, sym_id)
+                       : (sym_strings && (uint64_t)sym_id < (uint64_t)dict_n)
                        ? sym_strings[sym_id] : NULL;
             if (!str) { dst[out_off + i] = 0; continue; }
             const char* sp = ray_str_ptr(str);
@@ -604,9 +630,20 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
          * a low-card column like BrowserCountry phase (1) keeps the
          * resolve work bounded to that column's actual sym_ids. */
         const void* base = ray_data(input);
+        /* Cell ids are positions in the COLUMN's domain (sym-domain
+         * Phase 2).  Runtime: borrow the global snapshot.  FILE: LUT
+         * sized by the domain's count, resolved via ray_sym_domain_str
+         * (fused_group precedent).  Pre-flip: always runtime. */
+        struct ray_sym_domain_s* dom = ray_sym_vec_domain(input);
         ray_t** sym_strings = NULL;
         uint32_t dict_n = 0;
-        ray_sym_strings_borrow(&sym_strings, &dict_n);
+        if (dom == ray_sym_runtime_domain()) {
+            dom = NULL;
+            ray_sym_strings_borrow(&sym_strings, &dict_n);
+        } else {
+            int64_t dn = ray_sym_domain_count(dom);
+            dict_n = (dn > 0 && dn <= (int64_t)UINT32_MAX) ? (uint32_t)dn : 0;
+        }
         ray_t* lut_hdr = NULL;
         ray_t* seen_hdr = NULL;
         uint8_t* lut = NULL;
@@ -650,7 +687,7 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
 
             /* Pass 2: parallel pattern resolve over the dict range. */
             like_resolve_ctx_t rctx = {
-                .sym_strings = sym_strings, .seen = seen, .lut = lut,
+                .sym_strings = sym_strings, .dom = dom, .seen = seen, .lut = lut,
                 .pc = &pc, .use_simple = use_simple,
                 .pat_str = pat_str, .pat_len = pat_len,
             };
@@ -689,7 +726,8 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
             if (seen_hdr) scratch_free(seen_hdr);
             for (int64_t i = 0; i < len; i++) {
                 int64_t sym_id = ray_read_sym(base, i, in_type, input->attrs);
-                ray_t* s = (sym_strings && (uint64_t)sym_id < (uint64_t)dict_n)
+                ray_t* s = dom ? ray_sym_domain_str(dom, sym_id)
+                         : (sym_strings && (uint64_t)sym_id < (uint64_t)dict_n)
                            ? sym_strings[sym_id] : NULL;
                 if (!s) { dst[i] = 0; continue; }
                 const char* sp = ray_str_ptr(s);
@@ -737,9 +775,15 @@ ray_t* exec_ilike(ray_graph_t* g, ray_op_t* op) {
             dst[i] = ray_glob_match_ci(sp, sl, pat_str, pat_len) ? 1 : 0;
         }
     } else if (RAY_IS_SYM(in_type)) {
-        /* Dictionary-cached fast path — see exec_like. */
+        /* Dictionary-cached fast path — see exec_like.  Cell ids are
+         * positions in the COLUMN's domain (sym-domain Phase 2); the
+         * LUT is sized by that domain's count and resolved through it
+         * (the runtime singleton delegates to ray_sym_count/_str —
+         * exact no-op pre-flip). */
         const void* base = ray_data(input);
-        uint32_t dict_n = ray_sym_count();
+        struct ray_sym_domain_s* dom = ray_sym_vec_domain(input);
+        int64_t dn = ray_sym_domain_count(dom);
+        uint32_t dict_n = (dn > 0 && dn <= (int64_t)UINT32_MAX) ? (uint32_t)dn : 0;
         ray_t* lut_hdr = NULL;
         ray_t* seen_hdr = NULL;
         uint8_t* lut = NULL;
@@ -753,7 +797,7 @@ ray_t* exec_ilike(ray_graph_t* g, ray_op_t* op) {
                 int64_t sid = ray_read_sym(base, i, in_type, input->attrs);
                 if ((uint64_t)sid >= (uint64_t)dict_n) { dst[i] = 0; continue; }
                 if (!seen[sid]) {
-                    ray_t* s = ray_sym_str(sid);
+                    ray_t* s = ray_sym_domain_str(dom, sid);
                     if (!s) { lut[sid] = 0; }
                     else {
                         lut[sid] = ray_glob_match_ci(ray_str_ptr(s), ray_str_len(s),
@@ -770,7 +814,7 @@ ray_t* exec_ilike(ray_graph_t* g, ray_op_t* op) {
             if (seen_hdr) scratch_free(seen_hdr);
             for (int64_t i = 0; i < len; i++) {
                 int64_t sym_id = ray_read_sym(base, i, in_type, input->attrs);
-                ray_t* s = ray_sym_str(sym_id);
+                ray_t* s = ray_sym_domain_str(dom, sym_id);
                 if (!s) { dst[i] = 0; continue; }
                 dst[i] = ray_glob_match_ci(ray_str_ptr(s), ray_str_len(s), pat_str, pat_len) ? 1 : 0;
             }
