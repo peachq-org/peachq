@@ -41,8 +41,15 @@
  *              yields the SAME object — pointer equality is domain
  *              identity, always.  The reverse index (find) is built
  *              lazily on first use; per-position string atoms are
- *              materialized lazily and owned by the domain (borrowed by
- *              callers, exactly like ray_sym_str).
+ *              materialized EAGERLY at open and owned by the domain
+ *              (borrowed by callers, exactly like ray_sym_str), making
+ *              ray_sym_domain_str a lock-free array read.
+ *
+ * Position-0 reservation: position 0 of every non-empty FILE domain is
+ * the empty string "" (mirrors global id 0 — the SYM null; group kernels
+ * and null conventions treat id 0 as null).  ray_sym_domain_open
+ * VALIDATES this and refuses (NULL) files that violate it; the save path
+ * writes "" at file creation (Task 7b).  Empty vocabularies are fine.
  *
  * Phase 1 scope: FILE domains are READ-ONLY — base mapping only, no
  * growable in-memory tail yet.  ray_sym_domain_intern on a FILE domain
@@ -85,6 +92,23 @@ ray_t* ray_sym_domain_str(ray_sym_domain_t* dom, int64_t pos);
 /* Position of `str` in the domain, or -1 if absent.
  * FILE: builds the reverse index on first call (O(|vocabulary|)). */
 int64_t ray_sym_domain_find(ray_sym_domain_t* dom, const char* str, size_t len);
+
+/* Position → runtime-intern-id translation table.
+ *
+ *   RUNTIME: NULL — ids ARE runtime ids, callers use them as-is.
+ *   FILE:    `count` entries, lut[pos] = ray_sym_intern(vocab[pos]);
+ *            built ONCE on first request (double-checked under the
+ *            domain lock, atomically published), then lock-free reads
+ *            for the domain's lifetime.
+ *
+ * Building the LUT INTERNS the whole vocabulary into the global table —
+ * the sanctioned, SEQUENTIAL one-time cost of crossing a FILE domain
+ * into runtime-id space (O(|vocabulary|), never O(rows)).  Contract:
+ * any path that translates ids inside ray_pool_dispatch workers must
+ * obtain the LUT during sequential setup (join/window setup do) —
+ * interning inside a worker violates sym.c's frozen-table rule.
+ * Returns NULL on OOM (FILE domains with a non-empty vocabulary). */
+const int64_t* ray_sym_domain_runtime_lut(ray_sym_domain_t* dom);
 
 /* Find-or-append.  RUNTIME: delegates to ray_sym_intern.  FILE: Phase 2
  * (in-memory tail append) — currently returns -1 (NYI). */
