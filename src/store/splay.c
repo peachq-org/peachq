@@ -22,6 +22,7 @@
  */
 
 #include "splay.h"
+#include "core/runtime.h"
 #include "store/col.h"
 #include "store/fileio.h"
 #include "table/sym.h"
@@ -279,7 +280,13 @@ static ray_t* splay_load_dom_impl(const char* dir, ray_sym_domain_t* dom,
         if (trace)
             fprintf(stderr, "splayed.get: schema load failed path=%s err=%s\n",
                     path, schema && RAY_IS_ERR(schema) ? ray_err_code(schema) : "io");
-        return schema;
+        /* .d failures from ray_col_load are bare (code, no message) —
+         * name the directory so a missing/corrupt table is locatable. */
+        char codebuf[8];
+        const char* code = schema && RAY_IS_ERR(schema) ? ray_err_code(schema) : "io";
+        snprintf(codebuf, sizeof(codebuf), "%s", code);
+        ray_error_free(schema);
+        return ray_error(codebuf, "splayed %s: cannot read .d schema", dir);
     }
 
     if (schema->type != RAY_STR) {
@@ -348,7 +355,17 @@ static ray_t* splay_load_dom_impl(const char* dir, ray_sym_domain_t* dom,
                         path, col && RAY_IS_ERR(col) ? ray_err_code(col) : "io");
             ray_release(schema);
             ray_release(tbl);
-            return col ? col : ray_error("io", NULL);
+            /* Rich loader errors (the loud "sym", domain bounds, …) name
+             * the path already and propagate verbatim; only a bare code
+             * (e.g. plain "io" from a missing column file) gains the
+             * dir + column context here. */
+            if (col && ray_error_msg() != NULL) return col;
+            char codebuf[8];
+            snprintf(codebuf, sizeof(codebuf), "%s",
+                     col && RAY_IS_ERR(col) ? ray_err_code(col) : "io");
+            ray_error_free(col);
+            return ray_error(codebuf, "splayed %s: column '%.*s' failed to load",
+                             dir, (int)name_len, name);
         }
 
         if (c > 0 && col->len != ray_table_nrows(tbl)) {

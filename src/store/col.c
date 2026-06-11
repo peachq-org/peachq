@@ -1258,8 +1258,8 @@ ray_t* ray_col_load_dom(const char* path, struct ray_sym_domain_s* dom) {
  * ray_release -> ray_free -> munmap.
  * -------------------------------------------------------------------------- */
 
-static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count,
-                            struct ray_sym_domain_s* dom, bool require_dom) {
+static ray_t* col_mmap_impl(const char* path, struct ray_sym_domain_s* dom,
+                            bool require_dom) {
     if (!path) return ray_error("io", NULL);
 
     col_mapped_t cm = {0};
@@ -1306,28 +1306,20 @@ static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count,
                 "column %s: SYM data but no symfile resolved "
                 "(missing <dir>/sym or explicit sym argument)", path);
         } else {
+            /* Bare load: process-local runtime-id semantics.  Fast-reject a
+             * file whose saved dictionary count exceeds the live table — it
+             * cannot have been written by this process lineage. */
             uint32_t cur_sc = ray_sym_count();
-            uint32_t trusted_sc = trust_splayed_sym_count ? ray_sym_persisted_count() : cur_sc;
-            if (trust_splayed_sym_count && cm.saved_sym_count > trusted_sc) {
+            if (cm.saved_sym_count > 0 && cur_sc > 0 &&
+                cur_sc < cm.saved_sym_count) {
                 ray_vm_unmap_file(cm.mapped, cm.mapped_size);
                 return ray_error("corrupt", NULL);
             }
-            /* Bare-load fast-reject (was in col_validate_mapped): a file
-             * whose saved dictionary count exceeds the live table cannot
-             * have been written by this process lineage. */
-            if (!trust_splayed_sym_count && cm.saved_sym_count > 0 &&
-                cur_sc > 0 && cur_sc < cm.saved_sym_count) {
+            ray_err_t sym_err = validate_sym_bounds(
+                (const char*)cm.mapped + 32, vec->len, vec->attrs, cur_sc);
+            if (sym_err != RAY_OK) {
                 ray_vm_unmap_file(cm.mapped, cm.mapped_size);
-                return ray_error("corrupt", NULL);
-            }
-            bool skip_bounds = trust_splayed_sym_count && trusted_sc > 0;
-            if (!skip_bounds) {
-                ray_err_t sym_err = validate_sym_bounds(
-                    (const char*)cm.mapped + 32, vec->len, vec->attrs, cur_sc);
-                if (sym_err != RAY_OK) {
-                    ray_vm_unmap_file(cm.mapped, cm.mapped_size);
-                    return ray_error(ray_err_code_str(sym_err), NULL);
-                }
+                return ray_error(ray_err_code_str(sym_err), NULL);
             }
         }
     }
@@ -1373,13 +1365,9 @@ static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count,
 }
 
 ray_t* ray_col_mmap(const char* path) {
-    return col_mmap_impl(path, false, NULL, false);
-}
-
-ray_t* ray_col_mmap_splayed(const char* path) {
-    return col_mmap_impl(path, true, NULL, false);
+    return col_mmap_impl(path, NULL, false);
 }
 
 ray_t* ray_col_mmap_splayed_dom(const char* path, struct ray_sym_domain_s* dom) {
-    return col_mmap_impl(path, true, dom, true);
+    return col_mmap_impl(path, dom, true);
 }
