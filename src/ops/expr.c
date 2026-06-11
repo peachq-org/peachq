@@ -1101,6 +1101,10 @@ static ray_t* expr_eval_full_parted(const ray_expr_t* expr, int64_t nrows) {
                 ray_t** segs = (ray_t**)ray_data(seg_expr.regs[r].parted_col);
                 if (!segs[s]) { seg_ok = false; break; }
                 seg_expr.regs[r].data = ray_data(segs[s]);
+                /* SYM index width is PER SEGMENT (partitions saved at
+                 * different vocabulary sizes legitimately differ) — the
+                 * compile-time reg carries no width for parted scans. */
+                seg_expr.regs[r].col_attrs = segs[s]->attrs;
             }
         }
         if (!seg_ok) {
