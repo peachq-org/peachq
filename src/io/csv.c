@@ -2263,36 +2263,19 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
         return err;
     }
 
-    ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
-    if (!schema || RAY_IS_ERR(schema)) {
-        munmap(buf, file_size);
-        return schema ? ray_err_from_obj(schema) : RAY_ERR_OOM;
-    }
-    for (int c = 0; c < ncols; c++) {
-        ray_t* na = ray_sym_str(col_name_ids[c]);
-        if (!na) {
-            ray_release(schema);
-            munmap(buf, file_size);
-            return RAY_ERR_OOM;
-        }
-        schema = ray_str_vec_append(schema, ray_str_ptr(na), ray_str_len(na));
-        if (!schema || RAY_IS_ERR(schema)) {
-            if (schema) ray_release(schema);
-            munmap(buf, file_size);
-            return RAY_ERR_OOM;
-        }
-    }
+    /* The .d schema is the commit marker and is written LAST (crash-safe
+     * ordering: symfile → columns → .d; see ray_splay_save).  Remove any
+     * pre-existing .d up front: the streaming writer renames column files
+     * into place one by one, so a stale .d from a previous run could pair
+     * an old schema with a partial mix of new columns — a *corrupt* table.
+     * Without a .d the dir reads as a *missing* table until commit. */
     char schema_path[1024];
     int sn = snprintf(schema_path, sizeof(schema_path), "%s/.d", dir);
-    if (sn < 0 || (size_t)sn >= sizeof(schema_path))
-        err = RAY_ERR_RANGE;
-    else
-        err = ray_col_save_bulk(schema, schema_path);
-    ray_release(schema);
-    if (err != RAY_OK) {
+    if (sn < 0 || (size_t)sn >= sizeof(schema_path)) {
         munmap(buf, file_size);
-        return err;
+        return RAY_ERR_RANGE;
     }
+    remove(schema_path); /* best-effort; ENOENT is the common case */
 
     /* SYM columns encode against the table's symfile domain (dir/sym):
      * open-or-create it up front; cells intern as they stream. */
@@ -2393,6 +2376,34 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
                                          : RAY_ERR_IO;
         if (err == RAY_OK && cerr != RAY_OK) err = cerr;
         if (err != RAY_OK) csv_splayed_writer_abort(&writers[c]);
+    }
+
+    /* .d LAST — the commit marker.  All column files are renamed into
+     * place by now and the symfile is flushed; a crash or error before
+     * this point leaves a dir without .d, which loads as a *missing*
+     * table, never a corrupt one. */
+    if (err == RAY_OK) {
+        ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
+        if (!schema || RAY_IS_ERR(schema)) {
+            if (schema) ray_release(schema);
+            schema = NULL;
+            err = RAY_ERR_OOM;
+        }
+        for (int c = 0; schema && c < ncols; c++) {
+            ray_t* na = ray_sym_str(col_name_ids[c]);
+            if (na)
+                schema = ray_str_vec_append(schema, ray_str_ptr(na),
+                                            ray_str_len(na));
+            if (!na || !schema || RAY_IS_ERR(schema)) {
+                if (schema && RAY_IS_ERR(schema)) ray_release(schema);
+                schema = NULL;
+                err = RAY_ERR_OOM;
+            }
+        }
+        if (schema) {
+            err = ray_col_save_bulk(schema, schema_path);
+            ray_release(schema);
+        }
     }
 
     if (sym_dom) ray_sym_domain_release(sym_dom);
