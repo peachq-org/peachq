@@ -23,6 +23,7 @@
 
 #include "ops/internal.h"
 #include "ops/rowsel.h"
+#include "lang/internal.h"  /* sym_domain_rep (sym-domain Phase 2) */
 
 /* ============================================================================
  * Filter execution — extracted from exec.c
@@ -94,6 +95,12 @@ static ray_t* exec_filter_vec(ray_t* input, ray_t* pred, int64_t pass_count) {
     }
 
     col_propagate_str_pool(result, input);
+    /* Output-vec rule (sym-domain Phase 2): the filtered SYM output
+     * raw-copies cell ids from `input`, so it must resolve over the
+     * same dictionary.  No-op while every domain is the runtime
+     * singleton. */
+    if (result->type == RAY_SYM)
+        ray_sym_vec_adopt_domain(result, input);
     col_propagate_nulls_filter(result, input,
                                (const uint8_t*)ray_data(pred), input->len);
     return result;
@@ -174,6 +181,10 @@ static ray_t* exec_filter_parted_vec(ray_t* parted_col, ray_t* pred,
         }
         pred_off += seg_len;
     }
+    /* SYM segments raw-copy into the output — adopt the partitions'
+     * shared domain (all segments resolve over the root symfile). */
+    if (result->type == RAY_SYM)
+        ray_sym_vec_adopt_domain(result, sym_domain_rep(parted_col));
     return result;
 }
 
@@ -366,7 +377,10 @@ ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred) {
 
     /* Propagate str_pool for any RAY_STR columns gathered by index */
     /* Propagate str_pool for non-STR parted and flat columns.
-     * STR parted columns were already deep-copied with their own pool. */
+     * STR parted columns were already deep-copied with their own pool.
+     * SYM outputs raw-copy cell ids — adopt the source's domain
+     * (sym-domain Phase 2; no-op while all domains are the runtime
+     * singleton). */
     for (int64_t c = 0; c < ncols; c++) {
         if (!new_cols[c]) continue;
         ray_t* col = ray_table_get_col_idx(input, c);
@@ -380,6 +394,8 @@ ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred) {
         } else {
             col_propagate_str_pool(new_cols[c], col);
         }
+        if (new_cols[c]->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_cols[c], sym_domain_rep(col));
     }
 
     for (int64_t c = 0; c < ncols; c++) {
