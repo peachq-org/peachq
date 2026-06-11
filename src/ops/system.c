@@ -62,13 +62,61 @@ ray_t* ray_de_fn(ray_t* val) {
     return ray_de(val);
 }
 
-/* Build default sym path: dir/sym. Returns NULL if file does not exist. */
-static const char* splay_default_sym(const char* dir, char* buf, size_t bufsz,
-                                     bool must_exist) {
-    int n = snprintf(buf, bufsz, "%s/sym", dir);
+/* True when `name` (n bytes) is partition-shaped: nonempty, digits and
+ * dots only — the same loose classification collect_part_dirs
+ * (store/part.c) applies to partition directory names. */
+static bool sym_partition_shaped(const char* name, size_t n) {
+    if (n == 0) return false;
+    for (size_t i = 0; i < n; i++)
+        if (name[i] != '.' && (name[i] < '0' || name[i] > '9')) return false;
+    return true;
+}
+
+/* Symfile resolution (sym-domain spec, "Surface"): for a partition dir
+ * (/db/2024.01.01/t/) the table root is the PARTED ROOT — derived from
+ * the path shape — and the domain is root/sym; for a standalone splayed
+ * dir the root is the dir itself (dir/sym).  Writes default to the
+ * convention unconditionally; reads prefer an existing dir/sym, then an
+ * existing partition root/sym, else NULL (the load layer raises the
+ * loud "sym" error only if SYM columns actually exist). */
+static const char* splay_resolve_sym(const char* dir, char* buf, size_t bufsz,
+                                     bool for_write) {
+    size_t dlen = strlen(dir);
+    while (dlen > 1 && dir[dlen - 1] == '/') dlen--; /* strip trailing '/' */
+
+    /* dir/sym */
+    int n = snprintf(buf, bufsz, "%.*s/sym", (int)dlen, dir);
     if (n < 0 || (size_t)n >= bufsz) return NULL;
-    if (must_exist && access(buf, F_OK) != 0) return NULL;
-    return buf;
+    if (!for_write && access(buf, F_OK) == 0) return buf;
+
+    /* partition-shaped parent → parted root's root/sym */
+    const char* slash = NULL;
+    for (size_t i = dlen; i > 0; i--)
+        if (dir[i - 1] == '/') { slash = dir + i - 1; break; }
+    if (slash && slash > dir) {
+        size_t parent_end = (size_t)(slash - dir);
+        const char* pslash = NULL;
+        for (size_t i = parent_end; i > 0; i--)
+            if (dir[i - 1] == '/') { pslash = dir + i - 1; break; }
+        const char* pname = pslash ? pslash + 1 : dir;
+        size_t pname_len = (size_t)(dir + parent_end - pname);
+        if (sym_partition_shaped(pname, pname_len) && pslash) {
+            size_t root_len = (size_t)(pslash - dir);
+            if (root_len == 0) root_len = 1; /* "/" root */
+            int rn = snprintf(buf, bufsz, "%.*s/sym", (int)root_len, dir);
+            if (rn < 0 || (size_t)rn >= bufsz) return NULL;
+            if (for_write || access(buf, F_OK) == 0) return buf;
+            return NULL;
+        }
+    }
+
+    if (for_write) {
+        /* Not partition-shaped: the dir itself is the table root. */
+        n = snprintf(buf, bufsz, "%.*s/sym", (int)dlen, dir);
+        if (n < 0 || (size_t)n >= bufsz) return NULL;
+        return buf;
+    }
+    return NULL; /* read: no symfile resolvable */
 }
 
 /* Helper: extract null-terminated path from a STR atom into a stack buffer.
@@ -98,7 +146,7 @@ ray_t* ray_set_splayed_fn(ray_t** args, int64_t n) {
     if (n == 3 && args[2] && args[2]->type == -RAY_STR)
         sym_path = str_to_cpath(args[2], sym, sizeof(sym));
     else
-        sym_path = splay_default_sym(dir, sym, sizeof(sym), false);
+        sym_path = splay_resolve_sym(dir, sym, sizeof(sym), true);
 
     ray_err_t err = ray_splay_save(tbl, dir, sym_path);
     if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
@@ -119,8 +167,12 @@ ray_t* ray_get_splayed_fn(ray_t** args, int64_t n) {
     if (n == 2 && args[1] && args[1]->type == -RAY_STR)
         sym_path = str_to_cpath(args[1], sym, sizeof(sym));
     else
-        sym_path = splay_default_sym(dir, sym, sizeof(sym), true);
+        sym_path = splay_resolve_sym(dir, sym, sizeof(sym), false);
 
+    /* sym_path == NULL: no symfile resolvable (no explicit arg, no
+     * dir/sym, no partition root/sym).  The load layer raises the loud
+     * "sym" error if the table actually has SYM columns; symbol-free
+     * tables load fine without one. */
     return ray_read_splayed(dir, sym_path);
 }
 
