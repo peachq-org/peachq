@@ -38,14 +38,17 @@ static inline ray_t* sym_scalar_str(ray_t* v) {
 
 /* A SYM id taken from `col`'s cells, re-expressed in the RUNTIME domain
  * (fresh SYM output vecs built here are runtime-domain).  Fast path: a
- * runtime-domain column's ids ARE runtime ids — raw copy.  Otherwise
- * resolve through the column's domain and re-intern (exact no-op while
- * every domain is the runtime singleton). */
+ * runtime-domain column's ids ARE runtime ids — raw copy.  Otherwise a
+ * lock-free read of the per-domain runtime-id LUT (pivot is sequential,
+ * so the LUT's first-request vocabulary intern is safe here; mirrors
+ * lang/internal.h sym_id_runtime — exact no-op while every domain is
+ * the runtime singleton). */
 static inline int64_t sym_id_runtime(ray_t* col, int64_t id) {
     struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
     if (dom == ray_sym_runtime_domain()) return id;
-    ray_t* s = ray_sym_domain_str(dom, id);
-    return s ? ray_sym_intern(ray_str_ptr(s), ray_str_len(s)) : -1;
+    const int64_t* lut = ray_sym_domain_runtime_lut(dom);
+    if (!lut || id < 0 || id >= ray_sym_domain_count(dom)) return -1;
+    return lut[id];
 }
 
 static inline int64_t sym_cell_runtime_id(ray_t* v, int64_t i) {
