@@ -220,7 +220,7 @@ static bool is_const(ray_op_t* n) {
 
 /* O(ext_count) per call; acceptable for typical graph sizes (tens to
    hundreds of nodes).  L2: intentional duplication to keep files
-   self-contained — also present in fuse.c. */
+   self-contained — also present in expr.c. */
 ray_op_ext_t* find_ext(ray_graph_t* g, uint32_t node_id) {
     for (uint32_t i = 0; i < g->ext_count; i++) {
         if (g->ext_nodes[i] && g->ext_nodes[i]->base.id == node_id)
