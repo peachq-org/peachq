@@ -32,6 +32,7 @@
 #include "vec/str.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 
 /* --------------------------------------------------------------------------
@@ -227,11 +228,19 @@ static ray_t* col_load_str_vec(const uint8_t* ptr, size_t remaining) {
  *   [1B type]
  *   atoms (type < 0):
  *     -RAY_STR: [4B len][data bytes]
+ *     -RAY_SYM: [4B len][data bytes]   (resolved string; load re-interns)
  *     other:       [8B raw value]
- *   vectors with is_serializable_type: [8B len][raw data]
+ *   RAY_SYM vector: [8B len][per cell: 4B len + data bytes]
+ *   other vectors with is_serializable_type: [8B len][raw data]
  *   RAY_LIST: [8B count][recursive elements...]
  *   RAY_TABLE: [8B ncols][8B nrows][for each col: 8B name_sym + recursive col]
- * -------------------------------------------------------------------------- */
+ *
+ * SYM data inside recursive payloads (list columns, nested tables) is
+ * serialized as STRINGS, not ids (the flip, Task 7b): nested sym data
+ * has no symfile of its own, and raw ids — global or positional — only
+ * resolve against incidental process state.  Loads intern into the
+ * global table, so nested SYM data is always runtime-domain.  Tables
+ * with ONLY nested sym data therefore need no symfile at all. */
 
 static ray_err_t col_write_recursive(ray_t* obj, FILE* f);
 
@@ -243,9 +252,13 @@ static ray_err_t col_write_recursive(ray_t* obj, FILE* f) {
 
     if (type < 0) {
         /* Atom */
-        if (type == -RAY_STR) {
-            const char* sp = ray_str_ptr(obj);
-            size_t slen = ray_str_len(obj);
+        if (type == -RAY_STR || type == -RAY_SYM) {
+            /* SYM atoms serialize as their resolved string (atoms are
+             * runtime-domain by design; ids never reach disk). */
+            ray_t* s = (type == -RAY_SYM) ? ray_sym_str(obj->i64) : obj;
+            if (!s) return RAY_ERR_CORRUPT;
+            const char* sp = ray_str_ptr(s);
+            size_t slen = ray_str_len(s);
             uint32_t len32 = (uint32_t)slen;
             if (fwrite(&len32, 4, 1, f) != 1) return RAY_ERR_IO;
             if (slen > 0 && fwrite(sp, 1, slen, f) != slen) return RAY_ERR_IO;
@@ -256,13 +269,29 @@ static ray_err_t col_write_recursive(ray_t* obj, FILE* f) {
         return RAY_OK;
     }
 
+    if (type == RAY_SYM) {
+        /* SYM vector nested in a recursive payload: per-cell strings,
+         * resolved through the VEC's domain. */
+        int64_t len = obj->len;
+        if (fwrite(&len, 8, 1, f) != 1) return RAY_ERR_IO;
+        for (int64_t i = 0; i < len; i++) {
+            ray_t* s = ray_sym_vec_cell(obj, i);
+            if (!s) return RAY_ERR_CORRUPT;
+            const char* sp = ray_str_ptr(s);
+            size_t slen = ray_str_len(s);
+            uint32_t len32 = (uint32_t)slen;
+            if (fwrite(&len32, 4, 1, f) != 1) return RAY_ERR_IO;
+            if (slen > 0 && fwrite(sp, 1, slen, f) != slen) return RAY_ERR_IO;
+        }
+        return RAY_OK;
+    }
+
     if (is_serializable_type(type)) {
         /* Fixed-size vector: write len + raw data.
-         * RAY_SYM: also write attrs byte (adaptive width W8/W16/W32/W64).
          * RAY_STR: also write attrs byte and the adjacent byte pool. */
         int64_t len = obj->len;
         if (fwrite(&len, 8, 1, f) != 1) return RAY_ERR_IO;
-        if (type == RAY_SYM || type == RAY_STR) {
+        if (type == RAY_STR) {
             uint8_t attrs = obj->attrs;
             if (fwrite(&attrs, 1, 1, f) != 1) return RAY_ERR_IO;
         }
@@ -320,12 +349,19 @@ static ray_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
 
     if (type < 0) {
         /* Atom */
-        if (type == -RAY_STR) {
+        if (type == -RAY_STR || type == -RAY_SYM) {
             if (*remaining < 4) return ray_error("corrupt", NULL);
             uint32_t slen;
             memcpy(&slen, *pp, 4);
             *pp += 4; *remaining -= 4;
             if (slen > *remaining) return ray_error("corrupt", NULL);
+            if (type == -RAY_SYM) {
+                /* Stored as a string; re-intern → runtime-domain atom. */
+                int64_t id = ray_sym_intern((const char*)*pp, (size_t)slen);
+                *pp += slen; *remaining -= slen;
+                if (id < 0) return ray_error("oom", NULL);
+                return ray_sym(id);
+            }
             ray_t* s = ray_str((const char*)*pp, (size_t)slen);
             *pp += slen; *remaining -= slen;
             return s;
@@ -344,6 +380,34 @@ static ray_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
         }
     }
 
+    if (type == RAY_SYM) {
+        /* SYM vector stored as per-cell strings: intern each into the
+         * global table — runtime-domain output by construction. */
+        if (*remaining < 8) return ray_error("corrupt", NULL);
+        int64_t len;
+        memcpy(&len, *pp, 8);
+        *pp += 8; *remaining -= 8;
+        if (len < 0 || (uint64_t)len > *remaining / 4)
+            return ray_error("corrupt", NULL);
+
+        ray_t* vec = ray_sym_vec_new(RAY_SYM_W64, len);
+        if (!vec || RAY_IS_ERR(vec)) return vec;
+        vec->len = len;
+        int64_t* out = (int64_t*)ray_data(vec);
+        for (int64_t i = 0; i < len; i++) {
+            if (*remaining < 4) { ray_release(vec); return ray_error("corrupt", NULL); }
+            uint32_t slen;
+            memcpy(&slen, *pp, 4);
+            *pp += 4; *remaining -= 4;
+            if (slen > *remaining) { ray_release(vec); return ray_error("corrupt", NULL); }
+            int64_t id = ray_sym_intern((const char*)*pp, (size_t)slen);
+            *pp += slen; *remaining -= slen;
+            if (id < 0) { ray_release(vec); return ray_error("oom", NULL); }
+            out[i] = id;
+        }
+        return vec;
+    }
+
     if (is_serializable_type(type)) {
         /* Fixed-size vector */
         if (*remaining < 8) return ray_error("corrupt", NULL);
@@ -352,9 +416,9 @@ static ray_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
         *pp += 8; *remaining -= 8;
         if (len < 0) return ray_error("corrupt", NULL);
 
-        /* RAY_SYM / RAY_STR: read attrs byte for adaptive width/nulls */
+        /* RAY_STR: read attrs byte for nulls/pool layout */
         uint8_t attrs = 0;
-        if (type == RAY_SYM || type == RAY_STR) {
+        if (type == RAY_STR) {
             if (*remaining < 1) return ray_error("corrupt", NULL);
             memcpy(&attrs, *pp, 1);
             *pp += 1; *remaining -= 1;
@@ -366,9 +430,7 @@ static ray_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
         size_t data_size = (size_t)len * esz;
         if (data_size > *remaining) return ray_error("corrupt", NULL);
 
-        ray_t* vec = (type == RAY_SYM)
-            ? ray_sym_vec_new(attrs & RAY_SYM_W_MASK, len)
-            : ray_vec_new(type, len);
+        ray_t* vec = ray_vec_new(type, len);
         if (!vec || RAY_IS_ERR(vec)) return vec;
         vec->len = len;
         if (data_size > 0)
@@ -402,11 +464,6 @@ static ray_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
             vec->attrs = attrs & COL_DISK_ATTRS_MASK;
         }
 
-        if (type == RAY_SYM) {
-            uint32_t sc = ray_sym_count();
-            ray_err_t ve = validate_sym_bounds(ray_data(vec), len, attrs, sc);
-            if (ve != RAY_OK) { ray_release(vec); return ray_error(ray_err_code_str(ve), NULL); }
-        }
         return vec;
     }
 
@@ -559,9 +616,43 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
     if (!is_serializable_type(vec->type))
         return RAY_ERR_NYI;
 
+    /* Bare column files keep PROCESS-LOCAL semantics for RAY_SYM: cells
+     * are runtime intern ids (header rc = global count for the fast
+     * reject).  A FILE-domain vec (a loaded splayed column saved through
+     * this entry point) stores positions in ITS symfile — re-express
+     * them as runtime ids via the domain LUT so the written file means
+     * the same thing every bare-save file means.  Splayed table saves
+     * never come here for SYM columns (ray_col_save_sym_encoded). */
+    void*   sym_xlate = NULL;
+    uint8_t sym_xlate_attrs = 0;
+    if (vec->type == RAY_SYM &&
+        ray_sym_vec_domain(vec) != ray_sym_runtime_domain()) {
+        struct ray_sym_domain_s* dom = ray_sym_vec_domain(vec);
+        const int64_t* lut = ray_sym_domain_runtime_lut(dom);
+        if (!lut) return RAY_ERR_OOM;
+        int64_t dcount = ray_sym_domain_count(dom);
+        uint8_t w = ray_sym_dict_width((int64_t)ray_sym_count());
+        uint8_t wesz = (uint8_t)(1u << w);
+        if (vec->len > 0 && (uint64_t)vec->len > SIZE_MAX / wesz)
+            return RAY_ERR_IO;
+        sym_xlate = malloc(vec->len > 0 ? (size_t)vec->len * wesz : 1);
+        if (!sym_xlate) return RAY_ERR_OOM;
+        const void* src = ray_data(vec); /* slice-safe */
+        for (int64_t i = 0; i < vec->len; i++) {
+            int64_t pos = ray_read_sym(src, i, RAY_SYM, vec->attrs);
+            if (pos < 0 || pos >= dcount) {
+                free(sym_xlate);
+                return RAY_ERR_CORRUPT;
+            }
+            ray_write_sym(sym_xlate, i, (uint64_t)lut[pos], RAY_SYM, w);
+        }
+        /* Translation reorders ids — SORTED no longer holds. */
+        sym_xlate_attrs = w;
+    }
+
     {
         FILE* f = fopen(tmp_path, "wb");
-        if (!f) return RAY_ERR_IO;
+        if (!f) { free(sym_xlate); return RAY_ERR_IO; }
 
         /* Write a clean header (mmod=0, rc=0) */
         ray_t header;
@@ -605,24 +696,33 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
          * Load/mmap reattach the domain below. */
         if (vec->type == RAY_SYM)
             memset(header.aux, 0, 16);
+        /* FILE-domain SYM re-expressed to runtime ids: width follows the
+         * global table, SORTED dropped (id order changed). */
+        if (sym_xlate)
+            header.attrs = (uint8_t)((header.attrs &
+                ~(uint8_t)(RAY_SYM_W_MASK | RAY_ATTR_SORTED)) | sym_xlate_attrs);
 
         size_t written = fwrite(&header, 1, 32, f);
-        if (written != 32) { fclose(f); remove(tmp_path); return RAY_ERR_IO; }
+        if (written != 32) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_IO; }
 
         /* Write data */
-        if (vec->len < 0) { fclose(f); remove(tmp_path); return RAY_ERR_CORRUPT; }
-        uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
-        if (esz == 0 && vec->len > 0) { fclose(f); remove(tmp_path); return RAY_ERR_TYPE; }
+        if (vec->len < 0) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_CORRUPT; }
+        uint8_t esz = ray_sym_elem_size(vec->type,
+                                        sym_xlate ? sym_xlate_attrs : vec->attrs);
+        if (esz == 0 && vec->len > 0) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_TYPE; }
         /* Overflow check: ensure len*esz fits in size_t with 32-byte header room */
         if ((uint64_t)vec->len > (SIZE_MAX - 32) / (esz ? esz : 1)) {
             fclose(f);
             remove(tmp_path);
+            free(sym_xlate);
             return RAY_ERR_IO;
         }
         size_t data_size = (size_t)vec->len * esz;
 
         void* data;
-        if (vec->attrs & RAY_ATTR_SLICE) {
+        if (sym_xlate) {
+            data = sym_xlate;
+        } else if (vec->attrs & RAY_ATTR_SLICE) {
             /* Validate slice bounds before computing data pointer */
             ray_t* parent = vec->slice_parent;
             if (!parent || vec->slice_offset < 0 ||
@@ -638,8 +738,10 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
 
         if (data_size > 0) {
             written = fwrite(data, 1, data_size, f);
-            if (written != data_size) { fclose(f); remove(tmp_path); return RAY_ERR_IO; }
+            if (written != data_size) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_IO; }
         }
+        free(sym_xlate);
+        sym_xlate = NULL;
 
         if (vec->type == RAY_STR) {
             size_t pool_size = col_str_pool_payload_len(vec);
@@ -732,6 +834,108 @@ ray_err_t ray_col_save(ray_t* vec, const char* path) {
 
 ray_err_t ray_col_save_bulk(ray_t* vec, const char* path) {
     return col_save_impl(vec, path, false);
+}
+
+/* --------------------------------------------------------------------------
+ * ray_col_save_sym_encoded -- write a RAY_SYM column as positions in the
+ * table's symfile domain (the flip, Task 7b).
+ *
+ * Width = ray_sym_dict_width(|domain|) — the table's vocabulary, not the
+ * process dictionary.  Header rc = domain count at save time (the O(1)
+ * fast-reject the loader checks against the FILE domain's count).
+ * Caller contract: every distinct symbol of the column was interned into
+ * `target` and the domain was FLUSHED before this call (crash ordering:
+ * sym → columns → .d) — an absent symbol here is RAY_ERR_CORRUPT.
+ * -------------------------------------------------------------------------- */
+
+ray_err_t ray_col_save_sym_encoded(ray_t* vec, const char* path,
+                                   struct ray_sym_domain_s* target,
+                                   bool durable) {
+    if (!vec || RAY_IS_ERR(vec) || vec->type != RAY_SYM) return RAY_ERR_TYPE;
+    if (!path || !target) return RAY_ERR_IO;
+    if (vec->len < 0) return RAY_ERR_CORRUPT;
+
+    struct ray_sym_domain_s* src = ray_sym_vec_domain(vec);
+    int64_t dcount = ray_sym_domain_count(target);
+    if (dcount > UINT32_MAX) return RAY_ERR_RANGE;
+    uint8_t w = ray_sym_dict_width(dcount);
+    uint8_t esz = (uint8_t)(1u << w);
+
+    char tmp_path[1024];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path) >= (int)sizeof(tmp_path))
+        return RAY_ERR_IO;
+
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) return RAY_ERR_IO;
+
+    ray_err_t err = RAY_OK;
+    {
+        ray_t header;
+        memcpy(&header, vec, 32);
+        header.mmod = 0;
+        header.order = 0;
+        header.rc = (uint32_t)dcount;
+        /* Same-domain saves preserve positions, hence order; re-encoding
+         * from another domain reorders ids — drop SORTED then. */
+        uint8_t keep_sorted = (src == target) ? (vec->attrs & RAY_ATTR_SORTED) : 0;
+        header.attrs = (uint8_t)(w | keep_sorted);
+        memset(header.aux, 0, 16); /* domain ptr is runtime-only state */
+        if (fwrite(&header, 1, 32, f) != 32) err = RAY_ERR_IO;
+    }
+
+    if (err == RAY_OK) {
+        uint8_t buf[8192];
+        int64_t per = (int64_t)(sizeof(buf) / esz);
+        const void* sdata = ray_data(vec); /* slice-safe */
+        for (int64_t off = 0; err == RAY_OK && off < vec->len; off += per) {
+            int64_t cnt = vec->len - off;
+            if (cnt > per) cnt = per;
+            for (int64_t i = 0; i < cnt; i++) {
+                int64_t pos = ray_read_sym(sdata, off + i, RAY_SYM, vec->attrs);
+                int64_t tpos;
+                if (src == target) {
+                    tpos = pos; /* already positions in the target */
+                    if (tpos < 0 || tpos >= dcount) { err = RAY_ERR_CORRUPT; break; }
+                } else {
+                    ray_t* s = ray_sym_domain_str(src, pos);
+                    if (!s) { err = RAY_ERR_CORRUPT; break; }
+                    tpos = ray_sym_domain_find(target, ray_str_ptr(s),
+                                               ray_str_len(s));
+                    if (tpos < 0) { err = RAY_ERR_CORRUPT; break; }
+                }
+                ray_write_sym(buf, i, (uint64_t)tpos, RAY_SYM, w);
+            }
+            if (err == RAY_OK && cnt > 0 &&
+                fwrite(buf, esz, (size_t)cnt, f) != (size_t)cnt)
+                err = RAY_ERR_IO;
+        }
+    }
+
+    if (fclose(f) != 0 && err == RAY_OK) err = RAY_ERR_IO;
+    if (err != RAY_OK) { remove(tmp_path); return err; }
+
+    if (durable) {
+        ray_fd_t tmp_fd = ray_file_open(tmp_path, RAY_OPEN_READ | RAY_OPEN_WRITE);
+        if (tmp_fd == RAY_FD_INVALID) { remove(tmp_path); return RAY_ERR_IO; }
+        err = ray_file_sync(tmp_fd);
+        ray_file_close(tmp_fd);
+        if (err != RAY_OK) { remove(tmp_path); return err; }
+    }
+
+    err = ray_file_rename(tmp_path, path);
+    if (err != RAY_OK) { remove(tmp_path); return err; }
+
+    /* SYM columns never carry links — clean any stale sidecar. */
+    {
+        char link_path[1024];
+        size_t plen = strlen(path);
+        if (plen + 6 < sizeof(link_path)) {
+            memcpy(link_path, path, plen);
+            memcpy(link_path + plen, ".link", 6);
+            remove(link_path);
+        }
+    }
+    return RAY_OK;
 }
 
 /* --------------------------------------------------------------------------
@@ -890,17 +1094,16 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
         out->tail_offset = 32 + data_size;
     }
 
-    /* RAY_SYM: fast-reject via sym count in header rc field.
-     * Use memcpy (not atomic_load) since file data is not atomic storage. */
+    /* RAY_SYM: record the saved dictionary count from the header rc
+     * field (runtime-domain files: global count at save; domain-encoded
+     * splayed columns: the symfile's count at save).  The fast-reject
+     * against the live dictionary happens in the loaders, which know
+     * which dictionary applies.  Use memcpy (not atomic_load) since
+     * file data is not atomic storage. */
     if (hdr->type == RAY_SYM) {
         uint32_t saved_sc;
         memcpy(&saved_sc, (const char*)ptr + offsetof(ray_t, rc), sizeof(saved_sc));
         out->saved_sym_count = saved_sc;
-        uint32_t cur_sc = ray_sym_count();
-        if (saved_sc > 0 && cur_sc > 0 && cur_sc < saved_sc) {
-            ray_vm_unmap_file(ptr, mapped_size);
-            return ray_error("corrupt", NULL);
-        }
     }
 
     out->mapped          = ptr;
@@ -915,7 +1118,8 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
  * ray_col_load -- load a column file via mmap (zero deserialization)
  * -------------------------------------------------------------------------- */
 
-ray_t* ray_col_load(const char* path) {
+static ray_t* col_load_impl(const char* path, struct ray_sym_domain_s* dom,
+                            bool require_dom) {
     if (!path) return ray_error("io", NULL);
 
     /* Read file into temp mmap for validation, then copy to buddy block.
@@ -983,26 +1187,66 @@ ray_t* ray_col_load(const char* path) {
     vec->attrs &= COL_DISK_ATTRS_MASK;
     ray_atomic_store(&vec->rc, 1);
 
-    /* RAY_SYM: validate sym count footer + bounds check */
+    /* RAY_SYM: attach the resolution domain + bounds check.  The header
+     * memcpy above copied the on-disk aux (zeroed by save, but
+     * old/foreign files are untrusted) — attach BEFORE any release path
+     * can run owned-ref handling over a garbage pointer. */
     if (vec->type == RAY_SYM) {
-        /* The header memcpy above copied the on-disk aux (zeroed by save,
-         * but old/foreign files are untrusted) — attach the resolution
-         * domain BEFORE any release path can run owned-ref handling over
-         * a garbage pointer.  Phase 1: columns store global sym ids, so
-         * the runtime domain is the correct domain; FILE-domain
-         * attachment flips here in Phase 2 with save-side encoding. */
-        vec->sym_domain = ray_sym_runtime_domain();
-        ray_err_t sym_err = validate_sym_bounds(ray_data(vec), vec->len,
-                                                vec->attrs, ray_sym_count());
-        if (sym_err != RAY_OK) {
+        if (dom) {
+            /* Splayed/parted load: on-disk cells are positions in the
+             * table's symfile — attach ITS domain (one ref per column). */
+            vec->sym_domain = dom;
+            ray_sym_domain_retain(dom);
+            int64_t dcount = ray_sym_domain_count(dom);
+            if (cm.saved_sym_count > 0 && (int64_t)cm.saved_sym_count > dcount) {
+                ray_release(vec);
+                return ray_error("corrupt",
+                    "column %s: saved sym count %u exceeds symfile count %lld",
+                    path, cm.saved_sym_count, (long long)dcount);
+            }
+            uint32_t bound = dcount > UINT32_MAX ? UINT32_MAX : (uint32_t)dcount;
+            ray_err_t sym_err = validate_sym_bounds(ray_data(vec), vec->len,
+                                                    vec->attrs, bound);
+            if (sym_err != RAY_OK) {
+                ray_release(vec);
+                return ray_error(ray_err_code_str(sym_err), NULL);
+            }
+        } else if (require_dom) {
+            /* A stored SYM column without a resolvable symfile must
+             * never silently resolve against incidental state. */
+            vec->sym_domain = ray_sym_runtime_domain();
             ray_release(vec);
-            return ray_error(ray_err_code_str(sym_err), NULL);
+            return ray_error("sym",
+                "column %s: SYM data but no symfile resolved "
+                "(missing <dir>/sym or explicit sym argument)", path);
+        } else {
+            /* Bare load: process-local runtime-id semantics. */
+            vec->sym_domain = ray_sym_runtime_domain();
+            uint32_t cur_sc = ray_sym_count();
+            if (cm.saved_sym_count > 0 && cur_sc > 0 && cur_sc < cm.saved_sym_count) {
+                ray_release(vec);
+                return ray_error("corrupt", NULL);
+            }
+            ray_err_t sym_err = validate_sym_bounds(ray_data(vec), vec->len,
+                                                    vec->attrs, cur_sc);
+            if (sym_err != RAY_OK) {
+                ray_release(vec);
+                return ray_error(ray_err_code_str(sym_err), NULL);
+            }
         }
     }
 
     try_load_link_sidecar(vec, path);
 
     return vec;
+}
+
+ray_t* ray_col_load(const char* path) {
+    return col_load_impl(path, NULL, false);
+}
+
+ray_t* ray_col_load_dom(const char* path, struct ray_sym_domain_s* dom) {
+    return col_load_impl(path, dom, true);
 }
 
 /* --------------------------------------------------------------------------
@@ -1014,7 +1258,8 @@ ray_t* ray_col_load(const char* path) {
  * ray_release -> ray_free -> munmap.
  * -------------------------------------------------------------------------- */
 
-static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count) {
+static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count,
+                            struct ray_sym_domain_s* dom, bool require_dom) {
     if (!path) return ray_error("io", NULL);
 
     col_mapped_t cm = {0};
@@ -1033,23 +1278,56 @@ static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count) {
     /* RAY_SYM: generic mmap validates indices by scanning the data.  Splayed
      * reads are the trusted local table format, so opening them must only map
      * files and validate headers; walking every symbol column would turn mmap
-     * open into an eager cold-disk scan.  New files carry a saved symbol count
-     * for an O(1) reject.  Older files have zero there, so they rely on the
-     * loaded global symfile contract instead. */
+     * open into an eager cold-disk scan.  Files carry a saved dictionary
+     * count for an O(1) reject — post-flip that is the SYMFILE's count at
+     * save time, checked against the attached FILE domain. */
     if (vec->type == RAY_SYM) {
-        uint32_t cur_sc = ray_sym_count();
-        uint32_t trusted_sc = trust_splayed_sym_count ? ray_sym_persisted_count() : cur_sc;
-        if (trust_splayed_sym_count && cm.saved_sym_count > trusted_sc) {
-            ray_vm_unmap_file(cm.mapped, cm.mapped_size);
-            return ray_error("corrupt", NULL);
-        }
-        bool skip_bounds = trust_splayed_sym_count && trusted_sc > 0;
-        if (!skip_bounds) {
-            ray_err_t sym_err = validate_sym_bounds(
-                (const char*)cm.mapped + 32, vec->len, vec->attrs, cur_sc);
-            if (sym_err != RAY_OK) {
+        if (dom) {
+            int64_t dcount = ray_sym_domain_count(dom);
+            if (cm.saved_sym_count > 0 && (int64_t)cm.saved_sym_count > dcount) {
                 ray_vm_unmap_file(cm.mapped, cm.mapped_size);
-                return ray_error(ray_err_code_str(sym_err), NULL);
+                return ray_error("corrupt",
+                    "column %s: saved sym count %u exceeds symfile count %lld",
+                    path, cm.saved_sym_count, (long long)dcount);
+            }
+            if (cm.saved_sym_count == 0) {
+                uint32_t bound = dcount > UINT32_MAX ? UINT32_MAX
+                                                     : (uint32_t)dcount;
+                ray_err_t sym_err = validate_sym_bounds(
+                    (const char*)cm.mapped + 32, vec->len, vec->attrs, bound);
+                if (sym_err != RAY_OK) {
+                    ray_vm_unmap_file(cm.mapped, cm.mapped_size);
+                    return ray_error(ray_err_code_str(sym_err), NULL);
+                }
+            }
+        } else if (require_dom) {
+            ray_vm_unmap_file(cm.mapped, cm.mapped_size);
+            return ray_error("sym",
+                "column %s: SYM data but no symfile resolved "
+                "(missing <dir>/sym or explicit sym argument)", path);
+        } else {
+            uint32_t cur_sc = ray_sym_count();
+            uint32_t trusted_sc = trust_splayed_sym_count ? ray_sym_persisted_count() : cur_sc;
+            if (trust_splayed_sym_count && cm.saved_sym_count > trusted_sc) {
+                ray_vm_unmap_file(cm.mapped, cm.mapped_size);
+                return ray_error("corrupt", NULL);
+            }
+            /* Bare-load fast-reject (was in col_validate_mapped): a file
+             * whose saved dictionary count exceeds the live table cannot
+             * have been written by this process lineage. */
+            if (!trust_splayed_sym_count && cm.saved_sym_count > 0 &&
+                cur_sc > 0 && cur_sc < cm.saved_sym_count) {
+                ray_vm_unmap_file(cm.mapped, cm.mapped_size);
+                return ray_error("corrupt", NULL);
+            }
+            bool skip_bounds = trust_splayed_sym_count && trusted_sc > 0;
+            if (!skip_bounds) {
+                ray_err_t sym_err = validate_sym_bounds(
+                    (const char*)cm.mapped + 32, vec->len, vec->attrs, cur_sc);
+                if (sym_err != RAY_OK) {
+                    ray_vm_unmap_file(cm.mapped, cm.mapped_size);
+                    return ray_error(ray_err_code_str(sym_err), NULL);
+                }
             }
         }
     }
@@ -1074,11 +1352,17 @@ static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count) {
     }
 
     /* RAY_SYM: attach the resolution domain (header page is MAP_PRIVATE
-     * COW, same mechanism as the str_pool patch above).  Phase 1 attaches
-     * the runtime singleton — today's columns store global sym ids;
-     * FILE-domain attachment flips here in Phase 2. */
-    if (vec->type == RAY_SYM)
-        vec->sym_domain = ray_sym_runtime_domain();
+     * COW, same mechanism as the str_pool patch above).  Splayed loads
+     * attach the table's symfile domain (cells are positions in it);
+     * bare loads attach the runtime singleton (cells are runtime ids). */
+    if (vec->type == RAY_SYM) {
+        if (dom) {
+            vec->sym_domain = dom;
+            ray_sym_domain_retain(dom);
+        } else {
+            vec->sym_domain = ray_sym_runtime_domain();
+        }
+    }
 
     /* Reattach link sidecar if present.  Without this, linked columns
      * round-tripped through splay-mmap (splay.c:184) lose HAS_LINK
@@ -1089,9 +1373,13 @@ static ray_t* col_mmap_impl(const char* path, bool trust_splayed_sym_count) {
 }
 
 ray_t* ray_col_mmap(const char* path) {
-    return col_mmap_impl(path, false);
+    return col_mmap_impl(path, false, NULL, false);
 }
 
 ray_t* ray_col_mmap_splayed(const char* path) {
-    return col_mmap_impl(path, true);
+    return col_mmap_impl(path, true, NULL, false);
+}
+
+ray_t* ray_col_mmap_splayed_dom(const char* path, struct ray_sym_domain_s* dom) {
+    return col_mmap_impl(path, true, dom, true);
 }
