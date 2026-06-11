@@ -222,6 +222,51 @@ static inline int is_collection(ray_t* x) {
     return x && !RAY_IS_ERR(x) && (x->type == RAY_LIST || ray_is_vec(x));
 }
 
+/* A SYM id taken from `col`'s cells, re-expressed in the RUNTIME domain
+ * (sym-domain Phase 2).  SYM atoms are runtime-domain by design, so any
+ * cell id flowing into an atom must be translated.  Fast path: a
+ * runtime-domain column's ids ARE runtime ids — raw copy (exact no-op
+ * while every domain is the runtime singleton).
+ *
+ * FILE-domain path: a lock-free read of the per-domain runtime-id LUT.
+ * The FIRST LUT request interns the vocabulary into the global table —
+ * sequential by contract: callers that translate inside parallel
+ * workers must warm the LUT in their sequential setup first (join and
+ * window setup do; see ray_sym_domain_runtime_lut in table/domain.h). */
+static inline int64_t sym_id_runtime(ray_t* col, int64_t id) {
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
+    if (dom == ray_sym_runtime_domain()) return id;
+    const int64_t* lut = ray_sym_domain_runtime_lut(dom);
+    if (!lut || id < 0 || id >= ray_sym_domain_count(dom)) return -1;
+    return lut[id];
+}
+
+static inline int64_t sym_cell_runtime_id(ray_t* v, int64_t i) {
+    return sym_id_runtime(v, ray_read_sym(ray_data(v), i, v->type, v->attrs));
+}
+
+/* The vec whose domain represents `col`'s SYM cell-id space: the col
+ * itself, its first SYM segment (PARTED — all partitions resolve over
+ * the root symfile's domain), or the MAPCOMMON keys vec.  NULL when
+ * `col` carries no SYM cells.  (Moved here from query.c for the Task-4
+ * group sweep — group key outputs adopt via this same representative.) */
+static inline ray_t* sym_domain_rep(ray_t* col) {
+    if (!col) return NULL;
+    if (col->type == RAY_SYM) return col;
+    if (RAY_IS_PARTED(col->type) &&
+        RAY_PARTED_BASETYPE(col->type) == RAY_SYM) {
+        ray_t** segs = (ray_t**)ray_data(col);
+        for (int64_t i = 0; i < col->len; i++)
+            if (segs[i] && segs[i]->type == RAY_SYM) return segs[i];
+        return NULL;
+    }
+    if (col->type == RAY_MAPCOMMON) {
+        ray_t** ptrs = (ray_t**)ray_data(col);
+        return (ptrs[0] && ptrs[0]->type == RAY_SYM) ? ptrs[0] : NULL;
+    }
+    return NULL;
+}
+
 /* Extract the i-th element of a collection as a ray_t* atom.
  * For boxed lists, returns the stored pointer (no alloc).
  * For typed vectors, allocates a new atom.  Caller must release
@@ -241,7 +286,9 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
         case RAY_I32:       return ray_i32(((int32_t*)d)[i]);
         case RAY_I16:       return ray_i16(((int16_t*)d)[i]);
         case RAY_BOOL:      return ray_bool(((bool*)d)[i]);
-        case RAY_SYM:       return ray_sym(ray_read_sym(d, i, coll->type, coll->attrs));
+        /* Atom rule (Task-3 review): the cell id is a position in the
+         * COLUMN's domain; the atom must carry the runtime id. */
+        case RAY_SYM:       return ray_sym(sym_cell_runtime_id(coll, i));
         case RAY_U8:        return ray_u8(((uint8_t*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
         case RAY_TIME:      return ray_time((int64_t)((int32_t*)d)[i]);
@@ -306,7 +353,37 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIME:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIMESTAMP: ((int64_t*)ray_data(vec))[i]   = elem_as_i64(elem); return 0;
-        case RAY_SYM:       ray_write_sym(ray_data(vec), i, (uint64_t)elem->i64, vec->type, vec->attrs); return 0;
+        /* SYM atoms are runtime-domain by design.  Runtime-domain target:
+         * the id is written raw (today's behavior).  FILE-domain target
+         * (a loaded column mutated in place, e.g. alter's set path):
+         * reverse-lookup the atom's string in the vec's domain.  Absent
+         * symbol → -1: this in-memory write cannot be represented in the
+         * file vocabulary at the vec's width — per the spec's mutation
+         * boundary the producer should have re-expressed the vec to the
+         * runtime domain first (dict upsert does); callers treat -1 like
+         * any other type mismatch (fall back to a list or skip).  We
+         * deliberately do NOT intern into the shared domain here: growing
+         * a persistent vocabulary as a side effect of a transient cell
+         * write — and silently truncating positions wider than the vec —
+         * are both worse failure modes than declining. */
+        case RAY_SYM: {
+            uint64_t v = (uint64_t)elem->i64;
+            struct ray_sym_domain_s* dom = ray_sym_vec_domain(vec);
+            if (dom != ray_sym_runtime_domain()) {
+                ray_t* s = ray_sym_str(elem->i64);
+                if (!s) return -1;
+                int64_t pos = ray_sym_domain_find(dom, ray_str_ptr(s),
+                                                  ray_str_len(s));
+                if (pos < 0) return -1;
+                uint8_t w = vec->attrs & RAY_SYM_W_MASK;
+                if (w != RAY_SYM_W64 &&
+                    (uint64_t)pos > ((1ull << (8u << w)) - 1ull))
+                    return -1; /* position doesn't fit the column width */
+                v = (uint64_t)pos;
+            }
+            ray_write_sym(ray_data(vec), i, v, vec->type, vec->attrs);
+            return 0;
+        }
         case RAY_GUID:      if (elem->obj) memcpy(((uint8_t*)ray_data(vec)) + i * 16, ray_data(elem->obj), 16); return 0;
         default: return -1;
     }
@@ -477,11 +554,6 @@ ray_t* ray_ipc_handle_fn(ray_t** args, int64_t n);
 ray_t* ray_set_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_parted_fn(ray_t** args, int64_t n);
-/* Bulk-load entry points: walk a root directory, find every splayed
- * (resp. parted) child, bind it as a Rayfall global, return the
- * resulting {name → table} dict. */
-ray_t* ray_db_splayed_mount_fn(ray_t** args, int64_t n);
-ray_t* ray_db_parted_mount_fn(ray_t** args, int64_t n);
 ray_t* ray_guid_fn(ray_t* n_arg);
 
 /* Transaction-log journaling (.log.*) — the -l/-L feature.

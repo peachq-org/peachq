@@ -23,6 +23,7 @@
 
 #include "ops/fused_group.h"
 #include "ops/fused_pred.h" /* fp_pred_t / fp_compile_pred / fp_eval_pred */
+#include "table/domain.h"   /* sym-domain resolution (Phase 2) */
 #include "ops/idxop.h"      /* RAY_IDX_CHUNK_ZONE chunk-skip in fp_eval_cmp */
 #include "lang/eval.h"      /* ATTR_QUOTED */
 #include "core/pool.h"      /* ray_pool_get / ray_pool_dispatch */
@@ -426,16 +427,22 @@ void fp_eval_cmp(const fp_cmp_t* p, int64_t start, int64_t end,
             const void* base = p->col_base;
             uint8_t esz_l = p->col_esz;
             ray_t** sym_strings = p->like_sym_strings;
+            /* sym_strings == NULL ⇒ FILE-domain column: resolve cell
+             * positions through the column's domain (sym-domain Phase 2).
+             * The LUT is sized by that domain's count at compile. */
+            struct ray_sym_domain_s* like_dom =
+                sym_strings ? NULL : ray_sym_vec_domain(p->col_obj);
             int use_simple = p->pat_compiled.shape != RAY_GLOB_SHAPE_NONE;
             for (int64_t r = 0; r < n; r++) {
                 uint64_t sid = (uint64_t)read_by_esz(base, start + r, esz_l);
-                if (sid >= lut_n || !lut || !sym_strings) {
+                if (sid >= lut_n || !lut) {
                     bits[r] = 0;
                     continue;
                 }
                 uint8_t state = lut[sid];
                 if (!state) {
-                    ray_t* s = sym_strings[sid];
+                    ray_t* s = sym_strings ? sym_strings[sid]
+                                           : ray_sym_domain_str(like_dom, (int64_t)sid);
                     uint8_t match = 0;
                     if (s) {
                         const char* sp = ray_str_ptr(s);
@@ -586,11 +593,14 @@ static inline uint8_t fp_eval_cmp_one(const fp_cmp_t* p, int64_t row) {
     if (p->op == FP_LIKE) {
         if (p->col_type == RAY_SYM) {
             uint64_t sid = (uint64_t)read_by_esz(p->col_base, row, p->col_esz);
-            if (sid >= p->like_lut_count || !p->like_lut || !p->like_sym_strings)
+            if (sid >= p->like_lut_count || !p->like_lut)
                 return 0;
             uint8_t state = p->like_lut[sid];
             if (!state) {
-                ray_t* s = p->like_sym_strings[sid];
+                /* NULL sym_strings ⇒ FILE-domain column (see fp_eval_cmp) */
+                ray_t* s = p->like_sym_strings
+                    ? p->like_sym_strings[sid]
+                    : ray_sym_domain_str(ray_sym_vec_domain(p->col_obj), (int64_t)sid);
                 uint8_t match = 0;
                 if (s) {
                     const char* sp = ray_str_ptr(s);
@@ -761,15 +771,31 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
         out->pat_len   = ray_str_len(cv_like);
         out->pat_compiled = ray_glob_compile(out->pat_str, out->pat_len);
         if (col->type == RAY_SYM) {
-            ray_t** sym_strings = NULL;
-            uint32_t sym_count = 0;
-            ray_sym_strings_borrow(&sym_strings, &sym_count);
-            if (!sym_strings || sym_count == 0) return -1;
-            uint8_t* lut = (uint8_t*)scratch_calloc(&out->aux_hdr, sym_count);
-            if (!lut) return -1;
-            out->like_lut = lut;
-            out->like_lut_count = sym_count;
-            out->like_sym_strings = sym_strings;
+            /* Cell ids are positions in the COLUMN's domain.  Runtime
+             * domain: borrow the global string snapshot (lock-free per
+             * row).  FILE domain: size the LUT by the domain's count and
+             * resolve lazily via ray_sym_domain_str at eval (col_obj
+             * carries the domain).  Pre-flip this is always the runtime
+             * branch — exact no-op. */
+            if (ray_sym_vec_domain(col) == ray_sym_runtime_domain()) {
+                ray_t** sym_strings = NULL;
+                uint32_t sym_count = 0;
+                ray_sym_strings_borrow(&sym_strings, &sym_count);
+                if (!sym_strings || sym_count == 0) return -1;
+                uint8_t* lut = (uint8_t*)scratch_calloc(&out->aux_hdr, sym_count);
+                if (!lut) return -1;
+                out->like_lut = lut;
+                out->like_lut_count = sym_count;
+                out->like_sym_strings = sym_strings;
+            } else {
+                int64_t dn = ray_sym_domain_count(ray_sym_vec_domain(col));
+                if (dn <= 0 || dn > UINT32_MAX) return -1;
+                uint8_t* lut = (uint8_t*)scratch_calloc(&out->aux_hdr, (size_t)dn);
+                if (!lut) return -1;
+                out->like_lut = lut;
+                out->like_lut_count = (uint32_t)dn;
+                out->like_sym_strings = NULL;  /* resolve via col_obj's domain */
+            }
         }
         out->cval_in_dict = 1;
         return 0;
@@ -798,11 +824,24 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
     out->col_len   = col->len;
 
     if (out->col_type == RAY_SYM) {
+        /* The constant must be expressed in the COLUMN's domain — cells
+         * below compare as raw indices against cval (sym-domain Phase 2).
+         * Absent from the domain ⇒ matches nothing (EQ all-false / NE
+         * all-true fold via cval_in_dict).  Exact no-op while the column
+         * is runtime-domain: a runtime atom's id IS the cell-id space. */
         if (cv->type == -RAY_SYM) {
-            out->cval = cv->i64;
-            out->cval_in_dict = 1;
+            if (ray_sym_vec_domain(col) == ray_sym_runtime_domain()) {
+                out->cval = cv->i64;
+                out->cval_in_dict = 1;
+            } else {
+                ray_t* cs = ray_sym_str(cv->i64);  /* atom: runtime id */
+                int64_t did = cs ? ray_sym_vec_lookup(col, ray_str_ptr(cs),
+                                                      ray_str_len(cs)) : -1;
+                out->cval = (did >= 0) ? did : 0;
+                out->cval_in_dict = (did >= 0) ? 1 : 0;
+            }
         } else if (cv->type == -RAY_STR) {
-            int64_t did = ray_sym_find(ray_str_ptr(cv), ray_str_len(cv));
+            int64_t did = ray_sym_vec_lookup(col, ray_str_ptr(cv), ray_str_len(cv));
             out->cval = (did >= 0) ? did : 0;
             out->cval_in_dict = (did >= 0) ? 1 : 0;
         } else {
@@ -990,6 +1029,7 @@ typedef struct {
     uint8_t    katt;
     uint8_t    kesz;
     const void* kbase;
+    ray_t*     key_vec;     /* key column (SYM outputs adopt its domain) */
     fp_shard_t* shards;     /* nw entries */
     uint64_t   init_cap;
     _Atomic(uint32_t) oom;  /* set by any worker on OOM; main bails */
@@ -1750,6 +1790,10 @@ static ray_t* fp_try_direct_count1(const fp_par_ctx_t* ctx, int64_t nrows,
             if (counts[s] >= keep_min) out_n++;
 
         ray_t* k_out = ray_sym_vec_new(ctx->katt & RAY_SYM_W_MASK, out_n);
+        /* group keys are RAW cell ids (slot indices) of the key column —
+         * the output resolves over its dictionary (no-op pre-flip). */
+        if (k_out && !RAY_IS_ERR(k_out))
+            ray_sym_vec_adopt_domain(k_out, ctx->key_vec);
         ray_t* c_out = ray_vec_new(RAY_I64, out_n);
         if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
             if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
@@ -2115,7 +2159,7 @@ static void fp_combine_dedup_fn(void* vctx, uint32_t worker_id,
  * afterwards. */
 static ray_t* fp_combine_and_materialize(fp_shard_t* shards, uint32_t nw,
                                          int8_t kt, uint8_t katt,
-                                         int64_t key_sym)
+                                         int64_t key_sym, ray_t* key_vec)
 {
     /* Sum local fills to size the global HT. */
     int64_t total_local = 0;
@@ -2125,6 +2169,8 @@ static ray_t* fp_combine_and_materialize(fp_shard_t* shards, uint32_t nw,
         ray_t* k0 = (kt == RAY_SYM)
                   ? ray_sym_vec_new(katt & RAY_SYM_W_MASK, 0)
                   : ray_vec_new(kt, 0);
+        if (k0 && !RAY_IS_ERR(k0) && kt == RAY_SYM)
+            ray_sym_vec_adopt_domain(k0, key_vec);
         ray_t* c0 = ray_vec_new(RAY_I64, 0);
         if (!k0 || !c0 || RAY_IS_ERR(k0) || RAY_IS_ERR(c0)) {
             if (k0 && !RAY_IS_ERR(k0)) ray_release(k0);
@@ -2241,6 +2287,9 @@ static ray_t* fp_combine_and_materialize(fp_shard_t* shards, uint32_t nw,
                 ray_t* k_out = (kt == RAY_SYM)
                              ? ray_sym_vec_new(katt & RAY_SYM_W_MASK, global_n)
                              : ray_vec_new(kt, global_n);
+                /* raw key cell ids — adopt the key column's dictionary */
+                if (k_out && !RAY_IS_ERR(k_out) && kt == RAY_SYM)
+                    ray_sym_vec_adopt_domain(k_out, key_vec);
                 ray_t* c_out = ray_vec_new(RAY_I64, global_n);
                 if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
                     if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
@@ -2368,6 +2417,9 @@ static ray_t* fp_combine_and_materialize(fp_shard_t* shards, uint32_t nw,
     ray_t* k_out = (kt == RAY_SYM)
                  ? ray_sym_vec_new(katt & RAY_SYM_W_MASK, out_n)
                  : ray_vec_new(kt, out_n);
+    /* raw key cell ids — adopt the key column's dictionary */
+    if (k_out && !RAY_IS_ERR(k_out) && kt == RAY_SYM)
+        ray_sym_vec_adopt_domain(k_out, key_vec);
     ray_t* c_out = ray_vec_new(RAY_I64, out_n);
     if (!k_out || !c_out || RAY_IS_ERR(k_out) || RAY_IS_ERR(c_out)) {
         if (k_out && !RAY_IS_ERR(k_out)) ray_release(k_out);
@@ -2439,6 +2491,7 @@ static ray_t* exec_filtered_group_count1(ray_graph_t* g, ray_op_ext_t* ext,
     ctx.katt  = key_col->attrs;
     ctx.kesz  = ray_sym_elem_size(ctx.kt, ctx.katt);
     ctx.kbase = ray_data(key_col);
+    ctx.key_vec = key_col;
     ctx.init_cap = FP_SHARD_INIT_CAP;
     atomic_store_explicit(&ctx.oom, 0, memory_order_relaxed);
 
@@ -2466,7 +2519,8 @@ static ray_t* exec_filtered_group_count1(ray_graph_t* g, ray_op_ext_t* ext,
     }
 
     ray_t* result = fp_combine_and_materialize(ctx.shards, nw,
-                                               ctx.kt, ctx.katt, kext->sym);
+                                               ctx.kt, ctx.katt, kext->sym,
+                                               ctx.key_vec);
     for (uint32_t w = 0; w < nw; w++) fp_shard_free(&ctx.shards[w]);
     scratch_free(shards_hdr);
     return result;
@@ -2542,6 +2596,7 @@ typedef struct {
     uint8_t     esz;
     uint8_t     bit_off;
     const void* base;
+    ray_t*      vec;        /* key column (SYM outputs adopt its domain) */
     int64_t     sym;
 } mk_key_t;
 
@@ -4689,6 +4744,10 @@ materialize:
                    ? ray_sym_vec_new(kk->attrs & RAY_SYM_W_MASK, global_n)
                    : ray_vec_new(kk->type, global_n);
         if (!col || RAY_IS_ERR(col)) { keys_ok = 0; break; }
+        /* composite-decomposed keys are RAW cell ids of the key column —
+         * the output resolves over its dictionary (no-op pre-flip). */
+        if (kk->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(col, kk->vec);
         col->len = global_n;
         key_cols[k] = col;
     }
@@ -4832,8 +4891,15 @@ static int mk_compile(ray_graph_t* g, ray_op_ext_t* ext, ray_t* tbl,
         a->in_strlen = in_strlen;
         a->in_base = ray_data(col);
         a->in_unsigned = (ct == RAY_BOOL || ct == RAY_U8) ? 1 : 0;
-        if (in_strlen)
+        if (in_strlen) {
+            /* mk_read_agg_i64 indexes a borrow of the GLOBAL sym table —
+             * only valid for runtime-domain cells.  FILE-domain columns
+             * bail to OP_GROUP, whose strlen path is domain-aware
+             * (group_strlen_at).  No-op pre-flip. */
+            if (ray_sym_vec_domain(col) != ray_sym_runtime_domain())
+                return -1;
             ray_sym_strings_borrow(&a->sym_strings, &a->sym_count);
+        }
     }
     ctx->total_state = state_off;
     ctx->n_aggs = ext->n_aggs;
@@ -4865,6 +4931,7 @@ static int mk_compile(ray_graph_t* g, ray_op_ext_t* ext, ray_t* tbl,
         ctx->keys[k].esz     = esz;
         ctx->keys[k].bit_off = bit_off;
         ctx->keys[k].base    = ray_data(col);
+        ctx->keys[k].vec     = col;
         ctx->keys[k].sym     = kext->sym;
         bit_off += (uint8_t)(esz * 8);
     }

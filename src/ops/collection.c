@@ -80,6 +80,10 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
         case RAY_TIME:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_TIMESTAMP: return ray_hash_i64(((const int64_t*)data)[i]);
         case RAY_SYM: {
+            /* Hashes the raw cell id, i.e. the BUILD side's id space.
+             * Cross-domain probes never reach this hash — they are
+             * translated into the build side's domain up front in
+             * hashset_find_xrow (sym-domain Phase 2). */
             uint64_t s = ray_read_sym(data, i, src->type, src->attrs);
             return ray_hash_i64((int64_t)s);
         }
@@ -135,6 +139,14 @@ static int hs_eq_rows(ray_t* a_src, int64_t ai, int8_t at, void* a_data,
             case RAY_TIME:      return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
             case RAY_TIMESTAMP: return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
             case RAY_SYM: {
+                /* Raw index equality is only meaningful within ONE id
+                 * space — gate on domain identity (sym-domain Phase 2);
+                 * cross-domain rows fall through to the boxed compare
+                 * below (collection_elem re-expresses through each
+                 * cell's domain).  Pre-flip both sides are the runtime
+                 * singleton: byte-identical fast path. */
+                if (ray_sym_vec_domain(a_src) != ray_sym_vec_domain(b_src))
+                    break;
                 uint64_t sa = ray_read_sym(a_data, ai, a_src->type, a_src->attrs);
                 uint64_t sb = ray_read_sym(b_data, bi, b_src->type, b_src->attrs);
                 return sa == sb;
@@ -231,6 +243,35 @@ static int64_t hashset_find_xrow(hashset_t* hs, ray_t* probe_src, int64_t probe_
                                   int8_t probe_type, void* probe_data) {
     if (hs_row_is_null(probe_src, probe_i, probe_data))
         return hs->null_seen ? hs->null_idx : HS_EMPTY;
+    /* sym-domain Phase 2: SYM-vec vs SYM-vec probes across DIFFERENT
+     * domains cannot compare (or hash) raw ids.  Re-express the probe
+     * cell in the build side's domain once, then run the standard raw
+     * probe.  Absent from the build domain ⇒ no build row can hold
+     * that symbol ⇒ miss.  Same-domain probes (the only pre-flip case)
+     * skip this entirely: byte-identical fast path. */
+    if (probe_type == RAY_SYM && hs->src_type == RAY_SYM &&
+        probe_src->type == RAY_SYM && hs->src && hs->src->type == RAY_SYM) {
+        struct ray_sym_domain_s* bdom = ray_sym_vec_domain(hs->src);
+        struct ray_sym_domain_s* pdom = ray_sym_vec_domain(probe_src);
+        if (bdom != pdom) {
+            int64_t pid = ray_read_sym(probe_data, probe_i, probe_type,
+                                       probe_src->attrs);
+            ray_t* s = ray_sym_domain_str(pdom, pid);
+            int64_t xid = s ? ray_sym_domain_find(bdom, ray_str_ptr(s),
+                                                  ray_str_len(s)) : -1;
+            if (xid < 0) return HS_EMPTY;
+            uint64_t hx = ray_hash_i64(xid);
+            int64_t sx = (int64_t)(hx & (uint64_t)hs->mask);
+            while (hs->slots[sx] != HS_EMPTY) {
+                int64_t stored = hs->slots[sx];
+                if (ray_read_sym(hs->src_data, stored, hs->src_type,
+                                 hs->src->attrs) == xid)
+                    return stored;
+                sx = (sx + 1) & hs->mask;
+            }
+            return HS_EMPTY;
+        }
+    }
     uint64_t h = hs_hash_row(probe_src, probe_i, probe_type, probe_data);
     int64_t s = (int64_t)(h & (uint64_t)hs->mask);
     while (hs->slots[s] != HS_EMPTY) {
@@ -1339,6 +1380,8 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
             if (RAY_IS_ERR(result)) return result;
             result->len = count;
             memcpy(ray_data(result), (char*)ray_data(vec) + start * esz, (size_t)(count * esz));
+            /* SYM ids copied verbatim — resolve over the source domain. */
+            if (vtype == RAY_SYM) ray_sym_vec_adopt_domain(result, vec);
             /* RAY_STR: the copied ray_str_t records still reference the
              * source's str_pool by pool_off — propagate the pool ray_t
              * (with retain) so the result owns a valid backing store. */
@@ -1538,6 +1581,8 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
          * past the SSO threshold, tripping the assertion in
          * ray_str_t_ptr / strsort_repack_window / strkey_cmp. */
         if (vtype == RAY_STR) col_propagate_str_pool(result, vec);
+        /* SYM ids copied verbatim — resolve over the source domain. */
+        if (vtype == RAY_SYM) ray_sym_vec_adopt_domain(result, vec);
         /* Propagate null bitmap — check parent's flag for slices */
         bool has_nulls = len > 0 &&
                          ((vec->attrs & RAY_ATTR_HAS_NULLS) ||
@@ -1912,6 +1957,8 @@ ray_t* reverse_vec_eager(ray_t* x) {
         for (int64_t i = 0; i < len; i++)
             memcpy(dst + i * esz, src + (len - 1 - i) * esz, esz);
     }
+    /* SYM ids copied verbatim — resolve over the source domain. */
+    if (vtype == RAY_SYM) ray_sym_vec_adopt_domain(result, x);
     return result;
 }
 

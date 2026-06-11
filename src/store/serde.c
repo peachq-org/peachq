@@ -79,6 +79,8 @@ static size_t safe_strlen(const uint8_t* buf, int64_t max) {
     return (size_t)max;
 }
 
+/* Table schema slot: an I64 vector of column NAME ids — name-ids live in
+ * the global table (sym-domain Phase 2: global resolution is correct). */
 static int64_t schema_names_serde_size(ray_t* schema) {
     if (!schema || schema->type != RAY_I64) return 0;
     int64_t size = 1 + 1 + 8;
@@ -139,6 +141,8 @@ int64_t ray_serde_size(ray_t* obj) {
         case RAY_F64:       return 1 + 1 + 8;
         case RAY_GUID:      return 1 + 1 + 16;
         case RAY_SYM: {
+            /* SYM ATOM: atoms are runtime-domain by design — global
+             * resolution is correct (sym-domain Phase 2). */
             ray_t* s = ray_sym_str(obj->i64);
             return 1 + 1 + (s ? (int64_t)ray_str_len(s) : 0) + 1; /* +1 for null terminator */
         }
@@ -170,10 +174,14 @@ int64_t ray_serde_size(ray_t* obj) {
     case RAY_F64:       return 1 + 1 + 8 + obj->len * 8;
     case RAY_GUID:      return 1 + 1 + 8 + obj->len * 16;
     case RAY_SYM: {
+        /* SYM VECTOR cells are positions in THE VEC's domain — resolve
+         * each through ray_sym_vec_cell, not the global table (sym-domain
+         * Phase 2; identical strings while the domain is the runtime
+         * singleton).  Also honors narrow W8/16/32 index widths.  Must
+         * stay in lockstep with the ray_ser_raw RAY_SYM loop below. */
         int64_t size = 1 + 1 + 8;
-        int64_t* ids = (int64_t*)ray_data(obj);
         for (int64_t i = 0; i < obj->len; i++) {
-            ray_t* s = ray_sym_str(ids[i]);
+            ray_t* s = ray_sym_vec_cell(obj, i);
             size += (s ? (int64_t)ray_str_len(s) : 0) + 1;
         }
         return size;
@@ -299,6 +307,7 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
             return 1 + 1 + 16;
         }
         case RAY_SYM: {
+            /* SYM ATOM — runtime-domain by design, global resolution. */
             ray_t* s = ray_sym_str(obj->i64);
             if (s) {
                 size_t slen = ray_str_len(s);
@@ -375,12 +384,14 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
         return c;
     }
     case RAY_SYM: {
+        /* Cells resolve through THE VEC's domain (sym-domain Phase 2);
+         * the wire format is unchanged — only the resolution source.
+         * Must stay in lockstep with the ray_serde_size RAY_SYM loop. */
         buf[0] = wire_attrs; buf++;
         memcpy(buf, &obj->len, 8); buf += 8;
-        int64_t* ids = (int64_t*)ray_data(obj);
         c = 0;
         for (int64_t i = 0; i < obj->len; i++) {
-            ray_t* s = ray_sym_str(ids[i]);
+            ray_t* s = ray_sym_vec_cell(obj, i);
             if (s) {
                 size_t slen = ray_str_len(s);
                 memcpy(buf + c, ray_str_ptr(s), slen);
@@ -563,6 +574,8 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
             if ((int64_t)slen >= *len) return ray_error("domain", NULL);
             *len -= (int64_t)slen + 1;
             if (is_null) return ray_typed_null(type);
+            /* Decode interns into the GLOBAL table: atoms are
+             * runtime-domain by design (sym-domain Phase 2 — correct). */
             int64_t id = ray_sym_intern((const char*)buf, slen);
             ray_t* s = ray_sym(id);
             if (s && !RAY_IS_ERR(s) && (aflags & ATTR_QUOTED))
@@ -630,6 +643,9 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
 
         if (l < 0 || l > 1000000000) return ray_error("domain", NULL);
 
+        /* Decode interns each string into the GLOBAL table and builds a
+         * W64 runtime-domain vec — correct: a freshly materialized wire
+         * object lives in the runtime's id space (sym-domain Phase 2). */
         ray_t* vec = ray_vec_new(RAY_SYM, l);
         if (!vec || RAY_IS_ERR(vec)) return vec;
         vec->len = l;
