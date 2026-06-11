@@ -802,6 +802,8 @@ static ray_t* dl_builtin_before(ray_t* tbl, int s_col, int t_col) {
         for (int64_t r = 0; r < nrows; r++)
             if (t_data[r] < sd[r])
                 dst_d[j++] = src_d[r];
+        /* SYM ids copied verbatim — resolve over the source domain. */
+        if (src->type == RAY_SYM) ray_sym_vec_adopt_domain(dst, src);
         out = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
         ray_release(dst);
     }
@@ -1241,6 +1243,8 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
              * pool, so propagate the source's pool onto dst or later
              * reads through pool_off would land in a NULL pool. */
             if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
+            /* SYM ids copied verbatim — resolve over the source domain. */
+            if (src->type == RAY_SYM) ray_sym_vec_adopt_domain(dst, src);
             ray_t* next = ray_table_add_col(out, head_rel->col_names[c], dst);
             ray_release(dst);
             /* Release the partial `out` on failure — ray_table_add_col
@@ -2123,6 +2127,8 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                         j++;
                     }
                 if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
+                /* SYM ids copied verbatim — resolve over the source domain. */
+                if (src->type == RAY_SYM) ray_sym_vec_adopt_domain(dst, src);
                 ray_t* next = ray_table_add_col(out, ray_table_col_name(accum, c), dst);
                 ray_release(dst);
                 if (!next) {
@@ -3191,6 +3197,9 @@ ray_t* ray_retract_fact_fn(ray_t** args, int64_t n) {
         new_v = ray_vec_append(new_v, &v_data[r]);
         if (RAY_IS_ERR(new_v)) { ray_release(new_e); ray_release(new_a); return new_v; }
     }
+    /* SYM ids copied verbatim from the db's attribute column — resolve
+     * over its domain (after appends: vec pointer is final here). */
+    ray_sym_vec_adopt_domain(new_a, a_col);
 
     /* Build result table */
     ray_t* result = ray_table_new(3);
