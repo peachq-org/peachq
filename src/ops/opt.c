@@ -37,10 +37,11 @@
 ray_op_ext_t* find_ext(ray_graph_t* g, uint32_t node_id);
 
 /* --------------------------------------------------------------------------
- * Optimizer passes (v1): Type Inference + Constant Folding + Fusion + DCE
+ * Optimizer passes: Type Inference + Constant Folding + DCE
  *
- * Per the spec's staged rollout:
- *   v1: Type Inference + Constant Folding + Fusion + DCE
+ * Expression fusion is handled executor-side by the expr.c bytecode VM.
+ *
+ *   v1: Type Inference + Constant Folding + DCE
  *   v2: Predicate/Projection Pushdown + CSE (future)
  *   v3: Op Reordering + Join Optimization (future)
  * -------------------------------------------------------------------------- */
@@ -312,7 +313,6 @@ static bool replace_with_const(ray_graph_t* g, ray_op_t* node, ray_t* literal) {
     ext->base.arity = 0;
     ext->base.inputs[0] = NULL;
     ext->base.inputs[1] = NULL;
-    ext->base.flags &= (uint8_t)~OP_FLAG_FUSED;
     ext->base.out_type = literal->type < 0 ? (int8_t)(-(int)literal->type) : literal->type;
     ext->literal = literal;
 
@@ -541,7 +541,6 @@ static bool simplify_and_or_const(ray_graph_t* g, ray_op_t* node) {
         node->inputs[1] = NULL;
         node->out_type = RAY_BOOL;
         node->est_rows = X->est_rows;
-        node->flags &= (uint8_t)~OP_FLAG_FUSED;
         g->nodes[node->id] = *node;
         return true;
     }
@@ -574,7 +573,6 @@ static bool fold_filter_const_predicate(ray_graph_t* g, ray_op_t* node) {
         node->opcode = OP_MATERIALIZE;
         node->arity = 1;
         node->inputs[1] = NULL;
-        node->flags &= (uint8_t)~OP_FLAG_FUSED;
         g->nodes[node->id] = *node;
         return true;
     }
@@ -586,7 +584,6 @@ static bool fold_filter_const_predicate(ray_graph_t* g, ray_op_t* node) {
     ext->base.arity = 1;
     ext->base.inputs[1] = NULL;
     ext->base.est_rows = 0;
-    ext->base.flags &= (uint8_t)~OP_FLAG_FUSED;
     ext->sym = 0;
 
     *node = ext->base;
@@ -2058,11 +2055,7 @@ ray_op_t* ray_optimize(ray_graph_t* g, ray_op_t* root) {
         pass_partition_pruning(g, root);
     ray_profile_tick("partition pruning");
 
-    /* Pass 10: Fusion */
-    ray_fuse_pass(g, root);
-    ray_profile_tick("fusion");
-
-    /* Pass 11: DCE */
+    /* Pass 10: DCE */
     pass_dce(g, root);
     ray_profile_tick("DCE");
 
