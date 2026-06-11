@@ -657,6 +657,15 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             }
         }
 
+        /* Output-vec rule (sym-domain Phase 2): a SYM value column
+         * (MIN/MAX/FIRST/LAST over a SYM input) carries raw cell ids
+         * accumulated from `vcol` — it must resolve over vcol's
+         * dictionary.  The memset-0 fill for missing cells is the SYM
+         * null (id 0) in any domain.  No-op while every domain is the
+         * runtime singleton. */
+        if (new_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_col, vcol);
+
         /* Column name from pivot value — match pivot_val_to_sym semantics */
         int64_t pval = pv_vals[p];
         int64_t col_sym;

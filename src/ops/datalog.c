@@ -4070,13 +4070,19 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
             ray_t* col = ray_table_get_col_idx(db, c);
             if (!col) continue;
             if (col->type == RAY_SYM) {
-                /* Convert SYM -> I64: read sym IDs via ray_read_sym */
+                /* Convert SYM -> I64.  The I64 ids flow into datalog's
+                 * runtime-id world (literal compares, joins with parsed
+                 * constants), so each cell must be re-expressed as a
+                 * RUNTIME id (sym-domain Phase 2) — the EAV table may
+                 * carry FILE-domain columns.  Raw-copy fast path when
+                 * the column is runtime-domain (exact no-op pre-flip).
+                 * Mirrors the env-backed EDB conversion below. */
                 ray_t* i64col = ray_vec_new(RAY_I64, nrows_db);
                 if (i64col && !RAY_IS_ERR(i64col)) {
                     i64col->len = nrows_db;
                     int64_t* d = (int64_t*)ray_data(i64col);
                     for (int64_t r = 0; r < nrows_db; r++)
-                        d[r] = ray_read_sym(ray_data(col), r, col->type, col->attrs);
+                        d[r] = sym_cell_runtime_id(col, r);
                     eav_tbl = ray_table_add_col(eav_tbl, ray_table_col_name(db, c), i64col);
                     ray_release(i64col);
                 }
