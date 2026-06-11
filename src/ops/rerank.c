@@ -171,6 +171,12 @@ static ray_t* gather_rows_with_dist(ray_t* tbl,
              * pooled long-string data). */
             if (ct == RAY_STR) col_propagate_str_pool(new_col, src_col);
 
+            /* RAY_SYM: the byte-wise gather copied raw cell ids — the
+             * output must resolve over the source column's dictionary
+             * (sym-domain Phase 2; no-op while every domain is the
+             * runtime singleton). */
+            if (ct == RAY_SYM) ray_sym_vec_adopt_domain(new_col, src_col);
+
             /* Null bitmap: the shared col_propagate_nulls_gather only
              * inspects src's own attrs — for a sliced src it misses
              * HAS_NULLS on the parent.  Mirror sort.c:3315's slice-aware
