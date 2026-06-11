@@ -2740,23 +2740,16 @@ static ray_t* query_materialize_parted_col(ray_t* col) {
     int64_t total = ray_parted_nrows(col);
     if (base == RAY_STR) return parted_flatten_str(segs, col->len, total);
 
-    uint8_t attrs = (base == RAY_SYM) ? parted_first_attrs(segs, col->len) : 0;
+    uint8_t attrs = (base == RAY_SYM) ? parted_sym_max_attrs(segs, col->len) : 0;
     ray_t* flat = typed_vec_new(base, attrs, total);
     if (!flat || RAY_IS_ERR(flat)) return flat ? flat : ray_error("oom", NULL);
     flat->len = total;
 
-    size_t esz = (size_t)ray_sym_elem_size(base, attrs);
     int64_t off = 0;
     for (int64_t s = 0; s < col->len; s++) {
         ray_t* seg = segs[s];
         if (!seg || seg->len <= 0) continue;
-        if (parted_seg_esz_ok(seg, base, (uint8_t)esz)) {
-            memcpy((char*)ray_data(flat) + (size_t)off * esz,
-                   ray_data(seg), (size_t)seg->len * esz);
-        } else {
-            memset((char*)ray_data(flat) + (size_t)off * esz, 0,
-                   (size_t)seg->len * esz);
-        }
+        parted_copy_cells(ray_data(flat), base, attrs, off, seg, 0, seg->len);
         off += seg->len;
     }
     /* The memcpy above copied SYM cell ids verbatim from the partition
