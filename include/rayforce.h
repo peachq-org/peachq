@@ -510,6 +510,14 @@ uint32_t ray_sym_count(void);
  * *out_count must be non-NULL. */
 void ray_sym_strings_borrow(ray_t*** out_strings, uint32_t* out_count);
 bool     ray_sym_ensure_cap(uint32_t needed);
+
+/* Runtime dictionary snapshot — NOT table symfiles.  ray_sym_save writes
+ * the whole process-global intern table to `path` (tmp + fsync + atomic
+ * rename, replacing whatever was there; single-writer contract);
+ * ray_sym_load restores it, requiring every entry to land at the id equal
+ * to its file position so ids from the saved session stay valid (see
+ * ray_runtime_create_with_sym).  Stored tables do not use these: their
+ * symbols live in per-table symfiles managed by the storage layer. */
 ray_err_t ray_sym_save(const char* path);
 ray_err_t ray_sym_load(const char* path);
 
