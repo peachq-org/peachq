@@ -25,6 +25,7 @@
 #include "core/platform.h"
 #include "mem/heap.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include "vec/embedding.h"
 #include "vec/str.h"
 #include "ops/idxop.h"
@@ -202,8 +203,37 @@ ray_t* ray_sym_vec_new(uint8_t sym_width, int64_t capacity) {
     v->len = 0;
     v->attrs = sym_width;  /* lower 2 bits encode width */
     memset(v->aux, 0, 16);
+    /* Every SYM vec carries a non-NULL resolution domain.  This is the
+     * single chokepoint all runtime SYM vec construction funnels through;
+     * loaded columns are patched in src/store/col.c.  The singleton is
+     * immortal — no retain needed. */
+    v->sym_domain = ray_sym_runtime_domain();
 
     return v;
+}
+
+/* --------------------------------------------------------------------------
+ * ray_sym_vec_adopt_domain
+ *
+ * An output SYM vec whose cells were COPIED from `in` must resolve over
+ * the same dictionary.  Retain-before-release so adopting a vec's own
+ * domain is safe; retain/release are no-ops on the runtime singleton, so
+ * this is free on the hot (all-runtime) path.  Slice headers keep
+ * parent/offset in the aux bytes — never write a domain into one (the
+ * accessor resolves through slice_parent anyway).
+ * -------------------------------------------------------------------------- */
+
+void ray_sym_vec_adopt_domain(ray_t* out, ray_t* in) {
+    if (!out || !in) return;
+    if (out->type != RAY_SYM || in->type != RAY_SYM) return;
+    if (out->attrs & RAY_ATTR_SLICE) return;
+
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(in);
+    if (out->sym_domain == dom) return;
+
+    ray_sym_domain_retain(dom);
+    ray_sym_domain_release(out->sym_domain);
+    out->sym_domain = dom;
 }
 
 /* --------------------------------------------------------------------------
@@ -446,6 +476,34 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     uint8_t out_attrs = (a_esz >= b_esz) ? (a->attrs & RAY_SYM_W_MASK) : (b->attrs & RAY_SYM_W_MASK);
     uint8_t esz = (a_esz >= b_esz) ? a_esz : b_esz;
 
+    /* SYM cross-domain concat (post-flip reachable: a loaded FILE-domain
+     * column concatenated with a runtime one): positions in different
+     * dictionaries must not be raw-mixed.  Materialize as RUNTIME-domain
+     * W64 ids, translating each side through its domain's runtime-id LUT
+     * (NULL LUT = runtime side, ids pass through) — invariant 5: the
+     * translation rides this pass, which touches every row anyway. */
+    struct ray_sym_domain_s* concat_dom = NULL;
+    const int64_t* sym_lut_a = NULL;
+    const int64_t* sym_lut_b = NULL;
+    bool sym_translate = false;
+    if (a->type == RAY_SYM) {
+        struct ray_sym_domain_s* da = ray_sym_vec_domain(a);
+        struct ray_sym_domain_s* db = ray_sym_vec_domain(b);
+        if (da == db) {
+            concat_dom = da;
+        } else {
+            concat_dom = ray_sym_runtime_domain();
+            sym_translate = true;
+            sym_lut_a = ray_sym_domain_runtime_lut(da);
+            sym_lut_b = ray_sym_domain_runtime_lut(db);
+            if ((da != concat_dom && !sym_lut_a) ||
+                (db != concat_dom && !sym_lut_b))
+                return ray_error("oom", "concat: sym domain LUT build failed");
+            out_attrs = RAY_SYM_W64;
+            esz = 8;
+        }
+    }
+
     int64_t total_len = a->len + b->len;
     if (total_len < a->len) return ray_error("oom", NULL); /* overflow */
     size_t data_size = (size_t)total_len * esz;
@@ -460,8 +518,48 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     result->attrs = out_attrs;
     memset(result->aux, 0, 16);
 
-    /* For SYM with mismatched widths, widen element-by-element */
-    if (a->type == RAY_SYM && a_esz != b_esz) {
+    /* SYM: propagate the resolution domain — inputs agree → that domain;
+     * mixed → runtime (cells re-expressed below). */
+    if (result->type == RAY_SYM) {
+        ray_sym_domain_retain(concat_dom);
+        result->sym_domain = concat_dom;
+    }
+
+    if (sym_translate) {
+        /* Cross-domain: re-express both sides as runtime ids. */
+        int64_t* dst = (int64_t*)ray_data(result);
+        int64_t cnt_a = ray_sym_domain_count(ray_sym_vec_domain(a));
+        int64_t cnt_b = ray_sym_domain_count(ray_sym_vec_domain(b));
+        /* An out-of-range position means corrupt input — never silently
+         * map it to 0 (the SYM null ''): loud error instead. */
+        for (int64_t i = 0; i < a->len; i++) {
+            int64_t val = ray_read_sym(ray_data(a), i, a->type, a->attrs);
+            if (sym_lut_a) {
+                if (val < 0 || val >= cnt_a) {
+                    ray_release(result);
+                    return ray_error("corrupt",
+                        "sym position %lld out of domain range %lld in concat",
+                        (long long)val, (long long)cnt_a);
+                }
+                val = sym_lut_a[val];
+            }
+            dst[i] = val;
+        }
+        for (int64_t i = 0; i < b->len; i++) {
+            int64_t val = ray_read_sym(ray_data(b), i, b->type, b->attrs);
+            if (sym_lut_b) {
+                if (val < 0 || val >= cnt_b) {
+                    ray_release(result);
+                    return ray_error("corrupt",
+                        "sym position %lld out of domain range %lld in concat",
+                        (long long)val, (long long)cnt_b);
+                }
+                val = sym_lut_b[val];
+            }
+            dst[a->len + i] = val;
+        }
+    } else if (a->type == RAY_SYM && a_esz != b_esz) {
+        /* Same domain, mismatched widths: widen element-by-element */
         void* dst = ray_data(result);
         for (int64_t i = 0; i < a->len; i++) {
             int64_t val = ray_read_sym(ray_data(a), i, a->type, a->attrs);
@@ -710,6 +808,12 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
     result->len = new_len;
     result->attrs = vec->attrs & RAY_SYM_W_MASK;
     memset(result->aux, 0, 16);
+    if (result->type == RAY_SYM) {
+        /* Fresh SYM result inherits the source vec's domain. */
+        struct ray_sym_domain_s* dom = ray_sym_vec_domain(vec);
+        ray_sym_domain_retain(dom);
+        result->sym_domain = dom;
+    }
 
     /* Source pointers */
     const char* src_base = (vec->attrs & RAY_ATTR_SLICE)
@@ -809,6 +913,8 @@ ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
     v->len = count;
     v->attrs = sym_w;
     memset(v->aux, 0, 16);
+    if (type == RAY_SYM)
+        v->sym_domain = ray_sym_runtime_domain();  /* immortal — no retain */
 
     if (data_size) {
         if (!data) { ray_release(v); return ray_error("domain", NULL); }

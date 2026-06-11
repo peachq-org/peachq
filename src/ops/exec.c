@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "lang/internal.h"  /* sym_domain_rep (sym-domain Phase 2) */
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
 #include "ops/idxop.h"
@@ -51,6 +52,10 @@ ray_t* materialize_mapcommon(ray_t* mc) {
     ray_t* flat = ray_vec_new(kv_type, total);
     if (!flat || RAY_IS_ERR(flat)) return ray_error("oom", NULL);
     flat->len = total;
+    /* SYM keys are raw cell ids of the MAPCOMMON keys carrier — the
+     * flat output resolves over ITS dictionary (sym-domain Phase 2;
+     * no-op while every domain is the runtime singleton). */
+    if (kv_type == RAY_SYM) ray_sym_vec_adopt_domain(flat, kv);
 
     /* Pattern-fill: broadcast each partition's key value across its row range.
      * Typed fill avoids per-element memcpy overhead. */
@@ -91,6 +96,8 @@ ray_t* materialize_mapcommon_head(ray_t* mc, int64_t n) {
     ray_t* flat = ray_vec_new(kv_type, n);
     if (!flat || RAY_IS_ERR(flat)) return ray_error("oom", NULL);
     flat->len = n;
+    /* raw SYM cell ids — adopt the keys carrier's domain (see above) */
+    if (kv_type == RAY_SYM) ray_sym_vec_adopt_domain(flat, kv);
 
     char* out = (char*)ray_data(flat);
     int64_t off = 0;
@@ -130,6 +137,8 @@ ray_t* materialize_mapcommon_filter(ray_t* mc, ray_t* pred, int64_t pass_count) 
     ray_t* flat = ray_vec_new(kv_type, pass_count);
     if (!flat || RAY_IS_ERR(flat)) return ray_error("oom", NULL);
     flat->len = pass_count;
+    /* raw SYM cell ids — adopt the keys carrier's domain (see above) */
+    if (kv_type == RAY_SYM) ray_sym_vec_adopt_domain(flat, kv);
 
     char* out = (char*)ray_data(flat);
     int64_t out_idx = 0;
@@ -800,6 +809,25 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
         else            svi = (int64_t*)ray_data(sv_hdr);
     }
 
+    /* sym-domain Phase 2 (SYM ∈ SYM): the worker compares RAW column
+     * cell ids against the probe values, so the probe must be expressed
+     * in the COLUMN's id space.  When the two sides resolve over
+     * different domains, translate each set element through its strings
+     * into the column's domain; elements absent from it are dropped —
+     * they can match nothing.  Same-domain sides (the only pre-flip
+     * case) keep the raw copy: byte-identical fast path. */
+    struct ray_sym_domain_s* in_col_dom = NULL;  /* non-NULL ⇒ translate */
+    struct ray_sym_domain_s* in_set_dom = NULL;
+    if (col_class == 2 && set_class == 2 && set_len > 0) {
+        ray_t* col_rep = ray_is_atom(col) ? NULL : sym_domain_rep(col);
+        ray_t* set_rep = ray_is_atom(set) ? NULL : sym_domain_rep(set);
+        struct ray_sym_domain_s* cd =
+            col_rep ? ray_sym_vec_domain(col_rep) : ray_sym_runtime_domain();
+        struct ray_sym_domain_s* sd =
+            set_rep ? ray_sym_vec_domain(set_rep) : ray_sym_runtime_domain();
+        if (cd != sd) { in_col_dom = cd; in_set_dom = sd; }
+    }
+
     /* set_len is 0 when we want to suppress the set entirely
      * (SYM-vs-non-SYM type mismatch).  Respect it in BOTH the
      * atom and vec branches so the probe stays empty. */
@@ -818,11 +846,28 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
         }
     } else {
         if (set_len > 0 && ray_is_atom(set)) {
-            if (!RAY_ATOM_IS_NULL(set)) { svi[0] = set->i64; sv_len = 1; }
+            if (!RAY_ATOM_IS_NULL(set)) {
+                if (in_col_dom) {
+                    ray_t* s = ray_sym_domain_str(in_set_dom, set->i64);
+                    int64_t xid = s ? ray_sym_domain_find(in_col_dom,
+                                          ray_str_ptr(s), ray_str_len(s)) : -1;
+                    if (xid >= 0) { svi[0] = xid; sv_len = 1; }
+                } else {
+                    svi[0] = set->i64; sv_len = 1;
+                }
+            }
         } else if (set_len > 0) {
             for (int64_t i = 0; i < set_len; i++) {
                 if (set_has_nulls && ray_vec_is_null(set, i)) continue;
                 READ_I64(svi[sv_len], set, st, i);
+                if (in_col_dom) {
+                    /* cross-domain: re-express in the column's domain */
+                    ray_t* s = ray_sym_domain_str(in_set_dom, svi[sv_len]);
+                    int64_t xid = s ? ray_sym_domain_find(in_col_dom,
+                                          ray_str_ptr(s), ray_str_len(s)) : -1;
+                    if (xid < 0) continue;  /* absent: matches nothing */
+                    svi[sv_len] = xid;
+                }
                 sv_len++;
             }
         }
@@ -1003,6 +1048,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         off += segs[s]->len;
                     }
                 }
+                /* Raw-copied SYM cell ids resolve over the partitions'
+                 * shared domain (first SYM segment is the rep). */
+                if (flat->type == RAY_SYM)
+                    ray_sym_vec_adopt_domain(flat, sym_domain_rep(col));
                 return flat;
             }
             ray_retain(col);
@@ -1576,6 +1625,11 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                                     dst_off += take;
                                     remaining -= take;
                                 }
+                                /* raw SYM cell-id copy from the segments —
+                                 * adopt the partitions' shared domain */
+                                if (head_vec->type == RAY_SYM)
+                                    ray_sym_vec_adopt_domain(head_vec,
+                                                             sym_domain_rep(col));
                             }
                         }
                         result = ray_table_add_col(result, name_id, head_vec);
@@ -1589,6 +1643,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                             memcpy(ray_data(head_vec), ray_data(col),
                                    (size_t)n * esz);
                             col_propagate_nulls_range(head_vec, 0, col, 0, n);
+                            /* raw SYM cell-id copy — adopt the source's
+                             * dictionary (sym-domain Phase 2) */
+                            if (col->type == RAY_SYM)
+                                ray_sym_vec_adopt_domain(head_vec, col);
                         }
                         result = ray_table_add_col(result, name_id, head_vec);
                         ray_release(head_vec);
@@ -1605,6 +1663,8 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 result->len = n;
                 memcpy(ray_data(result), ray_data(input), (size_t)n * esz);
                 col_propagate_nulls_range(result, 0, input, 0, n);
+                if (input->type == RAY_SYM)
+                    ray_sym_vec_adopt_domain(result, input);
             }
             ray_release(input);
             return result;
@@ -1637,6 +1697,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         ray_t* flat = col_vec_new(kv, n);
                         if (flat && !RAY_IS_ERR(flat)) {
                             flat->len = n;
+                            /* raw SYM keys of the MAPCOMMON carrier */
+                            if (kv->type == RAY_SYM)
+                                ray_sym_vec_adopt_domain(flat, kv);
                             char* out = (char*)ray_data(flat);
                             /* Walk partitions from end, fill output from end */
                             int64_t remaining = n;
@@ -1686,6 +1749,11 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                                     }
                                     remaining -= take;
                                 }
+                                /* raw SYM cell-id copy from the segments —
+                                 * adopt the partitions' shared domain */
+                                if (tail_vec->type == RAY_SYM)
+                                    ray_sym_vec_adopt_domain(tail_vec,
+                                                             sym_domain_rep(col));
                             }
                         }
                         result = ray_table_add_col(result, name_id, tail_vec);
@@ -1700,6 +1768,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                                    (char*)ray_data(col) + (size_t)skip * esz,
                                    (size_t)n * esz);
                             col_propagate_nulls_range(tail_vec, 0, col, skip, n);
+                            /* raw SYM cell-id copy — adopt source dict */
+                            if (col->type == RAY_SYM)
+                                ray_sym_vec_adopt_domain(tail_vec, col);
                         }
                         result = ray_table_add_col(result, name_id, tail_vec);
                         ray_release(tail_vec);
@@ -1718,6 +1789,8 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                        (char*)ray_data(input) + (size_t)skip * esz,
                        (size_t)n * esz);
                 col_propagate_nulls_range(result, 0, input, skip, n);
+                if (input->type == RAY_SYM)
+                    ray_sym_vec_adopt_domain(result, input);
             }
             ray_release(input);
             return result;
@@ -2087,6 +2160,8 @@ static ray_t* build_segment_table(ray_t* parted_tbl, int32_t seg_idx) {
                 for (int64_t r = 0; r < seg_rows; r++)
                     memcpy(dst + r * esz, src, esz);
             }
+            /* raw SYM key id broadcast — adopt the keys carrier's domain */
+            if (flat->type == RAY_SYM) ray_sym_vec_adopt_domain(flat, kv);
             seg_tbl = ray_table_add_col(seg_tbl, name_id, flat);
             ray_release(flat);
         } else if (RAY_IS_PARTED(col->type)) {
@@ -2284,6 +2359,10 @@ static ray_t* flatten_parted_col(ray_t* col) {
                    (size_t)segs[s]->len * esz);
         off += segs[s]->len;
     }
+    /* Raw-copied SYM cell ids resolve over the partitions' shared
+     * domain (first SYM segment is the rep). */
+    if (flat->type == RAY_SYM)
+        ray_sym_vec_adopt_domain(flat, sym_domain_rep(col));
     return flat;
 }
 

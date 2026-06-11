@@ -87,6 +87,37 @@ static inline void ray_write_sym(void* data, int64_t row, uint64_t val, int8_t t
     }
 }
 
+/* ---- Domain-aware cell resolution (sym-domain architecture, Phase 2) ----
+ * A SYM cell id is a position in the COLUMN'S domain (ray_sym_vec_domain),
+ * not necessarily the global intern table — exact no-ops while every
+ * domain is the runtime singleton.  Use these for ids read from vector
+ * cell data; name-ids / SYM-atom i64s / config lookups stay on the global
+ * ray_sym_str / ray_sym_find.  ray_sym_domain_str/find are declared in
+ * <rayforce.h> next to ray_sym_vec_domain. */
+
+/* RAY_SYM_AUDIT=1 (cached once at ray_sym_init): cross-check every cell
+ * resolution and abort with full context on an invariant violation
+ * (unresolvable atom / position outside the domain).  Definitions in
+ * src/table/domain.c; OFF by default — one predictable branch. */
+extern uint8_t ray_g_sym_audit;
+void ray_sym_audit_cell(ray_t* vec, int64_t row, int64_t pos, ray_t* resolved);
+
+/* Resolve one cell of a SYM vector through ITS domain.  Borrowed atom
+ * (valid for the domain's lifetime; do not release). */
+static inline ray_t* ray_sym_vec_cell(ray_t* vec, int64_t row) {
+    int64_t pos = ray_read_sym(ray_data(vec), row, RAY_SYM, vec->attrs);
+    ray_t* s = ray_sym_domain_str(ray_sym_vec_domain(vec), pos);
+    if (__builtin_expect(ray_g_sym_audit != 0, 0))
+        ray_sym_audit_cell(vec, row, pos, s);
+    return s;
+}
+
+/* Position of `s` in the vector's domain, -1 if absent (literal lookup
+ * for filters: absent literal matches nothing — correct). */
+static inline int64_t ray_sym_vec_lookup(ray_t* vec, const char* s, size_t n) {
+    return ray_sym_domain_find(ray_sym_vec_domain(vec), s, n);
+}
+
 /* Intern with pre-computed wyhash, no lock.
  * Caller must guarantee single-threaded access. */
 int64_t ray_sym_intern_prehashed(uint32_t hash, const char* str, size_t len);
@@ -104,10 +135,10 @@ bool ray_sym_is_dotted(int64_t sym_id);
 int ray_sym_segs(int64_t sym_id, const int64_t** out_segs);
 
 /* Bulk-intern variant that does NOT sub-intern segments.  Used only by
- * persistence paths (ray_sym_load, ray_sym_save merge phase) where the
- * disk-position==sym_id invariant would be broken by segment sub-interning
- * appending entries mid-sequence.  Callers MUST follow a batch of these
- * with ray_sym_rebuild_segments to populate the dotted cache. */
+ * the snapshot-restore path (ray_sym_load) where the disk-position==sym_id
+ * invariant would be broken by segment sub-interning appending entries
+ * mid-sequence.  Callers MUST follow a batch of these with
+ * ray_sym_rebuild_segments to populate the dotted cache. */
 int64_t ray_sym_intern_no_split(const char* str, size_t len);
 int64_t ray_sym_intern_no_split_unlocked(const char* str, size_t len);
 int64_t ray_sym_intern_runtime(const char* str, size_t len);
@@ -118,15 +149,6 @@ int64_t ray_sym_intern_runtime(const char* str, size_t len);
  * RAY_ERR_OOM on the first allocation/sub-intern failure so persistence
  * paths can abort instead of leaving dotted names silently un-cached. */
 ray_err_t ray_sym_rebuild_segments(void);
-
-/* Number of symbols loaded from or saved to the current on-disk dictionary.
- * Runtime-only interned symbols may exist above this prefix. */
-uint32_t ray_sym_persisted_count(void);
-
-/* Save the same on-disk symbol format as ray_sym_save, but skip durability
- * syncs.  Intended for generated bulk-import caches where throughput matters
- * more than crash recovery of a half-written target. */
-ray_err_t ray_sym_save_bulk(const char* path);
 
 /* Upper bound on the arena bytes that sym_str_arena consumes for a name
  * of the given length.  Used by the three-phase atomic intern to pre-
