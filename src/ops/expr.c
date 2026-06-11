@@ -468,6 +468,9 @@ static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
         if (dt == RAY_BOOL) return true;                   /* BOOL CAST: unconditionally sentinel-hardened;
                                                             * ignores null_aware param (unlike other clauses)
                                                             * — sentinel handling is baked into the kernel */
+        /* Task 8: narrowing demotion to I32/I16; null_aware arm writes
+         * NULL_I32/NULL_I16 for NULL_I64/NaN inputs. */
+        if (dt == RAY_I32 || dt == RAY_I16) return true;
     }
     /* I64 comparisons and AND/OR: null-aware kernel handles NULL_I64 sentinel inline. */
     if (dt == RAY_BOOL && t1 == RAY_I64 &&
@@ -1236,23 +1239,48 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
         }
     } else if (dt == RAY_I32) {
         /* OP_CAST narrow output — src came from I64/F64 scratch (filled
-         * by REG_CONST or REG_SCAN widening); truncate to int32_t. */
+         * by REG_CONST or REG_SCAN widening); truncate to int32_t.
+         *
+         * Fallback semantics (exec_elementwise_unary + propagate_nulls):
+         *   non-null → plain (int32_t) truncation; null → propagate_nulls
+         *   calls ray_vec_set_null which writes NULL_I32 (INT32_MIN) into
+         *   the data cell.  ray_vec_is_null is sentinel-based, so the
+         *   null_aware arm must write NULL_I32 inline for null inputs.
+         *   No out-of-range clamping; truncation is the contract. */
         int32_t* d = (int32_t*)dp;
         if (t1 == RAY_F64) {
             const double* a = (const double*)ap;
-            for (int64_t j = 0; j < n; j++) d[j] = (int32_t)a[j];
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] != a[j]) ? NULL_I32 : (int32_t)a[j];
+            else
+                for (int64_t j = 0; j < n; j++) d[j] = (int32_t)a[j];
         } else {
             const int64_t* a = (const int64_t*)ap;
-            for (int64_t j = 0; j < n; j++) d[j] = (int32_t)a[j];
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] == NULL_I64) ? NULL_I32 : (int32_t)a[j];
+            else
+                for (int64_t j = 0; j < n; j++) d[j] = (int32_t)a[j];
         }
     } else if (dt == RAY_I16) {
+        /* Fallback semantics identical to I32: plain truncation for
+         * non-null, NULL_I16 (INT16_MIN) sentinel written at null positions. */
         int16_t* d = (int16_t*)dp;
         if (t1 == RAY_F64) {
             const double* a = (const double*)ap;
-            for (int64_t j = 0; j < n; j++) d[j] = (int16_t)a[j];
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] != a[j]) ? NULL_I16 : (int16_t)a[j];
+            else
+                for (int64_t j = 0; j < n; j++) d[j] = (int16_t)a[j];
         } else {
             const int64_t* a = (const int64_t*)ap;
-            for (int64_t j = 0; j < n; j++) d[j] = (int16_t)a[j];
+            if (null_aware)
+                for (int64_t j = 0; j < n; j++)
+                    d[j] = (a[j] == NULL_I64) ? NULL_I16 : (int16_t)a[j];
+            else
+                for (int64_t j = 0; j < n; j++) d[j] = (int16_t)a[j];
         }
     } else if (dt == RAY_U8) {
         uint8_t* d = (uint8_t*)dp;
