@@ -1029,24 +1029,17 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                     return parted_flatten_str(sps, col->len, total);
 
                 uint8_t sba = (base == RAY_SYM)
-                            ? parted_first_attrs(sps, col->len) : 0;
+                            ? parted_sym_max_attrs(sps, col->len) : 0;
                 ray_t* flat = typed_vec_new(base, sba, total);
                 if (!flat || RAY_IS_ERR(flat)) return ray_error("oom", NULL);
                 flat->len = total;
                 ray_t** segs = sps;
-                size_t esz = (size_t)ray_sym_elem_size(base, sba);
                 int64_t off = 0;
                 for (int64_t s = 0; s < col->len; s++) {
-                    if (segs[s] && segs[s]->len > 0 &&
-                        parted_seg_esz_ok(segs[s], base, (uint8_t)esz)) {
-                        memcpy((char*)ray_data(flat) + off * esz,
-                               ray_data(segs[s]), (size_t)segs[s]->len * esz);
-                        off += segs[s]->len;
-                    } else if (segs[s] && segs[s]->len > 0) {
-                        memset((char*)ray_data(flat) + off * esz, 0,
-                               (size_t)segs[s]->len * esz);
-                        off += segs[s]->len;
-                    }
+                    if (!segs[s] || segs[s]->len <= 0) continue;
+                    parted_copy_cells(ray_data(flat), base, sba, off,
+                                      segs[s], 0, segs[s]->len);
+                    off += segs[s]->len;
                 }
                 /* Raw-copied SYM cell ids resolve over the partitions'
                  * shared domain (first SYM segment is the rep). */
@@ -1603,8 +1596,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                             head_vec = parted_head_str(sp, col->len, n);
                         } else {
                             uint8_t ba = (base == RAY_SYM)
-                                       ? parted_first_attrs(sp, col->len) : 0;
-                            uint8_t esz = ray_sym_elem_size(base, ba);
+                                       ? parted_sym_max_attrs(sp, col->len) : 0;
                             head_vec = typed_vec_new(base, ba, n);
                             if (head_vec && !RAY_IS_ERR(head_vec)) {
                                 head_vec->len = n;
@@ -1615,13 +1607,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                                     if (!segs[s]) continue;
                                     int64_t take = segs[s]->len;
                                     if (take > remaining) take = remaining;
-                                    if (parted_seg_esz_ok(segs[s], base, esz)) {
-                                        memcpy((char*)ray_data(head_vec) + dst_off * esz,
-                                               ray_data(segs[s]), (size_t)take * esz);
-                                    } else {
-                                        memset((char*)ray_data(head_vec) + dst_off * esz,
-                                               0, (size_t)take * esz);
-                                    }
+                                    parted_copy_cells(ray_data(head_vec), base,
+                                                      ba, dst_off, segs[s], 0,
+                                                      take);
                                     dst_off += take;
                                     remaining -= take;
                                 }
@@ -1726,8 +1714,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                             tail_vec = parted_tail_str(tsp, col->len, n);
                         } else {
                             uint8_t tba = (base == RAY_SYM)
-                                        ? parted_first_attrs(tsp, col->len) : 0;
-                            uint8_t esz = ray_sym_elem_size(base, tba);
+                                        ? parted_sym_max_attrs(tsp, col->len) : 0;
                             tail_vec = typed_vec_new(base, tba, n);
                             if (tail_vec && !RAY_IS_ERR(tail_vec)) {
                                 tail_vec->len = n;
@@ -1739,14 +1726,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                                     int64_t take = segs[s]->len;
                                     if (take > remaining) take = remaining;
                                     dst -= take;
-                                    if (parted_seg_esz_ok(segs[s], base, esz)) {
-                                        memcpy((char*)ray_data(tail_vec) + (size_t)dst * esz,
-                                               (char*)ray_data(segs[s]) + (size_t)(segs[s]->len - take) * esz,
-                                               (size_t)take * esz);
-                                    } else {
-                                        memset((char*)ray_data(tail_vec) + (size_t)dst * esz,
-                                               0, (size_t)take * esz);
-                                    }
+                                    parted_copy_cells(ray_data(tail_vec), base,
+                                                      tba, dst, segs[s],
+                                                      segs[s]->len - take, take);
                                     remaining -= take;
                                 }
                                 /* raw SYM cell-id copy from the segments —
@@ -2343,20 +2325,15 @@ static ray_t* flatten_parted_col(ray_t* col) {
     int64_t total = ray_parted_nrows(col);
     if (base == RAY_STR)
         return parted_flatten_str(segs, col->len, total);
-    uint8_t sba = (base == RAY_SYM) ? parted_first_attrs(segs, col->len) : 0;
+    uint8_t sba = (base == RAY_SYM) ? parted_sym_max_attrs(segs, col->len) : 0;
     ray_t* flat = typed_vec_new(base, sba, total);
     if (!flat || RAY_IS_ERR(flat)) return ray_error("oom", NULL);
     flat->len = total;
-    size_t esz = (size_t)ray_sym_elem_size(base, sba);
     int64_t off = 0;
     for (int64_t s = 0; s < col->len; s++) {
         if (!segs[s] || segs[s]->len <= 0) continue;
-        if (parted_seg_esz_ok(segs[s], base, (uint8_t)esz))
-            memcpy((char*)ray_data(flat) + off * esz,
-                   ray_data(segs[s]), (size_t)segs[s]->len * esz);
-        else
-            memset((char*)ray_data(flat) + off * esz, 0,
-                   (size_t)segs[s]->len * esz);
+        parted_copy_cells(ray_data(flat), base, sba, off,
+                          segs[s], 0, segs[s]->len);
         off += segs[s]->len;
     }
     /* Raw-copied SYM cell ids resolve over the partitions' shared
