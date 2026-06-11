@@ -55,19 +55,45 @@
  * Parted segment helpers
  * ══════════════════════════════════════════ */
 
-/* Return attrs of the first non-NULL segment (for SYM width). */
-static inline uint8_t parted_first_attrs(ray_t** segs, int64_t n_segs) {
+/* Output attrs for a flat vector gathered/flattened from parted segments:
+ * the MAX SYM index width across segments (width bits only).  Partitions
+ * legitimately carry different widths — each partition's width tracked
+ * the shared vocabulary size at ITS save time, so partitions written
+ * after the vocabulary crossed the 255/65535 boundaries are wider than
+ * older ones.  The flat output must hold the widest segment's ids. */
+static inline uint8_t parted_sym_max_attrs(ray_t** segs, int64_t n_segs) {
+    uint8_t w = 0;
     for (int64_t i = 0; i < n_segs; i++)
-        if (segs[i]) return segs[i]->attrs;
-    return 0;
+        if (segs[i] && (segs[i]->attrs & RAY_SYM_W_MASK) > w)
+            w = segs[i]->attrs & RAY_SYM_W_MASK;
+    return w;
 }
 
-/* Check whether a parted segment's SYM width matches the expected esz.
- * For non-SYM types this always returns true (attrs don't affect esz). */
-static inline bool parted_seg_esz_ok(ray_t* seg, int8_t base, uint8_t expected_esz) {
-    if (!seg) return false;
-    if (base != RAY_SYM) return true;
-    return ray_sym_elem_size(base, seg->attrs) == expected_esz;
+/* Copy n cells from flat source vec `src` [src_off..src_off+n) into the raw
+ * output buffer `out_data` at [dst_off..), where the output was created
+ * with element type `base` and attrs `out_attrs`.  Equal element size
+ * (always true for non-SYM bases, and for SYM segments saved at the
+ * output's width) takes the memcpy fast path.  A SYM source at a
+ * different index width takes the per-cell conversion loop — ids are
+ * positions in the shared domain, so widening preserves them verbatim.
+ * The loop only runs for genuinely mixed-width parted tables. */
+static inline void parted_copy_cells(void* out_data, int8_t base,
+                                     uint8_t out_attrs, int64_t dst_off,
+                                     ray_t* src, int64_t src_off, int64_t n) {
+    uint8_t out_esz = ray_sym_elem_size(base, out_attrs);
+    if (base != RAY_SYM ||
+        ((src->attrs ^ out_attrs) & RAY_SYM_W_MASK) == 0) {
+        memcpy((char*)out_data + (size_t)dst_off * out_esz,
+               (const char*)ray_data(src) + (size_t)src_off * out_esz,
+               (size_t)n * out_esz);
+        return;
+    }
+    const void* src_data = ray_data(src);
+    for (int64_t i = 0; i < n; i++)
+        ray_write_sym(out_data, dst_off + i,
+                      (uint64_t)ray_read_sym(src_data, src_off + i,
+                                             RAY_SYM, src->attrs),
+                      RAY_SYM, out_attrs);
 }
 
 /* ══════════════════════════════════════════
