@@ -24,6 +24,7 @@
 #include "ops/internal.h"
 #include "ops/hash.h"
 #include "ops/idxop.h"
+#include "lang/internal.h"  /* sym_id_runtime, sym_domain_rep (sym-domain Phase 2) */
 
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
@@ -36,10 +37,17 @@ static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
         if (ray_vec_is_null(col, row))
             return h ^ ((uint64_t)row * 0x9E3779B97F4A7C15ULL);
         uint64_t kh;
-        if (col->type == RAY_F64)
+        if (col->type == RAY_F64) {
             kh = ray_hash_f64(((double*)ray_data(col))[row]);
-        else
-            kh = ray_hash_i64(read_col_i64(ray_data(col), row, col->type, col->attrs));
+        } else {
+            int64_t kv = read_col_i64(ray_data(col), row, col->type, col->attrs);
+            /* sym-domain Phase 2: a SYM cell id is a position in the
+             * COLUMN's domain — build and probe sides must hash into ONE
+             * id space, so canonicalize to the runtime id.  Runtime-domain
+             * columns (the only pre-flip case) pass through unchanged. */
+            if (col->type == RAY_SYM) kv = sym_id_runtime(col, kv);
+            kh = ray_hash_i64(kv);
+        }
         h = (k == 0) ? kh : ray_hash_combine(h, kh);
     }
     return h;
@@ -379,8 +387,21 @@ static inline bool join_keys_eq(ray_t* const* l_vecs, ray_t* const* r_vecs, uint
         if (lc->type == RAY_F64) {
             if (((double*)ray_data(lc))[l] != ((double*)ray_data(rc))[r]) return false;
         } else {
-            if (read_col_i64(ray_data(lc), l, lc->type, lc->attrs) !=
-                read_col_i64(ray_data(rc), r, rc->type, rc->attrs)) return false;
+            int64_t lv = read_col_i64(ray_data(lc), l, lc->type, lc->attrs);
+            int64_t rv = read_col_i64(ray_data(rc), r, rc->type, rc->attrs);
+            /* Raw SYM ids only compare within ONE domain — gate on domain
+             * identity and translate both sides to runtime ids on mismatch
+             * (collection.c hashset precedent; matches hash_row_keys'
+             * canonical hashing).  Same-domain compares stay raw: per-domain
+             * translation is injective, so raw equality ⇔ runtime equality.
+             * Pre-flip both sides are the runtime singleton: byte-identical
+             * fast path. */
+            if (lc->type == RAY_SYM && rc->type == RAY_SYM &&
+                ray_sym_vec_domain(lc) != ray_sym_vec_domain(rc)) {
+                lv = sym_id_runtime(lc, lv);
+                rv = sym_id_runtime(rc, rv);
+            }
+            if (lv != rv) return false;
         }
     }
     return true;
@@ -1347,7 +1368,10 @@ join_gather:;
         }
     }
 
-    /* Propagate RAY_STR string pools and null bitmaps from source columns */
+    /* Propagate RAY_STR string pools and null bitmaps from source columns.
+     * SYM outputs gather raw cell ids from exactly one side's column —
+     * adopt that source's domain (sym-domain Phase 2; no-op while all
+     * domains are the runtime singleton). */
     {
         int64_t si = 0;
         for (int64_t c = 0; c < left_ncols && si < l_out_count; c++) {
@@ -1355,12 +1379,16 @@ join_gather:;
             if (!col) continue;
             col_propagate_str_pool(l_out_cols[si], col);
             col_propagate_nulls_gather(l_out_cols[si], col, l_idx, pair_count);
+            if (l_out_cols[si]->type == RAY_SYM)
+                ray_sym_vec_adopt_domain(l_out_cols[si], col);
             si++;
         }
     }
     for (int64_t i = 0; i < r_out_count; i++) {
         col_propagate_str_pool(r_out_cols[i], r_src_cols[i]);
         col_propagate_nulls_gather(r_out_cols[i], r_src_cols[i], r_idx, pair_count);
+        if (r_out_cols[i]->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(r_out_cols[i], r_src_cols[i]);
     }
 
     /* Add columns to result */
@@ -1542,6 +1570,10 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
                 gather_fn(&gctx, 0, 0, out_count);
 
             col_propagate_str_pool(new_col, col);
+            /* SYM output gathers raw cell ids from `col` — resolve over
+             * the same dictionary (sym-domain Phase 2). */
+            if (new_col->type == RAY_SYM)
+                ray_sym_vec_adopt_domain(new_col, col);
 
             int64_t name_id = ray_table_col_name(left_table, c);
             result = ray_table_add_col(result, name_id, new_col);
@@ -1570,6 +1602,30 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
  * identity order would not do).  Caller must also confirm the index's
  * built_for_len matches the current column length, so the part ranges
  * (starts/lens) are in-bounds for the time array indexed here. */
+/* Left-side eq-key reader for the asof sort-merge.  Eq keys are MATCHED
+ * across the two tables, and raw SYM ids only order/compare within ONE
+ * domain (sym-domain Phase 2): when a SYM eq-key pair spans two domains,
+ * re-express the LEFT cell in the RIGHT side's id space (absent symbol →
+ * -1: sorts first, matches nothing — right ids are ≥ 0).  Every left-side
+ * eq read below goes through this reader, so the left sort, the partition
+ * rewind and the merge walk all order by the right side's id space, while
+ * right-side reads stay raw.  Pre-flip every domain is the runtime
+ * singleton — plain raw read, byte-identical behavior.  (Cross-domain
+ * translation is a per-read hash lookup; if a post-flip profile shows it
+ * hot, build a per-key LUT at setup.) */
+static inline int64_t asof_eq_lread(ray_t* lc, ray_t* rc, int64_t row) {
+    int64_t v = read_col_i64(ray_data(lc), row, lc->type, lc->attrs);
+    if (lc->type == RAY_SYM && rc->type == RAY_SYM) {
+        struct ray_sym_domain_s* ld = ray_sym_vec_domain(lc);
+        struct ray_sym_domain_s* rd = ray_sym_vec_domain(rc);
+        if (ld != rd) {
+            ray_t* s = ray_sym_domain_str(ld, v);
+            v = s ? ray_sym_domain_find(rd, ray_str_ptr(s), ray_str_len(s)) : -1;
+        }
+    }
+    return v;
+}
+
 static bool asof_time_sorted_within_parts(const ray_t* keycol, const int64_t* tvals) {
     ray_index_t* ix = ray_index_payload(((ray_t*)keycol)->index);
     const int64_t* st = (const int64_t*)ray_data(ix->u.part.starts);
@@ -1713,13 +1769,24 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
      *     order already equals (key, time) order.
      * Either way we fill the index array with the identity permutation and skip
      * the O(n log n) sort.  Falls back to sort-merge otherwise; never wrong. */
-    bool l_presorted = (n_eq == 0 && ray_attr_is_sorted(lt_time_vec))
+    /* Cross-domain SYM eq key?  The left side then sorts/merges in the
+     * RIGHT side's id space (asof_eq_lread), so left identity order in
+     * its OWN id space is not usable — disable the left presort shortcut.
+     * Right-side reads stay raw: its shortcut is unaffected. */
+    bool eq_xdomain = false;
+    for (uint8_t k = 0; k < n_eq; k++)
+        if (lt_eq[k]->type == RAY_SYM && rt_eq[k]->type == RAY_SYM &&
+            ray_sym_vec_domain(lt_eq[k]) != ray_sym_vec_domain(rt_eq[k]))
+            eq_xdomain = true;
+
+    bool l_presorted = !eq_xdomain
+        && ((n_eq == 0 && ray_attr_is_sorted(lt_time_vec))
         || (n_eq == 1
             && !(lt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
             && ray_index_kind(lt_eq[0]) == RAY_IDX_PART
             /* reject a stale part index (parent length changed since build) */
             && ray_index_payload(lt_eq[0]->index)->built_for_len == lt_eq[0]->len
-            && asof_time_sorted_within_parts(lt_eq[0], lt_time));
+            && asof_time_sorted_within_parts(lt_eq[0], lt_time)));
     bool r_presorted = (n_eq == 0 && ray_attr_is_sorted(rt_time_vec))
         || (n_eq == 1
             && !(rt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
@@ -1760,8 +1827,10 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                     if (lt_null[ai] != lt_null[bi])
                         cmp = lt_null[ai] - lt_null[bi]; /* 1 > 0 → nulls last */
                     for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
-                        int64_t va = read_col_i64(ray_data(lt_eq[k2]), ai, lt_eq[k2]->type, lt_eq[k2]->attrs);
-                        int64_t vb = read_col_i64(ray_data(lt_eq[k2]), bi, lt_eq[k2]->type, lt_eq[k2]->attrs);
+                        /* asof_eq_lread: left sorts in the RIGHT side's
+                         * id space when a SYM key pair spans domains. */
+                        int64_t va = asof_eq_lread(lt_eq[k2], rt_eq[k2], ai);
+                        int64_t vb = asof_eq_lread(lt_eq[k2], rt_eq[k2], bi);
                         if (va < vb) cmp = -1;
                         else if (va > vb) cmp = 1;
                     }
@@ -1845,7 +1914,9 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             continue;
         }
 
-        /* Detect partition change — reset best match and rewind rp */
+        /* Detect partition change — reset best match and rewind rp.
+         * Within-column equality of two LEFT rows: raw ids compare
+         * correctly in any single domain — no translation needed. */
         if (prev_non_null_li >= 0) {
             int changed = 0;
             for (uint8_t k = 0; k < n_eq; k++) {
@@ -1862,7 +1933,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                     int eq_match = 1;
                     for (uint8_t k = 0; k < n_eq; k++) {
                         int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri_prev, rt_eq[k]->type, rt_eq[k]->attrs);
-                        int64_t lv = read_col_i64(ray_data(lt_eq[k]), li, lt_eq[k]->type, lt_eq[k]->attrs);
+                        int64_t lv = asof_eq_lread(lt_eq[k], rt_eq[k], li);
                         if (rv < lv) { eq_match = 0; break; }
                     }
                     if (!eq_match) break;
@@ -1878,7 +1949,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             int eq_cmp = 0;
             for (uint8_t k = 0; k < n_eq && eq_cmp == 0; k++) {
                 int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri, rt_eq[k]->type, rt_eq[k]->attrs);
-                int64_t lv = read_col_i64(ray_data(lt_eq[k]), li, lt_eq[k]->type, lt_eq[k]->attrs);
+                int64_t lv = asof_eq_lread(lt_eq[k], rt_eq[k], li);
                 if (rv < lv) eq_cmp = -1;
                 else if (rv > lv) eq_cmp = 1;
             }
@@ -1982,6 +2053,10 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         dst_col->len = out_n;
         col_propagate_str_pool(dst_col, src_col);
         col_propagate_nulls_gather(dst_col, src_col, lidx, out_n);
+        /* SYM output raw-copies cell ids from one source column —
+         * adopt its domain (sym-domain Phase 2). */
+        if (dst_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(dst_col, src_col);
         out = ray_table_add_col(out, col_name, dst_col);
         ray_release(dst_col);
     }
@@ -2009,6 +2084,8 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         dst_col->len = out_n;
         col_propagate_str_pool(dst_col, src_col);
         col_propagate_nulls_gather(dst_col, src_col, ridx, out_n);
+        if (dst_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(dst_col, src_col);
         out = ray_table_add_col(out, col_name, dst_col);
         ray_release(dst_col);
     }
