@@ -1048,6 +1048,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         off += segs[s]->len;
                     }
                 }
+                /* Raw-copied SYM cell ids resolve over the partitions'
+                 * shared domain (first SYM segment is the rep). */
+                if (flat->type == RAY_SYM)
+                    ray_sym_vec_adopt_domain(flat, sym_domain_rep(col));
                 return flat;
             }
             ray_retain(col);
@@ -1621,6 +1625,11 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                                     dst_off += take;
                                     remaining -= take;
                                 }
+                                /* raw SYM cell-id copy from the segments —
+                                 * adopt the partitions' shared domain */
+                                if (head_vec->type == RAY_SYM)
+                                    ray_sym_vec_adopt_domain(head_vec,
+                                                             sym_domain_rep(col));
                             }
                         }
                         result = ray_table_add_col(result, name_id, head_vec);
@@ -1740,6 +1749,11 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                                     }
                                     remaining -= take;
                                 }
+                                /* raw SYM cell-id copy from the segments —
+                                 * adopt the partitions' shared domain */
+                                if (tail_vec->type == RAY_SYM)
+                                    ray_sym_vec_adopt_domain(tail_vec,
+                                                             sym_domain_rep(col));
                             }
                         }
                         result = ray_table_add_col(result, name_id, tail_vec);
@@ -2146,6 +2160,8 @@ static ray_t* build_segment_table(ray_t* parted_tbl, int32_t seg_idx) {
                 for (int64_t r = 0; r < seg_rows; r++)
                     memcpy(dst + r * esz, src, esz);
             }
+            /* raw SYM key id broadcast — adopt the keys carrier's domain */
+            if (flat->type == RAY_SYM) ray_sym_vec_adopt_domain(flat, kv);
             seg_tbl = ray_table_add_col(seg_tbl, name_id, flat);
             ray_release(flat);
         } else if (RAY_IS_PARTED(col->type)) {
@@ -2343,6 +2359,10 @@ static ray_t* flatten_parted_col(ray_t* col) {
                    (size_t)segs[s]->len * esz);
         off += segs[s]->len;
     }
+    /* Raw-copied SYM cell ids resolve over the partitions' shared
+     * domain (first SYM segment is the rep). */
+    if (flat->type == RAY_SYM)
+        ray_sym_vec_adopt_domain(flat, sym_domain_rep(col));
     return flat;
 }
 
