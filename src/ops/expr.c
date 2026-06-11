@@ -444,12 +444,22 @@ static uint8_t expr_ensure_type(ray_expr_t* out, uint8_t src, int8_t target) {
     uint8_t r = out->n_regs;
     out->regs[r].kind = REG_SCRATCH;
     out->regs[r].type = target;
+    out->regs[r].nullable = out->regs[src].nullable;
     out->n_regs++;
     out->n_scratch++;
     out->ins[out->n_ins++] = (expr_ins_t){
         .opcode = OP_CAST, .dst = r, .src1 = src, .src2 = 0xFF,
+        .null_aware = out->regs[src].nullable ? 1 : 0,
     };
     return r;
+}
+
+/* Which (opcode, dst-type, src1-type) shapes have null-aware kernel
+ * variants? Grows per-family as kernels land; anything not listed makes
+ * the whole program bail to the fallback (never wrong results). */
+static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
+    (void)op; (void)dt; (void)t1;
+    return false; /* Task 5+ flips families on */
 }
 
 /* Compile expression DAG into flat instruction array.
@@ -500,7 +510,6 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 if (!col) EXPR_BAIL(EXPR_BAIL_OTHER);
                 if (col->type == RAY_MAPCOMMON) EXPR_BAIL(EXPR_BAIL_MAPCOMMON);
                 if (col->type == RAY_STR) EXPR_BAIL(EXPR_BAIL_STR); /* RAY_STR needs string comparison path */
-                if (col->attrs & RAY_ATTR_HAS_NULLS) EXPR_BAIL(EXPR_BAIL_NULLS);
                 if (col->attrs & RAY_ATTR_SLICE)     EXPR_BAIL(EXPR_BAIL_SLICE);
                 /* sym-domain Phase 2: the fused program loads SYM cells
                  * as raw i64s and resolves STR literals via the GLOBAL
@@ -514,6 +523,22 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                                        ray_sym_runtime_domain())
                         EXPR_BAIL(EXPR_BAIL_SYM_DOMAIN);
                 }
+                /* Determine whether any lane in this column may be null.
+                 * For parted columns the wrapper attrs may not reflect
+                 * individual segments — scan all segments. */
+                bool col_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) != 0;
+                if (RAY_IS_PARTED(col->type)) {
+                    ray_t** segs = (ray_t**)ray_data(col);
+                    for (int64_t s = 0; s < col->len; s++)
+                        if (segs[s] && (segs[s]->attrs & RAY_ATTR_HAS_NULLS))
+                            col_nulls = true;
+                }
+                /* Nullable SYM is out of scope: sym ids are indistinguishable
+                 * from the null sentinel (id 0) in raw integer lanes. */
+                if (col_nulls && (col->type == RAY_SYM ||
+                    (RAY_IS_PARTED(col->type) &&
+                     RAY_PARTED_BASETYPE(col->type) == RAY_SYM)))
+                    EXPR_BAIL(EXPR_BAIL_NULLS);
                 out->regs[r].kind = REG_SCAN;
                 if (RAY_IS_PARTED(col->type)) {
                     int8_t base = (int8_t)RAY_PARTED_BASETYPE(col->type);
@@ -522,6 +547,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                     out->regs[r].is_parted = true;
                     out->regs[r].parted_col = col;
                     out->regs[r].type = (base == RAY_F64) ? RAY_F64 : RAY_I64;
+                    out->regs[r].nullable = col_nulls;
                     out->has_parted = true;
                 } else {
                     out->regs[r].col_type = col->type;
@@ -530,6 +556,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                     out->regs[r].is_parted = false;
                     out->regs[r].parted_col = NULL;
                     out->regs[r].type = (col->type == RAY_F64) ? RAY_F64 : RAY_I64;
+                    out->regs[r].nullable = col_nulls;
                 }
             } else if (node->opcode == OP_CONST) {
                 ray_op_ext_t* ext = find_ext(g, node->id);
@@ -609,13 +636,44 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                     if (r >= EXPR_MAX_REGS) EXPR_BAIL(EXPR_BAIL_REGS);
                 }
 
+                /* Compute nullability from the FINAL (post-promotion) s1/s2.
+                 * Inserted CASTs inherit nullable from their source (Step 3),
+                 * so the promoted regs already carry the right flag. */
+                bool in_null = out->regs[s1].nullable ||
+                               (s2 != 0xFF && out->regs[s2].nullable);
+                bool ins_null_aware = false;
+                bool dst_nullable   = false;
+                if (in_null) {
+                    bool cmp    = (op >= OP_EQ && op <= OP_GE);
+                    bool boolop = (op == OP_AND || op == OP_OR || op == OP_NOT);
+                    if (cmp || boolop || op == OP_ISNULL) {
+                        /* definite-bool output; nullable input needs a kernel variant */
+                        ins_null_aware = true;
+                        dst_nullable = false;
+                    } else if (op == OP_CAST) {
+                        dst_nullable   = (ot != RAY_BOOL && ot != RAY_U8);
+                        ins_null_aware = true;
+                    } else {
+                        /* arithmetic (incl. F64 where NaN would propagate for free,
+                         * but the fused evaluator doesn't yet set HAS_NULLS on the
+                         * output — mark null_aware so the capability choke fires
+                         * until the matching kernel variant lands). */
+                        ins_null_aware = true;
+                        dst_nullable   = true;
+                    }
+                    if (ot == RAY_U8)
+                        EXPR_BAIL(EXPR_BAIL_NULL_SHAPE); /* no U8 sentinel */
+                }
+
                 out->regs[r].kind = REG_SCRATCH;
                 out->regs[r].type = ot;
+                out->regs[r].nullable = dst_nullable;
                 out->n_scratch++;
 
                 if (out->n_ins >= EXPR_MAX_INS) EXPR_BAIL(EXPR_BAIL_INS);
                 out->ins[out->n_ins++] = (expr_ins_t){
                     .opcode = (uint8_t)op, .dst = r, .src1 = s1, .src2 = s2,
+                    .null_aware = ins_null_aware ? 1 : 0,
                 };
             } else {
                 EXPR_BAIL(EXPR_BAIL_OTHER);
@@ -629,6 +687,18 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
     if (out->n_regs == 0 || out->n_ins == 0) EXPR_BAIL(EXPR_BAIL_OTHER);
     out->out_reg = out->n_regs - 1;
     out->out_type = out->regs[out->out_reg].type;
+
+    /* Null-capability choke: a nullable program may only use instructions
+     * with null-aware kernel variants. Bail (to the fallback) otherwise —
+     * never produce wrong results. */
+    for (uint8_t i = 0; i < out->n_ins; i++) {
+        const expr_ins_t* in = &out->ins[i];
+        if (in->null_aware &&
+            !expr_null_capable(in->opcode, out->regs[in->dst].type,
+                               out->regs[in->src1].type))
+            EXPR_BAIL(EXPR_BAIL_NULL_SHAPE);
+    }
+
     ray_expr_compile_ok++;
     return true;
 }
