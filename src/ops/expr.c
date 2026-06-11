@@ -461,7 +461,9 @@ static bool expr_null_capable(uint8_t op, int8_t dt, int8_t t1) {
         if (dt == RAY_F64 && t1 != RAY_F64) return true;  /* i64→f64: NaN map */
         if (dt == RAY_I64 && t1 == RAY_F64) return true;  /* f64→i64: NaN→NULL_I64 */
         if (dt == RAY_I64 && t1 != RAY_F64) return true;  /* narrow widen: sentinel map */
-        if (dt == RAY_BOOL) return true;                   /* null→false, existing kernel */
+        if (dt == RAY_BOOL) return true;                   /* BOOL CAST: unconditionally sentinel-hardened;
+                                                            * ignores null_aware param (unlike other clauses)
+                                                            * — sentinel handling is baked into the kernel */
     }
     return false;
 }
@@ -655,9 +657,10 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                          * F64 comparisons (EQ/NE/LT/LE/GT/GE): already null-
                          *   aware in the F64 BOOL block of expr_exec_binary
                          *   (explicit NaN handling).  No kernel variant needed.
-                         * F64 AND/OR: the binary kernel has no NaN handling for
-                         *   these — NaN is truthy as a raw double.  Mark
-                         *   null_aware so the choke fires → fallback.
+                         * F64 AND/OR/NOT: these kernels have no NaN handling
+                         *   (NaN is truthy as a raw double), so op == OP_NOT is
+                         *   also included intentionally.  Mark null_aware so
+                         *   the choke fires → fallback.
                          * Integer lanes: need bitmap post-pass → null_aware. */
                         ins_null_aware = (out->regs[s1].type != RAY_F64) ||
                                          op == OP_ISNULL ||
@@ -668,7 +671,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                         ins_null_aware = true;
                     } else {
                         /* Arithmetic:
-                         * F64 standard ops (ADD/SUB/MUL/DIV/MOD): NaN propagates
+                         * F64 standard ops (ADD/SUB/MUL/DIV/MOD, NEG/ABS/SQRT/LOG/EXP/CEIL/FLOOR/ROUND): NaN propagates
                          *   via IEEE for free — no kernel variant needed.
                          * F64 MIN2/MAX2: NOT IEEE-propagating (comparison returns
                          *   the non-NaN side) — mark null_aware → capability choke
@@ -1122,7 +1125,11 @@ static void* expr_eval_morsel(const ray_expr_t* expr, void** scratch,
         int8_t ct = expr->regs[r].col_type;
         switch (expr->regs[r].kind) {
             case REG_SCAN: {
-                /* Direct pointer if native type matches, else convert */
+                /* Direct pointer if native type matches, else convert.
+                 * Nullable F64/I64 columns may take the direct path: their
+                 * sentinels (NaN / NULL_I64) are already canonical in place.
+                 * Narrow types always go through expr_load_* for sentinel
+                 * normalization. */
                 uint8_t ca = expr->regs[r].col_attrs;
                 if (rt == RAY_F64 && ct == RAY_F64) {
                     rptrs[r] = (double*)expr->regs[r].data + start;
