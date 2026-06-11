@@ -10790,10 +10790,18 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         /* If row_elems[c] is NULL (missing column), keep original values */
         int has_new_val = (row_elems[c] != NULL);
 
+        /* Copied rows must carry their null state across the rebuild —
+         * mirror ray_insert_fn's copy loops (sentinel survives the raw
+         * copy but RAY_ATTR_HAS_NULLS would otherwise be dropped). */
+        bool src_has_nulls = (orig_col->attrs & RAY_ATTR_HAS_NULLS) != 0;
         if (ct == RAY_STR) {
             for (int64_t r = 0; r < nrows; r++) {
                 if (r == match_row && has_new_val) {
                     new_col = append_atom_to_col(new_col, row_elems[c]);
+                } else if (src_has_nulls && ray_vec_is_null(orig_col, r)) {
+                    new_col = ray_str_vec_append(new_col, "", 0);
+                    if (!RAY_IS_ERR(new_col))
+                        ray_vec_set_null(new_col, new_col->len - 1, true);
                 } else {
                     size_t slen = 0;
                     const char* sp = ray_str_vec_get(orig_col, r, &slen);
@@ -10811,6 +10819,8 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
                 } else {
                     int64_t sym_val = sym_cell_runtime_id(orig_col, r);
                     new_col = ray_vec_append(new_col, &sym_val);
+                    if (!RAY_IS_ERR(new_col) && src_has_nulls && ray_vec_is_null(orig_col, r))
+                        ray_vec_set_null(new_col, new_col->len - 1, true);
                 }
                 if (RAY_IS_ERR(new_col)) { ray_release(result); ray_release(tbl); ray_release(key_sym); ray_release(row); return new_col; }
             }
@@ -10822,6 +10832,8 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
                     new_col = append_atom_to_col(new_col, row_elems[c]);
                 } else {
                     new_col = ray_vec_append(new_col, src + r * elem_sz);
+                    if (!RAY_IS_ERR(new_col) && src_has_nulls && ray_vec_is_null(orig_col, r))
+                        ray_vec_set_null(new_col, new_col->len - 1, true);
                 }
                 if (RAY_IS_ERR(new_col)) { ray_release(result); ray_release(tbl); ray_release(key_sym); ray_release(row); return new_col; }
             }
