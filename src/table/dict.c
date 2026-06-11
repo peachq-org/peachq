@@ -611,6 +611,8 @@ ray_t* ray_dict_remove(ray_t* d, ray_t* key_atom) {
             if (!nk || RAY_IS_ERR(nk)) { ray_release(new_keys); ray_release(d); return nk ? nk : ray_error("oom", NULL); }
             new_keys = nk;
         }
+        /* Key ids copied verbatim — resolve over the source keys' domain. */
+        ray_sym_vec_adopt_domain(new_keys, keys);
     } else {
         uint8_t esz = ray_sym_elem_size(keys->type, keys->attrs);
         const uint8_t* base = (const uint8_t*)ray_data(keys);
