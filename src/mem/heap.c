@@ -32,6 +32,7 @@
 #include "sys.h"
 #include "core/platform.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include "lang/eval.h"
 #include "store/hnsw.h"
 #include "store/csr.h"
@@ -594,6 +595,13 @@ static void ray_release_owned_refs(ray_t* v) {
     if (v->type == RAY_STR && v->str_pool && !RAY_IS_ERR(v->str_pool))
         ray_release(v->str_pool);
 
+    /* RAY_SYM vec: drop the resolution-domain ref (aux bytes 8-15).
+     * No-op for the immortal runtime singleton — the common case. */
+    if (v->type == RAY_SYM && v->sym_domain) {
+        ray_sym_domain_release(v->sym_domain);
+        return;
+    }
+
     if (RAY_IS_PARTED(v->type)) {
         int64_t n_segs = v->len;
         ray_t** segs = (ray_t**)ray_data(v);
@@ -699,6 +707,13 @@ bool ray_retain_owned_refs(ray_t* v) {
     if (v->type == RAY_STR && v->str_pool && !RAY_IS_ERR(v->str_pool))
         ray_retain(v->str_pool);
 
+    /* RAY_SYM vec: the header copy carried the domain pointer — take a
+     * ref.  No-op for the immortal runtime singleton. */
+    if (v->type == RAY_SYM && v->sym_domain) {
+        ray_sym_domain_retain(v->sym_domain);
+        return true;
+    }
+
     if (RAY_IS_PARTED(v->type)) {
         int64_t n_segs = v->len;
         ray_t** segs = (ray_t**)ray_data(v);
@@ -796,6 +811,15 @@ static void ray_detach_owned_refs(ray_t* v) {
 
     if (v->type == RAY_STR) {
         v->str_pool = NULL;
+    }
+
+    /* RAY_SYM vec: domain ref transferred elsewhere (e.g. the header
+     * memcpy in ray_scratch_realloc) — clear so ray_free won't drop it.
+     * The defensive ray_sym_vec_domain fallback covers any reader that
+     * sees the detached header. */
+    if (v->type == RAY_SYM) {
+        v->sym_domain = NULL;
+        return;
     }
 
     if (RAY_IS_PARTED(v->type)) {

@@ -49,6 +49,7 @@
 #include "store/fileio.h"
 #include "store/splay.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include "vec/str.h"
 
 #include <inttypes.h>
@@ -1986,14 +1987,24 @@ typedef struct {
     uint8_t attrs;
     int64_t rows;
     bool had_nulls;
+    /* SYM columns: the target symfile's domain (shared, borrowed from
+     * the caller).  Cells are encoded as positions in it — the freshly
+     * parsed chunk vecs are runtime-domain, so each cell's string is
+     * find-or-appended into the domain (the flip, Task 7b).  Width is
+     * fixed at W32: a streaming writer can't know the final vocabulary
+     * before the last chunk, and W32 covers any STRL count. */
+    struct ray_sym_domain_s* dom;
 } csv_splayed_col_writer_t;
 
 static ray_err_t csv_splayed_writer_open(csv_splayed_col_writer_t* w,
                                          const char* dir, int64_t name_id,
-                                         int8_t type) {
+                                         int8_t type,
+                                         struct ray_sym_domain_s* dom) {
     memset(w, 0, sizeof(*w));
     w->type = type;
     w->attrs = (type == RAY_SYM) ? RAY_SYM_W32 : 0;
+    w->dom = dom;
+    if (type == RAY_SYM && !dom) return RAY_ERR_IO;
 
     ray_t* name_atom = ray_sym_str(name_id);
     if (!name_atom) return RAY_ERR_CORRUPT;
@@ -2024,14 +2035,24 @@ static ray_err_t csv_splayed_writer_append(csv_splayed_col_writer_t* w,
     if (n < 0) return RAY_ERR_CORRUPT;
 
     if (w->type == RAY_SYM) {
+        /* Encode cells as positions in the target symfile's domain:
+         * resolve each cell through the chunk vec's own domain and
+         * find-or-append into the target (distinct work rides the
+         * write).  The domain is flushed before the column files are
+         * committed (close), preserving the sym-first crash ordering. */
         uint32_t buf[8192];
-        void* data = ray_data(col);
         for (int64_t off = 0; off < n; ) {
             int64_t cnt = n - off;
             if (cnt > (int64_t)(sizeof(buf) / sizeof(buf[0])))
                 cnt = (int64_t)(sizeof(buf) / sizeof(buf[0]));
-            for (int64_t i = 0; i < cnt; i++)
-                buf[i] = (uint32_t)ray_read_sym(data, off + i, col->type, col->attrs);
+            for (int64_t i = 0; i < cnt; i++) {
+                ray_t* s = ray_sym_vec_cell(col, off + i);
+                if (!s) return RAY_ERR_CORRUPT;
+                int64_t pos = ray_sym_domain_intern(w->dom, ray_str_ptr(s),
+                                                    ray_str_len(s));
+                if (pos < 0) return RAY_ERR_OOM;
+                buf[i] = (uint32_t)pos;
+            }
             if (fwrite(buf, sizeof(uint32_t), (size_t)cnt, w->fp) != (size_t)cnt)
                 return RAY_ERR_IO;
             off += cnt;
@@ -2056,7 +2077,10 @@ static ray_err_t csv_splayed_writer_close(csv_splayed_col_writer_t* w) {
         hdr.type = w->type;
         hdr.attrs = w->attrs;
         hdr.len = w->rows;
-        hdr.rc = (w->type == RAY_SYM) ? ray_sym_count() : 0;
+        /* SYM: header rc = the symfile's count (the loader's O(1)
+         * fast-reject against the FILE domain). */
+        hdr.rc = (w->type == RAY_SYM)
+            ? (uint32_t)ray_sym_domain_count(w->dom) : 0;
         if (w->had_nulls) hdr.attrs |= RAY_ATTR_HAS_NULLS;
         if (fseek(w->fp, 0, SEEK_SET) != 0 ||
             fwrite(&hdr, 1, 32, w->fp) != 32)
@@ -2216,14 +2240,18 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
                 munmap(buf, file_size);
                 return tbl ? ray_err_from_obj(tbl) : RAY_ERR_IO;
             }
-            err = ray_splay_save_bulk(tbl, dir, NULL);
-            ray_release(tbl);
-            if (err == RAY_OK) {
-                char sym_path[1024];
-                int n = snprintf(sym_path, sizeof(sym_path), "%s/sym", dir);
-                if (n < 0 || (size_t)n >= sizeof(sym_path)) err = RAY_ERR_RANGE;
-                else err = ray_sym_save_bulk(sym_path);
+            /* Splay save owns the symfile now: dir/sym is the table's
+             * domain (distinct-merge + position encoding); symbol-free
+             * tables write none. */
+            char sym_path[1024];
+            int n = snprintf(sym_path, sizeof(sym_path), "%s/sym", dir);
+            if (n < 0 || (size_t)n >= sizeof(sym_path)) {
+                ray_release(tbl);
+                munmap(buf, file_size);
+                return RAY_ERR_RANGE;
             }
+            err = ray_splay_save_bulk(tbl, dir, sym_path);
+            ray_release(tbl);
             munmap(buf, file_size);
             return err;
         }
@@ -2235,32 +2263,62 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
         return err;
     }
 
-    ray_t* schema = ray_vec_new(RAY_I64, ncols);
-    if (!schema || RAY_IS_ERR(schema)) {
-        munmap(buf, file_size);
-        return schema ? ray_err_from_obj(schema) : RAY_ERR_OOM;
-    }
-    schema->len = ncols;
-    memcpy(ray_data(schema), col_name_ids, (size_t)ncols * sizeof(int64_t));
+    /* The .d schema is the commit marker and is written LAST (crash-safe
+     * ordering: symfile → columns → .d; see ray_splay_save).  Remove any
+     * pre-existing .d up front: the streaming writer renames column files
+     * into place one by one, so a stale .d from a previous run could pair
+     * an old schema with a partial mix of new columns — a *corrupt* table.
+     * Without a .d the dir reads as a *missing* table until commit. */
     char schema_path[1024];
     int sn = snprintf(schema_path, sizeof(schema_path), "%s/.d", dir);
-    if (sn < 0 || (size_t)sn >= sizeof(schema_path))
-        err = RAY_ERR_RANGE;
-    else
-        err = ray_col_save_bulk(schema, schema_path);
-    ray_release(schema);
-    if (err != RAY_OK) {
+    if (sn < 0 || (size_t)sn >= sizeof(schema_path)) {
         munmap(buf, file_size);
-        return err;
+        return RAY_ERR_RANGE;
+    }
+    remove(schema_path); /* best-effort; ENOENT is the common case */
+
+    /* SYM columns encode against the table's symfile domain (dir/sym):
+     * open-or-create it up front; cells intern as they stream. */
+    struct ray_sym_domain_s* sym_dom = NULL;
+    {
+        bool any_sym = false;
+        for (int c = 0; c < ncols; c++)
+            if (resolved_types[c] == RAY_SYM) any_sym = true;
+        if (any_sym) {
+            char sym_path[1024];
+            int n = snprintf(sym_path, sizeof(sym_path), "%s/sym", dir);
+            if (n < 0 || (size_t)n >= sizeof(sym_path)) {
+                munmap(buf, file_size);
+                return RAY_ERR_RANGE;
+            }
+            sym_dom = ray_sym_domain_open_or_create(sym_path);
+            if (!sym_dom) {
+                munmap(buf, file_size);
+                return RAY_ERR_IO;
+            }
+            /* Empty-vocabulary seeding: a header-only CSV streams no
+             * cells, and ray_sym_domain_flush no-ops at count ==
+             * disk_count (0 == 0 for a freshly created domain) — no
+             * symfile would be written and the table would be
+             * unloadable.  Seed the position-0 "" so the flush below
+             * always persists a count>=1 file for SYM tables. */
+            if (ray_sym_domain_count(sym_dom) == 0 &&
+                ray_sym_domain_intern(sym_dom, "", 0) != 0) {
+                ray_sym_domain_release(sym_dom);
+                munmap(buf, file_size);
+                return RAY_ERR_OOM;
+            }
+        }
     }
 
     csv_splayed_col_writer_t writers[CSV_MAX_COLS];
     memset(writers, 0, sizeof(writers));
     for (int c = 0; c < ncols; c++) {
         err = csv_splayed_writer_open(&writers[c], dir, col_name_ids[c],
-                                      resolved_types[c]);
+                                      resolved_types[c], sym_dom);
         if (err != RAY_OK) {
             for (int j = 0; j < c; j++) csv_splayed_writer_abort(&writers[j]);
+            if (sym_dom) ray_sym_domain_release(sym_dom);
             munmap(buf, file_size);
             return err;
         }
@@ -2307,6 +2365,12 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
         chunk_offset = next_offset;
     }
 
+    /* Flush the symfile BEFORE committing column files (writer_close
+     * renames tmp → final): columns must never reference positions the
+     * symfile doesn't persist (sym-first crash ordering). */
+    if (err == RAY_OK && sym_dom)
+        err = ray_sym_domain_flush(sym_dom, false);
+
     for (int c = 0; c < ncols; c++) {
         ray_err_t cerr = (err == RAY_OK) ? csv_splayed_writer_close(&writers[c])
                                          : RAY_ERR_IO;
@@ -2314,13 +2378,35 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
         if (err != RAY_OK) csv_splayed_writer_abort(&writers[c]);
     }
 
+    /* .d LAST — the commit marker.  All column files are renamed into
+     * place by now and the symfile is flushed; a crash or error before
+     * this point leaves a dir without .d, which loads as a *missing*
+     * table, never a corrupt one. */
     if (err == RAY_OK) {
-        char sym_path[1024];
-        int n = snprintf(sym_path, sizeof(sym_path), "%s/sym", dir);
-        if (n < 0 || (size_t)n >= sizeof(sym_path)) err = RAY_ERR_RANGE;
-        else err = ray_sym_save_bulk(sym_path);
+        ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
+        if (!schema || RAY_IS_ERR(schema)) {
+            if (schema) ray_release(schema);
+            schema = NULL;
+            err = RAY_ERR_OOM;
+        }
+        for (int c = 0; schema && c < ncols; c++) {
+            ray_t* na = ray_sym_str(col_name_ids[c]);
+            if (na)
+                schema = ray_str_vec_append(schema, ray_str_ptr(na),
+                                            ray_str_len(na));
+            if (!na || !schema || RAY_IS_ERR(schema)) {
+                if (schema && RAY_IS_ERR(schema)) ray_release(schema);
+                schema = NULL;
+                err = RAY_ERR_OOM;
+            }
+        }
+        if (schema) {
+            err = ray_col_save_bulk(schema, schema_path);
+            ray_release(schema);
+        }
     }
 
+    if (sym_dom) ray_sym_domain_release(sym_dom);
     munmap(buf, file_size);
     return err;
 }
@@ -2517,7 +2603,17 @@ ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool 
         if (trace)
             fprintf(stderr, "csv.parted: save part=%" PRId64 " rows=%" PRId64 " leaf=%s\n",
                     part, cnt, leaf);
-        err = ray_splay_save_bulk(tbl, leaf, NULL);
+        /* Every partition encodes against the parted root's shared
+         * symfile (root/sym) — one domain for the whole table. */
+        char root_sym[1024];
+        int sn = snprintf(root_sym, sizeof(root_sym), "%s/sym", root);
+        if (sn < 0 || (size_t)sn >= sizeof(root_sym)) {
+            ray_release(tbl);
+            scratch_free(row_offsets_hdr);
+            err = RAY_ERR_RANGE;
+            break;
+        }
+        err = ray_splay_save_bulk(tbl, leaf, root_sym);
         ray_release(tbl);
         scratch_free(row_offsets_hdr);
         if (err != RAY_OK) {
@@ -2532,22 +2628,9 @@ ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool 
         part++;
     }
 
-    if (err == RAY_OK) {
-        char sym_path[1024];
-        int n = snprintf(sym_path, sizeof(sym_path), "%s/sym", root);
-        if (n < 0 || (size_t)n >= sizeof(sym_path))
-            err = RAY_ERR_RANGE;
-        else {
-            if (trace)
-                fprintf(stderr, "csv.parted: save sym=%s parts=%" PRId64 "\n",
-                        sym_path, part);
-            err = ray_sym_save_bulk(sym_path);
-            if (trace && err != RAY_OK)
-                fprintf(stderr, "csv.parted: sym save failure err=%s\n",
-                        ray_err_code_str(err));
-        }
-    }
-
+    /* root/sym is maintained per-partition by ray_splay_save_bulk
+     * (distinct-merge + flush before each partition's columns) — no
+     * whole-dictionary dump at the end anymore. */
     munmap(buf, file_size);
     if (trace)
         fprintf(stderr, "csv.parted: done err=%s\n", ray_err_code_str(err));
@@ -2785,8 +2868,9 @@ static void csv_write_cell(csv_writer_t* w, const csv_col_info_t* ci, int64_t r)
         csv_write_timestamp(w, ((const int64_t*)d)[dr]);
         break;
     case RAY_SYM: {
-        int64_t sym = ray_read_sym(d, dr, t, ci->attrs);
-        ray_t* s = ray_sym_str(sym);
+        /* cell-data: resolve through the column's domain (data_owner is
+         * the slice parent when sliced — same data, same dictionary). */
+        ray_t* s = ray_sym_vec_cell(ci->data_owner, dr);
         if (s) csv_write_str(w, ray_str_ptr(s), ray_str_len(s));
         /* unknown sym id -> empty field rather than a phantom value */
         break;

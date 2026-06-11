@@ -406,6 +406,41 @@ static ray_t* promote_vals_to_list(ray_t* vals) {
 }
 
 /* --------------------------------------------------------------------------
+ * SYM-key mutation boundary (sym-domain Phase 2, Task 7a).
+ *
+ * A dict whose keys vec resolves over a read-only FILE domain cannot
+ * absorb a NEW symbol into that domain, and ray_dict_find_idx compares
+ * the (always runtime-domain) key atom's id raw against cell ids — only
+ * valid once the keys are runtime-domain.  Per the spec's mutation
+ * boundary, an upsert on FILE-domain SYM keys first re-expresses the
+ * keys into the runtime domain: a per-cell pass over the domain's
+ * runtime-id LUT, riding the COW the upsert performs anyway.  W64
+ * output (runtime ids don't fit narrow file widths); SYM null (id 0)
+ * maps to runtime 0 via the position-0 "" reservation.
+ * Behavior-neutral today: no FILE-domain dicts exist pre-flip.
+ * -------------------------------------------------------------------------- */
+
+static ray_t* dict_sym_keys_to_runtime(ray_t* keys) {
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(keys);
+    const int64_t* lut = ray_sym_domain_runtime_lut(dom);
+    if (!lut) return ray_error("oom", NULL);   /* FILE domain: NULL = OOM */
+    int64_t cnt = ray_sym_domain_count(dom);
+
+    ray_t* nk = ray_sym_vec_new(RAY_SYM_W64, keys->len);
+    if (!nk || RAY_IS_ERR(nk)) return nk;
+    nk->len = keys->len;
+    int64_t* out = (int64_t*)ray_data(nk);
+    for (int64_t i = 0; i < keys->len; i++) {
+        int64_t p = ray_read_sym(ray_data(keys), i, RAY_SYM, keys->attrs);
+        /* Out-of-range position = corrupt input; map to 0 (SYM null)
+         * rather than leaking a bogus id into the runtime table. */
+        out[i] = (p >= 0 && p < cnt) ? lut[p] : 0;
+    }
+    if (keys->attrs & RAY_ATTR_HAS_NULLS) nk->attrs |= RAY_ATTR_HAS_NULLS;
+    return nk;
+}
+
+/* --------------------------------------------------------------------------
  * ray_dict_upsert — set d[key_atom] = val.
  *
  * Ownership: consumes `d`; on success the ref is transferred into the
@@ -441,6 +476,26 @@ ray_t* ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val) {
         ray_t* d2 = ray_dict_new(keys, vals);
         if (!d2 || RAY_IS_ERR(d2)) return d2;
         return ray_dict_upsert(d2, key_atom, val);
+    }
+
+    /* Mutation boundary: FILE-domain SYM keys re-express to runtime
+     * BEFORE the key lookup (find_idx raw-compares the runtime key
+     * atom's id against cell ids).  See dict_sym_keys_to_runtime. */
+    {
+        ray_t* k0 = ray_dict_slots(d)[0];
+        if (k0 && k0->type == RAY_SYM &&
+            ray_sym_vec_domain(k0) != ray_sym_runtime_domain()) {
+            d = ray_cow(d);
+            if (!d || RAY_IS_ERR(d)) return d;
+            ray_t** sl = ray_dict_slots(d);
+            ray_t* rk = dict_sym_keys_to_runtime(sl[0]);
+            if (!rk || RAY_IS_ERR(rk)) {
+                ray_release(d);
+                return rk ? rk : ray_error("oom", NULL);
+            }
+            ray_release(sl[0]);
+            sl[0] = rk;
+        }
     }
 
     int64_t idx = ray_dict_find_idx(d, key_atom);
@@ -611,6 +666,8 @@ ray_t* ray_dict_remove(ray_t* d, ray_t* key_atom) {
             if (!nk || RAY_IS_ERR(nk)) { ray_release(new_keys); ray_release(d); return nk ? nk : ray_error("oom", NULL); }
             new_keys = nk;
         }
+        /* Key ids copied verbatim — resolve over the source keys' domain. */
+        ray_sym_vec_adopt_domain(new_keys, keys);
     } else {
         uint8_t esz = ray_sym_elem_size(keys->type, keys->attrs);
         const uint8_t* base = (const uint8_t*)ray_data(keys);

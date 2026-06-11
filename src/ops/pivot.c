@@ -24,16 +24,39 @@
 #include "ops/internal.h"
 #include "ops/hash.h"
 
-/* For a SYM-scalar broadcast input (atom -RAY_SYM, or a 1-elem
- * RAY_SYM_W{8,16,32,64} vec used as scalar), return the sym ID.
- * Hides the atom/vec dispatch: ray_t->i64 aliases ray_t->len, so
- * reading `v->i64` on a vec silently yields `len` (= 1) instead of
- * the element value.  Always use this helper to read the sym ID
- * from a then_v/else_v that may be either atom or 1-elem vec. */
-static inline int64_t sym_scalar_id(ray_t* v) {
-    return ray_is_atom(v)
-        ? v->i64
-        : ray_read_sym(ray_data(v), 0, v->type, v->attrs);
+/* Resolved string atom (borrowed) of a SYM-scalar broadcast input
+ * (atom -RAY_SYM, or a 1-elem RAY_SYM_W{8,16,32,64} vec used as
+ * scalar).  Atoms are runtime-domain by design; a vec scalar is
+ * CELL-DATA and resolves through its own domain.  Hides the atom/vec
+ * dispatch: ray_t->i64 aliases ray_t->len, so reading `v->i64` on a
+ * vec silently yields `len` (= 1) instead of the element value —
+ * always go through these helpers for a then_v/else_v that may be
+ * either atom or 1-elem vec. */
+static inline ray_t* sym_scalar_str(ray_t* v) {
+    return ray_is_atom(v) ? ray_sym_str(v->i64) : ray_sym_vec_cell(v, 0);
+}
+
+/* A SYM id taken from `col`'s cells, re-expressed in the RUNTIME domain
+ * (fresh SYM output vecs built here are runtime-domain).  Fast path: a
+ * runtime-domain column's ids ARE runtime ids — raw copy.  Otherwise a
+ * lock-free read of the per-domain runtime-id LUT (pivot is sequential,
+ * so the LUT's first-request vocabulary intern is safe here; mirrors
+ * lang/internal.h sym_id_runtime — exact no-op while every domain is
+ * the runtime singleton). */
+static inline int64_t sym_id_runtime(ray_t* col, int64_t id) {
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
+    if (dom == ray_sym_runtime_domain()) return id;
+    const int64_t* lut = ray_sym_domain_runtime_lut(dom);
+    if (!lut || id < 0 || id >= ray_sym_domain_count(dom)) return -1;
+    return lut[id];
+}
+
+static inline int64_t sym_cell_runtime_id(ray_t* v, int64_t i) {
+    return sym_id_runtime(v, ray_read_sym(ray_data(v), i, v->type, v->attrs));
+}
+
+static inline int64_t sym_scalar_runtime_id(ray_t* v) {
+    return ray_is_atom(v) ? v->i64 : sym_cell_runtime_id(v, 0);
 }
 
 /* ============================================================================
@@ -123,7 +146,7 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
                         sp = ray_str_vec_get(then_v, 0, &sl);
                         if (!sp) { sp = ""; sl = 0; }
                     } else if (RAY_IS_SYM(then_v->type) || then_v->type == -RAY_SYM) {
-                        ray_t* s = ray_sym_str(sym_scalar_id(then_v));
+                        ray_t* s = sym_scalar_str(then_v);
                         sp = s ? ray_str_ptr(s) : "";
                         sl = s ? ray_str_len(s) : 0;
                     } else { sp = ""; sl = 0; }
@@ -131,9 +154,8 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
                     sp = ray_str_vec_get(then_v, i, &sl);
                     if (!sp) { sp = ""; sl = 0; }
                 } else {
-                    /* RAY_SYM column */
-                    int64_t sid = ray_read_sym(ray_data(then_v), i, then_v->type, then_v->attrs);
-                    ray_t* sa = ray_sym_str(sid);
+                    /* RAY_SYM column: cell-data, resolve through its domain */
+                    ray_t* sa = ray_sym_vec_cell(then_v, i);
                     sp = sa ? ray_str_ptr(sa) : "";
                     sl = sa ? ray_str_len(sa) : 0;
                 }
@@ -146,7 +168,7 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
                         sp = ray_str_vec_get(else_v, 0, &sl);
                         if (!sp) { sp = ""; sl = 0; }
                     } else if (RAY_IS_SYM(else_v->type) || else_v->type == -RAY_SYM) {
-                        ray_t* s = ray_sym_str(sym_scalar_id(else_v));
+                        ray_t* s = sym_scalar_str(else_v);
                         sp = s ? ray_str_ptr(s) : "";
                         sl = s ? ray_str_len(s) : 0;
                     } else { sp = ""; sl = 0; }
@@ -154,9 +176,8 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
                     sp = ray_str_vec_get(else_v, i, &sl);
                     if (!sp) { sp = ""; sl = 0; }
                 } else {
-                    /* RAY_SYM column */
-                    int64_t sid = ray_read_sym(ray_data(else_v), i, else_v->type, else_v->attrs);
-                    ray_t* sa = ray_sym_str(sid);
+                    /* RAY_SYM column: cell-data, resolve through its domain */
+                    ray_t* sa = ray_sym_vec_cell(else_v, i);
                     sp = sa ? ray_str_ptr(sa) : "";
                     sl = sa ? ray_str_len(sa) : 0;
                 }
@@ -166,28 +187,29 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
         }
     } else if (out_type == RAY_SYM) {
         /* SYM columns may have narrow widths (W8/W16/W32) — use ray_read_sym.
-         * Scalars may be string atoms that need interning. Output is always W64. */
+         * Scalars may be string atoms that need interning. Output is always W64.
+         * The result is a fresh runtime-domain vec that can mix cells of
+         * TWO source columns, so every cell id is re-expressed in the
+         * runtime domain (raw-copy fast path while domains == runtime). */
         int64_t t_scalar = 0, e_scalar = 0;
         if (then_scalar) {
             if (then_v->type == -RAY_STR) {
                 t_scalar = ray_sym_intern(ray_str_ptr(then_v), ray_str_len(then_v));
             } else {
-                t_scalar = sym_scalar_id(then_v);
+                t_scalar = sym_scalar_runtime_id(then_v);
             }
         }
         if (else_scalar) {
             if (else_v->type == -RAY_STR) {
                 e_scalar = ray_sym_intern(ray_str_ptr(else_v), ray_str_len(else_v));
             } else {
-                e_scalar = sym_scalar_id(else_v);
+                e_scalar = sym_scalar_runtime_id(else_v);
             }
         }
         int64_t* dst = (int64_t*)ray_data(result);
         for (int64_t i = 0; i < len; i++) {
-            int64_t tv = then_scalar ? t_scalar
-                : ray_read_sym(ray_data(then_v), i, then_v->type, then_v->attrs);
-            int64_t ev = else_scalar ? e_scalar
-                : ray_read_sym(ray_data(else_v), i, else_v->type, else_v->attrs);
+            int64_t tv = then_scalar ? t_scalar : sym_cell_runtime_id(then_v, i);
+            int64_t ev = else_scalar ? e_scalar : sym_cell_runtime_id(else_v, i);
             dst[i] = cond_p[i] ? tv : ev;
         }
     } else if (out_type == RAY_BOOL || out_type == RAY_U8) {
@@ -561,6 +583,11 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
         if (idx_vecs[k]->type == RAY_STR)
             col_propagate_str_pool(new_col, idx_vecs[k]);
+        /* Output-vec rule (Task-2 review): a SYM index column raw-copies
+         * cell ids from its source, so it must resolve over the source's
+         * dictionary.  No-op while every domain is the runtime singleton. */
+        if (new_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_col, idx_vecs[k]);
 
         ray_op_ext_t* ie = find_ext(g, ext->pivot.index_cols[k]->id);
         result = ray_table_add_col(result, ie->sym, new_col);
@@ -633,11 +660,22 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             }
         }
 
+        /* Output-vec rule (sym-domain Phase 2): a SYM value column
+         * (MIN/MAX/FIRST/LAST over a SYM input) carries raw cell ids
+         * accumulated from `vcol` — it must resolve over vcol's
+         * dictionary.  The memset-0 fill for missing cells is the SYM
+         * null (id 0) in any domain.  No-op while every domain is the
+         * runtime singleton. */
+        if (new_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_col, vcol);
+
         /* Column name from pivot value — match pivot_val_to_sym semantics */
         int64_t pval = pv_vals[p];
         int64_t col_sym;
         if (pcol->type == RAY_SYM) {
-            col_sym = pval;
+            /* pivot value (cell-data) becomes a column NAME — names live
+             * in the runtime table, so re-express the id there. */
+            col_sym = sym_id_runtime(pcol, pval);
         } else if (pvt_wide) {
             /* GUID: format 16 bytes as xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.
              * pval is a source row index into pvt_base. */
