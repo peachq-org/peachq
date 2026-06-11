@@ -530,14 +530,32 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
         int64_t* dst = (int64_t*)ray_data(result);
         int64_t cnt_a = ray_sym_domain_count(ray_sym_vec_domain(a));
         int64_t cnt_b = ray_sym_domain_count(ray_sym_vec_domain(b));
+        /* An out-of-range position means corrupt input — never silently
+         * map it to 0 (the SYM null ''): loud error instead. */
         for (int64_t i = 0; i < a->len; i++) {
             int64_t val = ray_read_sym(ray_data(a), i, a->type, a->attrs);
-            if (sym_lut_a) val = (val >= 0 && val < cnt_a) ? sym_lut_a[val] : 0;
+            if (sym_lut_a) {
+                if (val < 0 || val >= cnt_a) {
+                    ray_release(result);
+                    return ray_error("corrupt",
+                        "sym position %lld out of domain range %lld in concat",
+                        (long long)val, (long long)cnt_a);
+                }
+                val = sym_lut_a[val];
+            }
             dst[i] = val;
         }
         for (int64_t i = 0; i < b->len; i++) {
             int64_t val = ray_read_sym(ray_data(b), i, b->type, b->attrs);
-            if (sym_lut_b) val = (val >= 0 && val < cnt_b) ? sym_lut_b[val] : 0;
+            if (sym_lut_b) {
+                if (val < 0 || val >= cnt_b) {
+                    ray_release(result);
+                    return ray_error("corrupt",
+                        "sym position %lld out of domain range %lld in concat",
+                        (long long)val, (long long)cnt_b);
+                }
+                val = sym_lut_b[val];
+            }
             dst[a->len + i] = val;
         }
     } else if (a->type == RAY_SYM && a_esz != b_esz) {
