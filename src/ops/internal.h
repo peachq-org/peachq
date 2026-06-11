@@ -612,7 +612,8 @@ typedef enum {
     EXPR_BAIL_ROOT = 0, EXPR_BAIL_SIZE, EXPR_BAIL_DEPTH, EXPR_BAIL_REGS,
     EXPR_BAIL_INS, EXPR_BAIL_MAPCOMMON, EXPR_BAIL_STR, EXPR_BAIL_NULLS,
     EXPR_BAIL_SLICE, EXPR_BAIL_SYM_DOMAIN, EXPR_BAIL_CONST,
-    EXPR_BAIL_NULL_SHAPE, EXPR_BAIL_OTHER, EXPR_BAIL__N
+    EXPR_BAIL_NULL_SHAPE, /* nullable program hit a not-yet-null-capable instruction */
+    EXPR_BAIL_OTHER, EXPR_BAIL__N
 } expr_bail_t;
 
 extern uint64_t ray_expr_bail_counts[EXPR_BAIL__N];
@@ -629,6 +630,7 @@ typedef struct {
     uint8_t dst;        /* destination register */
     uint8_t src1;       /* source 1 register */
     uint8_t src2;       /* source 2 register (0xFF for unary) */
+    uint8_t null_aware; /* 1 = use sentinel-checking kernel variant */
 } expr_ins_t;
 
 enum { REG_SCAN = 0, REG_CONST = 1, REG_SCRATCH = 2 };
@@ -646,6 +648,7 @@ typedef struct {
         int8_t      col_type;   /* original column type (REG_SCAN only) */
         uint8_t     col_attrs;  /* column attrs — RAY_SYM width (REG_SCAN only) */
         bool        is_parted;  /* true if this SCAN refs a parted column */
+        bool        nullable;   /* lanes may contain NULL_I64 / NaN */
         const void* data;       /* column data pointer (REG_SCAN only) */
         ray_t*       parted_col; /* parted wrapper (is_parted only) */
         double      const_f64;  /* scalar value (REG_CONST) */
