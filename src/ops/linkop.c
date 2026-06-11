@@ -191,6 +191,9 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     }
     if (!result || RAY_IS_ERR(result)) return result;
     result->len = n;
+    /* The gather below copies SYM cell ids verbatim from the dim-table
+     * column — resolve over its domain (slice-aware via slice_parent). */
+    if (out_type == RAY_SYM) ray_sym_vec_adopt_domain(result, target_col);
 
     uint8_t out_esz = ray_sym_elem_size(out_type, result->attrs);
     if (out_esz > 0) memset(ray_data(result), 0, (size_t)n * out_esz);

@@ -2759,6 +2759,10 @@ static ray_t* query_materialize_parted_col(ray_t* col) {
         }
         off += seg->len;
     }
+    /* The memcpy above copied SYM cell ids verbatim from the partition
+     * segments — resolve over their domain (all segments share the root
+     * symfile's domain; sym_domain_rep returns the first SYM segment). */
+    if (flat->type == RAY_SYM) ray_sym_vec_adopt_domain(flat, sym_domain_rep(col));
     return flat;
 }
 
