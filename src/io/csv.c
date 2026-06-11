@@ -2313,6 +2313,18 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
                 munmap(buf, file_size);
                 return RAY_ERR_IO;
             }
+            /* Empty-vocabulary seeding: a header-only CSV streams no
+             * cells, and ray_sym_domain_flush no-ops at count ==
+             * disk_count (0 == 0 for a freshly created domain) — no
+             * symfile would be written and the table would be
+             * unloadable.  Seed the position-0 "" so the flush below
+             * always persists a count>=1 file for SYM tables. */
+            if (ray_sym_domain_count(sym_dom) == 0 &&
+                ray_sym_domain_intern(sym_dom, "", 0) != 0) {
+                ray_sym_domain_release(sym_dom);
+                munmap(buf, file_size);
+                return RAY_ERR_OOM;
+            }
         }
     }
 
