@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "lang/internal.h"  /* sym_cell_runtime_id (sym-domain Phase 2) */
 
 /* ============================================================================
  * Window function execution
@@ -52,8 +53,10 @@ static inline bool win_keys_differ(ray_t* const* vecs, uint8_t n_keys,
             /* Partition equality of two rows of ONE column: both ids
              * live in the same domain, raw index compare is correct
              * for any domain (sym-domain Phase 2 — no change).  Same
-             * holds for the pkey gathers / win_read_* SYM reads below:
-             * within-column equality and index-order keys stay raw. */
+             * holds for the pkey gathers below.  The win_read_* SYM
+             * reads are different: their ids LEAVE the column into
+             * I64/F64 outputs, so they re-express through the cell's
+             * domain into runtime ids (see win_read_i64/f64). */
             if (ray_read_sym(ray_data(col), ra, col->type, col->attrs) !=
                 ray_read_sym(ray_data(col), rb, col->type, col->attrs)) return true;
             break;
@@ -78,6 +81,11 @@ static inline bool win_keys_differ(ray_t* const* vecs, uint8_t n_keys,
     return false;
 }
 
+/* Value readers for lag/lead/first_value/last_value/nth_value and the
+ * numeric frame aggregates.  A SYM cell's id LEAVES its column here
+ * (into an I64/F64 result vec), so it must be re-expressed as a RUNTIME
+ * id through the cell's domain (sym-domain Phase 2) — raw pass-through
+ * when the column is runtime-domain (exact no-op pre-flip). */
 static inline double win_read_f64(ray_t* col, int64_t row) {
     switch (col->type) {
     case RAY_F64: return ((const double*)ray_data(col))[row];
@@ -86,7 +94,7 @@ static inline double win_read_f64(ray_t* col, int64_t row) {
     case RAY_I32: case RAY_DATE: case RAY_TIME:
         return (double)((const int32_t*)ray_data(col))[row];
     case RAY_SYM:
-        return (double)ray_read_sym(ray_data(col), row, col->type, col->attrs);
+        return (double)sym_cell_runtime_id(col, row);
     case RAY_I16: return (double)((const int16_t*)ray_data(col))[row];
     case RAY_BOOL: case RAY_U8: return (double)((const uint8_t*)ray_data(col))[row];
     default: return 0.0;
@@ -100,7 +108,7 @@ static inline int64_t win_read_i64(ray_t* col, int64_t row) {
     case RAY_I32: case RAY_DATE: case RAY_TIME:
         return (int64_t)((const int32_t*)ray_data(col))[row];
     case RAY_SYM:
-        return ray_read_sym(ray_data(col), row, col->type, col->attrs);
+        return sym_cell_runtime_id(col, row);
     case RAY_F64: return (int64_t)((const double*)ray_data(col))[row];
     case RAY_I16: return (int64_t)((const int16_t*)ray_data(col))[row];
     case RAY_BOOL: case RAY_U8: return (int64_t)((const uint8_t*)ray_data(col))[row];
