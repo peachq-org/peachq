@@ -802,6 +802,8 @@ static ray_t* dl_builtin_before(ray_t* tbl, int s_col, int t_col) {
         for (int64_t r = 0; r < nrows; r++)
             if (t_data[r] < sd[r])
                 dst_d[j++] = src_d[r];
+        /* SYM ids copied verbatim — resolve over the source domain. */
+        if (src->type == RAY_SYM) ray_sym_vec_adopt_domain(dst, src);
         out = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
         ray_release(dst);
     }
@@ -1027,6 +1029,22 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value,
         return tbl;
     }
 
+    /* sym-domain Phase 2: for a SYM column, `value` is a runtime-domain
+     * literal id (datalog constants intern at parse), while the cells
+     * are positions in the COLUMN's domain — EDB tables share env table
+     * columns by reference, which may be FILE-domain.  Re-express the
+     * literal once before the scans; absent ⇒ -1, matches no cell
+     * (empty filter result — correct).  Runtime-domain columns keep
+     * the raw id: exact no-op pre-flip. */
+    if (col->type == RAY_SYM) {
+        struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
+        if (dom != ray_sym_runtime_domain()) {
+            ray_t* s = ray_sym_str(value);
+            value = s ? ray_sym_domain_find(dom, ray_str_ptr(s),
+                                            ray_str_len(s)) : -1;
+        }
+    }
+
     int64_t nrows = ray_table_nrows(tbl);
     int64_t ncols = ray_table_ncols(tbl);
 
@@ -1055,6 +1073,8 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value,
         if (!dst) { ray_release(out); return ray_error("memory", "dl_filter_eq: vec_new"); }
         if (RAY_IS_ERR(dst)) { ray_error_free(dst); ray_release(out); return ray_error("memory", "dl_filter_eq: vec_new"); }
         dst->len = count;
+        /* raw SYM cell-id copies resolve over the source's dictionary */
+        if (src->type == RAY_SYM) ray_sym_vec_adopt_domain(dst, src);
         uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
         const uint8_t* src_b = (const uint8_t*)ray_data(src);
         uint8_t* dst_b = (uint8_t*)ray_data(dst);
@@ -1223,6 +1243,8 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
              * pool, so propagate the source's pool onto dst or later
              * reads through pool_off would land in a NULL pool. */
             if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
+            /* SYM ids copied verbatim — resolve over the source domain. */
+            if (src->type == RAY_SYM) ray_sym_vec_adopt_domain(dst, src);
             ray_t* next = ray_table_add_col(out, head_rel->col_names[c], dst);
             ray_release(dst);
             /* Release the partial `out` on failure — ray_table_add_col
@@ -2105,6 +2127,8 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                         j++;
                     }
                 if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
+                /* SYM ids copied verbatim — resolve over the source domain. */
+                if (src->type == RAY_SYM) ray_sym_vec_adopt_domain(dst, src);
                 ray_t* next = ray_table_add_col(out, ray_table_col_name(accum, c), dst);
                 ray_release(dst);
                 if (!next) {
@@ -3173,6 +3197,9 @@ ray_t* ray_retract_fact_fn(ray_t** args, int64_t n) {
         new_v = ray_vec_append(new_v, &v_data[r]);
         if (RAY_IS_ERR(new_v)) { ray_release(new_e); ray_release(new_a); return new_v; }
     }
+    /* SYM ids copied verbatim from the db's attribute column — resolve
+     * over its domain (after appends: vec pointer is final here). */
+    ray_sym_vec_adopt_domain(new_a, a_col);
 
     /* Build result table */
     ray_t* result = ray_table_new(3);
@@ -3209,6 +3236,17 @@ ray_t* ray_scan_eav_fn(ray_t** args, int64_t n) {
         if (attr_arg->type != -RAY_SYM)
             return ray_error("type", "scan-eav: attr must be a symbol");
         int64_t attr_id = attr_arg->i64;
+        /* sym-domain Phase 2: the attr literal is a runtime id; a_col's
+         * cells are positions in ITS domain (the db table may be a
+         * loaded one).  Re-express once; absent ⇒ -1, matches nothing.
+         * Runtime-domain a_col keeps the raw id (no-op pre-flip). */
+        if (a_col->type == RAY_SYM &&
+            ray_sym_vec_domain(a_col) != ray_sym_runtime_domain()) {
+            ray_t* s = ray_sym_str(attr_id);
+            attr_id = s ? ray_sym_domain_find(ray_sym_vec_domain(a_col),
+                                              ray_str_ptr(s), ray_str_len(s))
+                        : -1;
+        }
 
         int64_t e_name = ray_sym_intern("e", 1);
         int64_t v_name = ray_sym_intern("v", 1);
@@ -3252,6 +3290,14 @@ ray_t* ray_scan_eav_fn(ray_t** args, int64_t n) {
 
         int64_t entity_id = entity_arg->i64;
         int64_t attr_id   = attr_arg->i64;
+        /* see the n==2 branch: re-express the attr literal in a_col's domain */
+        if (a_col->type == RAY_SYM &&
+            ray_sym_vec_domain(a_col) != ray_sym_runtime_domain()) {
+            ray_t* s = ray_sym_str(attr_id);
+            attr_id = s ? ray_sym_domain_find(ray_sym_vec_domain(a_col),
+                                              ray_str_ptr(s), ray_str_len(s))
+                        : -1;
+        }
 
         const int64_t* e_data = (const int64_t*)ray_data(e_col);
 
@@ -3312,7 +3358,13 @@ ray_t* ray_pull_fn(ray_t** args, int64_t n) {
 
     for (int64_t r = 0; r < nrows; r++) {
         if (e_data[r] != entity_id) continue;
-        int64_t a_val = ray_read_sym(ray_data(a_col), r, a_col->type, a_col->attrs);
+        /* sym-domain Phase 2: the attribute id flows into a FRESH
+         * runtime-domain keys vec and is compared against the (runtime)
+         * filter literals — re-express the cell as a RUNTIME id (raw
+         * read fast path for runtime-domain columns: no-op pre-flip). */
+        int64_t a_val = (a_col->type == RAY_SYM)
+            ? sym_cell_runtime_id(a_col, r)
+            : ray_read_sym(ray_data(a_col), r, a_col->type, a_col->attrs);
 
         /* Check filter if present */
         if (attr_filter) {
@@ -4027,13 +4079,19 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
             ray_t* col = ray_table_get_col_idx(db, c);
             if (!col) continue;
             if (col->type == RAY_SYM) {
-                /* Convert SYM -> I64: read sym IDs via ray_read_sym */
+                /* Convert SYM -> I64.  The I64 ids flow into datalog's
+                 * runtime-id world (literal compares, joins with parsed
+                 * constants), so each cell must be re-expressed as a
+                 * RUNTIME id (sym-domain Phase 2) — the EAV table may
+                 * carry FILE-domain columns.  Raw-copy fast path when
+                 * the column is runtime-domain (exact no-op pre-flip).
+                 * Mirrors the env-backed EDB conversion below. */
                 ray_t* i64col = ray_vec_new(RAY_I64, nrows_db);
                 if (i64col && !RAY_IS_ERR(i64col)) {
                     i64col->len = nrows_db;
                     int64_t* d = (int64_t*)ray_data(i64col);
                     for (int64_t r = 0; r < nrows_db; r++)
-                        d[r] = ray_read_sym(ray_data(col), r, col->type, col->attrs);
+                        d[r] = sym_cell_runtime_id(col, r);
                     eav_tbl = ray_table_add_col(eav_tbl, ray_table_col_name(db, c), i64col);
                     ray_release(i64col);
                 }
@@ -4152,8 +4210,14 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
                     }
                     i64col->len = nrows_env;
                     int64_t* d = (int64_t*)ray_data(i64col);
+                    /* The I64 ids flow into datalog's runtime-id world
+                     * (literal compares, joins with parsed constants),
+                     * so each cell must be re-expressed as a RUNTIME id
+                     * (sym-domain Phase 2) — env tables may carry
+                     * FILE-domain columns.  Raw-copy fast path when the
+                     * column is runtime-domain (exact no-op pre-flip). */
                     for (int64_t r = 0; r < nrows_env; r++)
-                        d[r] = ray_read_sym(ray_data(col), r, col->type, col->attrs);
+                        d[r] = sym_cell_runtime_id(col, r);
                     next_clean = ray_table_add_col(clean, ray_table_col_name(env_val, c), i64col);
                     ray_release(i64col);
                 } else {
