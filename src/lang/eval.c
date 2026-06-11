@@ -804,7 +804,32 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                 int     vec_has_nulls = (va & RAY_ATTR_HAS_NULLS) ? 1 : 0;
                 bool    invert = (dag_opcode == OP_NE);
 
-                if (atom_null && !vec_has_nulls) {
+                /* sym-domain Phase 2: the loops below compare RAW cell
+                 * ids, which are positions in the COLUMN's domain.  The
+                 * atom carries a runtime id — re-express it in the
+                 * column's domain once before the loops.  Runtime-domain
+                 * columns keep the raw id (byte-identical fast path).
+                 * Literal absent from the domain ⇒ equals no cell and,
+                 * with a non-null atom, no null row either: == all-false,
+                 * != all-true — same as the per-element atom rules. */
+                int target_absent = 0;
+                if (!atom_null) {
+                    struct ray_sym_domain_s* dom = ray_sym_vec_domain(vv);
+                    if (dom != ray_sym_runtime_domain()) {
+                        ray_t* ts = ray_sym_str(atom->i64);
+                        int64_t pos = ts ? ray_sym_domain_find(dom,
+                                              ray_str_ptr(ts),
+                                              ray_str_len(ts))
+                                         : -1;
+                        if (pos >= 0) target = pos;
+                        else          target_absent = 1;
+                    }
+                }
+
+                if (target_absent) {
+                    bool fill = invert; /* != absent → true; == absent → false */
+                    for (int64_t i = 0; i < n; i++) obuf[i] = fill;
+                } else if (atom_null && !vec_has_nulls) {
                     /* Atom is null, vec has no nulls — every row is
                      * "not equal" to the null atom (== false, != true). */
                     bool fill = invert; /* != null → true; == null → false */
@@ -1151,6 +1176,11 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
                 if (ray_vec_is_null(vec, idx[i]))
                     ray_vec_set_null(result, i, true);
         }
+        /* Output-vec rule (Task-3 review): the gather raw-copies cell ids
+         * from a single source vec, so the output must resolve over the
+         * source's dictionary.  No-op while every domain is the runtime
+         * singleton. */
+        ray_sym_vec_adopt_domain(result, vec);
         return result;
     }
 
@@ -1521,6 +1551,8 @@ ray_t* ray_fn(ray_t** args, int64_t n) {
     if (params_list) {
         int64_t nparams = ray_len(params_list);
         if (params_list->type == RAY_SYM) {
+            /* name-ids: stays global — param lists are parser-built
+             * runtime SYM vecs of BINDING names, not data cells. */
             int64_t* ids = (int64_t*)ray_data(params_list);
             for (int64_t i = 0; i < nparams; i++)
                 if (ray_sym_is_reserved(ids[i]))
@@ -2673,13 +2705,11 @@ static void ray_register_builtins(void) {
     /* Splayed / partitioned table I/O */
     /* Database storage — splayed and parted table I/O.  Kept under a
      * dedicated `.db.*` namespace so format-specific siblings stay
-     * grouped (set/get/mount per format) and there's room to grow
+     * grouped (set/get per format) and there's room to grow
      * without polluting the top-level builtin namespace. */
     register_vary(".db.splayed.set",   RAY_FN_RESTRICTED, ray_set_splayed_fn);
     register_vary(".db.splayed.get",   RAY_FN_NONE,       ray_get_splayed_fn);
-    register_vary(".db.splayed.mount", RAY_FN_NONE,       ray_db_splayed_mount_fn);
     register_vary(".db.parted.get",    RAY_FN_NONE,       ray_get_parted_fn);
-    register_vary(".db.parted.mount",  RAY_FN_NONE,       ray_db_parted_mount_fn);
 
     /* GUID generation */
     register_unary("guid",       RAY_FN_NONE, ray_guid_fn);

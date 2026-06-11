@@ -110,6 +110,11 @@ typedef enum {
 
 /* ===== Core Type: ray_t (32-byte block/object header) ===== */
 
+/* Symbol-resolution domain (src/table/domain.h): every RAY_SYM vector
+ * carries a non-NULL pointer to one — either the immortal runtime
+ * singleton (global intern table) or a refcounted mmapped symfile. */
+struct ray_sym_domain_s;
+
 typedef union ray_t {
     /* Allocated: object header */
     struct {
@@ -124,6 +129,23 @@ typedef union ray_t {
             uint8_t  aux[16];
             struct { union ray_t* slice_parent;  int64_t slice_offset; };
             struct { uint8_t _aux_str_lo[8];     union ray_t* str_pool; };
+            /* RAY_SYM (vectors): bytes 8-15 hold the symbol-domain
+             * pointer (see src/table/domain.h) — every non-slice SYM vec
+             * carries a non-NULL domain; runtime-created vecs point at
+             * the immortal singleton wrapping the global intern table.
+             * Layout audit (2026-06-10): bytes 8-15 are free for SYM —
+             *   - str_pool uses 8-15 but only for RAY_STR;
+             *   - HAS_INDEX's index/_idx_pad (0-7/8-15) can never be set
+             *     on a SYM vec: prepare_attach (ops/idxop.c) rejects all
+             *     non-numeric types, and SYM/STR/GUID indexing is
+             *     explicitly deferred (ops/idxop.h);
+             *   - HAS_LINK's link_target (8-15) is RAY_I32/RAY_I64 only;
+             *   - slices use both 0-7 and 8-15, but slice headers do not
+             *     store a domain — ray_sym_vec_domain follows
+             *     slice_parent, mirroring ray_data_fn's slice walk.
+             * The pointer is runtime-only state: serde strips aux, and
+             * col_save zeroes the SYM header aux slot on disk. */
+            struct { uint8_t _aux_sym_lo[8];     struct ray_sym_domain_s* sym_domain; };
             /* RAY_ATTR_HAS_INDEX (vectors): ray_t* of type RAY_INDEX
              * carrying the accelerator payload and the saved aux
              * bytes.  _idx_pad is reserved (must be NULL).  See
@@ -222,6 +244,46 @@ static inline void* ray_data_fn(ray_t* v) {
 }
 #define ray_slice_data(v) ray_data_fn(v)  /* alias — ray_data is always slice-safe */
 #define ray_data(v)       ray_data_fn(v)
+
+/* ===== Symbol domain access (RAY_SYM vectors) ===== */
+
+/* The immortal runtime domain singleton wrapping the global intern table.
+ * Full domain API lives in src/table/domain.h. */
+struct ray_sym_domain_s* ray_sym_runtime_domain(void);
+
+/* Resolution domain of a RAY_SYM vector.  Slices don't carry a domain of
+ * their own — follow slice_parent, the same walk ray_data_fn performs.
+ * Defensively returns the runtime singleton if the field is zero (e.g. a
+ * producer that builds SYM headers by hand); uniform non-NULL guarantee
+ * for consumers. */
+static inline struct ray_sym_domain_s* ray_sym_vec_domain(ray_t* v) {
+    if (v->attrs & RAY_ATTR_SLICE) v = v->slice_parent;
+    struct ray_sym_domain_s* d = v->sym_domain;
+    return d ? d : ray_sym_runtime_domain();
+}
+
+/* Domain resolution primitives (full API + docs: src/table/domain.h).
+ * Declared here so the inline cell-resolution helpers next to
+ * ray_read_sym (src/table/sym.h) compile without internal headers.
+ *   str:  borrowed string atom for position `pos` (NULL if out of range);
+ *   find: position of the bytes in the domain, -1 if absent. */
+ray_t*  ray_sym_domain_str(struct ray_sym_domain_s* dom, int64_t pos);
+int64_t ray_sym_domain_find(struct ray_sym_domain_s* dom, const char* str, size_t len);
+
+/* Entry count, and the position → runtime-intern-id LUT (NULL for the
+ * runtime domain — ids pass through; for FILE domains the FIRST request
+ * interns the vocabulary sequentially: obtain the LUT BEFORE handing
+ * cell ids to ray_pool_dispatch workers).  Docs: src/table/domain.h. */
+int64_t ray_sym_domain_count(struct ray_sym_domain_s* dom);
+const int64_t* ray_sym_domain_runtime_lut(struct ray_sym_domain_s* dom);
+
+/* An output SYM vector built by COPYING cell ids from `in` (group keys,
+ * filtered selections) must resolve over the same dictionary: release
+ * out's previous non-singleton domain ref, copy the pointer, retain the
+ * new non-singleton.  No-op unless both are RAY_SYM vectors (and never
+ * touches slice headers — their aux bytes are parent/offset).  Defined
+ * in src/vec/vec.c. */
+void ray_sym_vec_adopt_domain(ray_t* out, ray_t* in);
 
 /* ===== Introspection helpers (FFI-safe access for foreign consumers) ===== */
 
@@ -448,6 +510,14 @@ uint32_t ray_sym_count(void);
  * *out_count must be non-NULL. */
 void ray_sym_strings_borrow(ray_t*** out_strings, uint32_t* out_count);
 bool     ray_sym_ensure_cap(uint32_t needed);
+
+/* Runtime dictionary snapshot — NOT table symfiles.  ray_sym_save writes
+ * the whole process-global intern table to `path` (tmp + fsync + atomic
+ * rename, replacing whatever was there; single-writer contract);
+ * ray_sym_load restores it, requiring every entry to land at the id equal
+ * to its file position so ids from the saved session stay valid (see
+ * ray_runtime_create_with_sym).  Stored tables do not use these: their
+ * symbols live in per-table symfiles managed by the storage layer. */
 ray_err_t ray_sym_save(const char* path);
 ray_err_t ray_sym_load(const char* path);
 
