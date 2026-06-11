@@ -1374,6 +1374,8 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
             if (RAY_IS_ERR(result)) return result;
             result->len = count;
             memcpy(ray_data(result), (char*)ray_data(vec) + start * esz, (size_t)(count * esz));
+            /* SYM ids copied verbatim — resolve over the source domain. */
+            if (vtype == RAY_SYM) ray_sym_vec_adopt_domain(result, vec);
             /* RAY_STR: the copied ray_str_t records still reference the
              * source's str_pool by pool_off — propagate the pool ray_t
              * (with retain) so the result owns a valid backing store. */
@@ -1573,6 +1575,8 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
          * past the SSO threshold, tripping the assertion in
          * ray_str_t_ptr / strsort_repack_window / strkey_cmp. */
         if (vtype == RAY_STR) col_propagate_str_pool(result, vec);
+        /* SYM ids copied verbatim — resolve over the source domain. */
+        if (vtype == RAY_SYM) ray_sym_vec_adopt_domain(result, vec);
         /* Propagate null bitmap — check parent's flag for slices */
         bool has_nulls = len > 0 &&
                          ((vec->attrs & RAY_ATTR_HAS_NULLS) ||
@@ -1947,6 +1951,8 @@ ray_t* reverse_vec_eager(ray_t* x) {
         for (int64_t i = 0; i < len; i++)
             memcpy(dst + i * esz, src + (len - 1 - i) * esz, esz);
     }
+    /* SYM ids copied verbatim — resolve over the source domain. */
+    if (vtype == RAY_SYM) ray_sym_vec_adopt_domain(result, x);
     return result;
 }
 

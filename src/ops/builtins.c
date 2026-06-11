@@ -2690,6 +2690,9 @@ ray_t* ray_group_fn(ray_t* x) {
         }
     }
 
+    /* SYM group keys are raw cell ids of x — resolve over x's domain. */
+    if (key_type == RAY_SYM) ray_sym_vec_adopt_domain(keys_vec, x);
+
     ray_t* vals_lst = ray_list_new(ngroups);
     if (RAY_IS_ERR(vals_lst)) { ray_release(keys_vec); goto gfail; }
     for (int64_t g = 0; g < ngroups; g++) {
@@ -2826,7 +2829,16 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         }
         default: ray_free(result); return ray_error("type", NULL);
         }
-        memcpy((char*)ray_data(result) + esz, ray_data(b), (size_t)(nb * esz));
+        if (b->type == RAY_SYM) {
+            /* Mixed sources: the atom id is runtime-domain by design, b's
+             * cells are b-domain — re-express b per cell into the runtime
+             * domain (the output's; no-op while b is runtime-domain). */
+            int64_t* out = (int64_t*)ray_data(result);
+            for (int64_t i = 0; i < nb; i++)
+                out[1 + i] = sym_cell_runtime_id(b, i);
+        } else {
+            memcpy((char*)ray_data(result) + esz, ray_data(b), (size_t)(nb * esz));
+        }
         result->len = 1 + nb;
         return result;
     }
@@ -2835,7 +2847,15 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         int esz = ray_elem_size(a->type);
         ray_t* result = ray_vec_new(a->type, na + 1);
         if (RAY_IS_ERR(result)) return result;
-        memcpy(ray_data(result), ray_data(a), (size_t)(na * esz));
+        if (a->type == RAY_SYM) {
+            /* Mixed sources (see atom+vec case above): re-express a's
+             * cells into the output's runtime domain. */
+            int64_t* out = (int64_t*)ray_data(result);
+            for (int64_t i = 0; i < na; i++)
+                out[i] = sym_cell_runtime_id(a, i);
+        } else {
+            memcpy(ray_data(result), ray_data(a), (size_t)(na * esz));
+        }
         switch (a->type) {
         case RAY_I64: case RAY_TIMESTAMP: case RAY_SYM:
             ((int64_t*)ray_data(result))[na] = b->i64; break;

@@ -504,6 +504,10 @@ ray_t* exec_filter_head(ray_t* input, ray_t* pred, int64_t limit) {
                 memcpy(dst + j * esz, src + match_idx[j] * esz, esz);
             col_propagate_str_pool(new_col, col);
         }
+        /* SYM gather copied cell ids verbatim — resolve over the source
+         * column's domain (flat → col itself; parted → first SYM seg). */
+        if (new_col && new_col->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_col, sym_domain_rep(col));
         tbl = ray_table_add_col(tbl, name_id, new_col);
         ray_release(new_col);
     }
@@ -758,6 +762,11 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
             col_propagate_str_pool(new_cols[c], scol);
             col_propagate_nulls_gather(new_cols[c], scol, match_idx, pass_count);
         }
+        /* SYM gathers above copied cell ids verbatim — resolve over the
+         * source column's domain (flat → scol; parted → first SYM seg;
+         * MAPCOMMON → keys vec, all via sym_domain_rep). */
+        if (new_cols[c]->type == RAY_SYM)
+            ray_sym_vec_adopt_domain(new_cols[c], sym_domain_rep(scol));
         out = ray_table_add_col(out, col_names[c], new_cols[c]);
         ray_release(new_cols[c]);
     }
