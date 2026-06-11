@@ -30,6 +30,7 @@
 #include "mem/arena.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <errno.h>
 #include "ops/hash.h"
@@ -156,6 +157,10 @@ ray_err_t ray_sym_init(void) {
     if (!atomic_compare_exchange_strong_explicit(&g_sym_inited, &expected, true,
             memory_order_acq_rel, memory_order_acquire))
         return RAY_OK; /* already initialized by another thread */
+
+    /* RAY_SYM_AUDIT: cache the env check once (the hot ray_sym_vec_cell
+     * inline branches on the cached byte, never on getenv). */
+    ray_g_sym_audit = getenv("RAY_SYM_AUDIT") != NULL ? 1 : 0;
 
     g_sym.bucket_cap = SYM_INIT_CAP;
     /* ray_sys_alloc uses mmap(MAP_ANONYMOUS) which zero-initializes. */

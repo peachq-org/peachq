@@ -60,15 +60,24 @@ static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
  * in join setup, never inside a worker (sym.c's frozen-table rule; a
  * worker-side intern would also leak the joined vocabulary build into
  * parallel execution).  No-op while every key is runtime-domain (LUT is
- * NULL for the singleton). */
-static void join_warm_sym_luts(ray_t* const* l_vecs, ray_t* const* r_vecs,
+ * NULL for the singleton).
+ *
+ * Returns false on LUT-build OOM for a FILE domain — the caller MUST
+ * abort the join: silent -1 translations downstream would make
+ * cross-domain keys spuriously equal (7a-review hardening). */
+static bool join_warm_sym_luts(ray_t* const* l_vecs, ray_t* const* r_vecs,
                                uint8_t n_keys) {
     for (uint8_t k = 0; k < n_keys; k++) {
-        if (l_vecs[k] && l_vecs[k]->type == RAY_SYM)
-            (void)ray_sym_domain_runtime_lut(ray_sym_vec_domain(l_vecs[k]));
-        if (r_vecs[k] && r_vecs[k]->type == RAY_SYM)
-            (void)ray_sym_domain_runtime_lut(ray_sym_vec_domain(r_vecs[k]));
+        ray_t* sides[2] = { l_vecs[k], r_vecs[k] };
+        for (int s = 0; s < 2; s++) {
+            ray_t* v = sides[s];
+            if (!v || v->type != RAY_SYM) continue;
+            struct ray_sym_domain_s* dom = ray_sym_vec_domain(v);
+            if (dom == ray_sym_runtime_domain()) continue;
+            if (!ray_sym_domain_runtime_lut(dom)) return false;
+        }
     }
+    return true;
 }
 
 /* ============================================================================
@@ -829,7 +838,8 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
     }
 
     /* Sequential LUT warm-up BEFORE any dispatch (see join_warm_sym_luts). */
-    join_warm_sym_luts(l_key_vecs, r_key_vecs, n_keys);
+    if (!join_warm_sym_luts(l_key_vecs, r_key_vecs, n_keys))
+        return ray_error("oom", "join: sym domain runtime-id LUT build failed");
 
     ray_pool_t* pool = ray_pool_get();
 
@@ -1491,7 +1501,8 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
     }
 
     /* Sequential LUT warm-up BEFORE the parallel build dispatch. */
-    join_warm_sym_luts(l_key_vecs, r_key_vecs, n_keys);
+    if (!join_warm_sym_luts(l_key_vecs, r_key_vecs, n_keys))
+        return ray_error("oom", "join: sym domain runtime-id LUT build failed");
 
     /* Build chained hash table from right side */
     ray_t* ht_next_hdr = NULL;

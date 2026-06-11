@@ -25,6 +25,7 @@
 #include "store/col.h"
 #include "store/fileio.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,51 +39,24 @@
  *
  * Format:
  *   dir/.d        — RAY_STR vector of column names (self-describing)
- *   dir/<colname> — column file per column
+ *   dir/<colname> — column file per column; RAY_SYM column cells are
+ *                   POSITIONS in the table's symfile (sym-domain spec)
  *
  * No symlink check: local-trust file format; path traversal checks
  * (rejecting '/', '\\', '..', leading '.') cover main attack vector.
  * -------------------------------------------------------------------------- */
 
-/* True when `v` is or contains symbol data (sym vec, sym atom, or a list
- * nesting either) — anything that serializes raw sym ids and therefore
- * needs the dictionary persisted. */
-static bool vec_has_syms(ray_t* v) {
-    if (!v || RAY_IS_ERR(v)) return false;
-    if (v->type == RAY_SYM || v->type == -RAY_SYM) return true;
-    if (v->type == RAY_LIST) {
-        ray_t** items = (ray_t**)ray_data(v);
-        for (int64_t i = 0; i < v->len; i++)
-            if (vec_has_syms(items[i])) return true;
-    }
-    return false;
-}
-
-/* True when the table has at least one column carrying symbol data. */
+/* True when the table has at least one top-level RAY_SYM column — the
+ * data that encodes as symfile positions.  SYM data NESTED in list
+ * columns serializes as self-contained strings (store/col.c recursive
+ * format) and needs no symfile. */
 static bool table_has_sym_cols(ray_t* tbl) {
     int64_t nc = ray_table_ncols(tbl);
-    for (int64_t c = 0; c < nc; c++)
-        if (vec_has_syms(ray_table_get_col_idx(tbl, c))) return true;
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        if (col && !RAY_IS_ERR(col) && col->type == RAY_SYM) return true;
+    }
     return false;
-}
-
-/* Post-load validation: reject if sym table is empty but table has symbol
- * columns (incl. symbols nested in lists), or if schema expected columns
- * but none could be loaded. */
-static ray_err_t validate_sym_columns(ray_t* tbl, int64_t schema_ncols,
-                                      uint32_t sym_count_at_entry) {
-    /* Sym table always has the empty string at ID 0 after init, so the
-     * baseline "no real symbols loaded" state is count == 1, not 0.
-     * The count is snapshotted BEFORE the load loop: loading interns the
-     * column names from .d, which must not mask an unpopulated table. */
-    if (sym_count_at_entry > 1) return RAY_OK;
-
-    int64_t nc = ray_table_ncols(tbl);
-    if (schema_ncols > 0 && nc == 0) return RAY_ERR_CORRUPT;
-
-    for (int64_t c = 0; c < nc; c++)
-        if (vec_has_syms(ray_table_get_col_idx(tbl, c))) return RAY_ERR_CORRUPT;
-    return RAY_OK;
 }
 
 /* --------------------------------------------------------------------------
@@ -143,13 +117,44 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
     ray_err_t mkdir_err = ray_mkdir_p(dir);
     if (mkdir_err != RAY_OK) return mkdir_err;
 
-    /* 1. Symfile FIRST — column data must never reference symbols that are
-     *    not persisted.  Skipped entirely for symbol-free tables: nothing
-     *    to enumerate (spec: no-symbol-columns exemption). */
-    if (sym_path && table_has_sym_cols(tbl)) {
-        ray_err_t sym_err = durable ? ray_sym_save(sym_path)
-                                    : ray_sym_save_bulk(sym_path);
-        if (sym_err != RAY_OK) return sym_err;
+    /* 1. Symfile FIRST — column data must never reference positions the
+     *    symfile doesn't persist (crash ordering: sym → columns → .d).
+     *
+     *    The v1 algorithm, restored (sym-domain spec, "Save"): open or
+     *    create the target symfile's domain, distinct-merge every SYM
+     *    column's vocabulary into it (append-only — existing positions
+     *    stay; the find-or-append rides the cell walk), flush, then
+     *    write columns re-encoded as positions during the column pass.
+     *
+     *    Skipped entirely for symbol-free tables: nothing to enumerate
+     *    (spec: no-symbol-columns exemption). */
+    ray_sym_domain_t* dom = NULL;
+    if (table_has_sym_cols(tbl)) {
+        if (!sym_path) return RAY_ERR_DOMAIN; /* SYM columns need a symfile */
+        dom = ray_sym_domain_open_or_create(sym_path);
+        if (!dom) return RAY_ERR_IO;
+
+        int64_t nc = ray_table_ncols(tbl);
+        for (int64_t c = 0; c < nc; c++) {
+            ray_t* col = ray_table_get_col_idx(tbl, c);
+            if (!col || RAY_IS_ERR(col) || col->type != RAY_SYM) continue;
+            if (ray_sym_vec_domain(col) == dom) continue; /* already merged */
+            for (int64_t i = 0; i < col->len; i++) {
+                ray_t* s = ray_sym_vec_cell(col, i);
+                if (!s) { ray_sym_domain_release(dom); return RAY_ERR_CORRUPT; }
+                if (ray_sym_domain_intern(dom, ray_str_ptr(s),
+                                          ray_str_len(s)) < 0) {
+                    ray_sym_domain_release(dom);
+                    return RAY_ERR_OOM;
+                }
+            }
+        }
+
+        ray_err_t sym_err = ray_sym_domain_flush(dom, durable);
+        if (sym_err != RAY_OK) {
+            ray_sym_domain_release(dom);
+            return sym_err;
+        }
     }
 
     int64_t ncols = ray_table_ncols(tbl);
@@ -164,6 +169,7 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
     ray_t* schema = ray_vec_new(RAY_STR, ncols > 0 ? ncols : 1);
     if (!schema || RAY_IS_ERR(schema)) {
         if (schema) ray_release(schema);
+        if (dom) ray_sym_domain_release(dom);
         return RAY_ERR_OOM;
     }
     for (int64_t c = 0; c < ncols; c++) {
@@ -183,22 +189,28 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
                                 (int)name_len, name);
         if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
             ray_release(schema);
+            if (dom) ray_sym_domain_release(dom);
             return RAY_ERR_RANGE;
         }
-        ray_err_t err = durable ? ray_col_save(col, path)
-                                : ray_col_save_bulk(col, path);
+        ray_err_t err = (col->type == RAY_SYM)
+            ? ray_col_save_sym_encoded(col, path, dom, durable)
+            : (durable ? ray_col_save(col, path)
+                       : ray_col_save_bulk(col, path));
         if (err != RAY_OK) {
             /* No .d written yet: the dir stays in its previous committed
              * state (old .d) or uncommitted state (no .d) — never torn. */
             ray_release(schema);
+            if (dom) ray_sym_domain_release(dom);
             return err;
         }
         schema = ray_str_vec_append(schema, name, name_len);
         if (!schema || RAY_IS_ERR(schema)) {
             if (schema) ray_release(schema);
+            if (dom) ray_sym_domain_release(dom);
             return RAY_ERR_OOM;
         }
     }
+    if (dom) ray_sym_domain_release(dom);
 
     /* 3. .d LAST — the commit marker. */
     {
@@ -236,17 +248,12 @@ ray_err_t ray_splay_save_bulk(ray_t* tbl, const char* dir, const char* sym_path)
  * The .d schema is always loaded via ray_col_load (small, buddy copy).
  * -------------------------------------------------------------------------- */
 
-static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mmap) {
+static ray_t* splay_load_dom_impl(const char* dir, ray_sym_domain_t* dom,
+                                  bool use_mmap) {
     if (!dir) return ray_error("io", NULL);
     bool trace = getenv("RAY_CSV_TRACE") != NULL;
     if (trace)
         fprintf(stderr, "splayed.get: dir=%s mmap=%d\n", dir, use_mmap ? 1 : 0);
-
-    /* Load symbol table if sym_path provided */
-    if (sym_path) {
-        ray_err_t sym_err = ray_sym_load(sym_path);
-        if (sym_err != RAY_OK) return ray_error(ray_err_code_str(sym_err), NULL);
-    }
 
     /* Load .d schema */
     char path[1024];
@@ -274,8 +281,6 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
         ray_release(schema);
         return tbl;
     }
-
-    uint32_t sym_count_at_entry = ray_sym_count();
 
     /* Load each column */
     for (int64_t c = 0; c < ncols; c++) {
@@ -309,14 +314,19 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
             return ray_error("range", NULL);
         }
 
-        ray_t* col = use_mmap ? ray_col_mmap_splayed(path) : ray_col_load(path);
+        /* Domain-attaching loaders: a SYM column resolves over the
+         * table's symfile (dom); dom == NULL + SYM column is the loud
+         * "sym" error from the col loader (spec: never silent
+         * resolution against incidental state). */
+        ray_t* col = use_mmap ? ray_col_mmap_splayed_dom(path, dom)
+                              : ray_col_load_dom(path, dom);
         if (use_mmap && col && RAY_IS_ERR(col) &&
             strcmp(ray_err_code(col), "nyi") == 0) {
             /* ray_release on an error object is a no-op (rayforce.h:180);
              * must use ray_error_free to actually reclaim the error
              * before retrying with the non-mmap loader. */
             ray_error_free(col);
-            col = ray_col_load(path);
+            col = ray_col_load_dom(path, dom);
         }
         if (!col || RAY_IS_ERR(col)) {
             if (trace)
@@ -350,13 +360,28 @@ static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mm
     }
 
     ray_release(schema);
+    return tbl;
+}
 
-    ray_err_t sym_check = validate_sym_columns(tbl, ncols, sym_count_at_entry);
-    if (sym_check != RAY_OK) {
-        ray_release(tbl);
-        return ray_error(ray_err_code_str(sym_check), NULL);
+/* Resolve sym_path to a FILE domain.  Missing file → NULL domain with
+ * RAY_OK (only an error if a SYM column is later encountered — the
+ * symbol-free-table exemption must hold for reads too); existing but
+ * unopenable/invalid file → loud error. */
+static ray_t* splay_load_impl(const char* dir, const char* sym_path,
+                              bool use_mmap) {
+    ray_sym_domain_t* dom = NULL;
+    if (sym_path) {
+        struct stat st;
+        if (stat(sym_path, &st) == 0) {
+            dom = ray_sym_domain_open(sym_path);
+            if (!dom)
+                return ray_error("corrupt",
+                    "symfile %s: unreadable or invalid (bad magic, torn "
+                    "record, or missing \"\" at position 0)", sym_path);
+        }
     }
-
+    ray_t* tbl = splay_load_dom_impl(dir, dom, use_mmap);
+    if (dom) ray_sym_domain_release(dom); /* columns hold their own refs */
     return tbl;
 }
 
@@ -366,4 +391,8 @@ ray_t* ray_splay_load(const char* dir, const char* sym_path) {
 
 ray_t* ray_read_splayed(const char* dir, const char* sym_path) {
     return splay_load_impl(dir, sym_path, true);
+}
+
+ray_t* ray_read_splayed_dom(const char* dir, struct ray_sym_domain_s* dom) {
+    return splay_load_dom_impl(dir, dom, true);
 }
