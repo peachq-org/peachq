@@ -270,6 +270,13 @@ static inline struct ray_sym_domain_s* ray_sym_vec_domain(ray_t* v) {
 ray_t*  ray_sym_domain_str(struct ray_sym_domain_s* dom, int64_t pos);
 int64_t ray_sym_domain_find(struct ray_sym_domain_s* dom, const char* str, size_t len);
 
+/* Entry count, and the position → runtime-intern-id LUT (NULL for the
+ * runtime domain — ids pass through; for FILE domains the FIRST request
+ * interns the vocabulary sequentially: obtain the LUT BEFORE handing
+ * cell ids to ray_pool_dispatch workers).  Docs: src/table/domain.h. */
+int64_t ray_sym_domain_count(struct ray_sym_domain_s* dom);
+const int64_t* ray_sym_domain_runtime_lut(struct ray_sym_domain_s* dom);
+
 /* An output SYM vector built by COPYING cell ids from `in` (group keys,
  * filtered selections) must resolve over the same dictionary: release
  * out's previous non-singleton domain ref, copy the pointer, retain the
