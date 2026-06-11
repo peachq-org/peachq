@@ -37,9 +37,10 @@ static void parted_gather_col(ray_t* parted_col, const int64_t* match_idx,
     if (n_segs == 0) return;  /* zero-length VLA is UB in C17 */
     ray_t** segs = (ray_t**)ray_data(parted_col);
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(parted_col->type);
-    uint8_t base_attrs = (base == RAY_SYM)
-                       ? parted_first_attrs(segs, n_segs) : 0;
-    uint8_t esz = ray_sym_elem_size(base, base_attrs);
+    /* Output width is fixed by dst_col (callers allocate it at the max
+     * segment width); narrower segments are widened per cell. */
+    uint8_t out_attrs = (base == RAY_SYM) ? dst_col->attrs : 0;
+    uint8_t esz = ray_sym_elem_size(base, out_attrs);
     char* dst = (char*)ray_data(dst_col);
     memset(dst, 0, (size_t)count * esz);
 
@@ -56,12 +57,11 @@ static void parted_gather_col(ray_t* parted_col, const int64_t* match_idx,
     for (int64_t i = 0; i < count; i++) {
         int64_t row = match_idx[i];
         while (seg < n_segs - 1 && row >= seg_ends[seg]) seg++;
-        if (!segs[seg] || !parted_seg_esz_ok(segs[seg], base, esz))
-            continue;  /* NULL or width-mismatch — skip (zero-fill from vec_new) */
+        if (!segs[seg])
+            continue;  /* NULL segment — zero-fill from vec_new */
         int64_t seg_start = (seg > 0) ? seg_ends[seg - 1] : 0;
         int64_t local_row = row - seg_start;
-        char* src = (char*)ray_data(segs[seg]);
-        memcpy(dst + i * esz, src + local_row * esz, esz);
+        parted_copy_cells(dst, base, out_attrs, i, segs[seg], local_row, 1);
         if ((segs[seg]->attrs & RAY_ATTR_HAS_NULLS) &&
             ray_vec_is_null(segs[seg], local_row))
             ray_vec_set_null(dst_col, i, true);
@@ -136,8 +136,7 @@ static ray_t* exec_filter_parted_vec(ray_t* parted_col, ray_t* pred,
     }
 
     uint8_t base_attrs = (base == RAY_SYM)
-                       ? parted_first_attrs(segs, n_segs) : 0;
-    uint8_t esz = ray_sym_elem_size(base, base_attrs);
+                       ? parted_sym_max_attrs(segs, n_segs) : 0;
     ray_t* result = typed_vec_new(base, base_attrs, pass_count);
     if (!result || RAY_IS_ERR(result)) return result;
     result->len = pass_count;
@@ -148,24 +147,13 @@ static ray_t* exec_filter_parted_vec(ray_t* parted_col, ray_t* pred,
     for (int64_t s = 0; s < n_segs; s++) {
         if (!segs[s]) continue;
         int64_t seg_len = segs[s]->len;
-        if (!parted_seg_esz_ok(segs[s], base, esz)) {
-            char* dst = (char*)ray_data(result);
-            for (int64_t i = 0; i < seg_len; i++) {
-                if (pred_data[pred_off + i]) {
-                    memset(dst + out_idx * esz, 0, esz);
-                    out_idx++;
-                }
-            }
-            pred_off += seg_len;
-            continue;
-        }
-        char* src = (char*)ray_data(segs[s]);
         char* dst = (char*)ray_data(result);
         bool seg_has_nulls = (segs[s]->attrs & RAY_ATTR_HAS_NULLS) != 0;
         if (seg_has_nulls) {
             for (int64_t i = 0; i < seg_len; i++) {
                 if (pred_data[pred_off + i]) {
-                    memcpy(dst + out_idx * esz, src + i * esz, esz);
+                    parted_copy_cells(dst, base, base_attrs, out_idx,
+                                      segs[s], i, 1);
                     if (ray_vec_is_null(segs[s], i))
                         ray_vec_set_null(result, out_idx, true);
                     out_idx++;
@@ -174,7 +162,8 @@ static ray_t* exec_filter_parted_vec(ray_t* parted_col, ray_t* pred,
         } else {
             for (int64_t i = 0; i < seg_len; i++) {
                 if (pred_data[pred_off + i]) {
-                    memcpy(dst + out_idx * esz, src + i * esz, esz);
+                    parted_copy_cells(dst, base, base_attrs, out_idx,
+                                      segs[s], i, 1);
                     out_idx++;
                 }
             }
@@ -299,7 +288,7 @@ ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred) {
         if (out_type == RAY_SYM) {
             if (RAY_IS_PARTED(col->type)) {
                 ray_t** sp = (ray_t**)ray_data(col);
-                out_attrs = parted_first_attrs(sp, col->len);
+                out_attrs = parted_sym_max_attrs(sp, col->len);
             } else {
                 out_attrs = col->attrs;
             }
@@ -463,7 +452,7 @@ ray_t* exec_filter_head(ray_t* input, ray_t* pred, int64_t limit) {
         if (out_type == RAY_SYM) {
             if (RAY_IS_PARTED(col->type)) {
                 ray_t** sp = (ray_t**)ray_data(col);
-                out_attrs = parted_first_attrs(sp, col->len);
+                out_attrs = parted_sym_max_attrs(sp, col->len);
             } else out_attrs = col->attrs;
         }
         uint8_t esz = ray_sym_elem_size(out_type, out_attrs);
@@ -492,10 +481,10 @@ ray_t* exec_filter_head(ray_t* input, ray_t* pred, int64_t limit) {
                         cur_seg++;
                         cur_seg_end += segs[cur_seg] ? segs[cur_seg]->len : 0;
                     }
-                    if (!segs[cur_seg] || !parted_seg_esz_ok(segs[cur_seg], out_type, esz))
-                        continue;
-                    char* src = (char*)ray_data(segs[cur_seg]);
-                    memcpy(dst + j * esz, src + (r - seg_start) * esz, esz);
+                    if (!segs[cur_seg])
+                        continue;  /* NULL segment — zero-fill from memset */
+                    parted_copy_cells(dst, out_type, out_attrs, j,
+                                      segs[cur_seg], r - seg_start, 1);
                 }
             }
         } else {
@@ -651,7 +640,7 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
         if (ct == RAY_SYM) {
             if (RAY_IS_PARTED(col->type)) {
                 ray_t** sp = (ray_t**)ray_data(col);
-                ca = parted_first_attrs(sp, col->len);
+                ca = parted_sym_max_attrs(sp, col->len);
             } else ca = col->attrs;
         }
         if (RAY_IS_PARTED(col->type)) has_parted = true;
