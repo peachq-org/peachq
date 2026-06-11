@@ -680,10 +680,12 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                         /* Arithmetic:
                          * F64 standard ops (ADD/SUB/MUL/DIV/MOD, NEG/ABS/SQRT/LOG/EXP/CEIL/FLOOR/ROUND): NaN propagates
                          *   via IEEE for free — no kernel variant needed.
-                         * F64 MIN2/MAX2: NOT IEEE-propagating (comparison returns
-                         *   the non-NaN side) — mark null_aware → capability choke
-                         *   fires until a null-aware variant lands (Task 6).
-                         * Non-F64: needs kernel variant (Task 6). */
+                         * F64 MIN2/MAX2 + F64 AND/OR/NOT: NOT IEEE-propagating —
+                         *   mark null_aware → capability choke fires until
+                         *   null-aware variants land.
+                         * Non-F64 arithmetic (ADD/SUB/MUL/DIV/MOD/…): I64
+                         *   comparison/AND/OR BOOL kernels are live; I64
+                         *   arithmetic variants still pending. */
                         bool f64_ieee_propagates = (ot == RAY_F64) &&
                             (op == OP_ADD || op == OP_SUB || op == OP_MUL ||
                              op == OP_DIV || op == OP_MOD ||
@@ -827,7 +829,8 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
 
 /* Execute a binary instruction over n elements.
  * Switch is OUTSIDE the loop so each case auto-vectorizes.
- * null_aware is reserved for Task 6 integer-arithmetic null kernels. */
+ * null_aware selects sentinel-checking kernel variants (currently: the I64
+ * BOOL comparison/AND/OR block; i64 arithmetic variants land next). */
 static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void* dp,
                               int8_t t1, const void* ap,
                               int8_t t2, const void* bp, int64_t n) {
