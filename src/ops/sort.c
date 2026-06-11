@@ -65,10 +65,15 @@ int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
             if (va < vb) cmp = -1;
             else if (va > vb) cmp = 1;
         } else if (RAY_IS_SYM(col->type)) {
+            /* Lex compare materializes strings: both ids are CELL DATA
+             * of this column, so they resolve through ITS domain
+             * (sym-domain Phase 2; runtime singleton delegates to
+             * ray_sym_str — exact no-op pre-flip). */
+            struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
             int64_t va = ray_read_sym(ray_data(col), a, col->type, col->attrs);
             int64_t vb = ray_read_sym(ray_data(col), b, col->type, col->attrs);
-            ray_t* sa = ray_sym_str(va);
-            ray_t* sb = ray_sym_str(vb);
+            ray_t* sa = ray_sym_domain_str(dom, va);
+            ray_t* sb = ray_sym_domain_str(dom, vb);
             if (sa && sb) cmp = ray_str_cmp(sa, sb);
         } else if (col->type == RAY_I16) {
             int16_t va = ((int16_t*)ray_data(col))[a];
@@ -1929,8 +1934,14 @@ uint32_t* build_enum_rank(ray_t* col, int64_t nrows, ray_t** hdr_out) {
     if (!ptrs || !lens) {
         ray_scratch_arena_reset(&arena); *hdr_out = NULL; return NULL;
     }
+    /* The ids being ranked are CELL DATA of `col`: resolve each through
+     * the COLUMN's domain (sym-domain Phase 2).  Every consumer of the
+     * rank LUT (radix encodes in sort.c/window.c) keeps reading raw
+     * cell ids — only the id→string source changes.  Runtime singleton
+     * delegates to ray_sym_str: exact no-op pre-flip. */
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
     for (uint32_t i = 0; i < n_ids; i++) {
-        ray_t* s = ray_sym_str((int64_t)i);
+        ray_t* s = ray_sym_domain_str(dom, (int64_t)i);
         if (s) {
             ptrs[i] = ray_str_ptr(s);
             lens[i] = (uint32_t)ray_str_len(s);
@@ -3456,6 +3467,10 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
             nc = ray_list_new(gather_rows);
         } else {
             nc = col_vec_new(col, gather_rows);
+            /* the gather below raw-copies SYM cell ids — the output
+             * resolves over the source's dictionary (sym-domain Phase 2) */
+            if (nc && !RAY_IS_ERR(nc) && col->type == RAY_SYM)
+                ray_sym_vec_adopt_domain(nc, col);
         }
         if (!nc || RAY_IS_ERR(nc)) {
             for (int64_t j = 0; j < c; j++)
@@ -3779,8 +3794,12 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
         ray_t* nc;
         if (col->type == RAY_LIST)
             nc = ray_list_new(nrows);
-        else
+        else {
             nc = col_vec_new(col, nrows);
+            /* raw SYM cell-id gather — adopt the source's dictionary */
+            if (nc && !RAY_IS_ERR(nc) && col->type == RAY_SYM)
+                ray_sym_vec_adopt_domain(nc, col);
+        }
         if (!nc || RAY_IS_ERR(nc)) {
             for (int64_t j = 0; j < c; j++)
                 if (new_cols[j]) ray_release(new_cols[j]);
