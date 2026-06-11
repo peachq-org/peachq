@@ -539,11 +539,14 @@ static inline void str_resolve(const ray_t* v, const ray_str_t** elems,
     *pool = owner->str_pool ? (const char*)ray_data(owner->str_pool) : NULL;
 }
 
-/* Helper: resolve sym/enum element to string */
+/* Helper: resolve sym/enum element to string.  The id is CELL DATA of
+ * `input`, so it resolves through the COLUMN's domain (sym-domain
+ * Phase 2) — exact no-op while the domain is the runtime singleton
+ * (ray_sym_domain_str delegates to ray_sym_str). */
 static inline void sym_elem(const ray_t* input, int64_t i,
                             const char** out_str, size_t* out_len) {
     int64_t sym_id = ray_read_sym(ray_data((ray_t*)input), i, input->type, input->attrs);
-    ray_t* atom = ray_sym_str(sym_id);
+    ray_t* atom = ray_sym_domain_str(ray_sym_vec_domain((ray_t*)input), sym_id);
     if (!atom) { *out_str = ""; *out_len = 0; return; }
     *out_str = ray_str_ptr(atom);
     *out_len = ray_str_len(atom);

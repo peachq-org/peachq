@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "lang/internal.h"  /* sym_domain_rep (sym-domain Phase 2) */
 #include "ops/rowsel.h"
 #include <stdio.h>
 
@@ -468,6 +469,18 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 if (col->type == RAY_MAPCOMMON) return false;
                 if (col->type == RAY_STR) return false; /* RAY_STR needs string comparison path */
                 if (col->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)) return false; /* nullable cols need the null-aware path */
+                /* sym-domain Phase 2: the fused program loads SYM cells
+                 * as raw i64s and resolves STR literals via the GLOBAL
+                 * intern table (ray_sym_find below) — only valid for
+                 * runtime-domain columns.  FILE-domain columns bail to
+                 * the non-fused executor, which is domain-aware.  No-op
+                 * pre-flip (every domain is the runtime singleton). */
+                {
+                    ray_t* sym_rep = sym_domain_rep(col);
+                    if (sym_rep && ray_sym_vec_domain(sym_rep) !=
+                                       ray_sym_runtime_domain())
+                        return false;
+                }
                 out->regs[r].kind = REG_SCAN;
                 if (RAY_IS_PARTED(col->type)) {
                     int8_t base = (int8_t)RAY_PARTED_BASETYPE(col->type);
@@ -1780,6 +1793,14 @@ static void binary_range(ray_op_t* op, int8_t out_type,
      * are bounded by n so extra slots are harmless. */
     int64_t _sym_buf_n = n ? n : 1;
     int64_t lsym_buf[_sym_buf_n], rsym_buf[_sym_buf_n]; /* stack VLA for narrow RAY_SYM (n<=1024) */
+    /* sym-domain Phase 2: SYM column vs SYM column across DIFFERENT
+     * domains cannot compare raw indices — re-express the rhs cells in
+     * the lhs's domain via the buffer path (absent → -1: equals no lhs
+     * id).  Same-domain columns (the only pre-flip case) keep the
+     * direct typed-pointer fast paths — byte-identical. */
+    bool sym_xlate = !l_scalar && !r_scalar &&
+                     RAY_IS_SYM(lhs->type) && RAY_IS_SYM(rhs->type) &&
+                     ray_sym_vec_domain(lhs) != ray_sym_vec_domain(rhs);
     if (!l_scalar) {
         int64_t l_off = start;
         void* l_data = resolve_vec_data(lhs, &l_off);
@@ -1804,7 +1825,19 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         else if (rhs->type == RAY_I64 || rhs->type == RAY_TIMESTAMP) rp_i64 = (int64_t*)rbase;
         else if (RAY_IS_SYM(rhs->type)) {
             uint8_t w = rhs->attrs & RAY_SYM_W_MASK;
-            if (w == RAY_SYM_W64) rp_i64 = (int64_t*)rbase;
+            if (sym_xlate) {
+                /* cross-domain: translate every rhs cell (any width) */
+                struct ray_sym_domain_s* ld = ray_sym_vec_domain(lhs);
+                struct ray_sym_domain_s* rd = ray_sym_vec_domain(rhs);
+                for (int64_t j = 0; j < n; j++) {
+                    int64_t rid = ray_read_sym(r_data, r_off+j, rhs->type, rhs->attrs);
+                    ray_t* s = ray_sym_domain_str(rd, rid);
+                    rsym_buf[j] = s ? ray_sym_domain_find(ld, ray_str_ptr(s),
+                                                          ray_str_len(s)) : -1;
+                }
+                rp_i64 = rsym_buf;
+            }
+            else if (w == RAY_SYM_W64) rp_i64 = (int64_t*)rbase;
             else if (w == RAY_SYM_W32) rp_u32 = (uint32_t*)rbase;
             else { for (int64_t j = 0; j < n; j++) rsym_buf[j] = ray_read_sym(r_data, r_off+j, rhs->type, rhs->attrs); rp_i64 = rsym_buf; }
         }
@@ -2052,22 +2085,26 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
         }
     }
 
-    /* SYM vs STR comparison: resolve string constant to intern ID so we
-       can compare numerically against SYM intern indices.
-       ray_sym_find returns -1 if string not in table → no match. */
+    /* SYM vs STR comparison: resolve the string constant to a position
+       in the SYM COLUMN's domain so we can compare numerically against
+       its raw cell indices (sym-domain Phase 2; the runtime singleton
+       delegates to ray_sym_find — exact no-op pre-flip).
+       Lookup returns -1 if the string is absent → no match (truncated
+       -1 can never equal a valid id at any width by ray_sym_dict_width
+       construction). */
     bool str_resolved = false;
     int64_t resolved_sym_id = 0;
     if (r_scalar && rhs->type == -RAY_STR &&
         RAY_IS_SYM(lhs->type)) {
         const char* s = ray_str_ptr(rhs);
         size_t slen = ray_str_len(rhs);
-        resolved_sym_id = ray_sym_find(s, slen);
+        resolved_sym_id = ray_sym_vec_lookup(lhs, s, slen);
         str_resolved = true;
     } else if (l_scalar && lhs->type == -RAY_STR &&
                RAY_IS_SYM(rhs->type)) {
         const char* s = ray_str_ptr(lhs);
         size_t slen = ray_str_len(lhs);
-        resolved_sym_id = ray_sym_find(s, slen);
+        resolved_sym_id = ray_sym_vec_lookup(rhs, s, slen);
         str_resolved = true;
     }
 
@@ -2107,6 +2144,34 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             void* data = resolve_vec_data(rhs, &elem);
             if (t == RAY_F64) r_f64_val = ((double*)data)[elem];
             else r_i64_val = read_col_i64(data, elem, t, rhs->attrs);
+        }
+    }
+
+    /* sym-domain Phase 2: a SYM scalar (runtime-domain atom, or a 1-len
+     * SYM vec with its own domain) compared against a SYM COLUMN is a
+     * raw index compare against the column's cells, so the scalar must
+     * be re-expressed in the COLUMN's domain.  Same-domain (the only
+     * pre-flip case) keeps the raw id — byte-identical fast path.
+     * Absent ⇒ -1: equals no cell (see the lookup note above). */
+    if (!l_scalar && RAY_IS_SYM(lhs->type) && r_scalar &&
+        (rhs->type == -RAY_SYM || RAY_IS_SYM(rhs->type))) {
+        struct ray_sym_domain_s* cdom = ray_sym_vec_domain(lhs);
+        struct ray_sym_domain_s* sdom = (rhs->type == -RAY_SYM)
+            ? ray_sym_runtime_domain() : ray_sym_vec_domain(rhs);
+        if (cdom != sdom) {
+            ray_t* s = ray_sym_domain_str(sdom, r_i64_val);
+            r_i64_val = s ? ray_sym_domain_find(cdom, ray_str_ptr(s),
+                                                ray_str_len(s)) : -1;
+        }
+    } else if (!r_scalar && RAY_IS_SYM(rhs->type) && l_scalar &&
+               (lhs->type == -RAY_SYM || RAY_IS_SYM(lhs->type))) {
+        struct ray_sym_domain_s* cdom = ray_sym_vec_domain(rhs);
+        struct ray_sym_domain_s* sdom = (lhs->type == -RAY_SYM)
+            ? ray_sym_runtime_domain() : ray_sym_vec_domain(lhs);
+        if (cdom != sdom) {
+            ray_t* s = ray_sym_domain_str(sdom, l_i64_val);
+            l_i64_val = s ? ray_sym_domain_find(cdom, ray_str_ptr(s),
+                                                ray_str_len(s)) : -1;
         }
     }
 

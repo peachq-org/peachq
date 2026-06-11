@@ -24,6 +24,7 @@
 #include "lang/internal.h"
 #include "ops/internal.h"
 #include "table/sym.h"
+#include "table/domain.h"   /* sym-domain resolution (Phase 2) */
 #include "table/table.h"
 #include "ops/glob.h"
 
@@ -52,8 +53,8 @@ static bool strlen_vec_value(ray_t* x, int64_t row, int64_t* out) {
         return true;
     }
     if (x->type == RAY_SYM) {
-        int64_t sid = ray_read_sym(ray_data(x), row, x->type, x->attrs);
-        ray_t* s = ray_sym_str(sid);
+        /* cell id: resolve through the COLUMN's domain (sym-domain Phase 2) */
+        ray_t* s = ray_sym_vec_cell(x, row);
         *out = s ? (int64_t)ray_str_len(s) : 0;
         return true;
     }
@@ -384,9 +385,21 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
              * match against sym_ids actually touched.  ray_sym_strings_borrow
              * snapshots the strings array under one lock so each lookup
              * is a plain pointer load. */
+            /* Cell ids are positions in the COLUMN's domain (sym-domain
+             * Phase 2).  Runtime: borrow the global snapshot (below).
+             * FILE: size the LUT by the domain's count and resolve via
+             * ray_sym_domain_str (fused_group precedent).  Pre-flip
+             * this is always the runtime branch. */
+            struct ray_sym_domain_s* dom = ray_sym_vec_domain(x);
             ray_t** sym_strings = NULL;
             uint32_t dict_n = 0;
-            ray_sym_strings_borrow(&sym_strings, &dict_n);
+            if (dom == ray_sym_runtime_domain()) {
+                dom = NULL;
+                ray_sym_strings_borrow(&sym_strings, &dict_n);
+            } else {
+                int64_t dn = ray_sym_domain_count(dom);
+                dict_n = (dn > 0 && dn <= (int64_t)UINT32_MAX) ? (uint32_t)dn : 0;
+            }
             ray_t* lut_hdr = NULL;
             ray_t* seen_hdr = NULL;
             uint8_t* lut = NULL;
@@ -418,7 +431,8 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
                         int64_t sid = (LOAD);                                 \
                         if ((uint64_t)sid >= (uint64_t)dict_n) continue;      \
                         if (!seen[sid]) {                                     \
-                            ray_t* s = sym_strings[sid];                      \
+                            ray_t* s = sym_strings ? sym_strings[sid]         \
+                                     : ray_sym_domain_str(dom, sid);          \
                             const char* sp = s ? ray_str_ptr(s) : "";         \
                             size_t sl = s ? ray_str_len(s) : 0;               \
                             lut[sid] = (use_simple                            \
@@ -465,7 +479,8 @@ ray_t* ray_like_fn(ray_t* x, ray_t* pattern) {
                 if (seen_hdr) scratch_free(seen_hdr);
                 for (int64_t i = 0; i < n; i++) {
                     int64_t sid = ray_read_sym(base, i, in_type, in_attrs);
-                    ray_t* s = (sym_strings && (uint64_t)sid < (uint64_t)dict_n)
+                    ray_t* s = dom ? ray_sym_domain_str(dom, sid)
+                             : (sym_strings && (uint64_t)sid < (uint64_t)dict_n)
                                ? sym_strings[sid] : NULL;
                     const char* sp = s ? ray_str_ptr(s) : "";
                     size_t sl = s ? ray_str_len(s) : 0;
