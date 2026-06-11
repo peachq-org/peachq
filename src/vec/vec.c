@@ -476,6 +476,34 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     uint8_t out_attrs = (a_esz >= b_esz) ? (a->attrs & RAY_SYM_W_MASK) : (b->attrs & RAY_SYM_W_MASK);
     uint8_t esz = (a_esz >= b_esz) ? a_esz : b_esz;
 
+    /* SYM cross-domain concat (post-flip reachable: a loaded FILE-domain
+     * column concatenated with a runtime one): positions in different
+     * dictionaries must not be raw-mixed.  Materialize as RUNTIME-domain
+     * W64 ids, translating each side through its domain's runtime-id LUT
+     * (NULL LUT = runtime side, ids pass through) — invariant 5: the
+     * translation rides this pass, which touches every row anyway. */
+    struct ray_sym_domain_s* concat_dom = NULL;
+    const int64_t* sym_lut_a = NULL;
+    const int64_t* sym_lut_b = NULL;
+    bool sym_translate = false;
+    if (a->type == RAY_SYM) {
+        struct ray_sym_domain_s* da = ray_sym_vec_domain(a);
+        struct ray_sym_domain_s* db = ray_sym_vec_domain(b);
+        if (da == db) {
+            concat_dom = da;
+        } else {
+            concat_dom = ray_sym_runtime_domain();
+            sym_translate = true;
+            sym_lut_a = ray_sym_domain_runtime_lut(da);
+            sym_lut_b = ray_sym_domain_runtime_lut(db);
+            if ((da != concat_dom && !sym_lut_a) ||
+                (db != concat_dom && !sym_lut_b))
+                return ray_error("oom", "concat: sym domain LUT build failed");
+            out_attrs = RAY_SYM_W64;
+            esz = 8;
+        }
+    }
+
     int64_t total_len = a->len + b->len;
     if (total_len < a->len) return ray_error("oom", NULL); /* overflow */
     size_t data_size = (size_t)total_len * esz;
@@ -491,18 +519,29 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     memset(result->aux, 0, 16);
 
     /* SYM: propagate the resolution domain — inputs agree → that domain;
-     * mixed → runtime (Phase 1: inputs are always runtime; cross-domain
-     * concat materializes per the domain spec in a later phase). */
+     * mixed → runtime (cells re-expressed below). */
     if (result->type == RAY_SYM) {
-        struct ray_sym_domain_s* da = ray_sym_vec_domain(a);
-        struct ray_sym_domain_s* db = ray_sym_vec_domain(b);
-        struct ray_sym_domain_s* dom = (da == db) ? da : ray_sym_runtime_domain();
-        ray_sym_domain_retain(dom);
-        result->sym_domain = dom;
+        ray_sym_domain_retain(concat_dom);
+        result->sym_domain = concat_dom;
     }
 
-    /* For SYM with mismatched widths, widen element-by-element */
-    if (a->type == RAY_SYM && a_esz != b_esz) {
+    if (sym_translate) {
+        /* Cross-domain: re-express both sides as runtime ids. */
+        int64_t* dst = (int64_t*)ray_data(result);
+        int64_t cnt_a = ray_sym_domain_count(ray_sym_vec_domain(a));
+        int64_t cnt_b = ray_sym_domain_count(ray_sym_vec_domain(b));
+        for (int64_t i = 0; i < a->len; i++) {
+            int64_t val = ray_read_sym(ray_data(a), i, a->type, a->attrs);
+            if (sym_lut_a) val = (val >= 0 && val < cnt_a) ? sym_lut_a[val] : 0;
+            dst[i] = val;
+        }
+        for (int64_t i = 0; i < b->len; i++) {
+            int64_t val = ray_read_sym(ray_data(b), i, b->type, b->attrs);
+            if (sym_lut_b) val = (val >= 0 && val < cnt_b) ? sym_lut_b[val] : 0;
+            dst[a->len + i] = val;
+        }
+    } else if (a->type == RAY_SYM && a_esz != b_esz) {
+        /* Same domain, mismatched widths: widen element-by-element */
         void* dst = ray_data(result);
         for (int64_t i = 0; i < a->len; i++) {
             int64_t val = ray_read_sym(ray_data(a), i, a->type, a->attrs);
