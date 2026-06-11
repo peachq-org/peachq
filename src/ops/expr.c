@@ -25,6 +25,7 @@
 #include "lang/internal.h"  /* sym_domain_rep (sym-domain Phase 2) */
 #include "ops/rowsel.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 static bool atom_to_numeric(ray_t* atom, double* out_f, int64_t* out_i, bool* out_is_f64) {
     if (!atom || !ray_is_atom(atom)) return false;
@@ -401,6 +402,36 @@ bool try_affine_sumavg_input(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
  * registers — never allocates full-length intermediate vectors.
  * ============================================================================ */
 
+/* ── Phase-0 instrumentation: why did expr_compile bail? ──
+ * Diagnostic counters, not synchronized — compiles run on the query
+ * thread; benign races on parallel sessions are acceptable for stats. */
+uint64_t ray_expr_bail_counts[EXPR_BAIL__N];
+uint64_t ray_expr_compile_ok;
+bool     ray_expr_disable; /* test knob: force the fallback path */
+
+#define EXPR_BAIL(reason) do {                          \
+    ray_expr_bail_counts[(reason)]++;                   \
+    return false;                                       \
+} while (0)
+
+static void expr_stats_dump(void) {
+    static const char* names[EXPR_BAIL__N] = {
+        "root-shape", "graph-size", "depth", "regs", "ins",
+        "mapcommon", "str", "nulls", "slice", "sym-domain",
+        "const", "null-shape", "other",
+    };
+    fprintf(stderr, "expr_compile ok=%llu\n",
+            (unsigned long long)ray_expr_compile_ok);
+    for (int i = 0; i < EXPR_BAIL__N; i++)
+        if (ray_expr_bail_counts[i])
+            fprintf(stderr, "expr_compile bail %-10s %llu\n", names[i],
+                    (unsigned long long)ray_expr_bail_counts[i]);
+}
+
+void ray_expr_stats_init(void) {
+    if (getenv("RAY_EXPR_STATS")) atexit(expr_stats_dump);
+}
+
 /* Is this opcode an element-wise op suitable for expression compilation? */
 static inline bool expr_is_elementwise(uint16_t op) {
     return (op >= OP_NEG && op <= OP_CAST) || (op >= OP_ADD && op <= OP_MAX2);
@@ -425,12 +456,13 @@ static uint8_t expr_ensure_type(ray_expr_t* out, uint8_t src, int8_t target) {
  * Returns true on success. Only compiles element-wise subtrees. */
 bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
     memset(out, 0, sizeof(*out));
-    if (!root || !g || !tbl) return false;
-    if (root->opcode == OP_SCAN || root->opcode == OP_CONST) return false;
-    if (!expr_is_elementwise(root->opcode)) return false;
+    if (ray_expr_disable) return false; /* uncounted: test knob */
+    if (!root || !g || !tbl) EXPR_BAIL(EXPR_BAIL_ROOT);
+    if (root->opcode == OP_SCAN || root->opcode == OP_CONST) EXPR_BAIL(EXPR_BAIL_ROOT);
+    if (!expr_is_elementwise(root->opcode)) EXPR_BAIL(EXPR_BAIL_ROOT);
 
     uint32_t nc = g->node_count;
-    if (nc > 4096) return false; /* guard against stack overflow from VLA */
+    if (nc > 4096) EXPR_BAIL(EXPR_BAIL_SIZE); /* guard against stack overflow from VLA */
     uint8_t node_reg[nc];
     memset(node_reg, 0xFF, nc * sizeof(uint8_t));
 
@@ -453,22 +485,23 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 ray_op_t* ch = node->inputs[i];
                 if (!ch) continue;
                 if (ch->id < nc && node_reg[ch->id] != 0xFF) continue;
-                if (sp >= 64) return false;
+                if (sp >= 64) EXPR_BAIL(EXPR_BAIL_DEPTH);
                 dfs[sp++] = (dfs_t){ch, 0};
             }
         } else {
             sp--;
             uint8_t r = out->n_regs;
-            if (r >= EXPR_MAX_REGS) return false;
+            if (r >= EXPR_MAX_REGS) EXPR_BAIL(EXPR_BAIL_REGS);
 
             if (node->opcode == OP_SCAN) {
                 ray_op_ext_t* ext = find_ext(g, node->id);
-                if (!ext) return false;
+                if (!ext) EXPR_BAIL(EXPR_BAIL_OTHER);
                 ray_t* col = ray_table_get_col(tbl, ext->sym);
-                if (!col) return false;
-                if (col->type == RAY_MAPCOMMON) return false;
-                if (col->type == RAY_STR) return false; /* RAY_STR needs string comparison path */
-                if (col->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)) return false; /* nullable cols need the null-aware path */
+                if (!col) EXPR_BAIL(EXPR_BAIL_OTHER);
+                if (col->type == RAY_MAPCOMMON) EXPR_BAIL(EXPR_BAIL_MAPCOMMON);
+                if (col->type == RAY_STR) EXPR_BAIL(EXPR_BAIL_STR); /* RAY_STR needs string comparison path */
+                if (col->attrs & RAY_ATTR_HAS_NULLS) EXPR_BAIL(EXPR_BAIL_NULLS);
+                if (col->attrs & RAY_ATTR_SLICE)     EXPR_BAIL(EXPR_BAIL_SLICE);
                 /* sym-domain Phase 2: the fused program loads SYM cells
                  * as raw i64s and resolves STR literals via the GLOBAL
                  * intern table (ray_sym_find below) — only valid for
@@ -479,7 +512,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                     ray_t* sym_rep = sym_domain_rep(col);
                     if (sym_rep && ray_sym_vec_domain(sym_rep) !=
                                        ray_sym_runtime_domain())
-                        return false;
+                        EXPR_BAIL(EXPR_BAIL_SYM_DOMAIN);
                 }
                 out->regs[r].kind = REG_SCAN;
                 if (RAY_IS_PARTED(col->type)) {
@@ -500,8 +533,8 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 }
             } else if (node->opcode == OP_CONST) {
                 ray_op_ext_t* ext = find_ext(g, node->id);
-                if (!ext || !ext->literal) return false;
-                if (RAY_ATOM_IS_NULL(ext->literal)) return false; /* null constants need the null-aware path */
+                if (!ext || !ext->literal) EXPR_BAIL(EXPR_BAIL_CONST);
+                if (RAY_ATOM_IS_NULL(ext->literal)) EXPR_BAIL(EXPR_BAIL_CONST); /* null constants need the null-aware path */
                 double cf; int64_t ci; bool is_f64;
                 if (!atom_to_numeric(ext->literal, &cf, &ci, &is_f64)) {
                     /* Try resolving string constant to symbol intern ID —
@@ -511,12 +544,12 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                         const char* s = ray_str_ptr(ext->literal);
                         size_t slen = ray_str_len(ext->literal);
                         int64_t sid = ray_sym_find(s, slen);
-                        if (sid < 0) return false;
+                        if (sid < 0) EXPR_BAIL(EXPR_BAIL_CONST);
                         ci = sid;
                         cf = (double)sid;
                         is_f64 = false;
                     } else {
-                        return false;
+                        EXPR_BAIL(EXPR_BAIL_CONST);
                     }
                 }
                 out->regs[r].kind = REG_CONST;
@@ -524,13 +557,13 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 out->regs[r].const_f64 = cf;
                 out->regs[r].const_i64 = ci;
             } else if (expr_is_elementwise(node->opcode)) {
-                if (!node->inputs[0]) return false;
+                if (!node->inputs[0]) EXPR_BAIL(EXPR_BAIL_OTHER);
                 uint8_t s1 = node_reg[node->inputs[0]->id];
-                if (s1 == 0xFF) return false;
+                if (s1 == 0xFF) EXPR_BAIL(EXPR_BAIL_OTHER);
                 uint8_t s2 = 0xFF;
                 if (node->arity >= 2 && node->inputs[1]) {
                     s2 = node_reg[node->inputs[1]->id];
-                    if (s2 == 0xFF) return false;
+                    if (s2 == 0xFF) EXPR_BAIL(EXPR_BAIL_OTHER);
                 }
 
                 int8_t t1 = out->regs[s1].type;
@@ -555,37 +588,37 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 if (op == OP_CAST) {
                     /* No promotion needed; CAST handles the conversion */
                     r = out->n_regs;
-                    if (r >= EXPR_MAX_REGS) return false;
+                    if (r >= EXPR_MAX_REGS) EXPR_BAIL(EXPR_BAIL_REGS);
                 } else if (ot == RAY_F64 && s2 != 0xFF) {
                     /* Arithmetic with f64 output — promote i64 inputs to f64 */
                     s1 = expr_ensure_type(out, s1, RAY_F64);
                     s2 = expr_ensure_type(out, s2, RAY_F64);
                     r = out->n_regs; /* re-read after possible CAST inserts */
-                    if (r >= EXPR_MAX_REGS) return false;
+                    if (r >= EXPR_MAX_REGS) EXPR_BAIL(EXPR_BAIL_REGS);
                 } else if (ot == RAY_F64 && s2 == 0xFF) {
                     /* Unary f64 — promote input */
                     s1 = expr_ensure_type(out, s1, RAY_F64);
                     r = out->n_regs;
-                    if (r >= EXPR_MAX_REGS) return false;
+                    if (r >= EXPR_MAX_REGS) EXPR_BAIL(EXPR_BAIL_REGS);
                 } else if (ot == RAY_BOOL && s2 != 0xFF && t1 != t2) {
                     /* Comparison with mixed types — promote both to f64 */
                     int8_t pt = (t1 == RAY_F64 || t2 == RAY_F64) ? RAY_F64 : RAY_I64;
                     s1 = expr_ensure_type(out, s1, pt);
                     s2 = expr_ensure_type(out, s2, pt);
                     r = out->n_regs;
-                    if (r >= EXPR_MAX_REGS) return false;
+                    if (r >= EXPR_MAX_REGS) EXPR_BAIL(EXPR_BAIL_REGS);
                 }
 
                 out->regs[r].kind = REG_SCRATCH;
                 out->regs[r].type = ot;
                 out->n_scratch++;
 
-                if (out->n_ins >= EXPR_MAX_INS) return false;
+                if (out->n_ins >= EXPR_MAX_INS) EXPR_BAIL(EXPR_BAIL_INS);
                 out->ins[out->n_ins++] = (expr_ins_t){
                     .opcode = (uint8_t)op, .dst = r, .src1 = s1, .src2 = s2,
                 };
             } else {
-                return false;
+                EXPR_BAIL(EXPR_BAIL_OTHER);
             }
 
             out->n_regs++;
@@ -593,9 +626,10 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
         }
     }
 
-    if (out->n_regs == 0 || out->n_ins == 0) return false;
+    if (out->n_regs == 0 || out->n_ins == 0) EXPR_BAIL(EXPR_BAIL_OTHER);
     out->out_reg = out->n_regs - 1;
     out->out_type = out->regs[out->out_reg].type;
+    ray_expr_compile_ok++;
     return true;
 }
 
