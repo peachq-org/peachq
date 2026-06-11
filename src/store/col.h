@@ -42,7 +42,6 @@ ray_err_t ray_col_save(ray_t* vec, const char* path);
 ray_err_t ray_col_save_bulk(ray_t* vec, const char* path);
 ray_t*    ray_col_load(const char* path);
 ray_t*    ray_col_mmap(const char* path);
-ray_t*    ray_col_mmap_splayed(const char* path);
 
 /* Write a RAY_SYM column re-encoded as positions in `target` (width =
  * ray_sym_dict_width(domain count); header rc = domain count at save).
