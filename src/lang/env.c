@@ -22,6 +22,7 @@
  */
 
 #include "lang/env.h"
+#include "core/runtime.h"
 #include "table/sym.h"
 #include "table/dict.h"
 #include "ops/temporal.h"
@@ -105,22 +106,13 @@ static struct {
 
 /* ---- Local scope stack ---- */
 
-#define SCOPE_CAP  64
-#define FRAME_CAP  64
+/* The scope stack lives on the per-thread VM (core/runtime.h) — one
+ * per thread, stable across bytecode invocations.  ray_scope_frame_t
+ * and the caps (RAY_SCOPE_CAP / RAY_FRAME_CAP) are defined there.
+ * Callers reach env state through eval, whose entry guard rejects
+ * threads with no bound VM, so plain __VM derefs are safe below. */
 
-typedef struct {
-    int64_t  keys_inline[FRAME_CAP];
-    ray_t*   vals_inline[FRAME_CAP];
-    int64_t* keys;     /* -> keys_inline, or heap once grown past FRAME_CAP */
-    ray_t**  vals;     /* -> vals_inline, or heap once grown */
-    int32_t  cap;
-    int32_t  count;
-} ray_scope_frame_t;
-
-static _Thread_local ray_scope_frame_t scope_stack[SCOPE_CAP];
-static _Thread_local int32_t scope_depth = 0;
-
-int32_t ray_env_scope_depth(void) { return scope_depth; }
+int32_t ray_env_scope_depth(void) { return __VM ? __VM->scope_depth : 0; }
 int32_t ray_env_global_count(void) { return g_env.count; }
 
 /* The five connection-hook sym ids carved out of the reserved-name reject.
@@ -158,7 +150,7 @@ int64_t ray_sym_ipc_hook(int idx) {
 
 ray_err_t ray_env_init(void) {
     memset(&g_env, 0, sizeof(g_env));
-    scope_depth = 0;
+    __VM->scope_depth = 0;
     /* The IPC hook sym IDs are interned lazily on first probe via
      * `ipc_hook_syms_ensure`.  We deliberately do NOT pre-intern here:
      * single-char operator names (`+`, `-`, `*`, …) are registered just
@@ -174,7 +166,7 @@ ray_err_t ray_env_init(void) {
 
 void ray_env_destroy(void) {
     /* Pop any remaining scopes */
-    while (scope_depth > 0) ray_env_pop_scope();
+    while (__VM->scope_depth > 0) ray_env_pop_scope();
     for (int32_t i = 0; i < g_env.count; i++) {
         if (g_env.vals[i]) ray_release(g_env.vals[i]);
     }
@@ -191,8 +183,8 @@ void ray_env_destroy(void) {
  * Returns NULL if not bound.  Always used as the head-segment resolver
  * for dotted paths, and as the fast path for plain names. */
 static ray_t* env_lookup_flat(int64_t sym_id) {
-    for (int32_t d = scope_depth - 1; d >= 0; d--) {
-        ray_scope_frame_t* f = &scope_stack[d];
+    for (int32_t d = __VM->scope_depth - 1; d >= 0; d--) {
+        ray_scope_frame_t* f = &__VM->scope_stack[d];
         for (int32_t i = 0; i < f->count; i++) {
             if (f->keys[i] == sym_id) return f->vals[i];
         }
@@ -295,8 +287,8 @@ ray_t* ray_env_resolve(int64_t sym_id) {
          * pushed into scope by the select fallback) must not shadow
          * the globally-registered accessor function. */
         ray_t* fn = NULL;
-        for (int32_t d = scope_depth - 1; d >= 0 && !fn; d--) {
-            ray_scope_frame_t* f = &scope_stack[d];
+        for (int32_t d = __VM->scope_depth - 1; d >= 0 && !fn; d--) {
+            ray_scope_frame_t* f = &__VM->scope_stack[d];
             for (int32_t k = 0; k < f->count; k++) {
                 if (f->keys[k] == segs[i] && f->vals[k]
                     && f->vals[k]->type == RAY_UNARY) {
@@ -399,7 +391,7 @@ static ray_err_t env_bind_global_user(int64_t sym_id, ray_t* val) {
 }
 
 static ray_err_t env_bind_local(int64_t sym_id, ray_t* val) {
-    ray_scope_frame_t* f = &scope_stack[scope_depth - 1];
+    ray_scope_frame_t* f = &__VM->scope_stack[__VM->scope_depth - 1];
     for (int32_t i = 0; i < f->count; i++) {
         if (f->keys[i] == sym_id) {
             if (val == NULL) {
@@ -563,8 +555,8 @@ static ray_t* lookup_global(int64_t sym_id) {
 }
 
 static ray_t* lookup_top_frame(int64_t sym_id) {
-    if (scope_depth <= 0) return NULL;
-    ray_scope_frame_t* f = &scope_stack[scope_depth - 1];
+    if (__VM->scope_depth <= 0) return NULL;
+    ray_scope_frame_t* f = &__VM->scope_stack[__VM->scope_depth - 1];
     for (int32_t i = 0; i < f->count; i++) {
         if (f->keys[i] == sym_id) return f->vals[i];
     }
@@ -611,20 +603,20 @@ ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
 }
 
 ray_err_t ray_env_push_scope(void) {
-    if (scope_depth >= SCOPE_CAP) return RAY_ERR_OOM;
-    ray_scope_frame_t* f = &scope_stack[scope_depth];
+    if (__VM->scope_depth >= RAY_SCOPE_CAP) return RAY_ERR_OOM;
+    ray_scope_frame_t* f = &__VM->scope_stack[__VM->scope_depth];
     f->keys = f->keys_inline;
     f->vals = f->vals_inline;
-    f->cap = FRAME_CAP;
+    f->cap = RAY_FRAME_CAP;
     f->count = 0;
-    scope_depth++;
+    __VM->scope_depth++;
     return RAY_OK;
 }
 
 void ray_env_pop_scope(void) {
-    if (scope_depth <= 0) return;
-    scope_depth--;
-    ray_scope_frame_t* f = &scope_stack[scope_depth];
+    if (__VM->scope_depth <= 0) return;
+    __VM->scope_depth--;
+    ray_scope_frame_t* f = &__VM->scope_stack[__VM->scope_depth];
     for (int32_t i = 0; i < f->count; i++) {
         if (f->vals[i]) ray_release(f->vals[i]);
     }
@@ -632,7 +624,7 @@ void ray_env_pop_scope(void) {
     if (f->vals != f->vals_inline) ray_sys_free(f->vals);
     f->keys = f->keys_inline;
     f->vals = f->vals_inline;
-    f->cap = FRAME_CAP;
+    f->cap = RAY_FRAME_CAP;
     f->count = 0;
 }
 
@@ -735,7 +727,7 @@ ray_err_t ray_env_set_local(int64_t sym_id, ray_t* val) {
      * user-settable here too, matching the global `ray_env_set` path. */
     if (ray_sym_is_reserved(sym_id) && !ray_sym_is_ipc_hook(sym_id))
         return RAY_ERR_RESERVED;
-    if (scope_depth <= 0) return ray_env_set(sym_id, val);
+    if (__VM->scope_depth <= 0) return ray_env_set(sym_id, val);
     if (ray_sym_is_dotted(sym_id)) {
         return env_set_dotted(sym_id, val, lookup_top_frame, env_bind_local);
     }
