@@ -34,6 +34,28 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+/* ── Routing observability counters (diagnostic, unsynchronized) ── */
+uint64_t ray_idx_consults[IDX_SITE__N];
+uint64_t ray_idx_hits[IDX_SITE__N];
+
+static void idx_stats_dump(void) {
+    static const char* names[IDX_SITE__N] = {
+        "filter-zone", "filter-bloom", "filter-hash", "filter-range",
+        "in", "find", "sort", "distinct",
+    };
+    for (int i = 0; i < IDX_SITE__N; i++)
+        if (ray_idx_consults[i] || ray_idx_hits[i])
+            fprintf(stderr, "idx_route %-12s consults=%llu hits=%llu\n",
+                    names[i],
+                    (unsigned long long)ray_idx_consults[i],
+                    (unsigned long long)ray_idx_hits[i]);
+}
+
+void ray_idx_stats_init(void) {
+    if (getenv("RAY_IDX_STATS")) atexit(idx_stats_dump);
+}
 
 /* Width of one element of a numeric vector type, or 0 if unsupported. */
 static int numeric_elem_size(int8_t t) {
@@ -762,6 +784,21 @@ static ray_index_t* hash_probe_setup(ray_t* col, int64_t key,
     return ix;
 }
 
+/* v1 routing eligibility — structural gate shared by every consult function.
+ * Checks that col is a flat (non-parted, non-MAPCOMMON) vector carrying a
+ * fresh index of the requested kind.  Does NOT gate on HAS_NULLS: hash and
+ * bloom indexes skip null rows during build, so probing a null-bearing column
+ * is correct (the chain simply won't surface null-row matches).  Callers that
+ * must exclude null-bearing columns for semantic reasons (sort perm, range
+ * scan) should add their own HAS_NULLS check. */
+static bool idx_fresh(ray_t* col, ray_idx_kind_t kind) {
+    if (!col || RAY_IS_ERR(col)) return false;
+    if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return false;
+    if (!ray_index_has(col)) return false;
+    ray_index_t* ix = ray_index_payload(col->index);
+    return ix->kind == (uint8_t)kind && ix->built_for_len == col->len;
+}
+
 /* qsort comparator: ascending int64 row ids, used by the rowsel
  * builder to put matches into per-segment order. */
 static int hash_match_cmp_i64(const void* a, const void* b) {
@@ -770,7 +807,72 @@ static int hash_match_cmp_i64(const void* a, const void* b) {
     return (x > y) - (x < y);
 }
 
+/* Build a rowsel block from a SORTED ascending array of matching row ids
+ * over a column of n rows.  Returns fresh rowsel (rc=1) or NULL on OOM.
+ * mcnt==0 yields a valid all-NONE rowsel, NOT NULL — NULL means "no fast
+ * path" to every consumer (idxop.h contract). */
+static ray_t* rowsel_from_sorted_ids(int64_t n, const int64_t* ids, int64_t mcnt) {
+    ray_t* block = ray_rowsel_new(n, mcnt, mcnt);
+    if (!block) return NULL;
+
+    uint32_t n_segs = ray_rowsel_meta(block)->n_segs;
+    uint8_t*  seg_flags   = ray_rowsel_flags(block);
+    uint32_t* seg_offsets = ray_rowsel_offsets(block);
+    uint16_t* idx_arr     = ray_rowsel_idx(block);
+
+    /* All segments default to NONE; the loop below flips MIX where
+     * a match lands.  ray_alloc does NOT zero the data area
+     * (only the 32-byte header), so explicit init is required. */
+    memset(seg_flags, RAY_SEL_NONE, (size_t)n_segs);
+    /* seg_offsets is built by linear sweep below — initialize to a
+     * sentinel that the sweep will overwrite. */
+    /* (no memset needed; the sweep writes every entry [0..n_segs]) */
+
+    /* Single sweep over the sorted matches: emit per-segment offsets
+     * and morsel-local indices into idx_arr.  cur_seg tracks the
+     * segment we're filling; gaps get RAY_SEL_NONE and zero spans. */
+    int64_t mi = 0;
+    uint32_t cum = 0;
+    for (uint32_t s = 0; s < n_segs; s++) {
+        seg_offsets[s] = cum;
+        int64_t seg_start = (int64_t)s * RAY_MORSEL_ELEMS;
+        int64_t seg_end   = seg_start + RAY_MORSEL_ELEMS;
+        if (seg_end > n) seg_end = n;
+        uint32_t pc = 0;
+        while (mi < mcnt && ids[mi] < seg_end) {
+            idx_arr[cum + pc] = (uint16_t)(ids[mi] - seg_start);
+            pc++;
+            mi++;
+        }
+        if (pc == 0) {
+            seg_flags[s] = RAY_SEL_NONE;
+        } else if ((int64_t)pc == seg_end - seg_start) {
+            seg_flags[s] = RAY_SEL_ALL;
+            /* Roll back the indices — ALL segments contribute zero
+             * idx[] entries in the rowsel contract. */
+            cum -= pc;  /* idx_arr writes for this seg get overwritten
+                          by the next MIX segment's writes; idx_count
+                          was sized for all matches, so this is safe. */
+        } else {
+            seg_flags[s] = RAY_SEL_MIX;
+            cum += pc;
+        }
+    }
+    seg_offsets[n_segs] = cum;
+    /* Adjust meta total_pass / idx layout — ALL-segment rows count
+     * toward total_pass but not idx_count.  We initially passed
+     * (mcnt, mcnt); fix up if any ALL segments collapsed. */
+    ray_rowsel_meta(block)->total_pass = mcnt;
+    (void)cum;
+
+    return block;
+}
+
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
+    /* Sanity precheck — idx_fresh validates parted/nulls/kind/staleness;
+     * hash_probe_setup below also validates key-range, elem-size, and
+     * payload pointers, so these checks are complementary. */
+    if (!idx_fresh(col, RAY_IDX_HASH)) return NULL;
     int64_t rid = -1;
     ray_index_t* ix = hash_probe_setup(col, key, &rid);
     if (!ix) return NULL;
@@ -819,65 +921,7 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
     if (mcnt > 1)
         qsort(matches, (size_t)mcnt, sizeof(int64_t), hash_match_cmp_i64);
 
-    /* Count idx_count = # of MIX segments × matches in that segment.
-     * For a hash probe a segment is either NONE (no matches) or MIX
-     * (≥1 match; never ALL unless every row in the segment matched,
-     * which would require duplicate-key density > MORSEL_ELEMS in one
-     * 1024-row window — vanishingly rare and indistinguishable in the
-     * consumer from a normal MIX). */
-    ray_t* block = ray_rowsel_new(n, mcnt, mcnt);
-    if (!block) { ray_release(match_hdr); return NULL; }
-
-    uint32_t n_segs = ray_rowsel_meta(block)->n_segs;
-    uint8_t*  seg_flags   = ray_rowsel_flags(block);
-    uint32_t* seg_offsets = ray_rowsel_offsets(block);
-    uint16_t* idx_arr     = ray_rowsel_idx(block);
-
-    /* All segments default to NONE; the loop below flips MIX where
-     * a match lands.  ray_alloc does NOT zero the data area
-     * (only the 32-byte header), so explicit init is required. */
-    memset(seg_flags, RAY_SEL_NONE, (size_t)n_segs);
-    /* seg_offsets is built by linear sweep below — initialize to a
-     * sentinel that the sweep will overwrite. */
-    /* (no memset needed; the sweep writes every entry [0..n_segs]) */
-
-    /* Single sweep over the sorted matches: emit per-segment offsets
-     * and morsel-local indices into idx_arr.  cur_seg tracks the
-     * segment we're filling; gaps get RAY_SEL_NONE and zero spans. */
-    int64_t mi = 0;
-    uint32_t cum = 0;
-    for (uint32_t s = 0; s < n_segs; s++) {
-        seg_offsets[s] = cum;
-        int64_t seg_start = (int64_t)s * RAY_MORSEL_ELEMS;
-        int64_t seg_end   = seg_start + RAY_MORSEL_ELEMS;
-        if (seg_end > n) seg_end = n;
-        uint32_t pc = 0;
-        while (mi < mcnt && matches[mi] < seg_end) {
-            idx_arr[cum + pc] = (uint16_t)(matches[mi] - seg_start);
-            pc++;
-            mi++;
-        }
-        if (pc == 0) {
-            seg_flags[s] = RAY_SEL_NONE;
-        } else if ((int64_t)pc == seg_end - seg_start) {
-            seg_flags[s] = RAY_SEL_ALL;
-            /* Roll back the indices — ALL segments contribute zero
-             * idx[] entries in the rowsel contract. */
-            cum -= pc;  /* idx_arr writes for this seg get overwritten
-                          by the next MIX segment's writes; idx_count
-                          was sized for all matches, so this is safe. */
-        } else {
-            seg_flags[s] = RAY_SEL_MIX;
-            cum += pc;
-        }
-    }
-    seg_offsets[n_segs] = cum;
-    /* Adjust meta total_pass / idx layout — ALL-segment rows count
-     * toward total_pass but not idx_count.  We initially passed
-     * (mcnt, mcnt); fix up if any ALL segments collapsed. */
-    ray_rowsel_meta(block)->total_pass = mcnt;
-    (void)cum;
-
+    ray_t* block = rowsel_from_sorted_ids(n, matches, mcnt);
     ray_release(match_hdr);
     return block;
 }
