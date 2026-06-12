@@ -22,6 +22,7 @@
  */
 
 #include "lang/eval.h"
+#include "core/runtime.h"
 #include "lang/internal.h"
 #include "app/repl.h"
 #include "lang/env.h"
@@ -50,9 +51,9 @@
 #include <signal.h>
 #include <time.h>
 
-/* Maximum recursion depth for ray_eval() to prevent stack overflow */
+/* Maximum recursion depth for ray_eval() to prevent stack overflow.
+ * The depth counter lives on the per-thread VM (__VM->eval_depth). */
 #define RAY_EVAL_MAX_DEPTH 512
-_Thread_local static int eval_depth = 0;
 
 typedef struct {
     const ray_t* vec;
@@ -73,11 +74,10 @@ static void affine_sum_cache_clear(void) {
     affine_sum_cache_n = 0;
 }
 
-/* Thread-local nfo for eval context — tracks source locations during evaluation */
-static _Thread_local ray_t* g_eval_nfo = NULL;
-
-/* Thread-local error trace — list of [span_i64, filename, fn_name, source] frames */
-static _Thread_local ray_t* g_error_trace = NULL;
+/* Eval-context nfo (source locations) and the error trace (list of
+ * [span_i64, filename, fn_name, source] frames) live on the per-thread
+ * VM — __VM->nfo / __VM->trace — so they survive across bytecode
+ * invocations and stay one-per-thread, per the runtime/VM state model. */
 
 /* Interrupt flag — set by REPL signal handler, checked by eval/VM loops */
 static volatile sig_atomic_t g_eval_interrupted = 0;
@@ -91,25 +91,23 @@ void ray_eval_request_interrupt(void) { ray_request_interrupt(); }
 void ray_eval_clear_interrupt(void)   { ray_clear_interrupt(); }
 int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 
-ray_t* ray_eval_get_nfo(void) { return g_eval_nfo; }
-void   ray_eval_set_nfo(ray_t* nfo) { g_eval_nfo = nfo; }
+ray_t* ray_eval_get_nfo(void) { return __VM ? __VM->nfo : NULL; }
+void   ray_eval_set_nfo(ray_t* nfo) { if (__VM) __VM->nfo = nfo; }
 
-ray_t* ray_get_error_trace(void) { return g_error_trace; }
+ray_t* ray_get_error_trace(void) { return __VM ? __VM->trace : NULL; }
 void   ray_clear_error_trace(void) {
-    if (g_error_trace) { ray_release(g_error_trace); g_error_trace = NULL; }
+    if (__VM && __VM->trace) { ray_release(__VM->trace); __VM->trace = NULL; }
 }
 
 /* ══════════════════════════════════════════
  * Restricted-mode check
  * ══════════════════════════════════════════ */
 
-static _Thread_local bool g_eval_restricted = false;
-
-void ray_eval_set_restricted(bool on) { g_eval_restricted = on; }
-bool ray_eval_get_restricted(void)    { return g_eval_restricted; }
+void ray_eval_set_restricted(bool on) { if (__VM) __VM->restricted = on; }
+bool ray_eval_get_restricted(void)    { return __VM && __VM->restricted; }
 
 static inline bool fn_is_restricted(ray_t* fn_obj) {
-    return g_eval_restricted && (fn_obj->attrs & RAY_FN_RESTRICTED);
+    return __VM->restricted && (fn_obj->attrs & RAY_FN_RESTRICTED);
 }
 
 static ray_t* materialize_owned_args(ray_t** args, int64_t n) {
@@ -256,13 +254,15 @@ static ray_t* try_sum_affine_expr(ray_t* expr, int* handled) {
  * Error handling: try / raise
  * ══════════════════════════════════════════ */
 
-static _Thread_local ray_t *__raise_val = NULL;
+/* The pending (raise x) value lives on the per-thread VM
+ * (__VM->raise_val) — it must survive the unwind across any number of
+ * bytecode invocations on this thread's stack. */
 
 /* (raise value) — raise an error with the given value */
 ray_t* ray_raise_fn(ray_t* val) {
-    if (__raise_val) ray_release(__raise_val);
+    if (__VM->raise_val) ray_release(__VM->raise_val);
     ray_retain(val);
-    __raise_val = val;
+    __VM->raise_val = val;
     return ray_error("domain", NULL);
 }
 
@@ -273,8 +273,8 @@ ray_t* ray_try_fn(ray_t* expr, ray_t* handler_expr) {
     if (!RAY_IS_ERR(result)) return result;
 
     /* Get error value (set by raise, or default for runtime errors) */
-    ray_t* err_val = __raise_val;
-    __raise_val = NULL;
+    ray_t* err_val = __VM->raise_val;
+    __VM->raise_val = NULL;
     if (!err_val) err_val = make_i64(0);
 
     /* Evaluate handler expression */
@@ -1621,9 +1621,9 @@ ray_t* ray_fn(ray_t** args, int64_t n) {
     LAMBDA_NLOCALS(lambda) = 0;
 
     /* Attach source location info from current eval context */
-    if (g_eval_nfo) {
-        LAMBDA_NFO(lambda) = g_eval_nfo;
-        ray_retain(g_eval_nfo);
+    if (__VM->nfo) {
+        LAMBDA_NFO(lambda) = __VM->nfo;
+        ray_retain(__VM->nfo);
     } else {
         LAMBDA_NFO(lambda) = NULL;
     }
@@ -1633,7 +1633,7 @@ ray_t* ray_fn(ray_t** args, int64_t n) {
 }
 
 /* Build a [span_i64, filename, fn_name, source] frame from a resolved span
- * and append it to g_error_trace.  Shared by the bytecode and eval paths. */
+ * and append it to __VM->trace.  Shared by the bytecode and eval paths. */
 static void append_error_frame(ray_t* nfo, ray_span_t span) {
     if (span.id == 0) return;
 
@@ -1658,14 +1658,14 @@ static void append_error_frame(ray_t* nfo, ray_span_t span) {
         fe[3] = ray_str("", 0);
     }
 
-    if (!g_error_trace) {
-        g_error_trace = ray_alloc(sizeof(ray_t*));
-        if (!g_error_trace) { ray_release(frame); return; }
-        g_error_trace->type = RAY_LIST;
-        g_error_trace->len = 1;
-        ((ray_t**)ray_data(g_error_trace))[0] = frame;
+    if (!__VM->trace) {
+        __VM->trace = ray_alloc(sizeof(ray_t*));
+        if (!__VM->trace) { ray_release(frame); return; }
+        __VM->trace->type = RAY_LIST;
+        __VM->trace->len = 1;
+        ((ray_t**)ray_data(__VM->trace))[0] = frame;
     } else {
-        g_error_trace = ray_list_append(g_error_trace, frame);
+        __VM->trace = ray_list_append(__VM->trace, frame);
         ray_release(frame);
     }
 }
@@ -1752,7 +1752,8 @@ ray_t* call_lambda(ray_t* lambda, ray_t** call_args, int64_t argc) {
  * ray_error_msg() reading a NULL pointer on any thread that ran an eval
  * without going through ray_runtime_create — which is every tokio worker
  * thread in ray-exomem. */
-extern _Thread_local ray_vm_t *__VM;
+/* __VM (per-thread VM) comes from core/runtime.h — the executor below
+ * allocates a private ray_exec_t per invocation and leaves __VM alone. */
 
 static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
     /* Computed goto dispatch table */
@@ -1787,11 +1788,13 @@ static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
             return ray_error("arity", "expected %" PRId64 " args, got %" PRId64, param_count, argc);
     }
 
-    ray_t *vm_block = ray_alloc(sizeof(ray_vm_t));
+    if (RAY_UNLIKELY(!__VM))
+        return ray_error("state", "no VM bound to this thread");
+
+    ray_t *vm_block = ray_alloc(sizeof(ray_exec_t));
     if (!vm_block || RAY_IS_ERR(vm_block)) return ray_error("oom", NULL);
-    ray_vm_t *vmp = (ray_vm_t *)ray_data(vm_block);
-    memset(vmp, 0, sizeof(ray_vm_t));
-    __VM = vmp;
+    ray_exec_t *vmp = (ray_exec_t *)ray_data(vm_block);
+    memset(vmp, 0, sizeof(ray_exec_t));
 
 #define vm (*vmp)
 
@@ -2247,7 +2250,6 @@ op_ret: {
     if (vm.rp == 0) {
         /* Top-level return */
         ray_release(vm.fn);
-        __VM = NULL;
 #undef vm
         ray_free(vm_block);
         return result;  /* caller owns the POP'd reference */
@@ -2327,21 +2329,21 @@ vm_error_cleanup: {
             if (v) ray_release(v);
         }
 
-        /* Get error value.  If __raise_val is set, a user (raise x)
+        /* Get error value.  If __VM->raise_val is set, a user (raise x)
          * just ran — its value is the real payload the handler must
          * see.  vm_err_obj is the generic error-sentinel returned
          * from ray_raise_fn (or a VM-detected error like arity);
-         * release it if we picked __raise_val.  For VM-only errors,
-         * __raise_val stays NULL and vm_err_obj is used. */
+         * release it if we picked __VM->raise_val.  For VM-only errors,
+         * __VM->raise_val stays NULL and vm_err_obj is used. */
         ray_t *err_val;
-        if (__raise_val) {
+        if (__VM->raise_val) {
             if (vm_err_obj) ray_release(vm_err_obj);
-            err_val = __raise_val;
+            err_val = __VM->raise_val;
         } else {
             err_val = vm_err_obj;
         }
         vm_err_obj = NULL;
-        __raise_val = NULL;
+        __VM->raise_val = NULL;
         if (!err_val) err_val = make_i64(0);
 
         /* Restore context and push error value */
@@ -2372,7 +2374,6 @@ vm_error_cleanup: {
         if (vm.rs[i].fn) ray_release(vm.rs[i].fn);
     for (int32_t i = 0; i < vm.tp; i++)
         ray_release(vm.ts[i].fn);
-    __VM = NULL;
 #undef vm
     ray_free(vm_block);
     if (vm_err_obj)
@@ -2959,7 +2960,7 @@ ray_err_t ray_lang_init(void) {
 }
 
 void ray_lang_destroy(void) {
-    if (__raise_val) { ray_release(__raise_val); __raise_val = NULL; }
+    if (__VM && __VM->raise_val) { ray_release(__VM->raise_val); __VM->raise_val = NULL; }
     /* Reset global Datalog rule storage */
     ray_dl_reset_rules();
     ray_env_destroy();
@@ -2973,14 +2974,19 @@ void ray_lang_destroy(void) {
 ray_t* ray_eval(ray_t* obj) {
     if (!obj || RAY_IS_ERR(obj)) return obj;
 
-    if (eval_depth == 0)
+    /* All eval-context state (depth, scope, restricted, nfo/trace) lives
+     * on the per-thread VM — a thread must bind one before evaluating. */
+    if (RAY_UNLIKELY(!__VM))
+        return ray_error("state", "no VM bound to this thread");
+
+    if (__VM->eval_depth == 0)
         affine_sum_cache_clear();
 
     /* Check for external interrupt (e.g. Ctrl-C from REPL) */
     if (g_eval_interrupted) return ray_error("limit", "interrupted");
 
-    if (++eval_depth > RAY_EVAL_MAX_DEPTH) {
-        eval_depth--;
+    if (++__VM->eval_depth > RAY_EVAL_MAX_DEPTH) {
+        __VM->eval_depth--;
         return ray_error("limit", "eval depth exceeded");
     }
 
@@ -3234,7 +3240,7 @@ ray_t* ray_eval(ray_t* obj) {
             for (int64_t i = 0; i < argc; i++) ray_release(args[i]);
             ray_release(head);
             if (RAY_IS_ERR(result))
-                add_eval_error_frame(g_eval_nfo, obj);
+                add_eval_error_frame(__VM->nfo, obj);
             ret = result; goto out;
         }
         default:
@@ -3243,14 +3249,14 @@ ray_t* ray_eval(ray_t* obj) {
     }
 
 out:
-    eval_depth--;
+    __VM->eval_depth--;
     /* End-of-top-level-expression cleanup hook. Every path that
      * entered ray_eval — REPL, IPC, ray_eval_str, file mode — exits
      * through here; firing ray_progress_end exactly when the depth
      * returns to 0 guarantees the progress bar is cleared no matter
      * which builtin drove the update (including ray_group_fn etc.
      * that bypass ray_execute). */
-    if (eval_depth == 0) ray_progress_end();
+    if (__VM->eval_depth == 0) ray_progress_end();
     return ret;
 }
 
@@ -3260,10 +3266,10 @@ ray_t* ray_eval_str(const char* source) {
     ray_t* parsed = ray_parse_with_nfo(source, nfo);
     if (RAY_IS_ERR(parsed)) { ray_release(nfo); return parsed; }
 
-    ray_t* prev_nfo = g_eval_nfo;
-    g_eval_nfo = nfo;
+    ray_t* prev_nfo = __VM->nfo;
+    __VM->nfo = nfo;
     ray_t* result = ray_eval(parsed);
-    g_eval_nfo = prev_nfo;
+    __VM->nfo = prev_nfo;
 
     ray_release(parsed);
     ray_release(nfo);
