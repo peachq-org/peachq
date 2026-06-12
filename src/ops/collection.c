@@ -29,6 +29,7 @@
 #include "mem/sys.h"
 #include "ops/hash.h"
 #include "ops/internal.h"   /* col_propagate_str_pool */
+#include "ops/idxop.h"
 #include "ops/ops.h"
 #include <stdlib.h>
 #include <string.h>
@@ -1844,6 +1845,37 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
         int64_t len = vec->len;
         bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
         bool val_null = RAY_ATOM_IS_NULL(val);
+
+        /* Hash-index fast path: integer-family needle against an indexed
+         * integer-family column without nulls.  Float and cross-family
+         * needles fall through to the scan (the scan owns promotion
+         * semantics; we do not replicate them here). */
+        if (!has_nulls && !val_null && ray_is_atom(val) && ray_index_has(vec)) {
+            int64_t needle = 0;
+            int eligible = 1;
+            switch (val->type) {
+            case -RAY_I64:
+            case -RAY_TIMESTAMP: needle = val->i64;              break;
+            case -RAY_I32:
+            case -RAY_DATE:
+            case -RAY_TIME:      needle = (int64_t)val->i32;     break;
+            case -RAY_I16:       needle = (int64_t)val->i16;     break;
+            case -RAY_BOOL:
+            case -RAY_U8:        needle = (int64_t)val->b8;      break;
+            default:             eligible = 0;                   break;
+            }
+            if (eligible) {
+                ray_idx_consults[IDX_SITE_FIND]++;
+                int64_t row = ray_index_find_row(vec, needle);
+                if (row >= -1) {   /* -2 means not eligible — fall through */
+                    ray_idx_hits[IDX_SITE_FIND]++;
+                    if (row < 0)
+                        return ray_typed_null(-RAY_I64);
+                    return make_i64(row);
+                }
+            }
+        }
+
         if (has_nulls) {
             for (int64_t i = 0; i < len; i++) {
                 if (ray_vec_is_null(vec, i)) {

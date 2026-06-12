@@ -1866,3 +1866,38 @@ ray_t* ray_attr_set_fn(ray_t* name, ray_t* v) {
     if (id == ray_sym_intern_runtime("parted", 6))   return attr_set_parted(v);
     return ray_error("domain", "attr.set: unknown attribute (want sorted/unique/grouped/parted)");
 }
+
+/* --------------------------------------------------------------------------
+ * Hash-index find — minimum row id whose value equals key, or -1 / -2.
+ * -------------------------------------------------------------------------- */
+
+int64_t ray_index_find_row(ray_t* col, int64_t key) {
+    /* Float-family: equality has NaN/-0 semantics owned by the scan kernel. */
+    if (!col || RAY_IS_ERR(col)) return -2;
+    int8_t t = col->type;
+    if (t == RAY_F32 || t == RAY_F64) return -2;
+
+    /* idx_fresh_nonull: freshness + kind check + null-bearing gate. */
+    if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return -2;
+
+    /* Out-of-range key cannot equal any stored value of this type. */
+    if (!hash_key_in_range(t, key)) return -1;
+
+    int64_t start_rid = -1;
+    ray_index_t* ix = hash_probe_setup(col, key, &start_rid);
+    if (!ix) return -2;   /* unexpected failure after eligibility passed */
+
+    const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+
+    int64_t min_rid = -1;
+    int64_t rid = start_rid;
+    while (rid >= 0) {
+        if (hash_col_read_i64(base, t, rid) == key) {
+            if (min_rid < 0 || rid < min_rid)
+                min_rid = rid;
+        }
+        rid = chn[rid] - 1;
+    }
+    return min_rid;  /* -1 when nothing matched = key provably absent */
+}
