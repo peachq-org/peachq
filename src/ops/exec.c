@@ -902,17 +902,30 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
  * Recursive executor
  * ============================================================================ */
 
-/* Decode an OP_EQ predicate `pred_op` against g->table.  When the
- * predicate has shape (== col_scan const_int) and `col_scan` resolves
- * to a column in g->table that is non-null, non-parted, and carries a
- * fresh RAY_IDX_HASH, write the column pointer to *out_col and the
- * decoded int64 key to *out_key, returning 1.  Returns 0 on any
- * miss — the caller falls through to the regular scan-based pred
- * evaluation. */
-static int hash_index_eq_decode(ray_graph_t* g, ray_op_t* pred_op,
-                                ray_t** out_col, int64_t* out_key) {
-    if (!pred_op || pred_op->opcode != OP_EQ || pred_op->arity != 2)
-        return 0;
+/* Decode a comparison predicate `pred_op` against g->table.  When the
+ * predicate has shape (cmp_op col_scan const) and `col_scan` resolves to
+ * a column in g->table that is non-parted, non-MAPCOMMON, write the column
+ * pointer to *out_col, the decoded opcode to *out_cmp_op, the integer key
+ * to *out_key_i, the float key to *out_key_f, and *out_is_float to
+ * distinguish the two families.  Returns 1 on success, 0 on any miss.
+ *
+ * Eligible opcodes: OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE.
+ * The HAS_NULLS check is intentionally ABSENT here — per-consult gates
+ * decide whether to exclude null-bearing columns (zone uses idx_fresh_nonull;
+ * hash re-checks HAS_NULLS explicitly before calling ray_index_hash_eq_rowsel).
+ *
+ * Float literals (F32/F64) decode into *out_key_f; integer literals decode
+ * into *out_key_i.  Hash-eq only uses integer keys; zone uses both. */
+static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
+                             ray_t** out_col, uint16_t* out_cmp_op,
+                             int64_t* out_key_i, double* out_key_f,
+                             int* out_is_float) {
+    if (!pred_op || pred_op->arity != 2) return 0;
+    uint16_t opc = pred_op->opcode;
+    if (opc != OP_EQ && opc != OP_NE &&
+        opc != OP_LT && opc != OP_LE &&
+        opc != OP_GT && opc != OP_GE) return 0;
+
     ray_op_t* lhs = pred_op->inputs[0];
     ray_op_t* rhs = pred_op->inputs[1];
     if (!lhs || !rhs) return 0;
@@ -928,32 +941,30 @@ static int hash_index_eq_decode(ray_graph_t* g, ray_op_t* pred_op,
     ray_t* col = ray_table_get_col(tbl, lext->sym);
     if (!col || RAY_IS_ERR(col)) return 0;
     if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return 0;
-    /* Nullable columns: the hash chain skipped null rows, so the
-     * resulting selection would mismatch the unfused null-aware
-     * compare for the col == col semantics rare-but-required case.
-     * Bail and let the existing compare run. */
-    if (col->attrs & RAY_ATTR_HAS_NULLS) return 0;
-    if (!ray_index_has(col)) return 0;
-    if (ray_index_kind(col) != RAY_IDX_HASH) return 0;
-    ray_index_t* ix = ray_index_payload(col->index);
-    if (ix->built_for_len != col->len) return 0;
 
     ray_t* cv = rext->literal;
     if (!cv) return 0;
-    int64_t key = 0;
+    int64_t key_i = 0;
+    double  key_f = 0.0;
+    int     is_float = 0;
     switch (cv->type) {
     case -RAY_I64:
-    case -RAY_TIMESTAMP: key = cv->i64;                  break;
+    case -RAY_TIMESTAMP: key_i = cv->i64;                  break;
     case -RAY_I32:
     case -RAY_DATE:
-    case -RAY_TIME:      key = (int64_t)cv->i32;         break;
-    case -RAY_I16:       key = (int64_t)cv->i16;         break;
+    case -RAY_TIME:      key_i = (int64_t)cv->i32;         break;
+    case -RAY_I16:       key_i = (int64_t)cv->i16;         break;
     case -RAY_BOOL:
-    case -RAY_U8:        key = (int64_t)cv->b8;          break;
-    default: return 0;  /* floats / sym / str — not eligible */
+    case -RAY_U8:        key_i = (int64_t)cv->b8;          break;
+    case -RAY_F64:       key_f = cv->f64;    is_float = 1; break;
+    case -RAY_F32:       key_f = cv->f64;    is_float = 1; break; /* F32 atoms use f64 slot */
+    default: return 0;  /* sym / str / guid — not eligible */
     }
-    *out_col = col;
-    *out_key = key;
+    *out_col      = col;
+    *out_cmp_op   = opc;
+    *out_key_i    = key_i;
+    *out_key_f    = key_f;
+    *out_is_float = is_float;
     return 1;
 }
 
@@ -1264,20 +1275,45 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
              * pre-existing selection (the entry shape downstream
              * group-by / sort already expects). */
             if (input->type == RAY_TABLE && !g->selection) {
-                ray_t* col = NULL;
-                int64_t key = 0;
-                if (hash_index_eq_decode(g, op->inputs[1], &col, &key)) {
-                    ray_idx_consults[IDX_SITE_FILTER_HASH]++;
-                    ray_t* sel = ray_index_hash_eq_rowsel(col, key);
-                    if (sel) {
-                        ray_idx_hits[IDX_SITE_FILTER_HASH]++;
-                        g->selection = sel;
+                ray_t*   col      = NULL;
+                uint16_t cmp_op   = 0;
+                int64_t  key_i    = 0;
+                double   key_f    = 0.0;
+                int      is_float = 0;
+                if (idx_filter_decode(g, op->inputs[1], &col, &cmp_op,
+                                      &key_i, &key_f, &is_float)) {
+                    /* 1. Zone index: O(1) all/none short-circuit. */
+                    if (ray_index_kind(col) == RAY_IDX_ZONE)
+                        ray_idx_consults[IDX_SITE_FILTER_ZONE]++;
+                    switch (ray_index_zone_class(col, cmp_op, key_i, key_f)) {
+                    case RAY_ZONE_ALL:
+                        ray_idx_hits[IDX_SITE_FILTER_ZONE]++;
+                        /* All rows pass — mirror the lazy path: leave
+                         * g->selection NULL (no filter) and return the
+                         * table.  Same ownership as the hash path below. */
                         return input;
+                    case RAY_ZONE_NONE: {
+                        ray_idx_hits[IDX_SITE_FILTER_ZONE]++;
+                        int64_t nrows = ray_table_nrows(input);
+                        ray_t* empty = ray_index_empty_rowsel(nrows);
+                        if (empty) { g->selection = empty; return input; }
+                        break;  /* OOM — fall through to scan */
                     }
-                    /* sel == NULL: column was eligible at decode time
-                     * but allocation failed.  Fall through to the
-                     * scan path below — defensive (no functional
-                     * difference in the common case). */
+                    default: break;
+                    }
+
+                    /* 2. Hash-eq: integer EQ only; re-check HAS_NULLS. */
+                    if (cmp_op == OP_EQ && !is_float &&
+                        !(col->attrs & RAY_ATTR_HAS_NULLS)) {
+                        ray_idx_consults[IDX_SITE_FILTER_HASH]++;
+                        ray_t* sel = ray_index_hash_eq_rowsel(col, key_i);
+                        if (sel) {
+                            ray_idx_hits[IDX_SITE_FILTER_HASH]++;
+                            g->selection = sel;
+                            return input;
+                        }
+                        /* sel == NULL: OOM after eligibility — fall through. */
+                    }
                 }
             }
             ray_t* pred = exec_node(g, op->inputs[1]);
