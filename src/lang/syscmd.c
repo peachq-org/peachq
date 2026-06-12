@@ -22,21 +22,19 @@
  */
 
 #include "lang/syscmd.h"
-/* Avoid both lang/internal.h and core/runtime.h here: they each
- * transitively pull a different struct definition for `ray_vm_t`
- * (lang/eval.h vs core/runtime.h) and we don't need the VM internals
- * — only the runtime accessors and the lang-side builtins.  The
- * runtime exposes its main poll via opaque-pointer accessors
- * declared inline below. */
+/* We don't need the VM internals here — only the runtime accessors
+ * and the lang-side builtins.  The runtime exposes its main poll via
+ * opaque-pointer accessors declared inline below.  (Historically this
+ * also dodged a dual ray_vm_t typedef; that's unified in
+ * core/runtime.h now, the externs just keep the TU lean.) */
 #include "core/poll.h"
 #include "core/ipc.h"
 #include "core/profile.h"
 #include "lang/env.h"
 #include "table/sym.h"
 
-/* Forward decls of the bare runtime accessors — these are defined in
- * core/runtime.c.  Pulling the full runtime.h would re-trigger the
- * dual ray_vm_t typedef; one extern keeps us decoupled. */
+/* Forward decls of the bare runtime accessors — defined in
+ * core/runtime.c; one extern keeps this TU decoupled from runtime.h. */
 void* ray_runtime_get_poll(void);
 
 #include <errno.h>
