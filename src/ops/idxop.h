@@ -258,6 +258,25 @@ bool ray_index_bloom_absent(ray_t* col, int64_t key);
  * has NaN / -0 semantics the unfused compare kernel handles. */
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
 
+/* ===== Sort-index range probe =====
+ *
+ * Build a rowsel from a binary search over the sort-index permutation for
+ * rows satisfying (col cmp_op key).  Supports EQ/LT/LE/GT/GE.  NE returns
+ * NULL (two disjoint spans — unsupported).
+ *
+ * Returns:
+ *   - A fresh rowsel block on success — install on g->selection.
+ *     span == 0 yields a valid all-NONE rowsel (NOT NULL).
+ *   - NULL when not eligible: no sort index, stale, type mismatch,
+ *     span > col->len / IDX_RANGE_MAX_FRAC (selectivity guard), OOM,
+ *     or NE operator.  Caller falls back to the scan.
+ *
+ * key_i is used for integer-family columns; key_f for float-family.
+ * is_float must match the column family (mirror of idx_filter_decode
+ * contract); mismatch returns NULL defensively. */
+ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
+                              int64_t key_i, double key_f, bool is_float);
+
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */
 
