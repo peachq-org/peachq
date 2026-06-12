@@ -898,9 +898,20 @@ static ray_t* rowsel_from_sorted_ids(int64_t n, const int64_t* ids, int64_t mcnt
      * sentinel that the sweep will overwrite. */
     /* (no memset needed; the sweep writes every entry [0..n_segs]) */
 
-    /* Single sweep over the sorted matches: emit per-segment offsets
-     * and morsel-local indices into idx_arr.  cur_seg tracks the
-     * segment we're filling; gaps get RAY_SEL_NONE and zero spans. */
+    /* Classify-then-emit sweep over the sorted matches.  For each
+     * segment, first COUNT its matches by advancing mi without writing
+     * anything, then classify and emit:
+     *   - NONE: no matches — nothing stored.
+     *   - ALL:  whole segment matched — no idx[] entries, cum unchanged,
+     *           so seg_offsets[s+1] == seg_offsets[s] (rowsel.h contract;
+     *           consumers iterate ALL segments densely and never read
+     *           idx[] for them).
+     *   - MIX:  re-walk [mi0, mi) and write morsel-local indices at
+     *           idx_arr[cum..], then advance cum.
+     * The previous sweep wrote idx entries while counting and tried to
+     * "roll back" ALL segments with `cum -= pc` — but cum had never been
+     * advanced for the segment, so the uint32 cursor wrapped and every
+     * subsequent idx_arr write landed out of bounds. */
     int64_t mi = 0;
     uint32_t cum = 0;
     for (uint32_t s = 0; s < n_segs; s++) {
@@ -908,32 +919,25 @@ static ray_t* rowsel_from_sorted_ids(int64_t n, const int64_t* ids, int64_t mcnt
         int64_t seg_start = (int64_t)s * RAY_MORSEL_ELEMS;
         int64_t seg_end   = seg_start + RAY_MORSEL_ELEMS;
         if (seg_end > n) seg_end = n;
-        uint32_t pc = 0;
-        while (mi < mcnt && ids[mi] < seg_end) {
-            idx_arr[cum + pc] = (uint16_t)(ids[mi] - seg_start);
-            pc++;
-            mi++;
-        }
-        if (pc == 0) {
-            seg_flags[s] = RAY_SEL_NONE;
-        } else if ((int64_t)pc == seg_end - seg_start) {
-            seg_flags[s] = RAY_SEL_ALL;
-            /* Roll back the indices — ALL segments contribute zero
-             * idx[] entries in the rowsel contract. */
-            cum -= pc;  /* idx_arr writes for this seg get overwritten
-                          by the next MIX segment's writes; idx_count
-                          was sized for all matches, so this is safe. */
+        int64_t mi0 = mi;
+        while (mi < mcnt && ids[mi] < seg_end) mi++;
+        int64_t pc = mi - mi0;
+        if (pc == 0) continue;                 /* NONE — preset by memset */
+        if (pc == seg_end - seg_start) {
+            seg_flags[s] = RAY_SEL_ALL;        /* zero idx[] entries */
         } else {
             seg_flags[s] = RAY_SEL_MIX;
-            cum += pc;
+            for (int64_t i = mi0; i < mi; i++)
+                idx_arr[cum + (uint32_t)(i - mi0)] =
+                    (uint16_t)(ids[i] - seg_start);
+            cum += (uint32_t)pc;
         }
     }
     seg_offsets[n_segs] = cum;
-    /* Adjust meta total_pass / idx layout — ALL-segment rows count
-     * toward total_pass but not idx_count.  We initially passed
-     * (mcnt, mcnt); fix up if any ALL segments collapsed. */
-    ray_rowsel_meta(block)->total_pass = mcnt;
-    (void)cum;
+    /* meta->total_pass is already mcnt (set by ray_rowsel_new): ALL-segment
+     * rows still count as passing.  idx space was sized for mcnt entries,
+     * so when ALL segments exist the tail [cum, mcnt) is unused slack —
+     * harmless; ray_rowsel_new only uses idx_count for allocation sizing. */
 
     return block;
 }
