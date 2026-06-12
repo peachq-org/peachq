@@ -1438,6 +1438,12 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                 gext  = find_ext(g, child_id);
                 if (!gext) continue;
                 n->inputs[0] = tbl_node;
+                /* Mark the interposed filter so pass_filter_reorder leaves
+                 * it alone: GROUP's arity is 0, so redirect_consumers would
+                 * never re-point GROUP->inputs[0] at a split-off outer
+                 * filter — an AND-split below the group silently drops a
+                 * conjunct.  (OP_FILTER is dense-only; no ext copy.) */
+                n->flags |= OP_FLAG_PUSHED;
                 child->inputs[0] = n;        /* dense copy */
                 gext->base.inputs[0] = n;    /* ext copy in sync */
                 redirect_consumers(g, n_id, child, child_id, n_id);
@@ -1558,11 +1564,17 @@ static ray_op_t* split_and_filter(ray_graph_t* g, ray_op_t* filter_node) {
     return outer;
 }
 
-/* Collect a chain of OP_FILTER nodes. Returns count (max 64). */
+/* Collect a chain of OP_FILTER nodes. Returns count (max 64).
+ * Stops before PUSHED filters: a filter interposed below a GROUP must
+ * never have its predicate reordered into (or out of) an above-group
+ * chain.  (Pushed filters sit below GROUP with a const-table input, so
+ * they can't normally appear inside an above-group chain — this is a
+ * defensive stop.) */
 static int collect_filter_chain(ray_op_t* top, ray_op_t** chain, int max) {
     int n = 0;
     ray_op_t* cur = top;
-    while (cur && cur->opcode == OP_FILTER && n < max) {
+    while (cur && cur->opcode == OP_FILTER &&
+           !(cur->flags & OP_FLAG_PUSHED) && n < max) {
         chain[n++] = cur;
         cur = cur->inputs[0];
     }
@@ -1584,6 +1596,15 @@ static ray_op_t* pass_filter_reorder(ray_graph_t* g, ray_op_t* root) {
             ray_op_t* n = &g->nodes[i];
             if (n->flags & OP_FLAG_DEAD) continue;
             if (n->opcode != OP_FILTER) continue;
+            /* Never split a PUSHED filter (interposed below a GROUP by
+             * predicate pushdown).  Its AND evaluates as ONE fused BOOL
+             * pass through the lazy-selection path; splitting it would
+             * need a GROUP.inputs[0] redirection that redirect_consumers'
+             * arity gate (GROUP arity is 0) doesn't perform — the outer
+             * split filter would be orphaned and a conjunct silently
+             * dropped — and would also cost two rowsel passes instead
+             * of one. */
+            if (n->flags & OP_FLAG_PUSHED) continue;
             if (n->arity != 2 || !n->inputs[1]) continue;
             if (n->inputs[1]->opcode != OP_AND) continue;
 
@@ -1618,6 +1639,10 @@ static ray_op_t* pass_filter_reorder(ray_graph_t* g, ray_op_t* root) {
         ray_op_t* n = &g->nodes[i];
         if (n->flags & OP_FLAG_DEAD) continue;
         if (n->opcode != OP_FILTER) continue;
+        /* PUSHED filters (below a GROUP) are not reorder candidates:
+         * their single fused predicate must stay exactly where pass-6
+         * put it (see split-loop comment above). */
+        if (n->flags & OP_FLAG_PUSHED) continue;
         if (visited[i]) continue;
 
         /* Collect the filter chain starting at this node */
