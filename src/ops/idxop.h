@@ -310,6 +310,15 @@ int64_t ray_index_find_row(ray_t* col, int64_t key);
 ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
                               int64_t key_i, double key_f, bool is_float);
 
+/* ===== Sort-index ORDER BY permutation probe =====
+ *
+ * Returns a BORROWED pointer to the ascending permutation vector stored in
+ * the sort index on `col` when the column carries a fresh, null-free sort
+ * index; NULL otherwise.  The caller MUST NOT release the returned pointer
+ * (it is owned by the index payload).  To use it as an owned reference,
+ * call ray_retain() immediately after. */
+ray_t* ray_index_sort_perm_fresh(ray_t* col);
+
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */
 
