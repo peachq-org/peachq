@@ -1267,8 +1267,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 ray_t* col = NULL;
                 int64_t key = 0;
                 if (hash_index_eq_decode(g, op->inputs[1], &col, &key)) {
+                    ray_idx_consults[IDX_SITE_FILTER_HASH]++;
                     ray_t* sel = ray_index_hash_eq_rowsel(col, key);
                     if (sel) {
+                        ray_idx_hits[IDX_SITE_FILTER_HASH]++;
                         g->selection = sel;
                         return input;
                     }
