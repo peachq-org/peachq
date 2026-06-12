@@ -125,6 +125,10 @@ int32_t ray_env_global_count(void) { return g_env.count; }
 static int64_t g_ipc_hook_syms[5] = {0};
 static bool    g_ipc_hook_syms_ready = false;
 
+/* Cached `self` sym id for ray_env_scope_bind — interned once per sym
+ * table generation; invalidated alongside the hook syms below. */
+static int64_t g_self_sym = -1;
+
 static void ipc_hook_syms_ensure(void) {
     if (g_ipc_hook_syms_ready) return;
     g_ipc_hook_syms[0] = ray_sym_intern(".ipc.on.open",  strlen(".ipc.on.open"));
@@ -177,6 +181,7 @@ void ray_env_destroy(void) {
      * so the next ray_env_init re-interns fresh IDs from the new sym
      * table. */
     g_ipc_hook_syms_ready = false;
+    g_self_sym = -1;
 }
 
 /* Flat (non-dotted) lookup — scope stack top-down, then global env.
@@ -626,6 +631,56 @@ void ray_env_pop_scope(void) {
     f->vals = f->vals_inline;
     f->cap = RAY_FRAME_CAP;
     f->count = 0;
+}
+
+/* Materialize compiled-lambda locals into a fresh scope frame — the
+ * compiled counterpart of call_lambda's tree-walk frame.  A runtime
+ * special form re-evaluates its argument ASTs via ray_eval, which
+ * resolves names through scope frames + globals and cannot see the
+ * caller's bytecode slots; this bridges the two.  NULL slots are
+ * let-locals whose initializer hasn't executed yet: in the tree walker
+ * they wouldn't be bound at this point either, so they're skipped. */
+ray_err_t ray_env_scope_bind(const int64_t* syms, int32_t n, ray_t** slots,
+                             ray_t* self_obj) {
+    ray_err_t err = ray_env_push_scope();
+    if (err != RAY_OK) return err;
+    if (self_obj) {
+        if (g_self_sym < 0) g_self_sym = ray_sym_intern("self", 4);
+        (void)ray_env_set_local(g_self_sym, self_obj);
+    }
+    for (int32_t i = 0; i < n; i++) {
+        if (!slots[i]) continue;
+        ray_err_t e = ray_env_set_local(syms[i], slots[i]);
+        if (e != RAY_OK && e != RAY_ERR_RESERVED) {
+            ray_env_pop_scope();
+            return e;
+        }
+    }
+    return RAY_OK;
+}
+
+/* Sync the materialized frame back into the slots and pop it.  Only
+ * syms from the compiler's table sync — a `let` inside the dynamic
+ * eval that introduced a name the compiler never saw has no slot to
+ * land in (the tree walker would keep it in the lambda frame; compiled
+ * code drops it with this frame — names must be introduced lexically
+ * for the compiler to allocate a slot, same as before). */
+void ray_env_scope_sync(const int64_t* syms, int32_t n, ray_t** slots) {
+    if (__VM->scope_depth > 0) {
+        ray_scope_frame_t* f = &__VM->scope_stack[__VM->scope_depth - 1];
+        for (int32_t i = 0; i < n; i++) {
+            for (int32_t k = 0; k < f->count; k++) {
+                if (f->keys[k] != syms[i]) continue;
+                if (f->vals[k] != slots[i]) {
+                    ray_retain(f->vals[k]);
+                    if (slots[i]) ray_release(slots[i]);
+                    slots[i] = f->vals[k];
+                }
+                break;
+            }
+        }
+    }
+    ray_env_pop_scope();
 }
 
 /* ---- Iteration ---- */

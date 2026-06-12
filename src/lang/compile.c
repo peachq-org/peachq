@@ -194,6 +194,7 @@ static void patch_jump(compiler_t *c, int32_t pos) {
 
 /* Cached sym IDs for special forms */
 static _Thread_local int64_t sf_set = -1, sf_let = -1, sf_if = -1, sf_do = -1, sf_fn = -1, sf_self = -1, sf_try = -1, sf_return = -1;
+static _Thread_local int64_t sf_eval = -1, sf_resolve = -1;
 
 static void init_sf_syms(void) {
     if (sf_set >= 0) return;
@@ -205,7 +206,47 @@ static void init_sf_syms(void) {
     sf_self = ray_sym_intern("self", 4);
     sf_try  = ray_sym_intern("try",  3);
     sf_return = ray_sym_intern("return", 6);
+    sf_eval    = ray_sym_intern("eval", 4);
+    sf_resolve = ray_sym_intern("resolve", 7);
 }
+
+/* Does `ast` mention any of the current locals — or `self`, or a
+ * dynamic resolver (`eval` / `resolve`) that could reach them by a
+ * constructed name?  Decides whether a special-form call needs its
+ * locals materialized into a scope frame around the dynamic eval.
+ * Quoted syms count: forms like (alter 'v ...) resolve them through
+ * the env, where a tree-walk local would shadow a global.  Conservative
+ * by construction — descends lists, dicts, and sym vectors. */
+static bool ast_refs_locals(compiler_t *c, ray_t *ast);
+static bool sym_is_local_ref(compiler_t *c, int64_t id) {
+    if (id == sf_self || id == sf_eval || id == sf_resolve) return true;
+    for (int32_t i = c->n_locals - 1; i >= 0; i--)
+        if (c->locals[i].sym_id == id) return true;
+    return false;
+}
+static bool ast_refs_locals(compiler_t *c, ray_t *ast) {
+    if (!ast) return false;
+    if (ast->type == -RAY_SYM)
+        return sym_is_local_ref(c, ast->i64);
+    if (ast->type == RAY_SYM) {  /* sym vector */
+        const int64_t *ids = (const int64_t*)ray_data(ast);
+        for (int64_t i = 0; i < ast->len; i++)
+            if (sym_is_local_ref(c, ids[i])) return true;
+        return false;
+    }
+    if (ast->type == RAY_LIST) {
+        ray_t **elems = (ray_t**)ray_data(ast);
+        for (int64_t i = 0; i < ast->len; i++)
+            if (ast_refs_locals(c, elems[i])) return true;
+        return false;
+    }
+    if (ast->type == RAY_DICT) {  /* slot[0]=keys, slot[1]=vals */
+        ray_t **slots = (ray_t**)ray_data(ast);
+        return ast_refs_locals(c, slots[0]) || ast_refs_locals(c, slots[1]);
+    }
+    return false;
+}
+
 
 /* ── Compile a list (special form or function call) ── */
 static void compile_list(compiler_t *c, ray_t *ast) {
@@ -386,12 +427,43 @@ static void compile_list(compiler_t *c, ray_t *ast) {
     if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED))
         fn = ray_env_get(head->i64);
 
-    /* Unrecognized special form: dynamic eval on entire form */
+    /* Unrecognized special form: dynamic eval on the entire form.  The
+     * special form re-evaluates its argument ASTs via the tree walker,
+     * which resolves names through scope frames + globals and cannot
+     * see this frame's local slots — so materialize the locals known
+     * at this point (plus self) into a scope frame around the eval,
+     * and sync any let-updates back into the slots afterwards. */
     if (fn && (fn->attrs & RAY_FN_SPECIAL_FORM)) {
+        /* Fast path: a form that mentions no local (the common
+         * globals-only case) needs no materialization — emit the bare
+         * dynamic eval exactly as before. */
+        if (!ast_refs_locals(c, ast)) {
+            int32_t idx = add_constant(c, ast);
+            emit_const(c, idx);
+            emit(c, OP_CALLD);
+            emit(c, 0);
+            return;
+        }
+
+        ray_t *syms = ray_alloc((size_t)c->n_locals * sizeof(int64_t));
+        if (!syms || RAY_IS_ERR(syms)) { c->error = true; return; }
+        syms->type = RAY_I64;
+        syms->len  = c->n_locals;
+        int64_t *ids = (int64_t*)ray_data(syms);
+        for (int32_t i = 0; i < c->n_locals; i++)
+            ids[i] = c->locals[i].sym_id;   /* slot i <-> ids[i] */
+        int32_t syms_idx = add_constant(c, syms);
+        ray_release(syms);
+        if (c->error) return;
+
+        emit_const(c, syms_idx);
+        emit(c, OP_SCOPE_BEGIN);
         int32_t idx = add_constant(c, ast);
         emit_const(c, idx);
         emit(c, OP_CALLD);
         emit(c, 0);
+        emit_const(c, syms_idx);
+        emit(c, OP_SCOPE_END);
         return;
     }
 
@@ -563,4 +635,5 @@ ray_span_t ray_bc_dbg_get(ray_t* dbg, int32_t ip) {
 
 void ray_compile_reset(void) {
     sf_set = sf_let = sf_if = sf_do = sf_fn = sf_self = sf_try = sf_return = -1;
+    sf_eval = sf_resolve = -1;
 }
