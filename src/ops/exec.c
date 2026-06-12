@@ -1521,13 +1521,30 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             /* HEAD(GROUP) optimization: pass limit hint to exec_group
              * so it can short-circuit the per-partition loop when all
              * GROUP BY keys are MAPCOMMON.  The normal HEAD logic below
-             * still trims the result to N rows regardless. */
+             * still trims the result to N rows regardless.
+             *
+             * After GROUP predicate pushdown (opt.c Task-3) the shape
+             * becomes HEAD(GROUP(FILTER(...))).  The fast-path must
+             * execute the interposed filter before calling exec_group,
+             * mirroring the Task-2 hook in the generic OP_GROUP dispatch. */
             ray_t* input;
             if (child_op && child_op->opcode == OP_GROUP) {
                 ray_t* tbl = g->table;
                 if (!tbl || RAY_IS_ERR(tbl)) return tbl;
                 ray_t* owned_tbl = NULL;
-                if (g->selection && tbl->type == RAY_TABLE) {
+                /* Pushed-down filter: execute it first, same as the
+                 * generic OP_GROUP dispatch in exec.c. */
+                if (child_op->inputs[0] &&
+                    child_op->inputs[0]->opcode == OP_FILTER) {
+                    ray_t* fres = exec_node(g, child_op->inputs[0]);
+                    if (!fres || RAY_IS_ERR(fres)) return fres;
+                    if (fres->type == RAY_TABLE && fres != tbl) {
+                        owned_tbl = fres;
+                        tbl = fres;
+                    } else {
+                        ray_release(fres);
+                    }
+                } else if (g->selection && tbl->type == RAY_TABLE) {
                     int needs = 0;
                     int64_t nc = ray_table_ncols(tbl);
                     for (int64_t c = 0; c < nc; c++) {
@@ -1548,6 +1565,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 }
                 input = exec_group(g, child_op, tbl, n);
                 if (owned_tbl) ray_release(owned_tbl);
+                if (g->selection) {
+                    ray_release(g->selection);
+                    g->selection = NULL;
+                }
             } else if (child_op && child_op->opcode == OP_FILTER) {
                 /* HEAD(FILTER): early-termination filter — gather only
                  * the first N matching rows instead of all matches. */
