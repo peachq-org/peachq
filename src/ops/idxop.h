@@ -144,6 +144,17 @@ static inline ray_index_t* ray_index_payload(ray_t* idx) {
     return (ray_index_t*)idx->data;
 }
 
+/* ── Routing observability: per-site consult/hit counters ──
+ * Diagnostic, unsynchronized (same caveat as ray_expr_bail_counts). */
+typedef enum {
+    IDX_SITE_FILTER_ZONE = 0, IDX_SITE_FILTER_BLOOM, IDX_SITE_FILTER_HASH,
+    IDX_SITE_FILTER_RANGE, IDX_SITE_IN, IDX_SITE_FIND, IDX_SITE_SORT,
+    IDX_SITE_DISTINCT, IDX_SITE__N
+} idx_site_t;
+extern uint64_t ray_idx_consults[IDX_SITE__N];
+extern uint64_t ray_idx_hits[IDX_SITE__N];
+void ray_idx_stats_init(void);   /* atexit dump when RAY_IDX_STATS set */
+
 /* ===== Attach / Detach ===== */
 
 /* Build an accelerator and attach.  Numeric types only for v1
