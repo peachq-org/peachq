@@ -31,61 +31,58 @@ typedef struct {
     char msg[256];
 } ray_err_info_t;
 
-/* ===== Scope Frame (moved from env.c) ===== */
+/* ===== Scope Frame ===== */
 
 #define RAY_SCOPE_CAP  64
 #define RAY_FRAME_CAP  64
 
+/* One lexical scope frame.  keys/vals start out pointing at the inline
+ * arrays and move to heap blocks if the frame grows past RAY_FRAME_CAP
+ * (see env.c).  Self-referential, so a frame must not be relocated
+ * while live. */
 typedef struct {
-    int64_t keys[RAY_FRAME_CAP];
-    ray_t*  vals[RAY_FRAME_CAP];
-    int32_t count;
+    int64_t  keys_inline[RAY_FRAME_CAP];
+    ray_t*   vals_inline[RAY_FRAME_CAP];
+    int64_t* keys;     /* -> keys_inline, or heap once grown */
+    ray_t**  vals;     /* -> vals_inline, or heap once grown */
+    int32_t  cap;
+    int32_t  count;
 } ray_scope_frame_t;
 
-/* ===== VM sub-types ===== */
-
-#define RAY_VM_STACK_SIZE 1024
-#define RAY_VM_TRAP_SIZE  16
-
+/* ===== Per-thread VM =====
+ *
+ * THE per-thread state object — one per thread, stable for the thread's
+ * lifetime, published through `__VM`.  Process-wide state lives on
+ * ray_runtime_t; everything thread-scoped lives here.  Bytecode
+ * execution state is NOT here: the interpreter allocates a private
+ * ray_exec_t (lang/eval.h) per invocation and never touches __VM.
+ *
+ * Always initialize through ray_vm_init() — plain memset(0) leaves
+ * ipc_handle at 0, which is a VALID connection handle; the sentinel
+ * for "no dispatch on this stack" is -1. */
 typedef struct {
-    ray_t   *fn;
-    int32_t  fp;
-    int32_t  ip;
-} ray_vm_ctx_t;
-
-typedef struct {
-    int32_t  rp;
-    int32_t  sp;
-    int32_t  handler_ip;
-    ray_t   *fn;
-    int32_t  fp;
-    int32_t  n_locals;
-} ray_vm_trap_t;
-
-/* ===== Per-thread VM ===== */
-
-typedef struct {
-    /* hot path */
-    int32_t          sp;
-    int32_t          fp;
-    int32_t          rp;
-    int32_t          id;
-    ray_t           *fn;
-    void            *heap;
-    int32_t          tp;
-    /* stacks */
-    ray_t           *ps[RAY_VM_STACK_SIZE];
-    ray_vm_ctx_t     rs[RAY_VM_STACK_SIZE];
-    ray_vm_trap_t    ts[RAY_VM_TRAP_SIZE];
-    /* cold — error/debug */
-    ray_err_info_t   err;
-    ray_t           *nfo;
-    ray_t           *trace;
-    ray_t           *raise_val;
-    /* scope */
-    ray_scope_frame_t scope_stack[RAY_SCOPE_CAP];
+    /* ── hot: touched on every eval step / scope lookup.  Keep this
+     * block within the first 32 bytes — ray_sys_alloc data starts at
+     * page+32, so offsets 0..31 share one cache line. */
+    int32_t          eval_depth;
     int32_t          scope_depth;
+    bool             restricted; /* -U connection on this stack */
+    int32_t          id;
+    ray_t           *nfo;        /* source-info of the eval in progress (borrowed) */
+    void            *heap;
+    /* ── warm: per-dispatch context (core/ipc.c saves/restores) */
+    int64_t          ipc_handle; /* connection handle of the hook/eval on this stack; -1 = none */
+    void            *ipc_poll;   /* opaque ray_poll_t* that dispatched it; NULL = none */
+    /* ── cold: error paths only */
+    ray_t           *trace;      /* error trace list (owned) */
+    ray_t           *raise_val;  /* pending (raise x) value (owned) */
+    ray_err_info_t   err;
+    /* ── big: lexical scope stack, own cache lines */
+    ray_scope_frame_t scope_stack[RAY_SCOPE_CAP];
 } ray_vm_t;
+
+/* Zero the VM and set the non-zero defaults (ipc_handle = -1). */
+void ray_vm_init(ray_vm_t* vm, int32_t id);
 
 /* ===== Runtime ===== */
 
@@ -107,9 +104,7 @@ void           ray_runtime_destroy(ray_runtime_t* rt);
 
 /* Main event-loop accessors.  The host (main.c) registers the poll it
  * created; runtime-level builtins read it back through these to avoid
- * pulling poll.h into runtime.h (and to keep TUs that include
- * runtime.h decoupled from the eval-VM definition that conflicts with
- * the unrelated `ray_vm_t` declared above). */
+ * pulling poll.h into runtime.h. */
 void  ray_runtime_set_poll(void* poll);
 void* ray_runtime_get_poll(void);
 
