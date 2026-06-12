@@ -319,6 +319,19 @@ ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
  * call ray_retain() immediately after. */
 ray_t* ray_index_sort_perm_fresh(ray_t* col);
 
+/* ===== Sort-index distinct fast path =====
+ *
+ * Walk the sort permutation once to collect the first-occurrence row id of
+ * each distinct value (the first element of each equal-value run, which is
+ * the minimum row id of the run because the sort is stable with iota
+ * tie-breaking).  Returns an OWNED I64 vector of those row ids, sorted
+ * ascending by VALUE (matching distinct_vec_eager's qsort-of-indices
+ * contract), and sets *out_count to the number of distinct values.
+ *
+ * Returns NULL if not eligible (no sort index, stale, null-bearing) or on
+ * OOM.  The caller is responsible for releasing the returned vector. */
+ray_t* ray_index_distinct_ids(ray_t* col, int64_t* out_count);
+
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */
 
