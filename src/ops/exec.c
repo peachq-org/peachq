@@ -968,7 +968,10 @@ static int hash_index_eq_decode(ray_graph_t* g, ray_op_t* pred_op,
  *                           filter; caller groups g->table as-is. */
 static ray_t* exec_pushed_group_filter(ray_graph_t* g, ray_op_t* filter_op) {
     ray_t* fres = exec_node(g, filter_op);
-    if (!fres || RAY_IS_ERR(fres)) return fres;
+    /* NULL must not leak out: callers read NULL as "lazy, selection
+     * installed" — a failed exec would silently group unfiltered rows. */
+    if (!fres) return ray_error("nyi", "pushed group filter yielded no result");
+    if (RAY_IS_ERR(fres)) return fres;
     if (fres->type == RAY_TABLE && fres != g->table) {
         return fres;  /* compacted table; caller owns ref */
     }
