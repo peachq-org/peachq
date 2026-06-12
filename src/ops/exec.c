@@ -1324,7 +1324,23 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                     default: break;
                     }
 
-                    /* 2. Hash-eq: integer EQ only; re-check HAS_NULLS. */
+                    /* 2. Bloom definite-absent: EQ + integer-family only. */
+                    if (cmp_op == OP_EQ && !is_float &&
+                        ray_index_kind(col) == RAY_IDX_BLOOM) {
+                        ray_idx_consults[IDX_SITE_FILTER_BLOOM]++;
+                        if (ray_index_bloom_absent(col, key_i)) {
+                            int64_t nrows = ray_table_nrows(input);
+                            ray_t* empty = ray_index_empty_rowsel(nrows);
+                            if (empty) {
+                                ray_idx_hits[IDX_SITE_FILTER_BLOOM]++;
+                                g->selection = empty;
+                                return input;
+                            }
+                            /* OOM — fall through to scan */
+                        }
+                    }
+
+                    /* 3. Hash-eq: integer EQ only; re-check HAS_NULLS. */
                     if (cmp_op == OP_EQ && !is_float &&
                         !(col->attrs & RAY_ATTR_HAS_NULLS)) {
                         if (ray_index_kind(col) == RAY_IDX_HASH)
