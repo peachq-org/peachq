@@ -960,6 +960,28 @@ static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
     case -RAY_F32:       key_f = cv->f64;    is_float = 1; break; /* F32 atoms use f64 slot */
     default: return 0;  /* sym / str / guid — not eligible */
     }
+
+    /* Reconcile the literal's family with the COLUMN's family.  Index
+     * consults (ray_index_zone_class) dispatch on the COLUMN type, so a
+     * cross-type predicate would otherwise compare against the zero-filled
+     * key slot — e.g. (> f 100) on an F64 column decoded key_f=0.0 and
+     * misclassified ALL/NONE. */
+    int col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    if (col_is_float && !is_float) {
+        /* Integer literal vs float column: coerce, but only when the
+         * value round-trips exactly through double.  Doubles have a
+         * 53-bit mantissa, so |key_i| <= 2^53 guarantees (double)key_i
+         * is exact; beyond that the coercion could silently shift the
+         * comparison boundary — reject and let the scan handle it. */
+        if (key_i > (1LL << 53) || key_i < -(1LL << 53)) return 0;
+        key_f = (double)key_i;
+        is_float = 1;
+    } else if (!col_is_float && is_float) {
+        /* Float literal vs integer-family column: the scan fallback's
+         * promotion semantics own this shape — reject. */
+        return 0;
+    }
+
     *out_col      = col;
     *out_cmp_op   = opc;
     *out_key_i    = key_i;
@@ -1305,14 +1327,16 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                     /* 2. Hash-eq: integer EQ only; re-check HAS_NULLS. */
                     if (cmp_op == OP_EQ && !is_float &&
                         !(col->attrs & RAY_ATTR_HAS_NULLS)) {
-                        ray_idx_consults[IDX_SITE_FILTER_HASH]++;
+                        if (ray_index_kind(col) == RAY_IDX_HASH)
+                            ray_idx_consults[IDX_SITE_FILTER_HASH]++;
                         ray_t* sel = ray_index_hash_eq_rowsel(col, key_i);
                         if (sel) {
                             ray_idx_hits[IDX_SITE_FILTER_HASH]++;
                             g->selection = sel;
                             return input;
                         }
-                        /* sel == NULL: OOM after eligibility — fall through. */
+                        /* sel == NULL: ineligible (wrong/stale index kind,
+                         * key out of range) or OOM — fall through to scan. */
                     }
                 }
             }
