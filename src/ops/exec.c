@@ -1354,6 +1354,21 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         /* sel == NULL: ineligible (wrong/stale index kind,
                          * key out of range) or OOM — fall through to scan. */
                     }
+
+                    /* 4. Sort-index range: EQ/LT/LE/GT/GE (NE returns NULL). */
+                    if (cmp_op != OP_NE) {
+                        if (ray_index_kind(col) == RAY_IDX_SORT) {
+                            ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
+                            ray_t* sel = ray_index_range_rowsel(col, cmp_op,
+                                                                key_i, key_f,
+                                                                (bool)is_float);
+                            if (sel) {
+                                ray_idx_hits[IDX_SITE_FILTER_RANGE]++;
+                                g->selection = sel;
+                                return input;
+                            }
+                        }
+                    }
                 }
             }
             ray_t* pred = exec_node(g, op->inputs[1]);
