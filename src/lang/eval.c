@@ -1779,6 +1779,8 @@ static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
         [OP_TRAP_END]   = &&op_trap_end,
         [OP_STOREGLOBAL]   = &&op_storeglobal,
         [OP_STOREGLOBAL_W] = &&op_storeglobal_w,
+        [OP_SCOPE_BEGIN]   = &&op_scope_begin,
+        [OP_SCOPE_END]     = &&op_scope_end,
     };
 
     /* Arity check before allocating VM state */
@@ -1790,6 +1792,11 @@ static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
 
     if (RAY_UNLIKELY(!__VM))
         return ray_error("state", "no VM bound to this thread");
+
+    /* Scope-stack baseline: OP_SCOPE_BEGIN windows that error out before
+     * their OP_SCOPE_END leave materialized frames behind — the error
+     * paths unwind back to this depth. */
+    int32_t scope_base = ray_env_scope_depth();
 
     ray_t *vm_block = ray_alloc(sizeof(ray_exec_t));
     if (!vm_block || RAY_IS_ERR(vm_block)) return ray_error("oom", NULL);
@@ -2279,7 +2286,8 @@ op_trap: {
     if (vm.tp >= VM_TRAP_SIZE) goto vm_error_limit;
     vm.ts[vm.tp++] = (vm_trap_t){
         .rp = vm.rp, .sp = vm.sp, .handler_ip = ip + offset,
-        .fn = vm.fn, .fp = vm.fp, .n_locals = n_locals
+        .fn = vm.fn, .fp = vm.fp, .n_locals = n_locals,
+        .scope_depth = ray_env_scope_depth()
     };
     ray_retain(vm.fn);
     DISPATCH();
@@ -2290,6 +2298,29 @@ op_trap_end: {
         vm.tp--;
         ray_release(vm.ts[vm.tp].fn);
     }
+    DISPATCH();
+}
+
+op_scope_begin: {
+    /* Stack: [.., syms_vec] — materialize the live locals (slot i holds
+     * the value of syms[i]) plus self into a fresh scope frame so the
+     * OP_CALLD that follows can resolve them via the tree walker. */
+    ray_t *syms = POP();
+    ray_err_t err = ray_env_scope_bind((const int64_t*)ray_data(syms),
+                                       (int32_t)syms->len,
+                                       &vm.ps[vm.fp], vm.fn);
+    ray_release(syms);
+    if (err != RAY_OK) goto vm_error_limit;
+    DISPATCH();
+}
+
+op_scope_end: {
+    /* Stack: [.., calld_result, syms_vec] — sync the frame back into the
+     * slots and pop it; the dynamic eval's result stays on the stack. */
+    ray_t *syms = POP();
+    ray_env_scope_sync((const int64_t*)ray_data(syms),
+                       (int32_t)syms->len, &vm.ps[vm.fp]);
+    ray_release(syms);
     DISPATCH();
 }
 
@@ -2329,6 +2360,12 @@ vm_error_cleanup: {
             if (v) ray_release(v);
         }
 
+        /* Unwind scope frames materialized after the trap was armed
+         * (an error inside an OP_SCOPE_BEGIN..END window skips its
+         * OP_SCOPE_END) */
+        while (ray_env_scope_depth() > trap.scope_depth)
+            ray_env_pop_scope();
+
         /* Get error value.  If __VM->raise_val is set, a user (raise x)
          * just ran — its value is the real payload the handler must
          * see.  vm_err_obj is the generic error-sentinel returned
@@ -2359,6 +2396,10 @@ vm_error_cleanup: {
     }
 
     /* No trap frame — regular error cleanup */
+
+    /* Unwind any scope frames this exec materialized and didn't end */
+    while (ray_env_scope_depth() > scope_base)
+        ray_env_pop_scope();
 
     /* Build error trace: current frame + callers from return stack */
     add_error_frame(vm.fn, ip > 0 ? ip - 1 : 0);

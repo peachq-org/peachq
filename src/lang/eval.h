@@ -80,6 +80,12 @@ enum {
     OP_TRAP_END,      /* pop trap frame (success path) */
     OP_STOREGLOBAL,   /* bind global: cpool[operand] is sym_id; value stays on stack (1-byte index) */
     OP_STOREGLOBAL_W, /* bind global: 2-byte constant pool index */
+    OP_SCOPE_BEGIN,   /* pop sym-id vec; push scope frame binding the live
+                       * locals (+ self) so a following OP_CALLD's tree-walk
+                       * eval can resolve them */
+    OP_SCOPE_END,     /* pop sym-id vec; sync frame values back into the
+                       * local slots, pop the frame (leaves the CALLD result
+                       * on the stack) */
     OP__COUNT
 };
 
@@ -131,6 +137,9 @@ typedef struct {
     ray_t    *fn;        /* function containing handler code */
     int32_t  fp;        /* frame pointer at trap point */
     int32_t  n_locals;  /* n_locals at trap point */
+    int32_t  scope_depth; /* env scope depth at trap point — an error inside
+                           * an OP_SCOPE_BEGIN..END window must unwind the
+                           * materialized frame(s) before the handler runs */
 } vm_trap_t;
 
 #define VM_TRAP_SIZE 16
