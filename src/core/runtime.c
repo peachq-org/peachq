@@ -36,7 +36,7 @@
 #include <unistd.h>
 #endif
 
-/* Forward-declare lang init/destroy to avoid eval.h ray_vm_t conflict */
+/* Forward-declare lang init/destroy — keeps runtime.c decoupled from lang/eval.h */
 extern ray_err_t ray_lang_init(void);
 extern void      ray_lang_destroy(void);
 
@@ -47,12 +47,20 @@ _Thread_local ray_vm_t *__VM = NULL;
 
 /* Persistent error message buffer.
  *
- * `__VM->err.msg` lives inside the VM struct, which is freed at the end of
- * every eval (eval.c sets __VM = NULL right after `ray_free(vm_block)`). By
- * the time the FFI caller reaches `ray_error_msg()`, the VM is gone. Stash a
- * copy in a thread-local buffer that outlives the VM so callers can still
- * read what went wrong. */
+ * `__VM->err.msg` is the canonical per-thread slot now that the VM is
+ * stable for the thread's lifetime, but FFI callers can hit errors on
+ * threads that never bound a VM — this thread-local shadow keeps
+ * ray_error_msg() answerable there too. */
 static _Thread_local char ray_last_err_msg[256] = {0};
+
+/* Zero a VM and set the non-zero defaults.  Every VM must go through
+ * here — a bare memset leaves ipc_handle at 0, which is a VALID
+ * connection handle; the "no dispatch on this stack" sentinel is -1. */
+void ray_vm_init(ray_vm_t* vm, int32_t id) {
+    memset(vm, 0, sizeof(*vm));
+    vm->id = id;
+    vm->ipc_handle = -1;
+}
 
 /* Static null singleton — type RAY_NULL, ARENA flag makes retain/release no-ops */
 ray_t __ray_null = { .type = RAY_NULL, .attrs = RAY_ATTR_ARENA, .rc = 0, .len = 0 };
@@ -246,8 +254,7 @@ static ray_runtime_t* runtime_create_impl(const char* sym_path,
     if (!rt->vms) { ray_sys_free(rt); return NULL; }
     rt->vms[0] = (ray_vm_t*)ray_sys_alloc(sizeof(ray_vm_t));
     if (!rt->vms[0]) { ray_sys_free(rt->vms); ray_sys_free(rt); return NULL; }
-    memset(rt->vms[0], 0, sizeof(ray_vm_t));
-    rt->vms[0]->id = 0;
+    ray_vm_init(rt->vms[0], 0);
     __VM = rt->vms[0];
 
     /* Detect memory budget: 80% of physical RAM */
