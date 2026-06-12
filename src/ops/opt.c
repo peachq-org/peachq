@@ -1368,9 +1368,80 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                 continue;
             }
 
-            /* GROUP pushdown disabled: the executor's key/agg scans
-             * bypass the filter, producing wrong results. Needs executor
-             * support for filtered scan propagation before enabling. */
+            /* Push past GROUP — legal only for HAVING predicates that
+             * reference group KEY columns exclusively, each key a plain
+             * OP_SCAN (key output column name == input column name, so the
+             * predicate resolves identically below the group; every row of
+             * a group shares its key value, so group-passes-HAVING iff
+             * rows-pass-filter).  Agg-output references (v_sum etc.) match
+             * no key sym and correctly refuse the push.  The executor
+             * honours the interposed filter (exec.c OP_GROUP dispatch). */
+            if (child->opcode == OP_GROUP && !ray_opt_no_group_pushdown) {
+                if (!g->table) continue;
+                if (count_node_consumers(g, child->id) > 1) continue;
+                ray_op_ext_t* gext = find_ext(g, child->id);
+                if (!gext || gext->n_keys == 0) continue;
+                /* one pushed filter per GROUP (chained HAVING stays above) */
+                if (child->inputs[0] && child->inputs[0]->opcode == OP_FILTER)
+                    continue;
+                /* factorized-expand pipeline (key `_src`) reads the expand
+                 * output, not g->table — never push into it */
+                {
+                    int64_t src_sym = ray_sym_intern("_src", 4);
+                    bool is_fact = false;
+                    for (uint8_t kk = 0; kk < gext->n_keys; kk++) {
+                        ray_op_ext_t* ke = gext->keys[kk]
+                            ? find_ext(g, gext->keys[kk]->id) : NULL;
+                        if (ke && ke->base.opcode == OP_SCAN &&
+                            ke->sym == src_sym) { is_fact = true; break; }
+                    }
+                    if (is_fact) continue;
+                }
+                uint32_t scan_ids[64];
+                int n_scans = collect_pred_scans(g, pred, scan_ids, 64);
+                if (n_scans <= 0) continue;
+                bool keys_only = true;
+                for (int s = 0; s < n_scans && keys_only; s++) {
+                    ray_op_ext_t* sext = find_ext(g, scan_ids[s]);
+                    if (!sext) { keys_only = false; break; }
+                    bool matched = false;
+                    for (uint8_t kk = 0; kk < gext->n_keys; kk++) {
+                        ray_op_t* kop = gext->keys[kk];
+                        if (!kop || kop->opcode != OP_SCAN) continue;
+                        ray_op_ext_t* kext = find_ext(g, kop->id);
+                        if (kext && kext->sym == sext->sym) { matched = true; break; }
+                    }
+                    if (!matched) keys_only = false;
+                }
+                if (!keys_only) continue;
+                /* Rewire: FILTER's data input becomes a const-table source;
+                 * GROUP's inputs[0] (normally the first key op — keys stay
+                 * reachable via ext->keys) becomes the FILTER; consumers of
+                 * FILTER consume GROUP.  Both dense and ext copies of
+                 * GROUP's inputs[0] must be updated (graph.c:843 copies).
+                 *
+                 * REALLOC SAFETY: ray_const_table allocates a new node and
+                 * may realloc g->nodes.  graph_fixup_ptrs patches all stored
+                 * pointers inside g->nodes[] and ext nodes, but our local C
+                 * variables n/child/pred are NOT fixed up.  Save node ids
+                 * and re-derive pointers after the allocation. */
+                uint32_t n_id     = n->id;
+                uint32_t child_id = child->id;
+                ray_op_t* tbl_node = ray_const_table(g, g->table);
+                if (!tbl_node) continue;
+                /* Re-derive pointers (realloc may have moved g->nodes) */
+                n     = &g->nodes[n_id];
+                child = &g->nodes[child_id];
+                gext  = find_ext(g, child_id);
+                if (!gext) continue;
+                n->inputs[0] = tbl_node;
+                child->inputs[0] = n;        /* dense copy */
+                gext->base.inputs[0] = n;    /* ext copy in sync */
+                redirect_consumers(g, n_id, child, child_id, n_id);
+                if (n_id == root->id) root = child;
+                changed = true;
+                continue;
+            }
 
             /* Push past EXPAND (source-side predicates, single-consumer only) */
             if (child->opcode == OP_EXPAND) {
