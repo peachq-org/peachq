@@ -258,6 +258,22 @@ bool ray_index_bloom_absent(ray_t* col, int64_t key);
  * has NaN / -0 semantics the unfused compare kernel handles. */
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
 
+/* ===== Hash-index IN probe =====
+ *
+ * Build a rowsel of all rows whose value is in set_vec via per-element
+ * hash-chain probes.  Integer-family columns only (same conservatism as
+ * the hash-eq path: F32/F64 NaN/-0 semantics belong to the scan kernel).
+ *
+ * set_vec must be an integer-family typed vec; other set types → NULL.
+ *
+ * Returns:
+ *   - A fresh rowsel block (rc=1) on success — install on g->selection.
+ *     An empty set yields a valid all-NONE rowsel (NOT NULL).
+ *   - NULL when the column is not eligible (no hash index, stale, float-
+ *     family column, unsupported set type, OOM, or selectivity > col->len/4).
+ *     Caller falls back to the scan path. */
+ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec);
+
 /* ===== Sort-index range probe =====
  *
  * Build a rowsel from a binary search over the sort-index permutation for
