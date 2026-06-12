@@ -776,7 +776,14 @@ static ray_t* dl_table_add_computed_col(ray_t* tbl, ray_t* new_col, const char* 
 
 /* before(S, E, T): keep rows where T < S */
 static ray_t* dl_builtin_before(ray_t* tbl, int s_col, int t_col) {
-    if (!tbl || RAY_IS_ERR(tbl) || ray_table_nrows(tbl) == 0) return tbl;
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
+    /* Empty accum: nothing to filter, but the caller releases its input
+     * unconditionally and adopts the return value as a new owned ref —
+     * hand back a retained tbl exactly like the all-rows-pass path below.
+     * Returning it bare let the caller's release free the table while
+     * still in use; the recycled block then resurfaced as dl_project's
+     * output and was freed a second time via release(accum). */
+    if (ray_table_nrows(tbl) == 0) { ray_retain(tbl); return tbl; }
 
     int64_t nrows = ray_table_nrows(tbl);
     int64_t ncols = ray_table_ncols(tbl);
