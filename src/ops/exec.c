@@ -1351,6 +1351,25 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 }
             }
 
+            /* Pushed-down predicate (GROUP pushdown, opt.c): the optimizer
+             * may interpose an OP_FILTER as inputs[0] (normally the first
+             * key op).  Execute it first: the lazy path installs
+             * g->selection — which exec_group honours in every scan loop —
+             * and returns the original table; a materializing filter
+             * returns a compacted table to group instead. */
+            if (op->inputs[0] && op->inputs[0]->opcode == OP_FILTER) {
+                ray_t* fres = exec_node(g, op->inputs[0]);
+                if (!fres || RAY_IS_ERR(fres)) return fres;
+                if (fres->type == RAY_TABLE && fres != g->table) {
+                    owned_tbl = fres;   /* compacted result owns a ref */
+                    tbl = fres;
+                } else {
+                    ray_release(fres);  /* lazy path: original table back,
+                                         * selection installed; drop the
+                                         * extra retain */
+                }
+            }
+
             /* Lazy selection is consumed by exec_group itself — all
              * paths (sequential, DA, radix-parallel) honour the
              * bitmap via group_rows_range / radix scan loops.  We
