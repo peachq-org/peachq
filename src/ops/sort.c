@@ -3242,6 +3242,15 @@ static ray_t* topk_take_vec(ray_t* v, int64_t k, uint8_t desc) {
      * STR-compare reach this — still O(N log N) but correct. */
     ray_t* sorted = desc ? ray_desc_fn(v) : ray_asc_fn(v);
     if (!sorted || RAY_IS_ERR(sorted)) return sorted;
+    /* asc/desc on a concrete vector returns a LAZY handle, and
+     * ray_take_fn materializes lazy args at entry — which CONSUMES the
+     * handle (ray_lazy_materialize releases its input).  Materialize
+     * here instead so take borrows a concrete vector and our release
+     * below drops the ref we actually own; releasing the handle after
+     * take had consumed it was a double free that resurfaced as
+     * cascading stale releases once the slab recycled the block. */
+    if (ray_is_lazy(sorted)) sorted = ray_lazy_materialize(sorted);
+    if (!sorted || RAY_IS_ERR(sorted)) return sorted;
     ray_t* k_atom = ray_i64(k);
     ray_t* out = ray_take_fn(sorted, k_atom);
     ray_release(sorted);
