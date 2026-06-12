@@ -36,6 +36,10 @@
 /* Forward declaration — defined below, used by type inference and DCE passes. */
 ray_op_ext_t* find_ext(ray_graph_t* g, uint32_t node_id);
 
+/* Test knob: disable the GROUP predicate-pushdown arm so the differential
+ * harness and the perf gate can compare pushed vs unpushed plans. */
+bool ray_opt_no_group_pushdown = false;
+
 /* --------------------------------------------------------------------------
  * Optimizer passes: Type Inference + Constant Folding + DCE
  *
