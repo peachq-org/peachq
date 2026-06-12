@@ -1393,6 +1393,16 @@ ray_t* ray_index_attach_sort(ray_t** vp) {
 }
 
 /* --------------------------------------------------------------------------
+ * Sort-index ORDER BY permutation probe
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_index_sort_perm_fresh(ray_t* col) {
+    if (!idx_fresh_nonull(col, RAY_IDX_SORT)) return NULL;
+    ray_index_t* ix = ray_index_payload(col->index);
+    return ix->u.sort.perm;
+}
+
+/* --------------------------------------------------------------------------
  * Bloom filter — m bits, k=3 hashes via double-hashing
  *
  * Layout: m is rounded to the next power of two >= max(64, 8*n_non_null).
