@@ -990,6 +990,43 @@ static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
     return 1;
 }
 
+/* Decode a FILTER predicate of the shape OP_IN(SCAN(col), CONST(set_vec)).
+ *
+ * Same column eligibility as idx_filter_decode: default table, not parted,
+ * not MAPCOMMON.
+ *
+ * On success, *out_col is the column vec and *out_set_lit is the CONST
+ * literal vec (borrowed from the ext, valid for the lifetime of the graph).
+ * Returns 1 on success, 0 if the shape is not matched. */
+static int idx_filter_in_decode(ray_graph_t* g, ray_op_t* pred_op,
+                                ray_t** out_col, ray_t** out_set_lit) {
+    if (!pred_op || pred_op->arity != 2) return 0;
+    if (pred_op->opcode != OP_IN) return 0;
+
+    ray_op_t* lhs = pred_op->inputs[0];  /* SCAN(col) */
+    ray_op_t* rhs = pred_op->inputs[1];  /* CONST(set_vec) */
+    if (!lhs || !rhs) return 0;
+    if (lhs->opcode != OP_SCAN || rhs->opcode != OP_CONST) return 0;
+
+    ray_op_ext_t* lext = find_ext(g, lhs->id);
+    ray_op_ext_t* rext = find_ext(g, rhs->id);
+    if (!lext || !rext || !rext->literal) return 0;
+
+    uint16_t stored_table_id = 0;
+    memcpy(&stored_table_id, lext->base.pad, sizeof(uint16_t));
+    if (stored_table_id != 0) return 0;  /* non-default table — skip */
+
+    ray_t* tbl = g->table;
+    if (!tbl) return 0;
+    ray_t* col = ray_table_get_col(tbl, lext->sym);
+    if (!col || RAY_IS_ERR(col)) return 0;
+    if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return 0;
+
+    *out_col     = col;
+    *out_set_lit = rext->literal;
+    return 1;
+}
+
 /* Execute a pushed-down filter interposed as a GROUP's inputs[0]
  * (GROUP predicate pushdown, opt.c Task-3).
  *
@@ -1370,7 +1407,32 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         }
                     }
                 }
+
+                /* 5. Hash-index IN probe: FILTER(IN(SCAN col, CONST set_vec))
+                 * on an integer-family column with a hash index.  Probes the
+                 * hash chain for each unique set element; builds one rowsel
+                 * over the union of matches. */
+                {
+                    ray_t* in_col     = NULL;
+                    ray_t* in_set_lit = NULL;
+                    if (idx_filter_in_decode(g, op->inputs[1], &in_col, &in_set_lit)) {
+                        bool in_col_is_float = (in_col->type == RAY_F32 ||
+                                               in_col->type == RAY_F64);
+                        if (ray_index_kind(in_col) == RAY_IDX_HASH &&
+                            !in_col_is_float) {
+                            ray_idx_consults[IDX_SITE_IN]++;
+                            ray_t* sel = ray_index_in_rowsel(in_col, in_set_lit);
+                            if (sel) {
+                                ray_idx_hits[IDX_SITE_IN]++;
+                                g->selection = sel;
+                                return input;
+                            }
+                            /* NULL: guard fired, ineligible, or OOM — fall through. */
+                        }
+                    }
+                }
             }
+
             ray_t* pred = exec_node(g, op->inputs[1]);
             if (!pred || RAY_IS_ERR(pred)) { ray_release(input); return pred; }
 
