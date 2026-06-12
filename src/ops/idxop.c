@@ -1001,6 +1001,70 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
 }
 
 /* --------------------------------------------------------------------------
+ * Bloom-index definite-absent probe
+ *
+ * Builder formula (ray_index_attach_bloom above):
+ *   h  = mix64(numeric_key_word(base, type, row))
+ *   h1 = h
+ *   h2 = mix64(h ^ 0xc6a4a7935bd1e995ULL) | 1ULL   -- ensure odd (double-hashing)
+ *   for kk in 0..k-1:
+ *       pos = (h1 + kk * h2) & m_mask
+ *       bits[pos >> 3] |= 1 << (pos & 7)
+ *
+ * For an integer key the raw bit representation used by numeric_key_word is:
+ *   zero-extend  for U8/BOOL (1-byte storage)
+ *   sign-extend  for I16 (2-byte storage)
+ *   sign-extend  for I32/DATE/TIME (4-byte storage)
+ *   identity     for I64/TIMESTAMP (8-byte storage)
+ * which is exactly (uint64_t)(int64_t)key after the appropriate truncation.
+ *
+ * We derive kbits the same way hash_probe_setup does for the HASH index
+ * (see hash_probe_setup, ~line 773), then run the same double-hash probe.
+ * -------------------------------------------------------------------------- */
+
+bool ray_index_bloom_absent(ray_t* col, int64_t key) {
+    /* idx_fresh_nonull: freshness + kind + no-null gate. */
+    if (!idx_fresh_nonull(col, RAY_IDX_BLOOM)) return false;
+
+    /* Integer-family only in v1.  F32/F64 equality has NaN/-0 semantics
+     * that the unfused kernel handles; skip bloom for float columns. */
+    int8_t t = col->type;
+    if (t == RAY_F32 || t == RAY_F64) return false;
+
+    /* Derive kbits: mirror numeric_key_word for an integer scalar key.
+     * numeric_key_word uses the raw bit pattern of the storage width; for
+     * integer types that means zero-extension (U8/BOOL) or sign-extension
+     * (I16/I32/I64 family) to uint64.  No range check needed: an out-of-
+     * range key hashes to some bit positions; if all happen to be set we
+     * fall through harmlessly — the absent proof is still sound. */
+    int es = numeric_elem_size(t);
+    uint64_t kbits;
+    switch (es) {
+    case 1:  kbits = (uint64_t)(uint8_t)key;                break;
+    case 2:  kbits = (uint64_t)(int64_t)(int16_t)key;       break;
+    case 4:  kbits = (uint64_t)(int64_t)(int32_t)key;       break;
+    default: kbits = (uint64_t)key;                         break;
+    }
+
+    ray_index_t* ix    = ray_index_payload(col->index);
+    uint64_t     mask  = ix->u.bloom.m_mask;
+    uint32_t     k     = ix->u.bloom.k;
+    const uint8_t* bbuf = (const uint8_t*)ray_data(ix->u.bloom.bits);
+
+    /* Double-hashing probe — exact mirror of the builder loop. */
+    uint64_t h  = mix64(kbits);
+    uint64_t h1 = h;
+    uint64_t h2 = mix64(h ^ 0xc6a4a7935bd1e995ULL) | 1ULL;
+
+    for (uint32_t kk = 0; kk < k; kk++) {
+        uint64_t pos = (h1 + (uint64_t)kk * h2) & mask;
+        if (!(bbuf[pos >> 3] & (uint8_t)(1u << (pos & 7))))
+            return true;   /* bit clear → key provably absent */
+    }
+    return false;  /* all bits set → maybe present, fall through */
+}
+
+/* --------------------------------------------------------------------------
  * Sort index — ascending permutation of row ids
  *
  * Delegates to the existing parallel sort builder.  Result is an I64 vec of
