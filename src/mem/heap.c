@@ -131,6 +131,22 @@ static bool dfd_contains(const void* p) {
     return found;
 }
 
+/* Forget every tracked address inside [lo, hi).  Must run whenever a
+ * pool is munmapped (heap destroy, oversized-pool reclaim): tests
+ * destroy and recreate heaps, and a new pool mapped at a recycled
+ * address would otherwise alias stale "free" entries and report
+ * phantom stale-retains on legitimately live blocks. */
+static void dfd_purge_range(uintptr_t lo, uintptr_t hi) {
+    if (!dfd_enabled()) return;
+    dfd_lock();
+    for (uint32_t i = 0; i < DFD_CAP; i++) {
+        uintptr_t p = (uintptr_t)dfd_slots[i];
+        if (p > (uintptr_t)DFD_TOMB && p >= lo && p < hi)
+            dfd_slots[i] = DFD_TOMB;
+    }
+    dfd_unlock();
+}
+
 static void dfd_report(const char* who, const void* p) {
     void* frames[64];
     int n = backtrace(frames, 64);
@@ -151,8 +167,9 @@ void ray_dfd_check_live(const void* p, const char* who) {
  * the release build crashes (issue #240), but deterministically. */
 static void dfd_validate_freelists(void);
 #else
-#define dfd_add(p)      ((void)0)
-#define dfd_remove(p)   ((void)0)
+#define dfd_add(p)              ((void)0)
+#define dfd_remove(p)           ((void)0)
+#define dfd_purge_range(lo, hi) ((void)0)
 #endif
 
 /* Portable disk-block preallocation.  Returns 0 on success, errno-style
@@ -1424,6 +1441,8 @@ void ray_heap_destroy(void) {
      * accumulate orphans. */
     for (uint32_t i = 0; i < h->pool_count; i++) {
         ray_pool_hdr_t* hdr = (ray_pool_hdr_t*)h->pools[i].base;
+        dfd_purge_range((uintptr_t)h->pools[i].base,
+                        (uintptr_t)h->pools[i].base + BSIZEOF(h->pools[i].pool_order));
         ray_vm_free(hdr->vm_base, BSIZEOF(h->pools[i].pool_order));
         if (h->pools[i].backed) {
             if (h->pools[i].swap_fd >= 0) close(h->pools[i].swap_fd);
@@ -1690,6 +1709,7 @@ void ray_heap_gc(void) {
                     }
                 }
 
+                dfd_purge_range(pb, pe);
                 ray_vm_free(phdr->vm_base, BSIZEOF(po));
                 /* File-backed pools also need their fd closed and tempfile
                  * unlinked, mirroring the heap_destroy path. */
