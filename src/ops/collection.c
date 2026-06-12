@@ -768,6 +768,25 @@ ray_t* distinct_vec_eager(ray_t* x) {
     int64_t len = ray_len(x);
     if (len == 0) { ray_retain(x); return x; }
 
+    /* Fast path: when a fresh, null-free sort index is attached, walk the
+     * permutation once to collect the first-in-run row ids.  The walk
+     * produces ids in value-ascending order (matching the hashset path's
+     * distinct_sort_indices contract) in O(n) with no hash table.
+     * Guard on ray_index_has to avoid a consult bump when no index exists
+     * (mirrors the find fast-path's !has_nulls && ray_index_has gate). */
+    if (x->type != RAY_SYM && x->type != RAY_GUID && x->type != RAY_STR
+            && ray_index_has(x)) {
+        ray_idx_consults[IDX_SITE_DISTINCT]++;
+        int64_t count = 0;
+        ray_t* ids = ray_index_distinct_ids(x, &count);
+        if (ids) {
+            ray_idx_hits[IDX_SITE_DISTINCT]++;
+            ray_t* result = gather_by_idx(x, (int64_t*)ray_data(ids), count);
+            ray_release(ids);
+            return result;
+        }
+    }
+
     int64_t idx_stack[256];
     int64_t* idx = (len <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len * sizeof(int64_t));
     if (!idx) return ray_error("oom", NULL);
