@@ -33,9 +33,17 @@ RAY_TLS bool ray_rc_sync = false;
  * ray_retain
  * -------------------------------------------------------------------------- */
 
+#ifdef DEBUG
+/* Debug stale-pointer detector — see src/mem/heap.c (issue #240). */
+extern void ray_dfd_check_live(const void* p, const char* who);
+#endif
+
 void ray_retain(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return;
     if (v->attrs & RAY_ATTR_ARENA) return;
+#ifdef DEBUG
+    ray_dfd_check_live(v, "ray_retain (stale retain of freed block)");
+#endif
     if (RAY_LIKELY(!ray_rc_sync))
         v->rc++;
     else
@@ -49,6 +57,9 @@ void ray_retain(ray_t* v) {
 void ray_release(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return;
     if (v->attrs & RAY_ATTR_ARENA) return;
+#ifdef DEBUG
+    ray_dfd_check_live(v, "ray_release (stale release of freed block)");
+#endif
     uint32_t prev;
     if (RAY_LIKELY(!ray_rc_sync)) {
         prev = v->rc--;
