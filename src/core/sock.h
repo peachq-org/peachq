@@ -41,6 +41,9 @@ ray_sock_t ray_sock_accept(ray_sock_t srv);
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms);
 int64_t    ray_sock_send(ray_sock_t s, const void* buf, size_t len);
 int64_t    ray_sock_recv(ray_sock_t s, void* buf, size_t len);
+/* Block until s is readable (or hung up).  timeout_ms < 0 = no timeout.
+ * Returns 1 readable, 0 timed out, -1 error. */
+int        ray_sock_wait_readable(ray_sock_t s, int timeout_ms);
 void       ray_sock_close(ray_sock_t s);
 ray_err_t  ray_sock_set_nonblocking(ray_sock_t s);
 
