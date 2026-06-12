@@ -274,6 +274,23 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
  *     Caller falls back to the scan path. */
 ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec);
 
+/* ===== Hash-index find (point lookup) =====
+ *
+ * Returns the minimum row id where the column value equals `key`, or
+ * -1 when the index proves the key is absent (provably-no-match).
+ * Returns -2 when the column is not eligible: no hash index, stale,
+ * float-family column, or out-of-eligibility condition — caller must
+ * fall back to the linear scan.
+ *
+ * Contract:
+ *   >= 0  → key found; this is the FIRST (minimum) row id match.
+ *   -1    → key provably absent; caller returns find's miss value.
+ *   -2    → not eligible; caller falls back to the scan.
+ *
+ * Uses idx_fresh_nonull: null-bearing columns fall back (-2) so the
+ * scan correctly surfaces null-equality searches. */
+int64_t ray_index_find_row(ray_t* col, int64_t key);
+
 /* ===== Sort-index range probe =====
  *
  * Build a rowsel from a binary search over the sort-index permutation for
