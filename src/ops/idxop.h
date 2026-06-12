@@ -219,6 +219,20 @@ ray_zone_class_t ray_index_zone_class(ray_t* col, uint16_t cmp_op,
  * Returns NULL on OOM; returns a valid zero-match rowsel on success. */
 ray_t* ray_index_empty_rowsel(int64_t n);
 
+/* ===== Bloom-index definite-absent probe =====
+ *
+ * Returns true ONLY when the bloom filter PROVES the key is absent
+ * (all k probe bits are clear).  Returns false when the key may be
+ * present OR when the column is not eligible — caller proceeds to
+ * other consults / the scan either way.
+ *
+ * Integer-family columns only in v1 (mirrors the hash path's
+ * conservatism on float equality: F32/F64 NaN/-0 semantics).
+ * No range validation is performed: an out-of-range key hashes to
+ * some bit positions; if they are set we fall through — the absent
+ * proof is still sound (no false absent is possible). */
+bool ray_index_bloom_absent(ray_t* col, int64_t key);
+
 /* ===== Hash-index point-lookup probe =====
  *
  * Build a ray_rowsel directly from a hash probe on `col`'s
