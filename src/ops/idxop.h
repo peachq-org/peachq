@@ -201,6 +201,24 @@ static inline bool ray_attr_is_sorted(const ray_t* v) {
  * or RAY_NULL_OBJ when no index is attached. */
 ray_t* ray_index_info(ray_t* v);
 
+/* ===== Zone-index all/none classification =====
+ *
+ * O(1) pre-check: given the zone index on `col` and a comparison
+ * (col cmp_op key), decide whether the predicate is definitely true for
+ * ALL rows, definitely false for ALL rows (NONE), or UNKNOWN (need scan).
+ *
+ * cmp_op is the OP_EQ..OP_GE opcode.  key_i is used for integer/temporal
+ * column families; key_f for float families.  NaN key_f → UNKNOWN.
+ * Returns UNKNOWN when the column is not eligible (no zone index, stale,
+ * null-bearing, unsupported type). */
+typedef enum { RAY_ZONE_UNKNOWN = 0, RAY_ZONE_ALL = 1, RAY_ZONE_NONE = 2 } ray_zone_class_t;
+ray_zone_class_t ray_index_zone_class(ray_t* col, uint16_t cmp_op,
+                                      int64_t key_i, double key_f);
+
+/* Build an all-NONE rowsel of `n` rows.  Wraps rowsel_from_sorted_ids(n, NULL, 0).
+ * Returns NULL on OOM; returns a valid zero-match rowsel on success. */
+ray_t* ray_index_empty_rowsel(int64_t n);
+
 /* ===== Hash-index point-lookup probe =====
  *
  * Build a ray_rowsel directly from a hash probe on `col`'s

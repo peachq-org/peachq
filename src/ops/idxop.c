@@ -799,6 +799,75 @@ static bool idx_fresh(ray_t* col, ray_idx_kind_t kind) {
     return ix->kind == (uint8_t)kind && ix->built_for_len == col->len;
 }
 
+/* v1 routing gate for the NEW consult paths: like idx_fresh but also
+ * excludes null-bearing columns.  Sort perm orders nulls LAST while
+ * sentinel values order FIRST, and comparison semantics on null rows
+ * follow null-as-minimum — none of the new consults model that in v1.
+ * (The pre-existing hash-eq probe keeps bare idx_fresh: its builder
+ * skips null rows, making null-bearing probes structurally correct.) */
+static bool idx_fresh_nonull(ray_t* col, ray_idx_kind_t kind) {
+    return idx_fresh(col, kind) && !(col->attrs & RAY_ATTR_HAS_NULLS);
+}
+
+/* --------------------------------------------------------------------------
+ * Zone-index all/none classification
+ * -------------------------------------------------------------------------- */
+
+/* Classify (col cmp_op key) using the zone index min/max for O(1) decision.
+ * Integer family (BOOL/U8/I16/I32/I64/DATE/TIME/TIMESTAMP) uses key_i and
+ * the zone's min_i/max_i; float family (F32/F64) uses key_f and min_f/max_f.
+ * NaN key_f → UNKNOWN immediately (NaN comparison is the null-aware kernel's
+ * business).  Returns UNKNOWN when not eligible (no zone, stale, null-bearing,
+ * or unsupported type). */
+ray_zone_class_t ray_index_zone_class(ray_t* col, uint16_t cmp_op,
+                                      int64_t key_i, double key_f) {
+    if (!idx_fresh_nonull(col, RAY_IDX_ZONE)) return RAY_ZONE_UNKNOWN;
+    ray_index_t* ix = ray_index_payload(col->index);
+
+    /* Dispatch to integer or float path based on column type. */
+    bool is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    bool is_int   = !is_float && (numeric_elem_size(col->type) > 0);
+    if (!is_float && !is_int) return RAY_ZONE_UNKNOWN;
+
+    if (is_float && isnan(key_f)) return RAY_ZONE_UNKNOWN;
+
+#define ZONE_CLASSIFY(mn, mx, key) do {                                \
+    switch (cmp_op) {                                                  \
+    case OP_EQ:                                                        \
+        if ((key) < (mn) || (key) > (mx)) return RAY_ZONE_NONE;       \
+        if ((mn) == (mx) && (mn) == (key)) return RAY_ZONE_ALL;       \
+        break;                                                         \
+    case OP_NE:                                                        \
+        if ((mn) == (mx) && (mn) == (key)) return RAY_ZONE_NONE;      \
+        if ((key) < (mn) || (key) > (mx)) return RAY_ZONE_ALL;        \
+        break;                                                         \
+    case OP_LT:                                                        \
+        if ((mx) <  (key)) return RAY_ZONE_ALL;                        \
+        if ((mn) >= (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    case OP_LE:                                                        \
+        if ((mx) <= (key)) return RAY_ZONE_ALL;                        \
+        if ((mn) >  (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    case OP_GT:                                                        \
+        if ((mn) >  (key)) return RAY_ZONE_ALL;                        \
+        if ((mx) <= (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    case OP_GE:                                                        \
+        if ((mn) >= (key)) return RAY_ZONE_ALL;                        \
+        if ((mx) <  (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    }                                                                  \
+} while (0)
+
+    if (is_int)   { ZONE_CLASSIFY(ix->u.zone.min_i, ix->u.zone.max_i, key_i); }
+    else          { ZONE_CLASSIFY(ix->u.zone.min_f, ix->u.zone.max_f, key_f); }
+
+#undef ZONE_CLASSIFY
+
+    return RAY_ZONE_UNKNOWN;
+}
+
 /* qsort comparator: ascending int64 row ids, used by the rowsel
  * builder to put matches into per-segment order. */
 static int hash_match_cmp_i64(const void* a, const void* b) {
@@ -866,6 +935,11 @@ static ray_t* rowsel_from_sorted_ids(int64_t n, const int64_t* ids, int64_t mcnt
     (void)cum;
 
     return block;
+}
+
+/* Public wrapper: build an all-NONE rowsel for n rows.  Returns NULL on OOM. */
+ray_t* ray_index_empty_rowsel(int64_t n) {
+    return rowsel_from_sorted_ids(n, NULL, 0);
 }
 
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
