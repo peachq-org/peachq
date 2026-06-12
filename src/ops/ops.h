@@ -352,13 +352,14 @@ static inline bool agg_type_admitted(uint16_t op, int8_t t) {
 #define RAY_BOUND_UNBOUNDED_FOLLOWING  4
 
 /* Op flags */
+#define OP_FLAG_PUSHED       0x01  /* filter interposed below a GROUP by predicate pushdown */
 #define OP_FLAG_DEAD         0x02
 
 /* Operation node (32 bytes, fits one cache line) */
 typedef struct ray_op {
     uint16_t       opcode;     /* OP_ADD, OP_SCAN, OP_FILTER, etc. */
     uint8_t        arity;      /* 0, 1, or 2 */
-    uint8_t        flags;      /* FUSED, DEAD */
+    uint8_t        flags;      /* PUSHED, DEAD */
     int8_t         out_type;   /* inferred output type */
     uint8_t        pad[3];
     uint32_t       id;         /* unique node ID */
