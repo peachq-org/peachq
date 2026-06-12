@@ -1001,6 +1001,151 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
 }
 
 /* --------------------------------------------------------------------------
+ * Hash-index IN probe
+ *
+ * For each unique in-range element of set_vec, walk the hash chain and
+ * collect matching row ids into a single shared buffer, then build a
+ * rowsel in one pass.
+ * -------------------------------------------------------------------------- */
+
+/* Read element i of a set vec (integer-family only) as int64.  Mirrors
+ * hash_col_read_i64 but operates on the set_vec type, not the column type. */
+static int64_t set_vec_read_i64(const uint8_t* base, int8_t t, int64_t i) {
+    switch (t) {
+    case RAY_BOOL: case RAY_U8:        return (int64_t)base[i];
+    case RAY_I16:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
+    case RAY_I32: case RAY_DATE: case RAY_TIME:
+                   { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
+    case RAY_I64: case RAY_TIMESTAMP:
+                   { int64_t v; memcpy(&v, base + i*8, 8); return v; }
+    default:       return 0;
+    }
+}
+
+static int cmp_i64_plain(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a;
+    int64_t y = *(const int64_t*)b;
+    return (x > y) - (x < y);
+}
+
+ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
+    /* Gate: integer-family column with fresh hash index, no nulls. */
+    if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return NULL;
+    bool col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    if (col_is_float) return NULL;
+
+    /* set_vec must be a non-atom integer-family vec. */
+    if (!set_vec || RAY_IS_ERR(set_vec) || ray_is_atom(set_vec)) return NULL;
+    int8_t st = set_vec->type;
+    bool set_is_float = (st == RAY_F32 || st == RAY_F64);
+    if (set_is_float) return NULL;
+    /* Check set type is integer-family (numeric_elem_size covers all int types) */
+    if (numeric_elem_size(st) == 0) return NULL;
+
+    int64_t set_len = set_vec->len;
+    int64_t n       = col->len;
+
+    /* Canonicalize set: copy to int64 scratch, sort, unique, drop out-of-range. */
+    int64_t* set_scratch = NULL;
+    ray_t*   set_hdr     = NULL;
+    if (set_len > 0) {
+        set_hdr = ray_alloc(set_len * (int64_t)sizeof(int64_t));
+        if (!set_hdr) return NULL;
+        set_scratch = (int64_t*)ray_data(set_hdr);
+        const uint8_t* sb = (const uint8_t*)ray_data(set_vec);
+        int64_t ulen = 0;
+        for (int64_t i = 0; i < set_len; i++) {
+            int64_t v = set_vec_read_i64(sb, st, i);
+            if (hash_key_in_range(col->type, v))
+                set_scratch[ulen++] = v;
+        }
+        if (ulen == 0) {
+            /* All elements out of range — no possible matches. */
+            ray_release(set_hdr);
+            return rowsel_from_sorted_ids(n, NULL, 0);
+        }
+        /* Sort and deduplicate. */
+        qsort(set_scratch, (size_t)ulen, sizeof(int64_t), cmp_i64_plain);
+        int64_t wlen = 1;
+        for (int64_t i = 1; i < ulen; i++)
+            if (set_scratch[i] != set_scratch[i-1])
+                set_scratch[wlen++] = set_scratch[i];
+        set_len = wlen;
+    } else {
+        /* Empty set → all-NONE rowsel. */
+        return rowsel_from_sorted_ids(n, NULL, 0);
+    }
+
+    ray_index_t* ix = ray_index_payload(col->index);
+    const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    int8_t t = col->type;
+
+    /* Shared match buffer: starts at 16, grows by doubling, capped at n. */
+    int64_t mcap = 16;
+    int64_t mcnt = 0;
+    ray_t*   match_hdr  = ray_alloc(mcap * (int64_t)sizeof(int64_t));
+    if (!match_hdr) { ray_release(set_hdr); return NULL; }
+    int64_t* matches = (int64_t*)ray_data(match_hdr);
+
+    /* Selectivity guard threshold: if total collected > n/4, abandon
+     * (rowsel build + sort overhead approaches scan cost at that point).
+     * For small tables (n <= 64) the guard never fires — the overhead is
+     * trivial regardless of selectivity. */
+    int64_t guard = (n > 64) ? n / 4 : n;
+
+    for (int64_t si = 0; si < set_len; si++) {
+        int64_t key = set_scratch[si];
+        int64_t rid = -1;
+        ray_index_t* ix2 = hash_probe_setup(col, key, &rid);
+        if (!ix2) continue;  /* ineligible key (shouldn't happen after range check) */
+        (void)ix2;
+
+        while (rid >= 0) {
+            if (hash_col_read_i64(base, t, rid) == key) {
+                /* Grow match buffer if needed. */
+                if (mcnt == mcap) {
+                    int64_t new_cap = mcap * 2;
+                    if (new_cap > n) new_cap = n + 1;
+                    ray_t* new_hdr = ray_alloc(new_cap * (int64_t)sizeof(int64_t));
+                    if (!new_hdr) {
+                        ray_release(match_hdr);
+                        ray_release(set_hdr);
+                        return NULL;
+                    }
+                    memcpy(ray_data(new_hdr), matches,
+                           (size_t)mcnt * sizeof(int64_t));
+                    ray_release(match_hdr);
+                    match_hdr = new_hdr;
+                    matches   = (int64_t*)ray_data(match_hdr);
+                    mcap      = new_cap;
+                }
+                matches[mcnt++] = rid;
+                /* Selectivity guard: abandon if too many matches. */
+                if (mcnt > guard) {
+                    ray_release(match_hdr);
+                    ray_release(set_hdr);
+                    return NULL;
+                }
+            }
+            rid = chn[rid] - 1;
+        }
+    }
+
+    ray_release(set_hdr);
+
+    /* Sort collected ids (distinct keys → no duplicate row ids across different
+     * probes; a row holds exactly one value so different keys can't hit the
+     * same row). */
+    if (mcnt > 1)
+        qsort(matches, (size_t)mcnt, sizeof(int64_t), hash_match_cmp_i64);
+
+    ray_t* block = rowsel_from_sorted_ids(n, matches, mcnt);
+    ray_release(match_hdr);
+    return block;
+}
+
+/* --------------------------------------------------------------------------
  * Sort-index range probe
  *
  * Binary search over the sort permutation.  Two typed helpers — one for
