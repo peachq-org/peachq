@@ -1001,6 +1001,154 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
 }
 
 /* --------------------------------------------------------------------------
+ * Sort-index range probe
+ *
+ * Binary search over the sort permutation.  Two typed helpers — one for
+ * integer-family columns, one for float-family — avoid branching inside the
+ * hot search loop.
+ *
+ * Guard: O(m log m) row-id sort + rowsel build must stay under O(n).  At
+ * IDX_RANGE_MAX_FRAC == 4 the break-even is roughly 25% selectivity.
+ * -------------------------------------------------------------------------- */
+
+/* Bail when the qualifying span exceeds len/IDX_RANGE_MAX_FRAC — the
+ * O(m log m) row-id sort below must stay under the scan's O(n) cost.
+ * 4 (25%) is the initial setting; the perf gate tunes it. */
+#define IDX_RANGE_MAX_FRAC 4
+
+/* Read row rid of an integer-family column as int64. */
+static int64_t sort_read_i64(const uint8_t* base, int8_t t, int64_t rid) {
+    return hash_col_read_i64(base, t, rid);
+}
+
+/* Read row rid of a float-family column as double. */
+static double sort_read_f64(const uint8_t* base, int8_t t, int64_t rid) {
+    if (t == RAY_F32) {
+        float v; memcpy(&v, base + rid * 4, 4); return (double)v;
+    }
+    double v; memcpy(&v, base + rid * 8, 8); return v;
+}
+
+/* lower_bound_i: first sorted position pos where value_at(perm[pos]) >= key.
+ * Positions in [0, n) are searched; perm is the sort permutation. */
+static int64_t sort_lower_i(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, int64_t key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (sort_read_i64(base, t, perm[mid]) < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* upper_bound_i: first sorted position pos where value_at(perm[pos]) > key. */
+static int64_t sort_upper_i(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, int64_t key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (sort_read_i64(base, t, perm[mid]) <= key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* lower_bound_f: first position where value >= key (NaN-safe: NaN is > any). */
+static int64_t sort_lower_f(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, double key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        double v = sort_read_f64(base, t, perm[mid]);
+        if (!isnan(v) && v < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* upper_bound_f: first position where value > key. */
+static int64_t sort_upper_f(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, double key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        double v = sort_read_f64(base, t, perm[mid]);
+        if (!isnan(v) && v <= key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
+                              int64_t key_i, double key_f, bool is_float) {
+    /* NE = two spans — unsupported. */
+    if (cmp_op == OP_NE) return NULL;
+
+    /* Freshness + no-null gate. */
+    if (!idx_fresh_nonull(col, RAY_IDX_SORT)) return NULL;
+
+    /* Consistency check: is_float must agree with the column's type family. */
+    bool col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    if ((bool)is_float != col_is_float) return NULL;
+
+    ray_index_t* ix = ray_index_payload(col->index);
+    if (!ix->u.sort.perm) return NULL;
+
+    int64_t n = col->len;
+    const int64_t* perm = (const int64_t*)ray_data(ix->u.sort.perm);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    int8_t t = col->type;
+
+    /* Compute [lo, hi) span in sorted order. */
+    int64_t lo, hi;
+    if (!is_float) {
+        int64_t lower = sort_lower_i(perm, n, base, t, key_i);
+        int64_t upper = sort_upper_i(perm, n, base, t, key_i);
+        switch (cmp_op) {
+        case OP_LT: lo = 0;     hi = lower; break;
+        case OP_LE: lo = 0;     hi = upper; break;
+        case OP_GT: lo = upper; hi = n;     break;
+        case OP_GE: lo = lower; hi = n;     break;
+        case OP_EQ: lo = lower; hi = upper; break;
+        default:    return NULL;
+        }
+    } else {
+        int64_t lower = sort_lower_f(perm, n, base, t, key_f);
+        int64_t upper = sort_upper_f(perm, n, base, t, key_f);
+        switch (cmp_op) {
+        case OP_LT: lo = 0;     hi = lower; break;
+        case OP_LE: lo = 0;     hi = upper; break;
+        case OP_GT: lo = upper; hi = n;     break;
+        case OP_GE: lo = lower; hi = n;     break;
+        case OP_EQ: lo = lower; hi = upper; break;
+        default:    return NULL;
+        }
+    }
+
+    int64_t span = hi - lo;
+    if (span <= 0) return ray_index_empty_rowsel(n);
+    /* Selectivity guard: only worth paying the O(m log m) sort when the
+     * span is small relative to the column AND the column is large enough
+     * that a scan would be expensive.  Below 64 rows the scan is trivial
+     * regardless of selectivity, so skip the guard. */
+    if (n >= 64 && span > n / IDX_RANGE_MAX_FRAC) return NULL;
+
+    /* Copy perm[lo..hi) into a scratch buffer, sort ascending, build rowsel. */
+    ray_t* scratch = ray_alloc(span * (int64_t)sizeof(int64_t));
+    if (!scratch) return NULL;
+    int64_t* ids = (int64_t*)ray_data(scratch);
+    for (int64_t i = 0; i < span; i++) ids[i] = perm[lo + i];
+
+    if (span > 1)
+        qsort(ids, (size_t)span, sizeof(int64_t), hash_match_cmp_i64);
+
+    ray_t* block = rowsel_from_sorted_ids(n, ids, span);
+    ray_release(scratch);
+    return block;
+}
+
+/* --------------------------------------------------------------------------
  * Bloom-index definite-absent probe
  *
  * Builder formula (ray_index_attach_bloom above):
