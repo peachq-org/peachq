@@ -109,7 +109,12 @@ enum {
 
 #define LAMBDA_IS_COMPILED(lam) ((lam)->attrs & RAY_FN_COMPILED)
 
-/* ===== VM Types ===== */
+/* ===== Bytecode execution state =====
+ *
+ * Per-invocation interpreter state, allocated by the executor for each
+ * compiled-lambda call and freed on return.  This is NOT the per-thread
+ * VM — that is ray_vm_t in core/runtime.h, which stays stable for the
+ * thread's lifetime while any number of ray_exec_t frames come and go. */
 
 #define VM_STACK_SIZE 1024
 
@@ -134,14 +139,12 @@ typedef struct {
     int32_t  sp;                    /* stack pointer */
     int32_t  fp;                    /* frame pointer */
     int32_t  rp;                    /* return stack pointer */
-    int32_t  id;                    /* VM identifier */
     ray_t    *fn;                    /* current lambda */
-    void    *heap;                  /* heap pointer (future use) */
     int32_t  tp;                    /* trap stack pointer */
     ray_t    *ps[VM_STACK_SIZE];     /* program stack */
     vm_ctx_t rs[VM_STACK_SIZE];     /* return stack */
     vm_trap_t ts[VM_TRAP_SIZE];     /* trap frames */
-} ray_vm_t;
+} ray_exec_t;
 
 /* ===== Public API ===== */
 

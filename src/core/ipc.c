@@ -50,6 +50,7 @@
   #define RAY_IPC_MAX_EVENTS 64
 #endif
 
+#include "core/runtime.h"
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "lang/internal.h"
@@ -191,10 +192,10 @@ static bool validate_creds(const uint8_t* buf, uint8_t cred_len,
  * Lookup is by interned sym id; we cache the ids in `hook_syms[]` so the
  * fast path is a single ray_env_get + RAY_LAMBDA-type check per dispatch.
  *
- * `g_current_handle` is the thread-local value `.ipc.handle` reads back
- * to Rayfall.  HOOK_SCOPE saves/restores it around each invocation, so a
- * hook that opens its own connection (calling `.ipc.handle` inside a
- * nested `.ipc.send` round-trip) still sees the outer handle when its
+ * `__VM->ipc_handle` is the per-thread value `.ipc.handle` reads back
+ * to Rayfall.  Each dispatch saves/restores it around the invocation,
+ * so a hook that opens its own connection (calling `.ipc.handle` inside
+ * a nested `.ipc.send` round-trip) still sees the outer handle when its
  * body resumes.  Default value -1 means "no hook is currently on the
  * stack" — exposed verbatim through the builtin.
  *
@@ -215,27 +216,35 @@ enum {
     IPC_HOOK_COUNT = 5,
 };
 
-static _Thread_local int64_t g_current_handle = -1;
+/* The IPC dispatch context — which connection's hook/eval is on this
+ * thread's stack, and the poll it lives in — is per-thread state and
+ * therefore lives on the VM (__VM->ipc_handle / __VM->ipc_poll, see
+ * core/runtime.h).  Connection handles are selector ids, so resolving
+ * one needs the poll: inside a hook / inbound eval that's the poll
+ * that fired it; everywhere else (REPL, scripts) it's the runtime's
+ * main poll. */
 
-/* The poll whose event dispatch is currently on this thread's stack.
- * Connection handles are selector ids, so resolving one needs the poll
- * it lives in: inside a hook / inbound eval that's the poll that fired
- * it; everywhere else (REPL, scripts) it's the runtime's main poll.
- * Saved/restored exactly like g_current_handle. */
-static _Thread_local ray_poll_t* g_current_poll = NULL;
+static int64_t ipc_ctx_handle(void) {
+    return __VM ? __VM->ipc_handle : -1;
+}
 
-/* From core/runtime.h — not included here because lang/eval.h (included
- * below) and core/runtime.h declare conflicting ray_vm_t types; see the
- * matching note in test/test_ipc.c. */
-extern void* ray_runtime_get_poll(void);
+static ray_poll_t* ipc_ctx_poll(void) {
+    return __VM ? (ray_poll_t*)__VM->ipc_poll : NULL;
+}
+
+static void ipc_ctx_set(int64_t handle, ray_poll_t* poll) {
+    if (!__VM) return;
+    __VM->ipc_handle = handle;
+    __VM->ipc_poll   = poll;
+}
 
 static ray_poll_t* ipc_active_poll(void) {
-    return g_current_poll ? g_current_poll
-                          : (ray_poll_t*)ray_runtime_get_poll();
+    ray_poll_t* p = ipc_ctx_poll();
+    return p ? p : (ray_poll_t*)ray_runtime_get_poll();
 }
 
 int64_t ray_ipc_current_handle(void) {
-    return g_current_handle;
+    return ipc_ctx_handle();
 }
 
 /* Fetch the hook lambda if one is installed and is in fact a lambda.
@@ -264,13 +273,11 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
     if (!fn) return;
     ray_t* arg = make_i64(handle);
     if (!arg || RAY_IS_ERR(arg)) { if (arg) ray_release(arg); return; }
-    int64_t prev = g_current_handle;
-    ray_poll_t* prev_poll = g_current_poll;
-    g_current_handle = handle;
-    if (poll) g_current_poll = poll;
+    int64_t prev = ipc_ctx_handle();
+    ray_poll_t* prev_poll = ipc_ctx_poll();
+    ipc_ctx_set(handle, poll ? poll : prev_poll);
     ray_t* r = call_fn1(fn, arg);
-    g_current_handle = prev;
-    g_current_poll   = prev_poll;
+    ipc_ctx_set(prev, prev_poll);
     if (r && RAY_IS_ERR(r)) {
         const char* name = (idx == IPC_HOOK_OPEN) ? ".ipc.on.open" : ".ipc.on.close";
         fprintf(stderr, "ipc: %s hook raised an error (handle=%lld)\n",
@@ -310,13 +317,11 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
         if (p && !RAY_IS_ERR(p)) ray_release(p);
         return 0;  /* allocation failure → reject conservatively */
     }
-    int64_t prev = g_current_handle;
-    ray_poll_t* prev_poll = g_current_poll;
-    g_current_handle = handle;
-    if (poll) g_current_poll = poll;
+    int64_t prev = ipc_ctx_handle();
+    ray_poll_t* prev_poll = ipc_ctx_poll();
+    ipc_ctx_set(handle, poll ? poll : prev_poll);
     ray_t* r = call_fn2(fn, u, p);
-    g_current_handle = prev;
-    g_current_poll   = prev_poll;
+    ipc_ctx_set(prev, prev_poll);
     ray_release(u);
     ray_release(p);
 
@@ -819,17 +824,15 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
      * runs inside eval_payload.  Save/restore so a hook that itself
      * opens a nested IPC round-trip doesn't leave the wrong handle
      * visible when its caller resumes. */
-    int64_t prev_handle = g_current_handle;
-    ray_poll_t* prev_poll = g_current_poll;
-    g_current_handle = id;
-    g_current_poll   = poll;
+    int64_t prev_handle = ipc_ctx_handle();
+    ray_poll_t* prev_poll = ipc_ctx_poll();
+    ipc_ctx_set(id, poll);
 
     /* Eval and produce result */
     ray_t* result = eval_payload(payload->data,
                                  (size_t)payload->offset, &hdr);
 
-    g_current_handle = prev_handle;
-    g_current_poll   = prev_poll;
+    ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev_restricted);
     ray_poll_buf_free(payload);
 
@@ -994,12 +997,13 @@ static void conn_on_payload(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
      * stable for the connection's lifetime, distinct across active
      * connections, freed back to the pool on close.  Mirrored shape
      * of the poll path's sel->id. */
-    int64_t prev_handle = g_current_handle;
-    g_current_handle    = (int64_t)(c - srv->conns);
+    int64_t prev_handle = ipc_ctx_handle();
+    ray_poll_t* prev_poll = ipc_ctx_poll();
+    ipc_ctx_set((int64_t)(c - srv->conns), prev_poll);
 
     ray_t* result = eval_payload(c->rx_buf, c->rx_len, &c->hdr);
 
-    g_current_handle = prev_handle;
+    ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev);
 
     if (c->hdr.msgtype == RAY_IPC_MSG_SYNC)
