@@ -85,9 +85,16 @@ static const char* null_literal_str(int8_t type) {
 void ray_lang_print(FILE* fp, ray_t* val) {
     if (!val || RAY_IS_ERR(val)) { fprintf(fp, "error"); return; }
     if (RAY_IS_NULL(val)) { fprintf(fp, "null"); return; }
-    /* Materialize lazy handles before printing */
-    if (ray_is_lazy(val))
-        val = ray_lazy_materialize(val);
+    /* Materialize lazy handles before printing.  val is BORROWED and
+     * ray_lazy_materialize consumes its input, so give it its own ref;
+     * print the owned concrete result and release it before returning. */
+    if (ray_is_lazy(val)) {
+        ray_retain(val);
+        ray_t* mat = ray_lazy_materialize(val);
+        ray_lang_print(fp, mat);
+        if (mat && !RAY_IS_ERR(mat)) ray_release(mat);
+        return;
+    }
     if (!val || RAY_IS_ERR(val)) { fprintf(fp, "error"); return; }
     /* STR has no distinct null — empty and null strings are the same
      * value and print as empty content (handled by the -RAY_STR case),
@@ -176,7 +183,14 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
             /* Format the arg into a temp buffer */
             char tmp[256];
             ray_t* a = args[ai++];
-            if (ray_is_lazy(a)) a = ray_lazy_materialize(a);
+            /* Defensive: args are pre-materialized by eval, but if a lazy
+             * slips through, materialize a PRIVATE ref — a is borrowed and
+             * ray_lazy_materialize consumes its input. */
+            ray_t* a_owned = NULL;
+            if (a && ray_is_lazy(a)) {
+                ray_retain(a);
+                a = a_owned = ray_lazy_materialize(a);
+            }
             int tlen = 0;
             if (!a || RAY_IS_ERR(a)) {
                 tlen = snprintf(tmp, sizeof(tmp), "error");
@@ -196,6 +210,7 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
                 while (pos + sl + 1 > cap) { cap *= 2; buf = ray_sys_realloc(buf, cap); }
                 memcpy(buf + pos, sp, sl);
                 pos += sl;
+                if (a_owned) ray_release(a_owned);
                 continue;
             } else if (a->type == -RAY_SYM) {
                 ray_t* ss = ray_sym_str(a->i64);
@@ -206,6 +221,7 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
                     memcpy(buf + pos, sp, sl);
                     pos += sl;
                     ray_release(ss);
+                    if (a_owned) ray_release(a_owned);
                     continue;
                 }
                 tlen = snprintf(tmp, sizeof(tmp), "'?");
@@ -219,11 +235,13 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
                     memcpy(buf + pos, sp, sl);
                     pos += sl;
                     ray_release(formatted);
+                    if (a_owned) ray_release(a_owned);
                     continue;
                 }
                 if (formatted) ray_release(formatted);
                 tlen = snprintf(tmp, sizeof(tmp), "<type:%d>", a->type);
             }
+            if (a_owned && !RAY_IS_ERR(a_owned)) ray_release(a_owned);
             while (pos + (size_t)tlen + 1 > cap) { cap *= 2; buf = ray_sys_realloc(buf, cap); }
             memcpy(buf + pos, tmp, (size_t)tlen);
             pos += (size_t)tlen;
@@ -240,8 +258,10 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
 /* (println val1 val2 ...) — print values to stdout, newline at end.
  * If first arg is a string with % placeholders, substitutes remaining args. */
 ray_t* ray_println_fn(ray_t** args, int64_t n) {
-    for (int64_t i = 0; i < n; i++)
-        if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
+    /* args are pre-materialized by eval (materialize_owned_args runs for
+     * every non-LAZY_AWARE vary builtin); a stray lazy is handled safely
+     * by ray_lang_print.  Materializing borrowed args here would consume
+     * eval's refs. */
 
     /* Format string mode: first arg is a string with % placeholders */
     if (n >= 2 && args[0] && args[0]->type == -RAY_STR) {
@@ -269,8 +289,7 @@ ray_t* ray_println_fn(ray_t** args, int64_t n) {
 
 /* (print val1 val2 ...) — like println but without trailing newline */
 ray_t* ray_print_fn(ray_t** args, int64_t n) {
-    for (int64_t i = 0; i < n; i++)
-        if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
+    /* args are pre-materialized by eval — see ray_println_fn. */
 
     /* Format string mode: first arg is a string with % placeholders */
     if (n >= 2 && args[0] && args[0]->type == -RAY_STR) {
@@ -296,8 +315,8 @@ ray_t* ray_print_fn(ray_t** args, int64_t n) {
 
 /* (show val1 val2 ...) — print values to stdout using ray_fmt, newline at end */
 ray_t* ray_show_fn(ray_t** args, int64_t n) {
+    /* args are pre-materialized by eval — see ray_println_fn. */
     for (int64_t i = 0; i < n; i++) {
-        if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
         if (!args[i] || RAY_IS_ERR(args[i])) { fprintf(stdout, "error"); continue; }
         ray_t* formatted = ray_fmt(args[i], 1);
         if (formatted && !RAY_IS_ERR(formatted)) {
@@ -318,8 +337,7 @@ ray_t* ray_show_fn(ray_t** args, int64_t n) {
 /* (format "hello % world %" a b) — string formatting with % placeholders */
 ray_t* ray_format_fn(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
-    for (int64_t i = 0; i < n; i++)
-        if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
+    /* args are pre-materialized by eval — see ray_println_fn. */
     if (!args[0] || args[0]->type != -RAY_STR) return ray_error("type", NULL);
     const char* fmt = ray_str_ptr(args[0]);
     size_t flen = ray_str_len(args[0]);
@@ -355,12 +373,12 @@ ray_t* ray_resolve_fn(ray_t** args, int64_t n) {
     }
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", "resolve: null argument");
 
-    /* Materialize lazy tables */
+    /* Materialize lazy tables.  ray_lazy_materialize CONSUMES the lazy
+     * handle (releases its input) — the extra ray_release here was a
+     * double free of the handle. */
     if (ray_is_lazy(tbl)) {
-        ray_t* mat = ray_lazy_materialize(tbl);
-        ray_release(tbl);
-        if (!mat || RAY_IS_ERR(mat)) return mat ? mat : ray_error("domain", "resolve: materialization failed");
-        tbl = mat;
+        tbl = ray_lazy_materialize(tbl);
+        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("domain", "resolve: materialization failed");
     }
 
     /* If not a table, return as-is */
