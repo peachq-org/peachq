@@ -2585,7 +2585,11 @@ static void ray_register_builtins(void) {
      * OP_PEARSON_CORR DAG node — single-pass vectorized hash-agg.  The
      * ray_pearson_corr_fn body remains the fallback for non-vectorizable
      * shapes (LIST inputs, eval-level scatter on unsupported key types). */
-    register_binary("pearson_corr", RAY_FN_AGGR | RAY_FN_LAZY_AWARE, ray_pearson_corr_fn);
+    /* NOT lazy-aware: ray_pearson_corr_fn has no lazy branch (no
+     * lazy_append shell), so the flag made eval hand it raw lazy handles
+     * that it rejected with a bogus "expects two vectors" type error.
+     * Without the flag eval materializes lazy args before the call. */
+    register_binary("pearson_corr", RAY_FN_AGGR, ray_pearson_corr_fn);
 
     /* Special forms */
     register_binary("set", RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_set_fn);
@@ -2936,7 +2940,11 @@ static void ray_register_builtins(void) {
     register_vary (".graph.shortest-path", RAY_FN_NONE, ray_graph_shortest_path_fn);
     register_vary (".graph.expand",        RAY_FN_NONE, ray_graph_expand_fn);
     register_vary (".graph.var-expand",    RAY_FN_NONE, ray_graph_var_expand_fn);
-    register_unary("strlen",               RAY_FN_NONE | RAY_FN_LAZY_AWARE, ray_strlen_fn);
+    /* NOT lazy-aware: ray_strlen_fn has no lazy branch and there is no
+     * OP_STRLEN chain opcode — the flag made eval pass raw lazy handles
+     * that fell through to the eager paths and errored.  Without the
+     * flag eval materializes lazy args before the call. */
+    register_unary("strlen",               RAY_FN_NONE, ray_strlen_fn);
 }
 
 /* ══════════════════════════════════════════
