@@ -919,8 +919,18 @@ static void ray_term_update_ghost(ray_term_t* term) {
     /* Extract word before cursor */
     int32_t ws = find_word_start(term->buf, term->buf_pos);
     int32_t wlen = term->buf_pos - ws;
-    if (wlen <= 0)
+    if (wlen <= 0) {
+        term->comp_count = 0;
         return;
+    }
+
+    /* Keep the word span in sync with comp_items on EVERY path that
+     * leaves comp_count > 0.  Tab starts a completion cycle from
+     * ghost_word_start/len whenever comp_count >= 2 — if these still
+     * described a word from a previous (longer) line, comp_cycle_insert
+     * would compute a negative tail and memmove with a huge size_t. */
+    term->ghost_word_start = ws;
+    term->ghost_word_len = wlen;
 
     /* Collect completions from all sources */
     ray_term_collect_completions(term, term->buf + ws, wlen);
@@ -939,8 +949,6 @@ static void ray_term_update_ghost(ray_term_t* term) {
         remaining = TERM_BUF_SIZE - 1;
     memcpy(term->ghost, match + wlen, (size_t)remaining);
     term->ghost_len = remaining;
-    term->ghost_word_start = ws;
-    term->ghost_word_len = wlen;
 }
 
 /* Accept ghost text into the buffer */
@@ -1104,6 +1112,13 @@ static void comp_cycle_insert(ray_term_t* term, int32_t idx) {
     int32_t ilen = (int32_t)strlen(item);
     int32_t ws = term->comp_cycle_start;
     int32_t old_len = term->comp_cycle_len;
+    /* The cycle span must lie within the current buffer.  If the buffer
+     * changed under an active cycle, a negative tail below would become
+     * a huge size_t in memmove.  Drop the cycle instead of writing. */
+    if (ws < 0 || old_len < 0 || ws + old_len > term->buf_len) {
+        term->comp_cycling = 0;
+        return;
+    }
     int32_t tail = term->buf_len - (ws + old_len);
     if (ws + ilen + tail >= TERM_BUF_SIZE) return;
     memmove(term->buf + ws + ilen, term->buf + ws + old_len, (size_t)tail);
