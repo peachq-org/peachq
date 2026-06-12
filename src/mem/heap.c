@@ -48,6 +48,113 @@
 #include <sys/types.h>
 #include <stdatomic.h>
 
+#ifdef DEBUG
+/* =====================================================================
+ * Debug-only stale-pointer detector (issue #240 investigation).
+ *
+ * Shadow set of block addresses that are currently FREE (sitting on a
+ * freelist, in a slab cache, or queued on a foreign list).  Any
+ * ray_free / ray_release / ray_retain that touches an address in this
+ * set is a use-after-free; report with a backtrace and abort before
+ * the allocator state is corrupted.
+ *
+ * Opt-in: set RAY_DFD=1 (debug builds only).  ASan cannot see
+ * use-after-free inside the pool allocator, so this is the tool of
+ * choice for chasing double releases (found while debugging #240).
+ * RAY_DFD_NO_ABORT=1 reports without aborting.
+ * ===================================================================== */
+#include <execinfo.h>
+
+#define DFD_CAP_BITS 20
+#define DFD_CAP      (1u << DFD_CAP_BITS)
+#define DFD_TOMB     ((const void*)(uintptr_t)1)
+
+static const void*  dfd_slots[DFD_CAP];
+static atomic_flag  dfd_lock_flag = ATOMIC_FLAG_INIT;
+
+static bool dfd_enabled(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("RAY_DFD");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on == 1;
+}
+
+static void dfd_lock(void)   { while (atomic_flag_test_and_set_explicit(&dfd_lock_flag, memory_order_acquire)) {} }
+static void dfd_unlock(void) { atomic_flag_clear_explicit(&dfd_lock_flag, memory_order_release); }
+
+static inline uint32_t dfd_hash(const void* p) {
+    uint64_t x = (uint64_t)(uintptr_t)p >> 5;
+    x *= 0x9E3779B97F4A7C15ull;
+    return (uint32_t)(x >> (64 - DFD_CAP_BITS));
+}
+
+static void dfd_add(const void* p) {
+    if (!dfd_enabled()) return;
+    dfd_lock();
+    uint32_t i = dfd_hash(p);
+    uint32_t first_tomb = UINT32_MAX;
+    for (uint32_t n = 0; n < DFD_CAP; n++, i = (i + 1) & (DFD_CAP - 1)) {
+        if (dfd_slots[i] == p) { dfd_unlock(); return; }       /* already present */
+        if (dfd_slots[i] == DFD_TOMB && first_tomb == UINT32_MAX) first_tomb = i;
+        if (dfd_slots[i] == NULL) {
+            dfd_slots[first_tomb != UINT32_MAX ? first_tomb : i] = p;
+            dfd_unlock();
+            return;
+        }
+    }
+    dfd_unlock();  /* table full — detector degrades, never blocks */
+}
+
+static void dfd_remove(const void* p) {
+    if (!dfd_enabled()) return;
+    dfd_lock();
+    uint32_t i = dfd_hash(p);
+    for (uint32_t n = 0; n < DFD_CAP; n++, i = (i + 1) & (DFD_CAP - 1)) {
+        if (dfd_slots[i] == p) { dfd_slots[i] = DFD_TOMB; break; }
+        if (dfd_slots[i] == NULL) break;
+    }
+    dfd_unlock();
+}
+
+static bool dfd_contains(const void* p) {
+    if (!dfd_enabled()) return false;
+    dfd_lock();
+    uint32_t i = dfd_hash(p);
+    bool found = false;
+    for (uint32_t n = 0; n < DFD_CAP; n++, i = (i + 1) & (DFD_CAP - 1)) {
+        if (dfd_slots[i] == p) { found = true; break; }
+        if (dfd_slots[i] == NULL) break;
+    }
+    dfd_unlock();
+    return found;
+}
+
+static void dfd_report(const char* who, const void* p) {
+    void* frames[64];
+    int n = backtrace(frames, 64);
+    fprintf(stderr, "\n=== DFD: %s on FREED block %p ===\n", who, p);
+    backtrace_symbols_fd(frames, n, 2);
+    fflush(stderr);
+    if (!getenv("RAY_DFD_NO_ABORT")) abort();
+}
+
+/* Called from cow.c (ray_release / ray_retain). */
+void ray_dfd_check_live(const void* p, const char* who);
+void ray_dfd_check_live(const void* p, const char* who) {
+    if (p && dfd_contains(p)) dfd_report(who, p);
+}
+
+/* Walk every freelist of every registered heap; abort on NULL links or
+ * cycles.  Called at GC entry so corruption is caught at the same point
+ * the release build crashes (issue #240), but deterministically. */
+static void dfd_validate_freelists(void);
+#else
+#define dfd_add(p)      ((void)0)
+#define dfd_remove(p)   ((void)0)
+#endif
+
 /* Portable disk-block preallocation.  Returns 0 on success, errno-style
  * code on failure (matching posix_fallocate's contract).  Linux has
  * posix_fallocate natively.  macOS uses fcntl(F_PREALLOCATE) — try
@@ -193,6 +300,7 @@ static bool heap_add_pool(ray_heap_t* h, uint8_t order);
  * -------------------------------------------------------------------------- */
 
 RAY_INLINE void heap_insert_block(ray_heap_t* h, ray_t* blk, uint8_t order) {
+    dfd_add(blk);
     ray_fl_head_t* head = &h->freelist[order];
     ray_t* first = head->fl_next;
     blk->fl_prev = (ray_t*)head;
@@ -224,6 +332,7 @@ RAY_INLINE void heap_split_block(ray_heap_t* h, ray_t* blk,
 
 static void heap_coalesce(ray_heap_t* h, ray_t* blk,
                           uintptr_t pool_base, uint8_t pool_order) {
+    dfd_remove(blk);
     uint8_t order = blk->order;
 
     /* During parallel execution, coalesce only same-pool buddies owned by
@@ -240,6 +349,7 @@ static void heap_coalesce(ray_heap_t* h, ray_t* blk,
             ray_pool_hdr_t* bphdr = ray_pool_of(buddy);
             if (!bphdr || bphdr->heap_id != h->id) break;
             fl_remove(buddy);
+            dfd_remove(buddy);
             if (fl_empty(&h->freelist[order]))
                 h->avail &= ~(1ULL << order);
             blk = (buddy < blk) ? buddy : blk;
@@ -420,6 +530,7 @@ static void heap_flush_slabs(ray_heap_t* h) {
     for (int i = 0; i < RAY_SLAB_ORDERS; i++) {
         while (h->slabs[i].count > 0) {
             ray_t* blk = h->slabs[i].stack[--h->slabs[i].count];
+            dfd_remove(blk);
             int pidx = heap_find_pool(h, blk);
             uintptr_t pb;
             uint8_t po;
@@ -870,6 +981,7 @@ ray_t* ray_alloc(size_t data_size) {
         int idx = SLAB_INDEX(order);
         if (RAY_LIKELY(h->slabs[idx].count > 0)) {
             ray_t* v = h->slabs[idx].stack[--h->slabs[idx].count];
+            dfd_remove(v);
 
             /* Zero full 32-byte header (hot path).
              * Null bitmap (bytes 0-15) must be cleared for null-bit correctness. */
@@ -925,6 +1037,7 @@ ray_t* ray_alloc(size_t data_size) {
     ray_fl_head_t* head = &h->freelist[found_order];
     ray_t* blk = head->fl_next;
     fl_remove(blk);
+    dfd_remove(blk);
     if (fl_empty(head))
         h->avail &= ~(1ULL << found_order);
 
@@ -955,6 +1068,9 @@ ray_t* ray_alloc(size_t data_size) {
 void ray_free(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return;
     if (v->attrs & RAY_ATTR_ARENA) return;  /* arena-owned, bulk-freed */
+#ifdef DEBUG
+    if (dfd_contains(v)) dfd_report("ray_free (double free)", v);
+#endif
 
     /* Guard: keep rc=1 while releasing children so buddy coalescing
      * won't merge this block prematurely (it checks buddy_rc==0). */
@@ -1025,6 +1141,7 @@ void ray_free(ray_t* v) {
                 /* rc=1 so buddy coalescing skips slab-cached blocks (a buddy
                  * freed concurrently reads rc; rc==0 would wrongly merge). */
                 ray_atomic_store(&v->rc, 1);
+                dfd_add(v);
                 h->slabs[idx].stack[h->slabs[idx].count++] = v;
                 RAY_STAT(h->stats.free_count++);
                 RAY_STAT(h->stats.bytes_allocated -= block_size);
@@ -1041,6 +1158,7 @@ void ray_free(ray_t* v) {
     /* Foreign: not in any of our pools.  Enqueue to the foreign list for
      * return to the owner during GC.  Do NOT adjust bytes_allocated: the
      * block stays counted on the owning heap until returned and coalesced. */
+    dfd_add(v);
     v->fl_next = h->foreign;
     h->foreign = v;
     RAY_STAT(h->stats.free_count++);
@@ -1355,6 +1473,7 @@ static void heap_return_foreign_freelist(ray_heap_t* h) {
                 ray_heap_t* owner = ray_heap_registry[phdr->heap_id % RAY_HEAP_REGISTRY_SIZE];
                 if (owner && owner->id == phdr->heap_id) {
                     fl_remove(blk);
+                    dfd_remove(blk);
                     if (fl_empty(head))
                         h->avail &= ~(1ULL << order);
                     /* Coalesce on owner for defragmentation */
@@ -1376,9 +1495,40 @@ static void heap_return_foreign_freelist(ray_heap_t* h) {
     }
 }
 
+#ifdef DEBUG
+static void dfd_validate_freelists(void) {
+    if (!dfd_enabled()) return;
+    for (int hid = 0; hid < RAY_HEAP_REGISTRY_SIZE; hid++) {
+        ray_heap_t* gh = ray_heap_registry[hid];
+        if (!gh) continue;
+        for (int ord = RAY_ORDER_MIN; ord < RAY_HEAP_FL_SIZE; ord++) {
+            ray_fl_head_t* fh = &gh->freelist[ord];
+            ray_t* blk = fh->fl_next;
+            int64_t steps = 0;
+            while (blk != (ray_t*)fh) {
+                if (!blk) {
+                    fprintf(stderr, "\n=== DFD: NULL link in heap %u freelist order %d ===\n",
+                            gh->id, ord);
+                    dfd_report("freelist NULL link", NULL);
+                }
+                if (++steps > (int64_t)1e8) {
+                    fprintf(stderr, "\n=== DFD: cycle in heap %u freelist order %d ===\n",
+                            gh->id, ord);
+                    dfd_report("freelist cycle", blk);
+                }
+                blk = blk->fl_next;
+            }
+        }
+    }
+}
+#endif
+
 void ray_heap_gc(void) {
     ray_heap_t* h = ray_tl_heap;
     if (!h) return;
+#ifdef DEBUG
+    dfd_validate_freelists();
+#endif
 
     bool safe = (atomic_load_explicit(&ray_parallel_flag, memory_order_relaxed) == 0);
 
@@ -1498,6 +1648,7 @@ void ray_heap_gc(void) {
                         ray_t* next = blk->fl_next;
                         if ((uintptr_t)blk >= pb && (uintptr_t)blk < pe) {
                             fl_remove(blk);
+                            dfd_remove(blk);
                             if (fl_empty(fh))
                                 gh->avail &= ~(1ULL << ord);
                         }
@@ -1508,8 +1659,10 @@ void ray_heap_gc(void) {
                     uint32_t dst = 0;
                     for (uint32_t j = 0; j < gh->slabs[si].count; j++) {
                         ray_t* sb = gh->slabs[si].stack[j];
-                        if ((uintptr_t)sb >= pb && (uintptr_t)sb < pe)
+                        if ((uintptr_t)sb >= pb && (uintptr_t)sb < pe) {
+                            dfd_remove(sb);
                             continue;
+                        }
                         gh->slabs[si].stack[dst++] = sb;
                     }
                     gh->slabs[si].count = dst;
