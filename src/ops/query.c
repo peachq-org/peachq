@@ -2415,6 +2415,15 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
         g_active_query_table = _aqt;
         ray_env_pop_scope();
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        /* col_expr can evaluate to a LAZY handle (e.g. (asc col)).  We own
+         * it, and the per-group ray_at_fn below materializes lazy args at
+         * entry — CONSUMING the handle while our src still points at it
+         * (the next iteration reads freed memory, the final release double
+         * frees).  Materialize once here instead. */
+        if (ray_is_lazy(src)) {
+            src = ray_lazy_materialize(src);
+            if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        }
     }
 
     /* Reusable I64 idx wrapper. */
@@ -5789,6 +5798,11 @@ by_dict_done:
                         }
                         if (!src_col_val) {
                             src_col_val = ray_eval(agg_col_expr);
+                            /* Materialize a lazy result up front: the
+                             * per-group ray_at_fn consumes lazy args
+                             * (see aggr_unary_per_group_buf). */
+                            if (src_col_val && ray_is_lazy(src_col_val))
+                                src_col_val = ray_lazy_materialize(src_col_val);
                             if (!src_col_val || RAY_IS_ERR(src_col_val)) {
                                 for (int ai = 0; ai < n_agg_out; ai++) if (agg_results[ai]) ray_release(agg_results[ai]);
                                 ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
@@ -6303,6 +6317,11 @@ by_dict_done:
                     }
                     if (!src_col_val) {
                         src_col_val = ray_eval(agg_col_expr);
+                        /* Materialize a lazy result up front: the
+                         * per-group ray_at_fn consumes lazy args
+                         * (see aggr_unary_per_group_buf). */
+                        if (src_col_val && !RAY_IS_ERR(src_col_val) && ray_is_lazy(src_col_val))
+                            src_col_val = ray_lazy_materialize(src_col_val);
                         if (RAY_IS_ERR(src_col_val)) {
                             for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
                             ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return src_col_val;
