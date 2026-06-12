@@ -402,9 +402,9 @@ static ray_err_t zone_scan(ray_t* v, ray_index_t* ix) {
     case RAY_U8:        return zone_scan_int(v, ix, 1);
     case RAY_I16:       return zone_scan_int(v, ix, 2);
     case RAY_I32:
-    case RAY_DATE:      return zone_scan_int(v, ix, 4);
+    case RAY_DATE:
+    case RAY_TIME:      return zone_scan_int(v, ix, 4);  /* TIME is 4-byte int32 */
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP: return zone_scan_int(v, ix, 8);
     case RAY_F32:       return zone_scan_float(v, ix, 4);
     case RAY_F64:       return zone_scan_float(v, ix, 8);
@@ -503,9 +503,9 @@ static ray_err_t chunk_zone_scan(ray_t* v, ray_index_t* ix) {
     case RAY_U8:        return chunk_zone_scan_int(v, ix, 1);
     case RAY_I16:       return chunk_zone_scan_int(v, ix, 2);
     case RAY_I32:
-    case RAY_DATE:      return chunk_zone_scan_int(v, ix, 4);
+    case RAY_DATE:
+    case RAY_TIME:      return chunk_zone_scan_int(v, ix, 4);  /* TIME is 4-byte int32 */
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP: return chunk_zone_scan_int(v, ix, 8);
     case RAY_F32:       return chunk_zone_scan_float(v, ix, 4);
     case RAY_F64:       return chunk_zone_scan_float(v, ix, 8);
@@ -723,9 +723,9 @@ static int hash_key_in_range(int8_t t, int64_t k) {
     switch (t) {
     case RAY_BOOL: case RAY_U8:        return k >= 0 && k <= UINT8_MAX;
     case RAY_I16:                      return k >= INT16_MIN && k <= INT16_MAX;
-    case RAY_I32: case RAY_DATE:       return k >= INT32_MIN && k <= INT32_MAX;
+    case RAY_I32: case RAY_DATE:
+    case RAY_TIME:                     return k >= INT32_MIN && k <= INT32_MAX;
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP:                return 1;
     default:                           return 0;
     }
@@ -737,9 +737,9 @@ static int64_t hash_col_read_i64(const uint8_t* base, int8_t t, int64_t i) {
     switch (t) {
     case RAY_BOOL: case RAY_U8:        es = 1; break;
     case RAY_I16:                      es = 2; break;
-    case RAY_I32: case RAY_DATE:       es = 4; break;
+    case RAY_I32: case RAY_DATE:
+    case RAY_TIME:                     es = 4; break;  /* TIME is 4-byte int32 */
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP:                es = 8; break;
     default:                           return 0;
     }
@@ -748,6 +748,19 @@ static int64_t hash_col_read_i64(const uint8_t* base, int8_t t, int64_t i) {
     case 2:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
     case 4:  { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
     default: { int64_t v; memcpy(&v, base + i*8, 8); return v;          }
+    }
+}
+
+/* Mirror numeric_key_word for an int64 key probed against a column of
+ * element size `es`: the canonical hash input is the raw bit pattern of
+ * the storage width.  We zero-extend U8/BOOL and sign-extend others up
+ * to int64; mix64 then folds them — the builder did the same per row. */
+static uint64_t hash_key_bits(int es, int64_t key) {
+    switch (es) {
+    case 1:  return (uint64_t)(uint8_t)key;
+    case 2:  return (uint64_t)(int64_t)(int16_t)key;
+    case 4:  return (uint64_t)(int64_t)(int32_t)key;
+    default: return (uint64_t)key;
     }
 }
 
@@ -765,19 +778,7 @@ static ray_index_t* hash_probe_setup(ray_t* col, int64_t key,
     if (numeric_elem_size(col->type) == 0) return NULL;
     if (!ix->u.hash.table || !ix->u.hash.chain) return NULL;
 
-    /* Mirror numeric_key_word for an int64 key: the canonical hash
-     * input is the raw bit pattern of the storage width.  We zero-
-     * extend U8/BOOL and sign-extend others up to int64; mix64 then
-     * folds them — the builder did the same on a per-row basis. */
-    int es = numeric_elem_size(col->type);
-    uint64_t kbits = 0;
-    switch (es) {
-    case 1: kbits = (uint64_t)(uint8_t)key;                  break;
-    case 2: kbits = (uint64_t)(int64_t)(int16_t)key;         break;
-    case 4: kbits = (uint64_t)(int64_t)(int32_t)key;         break;
-    default: kbits = (uint64_t)key;                          break;
-    }
-    uint64_t h = mix64(kbits);
+    uint64_t h = mix64(hash_key_bits(numeric_elem_size(col->type), key));
     uint64_t slot = h & ix->u.hash.mask;
     const int64_t* tbl = (const int64_t*)ray_data(ix->u.hash.table);
     *start_rid = tbl[slot] - 1;
@@ -1076,10 +1077,20 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
         return rowsel_from_sorted_ids(n, NULL, 0);
     }
 
+    /* Fetch the hash payload ONCE; per-key probing below only needs the
+     * bucket-head lookup (every key already passed hash_key_in_range, and
+     * the column-level gates were validated by idx_fresh_nonull above). */
     ray_index_t* ix = ray_index_payload(col->index);
+    if (!ix->u.hash.table || !ix->u.hash.chain) {
+        ray_release(set_hdr);
+        return NULL;
+    }
+    const int64_t* tbl  = (const int64_t*)ray_data(ix->u.hash.table);
     const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
     const uint8_t* base = (const uint8_t*)ray_data(col);
-    int8_t t = col->type;
+    uint64_t mask = ix->u.hash.mask;
+    int8_t t  = col->type;
+    int    es = numeric_elem_size(t);
 
     /* Shared match buffer: starts at 16, grows by doubling, capped at n. */
     int64_t mcap = 16;
@@ -1096,10 +1107,8 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
 
     for (int64_t si = 0; si < set_len; si++) {
         int64_t key = set_scratch[si];
-        int64_t rid = -1;
-        ray_index_t* ix2 = hash_probe_setup(col, key, &rid);
-        if (!ix2) continue;  /* ineligible key (shouldn't happen after range check) */
-        (void)ix2;
+        /* Bucket head for this key — same kbits/mix64 the builder used. */
+        int64_t rid = tbl[mix64(hash_key_bits(es, key)) & mask] - 1;
 
         while (rid >= 0) {
             if (hash_col_read_i64(base, t, rid) == key) {
