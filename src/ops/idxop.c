@@ -1165,14 +1165,19 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
  * integer-family columns, one for float-family — avoid branching inside the
  * hot search loop.
  *
- * Guard: O(m log m) row-id sort + rowsel build must stay under O(n).  At
- * IDX_RANGE_MAX_FRAC == 4 the break-even is roughly 25% selectivity.
+ * Guard: O(m log m) row-id sort + rowsel build must stay under O(n).
+ * Measured break-even on shuffled data is ~0.5-1% selectivity (loses +1.9ms
+ * at 1%, wins -7.8ms at 0.1% on 10M rows).  1/128 (~0.78%) keeps the 0.1%
+ * win region and rejects the loss region.  Sorted-layout 1% wins are forfeited
+ * because the guard is layout-blind (no RAY_ATTR_SORTED signal yet).
+ * See bench/bottleneck/idx_route_compare.md ROUND 2 Q1 for the curve.
  * -------------------------------------------------------------------------- */
 
 /* Bail when the qualifying span exceeds len/IDX_RANGE_MAX_FRAC — the
  * O(m log m) row-id sort below must stay under the scan's O(n) cost.
- * 4 (25%) is the initial setting; the perf gate tunes it. */
-#define IDX_RANGE_MAX_FRAC 4
+ * 128 (~0.78%) sits just below the ~0.5-1% shuffled-data break-even measured
+ * in bench/bottleneck/idx_route_compare.md ROUND 2 Q1. */
+#define IDX_RANGE_MAX_FRAC 128
 
 /* Read row rid of an integer-family column as int64. */
 static int64_t sort_read_i64(const uint8_t* base, int8_t t, int64_t rid) {
