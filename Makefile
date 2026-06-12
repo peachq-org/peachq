@@ -109,6 +109,13 @@ bench-alloc:
 		bench/alloc/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS) -lpthread
 	./bench-alloc
 
+# Group predicate pushdown perf gate (release-optimized, no sanitizers).
+# Measures FILTER(GROUP) with predicate pushed below GROUP vs unpushed.
+bench-group-pushdown:
+	$(CC) $(RELEASE_CFLAGS) $(DEFS) $(INCLUDES) -o bench-group-pushdown \
+		bench/group_pushdown/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
+	./bench-group-pushdown
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
