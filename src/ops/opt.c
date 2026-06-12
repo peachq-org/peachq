@@ -1427,6 +1427,9 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                  * and re-derive pointers after the allocation. */
                 uint32_t n_id     = n->id;
                 uint32_t child_id = child->id;
+                /* Save root->id before ray_const_table: that call may realloc
+                 * g->nodes, invalidating the root pointer itself. */
+                uint32_t root_id  = root->id;
                 ray_op_t* tbl_node = ray_const_table(g, g->table);
                 if (!tbl_node) continue;
                 /* Re-derive pointers (realloc may have moved g->nodes) */
@@ -1438,7 +1441,7 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                 child->inputs[0] = n;        /* dense copy */
                 gext->base.inputs[0] = n;    /* ext copy in sync */
                 redirect_consumers(g, n_id, child, child_id, n_id);
-                if (n_id == root->id) root = child;
+                if (n_id == root_id) root = child;
                 changed = true;
                 continue;
             }
