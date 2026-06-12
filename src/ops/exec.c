@@ -957,6 +957,28 @@ static int hash_index_eq_decode(ray_graph_t* g, ray_op_t* pred_op,
     return 1;
 }
 
+/* Execute a pushed-down filter interposed as a GROUP's inputs[0]
+ * (GROUP predicate pushdown, opt.c Task-3).
+ *
+ * Return values (three-way, check in this order):
+ *   • RAY_IS_ERR(result) — propagate the error immediately.
+ *   • result != NULL      — compacted table; caller owns the reference,
+ *                           should group this table instead of g->table.
+ *   • result == NULL      — lazy path: g->selection was installed by the
+ *                           filter; caller groups g->table as-is. */
+static ray_t* exec_pushed_group_filter(ray_graph_t* g, ray_op_t* filter_op) {
+    ray_t* fres = exec_node(g, filter_op);
+    /* NULL must not leak out: callers read NULL as "lazy, selection
+     * installed" — a failed exec would silently group unfiltered rows. */
+    if (!fres) return ray_error("nyi", "pushed group filter yielded no result");
+    if (RAY_IS_ERR(fres)) return fres;
+    if (fres->type == RAY_TABLE && fres != g->table) {
+        return fres;  /* compacted table; caller owns ref */
+    }
+    ray_release(fres);  /* lazy: original table back, selection installed */
+    return NULL;
+}
+
 /* Is this opcode a "heavy" pipeline breaker worth profiling? */
 static inline bool op_is_heavy(uint16_t opc) {
     return opc == OP_FILTER || opc == OP_SORT || opc == OP_GROUP ||
@@ -1351,6 +1373,16 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 }
             }
 
+            /* Pushed-down predicate (GROUP pushdown, opt.c): the optimizer
+             * may interpose an OP_FILTER as inputs[0] (normally the first
+             * key op).  Execute it first via the shared helper. */
+            if (op->inputs[0] && op->inputs[0]->opcode == OP_FILTER) {
+                ray_t* res = exec_pushed_group_filter(g, op->inputs[0]);
+                if (res && RAY_IS_ERR(res)) return res;
+                if (res) { owned_tbl = res; tbl = res; }
+                /* NULL → lazy path; g->selection installed, tbl unchanged */
+            }
+
             /* Lazy selection is consumed by exec_group itself — all
              * paths (sequential, DA, radix-parallel) honour the
              * bitmap via group_rows_range / radix scan loops.  We
@@ -1502,13 +1534,25 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             /* HEAD(GROUP) optimization: pass limit hint to exec_group
              * so it can short-circuit the per-partition loop when all
              * GROUP BY keys are MAPCOMMON.  The normal HEAD logic below
-             * still trims the result to N rows regardless. */
+             * still trims the result to N rows regardless.
+             *
+             * After GROUP predicate pushdown (opt.c Task-3) the shape
+             * becomes HEAD(GROUP(FILTER(...))).  The fast-path must
+             * execute the interposed filter before calling exec_group,
+             * mirroring the Task-2 hook in the generic OP_GROUP dispatch. */
             ray_t* input;
             if (child_op && child_op->opcode == OP_GROUP) {
                 ray_t* tbl = g->table;
                 if (!tbl || RAY_IS_ERR(tbl)) return tbl;
                 ray_t* owned_tbl = NULL;
-                if (g->selection && tbl->type == RAY_TABLE) {
+                /* Pushed-down filter: execute it first via the shared helper. */
+                if (child_op->inputs[0] &&
+                    child_op->inputs[0]->opcode == OP_FILTER) {
+                    ray_t* res = exec_pushed_group_filter(g, child_op->inputs[0]);
+                    if (res && RAY_IS_ERR(res)) return res;
+                    if (res) { owned_tbl = res; tbl = res; }
+                    /* NULL → lazy path; g->selection installed, tbl unchanged */
+                } else if (g->selection && tbl->type == RAY_TABLE) {
                     int needs = 0;
                     int64_t nc = ray_table_ncols(tbl);
                     for (int64_t c = 0; c < nc; c++) {
@@ -1529,6 +1573,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 }
                 input = exec_group(g, child_op, tbl, n);
                 if (owned_tbl) ray_release(owned_tbl);
+                if (g->selection) {
+                    ray_release(g->selection);
+                    g->selection = NULL;
+                }
             } else if (child_op && child_op->opcode == OP_FILTER) {
                 /* HEAD(FILTER): early-termination filter — gather only
                  * the first N matching rows instead of all matches. */
