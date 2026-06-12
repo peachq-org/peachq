@@ -619,6 +619,7 @@ typedef enum {
 extern uint64_t ray_expr_bail_counts[EXPR_BAIL__N];
 extern uint64_t ray_expr_compile_ok;
 extern bool     ray_expr_disable;
+extern bool     ray_opt_no_group_pushdown;
 void ray_expr_stats_init(void);
 
 #define EXPR_MAX_REGS 16
