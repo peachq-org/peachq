@@ -134,6 +134,18 @@ int32_t ray_env_global_count(void);
 /* Local scope stack for lexical binding (let, do, lambda) */
 ray_err_t ray_env_push_scope(void);
 void ray_env_pop_scope(void);
+int32_t   ray_env_scope_depth(void);
 ray_err_t ray_env_set_local(int64_t sym_id, ray_t* val);
+
+/* Compiled-lambda local materialization (OP_SCOPE_BEGIN / OP_SCOPE_END).
+ * bind: push a fresh frame and bind syms[i] -> slots[i] (NULL slots —
+ * let-locals whose initializer hasn't run yet — are skipped) plus
+ * `self` -> self_obj, so a dynamic tree-walk eval inside bytecode
+ * resolves the same names the tree-walk fallback would.
+ * sync: write the frame's (possibly let-updated) values back into the
+ * slots, then pop the frame. */
+ray_err_t ray_env_scope_bind(const int64_t* syms, int32_t n, ray_t** slots,
+                             ray_t* self_obj);
+void      ray_env_scope_sync(const int64_t* syms, int32_t n, ray_t** slots);
 
 #endif /* RAY_ENV_H */
