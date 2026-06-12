@@ -98,7 +98,28 @@ void ray_vm_release(void* ptr, size_t size) {
 
 void ray_vm_release_block(void* blk, size_t bsize, bool hugepage) {
     if (!hugepage) {
-        if (bsize > 4096) ray_vm_release((char*)blk + 4096, bsize - 4096);
+        /* Release only whole pages strictly INSIDE the block, keeping its
+         * first page resident: the buddy free-list links (fl_prev/fl_next
+         * at offset 0-15) live there and the block stays linked on the
+         * freelist after this call.
+         *
+         * The page size is not always 4096 — macOS arm64 and some aarch64
+         * Linux kernels use 16K (or 64K) pages.  Worse, Darwin's madvise
+         * rounds an unaligned range OUTWARD (trunc_page(addr),
+         * round_page(addr+len)), so the old `blk + 4096` start was rounded
+         * back to `blk` on 16K pages and MADV_FREE hit the header page of
+         * a linked freelist block; once the kernel reclaimed it, fl_next
+         * read back as zero and the next GC freelist walk crashed on a
+         * NULL link (issue #240).  Rounding inward to page-aligned bounds
+         * makes the kernel's own rounding a no-op on every platform. */
+        static size_t pg = 0;
+        if (pg == 0) {
+            long ps = sysconf(_SC_PAGESIZE);
+            pg = (ps > 0) ? (size_t)ps : 4096;
+        }
+        uintptr_t s = ((uintptr_t)blk + 32 + (pg - 1)) & ~(uintptr_t)(pg - 1);
+        uintptr_t e = ((uintptr_t)blk + bsize) & ~(uintptr_t)(pg - 1);
+        if (e > s) ray_vm_release((void*)s, e - s);
         return;
     }
     /* THP pool: release only the whole 2MB-aligned interior so a partial
