@@ -1403,6 +1403,64 @@ ray_t* ray_index_sort_perm_fresh(ray_t* col) {
 }
 
 /* --------------------------------------------------------------------------
+ * Sort-index distinct fast path
+ *
+ * Walk the sort permutation once.  The perm is a stable ascending sort with
+ * iota tie-breaking, so within each equal-value run the row ids appear in
+ * ascending order; the FIRST element of each run is already the minimum row
+ * id (= first occurrence) for that value.
+ *
+ * After collecting the first-in-run ids we sort them by VALUE (not by row)
+ * to match distinct_vec_eager's distinct_sort_indices contract: output is
+ * numerically sorted, not first-occurrence ordered.  Because the perm
+ * already provides one representative per value in ascending value order, we
+ * can emit them directly without a second sort — the perm walk order is
+ * already value-ascending, which is exactly the required output order.
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_index_distinct_ids(ray_t* col, int64_t* out_count) {
+    *out_count = 0;
+    if (!idx_fresh_nonull(col, RAY_IDX_SORT)) return NULL;
+
+    ray_index_t* ix  = ray_index_payload(col->index);
+    ray_t*       perm = ix->u.sort.perm;
+    int64_t      n    = perm->len;
+    if (n == 0) {
+        ray_t* empty = ray_vec_new(RAY_I64, 0);
+        return empty;
+    }
+
+    /* Allocate output array (worst case: all values distinct). */
+    ray_t* out = ray_vec_new(RAY_I64, n);
+    if (!out || RAY_IS_ERR(out)) return NULL;
+
+    const int64_t* p    = (const int64_t*)ray_data(perm);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    int64_t* ids        = (int64_t*)ray_data(out);
+    int64_t  count      = 0;
+
+    /* First element of the perm always starts the first run. */
+    ids[count++] = p[0];
+    for (int64_t i = 1; i < n; i++) {
+        /* Compare value at current perm position to previous one.
+         * The perm is sorted ascending, so equal values form contiguous runs;
+         * we emit one id per run (the first element, which is the min row id
+         * because the sort is stable with iota tie-breaking). */
+        if (numeric_key_word(base, col->type, p[i]) !=
+            numeric_key_word(base, col->type, p[i-1])) {
+            ids[count++] = p[i];
+        }
+    }
+
+    /* The perm walk produces ids in VALUE-ascending order (perm is sorted
+     * ascending).  distinct_vec_eager's contract (from distinct_sort_indices)
+     * is also value-ascending, so no second sort is needed. */
+    out->len   = count;
+    *out_count = count;
+    return out;
+}
+
+/* --------------------------------------------------------------------------
  * Bloom filter — m bits, k=3 hashes via double-hashing
  *
  * Layout: m is rounded to the next power of two >= max(64, 8*n_non_null).
