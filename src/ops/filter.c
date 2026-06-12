@@ -408,7 +408,15 @@ ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred) {
 ray_t* exec_filter_head(ray_t* input, ray_t* pred, int64_t limit) {
     if (!input || RAY_IS_ERR(input)) return input;
     if (!pred || RAY_IS_ERR(pred)) return pred;
-    if (input->type != RAY_TABLE || pred->type != RAY_BOOL) return input;
+    /* Pass-through must hand back an OWNED ref: the exec.c caller
+     * releases its own input ref and returns this value as the node
+     * result, so a bare `input` would leave the result dangling once
+     * that release dropped the last ref.  (NULL/error above stay bare —
+     * retain/release are no-ops for both.) */
+    if (input->type != RAY_TABLE || pred->type != RAY_BOOL) {
+        ray_retain(input);
+        return input;
+    }
 
     int64_t ncols = ray_table_ncols(input);
     int64_t nrows = ray_table_nrows(input);
