@@ -3419,7 +3419,13 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
      * difference that would fail the differential).
      *
      * g->selection is always NULL here (exec.c compacts it before calling
-     * exec_sort), so no extra guard is needed for that. */
+     * exec_sort); the gate still checks defensively.
+     *
+     * FUTURE TRAP: lifting the null-free restriction (idx_fresh_nonull)
+     * requires reconciling nulls placement — the index perm was built with
+     * sort_indices_ex's default (nulls FIRST), while ray_sort_op defaults
+     * to nulls LAST for ASC.  Reusing the perm for a null-bearing column
+     * without that reconciliation silently misplaces the null block. */
     uint64_t* sorted_keys = NULL;
     ray_t* sorted_keys_hdr = NULL;
     ray_t* idx_vec;
