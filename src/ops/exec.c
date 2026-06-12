@@ -957,6 +957,25 @@ static int hash_index_eq_decode(ray_graph_t* g, ray_op_t* pred_op,
     return 1;
 }
 
+/* Execute a pushed-down filter interposed as a GROUP's inputs[0]
+ * (GROUP predicate pushdown, opt.c Task-3).
+ *
+ * Return values (three-way, check in this order):
+ *   • RAY_IS_ERR(result) — propagate the error immediately.
+ *   • result != NULL      — compacted table; caller owns the reference,
+ *                           should group this table instead of g->table.
+ *   • result == NULL      — lazy path: g->selection was installed by the
+ *                           filter; caller groups g->table as-is. */
+static ray_t* exec_pushed_group_filter(ray_graph_t* g, ray_op_t* filter_op) {
+    ray_t* fres = exec_node(g, filter_op);
+    if (!fres || RAY_IS_ERR(fres)) return fres;
+    if (fres->type == RAY_TABLE && fres != g->table) {
+        return fres;  /* compacted table; caller owns ref */
+    }
+    ray_release(fres);  /* lazy: original table back, selection installed */
+    return NULL;
+}
+
 /* Is this opcode a "heavy" pipeline breaker worth profiling? */
 static inline bool op_is_heavy(uint16_t opc) {
     return opc == OP_FILTER || opc == OP_SORT || opc == OP_GROUP ||
@@ -1353,21 +1372,12 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
 
             /* Pushed-down predicate (GROUP pushdown, opt.c): the optimizer
              * may interpose an OP_FILTER as inputs[0] (normally the first
-             * key op).  Execute it first: the lazy path installs
-             * g->selection — which exec_group honours in every scan loop —
-             * and returns the original table; a materializing filter
-             * returns a compacted table to group instead. */
+             * key op).  Execute it first via the shared helper. */
             if (op->inputs[0] && op->inputs[0]->opcode == OP_FILTER) {
-                ray_t* fres = exec_node(g, op->inputs[0]);
-                if (!fres || RAY_IS_ERR(fres)) return fres;
-                if (fres->type == RAY_TABLE && fres != g->table) {
-                    owned_tbl = fres;   /* compacted result owns a ref */
-                    tbl = fres;
-                } else {
-                    ray_release(fres);  /* lazy path: original table back,
-                                         * selection installed; drop the
-                                         * extra retain */
-                }
+                ray_t* res = exec_pushed_group_filter(g, op->inputs[0]);
+                if (res && RAY_IS_ERR(res)) return res;
+                if (res) { owned_tbl = res; tbl = res; }
+                /* NULL → lazy path; g->selection installed, tbl unchanged */
             }
 
             /* Lazy selection is consumed by exec_group itself — all
@@ -1532,18 +1542,13 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 ray_t* tbl = g->table;
                 if (!tbl || RAY_IS_ERR(tbl)) return tbl;
                 ray_t* owned_tbl = NULL;
-                /* Pushed-down filter: execute it first, same as the
-                 * generic OP_GROUP dispatch in exec.c. */
+                /* Pushed-down filter: execute it first via the shared helper. */
                 if (child_op->inputs[0] &&
                     child_op->inputs[0]->opcode == OP_FILTER) {
-                    ray_t* fres = exec_node(g, child_op->inputs[0]);
-                    if (!fres || RAY_IS_ERR(fres)) return fres;
-                    if (fres->type == RAY_TABLE && fres != tbl) {
-                        owned_tbl = fres;
-                        tbl = fres;
-                    } else {
-                        ray_release(fres);
-                    }
+                    ray_t* res = exec_pushed_group_filter(g, child_op->inputs[0]);
+                    if (res && RAY_IS_ERR(res)) return res;
+                    if (res) { owned_tbl = res; tbl = res; }
+                    /* NULL → lazy path; g->selection installed, tbl unchanged */
                 } else if (g->selection && tbl->type == RAY_TABLE) {
                     int needs = 0;
                     int64_t nc = ray_table_ncols(tbl);
