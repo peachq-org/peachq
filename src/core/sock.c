@@ -175,6 +175,25 @@ int64_t ray_sock_recv(ray_sock_t s, void* buf, size_t len)
     }
 }
 
+int ray_sock_wait_readable(ray_sock_t s, int timeout_ms)
+{
+    /* Same wait primitive ray_sock_send uses for write-readiness. */
+    struct pollfd pfd = { .fd = s, .events = POLLIN };
+    for (;;) {
+#ifdef RAY_OS_WINDOWS
+        int n = WSAPoll(&pfd, 1, timeout_ms);
+#else
+        int n = poll(&pfd, 1, timeout_ms);
+#endif
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return 0;
+        return 1;  /* POLLIN/POLLHUP/POLLERR all mean "go recv" */
+    }
+}
+
 void ray_sock_close(ray_sock_t s)
 {
     if (s == RAY_INVALID_SOCK) return;
