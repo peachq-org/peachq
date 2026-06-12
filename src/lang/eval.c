@@ -323,9 +323,14 @@ ray_t* to_boxed_list(ray_t* x) {
         int alloc = 0;
         dst[i] = collection_elem(x, i, &alloc);
         if (RAY_IS_ERR(dst[i])) {
-            for (int64_t j = 0; j < i; j++) ray_release(dst[j]);
+            /* Trim len to the initialized prefix so the list free
+             * releases exactly dst[0..i) — leaving len at the full
+             * length would re-release them and then touch the
+             * uninitialized tail. */
+            ray_t* err = dst[i];
+            list->len = i;
             ray_release(list);
-            return dst[i];
+            return err;
         }
         /* collection_elem always allocates for typed vecs, so ownership transfers */
     }
@@ -957,7 +962,12 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
         if (la) ray_release(a);
         if (ra) ray_release(b);
         if (RAY_IS_ERR(elem)) {
-            for (int64_t j = 0; j < i; j++) ray_release(out[j]);
+            /* Only out[0..i) are initialized.  Trim len so the list free
+             * releases exactly the filled prefix — with len still at the
+             * full length it would re-release those children after this
+             * path already had (double free) and then "release" the
+             * uninitialized garbage pointers in out[i..len). */
+            result->len = i;
             ray_release(result);
             return elem;
         }
@@ -1036,7 +1046,11 @@ ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
         ray_t* elem = RAY_IS_ERR(e) ? e : fn(e);
         if (alloc) ray_release(e);
         if (RAY_IS_ERR(elem)) {
-            for (int64_t j = 0; j < i; j++) ray_release(out[j]);
+            /* Trim to the initialized prefix — see atomic_map_binary_op:
+             * the list free releases len children, so leaving len at the
+             * full length double-freed out[0..i) and released garbage
+             * pointers from the uninitialized tail. */
+            result->len = i;
             ray_release(result);
             return elem;
         }
