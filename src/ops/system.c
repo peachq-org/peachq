@@ -35,8 +35,8 @@
 #include "core/poll.h"
 #include "core/timer.h"
 
-/* Forward decl: avoids pulling core/runtime.h (which conflicts with
- * lang/eval.h's ray_vm_t typedef in this TU). */
+/* Forward decls: keep this TU decoupled from core/runtime.h — only
+ * the opaque accessors are needed. */
 void* ray_runtime_get_poll(void);
 void  ray_runtime_set_sys_args(void* dict);
 void* ray_runtime_get_sys_args(void);
