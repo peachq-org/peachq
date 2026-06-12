@@ -103,7 +103,16 @@ ray_err_t ray_ipc_server_init(ray_ipc_server_t* srv, uint16_t port);
 void      ray_ipc_server_destroy(ray_ipc_server_t* srv);
 int       ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms);
 
-/* ===== Client API (blocking, no poll needed) ===== */
+/* ===== Connection-handle API =====
+ *
+ * One handle namespace: a handle is the poll selector id of an IPC
+ * connection, inbound or outbound.  ray_ipc_connect registers the new
+ * connection in the active poll (the poll dispatching the current
+ * hook/eval, else the runtime's main poll) and returns its selector
+ * id; send/close resolve handles the same way, so server-side hooks
+ * can write back through the handles they receive.  Sync sends pump
+ * the connection's rx machinery while waiting, dispatching any
+ * interleaved async/sync frames from the peer. */
 
 int64_t   ray_ipc_connect(const char* host, uint16_t port,
                            const char* user, const char* password);
