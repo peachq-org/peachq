@@ -217,6 +217,23 @@ enum {
 
 static _Thread_local int64_t g_current_handle = -1;
 
+/* The poll whose event dispatch is currently on this thread's stack.
+ * Connection handles are selector ids, so resolving one needs the poll
+ * it lives in: inside a hook / inbound eval that's the poll that fired
+ * it; everywhere else (REPL, scripts) it's the runtime's main poll.
+ * Saved/restored exactly like g_current_handle. */
+static _Thread_local ray_poll_t* g_current_poll = NULL;
+
+/* From core/runtime.h — not included here because lang/eval.h (included
+ * below) and core/runtime.h declare conflicting ray_vm_t types; see the
+ * matching note in test/test_ipc.c. */
+extern void* ray_runtime_get_poll(void);
+
+static ray_poll_t* ipc_active_poll(void) {
+    return g_current_poll ? g_current_poll
+                          : (ray_poll_t*)ray_runtime_get_poll();
+}
+
 int64_t ray_ipc_current_handle(void) {
     return g_current_handle;
 }
@@ -238,16 +255,22 @@ static ray_t* hook_lookup(int idx) {
 
 /* Call a single-arg hook for lifecycle events (on.open / on.close).
  * Errors are logged and swallowed — a buggy logging hook must never
- * wedge connection teardown. */
-static void hook_call_lifecycle(int idx, int64_t handle) {
+ * wedge connection teardown.  `poll` is the poll the connection lives
+ * in, exposed thread-locally so the hook body can use the handle with
+ * `.ipc.post` / `.ipc.send` / `.ipc.close`; the legacy server path
+ * passes NULL (its conn-index handles are not selector ids). */
+static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
     ray_t* fn = hook_lookup(idx);
     if (!fn) return;
     ray_t* arg = make_i64(handle);
     if (!arg || RAY_IS_ERR(arg)) { if (arg) ray_release(arg); return; }
     int64_t prev = g_current_handle;
+    ray_poll_t* prev_poll = g_current_poll;
     g_current_handle = handle;
+    if (poll) g_current_poll = poll;
     ray_t* r = call_fn1(fn, arg);
     g_current_handle = prev;
+    g_current_poll   = prev_poll;
     if (r && RAY_IS_ERR(r)) {
         const char* name = (idx == IPC_HOOK_OPEN) ? ".ipc.on.open" : ".ipc.on.close";
         fprintf(stderr, "ipc: %s hook raised an error (handle=%lld)\n",
@@ -263,8 +286,8 @@ static void hook_call_lifecycle(int idx, int64_t handle) {
  *  - -1 → no hook installed; caller uses the existing pass-through.
  * The constant-time secret compare in validate_creds always runs first,
  * so this hook can only narrow access — never widen it. */
-static int hook_call_auth(int64_t handle, const uint8_t* cred_buf,
-                          uint8_t cred_len) {
+static int hook_call_auth(ray_poll_t* poll, int64_t handle,
+                          const uint8_t* cred_buf, uint8_t cred_len) {
     ray_t* fn = hook_lookup(IPC_HOOK_AUTH);
     if (!fn) return -1;
 
@@ -288,9 +311,12 @@ static int hook_call_auth(int64_t handle, const uint8_t* cred_buf,
         return 0;  /* allocation failure → reject conservatively */
     }
     int64_t prev = g_current_handle;
+    ray_poll_t* prev_poll = g_current_poll;
     g_current_handle = handle;
+    if (poll) g_current_poll = poll;
     ray_t* r = call_fn2(fn, u, p);
     g_current_handle = prev;
+    g_current_poll   = prev_poll;
     ray_release(u);
     ray_release(p);
 
@@ -358,6 +384,35 @@ static void send_response(ray_sock_t fd, ray_t* result)
     if (payload) ray_sys_free(payload);
 }
 
+/* Decompress (when flagged) + de-serialize one framed payload into an
+ * object.  Returns NULL on any decompress/decode failure.  Shared by
+ * the request-eval path below and the RESP-frame path in
+ * ipc_read_payload. */
+static ray_t* deser_frame(uint8_t* payload, size_t payload_len, uint8_t flags)
+{
+    uint8_t* decompressed = NULL;
+    if (flags & RAY_IPC_FLAG_COMPRESSED) {
+        if (payload_len < 4) return NULL;
+        uint32_t uncomp_size;
+        memcpy(&uncomp_size, payload, 4);
+        if (uncomp_size == 0 || uncomp_size > 256u * 1024u * 1024u) return NULL;
+        decompressed = (uint8_t*)ray_sys_alloc(uncomp_size);
+        if (!decompressed) return NULL;
+        size_t dlen = ray_ipc_decompress(payload + 4, payload_len - 4,
+                                         decompressed, uncomp_size);
+        if (dlen != uncomp_size) {
+            ray_sys_free(decompressed);
+            return NULL;
+        }
+        payload     = decompressed;
+        payload_len = uncomp_size;
+    }
+    int64_t de_len = (int64_t)payload_len;
+    ray_t*  msg    = ray_de_raw(payload, &de_len);
+    if (decompressed) ray_sys_free(decompressed);
+    return msg;
+}
+
 /* Run the actual decompress + de-serialize + ray_eval pipeline on a
  * single inbound payload.  The wrapper eval_payload() below decides
  * whether to capture stdout/stderr (RAY_IPC_FLAG_VERBOSE) and whether
@@ -398,27 +453,7 @@ static ray_t* eval_payload_core(uint8_t* payload, size_t payload_len,
         }
     }
 
-    uint8_t* decompressed = NULL;
-    if (hdr->flags & RAY_IPC_FLAG_COMPRESSED) {
-        if (payload_len < 4) return NULL;
-        uint32_t uncomp_size;
-        memcpy(&uncomp_size, payload, 4);
-        if (uncomp_size == 0 || uncomp_size > 256u * 1024u * 1024u) return NULL;
-        decompressed = (uint8_t*)ray_sys_alloc(uncomp_size);
-        if (!decompressed) return NULL;
-        size_t dlen = ray_ipc_decompress(payload + 4, payload_len - 4,
-                                         decompressed, uncomp_size);
-        if (dlen != uncomp_size) {
-            ray_sys_free(decompressed);
-            return NULL;
-        }
-        payload     = decompressed;
-        payload_len = uncomp_size;
-    }
-
-    int64_t de_len = (int64_t)payload_len;
-    ray_t*  msg    = ray_de_raw(payload, &de_len);
-    if (decompressed) ray_sys_free(decompressed);
+    ray_t* msg = deser_frame(payload, payload_len, hdr->flags);
 
     ray_t* result = NULL;
     if (msg && !RAY_IS_ERR(msg)) {
@@ -550,13 +585,23 @@ static ray_t* eval_payload(uint8_t* payload, size_t payload_len,
  * Poll-based IPC (new API)
  * ====================================================================== */
 
-/* Per-connection state stored in selector->data */
+/* Per-connection state stored in selector->data.  Used for BOTH
+ * directions: inbound conns accepted by a listener and outbound conns
+ * registered by ray_ipc_connect — the selector id is the one handle
+ * namespace either side of the wire works with. */
 typedef struct {
     ray_ipc_header_t hdr;
     uint8_t          phase;
-    int64_t          listener_id;  /* id of the listener selector */
+    int64_t          listener_id;  /* id of the listener selector; -1 = outbound */
     bool             auth_required;  /* server has -u/-U */
     bool             restricted;     /* server has -U */
+    /* Sync round-trip state: while a ray_ipc_send waits on this conn it
+     * pumps the rx machinery itself; a RESP frame is deposited here
+     * instead of being evaluated.  Interleaved ASYNC/SYNC frames still
+     * dispatch normally during the wait. */
+    bool             sync_waiting;
+    bool             sync_ready;
+    ray_t*           sync_resp;
 } ray_ipc_conn_data_t;
 
 static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel);
@@ -639,7 +684,7 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
     /* No-auth path: connection is now fully ready for inbound messages.
      * Fire `.ipc.on.open` AFTER we've requested the next read, so a
      * hook that calls back into the server can't race the read pump. */
-    hook_call_lifecycle(IPC_HOOK_OPEN, sel->id);
+    hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id);
     return NULL;
 }
 
@@ -680,7 +725,7 @@ static ray_t* ipc_read_creds(ray_poll_t* poll, ray_selector_t* sel)
      * falsy returns flip `ok` to false, triggering the same reject byte
      * + deregister the secret-mismatch path would. */
     if (ok) {
-        int hook_ok = hook_call_auth(sel->id, sel->rx.buf->data + 1, cred_len);
+        int hook_ok = hook_call_auth(poll, sel->id, sel->rx.buf->data + 1, cred_len);
         if (hook_ok == 0) ok = false;
     }
 
@@ -698,7 +743,7 @@ static ray_t* ipc_read_creds(ray_poll_t* poll, ray_selector_t* sel)
     /* Auth path: fully handshaked and authed — connection is now ready
      * for inbound messages.  Same ordering as the no-auth branch above:
      * fire AFTER the next read is requested. */
-    hook_call_lifecycle(IPC_HOOK_OPEN, sel->id);
+    hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id);
     return NULL;
 }
 
@@ -733,33 +778,70 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     if (!sel->rx.buf || sel->rx.buf->offset < cd->hdr.size)
         return NULL;
 
-    bool prev_restricted = ray_eval_get_restricted();
-    ray_eval_set_restricted(cd->restricted);
-
-    /* Expose this connection's selector id to `.ipc.handle` for the
-     * duration of any `.ipc.on.sync` / `.ipc.on.async` hook that runs
-     * inside eval_payload.  Save/restore so a hook that itself opens
-     * a nested IPC round-trip doesn't leave the wrong handle visible
-     * when its caller resumes. */
-    int64_t prev_handle = g_current_handle;
-    g_current_handle    = sel->id;
-
-    /* Eval and produce result */
-    ray_t* result = eval_payload(sel->rx.buf->data,
-                                 (size_t)sel->rx.buf->offset, &cd->hdr);
-
-    g_current_handle = prev_handle;
-    ray_eval_set_restricted(prev_restricted);
-
-    /* Send response for sync messages */
-    if (cd->hdr.msgtype == RAY_IPC_MSG_SYNC)
-        send_response((ray_sock_t)sel->fd, result);
-    if (result != RAY_NULL_OBJ) ray_release(result);
-
-    /* Reset for next message */
+    /* Detach the payload buffer and advance the state machine to the
+     * next header BEFORE dispatching: the eval below may re-enter this
+     * connection's rx pump (a hook doing a nested sync round-trip on
+     * the same handle), and that pump must find the selector parked on
+     * a fresh header read — not on this very payload, which would
+     * re-dispatch it.  Same reason for the local header copy: a nested
+     * frame would overwrite cd->hdr under our feet. */
+    ray_ipc_header_t hdr     = cd->hdr;
+    ray_poll_buf_t*  payload = sel->rx.buf;
+    int64_t          id      = sel->id;
+    sel->rx.buf = NULL;
     cd->phase = RAY_IPC_PHASE_HEADER;
     sel->rx.read_fn = ipc_read_header;
     ray_poll_rx_request(poll, sel, sizeof(ray_ipc_header_t));
+
+    /* Response frame: deposit it for the sync send waiting on this
+     * conn instead of evaluating it.  A response nobody waits for has
+     * no defined meaning — log and drop. */
+    if (hdr.msgtype == RAY_IPC_MSG_RESP) {
+        ray_t* obj = deser_frame(payload->data, (size_t)payload->offset,
+                                 hdr.flags);
+        ray_poll_buf_free(payload);
+        if (cd->sync_waiting && !cd->sync_ready) {
+            cd->sync_resp  = obj;
+            cd->sync_ready = true;
+        } else {
+            fprintf(stderr, "ipc: dropping unexpected response frame "
+                            "(handle=%lld)\n", (long long)id);
+            if (obj && obj != RAY_NULL_OBJ) ray_release(obj);
+        }
+        return NULL;
+    }
+
+    bool prev_restricted = ray_eval_get_restricted();
+    ray_eval_set_restricted(cd->restricted);
+
+    /* Expose this connection's selector id to `.ipc.handle` (and its
+     * poll to handle resolution) for the duration of any hook that
+     * runs inside eval_payload.  Save/restore so a hook that itself
+     * opens a nested IPC round-trip doesn't leave the wrong handle
+     * visible when its caller resumes. */
+    int64_t prev_handle = g_current_handle;
+    ray_poll_t* prev_poll = g_current_poll;
+    g_current_handle = id;
+    g_current_poll   = poll;
+
+    /* Eval and produce result */
+    ray_t* result = eval_payload(payload->data,
+                                 (size_t)payload->offset, &hdr);
+
+    g_current_handle = prev_handle;
+    g_current_poll   = prev_poll;
+    ray_eval_set_restricted(prev_restricted);
+    ray_poll_buf_free(payload);
+
+    /* Send response for sync messages.  The eval may have closed this
+     * very connection (`.ipc.close` on its own handle) — revalidate the
+     * selector before writing to its fd. */
+    if (hdr.msgtype == RAY_IPC_MSG_SYNC) {
+        ray_selector_t* cur = ray_poll_get(poll, id);
+        if (cur && cur->data == (void*)cd)
+            send_response((ray_sock_t)cur->fd, result);
+    }
+    if (result != RAY_NULL_OBJ) ray_release(result);
 
     return NULL;
 }
@@ -772,14 +854,24 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
      * before the listener's own close path (which would otherwise also
      * route through here) runs the hook with a stale fd.  Guard on:
      *   - sel->data: the listener itself has no conn data.
+     *   - listener_id ≥ 0: lifecycle hooks pair with inbound on.open
+     *     only — outbound conns (ray_ipc_connect) never fired on.open,
+     *     so they must not fire on.close either.
      *   - phase ≥ HEADER: the connection actually completed handshake
      *     (otherwise no matching on.open was fired, so on.close must
      *     also stay silent to keep the pair balanced for the user). */
     if (sel->data) {
         ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
-        if (cd->phase == RAY_IPC_PHASE_HEADER ||
-            cd->phase == RAY_IPC_PHASE_PAYLOAD) {
-            hook_call_lifecycle(IPC_HOOK_CLOSE, sel->id);
+        if (cd->listener_id >= 0 &&
+            (cd->phase == RAY_IPC_PHASE_HEADER ||
+             cd->phase == RAY_IPC_PHASE_PAYLOAD)) {
+            hook_call_lifecycle(poll, IPC_HOOK_CLOSE, sel->id);
+        }
+        /* A RESP deposited for a sync wait that never consumed it
+         * (connection died mid-round-trip) would otherwise leak. */
+        if (cd->sync_resp) {
+            if (cd->sync_resp != RAY_NULL_OBJ) ray_release(cd->sync_resp);
+            cd->sync_resp = NULL;
         }
         ray_sys_free(sel->data);
         sel->data = NULL;
@@ -821,7 +913,7 @@ static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
      * Keeps the pair balanced for the user. */
     if (c->phase == RAY_IPC_PHASE_HEADER ||
         c->phase == RAY_IPC_PHASE_PAYLOAD) {
-        hook_call_lifecycle(IPC_HOOK_CLOSE, (int64_t)(c - srv->conns));
+        hook_call_lifecycle(NULL, IPC_HOOK_CLOSE, (int64_t)(c - srv->conns));
     }
 
 #if defined(__linux__)
@@ -873,7 +965,7 @@ static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     c->rx_need = sizeof(ray_ipc_header_t);
     c->phase   = RAY_IPC_PHASE_HEADER;
     /* Legacy path mirror of the poll-path post-handshake fire. */
-    hook_call_lifecycle(IPC_HOOK_OPEN, (int64_t)(c - srv->conns));
+    hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns));
 }
 
 static void conn_on_header(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
@@ -942,7 +1034,7 @@ static void conn_on_creds(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     /* Legacy path mirror of the poll-path on.auth call: same handle-as-
      * conn-index convention, same narrowing semantics. */
     if (ok) {
-        int hook_ok = hook_call_auth((int64_t)(c - srv->conns),
+        int hook_ok = hook_call_auth(NULL, (int64_t)(c - srv->conns),
                                      c->rx_buf + 1, cred_len);
         if (hook_ok == 0) ok = false;
     }
@@ -960,7 +1052,7 @@ static void conn_on_creds(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     c->rx_len  = 0;
     c->rx_need = sizeof(ray_ipc_header_t);
     c->phase   = RAY_IPC_PHASE_HEADER;
-    hook_call_lifecycle(IPC_HOOK_OPEN, (int64_t)(c - srv->conns));
+    hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns));
 }
 
 static void conn_on_readable(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
@@ -1174,18 +1266,14 @@ int ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms)
     return ready;
 }
 
-/* ===== Client API ===== */
-
-static ray_sock_t g_client_fds[RAY_IPC_MAX_CONNS];
-static int        g_client_count = 0;
-static bool       g_client_init = false;
-
-static void client_init(void) {
-    if (g_client_init) return;
-    for (int i = 0; i < RAY_IPC_MAX_CONNS; i++)
-        g_client_fds[i] = RAY_INVALID_SOCK;
-    g_client_init = true;
-}
+/* ===== Connection-handle API =====
+ *
+ * One handle namespace: a handle is the poll selector id of an IPC
+ * connection — inbound (accepted by a listener) or outbound (opened by
+ * ray_ipc_connect).  Every entry point below resolves the handle in the
+ * "active" poll (the poll dispatching the current hook/eval, else the
+ * runtime's main poll), so server-side code can write to the very
+ * handles its hooks receive — kdb-style server push. */
 
 static int64_t recv_full(ray_sock_t fd, void* buf, size_t len) {
     size_t total = 0;
@@ -1197,13 +1285,63 @@ static int64_t recv_full(ray_sock_t fd, void* buf, size_t len) {
     return (int64_t)total;
 }
 
-static int64_t client_send_msg(int64_t handle, ray_t* msg, uint8_t msgtype,
-                               uint8_t extra_flags)
+/* Resolve `handle` to a handshake-complete IPC connection selector in
+ * the active poll.  Rejects anything else living in the selector table
+ * (listeners, the REPL's stdin, conns still mid-handshake) so a stray
+ * integer can never write to a non-IPC fd. */
+static ray_selector_t* conn_resolve(ray_poll_t** poll_out, int64_t handle)
 {
-    if (handle < 0 || handle >= RAY_IPC_MAX_CONNS) return -2;
-    ray_sock_t fd = g_client_fds[handle];
-    if (fd == RAY_INVALID_SOCK) return -2;
+    ray_poll_t* poll = ipc_active_poll();
+    if (!poll) return NULL;
+    ray_selector_t* sel = ray_poll_get(poll, handle);
+    if (!sel || sel->type != RAY_SEL_SOCKET || !sel->data) return NULL;
+    if (sel->rx.read_fn != ipc_read_header &&
+        sel->rx.read_fn != ipc_read_payload) return NULL;
+    if (poll_out) *poll_out = poll;
+    return sel;
+}
 
+/* Drain whatever is available on one connection's socket through its rx
+ * state machine WITHOUT blocking: fill the requested rx buffer, invoke
+ * read_fn for each completed phase, repeat until the socket is dry.
+ * Mirrors the per-event rx loop in the poll backends; used by sync
+ * sends to wait for their RESP while still dispatching any interleaved
+ * frames (pushed ASYNCs, nested SYNC requests).  Returns 0 when the
+ * socket has no more data right now, -1 if the selector was
+ * deregistered (peer closed or protocol error). */
+static int conn_pump(ray_poll_t* poll, int64_t id)
+{
+    for (;;) {
+        ray_selector_t* sel = ray_poll_get(poll, id);
+        if (!sel) return -1;
+        if (!sel->rx.buf || !sel->rx.recv_fn || !sel->rx.read_fn) return 0;
+        while (sel->rx.buf->offset < sel->rx.buf->size) {
+            int64_t nr = sel->rx.recv_fn(sel->fd,
+                                         sel->rx.buf->data + sel->rx.buf->offset,
+                                         sel->rx.buf->size - sel->rx.buf->offset);
+            if (nr <= 0) {
+                if (nr < 0 && errno == EINTR) continue;
+                if (nr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    return 0;  /* drained — caller decides whether to wait */
+                ray_poll_deregister(poll, id);  /* error or peer closed */
+                return -1;
+            }
+            sel->rx.buf->offset += nr;
+        }
+        /* Phase buffer complete — advance the state machine.  read_fn
+         * may deregister the selector or re-arm it for the next phase;
+         * the loop re-validates from scratch either way. */
+        sel->rx.read_fn(poll, sel);
+    }
+}
+
+/* Serialize + frame + write one message to a connection's fd.
+ * ray_sock_send loops on partial writes/EAGAIN internally, so this is
+ * safe on the nonblocking fds the poll owns.  Returns 0 on success,
+ * -1 on serialization or socket failure. */
+static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype,
+                              uint8_t extra_flags)
+{
     int64_t ser_size = ray_serde_size(msg);
     if (ser_size <= 0) return -1;
 
@@ -1261,7 +1399,11 @@ static int64_t client_send_msg(int64_t handle, ray_t* msg, uint8_t msgtype,
 int64_t ray_ipc_connect(const char* host, uint16_t port,
                          const char* user, const char* password)
 {
-    client_init();
+    /* The connection lives in the active poll's selector table — its
+     * selector id IS the handle.  No poll, no handle namespace: refuse
+     * up front rather than hand out an integer nothing can resolve. */
+    ray_poll_t* poll = ipc_active_poll();
+    if (!poll) return -1;
 
     ray_sock_t fd = ray_sock_connect(host, port, 5000);
     if (fd == RAY_INVALID_SOCK) return -1;
@@ -1330,27 +1472,58 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
       setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &z, sizeof(z)); }
 #endif
 
-    for (int i = 0; i < RAY_IPC_MAX_CONNS; i++) {
-        if (g_client_fds[i] == RAY_INVALID_SOCK) {
-            g_client_fds[i] = fd;
-            if (i >= g_client_count) g_client_count = i + 1;
-            return (int64_t)i;
-        }
-    }
+    /* Handshake + auth done (blocking socket).  Hand the fd over to the
+     * poll: nonblocking, parked on a header read, same read pump as an
+     * inbound connection — which is exactly what makes pushed frames
+     * from the server dispatchable on this side. */
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)ray_sys_alloc(
+                                    sizeof(ray_ipc_conn_data_t));
+    if (!cd) { ray_sock_close(fd); return -1; }
+    memset(cd, 0, sizeof(*cd));
+    cd->phase       = RAY_IPC_PHASE_HEADER;
+    cd->listener_id = -1;               /* outbound — no lifecycle hooks */
+    cd->restricted  = poll->restricted; /* -U narrows pushed evals too */
 
-    ray_sock_close(fd);
-    return -1;
+    ray_sock_set_nonblocking(fd);
+
+    ray_poll_reg_t reg = {0};
+    reg.fd       = (int64_t)fd;
+    reg.type     = RAY_SEL_SOCKET;
+    reg.recv_fn  = ipc_recv_fn;
+    reg.read_fn  = ipc_read_header;
+    reg.close_fn = ipc_on_close;
+    reg.data     = cd;
+
+    int64_t id = ray_poll_register(poll, &reg);
+    if (id < 0) {
+        ray_sock_close(fd);
+        ray_sys_free(cd);
+        return -1;
+    }
+    ray_selector_t* ns = ray_poll_get(poll, id);
+    if (ns) ray_poll_rx_request(poll, ns, sizeof(ray_ipc_header_t));
+
+    return id;
 }
 
 void ray_ipc_close(int64_t handle)
 {
-    if (handle < 0 || handle >= RAY_IPC_MAX_CONNS) return;
-    if (g_client_fds[handle] == RAY_INVALID_SOCK) return;
-    ray_sock_close(g_client_fds[handle]);
-    g_client_fds[handle] = RAY_INVALID_SOCK;
+    ray_poll_t* poll;
+    ray_selector_t* sel = conn_resolve(&poll, handle);
+    if (!sel) return;
+    /* Deregister fires ipc_on_close: socket closed, conn data freed,
+     * and the on.close hook for inbound connections — so a server can
+     * kick a client through the same handle its hooks were given. */
+    ray_poll_deregister(poll, sel->id);
 }
 
-ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
+/* Sync round-trip on any connection handle.  Writes a SYNC frame, then
+ * pumps this connection's rx machinery until the matching RESP frame is
+ * deposited — dispatching (not swallowing) any frames that arrive in
+ * between: a pushed ASYNC gets evaluated, a nested SYNC request from
+ * the peer gets evaluated and answered.  Full-duplex, either side of
+ * the wire. */
+static ray_t* sync_send(int64_t handle, ray_t* msg, uint8_t extra_flags)
 {
     bool owned = false;
     if (ray_is_lazy(msg)) {
@@ -1359,73 +1532,69 @@ ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
         if (RAY_IS_ERR(msg)) return msg;
         owned = true;
     }
-    { int64_t sr = client_send_msg(handle, msg, RAY_IPC_MSG_SYNC, 0);
-      if (sr == -2) { if (owned) ray_release(msg); return ray_error("io", "connection closed"); }
-      if (sr < 0)  { if (owned) ray_release(msg); return ray_error("io", "ipc send failed"); } }
 
-    ray_sock_t fd = g_client_fds[handle];
-
-    ray_ipc_header_t hdr;
-    if (recv_full(fd, &hdr, sizeof(hdr)) < 0) {
-        ray_ipc_close(handle);
+    ray_poll_t* poll;
+    ray_selector_t* sel = conn_resolve(&poll, handle);
+    if (!sel) {
         if (owned) ray_release(msg);
-        return ray_error("io", "ipc recv header failed");
+        return ray_error("io", "connection closed");
     }
-    if (hdr.prefix != RAY_SERDE_PREFIX || hdr.size <= 0) {
-        ray_ipc_close(handle);
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    if (cd->sync_waiting) {
+        /* A sync wait is already pumping this conn further down the
+         * stack (hook → nested send on the SAME handle).  Two waiters
+         * can't both claim the next RESP — refuse the inner one. */
         if (owned) ray_release(msg);
-        return ray_error("io", "ipc bad response header");
+        return ray_error("io", "nested sync send on busy handle");
     }
-    if (hdr.version != RAY_SERDE_WIRE_VERSION) {
-        ray_ipc_close(handle);
+
+    if (conn_write_msg((ray_sock_t)sel->fd, msg, RAY_IPC_MSG_SYNC,
+                       extra_flags) < 0) {
         if (owned) ray_release(msg);
-        return ray_error("version", "ipc peer wire version mismatch");
+        return ray_error("io", "ipc send failed");
     }
-    if (hdr.size > 256 * 1024 * 1024) {
-        ray_ipc_close(handle);
-        if (owned) ray_release(msg);
-        return ray_error("io", "ipc response too large");
-    }
-
-    uint8_t* payload = (uint8_t*)ray_sys_alloc((size_t)hdr.size);
-    if (!payload) { if (owned) ray_release(msg); return ray_error("oom", NULL); }
-    if (recv_full(fd, payload, (size_t)hdr.size) < 0) {
-        ray_sys_free(payload);
-        ray_ipc_close(handle);
-        if (owned) ray_release(msg);
-        return ray_error("io", "ipc recv payload failed");
-    }
-
-    uint8_t* deser_buf     = payload;
-    size_t   deser_len     = (size_t)hdr.size;
-    uint8_t* decompressed  = NULL;
-
-    if (hdr.flags & RAY_IPC_FLAG_COMPRESSED) {
-        if (deser_len < 4) { ray_sys_free(payload); if (owned) ray_release(msg); return ray_error("io", "ipc compressed payload too short"); }
-        uint32_t uncomp_size;
-        memcpy(&uncomp_size, payload, 4);
-        decompressed = (uint8_t*)ray_sys_alloc(uncomp_size);
-        if (!decompressed) { ray_sys_free(payload); if (owned) ray_release(msg); return ray_error("oom", NULL); }
-        size_t dlen = ray_ipc_decompress(payload + 4, deser_len - 4,
-                                         decompressed, uncomp_size);
-        if (dlen != uncomp_size) {
-            ray_sys_free(decompressed);
-            ray_sys_free(payload);
-            if (owned) ray_release(msg);
-            return ray_error("io", "ipc decompress failed");
-        }
-        deser_buf = decompressed;
-        deser_len = uncomp_size;
-    }
-
-    int64_t de_len = (int64_t)deser_len;
-    ray_t*  result = ray_de_raw(deser_buf, &de_len);
-
-    if (decompressed) ray_sys_free(decompressed);
-    ray_sys_free(payload);
     if (owned) ray_release(msg);
 
-    return result ? result : RAY_NULL_OBJ;
+    cd->sync_waiting = true;
+    cd->sync_ready   = false;
+    cd->sync_resp    = NULL;
+    int64_t id = sel->id;
+
+    for (;;) {
+        /* Process anything already buffered/readable first, then block
+         * for more.  The pump can deregister the selector (peer died) —
+         * conn data is freed with it, so re-resolve every iteration.
+         * The data-pointer compare also guards against this id being
+         * reused by a NEW connection opened inside a dispatched eval:
+         * that conn's state must not be mistaken for ours. */
+        int rc = conn_pump(poll, id);
+        sel = ray_poll_get(poll, id);
+        if (!sel || sel->data != (void*)cd)
+            return ray_error("io", "connection closed");
+        if (cd->sync_ready) {
+            ray_t* result = cd->sync_resp;
+            cd->sync_resp    = NULL;
+            cd->sync_ready   = false;
+            cd->sync_waiting = false;
+            if (!result)
+                return ray_error("io", "ipc bad response");
+            return result;
+        }
+        if (rc < 0) {
+            /* Deregistered but selector still resolves?  Can't happen —
+             * defensive: treat as closed. */
+            return ray_error("io", "connection closed");
+        }
+        if (ray_sock_wait_readable((ray_sock_t)sel->fd, -1) < 0) {
+            cd->sync_waiting = false;
+            return ray_error("io", "ipc recv failed");
+        }
+    }
+}
+
+ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
+{
+    return sync_send(handle, msg, 0);
 }
 
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
@@ -1441,92 +1610,19 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
         }
         owned = true;
     }
-    ray_err_t rc = (client_send_msg(handle, msg, RAY_IPC_MSG_ASYNC, 0) < 0)
+    ray_selector_t* sel = conn_resolve(NULL, handle);
+    ray_err_t rc = (!sel || conn_write_msg((ray_sock_t)sel->fd, msg,
+                                           RAY_IPC_MSG_ASYNC, 0) < 0)
                    ? RAY_ERR_IO : RAY_OK;
     if (owned) ray_release(msg);
     return rc;
 }
 
-/* Verbose-eval client send: sets RAY_IPC_FLAG_VERBOSE on the
- * outbound header so the server captures whatever the eval writes
- * to stdout/stderr and returns a 2-element list [captured_str,
- * result] instead of bare result.  Same wire path as ray_ipc_send
- * otherwise — sync, blocking until response. */
+/* Verbose-eval sync send: sets RAY_IPC_FLAG_VERBOSE on the outbound
+ * header so the peer captures whatever the eval writes to
+ * stdout/stderr and returns a 2-element list [captured_str, result]
+ * instead of bare result.  Same wire path as ray_ipc_send otherwise. */
 ray_t* ray_ipc_send_verbose(int64_t handle, ray_t* msg)
 {
-    bool owned = false;
-    if (ray_is_lazy(msg)) {
-        ray_retain(msg);
-        msg = ray_lazy_materialize(msg); /* consumes the retain */
-        if (RAY_IS_ERR(msg)) return msg;
-        owned = true;
-    }
-    { int64_t sr = client_send_msg(handle, msg, RAY_IPC_MSG_SYNC,
-                                   RAY_IPC_FLAG_VERBOSE);
-      if (sr == -2) { if (owned) ray_release(msg); return ray_error("io", "connection closed"); }
-      if (sr < 0)  { if (owned) ray_release(msg); return ray_error("io", "ipc send failed"); } }
-
-    ray_sock_t fd = g_client_fds[handle];
-
-    ray_ipc_header_t hdr;
-    if (recv_full(fd, &hdr, sizeof(hdr)) < 0) {
-        ray_ipc_close(handle);
-        if (owned) ray_release(msg);
-        return ray_error("io", "ipc recv header failed");
-    }
-    if (hdr.prefix != RAY_SERDE_PREFIX || hdr.size <= 0) {
-        ray_ipc_close(handle);
-        if (owned) ray_release(msg);
-        return ray_error("io", "ipc bad response header");
-    }
-    if (hdr.version != RAY_SERDE_WIRE_VERSION) {
-        ray_ipc_close(handle);
-        if (owned) ray_release(msg);
-        return ray_error("version", "ipc peer wire version mismatch");
-    }
-    if (hdr.size > 256 * 1024 * 1024) {
-        ray_ipc_close(handle);
-        if (owned) ray_release(msg);
-        return ray_error("io", "ipc response too large");
-    }
-
-    uint8_t* payload = (uint8_t*)ray_sys_alloc((size_t)hdr.size);
-    if (!payload) { if (owned) ray_release(msg); return ray_error("oom", NULL); }
-    if (recv_full(fd, payload, (size_t)hdr.size) < 0) {
-        ray_sys_free(payload);
-        ray_ipc_close(handle);
-        if (owned) ray_release(msg);
-        return ray_error("io", "ipc recv payload failed");
-    }
-
-    uint8_t* deser_buf    = payload;
-    size_t   deser_len    = (size_t)hdr.size;
-    uint8_t* decompressed = NULL;
-
-    if (hdr.flags & RAY_IPC_FLAG_COMPRESSED) {
-        if (deser_len < 4) { ray_sys_free(payload); if (owned) ray_release(msg); return ray_error("io", "ipc compressed payload too short"); }
-        uint32_t uncomp_size;
-        memcpy(&uncomp_size, payload, 4);
-        decompressed = (uint8_t*)ray_sys_alloc(uncomp_size);
-        if (!decompressed) { ray_sys_free(payload); if (owned) ray_release(msg); return ray_error("oom", NULL); }
-        size_t dlen = ray_ipc_decompress(payload + 4, deser_len - 4,
-                                         decompressed, uncomp_size);
-        if (dlen != uncomp_size) {
-            ray_sys_free(decompressed);
-            ray_sys_free(payload);
-            if (owned) ray_release(msg);
-            return ray_error("io", "ipc decompress failed");
-        }
-        deser_buf = decompressed;
-        deser_len = uncomp_size;
-    }
-
-    int64_t de_len = (int64_t)deser_len;
-    ray_t*  result = ray_de_raw(deser_buf, &de_len);
-
-    if (decompressed) ray_sys_free(decompressed);
-    ray_sys_free(payload);
-    if (owned) ray_release(msg);
-
-    return result ? result : RAY_NULL_OBJ;
+    return sync_send(handle, msg, RAY_IPC_FLAG_VERBOSE);
 }
