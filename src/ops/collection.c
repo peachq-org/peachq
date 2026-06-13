@@ -2200,38 +2200,26 @@ static ray_t* map_iterate(ray_t* fn, ray_t* fixed, ray_t* vec, int fixed_is_left
     return out;
 }
 
-/* (map-left fn fixed vec) → apply fn(fixed, elem) for each elem in vec.
- * If vec is scalar but fixed is a vector, auto-swap (iterate over fixed). */
+/* (map-left fn left right) → fix the LEFT arg, iterate over the right:
+ * apply fn(left, right_i) for each element of right. If right is scalar this
+ * collapses to a single fn(left, right) (handled by map_iterate). */
 ray_t* ray_map_left_fn(ray_t** args, int64_t n) {
     if (n != 3) return ray_error("domain", NULL);
     ray_t* fn = args[0];
-    ray_t* fixed = args[1];
-    ray_t* vec = args[2];
-
-    /* Auto-detect: if vec is scalar but fixed is a vector, swap roles */
-    if (!ray_is_vec(vec) && vec->type != RAY_LIST &&
-        (ray_is_vec(fixed) || fixed->type == RAY_LIST)) {
-        return map_iterate(fn, vec, fixed, 0); /* fn(elem_of_fixed, vec) — but we want fn(fixed=scalar, elem) */
-    }
-
-    return map_iterate(fn, fixed, vec, 1); /* fn(fixed, elem) */
+    ray_t* left = args[1];
+    ray_t* right = args[2];
+    return map_iterate(fn, left, right, 1); /* fn(left, right_i) */
 }
 
-/* (map-right fn vec fixed) → apply fn(elem, fixed) for each elem in vec.
- * If vec is scalar but fixed is a vector, auto-swap (iterate over fixed). */
+/* (map-right fn left right) → fix the RIGHT arg, iterate over the left:
+ * apply fn(left_i, right) for each element of left. If left is scalar this
+ * collapses to a single fn(left, right) (handled by map_iterate). */
 ray_t* ray_map_right_fn(ray_t** args, int64_t n) {
     if (n != 3) return ray_error("domain", NULL);
     ray_t* fn = args[0];
-    ray_t* vec = args[1];
-    ray_t* fixed = args[2];
-
-    /* Auto-detect: if vec is scalar but fixed is a vector, swap roles */
-    if (!ray_is_vec(vec) && vec->type != RAY_LIST &&
-        (ray_is_vec(fixed) || fixed->type == RAY_LIST)) {
-        return map_iterate(fn, vec, fixed, 1); /* fn(vec_scalar, elem_of_fixed) */
-    }
-
-    return map_iterate(fn, fixed, vec, 0); /* fn(elem, fixed) */
+    ray_t* left = args[1];
+    ray_t* right = args[2];
+    return map_iterate(fn, right, left, 0); /* fn(left_i, right) */
 }
 
 /* ══════════════════════════════════════════
