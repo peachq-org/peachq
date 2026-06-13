@@ -1277,7 +1277,7 @@ int ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms)
  * ray_ipc_connect).  Every entry point below resolves the handle in the
  * "active" poll (the poll dispatching the current hook/eval, else the
  * runtime's main poll), so server-side code can write to the very
- * handles its hooks receive — kdb-style server push. */
+ * handles its hooks receive — server-initiated push. */
 
 static int64_t recv_full(ray_sock_t fd, void* buf, size_t len) {
     size_t total = 0;
