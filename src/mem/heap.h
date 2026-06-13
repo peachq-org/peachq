@@ -154,6 +154,10 @@ typedef struct ray_dispatch  ray_dispatch_t;
 
 void     ray_heap_init(void);
 void     ray_heap_destroy(void);
+/* Id of the calling thread's current heap, or 0xFFFF if none is bound.
+ * Used to tag heap-backed allocations (e.g. sym-domain atoms) so their
+ * owner can be invalidated when this heap is torn down. */
+uint16_t ray_heap_current_id(void);
 void     ray_heap_merge(ray_heap_t* src);
 void     ray_heap_flush_foreign(void);
 void     ray_heap_push_pending(ray_heap_t* heap);
