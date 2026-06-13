@@ -220,13 +220,20 @@ static inline uint64_t ray_hash_i64(int64_t val) {
  * Normalizes negative zero to positive zero so that -0.0 and +0.0
  * hash identically (they compare equal via ==).
  *
+ * The -0.0 check is done on the bit pattern, NOT via `if (val == 0.0)`:
+ * the release build uses -fno-signed-zeros, under which the compiler
+ * treats -0.0 and +0.0 as interchangeable and optimizes the
+ * `if (val == 0.0) val = 0.0` form into a no-op — leaving -0.0's sign
+ * bit intact, so it hashes differently from +0.0 and `distinct`
+ * over-counts.  Same trap, same fix as clear_neg_zero in ops/internal.h.
+ *
  * Note: different NaN bit patterns hash differently; SQL NULL is
  * handled separately at a higher level and never reaches this path.
  */
 static inline uint64_t ray_hash_f64(double val) {
     uint64_t bits;
-    if (val == 0.0) { uint64_t z = 0; memcpy(&val, &z, sizeof(val)); } /* normalize -0.0 → +0.0 */
     memcpy(&bits, &val, sizeof(bits));
+    if (bits == UINT64_C(0x8000000000000000)) bits = 0; /* -0.0 → +0.0 */
     uint64_t A = bits ^ 0x2d358dccaa6c78a5ULL;
     uint64_t B = bits ^ 0x8bb84b93962eacc9ULL;
     ray__wymum(&A, &B);
