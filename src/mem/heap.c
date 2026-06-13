@@ -1320,17 +1320,32 @@ void ray_mem_stats(ray_mem_stats_t* out) {
  * Heap lifecycle
  * -------------------------------------------------------------------------- */
 
+uint16_t ray_heap_current_id(void) {
+    return ray_tl_heap ? ray_tl_heap->id : (uint16_t)0xFFFF;
+}
+
 void ray_heap_init(void) {
     if (ray_tl_heap) return;
 
     size_t heap_sz = (sizeof(ray_heap_t) + 4095) & ~(size_t)4095;
     ray_heap_t* h = (ray_heap_t*)ray_vm_alloc(heap_sz);
-    if (!h) return;
+    /* A silent return here leaves ray_tl_heap NULL, so every later
+     * ray_alloc on this thread fails and the caller sees a baffling
+     * downstream error (e.g. a save returning IO) with no hint that the
+     * heap never came up.  Make both init failure modes loud. */
+    if (!h) {
+        fprintf(stderr, "ray_heap_init: ray_vm_alloc(%zu) failed (errno=%d %s) "
+                        "— heap not initialized\n",
+                heap_sz, errno, strerror(errno));
+        return;
+    }
     memset(h, 0, heap_sz);
 
     /* Bitmap-based ID: acquire reusable ID via atomic CAS */
     int id = heap_id_acquire();
     if (id < 0) {
+        fprintf(stderr, "ray_heap_init: heap-ID pool exhausted "
+                        "— heap not initialized\n");
         ray_vm_free(h, heap_sz);
         return;  /* ID pool exhausted */
     }
@@ -1387,6 +1402,11 @@ void ray_heap_init(void) {
  * heap takes over.  Lives in src/lang/eval.c. */
 extern void ray_clear_error_trace(void);
 
+/* Drop sym-domain cache entries whose atoms live on a heap being torn
+ * down (src/table/domain.c).  Extern-declared to keep heap.c free of the
+ * table-layer header, mirroring ray_clear_error_trace above. */
+extern void ray_sym_domain_drop_heap(uint16_t heap_id);
+
 void ray_heap_destroy(void) {
     ray_heap_t* h = ray_tl_heap;
     if (!h) return;
@@ -1396,6 +1416,12 @@ void ray_heap_destroy(void) {
      * memory is still mapped; once the for-loop below munmap's the
      * pools, dereferencing g_error_trace becomes UB. */
     ray_clear_error_trace();
+
+    /* Same ordering rationale: the process-global sym-domain cache holds
+     * FILE domains whose string atoms are ray_str objects on THIS heap.
+     * Drop them now, while the atoms are still mapped, so the cache never
+     * hands out a domain backed by freed memory after this heap dies. */
+    ray_sym_domain_drop_heap(h->id);
 
     uint16_t saved_id = h->id;
 

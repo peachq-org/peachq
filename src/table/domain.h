@@ -102,6 +102,12 @@ ray_sym_domain_t* ray_sym_domain_open_or_create(const char* path);
 void ray_sym_domain_retain(ray_sym_domain_t* dom);
 void ray_sym_domain_release(ray_sym_domain_t* dom);
 
+/* Drop every cached FILE domain whose atoms are backed by `heap_id`.
+ * Called by ray_heap_destroy while that heap's atoms are still valid, so
+ * the process-global domain cache never outlives the heap its atoms live
+ * on.  Not a general-purpose API. */
+void ray_sym_domain_drop_heap(uint16_t heap_id);
+
 /* Borrowed string atom for position `pos` (NULL if out of range).
  * RUNTIME: delegates to ray_sym_str.  FILE: lazily materialized atom
  * owned by the domain — valid for the domain's lifetime, do not release. */
