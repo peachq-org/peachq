@@ -1537,6 +1537,14 @@ static ray_op_t* split_and_filter(ray_graph_t* g, ray_op_t* filter_node) {
     ray_op_t* input  = filter_node->inputs[0];
     if (!pred_a || !pred_b || !input) return filter_node;
 
+    /* Don't split a FILTER whose child is a GROUP.  Splitting an AND here
+     * produces FILTER(b, FILTER(a, GROUP)); exec's HAVING fusion swaps the
+     * table to the GROUP output only for a FILTER whose DIRECT child is GROUP,
+     * so the outer conjunct would evaluate against the base table (schema error
+     * on an agg-output ref, row-count mismatch on a key ref).  Left intact, the
+     * single FILTER(AND, GROUP) is handled correctly by the HAVING fusion. */
+    if (input->opcode == OP_GROUP) return filter_node;
+
     /* Save IDs before potential realloc */
     uint32_t filter_id = filter_node->id;
     uint32_t pred_a_id = pred_a->id;
