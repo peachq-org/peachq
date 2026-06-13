@@ -26,6 +26,12 @@
 #include "ops/idxop.h"
 #include "lang/internal.h"  /* sym_id_runtime, sym_domain_rep (sym-domain Phase 2) */
 
+/* Test knob: force the legacy build-on-right behavior so the differential
+ * harness can compare swap vs no-swap in one binary. */
+bool ray_join_no_build_swap = false;
+/* Diagnostic: how many radix inner-joins built on the smaller (left) side. */
+uint64_t ray_join_build_swaps = 0;
+
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
 static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
@@ -488,6 +494,10 @@ static inline bool bp_grow_bufs(join_radix_bp_ctx_t* c, uint32_t p,
     return true;
 }
 
+/* NOTE: l_xx/r_xx (l_parts/r_parts/l_key_vecs/r_key_vecs) and lr/rr/pl/pr denote
+ * PROBE/BUILD roles, not logical left/right.  Under the build-side swap the
+ * physical right becomes the build side and physical left the probe side.
+ * Logical left/right is restored at the consolidation remap in exec_join. */
 static void join_radix_build_probe_fn(void* raw, uint32_t wid, int64_t task_start, int64_t task_end) {
     (void)wid; (void)task_end;
     join_radix_bp_ctx_t* c = (join_radix_bp_ctx_t*)raw;
@@ -860,29 +870,41 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
 
     /* ── Radix-partitioned path (large joins) ──────────────────────── */
     if (right_rows > RAY_PARALLEL_THRESHOLD) {
-        uint8_t radix_bits = radix_join_bits(right_rows);
+        /* Build on the smaller side for INNER joins (radix path).  Other
+         * join types stay build-on-right (LEFT/FULL/ANTI are asymmetric — a
+         * swap would change their result).  SWAP_MARGIN ≥ 1: require LEFT
+         * (×margin) strictly smaller; default 1.  Knob forces legacy. */
+        #define JOIN_SWAP_MARGIN 1
+        bool swap = (join_type == 0) && !ray_join_no_build_swap &&
+                    (left_rows * (int64_t)JOIN_SWAP_MARGIN < right_rows);
+        if (swap) ray_join_build_swaps++;
+        int64_t  build_rows = swap ? left_rows : right_rows;
+        int64_t  probe_rows = swap ? right_rows : left_rows;
+        ray_t**  build_keys = swap ? l_key_vecs : r_key_vecs;
+        ray_t**  probe_keys = swap ? r_key_vecs : l_key_vecs;
+        uint8_t radix_bits = radix_join_bits(build_rows);
         uint32_t n_rparts = (uint32_t)1 << radix_bits;
 
         /* Pre-compute hashes for both sides (once, reused by histogram+scatter) */
         ray_t* r_hash_hdr = NULL;
         uint32_t* r_hashes = (uint32_t*)scratch_alloc(&r_hash_hdr,
-                                (size_t)right_rows * sizeof(uint32_t));
+                                (size_t)build_rows * sizeof(uint32_t));
         ray_t* l_hash_hdr = NULL;
         uint32_t* l_hashes = (uint32_t*)scratch_alloc(&l_hash_hdr,
-                                (size_t)left_rows * sizeof(uint32_t));
+                                (size_t)probe_rows * sizeof(uint32_t));
         if (!r_hashes || !l_hashes) {
             if (r_hash_hdr) scratch_free(r_hash_hdr);
             if (l_hash_hdr) scratch_free(l_hash_hdr);
             goto chained_ht_fallback;
         }
-        join_radix_hash_ctx_t rhctx = { .key_vecs = r_key_vecs, .n_keys = n_keys, .hashes = r_hashes };
-        join_radix_hash_ctx_t lhctx = { .key_vecs = l_key_vecs, .n_keys = n_keys, .hashes = l_hashes };
+        join_radix_hash_ctx_t rhctx = { .key_vecs = build_keys, .n_keys = n_keys, .hashes = r_hashes };
+        join_radix_hash_ctx_t lhctx = { .key_vecs = probe_keys, .n_keys = n_keys, .hashes = l_hashes };
         if (pool) {
-            ray_pool_dispatch(pool, join_radix_hash_fn, &rhctx, right_rows);
-            ray_pool_dispatch(pool, join_radix_hash_fn, &lhctx, left_rows);
+            ray_pool_dispatch(pool, join_radix_hash_fn, &rhctx, build_rows);
+            ray_pool_dispatch(pool, join_radix_hash_fn, &lhctx, probe_rows);
         } else {
-            join_radix_hash_fn(&rhctx, 0, 0, right_rows);
-            join_radix_hash_fn(&lhctx, 0, 0, left_rows);
+            join_radix_hash_fn(&rhctx, 0, 0, build_rows);
+            join_radix_hash_fn(&lhctx, 0, 0, probe_rows);
         }
 
         if (pool_cancelled(pool)) {
@@ -892,10 +914,10 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
 
         /* Partition both sides using cached hashes */
         ray_t* r_parts_hdr = NULL;
-        join_radix_part_t* r_parts = join_radix_partition(pool, right_rows,
+        join_radix_part_t* r_parts = join_radix_partition(pool, build_rows,
                                                           radix_bits, r_hashes, &r_parts_hdr);
         ray_t* l_parts_hdr = NULL;
-        join_radix_part_t* l_parts = join_radix_partition(pool, left_rows,
+        join_radix_part_t* l_parts = join_radix_partition(pool, probe_rows,
                                                           radix_bits, l_hashes, &l_parts_hdr);
         scratch_free(r_hash_hdr);
         scratch_free(l_hash_hdr);
@@ -966,7 +988,7 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
 
         join_radix_bp_ctx_t bp_ctx = {
             .l_parts = l_parts, .r_parts = r_parts,
-            .l_key_vecs = l_key_vecs, .r_key_vecs = r_key_vecs,
+            .l_key_vecs = probe_keys, .r_key_vecs = build_keys,
             .n_keys = n_keys, .join_type = join_type,
             .pp_l = pp_l, .pp_r = pp_r,
             .pp_l_hdr = pp_l_hdr, .pp_r_hdr = pp_r_hdr,
@@ -1042,8 +1064,10 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
                 int64_t cnt = part_counts[rp2];
                 if (cnt > 0 && pp_l[rp2] && pp_r[rp2]) {
                     for (int64_t j = 0; j < cnt; j++) {
-                        l_idx[off + j] = (int64_t)pp_l[rp2][j];
-                        r_idx[off + j] = (int64_t)pp_r[rp2][j];
+                        int32_t probe_row = pp_l[rp2][j];   /* PROBE side row */
+                        int32_t build_row = pp_r[rp2][j];   /* BUILD side row */
+                        l_idx[off + j] = (int64_t)(swap ? build_row : probe_row);
+                        r_idx[off + j] = (int64_t)(swap ? probe_row : build_row);
                     }
                     off += cnt;
                 }
