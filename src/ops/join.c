@@ -26,6 +26,12 @@
 #include "ops/idxop.h"
 #include "lang/internal.h"  /* sym_id_runtime, sym_domain_rep (sym-domain Phase 2) */
 
+/* Test knob: force the legacy build-on-right behavior so the differential
+ * harness can compare swap vs no-swap in one binary. */
+bool ray_join_no_build_swap = false;
+/* Diagnostic: how many radix inner-joins built on the smaller (left) side. */
+uint64_t ray_join_build_swaps = 0;
+
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
 static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
