@@ -132,6 +132,15 @@ bench-join-buildside:
 		bench/join_buildside/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
 	./bench-join-buildside
 
+# Join dup-fallback perf gate.
+# Measures post-fix (auto dup-fallback to chained build) vs pre-fix (O(dup²)
+# build via the ray_join_no_dup_fallback bypass knob) on catastrophic,
+# zero-regression, and moderate-dup cases.  Sanitizer-free.
+bench-join-dup:
+	$(CC) $(RELEASE_CFLAGS) $(DEFS) $(INCLUDES) -o bench-join-dup \
+		bench/join_dup/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
+	./bench-join-dup
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
@@ -185,7 +194,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib bench-alloc bench-join-buildside test coverage clean
+.PHONY: default debug release lib bench-alloc bench-join-buildside bench-join-dup test coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.

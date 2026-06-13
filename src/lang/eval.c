@@ -1330,6 +1330,17 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
         else if (nrows != expected_rows)
             { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", NULL); }
 
+        /* Empty generic list → typeless empty column: keep it as a RAY_LIST
+         * so its storage type is adopted from the first inserted value,
+         * rather than defaulting to I64. */
+        if (nrows == 0) {
+            ray_retain(col_src);
+            tbl = ray_table_add_col(tbl, name_id, col_src);
+            ray_release(col_src);
+            if (RAY_IS_ERR(tbl)) { if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return tbl; }
+            continue;
+        }
+
         ray_t** row_elems = (ray_t**)ray_data(col_src);
 
         /* If the LIST contains non-atom values (e.g. nested vectors for an
