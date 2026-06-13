@@ -9197,6 +9197,28 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
  * Update, Insert, Upsert
  * ══════════════════════════════════════════ */
 
+/* Derive the storage type for a typeless (empty RAY_LIST) column from the
+ * first value inserted into it — q-style () columns adopt their type on the
+ * first insert. Returns the RAY_* column type, or RAY_LIST when the payload
+ * is itself nested (non-atom elements → a genuine list column). */
+static int8_t typeless_col_type(ray_t* payload) {
+    if (!payload) return RAY_I64;                 /* null row → default I64 */
+    if (ray_is_atom(payload)) return -payload->type;
+    if (ray_is_vec(payload)) return payload->type; /* typed vec → splice */
+    if (payload->type == RAY_LIST) {
+        int64_t m = ray_len(payload);
+        if (m == 0) return RAY_LIST;               /* empty payload → stay typeless */
+        ray_t** e = (ray_t**)ray_data(payload);
+        if (e[0] && !ray_is_atom(e[0])) return RAY_LIST; /* nested cells */
+        int8_t t = e[0] ? (int8_t)(-e[0]->type) : RAY_I64;
+        if (t == RAY_I64) /* promote to F64 if any element is float */
+            for (int64_t k = 0; k < m; k++)
+                if (e[k] && e[k]->type == -RAY_F64) { t = RAY_F64; break; }
+        return t;
+    }
+    return RAY_I64;
+}
+
 /* Helper: convert a Rayfall list of atoms into a typed column vector by
  * appending to an existing column (for insert/upsert). */
 static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
@@ -10411,6 +10433,12 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
         int64_t col_name = ray_table_col_name(tbl, c);
         ray_t* orig_col = ray_table_get_col_idx(tbl, c);
         int8_t ct = orig_col->type;
+
+        /* Typeless empty column (an empty () list, adopt-on-first-insert).
+         * The table has 0 rows here, so there is nothing to copy and the
+         * derived type drives the new column's storage. */
+        if (ct == RAY_LIST && ray_len(orig_col) == 0)
+            ct = typeless_col_type(row_elems[c]);
 
         ray_t* new_col = ray_vec_new(ct, nrows + 1);
         if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
