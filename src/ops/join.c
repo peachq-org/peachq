@@ -31,6 +31,11 @@
 bool ray_join_no_build_swap = false;
 /* Diagnostic: how many radix inner-joins built on the smaller (left) side. */
 uint64_t ray_join_build_swaps = 0;
+/* Test knob: force every radix join to fall back to the chained path, so the
+ * differential harness can compare radix-build vs chained-build on ordinary data. */
+bool ray_join_force_dup_fallback = false;
+/* Diagnostic: radix joins that fell back due to pathological key duplication. */
+uint64_t ray_join_dup_fallbacks = 0;
 
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
@@ -444,6 +449,10 @@ static inline bool join_keys_eq(ray_t* const* l_vecs, ray_t* const* r_vecs, uint
 
 #define RADIX_HT_EMPTY UINT32_MAX
 
+/* A per-partition open-addressing build whose linear-probe run exceeds this
+ * is pathologically duplicated (O(dup²) build); abort to the chained path. */
+#define RADIX_DUP_RUN_MAX 512
+
 /* Per-partition single-pass build+probe context.
  * Each partition writes to its own local output buffer, then results
  * are consolidated into contiguous arrays afterward. */
@@ -463,6 +472,7 @@ typedef struct {
     uint32_t*      pp_cap;       /* capacity per partition */
     _Atomic(uint8_t)* matched_right;
     _Atomic(uint8_t)  had_error;  /* set by any partition on OOM */
+    _Atomic(uint8_t)  pathological;  /* set on long-run duplication or forced */
 } join_radix_bp_ctx_t;
 
 /* Grow per-partition output buffers (matched pair arrays).
@@ -505,6 +515,13 @@ static void join_radix_build_probe_fn(void* raw, uint32_t wid, int64_t task_star
 
     join_radix_part_t* rp = &c->r_parts[p];
     join_radix_part_t* lp = &c->l_parts[p];
+
+    /* Test knob: force the chained-path fallback.  Bail before allocating
+     * anything (pp headers are still NULL → cleanup-safe). */
+    if (ray_join_force_dup_fallback) {
+        atomic_store_explicit(&c->pathological, 1, memory_order_relaxed);
+        return;
+    }
 
     if (rp->count == 0) {
         /* No right rows — emit unmatched left rows for LEFT/FULL */
@@ -995,6 +1012,7 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
             .part_counts = part_counts, .pp_cap = pp_cap,
             .matched_right = matched_right,
             .had_error = 0,
+            .pathological = 0,
         };
         if (pool && n_rparts > 1)
             ray_pool_dispatch_n(pool, join_radix_build_probe_fn, &bp_ctx, n_rparts);
@@ -1005,7 +1023,8 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
         /* Check cancellation and errors during build+probe */
         bool bp_cancelled = pool_cancelled(pool);
         bool bp_error = atomic_load_explicit(&bp_ctx.had_error, memory_order_relaxed);
-        if (bp_cancelled || bp_error) {
+        bool bp_pathological = atomic_load_explicit(&bp_ctx.pathological, memory_order_relaxed);
+        if (bp_cancelled || bp_error || bp_pathological) {
             /* Free all per-partition buffers */
             for (uint32_t rp2 = 0; rp2 < n_rparts; rp2++) {
                 if (r_parts[rp2].entries_hdr) scratch_free(r_parts[rp2].entries_hdr);
@@ -1018,6 +1037,7 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
             if (matched_right_hdr) { scratch_free(matched_right_hdr); matched_right_hdr = NULL; }
             matched_right = NULL;
             if (bp_cancelled) return ray_error("cancel", NULL);
+            if (bp_pathological) ray_join_dup_fallbacks++;
             goto chained_ht_fallback;
         }
 
