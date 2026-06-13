@@ -9198,7 +9198,7 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
  * ══════════════════════════════════════════ */
 
 /* Derive the storage type for a typeless (empty RAY_LIST) column from the
- * first value inserted into it — q-style () columns adopt their type on the
+ * first value inserted into it — an empty () column adopts its type on the
  * first insert. Returns the RAY_* column type, or RAY_LIST when the payload
  * is itself nested (non-atom elements → a genuine list column). */
 static int8_t typeless_col_type(ray_t* payload) {

@@ -2200,26 +2200,28 @@ static ray_t* map_iterate(ray_t* fn, ray_t* fixed, ray_t* vec, int fixed_is_left
     return out;
 }
 
-/* (map-left fn left right) → fix the LEFT arg, iterate over the right:
- * apply fn(left, right_i) for each element of right. If right is scalar this
- * collapses to a single fn(left, right) (handled by map_iterate). */
+/* (map-left fn left right): iterate the LEFT operand, pairing each element with
+ * the whole RIGHT → fn(left_i, right).
+ * (map-right fn left right): iterate the RIGHT operand, pairing the whole LEFT
+ * with each element → fn(left, right_i).
+ *
+ * The iterated side is fixed by the operator, not auto-detected. When that side
+ * is an atom there is nothing to iterate, so fn is applied once to (left,right);
+ * for an atomic fn that single call is exactly its broadcast over the other
+ * operand, so map-left/map-right agree with plain atomic application there.
+ * Every call goes through call_fn2, which routes atomic builtins through the
+ * broadcasting engine (so a held vector conforms element-wise) and hands
+ * lambdas their arguments whole. */
 ray_t* ray_map_left_fn(ray_t** args, int64_t n) {
     if (n != 3) return ray_error("domain", NULL);
-    ray_t* fn = args[0];
-    ray_t* left = args[1];
-    ray_t* right = args[2];
-    return map_iterate(fn, left, right, 1); /* fn(left, right_i) */
+    /* iterate left (vec), hold right (fixed) → fn(left_i, right) */
+    return map_iterate(args[0], args[2], args[1], 0);
 }
 
-/* (map-right fn left right) → fix the RIGHT arg, iterate over the left:
- * apply fn(left_i, right) for each element of left. If left is scalar this
- * collapses to a single fn(left, right) (handled by map_iterate). */
 ray_t* ray_map_right_fn(ray_t** args, int64_t n) {
     if (n != 3) return ray_error("domain", NULL);
-    ray_t* fn = args[0];
-    ray_t* left = args[1];
-    ray_t* right = args[2];
-    return map_iterate(fn, right, left, 0); /* fn(left_i, right) */
+    /* iterate right (vec), hold left (fixed) → fn(left, right_i) */
+    return map_iterate(args[0], args[1], args[2], 1);
 }
 
 /* ══════════════════════════════════════════
