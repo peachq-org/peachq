@@ -9209,32 +9209,74 @@ static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
         return col_vec;
     }
     int8_t ct = col_vec->type;
-    if (ct == RAY_I64) {
-        if (atom->type != -RAY_I64)
-            return ray_error("type", NULL);
-        int64_t v = atom->i64;
-        return ray_vec_append(col_vec, &v);
-    } else if (ct == RAY_SYM) {
-        if (atom->type != -RAY_SYM)
-            return ray_error("type", NULL);
-        int64_t v = atom->i64;
-        return ray_vec_append(col_vec, &v);
-    } else if (ct == RAY_F64) {
-        if (atom->type != -RAY_F64 && atom->type != -RAY_I64)
-            return ray_error("type", NULL);
-        double v = (atom->type == -RAY_F64) ? atom->f64 : (double)atom->i64;
-        return ray_vec_append(col_vec, &v);
-    } else if (ct == RAY_BOOL) {
-        if (atom->type != -RAY_BOOL)
-            return ray_error("type", NULL);
+    int8_t at = atom->type;
+    /* Integer atoms accepted (with width narrowing) by the numeric columns. */
+    bool is_int = (at == -RAY_I64 || at == -RAY_I32 ||
+                   at == -RAY_I16 || at == -RAY_U8);
+    switch (ct) {
+    case RAY_BOOL: {
+        if (at != -RAY_BOOL) return ray_error("type", NULL);
         uint8_t v = atom->b8;
         return ray_vec_append(col_vec, &v);
-    } else if (ct == RAY_STR && atom->type == -RAY_STR) {
-        const char *sptr = ray_str_ptr(atom);
-        size_t slen = ray_str_len(atom);
-        return ray_str_vec_append(col_vec, sptr, slen);
     }
-    return ray_error("type", NULL);
+    case RAY_U8: {
+        if (!is_int) return ray_error("type", NULL);
+        uint8_t v = (uint8_t)as_i64(atom);
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_I16: {
+        if (!is_int) return ray_error("type", NULL);
+        int16_t v = (int16_t)as_i64(atom);
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_I32: {
+        if (!is_int) return ray_error("type", NULL);
+        int32_t v = (int32_t)as_i64(atom);
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_I64: {
+        if (!is_int) return ray_error("type", NULL);
+        int64_t v = as_i64(atom);
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_F64: {
+        if (at != -RAY_F64 && !is_int) return ray_error("type", NULL);
+        double v = (at == -RAY_F64) ? atom->f64 : (double)as_i64(atom);
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_DATE: {
+        if (at != -RAY_DATE) return ray_error("type", NULL);
+        int32_t v = atom->i32;
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_TIME: {
+        if (at != -RAY_TIME) return ray_error("type", NULL);
+        int32_t v = atom->i32;
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_TIMESTAMP: {
+        if (at != -RAY_TIMESTAMP) return ray_error("type", NULL);
+        int64_t v = atom->i64;
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_GUID: {
+        if (at != -RAY_GUID) return ray_error("type", NULL);
+        static const uint8_t zero_guid[16] = {0};
+        const void* src = atom->obj ? ray_data(atom->obj) : zero_guid;
+        return ray_vec_append(col_vec, src);
+    }
+    case RAY_SYM: {
+        if (at != -RAY_SYM) return ray_error("type", NULL);
+        int64_t v = atom->i64;
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_STR: {
+        if (at != -RAY_STR) return ray_error("type", NULL);
+        return ray_str_vec_append(col_vec, ray_str_ptr(atom), ray_str_len(atom));
+    }
+    default:
+        return ray_error("type", NULL);
+    }
 }
 
 /* (update {col: expr ... from: t [where: pred]})
@@ -10377,7 +10419,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                     ray_vec_set_null(new_col, new_col->len - 1, true);
             }
         } else {
-            size_t elem_sz = (ct == RAY_BOOL) ? 1 : 8;
+            size_t elem_sz = ray_elem_size(ct);
             uint8_t* src = (uint8_t*)ray_data(orig_col);
             for (int64_t r = 0; r < nrows; r++) {
                 new_col = ray_vec_append(new_col, src + r * elem_sz);
@@ -10395,10 +10437,30 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
             ray_release(null_atom);
         } else if (ray_is_atom(row_elems[c])) {
             new_col = append_atom_to_col(new_col, row_elems[c]);
-        } else if (ray_is_vec(row_elems[c]) || row_elems[c]->type == RAY_LIST) {
+        } else if (row_elems[c]->type == ct) {
+            /* Same-typed vector → splice; preserves the column type. */
             ray_t* merged = ray_concat_fn(new_col, row_elems[c]);
             ray_release(new_col);
             new_col = merged;
+        } else if (ray_is_vec(row_elems[c]) || row_elems[c]->type == RAY_LIST) {
+            /* Generic list (or a differently-typed vector) is a multi-row
+             * payload: append element-by-element so the column keeps its own
+             * type instead of promoting to a generic LIST via concat. */
+            ray_t* payload = row_elems[c];
+            int64_t m = ray_len(payload);
+            for (int64_t k = 0; k < m; k++) {
+                int alloc = 0;
+                ray_t* e = collection_elem(payload, k, &alloc);
+                if (!e) {
+                    ray_t* na = ray_typed_null(-ct);
+                    new_col = append_atom_to_col(new_col, na);
+                    ray_release(na);
+                } else {
+                    new_col = append_atom_to_col(new_col, e);
+                    if (alloc) ray_release(e);
+                }
+                if (RAY_IS_ERR(new_col)) break;
+            }
         } else {
             new_col = append_atom_to_col(new_col, row_elems[c]);
         }
@@ -10837,7 +10899,7 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
                 if (RAY_IS_ERR(new_col)) { ray_release(result); ray_release(tbl); ray_release(key_sym); ray_release(row); return new_col; }
             }
         } else {
-            size_t elem_sz = (ct == RAY_BOOL) ? 1 : 8;
+            size_t elem_sz = ray_elem_size(ct);
             uint8_t* src = (uint8_t*)ray_data(orig_col);
             for (int64_t r = 0; r < nrows; r++) {
                 if (r == match_row && has_new_val) {
