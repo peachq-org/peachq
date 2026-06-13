@@ -494,6 +494,10 @@ static inline bool bp_grow_bufs(join_radix_bp_ctx_t* c, uint32_t p,
     return true;
 }
 
+/* NOTE: l_xx/r_xx (l_parts/r_parts/l_key_vecs/r_key_vecs) and lr/rr/pl/pr denote
+ * PROBE/BUILD roles, not logical left/right.  Under the build-side swap the
+ * physical right becomes the build side and physical left the probe side.
+ * Logical left/right is restored at the consolidation remap in exec_join. */
 static void join_radix_build_probe_fn(void* raw, uint32_t wid, int64_t task_start, int64_t task_end) {
     (void)wid; (void)task_end;
     join_radix_bp_ctx_t* c = (join_radix_bp_ctx_t*)raw;
