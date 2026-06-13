@@ -116,6 +116,13 @@ bench-group-pushdown:
 		bench/group_pushdown/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
 	./bench-group-pushdown
 
+# Index routing per-point perf gate (release-optimized, no sanitizers).
+# Measures indexed vs plain side for each of the 9 routing consumption points.
+bench-idx-route:
+	$(CC) $(RELEASE_CFLAGS) $(DEFS) $(INCLUDES) -o bench-idx-route \
+		bench/idx_route/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
+	./bench-idx-route
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
