@@ -32,10 +32,19 @@
 #define FMT_LIST_MAX_HEIGHT   50
 #define FMT_DEFAULT_ROW_WIDTH 80
 #define FMT_DEFAULT_PRECISION  2
+#define FMT_PP_MAX_ROWS       20   /* max pairs/elems shown in broken pp form */
 
 /* Format a ray_t value into a new ray_t string (RAY_STR atom).
  * mode: 0 = compact, 1 = full (REPL), 2 = show (no limits) */
 ray_t* ray_fmt(ray_t* obj, int mode);
+
+/* REPL pretty-printer: like ray_fmt(obj, 1) but dicts/lists that would
+ * exceed the row width break across multiple indented lines (JSON-style).
+ * Used only for top-level REPL display — ray_fmt stays single-line. */
+ray_t* ray_fmt_pp(ray_t* obj);
+
+/* Pretty-print and write to FILE* (REPL display path). */
+void ray_fmt_pp_print(FILE* fp, ray_t* obj);
 
 /* Format and write to FILE* */
 void ray_fmt_print(FILE* fp, ray_t* obj, int mode);
