@@ -866,10 +866,14 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
 
     /* ── Radix-partitioned path (large joins) ──────────────────────── */
     if (right_rows > RAY_PARALLEL_THRESHOLD) {
-        /* Build/probe role: for INNER joins we may build the hash on the
-         * smaller side.  Hardwired OFF in this commit (decision lands in the
-         * next).  FULL-outer matched-right tracking stays on logical right. */
-        bool swap = false;
+        /* Build on the smaller side for INNER joins (radix path).  Other
+         * join types stay build-on-right (LEFT/FULL/ANTI are asymmetric — a
+         * swap would change their result).  SWAP_MARGIN ≥ 1: require LEFT
+         * (×margin) strictly smaller; default 1.  Knob forces legacy. */
+        #define JOIN_SWAP_MARGIN 1
+        bool swap = (join_type == 0) && !ray_join_no_build_swap &&
+                    (left_rows * (int64_t)JOIN_SWAP_MARGIN < right_rows);
+        if (swap) ray_join_build_swaps++;
         int64_t  build_rows = swap ? left_rows : right_rows;
         int64_t  probe_rows = swap ? right_rows : left_rows;
         ray_t**  build_keys = swap ? l_key_vecs : r_key_vecs;
