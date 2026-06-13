@@ -449,28 +449,34 @@ static void fmt_list(fmt_buf_t* b, ray_t* list, int mode) {
     int64_t len = ray_len(list);
     if (len == 0) { fmt_puts(b, "()"); return; }
 
-    /* Homogeneous atom list → format as vector [...] */
-    ray_t** items = (ray_t**)ray_data(list);
-    if (items && len > 0 && items[0] && !RAY_IS_ERR(items[0]) && ray_is_atom(items[0])) {
-        int8_t first_type = items[0]->type;
-        int homogeneous = 1;
-        for (int64_t i = 1; i < len; i++) {
-            if (!items[i] || RAY_IS_ERR(items[i]) || items[i]->type != first_type) {
-                homogeneous = 0; break;
+    /* Historical display equivalence: a homogeneous-atom list renders as a
+     * vector [..] in the round-trippable / cell modes (0 and 2), which the
+     * test suite and value-equality (fmt_eq, mode 0) rely on.  REPL display
+     * (mode 1) instead always uses parens, so a generic list is visually
+     * distinct from a real typed vector. */
+    if (mode != 1) {
+        ray_t** items = (ray_t**)ray_data(list);
+        if (items && items[0] && !RAY_IS_ERR(items[0]) && ray_is_atom(items[0])) {
+            int8_t first_type = items[0]->type;
+            int homogeneous = 1;
+            for (int64_t i = 1; i < len; i++) {
+                if (!items[i] || RAY_IS_ERR(items[i]) || items[i]->type != first_type) {
+                    homogeneous = 0; break;
+                }
             }
-        }
-        if (homogeneous) {
-            fmt_puts(b, "[");
-            for (int64_t i = 0; i < len; i++) {
-                if (i > 0) fmt_putc(b, ' ');
-                fmt_obj(b, items[i], mode);
+            if (homogeneous) {
+                fmt_puts(b, "[");
+                for (int64_t i = 0; i < len; i++) {
+                    if (i > 0) fmt_putc(b, ' ');
+                    fmt_obj(b, items[i], mode);
+                }
+                fmt_puts(b, "]");
+                return;
             }
-            fmt_puts(b, "]");
-            return;
         }
     }
 
-    /* mode 0 = compact/round-trippable: "(list ...)" prefix required
+    /* mode 0 = compact/round-trippable: the "(list ...)" prefix is required.
      * mode 1 = REPL display: "(...)" matching rayforce 1 output */
     if (mode == 0)
         fmt_puts(b, "(list ");
@@ -492,6 +498,129 @@ static void fmt_list(fmt_buf_t* b, ray_t* list, int mode) {
 
 /* ===== Dict formatter ===== */
 
+/* Render dict key i into b (mode-aware).  Synthesizes an atom view from the
+ * keys vector; when the source slot is flagged null in the keys' bitmap, sets
+ * the synthesized atom's aux bit 0 so fmt_obj renders the proper null literal.
+ * Without this, nullable GUID/STR/sym keys render as their underlying bytes
+ * (e.g. the 16-zero-byte GUID), losing null semantics. */
+static void fmt_dict_key(fmt_buf_t* b, ray_t* keys, int64_t i, int mode) {
+    bool k_is_null = (keys->type != RAY_LIST) && ray_vec_is_null(keys, i);
+    ray_t k_atom_storage;
+    ray_t* k_atom = NULL;
+    memset(&k_atom_storage, 0, sizeof(k_atom_storage));
+    bool k_owned = false;   /* true if k_atom is a fresh allocation */
+    if (keys->type == RAY_SYM) {
+        /* cell-data: resolve through the keys vector's domain, then
+         * re-intern so the synthesized atom stays runtime-domain
+         * (exact no-op while the domain is the runtime singleton). */
+        ray_t* ks = ray_sym_vec_cell(keys, i);
+        k_atom_storage.type = -RAY_SYM;
+        k_atom_storage.i64  = ks ? ray_sym_intern(ray_str_ptr(ks), ray_str_len(ks)) : -1;
+        k_atom = &k_atom_storage;
+    } else if (keys->type == RAY_STR) {
+        size_t slen = 0;
+        const char* sp = ray_str_vec_get(keys, i, &slen);
+        k_atom = ray_str(sp ? sp : "", sp ? slen : 0);
+        k_owned = true;
+    } else if (keys->type == RAY_I64 || keys->type == RAY_TIMESTAMP) {
+        k_atom_storage.type = (int8_t)-keys->type;
+        k_atom_storage.i64  = ((int64_t*)ray_data(keys))[i];
+        k_atom = &k_atom_storage;
+    } else if (keys->type == RAY_I32 || keys->type == RAY_DATE || keys->type == RAY_TIME) {
+        k_atom_storage.type = (int8_t)-keys->type;
+        k_atom_storage.i32  = ((int32_t*)ray_data(keys))[i];
+        k_atom = &k_atom_storage;
+    } else if (keys->type == RAY_I16) {
+        k_atom_storage.type = -RAY_I16;
+        k_atom_storage.i16  = ((int16_t*)ray_data(keys))[i];
+        k_atom = &k_atom_storage;
+    } else if (keys->type == RAY_BOOL || keys->type == RAY_U8) {
+        k_atom_storage.type = (int8_t)-keys->type;
+        k_atom_storage.u8   = ((uint8_t*)ray_data(keys))[i];
+        k_atom = &k_atom_storage;
+    } else if (keys->type == RAY_F64) {
+        k_atom_storage.type = -RAY_F64;
+        k_atom_storage.f64  = ((double*)ray_data(keys))[i];
+        k_atom = &k_atom_storage;
+    } else if (keys->type == RAY_F32) {
+        k_atom_storage.type = -RAY_F32;
+        k_atom_storage.f64  = (double)((float*)ray_data(keys))[i];
+        k_atom = &k_atom_storage;
+    } else if (keys->type == RAY_GUID) {
+        /* GUID atoms keep their 16-byte payload in a heap-allocated
+         * child block; the stack-local view trick from the other
+         * branches doesn't carry the bytes (fmt_obj would deref a
+         * bogus inline data[] pointer).  Build a real atom. */
+        k_atom = ray_guid(((const uint8_t*)ray_data(keys)) + i * 16);
+        k_owned = (k_atom && !RAY_IS_ERR(k_atom));
+    } else if (keys->type == RAY_LIST) {
+        /* Borrowed — do NOT release. */
+        k_atom = ((ray_t**)ray_data(keys))[i];
+    }
+    if (k_is_null && k_atom) k_atom->aux[0] |= 1;
+    if (k_atom) fmt_obj(b, k_atom, mode);
+    if (k_owned && k_atom) ray_release(k_atom);
+}
+
+/* Render dict value i into b (mode-aware): borrow from vals (LIST) or
+ * synthesize a typed atom directly from index i. */
+static void fmt_dict_val(fmt_buf_t* b, ray_t* vals, int64_t i, int mode) {
+    if (vals && vals->type == RAY_LIST) {
+        ray_t* v = ray_list_get(vals, i);
+        fmt_obj(b, v, mode);
+    } else if (vals && i < vals->len) {
+        bool v_is_null = ray_vec_is_null(vals, i);
+        ray_t v_storage; memset(&v_storage, 0, sizeof(v_storage));
+        ray_t* v_atom = NULL;
+        bool   v_owned = false;
+        switch (vals->type) {
+            case RAY_BOOL:
+            case RAY_U8:        v_storage.type = (int8_t)-vals->type;
+                                v_storage.u8   = ((uint8_t*)ray_data(vals))[i];
+                                v_atom = &v_storage; break;
+            case RAY_I16:       v_storage.type = -RAY_I16;
+                                v_storage.i16  = ((int16_t*)ray_data(vals))[i];
+                                v_atom = &v_storage; break;
+            case RAY_I32:
+            case RAY_DATE:
+            case RAY_TIME:      v_storage.type = (int8_t)-vals->type;
+                                v_storage.i32  = ((int32_t*)ray_data(vals))[i];
+                                v_atom = &v_storage; break;
+            case RAY_I64:
+            case RAY_TIMESTAMP: v_storage.type = (int8_t)-vals->type;
+                                v_storage.i64  = ((int64_t*)ray_data(vals))[i];
+                                v_atom = &v_storage; break;
+            case RAY_F32:       v_storage.type = -RAY_F32;
+                                v_storage.f64  = (double)((float*)ray_data(vals))[i];
+                                v_atom = &v_storage; break;
+            case RAY_F64:       v_storage.type = -RAY_F64;
+                                v_storage.f64  = ((double*)ray_data(vals))[i];
+                                v_atom = &v_storage; break;
+            case RAY_SYM: {     /* cell-data: domain-resolve + re-intern (see keys) */
+                                ray_t* vs = ray_sym_vec_cell(vals, i);
+                                v_storage.type = -RAY_SYM;
+                                v_storage.i64  = vs ? ray_sym_intern(ray_str_ptr(vs), ray_str_len(vs)) : -1;
+                                v_atom = &v_storage; break;
+            }
+            case RAY_STR: {
+                size_t vl = 0;
+                const char* vp = ray_str_vec_get(vals, i, &vl);
+                v_atom = ray_str(vp ? vp : "", vp ? vl : 0);
+                v_owned = true;
+                break;
+            }
+            case RAY_GUID:
+                v_atom = ray_guid(((const uint8_t*)ray_data(vals)) + i * 16);
+                v_owned = (v_atom && !RAY_IS_ERR(v_atom));
+                break;
+            default: break;
+        }
+        if (v_is_null && v_atom) v_atom->aux[0] |= 1;
+        if (v_atom) fmt_obj(b, v_atom, mode);
+        if (v_owned && v_atom) ray_release(v_atom);
+    }
+}
+
 static void fmt_dict(fmt_buf_t* b, ray_t* dict, int mode) {
     ray_t* keys = ray_dict_keys(dict);
     ray_t* vals = ray_dict_vals(dict);
@@ -504,128 +633,9 @@ static void fmt_dict(fmt_buf_t* b, ray_t* dict, int mode) {
     fmt_puts(b, "{");
     for (int64_t i = 0; i < show; i++) {
         if (i > 0) fmt_putc(b, ' ');
-        /* Render key: synthesize an atom view from the keys vector.  When
-         * the source slot is flagged null in the keys' bitmap, set the
-         * synthesized atom's aux bit 0 so fmt_obj renders the proper
-         * null literal.  Without this, nullable GUID/STR/sym keys render
-         * as their underlying bytes (e.g. the 16-zero-byte GUID), losing
-         * null semantics. */
-        bool k_is_null = (keys->type != RAY_LIST) && ray_vec_is_null(keys, i);
-        ray_t k_atom_storage;
-        ray_t* k_atom = NULL;
-        memset(&k_atom_storage, 0, sizeof(k_atom_storage));
-        bool k_owned = false;   /* true if k_atom is a fresh allocation */
-        if (keys->type == RAY_SYM) {
-            /* cell-data: resolve through the keys vector's domain, then
-             * re-intern so the synthesized atom stays runtime-domain
-             * (exact no-op while the domain is the runtime singleton). */
-            ray_t* ks = ray_sym_vec_cell(keys, i);
-            k_atom_storage.type = -RAY_SYM;
-            k_atom_storage.i64  = ks ? ray_sym_intern(ray_str_ptr(ks), ray_str_len(ks)) : -1;
-            k_atom = &k_atom_storage;
-        } else if (keys->type == RAY_STR) {
-            size_t slen = 0;
-            const char* sp = ray_str_vec_get(keys, i, &slen);
-            k_atom = ray_str(sp ? sp : "", sp ? slen : 0);
-            k_owned = true;
-        } else if (keys->type == RAY_I64 || keys->type == RAY_TIMESTAMP) {
-            k_atom_storage.type = (int8_t)-keys->type;
-            k_atom_storage.i64  = ((int64_t*)ray_data(keys))[i];
-            k_atom = &k_atom_storage;
-        } else if (keys->type == RAY_I32 || keys->type == RAY_DATE || keys->type == RAY_TIME) {
-            k_atom_storage.type = (int8_t)-keys->type;
-            k_atom_storage.i32  = ((int32_t*)ray_data(keys))[i];
-            k_atom = &k_atom_storage;
-        } else if (keys->type == RAY_I16) {
-            k_atom_storage.type = -RAY_I16;
-            k_atom_storage.i16  = ((int16_t*)ray_data(keys))[i];
-            k_atom = &k_atom_storage;
-        } else if (keys->type == RAY_BOOL || keys->type == RAY_U8) {
-            k_atom_storage.type = (int8_t)-keys->type;
-            k_atom_storage.u8   = ((uint8_t*)ray_data(keys))[i];
-            k_atom = &k_atom_storage;
-        } else if (keys->type == RAY_F64) {
-            k_atom_storage.type = -RAY_F64;
-            k_atom_storage.f64  = ((double*)ray_data(keys))[i];
-            k_atom = &k_atom_storage;
-        } else if (keys->type == RAY_F32) {
-            k_atom_storage.type = -RAY_F32;
-            k_atom_storage.f64  = (double)((float*)ray_data(keys))[i];
-            k_atom = &k_atom_storage;
-        } else if (keys->type == RAY_GUID) {
-            /* GUID atoms keep their 16-byte payload in a heap-allocated
-             * child block; the stack-local view trick from the other
-             * branches doesn't carry the bytes (fmt_obj would deref a
-             * bogus inline data[] pointer).  Build a real atom. */
-            k_atom = ray_guid(((const uint8_t*)ray_data(keys)) + i * 16);
-            k_owned = (k_atom && !RAY_IS_ERR(k_atom));
-        } else if (keys->type == RAY_LIST) {
-            /* Borrowed — do NOT release. */
-            k_atom = ((ray_t**)ray_data(keys))[i];
-        }
-        if (k_is_null && k_atom) k_atom->aux[0] |= 1;
-        if (k_atom) fmt_obj(b, k_atom, mode);
+        fmt_dict_key(b, keys, i, mode);
         fmt_putc(b, ':');
-
-        /* Render value: borrow from vals (LIST) or synthesize a typed atom
-         * directly from index i (do NOT route through k_atom — for STR keys
-         * k_atom is a fresh allocation we'll release just below).  */
-        if (vals && vals->type == RAY_LIST) {
-            ray_t* v = ray_list_get(vals, i);
-            fmt_obj(b, v, mode);
-        } else if (vals && i < vals->len) {
-            bool v_is_null = ray_vec_is_null(vals, i);
-            ray_t v_storage; memset(&v_storage, 0, sizeof(v_storage));
-            ray_t* v_atom = NULL;
-            bool   v_owned = false;
-            switch (vals->type) {
-                case RAY_BOOL:
-                case RAY_U8:        v_storage.type = (int8_t)-vals->type;
-                                    v_storage.u8   = ((uint8_t*)ray_data(vals))[i];
-                                    v_atom = &v_storage; break;
-                case RAY_I16:       v_storage.type = -RAY_I16;
-                                    v_storage.i16  = ((int16_t*)ray_data(vals))[i];
-                                    v_atom = &v_storage; break;
-                case RAY_I32:
-                case RAY_DATE:
-                case RAY_TIME:      v_storage.type = (int8_t)-vals->type;
-                                    v_storage.i32  = ((int32_t*)ray_data(vals))[i];
-                                    v_atom = &v_storage; break;
-                case RAY_I64:
-                case RAY_TIMESTAMP: v_storage.type = (int8_t)-vals->type;
-                                    v_storage.i64  = ((int64_t*)ray_data(vals))[i];
-                                    v_atom = &v_storage; break;
-                case RAY_F32:       v_storage.type = -RAY_F32;
-                                    v_storage.f64  = (double)((float*)ray_data(vals))[i];
-                                    v_atom = &v_storage; break;
-                case RAY_F64:       v_storage.type = -RAY_F64;
-                                    v_storage.f64  = ((double*)ray_data(vals))[i];
-                                    v_atom = &v_storage; break;
-                case RAY_SYM: {     /* cell-data: domain-resolve + re-intern (see keys) */
-                                    ray_t* vs = ray_sym_vec_cell(vals, i);
-                                    v_storage.type = -RAY_SYM;
-                                    v_storage.i64  = vs ? ray_sym_intern(ray_str_ptr(vs), ray_str_len(vs)) : -1;
-                                    v_atom = &v_storage; break;
-                }
-                case RAY_STR: {
-                    size_t vl = 0;
-                    const char* vp = ray_str_vec_get(vals, i, &vl);
-                    v_atom = ray_str(vp ? vp : "", vp ? vl : 0);
-                    v_owned = true;
-                    break;
-                }
-                case RAY_GUID:
-                    v_atom = ray_guid(((const uint8_t*)ray_data(vals)) + i * 16);
-                    v_owned = (v_atom && !RAY_IS_ERR(v_atom));
-                    break;
-                default: break;
-            }
-            if (v_is_null && v_atom) v_atom->aux[0] |= 1;
-            if (v_atom) fmt_obj(b, v_atom, mode);
-            if (v_owned && v_atom) ray_release(v_atom);
-        }
-
-        if (k_owned && k_atom) ray_release(k_atom);
+        fmt_dict_val(b, vals, i, mode);
     }
     if (npairs > show) fmt_puts(b, " ..");
     fmt_puts(b, "}");
@@ -1085,8 +1095,94 @@ ray_t* ray_fmt(ray_t* obj, int mode) {
     return fmt_to_str(&b);
 }
 
+/* ===== REPL pretty-printer (width-triggered, JSON-style) ===== */
+
+/* Column of the next write position: distance back to the last newline. */
+static int32_t fmt_cur_col(fmt_buf_t* b) {
+    int32_t c = 0;
+    while (c < b->len && b->buf[b->len - 1 - c] != '\n') c++;
+    return c;
+}
+
+static void fmt_pp_indent(fmt_buf_t* b, int n) {
+    for (int i = 0; i < n; i++) fmt_putc(b, ' ');
+}
+
+static void fmt_pp(fmt_buf_t* b, ray_t* obj, int indent);
+
+static void fmt_pp_dict_broken(fmt_buf_t* b, ray_t* dict, int indent) {
+    ray_t* keys = ray_dict_keys(dict);
+    ray_t* vals = ray_dict_vals(dict);
+    int64_t npairs = keys ? keys->len : 0;
+    int64_t show = npairs < FMT_PP_MAX_ROWS ? npairs : FMT_PP_MAX_ROWS;
+    fmt_puts(b, "{\n");
+    for (int64_t i = 0; i < show; i++) {
+        fmt_pp_indent(b, indent + 2);
+        fmt_dict_key(b, keys, i, 1);
+        fmt_puts(b, ": ");
+        /* Only LIST-valued dicts can hold containers worth breaking; a
+         * typed-vec value is always a scalar and renders inline. */
+        if (vals && vals->type == RAY_LIST)
+            fmt_pp(b, ray_list_get(vals, i), indent + 2);
+        else
+            fmt_dict_val(b, vals, i, 1);
+        fmt_putc(b, '\n');
+    }
+    if (npairs > show) { fmt_pp_indent(b, indent + 2); fmt_puts(b, "...\n"); }
+    fmt_pp_indent(b, indent);
+    fmt_putc(b, '}');
+}
+
+static void fmt_pp_list_broken(fmt_buf_t* b, ray_t* list, int indent) {
+    int64_t len = ray_len(list);
+    int64_t show = len < FMT_PP_MAX_ROWS ? len : FMT_PP_MAX_ROWS;
+    fmt_puts(b, "(\n");
+    for (int64_t i = 0; i < show; i++) {
+        fmt_pp_indent(b, indent + 2);
+        fmt_pp(b, ray_list_get(list, i), indent + 2);
+        fmt_putc(b, '\n');
+    }
+    if (len > show) { fmt_pp_indent(b, indent + 2); fmt_puts(b, "...\n"); }
+    fmt_pp_indent(b, indent);
+    fmt_putc(b, ')');
+}
+
+static void fmt_pp(fmt_buf_t* b, ray_t* obj, int indent) {
+    /* Only dicts and generic lists participate in width-triggered breaking;
+     * everything else renders exactly as REPL mode 1. */
+    if (!obj || RAY_IS_ERR(obj) ||
+        (obj->type != RAY_DICT && obj->type != RAY_LIST)) {
+        fmt_obj(b, obj, 1);
+        return;
+    }
+    /* Render compact first; keep it if it fits the row width from here. */
+    int32_t col   = fmt_cur_col(b);
+    int32_t saved = b->len;
+    fmt_obj(b, obj, 1);
+    if (col + (b->len - saved) <= g_row_width) return;
+    /* Too wide — rewind and break across indented lines. */
+    b->len = saved;
+    if (obj->type == RAY_DICT) fmt_pp_dict_broken(b, obj, indent);
+    else                       fmt_pp_list_broken(b, obj, indent);
+}
+
+ray_t* ray_fmt_pp(ray_t* obj) {
+    fmt_buf_t b;
+    fmt_init(&b);
+    fmt_pp(&b, obj, 0);
+    return fmt_to_str(&b);
+}
+
 void ray_fmt_print(FILE* fp, ray_t* obj, int mode) {
     ray_t* s = ray_fmt(obj, mode);
+    if (s) {
+        fwrite(ray_str_ptr(s), 1, ray_str_len(s), fp);
+        ray_release(s);
+    }
+}
+
+void ray_fmt_pp_print(FILE* fp, ray_t* obj) {
+    ray_t* s = ray_fmt_pp(obj);
     if (s) {
         fwrite(ray_str_ptr(s), 1, ray_str_len(s), fp);
         ray_release(s);
