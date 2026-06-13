@@ -9197,6 +9197,28 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
  * Update, Insert, Upsert
  * ══════════════════════════════════════════ */
 
+/* Derive the storage type for a typeless (empty RAY_LIST) column from the
+ * first value inserted into it — an empty () column adopts its type on the
+ * first insert. Returns the RAY_* column type, or RAY_LIST when the payload
+ * is itself nested (non-atom elements → a genuine list column). */
+static int8_t typeless_col_type(ray_t* payload) {
+    if (!payload) return RAY_I64;                 /* null row → default I64 */
+    if (ray_is_atom(payload)) return -payload->type;
+    if (ray_is_vec(payload)) return payload->type; /* typed vec → splice */
+    if (payload->type == RAY_LIST) {
+        int64_t m = ray_len(payload);
+        if (m == 0) return RAY_LIST;               /* empty payload → stay typeless */
+        ray_t** e = (ray_t**)ray_data(payload);
+        if (e[0] && !ray_is_atom(e[0])) return RAY_LIST; /* nested cells */
+        int8_t t = e[0] ? (int8_t)(-e[0]->type) : RAY_I64;
+        if (t == RAY_I64) /* promote to F64 if any element is float */
+            for (int64_t k = 0; k < m; k++)
+                if (e[k] && e[k]->type == -RAY_F64) { t = RAY_F64; break; }
+        return t;
+    }
+    return RAY_I64;
+}
+
 /* Helper: convert a Rayfall list of atoms into a typed column vector by
  * appending to an existing column (for insert/upsert). */
 static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
@@ -9453,9 +9475,12 @@ ray_t* ray_update(ray_t** args, int64_t n) {
         }
 
         ray_release(groups);
-        /* Store in-place if needed */
-        if (inplace_sym >= 0) {
+        /* Store in-place and return the symbol if amending by name. */
+        if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
             ray_env_set(inplace_sym, result);
+            ray_release(result);
+            ray_release(tbl);
+            return ray_sym(inplace_sym);
         }
         ray_release(tbl);
         return result;
@@ -9803,6 +9828,9 @@ ray_t* ray_update(ray_t** args, int64_t n) {
         ray_release(mask_vec);
         if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
             ray_env_set(inplace_sym, result);
+            ray_release(result);
+            ray_release(tbl);
+            return ray_sym(inplace_sym);
         }
         ray_release(tbl);
         return result;
@@ -10093,9 +10121,12 @@ no_where_add_col:
         if (RAY_IS_ERR(result)) { ray_release(tbl); return result; }
     }
 
-    /* Store in-place if from: 't */
+    /* Store in-place and return the symbol if amending by name (from: 't). */
     if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
         ray_env_set(inplace_sym, result);
+        ray_release(result);
+        ray_release(tbl);
+        return ray_sym(inplace_sym);
     }
     ray_release(tbl);
     return result;
@@ -10109,7 +10140,11 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
 ray_t* ray_insert(ray_t** args, int64_t n) {
     if (n < 2) return ray_error("domain", NULL);
 
-    /* Special form: detect 'sym (quoted symbol for in-place insert) */
+    /* In-place vs functional is decided by the EVALUATED first argument:
+     * a symbol value names a global to amend in place (returning that
+     * symbol); a table/vec value is amended functionally (returning the
+     * new value).  Evaluating first means it works however the symbol
+     * arrives — literal 'sym, (quote sym), a variable, or a lambda param. */
     int64_t inplace_sym = -1;
     ray_t* tbl_raw = args[0];
     ray_t* tbl;
@@ -10117,18 +10152,20 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
     /* Detect calling convention: already-evaluated args (from upsert) vs raw parse tree */
     int already_eval = (tbl_raw && tbl_raw->type == RAY_TABLE);
 
-    if (!already_eval && tbl_raw && tbl_raw->type == -RAY_SYM && (tbl_raw->attrs & ATTR_QUOTED)) {
-        /* Quoted/literal symbol 'sym (ATTR_QUOTED set) — in-place insert */
-        inplace_sym = tbl_raw->i64;
-        tbl = ray_env_get(inplace_sym);
-        if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
-        ray_retain(tbl);
-    } else if (already_eval) {
+    if (already_eval) {
         tbl = tbl_raw;
         ray_retain(tbl);
     } else {
         tbl = ray_eval(tbl_raw);
         if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", NULL);
+        if (tbl->type == -RAY_SYM) {
+            /* Symbol value → resolve the named global for in-place insert */
+            inplace_sym = tbl->i64;
+            ray_release(tbl);
+            tbl = ray_env_get(inplace_sym);
+            if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
+            ray_retain(tbl);
+        }
     }
 
     /* ====================================================================
@@ -10291,8 +10328,10 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
         }
 
         if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
+            /* In-place amend stores the new value and returns the symbol. */
             ray_env_set(inplace_sym, result);
-            ray_retain(result);
+            ray_release(result);
+            return ray_sym(inplace_sym);
         }
         return result;
     }
@@ -10412,6 +10451,12 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
         ray_t* orig_col = ray_table_get_col_idx(tbl, c);
         int8_t ct = orig_col->type;
 
+        /* Typeless empty column (an empty () list, adopt-on-first-insert).
+         * The table has 0 rows here, so there is nothing to copy and the
+         * derived type drives the new column's storage. */
+        if (ct == RAY_LIST && ray_len(orig_col) == 0)
+            ct = typeless_col_type(row_elems[c]);
+
         ray_t* new_col = ray_vec_new(ct, nrows + 1);
         if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
 
@@ -10510,11 +10555,11 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
     ray_release(tbl);
     ray_release(row_orig);
 
-    /* In-place: update the variable in the env */
-    if (inplace_sym >= 0 && !RAY_IS_ERR(result)) {
+    /* In-place: store the new table in the env and return the symbol. */
+    if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
         ray_env_set(inplace_sym, result);
-        ray_retain(result);
-        return result;
+        ray_release(result);
+        return ray_sym(inplace_sym);
     }
     return result;
 }
@@ -10534,17 +10579,20 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
     int already_eval = (tbl_raw && tbl_raw->type == RAY_TABLE);
     ray_t* tbl;
 
-    if (!already_eval && tbl_raw && tbl_raw->type == -RAY_SYM && (tbl_raw->attrs & ATTR_QUOTED)) {
-        inplace_sym = tbl_raw->i64;
-        tbl = ray_env_get(inplace_sym);
-        if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
-        ray_retain(tbl);
-    } else if (already_eval) {
+    if (already_eval) {
         tbl = tbl_raw;
         ray_retain(tbl);
     } else {
         tbl = ray_eval(tbl_raw);
         if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", NULL);
+        if (tbl->type == -RAY_SYM) {
+            /* Symbol value → resolve the named global for in-place upsert */
+            inplace_sym = tbl->i64;
+            ray_release(tbl);
+            tbl = ray_env_get(inplace_sym);
+            if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
+            ray_retain(tbl);
+        }
     }
 
     ray_t* key_sym = already_eval ? (ray_retain(args[1]), args[1]) : ray_eval(args[1]);
@@ -10659,9 +10707,10 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         ray_release(tbl);
         ray_release(key_sym);
         ray_release(row);
-        if (inplace_sym >= 0 && !RAY_IS_ERR(cur_tbl)) {
+        if (inplace_sym >= 0 && cur_tbl && !RAY_IS_ERR(cur_tbl)) {
             ray_env_set(inplace_sym, cur_tbl);
-            ray_retain(cur_tbl);
+            ray_release(cur_tbl);
+            return ray_sym(inplace_sym);
         }
         return cur_tbl;
     }
@@ -10783,9 +10832,10 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         ray_release(tbl);
         ray_release(key_sym);
         ray_release(row);
-        if (inplace_sym >= 0 && !RAY_IS_ERR(cur_tbl)) {
+        if (inplace_sym >= 0 && cur_tbl && !RAY_IS_ERR(cur_tbl)) {
             ray_env_set(inplace_sym, cur_tbl);
-            ray_retain(cur_tbl);
+            ray_release(cur_tbl);
+            return ray_sym(inplace_sym);
         }
         return cur_tbl;
     }
@@ -10865,9 +10915,10 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         ray_release(tbl);
         ray_release(key_sym);
         ray_release(row);
-        if (inplace_sym >= 0 && !RAY_IS_ERR(result)) {
+        if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
             ray_env_set(inplace_sym, result);
-            ray_retain(result);
+            ray_release(result);
+            return ray_sym(inplace_sym);
         }
         return result;
     }
@@ -10945,9 +10996,10 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
     ray_release(key_sym);
     ray_release(row);
 
-    if (inplace_sym >= 0 && !RAY_IS_ERR(result)) {
+    if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
         ray_env_set(inplace_sym, result);
-        ray_retain(result);
+        ray_release(result);
+        return ray_sym(inplace_sym);
     }
     return result;
 }
