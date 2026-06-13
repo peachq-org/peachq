@@ -454,8 +454,9 @@ static inline bool join_keys_eq(ray_t* const* l_vecs, ray_t* const* r_vecs, uint
 
 #define RADIX_HT_EMPTY UINT32_MAX
 
-/* A per-partition open-addressing build whose linear-probe run exceeds this
- * is pathologically duplicated (O(dup²) build); abort to the chained path. */
+/* A build key with more than this many duplicate rows is pathological
+ * (O(dup²) build); abort to the chained path.  Counts same-hash slots, so
+ * dense moderate keys whose clusters merge into a long run don't trip. */
 #define RADIX_DUP_RUN_MAX 512
 
 /* Per-partition single-pass build+probe context.
@@ -601,15 +602,25 @@ static void join_radix_build_probe_fn(void* raw, uint32_t wid, int64_t task_star
         uint32_t slot = h & ht_mask;
         if (i + 4 < rp->count)
             __builtin_prefetch(&ht[(rp->entries[i + 4].hash & ht_mask) * 2], 1, 1);
-        uint32_t run = 0;
+        /* Count rows of THIS key (same hash) already inserted — the true
+         * per-key duplication.  Total run length would conflate one giant
+         * key (pathological O(dup²) build) with many moderate keys whose
+         * dense clusters merge into a long run (fine); counting same-hash
+         * slots is immune to that collision-merge.  Accumulate `same`
+         * branchlessly with NO global read / NO goto in the loop body: an
+         * in-loop trip check makes the compiler clone the probe loop on the
+         * (loop-invariant) bypass knob and pessimise the production variant
+         * (~55% regression at moderate dup, measured).  Trip once, after. */
+        uint32_t same = 0;
         while (ht[slot * 2 + 1] != RADIX_HT_EMPTY) {
+            same += (ht[slot * 2] == h);
             slot = (slot + 1) & ht_mask;
-            if (++run > RADIX_DUP_RUN_MAX && !ray_join_no_dup_fallback) {
-                /* Pathological duplication — abort to the chained path.
-                 * `done:` frees ht_hdr and leaves pp buffers cleanup-safe. */
-                atomic_store_explicit(&c->pathological, 1, memory_order_relaxed);
-                goto done;
-            }
+        }
+        if (same > RADIX_DUP_RUN_MAX && !ray_join_no_dup_fallback) {
+            /* Pathological duplication — abort to the chained path.
+             * `done:` frees ht_hdr and leaves pp buffers cleanup-safe. */
+            atomic_store_explicit(&c->pathological, 1, memory_order_relaxed);
+            goto done;
         }
         ht[slot * 2] = h;
         ht[slot * 2 + 1] = rp->entries[i].row_idx;
