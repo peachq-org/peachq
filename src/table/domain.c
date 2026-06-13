@@ -58,6 +58,7 @@
 
 #include "domain.h"
 #include "core/platform.h"  /* ray_vm_map_file / ray_vm_unmap_file */
+#include "mem/heap.h"       /* ray_heap_current_id — atom-heap tagging */
 #include "store/fileio.h"   /* flock + tmp/rename protocol for flush */
 #include "ops/hash.h"       /* ray_hash_bytes (same hash family as g_sym) */
 #include <stdatomic.h>
@@ -125,6 +126,15 @@ struct ray_sym_domain_s {
     uint64_t  bucket_mask; /* cap - 1; 0 = not built yet */
 
     dom_retired_t* retired; /* replaced atom arrays + old LUTs */
+
+    /* Heap that backs this domain's string atoms (atoms[] are ray_str
+     * objects on the buddy heap, created when the domain was opened).
+     * The process-global cache outlives a per-thread ray_heap_destroy,
+     * so a cached domain whose heap is torn down would dangle; recording
+     * the heap lets ray_heap_destroy drop exactly its own domains while
+     * the atoms are still valid.  0xFFFF = "no heap was bound at
+     * creation" (never matches a real id, so never auto-dropped). */
+    uint16_t  atom_heap_id;
 
     struct ray_sym_domain_s* next; /* cache chain */
 };
@@ -402,6 +412,7 @@ static ray_sym_domain_t* dom_open_impl(const char* path, bool create) {
     d->kind = DOM_FILE;
     d->rc = 1;
     d->path = rpath;
+    d->atom_heap_id = ray_heap_current_id();  /* heap that will back atoms */
 
     if (exists) {
         d->map = ray_vm_map_file(rpath, &d->map_size);
@@ -479,6 +490,36 @@ void ray_sym_domain_release(ray_sym_domain_t* dom) {
     if (*pp) *pp = dom->next;
     dom_unlock();
     dom_destroy(dom);
+}
+
+/* Drop every cached FILE domain whose string atoms live on `heap_id`.
+ * Called from ray_heap_destroy BEFORE that heap's pools are unmapped, so
+ * the atoms are still valid and dom_destroy's ray_release path is safe.
+ * Without this the process-global cache would keep handing out domains
+ * whose atoms were freed when their backing heap was torn down (e.g. the
+ * per-test heap_init/destroy in the test harness) — a use-after-free on
+ * the next open/extend of that path.  Detach under the lock, free
+ * outside it. */
+void ray_sym_domain_drop_heap(uint16_t heap_id) {
+    dom_lock();
+    ray_sym_domain_t* dead = NULL;
+    ray_sym_domain_t** pp = &g_domains;
+    while (*pp) {
+        ray_sym_domain_t* d = *pp;
+        if (d->kind == DOM_FILE && d->atom_heap_id == heap_id) {
+            *pp = d->next;          /* unlink */
+            d->next = dead;         /* stash for freeing outside the lock */
+            dead = d;
+        } else {
+            pp = &d->next;
+        }
+    }
+    dom_unlock();
+    while (dead) {
+        ray_sym_domain_t* next = dead->next;
+        dom_destroy(dead);
+        dead = next;
+    }
 }
 
 /* ---- resolution ------------------------------------------------------------ */
