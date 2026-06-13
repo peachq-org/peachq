@@ -2200,38 +2200,28 @@ static ray_t* map_iterate(ray_t* fn, ray_t* fixed, ray_t* vec, int fixed_is_left
     return out;
 }
 
-/* (map-left fn fixed vec) → apply fn(fixed, elem) for each elem in vec.
- * If vec is scalar but fixed is a vector, auto-swap (iterate over fixed). */
+/* (map-left fn left right): iterate the LEFT operand, pairing each element with
+ * the whole RIGHT → fn(left_i, right).
+ * (map-right fn left right): iterate the RIGHT operand, pairing the whole LEFT
+ * with each element → fn(left, right_i).
+ *
+ * The iterated side is fixed by the operator, not auto-detected. When that side
+ * is an atom there is nothing to iterate, so fn is applied once to (left,right);
+ * for an atomic fn that single call is exactly its broadcast over the other
+ * operand, so map-left/map-right agree with plain atomic application there.
+ * Every call goes through call_fn2, which routes atomic builtins through the
+ * broadcasting engine (so a held vector conforms element-wise) and hands
+ * lambdas their arguments whole. */
 ray_t* ray_map_left_fn(ray_t** args, int64_t n) {
     if (n != 3) return ray_error("domain", NULL);
-    ray_t* fn = args[0];
-    ray_t* fixed = args[1];
-    ray_t* vec = args[2];
-
-    /* Auto-detect: if vec is scalar but fixed is a vector, swap roles */
-    if (!ray_is_vec(vec) && vec->type != RAY_LIST &&
-        (ray_is_vec(fixed) || fixed->type == RAY_LIST)) {
-        return map_iterate(fn, vec, fixed, 0); /* fn(elem_of_fixed, vec) — but we want fn(fixed=scalar, elem) */
-    }
-
-    return map_iterate(fn, fixed, vec, 1); /* fn(fixed, elem) */
+    /* iterate left (vec), hold right (fixed) → fn(left_i, right) */
+    return map_iterate(args[0], args[2], args[1], 0);
 }
 
-/* (map-right fn vec fixed) → apply fn(elem, fixed) for each elem in vec.
- * If vec is scalar but fixed is a vector, auto-swap (iterate over fixed). */
 ray_t* ray_map_right_fn(ray_t** args, int64_t n) {
     if (n != 3) return ray_error("domain", NULL);
-    ray_t* fn = args[0];
-    ray_t* vec = args[1];
-    ray_t* fixed = args[2];
-
-    /* Auto-detect: if vec is scalar but fixed is a vector, swap roles */
-    if (!ray_is_vec(vec) && vec->type != RAY_LIST &&
-        (ray_is_vec(fixed) || fixed->type == RAY_LIST)) {
-        return map_iterate(fn, vec, fixed, 1); /* fn(vec_scalar, elem_of_fixed) */
-    }
-
-    return map_iterate(fn, fixed, vec, 0); /* fn(elem, fixed) */
+    /* iterate right (vec), hold left (fixed) → fn(left, right_i) */
+    return map_iterate(args[0], args[1], args[2], 1);
 }
 
 /* ══════════════════════════════════════════
