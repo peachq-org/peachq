@@ -620,6 +620,8 @@ extern uint64_t ray_expr_bail_counts[EXPR_BAIL__N];
 extern uint64_t ray_expr_compile_ok;
 extern bool     ray_expr_disable;
 extern bool     ray_opt_no_group_pushdown;
+extern bool     ray_join_no_build_swap;
+extern uint64_t ray_join_build_swaps;
 void ray_expr_stats_init(void);
 
 #define EXPR_MAX_REGS 16
