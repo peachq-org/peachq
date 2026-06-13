@@ -486,7 +486,7 @@ static void repl_print_result(FILE* fp, ray_t* val, bool use_color) {
         }
         return;
     }
-    ray_fmt_print(fp, val, 1);
+    ray_fmt_pp_print(fp, val);
     fprintf(fp, "\n");
 }
 
