@@ -686,9 +686,9 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
             }
             ray_release(idx); ray_release(val);
             ray_env_set(name_sym->i64, new_list);
-            ray_release(name_sym);
-            ray_retain(new_list);
-            return new_list;
+            ray_release(new_list);
+            /* In-place amend returns the symbol, not the altered value. */
+            return name_sym;
         }
 
         /* `var` came from ray_env_get as a BORROWED ref.  ray_cow's
@@ -781,12 +781,11 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         }
         ray_release(val);
         ray_env_set(name_sym->i64, var);
-        ray_release(name_sym);
         /* The retain-first at the top of the set path gave us an owning
-         * ref to var.  ray_env_set already retained for the env binding;
-         * transferring our existing ref to the caller via return is
-         * correct.  No additional ray_retain here. */
-        return var;
+         * ref to var; ray_env_set retained its own for the binding, so
+         * drop ours.  In-place amend returns the symbol, not the value. */
+        ray_release(var);
+        return name_sym;
     }
     if (olen == 6 && memcmp(oname, "concat", 6) == 0) {
         /* (alter 'v concat val) */
@@ -798,9 +797,9 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         ray_release(val);
         if (RAY_IS_ERR(new_vec)) { ray_release(name_sym); return new_vec; }
         ray_env_set(name_sym->i64, new_vec);
-        ray_release(name_sym);
-        ray_retain(new_vec);
-        return new_vec;
+        ray_release(new_vec);
+        /* In-place amend returns the symbol, not the altered value. */
+        return name_sym;
     }
     if (olen == 6 && memcmp(oname, "remove", 6) == 0) {
         /* (alter 'v remove idx) — remove element(s) at index/indices */
@@ -860,9 +859,9 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         }
         new_list->len = j;
         ray_env_set(name_sym->i64, new_list);
-        ray_release(name_sym);
-        ray_retain(new_list);
-        return new_list;
+        ray_release(new_list);
+        /* In-place amend returns the symbol, not the altered value. */
+        return name_sym;
     }
     ray_release(op_name);
     ray_release(name_sym);
