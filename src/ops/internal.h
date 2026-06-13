@@ -622,6 +622,8 @@ extern bool     ray_expr_disable;
 extern bool     ray_opt_no_group_pushdown;
 extern bool     ray_join_no_build_swap;
 extern uint64_t ray_join_build_swaps;
+extern bool     ray_join_force_dup_fallback;
+extern uint64_t ray_join_dup_fallbacks;
 void ray_expr_stats_init(void);
 
 #define EXPR_MAX_REGS 16
