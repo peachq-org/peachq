@@ -596,8 +596,16 @@ static void join_radix_build_probe_fn(void* raw, uint32_t wid, int64_t task_star
         uint32_t slot = h & ht_mask;
         if (i + 4 < rp->count)
             __builtin_prefetch(&ht[(rp->entries[i + 4].hash & ht_mask) * 2], 1, 1);
-        while (ht[slot * 2 + 1] != RADIX_HT_EMPTY)
+        uint32_t run = 0;
+        while (ht[slot * 2 + 1] != RADIX_HT_EMPTY) {
             slot = (slot + 1) & ht_mask;
+            if (++run > RADIX_DUP_RUN_MAX) {
+                /* Pathological duplication — abort to the chained path.
+                 * `done:` frees ht_hdr and leaves pp buffers cleanup-safe. */
+                atomic_store_explicit(&c->pathological, 1, memory_order_relaxed);
+                goto done;
+            }
+        }
         ht[slot * 2] = h;
         ht[slot * 2 + 1] = rp->entries[i].row_idx;
     }
