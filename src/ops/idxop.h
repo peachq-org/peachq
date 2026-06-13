@@ -144,6 +144,17 @@ static inline ray_index_t* ray_index_payload(ray_t* idx) {
     return (ray_index_t*)idx->data;
 }
 
+/* ── Routing observability: per-site consult/hit counters ──
+ * Diagnostic, unsynchronized (same caveat as ray_expr_bail_counts). */
+typedef enum {
+    IDX_SITE_FILTER_ZONE = 0, IDX_SITE_FILTER_BLOOM, IDX_SITE_FILTER_HASH,
+    IDX_SITE_FILTER_RANGE, IDX_SITE_IN, IDX_SITE_FIND, IDX_SITE_SORT,
+    IDX_SITE_DISTINCT, IDX_SITE__N
+} idx_site_t;
+extern uint64_t ray_idx_consults[IDX_SITE__N];
+extern uint64_t ray_idx_hits[IDX_SITE__N];
+void ray_idx_stats_init(void);   /* atexit dump when RAY_IDX_STATS set */
+
 /* ===== Attach / Detach ===== */
 
 /* Build an accelerator and attach.  Numeric types only for v1
@@ -190,6 +201,38 @@ static inline bool ray_attr_is_sorted(const ray_t* v) {
  * or RAY_NULL_OBJ when no index is attached. */
 ray_t* ray_index_info(ray_t* v);
 
+/* ===== Zone-index all/none classification =====
+ *
+ * O(1) pre-check: given the zone index on `col` and a comparison
+ * (col cmp_op key), decide whether the predicate is definitely true for
+ * ALL rows, definitely false for ALL rows (NONE), or UNKNOWN (need scan).
+ *
+ * cmp_op is the OP_EQ..OP_GE opcode.  key_i is used for integer/temporal
+ * column families; key_f for float families.  NaN key_f → UNKNOWN.
+ * Returns UNKNOWN when the column is not eligible (no zone index, stale,
+ * null-bearing, unsupported type). */
+typedef enum { RAY_ZONE_UNKNOWN = 0, RAY_ZONE_ALL = 1, RAY_ZONE_NONE = 2 } ray_zone_class_t;
+ray_zone_class_t ray_index_zone_class(ray_t* col, uint16_t cmp_op,
+                                      int64_t key_i, double key_f);
+
+/* Build an all-NONE rowsel of `n` rows.  Wraps rowsel_from_sorted_ids(n, NULL, 0).
+ * Returns NULL on OOM; returns a valid zero-match rowsel on success. */
+ray_t* ray_index_empty_rowsel(int64_t n);
+
+/* ===== Bloom-index definite-absent probe =====
+ *
+ * Returns true ONLY when the bloom filter PROVES the key is absent
+ * (all k probe bits are clear).  Returns false when the key may be
+ * present OR when the column is not eligible — caller proceeds to
+ * other consults / the scan either way.
+ *
+ * Integer-family columns only in v1 (mirrors the hash path's
+ * conservatism on float equality: F32/F64 NaN/-0 semantics).
+ * No range validation is performed: an out-of-range key hashes to
+ * some bit positions; if they are set we fall through — the absent
+ * proof is still sound (no false absent is possible). */
+bool ray_index_bloom_absent(ray_t* col, int64_t key);
+
 /* ===== Hash-index point-lookup probe =====
  *
  * Build a ray_rowsel directly from a hash probe on `col`'s
@@ -214,6 +257,80 @@ ray_t* ray_index_info(ray_t* v);
  * Floats are intentionally not supported — equality on F32/F64
  * has NaN / -0 semantics the unfused compare kernel handles. */
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
+
+/* ===== Hash-index IN probe =====
+ *
+ * Build a rowsel of all rows whose value is in set_vec via per-element
+ * hash-chain probes.  Integer-family columns only (same conservatism as
+ * the hash-eq path: F32/F64 NaN/-0 semantics belong to the scan kernel).
+ *
+ * set_vec must be an integer-family typed vec; other set types → NULL.
+ *
+ * Returns:
+ *   - A fresh rowsel block (rc=1) on success — install on g->selection.
+ *     An empty set yields a valid all-NONE rowsel (NOT NULL).
+ *   - NULL when the column is not eligible (no hash index, stale, float-
+ *     family column, unsupported set type, OOM, or selectivity > col->len/4).
+ *     Caller falls back to the scan path. */
+ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec);
+
+/* ===== Hash-index find (point lookup) =====
+ *
+ * Returns the minimum row id where the column value equals `key`, or
+ * -1 when the index proves the key is absent (provably-no-match).
+ * Returns -2 when the column is not eligible: no hash index, stale,
+ * float-family column, or out-of-eligibility condition — caller must
+ * fall back to the linear scan.
+ *
+ * Contract:
+ *   >= 0  → key found; this is the FIRST (minimum) row id match.
+ *   -1    → key provably absent; caller returns find's miss value.
+ *   -2    → not eligible; caller falls back to the scan.
+ *
+ * Uses idx_fresh_nonull: null-bearing columns fall back (-2) so the
+ * scan correctly surfaces null-equality searches. */
+int64_t ray_index_find_row(ray_t* col, int64_t key);
+
+/* ===== Sort-index range probe =====
+ *
+ * Build a rowsel from a binary search over the sort-index permutation for
+ * rows satisfying (col cmp_op key).  Supports EQ/LT/LE/GT/GE.  NE returns
+ * NULL (two disjoint spans — unsupported).
+ *
+ * Returns:
+ *   - A fresh rowsel block on success — install on g->selection.
+ *     span == 0 yields a valid all-NONE rowsel (NOT NULL).
+ *   - NULL when not eligible: no sort index, stale, type mismatch,
+ *     span > col->len / IDX_RANGE_MAX_FRAC (selectivity guard), OOM,
+ *     or NE operator.  Caller falls back to the scan.
+ *
+ * key_i is used for integer-family columns; key_f for float-family.
+ * is_float must match the column family (mirror of idx_filter_decode
+ * contract); mismatch returns NULL defensively. */
+ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
+                              int64_t key_i, double key_f, bool is_float);
+
+/* ===== Sort-index ORDER BY permutation probe =====
+ *
+ * Returns a BORROWED pointer to the ascending permutation vector stored in
+ * the sort index on `col` when the column carries a fresh, null-free sort
+ * index; NULL otherwise.  The caller MUST NOT release the returned pointer
+ * (it is owned by the index payload).  To use it as an owned reference,
+ * call ray_retain() immediately after. */
+ray_t* ray_index_sort_perm_fresh(ray_t* col);
+
+/* ===== Sort-index distinct fast path =====
+ *
+ * Walk the sort permutation once to collect the first-occurrence row id of
+ * each distinct value (the first element of each equal-value run, which is
+ * the minimum row id of the run because the sort is stable with iota
+ * tie-breaking).  Returns an OWNED I64 vector of those row ids, sorted
+ * ascending by VALUE (matching distinct_vec_eager's qsort-of-indices
+ * contract), and sets *out_count to the number of distinct values.
+ *
+ * Returns NULL if not eligible (no sort index, stale, null-bearing) or on
+ * OOM.  The caller is responsible for releasing the returned vector. */
+ray_t* ray_index_distinct_ids(ray_t* col, int64_t* out_count);
 
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */

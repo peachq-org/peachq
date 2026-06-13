@@ -30,6 +30,7 @@
 #include "core/runtime.h"
 #include "store/journal.h"
 #include "ops/internal.h"
+#include "ops/idxop.h"
 #include <rayforce.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,7 @@
 
 int main(int argc, char** argv) {
     ray_expr_stats_init();
+    ray_idx_stats_init();
     ray_runtime_t* rt = ray_runtime_create(argc, argv);
     if (!rt) { fprintf(stderr, "failed to create runtime\n"); return 1; }
 

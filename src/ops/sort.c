@@ -24,6 +24,7 @@
 #include "ops/internal.h"
 #include "lang/internal.h"
 #include "ops/ops.h"
+#include "ops/idxop.h"
 #include "mem/sys.h"
 
 /* --------------------------------------------------------------------------
@@ -3416,12 +3417,45 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
         }
     }
 
-    /* Sort columns -> get index permutation (with optional sorted radix keys) */
+    /* ---- Sort-index permutation reuse ----
+     * When there is exactly one ascending sort key that is a direct column
+     * scan and that column carries a fresh, null-free sort index, reuse the
+     * pre-built ascending permutation instead of recomputing it.
+     *
+     * Restricted to ascending-only: reversing the asc perm for DESC would
+     * swap tie-group positions (stable DESC sort keeps ties in iota order;
+     * reversed ASC perm would put them in reverse-iota order — a visible
+     * difference that would fail the differential).
+     *
+     * g->selection is always NULL here (exec.c compacts it before calling
+     * exec_sort); the gate still checks defensively.
+     *
+     * FUTURE TRAP: lifting the null-free restriction (idx_fresh_nonull)
+     * requires reconciling nulls placement — the index perm was built with
+     * sort_indices_ex's default (nulls FIRST), while ray_sort_op defaults
+     * to nulls LAST for ASC.  Reusing the perm for a null-bearing column
+     * without that reconciliation silently misplaces the null block. */
     uint64_t* sorted_keys = NULL;
     ray_t* sorted_keys_hdr = NULL;
-    ray_t* idx_vec = sort_indices_ex(sort_vecs, ext->sort.desc,
-                                     ext->sort.nulls_first, n_sort, nrows,
-                                     &sorted_keys, &sorted_keys_hdr);
+    ray_t* idx_vec;
+    if (n_sort == 1 &&
+        (!ext->sort.desc || !ext->sort.desc[0]) &&
+        (!g || !g->selection) &&
+        !sort_owned[0] && sort_vecs[0]) {
+        ray_t* perm = ray_index_sort_perm_fresh(sort_vecs[0]);
+        if (perm) {
+            /* Index eligible and fresh: consult + hit. */
+            ray_idx_consults[IDX_SITE_SORT]++;
+            ray_idx_hits[IDX_SITE_SORT]++;
+            ray_retain(perm);
+            idx_vec = perm;
+            goto sort_idx_ready;
+        }
+    }
+    idx_vec = sort_indices_ex(sort_vecs, ext->sort.desc,
+                              ext->sort.nulls_first, n_sort, nrows,
+                              &sorted_keys, &sorted_keys_hdr);
+sort_idx_ready:;
     if (!idx_vec || RAY_IS_ERR(idx_vec)) {
         if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
         for (uint8_t k = 0; k < n_sort; k++) {
