@@ -123,6 +123,15 @@ bench-idx-route:
 		bench/idx_route/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
 	./bench-idx-route
 
+# Join build-side selection perf gate.
+# Measures swap (build hash on smaller left) vs legacy (build on right) for
+# three cases: WIN (10K left vs 10M right), CONTROL (10M==10M, no swap),
+# MANY-TO-MANY (100K left vs 10M right, ~10M output).  Sanitizer-free.
+bench-join-buildside:
+	$(CC) $(RELEASE_CFLAGS) $(DEFS) $(INCLUDES) -o bench-join-buildside \
+		bench/join_buildside/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
+	./bench-join-buildside
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
@@ -176,7 +185,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib bench-alloc test coverage clean
+.PHONY: default debug release lib bench-alloc bench-join-buildside test coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
