@@ -34,6 +34,28 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+/* ── Routing observability counters (diagnostic, unsynchronized) ── */
+uint64_t ray_idx_consults[IDX_SITE__N];
+uint64_t ray_idx_hits[IDX_SITE__N];
+
+static void idx_stats_dump(void) {
+    static const char* names[IDX_SITE__N] = {
+        "filter-zone", "filter-bloom", "filter-hash", "filter-range",
+        "in", "find", "sort", "distinct",
+    };
+    for (int i = 0; i < IDX_SITE__N; i++)
+        if (ray_idx_consults[i] || ray_idx_hits[i])
+            fprintf(stderr, "idx_route %-12s consults=%llu hits=%llu\n",
+                    names[i],
+                    (unsigned long long)ray_idx_consults[i],
+                    (unsigned long long)ray_idx_hits[i]);
+}
+
+void ray_idx_stats_init(void) {
+    if (getenv("RAY_IDX_STATS")) atexit(idx_stats_dump);
+}
 
 /* Width of one element of a numeric vector type, or 0 if unsupported. */
 static int numeric_elem_size(int8_t t) {
@@ -380,9 +402,9 @@ static ray_err_t zone_scan(ray_t* v, ray_index_t* ix) {
     case RAY_U8:        return zone_scan_int(v, ix, 1);
     case RAY_I16:       return zone_scan_int(v, ix, 2);
     case RAY_I32:
-    case RAY_DATE:      return zone_scan_int(v, ix, 4);
+    case RAY_DATE:
+    case RAY_TIME:      return zone_scan_int(v, ix, 4);  /* TIME is 4-byte int32 */
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP: return zone_scan_int(v, ix, 8);
     case RAY_F32:       return zone_scan_float(v, ix, 4);
     case RAY_F64:       return zone_scan_float(v, ix, 8);
@@ -481,9 +503,9 @@ static ray_err_t chunk_zone_scan(ray_t* v, ray_index_t* ix) {
     case RAY_U8:        return chunk_zone_scan_int(v, ix, 1);
     case RAY_I16:       return chunk_zone_scan_int(v, ix, 2);
     case RAY_I32:
-    case RAY_DATE:      return chunk_zone_scan_int(v, ix, 4);
+    case RAY_DATE:
+    case RAY_TIME:      return chunk_zone_scan_int(v, ix, 4);  /* TIME is 4-byte int32 */
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP: return chunk_zone_scan_int(v, ix, 8);
     case RAY_F32:       return chunk_zone_scan_float(v, ix, 4);
     case RAY_F64:       return chunk_zone_scan_float(v, ix, 8);
@@ -701,9 +723,9 @@ static int hash_key_in_range(int8_t t, int64_t k) {
     switch (t) {
     case RAY_BOOL: case RAY_U8:        return k >= 0 && k <= UINT8_MAX;
     case RAY_I16:                      return k >= INT16_MIN && k <= INT16_MAX;
-    case RAY_I32: case RAY_DATE:       return k >= INT32_MIN && k <= INT32_MAX;
+    case RAY_I32: case RAY_DATE:
+    case RAY_TIME:                     return k >= INT32_MIN && k <= INT32_MAX;
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP:                return 1;
     default:                           return 0;
     }
@@ -715,9 +737,9 @@ static int64_t hash_col_read_i64(const uint8_t* base, int8_t t, int64_t i) {
     switch (t) {
     case RAY_BOOL: case RAY_U8:        es = 1; break;
     case RAY_I16:                      es = 2; break;
-    case RAY_I32: case RAY_DATE:       es = 4; break;
+    case RAY_I32: case RAY_DATE:
+    case RAY_TIME:                     es = 4; break;  /* TIME is 4-byte int32 */
     case RAY_I64:
-    case RAY_TIME:
     case RAY_TIMESTAMP:                es = 8; break;
     default:                           return 0;
     }
@@ -726,6 +748,19 @@ static int64_t hash_col_read_i64(const uint8_t* base, int8_t t, int64_t i) {
     case 2:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
     case 4:  { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
     default: { int64_t v; memcpy(&v, base + i*8, 8); return v;          }
+    }
+}
+
+/* Mirror numeric_key_word for an int64 key probed against a column of
+ * element size `es`: the canonical hash input is the raw bit pattern of
+ * the storage width.  We zero-extend U8/BOOL and sign-extend others up
+ * to int64; mix64 then folds them — the builder did the same per row. */
+static uint64_t hash_key_bits(int es, int64_t key) {
+    switch (es) {
+    case 1:  return (uint64_t)(uint8_t)key;
+    case 2:  return (uint64_t)(int64_t)(int16_t)key;
+    case 4:  return (uint64_t)(int64_t)(int32_t)key;
+    default: return (uint64_t)key;
     }
 }
 
@@ -743,23 +778,95 @@ static ray_index_t* hash_probe_setup(ray_t* col, int64_t key,
     if (numeric_elem_size(col->type) == 0) return NULL;
     if (!ix->u.hash.table || !ix->u.hash.chain) return NULL;
 
-    /* Mirror numeric_key_word for an int64 key: the canonical hash
-     * input is the raw bit pattern of the storage width.  We zero-
-     * extend U8/BOOL and sign-extend others up to int64; mix64 then
-     * folds them — the builder did the same on a per-row basis. */
-    int es = numeric_elem_size(col->type);
-    uint64_t kbits = 0;
-    switch (es) {
-    case 1: kbits = (uint64_t)(uint8_t)key;                  break;
-    case 2: kbits = (uint64_t)(int64_t)(int16_t)key;         break;
-    case 4: kbits = (uint64_t)(int64_t)(int32_t)key;         break;
-    default: kbits = (uint64_t)key;                          break;
-    }
-    uint64_t h = mix64(kbits);
+    uint64_t h = mix64(hash_key_bits(numeric_elem_size(col->type), key));
     uint64_t slot = h & ix->u.hash.mask;
     const int64_t* tbl = (const int64_t*)ray_data(ix->u.hash.table);
     *start_rid = tbl[slot] - 1;
     return ix;
+}
+
+/* v1 routing eligibility — structural gate shared by every consult function.
+ * Checks that col is a flat (non-parted, non-MAPCOMMON) vector carrying a
+ * fresh index of the requested kind.  Does NOT gate on HAS_NULLS: hash and
+ * bloom indexes skip null rows during build, so probing a null-bearing column
+ * is correct (the chain simply won't surface null-row matches).  Callers that
+ * must exclude null-bearing columns for semantic reasons (sort perm, range
+ * scan) should add their own HAS_NULLS check. */
+static bool idx_fresh(ray_t* col, ray_idx_kind_t kind) {
+    if (!col || RAY_IS_ERR(col)) return false;
+    if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return false;
+    if (!ray_index_has(col)) return false;
+    ray_index_t* ix = ray_index_payload(col->index);
+    return ix->kind == (uint8_t)kind && ix->built_for_len == col->len;
+}
+
+/* v1 routing gate for the NEW consult paths: like idx_fresh but also
+ * excludes null-bearing columns.  Sort perm orders nulls LAST while
+ * sentinel values order FIRST, and comparison semantics on null rows
+ * follow null-as-minimum — none of the new consults model that in v1.
+ * (The pre-existing hash-eq probe keeps bare idx_fresh: its builder
+ * skips null rows, making null-bearing probes structurally correct.) */
+static bool idx_fresh_nonull(ray_t* col, ray_idx_kind_t kind) {
+    return idx_fresh(col, kind) && !(col->attrs & RAY_ATTR_HAS_NULLS);
+}
+
+/* --------------------------------------------------------------------------
+ * Zone-index all/none classification
+ * -------------------------------------------------------------------------- */
+
+/* Classify (col cmp_op key) using the zone index min/max for O(1) decision.
+ * Integer family (BOOL/U8/I16/I32/I64/DATE/TIME/TIMESTAMP) uses key_i and
+ * the zone's min_i/max_i; float family (F32/F64) uses key_f and min_f/max_f.
+ * NaN key_f → UNKNOWN immediately (NaN comparison is the null-aware kernel's
+ * business).  Returns UNKNOWN when not eligible (no zone, stale, null-bearing,
+ * or unsupported type). */
+ray_zone_class_t ray_index_zone_class(ray_t* col, uint16_t cmp_op,
+                                      int64_t key_i, double key_f) {
+    if (!idx_fresh_nonull(col, RAY_IDX_ZONE)) return RAY_ZONE_UNKNOWN;
+    ray_index_t* ix = ray_index_payload(col->index);
+
+    /* Dispatch to integer or float path based on column type. */
+    bool is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    bool is_int   = !is_float && (numeric_elem_size(col->type) > 0);
+    if (!is_float && !is_int) return RAY_ZONE_UNKNOWN;
+
+    if (is_float && isnan(key_f)) return RAY_ZONE_UNKNOWN;
+
+#define ZONE_CLASSIFY(mn, mx, key) do {                                \
+    switch (cmp_op) {                                                  \
+    case OP_EQ:                                                        \
+        if ((key) < (mn) || (key) > (mx)) return RAY_ZONE_NONE;       \
+        if ((mn) == (mx) && (mn) == (key)) return RAY_ZONE_ALL;       \
+        break;                                                         \
+    case OP_NE:                                                        \
+        if ((mn) == (mx) && (mn) == (key)) return RAY_ZONE_NONE;      \
+        if ((key) < (mn) || (key) > (mx)) return RAY_ZONE_ALL;        \
+        break;                                                         \
+    case OP_LT:                                                        \
+        if ((mx) <  (key)) return RAY_ZONE_ALL;                        \
+        if ((mn) >= (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    case OP_LE:                                                        \
+        if ((mx) <= (key)) return RAY_ZONE_ALL;                        \
+        if ((mn) >  (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    case OP_GT:                                                        \
+        if ((mn) >  (key)) return RAY_ZONE_ALL;                        \
+        if ((mx) <= (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    case OP_GE:                                                        \
+        if ((mn) >= (key)) return RAY_ZONE_ALL;                        \
+        if ((mx) <  (key)) return RAY_ZONE_NONE;                       \
+        break;                                                         \
+    }                                                                  \
+} while (0)
+
+    if (is_int)   { ZONE_CLASSIFY(ix->u.zone.min_i, ix->u.zone.max_i, key_i); }
+    else          { ZONE_CLASSIFY(ix->u.zone.min_f, ix->u.zone.max_f, key_f); }
+
+#undef ZONE_CLASSIFY
+
+    return RAY_ZONE_UNKNOWN;
 }
 
 /* qsort comparator: ascending int64 row ids, used by the rowsel
@@ -770,7 +877,81 @@ static int hash_match_cmp_i64(const void* a, const void* b) {
     return (x > y) - (x < y);
 }
 
+/* Build a rowsel block from a SORTED ascending array of matching row ids
+ * over a column of n rows.  Returns fresh rowsel (rc=1) or NULL on OOM.
+ * mcnt==0 yields a valid all-NONE rowsel, NOT NULL — NULL means "no fast
+ * path" to every consumer (idxop.h contract). */
+static ray_t* rowsel_from_sorted_ids(int64_t n, const int64_t* ids, int64_t mcnt) {
+    ray_t* block = ray_rowsel_new(n, mcnt, mcnt);
+    if (!block) return NULL;
+
+    uint32_t n_segs = ray_rowsel_meta(block)->n_segs;
+    uint8_t*  seg_flags   = ray_rowsel_flags(block);
+    uint32_t* seg_offsets = ray_rowsel_offsets(block);
+    uint16_t* idx_arr     = ray_rowsel_idx(block);
+
+    /* All segments default to NONE; the loop below flips MIX where
+     * a match lands.  ray_alloc does NOT zero the data area
+     * (only the 32-byte header), so explicit init is required. */
+    memset(seg_flags, RAY_SEL_NONE, (size_t)n_segs);
+    /* seg_offsets is built by linear sweep below — initialize to a
+     * sentinel that the sweep will overwrite. */
+    /* (no memset needed; the sweep writes every entry [0..n_segs]) */
+
+    /* Classify-then-emit sweep over the sorted matches.  For each
+     * segment, first COUNT its matches by advancing mi without writing
+     * anything, then classify and emit:
+     *   - NONE: no matches — nothing stored.
+     *   - ALL:  whole segment matched — no idx[] entries, cum unchanged,
+     *           so seg_offsets[s+1] == seg_offsets[s] (rowsel.h contract;
+     *           consumers iterate ALL segments densely and never read
+     *           idx[] for them).
+     *   - MIX:  re-walk [mi0, mi) and write morsel-local indices at
+     *           idx_arr[cum..], then advance cum.
+     * The previous sweep wrote idx entries while counting and tried to
+     * "roll back" ALL segments with `cum -= pc` — but cum had never been
+     * advanced for the segment, so the uint32 cursor wrapped and every
+     * subsequent idx_arr write landed out of bounds. */
+    int64_t mi = 0;
+    uint32_t cum = 0;
+    for (uint32_t s = 0; s < n_segs; s++) {
+        seg_offsets[s] = cum;
+        int64_t seg_start = (int64_t)s * RAY_MORSEL_ELEMS;
+        int64_t seg_end   = seg_start + RAY_MORSEL_ELEMS;
+        if (seg_end > n) seg_end = n;
+        int64_t mi0 = mi;
+        while (mi < mcnt && ids[mi] < seg_end) mi++;
+        int64_t pc = mi - mi0;
+        if (pc == 0) continue;                 /* NONE — preset by memset */
+        if (pc == seg_end - seg_start) {
+            seg_flags[s] = RAY_SEL_ALL;        /* zero idx[] entries */
+        } else {
+            seg_flags[s] = RAY_SEL_MIX;
+            for (int64_t i = mi0; i < mi; i++)
+                idx_arr[cum + (uint32_t)(i - mi0)] =
+                    (uint16_t)(ids[i] - seg_start);
+            cum += (uint32_t)pc;
+        }
+    }
+    seg_offsets[n_segs] = cum;
+    /* meta->total_pass is already mcnt (set by ray_rowsel_new): ALL-segment
+     * rows still count as passing.  idx space was sized for mcnt entries,
+     * so when ALL segments exist the tail [cum, mcnt) is unused slack —
+     * harmless; ray_rowsel_new only uses idx_count for allocation sizing. */
+
+    return block;
+}
+
+/* Public wrapper: build an all-NONE rowsel for n rows.  Returns NULL on OOM. */
+ray_t* ray_index_empty_rowsel(int64_t n) {
+    return rowsel_from_sorted_ids(n, NULL, 0);
+}
+
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
+    /* Sanity precheck — idx_fresh validates parted/nulls/kind/staleness;
+     * hash_probe_setup below also validates key-range, elem-size, and
+     * payload pointers, so these checks are complementary. */
+    if (!idx_fresh(col, RAY_IDX_HASH)) return NULL;
     int64_t rid = -1;
     ray_index_t* ix = hash_probe_setup(col, key, &rid);
     if (!ix) return NULL;
@@ -819,67 +1000,379 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
     if (mcnt > 1)
         qsort(matches, (size_t)mcnt, sizeof(int64_t), hash_match_cmp_i64);
 
-    /* Count idx_count = # of MIX segments × matches in that segment.
-     * For a hash probe a segment is either NONE (no matches) or MIX
-     * (≥1 match; never ALL unless every row in the segment matched,
-     * which would require duplicate-key density > MORSEL_ELEMS in one
-     * 1024-row window — vanishingly rare and indistinguishable in the
-     * consumer from a normal MIX). */
-    ray_t* block = ray_rowsel_new(n, mcnt, mcnt);
-    if (!block) { ray_release(match_hdr); return NULL; }
-
-    uint32_t n_segs = ray_rowsel_meta(block)->n_segs;
-    uint8_t*  seg_flags   = ray_rowsel_flags(block);
-    uint32_t* seg_offsets = ray_rowsel_offsets(block);
-    uint16_t* idx_arr     = ray_rowsel_idx(block);
-
-    /* All segments default to NONE; the loop below flips MIX where
-     * a match lands.  ray_alloc does NOT zero the data area
-     * (only the 32-byte header), so explicit init is required. */
-    memset(seg_flags, RAY_SEL_NONE, (size_t)n_segs);
-    /* seg_offsets is built by linear sweep below — initialize to a
-     * sentinel that the sweep will overwrite. */
-    /* (no memset needed; the sweep writes every entry [0..n_segs]) */
-
-    /* Single sweep over the sorted matches: emit per-segment offsets
-     * and morsel-local indices into idx_arr.  cur_seg tracks the
-     * segment we're filling; gaps get RAY_SEL_NONE and zero spans. */
-    int64_t mi = 0;
-    uint32_t cum = 0;
-    for (uint32_t s = 0; s < n_segs; s++) {
-        seg_offsets[s] = cum;
-        int64_t seg_start = (int64_t)s * RAY_MORSEL_ELEMS;
-        int64_t seg_end   = seg_start + RAY_MORSEL_ELEMS;
-        if (seg_end > n) seg_end = n;
-        uint32_t pc = 0;
-        while (mi < mcnt && matches[mi] < seg_end) {
-            idx_arr[cum + pc] = (uint16_t)(matches[mi] - seg_start);
-            pc++;
-            mi++;
-        }
-        if (pc == 0) {
-            seg_flags[s] = RAY_SEL_NONE;
-        } else if ((int64_t)pc == seg_end - seg_start) {
-            seg_flags[s] = RAY_SEL_ALL;
-            /* Roll back the indices — ALL segments contribute zero
-             * idx[] entries in the rowsel contract. */
-            cum -= pc;  /* idx_arr writes for this seg get overwritten
-                          by the next MIX segment's writes; idx_count
-                          was sized for all matches, so this is safe. */
-        } else {
-            seg_flags[s] = RAY_SEL_MIX;
-            cum += pc;
-        }
-    }
-    seg_offsets[n_segs] = cum;
-    /* Adjust meta total_pass / idx layout — ALL-segment rows count
-     * toward total_pass but not idx_count.  We initially passed
-     * (mcnt, mcnt); fix up if any ALL segments collapsed. */
-    ray_rowsel_meta(block)->total_pass = mcnt;
-    (void)cum;
-
+    ray_t* block = rowsel_from_sorted_ids(n, matches, mcnt);
     ray_release(match_hdr);
     return block;
+}
+
+/* --------------------------------------------------------------------------
+ * Hash-index IN probe
+ *
+ * For each unique in-range element of set_vec, walk the hash chain and
+ * collect matching row ids into a single shared buffer, then build a
+ * rowsel in one pass.
+ * -------------------------------------------------------------------------- */
+
+/* Read element i of a set vec (integer-family only) as int64.  Mirrors
+ * hash_col_read_i64 but operates on the set_vec type, not the column type. */
+static int64_t set_vec_read_i64(const uint8_t* base, int8_t t, int64_t i) {
+    switch (t) {
+    case RAY_BOOL: case RAY_U8:        return (int64_t)base[i];
+    case RAY_I16:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
+    case RAY_I32: case RAY_DATE: case RAY_TIME:
+                   { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
+    case RAY_I64: case RAY_TIMESTAMP:
+                   { int64_t v; memcpy(&v, base + i*8, 8); return v; }
+    default:       return 0;
+    }
+}
+
+static int cmp_i64_plain(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a;
+    int64_t y = *(const int64_t*)b;
+    return (x > y) - (x < y);
+}
+
+ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
+    /* Gate: integer-family column with fresh hash index, no nulls. */
+    if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return NULL;
+    bool col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    if (col_is_float) return NULL;
+
+    /* set_vec must be a non-atom integer-family vec. */
+    if (!set_vec || RAY_IS_ERR(set_vec) || ray_is_atom(set_vec)) return NULL;
+    int8_t st = set_vec->type;
+    bool set_is_float = (st == RAY_F32 || st == RAY_F64);
+    if (set_is_float) return NULL;
+    /* Check set type is integer-family (numeric_elem_size covers all int types) */
+    if (numeric_elem_size(st) == 0) return NULL;
+
+    int64_t set_len = set_vec->len;
+    int64_t n       = col->len;
+
+    /* Canonicalize set: copy to int64 scratch, sort, unique, drop out-of-range. */
+    int64_t* set_scratch = NULL;
+    ray_t*   set_hdr     = NULL;
+    if (set_len > 0) {
+        set_hdr = ray_alloc(set_len * (int64_t)sizeof(int64_t));
+        if (!set_hdr) return NULL;
+        set_scratch = (int64_t*)ray_data(set_hdr);
+        const uint8_t* sb = (const uint8_t*)ray_data(set_vec);
+        int64_t ulen = 0;
+        for (int64_t i = 0; i < set_len; i++) {
+            int64_t v = set_vec_read_i64(sb, st, i);
+            if (hash_key_in_range(col->type, v))
+                set_scratch[ulen++] = v;
+        }
+        if (ulen == 0) {
+            /* All elements out of range — no possible matches. */
+            ray_release(set_hdr);
+            return rowsel_from_sorted_ids(n, NULL, 0);
+        }
+        /* Sort and deduplicate. */
+        qsort(set_scratch, (size_t)ulen, sizeof(int64_t), cmp_i64_plain);
+        int64_t wlen = 1;
+        for (int64_t i = 1; i < ulen; i++)
+            if (set_scratch[i] != set_scratch[i-1])
+                set_scratch[wlen++] = set_scratch[i];
+        set_len = wlen;
+    } else {
+        /* Empty set → all-NONE rowsel. */
+        return rowsel_from_sorted_ids(n, NULL, 0);
+    }
+
+    /* Fetch the hash payload ONCE; per-key probing below only needs the
+     * bucket-head lookup (every key already passed hash_key_in_range, and
+     * the column-level gates were validated by idx_fresh_nonull above). */
+    ray_index_t* ix = ray_index_payload(col->index);
+    if (!ix->u.hash.table || !ix->u.hash.chain) {
+        ray_release(set_hdr);
+        return NULL;
+    }
+    const int64_t* tbl  = (const int64_t*)ray_data(ix->u.hash.table);
+    const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    uint64_t mask = ix->u.hash.mask;
+    int8_t t  = col->type;
+    int    es = numeric_elem_size(t);
+
+    /* Shared match buffer: starts at 16, grows by doubling, capped at n. */
+    int64_t mcap = 16;
+    int64_t mcnt = 0;
+    ray_t*   match_hdr  = ray_alloc(mcap * (int64_t)sizeof(int64_t));
+    if (!match_hdr) { ray_release(set_hdr); return NULL; }
+    int64_t* matches = (int64_t*)ray_data(match_hdr);
+
+    /* Selectivity guard threshold: if total collected > n/4, abandon
+     * (rowsel build + sort overhead approaches scan cost at that point).
+     * For small tables (n <= 64) the guard never fires — the overhead is
+     * trivial regardless of selectivity. */
+    int64_t guard = (n > 64) ? n / 4 : n;
+
+    for (int64_t si = 0; si < set_len; si++) {
+        int64_t key = set_scratch[si];
+        /* Bucket head for this key — same kbits/mix64 the builder used. */
+        int64_t rid = tbl[mix64(hash_key_bits(es, key)) & mask] - 1;
+
+        while (rid >= 0) {
+            if (hash_col_read_i64(base, t, rid) == key) {
+                /* Grow match buffer if needed. */
+                if (mcnt == mcap) {
+                    int64_t new_cap = mcap * 2;
+                    if (new_cap > n) new_cap = n + 1;
+                    ray_t* new_hdr = ray_alloc(new_cap * (int64_t)sizeof(int64_t));
+                    if (!new_hdr) {
+                        ray_release(match_hdr);
+                        ray_release(set_hdr);
+                        return NULL;
+                    }
+                    memcpy(ray_data(new_hdr), matches,
+                           (size_t)mcnt * sizeof(int64_t));
+                    ray_release(match_hdr);
+                    match_hdr = new_hdr;
+                    matches   = (int64_t*)ray_data(match_hdr);
+                    mcap      = new_cap;
+                }
+                matches[mcnt++] = rid;
+                /* Selectivity guard: abandon if too many matches. */
+                if (mcnt > guard) {
+                    ray_release(match_hdr);
+                    ray_release(set_hdr);
+                    return NULL;
+                }
+            }
+            rid = chn[rid] - 1;
+        }
+    }
+
+    ray_release(set_hdr);
+
+    /* Sort collected ids (distinct keys → no duplicate row ids across different
+     * probes; a row holds exactly one value so different keys can't hit the
+     * same row). */
+    if (mcnt > 1)
+        qsort(matches, (size_t)mcnt, sizeof(int64_t), hash_match_cmp_i64);
+
+    ray_t* block = rowsel_from_sorted_ids(n, matches, mcnt);
+    ray_release(match_hdr);
+    return block;
+}
+
+/* --------------------------------------------------------------------------
+ * Sort-index range probe
+ *
+ * Binary search over the sort permutation.  Two typed helpers — one for
+ * integer-family columns, one for float-family — avoid branching inside the
+ * hot search loop.
+ *
+ * Guard: O(m log m) row-id sort + rowsel build must stay under O(n).
+ * Measured break-even on shuffled data is ~0.5-1% selectivity (loses +1.9ms
+ * at 1%, wins -7.8ms at 0.1% on 10M rows).  1/128 (~0.78%) keeps the 0.1%
+ * win region and rejects the loss region.  Sorted-layout 1% wins are forfeited
+ * because the guard is layout-blind (no RAY_ATTR_SORTED signal yet).
+ * See bench/bottleneck/idx_route_compare.md ROUND 2 Q1 for the curve.
+ * -------------------------------------------------------------------------- */
+
+/* Bail when the qualifying span exceeds len/IDX_RANGE_MAX_FRAC — the
+ * O(m log m) row-id sort below must stay under the scan's O(n) cost.
+ * 128 (~0.78%) sits just below the ~0.5-1% shuffled-data break-even measured
+ * in bench/bottleneck/idx_route_compare.md ROUND 2 Q1. */
+#define IDX_RANGE_MAX_FRAC 128
+
+/* Read row rid of an integer-family column as int64. */
+static int64_t sort_read_i64(const uint8_t* base, int8_t t, int64_t rid) {
+    return hash_col_read_i64(base, t, rid);
+}
+
+/* Read row rid of a float-family column as double. */
+static double sort_read_f64(const uint8_t* base, int8_t t, int64_t rid) {
+    if (t == RAY_F32) {
+        float v; memcpy(&v, base + rid * 4, 4); return (double)v;
+    }
+    double v; memcpy(&v, base + rid * 8, 8); return v;
+}
+
+/* lower_bound_i: first sorted position pos where value_at(perm[pos]) >= key.
+ * Positions in [0, n) are searched; perm is the sort permutation. */
+static int64_t sort_lower_i(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, int64_t key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (sort_read_i64(base, t, perm[mid]) < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* upper_bound_i: first sorted position pos where value_at(perm[pos]) > key. */
+static int64_t sort_upper_i(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, int64_t key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (sort_read_i64(base, t, perm[mid]) <= key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* lower_bound_f: first position where value >= key (NaN-safe: NaN is > any). */
+static int64_t sort_lower_f(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, double key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        double v = sort_read_f64(base, t, perm[mid]);
+        if (!isnan(v) && v < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* upper_bound_f: first position where value > key. */
+static int64_t sort_upper_f(const int64_t* perm, int64_t n,
+                            const uint8_t* base, int8_t t, double key) {
+    int64_t lo = 0, hi = n;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        double v = sort_read_f64(base, t, perm[mid]);
+        if (!isnan(v) && v <= key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
+                              int64_t key_i, double key_f, bool is_float) {
+    /* NE = two spans — unsupported. */
+    if (cmp_op == OP_NE) return NULL;
+
+    /* Freshness + no-null gate. */
+    if (!idx_fresh_nonull(col, RAY_IDX_SORT)) return NULL;
+
+    /* Consistency check: is_float must agree with the column's type family. */
+    bool col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    if ((bool)is_float != col_is_float) return NULL;
+
+    ray_index_t* ix = ray_index_payload(col->index);
+    if (!ix->u.sort.perm) return NULL;
+
+    int64_t n = col->len;
+    const int64_t* perm = (const int64_t*)ray_data(ix->u.sort.perm);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    int8_t t = col->type;
+
+    /* Compute [lo, hi) span in sorted order. */
+    int64_t lo, hi;
+    if (!is_float) {
+        int64_t lower = sort_lower_i(perm, n, base, t, key_i);
+        int64_t upper = sort_upper_i(perm, n, base, t, key_i);
+        switch (cmp_op) {
+        case OP_LT: lo = 0;     hi = lower; break;
+        case OP_LE: lo = 0;     hi = upper; break;
+        case OP_GT: lo = upper; hi = n;     break;
+        case OP_GE: lo = lower; hi = n;     break;
+        case OP_EQ: lo = lower; hi = upper; break;
+        default:    return NULL;
+        }
+    } else {
+        int64_t lower = sort_lower_f(perm, n, base, t, key_f);
+        int64_t upper = sort_upper_f(perm, n, base, t, key_f);
+        switch (cmp_op) {
+        case OP_LT: lo = 0;     hi = lower; break;
+        case OP_LE: lo = 0;     hi = upper; break;
+        case OP_GT: lo = upper; hi = n;     break;
+        case OP_GE: lo = lower; hi = n;     break;
+        case OP_EQ: lo = lower; hi = upper; break;
+        default:    return NULL;
+        }
+    }
+
+    int64_t span = hi - lo;
+    if (span <= 0) return ray_index_empty_rowsel(n);
+    /* Selectivity guard: only worth paying the O(m log m) sort when the
+     * span is small relative to the column AND the column is large enough
+     * that a scan would be expensive.  Below 64 rows the scan is trivial
+     * regardless of selectivity, so skip the guard. */
+    if (n >= 64 && span > n / IDX_RANGE_MAX_FRAC) return NULL;
+
+    /* Copy perm[lo..hi) into a scratch buffer, sort ascending, build rowsel. */
+    ray_t* scratch = ray_alloc(span * (int64_t)sizeof(int64_t));
+    if (!scratch) return NULL;
+    int64_t* ids = (int64_t*)ray_data(scratch);
+    for (int64_t i = 0; i < span; i++) ids[i] = perm[lo + i];
+
+    if (span > 1)
+        qsort(ids, (size_t)span, sizeof(int64_t), hash_match_cmp_i64);
+
+    ray_t* block = rowsel_from_sorted_ids(n, ids, span);
+    ray_release(scratch);
+    return block;
+}
+
+/* --------------------------------------------------------------------------
+ * Bloom-index definite-absent probe
+ *
+ * Builder formula (ray_index_attach_bloom above):
+ *   h  = mix64(numeric_key_word(base, type, row))
+ *   h1 = h
+ *   h2 = mix64(h ^ 0xc6a4a7935bd1e995ULL) | 1ULL   -- ensure odd (double-hashing)
+ *   for kk in 0..k-1:
+ *       pos = (h1 + kk * h2) & m_mask
+ *       bits[pos >> 3] |= 1 << (pos & 7)
+ *
+ * For an integer key the raw bit representation used by numeric_key_word is:
+ *   zero-extend  for U8/BOOL (1-byte storage)
+ *   sign-extend  for I16 (2-byte storage)
+ *   sign-extend  for I32/DATE/TIME (4-byte storage)
+ *   identity     for I64/TIMESTAMP (8-byte storage)
+ * which is exactly (uint64_t)(int64_t)key after the appropriate truncation.
+ *
+ * We derive kbits the same way hash_probe_setup does for the HASH index
+ * (see hash_probe_setup, ~line 773), then run the same double-hash probe.
+ * -------------------------------------------------------------------------- */
+
+bool ray_index_bloom_absent(ray_t* col, int64_t key) {
+    /* idx_fresh_nonull: freshness + kind + no-null gate. */
+    if (!idx_fresh_nonull(col, RAY_IDX_BLOOM)) return false;
+
+    /* Integer-family only in v1.  F32/F64 equality has NaN/-0 semantics
+     * that the unfused kernel handles; skip bloom for float columns. */
+    int8_t t = col->type;
+    if (t == RAY_F32 || t == RAY_F64) return false;
+
+    /* Derive kbits: mirror numeric_key_word for an integer scalar key.
+     * numeric_key_word uses the raw bit pattern of the storage width; for
+     * integer types that means zero-extension (U8/BOOL) or sign-extension
+     * (I16/I32/I64 family) to uint64.  No range check needed: an out-of-
+     * range key hashes to some bit positions; if all happen to be set we
+     * fall through harmlessly — the absent proof is still sound. */
+    int es = numeric_elem_size(t);
+    uint64_t kbits;
+    switch (es) {
+    case 1:  kbits = (uint64_t)(uint8_t)key;                break;
+    case 2:  kbits = (uint64_t)(int64_t)(int16_t)key;       break;
+    case 4:  kbits = (uint64_t)(int64_t)(int32_t)key;       break;
+    default: kbits = (uint64_t)key;                         break;
+    }
+
+    ray_index_t* ix    = ray_index_payload(col->index);
+    uint64_t     mask  = ix->u.bloom.m_mask;
+    uint32_t     k     = ix->u.bloom.k;
+    const uint8_t* bbuf = (const uint8_t*)ray_data(ix->u.bloom.bits);
+
+    /* Double-hashing probe — exact mirror of the builder loop. */
+    uint64_t h  = mix64(kbits);
+    uint64_t h1 = h;
+    uint64_t h2 = mix64(h ^ 0xc6a4a7935bd1e995ULL) | 1ULL;
+
+    for (uint32_t kk = 0; kk < k; kk++) {
+        uint64_t pos = (h1 + (uint64_t)kk * h2) & mask;
+        if (!(bbuf[pos >> 3] & (uint8_t)(1u << (pos & 7))))
+            return true;   /* bit clear → key provably absent */
+    }
+    return false;  /* all bits set → maybe present, fall through */
 }
 
 /* --------------------------------------------------------------------------
@@ -906,6 +1399,74 @@ ray_t* ray_index_attach_sort(ray_t** vp) {
     ix->u.sort.perm = perm;
 
     return attach_finalize(v, idx);
+}
+
+/* --------------------------------------------------------------------------
+ * Sort-index ORDER BY permutation probe
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_index_sort_perm_fresh(ray_t* col) {
+    if (!idx_fresh_nonull(col, RAY_IDX_SORT)) return NULL;
+    ray_index_t* ix = ray_index_payload(col->index);
+    return ix->u.sort.perm;
+}
+
+/* --------------------------------------------------------------------------
+ * Sort-index distinct fast path
+ *
+ * Walk the sort permutation once.  The perm is a stable ascending sort with
+ * iota tie-breaking, so within each equal-value run the row ids appear in
+ * ascending order; the FIRST element of each run is already the minimum row
+ * id (= first occurrence) for that value.
+ *
+ * After collecting the first-in-run ids we sort them by VALUE (not by row)
+ * to match distinct_vec_eager's distinct_sort_indices contract: output is
+ * numerically sorted, not first-occurrence ordered.  Because the perm
+ * already provides one representative per value in ascending value order, we
+ * can emit them directly without a second sort — the perm walk order is
+ * already value-ascending, which is exactly the required output order.
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_index_distinct_ids(ray_t* col, int64_t* out_count) {
+    *out_count = 0;
+    if (!idx_fresh_nonull(col, RAY_IDX_SORT)) return NULL;
+
+    ray_index_t* ix  = ray_index_payload(col->index);
+    ray_t*       perm = ix->u.sort.perm;
+    int64_t      n    = perm->len;
+    if (n == 0) {
+        ray_t* empty = ray_vec_new(RAY_I64, 0);
+        return empty;
+    }
+
+    /* Allocate output array (worst case: all values distinct). */
+    ray_t* out = ray_vec_new(RAY_I64, n);
+    if (!out || RAY_IS_ERR(out)) return NULL;
+
+    const int64_t* p    = (const int64_t*)ray_data(perm);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    int64_t* ids        = (int64_t*)ray_data(out);
+    int64_t  count      = 0;
+
+    /* First element of the perm always starts the first run. */
+    ids[count++] = p[0];
+    for (int64_t i = 1; i < n; i++) {
+        /* Compare value at current perm position to previous one.
+         * The perm is sorted ascending, so equal values form contiguous runs;
+         * we emit one id per run (the first element, which is the min row id
+         * because the sort is stable with iota tie-breaking). */
+        if (numeric_key_word(base, col->type, p[i]) !=
+            numeric_key_word(base, col->type, p[i-1])) {
+            ids[count++] = p[i];
+        }
+    }
+
+    /* The perm walk produces ids in VALUE-ascending order (perm is sorted
+     * ascending).  distinct_vec_eager's contract (from distinct_sort_indices)
+     * is also value-ascending, so no second sort is needed. */
+    out->len   = count;
+    *out_count = count;
+    return out;
 }
 
 /* --------------------------------------------------------------------------
@@ -1381,4 +1942,39 @@ ray_t* ray_attr_set_fn(ray_t* name, ray_t* v) {
     if (id == ray_sym_intern_runtime("grouped", 7))  return attr_set_grouped(v);
     if (id == ray_sym_intern_runtime("parted", 6))   return attr_set_parted(v);
     return ray_error("domain", "attr.set: unknown attribute (want sorted/unique/grouped/parted)");
+}
+
+/* --------------------------------------------------------------------------
+ * Hash-index find — minimum row id whose value equals key, or -1 / -2.
+ * -------------------------------------------------------------------------- */
+
+int64_t ray_index_find_row(ray_t* col, int64_t key) {
+    /* Float-family: equality has NaN/-0 semantics owned by the scan kernel. */
+    if (!col || RAY_IS_ERR(col)) return -2;
+    int8_t t = col->type;
+    if (t == RAY_F32 || t == RAY_F64) return -2;
+
+    /* idx_fresh_nonull: freshness + kind check + null-bearing gate. */
+    if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return -2;
+
+    /* Out-of-range key cannot equal any stored value of this type. */
+    if (!hash_key_in_range(t, key)) return -1;
+
+    int64_t start_rid = -1;
+    ray_index_t* ix = hash_probe_setup(col, key, &start_rid);
+    if (!ix) return -2;   /* unexpected failure after eligibility passed */
+
+    const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+
+    int64_t min_rid = -1;
+    int64_t rid = start_rid;
+    while (rid >= 0) {
+        if (hash_col_read_i64(base, t, rid) == key) {
+            if (min_rid < 0 || rid < min_rid)
+                min_rid = rid;
+        }
+        rid = chn[rid] - 1;
+    }
+    return min_rid;  /* -1 when nothing matched = key provably absent */
 }
