@@ -34,6 +34,11 @@ uint64_t ray_join_build_swaps = 0;
 /* Test knob: force every radix join to fall back to the chained path, so the
  * differential harness can compare radix-build vs chained-build on ordinary data. */
 bool ray_join_force_dup_fallback = false;
+/* Perf-gate bypass: disable the auto dup-fallback so the differential harness
+ * can measure the pre-fix O(dup²) build in the same binary.  Independent of
+ * ray_join_force_dup_fallback (which forces the fallback); this disables the
+ * auto-trip only. */
+bool ray_join_no_dup_fallback = false;
 /* Diagnostic: radix joins that fell back due to pathological key duplication. */
 uint64_t ray_join_dup_fallbacks = 0;
 
@@ -599,7 +604,7 @@ static void join_radix_build_probe_fn(void* raw, uint32_t wid, int64_t task_star
         uint32_t run = 0;
         while (ht[slot * 2 + 1] != RADIX_HT_EMPTY) {
             slot = (slot + 1) & ht_mask;
-            if (++run > RADIX_DUP_RUN_MAX) {
+            if (++run > RADIX_DUP_RUN_MAX && !ray_join_no_dup_fallback) {
                 /* Pathological duplication — abort to the chained path.
                  * `done:` frees ht_hdr and leaves pp buffers cleanup-safe. */
                 atomic_store_explicit(&c->pathological, 1, memory_order_relaxed);
