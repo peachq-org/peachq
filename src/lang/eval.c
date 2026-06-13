@@ -1331,8 +1331,8 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", NULL); }
 
         /* Empty generic list → typeless empty column: keep it as a RAY_LIST
-         * so its storage type is adopted from the first inserted value
-         * (q-style () column), rather than defaulting to I64. */
+         * so its storage type is adopted from the first inserted value,
+         * rather than defaulting to I64. */
         if (nrows == 0) {
             ray_retain(col_src);
             tbl = ray_table_add_col(tbl, name_id, col_src);
