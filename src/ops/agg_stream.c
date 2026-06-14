@@ -114,10 +114,116 @@ static const agg_vtable_t MAX_I64 = {
     .merge = max_i64_merge, .finalize = ext_i64_final,
 };
 
+/* ---- sum, F64 -------------------------------------------------------- */
+typedef struct { double sum; } sum_f64_state;
+static void sum_f64_init(void* s) { ((sum_f64_state*)s)->sum = 0.0; }
+static void sum_f64_update(void* base, size_t stride, const uint32_t* gids,
+                           const void* vals, const ray_valid_t* valid,
+                           int64_t n, acc_arena_t* a) {
+    (void)a; const double* d = (const double*)vals;
+    for (int64_t i = 0; i < n; i++) {
+        if (!ray_valid_at(valid, i)) continue;
+        ((sum_f64_state*)((char*)base + (size_t)gids[i]*stride))->sum += d[i];
+    }
+}
+static void sum_f64_merge(void* d, const void* s, acc_arena_t* a) {
+    (void)a; ((sum_f64_state*)d)->sum += ((const sum_f64_state*)s)->sum;
+}
+static ray_t* sum_f64_final(const void* s, acc_arena_t* a) {
+    (void)a; return ray_f64(((const sum_f64_state*)s)->sum);
+}
+static const agg_vtable_t SUM_F64 = {
+    .state_size = sizeof(sum_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = sum_f64_init, .update_batch = sum_f64_update,
+    .merge = sum_f64_merge, .finalize = sum_f64_final,
+};
+
+/* ---- min / max F64 (empty group → typed null) ------------------------ */
+typedef struct { double v; int64_t cnt; } ext_f64_state;
+static void min_f64_init(void* s) { ((ext_f64_state*)s)->v = INFINITY;  ((ext_f64_state*)s)->cnt = 0; }
+static void max_f64_init(void* s) { ((ext_f64_state*)s)->v = -INFINITY; ((ext_f64_state*)s)->cnt = 0; }
+static void min_f64_update(void* base, size_t stride, const uint32_t* gids,
+                           const void* vals, const ray_valid_t* valid,
+                           int64_t n, acc_arena_t* a) {
+    (void)a; const double* d = (const double*)vals;
+    for (int64_t i = 0; i < n; i++) {
+        if (!ray_valid_at(valid, i)) continue;
+        ext_f64_state* st = (ext_f64_state*)((char*)base + (size_t)gids[i]*stride);
+        if (d[i] < st->v) st->v = d[i];
+        st->cnt++;
+    }
+}
+static void max_f64_update(void* base, size_t stride, const uint32_t* gids,
+                           const void* vals, const ray_valid_t* valid,
+                           int64_t n, acc_arena_t* a) {
+    (void)a; const double* d = (const double*)vals;
+    for (int64_t i = 0; i < n; i++) {
+        if (!ray_valid_at(valid, i)) continue;
+        ext_f64_state* st = (ext_f64_state*)((char*)base + (size_t)gids[i]*stride);
+        if (d[i] > st->v) st->v = d[i];
+        st->cnt++;
+    }
+}
+static void min_f64_merge(void* d, const void* s, acc_arena_t* a) {
+    (void)a; const ext_f64_state* src = s; ext_f64_state* dst = d;
+    if (src->cnt && src->v < dst->v) { dst->v = src->v; }
+    dst->cnt += src->cnt;
+}
+static void max_f64_merge(void* d, const void* s, acc_arena_t* a) {
+    (void)a; const ext_f64_state* src = s; ext_f64_state* dst = d;
+    if (src->cnt && src->v > dst->v) { dst->v = src->v; }
+    dst->cnt += src->cnt;
+}
+static ray_t* ext_f64_final(const void* s, acc_arena_t* a) {
+    (void)a; const ext_f64_state* st = s;
+    return st->cnt ? ray_f64(st->v) : ray_typed_null(-RAY_F64);
+}
+static const agg_vtable_t MIN_F64 = {
+    .state_size = sizeof(ext_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = min_f64_init, .update_batch = min_f64_update,
+    .merge = min_f64_merge, .finalize = ext_f64_final,
+};
+static const agg_vtable_t MAX_F64 = {
+    .state_size = sizeof(ext_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = max_f64_init, .update_batch = max_f64_update,
+    .merge = max_f64_merge, .finalize = ext_f64_final,
+};
+
+/* ---- avg, F64 -------------------------------------------------------- */
+typedef struct { double sum; int64_t cnt; } avg_f64_state;
+static void avg_f64_init(void* s) { ((avg_f64_state*)s)->sum = 0.0; ((avg_f64_state*)s)->cnt = 0; }
+static void avg_f64_update(void* base, size_t stride, const uint32_t* gids,
+                           const void* vals, const ray_valid_t* valid,
+                           int64_t n, acc_arena_t* a) {
+    (void)a; const double* d = (const double*)vals;
+    for (int64_t i = 0; i < n; i++) {
+        if (!ray_valid_at(valid, i)) continue;
+        avg_f64_state* st = (avg_f64_state*)((char*)base + (size_t)gids[i]*stride);
+        st->sum += d[i]; st->cnt++;
+    }
+}
+static void avg_f64_merge(void* d, const void* s, acc_arena_t* a) {
+    (void)a; ((avg_f64_state*)d)->sum += ((const avg_f64_state*)s)->sum;
+    ((avg_f64_state*)d)->cnt += ((const avg_f64_state*)s)->cnt;
+}
+static ray_t* avg_f64_final(const void* s, acc_arena_t* a) {
+    (void)a; const avg_f64_state* st = s;
+    return st->cnt ? ray_f64(st->sum / (double)st->cnt) : ray_typed_null(-RAY_F64);
+}
+static const agg_vtable_t AVG_F64 = {
+    .state_size = sizeof(avg_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = avg_f64_init, .update_batch = avg_f64_update,
+    .merge = avg_f64_merge, .finalize = avg_f64_final,
+};
+
 const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
     if (agg_kind == OP_SUM && in_type == RAY_I64) return &SUM_I64;
     if (agg_kind == OP_COUNT)                     return &COUNT_ANY;
     if (agg_kind == OP_MIN && in_type == RAY_I64) return &MIN_I64;
     if (agg_kind == OP_MAX && in_type == RAY_I64) return &MAX_I64;
+    if (agg_kind == OP_SUM && in_type == RAY_F64) return &SUM_F64;
+    if (agg_kind == OP_MIN && in_type == RAY_F64) return &MIN_F64;
+    if (agg_kind == OP_MAX && in_type == RAY_F64) return &MAX_F64;
+    if (agg_kind == OP_AVG && in_type == RAY_F64) return &AVG_F64;
     return NULL;
 }
