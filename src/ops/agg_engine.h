@@ -16,4 +16,17 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl);
 /* Precondition: agg_v2_can_handle(g, op, tbl) returned true. */
 ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl);
 
+/* Dense group assignment for a single key column, first-occurrence order. */
+typedef struct {
+    uint32_t* gids;     /* len = nrows; gid per row */
+    int64_t*  keys;     /* len = ngroups; representative int-coded key per group */
+    int64_t   ngroups;
+} agg_groups_t;
+
+/* Single-key grouping. Reads the key as an int64 (intern id for SYM).
+ * Assigns gids incrementally on first sight → gid order == first-occurrence
+ * order. Returns 0 on success (caller frees out->gids and out->keys via free()),
+ * -1 on allocation failure. */
+int agg_group_keys_i(ray_t* key_col, agg_groups_t* out);
+
 #endif /* RAY_OPS_AGG_ENGINE_H */
