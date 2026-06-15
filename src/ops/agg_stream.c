@@ -3,8 +3,10 @@
  * state, recovering the rowform density win generically. */
 #include "ops/agg_registry.h"
 #include "ops/ops.h"
+#include "lang/internal.h"  /* ray_median_dbl_inplace */
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>         /* realloc/free for the buffered median accumulator */
 
 /* ---- sum, I64 -------------------------------------------------------- */
 typedef struct { int64_t sum; } sum_i64_state;
@@ -379,7 +381,41 @@ static const agg_vtable_t PEARSON_F64 = {
     .merge = pearson_merge, .finalize = pearson_final,
 };
 
+/* ---- median, F64 output (first ACC_BUFFERED: growable per-group buffer) ---- */
+typedef struct { double* buf; int64_t len; int64_t cap; } median_state;
+static void median_init(void* s){ median_state* st=s; st->buf=NULL; st->len=0; st->cap=0; }
+static inline void median_push(median_state* st, double v){
+    if (st->len == st->cap){ int64_t nc = st->cap ? st->cap*2 : 8;
+        double* nb = realloc(st->buf, (size_t)nc*sizeof(double)); st->buf=nb; st->cap=nc; }
+    st->buf[st->len++] = v;
+}
+static void median_update_i64(void* base, size_t stride, const uint32_t* gids,
+                              const void* vals, const ray_valid_t* valid, int64_t n, acc_arena_t* a){
+    (void)a; const int64_t* d=vals;
+    for (int64_t i=0;i<n;i++){ if(!ray_valid_at(valid,i))continue;
+        median_push((median_state*)((char*)base+(size_t)gids[i]*stride),(double)d[i]); }
+}
+static void median_update_f64(void* base, size_t stride, const uint32_t* gids,
+                              const void* vals, const ray_valid_t* valid, int64_t n, acc_arena_t* a){
+    (void)a; const double* d=vals;
+    for (int64_t i=0;i<n;i++){ if(!ray_valid_at(valid,i))continue;
+        median_push((median_state*)((char*)base+(size_t)gids[i]*stride), d[i]); }
+}
+static void median_merge(void* dd, const void* ss, acc_arena_t* a){ (void)a;
+    median_state* d=dd; const median_state* s=ss;
+    for (int64_t i=0;i<s->len;i++) median_push(d, s->buf[i]); }
+static ray_t* median_final(const void* s, acc_arena_t* a){ (void)a; median_state* st=(median_state*)s;
+    if (st->len==0) return ray_typed_null(-RAY_F64);
+    return ray_f64(ray_median_dbl_inplace(st->buf, st->len)); }
+static void median_destroy(void* s){ median_state* st=s; free(st->buf); st->buf=NULL; st->len=st->cap=0; }
+static const agg_vtable_t MEDIAN_I64 = { .state_size=sizeof(median_state), .kind=ACC_BUFFERED, .out_type=RAY_F64,
+    .init=median_init, .update_batch=median_update_i64, .merge=median_merge, .finalize=median_final, .destroy=median_destroy };
+static const agg_vtable_t MEDIAN_F64 = { .state_size=sizeof(median_state), .kind=ACC_BUFFERED, .out_type=RAY_F64,
+    .init=median_init, .update_batch=median_update_f64, .merge=median_merge, .finalize=median_final, .destroy=median_destroy };
+
 const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
+    if (agg_kind == OP_MEDIAN && in_type == RAY_I64) return &MEDIAN_I64;
+    if (agg_kind == OP_MEDIAN && in_type == RAY_F64) return &MEDIAN_F64;
     if (agg_kind == OP_PEARSON_CORR && in_type == RAY_F64) return &PEARSON_F64;
     if (agg_kind == OP_SUM && in_type == RAY_I64) return &SUM_I64;
     if (agg_kind == OP_COUNT)                     return &COUNT_ANY;
