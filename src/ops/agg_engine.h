@@ -37,7 +37,8 @@ int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t
  * NULL. Caller owns the returned column (ray_release). Returns a ray_error atom
  * on allocation failure. Single-threaded (Phase 1a). */
 ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
-                   const uint32_t* gids, int64_t nrows, int64_t ngroups);
+                   const uint32_t* gids, int64_t nrows, int64_t ngroups,
+                   int64_t kparam);
 
 /* Result column name for a plain-column-input aggregate: input column name
  * (ray_sym_str of in_sym) + per-op suffix (_sum/_count/_mean/_min/_max/...),
