@@ -56,6 +56,13 @@ typedef struct {
                            const uint32_t* gids, const void* vals,
                            const ray_valid_t* valid, int64_t n,
                            acc_arena_t* arena);
+    /* Binary aggregates (e.g. pearson): two value columns. NULL for unary
+     * accumulators (the engine calls update_batch2 when non-NULL). A row
+     * contributes only if BOTH x and y are valid. */
+    void   (*update_batch2)(void* states_base, size_t stride, const uint32_t* gids,
+                            const void* vals_x, const void* vals_y,
+                            const ray_valid_t* valid_x, const ray_valid_t* valid_y,
+                            int64_t n, acc_arena_t* arena);
     void   (*merge)       (void* dst, const void* src, acc_arena_t* arena);
     ray_t* (*finalize)    (const void* state, acc_arena_t* arena);
 } agg_vtable_t;
