@@ -187,6 +187,21 @@ static void agg_local_destroy(agg_local_t* loc) {
     loc->ht = NULL; loc->first_row = NULL; loc->states = NULL;
 }
 
+/* Run vt->destroy on every init'd per-group state in `loc` for buffered
+ * accumulators (destroy != NULL), then free the slab.  Safe to call once a
+ * local/global table's groups have been merged/finalized: streaming accs
+ * (destroy == NULL) are skipped, and the call is idempotent on the slab via
+ * agg_local_destroy nulling the pointers (but must not be invoked twice on the
+ * same live buffered state — each caller below destroys a given table once). */
+static void agg_table_destroy(agg_local_t* loc, const agg_vtable_t** vts,
+                              const size_t* off, size_t block, uint8_t n_aggs) {
+    for (uint8_t a = 0; a < n_aggs; a++)
+        if (vts[a]->destroy)
+            for (int64_t gg = 0; gg < loc->ng; gg++)
+                vts[a]->destroy(loc->states + (size_t)gg * block + off[a]);
+    agg_local_destroy(loc);
+}
+
 /* Context shared (read-only) across workers; per-worker writes go to locals[wid]. */
 typedef struct {
     ray_t**            key_cols;
@@ -338,7 +353,9 @@ static ray_t* exec_group_v2_parallel(
 
     for (uint32_t w = 0; w < nw; w++)
         if (locals[w].oom) {
-            for (uint32_t i = 0; i < nw; i++) agg_local_destroy(&locals[i]);
+            /* Phase A ran: workers may hold init'd buffered group states. */
+            for (uint32_t i = 0; i < nw; i++)
+                agg_table_destroy(&locals[i], vts, off, block, n_aggs);
             free(locals);
             return ray_error("oom", NULL);
         }
@@ -346,8 +363,9 @@ static ray_t* exec_group_v2_parallel(
     /* ── Phase B: merge per-worker locals into a global table (serial) ── */
     agg_local_t gt = {0};
     if (agg_local_init(&gt, cap, htcap, (int64_t)block) != 0) {
-        agg_local_destroy(&gt);
-        for (uint32_t i = 0; i < nw; i++) agg_local_destroy(&locals[i]);
+        agg_local_destroy(&gt);   /* gt init failed: no init'd states in gt */
+        for (uint32_t i = 0; i < nw; i++)
+            agg_table_destroy(&locals[i], vts, off, block, n_aggs);
         free(locals);
         return ray_error("oom", NULL);
     }
@@ -384,15 +402,26 @@ static ray_t* exec_group_v2_parallel(
     }
     int64_t ng = gt.ng;
 
-    /* Phase A locals no longer needed past the merge. */
-    for (uint32_t i = 0; i < nw; i++) agg_local_destroy(&locals[i]);
+    /* Phase A locals no longer needed past the merge.  Destroy each init'd local
+     * per-group state for buffered accumulators (merge copied values into gt) so
+     * the local buffers don't leak; do it BEFORE freeing the slabs.  After this
+     * point, only gt holds live buffered state — every later path (success +
+     * error) destroys gt exactly once and need not touch locals again. */
+    for (uint32_t i = 0; i < nw; i++) {
+        for (uint8_t a = 0; a < n_aggs; a++)
+            if (vts[a]->destroy)
+                for (int64_t lg = 0; lg < locals[i].ng; lg++)
+                    vts[a]->destroy(locals[i].states + (size_t)lg * block + off[a]);
+        agg_local_destroy(&locals[i]);
+    }
     free(locals);
 
     /* ── Phase C: order by first_row, emit key + agg columns ── */
     int64_t* order = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
     int64_t* first_row_ordered = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
     if (!order || !first_row_ordered) {
-        free(order); free(first_row_ordered); agg_local_destroy(&gt);
+        free(order); free(first_row_ordered);
+        agg_table_destroy(&gt, vts, off, block, n_aggs);
         return ray_error("oom", NULL);
     }
     /* Order group indices by first_row ascending.  first_row is distinct across
@@ -401,7 +430,8 @@ static ray_t* exec_group_v2_parallel(
     {
         agg_fr_pair_t* pairs = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(agg_fr_pair_t));
         if (!pairs) {
-            free(order); free(first_row_ordered); agg_local_destroy(&gt);
+            free(order); free(first_row_ordered);
+            agg_table_destroy(&gt, vts, off, block, n_aggs);
             return ray_error("oom", NULL);
         }
         for (int64_t i = 0; i < ng; i++) { pairs[i].fr = gt.first_row[i]; pairs[i].idx = i; }
@@ -415,14 +445,16 @@ static ray_t* exec_group_v2_parallel(
 
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
-        free(order); free(first_row_ordered); agg_local_destroy(&gt);
+        free(order); free(first_row_ordered);
+        agg_table_destroy(&gt, vts, off, block, n_aggs);
         return result ? result : ray_error("oom", NULL);
     }
 
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_t* kc = agg_gather_key_col(key_cols[k], first_row_ordered, ng);
         if (!kc || RAY_IS_ERR(kc)) {
-            free(order); free(first_row_ordered); agg_local_destroy(&gt);
+            free(order); free(first_row_ordered);
+            agg_table_destroy(&gt, vts, off, block, n_aggs);
             ray_release(result); return kc ? kc : ray_error("oom", NULL);
         }
         result = ray_table_add_col(result, key_syms[k], kc);
@@ -432,7 +464,8 @@ static ray_t* exec_group_v2_parallel(
     for (uint8_t a = 0; a < n_aggs; a++) {
         ray_t* out = ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
-            free(order); free(first_row_ordered); agg_local_destroy(&gt);
+            free(order); free(first_row_ordered);
+            agg_table_destroy(&gt, vts, off, block, n_aggs);
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
         out->len = ng;
@@ -446,7 +479,8 @@ static ray_t* exec_group_v2_parallel(
         ray_release(out);
     }
 
-    free(order); free(first_row_ordered); agg_local_destroy(&gt);
+    free(order); free(first_row_ordered);
+    agg_table_destroy(&gt, vts, off, block, n_aggs);
     return result;
 }
 
@@ -552,12 +586,18 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
     vt->update_batch(states, vt->state_size, gids, vals, &valid, nrows, NULL);
 
     ray_t* out = ray_vec_new(vt->out_type, ngroups);
-    if (!out || RAY_IS_ERR(out)) { free(states); return ray_error("oom", NULL); }
+    if (!out || RAY_IS_ERR(out)) {
+        if (vt->destroy)
+            for (int64_t gi = 0; gi < ngroups; gi++)
+                vt->destroy(states + (size_t)gi * vt->state_size);
+        free(states); return ray_error("oom", NULL);
+    }
     out->len = ngroups;
     for (int64_t gi = 0; gi < ngroups; gi++) {
         ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL);
         agg_put_cell(out, gi, cell);
         ray_release(cell);
+        if (vt->destroy) vt->destroy(states + (size_t)gi * vt->state_size);
     }
     free(states);
     return out;
@@ -581,12 +621,18 @@ ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
                       ray_data(x_col), ray_data(y_col), &vx, &vy, nrows, NULL);
 
     ray_t* out = ray_vec_new(vt->out_type, ngroups);
-    if (!out || RAY_IS_ERR(out)) { free(states); return ray_error("oom", NULL); }
+    if (!out || RAY_IS_ERR(out)) {
+        if (vt->destroy)
+            for (int64_t gi = 0; gi < ngroups; gi++)
+                vt->destroy(states + (size_t)gi * vt->state_size);
+        free(states); return ray_error("oom", NULL);
+    }
     out->len = ngroups;
     for (int64_t gi = 0; gi < ngroups; gi++) {
         ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL);
         agg_put_cell(out, gi, cell);
         ray_release(cell);
+        if (vt->destroy) vt->destroy(states + (size_t)gi * vt->state_size);
     }
     free(states);
     return out;
