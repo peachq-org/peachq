@@ -14,6 +14,9 @@ bool ray_agg_engine_v2 = false;   /* knob; default off */
 static inline int64_t agg_read_key_i64(ray_t* col, const void* data, int64_t row);
 /* Write a finalized scalar cell into output column slot i, marking nulls. */
 static void agg_put_cell(ray_t* out, int64_t i, ray_t* cell);
+/* Binary-aggregate (pearson) serial driver; defined below agg_run_one. */
+ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
+                       const uint32_t* gids, int64_t nrows, int64_t ngroups);
 
 bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     ray_op_ext_t* ext = find_ext(g, op->id);
@@ -40,8 +43,18 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     /* every aggregate must be a registry-resolvable plain-column scan */
     for (uint8_t a = 0; a < ext->n_aggs; a++) {
-        if (ext->agg_ins2 && ext->agg_ins2[a]) return false;   /* binary agg (pearson) — defer */
-        if (ext->agg_k   && ext->agg_k[a])    return false;    /* holistic K (top/bot) — defer */
+        if (ext->agg_k && ext->agg_k[a]) return false;            /* holistic K deferred */
+        if (ext->agg_ins2 && ext->agg_ins2[a]) {
+            if (ext->agg_ops[a] != OP_PEARSON_CORR) return false; /* only pearson in 2b */
+            ray_op_t* xin = ext->agg_ins[a]; ray_op_t* yin = ext->agg_ins2[a];
+            if (!xin || xin->opcode != OP_SCAN || !yin || yin->opcode != OP_SCAN) return false;
+            ray_op_ext_t* xe = find_ext(g, xin->id); ray_op_ext_t* ye = find_ext(g, yin->id);
+            ray_t* xc = xe ? ray_table_get_col(tbl, xe->sym) : NULL;
+            ray_t* yc = ye ? ray_table_get_col(tbl, ye->sym) : NULL;
+            if (!xc || !yc || xc->type != RAY_F64 || yc->type != RAY_F64) return false;  /* 2b: F64 only */
+            if (!agg_resolve(OP_PEARSON_CORR, RAY_F64)) return false;
+            continue;  /* admitted */
+        }
         if (ext->agg_ops[a] == OP_COUNT) {
             /* count: needs no typed input column */
             if (!agg_resolve(OP_COUNT, RAY_I64)) return false;
@@ -187,6 +200,11 @@ typedef struct {
     const int8_t*      val_types;  /* [n_aggs] */
     const bool*        val_hasnull;/* [n_aggs] */
     const uint8_t*     val_esz;    /* [n_aggs] element size or 0 (COUNT) */
+    /* Binary aggregates (pearson): second value column.  NULL/0 for unary. */
+    const void**       val2_data;  /* [n_aggs] */
+    const int8_t*      val2_types; /* [n_aggs] */
+    const bool*        val2_hasnull;/* [n_aggs] */
+    const uint8_t*     val2_esz;   /* [n_aggs] */
     agg_local_t*       locals;     /* [nw] */
 } agg_par_ctx_t;
 
@@ -235,13 +253,22 @@ static void agg_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) 
     }
 
     for (uint8_t a = 0; a < c->n_aggs; a++) {
-        const void* vals = (c->val_data[a])
-            ? (const void*)((const char*)c->val_data[a] + (size_t)start * c->val_esz[a])
-            : NULL;
-        ray_valid_t valid = { vals, c->val_types[a],
-                              c->val_data[a] ? c->val_hasnull[a] : false };
-        c->vts[a]->update_batch(loc->states + c->off[a], c->block,
-                                cgid, vals, &valid, n, NULL);
+        if (c->vts[a]->update_batch2) {                 /* binary agg (pearson) */
+            const void* vx = (const char*)c->val_data[a]  + (size_t)start * c->val_esz[a];
+            const void* vy = (const char*)c->val2_data[a] + (size_t)start * c->val2_esz[a];
+            ray_valid_t valid_x = { vx, c->val_types[a],  c->val_hasnull[a] };
+            ray_valid_t valid_y = { vy, c->val2_types[a], c->val2_hasnull[a] };
+            c->vts[a]->update_batch2(loc->states + c->off[a], c->block, cgid,
+                                     vx, vy, &valid_x, &valid_y, n, NULL);
+        } else {
+            const void* vals = (c->val_data[a])
+                ? (const void*)((const char*)c->val_data[a] + (size_t)start * c->val_esz[a])
+                : NULL;
+            ray_valid_t valid = { vals, c->val_types[a],
+                                  c->val_data[a] ? c->val_hasnull[a] : false };
+            c->vts[a]->update_batch(loc->states + c->off[a], c->block,
+                                    cgid, vals, &valid, n, NULL);
+        }
     }
     free(cgid);
 }
@@ -262,6 +289,7 @@ static ray_t* exec_group_v2_parallel(
 
     /* per-agg value column bases / types (resolve once) */
     const void* val_data[16]; int8_t val_types[16]; bool val_hasnull[16]; uint8_t val_esz[16];
+    const void* val2_data[16]; int8_t val2_types[16]; bool val2_hasnull[16]; uint8_t val2_esz[16];
     int64_t agg_syms[16];
     for (uint8_t a = 0; a < n_aggs; a++) {
         ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
@@ -271,6 +299,13 @@ static ray_t* exec_group_v2_parallel(
         val_types[a]   = vc ? vc->type : RAY_I64;
         val_hasnull[a] = vc ? ((vc->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
         val_esz[a]     = vc ? col_esz(vc) : 0;
+        /* Binary agg (pearson): resolve the y-side column from agg_ins2[a]. */
+        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a])
+            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a]->id)->sym) : NULL;
+        val2_data[a]    = vc2 ? ray_data(vc2) : NULL;
+        val2_types[a]   = vc2 ? vc2->type : RAY_I64;
+        val2_hasnull[a] = vc2 ? ((vc2->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
+        val2_esz[a]     = vc2 ? col_esz(vc2) : 0;
     }
 
     /* per-worker ht sized to next_pow2(2*nrows): over-allocates (each worker
@@ -295,7 +330,9 @@ static ray_t* exec_group_v2_parallel(
         .key_cols = key_cols, .key_data = key_data, .n_keys = n_keys,
         .vts = vts, .off = off, .block = block, .n_aggs = n_aggs,
         .val_data = val_data, .val_types = val_types,
-        .val_hasnull = val_hasnull, .val_esz = val_esz, .locals = locals,
+        .val_hasnull = val_hasnull, .val_esz = val_esz,
+        .val2_data = val2_data, .val2_types = val2_types,
+        .val2_hasnull = val2_hasnull, .val2_esz = val2_esz, .locals = locals,
     };
     ray_pool_dispatch(pool, agg_phaseA_fn, &ctx, nrows);
 
@@ -454,10 +491,19 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     for (uint8_t a = 0; a < ext->n_aggs; a++) {
         ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
-        ray_t* val_col = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
-        int8_t in_type = val_col ? val_col->type : RAY_I64;
-        const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], in_type);
-        ray_t* col = agg_run_one(vt, val_col, groups.gids, nrows, groups.ngroups);
+        ray_t* col;
+        if (ext->agg_ins2 && ext->agg_ins2[a]) {       /* binary agg (pearson) */
+            ray_op_ext_t* ye = find_ext(g, ext->agg_ins2[a]->id);
+            ray_t* x_col = ray_table_get_col(tbl, ie->sym);
+            ray_t* y_col = ray_table_get_col(tbl, ye->sym);
+            const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], x_col->type);
+            col = agg_run_one_bin(vt, x_col, y_col, groups.gids, nrows, groups.ngroups);
+        } else {
+            ray_t* val_col = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
+            int8_t in_type = val_col ? val_col->type : RAY_I64;
+            const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], in_type);
+            col = agg_run_one(vt, val_col, groups.gids, nrows, groups.ngroups);
+        }
         if (!col || RAY_IS_ERR(col)) { free(groups.gids); free(groups.first_row); ray_release(result); return col ? col : ray_error("oom", NULL); }
         int64_t agg_name = agg_result_col_name(ie->sym, ext->agg_ops[a]);
         result = ray_table_add_col(result, agg_name, col);
@@ -504,6 +550,35 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
                           val_col ? ((val_col->attrs & RAY_ATTR_HAS_NULLS) != 0) : false };
     const void* vals = val_col ? ray_data(val_col) : NULL;
     vt->update_batch(states, vt->state_size, gids, vals, &valid, nrows, NULL);
+
+    ray_t* out = ray_vec_new(vt->out_type, ngroups);
+    if (!out || RAY_IS_ERR(out)) { free(states); return ray_error("oom", NULL); }
+    out->len = ngroups;
+    for (int64_t gi = 0; gi < ngroups; gi++) {
+        ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL);
+        agg_put_cell(out, gi, cell);
+        ray_release(cell);
+    }
+    free(states);
+    return out;
+}
+
+/* Binary-aggregate (pearson) serial driver: mirrors agg_run_one but feeds two
+ * value columns through vt->update_batch2.  A row contributes only when both x
+ * and y are valid (the accumulator enforces this via valid_x/valid_y). */
+ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
+                       const uint32_t* gids, int64_t nrows, int64_t ngroups) {
+    char* states = calloc((size_t)(ngroups > 0 ? ngroups : 1), vt->state_size);
+    if (!states) return ray_error("oom", NULL);
+    for (int64_t gi = 0; gi < ngroups; gi++)
+        vt->init(states + (size_t)gi * vt->state_size);
+
+    ray_valid_t vx = { ray_data(x_col), x_col->type,
+                       (x_col->attrs & RAY_ATTR_HAS_NULLS) != 0 };
+    ray_valid_t vy = { ray_data(y_col), y_col->type,
+                       (y_col->attrs & RAY_ATTR_HAS_NULLS) != 0 };
+    vt->update_batch2(states, vt->state_size, gids,
+                      ray_data(x_col), ray_data(y_col), &vx, &vy, nrows, NULL);
 
     ray_t* out = ray_vec_new(vt->out_type, ngroups);
     if (!out || RAY_IS_ERR(out)) { free(states); return ray_error("oom", NULL); }
