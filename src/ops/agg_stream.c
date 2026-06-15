@@ -216,6 +216,134 @@ static const agg_vtable_t AVG_F64 = {
     .merge = avg_f64_merge, .finalize = avg_f64_final,
 };
 
+/* ---- variance family, I64 (sumsq as int64 unsigned-wrap; formula group.c:2190) -- */
+typedef struct { double sum; int64_t sumsq; int64_t cnt; } var_i64_state;
+static void var_i64_init(void* s) { var_i64_state* st = s; st->sum = 0; st->sumsq = 0; st->cnt = 0; }
+static void var_i64_update(void* base, size_t stride, const uint32_t* gids,
+                           const void* vals, const ray_valid_t* valid,
+                           int64_t n, acc_arena_t* a) {
+    (void)a; const int64_t* d = (const int64_t*)vals;
+    for (int64_t i = 0; i < n; i++) {
+        if (!ray_valid_at(valid, i)) continue;
+        var_i64_state* st = (var_i64_state*)((char*)base + (size_t)gids[i]*stride);
+        int64_t v = d[i]; st->sum += (double)v;
+        st->sumsq = (int64_t)((uint64_t)st->sumsq + (uint64_t)v*(uint64_t)v); /* wrap: group.c:185 */
+        st->cnt++;
+    }
+}
+static void var_i64_merge(void* dd, const void* ss, acc_arena_t* a) {
+    (void)a; var_i64_state* d = dd; const var_i64_state* s = ss;
+    d->sum += s->sum; d->sumsq = (int64_t)((uint64_t)d->sumsq + (uint64_t)s->sumsq); d->cnt += s->cnt;
+}
+static inline double var_i64_varpop(const var_i64_state* st) {
+    double mean = st->sum / (double)st->cnt;
+    double vp = (double)st->sumsq / (double)st->cnt - mean*mean;
+    return vp < 0 ? 0 : vp;
+}
+static ray_t* fin_var_pop_i64(const void* s, acc_arena_t* a) {
+    (void)a; const var_i64_state* st = s;
+    if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
+    return ray_f64(var_i64_varpop(st));
+}
+static ray_t* fin_var_i64(const void* s, acc_arena_t* a) {
+    (void)a; const var_i64_state* st = s;
+    if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
+    return ray_f64(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0));
+}
+static ray_t* fin_stddev_pop_i64(const void* s, acc_arena_t* a) {
+    (void)a; const var_i64_state* st = s;
+    if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
+    return ray_f64(sqrt(var_i64_varpop(st)));
+}
+static ray_t* fin_stddev_i64(const void* s, acc_arena_t* a) {
+    (void)a; const var_i64_state* st = s;
+    if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
+    return ray_f64(sqrt(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
+}
+static const agg_vtable_t VAR_I64 = {
+    .state_size = sizeof(var_i64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_i64_init, .update_batch = var_i64_update,
+    .merge = var_i64_merge, .finalize = fin_var_i64,
+};
+static const agg_vtable_t VAR_POP_I64 = {
+    .state_size = sizeof(var_i64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_i64_init, .update_batch = var_i64_update,
+    .merge = var_i64_merge, .finalize = fin_var_pop_i64,
+};
+static const agg_vtable_t STDDEV_I64 = {
+    .state_size = sizeof(var_i64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_i64_init, .update_batch = var_i64_update,
+    .merge = var_i64_merge, .finalize = fin_stddev_i64,
+};
+static const agg_vtable_t STDDEV_POP_I64 = {
+    .state_size = sizeof(var_i64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_i64_init, .update_batch = var_i64_update,
+    .merge = var_i64_merge, .finalize = fin_stddev_pop_i64,
+};
+
+/* ---- variance family, F64 (sumsq as double) -------------------------- */
+typedef struct { double sum; double sumsq; int64_t cnt; } var_f64_state;
+static void var_f64_init(void* s) { var_f64_state* st = s; st->sum = 0; st->sumsq = 0; st->cnt = 0; }
+static void var_f64_update(void* base, size_t stride, const uint32_t* gids,
+                           const void* vals, const ray_valid_t* valid,
+                           int64_t n, acc_arena_t* a) {
+    (void)a; const double* d = (const double*)vals;
+    for (int64_t i = 0; i < n; i++) {
+        if (!ray_valid_at(valid, i)) continue;
+        var_f64_state* st = (var_f64_state*)((char*)base + (size_t)gids[i]*stride);
+        double v = d[i]; st->sum += v; st->sumsq += v*v; st->cnt++;
+    }
+}
+static void var_f64_merge(void* dd, const void* ss, acc_arena_t* a) {
+    (void)a; var_f64_state* d = dd; const var_f64_state* s = ss;
+    d->sum += s->sum; d->sumsq += s->sumsq; d->cnt += s->cnt;
+}
+static inline double var_f64_varpop(const var_f64_state* st) {
+    double mean = st->sum / (double)st->cnt;
+    double vp = st->sumsq / (double)st->cnt - mean*mean;
+    return vp < 0 ? 0 : vp;
+}
+static ray_t* fin_var_pop_f64(const void* s, acc_arena_t* a) {
+    (void)a; const var_f64_state* st = s;
+    if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
+    return ray_f64(var_f64_varpop(st));
+}
+static ray_t* fin_var_f64(const void* s, acc_arena_t* a) {
+    (void)a; const var_f64_state* st = s;
+    if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
+    return ray_f64(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0));
+}
+static ray_t* fin_stddev_pop_f64(const void* s, acc_arena_t* a) {
+    (void)a; const var_f64_state* st = s;
+    if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
+    return ray_f64(sqrt(var_f64_varpop(st)));
+}
+static ray_t* fin_stddev_f64(const void* s, acc_arena_t* a) {
+    (void)a; const var_f64_state* st = s;
+    if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
+    return ray_f64(sqrt(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
+}
+static const agg_vtable_t VAR_F64 = {
+    .state_size = sizeof(var_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_f64_init, .update_batch = var_f64_update,
+    .merge = var_f64_merge, .finalize = fin_var_f64,
+};
+static const agg_vtable_t VAR_POP_F64 = {
+    .state_size = sizeof(var_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_f64_init, .update_batch = var_f64_update,
+    .merge = var_f64_merge, .finalize = fin_var_pop_f64,
+};
+static const agg_vtable_t STDDEV_F64 = {
+    .state_size = sizeof(var_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_f64_init, .update_batch = var_f64_update,
+    .merge = var_f64_merge, .finalize = fin_stddev_f64,
+};
+static const agg_vtable_t STDDEV_POP_F64 = {
+    .state_size = sizeof(var_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = var_f64_init, .update_batch = var_f64_update,
+    .merge = var_f64_merge, .finalize = fin_stddev_pop_f64,
+};
+
 const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
     if (agg_kind == OP_SUM && in_type == RAY_I64) return &SUM_I64;
     if (agg_kind == OP_COUNT)                     return &COUNT_ANY;
@@ -225,5 +353,16 @@ const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
     if (agg_kind == OP_MIN && in_type == RAY_F64) return &MIN_F64;
     if (agg_kind == OP_MAX && in_type == RAY_F64) return &MAX_F64;
     if (agg_kind == OP_AVG && in_type == RAY_F64) return &AVG_F64;
+    if (in_type == RAY_I64) {
+        if (agg_kind == OP_VAR) return &VAR_I64;
+        if (agg_kind == OP_VAR_POP) return &VAR_POP_I64;
+        if (agg_kind == OP_STDDEV) return &STDDEV_I64;
+        if (agg_kind == OP_STDDEV_POP) return &STDDEV_POP_I64;
+    } else if (in_type == RAY_F64) {
+        if (agg_kind == OP_VAR) return &VAR_F64;
+        if (agg_kind == OP_VAR_POP) return &VAR_POP_F64;
+        if (agg_kind == OP_STDDEV) return &STDDEV_F64;
+        if (agg_kind == OP_STDDEV_POP) return &STDDEV_POP_F64;
+    }
     return NULL;
 }
