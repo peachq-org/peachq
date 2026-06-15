@@ -344,7 +344,43 @@ static const agg_vtable_t STDDEV_POP_F64 = {
     .merge = var_f64_merge, .finalize = fin_stddev_pop_f64,
 };
 
+/* ---- pearson correlation, F64 (first BINARY aggregate: x,y) ----------- */
+typedef struct { double sx, sy, sxx, syy, sxy; int64_t n; } pearson_state;
+static void pearson_init(void* s) {
+    pearson_state* st = s; st->sx = st->sy = st->sxx = st->syy = st->sxy = 0; st->n = 0;
+}
+static void pearson_update2(void* base, size_t stride, const uint32_t* gids,
+                            const void* vx, const void* vy,
+                            const ray_valid_t* valx, const ray_valid_t* valy,
+                            int64_t n, acc_arena_t* a) {
+    (void)a; const double* x = vx; const double* y = vy;
+    for (int64_t i = 0; i < n; i++) {
+        if (!ray_valid_at(valx, i) || !ray_valid_at(valy, i)) continue;
+        pearson_state* st = (pearson_state*)((char*)base + (size_t)gids[i]*stride);
+        double xi = x[i], yi = y[i];
+        st->sx += xi; st->sy += yi; st->sxx += xi*xi; st->syy += yi*yi; st->sxy += xi*yi; st->n++;
+    }
+}
+static void pearson_merge(void* dd, const void* ss, acc_arena_t* a) {
+    (void)a; pearson_state* d = dd; const pearson_state* s = ss;
+    d->sx += s->sx; d->sy += s->sy; d->sxx += s->sxx; d->syy += s->syy; d->sxy += s->sxy; d->n += s->n;
+}
+static ray_t* pearson_final(const void* s, acc_arena_t* a) {
+    (void)a; const pearson_state* st = s;
+    double dn = (double)st->n;
+    double num = dn*st->sxy - st->sx*st->sy,
+           dx  = dn*st->sxx - st->sx*st->sx,
+           dy  = dn*st->syy - st->sy*st->sy;
+    return ray_f64(num / sqrt(dx*dy));
+}
+static const agg_vtable_t PEARSON_F64 = {
+    .state_size = sizeof(pearson_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
+    .init = pearson_init, .update_batch2 = pearson_update2,
+    .merge = pearson_merge, .finalize = pearson_final,
+};
+
 const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
+    if (agg_kind == OP_PEARSON_CORR && in_type == RAY_F64) return &PEARSON_F64;
     if (agg_kind == OP_SUM && in_type == RAY_I64) return &SUM_I64;
     if (agg_kind == OP_COUNT)                     return &COUNT_ANY;
     if (agg_kind == OP_MIN && in_type == RAY_I64) return &MIN_I64;
