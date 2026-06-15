@@ -44,4 +44,9 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
  * emit_agg_columns' inline naming for the OP_SCAN input case. */
 int64_t agg_result_col_name(int64_t in_sym, uint16_t agg_op);
 
+/* Build a result key column of src_key_col's type from int-coded group keys
+ * (length n), each written at native width.  SYM adopts the source domain.
+ * Caller owns the returned column (ray_release). */
+ray_t* agg_build_key_col(ray_t* src_key_col, const int64_t* keys, int64_t n);
+
 #endif /* RAY_OPS_AGG_ENGINE_H */

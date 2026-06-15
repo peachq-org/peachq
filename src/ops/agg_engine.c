@@ -2,6 +2,8 @@
 #include "ops/agg_engine.h"
 #include "ops/agg_registry.h"
 #include "ops/ops.h"
+#include "ops/internal.h"  /* col_vec_new, write_col_i64 */
+#include "lang/internal.h" /* sym_domain_rep */
 #include "table/sym.h"    /* ray_read_sym */
 #include <stdlib.h>
 #include <string.h>
@@ -92,9 +94,52 @@ int64_t agg_result_col_name(int64_t in_sym, uint16_t agg_op) {
     return in_sym;
 }
 
+/* Build a result key column of src_key_col's type from int-coded group keys,
+ * storing each at its native width.  For SYM, adopts the source domain so the
+ * intern ids resolve correctly.  Caller owns the returned column. */
+ray_t* agg_build_key_col(ray_t* src_key_col, const int64_t* keys, int64_t n) {
+    ray_t* out = col_vec_new(src_key_col, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    if (out->type == RAY_SYM)
+        ray_sym_vec_adopt_domain(out, sym_domain_rep(src_key_col));
+    out->len = n;
+    void* data = ray_data(out);
+    for (int64_t i = 0; i < n; i++)
+        write_col_i64(data, i, keys[i], out->type, out->attrs);
+    return out;
+}
+
 ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
-    (void)g; (void)op; (void)tbl;
-    return ray_error("nyi", "agg v2: not reachable until gate admits");
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    int64_t nrows = ray_table_nrows(tbl);
+    ray_op_t* key = ext->keys[0];
+    ray_op_ext_t* kext = find_ext(g, key->id);
+    ray_t* key_col = ray_table_get_col(tbl, kext->sym);
+
+    agg_groups_t groups = {0};
+    if (agg_group_keys_i(key_col, &groups) != 0) return ray_error("oom", NULL);
+
+    ray_t* result = ray_table_new(1 + ext->n_aggs);
+    if (!result || RAY_IS_ERR(result)) { free(groups.gids); free(groups.keys); return ray_error("oom", NULL); }
+
+    ray_t* out_key = agg_build_key_col(key_col, groups.keys, groups.ngroups);
+    if (!out_key || RAY_IS_ERR(out_key)) { free(groups.gids); free(groups.keys); ray_release(result); return ray_error("oom", NULL); }
+    result = ray_table_add_col(result, kext->sym, out_key);
+    ray_release(out_key);
+
+    for (uint8_t a = 0; a < ext->n_aggs; a++) {
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_t* val_col = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
+        int8_t in_type = val_col ? val_col->type : RAY_I64;
+        const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], in_type);
+        ray_t* col = agg_run_one(vt, val_col, groups.gids, nrows, groups.ngroups);
+        if (!col || RAY_IS_ERR(col)) { free(groups.gids); free(groups.keys); ray_release(result); return col ? col : ray_error("oom", NULL); }
+        int64_t agg_name = agg_result_col_name(ie->sym, ext->agg_ops[a]);
+        result = ray_table_add_col(result, agg_name, col);
+        ray_release(col);
+    }
+    free(groups.gids); free(groups.keys);
+    return result;
 }
 
 /* Read element `row` of an integer/temporal/SYM column widened to int64. */
