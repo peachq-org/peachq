@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>         /* realloc/free for the buffered median accumulator */
+#include <string.h>         /* memcpy for the top_n/bot_n native buffer */
 
 /* ---- sum, I64 -------------------------------------------------------- */
 typedef struct { int64_t sum; } sum_i64_state;
@@ -413,7 +414,76 @@ static const agg_vtable_t MEDIAN_I64 = { .state_size=sizeof(median_state), .kind
 static const agg_vtable_t MEDIAN_F64 = { .state_size=sizeof(median_state), .kind=ACC_BUFFERED, .out_type=RAY_F64,
     .init=median_init, .update_batch=median_update_f64, .merge=median_merge, .finalize=median_final, .destroy=median_destroy };
 
+/* ---- top_n / bot_n: ACC_BUFFERED, NATIVE-typed buffer, LIST cell output ----
+ * finalize wraps the per-group buffer as a vec and reuses topk_take_vec for
+ * value+order parity with the old engine (top=desc1 largest-first, bot=desc0
+ * smallest-first).  out_type is RAY_LIST: the result cell is a vector of the
+ * native input type (min(K,len) elements, ordered). */
+typedef struct { int64_t* buf; int64_t len; int64_t cap; } topk_i64_state;
+static void topk_i64_init(void* s){ topk_i64_state* st=s; st->buf=NULL; st->len=0; st->cap=0; }
+static inline void topk_i64_push(topk_i64_state* st, int64_t v){
+    if (st->len==st->cap){ int64_t nc=st->cap?st->cap*2:8;
+        int64_t* nb=realloc(st->buf,(size_t)nc*sizeof(int64_t)); st->buf=nb; st->cap=nc; }
+    st->buf[st->len++]=v; }
+static void topk_i64_update(void* base,size_t stride,const uint32_t* gids,const void* vals,
+                            const ray_valid_t* valid,int64_t n,acc_arena_t* a){ (void)a;
+    const int64_t* d=vals;
+    for(int64_t i=0;i<n;i++){ if(!ray_valid_at(valid,i))continue;
+        topk_i64_push((topk_i64_state*)((char*)base+(size_t)gids[i]*stride),d[i]); } }
+static void topk_i64_merge(void* dd,const void* ss,acc_arena_t* a){ (void)a;
+    topk_i64_state* d=dd; const topk_i64_state* s=ss;
+    for(int64_t i=0;i<s->len;i++) topk_i64_push(d,s->buf[i]); }
+static void topk_i64_destroy(void* s){ topk_i64_state* st=s; free(st->buf); st->buf=NULL; st->len=st->cap=0; }
+static ray_t* topk_i64_make(const topk_i64_state* st, int64_t k, uint8_t desc){
+    if (st->len==0) return ray_vec_new(RAY_I64, 0);  /* empty group → 0-len vec */
+    ray_t* v=ray_vec_new(RAY_I64, st->len); v->len=st->len;
+    memcpy(ray_data(v), st->buf, (size_t)st->len*sizeof(int64_t));
+    ray_t* out=topk_take_vec(v, k, desc); ray_release(v);
+    /* k>=len takes the asc/desc fast path → a LAZY handle; the LIST cell must
+     * be a concrete vector, so materialize before handing it back. */
+    if (out && !RAY_IS_ERR(out) && ray_is_lazy(out)) out=ray_lazy_materialize(out);
+    return out; }
+static ray_t* topN_i64_final(const void* s,acc_arena_t* a,int64_t k){ (void)a; return topk_i64_make(s,k,1); }
+static ray_t* botN_i64_final(const void* s,acc_arena_t* a,int64_t k){ (void)a; return topk_i64_make(s,k,0); }
+static const agg_vtable_t TOPK_I64 = { .state_size=sizeof(topk_i64_state), .kind=ACC_BUFFERED, .out_type=RAY_LIST,
+    .init=topk_i64_init, .update_batch=topk_i64_update, .merge=topk_i64_merge, .finalize=topN_i64_final, .destroy=topk_i64_destroy };
+static const agg_vtable_t BOTK_I64 = { .state_size=sizeof(topk_i64_state), .kind=ACC_BUFFERED, .out_type=RAY_LIST,
+    .init=topk_i64_init, .update_batch=topk_i64_update, .merge=topk_i64_merge, .finalize=botN_i64_final, .destroy=topk_i64_destroy };
+
+typedef struct { double* buf; int64_t len; int64_t cap; } topk_f64_state;
+static void topk_f64_init(void* s){ topk_f64_state* st=s; st->buf=NULL; st->len=0; st->cap=0; }
+static inline void topk_f64_push(topk_f64_state* st, double v){
+    if (st->len==st->cap){ int64_t nc=st->cap?st->cap*2:8;
+        double* nb=realloc(st->buf,(size_t)nc*sizeof(double)); st->buf=nb; st->cap=nc; }
+    st->buf[st->len++]=v; }
+static void topk_f64_update(void* base,size_t stride,const uint32_t* gids,const void* vals,
+                            const ray_valid_t* valid,int64_t n,acc_arena_t* a){ (void)a;
+    const double* d=vals;
+    for(int64_t i=0;i<n;i++){ if(!ray_valid_at(valid,i))continue;
+        topk_f64_push((topk_f64_state*)((char*)base+(size_t)gids[i]*stride),d[i]); } }
+static void topk_f64_merge(void* dd,const void* ss,acc_arena_t* a){ (void)a;
+    topk_f64_state* d=dd; const topk_f64_state* s=ss;
+    for(int64_t i=0;i<s->len;i++) topk_f64_push(d,s->buf[i]); }
+static void topk_f64_destroy(void* s){ topk_f64_state* st=s; free(st->buf); st->buf=NULL; st->len=st->cap=0; }
+static ray_t* topk_f64_make(const topk_f64_state* st, int64_t k, uint8_t desc){
+    if (st->len==0) return ray_vec_new(RAY_F64, 0);
+    ray_t* v=ray_vec_new(RAY_F64, st->len); v->len=st->len;
+    memcpy(ray_data(v), st->buf, (size_t)st->len*sizeof(double));
+    ray_t* out=topk_take_vec(v, k, desc); ray_release(v);
+    if (out && !RAY_IS_ERR(out) && ray_is_lazy(out)) out=ray_lazy_materialize(out);
+    return out; }
+static ray_t* topN_f64_final(const void* s,acc_arena_t* a,int64_t k){ (void)a; return topk_f64_make(s,k,1); }
+static ray_t* botN_f64_final(const void* s,acc_arena_t* a,int64_t k){ (void)a; return topk_f64_make(s,k,0); }
+static const agg_vtable_t TOPK_F64 = { .state_size=sizeof(topk_f64_state), .kind=ACC_BUFFERED, .out_type=RAY_LIST,
+    .init=topk_f64_init, .update_batch=topk_f64_update, .merge=topk_f64_merge, .finalize=topN_f64_final, .destroy=topk_f64_destroy };
+static const agg_vtable_t BOTK_F64 = { .state_size=sizeof(topk_f64_state), .kind=ACC_BUFFERED, .out_type=RAY_LIST,
+    .init=topk_f64_init, .update_batch=topk_f64_update, .merge=topk_f64_merge, .finalize=botN_f64_final, .destroy=topk_f64_destroy };
+
 const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
+    if (agg_kind == OP_TOP_N && in_type == RAY_I64) return &TOPK_I64;
+    if (agg_kind == OP_BOT_N && in_type == RAY_I64) return &BOTK_I64;
+    if (agg_kind == OP_TOP_N && in_type == RAY_F64) return &TOPK_F64;
+    if (agg_kind == OP_BOT_N && in_type == RAY_F64) return &BOTK_F64;
     if (agg_kind == OP_MEDIAN && in_type == RAY_I64) return &MEDIAN_I64;
     if (agg_kind == OP_MEDIAN && in_type == RAY_F64) return &MEDIAN_F64;
     if (agg_kind == OP_PEARSON_CORR && in_type == RAY_F64) return &PEARSON_F64;
