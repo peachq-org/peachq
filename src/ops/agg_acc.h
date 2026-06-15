@@ -64,7 +64,9 @@ typedef struct {
                             const ray_valid_t* valid_x, const ray_valid_t* valid_y,
                             int64_t n, acc_arena_t* arena);
     void   (*merge)       (void* dst, const void* src, acc_arena_t* arena);
-    ray_t* (*finalize)    (const void* state, acc_arena_t* arena);
+    /* param: per-aggregate integer parameter (K for top_n/bot_n via ext->agg_k[a];
+     * 0 and ignored for all other aggregates). */
+    ray_t* (*finalize)    (const void* state, acc_arena_t* arena, int64_t param);
     /* Release heap state owned by a per-group state slab. NULL for ACC_STREAMING.
      * The engine calls this on every init'd state once it won't be used again. */
     void   (*destroy)(void* state);

@@ -16,7 +16,8 @@ static inline int64_t agg_read_key_i64(ray_t* col, const void* data, int64_t row
 static void agg_put_cell(ray_t* out, int64_t i, ray_t* cell);
 /* Binary-aggregate (pearson) serial driver; defined below agg_run_one. */
 ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
-                       const uint32_t* gids, int64_t nrows, int64_t ngroups);
+                       const uint32_t* gids, int64_t nrows, int64_t ngroups,
+                       int64_t kparam);
 
 bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     ray_op_ext_t* ext = find_ext(g, op->id);
@@ -469,8 +470,9 @@ static ray_t* exec_group_v2_parallel(
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
         out->len = ng;
+        int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
         for (int64_t i = 0; i < ng; i++) {
-            ray_t* cell = vts[a]->finalize(gt.states + (size_t)order[i] * block + off[a], NULL);
+            ray_t* cell = vts[a]->finalize(gt.states + (size_t)order[i] * block + off[a], NULL, kparam);
             agg_put_cell(out, i, cell);
             ray_release(cell);
         }
@@ -525,18 +527,19 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     for (uint8_t a = 0; a < ext->n_aggs; a++) {
         ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
         ray_t* col;
         if (ext->agg_ins2 && ext->agg_ins2[a]) {       /* binary agg (pearson) */
             ray_op_ext_t* ye = find_ext(g, ext->agg_ins2[a]->id);
             ray_t* x_col = ray_table_get_col(tbl, ie->sym);
             ray_t* y_col = ray_table_get_col(tbl, ye->sym);
             const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], x_col->type);
-            col = agg_run_one_bin(vt, x_col, y_col, groups.gids, nrows, groups.ngroups);
+            col = agg_run_one_bin(vt, x_col, y_col, groups.gids, nrows, groups.ngroups, kparam);
         } else {
             ray_t* val_col = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
             int8_t in_type = val_col ? val_col->type : RAY_I64;
             const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], in_type);
-            col = agg_run_one(vt, val_col, groups.gids, nrows, groups.ngroups);
+            col = agg_run_one(vt, val_col, groups.gids, nrows, groups.ngroups, kparam);
         }
         if (!col || RAY_IS_ERR(col)) { free(groups.gids); free(groups.first_row); ray_release(result); return col ? col : ray_error("oom", NULL); }
         int64_t agg_name = agg_result_col_name(ie->sym, ext->agg_ops[a]);
@@ -573,7 +576,8 @@ static void agg_put_cell(ray_t* out, int64_t i, ray_t* cell) {
 }
 
 ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
-                   const uint32_t* gids, int64_t nrows, int64_t ngroups) {
+                   const uint32_t* gids, int64_t nrows, int64_t ngroups,
+                   int64_t kparam) {
     char* states = calloc((size_t)(ngroups > 0 ? ngroups : 1), vt->state_size);
     if (!states) return ray_error("oom", NULL);
     for (int64_t gi = 0; gi < ngroups; gi++)
@@ -594,7 +598,7 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
     }
     out->len = ngroups;
     for (int64_t gi = 0; gi < ngroups; gi++) {
-        ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL);
+        ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL, kparam);
         agg_put_cell(out, gi, cell);
         ray_release(cell);
         if (vt->destroy) vt->destroy(states + (size_t)gi * vt->state_size);
@@ -607,7 +611,8 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
  * value columns through vt->update_batch2.  A row contributes only when both x
  * and y are valid (the accumulator enforces this via valid_x/valid_y). */
 ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
-                       const uint32_t* gids, int64_t nrows, int64_t ngroups) {
+                       const uint32_t* gids, int64_t nrows, int64_t ngroups,
+                       int64_t kparam) {
     char* states = calloc((size_t)(ngroups > 0 ? ngroups : 1), vt->state_size);
     if (!states) return ray_error("oom", NULL);
     for (int64_t gi = 0; gi < ngroups; gi++)
@@ -629,7 +634,7 @@ ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
     }
     out->len = ngroups;
     for (int64_t gi = 0; gi < ngroups; gi++) {
-        ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL);
+        ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL, kparam);
         agg_put_cell(out, gi, cell);
         ray_release(cell);
         if (vt->destroy) vt->destroy(states + (size_t)gi * vt->state_size);
