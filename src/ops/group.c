@@ -3993,36 +3993,10 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
         ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
         int64_t name_id;
         if (agg_ext && agg_ext->base.opcode == OP_SCAN) {
-            ray_t* name_atom = ray_sym_str(agg_ext->sym);
-            const char* base = name_atom ? ray_str_ptr(name_atom) : NULL;
-            size_t blen = base ? ray_str_len(name_atom) : 0;
-            const char* sfx = "";
-            size_t slen = 0;
-            switch (agg_op) {
-                case OP_SUM:   sfx = "_sum";   slen = 4; break;
-                case OP_PROD:  sfx = "_prod";  slen = 5; break;
-                case OP_COUNT: sfx = "_count"; slen = 6; break;
-                case OP_AVG:   sfx = "_mean";  slen = 5; break;
-                case OP_MIN:   sfx = "_min";   slen = 4; break;
-                case OP_MAX:   sfx = "_max";   slen = 4; break;
-                case OP_FIRST: sfx = "_first"; slen = 6; break;
-                case OP_LAST:  sfx = "_last";  slen = 5; break;
-                case OP_STDDEV:     sfx = "_stddev";     slen = 7; break;
-                case OP_STDDEV_POP: sfx = "_stddev_pop"; slen = 11; break;
-                case OP_VAR:        sfx = "_var";        slen = 4; break;
-                case OP_VAR_POP:    sfx = "_var_pop";    slen = 8; break;
-                case OP_MEDIAN:     sfx = "_median";     slen = 7; break;
-                case OP_TOP_N:      sfx = "_top";        slen = 4; break;
-                case OP_BOT_N:      sfx = "_bot";        slen = 4; break;
-            }
-            char buf[256];
-            if (base && blen + slen < sizeof(buf)) {
-                memcpy(buf, base, blen);
-                memcpy(buf + blen, sfx, slen);
-                name_id = ray_sym_intern(buf, blen + slen);
-            } else {
-                name_id = agg_ext->sym;
-            }
+            /* Shared with exec_group_v2 (agg_engine.c) — parity by
+             * construction.  Same input-name + per-op-suffix logic, same
+             * 256-byte buffer overflow fallback to the input sym. */
+            name_id = agg_result_col_name(agg_ext->sym, agg_op);
         } else {
             /* Expression agg input — synthetic name like "_e0_sum" */
             char nbuf[32];
@@ -9311,36 +9285,10 @@ build_from_final_ht:
         ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
         int64_t name_id;
         if (agg_ext && agg_ext->base.opcode == OP_SCAN) {
-            ray_t* name_atom = ray_sym_str(agg_ext->sym);
-            const char* base = name_atom ? ray_str_ptr(name_atom) : NULL;
-            size_t blen = base ? ray_str_len(name_atom) : 0;
-            const char* sfx = "";
-            size_t slen = 0;
-            switch (agg_op) {
-                case OP_SUM:   sfx = "_sum";   slen = 4; break;
-                case OP_PROD:  sfx = "_prod";  slen = 5; break;
-                case OP_COUNT: sfx = "_count"; slen = 6; break;
-                case OP_AVG:   sfx = "_mean";  slen = 5; break;
-                case OP_MIN:   sfx = "_min";   slen = 4; break;
-                case OP_MAX:   sfx = "_max";   slen = 4; break;
-                case OP_FIRST: sfx = "_first"; slen = 6; break;
-                case OP_LAST:  sfx = "_last";  slen = 5; break;
-                case OP_STDDEV:     sfx = "_stddev";     slen = 7; break;
-                case OP_STDDEV_POP: sfx = "_stddev_pop"; slen = 11; break;
-                case OP_VAR:        sfx = "_var";        slen = 4; break;
-                case OP_VAR_POP:    sfx = "_var_pop";    slen = 8; break;
-                case OP_MEDIAN:     sfx = "_median";     slen = 7; break;
-                case OP_TOP_N:      sfx = "_top";        slen = 4; break;
-                case OP_BOT_N:      sfx = "_bot";        slen = 4; break;
-            }
-            char buf[256];
-            if (base && blen + slen < sizeof(buf)) {
-                memcpy(buf, base, blen);
-                memcpy(buf + blen, sfx, slen);
-                name_id = ray_sym_intern(buf, blen + slen);
-            } else {
-                name_id = agg_ext->sym;
-            }
+            /* Shared with exec_group_v2 (agg_engine.c) — parity by
+             * construction.  Same input-name + per-op-suffix logic, same
+             * 256-byte buffer overflow fallback to the input sym. */
+            name_id = agg_result_col_name(agg_ext->sym, agg_op);
         } else {
             /* Expression agg input — synthetic name like "_e0_sum" */
             char nbuf[32];

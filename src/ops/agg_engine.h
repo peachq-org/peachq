@@ -38,4 +38,10 @@ int agg_group_keys_i(ray_t* key_col, agg_groups_t* out);
 ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
                    const uint32_t* gids, int64_t nrows, int64_t ngroups);
 
+/* Result column name for a plain-column-input aggregate: input column name
+ * (ray_sym_str of in_sym) + per-op suffix (_sum/_count/_mean/_min/_max/...),
+ * interned.  Falls back to in_sym on buffer overflow.  Behavior-identical to
+ * emit_agg_columns' inline naming for the OP_SCAN input case. */
+int64_t agg_result_col_name(int64_t in_sym, uint16_t agg_op);
+
 #endif /* RAY_OPS_AGG_ENGINE_H */
