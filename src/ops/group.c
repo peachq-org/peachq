@@ -27,6 +27,7 @@
 #include "ops/hll.h"        /* approximate count-distinct via HyperLogLog */
 #include "lang/internal.h"  /* for ray_median_dbl_inplace */
 #include "table/domain.h"   /* sym-domain resolution (ray_sym_domain_count) */
+#include "ops/agg_engine.h" /* v2 agg engine routing gate (ray_agg_engine_v2) */
 
 /* ============================================================================
  * Reduction execution
@@ -5507,6 +5508,9 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
 
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return ray_error("nyi", NULL);
+
+    if (ray_agg_engine_v2 && agg_v2_can_handle(g, op, tbl))
+        return exec_group_v2(g, op, tbl);
 
     int64_t nrows = ray_table_nrows(tbl);
     uint8_t n_keys = ext->n_keys;
