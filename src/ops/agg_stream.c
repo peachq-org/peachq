@@ -31,8 +31,8 @@ static void sum_i64_merge(void* dst, const void* src, acc_arena_t* a) {
                                          + (uint64_t)((const sum_i64_state*)src)->sum);
 }
 
-static ray_t* sum_i64_final(const void* s, acc_arena_t* a) {
-    (void)a; return ray_i64(((const sum_i64_state*)s)->sum);
+static ray_t* sum_i64_final(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; return ray_i64(((const sum_i64_state*)s)->sum);
 }
 
 static const agg_vtable_t SUM_I64 = {
@@ -56,8 +56,8 @@ static void count_update(void* base, size_t stride, const uint32_t* gids,
 static void count_merge(void* d, const void* s, acc_arena_t* a) {
     (void)a; ((count_state*)d)->n += ((const count_state*)s)->n;
 }
-static ray_t* count_final(const void* s, acc_arena_t* a) {
-    (void)a; return ray_i64(((const count_state*)s)->n);
+static ray_t* count_final(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; return ray_i64(((const count_state*)s)->n);
 }
 static const agg_vtable_t COUNT_ANY = {
     .state_size = sizeof(count_state), .kind = ACC_STREAMING, .out_type = RAY_I64,
@@ -101,8 +101,8 @@ static void max_i64_merge(void* d, const void* s, acc_arena_t* a) {
     if (src->cnt && src->v > dst->v) { dst->v = src->v; }
     dst->cnt += src->cnt;
 }
-static ray_t* ext_i64_final(const void* s, acc_arena_t* a) {
-    (void)a; const ext_i64_state* st = s;
+static ray_t* ext_i64_final(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const ext_i64_state* st = s;
     return st->cnt ? ray_i64(st->v) : ray_typed_null(-RAY_I64);
 }
 static const agg_vtable_t MIN_I64 = {
@@ -131,8 +131,8 @@ static void sum_f64_update(void* base, size_t stride, const uint32_t* gids,
 static void sum_f64_merge(void* d, const void* s, acc_arena_t* a) {
     (void)a; ((sum_f64_state*)d)->sum += ((const sum_f64_state*)s)->sum;
 }
-static ray_t* sum_f64_final(const void* s, acc_arena_t* a) {
-    (void)a; return ray_f64(((const sum_f64_state*)s)->sum);
+static ray_t* sum_f64_final(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; return ray_f64(((const sum_f64_state*)s)->sum);
 }
 static const agg_vtable_t SUM_F64 = {
     .state_size = sizeof(sum_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
@@ -176,8 +176,8 @@ static void max_f64_merge(void* d, const void* s, acc_arena_t* a) {
     if (src->cnt && src->v > dst->v) { dst->v = src->v; }
     dst->cnt += src->cnt;
 }
-static ray_t* ext_f64_final(const void* s, acc_arena_t* a) {
-    (void)a; const ext_f64_state* st = s;
+static ray_t* ext_f64_final(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const ext_f64_state* st = s;
     return st->cnt ? ray_f64(st->v) : ray_typed_null(-RAY_F64);
 }
 static const agg_vtable_t MIN_F64 = {
@@ -208,8 +208,8 @@ static void avg_f64_merge(void* d, const void* s, acc_arena_t* a) {
     (void)a; ((avg_f64_state*)d)->sum += ((const avg_f64_state*)s)->sum;
     ((avg_f64_state*)d)->cnt += ((const avg_f64_state*)s)->cnt;
 }
-static ray_t* avg_f64_final(const void* s, acc_arena_t* a) {
-    (void)a; const avg_f64_state* st = s;
+static ray_t* avg_f64_final(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const avg_f64_state* st = s;
     return st->cnt ? ray_f64(st->sum / (double)st->cnt) : ray_typed_null(-RAY_F64);
 }
 static const agg_vtable_t AVG_F64 = {
@@ -242,23 +242,23 @@ static inline double var_i64_varpop(const var_i64_state* st) {
     double vp = (double)st->sumsq / (double)st->cnt - mean*mean;
     return vp < 0 ? 0 : vp;
 }
-static ray_t* fin_var_pop_i64(const void* s, acc_arena_t* a) {
-    (void)a; const var_i64_state* st = s;
+static ray_t* fin_var_pop_i64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
     return ray_f64(var_i64_varpop(st));
 }
-static ray_t* fin_var_i64(const void* s, acc_arena_t* a) {
-    (void)a; const var_i64_state* st = s;
+static ray_t* fin_var_i64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
     return ray_f64(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0));
 }
-static ray_t* fin_stddev_pop_i64(const void* s, acc_arena_t* a) {
-    (void)a; const var_i64_state* st = s;
+static ray_t* fin_stddev_pop_i64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
     return ray_f64(sqrt(var_i64_varpop(st)));
 }
-static ray_t* fin_stddev_i64(const void* s, acc_arena_t* a) {
-    (void)a; const var_i64_state* st = s;
+static ray_t* fin_stddev_i64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
     return ray_f64(sqrt(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
 }
@@ -305,23 +305,23 @@ static inline double var_f64_varpop(const var_f64_state* st) {
     double vp = st->sumsq / (double)st->cnt - mean*mean;
     return vp < 0 ? 0 : vp;
 }
-static ray_t* fin_var_pop_f64(const void* s, acc_arena_t* a) {
-    (void)a; const var_f64_state* st = s;
+static ray_t* fin_var_pop_f64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
     return ray_f64(var_f64_varpop(st));
 }
-static ray_t* fin_var_f64(const void* s, acc_arena_t* a) {
-    (void)a; const var_f64_state* st = s;
+static ray_t* fin_var_f64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
     return ray_f64(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0));
 }
-static ray_t* fin_stddev_pop_f64(const void* s, acc_arena_t* a) {
-    (void)a; const var_f64_state* st = s;
+static ray_t* fin_stddev_pop_f64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
     return ray_f64(sqrt(var_f64_varpop(st)));
 }
-static ray_t* fin_stddev_f64(const void* s, acc_arena_t* a) {
-    (void)a; const var_f64_state* st = s;
+static ray_t* fin_stddev_f64(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
     return ray_f64(sqrt(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
 }
@@ -367,8 +367,8 @@ static void pearson_merge(void* dd, const void* ss, acc_arena_t* a) {
     (void)a; pearson_state* d = dd; const pearson_state* s = ss;
     d->sx += s->sx; d->sy += s->sy; d->sxx += s->sxx; d->syy += s->syy; d->sxy += s->sxy; d->n += s->n;
 }
-static ray_t* pearson_final(const void* s, acc_arena_t* a) {
-    (void)a; const pearson_state* st = s;
+static ray_t* pearson_final(const void* s, acc_arena_t* a, int64_t param) {
+    (void)a; (void)param; const pearson_state* st = s;
     double dn = (double)st->n;
     double num = dn*st->sxy - st->sx*st->sy,
            dx  = dn*st->sxx - st->sx*st->sx,
@@ -404,7 +404,7 @@ static void median_update_f64(void* base, size_t stride, const uint32_t* gids,
 static void median_merge(void* dd, const void* ss, acc_arena_t* a){ (void)a;
     median_state* d=dd; const median_state* s=ss;
     for (int64_t i=0;i<s->len;i++) median_push(d, s->buf[i]); }
-static ray_t* median_final(const void* s, acc_arena_t* a){ (void)a; median_state* st=(median_state*)s;
+static ray_t* median_final(const void* s, acc_arena_t* a, int64_t param){ (void)a; (void)param; median_state* st=(median_state*)s;
     if (st->len==0) return ray_typed_null(-RAY_F64);
     return ray_f64(ray_median_dbl_inplace(st->buf, st->len)); }
 static void median_destroy(void* s){ median_state* st=s; free(st->buf); st->buf=NULL; st->len=st->cap=0; }
