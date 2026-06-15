@@ -417,6 +417,10 @@ ray_t* ray_exp_fn(ray_t* x);
 ray_t* ray_pow_fn(ray_t* x, ray_t* y);
 ray_t* ray_top_fn(ray_t* v, ray_t* n_obj);
 ray_t* ray_bot_fn(ray_t* v, ray_t* n_obj);
+/* Partial-sort first K largest (desc=1) / smallest (desc=0) elements of a
+ * numeric vector; returns a NEW typed vec of v's type with min(K, len) elems,
+ * ordered. Defined in src/ops/sort.c; reused by top_n/bot_n accumulators. */
+ray_t* topk_take_vec(ray_t* v, int64_t k, uint8_t desc);
 ray_t* ray_pearson_corr_fn(ray_t* x, ray_t* y);
 
 /* In-place median (quickselect).  Caller owns the buffer; we permute
