@@ -4,6 +4,7 @@
 
 #include <rayforce.h>
 #include "ops/internal.h"   /* ray_graph_t, ray_op_t, ray_op_ext_t, find_ext */
+#include "ops/agg_acc.h"    /* agg_vtable_t */
 
 /* Test/feature knob: route OP_GROUP through the v2 engine when it can handle
  * the query (see agg_v2_can_handle). Default false → zero behavioral change. */
@@ -28,5 +29,13 @@ typedef struct {
  * order. Returns 0 on success (caller frees out->gids and out->keys via free()),
  * -1 on allocation failure. */
 int agg_group_keys_i(ray_t* key_col, agg_groups_t* out);
+
+/* Build a dense SoA per-group state array for one aggregate (vt), run a single
+ * update_batch over val_col grouped by gids, and finalize each group into a
+ * typed result column of vt->out_type, length ngroups. For COUNT, val_col is
+ * NULL. Caller owns the returned column (ray_release). Returns a ray_error atom
+ * on allocation failure. Single-threaded (Phase 1a). */
+ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
+                   const uint32_t* gids, int64_t nrows, int64_t ngroups);
 
 #endif /* RAY_OPS_AGG_ENGINE_H */
