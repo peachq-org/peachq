@@ -44,7 +44,16 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     /* every aggregate must be a registry-resolvable plain-column scan */
     for (uint8_t a = 0; a < ext->n_aggs; a++) {
-        if (ext->agg_k && ext->agg_k[a]) return false;            /* holistic K deferred */
+        if (ext->agg_k && ext->agg_k[a]) {
+            if (ext->agg_ops[a] != OP_TOP_N && ext->agg_ops[a] != OP_BOT_N) return false;
+            if (ext->agg_k[a] < 1) return false;
+            ray_op_t* in = ext->agg_ins[a];
+            if (!in || in->opcode != OP_SCAN) return false;
+            ray_op_ext_t* ie = find_ext(g, in->id);
+            ray_t* ic = ie ? ray_table_get_col(tbl, ie->sym) : NULL;
+            if (!ic || !agg_resolve(ext->agg_ops[a], ic->type)) return false;
+            continue;  /* admitted */
+        }
         if (ext->agg_ins2 && ext->agg_ins2[a]) {
             if (ext->agg_ops[a] != OP_PEARSON_CORR) return false; /* only pearson in 2b */
             ray_op_t* xin = ext->agg_ins[a]; ray_op_t* yin = ext->agg_ins2[a];
@@ -463,7 +472,8 @@ static ray_t* exec_group_v2_parallel(
     }
 
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_t* out = ray_vec_new(vts[a]->out_type, ng);
+        bool is_list = (vts[a]->out_type == RAY_LIST);
+        ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
             free(order); free(first_row_ordered);
             agg_table_destroy(&gt, vts, off, block, n_aggs);
@@ -473,8 +483,13 @@ static ray_t* exec_group_v2_parallel(
         int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
         for (int64_t i = 0; i < ng; i++) {
             ray_t* cell = vts[a]->finalize(gt.states + (size_t)order[i] * block + off[a], NULL, kparam);
-            agg_put_cell(out, i, cell);
-            ray_release(cell);
+            if (is_list) {
+                out = ray_list_set(out, i, cell);   /* retains cell */
+                ray_release(cell);                  /* drop our local ref */
+            } else {
+                agg_put_cell(out, i, cell);
+                ray_release(cell);
+            }
         }
         int64_t agg_name = agg_result_col_name(agg_syms[a], ext->agg_ops[a]);
         result = ray_table_add_col(result, agg_name, out);
@@ -589,7 +604,8 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
     const void* vals = val_col ? ray_data(val_col) : NULL;
     vt->update_batch(states, vt->state_size, gids, vals, &valid, nrows, NULL);
 
-    ray_t* out = ray_vec_new(vt->out_type, ngroups);
+    bool is_list = (vt->out_type == RAY_LIST);
+    ray_t* out = is_list ? ray_list_new(ngroups) : ray_vec_new(vt->out_type, ngroups);
     if (!out || RAY_IS_ERR(out)) {
         if (vt->destroy)
             for (int64_t gi = 0; gi < ngroups; gi++)
@@ -599,8 +615,13 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
     out->len = ngroups;
     for (int64_t gi = 0; gi < ngroups; gi++) {
         ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL, kparam);
-        agg_put_cell(out, gi, cell);
-        ray_release(cell);
+        if (is_list) {
+            out = ray_list_set(out, gi, cell);   /* retains cell */
+            ray_release(cell);                    /* drop our local ref */
+        } else {
+            agg_put_cell(out, gi, cell);
+            ray_release(cell);
+        }
         if (vt->destroy) vt->destroy(states + (size_t)gi * vt->state_size);
     }
     free(states);
