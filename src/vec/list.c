@@ -55,6 +55,11 @@ ray_t* ray_list_new(int64_t capacity) {
     list->attrs = 0;
     memset(list->aux, 0, 16);
 
+    /* Zero the slot array so callers that pre-size the list (set len = N then
+     * ray_list_set each slot) have NULL old slots — ray_list_set releases the
+     * old slot, which must be NULL rather than uninitialised garbage. */
+    if (data_size) memset(ray_data(list), 0, data_size);
+
     return list;
 }
 
