@@ -65,6 +65,9 @@ typedef struct {
                             int64_t n, acc_arena_t* arena);
     void   (*merge)       (void* dst, const void* src, acc_arena_t* arena);
     ray_t* (*finalize)    (const void* state, acc_arena_t* arena);
+    /* Release heap state owned by a per-group state slab. NULL for ACC_STREAMING.
+     * The engine calls this on every init'd state once it won't be used again. */
+    void   (*destroy)(void* state);
 } agg_vtable_t;
 
 #endif /* RAY_OPS_AGG_ACC_H */
