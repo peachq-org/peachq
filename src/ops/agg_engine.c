@@ -48,6 +48,50 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     return true;
 }
 
+/* Per-op result-column-name suffix, mirroring emit_agg_columns (group.c).
+ * Returns "" / 0 for ops without a suffix. */
+static const char* agg_name_suffix(uint16_t agg_op, size_t* slen_out) {
+    const char* sfx = ""; size_t slen = 0;
+    switch (agg_op) {
+        case OP_SUM:   sfx = "_sum";   slen = 4; break;
+        case OP_PROD:  sfx = "_prod";  slen = 5; break;
+        case OP_COUNT: sfx = "_count"; slen = 6; break;
+        case OP_AVG:   sfx = "_mean";  slen = 5; break;
+        case OP_MIN:   sfx = "_min";   slen = 4; break;
+        case OP_MAX:   sfx = "_max";   slen = 4; break;
+        case OP_FIRST: sfx = "_first"; slen = 6; break;
+        case OP_LAST:  sfx = "_last";  slen = 5; break;
+        case OP_STDDEV:     sfx = "_stddev";     slen = 7; break;
+        case OP_STDDEV_POP: sfx = "_stddev_pop"; slen = 11; break;
+        case OP_VAR:        sfx = "_var";        slen = 4; break;
+        case OP_VAR_POP:    sfx = "_var_pop";    slen = 8; break;
+        case OP_MEDIAN:     sfx = "_median";     slen = 7; break;
+        case OP_TOP_N:      sfx = "_top";        slen = 4; break;
+        case OP_BOT_N:      sfx = "_bot";        slen = 4; break;
+        default: break;
+    }
+    *slen_out = slen;
+    return sfx;
+}
+
+/* Result column name for a plain-column-input aggregate: the input column's
+ * name (for in_sym) plus the per-op suffix, interned.  On overflow, falls back
+ * to the input sym itself — byte-identical to emit_agg_columns' inline copy. */
+int64_t agg_result_col_name(int64_t in_sym, uint16_t agg_op) {
+    ray_t* name_atom = ray_sym_str(in_sym);
+    const char* base = name_atom ? ray_str_ptr(name_atom) : NULL;
+    size_t blen = base ? ray_str_len(name_atom) : 0;
+    size_t slen = 0;
+    const char* sfx = agg_name_suffix(agg_op, &slen);
+    char buf[256];
+    if (base && blen + slen < sizeof(buf)) {
+        memcpy(buf, base, blen);
+        memcpy(buf + blen, sfx, slen);
+        return ray_sym_intern(buf, blen + slen);
+    }
+    return in_sym;
+}
+
 ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     (void)g; (void)op; (void)tbl;
     return ray_error("nyi", "agg v2: not reachable until gate admits");
