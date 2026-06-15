@@ -3211,7 +3211,7 @@ ray_t* ray_topk_table_multi(ray_t* tbl, ray_t** key_cols, uint8_t* descs,
  * heap).  O(N log K) when K << len via the same bounded-heap path
  * that ray_topk_table uses; falls back to full-sort + take when the
  * heap path declines (k >= len, unsupported types). */
-static ray_t* topk_take_vec(ray_t* v, int64_t k, uint8_t desc) {
+ray_t* topk_take_vec(ray_t* v, int64_t k, uint8_t desc) {
     if (!v) return ray_error("type", NULL);
     if (ray_is_lazy(v)) v = ray_lazy_materialize(v);
     if (!ray_is_vec(v)) return ray_error("type", "top/bot expects a vector");
