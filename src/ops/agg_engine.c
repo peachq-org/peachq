@@ -65,6 +65,46 @@ static inline int64_t agg_read_key_i64(ray_t* col, const void* data, int64_t row
     }
 }
 
+/* Write a finalized scalar cell into output column slot gi, marking nulls. */
+static void agg_out_put(ray_t* out, int64_t gi, ray_t* cell, bool* any_null) {
+    switch (out->type) {
+        case RAY_F64:
+            ((double*)ray_data(out))[gi] = cell->f64; break;
+        default: /* RAY_I64 (and temporal widths if they arise) */
+            ((int64_t*)ray_data(out))[gi] = cell->i64; break;
+    }
+    if (RAY_ATOM_IS_NULL(cell)) {
+        ray_vec_set_null(out, gi, true);   /* also sets RAY_ATTR_HAS_NULLS */
+        *any_null = true;
+    }
+}
+
+ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
+                   const uint32_t* gids, int64_t nrows, int64_t ngroups) {
+    char* states = calloc((size_t)(ngroups > 0 ? ngroups : 1), vt->state_size);
+    if (!states) return ray_error("oom", NULL);
+    for (int64_t gi = 0; gi < ngroups; gi++)
+        vt->init(states + (size_t)gi * vt->state_size);
+
+    ray_valid_t valid = { val_col ? ray_data(val_col) : NULL,
+                          val_col ? val_col->type : RAY_I64,
+                          val_col ? ((val_col->attrs & RAY_ATTR_HAS_NULLS) != 0) : false };
+    const void* vals = val_col ? ray_data(val_col) : NULL;
+    vt->update_batch(states, vt->state_size, gids, vals, &valid, nrows, NULL);
+
+    ray_t* out = ray_vec_new(vt->out_type, ngroups);
+    if (!out || RAY_IS_ERR(out)) { free(states); return ray_error("oom", NULL); }
+    out->len = ngroups;
+    bool any_null = false;
+    for (int64_t gi = 0; gi < ngroups; gi++) {
+        ray_t* cell = vt->finalize(states + (size_t)gi * vt->state_size, NULL);
+        agg_out_put(out, gi, cell, &any_null);
+        ray_release(cell);
+    }
+    free(states);
+    return out;
+}
+
 int agg_group_keys_i(ray_t* key_col, agg_groups_t* out) {
     int64_t nrows = key_col->len;
     const void* data = ray_data(key_col);
