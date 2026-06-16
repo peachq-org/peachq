@@ -72,8 +72,11 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             ray_op_ext_t* xe = find_ext(g, xin->id); ray_op_ext_t* ye = find_ext(g, yin->id);
             ray_t* xc = xe ? ray_table_get_col(tbl, xe->sym) : NULL;
             ray_t* yc = ye ? ray_table_get_col(tbl, ye->sym) : NULL;
-            if (!xc || !yc || xc->type != RAY_F64 || yc->type != RAY_F64) return false;  /* 2b: F64 only */
-            if (!agg_resolve(OP_PEARSON_CORR, RAY_F64)) return false;
+            /* pearson reads x/y per type (pearson_read_f64): admit any numeric/
+             * temporal pair, not just F64.  agg_resolve gates the exact set. */
+            if (!xc || !yc) return false;
+            if (!agg_resolve(OP_PEARSON_CORR, xc->type)) return false;
+            if (!agg_resolve(OP_PEARSON_CORR, yc->type)) return false;
             continue;  /* admitted */
         }
         if (ext->agg_ops[a] == OP_COUNT) {
