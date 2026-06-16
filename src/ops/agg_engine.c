@@ -894,18 +894,25 @@ static ray_t* exec_group_v2_parallel_dense(
 
 #define AGG_RADIX_P 256
 
-/* Growable int64 row-index list (per worker, per partition). */
-typedef struct { int64_t* idx; uint32_t n, cap; } agg_ridx_buf_t;
+/* Growable contiguous PAYLOAD buffer (per worker, per partition).  Phase 1
+ * scatters one fixed-size record per row instead of a bare row index: the
+ * record packs [n_keys×int64 widened keys][agg input value(s) at native esz]
+ * [row_idx int64].  Phase 2 then groups+accumulates each partition by walking
+ * its records SEQUENTIALLY — hash/equality compare the contiguous packed keys
+ * and accumulation reads values from the contiguous record — trading a one-time
+ * scatter cost for cache-friendly Phase-2 reads (the memory-bound hot spot was
+ * agg_tuple_eq re-reading scattered key columns on every distinct insert). */
+typedef struct { char* buf; uint32_t n, cap; } agg_pay_buf_t;  /* n = #records */
 
-static int agg_ridx_push(agg_ridx_buf_t* b, int64_t row) {
+/* Reserve room for one more record of `rec` bytes; returns dest ptr or NULL. */
+static char* agg_pay_reserve(agg_pay_buf_t* b, size_t rec) {
     if (b->n == b->cap) {
         uint32_t nc = b->cap ? b->cap * 2 : 64;
-        int64_t* ni = realloc(b->idx, (size_t)nc * sizeof(int64_t));
-        if (!ni) return -1;
-        b->idx = ni; b->cap = nc;
+        char* nb = realloc(b->buf, (size_t)nc * rec);
+        if (!nb) return NULL;
+        b->buf = nb; b->cap = nc;
     }
-    b->idx[b->n++] = row;
-    return 0;
+    return b->buf + (size_t)b->n++ * rec;
 }
 
 /* Per-partition result slot (filled by Phase 2). */
@@ -927,27 +934,73 @@ typedef struct {
     const void**        val_data; const int8_t* val_types; const bool* val_hasnull; const uint8_t* val_esz;
     const void**        val2_data; const int8_t* val2_types; const bool* val2_hasnull; const uint8_t* val2_esz;
     uint32_t            nw;
-    agg_ridx_buf_t*     bufs;       /* [nw * AGG_RADIX_P] */
+    agg_pay_buf_t*      bufs;       /* [nw * AGG_RADIX_P] payload records */
     agg_radix_part_t*   parts;      /* [AGG_RADIX_P] */
     int                 phase1_oom; /* set by any Phase-1 worker on push failure */
+    /* Per-row payload record layout (bytes), computed once by the caller:
+     *   [0 .. n_keys*8)         packed keys (each widened via agg_read_key_i64)
+     *   [val_off[a] ..]         agg a's input value at native esz (if val_data[a])
+     *   [val2_off[a] ..]        agg a's 2nd input (pearson) at native esz
+     *   [row_off ..]            int64 source row index (for first_row) */
+    size_t              rec;        /* total record size, 8-aligned */
+    size_t              val_off[16];
+    size_t              val2_off[16];
+    size_t              row_off;
 } agg_radix_ctx_t;
 
-/* Phase 1: scatter row indices into per-(worker,partition) buffers. */
+/* Phase 1: scatter one packed payload record per row into per-(worker,
+ * partition) contiguous buffers, keyed by RADIX_PART(tuple hash). */
 static void agg_radix_scatter_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) {
     agg_radix_ctx_t* c = (agg_radix_ctx_t*)vctx;
-    agg_ridx_buf_t* my = &c->bufs[(size_t)wid * AGG_RADIX_P];
+    agg_pay_buf_t* my = &c->bufs[(size_t)wid * AGG_RADIX_P];
+    uint8_t n_keys = c->n_keys, n_aggs = c->n_aggs;
     for (int64_t r = start; r < end; r++) {
-        uint64_t h = agg_tuple_hash(c->key_cols, c->key_data, c->n_keys, r);
-        uint32_t p = (uint32_t)(h & (AGG_RADIX_P - 1));
-        if (agg_ridx_push(&my[p], r) != 0) { c->phase1_oom = 1; return; }
+        /* Widen keys once; reuse for both the partition hash and the packed
+         * record so Phase 2 never re-reads the source key columns. */
+        int64_t* kdst;
+        uint64_t h = 1469598103934665603ULL;
+        uint32_t p;
+        {
+            int64_t kv[16];
+            for (uint8_t k = 0; k < n_keys; k++) {
+                int64_t v = agg_read_key_i64(c->key_cols[k], c->key_data[k], r);
+                kv[k] = v;
+                h ^= (uint64_t)v; h *= 1099511628211ULL;
+            }
+            p = (uint32_t)(h & (AGG_RADIX_P - 1));
+            char* rec = agg_pay_reserve(&my[p], c->rec);
+            if (!rec) { c->phase1_oom = 1; return; }
+            kdst = (int64_t*)rec;
+            for (uint8_t k = 0; k < n_keys; k++) kdst[k] = kv[k];
+            for (uint8_t a = 0; a < n_aggs; a++) {
+                if (c->val_data[a]) {
+                    uint8_t ez = c->val_esz[a];
+                    memcpy(rec + c->val_off[a],
+                           (const char*)c->val_data[a] + (size_t)r * ez, ez);
+                }
+                if (c->val2_data[a]) {
+                    uint8_t ez2 = c->val2_esz[a];
+                    memcpy(rec + c->val2_off[a],
+                           (const char*)c->val2_data[a] + (size_t)r * ez2, ez2);
+                }
+            }
+            *(int64_t*)(rec + c->row_off) = r;
+        }
     }
 }
 
-/* Phase 2: group + accumulate one partition.  Keys here are disjoint from every
- * other partition, so a partition-local open-addressing hash suffices. */
+/* Phase 2: group + accumulate one partition by walking its packed payload
+ * records SEQUENTIALLY.  Keys here are disjoint from every other partition, so
+ * a partition-local open-addressing hash suffices.  Hash/equality compare the
+ * contiguous packed keys at the head of each record (no scattered key-column
+ * re-reads), and each agg's dense value buffer is gathered straight from the
+ * records in the same sequential pass.  Keys are disjoint from other
+ * partitions so the partition-local open-addressing hash suffices. */
 static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) {
     (void)wid;
     agg_radix_ctx_t* c = (agg_radix_ctx_t*)vctx;
+    uint8_t n_keys = c->n_keys, n_aggs = c->n_aggs;
+    size_t key_bytes = (size_t)n_keys * 8;
     for (int64_t pi = start; pi < end; pi++) {
         uint32_t p = (uint32_t)pi;
         agg_radix_part_t* pr = &c->parts[p];
@@ -965,21 +1018,47 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
         int32_t* ht        = malloc((size_t)htcap * sizeof(int32_t));
         int64_t* first_row = malloc((size_t)total * sizeof(int64_t));
         char*    states    = malloc((size_t)total * c->block);
-        int64_t* rows      = malloc((size_t)total * sizeof(int64_t)); /* gathered, dense */
+        const int64_t** keyp = malloc((size_t)total * sizeof(int64_t*)); /* gid -> packed keys */
         uint32_t* gid      = malloc((size_t)total * sizeof(uint32_t));/* row i -> local gid */
-        if (!ht || !first_row || !states || !rows || !gid) {
-            free(ht); free(first_row); free(states); free(rows); free(gid);
+        if (!ht || !first_row || !states || !keyp || !gid) {
+            free(ht); free(first_row); free(states); free(keyp); free(gid);
             pr->oom = 1; return;
         }
         for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
 
+        /* Per-agg dense value buffers, gathered contiguously from the records. */
+        char* gv[16] = {0}; char* gy[16] = {0};
+        for (uint8_t a = 0; a < n_aggs; a++) {
+            if (c->val_data[a]) {
+                uint8_t ez = c->val_esz[a];
+                gv[a] = malloc((size_t)total * (ez ? ez : 1));
+                if (!gv[a]) goto oom;
+            }
+            if (c->val2_data[a]) {
+                uint8_t ez2 = c->val2_esz[a];
+                gy[a] = malloc((size_t)total * (ez2 ? ez2 : 1));
+                if (!gy[a]) goto oom;
+            }
+        }
+
         int64_t ng = 0, ri = 0;
         for (uint32_t w = 0; w < c->nw; w++) {
-            agg_ridx_buf_t* b = &c->bufs[(size_t)w * AGG_RADIX_P + p];
-            for (uint32_t i = 0; i < b->n; i++) {
-                int64_t r = b->idx[i];
-                rows[ri] = r;
-                uint64_t h = agg_tuple_hash(c->key_cols, c->key_data, c->n_keys, r);
+            agg_pay_buf_t* b = &c->bufs[(size_t)w * AGG_RADIX_P + p];
+            const char* rec = b->buf;
+            for (uint32_t i = 0; i < b->n; i++, rec += c->rec) {
+                const int64_t* keys = (const int64_t*)rec;
+                int64_t r = *(const int64_t*)(rec + c->row_off);
+                /* Gather this row's agg values into the dense per-agg buffers
+                 * (sequential record read → sequential dense write). */
+                for (uint8_t a = 0; a < n_aggs; a++) {
+                    if (gv[a]) { uint8_t ez = c->val_esz[a];
+                        memcpy(gv[a] + (size_t)ri * ez, rec + c->val_off[a], ez); }
+                    if (gy[a]) { uint8_t ez2 = c->val2_esz[a];
+                        memcpy(gy[a] + (size_t)ri * ez2, rec + c->val2_off[a], ez2); }
+                }
+                /* Hash the contiguous packed keys (same FNV-1a as the scatter). */
+                uint64_t h = 1469598103934665603ULL;
+                for (uint8_t k = 0; k < n_keys; k++) { h ^= (uint64_t)keys[k]; h *= 1099511628211ULL; }
                 uint64_t slot = h & htmask;
                 int32_t gg;
                 for (;;) {
@@ -988,12 +1067,13 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                         gg = (int32_t)ng;
                         ht[slot] = gg;
                         first_row[gg] = r;
-                        for (uint8_t a = 0; a < c->n_aggs; a++)
+                        keyp[gg] = keys;
+                        for (uint8_t a = 0; a < n_aggs; a++)
                             c->vts[a]->init(states + (size_t)gg * c->block + c->off[a]);
                         ng++;
                         break;
                     }
-                    if (agg_tuple_eq(c->key_cols, c->key_data, c->n_keys, r, first_row[gp])) {
+                    if (memcmp(keys, keyp[gp], key_bytes) == 0) {  /* contiguous key compare */
                         gg = gp;
                         if (r < first_row[gg]) first_row[gg] = r;   /* MIN */
                         break;
@@ -1004,43 +1084,32 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                 ri++;
             }
         }
-        free(ht);
+        free(ht); free(keyp);
 
-        /* Batch-accumulate each agg over the partition's rows.  Value columns
-         * are gathered at the partition's (scattered) row indices so the dense
-         * cgid[]==gid[] mapping lines up with update_batch's row-major contract. */
-        for (uint8_t a = 0; a < c->n_aggs; a++) {
+        /* Batch-accumulate each agg over the partition's dense value buffers. */
+        for (uint8_t a = 0; a < n_aggs; a++) {
             if (c->vts[a]->update_batch2) {             /* binary agg (pearson) */
-                uint8_t ex = c->val_esz[a], ey = c->val2_esz[a];
-                char* gx = malloc((size_t)total * (ex ? ex : 1));
-                char* gy = malloc((size_t)total * (ey ? ey : 1));
-                if (!gx || !gy) { free(gx); free(gy); free(first_row); free(states); free(rows); free(gid); pr->oom = 1; return; }
-                for (int64_t i = 0; i < total; i++) {
-                    memcpy(gx + (size_t)i * ex, (const char*)c->val_data[a]  + (size_t)rows[i] * ex, ex);
-                    memcpy(gy + (size_t)i * ey, (const char*)c->val2_data[a] + (size_t)rows[i] * ey, ey);
-                }
-                ray_valid_t vx = { gx, c->val_types[a],  c->val_hasnull[a] };
-                ray_valid_t vy = { gy, c->val2_types[a], c->val2_hasnull[a] };
+                ray_valid_t vx = { gv[a], c->val_types[a],  c->val_hasnull[a] };
+                ray_valid_t vy = { gy[a], c->val2_types[a], c->val2_hasnull[a] };
                 c->vts[a]->update_batch2(states + c->off[a], c->block, gid,
-                                         gx, gy, &vx, &vy, total, NULL);
-                free(gx); free(gy);
+                                         gv[a], gy[a], &vx, &vy, total, NULL);
             } else if (c->val_data[a]) {                /* unary agg over a column */
-                uint8_t ez = c->val_esz[a];
-                char* gv = malloc((size_t)total * (ez ? ez : 1));
-                if (!gv) { free(first_row); free(states); free(rows); free(gid); pr->oom = 1; return; }
-                for (int64_t i = 0; i < total; i++)
-                    memcpy(gv + (size_t)i * ez, (const char*)c->val_data[a] + (size_t)rows[i] * ez, ez);
-                ray_valid_t valid = { gv, c->val_types[a], c->val_hasnull[a] };
-                c->vts[a]->update_batch(states + c->off[a], c->block, gid, gv, &valid, total, NULL);
-                free(gv);
+                ray_valid_t valid = { gv[a], c->val_types[a], c->val_hasnull[a] };
+                c->vts[a]->update_batch(states + c->off[a], c->block, gid, gv[a], &valid, total, NULL);
             } else {                                    /* COUNT (no value column) */
                 ray_valid_t valid = { NULL, c->val_types[a], false };
                 c->vts[a]->update_batch(states + c->off[a], c->block, gid, NULL, &valid, total, NULL);
             }
         }
 
-        free(rows); free(gid);
+        for (uint8_t a = 0; a < n_aggs; a++) { free(gv[a]); free(gy[a]); }
+        free(gid);
         pr->states = states; pr->first_row = first_row; pr->ng = ng;
+        continue;
+    oom:
+        free(ht); free(first_row); free(states); free(keyp); free(gid);
+        for (uint8_t a = 0; a < n_aggs; a++) { free(gv[a]); free(gy[a]); }
+        pr->oom = 1; return;
     }
 }
 
@@ -1077,8 +1146,18 @@ static ray_t* exec_group_v2_parallel_radix(
         val2_esz[a]     = vc2 ? col_esz(vc2) : 0;
     }
 
+    /* Per-row payload record layout: [packed keys][agg values][row_idx]. */
+    size_t val_off[16] = {0}, val2_off[16] = {0};
+    size_t rec_cur = (size_t)n_keys * 8;
+    for (uint8_t a = 0; a < n_aggs; a++) {
+        if (val_data[a])  { val_off[a]  = rec_cur; rec_cur += val_esz[a]; }
+        if (val2_data[a]) { val2_off[a] = rec_cur; rec_cur += val2_esz[a]; }
+    }
+    size_t row_off = rec_cur; rec_cur += 8;
+    size_t rec = (rec_cur + 7u) & ~(size_t)7u;   /* 8-align records */
+
     size_t nbuf = (size_t)nw * AGG_RADIX_P;
-    agg_ridx_buf_t*   bufs  = calloc(nbuf, sizeof(agg_ridx_buf_t));
+    agg_pay_buf_t*    bufs  = calloc(nbuf, sizeof(agg_pay_buf_t));
     agg_radix_part_t* parts = calloc(AGG_RADIX_P, sizeof(agg_radix_part_t));
     if (!bufs || !parts) { free(bufs); free(parts); return ray_error("oom", NULL); }
 
@@ -1088,7 +1167,10 @@ static ray_t* exec_group_v2_parallel_radix(
         .val_data = val_data, .val_types = val_types, .val_hasnull = val_hasnull, .val_esz = val_esz,
         .val2_data = val2_data, .val2_types = val2_types, .val2_hasnull = val2_hasnull, .val2_esz = val2_esz,
         .nw = nw, .bufs = bufs, .parts = parts, .phase1_oom = 0,
+        .rec = rec, .row_off = row_off,
     };
+    memcpy(ctx.val_off, val_off, sizeof(val_off));
+    memcpy(ctx.val2_off, val2_off, sizeof(val2_off));
 
     /* Phase 1: scatter. */
     ray_pool_dispatch(pool, agg_radix_scatter_fn, &ctx, nrows);
@@ -1103,7 +1185,7 @@ static ray_t* exec_group_v2_parallel_radix(
 
     if (oom) {
         for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
-        for (size_t i = 0; i < nbuf; i++) free(bufs[i].idx);
+        for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
         return ray_error("oom", NULL);
     }
@@ -1120,7 +1202,7 @@ static ray_t* exec_group_v2_parallel_radix(
     if (!pairs || !first_row_ordered) {
         free(pairs); free(first_row_ordered);
         for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
-        for (size_t i = 0; i < nbuf; i++) free(bufs[i].idx);
+        for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
         return ray_error("oom", NULL);
     }
@@ -1139,7 +1221,7 @@ static ray_t* exec_group_v2_parallel_radix(
     if (!result || RAY_IS_ERR(result)) {
         free(pairs); free(first_row_ordered);
         for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
-        for (size_t i = 0; i < nbuf; i++) free(bufs[i].idx);
+        for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
         return result ? result : ray_error("oom", NULL);
     }
@@ -1149,7 +1231,7 @@ static ray_t* exec_group_v2_parallel_radix(
         if (!kc || RAY_IS_ERR(kc)) {
             free(pairs); free(first_row_ordered);
             for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
-            for (size_t i = 0; i < nbuf; i++) free(bufs[i].idx);
+            for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
             free(bufs); free(parts);
             ray_release(result); return kc ? kc : ray_error("oom", NULL);
         }
@@ -1162,7 +1244,7 @@ static ray_t* exec_group_v2_parallel_radix(
         if (!out || RAY_IS_ERR(out)) {
             free(pairs); free(first_row_ordered);
             for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
-            for (size_t i = 0; i < nbuf; i++) free(bufs[i].idx);
+            for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
             free(bufs); free(parts);
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
@@ -1182,7 +1264,7 @@ static ray_t* exec_group_v2_parallel_radix(
 
     free(pairs); free(first_row_ordered);
     for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
-    for (size_t i = 0; i < nbuf; i++) free(bufs[i].idx);
+    for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
     free(bufs); free(parts);
     return result;
 }
