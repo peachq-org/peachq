@@ -278,6 +278,7 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket);
 ray_t* ray_left_join_fn(ray_t** args, int64_t n);
 ray_t* ray_inner_join_fn(ray_t** args, int64_t n);
 ray_t* ray_window_join_fn(ray_t** args, int64_t n);
+ray_t* ray_window_join1_fn(ray_t** args, int64_t n);
 
 /* I/O */
 ray_t* ray_println_fn(ray_t** args, int64_t n);
