@@ -5483,7 +5483,11 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return ray_error("nyi", NULL);
 
-    if (ray_agg_engine_v2 && group_limit == 0 && agg_v2_can_handle(g, op, tbl))
+    /* v2 doesn't implement the top-count emit filter (old-engine feature);
+     * when one is active, stay on the legacy path that honors it. */
+    if (ray_agg_engine_v2 && group_limit == 0
+        && !ray_group_emit_filter_get().enabled
+        && agg_v2_can_handle(g, op, tbl))
         return exec_group_v2(g, op, tbl);
 
     int64_t nrows = ray_table_nrows(tbl);
