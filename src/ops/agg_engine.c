@@ -94,6 +94,66 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     return true;
 }
 
+/* ── Dense grouping eligibility selector (mirrors group.c DA path) ────────
+ * Decides whether the key tuple packs into a bounded direct-index slot space
+ * (gid = sum_k (key_k - min_k)*strides[k]) so grouping can skip hashing.
+ * Eligible iff: 1..16 keys, every agg is ACC_STREAMING, every key is an
+ * integer/temporal/SYM type with no nulls, and the product of per-key ranges
+ * stays at or below DENSE_MAX_SLOTS (computed overflow-safely).  Performs one
+ * min/max prescan per key column. */
+bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
+                    const agg_vtable_t** vts, uint8_t n_aggs,
+                    int64_t nrows, dense_plan_t* out) {
+    out->ok = false;
+    out->n_keys = n_keys;
+    if (n_keys < 1 || n_keys > 16) return false;
+
+    /* Buffered aggregates (median/top-k) can't run on the dense path → defer. */
+    for (uint8_t a = 0; a < n_aggs; a++)
+        if (vts[a]->kind != ACC_STREAMING) return false;
+
+    /* Per-key type check + min/max prescan. */
+    for (uint8_t k = 0; k < n_keys; k++) {
+        ray_t* kc = key_cols[k];
+        switch (kc->type) {
+            case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+            case RAY_BOOL: case RAY_DATE: case RAY_TIME:
+            case RAY_TIMESTAMP: case RAY_SYM: break;
+            default: return false;
+        }
+        if (kc->attrs & RAY_ATTR_HAS_NULLS) return false;
+        if (nrows <= 0) return false;   /* empty → no min/max, max<min guard */
+
+        const void* data = ray_data(kc);
+        int64_t mn = agg_read_key_i64(kc, data, 0);
+        int64_t mx = mn;
+        for (int64_t r = 1; r < nrows; r++) {
+            int64_t v = agg_read_key_i64(kc, data, r);
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+        if (mx < mn) return false;       /* no live values */
+        out->mins[k]   = mn;
+        out->ranges[k] = mx - mn + 1;
+    }
+
+    /* Composite packing; bail if a range is non-positive or the product would
+     * exceed the cap.  Overflow-safe: check before multiplying. */
+    int64_t total = 1;
+    for (uint8_t k = 0; k < n_keys; k++) {
+        int64_t rng = out->ranges[k];
+        if (rng <= 0) return false;
+        if (total > DENSE_MAX_SLOTS / rng) return false;   /* would exceed cap */
+        out->strides[k] = total;
+        total *= rng;
+    }
+    if (total > DENSE_MAX_SLOTS) return false;
+
+    out->total_slots = total;
+    out->ok = true;
+    return true;
+}
+
 /* Per-op result-column-name suffix, mirroring emit_agg_columns (group.c).
  * Returns "" / 0 for ops without a suffix. */
 static const char* agg_name_suffix(uint16_t agg_op, size_t* slen_out) {
