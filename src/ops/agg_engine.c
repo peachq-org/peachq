@@ -312,9 +312,43 @@ typedef struct {
 
 /* (first_row, group idx) pair, sorted by first_row to recover emit order. */
 typedef struct { int64_t fr; int64_t idx; } agg_fr_pair_t;
-static int agg_fr_pair_cmp(const void* x, const void* y) {
+static int agg_fr_pair_cmp_fallback(const void* x, const void* y) {
     int64_t a = ((const agg_fr_pair_t*)x)->fr, b = ((const agg_fr_pair_t*)y)->fr;
     return (a > b) - (a < b);
+}
+
+/* Sort pairs by .fr ascending.  .fr values are distinct row indices in
+ * [0, nrows), so an LSD byte-wise radix sort is O(n) and produces the same
+ * total order as a comparison qsort on .fr — no tie-break needed (distinct).
+ * Stable per digit; ping-pongs between `a` and a scratch buffer.  On OOM it
+ * falls back to the comparison sort (correctness preserved). */
+static void agg_sort_pairs_by_fr(agg_fr_pair_t* a, int64_t n) {
+    if (n < 2) return;
+    /* Number of 8-bit passes needed to cover the largest fr value. */
+    int64_t maxfr = 0;
+    for (int64_t i = 0; i < n; i++) if (a[i].fr > maxfr) maxfr = a[i].fr;
+    int passes = 1;
+    while ((uint64_t)maxfr >> (8 * passes)) passes++;
+
+    agg_fr_pair_t* tmp = malloc((size_t)n * sizeof(agg_fr_pair_t));
+    if (!tmp) {
+        qsort(a, (size_t)n, sizeof(agg_fr_pair_t), agg_fr_pair_cmp_fallback);
+        return;
+    }
+    agg_fr_pair_t* src = a;
+    agg_fr_pair_t* dst = tmp;
+    for (int p = 0; p < passes; p++) {
+        int64_t count[256] = {0};
+        int shift = 8 * p;
+        for (int64_t i = 0; i < n; i++) count[(src[i].fr >> shift) & 0xFF]++;
+        int64_t sum = 0;
+        for (int b = 0; b < 256; b++) { int64_t c = count[b]; count[b] = sum; sum += c; }
+        for (int64_t i = 0; i < n; i++) dst[count[(src[i].fr >> shift) & 0xFF]++] = src[i];
+        agg_fr_pair_t* t = src; src = dst; dst = t;
+    }
+    /* If sorted result ended up in tmp (odd passes), copy back to `a`. */
+    if (src != a) memcpy(a, src, (size_t)n * sizeof(agg_fr_pair_t));
+    free(tmp);
 }
 
 /* Phase A: per-worker local group + accumulate over chunk [start,end). */
@@ -522,7 +556,7 @@ static ray_t* exec_group_v2_parallel(
             return ray_error("oom", NULL);
         }
         for (int64_t i = 0; i < ng; i++) { pairs[i].fr = gt.first_row[i]; pairs[i].idx = i; }
-        qsort(pairs, (size_t)ng, sizeof(agg_fr_pair_t), agg_fr_pair_cmp);
+        agg_sort_pairs_by_fr(pairs, ng);
         for (int64_t i = 0; i < ng; i++) {
             order[i] = pairs[i].idx;
             first_row_ordered[i] = pairs[i].fr;
@@ -789,7 +823,7 @@ static ray_t* exec_group_v2_parallel_dense(
       for (int64_t s = 0; s < total_slots; s++)
           if (gfirst[s] != INT64_MAX) { pairs[i].fr = gfirst[s]; pairs[i].idx = s; i++; }
     }
-    qsort(pairs, (size_t)ng, sizeof(agg_fr_pair_t), agg_fr_pair_cmp);
+    agg_sort_pairs_by_fr(pairs, ng);
     for (int64_t i = 0; i < ng; i++) {
         occupied_slot[i]     = pairs[i].idx;
         first_row_ordered[i] = pairs[i].fr;
@@ -1098,7 +1132,7 @@ static ray_t* exec_group_v2_parallel_radix(
               i++;
           }
     }
-    qsort(pairs, (size_t)ng, sizeof(agg_fr_pair_t), agg_fr_pair_cmp);
+    agg_sort_pairs_by_fr(pairs, ng);
     for (int64_t i = 0; i < ng; i++) first_row_ordered[i] = pairs[i].fr;
 
     ray_t* result = ray_table_new(n_keys + n_aggs);
