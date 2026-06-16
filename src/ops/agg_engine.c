@@ -100,20 +100,19 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 /* ── Dense grouping eligibility selector (mirrors group.c DA path) ────────
  * Decides whether the key tuple packs into a bounded direct-index slot space
  * (gid = sum_k (key_k - min_k)*strides[k]) so grouping can skip hashing.
- * Eligible iff: 1..16 keys, every agg is ACC_STREAMING, every key is an
- * integer/temporal/SYM type with no nulls, and the product of per-key ranges
- * stays at or below DENSE_MAX_SLOTS (computed overflow-safely).  Performs one
- * min/max prescan per key column. */
+ * Eligible iff: 1..16 keys, every key is an integer/temporal/SYM type with no
+ * nulls, and the product of per-key ranges stays at or below DENSE_MAX_SLOTS
+ * (computed overflow-safely).  Performs one min/max prescan per key column.
+ * Aggregates may be ACC_STREAMING or ACC_BUFFERED (median/top-k): the dense
+ * serial driver (agg_run_one) and the dense parallel path both carry the
+ * per-group destroy lifecycle, so buffered state is handled. */
 bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
                     const agg_vtable_t** vts, uint8_t n_aggs,
                     int64_t nrows, dense_plan_t* out) {
+    (void)vts; (void)n_aggs;   /* agg kind no longer gates dense eligibility */
     out->ok = false;
     out->n_keys = n_keys;
     if (n_keys < 1 || n_keys > 16) return false;
-
-    /* Buffered aggregates (median/top-k) can't run on the dense path → defer. */
-    for (uint8_t a = 0; a < n_aggs; a++)
-        if (vts[a]->kind != ACC_STREAMING) return false;
 
     /* Per-key type check + min/max prescan. */
     for (uint8_t k = 0; k < n_keys; k++) {
@@ -613,13 +612,17 @@ static ray_t* exec_group_v2_parallel(
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * Parallel DENSE group-by (low-card int/SYM keys, ACC_STREAMING aggs only).
+ * Parallel DENSE group-by (low-card int/SYM keys; streaming OR buffered aggs).
  * Per-worker flat slabs of `total_slots` AoS group states (slot == gid via the
  * mixed-radix packing) + a per-worker first_row[slot] (INT64_MAX = untouched).
  * Phase A: each worker packs its chunk rows into slots and update_batch's into
  * its own slab.  Phase B: merge per-worker slabs into a global slab.  Phase C:
  * collect occupied slots, order by global first_row (first-occurrence), emit.
- * No hashing, no buffered state, no destroy lifecycle (streaming guaranteed). */
+ * No hashing.  Buffered aggs (median/top-k) malloc a per-group buffer in their
+ * state; every init'd slot of every slab carries the vt->destroy lifecycle:
+ * worker buffers are freed once after being merged into the global slab, and
+ * the global slab's buffers are freed after finalize — exactly-once, mirroring
+ * agg_table_destroy on the hash path. */
 
 /* Per-worker dense slab. */
 typedef struct {
@@ -662,6 +665,21 @@ static int agg_dense_local_init(agg_dense_local_t* loc, int64_t total_slots,
 static void agg_dense_local_destroy(agg_dense_local_t* loc) {
     free(loc->states); free(loc->first_row);
     loc->states = NULL; loc->first_row = NULL;
+}
+
+/* Run vt->destroy on EVERY slot's buffered agg state in a dense slab (states +
+ * total_slots blocks).  Empty slots hold the init'd state (median/top-k init →
+ * buf=NULL), so destroy on them is free(NULL) — safe.  No-op when no agg has a
+ * destroy hook (all-streaming).  Idempotent per slab when paired with a free()
+ * immediately after; callers must invoke exactly once per slab. */
+static void agg_dense_slab_destroy_states(char* states, int64_t total_slots,
+                                          const agg_vtable_t** vts, const size_t* off,
+                                          size_t block, uint8_t n_aggs) {
+    if (!states) return;
+    for (uint8_t a = 0; a < n_aggs; a++)
+        if (vts[a]->destroy)
+            for (int64_t s = 0; s < total_slots; s++)
+                vts[a]->destroy(states + (size_t)s * block + off[a]);
 }
 
 /* Compute the dense slot for row r via mixed-radix packing. */
@@ -755,10 +773,18 @@ static ray_t* exec_group_v2_parallel_dense(
 
     agg_dense_local_t* locals = calloc((size_t)nw, sizeof(agg_dense_local_t));
     if (!locals) return ray_error("oom", NULL);
+    uint32_t n_init = 0;   /* slabs whose slots were fully init'd (destroy-safe) */
     int alloc_oom = 0;
-    for (uint32_t w = 0; w < nw; w++)
+    for (uint32_t w = 0; w < nw; w++) {
         if (agg_dense_local_init(&locals[w], total_slots, vts, off, block, n_aggs) != 0) { alloc_oom = 1; break; }
+        n_init = w + 1;
+    }
     if (alloc_oom) {
+        /* Only the fully-init'd slabs carry valid (destroyable) buffered state;
+         * the slab that failed init never ran its per-slot init → its bytes are
+         * uninitialized and must NOT be destroy'd (would free a garbage ptr). */
+        for (uint32_t w = 0; w < n_init; w++)
+            agg_dense_slab_destroy_states(locals[w].states, total_slots, vts, off, block, n_aggs);
         for (uint32_t w = 0; w < nw; w++) agg_dense_local_destroy(&locals[w]);
         free(locals);
         return ray_error("oom", NULL);
@@ -775,6 +801,8 @@ static ray_t* exec_group_v2_parallel_dense(
 
     for (uint32_t w = 0; w < nw; w++)
         if (locals[w].oom) {
+            for (uint32_t i = 0; i < nw; i++)
+                agg_dense_slab_destroy_states(locals[i].states, total_slots, vts, off, block, n_aggs);
             for (uint32_t i = 0; i < nw; i++) agg_dense_local_destroy(&locals[i]);
             free(locals);
             return ray_error("oom", NULL);
@@ -785,6 +813,8 @@ static ray_t* exec_group_v2_parallel_dense(
     int64_t* gfirst   = malloc((size_t)total_slots * sizeof(int64_t));
     if (!gstates || !gfirst) {
         free(gstates); free(gfirst);
+        for (uint32_t i = 0; i < nw; i++)
+            agg_dense_slab_destroy_states(locals[i].states, total_slots, vts, off, block, n_aggs);
         for (uint32_t i = 0; i < nw; i++) agg_dense_local_destroy(&locals[i]);
         free(locals);
         return ray_error("oom", NULL);
@@ -804,6 +834,11 @@ static ray_t* exec_group_v2_parallel_dense(
                               loc->states + (size_t)s * block + off[a], NULL);
         }
     }
+    /* Worker buffered state has been merged into the global slab → its per-group
+     * buffers are now redundant.  Destroy (free) them exactly once before
+     * releasing the worker slabs.  No-op for all-streaming. */
+    for (uint32_t i = 0; i < nw; i++)
+        agg_dense_slab_destroy_states(locals[i].states, total_slots, vts, off, block, n_aggs);
     for (uint32_t i = 0; i < nw; i++) agg_dense_local_destroy(&locals[i]);
     free(locals);
 
@@ -816,6 +851,7 @@ static ray_t* exec_group_v2_parallel_dense(
     agg_fr_pair_t* pairs       = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(agg_fr_pair_t));
     if (!occupied_slot || !first_row_ordered || !pairs) {
         free(occupied_slot); free(first_row_ordered); free(pairs);
+        agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
         free(gstates); free(gfirst);
         return ray_error("oom", NULL);
     }
@@ -832,6 +868,7 @@ static ray_t* exec_group_v2_parallel_dense(
 
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
+        agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
         free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
         return result ? result : ray_error("oom", NULL);
     }
@@ -839,6 +876,7 @@ static ray_t* exec_group_v2_parallel_dense(
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_t* kc = agg_gather_key_col(key_cols[k], first_row_ordered, ng);
         if (!kc || RAY_IS_ERR(kc)) {
+            agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
             free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
             ray_release(result); return kc ? kc : ray_error("oom", NULL);
         }
@@ -847,8 +885,12 @@ static ray_t* exec_group_v2_parallel_dense(
     }
 
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_t* out = ray_vec_new(vts[a]->out_type, ng);   /* streaming → scalar out_type */
+        /* Buffered top_n/bot_n produce a LIST cell per group (a native vector);
+         * median and all streaming aggs produce a scalar out_type cell. */
+        bool is_list = (vts[a]->out_type == RAY_LIST);
+        ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
+            agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
             free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
@@ -856,14 +898,22 @@ static ray_t* exec_group_v2_parallel_dense(
         int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
         for (int64_t i = 0; i < ng; i++) {
             ray_t* cell = vts[a]->finalize(gstates + (size_t)occupied_slot[i] * block + off[a], NULL, kparam);
-            agg_put_cell(out, i, cell);
-            ray_release(cell);
+            if (is_list) {
+                out = ray_list_set(out, i, cell);   /* retains cell */
+                ray_release(cell);                  /* drop our local ref */
+            } else {
+                agg_put_cell(out, i, cell);
+                ray_release(cell);
+            }
         }
         int64_t agg_name = agg_result_col_name(agg_syms[a], ext->agg_ops[a]);
         result = ray_table_add_col(result, agg_name, out);
         ray_release(out);
     }
 
+    /* Finalize is done reading the global slab → destroy its buffered per-group
+     * state exactly once before freeing the slab. */
+    agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
     free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
     return result;
 }
