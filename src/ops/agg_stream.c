@@ -352,15 +352,29 @@ typedef struct { double sx, sy, sxx, syy, sxy; int64_t n; } pearson_state;
 static void pearson_init(void* s) {
     pearson_state* st = s; st->sx = st->sy = st->sxx = st->syy = st->sxy = 0; st->n = 0;
 }
+/* Read element `i` of a numeric/temporal column (per the valid view's type)
+ * widened to double.  Lets pearson accept integer inputs without forcing the
+ * caller to materialize an F64 copy. */
+static inline double pearson_read_f64(const ray_valid_t* v, int64_t i) {
+    switch (v->type) {
+        case RAY_F64:                       return ((const double*)v->base)[i];
+        case RAY_I64: case RAY_TIMESTAMP:   return (double)((const int64_t*)v->base)[i];
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+                                            return (double)((const int32_t*)v->base)[i];
+        case RAY_I16:                       return (double)((const int16_t*)v->base)[i];
+        case RAY_U8:  case RAY_BOOL:        return (double)((const uint8_t*)v->base)[i];
+        default:                            return 0.0;  /* gate admits only the above */
+    }
+}
 static void pearson_update2(void* base, size_t stride, const uint32_t* gids,
                             const void* vx, const void* vy,
                             const ray_valid_t* valx, const ray_valid_t* valy,
                             int64_t n, acc_arena_t* a) {
-    (void)a; const double* x = vx; const double* y = vy;
+    (void)a; (void)vx; (void)vy;
     for (int64_t i = 0; i < n; i++) {
         if (!ray_valid_at(valx, i) || !ray_valid_at(valy, i)) continue;
         pearson_state* st = (pearson_state*)((char*)base + (size_t)gids[i]*stride);
-        double xi = x[i], yi = y[i];
+        double xi = pearson_read_f64(valx, i), yi = pearson_read_f64(valy, i);
         st->sx += xi; st->sy += yi; st->sxx += xi*xi; st->syy += yi*yi; st->sxy += xi*yi; st->n++;
     }
 }
@@ -486,7 +500,13 @@ const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
     if (agg_kind == OP_BOT_N && in_type == RAY_F64) return &BOTK_F64;
     if (agg_kind == OP_MEDIAN && in_type == RAY_I64) return &MEDIAN_I64;
     if (agg_kind == OP_MEDIAN && in_type == RAY_F64) return &MEDIAN_F64;
-    if (agg_kind == OP_PEARSON_CORR && in_type == RAY_F64) return &PEARSON_F64;
+    /* pearson reads x/y per their declared type (pearson_read_f64), so it
+     * accepts any numeric/temporal input column, not just F64. */
+    if (agg_kind == OP_PEARSON_CORR &&
+        (in_type == RAY_F64 || in_type == RAY_I64 || in_type == RAY_I32 ||
+         in_type == RAY_I16 || in_type == RAY_U8  || in_type == RAY_BOOL ||
+         in_type == RAY_DATE || in_type == RAY_TIME || in_type == RAY_TIMESTAMP))
+        return &PEARSON_F64;
     if (agg_kind == OP_SUM && in_type == RAY_I64) return &SUM_I64;
     if (agg_kind == OP_COUNT)                     return &COUNT_ANY;
     if (agg_kind == OP_MIN && in_type == RAY_I64) return &MIN_I64;
