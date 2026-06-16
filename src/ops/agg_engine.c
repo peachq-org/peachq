@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-bool ray_agg_engine_v2 = false;   /* knob; default off */
+bool ray_agg_engine_v2 = true;   /* knob; default on */
 
 /* Read element `row` of an integer/temporal/SYM column widened to int64. */
 static inline int64_t agg_read_key_i64(ray_t* col, const void* data, int64_t row);
@@ -26,6 +26,17 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     if (ext->n_aggs == 0) return false;        /* need >=1 aggregate  */
     if (!tbl) return false;
     if (g->selection) return false;            /* no active/pushed filter */
+
+    /* Factorized-EXPAND result (synthetic _src key + _count weight column) needs
+     * exec_group's dedicated factorized handling (COUNT/SUM(_count) weight by
+     * _count). v2 would compute a plain count — defer the whole shape. */
+    if (ext->n_keys == 1 && ext->keys[0] && ext->keys[0]->opcode == OP_SCAN) {
+        ray_op_ext_t* ke = find_ext(g, ext->keys[0]->id);
+        if (ke && ke->sym == ray_sym_intern("_src", 4)) {
+            ray_t* cnt = ray_table_get_col(tbl, ray_sym_intern("_count", 6));
+            if (cnt && cnt->type == RAY_I64) return false;
+        }
+    }
 
     /* every key must be a plain column scan of a supported type */
     for (uint8_t k = 0; k < ext->n_keys; k++) {
