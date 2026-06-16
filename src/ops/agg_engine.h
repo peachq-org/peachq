@@ -40,6 +40,29 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
                    const uint32_t* gids, int64_t nrows, int64_t ngroups,
                    int64_t kparam);
 
+/* ── Dense grouping eligibility selector (low-cardinality int/SYM keys) ──
+ * Mirrors the old direct-array group path's cap.  When dense applies, a group
+ * id is the packed key offset (O(1) direct index) rather than a hash slot. */
+#define DENSE_MAX_SLOTS 262144   /* mirror the old DA path's cap */
+
+typedef struct {
+    bool     ok;
+    uint8_t  n_keys;
+    int64_t  mins[16];      /* per-key min */
+    int64_t  ranges[16];    /* per-key (max-min+1) */
+    int64_t  strides[16];   /* composite packing: slot = sum_k (key_k - min_k)*strides[k] */
+    int64_t  total_slots;   /* product of ranges */
+} dense_plan_t;
+
+/* Decide if dense grouping applies to (key_cols, aggs).  Eligible iff:
+ *  - every key type in {I64,I32,I16,U8,BOOL,DATE,TIME,TIMESTAMP,SYM} and NOT HAS_NULLS
+ *  - every agg vtable is ACC_STREAMING (no buffered median/top)
+ *  - product of per-key ranges <= DENSE_MAX_SLOTS (no overflow)
+ * Does one min/max prescan over the key columns.  Sets out->ok accordingly. */
+bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
+                    const agg_vtable_t** vts, uint8_t n_aggs,
+                    int64_t nrows, dense_plan_t* out);
+
 /* Result column name for a plain-column-input aggregate: input column name
  * (ray_sym_str of in_sym) + per-op suffix (_sum/_count/_mean/_min/_max/...),
  * interned.  Falls back to in_sym on buffer overflow.  Behavior-identical to
