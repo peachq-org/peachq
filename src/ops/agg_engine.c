@@ -14,6 +14,9 @@ bool ray_agg_engine_v2 = true;   /* knob; default on */
 static inline int64_t agg_read_key_i64(ray_t* col, const void* data, int64_t row);
 /* Write a finalized scalar cell into output column slot i, marking nulls. */
 static void agg_put_cell(ray_t* out, int64_t i, ray_t* cell);
+/* Dense direct-index serial grouping; defined below agg_run_one. */
+static int agg_group_keys_dense(ray_t** key_cols, int64_t nrows,
+                                const dense_plan_t* dp, agg_groups_t* out);
 /* Binary-aggregate (pearson) serial driver; defined below agg_run_one. */
 ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
                        const uint32_t* gids, int64_t nrows, int64_t ngroups,
@@ -601,8 +604,15 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     if (pool && nrows >= RAY_PARALLEL_THRESHOLD)
         return exec_group_v2_parallel(g, op, tbl, nrows, key_cols, key_syms, vts, off, block);
 
+    /* SERIAL path: for low-cardinality int/SYM keys + streaming aggs, group via
+     * direct index (no hash).  The parallel path keeps hash grouping (Task 3). */
+    dense_plan_t dp;
+    bool dense = agg_dense_plan(key_cols, ext->n_keys, vts, ext->n_aggs, nrows, &dp);
+
     agg_groups_t groups = {0};
-    if (agg_group_keys(key_cols, ext->n_keys, nrows, &groups) != 0) return ray_error("oom", NULL);
+    int grp_rc = dense ? agg_group_keys_dense(key_cols, nrows, &dp, &groups)
+                       : agg_group_keys(key_cols, ext->n_keys, nrows, &groups);
+    if (grp_rc != 0) return ray_error("oom", NULL);
 
     ray_t* result = ray_table_new(ext->n_keys + ext->n_aggs);
     if (!result || RAY_IS_ERR(result)) { free(groups.gids); free(groups.first_row); return ray_error("oom", NULL); }
@@ -736,6 +746,45 @@ ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
     }
     free(states);
     return out;
+}
+
+/* Direct-index grouping: gid = slot2gid[packed slot], assigned first-occurrence.
+ * O(1) per row, no hashing. Precondition: dp->ok. Returns 0 / -1 (OOM).
+ * Caller frees out->gids and out->first_row.  Fills the SAME agg_groups_t
+ * contract as agg_group_keys (gids per row, first_row per group, ngroups in
+ * first-occurrence order) so the downstream emit/assembler is unchanged. */
+static int agg_group_keys_dense(ray_t** key_cols, int64_t nrows,
+                                const dense_plan_t* dp, agg_groups_t* out) {
+    const void* data[16];
+    for (uint8_t k = 0; k < dp->n_keys; k++) data[k] = ray_data(key_cols[k]);
+    int32_t* slot2gid = malloc((size_t)dp->total_slots * sizeof(int32_t));
+    out->gids      = malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(uint32_t));
+    out->first_row = malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(int64_t));
+    if (!slot2gid || !out->gids || !out->first_row) {
+        free(slot2gid); free(out->gids); free(out->first_row);
+        out->gids = NULL; out->first_row = NULL; return -1;
+    }
+    for (int64_t s = 0; s < dp->total_slots; s++) slot2gid[s] = -1;
+    int64_t ngroups = 0;
+    for (int64_t r = 0; r < nrows; r++) {
+        int64_t slot = 0;
+        for (uint8_t k = 0; k < dp->n_keys; k++)
+            slot += (agg_read_key_i64(key_cols[k], data[k], r) - dp->mins[k]) * dp->strides[k];
+        /* slot is provably in [0,total_slots): each key in [min_k,max_k] so
+         * (key-min) in [0,range_k), and the composite is a mixed-radix index
+         * < total_slots (dp->ok from the same prescan). */
+        int32_t gp = slot2gid[slot];
+        if (gp < 0) {
+            gp = (int32_t)ngroups;
+            slot2gid[slot] = gp;
+            out->first_row[ngroups] = r;
+            ngroups++;
+        }
+        out->gids[r] = (uint32_t)gp;
+    }
+    out->ngroups = ngroups;
+    free(slot2gid);
+    return 0;
 }
 
 int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out) {
