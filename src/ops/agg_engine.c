@@ -309,46 +309,12 @@ typedef struct {
     agg_local_t*       locals;     /* [nw] */
 } agg_par_ctx_t;
 
-/* (first_row, group idx) pair, sorted by first_row to recover emit order. */
+/* (first_row, group idx) pair.  The radix path packs (part << 32 | local gid)
+ * into .idx so finalize can recover both the partition and the in-partition
+ * state offset for each emitted group; .fr carries the representative row used
+ * to gather the key columns.  Group-by output order is UNSPECIFIED — groups are
+ * emitted in build order, so there is no sort. */
 typedef struct { int64_t fr; int64_t idx; } agg_fr_pair_t;
-static int agg_fr_pair_cmp_fallback(const void* x, const void* y) {
-    int64_t a = ((const agg_fr_pair_t*)x)->fr, b = ((const agg_fr_pair_t*)y)->fr;
-    return (a > b) - (a < b);
-}
-
-/* Sort pairs by .fr ascending.  .fr values are distinct row indices in
- * [0, nrows), so an LSD byte-wise radix sort is O(n) and produces the same
- * total order as a comparison qsort on .fr — no tie-break needed (distinct).
- * Stable per digit; ping-pongs between `a` and a scratch buffer.  On OOM it
- * falls back to the comparison sort (correctness preserved). */
-static void agg_sort_pairs_by_fr(agg_fr_pair_t* a, int64_t n) {
-    if (n < 2) return;
-    /* Number of 8-bit passes needed to cover the largest fr value. */
-    int64_t maxfr = 0;
-    for (int64_t i = 0; i < n; i++) if (a[i].fr > maxfr) maxfr = a[i].fr;
-    int passes = 1;
-    while ((uint64_t)maxfr >> (8 * passes)) passes++;
-
-    agg_fr_pair_t* tmp = malloc((size_t)n * sizeof(agg_fr_pair_t));
-    if (!tmp) {
-        qsort(a, (size_t)n, sizeof(agg_fr_pair_t), agg_fr_pair_cmp_fallback);
-        return;
-    }
-    agg_fr_pair_t* src = a;
-    agg_fr_pair_t* dst = tmp;
-    for (int p = 0; p < passes; p++) {
-        int64_t count[256] = {0};
-        int shift = 8 * p;
-        for (int64_t i = 0; i < n; i++) count[(src[i].fr >> shift) & 0xFF]++;
-        int64_t sum = 0;
-        for (int b = 0; b < 256; b++) { int64_t c = count[b]; count[b] = sum; sum += c; }
-        for (int64_t i = 0; i < n; i++) dst[count[(src[i].fr >> shift) & 0xFF]++] = src[i];
-        agg_fr_pair_t* t = src; src = dst; dst = t;
-    }
-    /* If sorted result ended up in tmp (odd passes), copy back to `a`. */
-    if (src != a) memcpy(a, src, (size_t)n * sizeof(agg_fr_pair_t));
-    free(tmp);
-}
 
 /* Phase A: per-worker local group + accumulate over chunk [start,end). */
 static void agg_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) {
@@ -536,44 +502,20 @@ static ray_t* exec_group_v2_parallel(
     }
     free(locals);
 
-    /* ── Phase C: order by first_row, emit key + agg columns ── */
-    int64_t* order = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
-    int64_t* first_row_ordered = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
-    if (!order || !first_row_ordered) {
-        free(order); free(first_row_ordered);
-        agg_table_destroy(&gt, vts, off, block, n_aggs);
-        return ray_error("oom", NULL);
-    }
-    /* Order group indices by first_row ascending.  first_row is distinct across
-     * groups → total order, so the sort is unambiguously deterministic and gives
-     * the same first-occurrence emit order as the serial path. */
-    {
-        agg_fr_pair_t* pairs = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(agg_fr_pair_t));
-        if (!pairs) {
-            free(order); free(first_row_ordered);
-            agg_table_destroy(&gt, vts, off, block, n_aggs);
-            return ray_error("oom", NULL);
-        }
-        for (int64_t i = 0; i < ng; i++) { pairs[i].fr = gt.first_row[i]; pairs[i].idx = i; }
-        agg_sort_pairs_by_fr(pairs, ng);
-        for (int64_t i = 0; i < ng; i++) {
-            order[i] = pairs[i].idx;
-            first_row_ordered[i] = pairs[i].fr;
-        }
-        free(pairs);
-    }
-
+    /* ── Phase C: emit key + agg columns in natural global-group order ──
+     * Group-by output order is UNSPECIFIED (callers ORDER BY for order), so we
+     * emit groups in build/creation order (global hash-slot insertion order)
+     * rather than sorting by first_row.  gt.first_row[g] is still the gather
+     * index (any member row works) for the key columns. */
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
-        free(order); free(first_row_ordered);
         agg_table_destroy(&gt, vts, off, block, n_aggs);
         return result ? result : ray_error("oom", NULL);
     }
 
     for (uint8_t k = 0; k < n_keys; k++) {
-        ray_t* kc = agg_gather_key_col(key_cols[k], first_row_ordered, ng);
+        ray_t* kc = agg_gather_key_col(key_cols[k], gt.first_row, ng);
         if (!kc || RAY_IS_ERR(kc)) {
-            free(order); free(first_row_ordered);
             agg_table_destroy(&gt, vts, off, block, n_aggs);
             ray_release(result); return kc ? kc : ray_error("oom", NULL);
         }
@@ -585,14 +527,13 @@ static ray_t* exec_group_v2_parallel(
         bool is_list = (vts[a]->out_type == RAY_LIST);
         ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
-            free(order); free(first_row_ordered);
             agg_table_destroy(&gt, vts, off, block, n_aggs);
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
         out->len = ng;
         int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
         for (int64_t i = 0; i < ng; i++) {
-            ray_t* cell = vts[a]->finalize(gt.states + (size_t)order[i] * block + off[a], NULL, kparam);
+            ray_t* cell = vts[a]->finalize(gt.states + (size_t)i * block + off[a], NULL, kparam);
             if (is_list) {
                 out = ray_list_set(out, i, cell);   /* retains cell */
                 ray_release(cell);                  /* drop our local ref */
@@ -606,7 +547,6 @@ static ray_t* exec_group_v2_parallel(
         ray_release(out);
     }
 
-    free(order); free(first_row_ordered);
     agg_table_destroy(&gt, vts, off, block, n_aggs);
     return result;
 }
@@ -617,7 +557,7 @@ static ray_t* exec_group_v2_parallel(
  * mixed-radix packing) + a per-worker first_row[slot] (INT64_MAX = untouched).
  * Phase A: each worker packs its chunk rows into slots and update_batch's into
  * its own slab.  Phase B: merge per-worker slabs into a global slab.  Phase C:
- * collect occupied slots, order by global first_row (first-occurrence), emit.
+ * collect occupied slots in slot order and emit (output order unspecified).
  * No hashing.  Buffered aggs (median/top-k) malloc a per-group buffer in their
  * state; every init'd slot of every slab carries the vt->destroy lifecycle:
  * worker buffers are freed once after being merged into the global slab, and
@@ -842,29 +782,25 @@ static ray_t* exec_group_v2_parallel_dense(
     for (uint32_t i = 0; i < nw; i++) agg_dense_local_destroy(&locals[i]);
     free(locals);
 
-    /* ── Phase C: collect occupied slots, order by first_row (first-occurrence). ── */
+    /* ── Phase C: collect occupied slots in slot order, emit. ──
+     * Group-by output order is UNSPECIFIED, so we emit in dense-slot order
+     * (the natural build order) rather than sorting by first_row.  gfirst[s] is
+     * still the gather index (any member row) for the key columns. */
     int64_t ng = 0;
     for (int64_t s = 0; s < total_slots; s++) if (gfirst[s] != INT64_MAX) ng++;
 
     int64_t* occupied_slot     = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
     int64_t* first_row_ordered = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
-    agg_fr_pair_t* pairs       = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(agg_fr_pair_t));
-    if (!occupied_slot || !first_row_ordered || !pairs) {
-        free(occupied_slot); free(first_row_ordered); free(pairs);
+    if (!occupied_slot || !first_row_ordered) {
+        free(occupied_slot); free(first_row_ordered);
         agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
         free(gstates); free(gfirst);
         return ray_error("oom", NULL);
     }
     { int64_t i = 0;
       for (int64_t s = 0; s < total_slots; s++)
-          if (gfirst[s] != INT64_MAX) { pairs[i].fr = gfirst[s]; pairs[i].idx = s; i++; }
+          if (gfirst[s] != INT64_MAX) { first_row_ordered[i] = gfirst[s]; occupied_slot[i] = s; i++; }
     }
-    agg_sort_pairs_by_fr(pairs, ng);
-    for (int64_t i = 0; i < ng; i++) {
-        occupied_slot[i]     = pairs[i].idx;
-        first_row_ordered[i] = pairs[i].fr;
-    }
-    free(pairs);
 
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
@@ -934,10 +870,10 @@ static ray_t* exec_group_v2_parallel_dense(
  *            (keys disjoint from other partitions); assign partition-local gids
  *            (first_row = MIN row), init each agg state on first key sight,
  *            batch-update each agg from a gathered value column.
- *   Phase 3 (serial): ngroups = Σ partition group counts; collect every group's
- *            first_row globally, qsort ascending (first-occurrence — partitions
- *            are hash-ordered so a GLOBAL sort is required), emit key + agg
- *            columns in that order, assemble {key cols, agg cols}.
+ *   Phase 3: ngroups = Σ partition group counts; emit groups in build order
+ *            (partition order, then partition-local group order — output order
+ *            is unspecified, so no global sort), assembling {key cols, agg cols}.
+ *            The per-group representative row (first_row) gathers the key cols.
  *
  * Streaming aggs only (selector guarantees it) → no buffered destroy lifecycle.
  * ══════════════════════════════════════════════════════════════════════ */
@@ -969,6 +905,11 @@ static char* agg_pay_reserve(agg_pay_buf_t* b, size_t rec) {
 typedef struct {
     char*    states;     /* [ng * block] AoS group state (every group init'd) */
     int64_t* first_row;  /* [ng] MIN row idx per partition-local group */
+    int64_t* keys;       /* [ng * n_keys] packed keys (build order) for the
+                          * representative record of each group — Phase 3 emits
+                          * the key columns by un-packing these SEQUENTIALLY
+                          * (cache-friendly) instead of gathering scattered
+                          * original-column rows at first_row[]. */
     int64_t  ng;
     int      oom;
 } agg_radix_part_t;
@@ -991,7 +932,42 @@ static void agg_radix_parts_destroy(agg_radix_part_t* parts, uint32_t nparts,
                         vts[a]->destroy(states + (size_t)gg * block + off[a]);
         free(parts[p].states);
         free(parts[p].first_row);
+        free(parts[p].keys);
     }
+}
+
+/* Build a result key column of src_col's type for the radix path by un-packing
+ * the per-group packed key value (column key_idx of each group's representative
+ * record) SEQUENTIALLY from the per-partition `keys` buffers, in emit order
+ * (partition-major, then partition-local gid).  This replaces the scattered
+ * gather of the original key column at first_row[gi] — for huge ngroups the
+ * sequential read is far more cache-friendly.
+ *
+ * agg_read_key_i64 widened each key into int64 (sign-extend for signed types,
+ * zero-extend for U8/BOOL/SYM intern ids); write_col_i64 is its exact inverse,
+ * so the round-trip stores byte-identical payload to what agg_gather_key_col's
+ * raw memcpy of the original column produced — for SYM it routes through
+ * ray_write_sym at the matching width, and the domain is adopted from src_col
+ * just like agg_gather_key_col.  Caller owns the returned column. */
+static ray_t* agg_unpack_key_col(ray_t* src_col, uint8_t key_idx, uint8_t n_keys,
+                                 const agg_radix_part_t* parts, uint32_t nparts,
+                                 int64_t n) {
+    ray_t* out = col_vec_new(src_col, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    if (out->type == RAY_SYM)
+        ray_sym_vec_adopt_domain(out, sym_domain_rep(src_col));
+    out->len = n;
+    int8_t type = src_col->type; uint8_t attrs = src_col->attrs;
+    void* dst = ray_data(out);
+    int64_t i = 0;
+    for (uint32_t p = 0; p < nparts; p++) {
+        const int64_t* keys = parts[p].keys;
+        int64_t png = parts[p].ng;
+        for (int64_t gg = 0; gg < png; gg++, i++)
+            write_col_i64(dst, i, keys[(size_t)gg * n_keys + key_idx], type, attrs);
+    }
+    if (src_col->attrs & RAY_ATTR_HAS_NULLS) out->attrs |= RAY_ATTR_HAS_NULLS;
+    return out;
 }
 
 typedef struct {
@@ -1092,8 +1068,11 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
         char*    states    = malloc((size_t)total * c->block);
         const int64_t** keyp = malloc((size_t)total * sizeof(int64_t*)); /* gid -> packed keys */
         uint32_t* gid      = malloc((size_t)total * sizeof(uint32_t));/* row i -> local gid */
-        if (!ht || !ht_salt || !first_row || !states || !keyp || !gid) {
-            free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid);
+        /* Persist each group's packed keys (build order) so Phase 3 emits the
+         * key columns by sequential un-pack rather than scattered gather. */
+        int64_t* gkeys     = malloc((size_t)total * (size_t)(n_keys ? n_keys : 1) * sizeof(int64_t));
+        if (!ht || !ht_salt || !first_row || !states || !keyp || !gid || !gkeys) {
+            free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid); free(gkeys);
             pr->oom = 1; return;
         }
         for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
@@ -1144,6 +1123,8 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                         ht_salt[slot] = salt;
                         first_row[gg] = r;
                         keyp[gg] = keys;
+                        for (uint8_t k = 0; k < n_keys; k++)
+                            gkeys[(size_t)gg * n_keys + k] = keys[k];
                         for (uint8_t a = 0; a < n_aggs; a++)
                             c->vts[a]->init(states + (size_t)gg * c->block + c->off[a]);
                         ng++;
@@ -1180,10 +1161,10 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
 
         for (uint8_t a = 0; a < n_aggs; a++) { free(gv[a]); free(gy[a]); }
         free(gid);
-        pr->states = states; pr->first_row = first_row; pr->ng = ng;
+        pr->states = states; pr->first_row = first_row; pr->keys = gkeys; pr->ng = ng;
         continue;
     oom:
-        free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid);
+        free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid); free(gkeys);
         for (uint8_t a = 0; a < n_aggs; a++) { free(gv[a]); free(gy[a]); }
         pr->oom = 1; return;
     }
@@ -1191,9 +1172,10 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
 
 /* ── Phase 3 parallel finalize/gather (high-group-count win) ──────────────
  * For huge ngroups (q10 ~10M), the serial per-group vt->finalize + cell write
- * dominates.  Once first-occurrence order is known (the sorted `pairs`), the
- * output is ngroups rows: partition [0,ngroups) across workers and have each
- * worker finalize its DISJOINT slice into the pre-sized output columns.
+ * dominates.  The emit order is fixed by `pairs` (build order — output order is
+ * unspecified), so the output is ngroups rows: partition [0,ngroups) across
+ * workers and have each worker finalize its DISJOINT slice into the pre-sized
+ * output columns.
  *
  * Safety:
  *   - Each worker writes disjoint output element ranges → no payload contention.
@@ -1329,17 +1311,20 @@ static ray_t* exec_group_v2_parallel_radix(
         return ray_error("oom", NULL);
     }
 
-    /* Phase 3: global first-occurrence order, emit. */
+    /* Phase 3: emit in natural partition/group order. ──
+     * Group-by output order is UNSPECIFIED, so we emit groups in partition order
+     * then partition-local build order (no global sort by first_row).  The
+     * (part<<32 | gid) idx encoding locates each group's state during finalize;
+     * key columns are un-packed sequentially from the contiguous packed-key
+     * buffers (agg_unpack_key_col), not gathered from scattered first_row[]. */
     int64_t ng = 0;
     for (uint32_t p = 0; p < AGG_RADIX_P; p++) ng += parts[p].ng;
 
-    /* (first_row, part, local gid) collected globally and sorted by first_row.
-     * Reuse agg_fr_pair_t with idx encoding (part << 32 | local gid) so a single
-     * qsort recovers both the partition and the in-partition state offset. */
+    /* (first_row, part, local gid) collected globally in build order.  idx packs
+     * (part << 32 | local gid) so finalize recovers both the partition and the
+     * in-partition state offset. */
     agg_fr_pair_t* pairs = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(agg_fr_pair_t));
-    int64_t* first_row_ordered = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
-    if (!pairs || !first_row_ordered) {
-        free(pairs); free(first_row_ordered);
+    if (!pairs) {
         agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
         for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
@@ -1348,27 +1333,29 @@ static ray_t* exec_group_v2_parallel_radix(
     { int64_t i = 0;
       for (uint32_t p = 0; p < AGG_RADIX_P; p++)
           for (int64_t gg = 0; gg < parts[p].ng; gg++) {
-              pairs[i].fr  = parts[p].first_row[gg];
+              pairs[i].fr  = parts[p].first_row[gg];   /* unused by emit; kept for idx pairing */
               pairs[i].idx = ((int64_t)p << 32) | (uint32_t)gg;   /* part | gid */
               i++;
           }
     }
-    agg_sort_pairs_by_fr(pairs, ng);
-    for (int64_t i = 0; i < ng; i++) first_row_ordered[i] = pairs[i].fr;
 
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
-        free(pairs); free(first_row_ordered);
+        free(pairs);
         agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
         for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
         return result ? result : ray_error("oom", NULL);
     }
 
+    /* Emit key columns by sequential un-pack from the contiguous per-partition
+     * packed-key buffers (cache-friendly), NOT a scattered gather of the
+     * original columns at first_row[].  Byte-identical to agg_gather_key_col
+     * (see agg_unpack_key_col), incl. SYM payload + domain. */
     for (uint8_t k = 0; k < n_keys; k++) {
-        ray_t* kc = agg_gather_key_col(key_cols[k], first_row_ordered, ng);
+        ray_t* kc = agg_unpack_key_col(key_cols[k], k, n_keys, parts, AGG_RADIX_P, ng);
         if (!kc || RAY_IS_ERR(kc)) {
-            free(pairs); free(first_row_ordered);
+            free(pairs);
             agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
             for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
             free(bufs); free(parts);
@@ -1391,7 +1378,7 @@ static ray_t* exec_group_v2_parallel_radix(
         ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
             for (uint8_t b = 0; b < a; b++) ray_release(outs[b]);
-            free(pairs); free(first_row_ordered);
+            free(pairs);
             agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
             for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
             free(bufs); free(parts);
@@ -1457,7 +1444,7 @@ static ray_t* exec_group_v2_parallel_radix(
         ray_release(out);
     }
 
-    free(pairs); free(first_row_ordered);
+    free(pairs);
     /* Finalize is done reading every partition's buffered group state → destroy
      * exactly once before freeing the partition slabs. */
     agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
