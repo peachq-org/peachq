@@ -461,7 +461,10 @@ ray_t* ray_timeit_fn(ray_t** args, int64_t n) {
     int64_t t0 = ray_profile_now_ns();
     ray_t* result = ray_eval(args[0]);
     int64_t t1 = ray_profile_now_ns();
-    if (result && !RAY_IS_ERR(result)) ray_release(result);
+    /* Propagate errors instead of swallowing them — otherwise a failing
+     * expression silently reports a timing as if it had succeeded. */
+    if (result && RAY_IS_ERR(result)) return result;
+    if (result) ray_release(result);
     double ms = (double)(t1 - t0) / 1e6;
     return make_f64(ms);
 }
