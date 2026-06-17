@@ -1189,11 +1189,71 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
     }
 }
 
-/* Parallel radix path.  Precondition: keys int/SYM and non-null
- * (selector-gated).  Handles both streaming and buffered (median/top) aggs:
- * Phase 2 runs init/update_batch per group, Phase 3 finalizes then destroys
- * each partition's buffered group state exactly once.  vts/off/block resolved
- * by caller. */
+/* ── Phase 3 parallel finalize/gather (high-group-count win) ──────────────
+ * For huge ngroups (q10 ~10M), the serial per-group vt->finalize + cell write
+ * dominates.  Once first-occurrence order is known (the sorted `pairs`), the
+ * output is ngroups rows: partition [0,ngroups) across workers and have each
+ * worker finalize its DISJOINT slice into the pre-sized output columns.
+ *
+ * Safety:
+ *   - Each worker writes disjoint output element ranges → no payload contention.
+ *   - Per-group buffered states are read (finalize) here; the buffered destroy
+ *     stays SERIAL afterward (agg_radix_parts_destroy) → exactly-once, no race.
+ *   - agg_put_cell would OR RAY_ATTR_HAS_NULLS into the SHARED out->attrs (a
+ *     racy read-modify-write).  So the worker writes the null sentinel directly
+ *     (disjoint idx, safe) and records a per-worker "saw null" flag; the caller
+ *     ORs RAY_ATTR_HAS_NULLS once, serially, after the parallel pass.
+ *   - LIST out_type (top/bot) cells are NEW ray_t's whose finalize + ray_list_set
+ *     COW/retain semantics are not confirmed race-free → LIST aggs are finalized
+ *     SERIALLY by the caller (q10 and other scalar shapes get the full win). */
+typedef struct {
+    agg_radix_part_t*    parts;
+    const agg_fr_pair_t* pairs;       /* [ng], sorted by first_row */
+    const agg_vtable_t** vts;
+    const size_t*        off;
+    size_t               block;
+    uint8_t              n_aggs;
+    const int64_t*       agg_k;       /* [n_aggs] kparam, or NULL */
+    ray_t**              outs;        /* [n_aggs] pre-sized scalar columns (LIST = NULL) */
+    uint8_t*             saw_null;    /* [nw * n_aggs] per-worker null flag, 0/1 */
+} agg_radix_fin_ctx_t;
+
+/* Write a finalized scalar cell's payload at disjoint index i WITHOUT touching
+ * the shared out->attrs flag; report null via the return value.  Byte-identical
+ * to the serial agg_put_cell + ray_vec_set_null pair: a null cell stores the
+ * type's NULL sentinel (overwriting cell->f64/i64), matching ray_vec_set_null's
+ * payload write — only the RAY_ATTR_HAS_NULLS flag set is deferred to the
+ * caller (set once serially) to avoid a racy shared read-modify-write. */
+static inline bool agg_put_cell_value(ray_t* out, int64_t i, ray_t* cell) {
+    bool is_null = RAY_ATOM_IS_NULL(cell);
+    switch (out->type) {
+        case RAY_F64: ((double*)ray_data(out))[i]  = is_null ? NULL_F64 : cell->f64; break;
+        default:      ((int64_t*)ray_data(out))[i] = is_null ? NULL_I64 : cell->i64; break;
+    }
+    return is_null;
+}
+
+/* Phase 3 worker: finalize the scalar aggs for output rows [start,end). */
+static void agg_radix_finalize_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) {
+    agg_radix_fin_ctx_t* c = (agg_radix_fin_ctx_t*)vctx;
+    uint8_t n_aggs = c->n_aggs;
+    for (uint8_t a = 0; a < n_aggs; a++) {
+        ray_t* out = c->outs[a];
+        if (!out) continue;                       /* LIST agg: emitted serially */
+        int64_t kparam = c->agg_k ? c->agg_k[a] : 0;
+        bool any_null = false;
+        for (int64_t i = start; i < end; i++) {
+            uint32_t p  = (uint32_t)(c->pairs[i].idx >> 32);
+            uint32_t gg = (uint32_t)(c->pairs[i].idx & 0xffffffffu);
+            ray_t* cell = c->vts[a]->finalize(
+                c->parts[p].states + (size_t)gg * c->block + c->off[a], NULL, kparam);
+            if (agg_put_cell_value(out, i, cell)) any_null = true;
+            ray_release(cell);
+        }
+        if (any_null) c->saw_null[(size_t)wid * n_aggs + a] = 1;
+    }
+}
+
 static ray_t* exec_group_v2_parallel_radix(
         ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t nrows,
         ray_t** key_cols, int64_t* key_syms,
@@ -1318,12 +1378,19 @@ static ray_t* exec_group_v2_parallel_radix(
         ray_release(kc);
     }
 
+    /* Pre-allocate every agg's output column up front so the parallel finalize
+     * pass can write disjoint slices into all scalar columns at once.  LIST
+     * (top/bot) columns are finalized serially below — outs[a] stays NULL for
+     * them so the parallel worker skips them. */
+    ray_t* outs[16] = {0};
+    int64_t kparams[16] = {0};
     for (uint8_t a = 0; a < n_aggs; a++) {
         /* Buffered top_n/bot_n produce a LIST cell per group (a native vector);
          * median and all streaming aggs produce a scalar out_type cell. */
         bool is_list = (vts[a]->out_type == RAY_LIST);
         ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
+            for (uint8_t b = 0; b < a; b++) ray_release(outs[b]);
             free(pairs); free(first_row_ordered);
             agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
             for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
@@ -1331,18 +1398,59 @@ static ray_t* exec_group_v2_parallel_radix(
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
         out->len = ng;
-        int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
-        for (int64_t i = 0; i < ng; i++) {
-            uint32_t p  = (uint32_t)(pairs[i].idx >> 32);
-            uint32_t gg = (uint32_t)(pairs[i].idx & 0xffffffffu);
-            ray_t* cell = vts[a]->finalize(parts[p].states + (size_t)gg * block + off[a], NULL, kparam);
-            if (is_list) {
-                out = ray_list_set(out, i, cell);   /* retains cell */
-                ray_release(cell);                  /* drop our local ref */
-            } else {
-                agg_put_cell(out, i, cell);
-                ray_release(cell);
+        outs[a] = out;
+        kparams[a] = (ext->agg_k ? ext->agg_k[a] : 0);
+    }
+
+    /* Parallelize the scalar finalize over the output rows when ngroups is large
+     * (the q10/high-card win).  Small ng (incl. every low-card shape) keeps the
+     * trivial serial loop → zero dispatch overhead, no regression. */
+    bool par_fin = (pool && ng >= RAY_PARALLEL_THRESHOLD);
+    if (par_fin) {
+        uint8_t* saw_null = calloc((size_t)nw * (n_aggs ? n_aggs : 1), 1);
+        if (!saw_null) { par_fin = false; }
+        else {
+            ray_t* scalar_outs[16];
+            for (uint8_t a = 0; a < n_aggs; a++)
+                scalar_outs[a] = (vts[a]->out_type == RAY_LIST) ? NULL : outs[a];
+            agg_radix_fin_ctx_t fc = {
+                .parts = parts, .pairs = pairs, .vts = vts, .off = off,
+                .block = block, .n_aggs = n_aggs, .agg_k = kparams,
+                .outs = scalar_outs, .saw_null = saw_null,
+            };
+            ray_pool_dispatch(pool, agg_radix_finalize_fn, &fc, ng);
+            /* OR the deferred HAS_NULLS flag once, serially. */
+            for (uint8_t a = 0; a < n_aggs; a++) {
+                if (vts[a]->out_type == RAY_LIST) continue;
+                for (uint32_t w = 0; w < nw; w++)
+                    if (saw_null[(size_t)w * n_aggs + a]) {
+                        outs[a]->attrs |= RAY_ATTR_HAS_NULLS;
+                        break;
+                    }
             }
+            free(saw_null);
+        }
+    }
+
+    for (uint8_t a = 0; a < n_aggs; a++) {
+        bool is_list = (vts[a]->out_type == RAY_LIST);
+        ray_t* out = outs[a];
+        /* Serial finalize: LIST aggs always (ray_list_set COW/retain not
+         * confirmed race-safe), and all aggs when the parallel pass was skipped. */
+        if (is_list || !par_fin) {
+            for (int64_t i = 0; i < ng; i++) {
+                uint32_t p  = (uint32_t)(pairs[i].idx >> 32);
+                uint32_t gg = (uint32_t)(pairs[i].idx & 0xffffffffu);
+                ray_t* cell = vts[a]->finalize(parts[p].states + (size_t)gg * block + off[a], NULL, kparams[a]);
+                if (is_list) {
+                    out = ray_list_set(out, i, cell);   /* retains cell */
+                    ray_release(cell);                  /* drop our local ref */
+                } else {
+                    agg_put_cell(out, i, cell);
+                    ray_release(cell);
+                }
+            }
+            outs[a] = out;   /* ray_list_set may COW-realloc */
         }
         int64_t agg_name = agg_result_col_name(agg_syms[a], ext->agg_ops[a]);
         result = ray_table_add_col(result, agg_name, out);
