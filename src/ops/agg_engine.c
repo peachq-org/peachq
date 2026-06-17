@@ -855,6 +855,362 @@ static ray_t* exec_group_v2_parallel_dense(
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * Parallel SMALL-HASH group-by (high-reduction sparse int/SYM keys).
+ *
+ * Targets the shape the dense path rejects (key range exceeds the dense cap)
+ * but that still has FEW distinct groups — e.g. 64 groups whose values span
+ * 0..6.3e9.  Routing such a shape to RADIX scatters all N rows into 256
+ * partitions for a handful of groups (the ~4.7× "scatter tax"); routing it to
+ * the generic hash path sizes every per-worker structure to N (htable, states,
+ * first_row).  This path is the missing O(groups)-sized strategy: per-worker
+ * structures sized to the estimated CARDINALITY, growable on a wrong-low guess.
+ *
+ * Streaming aggs only (selector gates ACC_BUFFERED → radix).  Per-worker hash:
+ * open-addressing, next_pow2(4*estimate) with a small floor, GROWABLE (rehash
+ * on load-factor exceed); states + first_row grow with the hash, never with N.
+ * Phase A interleaves probe + accumulate in fixed CHUNK_ROWS chunks so the gid
+ * buffer is chunk-sized, not nrows-sized.  Phase B merges per-worker hashes into
+ * a global hash (≤ groups×nworkers entries — cheap).  Phase C emits in build
+ * order (unspecified output order): gather key columns at the representative
+ * row per group, finalize each group's streaming state.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* Cardinality estimate via a bounded sample of the first rows.  Inserts key
+ * tuples into a small open-addressing hash (reusing agg_tuple_hash/agg_tuple_eq
+ * for byte-consistency with the real grouping) and EARLY-EXITS the moment the
+ * distinct count exceeds t_route → returns t_route+1 to signal "high card" so
+ * high-card shapes (q10/S2) pay only the bounded sample, never a full pass.
+ * On no early-exit, returns the exact distinct count of the sample (capped at
+ * t_route).  sample_rows is clamped to nrows. */
+static int64_t agg_estimate_card(ray_t** key_cols, const void** key_data,
+                                 uint8_t n_keys, int64_t nrows,
+                                 int64_t sample_rows, int64_t t_route) {
+    int64_t ns = sample_rows < nrows ? sample_rows : nrows;
+    if (ns <= 0) return 0;
+    /* Hash sized to comfortably hold t_route distinct keys at <0.5 load. */
+    int64_t htcap = 16;
+    while (htcap < (t_route + 1) * 4) htcap <<= 1;
+    uint64_t htmask = (uint64_t)htcap - 1;
+    int32_t* ht = malloc((size_t)htcap * sizeof(int32_t));
+    int64_t* rep = malloc((size_t)(t_route + 2) * sizeof(int64_t)); /* gid -> sample row */
+    if (!ht || !rep) { free(ht); free(rep); return t_route + 1; /* assume high */ }
+    for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
+    int64_t distinct = 0;
+    for (int64_t r = 0; r < ns; r++) {
+        uint64_t h = agg_tuple_hash(key_cols, key_data, n_keys, r);
+        uint64_t slot = h & htmask;
+        for (;;) {
+            int32_t gp = ht[slot];
+            if (gp < 0) {
+                ht[slot] = (int32_t)distinct;
+                rep[distinct] = r;
+                distinct++;
+                if (distinct > t_route) { free(ht); free(rep); return t_route + 1; }
+                break;
+            }
+            if (agg_tuple_eq(key_cols, key_data, n_keys, r, rep[gp])) break;
+            slot = (slot + 1) & htmask;
+        }
+    }
+    free(ht); free(rep);
+    return distinct;
+}
+
+/* Per-worker (and global merge) GROWABLE small-hash group table: open-addressing
+ * hash on the tuple-hash → local gid; AoS per-group state blocks of `block`
+ * bytes.  Sized to cardinality (not N) and grown by rehash on load-factor. */
+typedef struct {
+    int32_t* ht;          /* [htcap] slot -> local gid, -1 empty */
+    int64_t  htcap;
+    uint64_t htmask;
+    int64_t* first_row;   /* [cap] representative (MIN) row idx per local group */
+    char*    states;      /* [cap*block] AoS group state */
+    int64_t  ng, cap;
+    size_t   block;
+    int      oom;
+} agg_sh_t;
+
+static int agg_sh_init(agg_sh_t* sh, int64_t cap, size_t block) {
+    if (cap < 1) cap = 1;
+    int64_t htcap = 16;
+    while (htcap < cap * 2) htcap <<= 1;   /* <0.5 load at full cap */
+    sh->ng = 0; sh->cap = cap; sh->block = block; sh->oom = 0;
+    sh->htcap = htcap; sh->htmask = (uint64_t)htcap - 1;
+    sh->ht        = malloc((size_t)htcap * sizeof(int32_t));
+    sh->first_row = malloc((size_t)cap * sizeof(int64_t));
+    sh->states    = malloc((size_t)cap * block);
+    if (!sh->ht || !sh->first_row || !sh->states) { sh->oom = 1; return -1; }
+    for (int64_t i = 0; i < htcap; i++) sh->ht[i] = -1;
+    return 0;
+}
+
+static void agg_sh_destroy(agg_sh_t* sh) {
+    free(sh->ht); free(sh->first_row); free(sh->states);
+    sh->ht = NULL; sh->first_row = NULL; sh->states = NULL;
+}
+
+/* Grow capacity (states + first_row) when ng would exceed cap.  Doubles cap. */
+static int agg_sh_grow_cap(agg_sh_t* sh) {
+    int64_t nc = sh->cap * 2;
+    int64_t* nfr = realloc(sh->first_row, (size_t)nc * sizeof(int64_t));
+    if (!nfr) { sh->oom = 1; return -1; }
+    sh->first_row = nfr;
+    char* nst = realloc(sh->states, (size_t)nc * sh->block);
+    if (!nst) { sh->oom = 1; return -1; }
+    sh->states = nst;
+    sh->cap = nc;
+    return 0;
+}
+
+/* Rehash the hash table to a larger htcap (keeps load factor low).  The gid set
+ * is unchanged; we recompute each group's slot from its representative row's
+ * tuple hash. */
+static int agg_sh_grow_ht(agg_sh_t* sh, ray_t** key_cols, const void** key_data,
+                          uint8_t n_keys) {
+    int64_t nc = sh->htcap * 2;
+    int32_t* nht = malloc((size_t)nc * sizeof(int32_t));
+    if (!nht) { sh->oom = 1; return -1; }
+    uint64_t nmask = (uint64_t)nc - 1;
+    for (int64_t i = 0; i < nc; i++) nht[i] = -1;
+    for (int64_t g = 0; g < sh->ng; g++) {
+        uint64_t h = agg_tuple_hash(key_cols, key_data, n_keys, sh->first_row[g]);
+        uint64_t slot = h & nmask;
+        while (nht[slot] >= 0) slot = (slot + 1) & nmask;
+        nht[slot] = (int32_t)g;
+    }
+    free(sh->ht);
+    sh->ht = nht; sh->htcap = nc; sh->htmask = nmask;
+    return 0;
+}
+
+#define AGG_SH_CHUNK 4096
+
+typedef struct {
+    ray_t**            key_cols;
+    const void**       key_data;
+    uint8_t            n_keys;
+    const agg_vtable_t** vts;
+    const size_t*      off;
+    size_t             block;
+    uint8_t            n_aggs;
+    const void**       val_data; const int8_t* val_types; const bool* val_hasnull; const uint8_t* val_esz;
+    const void**       val2_data; const int8_t* val2_types; const bool* val2_hasnull; const uint8_t* val2_esz;
+    int64_t            est_card;   /* sizing hint for per-worker hashes */
+    agg_sh_t*          locals;     /* [nw] */
+} agg_sh_ctx_t;
+
+/* Probe-or-insert key tuple at row r in sh; returns gid (>=0) or -1 on oom. */
+static inline int32_t agg_sh_find_or_insert(
+        agg_sh_t* sh, ray_t** key_cols, const void** key_data, uint8_t n_keys,
+        const agg_vtable_t** vts, const size_t* off, uint8_t n_aggs, int64_t r) {
+    uint64_t h = agg_tuple_hash(key_cols, key_data, n_keys, r);
+    uint64_t slot = h & sh->htmask;
+    for (;;) {
+        int32_t gp = sh->ht[slot];
+        if (gp < 0) {                       /* new group */
+            if (sh->ng == sh->cap && agg_sh_grow_cap(sh) != 0) return -1;
+            /* Keep hash load factor < 0.5: grow + rehash before insert. */
+            if ((sh->ng + 1) * 2 > sh->htcap) {
+                if (agg_sh_grow_ht(sh, key_cols, key_data, n_keys) != 0) return -1;
+                slot = h & sh->htmask;
+                while (sh->ht[slot] >= 0) slot = (slot + 1) & sh->htmask;
+            }
+            int32_t g = (int32_t)sh->ng;
+            sh->ht[slot] = g;
+            sh->first_row[g] = r;
+            for (uint8_t a = 0; a < n_aggs; a++)
+                vts[a]->init(sh->states + (size_t)g * sh->block + off[a]);
+            sh->ng++;
+            return g;
+        }
+        if (agg_tuple_eq(key_cols, key_data, n_keys, r, sh->first_row[gp])) {
+            if (r < sh->first_row[gp]) sh->first_row[gp] = r;   /* MIN representative */
+            return gp;
+        }
+        slot = (slot + 1) & sh->htmask;
+    }
+}
+
+/* Phase A: per-worker small-hash group + accumulate over chunk [start,end),
+ * processed in fixed-size sub-chunks so the gid buffer is O(CHUNK), not O(N). */
+static void agg_sh_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) {
+    agg_sh_ctx_t* c = (agg_sh_ctx_t*)vctx;
+    agg_sh_t* sh = &c->locals[wid];
+    if (sh->oom) return;
+    uint32_t gid[AGG_SH_CHUNK];
+
+    for (int64_t cs = start; cs < end; cs += AGG_SH_CHUNK) {
+        int64_t ce = cs + AGG_SH_CHUNK; if (ce > end) ce = end;
+        int64_t n = ce - cs;
+        for (int64_t r = cs; r < ce; r++) {
+            int32_t g = agg_sh_find_or_insert(sh, c->key_cols, c->key_data, c->n_keys,
+                                              c->vts, c->off, c->n_aggs, r);
+            if (g < 0) { sh->oom = 1; return; }
+            gid[r - cs] = (uint32_t)g;
+        }
+        for (uint8_t a = 0; a < c->n_aggs; a++) {
+            if (c->vts[a]->update_batch2) {             /* binary agg (pearson) */
+                const void* vx = (const char*)c->val_data[a]  + (size_t)cs * c->val_esz[a];
+                const void* vy = (const char*)c->val2_data[a] + (size_t)cs * c->val2_esz[a];
+                ray_valid_t valid_x = { vx, c->val_types[a],  c->val_hasnull[a] };
+                ray_valid_t valid_y = { vy, c->val2_types[a], c->val2_hasnull[a] };
+                c->vts[a]->update_batch2(sh->states + c->off[a], c->block, gid,
+                                         vx, vy, &valid_x, &valid_y, n, NULL);
+            } else {
+                const void* vals = (c->val_data[a])
+                    ? (const void*)((const char*)c->val_data[a] + (size_t)cs * c->val_esz[a])
+                    : NULL;
+                ray_valid_t valid = { vals, c->val_types[a],
+                                      c->val_data[a] ? c->val_hasnull[a] : false };
+                c->vts[a]->update_batch(sh->states + c->off[a], c->block,
+                                        gid, vals, &valid, n, NULL);
+            }
+        }
+    }
+}
+
+/* Parallel small-hash path.  Precondition: int/SYM keys, all aggs ACC_STREAMING,
+ * estimated cardinality LOW (caller-gated).  est_card sizes the per-worker
+ * hashes; they grow if the estimate proves too low. */
+static ray_t* exec_group_v2_parallel_smallhash(
+        ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t nrows,
+        ray_t** key_cols, int64_t* key_syms,
+        const agg_vtable_t** vts, const size_t* off, size_t block,
+        int64_t est_card) {
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    uint8_t n_keys = ext->n_keys, n_aggs = ext->n_aggs;
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t nw = ray_pool_total_workers(pool);
+
+    const void* key_data[16];
+    for (uint8_t k = 0; k < n_keys; k++) key_data[k] = ray_data(key_cols[k]);
+
+    const void* val_data[16]; int8_t val_types[16]; bool val_hasnull[16]; uint8_t val_esz[16];
+    const void* val2_data[16]; int8_t val2_types[16]; bool val2_hasnull[16]; uint8_t val2_esz[16];
+    int64_t agg_syms[16];
+    for (uint8_t a = 0; a < n_aggs; a++) {
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        agg_syms[a] = ie->sym;
+        ray_t* vc = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
+        val_data[a]    = vc ? ray_data(vc) : NULL;
+        val_types[a]   = vc ? vc->type : RAY_I64;
+        val_hasnull[a] = vc ? ((vc->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
+        val_esz[a]     = vc ? col_esz(vc) : 0;
+        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a])
+            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a]->id)->sym) : NULL;
+        val2_data[a]    = vc2 ? ray_data(vc2) : NULL;
+        val2_types[a]   = vc2 ? vc2->type : RAY_I64;
+        val2_hasnull[a] = vc2 ? ((vc2->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
+        val2_esz[a]     = vc2 ? col_esz(vc2) : 0;
+    }
+
+    /* Per-worker hash sized to ~4× the estimated cardinality (floor 256) — the
+     * cap, not N.  Grows by rehash if a worker sees more distinct keys than the
+     * sample predicted (rare-key tail).  Cap is bounded by nrows for safety. */
+    int64_t cap0 = est_card * 4;
+    if (cap0 < 256) cap0 = 256;
+    if (nrows > 0 && cap0 > nrows) cap0 = nrows;
+
+    agg_sh_t* locals = calloc((size_t)nw, sizeof(agg_sh_t));
+    if (!locals) return ray_error("oom", NULL);
+    int alloc_oom = 0;
+    for (uint32_t w = 0; w < nw; w++)
+        if (agg_sh_init(&locals[w], cap0, block) != 0) { alloc_oom = 1; break; }
+    if (alloc_oom) {
+        for (uint32_t w = 0; w < nw; w++) agg_sh_destroy(&locals[w]);
+        free(locals);
+        return ray_error("oom", NULL);
+    }
+
+    agg_sh_ctx_t ctx = {
+        .key_cols = key_cols, .key_data = key_data, .n_keys = n_keys,
+        .vts = vts, .off = off, .block = block, .n_aggs = n_aggs,
+        .val_data = val_data, .val_types = val_types,
+        .val_hasnull = val_hasnull, .val_esz = val_esz,
+        .val2_data = val2_data, .val2_types = val2_types,
+        .val2_hasnull = val2_hasnull, .val2_esz = val2_esz,
+        .est_card = est_card, .locals = locals,
+    };
+    ray_pool_dispatch(pool, agg_sh_phaseA_fn, &ctx, nrows);
+
+    for (uint32_t w = 0; w < nw; w++)
+        if (locals[w].oom) {
+            for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
+            free(locals);
+            return ray_error("oom", NULL);
+        }
+
+    /* ── Phase B: merge per-worker hashes into a global hash (serial). ──
+     * Entries ≤ groups×nworkers, so size the global hash to that bound. */
+    int64_t gcap = 0;
+    for (uint32_t w = 0; w < nw; w++) gcap += locals[w].ng;
+    agg_sh_t gt = {0};
+    if (agg_sh_init(&gt, gcap, block) != 0) {
+        agg_sh_destroy(&gt);
+        for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
+        free(locals);
+        return ray_error("oom", NULL);
+    }
+    for (uint32_t w = 0; w < nw; w++) {
+        agg_sh_t* loc = &locals[w];
+        for (int64_t lg = 0; lg < loc->ng; lg++) {
+            int64_t fr = loc->first_row[lg];
+            int32_t gg = agg_sh_find_or_insert(&gt, key_cols, key_data, n_keys,
+                                               vts, off, n_aggs, fr);
+            if (gg < 0) {
+                agg_sh_destroy(&gt);
+                for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
+                free(locals);
+                return ray_error("oom", NULL);
+            }
+            for (uint8_t a = 0; a < n_aggs; a++)
+                vts[a]->merge(gt.states + (size_t)gg * block + off[a],
+                              loc->states + (size_t)lg * block + off[a], NULL);
+        }
+    }
+    int64_t ng = gt.ng;
+    for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
+    free(locals);
+
+    /* ── Phase C: emit key + agg columns in build order (unspecified order). ──
+     * gt.first_row[g] is the representative row for the scattered key gather —
+     * trivially cheap for the few groups this path handles. */
+    ray_t* result = ray_table_new(n_keys + n_aggs);
+    if (!result || RAY_IS_ERR(result)) {
+        agg_sh_destroy(&gt);
+        return result ? result : ray_error("oom", NULL);
+    }
+    for (uint8_t k = 0; k < n_keys; k++) {
+        ray_t* kc = agg_gather_key_col(key_cols[k], gt.first_row, ng);
+        if (!kc || RAY_IS_ERR(kc)) {
+            agg_sh_destroy(&gt); ray_release(result);
+            return kc ? kc : ray_error("oom", NULL);
+        }
+        result = ray_table_add_col(result, key_syms[k], kc);
+        ray_release(kc);
+    }
+    for (uint8_t a = 0; a < n_aggs; a++) {
+        ray_t* out = ray_vec_new(vts[a]->out_type, ng);   /* streaming → never LIST */
+        if (!out || RAY_IS_ERR(out)) {
+            agg_sh_destroy(&gt); ray_release(result);
+            return out ? out : ray_error("oom", NULL);
+        }
+        out->len = ng;
+        int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
+        for (int64_t i = 0; i < ng; i++) {
+            ray_t* cell = vts[a]->finalize(gt.states + (size_t)i * block + off[a], NULL, kparam);
+            agg_put_cell(out, i, cell);
+            ray_release(cell);
+        }
+        int64_t agg_name = agg_result_col_name(agg_syms[a], ext->agg_ops[a]);
+        result = ray_table_add_col(result, agg_name, out);
+        ray_release(out);
+    }
+    agg_sh_destroy(&gt);   /* streaming-only: no per-group destroy lifecycle */
+    return result;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * Parallel RADIX group-by (high-card int/SYM keys, ACC_STREAMING aggs only).
  *
  * Partition rows by key-hash into AGG_RADIX_P disjoint partitions: every row
@@ -1508,10 +1864,32 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             if (kc->attrs & RAY_ATTR_HAS_NULLS) keys_intsym = false;
         }
 
+        /* All aggregates streaming?  (Buffered median/top-k keep radix — its
+         * per-group destroy lifecycle handles them; the small-hash path is
+         * streaming-only.) */
+        bool all_streaming = true;
+        for (uint8_t a = 0; a < ext->n_aggs && all_streaming; a++)
+            if (vts[a]->kind != ACC_STREAMING) all_streaming = false;
+
         if (dense_par_ok)
             return exec_group_v2_parallel_dense(g, op, tbl, key_cols, key_syms, ext, nrows, pool, &dp);
-        if (keys_intsym)   /* high-card int/sym keys (streaming or buffered) */
+        if (keys_intsym) {
+            /* Dense-FAIL int/SYM streaming shapes: probe cardinality on a bounded
+             * sample.  LOW card → small-hash (O(groups) working set, no scatter
+             * tax); HIGH card → radix.  The estimate early-exits above T_route so
+             * high-card shapes pay only the bounded sample. */
+            if (all_streaming) {
+                const void* key_data[16];
+                for (uint8_t k = 0; k < ext->n_keys; k++) key_data[k] = ray_data(key_cols[k]);
+                const int64_t T_ROUTE = 16384;        /* > R2's 4096, < S2's in-sample distinct */
+                int64_t est = agg_estimate_card(key_cols, key_data, ext->n_keys,
+                                                nrows, 65536, T_ROUTE);
+                if (est <= T_ROUTE)
+                    return exec_group_v2_parallel_smallhash(g, op, tbl, nrows,
+                            key_cols, key_syms, vts, off, block, est);
+            }
             return exec_group_v2_parallel_radix(g, op, tbl, nrows, key_cols, key_syms, vts, off, block);
+        }
         return exec_group_v2_parallel(g, op, tbl, nrows, key_cols, key_syms, vts, off, block);
     }
 
