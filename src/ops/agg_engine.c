@@ -1087,12 +1087,13 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
         while (htcap < total * 2) htcap <<= 1;
         uint64_t htmask = (uint64_t)htcap - 1;
         int32_t* ht        = malloc((size_t)htcap * sizeof(int32_t));
+        uint8_t* ht_salt   = malloc((size_t)htcap);  /* parallel salt fingerprint per slot */
         int64_t* first_row = malloc((size_t)total * sizeof(int64_t));
         char*    states    = malloc((size_t)total * c->block);
         const int64_t** keyp = malloc((size_t)total * sizeof(int64_t*)); /* gid -> packed keys */
         uint32_t* gid      = malloc((size_t)total * sizeof(uint32_t));/* row i -> local gid */
-        if (!ht || !first_row || !states || !keyp || !gid) {
-            free(ht); free(first_row); free(states); free(keyp); free(gid);
+        if (!ht || !ht_salt || !first_row || !states || !keyp || !gid) {
+            free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid);
             pr->oom = 1; return;
         }
         for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
@@ -1131,12 +1132,16 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                 uint64_t h = 1469598103934665603ULL;
                 for (uint8_t k = 0; k < n_keys; k++) { h ^= (uint64_t)keys[k]; h *= 1099511628211ULL; }
                 uint64_t slot = h & htmask;
+                /* Salt = top 8 bits of the hash (independent of the low-bit slot
+                 * index). Compared first on probe to skip ~255/256 full memcmps. */
+                uint8_t salt = (uint8_t)(h >> 56);
                 int32_t gg;
                 for (;;) {
                     int32_t gp = ht[slot];
                     if (gp < 0) {                       /* new group */
                         gg = (int32_t)ng;
                         ht[slot] = gg;
+                        ht_salt[slot] = salt;
                         first_row[gg] = r;
                         keyp[gg] = keys;
                         for (uint8_t a = 0; a < n_aggs; a++)
@@ -1144,8 +1149,8 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                         ng++;
                         break;
                     }
-                    if (memcmp(keys, keyp[gp], key_bytes) == 0) {  /* contiguous key compare */
-                        gg = gp;
+                    if (ht_salt[slot] == salt && memcmp(keys, keyp[gp], key_bytes) == 0) {
+                        gg = gp;                                     /* salt-gated key compare */
                         if (r < first_row[gg]) first_row[gg] = r;   /* MIN */
                         break;
                     }
@@ -1155,7 +1160,7 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                 ri++;
             }
         }
-        free(ht); free(keyp);
+        free(ht); free(ht_salt); free(keyp);
 
         /* Batch-accumulate each agg over the partition's dense value buffers. */
         for (uint8_t a = 0; a < n_aggs; a++) {
@@ -1178,7 +1183,7 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
         pr->states = states; pr->first_row = first_row; pr->ng = ng;
         continue;
     oom:
-        free(ht); free(first_row); free(states); free(keyp); free(gid);
+        free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid);
         for (uint8_t a = 0; a < n_aggs; a++) { free(gv[a]); free(gy[a]); }
         pr->oom = 1; return;
     }
