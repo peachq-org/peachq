@@ -11153,6 +11153,7 @@ typedef struct {
     int64_t  right_nrows;
     int64_t  n_eq;
     int64_t  n_agg;
+    int      mode;          /* 0 = wj (prevailing-quote seeded), 1 = wj1 (strict) */
 
     /* Left-row metadata — pre-extracted to int64 so workers can read
      * without touching any ray_t objects (no locking, no allocation). */
@@ -11183,6 +11184,18 @@ typedef struct {
     uint8_t*        result_null[WJ_MAX_AGG];  /* 1 byte per row: 1 = null */
 } wj_scan_ctx_t;
 
+/* Compare the equality tuple of sorted-right row `ri` against `target_eq`.
+ * Returns <0, 0, >0.  Used to bracket a left row's eq partition. */
+static inline int wj_eq_cmp(const wj_scan_ctx_t* c, int64_t ri,
+                            const int64_t* target_eq, int64_t n_eq) {
+    for (int64_t e = 0; e < n_eq; e++) {
+        int64_t rv = read_col_i64(c->eq_data[e], ri, c->eq_type[e], c->eq_attrs[e]);
+        if (rv < target_eq[e]) return -1;
+        if (rv > target_eq[e]) return 1;
+    }
+    return 0;
+}
+
 static void wj_scan_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t end) {
     (void)worker_id;
     wj_scan_ctx_t* c = (wj_scan_ctx_t*)ctx_;
@@ -11201,33 +11214,49 @@ static void wj_scan_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t en
         for (int64_t e = 0; e < n_eq; e++)
             target_eq[e] = c->left_eq_arr[e][lr];
 
-        /* lower_bound: first rank with (eq, time) >= (target_eq, lo) */
-        int64_t lb = 0, lb_hi = rn;
-        while (lb < lb_hi) {
-            int64_t m = (lb + lb_hi) >> 1;
-            int64_t ri = right_sort[m];
-            int cmp = 0;
-            for (int64_t e = 0; e < n_eq && cmp == 0; e++) {
-                int64_t rv = read_col_i64(c->eq_data[e], ri, c->eq_type[e], c->eq_attrs[e]);
-                if (rv < target_eq[e]) cmp = -1;
-                else if (rv > target_eq[e]) cmp = 1;
-            }
-            if (cmp == 0 && rt_time_i[ri] < lo) cmp = -1;
-            if (cmp < 0) lb = m + 1; else lb_hi = m;
+        /* Locate the eq partition [ps, pe) in the sorted right table — the
+         * contiguous run of ranks whose equality tuple == target_eq.  Compare
+         * eq keys only (the sort is (eq..., time), so the run is contiguous). */
+        int64_t ps = 0, ps_hi = rn;
+        while (ps < ps_hi) {
+            int64_t m = (ps + ps_hi) >> 1;
+            if (wj_eq_cmp(c, right_sort[m], target_eq, n_eq) < 0) ps = m + 1;
+            else ps_hi = m;
         }
-        int64_t ub = lb, ub_hi = rn;
+        int64_t pe = ps, pe_hi = rn;
+        while (pe < pe_hi) {
+            int64_t m = (pe + pe_hi) >> 1;
+            if (wj_eq_cmp(c, right_sort[m], target_eq, n_eq) <= 0) pe = m + 1;
+            else pe_hi = m;
+        }
+
+        /* Upper bound (both modes): first rank in [ps, pe) with time > hi. */
+        int64_t ub = ps, ub_hi = pe;
         while (ub < ub_hi) {
             int64_t m = (ub + ub_hi) >> 1;
-            int64_t ri = right_sort[m];
-            int cmp = 0;
-            for (int64_t e = 0; e < n_eq && cmp == 0; e++) {
-                int64_t rv = read_col_i64(c->eq_data[e], ri, c->eq_type[e], c->eq_attrs[e]);
-                if (rv < target_eq[e]) cmp = -1;
-                else if (rv > target_eq[e]) cmp = 1;
-            }
-            if (cmp == 0 && rt_time_i[ri] <= hi) cmp = -1;
-            if (cmp < 0) ub = m + 1; else ub_hi = m;
+            if (rt_time_i[right_sort[m]] <= hi) ub = m + 1; else ub_hi = m;
         }
+
+        /* Lower bound differs by mode:
+         *   wj1 (mode 1): first rank in [ps, pe) with time >= lo (strict window).
+         *   wj  (mode 0): the prevailing quote — rightmost rank with time <= lo,
+         *                 i.e. (first rank with time > lo) - 1, clamped to ps. */
+        int64_t lb;
+        if (c->mode == 1) {
+            lb = ps; int64_t lbh = pe;
+            while (lb < lbh) {
+                int64_t m = (lb + lbh) >> 1;
+                if (rt_time_i[right_sort[m]] < lo) lb = m + 1; else lbh = m;
+            }
+        } else {
+            int64_t r = ps, rh = pe;
+            while (r < rh) {
+                int64_t m = (r + rh) >> 1;
+                if (rt_time_i[right_sort[m]] <= lo) r = m + 1; else rh = m;
+            }
+            lb = (r > ps) ? r - 1 : ps;
+        }
+        if (lb > ub) lb = ub;   /* empty window / no partition → null result */
 
         memset(acc, 0, sizeof(acc));
         for (int64_t a = 0; a < n_agg; a++) {
@@ -11477,10 +11506,21 @@ static void wj_scan_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t en
     }
 }
 
-/* (window-join t1 t2 [eq-keys] time-col)
- * ASOF join: for each left row, find closest right row with time <= left.time
- * within the same equality partition. */
-ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
+/* Window join (Rayforce convention):
+ *   (window-join  [eq-keys.. timeKey] intervals left right {agg})
+ *   (window-join1 [eq-keys.. timeKey] intervals left right {agg})
+ * `intervals` is a 2-element list (lo_vec hi_vec) of parallel vectors, one
+ * entry per left row: the window for left row r is [lo_vec[r], hi_vec[r]].
+ *
+ * mode 0 (window-join / wj):  each window is seeded with the PREVAILING quote
+ *   — the rightmost quote with time <= lo[r] within the eq partition — then
+ *   extended through the last quote with time <= hi[r].
+ * mode 1 (window-join1 / wj1): strict window — only quotes whose time falls in
+ *   [lo[r], hi[r]].
+ *
+ * The legacy asof fall-through ((window-join L R [keys] time)) is mode-agnostic.
+ */
+static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
     if (n < 4) return ray_error("domain", NULL);
 
     /* Special form: evaluate first 4 args, keep agg dict (args[4]) unevaluated */
@@ -11812,11 +11852,20 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
             for (int i = 0; i < 4; i++) ray_release(eargs[i]);
             return ray_error("oom", NULL);
         }
-        for (int64_t lr = 0; lr < left_nrows; lr++) {
-            int alloc_iv = 0;
-            ray_t* iv = collection_elem(intervals, lr, &alloc_iv);
-            if (!iv || RAY_IS_ERR(iv) || ray_len(iv) < 2) {
-                if (alloc_iv && iv) ray_release(iv);
+        /* `intervals` is the v1 two-parallel-vector form: a 2-element list
+         * (lo_vec hi_vec), each a vector with one entry per left row.  The
+         * window for left row r is [lo_vec[r], hi_vec[r]]. */
+        {
+            int alloc_lo_v = 0, alloc_hi_v = 0;
+            ray_t* lo_vec = (ray_len(intervals) >= 2)
+                ? collection_elem(intervals, 0, &alloc_lo_v) : NULL;
+            ray_t* hi_vec = (ray_len(intervals) >= 2)
+                ? collection_elem(intervals, 1, &alloc_hi_v) : NULL;
+            if (!lo_vec || !hi_vec || RAY_IS_ERR(lo_vec) || RAY_IS_ERR(hi_vec) ||
+                !ray_is_vec(lo_vec) || !ray_is_vec(hi_vec) ||
+                ray_len(lo_vec) != left_nrows || ray_len(hi_vec) != left_nrows) {
+                if (alloc_lo_v && lo_vec) ray_release(lo_vec);
+                if (alloc_hi_v && hi_vec) ray_release(hi_vec);
                 if (lo_hdr) scratch_free(lo_hdr);
                 if (hi_hdr) scratch_free(hi_hdr);
                 WJ_CLEANUP_TEMP();
@@ -11824,14 +11873,16 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
                 for (int i = 0; i < 4; i++) ray_release(eargs[i]);
                 return ray_error("domain", NULL);
             }
-            int alloc_lo = 0, alloc_hi = 0;
-            ray_t* lo_atom = collection_elem(iv, 0, &alloc_lo);
-            ray_t* hi_atom = collection_elem(iv, 1, &alloc_hi);
-            lo_arr[lr] = as_i64(lo_atom);
-            hi_arr[lr] = as_i64(hi_atom);
-            if (alloc_lo) ray_release(lo_atom);
-            if (alloc_hi) ray_release(hi_atom);
-            if (alloc_iv) ray_release(iv);
+            const void* lo_d = ray_data(lo_vec);
+            const void* hi_d = ray_data(hi_vec);
+            int8_t  lo_t = lo_vec->type,  hi_t = hi_vec->type;
+            uint8_t lo_a = lo_vec->attrs, hi_a = hi_vec->attrs;
+            for (int64_t lr = 0; lr < left_nrows; lr++) {
+                lo_arr[lr] = read_col_i64(lo_d, lr, lo_t, lo_a);
+                hi_arr[lr] = read_col_i64(hi_d, lr, hi_t, hi_a);
+            }
+            if (alloc_lo_v) ray_release(lo_vec);
+            if (alloc_hi_v) ray_release(hi_vec);
         }
 
         ray_t*   left_eq_hdr[WJ_MAX_AGG] = {0};
@@ -11883,6 +11934,7 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
         wctx.right_nrows = right_nrows;
         wctx.n_eq        = n_eq;
         wctx.n_agg       = n_agg;
+        wctx.mode        = mode;
         wctx.lo_arr      = lo_arr;
         wctx.hi_arr      = hi_arr;
         wctx.right_sort  = right_sort;
@@ -12003,6 +12055,16 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
     ray_t* result = ray_execute(g, jn);
     ray_graph_free(g);
     return result;
+}
+
+/* window-join (wj):  prevailing-quote-seeded window aggregation. */
+ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
+    return window_join_impl(args, n, 0);
+}
+
+/* window-join1 (wj1): strict-window aggregation (no prevailing quote). */
+ray_t* ray_window_join1_fn(ray_t** args, int64_t n) {
+    return window_join_impl(args, n, 1);
 }
 
 /* (asof-join [key1 key2 ... timeKey] leftTable rightTable)
