@@ -3119,6 +3119,106 @@ ray_t* ray_raze_fn(ray_t* x) {
     return result;
 }
 
+/* ungroup t — flatten nested-list columns, replicate flat columns.
+ *
+ * Grouping a non-aggregate (e.g. `top(2) by k`) yields a table with a
+ * nested LIST column (one list-of-values per group) alongside ATOM key
+ * columns.  `ungroup` expands that to SQL/row-form shape: per row i, the
+ * nested columns' cells have a common length n_i; flat columns are
+ * replicated n_i times and nested columns are razed (concatenated) in
+ * row order.  Total output rows = Σ_i n_i (n_i may be 0 → row drops out).
+ *
+ *   - No nested column → return `t` unchanged (identity).
+ *   - Nested columns disagreeing on a row's length → ray_error("length").
+ *
+ * A nested cell that is an atom counts as length 1 (broadcast); otherwise
+ * its `ray_len` is used.  Flat-column replication uses gather_by_idx
+ * (preserves type/attrs/null bits/SYM domain); nested-column flatten
+ * reuses ray_raze_fn (handles the fast memcpy path, nulls, empties). */
+ray_t* ray_ungroup_fn(ray_t* x) {
+    if (!x || RAY_IS_ERR(x) || x->type != RAY_TABLE)
+        return ray_error("type", NULL);
+
+    int64_t ncols = ray_table_ncols(x);
+    int64_t nrows = ray_table_nrows(x);
+
+    /* Locate the nested (RAY_LIST) columns. */
+    bool any_nested = false;
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* col = ray_table_get_col_idx(x, c);
+        if (col && !RAY_IS_ERR(col) && col->type == RAY_LIST) { any_nested = true; break; }
+    }
+    /* No nested column → identity. */
+    if (!any_nested) { ray_retain(x); return x; }
+
+    /* Per-row expansion count n_i from the nested columns; all nested
+     * columns must agree on n_i for each row.  Build a replication index
+     * vector idx[] = each row i repeated n_i times (for flat gather). */
+    int64_t total = 0;
+    int64_t* counts = (int64_t*)malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(int64_t));
+    if (!counts) return ray_error("oom", NULL);
+
+    for (int64_t i = 0; i < nrows; i++) {
+        int64_t n_i = -1;
+        for (int64_t c = 0; c < ncols; c++) {
+            ray_t* col = ray_table_get_col_idx(x, c);
+            if (!col || RAY_IS_ERR(col) || col->type != RAY_LIST) continue;
+            ray_t* cell = ray_list_get(col, i);
+            int64_t len_i = (cell && ray_is_atom(cell)) ? 1 : ray_len(cell);
+            if (n_i < 0) n_i = len_i;
+            else if (n_i != len_i) { free(counts); return ray_error("length", NULL); }
+        }
+        if (n_i < 0) n_i = 0;
+        counts[i] = n_i;
+        total += n_i;
+    }
+
+    ray_t* idx = ray_vec_new(RAY_I64, total > 0 ? total : 1);
+    if (!idx || RAY_IS_ERR(idx)) { free(counts); return idx ? idx : ray_error("oom", NULL); }
+    idx->len = total;
+    int64_t* idxd = (int64_t*)ray_data(idx);
+    int64_t pos = 0;
+    for (int64_t i = 0; i < nrows; i++)
+        for (int64_t r = 0; r < counts[i]; r++) idxd[pos++] = i;
+
+    /* Rebuild every column, preserving names and order. */
+    ray_t* out = ray_table_new(ncols);
+    if (!out || RAY_IS_ERR(out)) { free(counts); ray_release(idx); return out ? out : ray_error("oom", NULL); }
+
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* col = ray_table_get_col_idx(x, c);
+        int64_t name = ray_table_col_name(x, c);
+        ray_t* newcol;
+        if (col && !RAY_IS_ERR(col) && col->type == RAY_LIST) {
+            /* Nested: raze the per-row cells in row order. */
+            newcol = ray_raze_fn(col);
+            /* raze of an empty/all-empty list yields an empty LIST — leave
+             * it; the column is empty (total == 0) and shapes still align. */
+        } else if (col && !RAY_IS_ERR(col)) {
+            /* Flat: gather row i repeated n_i times. */
+            newcol = gather_by_idx(col, idxd, total);
+        } else {
+            ray_release(out); ray_release(idx); free(counts);
+            return ray_error("type", NULL);
+        }
+        if (!newcol || RAY_IS_ERR(newcol)) {
+            ray_release(out); ray_release(idx); free(counts);
+            return newcol ? newcol : ray_error("oom", NULL);
+        }
+        ray_t* added = ray_table_add_col(out, name, newcol);
+        ray_release(newcol);
+        if (!added || RAY_IS_ERR(added)) {
+            ray_release(idx); free(counts);
+            return added ? added : ray_error("oom", NULL);
+        }
+        out = added;
+    }
+
+    ray_release(idx);
+    free(counts);
+    return out;
+}
+
 /* (within vals [lo hi]) -> bool vector, true where lo <= val <= hi */
 ray_t* ray_within_fn(ray_t* vals, ray_t* range) {
     if (!ray_is_vec(vals) || !ray_is_vec(range) || range->len != 2)
