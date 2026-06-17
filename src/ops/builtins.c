@@ -3164,7 +3164,18 @@ ray_t* ray_ungroup_fn(ray_t* x) {
             ray_t* col = ray_table_get_col_idx(x, c);
             if (!col || RAY_IS_ERR(col) || col->type != RAY_LIST) continue;
             ray_t* cell = ray_list_get(col, i);
-            int64_t len_i = (cell && ray_is_atom(cell)) ? 1 : ray_len(cell);
+            /* A valid nested cell is either an atom (length 1) or a typed
+             * NON-LIST vector (length cell->len).  Anything else — NULL
+             * (unfilled list slot → ray_len would deref NULL) or a boxed
+             * RAY_LIST cell (whose top-level len would disagree with the
+             * scalar count raze emits, corrupting column lengths) — is a
+             * type error. */
+            int64_t len_i;
+            if (cell && ray_is_atom(cell))
+                len_i = 1;
+            else if (cell && ray_is_vec(cell) && cell->type != RAY_LIST)
+                len_i = ray_len(cell);
+            else { free(counts); return ray_error("type", NULL); }
             if (n_i < 0) n_i = len_i;
             else if (n_i != len_i) { free(counts); return ray_error("length", NULL); }
         }
@@ -3194,6 +3205,13 @@ ray_t* ray_ungroup_fn(ray_t* x) {
             newcol = ray_raze_fn(col);
             /* raze of an empty/all-empty list yields an empty LIST — leave
              * it; the column is empty (total == 0) and shapes still align. */
+            /* Defensive: with the up-front nested-cell validation, the razed
+             * column length must equal the row count.  Convert any future
+             * invariant break into a clean error instead of a corrupt table. */
+            if (newcol && !RAY_IS_ERR(newcol) && ray_len(newcol) != total) {
+                ray_release(newcol); ray_release(out); ray_release(idx); free(counts);
+                return ray_error("length", NULL);
+            }
         } else if (col && !RAY_IS_ERR(col)) {
             /* Flat: gather row i repeated n_i times. */
             newcol = gather_by_idx(col, idxd, total);
