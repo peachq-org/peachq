@@ -973,6 +973,27 @@ typedef struct {
     int      oom;
 } agg_radix_part_t;
 
+/* Run vt->destroy on every init'd per-group buffered state across all
+ * partitions' slabs, then free each partition's states/first_row.  Each
+ * partition's `ng` groups are all init'd contiguously in [0, ng) (no sparse
+ * slots), so destroy walks exactly the live states.  No-op destroy hook for
+ * streaming accs.  Must be called exactly once per partition slab (paired with
+ * the free here); buffered states must be finalized before this runs. */
+static void agg_radix_parts_destroy(agg_radix_part_t* parts, uint32_t nparts,
+                                    const agg_vtable_t** vts, const size_t* off,
+                                    size_t block, uint8_t n_aggs) {
+    for (uint32_t p = 0; p < nparts; p++) {
+        char* states = parts[p].states;
+        if (states)
+            for (uint8_t a = 0; a < n_aggs; a++)
+                if (vts[a]->destroy)
+                    for (int64_t gg = 0; gg < parts[p].ng; gg++)
+                        vts[a]->destroy(states + (size_t)gg * block + off[a]);
+        free(parts[p].states);
+        free(parts[p].first_row);
+    }
+}
+
 typedef struct {
     ray_t**             key_cols;
     const void**        key_data;
@@ -1163,8 +1184,11 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
     }
 }
 
-/* Parallel radix path.  Precondition: all aggs ACC_STREAMING, keys int/SYM and
- * non-null (selector-gated).  vts/off/block resolved by caller. */
+/* Parallel radix path.  Precondition: keys int/SYM and non-null
+ * (selector-gated).  Handles both streaming and buffered (median/top) aggs:
+ * Phase 2 runs init/update_batch per group, Phase 3 finalizes then destroys
+ * each partition's buffered group state exactly once.  vts/off/block resolved
+ * by caller. */
 static ray_t* exec_group_v2_parallel_radix(
         ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t nrows,
         ray_t** key_cols, int64_t* key_syms,
@@ -1234,7 +1258,7 @@ static ray_t* exec_group_v2_parallel_radix(
             if (parts[p].oom) { oom = 1; break; }
 
     if (oom) {
-        for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
+        agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
         for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
         return ray_error("oom", NULL);
@@ -1251,7 +1275,7 @@ static ray_t* exec_group_v2_parallel_radix(
     int64_t* first_row_ordered = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
     if (!pairs || !first_row_ordered) {
         free(pairs); free(first_row_ordered);
-        for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
+        agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
         for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
         return ray_error("oom", NULL);
@@ -1270,7 +1294,7 @@ static ray_t* exec_group_v2_parallel_radix(
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
         free(pairs); free(first_row_ordered);
-        for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
+        agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
         for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
         free(bufs); free(parts);
         return result ? result : ray_error("oom", NULL);
@@ -1280,7 +1304,7 @@ static ray_t* exec_group_v2_parallel_radix(
         ray_t* kc = agg_gather_key_col(key_cols[k], first_row_ordered, ng);
         if (!kc || RAY_IS_ERR(kc)) {
             free(pairs); free(first_row_ordered);
-            for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
+            agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
             for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
             free(bufs); free(parts);
             ray_release(result); return kc ? kc : ray_error("oom", NULL);
@@ -1290,10 +1314,13 @@ static ray_t* exec_group_v2_parallel_radix(
     }
 
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_t* out = ray_vec_new(vts[a]->out_type, ng);   /* streaming → scalar out_type */
+        /* Buffered top_n/bot_n produce a LIST cell per group (a native vector);
+         * median and all streaming aggs produce a scalar out_type cell. */
+        bool is_list = (vts[a]->out_type == RAY_LIST);
+        ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
             free(pairs); free(first_row_ordered);
-            for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
+            agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
             for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
             free(bufs); free(parts);
             ray_release(result); return out ? out : ray_error("oom", NULL);
@@ -1304,8 +1331,13 @@ static ray_t* exec_group_v2_parallel_radix(
             uint32_t p  = (uint32_t)(pairs[i].idx >> 32);
             uint32_t gg = (uint32_t)(pairs[i].idx & 0xffffffffu);
             ray_t* cell = vts[a]->finalize(parts[p].states + (size_t)gg * block + off[a], NULL, kparam);
-            agg_put_cell(out, i, cell);
-            ray_release(cell);
+            if (is_list) {
+                out = ray_list_set(out, i, cell);   /* retains cell */
+                ray_release(cell);                  /* drop our local ref */
+            } else {
+                agg_put_cell(out, i, cell);
+                ray_release(cell);
+            }
         }
         int64_t agg_name = agg_result_col_name(agg_syms[a], ext->agg_ops[a]);
         result = ray_table_add_col(result, agg_name, out);
@@ -1313,7 +1345,9 @@ static ray_t* exec_group_v2_parallel_radix(
     }
 
     free(pairs); free(first_row_ordered);
-    for (uint32_t p = 0; p < AGG_RADIX_P; p++) { free(parts[p].states); free(parts[p].first_row); }
+    /* Finalize is done reading every partition's buffered group state → destroy
+     * exactly once before freeing the partition slabs. */
+    agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
     for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
     free(bufs); free(parts);
     return result;
@@ -1356,13 +1390,12 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         int64_t per_worker_bytes = dp.total_slots * (int64_t)(block + 8 /*first_row*/);
         bool dense_par_ok = dp.ok && per_worker_bytes <= (8LL << 20);  /* 8 MB/worker cap */
 
-        /* RADIX eligibility: every agg streaming + every key an int/SYM type with
-         * no nulls (same type-set check as agg_dense_plan).  Radix takes the
-         * high-card remainder of streaming int-key queries (dense handles the
-         * low-card head); hash handles buffered aggs / F64 / STR keys. */
-        bool all_streaming = true;
-        for (uint8_t a = 0; a < ext->n_aggs && all_streaming; a++)
-            if (vts[a]->kind != ACC_STREAMING) all_streaming = false;
+        /* RADIX eligibility: every key an int/SYM type with no nulls (same
+         * type-set check as agg_dense_plan).  Radix takes the high-card
+         * remainder of int-key queries (dense handles the low-card head),
+         * for BOTH streaming and buffered (median/top) aggs — radix runs the
+         * full init/update_batch/finalize/destroy lifecycle.  Hash handles
+         * F64 / STR keys. */
         bool keys_intsym = true;
         for (uint8_t k = 0; k < ext->n_keys && keys_intsym; k++) {
             ray_t* kc = key_cols[k];
@@ -1377,7 +1410,7 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
         if (dense_par_ok)
             return exec_group_v2_parallel_dense(g, op, tbl, key_cols, key_syms, ext, nrows, pool, &dp);
-        if (all_streaming && keys_intsym)   /* high-card streaming int/sym keys */
+        if (keys_intsym)   /* high-card int/sym keys (streaming or buffered) */
             return exec_group_v2_parallel_radix(g, op, tbl, nrows, key_cols, key_syms, vts, off, block);
         return exec_group_v2_parallel(g, op, tbl, nrows, key_cols, key_syms, vts, off, block);
     }
