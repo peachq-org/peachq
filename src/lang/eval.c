@@ -2728,7 +2728,7 @@ static void ray_register_builtins(void) {
     register_vary("inner-join",  RAY_FN_NONE, ray_inner_join_fn);
     register_vary("anti-join",   RAY_FN_NONE, ray_anti_join_fn);
     register_vary("window-join", RAY_FN_SPECIAL_FORM, ray_window_join_fn);
-    register_vary("window-join1", RAY_FN_SPECIAL_FORM, ray_window_join_fn);
+    register_vary("window-join1", RAY_FN_SPECIAL_FORM, ray_window_join1_fn);
     register_vary("asof-join",   RAY_FN_NONE, ray_asof_join_fn);
 
     /* I/O builtins */
