@@ -150,7 +150,7 @@ static void dict_pair_view(ray_t* d, ray_t* key_atoms, ray_t** out_elems, int64_
  * Atom keys are freshly boxed for typed-vector key columns (sym, i64,
  * etc.); for RAY_LIST keys they are retained borrows. */
 static ray_t* groups_to_pair_list(ray_t* d) {
-    if (!d || d->type != RAY_DICT) return ray_error("type", NULL);
+    if (!d || d->type != RAY_DICT) return ray_error("type", "group: expected groups dict, got %s", d ? ray_type_name(d->type) : "null");
     ray_t* keys = ray_dict_keys(d);
     ray_t* vals = ray_dict_vals(d);
     int64_t n = keys ? keys->len : 0;
@@ -408,7 +408,7 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
         ray_t* tv = ray_eval(take_val_expr);
         if (!tv || RAY_IS_ERR(tv)) {
             ray_release(result);
-            return tv ? tv : ray_error("domain", NULL);
+            return tv ? tv : ray_error("domain", "select: failed to evaluate `take:`");
         }
         if (ray_is_atom(tv) && (tv->type == -RAY_I64 || tv->type == -RAY_I32)) {
             int64_t atom_n = (tv->type == -RAY_I64) ? tv->i64 : tv->i32;
@@ -451,9 +451,10 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
             ray_release(tv);
             return sliced;
         }
+        int8_t tv_t = tv->type;            /* capture BEFORE free */
         ray_release(tv);
         ray_release(result);
-        return ray_error("domain", NULL);
+        return ray_error("domain", "select: `take:` must be an integer atom or a 2-element integer range, got %s", ray_type_name(tv_t));
     }
 
     /* ---- Top-K fast path detection ----
@@ -609,7 +610,7 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
         ray_t* tv = ray_eval(take_val_expr);
         if (!tv || RAY_IS_ERR(tv)) {
             ray_graph_free(g); ray_release(result);
-            return tv ? tv : ray_error("domain", NULL);
+            return tv ? tv : ray_error("domain", "select: failed to evaluate `take:`");
         }
         if (ray_is_atom(tv) && (tv->type == -RAY_I64 || tv->type == -RAY_I32)) {
             atom_n = (tv->type == -RAY_I64) ? tv->i64 : tv->i32;
@@ -618,8 +619,9 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
         } else if (ray_is_vec(tv) && (tv->type == RAY_I64 || tv->type == RAY_I32) && tv->len == 2) {
             take_range = tv;
         } else {
+            int8_t tv_t = tv->type;            /* capture BEFORE free */
             ray_release(tv); ray_graph_free(g); ray_release(result);
-            return ray_error("domain", NULL);
+            return ray_error("domain", "select: `take:` must be an integer atom or a 2-element integer range, got %s", ray_type_name(tv_t));
         }
     }
 
@@ -1684,7 +1686,7 @@ static ray_t* filter_group_result(ray_t* result, ray_t* where_expr) {
     if (!pred) {
         ray_graph_free(fg);
         ray_release(result);
-        return ray_error("domain", NULL);
+        return ray_error("domain", "select having: failed to compile group filter predicate");
     }
     root = ray_filter(fg, root, pred);
     root = ray_optimize(fg, root);
@@ -1693,7 +1695,7 @@ static ray_t* filter_group_result(ray_t* result, ray_t* where_expr) {
         filtered = ray_lazy_materialize(filtered);
     ray_graph_free(fg);
     ray_release(result);
-    return filtered ? filtered : ray_error("domain", NULL);
+    return filtered ? filtered : ray_error("domain", "select having: group filter produced no result");
 }
 
 static bool match_group_count_emit_filter(ray_t* from_expr, ray_t* where_expr,
@@ -2130,7 +2132,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
             g_active_query_table = _aqt;
             ray_env_pop_scope();
             if (result) ray_release(result);
-            return cell ? cell : ray_error("domain", NULL);
+            return cell ? cell : ray_error("domain", "select by: per-group expression evaluation failed");
         }
         /* Materialise lazy cells before storing.  Per-group projection
          * eval can return a RAY_LAZY (e.g. (reverse v) returns a fresh
@@ -2145,7 +2147,7 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
                 g_active_query_table = _aqt;
                 ray_env_pop_scope();
                 if (result) ray_release(result);
-                return cell ? cell : ray_error("domain", NULL);
+                return cell ? cell : ray_error("domain", "select by: failed to materialize per-group cell");
             }
         }
 
@@ -2294,7 +2296,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
                 g_active_query_table = _aqt;
                 ray_env_pop_scope();
                 if (result) ray_release(result);
-                return arg ? arg : ray_error("domain", NULL);
+                return arg ? arg : ray_error("domain", "select: failed to read column cell for per-row eval");
             }
             ray_env_set_local(col_syms[i], arg);
             if (allocated) ray_release(arg);
@@ -2305,7 +2307,7 @@ static ray_t* eval_expr_per_row(ray_t* expr, ray_t* tbl, int64_t nrows) {
             g_active_query_table = _aqt;
             ray_env_pop_scope();
             if (result) ray_release(result);
-            return cell ? cell : ray_error("domain", NULL);
+            return cell ? cell : ray_error("domain", "select: per-row expression evaluation failed");
         }
 
         if (row == 0) {
@@ -2397,7 +2399,7 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
 
     ray_t* fn_obj = ray_env_get(fn_name->i64);
     if (!fn_obj || fn_obj->type != RAY_UNARY)
-        return ray_error("type", NULL);
+        return ray_error("type", "select by: aggregate must be a unary function, got %s", fn_obj ? ray_type_name(fn_obj->type) : "null");
     ray_unary_fn uf = (ray_unary_fn)(uintptr_t)fn_obj->i64;
 
     /* Resolve the source column: either a direct column ref (no copy)
@@ -2414,7 +2416,7 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
         src = ray_eval(col_expr);
         g_active_query_table = _aqt;
         ray_env_pop_scope();
-        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", "select by: failed to evaluate aggregation source");
         /* col_expr can evaluate to a LAZY handle (e.g. (asc col)).  We own
          * it, and the per-group ray_at_fn below materializes lazy args at
          * entry — CONSUMING the handle while our src still points at it
@@ -2422,7 +2424,7 @@ static ray_t* aggr_unary_per_group_buf(ray_t* expr, ray_t* tbl,
          * frees).  Materialize once here instead. */
         if (ray_is_lazy(src)) {
             src = ray_lazy_materialize(src);
-            if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+            if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", "select by: failed to materialize aggregation source");
         }
     }
 
@@ -2530,7 +2532,7 @@ static ray_t* aggr_med_per_group_buf(ray_t* expr, ray_t* tbl,
         src = ray_eval(col_expr);
         g_active_query_table = _aqt;
         ray_env_pop_scope();
-        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", "select by: failed to evaluate median source column");
     }
 
     ray_t* out = ray_median_per_group_buf(src, idx_buf, offsets, grp_cnt, n_groups);
@@ -3058,7 +3060,7 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
         src = ray_eval(inner_expr);
         g_active_query_table = _aqt;
         ray_env_pop_scope();
-        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", "select by: failed to evaluate count-distinct source");
     }
     if (src && !RAY_IS_ERR(src) && (RAY_IS_PARTED(src->type) || src->type == RAY_MAPCOMMON)) {
         ray_t* flat = query_materialize_parted_col(src);
@@ -3159,7 +3161,7 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
                                               ray_t* groups, int64_t n_groups) {
     {
     if (!groups || groups->type != RAY_LIST || n_groups < 0)
-        return ray_error("type", NULL);
+        return ray_error("type", "count distinct: expected a groups list, got %s", groups ? ray_type_name(groups->type) : "null");
     ray_t** items0 = (ray_t**)ray_data(groups);
     int64_t total = 0;
     for (int64_t gi = 0; gi < n_groups; gi++) {
@@ -3220,7 +3222,7 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
         src = ray_eval(inner_expr);
         g_active_query_table = _aqt;
         ray_env_pop_scope();
-        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", "select by: failed to evaluate count-distinct source");
     }
     if (src && !RAY_IS_ERR(src) && (RAY_IS_PARTED(src->type) || src->type == RAY_MAPCOMMON)) {
         ray_t* flat = query_materialize_parted_col(src);
@@ -3901,10 +3903,11 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
     }
 
     ray_t* tbl = ray_eval(from_expr);
-    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", NULL);
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", "select count: `from:` evaluation failed");
     if (tbl->type != RAY_TABLE) {
+        int8_t tbl_t = tbl->type;            /* capture BEFORE free */
         ray_release(tbl);
-        return ray_error("type", NULL);
+        return ray_error("type", "select count: `from:` must be a table, got %s", ray_type_name(tbl_t));
     }
 
     if (!where_expr) {
@@ -3952,14 +3955,15 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
     if (!pred_vec || RAY_IS_ERR(pred_vec)) {
         ray_graph_free(g);
         ray_release(tbl);
-        return pred_vec ? pred_vec : ray_error("type", NULL);
+        return pred_vec ? pred_vec : ray_error("type", "select count: WHERE predicate evaluation failed");
     }
     int64_t tbl_nrows = ray_table_nrows(tbl);
     if (pred_vec->type != RAY_BOOL || pred_vec->len != tbl_nrows) {
+        int8_t pred_t = pred_vec->type;            /* capture BEFORE free */
         ray_release(pred_vec);
         ray_graph_free(g);
         ray_release(tbl);
-        return ray_error("type", NULL);
+        return ray_error("type", "select count: WHERE must produce a bool mask matching row count, got %s", ray_type_name(pred_t));
     }
 
     if (handled) *handled = 1;
@@ -4046,7 +4050,7 @@ static ray_t* project_table_cols(ray_t* src_tbl, const int64_t* keep_syms,
     if (!nt || RAY_IS_ERR(nt)) return nt ? nt : ray_error("oom", NULL);
     for (int i = 0; i < n_keep; i++) {
         ray_t* col = ray_table_get_col(src_tbl, keep_syms[i]);
-        if (!col) { ray_release(nt); return ray_error("domain", NULL); }
+        if (!col) { ray_release(nt); return ray_error("domain", "select: projected column not found"); }
         ray_t* nt2 = ray_table_add_col(nt, keep_syms[i], col);
         if (!nt2 || RAY_IS_ERR(nt2)) {
             if (nt2 && nt2 != nt) ray_release(nt2);
@@ -4103,14 +4107,14 @@ static ray_t* narrow_known_small_extract_result(ray_t* expr, ray_t* col) {
 }
 
 ray_t* ray_select(ray_t** args, int64_t n) {
-    if (n < 1) return ray_error("domain", NULL);
+    if (n < 1) return ray_error("arity", "select: expects a query dict, got %lld args", (long long)n);
     ray_t* dict = args[0];
     if (!dict || dict->type != RAY_DICT)
-        return ray_error("type", NULL);
+        return ray_error("type", "select: query must be a dict, got %s", dict ? ray_type_name(dict->type) : "null");
 
     /* Evaluate 'from:' to get the source table */
     ray_t* from_expr = dict_get(dict, "from");
-    if (!from_expr) return ray_error("domain", NULL);
+    if (!from_expr) return ray_error("domain", "select: missing `from:` clause");
     ray_t* where_expr = dict_get(dict, "where");
     ray_group_emit_filter_t prev_emit_filter = ray_group_emit_filter_get();
     ray_group_emit_filter_t emit_filter = {0};
@@ -4122,7 +4126,7 @@ ray_t* ray_select(ray_t** args, int64_t n) {
     if (emit_filter_set)
         ray_group_emit_filter_set(prev_emit_filter);
     if (RAY_IS_ERR(tbl)) return tbl;
-    if (tbl->type != RAY_TABLE) { ray_release(tbl); return ray_error("type", NULL); }
+    if (tbl->type != RAY_TABLE) { int8_t tbl_t = tbl->type; ray_release(tbl); return ray_error("type", "select: `from:` must evaluate to a table, got %s", ray_type_name(tbl_t)); }
 
     ray_t* by_expr = dict_get(dict, "by");
     ray_t* take_expr = dict_get(dict, "take");
@@ -4571,7 +4575,7 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                 ray_graph_free(fg);
                 if (narrow_tbl) ray_release(narrow_tbl);
                 ray_release(tbl);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "select: failed to compile `where:` predicate");
             }
             froot = ray_filter(fg, froot, pred);
             /* Deliberately skip ray_optimize: its predicate pushdown
@@ -4587,13 +4591,13 @@ ray_t* ray_select(ray_t** args, int64_t n) {
             if (narrow_tbl) ray_release(narrow_tbl);
             if (!filtered || RAY_IS_ERR(filtered)) {
                 ray_release(tbl);
-                return filtered ? filtered : ray_error("domain", NULL);
+                return filtered ? filtered : ray_error("domain", "select: `where:` filter produced no result");
             }
             if (ray_is_lazy(filtered))
                 filtered = ray_lazy_materialize(filtered);
             if (!filtered || RAY_IS_ERR(filtered)) {
                 ray_release(tbl);
-                return filtered ? filtered : ray_error("domain", NULL);
+                return filtered ? filtered : ray_error("domain", "select: failed to materialize filtered result");
             }
             ray_release(tbl);
             tbl = filtered;
@@ -5136,7 +5140,7 @@ by_dict_done:
             ray_t* tv = ray_eval(take_expr);
             if (!tv || RAY_IS_ERR(tv)) {
                 ray_graph_free(g); ray_release(tbl);
-                return tv ? tv : ray_error("domain", NULL);
+                return tv ? tv : ray_error("domain", "nearest: failed to evaluate `take:`");
             }
             if (tv->type == -RAY_I64)      k_req = tv->i64;
             else if (tv->type == -RAY_I32) k_req = tv->i32;
@@ -5156,7 +5160,7 @@ by_dict_done:
         ray_t* qvec = ray_eval(nlist[2]);
         if (!qvec || RAY_IS_ERR(qvec)) {
             ray_graph_free(g); ray_release(tbl);
-            return qvec ? qvec : ray_error("domain", NULL);
+            return qvec ? qvec : ray_error("domain", "nearest: failed to evaluate query vector");
         }
         if (!ray_is_vec(qvec) ||
             (qvec->type != RAY_F32 && qvec->type != RAY_F64 &&
@@ -5207,7 +5211,7 @@ by_dict_done:
             if (!hobj || RAY_IS_ERR(hobj)) {
                 ray_sys_free(nearest_query_owned);
                 ray_graph_free(g); ray_release(tbl);
-                return hobj ? hobj : ray_error("domain", NULL);
+                return hobj ? hobj : ray_error("domain", "nearest (ann): failed to evaluate HNSW handle");
             }
             if (hobj->type != -RAY_I64 || !(hobj->attrs & RAY_ATTR_HNSW)) {
                 ray_release(hobj); ray_sys_free(nearest_query_owned);
@@ -5491,9 +5495,9 @@ by_dict_done:
                 root = ray_optimize(g, root);
                 ray_t* fres = ray_execute(g, root);
                 ray_graph_free(g); g = NULL;
-                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", "select: `where:` filter produced no result"); }
                 if (ray_is_lazy(fres)) fres = ray_lazy_materialize(fres);
-                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", "select: failed to materialize filtered result"); }
                 eval_tbl = fres;
             } else {
                 ray_graph_free(g); g = NULL;
@@ -5719,7 +5723,7 @@ by_dict_done:
                             ray_release(composite_keys);
                             if (eval_tbl != tbl) ray_release(eval_tbl);
                             ray_release(tbl);
-                            return cell ? cell : ray_error("domain", NULL);
+                            return cell ? cell : ray_error("domain", "select by: failed to read composite group key cell");
                         }
                         row_key = ray_list_append(row_key, cell);
                         if (alloc) ray_release(cell);
@@ -5744,14 +5748,14 @@ by_dict_done:
                 if (!groups_dict || RAY_IS_ERR(groups_dict)) {
                     if (eval_tbl != tbl) ray_release(eval_tbl);
                     ray_release(tbl);
-                    return groups_dict ? groups_dict : ray_error("domain", NULL);
+                    return groups_dict ? groups_dict : ray_error("domain", "select by: failed to compute composite groups");
                 }
                 ray_t* groups = groups_to_pair_list(groups_dict);
                 ray_release(groups_dict);
                 if (!groups || RAY_IS_ERR(groups)) {
                     if (eval_tbl != tbl) ray_release(eval_tbl);
                     ray_release(tbl);
-                    return groups ? groups : ray_error("domain", NULL);
+                    return groups ? groups : ray_error("domain", "select by: failed to build groups pair list");
                 }
                 int64_t n_groups = ray_len(groups) / 2;
                 int64_t out_groups = n_groups;
@@ -5779,7 +5783,7 @@ by_dict_done:
                         if (!per_group || RAY_IS_ERR(per_group)) {
                             for (int ai = 0; ai < n_agg_out; ai++) if (agg_results[ai]) ray_release(agg_results[ai]);
                             ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
-                            return per_group ? per_group : ray_error("domain", NULL);
+                            return per_group ? per_group : ray_error("domain", "select by: count-distinct aggregation failed");
                         }
                         agg_names[n_agg_out] = kid;
                         agg_results[n_agg_out] = per_group;
@@ -5806,7 +5810,7 @@ by_dict_done:
                             if (!src_col_val || RAY_IS_ERR(src_col_val)) {
                                 for (int ai = 0; ai < n_agg_out; ai++) if (agg_results[ai]) ray_release(agg_results[ai]);
                                 ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
-                                return src_col_val ? src_col_val : ray_error("domain", NULL);
+                                return src_col_val ? src_col_val : ray_error("domain", "select by: failed to evaluate aggregation source column");
                             }
                         }
 
@@ -5888,7 +5892,7 @@ by_dict_done:
                         if (!per_group || RAY_IS_ERR(per_group)) {
                             for (int ai = 0; ai < n_agg_out; ai++) if (agg_results[ai]) ray_release(agg_results[ai]);
                             ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
-                            return per_group ? per_group : ray_error("domain", NULL);
+                            return per_group ? per_group : ray_error("domain", "select by: per-group projection evaluation failed");
                         }
                         agg_names[n_agg_out] = kid;
                         agg_results[n_agg_out] = per_group;
@@ -6289,7 +6293,7 @@ by_dict_done:
                         if (!per_group || RAY_IS_ERR(per_group)) {
                             for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
                             ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
-                            return per_group ? per_group : ray_error("domain", NULL);
+                            return per_group ? per_group : ray_error("domain", "select by: count-distinct aggregation failed");
                         }
                         agg_names[n_agg_out] = kid;
                         agg_results[n_agg_out] = per_group;
@@ -6720,7 +6724,7 @@ by_dict_done:
                 ray_op_t* pred = compile_expr_dag(g, where_expr);
                 if (!pred) {
                     ray_graph_free(g); ray_release(tbl);
-                    return ray_error("domain", NULL);
+                    return ray_error("domain", "select: failed to compile `where:` predicate");
                 }
                 root = ray_filter(g, root, pred);
             }
@@ -6767,7 +6771,7 @@ by_dict_done:
                         g->selection = NULL;
                     }
                     ray_graph_free(g); ray_release(tbl);
-                    return fres ? fres : ray_error("domain", NULL);
+                    return fres ? fres : ray_error("domain", "select: `where:` filter produced no result");
                 }
                 /* OP_CONST/OP_FILTER both retain, so the returned
                  * table has an extra refcount we must release.
@@ -6786,9 +6790,9 @@ by_dict_done:
                 root = ray_optimize(g, root);
                 ray_t* fres = ray_execute(g, root);
                 ray_graph_free(g); g = NULL;
-                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", "select: `where:` filter produced no result"); }
                 if (ray_is_lazy(fres)) fres = ray_lazy_materialize(fres);
-                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", "select: failed to materialize filtered result"); }
                 ray_release(tbl);
                 tbl = fres;
                 g = ray_graph_new(tbl);
@@ -6807,15 +6811,15 @@ by_dict_done:
             int64_t nk = ray_len(by_expr);
             for (int64_t i = 0; i < nk && n_keys < 16; i++) {
                 ray_t* name_str = ray_sym_vec_cell(by_expr, i);
-                if (!name_str) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                if (!name_str) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", "select by: unknown group key symbol"); }
                 key_ops[n_keys] = ray_scan(g, ray_str_ptr(name_str));
-                if (!key_ops[n_keys]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                if (!key_ops[n_keys]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", "select by: group key column not found"); }
                 n_keys++;
             }
         } else {
             /* Single key expression */
             key_ops[0] = compile_expr_dag(g, by_expr);
-            if (!key_ops[0]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+            if (!key_ops[0]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", "select by: failed to compile group key expression"); }
             n_keys = 1;
         }
 
@@ -6857,23 +6861,24 @@ by_dict_done:
                 agg_ops[n_aggs] = op;
                 /* Compile the aggregation input (the column reference) */
                 agg_ins[n_aggs] = compile_expr_dag(g, agg_arg);
-                if (!agg_ins[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                if (!agg_ins[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", "select by: failed to compile aggregation argument"); }
                 /* Canonical aggregand type-admission (matches the scalar
                  * builtins): reject non-numeric / absolute-temporal inputs so a
                  * by-group sum/avg/var never silently folds symbol ids etc. */
                 if (agg_ins[n_aggs]->out_type > 0 &&
                     !agg_type_admitted(op, agg_ins[n_aggs]->out_type)) {
-                    ray_graph_free(g); ray_release(tbl); return ray_error("type", NULL);
+                    int8_t in_t = agg_ins[n_aggs]->out_type;            /* capture BEFORE free */
+                    ray_graph_free(g); ray_release(tbl); return ray_error("type", "select by: aggregation does not admit input type %s", ray_type_name(in_t));
                 }
                 agg_ins2[n_aggs] = NULL;
                 agg_k[n_aggs] = 0;
                 if (op == OP_PEARSON_CORR) {
-                    if (ray_len(val_expr) < 3) { ray_graph_free(g); ray_release(tbl); return ray_error("arity", NULL); }
+                    if (ray_len(val_expr) < 3) { ray_graph_free(g); ray_release(tbl); return ray_error("arity", "select by: cor aggregation requires two column arguments"); }
                     agg_ins2[n_aggs] = compile_expr_dag(g, agg_elems[2]);
-                    if (!agg_ins2[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                    if (!agg_ins2[n_aggs]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", "select by: failed to compile cor second argument"); }
                     has_binary_agg = 1;
                 } else if (op == OP_TOP_N || op == OP_BOT_N) {
-                    if (ray_len(val_expr) < 3) { ray_graph_free(g); ray_release(tbl); return ray_error("arity", NULL); }
+                    if (ray_len(val_expr) < 3) { ray_graph_free(g); ray_release(tbl); return ray_error("arity", "select by: top/bot aggregation requires a K argument"); }
                     ray_t* k_expr = agg_elems[2];
                     int64_t k_val;
                     if (k_expr->type == -RAY_I64)       k_val = k_expr->i64;
@@ -6985,9 +6990,9 @@ by_dict_done:
                 root = ray_optimize(g, root);
                 ray_t* fres = ray_execute(g, root);
                 ray_graph_free(g); g = NULL;
-                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", "select: `where:` filter produced no result"); }
                 if (ray_is_lazy(fres)) fres = ray_lazy_materialize(fres);
-                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", "select: failed to materialize filtered result"); }
                 filtered_tbl = fres;
                 /* Rebuild graph on filtered table for GROUP+COUNT */
                 g = ray_graph_new(filtered_tbl);
@@ -7145,14 +7150,14 @@ by_dict_done:
                 if (!computed_key || RAY_IS_ERR(computed_key)) {
                     if (filtered_tbl != tbl) ray_release(filtered_tbl);
                     ray_release(tbl);
-                    return computed_key ? computed_key : ray_error("domain", NULL);
+                    return computed_key ? computed_key : ray_error("domain", "select by: failed to evaluate group key expression");
                 }
                 ray_t* groups2_dict = ray_group_fn(computed_key);
                 if (!groups2_dict || RAY_IS_ERR(groups2_dict)) {
                     ray_release(computed_key);
                     if (filtered_tbl != tbl) ray_release(filtered_tbl);
                     ray_release(tbl);
-                    return groups2_dict ? groups2_dict : ray_error("domain", NULL);
+                    return groups2_dict ? groups2_dict : ray_error("domain", "select by: failed to compute groups");
                 }
                 ray_t* groups2 = groups_to_pair_list(groups2_dict);
                 ray_release(groups2_dict);
@@ -7598,7 +7603,7 @@ by_dict_done:
                         g->selection = NULL;
                     }
                     ray_graph_free(g); ray_release(tbl);
-                    return fres ? fres : ray_error("domain", NULL);
+                    return fres ? fres : ray_error("domain", "select: `where:` filter produced no result");
                 }
                 ray_release(fres);
             }
@@ -7624,7 +7629,7 @@ by_dict_done:
                         g->selection = NULL;
                     }
                     ray_graph_free(g); ray_release(tbl);
-                    return ray_error("domain", NULL);
+                    return ray_error("domain", "select: failed to compile aggregation argument");
                 }
                 /* Canonical aggregand type-admission (same table as the scalar
                  * builtins): reject non-numeric (SYM/STR/GUID) and, for sum,
@@ -7632,21 +7637,22 @@ by_dict_done:
                  * silently aggregates raw symbol ids / string bytes / dates. */
                 if (s_agg_ins[s_n_aggs]->out_type > 0 &&
                     !agg_type_admitted(op, s_agg_ins[s_n_aggs]->out_type)) {
+                    int8_t in_t = s_agg_ins[s_n_aggs]->out_type;            /* capture BEFORE free */
                     if (g->selection) { ray_release(g->selection); g->selection = NULL; }
                     ray_graph_free(g); ray_release(tbl);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "select: aggregation does not admit input type %s", ray_type_name(in_t));
                 }
                 if (op == OP_PEARSON_CORR) {
                     if (ray_len(val_expr) < 3) {
                         if (g->selection) { ray_release(g->selection); g->selection = NULL; }
                         ray_graph_free(g); ray_release(tbl);
-                        return ray_error("arity", NULL);
+                        return ray_error("arity", "select: cor aggregation requires two column arguments");
                     }
                     s_agg_ins2[s_n_aggs] = compile_expr_dag(g, agg_elems[2]);
                     if (!s_agg_ins2[s_n_aggs]) {
                         if (g->selection) { ray_release(g->selection); g->selection = NULL; }
                         ray_graph_free(g); ray_release(tbl);
-                        return ray_error("domain", NULL);
+                        return ray_error("domain", "select: failed to compile cor second argument");
                     }
                     s_has_binary = 1;
                 }
@@ -7690,7 +7696,7 @@ by_dict_done:
                         kid == nearest_id) continue;
                     ray_t* col = eval_expr_per_row(dict_elems[i + 1], tbl, nrows);
                     if (!col || RAY_IS_ERR(col)) {
-                        ray_t* err = col ? col : ray_error("domain", NULL);
+                        ray_t* err = col ? col : ray_error("domain", "select: failed to evaluate output column expression");
                         ray_release(result);
                         if (nearest_handle_owned) ray_release(nearest_handle_owned);
                         if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
@@ -7750,7 +7756,7 @@ by_dict_done:
                 }
             } else {
                 ray_graph_free(g); ray_release(tbl);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "select: asc/desc value must be a column name or symbol list, got %s", ray_type_name(val->type));
             }
         }
         if (n_sort > 0)
@@ -7762,7 +7768,7 @@ by_dict_done:
     ray_t* take_range = NULL;
     if (take_expr && !by_expr && !nearest_expr) {
         ray_t* tv = ray_eval(take_expr);
-        if (!tv || RAY_IS_ERR(tv)) { ray_graph_free(g); ray_release(tbl); return tv ? tv : ray_error("domain", NULL); }
+        if (!tv || RAY_IS_ERR(tv)) { ray_graph_free(g); ray_release(tbl); return tv ? tv : ray_error("domain", "select: failed to evaluate `take:`"); }
         if (ray_is_atom(tv) && (tv->type == -RAY_I64 || tv->type == -RAY_I32)) {
             int64_t n_take = (tv->type == -RAY_I64) ? tv->i64 : tv->i32;
             ray_release(tv);
@@ -7773,9 +7779,10 @@ by_dict_done:
         } else if (ray_is_vec(tv) && (tv->type == RAY_I64 || tv->type == RAY_I32) && tv->len == 2) {
             take_range = tv;  /* apply after DAG execution */
         } else {
+            int8_t tv_t = tv->type;            /* capture BEFORE free */
             ray_release(tv);
             ray_graph_free(g); ray_release(tbl);
-            return ray_error("domain", NULL);
+            return ray_error("domain", "select: `take:` must be an integer atom or a 2-element integer range, got %s", ray_type_name(tv_t));
         }
     }
 
@@ -8017,7 +8024,7 @@ by_dict_done:
 
             if (ks < 0) {
                 ray_release(result); ray_release(tbl);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "select by: could not resolve scalar group key symbol");
             }
 
             ray_t* orig_key = ray_table_get_col(tbl, ks);
@@ -8026,7 +8033,7 @@ by_dict_done:
 
             if (!orig_key || !grp_key) {
                 ray_release(result); ray_release(tbl);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "select by: group key column not found");
             }
 
             if (n_groups > 0 && nrows > 0) {
@@ -8598,7 +8605,7 @@ by_dict_done:
                     g_active_query_table = _aqt;
                     ray_env_pop_scope();
                     if (!full_val || RAY_IS_ERR(full_val)) {
-                        scatter_err = full_val ? full_val : ray_error("domain", NULL);
+                        scatter_err = full_val ? full_val : ray_error("domain", "select by: failed to evaluate non-aggregate column expression");
                         break;
                     }
 
@@ -8853,7 +8860,7 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
          col->type == RAY_DATE || col->type == RAY_TIME) &&
         !RAY_ATOM_IS_NULL(bucket)) {
         int64_t b = bucket->i64;
-        if (b == 0) return ray_error("domain", NULL);
+        if (b == 0) return ray_error("domain", "xbar: bucket size must be non-zero");
         int64_t n = col->len;
         ray_t* out = ray_vec_new(col->type, n);
         if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
@@ -8906,7 +8913,7 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
     if (is_numeric(col) && is_numeric(bucket) && !is_float_op(col, bucket)) {
         int64_t a = as_i64(col), b = as_i64(bucket);
         if (b == 0 || RAY_ATOM_IS_NULL(col) || RAY_ATOM_IS_NULL(bucket))
-            return ray_error("domain", NULL);
+            return ray_error("domain", "xbar: bucket size must be non-zero and operands non-null");
         int64_t q = a / b;
         if ((a ^ b) < 0 && q * b != a) q--;
         int64_t result = q * b;
@@ -8918,9 +8925,9 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
     /* Float path: either operand is f64 */
     if (is_numeric(col) && is_numeric(bucket)) {
         if (RAY_ATOM_IS_NULL(col) || RAY_ATOM_IS_NULL(bucket))
-            return ray_error("domain", NULL);
+            return ray_error("domain", "xbar: operands must be non-null");
         double c = as_f64(col), b = as_f64(bucket);
-        if (b == 0.0) return ray_error("domain", NULL);
+        if (b == 0.0) return ray_error("domain", "xbar: bucket size must be non-zero");
         double fq = floor(c / b);
         return make_f64(fq * b);
     }
@@ -8936,7 +8943,7 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
         } else {
             b = as_i64(bucket);
         }
-        if (b == 0 || RAY_ATOM_IS_NULL(bucket)) return ray_error("domain", NULL);
+        if (b == 0 || RAY_ATOM_IS_NULL(bucket)) return ray_error("domain", "xbar: bucket size must be non-zero and non-null");
         int64_t q = a / b;
         if ((a ^ b) < 0 && q * b != a) q--;
         int64_t result = q * b;
@@ -8944,7 +8951,8 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
         if (col->type == -RAY_DATE) return ray_date(result);
         return ray_timestamp(result);
     }
-    return ray_error("type", NULL);
+    return ray_error("type", "xbar: unsupported operand types, got %s and %s",
+                     ray_type_name(col->type), ray_type_name(bucket->type));
 }
 
 /* ══════════════════════════════════════════
@@ -8991,67 +8999,67 @@ static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
                    at == -RAY_I16 || at == -RAY_U8);
     switch (ct) {
     case RAY_BOOL: {
-        if (at != -RAY_BOOL) return ray_error("type", NULL);
+        if (at != -RAY_BOOL) return ray_error("type", "insert: value type does not match bool column, got %s", ray_type_name(at));
         uint8_t v = atom->b8;
         return ray_vec_append(col_vec, &v);
     }
     case RAY_U8: {
-        if (!is_int) return ray_error("type", NULL);
+        if (!is_int) return ray_error("type", "insert: u8 column requires an integer value, got %s", ray_type_name(at));
         uint8_t v = (uint8_t)as_i64(atom);
         return ray_vec_append(col_vec, &v);
     }
     case RAY_I16: {
-        if (!is_int) return ray_error("type", NULL);
+        if (!is_int) return ray_error("type", "insert: i16 column requires an integer value, got %s", ray_type_name(at));
         int16_t v = (int16_t)as_i64(atom);
         return ray_vec_append(col_vec, &v);
     }
     case RAY_I32: {
-        if (!is_int) return ray_error("type", NULL);
+        if (!is_int) return ray_error("type", "insert: i32 column requires an integer value, got %s", ray_type_name(at));
         int32_t v = (int32_t)as_i64(atom);
         return ray_vec_append(col_vec, &v);
     }
     case RAY_I64: {
-        if (!is_int) return ray_error("type", NULL);
+        if (!is_int) return ray_error("type", "insert: i64 column requires an integer value, got %s", ray_type_name(at));
         int64_t v = as_i64(atom);
         return ray_vec_append(col_vec, &v);
     }
     case RAY_F64: {
-        if (at != -RAY_F64 && !is_int) return ray_error("type", NULL);
+        if (at != -RAY_F64 && !is_int) return ray_error("type", "insert: f64 column requires a numeric value, got %s", ray_type_name(at));
         double v = (at == -RAY_F64) ? atom->f64 : (double)as_i64(atom);
         return ray_vec_append(col_vec, &v);
     }
     case RAY_DATE: {
-        if (at != -RAY_DATE) return ray_error("type", NULL);
+        if (at != -RAY_DATE) return ray_error("type", "insert: date column requires a date value, got %s", ray_type_name(at));
         int32_t v = atom->i32;
         return ray_vec_append(col_vec, &v);
     }
     case RAY_TIME: {
-        if (at != -RAY_TIME) return ray_error("type", NULL);
+        if (at != -RAY_TIME) return ray_error("type", "insert: time column requires a time value, got %s", ray_type_name(at));
         int32_t v = atom->i32;
         return ray_vec_append(col_vec, &v);
     }
     case RAY_TIMESTAMP: {
-        if (at != -RAY_TIMESTAMP) return ray_error("type", NULL);
+        if (at != -RAY_TIMESTAMP) return ray_error("type", "insert: timestamp column requires a timestamp value, got %s", ray_type_name(at));
         int64_t v = atom->i64;
         return ray_vec_append(col_vec, &v);
     }
     case RAY_GUID: {
-        if (at != -RAY_GUID) return ray_error("type", NULL);
+        if (at != -RAY_GUID) return ray_error("type", "insert: guid column requires a guid value, got %s", ray_type_name(at));
         static const uint8_t zero_guid[16] = {0};
         const void* src = atom->obj ? ray_data(atom->obj) : zero_guid;
         return ray_vec_append(col_vec, src);
     }
     case RAY_SYM: {
-        if (at != -RAY_SYM) return ray_error("type", NULL);
+        if (at != -RAY_SYM) return ray_error("type", "insert: sym column requires a sym value, got %s", ray_type_name(at));
         int64_t v = atom->i64;
         return ray_vec_append(col_vec, &v);
     }
     case RAY_STR: {
-        if (at != -RAY_STR) return ray_error("type", NULL);
+        if (at != -RAY_STR) return ray_error("type", "insert: str column requires a str value, got %s", ray_type_name(at));
         return ray_str_vec_append(col_vec, ray_str_ptr(atom), ray_str_len(atom));
     }
     default:
-        return ray_error("type", NULL);
+        return ray_error("type", "insert: unsupported column type %s", ray_type_name(ct));
     }
 }
 
@@ -9066,13 +9074,13 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
 }
 
 ray_t* ray_update(ray_t** args, int64_t n) {
-    if (n < 1) return ray_error("domain", NULL);
+    if (n < 1) return ray_error("arity", "update: expects a query dict, got %lld args", (long long)n);
     ray_t* dict = args[0];
     if (!dict || dict->type != RAY_DICT)
-        return ray_error("type", NULL);
+        return ray_error("type", "update: query must be a dict, got %s", dict ? ray_type_name(dict->type) : "null");
 
     ray_t* from_expr = dict_get(dict, "from");
-    if (!from_expr) return ray_error("domain", NULL);
+    if (!from_expr) return ray_error("domain", "update: missing `from:` clause");
     /* Detect in-place update: from: 't means quoted symbol */
     int64_t inplace_sym = -1;
     ray_t* tbl = ray_eval(from_expr);
@@ -9082,10 +9090,10 @@ ray_t* ray_update(ray_t** args, int64_t n) {
         inplace_sym = tbl->i64;
         ray_release(tbl);
         tbl = ray_env_get(inplace_sym);
-        if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
+        if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", "update: `from:` symbol is unbound");
         ray_retain(tbl);
     }
-    if (tbl->type != RAY_TABLE) { ray_release(tbl); return ray_error("type", NULL); }
+    if (tbl->type != RAY_TABLE) { int8_t tbl_t = tbl->type; ray_release(tbl); return ray_error("type", "update: `from:` must be a table, got %s", ray_type_name(tbl_t)); }
 
     ray_t* where_expr = dict_get(dict, "where");
     ray_t* by_expr = dict_get(dict, "by");
@@ -9110,11 +9118,11 @@ ray_t* ray_update(ray_t** args, int64_t n) {
         if (by_expr->type == -RAY_SYM) {
             by_col_name = by_expr->i64;
         }
-        if (by_col_name < 0) { ray_release(tbl); return ray_error("type", NULL); }
+        if (by_col_name < 0) { ray_release(tbl); return ray_error("type", "update by: group key must be a column name symbol"); }
 
         /* Find group column in table */
         ray_t* grp_col = ray_table_get_col(tbl, by_col_name);
-        if (!grp_col) { ray_release(tbl); return ray_error("domain", NULL); }
+        if (!grp_col) { ray_release(tbl); return ray_error("domain", "update by: group key column not found"); }
         int64_t nrows2 = ray_table_nrows(tbl);
 
         /* Use ray_group_fn to get group indices: {key: [indices]}.
@@ -9194,7 +9202,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 /* Evaluate expression on sub-table via DAG */
                 ray_graph_t* ug = ray_graph_new(sub_tbl);
                 ray_op_t* expr_op = compile_expr_dag(ug, agg_expr);
-                if (!expr_op) { ray_graph_free(ug); ray_release(sub_tbl); ray_release(out_col); ray_release(result); ray_release(groups); ray_release(tbl); return ray_error("domain", NULL); }
+                if (!expr_op) { ray_graph_free(ug); ray_release(sub_tbl); ray_release(out_col); ray_release(result); ray_release(groups); ray_release(tbl); return ray_error("domain", "update by: failed to compile aggregate expression"); }
                 expr_op = ray_optimize(ug, expr_op);
                 ray_t* agg_result = ray_execute(ug, expr_op);
                 ray_graph_free(ug);
@@ -9269,11 +9277,12 @@ ray_t* ray_update(ray_t** args, int64_t n) {
             mask_vec = ray_eval(where_expr);
             ray_env_pop_scope();
         }
-        if (!mask_vec || RAY_IS_ERR(mask_vec)) { ray_release(tbl); return mask_vec ? mask_vec : ray_error("type", NULL); }
+        if (!mask_vec || RAY_IS_ERR(mask_vec)) { ray_release(tbl); return mask_vec ? mask_vec : ray_error("type", "update: `where:` predicate evaluation failed"); }
         if (mask_vec->type != RAY_BOOL || mask_vec->len != nrows) {
+            int8_t mask_t = mask_vec->type;            /* capture BEFORE free */
             ray_release(mask_vec);
             ray_release(tbl);
-            return ray_error("type", NULL);
+            return ray_error("type", "update: `where:` must produce a bool mask matching row count, got %s", ray_type_name(mask_t));
         }
         mask = (uint8_t*)ray_data(mask_vec);
         /* Keep mask_vec alive until we're done */
@@ -9342,7 +9351,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     expr_vec = ray_eval(update_expr);
                     ray_env_pop_scope();
                 }
-                if (!expr_vec || RAY_IS_ERR(expr_vec)) { ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return expr_vec ? expr_vec : ray_error("type", NULL); }
+                if (!expr_vec || RAY_IS_ERR(expr_vec)) { ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return expr_vec ? expr_vec : ray_error("type", "update: failed to evaluate column update expression"); }
 
                 /* WHERE update: expression result replaces ONLY masked rows.
                  * When type differs (e.g., I64 col, F64 expr from (* col 1.1)),
@@ -9355,7 +9364,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                                            (expr_type == RAY_I64 || expr_type == RAY_I32 || expr_type == RAY_F64);
                     if (!is_numeric_promo) {
                         ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl);
-                        return ray_error("type", NULL);
+                        return ray_error("type", "update: cannot assign %s expression to %s column", ray_type_name(expr_type), ray_type_name(ct));
                     }
                     /* Copy original column values first */
                     int esz = ray_elem_size(ct);
@@ -9406,8 +9415,9 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     if (!ok && ct == RAY_LIST && expr_vec->type == -RAY_SYM) ok = 1;
                     if (!ok && ct == RAY_SYM && expr_vec->type == -RAY_SYM) ok = 1;
                     if (!ok) {
+                        int8_t ev_t = expr_vec->type;            /* capture BEFORE free */
                         ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl);
-                        return ray_error("type", NULL);
+                        return ray_error("type", "update: cannot assign %s value to %s column", ray_type_name(ev_t), ray_type_name(ct));
                     }
                     /* SYM atom to LIST column: build boxed list, merge with mask */
                     if (ct == RAY_LIST && expr_vec->type == -RAY_SYM) {
@@ -9519,8 +9529,9 @@ ray_t* ray_update(ray_t** args, int64_t n) {
 
                 /* Type check: expr_vec must match original column type */
                 if (expr_vec->type != ct) {
+                    int8_t ev_t = expr_vec->type;            /* capture BEFORE free */
                     ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "update: expression type %s does not match %s column", ray_type_name(ev_t), ray_type_name(ct));
                 }
 
                 /* Merge: use expr_vec for matching rows, orig_col for non-matching.
@@ -9645,7 +9656,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 expr_vec = ray_eval(update_expr);
                 ray_env_pop_scope();
             }
-            if (!expr_vec || RAY_IS_ERR(expr_vec)) { ray_release(result); ray_release(tbl); return expr_vec ? expr_vec : ray_error("type", NULL); }
+            if (!expr_vec || RAY_IS_ERR(expr_vec)) { ray_release(result); ray_release(tbl); return expr_vec ? expr_vec : ray_error("type", "update: failed to evaluate column update expression"); }
 
             /* Broadcast scalar atom to full column vector if needed */
             if (expr_vec->type < 0) {
@@ -9657,8 +9668,9 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                 /* SYM atom → LIST column (LIST of SYM atoms) */
                 if (!ok && ct == RAY_LIST && expr_vec->type == -RAY_SYM) ok = 1;
                 if (!ok) {
+                    int8_t ev_t = expr_vec->type;            /* capture BEFORE free */
                     ray_release(expr_vec); ray_release(result); ray_release(tbl);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "update: cannot assign %s value to %s column", ray_type_name(ev_t), ray_type_name(ct));
                 }
                 /* SYM atom to LIST column: broadcast as boxed list */
                 if (ct == RAY_LIST && expr_vec->type == -RAY_SYM) {
@@ -9774,8 +9786,9 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     (expr_vec->type == RAY_SYM || expr_vec->type == RAY_LIST))
                     is_ok = 1;
                 if (!is_ok) {
+                    int8_t ev_t = expr_vec->type, oc_t = orig_col->type;            /* capture BEFORE free */
                     ray_release(expr_vec); ray_release(result); ray_release(tbl);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "update: expression type %s does not match %s column", ray_type_name(ev_t), ray_type_name(oc_t));
                 }
             }
 
@@ -9801,7 +9814,7 @@ no_where_add_col:
         ray_t* update_expr = dict_elems[d + 1];
         ray_graph_t* ug = ray_graph_new(tbl);
         ray_op_t* expr_op = compile_expr_dag(ug, update_expr);
-        if (!expr_op) { ray_release(result); ray_release(tbl); ray_graph_free(ug); return ray_error("domain", NULL); }
+        if (!expr_op) { ray_release(result); ray_release(tbl); ray_graph_free(ug); return ray_error("domain", "update: failed to compile new column expression"); }
         expr_op = ray_optimize(ug, expr_op);
         ray_t* expr_vec = ray_execute(ug, expr_op);
         ray_graph_free(ug);
@@ -9892,7 +9905,7 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
 }
 
 ray_t* ray_insert(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("arity", "insert: expects a target and a value, got %lld args", (long long)n);
 
     /* In-place vs functional is decided by the EVALUATED first argument:
      * a symbol value names a global to amend in place (returning that
@@ -9911,13 +9924,13 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
         ray_retain(tbl);
     } else {
         tbl = ray_eval(tbl_raw);
-        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", NULL);
+        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", "insert: target evaluation failed");
         if (tbl->type == -RAY_SYM) {
             /* Symbol value → resolve the named global for in-place insert */
             inplace_sym = tbl->i64;
             ray_release(tbl);
             tbl = ray_env_get(inplace_sym);
-            if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
+            if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", "insert: target symbol is unbound");
             ray_retain(tbl);
         }
     }
@@ -9927,12 +9940,12 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
      * Tables with n==2 fall through to the legacy table-row append below.
      * ==================================================================== */
     if (tbl->type != RAY_TABLE) {
-        if (already_eval) { ray_release(tbl); return ray_error("type", NULL); }
-        if (tbl->attrs & RAY_ATTR_ARENA) { ray_release(tbl); return ray_error("type", NULL); }
+        if (already_eval) { int8_t tbl_t = tbl->type; ray_release(tbl); return ray_error("type", "insert: target must be a table, got %s", ray_type_name(tbl_t)); }
+        if (tbl->attrs & RAY_ATTR_ARENA) { ray_release(tbl); return ray_error("type", "insert: cannot insert into an arena-backed value"); }
 
         /* Slice → materialise so cow can mutate. Lists never slice. */
         if (tbl->attrs & RAY_ATTR_SLICE) {
-            if (tbl->type == RAY_LIST) { ray_release(tbl); return ray_error("type", NULL); }
+            if (tbl->type == RAY_LIST) { ray_release(tbl); return ray_error("type", "insert: cannot insert into a list slice"); }
             ray_t* empty = ray_vec_new(tbl->type, 0);
             if (!empty || RAY_IS_ERR(empty)) {
                 ray_release(tbl);
@@ -9948,12 +9961,13 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
         bool is_target_list = (tbl->type == RAY_LIST);
         bool is_target_vec  = ray_is_vec(tbl);
         if (!is_target_list && !is_target_vec) {
+            int8_t tbl_t = tbl->type;            /* capture BEFORE free */
             ray_release(tbl);
-            return ray_error("type", NULL);
+            return ray_error("type", "insert: target must be a table, list or vector, got %s", ray_type_name(tbl_t));
         }
         if (n != 2 && n != 3) {
             ray_release(tbl);
-            return ray_error("domain", NULL);
+            return ray_error("domain", "insert: list/vector insert takes 2 or 3 args, got %lld", (long long)n);
         }
 
         ray_t* result = NULL;
@@ -9964,7 +9978,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
             ray_t* val = ray_eval(args[1]);
             if (!val || RAY_IS_ERR(val)) {
                 ray_release(tbl);
-                return val ? val : ray_error("type", NULL);
+                return val ? val : ray_error("type", "insert: value evaluation failed");
             }
             if (is_target_list) {
                 /* Always one slot — never splice on append. */
@@ -9996,9 +10010,11 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                 result = ray_vec_concat(tbl, val);
                 ray_release(tbl);
             } else {
+                int8_t val_t = val->type;            /* capture BEFORE free */
                 ray_release(tbl);
                 ray_release(val);
-                return ray_error("type", NULL);
+                return ray_error("type", "insert: appended value type does not match %s vector, got %s",
+                                 ray_type_name(tt), ray_type_name(val_t));
             }
             ray_release(val);
         } else {
@@ -10006,13 +10022,13 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
             ray_t* idx_arg = ray_eval(args[1]);
             if (!idx_arg || RAY_IS_ERR(idx_arg)) {
                 ray_release(tbl);
-                return idx_arg ? idx_arg : ray_error("type", NULL);
+                return idx_arg ? idx_arg : ray_error("type", "insert: index evaluation failed");
             }
             ray_t* val = ray_eval(args[2]);
             if (!val || RAY_IS_ERR(val)) {
                 ray_release(tbl);
                 ray_release(idx_arg);
-                return val ? val : ray_error("type", NULL);
+                return val ? val : ray_error("type", "insert: value evaluation failed");
             }
 
             if (is_target_list) {
@@ -10021,14 +10037,16 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                     result = tbl;
                 } else if (idx_arg->type == RAY_I64) {
                     if (val->type != RAY_LIST) {
+                        int8_t val_t = val->type;            /* capture BEFORE free */
                         ray_release(tbl); ray_release(idx_arg); ray_release(val);
-                        return ray_error("type", NULL);
+                        return ray_error("type", "insert: multi-index list insert requires a list of values, got %s", ray_type_name(val_t));
                     }
                     result = ray_list_insert_many(tbl, idx_arg, val);
                     ray_release(tbl);
                 } else {
+                    int8_t idx_t = idx_arg->type;            /* capture BEFORE free */
                     ray_release(tbl); ray_release(idx_arg); ray_release(val);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "insert: list index must be an i64 atom or vector, got %s", ray_type_name(idx_t));
                 }
             } else {
                 /* vec target */
@@ -10058,23 +10076,28 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                         result = ray_vec_insert_vec_at(tbl, i, val);
                         ray_release(tbl);
                     } else {
+                        int8_t val_t = val->type;            /* capture BEFORE free */
                         ray_release(tbl); ray_release(idx_arg); ray_release(val);
-                        return ray_error("type", NULL);
+                        return ray_error("type", "insert: value type does not match %s vector, got %s",
+                                         ray_type_name(tt), ray_type_name(val_t));
                     }
                 } else if (idx_arg->type == RAY_I64) {
                     if (tt == RAY_STR) {
                         ray_release(tbl); ray_release(idx_arg); ray_release(val);
-                        return ray_error("type", NULL);
+                        return ray_error("type", "insert: multi-index insert not supported on str vectors");
                     }
                     if (val->type != tt && val->type != -tt) {
+                        int8_t val_t = val->type;            /* capture BEFORE free */
                         ray_release(tbl); ray_release(idx_arg); ray_release(val);
-                        return ray_error("type", NULL);
+                        return ray_error("type", "insert: value type does not match %s vector, got %s",
+                                         ray_type_name(tt), ray_type_name(val_t));
                     }
                     result = ray_vec_insert_many(tbl, idx_arg, val);
                     ray_release(tbl);
                 } else {
+                    int8_t idx_t = idx_arg->type;            /* capture BEFORE free */
                     ray_release(tbl); ray_release(idx_arg); ray_release(val);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "insert: index must be an i64 atom or vector, got %s", ray_type_name(idx_t));
                 }
             }
             ray_release(idx_arg);
@@ -10095,19 +10118,19 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
 
     /* Evaluate the row argument (skip if already evaluated) */
     ray_t* row = already_eval ? (ray_retain(args[1]), args[1]) : ray_eval(args[1]);
-    if (!row || RAY_IS_ERR(row)) { ray_release(tbl); return row ? row : ray_error("type", NULL); }
-    if (tbl->type != RAY_TABLE) { ray_release(tbl); ray_release(row); return ray_error("type", NULL); }
+    if (!row || RAY_IS_ERR(row)) { ray_release(tbl); return row ? row : ray_error("type", "insert: row evaluation failed"); }
+    if (tbl->type != RAY_TABLE) { int8_t tbl_t = tbl->type; ray_release(tbl); ray_release(row); return ray_error("type", "insert: target must be a table, got %s", ray_type_name(tbl_t)); }
 
     int64_t ncols = ray_table_ncols(tbl);
     ray_t* row_orig = row; /* keep original eval result for cleanup */
 
-    if (!is_list(row) && row->type != RAY_TABLE && row->type != RAY_DICT) { ray_release(tbl); ray_release(row); return ray_error("type", NULL); }
+    if (!is_list(row) && row->type != RAY_TABLE && row->type != RAY_DICT) { int8_t row_t = row->type; ray_release(tbl); ray_release(row); return ray_error("type", "insert: row must be a list, table or dict, got %s", ray_type_name(row_t)); }
 
     /* Table row: convert to list of column vectors */
     ray_t* tbl_row_list = NULL;
     if (row->type == RAY_TABLE) {
         int64_t src_ncols = ray_table_ncols(row);
-        if (src_ncols != ncols) { ray_release(tbl); ray_release(row); return ray_error("domain", NULL); }
+        if (src_ncols != ncols) { ray_release(tbl); ray_release(row); return ray_error("domain", "insert: row table has %lld columns, target has %lld", (long long)src_ncols, (long long)ncols); }
         tbl_row_list = ray_alloc(ncols * sizeof(ray_t*));
         if (!tbl_row_list) { ray_release(tbl); ray_release(row_orig); return ray_error("oom", NULL); }
         tbl_row_list->type = RAY_LIST;
@@ -10121,7 +10144,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                 tbl_row_list->len = 0;
                 ray_free(tbl_row_list);
                 ray_release(tbl); ray_release(row_orig);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "insert: row table missing a target column");
             }
             trl[c] = src_col;
             ray_retain(src_col);
@@ -10136,7 +10159,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
         ray_t* dvals = ray_dict_vals(row);
         if (!dkeys || dkeys->type != RAY_SYM || !dvals) {
             ray_release(tbl); ray_release(row_orig);
-            return ray_error("type", NULL);
+            return ray_error("type", "insert: dict row keys must be symbols");
         }
         int64_t dict_len = dkeys->len;
 
@@ -10191,7 +10214,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
             ray_free(dict_vals);
         }
         ray_release(tbl); ray_release(row_orig);
-        return ray_error("domain", NULL);
+        return ray_error("domain", "insert: row has %lld values, target has %lld columns", (long long)ray_len(row), (long long)ncols);
     }
 
     ray_t** row_elems = (ray_t**)ray_data(row);
@@ -10325,7 +10348,7 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
 }
 
 ray_t* ray_upsert(ray_t** args, int64_t n) {
-    if (n < 3) return ray_error("domain", NULL);
+    if (n < 3) return ray_error("arity", "upsert: expects a target, key and row, got %lld args", (long long)n);
 
     /* Detect calling convention: already-evaluated args (from recursive call) vs raw parse tree */
     int64_t inplace_sym = -1;
@@ -10338,25 +10361,25 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         ray_retain(tbl);
     } else {
         tbl = ray_eval(tbl_raw);
-        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", NULL);
+        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", "upsert: target evaluation failed");
         if (tbl->type == -RAY_SYM) {
             /* Symbol value → resolve the named global for in-place upsert */
             inplace_sym = tbl->i64;
             ray_release(tbl);
             tbl = ray_env_get(inplace_sym);
-            if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", NULL);
+            if (!tbl || RAY_IS_ERR(tbl)) return ray_error("domain", "upsert: target symbol is unbound");
             ray_retain(tbl);
         }
     }
 
     ray_t* key_sym = already_eval ? (ray_retain(args[1]), args[1]) : ray_eval(args[1]);
-    if (!key_sym || RAY_IS_ERR(key_sym)) { ray_release(tbl); return key_sym ? key_sym : ray_error("type", NULL); }
+    if (!key_sym || RAY_IS_ERR(key_sym)) { ray_release(tbl); return key_sym ? key_sym : ray_error("type", "upsert: key evaluation failed"); }
 
     ray_t* row = already_eval ? (ray_retain(args[2]), args[2]) : ray_eval(args[2]);
-    if (!row || RAY_IS_ERR(row)) { ray_release(tbl); ray_release(key_sym); return row ? row : ray_error("type", NULL); }
+    if (!row || RAY_IS_ERR(row)) { ray_release(tbl); ray_release(key_sym); return row ? row : ray_error("type", "upsert: row evaluation failed"); }
 
-    if (tbl->type != RAY_TABLE) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("type", NULL); }
-    if (!is_list(row) && row->type != RAY_TABLE && row->type != RAY_DICT) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("type", NULL); }
+    if (tbl->type != RAY_TABLE) { int8_t tbl_t = tbl->type; ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("type", "upsert: target must be a table, got %s", ray_type_name(tbl_t)); }
+    if (!is_list(row) && row->type != RAY_TABLE && row->type != RAY_DICT) { int8_t row_t = row->type; ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("type", "upsert: row must be a list, table or dict, got %s", ray_type_name(row_t)); }
 
     int64_t ncols = ray_table_ncols(tbl);
 
@@ -10412,13 +10435,14 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
             int64_t k = key_sym->i64;
             if (k <= 0 || k > ncols || k > 16) {
                 ray_release(tbl); ray_release(key_sym); ray_release(row);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "upsert: key count must be 1..min(ncols,16), got %lld", (long long)k);
             }
             for (int64_t i = 0; i < k; i++)
                 key_names[n_key++] = ray_table_col_name(tbl, i);
         } else {
+            int8_t ks_t = key_sym->type;            /* capture BEFORE free */
             ray_release(tbl); ray_release(key_sym); ray_release(row);
-            return ray_error("type", NULL);
+            return ray_error("type", "upsert: key must be a symbol or integer, got %s", ray_type_name(ks_t));
         }
         for (int64_t k = 0; k < n_key; k++) {
             int found = 0;
@@ -10476,7 +10500,7 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         ray_t* dvals = ray_dict_vals(row);
         if (!dkeys || dkeys->type != RAY_SYM || !dvals) {
             ray_release(tbl); ray_release(key_sym); ray_release(row);
-            return ray_error("type", NULL);
+            return ray_error("type", "upsert: dict row keys must be symbols");
         }
         int64_t n_pairs = dkeys->len;
 
@@ -10528,7 +10552,7 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         row = dict_row_list;
     }
 
-    if (ray_len(row) != ncols) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("domain", NULL); }
+    if (ray_len(row) != ncols) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("domain", "upsert: row has %lld values, target has %lld columns", (long long)ray_len(row), (long long)ncols); }
 
     ray_t** row_elems = (ray_t**)ray_data(row);
     int64_t nrows = ray_table_nrows(tbl);
@@ -10544,14 +10568,15 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
                 break;
             }
         }
-        if (key_col_indices[0] < 0) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("domain", NULL); }
+        if (key_col_indices[0] < 0) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("domain", "upsert: key column not found in target table"); }
     } else if (key_sym->type == -RAY_I64) {
         n_key_cols = key_sym->i64;
-        if (n_key_cols <= 0 || n_key_cols > ncols || n_key_cols > 16) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("domain", NULL); }
+        if (n_key_cols <= 0 || n_key_cols > ncols || n_key_cols > 16) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("domain", "upsert: key count must be 1..min(ncols,16), got %lld", (long long)n_key_cols); }
         for (int64_t k = 0; k < n_key_cols; k++) key_col_indices[k] = k;
     } else {
+        int8_t ks_t = key_sym->type;            /* capture BEFORE free */
         ray_release(tbl); ray_release(key_sym); ray_release(row);
-        return ray_error("type", NULL);
+        return ray_error("type", "upsert: key must be a symbol or integer, got %s", ray_type_name(ks_t));
     }
 
     /* Multi-row upsert: if row values are vectors, iterate row-by-row */
@@ -10607,12 +10632,14 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
         ray_t* key_atom = row_elems[kci];
         int8_t kt = key_col->type;
         if (kt == RAY_STR && key_atom->type != -RAY_STR) {
+            int8_t ka_t = key_atom->type;            /* capture BEFORE free */
             ray_release(tbl); ray_release(key_sym); ray_release(row);
-            return ray_error("type", NULL);
+            return ray_error("type", "upsert: key column is str but key value is %s", ray_type_name(ka_t));
         }
         if (kt == RAY_SYM && key_atom->type != -RAY_SYM) {
+            int8_t ka_t = key_atom->type;            /* capture BEFORE free */
             ray_release(tbl); ray_release(key_sym); ray_release(row);
-            return ray_error("type", NULL);
+            return ray_error("type", "upsert: key column is sym but key value is %s", ray_type_name(ka_t));
         }
         key_sym_want[k] = -1;
         if (kt == RAY_SYM) {
@@ -10765,7 +10792,7 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
 /* Shared implementation for left-join (join_type=1) and inner-join (join_type=0).
  * (left-join t1 t2 [key ...]) / (inner-join t1 t2 [key ...]) */
 static ray_t* join_impl(ray_t** args, int64_t n, uint8_t join_type) {
-    if (n < 3) return ray_error("domain", NULL);
+    if (n < 3) return ray_error("arity", "join: expects left table, right table and keys, got %lld args", (long long)n);
 
     ray_t* left_tbl  = args[0];
     ray_t* right_tbl = args[1];
@@ -10779,15 +10806,16 @@ static ray_t* join_impl(ray_t** args, int64_t n, uint8_t join_type) {
     }
 
     if (left_tbl->type != RAY_TABLE || right_tbl->type != RAY_TABLE)
-        return ray_error("type", NULL);
+        return ray_error("type", "join: both operands must be tables, got %s and %s",
+                         ray_type_name(left_tbl->type), ray_type_name(right_tbl->type));
     ray_t* _bxk = NULL;
     keys = unbox_vec_arg(keys, &_bxk);
     if (RAY_IS_ERR(keys)) return keys;
     if (!is_list(keys))
-        { if (_bxk) ray_release(_bxk); return ray_error("type", NULL); }
+        { if (_bxk) ray_release(_bxk); return ray_error("type", "join: keys must be a symbol list, got %s", ray_type_name(keys->type)); }
 
     int64_t nk = ray_len(keys);
-    if (nk == 0 || nk > 16) { if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+    if (nk == 0 || nk > 16) { if (_bxk) ray_release(_bxk); return ray_error("domain", "join: requires 1..16 keys, got %lld", (long long)nk); }
     ray_t** key_elems = (ray_t**)ray_data(keys);
 
     ray_graph_t* g = ray_graph_new(left_tbl);
@@ -10799,14 +10827,15 @@ static ray_t* join_impl(ray_t** args, int64_t n, uint8_t join_type) {
     ray_op_t* lk[16], *rk[16];
     for (int64_t i = 0; i < nk; i++) {
         if (key_elems[i]->type != -RAY_SYM) {
+            int8_t ke_t = key_elems[i]->type;            /* capture BEFORE free */
             ray_graph_free(g); if (_bxk) ray_release(_bxk);
-            return ray_error("type", NULL);
+            return ray_error("type", "join: key must be a symbol name, got %s", ray_type_name(ke_t));
         }
         ray_t* name_str = ray_sym_str(key_elems[i]->i64);
-        if (!name_str) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+        if (!name_str) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "join: unknown key symbol"); }
         lk[i] = ray_scan(g, ray_str_ptr(name_str));
         rk[i] = ray_scan(g, ray_str_ptr(name_str));
-        if (!lk[i] || !rk[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+        if (!lk[i] || !rk[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "join: key column not found"); }
     }
 
     if (_bxk) ray_release(_bxk);
@@ -10827,7 +10856,7 @@ ray_t* ray_inner_join_fn(ray_t** args, int64_t n) { return join_impl(args, n, 0)
 /* (antijoin left right [keys])
  * Anti-semi-join: keep rows from left that have NO match in right on keys. */
 static ray_t* antijoin_impl(ray_t** args, int64_t n) {
-    if (n < 3) return ray_error("domain", NULL);
+    if (n < 3) return ray_error("arity", "antijoin: expects left table, right table and keys, got %lld args", (long long)n);
 
     ray_t* left_tbl  = args[0];
     ray_t* right_tbl = args[1];
@@ -10841,15 +10870,16 @@ static ray_t* antijoin_impl(ray_t** args, int64_t n) {
     }
 
     if (left_tbl->type != RAY_TABLE || right_tbl->type != RAY_TABLE)
-        return ray_error("type", NULL);
+        return ray_error("type", "antijoin: both operands must be tables, got %s and %s",
+                         ray_type_name(left_tbl->type), ray_type_name(right_tbl->type));
     ray_t* _bxk = NULL;
     keys = unbox_vec_arg(keys, &_bxk);
     if (RAY_IS_ERR(keys)) return keys;
     if (!is_list(keys))
-        { if (_bxk) ray_release(_bxk); return ray_error("type", NULL); }
+        { if (_bxk) ray_release(_bxk); return ray_error("type", "antijoin: keys must be a symbol list, got %s", ray_type_name(keys->type)); }
 
     int64_t nk = ray_len(keys);
-    if (nk == 0 || nk > 16) { if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+    if (nk == 0 || nk > 16) { if (_bxk) ray_release(_bxk); return ray_error("domain", "antijoin: requires 1..16 keys, got %lld", (long long)nk); }
     ray_t** key_elems = (ray_t**)ray_data(keys);
 
     ray_graph_t* g = ray_graph_new(left_tbl);
@@ -10861,14 +10891,15 @@ static ray_t* antijoin_impl(ray_t** args, int64_t n) {
     ray_op_t* lk[16], *rk[16];
     for (int64_t i = 0; i < nk; i++) {
         if (key_elems[i]->type != -RAY_SYM) {
+            int8_t ke_t = key_elems[i]->type;            /* capture BEFORE free */
             ray_graph_free(g); if (_bxk) ray_release(_bxk);
-            return ray_error("type", NULL);
+            return ray_error("type", "antijoin: key must be a symbol name, got %s", ray_type_name(ke_t));
         }
         ray_t* name_str = ray_sym_str(key_elems[i]->i64);
-        if (!name_str) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+        if (!name_str) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "antijoin: unknown key symbol"); }
         lk[i] = ray_scan(g, ray_str_ptr(name_str));
         rk[i] = ray_scan(g, ray_str_ptr(name_str));
-        if (!lk[i] || !rk[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+        if (!lk[i] || !rk[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "antijoin: key column not found"); }
     }
 
     if (_bxk) ray_release(_bxk);
@@ -11275,7 +11306,7 @@ static void wj_scan_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t en
  * The legacy asof fall-through ((window-join L R [keys] time)) is mode-agnostic.
  */
 static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
-    if (n < 4) return ray_error("domain", NULL);
+    if (n < 4) return ray_error("domain", "window-join: expects keys, intervals, left and right tables, got %lld args", (long long)n);
 
     /* Special form: evaluate first 4 args, keep agg dict (args[4]) unevaluated */
     ray_t* eargs[5];
@@ -11283,7 +11314,7 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
         eargs[i] = ray_eval(args[i]);
         if (!eargs[i] || RAY_IS_ERR(eargs[i])) {
             for (int j = 0; j < i; j++) ray_release(eargs[j]);
-            return eargs[i] ? eargs[i] : ray_error("type", NULL);
+            return eargs[i] ? eargs[i] : ray_error("type", "window-join: argument evaluation failed");
         }
     }
     eargs[4] = (n >= 5) ? args[4] : NULL; /* agg dict stays unevaluated */
@@ -11301,7 +11332,7 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
         ray_t* agg_dict = eargs[4];      /* unevaluated dict */
 
         int64_t nkeys = ray_len(keys_vec);
-        if (nkeys < 2) return ray_error("domain", NULL);
+        if (nkeys < 2) return ray_error("domain", "window-join: keys must contain at least one equality key plus a time key, got %lld", (long long)nkeys);
 
         /* Last key is the time key, rest are equality keys.  keys_vec is
          * an EVALUATED user vec (any width, any domain) — read cells via
@@ -11316,7 +11347,7 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
         /* Get left time column */
         ray_t* left_time = ray_table_get_col(left_tbl, time_key);
         ray_t* right_time = ray_table_get_col(right_tbl, time_key);
-        if (!left_time || !right_time) return ray_error("domain", NULL);
+        if (!left_time || !right_time) return ray_error("domain", "window-join: time key column not found in both tables");
 
         /* Get equality columns */
         ray_t* left_eq[16], *right_eq[16];
@@ -11324,7 +11355,7 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
             int64_t eq_key = sym_cell_runtime_id(keys_vec, e);
             left_eq[e] = ray_table_get_col(left_tbl, eq_key);
             right_eq[e] = ray_table_get_col(right_tbl, eq_key);
-            if (!left_eq[e] || !right_eq[e]) return ray_error("domain", NULL);
+            if (!left_eq[e] || !right_eq[e]) return ray_error("domain", "window-join: equality key column not found in both tables");
         }
 
         /* Parse every (name, (op src)) pair from the agg dict.  The dict's
@@ -11399,13 +11430,13 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
             if (agg_ops[a] == 0) {
                 for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
                 for (int i = 0; i < 4; i++) ray_release(eargs[i]);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "window-join: unsupported aggregation op");
             }
             ray_t* src = ray_table_get_col(right_tbl, agg_src_ids[a]);
             if (!src) {
                 for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
                 for (int i = 0; i < 4; i++) ray_release(eargs[i]);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "window-join: aggregation source column not found");
             }
             int8_t t = src->type;
             /* COUNT never reads source values — accept any column type. Every
@@ -11419,7 +11450,7 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
                 default:
                     for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
                     for (int i = 0; i < 4; i++) ray_release(eargs[i]);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "window-join: aggregation source must be numeric, got %s", ray_type_name(t));
                 }
             }
             agg_src_vecs[a]  = src;
@@ -11625,7 +11656,7 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
                 WJ_CLEANUP_TEMP();
                 for (int64_t a = 0; a < n_agg; a++) ray_release(agg_result_vecs[a]);
                 for (int i = 0; i < 4; i++) ray_release(eargs[i]);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "window-join: intervals must be [lo hi] vectors matching left row count");
             }
             const void* lo_d = ray_data(lo_vec);
             const void* hi_d = ray_data(hi_vec);
@@ -11763,9 +11794,10 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
     ray_t* time_sym  = eargs[3];
 
     if (left_tbl->type != RAY_TABLE || right_tbl->type != RAY_TABLE)
-        return ray_error("type", NULL);
+        return ray_error("type", "window-join: both operands must be tables, got %s and %s",
+                         ray_type_name(left_tbl->type), ray_type_name(right_tbl->type));
     if (time_sym->type != -RAY_SYM)
-        return ray_error("type", NULL);
+        return ray_error("type", "window-join: time key must be a symbol, got %s", ray_type_name(time_sym->type));
 
     uint8_t n_eq = 0;
     ray_t** eq_elems = NULL;
@@ -11783,20 +11815,20 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
     ray_op_t* right_node = ray_const_table(g, right_tbl);
 
     ray_t* tname = ray_sym_str(time_sym->i64);
-    if (!tname) { ray_graph_free(g); return ray_error("domain", NULL); }
+    if (!tname) { ray_graph_free(g); return ray_error("domain", "window-join: unknown time key symbol"); }
     ray_op_t* time_op = ray_scan(g, ray_str_ptr(tname));
-    if (!time_op) { ray_graph_free(g); return ray_error("domain", NULL); }
+    if (!time_op) { ray_graph_free(g); return ray_error("domain", "window-join: time key column not found"); }
 
     ray_op_t* eq_ops[16];
     for (uint8_t i = 0; i < n_eq; i++) {
         if (eq_elems[i]->type != -RAY_SYM) {
             ray_graph_free(g);
-            return ray_error("type", NULL);
+            return ray_error("type", "window-join: equality key must be a symbol, got %s", ray_type_name(eq_elems[i]->type));
         }
         ray_t* nm = ray_sym_str(eq_elems[i]->i64);
-        if (!nm) { ray_graph_free(g); return ray_error("domain", NULL); }
+        if (!nm) { ray_graph_free(g); return ray_error("domain", "window-join: unknown equality key symbol"); }
         eq_ops[i] = ray_scan(g, ray_str_ptr(nm));
-        if (!eq_ops[i]) { ray_graph_free(g); return ray_error("domain", NULL); }
+        if (!eq_ops[i]) { ray_graph_free(g); return ray_error("domain", "window-join: equality key column not found"); }
     }
 
     if (_bxeq) ray_release(_bxeq);
@@ -11826,13 +11858,14 @@ ray_t* ray_window_join1_fn(ray_t** args, int64_t n) {
  * keys are OPTIONAL: a lone time key (asof-join [timeKey] L R) performs an
  * un-partitioned asof over all rows. */
 ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
-    if (n < 3) return ray_error("arity", NULL);
+    if (n < 3) return ray_error("arity", "asof-join: expects keys, left table and right table, got %lld args", (long long)n);
     ray_t* keys_vec   = args[0];
     ray_t* left_tbl   = args[1];
     ray_t* right_tbl  = args[2];
 
     if (left_tbl->type != RAY_TABLE || right_tbl->type != RAY_TABLE)
-        return ray_error("type", NULL);
+        return ray_error("type", "asof-join: both operands must be tables, got %s and %s",
+                         ray_type_name(left_tbl->type), ray_type_name(right_tbl->type));
 
     /* Keys vector must be a SYM vector with at least 1 element: the time key;
      * any preceding keys are equality (partition) keys. */
@@ -11840,7 +11873,7 @@ ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
     keys_vec = unbox_vec_arg(keys_vec, &_bxk);
     if (!is_list(keys_vec) || ray_len(keys_vec) < 1) {
         if (_bxk) ray_release(_bxk);
-        return ray_error("domain", NULL);
+        return ray_error("domain", "asof-join: keys must be a non-empty symbol list");
     }
     ray_t** kelems = (ray_t**)ray_data(keys_vec);
     int64_t nkeys = ray_len(keys_vec);
@@ -11848,8 +11881,9 @@ ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
     /* Last key is the time column */
     ray_t* time_sym = kelems[nkeys - 1];
     if (time_sym->type != -RAY_SYM) {
+        int8_t ts_t = time_sym->type;            /* capture BEFORE free */
         if (_bxk) ray_release(_bxk);
-        return ray_error("type", NULL);
+        return ray_error("type", "asof-join: time key must be a symbol, got %s", ray_type_name(ts_t));
     }
 
     /* Remaining keys are equality keys */
@@ -11863,20 +11897,21 @@ ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
     ray_op_t* right_node = ray_const_table(g, right_tbl);
 
     ray_t* tname = ray_sym_str(time_sym->i64);
-    if (!tname) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+    if (!tname) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: unknown time key symbol"); }
     ray_op_t* time_op = ray_scan(g, ray_str_ptr(tname));
-    if (!time_op) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+    if (!time_op) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: time key column not found"); }
 
     ray_op_t* eq_ops[16];
     for (uint8_t i = 0; i < n_eq; i++) {
         if (eq_syms[i]->type != -RAY_SYM) {
+            int8_t es_t = eq_syms[i]->type;            /* capture BEFORE free */
             ray_graph_free(g); if (_bxk) ray_release(_bxk);
-            return ray_error("type", NULL);
+            return ray_error("type", "asof-join: equality key must be a symbol, got %s", ray_type_name(es_t));
         }
         ray_t* nm = ray_sym_str(eq_syms[i]->i64);
-        if (!nm) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+        if (!nm) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: unknown equality key symbol"); }
         eq_ops[i] = ray_scan(g, ray_str_ptr(nm));
-        if (!eq_ops[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", NULL); }
+        if (!eq_ops[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: equality key column not found"); }
     }
 
     if (_bxk) ray_release(_bxk);
