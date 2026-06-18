@@ -333,12 +333,12 @@ plain_number:;
     /* Type suffix: h (i16), i (i32) */
     if (*p->pos == 'h') {
         p->pos++;
-        if (v < -32767 || v > 32767) return ray_error("domain", NULL);
+        if (v < -32767 || v > 32767) return ray_error("domain", "parse: i16 literal out of range [-32767,32767], got %lld", (long long)v);
         return ray_i16((int16_t)v);
     }
     if (*p->pos == 'i') {
         p->pos++;
-        if (v < -2147483647LL || v > 2147483647LL) return ray_error("domain", NULL);
+        if (v < -2147483647LL || v > 2147483647LL) return ray_error("domain", "parse: i32 literal out of range [-2147483647,2147483647], got %lld", (long long)v);
         return ray_i32((int32_t)v);
     }
 
@@ -371,7 +371,7 @@ static ray_t* parse_string(ray_parser_t *p) {
     const char *end = start + raw_len;
     while (r < end) {
         if (out >= sizeof(buf) - 2)
-            return ray_error("domain", NULL);  /* string too long for escape buffer */
+            return ray_error("domain", "parse: string literal exceeds %zu-byte escape buffer", sizeof(buf) - 2);  /* string too long for escape buffer */
         if (*r == '\\' && r + 1 < end) {
             r++;
             switch (*r) {
@@ -658,7 +658,7 @@ static ray_t* parse_vector(ray_parser_t *p) {
 boxed_list:
     /* Mixed types in vector literal — domain error */
     for (int32_t i = 0; i < count; i++) ray_release(elems[i]);
-    return ray_error("domain", NULL);
+    return ray_error("domain", "parse: vector literal mixes incompatible element types");
 }
 
 /* ── Dict literal: {key: val key: val ...} ──
@@ -845,7 +845,7 @@ static ray_t* parse_source(ray_parser_t *p) {
     while (*p->pos) {
         if (count >= 256) {
             for (int32_t i = 0; i < count; i++) ray_release(exprs[i]);
-            return ray_error("domain", NULL);  /* too many top-level expressions */
+            return ray_error("domain", "parse: too many top-level expressions, limit %d", 256);  /* too many top-level expressions */
         }
         ray_t* expr = parse_expr(p);
         if (RAY_IS_ERR(expr)) {
