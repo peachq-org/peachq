@@ -63,11 +63,11 @@ static ray_t* dict_alloc_block(ray_t* keys, ray_t* vals) {
 ray_t* ray_dict_new(ray_t* keys, ray_t* vals) {
     if (!keys || RAY_IS_ERR(keys)) {
         if (vals && !RAY_IS_ERR(vals)) ray_release(vals);
-        return keys ? keys : ray_error("type", NULL);
+        return keys ? keys : ray_error("type", "dict: keys vector is null");
     }
     if (!vals || RAY_IS_ERR(vals)) {
         ray_release(keys);
-        return vals ? vals : ray_error("type", NULL);
+        return vals ? vals : ray_error("type", "dict: vals vector is null");
     }
     ray_t* d = dict_alloc_block(keys, vals);
     if (!d || RAY_IS_ERR(d)) {
@@ -455,17 +455,19 @@ static ray_t* dict_sym_keys_to_runtime(ray_t* keys) {
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val) {
-    if (!d || RAY_IS_ERR(d)) return d ? d : ray_error("type", NULL);
+    if (!d || RAY_IS_ERR(d)) return d ? d : ray_error("type", "dict upsert: target dict is null");
     if (!val || RAY_IS_ERR(val)) {
         ray_release(d);
-        return val ? val : ray_error("type", NULL);
+        return val ? val : ray_error("type", "dict upsert: value is null");
     }
 
     /* Empty-target special case: build a fresh dict.  Keys vector type
      * mirrors the key atom's atom type. */
     if (d->type != RAY_DICT) {
         ray_release(d);
-        if (!key_atom || RAY_IS_ERR(key_atom)) return ray_error("type", NULL);
+        if (!key_atom || RAY_IS_ERR(key_atom))
+            return ray_error("type", "dict upsert: key must be an atom, got %s",
+                             key_atom ? ray_type_name(key_atom->type) : "null");
         int8_t kt = (int8_t)-key_atom->type;
         ray_t* keys = (kt == RAY_SYM)
             ? ray_sym_vec_new(RAY_SYM_W64, 1)
@@ -568,7 +570,7 @@ ray_t* ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val) {
         new_keys = ray_str_vec_append(keys, ray_str_ptr(key_atom), ray_str_len(key_atom));
     } else if (keys->type == RAY_GUID && key_atom->type == -RAY_GUID) {
         const void* src = key_atom->obj ? ray_data(key_atom->obj) : NULL;
-        if (!src) { ray_release(d); return ray_error("type", NULL); }
+        if (!src) { ray_release(d); return ray_error("type", "dict upsert: guid key has no payload"); }
         new_keys = ray_vec_append(keys, src);
     } else if (keys->type == RAY_F32 && key_atom->type == -RAY_F32) {
         /* F32 atoms keep their value in the f64 union slot; the keys vec
@@ -580,8 +582,11 @@ ray_t* ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val) {
     } else if (keys->type == -key_atom->type) {
         new_keys = ray_vec_append(keys, &key_atom->u8);
     } else {
+        const char* kvt = ray_type_name(keys->type);
+        const char* kat = ray_type_name(key_atom->type);
         ray_release(d);
-        return ray_error("type", NULL);
+        return ray_error("type", "dict upsert: key type does not match keys vector, got %s key for %s vector",
+                         kat, kvt);
     }
     if (!new_keys || RAY_IS_ERR(new_keys)) { ray_release(d); return new_keys ? new_keys : ray_error("oom", NULL); }
     slots[0] = new_keys;
@@ -602,8 +607,12 @@ ray_t* ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val) {
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_dict_remove(ray_t* d, ray_t* key_atom) {
-    if (!d || RAY_IS_ERR(d)) return d ? d : ray_error("type", NULL);
-    if (d->type != RAY_DICT) { ray_release(d); return ray_error("type", NULL); }
+    if (!d || RAY_IS_ERR(d)) return d ? d : ray_error("type", "dict remove: target dict is null");
+    if (d->type != RAY_DICT) {
+        const char* dt = ray_type_name(d->type);
+        ray_release(d);
+        return ray_error("type", "dict remove: target must be a dict, got %s", dt);
+    }
 
     int64_t idx = ray_dict_find_idx(d, key_atom);
     if (idx < 0) return d;
