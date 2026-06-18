@@ -2758,6 +2758,7 @@ static void ray_register_builtins(void) {
     register_unary("group",     RAY_FN_NONE, ray_group_fn);
     register_binary("concat",   RAY_FN_NONE, ray_concat_fn);
     register_unary("raze",      RAY_FN_NONE, ray_raze_fn);
+    register_unary("ungroup",   RAY_FN_NONE, ray_ungroup_fn);
     register_binary("within",   RAY_FN_NONE, ray_within_fn);
     register_binary("div",      RAY_FN_ATOMIC, ray_idiv_fn);
     register_binary("rand",     RAY_FN_NONE, ray_rand_fn);
