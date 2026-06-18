@@ -23,6 +23,7 @@
 
 #include "list.h"
 #include "mem/heap.h"
+#include "lang/format.h"  /* ray_type_name */
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -40,7 +41,7 @@ static int64_t list_capacity(ray_t* list) {
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_list_new(int64_t capacity) {
-    if (capacity < 0) return ray_error("range", NULL);
+    if (capacity < 0) return ray_error("range", "list_new: capacity must be non-negative, got %lld", (long long)capacity);
     if ((uint64_t)capacity > SIZE_MAX / sizeof(ray_t*))
         return ray_error("oom", NULL);
     size_t data_size = (size_t)capacity * sizeof(ray_t*);
@@ -128,7 +129,8 @@ ray_t* ray_list_get(ray_t* list, int64_t idx) {
 ray_t* ray_list_set(ray_t* list, int64_t idx, ray_t* item) {
     if (!list || RAY_IS_ERR(list)) return list;
     if (idx < 0 || idx >= list->len)
-        return ray_error("range", NULL);
+        return ray_error("range", "list_set: index out of bounds [0,%lld), got %lld",
+                         (long long)list->len, (long long)idx);
 
     /* COW if shared */
     list = ray_cow(list);
@@ -155,8 +157,9 @@ ray_t* ray_list_set(ray_t* list, int64_t idx, ray_t* item) {
 
 ray_t* ray_list_insert_at(ray_t* list, int64_t idx, ray_t* item) {
     if (!list || RAY_IS_ERR(list)) return list;
-    if (list->type != RAY_LIST) return ray_error("type", NULL);
-    if (idx < 0 || idx > list->len) return ray_error("range", NULL);
+    if (list->type != RAY_LIST) return ray_error("type", "list_insert_at: expects a list, got %s", ray_type_name(list->type));
+    if (idx < 0 || idx > list->len) return ray_error("range", "list_insert_at: index out of bounds [0,%lld], got %lld",
+                                                     (long long)list->len, (long long)idx);
 
     ray_t* original = list;
     list = ray_cow(list);
@@ -214,9 +217,9 @@ ray_t* ray_list_insert_many(ray_t* list, ray_t* idxs, ray_t* vals) {
     if (!list || RAY_IS_ERR(list)) return list;
     if (!idxs || RAY_IS_ERR(idxs)) return idxs;
     if (!vals || RAY_IS_ERR(vals)) return vals;
-    if (list->type != RAY_LIST) return ray_error("type", NULL);
-    if (idxs->type != RAY_I64) return ray_error("type", NULL);
-    if (vals->type != RAY_LIST) return ray_error("type", NULL);
+    if (list->type != RAY_LIST) return ray_error("type", "list_insert_many: dest expects a list, got %s", ray_type_name(list->type));
+    if (idxs->type != RAY_I64) return ray_error("type", "list_insert_many: indices expect an i64 vector, got %s", ray_type_name(idxs->type));
+    if (vals->type != RAY_LIST) return ray_error("type", "list_insert_many: values expect a list, got %s", ray_type_name(vals->type));
 
     int64_t N = idxs->len;
     int64_t old_len = list->len;
@@ -226,13 +229,15 @@ ray_t* ray_list_insert_many(ray_t* list, ray_t* idxs, ray_t* vals) {
     const int64_t* idx_arr = (const int64_t*)ray_data(idxs);
     for (int64_t k = 0; k < N; k++) {
         if (idx_arr[k] < 0 || idx_arr[k] > old_len)
-            return ray_error("range", NULL);
+            return ray_error("range", "list_insert_many: index out of bounds [0,%lld], got %lld",
+                             (long long)old_len, (long long)idx_arr[k]);
     }
 
     int broadcast;
     if (vals->len == 1) broadcast = 1;
     else if (vals->len == N) broadcast = 0;
-    else return ray_error("range", NULL);
+    else return ray_error("range", "list_insert_many: values length must be 1 or match index count %lld, got %lld",
+                          (long long)N, (long long)vals->len);
 
     /* Sort buffer of (idx, src_pos) pairs */
     ray_t* pair_vec = ray_vec_new(RAY_I64, 2 * N);
