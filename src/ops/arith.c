@@ -53,12 +53,15 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
     }
     /* Reject float + temporal */
     if ((a->type == -RAY_F64 && is_temporal(b)) || (is_temporal(a) && b->type == -RAY_F64))
-        return ray_error("type", NULL);
+        return ray_error("type", "add: temporal arithmetic requires integer offsets, got %s and %s",
+                         ray_type_name(a->type), ray_type_name(b->type));
     /* Reject null_numeric + temporal (for null floats etc) */
     if (is_numeric(a) && RAY_ATOM_IS_NULL(a) && is_temporal(b))
-        return ray_error("type", NULL);
+        return ray_error("type", "add: unsupported temporal operand combination, got %s and %s",
+                         ray_type_name(a->type), ray_type_name(b->type));
     if (is_temporal(a) && is_numeric(b) && RAY_ATOM_IS_NULL(b))
-        return ray_error("type", NULL);
+        return ray_error("type", "add: unsupported temporal operand combination, got %s and %s",
+                         ray_type_name(a->type), ray_type_name(b->type));
     /* DATE + TIME → TIMESTAMP */
     if (a->type == -RAY_DATE && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
@@ -149,7 +152,8 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     }
     /* TIMESTAMP - DATE → error */
     if (a->type == -RAY_TIMESTAMP && b->type == -RAY_DATE)
-        return ray_error("type", NULL);
+        return ray_error("type", "subtract: cannot subtract %s from %s",
+                         ray_type_name(b->type), ray_type_name(a->type));
 
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot subtract %s and %s",
@@ -180,7 +184,8 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
     }
     /* TIME * TIME → error */
     if (a->type == -RAY_TIME && b->type == -RAY_TIME)
-        return ray_error("type", NULL);
+        return ray_error("type", "multiply: cannot multiply %s by %s",
+                         ray_type_name(a->type), ray_type_name(b->type));
 
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot multiply %s and %s",
@@ -319,7 +324,7 @@ ray_t* ray_neg_fn(ray_t* x) {
         if (RAY_UNLIKELY(x->i16 == INT16_MIN)) return ray_typed_null(-RAY_I16);
         return make_i16(-x->i16);
     }
-    return ray_error("type", NULL);
+    return ray_error("type", "negate: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* round: round to nearest integer (ties go away from zero), returns f64 */
@@ -327,7 +332,7 @@ ray_t* ray_round_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
     if (x->type == -RAY_F64) return make_f64(round(x->f64));
     if (is_numeric(x)) return make_f64(round(as_f64(x)));
-    return ray_error("type", NULL);
+    return ray_error("type", "round: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* floor: round toward -inf, returns f64 for f64, identity for int */
@@ -335,7 +340,7 @@ ray_t* ray_floor_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
     if (x->type == -RAY_F64) return make_f64(floor(x->f64));
     if (is_numeric(x)) { ray_retain(x); return x; }
-    return ray_error("type", NULL);
+    return ray_error("type", "floor: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* ceil: round toward +inf, returns f64 for f64, identity for int */
@@ -343,7 +348,7 @@ ray_t* ray_ceil_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
     if (x->type == -RAY_F64) return make_f64(ceil(x->f64));
     if (is_numeric(x)) { ray_retain(x); return x; }
-    return ray_error("type", NULL);
+    return ray_error("type", "ceil: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* abs: absolute value, preserves type.  INT_MIN has no representable
@@ -365,7 +370,7 @@ ray_t* ray_abs_fn(ray_t* x) {
         if (RAY_UNLIKELY(x->i16 == INT16_MIN)) return ray_typed_null(-RAY_I16);
         return make_i16(x->i16 < 0 ? -x->i16 : x->i16);
     }
-    return ray_error("type", NULL);
+    return ray_error("type", "abs: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* sqrt: square root, returns f64 */
@@ -373,7 +378,7 @@ ray_t* ray_sqrt_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
     if (x->type == -RAY_F64) return make_f64(sqrt(x->f64));
     if (is_numeric(x)) return make_f64(sqrt(as_f64(x)));
-    return ray_error("type", NULL);
+    return ray_error("type", "sqrt: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* log: natural logarithm, returns f64 */
@@ -381,7 +386,7 @@ ray_t* ray_log_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
     if (x->type == -RAY_F64) return make_f64(log(x->f64));
     if (is_numeric(x)) return make_f64(log(as_f64(x)));
-    return ray_error("type", NULL);
+    return ray_error("type", "log: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* exp: e^x, returns f64 */
@@ -389,7 +394,7 @@ ray_t* ray_exp_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
     if (x->type == -RAY_F64) return make_f64(exp(x->f64));
     if (is_numeric(x)) return make_f64(exp(as_f64(x)));
-    return ray_error("type", NULL);
+    return ray_error("type", "exp: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
 /* pow: x raised to y, returns f64.
@@ -405,6 +410,7 @@ ray_t* ray_pow_fn(ray_t* x, ray_t* y) {
     if (RAY_ATOM_IS_NULL(x) || RAY_ATOM_IS_NULL(y))
         return ray_typed_null(-RAY_F64);
     if (!is_numeric(x) || !is_numeric(y))
-        return ray_error("type", NULL);
+        return ray_error("type", "pow: expects numeric base and exponent, got %s and %s",
+                         ray_type_name(x->type), ray_type_name(y->type));
     return make_f64(pow(as_f64(x), as_f64(y)));
 }
