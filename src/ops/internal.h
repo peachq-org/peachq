@@ -626,6 +626,7 @@ extern bool     ray_join_force_dup_fallback;
 /* perf-gate bypass: disable the auto dup-fallback to measure the pre-fix O(dup²) build */
 extern bool     ray_join_no_dup_fallback;
 extern uint64_t ray_join_dup_fallbacks;
+extern bool     ray_agg_engine_v2; /* route OP_GROUP through v2 agg engine; default off */
 void ray_expr_stats_init(void);
 
 #define EXPR_MAX_REGS 16
@@ -885,11 +886,6 @@ ray_t* ray_wide_minmax_per_group_buf(ray_t* src, uint16_t op,
                                      int64_t n_groups);
 
 ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit);
-ray_t* exec_group_topk_rowform(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_group_pearson_rowform(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_group_maxmin_rowform(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_group_median_stddev_rowform(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_group_sum_count_rowform(ray_graph_t* g, ray_op_t* op);
 
 /* ── collection.c ── */
 ray_t* distinct_vec_eager(ray_t* x);
