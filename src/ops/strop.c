@@ -27,6 +27,7 @@
 #include "table/domain.h"   /* sym-domain resolution (Phase 2) */
 #include "table/table.h"
 #include "ops/glob.h"
+#include "lang/format.h"   /* ray_type_name (error context) */
 
 /* ══════════════════════════════════════════
  * String builtins
@@ -273,12 +274,12 @@ ray_t* ray_split_fn(ray_t* str, ray_t* delim) {
     ray_t* sym_str_s = NULL;
     ray_t* sym_str_d = NULL;
     if (str->type == -RAY_STR) { sp = ray_str_ptr(str); slen = ray_str_len(str); }
-    else if (str->type == -RAY_SYM) { sym_str_s = ray_sym_str(str->i64); if (!sym_str_s) return ray_error("domain", NULL); sp = ray_str_ptr(sym_str_s); slen = ray_str_len(sym_str_s); }
+    else if (str->type == -RAY_SYM) { sym_str_s = ray_sym_str(str->i64); if (!sym_str_s) return ray_error("domain", "split: unresolved sym for input string"); sp = ray_str_ptr(sym_str_s); slen = ray_str_len(sym_str_s); }
     /* RAY_CHAR removed — all chars are now -RAY_STR */
-    else return ray_error("type", NULL);
+    else return ray_error("type", "split: expected str or sym input, got %s", ray_type_name(str->type));
     if (delim->type == -RAY_STR) { dp = ray_str_ptr(delim); dlen = ray_str_len(delim); }
     /* RAY_CHAR removed — all chars are now -RAY_STR */
-    else { if (sym_str_s) ray_release(sym_str_s); return ray_error("type", NULL); }
+    else { int8_t dt = delim->type; if (sym_str_s) ray_release(sym_str_s); return ray_error("type", "split: expected str delimiter, got %s", ray_type_name(dt)); }
 
     ray_t* result = ray_list_new(8);
     if (RAY_IS_ERR(result)) { if (sym_str_s) ray_release(sym_str_s); if (sym_str_d) ray_release(sym_str_d); return result; }
