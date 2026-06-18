@@ -26,6 +26,7 @@
 #include "ops/glob.h"
 #include "ops/rowsel.h"
 #include "core/pool.h"
+#include "lang/format.h"   /* ray_type_name (error context) */
 
 /* ============================================================================
  * OP_LIKE: glob pattern matching on STR / SYM columns.  See ops/glob.[ch].
@@ -1172,7 +1173,7 @@ ray_t* exec_concat(ray_graph_t* g, ray_op_t* op) {
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return ray_error("nyi", NULL);
     int64_t raw_nargs = ext->sym;
-    if (raw_nargs < 2 || raw_nargs > 255) return ray_error("domain", NULL);
+    if (raw_nargs < 2 || raw_nargs > 255) return ray_error("arity", "concat: expected 2 to 255 arguments, got %lld", (long long)raw_nargs);
     int n_args = (int)raw_nargs;
 
     /* Evaluate all inputs */

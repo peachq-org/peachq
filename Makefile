@@ -116,6 +116,13 @@ bench-group-pushdown:
 		bench/group_pushdown/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
 	./bench-group-pushdown
 
+# Aggregation-engine A/B perf microbench (release-optimized, no sanitizers).
+# H2O-style group-by shapes; v2 engine (this branch) vs rowforms (master).
+bench-agg-v2:
+	$(CC) $(RELEASE_CFLAGS) $(DEFS) $(INCLUDES) -o bench-agg-v2 \
+		bench/agg_v2/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS) -lm
+	./bench-agg-v2
+
 # Index routing per-point perf gate (release-optimized, no sanitizers).
 # Measures indexed vs plain side for each of the 9 routing consumption points.
 bench-idx-route:
