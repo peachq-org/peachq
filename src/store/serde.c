@@ -40,6 +40,7 @@
 #include "table/sym.h"
 #include "lang/env.h"
 #include "lang/eval.h"
+#include "lang/format.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -496,7 +497,7 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len);
 
 ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
     if (g_de_depth >= RAY_DE_MAX_DEPTH)
-        return ray_error("domain", "serde: nesting too deep");
+        return ray_error("domain", "deserialize: nesting exceeds max depth %lld", (long long)RAY_DE_MAX_DEPTH);
     g_de_depth++;
     ray_t* r = de_raw_inner(buf, len);
     g_de_depth--;
@@ -518,60 +519,60 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
      * of the value bytes, which are still read/skipped to keep the buffer
      * position in sync with the serialized length. */
     if (type < 0) {
-        if (*len < 1) return ray_error("domain", NULL);
+        if (*len < 1) return ray_error("domain", "deserialize atom: truncated buffer reading flags byte for %s", ray_type_name(type));
         uint8_t aflags = buf[0];
         buf++; (*len)--;
         bool is_null = (aflags & 1) != 0;
         int8_t base = -type;
         switch (base) {
         case RAY_BOOL:
-            if (*len < 1) return ray_error("domain", NULL);
+            if (*len < 1) return ray_error("domain", "deserialize atom: truncated bool, need 1 byte");
             (*len)--;
             return is_null ? ray_typed_null(type) : ray_bool(buf[0]);
         case RAY_U8:
-            if (*len < 1) return ray_error("domain", NULL);
+            if (*len < 1) return ray_error("domain", "deserialize atom: truncated u8, need 1 byte");
             (*len)--;
             return is_null ? ray_typed_null(type) : ray_u8(buf[0]);
         case RAY_I16:
-            if (*len < 2) return ray_error("domain", NULL);
+            if (*len < 2) return ray_error("domain", "deserialize atom: truncated i16, need 2 bytes");
             { int16_t v; memcpy(&v, buf, 2); *len -= 2;
               return is_null ? ray_typed_null(type) : ray_i16(v); }
         case RAY_I32:
-            if (*len < 4) return ray_error("domain", NULL);
+            if (*len < 4) return ray_error("domain", "deserialize atom: truncated i32, need 4 bytes");
             { int32_t v; memcpy(&v, buf, 4); *len -= 4;
               return is_null ? ray_typed_null(type) : ray_i32(v); }
         case RAY_DATE:
-            if (*len < 4) return ray_error("domain", NULL);
+            if (*len < 4) return ray_error("domain", "deserialize atom: truncated date, need 4 bytes");
             { int32_t v; memcpy(&v, buf, 4); *len -= 4;
               return is_null ? ray_typed_null(type) : ray_date((int64_t)v); }
         case RAY_TIME:
-            if (*len < 4) return ray_error("domain", NULL);
+            if (*len < 4) return ray_error("domain", "deserialize atom: truncated time, need 4 bytes");
             { int32_t v; memcpy(&v, buf, 4); *len -= 4;
               return is_null ? ray_typed_null(type) : ray_time((int64_t)v); }
         case RAY_F32:
-            if (*len < 4) return ray_error("domain", NULL);
+            if (*len < 4) return ray_error("domain", "deserialize atom: truncated f32, need 4 bytes");
             { float v; memcpy(&v, buf, 4); *len -= 4;
               return is_null ? ray_typed_null(-RAY_F32)
                              : ray_f32(v); }
         case RAY_I64:
-            if (*len < 8) return ray_error("domain", NULL);
+            if (*len < 8) return ray_error("domain", "deserialize atom: truncated i64, need 8 bytes");
             { int64_t v; memcpy(&v, buf, 8); *len -= 8;
               return is_null ? ray_typed_null(type) : ray_i64(v); }
         case RAY_TIMESTAMP:
-            if (*len < 8) return ray_error("domain", NULL);
+            if (*len < 8) return ray_error("domain", "deserialize atom: truncated timestamp, need 8 bytes");
             { int64_t v; memcpy(&v, buf, 8); *len -= 8;
               return is_null ? ray_typed_null(type) : ray_timestamp(v); }
         case RAY_F64:
-            if (*len < 8) return ray_error("domain", NULL);
+            if (*len < 8) return ray_error("domain", "deserialize atom: truncated f64, need 8 bytes");
             { double v; memcpy(&v, buf, 8); *len -= 8;
               return is_null ? ray_typed_null(type) : ray_f64(v); }
         case RAY_GUID:
-            if (*len < 16) return ray_error("domain", NULL);
+            if (*len < 16) return ray_error("domain", "deserialize atom: truncated guid, need 16 bytes");
             *len -= 16;
             return is_null ? ray_typed_null(type) : ray_guid(buf);
         case RAY_SYM: {
             size_t slen = safe_strlen(buf, *len);
-            if ((int64_t)slen >= *len) return ray_error("domain", NULL);
+            if ((int64_t)slen >= *len) return ray_error("domain", "deserialize atom: unterminated sym, no NUL within %lld bytes", (long long)*len);
             *len -= (int64_t)slen + 1;
             if (is_null) return ray_typed_null(type);
             /* Decode interns into the GLOBAL table: atoms are
@@ -583,16 +584,16 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
             return s;
         }
         case RAY_STR: {
-            if (*len < 8) return ray_error("domain", NULL);
+            if (*len < 8) return ray_error("domain", "deserialize atom: truncated str length prefix, need 8 bytes");
             int64_t slen; memcpy(&slen, buf, 8);
             buf += 8; *len -= 8;
-            if (*len < slen || slen < 0) return ray_error("domain", NULL);
+            if (*len < slen || slen < 0) return ray_error("domain", "deserialize atom: str length %lld out of range for %lld remaining bytes", (long long)slen, (long long)*len);
             *len -= slen;
             if (is_null) return ray_typed_null(type);
             return ray_str((const char*)buf, (size_t)slen);
         }
         default:
-            return ray_error("type", NULL);
+            return ray_error("type", "deserialize atom: unknown atom type %lld", (long long)type);
         }
     }
 
@@ -611,18 +612,18 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     case RAY_TIMESTAMP:
     case RAY_F64:
     case RAY_GUID: {
-        if (*len < 9) return ray_error("domain", NULL);
+        if (*len < 9) return ray_error("domain", "deserialize vector: truncated %s header, need 9 bytes (attr+len)", ray_type_name(type));
         uint8_t attrs = buf[0];
         buf++;
         memcpy(&l, buf, 8);
         buf += 8;
         *len -= 9;
 
-        if (l < 0 || l > 1000000000) return ray_error("domain", NULL);
+        if (l < 0 || l > 1000000000) return ray_error("domain", "deserialize vector: %s length %lld out of range", ray_type_name(type), (long long)l);
 
         uint8_t esz = ray_type_sizes[type];
         int64_t data_bytes = l * esz;
-        if (*len < data_bytes) return ray_error("domain", NULL);
+        if (*len < data_bytes) return ray_error("domain", "deserialize vector: truncated %s data, need %lld bytes, have %lld", ray_type_name(type), (long long)data_bytes, (long long)*len);
 
         ray_t* vec = ray_vec_from_raw(type, buf, l);
         if (!vec || RAY_IS_ERR(vec)) return vec;
@@ -634,14 +635,14 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     }
 
     case RAY_SYM: {
-        if (*len < 9) return ray_error("domain", NULL);
+        if (*len < 9) return ray_error("domain", "deserialize sym vector: truncated header, need 9 bytes (attr+len)");
         uint8_t attrs = buf[0];
         buf++;
         memcpy(&l, buf, 8);
         buf += 8;
         *len -= 9;
 
-        if (l < 0 || l > 1000000000) return ray_error("domain", NULL);
+        if (l < 0 || l > 1000000000) return ray_error("domain", "deserialize sym vector: length %lld out of range", (long long)l);
 
         /* Decode interns each string into the GLOBAL table and builds a
          * W64 runtime-domain vec — correct: a freshly materialized wire
@@ -655,7 +656,7 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
             if ((int64_t)slen >= *len) {
                 vec->len = i;
                 ray_release(vec);
-                return ray_error("domain", NULL);
+                return ray_error("domain", "deserialize sym vector: unterminated sym at index %lld, no NUL within %lld bytes", (long long)i, (long long)*len);
             }
             ids[i] = ray_sym_intern((const char*)buf, slen);
             buf += slen + 1;
@@ -667,24 +668,24 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     }
 
     case RAY_STR: {
-        if (*len < 9) return ray_error("domain", NULL);
+        if (*len < 9) return ray_error("domain", "deserialize str vector: truncated header, need 9 bytes (attr+len)");
         uint8_t attrs = buf[0];
         buf++;
         memcpy(&l, buf, 8);
         buf += 8;
         *len -= 9;
 
-        if (l < 0 || l > 1000000000) return ray_error("domain", NULL);
+        if (l < 0 || l > 1000000000) return ray_error("domain", "deserialize str vector: length %lld out of range", (long long)l);
 
         /* Build STR vector by appending each string via ray_str_vec_append */
         ray_t* vec = ray_vec_new(RAY_STR, l);
         if (!vec || RAY_IS_ERR(vec)) return vec;
         vec->len = 0;
         for (int64_t i = 0; i < l; i++) {
-            if (*len < 8) { ray_release(vec); return ray_error("domain", NULL); }
+            if (*len < 8) { ray_release(vec); return ray_error("domain", "deserialize str vector: truncated element length prefix at index %lld, need 8 bytes", (long long)i); }
             int64_t slen; memcpy(&slen, buf, 8);
             buf += 8; *len -= 8;
-            if (*len < slen || slen < 0) { ray_release(vec); return ray_error("domain", NULL); }
+            if (*len < slen || slen < 0) { ray_release(vec); return ray_error("domain", "deserialize str vector: element length %lld at index %lld out of range for %lld remaining bytes", (long long)slen, (long long)i, (long long)*len); }
             ray_t* nv = ray_str_vec_append(vec, (const char*)buf, (size_t)slen);
             if (!nv || RAY_IS_ERR(nv)) { ray_release(vec); return nv ? nv : ray_error("oom", NULL); }
             vec = nv;
@@ -697,14 +698,14 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     }
 
     case RAY_LIST: {
-        if (*len < 9) return ray_error("domain", NULL);
+        if (*len < 9) return ray_error("domain", "deserialize list: truncated header, need 9 bytes (attr+len)");
         uint8_t list_attrs = buf[0];
         buf++;
         memcpy(&l, buf, 8);
         buf += 8;
         *len -= 9;
 
-        if (l < 0 || l > 1000000000) return ray_error("domain", NULL);
+        if (l < 0 || l > 1000000000) return ray_error("domain", "deserialize list: length %lld out of range", (long long)l);
 
         ray_t* list = ray_alloc(l * sizeof(ray_t*));
         if (!list || RAY_IS_ERR(list)) return list;
@@ -739,7 +740,7 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     }
 
     case RAY_TABLE: {
-        if (*len < 1) return ray_error("domain", NULL);
+        if (*len < 1) return ray_error("domain", "deserialize table: truncated buffer reading attr byte");
         /* uint8_t tbl_attrs = buf[0]; — tables rebuild attrs via ray_table_add_col */
         buf++;
         *len -= 1;
@@ -759,9 +760,10 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
         /* Reconstruct table */
         if (cols->type != RAY_LIST ||
             (schema->type != RAY_I64 && schema->type != RAY_SYM)) {
+            ray_t* e = ray_error("domain", "deserialize table: expected list columns and i64/sym schema, got cols %s schema %s", ray_type_name(cols->type), ray_type_name(schema->type));
             ray_release(schema);
             ray_release(cols);
-            return ray_error("domain", NULL);
+            return e;
         }
 
         int64_t ncols = cols->len;
@@ -794,7 +796,7 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     }
 
     case RAY_DICT: {
-        if (*len < 1) return ray_error("domain", NULL);
+        if (*len < 1) return ray_error("domain", "deserialize dict: truncated buffer reading attr byte");
         uint8_t dict_attrs = buf[0];
         buf++;
         *len -= 1;
@@ -825,7 +827,7 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     }
 
     case RAY_LAMBDA: {
-        if (*len < 1) return ray_error("domain", NULL);
+        if (*len < 1) return ray_error("domain", "deserialize lambda: truncated buffer reading attr byte");
         uint8_t lam_attrs = buf[0];
         buf++;
         *len -= 1;
@@ -862,24 +864,24 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
         /* Deserialize builtin by name: read null-terminated string,
          * look up in the global environment. */
         size_t nlen = safe_strlen(buf, *len);
-        if ((int64_t)nlen >= *len) return ray_error("domain", NULL);
+        if ((int64_t)nlen >= *len) return ray_error("domain", "deserialize builtin: unterminated name, no NUL within %lld bytes", (long long)*len);
         int64_t sym = ray_sym_intern((const char*)buf, nlen);
-        *len -= (int64_t)nlen + 1;
         ray_t* fn = ray_env_get(sym);
-        if (!fn) return ray_error("name", NULL);
+        if (!fn) return ray_error("name", "deserialize builtin: '%s' not in global environment", (const char*)buf);
+        *len -= (int64_t)nlen + 1;
         ray_retain(fn);
         return fn;
     }
 
     case RAY_ERROR: {
-        if (*len < 8) return ray_error("domain", NULL);
+        if (*len < 8) return ray_error("domain", "deserialize error: truncated error code, need 8 bytes");
         ray_t* err = ray_error((const char*)buf, NULL);
         *len -= 8;
         return err;
     }
 
     default:
-        return ray_error("type", NULL);
+        return ray_error("type", "deserialize: unknown wire type %lld", (long long)type);
     }
 }
 
@@ -898,8 +900,11 @@ ray_t* ray_ser(ray_t* obj) {
 
     int64_t payload = ray_serde_size(obj);
     if (payload <= 0) {
+        ray_t* e = ray_error("domain", payload < 0
+            ? "serialize: payload size overflow"
+            : "serialize: zero serialized size for %s", ray_type_name(obj->type));
         if (owned) ray_release(obj);
-        return ray_error("domain", payload < 0 ? "serialization overflow" : NULL);
+        return e;
     }
 
     int64_t total = (int64_t)sizeof(ray_ipc_header_t) + payload;
@@ -920,9 +925,10 @@ ray_t* ray_ser(ray_t* obj) {
 
     int64_t written = ray_ser_raw((uint8_t*)ray_data(buf) + sizeof(ray_ipc_header_t), obj);
     if (written == 0) {
+        ray_t* e = ray_error("domain", "serialize: ray_ser_raw wrote 0 bytes for %s", ray_type_name(obj->type));
         ray_release(buf);
         if (owned) ray_release(obj);
-        return ray_error("domain", NULL);
+        return e;
     }
 
     if (owned) ray_release(obj);
@@ -934,25 +940,25 @@ ray_t* ray_ser(ray_t* obj) {
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_de(ray_t* bytes) {
-    if (!bytes || RAY_IS_ERR(bytes)) return ray_error("type", NULL);
+    if (!bytes || RAY_IS_ERR(bytes)) return ray_error("type", "deserialize: input must be a u8 byte buffer, got %s", bytes ? ray_type_name(bytes->type) : "null");
     if (bytes->type != RAY_U8 && bytes->type != -RAY_U8)
-        return ray_error("type", NULL);
+        return ray_error("type", "deserialize: input must be a u8 byte buffer, got %s", ray_type_name(bytes->type));
 
     int64_t total = bytes->len;
     uint8_t* buf = (uint8_t*)ray_data(bytes);
 
     if (total < (int64_t)sizeof(ray_ipc_header_t))
-        return ray_error("domain", NULL);
+        return ray_error("domain", "deserialize: buffer too small for ipc header, got %lld bytes", (long long)total);
 
     ray_ipc_header_t* hdr = (ray_ipc_header_t*)buf;
     if (hdr->prefix != RAY_SERDE_PREFIX)
-        return ray_error("domain", NULL);
+        return ray_error("domain", "deserialize: bad ipc header magic prefix");
     if (hdr->version != RAY_SERDE_WIRE_VERSION)
         return ray_error("version", "serde wire version mismatch");
     if (hdr->size < 0 || hdr->size > 1000000000)
-        return ray_error("domain", NULL);
+        return ray_error("domain", "deserialize: ipc header payload size %lld out of range", (long long)hdr->size);
     if (hdr->size + (int64_t)sizeof(ray_ipc_header_t) != total)
-        return ray_error("domain", NULL);
+        return ray_error("domain", "deserialize: ipc header size %lld + header != buffer length %lld", (long long)hdr->size, (long long)total);
 
     int64_t len = hdr->size;
     return ray_de_raw(buf + sizeof(ray_ipc_header_t), &len);

@@ -26,6 +26,7 @@
 #include "table/domain.h"   /* sym-domain resolution (Phase 2) */
 #include "ops/idxop.h"      /* RAY_IDX_CHUNK_ZONE chunk-skip in fp_eval_cmp */
 #include "lang/eval.h"      /* ATTR_QUOTED */
+#include "lang/format.h"    /* ray_type_name */
 #include "core/pool.h"      /* ray_pool_get / ray_pool_dispatch */
 
 #include <limits.h>
@@ -5107,7 +5108,7 @@ static ray_t* exec_filtered_group_fallback(ray_graph_t* g, ray_op_ext_t* ext) {
         ray_op_t* fnode = ray_filter(g, tbl_node, pred);
         if (!fnode) return ray_error("oom", NULL);
         ray_t* fres = ray_execute(g, fnode);
-        if (!fres) return ray_error("domain", NULL);
+        if (!fres) return ray_error("domain", "filtered group-by fallback: filter sub-execution returned null");
         if (RAY_IS_ERR(fres)) return fres;
         if (ray_is_lazy(fres)) {
             ray_t* mat = ray_lazy_materialize(fres);
@@ -5115,7 +5116,7 @@ static ray_t* exec_filtered_group_fallback(ray_graph_t* g, ray_op_ext_t* ext) {
             fres = mat;
         }
         if (!fres || RAY_IS_ERR(fres))
-            return fres ? fres : ray_error("domain", NULL);
+            return fres ? fres : ray_error("domain", "filtered group-by fallback: filter materialization returned null");
         filtered_tbl = fres;  /* owned ref — released after group runs */
     }
 
@@ -5136,7 +5137,8 @@ static ray_t* exec_filtered_group_fallback(ray_graph_t* g, ray_op_ext_t* ext) {
 ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op) {
     if (!g || !op) return ray_error("nyi", NULL);
     ray_t* tbl = g->table;
-    if (!tbl || tbl->type != RAY_TABLE) return ray_error("type", NULL);
+    if (!tbl) return ray_error("type", "filtered group-by: expects a table, got null");
+    if (tbl->type != RAY_TABLE) return ray_error("type", "filtered group-by: expects a table, got %s", ray_type_name(tbl->type));
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return ray_error("nyi", NULL);
 
