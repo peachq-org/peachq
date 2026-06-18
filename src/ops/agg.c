@@ -127,7 +127,7 @@ static ray_t* agg_atom_i64_for_type(int8_t t, int64_t v) {
 static ray_t* agg_parted_sum(ray_t* x) {
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(x->type);
     if (!agg_parted_numeric_base(base) || base == RAY_DATE)
-        return ray_error("type", NULL);
+        return ray_error("type", "sum expects a numeric or time-duration parted column, got %s", ray_type_name(base));
     ray_t** segs = (ray_t**)ray_data(x);
     if (base == RAY_F64) {
         double sum = 0.0;
@@ -156,7 +156,7 @@ static ray_t* agg_parted_sum(ray_t* x) {
 
 static ray_t* agg_parted_avg(ray_t* x) {
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(x->type);
-    if (!agg_parted_numeric_base(base)) return ray_error("type", NULL);
+    if (!agg_parted_numeric_base(base)) return ray_error("type", "avg expects a numeric or temporal parted column, got %s", ray_type_name(base));
     ray_t** segs = (ray_t**)ray_data(x);
     double sum = 0.0;
     int64_t cnt = 0;
@@ -183,7 +183,7 @@ static ray_t* agg_parted_avg(ray_t* x) {
 
 static ray_t* agg_parted_minmax(ray_t* x, int want_max) {
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(x->type);
-    if (!agg_parted_numeric_base(base)) return ray_error("type", NULL);
+    if (!agg_parted_numeric_base(base)) return ray_error("type", want_max ? "max expects a numeric or temporal parted column, got %s" : "min expects a numeric or temporal parted column, got %s", ray_type_name(base));
     ray_t** segs = (ray_t**)ray_data(x);
     int found = 0;
     double best_f = 0.0;
@@ -228,7 +228,7 @@ ray_t* ray_sum_fn(ray_t* x) {
     if (ray_is_vec(x)) {
         /* Canonical admission: numeric + TIME (duration); DATE/TIMESTAMP are
          * absolute points and SYM/STR/GUID are non-numeric → type error. */
-        if (!agg_type_admitted(OP_SUM, x->type)) return ray_error("type", NULL);
+        if (!agg_type_admitted(OP_SUM, x->type)) return ray_error("type", "sum expects a numeric or time-duration vector, got %s", ray_type_name(x->type));
         /* Narrow/temporal types need specific return constructors that the
          * DAG executor doesn't provide — use scalar path for these. */
         if (x->type == RAY_I32 || x->type == RAY_I16 || x->type == RAY_U8 ||
@@ -266,7 +266,7 @@ ray_t* ray_sum_fn(ray_t* x) {
         /* I64/F64: parallel morsel-driven reduction via DAG executor */
         AGG_VEC_VIA_DAG(x, ray_sum);
     }
-    if (!is_list(x)) return ray_error("type", NULL);
+    if (!is_list(x)) return ray_error("type", "sum expects a numeric vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
     if (len == 0) return make_i64(0);
     ray_t** elems = (ray_t**)ray_data(x);
@@ -274,7 +274,7 @@ ray_t* ray_sum_fn(ray_t* x) {
     double fsum = 0.0;
     int64_t isum = 0;
     for (int64_t i = 0; i < len; i++) {
-        if (!is_numeric(elems[i])) return ray_error("type", NULL);
+        if (!is_numeric(elems[i])) return ray_error("type", "sum: list elements must be numeric, got %s", ray_type_name(elems[i]->type));
         if (RAY_ATOM_IS_NULL(elems[i])) {
             if (elems[i]->type == -RAY_F64) has_float = 1;
             continue;
@@ -298,7 +298,7 @@ ray_t* ray_count_fn(ray_t* x) {
     if (!is_list(x)) {
         /* Scalar atom → count 1 */
         if (ray_is_atom(x)) return make_i64(1);
-        return ray_error("type", NULL);
+        return ray_error("type", "count: unsupported type %s", ray_type_name(x->type));
     }
     return make_i64(ray_len(x));
 }
@@ -314,17 +314,17 @@ ray_t* ray_avg_fn(ray_t* x) {
     if (ray_is_vec(x)) {
         /* Canonical admission: numeric + temporal (→ F64); SYM/STR/GUID are
          * non-numeric → type error (the DAG path otherwise averaged raw ids). */
-        if (!agg_type_admitted(OP_AVG, x->type)) return ray_error("type", NULL);
+        if (!agg_type_admitted(OP_AVG, x->type)) return ray_error("type", "avg expects a numeric or temporal vector, got %s", ray_type_name(x->type));
         AGG_VEC_VIA_DAG(x, ray_avg);
     }
-    if (!is_list(x)) return ray_error("type", NULL);
+    if (!is_list(x)) return ray_error("type", "avg expects a numeric vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
-    if (len == 0) return ray_error("domain", NULL);
+    if (len == 0) return ray_error("domain", "avg: empty list has no average");
     ray_t** elems = (ray_t**)ray_data(x);
     double sum = 0.0;
     int64_t cnt = 0;
     for (int64_t i = 0; i < len; i++) {
-        if (!is_numeric(elems[i])) return ray_error("type", NULL);
+        if (!is_numeric(elems[i])) return ray_error("type", "avg: list elements must be numeric, got %s", ray_type_name(elems[i]->type));
         if (RAY_ATOM_IS_NULL(elems[i])) continue;
         sum += as_f64(elems[i]); cnt++;
     }
@@ -373,14 +373,14 @@ ray_t* ray_min_fn(ray_t* x) {
         }
         AGG_VEC_VIA_DAG(x, ray_min_op);
     }
-    if (!is_list(x)) return ray_error("type", NULL);
+    if (!is_list(x)) return ray_error("type", "min expects a vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
-    if (len == 0) return ray_error("domain", NULL);
+    if (len == 0) return ray_error("domain", "min: empty list has no minimum");
     ray_t** elems = (ray_t**)ray_data(x);
     int has_float = 0, found = 0;
     double fmin = 0; int64_t imin = 0;
     for (int64_t i = 0; i < len; i++) {
-        if (!is_numeric(elems[i])) return ray_error("type", NULL);
+        if (!is_numeric(elems[i])) return ray_error("type", "min: list elements must be numeric, got %s", ray_type_name(elems[i]->type));
         if (elems[i]->type == -RAY_F64) has_float = 1;
         if (RAY_ATOM_IS_NULL(elems[i])) continue;
         double v = as_f64(elems[i]);
@@ -427,14 +427,14 @@ ray_t* ray_max_fn(ray_t* x) {
         }
         AGG_VEC_VIA_DAG(x, ray_max_op);
     }
-    if (!is_list(x)) return ray_error("type", NULL);
+    if (!is_list(x)) return ray_error("type", "max expects a vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
-    if (len == 0) return ray_error("domain", NULL);
+    if (len == 0) return ray_error("domain", "max: empty list has no maximum");
     ray_t** elems = (ray_t**)ray_data(x);
     int has_float = 0, found = 0;
     double fmax = 0; int64_t imax = 0;
     for (int64_t i = 0; i < len; i++) {
-        if (!is_numeric(elems[i])) return ray_error("type", NULL);
+        if (!is_numeric(elems[i])) return ray_error("type", "max: list elements must be numeric, got %s", ray_type_name(elems[i]->type));
         if (elems[i]->type == -RAY_F64) has_float = 1;
         if (RAY_ATOM_IS_NULL(elems[i])) continue;
         double v = as_f64(elems[i]);
@@ -449,14 +449,14 @@ ray_t* ray_first_fn(ray_t* x) {
     /* String first: return first char */
     if (ray_is_atom(x) && (-x->type) == RAY_STR) {
         size_t slen = ray_str_len(x);
-        if (slen == 0) return ray_error("domain", NULL);
+        if (slen == 0) return ray_error("domain", "first: empty string has no first char");
         const char* p = ray_str_ptr(x);
         return ray_str(p, 1);
     }
     if (ray_is_atom(x)) { ray_retain(x); return x; }
     /* Table first: return first row as dict */
     if (x->type == RAY_TABLE) {
-        if (ray_table_nrows(x) == 0) return ray_error("domain", NULL);
+        if (ray_table_nrows(x) == 0) return ray_error("domain", "first: empty table has no first row");
         ray_t* idx = make_i64(0);
         ray_t* result = ray_at_fn(x, idx);
         ray_release(idx);
@@ -476,7 +476,7 @@ ray_t* ray_first_fn(ray_t* x) {
         }
         AGG_VEC_VIA_DAG(x, ray_first);
     }
-    if (!is_list(x)) return ray_error("type", NULL);
+    if (!is_list(x)) return ray_error("type", "first: unsupported type %s", ray_type_name(x->type));
     if (ray_len(x) == 0) return ray_typed_null(-RAY_I64);
     ray_t* elem = ((ray_t**)ray_data(x))[0];
     ray_retain(elem);
@@ -488,7 +488,7 @@ ray_t* ray_last_fn(ray_t* x) {
     /* String last: return last char */
     if (ray_is_atom(x) && (-x->type) == RAY_STR) {
         size_t slen = ray_str_len(x);
-        if (slen == 0) return ray_error("domain", NULL);
+        if (slen == 0) return ray_error("domain", "last: empty string has no last char");
         const char* p = ray_str_ptr(x);
         return ray_str(p + slen - 1, 1);
     }
@@ -496,7 +496,7 @@ ray_t* ray_last_fn(ray_t* x) {
     /* Table last: return last row as dict */
     if (x->type == RAY_TABLE) {
         int64_t nrows = ray_table_nrows(x);
-        if (nrows == 0) return ray_error("domain", NULL);
+        if (nrows == 0) return ray_error("domain", "last: empty table has no last row");
         ray_t* idx = make_i64(nrows - 1);
         ray_t* result = ray_at_fn(x, idx);
         ray_release(idx);
@@ -514,7 +514,7 @@ ray_t* ray_last_fn(ray_t* x) {
         }
         AGG_VEC_VIA_DAG(x, ray_last);
     }
-    if (!is_list(x)) return ray_error("type", NULL);
+    if (!is_list(x)) return ray_error("type", "last: unsupported type %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
     if (len == 0) return ray_typed_null(-RAY_I64);
     ray_t* elem = ((ray_t**)ray_data(x))[len - 1];
@@ -557,7 +557,7 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
     } else {
         ray_release(scratch);
-        return ray_error("type", NULL);
+        return ray_error("type", "expects a numeric or temporal vector, got %s", ray_type_name(x->type));
     }
     scratch->len = cnt;
     *out_vals = vals;
@@ -572,7 +572,7 @@ ray_t* ray_med_fn(ray_t* x) {
     if (ray_is_atom(x)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
         if (is_numeric(x)) return make_f64(as_f64(x));
-        return ray_error("type", NULL);
+        return ray_error("type", "med expects a numeric atom, got %s", ray_type_name(x->type));
     }
     int64_t len;
     ray_t* scratch = NULL;
@@ -595,12 +595,12 @@ ray_t* ray_med_fn(ray_t* x) {
         int64_t cnt_l = 0;
         for (int64_t i = 0; i < len; i++) {
             if (ray_is_atom(elems[i]) && RAY_ATOM_IS_NULL(elems[i])) continue;
-            if (!is_numeric(elems[i])) { ray_release(scratch); return ray_error("type", NULL); }
+            if (!is_numeric(elems[i])) { ray_release(scratch); return ray_error("type", "med: list elements must be numeric, got %s", ray_type_name(elems[i]->type)); }
             vals[cnt_l++] = as_f64(elems[i]);
         }
         scratch->len = cnt_l;
     } else {
-        return ray_error("type", NULL);
+        return ray_error("type", "med expects a numeric atom, vector, or list, got %s", ray_type_name(x->type));
     }
 
     /* scratch->len holds the count of non-null values (already compacted) */
@@ -661,7 +661,7 @@ static ray_t* var_stddev_core(ray_t* x, int sample, int take_sqrt) {
     if (ray_is_atom(x)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
         if (is_numeric(x)) return sample ? ray_typed_null(-RAY_F64) : make_f64(0.0);
-        return ray_error("type", NULL);
+        return ray_error("type", "var/stddev expects a numeric atom, got %s", ray_type_name(x->type));
     }
 
     double* vals = NULL;
@@ -682,12 +682,12 @@ static ray_t* var_stddev_core(ray_t* x, int sample, int take_sqrt) {
         if (RAY_IS_ERR(scratch)) return scratch;
         vals = (double*)ray_data(scratch);
         for (int64_t i = 0; i < len; i++) {
-            if (!is_numeric(elems[i])) { ray_release(scratch); return ray_error("type", NULL); }
+            if (!is_numeric(elems[i])) { ray_release(scratch); return ray_error("type", "var/stddev: list elements must be numeric, got %s", ray_type_name(elems[i]->type)); }
             if (!RAY_ATOM_IS_NULL(elems[i])) vals[cnt++] = as_f64(elems[i]);
         }
         scratch->len = cnt;
     } else {
-        return ray_error("type", NULL);
+        return ray_error("type", "var/stddev expects a numeric atom, vector, or list, got %s", ray_type_name(x->type));
     }
 
     if (cnt == 0 || (sample && cnt <= 1)) {
@@ -729,11 +729,11 @@ ray_t* ray_var_pop_fn(ray_t* x)    { return var_stddev_core(x, 0, 0); }
  * non-row-aligned fallback re-runs the call on each group's slice. */
 ray_t* ray_pearson_corr_fn(ray_t* x, ray_t* y) {
     if (!x || RAY_IS_ERR(x) || !y || RAY_IS_ERR(y))
-        return ray_error("type", NULL);
+        return ray_error("type", "pearson_corr: both arguments must be valid (non-error) values");
     if (!ray_is_vec(x) || !ray_is_vec(y))
-        return ray_error("type", "pearson_corr expects two vectors");
+        return ray_error("type", "pearson_corr expects two vectors, got %s and %s", ray_type_name(x->type), ray_type_name(y->type));
     if (ray_len(x) != ray_len(y))
-        return ray_error("length", "pearson_corr: vectors must have equal length");
+        return ray_error("length", "pearson_corr: vectors must have equal length, got %lld and %lld", (long long)ray_len(x), (long long)ray_len(y));
 
     int64_t n = ray_len(x);
     /* Boxed read covers every numeric/temporal type at the cost of an
@@ -749,15 +749,16 @@ ray_t* ray_pearson_corr_fn(ray_t* x, ray_t* y) {
         if (!xe || !ye || RAY_IS_ERR(xe) || RAY_IS_ERR(ye)) {
             if (xa && xe) ray_release(xe);
             if (ya && ye) ray_release(ye);
-            return ray_error("type", NULL);
+            return ray_error("type", "pearson_corr: failed to read element pair");
         }
         int xn = RAY_ATOM_IS_NULL(xe);
         int yn = RAY_ATOM_IS_NULL(ye);
         if (!xn && !yn) {
             if (!is_numeric(xe) || !is_numeric(ye)) {
+                int8_t xt = xe->type, yt = ye->type;
                 if (xa) ray_release(xe);
                 if (ya) ray_release(ye);
-                return ray_error("type", "pearson_corr: numeric vectors only");
+                return ray_error("type", "pearson_corr: numeric vectors only, got %s and %s", ray_type_name(xt), ray_type_name(yt));
             }
             double xv = as_f64(xe);
             double yv = as_f64(ye);
