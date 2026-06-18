@@ -96,14 +96,14 @@ static ray_t* pivot_fn_impl(ray_t* tbl, ray_t* index_arg, ray_t* pivot_col_name,
                             ray_t* value_col_name, ray_t* agg_fn) {
 
     if (tbl->type != RAY_TABLE)
-        return ray_error("type", "pivot: first argument must be a table");
+        return ray_error("type", "pivot: first argument must be a table, got %s", ray_type_name(tbl->type));
     if (pivot_col_name->type != -RAY_SYM)
-        return ray_error("type", "pivot: pivot-col must be a symbol");
+        return ray_error("type", "pivot: pivot-col must be a symbol, got %s", ray_type_name(pivot_col_name->type));
     if (value_col_name->type != -RAY_SYM)
-        return ray_error("type", "pivot: value-col must be a symbol");
+        return ray_error("type", "pivot: value-col must be a symbol, got %s", ray_type_name(value_col_name->type));
     if (agg_fn->type != RAY_UNARY && agg_fn->type != RAY_LAMBDA &&
         agg_fn->type != RAY_VARY)
-        return ray_error("type", "pivot: agg-fn must be a function");
+        return ray_error("type", "pivot: agg-fn must be a function, got %s", ray_type_name(agg_fn->type));
 
     /* Determine index columns.  idx_syms are column NAME ids: atoms are
      * runtime-domain by design and collection_elem re-expresses SYM vec
@@ -116,21 +116,22 @@ static ray_t* pivot_fn_impl(ray_t* tbl, ray_t* index_arg, ray_t* pivot_col_name,
         n_idx = 1;
     } else if (index_arg->type == RAY_LIST || ray_is_vec(index_arg)) {
         int64_t len = ray_len(index_arg);
-        if (len > 16) return ray_error("limit", "pivot: too many index columns");
+        if (len > 16) return ray_error("limit", "pivot: too many index columns, max 16, got %lld", (long long)len);
         for (int64_t i = 0; i < len; i++) {
             int alloc = 0;
             ray_t* elem = collection_elem(index_arg, i, &alloc);
             if (RAY_IS_ERR(elem)) return elem;
             if (elem->type != -RAY_SYM) {
+                int8_t et = elem->type;
                 if (alloc) ray_release(elem);
-                return ray_error("type", "pivot: index columns must be symbols");
+                return ray_error("type", "pivot: index columns must be symbols, got %s", ray_type_name(et));
             }
             idx_syms[i] = elem->i64;
             if (alloc) ray_release(elem);
         }
         n_idx = len;
     } else {
-        return ray_error("type", "pivot: index must be a symbol or list of symbols");
+        return ray_error("type", "pivot: index must be a symbol or list of symbols, got %s", ray_type_name(index_arg->type));
     }
 
     /* Get pivot column, value column */
@@ -576,15 +577,15 @@ ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
 
 /* (modify tbl col_name fn) — apply fn to the named column, return new table */
 ray_t* ray_modify_fn(ray_t** args, int64_t n) {
-    if (n < 3) return ray_error("arity", "modify expects 3 arguments: table, column, function");
+    if (n < 3) return ray_error("arity", "modify expects 3 arguments: table, column, function, got %lld", (long long)n);
     ray_t* tbl = args[0];
     ray_t* col_name = args[1];
     ray_t* fn = args[2];
 
     if (tbl->type != RAY_TABLE)
-        return ray_error("type", "modify: first arg must be a table");
+        return ray_error("type", "modify: first arg must be a table, got %s", ray_type_name(tbl->type));
     if (col_name->type != -RAY_SYM)
-        return ray_error("type", "modify: second arg must be a symbol");
+        return ray_error("type", "modify: second arg must be a symbol, got %s", ray_type_name(col_name->type));
 
     int64_t target_sym = col_name->i64;
     ray_t* col = ray_table_get_col(tbl, target_sym);
@@ -632,11 +633,11 @@ ray_t* ray_alter_set_cow_fail(ray_t* original_var, ray_t* cow_result,
 }
 
 ray_t* ray_alter_fn(ray_t** args, int64_t n) {
-    if (n < 3) return ray_error("domain", NULL);
+    if (n < 3) return ray_error("domain", "alter: expects at least 3 arguments (var, op, ...), got %lld", (long long)n);
     /* First arg: evaluate to get the symbol */
     ray_t* name_sym = ray_eval(args[0]);
-    if (!name_sym || RAY_IS_ERR(name_sym)) return name_sym ? name_sym : ray_error("type", NULL);
-    if (name_sym->type != -RAY_SYM) { ray_release(name_sym); return ray_error("type", NULL); }
+    if (!name_sym || RAY_IS_ERR(name_sym)) return name_sym ? name_sym : ray_error("type", "alter: variable name argument evaluated to null");
+    if (name_sym->type != -RAY_SYM) { int8_t nt = name_sym->type; ray_release(name_sym); return ray_error("type", "alter: variable name must be a symbol, got %s", ray_type_name(nt)); }
 
     /* Resolve the variable */
     ray_t* var = ray_env_get(name_sym->i64);
@@ -644,21 +645,21 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
 
     /* Second arg: operation name (unevaluated, must be a name) */
     ray_t* op = args[1];
-    if (!op || op->type != -RAY_SYM) { ray_release(name_sym); return ray_error("type", NULL); }
+    if (!op || op->type != -RAY_SYM) { ray_release(name_sym); return ray_error("type", "alter: op must be a symbol (set, concat, or remove), got %s", op ? ray_type_name(op->type) : "null"); }
     ray_t* op_name = ray_sym_str(op->i64);
-    if (!op_name) { ray_release(name_sym); return ray_error("domain", NULL); }
+    if (!op_name) { ray_release(name_sym); return ray_error("domain", "alter: unknown op symbol"); }
     const char* oname = ray_str_ptr(op_name);
     size_t olen = ray_str_len(op_name);
 
     if (olen == 3 && memcmp(oname, "set", 3) == 0) {
         /* (alter 'v set idx val) — idx can be scalar or vector of indices */
         ray_release(op_name);
-        if (n < 4) { ray_release(name_sym); return ray_error("domain", NULL); }
+        if (n < 4) { ray_release(name_sym); return ray_error("domain", "alter set: expects 4 arguments (var, set, idx, val), got %lld", (long long)n); }
         ray_t* idx = ray_eval(args[2]);
-        if (!idx || RAY_IS_ERR(idx)) { ray_release(name_sym); return idx ? idx : ray_error("type", NULL); }
+        if (!idx || RAY_IS_ERR(idx)) { ray_release(name_sym); return idx ? idx : ray_error("type", "alter set: index argument evaluated to null"); }
         ray_t* val = ray_eval(args[3]);
-        if (!val || RAY_IS_ERR(val)) { ray_release(idx); ray_release(name_sym); return val ? val : ray_error("type", NULL); }
-        if (!ray_is_vec(var) && var->type != RAY_LIST) { ray_release(idx); ray_release(val); ray_release(name_sym); return ray_error("type", NULL); }
+        if (!val || RAY_IS_ERR(val)) { ray_release(idx); ray_release(name_sym); return val ? val : ray_error("type", "alter set: value argument evaluated to null"); }
+        if (!ray_is_vec(var) && var->type != RAY_LIST) { int8_t vt = var->type; ray_release(idx); ray_release(val); ray_release(name_sym); return ray_error("type", "alter set: target must be a vector or list, got %s", ray_type_name(vt)); }
 
         /* For LIST types, build a new list with replaced elements */
         if (var->type == RAY_LIST) {
@@ -725,9 +726,10 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         bool idx_is_atom_num = ray_is_atom(idx) && is_numeric(idx);
         bool idx_is_vec      = ray_is_vec(idx);
         if (!idx_is_atom_num && !idx_is_vec) {
+            int8_t it = idx->type;
             ray_release(var);
             ray_release(idx); ray_release(val); ray_release(name_sym);
-            return ray_error("type", NULL);
+            return ray_error("type", "alter set: index must be a numeric atom or a vector, got %s", ray_type_name(it));
         }
         if (idx_is_atom_num) {
             int64_t i_check = as_i64(idx);
@@ -790,9 +792,9 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
     if (olen == 6 && memcmp(oname, "concat", 6) == 0) {
         /* (alter 'v concat val) */
         ray_release(op_name);
-        if (n < 3) { ray_release(name_sym); return ray_error("domain", NULL); }
+        if (n < 3) { ray_release(name_sym); return ray_error("arity", "alter concat: expects 3 arguments (var, concat, val), got %lld", (long long)n); }
         ray_t* val = ray_eval(args[2]);
-        if (!val || RAY_IS_ERR(val)) { ray_release(name_sym); return val ? val : ray_error("type", NULL); }
+        if (!val || RAY_IS_ERR(val)) { ray_release(name_sym); return val ? val : ray_error("type", "alter concat: value argument evaluated to null"); }
         ray_t* new_vec = ray_concat_fn(var, val);
         ray_release(val);
         if (RAY_IS_ERR(new_vec)) { ray_release(name_sym); return new_vec; }
@@ -804,13 +806,13 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
     if (olen == 6 && memcmp(oname, "remove", 6) == 0) {
         /* (alter 'v remove idx) — remove element(s) at index/indices */
         ray_release(op_name);
-        if (n < 3) { ray_release(name_sym); return ray_error("domain", NULL); }
+        if (n < 3) { ray_release(name_sym); return ray_error("arity", "alter remove: expects 3 arguments (var, remove, idx), got %lld", (long long)n); }
         ray_t* idx = ray_eval(args[2]);
-        if (!idx || RAY_IS_ERR(idx)) { ray_release(name_sym); return idx ? idx : ray_error("type", NULL); }
+        if (!idx || RAY_IS_ERR(idx)) { ray_release(name_sym); return idx ? idx : ray_error("type", "alter remove: index argument evaluated to null"); }
 
         if (!var || var->type != RAY_LIST) {
             ray_release(idx); ray_release(name_sym);
-            return ray_error("type", NULL);
+            return ray_error("type", "alter remove: target must be a list, got %s", var ? ray_type_name(var->type) : "null");
         }
 
         int64_t vlen = ray_len(var);
@@ -832,8 +834,9 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
                 if (alloc) ray_release(e);
             }
         } else {
+            int8_t it = idx->type;
             ray_release(idx); ray_release(name_sym);
-            return ray_error("type", NULL);
+            return ray_error("type", "alter remove: index must be a numeric atom or a vector, got %s", ray_type_name(it));
         }
         ray_release(idx);
 
@@ -865,7 +868,7 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
     }
     ray_release(op_name);
     ray_release(name_sym);
-    return ray_error("domain", NULL);
+    return ray_error("domain", "alter: unknown op, expected set, concat, or remove");
 }
 
 /* ══════════════════════════════════════════
@@ -874,10 +877,10 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
 
 /* (del name) — delete variable from environment (special form, unevaluated arg) */
 ray_t* ray_del_fn(ray_t** args, int64_t n) {
-    if (n < 1) return ray_error("arity", "del expects 1 argument");
+    if (n < 1) return ray_error("arity", "del expects 1 argument, got %lld", (long long)n);
     ray_t* name = args[0];
     if (name->type != -RAY_SYM)
-        return ray_error("type", "del expects a symbol");
+        return ray_error("type", "del expects a symbol, got %s", ray_type_name(name->type));
     /* Propagate ray_env_set's failure: silently ignoring the return
      * value would let `(del .sys.gc)` appear to succeed while leaving
      * the builtin intact — a confusing lie.  Emit a precise message
@@ -900,8 +903,8 @@ ray_t* ray_del_fn(ray_t** args, int64_t n) {
 
 /* (row table idx) — extract a single row from a table as a dict */
 ray_t* ray_row_fn(ray_t* tbl, ray_t* idx) {
-    if (tbl->type != RAY_TABLE) return ray_error("type", "row expects a table");
-    if (!is_numeric(idx)) return ray_error("type", "row index must be integer");
+    if (tbl->type != RAY_TABLE) return ray_error("type", "row expects a table, got %s", ray_type_name(tbl->type));
+    if (!is_numeric(idx)) return ray_error("type", "row index must be a numeric atom, got %s", ray_type_name(idx->type));
     /* Delegate to at — it already handles table integer indexing */
     return ray_at_fn(tbl, idx);
 }
@@ -913,18 +916,18 @@ ray_t* ray_row_fn(ray_t* tbl, ray_t* idx) {
 /* (union-all t1 t2) — concatenate two tables row-wise (same schema) */
 ray_t* ray_union_all_fn(ray_t* t1, ray_t* t2) {
     if (t1->type != RAY_TABLE)
-        return ray_error("type", "union-all: first arg must be a table");
+        return ray_error("type", "union-all: first arg must be a table, got %s", ray_type_name(t1->type));
     if (t2->type != RAY_TABLE)
-        return ray_error("type", "union-all: second arg must be a table");
+        return ray_error("type", "union-all: second arg must be a table, got %s", ray_type_name(t2->type));
 
     int64_t ncols = ray_table_ncols(t1);
     if (ncols != ray_table_ncols(t2))
-        return ray_error("type", "union-all: tables must have same number of columns");
+        return ray_error("type", "union-all: tables must have same number of columns, got %lld and %lld", (long long)ncols, (long long)ray_table_ncols(t2));
 
     /* Validate matching column names */
     for (int64_t c = 0; c < ncols; c++) {
         if (ray_table_col_name(t1, c) != ray_table_col_name(t2, c))
-            return ray_error("type", "union-all: column names must match");
+            return ray_error("type", "union-all: column names must match at column %lld", (long long)c);
     }
 
     ray_t* result = ray_table_new(ncols);
@@ -937,7 +940,7 @@ ray_t* ray_union_all_fn(ray_t* t1, ray_t* t2) {
 
         if (!col1 || !col2) {
             ray_release(result);
-            return ray_error("type", "union-all: missing column");
+            return ray_error("domain", "union-all: missing column at index %lld", (long long)c);
         }
 
         ray_t* combined = ray_vec_concat(col1, col2);
@@ -961,7 +964,7 @@ ray_t* ray_union_all_fn(ray_t* t1, ray_t* t2) {
 /* (table-distinct t) — remove duplicate rows via DAG group-by */
 ray_t* ray_table_distinct_fn(ray_t* tbl) {
     if (tbl->type != RAY_TABLE)
-        return ray_error("type", "table-distinct expects a table");
+        return ray_error("type", "table-distinct expects a table, got %s", ray_type_name(tbl->type));
 
     int64_t ncols = ray_table_ncols(tbl);
     if (ncols == 0) { ray_retain(tbl); return tbl; }
@@ -970,12 +973,12 @@ ray_t* ray_table_distinct_fn(ray_t* tbl) {
     if (!g) return ray_error("oom", NULL);
 
     ray_op_t* keys[256];
-    if (ncols > 256) { ray_graph_free(g); return ray_error("range", "too many columns"); }
+    if (ncols > 256) { ray_graph_free(g); return ray_error("range", "table-distinct: too many columns, max 256, got %lld", (long long)ncols); }
 
     for (int64_t c = 0; c < ncols; c++) {
         int64_t name_id = ray_table_col_name(tbl, c);
         ray_t* name_str = ray_sym_str(name_id);
-        if (!name_str) { ray_graph_free(g); return ray_error("type", "bad column name"); }
+        if (!name_str) { ray_graph_free(g); return ray_error("domain", "table-distinct: column name symbol not found at index %lld", (long long)c); }
         keys[c] = ray_scan(g, ray_str_ptr(name_str));
         if (!keys[c]) { ray_graph_free(g); return ray_error("oom", NULL); }
     }
