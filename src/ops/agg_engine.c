@@ -3,6 +3,7 @@
 #include "ops/agg_registry.h"
 #include "ops/ops.h"
 #include "ops/internal.h"  /* col_vec_new, col_esz */
+#include "ops/rowsel.h"    /* ray_rowsel_meta, ray_rowsel_to_indices */
 #include "lang/internal.h" /* sym_domain_rep */
 #include "table/sym.h"    /* ray_read_sym */
 #include <stdlib.h>
@@ -28,7 +29,9 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     if (ext->n_keys < 1 || ext->n_keys > 16) return false;  /* 1b: 1..16 keys */
     if (ext->n_aggs == 0) return false;        /* need >=1 aggregate  */
     if (!tbl) return false;
-    if (g->selection) return false;            /* no active/pushed filter */
+    /* A pushed WHERE filter (g->selection set) is now handled by exec_group_v2's
+     * compact-table prologue: it gathers the selected rows of the keys/agg-inputs
+     * and runs the normal strategy dispatch on that compact table.  No bail. */
 
     /* Factorized-EXPAND result (synthetic _src key + _count weight column) needs
      * exec_group's dedicated factorized handling (COUNT/SUM(_count) weight by
@@ -1809,9 +1812,14 @@ static ray_t* exec_group_v2_parallel_radix(
     return result;
 }
 
-ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
+/* Core of exec_group_v2: resolution + strategy dispatch over (tbl, nrows).
+ * Never consults g->selection — when a WHERE filter is active, the public
+ * exec_group_v2 wrapper passes a COMPACT table (selected rows gathered) here
+ * with effective nrows = n_sel, so this body operates purely on what it is
+ * given and a double-filter is structurally impossible. */
+static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
+                                int64_t nrows) {
     ray_op_ext_t* ext = find_ext(g, op->id);
-    int64_t nrows = ray_table_nrows(tbl);
 
     ray_t* key_cols[16]; int64_t key_syms[16];
     for (uint8_t k = 0; k < ext->n_keys; k++) {
@@ -1931,6 +1939,124 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         ray_release(col);
     }
     free(groups.gids); free(groups.first_row);
+    return result;
+}
+
+/* Build a COMPACT table holding exactly the columns exec_group_v2_run reads —
+ * every KEY column and every non-COUNT AGG-INPUT column (x and y for binary
+ * aggs) — gathered at the surviving-row indices `idx` (length n_sel) under the
+ * SAME column sym, so the table_get_col(sym) resolution in run + every strategy
+ * works unchanged.  Distinct syms are gathered once (de-dup of columns shared
+ * by multiple keys/aggs).  gather_by_idx produces a fresh column (no alias to
+ * `tbl`'s buffers) preserving type / null bits / STR / GUID payload / SYM
+ * domain.  Returns a new table (caller releases) or an error ray. */
+static ray_t* agg_build_compact(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
+                                int64_t* idx, int64_t n_sel) {
+    ray_op_ext_t* ext = find_ext(g, op->id);
+
+    /* Collect the distinct syms this group needs from the source table. */
+    int64_t want[48]; uint8_t n_want = 0;   /* <=16 keys + <=16 aggs*2 inputs */
+    for (uint8_t k = 0; k < ext->n_keys; k++) {
+        int64_t s = find_ext(g, ext->keys[k]->id)->sym;
+        bool seen = false;
+        for (uint8_t i = 0; i < n_want; i++) if (want[i] == s) { seen = true; break; }
+        if (!seen) want[n_want++] = s;
+    }
+    for (uint8_t a = 0; a < ext->n_aggs; a++) {
+        if (ext->agg_ops[a] == OP_COUNT && !(ext->agg_ins && ext->agg_ins[a]))
+            continue;                       /* COUNT needs no typed input */
+        ray_op_t* ins[2] = { ext->agg_ins ? ext->agg_ins[a] : NULL,
+                             ext->agg_ins2 ? ext->agg_ins2[a] : NULL };
+        for (int j = 0; j < 2; j++) {
+            if (!ins[j]) continue;
+            int64_t s = find_ext(g, ins[j]->id)->sym;
+            bool seen = false;
+            for (uint8_t i = 0; i < n_want; i++) if (want[i] == s) { seen = true; break; }
+            if (!seen) want[n_want++] = s;
+        }
+    }
+
+    ray_t* compact = ray_table_new(n_want);
+    if (!compact || RAY_IS_ERR(compact)) return compact ? compact : ray_error("oom", NULL);
+    for (uint8_t i = 0; i < n_want; i++) {
+        ray_t* src = ray_table_get_col(tbl, want[i]);
+        if (!src) { ray_release(compact); return ray_error("nyi", NULL); }
+        ray_t* gcol = gather_by_idx(src, idx, n_sel);   /* fresh, no alias */
+        if (!gcol || RAY_IS_ERR(gcol)) { ray_release(compact); return gcol ? gcol : ray_error("oom", NULL); }
+        compact = ray_table_add_col(compact, want[i], gcol);  /* retains gcol */
+        ray_release(gcol);                                    /* drop our ref */
+        if (!compact || RAY_IS_ERR(compact)) return compact ? compact : ray_error("oom", NULL);
+    }
+    return compact;
+}
+
+/* Public entry.  No active WHERE filter → run directly over the input table.
+ * With g->selection set, build a compact table of the selected rows and run the
+ * normal strategy dispatch over it (effective nrows = n_sel), then free the
+ * compact table + the materialised index block on EVERY exit.  The result
+ * columns are freshly built (col_vec_new / ray_vec_new gathers), so they never
+ * alias the compact buffers and the compact table is safe to free.
+ *
+ * IN-PLACE vs COMPACT — design note.  The reference engine (DuckDB) threads a
+ * filter into aggregation in place via a SelectionVector: the address/key
+ * vectors are *sliced* (referenced, indexed through sel[i]) and the aggregate
+ * update walks sel[i] without copying — see
+ *   duckdb/src/include/duckdb/common/types/selection_vector.hpp
+ *   duckdb/src/common/row_operations/row_aggregate.cpp (UpdateFilteredStates)
+ *   duckdb/src/common/types/vector.cpp (Vector::Slice)
+ * That works there because DuckDB's aggregate update consumes a *vector +
+ * selection* pair throughout.  Our v2 strategies do not: ALL of them
+ * (serial dense/hash, parallel dense/radix/smallhash/generic-hash) feed each
+ * aggregate via a *batch* kernel — update_batch(states, block, cgid, vals, n)
+ * — that reads `vals` as a DENSE, CONTIGUOUS slice of the input column
+ * (e.g. agg_phaseA_fn: `val_data[a] + start*esz`).  Threading sel[i] in place
+ * would force every strategy to pre-gather the agg inputs into a temp dense
+ * buffer per batch anyway (the kernel cannot stride through sel), partition the
+ * sel range across workers, and translate the radix payload row_off into
+ * sel-space — i.e. the same gather, smeared across six hot loops with six
+ * separate correctness surfaces on the core group path.
+ *
+ * So we gather ONCE here, at the v2 boundary, into a compact table and let the
+ * unmodified strategies run over it.  This IS the documented "compact fallback"
+ * the design permits, applied uniformly because the dense-contiguous layout it
+ * produces is exactly what every strategy's batch kernel structurally requires;
+ * per-strategy in-place threading would reproduce this gather without removing
+ * it.  Representative-row indices (first_row) are correct in compact space: the
+ * key columns are gathered under the same sym, so first_row indexes the compact
+ * key column and the emitted key is the selected row's key (SYM domain carried
+ * through gather_by_idx).  No strategy needs original-row coordinates. */
+ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
+    if (!g || !g->selection)
+        return exec_group_v2_run(g, op, tbl, ray_table_nrows(tbl));
+
+    int64_t src_nrows = ray_table_nrows(tbl);
+    ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+    /* Defensive: a selection that doesn't cover this table's rows can't be
+     * applied here — fall back to the unfiltered run (matches the scalar-agg
+     * guard in group.c, which also only honors a selection when nrows match). */
+    if (sm->nrows != src_nrows)
+        return exec_group_v2_run(g, op, tbl, src_nrows);
+
+    int64_t n_sel = sm->total_pass;
+    ray_t* idx_block = ray_rowsel_to_indices(g->selection);
+    if (!idx_block) return ray_error("oom", NULL);
+    int64_t* idx = (int64_t*)ray_data(idx_block);
+
+    ray_t* compact = agg_build_compact(g, op, tbl, idx, n_sel);
+    if (!compact || RAY_IS_ERR(compact)) {
+        ray_release(idx_block);
+        return compact ? compact : ray_error("oom", NULL);
+    }
+
+    /* Hide the selection from the run so no strategy can double-filter, then
+     * dispatch over the compact table with effective nrows = n_sel. */
+    ray_t* saved_sel = g->selection;
+    g->selection = NULL;
+    ray_t* result = exec_group_v2_run(g, op, compact, n_sel);
+    g->selection = saved_sel;
+
+    ray_release(compact);     /* result columns are fresh, never alias compact */
+    ray_release(idx_block);
     return result;
 }
 
