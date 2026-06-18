@@ -26,6 +26,7 @@
 #include "mem/heap.h"
 #include "mem/sys.h"
 #include <string.h>
+#include <stdlib.h>
 #include <sched.h>
 
 /* Task granularity: RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS elements per task */
@@ -125,8 +126,21 @@ ray_err_t ray_pool_create(ray_pool_t* pool, uint32_t n_workers) {
     atomic_init(&pool->cancelled, 0);
 
     if (n_workers == 0) {
-        uint32_t ncpu = ray_thread_count();
-        n_workers = (ncpu > 1) ? ncpu - 1 : 0;
+        /* Auto-size to ncpu-1. The RAYFORCE_CORES env var overrides this
+         * default worker count — the test harness sets it (see the Makefile
+         * `test` target) so neither the in-process runtime nor the server
+         * children it spawns via .sys.exec each create ncpu-1 threads on a
+         * many-core box. An explicit -c (which passes n_workers > 0 through
+         * ray_pool_init) bypasses this entirely, and a non-test run with the
+         * var unset keeps the historical ncpu-1 default. */
+        const char* env = getenv("RAYFORCE_CORES");
+        if (env && *env) {
+            long v = strtol(env, NULL, 10);
+            n_workers = (v > 0) ? (uint32_t)v : 0;
+        } else {
+            uint32_t ncpu = ray_thread_count();
+            n_workers = (ncpu > 1) ? ncpu - 1 : 0;
+        }
     }
 
     pool->n_workers = n_workers;
