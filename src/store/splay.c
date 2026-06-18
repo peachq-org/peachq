@@ -27,6 +27,7 @@
 #include "store/fileio.h"
 #include "table/sym.h"
 #include "table/domain.h"
+#include "lang/format.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -274,7 +275,7 @@ static ray_t* splay_load_dom_impl(const char* dir, ray_sym_domain_t* dom,
     char path[1024];
     int path_len = snprintf(path, sizeof(path), "%s/.d", dir);
     if (path_len < 0 || (size_t)path_len >= sizeof(path))
-        return ray_error("range", NULL);
+        return ray_error("range", "splayed %s: .d schema path exceeds %zu-byte buffer", dir, sizeof(path));
     ray_t* schema = ray_col_load(path);
     if (!schema || RAY_IS_ERR(schema)) {
         if (trace)
@@ -332,7 +333,8 @@ static ray_t* splay_load_dom_impl(const char* dir, ray_sym_domain_t* dom,
         if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
             ray_release(schema);
             ray_release(tbl);
-            return ray_error("range", NULL);
+            return ray_error("range", "splayed %s: column path for entry %lld exceeds %zu-byte buffer",
+                             dir, (long long)c, sizeof(path));
         }
 
         /* Domain-attaching loaders: a SYM column resolves over the
