@@ -378,7 +378,7 @@ static bool hashset_insert(hashset_t* hs, int64_t i) {
 /* (map fn val vec) — apply binary fn(val, elem) to each element of vec.
  * Also supports (map fn vec) for unary mapping. */
 ray_t* ray_map_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("domain", "map: requires at least 2 args (fn and vec), got %lld", (long long)n);
     for (int64_t i = 0; i < n; i++)
         if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
 
@@ -389,7 +389,7 @@ ray_t* ray_map_fn(ray_t** args, int64_t n) {
         /* Unary map: (map fn vec) */
         ray_t* vec = unbox_vec_arg(args[1], &_bx);
         if (RAY_IS_ERR(vec)) return vec;
-        if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+        if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", "map: vec arg must be a list, got %s", ray_type_name(vec->type)); }
         int64_t len = ray_len(vec);
         ray_t* result = ray_alloc(len * sizeof(ray_t*));
         if (!result) { if (_bx) ray_release(_bx); return ray_error("oom", NULL); }
@@ -450,7 +450,7 @@ ray_t* ray_pmap_fn(ray_t** args, int64_t n) {
 
 /* (fold fn vec) or (fold fn init vec) — reduce with binary fn */
 ray_t* ray_fold_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("domain", "fold: requires at least 2 args (fn and vec), got %lld", (long long)n);
     for (int64_t i = 0; i < n; i++)
         if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
 
@@ -462,9 +462,9 @@ ray_t* ray_fold_fn(ray_t** args, int64_t n) {
         /* (fold fn vec) — use first element as initial value */
         vec = unbox_vec_arg(args[1], &_bx);
         if (RAY_IS_ERR(vec)) return vec;
-        if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+        if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", "fold: vec arg must be a list, got %s", ray_type_name(vec->type)); }
         int64_t len = ray_len(vec);
-        if (len == 0) { if (_bx) ray_release(_bx); return ray_error("domain", NULL); }
+        if (len == 0) { if (_bx) ray_release(_bx); return ray_error("domain", "fold: empty list has no initial value, got %lld", (long long)len); }
         ray_t** elems = (ray_t**)ray_data(vec);
         ray_retain(elems[0]);
         acc = elems[0];
@@ -483,7 +483,7 @@ ray_t* ray_fold_fn(ray_t** args, int64_t n) {
     acc = args[1];
     vec = unbox_vec_arg(args[2], &_bx);
     if (RAY_IS_ERR(vec)) { ray_release(acc); return vec; }
-    if (!is_list(vec)) { ray_release(acc); if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(vec)) { ray_release(acc); if (_bx) ray_release(_bx); return ray_error("type", "fold: vec arg must be a list, got %s", ray_type_name(vec->type)); }
     int64_t len = ray_len(vec);
     ray_t** elems = (ray_t**)ray_data(vec);
     for (int64_t i = 0; i < len; i++) {
@@ -498,7 +498,7 @@ ray_t* ray_fold_fn(ray_t** args, int64_t n) {
 
 /* (scan fn vec) — running fold, returns vector of partial results */
 ray_t* ray_scan_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("domain", "scan: requires at least 2 args (fn and vec), got %lld", (long long)n);
     for (int64_t i = 0; i < n; i++)
         if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
 
@@ -506,7 +506,7 @@ ray_t* ray_scan_fn(ray_t** args, int64_t n) {
     ray_t* _bx = NULL;
     ray_t* vec = unbox_vec_arg(args[1], &_bx);
     if (RAY_IS_ERR(vec)) return vec;
-    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", "scan: vec arg must be a list, got %s", ray_type_name(vec->type)); }
     int64_t len = ray_len(vec);
     if (len == 0) {
         if (_bx) ray_release(_bx);
@@ -547,7 +547,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
     if (vec->type == RAY_TABLE && ray_is_vec(mask) && mask->type == RAY_BOOL) {
         int64_t ncols = ray_table_ncols(vec);
         int64_t nrows = ray_table_nrows(vec);
-        if (nrows != mask->len) return ray_error("length", NULL);
+        if (nrows != mask->len) return ray_error("length", "filter: mask length must equal table row count %lld, got %lld", (long long)nrows, (long long)mask->len);
         ray_t* result = ray_table_new(ncols);
         if (RAY_IS_ERR(result)) return result;
         for (int64_t c = 0; c < ncols; c++) {
@@ -567,7 +567,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
         const char* sp = ray_str_ptr(vec);
         size_t slen = ray_str_len(vec);
         int64_t mlen = mask->len;
-        if ((int64_t)slen != mlen) return ray_error("length", NULL);
+        if ((int64_t)slen != mlen) return ray_error("length", "filter: mask length must equal string length %lld, got %lld", (long long)slen, (long long)mlen);
         bool* mb = (bool*)ray_data(mask);
         int64_t count = 0;
         for (int64_t i = 0; i < mlen; i++) if (mb[i]) count++;
@@ -584,7 +584,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
     if (ray_is_vec(vec) && ray_is_vec(mask) && mask->type == RAY_BOOL) {
         int64_t len = vec->len;
         int64_t mlen = mask->len;
-        if (len != mlen) return ray_error("length", NULL);
+        if (len != mlen) return ray_error("length", "filter: mask length must equal vec length %lld, got %lld", (long long)len, (long long)mlen);
         bool* mb = (bool*)ray_data(mask);
 
         /* Count true values */
@@ -616,17 +616,17 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
     if (RAY_IS_ERR(vec)) return vec;
     mask = unbox_vec_arg(mask, &_bx2);
     if (RAY_IS_ERR(mask)) { if (_bx1) ray_release(_bx1); return mask; }
-    if (!is_list(vec) || !is_list(mask)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
+    if (!is_list(vec) || !is_list(mask)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", "filter: vec and mask must be lists, got %s and %s", ray_type_name(vec->type), ray_type_name(mask->type)); }
     int64_t len = ray_len(vec);
     int64_t mlen = ray_len(mask);
-    if (len != mlen) return ray_error("length", NULL);
+    if (len != mlen) return ray_error("length", "filter: mask length must equal vec length %lld, got %lld", (long long)len, (long long)mlen);
 
     ray_t** velems = (ray_t**)ray_data(vec);
     ray_t** melems = (ray_t**)ray_data(mask);
 
     /* Validate mask is all booleans */
     for (int64_t i = 0; i < len; i++) {
-        if (melems[i]->type != -RAY_BOOL) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
+        if (melems[i]->type != -RAY_BOOL) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", "filter: mask elements must be bool, got %s", ray_type_name(melems[i]->type)); }
     }
     /* Count true values */
     int64_t count = 0;
@@ -653,7 +653,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
 
 /* (apply fn vec1 vec2) — zip-apply fn element-wise over two vectors */
 ray_t* ray_apply_fn(ray_t** args, int64_t n) {
-    if (n < 3) return ray_error("domain", NULL);
+    if (n < 3) return ray_error("domain", "apply: requires at least 3 args (fn and two vecs), got %lld", (long long)n);
     for (int64_t i = 0; i < n; i++)
         if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
 
@@ -668,7 +668,7 @@ ray_t* ray_apply_fn(ray_t** args, int64_t n) {
     if (RAY_IS_ERR(vec1)) return vec1;
     ray_t* vec2 = unbox_vec_arg(args[2], &_bx2);
     if (RAY_IS_ERR(vec2)) { if (_bx1) ray_release(_bx1); return vec2; }
-    if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
+    if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", "apply: both vec args must be lists, got %s and %s", ray_type_name(vec1->type), ray_type_name(vec2->type)); }
     int64_t len1 = ray_len(vec1);
     int64_t len2 = ray_len(vec2);
     int64_t len = len1 < len2 ? len1 : len2;
@@ -905,7 +905,7 @@ ray_t* ray_distinct_fn(ray_t* x) {
     ray_t* _bx = NULL;
     x = unbox_vec_arg(x, &_bx);
     if (RAY_IS_ERR(x)) return x;
-    if (!is_list(x)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(x)) { if (_bx) ray_release(_bx); return ray_error("type", "distinct: argument must be a list, got %s", ray_type_name(x->type)); }
     int64_t len = ray_len(x);
     if (len == 0) { if (_bx) ray_release(_bx); ray_retain(x); return x; }
     ray_t** elems = (ray_t**)ray_data(x);
@@ -1095,7 +1095,7 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
     ray_t* _bx = NULL;
     vec = unbox_vec_arg(vec, &_bx);
     if (RAY_IS_ERR(vec)) return vec;
-    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", "in: vec arg must be a list, got %s", ray_type_name(vec->type)); }
     int64_t len = ray_len(vec);
     ray_t** elems = (ray_t**)ray_data(vec);
     for (int64_t i = 0; i < len; i++) {
@@ -1179,7 +1179,7 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
     if (RAY_IS_ERR(vec1)) return vec1;
     vec2 = unbox_vec_arg(vec2, &_bx2);
     if (RAY_IS_ERR(vec2)) { if (_bx1) ray_release(_bx1); return vec2; }
-    if (!is_list(vec1)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
+    if (!is_list(vec1)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", "except: first arg must be a list, got %s", ray_type_name(vec1->type)); }
     int64_t len1 = ray_len(vec1);
     ray_t** e1 = (ray_t**)ray_data(vec1);
 
@@ -1250,7 +1250,7 @@ ray_t* ray_union_fn(ray_t* vec1, ray_t* vec2) {
     if (RAY_IS_ERR(vec1)) return vec1;
     vec2 = unbox_vec_arg(vec2, &_bx2);
     if (RAY_IS_ERR(vec2)) { if (_bx1) ray_release(_bx1); return vec2; }
-    if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
+    if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", "union: both args must be lists, got %s and %s", ray_type_name(vec1->type), ray_type_name(vec2->type)); }
     int64_t len1 = ray_len(vec1), len2 = ray_len(vec2);
     ray_t** e1 = (ray_t**)ray_data(vec1);
     ray_t** e2 = (ray_t**)ray_data(vec2);
@@ -1309,7 +1309,7 @@ ray_t* ray_sect_fn(ray_t* vec1, ray_t* vec2) {
     if (RAY_IS_ERR(vec1)) return vec1;
     vec2 = unbox_vec_arg(vec2, &_bx2);
     if (RAY_IS_ERR(vec2)) { if (_bx1) ray_release(_bx1); return vec2; }
-    if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
+    if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", "sect: both args must be lists, got %s and %s", ray_type_name(vec1->type), ray_type_name(vec2->type)); }
     int64_t len1 = ray_len(vec1);
     ray_t** e1 = (ray_t**)ray_data(vec1);
     ray_t** e2 = (ray_t**)ray_data(vec2);
@@ -1339,13 +1339,13 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
      * e.g. (take 1.0 2.0) to attempt a 4.6-quintillion-element allocation
      * and surface as "oom" — misleading for what is really a type error. */
     if (ray_is_atom(n_obj) && n_obj->type == -RAY_F64)
-        return ray_error("type", NULL);
+        return ray_error("type", "take: count must be an integer, got %s", ray_type_name(n_obj->type));
     /* Range take: (take collection [start amount]) — slice from start for amount elements */
     if (ray_is_vec(n_obj) && n_obj->type == RAY_I64 && ray_len(n_obj) == 2) {
         int64_t* idx = (int64_t*)ray_data(n_obj);
         int64_t start = idx[0];
         int64_t amount = idx[1];
-        if (amount < 0) return ray_error("length", NULL);
+        if (amount < 0) return ray_error("length", "take: range amount must be non-negative, got %lld", (long long)amount);
 
         /* Table range take */
         if (vec->type == RAY_TABLE) {
@@ -1479,7 +1479,7 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
             return result;
         }
 
-        return ray_error("type", NULL);
+        return ray_error("type", "take: range take unsupported for %s", ray_type_name(vec->type));
     }
     /* Char take: (take 'a' n) → string of n copies of char */
     if (ray_is_atom(vec) && vec->type == -RAY_STR && ray_str_len(vec) == 1 && ray_is_atom(n_obj) && is_numeric(n_obj)) {
@@ -1545,7 +1545,7 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
     if (vec->type == RAY_DICT && is_numeric(n_obj)) {
         ray_t* keys = ray_dict_keys(vec);
         ray_t* vals = ray_dict_vals(vec);
-        if (!keys) return ray_error("type", NULL);
+        if (!keys) return ray_error("type", "take: dict has no keys vector");
         ray_t* nk = ray_take_fn(keys, n_obj);
         if (RAY_IS_ERR(nk)) return nk;
         ray_t* nv = vals ? ray_take_fn(vals, n_obj) : ray_list_new(0);
@@ -1628,7 +1628,7 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
     vec = unbox_vec_arg(vec, &_bx);
     if (RAY_IS_ERR(vec)) return vec;
     if (!is_list(vec) || !is_numeric(n_obj))
-        { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+        { if (_bx) ray_release(_bx); return ray_error("type", "take: requires a list and a numeric count, got %s and %s", ray_type_name(vec->type), ray_type_name(n_obj->type)); }
     int64_t len = ray_len(vec);
     int64_t n = as_i64(n_obj);
     ray_t** elems = (ray_t**)ray_data(vec);
@@ -1669,7 +1669,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
      * count / formatting see a dense vector instead of failing with `type`. */
     if (vec->type == RAY_TABLE && idx->type == -RAY_SYM) {
         ray_t* col = ray_table_get_col(vec, idx->i64);
-        if (!col) return ray_error("domain", NULL);
+        if (!col) return ray_error("domain", "at: unknown table column");
         if (RAY_IS_PARTED(col->type)) return parted_to_flat_vec(col);
         if (col->type == RAY_MAPCOMMON) return materialize_mapcommon(col);
         ray_retain(col);
@@ -1682,7 +1682,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
          idx->type == -RAY_I16 || idx->type == -RAY_U8)) {
         int64_t row = as_i64(idx);
         int64_t nrows = ray_table_nrows(vec);
-        if (row < 0 || row >= nrows) return ray_error("domain", NULL);
+        if (row < 0 || row >= nrows) return ray_error("domain", "at: row index %lld out of range for table of %lld rows", (long long)row, (long long)nrows);
         int64_t ncols = ray_table_ncols(vec);
         /* Build a dict: keys SYM vec + vals LIST */
         ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, ncols);
@@ -1714,7 +1714,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
         int64_t* ids = (int64_t*)ray_data(idx);
         for (int64_t i = 0; i < nidx; i++) {
             if (ids[i] < 0 || ids[i] >= nrows)
-                return ray_error("domain", NULL);
+                return ray_error("domain", "at: row index %lld out of range for table of %lld rows", (long long)ids[i], (long long)nrows);
         }
 
         int64_t ncols = ray_table_ncols(vec);
@@ -1758,13 +1758,13 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
                 ray_t* ie = collection_elem(idx, j, &alloc);
                 int64_t k = as_i64(ie);
                 if (alloc) ray_release(ie);
-                if (k < 0 || (size_t)k >= slen) return ray_error("domain", NULL);
+                if (k < 0 || (size_t)k >= slen) return ray_error("domain", "at: string index %lld out of range for length %lld", (long long)k, (long long)slen);
                 buf[j] = s[k];
             }
             return ray_str(buf, (size_t)idxlen);
         }
         int64_t i = as_i64(idx);
-        if (i < 0 || (size_t)i >= slen) return ray_error("domain", NULL);
+        if (i < 0 || (size_t)i >= slen) return ray_error("domain", "at: string index %lld out of range for length %lld", (long long)i, (long long)slen);
         /* Return 1-char string atom */
         return ray_str(&s[i], 1);
     }
@@ -1800,7 +1800,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
 
     if (idx->type != -RAY_I64 && idx->type != -RAY_I32 &&
         idx->type != -RAY_I16 && idx->type != -RAY_U8)
-        return ray_error("type", NULL);
+        return ray_error("type", "at: index must be an integer, got %s", ray_type_name(idx->type));
     int64_t i = as_i64(idx);
 
     /* Typed vector: extract element directly */
@@ -1813,7 +1813,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
         return elem;
     }
 
-    if (!is_list(vec)) return ray_error("type", NULL);
+    if (!is_list(vec)) return ray_error("type", "at: cannot index %s", ray_type_name(vec->type));
     int64_t len = ray_len(vec);
     if (i < 0 || i >= len) return ray_typed_null(-RAY_I64); /* out of bounds → 0Nl */
     ray_t* elem = ((ray_t**)ray_data(vec))[i];
@@ -1924,7 +1924,7 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
     ray_t* _bx = NULL;
     vec = unbox_vec_arg(vec, &_bx);
     if (RAY_IS_ERR(vec)) return vec;
-    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", "find: vec arg must be a list, got %s", ray_type_name(vec->type)); }
     int64_t len = ray_len(vec);
     ray_t** elems = (ray_t**)ray_data(vec);
     for (int64_t i = 0; i < len; i++) {
@@ -1943,9 +1943,9 @@ static void til_fill(void* ctx, uint32_t worker_id, int64_t start, int64_t end) 
 }
 
 ray_t* ray_til_fn(ray_t* x) {
-    if (!ray_is_atom(x) || x->type != -RAY_I64) return ray_error("type", NULL);
+    if (!ray_is_atom(x) || x->type != -RAY_I64) return ray_error("type", "til: argument must be an i64 atom, got %s", ray_type_name(x->type));
     int64_t n = x->i64;
-    if (n < 0) return ray_error("domain", NULL);
+    if (n < 0) return ray_error("domain", "til: count must be non-negative, got %lld", (long long)n);
     if (n == 0) return ray_vec_new(RAY_I64, 0);
 
     ray_t* vec = ray_vec_new(RAY_I64, n);
@@ -2036,7 +2036,7 @@ ray_t* ray_reverse_fn(ray_t* x) {
     ray_t* _bx = NULL;
     x = unbox_vec_arg(x, &_bx);
     if (RAY_IS_ERR(x)) return x;
-    if (!is_list(x)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(x)) { if (_bx) ray_release(_bx); return ray_error("type", "reverse: argument must be a list, got %s", ray_type_name(x->type)); }
     int64_t len = ray_len(x);
     ray_t** elems = (ray_t**)ray_data(x);
 
@@ -2059,16 +2059,16 @@ ray_t* ray_reverse_fn(ray_t* x) {
 
 /* (rand n max) → vector of n random i64 in [0, max) */
 ray_t* ray_rand_fn(ray_t* a, ray_t* b) {
-    if (!ray_is_atom(a) || !ray_is_atom(b)) return ray_error("type", NULL);
+    if (!ray_is_atom(a) || !ray_is_atom(b)) return ray_error("type", "rand: count and max must be atoms, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     int64_t n, mx;
     if (a->type == -RAY_I64) n = a->i64;
     else if (a->type == -RAY_I32) n = a->i32;
-    else return ray_error("type", NULL);
+    else return ray_error("type", "rand: count must be an integer, got %s", ray_type_name(a->type));
     if (b->type == -RAY_I64) mx = b->i64;
     else if (b->type == -RAY_I32) mx = b->i32;
-    else return ray_error("type", NULL);
-    if (n < 0) return ray_error("domain", NULL);
-    if (mx <= 0) return ray_error("domain", NULL);
+    else return ray_error("type", "rand: max must be an integer, got %s", ray_type_name(b->type));
+    if (n < 0) return ray_error("domain", "rand: count must be non-negative, got %lld", (long long)n);
+    if (mx <= 0) return ray_error("domain", "rand: max must be positive, got %lld", (long long)mx);
     if (n == 0) return ray_vec_new(RAY_I64, 0);
     ray_t* vec = ray_vec_new(RAY_I64, n);
     if (RAY_IS_ERR(vec)) return vec;
@@ -2081,7 +2081,7 @@ ray_t* ray_rand_fn(ray_t* a, ray_t* b) {
 /* (bin sorted-vec val) → rightmost index where sorted[i] <= val, -1 if none */
 ray_t* ray_bin_fn(ray_t* sorted, ray_t* val) {
     if (!ray_is_vec(sorted) || sorted->type != RAY_I64)
-        return ray_error("type", NULL);
+        return ray_error("type", "bin: sorted arg must be an i64 vector, got %s", ray_type_name(sorted->type));
     int64_t* d = (int64_t*)ray_data(sorted);
     int64_t n = sorted->len;
 
@@ -2114,13 +2114,13 @@ ray_t* ray_bin_fn(ray_t* sorted, ray_t* val) {
         rvec->len = vn;
         return rvec;
     }
-    return ray_error("type", NULL);
+    return ray_error("type", "bin: val must be an i64 atom or vector, got %s", ray_type_name(val->type));
 }
 
 /* (binr sorted-vec val) → leftmost index where sorted[i] >= val */
 ray_t* ray_binr_fn(ray_t* sorted, ray_t* val) {
     if (!ray_is_vec(sorted) || sorted->type != RAY_I64)
-        return ray_error("type", NULL);
+        return ray_error("type", "binr: sorted arg must be an i64 vector, got %s", ray_type_name(sorted->type));
     int64_t* d = (int64_t*)ray_data(sorted);
     int64_t n = sorted->len;
 
@@ -2153,7 +2153,7 @@ ray_t* ray_binr_fn(ray_t* sorted, ray_t* val) {
         rvec->len = vn;
         return rvec;
     }
-    return ray_error("type", NULL);
+    return ray_error("type", "binr: val must be an i64 atom or vector, got %s", ray_type_name(val->type));
 }
 
 /* ══════════════════════════════════════════
@@ -2213,13 +2213,13 @@ static ray_t* map_iterate(ray_t* fn, ray_t* fixed, ray_t* vec, int fixed_is_left
  * broadcasting engine (so a held vector conforms element-wise) and hands
  * lambdas their arguments whole. */
 ray_t* ray_map_left_fn(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("domain", NULL);
+    if (n != 3) return ray_error("domain", "map-left: requires exactly 3 args (fn, left, right), got %lld", (long long)n);
     /* iterate left (vec), hold right (fixed) → fn(left_i, right) */
     return map_iterate(args[0], args[2], args[1], 0);
 }
 
 ray_t* ray_map_right_fn(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("domain", NULL);
+    if (n != 3) return ray_error("domain", "map-right: requires exactly 3 args (fn, left, right), got %lld", (long long)n);
     /* iterate right (vec), hold left (fixed) → fn(left, right_i) */
     return map_iterate(args[0], args[1], args[2], 1);
 }
@@ -2236,7 +2236,7 @@ ray_t* ray_fold_left_fn(ray_t** args, int64_t n) {
 
 /* (fold-right fn init coll) — right fold */
 ray_t* ray_fold_right_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("domain", "fold-right: requires at least 2 args (fn and vec), got %lld", (long long)n);
     for (int64_t i = 0; i < n; i++)
         if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
 
@@ -2249,9 +2249,9 @@ ray_t* ray_fold_right_fn(ray_t** args, int64_t n) {
         /* (fold-right fn vec) — use last element as initial value */
         vec = unbox_vec_arg(args[1], &_bx);
         if (RAY_IS_ERR(vec)) return vec;
-        if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+        if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", "fold-right: vec arg must be a list, got %s", ray_type_name(vec->type)); }
         int64_t len = ray_len(vec);
-        if (len == 0) { if (_bx) ray_release(_bx); return ray_error("domain", NULL); }
+        if (len == 0) { if (_bx) ray_release(_bx); return ray_error("domain", "fold-right: empty list has no initial value, got %lld", (long long)len); }
         ray_t** elems = (ray_t**)ray_data(vec);
         ray_retain(elems[len - 1]);
         acc = elems[len - 1];
@@ -2270,7 +2270,7 @@ ray_t* ray_fold_right_fn(ray_t** args, int64_t n) {
     acc = args[1];
     vec = unbox_vec_arg(args[2], &_bx);
     if (RAY_IS_ERR(vec)) { ray_release(acc); return vec; }
-    if (!is_list(vec)) { ray_release(acc); if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(vec)) { ray_release(acc); if (_bx) ray_release(_bx); return ray_error("type", "fold-right: vec arg must be a list, got %s", ray_type_name(vec->type)); }
     int64_t len = ray_len(vec);
     ray_t** elems = (ray_t**)ray_data(vec);
     for (int64_t i = len - 1; i >= 0; i--) {
@@ -2290,7 +2290,7 @@ ray_t* ray_scan_left_fn(ray_t** args, int64_t n) {
 
 /* (scan-right fn vec) — running right fold, returns vector of partial results */
 ray_t* ray_scan_right_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("domain", "scan-right: requires at least 2 args (fn and vec), got %lld", (long long)n);
     for (int64_t i = 0; i < n; i++)
         if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
 
@@ -2298,7 +2298,7 @@ ray_t* ray_scan_right_fn(ray_t** args, int64_t n) {
     ray_t* _bx = NULL;
     ray_t* vec = unbox_vec_arg(args[1], &_bx);
     if (RAY_IS_ERR(vec)) return vec;
-    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", NULL); }
+    if (!is_list(vec)) { if (_bx) ray_release(_bx); return ray_error("type", "scan-right: vec arg must be a list, got %s", ray_type_name(vec->type)); }
     int64_t len = ray_len(vec);
     if (len == 0) {
         if (_bx) ray_release(_bx);
