@@ -26,6 +26,7 @@
 #include "ops/rowsel.h"
 #include "ops/hll.h"        /* approximate count-distinct via HyperLogLog */
 #include "lang/internal.h"  /* for ray_median_dbl_inplace */
+#include "lang/format.h"    /* ray_type_name */
 #include "table/domain.h"   /* sym-domain resolution (ray_sym_domain_count) */
 #include "ops/agg_engine.h" /* v2 agg engine routing gate (ray_agg_engine_v2) */
 
@@ -765,7 +766,7 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         return ray_i64(cnt);
     }
     default:
-        return ray_error("type", NULL);
+        return ray_error("type", "count distinct: unsupported column type, got %s", ray_type_name(in_type));
     }
 
     void* base = ray_data(input);
@@ -1340,7 +1341,8 @@ __attribute__((unused)) static ray_t* count_distinct_per_group_hll(ray_t* src, c
  * hash mixes both halves so rare-gid collisions don't cluster. */
 ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
                                     int64_t n_rows, int64_t n_groups) {
-    if (!src || RAY_IS_ERR(src) || n_groups < 0) return ray_error("domain", NULL);
+    if (!src || RAY_IS_ERR(src)) return ray_error("domain", "count distinct per group: invalid source column");
+    if (n_groups < 0) return ray_error("domain", "count distinct per group: group count must be non-negative, got %lld", (long long)n_groups);
     int8_t in_type = src->type;
     switch (in_type) {
     case RAY_BOOL: case RAY_U8:
@@ -1351,7 +1353,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
     default:
         return NULL; /* unsupported — caller falls back. */
     }
-    if (src->len < n_rows) return ray_error("domain", NULL);
+    if (src->len < n_rows) return ray_error("domain", "count distinct per group: source has fewer rows than required, got %lld need %lld", (long long)src->len, (long long)n_rows);
 
     ray_t* out = ray_vec_new(RAY_I64, n_groups);
     if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
@@ -2031,7 +2033,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (input->type == RAY_TABLE) {
         if (op->opcode == OP_COUNT)
             return ray_i64(ray_table_nrows(input));
-        return ray_error("type", NULL);
+        return ray_error("type", "reduction: %s requires a column, got a table", ray_opcode_name(op->opcode));
     }
 
     /* Atom input: a reduction of a scalar sub-expression (e.g.
@@ -2062,7 +2064,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             /* OP_PROD has no scalar builtin; prod of a single element is
              * that element. */
             case OP_PROD:       ray_retain(input); return input;
-            default:            return ray_error("type", NULL);
+            default:            return ray_error("type", "reduction: unsupported op %s on atom of type %s", ray_opcode_name(op->opcode), ray_type_name(input->type));
         }
     }
 

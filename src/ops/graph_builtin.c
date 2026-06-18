@@ -154,32 +154,32 @@ static int64_t max_plus_one(ray_t* col_i64) {
  * that consume edge weights (dijkstra, mst, k-shortest, astar).
  * -------------------------------------------------------------------------- */
 ray_t* ray_graph_build_fn(ray_t** args, int64_t n) {
-    if (n < 3 || n > 4) return ray_error("rank", NULL);
+    if (n < 3 || n > 4) return ray_error("rank", "graph.build: expects 3 or 4 arguments, got %lld", (long long)n);
     ray_t* tbl = args[0];
-    if (!tbl || tbl->type != RAY_TABLE) return ray_error("type", NULL);
+    if (!tbl || tbl->type != RAY_TABLE) return ray_error("type", "graph.build: edges must be a table, got %s", tbl ? ray_type_name(tbl->type) : "null");
 
     int64_t src_sym = arg_to_sym(args[1]);
     int64_t dst_sym = arg_to_sym(args[2]);
-    if (src_sym < 0 || dst_sym < 0) return ray_error("type", NULL);
+    if (src_sym < 0 || dst_sym < 0) return ray_error("type", "graph.build: src and dst column names must be sym or str, got %s and %s", ray_type_name(args[1]->type), ray_type_name(args[2]->type));
 
     int64_t weight_sym = -1;
     if (n == 4) {
         weight_sym = arg_to_sym(args[3]);
-        if (weight_sym < 0) return ray_error("type", NULL);
+        if (weight_sym < 0) return ray_error("type", "graph.build: weight column name must be sym or str, got %s", ray_type_name(args[3]->type));
     }
 
     ray_t* src_col = ray_table_get_col(tbl, src_sym);
     ray_t* dst_col = ray_table_get_col(tbl, dst_sym);
     if (!src_col || !dst_col) return ray_error("name", NULL);
-    if (!ray_is_vec(src_col) || !ray_is_vec(dst_col)) return ray_error("type", NULL);
-    if (src_col->len != dst_col->len) return ray_error("length", NULL);
+    if (!ray_is_vec(src_col) || !ray_is_vec(dst_col)) return ray_error("type", "graph.build: src and dst columns must be vectors, got %s and %s", ray_type_name(src_col->type), ray_type_name(dst_col->type));
+    if (src_col->len != dst_col->len) return ray_error("length", "graph.build: src and dst columns must have equal length, got %lld and %lld", (long long)src_col->len, (long long)dst_col->len);
 
     /* Widen src/dst into RAY_I64 if needed.  ray_rel_from_edges insists
      * on I64 columns directly. */
     ray_t* src_i64 = widen_to_i64(src_col);
-    if (!src_i64) return ray_error("type", NULL);
+    if (!src_i64) return ray_error("type", "graph.build: src column must be an integer or sym vector, got %s", ray_type_name(src_col->type));
     ray_t* dst_i64 = widen_to_i64(dst_col);
-    if (!dst_i64) { ray_release(src_i64); return ray_error("type", NULL); }
+    if (!dst_i64) { ray_release(src_i64); return ray_error("type", "graph.build: dst column must be an integer or sym vector, got %s", ray_type_name(dst_col->type)); }
 
     /* Determine n_nodes from the larger of (max(src), max(dst)) + 1.  This
      * lets the user omit a node-count argument; bigger graphs that need a
@@ -223,12 +223,12 @@ ray_t* ray_graph_build_fn(ray_t** args, int64_t n) {
         }
         if (w_col->len != src_col->len) {
             ray_rel_free(rel); ray_release(edges);
-            return ray_error("length", NULL);
+            return ray_error("length", "graph.build: weight column must match edge count, got %lld and %lld", (long long)w_col->len, (long long)src_col->len);
         }
         if (w_col->type != RAY_F64 && w_col->type != RAY_I64 &&
             w_col->type != RAY_I32 && w_col->type != RAY_F32) {
             ray_rel_free(rel); ray_release(edges);
-            return ray_error("type", NULL);
+            return ray_error("type", "graph.build: weight column must be f64, f32, i64, or i32, got %s", ray_type_name(w_col->type));
         }
 
         /* Coerce weights to RAY_F64 (the algorithms expect F64). */
@@ -290,7 +290,7 @@ ray_t* ray_graph_build_fn(ray_t** args, int64_t n) {
  * call returns "type" instead of double-freeing. */
 ray_t* ray_graph_free_fn(ray_t* h) {
     ray_rel_t* rel = graph_unwrap(h);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.free: expects a graph handle, got %s", h ? ray_type_name(h->type) : "null");
     ray_rel_free(rel);
     h->i64 = 0;
     h->attrs &= ~RAY_ATTR_GRAPH;
@@ -302,7 +302,7 @@ ray_t* ray_graph_free_fn(ray_t* h) {
  * 'foo lookup syntax works. */
 ray_t* ray_graph_info_fn(ray_t* h) {
     ray_rel_t* rel = graph_unwrap(h);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.info: expects a graph handle, got %s", h ? ray_type_name(h->type) : "null");
 
     ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 4);
     if (RAY_IS_ERR(keys)) return keys;
@@ -357,24 +357,24 @@ static const char* rel_weight_col_name(ray_rel_t* rel) {
 
 /* (.graph.pagerank h [iter] [damping]) → table {_node, _rank} */
 ray_t* ray_graph_pagerank_fn(ray_t** args, int64_t n) {
-    if (n < 1 || n > 3) return ray_error("rank", NULL);
+    if (n < 1 || n > 3) return ray_error("rank", "graph.pagerank: expects 1 to 3 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.pagerank: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
 
     uint16_t iters = 30;
     double damping = 0.85;
     if (n >= 2) {
-        if (!atom_is_int(args[1])) return ray_error("type", NULL);
+        if (!atom_is_int(args[1])) return ray_error("type", "graph.pagerank: iter must be an integer, got %s", ray_type_name(args[1]->type));
         int64_t v = atom_to_i64(args[1]);
-        if (v <= 0 || v > 65535) return ray_error("domain", NULL);
+        if (v <= 0 || v > 65535) return ray_error("domain", "graph.pagerank: iter must be in 1..65535, got %lld", (long long)v);
         iters = (uint16_t)v;
     }
     if (n >= 3) {
         if (args[2]->type != -RAY_F64 && !atom_is_int(args[2]))
-            return ray_error("type", NULL);
+            return ray_error("type", "graph.pagerank: damping must be a number, got %s", ray_type_name(args[2]->type));
         damping = (args[2]->type == -RAY_F64) ? args[2]->f64
                                               : (double)atom_to_i64(args[2]);
-        if (damping <= 0.0 || damping >= 1.0) return ray_error("domain", NULL);
+        if (damping <= 0.0 || damping >= 1.0) return ray_error("domain", "graph.pagerank: damping must be in (0.0, 1.0)");
     }
 
     ray_graph_t* g = ray_graph_new(NULL);
@@ -388,9 +388,9 @@ ray_t* ray_graph_pagerank_fn(ray_t** args, int64_t n) {
 
 /* (.graph.connected h) → table {_node, _component} */
 ray_t* ray_graph_connected_fn(ray_t** args, int64_t n) {
-    if (n != 1) return ray_error("rank", NULL);
+    if (n != 1) return ray_error("rank", "graph.connected: expects 1 argument, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.connected: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
 
     ray_graph_t* g = ray_graph_new(NULL);
     if (!g) return ray_error("oom", NULL);
@@ -403,10 +403,10 @@ ray_t* ray_graph_connected_fn(ray_t** args, int64_t n) {
 
 /* (.graph.dijkstra h src [dst] [max-depth]) → table {_node, _dist, _depth} */
 ray_t* ray_graph_dijkstra_fn(ray_t** args, int64_t n) {
-    if (n < 2 || n > 4) return ray_error("rank", NULL);
+    if (n < 2 || n > 4) return ray_error("rank", "graph.dijkstra: expects 2 to 4 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
-    if (!atom_is_int(args[1])) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.dijkstra: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
+    if (!atom_is_int(args[1])) return ray_error("type", "graph.dijkstra: src must be an integer, got %s", ray_type_name(args[1]->type));
     int64_t src_id = atom_to_i64(args[1]);
 
     int64_t dst_id = -1;
@@ -417,14 +417,14 @@ ray_t* ray_graph_dijkstra_fn(ray_t** args, int64_t n) {
         } else if (atom_is_int(args[2])) {
             dst_id = atom_to_i64(args[2]);
         } else {
-            return ray_error("type", NULL);
+            return ray_error("type", "graph.dijkstra: dst must be an integer or nil, got %s", ray_type_name(args[2]->type));
         }
     }
     uint8_t max_depth = 255;
     if (n >= 4) {
-        if (!atom_is_int(args[3])) return ray_error("type", NULL);
+        if (!atom_is_int(args[3])) return ray_error("type", "graph.dijkstra: max-depth must be an integer, got %s", ray_type_name(args[3]->type));
         int64_t v = atom_to_i64(args[3]);
-        if (v <= 0 || v > 255) return ray_error("domain", NULL);
+        if (v <= 0 || v > 255) return ray_error("domain", "graph.dijkstra: max-depth must be in 1..255, got %lld", (long long)v);
         max_depth = (uint8_t)v;
     }
 
@@ -447,14 +447,14 @@ ray_t* ray_graph_dijkstra_fn(ray_t** args, int64_t n) {
 
 /* (.graph.louvain h [max-iter]) → table {_node, _community} */
 ray_t* ray_graph_louvain_fn(ray_t** args, int64_t n) {
-    if (n < 1 || n > 2) return ray_error("rank", NULL);
+    if (n < 1 || n > 2) return ray_error("rank", "graph.louvain: expects 1 or 2 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.louvain: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
     uint16_t iters = 100;
     if (n == 2) {
-        if (!atom_is_int(args[1])) return ray_error("type", NULL);
+        if (!atom_is_int(args[1])) return ray_error("type", "graph.louvain: max-iter must be an integer, got %s", ray_type_name(args[1]->type));
         int64_t v = atom_to_i64(args[1]);
-        if (v <= 0 || v > 65535) return ray_error("domain", NULL);
+        if (v <= 0 || v > 65535) return ray_error("domain", "graph.louvain: max-iter must be in 1..65535, got %lld", (long long)v);
         iters = (uint16_t)v;
     }
 
@@ -469,9 +469,9 @@ ray_t* ray_graph_louvain_fn(ray_t** args, int64_t n) {
 
 /* (.graph.degree h) → table {_node, _in_degree, _out_degree, _degree} */
 ray_t* ray_graph_degree_fn(ray_t** args, int64_t n) {
-    if (n != 1) return ray_error("rank", NULL);
+    if (n != 1) return ray_error("rank", "graph.degree: expects 1 argument, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.degree: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
 
     ray_graph_t* g = ray_graph_new(NULL);
     if (!g) return ray_error("oom", NULL);
@@ -484,9 +484,9 @@ ray_t* ray_graph_degree_fn(ray_t** args, int64_t n) {
 
 /* (.graph.topsort h) → table {_node, _order} */
 ray_t* ray_graph_topsort_fn(ray_t** args, int64_t n) {
-    if (n != 1) return ray_error("rank", NULL);
+    if (n != 1) return ray_error("rank", "graph.topsort: expects 1 argument, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.topsort: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
 
     ray_graph_t* g = ray_graph_new(NULL);
     if (!g) return ray_error("oom", NULL);
@@ -499,16 +499,16 @@ ray_t* ray_graph_topsort_fn(ray_t** args, int64_t n) {
 
 /* (.graph.dfs h src [max-depth]) → table {_node, _depth, _parent} */
 ray_t* ray_graph_dfs_fn(ray_t** args, int64_t n) {
-    if (n < 2 || n > 3) return ray_error("rank", NULL);
+    if (n < 2 || n > 3) return ray_error("rank", "graph.dfs: expects 2 or 3 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
-    if (!atom_is_int(args[1])) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.dfs: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
+    if (!atom_is_int(args[1])) return ray_error("type", "graph.dfs: src must be an integer, got %s", ray_type_name(args[1]->type));
     int64_t src_id = atom_to_i64(args[1]);
     uint8_t max_depth = 255;
     if (n == 3) {
-        if (!atom_is_int(args[2])) return ray_error("type", NULL);
+        if (!atom_is_int(args[2])) return ray_error("type", "graph.dfs: max-depth must be an integer, got %s", ray_type_name(args[2]->type));
         int64_t v = atom_to_i64(args[2]);
-        if (v < 0 || v > 255) return ray_error("domain", NULL);
+        if (v < 0 || v > 255) return ray_error("domain", "graph.dfs: max-depth must be in 0..255, got %lld", (long long)v);
         max_depth = (uint8_t)v;
     }
 
@@ -525,9 +525,9 @@ ray_t* ray_graph_dfs_fn(ray_t** args, int64_t n) {
 
 /* (.graph.cluster h) → table {_node, _coefficient} */
 ray_t* ray_graph_cluster_fn(ray_t** args, int64_t n) {
-    if (n != 1) return ray_error("rank", NULL);
+    if (n != 1) return ray_error("rank", "graph.cluster: expects 1 argument, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.cluster: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
 
     ray_graph_t* g = ray_graph_new(NULL);
     if (!g) return ray_error("oom", NULL);
@@ -540,14 +540,14 @@ ray_t* ray_graph_cluster_fn(ray_t** args, int64_t n) {
 
 /* (.graph.betweenness h [sample]) → table {_node, _centrality} */
 ray_t* ray_graph_betweenness_fn(ray_t** args, int64_t n) {
-    if (n < 1 || n > 2) return ray_error("rank", NULL);
+    if (n < 1 || n > 2) return ray_error("rank", "graph.betweenness: expects 1 or 2 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.betweenness: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
     uint16_t sample = 0;  /* 0 = exact */
     if (n == 2) {
-        if (!atom_is_int(args[1])) return ray_error("type", NULL);
+        if (!atom_is_int(args[1])) return ray_error("type", "graph.betweenness: sample must be an integer, got %s", ray_type_name(args[1]->type));
         int64_t v = atom_to_i64(args[1]);
-        if (v < 0 || v > 65535) return ray_error("domain", NULL);
+        if (v < 0 || v > 65535) return ray_error("domain", "graph.betweenness: sample must be in 0..65535, got %lld", (long long)v);
         sample = (uint16_t)v;
     }
 
@@ -562,14 +562,14 @@ ray_t* ray_graph_betweenness_fn(ray_t** args, int64_t n) {
 
 /* (.graph.closeness h [sample]) → table {_node, _centrality} */
 ray_t* ray_graph_closeness_fn(ray_t** args, int64_t n) {
-    if (n < 1 || n > 2) return ray_error("rank", NULL);
+    if (n < 1 || n > 2) return ray_error("rank", "graph.closeness: expects 1 or 2 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.closeness: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
     uint16_t sample = 0;
     if (n == 2) {
-        if (!atom_is_int(args[1])) return ray_error("type", NULL);
+        if (!atom_is_int(args[1])) return ray_error("type", "graph.closeness: sample must be an integer, got %s", ray_type_name(args[1]->type));
         int64_t v = atom_to_i64(args[1]);
-        if (v < 0 || v > 65535) return ray_error("domain", NULL);
+        if (v < 0 || v > 65535) return ray_error("domain", "graph.closeness: sample must be in 0..65535, got %lld", (long long)v);
         sample = (uint16_t)v;
     }
 
@@ -584,9 +584,9 @@ ray_t* ray_graph_closeness_fn(ray_t** args, int64_t n) {
 
 /* (.graph.mst h) → table {_src, _dst, _weight} */
 ray_t* ray_graph_mst_fn(ray_t** args, int64_t n) {
-    if (n != 1) return ray_error("rank", NULL);
+    if (n != 1) return ray_error("rank", "graph.mst: expects 1 argument, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.mst: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
     const char* w_col = rel_weight_col_name(rel);
     if (!w_col) return ray_error("schema", "graph has no weight column");
 
@@ -601,16 +601,16 @@ ray_t* ray_graph_mst_fn(ray_t** args, int64_t n) {
 
 /* (.graph.random-walk h src [walk-len]) → table {_step, _node} */
 ray_t* ray_graph_random_walk_fn(ray_t** args, int64_t n) {
-    if (n < 2 || n > 3) return ray_error("rank", NULL);
+    if (n < 2 || n > 3) return ray_error("rank", "graph.random-walk: expects 2 or 3 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
-    if (!atom_is_int(args[1])) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.random-walk: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
+    if (!atom_is_int(args[1])) return ray_error("type", "graph.random-walk: src must be an integer, got %s", ray_type_name(args[1]->type));
     int64_t src_id = atom_to_i64(args[1]);
     uint16_t walk_len = 10;
     if (n == 3) {
-        if (!atom_is_int(args[2])) return ray_error("type", NULL);
+        if (!atom_is_int(args[2])) return ray_error("type", "graph.random-walk: walk-len must be an integer, got %s", ray_type_name(args[2]->type));
         int64_t v = atom_to_i64(args[2]);
-        if (v <= 0 || v > 65535) return ray_error("domain", NULL);
+        if (v <= 0 || v > 65535) return ray_error("domain", "graph.random-walk: walk-len must be in 1..65535, got %lld", (long long)v);
         walk_len = (uint16_t)v;
     }
 
@@ -627,15 +627,15 @@ ray_t* ray_graph_random_walk_fn(ray_t** args, int64_t n) {
 
 /* (.graph.k-shortest h src dst k) → table {_path_id, _node, _dist} */
 ray_t* ray_graph_k_shortest_fn(ray_t** args, int64_t n) {
-    if (n != 4) return ray_error("rank", NULL);
+    if (n != 4) return ray_error("rank", "graph.k-shortest: expects 4 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.k-shortest: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
     if (!atom_is_int(args[1]) || !atom_is_int(args[2]) || !atom_is_int(args[3]))
-        return ray_error("type", NULL);
+        return ray_error("type", "graph.k-shortest: src, dst, and k must be integers, got %s, %s, and %s", ray_type_name(args[1]->type), ray_type_name(args[2]->type), ray_type_name(args[3]->type));
     int64_t src_id = atom_to_i64(args[1]);
     int64_t dst_id = atom_to_i64(args[2]);
     int64_t k_v    = atom_to_i64(args[3]);
-    if (k_v <= 0 || k_v > 65535) return ray_error("domain", NULL);
+    if (k_v <= 0 || k_v > 65535) return ray_error("domain", "graph.k-shortest: k must be in 1..65535, got %lld", (long long)k_v);
     const char* w_col = rel_weight_col_name(rel);
     if (!w_col) return ray_error("schema", "graph has no weight column");
 
@@ -657,17 +657,17 @@ ray_t* ray_graph_k_shortest_fn(ray_t** args, int64_t n) {
  * inputs; we materialise them via ray_const_i64 the same way the other
  * src/dst wrappers do. */
 ray_t* ray_graph_shortest_path_fn(ray_t** args, int64_t n) {
-    if (n < 3 || n > 4) return ray_error("rank", NULL);
+    if (n < 3 || n > 4) return ray_error("rank", "graph.shortest-path: expects 3 or 4 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
-    if (!atom_is_int(args[1]) || !atom_is_int(args[2])) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.shortest-path: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
+    if (!atom_is_int(args[1]) || !atom_is_int(args[2])) return ray_error("type", "graph.shortest-path: src and dst must be integers, got %s and %s", ray_type_name(args[1]->type), ray_type_name(args[2]->type));
     int64_t src_id = atom_to_i64(args[1]);
     int64_t dst_id = atom_to_i64(args[2]);
     uint8_t max_depth = 255;
     if (n == 4) {
-        if (!atom_is_int(args[3])) return ray_error("type", NULL);
+        if (!atom_is_int(args[3])) return ray_error("type", "graph.shortest-path: max-depth must be an integer, got %s", ray_type_name(args[3]->type));
         int64_t v = atom_to_i64(args[3]);
-        if (v <= 0 || v > 255) return ray_error("domain", NULL);
+        if (v <= 0 || v > 255) return ray_error("domain", "graph.shortest-path: max-depth must be in 1..255, got %lld", (long long)v);
         max_depth = (uint8_t)v;
     }
 
@@ -686,16 +686,16 @@ ray_t* ray_graph_shortest_path_fn(ray_t** args, int64_t n) {
 /* (.graph.expand h src [direction]) → table {_src, _dst}.
  * direction: 0=forward (default), 1=reverse, 2=both. */
 ray_t* ray_graph_expand_fn(ray_t** args, int64_t n) {
-    if (n < 2 || n > 3) return ray_error("rank", NULL);
+    if (n < 2 || n > 3) return ray_error("rank", "graph.expand: expects 2 or 3 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
-    if (!atom_is_int(args[1])) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.expand: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
+    if (!atom_is_int(args[1])) return ray_error("type", "graph.expand: src must be an integer, got %s", ray_type_name(args[1]->type));
     int64_t src_id = atom_to_i64(args[1]);
     uint8_t direction = 0;
     if (n == 3) {
-        if (!atom_is_int(args[2])) return ray_error("type", NULL);
+        if (!atom_is_int(args[2])) return ray_error("type", "graph.expand: direction must be an integer, got %s", ray_type_name(args[2]->type));
         int64_t v = atom_to_i64(args[2]);
-        if (v < 0 || v > 2) return ray_error("domain", NULL);
+        if (v < 0 || v > 2) return ray_error("domain", "graph.expand: direction must be 0 (forward), 1 (reverse), or 2 (both), got %lld", (long long)v);
         direction = (uint8_t)v;
     }
 
@@ -719,27 +719,27 @@ ray_t* ray_graph_expand_fn(ray_t** args, int64_t n) {
 
 /* (.graph.var-expand h src min-depth max-depth [direction] [track-path]) */
 ray_t* ray_graph_var_expand_fn(ray_t** args, int64_t n) {
-    if (n < 4 || n > 6) return ray_error("rank", NULL);
+    if (n < 4 || n > 6) return ray_error("rank", "graph.var-expand: expects 4 to 6 arguments, got %lld", (long long)n);
     ray_rel_t* rel = graph_unwrap(args[0]);
-    if (!rel) return ray_error("type", NULL);
+    if (!rel) return ray_error("type", "graph.var-expand: expects a graph handle, got %s", args[0] ? ray_type_name(args[0]->type) : "null");
     if (!atom_is_int(args[1]) || !atom_is_int(args[2]) || !atom_is_int(args[3]))
-        return ray_error("type", NULL);
+        return ray_error("type", "graph.var-expand: src, min-depth, and max-depth must be integers, got %s, %s, and %s", ray_type_name(args[1]->type), ray_type_name(args[2]->type), ray_type_name(args[3]->type));
     int64_t src_id    = atom_to_i64(args[1]);
     int64_t min_d_v   = atom_to_i64(args[2]);
     int64_t max_d_v   = atom_to_i64(args[3]);
     if (min_d_v < 0 || min_d_v > 255 || max_d_v < min_d_v || max_d_v > 255)
-        return ray_error("domain", NULL);
+        return ray_error("domain", "graph.var-expand: require 0 <= min-depth <= max-depth <= 255, got min-depth %lld and max-depth %lld", (long long)min_d_v, (long long)max_d_v);
     uint8_t direction = 0;
     bool    track     = false;
     if (n >= 5) {
-        if (!atom_is_int(args[4])) return ray_error("type", NULL);
+        if (!atom_is_int(args[4])) return ray_error("type", "graph.var-expand: direction must be an integer, got %s", ray_type_name(args[4]->type));
         int64_t v = atom_to_i64(args[4]);
-        if (v < 0 || v > 2) return ray_error("domain", NULL);
+        if (v < 0 || v > 2) return ray_error("domain", "graph.var-expand: direction must be 0 (forward), 1 (reverse), or 2 (both), got %lld", (long long)v);
         direction = (uint8_t)v;
     }
     if (n >= 6) {
         if (args[5]->type != -RAY_BOOL && !atom_is_int(args[5]))
-            return ray_error("type", NULL);
+            return ray_error("type", "graph.var-expand: track-path must be a boolean or integer, got %s", ray_type_name(args[5]->type));
         track = (args[5]->type == -RAY_BOOL) ? (args[5]->b8 != 0)
                                               : (atom_to_i64(args[5]) != 0);
     }
