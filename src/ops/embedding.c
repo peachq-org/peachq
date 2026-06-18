@@ -135,9 +135,20 @@ static double* query_to_doubles(ray_t* q, int32_t dim, double* q_norm_out) {
     return buf;
 }
 
+static const char* metric_op_name(metric_kind_t kind) {
+    switch (kind) {
+        case MET_COS_DIST:   return "cos-dist";
+        case MET_INNER_PROD: return "inner-prod";
+        case MET_L2_DIST:    return "l2-dist";
+        default:             return "vec-metric";
+    }
+}
+
 /* Binary dispatcher for cos-dist / inner-prod / l2-dist. */
 static ray_t* vec_binary_metric(metric_kind_t kind, ray_t* a, ray_t* b) {
-    if (!a || !b) return ray_error("type", NULL);
+    const char* op = metric_op_name(kind);
+    /* a/b are NULL here, so no type names available. */
+    if (!a || !b) return ray_error("type", "%s: missing operand", op);
 
     /* LIST × vec → F64 vector (one score per list entry).
      * vec × LIST → same (treat the LIST as the column). */
@@ -148,8 +159,11 @@ static ray_t* vec_binary_metric(metric_kind_t kind, ray_t* a, ray_t* b) {
 
     if (list) {
         int32_t dim;
-        if (list_vec_validate(list, &dim) != 0) return ray_error("type", NULL);
-        if (query->len != dim) return ray_error("length", NULL);
+        if (list_vec_validate(list, &dim) != 0)
+            return ray_error("type", "%s: list column must contain equal-length numeric vectors (f32, f64, i32 or i64)", op);
+        if (query->len != dim)
+            return ray_error("length", "%s: query length must match column dim %lld, got %lld",
+                             op, (long long)dim, (long long)query->len);
 
         double q_norm;
         double* q = query_to_doubles(query, dim, &q_norm);
@@ -169,8 +183,12 @@ static ray_t* vec_binary_metric(metric_kind_t kind, ray_t* a, ray_t* b) {
     }
 
     /* vec × vec → scalar */
-    if (!rayvec_is_numeric(a) || !rayvec_is_numeric(b)) return ray_error("type", NULL);
-    if (a->len != b->len || a->len <= 0) return ray_error("length", NULL);
+    if (!rayvec_is_numeric(a) || !rayvec_is_numeric(b))
+        return ray_error("type", "%s: expects numeric vectors (f32, f64, i32 or i64), got %s and %s",
+                         op, ray_type_name(a->type), ray_type_name(b->type));
+    if (a->len != b->len || a->len <= 0)
+        return ray_error("length", "%s: operands must be non-empty equal-length vectors, got %lld and %lld",
+                         op, (long long)a->len, (long long)b->len);
     int32_t dim = (int32_t)a->len;
 
     double q_norm;
@@ -187,10 +205,12 @@ ray_t* ray_l2_dist_fn    (ray_t* a, ray_t* b) { return vec_binary_metric(MET_L2_
 
 /* (norm x): x is numeric vec → F64 scalar; x is LIST of numeric vecs → F64 vector. */
 ray_t* ray_norm_fn(ray_t* x) {
-    if (!x) return ray_error("type", NULL);
+    /* x is NULL here, so no type name available. */
+    if (!x) return ray_error("type", "norm: missing operand");
     if (x->type == RAY_LIST) {
         int32_t dim;
-        if (list_vec_validate(x, &dim) != 0) return ray_error("type", NULL);
+        if (list_vec_validate(x, &dim) != 0)
+            return ray_error("type", "norm: list must contain equal-length numeric vectors (f32, f64, i32 or i64)");
         int64_t n = x->len;
         ray_t* result = ray_vec_new(RAY_F64, n);
         if (!result || RAY_IS_ERR(result)) return ray_error("oom", NULL);
@@ -207,7 +227,9 @@ ray_t* ray_norm_fn(ray_t* x) {
         }
         return result;
     }
-    if (!rayvec_is_numeric(x)) return ray_error("type", NULL);
+    if (!rayvec_is_numeric(x))
+        return ray_error("type", "norm: expects a numeric vector (f32, f64, i32 or i64) or list thereof, got %s",
+                         ray_type_name(x->type));
     double s = 0.0;
     for (int64_t i = 0; i < x->len; i++) {
         double e = rayvec_at_f64(x, i);
@@ -243,23 +265,30 @@ static bool atom_is_int(ray_t* a) {
 
 /* (knn col query k [metric]) → table {_rowid, _dist} */
 ray_t* ray_knn_fn(ray_t** args, int64_t n) {
-    if (n < 3 || n > 4) return ray_error("rank", NULL);
+    if (n < 3 || n > 4) return ray_error("rank", "knn: expects 3 or 4 args (col query k [metric]), got %lld", (long long)n);
     ray_t* col   = args[0];
     ray_t* query = args[1];
     ray_t* katom = args[2];
-    if (!col || col->type != RAY_LIST) return ray_error("type", NULL);
-    if (!rayvec_is_numeric(query))     return ray_error("type", NULL);
-    if (!atom_is_int(katom))           return ray_error("type", NULL);
+    if (!col || col->type != RAY_LIST)
+        return ray_error("type", "knn: col must be a list of numeric vectors, got %s", ray_type_name(col ? col->type : 0));
+    if (!rayvec_is_numeric(query))
+        return ray_error("type", "knn: query must be a numeric vector (f32, f64, i32 or i64), got %s", ray_type_name(query ? query->type : 0));
+    if (!atom_is_int(katom))
+        return ray_error("type", "knn: k must be an integer atom, got %s", ray_type_name(katom ? katom->type : 0));
 
     ray_hnsw_metric_t metric = RAY_HNSW_COSINE;
-    if (n == 4 && !parse_metric_sym(args[3], &metric)) return ray_error("domain", NULL);
+    if (n == 4 && !parse_metric_sym(args[3], &metric))
+        return ray_error("domain", "knn: metric must be 'cosine, 'l2 or 'ip");
 
     int32_t dim;
-    if (list_vec_validate(col, &dim) != 0) return ray_error("type", NULL);
-    if (query->len != dim) return ray_error("length", NULL);
+    if (list_vec_validate(col, &dim) != 0)
+        return ray_error("type", "knn: col must contain equal-length numeric vectors (f32, f64, i32 or i64)");
+    if (query->len != dim)
+        return ray_error("length", "knn: query length must match column dim %lld, got %lld",
+                         (long long)dim, (long long)query->len);
 
     int64_t k = atom_to_i64(katom);
-    if (k <= 0) return ray_error("domain", NULL);
+    if (k <= 0) return ray_error("domain", "knn: k must be positive, got %lld", (long long)k);
     int64_t nrows = col->len;
     if (k > nrows) k = nrows;
     if (nrows == 0) {
@@ -381,29 +410,34 @@ static ray_t* hnsw_wrap(ray_hnsw_t* idx) {
 
 /* (hnsw-build col [metric] [M] [ef_c]) → I64 handle (RAY_ATTR_HNSW) */
 ray_t* ray_hnsw_build_fn(ray_t** args, int64_t n) {
-    if (n < 1 || n > 4) return ray_error("rank", NULL);
+    if (n < 1 || n > 4) return ray_error("rank", "hnsw-build: expects 1 to 4 args (col [metric] [M] [ef_c]), got %lld", (long long)n);
     ray_t* col = args[0];
-    if (!col || col->type != RAY_LIST) return ray_error("type", NULL);
+    if (!col || col->type != RAY_LIST)
+        return ray_error("type", "hnsw-build: col must be a list of numeric vectors, got %s", ray_type_name(col ? col->type : 0));
 
     ray_hnsw_metric_t metric = RAY_HNSW_COSINE;
-    if (n >= 2 && !parse_metric_sym(args[1], &metric)) return ray_error("domain", NULL);
+    if (n >= 2 && !parse_metric_sym(args[1], &metric))
+        return ray_error("domain", "hnsw-build: metric must be 'cosine, 'l2 or 'ip");
 
     int32_t M = HNSW_DEFAULT_M;
     if (n >= 3) {
-        if (!atom_is_int(args[2])) return ray_error("type", NULL);
+        if (!atom_is_int(args[2]))
+            return ray_error("type", "hnsw-build: M must be an integer atom, got %s", ray_type_name(args[2] ? args[2]->type : 0));
         int64_t v = atom_to_i64(args[2]);
         if (v > 0 && v <= 512) M = (int32_t)v;
     }
     int32_t ef_c = HNSW_DEFAULT_EF_C;
     if (n >= 4) {
-        if (!atom_is_int(args[3])) return ray_error("type", NULL);
+        if (!atom_is_int(args[3]))
+            return ray_error("type", "hnsw-build: ef_c must be an integer atom, got %s", ray_type_name(args[3] ? args[3]->type : 0));
         int64_t v = atom_to_i64(args[3]);
         if (v > 0 && v <= 4096) ef_c = (int32_t)v;
     }
 
     int32_t dim;
-    if (list_vec_validate(col, &dim) != 0) return ray_error("type", NULL);
-    if (dim <= 0) return ray_error("length", NULL);
+    if (list_vec_validate(col, &dim) != 0)
+        return ray_error("type", "hnsw-build: col must contain equal-length numeric vectors (f32, f64, i32 or i64)");
+    if (dim <= 0) return ray_error("length", "hnsw-build: vector dim must be positive, got %lld", (long long)dim);
 
     int64_t n_rows;
     float* flat = list_flatten_floats(col, dim, &n_rows);
@@ -421,21 +455,26 @@ ray_t* ray_hnsw_build_fn(ray_t** args, int64_t n) {
 
 /* (ann handle query k [ef_s]) → table {_rowid, _dist} */
 ray_t* ray_ann_fn(ray_t** args, int64_t n) {
-    if (n < 3 || n > 4) return ray_error("rank", NULL);
+    if (n < 3 || n > 4) return ray_error("rank", "ann: expects 3 or 4 args (handle query k [ef_s]), got %lld", (long long)n);
     ray_hnsw_t* idx = hnsw_unwrap(args[0]);
-    if (!idx) return ray_error("type", NULL);
-    if (!rayvec_is_numeric(args[1])) return ray_error("type", NULL);
-    if (!atom_is_int(args[2]))       return ray_error("type", NULL);
+    if (!idx) return ray_error("type", "ann: handle must be an hnsw index handle, got %s", ray_type_name(args[0] ? args[0]->type : 0));
+    if (!rayvec_is_numeric(args[1]))
+        return ray_error("type", "ann: query must be a numeric vector (f32, f64, i32 or i64), got %s", ray_type_name(args[1] ? args[1]->type : 0));
+    if (!atom_is_int(args[2]))
+        return ray_error("type", "ann: k must be an integer atom, got %s", ray_type_name(args[2] ? args[2]->type : 0));
 
     int32_t dim = idx->dim;
-    if (args[1]->len != dim) return ray_error("length", NULL);
+    if (args[1]->len != dim)
+        return ray_error("length", "ann: query length must match index dim %lld, got %lld",
+                         (long long)dim, (long long)args[1]->len);
     int64_t k = atom_to_i64(args[2]);
-    if (k <= 0) return ray_error("domain", NULL);
+    if (k <= 0) return ray_error("domain", "ann: k must be positive, got %lld", (long long)k);
 
     int32_t ef = (int32_t)k;
     if (ef < HNSW_DEFAULT_EF_S) ef = HNSW_DEFAULT_EF_S;
     if (n == 4) {
-        if (!atom_is_int(args[3])) return ray_error("type", NULL);
+        if (!atom_is_int(args[3]))
+            return ray_error("type", "ann: ef_s must be an integer atom, got %s", ray_type_name(args[3] ? args[3]->type : 0));
         int64_t v = atom_to_i64(args[3]);
         if (v > 0 && v <= 4096) ef = (int32_t)v;
     }
@@ -488,7 +527,7 @@ ray_t* ray_ann_fn(ray_t** args, int64_t n) {
  * means a second call returns a type error rather than double-freeing. */
 ray_t* ray_hnsw_free_fn(ray_t* h) {
     ray_hnsw_t* idx = hnsw_unwrap(h);
-    if (!idx) return ray_error("type", NULL);
+    if (!idx) return ray_error("type", "hnsw-free: expects an hnsw index handle, got %s", ray_type_name(h ? h->type : 0));
     ray_hnsw_free(idx);
     h->i64 = 0;
     h->attrs &= ~RAY_ATTR_HNSW;
@@ -498,11 +537,13 @@ ray_t* ray_hnsw_free_fn(ray_t* h) {
 /* (hnsw-save handle path) → null */
 ray_t* ray_hnsw_save_fn(ray_t* h, ray_t* path) {
     ray_hnsw_t* idx = hnsw_unwrap(h);
-    if (!idx) return ray_error("type", NULL);
-    if (!path || path->type != -RAY_STR) return ray_error("type", NULL);
+    if (!idx) return ray_error("type", "hnsw-save: handle must be an hnsw index handle, got %s", ray_type_name(h ? h->type : 0));
+    if (!path || path->type != -RAY_STR)
+        return ray_error("type", "hnsw-save: path must be a string, got %s", ray_type_name(path ? path->type : 0));
     const char* p = ray_str_ptr(path);
     size_t len = ray_str_len(path);
-    if (!p || len == 0 || len >= 1023) return ray_error("domain", NULL);
+    if (!p || len == 0 || len >= 1023)
+        return ray_error("domain", "hnsw-save: path length must be 1 to 1022 bytes, got %lld", (long long)len);
     char buf[1024];
     memcpy(buf, p, len);
     buf[len] = '\0';
@@ -513,10 +554,12 @@ ray_t* ray_hnsw_save_fn(ray_t* h, ray_t* path) {
 
 /* (hnsw-load path) → I64 handle */
 ray_t* ray_hnsw_load_fn(ray_t* path) {
-    if (!path || path->type != -RAY_STR) return ray_error("type", NULL);
+    if (!path || path->type != -RAY_STR)
+        return ray_error("type", "hnsw-load: path must be a string, got %s", ray_type_name(path ? path->type : 0));
     const char* p = ray_str_ptr(path);
     size_t len = ray_str_len(path);
-    if (!p || len == 0 || len >= 1023) return ray_error("domain", NULL);
+    if (!p || len == 0 || len >= 1023)
+        return ray_error("domain", "hnsw-load: path length must be 1 to 1022 bytes, got %lld", (long long)len);
     char buf[1024];
     memcpy(buf, p, len);
     buf[len] = '\0';
@@ -531,7 +574,7 @@ ray_t* ray_hnsw_load_fn(ray_t* path) {
  * Keys avoid hyphens so the 'quote-tick' syntax works: 'nrows, 'dim, etc. */
 ray_t* ray_hnsw_info_fn(ray_t* h) {
     ray_hnsw_t* idx = hnsw_unwrap(h);
-    if (!idx) return ray_error("type", NULL);
+    if (!idx) return ray_error("type", "hnsw-info: expects an hnsw index handle, got %s", ray_type_name(h ? h->type : 0));
 
     const char* mname = "cosine";
     switch ((ray_hnsw_metric_t)idx->metric) {
