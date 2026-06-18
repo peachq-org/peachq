@@ -23,6 +23,7 @@
 
 #include "lang/internal.h"
 #include "ops/ops.h"   /* RAY_LAZY, ray_is_lazy, ray_lazy_materialize */
+#include "lang/format.h"   /* ray_type_name (error context) */
 
 #include <assert.h>
 
@@ -178,7 +179,7 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
     /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
     if (is_temporal(a) && is_temporal(b))
         return make_bool(temporal_as_ns(a) == temporal_as_ns(b) ? 1 : 0);
-    if (!is_numeric(a) || !is_numeric(b)) return ray_error("type", NULL);
+    if (!is_numeric(a) || !is_numeric(b)) return ray_error("type", "=: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     if (is_float_op(a, b))
         return make_bool(as_f64(a) == as_f64(b) ? 1 : 0);
     return make_bool(as_i64(a) == as_i64(b) ? 1 : 0);
@@ -200,7 +201,7 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
     /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
     if (is_temporal(a) && is_temporal(b))
         return make_bool(temporal_as_ns(a) != temporal_as_ns(b) ? 1 : 0);
-    if (!is_numeric(a) || !is_numeric(b)) return ray_error("type", NULL);
+    if (!is_numeric(a) || !is_numeric(b)) return ray_error("type", "<>: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     if (is_float_op(a, b))
         return make_bool(as_f64(a) != as_f64(b) ? 1 : 0);
     return make_bool(as_i64(a) != as_i64(b) ? 1 : 0);

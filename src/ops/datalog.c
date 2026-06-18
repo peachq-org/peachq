@@ -34,6 +34,7 @@
 #include "ops/hash.h"          /* ray_hash_i64, ray_hash_combine */
 #include "ops/internal.h"      /* col_propagate_str_pool */
 #include "mem/sys.h"           /* ray_sys_alloc / ray_sys_free */
+#include "lang/format.h"       /* ray_type_name (error context) */
 #include <string.h>
 #include <stdio.h>
 
@@ -1132,7 +1133,7 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value,
 static ray_t* dl_broadcast_const_col(int64_t nrows, int8_t type, int64_t val,
                                       const ray_t* width_template) {
     if (type != RAY_I64 && type != RAY_SYM && type != RAY_F64) {
-        return ray_error("type", NULL);
+        return ray_error("type", "datalog: broadcast const column expects i64/sym/f64, got %s", ray_type_name(type));
     }
     uint8_t sym_w = RAY_SYM_W64;
     if (type == RAY_SYM && width_template && width_template->type == RAY_SYM)

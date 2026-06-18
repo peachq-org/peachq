@@ -22,6 +22,7 @@
  */
 
 #include "fvec.h"
+#include "lang/format.h"
 #include "mem/sys.h"
 #include "table/sym.h"
 #include <string.h>
@@ -57,7 +58,7 @@ void ray_ftable_free(ray_ftable_t* ft) {
 }
 
 ray_t* ray_ftable_materialize(ray_ftable_t* ft) {
-    if (!ft || ft->n_cols == 0) return ray_error("type", NULL);
+    if (!ft || ft->n_cols == 0) return ray_error("type", "fvec materialize: expects a non-empty fused table");
 
     ray_t* tbl = ray_table_new(ft->n_cols);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
@@ -69,12 +70,12 @@ ray_t* ray_ftable_materialize(ray_ftable_t* ft) {
         ray_t* col;
         if (fv->cur_idx >= 0) {
             /* Flat: replicate single value */
-            if (fv->cardinality <= 0) { ray_release(tbl); return ray_error("range", NULL); }
+            if (fv->cardinality <= 0) { int64_t card = fv->cardinality; ray_release(tbl); return ray_error("range", "fvec materialize: flat column cardinality must be positive, got %lld", (long long)card); }
             col = ray_vec_new(fv->vec->type, fv->cardinality);
             if (!col || RAY_IS_ERR(col)) { ray_release(tbl); return col ? col : ray_error("oom", NULL); }
             col->len = fv->cardinality;
             void* val = ray_vec_get(fv->vec, fv->cur_idx);
-            if (!val) { ray_release(col); ray_release(tbl); return ray_error("range", NULL); }
+            if (!val) { int64_t idx = fv->cur_idx; ray_release(col); ray_release(tbl); return ray_error("range", "fvec materialize: flat value index out of range, got %lld", (long long)idx); }
             uint8_t esz = ray_sym_elem_size(fv->vec->type, fv->vec->attrs);
             char* dst = (char*)ray_data(col);
             for (int64_t r = 0; r < fv->cardinality; r++)
