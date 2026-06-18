@@ -29,6 +29,7 @@
 #include "vec/embedding.h"
 #include "vec/str.h"
 #include "ops/idxop.h"
+#include "lang/format.h"  /* ray_type_name */
 #include <string.h>
 #include <stdlib.h>
 
@@ -153,10 +154,10 @@ static int64_t vec_capacity(ray_t* vec) {
 
 ray_t* ray_vec_new(int8_t type, int64_t capacity) {
     if (type <= 0 || type >= RAY_TYPE_COUNT)
-        return ray_error("type", NULL);
+        return ray_error("type", "vec_new: type must be a positive concrete vector type, got %s", ray_type_name(type));
     if (type == RAY_SYM)
         return ray_sym_vec_new(RAY_SYM_W64, capacity);  /* default: global sym IDs */
-    if (capacity < 0) return ray_error("range", NULL);
+    if (capacity < 0) return ray_error("range", "vec_new: capacity must be non-negative, got %lld", (long long)capacity);
 
     uint8_t esz = ray_elem_size(type);
     size_t data_size = (size_t)capacity * esz;
@@ -186,8 +187,8 @@ ray_t* ray_vec_new(int8_t type, int64_t capacity) {
 
 ray_t* ray_sym_vec_new(uint8_t sym_width, int64_t capacity) {
     if ((sym_width & ~RAY_SYM_W_MASK) != 0)
-        return ray_error("type", NULL);
-    if (capacity < 0) return ray_error("range", NULL);
+        return ray_error("type", "sym_vec_new: invalid sym width, expected one of RAY_SYM_W8/W16/W32/W64, got %u", (unsigned)sym_width);
+    if (capacity < 0) return ray_error("range", "sym_vec_new: capacity must be non-negative, got %lld", (long long)capacity);
 
     uint8_t esz = (uint8_t)RAY_SYM_ELEM(sym_width);
     size_t data_size = (size_t)capacity * esz;
@@ -243,8 +244,8 @@ void ray_sym_vec_adopt_domain(ray_t* out, ray_t* in) {
 ray_t* ray_vec_append(ray_t* vec, const void* elem) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
     if (vec->type <= 0 || vec->type >= RAY_TYPE_COUNT)
-        return ray_error("type", NULL);
-    if (vec->type == RAY_STR) return ray_error("type", NULL);
+        return ray_error("type", "vec_append: expects a concrete vector type, got %s", ray_type_name(vec->type));
+    if (vec->type == RAY_STR) return ray_error("type", "vec_append: str vectors use ray_str_vec_append, got %s", ray_type_name(vec->type));
 
     /* COW: if shared, copy first */
     ray_t* original = vec;
@@ -296,9 +297,9 @@ fail:
 
 ray_t* ray_vec_set(ray_t* vec, int64_t idx, const void* elem) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
-    if (vec->type == RAY_STR) return ray_error("type", NULL);
+    if (vec->type == RAY_STR) return ray_error("type", "vec_set: str vectors use ray_str_vec_set, got %s", ray_type_name(vec->type));
     if (idx < 0 || idx >= vec->len)
-        return ray_error("range", NULL);
+        return ray_error("range", "vec_set: index out of bounds [0,%lld), got %lld", (long long)vec->len, (long long)idx);
 
     /* COW: if shared, copy first */
     vec = ray_cow(vec);
@@ -352,7 +353,7 @@ void* ray_vec_get(ray_t* vec, int64_t idx) {
 ray_t* ray_vec_slice(ray_t* vec, int64_t offset, int64_t len) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
     if (offset < 0 || len < 0 || offset > vec->len || len > vec->len - offset)
-        return ray_error("range", NULL);
+        return ray_error("range", "vec_slice: offset+len must stay within [0,%lld], got offset %lld len %lld", (long long)vec->len, (long long)offset, (long long)len);
 
     /* If input is already a slice, resolve to ultimate parent */
     ray_t* parent = vec;
@@ -386,7 +387,7 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     if (!a || RAY_IS_ERR(a)) return a;
     if (!b || RAY_IS_ERR(b)) return b;
     if (a->type != b->type)
-        return ray_error("type", NULL);
+        return ray_error("type", "concat: operands must have matching type, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
 
     if (a->type == RAY_STR) {
         int64_t total_len = a->len + b->len;
@@ -421,7 +422,7 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
         /* Guard: total pool must fit in uint32_t for pool_off rebasing */
         if (total_pool > (int64_t)UINT32_MAX) {
             ray_release(result);
-            return ray_error("range", NULL);
+            return ray_error("range", "concat: merged str pool exceeds %lld bytes, got %lld", (long long)UINT32_MAX, (long long)total_pool);
         }
 
         if (total_pool > 0) {
@@ -622,9 +623,9 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
 ray_t* ray_vec_insert_at(ray_t* vec, int64_t idx, const void* elem) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
     if (vec->type <= 0 || vec->type >= RAY_TYPE_COUNT)
-        return ray_error("type", NULL);
-    if (vec->type == RAY_STR) return ray_error("type", NULL);
-    if (idx < 0 || idx > vec->len) return ray_error("range", NULL);
+        return ray_error("type", "vec_insert_at: expects a concrete vector type, got %s", ray_type_name(vec->type));
+    if (vec->type == RAY_STR) return ray_error("type", "vec_insert_at: str vectors use ray_str_vec_insert_at, got %s", ray_type_name(vec->type));
+    if (idx < 0 || idx > vec->len) return ray_error("range", "vec_insert_at: index out of bounds [0,%lld], got %lld", (long long)vec->len, (long long)idx);
 
     /* COW: if shared, copy first */
     ray_t* original = vec;
@@ -700,8 +701,8 @@ fail_oom:
 ray_t* ray_vec_insert_vec_at(ray_t* vec, int64_t idx, ray_t* src) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
     if (!src || RAY_IS_ERR(src)) return src;
-    if (vec->type != src->type) return ray_error("type", NULL);
-    if (idx < 0 || idx > vec->len) return ray_error("range", NULL);
+    if (vec->type != src->type) return ray_error("type", "vec_insert_vec_at: dest and src must have matching type, got %s and %s", ray_type_name(vec->type), ray_type_name(src->type));
+    if (idx < 0 || idx > vec->len) return ray_error("range", "vec_insert_vec_at: index out of bounds [0,%lld], got %lld", (long long)vec->len, (long long)idx);
 
     /* Fast path: idx == len is plain concat */
     if (idx == vec->len) return ray_vec_concat(vec, src);
@@ -741,9 +742,9 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
     if (!idxs || RAY_IS_ERR(idxs)) return idxs;
     if (!vals || RAY_IS_ERR(vals)) return vals;
-    if (vec->type <= 0 || vec->type >= RAY_TYPE_COUNT) return ray_error("type", NULL);
-    if (vec->type == RAY_STR) return ray_error("type", NULL);
-    if (idxs->type != RAY_I64) return ray_error("type", NULL);
+    if (vec->type <= 0 || vec->type >= RAY_TYPE_COUNT) return ray_error("type", "vec_insert_many: dest expects a concrete vector type, got %s", ray_type_name(vec->type));
+    if (vec->type == RAY_STR) return ray_error("type", "vec_insert_many: str vectors are unsupported, use ray_vec_insert_vec_at in a loop, got %s", ray_type_name(vec->type));
+    if (idxs->type != RAY_I64) return ray_error("type", "vec_insert_many: indices must be an i64 vector, got %s", ray_type_name(idxs->type));
 
     int64_t N = idxs->len;
     int64_t old_len = vec->len;
@@ -756,24 +757,24 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
     const int64_t* idx_arr = (const int64_t*)ray_data(idxs);
     for (int64_t k = 0; k < N; k++) {
         if (idx_arr[k] < 0 || idx_arr[k] > old_len)
-            return ray_error("range", NULL);
+            return ray_error("range", "vec_insert_many: index out of bounds [0,%lld], got %lld", (long long)old_len, (long long)idx_arr[k]);
     }
 
     /* Classify vals: atom (broadcast) vs vec (parallel or singleton broadcast) */
     int broadcast;
     if (vals->type < 0) {
-        if (vals->type != -vec->type) return ray_error("type", NULL);
+        if (vals->type != -vec->type) return ray_error("type", "vec_insert_many: scalar value must be an atom of the dest type %s, got %s", ray_type_name(vec->type), ray_type_name(vals->type));
         broadcast = 1;
     } else if (vals->type == vec->type) {
         /* SYM width must match — dispatcher should widen upstream */
         if (vec->type == RAY_SYM &&
             (vals->attrs & RAY_SYM_W_MASK) != (vec->attrs & RAY_SYM_W_MASK))
-            return ray_error("type", NULL);
+            return ray_error("type", "vec_insert_many: sym value width must match dest width, got vals width %u dest width %u", (unsigned)(vals->attrs & RAY_SYM_W_MASK), (unsigned)(vec->attrs & RAY_SYM_W_MASK));
         if (vals->len == 1) broadcast = 1;
         else if (vals->len == N) broadcast = 0;
-        else return ray_error("range", NULL);
+        else return ray_error("range", "vec_insert_many: value count must be 1 or match index count %lld, got %lld", (long long)N, (long long)vals->len);
     } else {
-        return ray_error("type", NULL);
+        return ray_error("type", "vec_insert_many: values must be an atom or vector of the dest type %s, got %s", ray_type_name(vec->type), ray_type_name(vals->type));
     }
 
     /* Build sort buffer as I64 vec of 2*N slots: [idx0, src0, idx1, src1, ...] */
@@ -897,9 +898,9 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
 
 ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
     if (type <= 0 || type >= RAY_TYPE_COUNT)
-        return ray_error("type", NULL);
-    if (type == RAY_STR) return ray_error("type", NULL);
-    if (count < 0) return ray_error("range", NULL);
+        return ray_error("type", "vec_from_raw: type must be a positive concrete vector type, got %s", ray_type_name(type));
+    if (type == RAY_STR) return ray_error("type", "vec_from_raw: str vectors are unsupported (no pool), got %s", ray_type_name(type));
+    if (count < 0) return ray_error("range", "vec_from_raw: count must be non-negative, got %lld", (long long)count);
 
     /* RAY_SYM defaults to W64 (global sym IDs) */
     uint8_t sym_w = (type == RAY_SYM) ? RAY_SYM_W64 : 0;
@@ -917,7 +918,7 @@ ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count) {
         v->sym_domain = ray_sym_runtime_domain();  /* immortal — no retain */
 
     if (data_size) {
-        if (!data) { ray_release(v); return ray_error("domain", NULL); }
+        if (!data) { ray_release(v); return ray_error("domain", "vec_from_raw: data pointer is null but count is %lld", (long long)count); }
         memcpy(ray_data(v), data, data_size);
     }
 
@@ -1057,8 +1058,8 @@ static inline void str_pool_add_dead(ray_t* vec, uint32_t bytes) {
 
 ray_t* ray_str_vec_append(ray_t* vec, const char* s, size_t len) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
-    if (vec->type != RAY_STR) return ray_error("type", NULL);
-    if (len > UINT32_MAX) return ray_error("range", NULL);
+    if (vec->type != RAY_STR) return ray_error("type", "str_vec_append: expects a str vector, got %s", ray_type_name(vec->type));
+    if (len > UINT32_MAX) return ray_error("range", "str_vec_append: string length exceeds %lld bytes, got %lld", (long long)UINT32_MAX, (long long)len);
 
     ray_t* original = vec;
     vec = ray_cow(vec);
@@ -1139,7 +1140,7 @@ fail_oom:
     return ray_error("oom", NULL);
 fail_range:
     if (vec != original) ray_release(vec);
-    return ray_error("range", NULL);
+    return ray_error("range", "str_vec_append: pool offset exceeds %lld bytes", (long long)UINT32_MAX);
 }
 
 /* --------------------------------------------------------------------------
@@ -1182,9 +1183,9 @@ const char* ray_str_vec_get(ray_t* vec, int64_t idx, size_t* out_len) {
 
 ray_t* ray_str_vec_set(ray_t* vec, int64_t idx, const char* s, size_t len) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
-    if (vec->type != RAY_STR) return ray_error("type", NULL);
-    if (idx < 0 || idx >= vec->len) return ray_error("range", NULL);
-    if (len > UINT32_MAX) return ray_error("range", NULL);
+    if (vec->type != RAY_STR) return ray_error("type", "str_vec_set: expects a str vector, got %s", ray_type_name(vec->type));
+    if (idx < 0 || idx >= vec->len) return ray_error("range", "str_vec_set: index out of bounds [0,%lld), got %lld", (long long)vec->len, (long long)idx);
+    if (len > UINT32_MAX) return ray_error("range", "str_vec_set: string length exceeds %lld bytes, got %lld", (long long)UINT32_MAX, (long long)len);
 
     ray_t* original = vec;
     vec = ray_cow(vec);
@@ -1252,7 +1253,7 @@ fail_oom:
     return ray_error("oom", NULL);
 fail_range:
     if (vec != original) ray_release(vec);
-    return ray_error("range", NULL);
+    return ray_error("range", "str_vec_set: pool offset exceeds %lld bytes", (long long)UINT32_MAX);
 }
 
 /* --------------------------------------------------------------------------
@@ -1264,8 +1265,8 @@ fail_range:
 
 ray_t* ray_str_vec_insert_at(ray_t* vec, int64_t idx, const char* s, size_t len) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
-    if (vec->type != RAY_STR) return ray_error("type", NULL);
-    if (idx < 0 || idx > vec->len) return ray_error("range", NULL);
+    if (vec->type != RAY_STR) return ray_error("type", "str_vec_insert_at: expects a str vector, got %s", ray_type_name(vec->type));
+    if (idx < 0 || idx > vec->len) return ray_error("range", "str_vec_insert_at: index out of bounds [0,%lld], got %lld", (long long)vec->len, (long long)idx);
 
     ray_t* tmp = ray_vec_new(RAY_STR, 1);
     if (!tmp || RAY_IS_ERR(tmp)) return tmp ? tmp : ray_error("oom", NULL);
@@ -1287,7 +1288,7 @@ ray_t* ray_str_vec_insert_at(ray_t* vec, int64_t idx, const char* s, size_t len)
 
 ray_t* ray_str_vec_compact(ray_t* vec) {
     if (!vec || RAY_IS_ERR(vec)) return vec;
-    if (vec->type != RAY_STR) return ray_error("type", NULL);
+    if (vec->type != RAY_STR) return ray_error("type", "str_vec_compact: expects a str vector, got %s", ray_type_name(vec->type));
     if (!vec->str_pool || str_pool_dead(vec) == 0) return vec;
 
     ray_t* original = vec;
