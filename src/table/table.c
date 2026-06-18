@@ -24,6 +24,7 @@
 #include "table.h"
 #include "mem/heap.h"
 #include "ops/ops.h"
+#include "lang/format.h"
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -65,7 +66,7 @@ static inline ray_t* tbl_cols(ray_t* tbl) {
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_table_new(int64_t ncols) {
-    if (ncols < 0) return ray_error("range", NULL);
+    if (ncols < 0) return ray_error("range", "table_new: column count must be non-negative, got %lld", (long long)ncols);
 
     ray_t* tbl = ray_alloc(TBL_DATA_SIZE);
     if (!tbl) return ray_error("oom", "table_new(ncols=%lld)", (long long)ncols);
@@ -102,7 +103,7 @@ ray_t* ray_table_new(int64_t ncols) {
 
 ray_t* ray_table_add_col(ray_t* tbl, int64_t name_id, ray_t* col_vec) {
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
-    if (!col_vec || RAY_IS_ERR(col_vec)) return ray_error("type", NULL);
+    if (!col_vec || RAY_IS_ERR(col_vec)) return ray_error("type", "table add_col: column must be a vector, got %s", col_vec ? ray_type_name(col_vec->type) : "null");
 
     tbl = ray_cow(tbl);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
