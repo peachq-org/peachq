@@ -23,6 +23,7 @@
 
 #include <rayforce.h>
 #include "ops/ops.h"
+#include "lang/format.h"  /* ray_type_name */
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -51,7 +52,7 @@ static size_t sel_data_size(int64_t nrows) {
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_sel_new(int64_t nrows) {
-    if (nrows < 0) return ray_error("range", NULL);
+    if (nrows < 0) return ray_error("range", "sel_new: nrows must be non-negative, got %lld", (long long)nrows);
 
     size_t dsz = sel_data_size(nrows);
     ray_t* s = ray_alloc(dsz);
@@ -128,7 +129,7 @@ void ray_sel_recompute(ray_t* sel) {
 
 ray_t* ray_sel_from_pred(ray_t* pred) {
     if (!pred || RAY_IS_ERR(pred)) return pred;
-    if (pred->type != RAY_BOOL) return ray_error("type", NULL);
+    if (pred->type != RAY_BOOL) return ray_error("type", "sel_from_pred: expects a bool vector, got %s", ray_type_name(pred->type));
 
     int64_t nrows = pred->len;
     ray_t* sel = ray_sel_new(nrows);
@@ -169,9 +170,11 @@ ray_t* ray_sel_and(ray_t* a, ray_t* b) {
     if (!a || RAY_IS_ERR(a)) return a;
     if (!b || RAY_IS_ERR(b)) return b;
     if (a->type != RAY_SEL || b->type != RAY_SEL)
-        return ray_error("type", NULL);
+        return ray_error("type", "sel_and: both operands must be selections, got %s and %s",
+                         ray_type_name(a->type), ray_type_name(b->type));
     if (a->len != b->len)
-        return ray_error("range", NULL);
+        return ray_error("range", "sel_and: operands must have equal length, got %lld and %lld",
+                         (long long)a->len, (long long)b->len);
 
     int64_t nrows = a->len;
     ray_t* out = ray_sel_new(nrows);

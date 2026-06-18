@@ -24,6 +24,7 @@
 #include "ops/internal.h"
 #include "lang/internal.h"
 #include "ops/temporal.h"
+#include "lang/format.h"  /* ray_type_name (error context) */
 #include <time.h>
 
 /* ============================================================================
@@ -121,7 +122,7 @@ ray_t* ray_temporal_extract(ray_t* input, int field) {
     if (input->type < 0) {
         int8_t t = input->type;
         if (t != -RAY_DATE && t != -RAY_TIME && t != -RAY_TIMESTAMP)
-            return ray_error("type", NULL);
+            return ray_error("type", "extract: expected date/time/timestamp, got %s", ray_type_name(t));
         if (RAY_ATOM_IS_NULL(input)) return ray_typed_null(-RAY_I64);
         int64_t raw = input->i64;
         int64_t us = rte_to_us(t, raw);
@@ -131,7 +132,7 @@ ray_t* ray_temporal_extract(ray_t* input, int field) {
     /* Vector input. */
     int8_t t = input->type;
     if (t != RAY_DATE && t != RAY_TIME && t != RAY_TIMESTAMP)
-        return ray_error("type", NULL);
+        return ray_error("type", "extract: expected date/time/timestamp, got %s", ray_type_name(t));
 
     int64_t len = input->len;
     ray_t* result = ray_vec_new(RAY_I64, len);
@@ -249,7 +250,7 @@ ray_t* ray_temporal_truncate(ray_t* input, int kind) {
     if (input->type < 0) {
         int8_t t = input->type;
         if (t != -RAY_DATE && t != -RAY_TIME && t != -RAY_TIMESTAMP)
-            return ray_error("type", NULL);
+            return ray_error("type", "truncate: expected date/time/timestamp, got %s", ray_type_name(t));
         if (RAY_ATOM_IS_NULL(input)) return ray_typed_null(-RAY_TIMESTAMP);
         int64_t us = rte_to_us(t, input->i64);
         int64_t bucket = (kind == RAY_EXTRACT_DAY)
@@ -263,7 +264,7 @@ ray_t* ray_temporal_truncate(ray_t* input, int kind) {
     /* Vector input. */
     int8_t t = input->type;
     if (t != RAY_DATE && t != RAY_TIME && t != RAY_TIMESTAMP)
-        return ray_error("type", NULL);
+        return ray_error("type", "truncate: expected date/time/timestamp, got %s", ray_type_name(t));
 
     int64_t len = input->len;
     ray_t* result = ray_vec_new(RAY_TIMESTAMP, len);
