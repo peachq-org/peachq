@@ -22,6 +22,7 @@
  */
 
 #include "atom.h"
+#include "lang/format.h"  /* ray_type_name */
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -176,7 +177,7 @@ ray_t* ray_timestamp(int64_t val) {
 }
 
 ray_t* ray_typed_null(int8_t type) {
-    if (type >= 0) return ray_error("type", NULL);
+    if (type >= 0) return ray_error("type", "typed_null: expects a negative atom type tag, got %s", ray_type_name(type));
     /* GUID null is the canonical all-zero 16-byte value: allocate the
      * U8 payload buffer up front (same shape as ray_guid) so consumers
      * can deref obj without a NULL check.  Other types use the payload
