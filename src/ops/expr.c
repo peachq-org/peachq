@@ -23,6 +23,7 @@
 
 #include "ops/internal.h"
 #include "lang/internal.h"  /* sym_domain_rep (sym-domain Phase 2) */
+#include "lang/format.h"    /* ray_type_name */
 #include "ops/rowsel.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1713,7 +1714,7 @@ static void propagate_nulls_binary(ray_t* lhs, ray_t* rhs, ray_t* result,
 ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     (void)g;
     if (!input || RAY_IS_ERR(input)) return input;
-    if (!ray_is_vec(input)) return ray_error("type", NULL);
+    if (!ray_is_vec(input)) return ray_error("type", "expr eval: unary op expects a vector, got %s", ray_type_name(input->type));
     int64_t len = input->len;
     int8_t in_type = input->type;
     int8_t out_type = op->out_type;
@@ -2422,7 +2423,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
 
     int64_t len = 1;
     if (!l_scalar && !r_scalar) {
-        if (lhs->len != rhs->len) return ray_error("length", NULL);
+        if (lhs->len != rhs->len) return ray_error("length", "expr eval: binary op operand lengths must match, got %lld and %lld", (long long)lhs->len, (long long)rhs->len);
         len = lhs->len;
     } else if (l_scalar && !r_scalar) {
         len = rhs->len;
@@ -2450,14 +2451,14 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
         if (l_is_str || r_is_str || (l_atom_str && r_atom_str)) {
             /* RAY_STR only supports comparison ops — reject arithmetic */
             uint16_t opc = op->opcode;
-            if (opc < OP_EQ || opc > OP_GE) { ray_release(result); return ray_error("type", NULL); }
+            if (opc < OP_EQ || opc > OP_GE) { ray_release(result); return ray_error("type", "expr eval: string operands support only comparison operators, got %s and %s", ray_type_name(lhs->type), ray_type_name(rhs->type)); }
             /* At least one side is a RAY_STR column — use string comparison path.
                The scalar side (if any) must be -RAY_STR or RAY_SYM atom.
                The non-scalar side must be RAY_STR. */
-            if (l_scalar && !l_atom_str) { ray_release(result); return ray_error("type", NULL); }
-            if (r_scalar && !r_atom_str) { ray_release(result); return ray_error("type", NULL); }
-            if (!l_scalar && !l_is_str) { ray_release(result); return ray_error("type", NULL); }
-            if (!r_scalar && !r_is_str) { ray_release(result); return ray_error("type", NULL); }
+            if (l_scalar && !l_atom_str) { ray_release(result); return ray_error("type", "expr eval: string comparison left operand must be a str/sym scalar, got %s", ray_type_name(lhs->type)); }
+            if (r_scalar && !r_atom_str) { ray_release(result); return ray_error("type", "expr eval: string comparison right operand must be a str/sym scalar, got %s", ray_type_name(rhs->type)); }
+            if (!l_scalar && !l_is_str) { ray_release(result); return ray_error("type", "expr eval: string comparison left operand must be a str column, got %s", ray_type_name(lhs->type)); }
+            if (!r_scalar && !r_is_str) { ray_release(result); return ray_error("type", "expr eval: string comparison right operand must be a str column, got %s", ray_type_name(rhs->type)); }
 
             ray_pool_t* pool = ray_pool_get();
             if (pool && len >= RAY_PARALLEL_THRESHOLD) {
@@ -2484,7 +2485,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             bool is_cmp = (opc >= OP_EQ && opc <= OP_GE);
             if (!is_cmp && !RAY_IS_SYM(lhs->type) && !RAY_IS_SYM(rhs->type)) {
                 ray_release(result);
-                return ray_error("type", NULL);
+                return ray_error("type", "expr eval: string atom is not valid in arithmetic, got %s and %s", ray_type_name(lhs->type), ray_type_name(rhs->type));
             }
         }
     }
