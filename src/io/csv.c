@@ -456,7 +456,7 @@ RAY_INLINE int32_t fast_time(const char* p, size_t len, bool* is_null) {
  * src/lang/format.c:ts_to_parts and csv_write_timestamp).  Accept up
  * to 9 fractional digits; shorter fractions are right-padded with
  * zeros, longer ones are truncated. */
-RAY_INLINE int64_t fast_time_ns(const char* p, size_t len, bool* is_null) {
+RAY_INLINE int64_t fast_time_ns(const char* p, size_t len, bool* is_null, size_t* consumed) {
     if (RAY_UNLIKELY(len < 8)) { *is_null = true; return 0; }
     *is_null = false;
     int h  = (p[0]-'0')*10 + (p[1]-'0');
@@ -465,18 +465,47 @@ RAY_INLINE int64_t fast_time_ns(const char* p, size_t len, bool* is_null) {
     if (RAY_UNLIKELY(h > 23 || mi > 59 || s > 59)) { *is_null = true; return 0; }
     int64_t ns = (int64_t)h * 3600000000000LL + (int64_t)mi * 60000000000LL +
                  (int64_t)s * 1000000000LL;
+    size_t used = 8;
     if (len > 8 && p[8] == '.') {
         int64_t frac = 0;
         int digits = 0;
-        for (size_t i = 9; i < len && digits < 9; i++, digits++) {
+        size_t i = 9;
+        for (; i < len && digits < 9; i++, digits++) {
             unsigned di = (unsigned char)p[i] - '0';
             if (di > 9) break;
             frac = frac * 10 + (int64_t)di;
         }
         while (digits < 9) { frac *= 10; digits++; }
         ns += frac;
+        used = i;  /* index of the first char past the fractional seconds */
     }
+    if (consumed) *consumed = used;
     return ns;
+}
+
+/* Parse a trailing ISO-8601 UTC offset at p: 'Z'/'z' (== UTC) or
+ * (+|-)HH[[:]MM].  On success sets *out_ns to the signed offset in
+ * nanoseconds (to be SUBTRACTED from the local wall-clock value to get
+ * UTC) and returns true.  Returns false if the suffix is not a
+ * recognized offset (caller then leaves the value unadjusted, preserving
+ * the prior behaviour of ignoring unrecognized trailing characters). */
+RAY_INLINE bool parse_tz_offset(const char* p, size_t len, int64_t* out_ns) {
+    if (len == 0) return false;
+    if (p[0] == 'Z' || p[0] == 'z') { *out_ns = 0; return true; }
+    int sign;
+    if (p[0] == '+') sign = 1;
+    else if (p[0] == '-') sign = -1;
+    else return false;
+    if (len < 3 || p[1] < '0' || p[1] > '9' || p[2] < '0' || p[2] > '9') return false;
+    int hh = (p[1]-'0')*10 + (p[2]-'0');
+    int mm = 0;
+    size_t i = 3;
+    if (len > i && p[i] == ':') i++;            /* optional ':' separator */
+    if (len >= i + 2 && p[i] >= '0' && p[i] <= '9' && p[i+1] >= '0' && p[i+1] <= '9')
+        mm = (p[i]-'0')*10 + (p[i+1]-'0');
+    if (RAY_UNLIKELY(hh > 23 || mm > 59)) return false;
+    *out_ns = (int64_t)sign * ((int64_t)hh * 3600 + (int64_t)mm * 60) * 1000000000LL;
+    return true;
 }
 
 RAY_INLINE int64_t fast_timestamp(const char* p, size_t len, bool* is_null) {
@@ -485,10 +514,20 @@ RAY_INLINE int64_t fast_timestamp(const char* p, size_t len, bool* is_null) {
     int32_t days = fast_date(p, 10, is_null);
     if (*is_null) return 0;
     bool time_null = false;
-    int64_t time_ns = fast_time_ns(p + 11, len - 11, &time_null);
+    size_t time_used = 8;
+    int64_t time_ns = fast_time_ns(p + 11, len - 11, &time_null, &time_used);
     if (time_null) { *is_null = true; return 0; }
     const int64_t NS_PER_DAY = 86400000000000LL;
-    return (int64_t)days * NS_PER_DAY + time_ns;
+    int64_t result = (int64_t)days * NS_PER_DAY + time_ns;
+    /* Optional trailing UTC offset (Z | ±HH:MM | ±HHMM | ±HH).  The common
+     * no-offset case ends exactly at the time component (off == len), so
+     * the hot path pays only this single predicted-not-taken bounds check. */
+    size_t off = 11 + time_used;
+    if (RAY_UNLIKELY(off < len)) {
+        int64_t adj;
+        if (parse_tz_offset(p + off, len - off, &adj)) result -= adj;
+    }
+    return result;
 }
 
 /* --------------------------------------------------------------------------
