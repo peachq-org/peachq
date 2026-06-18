@@ -5074,6 +5074,7 @@ typedef struct {
     const uint32_t* part_offsets;
     int64_t*      row_gid;          /* output [nrows] */
     const int64_t* match_idx;
+    ray_t*        rowsel;           /* non-NULL when selection carried as rowsel */
 } reprobe_ctx_t;
 
 static void reprobe_rows_fn(void* vctx, uint32_t worker_id,
@@ -5090,9 +5091,17 @@ static void reprobe_rows_fn(void* vctx, uint32_t worker_id,
     uint8_t wide = c->wide_mask;
     const uint8_t* wide_esz = c->wide_esz;
     const int64_t* match_idx = c->match_idx;
+    ray_t* rowsel = c->rowsel;
     for (int64_t i = start; i < end; i++) {
         if (((i - start) & 65535) == 0 && ray_interrupted()) break;
         int64_t row = match_idx ? match_idx[i] : i;
+        /* Honor a rowsel-carried selection: filtered-out rows must not map to
+         * any group, else the holistic (median/top) idx_buf would include
+         * them.  -1 is the same "no group" sentinel the HT-miss case uses. */
+        if (!match_idx && rowsel && !group_rowsel_pass(rowsel, row)) {
+            c->row_gid[row] = -1;
+            continue;
+        }
         uint64_t h = 0;
         int64_t null_mask = 0;
         for (uint8_t k = 0; k < nk; k++) {
@@ -8711,6 +8720,7 @@ v2_emit:;
                 .part_offsets = part_offsets,
                 .row_gid = row_gid,
                 .match_idx = match_idx,
+                .rowsel = rowsel,
             };
             ray_pool_dispatch(pool, reprobe_rows_fn, &rp, n_scan);
 
@@ -9054,6 +9064,14 @@ build_from_final_ht:
                 int64_t ek_buf[9];
                 for (int64_t i = 0; i < n_scan; i++) {
                     int64_t row = match_idx ? match_idx[i] : i;
+                    /* Holistic fill re-scans rows independently of the streaming
+                     * grouping accumulators, so it must honor the pushed WHERE
+                     * filter itself.  When the selection is carried as a rowsel
+                     * (match_idx == NULL, the default), skip rows that don't
+                     * pass — otherwise median/top would aggregate filtered-out
+                     * rows (the unfiltered group), diverging from every other
+                     * agg which already respects the selection. */
+                    if (!match_idx && !group_rowsel_pass(rowsel, row)) continue;
                     uint64_t h = 0;
                     int64_t null_mask = 0;
                     for (uint8_t k = 0; k < n_keys; k++) {
@@ -9100,6 +9118,7 @@ build_from_final_ht:
                 if (idx_buf_s) {
                     for (int64_t i = 0; i < n_scan; i++) {
                         int64_t row = match_idx ? match_idx[i] : i;
+                        if (!match_idx && !group_rowsel_pass(rowsel, row)) continue;
                         int64_t gi = row_gid[row];
                         if (gi >= 0) idx_buf_s[pos_s[gi]++] = row;
                     }
