@@ -293,7 +293,7 @@ ray_t* ray_try_fn(ray_t* expr, ray_t* handler_expr) {
         ray_unary_fn fn = (ray_unary_fn)(uintptr_t)handler->i64;
         handler_result = fn(err_val);
     } else {
-        handler_result = ray_error("type", NULL);
+        handler_result = ray_error("type", "try: handler must be a function, got %s", ray_type_name(handler->type));
     }
 
     ray_release(err_val);
@@ -310,7 +310,7 @@ ray_t* ray_try_fn(ray_t* expr, ray_t* handler_expr) {
 ray_t* to_boxed_list(ray_t* x) {
     if (!x || RAY_IS_ERR(x)) return x;
     if (x->type == RAY_LIST) { ray_retain(x); return x; }
-    if (!ray_is_vec(x)) return ray_error("type", NULL);
+    if (!ray_is_vec(x)) return ray_error("type", "to_boxed_list: expected a vector or list, got %s", ray_type_name(x->type));
 
     int64_t len = ray_len(x);
     ray_t* list = ray_alloc(len * sizeof(ray_t*));
@@ -417,15 +417,17 @@ static ray_t* atomic_map_binary_parted(ray_binary_fn fn, uint16_t dag_opcode,
             return seg ? seg : ray_error("domain", NULL);
         }
         if (!ray_is_vec(seg)) {
+            int8_t st = seg->type;
             ray_release(seg);
             ray_release(out);
-            return ray_error("type", NULL);
+            return ray_error("type", "parted map: segment result must be a vector, got %s", ray_type_name(st));
         }
         if (s == 0) out_base = seg->type;
         if (seg->type != out_base) {
+            int8_t st = seg->type;
             ray_release(seg);
             ray_release(out);
-            return ray_error("type", NULL);
+            return ray_error("type", "parted map: segment result types must match, got %s and %s", ray_type_name(out_base), ray_type_name(st));
         }
         dst[s] = seg;
         out->len = s + 1;
@@ -1089,7 +1091,7 @@ ray_t* call_fn1(ray_t* fn, ray_t* arg) {
         ray_t* args[1] = { arg };
         return call_lambda(fn, args, 1);
     }
-    return ray_error("type", NULL);
+    return ray_error("type", "call: expected a callable function, got %s", ray_type_name(fn->type));
 }
 
 /* Helper: call a function object with 2 args. Does not release fn or args. */
@@ -1135,7 +1137,7 @@ ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b) {
         ray_unary_fn f = (ray_unary_fn)(uintptr_t)fn->i64;
         return f(a);
     }
-    return ray_error("type", NULL);
+    return ray_error("type", "call: expected a callable function, got %s", ray_type_name(fn->type));
 }
 
 
@@ -1264,9 +1266,9 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
     if (RAY_IS_ERR(names)) return names;
     cols = unbox_vec_arg(cols, &_bxc);
     if (RAY_IS_ERR(cols)) { if (_bxn) ray_release(_bxn); return cols; }
-    if (!is_list(names) || !is_list(cols)) { if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("type", NULL); }
+    if (!is_list(names) || !is_list(cols)) { int8_t nt = names->type, ct = cols->type; if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("type", "table: names and columns must be lists, got %s and %s", ray_type_name(nt), ray_type_name(ct)); }
     int64_t ncols = ray_len(names);
-    if (ray_len(cols) != ncols) { if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", NULL); }
+    if (ray_len(cols) != ncols) { int64_t ncols_got = ray_len(cols); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", "table: column count must match name count %lld, got %lld", (long long)ncols, (long long)ncols_got); }
 
     ray_t** name_elems = (ray_t**)ray_data(names);
     ray_t** col_elems = (ray_t**)ray_data(cols);
@@ -1277,7 +1279,7 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
 
     for (int64_t i = 0; i < ncols; i++) {
         if (name_elems[i]->type != -RAY_SYM)
-            { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("type", NULL); }
+            { int8_t nt = name_elems[i]->type; ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("type", "table: column name must be a symbol, got %s", ray_type_name(nt)); }
         int64_t name_id = name_elems[i]->i64;
 
         /* Convert Rayfall list (or typed vec) to typed column vector */
@@ -1313,7 +1315,7 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             int64_t nrows = ray_len(col_src);
             if (expected_rows < 0) expected_rows = nrows;
             else if (nrows != expected_rows)
-                { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", NULL); }
+                { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", "table: all columns must have %lld rows, got %lld", (long long)expected_rows, (long long)nrows); }
             ray_retain(col_src);
             tbl = ray_table_add_col(tbl, name_id, col_src);
             ray_release(col_src);
@@ -1322,13 +1324,13 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
         }
 
         if (!is_list(col_src))
-            { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("type", NULL); }
+            { int8_t ct = col_src->type; ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("type", "table: column must be a vector or list, got %s", ray_type_name(ct)); }
         int64_t nrows = ray_len(col_src);
 
         /* Validate all columns have consistent row count */
         if (expected_rows < 0) expected_rows = nrows;
         else if (nrows != expected_rows)
-            { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", NULL); }
+            { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return ray_error("domain", "table: all columns must have %lld rows, got %lld", (long long)expected_rows, (long long)nrows); }
 
         /* Empty generic list → typeless empty column: keep it as a RAY_LIST
          * so its storage type is adopted from the first inserted value,
@@ -1381,20 +1383,22 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
         for (int64_t j = 0; j < nrows; j++) {
             if (col_type == RAY_STR) {
                 if (row_elems[j]->type != -RAY_STR) {
+                    int8_t et = row_elems[j]->type;
                     ray_release(col_vec); ray_release(tbl);
                     if (_bxn) ray_release(_bxn);
                     if (_bxc) ray_release(_bxc);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "table: string column element must be a string, got %s", ray_type_name(et));
                 }
                 const char *sptr = ray_str_ptr(row_elems[j]);
                 size_t slen = ray_str_len(row_elems[j]);
                 col_vec = ray_str_vec_append(col_vec, sptr, slen);
             } else if (col_type == RAY_GUID) {
                 if (row_elems[j]->type != -RAY_GUID || !row_elems[j]->obj) {
+                    int8_t et = row_elems[j]->type;
                     ray_release(col_vec); ray_release(tbl);
                     if (_bxn) ray_release(_bxn);
                     if (_bxc) ray_release(_bxc);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "table: guid column element must be a guid, got %s", ray_type_name(et));
                 }
                 col_vec = ray_vec_append(col_vec, ray_data(row_elems[j]->obj));
             } else {
@@ -1402,10 +1406,11 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
                 int type_ok = (row_elems[j]->type == -col_type);
                 if (!type_ok && col_type == RAY_F64 && row_elems[j]->type == -RAY_I64) type_ok = 1;
                 if (!type_ok) {
+                    int8_t et = row_elems[j]->type;
                     ray_release(col_vec); ray_release(tbl);
                     if (_bxn) ray_release(_bxn);
                     if (_bxc) ray_release(_bxc);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "table: %s column element type mismatch, got %s", ray_type_name(col_type), ray_type_name(et));
                 }
                 void* val_ptr;
                 double promoted;
@@ -1440,7 +1445,7 @@ ray_t* ray_key_fn(ray_t* x) {
         ray_retain(keys);
         return keys;
     }
-    if (x->type != RAY_TABLE) return ray_error("type", NULL);
+    if (x->type != RAY_TABLE) return ray_error("type", "key: expected a dict or table, got %s", ray_type_name(x->type));
     int64_t ncols = ray_table_ncols(x);
     ray_t* vec = ray_vec_new(RAY_SYM, ncols);
     if (RAY_IS_ERR(vec)) return vec;
@@ -1466,7 +1471,7 @@ ray_t* ray_value_fn(ray_t* x) {
         }
         return result;
     }
-    if (x->type != RAY_DICT) return ray_error("type", NULL);
+    if (x->type != RAY_DICT) return ray_error("type", "value: expected a dict or table, got %s", ray_type_name(x->type));
     ray_t* vals = ray_dict_vals(x);
     if (!vals) return ray_error("type", NULL);
     ray_retain(vals);
@@ -1488,7 +1493,7 @@ ray_t* ray_value_fn(ray_t* x) {
 /* (set name value) — bind in global env. Receives unevaluated args. */
 ray_t* ray_set_fn(ray_t* name_obj, ray_t* val_expr) {
     if (name_obj->type != -RAY_SYM)
-        return ray_error("type", NULL);
+        return ray_error("type", "set: name must be a symbol, got %s", ray_type_name(name_obj->type));
     ray_t* val = ray_eval(val_expr);
     if (RAY_IS_ERR(val)) return val;
     /* Materialize lazy handles before binding */
@@ -1506,7 +1511,7 @@ ray_t* ray_set_fn(ray_t* name_obj, ray_t* val_expr) {
 /* (let name value) — bind in local scope. Receives unevaluated args. */
 ray_t* ray_let_fn(ray_t* name_obj, ray_t* val_expr) {
     if (name_obj->type != -RAY_SYM)
-        return ray_error("type", NULL);
+        return ray_error("type", "let: name must be a symbol, got %s", ray_type_name(name_obj->type));
     ray_t* val = ray_eval(val_expr);
     if (RAY_IS_ERR(val)) return val;
     /* Materialize lazy handles before binding */
@@ -1520,7 +1525,7 @@ ray_t* ray_let_fn(ray_t* name_obj, ray_t* val_expr) {
 
 /* (if cond then else?) — conditional. Receives unevaluated args. */
 ray_t* ray_cond_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("domain", "if: expected at least 2 args (cond then), got %lld", (long long)n);
     ray_t* cond = ray_eval(args[0]);
     if (RAY_IS_ERR(cond)) return cond;
     /* Materialize lazy handles before testing truthiness */
@@ -1561,7 +1566,7 @@ ray_t* ray_do_fn(ray_t** args, int64_t n) {
 /* (fn [params...] body...) — create a lambda object.
  * Stores params list and body expressions in data area. */
 ray_t* ray_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("domain", NULL);
+    if (n < 2) return ray_error("domain", "fn: expected at least 2 args (params body), got %lld", (long long)n);
     /* args[0] = param vector (list of name symbols), args[1..n-1] = body exprs */
     ray_t* params_list = args[0];
 
@@ -2173,7 +2178,7 @@ op_callf: {
             break;
         default:
             for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]);
-            result = ray_error("type", NULL);
+            result = ray_error("type", "apply: head is not callable, got %s", ray_type_name(fn_obj->type));
             break;
         }
         ray_release(fn_obj);
@@ -3232,10 +3237,11 @@ ray_t* ray_eval(ray_t* obj) {
                     ray_release(right);
                     ret = result; goto out;
                 }
+                int8_t lt = left->type, rt = right->type;
                 ray_release(head);
                 ray_release(left);
                 ray_release(right);
-                ret = ray_error("type", NULL); goto out;
+                ret = ray_error("type", "binary op: null operand not supported, got %s and %s", ray_type_name(lt), ray_type_name(rt)); goto out;
             }
             uint16_t fn_opcode = RAY_FN_OPCODE(head);
             ray_release(head);
@@ -3256,7 +3262,7 @@ ray_t* ray_eval(ray_t* obj) {
                 ret = fn(elems + 1, n - 1); goto out;
             }
             int64_t argc = n - 1;
-            if (argc > 64) { ray_release(head); ret = ray_error("domain", NULL); goto out; }
+            if (argc > 64) { ray_release(head); ret = ray_error("domain", "call: too many args, max 64, got %lld", (long long)argc); goto out; }
             ray_t* args[64];
             for (int64_t i = 0; i < argc; i++) {
                 args[i] = ray_eval(elems[i + 1]);
@@ -3278,7 +3284,7 @@ ray_t* ray_eval(ray_t* obj) {
         }
         case RAY_LAMBDA: {
             int64_t argc = n - 1;
-            if (argc > 64) { ray_release(head); ret = ray_error("domain", NULL); goto out; }
+            if (argc > 64) { ray_release(head); ret = ray_error("domain", "call: too many args, max 64, got %lld", (long long)argc); goto out; }
             ray_t* args[64];
             for (int64_t i = 0; i < argc; i++) {
                 args[i] = ray_eval(elems[i + 1]);
@@ -3296,9 +3302,11 @@ ray_t* ray_eval(ray_t* obj) {
                 add_eval_error_frame(__VM->nfo, obj);
             ret = result; goto out;
         }
-        default:
+        default: {
+            int8_t head_type = head->type;
             ray_release(head);
-            ret = ray_error("type", NULL); goto out;
+            ret = ray_error("type", "eval: head of list is not callable, got %s", ray_type_name(head_type)); goto out;
+        }
     }
 
 out:

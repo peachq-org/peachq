@@ -29,6 +29,7 @@
 
 #include "ops/internal.h"
 #include "ops/rowsel.h"
+#include "lang/format.h"
 #include "mem/sys.h"
 #include "store/hnsw.h"
 #include <math.h>
@@ -337,7 +338,8 @@ static bool rr_member_accept(int64_t node_id, void* ctx) {
 ray_t* exec_ann_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src) {
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return ray_error("nyi", NULL);
-    if (!src || src->type != RAY_TABLE) return ray_error("type", NULL);
+    if (!src) return ray_error("type", "ann rerank: expects a table source, got null");
+    if (src->type != RAY_TABLE) return ray_error("type", "ann rerank: expects a table source, got %s", ray_type_name(src->type));
 
     ray_hnsw_t* idx    = (ray_hnsw_t*)ext->rerank.hnsw_idx;
     const float* query = ext->rerank.query_vec;
@@ -345,7 +347,7 @@ ray_t* exec_ann_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src) {
     int64_t      k     = ext->rerank.k;
     int32_t      ef    = ext->rerank.ef_search;
     if (!idx || !query || dim <= 0 || k <= 0) return ray_error("schema", NULL);
-    if (dim != idx->dim) return ray_error("length", NULL);
+    if (dim != idx->dim) return ray_error("length", "ann rerank: query dim must match index dim %lld, got %lld", (long long)idx->dim, (long long)dim);
 
     int64_t src_rows = ray_table_nrows(src);
 
@@ -428,7 +430,8 @@ ray_t* exec_ann_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src) {
 ray_t* exec_knn_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src) {
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return ray_error("nyi", NULL);
-    if (!src || src->type != RAY_TABLE) return ray_error("type", NULL);
+    if (!src) return ray_error("type", "knn rerank: expects a table source, got null");
+    if (src->type != RAY_TABLE) return ray_error("type", "knn rerank: expects a table source, got %s", ray_type_name(src->type));
 
     int64_t      col_sym = ext->rerank.col_sym;
     const float* query   = ext->rerank.query_vec;
@@ -452,7 +455,7 @@ ray_t* exec_knn_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src) {
      * doesn't correctly materialise RAY_LIST columns. */
     ray_t* col = ray_table_get_col(src, col_sym);
     if (!col) return ray_error("name", NULL);
-    if (col->type != RAY_LIST) return ray_error("type", NULL);
+    if (col->type != RAY_LIST) return ray_error("type", "knn rerank: vector column must be a list of vectors, got %s", ray_type_name(col->type));
 
     int64_t nrows = col->len;
 
@@ -491,8 +494,12 @@ ray_t* exec_knn_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src) {
             if (i < 0 || i >= nrows) continue;
             ray_t* row = ray_list_get(col, i);
             if (!rr_is_numeric(row) || row->len != dim) {
+                int8_t  rt = row ? row->type : RAY_NULL;
+                int64_t rl = (row && rr_is_numeric(row)) ? row->len : -1;
                 ray_sys_free(heap); ray_sys_free(q_buf); ray_sys_free(accepted);
-                return ray_error("type", NULL);
+                if (rl >= 0)
+                    return ray_error("type", "knn rerank: each row vector must have length %lld, got %lld", (long long)dim, (long long)rl);
+                return ray_error("type", "knn rerank: each row must be a numeric vector (f32/f64/i32/i64), got %s", ray_type_name(rt));
             }
             double d = rr_row_dist(metric, row, q_buf, q_norm, dim);
             rr_heap_insert(heap, k_eff, &heap_size, d, i);
@@ -501,8 +508,12 @@ ray_t* exec_knn_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src) {
         for (int64_t i = 0; i < nrows; i++) {
             ray_t* row = ray_list_get(col, i);
             if (!rr_is_numeric(row) || row->len != dim) {
+                int8_t  rt = row ? row->type : RAY_NULL;
+                int64_t rl = (row && rr_is_numeric(row)) ? row->len : -1;
                 ray_sys_free(heap); ray_sys_free(q_buf);
-                return ray_error("type", NULL);
+                if (rl >= 0)
+                    return ray_error("type", "knn rerank: each row vector must have length %lld, got %lld", (long long)dim, (long long)rl);
+                return ray_error("type", "knn rerank: each row must be a numeric vector (f32/f64/i32/i64), got %s", ray_type_name(rt));
             }
             double d = rr_row_dist(metric, row, q_buf, q_norm, dim);
             rr_heap_insert(heap, k_eff, &heap_size, d, i);

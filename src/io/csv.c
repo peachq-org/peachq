@@ -1621,7 +1621,9 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
     if (ncols > CSV_MAX_COLS) {
         munmap(buf, file_size);
         /* fd already closed after mmap (line 1044) — do not close again */
-        return ray_error("range", NULL);  /* too many columns */
+        /* too many columns */
+        return ray_error("range", "csv read: header has too many columns, got %lld (max %d)",
+                         (long long)ncols, CSV_MAX_COLS);
     }
 
     /* ---- 5. Parse header row ---- */

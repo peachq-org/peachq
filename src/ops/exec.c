@@ -23,6 +23,7 @@
 
 #include "ops/internal.h"
 #include "lang/internal.h"  /* sym_domain_rep (sym-domain Phase 2) */
+#include "lang/format.h"    /* ray_type_name (error context) */
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
 #include "ops/idxop.h"
@@ -510,7 +511,7 @@ ray_t* broadcast_scalar(ray_t* atom, int64_t nrows) {
         else if (at == -RAY_F64)  vt = RAY_F64;
         else if (at == -RAY_BOOL) vt = RAY_BOOL;
         else if (at == -RAY_SYM)  vt = RAY_SYM;
-        else return ray_error("type", NULL);
+        else return ray_error("type", "broadcast: expected str/i64/f64/bool/sym atom, got %s", ray_type_name(at));
         return ray_vec_new(vt, 0);
     }
     int8_t at = atom->type;
@@ -534,7 +535,7 @@ ray_t* broadcast_scalar(ray_t* atom, int64_t nrows) {
     else if (at == -RAY_F64)  vt = RAY_F64;
     else if (at == -RAY_BOOL) vt = RAY_BOOL;
     else if (at == -RAY_SYM)  vt = RAY_SYM;
-    else return ray_error("type", NULL);
+    else return ray_error("type", "broadcast: expected str/i64/f64/bool/sym atom, got %s", ray_type_name(at));
 
     size_t esz = (vt == RAY_BOOL) ? 1 : 8;
     ray_t* vec = ray_vec_new(vt, nrows);
@@ -1226,7 +1227,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                           ? (int8_t)RAY_PARTED_BASETYPE(input->type) : input->type;
                 if (et > 0 && !agg_type_admitted(op->opcode, et)) {
                     if (own_input) ray_release(input);
-                    return ray_error("type", NULL);
+                    return ray_error("type", "aggregate: element type not admitted for this aggregation, got %s", ray_type_name(et));
                 }
             }
             ray_t* result = exec_reduction(g, op, input);
@@ -2259,7 +2260,8 @@ static ray_t* ray_result_merge(ray_t* accum, ray_t* partial) {
         return ray_vec_concat(accum, partial);
     }
 
-    return ray_error("type", NULL);
+    return ray_error("type", "result merge: cannot combine mismatched partial results, got %s and %s",
+                     ray_type_name(accum->type), ray_type_name(partial->type));
 }
 
 /* Build a flat table containing one segment's columns from a parted table.
@@ -2306,7 +2308,7 @@ static ray_t* build_segment_table(ray_t* parted_tbl, int32_t seg_idx) {
             size_t esz = (size_t)ray_sym_elem_size(kv_type, kv->attrs);
             if (esz == 0) {
                 ray_release(seg_tbl);
-                return ray_error("type", NULL);
+                return ray_error("type", "segment build: partition key has no element size, got %s", ray_type_name(kv_type));
             }
             ray_t* flat = ray_vec_new(kv_type, seg_rows);
             if (!flat || RAY_IS_ERR(flat)) {

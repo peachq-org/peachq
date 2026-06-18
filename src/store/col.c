@@ -30,6 +30,7 @@
 #include "table/domain.h"
 #include "ops/idxop.h"
 #include "vec/str.h"
+#include "lang/format.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -210,13 +211,14 @@ static ray_t* col_load_str_list(const uint8_t* ptr, size_t remaining) {
 }
 
 static ray_t* col_load_str_vec(const uint8_t* ptr, size_t remaining) {
-    if (remaining > (size_t)INT64_MAX) return ray_error("range", NULL);
+    if (remaining > (size_t)INT64_MAX) return ray_error("range", "col load str-vec: payload size exceeds int64 max, got %zu bytes", remaining);
     int64_t len = (int64_t)remaining;
     ray_t* result = ray_de_raw((uint8_t*)ptr, &len);
     if (!result || RAY_IS_ERR(result)) return result;
     if (result->type != RAY_STR) {
+        const char* rt = ray_type_name(result->type);
         ray_release(result);
-        return ray_error("type", NULL);
+        return ray_error("type", "col load str-vec: decoded payload is not a str vector, got %s", rt);
     }
     return result;
 }
@@ -1066,8 +1068,10 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
 
     uint8_t esz = ray_sym_elem_size(hdr->type, hdr->attrs);
     if (esz == 0 && hdr->len > 0) {
+        const char* ht = ray_type_name(hdr->type);
         ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("type", NULL);
+        return ray_error("type", "col mmap %s: on-disk type %s has no fixed element size for %lld rows",
+                         path, ht, (long long)hdr->len);
     }
     /* Overflow check: ensure len*esz fits in size_t with 32-byte header room */
     if ((uint64_t)hdr->len > (SIZE_MAX - 32) / (esz ? esz : 1)) {
