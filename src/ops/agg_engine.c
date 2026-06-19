@@ -2328,8 +2328,15 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
          * total_slots*(block + first_row) slab per worker.  Low-card (the perf
          * target) has tiny total_slots → always within budget → dense parallel.
          * Mid-card-over-budget dense plans fall back to hash parallel (correct). */
-        int64_t per_worker_bytes = dp.total_slots * (int64_t)(block + 8 /*first_row*/);
-        bool dense_par_ok = dp.ok && per_worker_bytes <= (8LL << 20);  /* 8 MB/worker cap */
+        /* Compute per_worker_bytes ONLY when the dense plan is valid: a bailed
+         * plan (dp.ok == false) leaves dp.total_slots unset, and the multiply
+         * would overflow on garbage (UBSan signed-overflow).  Short-circuit on
+         * dp.ok first. */
+        bool dense_par_ok = false;
+        if (dp.ok) {
+            int64_t per_worker_bytes = dp.total_slots * (int64_t)(block + 8 /*first_row*/);
+            dense_par_ok = per_worker_bytes <= (8LL << 20);  /* 8 MB/worker cap */
+        }
 
         /* RADIX eligibility: every key an int/SYM type with no nulls (same
          * type-set check as agg_dense_plan).  Radix takes the high-card

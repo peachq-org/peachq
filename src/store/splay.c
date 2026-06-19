@@ -113,6 +113,23 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
     if (!tbl || RAY_IS_ERR(tbl)) return RAY_ERR_TYPE;
     if (!dir) return RAY_ERR_IO;
 
+    /* Reserved column names: "sym" and "sym.lk" name the splayed symfile
+     * and its lock sidecar — a column file of either name would collide
+     * with / clobber the symfile.  Reject loudly BEFORE writing anything
+     * (MUST-prohibit, not silent skip). */
+    {
+        int64_t nc = ray_table_ncols(tbl);
+        for (int64_t c = 0; c < nc; c++) {
+            ray_t* na = ray_sym_str(ray_table_col_name(tbl, c));
+            if (!na || RAY_IS_ERR(na)) continue;
+            const char* n = ray_str_ptr(na);
+            size_t nlen = ray_str_len(na);
+            if ((nlen == 3 && memcmp(n, "sym", 3) == 0) ||
+                (nlen == 6 && memcmp(n, "sym.lk", 6) == 0))
+                return RAY_ERR_RESERVED;
+        }
+    }
+
     /* Create directory and any missing parents (mkdir -p semantics).
      * Required for partitioned layouts like "/db/2024.01.01/t/" where the
      * caller hasn't pre-created the date partition. */
