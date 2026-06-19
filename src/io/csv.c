@@ -2132,9 +2132,10 @@ static ray_err_t csv_splayed_writer_close(csv_splayed_col_writer_t* w) {
         hdr.rc = (w->type == RAY_SYM)
             ? (uint32_t)ray_sym_domain_count(w->dom) : 0;
         if (w->had_nulls) hdr.attrs |= RAY_ATTR_HAS_NULLS;
-        /* Stamp the on-disk format magic + version (aux region) so the
+        /* Stamp the on-disk format major version into `order` so the
          * streamed column file shares the exact identity ray_col_save
-         * writes — the loaders validate it. */
+         * writes — the loaders validate it.  aux stays zero (it was
+         * zero-initialized above) — reserved for postponed index data. */
         ray_col_stamp_format(&hdr);
         if (fseek(w->fp, 0, SEEK_SET) != 0 ||
             fwrite(&hdr, 1, 32, w->fp) != 32)
