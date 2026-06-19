@@ -195,10 +195,11 @@ void     ray_cancel(void);
 #define OP_GROUP        62
 #define OP_JOIN         63
 #define OP_WINDOW_JOIN  64
-/* Fused filter+group: predicate evaluated on each morsel and group HT
- * updated inline.  Produced by the planner for `(select … where … by …)`
- * when the predicate shape is supported (see src/ops/fused_group.c). */
-#define OP_FILTERED_GROUP 65
+/* Opcode 65 (formerly OP_FILTERED_GROUP) is RETIRED.  The benchmark-tuned
+ * fused filter+group operator was removed once the general FILTER + OP_GROUP
+ * (v2) path became competitive-or-better on every shape it handled; the
+ * planner now routes `(select … where … by …)` through that general path.
+ * The number is left reserved — do not reuse it for a new opcode. */
 #define OP_SELECT       66
 #define OP_HEAD         67
 #define OP_TAIL         68
