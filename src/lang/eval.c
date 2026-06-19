@@ -2976,6 +2976,7 @@ static void ray_register_builtins(void) {
     register_unary("dl-eval",      RAY_FN_NONE, ray_dl_eval_fn);
     register_binary("dl-query",    RAY_FN_NONE, ray_dl_query_fn);
     register_binary("dl-provenance", RAY_FN_NONE, ray_dl_provenance_fn);
+    register_unary("dl-free",      RAY_FN_NONE, ray_dl_free_fn);
 
     /* Vector similarity / embeddings / HNSW */
     register_binary("cos-dist",    RAY_FN_NONE, ray_cos_dist_fn);
