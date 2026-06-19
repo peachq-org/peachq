@@ -2720,12 +2720,18 @@ static ray_t* query_materialize_parted_col(ray_t* col) {
     flat->len = total;
 
     int64_t off = 0;
+    uint8_t seg_nulls = 0;
     for (int64_t s = 0; s < col->len; s++) {
         ray_t* seg = segs[s];
         if (!seg || seg->len <= 0) continue;
         parted_copy_cells(ray_data(flat), base, attrs, off, seg, 0, seg->len);
+        seg_nulls |= seg->attrs & RAY_ATTR_HAS_NULLS;
         off += seg->len;
     }
+    /* Null-model invariant 16.4: parted_copy_cells copies the sentinel
+     * bit-patterns but not the HAS_NULLS flag — OR it across segments so the
+     * flat result carries it whenever any segment did. */
+    flat->attrs |= seg_nulls;
     /* The memcpy above copied SYM cell ids verbatim from the partition
      * segments — resolve over their domain (all segments share the root
      * symfile's domain; sym_domain_rep returns the first SYM segment). */
