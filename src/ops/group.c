@@ -7575,9 +7575,19 @@ ht_path:;
          * inside accum_from_entry is correct, but the merge step needs
          * an nn_count and that isn't tracked yet. */
         bool v2_ok = (n_keys >= 1 && n_aggs > 0);
-        /* SYM single-key queries already had a tuned path (q33/q34 hit it
-         * before falling to the radix); v2 doesn't beat it for them, so
-         * skip when any key is SYM and let the existing pipeline handle it. */
+        /* Exclude SYM keys from the per-worker direct-insert path: it pays
+         * here because SYM keys make the per-row composite-key probe
+         * expensive.  Direct-insert hashes and probes the full composite
+         * key into a per-(worker, partition) hash table on every input row;
+         * with a SYM key that means resolving the SYM dictionary id and
+         * mixing it into the composite hash per probe.  The fat-entry
+         * fallback instead lets the radix machinery assign a dense group id
+         * once (a single keyed pass) and then accumulates by that compact
+         * id, so it avoids re-probing the wide composite key per row.  At
+         * mid/high SYM cardinality the per-probe cost dominates and
+         * direct-insert is ~3x slower; only at very low cardinality (where
+         * the working set is tiny and probes hit cache) do the two converge.
+         * So route any SYM-keyed group-by through the fat-entry pipeline. */
         for (uint8_t k = 0; k < n_keys && v2_ok; k++)
             if (key_types[k] == RAY_SYM) v2_ok = false;
         for (uint8_t a = 0; a < n_aggs && v2_ok; a++) {
