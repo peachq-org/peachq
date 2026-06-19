@@ -1209,16 +1209,21 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
                 for (int64_t j = 0; j < n; j++) d[j] = a[j];
         } else { /* CAST f64→i64: clamp + null_aware NaN → NULL_I64 */
             const double* a = (const double*)ap;
+            /* Null-model invariant 16.4: INT64_MIN == NULL_I64 is the reserved
+             * null sentinel and must NOT be produced as a real clamp value
+             * (it would read back as null).  Clamp the negative-overflow
+             * floor to INT64_MIN+1 — the most-negative *representable*
+             * non-null i64 — so a saturated cast stays a real value. */
             if (null_aware)
                 for (int64_t j = 0; j < n; j++)
                     d[j] = (a[j] != a[j]) ? NULL_I64
                          : (a[j] >= (double)INT64_MAX) ? INT64_MAX
-                         : (a[j] <= (double)INT64_MIN) ? INT64_MIN
+                         : (a[j] <= (double)INT64_MIN) ? (INT64_MIN + 1)
                          : (int64_t)a[j];
             else
                 for (int64_t j = 0; j < n; j++)
                     d[j] = (a[j] >= (double)INT64_MAX) ? INT64_MAX
-                         : (a[j] <= (double)INT64_MIN) ? INT64_MIN
+                         : (a[j] <= (double)INT64_MIN) ? (INT64_MIN + 1)
                          : (int64_t)a[j];
         }
     } else if (dt == RAY_BOOL) {
@@ -1464,6 +1469,23 @@ static bool expr_last_op_overflows_i64(const ray_expr_t* expr) {
     return true;
 }
 
+/* The fused binary path writes NULL_I64 for an i64 DIV/IDIV/MOD whose
+ * divisor is zero (or the INT64_MIN/-1 overflow case) — null-model
+ * invariant 16.4 requires HAS_NULLS set when that sentinel lands.  When the
+ * output register is already marked `nullable` the conservative flag below
+ * covers it; this detector handles the case where it is not, reusing the
+ * mark_i64_overflow_as_null scan (which flips HAS_NULLS for any NULL_I64
+ * lane).  Detect the shape from the last instruction. */
+static bool expr_last_op_divmod_i64(const ray_expr_t* expr) {
+    if (expr->out_type != RAY_I64 || expr->n_ins == 0) return false;
+    const expr_ins_t* last = &expr->ins[expr->n_ins - 1];
+    if (last->opcode != OP_DIV && last->opcode != OP_IDIV &&
+        last->opcode != OP_MOD) return false;
+    if (last->src2 == 0xFF) return false; /* binary only */
+    if (expr->regs[last->dst].type != RAY_I64) return false;
+    return true;
+}
+
 /* Single-null float model: the fused F64 kernels canonicalize any non-finite
  * result (overflow → ±Inf, div/mod-by-zero, sqrt(<0), log(≤0), exp(overflow))
  * to NULL_F64 in-buffer.  Detect when the last instruction is such an F64
@@ -1554,7 +1576,7 @@ static ray_t* expr_eval_full_parted(const ray_expr_t* expr, int64_t nrows) {
 
         global_off += seg_len;
     }
-    if (expr_last_op_overflows_i64(expr))
+    if (expr_last_op_overflows_i64(expr) || expr_last_op_divmod_i64(expr))
         mark_i64_overflow_as_null(out, 0, nrows);
     /* Single-null float model: flip HAS_NULLS PRECISELY if an F64 producer
      * canonicalized a non-finite result to NULL_F64 in-buffer.  Scan-based (not
@@ -1595,7 +1617,7 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
     else
         expr_full_fn(&ctx, 0, 0, nrows);
 
-    if (expr_last_op_overflows_i64(expr))
+    if (expr_last_op_overflows_i64(expr) || expr_last_op_divmod_i64(expr))
         mark_i64_overflow_as_null(out, 0, nrows);
     /* Single-null float model: flip HAS_NULLS PRECISELY if an F64 producer
      * canonicalized a non-finite result to NULL_F64 in-buffer.  Scan-based (not
