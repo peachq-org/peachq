@@ -605,8 +605,44 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         if (!new_col || RAY_IS_ERR(new_col)) { ray_release(result); result = ray_error("oom", NULL); goto pivot_cleanup; }
         new_col->len = (int64_t)ix_count;
 
-        /* Initialize with zero (missing cells get 0) */
-        memset(ray_data(new_col), 0, (size_t)ix_count * (out_agg_type == RAY_F64 ? 8 : (size_t)col_esz(new_col)));
+        /* Initialize missing cells with the type-correct NULL sentinel —
+         * a pivot cell with no source row is "no data", which must stay
+         * distinguishable from a real 0 (review 2.10).  Present cells get
+         * overwritten in the scatter loop below; whatever remains is null.
+         * par_finalize_nulls (after scatter) flips HAS_NULLS if any
+         * sentinel survives.  Non-sentinel types (SYM/STR/BOOL/U8/GUID)
+         * fall back to zero-fill: SYM id 0 is the SYM null already; the
+         * others carry no null sentinel. */
+        switch (new_col->type) {
+            case RAY_F64: {
+                double* d = (double*)ray_data(new_col);
+                for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_F64;
+                break;
+            }
+            case RAY_F32: {
+                float* d = (float*)ray_data(new_col);
+                for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_F32;
+                break;
+            }
+            case RAY_I64: case RAY_TIMESTAMP: {
+                int64_t* d = (int64_t*)ray_data(new_col);
+                for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_I64;
+                break;
+            }
+            case RAY_I32: case RAY_DATE: case RAY_TIME: {
+                int32_t* d = (int32_t*)ray_data(new_col);
+                for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_I32;
+                break;
+            }
+            case RAY_I16: {
+                int16_t* d = (int16_t*)ray_data(new_col);
+                for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_I16;
+                break;
+            }
+            default:
+                memset(ray_data(new_col), 0, (size_t)ix_count * (size_t)col_esz(new_col));
+                break;
+        }
 
         for (uint32_t _pp = 0; _pp < pg.n_parts; _pp++) {
             group_ht_t* ph = &pg.part_hts[_pp];
@@ -716,9 +752,12 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             col_sym = ray_sym_intern(buf, (size_t)len);
         }
 
-        /* Single-null float model: flip HAS_NULLS if an F64 pivot cell was
-         * canonicalized to NULL_F64 above (avg division, sum overflow). */
-        if (new_col->type == RAY_F64) par_finalize_nulls(new_col);
+        /* Flip HAS_NULLS if any pivot cell carries the type-correct NULL
+         * sentinel — either a missing cell (no source row) left as null by
+         * the init above, or (F64) a value canonicalized to NULL_F64 by
+         * ray_f64_fin (avg division, sum overflow).  par_finalize_nulls is
+         * a no-op for non-sentinel types (SYM/STR/BOOL/U8/GUID). */
+        par_finalize_nulls(new_col);
         result = ray_table_add_col(result, col_sym, new_col);
         ray_release(new_col);
         if (RAY_IS_ERR(result)) goto pivot_cleanup;
