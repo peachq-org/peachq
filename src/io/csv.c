@@ -1333,16 +1333,19 @@ static int csv_should_attach_hash(ray_t* v) {
      * across ~150 chunks each ~1.8e19 wide overflows; double has
      * ~15 significant decimal digits, plenty for this coarse ratio).
      *
-     * Threshold = 0.2.  The strict 0.5 cut documented in the design
-     * note cleanly catches uniformly-random hashed columns (ratio
-     * ~1.0) but excludes mildly-clustered numeric IDs like UserID
-     * (~0.26 on the ClickBench hits data: user sessions cluster
-     * consecutively so chunk spans don't fully cover the I64 range).
-     * For point lookups on those columns chunk_zone still prunes
-     * most chunks but ~30 % can hold the key — a 30 % full-column
-     * scan, not a real win.  Dropping to 0.2 admits UserID while
-     * still excluding tightly-clustered keys (CounterID/EventDate
-     * at <0.01) where chunk_zone already gives 99 %+ pruning. */
+     * Threshold = 0.5.  mean_ratio measures how much of the global
+     * value range an average chunk spans: it is the entropy/clustering
+     * signal that decides whether a hash index pays off.  A value
+     * near 1.0 means each chunk already covers (almost) the whole
+     * range — the column is effectively uniformly random, chunk_zone
+     * min/max pruning is useless, so every point lookup degenerates
+     * to a full-column scan and a hash index is the only way to make
+     * it cheap.  A small ratio means values are clustered, so
+     * chunk_zone already prunes most chunks and the index buys little.
+     * 0.5 is the natural random-vs-clustered separator: above it a
+     * chunk spans more than half the range (no useful zone pruning,
+     * index it); below it clustering gives the zone map real pruning
+     * power and the index's memory/build cost isn't justified. */
     double dgr = (double)global_range;
     double span_sum = 0.0;
     uint32_t n_eff = 0;
@@ -1354,7 +1357,7 @@ static int csv_should_attach_hash(ray_t* v) {
     }
     if (n_eff < 4) return 0;
     double mean_ratio = (span_sum / (double)n_eff) / dgr;
-    if (mean_ratio <= 0.2) return 0;
+    if (mean_ratio <= 0.5) return 0;
 
     /* Memory cap: ray_index_attach_hash allocates a power-of-two
      * `cap = next_pow2(2*n)` int64 table plus an n-entry int64
