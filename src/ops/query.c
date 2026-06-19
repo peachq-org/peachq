@@ -10959,6 +10959,15 @@ static void wj_scan_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t en
                 }
             }
 
+            /* Single-null float model: an F64 aggregate result that is
+             * non-finite (avg/var division, sum overflow, sqrt(<0)) becomes
+             * NULL_F64; reflect it in the null flag so HAS_NULLS is set and
+             * the result column never holds a non-finite-non-0Nf value. */
+            if (!null_out && rty == RAY_F64) {
+                out_f = ray_f64_fin(out_f);
+                if (out_f != out_f) null_out = true;
+            }
+
             c->result_null[a][lr] = null_out ? 1 : 0;
             if (null_out) continue;
 

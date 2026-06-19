@@ -1326,7 +1326,12 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             char* end;
             double v = strtod(sp, &end);
             if (end == sp) return ray_error("domain", "as: cannot parse str as f64");
-            return make_f64(v);
+            /* STAGE 2 (ingest/cast STR→F64): deliberately NOT canonicalized in
+             * Stage 1 — strtod("inf")/strtod("nan") may still enter a non-finite
+             * F64 here.  Use the raw ray_f64 constructor (NOT make_f64, which
+             * canonicalizes) so the single-null float model's scope stays
+             * exactly the compute kernels + aggregates.  Revisit in Stage 2. */
+            return ray_f64(v);
         }
         /* Vector cast */
         if (ray_is_vec(val) || val->type == RAY_LIST)

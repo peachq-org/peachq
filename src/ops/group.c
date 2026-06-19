@@ -2022,7 +2022,9 @@ static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
                                        double fval, int64_t ival, ray_t* src) {
     int8_t out_type = op->out_type ? op->out_type : in_type;
     if (!found) return ray_typed_null(-out_type);
-    if (out_type == RAY_F64) return ray_f64(fval);
+    /* Single-null float model: min/max of finite inputs is finite, but guard
+     * against an ±Inf init sentinel surfacing as a value. */
+    if (out_type == RAY_F64) return ray_f64(ray_f64_fin(fval));
     return reduction_i64_result(ival, out_type, out_type == RAY_SYM ? src : NULL);
 }
 
@@ -2180,14 +2182,14 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
         ray_t* result;
         switch (op->opcode) {
-            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : (in_type == RAY_TIME ? ray_time(merged.sum_i) : ray_i64(merged.sum_i)); break;
-            case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : ray_i64(merged.prod_i); break;
+            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(ray_f64_fin(merged.sum_f)) : (in_type == RAY_TIME ? ray_time(merged.sum_i) : ray_i64(merged.sum_i)); break;
+            case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(ray_f64_fin(merged.prod_f)) : ray_i64(merged.prod_i); break;
             case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i, input); break;
             case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i, input); break;
             /* COUNT returns total length including nulls — matches ray_count_fn's
              * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
             case OP_COUNT: result = ray_i64(scan_n); break;
-            case OP_AVG:   result = merged.cnt > 0 ? ray_f64(in_type == RAY_F64 ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt) : ray_typed_null(-RAY_F64); break;
+            case OP_AVG:   result = merged.cnt > 0 ? ray_f64(ray_f64_fin(in_type == RAY_F64 ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt)) : ray_typed_null(-RAY_F64); break;
             case OP_FIRST: result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.first_f) : reduction_i64_result(merged.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
             case OP_LAST:  result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.last_f) : reduction_i64_result(merged.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
             case OP_VAR: case OP_VAR_POP:
@@ -2203,7 +2205,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                 else if (op->opcode == OP_VAR) val = var_pop * merged.cnt / (merged.cnt - 1);
                 else if (op->opcode == OP_STDDEV_POP) val = sqrt(var_pop);
                 else val = sqrt(var_pop * merged.cnt / (merged.cnt - 1));
-                result = ray_f64(val);
+                result = ray_f64(ray_f64_fin(val));
                 break;
             }
             default:       result = ray_error("nyi", NULL); break;
@@ -2219,14 +2221,14 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (sel_idx_block) ray_release(sel_idx_block);
 
     switch (op->opcode) {
-        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : (in_type == RAY_TIME ? ray_time(acc.sum_i) : ray_i64(acc.sum_i));
-        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : ray_i64(acc.prod_i);
+        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(ray_f64_fin(acc.sum_f)) : (in_type == RAY_TIME ? ray_time(acc.sum_i) : ray_i64(acc.sum_i));
+        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(ray_f64_fin(acc.prod_f)) : ray_i64(acc.prod_i);
         case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i, input);
         case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i, input);
         /* COUNT returns total length including nulls — matches ray_count_fn's
          * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
         case OP_COUNT: return ray_i64(scan_n);
-        case OP_AVG:   return acc.cnt > 0 ? ray_f64(in_type == RAY_F64 ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt) : ray_typed_null(-RAY_F64);
+        case OP_AVG:   return acc.cnt > 0 ? ray_f64(ray_f64_fin(in_type == RAY_F64 ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt)) : ray_typed_null(-RAY_F64);
         case OP_FIRST: return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.first_f) : reduction_i64_result(acc.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
         case OP_LAST:  return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.last_f) : reduction_i64_result(acc.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
         case OP_VAR: case OP_VAR_POP:
@@ -2242,7 +2244,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             else if (op->opcode == OP_VAR) val = var_pop * acc.cnt / (acc.cnt - 1);
             else if (op->opcode == OP_STDDEV_POP) val = sqrt(var_pop);
             else val = sqrt(var_pop * acc.cnt / (acc.cnt - 1));
-            return ray_f64(val);
+            return ray_f64(ray_f64_fin(val));
         }
         default:       return ray_error("nyi", NULL);
     }
@@ -3246,13 +3248,16 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
                             double num = dn * sxy - sx * sy;
                             double dx  = dn * sxx - sx * sx;
                             double dy  = dn * syy - sy * sy;
-                            if (dx <= 0.0 || dy <= 0.0) { v = NAN; break; }
+                            if (dx <= 0.0 || dy <= 0.0) { v = NULL_F64; break; }
                             v = num / sqrt(dx * dy);
                             break;
                         }
                         default: v = 0.0; break;
                     }
-                    ((double*)(void*)ao->dst)[di] = v;
+                    /* Single-null float model: canonicalize non-finite (overflow,
+                     * pearson sqrt(≤0)/0-0, etc.) to NULL_F64.  HAS_NULLS is set
+                     * by grp_finalize_nulls(agg_outs[a].vec) after dispatch. */
+                    ((double*)(void*)ao->dst)[di] = ray_f64_fin(v);
                 } else {
                     int64_t v;
                     switch (op) {
@@ -3820,7 +3825,12 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                     }
                     default:     v = 0.0; break;
                 }
-                ((double*)ray_data(new_col))[gi] = v;
+                /* Single-null float model: canonicalize a non-finite computed
+                 * aggregate (sum overflow → ±Inf, var/stddev overflow, etc.) to
+                 * NULL_F64.  Explicit empty-group cases above already set the
+                 * null bit; a grp_finalize_nulls(new_col) scan below flips
+                 * HAS_NULLS for any sentinel produced here. */
+                ((double*)ray_data(new_col))[gi] = ray_f64_fin(v);
             } else {
                 int64_t v;
                 /* Null sentinel must match out_type's width: NULL_I64 truncated
@@ -3896,6 +3906,10 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
             memcpy(nbuf + np, nsfx, nslen);
             name_id = ray_sym_intern(nbuf, (size_t)np + nslen);
         }
+        /* Single-null float model: flip HAS_NULLS if the F64 store loop above
+         * canonicalized any non-finite aggregate to NULL_F64 (e.g. overflow)
+         * without an explicit ray_vec_set_null. */
+        if (new_col->type == RAY_F64) grp_finalize_nulls(new_col);
         *result = ray_table_add_col(*result, name_id, new_col);
         ray_release(new_col);
     }
@@ -8656,13 +8670,15 @@ sequential_fallback:;
                         double num = dn * sxy - sx * sy;
                         double dx  = dn * sxx - sx * sx;
                         double dy  = dn * syy - sy * sy;
-                        if (dx <= 0.0 || dy <= 0.0) { v = NAN; break; }
+                        if (dx <= 0.0 || dy <= 0.0) { v = NULL_F64; break; }
                         v = num / sqrt(dx * dy);
                         break;
                     }
                     default: v = 0.0; break;
                 }
-                ((double*)ray_data(new_col))[gi] = v;
+                /* Single-null float model: canonicalize non-finite computed
+                 * aggregate to NULL_F64 (HAS_NULLS via the scan added below). */
+                ((double*)ray_data(new_col))[gi] = ray_f64_fin(v);
             } else {
                 int64_t v;
                 switch (agg_op) {
@@ -8725,6 +8741,9 @@ sequential_fallback:;
             memcpy(nbuf + np, nsfx, nslen);
             name_id = ray_sym_intern(nbuf, (size_t)np + nslen);
         }
+        /* Single-null float model: flip HAS_NULLS if a non-finite F64 aggregate
+         * was canonicalized to NULL_F64 above without an explicit set_null. */
+        if (new_col->type == RAY_F64) grp_finalize_nulls(new_col);
         result = ray_table_add_col(result, name_id, new_col);
         ray_release(new_col);
     }
@@ -9270,13 +9289,16 @@ batch_fail:
                     const double* sv = (const double*)ray_data(sum_col);
                     const int64_t* cv = (const int64_t*)ray_data(cnt_col);
                     for (int64_t r = 0; r < nrows; r++)
-                        out[r] = cv[r] > 0 ? sv[r] / (double)cv[r] : 0.0;
+                        out[r] = cv[r] > 0 ? ray_f64_fin(sv[r] / (double)cv[r]) : 0.0;
                 } else {
                     const int64_t* sv = (const int64_t*)ray_data(sum_col);
                     const int64_t* cv = (const int64_t*)ray_data(cnt_col);
                     for (int64_t r = 0; r < nrows; r++)
-                        out[r] = cv[r] > 0 ? (double)sv[r] / (double)cv[r] : 0.0;
+                        out[r] = cv[r] > 0 ? ray_f64_fin((double)sv[r] / (double)cv[r]) : 0.0;
                 }
+                /* Single-null float model: flip HAS_NULLS for any avg
+                 * canonicalized to NULL_F64 (overflow). */
+                grp_finalize_nulls(avg_col);
                 trimmed = ray_table_add_col(trimmed, nm, avg_col);
                 ray_release(avg_col);
             } else if (is_std_slot) {
@@ -9324,10 +9346,10 @@ batch_fail:
                         if (var_pop < 0) var_pop = 0;
                         bool insuf = (orig_op == OP_VAR || orig_op == OP_STDDEV) && n <= 1;
                         if (insuf) { out[r] = NULL_F64; ray_vec_set_null(out_col, r, true); continue; }
-                        if (orig_op == OP_VAR_POP)         out[r] = var_pop;
-                        else if (orig_op == OP_VAR)         out[r] = var_pop * n / (n - 1);
-                        else if (orig_op == OP_STDDEV_POP)  out[r] = sqrt(var_pop);
-                        else /* OP_STDDEV */                out[r] = sqrt(var_pop * n / (n - 1));
+                        if (orig_op == OP_VAR_POP)         out[r] = ray_f64_fin(var_pop);
+                        else if (orig_op == OP_VAR)         out[r] = ray_f64_fin(var_pop * n / (n - 1));
+                        else if (orig_op == OP_STDDEV_POP)  out[r] = ray_f64_fin(sqrt(var_pop));
+                        else /* OP_STDDEV */                out[r] = ray_f64_fin(sqrt(var_pop * n / (n - 1)));
                     }
                 } else {
                     const int64_t* sv = (const int64_t*)ray_data(sum_col);
@@ -9339,12 +9361,15 @@ batch_fail:
                         if (var_pop < 0) var_pop = 0;
                         bool insuf = (orig_op == OP_VAR || orig_op == OP_STDDEV) && n <= 1;
                         if (insuf) { out[r] = NULL_F64; ray_vec_set_null(out_col, r, true); continue; }
-                        if (orig_op == OP_VAR_POP)         out[r] = var_pop;
-                        else if (orig_op == OP_VAR)         out[r] = var_pop * n / (n - 1);
-                        else if (orig_op == OP_STDDEV_POP)  out[r] = sqrt(var_pop);
-                        else /* OP_STDDEV */                out[r] = sqrt(var_pop * n / (n - 1));
+                        if (orig_op == OP_VAR_POP)         out[r] = ray_f64_fin(var_pop);
+                        else if (orig_op == OP_VAR)         out[r] = ray_f64_fin(var_pop * n / (n - 1));
+                        else if (orig_op == OP_STDDEV_POP)  out[r] = ray_f64_fin(sqrt(var_pop));
+                        else /* OP_STDDEV */                out[r] = ray_f64_fin(sqrt(var_pop * n / (n - 1)));
                     }
                 }
+                /* Single-null float model: flip HAS_NULLS for any var/stddev
+                 * canonicalized to NULL_F64 (overflow). */
+                grp_finalize_nulls(out_col);
                 trimmed = ray_table_add_col(trimmed, nm, out_col);
                 ray_release(out_col);
             } else {

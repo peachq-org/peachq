@@ -176,9 +176,12 @@ static ray_t* vec_binary_metric(metric_kind_t kind, ray_t* a, ray_t* b) {
         double* out = (double*)ray_data(result);
         for (int64_t i = 0; i < n; i++) {
             ray_t* row = ray_list_get(list, i);
-            out[i] = row_score(kind, row, q, q_norm, dim);
+            /* Single-null float model: a metric over degenerate vectors can be
+             * non-finite (NaN/Inf) → canonicalize to NULL_F64. */
+            out[i] = ray_f64_fin(row_score(kind, row, q, q_norm, dim));
         }
         ray_sys_free(q);
+        mark_f64_nonfinite_as_null(result, 0, n);
         return result;
     }
 
@@ -223,8 +226,9 @@ ray_t* ray_norm_fn(ray_t* x) {
                 double e = rayvec_at_f64(v, j);
                 s += e * e;
             }
-            out[i] = sqrt(s);
+            out[i] = ray_f64_fin(sqrt(s));
         }
+        mark_f64_nonfinite_as_null(result, 0, n);
         return result;
     }
     if (!rayvec_is_numeric(x))
