@@ -25,8 +25,43 @@
 #define RAY_COL_H
 
 #include <rayforce.h>
+#include <string.h>
 
 struct ray_sym_domain_s;
+
+/* On-disk column format version, carried in the 32-byte header's `order`
+ * byte (offset 17).  The on-disk header IS the in-memory ray_t allocator
+ * layout (payload at offset 32); there is NO separate envelope.
+ *
+ * Placement rationale: of the header bytes, only mmod(16) and order(17) are
+ * on-disk-free (written 0 and recomputed on load).  aux(0-15) is RESERVED
+ * for postponed on-disk index persistence (min/max zone map) and must not
+ * be squatted; rc(20-23) carries the SYM saved dictionary count;
+ * type/attrs/len are live data.  So the version lives in `order`.
+ *
+ * A SINGLE byte = MAJOR version.  Compatibility is gated by major only:
+ * minor/additive changes stay backward-compatible, so one byte (0-255
+ * generations) suffices.  There is NO magic — the type allowlist +
+ * len-vs-filesize + SYM rc saved-count already validate file integrity;
+ * this byte only gates the format generation.
+ *
+ * FRESH SWAP, NO LEGACY: a file whose `order` byte != the reader's major is
+ * rejected with a "version" error (RAY_ERR_VERSION). */
+#define RAY_COL_FORMAT_MAJOR    ((uint8_t)1)
+
+/* Stamp the format major version into a 32-byte on-disk header's `order`
+ * byte.  Does NOT touch aux (reserved for postponed index persistence).
+ * Replaces the prior `header.order = 0` at every write site. */
+static inline void ray_col_stamp_format(ray_t* header) {
+    header->order = RAY_COL_FORMAT_MAJOR;
+}
+
+/* Validate the format major version in a mapped/built column header's
+ * `order` byte (offset 17).  Returns RAY_OK iff it matches the reader's
+ * major, else RAY_ERR_VERSION. */
+static inline ray_err_t ray_col_check_format(const ray_t* header) {
+    return header->order == RAY_COL_FORMAT_MAJOR ? RAY_OK : RAY_ERR_VERSION;
+}
 
 /* Column file I/O.
  *
