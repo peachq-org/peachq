@@ -25,8 +25,47 @@
 #define RAY_COL_H
 
 #include <rayforce.h>
+#include <string.h>
 
 struct ray_sym_domain_s;
+
+/* On-disk column format identity, embedded in the 32-byte header's aux
+ * region (bytes 0-15 — the on-disk-free scratch that overlays runtime-only
+ * pointers slice / str_pool / sym_domain / index, all stripped before
+ * write).  The on-disk header IS the in-memory ray_t allocator layout
+ * (payload at offset 32); there is NO separate envelope.
+ *
+ * FRESH SWAP, NO LEGACY: files without the magic, or with a version newer
+ * than the reader, are rejected with a "version" error (RAY_ERR_VERSION).
+ * RFCL = "RayForce CoLumn"; distinct from the STRL/STRV/LSTG/TTBL container
+ * magics so the magic-dispatch routes the 32-byte-header path to the raw
+ * validator. */
+#define RAY_COL_MAGIC           0x4C434652U  /* "RFCL" (little-endian aux[0..3]) */
+#define RAY_COL_FORMAT_VERSION  ((uint16_t)1)
+
+/* Stamp the format magic + version into a 32-byte on-disk header's aux
+ * region and zero the remaining aux bytes.  Call AFTER all other aux
+ * manipulation so every fixed-width column file carries the magic. */
+static inline void ray_col_stamp_format(ray_t* header) {
+    uint32_t magic = RAY_COL_MAGIC;
+    uint16_t ver   = RAY_COL_FORMAT_VERSION;
+    memcpy(header->aux, &magic, 4);
+    memcpy(header->aux + 4, &ver, 2);
+    memset(header->aux + 6, 0, 10);
+}
+
+/* Validate the format magic + version at the head of a mapped/built column
+ * header.  Returns RAY_OK or RAY_ERR_VERSION (exact-match version: reject
+ * anything newer). */
+static inline ray_err_t ray_col_check_format(const void* base) {
+    uint32_t magic;
+    uint16_t ver;
+    memcpy(&magic, base, 4);
+    memcpy(&ver, (const char*)base + 4, 2);
+    if (magic != RAY_COL_MAGIC || ver > RAY_COL_FORMAT_VERSION)
+        return RAY_ERR_VERSION;
+    return RAY_OK;
+}
 
 /* Column file I/O.
  *
