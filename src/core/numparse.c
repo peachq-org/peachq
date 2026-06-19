@@ -25,6 +25,7 @@
 
 #include <rayforce.h>
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -236,13 +237,16 @@ size_t ray_parse_f64(const char *src, size_t len, double *dst) {
     if (src[0] == '-') { neg = 1; i = 1; }
     else if (src[0] == '+') { i = 1; }
 
-    /* NaN / Inf */
+    /* NaN / Inf.  STAGE 2 (single-null float model): the F64 domain is
+     * {finite} ∪ {0Nf}; ±Inf and NaN are NOT values.  A parsed "nan"/"inf"
+     * token canonicalizes to NULL_F64 (0Nf) so no non-finite can enter a
+     * column through CSV ingest or a Rayfall F64 literal. */
     if (i + 3 <= len && icmp3(src + i, 'n', 'a', 'n')) {
-        *dst = __builtin_nan("");
+        *dst = NULL_F64;
         return i + 3;
     }
     if (i + 3 <= len && icmp3(src + i, 'i', 'n', 'f')) {
-        *dst = neg ? -__builtin_inf() : __builtin_inf();
+        *dst = NULL_F64;
         return i + 3;
     }
 
@@ -425,8 +429,10 @@ size_t ray_parse_f64(const char *src, size_t len, double *dst) {
             if (buf_block) ray_free(buf_block);
             if (ok) {
                 /* strtod already applied the leading sign in buf, so
-                 * don't apply `neg` again. */
-                *dst = v;
+                 * don't apply `neg` again.  STAGE 2: canonicalize a
+                 * non-finite strtod result (overflow → ±Inf, "1e400") to
+                 * NULL_F64 so the single-null float model holds at ingest. */
+                *dst = (__builtin_fabs(v) <= DBL_MAX) ? v : NULL_F64;
                 return i;
             }
         }
@@ -437,7 +443,13 @@ size_t ray_parse_f64(const char *src, size_t len, double *dst) {
         val = scale_pow10((double)mantissa, dec_offset);
     }
 
-    *dst = neg ? -val : val;
+    /* STAGE 2 (single-null float model): canonicalize any non-finite
+     * result — overflow (dec_offset > 308 → +Inf above) or a scale_pow10
+     * fallback that produced ±Inf — to NULL_F64 (0Nf).  Finite values
+     * (including denormals and signed zero) pass through unchanged.  The
+     * fabs <= DBL_MAX test is false for both ±Inf and NaN. */
+    double out = neg ? -val : val;
+    *dst = (__builtin_fabs(out) <= DBL_MAX) ? out : NULL_F64;
     return i;
 }
 

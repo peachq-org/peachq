@@ -115,7 +115,8 @@ typedef enum {
     RAY_ERR_PARSE,
     RAY_ERR_NAME,
     RAY_ERR_LIMIT,
-    RAY_ERR_RESERVED
+    RAY_ERR_RESERVED,
+    RAY_ERR_VERSION
 } ray_err_t;
 
 #define RAY_IS_ERR(p)    ((p) != NULL && (uintptr_t)(p) > 31 && ((ray_t*)(p))->type == RAY_ERROR)

@@ -35,6 +35,7 @@
 #include "ops/idxop.h"
 #include "ops/linkop.h"
 #include "table/sym.h"
+#include "vec/vec.h"            /* ray_check_null_invariant (DEBUG null-model gate) */
 #include "core/profile.h"
 #include "table/sym.h"
 #include "mem/heap.h"
@@ -1307,7 +1308,14 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
                 atom_wrap = ray_vec_new(RAY_BOOL, 1);
                 if (!RAY_IS_ERR(atom_wrap)) { ((uint8_t*)ray_data(atom_wrap))[0] = col_src->b8; atom_wrap->len = 1; }
             }
-            if (atom_wrap && !RAY_IS_ERR(atom_wrap)) col_src = atom_wrap;
+            if (atom_wrap && !RAY_IS_ERR(atom_wrap)) {
+                /* Invariant 16.4: a lone typed-null atom (e.g. 0Nl) wrapped
+                 * into a 1-element column carries its sentinel; flag it.
+                 * SYM is no-null by design (excluded). */
+                if (RAY_ATOM_IS_NULL(col_src) && atom_wrap->type != RAY_SYM)
+                    atom_wrap->attrs |= RAY_ATTR_HAS_NULLS;
+                col_src = atom_wrap;
+            }
         }
 
         /* If the column is already a typed vector, use it directly */
@@ -1380,7 +1388,19 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
         if (RAY_IS_ERR(col_vec))
             { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return col_vec; }
 
+        /* Null-model invariant 16.4: ray_vec_append copies the atom payload
+         * raw and never sets HAS_NULLS, so a typed-null literal in the list
+         * (e.g. 0Nl = NULL_I64) would land its sentinel in the column with
+         * the flag clear.  Track it and flip HAS_NULLS after the loop. */
+        bool col_has_nulls = false;
+
         for (int64_t j = 0; j < nrows; j++) {
+            /* A null source atom whose sentinel survives into col_vec
+             * unchanged.  (F64 promotion of an I64 null produces a finite
+             * double, not a sentinel — no 16.4 issue there.) */
+            if (RAY_ATOM_IS_NULL(row_elems[j]) &&
+                !(col_type == RAY_F64 && row_elems[j]->type == -RAY_I64))
+                col_has_nulls = true;
             if (col_type == RAY_STR) {
                 if (row_elems[j]->type != -RAY_STR) {
                     int8_t et = row_elems[j]->type;
@@ -1426,6 +1446,10 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             if (RAY_IS_ERR(col_vec))
                 { ray_release(tbl); if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return col_vec; }
         }
+
+        /* Invariant 16.4: a sentinel was written into a non-SYM column. */
+        if (col_has_nulls && col_vec->type != RAY_SYM)
+            col_vec->attrs |= RAY_ATTR_HAS_NULLS;
 
         tbl = ray_table_add_col(tbl, name_id, col_vec);
         ray_release(col_vec);
@@ -3318,6 +3342,11 @@ out:
      * which builtin drove the update (including ray_group_fn etc.
      * that bypass ray_execute). */
     if (__VM->eval_depth == 0) ray_progress_end();
+    /* §2.1 null-model invariant 16.4: every eval/op result flows through
+     * here, so this is the suite-wide chokepoint that enforces "sentinel
+     * present ⇒ HAS_NULLS set" across all tested producers.  Compiled out
+     * in release (see vec.h).  Errors/NULL are no-ops in the validator. */
+    ray_check_null_invariant(ret);
     return ret;
 }
 
