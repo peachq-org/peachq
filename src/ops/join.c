@@ -1673,6 +1673,11 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
                 gather_fn(&gctx, 0, 0, out_count);
 
             col_propagate_str_pool(new_col, col);
+            /* Null-model invariant 16.4: the gather copies sentinel cells
+             * verbatim (e.g. an anti-join preserves a null-key left row) but
+             * gather_fn does not flag HAS_NULLS — propagate it from the
+             * source, mirroring the inner/outer join gather path. */
+            col_propagate_nulls_gather(new_col, col, out_idx, out_count);
             /* SYM output gathers raw cell ids from `col` — resolve over
              * the same dictionary (sym-domain Phase 2). */
             if (new_col->type == RAY_SYM)

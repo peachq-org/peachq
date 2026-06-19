@@ -393,8 +393,14 @@ RAY_INLINE int64_t fast_i64(const char* p, size_t len, bool* is_null) {
 RAY_INLINE double fast_f64(const char* p, size_t len, bool* is_null) {
     double v = 0.0;
     size_t n = ray_parse_f64(p, len, &v);
-    *is_null = (n == 0 || n != len);
-    return *is_null ? 0.0 : v;
+    /* STAGE 2 (single-null float model): ray_parse_f64 already canonicalizes
+     * any non-finite parse ("inf"/"nan"/"1e400") to NULL_F64 (0Nf).  Treat
+     * an unparseable cell OR a canonical 0Nf as null so the column's
+     * HAS_NULLS / null bitmap is marked the same way as a blank cell — the
+     * F64 domain is {finite} ∪ {0Nf}, and a 0Nf row reads as nil?.
+     * `v != v` is the model's null test (true only for the NaN-bit 0Nf). */
+    *is_null = (n == 0 || n != len || v != v);
+    return *is_null ? NULL_F64 : v;
 }
 
 /* --------------------------------------------------------------------------
@@ -2126,6 +2132,11 @@ static ray_err_t csv_splayed_writer_close(csv_splayed_col_writer_t* w) {
         hdr.rc = (w->type == RAY_SYM)
             ? (uint32_t)ray_sym_domain_count(w->dom) : 0;
         if (w->had_nulls) hdr.attrs |= RAY_ATTR_HAS_NULLS;
+        /* Stamp the on-disk format major version into `order` so the
+         * streamed column file shares the exact identity ray_col_save
+         * writes — the loaders validate it.  aux stays zero (it was
+         * zero-initialized above) — reserved for postponed index data. */
+        ray_col_stamp_format(&hdr);
         if (fseek(w->fp, 0, SEEK_SET) != 0 ||
             fwrite(&hdr, 1, 32, w->fp) != 32)
             err = RAY_ERR_IO;
