@@ -262,6 +262,12 @@ void dl_rule_init(dl_rule_t* rule, const char* head_pred, int head_arity) {
     if (len >= sizeof(rule->head_pred)) len = sizeof(rule->head_pred) - 1;
     memcpy(rule->head_pred, head_pred, len);
     rule->head_pred[len] = '\0';
+    /* Clamp head_arity to the fixed array bound so the head-setter helpers
+     * (which guard against rule->head_arity) can never index past
+     * head_vars[]/head_consts[]. Parse-time callers reject over-arity loudly
+     * before reaching here; this is defense for direct programmatic callers. */
+    if (head_arity < 0) head_arity = 0;
+    if (head_arity > DL_MAX_ARITY) head_arity = DL_MAX_ARITY;
     rule->head_arity = head_arity;
     rule->n_body = 0;
     rule->n_vars = 0;
@@ -303,6 +309,11 @@ void dl_rule_head_const_f64(dl_rule_t* rule, int pos, double val) {
 
 int dl_rule_add_atom(dl_rule_t* rule, const char* pred, int arity) {
     if (rule->n_body >= DL_MAX_BODY) return -1;
+    /* vars[]/const_vals[] are fixed-size (DL_MAX_ARITY). Reject an over-arity
+     * atom rather than writing past those arrays when positions are later set
+     * (dl_body_set_var/const guard against b->arity, which would itself be OOB
+     * if arity > DL_MAX_ARITY). */
+    if (arity < 0 || arity > DL_MAX_ARITY) return -1;
     int idx = rule->n_body++;
     dl_body_t* b = &rule->body[idx];
     memset(b, 0, sizeof(dl_body_t));
@@ -600,6 +611,17 @@ int dl_stratify(dl_program_t* prog) {
         if (stratum[i] > max_stratum) max_stratum = stratum[i];
     }
     prog->n_strata = max_stratum + 1;
+    /* The strata arrays are fixed-size (DL_MAX_STRATA). A program can produce
+     * up to ~DL_MAX_RELS strata (a chain of relations each depending on the
+     * previous through negation), so n_strata may exceed the array bound.
+     * The write loop below is guarded by `s < DL_MAX_STRATA`, but the eval
+     * read loop iterates [0, n_strata) unguarded — an unclamped n_strata would
+     * read past the strata array. Fail loudly rather than silently truncating
+     * (which would drop strata and produce wrong results) or reading OOB. */
+    if (prog->n_strata > DL_MAX_STRATA) {
+        prog->n_strata = 0;
+        return -1;
+    }
     memset(prog->strata_sizes, 0, sizeof(prog->strata_sizes));
 
     for (int i = 0; i < n; i++) {
@@ -2830,6 +2852,7 @@ int dl_eval(dl_program_t* prog) {
 
         /* Semi-naive iteration */
         int max_iter = 1000;
+        bool converged = false;
         for (int iter = 0; iter < max_iter; iter++) {
             /* Check convergence: all deltas empty */
             bool any_new = false;
@@ -2842,7 +2865,7 @@ int dl_eval(dl_program_t* prog) {
                     break;
                 }
             }
-            if (!any_new) break;
+            if (!any_new) { converged = true; break; }
 
             /* For each rule, for each positive body position that uses a
              * delta relation, compile and execute */
@@ -2981,6 +3004,15 @@ int dl_eval(dl_program_t* prog) {
                 prev_tables[rel_idx] = prog->rels[rel_idx].table;
             }
         }
+
+        /* Non-convergence: the fixpoint loop exhausted max_iter while deltas
+         * were still non-empty. The relation tables hold a partial (and thus
+         * wrong) result. Surface this loudly via eval_err rather than silently
+         * returning the truncated fixpoint. For well-formed Datalog over a
+         * finite EDB the loop converges in far fewer than max_iter steps, so
+         * hitting the cap signals a runaway/ill-formed program. */
+        if (!converged)
+            prog->eval_err = true;
 
         /* Cleanup stratum temporaries */
         for (int p = 0; p < prog->strata_sizes[s]; p++) {
@@ -3600,7 +3632,12 @@ static ray_t* dl_set_body_pos(dl_rule_t* rule, int bidx, int pos,
     if (node->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(node->i64);
         if (s && strcmp(ray_str_ptr(s), "_") == 0) {
-            /* Wildcard: create a fresh variable */
+            /* Wildcard: create a fresh variable. Bound-check against the
+             * fixed var-map size — the named path (dl_var_get_or_create)
+             * already guards this; without the same guard here a rule with
+             * >256 wildcards would write past vars->syms[]. */
+            if (vars->n >= DL_MAX_ARITY * DL_MAX_BODY)
+                return ray_error("domain", "rule: too many variables");
             int vi = vars->n++;
             vars->syms[vi] = -1 - vi;
             dl_body_set_var(rule, bidx, pos, vi);
@@ -3810,7 +3847,8 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
         dl_expr_t* expr = dl_build_expr(ce[2], vars);
         if (!expr)
             return ray_error("type", "rule: cannot parse assignment expression");
-        dl_rule_add_assign(rule, target_vi, DL_OP_EQ, expr);
+        if (dl_rule_add_assign(rule, target_vi, DL_OP_EQ, expr) < 0)
+            return ray_error("domain", "rule: too many body literals");
         return NULL;
     }
 
@@ -3833,9 +3871,11 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
         int64_t rhs_const = rhs_is_const ? ce[2]->i64 : 0;
 
         if (lhs_is_var && rhs_is_var) {
-            dl_rule_add_cmp(rule, cmp_op, lhs_vi, rhs_vi);
+            if (dl_rule_add_cmp(rule, cmp_op, lhs_vi, rhs_vi) < 0)
+                return ray_error("domain", "rule: too many body literals");
         } else if (lhs_is_var && rhs_is_const) {
-            dl_rule_add_cmp_const(rule, cmp_op, lhs_vi, rhs_const);
+            if (dl_rule_add_cmp_const(rule, cmp_op, lhs_vi, rhs_const) < 0)
+                return ray_error("domain", "rule: too many body literals");
         } else if (lhs_is_const && rhs_is_var) {
             /* Flip: const op var -> var flipped_op const */
             int flipped = cmp_op;
@@ -3846,14 +3886,16 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
             case DL_CMP_LE: flipped = DL_CMP_GE; break;
             default: break;
             }
-            dl_rule_add_cmp_const(rule, flipped, rhs_vi, lhs_const);
+            if (dl_rule_add_cmp_const(rule, flipped, rhs_vi, lhs_const) < 0)
+                return ray_error("domain", "rule: too many body literals");
         } else {
             /* Expression-based comparison */
             dl_expr_t* le = dl_build_expr(ce[1], vars);
             dl_expr_t* re = (clen > 2) ? dl_build_expr(ce[2], vars) : NULL;
-            if (le && re)
-                dl_rule_add_cmp_expr(rule, cmp_op, le, re);
-            else
+            if (le && re) {
+                if (dl_rule_add_cmp_expr(rule, cmp_op, le, re) < 0)
+                    return ray_error("domain", "rule: too many body literals");
+            } else
                 return ray_error("type", "rule: cannot parse comparison operands");
         }
         return NULL;
@@ -3899,6 +3941,12 @@ static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
         return ray_error("domain", "rule: _ is reserved as wildcard");
 
     int head_arity = (int)(hlen - 1);
+    /* head_vars[]/head_consts[] are fixed-size (DL_MAX_ARITY). A head literal
+     * with arity > DL_MAX_ARITY would write past those arrays (the head-setter
+     * helpers only guard against head_arity, which would itself be OOB here).
+     * Reject loudly instead. */
+    if (head_arity > DL_MAX_ARITY)
+        return ray_error("domain", "rule: head arity exceeds DL_MAX_ARITY");
     dl_rule_init(out, ray_str_ptr(head_name_str), head_arity);
 
     for (int i = 0; i < head_arity; i++) {
@@ -4420,6 +4468,21 @@ ray_t* ray_dl_provenance_fn(ray_t* prog_obj, ray_t* pred_obj) {
     if (!prov) return ray_error("domain", "dl-provenance: not available");
     ray_retain(prov);
     return prov;
+}
+
+/* (dl-free prog) — free a dl-program handle created by (dl-program).
+ * The handle wraps a raw dl_program_t* with no automatic finalizer, so
+ * without an explicit free the program block and all relation tables it
+ * owns leak. Idempotent: zeroes the handle so a second call is a no-op
+ * (returns false) instead of double-freeing. */
+ray_t* ray_dl_free_fn(ray_t* x) {
+    if (!x || x->type != -RAY_I64)
+        return ray_error("type", "dl-free: arg must be a dl-program");
+    dl_program_t* prog = dl_unwrap_program(x);
+    if (!prog) return ray_bool(false);  /* already freed / null handle */
+    dl_program_free(prog);
+    x->i64 = 0;
+    return ray_bool(true);
 }
 
 /* Reset global Datalog rule storage (called from ray_lang_destroy) */
