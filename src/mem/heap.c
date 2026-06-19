@@ -238,6 +238,19 @@ static _Atomic(uint64_t) g_heap_id_cursor = 0;
 
 ray_heap_t* ray_heap_registry[RAY_HEAP_REGISTRY_SIZE];
 
+/* Serializes the registry slot writes (register/unregister) and the
+ * cross-heap foreign-list purges that walk EVERY other heap's ->foreign
+ * during teardown.  ray_pool_free() joins workers one at a time, but all
+ * workers wake on the shutdown signal together and run ray_heap_destroy()
+ * CONCURRENTLY — two destroyers splicing the same neighbour's singly-linked
+ * ->foreign list (or one walking a slot another is NULLing) tears the list
+ * and SEGVs on the next ->fl_next deref.  Spinlock matches the dfd_lock
+ * pattern above; held only across the short registry/foreign critical
+ * sections, never across munmap or syscalls. */
+static atomic_flag ray_registry_lock_flag = ATOMIC_FLAG_INIT;
+static void ray_registry_lock(void)   { while (atomic_flag_test_and_set_explicit(&ray_registry_lock_flag, memory_order_acquire)) {} }
+static void ray_registry_unlock(void) { atomic_flag_clear_explicit(&ray_registry_lock_flag, memory_order_release); }
+
 /* Pending-merge queue head (lock-free LIFO) */
 _Atomic(ray_heap_t*) ray_heap_pending_merge = NULL;
 
@@ -1351,8 +1364,11 @@ void ray_heap_init(void) {
     }
     h->id = (uint16_t)id;
 
-    /* Register in global heap registry */
+    /* Register in global heap registry (lock: a concurrent destroyer may be
+     * walking the array in its foreign-purge loop). */
+    ray_registry_lock();
     ray_heap_registry[h->id % RAY_HEAP_REGISTRY_SIZE] = h;
+    ray_registry_unlock();
 
     /* Initialize circular sentinel freelists */
     for (int i = 0; i < RAY_HEAP_FL_SIZE; i++)
@@ -1425,6 +1441,13 @@ void ray_heap_destroy(void) {
 
     uint16_t saved_id = h->id;
 
+    /* Workers tear down CONCURRENTLY during ray_pool_free() (all woken by the
+     * same shutdown signal), so the unregister + the cross-heap foreign-list
+     * purge below must be serialized: otherwise two destroyers splice the same
+     * neighbour's ->foreign list at once and the ->fl_next walk SEGVs.  Held
+     * only across the registry critical section, released before munmap. */
+    ray_registry_lock();
+
     /* Unregister from global heap registry */
     ray_heap_registry[h->id % RAY_HEAP_REGISTRY_SIZE] = NULL;
 
@@ -1461,6 +1484,8 @@ void ray_heap_destroy(void) {
             curr = next;
         }
     }
+
+    ray_registry_unlock();
 
     /* Munmap all tracked pools.  File-backed pools also need their fd
      * closed and their tempfile unlinked so the swap directory doesn't
@@ -1665,6 +1690,11 @@ void ray_heap_gc(void) {
                  *     those blocks are threaded into the foreign list and
                  *     dereferencing them after munmap would crash.
                  *     They'll be flushed to the owner on the next GC. */
+                /* Lock the foreign-list scan + purge: keeps the registry-wide
+                 * foreign-splice invariant uniform with ray_heap_destroy.
+                 * Workers are idle here (ray_parallel_flag == 0), so this is
+                 * defensive — never contended in the live GC path. */
+                ray_registry_lock();
                 bool has_foreign = false;
                 for (int fh_id = 0; fh_id < RAY_HEAP_REGISTRY_SIZE && !has_foreign; fh_id++) {
                     ray_heap_t* fh_heap = ray_heap_registry[fh_id];
@@ -1680,6 +1710,7 @@ void ray_heap_gc(void) {
                 }
 
                 if (free_bytes < pool_capacity || has_foreign) {
+                    ray_registry_unlock();
                     p++;
                     continue;  /* pool has live allocations or dangling foreign refs */
                 }
@@ -1734,6 +1765,7 @@ void ray_heap_gc(void) {
                         curr = next;
                     }
                 }
+                ray_registry_unlock();
 
                 dfd_purge_range(pb, pe);
                 ray_vm_free(phdr->vm_base, BSIZEOF(po));
@@ -1928,8 +1960,11 @@ void ray_heap_flush_foreign(void) {
 
 void ray_heap_push_pending(ray_heap_t* heap) {
     if (!heap) return;
-    /* Unregister so no new foreign blocks target this heap */
+    /* Unregister so no new foreign blocks target this heap (lock: serialize
+     * against concurrent destroyers walking the registry). */
+    ray_registry_lock();
     ray_heap_registry[heap->id % RAY_HEAP_REGISTRY_SIZE] = NULL;
+    ray_registry_unlock();
     /* Lock-free push: CAS loop on global LIFO head */
     heap->pending_next = atomic_load_explicit(&ray_heap_pending_merge, memory_order_relaxed);
     while (!atomic_compare_exchange_weak_explicit(
