@@ -1500,21 +1500,6 @@ static int is_single_group_key_projection(ray_t* by_expr, ray_t* val_expr) {
            val_expr->i64 == key_id;
 }
 
-static int is_strlen_name_expr(ray_t* expr, int64_t* out_sym) {
-    if (!expr || expr->type != RAY_LIST || ray_len(expr) != 2) return 0;
-    ray_t** elems = (ray_t**)ray_data(expr);
-    if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
-    ray_t* head = ray_sym_str(elems[0]->i64);
-    if (!head || ray_str_len(head) != 6 ||
-        memcmp(ray_str_ptr(head), "strlen", 6) != 0)
-        return 0;
-    ray_t* arg = elems[1];
-    if (!arg || arg->type != -RAY_SYM || (arg->attrs & ATTR_QUOTED))
-        return 0;
-    if (out_sym) *out_sym = arg->i64;
-    return 1;
-}
-
 static int atom_i64_const(ray_t* v, int64_t* out) {
     if (!v || !ray_is_atom(v) ||
         (v->type == -RAY_SYM && !(v->attrs & ATTR_QUOTED)) ||
@@ -1863,28 +1848,6 @@ static int is_plain_count_expr(ray_t* expr) {
     if (!elems[0] || elems[0]->type != -RAY_SYM) return 0;
     if (resolve_agg_opcode(elems[0]->i64) != OP_COUNT) return 0;
     return !expr_contains_call_named(elems[1], "distinct", 8);
-}
-
-static bool bounded_multikey_count_take_candidate(ray_t** dict_elems, int64_t dict_n,
-                                                  int64_t from_id, int64_t where_id,
-                                                  int64_t by_id, int64_t take_id,
-                                                  int64_t asc_id, int64_t desc_id,
-                                                  int64_t nrows, int64_t max_groups) {
-    int64_t limit = nrows;
-    if (!unsorted_positive_take_limit(dict_elems, dict_n, asc_id, desc_id,
-                                      take_id, nrows, &limit))
-        return false;
-    if (limit > max_groups) return false;
-
-    int n_count_out = 0;
-    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-        int64_t kid = dict_elems[i]->i64;
-        if (kid == from_id || kid == where_id || kid == by_id ||
-            kid == take_id || kid == asc_id || kid == desc_id) continue;
-        if (!is_plain_count_expr(dict_elems[i + 1])) return false;
-        n_count_out++;
-    }
-    return n_count_out > 0;
 }
 
 /* NOTE: binary-aggregator gates (is_aggr_binary_call /
@@ -2947,16 +2910,26 @@ static ray_t* try_count_distinct_v2_rewrite(
     keys_in[n_K] = X_scan;
     uint16_t  agg_ops_in[1] = { OP_COUNT };
     ray_op_t* agg_ins_in[1] = { K_scans[0] };  /* count agg input is irrelevant */
-    ray_op_t* inner;
+    /* WHERE (when present) is applied as a general OP_FILTER pre-pass:
+     * exec_node on a TABLE input refines g_in->selection in place, and the
+     * subsequent OP_GROUP execution honours that selection (the v2 group
+     * engine consumes it directly).  This replaces the retired
+     * OP_FILTERED_GROUP fused node; results are identical. */
     if (where_expr) {
         ray_op_t* pred = compile_expr_dag(g_in, where_expr);
         if (!pred) { ray_graph_free(g_in); return NULL; }
-        inner = ray_filtered_group(g_in, pred, keys_in, n_K + 1,
-                                   agg_ops_in, agg_ins_in, 1);
-    } else {
-        inner = ray_group(g_in, keys_in, n_K + 1,
-                          agg_ops_in, agg_ins_in, 1);
+        ray_op_t* froot = ray_filter(g_in, ray_const_table(g_in, tbl), pred);
+        if (!froot) { ray_graph_free(g_in); return NULL; }
+        froot = ray_optimize(g_in, froot);
+        ray_t* fres = exec_node(g_in, froot);
+        if (!fres || RAY_IS_ERR(fres)) {
+            if (g_in->selection) { ray_release(g_in->selection); g_in->selection = NULL; }
+            ray_graph_free(g_in);
+            return (fres && RAY_IS_ERR(fres)) ? fres : NULL;
+        }
     }
+    ray_op_t* inner = ray_group(g_in, keys_in, n_K + 1,
+                                agg_ops_in, agg_ins_in, 1);
     if (!inner) { ray_graph_free(g_in); return NULL; }
     ray_t* dedup = ray_execute(g_in, inner);
     ray_graph_free(g_in);
@@ -4062,50 +4035,6 @@ static ray_t* project_table_cols(ray_t* src_tbl, const int64_t* keep_syms,
     return nt;
 }
 
-/* Narrow the result of a computed by-val expression when the AST head is
- * a known small-output temporal extract — minute/hh/ss/dd/dow/mm (0..59
- * etc.), doy/yyyy (0..366, year): all fit in I16.
- *
- * Why: mk_compile packs composite by-keys into a 16-byte slot.  An I64
- * column for minute() (0..59) blows the budget on q18's
- * {UserID(8B), minute(8B), SearchPhrase(SYM 2-4B)} → exec_group fallback.
- * Narrowing to I16 brings the composite under 16 bytes and unlocks the
- * fused mk_ path while keeping decimal display (U8 prints as 0x2F hex
- * which is unreadable for a minute value).
- *
- * Skips when col has nulls — the I64 null sentinel does not survive a
- * downcast. */
-static ray_t* narrow_known_small_extract_result(ray_t* expr, ray_t* col) {
-    if (!col || col->type != RAY_I64 || !ray_is_vec(col)) return col;
-    if (col->attrs & RAY_ATTR_HAS_NULLS) return col;
-    if (!expr || expr->type != RAY_LIST || ray_len(expr) < 1) return col;
-    ray_t** e = (ray_t**)ray_data(expr);
-    if (!e[0] || e[0]->type != -RAY_SYM) return col;
-    ray_t* head = ray_sym_str(e[0]->i64);
-    if (!head) return col;
-    size_t hn = ray_str_len(head);
-    const char* hp = ray_str_ptr(head);
-    int known = 0;
-    if      (hn == 6 && memcmp(hp, "minute", 6) == 0) known = 1;
-    else if (hn == 2 && memcmp(hp, "hh",     2) == 0) known = 1;
-    else if (hn == 2 && memcmp(hp, "ss",     2) == 0) known = 1;
-    else if (hn == 2 && memcmp(hp, "dd",     2) == 0) known = 1;
-    else if (hn == 3 && memcmp(hp, "dow",    3) == 0) known = 1;
-    else if (hn == 2 && memcmp(hp, "mm",     2) == 0) known = 1;
-    else if (hn == 3 && memcmp(hp, "doy",    3) == 0) known = 1;
-    else if (hn == 4 && memcmp(hp, "yyyy",   4) == 0) known = 1;
-    if (!known) return col;
-
-    int64_t len = ray_len(col);
-    ray_t* out = ray_vec_new(RAY_I16, len);
-    if (!out || RAY_IS_ERR(out)) return col;
-    out->len = len;
-    const int64_t* src = (const int64_t*)ray_data(col);
-    int16_t* dst = (int16_t*)ray_data(out);
-    for (int64_t i = 0; i < len; i++) dst[i] = (int16_t)src[i];
-    return out;
-}
-
 ray_t* ray_select(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("arity", "select: expects a query dict, got %lld args", (long long)n);
     ray_t* dict = args[0];
@@ -4705,15 +4634,6 @@ ray_t* ray_select(ray_t** args, int64_t n) {
                 fail_err = ray_error("length", "by-dict val must be a column vector");
                 failed = true; break;
             }
-            /* Narrow I64 results of known-small temporal extracts (minute,
-             * hour, day-of-week, etc.) to U8/I16.  Keeps q18-shaped
-             * composite by-keys under mk_compile's 16-byte budget so they
-             * fuse instead of falling to exec_group. */
-            ray_t* narrowed = narrow_known_small_extract_result(v, col_vec);
-            if (narrowed != col_vec) {
-                ray_release(col_vec);
-                col_vec = narrowed;
-            }
             ray_t* new_tbl = ray_table_add_col(tbl, k->i64, col_vec);
             ray_release(col_vec);
             if (!new_tbl || RAY_IS_ERR(new_tbl)) {
@@ -4758,193 +4678,15 @@ by_dict_done:
         where_expr = NULL;
     }
 
-    /* Phase-1 OP_FILTERED_GROUP gate.  When the (select … where … by …)
-     * shape matches the supported vocabulary, route through the fused
-     * operator instead of FILTER + GROUP.  We pre-scan the dict here so
-     * the WHERE block and the eager-filter step downstream can be
-     * short-circuited; the fused node consumes the predicate directly. */
-    int can_fuse_phase1 = 0;
-    ray_op_t* fused_pred_op = NULL;  /* compiled below in the WHERE block */
-    {
-        /* by_expr forms accepted:
-         *   - scalar  -RAY_SYM with NAME    (single key, e.g. Q8/Q37)
-         *   - vector  RAY_SYM with len 1..16 (dict-form pre-evaluated)
-         * Multi-key cases (len > 1) only fire if the multi path can pack
-         * keys into ≤ 8 bytes total (composite int64 slot). */
-        int single_key_scalar = by_expr && by_expr->type == -RAY_SYM
-                              && !(by_expr->attrs & ATTR_QUOTED);
-        int multi_key_vec     = by_expr && by_expr->type == RAY_SYM
-                              && ray_len(by_expr) >= 1
-                              && ray_len(by_expr) <= 16;
-        /* WHERE may be absent: a fused group with no predicate runs the
-         * worker with a const-true mask (ray_filtered_group accepts a
-         * NULL pred).  This routes high-cardinality multi-key group-bys
-         * (q16/q32 — no WHERE, millions of groups) onto the fused mk_
-         * shard path instead of the unfused exec_group fallback, whose
-         * per-row/per-call SYM-lock overhead dominates at scale. */
-        if (by_expr && !nearest_expr
-            && (single_key_scalar || multi_key_vec)
-            && (!where_expr || ray_fused_group_supported(where_expr, tbl)))
-        {
-            /* Walk the dict aggs.  Accept any combination of count/sum/
-             * min/max/avg with non-COUNT requiring an integer/temporal
-             * input column. */
-            int n_aggs_ok  = 0;
-            int n_other    = 0;
-            int has_only_count = 1;
-            int64_t count_sym = ray_sym_intern("count", 5);
-            int64_t sum_sym   = ray_sym_intern("sum",   3);
-            int64_t min_sym   = ray_sym_intern("min",   3);
-            int64_t max_sym   = ray_sym_intern("max",   3);
-            int64_t avg_sym   = ray_sym_intern("avg",   3);
-            for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-                int64_t kid = dict_elems[i]->i64;
-                if (kid == from_id || kid == where_id || kid == by_id ||
-                    kid == take_id || kid == asc_id || kid == desc_id ||
-                    kid == nearest_id) continue;
-                ray_t* val_expr = dict_elems[i + 1];
-                if (!is_group_dag_agg_expr(val_expr)) {
-                    if (is_single_group_key_projection(by_expr, val_expr))
-                        continue;
-                    n_other++;
-                    break;
-                }
-                ray_t** ae = (ray_t**)ray_data(val_expr);
-                int64_t aid = ae[0]->i64;
-                int op_ok = (aid == count_sym || aid == sum_sym ||
-                             aid == min_sym   || aid == max_sym ||
-                             aid == avg_sym);
-                if (!op_ok || ray_len(val_expr) < 2) { n_other++; break; }
-                if (aid != count_sym) has_only_count = 0;
-                ray_t* ae1 = ae[1];
-                int64_t agg_col_sym = -1;
-                int agg_strlen = 0;
-                if (ae1 && ae1->type == -RAY_SYM && !(ae1->attrs & ATTR_QUOTED)) {
-                    agg_col_sym = ae1->i64;
-                } else if ((aid == sum_sym || aid == avg_sym) &&
-                           is_strlen_name_expr(ae1, &agg_col_sym)) {
-                    agg_strlen = 1;
-                } else {
-                    n_other++; break;
-                }
-                if (aid != count_sym) {
-                    ray_t* in_col = ray_table_get_col(tbl, agg_col_sym);
-                    if (!in_col) { n_other++; break; }
-                    int8_t ict = in_col->type;
-                    if (RAY_IS_PARTED(ict) || ict == RAY_MAPCOMMON)
-                        { n_other++; break; }
-                    if (agg_strlen && ict != RAY_SYM)
-                        { n_other++; break; }
-                    if (!agg_strlen && ict != RAY_BOOL && ict != RAY_U8 && ict != RAY_I16
-                        && ict != RAY_I32 && ict != RAY_I64
-                        && ict != RAY_DATE && ict != RAY_TIME
-                        && ict != RAY_TIMESTAMP)
-                        { n_other++; break; }
-                    /* Mirror mk_compile's null-rejection: the fused agg
-                     * kernels read raw payload, so a stored null sentinel
-                     * would corrupt SUM/MIN/MAX/AVG.  Keep these on the
-                     * unfused null-aware OP_GROUP path. */
-                    if (in_col->attrs & RAY_ATTR_HAS_NULLS)
-                        { n_other++; break; }
-                }
-                n_aggs_ok++;
-            }
-            if (n_aggs_ok >= 1 && n_aggs_ok <= 8 && n_other == 0) {
-                /* Validate keys: total packed bytes ≤ 8 for multi-key. */
-                int64_t key_syms_buf[16];
-                uint8_t n_keys_local = 0;
-                if (single_key_scalar) {
-                    key_syms_buf[0] = by_expr->i64;
-                    n_keys_local = 1;
-                } else {
-                    int64_t* sv = (int64_t*)ray_data(by_expr);
-                    n_keys_local = (uint8_t)ray_len(by_expr);
-                    for (uint8_t i = 0; i < n_keys_local; i++)
-                        key_syms_buf[i] = sv[i];
-                }
-                int keys_ok = 1;
-                int total_bytes = 0;
-                bool has_sym_key = false;
-                for (uint8_t i = 0; i < n_keys_local && keys_ok; i++) {
-                    ray_t* kc = ray_table_get_col(tbl, key_syms_buf[i]);
-                    if (!kc) { keys_ok = 0; break; }
-                    int8_t kct = kc->type;
-                    if (RAY_IS_PARTED(kct) || kct == RAY_MAPCOMMON)
-                        { keys_ok = 0; break; }
-                    if (kct != RAY_SYM && kct != RAY_BOOL && kct != RAY_U8
-                        && kct != RAY_I16 && kct != RAY_I32 && kct != RAY_I64
-                        && kct != RAY_DATE && kct != RAY_TIME
-                        && kct != RAY_TIMESTAMP)
-                        { keys_ok = 0; break; }
-                    /* Mirror mk_compile's null-rejection: the composite
-                     * key compose treats every byte as part of the key,
-                     * so a null-sentinel collides with a row legitimately
-                     * holding the same bit pattern.  Fall back to
-                     * OP_GROUP, which buckets null keys separately. */
-                    if (kc->attrs & RAY_ATTR_HAS_NULLS)
-                        { keys_ok = 0; break; }
-                    if (kct == RAY_SYM) has_sym_key = true;
-                    total_bytes += ray_sym_elem_size(kct, kc->attrs);
-                }
-                /* SYM keys disable v2 radix-partitioned shards
-                 * (see fused_group.c v2_ok gate), so multi-key SYM
-                 * falls to v1 mk_par_fn — single shard per worker.
-                 * On q18 (no-WHERE, 10M rows × ~2M unique composite
-                 * keys) the shard reaches ~70 MB, every probe is an
-                 * L3 miss.  exec_group's radix scatter (256 partitions,
-                 * per-partition HTs fit L2) runs ~4× faster on this
-                 * shape.  Gate only fires for the no-WHERE case: a
-                 * WHERE-filtered SYM multi-key (q14) already lands on
-                 * a much smaller post-filter row set where the v1
-                 * single-shard fits L2 and the fused fast-path wins. */
-                if (has_sym_key && n_keys_local >= 2 &&
-                    !where_expr &&
-                    ray_table_nrows(tbl) >= 1000000) {
-                    keys_ok = 0;
-                }
-                /* Single-key case fits unconditionally (one key column, one
-                 * slot).  Multi-key narrow path (≤ 8 bytes packed) uses a
-                 * single int64 slot; the wide path (9..16 bytes) adds a
-                 * side kv_hi side array. */
-                int wide_fits  = (total_bytes >  8 && total_bytes <= 16);
-                int narrow_fits = (total_bytes <= 8);
-                int fits = (n_keys_local == 1) || narrow_fits || wide_fits;
-                if (keys_ok && fits) {
-                    /* Don't fire the multi path when n_keys == 1 AND not
-                     * count-only: the multi path's per-row update has higher
-                     * overhead than count1.  Specifically, count1 owns the
-                     * common-case wins. */
-                    if (n_keys_local == 1 && n_aggs_ok == 1 && has_only_count
-                        && where_expr) {
-                        /* Single-key count1 only fuses with a WHERE.  A
-                         * no-WHERE single key over a near-unique column
-                         * (e.g. q15 UserID, ~10M groups) is faster on the
-                         * unfused radix exec_group than on the count1
-                         * linear-probe shard; keep it there. */
-                        can_fuse_phase1 = 1;  /* will use count1 exec */
-                    } else if ((narrow_fits || wide_fits)
-                               && (where_expr
-                                   || (has_only_count && n_keys_local >= 2))) {
-                        /* No-WHERE: only fuse multi-key (≥2) count-only
-                         * shapes.  Single-key no-WHERE (even count-only,
-                         * e.g. q15 UserID) and multi-agg (SUM/AVG) over
-                         * near-unique keys (e.g. q32 {WatchID,ClientIP})
-                         * keep per-group state that the unfused radix
-                         * exec_group scatters more cheaply at very high
-                         * cardinality; fusing them there regresses.  With
-                         * a WHERE the filtered row count is small enough
-                         * that fusing always wins. */
-                        can_fuse_phase1 = 1;  /* will use multi exec */
-                    }
-                }
-            }
-        }
-    }
+    /* OP_FILTERED_GROUP has been retired.  The (select … where … by …)
+     * shape now routes unconditionally through the general FILTER +
+     * OP_GROUP subgraph, which reaches the v2 group-by engine (it
+     * consumes the WHERE selection in place). */
 
-    /* Apply WHERE filter (unless folded into OP_FILTERED_GROUP). */
+    /* Apply WHERE filter. */
     if (where_expr) {
-        /* When the WHERE is `(and a b c …)` and we're not folding into
-         * OP_FILTERED_GROUP, compile each conjunct as its own OP_FILTER.
+        /* When the WHERE is `(and a b c …)`, compile each conjunct as its
+         * own OP_FILTER.
          * exec_filter on a TABLE input refines g->selection in place via
          * ray_rowsel_refine, so subsequent conjuncts only need to make
          * their predicate's output bool VALID for surviving rows — the
@@ -4957,7 +4699,7 @@ by_dict_done:
          * by progressively-refined rowsel chaining — saving the OP_AND
          * binary AND-of-bool-vecs work. */
         int and_chained = 0;
-        if (!can_fuse_phase1 && where_expr->type == RAY_LIST
+        if (where_expr->type == RAY_LIST
             && ray_len(where_expr) >= 3)
         {
             ray_t** elems = (ray_t**)ray_data(where_expr);
@@ -5095,11 +4837,7 @@ by_dict_done:
                     "unknown function name, unsupported special form, "
                     "or a sub-expression the compiler can't lower");
             }
-            if (can_fuse_phase1) {
-                fused_pred_op = pred;  /* consumed by ray_filtered_group below */
-            } else {
-                root = ray_filter(g, root, pred);
-            }
+            root = ray_filter(g, root, pred);
         }
     }
 
@@ -5445,21 +5183,18 @@ by_dict_done:
                     break;
                 }
             }
-            /* The bounded-multikey count-take candidate uses an
-             * eval-level single-threaded scan with O(found) per-row
-             * group lookup.  Profitable on small inputs (skips the
-             * full DAG group HT construction) but at 10M rows × multi-
-             * key composite (ClickBench q17), the serial scan loses
-             * to the parallel mk_par_v2 filtered_group below.  Gate
-             * on table size — let big inputs through to the fused
-             * multi-key path. */
-            if (!use_eval_group &&
-                ray_table_nrows(tbl) < 100000 &&
-                bounded_multikey_count_take_candidate(
-                    dict_elems, dict_n, from_id, where_id, by_id, take_id,
-                    asc_id, desc_id, ray_table_nrows(tbl), 1024)) {
-                use_eval_group = 1;
-            }
+            /* (Removed) bounded-multikey count-take serial routing.  The
+             * eval-level scan it routed to is O(N × n_groups): for every
+             * input row it linearly searches all groups found so far to
+             * locate the matching one.  An A/B sweep (1..16 keys absent,
+             * 2-key unsorted `take:N` count-only, group counts 9..1M,
+             * nrows 5k..2M) showed the parallel multi-key DAG path is
+             * faster at EVERY measured point — from ~1.5x at the smallest
+             * (5k rows, 9 groups) to 50-75x at larger sizes/group counts.
+             * There is no input size at which the serial scan wins, so
+             * the former `nrows < 100000` gate sent small inputs to a
+             * strictly-dominated path.  The candidate now always flows to
+             * the parallel multi-key path below. */
             /* No-agg-no-nonagg multi-key (`select {by: [k1 k2]}`): the DAG
              * no-agg branch's computed-key fallback re-evaluates the by
              * SYM-vector as a literal symbol list — ignoring WHERE and the
@@ -6756,7 +6491,7 @@ by_dict_done:
          * WHERE clause on a `select ... by` query was silently
          * ignored before the filter was wired through the group
          * pipeline.) */
-        if (where_expr && !can_fuse_phase1) {
+        if (where_expr) {
             bool can_fuse = !has_nonagg_needing_flat && !table_is_parted;
             if (can_fuse) {
                 root = ray_optimize(g, root);
@@ -6901,58 +6636,7 @@ by_dict_done:
 
         if (n_aggs > 0 || n_nonaggs > 0) {
             if (n_aggs > 0) {
-                int agg_kinds_ok = (n_aggs <= 8);
-                for (uint8_t i = 0; agg_kinds_ok && i < n_aggs; i++) {
-                    if (agg_ops[i] != OP_COUNT && agg_ops[i] != OP_SUM &&
-                        agg_ops[i] != OP_MIN   && agg_ops[i] != OP_MAX &&
-                        agg_ops[i] != OP_AVG)
-                        agg_kinds_ok = 0;
-                }
-                int no_where_count_key_ok = 0;
-                /* Use the pre-computed filter when available so this
-                 * read agrees with what will actually be installed
-                 * just before ray_execute.  Falling back to a live
-                 * get() preserves behaviour for any caller that
-                 * pre-set the filter outside ray_select. */
-                ray_group_emit_filter_t no_where_emit = pre_top_emit_matched
-                    ? pre_top_emit
-                    : ray_group_emit_filter_get();
-                if (!where_expr && n_keys == 1 && no_where_emit.enabled &&
-                    no_where_emit.agg_index == 0 &&
-                    no_where_emit.top_count_take > 0) {
-                    int64_t ksym = -1;
-                    if (by_expr->type == -RAY_SYM && !(by_expr->attrs & ATTR_QUOTED))
-                        ksym = by_expr->i64;
-                    else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
-                        ksym = ((int64_t*)ray_data(by_expr))[0];
-                    ray_t* kc = ksym >= 0 ? ray_table_get_col(tbl, ksym) : NULL;
-                    if (kc && !(kc->attrs & RAY_ATTR_HAS_NULLS) &&
-                        (kc->type == RAY_SYM || kc->type == RAY_BOOL ||
-                         kc->type == RAY_U8 || kc->type == RAY_I16 ||
-                         kc->type == RAY_I32))
-                        no_where_count_key_ok = 1;
-                }
-                if (no_where_count_key_ok && n_nonaggs == 0 && !has_binary_agg &&
-                    !has_agg_k && n_keys == 1 && n_aggs == 1 &&
-                    agg_ops[0] == OP_COUNT) {
-                    root = ray_filtered_group(g, NULL, key_ops, n_keys,
-                                              agg_ops, agg_ins, n_aggs);
-                } else if (can_fuse_phase1
-                    && (fused_pred_op != NULL || !where_expr)
-                    && n_nonaggs == 0 && agg_kinds_ok
-                    && !has_binary_agg && !has_agg_k)
-                {
-                    /* exec_filtered_group dispatches: count1 (single key,
-                     * single COUNT) → Pass 3 fast path; everything else →
-                     * multi path with packed composite key.  Skipped when
-                     * any agg is binary (filtered-group fusion only knows
-                     * about unary aggs) or holistic with a K param.
-                     * fused_pred_op is NULL when there is no WHERE — the
-                     * fused worker then runs a const-true mask. */
-                    root = ray_filtered_group(g, fused_pred_op,
-                                              key_ops, n_keys,
-                                              agg_ops, agg_ins, n_aggs);
-                } else if (has_agg_k) {
+                if (has_agg_k) {
                     /* top/bot carry an integer K param per agg.  v2 admits
                      * these and produces LIST output (differential-validated
                      * to match the old OP_TOP_N LIST shape).  Build a plain
