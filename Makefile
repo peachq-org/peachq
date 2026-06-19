@@ -2,16 +2,26 @@ CC      ?= clang
 STD     = c17
 AR      = ar
 TARGET  = rayforce
-# Version is authoritative in include/rayforce.h — extract it here
-VERSION_MAJOR := $(shell grep 'RAY_VERSION_MAJOR' include/rayforce.h | head -1 | awk '{print $$3}')
-VERSION_MINOR := $(shell grep 'RAY_VERSION_MINOR' include/rayforce.h | head -1 | awk '{print $$3}')
-VERSION_PATCH := $(shell grep 'RAY_VERSION_PATCH' include/rayforce.h | head -1 | awk '{print $$3}')
-VERSION       = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
+# Version: the git tag is the single source of truth. Precedence:
+#   explicit override (CI passes RAY_VERSION=X.Y.Z from the release PR title)
+#   > latest git tag (vX.Y.Z) > 0.0.0 dev default.
+# The value is injected into the build via -D below (see DEFS); nothing is
+# hand-edited in source to cut a release. See RELEASE.md.
+RAY_VERSION ?= $(shell git describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 2>/dev/null | sed 's/^v//')
+ifeq ($(strip $(RAY_VERSION)),)
+  RAY_VERSION := 0.0.0
+endif
+VERSION       = $(RAY_VERSION)
+VERSION_MAJOR := $(word 1,$(subst ., ,$(RAY_VERSION)))
+VERSION_MINOR := $(word 2,$(subst ., ,$(RAY_VERSION)))
+VERSION_PATCH := $(word 3,$(subst ., ,$(RAY_VERSION)))
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%d)
 
 WARNS   = -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter
-DEFS    = -DRAYFORCE_GIT_COMMIT=\"$(GIT_HASH)\" -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
+DEFS    = -DRAYFORCE_GIT_COMMIT=\"$(GIT_HASH)\" -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\" \
+          -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MINOR) \
+          -DRAY_VERSION_PATCH=$(VERSION_PATCH) -DRAYFORCE_VERSION=\"$(RAY_VERSION)\"
 INCLUDES = -Iinclude -Isrc
 # Header-dependency tracking: -MMD emits a .d makefile fragment next to
 # each .o listing the headers it included (user headers only, not system);
@@ -101,6 +111,21 @@ lib: CFLAGS = $(RELEASE_CFLAGS)
 lib: $(LIB_OBJ)
 	$(AR) rc lib$(TARGET).a $(LIB_OBJ)
 
+# Release tarball: build the optimized binary and package it as
+# dist/rayforce-<version>-<os>-<arch>.tar.gz plus a SHA-256 checksum.
+# Used by .github/workflows/release.yml (which passes RAY_VERSION=X.Y.Z) and
+# runnable locally. VERSION comes from the tag/override resolved at the top.
+dist: release
+	@mkdir -p dist
+	@os=$$(uname -s | tr 'A-Z' 'a-z'); arch=$$(uname -m); \
+	 name=$(TARGET)-$(VERSION)-$$os-$$arch; stage=dist/$$name; \
+	 mkdir -p $$stage; \
+	 cp $(TARGET) LICENSE README.md include/rayforce.h $$stage/; \
+	 tar -czf dist/$$name.tar.gz -C dist $$name; \
+	 rm -rf $$stage; \
+	 ( cd dist && { command -v sha256sum >/dev/null 2>&1 && sha256sum $$name.tar.gz || shasum -a 256 $$name.tar.gz; } > $$name.tar.gz.sha256 ); \
+	 echo "built dist/$$name.tar.gz"
+
 # Allocator micro-benchmark (release-optimized, linked against lib objects).
 # Compile all sources fresh with RELEASE_CFLAGS so the benchmark measures
 # the release allocator, not a sanitizer-instrumented debug build.
@@ -148,6 +173,14 @@ bench-join-dup:
 		bench/join_dup/main.c $(LIB_SRC) $(LIBS) $(RELEASE_LDFLAGS)
 	./bench-join-dup
 
+# Worker threads per process during tests. Without this the runtime
+# auto-sizes to ncpu-1, so on a many-core box the in-process harness AND
+# every server it spawns via .sys.exec each create ~ncpu-1 threads — a lot of
+# wasted CPU for tiny test inputs. RAYFORCE_CORES (honored by ray_pool_create)
+# caps it; children inherit the env. Override for a fuller parallel stress,
+# e.g. `make test TEST_CORES=0` (serial) or `make test TEST_CORES=8`.
+TEST_CORES ?= 2
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
@@ -155,7 +188,7 @@ test: CFLAGS = $(DEBUG_CFLAGS)
 test: LDFLAGS = $(DEBUG_LDFLAGS)
 test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	./$(TARGET).test
+	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test
 
 # Coverage report.  Builds both binaries with clang source-based
 # instrumentation, runs the test suite (writing one .profraw per
@@ -194,14 +227,14 @@ clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
 	-rm -f $(TARGET) $(TARGET).test lib$(TARGET).a
-	-rm -rf build build_release
+	-rm -rf build build_release dist
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
 	-rm -f rf_test_*.csv
 	# Coverage artefacts (see `make coverage`).
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib bench-alloc bench-join-buildside bench-join-dup test coverage clean
+.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
