@@ -29,42 +29,38 @@
 
 struct ray_sym_domain_s;
 
-/* On-disk column format identity, embedded in the 32-byte header's aux
- * region (bytes 0-15 — the on-disk-free scratch that overlays runtime-only
- * pointers slice / str_pool / sym_domain / index, all stripped before
- * write).  The on-disk header IS the in-memory ray_t allocator layout
- * (payload at offset 32); there is NO separate envelope.
+/* On-disk column format version, carried in the 32-byte header's `order`
+ * byte (offset 17).  The on-disk header IS the in-memory ray_t allocator
+ * layout (payload at offset 32); there is NO separate envelope.
  *
- * FRESH SWAP, NO LEGACY: files without the magic, or with a version newer
- * than the reader, are rejected with a "version" error (RAY_ERR_VERSION).
- * RFCL = "RayForce CoLumn"; distinct from the STRL/STRV/LSTG/TTBL container
- * magics so the magic-dispatch routes the 32-byte-header path to the raw
- * validator. */
-#define RAY_COL_MAGIC           0x4C434652U  /* "RFCL" (little-endian aux[0..3]) */
-#define RAY_COL_FORMAT_VERSION  ((uint16_t)1)
+ * Placement rationale: of the header bytes, only mmod(16) and order(17) are
+ * on-disk-free (written 0 and recomputed on load).  aux(0-15) is RESERVED
+ * for postponed on-disk index persistence (min/max zone map) and must not
+ * be squatted; rc(20-23) carries the SYM saved dictionary count;
+ * type/attrs/len are live data.  So the version lives in `order`.
+ *
+ * A SINGLE byte = MAJOR version.  Compatibility is gated by major only:
+ * minor/additive changes stay backward-compatible, so one byte (0-255
+ * generations) suffices.  There is NO magic — the type allowlist +
+ * len-vs-filesize + SYM rc saved-count already validate file integrity;
+ * this byte only gates the format generation.
+ *
+ * FRESH SWAP, NO LEGACY: a file whose `order` byte != the reader's major is
+ * rejected with a "version" error (RAY_ERR_VERSION). */
+#define RAY_COL_FORMAT_MAJOR    ((uint8_t)1)
 
-/* Stamp the format magic + version into a 32-byte on-disk header's aux
- * region and zero the remaining aux bytes.  Call AFTER all other aux
- * manipulation so every fixed-width column file carries the magic. */
+/* Stamp the format major version into a 32-byte on-disk header's `order`
+ * byte.  Does NOT touch aux (reserved for postponed index persistence).
+ * Replaces the prior `header.order = 0` at every write site. */
 static inline void ray_col_stamp_format(ray_t* header) {
-    uint32_t magic = RAY_COL_MAGIC;
-    uint16_t ver   = RAY_COL_FORMAT_VERSION;
-    memcpy(header->aux, &magic, 4);
-    memcpy(header->aux + 4, &ver, 2);
-    memset(header->aux + 6, 0, 10);
+    header->order = RAY_COL_FORMAT_MAJOR;
 }
 
-/* Validate the format magic + version at the head of a mapped/built column
- * header.  Returns RAY_OK or RAY_ERR_VERSION (exact-match version: reject
- * anything newer). */
-static inline ray_err_t ray_col_check_format(const void* base) {
-    uint32_t magic;
-    uint16_t ver;
-    memcpy(&magic, base, 4);
-    memcpy(&ver, (const char*)base + 4, 2);
-    if (magic != RAY_COL_MAGIC || ver > RAY_COL_FORMAT_VERSION)
-        return RAY_ERR_VERSION;
-    return RAY_OK;
+/* Validate the format major version in a mapped/built column header's
+ * `order` byte (offset 17).  Returns RAY_OK iff it matches the reader's
+ * major, else RAY_ERR_VERSION. */
+static inline ray_err_t ray_col_check_format(const ray_t* header) {
+    return header->order == RAY_COL_FORMAT_MAJOR ? RAY_OK : RAY_ERR_VERSION;
 }
 
 /* Column file I/O.
