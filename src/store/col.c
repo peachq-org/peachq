@@ -94,14 +94,29 @@ static size_t col_str_pool_payload_len(const ray_t* vec);
 
 /* --------------------------------------------------------------------------
  * Column file format:
- *   Bytes 0-15:  aux union arm (atom flags / HAS_INDEX saved bytes)
+ *   Bytes 0-5:   format magic ("RFCL", aux[0..3]) + version (u16, aux[4..5])
+ *   Bytes 6-15:  zeroed (rest of the aux union arm)
  *   Bytes 16-31: mmod=0, order=0, type, attrs, rc=0, len
  *   Bytes 32+:   raw element data
  *
- * On-disk format IS the in-memory format (zero deserialization on load).
+ * On-disk format IS the in-memory format (zero deserialization on load):
+ * file-offset 0 maps directly as the in-memory `ray_t`, payload at offset
+ * 32.  The first 32 bytes ARE the allocator's object header; there is NO
+ * separate envelope.  The 16-byte aux region (bytes 0-15) is on-disk-free
+ * scratch (the runtime pointers it overlays — slice / str_pool / sym_domain
+ * / index — are runtime-only state, stripped/zeroed before write), so the
+ * format magic + version live there.  The loaders validate the magic, then
+ * reconstruct runtime aux in place (zero for plain columns, symfile-domain
+ * attach for RAY_SYM via the COW header-page patch).
+ *
  * Null state lives in the payload as a type-correct sentinel
  * (NULL_F64/NULL_I64/...).  There is no separate bitmap region.
  * -------------------------------------------------------------------------- */
+
+/* Format magic + version constants and the stamp/check helpers
+ * (ray_col_stamp_format / ray_col_check_format) live in col.h so the CSV
+ * streaming splayed-column writer (src/io/csv.c) shares the exact same
+ * on-disk identity. */
 
 /* Allowlist of attr bits the save path legitimately persists (col_save_impl
  * strips HAS_INDEX / HAS_LINK / SLICE before writing the header; what
@@ -704,6 +719,10 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
             header.attrs = (uint8_t)((header.attrs &
                 ~(uint8_t)(RAY_SYM_W_MASK | RAY_ATTR_SORTED)) | sym_xlate_attrs);
 
+        /* Stamp the format magic + version into the (now runtime-stripped)
+         * aux region — must come AFTER all aux manipulation above. */
+        ray_col_stamp_format(&header);
+
         size_t written = fwrite(&header, 1, 32, f);
         if (written != 32) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_IO; }
 
@@ -788,6 +807,12 @@ fsync_and_rename:;
     /* Atomic rename: tmp -> final path */
     err = ray_file_rename(tmp_path, path);
     if (err != RAY_OK) { remove(tmp_path); return err; }
+    /* Durable: fsync the parent dir so the rename (the new dir entry) is
+     * persisted, not just the file contents. */
+    if (durable) {
+        err = ray_file_sync_dir(path);
+        if (err != RAY_OK) return err;
+    }
 
     /* Linked-column sidecar: write `<path>.link` containing the target
      * table's sym name (text form) so it survives the per-process
@@ -813,7 +838,9 @@ fsync_and_rename:;
                             size_t wrote = fwrite(sp, 1, slen, lf);
                             fclose(lf);
                             if (wrote == slen) {
-                                ray_file_rename(tmp_link, link_path);
+                                if (ray_file_rename(tmp_link, link_path) == RAY_OK
+                                    && durable)
+                                    (void)ray_file_sync_dir(link_path);
                             } else {
                                 remove(tmp_link);
                             }
@@ -881,7 +908,9 @@ ray_err_t ray_col_save_sym_encoded(ray_t* vec, const char* path,
          * from another domain reorders ids — drop SORTED then. */
         uint8_t keep_sorted = (src == target) ? (vec->attrs & RAY_ATTR_SORTED) : 0;
         header.attrs = (uint8_t)(w | keep_sorted);
-        memset(header.aux, 0, 16); /* domain ptr is runtime-only state */
+        /* domain ptr is runtime-only state — zero it, then stamp the
+         * format magic + version into the freed aux region. */
+        ray_col_stamp_format(&header);
         if (fwrite(&header, 1, 32, f) != 32) err = RAY_ERR_IO;
     }
 
@@ -926,6 +955,11 @@ ray_err_t ray_col_save_sym_encoded(ray_t* vec, const char* path,
 
     err = ray_file_rename(tmp_path, path);
     if (err != RAY_OK) { remove(tmp_path); return err; }
+    /* Durable: persist the new dir entry created by the rename. */
+    if (durable) {
+        err = ray_file_sync_dir(path);
+        if (err != RAY_OK) return err;
+    }
 
     /* SYM columns never carry links — clean any stale sidecar. */
     {
@@ -1056,6 +1090,14 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
 
     ray_t* hdr = (ray_t*)ptr;
 
+    /* Validate the on-disk format magic + version (in the aux region)
+     * BEFORE interpreting type/len.  FRESH SWAP, NO LEGACY: a file with a
+     * missing/bad magic or a newer version is rejected here. */
+    if (ray_col_check_format(ptr) != RAY_OK) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("version", "col %s: bad format magic/version", path);
+    }
+
     /* Validate type from untrusted file data -- allowlist only */
     if (!is_serializable_type(hdr->type)) {
         ray_vm_unmap_file(ptr, mapped_size);
@@ -1170,6 +1212,11 @@ static ray_t* col_load_impl(const char* path, struct ray_sym_domain_s* dom,
     }
     uint8_t saved_order = vec->order;  /* preserve buddy order */
     memcpy(vec, cm.mapped, 32 + cm.data_size);
+    /* The on-disk aux carries the format magic/version (and, for foreign
+     * files, untrusted bytes) — reconstruct runtime aux by zeroing it
+     * BEFORE attaching str_pool / sym_domain (which write aux[8..15]).
+     * Plain columns want all-zero. */
+    memset(vec->aux, 0, 16);
 
     if (vec->type == RAY_STR) {
         ray_t* pool = col_copy_str_pool(&cm);
@@ -1191,10 +1238,9 @@ static ray_t* col_load_impl(const char* path, struct ray_sym_domain_s* dom,
     vec->attrs &= COL_DISK_ATTRS_MASK;
     ray_atomic_store(&vec->rc, 1);
 
-    /* RAY_SYM: attach the resolution domain + bounds check.  The header
-     * memcpy above copied the on-disk aux (zeroed by save, but
-     * old/foreign files are untrusted) — attach BEFORE any release path
-     * can run owned-ref handling over a garbage pointer. */
+    /* RAY_SYM: attach the resolution domain + bounds check.  The masked
+     * attrs + zeroed aux above mean no release path can run owned-ref
+     * handling over a garbage pointer; attach the domain now. */
     if (vec->type == RAY_SYM) {
         if (dom) {
             /* Splayed/parted load: on-disk cells are positions in the
@@ -1336,6 +1382,10 @@ static ray_t* col_mmap_impl(const char* path, struct ray_sym_domain_s* dom,
     vec->order = 0;
     vec->attrs &= COL_DISK_ATTRS_MASK;
     ray_atomic_store(&vec->rc, 1);
+    /* COW header page: the mapped aux carries the format magic/version —
+     * reconstruct runtime aux by zeroing it.  The str_pool / RAY_SYM
+     * domain patches below overwrite aux[8..15] afterward. */
+    memset(vec->aux, 0, 16);
 
     if (vec->type == RAY_STR) {
         ray_t* pool = (ray_t*)((char*)cm.mapped + cm.str_pool_offset);
