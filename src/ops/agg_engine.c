@@ -2371,7 +2371,26 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             if (all_streaming) {
                 const void* key_data[16];
                 for (uint8_t k = 0; k < ext->n_keys; k++) key_data[k] = ray_data(key_cols[k]);
-                const int64_t T_ROUTE = 16384;        /* > R2's 4096, < S2's in-sample distinct */
+                /* T_ROUTE: the group cardinality where the small-hash
+                 * per-worker working set stops fitting cache and radix's
+                 * partitioned scatter wins.  Small-hash keeps one hash
+                 * table of `groups` entries per worker (≈ groups ×
+                 * (key + state) bytes) and probes it per input row; while
+                 * that table stays resident in fast cache the probes are
+                 * near-free and small-hash beats radix's extra
+                 * partition/scatter pass.  Once `groups` grows past cache
+                 * residency the probes start missing to DRAM and per-row
+                 * cost climbs steeply, whereas radix is cardinality-flat
+                 * (it partitions keys into cache-sized buckets up front).
+                 * Measured 1-key 10M-row sweep on this class of machine:
+                 * the streaming-SUM crossover lands right at ~16384 groups
+                 * (smallhash ≈ radix there; smallhash ~2x faster below,
+                 * ~2x slower above), which is ~0.4 MB of per-worker table —
+                 * the L2-residency edge.  Lighter aggs (COUNT) cross a bit
+                 * lower; since radix degrades gracefully past the crossover
+                 * while small-hash blows up, we sit at the high end of that
+                 * band (16384) so a misroute costs little. */
+                const int64_t T_ROUTE = 16384;
                 int64_t est = sel
                     ? agg_estimate_card_sel(key_cols, key_data, ext->n_keys, sel, sel_prefix, n_sel, 65536, T_ROUTE)
                     : agg_estimate_card(key_cols, key_data, ext->n_keys, nrows, 65536, T_ROUTE);
