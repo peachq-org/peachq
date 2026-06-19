@@ -35,9 +35,21 @@ extern "C" {
 
 /* ===== Semantic Versioning ===== */
 
-#define RAY_VERSION_MAJOR 2
-#define RAY_VERSION_MINOR 1
+/* The real version is injected at build time via -D from the git tag (the
+ * single source of truth — see the Makefile and RELEASE.md). These are only
+ * fallbacks: 0.0.0 marks an untagged/dev build, and they give downstream code
+ * that includes this header without our -D flags a defined value. They are
+ * #ifndef-guarded so the injected -D wins without a -Wmacro-redefined error
+ * under -Werror. Do NOT hand-edit these to cut a release — tag instead. */
+#ifndef RAY_VERSION_MAJOR
+#define RAY_VERSION_MAJOR 0
+#endif
+#ifndef RAY_VERSION_MINOR
+#define RAY_VERSION_MINOR 0
+#endif
+#ifndef RAY_VERSION_PATCH
 #define RAY_VERSION_PATCH 0
+#endif
 
 /* Packed version number: 0xMMmmpp (MM=major, mm=minor, pp=patch) */
 #define RAY_VERSION_NUMBER \
