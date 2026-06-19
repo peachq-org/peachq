@@ -1206,6 +1206,17 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
         }
         ray_release(cast);
     }
+    /* STAGE 2 (ingest/cast → F64 vector): the per-element recursion routes
+     * STR→F64 through make_f64, which canonicalizes any non-finite parse
+     * (strtod "inf"/"1e400"/"nan") to NULL_F64 (0Nf).  cast_vec_copy_nulls
+     * below only propagates *source* nulls, so a 0Nf produced from a
+     * non-null source cell would not flip HAS_NULLS.  Scan the F64 output
+     * and set HAS_NULLS if any canonical 0Nf was produced. */
+    if (out_type == RAY_F64) {
+        const double* d = (const double*)out;
+        for (int64_t i = 0; i < n2; i++)
+            if (d[i] != d[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; break; }
+    }
     ray_t* result = cast_vec_copy_nulls(vec, val);
     if (RAY_IS_ERR(result)) return result;
     return vec;
@@ -1326,12 +1337,12 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             char* end;
             double v = strtod(sp, &end);
             if (end == sp) return ray_error("domain", "as: cannot parse str as f64");
-            /* STAGE 2 (ingest/cast STR→F64): deliberately NOT canonicalized in
-             * Stage 1 — strtod("inf")/strtod("nan") may still enter a non-finite
-             * F64 here.  Use the raw ray_f64 constructor (NOT make_f64, which
-             * canonicalizes) so the single-null float model's scope stays
-             * exactly the compute kernels + aggregates.  Revisit in Stage 2. */
-            return ray_f64(v);
+            /* STAGE 2 (ingest/cast STR→F64): canonicalize at the ingest entry
+             * point.  strtod("inf")/strtod("1e400")/strtod("nan") would yield a
+             * non-finite F64; make_f64 maps every non-finite to NULL_F64 (0Nf),
+             * closing the single-null float model on the cast surface.  An atom
+             * 0Nf is itself the null — there is no HAS_NULLS attr to set. */
+            return make_f64(v);
         }
         /* Vector cast */
         if (ray_is_vec(val) || val->type == RAY_LIST)
