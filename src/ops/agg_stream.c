@@ -3,6 +3,7 @@
  * state, recovering the rowform density win generically. */
 #include "ops/agg_registry.h"
 #include "ops/ops.h"
+#include "ops/internal.h"   /* ray_f64_fin (single-null float model) */
 #include "lang/internal.h"  /* ray_median_dbl_inplace */
 #include <math.h>
 #include <stdint.h>
@@ -133,7 +134,7 @@ static void sum_f64_merge(void* d, const void* s, acc_arena_t* a) {
     (void)a; ((sum_f64_state*)d)->sum += ((const sum_f64_state*)s)->sum;
 }
 static ray_t* sum_f64_final(const void* s, acc_arena_t* a, int64_t param) {
-    (void)a; (void)param; return ray_f64(((const sum_f64_state*)s)->sum);
+    (void)a; (void)param; return ray_f64(ray_f64_fin(((const sum_f64_state*)s)->sum));
 }
 static const agg_vtable_t SUM_F64 = {
     .state_size = sizeof(sum_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
@@ -179,7 +180,9 @@ static void max_f64_merge(void* d, const void* s, acc_arena_t* a) {
 }
 static ray_t* ext_f64_final(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const ext_f64_state* st = s;
-    return st->cnt ? ray_f64(st->v) : ray_typed_null(-RAY_F64);
+    /* min/max of finite inputs is finite, but ray_f64_fin guards against an
+     * ±Inf that may have leaked in from a not-yet-canonicalized source. */
+    return st->cnt ? ray_f64(ray_f64_fin(st->v)) : ray_typed_null(-RAY_F64);
 }
 static const agg_vtable_t MIN_F64 = {
     .state_size = sizeof(ext_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
@@ -211,7 +214,7 @@ static void avg_f64_merge(void* d, const void* s, acc_arena_t* a) {
 }
 static ray_t* avg_f64_final(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const avg_f64_state* st = s;
-    return st->cnt ? ray_f64(st->sum / (double)st->cnt) : ray_typed_null(-RAY_F64);
+    return st->cnt ? ray_f64(ray_f64_fin(st->sum / (double)st->cnt)) : ray_typed_null(-RAY_F64);
 }
 static const agg_vtable_t AVG_F64 = {
     .state_size = sizeof(avg_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
@@ -246,22 +249,22 @@ static inline double var_i64_varpop(const var_i64_state* st) {
 static ray_t* fin_var_pop_i64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
-    return ray_f64(var_i64_varpop(st));
+    return ray_f64(ray_f64_fin(var_i64_varpop(st)));
 }
 static ray_t* fin_var_i64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
-    return ray_f64(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0));
+    return ray_f64(ray_f64_fin(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
 }
 static ray_t* fin_stddev_pop_i64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
-    return ray_f64(sqrt(var_i64_varpop(st)));
+    return ray_f64(ray_f64_fin(sqrt(var_i64_varpop(st))));
 }
 static ray_t* fin_stddev_i64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_i64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
-    return ray_f64(sqrt(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
+    return ray_f64(ray_f64_fin(sqrt(var_i64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0))));
 }
 static const agg_vtable_t VAR_I64 = {
     .state_size = sizeof(var_i64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
@@ -309,22 +312,22 @@ static inline double var_f64_varpop(const var_f64_state* st) {
 static ray_t* fin_var_pop_f64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
-    return ray_f64(var_f64_varpop(st));
+    return ray_f64(ray_f64_fin(var_f64_varpop(st)));
 }
 static ray_t* fin_var_f64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
-    return ray_f64(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0));
+    return ray_f64(ray_f64_fin(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
 }
 static ray_t* fin_stddev_pop_f64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 0) return ray_typed_null(-RAY_F64);
-    return ray_f64(sqrt(var_f64_varpop(st)));
+    return ray_f64(ray_f64_fin(sqrt(var_f64_varpop(st))));
 }
 static ray_t* fin_stddev_f64(const void* s, acc_arena_t* a, int64_t param) {
     (void)a; (void)param; const var_f64_state* st = s;
     if (st->cnt <= 1) return ray_typed_null(-RAY_F64);
-    return ray_f64(sqrt(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0)));
+    return ray_f64(ray_f64_fin(sqrt(var_f64_varpop(st) * (double)st->cnt / ((double)st->cnt - 1.0))));
 }
 static const agg_vtable_t VAR_F64 = {
     .state_size = sizeof(var_f64_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
@@ -388,7 +391,10 @@ static ray_t* pearson_final(const void* s, acc_arena_t* a, int64_t param) {
     double num = dn*st->sxy - st->sx*st->sy,
            dx  = dn*st->sxx - st->sx*st->sx,
            dy  = dn*st->syy - st->sy*st->sy;
-    return ray_f64(num / sqrt(dx*dy));
+    /* Single-null float model: undefined pearson (n<2 → 0/0, or a constant
+     * side → sqrt(≤0)) yields NaN/Inf → canonicalize to NULL_F64.  agg_put_cell
+     * sees the NaN sentinel and sets HAS_NULLS. */
+    return ray_f64(ray_f64_fin(num / sqrt(dx*dy)));
 }
 static const agg_vtable_t PEARSON_F64 = {
     .state_size = sizeof(pearson_state), .kind = ACC_STREAMING, .out_type = RAY_F64,
