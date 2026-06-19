@@ -1850,28 +1850,6 @@ static int is_plain_count_expr(ray_t* expr) {
     return !expr_contains_call_named(elems[1], "distinct", 8);
 }
 
-static bool bounded_multikey_count_take_candidate(ray_t** dict_elems, int64_t dict_n,
-                                                  int64_t from_id, int64_t where_id,
-                                                  int64_t by_id, int64_t take_id,
-                                                  int64_t asc_id, int64_t desc_id,
-                                                  int64_t nrows, int64_t max_groups) {
-    int64_t limit = nrows;
-    if (!unsorted_positive_take_limit(dict_elems, dict_n, asc_id, desc_id,
-                                      take_id, nrows, &limit))
-        return false;
-    if (limit > max_groups) return false;
-
-    int n_count_out = 0;
-    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-        int64_t kid = dict_elems[i]->i64;
-        if (kid == from_id || kid == where_id || kid == by_id ||
-            kid == take_id || kid == asc_id || kid == desc_id) continue;
-        if (!is_plain_count_expr(dict_elems[i + 1])) return false;
-        n_count_out++;
-    }
-    return n_count_out > 0;
-}
-
 /* NOTE: binary-aggregator gates (is_aggr_binary_call /
  * is_streaming_aggr_binary_call) are not needed at the planner-call
  * sites for the canonical fast path — `(pearson_corr x y)` flows
@@ -5205,21 +5183,18 @@ by_dict_done:
                     break;
                 }
             }
-            /* The bounded-multikey count-take candidate uses an
-             * eval-level single-threaded scan with O(found) per-row
-             * group lookup.  Profitable on small inputs (skips the
-             * full DAG group HT construction) but at 10M rows × multi-
-             * key composite (ClickBench q17), the serial scan loses
-             * to the parallel mk_par_v2 filtered_group below.  Gate
-             * on table size — let big inputs through to the fused
-             * multi-key path. */
-            if (!use_eval_group &&
-                ray_table_nrows(tbl) < 100000 &&
-                bounded_multikey_count_take_candidate(
-                    dict_elems, dict_n, from_id, where_id, by_id, take_id,
-                    asc_id, desc_id, ray_table_nrows(tbl), 1024)) {
-                use_eval_group = 1;
-            }
+            /* (Removed) bounded-multikey count-take serial routing.  The
+             * eval-level scan it routed to is O(N × n_groups): for every
+             * input row it linearly searches all groups found so far to
+             * locate the matching one.  An A/B sweep (1..16 keys absent,
+             * 2-key unsorted `take:N` count-only, group counts 9..1M,
+             * nrows 5k..2M) showed the parallel multi-key DAG path is
+             * faster at EVERY measured point — from ~1.5x at the smallest
+             * (5k rows, 9 groups) to 50-75x at larger sizes/group counts.
+             * There is no input size at which the serial scan wins, so
+             * the former `nrows < 100000` gate sent small inputs to a
+             * strictly-dominated path.  The candidate now always flows to
+             * the parallel multi-key path below. */
             /* No-agg-no-nonagg multi-key (`select {by: [k1 k2]}`): the DAG
              * no-agg branch's computed-key fallback re-evaluates the by
              * SYM-vector as a literal symbol list — ignoring WHERE and the
