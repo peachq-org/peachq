@@ -221,11 +221,314 @@ static ray_t* agg_gather_key_col(ray_t* src_col, const int64_t* first_row, int64
     return out;
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * CHUNKED SELECTION CONSUMPTION (mirrors DuckDB's SelectionVector model)
+ *
+ * When a pushed WHERE filter is active, g->selection is a rowsel bitmap (see
+ * src/ops/rowsel.h: per-segment NONE/ALL/MIX flags + morsel-local idx[] for MIX
+ * segments).  Rather than materialize a full O(rows-passed) index array
+ * (ray_rowsel_to_indices) + a full compact column (the old prologue), the
+ * chunked strategies (dense serial+parallel, radix, smallhash) consume the
+ * selection IN PLACE: each worker walks its assigned SELECTED rows in fixed-size
+ * chunks (AGG_SEL_CHUNK), decoding each chunk's ORIGINAL row indices into a
+ * small reused stack buffer, gathering only that chunk's key/agg-input values
+ * into small reused contiguous buffers, then feeding the existing dense-batch
+ * kernel (update_batch) over the chunk.  No full index array, no full compact
+ * column, no per-call large alloc.  This is exactly DuckDB's chunked AddChunk
+ * (STANDARD_VECTOR_SIZE=2048): gather the chunk's selected rows into reused
+ * vectors and sink the chunk — see
+ *   duckdb/src/include/duckdb/common/types/selection_vector.hpp
+ *   duckdb/src/common/types/vector.cpp (Vector::Slice → gather under a sel)
+ * but adapted to v2's dense-contiguous batch kernels (which take a vector, not a
+ * vector+selection pair) by gathering per chunk instead of slicing references.
+ *
+ * Representative-row indices (first_row) stay in ORIGINAL-row space: the decoded
+ * row index is what gets recorded, so the result key columns gather correctly
+ * (SYM domains preserved) and the unordered output contract is unchanged.
+ *
+ * Parallel partitioning: workers are dispatched over the SELECTED-row space
+ * [0, n_sel).  A per-segment prefix sum of selected counts (seg_sel_prefix,
+ * built once from seg_flags/seg_offsets — O(n_segs), cheap) lets each worker's
+ * [sel_start, sel_end) range be mapped back to a starting segment + intra-
+ * segment offset.  This gives roughly-equal selected counts per worker AND
+ * fine-grained work-stealing balance (NONE segments cost nothing).
+ * ══════════════════════════════════════════════════════════════════════ */
+
+#include "core/pool.h"
+
+#define AGG_SEL_CHUNK 2048   /* DuckDB STANDARD_VECTOR_SIZE-equivalent */
+
+/* Build a prefix sum of per-segment selected counts: prefix[s] = number of
+ * selected rows in segments [0, s).  prefix[n_segs] == total_pass.  Lets a
+ * worker map a [sel_start, sel_end) range in selected-row space to the segment
+ * where it begins.  Returned via a ray_alloc'd int64 block (caller releases). */
+static ray_t* agg_sel_build_prefix(ray_t* sel) {
+    ray_rowsel_t* m = ray_rowsel_meta(sel);
+    uint32_t n_segs = m->n_segs;
+    const uint8_t*  flags   = ray_rowsel_flags(sel);
+    const uint32_t* offsets = ray_rowsel_offsets(sel);
+    int64_t nrows = m->nrows;
+    ray_t* block = ray_alloc((size_t)(n_segs + 1) * sizeof(int64_t));
+    if (!block) return NULL;
+    int64_t* prefix = (int64_t*)ray_data(block);
+    int64_t cum = 0;
+    for (uint32_t s = 0; s < n_segs; s++) {
+        prefix[s] = cum;
+        uint8_t f = flags[s];
+        if (f == RAY_SEL_NONE) continue;
+        if (f == RAY_SEL_ALL) {
+            int64_t base = (int64_t)s * RAY_MORSEL_ELEMS;
+            int64_t end  = base + RAY_MORSEL_ELEMS;
+            if (end > nrows) end = nrows;
+            cum += end - base;
+        } else { /* MIX */
+            cum += offsets[s + 1] - offsets[s];
+        }
+    }
+    prefix[n_segs] = cum;
+    return block;
+}
+
+/* Cursor over the selected rows in a contiguous slice [sel_start, sel_end) of
+ * selected-row space.  Decodes the next chunk of up to AGG_SEL_CHUNK ORIGINAL
+ * row indices into `rows`, returns the count (0 when exhausted). */
+typedef struct {
+    ray_t*          sel;
+    const uint8_t*  flags;
+    const uint32_t* offsets;
+    const uint16_t* idx;
+    const int64_t*  prefix;     /* per-segment selected-count prefix */
+    int64_t         nrows;
+    uint32_t        n_segs;
+    /* iteration state */
+    int64_t         remaining;  /* selected rows left in this worker's range */
+    uint32_t        seg;        /* current segment */
+    int64_t         seg_pos;    /* next intra-segment selected index to emit */
+} agg_sel_cursor_t;
+
+/* Position the cursor at the seg/offset where selected-row `sel_start` lives. */
+static void agg_sel_cursor_init(agg_sel_cursor_t* c, ray_t* sel,
+                                const int64_t* prefix,
+                                int64_t sel_start, int64_t sel_end) {
+    ray_rowsel_t* m = ray_rowsel_meta(sel);
+    c->sel = sel;
+    c->flags   = ray_rowsel_flags(sel);
+    c->offsets = ray_rowsel_offsets(sel);
+    c->idx     = ray_rowsel_idx(sel);
+    c->prefix  = prefix;
+    c->nrows   = m->nrows;
+    c->n_segs  = m->n_segs;
+    c->remaining = sel_end - sel_start;
+    if (c->remaining <= 0) { c->seg = c->n_segs; c->seg_pos = 0; return; }
+    /* Find the segment containing the sel_start'th selected row: largest s with
+     * prefix[s] <= sel_start.  Linear-then-skip is fine (n_segs small), but the
+     * prefix is monotonic so a binary search keeps init O(log n_segs). */
+    uint32_t lo = 0, hi = c->n_segs;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (prefix[mid + 1] <= sel_start) lo = mid + 1;
+        else hi = mid;
+    }
+    c->seg = lo;
+    c->seg_pos = sel_start - prefix[lo];   /* intra-segment selected offset */
+}
+
+/* Decode the next chunk of original row indices into rows[] (cap AGG_SEL_CHUNK);
+ * returns the number written (0 = done). */
+static int64_t agg_sel_cursor_next(agg_sel_cursor_t* c, int64_t* rows) {
+    int64_t n = 0;
+    while (c->remaining > 0 && n < AGG_SEL_CHUNK && c->seg < c->n_segs) {
+        uint32_t s = c->seg;
+        uint8_t f = c->flags[s];
+        if (f == RAY_SEL_NONE) { c->seg++; c->seg_pos = 0; continue; }
+        int64_t base = (int64_t)s * RAY_MORSEL_ELEMS;
+        int64_t seg_end = base + RAY_MORSEL_ELEMS;
+        if (seg_end > c->nrows) seg_end = c->nrows;
+        if (f == RAY_SEL_ALL) {
+            int64_t seg_sel = seg_end - base;          /* every row selected */
+            while (c->seg_pos < seg_sel && n < AGG_SEL_CHUNK && c->remaining > 0) {
+                rows[n++] = base + c->seg_pos;
+                c->seg_pos++; c->remaining--;
+            }
+            if (c->seg_pos >= seg_sel) { c->seg++; c->seg_pos = 0; }
+        } else { /* MIX */
+            const uint16_t* slice = c->idx + c->offsets[s];
+            int64_t seg_sel = c->offsets[s + 1] - c->offsets[s];
+            while (c->seg_pos < seg_sel && n < AGG_SEL_CHUNK && c->remaining > 0) {
+                rows[n++] = base + slice[c->seg_pos];
+                c->seg_pos++; c->remaining--;
+            }
+            if (c->seg_pos >= seg_sel) { c->seg++; c->seg_pos = 0; }
+        }
+    }
+    return n;
+}
+
+/* Gather one chunk's value column (native esz) into a small dense buffer.
+ * COUNT (val_data == NULL) needs no gather — returns without touching dst. */
+static inline void agg_sel_gather_vals(void* dst, const void* src, uint8_t esz,
+                                       const int64_t* rows, int64_t n) {
+    if (!src || esz == 0) return;
+    const char* s = (const char*)src;
+    switch (esz) {
+        case 8: {
+            int64_t* dd = (int64_t*)dst; const int64_t* ss = (const int64_t*)s;
+            for (int64_t i = 0; i < n; i++) dd[i] = ss[rows[i]];
+            break;
+        }
+        case 4: {
+            int32_t* dd = (int32_t*)dst; const int32_t* ss = (const int32_t*)s;
+            for (int64_t i = 0; i < n; i++) dd[i] = ss[rows[i]];
+            break;
+        }
+        case 2: {
+            int16_t* dd = (int16_t*)dst; const int16_t* ss = (const int16_t*)s;
+            for (int64_t i = 0; i < n; i++) dd[i] = ss[rows[i]];
+            break;
+        }
+        case 1: {
+            uint8_t* dd = (uint8_t*)dst; const uint8_t* ss = (const uint8_t*)s;
+            for (int64_t i = 0; i < n; i++) dd[i] = ss[rows[i]];
+            break;
+        }
+        default: {  /* general gather, correct for any element width */
+            char* dd = (char*)dst;
+            for (int64_t i = 0; i < n; i++) memcpy(dd + i * esz, s + rows[i] * esz, esz);
+            break;
+        }
+    }
+}
+
+/* Per-agg value descriptors, shared by every strategy's parallel ctx.  Gathered
+ * into a struct so the sel-mode chunk accumulator can be written once. */
+typedef struct {
+    uint8_t             n_aggs;
+    const agg_vtable_t** vts;
+    const size_t*       off;
+    size_t              block;
+    const void**        val_data;  const int8_t* val_types;  const bool* val_hasnull;  const uint8_t* val_esz;
+    const void**        val2_data; const int8_t* val2_types; const bool* val2_hasnull; const uint8_t* val2_esz;
+} agg_valdesc_t;
+
+/* Reused per-worker scratch for sel-mode chunk gathering: one dense value buffer
+ * per agg (sized AGG_SEL_CHUNK * esz), plus the y-side for binary aggs.  Lazily
+ * allocated the first time a worker touches a non-COUNT agg. */
+typedef struct {
+    char* gv[16];
+    char* gy[16];
+    int   oom;
+} agg_sel_scratch_t;
+
+static void agg_sel_scratch_free(agg_sel_scratch_t* sc) {
+    for (int a = 0; a < 16; a++) { free(sc->gv[a]); free(sc->gy[a]); sc->gv[a] = NULL; sc->gy[a] = NULL; }
+}
+
+/* Accumulate one decoded chunk (rows[], gid[] indexed [0,n)) into `states` for
+ * every aggregate, gathering each agg's input values for this chunk's ORIGINAL
+ * rows into the reused scratch buffers first.  `states` points at agg 0's slot 0
+ * (i.e. states_base + off applied per agg by the kernel via off[a]).  Returns 0,
+ * or -1 on scratch OOM (sets sc->oom). */
+static int agg_sel_accum_chunk(const agg_valdesc_t* vd, agg_sel_scratch_t* sc,
+                               char* states, const uint32_t* gid,
+                               const int64_t* rows, int64_t n) {
+    for (uint8_t a = 0; a < vd->n_aggs; a++) {
+        const agg_vtable_t* vt = vd->vts[a];
+        if (vt->update_batch2) {                            /* binary agg (pearson) */
+            uint8_t ez = vd->val_esz[a], ez2 = vd->val2_esz[a];
+            if (!sc->gv[a]) { sc->gv[a] = malloc((size_t)AGG_SEL_CHUNK * (ez ? ez : 1)); if (!sc->gv[a]) { sc->oom = 1; return -1; } }
+            if (!sc->gy[a]) { sc->gy[a] = malloc((size_t)AGG_SEL_CHUNK * (ez2 ? ez2 : 1)); if (!sc->gy[a]) { sc->oom = 1; return -1; } }
+            agg_sel_gather_vals(sc->gv[a], vd->val_data[a],  ez,  rows, n);
+            agg_sel_gather_vals(sc->gy[a], vd->val2_data[a], ez2, rows, n);
+            ray_valid_t vx = { sc->gv[a], vd->val_types[a],  vd->val_hasnull[a] };
+            ray_valid_t vy = { sc->gy[a], vd->val2_types[a], vd->val2_hasnull[a] };
+            vt->update_batch2(states + vd->off[a], vd->block, gid,
+                              sc->gv[a], sc->gy[a], &vx, &vy, n, NULL);
+        } else if (vd->val_data[a]) {                       /* unary agg over a column */
+            uint8_t ez = vd->val_esz[a];
+            if (!sc->gv[a]) { sc->gv[a] = malloc((size_t)AGG_SEL_CHUNK * (ez ? ez : 1)); if (!sc->gv[a]) { sc->oom = 1; return -1; } }
+            agg_sel_gather_vals(sc->gv[a], vd->val_data[a], ez, rows, n);
+            ray_valid_t valid = { sc->gv[a], vd->val_types[a], vd->val_hasnull[a] };
+            vt->update_batch(states + vd->off[a], vd->block, gid, sc->gv[a], &valid, n, NULL);
+        } else {                                            /* COUNT (no value gather) */
+            ray_valid_t valid = { NULL, vd->val_types[a], false };
+            vt->update_batch(states + vd->off[a], vd->block, gid, NULL, &valid, n, NULL);
+        }
+    }
+    return 0;
+}
+
+/* Selection-aware dense plan: identical to agg_dense_plan but the per-key
+ * min/max prescan walks only the SELECTED rows (via the cursor) instead of the
+ * full table.  In sel mode the grouped keys are exactly the selected rows, so
+ * their min/max defines the slot range — and the prescan cost is O(n_sel), not
+ * O(nrows).  This is what lets a high-selectivity filter (e.g. 100 distinct SYM
+ * keys among 100k of 10M rows) reach the dense direct-index path cheaply,
+ * instead of scanning all 10M rows just to discover the range. */
+static bool agg_dense_plan_sel(ray_t** key_cols, uint8_t n_keys, int64_t n_sel,
+                               ray_t* sel, const int64_t* sel_prefix,
+                               dense_plan_t* out) {
+    out->ok = false;
+    out->n_keys = n_keys;
+    if (n_keys < 1 || n_keys > 16) return false;
+    if (n_sel <= 0) return false;
+
+    for (uint8_t k = 0; k < n_keys; k++) {
+        ray_t* kc = key_cols[k];
+        switch (kc->type) {
+            case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+            case RAY_BOOL: case RAY_DATE: case RAY_TIME:
+            case RAY_TIMESTAMP: case RAY_SYM: break;
+            default: return false;
+        }
+        if (kc->attrs & RAY_ATTR_HAS_NULLS) return false;
+        out->mins[k] = INT64_MAX; out->ranges[k] = 0;   /* sentinels; filled below */
+    }
+
+    /* One pass over the selected rows updating every key's min/max together. */
+    int64_t mins[16], maxs[16];
+    for (uint8_t k = 0; k < n_keys; k++) { mins[k] = INT64_MAX; maxs[k] = INT64_MIN; }
+    const void* key_data[16];
+    for (uint8_t k = 0; k < n_keys; k++) key_data[k] = ray_data(key_cols[k]);
+
+    int64_t rows[AGG_SEL_CHUNK];
+    agg_sel_cursor_t cur;
+    agg_sel_cursor_init(&cur, sel, sel_prefix, 0, n_sel);
+    int64_t cn;
+    while ((cn = agg_sel_cursor_next(&cur, rows)) > 0) {
+        for (uint8_t k = 0; k < n_keys; k++) {
+            ray_t* kc = key_cols[k]; const void* d = key_data[k];
+            int64_t mn = mins[k], mx = maxs[k];
+            for (int64_t i = 0; i < cn; i++) {
+                int64_t v = agg_read_key_i64(kc, d, rows[i]);
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
+            }
+            mins[k] = mn; maxs[k] = mx;
+        }
+    }
+    for (uint8_t k = 0; k < n_keys; k++) {
+        if (maxs[k] < mins[k]) return false;
+        out->mins[k]   = mins[k];
+        out->ranges[k] = maxs[k] - mins[k] + 1;
+    }
+
+    int64_t total = 1;
+    for (uint8_t k = 0; k < n_keys; k++) {
+        int64_t rng = out->ranges[k];
+        if (rng <= 0) return false;
+        if (total > DENSE_MAX_SLOTS / rng) return false;
+        out->strides[k] = total;
+        total *= rng;
+    }
+    if (total > DENSE_MAX_SLOTS) return false;
+    out->total_slots = total;
+    out->ok = true;
+    return true;
+}
+
 /* ══════════════════════════════════════════
  * Parallel two-phase hash group-by (Phase 1c)
  * ══════════════════════════════════════════ */
-
-#include "core/pool.h"
 
 /* Per-worker (and global merge) local group table: open-addressing hash on the
  * tuple-hash → local gid; AoS per-group state blocks of `block` bytes. */
@@ -586,6 +889,11 @@ typedef struct {
     const void**        val_data; const int8_t* val_types; const bool* val_hasnull; const uint8_t* val_esz;
     const void**        val2_data; const int8_t* val2_types; const bool* val2_hasnull; const uint8_t* val2_esz;
     agg_dense_local_t*  locals;   /* [nw] */
+    /* Sel-mode (pushed WHERE filter): when sel != NULL, workers chunk-iterate
+     * the SELECTED rows of [0,n_sel) instead of dense rows [start,end). */
+    ray_t*              sel;
+    const int64_t*      sel_prefix;
+    agg_valdesc_t       vd;
 } agg_dense_ctx_t;
 
 /* Initialize every slot's agg states in a freshly-allocated slab (min/max need
@@ -641,6 +949,32 @@ static void agg_dense_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t
     int64_t n = end - start;
     if (n <= 0) return;
 
+    /* ── Sel mode: chunk-iterate the SELECTED rows in [start,end) (selected-row
+     * space).  Decode each chunk's ORIGINAL rows, compute dense slots, gather
+     * agg values per chunk into reused scratch, and batch-update.  No full
+     * index array, no full compact column. */
+    if (c->sel) {
+        int64_t rows[AGG_SEL_CHUNK];
+        uint32_t gid[AGG_SEL_CHUNK];
+        agg_sel_scratch_t sc = {0};
+        agg_sel_cursor_t cur;
+        agg_sel_cursor_init(&cur, c->sel, c->sel_prefix, start, end);
+        int64_t cn;
+        while ((cn = agg_sel_cursor_next(&cur, rows)) > 0) {
+            for (int64_t i = 0; i < cn; i++) {
+                int64_t r = rows[i];
+                int64_t slot = agg_dense_slot(c, r);   /* provably in [0,total_slots) */
+                gid[i] = (uint32_t)slot;
+                if (r < loc->first_row[slot]) loc->first_row[slot] = r;
+            }
+            if (agg_sel_accum_chunk(&c->vd, &sc, loc->states, gid, rows, cn) != 0) {
+                loc->oom = 1; agg_sel_scratch_free(&sc); return;
+            }
+        }
+        agg_sel_scratch_free(&sc);
+        return;
+    }
+
     uint32_t* cgid = malloc((size_t)n * sizeof(uint32_t));
     if (!cgid) { loc->oom = 1; return; }
 
@@ -676,7 +1010,8 @@ static void agg_dense_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t
 static ray_t* exec_group_v2_parallel_dense(
         ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         ray_t** key_cols, int64_t* key_syms, ray_op_ext_t* ext, int64_t nrows,
-        ray_pool_t* pool, const dense_plan_t* dp) {
+        ray_pool_t* pool, const dense_plan_t* dp,
+        ray_t* sel, const int64_t* sel_prefix, int64_t n_sel) {
     uint8_t n_keys = ext->n_keys, n_aggs = ext->n_aggs;
     int64_t total_slots = dp->total_slots;
     uint32_t nw = ray_pool_total_workers(pool);
@@ -739,8 +1074,14 @@ static ray_t* exec_group_v2_parallel_dense(
         .val_data = val_data, .val_types = val_types, .val_hasnull = val_hasnull, .val_esz = val_esz,
         .val2_data = val2_data, .val2_types = val2_types, .val2_hasnull = val2_hasnull, .val2_esz = val2_esz,
         .locals = locals,
+        .sel = sel, .sel_prefix = sel_prefix,
+        .vd = { .n_aggs = n_aggs, .vts = vts, .off = off, .block = block,
+                .val_data = val_data, .val_types = val_types, .val_hasnull = val_hasnull, .val_esz = val_esz,
+                .val2_data = val2_data, .val2_types = val2_types, .val2_hasnull = val2_hasnull, .val2_esz = val2_esz },
     };
-    ray_pool_dispatch(pool, agg_dense_phaseA_fn, &ctx, nrows);
+    /* Sel mode dispatches over the SELECTED-row space [0,n_sel); each worker
+     * range maps to a segment span via sel_prefix.  Non-sel dispatches over rows. */
+    ray_pool_dispatch(pool, agg_dense_phaseA_fn, &ctx, sel ? n_sel : nrows);
 
     for (uint32_t w = 0; w < nw; w++)
         if (locals[w].oom) {
@@ -919,6 +1260,49 @@ static int64_t agg_estimate_card(ray_t** key_cols, const void** key_data,
     return distinct;
 }
 
+/* Sel-mode cardinality estimate: samples the first `sample_rows` SELECTED rows
+ * (decoded to ORIGINAL indices via the cursor) so the routing reflects the
+ * cardinality of the rows that actually survive the WHERE — not the full table.
+ * Same early-exit-above-t_route contract as agg_estimate_card. */
+static int64_t agg_estimate_card_sel(ray_t** key_cols, const void** key_data,
+                                     uint8_t n_keys, ray_t* sel,
+                                     const int64_t* sel_prefix, int64_t n_sel,
+                                     int64_t sample_rows, int64_t t_route) {
+    int64_t ns = sample_rows < n_sel ? sample_rows : n_sel;
+    if (ns <= 0) return 0;
+    int64_t htcap = 16;
+    while (htcap < (t_route + 1) * 4) htcap <<= 1;
+    uint64_t htmask = (uint64_t)htcap - 1;
+    int32_t* ht = malloc((size_t)htcap * sizeof(int32_t));
+    int64_t* rep = malloc((size_t)(t_route + 2) * sizeof(int64_t));
+    if (!ht || !rep) { free(ht); free(rep); return t_route + 1; }
+    for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
+    int64_t distinct = 0, seen = 0;
+    int64_t rows[AGG_SEL_CHUNK];
+    agg_sel_cursor_t cur;
+    agg_sel_cursor_init(&cur, sel, sel_prefix, 0, ns);
+    int64_t cn;
+    while (seen < ns && (cn = agg_sel_cursor_next(&cur, rows)) > 0) {
+        for (int64_t i = 0; i < cn && seen < ns; i++, seen++) {
+            int64_t r = rows[i];
+            uint64_t h = agg_tuple_hash(key_cols, key_data, n_keys, r);
+            uint64_t slot = h & htmask;
+            for (;;) {
+                int32_t gp = ht[slot];
+                if (gp < 0) {
+                    ht[slot] = (int32_t)distinct; rep[distinct] = r; distinct++;
+                    if (distinct > t_route) { free(ht); free(rep); return t_route + 1; }
+                    break;
+                }
+                if (agg_tuple_eq(key_cols, key_data, n_keys, r, rep[gp])) break;
+                slot = (slot + 1) & htmask;
+            }
+        }
+    }
+    free(ht); free(rep);
+    return distinct;
+}
+
 /* Per-worker (and global merge) GROWABLE small-hash group table: open-addressing
  * hash on the tuple-hash → local gid; AoS per-group state blocks of `block`
  * bytes.  Sized to cardinality (not N) and grown by rehash on load-factor. */
@@ -1000,6 +1384,10 @@ typedef struct {
     const void**       val2_data; const int8_t* val2_types; const bool* val2_hasnull; const uint8_t* val2_esz;
     int64_t            est_card;   /* sizing hint for per-worker hashes */
     agg_sh_t*          locals;     /* [nw] */
+    /* Sel-mode (pushed WHERE filter): chunk-iterate selected rows of [0,n_sel). */
+    ray_t*             sel;
+    const int64_t*     sel_prefix;
+    agg_valdesc_t      vd;
 } agg_sh_ctx_t;
 
 /* Probe-or-insert key tuple at row r in sh; returns gid (>=0) or -1 on oom. */
@@ -1042,6 +1430,31 @@ static void agg_sh_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t en
     if (sh->oom) return;
     uint32_t gid[AGG_SH_CHUNK];
 
+    /* ── Sel mode: chunk-iterate the SELECTED rows in [start,end) (selected-row
+     * space), decoding ORIGINAL rows, probing the per-worker hash, gathering
+     * agg values per chunk into reused scratch.  No full index/compact alloc. */
+    if (c->sel) {
+        int64_t rows[AGG_SEL_CHUNK];
+        uint32_t sgid[AGG_SEL_CHUNK];
+        agg_sel_scratch_t sc = {0};
+        agg_sel_cursor_t cur;
+        agg_sel_cursor_init(&cur, c->sel, c->sel_prefix, start, end);
+        int64_t cn;
+        while ((cn = agg_sel_cursor_next(&cur, rows)) > 0) {
+            for (int64_t i = 0; i < cn; i++) {
+                int32_t g = agg_sh_find_or_insert(sh, c->key_cols, c->key_data, c->n_keys,
+                                                  c->vts, c->off, c->n_aggs, rows[i]);
+                if (g < 0) { sh->oom = 1; agg_sel_scratch_free(&sc); return; }
+                sgid[i] = (uint32_t)g;
+            }
+            if (agg_sel_accum_chunk(&c->vd, &sc, sh->states, sgid, rows, cn) != 0) {
+                sh->oom = 1; agg_sel_scratch_free(&sc); return;
+            }
+        }
+        agg_sel_scratch_free(&sc);
+        return;
+    }
+
     for (int64_t cs = start; cs < end; cs += AGG_SH_CHUNK) {
         int64_t ce = cs + AGG_SH_CHUNK; if (ce > end) ce = end;
         int64_t n = ce - cs;
@@ -1079,7 +1492,7 @@ static ray_t* exec_group_v2_parallel_smallhash(
         ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t nrows,
         ray_t** key_cols, int64_t* key_syms,
         const agg_vtable_t** vts, const size_t* off, size_t block,
-        int64_t est_card) {
+        int64_t est_card, ray_t* sel, const int64_t* sel_prefix, int64_t n_sel) {
     ray_op_ext_t* ext = find_ext(g, op->id);
     uint8_t n_keys = ext->n_keys, n_aggs = ext->n_aggs;
     ray_pool_t* pool = ray_pool_get();
@@ -1133,8 +1546,12 @@ static ray_t* exec_group_v2_parallel_smallhash(
         .val2_data = val2_data, .val2_types = val2_types,
         .val2_hasnull = val2_hasnull, .val2_esz = val2_esz,
         .est_card = est_card, .locals = locals,
+        .sel = sel, .sel_prefix = sel_prefix,
+        .vd = { .n_aggs = n_aggs, .vts = vts, .off = off, .block = block,
+                .val_data = val_data, .val_types = val_types, .val_hasnull = val_hasnull, .val_esz = val_esz,
+                .val2_data = val2_data, .val2_types = val2_types, .val2_hasnull = val2_hasnull, .val2_esz = val2_esz },
     };
-    ray_pool_dispatch(pool, agg_sh_phaseA_fn, &ctx, nrows);
+    ray_pool_dispatch(pool, agg_sh_phaseA_fn, &ctx, sel ? n_sel : nrows);
 
     for (uint32_t w = 0; w < nw; w++)
         if (locals[w].oom) {
@@ -1352,47 +1769,62 @@ typedef struct {
     size_t              val_off[16];
     size_t              val2_off[16];
     size_t              row_off;
+    /* Sel-mode (pushed WHERE filter): when sel != NULL, scatter the SELECTED
+     * rows of [0,n_sel) (decoded to ORIGINAL row indices) instead of [start,end).
+     * The packed record's row_off ALWAYS stores the ORIGINAL decoded row, so
+     * first_row / key-unpack stay correct in original-row space. */
+    ray_t*              sel;
+    const int64_t*      sel_prefix;
 } agg_radix_ctx_t;
+
+/* Scatter one ORIGINAL row r's packed payload record into the worker's per-
+ * partition buffer.  Returns 0 or -1 on push OOM (sets phase1_oom). */
+static inline int agg_radix_scatter_one(agg_radix_ctx_t* c, agg_pay_buf_t* my, int64_t r) {
+    uint8_t n_keys = c->n_keys, n_aggs = c->n_aggs;
+    int64_t kv[16];
+    uint64_t h = 1469598103934665603ULL;
+    for (uint8_t k = 0; k < n_keys; k++) {
+        int64_t v = agg_read_key_i64(c->key_cols[k], c->key_data[k], r);
+        kv[k] = v;
+        h ^= (uint64_t)v; h *= 1099511628211ULL;
+    }
+    uint32_t p = (uint32_t)(h & (AGG_RADIX_P - 1));
+    char* rec = agg_pay_reserve(&my[p], c->rec);
+    if (!rec) { c->phase1_oom = 1; return -1; }
+    int64_t* kdst = (int64_t*)rec;
+    for (uint8_t k = 0; k < n_keys; k++) kdst[k] = kv[k];
+    for (uint8_t a = 0; a < n_aggs; a++) {
+        if (c->val_data[a]) {
+            uint8_t ez = c->val_esz[a];
+            memcpy(rec + c->val_off[a], (const char*)c->val_data[a] + (size_t)r * ez, ez);
+        }
+        if (c->val2_data[a]) {
+            uint8_t ez2 = c->val2_esz[a];
+            memcpy(rec + c->val2_off[a], (const char*)c->val2_data[a] + (size_t)r * ez2, ez2);
+        }
+    }
+    *(int64_t*)(rec + c->row_off) = r;
+    return 0;
+}
 
 /* Phase 1: scatter one packed payload record per row into per-(worker,
  * partition) contiguous buffers, keyed by RADIX_PART(tuple hash). */
 static void agg_radix_scatter_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) {
     agg_radix_ctx_t* c = (agg_radix_ctx_t*)vctx;
     agg_pay_buf_t* my = &c->bufs[(size_t)wid * AGG_RADIX_P];
-    uint8_t n_keys = c->n_keys, n_aggs = c->n_aggs;
-    for (int64_t r = start; r < end; r++) {
-        /* Widen keys once; reuse for both the partition hash and the packed
-         * record so Phase 2 never re-reads the source key columns. */
-        int64_t* kdst;
-        uint64_t h = 1469598103934665603ULL;
-        uint32_t p;
-        {
-            int64_t kv[16];
-            for (uint8_t k = 0; k < n_keys; k++) {
-                int64_t v = agg_read_key_i64(c->key_cols[k], c->key_data[k], r);
-                kv[k] = v;
-                h ^= (uint64_t)v; h *= 1099511628211ULL;
-            }
-            p = (uint32_t)(h & (AGG_RADIX_P - 1));
-            char* rec = agg_pay_reserve(&my[p], c->rec);
-            if (!rec) { c->phase1_oom = 1; return; }
-            kdst = (int64_t*)rec;
-            for (uint8_t k = 0; k < n_keys; k++) kdst[k] = kv[k];
-            for (uint8_t a = 0; a < n_aggs; a++) {
-                if (c->val_data[a]) {
-                    uint8_t ez = c->val_esz[a];
-                    memcpy(rec + c->val_off[a],
-                           (const char*)c->val_data[a] + (size_t)r * ez, ez);
-                }
-                if (c->val2_data[a]) {
-                    uint8_t ez2 = c->val2_esz[a];
-                    memcpy(rec + c->val2_off[a],
-                           (const char*)c->val2_data[a] + (size_t)r * ez2, ez2);
-                }
-            }
-            *(int64_t*)(rec + c->row_off) = r;
-        }
+    if (c->sel) {
+        /* Chunk-decode this worker's slice of selected rows; scatter each. */
+        int64_t rows[AGG_SEL_CHUNK];
+        agg_sel_cursor_t cur;
+        agg_sel_cursor_init(&cur, c->sel, c->sel_prefix, start, end);
+        int64_t cn;
+        while ((cn = agg_sel_cursor_next(&cur, rows)) > 0)
+            for (int64_t i = 0; i < cn; i++)
+                if (agg_radix_scatter_one(c, my, rows[i]) != 0) return;
+        return;
     }
+    for (int64_t r = start; r < end; r++)
+        if (agg_radix_scatter_one(c, my, r) != 0) return;
 }
 
 /* Phase 2: group + accumulate one partition by walking its packed payload
@@ -1598,7 +2030,8 @@ static void agg_radix_finalize_fn(void* vctx, uint32_t wid, int64_t start, int64
 static ray_t* exec_group_v2_parallel_radix(
         ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t nrows,
         ray_t** key_cols, int64_t* key_syms,
-        const agg_vtable_t** vts, const size_t* off, size_t block) {
+        const agg_vtable_t** vts, const size_t* off, size_t block,
+        ray_t* sel, const int64_t* sel_prefix, int64_t n_sel) {
     ray_op_ext_t* ext = find_ext(g, op->id);
     uint8_t n_keys = ext->n_keys, n_aggs = ext->n_aggs;
     ray_pool_t* pool = ray_pool_get();
@@ -1648,12 +2081,14 @@ static ray_t* exec_group_v2_parallel_radix(
         .val2_data = val2_data, .val2_types = val2_types, .val2_hasnull = val2_hasnull, .val2_esz = val2_esz,
         .nw = nw, .bufs = bufs, .parts = parts, .phase1_oom = 0,
         .rec = rec, .row_off = row_off,
+        .sel = sel, .sel_prefix = sel_prefix,
     };
     memcpy(ctx.val_off, val_off, sizeof(val_off));
     memcpy(ctx.val2_off, val2_off, sizeof(val2_off));
 
-    /* Phase 1: scatter. */
-    ray_pool_dispatch(pool, agg_radix_scatter_fn, &ctx, nrows);
+    /* Phase 1: scatter.  Sel mode dispatches over selected-row space [0,n_sel);
+     * each worker decodes its slice of selected rows to ORIGINAL indices. */
+    ray_pool_dispatch(pool, agg_radix_scatter_fn, &ctx, sel ? n_sel : nrows);
 
     /* Phase 2: per-partition group+accumulate. */
     int oom = ctx.phase1_oom;
@@ -1812,13 +2247,30 @@ static ray_t* exec_group_v2_parallel_radix(
     return result;
 }
 
+static ray_t* agg_build_compact(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
+                                int64_t* idx, int64_t n_sel);
+
 /* Core of exec_group_v2: resolution + strategy dispatch over (tbl, nrows).
- * Never consults g->selection — when a WHERE filter is active, the public
- * exec_group_v2 wrapper passes a COMPACT table (selected rows gathered) here
- * with effective nrows = n_sel, so this body operates purely on what it is
- * given and a double-filter is structurally impossible. */
+ *
+ * Selection handling.  `sel` is the pushed WHERE filter's rowsel (or NULL).
+ * When set, the CHUNKED strategies (parallel dense / radix / smallhash) consume
+ * it IN PLACE: they chunk-decode the selected ORIGINAL rows and gather per chunk
+ * (no full index array, no compact column).  `nrows` stays the FULL table row
+ * count (dense min/max prescan + hash sizing operate on the source columns; the
+ * selected rows are a subset whose slots/keys are a subset of the full range),
+ * while `n_sel` is the number of selected rows used for the parallel-vs-serial
+ * decision and the chunked dispatch extent.  `sel_prefix` is the per-segment
+ * selected-count prefix used to partition selected-row space across workers.
+ *
+ * The HASH-FALLBACK strategy (F64/STR keys) and the SERIAL path keep the
+ * COMPACT-table approach: those shapes were not perf blockers and are rare/small
+ * (serial only fires below RAY_PARALLEL_THRESHOLD selected rows), so we build a
+ * compact table of the selected rows once and recurse with sel=NULL — the
+ * unmodified strategy then runs over the compact table.  This is the documented
+ * compact fallback the design permits for the non-chunked shapes. */
 static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
-                                int64_t nrows) {
+                                int64_t nrows, ray_t* sel,
+                                const int64_t* sel_prefix, int64_t n_sel) {
     ray_op_ext_t* ext = find_ext(g, op->id);
 
     ray_t* key_cols[16]; int64_t key_syms[16];
@@ -1841,12 +2293,37 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
 
     /* Dense plan (low-card int/SYM keys + streaming aggs → direct index, no
      * hash).  Computed up front so both the parallel and serial dispatch can use
-     * it.  One min/max prescan per key column. */
+     * it.  In sel mode the min/max prescan walks only the SELECTED rows (O(n_sel),
+     * not O(nrows)) — both correct (grouped keys ARE the selected rows) and cheap
+     * for high-selectivity filters, and it can pull a sparse-but-low-card selected
+     * key set into the dense path that the full-table range would have rejected. */
     dense_plan_t dp;
-    bool dense = agg_dense_plan(key_cols, ext->n_keys, vts, ext->n_aggs, nrows, &dp);
+    bool dense = sel ? agg_dense_plan_sel(key_cols, ext->n_keys, n_sel, sel, sel_prefix, &dp)
+                     : agg_dense_plan(key_cols, ext->n_keys, vts, ext->n_aggs, nrows, &dp);
+
+    /* Compact-fallback helper for the non-chunked shapes (hash-fallback keys,
+     * and the serial path): gather selected rows into a compact table once and
+     * recurse with sel=NULL so the unmodified strategy runs over it. */
+    #define AGG_RUN_COMPACT_FALLBACK()                                          \
+        do {                                                                    \
+            ray_t* idxb = ray_rowsel_to_indices(sel);                           \
+            if (!idxb) return ray_error("oom", NULL);                           \
+            ray_t* compact = agg_build_compact(g, op, tbl, (int64_t*)ray_data(idxb), n_sel); \
+            if (!compact || RAY_IS_ERR(compact)) {                              \
+                ray_release(idxb);                                              \
+                return compact ? compact : ray_error("oom", NULL);             \
+            }                                                                   \
+            ray_t* r = exec_group_v2_run(g, op, compact, n_sel, NULL, NULL, 0); \
+            ray_release(compact); ray_release(idxb);                            \
+            return r;                                                           \
+        } while (0)
+
+    /* Effective row count for the parallel-vs-serial decision: the selected
+     * count when a filter is active, else the full table. */
+    int64_t eff_n = sel ? n_sel : nrows;
 
     ray_pool_t* pool = ray_pool_get();
-    if (pool && nrows >= RAY_PARALLEL_THRESHOLD) {
+    if (pool && eff_n >= RAY_PARALLEL_THRESHOLD) {
         /* Per-worker memory budget gate: dense parallel allocates a full
          * total_slots*(block + first_row) slab per worker.  Low-card (the perf
          * target) has tiny total_slots → always within budget → dense parallel.
@@ -1880,27 +2357,39 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             if (vts[a]->kind != ACC_STREAMING) all_streaming = false;
 
         if (dense_par_ok)
-            return exec_group_v2_parallel_dense(g, op, tbl, key_cols, key_syms, ext, nrows, pool, &dp);
+            return exec_group_v2_parallel_dense(g, op, tbl, key_cols, key_syms, ext, nrows, pool, &dp,
+                                                sel, sel_prefix, n_sel);
         if (keys_intsym) {
             /* Dense-FAIL int/SYM streaming shapes: probe cardinality on a bounded
              * sample.  LOW card → small-hash (O(groups) working set, no scatter
              * tax); HIGH card → radix.  The estimate early-exits above T_route so
-             * high-card shapes pay only the bounded sample. */
+             * high-card shapes pay only the bounded sample.  In sel mode the
+             * sample is taken over the SELECTED rows (the cardinality that
+             * actually reaches grouping), so a high-selectivity filter over a
+             * high-card column still routes to small-hash when the surviving
+             * rows are few-and-low-card. */
             if (all_streaming) {
                 const void* key_data[16];
                 for (uint8_t k = 0; k < ext->n_keys; k++) key_data[k] = ray_data(key_cols[k]);
                 const int64_t T_ROUTE = 16384;        /* > R2's 4096, < S2's in-sample distinct */
-                int64_t est = agg_estimate_card(key_cols, key_data, ext->n_keys,
-                                                nrows, 65536, T_ROUTE);
+                int64_t est = sel
+                    ? agg_estimate_card_sel(key_cols, key_data, ext->n_keys, sel, sel_prefix, n_sel, 65536, T_ROUTE)
+                    : agg_estimate_card(key_cols, key_data, ext->n_keys, nrows, 65536, T_ROUTE);
                 if (est <= T_ROUTE)
                     return exec_group_v2_parallel_smallhash(g, op, tbl, nrows,
-                            key_cols, key_syms, vts, off, block, est);
+                            key_cols, key_syms, vts, off, block, est, sel, sel_prefix, n_sel);
             }
-            return exec_group_v2_parallel_radix(g, op, tbl, nrows, key_cols, key_syms, vts, off, block);
+            return exec_group_v2_parallel_radix(g, op, tbl, nrows, key_cols, key_syms, vts, off, block,
+                                                sel, sel_prefix, n_sel);
         }
+        /* Hash fallback (F64 / STR keys): not a chunked strategy — compact. */
+        if (sel) AGG_RUN_COMPACT_FALLBACK();
         return exec_group_v2_parallel(g, op, tbl, nrows, key_cols, key_syms, vts, off, block);
     }
 
+    /* Serial path: keep the compact fallback when a filter is active (selected
+     * count is below the parallel threshold here → small; not a perf blocker). */
+    if (sel) AGG_RUN_COMPACT_FALLBACK();
 
     agg_groups_t groups = {0};
     int grp_rc = dense ? agg_group_keys_dense(key_cols, nrows, &dp, &groups)
@@ -1940,6 +2429,7 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     }
     free(groups.gids); free(groups.first_row);
     return result;
+    #undef AGG_RUN_COMPACT_FALLBACK
 }
 
 /* Build a COMPACT table holding exactly the columns exec_group_v2_run reads —
@@ -1991,43 +2481,29 @@ static ray_t* agg_build_compact(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
 }
 
 /* Public entry.  No active WHERE filter → run directly over the input table.
- * With g->selection set, build a compact table of the selected rows and run the
- * normal strategy dispatch over it (effective nrows = n_sel), then free the
- * compact table + the materialised index block on EVERY exit.  The result
- * columns are freshly built (col_vec_new / ray_vec_new gathers), so they never
- * alias the compact buffers and the compact table is safe to free.
  *
- * IN-PLACE vs COMPACT — design note.  The reference engine (DuckDB) threads a
- * filter into aggregation in place via a SelectionVector: the address/key
- * vectors are *sliced* (referenced, indexed through sel[i]) and the aggregate
- * update walks sel[i] without copying — see
+ * With g->selection set (a pushed WHERE filter, rowsel form), build the per-
+ * segment selected-count prefix once and hand the rowsel to exec_group_v2_run,
+ * which threads it into the CHUNKED strategies (parallel dense / radix /
+ * smallhash): they decode the selected ORIGINAL rows in fixed-size chunks and
+ * gather only each chunk's key/agg values into small reused buffers, feeding the
+ * dense-batch kernels — NO full index array (ray_rowsel_to_indices), NO full
+ * compact column, NO per-call large alloc.  This mirrors DuckDB's chunked
+ * SelectionVector model (gather a STANDARD_VECTOR_SIZE chunk's selected rows
+ * into reused vectors and sink the chunk), adapted to v2's dense-contiguous
+ * batch kernels by gathering per chunk rather than slicing references — see
  *   duckdb/src/include/duckdb/common/types/selection_vector.hpp
- *   duckdb/src/common/row_operations/row_aggregate.cpp (UpdateFilteredStates)
- *   duckdb/src/common/types/vector.cpp (Vector::Slice)
- * That works there because DuckDB's aggregate update consumes a *vector +
- * selection* pair throughout.  Our v2 strategies do not: ALL of them
- * (serial dense/hash, parallel dense/radix/smallhash/generic-hash) feed each
- * aggregate via a *batch* kernel — update_batch(states, block, cgid, vals, n)
- * — that reads `vals` as a DENSE, CONTIGUOUS slice of the input column
- * (e.g. agg_phaseA_fn: `val_data[a] + start*esz`).  Threading sel[i] in place
- * would force every strategy to pre-gather the agg inputs into a temp dense
- * buffer per batch anyway (the kernel cannot stride through sel), partition the
- * sel range across workers, and translate the radix payload row_off into
- * sel-space — i.e. the same gather, smeared across six hot loops with six
- * separate correctness surfaces on the core group path.
+ *   duckdb/src/common/types/vector.cpp (Vector::Slice → gather under a sel).
  *
- * So we gather ONCE here, at the v2 boundary, into a compact table and let the
- * unmodified strategies run over it.  This IS the documented "compact fallback"
- * the design permits, applied uniformly because the dense-contiguous layout it
- * produces is exactly what every strategy's batch kernel structurally requires;
- * per-strategy in-place threading would reproduce this gather without removing
- * it.  Representative-row indices (first_row) are correct in compact space: the
- * key columns are gathered under the same sym, so first_row indexes the compact
- * key column and the emitted key is the selected row's key (SYM domain carried
- * through gather_by_idx).  No strategy needs original-row coordinates. */
+ * The HASH-FALLBACK strategy (F64/STR keys) and the SERIAL path are NOT chunked
+ * — those shapes were not perf blockers and are rare/small.  exec_group_v2_run
+ * keeps the compact-table approach for them (gather selected rows once, recurse
+ * with sel=NULL).  Representative (first_row) indices stay in ORIGINAL-row space
+ * throughout so result key columns gather correctly (SYM domains preserved); the
+ * output order is unspecified per the v2 contract. */
 ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     if (!g || !g->selection)
-        return exec_group_v2_run(g, op, tbl, ray_table_nrows(tbl));
+        return exec_group_v2_run(g, op, tbl, ray_table_nrows(tbl), NULL, NULL, 0);
 
     int64_t src_nrows = ray_table_nrows(tbl);
     ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
@@ -2035,28 +2511,21 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
      * applied here — fall back to the unfiltered run (matches the scalar-agg
      * guard in group.c, which also only honors a selection when nrows match). */
     if (sm->nrows != src_nrows)
-        return exec_group_v2_run(g, op, tbl, src_nrows);
+        return exec_group_v2_run(g, op, tbl, src_nrows, NULL, NULL, 0);
 
     int64_t n_sel = sm->total_pass;
-    ray_t* idx_block = ray_rowsel_to_indices(g->selection);
-    if (!idx_block) return ray_error("oom", NULL);
-    int64_t* idx = (int64_t*)ray_data(idx_block);
+    ray_t* prefix_block = agg_sel_build_prefix(g->selection);
+    if (!prefix_block) return ray_error("oom", NULL);
+    const int64_t* sel_prefix = (const int64_t*)ray_data(prefix_block);
 
-    ray_t* compact = agg_build_compact(g, op, tbl, idx, n_sel);
-    if (!compact || RAY_IS_ERR(compact)) {
-        ray_release(idx_block);
-        return compact ? compact : ray_error("oom", NULL);
-    }
-
-    /* Hide the selection from the run so no strategy can double-filter, then
-     * dispatch over the compact table with effective nrows = n_sel. */
+    /* Hide the selection from the run so a downstream strategy can't double-
+     * apply it; the rowsel is passed explicitly via the sel argument instead. */
     ray_t* saved_sel = g->selection;
     g->selection = NULL;
-    ray_t* result = exec_group_v2_run(g, op, compact, n_sel);
+    ray_t* result = exec_group_v2_run(g, op, tbl, src_nrows, saved_sel, sel_prefix, n_sel);
     g->selection = saved_sel;
 
-    ray_release(compact);     /* result columns are fresh, never alias compact */
-    ray_release(idx_block);
+    ray_release(prefix_block);
     return result;
 }
 
