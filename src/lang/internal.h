@@ -516,6 +516,7 @@ ray_t* ray_dl_stratify_fn(ray_t* x);
 ray_t* ray_dl_eval_fn(ray_t* x);
 ray_t* ray_dl_query_fn(ray_t* prog_obj, ray_t* pred_obj);
 ray_t* ray_dl_provenance_fn(ray_t* prog_obj, ray_t* pred_obj);
+ray_t* ray_dl_free_fn(ray_t* x);
 void   ray_dl_reset_rules(void);
 
 /* System builtins (formerly static in eval.c, now in system.c) */
