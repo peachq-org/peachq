@@ -5315,13 +5315,17 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
                 flat->len = total_rows;
 
                 int64_t offset = 0;
+                uint8_t seg_nulls = 0;
                 for (int32_t p = 0; p < n_parts; p++) {
                     ray_t* seg = segs[p];
                     if (!seg || seg->len <= 0) continue;
                     parted_copy_cells(ray_data(flat), base_type, base_attrs,
                                       offset, seg, 0, seg->len);
+                    seg_nulls |= seg->attrs & RAY_ATTR_HAS_NULLS;
                     offset += seg->len;
                 }
+                /* Invariant 16.4: propagate HAS_NULLS across segments. */
+                flat->attrs |= seg_nulls;
             }
             if (!flat || RAY_IS_ERR(flat)) {
                 ray_release(flat_tbl);
@@ -9083,12 +9087,15 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             char* out = (char*)ray_data(flat);
             int64_t off = 0;
 
+            uint8_t src_nulls = 0;
+
             /* Copy from running result */
             if (running) {
                 ray_t* rc = ray_table_get_col(running, key_syms[k]);
                 if (rc && rc->len > 0) {
                     parted_copy_cells(out, flat->type, out_attrs, 0,
                                       rc, 0, rc->len);
+                    src_nulls |= rc->attrs & RAY_ATTR_HAS_NULLS;
                     off = rc->len;
                 }
             }
@@ -9104,17 +9111,21 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
                     for (int64_t r = 0; r < pnrows; r++)
                         parted_copy_cells(out, flat->type, out_attrs,
                                           off + r, mc_kv, p, 1);
+                    src_nulls |= mc_kv->attrs & RAY_ATTR_HAS_NULLS;
                     off += pnrows;
                 } else {
                     ray_t* pc = ray_table_get_col(bp[i], key_syms[k]);
                     if (pc && pc->len > 0) {
                         parted_copy_cells(out, flat->type, out_attrs, off,
                                           pc, 0, pc->len);
+                        src_nulls |= pc->attrs & RAY_ATTR_HAS_NULLS;
                         off += pc->len;
                     }
                 }
             }
 
+            /* Invariant 16.4: propagate HAS_NULLS from copied sources. */
+            flat->attrs |= src_nulls;
             merge_tbl = ray_table_add_col(merge_tbl, key_syms[k], flat);
             ray_release(flat);
         }
@@ -9149,12 +9160,14 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
             flat->len = mrows;
             char* out = (char*)ray_data(flat);
             int64_t off = 0;
+            uint8_t src_nulls = 0;
 
             if (running) {
                 ray_t* rc = ray_table_get_col_idx(running, (int64_t)n_keys + a);
                 if (rc && rc->len > 0) {
                     parted_copy_cells(out, flat->type, out_attrs, 0,
                                       rc, 0, rc->len);
+                    src_nulls |= rc->attrs & RAY_ATTR_HAS_NULLS;
                     off = rc->len;
                 }
             }
@@ -9165,10 +9178,13 @@ exec_group_per_partition(ray_t* parted_tbl, ray_op_ext_t* ext,
                 if (pc && pc->len > 0) {
                     parted_copy_cells(out, flat->type, out_attrs, off,
                                       pc, 0, pc->len);
+                    src_nulls |= pc->attrs & RAY_ATTR_HAS_NULLS;
                     off += pc->len;
                 }
             }
 
+            /* Invariant 16.4: propagate HAS_NULLS from copied sources. */
+            flat->attrs |= src_nulls;
             merge_tbl = ray_table_add_col(merge_tbl, agg_name_ids[a], flat);
             ray_release(flat);
         }
