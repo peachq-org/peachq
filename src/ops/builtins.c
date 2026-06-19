@@ -1130,6 +1130,43 @@ static ray_t* cast_vec_numeric_fast(ray_t* val, ray_t* vec, int8_t out_type) {
  * Handles I64, I32, I16, U8, F64, BOOL, DATE, TIME, TIMESTAMP, SYM.
  * Fast path for typed numeric input vectors (no per-element atoms);
  * generic path for RAY_LIST and other shapes. */
+/* Null-model invariant 16.4: a cast can land the target type's RESERVED
+ * null sentinel in the output without it being a *source* null — e.g.
+ * STR→F64 "inf"→0Nf, or an out-of-domain value mapping to NULL_I64.
+ * cast_vec_copy_nulls only carries source nulls, so scan the output and
+ * flip HAS_NULLS for any reserved sentinel.
+ *
+ * Scope MATCHES the validator (src/vec/validate.c): only F64/F32/I64/
+ * TIMESTAMP sentinels are reserved.  I16/I32 (and I32-backed DATE/TIME) are
+ * DELIBERATELY excluded — narrow-int arithmetic/truncation wraps modulo the
+ * width (documented k/q rule), so INT16_MIN/INT32_MIN are legitimate
+ * computed values, not nulls (see test/rfl/expr/narrow_binary.rfl).  Forcing
+ * HAS_NULLS for them would make a wrapped result read back as null. */
+static void cast_mark_output_sentinels(ray_t* vec, int8_t out_type, int64_t n) {
+    const void* out = ray_data(vec);
+    switch (out_type) {
+        case RAY_F64: {
+            const double* d = (const double*)out;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] != d[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
+        }
+        case RAY_F32: {
+            const float* d = (const float*)out;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] != d[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
+        }
+        case RAY_I64: case RAY_TIMESTAMP: {
+            const int64_t* d = (const int64_t*)out;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] == NULL_I64) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
+            return;
+        }
+        default: return;
+    }
+}
+
 static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
     int64_t n2 = val->len;
     ray_t* vec = ray_vec_new(out_type, n2);
@@ -1163,6 +1200,9 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
             if (RAY_IS_ERR(result)) return result;
             if (_FP_CANCELLED()) { ray_release(vec); return ray_error("cancel", NULL); }
 #undef _FP_CANCELLED
+            /* Invariant 16.4: a narrowing fast cast may have produced a
+             * reserved sentinel not present in the source. */
+            cast_mark_output_sentinels(vec, out_type, n2);
             return vec;
         }
     }
@@ -1206,6 +1246,16 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
         }
         ray_release(cast);
     }
+    /* STAGE 2 (ingest/cast → F64 vector): the per-element recursion routes
+     * STR→F64 through make_f64, which canonicalizes any non-finite parse
+     * (strtod "inf"/"1e400"/"nan") to NULL_F64 (0Nf).  cast_vec_copy_nulls
+     * below only propagates *source* nulls, so a 0Nf produced from a
+     * non-null source cell would not flip HAS_NULLS.  Scan the F64 output
+     * and set HAS_NULLS if any canonical 0Nf was produced. */
+    /* Invariant 16.4: scan the output for any reserved sentinel produced by
+     * the cast (narrowing/truncation, or STR→F64 0Nf canonicalization) that
+     * is not a *source* null cast_vec_copy_nulls would carry. */
+    cast_mark_output_sentinels(vec, out_type, n2);
     ray_t* result = cast_vec_copy_nulls(vec, val);
     if (RAY_IS_ERR(result)) return result;
     return vec;
@@ -1326,6 +1376,11 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             char* end;
             double v = strtod(sp, &end);
             if (end == sp) return ray_error("domain", "as: cannot parse str as f64");
+            /* STAGE 2 (ingest/cast STR→F64): canonicalize at the ingest entry
+             * point.  strtod("inf")/strtod("1e400")/strtod("nan") would yield a
+             * non-finite F64; make_f64 maps every non-finite to NULL_F64 (0Nf),
+             * closing the single-null float model on the cast surface.  An atom
+             * 0Nf is itself the null — there is no HAS_NULLS attr to set. */
             return make_f64(v);
         }
         /* Vector cast */
@@ -2850,6 +2905,11 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         }
         default: ray_free(result); return ray_error("type", "concat: unsupported element type %s", ray_type_name(b->type));
         }
+        /* Null-model invariant 16.4: propagate null-ness of the leading atom
+         * (a typed-null sentinel written raw at slot 0) and any nulls in the
+         * trailing vector b. */
+        if (RAY_ATOM_IS_NULL(a) || (b->attrs & RAY_ATTR_HAS_NULLS))
+            result->attrs |= RAY_ATTR_HAS_NULLS;
         if (b->type == RAY_SYM) {
             /* Mixed sources: the atom id is runtime-domain by design, b's
              * cells are b-domain — re-express b per cell into the runtime
@@ -2897,6 +2957,10 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         default: ray_free(result); return ray_error("type", "concat: unsupported element type %s", ray_type_name(a->type));
         }
         result->len = na + 1;
+        /* Null-model invariant 16.4: propagate nulls in the leading vector a
+         * and null-ness of the trailing atom (sentinel written raw at na). */
+        if ((a->attrs & RAY_ATTR_HAS_NULLS) || RAY_ATOM_IS_NULL(b))
+            result->attrs |= RAY_ATTR_HAS_NULLS;
         return result;
     }
     /* Atom + atom of same type -> 2-element vector */
@@ -2939,6 +3003,12 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         }
         default: ray_free(result); return ray_error("type", "concat: unsupported element type %s", ray_type_name(vtype));
         }
+        /* Null-model invariant 16.4: a typed-null atom (e.g. the I64 literal
+         * INT64_MIN == NULL_I64) writes its sentinel bit-pattern straight
+         * into the result column.  Flag HAS_NULLS so null-aware ops don't
+         * treat the sentinel as a real value. */
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
+            result->attrs |= RAY_ATTR_HAS_NULLS;
         return result;
     }
     /* Dict concat: merge — keys/vals from b overwrite a's. */
