@@ -8788,6 +8788,18 @@ ray_t* ray_update(ray_t** args, int64_t n) {
     ray_t* where_expr = dict_get(dict, "where");
     ray_t* by_expr = dict_get(dict, "by");
 
+    /* update supports `by:` (grouped aggregate broadcast) and `where:` (masked
+     * row assignment) only SEPARATELY.  The combination was previously a silent
+     * wrong result: the `by:` branch below is gated on `!where_expr`, so when
+     * both were present `by:` was silently dropped and the update applied as if
+     * ungrouped (review 2.10).  Honoring both would require composing the
+     * where-filter + group pipeline the way `select` does — a larger feature.
+     * Until then, reject the combination LOUDLY rather than mislead. */
+    if (by_expr && where_expr) {
+        ray_release(tbl);
+        return ray_error("nyi", "update does not support `by:` together with `where:`");
+    }
+
     /* UPDATE WITH BY: group, compute aggregate, broadcast back */
     if (by_expr && !where_expr) {
         DICT_VIEW_DECL(updv);
