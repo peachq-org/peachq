@@ -644,7 +644,10 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                         break;
                     default: v = 0.0; break;
                 }
-                ((double*)ray_data(new_col))[r] = v;
+                /* Single-null float model: canonicalize non-finite (avg
+                 * division, sum overflow) to NULL_F64; HAS_NULLS set by the
+                 * scan below before new_col is added to the result. */
+                ((double*)ray_data(new_col))[r] = ray_f64_fin(v);
             } else {
                 int64_t v;
                 switch (agg_op) {
@@ -713,6 +716,9 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             col_sym = ray_sym_intern(buf, (size_t)len);
         }
 
+        /* Single-null float model: flip HAS_NULLS if an F64 pivot cell was
+         * canonicalized to NULL_F64 above (avg division, sum overflow). */
+        if (new_col->type == RAY_F64) par_finalize_nulls(new_col);
         result = ray_table_add_col(result, col_sym, new_col);
         ray_release(new_col);
         if (RAY_IS_ERR(result)) goto pivot_cleanup;
