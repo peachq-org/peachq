@@ -27,31 +27,18 @@
 #include "rayforce.h"
 #include "ops/internal.h"
 
-/* Construct an OP_FILTERED_GROUP DAG node.
- *
- *   pred       - predicate root (DAG op, must produce RAY_BOOL vec or be
- *                a recognised comparison/AND/LIKE shape).
- *   keys[]     - n_keys group-key DAG ops (each must produce a column).
- *   agg_ops[]  - n_aggs aggregate opcodes (OP_COUNT/OP_SUM/OP_AVG/...).
- *   agg_ins[]  - n_aggs aggregate input DAG ops.
- *
- * Returns NULL on allocation failure or unsupported shape. */
-ray_op_t* ray_filtered_group(ray_graph_t* g,
-                             ray_op_t* pred,
-                             ray_op_t** keys, uint8_t n_keys,
-                             uint16_t* agg_ops, ray_op_t** agg_ins,
-                             uint8_t n_aggs);
-
-/* Predicate-shape detection used by the planner before emitting the
- * fused op.  Returns 1 if `expr` (a Rayfall expression, not a DAG node)
+/* Predicate-shape detection used by the fused operators before emitting a
+ * DAG node.  Returns 1 if `expr` (a Rayfall expression, not a DAG node)
  * can be evaluated by the per-morsel predicate evaluator against `tbl`.
  *
- * Pass 1 accepted single (== col const) / (!= col const) on flat
- * SYM/integer columns.  Pass 3 adds (and pred1 pred2 …) of those, plus
- * ordering comparisons (<, <=, >, >=) on numeric (non-SYM) columns. */
+ * Accepts single (== col const) / (!= col const) on flat SYM/integer
+ * columns, (and pred1 pred2 …) of those, plus ordering comparisons
+ * (<, <=, >, >=) on numeric (non-SYM) columns, LIKE on string/SYM
+ * columns, and IN over a small integer/temporal value set.
+ *
+ * Implemented in fused_pred.c.  The only remaining consumer is
+ * fused_topk.c (the OP_FILTERED_GROUP fused operator that previously
+ * also used it has been retired). */
 int ray_fused_group_supported(ray_t* expr, ray_t* tbl);
-
-/* exec.c calls this for OP_FILTERED_GROUP nodes. */
-ray_t* exec_filtered_group(ray_graph_t* g, ray_op_t* op);
 
 #endif /* RAY_OPS_FUSED_GROUP_H */
