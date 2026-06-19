@@ -214,6 +214,9 @@ static void win_compute_partition(
                     for (int64_t i = ps; i < pe; i++)
                         if (!ray_vec_is_null(fvec, sorted_idx[i]))
                             t += win_read_f64(fvec, sorted_idx[i]);
+                    /* Single-null float model: window SUM can overflow → ±Inf;
+                     * canonicalize to NULL_F64 (HAS_NULLS via win_finalize_nulls). */
+                    t = ray_f64_fin(t);
                     for (int64_t i = ps; i < pe; i++)
                         out[sorted_idx[i]] = t;
                 } else {
@@ -221,7 +224,7 @@ static void win_compute_partition(
                     for (int64_t i = ps; i < pe; i++) {
                         if (!ray_vec_is_null(fvec, sorted_idx[i]))
                             acc += win_read_f64(fvec, sorted_idx[i]);
-                        out[sorted_idx[i]] = acc;
+                        out[sorted_idx[i]] = ray_f64_fin(acc);
                     }
                 }
             } else {
@@ -255,7 +258,7 @@ static void win_compute_partition(
                         t += win_read_f64(fvec, sorted_idx[i]); cnt++;
                     }
                 if (cnt > 0) {
-                    double avg = t / (double)cnt;
+                    double avg = ray_f64_fin(t / (double)cnt);
                     for (int64_t i = ps; i < pe; i++)
                         out[sorted_idx[i]] = avg;
                 } else {
@@ -270,7 +273,7 @@ static void win_compute_partition(
                         acc += win_read_f64(fvec, sorted_idx[i]); cnt++;
                     }
                     if (cnt > 0)
-                        out[sorted_idx[i]] = acc / (double)cnt;
+                        out[sorted_idx[i]] = ray_f64_fin(acc / (double)cnt);
                     else
                         win_set_null(rvec, sorted_idx[i]);
                 }
