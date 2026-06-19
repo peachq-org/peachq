@@ -1206,6 +1206,45 @@ static inline void par_finalize_nulls(ray_t* vec) {
     }
 }
 
+/* ══════════════════════════════════════════
+ * Single-null float model
+ * ══════════════════════════════════════════
+ * The F64 value domain is {finite} ∪ {0Nf}.  Any non-finite F64 result —
+ * NaN OR ±Inf — canonicalizes to NULL_F64 (= __builtin_nan("")) at the
+ * produce site; Inf is NOT a value.  Null detection is `x != x`.  Apply
+ * ray_f64_fin() to every F64-RESULT produce site (kernels, finalizers,
+ * computed-store sites) so a column never holds a non-finite-non-0Nf value.
+ *
+ * Written compare+select (no early-out branch) so vector loops stay
+ * auto-vectorizable.  For DIV/MOD keep the explicit `divisor==0 → NULL_F64`
+ * guard at the call site (mirrors the int kernels, avoids the FPU NaN slow
+ * path) and wrap only the value-producing branch. */
+static inline double ray_f64_fin(double r) {
+    /* finite ⟺ |r| <= DBL_MAX: this comparison is FALSE for ±Inf (|Inf| >
+     * DBL_MAX) AND for NaN (every NaN compare is false), so it selects exactly
+     * the finite values and maps every non-finite to NULL_F64.  Use this fabs +
+     * compare + select, NOT __builtin_isfinite — the latter lowers to a scalar
+     * fpclassify-style sequence that breaks auto-vectorization and regressed
+     * the hot float kernels ~50% (measured).  fabs is a bitwise-AND mask and
+     * the ternary becomes a vector blend, keeping the kernel loops vectorized
+     * (measured: within noise of baseline). */
+    return (__builtin_fabs(r) <= DBL_MAX) ? r : NULL_F64;
+}
+
+/* Post-pass for fused/fallback F64 kernels that may have canonicalized a
+ * non-finite result to NULL_F64 (NaN) in-buffer: scan [off,off+len) and set
+ * RAY_ATTR_HAS_NULLS if any lane is a NaN sentinel.  Mirrors
+ * mark_i64_overflow_as_null (which relies on the sentinel already being in
+ * the payload — here NULL_F64 is too, so we only flip the attr).  Single
+ * pass, memory-bound, branchless inner test; caller invokes single-threaded
+ * after pool dispatch joins. */
+static inline void mark_f64_nonfinite_as_null(ray_t* result, int64_t off, int64_t len) {
+    const double* d = (const double*)ray_data(result) + off;
+    for (int64_t i = 0; i < len; i++) {
+        if (RAY_UNLIKELY(d[i] != d[i])) { result->attrs |= RAY_ATTR_HAS_NULLS; return; }
+    }
+}
+
 /* Canonicalise IEEE 754 -0.0 → +0.0 via bit-level check.
  * Immune to -fno-signed-zeros (which makes `if (f==0) f=0` a no-op).
  * Used at output / hash-key boundaries only — not in hot SIMD loops. */
