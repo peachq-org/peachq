@@ -34,97 +34,14 @@
 
 #define GRAPH_INIT_CAP 4096
 
-static inline ray_op_t* graph_fix_ptr(ray_op_t* p, ptrdiff_t delta) {
-    return p ? (ray_op_t*)((char*)p + delta) : NULL;
-}
-
-static void graph_fixup_ext_ptrs(ray_graph_t* g, ptrdiff_t delta) {
-    for (uint32_t i = 0; i < g->ext_count; i++) {
-        ray_op_ext_t* ext = g->ext_nodes[i];
-        if (!ext) continue;
-
-        ext->base.inputs[0] = graph_fix_ptr(ext->base.inputs[0], delta);
-        ext->base.inputs[1] = graph_fix_ptr(ext->base.inputs[1], delta);
-
-        switch (ext->base.opcode) {
-            case OP_SORT:
-                for (uint8_t k = 0; k < ext->sort.n_cols; k++)
-                    ext->sort.columns[k] = graph_fix_ptr(ext->sort.columns[k], delta);
-                break;
-            case OP_GROUP:
-                for (uint8_t k = 0; k < ext->n_keys; k++)
-                    ext->keys[k] = graph_fix_ptr(ext->keys[k], delta);
-                for (uint8_t a = 0; a < ext->n_aggs; a++)
-                    ext->agg_ins[a] = graph_fix_ptr(ext->agg_ins[a], delta);
-                if (ext->agg_ins2) {
-                    for (uint8_t a = 0; a < ext->n_aggs; a++) {
-                        if (ext->agg_ins2[a])
-                            ext->agg_ins2[a] = graph_fix_ptr(ext->agg_ins2[a], delta);
-                    }
-                }
-                break;
-            case OP_JOIN:
-            case OP_ANTIJOIN:
-                for (uint8_t k = 0; k < ext->join.n_join_keys; k++)
-                    ext->join.left_keys[k] = graph_fix_ptr(ext->join.left_keys[k], delta);
-                if (ext->join.right_keys) {
-                    for (uint8_t k = 0; k < ext->join.n_join_keys; k++)
-                        ext->join.right_keys[k] = graph_fix_ptr(ext->join.right_keys[k], delta);
-                }
-                break;
-            case OP_WINDOW_JOIN:
-                ext->asof.time_key = graph_fix_ptr(ext->asof.time_key, delta);
-                for (uint8_t k = 0; k < ext->asof.n_eq_keys; k++)
-                    ext->asof.eq_keys[k] = graph_fix_ptr(ext->asof.eq_keys[k], delta);
-                break;
-            case OP_WINDOW:
-                for (uint8_t k = 0; k < ext->window.n_part_keys; k++)
-                    ext->window.part_keys[k] = graph_fix_ptr(ext->window.part_keys[k], delta);
-                for (uint8_t k = 0; k < ext->window.n_order_keys; k++)
-                    ext->window.order_keys[k] = graph_fix_ptr(ext->window.order_keys[k], delta);
-                for (uint8_t f = 0; f < ext->window.n_funcs; f++)
-                    ext->window.func_inputs[f] = graph_fix_ptr(ext->window.func_inputs[f], delta);
-                break;
-            case OP_SELECT:
-                for (uint8_t k = 0; k < ext->sort.n_cols; k++)
-                    ext->sort.columns[k] = graph_fix_ptr(ext->sort.columns[k], delta);
-                break;
-            case OP_PIVOT:
-                for (uint8_t k = 0; k < ext->pivot.n_index; k++)
-                    ext->pivot.index_cols[k] = graph_fix_ptr(ext->pivot.index_cols[k], delta);
-                ext->pivot.pivot_col = graph_fix_ptr(ext->pivot.pivot_col, delta);
-                ext->pivot.value_col = graph_fix_ptr(ext->pivot.value_col, delta);
-                break;
-            /* Graph ops: no ray_op_t* pointers in ext union to fix */
-            case OP_EXPAND:
-            case OP_VAR_EXPAND:
-            case OP_SHORTEST_PATH:
-            case OP_WCO_JOIN:
-                break;
-            default:
-                break;
-        }
-    }
-}
-
-/* After realloc moves g->nodes, fix up all stored input pointers.
-   old_base is saved as uintptr_t before realloc to avoid GCC 14
-   -Wuse-after-free on the stale pointer. */
-static void graph_fixup_ptrs(ray_graph_t* g, uintptr_t old_base) {
-    ptrdiff_t delta = (ptrdiff_t)((uintptr_t)g->nodes - old_base);
-    if (delta == 0) return;
-    for (uint32_t i = 0; i < g->node_count; i++) {
-        g->nodes[i].inputs[0] = graph_fix_ptr(g->nodes[i].inputs[0], delta);
-        g->nodes[i].inputs[1] = graph_fix_ptr(g->nodes[i].inputs[1], delta);
-    }
-    graph_fixup_ext_ptrs(g, delta);
-}
+/* Graph edges are stable uint32 node ids (indices into g->nodes), so a
+   realloc of g->nodes needs no pointer fixups — the former graph_fix_ptr /
+   graph_fixup_ptrs / graph_fixup_ext_ptrs machinery is gone entirely. */
 
 /* L3: node_count is uint32_t — theoretical overflow at 2^32 nodes is
    unreachable in practice (would require ~128 GB for the nodes array). */
-static ray_op_t* graph_alloc_node(ray_graph_t* g) {
+ray_op_t* graph_alloc_node(ray_graph_t* g) {
     if (g->node_count >= g->node_cap) {
-        uintptr_t old_base = (uintptr_t)g->nodes;
         /* H2: Overflow guard — if node_cap is already > UINT32_MAX/2,
            doubling would wrap around to a smaller value. */
         if (g->node_cap > UINT32_MAX / 2) return NULL;
@@ -134,11 +51,11 @@ static ray_op_t* graph_alloc_node(ray_graph_t* g) {
         if (!new_nodes) return NULL;
         g->nodes = new_nodes;
         g->node_cap = new_cap;
-        graph_fixup_ptrs(g, old_base);
     }
     ray_op_t* n = &g->nodes[g->node_count];
     memset(n, 0, sizeof(ray_op_t));
     n->id = g->node_count;
+    n->in_id[0] = n->in_id[1] = RAY_OP_NONE;
     g->node_count++;
     return n;
 }
@@ -148,24 +65,25 @@ ray_op_ext_t* graph_alloc_ext_node_ex(ray_graph_t* g, size_t extra) {
     ray_op_ext_t* ext = (ray_op_ext_t*)ray_sys_alloc(sizeof(ray_op_ext_t) + extra);
     if (!ext) return NULL;
     memset(ext, 0, sizeof(ray_op_ext_t) + extra);
+    ext->base.in_id[0] = ext->base.in_id[1] = RAY_OP_NONE;
+    ext->third_in = RAY_OP_NONE;
 
     /* Also add a placeholder in the nodes array for ID tracking */
     if (g->node_count >= g->node_cap) {
         if (g->node_cap > UINT32_MAX / 2) { ray_sys_free(ext); return NULL; }
-        uintptr_t old_base = (uintptr_t)g->nodes;
         uint32_t new_cap = g->node_cap * 2;
         ray_op_t* new_nodes = (ray_op_t*)ray_sys_realloc(g->nodes,
                                                       new_cap * sizeof(ray_op_t));
         if (!new_nodes) { ray_sys_free(ext); return NULL; }
         g->nodes = new_nodes;
         g->node_cap = new_cap;
-        graph_fixup_ptrs(g, old_base);
     }
     ext->base.id = g->node_count;
     /* H4: Do NOT copy ext->base to nodes[] here — the caller fills in
        fields first and then syncs via g->nodes[ext->base.id] = ext->base. */
     memset(&g->nodes[g->node_count], 0, sizeof(ray_op_t));
     g->nodes[g->node_count].id = g->node_count;
+    g->nodes[g->node_count].in_id[0] = g->nodes[g->node_count].in_id[1] = RAY_OP_NONE;
     g->node_count++;
 
     /* Track ext node for cleanup */
@@ -433,7 +351,7 @@ static ray_op_t* make_unary(ray_graph_t* g, uint16_t opcode, ray_op_t* a, int8_t
 
     n->opcode = opcode;
     n->arity = 1;
-    n->inputs[0] = a;
+    n->in_id[0] = a->id;
     n->out_type = out_type;
     n->est_rows = est;
     return n;
@@ -451,8 +369,8 @@ static ray_op_t* make_binary(ray_graph_t* g, uint16_t opcode, ray_op_t* a, ray_o
 
     n->opcode = opcode;
     n->arity = 2;
-    n->inputs[0] = a;
-    n->inputs[1] = b;
+    n->in_id[0] = a->id;
+    n->in_id[1] = b->id;
     n->out_type = out_type;
     n->est_rows = est;
     return n;
@@ -552,13 +470,12 @@ ray_op_t* ray_if(ray_graph_t* g, ray_op_t* cond, ray_op_t* then_val, ray_op_t* e
 
     ext->base.opcode = OP_IF;
     ext->base.arity = 2;  /* inputs[0]=cond, inputs[1]=then; else via ext */
-    ext->base.inputs[0] = cond;
-    ext->base.inputs[1] = then_val;
+    ext->base.in_id[0] = cond->id;
+    ext->base.in_id[1] = then_val->id;
     ext->base.out_type = out_type;
     ext->base.est_rows = est;
-    /* Store else_val as a node ID (not a pointer) in the literal field.
-     * Recovered via (uint32_t)(uintptr_t)ext->literal in expr.c/exec.c. */
-    ext->literal = (ray_t*)(uintptr_t)else_id;
+    /* Store else_val as a node ID in the dedicated third_in field. */
+    ext->third_in = else_id;
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];
@@ -592,11 +509,11 @@ ray_op_t* ray_substr(ray_graph_t* g, ray_op_t* str, ray_op_t* start, ray_op_t* l
 
     ext->base.opcode = OP_SUBSTR;
     ext->base.arity = 2;
-    ext->base.inputs[0] = str;
-    ext->base.inputs[1] = start;
+    ext->base.in_id[0] = str->id;
+    ext->base.in_id[1] = start->id;
     ext->base.out_type = (str->out_type == RAY_STR) ? RAY_STR : RAY_SYM;
     ext->base.est_rows = est;
-    ext->literal = (ray_t*)(uintptr_t)l_id;
+    ext->third_in = l_id;
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];
@@ -616,11 +533,11 @@ ray_op_t* ray_replace(ray_graph_t* g, ray_op_t* str, ray_op_t* from, ray_op_t* t
 
     ext->base.opcode = OP_REPLACE;
     ext->base.arity = 2;
-    ext->base.inputs[0] = str;
-    ext->base.inputs[1] = from;
+    ext->base.in_id[0] = str->id;
+    ext->base.in_id[1] = from->id;
     ext->base.out_type = (str->out_type == RAY_STR) ? RAY_STR : RAY_SYM;
     ext->base.est_rows = est;
-    ext->literal = (ray_t*)(uintptr_t)t_id;
+    ext->third_in = t_id;
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];
@@ -645,8 +562,8 @@ ray_op_t* ray_concat(ray_graph_t* g, ray_op_t** args, int n) {
 
     ext->base.opcode = OP_CONCAT;
     ext->base.arity = 2;
-    ext->base.inputs[0] = &g->nodes[ids[0]];
-    ext->base.inputs[1] = &g->nodes[ids[1]];
+    ext->base.in_id[0] = ids[0];
+    ext->base.in_id[1] = ids[1];
     /* RAY_STR if any input is RAY_STR, else RAY_SYM */
     int8_t out_type = RAY_SYM;
     for (int i = 0; i < n; i++) {
@@ -715,8 +632,8 @@ ray_op_t* ray_filter(ray_graph_t* g, ray_op_t* input, ray_op_t* predicate) {
 
     n->opcode = OP_FILTER;
     n->arity = 2;
-    n->inputs[0] = input;
-    n->inputs[1] = predicate;
+    n->in_id[0] = input->id;
+    n->in_id[1] = predicate->id;
     n->out_type = input->out_type;
     n->est_rows = est;
     return n;
@@ -740,15 +657,15 @@ ray_op_t* ray_sort_op(ray_graph_t* g, ray_op_t* table_node,
 
     ext->base.opcode = OP_SORT;
     ext->base.arity = 1;
-    ext->base.inputs[0] = table_node;
+    ext->base.in_id[0] = table_node->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = table_node->est_rows;
 
     /* Arrays embedded in trailing space — freed with ext node */
     char* trail = EXT_TRAIL(ext);
-    ext->sort.columns = (ray_op_t**)trail;
+    ext->sort.columns = (uint32_t*)trail;
     for (uint8_t i = 0; i < n_cols; i++)
-        ext->sort.columns[i] = &g->nodes[key_ids[i]];
+        ext->sort.columns[i] = key_ids[i];
     ext->sort.desc = (uint8_t*)(trail + keys_sz);
     memcpy(ext->sort.desc, descs, descs_sz);
     ext->sort.nulls_first = (uint8_t*)(trail + keys_sz + descs_sz);
@@ -781,7 +698,7 @@ static ray_op_t* ray_group_impl(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys,
     for (uint8_t i = 0; i < n_keys; i++) key_ids[i] = keys[i]->id;
     for (uint8_t i = 0; i < n_aggs; i++) {
         agg_ids[i]  = agg_ins[i]->id;
-        agg_ids2[i] = 0;
+        agg_ids2[i] = RAY_OP_NONE;
         if (agg_ins2 && agg_ins2[i]) {
             agg_ids2[i] = agg_ins2[i]->id;
             has_ins2 = true;
@@ -811,22 +728,22 @@ static ray_op_t* ray_group_impl(ray_graph_t* g, ray_op_t** keys, uint8_t n_keys,
     ext->base.out_type = RAY_TABLE;
     if (n_keys > 0 && keys[0])
         ext->base.est_rows = g->nodes[key_ids[0]].est_rows / 10;  /* rough estimate */
-    ext->base.inputs[0] = n_keys > 0 ? &g->nodes[key_ids[0]] : NULL;
+    ext->base.in_id[0] = n_keys > 0 ? key_ids[0] : RAY_OP_NONE;
 
     /* Arrays embedded in trailing space — freed with ext node */
     char* trail = EXT_TRAIL(ext);
-    ext->keys = (ray_op_t**)trail;
+    ext->keys = (uint32_t*)trail;
     for (uint8_t i = 0; i < n_keys; i++)
-        ext->keys[i] = &g->nodes[key_ids[i]];
+        ext->keys[i] = key_ids[i];
     ext->agg_ops = (uint16_t*)(trail + ops_off);
     if (ops_sz > 0) memcpy(ext->agg_ops, agg_ops, ops_sz);
-    ext->agg_ins = (ray_op_t**)(trail + ins_off);
+    ext->agg_ins = (uint32_t*)(trail + ins_off);
     for (uint8_t i = 0; i < n_aggs; i++)
-        ext->agg_ins[i] = &g->nodes[agg_ids[i]];
+        ext->agg_ins[i] = agg_ids[i];
     if (has_ins2) {
-        ext->agg_ins2 = (ray_op_t**)(trail + ins2_off);
+        ext->agg_ins2 = (uint32_t*)(trail + ins2_off);
         for (uint8_t i = 0; i < n_aggs; i++)
-            ext->agg_ins2[i] = agg_ids2[i] ? &g->nodes[agg_ids2[i]] : NULL;
+            ext->agg_ins2[i] = agg_ids2[i] != RAY_OP_NONE ? agg_ids2[i] : RAY_OP_NONE;
     } else {
         ext->agg_ins2 = NULL;
     }
@@ -886,11 +803,11 @@ ray_op_t* ray_pivot_op(ray_graph_t* g,
     ext->base.est_rows = 0; /* unknown until execution */
 
     char* trail = EXT_TRAIL(ext);
-    ext->pivot.index_cols = (ray_op_t**)trail;
+    ext->pivot.index_cols = (uint32_t*)trail;
     for (uint8_t i = 0; i < n_index; i++)
-        ext->pivot.index_cols[i] = &g->nodes[idx_ids[i]];
-    ext->pivot.pivot_col = &g->nodes[pcol_id];
-    ext->pivot.value_col = &g->nodes[vcol_id];
+        ext->pivot.index_cols[i] = idx_ids[i];
+    ext->pivot.pivot_col = pcol_id;
+    ext->pivot.value_col = vcol_id;
     ext->pivot.agg_op = agg_op;
     ext->pivot.n_index = n_index;
 
@@ -920,19 +837,19 @@ ray_op_t* ray_join(ray_graph_t* g,
 
     ext->base.opcode = OP_JOIN;
     ext->base.arity = 2;
-    ext->base.inputs[0] = left_table;
-    ext->base.inputs[1] = right_table;
+    ext->base.in_id[0] = left_table->id;
+    ext->base.in_id[1] = right_table->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = left_table->est_rows;
 
     /* Arrays embedded in trailing space — freed with ext node */
     char* trail = EXT_TRAIL(ext);
-    ext->join.left_keys = (ray_op_t**)trail;
+    ext->join.left_keys = (uint32_t*)trail;
     for (uint8_t i = 0; i < n_keys; i++)
-        ext->join.left_keys[i] = &g->nodes[lkey_ids[i]];
-    ext->join.right_keys = (ray_op_t**)(trail + (size_t)n_keys * sizeof(ray_op_t*));
+        ext->join.left_keys[i] = lkey_ids[i];
+    ext->join.right_keys = (uint32_t*)(trail + (size_t)n_keys * sizeof(ray_op_t*));
     for (uint8_t i = 0; i < n_keys; i++)
-        ext->join.right_keys[i] = &g->nodes[rkey_ids[i]];
+        ext->join.right_keys[i] = rkey_ids[i];
     ext->join.n_join_keys = n_keys;
     ext->join.join_type = join_type;
 
@@ -962,18 +879,18 @@ ray_op_t* ray_antijoin(ray_graph_t* g,
 
     ext->base.opcode = OP_ANTIJOIN;
     ext->base.arity = 2;
-    ext->base.inputs[0] = left_table;
-    ext->base.inputs[1] = right_table;
+    ext->base.in_id[0] = left_table->id;
+    ext->base.in_id[1] = right_table->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = left_table->est_rows;
 
     char* trail = EXT_TRAIL(ext);
-    ext->join.left_keys = (ray_op_t**)trail;
+    ext->join.left_keys = (uint32_t*)trail;
     for (uint8_t i = 0; i < n_keys; i++)
-        ext->join.left_keys[i] = &g->nodes[lkey_ids[i]];
-    ext->join.right_keys = (ray_op_t**)(trail + (size_t)n_keys * sizeof(ray_op_t*));
+        ext->join.left_keys[i] = lkey_ids[i];
+    ext->join.right_keys = (uint32_t*)(trail + (size_t)n_keys * sizeof(ray_op_t*));
     for (uint8_t i = 0; i < n_keys; i++)
-        ext->join.right_keys[i] = &g->nodes[rkey_ids[i]];
+        ext->join.right_keys[i] = rkey_ids[i];
     ext->join.n_join_keys = n_keys;
     ext->join.join_type = 3;  /* anti */
 
@@ -1002,17 +919,17 @@ ray_op_t* ray_asof_join(ray_graph_t* g,
 
     ext->base.opcode  = OP_WINDOW_JOIN;
     ext->base.arity   = 2;
-    ext->base.inputs[0] = left_table;
-    ext->base.inputs[1] = right_table;
+    ext->base.in_id[0] = left_table->id;
+    ext->base.in_id[1] = right_table->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = left_table->est_rows;
 
-    ext->asof.time_key   = &g->nodes[time_id];
+    ext->asof.time_key   = time_id;
     ext->asof.n_eq_keys  = n_eq_keys;
     ext->asof.join_type  = join_type;
-    ext->asof.eq_keys    = (ray_op_t**)EXT_TRAIL(ext);
+    ext->asof.eq_keys    = (uint32_t*)EXT_TRAIL(ext);
     for (uint8_t i = 0; i < n_eq_keys; i++)
-        ext->asof.eq_keys[i] = &g->nodes[eq_ids[i]];
+        ext->asof.eq_keys[i] = eq_ids[i];
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];
@@ -1066,26 +983,26 @@ ray_op_t* ray_window_op(ray_graph_t* g, ray_op_t* table_node,
 
     ext->base.opcode   = OP_WINDOW;
     ext->base.arity    = 1;
-    ext->base.inputs[0] = table_node;
+    ext->base.in_id[0] = table_node->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = est;  /* window preserves row count */
 
     /* Fill trailing arrays */
     char* trail = EXT_TRAIL(ext);
-    ext->window.part_keys = (ray_op_t**)trail;
+    ext->window.part_keys = (uint32_t*)trail;
     for (uint8_t i = 0; i < n_part; i++)
-        ext->window.part_keys[i] = &g->nodes[part_ids[i]];
+        ext->window.part_keys[i] = part_ids[i];
 
-    ext->window.order_keys = (ray_op_t**)(trail + pk_sz);
+    ext->window.order_keys = (uint32_t*)(trail + pk_sz);
     for (uint8_t i = 0; i < n_order; i++)
-        ext->window.order_keys[i] = &g->nodes[order_ids[i]];
+        ext->window.order_keys[i] = order_ids[i];
 
     ext->window.order_descs = (uint8_t*)(trail + pk_sz + ok_sz);
     if (n_order) memcpy(ext->window.order_descs, order_descs, od_sz);
 
-    ext->window.func_inputs = (ray_op_t**)(trail + fi_off);
+    ext->window.func_inputs = (uint32_t*)(trail + fi_off);
     for (uint8_t i = 0; i < n_funcs; i++)
-        ext->window.func_inputs[i] = &g->nodes[func_ids[i]];
+        ext->window.func_inputs[i] = func_ids[i];
 
     ext->window.func_kinds = (uint8_t*)(trail + fk_off);
     if (n_funcs) memcpy(ext->window.func_kinds, func_kinds, fk_sz);
@@ -1120,14 +1037,14 @@ ray_op_t* ray_select_op(ray_graph_t* g, ray_op_t* input,
 
     ext->base.opcode = OP_SELECT;
     ext->base.arity = 1;
-    ext->base.inputs[0] = input;
+    ext->base.in_id[0] = input->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = input->est_rows;
 
     /* Array embedded in trailing space — freed with ext node */
-    ext->sort.columns = (ray_op_t**)EXT_TRAIL(ext);
+    ext->sort.columns = (uint32_t*)EXT_TRAIL(ext);
     for (uint8_t i = 0; i < n_cols; i++)
-        ext->sort.columns[i] = &g->nodes[col_ids[i]];
+        ext->sort.columns[i] = col_ids[i];
     ext->sort.n_cols = n_cols;
 
     g->nodes[ext->base.id] = ext->base;
@@ -1145,7 +1062,7 @@ ray_op_t* ray_head(ray_graph_t* g, ray_op_t* input, int64_t n) {
 
     ext->base.opcode = OP_HEAD;
     ext->base.arity = 1;
-    ext->base.inputs[0] = input;
+    ext->base.in_id[0] = input->id;
     ext->base.out_type = input->out_type;
     ext->base.est_rows = (uint32_t)n;
     ext->sym = n;
@@ -1163,7 +1080,7 @@ ray_op_t* ray_tail(ray_graph_t* g, ray_op_t* input, int64_t n) {
 
     ext->base.opcode = OP_TAIL;
     ext->base.arity = 1;
-    ext->base.inputs[0] = input;
+    ext->base.in_id[0] = input->id;
     ext->base.out_type = input->out_type;
     ext->base.est_rows = (uint32_t)n;
     ext->sym = n;
@@ -1181,7 +1098,7 @@ ray_op_t* ray_alias(ray_graph_t* g, ray_op_t* input, const char* name) {
 
     ext->base.opcode = OP_ALIAS;
     ext->base.arity = 1;
-    ext->base.inputs[0] = input;
+    ext->base.in_id[0] = input->id;
     ext->base.out_type = input->out_type;
     ext->base.est_rows = input->est_rows;
     ext->sym = ray_sym_intern(name, strlen(name));
@@ -1200,7 +1117,7 @@ ray_op_t* ray_extract(ray_graph_t* g, ray_op_t* col, int64_t field) {
 
     ext->base.opcode = OP_EXTRACT;
     ext->base.arity = 1;
-    ext->base.inputs[0] = col;
+    ext->base.in_id[0] = col->id;
     ext->base.out_type = RAY_I64;
     ext->base.est_rows = est;
     ext->sym = field;
@@ -1219,7 +1136,7 @@ ray_op_t* ray_date_trunc(ray_graph_t* g, ray_op_t* col, int64_t field) {
 
     ext->base.opcode = OP_DATE_TRUNC;
     ext->base.arity = 1;
-    ext->base.inputs[0] = col;
+    ext->base.in_id[0] = col->id;
     ext->base.out_type = RAY_TIMESTAMP;  /* returns timestamp (microseconds) */
     ext->base.est_rows = est;
     ext->sym = field;
@@ -1237,7 +1154,7 @@ ray_op_t* ray_materialize(ray_graph_t* g, ray_op_t* input) {
 
     n->opcode = OP_MATERIALIZE;
     n->arity = 1;
-    n->inputs[0] = input;
+    n->in_id[0] = input->id;
     n->out_type = input->out_type;
     n->est_rows = input->est_rows;
     return n;
@@ -1307,7 +1224,7 @@ ray_op_t* ray_expand(ray_graph_t* g, ray_op_t* src_nodes,
 
     ext->base.opcode = OP_EXPAND;
     ext->base.arity = 1;
-    ext->base.inputs[0] = src_nodes;
+    ext->base.in_id[0] = src_nodes->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = est * 10;  /* rough estimate: 10x fan-out */
     ext->graph.rel = rel;
@@ -1333,7 +1250,7 @@ ray_op_t* ray_var_expand(ray_graph_t* g, ray_op_t* start_nodes,
 
     ext->base.opcode = OP_VAR_EXPAND;
     ext->base.arity = 1;
-    ext->base.inputs[0] = start_nodes;
+    ext->base.in_id[0] = start_nodes->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = est * 100;  /* rough estimate */
     ext->graph.rel = rel;
@@ -1358,8 +1275,8 @@ ray_op_t* ray_shortest_path(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
 
     ext->base.opcode = OP_SHORTEST_PATH;
     ext->base.arity = 2;
-    ext->base.inputs[0] = src;
-    ext->base.inputs[1] = dst;
+    ext->base.in_id[0] = src->id;
+    ext->base.in_id[1] = dst->id;
     ext->base.out_type = RAY_TABLE;
     ext->base.est_rows = max_depth;
     ext->graph.rel = rel;
@@ -1430,8 +1347,8 @@ ray_op_t* ray_dijkstra(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
 
     ext->base.opcode    = OP_DIJKSTRA;
     ext->base.arity     = dst ? 2 : 1;
-    ext->base.inputs[0] = src;
-    ext->base.inputs[1] = dst;
+    ext->base.in_id[0] = src->id;
+    ext->base.in_id[1] = dst ? dst->id : RAY_OP_NONE;
     ext->base.out_type  = RAY_TABLE;
     ext->base.est_rows  = (uint32_t)rel->fwd.n_nodes;
     ext->graph.rel       = rel;
@@ -1504,7 +1421,7 @@ ray_op_t* ray_dfs(ray_graph_t* g, ray_op_t* src, ray_rel_t* rel, uint8_t max_dep
 
     ext->base.opcode     = OP_DFS;
     ext->base.arity      = 1;
-    ext->base.inputs[0]  = src;
+    ext->base.in_id[0]   = src->id;
     ext->base.out_type   = RAY_TABLE;
     ext->base.est_rows   = (uint32_t)rel->fwd.n_nodes;
     ext->graph.rel       = rel;
@@ -1561,7 +1478,7 @@ ray_op_t* ray_random_walk(ray_graph_t* g, ray_op_t* src, ray_rel_t* rel,
     src = &g->nodes[src_id];
     ext->base.opcode    = OP_RANDOM_WALK;
     ext->base.arity     = 1;
-    ext->base.inputs[0] = src;
+    ext->base.in_id[0] = src->id;
     ext->base.out_type  = RAY_TABLE;
     ext->base.est_rows  = walk_length + 1;
     ext->graph.rel      = rel;
@@ -1590,8 +1507,8 @@ ray_op_t* ray_astar(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
 
     ext->base.opcode    = OP_ASTAR;
     ext->base.arity     = 2;
-    ext->base.inputs[0] = src;
-    ext->base.inputs[1] = dst;
+    ext->base.in_id[0] = src->id;
+    ext->base.in_id[1] = dst->id;
     ext->base.out_type  = RAY_TABLE;
     ext->base.est_rows  = (uint32_t)rel->fwd.n_nodes;
     ext->graph.rel       = rel;
@@ -1623,8 +1540,8 @@ ray_op_t* ray_k_shortest(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
 
     ext->base.opcode    = OP_K_SHORTEST;
     ext->base.arity     = 2;
-    ext->base.inputs[0] = src;
-    ext->base.inputs[1] = dst;
+    ext->base.in_id[0] = src->id;
+    ext->base.in_id[1] = dst->id;
     ext->base.out_type  = RAY_TABLE;
     ext->base.est_rows  = (uint32_t)(k * rel->fwd.n_nodes);
     ext->graph.rel       = rel;
@@ -1693,7 +1610,7 @@ ray_op_t* ray_ann_rerank(ray_graph_t* g, ray_op_t* src,
 
     ext->base.opcode     = OP_ANN_RERANK;
     ext->base.arity      = 1;
-    ext->base.inputs[0]  = src;
+    ext->base.in_id[0]   = src->id;
     ext->base.out_type   = RAY_TABLE;
     ext->base.est_rows   = (uint32_t)k;
     ext->rerank.hnsw_idx  = idx;
@@ -1720,7 +1637,7 @@ ray_op_t* ray_knn_rerank(ray_graph_t* g, ray_op_t* src,
 
     ext->base.opcode     = OP_KNN_RERANK;
     ext->base.arity      = 1;
-    ext->base.inputs[0]  = src;
+    ext->base.in_id[0]   = src->id;
     ext->base.out_type   = RAY_TABLE;
     ext->base.est_rows   = (uint32_t)k;
     ext->rerank.hnsw_idx  = NULL;
