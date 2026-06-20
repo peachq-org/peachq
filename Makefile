@@ -31,9 +31,16 @@ DEPFLAGS = -MMD -MP
 
 UNAME_S := $(shell uname -s)
 
-DEBUG_CFLAGS   = -fPIC $(WARNS) -std=$(STD) -g -O0 -march=native -DDEBUG \
+# Target microarchitecture.  Default `native` = build for THIS machine (fastest;
+# right for local builds and the per-machine release tarballs).  Override for
+# REDISTRIBUTABLE packages (.deb) that must run on any CPU, e.g.
+# `make release RAY_MARCH=x86-64-v3` (AVX2 baseline, ~2013+) — a -march=native
+# binary handed to a different/older CPU dies with SIGILL.
+RAY_MARCH ?= native
+
+DEBUG_CFLAGS   = -fPIC $(WARNS) -std=$(STD) -g -O0 -march=$(RAY_MARCH) -DDEBUG \
   -fsanitize=address,undefined -fno-omit-frame-pointer
-RELEASE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -O3 -march=native \
+RELEASE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -O3 -march=$(RAY_MARCH) \
   -funroll-loops -fomit-frame-pointer -fno-math-errno \
   -fassociative-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math
 # -fassociative-math: license to reorder FP additions/multiplications.
@@ -52,7 +59,7 @@ RELEASE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -O3 -march=native \
 # with the profile runtime, so we drop them; -O0 keeps line numbers
 # and avoids dead-code regions getting marked uncovered for the
 # wrong reason.  See `make coverage` below.
-COVERAGE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -g -O0 -march=native -DDEBUG \
+COVERAGE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -g -O0 -march=$(RAY_MARCH) -DDEBUG \
   -fno-omit-frame-pointer -fprofile-instr-generate -fcoverage-mapping
 COVERAGE_LDFLAGS = -fprofile-instr-generate -fcoverage-mapping
 
