@@ -449,7 +449,19 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
 
     int64_t len;
     if (left_coll && right_coll) {
-        len = ray_len(left) < ray_len(right) ? ray_len(left) : ray_len(right);
+        /* Both operands are vectors: lengths MUST match.  Silently
+         * truncating to the shorter (the prior behaviour) hid a real
+         * error and diverged from the compiled/VM path, which already
+         * rejects the mismatch (src/ops/expr.c).  A 1-element vector
+         * does NOT broadcast (only a true atom does — see the
+         * !left_coll/!right_coll branch). */
+        if (ray_len(left) != ray_len(right)) {
+            const char* opn = ray_opcode_name(dag_opcode);
+            return ray_error("length", "%s: operand lengths must match, got %lld and %lld",
+                             opn ? opn : "binary op",
+                             (long long)ray_len(left), (long long)ray_len(right));
+        }
+        len = ray_len(left);
     } else {
         len = left_coll ? ray_len(left) : ray_len(right);
     }
@@ -2964,6 +2976,7 @@ static void ray_register_builtins(void) {
     register_unary("dl-eval",      RAY_FN_NONE, ray_dl_eval_fn);
     register_binary("dl-query",    RAY_FN_NONE, ray_dl_query_fn);
     register_binary("dl-provenance", RAY_FN_NONE, ray_dl_provenance_fn);
+    register_unary("dl-free",      RAY_FN_NONE, ray_dl_free_fn);
 
     /* Vector similarity / embeddings / HNSW */
     register_binary("cos-dist",    RAY_FN_NONE, ray_cos_dist_fn);
