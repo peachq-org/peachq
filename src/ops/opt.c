@@ -36,6 +36,20 @@
 /* Forward declaration — defined below, used by type inference and DCE passes. */
 ray_op_ext_t* find_ext(ray_graph_t* g, uint32_t node_id);
 
+/* Shared 32-byte node allocator (graph.c).  Forwarded by graph_alloc_node_opt;
+ * node ids are realloc-stable so no pointer fixups are needed. */
+ray_op_t* graph_alloc_node(ray_graph_t* g);
+
+/* Node-id edge accessors (mirror src/ops/internal.h).  Local copies keep opt.c
+ * self-contained — same rationale as the duplicated find_ext below.  Resolve a
+ * stable uint32 node id (or input edge) to its ray_op_t*, NULL for RAY_OP_NONE. */
+static inline ray_op_t* op_node(ray_graph_t* g, uint32_t id) {
+    return id == RAY_OP_NONE ? NULL : &g->nodes[id];
+}
+static inline ray_op_t* op_child(ray_graph_t* g, const ray_op_t* op, int i) {
+    return op_node(g, op->in_id[i]);
+}
+
 /* Test knob: disable the GROUP predicate-pushdown arm so the differential
  * harness and the perf gate can compare pushed vs unpushed plans. */
 bool ray_opt_no_group_pushdown = false;
@@ -70,7 +84,7 @@ static int8_t promote_type(int8_t a, int8_t b) {
     return RAY_BOOL;
 }
 
-static void infer_type_for_node(ray_op_t* node) {
+static void infer_type_for_node(ray_graph_t* g, ray_op_t* node) {
     if (node->out_type == 0 && node->opcode != OP_SCAN && node->opcode != OP_CONST) {
         /* Comparison and boolean ops always produce BOOL */
         if (node->opcode >= OP_EQ && node->opcode <= OP_GE) {
@@ -81,11 +95,12 @@ static void infer_type_for_node(ray_op_t* node) {
             node->out_type = RAY_BOOL;
             return;
         }
-        if (node->arity >= 2 && node->inputs[0] && node->inputs[1]) {
-            node->out_type = promote_type(node->inputs[0]->out_type,
-                                           node->inputs[1]->out_type);
-        } else if (node->arity >= 1 && node->inputs[0]) {
-            node->out_type = node->inputs[0]->out_type;
+        ray_op_t* in0 = op_child(g, node, 0);
+        ray_op_t* in1 = op_child(g, node, 1);
+        if (node->arity >= 2 && in0 && in1) {
+            node->out_type = promote_type(in0->out_type, in1->out_type);
+        } else if (node->arity >= 1 && in0) {
+            node->out_type = in0->out_type;
         }
     }
 }
@@ -123,8 +138,8 @@ static void pass_type_inference(ray_graph_t* g, ray_op_t* root) {
         visited[nid] = true;
         order[oc++] = nid;
         for (int i = 0; i < 2 && i < n->arity; i++) {
-            if (n->inputs[i] && sp < (int)stack_cap)
-                stack[sp++] = n->inputs[i]->id;
+            if (op_child(g, n, i) && sp < (int)stack_cap)
+                stack[sp++] = n->in_id[i];
         }
         /* M3: Traverse ext node children so type inference reaches all
            referenced nodes (GROUP keys/aggs, SORT/PROJECT/SELECT columns,
@@ -134,55 +149,55 @@ static void pass_type_inference(ray_graph_t* g, ray_op_t* root) {
             switch (n->opcode) {
                 case OP_GROUP:
                     for (uint8_t k = 0; k < ext->n_keys; k++)
-                        if (ext->keys[k] && !visited[ext->keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->keys[k]->id;
+                        if (op_node(g, ext->keys[k]) && !visited[ext->keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->keys[k];
                     for (uint8_t a = 0; a < ext->n_aggs; a++)
-                        if (ext->agg_ins[a] && !visited[ext->agg_ins[a]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->agg_ins[a]->id;
+                        if (op_node(g, ext->agg_ins[a]) && !visited[ext->agg_ins[a]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->agg_ins[a];
                     break;
                 case OP_SORT:
                 case OP_SELECT:
                     for (uint8_t k = 0; k < ext->sort.n_cols; k++)
-                        if (ext->sort.columns[k] && !visited[ext->sort.columns[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->sort.columns[k]->id;
+                        if (op_node(g, ext->sort.columns[k]) && !visited[ext->sort.columns[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->sort.columns[k];
                     break;
                 case OP_JOIN:
                     for (uint8_t k = 0; k < ext->join.n_join_keys; k++) {
-                        if (ext->join.left_keys[k] && !visited[ext->join.left_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->join.left_keys[k]->id;
-                        if (ext->join.right_keys && ext->join.right_keys[k] &&
-                            !visited[ext->join.right_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->join.right_keys[k]->id;
+                        if (op_node(g, ext->join.left_keys[k]) && !visited[ext->join.left_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->join.left_keys[k];
+                        if (ext->join.right_keys && op_node(g, ext->join.right_keys[k]) &&
+                            !visited[ext->join.right_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->join.right_keys[k];
                     }
                     break;
                 case OP_WINDOW_JOIN: {
                     ray_op_ext_t* wj_ext = find_ext(g, n->id);
                     if (wj_ext) {
-                        if (wj_ext->asof.time_key && !visited[wj_ext->asof.time_key->id] && sp < (int)stack_cap)
-                            stack[sp++] = wj_ext->asof.time_key->id;
+                        if (op_node(g, wj_ext->asof.time_key) && !visited[wj_ext->asof.time_key] && sp < (int)stack_cap)
+                            stack[sp++] = wj_ext->asof.time_key;
                         for (uint8_t k = 0; k < wj_ext->asof.n_eq_keys; k++) {
-                            if (wj_ext->asof.eq_keys[k] && !visited[wj_ext->asof.eq_keys[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = wj_ext->asof.eq_keys[k]->id;
+                            if (op_node(g, wj_ext->asof.eq_keys[k]) && !visited[wj_ext->asof.eq_keys[k]] && sp < (int)stack_cap)
+                                stack[sp++] = wj_ext->asof.eq_keys[k];
                         }
                     }
                     break;
                 }
                 case OP_WINDOW:
                     for (uint8_t k = 0; k < ext->window.n_part_keys; k++)
-                        if (ext->window.part_keys[k] && !visited[ext->window.part_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->window.part_keys[k]->id;
+                        if (op_node(g, ext->window.part_keys[k]) && !visited[ext->window.part_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->window.part_keys[k];
                     for (uint8_t k = 0; k < ext->window.n_order_keys; k++)
-                        if (ext->window.order_keys[k] && !visited[ext->window.order_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->window.order_keys[k]->id;
+                        if (op_node(g, ext->window.order_keys[k]) && !visited[ext->window.order_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->window.order_keys[k];
                     for (uint8_t f = 0; f < ext->window.n_funcs; f++)
-                        if (ext->window.func_inputs[f] && !visited[ext->window.func_inputs[f]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->window.func_inputs[f]->id;
+                        if (op_node(g, ext->window.func_inputs[f]) && !visited[ext->window.func_inputs[f]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->window.func_inputs[f];
                     break;
-                /* M3b: 3-input ops store third operand node ID in ext->literal */
+                /* M3b: 3-input ops store third operand node ID in ext->third_in */
                 case OP_IF:
                 case OP_SUBSTR:
                 case OP_REPLACE: {
-                    uint32_t third_id = (uint32_t)(uintptr_t)ext->literal;
+                    uint32_t third_id = ext->third_in;
                     if (third_id < nc && !visited[third_id] && sp < (int)stack_cap)
                         stack[sp++] = third_id;
                     break;
@@ -206,7 +221,7 @@ static void pass_type_inference(ray_graph_t* g, ray_op_t* root) {
     }
     /* Process in reverse order (children before parents) */
     for (int i = oc - 1; i >= 0; i--)
-        infer_type_for_node(&g->nodes[order[i]]);
+        infer_type_for_node(g, &g->nodes[order[i]]);
 
     { if (stack_cap > 256) ray_sys_free(stack); if (nc > 256) { ray_sys_free(order); ray_sys_free(visited); } }
 }
@@ -315,8 +330,8 @@ static bool replace_with_const(ray_graph_t* g, ray_op_t* node, ray_t* literal) {
     ext->base = *node;
     ext->base.opcode = OP_CONST;
     ext->base.arity = 0;
-    ext->base.inputs[0] = NULL;
-    ext->base.inputs[1] = NULL;
+    ext->base.in_id[0] = RAY_OP_NONE;
+    ext->base.in_id[1] = RAY_OP_NONE;
     ext->base.out_type = literal->type < 0 ? (int8_t)(-(int)literal->type) : literal->type;
     ext->literal = literal;
 
@@ -326,7 +341,7 @@ static bool replace_with_const(ray_graph_t* g, ray_op_t* node, ray_t* literal) {
 }
 
 static bool fold_unary_const(ray_graph_t* g, ray_op_t* node) {
-    ray_op_t* operand = node->inputs[0];
+    ray_op_t* operand = op_child(g, node, 0);
     if (!is_const(operand)) return false;
 
     ray_op_ext_t* oe = find_ext(g, operand->id);
@@ -381,8 +396,8 @@ static bool fold_unary_const(ray_graph_t* g, ray_op_t* node) {
 }
 
 static bool fold_binary_const(ray_graph_t* g, ray_op_t* node) {
-    ray_op_t* lhs = node->inputs[0];
-    ray_op_t* rhs = node->inputs[1];
+    ray_op_t* lhs = op_child(g, node, 0);
+    ray_op_t* rhs = op_child(g, node, 1);
     if (!is_const(lhs) || !is_const(rhs)) return false;
 
     ray_op_ext_t* le = find_ext(g, lhs->id);
@@ -520,8 +535,8 @@ static bool const_node_bool(ray_graph_t* g, ray_op_t* n, bool* out) {
 static bool simplify_and_or_const(ray_graph_t* g, ray_op_t* node) {
     if (node->opcode != OP_AND && node->opcode != OP_OR) return false;
     if (node->arity != 2) return false;
-    ray_op_t* lhs = node->inputs[0];
-    ray_op_t* rhs = node->inputs[1];
+    ray_op_t* lhs = op_child(g, node, 0);
+    ray_op_t* rhs = op_child(g, node, 1);
     if (!lhs || !rhs) return false;
 
     bool lhs_b = false, rhs_b = false;
@@ -541,8 +556,8 @@ static bool simplify_and_or_const(ray_graph_t* g, ray_op_t* node) {
         if (find_ext(g, node->id)) return false;  /* shouldn't happen for AND/OR */
         node->opcode = OP_ALIAS;
         node->arity = 1;
-        node->inputs[0] = X;
-        node->inputs[1] = NULL;
+        node->in_id[0] = X ? X->id : RAY_OP_NONE;
+        node->in_id[1] = RAY_OP_NONE;
         node->out_type = RAY_BOOL;
         node->est_rows = X->est_rows;
         g->nodes[node->id] = *node;
@@ -564,7 +579,7 @@ static bool simplify_and_or_const(ray_graph_t* g, ray_op_t* node) {
 
 static bool fold_filter_const_predicate(ray_graph_t* g, ray_op_t* node) {
     if (node->opcode != OP_FILTER || node->arity != 2) return false;
-    ray_op_t* pred = node->inputs[1];
+    ray_op_t* pred = op_child(g, node, 1);
     if (!is_const(pred)) return false;
 
     ray_op_ext_t* pred_ext = find_ext(g, pred->id);
@@ -576,7 +591,7 @@ static bool fold_filter_const_predicate(ray_graph_t* g, ray_op_t* node) {
     if (keep_rows) {
         node->opcode = OP_MATERIALIZE;
         node->arity = 1;
-        node->inputs[1] = NULL;
+        node->in_id[1] = RAY_OP_NONE;
         g->nodes[node->id] = *node;
         return true;
     }
@@ -586,7 +601,7 @@ static bool fold_filter_const_predicate(ray_graph_t* g, ray_op_t* node) {
     ext->base = *node;
     ext->base.opcode = OP_HEAD;
     ext->base.arity = 1;
-    ext->base.inputs[1] = NULL;
+    ext->base.in_id[1] = RAY_OP_NONE;
     ext->base.est_rows = 0;
     ext->sym = 0;
 
@@ -645,8 +660,8 @@ static void pass_constant_fold(ray_graph_t* g, ray_op_t* root) {
         visited[nid] = true;
         order[oc++] = nid;
         for (int i = 0; i < 2 && i < n->arity; i++) {
-            if (n->inputs[i] && sp < (int)stack_cap)
-                stack[sp++] = n->inputs[i]->id;
+            if (op_child(g, n, i) && sp < (int)stack_cap)
+                stack[sp++] = n->in_id[i];
         }
         /* H1: Traverse ext-node children so constant folding reaches all
            referenced nodes (GROUP keys/aggs, SORT/PROJECT/SELECT columns,
@@ -656,55 +671,55 @@ static void pass_constant_fold(ray_graph_t* g, ray_op_t* root) {
             switch (n->opcode) {
                 case OP_GROUP:
                     for (uint8_t k = 0; k < ext->n_keys; k++)
-                        if (ext->keys[k] && !visited[ext->keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->keys[k]->id;
+                        if (op_node(g, ext->keys[k]) && !visited[ext->keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->keys[k];
                     for (uint8_t a = 0; a < ext->n_aggs; a++)
-                        if (ext->agg_ins[a] && !visited[ext->agg_ins[a]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->agg_ins[a]->id;
+                        if (op_node(g, ext->agg_ins[a]) && !visited[ext->agg_ins[a]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->agg_ins[a];
                     break;
                 case OP_SORT:
                 case OP_SELECT:
                     for (uint8_t k = 0; k < ext->sort.n_cols; k++)
-                        if (ext->sort.columns[k] && !visited[ext->sort.columns[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->sort.columns[k]->id;
+                        if (op_node(g, ext->sort.columns[k]) && !visited[ext->sort.columns[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->sort.columns[k];
                     break;
                 case OP_JOIN:
                     for (uint8_t k = 0; k < ext->join.n_join_keys; k++) {
-                        if (ext->join.left_keys[k] && !visited[ext->join.left_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->join.left_keys[k]->id;
-                        if (ext->join.right_keys && ext->join.right_keys[k] &&
-                            !visited[ext->join.right_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->join.right_keys[k]->id;
+                        if (op_node(g, ext->join.left_keys[k]) && !visited[ext->join.left_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->join.left_keys[k];
+                        if (ext->join.right_keys && op_node(g, ext->join.right_keys[k]) &&
+                            !visited[ext->join.right_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->join.right_keys[k];
                     }
                     break;
                 case OP_WINDOW_JOIN: {
                     ray_op_ext_t* wj_ext = find_ext(g, n->id);
                     if (wj_ext) {
-                        if (wj_ext->asof.time_key && !visited[wj_ext->asof.time_key->id] && sp < (int)stack_cap)
-                            stack[sp++] = wj_ext->asof.time_key->id;
+                        if (op_node(g, wj_ext->asof.time_key) && !visited[wj_ext->asof.time_key] && sp < (int)stack_cap)
+                            stack[sp++] = wj_ext->asof.time_key;
                         for (uint8_t k = 0; k < wj_ext->asof.n_eq_keys; k++) {
-                            if (wj_ext->asof.eq_keys[k] && !visited[wj_ext->asof.eq_keys[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = wj_ext->asof.eq_keys[k]->id;
+                            if (op_node(g, wj_ext->asof.eq_keys[k]) && !visited[wj_ext->asof.eq_keys[k]] && sp < (int)stack_cap)
+                                stack[sp++] = wj_ext->asof.eq_keys[k];
                         }
                     }
                     break;
                 }
                 case OP_WINDOW:
                     for (uint8_t k = 0; k < ext->window.n_part_keys; k++)
-                        if (ext->window.part_keys[k] && !visited[ext->window.part_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->window.part_keys[k]->id;
+                        if (op_node(g, ext->window.part_keys[k]) && !visited[ext->window.part_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->window.part_keys[k];
                     for (uint8_t k = 0; k < ext->window.n_order_keys; k++)
-                        if (ext->window.order_keys[k] && !visited[ext->window.order_keys[k]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->window.order_keys[k]->id;
+                        if (op_node(g, ext->window.order_keys[k]) && !visited[ext->window.order_keys[k]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->window.order_keys[k];
                     for (uint8_t f = 0; f < ext->window.n_funcs; f++)
-                        if (ext->window.func_inputs[f] && !visited[ext->window.func_inputs[f]->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->window.func_inputs[f]->id;
+                        if (op_node(g, ext->window.func_inputs[f]) && !visited[ext->window.func_inputs[f]] && sp < (int)stack_cap)
+                            stack[sp++] = ext->window.func_inputs[f];
                     break;
-                /* H1b: 3-input ops store third operand node ID in ext->literal */
+                /* H1b: 3-input ops store third operand node ID in ext->third_in */
                 case OP_IF:
                 case OP_SUBSTR:
                 case OP_REPLACE: {
-                    uint32_t third_id = (uint32_t)(uintptr_t)ext->literal;
+                    uint32_t third_id = ext->third_in;
                     if (third_id < nc && !visited[third_id] && sp < (int)stack_cap)
                         stack[sp++] = third_id;
                     break;
@@ -758,15 +773,15 @@ static void mark_live(ray_graph_t* g, ray_op_t* root, bool* live) {
         live[nid] = true;
         ray_op_t* n = &g->nodes[nid];
         for (int i = 0; i < 2; i++) {
-            if (n->inputs[i] && sp < (int)stack_cap)
-                stack[sp++] = n->inputs[i]->id;
+            if (op_child(g, n, i) && sp < (int)stack_cap)
+                stack[sp++] = n->in_id[i];
         }
         /* H4: 3-input ops (OP_IF, OP_SUBSTR, OP_REPLACE) store the third
-           operand node ID as (uintptr_t)ext->literal. */
+           operand node ID in ext->third_in. */
         if (n->opcode == OP_IF || n->opcode == OP_SUBSTR || n->opcode == OP_REPLACE) {
             ray_op_ext_t* ext = find_ext(g, nid);
             if (ext) {
-                uint32_t third_id = (uint32_t)(uintptr_t)ext->literal;
+                uint32_t third_id = ext->third_in;
                 if (third_id < nc && sp < (int)stack_cap)
                     stack[sp++] = third_id;
             }
@@ -800,65 +815,65 @@ static void mark_live(ray_graph_t* g, ray_op_t* root, bool* live) {
                 switch (n->opcode) {
                     case OP_GROUP:
                         for (uint8_t k = 0; k < ext->n_keys; k++) {
-                            if (ext->keys[k] && !live[ext->keys[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->keys[k]->id;
+                            if (op_node(g, ext->keys[k]) && !live[ext->keys[k]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->keys[k];
                         }
                         for (uint8_t a = 0; a < ext->n_aggs; a++) {
-                            if (ext->agg_ins[a] && !live[ext->agg_ins[a]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->agg_ins[a]->id;
+                            if (op_node(g, ext->agg_ins[a]) && !live[ext->agg_ins[a]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->agg_ins[a];
                         }
                         break;
                     case OP_SORT:
                     case OP_SELECT:
                         for (uint8_t k = 0; k < ext->sort.n_cols; k++) {
-                            if (ext->sort.columns[k] && !live[ext->sort.columns[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->sort.columns[k]->id;
+                            if (op_node(g, ext->sort.columns[k]) && !live[ext->sort.columns[k]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->sort.columns[k];
                         }
                         break;
                     case OP_JOIN:
                     case OP_ANTIJOIN:
                         for (uint8_t k = 0; k < ext->join.n_join_keys; k++) {
-                            if (ext->join.left_keys[k] && !live[ext->join.left_keys[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->join.left_keys[k]->id;
-                            if (ext->join.right_keys && ext->join.right_keys[k] &&
-                                !live[ext->join.right_keys[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->join.right_keys[k]->id;
+                            if (op_node(g, ext->join.left_keys[k]) && !live[ext->join.left_keys[k]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->join.left_keys[k];
+                            if (ext->join.right_keys && op_node(g, ext->join.right_keys[k]) &&
+                                !live[ext->join.right_keys[k]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->join.right_keys[k];
                         }
                         break;
                     case OP_PIVOT:
                         for (uint8_t k = 0; k < ext->pivot.n_index; k++) {
-                            if (ext->pivot.index_cols[k] && !live[ext->pivot.index_cols[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->pivot.index_cols[k]->id;
+                            if (op_node(g, ext->pivot.index_cols[k]) && !live[ext->pivot.index_cols[k]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->pivot.index_cols[k];
                         }
-                        if (ext->pivot.pivot_col && !live[ext->pivot.pivot_col->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->pivot.pivot_col->id;
-                        if (ext->pivot.value_col && !live[ext->pivot.value_col->id] && sp < (int)stack_cap)
-                            stack[sp++] = ext->pivot.value_col->id;
+                        if (op_node(g, ext->pivot.pivot_col) && !live[ext->pivot.pivot_col] && sp < (int)stack_cap)
+                            stack[sp++] = ext->pivot.pivot_col;
+                        if (op_node(g, ext->pivot.value_col) && !live[ext->pivot.value_col] && sp < (int)stack_cap)
+                            stack[sp++] = ext->pivot.value_col;
                         break;
                     case OP_WINDOW_JOIN: {
                         ray_op_ext_t* wj_ext = find_ext(g, n->id);
                         if (wj_ext) {
-                            if (wj_ext->asof.time_key && !live[wj_ext->asof.time_key->id] && sp < (int)stack_cap)
-                                stack[sp++] = wj_ext->asof.time_key->id;
+                            if (op_node(g, wj_ext->asof.time_key) && !live[wj_ext->asof.time_key] && sp < (int)stack_cap)
+                                stack[sp++] = wj_ext->asof.time_key;
                             for (uint8_t k = 0; k < wj_ext->asof.n_eq_keys; k++) {
-                                if (wj_ext->asof.eq_keys[k] && !live[wj_ext->asof.eq_keys[k]->id] && sp < (int)stack_cap)
-                                    stack[sp++] = wj_ext->asof.eq_keys[k]->id;
+                                if (op_node(g, wj_ext->asof.eq_keys[k]) && !live[wj_ext->asof.eq_keys[k]] && sp < (int)stack_cap)
+                                    stack[sp++] = wj_ext->asof.eq_keys[k];
                             }
                         }
                         break;
                     }
                     case OP_WINDOW:
                         for (uint8_t k = 0; k < ext->window.n_part_keys; k++) {
-                            if (ext->window.part_keys[k] && !live[ext->window.part_keys[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->window.part_keys[k]->id;
+                            if (op_node(g, ext->window.part_keys[k]) && !live[ext->window.part_keys[k]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->window.part_keys[k];
                         }
                         for (uint8_t k = 0; k < ext->window.n_order_keys; k++) {
-                            if (ext->window.order_keys[k] && !live[ext->window.order_keys[k]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->window.order_keys[k]->id;
+                            if (op_node(g, ext->window.order_keys[k]) && !live[ext->window.order_keys[k]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->window.order_keys[k];
                         }
                         for (uint8_t f = 0; f < ext->window.n_funcs; f++) {
-                            if (ext->window.func_inputs[f] && !live[ext->window.func_inputs[f]->id] && sp < (int)stack_cap)
-                                stack[sp++] = ext->window.func_inputs[f]->id;
+                            if (op_node(g, ext->window.func_inputs[f]) && !live[ext->window.func_inputs[f]] && sp < (int)stack_cap)
+                                stack[sp++] = ext->window.func_inputs[f];
                         }
                         break;
                     default:
@@ -909,7 +924,7 @@ static ray_op_t* find_consumer(ray_graph_t* g, uint32_t node_id) {
         ray_op_t* n = &g->nodes[i];
         if (n->flags & OP_FLAG_DEAD) continue;
         for (int j = 0; j < n->arity && j < 2; j++) {
-            if (n->inputs[j] && n->inputs[j]->id == node_id)
+            if (n->in_id[j] == node_id)
                 return n;
         }
     }
@@ -921,8 +936,9 @@ static ray_op_t* find_upstream_scan(ray_graph_t* g, ray_op_t* node) {
     uint32_t limit = g ? g->node_count : 1024;
     for (uint32_t steps = 0; node && steps < limit; steps++) {
         if (node->opcode == OP_SCAN) return node;
-        if (node->arity > 0 && node->inputs[0])
-            node = node->inputs[0];
+        ray_op_t* in0 = op_child(g, node, 0);
+        if (node->arity > 0 && in0)
+            node = in0;
         else return NULL;
     }
     return NULL;
@@ -963,8 +979,9 @@ static void sip_pass(ray_graph_t* g, ray_op_t* root) {
 
         /* 2. Find the input scan to this expand (source side) */
         ray_op_t* src_scan = NULL;
-        if (expand->arity > 0 && expand->inputs[0])
-            src_scan = find_upstream_scan(g, expand->inputs[0]);
+        ray_op_t* expand_in0 = op_child(g, expand, 0);
+        if (expand->arity > 0 && expand_in0)
+            src_scan = find_upstream_scan(g, expand_in0);
 
         if (!src_scan) continue;
 
@@ -1005,9 +1022,9 @@ static void factorize_pass(ray_graph_t* g, ray_op_t* root) {
         if (!consumer || consumer->opcode != OP_GROUP) continue;
 
         ray_op_ext_t* grp_ext = find_ext(g, consumer->id);
-        if (!grp_ext || grp_ext->n_keys != 1 || !grp_ext->keys[0]) continue;
+        if (!grp_ext || grp_ext->n_keys != 1 || !op_node(g, grp_ext->keys[0])) continue;
 
-        ray_op_ext_t* key_ext = find_ext(g, grp_ext->keys[0]->id);
+        ray_op_ext_t* key_ext = find_ext(g, grp_ext->keys[0]);
         if (!key_ext || key_ext->base.opcode != OP_SCAN) continue;
 
         int64_t src_sym = ray_sym_intern("_src", 4);
@@ -1025,121 +1042,10 @@ static void factorize_pass(ray_graph_t* g, ray_op_t* root) {
  * -------------------------------------------------------------------------- */
 
 /* Allocate a new node in the graph (for use during optimization passes).
- * Same logic as graph_alloc_node in graph.c but local to opt.c. */
+ * Forwards to graph.c's graph_alloc_node — node ids are realloc-stable, so
+ * no pointer fixups are needed and there is no second copy of the logic. */
 ray_op_t* graph_alloc_node_opt(ray_graph_t* g) {
-    if (g->node_count >= g->node_cap) {
-        if (g->node_cap > UINT32_MAX / 2) return NULL;
-        uint32_t new_cap = g->node_cap * 2;
-        uintptr_t old_base = (uintptr_t)g->nodes;
-        ray_op_t* new_nodes = (ray_op_t*)ray_sys_realloc(g->nodes,
-                                                       new_cap * sizeof(ray_op_t));
-        if (!new_nodes) return NULL;
-        g->nodes = new_nodes;
-        g->node_cap = new_cap;
-        /* Fix up all input pointers after realloc */
-        ptrdiff_t delta = (ptrdiff_t)((uintptr_t)g->nodes - old_base);
-        if (delta != 0) {
-            for (uint32_t i = 0; i < g->node_count; i++) {
-                if (g->nodes[i].inputs[0])
-                    g->nodes[i].inputs[0] = (ray_op_t*)((char*)g->nodes[i].inputs[0] + delta);
-                if (g->nodes[i].inputs[1])
-                    g->nodes[i].inputs[1] = (ray_op_t*)((char*)g->nodes[i].inputs[1] + delta);
-            }
-            /* Fix ext node input pointers */
-            for (uint32_t i = 0; i < g->ext_count; i++) {
-                if (g->ext_nodes[i]) {
-                    if (g->ext_nodes[i]->base.inputs[0])
-                        g->ext_nodes[i]->base.inputs[0] =
-                            (ray_op_t*)((char*)g->ext_nodes[i]->base.inputs[0] + delta);
-                    if (g->ext_nodes[i]->base.inputs[1])
-                        g->ext_nodes[i]->base.inputs[1] =
-                            (ray_op_t*)((char*)g->ext_nodes[i]->base.inputs[1] + delta);
-                    /* Fix structural op column pointers */
-                    switch (g->ext_nodes[i]->base.opcode) {
-                        case OP_GROUP:
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->n_keys; k++)
-                                if (g->ext_nodes[i]->keys[k])
-                                    g->ext_nodes[i]->keys[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->keys[k] + delta);
-                            for (uint8_t a = 0; a < g->ext_nodes[i]->n_aggs; a++)
-                                if (g->ext_nodes[i]->agg_ins[a])
-                                    g->ext_nodes[i]->agg_ins[a] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->agg_ins[a] + delta);
-                            break;
-                        case OP_SORT:
-                        case OP_SELECT:
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->sort.n_cols; k++)
-                                if (g->ext_nodes[i]->sort.columns[k])
-                                    g->ext_nodes[i]->sort.columns[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->sort.columns[k] + delta);
-                            break;
-                        case OP_JOIN:
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->join.n_join_keys; k++) {
-                                if (g->ext_nodes[i]->join.left_keys[k])
-                                    g->ext_nodes[i]->join.left_keys[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->join.left_keys[k] + delta);
-                                if (g->ext_nodes[i]->join.right_keys &&
-                                    g->ext_nodes[i]->join.right_keys[k])
-                                    g->ext_nodes[i]->join.right_keys[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->join.right_keys[k] + delta);
-                            }
-                            break;
-                        case OP_WINDOW_JOIN:
-                            if (g->ext_nodes[i]->asof.time_key)
-                                g->ext_nodes[i]->asof.time_key = (ray_op_t*)((char*)g->ext_nodes[i]->asof.time_key + delta);
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->asof.n_eq_keys; k++)
-                                if (g->ext_nodes[i]->asof.eq_keys[k])
-                                    g->ext_nodes[i]->asof.eq_keys[k] = (ray_op_t*)((char*)g->ext_nodes[i]->asof.eq_keys[k] + delta);
-                            break;
-                        case OP_ANTIJOIN:
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->join.n_join_keys; k++) {
-                                if (g->ext_nodes[i]->join.left_keys[k])
-                                    g->ext_nodes[i]->join.left_keys[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->join.left_keys[k] + delta);
-                                if (g->ext_nodes[i]->join.right_keys &&
-                                    g->ext_nodes[i]->join.right_keys[k])
-                                    g->ext_nodes[i]->join.right_keys[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->join.right_keys[k] + delta);
-                            }
-                            break;
-                        case OP_PIVOT:
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->pivot.n_index; k++)
-                                if (g->ext_nodes[i]->pivot.index_cols[k])
-                                    g->ext_nodes[i]->pivot.index_cols[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->pivot.index_cols[k] + delta);
-                            if (g->ext_nodes[i]->pivot.pivot_col)
-                                g->ext_nodes[i]->pivot.pivot_col =
-                                    (ray_op_t*)((char*)g->ext_nodes[i]->pivot.pivot_col + delta);
-                            if (g->ext_nodes[i]->pivot.value_col)
-                                g->ext_nodes[i]->pivot.value_col =
-                                    (ray_op_t*)((char*)g->ext_nodes[i]->pivot.value_col + delta);
-                            break;
-                        case OP_WINDOW:
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->window.n_part_keys; k++)
-                                if (g->ext_nodes[i]->window.part_keys[k])
-                                    g->ext_nodes[i]->window.part_keys[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->window.part_keys[k] + delta);
-                            for (uint8_t k = 0; k < g->ext_nodes[i]->window.n_order_keys; k++)
-                                if (g->ext_nodes[i]->window.order_keys[k])
-                                    g->ext_nodes[i]->window.order_keys[k] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->window.order_keys[k] + delta);
-                            for (uint8_t f = 0; f < g->ext_nodes[i]->window.n_funcs; f++)
-                                if (g->ext_nodes[i]->window.func_inputs[f])
-                                    g->ext_nodes[i]->window.func_inputs[f] =
-                                        (ray_op_t*)((char*)g->ext_nodes[i]->window.func_inputs[f] + delta);
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            }
-        }
-    }
-    ray_op_t* n = &g->nodes[g->node_count];
-    memset(n, 0, sizeof(ray_op_t));
-    n->id = g->node_count;
-    g->node_count++;
-    return n;
+    return graph_alloc_node(g);
 }
 
 /* Count how many live nodes use node_id as an input.
@@ -1151,7 +1057,7 @@ static int count_node_consumers(ray_graph_t* g, uint32_t node_id) {
         ray_op_t* c = &g->nodes[j];
         if (c->flags & OP_FLAG_DEAD) continue;
         for (int k = 0; k < c->arity && k < 2; k++) {
-            if (c->inputs[k] && c->inputs[k]->id == node_id) {
+            if (c->in_id[k] == node_id) {
                 count++;
                 break;  /* count each consumer node once */
             }
@@ -1163,7 +1069,7 @@ static int count_node_consumers(ray_graph_t* g, uint32_t node_id) {
         if (c->flags & OP_FLAG_DEAD) continue;
         if (c->id < nc) continue;  /* already counted in nodes[] */
         for (int k = 0; k < c->arity && k < 2; k++) {
-            if (c->inputs[k] && c->inputs[k]->id == node_id) {
+            if (c->in_id[k] == node_id) {
                 count++;
                 break;
             }
@@ -1210,9 +1116,9 @@ static int collect_pred_scans(ray_graph_t* g, ray_op_t* pred,
             continue;
         }
         for (int i = 0; i < node->arity && i < 2; i++) {
-            if (node->inputs[i]) {
+            if (op_child(g, node, i)) {
                 if (sp >= 64) return -1;  /* stack overflow */
-                stack[sp++] = node->inputs[i]->id;
+                stack[sp++] = node->in_id[i];
             }
         }
         /* Walk ext-stored operands for multi-input ops */
@@ -1222,7 +1128,7 @@ static int collect_pred_scans(ray_graph_t* g, ray_op_t* pred,
                 case OP_IF:
                 case OP_SUBSTR:
                 case OP_REPLACE: {
-                    uint32_t third_id = (uint32_t)(uintptr_t)ext->literal;
+                    uint32_t third_id = ext->third_in;
                     if (third_id < nc && !visited[third_id]) {
                         if (sp >= 64) return -1;
                         stack[sp++] = third_id;
@@ -1274,8 +1180,8 @@ static bool is_reachable_from(ray_graph_t* g, ray_op_t* start, uint32_t target_i
         ray_op_t* node = &g->nodes[nid];
         if (node->flags & OP_FLAG_DEAD) continue;
         for (int i = 0; i < node->arity && i < 2; i++) {
-            if (node->inputs[i] && sp < 64)
-                stack[sp++] = node->inputs[i]->id;
+            if (op_child(g, node, i) && sp < 64)
+                stack[sp++] = node->in_id[i];
         }
         /* Walk ext-stored operands for multi-input ops */
         ray_op_ext_t* ext = find_ext(g, nid);
@@ -1284,7 +1190,7 @@ static bool is_reachable_from(ray_graph_t* g, ray_op_t* start, uint32_t target_i
                 case OP_IF:
                 case OP_SUBSTR:
                 case OP_REPLACE: {
-                    uint32_t third_id = (uint32_t)(uintptr_t)ext->literal;
+                    uint32_t third_id = ext->third_in;
                     if (third_id < nc && !visited[third_id] && sp < 64)
                         stack[sp++] = third_id;
                     break;
@@ -1310,7 +1216,7 @@ static bool is_reachable_from(ray_graph_t* g, ray_op_t* start, uint32_t target_i
 
 /* Redirect all consumers of old_id to point to new_target instead.
  * Skips nodes with IDs skip_a and skip_b (the swapped pair).
- * Updates both g->nodes[] and g->ext_nodes[].base.inputs[]. */
+ * Updates both g->nodes[] and g->ext_nodes[].base.in_id[]. */
 void redirect_consumers(ray_graph_t* g, uint32_t old_id,
                         ray_op_t* new_target,
                         uint32_t skip_a, uint32_t skip_b) {
@@ -1319,8 +1225,8 @@ void redirect_consumers(ray_graph_t* g, uint32_t old_id,
         ray_op_t* c = &g->nodes[j];
         if (c->flags & OP_FLAG_DEAD || j == skip_a || j == skip_b) continue;
         for (int k = 0; k < c->arity && k < 2; k++) {
-            if (c->inputs[k] && c->inputs[k]->id == old_id)
-                c->inputs[k] = new_target;
+            if (c->in_id[k] == old_id)
+                c->in_id[k] = new_target ? new_target->id : RAY_OP_NONE;
         }
     }
     /* Also update ext_node heap copies to keep them in sync */
@@ -1330,8 +1236,8 @@ void redirect_consumers(ray_graph_t* g, uint32_t old_id,
         if (c->flags & OP_FLAG_DEAD) continue;
         if (c->id == skip_a || c->id == skip_b) continue;
         for (int k = 0; k < c->arity && k < 2; k++) {
-            if (c->inputs[k] && c->inputs[k]->id == old_id)
-                c->inputs[k] = new_target;
+            if (c->in_id[k] == old_id)
+                c->in_id[k] = new_target ? new_target->id : RAY_OP_NONE;
         }
     }
 }
@@ -1349,8 +1255,8 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
             if (n->flags & OP_FLAG_DEAD) continue;
             if (n->opcode != OP_FILTER || n->arity != 2) continue;
 
-            ray_op_t* child = n->inputs[0];
-            ray_op_t* pred  = n->inputs[1];
+            ray_op_t* child = op_child(g, n, 0);
+            ray_op_t* pred  = op_child(g, n, 1);
             if (!child || !pred) continue;
 
             /* Push past SELECT/ALIAS (only if child is single-consumer,
@@ -1359,9 +1265,9 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                 child->opcode == OP_ALIAS) {
                 if (count_node_consumers(g, child->id) > 1) continue;
                 /* Swap: FILTER(pred, SELECT(x)) -> SELECT(FILTER(pred, x)) */
-                ray_op_t* proj_input = child->inputs[0];
-                n->inputs[0] = proj_input;
-                child->inputs[0] = n;
+                ray_op_t* proj_input = op_child(g, child, 0);
+                n->in_id[0] = proj_input ? proj_input->id : RAY_OP_NONE;
+                child->in_id[0] = n->id;
                 redirect_consumers(g, n->id, child, child->id, n->id);
                 if (n->id == root->id) root = child;
                 changed = true;
@@ -1382,7 +1288,8 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                 ray_op_ext_t* gext = find_ext(g, child->id);
                 if (!gext || gext->n_keys == 0) continue;
                 /* one pushed filter per GROUP (chained HAVING stays above) */
-                if (child->inputs[0] && child->inputs[0]->opcode == OP_FILTER)
+                ray_op_t* child_in0 = op_child(g, child, 0);
+                if (child_in0 && child_in0->opcode == OP_FILTER)
                     continue;
                 /* factorized-expand pipeline (key `_src`) reads the expand
                  * output, not g->table — never push into it */
@@ -1390,8 +1297,8 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                     int64_t src_sym = ray_sym_intern("_src", 4);
                     bool is_fact = false;
                     for (uint8_t kk = 0; kk < gext->n_keys; kk++) {
-                        ray_op_ext_t* ke = gext->keys[kk]
-                            ? find_ext(g, gext->keys[kk]->id) : NULL;
+                        ray_op_ext_t* ke = op_node(g, gext->keys[kk])
+                            ? find_ext(g, gext->keys[kk]) : NULL;
                         if (ke && ke->base.opcode == OP_SCAN &&
                             ke->sym == src_sym) { is_fact = true; break; }
                     }
@@ -1406,9 +1313,9 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                     if (!sext) { keys_only = false; break; }
                     bool matched = false;
                     for (uint8_t kk = 0; kk < gext->n_keys; kk++) {
-                        ray_op_t* kop = gext->keys[kk];
+                        ray_op_t* kop = op_node(g, gext->keys[kk]);
                         if (!kop || kop->opcode != OP_SCAN) continue;
-                        ray_op_ext_t* kext = find_ext(g, kop->id);
+                        ray_op_ext_t* kext = find_ext(g, gext->keys[kk]);
                         if (kext && kext->sym == sext->sym) { matched = true; break; }
                     }
                     if (!matched) keys_only = false;
@@ -1437,15 +1344,15 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                 child = &g->nodes[child_id];
                 gext  = find_ext(g, child_id);
                 if (!gext) continue;
-                n->inputs[0] = tbl_node;
+                n->in_id[0] = tbl_node->id;
                 /* Mark the interposed filter so pass_filter_reorder leaves
                  * it alone: GROUP's arity is 0, so redirect_consumers would
                  * never re-point GROUP->inputs[0] at a split-off outer
                  * filter — an AND-split below the group silently drops a
                  * conjunct.  (OP_FILTER is dense-only; no ext copy.) */
                 n->flags |= OP_FLAG_PUSHED;
-                child->inputs[0] = n;        /* dense copy */
-                gext->base.inputs[0] = n;    /* ext copy in sync */
+                child->in_id[0] = n->id;        /* dense copy */
+                gext->base.in_id[0] = n->id;    /* ext copy in sync */
                 redirect_consumers(g, n_id, child, child_id, n_id);
                 if (n_id == root_id) root = child;
                 changed = true;
@@ -1461,7 +1368,7 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
 
                 /* All predicate scans must be reachable from the expand's
                  * source input (inputs[0]).  Walk the source subtree. */
-                ray_op_t* expand_src_tree = child->inputs[0];
+                ray_op_t* expand_src_tree = op_child(g, child, 0);
                 bool all_source = true;
                 for (int s = 0; s < n_scans; s++) {
                     if (!is_reachable_from(g, expand_src_tree, scan_ids[s])) {
@@ -1472,9 +1379,9 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
                 if (!all_source) continue;
 
                 /* Swap: FILTER(pred, EXPAND(src, rel)) -> EXPAND(FILTER(pred, src), rel) */
-                ray_op_t* expand_src = child->inputs[0];
-                n->inputs[0] = expand_src;
-                child->inputs[0] = n;
+                ray_op_t* expand_src = op_child(g, child, 0);
+                n->in_id[0] = expand_src ? expand_src->id : RAY_OP_NONE;
+                child->in_id[0] = n->id;
                 redirect_consumers(g, n->id, child, child->id, n->id);
                 if (n->id == root->id) root = child;
                 changed = true;
@@ -1488,22 +1395,23 @@ static ray_op_t* pass_predicate_pushdown(ray_graph_t* g, ray_op_t* root) {
 
 /* Score a predicate subtree: lower = cheaper = execute first. */
 static int filter_cost(ray_graph_t* g, ray_op_t* pred) {
-    (void)g;
     if (!pred) return 99;
     int cost = 0;
 
     /* Constant comparison: one input is OP_CONST */
     bool has_const = false;
     for (int i = 0; i < pred->arity && i < 2; i++) {
-        if (pred->inputs[i] && pred->inputs[i]->opcode == OP_CONST)
+        ray_op_t* in = op_child(g, pred, i);
+        if (in && in->opcode == OP_CONST)
             has_const = true;
     }
     if (!has_const) cost += 4;  /* col-col comparison */
 
     /* Type width cost */
     int8_t t = pred->out_type;
-    if (pred->arity >= 1 && pred->inputs[0])
-        t = pred->inputs[0]->out_type;
+    ray_op_t* pin0 = op_child(g, pred, 0);
+    if (pred->arity >= 1 && pin0)
+        t = pin0->out_type;
     switch (t) {
         case RAY_BOOL: case RAY_U8:  cost += 0; break;
         case RAY_I16:               cost += 1; break;
@@ -1529,12 +1437,12 @@ static ray_op_t* split_and_filter(ray_graph_t* g, ray_op_t* filter_node) {
     if (!filter_node || filter_node->opcode != OP_FILTER) return filter_node;
     if (filter_node->arity != 2) return filter_node;
 
-    ray_op_t* pred = filter_node->inputs[1];
+    ray_op_t* pred = op_child(g, filter_node, 1);
     if (!pred || pred->opcode != OP_AND || pred->arity != 2) return filter_node;
 
-    ray_op_t* pred_a = pred->inputs[0];
-    ray_op_t* pred_b = pred->inputs[1];
-    ray_op_t* input  = filter_node->inputs[0];
+    ray_op_t* pred_a = op_child(g, pred, 0);
+    ray_op_t* pred_b = op_child(g, pred, 1);
+    ray_op_t* input  = op_child(g, filter_node, 0);
     if (!pred_a || !pred_b || !input) return filter_node;
 
     /* Don't split a FILTER whose child is a GROUP.  Splitting an AND here
@@ -1560,12 +1468,12 @@ static ray_op_t* split_and_filter(ray_graph_t* g, ray_op_t* filter_node) {
     pred_b = &g->nodes[pred_b_id];
 
     /* Rewrite: filter_node becomes FILTER(pred_a, input) */
-    filter_node->inputs[1] = pred_a;
+    filter_node->in_id[1] = pred_a->id;
 
     outer->opcode = OP_FILTER;
     outer->arity = 2;
-    outer->inputs[0] = filter_node;
-    outer->inputs[1] = pred_b;
+    outer->in_id[0] = filter_node->id;
+    outer->in_id[1] = pred_b->id;
     outer->out_type = filter_node->out_type;
     outer->est_rows = filter_node->est_rows;
 
@@ -1578,13 +1486,13 @@ static ray_op_t* split_and_filter(ray_graph_t* g, ray_op_t* filter_node) {
  * chain.  (Pushed filters sit below GROUP with a const-table input, so
  * they can't normally appear inside an above-group chain — this is a
  * defensive stop.) */
-static int collect_filter_chain(ray_op_t* top, ray_op_t** chain, int max) {
+static int collect_filter_chain(ray_graph_t* g, ray_op_t* top, ray_op_t** chain, int max) {
     int n = 0;
     ray_op_t* cur = top;
     while (cur && cur->opcode == OP_FILTER &&
            !(cur->flags & OP_FLAG_PUSHED) && n < max) {
         chain[n++] = cur;
-        cur = cur->inputs[0];
+        cur = op_child(g, cur, 0);
     }
     return n;
 }
@@ -1613,8 +1521,9 @@ static ray_op_t* pass_filter_reorder(ray_graph_t* g, ray_op_t* root) {
              * dropped — and would also cost two rowsel passes instead
              * of one. */
             if (n->flags & OP_FLAG_PUSHED) continue;
-            if (n->arity != 2 || !n->inputs[1]) continue;
-            if (n->inputs[1]->opcode != OP_AND) continue;
+            ray_op_t* n_in1 = op_child(g, n, 1);
+            if (n->arity != 2 || !n_in1) continue;
+            if (n_in1->opcode != OP_AND) continue;
 
             /* Split AND and update consumers to point to new outer.
              * split_and_filter may realloc g->nodes, so re-fetch n afterwards. */
@@ -1655,7 +1564,7 @@ static ray_op_t* pass_filter_reorder(ray_graph_t* g, ray_op_t* root) {
 
         /* Collect the filter chain starting at this node */
         ray_op_t* chain[64];
-        int chain_len = collect_filter_chain(n, chain, 64);
+        int chain_len = collect_filter_chain(g, n, chain, 64);
         if (chain_len < 2) {
             for (int c = 0; c < chain_len; c++) visited[chain[c]->id] = true;
             continue;
@@ -1678,22 +1587,22 @@ static ray_op_t* pass_filter_reorder(ray_graph_t* g, ray_op_t* root) {
         /* Score each filter's predicate */
         int costs[64];
         for (int c = 0; c < chain_len; c++)
-            costs[c] = filter_cost(g, chain[c]->inputs[1]);
+            costs[c] = filter_cost(g, op_child(g, chain[c], 1));
 
         /* Insertion sort predicates by cost descending (stable: preserves
          * original order for equal costs). Expensive predicates go to
          * chain[0] (outer, runs last), cheap go to chain[N-1] (inner,
          * runs first). We swap predicates, not filter nodes. */
         for (int c = 1; c < chain_len; c++) {
-            ray_op_t* pred = chain[c]->inputs[1];
+            uint32_t pred_id = chain[c]->in_id[1];
             int cost = costs[c];
             int j = c - 1;
             while (j >= 0 && costs[j] < cost) {
-                chain[j + 1]->inputs[1] = chain[j]->inputs[1];
+                chain[j + 1]->in_id[1] = chain[j]->in_id[1];
                 costs[j + 1] = costs[j];
                 j--;
             }
-            chain[j + 1]->inputs[1] = pred;
+            chain[j + 1]->in_id[1] = pred_id;
             costs[j + 1] = cost;
         }
     }
@@ -1732,9 +1641,9 @@ static bool pass_projection_pushdown(ray_graph_t* g, ray_op_t* root) {
 
         /* Follow standard inputs */
         for (int i = 0; i < 2 && i < n->arity; i++) {
-            if (n->inputs[i] && !live[n->inputs[i]->id]) {
-                live[n->inputs[i]->id] = true;
-                if (qt < (int)nc) q[qt++] = n->inputs[i]->id;
+            if (op_child(g, n, i) && !live[n->in_id[i]]) {
+                live[n->in_id[i]] = true;
+                if (qt < (int)nc) q[qt++] = n->in_id[i];
             }
         }
 
@@ -1744,48 +1653,48 @@ static bool pass_projection_pushdown(ray_graph_t* g, ray_op_t* root) {
             switch (n->opcode) {
                 case OP_GROUP:
                     for (uint8_t k = 0; k < ext->n_keys; k++)
-                        if (ext->keys[k] && !live[ext->keys[k]->id]) {
-                            live[ext->keys[k]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->keys[k]->id;
+                        if (op_node(g, ext->keys[k]) && !live[ext->keys[k]]) {
+                            live[ext->keys[k]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->keys[k];
                         }
                     for (uint8_t a = 0; a < ext->n_aggs; a++)
-                        if (ext->agg_ins[a] && !live[ext->agg_ins[a]->id]) {
-                            live[ext->agg_ins[a]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->agg_ins[a]->id;
+                        if (op_node(g, ext->agg_ins[a]) && !live[ext->agg_ins[a]]) {
+                            live[ext->agg_ins[a]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->agg_ins[a];
                         }
                     break;
                 case OP_SORT:
                 case OP_SELECT:
                     for (uint8_t k = 0; k < ext->sort.n_cols; k++)
-                        if (ext->sort.columns[k] && !live[ext->sort.columns[k]->id]) {
-                            live[ext->sort.columns[k]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->sort.columns[k]->id;
+                        if (op_node(g, ext->sort.columns[k]) && !live[ext->sort.columns[k]]) {
+                            live[ext->sort.columns[k]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->sort.columns[k];
                         }
                     break;
                 case OP_JOIN:
                     for (uint8_t k = 0; k < ext->join.n_join_keys; k++) {
-                        if (ext->join.left_keys[k] && !live[ext->join.left_keys[k]->id]) {
-                            live[ext->join.left_keys[k]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->join.left_keys[k]->id;
+                        if (op_node(g, ext->join.left_keys[k]) && !live[ext->join.left_keys[k]]) {
+                            live[ext->join.left_keys[k]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->join.left_keys[k];
                         }
-                        if (ext->join.right_keys && ext->join.right_keys[k] &&
-                            !live[ext->join.right_keys[k]->id]) {
-                            live[ext->join.right_keys[k]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->join.right_keys[k]->id;
+                        if (ext->join.right_keys && op_node(g, ext->join.right_keys[k]) &&
+                            !live[ext->join.right_keys[k]]) {
+                            live[ext->join.right_keys[k]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->join.right_keys[k];
                         }
                     }
                     break;
                 case OP_WINDOW_JOIN: {
                     ray_op_ext_t* wj_ext = find_ext(g, n->id);
                     if (wj_ext) {
-                        if (wj_ext->asof.time_key && !live[wj_ext->asof.time_key->id]) {
-                            live[wj_ext->asof.time_key->id] = true;
-                            if (qt < (int)nc) q[qt++] = wj_ext->asof.time_key->id;
+                        if (op_node(g, wj_ext->asof.time_key) && !live[wj_ext->asof.time_key]) {
+                            live[wj_ext->asof.time_key] = true;
+                            if (qt < (int)nc) q[qt++] = wj_ext->asof.time_key;
                         }
                         for (uint8_t k = 0; k < wj_ext->asof.n_eq_keys; k++) {
-                            if (wj_ext->asof.eq_keys[k] && !live[wj_ext->asof.eq_keys[k]->id]) {
-                                live[wj_ext->asof.eq_keys[k]->id] = true;
-                                if (qt < (int)nc) q[qt++] = wj_ext->asof.eq_keys[k]->id;
+                            if (op_node(g, wj_ext->asof.eq_keys[k]) && !live[wj_ext->asof.eq_keys[k]]) {
+                                live[wj_ext->asof.eq_keys[k]] = true;
+                                if (qt < (int)nc) q[qt++] = wj_ext->asof.eq_keys[k];
                             }
                         }
                     }
@@ -1793,25 +1702,25 @@ static bool pass_projection_pushdown(ray_graph_t* g, ray_op_t* root) {
                 }
                 case OP_WINDOW:
                     for (uint8_t k = 0; k < ext->window.n_part_keys; k++)
-                        if (ext->window.part_keys[k] && !live[ext->window.part_keys[k]->id]) {
-                            live[ext->window.part_keys[k]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->window.part_keys[k]->id;
+                        if (op_node(g, ext->window.part_keys[k]) && !live[ext->window.part_keys[k]]) {
+                            live[ext->window.part_keys[k]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->window.part_keys[k];
                         }
                     for (uint8_t k = 0; k < ext->window.n_order_keys; k++)
-                        if (ext->window.order_keys[k] && !live[ext->window.order_keys[k]->id]) {
-                            live[ext->window.order_keys[k]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->window.order_keys[k]->id;
+                        if (op_node(g, ext->window.order_keys[k]) && !live[ext->window.order_keys[k]]) {
+                            live[ext->window.order_keys[k]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->window.order_keys[k];
                         }
                     for (uint8_t f = 0; f < ext->window.n_funcs; f++)
-                        if (ext->window.func_inputs[f] && !live[ext->window.func_inputs[f]->id]) {
-                            live[ext->window.func_inputs[f]->id] = true;
-                            if (qt < (int)nc) q[qt++] = ext->window.func_inputs[f]->id;
+                        if (op_node(g, ext->window.func_inputs[f]) && !live[ext->window.func_inputs[f]]) {
+                            live[ext->window.func_inputs[f]] = true;
+                            if (qt < (int)nc) q[qt++] = ext->window.func_inputs[f];
                         }
                     break;
                 case OP_IF:
                 case OP_SUBSTR:
                 case OP_REPLACE: {
-                    uint32_t third_id = (uint32_t)(uintptr_t)ext->literal;
+                    uint32_t third_id = ext->third_in;
                     if (third_id < nc && !live[third_id]) {
                         live[third_id] = true;
                         if (qt < (int)nc) q[qt++] = third_id;
@@ -1863,7 +1772,7 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
         if (n->flags & OP_FLAG_DEAD) continue;
         if (n->opcode != OP_FILTER || n->arity != 2) continue;
 
-        ray_op_t* pred = n->inputs[1];
+        ray_op_t* pred = op_child(g, n, 1);
         if (!pred || pred->arity != 2) continue;
 
         uint16_t cmp_op = pred->opcode;
@@ -1872,8 +1781,8 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
             cmp_op != OP_LE && cmp_op != OP_GE &&
             cmp_op != OP_IN && cmp_op != OP_NOT_IN) continue;
 
-        ray_op_t* lhs = pred->inputs[0];
-        ray_op_t* rhs = pred->inputs[1];
+        ray_op_t* lhs = op_child(g, pred, 0);
+        ray_op_t* rhs = op_child(g, pred, 1);
         if (!lhs || !rhs) continue;
 
         ray_op_t* scan_node = NULL;
