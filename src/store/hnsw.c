@@ -393,27 +393,45 @@ static int64_t hnsw_greedy_closest(const ray_hnsw_t* idx, const float* query,
 }
 
 /* --------------------------------------------------------------------------
- * Neighbor pruning: keep M closest neighbors (simple selection)
- * -------------------------------------------------------------------------- */
+ * Neighbor selection: keep M closest neighbors (simple selection)
+ * --------------------------------------------------------------------------
+ *
+ * Connect new_id into node_id's neighbor list, applying "keep M closest"
+ * selection when the list is already full.
+ *
+ * Background: M_keep == M_max in this build (layer M_max equals the connect
+ * budget M / M_max0), so the old prune_neighbors() guard `count <= M_keep`
+ * was always true and prune was a no-op — meaning a saturated list silently
+ * dropped every back-link, degrading recall.  Here we instead consider the
+ * combined set {existing neighbors} ∪ {new_id}, rank by distance to node_id,
+ * and keep the M_keep closest.  If new_id is farther than all M current
+ * neighbors it is correctly not added (standard HNSW heuristic); otherwise it
+ * displaces the current farthest.
+ *
+ * Returns true if new_id ended up in the list, false if it was farther than
+ * all kept neighbors (a legitimate, non-silent drop). */
+static bool hnsw_connect_neighbor(const ray_hnsw_t* idx, int64_t node_id,
+                                   int64_t* nb, int64_t M_max, int64_t M_keep,
+                                   int64_t new_id) {
+    /* Fast path: room available (or already present). */
+    if (add_neighbor(nb, M_max, new_id)) return true;
 
-static void prune_neighbors(const ray_hnsw_t* idx, int64_t node_id,
-                              int64_t* nb, int64_t M_max, int64_t M_keep) {
-    /* Count current neighbors */
+    /* List is full.  Build combined candidate set and keep M_keep closest. */
     int64_t count = count_neighbors(nb, M_max);
-    if (count <= M_keep) return;
+    int64_t total = count + 1;
+    hnsw_cand_t* ranked = (hnsw_cand_t*)ray_sys_alloc((size_t)total * sizeof(hnsw_cand_t));
+    if (!ranked) return false; /* OOM: leave list unchanged (no corruption) */
 
-    /* Compute distances from node to each neighbor */
     const float* vec = idx->vectors + node_id * idx->dim;
-    hnsw_cand_t* ranked = (hnsw_cand_t*)ray_sys_alloc((size_t)count * sizeof(hnsw_cand_t));
-    if (!ranked) return;
-
     for (int64_t i = 0; i < count; i++) {
         ranked[i].id = nb[i];
         ranked[i].dist = hnsw_dist(idx, vec, idx->vectors + nb[i] * idx->dim);
     }
+    ranked[count].id = new_id;
+    ranked[count].dist = hnsw_dist(idx, vec, idx->vectors + new_id * idx->dim);
 
-    /* Sort by distance ascending */
-    for (int64_t i = 1; i < count; i++) {
+    /* Insertion sort by distance ascending (lists are small, <= M_max+1). */
+    for (int64_t i = 1; i < total; i++) {
         hnsw_cand_t key = ranked[i];
         int64_t j = i - 1;
         while (j >= 0 && ranked[j].dist > key.dist) {
@@ -423,12 +441,19 @@ static void prune_neighbors(const ray_hnsw_t* idx, int64_t node_id,
         ranked[j + 1] = key;
     }
 
-    /* Keep M_keep closest */
+    bool kept = false;
+    int64_t keep = (M_keep < M_max) ? M_keep : M_max;
     for (int64_t i = 0; i < M_max; i++) {
-        nb[i] = (i < M_keep) ? ranked[i].id : -1;
+        if (i < keep && i < total) {
+            nb[i] = ranked[i].id;
+            if (ranked[i].id == new_id) kept = true;
+        } else {
+            nb[i] = -1;
+        }
     }
 
     ray_sys_free(ranked);
+    return kept;
 }
 
 /* --------------------------------------------------------------------------
@@ -560,11 +585,10 @@ ray_hnsw_t* ray_hnsw_build(const float* vectors, int64_t n_nodes, int32_t dim,
                 if (nb_local < 0) continue;
 
                 int64_t* their_nb = &layer->neighbors[nb_local * M_max_l];
-                if (!add_neighbor(their_nb, M_max_l, i)) {
-                    /* Neighbor list full — prune to make room, then add i */
-                    prune_neighbors(idx, nb_id, their_nb, M_max_l, M_keep);
-                    add_neighbor(their_nb, M_max_l, i);
-                }
+                /* Insert i into nb_id's list, displacing the farthest neighbor
+                 * when full (keep the M_keep closest).  Previously a full list
+                 * silently dropped the back-link, degrading recall. */
+                hnsw_connect_neighbor(idx, nb_id, their_nb, M_max_l, M_keep, i);
             }
 
             /* Update ep for next lower layer */
