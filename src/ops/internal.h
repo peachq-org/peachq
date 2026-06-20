@@ -486,6 +486,10 @@ static inline bool pool_cancelled(ray_pool_t* pool) {
  * struct.  Use EXT_TRAIL() to find the trailing bytes. */
 ray_op_ext_t* graph_alloc_ext_node_ex(ray_graph_t* g, size_t extra);
 
+/* Allocate a plain 32-byte node, growing g->nodes if needed.  Defined in
+ * graph.c.  Shared with opt.c (no second copy of the realloc logic). */
+ray_op_t* graph_alloc_node(ray_graph_t* g);
+
 /* Compile a Rayfall AST sub-expression to a DAG node.  Defined in
  * query.c.  Used by fused_* operators that need to evaluate a small
  * predicate without going through the full select planner. */
@@ -500,6 +504,19 @@ static inline ray_op_ext_t* find_ext(ray_graph_t* g, uint32_t node_id) {
             return g->ext_nodes[i];
     }
     return NULL;
+}
+
+/* Resolve a node id to its ray_op_t* in g->nodes.  Returns NULL for the
+ * RAY_OP_NONE sentinel.  Node ids are stable indices, so the returned
+ * pointer is only valid until the next g->nodes realloc — never store it
+ * across a node allocation; re-resolve from the id instead. */
+static inline ray_op_t* op_node(ray_graph_t* g, uint32_t id) {
+    return id == RAY_OP_NONE ? NULL : &g->nodes[id];
+}
+
+/* Resolve input edge i (0 or 1) of op to its child node, or NULL if unused. */
+static inline ray_op_t* op_child(ray_graph_t* g, const ray_op_t* op, int i) {
+    return op_node(g, op->in_id[i]);
 }
 
 /* ══════════════════════════════════════════

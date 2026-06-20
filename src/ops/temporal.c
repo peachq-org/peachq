@@ -336,7 +336,7 @@ ray_t* ray_temporal_truncate(ray_t* input, int kind) {
  * ============================================================================ */
 
 ray_t* exec_extract(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_node(g, op->inputs[0]);
+    ray_t* input = exec_node(g, op_child(g, op, 0));
     if (!input || RAY_IS_ERR(input)) return input;
 
     ray_op_ext_t* ext = find_ext(g, op->id);
@@ -490,7 +490,7 @@ static int64_t days_from_civil(int64_t y, int64_t m, int64_t d) {
 }
 
 ray_t* exec_date_trunc(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_node(g, op->inputs[0]);
+    ray_t* input = exec_node(g, op_child(g, op, 0));
     if (!input || RAY_IS_ERR(input)) return input;
 
     ray_op_ext_t* ext = find_ext(g, op->id);

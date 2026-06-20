@@ -322,16 +322,22 @@ static inline bool agg_type_admitted(uint16_t op, int8_t t) {
 #define OP_FLAG_PUSHED       0x01  /* filter interposed below a GROUP by predicate pushdown */
 #define OP_FLAG_DEAD         0x02
 
-/* Operation node (32 bytes, fits one cache line) */
+/* Sentinel node id for "no input".  Node id 0 is a valid node (the first
+ * one allocated), so zero cannot mean "none" — use the max value.  All
+ * graph edges are stable uint32 ids (indices into g->nodes), never raw
+ * pointers, so g->nodes may realloc freely with no fixup. */
+#define RAY_OP_NONE  ((uint32_t)0xFFFFFFFFu)
+
+/* Operation node (fits one cache line) */
 typedef struct ray_op {
     uint16_t       opcode;     /* OP_ADD, OP_SCAN, OP_FILTER, etc. */
     uint8_t        arity;      /* 0, 1, or 2 */
     uint8_t        flags;      /* PUSHED, DEAD */
     int8_t         out_type;   /* inferred output type */
     uint8_t        pad[3];
-    uint32_t       id;         /* unique node ID */
+    uint32_t       id;         /* unique node ID (== index into g->nodes) */
     uint32_t       est_rows;   /* estimated row count */
-    struct ray_op*  inputs[2];  /* NULL if unused */
+    uint32_t       in_id[2];   /* input node ids; RAY_OP_NONE if unused */
 } ray_op_t;
 
 /* Extended operation node for N-ary ops (heap-allocated, variable size) */
@@ -341,16 +347,16 @@ typedef struct ray_op_ext {
         ray_t*   literal;       /* OP_CONST: inline literal value */
         int64_t sym;           /* OP_SCAN: column name symbol ID */
         struct {               /* OP_GROUP: group-by specification */
-            ray_op_t**  keys;
+            uint32_t*  keys;        /* node ids */
             uint8_t    n_keys;
             uint8_t    n_aggs;
             uint16_t*  agg_ops;
-            ray_op_t**  agg_ins;
+            uint32_t*  agg_ins;     /* node ids */
             /* Optional second input per agg — non-NULL only for binary
              * aggregators (currently: OP_PEARSON_CORR). NULL for all
              * unary aggs and for the whole pointer when no binary agg
              * is present in this group. */
-            ray_op_t**  agg_ins2;
+            uint32_t*  agg_ins2;    /* node ids */
             /* Optional integer parameter per agg — used by holistic
              * aggregators that take a scalar literal alongside the
              * column (currently OP_TOP_N / OP_BOT_N: K).  NULL for
@@ -358,28 +364,28 @@ typedef struct ray_op_ext {
             int64_t*    agg_k;
         };
         struct {               /* OP_SORT: multi-column sort */
-            ray_op_t**  columns;
+            uint32_t*  columns;     /* node ids */
             uint8_t*   desc;
             uint8_t*   nulls_first; /* 1=nulls first, 0=nulls last */
             uint8_t    n_cols;
         } sort;
         struct {               /* OP_JOIN: join specification */
-            ray_op_t**  left_keys;
-            ray_op_t**  right_keys;
+            uint32_t*  left_keys;   /* node ids */
+            uint32_t*  right_keys;  /* node ids */
             uint8_t    n_join_keys;
             uint8_t    join_type;  /* 0=inner, 1=left, 2=full, 3=anti */
         } join;
         struct {               /* OP_WINDOW_JOIN: ASOF join */
-            ray_op_t*   time_key;      /* time/ordered key column */
-            ray_op_t**  eq_keys;       /* equality partition keys */
+            uint32_t   time_key;       /* time/ordered key column (node id) */
+            uint32_t*  eq_keys;        /* equality partition keys (node ids) */
             uint8_t    n_eq_keys;     /* number of equality keys */
             uint8_t    join_type;     /* 0=inner, 1=left outer */
         } asof;
         struct {               /* OP_WINDOW: window functions */
-            ray_op_t**  part_keys;
-            ray_op_t**  order_keys;
+            uint32_t*  part_keys;   /* node ids */
+            uint32_t*  order_keys;  /* node ids */
             uint8_t*   order_descs;
-            ray_op_t**  func_inputs;
+            uint32_t*  func_inputs; /* node ids */
             uint8_t*   func_kinds;    /* RAY_WIN_ROW_NUMBER etc. */
             int64_t*   func_params;   /* NTILE(n), LAG offset, etc. */
             uint8_t    n_part_keys;
@@ -420,13 +426,17 @@ typedef struct ray_op_ext {
             int32_t   ef_search;      /* ANN only */
         } rerank;
         struct {  /* OP_PIVOT */
-            ray_op_t**  index_cols;   /* OP_SCAN nodes for index columns */
-            ray_op_t*   pivot_col;    /* OP_SCAN node for pivot column */
-            ray_op_t*   value_col;    /* OP_SCAN node for value column */
+            uint32_t*   index_cols;   /* OP_SCAN node ids for index columns */
+            uint32_t    pivot_col;    /* OP_SCAN node id for pivot column */
+            uint32_t    value_col;    /* OP_SCAN node id for value column */
             uint16_t    agg_op;       /* OP_SUM, OP_AVG, etc. */
             uint8_t     n_index;      /* number of index columns */
         } pivot;
     };
+    /* Third input node id for 3-ary ops (OP_IF else-branch, OP_SUBSTR length,
+     * table-valued third arg).  RAY_OP_NONE if unused.  Replaces the former
+     * (ray_t*)(uintptr_t) punning of `literal`. */
+    uint32_t  third_in;
     uint64_t* seg_mask;   /* partition pruning bitmap (NULL = all active) */
     int64_t   seg_mask_count; /* number of partitions the mask covers */
 } ray_op_ext_t;
