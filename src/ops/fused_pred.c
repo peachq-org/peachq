@@ -667,8 +667,8 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
     default: return -1;
     }
 
-    ray_op_t* lhs = pred_op->inputs[0];
-    ray_op_t* rhs = pred_op->inputs[1];
+    ray_op_t* lhs = op_child(g, pred_op, 0);
+    ray_op_t* rhs = op_child(g, pred_op, 1);
     if (!lhs || !rhs) return -1;
     if (lhs->opcode != OP_SCAN || rhs->opcode != OP_CONST) return -1;
 
@@ -874,8 +874,8 @@ static int fp_compile_pred_dag(ray_graph_t* g, ray_op_t* node, ray_t* tbl,
 {
     if (!node) return -1;
     if (node->opcode == OP_AND) {
-        if (fp_compile_pred_dag(g, node->inputs[0], tbl, out) != 0) return -1;
-        if (fp_compile_pred_dag(g, node->inputs[1], tbl, out) != 0) return -1;
+        if (fp_compile_pred_dag(g, op_child(g, node, 0), tbl, out) != 0) return -1;
+        if (fp_compile_pred_dag(g, op_child(g, node, 1), tbl, out) != 0) return -1;
         return 0;
     }
     if (out->n_children >= FP_PRED_MAX_CHILDREN) return -1;

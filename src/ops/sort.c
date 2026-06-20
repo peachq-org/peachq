@@ -3351,7 +3351,7 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
         ray_t* key_cols[16];
         int    all_scan = 1;
         for (uint8_t k = 0; k < n_sort; k++) {
-            ray_op_t* key_op = ext->sort.columns[k];
+            ray_op_t* key_op = op_node(g, ext->sort.columns[k]);
             ray_op_ext_t* key_ext = find_ext(g, key_op->id);
             if (key_ext && key_ext->base.opcode == OP_SCAN) {
                 key_cols[k] = ray_table_get_col(tbl, key_ext->sym);
@@ -3396,7 +3396,7 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
     memset(sort_owned, 0, n_sort > 0 ? n_sort : 1);
 
     for (uint8_t k = 0; k < n_sort; k++) {
-        ray_op_t* key_op = ext->sort.columns[k];
+        ray_op_t* key_op = op_node(g, ext->sort.columns[k]);
         ray_op_ext_t* key_ext = find_ext(g, key_op->id);
         if (key_ext && key_ext->base.opcode == OP_SCAN) {
             sort_vecs[k] = ray_table_get_col(tbl, key_ext->sym);
@@ -3550,7 +3550,7 @@ sort_idx_ready:;
                         sk0_type == RAY_I16);
     int64_t sort_key_sym = -1;
     if (sorted_keys && n_sort == 1 && !RAY_IS_SYM(sk0_type) && !sk0_shifted) {
-        ray_op_ext_t* key_ext = find_ext(g, ext->sort.columns[0]->id);
+        ray_op_ext_t* key_ext = find_ext(g, ext->sort.columns[0]);
         if (key_ext && key_ext->base.opcode == OP_SCAN)
             sort_key_sym = key_ext->sym;
     }
