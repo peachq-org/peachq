@@ -27,6 +27,23 @@
  * Graph execution functions
  * ============================================================================ */
 
+/* Precondition for algorithms that iterate node ids in [0, fwd.n_nodes) while
+ * dereferencing the reverse CSR at the same index (e.g. rev_off[i+1]).  A
+ * relation built with distinct src/dst node counts (ray_rel_from_edges with
+ * n_src_nodes != n_dst_nodes) has fwd.n_nodes != rev.n_nodes; indexing the
+ * smaller CSR's offset array with the larger bound reads out of bounds.
+ *
+ * Returns NULL when the relation is square (safe), otherwise a loud error
+ * naming the op.  Callers must propagate the returned error. */
+static ray_t* graph_require_square(const ray_rel_t* rel, const char* op_name) {
+    if (rel->fwd.n_nodes != rel->rev.n_nodes)
+        return ray_error("domain",
+            "%s: requires a square relation (forward and reverse node counts "
+            "must match), got fwd=%lld rev=%lld",
+            op_name, (long long)rel->fwd.n_nodes, (long long)rel->rev.n_nodes);
+    return NULL;
+}
+
 /* exec_expand_factorized: emit factorized output for expand+group fusion.
  * Returns a table with _src (unique sources) and _count (degree per source).
  * This avoids materializing the full (src, dst) cross-product. */
@@ -293,6 +310,11 @@ ray_t* exec_var_expand(ray_graph_t* g, ray_op_t* op, ray_t* start_vec) {
     uint8_t direction = ext->graph.direction;
     uint8_t min_depth = ext->graph.min_depth;
     uint8_t max_depth = ext->graph.max_depth;
+    /* path_tracking is accepted by the op constructor but unimplemented: the
+     * BFS records (start, end, depth) endpoints only, not parent chains.
+     * Surface a loud error instead of silently dropping the request. */
+    if (ext->graph.path_tracking)
+        return ray_error("nyi", "graph.var-expand: path tracking is not supported (only start/end/depth endpoints are returned)");
     ray_csr_t* csr_fwd = &rel->fwd;
     ray_csr_t* csr_rev = &rel->rev;
     /* For direction==2 (both), use fwd for n_nodes bound but expand both */
@@ -651,6 +673,7 @@ ray_t* exec_pagerank(ray_graph_t* g, ray_op_t* op) {
     double damping  = ext->graph.damping;
 
     if (n <= 0) return ray_error("length", "graph.pagerank: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.pagerank"); if (sq) return sq; }
 
     /* Arena for all scratch memory — freed in one shot */
     ray_scratch_arena_t arena;
@@ -752,6 +775,7 @@ ray_t* exec_connected_comp(ray_graph_t* g, ray_op_t* op) {
 
     int64_t n = rel->fwd.n_nodes;
     if (n <= 0) return ray_error("length", "graph.connected: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.connected"); if (sq) return sq; }
 
     /* Arena for all scratch memory — freed in one shot */
     ray_scratch_arena_t arena;
@@ -939,6 +963,7 @@ ray_t* exec_dijkstra(ray_graph_t* g, ray_op_t* op,
 
     int64_t n = rel->fwd.n_nodes;
     int64_t m = rel->fwd.n_edges;
+    uint8_t max_depth = ext->graph.max_depth;
     int64_t src_id = ray_is_atom(src_val) ? src_val->i64 : ((int64_t*)ray_data(src_val))[0];
     int64_t dst_id = !dst_val ? -1 : ray_is_atom(dst_val) ? dst_val->i64 : ((int64_t*)ray_data(dst_val))[0];
 
@@ -999,6 +1024,11 @@ ray_t* exec_dijkstra(ray_graph_t* g, ray_op_t* op,
         visited[u] = true;
 
         if (u == dst_id) break;  /* early exit if destination reached */
+
+        /* Honor max-depth (hop bound): do not relax beyond max_depth hops
+         * from the source.  depth[] is the natural hop counter.  A path
+         * needing more than max_depth hops is simply not discovered. */
+        if (depth[u] >= max_depth) continue;
 
         for (int64_t j = fwd_off[u]; j < fwd_off[u + 1]; j++) {
             int64_t v = fwd_tgt[j];
@@ -1179,6 +1209,7 @@ ray_t* exec_louvain(ray_graph_t* g, ray_op_t* op) {
     uint16_t max_iter = ext->graph.max_iter;
 
     if (n <= 0) return ray_error("length", "graph.louvain: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.louvain"); if (sq) return sq; }
 
     /* Arena for all scratch memory — freed in one shot */
     ray_scratch_arena_t arena;
@@ -1331,6 +1362,7 @@ ray_t* exec_degree_cent(ray_graph_t* g, ray_op_t* op) {
 
     int64_t n = rel->fwd.n_nodes;
     if (n <= 0) return ray_error("length", "graph.degree: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.degree"); if (sq) return sq; }
 
     int64_t* fwd_off = (int64_t*)ray_data(rel->fwd.offsets);
     int64_t* rev_off = (int64_t*)ray_data(rel->rev.offsets);
@@ -1397,6 +1429,7 @@ ray_t* exec_topsort(ray_graph_t* g, ray_op_t* op) {
 
     int64_t n = rel->fwd.n_nodes;
     if (n <= 0) return ray_error("length", "graph.topsort: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.topsort"); if (sq) return sq; }
 
     int64_t* fwd_off = (int64_t*)ray_data(rel->fwd.offsets);
     int64_t* fwd_tgt = (int64_t*)ray_data(rel->fwd.targets);
@@ -1490,6 +1523,7 @@ ray_t* exec_cluster_coeff(ray_graph_t* g, ray_op_t* op) {
 
     int64_t n = rel->fwd.n_nodes;
     if (n <= 0) return ray_error("length", "graph.cluster: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.cluster"); if (sq) return sq; }
 
     ray_scratch_arena_t arena;
     ray_scratch_arena_init(&arena);
@@ -1592,6 +1626,7 @@ ray_t* exec_betweenness(ray_graph_t* g, ray_op_t* op) {
 
     int64_t n = rel->fwd.n_nodes;
     if (n <= 0) return ray_error("length", "graph.betweenness: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.betweenness"); if (sq) return sq; }
     uint16_t sample = ext->graph.max_iter;
     int64_t n_sources = (sample > 0 && (int64_t)sample < n) ? (int64_t)sample : n;
 
@@ -1778,6 +1813,7 @@ ray_t* exec_closeness(ray_graph_t* g, ray_op_t* op) {
 
     int64_t n = rel->fwd.n_nodes;
     if (n <= 0) return ray_error("length", "graph.closeness: graph must have at least one node, got %lld", (long long)n);
+    { ray_t* sq = graph_require_square(rel, "graph.closeness"); if (sq) return sq; }
     uint16_t sample = ext->graph.max_iter;
     int64_t n_sources = (sample > 0 && (int64_t)sample < n) ? (int64_t)sample : n;
 
@@ -2224,6 +2260,7 @@ ray_t* exec_astar(ray_graph_t* g, ray_op_t* op,
 
     int64_t n = rel->fwd.n_nodes;
     int64_t m = rel->fwd.n_edges;
+    uint8_t max_depth = ext->graph.max_depth;
     int64_t src_id = src_val->i64;
     int64_t dst_id = dst_val->i64;
 
@@ -2281,6 +2318,9 @@ ray_t* exec_astar(ray_graph_t* g, ray_op_t* op,
         visited[u] = true;
 
         if (u == dst_id) break;
+
+        /* Honor max-depth (hop bound): stop expanding past max_depth hops. */
+        if (depth_a[u] >= max_depth) continue;
 
         for (int64_t j = fwd_off[u]; j < fwd_off[u + 1]; j++) {
             int64_t v = fwd_tgt[j];
