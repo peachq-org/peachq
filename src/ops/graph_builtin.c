@@ -742,6 +742,12 @@ ray_t* ray_graph_var_expand_fn(ray_t** args, int64_t n) {
             return ray_error("type", "graph.var-expand: track-path must be a boolean or integer, got %s", ray_type_name(args[5]->type));
         track = (args[5]->type == -RAY_BOOL) ? (args[5]->b8 != 0)
                                               : (atom_to_i64(args[5]) != 0);
+        /* Path tracking (returning the full intermediate node sequence per
+         * reached endpoint) is not implemented: the BFS only records
+         * (start, end, depth) endpoints, not parent chains.  Rather than
+         * silently ignore the flag (a lying API), reject it loudly. */
+        if (track)
+            return ray_error("nyi", "graph.var-expand: track-path is not supported (only start/end/depth endpoints are returned); pass track-path=false");
     }
 
     ray_graph_t* g = ray_graph_new(NULL);
