@@ -78,11 +78,11 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
         return atom_to_numeric(ext->literal, out_f, out_i, out_is_f64);
     }
 
-    if ((op->opcode == OP_NEG || op->opcode == OP_ABS) && op->arity == 1 && op->inputs[0]) {
+    if ((op->opcode == OP_NEG || op->opcode == OP_ABS) && op->arity == 1 && op_child(g, op, 0)) {
         double af = 0.0;
         int64_t ai = 0;
         bool a_is_f64 = false;
-        if (!eval_const_numeric_expr(g, op->inputs[0], &af, &ai, &a_is_f64)) return false;
+        if (!eval_const_numeric_expr(g, op_child(g, op, 0), &af, &ai, &a_is_f64)) return false;
         if (a_is_f64 || op->out_type == RAY_F64) {
             double v = a_is_f64 ? af : (double)ai;
             double r = (op->opcode == OP_NEG) ? -v : fabs(v);
@@ -102,14 +102,14 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
         return true;
     }
 
-    if (op->arity != 2 || !op->inputs[0] || !op->inputs[1]) return false;
+    if (op->arity != 2 || !op_child(g, op, 0) || !op_child(g, op, 1)) return false;
     if ((op->opcode < OP_ADD || op->opcode > OP_MAX2) && op->opcode != OP_IDIV) return false;
 
     double lf = 0.0, rf = 0.0;
     int64_t li = 0, ri = 0;
     bool l_is_f64 = false, r_is_f64 = false;
-    if (!eval_const_numeric_expr(g, op->inputs[0], &lf, &li, &l_is_f64)) return false;
-    if (!eval_const_numeric_expr(g, op->inputs[1], &rf, &ri, &r_is_f64)) return false;
+    if (!eval_const_numeric_expr(g, op_child(g, op, 0), &lf, &li, &l_is_f64)) return false;
+    if (!eval_const_numeric_expr(g, op_child(g, op, 1), &rf, &ri, &r_is_f64)) return false;
 
     if (op->out_type == RAY_F64 || l_is_f64 || r_is_f64 || op->opcode == OP_DIV) {
         double lv = l_is_f64 ? lf : (double)li;
@@ -249,35 +249,35 @@ static bool parse_linear_i64_expr(ray_graph_t* g, ray_op_t* op, linear_expr_i64_
         return true;
     }
 
-    if (op->opcode == OP_NEG && op->arity == 1 && op->inputs[0]) {
+    if (op->opcode == OP_NEG && op->arity == 1 && op_child(g, op, 0)) {
         linear_expr_i64_t inner;
-        if (!parse_linear_i64_expr(g, op->inputs[0], &inner)) return false;
+        if (!parse_linear_i64_expr(g, op_child(g, op, 0), &inner)) return false;
         linear_expr_scale(&inner, -1);
         *out = inner;
         return true;
     }
 
     if ((op->opcode == OP_ADD || op->opcode == OP_SUB) &&
-        op->arity == 2 && op->inputs[0] && op->inputs[1]) {
+        op->arity == 2 && op_child(g, op, 0) && op_child(g, op, 1)) {
         linear_expr_i64_t lhs;
         linear_expr_i64_t rhs;
-        if (!parse_linear_i64_expr(g, op->inputs[0], &lhs)) return false;
-        if (!parse_linear_i64_expr(g, op->inputs[1], &rhs)) return false;
+        if (!parse_linear_i64_expr(g, op_child(g, op, 0), &lhs)) return false;
+        if (!parse_linear_i64_expr(g, op_child(g, op, 1), &rhs)) return false;
         *out = lhs;
         return linear_expr_add_scaled(out, &rhs, op->opcode == OP_ADD ? 1 : -1);
     }
 
-    if (op->opcode == OP_MUL && op->arity == 2 && op->inputs[0] && op->inputs[1]) {
+    if (op->opcode == OP_MUL && op->arity == 2 && op_child(g, op, 0) && op_child(g, op, 1)) {
         int64_t k = 0;
         linear_expr_i64_t side;
-        if (const_expr_to_i64(g, op->inputs[0], &k) &&
-            parse_linear_i64_expr(g, op->inputs[1], &side)) {
+        if (const_expr_to_i64(g, op_child(g, op, 0), &k) &&
+            parse_linear_i64_expr(g, op_child(g, op, 1), &side)) {
             linear_expr_scale(&side, k);
             *out = side;
             return true;
         }
-        if (const_expr_to_i64(g, op->inputs[1], &k) &&
-            parse_linear_i64_expr(g, op->inputs[0], &side)) {
+        if (const_expr_to_i64(g, op_child(g, op, 1), &k) &&
+            parse_linear_i64_expr(g, op_child(g, op, 0), &side)) {
             linear_expr_scale(&side, k);
             *out = side;
             return true;
@@ -320,10 +320,10 @@ bool try_affine_sumavg_input(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
                                     ray_t** out_vec, agg_affine_t* out_affine) {
     if (!g || !tbl || !input_op || !out_vec || !out_affine) return false;
     if (input_op->opcode != OP_ADD && input_op->opcode != OP_SUB) return false;
-    if (input_op->arity != 2 || !input_op->inputs[0] || !input_op->inputs[1]) return false;
+    if (input_op->arity != 2 || !op_child(g, input_op, 0) || !op_child(g, input_op, 1)) return false;
 
-    ray_op_t* lhs = input_op->inputs[0];
-    ray_op_t* rhs = input_op->inputs[1];
+    ray_op_t* lhs = op_child(g, input_op, 0);
+    ray_op_t* rhs = op_child(g, input_op, 1);
     ray_op_t* base_op = NULL;
     int sign = 1;
     double c_f = 0.0;
@@ -530,7 +530,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
         if (top->phase == 0) {
             top->phase = 1;
             for (int i = node->arity - 1; i >= 0; i--) {
-                ray_op_t* ch = node->inputs[i];
+                ray_op_t* ch = op_child(g, node, i);
                 if (!ch) continue;
                 if (ch->id < nc && node_reg[ch->id] != 0xFF) continue;
                 if (sp >= 64) EXPR_BAIL(EXPR_BAIL_DEPTH);
@@ -630,12 +630,12 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 out->regs[r].const_f64 = cf;
                 out->regs[r].const_i64 = ci;
             } else if (expr_is_elementwise(node->opcode)) {
-                if (!node->inputs[0]) EXPR_BAIL(EXPR_BAIL_OTHER);
-                uint8_t s1 = node_reg[node->inputs[0]->id];
+                if (!op_child(g, node, 0)) EXPR_BAIL(EXPR_BAIL_OTHER);
+                uint8_t s1 = node_reg[node->in_id[0]];
                 if (s1 == 0xFF) EXPR_BAIL(EXPR_BAIL_OTHER);
                 uint8_t s2 = 0xFF;
-                if (node->arity >= 2 && node->inputs[1]) {
-                    s2 = node_reg[node->inputs[1]->id];
+                if (node->arity >= 2 && op_child(g, node, 1)) {
+                    s2 = node_reg[node->in_id[1]];
                     if (s2 == 0xFF) EXPR_BAIL(EXPR_BAIL_OTHER);
                 }
 
