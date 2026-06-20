@@ -695,7 +695,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     memset(sort_descs, 0, sizeof(sort_descs));
 
     for (uint8_t k = 0; k < n_part; k++) {
-        sort_vecs[k] = win_resolve_vec(g, ext->window.part_keys[k], tbl,
+        sort_vecs[k] = win_resolve_vec(g, op_node(g, ext->window.part_keys[k]), tbl,
                                         &sort_owned[k]);
         sort_descs[k] = 0;  /* partition keys always ASC */
         if (!sort_vecs[k] || RAY_IS_ERR(sort_vecs[k])) {
@@ -707,7 +707,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
     }
     for (uint8_t k = 0; k < n_order; k++) {
-        sort_vecs[n_part + k] = win_resolve_vec(g, ext->window.order_keys[k],
+        sort_vecs[n_part + k] = win_resolve_vec(g, op_node(g, ext->window.order_keys[k]),
                                                  tbl, &sort_owned[n_part + k]);
         sort_descs[n_part + k] = ext->window.order_descs[k];
         if (!sort_vecs[n_part + k] || RAY_IS_ERR(sort_vecs[n_part + k])) {
@@ -727,7 +727,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     memset(func_owned, 0, sizeof(func_owned));
     memset(result_vecs, 0, sizeof(result_vecs));
     for (uint8_t f = 0; f < n_funcs; f++) {
-        ray_op_t* fi = ext->window.func_inputs[f];
+        ray_op_t* fi = op_node(g, ext->window.func_inputs[f]);
         if (fi) {
             func_vecs[f] = win_resolve_vec(g, fi, tbl, &func_owned[f]);
             if (!func_vecs[f] || RAY_IS_ERR(func_vecs[f])) {
