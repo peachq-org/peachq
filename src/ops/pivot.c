@@ -64,13 +64,13 @@ static inline int64_t sym_scalar_runtime_id(ray_t* v) {
  * ============================================================================ */
 
 ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
-    /* cond = inputs[0], then = inputs[1], else_id stored in ext->literal */
-    ray_t* cond_v = exec_node(g, op->inputs[0]);
-    ray_t* then_v = exec_node(g, op->inputs[1]);
+    /* cond = inputs[0], then = inputs[1], else_id stored in ext->third_in */
+    ray_t* cond_v = exec_node(g, op_child(g, op, 0));
+    ray_t* then_v = exec_node(g, op_child(g, op, 1));
 
     ray_op_ext_t* ext = find_ext(g, op->id);
-    uint32_t else_id = (uint32_t)(uintptr_t)ext->literal;
-    ray_t* else_v = exec_node(g, &g->nodes[else_id]);
+    uint32_t else_id = ext->third_in;
+    ray_t* else_v = exec_node(g, op_node(g, else_id));
 
     if (!cond_v || RAY_IS_ERR(cond_v)) {
         if (then_v && !RAY_IS_ERR(then_v)) ray_release(then_v);
@@ -277,18 +277,18 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     /* Resolve input columns */
     ray_t* idx_vecs[16];
     for (uint8_t i = 0; i < n_idx; i++) {
-        ray_op_ext_t* ie = find_ext(g, ext->pivot.index_cols[i]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->pivot.index_cols[i]);
         idx_vecs[i] = (ie && ie->base.opcode == OP_SCAN)
                      ? ray_table_get_col(tbl, ie->sym) : NULL;
         if (!idx_vecs[i]) return ray_error("domain", "pivot: index column not found");
     }
 
-    ray_op_ext_t* pe = find_ext(g, ext->pivot.pivot_col->id);
+    ray_op_ext_t* pe = find_ext(g, ext->pivot.pivot_col);
     ray_t* pcol = (pe && pe->base.opcode == OP_SCAN)
                 ? ray_table_get_col(tbl, pe->sym) : NULL;
     if (!pcol) return ray_error("domain", "pivot: pivot column not found");
 
-    ray_op_ext_t* ve = find_ext(g, ext->pivot.value_col->id);
+    ray_op_ext_t* ve = find_ext(g, ext->pivot.value_col);
     ray_t* vcol = (ve && ve->base.opcode == OP_SCAN)
                 ? ray_table_get_col(tbl, ve->sym) : NULL;
     if (!vcol) return ray_error("domain", "pivot: value column not found");
@@ -589,7 +589,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         if (new_col->type == RAY_SYM)
             ray_sym_vec_adopt_domain(new_col, idx_vecs[k]);
 
-        ray_op_ext_t* ie = find_ext(g, ext->pivot.index_cols[k]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->pivot.index_cols[k]);
         result = ray_table_add_col(result, ie->sym, new_col);
         ray_release(new_col);
         if (RAY_IS_ERR(result)) goto pivot_cleanup;

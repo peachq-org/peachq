@@ -927,8 +927,8 @@ static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
         opc != OP_LT && opc != OP_LE &&
         opc != OP_GT && opc != OP_GE) return 0;
 
-    ray_op_t* lhs = pred_op->inputs[0];
-    ray_op_t* rhs = pred_op->inputs[1];
+    ray_op_t* lhs = op_child(g, pred_op, 0);
+    ray_op_t* rhs = op_child(g, pred_op, 1);
     if (!lhs || !rhs) return 0;
     if (lhs->opcode != OP_SCAN || rhs->opcode != OP_CONST) return 0;
     ray_op_ext_t* lext = find_ext(g, lhs->id);
@@ -1004,8 +1004,8 @@ static int idx_filter_in_decode(ray_graph_t* g, ray_op_t* pred_op,
     if (!pred_op || pred_op->arity != 2) return 0;
     if (pred_op->opcode != OP_IN) return 0;
 
-    ray_op_t* lhs = pred_op->inputs[0];  /* SCAN(col) */
-    ray_op_t* rhs = pred_op->inputs[1];  /* CONST(set_vec) */
+    ray_op_t* lhs = op_child(g, pred_op, 0);  /* SCAN(col) */
+    ray_op_t* rhs = op_child(g, pred_op, 1);  /* CONST(set_vec) */
     if (!lhs || !rhs) return 0;
     if (lhs->opcode != OP_SCAN || rhs->opcode != OP_CONST) return 0;
 
@@ -1156,9 +1156,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
 
         /* Membership: col IN set_vec */
         case OP_IN: case OP_NOT_IN: {
-            ray_t* col = exec_node(g, op->inputs[0]);
+            ray_t* col = exec_node(g, op_child(g, op, 0));
             if (!col || RAY_IS_ERR(col)) return col;
-            ray_t* set = exec_node(g, op->inputs[1]);
+            ray_t* set = exec_node(g, op_child(g, op, 1));
             if (!set || RAY_IS_ERR(set)) { ray_release(col); return set; }
             ray_t* result = exec_in(g, op, col, set);
             ray_release(col);
@@ -1188,14 +1188,14 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             }
             /* Fallback: recursive per-node evaluation */
             if (op->arity == 1) {
-                ray_t* input = exec_node(g, op->inputs[0]);
+                ray_t* input = exec_node(g, op_child(g, op, 0));
                 if (!input || RAY_IS_ERR(input)) return input;
                 ray_t* result = exec_elementwise_unary(g, op, input);
                 ray_release(input);
                 return result;
             } else {
-                ray_t* lhs = exec_node(g, op->inputs[0]);
-                ray_t* rhs = exec_node(g, op->inputs[1]);
+                ray_t* lhs = exec_node(g, op_child(g, op, 0));
+                ray_t* rhs = exec_node(g, op_child(g, op, 1));
                 if (!lhs || RAY_IS_ERR(lhs)) { if (rhs && !RAY_IS_ERR(rhs)) ray_release(rhs); return lhs; }
                 if (!rhs || RAY_IS_ERR(rhs)) { ray_release(lhs); return rhs; }
                 ray_t* result = exec_elementwise_binary(g, op, lhs, rhs);
@@ -1209,7 +1209,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         case OP_SUM: case OP_PROD: case OP_MIN: case OP_MAX:
         case OP_COUNT: case OP_AVG: case OP_FIRST: case OP_LAST:
         case OP_STDDEV: case OP_STDDEV_POP: case OP_VAR: case OP_VAR_POP: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             /* Compact lazy selection before reducing — filters may have
              * set g->selection without materializing a compacted table. */
@@ -1240,7 +1240,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_COUNT_DISTINCT: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             ray_t* result = exec_count_distinct(g, op, input);
             ray_release(input);
@@ -1248,7 +1248,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_DISTINCT: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             if (!ray_is_vec(input)) {
                 ray_release(input);
@@ -1260,7 +1260,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_ASC: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             if (!ray_is_vec(input)) {
                 ray_release(input);
@@ -1272,7 +1272,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_DESC: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             if (!ray_is_vec(input)) {
                 ray_release(input);
@@ -1284,7 +1284,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_REVERSE: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             if (!ray_is_vec(input)) {
                 ray_release(input);
@@ -1300,7 +1300,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
              * the GROUP result rather than the original input table.
              * SCAN nodes in the predicate tree resolve column names via
              * g->table, so we temporarily swap it to the GROUP output. */
-            ray_op_t* filter_child = op->inputs[0];
+            ray_op_t* filter_child = op_child(g, op, 0);
             if (filter_child && filter_child->opcode == OP_GROUP) {
                 ray_t* group_result = exec_node(g, filter_child);
                 if (!group_result || RAY_IS_ERR(group_result))
@@ -1311,7 +1311,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 g->table     = group_result;
                 g->selection = NULL;
 
-                ray_t* pred = exec_node(g, op->inputs[1]);
+                ray_t* pred = exec_node(g, op_child(g, op, 1));
 
                 g->table     = saved_table;
                 g->selection = saved_sel;
@@ -1327,7 +1327,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 return result;
             }
 
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             /* Hash-index point-lookup fast path: when the predicate is
              * `col == K` on a column with RAY_IDX_HASH attached and
@@ -1343,7 +1343,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 int64_t  key_i    = 0;
                 double   key_f    = 0.0;
                 int      is_float = 0;
-                if (idx_filter_decode(g, op->inputs[1], &col, &cmp_op,
+                if (idx_filter_decode(g, op_child(g, op, 1), &col, &cmp_op,
                                       &key_i, &key_f, &is_float)) {
                     /* 1. Zone index: O(1) all/none short-circuit. */
                     if (ray_index_kind(col) == RAY_IDX_ZONE)
@@ -1419,7 +1419,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 {
                     ray_t* in_col     = NULL;
                     ray_t* in_set_lit = NULL;
-                    if (idx_filter_in_decode(g, op->inputs[1], &in_col, &in_set_lit)) {
+                    if (idx_filter_in_decode(g, op_child(g, op, 1), &in_col, &in_set_lit)) {
                         bool in_col_is_float = (in_col->type == RAY_F32 ||
                                                in_col->type == RAY_F64);
                         if (ray_index_kind(in_col) == RAY_IDX_HASH &&
@@ -1437,7 +1437,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 }
             }
 
-            ray_t* pred = exec_node(g, op->inputs[1]);
+            ray_t* pred = exec_node(g, op_child(g, op, 1));
             if (!pred || RAY_IS_ERR(pred)) { ray_release(input); return pred; }
 
             /* Lazy filter: convert predicate to a rowsel (morsel-local
@@ -1472,7 +1472,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_SORT: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             ray_t* tbl = (input->type == RAY_TABLE) ? input : g->table;
             /* Compact lazy selection before sort (needs dense data) */
@@ -1501,7 +1501,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             {
                 ray_op_ext_t* gext = find_ext(g, op->id);
                 if (gext && gext->n_keys == 1) {
-                    ray_op_ext_t* kext = find_ext(g, gext->keys[0]->id);
+                    ray_op_ext_t* kext = find_ext(g, gext->keys[0]);
                     int64_t src_sym = ray_sym_intern("_src", 4);
                     if (kext && kext->base.opcode == OP_SCAN && kext->sym == src_sym) {
                         /* Find the factorized OP_EXPAND connected to this GROUP.
@@ -1535,8 +1535,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             /* Pushed-down predicate (GROUP pushdown, opt.c): the optimizer
              * may interpose an OP_FILTER as inputs[0] (normally the first
              * key op).  Execute it first via the shared helper. */
-            if (op->inputs[0] && op->inputs[0]->opcode == OP_FILTER) {
-                ray_t* res = exec_pushed_group_filter(g, op->inputs[0]);
+            ray_op_t* group_in0 = op_child(g, op, 0);
+            if (group_in0 && group_in0->opcode == OP_FILTER) {
+                ray_t* res = exec_pushed_group_filter(g, group_in0);
                 if (res && RAY_IS_ERR(res)) return res;
                 if (res) { owned_tbl = res; tbl = res; }
                 /* NULL → lazy path; g->selection installed, tbl unchanged */
@@ -1574,8 +1575,8 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_JOIN: {
-            ray_t* left = exec_node(g, op->inputs[0]);
-            ray_t* right = exec_node(g, op->inputs[1]);
+            ray_t* left = exec_node(g, op_child(g, op, 0));
+            ray_t* right = exec_node(g, op_child(g, op, 1));
             if (!left || RAY_IS_ERR(left)) { if (right && !RAY_IS_ERR(right)) ray_release(right); return left; }
             if (!right || RAY_IS_ERR(right)) { ray_release(left); return right; }
             /* Compact lazy selection before join (needs dense data) */
@@ -1593,8 +1594,8 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_ANTIJOIN: {
-            ray_t* left = exec_node(g, op->inputs[0]);
-            ray_t* right = exec_node(g, op->inputs[1]);
+            ray_t* left = exec_node(g, op_child(g, op, 0));
+            ray_t* right = exec_node(g, op_child(g, op, 1));
             if (!left || RAY_IS_ERR(left)) { if (right && !RAY_IS_ERR(right)) ray_release(right); return left; }
             if (!right || RAY_IS_ERR(right)) { ray_release(left); return right; }
             if (g->selection && left && !RAY_IS_ERR(left) && left->type == RAY_TABLE) {
@@ -1611,8 +1612,8 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_WINDOW_JOIN: {
-            ray_t* left = exec_node(g, op->inputs[0]);
-            ray_t* right = exec_node(g, op->inputs[1]);
+            ray_t* left = exec_node(g, op_child(g, op, 0));
+            ray_t* right = exec_node(g, op_child(g, op, 1));
             if (!left || RAY_IS_ERR(left)) { if (right && !RAY_IS_ERR(right)) ray_release(right); return left; }
             if (!right || RAY_IS_ERR(right)) { ray_release(left); return right; }
             if (g->selection && left && !RAY_IS_ERR(left) && left->type == RAY_TABLE) {
@@ -1629,7 +1630,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_WINDOW: {
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             ray_t* wdf = (input->type == RAY_TABLE) ? input : g->table;
             /* Compact lazy selection before window (needs dense data) */
@@ -1651,9 +1652,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             int64_t n = ext ? ext->sym : 10;
 
             /* Fused sort+limit: detect SORT child → only gather N rows */
-            ray_op_t* child_op = op->inputs[0];
+            ray_op_t* child_op = op_child(g, op, 0);
             if (child_op && child_op->opcode == OP_SORT) {
-                ray_t* sort_input = exec_node(g, child_op->inputs[0]);
+                ray_t* sort_input = exec_node(g, op_child(g, child_op, 0));
                 if (!sort_input || RAY_IS_ERR(sort_input)) return sort_input;
                 ray_t* tbl = (sort_input->type == RAY_TABLE) ? sort_input : g->table;
                 /* Compact lazy selection before sort */
@@ -1686,9 +1687,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 if (!tbl || RAY_IS_ERR(tbl)) return tbl;
                 ray_t* owned_tbl = NULL;
                 /* Pushed-down filter: execute it first via the shared helper. */
-                if (child_op->inputs[0] &&
-                    child_op->inputs[0]->opcode == OP_FILTER) {
-                    ray_t* res = exec_pushed_group_filter(g, child_op->inputs[0]);
+                ray_op_t* child_in0 = op_child(g, child_op, 0);
+                if (child_in0 && child_in0->opcode == OP_FILTER) {
+                    ray_t* res = exec_pushed_group_filter(g, child_in0);
                     if (res && RAY_IS_ERR(res)) return res;
                     if (res) { owned_tbl = res; tbl = res; }
                     /* NULL → lazy path; g->selection installed, tbl unchanged */
@@ -1720,7 +1721,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             } else if (child_op && child_op->opcode == OP_FILTER) {
                 /* HEAD(FILTER): early-termination filter — gather only
                  * the first N matching rows instead of all matches. */
-                ray_t* filter_input = exec_node(g, child_op->inputs[0]);
+                ray_t* filter_input = exec_node(g, op_child(g, child_op, 0));
                 if (!filter_input || RAY_IS_ERR(filter_input))
                     return filter_input;
 
@@ -1739,7 +1740,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 /* Swap table for predicate evaluation */
                 ray_t* saved_table = g->table;
                 g->table = ftbl;
-                ray_t* pred = exec_node(g, child_op->inputs[1]);
+                ray_t* pred = exec_node(g, op_child(g, child_op, 1));
                 g->table = saved_table;
 
                 if (!pred || RAY_IS_ERR(pred)) {
@@ -1755,7 +1756,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 /* Top-level statement GC catches intermediates. */
                 return result;
             } else {
-                input = exec_node(g, op->inputs[0]);
+                input = exec_node(g, op_child(g, op, 0));
             }
             if (!input || RAY_IS_ERR(input)) return input;
             if (input->type == RAY_TABLE) {
@@ -1853,7 +1854,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
 
         case OP_TAIL: {
             ray_op_ext_t* ext = find_ext(g, op->id);
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             int64_t n = ext ? ext->sym : 10;
             if (input->type == RAY_TABLE) {
@@ -2013,16 +2014,16 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_ALIAS: {
-            return exec_node(g, op->inputs[0]);
+            return exec_node(g, op_child(g, op, 0));
         }
 
         case OP_MATERIALIZE: {
-            return exec_node(g, op->inputs[0]);
+            return exec_node(g, op_child(g, op, 0));
         }
 
         case OP_SELECT: {
             /* Column projection: select/compute columns from input table */
-            ray_t* input = exec_node(g, op->inputs[0]);
+            ray_t* input = exec_node(g, op_child(g, op, 0));
             if (!input || RAY_IS_ERR(input)) return input;
             if (input->type != RAY_TABLE) {
                 ray_release(input);
@@ -2031,7 +2032,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             ray_op_ext_t* ext = find_ext(g, op->id);
             if (!ext) { ray_release(input); return ray_error("nyi", NULL); }
             uint8_t n_cols = ext->sort.n_cols;
-            ray_op_t** columns = ext->sort.columns;
+            uint32_t* columns = ext->sort.columns;
             ray_t* result = ray_table_new(n_cols);
 
             /* Set g->table so SCAN nodes inside expressions resolve correctly */
@@ -2039,9 +2040,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             g->table = input;
 
             for (uint8_t c = 0; c < n_cols; c++) {
-                if (columns[c]->opcode == OP_SCAN) {
+                ray_op_t* col_op = op_node(g, columns[c]);
+                if (col_op->opcode == OP_SCAN) {
                     /* Direct column reference — copy from input table */
-                    ray_op_ext_t* col_ext = find_ext(g, columns[c]->id);
+                    ray_op_ext_t* col_ext = find_ext(g, columns[c]);
                     if (!col_ext) continue;
                     int64_t name_id = col_ext->sym;
                     ray_t* src_col = ray_table_get_col(input, name_id);
@@ -2052,7 +2054,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                     }
                 } else {
                     /* Expression column — evaluate against input table */
-                    ray_t* vec = exec_node(g, columns[c]);
+                    ray_t* vec = exec_node(g, col_op);
                     if (!vec || RAY_IS_ERR(vec)) {
                         ray_release(result);
                         g->table = saved_table;
@@ -2091,7 +2093,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_EXPAND: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
             ray_t* result = exec_expand(g, op, src);
             ray_release(src);
@@ -2099,7 +2101,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_VAR_EXPAND: {
-            ray_t* start = exec_node(g, op->inputs[0]);
+            ray_t* start = exec_node(g, op_child(g, op, 0));
             if (!start || RAY_IS_ERR(start)) return start;
             ray_t* result = exec_var_expand(g, op, start);
             ray_release(start);
@@ -2107,8 +2109,8 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_SHORTEST_PATH: {
-            ray_t* src = exec_node(g, op->inputs[0]);
-            ray_t* dst = exec_node(g, op->inputs[1]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
+            ray_t* dst = exec_node(g, op_child(g, op, 1));
             if (!src || RAY_IS_ERR(src)) {
                 if (dst && !RAY_IS_ERR(dst)) ray_release(dst);
                 return src;
@@ -2133,9 +2135,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_DIJKSTRA: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
-            ray_t* dst = op->inputs[1] ? exec_node(g, op->inputs[1]) : NULL;
+            ray_op_t* dij_in1 = op_child(g, op, 1);
+            ray_t* dst = dij_in1 ? exec_node(g, dij_in1) : NULL;
             if (dst && RAY_IS_ERR(dst)) { ray_release(src); return dst; }
             ray_t* result = exec_dijkstra(g, op, src, dst);
             ray_release(src);
@@ -2156,7 +2159,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_DFS: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
             ray_t* result = exec_dfs(g, op, src);
             ray_release(src);
@@ -2180,7 +2183,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_RANDOM_WALK: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
             ray_t* result = exec_random_walk(g, op, src);
             ray_release(src);
@@ -2188,9 +2191,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_ASTAR: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
-            ray_t* dst = exec_node(g, op->inputs[1]);
+            ray_t* dst = exec_node(g, op_child(g, op, 1));
             if (!dst || RAY_IS_ERR(dst)) { ray_release(src); return dst; }
             ray_t* result = exec_astar(g, op, src, dst);
             ray_release(src); ray_release(dst);
@@ -2198,9 +2201,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_K_SHORTEST: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
-            ray_t* dst = exec_node(g, op->inputs[1]);
+            ray_t* dst = exec_node(g, op_child(g, op, 1));
             if (!dst || RAY_IS_ERR(dst)) { ray_release(src); return dst; }
             ray_t* result = exec_k_shortest(g, op, src, dst);
             ray_release(src); ray_release(dst);
@@ -2208,14 +2211,14 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
 
         case OP_ANN_RERANK: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
             ray_t* result = exec_ann_rerank(g, op, src);
             ray_release(src);
             return result;
         }
         case OP_KNN_RERANK: {
-            ray_t* src = exec_node(g, op->inputs[0]);
+            ray_t* src = exec_node(g, op_child(g, op, 0));
             if (!src || RAY_IS_ERR(src)) return src;
             ray_t* result = exec_knn_rerank(g, op, src);
             ray_release(src);
@@ -2407,9 +2410,9 @@ static bool op_streamable(uint16_t opc) {
  * Several streamable ops store extra operands in ext nodes rather than in
  * the standard inputs[] array.  These hidden children must be walked too:
  *   OP_SELECT  — ext->sort.columns[0..n_cols-1]
- *   OP_IF      — else branch: g->nodes[(uint32_t)(uintptr_t)ext->literal]
- *   OP_SUBSTR  — length arg:  g->nodes[(uint32_t)(uintptr_t)ext->literal]
- *   OP_REPLACE — replacement: g->nodes[(uint32_t)(uintptr_t)ext->literal]
+ *   OP_IF      — else branch: g->nodes[ext->third_in]
+ *   OP_SUBSTR  — length arg:  g->nodes[ext->third_in]
+ *   OP_REPLACE — replacement: g->nodes[ext->third_in]
  *   OP_CONCAT  — args 2+:    g->nodes[trail[i-2]] (uint32_t[] after ext) */
 static bool subtree_has_default_scan(ray_graph_t* g, ray_op_t* op, bool* ok,
                                      uint64_t* visited) {
@@ -2440,20 +2443,20 @@ static bool subtree_has_default_scan(ray_graph_t* g, ray_op_t* op, bool* ok,
     if (!op_streamable(opc)) { *ok = false; return false; }
     bool found = false;
     for (uint8_t i = 0; i < op->arity && i < 2; i++)
-        found |= subtree_has_default_scan(g, op->inputs[i], ok, visited);
+        found |= subtree_has_default_scan(g, op_child(g, op, i), ok, visited);
 
     /* Walk hidden operands stored in ext nodes */
     if (opc == OP_SELECT) {
         ray_op_ext_t* ext = find_ext(g, op->id);
         if (ext) {
             for (uint8_t c = 0; c < ext->sort.n_cols && *ok; c++)
-                found |= subtree_has_default_scan(g, ext->sort.columns[c], ok, visited);
+                found |= subtree_has_default_scan(g, op_node(g, ext->sort.columns[c]), ok, visited);
         }
     } else if (opc == OP_IF || opc == OP_SUBSTR || opc == OP_REPLACE) {
-        /* 3rd operand stored as node index in ext->literal */
+        /* 3rd operand stored as node index in ext->third_in */
         ray_op_ext_t* ext = find_ext(g, op->id);
         if (ext) {
-            uint32_t child_id = (uint32_t)(uintptr_t)ext->literal;
+            uint32_t child_id = ext->third_in;
             if (child_id < g->node_count)
                 found |= subtree_has_default_scan(g, &g->nodes[child_id], ok, visited);
         }
