@@ -647,6 +647,29 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     ray_op_ext_t* ext = find_ext(g, op->id);
     if (!ext) return ray_error("nyi", NULL);
 
+    /* Frame-spec validation (review 2.10): the compute path honors EXACTLY two
+     * frames — the whole partition (UNBOUNDED PRECEDING .. UNBOUNDED FOLLOWING)
+     * and the running frame (UNBOUNDED PRECEDING .. CURRENT ROW, ROWS mode).
+     * Numeric N_PRECEDING/N_FOLLOWING bounds and RANGE-mode CURRENT ROW were
+     * accepted but SILENTLY degraded to the running frame, yielding the wrong
+     * window.  Reject any unsupported frame LOUDLY instead.
+     *   - whole:   end == UNBOUNDED_FOLLOWING (ROWS == RANGE here, mode moot)
+     *   - running: end == CURRENT_ROW and ROWS mode
+     * Both require start == UNBOUNDED_PRECEDING. */
+    {
+        uint8_t fs = ext->window.frame_start;
+        uint8_t fe = ext->window.frame_end;
+        bool whole_frame   = (fs == RAY_BOUND_UNBOUNDED_PRECEDING &&
+                              fe == RAY_BOUND_UNBOUNDED_FOLLOWING);
+        bool running_frame = (fs == RAY_BOUND_UNBOUNDED_PRECEDING &&
+                              fe == RAY_BOUND_CURRENT_ROW &&
+                              ext->window.frame_type == RAY_FRAME_ROWS);
+        if (!whole_frame && !running_frame)
+            return ray_error("nyi", "unsupported window frame: only "
+                "ROWS BETWEEN UNBOUNDED PRECEDING AND {CURRENT ROW | "
+                "UNBOUNDED FOLLOWING} are honored");
+    }
+
     int64_t nrows = ray_table_nrows(tbl);
     int64_t ncols = ray_table_ncols(tbl);
     uint8_t n_part  = ext->window.n_part_keys;
