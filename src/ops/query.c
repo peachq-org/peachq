@@ -3921,8 +3921,10 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
     while (sp > 0) {
         ray_op_t* cur = stk[--sp];
         if (cur->opcode == OP_SCAN) { has_scan = 1; break; }
-        for (uint8_t a = 0; a < cur->arity && sp < 64; a++)
-            if (cur->inputs[a]) stk[sp++] = cur->inputs[a];
+        for (uint8_t a = 0; a < cur->arity && sp < 64; a++) {
+            ray_op_t* ch = op_child(g, cur, a);
+            if (ch) stk[sp++] = ch;
+        }
     }
     if (!has_scan) {
         ray_graph_free(g);
@@ -4796,8 +4798,10 @@ by_dict_done:
                                 reorder_safe = 0;
                                 break;
                             }
-                            for (uint8_t a = 0; a < cur->arity && sp < 64; a++)
-                                if (cur->inputs[a]) stk[sp++] = cur->inputs[a];
+                            for (uint8_t a = 0; a < cur->arity && sp < 64; a++) {
+                                ray_op_t* ch = op_child(g, cur, a);
+                                if (ch) stk[sp++] = ch;
+                            }
                         }
                         if (!has_scan) { all_ok = 0; break; }
                         compiled[i] = p;
