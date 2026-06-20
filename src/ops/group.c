@@ -3756,7 +3756,7 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                  * materializing the input vector), so recover the source type
                  * from the aggregation input op when the vector is absent. */
                 int8_t src_t = agg_col ? agg_col->type
-                             : (ext->agg_ins[a] ? ext->agg_ins[a]->out_type : 0);
+                             : (op_node(g, ext->agg_ins[a]) ? op_node(g, ext->agg_ins[a])->out_type : 0);
                 out_type = is_f64 ? RAY_F64 : (src_t == RAY_TIME ? RAY_TIME : RAY_I64);
                 break;
             }
@@ -3868,7 +3868,7 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
             }
         }
         /* Generate unique column name: base_name + agg suffix (e.g. "v1_sum") */
-        ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]);
         int64_t name_id;
         if (agg_ext && agg_ext->base.opcode == OP_SCAN) {
             /* Shared with exec_group_v2 (agg_engine.c) — parity by
@@ -4254,9 +4254,9 @@ static inline int64_t group_strlen_at_cached(const ray_t* col, int64_t row,
 static bool try_strlen_sumavg_input(ray_graph_t* g, ray_t* tbl,
                                     ray_op_t* input_op, ray_t** out_vec) {
     if (!g || !tbl || !input_op || !out_vec) return false;
-    if (input_op->opcode != OP_STRLEN || input_op->arity != 1 || !input_op->inputs[0])
+    if (input_op->opcode != OP_STRLEN || input_op->arity != 1 || !op_child(g, input_op, 0))
         return false;
-    ray_op_t* child = input_op->inputs[0];
+    ray_op_t* child = op_child(g, input_op, 0);
     ray_op_ext_t* child_ext = find_ext(g, child->id);
     if (!child_ext || child_ext->base.opcode != OP_SCAN) return false;
     ray_t* col = ray_table_get_col(tbl, child_ext->sym);
@@ -5127,7 +5127,7 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
     int has_stddev = 0;
     int64_t key_syms[8];
     for (uint8_t k = 0; k < n_keys && can_partition; k++) {
-        ray_op_ext_t* ke = find_ext(g, ext->keys[k]->id);
+        ray_op_ext_t* ke = find_ext(g, ext->keys[k]);
         if (!ke || ke->base.opcode != OP_SCAN) { can_partition = 0; break; }
         key_syms[k] = ke->sym;
     }
@@ -5148,7 +5148,7 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
         if (aop == OP_AVG) has_avg = 1;
         if (aop == OP_STDDEV || aop == OP_STDDEV_POP ||
             aop == OP_VAR || aop == OP_VAR_POP) has_stddev = 1;
-        ray_op_ext_t* ae = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ae = find_ext(g, ext->agg_ins[a]);
         if (!ae || ae->base.opcode != OP_SCAN) { can_partition = 0; break; }
         agg_syms[a] = ae->sym;
     }
@@ -5238,7 +5238,7 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
         int64_t needed[16];
         int n_needed = 0;
         for (uint8_t k = 0; k < n_keys; k++) {
-            ray_op_ext_t* ke = find_ext(g, ext->keys[k]->id);
+            ray_op_ext_t* ke = find_ext(g, ext->keys[k]);
             if (ke && ke->base.opcode == OP_SCAN) {
                 int dup = 0;
                 for (int i = 0; i < n_needed; i++)
@@ -5247,7 +5247,7 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
             }
         }
         for (uint8_t a = 0; a < n_aggs; a++) {
-            ray_op_ext_t* ae = find_ext(g, ext->agg_ins[a]->id);
+            ray_op_ext_t* ae = find_ext(g, ext->agg_ins[a]);
             if (ae && ae->base.opcode == OP_SCAN) {
                 int dup = 0;
                 for (int i = 0; i < n_needed; i++)
@@ -5410,7 +5410,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     if (g->selection && n_keys == 1 && n_aggs > 0 && nrows > 0) {
         int64_t cnt_sym_probe = ray_sym_intern("_count", 6);
         ray_t*  cnt_col_probe = ray_table_get_col(tbl, cnt_sym_probe);
-        ray_op_ext_t* key_ext_probe = find_ext(g, ext->keys[0]->id);
+        ray_op_ext_t* key_ext_probe = find_ext(g, ext->keys[0]);
         int64_t src_sym_probe = ray_sym_intern("_src", 4);
         if (cnt_col_probe && cnt_col_probe->type == RAY_I64 &&
             key_ext_probe && key_ext_probe->base.opcode == OP_SCAN &&
@@ -5435,7 +5435,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                 bool needs_weighting = false;
                 for (uint8_t a = 0; a < n_aggs; a++) {
                     uint16_t aop = ext->agg_ops[a];
-                    ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
+                    ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]);
                     if (aop == OP_COUNT) { needs_weighting = true; break; }
                     if (aop == OP_SUM && agg_ext &&
                         agg_ext->base.opcode == OP_SCAN &&
@@ -5454,7 +5454,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         int64_t cnt_sym = ray_sym_intern("_count", 6);
         ray_t* cnt_col = ray_table_get_col(tbl, cnt_sym);
         if (cnt_col && cnt_col->type == RAY_I64) {
-            ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]->id);
+            ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]);
             int64_t src_sym = ray_sym_intern("_src", 4);
             if (key_ext && key_ext->base.opcode == OP_SCAN &&
                 key_ext->sym == src_sym) {
@@ -5464,7 +5464,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                 bool all_compat = true;
                 for (uint8_t a = 0; a < n_aggs; a++) {
                     uint16_t aop = ext->agg_ops[a];
-                    ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
+                    ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]);
                     if (aop == OP_COUNT) continue;
                     if (aop == OP_SUM && agg_ext &&
                         agg_ext->base.opcode == OP_SCAN &&
@@ -5534,7 +5534,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     uint8_t key_owned[vla_keys]; /* 1 = we allocated via exec_node, must free */
     memset(key_owned, 0, vla_keys * sizeof(uint8_t));
     for (uint8_t k = 0; k < n_keys; k++) {
-        ray_op_t* key_op = ext->keys[k];
+        ray_op_t* key_op = op_node(g, ext->keys[k]);
         ray_op_ext_t* key_ext = find_ext(g, key_op->id);
         if (key_ext && key_ext->base.opcode == OP_SCAN) {
             key_vecs[k] = ray_table_get_col(tbl, key_ext->sym);
@@ -5578,7 +5578,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     memset(agg_linear, 0, vla_aggs * sizeof(agg_linear_t));
 
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_op_t* agg_input_op = ext->agg_ins[a];
+        ray_op_t* agg_input_op = op_node(g, ext->agg_ins[a]);
         ray_op_ext_t* agg_ext = find_ext(g, agg_input_op->id);
 
         /* SUM/AVG(scan +/- const): aggregate base scan and apply bias at emit. */
@@ -5640,8 +5640,8 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
          * above for the y-side input.  Same OP_SCAN / OP_CONST / expr
          * fallback ladder, separate ownership flag because each side
          * may have come from a different source. */
-        if (ext->agg_ins2 && ext->agg_ins2[a]) {
-            ray_op_t* agg_input_op2 = ext->agg_ins2[a];
+        if (ext->agg_ins2 && ext->agg_ins2[a] != RAY_OP_NONE) {
+            ray_op_t* agg_input_op2 = op_node(g, ext->agg_ins2[a]);
             ray_op_ext_t* agg_ext2 = find_ext(g, agg_input_op2->id);
             if (agg_ext2 && agg_ext2->base.opcode == OP_SCAN) {
                 agg_vecs2[a] = ray_table_get_col(tbl, agg_ext2->sym);
@@ -6705,7 +6705,7 @@ da_path:;
                     write_col_i64(ray_data(key_col), gi, key_val, src_col->type, key_col->attrs);
                     gi++;
                 }
-                ray_op_ext_t* key_ext = find_ext(g, ext->keys[k]->id);
+                ray_op_ext_t* key_ext = find_ext(g, ext->keys[k]);
                 int64_t name_id = key_ext ? key_ext->sym : (int64_t)k;
                 result = ray_table_add_col(result, name_id, key_col);
                 ray_release(key_col);
@@ -7062,7 +7062,7 @@ dyn_dense_done:
 #undef DYN_DENSE_SUM_ROW
                     }
 
-                    ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]->id);
+                    ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]);
                     int64_t name_id = key_ext ? key_ext->sym : 0;
                     result = ray_table_add_col(result, name_id, key_col);
                     ray_release(key_col);
@@ -7265,7 +7265,7 @@ dyn_dense_done:
 
                     scratch_free(range_sum_hdr);
                     scratch_free(cnt_hdr);
-                    ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]->id);
+                    ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]);
                     int64_t name_id = key_ext ? key_ext->sym : 0;
                     result = ray_table_add_col(result, name_id, key_col);
                     ray_release(key_col);
@@ -7490,7 +7490,7 @@ dyn_dense_done:
                 }
             }
             sparse_i64_free(&heavy_ht);
-            ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]->id);
+            ray_op_ext_t* key_ext = find_ext(g, ext->keys[0]);
             int64_t name_id = key_ext ? key_ext->sym : 0;
             result = ray_table_add_col(result, name_id, key_col);
             ray_release(key_col);
@@ -8285,7 +8285,7 @@ v2_emit:;
         /* Add key columns to result */
         for (uint8_t k = 0; k < n_keys; k++) {
             if (!key_cols[k]) continue;
-            ray_op_ext_t* key_ext = find_ext(g, ext->keys[k]->id);
+            ray_op_ext_t* key_ext = find_ext(g, ext->keys[k]);
             int64_t name_id = key_ext ? key_ext->sym : k;
             result = ray_table_add_col(result, name_id, key_cols[k]);
             ray_release(key_cols[k]);
@@ -8295,7 +8295,7 @@ v2_emit:;
         for (uint8_t a = 0; a < n_aggs; a++) {
             if (!agg_cols[a]) continue;
             uint16_t agg_op = ext->agg_ops[a];
-            ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
+            ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]);
             int64_t name_id;
             if (agg_ext && agg_ext->base.opcode == OP_SCAN) {
                 ray_t* name_atom = ray_sym_str(agg_ext->sym);
@@ -8419,7 +8419,7 @@ sequential_fallback:;
             }
         }
 
-        ray_op_ext_t* key_ext = find_ext(g, ext->keys[k]->id);
+        ray_op_ext_t* key_ext = find_ext(g, ext->keys[k]);
         int64_t name_id = key_ext ? key_ext->sym : k;
         result = ray_table_add_col(result, name_id, new_col);
         ray_release(new_col);
@@ -8578,7 +8578,7 @@ sequential_fallback:;
                  * materializing the input vector), so recover the source type
                  * from the aggregation input op when the vector is absent. */
                 int8_t src_t = agg_col ? agg_col->type
-                             : (ext->agg_ins[a] ? ext->agg_ins[a]->out_type : 0);
+                             : (op_node(g, ext->agg_ins[a]) ? op_node(g, ext->agg_ins[a])->out_type : 0);
                 out_type = is_f64 ? RAY_F64 : (src_t == RAY_TIME ? RAY_TIME : RAY_I64);
                 break;
             }
@@ -8707,7 +8707,7 @@ sequential_fallback:;
 
     med_attach:;
         /* Generate unique column name */
-        ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]);
         int64_t name_id;
         if (agg_ext && agg_ext->base.opcode == OP_SCAN) {
             /* Shared with exec_group_v2 (agg_engine.c) — parity by
