@@ -36,8 +36,8 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     /* Factorized-EXPAND result (synthetic _src key + _count weight column) needs
      * exec_group's dedicated factorized handling (COUNT/SUM(_count) weight by
      * _count). v2 would compute a plain count — defer the whole shape. */
-    if (ext->n_keys == 1 && ext->keys[0] && ext->keys[0]->opcode == OP_SCAN) {
-        ray_op_ext_t* ke = find_ext(g, ext->keys[0]->id);
+    if (ext->n_keys == 1 && op_node(g, ext->keys[0]) && op_node(g, ext->keys[0])->opcode == OP_SCAN) {
+        ray_op_ext_t* ke = find_ext(g, ext->keys[0]);
         if (ke && ke->sym == ray_sym_intern("_src", 4)) {
             ray_t* cnt = ray_table_get_col(tbl, ray_sym_intern("_count", 6));
             if (cnt && cnt->type == RAY_I64) return false;
@@ -46,7 +46,7 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     /* every key must be a plain column scan of a supported type */
     for (uint8_t k = 0; k < ext->n_keys; k++) {
-        ray_op_t* key = ext->keys[k];
+        ray_op_t* key = op_node(g, ext->keys[k]);
         if (!key || key->opcode != OP_SCAN) return false;
         ray_op_ext_t* kext = find_ext(g, key->id);
         ray_t* kc = kext ? ray_table_get_col(tbl, kext->sym) : NULL;
@@ -64,16 +64,16 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         if (ext->agg_k && ext->agg_k[a]) {
             if (ext->agg_ops[a] != OP_TOP_N && ext->agg_ops[a] != OP_BOT_N) return false;
             if (ext->agg_k[a] < 1) return false;
-            ray_op_t* in = ext->agg_ins[a];
+            ray_op_t* in = op_node(g, ext->agg_ins[a]);
             if (!in || in->opcode != OP_SCAN) return false;
             ray_op_ext_t* ie = find_ext(g, in->id);
             ray_t* ic = ie ? ray_table_get_col(tbl, ie->sym) : NULL;
             if (!ic || !agg_resolve(ext->agg_ops[a], ic->type)) return false;
             continue;  /* admitted */
         }
-        if (ext->agg_ins2 && ext->agg_ins2[a]) {
+        if (ext->agg_ins2 && ext->agg_ins2[a] != RAY_OP_NONE) {
             if (ext->agg_ops[a] != OP_PEARSON_CORR) return false; /* only pearson in 2b */
-            ray_op_t* xin = ext->agg_ins[a]; ray_op_t* yin = ext->agg_ins2[a];
+            ray_op_t* xin = op_node(g, ext->agg_ins[a]); ray_op_t* yin = op_node(g, ext->agg_ins2[a]);
             if (!xin || xin->opcode != OP_SCAN || !yin || yin->opcode != OP_SCAN) return false;
             ray_op_ext_t* xe = find_ext(g, xin->id); ray_op_ext_t* ye = find_ext(g, yin->id);
             ray_t* xc = xe ? ray_table_get_col(tbl, xe->sym) : NULL;
@@ -90,7 +90,7 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             if (!agg_resolve(OP_COUNT, RAY_I64)) return false;
             continue;
         }
-        ray_op_t* in = ext->agg_ins[a];
+        ray_op_t* in = op_node(g, ext->agg_ins[a]);
         if (!in || in->opcode != OP_SCAN) return false;
         ray_op_ext_t* ie = find_ext(g, in->id);
         ray_t* ic = (ie) ? ray_table_get_col(tbl, ie->sym) : NULL;
@@ -699,7 +699,7 @@ static ray_t* exec_group_v2_parallel(
     const void* val2_data[16]; int8_t val2_types[16]; bool val2_hasnull[16]; uint8_t val2_esz[16];
     int64_t agg_syms[16];
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]);
         agg_syms[a] = ie->sym;
         ray_t* vc = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
         val_data[a]    = vc ? ray_data(vc) : NULL;
@@ -707,8 +707,8 @@ static ray_t* exec_group_v2_parallel(
         val_hasnull[a] = vc ? ((vc->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
         val_esz[a]     = vc ? col_esz(vc) : 0;
         /* Binary agg (pearson): resolve the y-side column from agg_ins2[a]. */
-        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a])
-            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a]->id)->sym) : NULL;
+        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a] != RAY_OP_NONE)
+            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a])->sym) : NULL;
         val2_data[a]    = vc2 ? ray_data(vc2) : NULL;
         val2_types[a]   = vc2 ? vc2->type : RAY_I64;
         val2_hasnull[a] = vc2 ? ((vc2->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
@@ -1019,7 +1019,7 @@ static ray_t* exec_group_v2_parallel_dense(
     /* Re-derive the AoS layout (same order as exec_group_v2). */
     const agg_vtable_t* vts[16]; size_t off[16]; size_t block = 0;
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]);
         ray_t* vc = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
         int8_t in_type = vc ? vc->type : RAY_I64;
         vts[a] = agg_resolve(ext->agg_ops[a], in_type);
@@ -1034,15 +1034,15 @@ static ray_t* exec_group_v2_parallel_dense(
     const void* val2_data[16]; int8_t val2_types[16]; bool val2_hasnull[16]; uint8_t val2_esz[16];
     int64_t agg_syms[16];
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]);
         agg_syms[a] = ie->sym;
         ray_t* vc = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
         val_data[a]    = vc ? ray_data(vc) : NULL;
         val_types[a]   = vc ? vc->type : RAY_I64;
         val_hasnull[a] = vc ? ((vc->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
         val_esz[a]     = vc ? col_esz(vc) : 0;
-        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a])
-            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a]->id)->sym) : NULL;
+        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a] != RAY_OP_NONE)
+            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a])->sym) : NULL;
         val2_data[a]    = vc2 ? ray_data(vc2) : NULL;
         val2_types[a]   = vc2 ? vc2->type : RAY_I64;
         val2_hasnull[a] = vc2 ? ((vc2->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
@@ -1505,15 +1505,15 @@ static ray_t* exec_group_v2_parallel_smallhash(
     const void* val2_data[16]; int8_t val2_types[16]; bool val2_hasnull[16]; uint8_t val2_esz[16];
     int64_t agg_syms[16];
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]);
         agg_syms[a] = ie->sym;
         ray_t* vc = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
         val_data[a]    = vc ? ray_data(vc) : NULL;
         val_types[a]   = vc ? vc->type : RAY_I64;
         val_hasnull[a] = vc ? ((vc->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
         val_esz[a]     = vc ? col_esz(vc) : 0;
-        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a])
-            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a]->id)->sym) : NULL;
+        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a] != RAY_OP_NONE)
+            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a])->sym) : NULL;
         val2_data[a]    = vc2 ? ray_data(vc2) : NULL;
         val2_types[a]   = vc2 ? vc2->type : RAY_I64;
         val2_hasnull[a] = vc2 ? ((vc2->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
@@ -2044,15 +2044,15 @@ static ray_t* exec_group_v2_parallel_radix(
     const void* val2_data[16]; int8_t val2_types[16]; bool val2_hasnull[16]; uint8_t val2_esz[16];
     int64_t agg_syms[16];
     for (uint8_t a = 0; a < n_aggs; a++) {
-        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]);
         agg_syms[a] = ie->sym;
         ray_t* vc = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
         val_data[a]    = vc ? ray_data(vc) : NULL;
         val_types[a]   = vc ? vc->type : RAY_I64;
         val_hasnull[a] = vc ? ((vc->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
         val_esz[a]     = vc ? col_esz(vc) : 0;
-        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a])
-            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a]->id)->sym) : NULL;
+        ray_t* vc2 = (ext->agg_ins2 && ext->agg_ins2[a] != RAY_OP_NONE)
+            ? ray_table_get_col(tbl, find_ext(g, ext->agg_ins2[a])->sym) : NULL;
         val2_data[a]    = vc2 ? ray_data(vc2) : NULL;
         val2_types[a]   = vc2 ? vc2->type : RAY_I64;
         val2_hasnull[a] = vc2 ? ((vc2->attrs & RAY_ATTR_HAS_NULLS) != 0) : false;
@@ -2275,7 +2275,7 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
 
     ray_t* key_cols[16]; int64_t key_syms[16];
     for (uint8_t k = 0; k < ext->n_keys; k++) {
-        ray_op_ext_t* kext = find_ext(g, ext->keys[k]->id);
+        ray_op_ext_t* kext = find_ext(g, ext->keys[k]);
         key_cols[k] = ray_table_get_col(tbl, kext->sym);
         key_syms[k] = kext->sym;
     }
@@ -2283,7 +2283,7 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     /* Precompute AoS state layout for the admitted aggregates. */
     const agg_vtable_t* vts[16]; size_t off[16]; size_t block = 0;
     for (uint8_t a = 0; a < ext->n_aggs; a++) {
-        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]);
         ray_t* vc = (ext->agg_ops[a] != OP_COUNT) ? ray_table_get_col(tbl, ie->sym) : NULL;
         int8_t in_type = vc ? vc->type : RAY_I64;
         vts[a] = agg_resolve(ext->agg_ops[a], in_type);
@@ -2433,11 +2433,11 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     }
 
     for (uint8_t a = 0; a < ext->n_aggs; a++) {
-        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]->id);
+        ray_op_ext_t* ie = find_ext(g, ext->agg_ins[a]);
         int64_t kparam = (ext->agg_k ? ext->agg_k[a] : 0);
         ray_t* col;
-        if (ext->agg_ins2 && ext->agg_ins2[a]) {       /* binary agg (pearson) */
-            ray_op_ext_t* ye = find_ext(g, ext->agg_ins2[a]->id);
+        if (ext->agg_ins2 && ext->agg_ins2[a] != RAY_OP_NONE) {       /* binary agg (pearson) */
+            ray_op_ext_t* ye = find_ext(g, ext->agg_ins2[a]);
             ray_t* x_col = ray_table_get_col(tbl, ie->sym);
             ray_t* y_col = ray_table_get_col(tbl, ye->sym);
             const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], x_col->type);
@@ -2473,16 +2473,16 @@ static ray_t* agg_build_compact(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     /* Collect the distinct syms this group needs from the source table. */
     int64_t want[48]; uint8_t n_want = 0;   /* <=16 keys + <=16 aggs*2 inputs */
     for (uint8_t k = 0; k < ext->n_keys; k++) {
-        int64_t s = find_ext(g, ext->keys[k]->id)->sym;
+        int64_t s = find_ext(g, ext->keys[k])->sym;
         bool seen = false;
         for (uint8_t i = 0; i < n_want; i++) if (want[i] == s) { seen = true; break; }
         if (!seen) want[n_want++] = s;
     }
     for (uint8_t a = 0; a < ext->n_aggs; a++) {
-        if (ext->agg_ops[a] == OP_COUNT && !(ext->agg_ins && ext->agg_ins[a]))
+        if (ext->agg_ops[a] == OP_COUNT && !(ext->agg_ins && ext->agg_ins[a] != RAY_OP_NONE))
             continue;                       /* COUNT needs no typed input */
-        ray_op_t* ins[2] = { ext->agg_ins ? ext->agg_ins[a] : NULL,
-                             ext->agg_ins2 ? ext->agg_ins2[a] : NULL };
+        ray_op_t* ins[2] = { ext->agg_ins ? op_node(g, ext->agg_ins[a]) : NULL,
+                             ext->agg_ins2 ? op_node(g, ext->agg_ins2[a]) : NULL };
         for (int j = 0; j < 2; j++) {
             if (!ins[j]) continue;
             int64_t s = find_ext(g, ins[j]->id)->sym;
