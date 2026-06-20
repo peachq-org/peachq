@@ -558,8 +558,8 @@ static ray_t* exec_like_input(ray_graph_t* g, ray_op_t* input_op) {
 }
 
 ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_like_input(g, op->inputs[0]);
-    ray_t* pat_v = exec_node(g, op->inputs[1]);
+    ray_t* input = exec_like_input(g, op_child(g, op, 0));
+    ray_t* pat_v = exec_node(g, op_child(g, op, 1));
     if (!input || RAY_IS_ERR(input)) { if (pat_v && !RAY_IS_ERR(pat_v)) ray_release(pat_v); return input; }
     if (!pat_v || RAY_IS_ERR(pat_v)) { ray_release(input); return pat_v; }
 
@@ -749,8 +749,8 @@ ray_t* exec_like(ray_graph_t* g, ray_op_t* op) {
 /* Case-insensitive LIKE — same syntax as `like`, ASCII-fold both sides. */
 
 ray_t* exec_ilike(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_node(g, op->inputs[0]);
-    ray_t* pat_v = exec_node(g, op->inputs[1]);
+    ray_t* input = exec_node(g, op_child(g, op, 0));
+    ray_t* pat_v = exec_node(g, op_child(g, op, 1));
     if (!input || RAY_IS_ERR(input)) { if (pat_v && !RAY_IS_ERR(pat_v)) ray_release(pat_v); return input; }
     if (!pat_v || RAY_IS_ERR(pat_v)) { ray_release(input); return pat_v; }
 
@@ -838,7 +838,7 @@ ray_t* exec_ilike(ray_graph_t* g, ray_op_t* op) {
 
 /* UPPER / LOWER / TRIM — unary SYM/STR → SYM/STR */
 ray_t* exec_string_unary(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_node(g, op->inputs[0]);
+    ray_t* input = exec_node(g, op_child(g, op, 0));
     if (!input || RAY_IS_ERR(input)) return input;
 
     int64_t len = input->len;
@@ -920,7 +920,7 @@ ray_t* exec_string_unary(ray_graph_t* g, ray_op_t* op) {
 
 /* LENGTH — SYM → I64 */
 ray_t* exec_strlen(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_node(g, op->inputs[0]);
+    ray_t* input = exec_node(g, op_child(g, op, 0));
     if (!input || RAY_IS_ERR(input)) return input;
 
     int64_t len = input->len;
@@ -958,15 +958,14 @@ ray_t* exec_strlen(ray_graph_t* g, ray_op_t* op) {
 
 /* SUBSTR(str, start, len) — 1-based start */
 ray_t* exec_substr(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_node(g, op->inputs[0]);
-    ray_t* start_v = exec_node(g, op->inputs[1]);
+    ray_t* input = exec_node(g, op_child(g, op, 0));
+    ray_t* start_v = exec_node(g, op_child(g, op, 1));
     if (!input || RAY_IS_ERR(input)) { if (start_v && !RAY_IS_ERR(start_v)) ray_release(start_v); return input; }
     if (!start_v || RAY_IS_ERR(start_v)) { ray_release(input); return start_v; }
 
-    /* Get len arg from ext node's literal field */
+    /* Get len arg from ext node's third input id */
     ray_op_ext_t* ext = find_ext(g, op->id);
-    uint32_t len_id = (uint32_t)(uintptr_t)ext->literal;
-    ray_t* len_v = exec_node(g, &g->nodes[len_id]);
+    ray_t* len_v = exec_node(g, op_node(g, ext->third_in));
     if (!len_v || RAY_IS_ERR(len_v)) { ray_release(input); ray_release(start_v); return len_v; }
 
     int64_t nrows = input->len;
@@ -1065,14 +1064,13 @@ ray_t* exec_substr(ray_graph_t* g, ray_op_t* op) {
 
 /* REPLACE(str, from, to) */
 ray_t* exec_replace(ray_graph_t* g, ray_op_t* op) {
-    ray_t* input = exec_node(g, op->inputs[0]);
-    ray_t* from_v = exec_node(g, op->inputs[1]);
+    ray_t* input = exec_node(g, op_child(g, op, 0));
+    ray_t* from_v = exec_node(g, op_child(g, op, 1));
     if (!input || RAY_IS_ERR(input)) { if (from_v && !RAY_IS_ERR(from_v)) ray_release(from_v); return input; }
     if (!from_v || RAY_IS_ERR(from_v)) { ray_release(input); return from_v; }
 
     ray_op_ext_t* ext = find_ext(g, op->id);
-    uint32_t to_id = (uint32_t)(uintptr_t)ext->literal;
-    ray_t* to_v = exec_node(g, &g->nodes[to_id]);
+    ray_t* to_v = exec_node(g, op_node(g, ext->third_in));
     if (!to_v || RAY_IS_ERR(to_v)) { ray_release(input); ray_release(from_v); return to_v; }
 
     /* from_v and to_v should be string constants (SYM atoms) */
@@ -1185,8 +1183,8 @@ ray_t* exec_concat(ray_graph_t* g, ray_op_t* op) {
         if (!args) return ray_error("oom", NULL);
     }
 
-    args[0] = exec_node(g, op->inputs[0]);
-    args[1] = exec_node(g, op->inputs[1]);
+    args[0] = exec_node(g, op_child(g, op, 0));
+    args[1] = exec_node(g, op_child(g, op, 1));
     uint32_t* trail = (uint32_t*)((char*)(ext + 1));
     for (int i = 2; i < n_args; i++) {
         args[i] = exec_node(g, &g->nodes[trail[i - 2]]);
