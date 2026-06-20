@@ -27,6 +27,17 @@
 #include "mem/heap.h"
 #include <string.h>
 
+/* Local accessors mirroring ops/internal.h.  idiom.c includes "opt.h" (which
+ * provides a non-static find_ext); including internal.h here would redefine
+ * find_ext as static inline.  So we copy the id->node accessors locally, the
+ * same way opt.c does. */
+static inline ray_op_t* op_node(ray_graph_t* g, uint32_t id) {
+    return id == RAY_OP_NONE ? NULL : &g->nodes[id];
+}
+static inline ray_op_t* op_child(ray_graph_t* g, const ray_op_t* op, int i) {
+    return op_node(g, op->in_id[i]);
+}
+
 #define RAY_IDIOM_OPCODE_CAP 128
 #define RAY_IDIOM_MAX_ROWS    64
 
@@ -38,19 +49,19 @@
 /* (count (distinct v)) → OP_COUNT_DISTINCT(v)
  *
  * node     = OP_COUNT
- * node->inputs[0] = OP_DISTINCT
- * Returns  OP_COUNT_DISTINCT(distinct->inputs[0])
+ * node's input[0] = OP_DISTINCT
+ * Returns  OP_COUNT_DISTINCT(distinct's input[0])
  */
 static ray_op_t* rw_count_distinct(ray_graph_t* g, ray_op_t* node) {
-    ray_op_t* distinct = node->inputs[0];
-    if (!distinct || !distinct->inputs[0]) return NULL;
-    ray_op_t* src = distinct->inputs[0];
+    ray_op_t* distinct = op_child(g, node, 0);
+    if (!distinct || !op_child(g, distinct, 0)) return NULL;
+    ray_op_t* src = op_child(g, distinct, 0);
 
     ray_op_t* repl = graph_alloc_node_opt(g);
     if (!repl) return NULL;
     repl->opcode    = OP_COUNT_DISTINCT;
     repl->arity     = 1;
-    repl->inputs[0] = src;
+    repl->in_id[0]  = src ? src->id : RAY_OP_NONE;
     repl->out_type  = RAY_I64;
     repl->est_rows  = 1;
     return repl;
@@ -61,15 +72,15 @@ static ray_op_t* rw_count_distinct(ray_graph_t* g, ray_op_t* node) {
  * letting the orphaned sort/reverse node be swept by pass_dce.
  */
 static ray_op_t* rw_count_passthrough(ray_graph_t* g, ray_op_t* node) {
-    ray_op_t* inner = node->inputs[0];
-    if (!inner || !inner->inputs[0]) return NULL;
-    ray_op_t* src = inner->inputs[0];
+    ray_op_t* inner = op_child(g, node, 0);
+    if (!inner || !op_child(g, inner, 0)) return NULL;
+    ray_op_t* src = op_child(g, inner, 0);
 
     ray_op_t* repl = graph_alloc_node_opt(g);
     if (!repl) return NULL;
     repl->opcode    = OP_COUNT;
     repl->arity     = 1;
-    repl->inputs[0] = src;
+    repl->in_id[0]  = src ? src->id : RAY_OP_NONE;
     repl->out_type  = RAY_I64;
     repl->est_rows  = 1;
     return repl;
@@ -102,11 +113,11 @@ static ray_t* scan_source_col(ray_graph_t* g, ray_op_t* src) {
    its out_attrs (if tracked) or out_type+constness. Returns false on
    uncertainty (safe default — slow path runs). */
 static bool pre_no_nulls_on_asc_input(ray_graph_t* g, ray_op_t* node) {
-    /* node = OP_FIRST (or OP_LAST); node->inputs[0] = OP_ASC;
-       inspect node->inputs[0]->inputs[0] (the source vector). */
-    ray_op_t* asc = node->inputs[0];
-    if (!asc || !asc->inputs[0]) return false;
-    ray_op_t* src = asc->inputs[0];
+    /* node = OP_FIRST (or OP_LAST); node's input[0] = OP_ASC;
+       inspect the OP_ASC's input[0] (the source vector). */
+    ray_op_t* asc = op_child(g, node, 0);
+    if (!asc || !op_child(g, asc, 0)) return false;
+    ray_op_t* src = op_child(g, asc, 0);
 
     /* OP_CONST: read the literal from the ext data and check its attrs.
        For other opcodes (computed inputs), bail — false negative is fine. */
@@ -134,15 +145,15 @@ static bool pre_no_nulls_on_asc_input(ray_graph_t* g, ray_op_t* node) {
  * OP_MIN skips nulls and returns smallest non-null.  The precondition
  * pre_no_nulls_on_asc_input ensures we only rewrite when null-free. */
 static ray_op_t* rw_first_asc_to_min(ray_graph_t* g, ray_op_t* node) {
-    ray_op_t* asc = node->inputs[0];
-    if (!asc || !asc->inputs[0]) return NULL;
-    ray_op_t* src = asc->inputs[0];
+    ray_op_t* asc = op_child(g, node, 0);
+    if (!asc || !op_child(g, asc, 0)) return NULL;
+    ray_op_t* src = op_child(g, asc, 0);
 
     ray_op_t* repl = graph_alloc_node_opt(g);
     if (!repl) return NULL;
     repl->opcode    = OP_MIN;
     repl->arity     = 1;
-    repl->inputs[0] = src;
+    repl->in_id[0]  = src ? src->id : RAY_OP_NONE;
     repl->out_type  = src->out_type;
     repl->est_rows  = 1;
     return repl;
@@ -152,15 +163,15 @@ static ray_op_t* rw_first_asc_to_min(ray_graph_t* g, ray_op_t* node) {
  * xasc puts nulls first, so last(asc(null-free)) = largest element;
  * OP_MAX also returns the largest non-null element — semantics match. */
 static ray_op_t* rw_last_asc_to_max(ray_graph_t* g, ray_op_t* node) {
-    ray_op_t* asc = node->inputs[0];
-    if (!asc || !asc->inputs[0]) return NULL;
-    ray_op_t* src = asc->inputs[0];
+    ray_op_t* asc = op_child(g, node, 0);
+    if (!asc || !op_child(g, asc, 0)) return NULL;
+    ray_op_t* src = op_child(g, asc, 0);
 
     ray_op_t* repl = graph_alloc_node_opt(g);
     if (!repl) return NULL;
     repl->opcode    = OP_MAX;
     repl->arity     = 1;
-    repl->inputs[0] = src;
+    repl->in_id[0]  = src ? src->id : RAY_OP_NONE;
     repl->out_type  = src->out_type;
     repl->est_rows  = 1;
     return repl;
@@ -218,7 +229,8 @@ static ray_op_t* try_rewrite(ray_graph_t* g, ray_op_t* node) {
     int idx = first_idiom[node->opcode];
     while (idx >= 0) {
         const ray_idiom_t* row = &ray_idioms[idx];
-        if (node->inputs[0] && node->inputs[0]->opcode == row->child0_op) {
+        ray_op_t* c0 = op_child(g, node, 0);
+        if (c0 && c0->opcode == row->child0_op) {
             if (!row->pre || row->pre(g, node)) {
                 ray_op_t* repl = row->rewrite(g, node);
                 if (repl) {
@@ -276,8 +288,9 @@ ray_op_t* ray_idiom_pass(ray_graph_t* g, ray_op_t* root) {
         ray_op_t* n = &g->nodes[nid];
         if (n->flags & OP_FLAG_DEAD) continue;
         for (int i = 0; i < n->arity && i < 2; i++) {
-            if (n->inputs[i] && sp1 < (int)cap)
-                stk1[sp1++] = n->inputs[i]->id;
+            ray_op_t* ci = op_child(g, n, i);
+            if (ci && sp1 < (int)cap)
+                stk1[sp1++] = ci->id;
         }
     }
 

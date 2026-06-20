@@ -871,8 +871,8 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
     memset(r_key_vecs, 0, key_slots * sizeof(ray_t*));
 
     for (uint8_t k = 0; k < n_keys; k++) {
-        ray_op_ext_t* lk = find_ext(g, ext->join.left_keys[k]->id);
-        ray_op_ext_t* rk = find_ext(g, ext->join.right_keys[k]->id);
+        ray_op_ext_t* lk = find_ext(g, ext->join.left_keys[k]);
+        ray_op_ext_t* rk = find_ext(g, ext->join.right_keys[k]);
         if (lk && lk->base.opcode == OP_SCAN)
             l_key_vecs[k] = ray_table_get_col(left_table, lk->sym);
         if (rk && rk->base.opcode == OP_SCAN)
@@ -1388,7 +1388,7 @@ join_gather:;
         if (!col) continue;
         bool is_key = false;
         for (uint8_t k = 0; k < n_keys; k++) {
-            ray_op_ext_t* rk = find_ext(g, ext->join.right_keys[k]->id);
+            ray_op_ext_t* rk = find_ext(g, ext->join.right_keys[k]);
             if (rk && rk->base.opcode == OP_SCAN && rk->sym == name_id) {
                 is_key = true; break;
             }
@@ -1551,8 +1551,8 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
     memset(r_key_vecs, 0, n_keys * sizeof(ray_t*));
 
     for (uint8_t k = 0; k < n_keys; k++) {
-        ray_op_ext_t* lk = find_ext(g, ext->join.left_keys[k]->id);
-        ray_op_ext_t* rk = find_ext(g, ext->join.right_keys[k]->id);
+        ray_op_ext_t* lk = find_ext(g, ext->join.left_keys[k]);
+        ray_op_ext_t* rk = find_ext(g, ext->join.right_keys[k]);
         if (lk && lk->base.opcode == OP_SCAN)
             l_key_vecs[k] = ray_table_get_col(left_table, lk->sym);
         if (rk && rk->base.opcode == OP_SCAN)
@@ -1760,7 +1760,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     int64_t right_n = ray_table_nrows(right_table);
 
     /* Resolve time key */
-    ray_op_ext_t* time_ext = find_ext(g, ext->asof.time_key->id);
+    ray_op_ext_t* time_ext = find_ext(g, ext->asof.time_key);
     if (!time_ext || time_ext->base.opcode != OP_SCAN)
         return ray_error("nyi", NULL);
     int64_t time_sym = time_ext->sym;
@@ -1768,7 +1768,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     /* Resolve equality keys */
     int64_t eq_syms[256];
     for (uint8_t k = 0; k < n_eq; k++) {
-        ray_op_ext_t* ek = find_ext(g, ext->asof.eq_keys[k]->id);
+        ray_op_ext_t* ek = find_ext(g, ext->asof.eq_keys[k]);
         if (!ek || ek->base.opcode != OP_SCAN)
             return ray_error("nyi", NULL);
         eq_syms[k] = ek->sym;
