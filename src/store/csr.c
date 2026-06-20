@@ -44,7 +44,12 @@ typedef struct {
     int64_t row;  /* original row index for rowmap */
 } edge_pair_t;
 
-/* Comparison by src then dst */
+/* Comparison by src then dst, with .row as a final tie-break.
+ *
+ * qsort is not a stable sort: for parallel edges (equal src AND equal dst)
+ * the relative order of their original rows would otherwise be platform- and
+ * input-dependent, making rowmap (and any golden test or MST that consumes it)
+ * non-deterministic.  The .row tie-break pins a total order. */
 static int cmp_edge_by_src(const void* a, const void* b) {
     const edge_pair_t* ea = (const edge_pair_t*)a;
     const edge_pair_t* eb = (const edge_pair_t*)b;
@@ -52,10 +57,13 @@ static int cmp_edge_by_src(const void* a, const void* b) {
     if (ea->src > eb->src) return 1;
     if (ea->dst < eb->dst) return -1;
     if (ea->dst > eb->dst) return 1;
+    if (ea->row < eb->row) return -1;
+    if (ea->row > eb->row) return 1;
     return 0;
 }
 
-/* Comparison by dst then src (for reverse CSR) */
+/* Comparison by dst then src (for reverse CSR), with .row as a final tie-break
+ * for determinism (see cmp_edge_by_src). */
 static int cmp_edge_by_dst(const void* a, const void* b) {
     const edge_pair_t* ea = (const edge_pair_t*)a;
     const edge_pair_t* eb = (const edge_pair_t*)b;
@@ -63,6 +71,8 @@ static int cmp_edge_by_dst(const void* a, const void* b) {
     if (ea->dst > eb->dst) return 1;
     if (ea->src < eb->src) return -1;
     if (ea->src > eb->src) return 1;
+    if (ea->row < eb->row) return -1;
+    if (ea->row > eb->row) return 1;
     return 0;
 }
 
