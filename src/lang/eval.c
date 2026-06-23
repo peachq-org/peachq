@@ -2910,6 +2910,7 @@ static void ray_register_builtins(void) {
     register_vary(".log.snapshot", RAY_FN_RESTRICTED, ray_log_snapshot_fn);
     register_vary(".log.sync",     RAY_FN_NONE,       ray_log_sync_fn);
     register_vary(".log.close",    RAY_FN_RESTRICTED, ray_log_close_fn);
+    register_vary(".log.purge",    RAY_FN_RESTRICTED, ray_log_purge_fn);
 
     /* quote — special form (unevaluated argument) */
     register_vary("quote",       RAY_FN_SPECIAL_FORM, ray_quote_fn);
