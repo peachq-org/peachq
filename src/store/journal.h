@@ -131,4 +131,15 @@ ray_err_t ray_journal_sync(void);
 /* Close the active journal.  No-op if none is open. */
 ray_err_t ray_journal_close(void);
 
+/* Close the active journal (if open) and unlink EVERY on-disk file of the
+ * current journal base: the active <base>.log, every rolled
+ * <base>.<stamp>.log archive, the <base>.qdb snapshot, and a stray
+ * <base>.qdb.tmp.  Operates on the same journal .log.open/.write/.close
+ * target — the base survives .log.close, so this works after a close.
+ * Resets module state to OFF so a later .log.open starts clean.
+ * Best-effort: a missing file is not an error; returns RAY_ERR_IO if an
+ * existing file cannot be removed, RAY_ERR_DOMAIN if no journal base is
+ * known (none ever opened this process). */
+ray_err_t ray_journal_purge(void);
+
 #endif /* RAY_JOURNAL_H */
