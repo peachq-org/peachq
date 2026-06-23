@@ -33,6 +33,7 @@
 #include "lang/env.h"
 #include "mem/sys.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -514,6 +515,85 @@ ray_err_t ray_journal_close(void) {
         return RAY_ERR_IO;
     }
     return RAY_OK;
+}
+
+/* Remove one path, tolerating ENOENT.  Sets *result to RAY_ERR_IO if an
+ * existing file could not be unlinked. */
+static void purge_one(const char* path, ray_err_t* result) {
+    if (remove(path) != 0 && errno != ENOENT) *result = RAY_ERR_IO;
+}
+
+ray_err_t ray_journal_purge(void) {
+    /* No base means no journal was ever opened in this process — there is
+     * nothing to act on, and (unlike .log.close) we cannot derive a path. */
+    if (!g_journal.base[0]) return RAY_ERR_DOMAIN;
+
+    /* Close the active log FIRST: never unlink a path out from under
+     * buffered writes (and Windows refuses to unlink an open file). */
+    if (g_journal.fp) {
+        fflush(g_journal.fp);
+        fclose(g_journal.fp);
+        g_journal.fp = NULL;
+    }
+
+    ray_err_t result = RAY_OK;
+    char path[RAY_JOURNAL_PATH_MAX];
+
+    /* 1. Fixed-name files: active log, snapshot, stray snapshot temp. */
+    static const char* const exts[] = { ".log", ".qdb", ".qdb.tmp" };
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
+        if (path_join_ext(path, sizeof(path), g_journal.base, exts[i]))
+            purge_one(path, &result);
+
+    /* 2. Rolled archives <base>.<stamp>.log live beside the base file.
+     *    Split base into dir + leaf, then unlink every sibling named
+     *    "<leaf>.*.log" (the leading "<leaf>." guards against a different
+     *    base that merely shares a prefix). */
+    const char* slash = strrchr(g_journal.base, '/');
+#ifdef RAY_OS_WINDOWS
+    const char* bslash = strrchr(g_journal.base, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+    char dir[RAY_JOURNAL_PATH_MAX];
+    const char* leaf;
+    if (slash) {
+        size_t dlen = (size_t)(slash - g_journal.base);
+        if (dlen >= sizeof(dir)) dlen = sizeof(dir) - 1;
+        memcpy(dir, g_journal.base, dlen);
+        dir[dlen] = '\0';
+        leaf = slash + 1;
+    } else {
+        dir[0] = '.'; dir[1] = '\0';
+        leaf = g_journal.base;
+    }
+    size_t leaflen = strlen(leaf);
+
+    DIR* d = opendir(dir);
+    if (d) {
+        struct dirent* ent;
+        while ((ent = readdir(d)) != NULL) {
+            const char* nm = ent->d_name;
+            size_t nlen = strlen(nm);
+            /* "<leaf>." prefix + non-empty stamp + ".log" suffix. The
+             * length floor guarantees nm[leaflen] is in bounds and that
+             * the bare active "<leaf>.log" (already removed above) is not
+             * re-matched here. */
+            if (nlen <= leaflen + 4) continue;
+            if (strncmp(nm, leaf, leaflen) != 0 || nm[leaflen] != '.') continue;
+            if (strcmp(nm + nlen - 4, ".log") != 0) continue;
+            int n = snprintf(path, sizeof(path), "%s/%s", dir, nm);
+            if (n <= 0 || (size_t)n >= sizeof(path)) continue;
+            purge_one(path, &result);
+        }
+        closedir(d);
+    }
+
+    /* 3. Reset: the journal is gone, so a later .log.open starts clean. */
+    g_journal.mode        = RAY_JOURNAL_OFF;
+    g_journal.base[0]     = '\0';
+    g_journal.log_path[0] = '\0';
+
+    return result;
 }
 
 ray_err_t ray_journal_sync(void) {
