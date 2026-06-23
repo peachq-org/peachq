@@ -86,6 +86,9 @@ enum {
     OP_SCOPE_END,     /* pop sym-id vec; sync frame values back into the
                        * local slots, pop the frame (leaves the CALLD result
                        * on the stack) */
+    OP_TRYH,          /* try-handler dispatch: pop err_val + handler; if
+                       * handler is callable, call it with err_val, else
+                       * push handler as a fallback value */
     OP__COUNT
 };
 
