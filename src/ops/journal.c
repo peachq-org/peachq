@@ -209,3 +209,13 @@ ray_t* ray_log_close_fn(ray_t** args, int64_t n) {
     (void)args; (void)n;
     return err_to_ray(ray_journal_close(), "io");
 }
+
+/* (.log.purge) — close the active journal (if open) and unlink ALL files
+ * of the current journal base: <base>.log, every rolled <base>.<stamp>.log
+ * archive, the <base>.qdb snapshot, and a stray <base>.qdb.tmp.  No path
+ * argument; acts on the journal .log.open/.write/.close target.  Errors
+ * with `domain` when no journal base is known (none ever opened). */
+ray_t* ray_log_purge_fn(ray_t** args, int64_t n) {
+    (void)args; (void)n;
+    return err_to_ray(ray_journal_purge(), "io");
+}

@@ -565,6 +565,7 @@ ray_t* ray_ipc_handle_fn(ray_t** args, int64_t n);
 ray_t* ray_set_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_parted_fn(ray_t** args, int64_t n);
+ray_t* ray_get_parted_tables_fn(ray_t** args, int64_t n);
 ray_t* ray_guid_fn(ray_t* n_arg);
 
 /* Transaction-log journaling (.log.*) — the -l/-L feature.
@@ -578,6 +579,7 @@ ray_t* ray_log_roll_fn(ray_t** args, int64_t n);
 ray_t* ray_log_snapshot_fn(ray_t** args, int64_t n);
 ray_t* ray_log_sync_fn(ray_t** args, int64_t n);
 ray_t* ray_log_close_fn(ray_t** args, int64_t n);
+ray_t* ray_log_purge_fn(ray_t** args, int64_t n);
 
 /* Group (formerly static in eval.c, now extern for query.c) */
 ray_t* ray_group_fn(ray_t* x);
