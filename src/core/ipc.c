@@ -1401,7 +1401,8 @@ static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype,
 }
 
 int64_t ray_ipc_connect(const char* host, uint16_t port,
-                         const char* user, const char* password)
+                         const char* user, const char* password,
+                         int timeout_ms)
 {
     /* The connection lives in the active poll's selector table — its
      * selector id IS the handle.  No poll, no handle namespace: refuse
@@ -1409,8 +1410,11 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     ray_poll_t* poll = ipc_active_poll();
     if (!poll) return -1;
 
-    ray_sock_t fd = ray_sock_connect(host, port, 5000);
-    if (fd == RAY_INVALID_SOCK) return -1;
+    /* Default the connect/handshake budget to 5s when the caller gives
+     * no explicit timeout, matching the long-standing handshake timeout. */
+    int connect_to = timeout_ms > 0 ? timeout_ms : 5000;
+    ray_sock_t fd = ray_sock_connect(host, port, connect_to);
+    if (fd == RAY_INVALID_SOCK) return (errno == ETIMEDOUT) ? -5 : -1;
 
     uint8_t hs[2] = { RAY_SERDE_WIRE_VERSION, 0x00 };
     if (ray_sock_send(fd, hs, 2) < 0) {
