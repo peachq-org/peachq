@@ -565,6 +565,7 @@ ray_t* ray_ipc_handle_fn(ray_t** args, int64_t n);
 ray_t* ray_set_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_splayed_fn(ray_t** args, int64_t n);
 ray_t* ray_get_parted_fn(ray_t** args, int64_t n);
+ray_t* ray_get_parted_tables_fn(ray_t** args, int64_t n);
 ray_t* ray_guid_fn(ray_t* n_arg);
 
 /* Transaction-log journaling (.log.*) — the -l/-L feature.
