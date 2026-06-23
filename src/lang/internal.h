@@ -405,6 +405,7 @@ ray_t* to_boxed_list(ray_t* x);
 ray_t* unbox_vec_arg(ray_t* x, ray_t** _bx);
 ray_t* call_lambda(ray_t* lambda, ray_t** call_args, int64_t argc);
 ray_t* call_fn1(ray_t* fn, ray_t* arg);
+ray_t* ray_try_handle(ray_t* handler, ray_t* err_val);
 ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b);
 ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n);
 ray_t* ray_sort(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
@@ -557,7 +558,7 @@ ray_t* ray_sysinfo_fn(ray_t** args, int64_t n);
 ray_t* ray_sys_args_fn(ray_t** args, int64_t n);
 ray_t* ray_ser_fn(ray_t* val);
 ray_t* ray_de_fn(ray_t* val);
-ray_t* ray_hopen_fn(ray_t* x);
+ray_t* ray_hopen_fn(ray_t** args, int64_t n);
 ray_t* ray_hclose_fn(ray_t* x);
 ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg);
 ray_t* ray_hpost_fn(ray_t* handle, ray_t* msg);
