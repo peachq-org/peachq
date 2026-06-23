@@ -381,11 +381,10 @@ static void compile_list(compiler_t *c, ray_t *ast) {
              * Stash it, compile handler fn, reload err_val, call. */
             emit(c, OP_STOREENV);
             emit(c, (uint8_t)err_slot);
-            compile_expr(c, elems[2]);       /* handler fn */
+            compile_expr(c, elems[2]);       /* handler (fn or fallback value) */
             emit(c, OP_LOADENV);
             emit(c, (uint8_t)err_slot);
-            emit(c, OP_CALLF);
-            emit(c, 1);                     /* call handler(err_val) */
+            emit(c, OP_TRYH);                /* callable → call(err); else value */
             patch_jump(c, jmp_pos);          /* end */
             return;
         }
