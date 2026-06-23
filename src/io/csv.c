@@ -2295,11 +2295,12 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
                 munmap(buf, file_size);
                 return tbl ? ray_err_from_obj(tbl) : RAY_ERR_IO;
             }
-            /* Splay save owns the symfile now: dir/sym is the table's
+            /* Splay save owns the symfile now: dir/.sym is the table's
              * domain (distinct-merge + position encoding); symbol-free
-             * tables write none. */
+             * tables write none.  The dotfile name leaves "sym" free as a
+             * user column. */
             char sym_path[1024];
-            int n = snprintf(sym_path, sizeof(sym_path), "%s/sym", dir);
+            int n = snprintf(sym_path, sizeof(sym_path), "%s/.sym", dir);
             if (n < 0 || (size_t)n >= sizeof(sym_path)) {
                 ray_release(tbl);
                 munmap(buf, file_size);
@@ -2332,7 +2333,7 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
     }
     remove(schema_path); /* best-effort; ENOENT is the common case */
 
-    /* SYM columns encode against the table's symfile domain (dir/sym):
+    /* SYM columns encode against the table's symfile domain (dir/.sym):
      * open-or-create it up front; cells intern as they stream. */
     struct ray_sym_domain_s* sym_dom = NULL;
     {
@@ -2341,7 +2342,7 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
             if (resolved_types[c] == RAY_SYM) any_sym = true;
         if (any_sym) {
             char sym_path[1024];
-            int n = snprintf(sym_path, sizeof(sym_path), "%s/sym", dir);
+            int n = snprintf(sym_path, sizeof(sym_path), "%s/.sym", dir);
             if (n < 0 || (size_t)n >= sizeof(sym_path)) {
                 munmap(buf, file_size);
                 return RAY_ERR_RANGE;
@@ -2659,9 +2660,9 @@ ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool 
             fprintf(stderr, "csv.parted: save part=%" PRId64 " rows=%" PRId64 " leaf=%s\n",
                     part, cnt, leaf);
         /* Every partition encodes against the parted root's shared
-         * symfile (root/sym) — one domain for the whole table. */
+         * symfile (root/.sym) — one domain for the whole table. */
         char root_sym[1024];
-        int sn = snprintf(root_sym, sizeof(root_sym), "%s/sym", root);
+        int sn = snprintf(root_sym, sizeof(root_sym), "%s/.sym", root);
         if (sn < 0 || (size_t)sn >= sizeof(root_sym)) {
             ray_release(tbl);
             scratch_free(row_offsets_hdr);
@@ -2683,7 +2684,7 @@ ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool 
         part++;
     }
 
-    /* root/sym is maintained per-partition by ray_splay_save_bulk
+    /* root/.sym is maintained per-partition by ray_splay_save_bulk
      * (distinct-merge + flush before each partition's columns) — no
      * whole-dictionary dump at the end anymore. */
     munmap(buf, file_size);
