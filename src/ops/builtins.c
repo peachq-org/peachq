@@ -592,7 +592,7 @@ static int csv_valid_table_name(const char* name) {
 }
 
 static const char* csv_default_sym_path(const char* dir, char* buf, size_t bufsz) {
-    int n = snprintf(buf, bufsz, "%s/sym", dir);
+    int n = snprintf(buf, bufsz, "%s/.sym", dir);
     if (n < 0 || (size_t)n >= bufsz) return NULL;
     return buf;
 }
