@@ -38,6 +38,13 @@
 
 ray_sock_t ray_sock_listen(uint16_t port);
 ray_sock_t ray_sock_accept(ray_sock_t srv);
+/* Connect to host:port.  timeout_ms > 0 bounds the connect: the socket
+ * connects non-blocking and waits at most timeout_ms for completion (a
+ * blocking connect() ignores SO_*TIMEO and would otherwise hang for the
+ * OS default), then the same value is applied as SO_RCVTIMEO/SO_SNDTIMEO
+ * for the subsequent handshake I/O.  timeout_ms <= 0 = blocking connect,
+ * no I/O timeout.  On a connect timeout, errno is set to ETIMEDOUT and
+ * RAY_INVALID_SOCK is returned. */
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms);
 int64_t    ray_sock_send(ray_sock_t s, const void* buf, size_t len);
 int64_t    ray_sock_recv(ray_sock_t s, void* buf, size_t len);
@@ -46,5 +53,6 @@ int64_t    ray_sock_recv(ray_sock_t s, void* buf, size_t len);
 int        ray_sock_wait_readable(ray_sock_t s, int timeout_ms);
 void       ray_sock_close(ray_sock_t s);
 ray_err_t  ray_sock_set_nonblocking(ray_sock_t s);
+ray_err_t  ray_sock_set_blocking(ray_sock_t s);
 
 #endif /* RAY_SOCK_H */
