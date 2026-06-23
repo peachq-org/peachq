@@ -114,8 +114,13 @@ int       ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms);
  * the connection's rx machinery while waiting, dispatching any
  * interleaved async/sync frames from the peer. */
 
+/* timeout_ms > 0 bounds the TCP connect and the handshake I/O; <= 0 uses
+ * the default budget.  Returns the handle (>= 0) or a negative code:
+ * -1 refused/error, -2 auth required, -3 auth failed, -4 wire mismatch,
+ * -5 connect timed out. */
 int64_t   ray_ipc_connect(const char* host, uint16_t port,
-                           const char* user, const char* password);
+                           const char* user, const char* password,
+                           int timeout_ms);
 void      ray_ipc_close(int64_t handle);
 ray_t*    ray_ipc_send(int64_t handle, ray_t* msg);
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
