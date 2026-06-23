@@ -557,7 +557,7 @@ ray_t* ray_sysinfo_fn(ray_t** args, int64_t n);
 ray_t* ray_sys_args_fn(ray_t** args, int64_t n);
 ray_t* ray_ser_fn(ray_t* val);
 ray_t* ray_de_fn(ray_t* val);
-ray_t* ray_hopen_fn(ray_t* x);
+ray_t* ray_hopen_fn(ray_t** args, int64_t n);
 ray_t* ray_hclose_fn(ray_t* x);
 ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg);
 ray_t* ray_hpost_fn(ray_t* handle, ray_t* msg);
