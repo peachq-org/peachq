@@ -104,7 +104,8 @@ static int64_t parse_int_dir(const char* s) {
  * Partitioned table: date-partitioned directory of splayed tables
  *
  * Format:
- *   db_root/sym              — global symbol intern table
+ *   db_root/.sym             — global symbol intern table (dotfile so it
+ *                              never collides with a splayed table dir)
  *   db_root/YYYY.MM.DD/      — partition directories
  *   db_root/YYYY.MM.DD/table — splayed table per partition
  *
@@ -116,12 +117,13 @@ static int64_t parse_int_dir(const char* s) {
  * collect_part_dirs — scan db_root for partition directories
  *
  * Collects directory names that match digit/dot pattern, bubble-sorts them.
- * If skip_sym is true, entries named "sym" are skipped.
+ * The symfile (".sym") and its lock are dotfiles, and partition names are
+ * digit/dot-only, so neither is ever picked up here.
  * Caller must free each entry with ray_sys_free and the array itself.
  * -------------------------------------------------------------------------- */
 
 static ray_err_t collect_part_dirs(const char* db_root, char*** out_dirs,
-                                   int64_t* out_count, bool skip_sym) {
+                                   int64_t* out_count) {
     DIR* d = opendir(db_root);
     if (!d) return RAY_ERR_IO;
 
@@ -133,7 +135,6 @@ static ray_err_t collect_part_dirs(const char* db_root, char*** out_dirs,
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.') continue;
-        if (skip_sym && strcmp(ent->d_name, "sym") == 0) continue;
 
         /* Partition directory name format validation is intentionally loose:
          * accepts any sequence of digits and dots (e.g. "2024.01.15").
@@ -208,7 +209,7 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
 
     /* Build sym_path. */
     char sym_path[1024];
-    int sn = snprintf(sym_path, sizeof(sym_path), "%s/sym", db_root);
+    int sn = snprintf(sym_path, sizeof(sym_path), "%s/.sym", db_root);
     if (sn < 0 || (size_t)sn >= sizeof(sym_path))
         return ray_error("io", NULL);
 
@@ -228,10 +229,10 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
                 "or missing \"\" at position 0)", sym_path);
     }
 
-    /* Scan db_root for partition directories (skip "sym" entry) */
+    /* Scan db_root for partition directories (the ".sym" dotfile is skipped) */
     char** part_dirs = NULL;
     int64_t part_count = 0;
-    ray_err_t collect_err = collect_part_dirs(db_root, &part_dirs, &part_count, true);
+    ray_err_t collect_err = collect_part_dirs(db_root, &part_dirs, &part_count);
     if (collect_err != RAY_OK) {
         if (trace)
             fprintf(stderr, "parted.get: collect dirs failed err=%s\n",
