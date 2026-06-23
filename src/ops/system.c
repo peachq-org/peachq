@@ -74,18 +74,20 @@ static bool sym_partition_shaped(const char* name, size_t n) {
 
 /* Symfile resolution (sym-domain spec, "Surface"): for a partition dir
  * (/db/2024.01.01/t/) the table root is the PARTED ROOT — derived from
- * the path shape — and the domain is root/sym; for a standalone splayed
- * dir the root is the dir itself (dir/sym).  Writes default to the
- * convention unconditionally; reads prefer an existing dir/sym, then an
- * existing partition root/sym, else NULL (the load layer raises the
+ * the path shape — and the domain is root/.sym; for a standalone splayed
+ * dir the root is the dir itself (dir/.sym).  The symfile is a dotfile so
+ * it can never collide with a user column (e.g. a "sym" ticker column).
+ * Writes default to the convention unconditionally; reads prefer an
+ * existing dir/.sym, then an existing partition root/.sym, else NULL (the
+ * load layer raises the
  * loud "sym" error only if SYM columns actually exist). */
 static const char* splay_resolve_sym(const char* dir, char* buf, size_t bufsz,
                                      bool for_write) {
     size_t dlen = strlen(dir);
     while (dlen > 1 && dir[dlen - 1] == '/') dlen--; /* strip trailing '/' */
 
-    /* dir/sym */
-    int n = snprintf(buf, bufsz, "%.*s/sym", (int)dlen, dir);
+    /* dir/.sym */
+    int n = snprintf(buf, bufsz, "%.*s/.sym", (int)dlen, dir);
     if (n < 0 || (size_t)n >= bufsz) return NULL;
     if (!for_write && access(buf, F_OK) == 0) return buf;
 
@@ -103,7 +105,7 @@ static const char* splay_resolve_sym(const char* dir, char* buf, size_t bufsz,
         if (sym_partition_shaped(pname, pname_len) && pslash) {
             size_t root_len = (size_t)(pslash - dir);
             if (root_len == 0) root_len = 1; /* "/" root */
-            int rn = snprintf(buf, bufsz, "%.*s/sym", (int)root_len, dir);
+            int rn = snprintf(buf, bufsz, "%.*s/.sym", (int)root_len, dir);
             if (rn < 0 || (size_t)rn >= bufsz) return NULL;
             if (for_write || access(buf, F_OK) == 0) return buf;
             return NULL;
@@ -112,7 +114,7 @@ static const char* splay_resolve_sym(const char* dir, char* buf, size_t bufsz,
 
     if (for_write) {
         /* Not partition-shaped: the dir itself is the table root. */
-        n = snprintf(buf, bufsz, "%.*s/sym", (int)dlen, dir);
+        n = snprintf(buf, bufsz, "%.*s/.sym", (int)dlen, dir);
         if (n < 0 || (size_t)n >= bufsz) return NULL;
         return buf;
     }
@@ -204,6 +206,19 @@ ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
     name[nlen] = '\0';
 
     return ray_read_parted(root, name);
+}
+
+/* (.db.parted.tables "db_root") → sym vector of table names available under
+ * the root, suitable for passing to .db.parted.get. */
+ray_t* ray_get_parted_tables_fn(ray_t** args, int64_t n) {
+    if (n != 1)
+        return ray_error("domain", ".db.parted.tables expects 1 argument, got %lld", (long long)n);
+
+    char root[1024];
+    if (!str_to_cpath(args[0], root, sizeof(root)))
+        return ray_error("type", ".db.parted.tables expects a string db root path, got %s", ray_type_name(args[0]->type));
+
+    return ray_parted_tables(root);
 }
 
 /* stat/dirent used by the .os.* filesystem metadata builtins below. */
