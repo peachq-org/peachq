@@ -1135,6 +1135,61 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             return ray_cast(g, col, tgt);
         }
 
+        /* (within col [lo hi]) — inclusive range membership.  Lowers to
+         * `(and (>= col lo) (<= col hi))`, reusing the comparison
+         * executors so a `within` WHERE predicate inherits range-index
+         * rowsel, partition pruning, null handling and type promotion
+         * for free.  The range must compile to a 2-element constant
+         * vector — the same literal-operand constraint OP_IN's set has;
+         * a non-const or wrong-length range returns NULL so the select
+         * falls back to the eval-level `within` builtin. */
+        if (fname_len == 6 && memcmp(fname, "within", 6) == 0) {
+            if (n != 3) return NULL;
+            ray_op_t* col = compile_expr_dag(g, elems[1]);
+            if (!col) return NULL;
+            uint32_t col_id = col->id;
+            ray_op_t* rng = compile_expr_dag(g, elems[2]);
+            if (!rng || rng->opcode != OP_CONST) return NULL;
+            ray_op_ext_t* rext = find_ext(g, rng->id);
+            if (!rext || !rext->literal) return NULL;
+            ray_t* rv = rext->literal;
+            if (!ray_is_vec(rv) || rv->len != 2) return NULL;
+            /* Extract the two bounds as typed atoms via ray_at_fn so a
+             * DATE/TIME/I32 range keeps its element type for the
+             * comparison (ray_const_atom retains, so release ours). */
+            ray_t* lo_idx = ray_i64(0);
+            ray_t* hi_idx = ray_i64(1);
+            ray_t* lo_atom = ray_at_fn(rv, lo_idx);
+            ray_t* hi_atom = ray_at_fn(rv, hi_idx);
+            ray_release(lo_idx);
+            ray_release(hi_idx);
+            if (!lo_atom || RAY_IS_ERR(lo_atom) ||
+                !hi_atom || RAY_IS_ERR(hi_atom)) {
+                if (lo_atom) ray_release(lo_atom);
+                if (hi_atom) ray_release(hi_atom);
+                return NULL;
+            }
+            ray_op_t* lo = ray_const_atom(g, lo_atom);
+            ray_op_t* hi = ray_const_atom(g, hi_atom);
+            ray_release(lo_atom);
+            ray_release(hi_atom);
+            if (!lo || !hi) return NULL;
+            /* Snapshot IDs and re-resolve after each graph alloc — the
+             * node array may realloc between constructor calls. */
+            uint32_t lo_id = lo->id, hi_id = hi->id;
+            col = &g->nodes[col_id];
+            lo  = &g->nodes[lo_id];
+            ray_op_t* ge = ray_ge(g, col, lo);
+            if (!ge) return NULL;
+            uint32_t ge_id = ge->id;
+            col = &g->nodes[col_id];
+            hi  = &g->nodes[hi_id];
+            ray_op_t* le = ray_le(g, col, hi);
+            if (!le) return NULL;
+            ge = &g->nodes[ge_id];
+            return ray_and(g, ge, le);
+        }
+
         /* Temporal extract: (year col), (month col), (day col), ... */
         if (n == 2) {
             int64_t field = -1;
