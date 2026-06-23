@@ -464,3 +464,88 @@ fail_dirs:
 
     return part_err ? part_err : ray_error("io", NULL);
 }
+
+/* --------------------------------------------------------------------------
+ * ray_parted_tables — list the table names under a parted db root
+ *
+ * Table names are the splayed-table subdirectories of a partition (those
+ * carrying a `.d` schema).  We read them from the FIRST (sorted) partition,
+ * the same canonical-schema convention ray_read_parted uses for columns.
+ * Returns a sorted RAY_SYM vector suitable for ray_read_parted, or an error.
+ * -------------------------------------------------------------------------- */
+ray_t* ray_parted_tables(const char* db_root) {
+    if (!db_root || !*db_root) return ray_error("io", NULL);
+
+    char** part_dirs = NULL;
+    int64_t part_count = 0;
+    ray_err_t e = collect_part_dirs(db_root, &part_dirs, &part_count);
+    if (e != RAY_OK)
+        return ray_error(ray_err_code_str(e),
+            "parted %s: cannot enumerate partition directories", db_root);
+
+    /* Only the first partition is needed; release the rest. */
+    char pdir[1024];
+    int pn = snprintf(pdir, sizeof(pdir), "%s/%s", db_root, part_dirs[0]);
+    for (int64_t p = 0; p < part_count; p++) free(part_dirs[p]);
+    free(part_dirs);
+    if (pn < 0 || (size_t)pn >= sizeof(pdir))
+        return ray_error("range", "parted %s: partition path too long", db_root);
+
+    DIR* d = opendir(pdir);
+    if (!d)
+        return ray_error("io", "parted %s: cannot read partition %s", db_root, pdir);
+
+    /* Collect subdirectories that are splayed tables (contain a `.d`). */
+    char** names = NULL;
+    int64_t count = 0, cap = 0;
+    ray_err_t oom = RAY_OK;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;   /* ".", "..", and the ".sym" dotfile */
+        char dpath[1024];
+        int dn = snprintf(dpath, sizeof(dpath), "%s/%s/.d", pdir, ent->d_name);
+        if (dn < 0 || (size_t)dn >= sizeof(dpath)) continue;
+        struct stat st;
+        if (stat(dpath, &st) != 0 || !S_ISREG(st.st_mode)) continue; /* not a table */
+        if (count >= cap) {
+            int64_t ncap = cap == 0 ? 16 : cap * 2;
+            char** tmp = (char**)realloc(names, (size_t)ncap * sizeof(char*));
+            if (!tmp) { oom = RAY_ERR_OOM; break; }
+            names = tmp; cap = ncap;
+        }
+        size_t len = strlen(ent->d_name);
+        char* dup = (char*)malloc(len + 1);
+        if (!dup) { oom = RAY_ERR_OOM; break; }
+        memcpy(dup, ent->d_name, len + 1);
+        names[count++] = dup;
+    }
+    closedir(d);
+
+    if (oom != RAY_OK) {
+        for (int64_t i = 0; i < count; i++) free(names[i]);
+        free(names);
+        return ray_error("oom", NULL);
+    }
+
+    /* Deterministic order. */
+    for (int64_t i = 0; i + 1 < count; i++)
+        for (int64_t j = i + 1; j < count; j++)
+            if (strcmp(names[i], names[j]) > 0) {
+                char* t = names[i]; names[i] = names[j]; names[j] = t;
+            }
+
+    ray_t* result = ray_vec_new(RAY_SYM, count);
+    if (!result || RAY_IS_ERR(result)) {
+        for (int64_t i = 0; i < count; i++) free(names[i]);
+        free(names);
+        return result ? result : ray_error("oom", NULL);
+    }
+    result->len = count;
+    int64_t* out = (int64_t*)ray_data(result);
+    for (int64_t i = 0; i < count; i++) {
+        out[i] = ray_sym_intern(names[i], strlen(names[i]));
+        free(names[i]);
+    }
+    free(names);
+    return result;
+}

@@ -208,6 +208,19 @@ ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
     return ray_read_parted(root, name);
 }
 
+/* (.db.parted.tables "db_root") → sym vector of table names available under
+ * the root, suitable for passing to .db.parted.get. */
+ray_t* ray_get_parted_tables_fn(ray_t** args, int64_t n) {
+    if (n != 1)
+        return ray_error("domain", ".db.parted.tables expects 1 argument, got %lld", (long long)n);
+
+    char root[1024];
+    if (!str_to_cpath(args[0], root, sizeof(root)))
+        return ray_error("type", ".db.parted.tables expects a string db root path, got %s", ray_type_name(args[0]->type));
+
+    return ray_parted_tables(root);
+}
+
 /* stat/dirent used by the .os.* filesystem metadata builtins below. */
 #include <sys/stat.h>
 #include <dirent.h>
