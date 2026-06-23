@@ -339,10 +339,24 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
 static void send_response(ray_sock_t fd, ray_t* result)
 {
     int64_t ser_size = ray_serde_size(result);
-    if (ser_size <= 0) return;
+
+    /* A result we cannot serialize must never leave the client waiting on
+     * a reply that never arrives.  Substitute a serializable error so the
+     * caller observes a clean failure instead of a silent infinite hang
+     * (issue #285).  ray_error frames serialize, so the substitute always
+     * goes out unless even that fails — in which case there is nothing we
+     * can put on the wire and we drop as before. */
+    ray_t* fallback = NULL;
+    if (ser_size <= 0) {
+        fallback = ray_error("type", "result of type %s is not serializable over IPC",
+                             result ? ray_type_name(result->type) : "null");
+        result   = fallback;
+        ser_size = ray_serde_size(result);
+        if (ser_size <= 0) { if (fallback) ray_error_free(fallback); return; }
+    }
 
     uint8_t* payload = (uint8_t*)ray_sys_alloc((size_t)ser_size);
-    if (!payload) return;
+    if (!payload) { if (fallback) ray_error_free(fallback); return; }
     ray_ser_raw(payload, result);
 
     uint8_t* send_buf = NULL;
@@ -387,6 +401,7 @@ static void send_response(ray_sock_t fd, ray_t* result)
 
     ray_sys_free(send_buf);
     if (payload) ray_sys_free(payload);
+    if (fallback) ray_error_free(fallback);
 }
 
 /* Decompress (when flagged) + de-serialize one framed payload into an
@@ -501,6 +516,15 @@ static ray_t* eval_payload_core(uint8_t* payload, size_t payload_len,
             ray_release(msg);
         }
     }
+    /* A lazy result is an internal deferred-DAG representation that cannot
+     * be serialized — force it to a concrete value before it reaches the
+     * wire.  The direct ray_eval(msg) path (non-STR payloads, e.g. an
+     * expression list `(first v)`) returns lazy chains verbatim; the
+     * ray_eval_str path already materializes, so this is a no-op there.
+     * Without this, send_response cannot serialize the result and the
+     * client blocks forever waiting for a reply (issue #285). */
+    if (result && ray_is_lazy(result))
+        result = ray_lazy_materialize(result);  /* consumes the retain */
     return result ? result : RAY_NULL_OBJ;
 }
 
