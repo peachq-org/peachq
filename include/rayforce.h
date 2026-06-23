@@ -647,7 +647,8 @@ ray_t* ray_fmt(ray_t* obj, int mode);
  * exchange; ray_ipc_send_async sends a fire-and-forget frame. */
 
 int64_t   ray_ipc_connect(const char* host, uint16_t port,
-                          const char* user, const char* password);
+                          const char* user, const char* password,
+                          int timeout_ms);
 void      ray_ipc_close(int64_t handle);
 ray_t*    ray_ipc_send(int64_t handle, ray_t* msg);
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
