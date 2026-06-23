@@ -42,6 +42,7 @@ void  ray_runtime_set_sys_args(void* dict);
 void* ray_runtime_get_sys_args(void);
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #if !defined(RAY_OS_WINDOWS)
@@ -845,10 +846,27 @@ ray_t* ray_sys_args_fn(ray_t** args, int64_t n) {
  * IPC builtins
  * ══════════════════════════════════════════ */
 
-/* (hopen "host:port[:user:password]") → i64 handle */
-ray_t* ray_hopen_fn(ray_t* x) {
+/* (hopen "host:port[:user:password]" [timeout-ms]) → i64 handle.
+ * The optional second argument bounds the TCP connect and handshake in
+ * milliseconds; omitted leaves the default budget. */
+ray_t* ray_hopen_fn(ray_t** args, int64_t n) {
+    if (n < 1 || n > 2)
+        return ray_error("rank", ".ipc.open expects 1 or 2 arguments: \"host:port[:user:password]\" [timeout-ms]");
+
+    ray_t* x = args[0];
     if (!ray_is_atom(x) || x->type != -RAY_STR)
         return ray_error("type", ".ipc.open expects a string \"host:port[:user:password]\", got %s", ray_type_name(x->type));
+
+    /* Optional connect timeout in milliseconds (0 = use default). */
+    int timeout_ms = 0;
+    if (n == 2) {
+        ray_t* t = args[1];
+        if (!ray_is_atom(t) || (t->type != -RAY_I64 && t->type != -RAY_I32))
+            return ray_error("type", ".ipc.open timeout must be an integer (milliseconds), got %s", ray_type_name(t->type));
+        int64_t tv = (t->type == -RAY_I64) ? t->i64 : t->i32;
+        if (tv < 0) return ray_error("domain", ".ipc.open timeout must be >= 0, got %lld", (long long)tv);
+        timeout_ms = (tv > INT_MAX) ? INT_MAX : (int)tv;
+    }
 
     const char* s = ray_str_ptr(x);
     size_t slen = ray_str_len(x);
@@ -896,9 +914,10 @@ ray_t* ray_hopen_fn(ray_t* x) {
     const char* pw_ptr = (n_parts >= 4) ? password : NULL;
     const char* us_ptr = (n_parts >= 4) ? user : NULL;
 
-    int64_t h = ray_ipc_connect(host, (uint16_t)port, us_ptr, pw_ptr);
+    int64_t h = ray_ipc_connect(host, (uint16_t)port, us_ptr, pw_ptr, timeout_ms);
     if (h == -2) return ray_error("access", "server requires authentication");
     if (h == -3) return ray_error("access", "authentication failed");
+    if (h == -5) return ray_error("io", "connection timed out: %s:%d", host, port);
     if (h < 0) return ray_error("io", "connection refused: %s:%d", host, port);
 
     return make_i64(h);
