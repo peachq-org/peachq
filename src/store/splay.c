@@ -79,17 +79,19 @@ static bool table_has_col_named(ray_t* tbl, const char* name, size_t len) {
 }
 
 /* Remove regular files in `dir` that are not part of the just-written
- * table: not ".d", not "sym"/"sym.lk", not a current column.  Runs after
- * the .d commit so a stale wider-schema file can never shadow a column
- * (the historical "error: corrupt on re-set" bug). */
+ * table: not a dotfile (".d", ".sym", ".sym.lk"), not a current column.
+ * Runs after the .d commit so a stale wider-schema file can never shadow
+ * a column (the historical "error: corrupt on re-set" bug).  The symfile
+ * and its lock are dotfiles (".sym"/".sym.lk"), so the leading-'.' skip
+ * already protects them — and a column legitimately named "sym" is now
+ * swept like any other column when it leaves the schema. */
 static void splay_sweep_stale(ray_t* tbl, const char* dir) {
     DIR* d = opendir(dir);
     if (!d) return;
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL) {
         const char* n = ent->d_name;
-        if (n[0] == '.') continue; /* ".", "..", ".d" */
-        if (strcmp(n, "sym") == 0 || strcmp(n, "sym.lk") == 0) continue;
+        if (n[0] == '.') continue; /* ".", "..", ".d", ".sym", ".sym.lk" */
         size_t nlen = strlen(n);
         if (table_has_col_named(tbl, n, nlen)) continue;
         /* `<col>.link` sidecars (store/col.c) belong to their column: keep
@@ -113,20 +115,39 @@ static ray_err_t splay_save_impl(ray_t* tbl, const char* dir, const char* sym_pa
     if (!tbl || RAY_IS_ERR(tbl)) return RAY_ERR_TYPE;
     if (!dir) return RAY_ERR_IO;
 
-    /* Reserved column names: "sym" and "sym.lk" name the splayed symfile
-     * and its lock sidecar — a column file of either name would collide
-     * with / clobber the symfile.  Reject loudly BEFORE writing anything
-     * (MUST-prohibit, not silent skip). */
-    {
-        int64_t nc = ray_table_ncols(tbl);
-        for (int64_t c = 0; c < nc; c++) {
-            ray_t* na = ray_sym_str(ray_table_col_name(tbl, c));
-            if (!na || RAY_IS_ERR(na)) continue;
-            const char* n = ray_str_ptr(na);
-            size_t nlen = ray_str_len(na);
-            if ((nlen == 3 && memcmp(n, "sym", 3) == 0) ||
-                (nlen == 6 && memcmp(n, "sym.lk", 6) == 0))
-                return RAY_ERR_RESERVED;
+    /* Symfile/column collision guard.  A column is written as `dir/<name>`;
+     * the symfile (and its `<sym>.lk` lock) is written at `sym_path`.  A
+     * column whose file lands on the symfile path — or its lock path —
+     * would clobber it, so reject loudly BEFORE writing anything
+     * (MUST-prohibit, not silent skip).
+     *
+     * This can only happen when a symfile is actually written: the table
+     * has SYM columns AND the symfile lives directly in `dir`.  The default
+     * symfile is the dotfile ".sym", which no column can be named (dot-led
+     * names are skipped below), so the default convention never collides —
+     * a plain column named "sym" round-trips fine (issue #280).  But an
+     * explicit sym_path (3-arg .db.splayed.set) may name anything, so the
+     * guard matches the resolved symfile path, not the literal "sym". */
+    if (sym_path && table_has_sym_cols(tbl)) {
+        size_t dlen = strlen(dir);
+        while (dlen > 1 && dir[dlen - 1] == '/') dlen--;
+        const char* slash = strrchr(sym_path, '/');
+        const char* base  = slash ? slash + 1 : sym_path;
+        size_t plen = slash ? (size_t)(slash - sym_path) : 0; /* parent dir */
+        while (plen > 1 && sym_path[plen - 1] == '/') plen--;
+        if (plen == dlen && memcmp(sym_path, dir, dlen) == 0) {
+            size_t blen = strlen(base);
+            int64_t nc = ray_table_ncols(tbl);
+            for (int64_t c = 0; c < nc; c++) {
+                ray_t* na = ray_sym_str(ray_table_col_name(tbl, c));
+                if (!na || RAY_IS_ERR(na)) continue;
+                const char* n = ray_str_ptr(na);
+                size_t nlen = ray_str_len(na);
+                if ((nlen == blen && memcmp(n, base, blen) == 0) ||
+                    (nlen == blen + 3 && memcmp(n, base, blen) == 0 &&
+                     memcmp(n + blen, ".lk", 3) == 0))
+                    return RAY_ERR_RESERVED;
+            }
         }
     }
 
