@@ -573,7 +573,7 @@ ray_t* ray_repl_connect_fn(ray_t* host_port_str) {
      * and the connect-error-to-rayfall-error mapping; reusing it
      * keeps .repl.connect a one-line wrapper instead of a parallel
      * implementation that drifts. */
-    ray_t* opened = ray_hopen_fn(host_port_str);
+    ray_t* opened = ray_hopen_fn(&host_port_str, 1);
     if (!opened || RAY_IS_ERR(opened)) return opened;
     if (!ray_is_atom(opened) ||
         (opened->type != -RAY_I64 && opened->type != -RAY_I32)) {
