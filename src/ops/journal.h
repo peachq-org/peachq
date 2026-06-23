@@ -61,4 +61,9 @@ ray_t* ray_log_sync_fn(ray_t** args, int64_t n);
 /* (.log.close) — close the active log. */
 ray_t* ray_log_close_fn(ray_t** args, int64_t n);
 
+/* (.log.purge) — close the active log (if open) and unlink every file of
+ * the current journal base: <base>.log, all rolled <base>.<UTC>.log
+ * archives, <base>.qdb, and a stray <base>.qdb.tmp. */
+ray_t* ray_log_purge_fn(ray_t** args, int64_t n);
+
 #endif /* RAY_OPS_JOURNAL_H */
