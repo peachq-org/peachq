@@ -267,7 +267,27 @@ ray_t* ray_raise_fn(ray_t* val) {
     return ray_error("domain", NULL);
 }
 
-/* (try expr handler) — evaluate expr, if error call handler with error value.
+/* Dispatch a `try` handler value against the error value.  A *callable*
+ * handler (a lambda or a unary builtin) is invoked with the error and its
+ * result returned; ANY other value is returned as-is as a fallback result.
+ *
+ * The fallback form exists because Rayfall lambdas do not capture closures,
+ * so a handler lambda `(fn [e] outer)` cannot see an outer binding.  Passing
+ * the value directly — evaluated in the current scope — is the only way to
+ * surface an outer variable from the failure branch:
+ *     ((fn [data] (try (raise "x") data)) 123)  ->  123
+ *
+ * Borrows both `handler` and `err_val`; returns a new owned ref. */
+ray_t* ray_try_handle(ray_t* handler, ray_t* err_val) {
+    if (handler->type == RAY_LAMBDA || handler->type == RAY_UNARY)
+        return call_fn1(handler, err_val);   /* borrows err_val */
+    ray_retain(handler);
+    return handler;                          /* fallback value */
+}
+
+/* (try expr handler) — evaluate expr; on error, dispatch the (evaluated)
+ * handler via ray_try_handle (callable → invoked with the error value;
+ * otherwise returned as a fallback value).
  * Special form: receives unevaluated args. */
 ray_t* ray_try_fn(ray_t* expr, ray_t* handler_expr) {
     ray_t* result = ray_eval(expr);
@@ -278,25 +298,14 @@ ray_t* ray_try_fn(ray_t* expr, ray_t* handler_expr) {
     __VM->raise_val = NULL;
     if (!err_val) err_val = make_i64(0);
 
-    /* Evaluate handler expression */
+    /* Evaluate handler expression (in the current scope) */
     ray_t* handler = ray_eval(handler_expr);
     if (RAY_IS_ERR(handler)) {
         ray_release(err_val);
         return handler;
     }
 
-    /* Call handler with error value */
-    ray_t* handler_result;
-    if (handler->type == RAY_LAMBDA) {
-        ray_t* args[1] = { err_val };
-        handler_result = call_lambda(handler, args, 1);
-    } else if (handler->type == RAY_UNARY) {
-        ray_unary_fn fn = (ray_unary_fn)(uintptr_t)handler->i64;
-        handler_result = fn(err_val);
-    } else {
-        handler_result = ray_error("type", "try: handler must be a function, got %s", ray_type_name(handler->type));
-    }
-
+    ray_t* handler_result = ray_try_handle(handler, err_val);
     ray_release(err_val);
     ray_release(handler);
     return handler_result;
@@ -1833,6 +1842,7 @@ static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
         [OP_STOREGLOBAL_W] = &&op_storeglobal_w,
         [OP_SCOPE_BEGIN]   = &&op_scope_begin,
         [OP_SCOPE_END]     = &&op_scope_end,
+        [OP_TRYH]          = &&op_tryh,
     };
 
     /* Arity check before allocating VM state */
@@ -2350,6 +2360,19 @@ op_trap_end: {
         vm.tp--;
         ray_release(vm.ts[vm.tp].fn);
     }
+    DISPATCH();
+}
+
+op_tryh: {
+    /* Stack: [.., handler, err_val] (err_val on top).  A callable handler
+     * is invoked with the error; any other value is the fallback result. */
+    ray_t* err_val = POP();
+    ray_t* handler = POP();
+    ray_t* result  = ray_try_handle(handler, err_val);  /* borrows both */
+    ray_release(err_val);
+    ray_release(handler);
+    if (RAY_IS_ERR(result)) { vm_err_obj = result; goto vm_error; }
+    PUSH(result);
     DISPATCH();
 }
 
