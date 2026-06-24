@@ -40,6 +40,9 @@ ray_err_t ray_splay_save_bulk(ray_t* tbl, const char* dir, const char* sym_path)
 ray_t*    ray_splay_load(const char* dir, const char* sym_path);
 ray_t*    ray_read_splayed(const char* dir, const char* sym_path);
 
+/* Append chunk-zone index regions to a freshly-streamed splayed store's column
+ * files so later mmap loads get block-skip.  Best-effort, per numeric column. */
+void      ray_splay_build_indexes(const char* dir, ray_t* tbl);
 
 /* Partition loader entry: the parted reader opens root/sym ONCE and
  * passes the shared domain to every partition's columns. */
