@@ -313,6 +313,13 @@ static void compile_list(compiler_t *c, ray_t *ast) {
                 return;
             }
             compile_expr(c, elems[2]);
+            /* Materialize a lazy value before binding — the interpreter's
+             * ray_let_fn does the same.  A lazy handle is single-use
+             * (materialization consumes its deferred graph), so a local
+             * that aliased one would break on its SECOND read (e.g.
+             * `(let v (first xs)) (if (> v 0) v 0)`: the compare consumes
+             * the lazy, the branch then reloads a dead handle). */
+            emit(c, OP_FORCE);
             emit(c, OP_DUP);
             int32_t slot = find_local(c, name_obj->i64);
             if (slot < 0) slot = add_local(c, name_obj->i64);
