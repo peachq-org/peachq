@@ -728,7 +728,11 @@ static void ray_release_owned_refs(ray_t* v) {
      * so we must NOT also try to release those off the parent — they
      * aren't there anymore.  Skip the STR_pool branch. */
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
-        if (v->index && !RAY_IS_ERR(v->index))
+        /* A mmap-resident index (mmod==1) is a PASSENGER in this column's file
+         * mapping — the column's single munmap frees it.  Releasing it here
+         * would ray_free it and munmap a sub-region of the mapping.  Only a
+         * heap-built index (mmod==0) is released by pointer. */
+        if (v->index && !RAY_IS_ERR(v->index) && v->index->mmod != 1)
             ray_release(v->index);
         return;
     }
@@ -840,7 +844,9 @@ bool ray_retain_owned_refs(ray_t* v) {
     }
 
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
-        if (v->index && !RAY_IS_ERR(v->index))
+        /* Mirror ray_release_owned_refs: a mmap-resident passenger index
+         * (mmod==1) is owned by the column's mapping, not refcounted here. */
+        if (v->index && !RAY_IS_ERR(v->index) && v->index->mmod != 1)
             ray_retain(v->index);
         return true;
     }
@@ -1123,6 +1129,13 @@ void ray_free(ray_t* v) {
                 data_size += 32 + pool_len;
             }
             size_t mapped_size = (data_size + 4095) & ~(size_t)4095;
+            /* Inline index region: a mmap-resident index extends the mapping
+             * past the payload; _idx_pad carries the full page-aligned mapping
+             * size so the whole region (payload + index) is unmapped at once.
+             * NULL for plain columns and for runtime heap indexes (payload-only
+             * mapping) — those keep the formula above. */
+            if ((v->attrs & RAY_ATTR_HAS_INDEX) && v->_idx_pad)
+                mapped_size = (size_t)(uintptr_t)v->_idx_pad;
             ray_vm_unmap_file(v, mapped_size);
         } else {
             ray_vm_unmap_file(v, 4096);

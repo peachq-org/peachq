@@ -25,8 +25,12 @@
 #include "core/runtime.h"
 #include "store/col.h"
 #include "store/fileio.h"
+#include "store/serde.h"
 #include "table/sym.h"
+#include "table/table.h"
 #include "table/domain.h"
+#include "ops/idxop.h"
+#include "vec/str.h"
 #include "lang/format.h"
 #include <string.h>
 #include <stdio.h>

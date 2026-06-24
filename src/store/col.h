@@ -105,4 +105,5 @@ ray_err_t ray_col_save_sym_encoded(ray_t* vec, const char* path,
 ray_t*    ray_col_load_dom(const char* path, struct ray_sym_domain_s* dom);
 ray_t*    ray_col_mmap_splayed_dom(const char* path, struct ray_sym_domain_s* dom);
 
+
 #endif /* RAY_COL_H */

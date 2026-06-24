@@ -660,6 +660,7 @@ ray_t* ray_read_csv_splayed_fn(ray_t** args, int64_t n) {
     char sym_path[1024];
     const char* sym = csv_default_sym_path(dir, sym_path, sizeof(sym_path));
     if (!sym) return ray_error("io", NULL);
+
     return ray_read_splayed(dir, sym);
 }
 
