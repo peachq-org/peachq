@@ -597,6 +597,48 @@ static void try_load_link_sidecar(ray_t* vec, const char* path) {
  * ray_col_save -- write a vector to a column file
  * -------------------------------------------------------------------------- */
 
+/* Append an inline index region to an EXISTING column file (no data rewrite):
+ * pad the payload to 32, write the region, then stamp the aux[0..3] marker.
+ * Used by the streaming .csv.splayed builder, which writes raw columns first.
+ * `col_len`/`col_type` describe the on-disk column (payload = 32 + len*esz). */
+ray_err_t ray_col_append_index(const char* path, const void* ix_v,
+                               int64_t col_len, int8_t col_type) {
+    const ray_index_t* ix = (const ray_index_t*)ix_v;
+    if (!path || !ix) return RAY_ERR_DOMAIN;
+    uint8_t esz = ray_sym_elem_size(col_type, 0);
+    if (esz == 0) return RAY_ERR_TYPE;
+    int64_t payload_end = 32 + col_len * esz;
+
+    FILE* f = fopen(path, "r+b");
+    if (!f) return RAY_ERR_IO;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return RAY_ERR_IO; }
+    long fsz = ftell(f);
+    if (fsz != (long)payload_end) { fclose(f); return RAY_ERR_CORRUPT; } /* already indexed / mismatch */
+
+    int64_t region_off = (payload_end + 31) & ~(int64_t)31;
+    int64_t pad = region_off - payload_end;
+    static const uint8_t zeros[32] = {0};
+    if (pad > 0 && fwrite(zeros, 1, (size_t)pad, f) != (size_t)pad) { fclose(f); return RAY_ERR_IO; }
+
+    int64_t rsize = ray_index_inline_size(ix);
+    uint8_t* rbuf = (uint8_t*)calloc(1, (size_t)rsize);
+    if (!rbuf) { fclose(f); return RAY_ERR_OOM; }
+    ray_index_inline_write(rbuf, ix);
+    size_t rw = fwrite(rbuf, 1, (size_t)rsize, f);
+    free(rbuf);
+    if (rw != (size_t)rsize) { fclose(f); return RAY_ERR_IO; }
+
+    /* Stamp the marker into aux[0..3] (file offset 0). */
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return RAY_ERR_IO; }
+    uint32_t mg = COL_IDX_AUX_MAGIC;
+    if (fwrite(&mg, 1, 4, f) != 4) { fclose(f); return RAY_ERR_IO; }
+    /* The index is a derived accelerator (rebuildable); flush is enough — no
+     * fsync needed, and the marker is written LAST so a torn append never
+     * leaves a half-region that looks indexed. */
+    if (fclose(f) != 0) return RAY_ERR_IO;
+    return RAY_OK;
+}
+
 static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
     if (!vec || RAY_IS_ERR(vec)) return RAY_ERR_TYPE;
     if (!path) return RAY_ERR_IO;

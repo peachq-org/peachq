@@ -661,7 +661,17 @@ ray_t* ray_read_csv_splayed_fn(ray_t** args, int64_t n) {
     const char* sym = csv_default_sym_path(dir, sym_path, sizeof(sym_path));
     if (!sym) return ray_error("io", NULL);
 
-    return ray_read_splayed(dir, sym);
+    /* The streaming writer emits raw columns; append chunk-zone indexes to the
+     * just-written files, then reload so the returned table carries them
+     * (mmap'd in place).  Without this, an on-disk column would lack the
+     * block-skip an in-memory .csv.read column has. */
+    ray_t* tbl = ray_read_splayed(dir, sym);
+    if (tbl && !RAY_IS_ERR(tbl) && tbl->type == RAY_TABLE) {
+        ray_splay_build_indexes(dir, tbl);
+        ray_release(tbl);
+        tbl = ray_read_splayed(dir, sym);
+    }
+    return tbl;
 }
 
 ray_t* ray_read_csv_parted_fn(ray_t** args, int64_t n) {
