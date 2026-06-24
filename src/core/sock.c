@@ -86,9 +86,66 @@ ray_sock_t ray_sock_accept(ray_sock_t srv)
     return fd;
 }
 
+/* Connect an already-created socket `fd` to one resolved address.  With
+ * timeout_ms > 0 the connect is driven non-blocking + poll (a blocking
+ * connect() ignores SO_*TIMEO) and the same budget is then applied as the
+ * handshake SO_RCVTIMEO/SO_SNDTIMEO; otherwise it is a plain blocking
+ * connect.  Returns 0 on success, -1 on failure with errno set
+ * (ETIMEDOUT on a connect timeout). */
+static int sock_connect_one(ray_sock_t fd, const struct sockaddr* addr,
+                            socklen_t addrlen, int timeout_ms)
+{
+    if (timeout_ms <= 0)
+        return connect(fd, addr, addrlen) < 0 ? -1 : 0;
+
+    ray_sock_set_nonblocking(fd);
+    int rc = connect(fd, addr, addrlen);
+    if (rc < 0) {
+#ifdef RAY_OS_WINDOWS
+        int werr = WSAGetLastError();
+        int in_progress = (werr == WSAEWOULDBLOCK || werr == WSAEINPROGRESS);
+#else
+        int in_progress = (errno == EINPROGRESS);
+#endif
+        if (!in_progress) return -1;
+        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+        int pr;
+#ifdef RAY_OS_WINDOWS
+        pr = WSAPoll(&pfd, 1, timeout_ms);
+#else
+        do { pr = poll(&pfd, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
+#endif
+        if (pr == 0) { errno = ETIMEDOUT; return -1; }
+        if (pr < 0) return -1;
+        /* Writable: harvest the pending connect result via SO_ERROR. */
+        int soerr = 0;
+        socklen_t soerr_len = sizeof(soerr);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)&soerr, &soerr_len) < 0
+            || soerr != 0) {
+            if (soerr != 0) errno = soerr;
+            return -1;
+        }
+    }
+    ray_sock_set_blocking(fd);
+
+    /* Apply the same budget as the handshake send/recv timeout. */
+#ifdef RAY_OS_WINDOWS
+    DWORD tv = (DWORD)timeout_ms;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+#else
+    struct timeval tv;
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+    return 0;
+}
+
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms)
 {
-    struct addrinfo hints, *res = NULL;
+    struct addrinfo hints, *res = NULL, *rp;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -99,81 +156,28 @@ ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms)
     if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res)
         return RAY_INVALID_SOCK;
 
-    ray_sock_t fd = (ray_sock_t)socket(res->ai_family, res->ai_socktype,
-                                        res->ai_protocol);
-    if (fd == RAY_INVALID_SOCK) {
-        freeaddrinfo(res);
-        return RAY_INVALID_SOCK;
-    }
-
-    if (timeout_ms > 0) {
-        /* Bounded connect.  A blocking connect() ignores SO_*TIMEO, so to
-         * honor the requested timeout we connect non-blocking and wait at
-         * most timeout_ms for the socket to become writable (= connected
-         * or failed), then restore blocking mode for the handshake. */
-        ray_sock_set_nonblocking(fd);
-        int rc = connect(fd, res->ai_addr, (socklen_t)res->ai_addrlen);
-        if (rc < 0) {
-#ifdef RAY_OS_WINDOWS
-            int werr = WSAGetLastError();
-            int in_progress = (werr == WSAEWOULDBLOCK || werr == WSAEINPROGRESS);
-#else
-            int in_progress = (errno == EINPROGRESS);
-#endif
-            if (!in_progress) {
-                ray_sock_close(fd);
-                freeaddrinfo(res);
-                return RAY_INVALID_SOCK;
-            }
-            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-            int pr;
-#ifdef RAY_OS_WINDOWS
-            pr = WSAPoll(&pfd, 1, timeout_ms);
-#else
-            do { pr = poll(&pfd, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
-#endif
-            if (pr == 0) {                 /* timed out — distinct from refused */
-                ray_sock_close(fd);
-                freeaddrinfo(res);
-                errno = ETIMEDOUT;
-                return RAY_INVALID_SOCK;
-            }
-            if (pr < 0) {
-                ray_sock_close(fd);
-                freeaddrinfo(res);
-                return RAY_INVALID_SOCK;
-            }
-            /* Writable: harvest the pending connect result via SO_ERROR. */
-            int soerr = 0;
-            socklen_t soerr_len = sizeof(soerr);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)&soerr, &soerr_len) < 0
-                || soerr != 0) {
-                ray_sock_close(fd);
-                freeaddrinfo(res);
-                if (soerr != 0) errno = soerr;
-                return RAY_INVALID_SOCK;
-            }
-        }
-        ray_sock_set_blocking(fd);
-
-        /* Apply the same budget as the handshake send/recv timeout. */
-#ifdef RAY_OS_WINDOWS
-        DWORD tv = (DWORD)timeout_ms;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
-#else
-        struct timeval tv;
-        tv.tv_sec  = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-#endif
-    } else if (connect(fd, res->ai_addr, (socklen_t)res->ai_addrlen) < 0) {
+    /* Try every resolved address in turn, not just the first.  `localhost`
+     * commonly resolves to BOTH ::1 (IPv6, often first) and 127.0.0.1; a
+     * server bound IPv4-only refuses the ::1 attempt, so we must fall
+     * through to the next candidate rather than give up. */
+    ray_sock_t fd = RAY_INVALID_SOCK;
+    int saved_errno = 0;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        fd = (ray_sock_t)socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd == RAY_INVALID_SOCK) { saved_errno = errno; continue; }
+        if (sock_connect_one(fd, rp->ai_addr, (socklen_t)rp->ai_addrlen,
+                             timeout_ms) == 0)
+            break;                          /* connected */
+        saved_errno = errno;
         ray_sock_close(fd);
-        freeaddrinfo(res);
-        return RAY_INVALID_SOCK;
+        fd = RAY_INVALID_SOCK;
     }
     freeaddrinfo(res);
+
+    if (fd == RAY_INVALID_SOCK) {
+        errno = saved_errno;                /* preserve ETIMEDOUT / refused */
+        return RAY_INVALID_SOCK;
+    }
 
     int yes = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
