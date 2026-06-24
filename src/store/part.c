@@ -167,8 +167,14 @@ static ray_err_t collect_part_dirs(const char* db_root, char*** out_dirs,
     }
 
     if (part_count == 0) {
+        /* Directory opened fine but holds no partition directories — an
+         * EMPTY (or non-parted) db, not an I/O failure.  Report success
+         * with a zero count and let each caller decide what "empty" means
+         * (tables/fill → empty result; get → error, nothing to read). */
         free(part_dirs);
-        return RAY_ERR_IO;
+        *out_dirs = NULL;
+        *out_count = 0;
+        return RAY_OK;
     }
 
     /* Sort partition names for deterministic order.
@@ -243,6 +249,14 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
     }
     if (trace)
         fprintf(stderr, "parted.get: parts=%" PRId64 "\n", part_count);
+
+    /* No partitions: there is no named table to read.  Unlike
+     * .db.parted.tables (which lists nothing), reading data from an empty
+     * or non-parted root is a genuine error. */
+    if (part_count <= 0) {
+        if (dom) ray_sym_domain_release(dom);
+        return ray_error("io", "parted %s: no partition directories", db_root);
+    }
 
     /* Open each partition via ray_read_splayed */
     ray_t* part_err = NULL;
@@ -569,8 +583,12 @@ ray_t* ray_parted_tables(const char* db_root) {
         return ray_error(ray_err_code_str(e),
             "parted %s: cannot enumerate partition directories", db_root);
     if (part_count <= 0) {
+        /* Existing-but-empty (or non-parted) root → no tables.  Return an
+         * empty SYM vector rather than an error: a freshly-created db root
+         * has zero tables, and that's a friendlier answer than failing. */
         free(part_dirs);
-        return ray_error("io", "parted %s: no partition directories", db_root);
+        ray_t* empty = ray_vec_new(RAY_SYM, 0);
+        return empty ? empty : ray_error("oom", NULL);
     }
 
     /* Only the last (most recent) partition is needed; release the rest. */
@@ -626,8 +644,12 @@ ray_t* ray_parted_fill(const char* db_root) {
         return ray_error(ray_err_code_str(e),
             "parted %s: cannot enumerate partition directories", db_root);
     if (part_count <= 0) {
+        /* Empty (or non-parted) root → nothing to fill.  Matches the
+         * "empty vector when nothing needed fixing" contract, so a fill on
+         * a fresh db root is a friendly no-op rather than an error. */
         free(part_dirs);
-        return ray_error("io", "parted %s: no partition directories", db_root);
+        ray_t* empty = ray_vec_new(RAY_SYM, 0);
+        return empty ? empty : ray_error("oom", NULL);
     }
 
     /* Shared root symfile — pass to load/save so SYM columns intern against
