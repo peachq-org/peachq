@@ -236,15 +236,15 @@ ray_t* ray_fill_parted_fn(ray_t** args, int64_t n) {
     return ray_parted_fill(root);
 }
 
-/* stat/dirent used by the .os.* filesystem metadata builtins below. */
+/* stat/dirent used by the .fs.* filesystem metadata builtins below. */
 #include <sys/stat.h>
 #include <dirent.h>
 
 /* ══════════════════════════════════════════
- * Filesystem metadata: .os.size / .os.list
+ * Filesystem metadata: .fs.size / .fs.list
  *
  * Issue #36 asked for size + existence + listing primitives.  We
- * keep just two — `.os.size` and `.os.list` — because every other
+ * keep just two — `.fs.size` and `.fs.list` — because every other
  * predicate (exists, is-file, is-dir) is reachable either via
  * try-on-error against these or via the existing shell fallback
  * (`(.sys.cmd "test -e p")` etc.).  Both errors are flagged "io"
@@ -253,19 +253,19 @@ ray_t* ray_fill_parted_fn(ray_t** args, int64_t n) {
  * message.
  * ══════════════════════════════════════════ */
 
-/* (.os.size "path") → i64 file size in bytes.  Errors with "io"
+/* (.fs.size "path") → i64 file size in bytes.  Errors with "io"
  * when the path doesn't exist or names a directory — `try` it if
  * the caller wants those treated as "not a file" rather than a
  * hard error. */
-ray_t* ray_os_size_fn(ray_t* x) {
+ray_t* ray_fs_size_fn(ray_t* x) {
     if (!ray_is_atom(x) || x->type != -RAY_STR)
-        return ray_error("type", ".os.size expects a string path");
+        return ray_error("type", ".fs.size expects a string path");
     char path[1024];
     /* x is already a STR atom here; str_to_cpath fails only when the path
      * is empty or exceeds the buffer — a domain/range issue, not a type
      * mismatch (old code: "type" → "domain"). */
     if (!str_to_cpath(x, path, sizeof(path)))
-        return ray_error("domain", ".os.size path is empty or too long, got %lld bytes", (long long)ray_str_len(x));
+        return ray_error("domain", ".fs.size path is empty or too long, got %lld bytes", (long long)ray_str_len(x));
 
     struct stat st;
     if (stat(path, &st) != 0)
@@ -284,19 +284,19 @@ static int dir_entry_cmp(const void* a, const void* b) {
     return strcmp(sa, sb);
 }
 
-/* (.os.list "path") → sym vec of entries, sorted, with `.` and `..`
+/* (.fs.list "path") → sym vec of entries, sorted, with `.` and `..`
  * filtered out.  Errors with "io" if the path isn't a directory or
  * doesn't exist — caller can use that as a file/dir discriminator
  * via `try` when they don't want to shell out for the predicate. */
-ray_t* ray_os_list_fn(ray_t* x) {
+ray_t* ray_fs_list_fn(ray_t* x) {
     if (!ray_is_atom(x) || x->type != -RAY_STR)
-        return ray_error("type", ".os.list expects a string path");
+        return ray_error("type", ".fs.list expects a string path");
     char path[1024];
     /* x is already a STR atom here; str_to_cpath fails only when the path
      * is empty or exceeds the buffer — a domain/range issue, not a type
      * mismatch (old code: "type" → "domain"). */
     if (!str_to_cpath(x, path, sizeof(path)))
-        return ray_error("domain", ".os.list path is empty or too long, got %lld bytes", (long long)ray_str_len(x));
+        return ray_error("domain", ".fs.list path is empty or too long, got %lld bytes", (long long)ray_str_len(x));
 
     DIR* d = opendir(path);
     if (!d) return ray_error("io", "%s: %s", path, strerror(errno));
