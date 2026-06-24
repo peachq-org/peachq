@@ -469,8 +469,10 @@ fail_dirs:
  * ray_parted_tables — list the table names under a parted db root
  *
  * Table names are the splayed-table subdirectories of a partition (those
- * carrying a `.d` schema).  We read them from the FIRST (sorted) partition,
- * the same canonical-schema convention ray_read_parted uses for columns.
+ * carrying a `.d` schema).  We read them from the LAST (sorted) partition:
+ * partition dirs sort ascending (e.g. by date), so the last is the most
+ * recent and reflects the current table set — a table added in a later
+ * partition would be invisible if we only looked at the first/oldest.
  * Returns a sorted RAY_SYM vector suitable for ray_read_parted, or an error.
  * -------------------------------------------------------------------------- */
 ray_t* ray_parted_tables(const char* db_root) {
@@ -482,10 +484,14 @@ ray_t* ray_parted_tables(const char* db_root) {
     if (e != RAY_OK)
         return ray_error(ray_err_code_str(e),
             "parted %s: cannot enumerate partition directories", db_root);
+    if (part_count <= 0) {
+        free(part_dirs);
+        return ray_error("io", "parted %s: no partition directories", db_root);
+    }
 
-    /* Only the first partition is needed; release the rest. */
+    /* Only the last (most recent) partition is needed; release the rest. */
     char pdir[1024];
-    int pn = snprintf(pdir, sizeof(pdir), "%s/%s", db_root, part_dirs[0]);
+    int pn = snprintf(pdir, sizeof(pdir), "%s/%s", db_root, part_dirs[part_count - 1]);
     for (int64_t p = 0; p < part_count; p++) free(part_dirs[p]);
     free(part_dirs);
     if (pn < 0 || (size_t)pn >= sizeof(pdir))
