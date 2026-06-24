@@ -639,6 +639,165 @@ ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2) {
     return attach_finalize(v, idx);
 }
 
+ray_t* ray_index_chunk_zone_compute(ray_t* v, uint8_t chunk_log2) {
+    if (!v || RAY_IS_ERR(v) || !ray_is_vec(v))
+        return ray_error("type", "chunk_zone: compute needs a vector");
+    if (chunk_log2 == 0) chunk_log2 = 16;
+    if (chunk_log2 < 8 || chunk_log2 > 22)
+        return ray_error("domain", "chunk_zone: chunk_log2 out of range [8, 22]");
+    if (numeric_elem_size(v->type) == 0)
+        return ray_error("nyi", "chunk_zone: only numeric vectors supported");
+    int64_t csz = 1LL << chunk_log2;
+    if (v->len < csz)
+        return ray_error("domain", "chunk_zone: column has fewer rows than one chunk");
+
+    uint32_t n_chunks = (uint32_t)((v->len + csz - 1) / csz);
+    ray_t* idx = ray_index_alloc(RAY_IDX_CHUNK_ZONE, v->type, v->len);
+    if (!idx || RAY_IS_ERR(idx)) return idx;
+    ray_index_t* ix = ray_index_payload(idx);
+    ix->u.chunk_zone.n_chunks   = n_chunks;
+    ix->u.chunk_zone.chunk_log2 = chunk_log2;
+    ix->u.chunk_zone.is_f64     = (v->type == RAY_F64 || v->type == RAY_F32) ? 1 : 0;
+
+    int8_t arr_type = ix->u.chunk_zone.is_f64 ? RAY_F64 : RAY_I64;
+    ray_t* mins = ray_vec_new(arr_type, (int64_t)n_chunks);
+    ray_t* maxs = ray_vec_new(arr_type, (int64_t)n_chunks);
+    int64_t nb_len = (int64_t)((n_chunks + 7) / 8);
+    ray_t* nbits = ray_vec_new(RAY_U8, nb_len);
+    if (!mins || RAY_IS_ERR(mins) || !maxs || RAY_IS_ERR(maxs) ||
+        !nbits || RAY_IS_ERR(nbits)) {
+        if (mins && !RAY_IS_ERR(mins)) ray_release(mins);
+        if (maxs && !RAY_IS_ERR(maxs)) ray_release(maxs);
+        if (nbits && !RAY_IS_ERR(nbits)) ray_release(nbits);
+        ray_release(idx);
+        return ray_error("oom", "chunk_zone: arrays alloc");
+    }
+    mins->len = (int64_t)n_chunks;
+    maxs->len = (int64_t)n_chunks;
+    nbits->len = nb_len;
+    memset(ray_data(nbits), 0, (size_t)nb_len);
+    ix->u.chunk_zone.mins      = mins;
+    ix->u.chunk_zone.maxs      = maxs;
+    ix->u.chunk_zone.null_bits = nbits;
+
+    ray_err_t err = chunk_zone_scan(v, ix);
+    if (err != RAY_OK) {
+        ray_release(idx);
+        return ray_error(ray_err_code_str(err),
+                         "chunk_zone scan failed for type %d", (int)v->type);
+    }
+    return idx;   /* standalone RAY_INDEX object — caller releases */
+}
+
+/* Attach an already-built standalone RAY_INDEX object to a column.  Takes
+ * ownership of idx on success.  Zero-copy on a fresh rc=1 column. */
+ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx) {
+    if (!idx || RAY_IS_ERR(idx) || idx->type != RAY_INDEX)
+        return ray_error("type", "attach_built: not an index object");
+    ray_t* v = prepare_attach(vp, "index");   /* rc=1 → ray_cow no-op */
+    if (RAY_IS_ERR(v)) return v;
+    return attach_finalize(v, idx);
+}
+
+/* ── Inline on-disk index region (zero-copy mmap, kdb+-style) ───────────────
+ * An attached index is persisted at the (32-aligned) tail of its column file as
+ * a run of contiguous 32-byte-aligned ray_t blocks:
+ *   [RAY_INDEX block: 32B hdr + ray_index_t payload][child vec block]…
+ * The ray_index_t's child-pointer fields hold REGION-RELATIVE byte offsets on
+ * disk; ray_index_inline_map patches them to absolute pointers in place after
+ * mmap (one COW'd header page) and flags the index RAY_MARK_MMAP so the parent
+ * column frees the whole region with one munmap and never frees children by
+ * pointer.  All blocks are 32-aligned so each is a directly-usable ray_t. */
+#define IDX_ALIGN32(n) (((n) + 31) & ~(int64_t)31)
+
+/* Addresses of this kind's child ray_t* fields (so write/map read+patch them
+ * uniformly).  Returns count 0..3. */
+static int idx_child_slots(ray_index_t* ix, ray_t** slots[3]) {
+    int n = 0;
+    switch (ix->kind) {
+    case RAY_IDX_HASH:
+        slots[n++] = &ix->u.hash.table; slots[n++] = &ix->u.hash.chain; break;
+    case RAY_IDX_SORT:
+        slots[n++] = &ix->u.sort.perm; break;
+    case RAY_IDX_BLOOM:
+        slots[n++] = &ix->u.bloom.bits; break;
+    case RAY_IDX_CHUNK_ZONE:
+        slots[n++] = &ix->u.chunk_zone.mins;
+        slots[n++] = &ix->u.chunk_zone.maxs;
+        slots[n++] = &ix->u.chunk_zone.null_bits; break;
+    case RAY_IDX_PART:
+        slots[n++] = &ix->u.part.keys; slots[n++] = &ix->u.part.starts;
+        slots[n++] = &ix->u.part.lens; break;
+    default: break;  /* RAY_IDX_ZONE: scalars only, no child vecs */
+    }
+    return n;
+}
+
+static int64_t idx_blk_bytes(const ray_t* v) {
+    return IDX_ALIGN32(32 + (int64_t)v->len * ray_elem_size(v->type));
+}
+
+/* Total byte size of the inline region for `ix` (32-aligned blocks). */
+int64_t ray_index_inline_size(const ray_index_t* ix) {
+    int64_t total = IDX_ALIGN32(32 + (int64_t)sizeof(ray_index_t));  /* RAY_INDEX block */
+    ray_t** slots[3];
+    int nch = idx_child_slots((ray_index_t*)ix, slots);
+    for (int i = 0; i < nch; i++) {
+        ray_t* c = *slots[i];
+        if (c && !RAY_IS_ERR(c)) total += idx_blk_bytes(c);
+    }
+    return total;
+}
+
+/* Serialize `ix` into `dst` (>= ray_index_inline_size bytes, pre-zeroed by the
+ * caller for clean 32-pad).  Child pointers become region-relative offsets. */
+void ray_index_inline_write(uint8_t* dst, const ray_index_t* ix) {
+    ray_t blkhdr;
+    memset(&blkhdr, 0, 32);
+    blkhdr.type = RAY_INDEX; blkhdr.len = (int64_t)sizeof(ray_index_t);
+    blkhdr.mmod = 1; blkhdr.rc = 1;
+    memcpy(dst, &blkhdr, 32);
+
+    ray_index_t* on = (ray_index_t*)(dst + 32);
+    memcpy(on, ix, sizeof(ray_index_t));   /* scalars + child ptrs (overwritten below) */
+    on->markers |= RAY_MARK_MMAP;           /* on-disk indexes are always mmap-resident */
+
+    ray_t** src_slots[3];
+    ray_t** on_slots[3];
+    int nch = idx_child_slots((ray_index_t*)ix, src_slots);
+    idx_child_slots(on, on_slots);
+    int64_t off = IDX_ALIGN32(32 + (int64_t)sizeof(ray_index_t));
+    for (int i = 0; i < nch; i++) {
+        ray_t* c = *src_slots[i];
+        if (!c || RAY_IS_ERR(c)) { *on_slots[i] = NULL; continue; }
+        ray_t chdr;
+        memcpy(&chdr, c, 32);
+        chdr.mmod = 1; chdr.rc = 1;
+        memcpy(dst + off, &chdr, 32);
+        size_t dbytes = (size_t)c->len * ray_elem_size(c->type);
+        if (dbytes) memcpy(dst + off + 32, ray_data(c), dbytes);
+        *on_slots[i] = (ray_t*)(intptr_t)off;   /* region-relative offset */
+        off += idx_blk_bytes(c);
+    }
+}
+
+/* Map an mmap'd inline region in place: patch child offsets to absolute
+ * pointers and return the RAY_INDEX object (already RAY_MARK_MMAP).  `region`
+ * points at the start of the index region within the column's file mapping. */
+ray_t* ray_index_inline_map(uint8_t* region) {
+    ray_t* idx = (ray_t*)region;
+    ray_index_t* ix = ray_index_payload(idx);
+    ray_t** slots[3];
+    int nch = idx_child_slots(ix, slots);
+    for (int i = 0; i < nch; i++) {
+        int64_t o = (int64_t)(intptr_t)(*slots[i]);
+        *slots[i] = o ? (ray_t*)(region + o) : NULL;
+    }
+    ix->markers |= RAY_MARK_MMAP;
+    idx->mmod = 1;
+    return idx;
+}
+
 /* --------------------------------------------------------------------------
  * Hash index — chained open addressing
  *
