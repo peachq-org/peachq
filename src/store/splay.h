@@ -40,6 +40,7 @@ ray_err_t ray_splay_save_bulk(ray_t* tbl, const char* dir, const char* sym_path)
 ray_t*    ray_splay_load(const char* dir, const char* sym_path);
 ray_t*    ray_read_splayed(const char* dir, const char* sym_path);
 
+
 /* Partition loader entry: the parted reader opens root/sym ONCE and
  * passes the shared domain to every partition's columns. */
 ray_t*    ray_read_splayed_dom(const char* dir, struct ray_sym_domain_s* dom);
