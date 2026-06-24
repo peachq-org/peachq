@@ -4510,8 +4510,14 @@ ray_t* ray_select(ray_t** args, int64_t n) {
             match_group_desc_count_take(dict_elems, dict_n, from_id, where_id,
                                         by_id, take_id, asc_id, desc_id,
                                         &prefilter_top_count);
-        bool prefilter_computed_by =
-            has_computed_by_val && prefilter_top_n_match;
+        /* A computed by-key (e.g. `(xbar EventTime …)`) is materialised over
+         * every input row before grouping, so a selective WHERE wins from the
+         * project→filter→eval-key prefilter REGARDLESS of how the result is
+         * ordered.  Gating on the top-N-by-agg shape left the common
+         * "group by time-bucket, order asc by the bucket" shape (q42) on the
+         * slow full-materialisation path; the prefilter body below only needs
+         * a WHERE and is order-agnostic, so the top-N match is not required. */
+        bool prefilter_computed_by = has_computed_by_val;
         /* Multi-key WHERE shape — same kind of win even with bare-ref
          * by-vals when at least one aggregate has a *distinct* input
          * column (SUM / MIN / MAX / AVG on something other than a
