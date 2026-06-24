@@ -2929,11 +2929,12 @@ static void ray_register_builtins(void) {
     /* OS env / process interaction under `.os.*` */
     register_unary( ".os.getenv", RAY_FN_RESTRICTED,  ray_getenv_fn);
     register_binary(".os.setenv", RAY_FN_RESTRICTED,  ray_setenv_fn);
-    /* Filesystem metadata (issue #36): size + listing.  Predicates
-     * (exists / is-file / is-dir) are reachable via `try` on these
-     * or via shell fallback through `.sys.cmd`. */
-    register_unary( ".os.size",   RAY_FN_NONE,        ray_os_size_fn);
-    register_unary( ".os.list",   RAY_FN_NONE,        ray_os_list_fn);
+
+    /* Filesystem metadata under `.fs.*` (issue #36): size + listing.
+     * Predicates (exists / is-file / is-dir) are reachable via `try` on
+     * these or via shell fallback through `.sys.cmd`. */
+    register_unary( ".fs.size",   RAY_FN_NONE,        ray_fs_size_fn);
+    register_unary( ".fs.list",   RAY_FN_NONE,        ray_fs_list_fn);
 
     /* IPC client primitives under `.ipc.*` */
     register_vary(  ".ipc.open",  RAY_FN_RESTRICTED,  ray_hopen_fn);
