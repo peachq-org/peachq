@@ -89,6 +89,8 @@ enum {
     OP_TRYH,          /* try-handler dispatch: pop err_val + handler; if
                        * handler is callable, call it with err_val, else
                        * push handler as a fallback value */
+    OP_FORCE,         /* materialize TOS if it is a lazy handle (so a
+                       * let-bound local holds a concrete, reusable value) */
     OP__COUNT
 };
 
