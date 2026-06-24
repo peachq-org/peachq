@@ -25,6 +25,7 @@
 #include "lang/internal.h"  /* sym_domain_rep (sym-domain Phase 2) */
 #include "lang/format.h"    /* ray_type_name */
 #include "ops/rowsel.h"
+#include "ops/idxop.h"      /* RAY_IDX_CHUNK_ZONE per-morsel zone-skip */
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -591,6 +592,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                     out->regs[r].col_type = base;
                     out->regs[r].data = NULL; /* resolved per-segment */
                     out->regs[r].is_parted = true;
+                    out->regs[r].col_obj = NULL; /* parted: per-segment, no zone-skip */
                     out->regs[r].parted_col = col;
                     out->regs[r].type = (base == RAY_F64) ? RAY_F64 : RAY_I64;
                     out->regs[r].nullable = col_nulls;
@@ -600,6 +602,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                     out->regs[r].col_attrs = col->attrs;
                     out->regs[r].data = ray_data(col);
                     out->regs[r].is_parted = false;
+                    out->regs[r].col_obj = col;
                     out->regs[r].parted_col = NULL;
                     out->regs[r].type = (col->type == RAY_F64) ? RAY_F64 : RAY_I64;
                     out->regs[r].nullable = col_nulls;
@@ -1409,6 +1412,151 @@ static void* expr_eval_morsel(const ray_expr_t* expr, void** scratch,
     return rptrs[expr->out_reg];
 }
 
+/* ── Per-morsel chunk-zone skip for fused BOOL predicates ──────────────────
+ *
+ * A WHERE comparison (or AND/OR tree of comparisons) over chunk-zone-indexed
+ * integer/temporal columns can frequently be decided for a whole morsel from
+ * the per-chunk [min,max] extrema alone — without reading a single column
+ * value.  This recovers the block-skip the deleted OP_FILTERED_GROUP operator
+ * provided, but as a general property of the fused evaluator (every BOOL
+ * expression benefits; nothing is benchmark-shaped).
+ *
+ * The decision is tri-state per register during a walk of the compiled
+ * instruction list:  1 = all-pass, 0 = all-fail, mixed/none = undecided.
+ * Each comparison's tri-state is proven by chunk extrema (mirrors the proven
+ * fp_eval_cmp logic); three-valued AND/OR composition preserves soundness.
+ * Any non-{compare,AND,OR} instruction, or a comparison whose operands aren't
+ * (zone-column, integer-const), degrades that register to "mixed", so the
+ * final answer is conservative by construction — a wrong "all-pass"/"all-fail"
+ * is impossible. */
+#define ZT_MIXED  (-1)   /* boolean, but value varies within the chunk */
+#define ZT_NONE   (-2)   /* register is not a boolean we can reason about */
+
+static inline int zt_and(int a, int b) {
+    if (a == 0 || b == 0) return 0;          /* FALSE dominates AND */
+    if (a == 1 && b == 1) return 1;
+    return ZT_MIXED;
+}
+static inline int zt_or(int a, int b) {
+    if (a == 1 || b == 1) return 1;          /* TRUE dominates OR */
+    if (a == 0 && b == 0) return 0;
+    return ZT_MIXED;
+}
+/* Mirror a comparison operator when the column is the RIGHT operand
+ * (const OP col ≡ col swap(OP) const).  EQ/NE are symmetric. */
+static inline uint16_t zone_swap_op(uint16_t op) {
+    switch (op) {
+    case OP_LT: return OP_GT;
+    case OP_GT: return OP_LT;
+    case OP_LE: return OP_GE;
+    case OP_GE: return OP_LE;
+    default:    return op;
+    }
+}
+
+/* Decide one comparison (col cmp_op cval) over chunk `ch` from its int64
+ * extrema.  cmp_op is normalized so the column is the left operand.  The
+ * all-pass arm is gated on "no nulls in the chunk" (a NULL lane yields BOOL 0,
+ * never 1); the all-fail arm needs no guard (NULL op const is never TRUE). */
+static int zone_cmp_decision(const ray_index_t* ix, int64_t ch,
+                             uint16_t cmp_op, int64_t cval) {
+    const int64_t* mins = (const int64_t*)ray_data(ix->u.chunk_zone.mins);
+    const int64_t* maxs = (const int64_t*)ray_data(ix->u.chunk_zone.maxs);
+    int64_t cmin = mins[ch], cmax = maxs[ch];
+    if (cmin > cmax) return ZT_MIXED;        /* all-null chunk: leave to kernel */
+    const uint8_t* nb = (const uint8_t*)ray_data(ix->u.chunk_zone.null_bits);
+    bool has_nulls = (nb[ch >> 3] >> (ch & 7)) & 1u;
+    switch (cmp_op) {
+    case OP_EQ:
+        if (cval < cmin || cval > cmax)                 return 0;
+        if (!has_nulls && cmin == cmax)                 return 1;
+        break;
+    case OP_NE:
+        if (!has_nulls && (cval < cmin || cval > cmax)) return 1;
+        if (cmin == cmax && cval == cmin)               return 0;
+        break;
+    case OP_LT:
+        if (cmin >= cval)                               return 0;
+        if (!has_nulls && cmax <  cval)                 return 1;
+        break;
+    case OP_LE:
+        if (cmin >  cval)                               return 0;
+        if (!has_nulls && cmax <= cval)                 return 1;
+        break;
+    case OP_GT:
+        if (cmax <= cval)                               return 0;
+        if (!has_nulls && cmin >  cval)                 return 1;
+        break;
+    case OP_GE:
+        if (cmax <  cval)                               return 0;
+        if (!has_nulls && cmin >= cval)                 return 1;
+        break;
+    default: break;
+    }
+    return ZT_MIXED;
+}
+
+/* Does `col` carry a fresh, integer/temporal chunk-zone index? */
+static inline const ray_index_t* zone_fresh_index(const ray_t* col) {
+    if (!col || !(col->attrs & RAY_ATTR_HAS_INDEX) || !col->index) return NULL;
+    const ray_index_t* ix = ray_index_payload(col->index);
+    if (ix->kind != RAY_IDX_CHUNK_ZONE ||
+        ix->built_for_len != col->len ||
+        ix->u.chunk_zone.is_f64) return NULL;
+    return ix;
+}
+
+/* Cheap O(n_regs) pre-check: is any scan register zone-eligible?  Computed
+ * once per evaluation so the per-morsel walk is skipped entirely otherwise. */
+static bool expr_zone_eligible(const ray_expr_t* expr) {
+    if (expr->out_type != RAY_BOOL) return false;
+    for (uint8_t r = 0; r < expr->n_regs; r++)
+        if (expr->regs[r].kind == REG_SCAN && zone_fresh_index(expr->regs[r].col_obj))
+            return true;
+    return false;
+}
+
+/* Decide morsel [ms, me) from chunk-zone extrema without reading column data.
+ * Returns 1 (all-pass), 0 (all-fail), or -1 (undecided — evaluate normally). */
+static int expr_zone_decide(const ray_expr_t* expr, int64_t ms, int64_t me) {
+    int tri[EXPR_MAX_REGS];
+    for (uint8_t r = 0; r < expr->n_regs; r++) tri[r] = ZT_NONE;
+
+    for (uint8_t i = 0; i < expr->n_ins; i++) {
+        const expr_ins_t* in = &expr->ins[i];
+        uint16_t op = in->opcode;
+        if (op >= OP_EQ && op <= OP_GE && in->src2 != 0xFF) {
+            const ray_t* col = NULL; int64_t cval = 0; uint16_t cmp = op;
+            uint8_t a = in->src1, b = in->src2;
+            if (expr->regs[a].kind == REG_SCAN &&
+                expr->regs[b].kind == REG_CONST && expr->regs[b].type == RAY_I64) {
+                col = expr->regs[a].col_obj; cval = expr->regs[b].const_i64;
+            } else if (expr->regs[b].kind == REG_SCAN &&
+                       expr->regs[a].kind == REG_CONST && expr->regs[a].type == RAY_I64) {
+                col = expr->regs[b].col_obj; cval = expr->regs[a].const_i64;
+                cmp = zone_swap_op(op);
+            }
+            int d = ZT_MIXED;
+            const ray_index_t* ix = zone_fresh_index(col);
+            if (ix) {
+                uint8_t log2 = ix->u.chunk_zone.chunk_log2;
+                int64_t s_ch = ms >> log2, e_ch = (me - 1) >> log2;
+                if (s_ch == e_ch && (uint32_t)s_ch < ix->u.chunk_zone.n_chunks)
+                    d = zone_cmp_decision(ix, s_ch, cmp, cval);
+            }
+            tri[in->dst] = d;
+        } else if (op == OP_AND && in->src2 != 0xFF) {
+            tri[in->dst] = zt_and(tri[in->src1], tri[in->src2]);
+        } else if (op == OP_OR && in->src2 != 0xFF) {
+            tri[in->dst] = zt_or(tri[in->src1], tri[in->src2]);
+        } else {
+            tri[in->dst] = ZT_MIXED;            /* unanalyzable op */
+        }
+    }
+    int res = tri[expr->out_reg];
+    return (res == 0 || res == 1) ? res : -1;
+}
+
 /* Context for parallel full-vector expression evaluation */
 typedef struct {
     const ray_expr_t* expr;
@@ -1431,8 +1579,19 @@ static void expr_full_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t e
     for (uint8_t r = 0; r < expr->n_regs; r++)
         scratch[r] = scratch_mem + (size_t)r * EXPR_MORSEL * 8;
 
+    /* Chunk-zone skip is only possible for a BOOL predicate over a zone-
+     * indexed column; compute the gate once, not per morsel. */
+    bool zone = expr_zone_eligible(expr);
+
     for (int64_t ms = start; ms < end; ms += EXPR_MORSEL) {
         int64_t me = (ms + EXPR_MORSEL < end) ? ms + EXPR_MORSEL : end;
+        if (zone) {
+            int d = expr_zone_decide(expr, ms, me);
+            if (d >= 0) {  /* whole morsel decided from extrema — skip the read */
+                memset((char*)c->out_data + ms * esz, d, (size_t)(me - ms) * esz);
+                continue;
+            }
+        }
         void* result = expr_eval_morsel(expr, scratch, ms, me);
         if (result)
             memcpy((char*)c->out_data + ms * esz, result, (size_t)(me - ms) * esz);

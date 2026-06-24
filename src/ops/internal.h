@@ -675,6 +675,8 @@ typedef struct {
         bool        is_parted;  /* true if this SCAN refs a parted column */
         bool        nullable;   /* lanes may contain NULL_I64 / NaN */
         const void* data;       /* column data pointer (REG_SCAN only) */
+        ray_t*       col_obj;    /* source column vec (REG_SCAN, non-parted) —
+                                  * carries the chunk-zone index for zone-skip */
         ray_t*       parted_col; /* parted wrapper (is_parted only) */
         double      const_f64;  /* scalar value (REG_CONST) */
         int64_t     const_i64;  /* scalar value (REG_CONST) */
