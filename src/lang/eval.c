@@ -1843,6 +1843,7 @@ static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
         [OP_SCOPE_BEGIN]   = &&op_scope_begin,
         [OP_SCOPE_END]     = &&op_scope_end,
         [OP_TRYH]          = &&op_tryh,
+        [OP_FORCE]         = &&op_force,
     };
 
     /* Arity check before allocating VM state */
@@ -1914,6 +1915,21 @@ op_loadconst_w: {
 op_loadenv: {
     uint8_t slot = code[ip++];
     ray_t *val = LOCAL(slot);
+    if (val && ray_is_lazy(val)) {
+        /* Force a lazy local to a concrete, reusable value on first read,
+         * storing it back into the slot.  A lazy handle is single-use
+         * (materialization consumes its deferred graph), so a second read
+         * would otherwise see a dead handle — e.g. a lazy first/last bound
+         * to a lambda PARAM (which, unlike `let`, is not forced at bind)
+         * and then used twice: `((fn [v] (if (> v 0) v 0)) (first xs))`. */
+        val = ray_lazy_materialize(val);   /* consumes the slot's ref */
+        if (!val || RAY_IS_ERR(val)) {
+            vm_err_obj = val ? val : ray_error("type", NULL);
+            LOCAL(slot) = NULL;            /* ref already consumed */
+            goto vm_error;
+        }
+        LOCAL(slot) = val;                 /* slot now owns the concrete */
+    }
     if (val) ray_retain(val);
     else val = make_i64(0);
     PUSH(val);
@@ -2373,6 +2389,18 @@ op_tryh: {
     ray_release(handler);
     if (RAY_IS_ERR(result)) { vm_err_obj = result; goto vm_error; }
     PUSH(result);
+    DISPATCH();
+}
+
+op_force: {
+    /* Materialize a lazy TOS so a let-bound local holds a concrete,
+     * reusable value (a lazy handle is single-use). */
+    ray_t* v = POP();
+    if (v && ray_is_lazy(v)) {
+        v = ray_lazy_materialize(v);   /* consumes; concrete or error */
+        if (!v || RAY_IS_ERR(v)) { vm_err_obj = v ? v : ray_error("type", NULL); goto vm_error; }
+    }
+    PUSH(v);
     DISPATCH();
 }
 
@@ -2847,6 +2875,7 @@ static void ray_register_builtins(void) {
     register_vary(".db.splayed.get",   RAY_FN_NONE,       ray_get_splayed_fn);
     register_vary(".db.parted.get",    RAY_FN_NONE,       ray_get_parted_fn);
     register_vary(".db.parted.tables", RAY_FN_NONE,       ray_get_parted_tables_fn);
+    register_vary(".db.parted.fill",   RAY_FN_RESTRICTED, ray_fill_parted_fn);
 
     /* GUID generation */
     register_unary("guid",       RAY_FN_NONE, ray_guid_fn);
