@@ -105,5 +105,12 @@ ray_err_t ray_col_save_sym_encoded(ray_t* vec, const char* path,
 ray_t*    ray_col_load_dom(const char* path, struct ray_sym_domain_s* dom);
 ray_t*    ray_col_mmap_splayed_dom(const char* path, struct ray_sym_domain_s* dom);
 
+/* Append an inline index region to an existing (index-less) column file — used
+ * by the streaming .csv.splayed builder which writes raw columns first.  `ix`
+ * is a const ray_index_t* (void to avoid the ops/ type dependency in this
+ * store/ header). */
+ray_err_t ray_col_append_index(const char* path, const void* ix,
+                               int64_t col_len, int8_t col_type);
+
 
 #endif /* RAY_COL_H */
