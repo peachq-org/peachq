@@ -464,6 +464,35 @@ ray_t* ray_splay_load(const char* dir, const char* sym_path) {
     return splay_load_impl(dir, sym_path, false);
 }
 
+/* Build + persist accelerator indexes for a freshly-streamed splayed store.
+ * The .csv.splayed writer emits raw columns; this scans each eligible numeric
+ * column once and APPENDS a chunk-zone index region to its file (no data
+ * rewrite), so a later mmap load gets the same block-skip an in-memory build
+ * has.  Best-effort and idempotent-ish: ray_col_append_index refuses a file
+ * that is not exactly payload-sized (already indexed), so re-runs are no-ops. */
+void ray_splay_build_indexes(const char* dir, ray_t* tbl) {
+    if (!dir || !tbl || RAY_IS_ERR(tbl) || tbl->type != RAY_TABLE) return;
+    int64_t nc = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        if (!col || RAY_IS_ERR(col) || col->len < (1 << 16)) continue;
+
+        ray_t* idx = ray_index_chunk_zone_compute(col, 16);
+        if (!idx || RAY_IS_ERR(idx)) { if (idx) ray_error_free(idx); continue; }
+
+        ray_t* nstr = ray_sym_str(ray_table_col_name(tbl, c));
+        if (nstr && !RAY_IS_ERR(nstr)) {
+            char path[1100];
+            int n = snprintf(path, sizeof(path), "%s/%.*s", dir,
+                             (int)ray_str_len(nstr), ray_str_ptr(nstr));
+            if (n > 0 && n < (int)sizeof(path))
+                (void)ray_col_append_index(path, ray_index_payload(idx),
+                                           col->len, col->type);
+        }
+        ray_release(idx);
+    }
+}
+
 ray_t* ray_read_splayed(const char* dir, const char* sym_path) {
     return splay_load_impl(dir, sym_path, true);
 }
