@@ -92,11 +92,26 @@ static inline uint64_t ray_str_t_hash(const ray_str_t* s, const char* pool_base)
         assert(pool_base != NULL && "ray_str_t_hash: pooled string requires non-NULL pool_base");
     }
     const char* p = ray_str_is_inline(s) ? s->data : pool_base + s->pool_off;
-    uint64_t h = 0xcbf29ce484222325ULL;
-    for (uint32_t i = 0; i < s->len; i++) {
-        h ^= (uint64_t)(unsigned char)p[i];
-        h *= 0x100000001b3ULL;
+    /* 8-byte-block mix (murmur-style), matching DuckDB's HashBytes: far fewer
+     * multiplies than per-byte FNV for medium/long keys (URLs, titles). */
+    const uint64_t m = 0xc6a4a7935bd1e995ULL;
+    uint32_t len = s->len;
+    uint64_t h = 0xe17a1465ULL ^ ((uint64_t)len * m);
+    uint32_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t k;
+        memcpy(&k, p + i, 8);
+        k *= m; k ^= k >> 47; k *= m;
+        h ^= k; h *= m;
     }
+    uint32_t rem = len - i;
+    if (rem) {
+        uint64_t k = 0;
+        memcpy(&k, p + i, rem);   /* tail: rem<8 bytes, zero-padded high bytes */
+        k *= m; k ^= k >> 47; k *= m;
+        h ^= k; h *= m;
+    }
+    h ^= h >> 47; h *= m; h ^= h >> 47;
     return h;
 }
 
