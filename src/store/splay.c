@@ -477,7 +477,11 @@ void ray_splay_build_indexes(const char* dir, ray_t* tbl) {
         ray_t* col = ray_table_get_col_idx(tbl, c);
         if (!col || RAY_IS_ERR(col) || col->len < (1 << 16)) continue;
 
-        ray_t* idx = ray_index_chunk_zone_compute(col, 16);
+        /* STR columns get a dictionary (group on int codes); numeric/temporal
+         * get the per-chunk min/max for block-skip. */
+        ray_t* idx = (col->type == RAY_STR)
+                     ? ray_index_dict_compute(col)
+                     : ray_index_chunk_zone_compute(col, 16);
         if (!idx || RAY_IS_ERR(idx)) { if (idx) ray_error_free(idx); continue; }
 
         ray_t* nstr = ray_sym_str(ray_table_col_name(tbl, c));
