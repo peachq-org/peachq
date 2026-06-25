@@ -58,11 +58,13 @@
 
 #include "domain.h"
 #include "core/platform.h"  /* ray_vm_map_file / ray_vm_unmap_file */
-#include "mem/heap.h"       /* ray_heap_current_id — atom-heap tagging */
+#include "mem/heap.h"
+#include "mem/arena.h"   /* ray_arena_t / ray_arena_str — domain atom storage */
 #include "store/fileio.h"   /* flock + tmp/rename protocol for flush */
 #include "ops/hash.h"       /* ray_hash_bytes (same hash family as g_sym) */
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <libgen.h>
@@ -75,6 +77,20 @@ typedef enum {
     DOM_RUNTIME = 0,
     DOM_FILE    = 1,
 } dom_kind_t;
+
+/* ---- per-domain string-atom arena ----------------------------------------
+ *
+ * String atoms for a FILE domain are LAZILY materialized on first access and
+ * allocated from a per-domain ray_arena_t (mem/arena.c — mmap-backed via
+ * ray_sys_alloc, the same arena the global sym table uses) instead of the
+ * per-thread buddy heap.  Two reasons it must NOT be the buddy heap:
+ *   - Lazy materialization runs on ray_pool_dispatch WORKER threads during
+ *     query execution; each worker owns a distinct buddy heap.  An atom built
+ *     with ray_str() there would land on a worker heap that the process-global
+ *     domain cache outlives → use-after-free when that heap tears down.  The
+ *     arena's chunks are thread-independent and freed only at dom_destroy.
+ *   - ray_arena_str atoms carry RAY_ATTR_ARENA: ray_free / retain / release all
+ *     no-op on them, so they are refcount-free and bulk-freed by the arena. */
 
 /* Retired allocations (replaced atom arrays / invalidated LUTs): kept
  * alive until domain destroy so lock-free readers holding a stale
@@ -102,14 +118,29 @@ struct ray_sym_domain_s {
     int64_t   disk_count;
     size_t    disk_size;
 
-    /* FILE: published vocabulary — (atoms, count) pair.  atoms[i] is an
-     * owned string atom for position i (borrowed by callers).  count is
-     * release-published AFTER the slot write; growth REPLACES the array
-     * via atomic store and retires the old one.  Lock-free readers load
-     * count (acquire) then atoms. */
+    /* FILE: published vocabulary — (atoms, count) pair.  atoms[i] is the
+     * string atom for position i (borrowed by callers), LAZILY materialized
+     * on first access from the arena.  A slot is NULL until materialized;
+     * the per-slot publication is an atomic release store.  count is
+     * release-published AFTER the slot write (for appends); growth REPLACES
+     * the array via atomic store and retires the old one.  Lock-free readers
+     * load count (acquire) then atoms (acquire) then the slot (acquire). */
     _Atomic(int64_t)  count;
     _Atomic(ray_t**)  atoms;
     int64_t   atoms_cap;   /* guarded by g_dom_lock */
+
+    /* FILE: per-domain ray_arena_t backing every materialized string atom
+     * (lazy file slots + runtime-appended interns).  Atoms carry
+     * RAY_ATTR_ARENA (refcount-free); ray_arena_destroy bulk-frees them.
+     * Guarded by g_dom_lock (only ever touched under it). */
+    ray_arena_t* arena;
+
+    /* FILE: byte offset within `map` of each file entry's record (the u32
+     * length prefix).  base_count entries, covering the file prefix
+     * [0, base_count) only.  Built in one pass at open (no per-entry alloc);
+     * used to materialize atoms[pos] on demand from the mmap bytes.
+     * malloc'd; NULL when base_count == 0. */
+    size_t*   offsets;
 
     /* FILE, lazy: position → runtime intern id.  Built under g_dom_lock
      * (the build INTERNS the vocabulary into the global table —
@@ -126,15 +157,6 @@ struct ray_sym_domain_s {
     uint64_t  bucket_mask; /* cap - 1; 0 = not built yet */
 
     dom_retired_t* retired; /* replaced atom arrays + old LUTs */
-
-    /* Heap that backs this domain's string atoms (atoms[] are ray_str
-     * objects on the buddy heap, created when the domain was opened).
-     * The process-global cache outlives a per-thread ray_heap_destroy,
-     * so a cached domain whose heap is torn down would dangle; recording
-     * the heap lets ray_heap_destroy drop exactly its own domains while
-     * the atoms are still valid.  0xFFFF = "no heap was bound at
-     * creation" (never matches a real id, so never auto-dropped). */
-    uint16_t  atom_heap_id;
 
     struct ray_sym_domain_s* next; /* cache chain */
 };
@@ -212,13 +234,12 @@ static bool dom_retire(ray_sym_domain_t* d, void* p) {
 /* Free a FILE domain after the last reference dropped.  Caller has
  * already unlinked it from the cache. */
 static void dom_destroy(ray_sym_domain_t* d) {
+    /* Atoms are RAY_ATTR_ARENA — never refcounted, never individually freed.
+     * The arena bulk-frees them; we only free the pointer ARRAY here. */
     ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
-    int64_t count = atomic_load_explicit(&d->count, memory_order_relaxed);
-    if (atoms) {
-        for (int64_t i = 0; i < count; i++)
-            if (atoms[i]) ray_release(atoms[i]);
-        free(atoms);
-    }
+    free(atoms);
+    if (d->arena) ray_arena_destroy(d->arena);
+    free(d->offsets);
     free(atomic_load_explicit(&d->runtime_lut, memory_order_relaxed));
     for (dom_retired_t* r = d->retired; r;) {
         dom_retired_t* nxt = r->next;
@@ -232,13 +253,16 @@ static void dom_destroy(ray_sym_domain_t* d) {
     free(d);
 }
 
-/* Parse a mapped STRL image, materializing one owned string atom per
- * record into a fresh array.  Returns false on structural inconsistency
- * (bad magic, truncated record, trailing bytes) or OOM.  On success
- * *out_atoms (malloc'd, exactly *out_count entries; NULL when empty)
- * carries the vocabulary. */
+/* Index a mapped STRL image in one pass WITHOUT materializing any atom:
+ * validate magic + count, then record each record's byte offset (the start
+ * of its u32 length prefix) into a fresh offsets array.  atoms[] are all
+ * NULL — every slot is materialized lazily on first access.  Returns false
+ * on structural inconsistency (bad magic, truncated record, trailing bytes)
+ * or OOM.  On success *out_atoms (calloc'd NULLs) and *out_offsets (malloc'd
+ * byte offsets), each exactly *out_count entries; both NULL when empty. */
 static bool dom_parse_strl_atoms(const void* map, size_t map_size,
-                                 ray_t*** out_atoms, int64_t* out_count) {
+                                 ray_t*** out_atoms, size_t** out_offsets,
+                                 int64_t* out_count) {
     const uint8_t* base = (const uint8_t*)map;
     if (map_size < 12) return false;
 
@@ -251,36 +275,59 @@ static bool dom_parse_strl_atoms(const void* map, size_t map_size,
     if (count < 0 || count > UINT32_MAX) return false;
 
     ray_t** atoms = NULL;
+    size_t* offsets = NULL;
     if (count > 0) {
         atoms = (ray_t**)calloc((size_t)count, sizeof(ray_t*));
         if (!atoms) return false;
+        offsets = (size_t*)malloc((size_t)count * sizeof(size_t));
+        if (!offsets) { free(atoms); return false; }
     }
 
     size_t off = 12;
     size_t remaining = map_size - 12;
-    int64_t done = 0;
     for (int64_t i = 0; i < count; i++) {
+        offsets[i] = off;          /* start of this record's u32 len prefix */
         uint32_t slen;
         if (remaining < 4) goto fail;
         memcpy(&slen, base + off, 4);
         off += 4; remaining -= 4;
         if ((size_t)slen > remaining) goto fail;
-        ray_t* s = ray_str((const char*)base + off, slen);
-        if (!s || RAY_IS_ERR(s)) goto fail;
-        atoms[i] = s;
-        done = i + 1;
         off += slen; remaining -= slen;
     }
     if (remaining != 0) goto fail;
 
     *out_atoms = atoms;
+    *out_offsets = offsets;
     *out_count = count;
     return true;
 
 fail:
-    for (int64_t i = 0; i < done; i++) ray_release(atoms[i]);
     free(atoms);
+    free(offsets);
     return false;
+}
+
+/* Materialize atoms[pos] from the file bytes at offsets[pos] into the arena
+ * and publish it.  CALLER MUST HOLD g_dom_lock.  Idempotent: returns an
+ * already-published slot without re-materializing.  pos must be a valid file
+ * position (0 <= pos < base_count); runtime-appended slots (pos >=
+ * base_count) are materialized at append time and are never NULL.  Returns
+ * NULL on arena OOM. */
+static ray_t* dom_atom_at_locked(ray_sym_domain_t* d, int64_t pos) {
+    ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
+    ray_t* a = atomic_load_explicit((_Atomic(ray_t*)*)&atoms[pos],
+                                    memory_order_relaxed);
+    if (a) return a;
+
+    /* Lazy file slot: read [u32 len | bytes] at offsets[pos] from the map. */
+    const uint8_t* base = (const uint8_t*)d->map;
+    size_t off = d->offsets[pos];
+    uint32_t slen;
+    memcpy(&slen, base + off, 4);
+    a = ray_arena_str(d->arena, (const char*)base + off + 4, slen);
+    if (!a) return NULL;
+    atomic_store_explicit((_Atomic(ray_t*)*)&atoms[pos], a, memory_order_release);
+    return a;
 }
 
 /* Cache-hit revalidation: the file changed size since this object last
@@ -298,48 +345,81 @@ static bool dom_extend_from_file_locked(ray_sym_domain_t* d, size_t st_size) {
     void* map = ray_vm_map_file(d->path, &map_size);
     if (!map) return false;
 
-    ray_t** fresh = NULL;
+    ray_t** fresh = NULL;       /* all-NULL (lazy) slot array for the new image */
+    size_t* fresh_offsets = NULL;
     int64_t fresh_count = 0;
-    if (!dom_parse_strl_atoms(map, map_size, &fresh, &fresh_count)) {
+    if (!dom_parse_strl_atoms(map, map_size, &fresh, &fresh_offsets,
+                              &fresh_count)) {
         ray_vm_unmap_file(map, map_size);
         return false;
     }
 
     bool ok = fresh_count >= count;
-    /* Position-0 reservation also holds for externally grown files. */
-    if (ok && count == 0 && fresh_count > 0 && ray_str_len(fresh[0]) != 0)
-        ok = false;
-    /* Append-only prefix check: every position we already published must
-     * be byte-identical in the new image. */
-    ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
-    for (int64_t i = 0; ok && i < count; i++) {
-        ray_t* a = atoms[i];
-        ray_t* b = fresh[i];
-        if (ray_str_len(a) != ray_str_len(b) ||
-            (ray_str_len(a) > 0 &&
-             memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) != 0))
-            ok = false;
+
+    const uint8_t* nbase = (const uint8_t*)map;     /* new image bytes */
+    const uint8_t* obase = (const uint8_t*)d->map;  /* old image bytes (count > 0) */
+
+    /* Read a file record's [len, ptr] at byte offset `off` within `b`. */
+    #define DOM_REC(b, off, lp, pp) do {                       \
+        uint32_t _l; memcpy(&_l, (b) + (off), 4);              \
+        (lp) = _l; (pp) = (const char*)((b) + (off) + 4);      \
+    } while (0)
+
+    /* Position-0 reservation also holds for externally grown files: the
+     * first record of a non-empty file must be the empty string. */
+    if (ok && count == 0 && fresh_count > 0) {
+        uint32_t l0; const char* p0; (void)p0;
+        DOM_REC(nbase, fresh_offsets[0], l0, p0);
+        if (l0 != 0) ok = false;
     }
 
+    /* Append-only prefix check: every position we already published must be
+     * byte-identical between the old and new file images (compare mmap bytes
+     * directly via the old/new offsets — no materialization needed). */
+    for (int64_t i = 0; ok && i < count; i++) {
+        uint32_t ol, nl; const char *op, *np;
+        DOM_REC(obase, d->offsets[i], ol, op);
+        DOM_REC(nbase, fresh_offsets[i], nl, np);
+        if (ol != nl || (ol > 0 && memcmp(op, np, ol) != 0)) ok = false;
+    }
+    #undef DOM_REC
+
     if (ok && fresh_count > count) {
-        /* Publish the grown vocabulary: reuse the freshly parsed array
-         * (it already contains copies of the prefix), retire the old. */
-        if (!dom_retire(d, atoms)) {
+        /* Publish the grown vocabulary.  Build a NEW slot array (replace,
+         * never realloc — lock-free readers may hold the old one): carry the
+         * already-materialized prefix atoms (arena-owned, still valid; long
+         * atoms hold their own copy, so swapping the map is safe), new file
+         * slots start NULL (lazy). */
+        ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
+        ray_t** narr = (ray_t**)malloc((size_t)fresh_count * sizeof(ray_t*));
+        if (!narr) {
+            ok = false;
+        } else if (!dom_retire(d, atoms)) {
+            free(narr);
             ok = false;
         } else {
-            /* Old prefix atoms are owned by the OLD array's entries —
-             * but we retired the array, not the atoms.  Transfer: keep
-             * the old atoms in the published prefix so borrowed pointers
-             * stay valid; release the fresh duplicates. */
-            for (int64_t i = 0; i < count; i++) {
-                ray_release(fresh[i]);
-                fresh[i] = atoms[i];
-            }
-            atomic_store_explicit(&d->atoms, fresh, memory_order_release);
+            if (count > 0) memcpy(narr, atoms, (size_t)count * sizeof(ray_t*));
+            for (int64_t i = count; i < fresh_count; i++) narr[i] = NULL;
+            free(fresh);  /* fresh slot array unused — narr carries the prefix */
+
+            /* Swap in the new offsets + map; the old map's bytes are no
+             * longer referenced (prefix atoms are arena-copied). */
+            free(d->offsets);
+            d->offsets = fresh_offsets;
+            void* old_map = d->map;
+            size_t old_map_size = d->map_size;
+            d->map = map;
+            d->map_size = map_size;
+            d->base_count = fresh_count;
+
+            atomic_store_explicit(&d->atoms, narr, memory_order_release);
             d->atoms_cap = fresh_count;
             atomic_store_explicit(&d->count, fresh_count, memory_order_release);
             d->disk_count = fresh_count;
             d->disk_size = st_size;
+
+            if (old_map) ray_vm_unmap_file(old_map, old_map_size);
+
             /* Reverse index + LUT now cover a stale prefix: drop both.
              * A retire-OOM here would keep the stale LUT published over
              * the grown count (OOB reads for lock-free consumers) — the
@@ -357,21 +437,15 @@ static bool dom_extend_from_file_locked(ray_sym_domain_t* d, size_t st_size) {
                 }
                 atomic_store_explicit(&d->runtime_lut, NULL, memory_order_release);
             }
+            return true;
         }
     }
 
-    if (!ok || fresh_count == count) {
-        /* Failure, or nothing actually new (size-only change): drop the
-         * fresh parse.  fresh entries beyond count (failure case) and
-         * all entries (no-growth case) are duplicates we own. */
-        bool published = ok && fresh_count > count;
-        if (!published) {
-            for (int64_t i = 0; i < fresh_count; i++) ray_release(fresh[i]);
-            free(fresh);
-        }
-        if (ok && fresh_count == count) { d->disk_size = st_size; }
-    }
-
+    /* Failure, or nothing actually new (size-only change): drop the fresh
+     * parse and the new mapping; keep the existing image. */
+    if (ok && fresh_count == count) d->disk_size = st_size;
+    free(fresh);
+    free(fresh_offsets);
     ray_vm_unmap_file(map, map_size);
     return ok;
 }
@@ -412,34 +486,43 @@ static ray_sym_domain_t* dom_open_impl(const char* path, bool create) {
     d->kind = DOM_FILE;
     d->rc = 1;
     d->path = rpath;
-    d->atom_heap_id = ray_heap_current_id();  /* heap that will back atoms */
+    /* String atoms (lazy file slots + runtime-appended interns) live here,
+     * off the per-thread buddy heap.  64 KB chunks. */
+    d->arena = ray_arena_new(64 * 1024);
+    if (!d->arena) { free(d); free(rpath); return NULL; }
 
     if (exists) {
         d->map = ray_vm_map_file(rpath, &d->map_size);
         ray_t** atoms = NULL;
+        size_t* offsets = NULL;
         int64_t count = 0;
         if (!d->map ||
-            !dom_parse_strl_atoms(d->map, d->map_size, &atoms, &count)) {
-            dom_destroy(d);
-            return NULL;
-        }
-        /* Position-0 reservation: every non-empty symfile must carry the
-         * empty string at position 0 (mirrors global id 0 — the SYM
-         * null; group kernels and null conventions treat id 0 as "" /
-         * null).  A vocabulary that starts with anything else is
-         * structurally corrupt for domain use.  Empty files are fine. */
-        if (count > 0 && ray_str_len(atoms[0]) != 0) {
-            for (int64_t i = 0; i < count; i++) ray_release(atoms[i]);
-            free(atoms);
+            !dom_parse_strl_atoms(d->map, d->map_size, &atoms, &offsets, &count)) {
             dom_destroy(d);
             return NULL;
         }
         atomic_store_explicit(&d->atoms, atoms, memory_order_relaxed);
         atomic_store_explicit(&d->count, count, memory_order_relaxed);
+        d->offsets = offsets;
         d->atoms_cap = count;
         d->base_count = count;
         d->disk_count = count;
         d->disk_size = d->map_size;
+        /* Position-0 reservation: every non-empty symfile must carry the
+         * empty string at position 0 (mirrors global id 0 — the SYM
+         * null; group kernels and null conventions treat id 0 as "" /
+         * null).  A vocabulary that starts with anything else is
+         * structurally corrupt for domain use.  Empty files are fine.
+         * Check the file bytes directly (slen at offsets[0] must be 0) —
+         * no atom materialization needed. */
+        if (count > 0) {
+            uint32_t l0;
+            memcpy(&l0, (const uint8_t*)d->map + offsets[0], 4);
+            if (l0 != 0) {
+                dom_destroy(d);
+                return NULL;
+            }
+        }
     }
     /* create && !exists: empty domain — vocabulary appears via intern
      * ("" seeded at position 0) and reaches disk on first flush. */
@@ -492,51 +575,29 @@ void ray_sym_domain_release(ray_sym_domain_t* dom) {
     dom_destroy(dom);
 }
 
-/* Drop every cached FILE domain whose string atoms live on `heap_id`.
- * Called from ray_heap_destroy BEFORE that heap's pools are unmapped, so
- * the atoms are still valid and dom_destroy's ray_release path is safe.
- * Without this the process-global cache would keep handing out domains
- * whose atoms were freed when their backing heap was torn down (e.g. the
- * per-test heap_init/destroy in the test harness) — a use-after-free on
- * the next open/extend of that path.  Detach under the lock, free
- * outside it. */
-void ray_sym_domain_drop_heap(uint16_t heap_id) {
-    dom_lock();
-    ray_sym_domain_t* dead = NULL;
-    ray_sym_domain_t** pp = &g_domains;
-    while (*pp) {
-        ray_sym_domain_t* d = *pp;
-        if (d->kind == DOM_FILE && d->atom_heap_id == heap_id) {
-            *pp = d->next;          /* unlink */
-            d->next = dead;         /* stash for freeing outside the lock */
-            dead = d;
-        } else {
-            pp = &d->next;
-        }
-    }
-    dom_unlock();
-    while (dead) {
-        ray_sym_domain_t* next = dead->next;
-        dom_destroy(dead);
-        dead = next;
-    }
-}
-
 /* ---- resolution ------------------------------------------------------------ */
 
 ray_t* ray_sym_domain_str(ray_sym_domain_t* dom, int64_t pos) {
     if (!dom) return NULL;
     if (dom->kind == DOM_RUNTIME) return ray_sym_str(pos);
 
-    /* Lock-free: acquire the published count, then the array.  Appends
-     * release-publish the count after the slot write; array replacements
-     * are release-published before the count bump and old arrays are
-     * retired (valid memory) — a reader can never index a published
-     * position into memory that lacks it. */
+    /* Lock-free fast path: acquire the published count, then the array, then
+     * the slot.  Appends release-publish the count after the slot write;
+     * array replacements are release-published before the count bump and old
+     * arrays are retired (valid memory) — a reader can never index a
+     * published position into memory that lacks it.  A NULL slot is an
+     * unmaterialized lazy file entry: fall to the lock-held materialize. */
     int64_t count = atomic_load_explicit(&dom->count, memory_order_acquire);
     if (pos < 0 || pos >= count) return NULL;
     ray_t** atoms = atomic_load_explicit(&dom->atoms, memory_order_acquire);
-    return atoms[pos];
+    ray_t* a = atomic_load_explicit((_Atomic(ray_t*)*)&atoms[pos],
+                                    memory_order_acquire);
+    if (a) return a;
+
+    dom_lock();
+    a = dom_atom_at_locked(dom, pos);
+    dom_unlock();
+    return a;
 }
 
 /* Empty-vocabulary FILE domains get a distinct non-NULL LUT so callers
@@ -556,7 +617,6 @@ const int64_t* ray_sym_domain_runtime_lut(ray_sym_domain_t* dom) {
     lut = atomic_load_explicit(&dom->runtime_lut, memory_order_relaxed);
     if (!lut) {
         int64_t count = atomic_load_explicit(&dom->count, memory_order_relaxed);
-        ray_t** atoms = atomic_load_explicit(&dom->atoms, memory_order_relaxed);
         lut = (int64_t*)malloc((size_t)count * sizeof(int64_t));
         if (!lut) { dom_unlock(); return NULL; }
         /* THE sanctioned interning of a file vocabulary into the global
@@ -565,7 +625,9 @@ const int64_t* ray_sym_domain_runtime_lut(ray_sym_domain_t* dom) {
          * must request this LUT during sequential setup — interning
          * inside a worker violates sym.c's frozen-table rule. */
         for (int64_t i = 0; i < count; i++) {
-            lut[i] = ray_sym_intern(ray_str_ptr(atoms[i]), ray_str_len(atoms[i]));
+            ray_t* a = dom_atom_at_locked(dom, i);
+            if (!a) { free(lut); dom_unlock(); return NULL; }
+            lut[i] = ray_sym_intern(ray_str_ptr(a), ray_str_len(a));
             if (lut[i] < 0) {
                 /* 7a-review hardening: never publish a LUT carrying -1
                  * intern failures — a silent -1 makes cross-domain keys
@@ -594,11 +656,11 @@ static bool dom_build_index_locked(ray_sym_domain_t* d, int64_t extra) {
     uint64_t* buckets = (uint64_t*)calloc((size_t)cap, sizeof(uint64_t));
     if (!buckets) return false;
 
-    ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
     uint64_t mask = cap - 1;
     for (int64_t i = 0; i < count; i++) {
-        uint32_t h = (uint32_t)ray_hash_bytes(ray_str_ptr(atoms[i]),
-                                              ray_str_len(atoms[i]));
+        ray_t* a = dom_atom_at_locked(d, i);
+        if (!a) { free(buckets); return false; }
+        uint32_t h = (uint32_t)ray_hash_bytes(ray_str_ptr(a), ray_str_len(a));
         uint64_t slot = h & mask;
         while (buckets[slot] != 0) slot = (slot + 1) & mask;
         buckets[slot] = ((uint64_t)h << 32) | ((uint64_t)(uint32_t)i + 1);
@@ -612,15 +674,15 @@ static bool dom_build_index_locked(ray_sym_domain_t* d, int64_t extra) {
 /* Probe the reverse index.  Called under the lock with buckets built. */
 static int64_t dom_probe_locked(ray_sym_domain_t* d, uint32_t h,
                                 const char* str, size_t len) {
-    ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
     uint64_t mask = d->bucket_mask;
     uint64_t slot = h & mask;
     while (d->buckets[slot] != 0) {
         uint64_t e = d->buckets[slot];
         if ((uint32_t)(e >> 32) == h) {
             int64_t pos = (int64_t)(uint32_t)e - 1;
-            if (ray_str_len(atoms[pos]) == len &&
-                (len == 0 || memcmp(ray_str_ptr(atoms[pos]), str, len) == 0))
+            ray_t* a = dom_atom_at_locked(d, pos);
+            if (a && ray_str_len(a) == len &&
+                (len == 0 || memcmp(ray_str_ptr(a), str, len) == 0))
                 return pos;
         }
         slot = (slot + 1) & mask;
@@ -674,8 +736,11 @@ static int64_t dom_append_locked(ray_sym_domain_t* d, uint32_t h,
         !dom_build_index_locked(d, 1))
         return -1;
 
-    ray_t* s = ray_str(str, len);
-    if (!s || RAY_IS_ERR(s)) return -1;
+    /* Runtime-appended interns have NO file offset; materialize eagerly into
+     * the arena here so the slot is never NULL (lazy materialization covers
+     * only the file prefix [0, base_count)). */
+    ray_t* s = ray_arena_str(d->arena, str, len);
+    if (!s) return -1;
 
     ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
     atoms[count] = s;
@@ -757,9 +822,17 @@ ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
 
     dom_lock();
     int64_t count = atomic_load_explicit(&dom->count, memory_order_relaxed);
-    ray_t** atoms = atomic_load_explicit(&dom->atoms, memory_order_relaxed);
     int64_t disk_count = dom->disk_count;
     size_t  disk_size  = dom->disk_size;
+    /* Materialize every slot under the lock so the lock-free snapshot below
+     * has no NULL (lazy) entries to write.  The atoms are arena-owned, so
+     * once materialized they stay valid for the rest of this call. */
+    if (count != disk_count) {
+        for (int64_t i = 0; i < count; i++) {
+            if (!dom_atom_at_locked(dom, i)) { dom_unlock(); return RAY_ERR_OOM; }
+        }
+    }
+    ray_t** atoms = atomic_load_explicit(&dom->atoms, memory_order_relaxed);
     dom_unlock();
 
     if (count == disk_count) return RAY_OK; /* nothing new */
