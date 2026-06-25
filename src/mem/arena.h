@@ -37,6 +37,14 @@ ray_arena_t* ray_arena_new(size_t chunk_size);
  * Returns NULL on OOM. */
 ray_t* ray_arena_alloc(ray_arena_t* arena, size_t nbytes);
 
+/* Arena-backed ray_str(): build a -RAY_STR string atom for `len` bytes at `s`
+ * in the arena instead of the buddy heap.  SSO for len < 7; a fused U8-vec +
+ * atom block otherwise.  Atoms carry RAY_ATTR_ARENA (retain/release/free
+ * no-op) and are reclaimed in bulk by ray_arena_destroy.  The sanctioned way
+ * to hold immortal / domain-lifetime string atoms off the per-thread buddy
+ * heap (used by the global sym table and FILE sym domains).  NULL on OOM. */
+ray_t* ray_arena_str(ray_arena_t* arena, const char* s, size_t len);
+
 /* Ensure the arena can serve subsequent allocations totalling at least
  * `bytes` without the head chunk needing to grow.  If the head chunk has
  * enough free space already, this is a no-op; otherwise a new chunk with

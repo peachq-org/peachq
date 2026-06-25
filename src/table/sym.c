@@ -106,40 +106,8 @@ static inline void sym_unlock(void) {
     atomic_store_explicit(&g_sym_lock, 0, memory_order_release);
 }
 
-/* Arena-backed ray_str equivalent. Same logic as ray_str() in atom.c
- * but allocates from the sym arena instead of the buddy allocator. */
-static ray_t* sym_str_arena(ray_arena_t* arena, const char* s, size_t len) {
-    if (len < 7) {
-        /* SSO path: inline in header */
-        ray_t* v = ray_arena_alloc(arena, 0);
-        if (!v) return NULL;
-        v->type = -RAY_STR;
-        v->slen = (uint8_t)len;
-        if (len > 0) memcpy(v->sdata, s, len);
-        v->sdata[len] = '\0';
-        return v;
-    }
-    /* Long string: fused single allocation for U8 vector + STR header.
-     * Layout: [CHAR ray_t header (32B) | string data (len+1) | padding | STR ray_t header (32B)]
-     * This halves arena_alloc calls for long strings. */
-    size_t data_size = len + 1;
-    size_t chars_block = ((32 + data_size) + 31) & ~(size_t)31;  /* align up to 32 */
-    ray_t* chars = ray_arena_alloc(arena, chars_block + 32 - 32);  /* chars_block - 32 (header) + 32 (str header) */
-    if (!chars) return NULL;
-    chars->type = RAY_U8;
-    chars->len = (int64_t)len;
-    memcpy(ray_data(chars), s, len);
-    ((char*)ray_data(chars))[len] = '\0';
-
-    /* STR header sits right after the CHAR block */
-    ray_t* v = (ray_t*)((char*)chars + chars_block);
-    memset(v, 0, 32);
-    v->attrs = RAY_ATTR_ARENA;
-    ray_atomic_store(&v->rc, 1);
-    v->type = -RAY_STR;
-    v->obj = chars;
-    return v;
-}
+/* String atoms for the global sym table live in its arena (off the per-thread
+ * buddy heap) — see ray_arena_str in mem/arena.c. */
 
 /* Forward decl — used from ray_sym_init below to reserve sym ID 0 as
  * the canonical empty string.  Definition is further down with the
@@ -540,7 +508,7 @@ static int64_t sym_commit_new(uint32_t hash, const char* str, size_t len) {
 
     /* Create string atom from arena — avoids buddy allocator overhead.
      * Arena blocks have rc=1 and RAY_ATTR_ARENA set. */
-    ray_t* s = sym_str_arena(g_sym.arena, str, len);
+    ray_t* s = ray_arena_str(g_sym.arena, str, len);
     if (!s) return -1;
     g_sym.strings[new_id] = s;
     g_sym.str_count++;
@@ -638,7 +606,7 @@ static bool sym_lazy_materialize_to_locked(uint32_t target_id) {
                 memcmp(ray_str_ptr(existing), sp, slen) != 0)
                 return false;
         } else {
-            ray_t* s = sym_str_arena(g_sym.arena, sp, (size_t)slen);
+            ray_t* s = ray_arena_str(g_sym.arena, sp, (size_t)slen);
             if (!s) return false;
             g_sym.strings[id] = s;
             ht_insert(g_sym.buckets, g_sym.bucket_cap,
