@@ -30,6 +30,7 @@
 #include "table/domain.h"   /* sym-domain resolution (ray_sym_domain_count) */
 #include "ops/agg_engine.h" /* v2 agg engine routing gate (ray_agg_engine_v2) */
 #include "vec/str.h"        /* ray_str_t SSO hash/eq for wide STR group keys */
+#include "ops/idxop.h"      /* RAY_IDX_DICT: group on persisted string codes */
 
 /* ============================================================================
  * Reduction execution
@@ -5589,7 +5590,103 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
     }
 }
 
-ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
+static ray_t* exec_group_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
+                             int64_t group_limit);
+
+/* Map an I32 dictionary-code result column back to strings via the source
+ * column: code -> first_occ[code] -> the string at that row. */
+static ray_t* dict_codes_to_str(const ray_t* codes_col, ray_t* src_col,
+                                const ray_index_t* dix) {
+    int64_t n = codes_col->len, ndist = dix->u.dict.n_distinct;
+    const int32_t* cd   = (const int32_t*)ray_data((ray_t*)codes_col);
+    const int32_t* focc = (const int32_t*)ray_data(dix->u.dict.first_occ);
+    ray_t* out = ray_vec_new(RAY_STR, n > 0 ? n : 1);
+    if (!out || RAY_IS_ERR(out)) return out;
+    for (int64_t i = 0; i < n; i++) {
+        int32_t code = cd[i];
+        if (code < 0 || code >= ndist) { out = ray_str_vec_append(out, "", 0); }
+        else {
+            size_t vl; const char* vp = ray_str_vec_get(src_col, focc[code], &vl);
+            out = ray_str_vec_append(out, vp ? vp : "", vp ? vl : 0);
+        }
+        if (!out || RAY_IS_ERR(out)) return out;
+    }
+    return out;
+}
+
+/* exec_group wrapper: when a plain STR scan key carries a RAY_IDX_DICT, group on
+ * its int32 codes (cheap integer path) instead of the 16-byte descriptors, then
+ * map codes -> strings on the small result.  Falls through otherwise. */
+ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit) {
+    if (!tbl || RAY_IS_ERR(tbl) || tbl->type != RAY_TABLE)
+        return exec_group_run(g, op, tbl, group_limit);
+    ray_op_ext_t* ext = find_ext(g, op->id);
+    if (!ext || ext->n_keys == 0 || ext->n_keys > 8)
+        return exec_group_run(g, op, tbl, group_limit);
+
+    uint8_t nk = ext->n_keys;
+    ray_t*  key_col[8] = {0};   /* source STR column per dict'd key (for output) */
+    int64_t dict_sym[8];
+    bool any = false;
+    for (uint8_t k = 0; k < nk; k++) {
+        ray_op_t* key_op = op_node(g, ext->keys[k]);
+        ray_op_ext_t* ke = key_op ? find_ext(g, key_op->id) : NULL;
+        if (!ke || ke->base.opcode != OP_SCAN) continue;
+        int64_t sym = ke->sym;
+        ray_t* col = ray_table_get_col(tbl, sym);
+        if (!col || col->type != RAY_STR) continue;
+        if (ray_index_kind(col) != RAY_IDX_DICT) continue;
+        /* Skip if any non-COUNT agg reads this key column as strings. */
+        bool unsafe = false;
+        for (uint8_t a = 0; a < ext->n_aggs; a++) {
+            if (ext->agg_ops[a] == OP_COUNT) continue;
+            ray_op_t* ain = op_node(g, ext->agg_ins[a]);
+            ray_op_ext_t* ae = ain ? find_ext(g, ain->id) : NULL;
+            if (ae && ae->base.opcode == OP_SCAN && ae->sym == sym) { unsafe = true; break; }
+        }
+        if (unsafe) continue;
+        key_col[k] = col;
+        dict_sym[k] = sym;
+        any = true;
+    }
+    if (!any) return exec_group_run(g, op, tbl, group_limit);
+
+    /* Substitute each dict'd STR key column with its int32 code vector. */
+    int64_t ncols = ray_table_ncols(tbl);
+    ray_t* sub = ray_table_new(ncols);
+    if (!sub || RAY_IS_ERR(sub)) return exec_group_run(g, op, tbl, group_limit);
+    for (int64_t c = 0; c < ncols; c++) {
+        int64_t name = ray_table_col_name(tbl, c);
+        ray_t* use = ray_table_get_col_idx(tbl, c);
+        for (uint8_t k = 0; k < nk; k++)
+            if (key_col[k] && dict_sym[k] == name) {
+                use = ray_index_payload(key_col[k]->index)->u.dict.codes; break;
+            }
+        sub = ray_table_add_col(sub, name, use);
+        if (!sub || RAY_IS_ERR(sub)) return exec_group_run(g, op, tbl, group_limit);
+    }
+
+    ray_t* result = exec_group_run(g, op, sub, group_limit);
+    ray_release(sub);
+
+    if (result && !RAY_IS_ERR(result) && result->type == RAY_TABLE) {
+        for (uint8_t k = 0; k < nk; k++) {
+            if (!key_col[k]) continue;
+            ray_t* codes_col = ray_table_get_col_idx(result, k);
+            if (codes_col && codes_col->type == RAY_I32) {
+                ray_t* str_col = dict_codes_to_str(
+                    codes_col, key_col[k], ray_index_payload(key_col[k]->index));
+                if (str_col && !RAY_IS_ERR(str_col)) {
+                    ray_table_set_col_idx(result, k, str_col);
+                    ray_release(str_col);
+                } else if (str_col) ray_release(str_col);
+            }
+        }
+    }
+    return result;
+}
+
+static ray_t* exec_group_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                   int64_t group_limit) {
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
 
