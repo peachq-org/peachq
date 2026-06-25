@@ -65,6 +65,14 @@ typedef enum {
      * of ray_index_t.u below. */
     RAY_IDX_CHUNK_ZONE = 5,
     RAY_IDX_PART       = 6,
+    /* Per-column string dictionary: an int32 code per row + the distinct
+     * string values (code -> string).  Lets group-by / distinct run on the
+     * cheap integer-code path instead of hashing 16-byte ray_str_t descriptors
+     * and chasing the string pool.  Built at column ingest / splayed save and
+     * persisted inline like the chunk-zone index; the only accelerator index
+     * permitted on RAY_STR (it stores codes alongside the descriptors, leaving
+     * the column's own representation untouched). */
+    RAY_IDX_DICT       = 7,
 } ray_idx_kind_t;
 
 /* Marker bits stored in ray_index_t.markers (block-resident attributes
@@ -142,6 +150,16 @@ typedef struct {
             ray_t*  lens;       /* RAY_I64, row count of each part */
             int64_t n_parts;
         } part;
+        struct {                /* RAY_IDX_DICT */
+            /* Both children are RAY_I32 (numeric — the inline persistence stores
+             * them verbatim, no nested str_pool).  The distinct STRING values
+             * are NOT duplicated: first_occ[c] is the parent-column row index of
+             * code c's first occurrence, so code -> string resolves through the
+             * parent column itself (ray_str_vec_get(col, first_occ[c])). */
+            ray_t*   codes;     /* RAY_I32 vec, parent->len entries: code per row */
+            ray_t*   first_occ; /* RAY_I32 vec, n_distinct entries: first-occ row  */
+            int64_t  n_distinct;
+        } dict;
     } u;
 } ray_index_t;
 
@@ -188,6 +206,13 @@ ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2);
  * RAY_INDEX object (caller releases).  Used by the splayed-store builder to
  * compute an index for persistence without COWing a shared column. */
 ray_t* ray_index_chunk_zone_compute(ray_t* v, uint8_t chunk_log2);
+
+/* Build a RAY_IDX_DICT (codes + distinct values) for STR vector `v` WITHOUT
+ * attaching it — standalone RAY_INDEX object (caller releases / attaches).
+ * Returns RAY_ERR_NYI for non-STR.  Used at splayed save to persist the dict
+ * and by ray_index_attach_dict for the runtime path. */
+ray_t* ray_index_dict_compute(ray_t* v);
+ray_t* ray_index_attach_dict(ray_t** vp);
 
 /* Attach an already-built standalone RAY_INDEX object (zero-copy on rc=1). */
 ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx);

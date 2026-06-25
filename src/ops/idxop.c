@@ -273,6 +273,11 @@ void ray_index_release_payload(ray_index_t* ix) {
         if (ix->u.part.lens   && !RAY_IS_ERR(ix->u.part.lens))   ray_release(ix->u.part.lens);
         ix->u.part.keys = ix->u.part.starts = ix->u.part.lens = NULL;
         break;
+    case RAY_IDX_DICT:
+        if (ix->u.dict.codes  && !RAY_IS_ERR(ix->u.dict.codes))  ray_release(ix->u.dict.codes);
+        if (ix->u.dict.first_occ && !RAY_IS_ERR(ix->u.dict.first_occ)) ray_release(ix->u.dict.first_occ);
+        ix->u.dict.codes = ix->u.dict.first_occ = NULL;
+        break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
         break;
@@ -307,6 +312,10 @@ void ray_index_retain_payload(ray_index_t* ix) {
         if (ix->u.part.keys   && !RAY_IS_ERR(ix->u.part.keys))   ray_retain(ix->u.part.keys);
         if (ix->u.part.starts && !RAY_IS_ERR(ix->u.part.starts)) ray_retain(ix->u.part.starts);
         if (ix->u.part.lens   && !RAY_IS_ERR(ix->u.part.lens))   ray_retain(ix->u.part.lens);
+        break;
+    case RAY_IDX_DICT:
+        if (ix->u.dict.codes  && !RAY_IS_ERR(ix->u.dict.codes))  ray_retain(ix->u.dict.codes);
+        if (ix->u.dict.first_occ && !RAY_IS_ERR(ix->u.dict.first_occ)) ray_retain(ix->u.dict.first_occ);
         break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
@@ -540,7 +549,10 @@ static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
      * via ray_vec_is_null (sentinel-based), which is unaffected by the
      * index pointer overlay at bytes 0-7. */
     parent->index    = idx;
-    if (!(parent->attrs & RAY_ATTR_HAS_LINK)) parent->_idx_pad = NULL;
+    /* _idx_pad (bytes 8-15) aliases str_pool on a RAY_STR parent — NEVER clear
+     * it there, or we'd null the column's string pool.  HAS_LINK uses it too. */
+    if (!(parent->attrs & RAY_ATTR_HAS_LINK) && parent->type != RAY_STR)
+        parent->_idx_pad = NULL;
     parent->attrs   |= RAY_ATTR_HAS_INDEX;
     return parent;
 }
@@ -548,7 +560,7 @@ static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
 /* Validate + COW + drop existing index.  Returns the (possibly new) parent
  * pointer and updates *vp.  On error returns a RAY_ERROR; caller must
  * propagate without further modifying *vp. */
-static ray_t* prepare_attach(ray_t** vp, const char* what) {
+static ray_t* prepare_attach_ex(ray_t** vp, const char* what, bool allow_str) {
     if (!vp || !*vp || RAY_IS_ERR(*vp))
         return ray_error("type", "%s: null/error vector", what);
     ray_t* v = *vp;
@@ -564,11 +576,17 @@ static ray_t* prepare_attach(ray_t** vp, const char* what) {
     v = ray_cow(v);
     if (!v || RAY_IS_ERR(v)) return v;
     *vp = v;
-    if (numeric_elem_size(v->type) == 0) {
-        return ray_error("nyi", "%s: only numeric vectors supported in v1 (got type %d)",
+    /* Numeric vectors carry any index kind; STR carries only RAY_IDX_DICT (the
+     * codes live alongside the descriptors — the column representation is
+     * untouched).  allow_str gates that one exception. */
+    if (numeric_elem_size(v->type) == 0 && !(allow_str && v->type == RAY_STR)) {
+        return ray_error("nyi", "%s: only numeric vectors supported (got type %d)",
                          what, (int)v->type);
     }
     return v;
+}
+static ray_t* prepare_attach(ray_t** vp, const char* what) {
+    return prepare_attach_ex(vp, what, false);
 }
 
 ray_t* ray_index_attach_zone(ray_t** vp) {
@@ -689,13 +707,83 @@ ray_t* ray_index_chunk_zone_compute(ray_t* v, uint8_t chunk_log2) {
     return idx;   /* standalone RAY_INDEX object — caller releases */
 }
 
+/* ── RAY_IDX_DICT: per-column string dictionary (codes + first-occ rows) ──
+ * Deduplicates `v`'s strings into dense int32 codes; first_occ[c] is the row of
+ * code c's first occurrence (so code -> string resolves through `v` itself).
+ * Standalone RAY_INDEX object (caller releases / attaches).  STR only. */
+ray_t* ray_index_dict_compute(ray_t* v) {
+    if (!v || RAY_IS_ERR(v) || !ray_is_vec(v))
+        return ray_error("type", "dict: compute needs a vector");
+    if (v->type != RAY_STR)
+        return ray_error("nyi", "dict: only RAY_STR vectors supported");
+    int64_t n = v->len;
+    if (n <= 0 || n > INT32_MAX)
+        return ray_error("domain", "dict: row count out of int32 code range");
+
+    ray_t* owner = (v->attrs & RAY_ATTR_SLICE) ? v->slice_parent : v;
+    const ray_str_t* desc = (const ray_str_t*)ray_data(v);
+    const char* pool = (owner && owner->str_pool && !RAY_IS_ERR(owner->str_pool))
+                       ? (const char*)ray_data(owner->str_pool) : NULL;
+
+    ray_t* codes = ray_vec_new(RAY_I32, n);
+    if (!codes || RAY_IS_ERR(codes)) return codes ? codes : ray_error("oom", NULL);
+    codes->len = n;
+    int32_t* cd = (int32_t*)ray_data(codes);
+
+    uint64_t cap = 32; while (cap < (uint64_t)n * 2) cap <<= 1;
+    uint64_t mask = cap - 1;
+    int32_t* slot = (int32_t*)calloc((size_t)cap, sizeof(int32_t));   /* code+1 */
+    int32_t* focc = (int32_t*)malloc((size_t)n * sizeof(int32_t));    /* first-occ row */
+    if (!slot || !focc) { free(slot); free(focc); ray_release(codes); return ray_error("oom", NULL); }
+
+    int64_t ndist = 0;
+    for (int64_t i = 0; i < n; i++) {
+        const ray_str_t* d = &desc[i];
+        uint64_t s = ray_str_t_hash(d, pool) & mask;
+        for (;;) {
+            int32_t cp1 = slot[s];
+            if (cp1 == 0) {
+                int32_t code = (int32_t)ndist++;
+                focc[code] = (int32_t)i; slot[s] = code + 1; cd[i] = code; break;
+            }
+            int32_t code = cp1 - 1;
+            if (ray_str_t_eq(&desc[focc[code]], pool, d, pool)) { cd[i] = code; break; }
+            s = (s + 1) & mask;
+        }
+    }
+    free(slot);
+
+    ray_t* first_occ = ray_vec_new(RAY_I32, ndist > 0 ? ndist : 1);
+    if (!first_occ || RAY_IS_ERR(first_occ)) { free(focc); ray_release(codes); return ray_error("oom", NULL); }
+    first_occ->len = ndist;
+    memcpy(ray_data(first_occ), focc, (size_t)ndist * sizeof(int32_t));
+    free(focc);
+
+    ray_t* idx = ray_index_alloc(RAY_IDX_DICT, v->type, n);
+    if (!idx || RAY_IS_ERR(idx)) { ray_release(codes); ray_release(first_occ); return idx; }
+    ray_index_t* ix = ray_index_payload(idx);
+    ix->u.dict.codes      = codes;
+    ix->u.dict.first_occ  = first_occ;
+    ix->u.dict.n_distinct = ndist;
+    return idx;
+}
+
 /* Attach an already-built standalone RAY_INDEX object to a column.  Takes
  * ownership of idx on success.  Zero-copy on a fresh rc=1 column. */
 ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx) {
     if (!idx || RAY_IS_ERR(idx) || idx->type != RAY_INDEX)
         return ray_error("type", "attach_built: not an index object");
-    ray_t* v = prepare_attach(vp, "index");   /* rc=1 → ray_cow no-op */
+    bool is_dict = (ray_index_payload(idx)->kind == RAY_IDX_DICT);
+    ray_t* v = prepare_attach_ex(vp, "index", is_dict);   /* rc=1 → ray_cow no-op */
     if (RAY_IS_ERR(v)) return v;
+    return attach_finalize(v, idx);
+}
+
+ray_t* ray_index_attach_dict(ray_t** vp) {
+    ray_t* v = prepare_attach_ex(vp, "dict", true);
+    if (RAY_IS_ERR(v)) return v;
+    ray_t* idx = ray_index_dict_compute(v);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
     return attach_finalize(v, idx);
 }
 
@@ -728,6 +816,8 @@ static int idx_child_slots(ray_index_t* ix, ray_t** slots[3]) {
     case RAY_IDX_PART:
         slots[n++] = &ix->u.part.keys; slots[n++] = &ix->u.part.starts;
         slots[n++] = &ix->u.part.lens; break;
+    case RAY_IDX_DICT:
+        slots[n++] = &ix->u.dict.codes; slots[n++] = &ix->u.dict.first_occ; break;
     default: break;  /* RAY_IDX_ZONE: scalars only, no child vecs */
     }
     return n;
@@ -1823,6 +1913,7 @@ static const char* kind_name(ray_idx_kind_t k) {
     case RAY_IDX_BLOOM:      return "bloom";
     case RAY_IDX_CHUNK_ZONE: return "chunk_zone";
     case RAY_IDX_PART:       return "part";
+    case RAY_IDX_DICT:       return "dict";
     default:                 return "none";
     }
 }
@@ -1916,6 +2007,10 @@ ray_t* ray_index_info(ray_t* v) {
         break;
     case RAY_IDX_PART:
         r = dict_append_sym_i64(&keys, &vals, "n_parts", ix->u.part.n_parts);
+        if (RAY_IS_ERR(r)) goto fail;
+        break;
+    case RAY_IDX_DICT:
+        r = dict_append_sym_i64(&keys, &vals, "n_distinct", ix->u.dict.n_distinct);
         if (RAY_IS_ERR(r)) goto fail;
         break;
     case RAY_IDX_NONE:
