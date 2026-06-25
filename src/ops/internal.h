@@ -991,6 +991,15 @@ typedef struct {
      * (16 B) resolved via the string pool (key_pool[k]) with SSO-aware
      * hash/eq (inline ≤12 B keys need no pool deref). */
     int8_t   wide_key_type[8];
+    /* Byte offset of each key within the entry/HT-row key region (relative to
+     * the start of the key region, i.e. entry+8 / row+8).  key_off[n_keys] is
+     * the null-mask slot.  Most keys are 8 B (key_off[k]==k*8); a RAY_STR key
+     * stores its ray_str_t descriptor INLINE (16 B) so probe/rehash compare it
+     * cache-locally instead of chasing key_data[k]+row*16 in the source column.
+     * key_inline_str bit k set iff key k stores an inline 16 B STR descriptor. */
+    uint16_t key_off[9];
+    uint16_t key_region;       /* total key region bytes = key_off[n_keys] + 8 */
+    uint8_t  key_inline_str;   /* bitset: key k is an inline STR descriptor */
 } ght_layout_t;
 
 typedef struct {
