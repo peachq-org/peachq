@@ -140,6 +140,13 @@ static ray_t* pivot_fn_impl(ray_t* tbl, ray_t* index_arg, ray_t* pivot_col_name,
     ray_t* vcol = ray_table_get_col(tbl, value_col_name->i64);
     if (!vcol) return ray_error("domain", "pivot: value column not found");
 
+    /* The pivot column's distinct values become output column NAMES (syms);
+     * a STR pivot column cannot supply names.  (STR *index* columns ARE now
+     * supported — they group via the wide-key path; this restriction is
+     * specific to the pivot column, whose values name the unstacked columns.) */
+    if (pcol->type == RAY_STR)
+        return ray_error("nyi", "pivot: STR pivot column not supported as column names");
+
     /* Get index columns */
     ray_t* icols[16];
     for (int64_t i = 0; i < n_idx; i++) {
