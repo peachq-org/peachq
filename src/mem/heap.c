@@ -1438,11 +1438,6 @@ void ray_heap_init(void) {
  * heap takes over.  Lives in src/lang/eval.c. */
 extern void ray_clear_error_trace(void);
 
-/* Drop sym-domain cache entries whose atoms live on a heap being torn
- * down (src/table/domain.c).  Extern-declared to keep heap.c free of the
- * table-layer header, mirroring ray_clear_error_trace above. */
-extern void ray_sym_domain_drop_heap(uint16_t heap_id);
-
 void ray_heap_destroy(void) {
     ray_heap_t* h = ray_tl_heap;
     if (!h) return;
@@ -1453,11 +1448,11 @@ void ray_heap_destroy(void) {
      * pools, dereferencing g_error_trace becomes UB. */
     ray_clear_error_trace();
 
-    /* Same ordering rationale: the process-global sym-domain cache holds
-     * FILE domains whose string atoms are ray_str objects on THIS heap.
-     * Drop them now, while the atoms are still mapped, so the cache never
-     * hands out a domain backed by freed memory after this heap dies. */
-    ray_sym_domain_drop_heap(h->id);
+    /* FILE sym-domain string atoms used to live on the per-thread buddy
+     * heap, requiring a drop here so the process-global cache never handed
+     * out a domain backed by this heap's freed memory.  They now live in a
+     * per-domain malloc arena (RAY_ATTR_ARENA, thread-independent), so the
+     * cache safely outlives any heap teardown — no drop needed. */
 
     uint16_t saved_id = h->id;
 
