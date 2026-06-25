@@ -109,6 +109,40 @@ ray_t* ray_arena_alloc(ray_arena_t* arena, size_t nbytes) {
     return v;
 }
 
+ray_t* ray_arena_str(ray_arena_t* arena, const char* s, size_t len) {
+    if (len < 7) {
+        /* SSO: bytes inline in the header (ray_arena_alloc zeroes it and sets
+         * RAY_ATTR_ARENA + rc=1). */
+        ray_t* v = ray_arena_alloc(arena, 0);
+        if (!v) return NULL;
+        v->type = -RAY_STR;
+        v->slen = (uint8_t)len;
+        if (len > 0) memcpy(v->sdata, s, len);
+        v->sdata[len] = '\0';
+        return v;
+    }
+    /* Long string: fused single allocation for the U8 data vec + the STR atom.
+     * Layout: [U8 ray_t header (32) | data (len+1) | pad to 32 | STR header (32)].
+     * One arena_alloc instead of two.  32-byte arena alignment keeps the atom's
+     * obj pointer low byte out of is_sso()'s 1..7 SSO range. */
+    size_t data_size = len + 1;
+    size_t chars_block = ((32 + data_size) + 31) & ~(size_t)31;  /* align up to 32 */
+    ray_t* chars = ray_arena_alloc(arena, chars_block);
+    if (!chars) return NULL;
+    chars->type = RAY_U8;
+    chars->len  = (int64_t)len;
+    memcpy(ray_data(chars), s, len);
+    ((char*)ray_data(chars))[len] = '\0';
+
+    ray_t* v = (ray_t*)((char*)chars + chars_block);
+    memset(v, 0, 32);
+    v->attrs = RAY_ATTR_ARENA;
+    ray_atomic_store(&v->rc, 1);
+    v->type  = -RAY_STR;
+    v->obj   = chars;
+    return v;
+}
+
 bool ray_arena_reserve(ray_arena_t* arena, size_t bytes) {
     if (!arena) return false;
     if (bytes == 0) return true;
