@@ -2300,12 +2300,14 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
                 ly.wide_key_esz[k] = 16;
                 ly.wide_key_type[k] = RAY_GUID;
             } else if (key_types[k] == RAY_STR) {
-                /* STR key: the 8-byte slot holds a source row index; the
-                 * ray_str_t descriptor (16 B) lives in key_data[k], resolved
-                 * via the string pool key_pool[k] with SSO-aware hash/eq. */
+                /* STR key: store the 16-byte ray_str_t descriptor INLINE in the
+                 * entry/row key region (key_inline_str) so probe/rehash/compare
+                 * read it cache-locally — no key_data[k]+row*16 source chase.
+                 * key_pool[k] (source pool) is still used for >12 B full eq. */
                 ly.wide_key_mask |= (uint8_t)(1u << k);
                 ly.wide_key_esz[k] = (uint8_t)sizeof(ray_str_t);
                 ly.wide_key_type[k] = RAY_STR;
+                ly.key_inline_str |= (uint8_t)(1u << k);
             }
         }
     }
@@ -2367,7 +2369,21 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
      * The null mask slot holds a bitmap of which keys were null in the source
      * row (bit k = key k is null). Folding this slot into hash/memcmp lets
      * null and 0 form distinct groups. */
-    uint16_t key_region = (uint16_t)((uint16_t)n_keys * 8 + 8);
+    /* Per-key byte offsets within the key region.  Inline-STR keys are 16 B,
+     * all others 8 B; key_off[n_keys] is the trailing 8-byte null-mask slot.
+     * When no inline-STR key is present every offset is k*8 (byte-identical to
+     * the legacy fixed-8 layout, so non-STR group-bys are unchanged). */
+    {
+        uint16_t koff = 0;
+        for (uint8_t k = 0; k < n_keys && k < 8; k++) {
+            ly.key_off[k] = koff;
+            koff += (ly.key_inline_str & (1u << k)) ? 16 : 8;
+        }
+        ly.key_off[n_keys] = koff;   /* null mask */
+        koff += 8;
+        ly.key_region = koff;
+    }
+    uint16_t key_region = ly.key_region;
     /* Entry layout: hash | keys | null_mask | agg_vals | [entry_row?]
      * Tail entry_row slot is appended only when any agg is FIRST/LAST,
      * carrying the source-row index needed to merge correctly under
@@ -2520,6 +2536,84 @@ static inline bool wide_key_eq_at(const ght_layout_t* ly, uint8_t k,
     return memcmp(base + (size_t)ra * esz, base + (size_t)rb * esz, esz) == 0;
 }
 
+/* ── Inline-STR key resolution (descriptor stored in the entry/row) ──
+ * key_inline_str keys hold their 16-byte ray_str_t descriptor at
+ * keybase+key_off[k], so hash/compare are cache-local; key_pool[k] (the source
+ * pool) is touched only for the full eq/hash of pooled (>12 B) strings. */
+static inline uint64_t inline_str_hash(const ght_layout_t* ly, uint8_t k,
+                                       const void* keybase,
+                                       const void* const* key_pool) {
+    const ray_str_t* d = (const ray_str_t*)((const char*)keybase + ly->key_off[k]);
+    return ray_str_t_hash(d, key_pool ? (const char*)key_pool[k] : NULL);
+}
+static inline bool inline_str_eq(const ght_layout_t* ly, uint8_t k,
+                                 const void* a_base, const void* b_base,
+                                 const void* const* key_pool) {
+    const ray_str_t* a = (const ray_str_t*)((const char*)a_base + ly->key_off[k]);
+    const ray_str_t* b = (const ray_str_t*)((const char*)b_base + ly->key_off[k]);
+    const char* pool = key_pool ? (const char*)key_pool[k] : NULL;
+    return ray_str_t_eq(a, pool, b, pool);
+}
+/* Per-key hash within an inline-STR layout (offsets shifted by 16-byte keys). */
+static inline uint64_t inline_layout_key_hash(const ght_layout_t* ly, uint8_t k,
+                                              const int8_t* key_types,
+                                              const void* keybase, void* const* key_data,
+                                              const void* const* key_pool) {
+    if (ly->key_inline_str & (1u << k))
+        return inline_str_hash(ly, k, keybase, key_pool);
+    int64_t v = *(const int64_t*)((const char*)keybase + ly->key_off[k]);
+    if (ly->wide_key_mask & (1u << k))            /* GUID: v is a source row idx */
+        return wide_key_hash_at(ly, k, key_data, key_pool, v);
+    if (key_types[k] == RAY_F64) {
+        double dv; memcpy(&dv, &v, 8); return ray_hash_f64(dv);
+    }
+    return ray_hash_i64(v);
+}
+
+/* Build the key region of a fat entry for an inline-STR layout (offsets
+ * shifted by 16-byte descriptors).  Writes keys + null mask at keybase (entry+8
+ * / row+8), returns the combined hash and the null mask.  Mirrors the legacy
+ * fixed-8 build but addresses every slot via key_off[k]. */
+static inline uint64_t inline_build_keys(const ght_layout_t* ly, const int8_t* key_types,
+        void* const* key_data, const uint8_t* key_attrs, const void* const* key_pool,
+        ray_t* const* key_vecs, uint8_t nullable, int64_t row,
+        char* keybase, int64_t* out_null_mask) {
+    uint64_t h = 0;
+    int64_t null_mask = 0;
+    uint8_t nk = ly->n_keys;
+    for (uint8_t k = 0; k < nk; k++) {
+        char* slot = keybase + ly->key_off[k];
+        uint64_t kh;
+        bool is_null = (nullable & (1u << k)) && key_vecs && key_vecs[k]
+                       && ray_vec_is_null(key_vecs[k], row);
+        if (is_null) {
+            null_mask |= (int64_t)(1u << k);
+            if (ly->key_inline_str & (1u << k)) memset(slot, 0, sizeof(ray_str_t));
+            else *(int64_t*)slot = 0;
+            kh = ray_hash_i64(0);
+        } else if (ly->key_inline_str & (1u << k)) {
+            *(ray_str_t*)slot = ((const ray_str_t*)key_data[k])[row];
+            kh = ray_str_t_hash((const ray_str_t*)slot,
+                                key_pool ? (const char*)key_pool[k] : NULL);
+        } else if (ly->wide_key_mask & (1u << k)) {        /* GUID: row index */
+            *(int64_t*)slot = row;
+            kh = wide_key_hash_at(ly, k, key_data, key_pool, row);
+        } else if (key_types[k] == RAY_F64) {
+            *(int64_t*)slot = ((const int64_t*)key_data[k])[row];
+            kh = ray_hash_f64(((const double*)key_data[k])[row]);
+        } else {
+            int64_t kv = read_col_i64(key_data[k], row, key_types[k], key_attrs[k]);
+            *(int64_t*)slot = kv;
+            kh = ray_hash_i64(kv);
+        }
+        h = (k == 0) ? kh : ray_hash_combine(h, kh);
+    }
+    *(int64_t*)(keybase + ly->key_off[nk]) = null_mask;
+    if (null_mask) h = ray_hash_combine(h, ray_hash_i64(null_mask));
+    *out_null_mask = null_mask;
+    return h;
+}
+
 /* Hash inline int64_t keys (for rehash — resolves wide keys via
  * the HT's key_data pointers). */
 static inline uint64_t hash_keys_inline(const int64_t* keys, const int8_t* key_types,
@@ -2527,6 +2621,18 @@ static inline uint64_t hash_keys_inline(const int64_t* keys, const int8_t* key_t
                                          const uint8_t* wide_esz, void* const* key_data,
                                          const ght_layout_t* ly,
                                          const void* const* key_pool) {
+    if (ly->key_inline_str) {
+        /* Inline-STR layout: key offsets are shifted by 16-byte descriptors,
+         * so address every key via key_off[k] and hash the inline descriptor. */
+        uint64_t h = 0;
+        for (uint8_t k = 0; k < n_keys; k++) {
+            uint64_t kh = inline_layout_key_hash(ly, k, key_types, keys, key_data, key_pool);
+            h = (k == 0) ? kh : ray_hash_combine(h, kh);
+        }
+        int64_t null_mask = *(const int64_t*)((const char*)keys + ly->key_off[n_keys]);
+        if (null_mask) h = ray_hash_combine(h, ray_hash_i64(null_mask));
+        return h;
+    }
     uint64_t h = 0;
     for (uint8_t k = 0; k < n_keys; k++) {
         uint64_t kh;
@@ -2584,7 +2690,7 @@ static inline void init_accum_from_entry(char* row, const char* entry,
     if (ly->row_stride > accum_start)
         memset(row + accum_start, 0, ly->row_stride - accum_start);
 
-    const char* agg_data = entry + 8 + ((size_t)ly->n_keys + 1) * 8;
+    const char* agg_data = entry + 8 + (size_t)ly->key_region;
     uint8_t na = ly->n_aggs;
     uint8_t nf = ly->need_flags;
     bool has_fl = (ly->agg_is_first | ly->agg_is_last) != 0;
@@ -2653,7 +2759,7 @@ static inline void init_accum_from_entry(char* row, const char* entry,
 /* Accumulate into existing group from entry's inline agg values */
 static inline void accum_from_entry(char* row, const char* entry,
                                      const ght_layout_t* ly) {
-    const char* agg_data = entry + 8 + ((size_t)ly->n_keys + 1) * 8;
+    const char* agg_data = entry + 8 + (size_t)ly->key_region;
     uint8_t na = ly->n_aggs;
     uint8_t nf = ly->need_flags;
     /* Entry's source-row index — only present when any agg is FIRST/LAST.
@@ -2754,6 +2860,26 @@ static inline bool group_keys_equal(const int64_t* a_keys, const int64_t* b_keys
         /* memcmp covers nk values + trailing 8-byte null mask slot */
         return memcmp(a_keys, b_keys, (size_t)(nk + 1) * 8) == 0;
     }
+    if (ly->key_inline_str) {
+        /* Inline-STR layout: address every key via key_off[k]; STR keys compare
+         * their inline descriptors cache-locally (pool only for >12 B). */
+        const char* a = (const char*)a_keys;
+        const char* b = (const char*)b_keys;
+        for (uint8_t k = 0; k < nk; k++) {
+            if (ly->key_inline_str & (1u << k)) {
+                if (!inline_str_eq(ly, k, a_keys, b_keys, key_pool)) return false;
+            } else if (wide & (1u << k)) {           /* GUID: row indices */
+                int64_t ra = *(const int64_t*)(a + ly->key_off[k]);
+                int64_t rb = *(const int64_t*)(b + ly->key_off[k]);
+                if (!wide_key_eq_at(ly, k, key_data, key_pool, ra, rb)) return false;
+            } else {
+                if (*(const int64_t*)(a + ly->key_off[k]) !=
+                    *(const int64_t*)(b + ly->key_off[k])) return false;
+            }
+        }
+        return *(const int64_t*)(a + ly->key_off[nk]) ==
+               *(const int64_t*)(b + ly->key_off[nk]);
+    }
     for (uint8_t k = 0; k < nk; k++) {
         if (wide & (1u << k)) {
             if (!wide_key_eq_at(ly, k, key_data, key_pool, a_keys[k], b_keys[k]))
@@ -2775,7 +2901,7 @@ static inline uint32_t group_probe_entry(group_ht_t* ht,
     const char* ekeys = entry + 8;
     uint8_t salt = HT_SALT(hash);
     uint32_t slot = (uint32_t)(hash & mask);
-    uint16_t key_bytes = (uint16_t)((ly->n_keys + 1) * 8);
+    uint16_t key_bytes = ly->key_region;  /* keys + null mask (incl. inline STR descriptors) */
 
     /* For count-only queries (no SUM/MIN/MAX/SUMSQ/PEARSON aggregator
      * state, no FIRST/LAST row tracking, no binary aggregator y-side)
@@ -2893,6 +3019,10 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
         uint64_t h = 0;
         int64_t* ek = (int64_t*)(ebuf + 8);
         int64_t null_mask = 0;
+        if (ly->key_inline_str) {
+            h = inline_build_keys(ly, key_types, key_data, key_attrs, ht->key_pool,
+                                  key_vecs, nullable_mask, row, ebuf + 8, &null_mask);
+        } else {
         for (uint8_t k = 0; k < nk; k++) {
             int8_t t = key_types[k];
             uint64_t kh;
@@ -2921,9 +3051,10 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
         }
         ek[nk] = null_mask;
         if (null_mask) h = ray_hash_combine(h, ray_hash_i64(null_mask));
+        }
         *(uint64_t*)ebuf = h;
 
-        int64_t* ev = (int64_t*)(ebuf + 8 + ((size_t)nk + 1) * 8);
+        int64_t* ev = (int64_t*)(ebuf + 8 + (size_t)ly->key_region);
         uint8_t vi = 0;
         uint8_t bin_mask = ly->agg_is_binary;
         uint8_t hol_mask = ly->agg_is_holistic;
@@ -2989,7 +3120,8 @@ static inline void radix_buf_push(radix_buf_t* buf, uint16_t entry_stride,
                                    uint64_t hash, const int64_t* keys, uint8_t n_keys,
                                    int64_t null_mask,
                                    const int64_t* agg_vals, uint8_t n_agg_vals,
-                                   bool has_first_last, int64_t row) {
+                                   bool has_first_last, int64_t row,
+                                   uint16_t key_region, bool inline_keys) {
     if (__builtin_expect(buf->count >= buf->cap, 0)) {
         uint32_t old_cap = buf->cap;
         uint32_t new_cap = old_cap * 2;
@@ -3002,11 +3134,17 @@ static inline void radix_buf_push(radix_buf_t* buf, uint16_t entry_stride,
     }
     char* dst = buf->data + (size_t)buf->count * entry_stride;
     *(uint64_t*)dst = hash;
-    memcpy(dst + 8, keys, (size_t)n_keys * 8);
-    /* Null mask slot sits right after the keys */
-    memcpy(dst + 8 + (size_t)n_keys * 8, &null_mask, 8);
+    if (inline_keys) {
+        /* keys points at a prebuilt key-region buffer (incl. null mask) with
+         * 16-byte inline STR descriptors at shifted offsets. */
+        memcpy(dst + 8, keys, key_region);
+    } else {
+        memcpy(dst + 8, keys, (size_t)n_keys * 8);
+        /* Null mask slot sits right after the keys */
+        memcpy(dst + 8 + (size_t)n_keys * 8, &null_mask, 8);
+    }
     if (n_agg_vals)
-        memcpy(dst + 8 + ((size_t)n_keys + 1) * 8, agg_vals, (size_t)n_agg_vals * 8);
+        memcpy(dst + 8 + key_region, agg_vals, (size_t)n_agg_vals * 8);
     /* Tail slot: source row index for FIRST/LAST tie-breaking. */
     if (has_first_last)
         memcpy(dst + entry_stride - 8, &row, 8);
@@ -3050,6 +3188,7 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
 
     int64_t keys[8];
     int64_t agg_vals[8];
+    char    keybuf[136];   /* inline-STR key region: max 8*16 + 8 null mask */
 
     uint8_t nullable = c->nullable_mask;
     for (int64_t i = start; i < end; i++) {
@@ -3061,6 +3200,11 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
         if (!match_idx && c->rowsel && !group_rowsel_pass(c->rowsel, row)) continue;
         uint64_t h = 0;
         int64_t null_mask = 0;
+        if (ly->key_inline_str) {
+            h = inline_build_keys(ly, c->key_types, c->key_data, c->key_attrs,
+                                  c->key_pool, c->key_vecs, nullable, row,
+                                  keybuf, &null_mask);
+        } else {
         for (uint8_t k = 0; k < nk; k++) {
             int8_t t = c->key_types[k];
             uint64_t kh;
@@ -3086,6 +3230,7 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
             h = (k == 0) ? kh : ray_hash_combine(h, kh);
         }
         if (null_mask) h = ray_hash_combine(h, ray_hash_i64(null_mask));
+        }
 
         uint8_t vi = 0;
         uint8_t bin_mask = ly->agg_is_binary;
@@ -3119,8 +3264,9 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
         }
 
         uint32_t part = RADIX_PART(h);
-        radix_buf_push(&my_bufs[part], estride, h, keys, nk, null_mask,
-                       agg_vals, nv, has_fl, row);
+        radix_buf_push(&my_bufs[part], estride, h,
+                       ly->key_inline_str ? (const int64_t*)keybuf : keys, nk, null_mask,
+                       agg_vals, nv, has_fl, row, ly->key_region, ly->key_inline_str != 0);
     }
 }
 
@@ -3201,43 +3347,46 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
          * Reduces memory traffic from nk+na passes over group data to 1 pass. */
         for (uint32_t gi = 0; gi < gc; gi++) {
             const char* row = ph->rows + (size_t)gi * rs;
-            const int64_t* rkeys = (const int64_t*)(const void*)(row + 8);
+            const char* rk = row + 8;     /* key region (key_off-addressed) */
             int64_t cnt = *(const int64_t*)(const void*)row;
-            int64_t null_mask = rkeys[nk];
+            int64_t null_mask = *(const int64_t*)(const void*)(rk + ly->key_off[nk]);
             uint32_t di = off + gi;
 
             /* Scatter keys to result columns */
             for (uint8_t k = 0; k < nk; k++) {
+                char* dst = c->key_dsts[k];
+                uint8_t esz = c->key_esizes[k];
+                int8_t kt = c->key_types[k];
+                size_t doff = (size_t)di * esz;
                 if (null_mask & (int64_t)(1u << k)) {
                     if (c->key_cols && c->key_cols[k])
                         grp_set_null(c->key_cols[k], di);
                     /* Fill the correct-width sentinel. */
-                    char* dst = c->key_dsts[k];
-                    uint8_t esz = c->key_esizes[k];
-                    size_t off = (size_t)di * esz;
-                    int8_t kt = c->key_types[k];
                     switch (kt) {
                         case RAY_F64: {
-                            double v = NULL_F64; memcpy(dst + off, &v, 8); break;
+                            double v = NULL_F64; memcpy(dst + doff, &v, 8); break;
                         }
                         case RAY_I64: case RAY_TIMESTAMP: {
-                            int64_t v = NULL_I64; memcpy(dst + off, &v, 8); break;
+                            int64_t v = NULL_I64; memcpy(dst + doff, &v, 8); break;
                         }
                         case RAY_I32: case RAY_DATE: case RAY_TIME: {
-                            int32_t v = NULL_I32; memcpy(dst + off, &v, 4); break;
+                            int32_t v = NULL_I32; memcpy(dst + doff, &v, 4); break;
                         }
                         case RAY_I16: {
-                            int16_t v = NULL_I16; memcpy(dst + off, &v, 2); break;
+                            int16_t v = NULL_I16; memcpy(dst + doff, &v, 2); break;
                         }
+                        case RAY_STR: { memset(dst + doff, 0, sizeof(ray_str_t)); break; }
                         default: break;
                     }
                     continue;
                 }
-                int64_t kv = rkeys[k];
-                int8_t kt = c->key_types[k];
-                char* dst = c->key_dsts[k];
-                uint8_t esz = c->key_esizes[k];
-                size_t doff = (size_t)di * esz;
+                if (ly->key_inline_str & (1u << k)) {
+                    /* Inline STR key: the 16-byte descriptor lives in the row;
+                     * copy it to the output (which shares the source pool). */
+                    memcpy(dst + doff, rk + ly->key_off[k], sizeof(ray_str_t));
+                    continue;
+                }
+                int64_t kv = *(const int64_t*)(const void*)(rk + ly->key_off[k]);
                 if (ly->wide_key_mask & (1u << k)) {
                     /* Wide key: kv is the source row index; copy the
                      * bytes from the source column into the output. */
@@ -3551,6 +3700,10 @@ static void radix_v2_phase1_fn(void* ctx, uint32_t worker_id,
         uint64_t h = 0;
         int64_t* ek = (int64_t*)(ebuf + 8);
         int64_t null_mask = 0;
+        if (ly->key_inline_str) {
+            h = inline_build_keys(ly, c->key_types, c->key_data, c->key_attrs,
+                                  kpool, c->key_vecs, nullable, row, ebuf + 8, &null_mask);
+        } else {
         for (uint8_t k = 0; k < nk; k++) {
             int8_t t = c->key_types[k];
             uint64_t kh;
@@ -3577,13 +3730,14 @@ static void radix_v2_phase1_fn(void* ctx, uint32_t worker_id,
         }
         ek[nk] = null_mask;
         if (null_mask) h = ray_hash_combine(h, ray_hash_i64(null_mask));
+        }
         *(uint64_t*)ebuf = h;
         /* Pack agg values into entry — only when the HT layout actually
          * reads them.  For count-only need_flags == 0 and accum_from_entry
          * skips every agg slot; packing here would be a wasted column
          * read per row (a measurable regression on q15-class queries). */
         if (ly->need_flags) {
-            int64_t* ev = (int64_t*)(ebuf + 8 + ((size_t)nk + 1) * 8);
+            int64_t* ev = (int64_t*)(ebuf + 8 + (size_t)ly->key_region);
             uint8_t vi = 0;
             uint8_t na = ly->n_aggs;
             uint8_t bin_mask = ly->agg_is_binary;
@@ -5047,6 +5201,7 @@ static void reprobe_rows_fn(void* vctx, uint32_t worker_id,
     reprobe_ctx_t* c = (reprobe_ctx_t*)vctx;
     uint8_t nk = c->n_keys;
     int64_t ek_buf[9];           /* nk + null_mask slot */
+    char    keybuf[136];         /* inline-STR key region */
     int8_t* key_types = c->key_types;
     void** key_data = c->key_data;
     uint8_t* key_attrs = c->key_attrs;
@@ -5067,6 +5222,12 @@ static void reprobe_rows_fn(void* vctx, uint32_t worker_id,
         }
         uint64_t h = 0;
         int64_t null_mask = 0;
+        const int64_t* lookup_keys;
+        if (c->layout->key_inline_str) {
+            h = inline_build_keys(c->layout, key_types, key_data, key_attrs,
+                                  c->key_pool, key_vecs, nullable, row, keybuf, &null_mask);
+            lookup_keys = (const int64_t*)keybuf;
+        } else {
         for (uint8_t k = 0; k < nk; k++) {
             int8_t t = key_types[k];
             uint64_t kh;
@@ -5093,10 +5254,12 @@ static void reprobe_rows_fn(void* vctx, uint32_t worker_id,
         }
         ek_buf[nk] = null_mask;
         if (null_mask) h = ray_hash_combine(h, ray_hash_i64(null_mask));
+        lookup_keys = ek_buf;
+        }
 
         uint32_t part = RADIX_PART(h);
         uint32_t local = group_ht_lookup_gid(&c->part_hts[part], h,
-                                              ek_buf, key_types);
+                                              lookup_keys, key_types);
         if (local == UINT32_MAX) {
             c->row_gid[row] = -1;
         } else {
@@ -7653,8 +7816,13 @@ ht_path:;
      * across all input sizes (measured), so there is no separate
      * size-gated shortcut here. */
 
-    if (pool && nrows >= RAY_PARALLEL_THRESHOLD && n_total > 1 && !rowsel) {
-        /* Per-(worker, partition) direct-insert path: aggregates into
+    if (pool && nrows >= RAY_PARALLEL_THRESHOLD && n_total > 1) {
+        /* Filtered (rowsel/match_idx) group-bys are allowed on the parallel
+         * paths: both radix_v2_phase1_fn and radix_phase1_fn honour c->rowsel
+         * (skip non-passing rows during scatter), so partitioned data holds
+         * only passing rows.  Previously gated `!rowsel`, which dropped every
+         * WHERE'd group-by onto the single-threaded group_rows_range.
+         * Per-(worker, partition) direct-insert path: aggregates into
          * thread-local partition HTs during phase1, then merges per
          * partition.  Bypasses the phase1 fat-entry materialisation +
          * phase2 re-read DRAM round trip.  On success it populates
@@ -8483,11 +8651,11 @@ sequential_fallback:;
         bool is_wide = (ly->wide_key_mask & (1u << k)) != 0;
         const char* src_base = is_wide ? (const char*)key_data[k] : NULL;
 
+        bool inline_str_k = (ly->key_inline_str & (1u << k)) != 0;
         for (uint32_t gi = 0; gi < grp_count; gi++) {
             const char* row = final_ht->rows + (size_t)gi * ly->row_stride;
-            const int64_t* rkeys = (const int64_t*)(row + 8);
-            int64_t kv = rkeys[k];
-            int64_t null_mask = rkeys[n_keys];
+            const char* rk = row + 8;
+            int64_t null_mask = *(const int64_t*)(rk + ly->key_off[n_keys]);
             if (null_mask & (int64_t)(1u << k)) {
                 ray_vec_set_null(new_col, (int64_t)gi, true);
                 /* Fill the correct-width sentinel. */
@@ -8500,10 +8668,20 @@ sequential_fallback:;
                         ((int32_t*)ray_data(new_col))[gi] = NULL_I32; break;
                     case RAY_I16:
                         ((int16_t*)ray_data(new_col))[gi] = NULL_I16; break;
+                    case RAY_STR:
+                        memset((char*)ray_data(new_col) + (size_t)gi * esz, 0,
+                               sizeof(ray_str_t)); break;
                     default: break;
                 }
                 continue;
             }
+            if (inline_str_k) {
+                /* Inline STR descriptor lives in the row; output shares the pool. */
+                memcpy((char*)ray_data(new_col) + (size_t)gi * esz,
+                       rk + ly->key_off[k], sizeof(ray_str_t));
+                continue;
+            }
+            int64_t kv = *(const int64_t*)(rk + ly->key_off[k]);
             if (is_wide) {
                 char* dst = (char*)ray_data(new_col) + (size_t)gi * esz;
                 memcpy(dst, src_base + (size_t)kv * esz, esz);
@@ -8558,6 +8736,7 @@ sequential_fallback:;
                 const void* reprobe_pool[8];
                 derive_key_pool(ly, key_vecs, reprobe_pool);
                 int64_t ek_buf[9];
+                char    keybuf[136];   /* inline-STR key region */
                 for (int64_t i = 0; i < n_scan; i++) {
                     int64_t row = match_idx ? match_idx[i] : i;
                     /* Holistic fill re-scans rows independently of the streaming
@@ -8570,6 +8749,13 @@ sequential_fallback:;
                     if (!match_idx && !group_rowsel_pass(rowsel, row)) continue;
                     uint64_t h = 0;
                     int64_t null_mask = 0;
+                    const int64_t* lookup_keys;
+                    if (ly->key_inline_str) {
+                        h = inline_build_keys(ly, key_types, key_data, key_attrs,
+                                              reprobe_pool, key_vecs, reprobe_nullable_s,
+                                              row, keybuf, &null_mask);
+                        lookup_keys = (const int64_t*)keybuf;
+                    } else {
                     for (uint8_t k = 0; k < n_keys; k++) {
                         int8_t t = key_types[k];
                         uint64_t kh;
@@ -8596,7 +8782,9 @@ sequential_fallback:;
                     }
                     ek_buf[n_keys] = null_mask;
                     if (null_mask) h = ray_hash_combine(h, ray_hash_i64(null_mask));
-                    uint32_t gid = group_ht_lookup_gid(final_ht, h, ek_buf, key_types);
+                    lookup_keys = ek_buf;
+                    }
+                    uint32_t gid = group_ht_lookup_gid(final_ht, h, lookup_keys, key_types);
                     row_gid[row] = (gid == UINT32_MAX) ? -1 : (int64_t)gid;
                     if (gid != UINT32_MAX) grp_cnt_s[gid]++;
                 }
