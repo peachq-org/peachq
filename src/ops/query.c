@@ -5230,6 +5230,12 @@ by_dict_done:
          * decide whether GUID keys go to the DAG HT path or fall back
          * to eval-level. */
         int any_nonagg = 0;
+        /* Like any_nonagg but EXCLUDING count(distinct) — which is not a simple
+         * inline DAG agg yet IS served by the DAG per-group count-distinct
+         * kernel (ray_count_distinct_per_group via row_gid).  STR keys can
+         * therefore take the wide-key DAG path for pure count-distinct queries;
+         * only a genuine non-agg projection forces them to eval-level. */
+        int any_true_nonagg = 0;
         if (n_out > 0) {
             for (int64_t i = 0; i + 1 < dict_n; i += 2) {
                 int64_t kid = dict_elems[i]->i64;
@@ -5237,7 +5243,10 @@ by_dict_done:
                     kid == take_id || kid == asc_id || kid == desc_id) continue;
                 if (is_single_group_key_projection(by_expr, dict_elems[i + 1]))
                     continue;
-                if (!is_group_dag_agg_expr(dict_elems[i + 1])) { any_nonagg = 1; break; }
+                if (is_group_dag_agg_expr(dict_elems[i + 1])) continue;
+                any_nonagg = 1;
+                if (!match_count_distinct(dict_elems[i + 1])) { any_true_nonagg = 1; break; }
+                /* count(distinct): DAG-capable, keep scanning for true non-aggs */
             }
         }
 
@@ -5254,7 +5263,7 @@ by_dict_done:
             if (key_col) {
                 int8_t kct = key_col->type;
                 if (RAY_IS_PARTED(kct)) kct = (int8_t)RAY_PARTED_BASETYPE(kct);
-                if (kct == RAY_LIST || kct == RAY_STR)
+                if (kct == RAY_LIST)
                     use_eval_group = 1;
                 else if (kct == RAY_GUID && (any_nonagg || n_out == 0))
                     /* RAY_GUID routes to eval-level ray_group_fn only
@@ -5268,6 +5277,11 @@ by_dict_done:
                      * DAG path (exec_group handles wide keys correctly
                      * and stays parallel / segment-streamed on parted
                      * tables). */
+	                    use_eval_group = 1;
+                else if (kct == RAY_STR && (any_true_nonagg || n_out == 0))
+                    /* STR keys take the wide-key DAG path for pure-agg AND
+                     * count(distinct) queries; only a genuine non-agg
+                     * projection (or the no-output form) needs eval-level. */
 	                    use_eval_group = 1;
 	            }
 	        }
@@ -7890,7 +7904,7 @@ by_dict_done:
                      okt == RAY_I16  || okt == RAY_I32  || okt == RAY_I64 ||
                      okt == RAY_F32  || okt == RAY_F64  ||
                      okt == RAY_DATE || okt == RAY_TIME || okt == RAY_TIMESTAMP ||
-                     okt == RAY_SYM);
+                     okt == RAY_SYM  || okt == RAY_STR);
                 if (!key_supported) {
                     RELEASE_SCAN_KEY();
                     ray_release(result); ray_release(tbl);
@@ -7930,9 +7944,11 @@ by_dict_done:
                 int64_t* offsets = (int64_t*)ray_data(off_hdr);
                 int64_t* pos     = (int64_t*)ray_data(pos_hdr);
 
-                /* Copy group key values from the (possibly sliced) result */
-                for (int64_t gi = 0; gi < n_groups; gi++)
-                    KEY_READ(gk[gi], grp_key, gkt, gi);
+                /* Copy group key values from the (possibly sliced) result.
+                 * STR keys resolve via descriptors+pool below, not gk[]. */
+                if (okt != RAY_STR)
+                    for (int64_t gi = 0; gi < n_groups; gi++)
+                        KEY_READ(gk[gi], grp_key, gkt, gi);
 
                 /* Build row→group_id map.  Rows whose key isn't in the
                  * surviving group set get row_gid = -1 and are skipped.
@@ -7942,7 +7958,63 @@ by_dict_done:
                  * 5M * 730K ≈ 4T comparisons.  Build a value→gid hash
                  * instead so each row is one O(1) probe. */
                 int rgid_did_mask = 0;
-                {
+                if (okt == RAY_STR) {
+                    /* STR keys: hash the group key descriptors → gid, then
+                     * probe each input row's descriptor (SSO-aware via the
+                     * string pool; inline ≤12 B keys skip the pool).  grp_key
+                     * and scan_key carry their own pools (grp_key shares the
+                     * source pool, but resolve each independently to be safe). */
+                    const ray_str_t* gdesc = (const ray_str_t*)ray_data(grp_key);
+                    const char* gpool = grp_key->str_pool
+                        ? (const char*)ray_data(grp_key->str_pool) : NULL;
+                    const ray_str_t* sdesc = (const ray_str_t*)ray_data(scan_key);
+                    const char* spool = scan_key->str_pool
+                        ? (const char*)ray_data(scan_key->str_pool) : NULL;
+                    uint64_t cap = (uint64_t)n_groups * 2; if (cap < 32) cap = 32;
+                    uint64_t c = 1; while (c && c < cap) c <<= 1;
+                    if (!c) {
+                        ray_free(gk_hdr); ray_free(rg_hdr); ray_free(cnt_hdr);
+                        ray_free(off_hdr); ray_free(pos_hdr);
+                        RELEASE_SCAN_KEY();
+                        ray_release(result); ray_release(tbl);
+                        return ray_error("oom", NULL);
+                    }
+                    cap = c;
+                    uint64_t mask = cap - 1;
+                    ray_t* slot_hdr = NULL;
+                    int32_t* slot_gid_p1 = (int32_t*)scratch_calloc(&slot_hdr,
+                        (size_t)cap * sizeof(int32_t));
+                    if (!slot_gid_p1) {
+                        if (slot_hdr) scratch_free(slot_hdr);
+                        ray_free(gk_hdr); ray_free(rg_hdr); ray_free(cnt_hdr);
+                        ray_free(off_hdr); ray_free(pos_hdr);
+                        RELEASE_SCAN_KEY();
+                        ray_release(result); ray_release(tbl);
+                        return ray_error("oom", NULL);
+                    }
+                    for (int64_t gi = 0; gi < n_groups; gi++) {
+                        uint64_t h = ray_str_t_hash(&gdesc[gi], gpool);
+                        uint64_t s = h & mask;
+                        while (slot_gid_p1[s] != 0) s = (s + 1) & mask;
+                        slot_gid_p1[s] = (int32_t)(gi + 1);
+                    }
+                    for (int64_t r = 0; r < nrows; r++) {
+                        uint64_t h = ray_str_t_hash(&sdesc[r], spool);
+                        uint64_t s = h & mask;
+                        int64_t found = -1;
+                        for (;;) {
+                            int32_t g_p1 = slot_gid_p1[s];
+                            if (g_p1 == 0) break;
+                            int32_t g = g_p1 - 1;
+                            if (ray_str_t_eq(&gdesc[g], gpool, &sdesc[r], spool)) {
+                                found = g; break;
+                            }
+                            s = (s + 1) & mask;
+                        }
+                        row_gid[r] = found;
+                    }
+                    scratch_free(slot_hdr);
+                } else {
                     /* Capacity: 2 * n_groups rounded up to power of 2.
                      * Slot stores gid+1 (0 = empty) and the int64 key. */
                     uint64_t cap = (uint64_t)n_groups * 2;
