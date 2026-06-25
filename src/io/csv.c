@@ -1611,6 +1611,34 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
     return tbl;
 }
 
+/* When explicit column names are supplied the caller declares "no header", but
+ * the file may still carry one (e.g. ClickBench schema + headered CSV).  Parsing
+ * that header row as data is a silent +1-row corruption.  Guard against it: if
+ * the first line's fields all equal the supplied names, it IS a header — return
+ * the offset of the data that follows it.  Returns NULL when the first line is
+ * genuine data (no field-vs-name mismatch is possible for a real data row that
+ * happens to equal every column name, so this never eats a data row). */
+static const char* csv_skip_matching_header(const char* p, const char* buf_end,
+                                            char delimiter, int ncols,
+                                            const int64_t* names, char* esc_buf) {
+    bool is_header = true;
+    for (int c = 0; c < ncols; c++) {
+        const char* fld; size_t flen; char* dyn = NULL;
+        p = scan_field(p, buf_end, delimiter, &fld, &flen, esc_buf, &dyn);
+        if (is_header) {
+            ray_t* nm = ray_sym_str(names[c]);
+            const char* ns = nm ? ray_str_ptr(nm) : NULL;
+            size_t nl = nm ? ray_str_len(nm) : 0;
+            if (!ns || flen != nl || memcmp(fld, ns, flen) != 0) is_header = false;
+        }
+        if (dyn) ray_sys_free(dyn);
+    }
+    if (!is_header) return NULL;
+    if (p < buf_end && *p == '\r') p++;
+    if (p < buf_end && *p == '\n') p++;
+    return p;
+}
+
 /* --------------------------------------------------------------------------
  * ray_read_csv_opts — main CSV parser
  * -------------------------------------------------------------------------- */
@@ -1696,6 +1724,9 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
     } else if (col_names_in && n_names >= ncols) {
         for (int c = 0; c < ncols; c++)
             col_name_ids[c] = col_names_in[c];
+        const char* after = csv_skip_matching_header(buf, buf_end, delimiter,
+                                                     ncols, col_names_in, esc_buf);
+        if (after) p = after;   /* file carried a header matching the names */
     } else {
         for (int c = 0; c < ncols; c++) {
             char name[32];
@@ -2225,6 +2256,9 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
     } else if (col_names_in && n_names >= ncols) {
         for (int c = 0; c < ncols; c++)
             col_name_ids[c] = col_names_in[c];
+        const char* after = csv_skip_matching_header(buf, buf_end, delimiter,
+                                                     ncols, col_names_in, esc_buf);
+        if (after) p = after;   /* file carried a header matching the names */
     } else {
         for (int c = 0; c < ncols; c++) {
             char name[32];
@@ -2539,6 +2573,9 @@ ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool 
     } else if (col_names_in && n_names >= ncols) {
         for (int c = 0; c < ncols; c++)
             col_name_ids[c] = col_names_in[c];
+        const char* after = csv_skip_matching_header(buf, buf_end, delimiter,
+                                                     ncols, col_names_in, esc_buf);
+        if (after) p = after;   /* file carried a header matching the names */
     } else {
         for (int c = 0; c < ncols; c++) {
             char name[32];
