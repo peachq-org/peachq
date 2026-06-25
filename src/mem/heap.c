@@ -1128,14 +1128,21 @@ void ray_free(ray_t* v) {
                     pool_len = (size_t)v->str_pool->len;
                 data_size += 32 + pool_len;
             }
+            /* Inline index region: a mmap-resident (passenger) index extends the
+             * mapping past the payload by its 32-aligned inline region.  Derive
+             * that size from the index itself (ray_index_inline_size) rather than
+             * stashing it in aux — str_pool occupies _idx_pad on STR columns, and
+             * the payload size above already accounts for descriptors + pool.
+             * Heap-resident indexes (RAY_MARK_MMAP clear) keep the payload-only
+             * formula. */
+            if ((v->attrs & RAY_ATTR_HAS_INDEX) && v->index && !RAY_IS_ERR(v->index)) {
+                ray_index_t* ix = ray_index_payload(v->index);
+                if (ix->markers & RAY_MARK_MMAP) {
+                    int64_t region_off = ((int64_t)data_size + 31) & ~(int64_t)31;
+                    data_size = (size_t)(region_off + ray_index_inline_size(ix));
+                }
+            }
             size_t mapped_size = (data_size + 4095) & ~(size_t)4095;
-            /* Inline index region: a mmap-resident index extends the mapping
-             * past the payload; _idx_pad carries the full page-aligned mapping
-             * size so the whole region (payload + index) is unmapped at once.
-             * NULL for plain columns and for runtime heap indexes (payload-only
-             * mapping) — those keep the formula above. */
-            if ((v->attrs & RAY_ATTR_HAS_INDEX) && v->_idx_pad)
-                mapped_size = (size_t)(uintptr_t)v->_idx_pad;
             ray_vm_unmap_file(v, mapped_size);
         } else {
             ray_vm_unmap_file(v, 4096);

@@ -605,15 +605,23 @@ ray_err_t ray_col_append_index(const char* path, const void* ix_v,
                                int64_t col_len, int8_t col_type) {
     const ray_index_t* ix = (const ray_index_t*)ix_v;
     if (!path || !ix) return RAY_ERR_DOMAIN;
-    uint8_t esz = ray_sym_elem_size(col_type, 0);
-    if (esz == 0) return RAY_ERR_TYPE;
-    int64_t payload_end = 32 + col_len * esz;
+    (void)col_len; (void)col_type;
 
     FILE* f = fopen(path, "r+b");
     if (!f) return RAY_ERR_IO;
+    /* Already-indexed guard: the marker is stamped into aux[0..3] LAST, so its
+     * presence means a complete prior append. */
+    uint32_t cur_mg = 0;
+    if (fread(&cur_mg, 1, 4, f) == 4 && cur_mg == COL_IDX_AUX_MAGIC) {
+        fclose(f); return RAY_ERR_CORRUPT;
+    }
+    /* Append at the actual payload end — generic across formats: numeric is
+     * [header][data]; STR is [header][descriptors][pool].  Don't recompute it
+     * from col_len*esz (that ignores the str_pool). */
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return RAY_ERR_IO; }
     long fsz = ftell(f);
-    if (fsz != (long)payload_end) { fclose(f); return RAY_ERR_CORRUPT; } /* already indexed / mismatch */
+    if (fsz < 32) { fclose(f); return RAY_ERR_CORRUPT; }
+    int64_t payload_end = fsz;
 
     int64_t region_off = (payload_end + 31) & ~(int64_t)31;
     int64_t pad = region_off - payload_end;
@@ -1246,7 +1254,10 @@ static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
      * payload-only layout; present → a 32-aligned index region follows. */
     out->has_index = false;
     out->index_offset = 0;
-    if (hdr->type != RAY_STR) {
+    {
+        /* The marker lives in the header's aux[0..3] (first 4 file bytes) for
+         * every column type — numeric and STR alike.  tail_offset already
+         * accounts for the str_pool on STR, so region_off lands after it. */
         uint32_t idxmg;
         memcpy(&idxmg, ptr, 4);
         if (idxmg == COL_IDX_AUX_MAGIC) {
@@ -1536,10 +1547,9 @@ static ray_t* col_mmap_impl(const char* path, struct ray_sym_domain_s* dom,
     if (cm.has_index) {
         ray_t* idx = ray_index_inline_map((uint8_t*)cm.mapped + cm.index_offset);
         ray_t* r = ray_index_attach_built(&vec, idx);
-        if (r && !RAY_IS_ERR(r)) {
-            vec = r;
-            vec->_idx_pad = (ray_t*)(uintptr_t)((cm.mapped_size + 4095) & ~(size_t)4095);
-        }
+        if (r && !RAY_IS_ERR(r)) vec = r;
+        /* The munmap size is derived from the column + index at free time
+         * (ray_free), so no aux slot is needed — leaving str_pool intact on STR. */
         /* Attach failure → column loads unindexed; correctness unaffected. */
     }
 
