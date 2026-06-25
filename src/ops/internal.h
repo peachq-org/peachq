@@ -986,6 +986,11 @@ typedef struct {
      * the source column. */
     uint8_t  wide_key_mask;
     uint8_t  wide_key_esz[8];
+    /* Per wide key, the source element type so resolution can branch:
+     * RAY_GUID → fixed wide_key_esz bytes; RAY_STR → ray_str_t descriptor
+     * (16 B) resolved via the string pool (key_pool[k]) with SSO-aware
+     * hash/eq (inline ≤12 B keys need no pool deref). */
+    int8_t   wide_key_type[8];
 } ght_layout_t;
 
 typedef struct {
@@ -1000,6 +1005,9 @@ typedef struct {
      * group_probe_entry / group_ht_rehash to resolve row-indexed
      * wide keys. */
     void*        key_data[8];
+    /* String pool base per wide STR key (NULL otherwise) — paired with
+     * key_data[k] (the ray_str_t descriptor array) for SSO-aware resolve. */
+    const void*  key_pool[8];
     ray_t*        _h_slots;
     ray_t*        _h_rows;
     uint8_t       oom;        /* set by group_probe_entry on grow failure */
