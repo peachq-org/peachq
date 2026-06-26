@@ -1372,6 +1372,20 @@ static int agg_sh_grow_ht(agg_sh_t* sh, ray_t** key_cols, const void** key_data,
 
 #define AGG_SH_CHUNK 4096
 
+/* Adaptive promotion: the cardinality estimate is sample-based and can
+ * underestimate on clustered/ordered data, misrouting a genuinely high-card
+ * group to this small-hash path where the per-worker hash thrashes cache.
+ * Guard against it WITHOUT trusting the estimate: when any worker's live group
+ * count crosses this threshold the per-worker hash no longer fits cache, so we
+ * abort and re-run on the radix path (data-driven, no sampling bias).  Set well
+ * above the smallhash/radix crossover so medium-card groups are never promoted. */
+#define AGG_SH_PROMOTE (1 << 16)
+static ray_t* exec_group_v2_parallel_radix(
+        ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t nrows,
+        ray_t** key_cols, int64_t* key_syms,
+        const agg_vtable_t** vts, const size_t* off, size_t block,
+        ray_t* sel, const int64_t* sel_prefix, int64_t n_sel);
+
 typedef struct {
     ray_t**            key_cols;
     const void**       key_data;
@@ -1384,6 +1398,7 @@ typedef struct {
     const void**       val2_data; const int8_t* val2_types; const bool* val2_hasnull; const uint8_t* val2_esz;
     int64_t            est_card;   /* sizing hint for per-worker hashes */
     agg_sh_t*          locals;     /* [nw] */
+    _Atomic(int)       overflow;   /* set when any worker crosses AGG_SH_PROMOTE */
     /* Sel-mode (pushed WHERE filter): chunk-iterate selected rows of [0,n_sel). */
     ray_t*             sel;
     const int64_t*     sel_prefix;
@@ -1441,6 +1456,10 @@ static void agg_sh_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t en
         agg_sel_cursor_init(&cur, c->sel, c->sel_prefix, start, end);
         int64_t cn;
         while ((cn = agg_sel_cursor_next(&cur, rows)) > 0) {
+            /* Adaptive promotion trip-wire: too many distinct keys for cache, or
+             * another worker already tripped → abort to the radix path. */
+            if (sh->ng > AGG_SH_PROMOTE) atomic_store_explicit(&c->overflow, 1, memory_order_relaxed);
+            if (atomic_load_explicit(&c->overflow, memory_order_relaxed)) { agg_sel_scratch_free(&sc); return; }
             for (int64_t i = 0; i < cn; i++) {
                 int32_t g = agg_sh_find_or_insert(sh, c->key_cols, c->key_data, c->n_keys,
                                                   c->vts, c->off, c->n_aggs, rows[i]);
@@ -1456,6 +1475,11 @@ static void agg_sh_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t en
     }
 
     for (int64_t cs = start; cs < end; cs += AGG_SH_CHUNK) {
+        /* Adaptive promotion trip-wire (see AGG_SH_PROMOTE): per-worker hash no
+         * longer fits cache, or another worker already tripped → abort so the
+         * caller re-runs on radix. */
+        if (sh->ng > AGG_SH_PROMOTE) atomic_store_explicit(&c->overflow, 1, memory_order_relaxed);
+        if (atomic_load_explicit(&c->overflow, memory_order_relaxed)) return;
         int64_t ce = cs + AGG_SH_CHUNK; if (ce > end) ce = end;
         int64_t n = ce - cs;
         for (int64_t r = cs; r < ce; r++) {
@@ -1545,13 +1569,23 @@ static ray_t* exec_group_v2_parallel_smallhash(
         .val_hasnull = val_hasnull, .val_esz = val_esz,
         .val2_data = val2_data, .val2_types = val2_types,
         .val2_hasnull = val2_hasnull, .val2_esz = val2_esz,
-        .est_card = est_card, .locals = locals,
+        .est_card = est_card, .locals = locals, .overflow = 0,
         .sel = sel, .sel_prefix = sel_prefix,
         .vd = { .n_aggs = n_aggs, .vts = vts, .off = off, .block = block,
                 .val_data = val_data, .val_types = val_types, .val_hasnull = val_hasnull, .val_esz = val_esz,
                 .val2_data = val2_data, .val2_types = val2_types, .val2_hasnull = val2_hasnull, .val2_esz = val2_esz },
     };
     ray_pool_dispatch(pool, agg_sh_phaseA_fn, &ctx, sel ? n_sel : nrows);
+
+    /* Adaptive promotion: a worker found the live group count too high for the
+     * per-worker hash (estimate underestimated).  Discard the partial small-hash
+     * state and re-run on the radix path — data-driven, no sampling bias. */
+    if (atomic_load_explicit(&ctx.overflow, memory_order_relaxed)) {
+        for (uint32_t w = 0; w < nw; w++) agg_sh_destroy(&locals[w]);
+        free(locals);
+        return exec_group_v2_parallel_radix(g, op, tbl, nrows, key_cols, key_syms,
+                                            vts, off, block, sel, sel_prefix, n_sel);
+    }
 
     for (uint32_t w = 0; w < nw; w++)
         if (locals[w].oom) {
