@@ -2783,16 +2783,51 @@ void agg_groups_free(agg_groups_t* out) {
     ray_free_raw(out->first_row); out->first_row = NULL;
 }
 
+/* Gather one column's first-of-group values (first_row[gi]) by type: STR via the
+ * string-vec path (null-preserving), LIST via retained borrows, everything else
+ * (fixed-width + SYM) via agg_gather_key_col — which adopts a SYM column's source
+ * domain, so SYM columns are NEVER interned into the global table.  Returns a new
+ * column of n rows, or an error/NULL on failure. */
+static ray_t* agg_gather_col_at(ray_t* sc, const int64_t* first_row, int64_t n) {
+    if (sc->type == RAY_STR) {
+        ray_t* dst = ray_vec_new(RAY_STR, n);
+        if (!dst || RAY_IS_ERR(dst)) return dst;
+        bool hn = (sc->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        for (int64_t gi = 0; gi < n && dst && !RAY_IS_ERR(dst); gi++) {
+            if (hn && ray_vec_is_null(sc, first_row[gi])) {
+                dst = ray_str_vec_append(dst, "", 0);
+                if (dst && !RAY_IS_ERR(dst)) ray_vec_set_null(dst, dst->len - 1, true);
+            } else {
+                size_t sl = 0;
+                const char* sp = ray_str_vec_get(sc, first_row[gi], &sl);
+                dst = ray_str_vec_append(dst, sp ? sp : "", sp ? sl : 0);
+            }
+        }
+        return dst;
+    }
+    if (sc->type == RAY_LIST) {
+        ray_t* dst = ray_alloc((size_t)(n > 0 ? n : 1) * sizeof(ray_t*));
+        if (!dst || RAY_IS_ERR(dst)) return dst;
+        dst->type = RAY_LIST; dst->len = n;
+        ray_t** dout = (ray_t**)ray_data(dst);
+        ray_t** sitems = (ray_t**)ray_data(sc);
+        for (int64_t gi = 0; gi < n; gi++) { dout[gi] = sitems[first_row[gi]]; ray_retain(dout[gi]); }
+        return dst;
+    }
+    return agg_gather_key_col(sc, first_row, n);
+}
+
 /* Multi-key `select {by: {keys}}` with NO aggregates.  Group on each key
  * column's RAW cell values (positions for SYM — domain-local, NO global
  * interning of the vocabulary), then emit, per group, the FIRST-of-group value
  * of every column of `tbl`: the key columns (named by key_syms, in by: order)
  * followed by every non-key column (kdb `select by` semantics — first row of
- * the group).  Every column is gathered via agg_gather_key_col, which adopts a
- * SYM column's source domain, so NOTHING is interned into the global table.
+ * the group).  Columns are gathered via agg_gather_col_at, which handles
+ * STR/LIST and adopts SYM source domains, so NOTHING is interned globally.
  * Replaces the legacy path's per-cell runtime-id boxing.  Precondition (gated by
- * the caller): keys are int/SYM and EVERY tbl column is fixed-width or SYM (no
- * STR/LIST).  Caller owns the returned table. */
+ * the caller): keys are int/SYM (agg_group_keys reads them as int64) and tbl
+ * columns are fixed-width/SYM/STR/LIST (parted/mapcommon fall back to legacy).
+ * Caller owns the returned table. */
 ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms,
                            uint8_t nk, int64_t nrows) {
     agg_groups_t groups = {0};
@@ -2806,7 +2841,7 @@ ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms
     }
     /* key columns first, named by key_syms (by: order) */
     for (uint8_t k = 0; k < nk; k++) {
-        ray_t* kc = agg_gather_key_col(key_cols[k], groups.first_row, groups.ngroups);
+        ray_t* kc = agg_gather_col_at(key_cols[k], groups.first_row, groups.ngroups);
         if (!kc || RAY_IS_ERR(kc)) {
             agg_groups_free(&groups); ray_release(result);
             return kc ? kc : ray_error("oom", NULL);
@@ -2823,7 +2858,7 @@ ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms
         if (is_key) continue;
         ray_t* sc = ray_table_get_col_idx(tbl, c);
         if (!sc) continue;
-        ray_t* dc = agg_gather_key_col(sc, groups.first_row, groups.ngroups);
+        ray_t* dc = agg_gather_col_at(sc, groups.first_row, groups.ngroups);
         if (!dc || RAY_IS_ERR(dc)) {
             agg_groups_free(&groups); ray_release(result);
             return dc ? dc : ray_error("oom", NULL);
