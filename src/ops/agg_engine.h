@@ -39,7 +39,7 @@ void agg_groups_free(agg_groups_t* out);
  * first-of-group value of every `tbl` column (keys named by key_syms, then the
  * non-key columns), SYM columns adopting their source domain (no global
  * interning).  See agg_engine.c.  Precondition (caller-gated): keys are int/SYM
- * and every tbl column is fixed-width or SYM.  Caller owns the table. */
+ * and every tbl column is fixed-width/SYM/STR/LIST.  Caller owns the table. */
 ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms,
                            uint8_t nk, int64_t nrows);
 
