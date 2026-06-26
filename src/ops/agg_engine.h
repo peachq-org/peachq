@@ -27,9 +27,13 @@ typedef struct {
 /* Multi-key grouping (1..16 keys). Reads each key as an int64 (intern id for
  * SYM) and hashes the tuple. Assigns gids incrementally on first sight → gid
  * order == first-occurrence order; first_row[gid] records the row where the
- * group first appeared. Returns 0 on success (caller frees out->gids and
- * out->first_row via free()), -1 on allocation failure. */
+ * group first appeared. Returns 0 on success (caller releases out via
+ * agg_groups_free()), -1 on allocation failure. */
 int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out);
+
+/* Release the buffers an agg_groups_t holds (buddy-backed, NOT libc malloc — so
+ * callers must use this, not free()).  Idempotent; NULLs the pointers. */
+void agg_groups_free(agg_groups_t* out);
 
 /* Build a dense SoA per-group state array for one aggregate (vt), run a single
  * update_batch over val_col grouped by gids, and finalize each group into a

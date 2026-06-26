@@ -420,7 +420,7 @@ typedef struct {
 } agg_sel_scratch_t;
 
 static void agg_sel_scratch_free(agg_sel_scratch_t* sc) {
-    for (int a = 0; a < 16; a++) { free(sc->gv[a]); free(sc->gy[a]); sc->gv[a] = NULL; sc->gy[a] = NULL; }
+    for (int a = 0; a < 16; a++) { ray_free_raw(sc->gv[a]); ray_free_raw(sc->gy[a]); sc->gv[a] = NULL; sc->gy[a] = NULL; }
 }
 
 /* Accumulate one decoded chunk (rows[], gid[] indexed [0,n)) into `states` for
@@ -435,8 +435,8 @@ static int agg_sel_accum_chunk(const agg_valdesc_t* vd, agg_sel_scratch_t* sc,
         const agg_vtable_t* vt = vd->vts[a];
         if (vt->update_batch2) {                            /* binary agg (pearson) */
             uint8_t ez = vd->val_esz[a], ez2 = vd->val2_esz[a];
-            if (!sc->gv[a]) { sc->gv[a] = malloc((size_t)AGG_SEL_CHUNK * (ez ? ez : 1)); if (!sc->gv[a]) { sc->oom = 1; return -1; } }
-            if (!sc->gy[a]) { sc->gy[a] = malloc((size_t)AGG_SEL_CHUNK * (ez2 ? ez2 : 1)); if (!sc->gy[a]) { sc->oom = 1; return -1; } }
+            if (!sc->gv[a]) { sc->gv[a] = ray_alloc_raw((size_t)AGG_SEL_CHUNK * (ez ? ez : 1)); if (!sc->gv[a]) { sc->oom = 1; return -1; } }
+            if (!sc->gy[a]) { sc->gy[a] = ray_alloc_raw((size_t)AGG_SEL_CHUNK * (ez2 ? ez2 : 1)); if (!sc->gy[a]) { sc->oom = 1; return -1; } }
             agg_sel_gather_vals(sc->gv[a], vd->val_data[a],  ez,  rows, n);
             agg_sel_gather_vals(sc->gy[a], vd->val2_data[a], ez2, rows, n);
             ray_valid_t vx = { sc->gv[a], vd->val_types[a],  vd->val_hasnull[a] };
@@ -445,7 +445,7 @@ static int agg_sel_accum_chunk(const agg_valdesc_t* vd, agg_sel_scratch_t* sc,
                               sc->gv[a], sc->gy[a], &vx, &vy, n, NULL);
         } else if (vd->val_data[a]) {                       /* unary agg over a column */
             uint8_t ez = vd->val_esz[a];
-            if (!sc->gv[a]) { sc->gv[a] = malloc((size_t)AGG_SEL_CHUNK * (ez ? ez : 1)); if (!sc->gv[a]) { sc->oom = 1; return -1; } }
+            if (!sc->gv[a]) { sc->gv[a] = ray_alloc_raw((size_t)AGG_SEL_CHUNK * (ez ? ez : 1)); if (!sc->gv[a]) { sc->oom = 1; return -1; } }
             agg_sel_gather_vals(sc->gv[a], vd->val_data[a], ez, rows, n);
             ray_valid_t valid = { sc->gv[a], vd->val_types[a], vd->val_hasnull[a] };
             vt->update_batch(states + vd->off[a], vd->block, gid, sc->gv[a], &valid, n, NULL);
@@ -566,16 +566,16 @@ static inline int agg_tuple_eq(ray_t** key_cols, const void** key_data,
 static int agg_local_init(agg_local_t* loc, int64_t cap, int64_t htcap, int64_t block) {
     loc->ng = 0; loc->cap = cap; loc->oom = 0;
     loc->htcap = htcap; loc->htmask = (uint64_t)htcap - 1;
-    loc->ht        = malloc((size_t)htcap * sizeof(int32_t));
-    loc->first_row = malloc((size_t)cap * sizeof(int64_t));
-    loc->states    = malloc((size_t)cap * (size_t)block);
+    loc->ht        = ray_alloc_raw((size_t)htcap * sizeof(int32_t));
+    loc->first_row = ray_alloc_raw((size_t)cap * sizeof(int64_t));
+    loc->states    = ray_alloc_raw((size_t)cap * (size_t)block);
     if (!loc->ht || !loc->first_row || !loc->states) { loc->oom = 1; return -1; }
     for (int64_t i = 0; i < htcap; i++) loc->ht[i] = -1;
     return 0;
 }
 
 static void agg_local_destroy(agg_local_t* loc) {
-    free(loc->ht); free(loc->first_row); free(loc->states);
+    ray_free_raw(loc->ht); ray_free_raw(loc->first_row); ray_free_raw(loc->states);
     loc->ht = NULL; loc->first_row = NULL; loc->states = NULL;
 }
 
@@ -630,7 +630,7 @@ static void agg_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) 
     int64_t n = end - start;
     if (n <= 0) return;
 
-    uint32_t* cgid = malloc((size_t)n * sizeof(uint32_t));
+    uint32_t* cgid = ray_alloc_raw((size_t)n * sizeof(uint32_t));
     if (!cgid) { loc->oom = 1; return; }
 
     for (int64_t r = start; r < end; r++) {
@@ -640,7 +640,7 @@ static void agg_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) 
         for (;;) {
             int32_t gp = loc->ht[slot];
             if (gp < 0) {                       /* new group */
-                if (loc->ng == loc->cap) { loc->oom = 1; free(cgid); return; }
+                if (loc->ng == loc->cap) { loc->oom = 1; ray_free_raw(cgid); return; }
                 g = (int32_t)loc->ng;
                 loc->ht[slot] = g;
                 loc->first_row[g] = r;
@@ -677,7 +677,7 @@ static void agg_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t end) 
                                     cgid, vals, &valid, n, NULL);
         }
     }
-    free(cgid);
+    ray_free_raw(cgid);
 }
 
 /* Parallel two-phase path. key_cols/key_syms resolved by caller. */
@@ -721,7 +721,7 @@ static ray_t* exec_group_v2_parallel(
     while (htcap < nrows * 2) htcap <<= 1;
     int64_t cap = nrows > 0 ? nrows : 1;   /* a worker can't exceed nrows groups */
 
-    agg_local_t* locals = calloc((size_t)nw, sizeof(agg_local_t));
+    agg_local_t* locals = ray_calloc_raw((size_t)((size_t)nw) * (sizeof(agg_local_t)));
     if (!locals) return ray_error("oom", NULL);
 
     int alloc_oom = 0;
@@ -729,7 +729,7 @@ static ray_t* exec_group_v2_parallel(
         if (agg_local_init(&locals[w], cap, htcap, (int64_t)block) != 0) { alloc_oom = 1; break; }
     if (alloc_oom) {
         for (uint32_t w = 0; w < nw; w++) agg_local_destroy(&locals[w]);
-        free(locals);
+        ray_free_raw(locals);
         return ray_error("oom", NULL);
     }
 
@@ -748,7 +748,7 @@ static ray_t* exec_group_v2_parallel(
             /* Phase A ran: workers may hold init'd buffered group states. */
             for (uint32_t i = 0; i < nw; i++)
                 agg_table_destroy(&locals[i], vts, off, block, n_aggs);
-            free(locals);
+            ray_free_raw(locals);
             return ray_error("oom", NULL);
         }
 
@@ -758,7 +758,7 @@ static ray_t* exec_group_v2_parallel(
         agg_local_destroy(&gt);   /* gt init failed: no init'd states in gt */
         for (uint32_t i = 0; i < nw; i++)
             agg_table_destroy(&locals[i], vts, off, block, n_aggs);
-        free(locals);
+        ray_free_raw(locals);
         return ray_error("oom", NULL);
     }
 
@@ -806,7 +806,7 @@ static ray_t* exec_group_v2_parallel(
                     vts[a]->destroy(locals[i].states + (size_t)lg * block + off[a]);
         agg_local_destroy(&locals[i]);
     }
-    free(locals);
+    ray_free_raw(locals);
 
     /* ── Phase C: emit key + agg columns in natural global-group order ──
      * Group-by output order is UNSPECIFIED (callers ORDER BY for order), so we
@@ -902,8 +902,8 @@ static int agg_dense_local_init(agg_dense_local_t* loc, int64_t total_slots,
                                 const agg_vtable_t** vts, const size_t* off,
                                 size_t block, uint8_t n_aggs) {
     loc->oom = 0;
-    loc->states    = malloc((size_t)total_slots * block);
-    loc->first_row = malloc((size_t)total_slots * sizeof(int64_t));
+    loc->states    = ray_alloc_raw((size_t)total_slots * block);
+    loc->first_row = ray_alloc_raw((size_t)total_slots * sizeof(int64_t));
     if (!loc->states || !loc->first_row) { loc->oom = 1; return -1; }
     for (int64_t s = 0; s < total_slots; s++) {
         loc->first_row[s] = INT64_MAX;
@@ -914,14 +914,14 @@ static int agg_dense_local_init(agg_dense_local_t* loc, int64_t total_slots,
 }
 
 static void agg_dense_local_destroy(agg_dense_local_t* loc) {
-    free(loc->states); free(loc->first_row);
+    ray_free_raw(loc->states); ray_free_raw(loc->first_row);
     loc->states = NULL; loc->first_row = NULL;
 }
 
 /* Run vt->destroy on EVERY slot's buffered agg state in a dense slab (states +
  * total_slots blocks).  Empty slots hold the init'd state (median/top-k init →
- * buf=NULL), so destroy on them is free(NULL) — safe.  No-op when no agg has a
- * destroy hook (all-streaming).  Idempotent per slab when paired with a free()
+ * buf=NULL), so destroy on them is ray_free_raw(NULL) — safe.  No-op when no agg has a
+ * destroy hook (all-streaming).  Idempotent per slab when paired with a ray_free_raw()
  * immediately after; callers must invoke exactly once per slab. */
 static void agg_dense_slab_destroy_states(char* states, int64_t total_slots,
                                           const agg_vtable_t** vts, const size_t* off,
@@ -975,7 +975,7 @@ static void agg_dense_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t
         return;
     }
 
-    uint32_t* cgid = malloc((size_t)n * sizeof(uint32_t));
+    uint32_t* cgid = ray_alloc_raw((size_t)n * sizeof(uint32_t));
     if (!cgid) { loc->oom = 1; return; }
 
     for (int64_t r = start; r < end; r++) {
@@ -1002,7 +1002,7 @@ static void agg_dense_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t
                                     cgid, vals, &valid, n, NULL);
         }
     }
-    free(cgid);
+    ray_free_raw(cgid);
 }
 
 /* Parallel dense path.  Precondition: dp->ok, all aggs ACC_STREAMING, per-worker
@@ -1049,7 +1049,7 @@ static ray_t* exec_group_v2_parallel_dense(
         val2_esz[a]     = vc2 ? col_esz(vc2) : 0;
     }
 
-    agg_dense_local_t* locals = calloc((size_t)nw, sizeof(agg_dense_local_t));
+    agg_dense_local_t* locals = ray_calloc_raw((size_t)((size_t)nw) * (sizeof(agg_dense_local_t)));
     if (!locals) return ray_error("oom", NULL);
     uint32_t n_init = 0;   /* slabs whose slots were fully init'd (destroy-safe) */
     int alloc_oom = 0;
@@ -1064,7 +1064,7 @@ static ray_t* exec_group_v2_parallel_dense(
         for (uint32_t w = 0; w < n_init; w++)
             agg_dense_slab_destroy_states(locals[w].states, total_slots, vts, off, block, n_aggs);
         for (uint32_t w = 0; w < nw; w++) agg_dense_local_destroy(&locals[w]);
-        free(locals);
+        ray_free_raw(locals);
         return ray_error("oom", NULL);
     }
 
@@ -1088,19 +1088,19 @@ static ray_t* exec_group_v2_parallel_dense(
             for (uint32_t i = 0; i < nw; i++)
                 agg_dense_slab_destroy_states(locals[i].states, total_slots, vts, off, block, n_aggs);
             for (uint32_t i = 0; i < nw; i++) agg_dense_local_destroy(&locals[i]);
-            free(locals);
+            ray_free_raw(locals);
             return ray_error("oom", NULL);
         }
 
     /* ── Phase B: merge per-worker slabs into a global slab (serial) ── */
-    char*    gstates  = malloc((size_t)total_slots * block);
-    int64_t* gfirst   = malloc((size_t)total_slots * sizeof(int64_t));
+    char*    gstates  = ray_alloc_raw((size_t)total_slots * block);
+    int64_t* gfirst   = ray_alloc_raw((size_t)total_slots * sizeof(int64_t));
     if (!gstates || !gfirst) {
-        free(gstates); free(gfirst);
+        ray_free_raw(gstates); ray_free_raw(gfirst);
         for (uint32_t i = 0; i < nw; i++)
             agg_dense_slab_destroy_states(locals[i].states, total_slots, vts, off, block, n_aggs);
         for (uint32_t i = 0; i < nw; i++) agg_dense_local_destroy(&locals[i]);
-        free(locals);
+        ray_free_raw(locals);
         return ray_error("oom", NULL);
     }
     for (int64_t s = 0; s < total_slots; s++) {
@@ -1124,7 +1124,7 @@ static ray_t* exec_group_v2_parallel_dense(
     for (uint32_t i = 0; i < nw; i++)
         agg_dense_slab_destroy_states(locals[i].states, total_slots, vts, off, block, n_aggs);
     for (uint32_t i = 0; i < nw; i++) agg_dense_local_destroy(&locals[i]);
-    free(locals);
+    ray_free_raw(locals);
 
     /* ── Phase C: collect occupied slots in slot order, emit. ──
      * Group-by output order is UNSPECIFIED, so we emit in dense-slot order
@@ -1133,12 +1133,12 @@ static ray_t* exec_group_v2_parallel_dense(
     int64_t ng = 0;
     for (int64_t s = 0; s < total_slots; s++) if (gfirst[s] != INT64_MAX) ng++;
 
-    int64_t* occupied_slot     = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
-    int64_t* first_row_ordered = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
+    int64_t* occupied_slot     = ray_alloc_raw((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
+    int64_t* first_row_ordered = ray_alloc_raw((size_t)(ng > 0 ? ng : 1) * sizeof(int64_t));
     if (!occupied_slot || !first_row_ordered) {
-        free(occupied_slot); free(first_row_ordered);
+        ray_free_raw(occupied_slot); ray_free_raw(first_row_ordered);
         agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
-        free(gstates); free(gfirst);
+        ray_free_raw(gstates); ray_free_raw(gfirst);
         return ray_error("oom", NULL);
     }
     { int64_t i = 0;
@@ -1149,7 +1149,7 @@ static ray_t* exec_group_v2_parallel_dense(
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
         agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
-        free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
+        ray_free_raw(occupied_slot); ray_free_raw(first_row_ordered); ray_free_raw(gstates); ray_free_raw(gfirst);
         return result ? result : ray_error("oom", NULL);
     }
 
@@ -1157,7 +1157,7 @@ static ray_t* exec_group_v2_parallel_dense(
         ray_t* kc = agg_gather_key_col(key_cols[k], first_row_ordered, ng);
         if (!kc || RAY_IS_ERR(kc)) {
             agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
-            free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
+            ray_free_raw(occupied_slot); ray_free_raw(first_row_ordered); ray_free_raw(gstates); ray_free_raw(gfirst);
             ray_release(result); return kc ? kc : ray_error("oom", NULL);
         }
         result = ray_table_add_col(result, key_syms[k], kc);
@@ -1171,7 +1171,7 @@ static ray_t* exec_group_v2_parallel_dense(
         ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
             agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
-            free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
+            ray_free_raw(occupied_slot); ray_free_raw(first_row_ordered); ray_free_raw(gstates); ray_free_raw(gfirst);
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
         out->len = ng;
@@ -1194,7 +1194,7 @@ static ray_t* exec_group_v2_parallel_dense(
     /* Finalize is done reading the global slab → destroy its buffered per-group
      * state exactly once before freeing the slab. */
     agg_dense_slab_destroy_states(gstates, total_slots, vts, off, block, n_aggs);
-    free(occupied_slot); free(first_row_ordered); free(gstates); free(gfirst);
+    ray_free_raw(occupied_slot); ray_free_raw(first_row_ordered); ray_free_raw(gstates); ray_free_raw(gfirst);
     return result;
 }
 
@@ -1235,9 +1235,9 @@ static int64_t agg_estimate_card(ray_t** key_cols, const void** key_data,
     int64_t htcap = 16;
     while (htcap < (t_route + 1) * 4) htcap <<= 1;
     uint64_t htmask = (uint64_t)htcap - 1;
-    int32_t* ht = malloc((size_t)htcap * sizeof(int32_t));
-    int64_t* rep = malloc((size_t)(t_route + 2) * sizeof(int64_t)); /* gid -> sample row */
-    if (!ht || !rep) { free(ht); free(rep); return t_route + 1; /* assume high */ }
+    int32_t* ht = ray_alloc_raw((size_t)htcap * sizeof(int32_t));
+    int64_t* rep = ray_alloc_raw((size_t)(t_route + 2) * sizeof(int64_t)); /* gid -> sample row */
+    if (!ht || !rep) { ray_free_raw(ht); ray_free_raw(rep); return t_route + 1; /* assume high */ }
     for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
     int64_t distinct = 0;
     for (int64_t r = 0; r < ns; r++) {
@@ -1249,14 +1249,14 @@ static int64_t agg_estimate_card(ray_t** key_cols, const void** key_data,
                 ht[slot] = (int32_t)distinct;
                 rep[distinct] = r;
                 distinct++;
-                if (distinct > t_route) { free(ht); free(rep); return t_route + 1; }
+                if (distinct > t_route) { ray_free_raw(ht); ray_free_raw(rep); return t_route + 1; }
                 break;
             }
             if (agg_tuple_eq(key_cols, key_data, n_keys, r, rep[gp])) break;
             slot = (slot + 1) & htmask;
         }
     }
-    free(ht); free(rep);
+    ray_free_raw(ht); ray_free_raw(rep);
     return distinct;
 }
 
@@ -1273,9 +1273,9 @@ static int64_t agg_estimate_card_sel(ray_t** key_cols, const void** key_data,
     int64_t htcap = 16;
     while (htcap < (t_route + 1) * 4) htcap <<= 1;
     uint64_t htmask = (uint64_t)htcap - 1;
-    int32_t* ht = malloc((size_t)htcap * sizeof(int32_t));
-    int64_t* rep = malloc((size_t)(t_route + 2) * sizeof(int64_t));
-    if (!ht || !rep) { free(ht); free(rep); return t_route + 1; }
+    int32_t* ht = ray_alloc_raw((size_t)htcap * sizeof(int32_t));
+    int64_t* rep = ray_alloc_raw((size_t)(t_route + 2) * sizeof(int64_t));
+    if (!ht || !rep) { ray_free_raw(ht); ray_free_raw(rep); return t_route + 1; }
     for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
     int64_t distinct = 0, seen = 0;
     int64_t rows[AGG_SEL_CHUNK];
@@ -1291,7 +1291,7 @@ static int64_t agg_estimate_card_sel(ray_t** key_cols, const void** key_data,
                 int32_t gp = ht[slot];
                 if (gp < 0) {
                     ht[slot] = (int32_t)distinct; rep[distinct] = r; distinct++;
-                    if (distinct > t_route) { free(ht); free(rep); return t_route + 1; }
+                    if (distinct > t_route) { ray_free_raw(ht); ray_free_raw(rep); return t_route + 1; }
                     break;
                 }
                 if (agg_tuple_eq(key_cols, key_data, n_keys, r, rep[gp])) break;
@@ -1299,7 +1299,7 @@ static int64_t agg_estimate_card_sel(ray_t** key_cols, const void** key_data,
             }
         }
     }
-    free(ht); free(rep);
+    ray_free_raw(ht); ray_free_raw(rep);
     return distinct;
 }
 
@@ -1323,26 +1323,26 @@ static int agg_sh_init(agg_sh_t* sh, int64_t cap, size_t block) {
     while (htcap < cap * 2) htcap <<= 1;   /* <0.5 load at full cap */
     sh->ng = 0; sh->cap = cap; sh->block = block; sh->oom = 0;
     sh->htcap = htcap; sh->htmask = (uint64_t)htcap - 1;
-    sh->ht        = malloc((size_t)htcap * sizeof(int32_t));
-    sh->first_row = malloc((size_t)cap * sizeof(int64_t));
-    sh->states    = malloc((size_t)cap * block);
+    sh->ht        = ray_alloc_raw((size_t)htcap * sizeof(int32_t));
+    sh->first_row = ray_alloc_raw((size_t)cap * sizeof(int64_t));
+    sh->states    = ray_alloc_raw((size_t)cap * block);
     if (!sh->ht || !sh->first_row || !sh->states) { sh->oom = 1; return -1; }
     for (int64_t i = 0; i < htcap; i++) sh->ht[i] = -1;
     return 0;
 }
 
 static void agg_sh_destroy(agg_sh_t* sh) {
-    free(sh->ht); free(sh->first_row); free(sh->states);
+    ray_free_raw(sh->ht); ray_free_raw(sh->first_row); ray_free_raw(sh->states);
     sh->ht = NULL; sh->first_row = NULL; sh->states = NULL;
 }
 
 /* Grow capacity (states + first_row) when ng would exceed cap.  Doubles cap. */
 static int agg_sh_grow_cap(agg_sh_t* sh) {
     int64_t nc = sh->cap * 2;
-    int64_t* nfr = realloc(sh->first_row, (size_t)nc * sizeof(int64_t));
+    int64_t* nfr = ray_realloc_raw(sh->first_row, (size_t)nc * sizeof(int64_t));
     if (!nfr) { sh->oom = 1; return -1; }
     sh->first_row = nfr;
-    char* nst = realloc(sh->states, (size_t)nc * sh->block);
+    char* nst = ray_realloc_raw(sh->states, (size_t)nc * sh->block);
     if (!nst) { sh->oom = 1; return -1; }
     sh->states = nst;
     sh->cap = nc;
@@ -1355,7 +1355,7 @@ static int agg_sh_grow_cap(agg_sh_t* sh) {
 static int agg_sh_grow_ht(agg_sh_t* sh, ray_t** key_cols, const void** key_data,
                           uint8_t n_keys) {
     int64_t nc = sh->htcap * 2;
-    int32_t* nht = malloc((size_t)nc * sizeof(int32_t));
+    int32_t* nht = ray_alloc_raw((size_t)nc * sizeof(int32_t));
     if (!nht) { sh->oom = 1; return -1; }
     uint64_t nmask = (uint64_t)nc - 1;
     for (int64_t i = 0; i < nc; i++) nht[i] = -1;
@@ -1365,7 +1365,7 @@ static int agg_sh_grow_ht(agg_sh_t* sh, ray_t** key_cols, const void** key_data,
         while (nht[slot] >= 0) slot = (slot + 1) & nmask;
         nht[slot] = (int32_t)g;
     }
-    free(sh->ht);
+    ray_free_raw(sh->ht);
     sh->ht = nht; sh->htcap = nc; sh->htmask = nmask;
     return 0;
 }
@@ -1551,14 +1551,14 @@ static ray_t* exec_group_v2_parallel_smallhash(
     if (cap0 < 256) cap0 = 256;
     if (nrows > 0 && cap0 > nrows) cap0 = nrows;
 
-    agg_sh_t* locals = calloc((size_t)nw, sizeof(agg_sh_t));
+    agg_sh_t* locals = ray_calloc_raw((size_t)((size_t)nw) * (sizeof(agg_sh_t)));
     if (!locals) return ray_error("oom", NULL);
     int alloc_oom = 0;
     for (uint32_t w = 0; w < nw; w++)
         if (agg_sh_init(&locals[w], cap0, block) != 0) { alloc_oom = 1; break; }
     if (alloc_oom) {
         for (uint32_t w = 0; w < nw; w++) agg_sh_destroy(&locals[w]);
-        free(locals);
+        ray_free_raw(locals);
         return ray_error("oom", NULL);
     }
 
@@ -1582,7 +1582,7 @@ static ray_t* exec_group_v2_parallel_smallhash(
      * state and re-run on the radix path — data-driven, no sampling bias. */
     if (atomic_load_explicit(&ctx.overflow, memory_order_relaxed)) {
         for (uint32_t w = 0; w < nw; w++) agg_sh_destroy(&locals[w]);
-        free(locals);
+        ray_free_raw(locals);
         return exec_group_v2_parallel_radix(g, op, tbl, nrows, key_cols, key_syms,
                                             vts, off, block, sel, sel_prefix, n_sel);
     }
@@ -1590,7 +1590,7 @@ static ray_t* exec_group_v2_parallel_smallhash(
     for (uint32_t w = 0; w < nw; w++)
         if (locals[w].oom) {
             for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
-            free(locals);
+            ray_free_raw(locals);
             return ray_error("oom", NULL);
         }
 
@@ -1602,7 +1602,7 @@ static ray_t* exec_group_v2_parallel_smallhash(
     if (agg_sh_init(&gt, gcap, block) != 0) {
         agg_sh_destroy(&gt);
         for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
-        free(locals);
+        ray_free_raw(locals);
         return ray_error("oom", NULL);
     }
     for (uint32_t w = 0; w < nw; w++) {
@@ -1614,7 +1614,7 @@ static ray_t* exec_group_v2_parallel_smallhash(
             if (gg < 0) {
                 agg_sh_destroy(&gt);
                 for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
-                free(locals);
+                ray_free_raw(locals);
                 return ray_error("oom", NULL);
             }
             for (uint8_t a = 0; a < n_aggs; a++)
@@ -1624,7 +1624,7 @@ static ray_t* exec_group_v2_parallel_smallhash(
     }
     int64_t ng = gt.ng;
     for (uint32_t i = 0; i < nw; i++) agg_sh_destroy(&locals[i]);
-    free(locals);
+    ray_free_raw(locals);
 
     /* ── Phase C: emit key + agg columns in build order (unspecified order). ──
      * gt.first_row[g] is the representative row for the scattered key gather —
@@ -1704,7 +1704,7 @@ typedef struct { char* buf; uint32_t n, cap; } agg_pay_buf_t;  /* n = #records *
 static char* agg_pay_reserve(agg_pay_buf_t* b, size_t rec) {
     if (b->n == b->cap) {
         uint32_t nc = b->cap ? b->cap * 2 : 64;
-        char* nb = realloc(b->buf, (size_t)nc * rec);
+        char* nb = ray_realloc_raw(b->buf, (size_t)nc * rec);
         if (!nb) return NULL;
         b->buf = nb; b->cap = nc;
     }
@@ -1740,9 +1740,9 @@ static void agg_radix_parts_destroy(agg_radix_part_t* parts, uint32_t nparts,
                 if (vts[a]->destroy)
                     for (int64_t gg = 0; gg < parts[p].ng; gg++)
                         vts[a]->destroy(states + (size_t)gg * block + off[a]);
-        free(parts[p].states);
-        free(parts[p].first_row);
-        free(parts[p].keys);
+        ray_free_raw(parts[p].states);
+        ray_free_raw(parts[p].first_row);
+        ray_free_raw(parts[p].keys);
     }
 }
 
@@ -1887,17 +1887,17 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
         int64_t htcap = 16;
         while (htcap < total * 2) htcap <<= 1;
         uint64_t htmask = (uint64_t)htcap - 1;
-        int32_t* ht        = malloc((size_t)htcap * sizeof(int32_t));
-        uint8_t* ht_salt   = malloc((size_t)htcap);  /* parallel salt fingerprint per slot */
-        int64_t* first_row = malloc((size_t)total * sizeof(int64_t));
-        char*    states    = malloc((size_t)total * c->block);
-        const int64_t** keyp = malloc((size_t)total * sizeof(int64_t*)); /* gid -> packed keys */
-        uint32_t* gid      = malloc((size_t)total * sizeof(uint32_t));/* row i -> local gid */
+        int32_t* ht        = ray_alloc_raw((size_t)htcap * sizeof(int32_t));
+        uint8_t* ht_salt   = ray_alloc_raw((size_t)htcap);  /* parallel salt fingerprint per slot */
+        int64_t* first_row = ray_alloc_raw((size_t)total * sizeof(int64_t));
+        char*    states    = ray_alloc_raw((size_t)total * c->block);
+        const int64_t** keyp = ray_alloc_raw((size_t)total * sizeof(int64_t*)); /* gid -> packed keys */
+        uint32_t* gid      = ray_alloc_raw((size_t)total * sizeof(uint32_t));/* row i -> local gid */
         /* Persist each group's packed keys (build order) so Phase 3 emits the
          * key columns by sequential un-pack rather than scattered gather. */
-        int64_t* gkeys     = malloc((size_t)total * (size_t)(n_keys ? n_keys : 1) * sizeof(int64_t));
+        int64_t* gkeys     = ray_alloc_raw((size_t)total * (size_t)(n_keys ? n_keys : 1) * sizeof(int64_t));
         if (!ht || !ht_salt || !first_row || !states || !keyp || !gid || !gkeys) {
-            free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid); free(gkeys);
+            ray_free_raw(ht); ray_free_raw(ht_salt); ray_free_raw(first_row); ray_free_raw(states); ray_free_raw(keyp); ray_free_raw(gid); ray_free_raw(gkeys);
             pr->oom = 1; return;
         }
         for (int64_t i = 0; i < htcap; i++) ht[i] = -1;
@@ -1907,12 +1907,12 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
         for (uint8_t a = 0; a < n_aggs; a++) {
             if (c->val_data[a]) {
                 uint8_t ez = c->val_esz[a];
-                gv[a] = malloc((size_t)total * (ez ? ez : 1));
+                gv[a] = ray_alloc_raw((size_t)total * (ez ? ez : 1));
                 if (!gv[a]) goto oom;
             }
             if (c->val2_data[a]) {
                 uint8_t ez2 = c->val2_esz[a];
-                gy[a] = malloc((size_t)total * (ez2 ? ez2 : 1));
+                gy[a] = ray_alloc_raw((size_t)total * (ez2 ? ez2 : 1));
                 if (!gy[a]) goto oom;
             }
         }
@@ -1966,7 +1966,7 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                 ri++;
             }
         }
-        free(ht); free(ht_salt); free(keyp);
+        ray_free_raw(ht); ray_free_raw(ht_salt); ray_free_raw(keyp);
 
         /* Batch-accumulate each agg over the partition's dense value buffers. */
         for (uint8_t a = 0; a < n_aggs; a++) {
@@ -1984,13 +1984,13 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
             }
         }
 
-        for (uint8_t a = 0; a < n_aggs; a++) { free(gv[a]); free(gy[a]); }
-        free(gid);
+        for (uint8_t a = 0; a < n_aggs; a++) { ray_free_raw(gv[a]); ray_free_raw(gy[a]); }
+        ray_free_raw(gid);
         pr->states = states; pr->first_row = first_row; pr->keys = gkeys; pr->ng = ng;
         continue;
     oom:
-        free(ht); free(ht_salt); free(first_row); free(states); free(keyp); free(gid); free(gkeys);
-        for (uint8_t a = 0; a < n_aggs; a++) { free(gv[a]); free(gy[a]); }
+        ray_free_raw(ht); ray_free_raw(ht_salt); ray_free_raw(first_row); ray_free_raw(states); ray_free_raw(keyp); ray_free_raw(gid); ray_free_raw(gkeys);
+        for (uint8_t a = 0; a < n_aggs; a++) { ray_free_raw(gv[a]); ray_free_raw(gy[a]); }
         pr->oom = 1; return;
     }
 }
@@ -2104,9 +2104,9 @@ static ray_t* exec_group_v2_parallel_radix(
     size_t rec = (rec_cur + 7u) & ~(size_t)7u;   /* 8-align records */
 
     size_t nbuf = (size_t)nw * AGG_RADIX_P;
-    agg_pay_buf_t*    bufs  = calloc(nbuf, sizeof(agg_pay_buf_t));
-    agg_radix_part_t* parts = calloc(AGG_RADIX_P, sizeof(agg_radix_part_t));
-    if (!bufs || !parts) { free(bufs); free(parts); return ray_error("oom", NULL); }
+    agg_pay_buf_t*    bufs  = ray_calloc_raw((size_t)(nbuf) * (sizeof(agg_pay_buf_t)));
+    agg_radix_part_t* parts = ray_calloc_raw((size_t)(AGG_RADIX_P) * (sizeof(agg_radix_part_t)));
+    if (!bufs || !parts) { ray_free_raw(bufs); ray_free_raw(parts); return ray_error("oom", NULL); }
 
     agg_radix_ctx_t ctx = {
         .key_cols = key_cols, .key_data = key_data, .n_keys = n_keys,
@@ -2134,8 +2134,8 @@ static ray_t* exec_group_v2_parallel_radix(
 
     if (oom) {
         agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
-        for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
-        free(bufs); free(parts);
+        for (size_t i = 0; i < nbuf; i++) ray_free_raw(bufs[i].buf);
+        ray_free_raw(bufs); ray_free_raw(parts);
         return ray_error("oom", NULL);
     }
 
@@ -2151,11 +2151,11 @@ static ray_t* exec_group_v2_parallel_radix(
     /* (first_row, part, local gid) collected globally in build order.  idx packs
      * (part << 32 | local gid) so finalize recovers both the partition and the
      * in-partition state offset. */
-    agg_fr_pair_t* pairs = malloc((size_t)(ng > 0 ? ng : 1) * sizeof(agg_fr_pair_t));
+    agg_fr_pair_t* pairs = ray_alloc_raw((size_t)(ng > 0 ? ng : 1) * sizeof(agg_fr_pair_t));
     if (!pairs) {
         agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
-        for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
-        free(bufs); free(parts);
+        for (size_t i = 0; i < nbuf; i++) ray_free_raw(bufs[i].buf);
+        ray_free_raw(bufs); ray_free_raw(parts);
         return ray_error("oom", NULL);
     }
     { int64_t i = 0;
@@ -2169,10 +2169,10 @@ static ray_t* exec_group_v2_parallel_radix(
 
     ray_t* result = ray_table_new(n_keys + n_aggs);
     if (!result || RAY_IS_ERR(result)) {
-        free(pairs);
+        ray_free_raw(pairs);
         agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
-        for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
-        free(bufs); free(parts);
+        for (size_t i = 0; i < nbuf; i++) ray_free_raw(bufs[i].buf);
+        ray_free_raw(bufs); ray_free_raw(parts);
         return result ? result : ray_error("oom", NULL);
     }
 
@@ -2183,10 +2183,10 @@ static ray_t* exec_group_v2_parallel_radix(
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_t* kc = agg_unpack_key_col(key_cols[k], k, n_keys, parts, AGG_RADIX_P, ng);
         if (!kc || RAY_IS_ERR(kc)) {
-            free(pairs);
+            ray_free_raw(pairs);
             agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
-            for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
-            free(bufs); free(parts);
+            for (size_t i = 0; i < nbuf; i++) ray_free_raw(bufs[i].buf);
+            ray_free_raw(bufs); ray_free_raw(parts);
             ray_release(result); return kc ? kc : ray_error("oom", NULL);
         }
         result = ray_table_add_col(result, key_syms[k], kc);
@@ -2206,10 +2206,10 @@ static ray_t* exec_group_v2_parallel_radix(
         ray_t* out = is_list ? ray_list_new(ng) : ray_vec_new(vts[a]->out_type, ng);
         if (!out || RAY_IS_ERR(out)) {
             for (uint8_t b = 0; b < a; b++) ray_release(outs[b]);
-            free(pairs);
+            ray_free_raw(pairs);
             agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
-            for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
-            free(bufs); free(parts);
+            for (size_t i = 0; i < nbuf; i++) ray_free_raw(bufs[i].buf);
+            ray_free_raw(bufs); ray_free_raw(parts);
             ray_release(result); return out ? out : ray_error("oom", NULL);
         }
         out->len = ng;
@@ -2222,7 +2222,7 @@ static ray_t* exec_group_v2_parallel_radix(
      * trivial serial loop → zero dispatch overhead, no regression. */
     bool par_fin = (pool && ng >= RAY_PARALLEL_THRESHOLD);
     if (par_fin) {
-        uint8_t* saw_null = calloc((size_t)nw * (n_aggs ? n_aggs : 1), 1);
+        uint8_t* saw_null = ray_calloc_raw((size_t)((size_t)nw * (n_aggs ? n_aggs : 1)) * (1));
         if (!saw_null) { par_fin = false; }
         else {
             ray_t* scalar_outs[16];
@@ -2243,7 +2243,7 @@ static ray_t* exec_group_v2_parallel_radix(
                         break;
                     }
             }
-            free(saw_null);
+            ray_free_raw(saw_null);
         }
     }
 
@@ -2272,12 +2272,12 @@ static ray_t* exec_group_v2_parallel_radix(
         ray_release(out);
     }
 
-    free(pairs);
+    ray_free_raw(pairs);
     /* Finalize is done reading every partition's buffered group state → destroy
      * exactly once before freeing the partition slabs. */
     agg_radix_parts_destroy(parts, AGG_RADIX_P, vts, off, block, n_aggs);
-    for (size_t i = 0; i < nbuf; i++) free(bufs[i].buf);
-    free(bufs); free(parts);
+    for (size_t i = 0; i < nbuf; i++) ray_free_raw(bufs[i].buf);
+    ray_free_raw(bufs); ray_free_raw(parts);
     return result;
 }
 
@@ -2457,11 +2457,11 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     if (grp_rc != 0) return ray_error("oom", NULL);
 
     ray_t* result = ray_table_new(ext->n_keys + ext->n_aggs);
-    if (!result || RAY_IS_ERR(result)) { free(groups.gids); free(groups.first_row); return ray_error("oom", NULL); }
+    if (!result || RAY_IS_ERR(result)) { agg_groups_free(&groups); return ray_error("oom", NULL); }
 
     for (uint8_t k = 0; k < ext->n_keys; k++) {
         ray_t* kc = agg_gather_key_col(key_cols[k], groups.first_row, groups.ngroups);
-        if (!kc || RAY_IS_ERR(kc)) { free(groups.gids); free(groups.first_row); ray_release(result); return kc ? kc : ray_error("oom", NULL); }
+        if (!kc || RAY_IS_ERR(kc)) { agg_groups_free(&groups); ray_release(result); return kc ? kc : ray_error("oom", NULL); }
         result = ray_table_add_col(result, key_syms[k], kc);
         ray_release(kc);
     }
@@ -2482,12 +2482,12 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             const agg_vtable_t* vt = agg_resolve(ext->agg_ops[a], in_type);
             col = agg_run_one(vt, val_col, groups.gids, nrows, groups.ngroups, kparam);
         }
-        if (!col || RAY_IS_ERR(col)) { free(groups.gids); free(groups.first_row); ray_release(result); return col ? col : ray_error("oom", NULL); }
+        if (!col || RAY_IS_ERR(col)) { agg_groups_free(&groups); ray_release(result); return col ? col : ray_error("oom", NULL); }
         int64_t agg_name = agg_result_col_name(ie->sym, ext->agg_ops[a]);
         result = ray_table_add_col(result, agg_name, col);
         ray_release(col);
     }
-    free(groups.gids); free(groups.first_row);
+    agg_groups_free(&groups);
     return result;
     #undef AGG_RUN_COMPACT_FALLBACK
 }
@@ -2617,7 +2617,7 @@ static void agg_put_cell(ray_t* out, int64_t i, ray_t* cell) {
 ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
                    const uint32_t* gids, int64_t nrows, int64_t ngroups,
                    int64_t kparam) {
-    char* states = calloc((size_t)(ngroups > 0 ? ngroups : 1), vt->state_size);
+    char* states = ray_calloc_raw((size_t)((size_t)(ngroups > 0 ? ngroups : 1)) * (vt->state_size));
     if (!states) return ray_error("oom", NULL);
     for (int64_t gi = 0; gi < ngroups; gi++)
         vt->init(states + (size_t)gi * vt->state_size);
@@ -2634,7 +2634,7 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
         if (vt->destroy)
             for (int64_t gi = 0; gi < ngroups; gi++)
                 vt->destroy(states + (size_t)gi * vt->state_size);
-        free(states); return ray_error("oom", NULL);
+        ray_free_raw(states); return ray_error("oom", NULL);
     }
     out->len = ngroups;
     for (int64_t gi = 0; gi < ngroups; gi++) {
@@ -2648,7 +2648,7 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
         }
         if (vt->destroy) vt->destroy(states + (size_t)gi * vt->state_size);
     }
-    free(states);
+    ray_free_raw(states);
     return out;
 }
 
@@ -2658,7 +2658,7 @@ ray_t* agg_run_one(const agg_vtable_t* vt, ray_t* val_col,
 ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
                        const uint32_t* gids, int64_t nrows, int64_t ngroups,
                        int64_t kparam) {
-    char* states = calloc((size_t)(ngroups > 0 ? ngroups : 1), vt->state_size);
+    char* states = ray_calloc_raw((size_t)((size_t)(ngroups > 0 ? ngroups : 1)) * (vt->state_size));
     if (!states) return ray_error("oom", NULL);
     for (int64_t gi = 0; gi < ngroups; gi++)
         vt->init(states + (size_t)gi * vt->state_size);
@@ -2675,7 +2675,7 @@ ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
         if (vt->destroy)
             for (int64_t gi = 0; gi < ngroups; gi++)
                 vt->destroy(states + (size_t)gi * vt->state_size);
-        free(states); return ray_error("oom", NULL);
+        ray_free_raw(states); return ray_error("oom", NULL);
     }
     out->len = ngroups;
     for (int64_t gi = 0; gi < ngroups; gi++) {
@@ -2684,7 +2684,7 @@ ray_t* agg_run_one_bin(const agg_vtable_t* vt, ray_t* x_col, ray_t* y_col,
         ray_release(cell);
         if (vt->destroy) vt->destroy(states + (size_t)gi * vt->state_size);
     }
-    free(states);
+    ray_free_raw(states);
     return out;
 }
 
@@ -2697,11 +2697,11 @@ static int agg_group_keys_dense(ray_t** key_cols, int64_t nrows,
                                 const dense_plan_t* dp, agg_groups_t* out) {
     const void* data[16];
     for (uint8_t k = 0; k < dp->n_keys; k++) data[k] = ray_data(key_cols[k]);
-    int32_t* slot2gid = malloc((size_t)dp->total_slots * sizeof(int32_t));
-    out->gids      = malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(uint32_t));
-    out->first_row = malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(int64_t));
+    int32_t* slot2gid = ray_alloc_raw((size_t)dp->total_slots * sizeof(int32_t));
+    out->gids      = ray_alloc_raw((size_t)(nrows > 0 ? nrows : 1) * sizeof(uint32_t));
+    out->first_row = ray_alloc_raw((size_t)(nrows > 0 ? nrows : 1) * sizeof(int64_t));
     if (!slot2gid || !out->gids || !out->first_row) {
-        free(slot2gid); free(out->gids); free(out->first_row);
+        ray_free_raw(slot2gid); ray_free_raw(out->gids); ray_free_raw(out->first_row);
         out->gids = NULL; out->first_row = NULL; return -1;
     }
     for (int64_t s = 0; s < dp->total_slots; s++) slot2gid[s] = -1;
@@ -2723,7 +2723,7 @@ static int agg_group_keys_dense(ray_t** key_cols, int64_t nrows,
         out->gids[r] = (uint32_t)gp;
     }
     out->ngroups = ngroups;
-    free(slot2gid);
+    ray_free_raw(slot2gid);
     return 0;
 }
 
@@ -2736,11 +2736,11 @@ int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t
     while (cap < nrows * 2) cap <<= 1;
     uint64_t mask = (uint64_t)cap - 1;
 
-    int32_t* ht_gid = malloc((size_t)cap * sizeof(int32_t));
-    out->gids      = malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(uint32_t));
-    out->first_row = malloc((size_t)(nrows > 0 ? nrows : 1) * sizeof(int64_t));
+    int32_t* ht_gid = ray_alloc_raw((size_t)cap * sizeof(int32_t));
+    out->gids      = ray_alloc_raw((size_t)(nrows > 0 ? nrows : 1) * sizeof(uint32_t));
+    out->first_row = ray_alloc_raw((size_t)(nrows > 0 ? nrows : 1) * sizeof(int64_t));
     if (!ht_gid || !out->gids || !out->first_row) {
-        free(ht_gid); free(out->gids); free(out->first_row);
+        ray_free_raw(ht_gid); ray_free_raw(out->gids); ray_free_raw(out->first_row);
         out->gids = NULL; out->first_row = NULL; return -1;
     }
     for (int64_t i = 0; i < cap; i++) ht_gid[i] = -1;
@@ -2773,6 +2773,12 @@ int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t
         }
     }
     out->ngroups = ngroups;
-    free(ht_gid);
+    ray_free_raw(ht_gid);
     return 0;
+}
+
+void agg_groups_free(agg_groups_t* out) {
+    if (!out) return;
+    ray_free_raw(out->gids);      out->gids = NULL;
+    ray_free_raw(out->first_row); out->first_row = NULL;
 }
