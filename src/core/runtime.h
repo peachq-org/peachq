@@ -73,6 +73,14 @@ typedef struct {
     /* ── warm: per-dispatch context (core/ipc.c saves/restores) */
     int64_t          ipc_handle; /* connection handle of the hook/eval on this stack; -1 = none */
     void            *ipc_poll;   /* opaque ray_poll_t* that dispatched it; NULL = none */
+    /* ── projection-pushdown hint (query eval): a consuming select publishes the
+     * column syms it references before evaluating its `from:`; the first nested
+     * `select {by:}` distinct consumes them and drops the rest.  Consume-once;
+     * NULL/0/false defaults (memset) mean inactive. */
+    const int64_t   *proj_keep;
+    int              proj_keep_n;
+    int32_t          proj_depth;  /* eval_depth at publish; consumed only at +1 */
+    bool             proj_active;
     /* ── cold: error paths only */
     ray_t           *trace;      /* error trace list (owned) */
     ray_t           *raise_val;  /* pending (raise x) value (owned) */
