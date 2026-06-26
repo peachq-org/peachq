@@ -551,6 +551,17 @@ static inline uint64_t agg_tuple_hash(ray_t** key_cols, const void** key_data,
         int64_t v = agg_read_key_i64(key_cols[k], key_data[k], r);
         h ^= (uint64_t)v; h *= 1099511628211ULL;
     }
+    /* Avalanche (murmur3 fmix64).  FNV-1a leaves the LOW bits weakly mixed, and
+     * the hash table indexes with `h & htmask` (low bits).  Keys that share low
+     * bits then collapse into a few slots — catastrophic for structured keys
+     * like time-bucketed values (e.g. an xbar stride divisible by a high power
+     * of two): every key lands in the same handful of buckets and linear
+     * probing degrades to O(n²).  Finalize so every output bit depends on every
+     * input bit; correctness is unaffected (the eq-check resolves collisions),
+     * only the slot distribution. */
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
     return h;
 }
 
