@@ -5394,8 +5394,8 @@ by_dict_done:
                         default: distinct_only = false; break;
                     }
                 }
-                /* every output column is gathered fixed-width (agg_gather_key_col);
-                 * STR/LIST/nested columns fall back to the legacy path. */
+                /* agg_select_distinct gathers fixed-width/SYM/STR/LIST columns;
+                 * parted/mapcommon/nested fall back to the legacy path. */
                 int64_t dchk_nc = ray_table_ncols(eval_tbl);
                 for (int64_t c = 0; c < dchk_nc && distinct_only; c++) {
                     ray_t* cc = ray_table_get_col_idx(eval_tbl, c);
@@ -5404,7 +5404,7 @@ by_dict_done:
                         case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
                         case RAY_BOOL: case RAY_DATE: case RAY_TIME:
                         case RAY_TIMESTAMP: case RAY_SYM: case RAY_F64:
-                        case RAY_GUID: break;
+                        case RAY_GUID: case RAY_STR: case RAY_LIST: break;
                         default: distinct_only = false; break;
                     }
                 }
