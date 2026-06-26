@@ -130,6 +130,19 @@ bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
         if (kc->attrs & RAY_ATTR_HAS_NULLS) return false;
         if (nrows <= 0) return false;   /* empty → no min/max, max<min guard */
 
+        /* Narrow SYM codes are bounded by their width — codes ∈ [0, 2^w) — so the
+         * range is known a priori and ALWAYS within the dense cap (W16 = 65536 <
+         * cap).  Skip the O(nrows) min/max prescan entirely; min is 0, range is
+         * 2^w.  (W32/W64 still scan: their full code space exceeds the cap, so we
+         * need the actual used range to decide dense eligibility.) */
+        if (kc->type == RAY_SYM) {
+            switch (kc->attrs & RAY_SYM_W_MASK) {
+                case RAY_SYM_W8:  out->mins[k] = 0; out->ranges[k] = 256;   continue;
+                case RAY_SYM_W16: out->mins[k] = 0; out->ranges[k] = 65536; continue;
+                default: break;  /* W32/W64 fall through to the prescan */
+            }
+        }
+
         const void* data = ray_data(kc);
         int64_t mn, mx;
         /* Type/width-specialized min/max — hoist agg_read_key_i64's per-row
