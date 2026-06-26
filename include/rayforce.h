@@ -314,6 +314,17 @@ ray_t*    ray_alloc(size_t data_size);
  * when the owning heap flushes foreign blocks. */
 void     ray_free(ray_t* v);
 
+/* ===== Raw buffer allocator (buddy-backed, no libc malloc) =====
+ * malloc/calloc/realloc/free replacements for plain byte/scalar buffers that
+ * are NOT ray_t values — backed by the tuned slab/buddy heap (fast for the many
+ * small per-partition allocations the agg engine makes), thread-safe, with
+ * cross-thread free.  ray_alloc_raw returns uninitialised memory; ray_calloc_raw
+ * zeroes it.  Free with ray_free_raw, grow with ray_realloc_raw. */
+void*    ray_alloc_raw(size_t n);
+void*    ray_calloc_raw(size_t n);
+void*    ray_realloc_raw(void* p, size_t n);
+void     ray_free_raw(void* p);
+
 /* ===== Memory Budget API ===== */
 
 int64_t  ray_mem_budget(void);      /* returns memory budget in bytes */
