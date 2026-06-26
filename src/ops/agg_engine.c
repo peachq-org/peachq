@@ -2782,3 +2782,56 @@ void agg_groups_free(agg_groups_t* out) {
     ray_free_raw(out->gids);      out->gids = NULL;
     ray_free_raw(out->first_row); out->first_row = NULL;
 }
+
+/* Multi-key `select {by: {keys}}` with NO aggregates.  Group on each key
+ * column's RAW cell values (positions for SYM — domain-local, NO global
+ * interning of the vocabulary), then emit, per group, the FIRST-of-group value
+ * of every column of `tbl`: the key columns (named by key_syms, in by: order)
+ * followed by every non-key column (kdb `select by` semantics — first row of
+ * the group).  Every column is gathered via agg_gather_key_col, which adopts a
+ * SYM column's source domain, so NOTHING is interned into the global table.
+ * Replaces the legacy path's per-cell runtime-id boxing.  Precondition (gated by
+ * the caller): keys are int/SYM and EVERY tbl column is fixed-width or SYM (no
+ * STR/LIST).  Caller owns the returned table. */
+ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms,
+                           uint8_t nk, int64_t nrows) {
+    agg_groups_t groups = {0};
+    if (agg_group_keys(key_cols, nk, nrows, &groups) != 0)
+        return ray_error("oom", NULL);
+    int64_t ncol = ray_table_ncols(tbl);
+    ray_t* result = ray_table_new(ncol);
+    if (!result || RAY_IS_ERR(result)) {
+        agg_groups_free(&groups);
+        return result ? result : ray_error("oom", NULL);
+    }
+    /* key columns first, named by key_syms (by: order) */
+    for (uint8_t k = 0; k < nk; k++) {
+        ray_t* kc = agg_gather_key_col(key_cols[k], groups.first_row, groups.ngroups);
+        if (!kc || RAY_IS_ERR(kc)) {
+            agg_groups_free(&groups); ray_release(result);
+            return kc ? kc : ray_error("oom", NULL);
+        }
+        result = ray_table_add_col(result, key_syms[k], kc);
+        ray_release(kc);
+        if (RAY_IS_ERR(result)) { agg_groups_free(&groups); return result; }
+    }
+    /* then every NON-key column: first-of-group value (first_row = first occ) */
+    for (int64_t c = 0; c < ncol; c++) {
+        int64_t cn = ray_table_col_name(tbl, c);
+        bool is_key = false;
+        for (uint8_t k = 0; k < nk; k++) if (key_syms[k] == cn) { is_key = true; break; }
+        if (is_key) continue;
+        ray_t* sc = ray_table_get_col_idx(tbl, c);
+        if (!sc) continue;
+        ray_t* dc = agg_gather_key_col(sc, groups.first_row, groups.ngroups);
+        if (!dc || RAY_IS_ERR(dc)) {
+            agg_groups_free(&groups); ray_release(result);
+            return dc ? dc : ray_error("oom", NULL);
+        }
+        result = ray_table_add_col(result, cn, dc);
+        ray_release(dc);
+        if (RAY_IS_ERR(result)) { agg_groups_free(&groups); return result; }
+    }
+    agg_groups_free(&groups);
+    return result;
+}
