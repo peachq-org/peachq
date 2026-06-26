@@ -39,9 +39,12 @@ void agg_groups_free(agg_groups_t* out);
  * first-of-group value of every `tbl` column (keys named by key_syms, then the
  * non-key columns), SYM columns adopting their source domain (no global
  * interning).  See agg_engine.c.  Precondition (caller-gated): keys are int/SYM
- * and every tbl column is fixed-width/SYM/STR/LIST.  Caller owns the table. */
+ * and every tbl column is fixed-width/SYM/STR/LIST.  Caller owns the table.
+ * keep_syms (or NULL) lists the column syms a consumer references — non-key
+ * columns NOT in it are dropped (projection pushdown); keys are always kept. */
 ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms,
-                           uint8_t nk, int64_t nrows);
+                           uint8_t nk, int64_t nrows,
+                           const int64_t* keep_syms, int keep_n);
 
 /* Build a dense SoA per-group state array for one aggregate (vt), run a single
  * update_batch over val_col grouped by gids, and finalize each group into a

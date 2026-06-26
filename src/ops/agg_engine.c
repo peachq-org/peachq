@@ -2850,7 +2850,8 @@ static ray_t* agg_gather_col_at(ray_t* sc, const int64_t* first_row, int64_t n) 
  * columns are fixed-width/SYM/STR/LIST (parted/mapcommon fall back to legacy).
  * Caller owns the returned table. */
 ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms,
-                           uint8_t nk, int64_t nrows) {
+                           uint8_t nk, int64_t nrows,
+                           const int64_t* keep_syms, int keep_n) {
     agg_groups_t groups = {0};
     if (agg_group_keys(key_cols, nk, nrows, &groups) != 0)
         return ray_error("oom", NULL);
@@ -2877,6 +2878,14 @@ ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms
         bool is_key = false;
         for (uint8_t k = 0; k < nk; k++) if (key_syms[k] == cn) { is_key = true; break; }
         if (is_key) continue;
+        /* Projection pushdown: when the consumer published the columns it
+         * references (keep_syms), drop the non-key columns it never reads —
+         * keys are always carried.  keep_syms == NULL → carry all (kdb default). */
+        if (keep_syms) {
+            bool req = false;
+            for (int j = 0; j < keep_n; j++) if (keep_syms[j] == cn) { req = true; break; }
+            if (!req) continue;
+        }
         ray_t* sc = ray_table_get_col_idx(tbl, c);
         if (!sc) continue;
         ray_t* dc = agg_gather_col_at(sc, groups.first_row, groups.ngroups);

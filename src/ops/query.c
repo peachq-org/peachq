@@ -32,6 +32,7 @@
 #include "ops/internal.h"
 #include "ops/hash.h"
 #include "ops/agg_engine.h"   /* agg_select_distinct — dict-linked pure-distinct path */
+#include "core/runtime.h"     /* __VM — per-thread query/eval context */
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
 #include "ops/fused_topk.h"
@@ -4129,6 +4130,63 @@ static ray_t* project_table_cols(ray_t* src_tbl, const int64_t* keep_syms,
     return nt;
 }
 
+/* Walk an expr collecting unique UNQUOTED -RAY_SYM ids (candidate column-name
+ * refs).  Over-approximate — function names get included (harmless: the consumer
+ * keeps only columns whose name matches) — but COMPLETE for static refs, which
+ * is what matters: a referenced column must never be dropped. */
+static int collect_syms(ray_t* e, int64_t* out, int max, int n) {
+    if (!e || n >= max) return n;
+    if (e->type == -RAY_SYM) {
+        if (e->attrs & ATTR_QUOTED) return n;        /* literal sym, not a ref */
+        for (int i = 0; i < n; i++) if (out[i] == e->i64) return n;   /* dedup */
+        out[n++] = e->i64;
+        return n;
+    }
+    if (e->type == RAY_LIST) {
+        ray_t** el = (ray_t**)ray_data(e);
+        int64_t len = ray_len(e);
+        for (int64_t i = 0; i < len && n < max; i++) n = collect_syms(el[i], out, max, n);
+    } else if (e->type == RAY_DICT) {
+        ray_t* vals = ray_dict_vals(e);
+        if (vals && vals->type == RAY_LIST) {
+            ray_t** v = (ray_t**)ray_data(vals);
+            int64_t len = ray_len(vals);
+            for (int64_t i = 0; i < len && n < max; i++) n = collect_syms(v[i], out, max, n);
+        }
+    }
+    return n;
+}
+
+/* Projection-pushdown keep-set: for an EXPLICITLY-projected select (one with
+ * value exprs, so it references only named columns), collect the column syms its
+ * non-`from` clauses reference.  Returns false (→ carry all) for an implicit-all
+ * select, which references every column. */
+static bool proj_compute_keep(ray_t* dict, int64_t* out, int max, int* out_n) {
+    int64_t from_id    = dict_key_id(dict, "from");
+    int64_t where_id   = dict_key_id(dict, "where");
+    int64_t by_id      = dict_key_id(dict, "by");
+    int64_t take_id    = dict_key_id(dict, "take");
+    int64_t asc_id     = dict_key_id(dict, "asc");
+    int64_t desc_id    = dict_key_id(dict, "desc");
+    int64_t nearest_id = dict_key_id(dict, "nearest");
+    DICT_VIEW_DECL(pv);
+    DICT_VIEW_OPEN(dict, pv);
+    if (DICT_VIEW_OVERFLOW(pv)) return false;
+    int n = 0;
+    bool has_value_expr = false;
+    for (int64_t i = 0; i + 1 < pv_n; i += 2) {
+        int64_t kid = pv[i]->i64;
+        if (kid == from_id) continue;                /* the subquery itself */
+        if (kid != where_id && kid != by_id && kid != take_id &&
+            kid != asc_id && kid != desc_id && kid != nearest_id)
+            has_value_expr = true;                   /* an explicit projection */
+        n = collect_syms(pv[i + 1], out, max, n);
+    }
+    if (!has_value_expr) return false;               /* implicit-all → carry all */
+    *out_n = n;
+    return true;
+}
+
 ray_t* ray_select(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("arity", "select: expects a query dict, got %lld args", (long long)n);
     ray_t* dict = args[0];
@@ -4145,7 +4203,23 @@ ray_t* ray_select(ray_t** args, int64_t n) {
         from_expr, where_expr, &emit_filter);
     if (emit_filter_set)
         ray_group_emit_filter_set(emit_filter);
+    /* Projection pushdown: publish the columns this select references so an
+     * IMMEDIATE nested `select {by:}` distinct in `from:` (eval_depth+1) carries
+     * only those.  Stack buffer stays live across the from: eval; save/restore
+     * keeps it scoped and nesting-safe. */
+    int64_t  proj_buf[DICT_VIEW_MAX]; int proj_n = 0;
+    ray_vm_t* pvm = __VM;
+    int32_t        pj_d = pvm ? pvm->proj_depth   : 0;
+    const int64_t* pj_k = pvm ? pvm->proj_keep    : NULL;
+    int            pj_n = pvm ? pvm->proj_keep_n  : 0;
+    bool           pj_a = pvm ? pvm->proj_active  : false;
+    if (pvm && proj_compute_keep(dict, proj_buf, DICT_VIEW_MAX, &proj_n)) {
+        pvm->proj_keep = proj_buf; pvm->proj_keep_n = proj_n;
+        pvm->proj_depth = pvm->eval_depth; pvm->proj_active = true;
+    }
     ray_t* tbl = ray_eval(from_expr);
+    if (pvm) { pvm->proj_keep = pj_k; pvm->proj_keep_n = pj_n;
+               pvm->proj_depth = pj_d; pvm->proj_active = pj_a; }
     if (emit_filter_set)
         ray_group_emit_filter_set(prev_emit_filter);
     if (RAY_IS_ERR(tbl)) return tbl;
@@ -5410,7 +5484,16 @@ by_dict_done:
                     }
                 }
                 if (distinct_only) {
-                    ray_t* dres = agg_select_distinct(eval_tbl, key_cols, key_syms, (uint8_t)nk, nrows);
+                    /* Consume the projection hint (if a consumer published one) —
+                     * carry only its referenced non-key columns.  Consume-once. */
+                    const int64_t* keep = NULL; int keep_n = 0;
+                    if (__VM && __VM->proj_active &&
+                        __VM->eval_depth == __VM->proj_depth + 1) {  /* immediate from: only */
+                        keep = __VM->proj_keep; keep_n = __VM->proj_keep_n;
+                        __VM->proj_active = false;   /* consume-once */
+                    }
+                    ray_t* dres = agg_select_distinct(eval_tbl, key_cols, key_syms,
+                                                      (uint8_t)nk, nrows, keep, keep_n);
                     if (eval_tbl != tbl) ray_release(eval_tbl);
                     ray_release(tbl);
                     return dres;
