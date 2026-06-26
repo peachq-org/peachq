@@ -5385,12 +5385,13 @@ by_dict_done:
                     if (kid != from_id && kid != where_id && kid != by_id)
                         distinct_only = false;
                 }
-                /* keys must be int/SYM (agg_group_keys reads them as int64) */
+                /* keys: int/SYM (read as int64) or STR (wide hash/eq in
+                 * agg_group_keys) — agg_select_distinct handles both. */
                 for (int64_t k = 0; k < nk && distinct_only; k++) {
                     switch (key_cols[k]->type) {
                         case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
                         case RAY_BOOL: case RAY_DATE: case RAY_TIME:
-                        case RAY_TIMESTAMP: case RAY_SYM: break;
+                        case RAY_TIMESTAMP: case RAY_SYM: case RAY_STR: break;
                         default: distinct_only = false; break;
                     }
                 }
