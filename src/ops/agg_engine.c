@@ -131,13 +131,38 @@ bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
         if (nrows <= 0) return false;   /* empty → no min/max, max<min guard */
 
         const void* data = ray_data(kc);
-        int64_t mn = agg_read_key_i64(kc, data, 0);
-        int64_t mx = mn;
-        for (int64_t r = 1; r < nrows; r++) {
-            int64_t v = agg_read_key_i64(kc, data, r);
-            if (v < mn) mn = v;
-            if (v > mx) mx = v;
+        int64_t mn, mx;
+        /* Type/width-specialized min/max — hoist agg_read_key_i64's per-row
+         * switch out of the prescan (same reason as the phaseA slot loop). */
+        #define DENSE_MINMAX(T)                                         \
+            do { const T* p = (const T*)data; mn = mx = (int64_t)p[0];  \
+                 for (int64_t r = 1; r < nrows; r++) {                  \
+                     int64_t v = (int64_t)p[r];                         \
+                     if (v < mn) mn = v;                                \
+                     if (v > mx) mx = v;                                \
+                 } } while (0)
+        switch (kc->type) {
+            case RAY_I64: case RAY_TIMESTAMP: DENSE_MINMAX(int64_t); break;
+            case RAY_I32: case RAY_DATE: case RAY_TIME: DENSE_MINMAX(int32_t); break;
+            case RAY_I16: DENSE_MINMAX(int16_t); break;
+            case RAY_U8: case RAY_BOOL: DENSE_MINMAX(uint8_t); break;
+            case RAY_SYM:
+                switch (kc->attrs & RAY_SYM_W_MASK) {
+                    case RAY_SYM_W8:  DENSE_MINMAX(uint8_t);  break;
+                    case RAY_SYM_W16: DENSE_MINMAX(uint16_t); break;
+                    case RAY_SYM_W32: DENSE_MINMAX(uint32_t); break;
+                    default:          DENSE_MINMAX(int64_t);  break; /* W64 */
+                }
+                break;
+            default:
+                mn = mx = agg_read_key_i64(kc, data, 0);
+                for (int64_t r = 1; r < nrows; r++) {
+                    int64_t v = agg_read_key_i64(kc, data, r);
+                    if (v < mn) mn = v;
+                    if (v > mx) mx = v;
+                }
         }
+        #undef DENSE_MINMAX
         if (mx < mn) return false;       /* no live values */
         out->mins[k]   = mn;
         out->ranges[k] = mx - mn + 1;
@@ -990,10 +1015,52 @@ static void agg_dense_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t
     uint32_t* cgid = ray_alloc_raw((size_t)n * sizeof(uint32_t));
     if (!cgid) { loc->oom = 1; return; }
 
-    for (int64_t r = start; r < end; r++) {
-        int64_t slot = agg_dense_slot(c, r);   /* provably in [0,total_slots) */
-        cgid[r - start] = (uint32_t)slot;
-        if (r < loc->first_row[slot]) loc->first_row[slot] = r;
+    /* Hoist the per-row key-type dispatch out of the hot loop.  agg_dense_slot
+     * calls agg_read_key_i64 — a switch(col->type) — on every row, and for SYM
+     * keys ray_read_sym adds a second per-row switch on the code width.  Both
+     * are loop-invariant.  For the common single-key case, branch ONCE on
+     * (type, width) and run a tight typed load loop the compiler can vectorize;
+     * this is the dominant cost of a low-card group-by (a 7-group count was
+     * ~70% here).  Multi-key keeps the generic composite path. */
+    if (c->n_keys == 1) {
+        const void* kd = c->key_data[0];
+        int64_t  kmin = c->dp->mins[0];
+        int64_t  kstride = c->dp->strides[0];
+        int64_t* fr = loc->first_row;
+        uint32_t* cg = cgid;
+        #define DENSE_SLOT1(LD)                                            \
+            for (int64_t r = start; r < end; r++) {                        \
+                int64_t slot = ((int64_t)(LD) - kmin) * kstride;           \
+                cg[r - start] = (uint32_t)slot;                            \
+                if (r < fr[slot]) fr[slot] = r;                            \
+            }
+        switch (c->key_cols[0]->type) {
+            case RAY_I64: case RAY_TIMESTAMP: DENSE_SLOT1(((const int64_t*)kd)[r]); break;
+            case RAY_I32: case RAY_DATE: case RAY_TIME: DENSE_SLOT1(((const int32_t*)kd)[r]); break;
+            case RAY_I16: DENSE_SLOT1(((const int16_t*)kd)[r]); break;
+            case RAY_U8: case RAY_BOOL: DENSE_SLOT1(((const uint8_t*)kd)[r]); break;
+            case RAY_SYM:
+                switch (c->key_cols[0]->attrs & RAY_SYM_W_MASK) {
+                    case RAY_SYM_W8:  DENSE_SLOT1(((const uint8_t*)kd)[r]);  break;
+                    case RAY_SYM_W16: DENSE_SLOT1(((const uint16_t*)kd)[r]); break;
+                    case RAY_SYM_W32: DENSE_SLOT1(((const uint32_t*)kd)[r]); break;
+                    default:          DENSE_SLOT1(((const int64_t*)kd)[r]);  break; /* W64 */
+                }
+                break;
+            default:
+                for (int64_t r = start; r < end; r++) {
+                    int64_t slot = agg_dense_slot(c, r);
+                    cg[r - start] = (uint32_t)slot;
+                    if (r < fr[slot]) fr[slot] = r;
+                }
+        }
+        #undef DENSE_SLOT1
+    } else {
+        for (int64_t r = start; r < end; r++) {
+            int64_t slot = agg_dense_slot(c, r);   /* provably in [0,total_slots) */
+            cgid[r - start] = (uint32_t)slot;
+            if (r < loc->first_row[slot]) loc->first_row[slot] = r;
+        }
     }
 
     for (uint8_t a = 0; a < c->n_aggs; a++) {
