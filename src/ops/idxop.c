@@ -172,7 +172,7 @@ static bool vec_all_distinct(const ray_t* v) {
     uint64_t mask = cap - 1;
     /* Transient scratch table, deliberately off-heap (freed before return);
      * it is never an owned ray_t, unlike the persistent hash-index table. */
-    int64_t* slot = (int64_t*)calloc((size_t)cap, sizeof(int64_t)); /* 0 = empty; store i+1 */
+    int64_t* slot = (int64_t*)ray_calloc_raw((size_t)((size_t)cap) * (sizeof(int64_t))); /* 0 = empty; store i+1 */
     if (!slot) return false;
     const uint8_t* base = (const uint8_t*)ray_data((ray_t*)v);
     bool ok = true;
@@ -187,7 +187,7 @@ static bool vec_all_distinct(const ray_t* v) {
             h = (h + 1) & mask;
         }
     }
-    free(slot);
+    ray_free_raw(slot);
     return ok;
 }
 
@@ -732,9 +732,9 @@ ray_t* ray_index_dict_compute(ray_t* v) {
 
     uint64_t cap = 32; while (cap < (uint64_t)n * 2) cap <<= 1;
     uint64_t mask = cap - 1;
-    int32_t* slot = (int32_t*)calloc((size_t)cap, sizeof(int32_t));   /* code+1 */
-    int32_t* focc = (int32_t*)malloc((size_t)n * sizeof(int32_t));    /* first-occ row */
-    if (!slot || !focc) { free(slot); free(focc); ray_release(codes); return ray_error("oom", NULL); }
+    int32_t* slot = (int32_t*)ray_calloc_raw((size_t)((size_t)cap) * (sizeof(int32_t)));   /* code+1 */
+    int32_t* focc = (int32_t*)ray_alloc_raw((size_t)n * sizeof(int32_t));    /* first-occ row */
+    if (!slot || !focc) { ray_free_raw(slot); ray_free_raw(focc); ray_release(codes); return ray_error("oom", NULL); }
 
     int64_t ndist = 0;
     for (int64_t i = 0; i < n; i++) {
@@ -751,13 +751,13 @@ ray_t* ray_index_dict_compute(ray_t* v) {
             s = (s + 1) & mask;
         }
     }
-    free(slot);
+    ray_free_raw(slot);
 
     ray_t* first_occ = ray_vec_new(RAY_I32, ndist > 0 ? ndist : 1);
-    if (!first_occ || RAY_IS_ERR(first_occ)) { free(focc); ray_release(codes); return ray_error("oom", NULL); }
+    if (!first_occ || RAY_IS_ERR(first_occ)) { ray_free_raw(focc); ray_release(codes); return ray_error("oom", NULL); }
     first_occ->len = ndist;
     memcpy(ray_data(first_occ), focc, (size_t)ndist * sizeof(int32_t));
-    free(focc);
+    ray_free_raw(focc);
 
     ray_t* idx = ray_index_alloc(RAY_IDX_DICT, v->type, n);
     if (!idx || RAY_IS_ERR(idx)) { ray_release(codes); ray_release(first_occ); return idx; }

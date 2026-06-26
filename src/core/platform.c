@@ -448,7 +448,7 @@ void* ray_vm_alloc(size_t size) {
 
 void ray_vm_free(void* ptr, size_t size) {
     if (!ptr) return;
-    if (munmap(ptr, size) != 0) free(ptr);
+    if (munmap(ptr, size) != 0) ray_free_raw(ptr);
 }
 
 void* ray_vm_map_file(const char* path, size_t* out_size) {

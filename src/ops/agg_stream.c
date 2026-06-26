@@ -407,7 +407,7 @@ typedef struct { double* buf; int64_t len; int64_t cap; } median_state;
 static void median_init(void* s){ median_state* st=s; st->buf=NULL; st->len=0; st->cap=0; }
 static inline void median_push(median_state* st, double v){
     if (st->len == st->cap){ int64_t nc = st->cap ? st->cap*2 : 8;
-        double* nb = realloc(st->buf, (size_t)nc*sizeof(double)); st->buf=nb; st->cap=nc; }
+        double* nb = ray_realloc_raw(st->buf, (size_t)nc*sizeof(double)); st->buf=nb; st->cap=nc; }
     st->buf[st->len++] = v;
 }
 static void median_update_i64(void* base, size_t stride, const uint32_t* gids,
@@ -428,7 +428,7 @@ static void median_merge(void* dd, const void* ss, acc_arena_t* a){ (void)a;
 static ray_t* median_final(const void* s, acc_arena_t* a, int64_t param){ (void)a; (void)param; median_state* st=(median_state*)s;
     if (st->len==0) return ray_typed_null(-RAY_F64);
     return ray_f64(ray_median_dbl_inplace(st->buf, st->len)); }
-static void median_destroy(void* s){ median_state* st=s; free(st->buf); st->buf=NULL; st->len=st->cap=0; }
+static void median_destroy(void* s){ median_state* st=s; ray_free_raw(st->buf); st->buf=NULL; st->len=st->cap=0; }
 static const agg_vtable_t MEDIAN_I64 = { .state_size=sizeof(median_state), .kind=ACC_BUFFERED, .out_type=RAY_F64,
     .init=median_init, .update_batch=median_update_i64, .merge=median_merge, .finalize=median_final, .destroy=median_destroy };
 static const agg_vtable_t MEDIAN_F64 = { .state_size=sizeof(median_state), .kind=ACC_BUFFERED, .out_type=RAY_F64,
@@ -443,7 +443,7 @@ typedef struct { int64_t* buf; int64_t len; int64_t cap; } topk_i64_state;
 static void topk_i64_init(void* s){ topk_i64_state* st=s; st->buf=NULL; st->len=0; st->cap=0; }
 static inline void topk_i64_push(topk_i64_state* st, int64_t v){
     if (st->len==st->cap){ int64_t nc=st->cap?st->cap*2:8;
-        int64_t* nb=realloc(st->buf,(size_t)nc*sizeof(int64_t)); st->buf=nb; st->cap=nc; }
+        int64_t* nb=ray_realloc_raw(st->buf,(size_t)nc*sizeof(int64_t)); st->buf=nb; st->cap=nc; }
     st->buf[st->len++]=v; }
 static void topk_i64_update(void* base,size_t stride,const uint32_t* gids,const void* vals,
                             const ray_valid_t* valid,int64_t n,acc_arena_t* a){ (void)a;
@@ -453,7 +453,7 @@ static void topk_i64_update(void* base,size_t stride,const uint32_t* gids,const 
 static void topk_i64_merge(void* dd,const void* ss,acc_arena_t* a){ (void)a;
     topk_i64_state* d=dd; const topk_i64_state* s=ss;
     for(int64_t i=0;i<s->len;i++) topk_i64_push(d,s->buf[i]); }
-static void topk_i64_destroy(void* s){ topk_i64_state* st=s; free(st->buf); st->buf=NULL; st->len=st->cap=0; }
+static void topk_i64_destroy(void* s){ topk_i64_state* st=s; ray_free_raw(st->buf); st->buf=NULL; st->len=st->cap=0; }
 static ray_t* topk_i64_make(const topk_i64_state* st, int64_t k, uint8_t desc){
     if (st->len==0) return ray_vec_new(RAY_I64, 0);  /* empty group → 0-len vec */
     ray_t* v=ray_vec_new(RAY_I64, st->len); v->len=st->len;
@@ -474,7 +474,7 @@ typedef struct { double* buf; int64_t len; int64_t cap; } topk_f64_state;
 static void topk_f64_init(void* s){ topk_f64_state* st=s; st->buf=NULL; st->len=0; st->cap=0; }
 static inline void topk_f64_push(topk_f64_state* st, double v){
     if (st->len==st->cap){ int64_t nc=st->cap?st->cap*2:8;
-        double* nb=realloc(st->buf,(size_t)nc*sizeof(double)); st->buf=nb; st->cap=nc; }
+        double* nb=ray_realloc_raw(st->buf,(size_t)nc*sizeof(double)); st->buf=nb; st->cap=nc; }
     st->buf[st->len++]=v; }
 static void topk_f64_update(void* base,size_t stride,const uint32_t* gids,const void* vals,
                             const ray_valid_t* valid,int64_t n,acc_arena_t* a){ (void)a;
@@ -484,7 +484,7 @@ static void topk_f64_update(void* base,size_t stride,const uint32_t* gids,const 
 static void topk_f64_merge(void* dd,const void* ss,acc_arena_t* a){ (void)a;
     topk_f64_state* d=dd; const topk_f64_state* s=ss;
     for(int64_t i=0;i<s->len;i++) topk_f64_push(d,s->buf[i]); }
-static void topk_f64_destroy(void* s){ topk_f64_state* st=s; free(st->buf); st->buf=NULL; st->len=st->cap=0; }
+static void topk_f64_destroy(void* s){ topk_f64_state* st=s; ray_free_raw(st->buf); st->buf=NULL; st->len=st->cap=0; }
 static ray_t* topk_f64_make(const topk_f64_state* st, int64_t k, uint8_t desc){
     if (st->len==0) return ray_vec_new(RAY_F64, 0);
     ray_t* v=ray_vec_new(RAY_F64, st->len); v->len=st->len;
