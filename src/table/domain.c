@@ -710,16 +710,17 @@ int64_t ray_sym_domain_find(ray_sym_domain_t* dom, const char* str, size_t len) 
     if (atomic_load_explicit(&dom->count, memory_order_acquire) == 0)
         return -1;
 
-    /* Sym ID 0 is permanently reserved for the empty string (sym.c reserves it
-     * at init), and a FILE domain's positions are written in id order, so
-     * position 0 is ALWAYS "".  Short-circuit the empty-string lookup: resolve
-     * it in O(1) instead of triggering the full reverse-index build, which
-     * materialises + hashes + interns the entire vocabulary just to locate "".
-     * This is what `<> ''` / `= ''` filters on SYM columns hit. */
-    if (len == 0)
-        return 0;
-
     dom_lock();
+    /* Sym ID 0 is reserved for the empty string (sym.c reserves it at init) and
+     * a FILE domain's positions are written in id order, so position 0 is "".
+     * VERIFY it — materialising ONLY atom 0, no full index build — rather than
+     * assume, then short-circuit `<> ''` / `= ''` in O(1) instead of building the
+     * whole reverse index just to locate "".  Falls through to the normal find if
+     * a symfile was ever written some other way (then "" is found by probe). */
+    if (len == 0) {
+        ray_t* a0 = dom_atom_at_locked(dom, 0);
+        if (a0 && ray_str_len(a0) == 0) { dom_unlock(); return 0; }
+    }
     if (!dom->buckets && !dom_build_index_locked(dom, 0)) {
         dom_unlock();
         return -1;
