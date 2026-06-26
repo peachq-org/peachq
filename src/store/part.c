@@ -148,12 +148,12 @@ static ray_err_t collect_part_dirs(const char* db_root, char*** out_dirs,
 
         if (part_count >= part_cap) {
             part_cap = part_cap == 0 ? 16 : part_cap * 2;
-            char** tmp = (char**)realloc(part_dirs, (size_t)part_cap * sizeof(char*));
+            char** tmp = (char**)ray_realloc_raw(part_dirs, (size_t)part_cap * sizeof(char*));
             if (!tmp) { err = RAY_ERR_OOM; break; }
             part_dirs = tmp;
         }
         size_t len = strlen(ent->d_name);
-        char* dup = (char*)malloc(len + 1);
+        char* dup = (char*)ray_alloc_raw(len + 1);
         if (!dup) { err = RAY_ERR_OOM; break; }
         memcpy(dup, ent->d_name, len + 1);
         part_dirs[part_count++] = dup;
@@ -161,8 +161,8 @@ static ray_err_t collect_part_dirs(const char* db_root, char*** out_dirs,
     closedir(d);
 
     if (err != RAY_OK) {
-        for (int64_t i = 0; i < part_count; i++) free(part_dirs[i]);
-        free(part_dirs);
+        for (int64_t i = 0; i < part_count; i++) ray_free_raw(part_dirs[i]);
+        ray_free_raw(part_dirs);
         return err;
     }
 
@@ -171,7 +171,7 @@ static ray_err_t collect_part_dirs(const char* db_root, char*** out_dirs,
          * EMPTY (or non-parted) db, not an I/O failure.  Report success
          * with a zero count and let each caller decide what "empty" means
          * (tables/fill → empty result; get → error, nothing to read). */
-        free(part_dirs);
+        ray_free_raw(part_dirs);
         *out_dirs = NULL;
         *out_count = 0;
         return RAY_OK;
@@ -453,10 +453,10 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
     /* Release partition sub-tables (segment vectors survive via retain) */
     for (int64_t p = 0; p < part_count; p++) {
         if (part_tables[p]) ray_release(part_tables[p]);
-        free(part_dirs[p]);
+        ray_free_raw(part_dirs[p]);
     }
     ray_sys_free(part_tables);
-    free(part_dirs);
+    ray_free_raw(part_dirs);
     if (dom) ray_sym_domain_release(dom); /* columns hold their own refs */
 
     return result;
@@ -472,8 +472,8 @@ fail_tables:
 
 fail_dirs:
     for (int64_t p = 0; p < part_count; p++)
-        free(part_dirs[p]);
-    free(part_dirs);
+        ray_free_raw(part_dirs[p]);
+    ray_free_raw(part_dirs);
     if (dom) ray_sym_domain_release(dom);
 
     return part_err ? part_err : ray_error("io", NULL);
@@ -505,12 +505,12 @@ static ray_err_t collect_table_dirs(const char* pdir, char*** out_names,
         if (stat(dpath, &st) != 0 || !S_ISREG(st.st_mode)) continue; /* not a table */
         if (count >= cap) {
             int64_t ncap = cap == 0 ? 16 : cap * 2;
-            char** tmp = (char**)realloc(names, (size_t)ncap * sizeof(char*));
+            char** tmp = (char**)ray_realloc_raw(names, (size_t)ncap * sizeof(char*));
             if (!tmp) { oom = RAY_ERR_OOM; break; }
             names = tmp; cap = ncap;
         }
         size_t len = strlen(ent->d_name);
-        char* dup = (char*)malloc(len + 1);
+        char* dup = (char*)ray_alloc_raw(len + 1);
         if (!dup) { oom = RAY_ERR_OOM; break; }
         memcpy(dup, ent->d_name, len + 1);
         names[count++] = dup;
@@ -518,8 +518,8 @@ static ray_err_t collect_table_dirs(const char* pdir, char*** out_names,
     closedir(d);
 
     if (oom != RAY_OK) {
-        for (int64_t i = 0; i < count; i++) free(names[i]);
-        free(names);
+        for (int64_t i = 0; i < count; i++) ray_free_raw(names[i]);
+        ray_free_raw(names);
         return RAY_ERR_OOM;
     }
 
@@ -586,7 +586,7 @@ ray_t* ray_parted_tables(const char* db_root) {
         /* Existing-but-empty (or non-parted) root → no tables.  Return an
          * empty SYM vector rather than an error: a freshly-created db root
          * has zero tables, and that's a friendlier answer than failing. */
-        free(part_dirs);
+        ray_free_raw(part_dirs);
         ray_t* empty = ray_vec_new(RAY_SYM, 0);
         return empty ? empty : ray_error("oom", NULL);
     }
@@ -594,8 +594,8 @@ ray_t* ray_parted_tables(const char* db_root) {
     /* Only the last (most recent) partition is needed; release the rest. */
     char pdir[1024];
     int pn = snprintf(pdir, sizeof(pdir), "%s/%s", db_root, part_dirs[part_count - 1]);
-    for (int64_t p = 0; p < part_count; p++) free(part_dirs[p]);
-    free(part_dirs);
+    for (int64_t p = 0; p < part_count; p++) ray_free_raw(part_dirs[p]);
+    ray_free_raw(part_dirs);
     if (pn < 0 || (size_t)pn >= sizeof(pdir))
         return ray_error("range", "parted %s: partition path too long", db_root);
 
@@ -608,17 +608,17 @@ ray_t* ray_parted_tables(const char* db_root) {
 
     ray_t* result = ray_vec_new(RAY_SYM, count);
     if (!result || RAY_IS_ERR(result)) {
-        for (int64_t i = 0; i < count; i++) free(names[i]);
-        free(names);
+        for (int64_t i = 0; i < count; i++) ray_free_raw(names[i]);
+        ray_free_raw(names);
         return result ? result : ray_error("oom", NULL);
     }
     result->len = count;
     int64_t* out = (int64_t*)ray_data(result);
     for (int64_t i = 0; i < count; i++) {
         out[i] = ray_sym_intern(names[i], strlen(names[i]));
-        free(names[i]);
+        ray_free_raw(names[i]);
     }
-    free(names);
+    ray_free_raw(names);
     return result;
 }
 
@@ -647,7 +647,7 @@ ray_t* ray_parted_fill(const char* db_root) {
         /* Empty (or non-parted) root → nothing to fill.  Matches the
          * "empty vector when nothing needed fixing" contract, so a fill on
          * a fresh db root is a friendly no-op rather than an error. */
-        free(part_dirs);
+        ray_free_raw(part_dirs);
         ray_t* empty = ray_vec_new(RAY_SYM, 0);
         return empty ? empty : ray_error("oom", NULL);
     }
@@ -665,7 +665,7 @@ ray_t* ray_parted_fill(const char* db_root) {
     /* Union of table names across all partitions. */
     char** all = NULL;
     int64_t all_count = 0, all_cap = 0;
-    uint8_t* fixed = (uint8_t*)calloc((size_t)part_count, 1);
+    uint8_t* fixed = (uint8_t*)ray_calloc_raw((size_t)((size_t)part_count) * (1));
     ray_err_t err = fixed ? RAY_OK : RAY_ERR_OOM;
 
     for (int64_t p = 0; p < part_count && err == RAY_OK; p++) {
@@ -680,16 +680,16 @@ ray_t* ray_parted_fill(const char* db_root) {
             bool seen = false;
             for (int64_t k = 0; k < all_count; k++)
                 if (strcmp(all[k], names[i]) == 0) { seen = true; break; }
-            if (seen) { free(names[i]); continue; }
+            if (seen) { ray_free_raw(names[i]); continue; }
             if (all_count >= all_cap) {
                 int64_t nc = all_cap == 0 ? 16 : all_cap * 2;
-                char** tmp = (char**)realloc(all, (size_t)nc * sizeof(char*));
-                if (!tmp) { err = RAY_ERR_OOM; free(names[i]); continue; }
+                char** tmp = (char**)ray_realloc_raw(all, (size_t)nc * sizeof(char*));
+                if (!tmp) { err = RAY_ERR_OOM; ray_free_raw(names[i]); continue; }
                 all = tmp; all_cap = nc;
             }
             all[all_count++] = names[i];   /* transfer ownership */
         }
-        free(names);
+        ray_free_raw(names);
     }
 
     /* For each table: template = last partition with it; fill the rest. */
@@ -752,11 +752,11 @@ ray_t* ray_parted_fill(const char* db_root) {
         }
     }
 
-    for (int64_t i = 0; i < all_count; i++) free(all[i]);
-    free(all);
-    for (int64_t p = 0; p < part_count; p++) free(part_dirs[p]);
-    free(part_dirs);
-    free(fixed);
+    for (int64_t i = 0; i < all_count; i++) ray_free_raw(all[i]);
+    ray_free_raw(all);
+    for (int64_t p = 0; p < part_count; p++) ray_free_raw(part_dirs[p]);
+    ray_free_raw(part_dirs);
+    ray_free_raw(fixed);
 
     if (err != RAY_OK) {
         if (result && !RAY_IS_ERR(result)) ray_release(result);
