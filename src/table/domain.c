@@ -59,6 +59,7 @@
 #include "domain.h"
 #include "core/platform.h"  /* ray_vm_map_file / ray_vm_unmap_file */
 #include "mem/heap.h"
+#include "mem/sys.h"   /* domain buffers are process-global → mmap-backed, not buddy */
 #include "mem/arena.h"   /* ray_arena_t / ray_arena_str — domain atom storage */
 #include "store/fileio.h"   /* flock + tmp/rename protocol for flush */
 #include "ops/hash.h"       /* ray_hash_bytes (same hash family as g_sym) */
@@ -69,6 +70,10 @@
 #include <stdio.h>
 #include <libgen.h>
 #include <sys/stat.h>
+#include <limits.h>
+#ifndef PATH_MAX
+#  define PATH_MAX 4096
+#endif
 
 /* Same on-disk format constant as src/table/sym.c (private there). */
 #define DOMAIN_STRL_MAGIC 0x4C525453U /* "STRL" */
@@ -194,36 +199,44 @@ static inline void dom_unlock(void) {
  * for to-be-created symfiles, realpath of the parent + "/" + basename
  * (the parent must exist).  malloc'd. */
 static char* dom_resolve_path(const char* path) {
-    char* rpath = realpath(path, NULL);
-    if (rpath) return rpath;
+    /* Fixed-buffer realpath (POSIX form) + ray_alloc_raw for the result — avoids
+     * realpath(NULL)/strdup's libc-malloc'd buffers, so the returned key is
+     * uniformly buddy-allocated and the caller releases it with ray_free_raw. */
+    char resolved[PATH_MAX];
+    if (realpath(path, resolved)) {
+        size_t n = strlen(resolved);
+        char* out = (char*)ray_sys_alloc(n + 1);
+        if (out) memcpy(out, resolved, n + 1);
+        return out;
+    }
 
     char tmp[1024];
     size_t plen = strlen(path);
     if (plen == 0 || plen >= sizeof(tmp)) return NULL;
     memcpy(tmp, path, plen + 1);
     char* base = basename(tmp);
-    char* bdup = strdup(base);
-    if (!bdup) return NULL;
+    char bbuf[1024];
+    size_t blen = strlen(base);
+    if (blen >= sizeof(bbuf)) return NULL;
+    memcpy(bbuf, base, blen + 1);
     /* basename may have modified tmp; recompute dirname on a fresh copy */
     memcpy(tmp, path, plen + 1);
     char* dir = dirname(tmp);
-    char* rdir = realpath(dir, NULL);
-    if (!rdir) { free(bdup); return NULL; }
-    size_t dlen = strlen(rdir), blen = strlen(bdup);
-    char* out = (char*)malloc(dlen + 1 + blen + 1);
-    if (!out) { free(rdir); free(bdup); return NULL; }
+    char rdir[PATH_MAX];
+    if (!realpath(dir, rdir)) return NULL;
+    size_t dlen = strlen(rdir);
+    char* out = (char*)ray_sys_alloc(dlen + 1 + blen + 1);
+    if (!out) return NULL;
     memcpy(out, rdir, dlen);
     out[dlen] = '/';
-    memcpy(out + dlen + 1, bdup, blen + 1);
-    free(rdir);
-    free(bdup);
+    memcpy(out + dlen + 1, bbuf, blen + 1);
     return out;
 }
 
 /* Retire an allocation that lock-free readers may still hold. */
 static bool dom_retire(ray_sym_domain_t* d, void* p) {
     if (!p) return true;
-    dom_retired_t* r = (dom_retired_t*)malloc(sizeof(*r));
+    dom_retired_t* r = (dom_retired_t*)ray_sys_alloc(sizeof(*r));
     if (!r) return false;
     r->ptr = p;
     r->next = d->retired;
@@ -237,20 +250,20 @@ static void dom_destroy(ray_sym_domain_t* d) {
     /* Atoms are RAY_ATTR_ARENA — never refcounted, never individually freed.
      * The arena bulk-frees them; we only free the pointer ARRAY here. */
     ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
-    free(atoms);
+    ray_sys_free(atoms);
     if (d->arena) ray_arena_destroy(d->arena);
-    free(d->offsets);
-    free(atomic_load_explicit(&d->runtime_lut, memory_order_relaxed));
+    ray_sys_free(d->offsets);
+    ray_sys_free(atomic_load_explicit(&d->runtime_lut, memory_order_relaxed));
     for (dom_retired_t* r = d->retired; r;) {
         dom_retired_t* nxt = r->next;
-        free(r->ptr);
-        free(r);
+        ray_sys_free(r->ptr);
+        ray_sys_free(r);
         r = nxt;
     }
-    free(d->buckets);
+    ray_sys_free(d->buckets);
     if (d->map) ray_vm_unmap_file(d->map, d->map_size);
-    free(d->path);
-    free(d);
+    ray_sys_free(d->path);
+    ray_sys_free(d);
 }
 
 /* Index a mapped STRL image in one pass WITHOUT materializing any atom:
@@ -277,10 +290,10 @@ static bool dom_parse_strl_atoms(const void* map, size_t map_size,
     ray_t** atoms = NULL;
     size_t* offsets = NULL;
     if (count > 0) {
-        atoms = (ray_t**)calloc((size_t)count, sizeof(ray_t*));
+        atoms = (ray_t**)ray_sys_alloc((size_t)((size_t)count) * (sizeof(ray_t*)));
         if (!atoms) return false;
-        offsets = (size_t*)malloc((size_t)count * sizeof(size_t));
-        if (!offsets) { free(atoms); return false; }
+        offsets = (size_t*)ray_sys_alloc((size_t)count * sizeof(size_t));
+        if (!offsets) { ray_sys_free(atoms); return false; }
     }
 
     size_t off = 12;
@@ -302,8 +315,8 @@ static bool dom_parse_strl_atoms(const void* map, size_t map_size,
     return true;
 
 fail:
-    free(atoms);
-    free(offsets);
+    ray_sys_free(atoms);
+    ray_sys_free(offsets);
     return false;
 }
 
@@ -391,20 +404,20 @@ static bool dom_extend_from_file_locked(ray_sym_domain_t* d, size_t st_size) {
          * atoms hold their own copy, so swapping the map is safe), new file
          * slots start NULL (lazy). */
         ray_t** atoms = atomic_load_explicit(&d->atoms, memory_order_relaxed);
-        ray_t** narr = (ray_t**)malloc((size_t)fresh_count * sizeof(ray_t*));
+        ray_t** narr = (ray_t**)ray_sys_alloc((size_t)fresh_count * sizeof(ray_t*));
         if (!narr) {
             ok = false;
         } else if (!dom_retire(d, atoms)) {
-            free(narr);
+            ray_sys_free(narr);
             ok = false;
         } else {
             if (count > 0) memcpy(narr, atoms, (size_t)count * sizeof(ray_t*));
             for (int64_t i = count; i < fresh_count; i++) narr[i] = NULL;
-            free(fresh);  /* fresh slot array unused — narr carries the prefix */
+            ray_sys_free(fresh);  /* fresh slot array unused — narr carries the prefix */
 
             /* Swap in the new offsets + map; the old map's bytes are no
              * longer referenced (prefix atoms are arena-copied). */
-            free(d->offsets);
+            ray_sys_free(d->offsets);
             d->offsets = fresh_offsets;
             void* old_map = d->map;
             size_t old_map_size = d->map_size;
@@ -425,7 +438,7 @@ static bool dom_extend_from_file_locked(ray_sym_domain_t* d, size_t st_size) {
              * the grown count (OOB reads for lock-free consumers) — the
              * same corner dom_append_locked hits; mirror its loud abort
              * (the count is already published, there is no clean undo). */
-            if (d->buckets) { free(d->buckets); d->buckets = NULL; d->bucket_mask = 0; }
+            if (d->buckets) { ray_sys_free(d->buckets); d->buckets = NULL; d->bucket_mask = 0; }
             int64_t* lut = atomic_load_explicit(&d->runtime_lut, memory_order_relaxed);
             if (lut) {
                 if (!dom_retire(d, lut)) {
@@ -444,8 +457,8 @@ static bool dom_extend_from_file_locked(ray_sym_domain_t* d, size_t st_size) {
     /* Failure, or nothing actually new (size-only change): drop the fresh
      * parse and the new mapping; keep the existing image. */
     if (ok && fresh_count == count) d->disk_size = st_size;
-    free(fresh);
-    free(fresh_offsets);
+    ray_sys_free(fresh);
+    ray_sys_free(fresh_offsets);
     ray_vm_unmap_file(map, map_size);
     return ok;
 }
@@ -458,7 +471,7 @@ static ray_sym_domain_t* dom_open_impl(const char* path, bool create) {
 
     struct stat st;
     bool exists = (stat(rpath, &st) == 0);
-    if (!exists && !create) { free(rpath); return NULL; }
+    if (!exists && !create) { ray_sys_free(rpath); return NULL; }
 
     dom_lock();
     for (ray_sym_domain_t* d = g_domains; d; d = d->next) {
@@ -469,27 +482,27 @@ static ray_sym_domain_t* dom_open_impl(const char* path, bool create) {
             if (cur_size != d->disk_size &&
                 !dom_extend_from_file_locked(d, cur_size)) {
                 dom_unlock();
-                free(rpath);
+                ray_sys_free(rpath);
                 return NULL;
             }
             d->rc++;
             dom_unlock();
-            free(rpath);
+            ray_sys_free(rpath);
             return d;
         }
     }
     dom_unlock();
 
     /* Not cached: build outside the lock (mapping + parse can be slow). */
-    ray_sym_domain_t* d = (ray_sym_domain_t*)calloc(1, sizeof(*d));
-    if (!d) { free(rpath); return NULL; }
+    ray_sym_domain_t* d = (ray_sym_domain_t*)ray_sys_alloc((size_t)(1) * (sizeof(*d)));
+    if (!d) { ray_sys_free(rpath); return NULL; }
     d->kind = DOM_FILE;
     d->rc = 1;
     d->path = rpath;
     /* String atoms (lazy file slots + runtime-appended interns) live here,
      * off the per-thread buddy heap.  64 KB chunks. */
     d->arena = ray_arena_new(64 * 1024);
-    if (!d->arena) { free(d); free(rpath); return NULL; }
+    if (!d->arena) { ray_sys_free(d); ray_sys_free(rpath); return NULL; }
 
     if (exists) {
         d->map = ray_vm_map_file(rpath, &d->map_size);
@@ -617,7 +630,7 @@ const int64_t* ray_sym_domain_runtime_lut(ray_sym_domain_t* dom) {
     lut = atomic_load_explicit(&dom->runtime_lut, memory_order_relaxed);
     if (!lut) {
         int64_t count = atomic_load_explicit(&dom->count, memory_order_relaxed);
-        lut = (int64_t*)malloc((size_t)count * sizeof(int64_t));
+        lut = (int64_t*)ray_sys_alloc((size_t)count * sizeof(int64_t));
         if (!lut) { dom_unlock(); return NULL; }
         /* THE sanctioned interning of a file vocabulary into the global
          * table: one sequential pass over the VOCABULARY (never the
@@ -626,13 +639,13 @@ const int64_t* ray_sym_domain_runtime_lut(ray_sym_domain_t* dom) {
          * inside a worker violates sym.c's frozen-table rule. */
         for (int64_t i = 0; i < count; i++) {
             ray_t* a = dom_atom_at_locked(dom, i);
-            if (!a) { free(lut); dom_unlock(); return NULL; }
+            if (!a) { ray_sys_free(lut); dom_unlock(); return NULL; }
             lut[i] = ray_sym_intern(ray_str_ptr(a), ray_str_len(a));
             if (lut[i] < 0) {
                 /* 7a-review hardening: never publish a LUT carrying -1
                  * intern failures — a silent -1 makes cross-domain keys
                  * spuriously equal.  Loud NULL instead. */
-                free(lut);
+                ray_sys_free(lut);
                 dom_unlock();
                 return NULL;
             }
@@ -653,19 +666,19 @@ static bool dom_build_index_locked(ray_sym_domain_t* d, int64_t extra) {
         if (cap > (UINT64_MAX >> 1)) return false;
         cap <<= 1;
     }
-    uint64_t* buckets = (uint64_t*)calloc((size_t)cap, sizeof(uint64_t));
+    uint64_t* buckets = (uint64_t*)ray_sys_alloc((size_t)((size_t)cap) * (sizeof(uint64_t)));
     if (!buckets) return false;
 
     uint64_t mask = cap - 1;
     for (int64_t i = 0; i < count; i++) {
         ray_t* a = dom_atom_at_locked(d, i);
-        if (!a) { free(buckets); return false; }
+        if (!a) { ray_sys_free(buckets); return false; }
         uint32_t h = (uint32_t)ray_hash_bytes(ray_str_ptr(a), ray_str_len(a));
         uint64_t slot = h & mask;
         while (buckets[slot] != 0) slot = (slot + 1) & mask;
         buckets[slot] = ((uint64_t)h << 32) | ((uint64_t)(uint32_t)i + 1);
     }
-    free(d->buckets);
+    ray_sys_free(d->buckets);
     d->buckets = buckets;
     d->bucket_mask = mask;
     return true;
@@ -721,11 +734,11 @@ static int64_t dom_append_locked(ray_sym_domain_t* d, uint32_t h,
      * lock-free readers may hold the old pointer. */
     if (count >= d->atoms_cap) {
         int64_t ncap = d->atoms_cap < 8 ? 8 : d->atoms_cap * 2;
-        ray_t** narr = (ray_t**)malloc((size_t)ncap * sizeof(ray_t*));
+        ray_t** narr = (ray_t**)ray_sys_alloc((size_t)ncap * sizeof(ray_t*));
         if (!narr) return -1;
         ray_t** old = atomic_load_explicit(&d->atoms, memory_order_relaxed);
         if (count > 0) memcpy(narr, old, (size_t)count * sizeof(ray_t*));
-        if (!dom_retire(d, old)) { free(narr); return -1; }
+        if (!dom_retire(d, old)) { ray_sys_free(narr); return -1; }
         atomic_store_explicit(&d->atoms, narr, memory_order_release);
         d->atoms_cap = ncap;
     }

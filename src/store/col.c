@@ -629,11 +629,11 @@ ray_err_t ray_col_append_index(const char* path, const void* ix_v,
     if (pad > 0 && fwrite(zeros, 1, (size_t)pad, f) != (size_t)pad) { fclose(f); return RAY_ERR_IO; }
 
     int64_t rsize = ray_index_inline_size(ix);
-    uint8_t* rbuf = (uint8_t*)calloc(1, (size_t)rsize);
+    uint8_t* rbuf = (uint8_t*)ray_calloc_raw((size_t)(1) * ((size_t)rsize));
     if (!rbuf) { fclose(f); return RAY_ERR_OOM; }
     ray_index_inline_write(rbuf, ix);
     size_t rw = fwrite(rbuf, 1, (size_t)rsize, f);
-    free(rbuf);
+    ray_free_raw(rbuf);
     if (rw != (size_t)rsize) { fclose(f); return RAY_ERR_IO; }
 
     /* Stamp the marker into aux[0..3] (file offset 0). */
@@ -709,13 +709,13 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
         uint8_t wesz = (uint8_t)(1u << w);
         if (vec->len > 0 && (uint64_t)vec->len > SIZE_MAX / wesz)
             return RAY_ERR_IO;
-        sym_xlate = malloc(vec->len > 0 ? (size_t)vec->len * wesz : 1);
+        sym_xlate = ray_alloc_raw(vec->len > 0 ? (size_t)vec->len * wesz : 1);
         if (!sym_xlate) return RAY_ERR_OOM;
         const void* src = ray_data(vec); /* slice-safe */
         for (int64_t i = 0; i < vec->len; i++) {
             int64_t pos = ray_read_sym(src, i, RAY_SYM, vec->attrs);
             if (pos < 0 || pos >= dcount) {
-                free(sym_xlate);
+                ray_free_raw(sym_xlate);
                 return RAY_ERR_CORRUPT;
             }
             ray_write_sym(sym_xlate, i, (uint64_t)lut[pos], RAY_SYM, w);
@@ -726,7 +726,7 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
 
     {
         FILE* f = fopen(tmp_path, "wb");
-        if (!f) { free(sym_xlate); return RAY_ERR_IO; }
+        if (!f) { ray_free_raw(sym_xlate); return RAY_ERR_IO; }
 
         /* Write a clean header (mmod=0, rc=0) */
         ray_t header;
@@ -791,18 +791,18 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
         }
 
         size_t written = fwrite(&header, 1, 32, f);
-        if (written != 32) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_IO; }
+        if (written != 32) { fclose(f); remove(tmp_path); ray_free_raw(sym_xlate); return RAY_ERR_IO; }
 
         /* Write data */
-        if (vec->len < 0) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_CORRUPT; }
+        if (vec->len < 0) { fclose(f); remove(tmp_path); ray_free_raw(sym_xlate); return RAY_ERR_CORRUPT; }
         uint8_t esz = ray_sym_elem_size(vec->type,
                                         sym_xlate ? sym_xlate_attrs : vec->attrs);
-        if (esz == 0 && vec->len > 0) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_TYPE; }
+        if (esz == 0 && vec->len > 0) { fclose(f); remove(tmp_path); ray_free_raw(sym_xlate); return RAY_ERR_TYPE; }
         /* Overflow check: ensure len*esz fits in size_t with 32-byte header room */
         if ((uint64_t)vec->len > (SIZE_MAX - 32) / (esz ? esz : 1)) {
             fclose(f);
             remove(tmp_path);
-            free(sym_xlate);
+            ray_free_raw(sym_xlate);
             return RAY_ERR_IO;
         }
         size_t data_size = (size_t)vec->len * esz;
@@ -826,9 +826,9 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
 
         if (data_size > 0) {
             written = fwrite(data, 1, data_size, f);
-            if (written != data_size) { fclose(f); remove(tmp_path); free(sym_xlate); return RAY_ERR_IO; }
+            if (written != data_size) { fclose(f); remove(tmp_path); ray_free_raw(sym_xlate); return RAY_ERR_IO; }
         }
-        free(sym_xlate);
+        ray_free_raw(sym_xlate);
         sym_xlate = NULL;
 
         if (vec->type == RAY_STR) {
@@ -872,11 +872,11 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
             }
             ray_index_t* ix = ray_index_payload(vec->index);
             int64_t rsize = ray_index_inline_size(ix);
-            uint8_t* rbuf = (uint8_t*)calloc(1, (size_t)rsize);
+            uint8_t* rbuf = (uint8_t*)ray_calloc_raw((size_t)(1) * ((size_t)rsize));
             if (!rbuf) { fclose(f); remove(tmp_path); return RAY_ERR_OOM; }
             ray_index_inline_write(rbuf, ix);
             size_t rw = fwrite(rbuf, 1, (size_t)rsize, f);
-            free(rbuf);
+            ray_free_raw(rbuf);
             if (rw != (size_t)rsize) { fclose(f); remove(tmp_path); return RAY_ERR_IO; }
         }
 
