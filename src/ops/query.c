@@ -31,6 +31,7 @@
 #include "ops/ops.h"
 #include "ops/internal.h"
 #include "ops/hash.h"
+#include "ops/agg_engine.h"   /* agg_select_distinct — dict-linked pure-distinct path */
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
 #include "ops/fused_topk.h"
@@ -5369,6 +5370,49 @@ by_dict_done:
                         ray_release(tbl);
                         return ray_error("domain", "group key column not found");
                     }
+                }
+
+                /* Pure multi-key DISTINCT (only from/where/by — no aggregates,
+                 * no take/sort) over int/SYM keys: route to the dict-linked agg
+                 * path.  It groups on each column's RAW positions (no global
+                 * interning of the SYM vocabulary) and emits columns that adopt
+                 * the source domain — the column ships with its dict.  The
+                 * legacy composite path below would box every cell per-row into
+                 * a runtime-domain atom, interning the whole vocabulary. */
+                bool distinct_only = true;
+                for (int64_t i = 0; i + 1 < dict_n && distinct_only; i += 2) {
+                    int64_t kid = dict_elems[i]->i64;
+                    if (kid != from_id && kid != where_id && kid != by_id)
+                        distinct_only = false;
+                }
+                /* keys must be int/SYM (agg_group_keys reads them as int64) */
+                for (int64_t k = 0; k < nk && distinct_only; k++) {
+                    switch (key_cols[k]->type) {
+                        case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+                        case RAY_BOOL: case RAY_DATE: case RAY_TIME:
+                        case RAY_TIMESTAMP: case RAY_SYM: break;
+                        default: distinct_only = false; break;
+                    }
+                }
+                /* every output column is gathered fixed-width (agg_gather_key_col);
+                 * STR/LIST/nested columns fall back to the legacy path. */
+                int64_t dchk_nc = ray_table_ncols(eval_tbl);
+                for (int64_t c = 0; c < dchk_nc && distinct_only; c++) {
+                    ray_t* cc = ray_table_get_col_idx(eval_tbl, c);
+                    if (!cc) { distinct_only = false; break; }
+                    switch (cc->type) {
+                        case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+                        case RAY_BOOL: case RAY_DATE: case RAY_TIME:
+                        case RAY_TIMESTAMP: case RAY_SYM: case RAY_F64:
+                        case RAY_GUID: break;
+                        default: distinct_only = false; break;
+                    }
+                }
+                if (distinct_only) {
+                    ray_t* dres = agg_select_distinct(eval_tbl, key_cols, key_syms, (uint8_t)nk, nrows);
+                    if (eval_tbl != tbl) ray_release(eval_tbl);
+                    ray_release(tbl);
+                    return dres;
                 }
 
                 int64_t pre_take_groups = nrows;
