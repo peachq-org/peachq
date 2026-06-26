@@ -35,6 +35,14 @@ int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t
  * callers must use this, not free()).  Idempotent; NULLs the pointers. */
 void agg_groups_free(agg_groups_t* out);
 
+/* Multi-key `select {by: {keys}}` with no aggregates → result table carrying the
+ * first-of-group value of every `tbl` column (keys named by key_syms, then the
+ * non-key columns), SYM columns adopting their source domain (no global
+ * interning).  See agg_engine.c.  Precondition (caller-gated): keys are int/SYM
+ * and every tbl column is fixed-width or SYM.  Caller owns the table. */
+ray_t* agg_select_distinct(ray_t* tbl, ray_t** key_cols, const int64_t* key_syms,
+                           uint8_t nk, int64_t nrows);
+
 /* Build a dense SoA per-group state array for one aggregate (vt), run a single
  * update_batch over val_col grouped by gids, and finalize each group into a
  * typed result column of vt->out_type, length ngroups. For COUNT, val_col is
