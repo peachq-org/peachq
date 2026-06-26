@@ -1215,6 +1215,45 @@ void ray_free(ray_t* v) {
 }
 
 /* --------------------------------------------------------------------------
+ * Raw buffer allocator: malloc/calloc/realloc/free for plain byte buffers that
+ * are NOT ray_t values, backed by the buddy heap (no libc malloc).  The block
+ * is a real ray_t header + data; we stamp type=RAY_U8 (no owned children) so
+ * ray_free reclaims it without walking elements, and hand back ray_data().  The
+ * header sits 32 bytes before the returned pointer; ray_free_raw recovers it.
+ * -------------------------------------------------------------------------- */
+
+void* ray_alloc_raw(size_t n) {
+    ray_t* v = ray_alloc(n);
+    if (!v || RAY_IS_ERR(v)) return NULL;
+    v->type = RAY_U8;          /* plain byte vec: ray_free reclaims, no child walk */
+    v->len  = (int64_t)n;
+    return ray_data(v);
+}
+
+void* ray_calloc_raw(size_t n) {
+    void* p = ray_alloc_raw(n);
+    if (p && n) memset(p, 0, n);
+    return p;
+}
+
+void ray_free_raw(void* p) {
+    if (!p) return;
+    ray_free((ray_t*)((char*)p - 32));   /* 32 = ray_t header before the data */
+}
+
+void* ray_realloc_raw(void* p, size_t n) {
+    if (!p) return ray_alloc_raw(n);
+    ray_t* v = (ray_t*)((char*)p - 32);
+    size_t cur = BSIZEOF(v->order) - 32;   /* current block's data capacity */
+    if (n <= cur) { v->len = (int64_t)n; return p; }
+    void* np = ray_alloc_raw(n);
+    if (!np) return NULL;
+    memcpy(np, p, cur);                     /* copy the whole old block (>= valid bytes) */
+    ray_free_raw(p);
+    return np;
+}
+
+/* --------------------------------------------------------------------------
  * ray_alloc_copy
  * -------------------------------------------------------------------------- */
 
