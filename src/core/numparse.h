@@ -53,7 +53,6 @@ extern "C" {
 #endif
 
 size_t ray_parse_i64(const char *src, size_t len, int64_t  *dst);
-size_t ray_parse_i32(const char *src, size_t len, int32_t  *dst);
 size_t ray_parse_f64(const char *src, size_t len, double   *dst);
 size_t ray_parse_u64_hex(const char *src, size_t len, uint64_t *dst);
 
