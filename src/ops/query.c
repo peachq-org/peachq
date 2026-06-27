@@ -2614,6 +2614,7 @@ typedef struct {
     const int64_t*  offsets;
     const int64_t*  grp_cnt;
     int64_t*        odata;
+    int64_t         sym_cap_bound; /* SYM: cap per-group HT at 2*domain_count (else 0) */
     _Atomic(int32_t) oom;
 } cdpg_buf_par_ctx_t;
 
@@ -2667,6 +2668,8 @@ static void cdpg_buf_par_fn(void* vctx, uint32_t worker_id,
             return;
         }
         cap = c;
+        if (ctx->sym_cap_bound && cap > (uint64_t)ctx->sym_cap_bound)
+            cap = (uint64_t)ctx->sym_cap_bound;   /* SYM distinct <= domain_count */
         uint64_t mask = cap - 1;
 
         ray_t* set_hdr  = NULL;
@@ -3165,6 +3168,18 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
                         st == RAY_TIMESTAMP || RAY_IS_SYM(st));
         ray_pool_t* pool = ray_pool_get();
         if (flat_ok && pool && ray_pool_total_workers(pool) >= 2 && n_groups >= 4) {
+            /* SYM distinct values per group are bounded by domain_count, so a
+             * per-group HT sized 2*cnt (the group's ROW count) is wasteful — a
+             * huge low-card group builds a multi-MB cache-busting table to find
+             * a handful of codes.  Cap it at 2*domain_count for small domains. */
+            int64_t sym_cap_bound = 0;
+            if (RAY_IS_SYM(st)) {
+                int64_t dc = ray_sym_domain_count(ray_sym_vec_domain(src));
+                if (dc > 0 && dc <= 65536) {
+                    uint64_t b = 32; while (b < (uint64_t)dc * 2) b <<= 1;
+                    sym_cap_bound = (int64_t)b;
+                }
+            }
             cdpg_buf_par_ctx_t pctx = {
                 .in_type   = st,
                 .in_attrs  = src->attrs,
@@ -3176,6 +3191,7 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
                 .offsets   = offsets,
                 .grp_cnt   = grp_cnt,
                 .odata     = odata,
+                .sym_cap_bound = sym_cap_bound,
                 .oom       = 0,
             };
             ray_pool_dispatch_n(pool, cdpg_buf_par_fn, &pctx, (uint32_t)n_groups);
