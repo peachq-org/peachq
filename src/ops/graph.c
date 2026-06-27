@@ -602,11 +602,6 @@ ray_op_t* ray_stddev(ray_graph_t* g, ray_op_t* a)     { return make_unary(g, OP_
 ray_op_t* ray_stddev_pop(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_STDDEV_POP, a, RAY_F64); }
 ray_op_t* ray_var(ray_graph_t* g, ray_op_t* a)         { return make_unary(g, OP_VAR, a, RAY_F64); }
 ray_op_t* ray_var_pop(ray_graph_t* g, ray_op_t* a)     { return make_unary(g, OP_VAR_POP, a, RAY_F64); }
-/* Pearson correlation is a 2-input aggregator; the node carries two
- * input pointers (x and y) and lowers to OP_PEARSON_CORR. */
-ray_op_t* ray_pearson_corr(ray_graph_t* g, ray_op_t* x, ray_op_t* y) {
-    return make_binary(g, OP_PEARSON_CORR, x, y, RAY_F64);
-}
 
 /* Exact median per group. Runtime forks to a separate bucket-scatter +
  * quickselect path (see ray_median_per_group) — it can't fit the
@@ -1089,24 +1084,6 @@ ray_op_t* ray_tail(ray_graph_t* g, ray_op_t* input, int64_t n) {
     return &g->nodes[ext->base.id];
 }
 
-ray_op_t* ray_alias(ray_graph_t* g, ray_op_t* input, const char* name) {
-    uint32_t input_id = input->id;
-    ray_op_ext_t* ext = graph_alloc_ext_node(g);
-    if (!ext) return NULL;
-
-    input = &g->nodes[input_id];
-
-    ext->base.opcode = OP_ALIAS;
-    ext->base.arity = 1;
-    ext->base.in_id[0] = input->id;
-    ext->base.out_type = input->out_type;
-    ext->base.est_rows = input->est_rows;
-    ext->sym = ray_sym_intern(name, strlen(name));
-
-    g->nodes[ext->base.id] = ext->base;
-    return &g->nodes[ext->base.id];
-}
-
 ray_op_t* ray_extract(ray_graph_t* g, ray_op_t* col, int64_t field) {
     uint32_t col_id = col->id;
     uint32_t est = col->est_rows;
@@ -1143,21 +1120,6 @@ ray_op_t* ray_date_trunc(ray_graph_t* g, ray_op_t* col, int64_t field) {
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];
-}
-
-ray_op_t* ray_materialize(ray_graph_t* g, ray_op_t* input) {
-    uint32_t input_id = input->id;
-    ray_op_t* n = graph_alloc_node(g);
-    if (!n) return NULL;
-
-    input = &g->nodes[input_id];
-
-    n->opcode = OP_MATERIALIZE;
-    n->arity = 1;
-    n->in_id[0] = input->id;
-    n->out_type = input->out_type;
-    n->est_rows = input->est_rows;
-    return n;
 }
 
 /* --------------------------------------------------------------------------

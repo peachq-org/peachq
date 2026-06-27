@@ -641,7 +641,6 @@ ray_op_t* ray_stddev(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_stddev_pop(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_var(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_var_pop(ray_graph_t* g, ray_op_t* a);
-ray_op_t* ray_pearson_corr(ray_graph_t* g, ray_op_t* x, ray_op_t* y);
 ray_op_t* ray_median(ray_graph_t* g, ray_op_t* a);
 
 /* Structural ops */
@@ -694,8 +693,6 @@ ray_op_t* ray_select_op(ray_graph_t* g, ray_op_t* input,
                         ray_op_t** cols, uint8_t n_cols);
 ray_op_t* ray_head(ray_graph_t* g, ray_op_t* input, int64_t n);
 ray_op_t* ray_tail(ray_graph_t* g, ray_op_t* input, int64_t n);
-ray_op_t* ray_alias(ray_graph_t* g, ray_op_t* input, const char* name);
-ray_op_t* ray_materialize(ray_graph_t* g, ray_op_t* input);
 
 /* ===== Graph Ops ===== */
 
