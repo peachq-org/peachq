@@ -791,6 +791,31 @@ ray_t* distinct_vec_eager(ray_t* x) {
     int64_t* idx = (len <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len * sizeof(int64_t));
     if (!idx) return ray_error("oom", NULL);
 
+    /* SYM presence-bitmap dedup: a SYM code is a position in [0, domain_count),
+     * so for a small domain a domain_count-byte "seen" array collects the
+     * first-occurrence row ids in O(n) with NO hashing — identical first-
+     * appearance order to the hashset path below.  Gate dc<=len so the array
+     * never costs more than the data it replaces; larger domains fall through. */
+    if (x->type == RAY_SYM) {
+        int64_t dc = ray_sym_domain_count(ray_sym_vec_domain(x));
+        if (dc > 0 && dc <= 65536 && dc <= len) {
+            uint8_t* seen = (uint8_t*)ray_sys_alloc((size_t)dc);
+            if (!seen) { if (idx != idx_stack) ray_sys_free(idx); return ray_error("oom", NULL); }
+            memset(seen, 0, (size_t)dc);
+            const void* data = ray_data(x);
+            int8_t ty = x->type; uint16_t at = x->attrs;
+            int64_t count = 0;
+            for (int64_t i = 0; i < len; i++) {
+                int64_t code = ray_read_sym(data, i, ty, at);
+                if (!seen[code]) { seen[code] = 1; idx[count++] = i; }
+            }
+            ray_sys_free(seen);
+            ray_t* result = gather_by_idx(x, idx, count);
+            if (idx != idx_stack) ray_sys_free(idx);
+            return result;
+        }
+    }
+
     hashset_t hs;
     if (!hashset_init(&hs, x, len)) {
         if (idx != idx_stack) ray_sys_free(idx);
