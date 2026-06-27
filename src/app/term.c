@@ -1881,29 +1881,3 @@ ray_t* ray_term_feed(ray_term_t* term) {
     return feed_normal(term, key);
 }
 
-/* Blocking line reader — backward-compatible wrapper using begin+feed. */
-ray_t* ray_term_read(ray_term_t* term) {
-    ray_term_begin(term);
-    for (;;) {
-        int64_t sz = ray_term_getc(term);
-        if (sz <= 0) {
-            if (sz == -2) {
-                /* SIGINT — clear line and re-prompt */
-                ray_term_clear_interrupt();
-                term->comp_cycling = 0;
-                term->esc_state = 0;
-                term->buf_len = 0;
-                term->buf_pos = 0;
-                term->multiline_len = 0;
-                term_write("^C\n", 3);
-                ray_term_prompt(term);
-                fflush(stdout);
-                continue;
-            }
-            return NULL;
-        }
-        ray_t* line = ray_term_feed(term);
-        if (line == RAY_TERM_EOF) return NULL;
-        if (line) return line;
-    }
-}

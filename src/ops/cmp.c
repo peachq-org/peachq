@@ -158,10 +158,6 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
     return make_bool(as_f64(a) <= as_f64(b) ? 1 : 0);
 }
 
-/* Check if comparable (numeric or temporal) */
-int is_comparable(ray_t* x) {
-    return is_numeric(x) || is_temporal(x);
-}
 
 ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
     /* Handle null forms (RAY_NULL_OBJ, typed null atoms) */

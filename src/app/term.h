@@ -146,7 +146,6 @@ void ray_cursor_show(void);
 int32_t ray_term_visual_width(const char* str, int32_t len);
 void    ray_term_goto_position(ray_term_t* term, int32_t from_pos, int32_t to_pos);
 
-ray_t*  ray_term_read(ray_term_t* term);
 void   ray_term_redraw(ray_term_t* term);
 void   ray_term_prompt(ray_term_t* term);
 
@@ -157,7 +156,7 @@ void   ray_term_prompt(ray_term_t* term);
  * after the call. */
 void   ray_term_set_prompt_prefix(ray_term_t* term, const char* prefix);
 
-/* Event-driven terminal API — split ray_term_read into begin + feed.
+/* Event-driven terminal API — split the former blocking line reader into begin + feed.
  * ray_term_begin: show prompt, reset line state.
  * ray_term_feed:  process one byte from term->input[0].
  *   Returns ray_t* string when a complete line is ready,
