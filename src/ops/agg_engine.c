@@ -139,7 +139,17 @@ bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
             switch (kc->attrs & RAY_SYM_W_MASK) {
                 case RAY_SYM_W8:  out->mins[k] = 0; out->ranges[k] = 256;   continue;
                 case RAY_SYM_W16: out->mins[k] = 0; out->ranges[k] = 65536; continue;
-                default: break;  /* W32/W64 fall through to the prescan */
+                default: break;  /* W32/W64: try domain bounds, else prescan */
+            }
+            /* W32/W64 SYM codes are positions in [0, domain_count).  When the
+             * domain is small enough to stay within the dense array budget (and
+             * no larger than the row count), that range is known a priori — skip
+             * the O(nrows) min/max prescan, using min=0 / range=count.  Larger
+             * domains still scan: their actual used range may be far tighter
+             * than the full count, and the array would otherwise blow the cap. */
+            int64_t dc = ray_sym_domain_count(ray_sym_vec_domain(kc));
+            if (dc > 0 && dc <= 65536 && dc <= nrows) {
+                out->mins[k] = 0; out->ranges[k] = dc; continue;
             }
         }
 
