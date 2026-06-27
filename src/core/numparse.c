@@ -166,14 +166,6 @@ size_t ray_parse_i64(const char *src, size_t len, int64_t *dst) {
     return i;
 }
 
-size_t ray_parse_i32(const char *src, size_t len, int32_t *dst) {
-    int64_t v;
-    size_t n = ray_parse_i64(src, len, &v);
-    if (n == 0) return 0;
-    if (v < INT32_MIN || v > INT32_MAX) return 0;
-    *dst = (int32_t)v;
-    return n;
-}
 
 /* ----------------------------------------------------------------------------
  * Float parser
