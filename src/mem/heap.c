@@ -1392,9 +1392,6 @@ void ray_mem_stats(ray_mem_stats_t* out) {
  * Heap lifecycle
  * -------------------------------------------------------------------------- */
 
-uint16_t ray_heap_current_id(void) {
-    return ray_tl_heap ? ray_tl_heap->id : (uint16_t)0xFFFF;
-}
 
 void ray_heap_init(void) {
     if (ray_tl_heap) return;
