@@ -48,7 +48,6 @@ typedef struct {
     ray_t   *lambda;     /* the lambda being compiled (for 'self' resolution) */
 
     ray_t    *dbg_obj;   /* I64 vector: pairs of [offset, span.id] */
-    int32_t   dbg_len;
     int32_t  trap_depth;  /* open OP_TRAP frames in current lambda */
 } compiler_t;
 
