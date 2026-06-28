@@ -71,16 +71,9 @@ static ray_t* strlen_vec(ray_t* x) {
     if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
     out->len = n;
     int64_t* dst = (int64_t*)ray_data(out);
-    bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-
-    for (int64_t i = 0; i < n; i++) {
-        if (has_nulls && ray_vec_is_null(x, i)) {
-            dst[i] = NULL_I64;
-            ray_vec_set_null(out, i, true);
-            continue;
-        }
+    /* STR/SYM have no null. */
+    for (int64_t i = 0; i < n; i++)
         strlen_vec_value(x, i, &dst[i]);
-    }
     return out;
 }
 
@@ -103,14 +96,9 @@ static ray_t* strlen_mapcommon(ray_t* x) {
     int64_t off = 0;
     for (int64_t p = 0; p < counts->len; p++) {
         int64_t v = 0;
-        bool is_null = (keys->attrs & RAY_ATTR_HAS_NULLS) && ray_vec_is_null(keys, p);
-        if (is_null) v = NULL_I64;
-        else         strlen_vec_value(keys, p, &v);
-        for (int64_t r = 0; r < cnt[p]; r++) {
-            dst[off] = v;
-            if (is_null) ray_vec_set_null(out, off, true);
-            off++;
-        }
+        strlen_vec_value(keys, p, &v);  /* STR/SYM have no null */
+        for (int64_t r = 0; r < cnt[p]; r++)
+            dst[off++] = v;
     }
     return out;
 }
@@ -131,14 +119,9 @@ static ray_t* strlen_parted(ray_t* x) {
     for (int64_t s = 0; s < x->len; s++) {
         ray_t* seg = segs[s];
         if (!seg || RAY_IS_ERR(seg)) continue;
-        bool has_nulls = (seg->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        /* STR/SYM have no null. */
         for (int64_t i = 0; i < seg->len; i++) {
-            if (has_nulls && ray_vec_is_null(seg, i)) {
-                dst[off] = NULL_I64;
-                ray_vec_set_null(out, off, true);
-            } else {
-                strlen_vec_value(seg, i, &dst[off]);
-            }
+            strlen_vec_value(seg, i, &dst[off]);
             off++;
         }
     }
