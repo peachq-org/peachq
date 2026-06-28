@@ -1539,7 +1539,10 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
 
     for (int c = 0; c < ncols; c++) {
         ray_t* vec = col_vecs[c];
-        if (col_had_null[c] && vec->type != RAY_SYM)
+        /* SYM and STR both represent a blank cell as the empty string ("" /
+         * sym 0) — there is no null distinct from empty, so neither type
+         * carries HAS_NULLS (a per-row null check on them is pure waste). */
+        if (col_had_null[c] && vec->type != RAY_SYM && vec->type != RAY_STR)
             vec->attrs |= RAY_ATTR_HAS_NULLS;
         else
             vec->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
@@ -1977,7 +1980,10 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
      * empty fields were already remapped to sym 0 in step 9b. */
     for (int c = 0; c < ncols; c++) {
         ray_t* vec = col_vecs[c];
-        if (col_had_null[c] && vec->type != RAY_SYM)
+        /* SYM and STR both represent a blank cell as the empty string ("" /
+         * sym 0) — there is no null distinct from empty, so neither type
+         * carries HAS_NULLS (a per-row null check on them is pure waste). */
+        if (col_had_null[c] && vec->type != RAY_SYM && vec->type != RAY_STR)
             vec->attrs |= RAY_ATTR_HAS_NULLS;
         else
             vec->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
