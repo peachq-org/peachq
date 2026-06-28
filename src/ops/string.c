@@ -859,19 +859,8 @@ ray_t* exec_string_unary(ray_graph_t* g, ray_op_t* op) {
     if (is_str) str_resolve(input, &str_elems, &str_pool);
 
     uint16_t opc = op->opcode;
+    /* STR/SYM have no null — every row is a value. */
     for (int64_t i = 0; i < len; i++) {
-        /* Propagate null */
-        if (ray_vec_is_null((ray_t*)input, i)) {
-            if (is_str) {
-                result = ray_str_vec_append(result, "", 0);
-                if (RAY_IS_ERR(result)) break;
-                ray_vec_set_null(result, result->len - 1, true);
-            } else {
-                sym_dst[i] = 0;
-                ray_vec_set_null(result, i, true);
-            }
-            continue;
-        }
         const char* sp; size_t sl;
         if (is_str) {
             sp = ray_str_t_ptr(&str_elems[i], str_pool);
@@ -932,21 +921,10 @@ ray_t* exec_strlen(ray_graph_t* g, ray_op_t* op) {
     if (input->type == RAY_STR) {
         const ray_str_t* elems; const char* pool;
         str_resolve(input, &elems, &pool);
-        for (int64_t i = 0; i < len; i++) {
-            if (ray_vec_is_null((ray_t*)input, i)) {
-                dst[i] = NULL_I64;
-                ray_vec_set_null(result, i, true);
-                continue;
-            }
+        for (int64_t i = 0; i < len; i++)
             dst[i] = (int64_t)elems[i].len;
-        }
     } else {
         for (int64_t i = 0; i < len; i++) {
-            if (ray_vec_is_null((ray_t*)input, i)) {
-                dst[i] = NULL_I64;
-                ray_vec_set_null(result, i, true);
-                continue;
-            }
             const char* sp; size_t sl;
             sym_elem(input, i, &sp, &sl);
             dst[i] = (int64_t)sl;
@@ -1019,8 +997,8 @@ ray_t* exec_substr(ray_graph_t* g, ray_op_t* op) {
 
     for (int64_t i = 0; i < nrows; i++) {
         /* Propagate null — from input, start, or length */
-        if (ray_vec_is_null((ray_t*)input, i) ||
-            ((s_data || s_data_i32) && ray_vec_is_null((ray_t*)start_v, i)) ||
+        /* STR input has no null; start/len are I64 and can be null. */
+        if (((s_data || s_data_i32) && ray_vec_is_null((ray_t*)start_v, i)) ||
             ((l_data || l_data_i32) && ray_vec_is_null((ray_t*)len_v, i))) {
             if (is_str) {
                 result = ray_str_vec_append(result, "", 0);
@@ -1096,19 +1074,8 @@ ray_t* exec_replace(ray_graph_t* g, ray_op_t* op) {
     const char* str_pool = NULL;
     if (is_str) str_resolve(input, &str_elems, &str_pool);
 
+    /* STR/SYM have no null — every row is a value. */
     for (int64_t i = 0; i < nrows; i++) {
-        /* Propagate null */
-        if (ray_vec_is_null((ray_t*)input, i)) {
-            if (is_str) {
-                result = ray_str_vec_append(result, "", 0);
-                if (RAY_IS_ERR(result)) break;
-                ray_vec_set_null(result, result->len - 1, true);
-            } else {
-                sym_dst[i] = 0;
-                ray_vec_set_null(result, i, true);
-            }
-            continue;
-        }
         const char* sp; size_t sl;
         if (is_str) {
             sp = ray_str_t_ptr(&str_elems[i], str_pool);
@@ -1223,12 +1190,8 @@ ray_t* exec_concat(ray_graph_t* g, ray_op_t* op) {
         /* Check if any arg is null at this row */
         bool any_null = false;
         for (int a = 0; a < n_args; a++) {
-            if (ray_is_atom(args[a])) {
-                if (RAY_ATOM_IS_NULL(args[a])) { any_null = true; break; }
-            } else if (ray_vec_is_null((ray_t*)args[a], r < args[a]->len ? r : 0)) {
-                any_null = true;
-                break;
-            }
+            /* SYM atoms can be null (sym 0); STR/SYM vecs cannot. */
+            if (ray_is_atom(args[a]) && RAY_ATOM_IS_NULL(args[a])) { any_null = true; break; }
         }
         if (any_null) {
             if (out_str) {
