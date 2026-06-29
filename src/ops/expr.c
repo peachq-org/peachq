@@ -2254,6 +2254,19 @@ static void binary_range_str(ray_op_t* op, ray_t* lhs, ray_t* rhs, ray_t* result
         r_elems = &r_scalar_elem;
     }
 
+    /* Fast path: EQ/NE against the empty-string constant — a string equals ""
+     * iff len==0.  Evaluate as a length check; no pointer deref or memcmp.
+     * Results are byte-identical to the general STR_CMP_LOOP path. */
+    if ((opc == OP_EQ || opc == OP_NE) &&
+        ((l_scalar && !r_scalar && l_scalar_elem.len == 0) ||
+         (r_scalar && !l_scalar && r_scalar_elem.len == 0))) {
+        const ray_str_t* vec = l_scalar ? r_elems : l_elems;
+        bool is_eq = (opc == OP_EQ);
+        for (int64_t i = 0; i < n; i++)
+            dst[i] = (uint8_t)((vec[i].len == 0) == is_eq);
+        return;
+    }
+
     /* Resolve final element pointers and pool pointers outside the loop.
      * For scalar sides the element pointer is fixed; for vector sides it
      * advances with i.  Use step_l / step_r (0 or 1) to avoid per-element
