@@ -3529,6 +3529,45 @@ static void rgid_probe_fn(void* ctx_, uint32_t worker_id,
     }
 }
 
+/* STR-key sibling of rgid_probe_fn: probe each row's STR descriptor against
+ * the read-only group-key slot table to assign row_gid[r].  The int path
+ * above was parallel but the STR path was a serial 10M-row loop — the
+ * dominant cost of STR group + count(distinct) (q13).  The slot table,
+ * descriptors and pools are read-only here and row_gid writes are disjoint
+ * per row, so workers need no synchronisation.  No selection handling: this
+ * mirrors the serial STR loop, which probes the full row range. */
+typedef struct {
+    const int32_t*   slot_gid_p1;   /* group-key slot table (gid+1; 0=empty) */
+    uint64_t         mask;
+    const ray_str_t* gdesc;         /* group-key descriptors */
+    const char*      gpool;
+    const ray_str_t* sdesc;         /* row (scan) descriptors */
+    const char*      spool;
+    int64_t*         row_gid;       /* per-row output */
+} rgid_probe_str_ctx_t;
+
+static void rgid_probe_str_fn(void* ctx_, uint32_t worker_id,
+                              int64_t start, int64_t end) {
+    (void)worker_id;
+    rgid_probe_str_ctx_t* x = (rgid_probe_str_ctx_t*)ctx_;
+    uint64_t mask = x->mask;
+    for (int64_t r = start; r < end; r++) {
+        uint64_t h = ray_str_t_hash(&x->sdesc[r], x->spool);
+        uint64_t s = h & mask;
+        int64_t found = -1;
+        for (;;) {
+            int32_t g_p1 = x->slot_gid_p1[s];
+            if (g_p1 == 0) break;
+            int32_t g = g_p1 - 1;
+            if (ray_str_t_eq(&x->gdesc[g], x->gpool, &x->sdesc[r], x->spool)) {
+                found = g; break;
+            }
+            s = (s + 1) & mask;
+        }
+        x->row_gid[r] = found;
+    }
+}
+
 /* Forward declarations for eval-level groupby fallback */
 
 /* R8: cheap predicate for whether atom_broadcast_vec can handle this
@@ -8142,20 +8181,39 @@ by_dict_done:
                         while (slot_gid_p1[s] != 0) s = (s + 1) & mask;
                         slot_gid_p1[s] = (int32_t)(gi + 1);
                     }
-                    for (int64_t r = 0; r < nrows; r++) {
-                        uint64_t h = ray_str_t_hash(&sdesc[r], spool);
-                        uint64_t s = h & mask;
-                        int64_t found = -1;
-                        for (;;) {
-                            int32_t g_p1 = slot_gid_p1[s];
-                            if (g_p1 == 0) break;
-                            int32_t g = g_p1 - 1;
-                            if (ray_str_t_eq(&gdesc[g], gpool, &sdesc[r], spool)) {
-                                found = g; break;
+                    /* Probe each row to assign its gid.  Parallelise when the
+                     * input is large enough to amortise dispatch — the slot
+                     * table is read-only and row_gid writes are disjoint, so
+                     * workers need no synchronisation (mirrors the int path). */
+                    ray_pool_t* str_pool = ray_pool_get();
+                    if (str_pool && nrows >= 200000 &&
+                        ray_pool_total_workers(str_pool) >= 2) {
+                        rgid_probe_str_ctx_t spctx = {
+                            .slot_gid_p1 = slot_gid_p1,
+                            .mask        = mask,
+                            .gdesc       = gdesc,
+                            .gpool       = gpool,
+                            .sdesc       = sdesc,
+                            .spool       = spool,
+                            .row_gid     = row_gid,
+                        };
+                        ray_pool_dispatch(str_pool, rgid_probe_str_fn, &spctx, nrows);
+                    } else {
+                        for (int64_t r = 0; r < nrows; r++) {
+                            uint64_t h = ray_str_t_hash(&sdesc[r], spool);
+                            uint64_t s = h & mask;
+                            int64_t found = -1;
+                            for (;;) {
+                                int32_t g_p1 = slot_gid_p1[s];
+                                if (g_p1 == 0) break;
+                                int32_t g = g_p1 - 1;
+                                if (ray_str_t_eq(&gdesc[g], gpool, &sdesc[r], spool)) {
+                                    found = g; break;
+                                }
+                                s = (s + 1) & mask;
                             }
-                            s = (s + 1) & mask;
+                            row_gid[r] = found;
                         }
-                        row_gid[r] = found;
                     }
                     scratch_free(slot_hdr);
                 } else {
