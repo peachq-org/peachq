@@ -1196,6 +1196,10 @@ ray_t* ray_str_vec_from_parts(const char* const* ptrs, const uint32_t* lens,
             d->len = lens[i];
             if (lens[i] > 0) memcpy(d->data, ptrs[i], lens[i]);
         } else {
+            if ((uint64_t)pool_used > UINT32_MAX) {
+                ray_release(v);
+                return ray_error("range", "str_vec_from_parts: pool offset exceeds %lld bytes", (long long)UINT32_MAX);
+            }
             memcpy(pool_base + pool_used, ptrs[i], lens[i]);
             d->len      = lens[i];
             d->pool_off = (uint32_t)pool_used;
