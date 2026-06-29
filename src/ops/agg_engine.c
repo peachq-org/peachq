@@ -2915,31 +2915,20 @@ static ray_t* agg_gather_col_at(ray_t* sc, const int64_t* first_row, int64_t n) 
         if (n == 0) return ray_str_vec_from_parts(NULL, NULL, NULL, 0);
         const char** ptrs = (const char**)ray_alloc_raw((size_t)n * sizeof(const char*));
         uint32_t*    lens = (uint32_t*)ray_alloc_raw((size_t)n * sizeof(uint32_t));
-        uint8_t*    nulls = (uint8_t*)ray_alloc_raw((size_t)n * sizeof(uint8_t));
-        if (!ptrs || !lens || !nulls) {
+        if (!ptrs || !lens) {
             ray_free_raw(ptrs);
             ray_free_raw(lens);
-            ray_free_raw(nulls);
             return ray_error("oom", NULL);
         }
-        bool hn = (sc->attrs & RAY_ATTR_HAS_NULLS) != 0;
         for (int64_t gi = 0; gi < n; gi++) {
-            if (hn && ray_vec_is_null(sc, first_row[gi])) {
-                ptrs[gi]  = NULL;
-                lens[gi]  = 0;
-                nulls[gi] = 1;
-            } else {
-                size_t sl = 0;
-                const char* sp = ray_str_vec_get(sc, first_row[gi], &sl);
-                ptrs[gi]  = sp ? sp : "";
-                lens[gi]  = (uint32_t)(sp ? sl : 0);
-                nulls[gi] = 0;
-            }
+            size_t sl = 0;
+            const char* sp = ray_str_vec_get(sc, first_row[gi], &sl);
+            ptrs[gi] = sp ? sp : "";
+            lens[gi] = (uint32_t)(sp ? sl : 0);
         }
-        ray_t* dst = ray_str_vec_from_parts(ptrs, lens, nulls, n);
+        ray_t* dst = ray_str_vec_from_parts(ptrs, lens, NULL, n);
         ray_free_raw(ptrs);
         ray_free_raw(lens);
-        ray_free_raw(nulls);
         return dst;
     }
     if (sc->type == RAY_LIST) {
