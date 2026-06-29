@@ -1431,6 +1431,69 @@ static int filter_cost(ray_graph_t* g, ray_op_t* pred) {
     return cost;
 }
 
+/* Static selectivity rank for a filter predicate: lower = more selective =
+ * should run earlier (inner).  filter_cost above orders by per-row eval cost
+ * only, which runs a cheap but non-selective predicate (e.g. a BOOL/U8 flag
+ * `== 0`, ~half the rows) before a super-selective one (e.g. an I64 hash
+ * `== K`, a handful of rows), bloating every later filter's input and gather.
+ * This estimates the pass-fraction from the predicate's static shape so the
+ * reorder runs the most-selective predicate first.  Direction-only, not a
+ * calibrated fraction (data-backed estimation is a separate change). */
+enum {
+    SEL_EQ_WIDE   = 0,  /* == / in on I64/F64/SYM/STR: high-cardinality equality */
+    SEL_EQ_MED    = 2,  /* == / in on I32/DATE/TIME */
+    SEL_RANGE     = 4,  /* < <= > >= : often broad (e.g. a full-month date range) */
+    SEL_NEUTRAL   = 5,  /* col-col / no constant / unknown op: nothing to estimate */
+    SEL_EQ_NARROW = 6,  /* == on BOOL/U8/I16: low-cardinality flags, non-selective */
+    SEL_LIKE      = 7,  /* like / ilike */
+    SEL_NE        = 8,  /* != : passes most rows */
+};
+
+static int filter_selectivity_rank(ray_graph_t* g, ray_op_t* pred) {
+    if (!pred) return SEL_NEUTRAL;
+
+    /* Find the column operand (the non-const side) and whether a constant is
+     * present at all.  Without a constant there is nothing to estimate. */
+    bool has_const = false;
+    int8_t col_type = pred->out_type;
+    for (int i = 0; i < pred->arity && i < 2; i++) {
+        ray_op_t* in = op_child(g, pred, i);
+        if (!in) continue;
+        if (in->opcode == OP_CONST) has_const = true;
+        else col_type = in->out_type;
+    }
+    if (!has_const) return SEL_NEUTRAL;
+
+    bool wide   = (col_type == RAY_I64 || col_type == RAY_F64 ||
+                   col_type == RAY_SYM || col_type == RAY_STR);
+    bool narrow = (col_type == RAY_BOOL || col_type == RAY_U8 ||
+                   col_type == RAY_I16);
+
+    switch (pred->opcode) {
+        case OP_EQ:
+        case OP_IN:
+            if (narrow) return SEL_EQ_NARROW;
+            if (wide)   return SEL_EQ_WIDE;
+            return SEL_EQ_MED;                 /* I32/DATE/TIME and other mid types */
+        case OP_LT: case OP_LE:
+        case OP_GT: case OP_GE:
+            return SEL_RANGE;
+        case OP_NE:
+            return SEL_NE;
+        case OP_LIKE: case OP_ILIKE:
+            return SEL_LIKE;
+        default:
+            return SEL_NEUTRAL;
+    }
+}
+
+/* Composite reorder key: selectivity dominates, filter_cost breaks ties.
+ * K (100) exceeds any filter_cost (max ~11), so equal-selectivity predicates
+ * fall back to the prior cheap-first ordering. */
+static int filter_rank_key(ray_graph_t* g, ray_op_t* pred) {
+    return filter_selectivity_rank(g, pred) * 100 + filter_cost(g, pred);
+}
+
 /* Split FILTER(AND(a, b), input) into FILTER(a, FILTER(b, input)).
  * Returns the new outer filter node, or the original if no split. */
 static ray_op_t* split_and_filter(ray_graph_t* g, ray_op_t* filter_node) {
@@ -1584,10 +1647,13 @@ static ray_op_t* pass_filter_reorder(ray_graph_t* g, ray_op_t* root) {
         }
         if (has_shared) continue;
 
-        /* Score each filter's predicate */
+        /* Score each filter's predicate: selectivity-primary, eval-cost tiebreak.
+         * The insertion sort below is unchanged — it sorts these keys
+         * descending, so least-selective lands outer (runs last) and
+         * most-selective lands inner (runs first). */
         int costs[64];
         for (int c = 0; c < chain_len; c++)
-            costs[c] = filter_cost(g, op_child(g, chain[c], 1));
+            costs[c] = filter_rank_key(g, op_child(g, chain[c], 1));
 
         /* Insertion sort predicates by cost descending (stable: preserves
          * original order for equal costs). Expensive predicates go to
