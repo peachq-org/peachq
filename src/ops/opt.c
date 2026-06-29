@@ -1650,9 +1650,10 @@ static ray_op_t* pass_filter_reorder(ray_graph_t* g, ray_op_t* root) {
         for (int c = 0; c < chain_len; c++)
             costs[c] = filter_rank_key(g, op_child(g, chain[c], 1));
 
-        /* Insertion sort predicates by cost descending (stable: preserves
-         * original order for equal costs). Expensive predicates go to
-         * chain[0] (outer, runs last), cheap go to chain[N-1] (inner,
+        /* Insertion sort predicates by rank key descending (stable: preserves
+         * original order for equal keys). Highest key — least selective, or
+         * equally selective but costlier — goes to chain[0] (outer, runs
+         * last); lowest key — most selective — goes to chain[N-1] (inner,
          * runs first). We swap predicates, not filter nodes. */
         for (int c = 1; c < chain_len; c++) {
             uint32_t pred_id = chain[c]->in_id[1];
