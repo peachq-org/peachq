@@ -1439,14 +1439,16 @@ static int filter_cost(ray_graph_t* g, ray_op_t* pred) {
  * This estimates the pass-fraction from the predicate's static shape so the
  * reorder runs the most-selective predicate first.  Direction-only, not a
  * calibrated fraction (data-backed estimation is a separate change). */
+/* Only a high-cardinality equality is a CONFIDENT static selectivity signal.
+ * Range / != / LIKE / narrow-flag-equality have data-dependent selectivity we
+ * cannot estimate statically, so they map to SEL_NEUTRAL and the composite key
+ * defers their ordering to filter_cost (which already runs expensive predicates
+ * like LIKE last). An earlier table that ranked LIKE/!= as distinct buckets
+ * regressed LIKE-heavy queries by running the substring scan first. */
 enum {
-    SEL_EQ_WIDE   = 0,  /* == / in on I64/F64/SYM/STR: high-cardinality equality */
-    SEL_EQ_MED    = 2,  /* == / in on I32/DATE/TIME */
-    SEL_RANGE     = 4,  /* < <= > >= : often broad (e.g. a full-month date range) */
-    SEL_NEUTRAL   = 5,  /* col-col / no constant / unknown op: nothing to estimate */
-    SEL_EQ_NARROW = 6,  /* == on BOOL/U8/I16: low-cardinality flags, non-selective */
-    SEL_LIKE      = 7,  /* like / ilike */
-    SEL_NE        = 8,  /* != : passes most rows */
+    SEL_EQ_WIDE = 0,   /* == / in on I64/F64/SYM/STR: high-cardinality equality */
+    SEL_EQ_MED  = 2,   /* == / in on I32/DATE/TIME: usually selective */
+    SEL_NEUTRAL = 5,   /* everything else: unknown/data-dependent — defer to filter_cost */
 };
 
 static int filter_selectivity_rank(ray_graph_t* g, ray_op_t* pred) {
@@ -1472,18 +1474,11 @@ static int filter_selectivity_rank(ray_graph_t* g, ray_op_t* pred) {
     switch (pred->opcode) {
         case OP_EQ:
         case OP_IN:
-            if (narrow) return SEL_EQ_NARROW;
-            if (wide)   return SEL_EQ_WIDE;
-            return SEL_EQ_MED;                 /* I32/DATE/TIME and other mid types */
-        case OP_LT: case OP_LE:
-        case OP_GT: case OP_GE:
-            return SEL_RANGE;
-        case OP_NE:
-            return SEL_NE;
-        case OP_LIKE: case OP_ILIKE:
-            return SEL_LIKE;
+            if (wide)   return SEL_EQ_WIDE;     /* I64/F64/SYM/STR */
+            if (narrow) return SEL_NEUTRAL;     /* BOOL/U8/I16 flags: non-selective */
+            return SEL_EQ_MED;                  /* I32/DATE/TIME and other mid types */
         default:
-            return SEL_NEUTRAL;
+            return SEL_NEUTRAL;                 /* range, !=, like/ilike, col-col, unknown */
     }
 }
 
