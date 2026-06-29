@@ -1146,6 +1146,71 @@ fail_range:
 }
 
 /* --------------------------------------------------------------------------
+ * ray_str_vec_from_parts — bulk-build a RAY_STR vec in two passes (no COW)
+ *
+ * Allocates the string pool once (not per-element like ray_str_vec_append).
+ * Pass 1 sums pooled bytes; pass 2 fills descriptors and pool in one sweep.
+ * ptrs[i] may be NULL when lens[i]==0.  nulls may be NULL (no nulls); when
+ * non-NULL, nulls[i]!=0 marks element i null (STR null = empty string,
+ * kdb+ model — len==0, no RAY_ATTR_HAS_NULLS set).
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_str_vec_from_parts(const char* const* ptrs, const uint32_t* lens,
+                               const uint8_t* nulls, int64_t n) {
+    if (n < 0) return ray_error("range", "str_vec_from_parts: n must be non-negative, got %lld", (long long)n);
+
+    ray_t* v = ray_vec_new(RAY_STR, n);
+    if (!v || RAY_IS_ERR(v)) return v;
+
+    /* Pass 1: count pool bytes needed for elements that don't inline */
+    size_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if ((!nulls || !nulls[i]) && lens[i] > RAY_STR_INLINE_MAX) {
+            total += lens[i];
+        }
+    }
+
+    /* Allocate pool once — mirrors the setup in ray_str_vec_append */
+    if (total > 0) {
+        v->str_pool = ray_alloc(total + 32);
+        if (!v->str_pool || RAY_IS_ERR(v->str_pool)) {
+            v->str_pool = NULL;
+            ray_release(v);
+            return ray_error("oom", NULL);
+        }
+        v->str_pool->type = RAY_U8;
+        v->str_pool->len  = 0;
+    }
+
+    /* Pass 2: fill descriptors and pool */
+    ray_str_t* elems     = (ray_str_t*)ray_data(v);
+    char*      pool_base = v->str_pool ? (char*)ray_data(v->str_pool) : NULL;
+    int64_t    pool_used = 0;
+
+    for (int64_t i = 0; i < n; i++) {
+        ray_str_t* d = &elems[i];
+        memset(d, 0, sizeof(ray_str_t));
+        if (nulls && nulls[i]) {
+            /* STR null = empty string (kdb+ model): d is already zeroed (len=0) */
+        } else if (lens[i] <= RAY_STR_INLINE_MAX) {
+            d->len = lens[i];
+            if (lens[i] > 0) memcpy(d->data, ptrs[i], lens[i]);
+        } else {
+            memcpy(pool_base + pool_used, ptrs[i], lens[i]);
+            d->len      = lens[i];
+            d->pool_off = (uint32_t)pool_used;
+            memcpy(d->prefix, ptrs[i], 4);
+            pool_used  += (int64_t)lens[i];
+        }
+    }
+
+    if (v->str_pool) v->str_pool->len = pool_used;
+    v->len = n;
+
+    return v;
+}
+
+/* --------------------------------------------------------------------------
  * ray_str_vec_get — read a string from a RAY_STR vector by index
  *
  * Returns a pointer to the string data (inline or pool) and sets *out_len.
