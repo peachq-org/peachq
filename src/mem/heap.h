@@ -264,41 +264,60 @@ typedef struct {
  * blocks always have order > RAY_ORDER_MIN.
  * -------------------------------------------------------------------------- */
 
+/* A pool header is the leftmost min-block of a self-aligned pool: it always
+ * carries order==RAY_ORDER_MIN, mmod==0 and the sentinel rc==1 (it is never
+ * freed, so it never coalesces — see the pool-init at heap.c).  These three
+ * together uniquely identify a header: every cascade/split block has
+ * order>RAY_ORDER_MIN, and live/free blocks never hold rc==1+order==MIN+mmod==0
+ * at a 32 MB boundary.  ray_pool_of MUST gate EVERY header it returns on this
+ * signature — pool_order alone is not enough. */
+static inline bool ray_is_pool_hdr(ray_t* b) {
+    return b->order == RAY_ORDER_MIN && b->mmod == 0 &&
+           ray_atomic_load(&b->rc) == 1;
+}
+
 static inline ray_pool_hdr_t* ray_pool_of(ray_t* v) {
     /* Standard pools (32 MB, self-aligned): one AND gives the base.
      * Oversized pools need a downward walk but are rare. */
     uintptr_t stride = BSIZEOF(RAY_HEAP_POOL_ORDER);  /* 32 MB */
     uintptr_t base = (uintptr_t)v & ~(stride - 1);
+    ray_t* hb = (ray_t*)base;
     ray_pool_hdr_t* hdr = (ray_pool_hdr_t*)base;
 
-    /* Fast path: standard pool header at 32 MB boundary (99%+ of calls) */
-    if (RAY_LIKELY(hdr->pool_order == RAY_HEAP_POOL_ORDER))
-        return hdr;
+    /* Fast path: a real pool header sits at this 32 MB boundary (99%+ of
+     * calls).  Gate on the header signature, NOT pool_order alone: a
+     * 32 MB-aligned block in the INTERIOR of an oversized pool lands here
+     * too, and trusting its overlaid pool_order byte would resolve it to
+     * itself — after which heap_coalesce's buddy walk runs past the real
+     * mapping and faults at pool_base+0x14 (the rc field). */
+    if (RAY_LIKELY(ray_is_pool_hdr(hb))) {
+        if (hdr->pool_order == RAY_HEAP_POOL_ORDER)
+            return hdr;                          /* standard pool */
+        if (hdr->pool_order > RAY_HEAP_POOL_ORDER &&
+            hdr->pool_order <= RAY_HEAP_MAX_ORDER &&
+            (uintptr_t)v < base + BSIZEOF(hdr->pool_order))
+            return hdr;                          /* oversized header at boundary */
+    }
 
-    /* Slow path: oversized pool — walk downward at 32 MB stride */
-    if (hdr->pool_order > RAY_HEAP_POOL_ORDER &&
-        hdr->pool_order <= RAY_HEAP_MAX_ORDER &&
-        (uintptr_t)v < base + BSIZEOF(hdr->pool_order))
-        return hdr;
-
+    /* Oversized pool: the header is one or more 32 MB strides below v. */
     for (;;) {
         if (base < stride) break;
         base -= stride;
         hdr = (ray_pool_hdr_t*)base;
         ray_t* hdr_blk = (ray_t*)base;
-        if (hdr_blk->order == RAY_ORDER_MIN &&
-            hdr_blk->mmod == 0 &&
-            ray_atomic_load(&hdr_blk->rc) == 1) {
-            if (hdr->pool_order >= RAY_HEAP_POOL_ORDER &&
-                hdr->pool_order <= RAY_HEAP_MAX_ORDER &&
-                (uintptr_t)v < base + BSIZEOF(hdr->pool_order))
-                return hdr;
-        }
+        if (ray_is_pool_hdr(hdr_blk) &&
+            hdr->pool_order >= RAY_HEAP_POOL_ORDER &&
+            hdr->pool_order <= RAY_HEAP_MAX_ORDER &&
+            (uintptr_t)v < base + BSIZEOF(hdr->pool_order))
+            return hdr;
     }
-    ray_pool_hdr_t* fallback = (ray_pool_hdr_t*)((uintptr_t)v & ~(stride - 1));
-    if (fallback->pool_order >= RAY_HEAP_POOL_ORDER &&
-        fallback->pool_order <= RAY_HEAP_MAX_ORDER)
-        return fallback;
+
+    /* No signature-valid header covers v.  Pool headers are always at a
+     * 32 MB boundary, so the walk above sees every candidate; reaching here
+     * means v is not inside any live pool.  Returning a pool_order-only
+     * guess (the old fallback) reintroduces the very mis-resolution this
+     * function now guards against — report NULL instead and let callers
+     * (heap_flush_foreign etc.) drop the block. */
     return NULL;
 }
 
