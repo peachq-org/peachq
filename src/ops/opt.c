@@ -1446,7 +1446,7 @@ static int filter_cost(ray_graph_t* g, ray_op_t* pred) {
  * like LIKE last). An earlier table that ranked LIKE/!= as distinct buckets
  * regressed LIKE-heavy queries by running the substring scan first. */
 enum {
-    SEL_EQ_WIDE = 0,   /* == / in on I64/F64/SYM/STR: high-cardinality equality */
+    SEL_EQ_WIDE = 0,   /* == / in on I64/F64/STR: inherently large value space */
     SEL_EQ_MED  = 2,   /* == / in on I32/DATE/TIME: usually selective */
     SEL_NEUTRAL = 5,   /* everything else: unknown/data-dependent — defer to filter_cost */
 };
@@ -1466,16 +1466,24 @@ static int filter_selectivity_rank(ray_graph_t* g, ray_op_t* pred) {
     }
     if (!has_const) return SEL_NEUTRAL;
 
+    /* SYM is deliberately excluded from `wide`: it is dictionary-encoded, so
+     * its cardinality is the domain size (a low-card categorical may store as
+     * W8, a high-card one as W64).  That width/cardinality lives on the bound
+     * column, which this pass cannot see — only the logical RAY_SYM type — so
+     * assuming SYM equality is selective is unjustified.  Treat it as neutral
+     * and let filter_cost order it (consistent with the conservative rule:
+     * reorder only on a CONFIDENT static signal). */
     bool wide   = (col_type == RAY_I64 || col_type == RAY_F64 ||
-                   col_type == RAY_SYM || col_type == RAY_STR);
+                   col_type == RAY_STR);
     bool narrow = (col_type == RAY_BOOL || col_type == RAY_U8 ||
                    col_type == RAY_I16);
 
     switch (pred->opcode) {
         case OP_EQ:
         case OP_IN:
-            if (wide)   return SEL_EQ_WIDE;     /* I64/F64/SYM/STR */
+            if (wide)   return SEL_EQ_WIDE;     /* I64/F64/STR */
             if (narrow) return SEL_NEUTRAL;     /* BOOL/U8/I16 flags: non-selective */
+            if (col_type == RAY_SYM) return SEL_NEUTRAL;  /* card unknown statically */
             return SEL_EQ_MED;                  /* I32/DATE/TIME and other mid types */
         default:
             return SEL_NEUTRAL;                 /* range, !=, like/ilike, col-col, unknown */
