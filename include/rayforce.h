@@ -493,6 +493,7 @@ bool     ray_vec_is_null(ray_t* vec, int64_t idx);
 /* ===== String Vector API ===== */
 
 ray_t* ray_str_vec_append(ray_t* vec, const char* s, size_t len);
+ray_t* ray_str_vec_from_parts(const char* const* ptrs, const uint32_t* lens, const uint8_t* nulls, int64_t n);
 const char* ray_str_vec_get(ray_t* vec, int64_t idx, size_t* out_len);
 ray_t* ray_str_vec_set(ray_t* vec, int64_t idx, const char* s, size_t len);
 ray_t* ray_str_vec_insert_at(ray_t* vec, int64_t idx, const char* s, size_t len);
