@@ -664,9 +664,9 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
      * thrash dominates: `(!= URL nu)` standalone takes 113 ms when the
      * raw work is one i64 lookup + N width-truncated cmpneq.
      *
-     * Handles either operand order; output is RAY_BOOL.  Nulls go
-     * through the atom-vs-atom rules already in cmp.c (null≠value
-     * is true for NE) by applying the same logic per element. */
+     * Handles either operand order; output is RAY_BOOL.  SYM has no
+     * null (ray_vec_is_null / RAY_ATOM_IS_NULL are both false for SYM),
+     * so this is a pure value compare — no per-element null rules. */
     if (!force_boxed && (dag_opcode == OP_EQ || dag_opcode == OP_NE) &&
         out_type == RAY_BOOL) {
         int l_is_sym_vec = left_coll  && ray_is_vec(left)  && left->type  == RAY_SYM;
@@ -683,11 +683,8 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                 out->len = n;
                 bool*    obuf = (bool*)ray_data(out);
                 const void* src = ray_data(vv);
-                int8_t  vt = vv->type;
                 uint8_t va = vv->attrs;
-                int     atom_null = RAY_ATOM_IS_NULL(atom);
-                int64_t target = atom_null ? 0 : atom->i64;
-                int     vec_has_nulls = (va & RAY_ATTR_HAS_NULLS) ? 1 : 0;
+                int64_t target = atom->i64;
                 bool    invert = (dag_opcode == OP_NE);
 
                 /* sym-domain Phase 2: the loops below compare RAW cell
@@ -695,34 +692,29 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                  * atom carries a runtime id — re-express it in the
                  * column's domain once before the loops.  Runtime-domain
                  * columns keep the raw id (byte-identical fast path).
-                 * Literal absent from the domain ⇒ equals no cell and,
-                 * with a non-null atom, no null row either: == all-false,
-                 * != all-true — same as the per-element atom rules. */
+                 * Literal absent from the domain ⇒ equals no cell (SYM has
+                 * no null, so there is no null row either): == all-false,
+                 * != all-true. */
                 int target_absent = 0;
-                if (!atom_null) {
-                    struct ray_sym_domain_s* dom = ray_sym_vec_domain(vv);
-                    if (dom != ray_sym_runtime_domain()) {
-                        ray_t* ts = ray_sym_str(atom->i64);
-                        int64_t pos = ts ? ray_sym_domain_find(dom,
-                                              ray_str_ptr(ts),
-                                              ray_str_len(ts))
-                                         : -1;
-                        if (pos >= 0) target = pos;
-                        else          target_absent = 1;
-                    }
+                struct ray_sym_domain_s* dom = ray_sym_vec_domain(vv);
+                if (dom != ray_sym_runtime_domain()) {
+                    ray_t* ts = ray_sym_str(atom->i64);
+                    int64_t pos = ts ? ray_sym_domain_find(dom,
+                                          ray_str_ptr(ts),
+                                          ray_str_len(ts))
+                                     : -1;
+                    if (pos >= 0) target = pos;
+                    else          target_absent = 1;
                 }
 
                 if (target_absent) {
                     bool fill = invert; /* != absent → true; == absent → false */
                     for (int64_t i = 0; i < n; i++) obuf[i] = fill;
-                } else if (atom_null && !vec_has_nulls) {
-                    /* Atom is null, vec has no nulls — every row is
-                     * "not equal" to the null atom (== false, != true). */
-                    bool fill = invert; /* != null → true; == null → false */
-                    for (int64_t i = 0; i < n; i++) obuf[i] = fill;
-                } else if (!atom_null && !vec_has_nulls) {
-                    /* Hot path: tight per-width loop, no per-element
-                     * null checks. */
+                } else {
+                    /* SYM has no null: ray_vec_is_null and RAY_ATOM_IS_NULL are
+                     * both constant-false for SYM, so the compare reduces to a
+                     * tight per-width raw-id loop with no per-element null
+                     * checks. */
                     uint8_t w = (uint8_t)(va & RAY_SYM_W_MASK);
                     if (w == RAY_SYM_W8) {
                         const uint8_t* d = (const uint8_t*)src;
@@ -743,21 +735,6 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                         const int64_t* d = (const int64_t*)src;
                         for (int64_t i = 0; i < n; i++)
                             obuf[i] = (d[i] == target) ^ invert;
-                    }
-                } else {
-                    /* General path: vec may have nulls, atom may be null.
-                     * Apply atom-rules per element so semantics match
-                     * the slow path exactly. */
-                    for (int64_t i = 0; i < n; i++) {
-                        int row_null = ray_vec_is_null(vv, i);
-                        int eq;
-                        if (row_null && atom_null)      eq = 1;
-                        else if (row_null || atom_null) eq = 0;
-                        else {
-                            int64_t row_id = ray_read_sym(src, i, vt, va);
-                            eq = (row_id == target);
-                        }
-                        obuf[i] = invert ? !eq : eq;
                     }
                 }
                 ray_release(e0);
