@@ -492,7 +492,7 @@ static int8_t resolve_type_name(int64_t sym_id) {
     else if (len == 3 && memcmp(name, "I32", 3) == 0) result = RAY_I32;
     else if (len == 3 && memcmp(name, "I16", 3) == 0) result = RAY_I16;
     /* INT — schema-only marker; csv.c resolves it to the narrowest int width
-     * (BOOL/U8/I16/I32/I64) from the column's parsed min/max/has_null. */
+     * (I16/I32/I64) from the column's parsed min/max/has_null. */
     else if (len == 3 && memcmp(name, "INT", 3) == 0) result = RAY_CSV_AUTO_TAG;
     else if (len == 3 && memcmp(name, "F64", 3) == 0) result = RAY_F64;
     else if (len == 2 && memcmp(name, "B8", 2) == 0) result = RAY_BOOL;
