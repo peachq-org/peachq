@@ -1404,8 +1404,6 @@ static int csv_should_attach_hash(ray_t* v) {
 /* Map a resolved narrow-int CSV width back to its RAY column type. */
 static int8_t csv_auto_width_to_ray(csv_type_t w) {
     switch (w) {
-        case CSV_TYPE_BOOL: return RAY_BOOL;
-        case CSV_TYPE_U8:   return RAY_U8;
         case CSV_TYPE_I16:  return RAY_I16;
         case CSV_TYPE_I32:  return RAY_I32;
         default:            return RAY_I64;

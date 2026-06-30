@@ -61,9 +61,10 @@ typedef enum {
 #define RAY_CSV_AUTO_TAG 120
 
 /* Resolve the narrowest integer column type that can hold all values in
- * [min, max].  BOOL and U8 have no null sentinel, so a nullable column
- * always resolves to a signed type (I16/I32/I64) that excludes INT_MIN.
- * When min > max (empty or all-null column) returns CSV_TYPE_I64. */
+ * [min, max].  Returns I16/I32/I64 only (floor I16; U8/BOOL excluded because
+ * they lack null sentinels and render as hex/bool).  Nullable columns exclude
+ * the INT_MIN sentinel.  When min > max (empty or all-null column) returns
+ * CSV_TYPE_I64. */
 csv_type_t csv_resolve_int_width(int64_t min, int64_t max, bool has_null);
 
 ray_t* ray_read_csv(const char* path);
