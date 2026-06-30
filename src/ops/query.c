@@ -4086,6 +4086,29 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
         return NULL;
     }
 
+    int64_t pre_nrows = ray_table_nrows(tbl);
+
+    /* Fused predicate→selection: count directly off the streamed rowsel,
+     * skipping the full BOOL vec + the BOOL→rowsel scan.  Unsupported shapes
+     * (or RAY_NO_FUSED_SEL) fall through to the exec_node path below. */
+    if (fused_sel_supported(g, pred)) {
+        bool all_pass = false;
+        ray_t* fsel = exec_pred_to_selection(g, pred, pre_nrows, &all_pass);
+        if (all_pass || fsel) {
+            int64_t nrows = pre_nrows;
+            if (fsel) {
+                ray_rowsel_t* sm = ray_rowsel_meta(fsel);
+                nrows = sm ? sm->total_pass : 0;
+                ray_release(fsel);
+            }
+            if (handled) *handled = 1;
+            ray_graph_free(g);
+            ray_release(tbl);
+            return ray_i64(nrows);
+        }
+        /* unsupported / OOM — fall through to the bool path. */
+    }
+
     ray_t* pred_vec = exec_node(g, pred);
     if (!pred_vec || RAY_IS_ERR(pred_vec)) {
         ray_graph_free(g);
