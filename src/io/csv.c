@@ -1386,6 +1386,140 @@ static int csv_should_attach_hash(ray_t* v) {
     return 1;
 }
 
+/* --------------------------------------------------------------------------
+ * `INT` schema columns — auto narrowest integer width.
+ *
+ * The `INT` schema token arrives as RAY_CSV_AUTO_TAG in resolved_types[].
+ * Width is a whole-column property (the narrowest type holding every value),
+ * so it must be resolved over ALL rows before any column is allocated — the
+ * streaming splayed/parted writers materialize the file in 1M-row chunks and
+ * the splayed column writer is opened with a fixed width, so a per-chunk
+ * narrowing would diverge across chunks/partitions.  We therefore make a
+ * single stats scan (min/max/has_null over non-null int64 values), resolve to
+ * a concrete width, and rewrite resolved_types[] in place.  Downstream the
+ * column then flows through the existing explicit-width parse/write path
+ * unchanged — there is no CSV_TYPE_AUTO parse case.
+ * -------------------------------------------------------------------------- */
+
+/* Map a resolved narrow-int CSV width back to its RAY column type. */
+static int8_t csv_auto_width_to_ray(csv_type_t w) {
+    switch (w) {
+        case CSV_TYPE_BOOL: return RAY_BOOL;
+        case CSV_TYPE_U8:   return RAY_U8;
+        case CSV_TYPE_I16:  return RAY_I16;
+        case CSV_TYPE_I32:  return RAY_I32;
+        default:            return RAY_I64;
+    }
+}
+
+/* Accumulate per-column min/max/has_null over a block of rows for the columns
+ * flagged RAY_CSV_AUTO_TAG in resolved_types; non-AUTO columns are skipped.
+ * Mirrors the field-walk (and short-row null handling) of csv_parse_serial. */
+static void csv_auto_scan_rows(const char* buf, const char* buf_end,
+                               const int64_t* row_offsets, int64_t n_rows,
+                               int ncols, char delim,
+                               const int8_t* resolved_types,
+                               int64_t* col_min, int64_t* col_max,
+                               bool* col_had_null) {
+    char esc_buf[8192];
+    for (int64_t row = 0; row < n_rows; row++) {
+        const char* p = buf + row_offsets[row];
+        const char* row_end = (row + 1 < n_rows)
+            ? buf + row_offsets[row + 1] : buf_end;
+        for (int c = 0; c < ncols; c++) {
+            if (p >= row_end) {
+                /* Short row — remaining AUTO cells are empty (null). */
+                for (; c < ncols; c++)
+                    if (resolved_types[c] == RAY_CSV_AUTO_TAG)
+                        col_had_null[c] = true;
+                break;
+            }
+            const char* fld;
+            size_t flen;
+            char* dyn_esc = NULL;
+            p = scan_field(p, buf_end, delim, &fld, &flen, esc_buf, &dyn_esc);
+            if (c == ncols - 1 && flen > 0 && fld[flen - 1] == '\r') flen--;
+            if (resolved_types[c] == RAY_CSV_AUTO_TAG) {
+                bool is_null;
+                int64_t v = fast_i64(fld, flen, &is_null);
+                if (is_null) {
+                    col_had_null[c] = true;
+                } else {
+                    if (v < col_min[c]) col_min[c] = v;
+                    if (v > col_max[c]) col_max[c] = v;
+                }
+            }
+            if (RAY_UNLIKELY(dyn_esc != NULL)) ray_sys_free(dyn_esc);
+        }
+    }
+}
+
+/* Resolve every RAY_CSV_AUTO_TAG column in resolved_types[] to a concrete
+ * width using a stats scan over the already-built whole-file row_offsets.
+ * No-op when the schema carries no `INT` column. */
+static void csv_resolve_auto_in_place(const char* buf, size_t file_size,
+                                      const int64_t* row_offsets, int64_t n_rows,
+                                      int ncols, char delim,
+                                      int8_t* resolved_types) {
+    bool any = false;
+    for (int c = 0; c < ncols; c++)
+        if (resolved_types[c] == RAY_CSV_AUTO_TAG) any = true;
+    if (!any) return;
+
+    int64_t col_min[CSV_MAX_COLS], col_max[CSV_MAX_COLS];
+    bool col_had_null[CSV_MAX_COLS];
+    for (int c = 0; c < ncols; c++) {
+        col_min[c] = INT64_MAX; col_max[c] = INT64_MIN; col_had_null[c] = false;
+    }
+    csv_auto_scan_rows(buf, buf + file_size, row_offsets, n_rows, ncols, delim,
+                       resolved_types, col_min, col_max, col_had_null);
+    for (int c = 0; c < ncols; c++)
+        if (resolved_types[c] == RAY_CSV_AUTO_TAG)
+            resolved_types[c] = csv_auto_width_to_ray(
+                csv_resolve_int_width(col_min[c], col_max[c], col_had_null[c]));
+}
+
+/* Same as csv_resolve_auto_in_place, but for the streaming writers which never
+ * build whole-file offsets: stream the file in chunks accumulating stats,
+ * then resolve.  Bounded memory (one chunk of offsets at a time). */
+static void csv_resolve_auto_streamed(const char* buf, size_t file_size,
+                                      size_t data_offset, int ncols, char delim,
+                                      bool data_has_quotes,
+                                      int8_t* resolved_types) {
+    bool any = false;
+    for (int c = 0; c < ncols; c++)
+        if (resolved_types[c] == RAY_CSV_AUTO_TAG) any = true;
+    if (!any) return;
+
+    int64_t col_min[CSV_MAX_COLS], col_max[CSV_MAX_COLS];
+    bool col_had_null[CSV_MAX_COLS];
+    for (int c = 0; c < ncols; c++) {
+        col_min[c] = INT64_MAX; col_max[c] = INT64_MIN; col_had_null[c] = false;
+    }
+
+    size_t off = data_offset;
+    while (off < file_size) {
+        ray_t* hdr = NULL;
+        int64_t* roff = NULL;
+        size_t next = off;
+        int64_t cnt = build_row_offsets_limited(buf, file_size, off,
+                                                CSV_PART_ROWS_DEFAULT,
+                                                data_has_quotes,
+                                                &roff, &hdr, &next);
+        if (cnt <= 0) { scratch_free(hdr); break; }
+        csv_auto_scan_rows(buf, buf + file_size, roff, cnt, ncols, delim,
+                           resolved_types, col_min, col_max, col_had_null);
+        scratch_free(hdr);
+        if (next <= off) break;
+        off = next;
+    }
+
+    for (int c = 0; c < ncols; c++)
+        if (resolved_types[c] == RAY_CSV_AUTO_TAG)
+            resolved_types[c] = csv_auto_width_to_ray(
+                csv_resolve_int_width(col_min[c], col_max[c], col_had_null[c]));
+}
+
 static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
                                    const int64_t* row_offsets, int64_t n_rows,
                                    int ncols, char delimiter,
@@ -1769,7 +1903,9 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
         /* Explicit types provided by caller — validate against known types */
         for (int c = 0; c < ncols; c++) {
             int8_t t = col_types_in[c];
-            if (t < RAY_BOOL || t >= RAY_TYPE_COUNT || t == RAY_TABLE) {
+            if (t < RAY_BOOL ||
+                (t >= RAY_TYPE_COUNT && t != RAY_CSV_AUTO_TAG) ||
+                t == RAY_TABLE) {
                 /* Invalid type constant — fall through to error */
                 goto fail_offsets;
             }
@@ -1811,6 +1947,12 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
         /* col_types_in provided but too short — error */
         goto fail_offsets;
     }
+
+    /* `INT` schema columns: resolve to a concrete narrowest width over all
+     * rows before allocating vectors, so the explicit-width path below sees a
+     * real type. */
+    csv_resolve_auto_in_place(buf, file_size, row_offsets, n_rows,
+                              ncols, delimiter, resolved_types);
 
     /* ---- 8. Allocate column vectors ---- */
     ray_t* col_vecs[CSV_MAX_COLS];
@@ -2281,7 +2423,9 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
     if (col_types_in && n_types >= ncols) {
         for (int c = 0; c < ncols; c++) {
             int8_t t = col_types_in[c];
-            if (t < RAY_BOOL || t >= RAY_TYPE_COUNT || t == RAY_TABLE) {
+            if (t < RAY_BOOL ||
+                (t >= RAY_TYPE_COUNT && t != RAY_CSV_AUTO_TAG) ||
+                t == RAY_TABLE) {
                 munmap(buf, file_size);
                 return RAY_ERR_TYPE;
             }
@@ -2354,6 +2498,11 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
             return err;
         }
     }
+
+    /* `INT` schema columns: resolve to a concrete narrowest width over the
+     * whole file before opening the fixed-width streaming column writers. */
+    csv_resolve_auto_streamed(buf, file_size, data_offset, ncols, delimiter,
+                              data_has_quotes, resolved_types);
 
     err = ray_mkdir_p(dir);
     if (err != RAY_OK) {
@@ -2604,7 +2753,9 @@ ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool 
     if (col_types_in && n_types >= ncols) {
         for (int c = 0; c < ncols; c++) {
             int8_t t = col_types_in[c];
-            if (t < RAY_BOOL || t >= RAY_TYPE_COUNT || t == RAY_TABLE) {
+            if (t < RAY_BOOL ||
+                (t >= RAY_TYPE_COUNT && t != RAY_CSV_AUTO_TAG) ||
+                t == RAY_TABLE) {
                 munmap(buf, file_size);
                 return RAY_ERR_TYPE;
             }
@@ -2650,6 +2801,11 @@ ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool 
         munmap(buf, file_size);
         return RAY_ERR_TYPE;
     }
+
+    /* `INT` schema columns: resolve to a concrete narrowest width over the
+     * whole file so every partition writes the same column type. */
+    csv_resolve_auto_streamed(buf, file_size, data_offset, ncols, delimiter,
+                              data_has_quotes, resolved_types);
 
     err = ray_mkdir_p(root);
     if (err != RAY_OK) {
