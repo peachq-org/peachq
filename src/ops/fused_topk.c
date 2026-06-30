@@ -166,6 +166,22 @@ static inline int fpk_cmp(const fpk_par_ctx_t* c, int64_t row_a, int64_t row_b) 
             }
             if (!sa || !sb) continue;
             cmp = ray_str_cmp(sa, sb);
+        } else if (ks->type == RAY_STR) {
+            /* Variable-length STR key: compare the actual strings (dict
+             * codes, if any, are first-occurrence order — not sorted).
+             * No null per the kdb+ STR model; empty "" is a normal value. */
+            size_t la = 0, lb = 0;
+            const char* sa = ray_str_vec_get(ks->col, row_a, &la);
+            const char* sb = ray_str_vec_get(ks->col, row_b, &lb);
+            if (!sa) sa = "";
+            if (!sb) sb = "";
+            size_t ml = la < lb ? la : lb;
+            cmp = ml ? memcmp(sa, sb, ml) : 0;
+            if (cmp == 0) {
+                if (la < lb) cmp = -1;
+                else if (la > lb) cmp = 1;
+            }
+            if (cmp == 0) continue;
         } else if (ks->esz == 8) {
             int64_t va = ((const int64_t*)ks->base)[row_a];
             int64_t vb = ((const int64_t*)ks->base)[row_b];
@@ -307,7 +323,7 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
         if (!col) return NULL;
         int8_t kt = col->type;
         if (RAY_IS_PARTED(kt) || kt == RAY_MAPCOMMON) return NULL;
-        if (kt != RAY_SYM && kt != RAY_BOOL && kt != RAY_U8
+        if (kt != RAY_SYM && kt != RAY_STR && kt != RAY_BOOL && kt != RAY_U8
             && kt != RAY_I16 && kt != RAY_I32 && kt != RAY_I64
             && kt != RAY_DATE && kt != RAY_TIME && kt != RAY_TIMESTAMP)
             return NULL;
