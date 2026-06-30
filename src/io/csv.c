@@ -123,23 +123,25 @@ typedef struct {
  * Type inference
  * -------------------------------------------------------------------------- */
 
-typedef enum {
-    CSV_TYPE_UNKNOWN = 0,
-    CSV_TYPE_BOOL,
-    CSV_TYPE_I64,
-    CSV_TYPE_F64,
-    CSV_TYPE_STR,
-    CSV_TYPE_DATE,
-    CSV_TYPE_TIME,
-    CSV_TYPE_TIMESTAMP,
-    CSV_TYPE_GUID,
-    /* Narrow-int parse types — selected only via explicit schema (never from
-     * inference, so they do not appear in promote_csv_type). Each parses the
-     * field as int64 and narrows at write time to match the column width. */
-    CSV_TYPE_U8,
-    CSV_TYPE_I16,
-    CSV_TYPE_I32
-} csv_type_t;
+/* csv_type_t enum (incl. CSV_TYPE_AUTO) is defined in csv.h */
+
+/* Narrowest integer width holding [min,max].  BOOL/U8 are non-nullable (no
+ * sentinel slot) so a nullable column needs a signed sentinel type whose data
+ * excludes INT_MIN (NULL_Iw).  min>max means no finite values (empty/all-null)
+ * -> safe I64. */
+csv_type_t csv_resolve_int_width(int64_t min, int64_t max, bool has_null) {
+    if (min > max) return CSV_TYPE_I64;
+    if (has_null) {
+        if (min > NULL_I16 && max <= INT16_MAX) return CSV_TYPE_I16;
+        if (min > NULL_I32 && max <= INT32_MAX) return CSV_TYPE_I32;
+        return CSV_TYPE_I64;
+    }
+    if (min >= 0 && max <= 1)                  return CSV_TYPE_BOOL;
+    if (min >= 0 && max <= 255)                return CSV_TYPE_U8;
+    if (min >= INT16_MIN && max <= INT16_MAX)  return CSV_TYPE_I16;
+    if (min >= INT32_MIN && max <= INT32_MAX)  return CSV_TYPE_I32;
+    return CSV_TYPE_I64;
+}
 
 static csv_type_t detect_type(const char* f, size_t len) {
     if (len == 0) return CSV_TYPE_UNKNOWN;

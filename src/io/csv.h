@@ -25,6 +25,39 @@
 #define RAY_CSV_H
 
 #include <rayforce.h>
+#include <stdbool.h>
+
+/* --------------------------------------------------------------------------
+ * Column type tokens used during CSV parse and schema resolution.
+ * CSV_TYPE_AUTO is a parse-time marker only — never a stored width and never
+ * returned by csv_resolve_int_width.
+ * -------------------------------------------------------------------------- */
+typedef enum {
+    CSV_TYPE_UNKNOWN = 0,
+    CSV_TYPE_BOOL,
+    CSV_TYPE_I64,
+    CSV_TYPE_F64,
+    CSV_TYPE_STR,
+    CSV_TYPE_DATE,
+    CSV_TYPE_TIME,
+    CSV_TYPE_TIMESTAMP,
+    CSV_TYPE_GUID,
+    /* Narrow-int parse types — selected only via explicit schema (never from
+     * inference, so they do not appear in promote_csv_type). Each parses the
+     * field as int64 and narrows at write time to match the column width. */
+    CSV_TYPE_U8,
+    CSV_TYPE_I16,
+    CSV_TYPE_I32,
+    /* Marker for "pick the narrowest integer width automatically" — used only
+     * during schema processing, never returned by the resolver. */
+    CSV_TYPE_AUTO
+} csv_type_t;
+
+/* Resolve the narrowest integer column type that can hold all values in
+ * [min, max].  BOOL and U8 have no null sentinel, so a nullable column
+ * always resolves to a signed type (I16/I32/I64) that excludes INT_MIN.
+ * When min > max (empty or all-null column) returns CSV_TYPE_I64. */
+csv_type_t csv_resolve_int_width(int64_t min, int64_t max, bool has_null);
 
 ray_t* ray_read_csv(const char* path);
 ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
