@@ -222,17 +222,39 @@ void rowsel_builder_init(rowsel_builder_t* b, uint32_t n_segs);
 /* Classify one morsel's `n` bools (n <= RAY_MORSEL_ELEMS) into segment
  * `seg`: NONE if zero set, ALL if all set, else MIX with the
  * morsel-local uint16 positions of set bits appended to idx[].
- * Accumulates total_pass.  Segments must be emitted in ascending
- * `seg` order within a builder. */
+ * Accumulates total_pass.
+ *
+ * CONTRACT: `seg` is a builder-LOCAL index in [0, b->n_segs).  It is
+ * NOT a global segment id.  A parallel caller that partitions segments
+ * across workers must give each worker its own builder covering only its
+ * assigned range [local_start, local_end), and pass builder-relative
+ * indices (0 .. local_n_segs-1) to rowsel_emit_segment — NOT the
+ * global segment numbers.  Passing a global id would index
+ * b->seg_flags[]/b->seg_off[] past their allocated size, silently
+ * corrupting the heap.
+ *
+ * Segments must be emitted in strictly ascending `seg` order within a
+ * builder (i.e. seg=0, 1, 2, … in order — gaps are not allowed).
+ *
+ * For rowsel_builder_finish over multiple builders: the workers'
+ * builder-local segment ranges must concatenate, in worker order, to
+ * the complete global segment range [0, n_segs); equivalently,
+ * sum(builders[w].n_segs for w in 0..n_workers) must equal the block's
+ * global n_segs = ceil(nrows / RAY_MORSEL_ELEMS). */
 void rowsel_emit_segment(rowsel_builder_t* b, uint32_t seg,
                          const uint8_t* morsel_bool, int64_t n);
 
 /* Concatenate `n_workers` builders (segment ranges globally ordered by
- * seg) into a fresh ray_rowsel_new(nrows, total_pass, idx_count) block
- * with the standard layout: seg_flags, seg_offsets (prefix sum into
- * idx[]), idx[].  Byte-identical to ray_rowsel_from_pred over the same
- * bools.  Frees each builder's scratch arrays before returning.
- * Returns NULL on OOM. */
+ * worker index) into a fresh ray_rowsel_new(nrows, total_pass, idx_count)
+ * block with the standard layout: seg_flags, seg_offsets (prefix sum
+ * into idx[]), idx[].  Byte-identical to ray_rowsel_from_pred over the
+ * same bools.  Frees each builder's scratch arrays before returning.
+ * Returns NULL on OOM.
+ *
+ * INVARIANT: sum(builders[w].n_segs for w in 0..n_workers) must equal
+ * ceil(nrows / RAY_MORSEL_ELEMS).  Violated if a partition over-covers
+ * (asserts) or under-covers (asserts); either would leave seg_flags[]
+ * entries uninitialized (ray_alloc does NOT zero the data area). */
 ray_t* rowsel_builder_finish(rowsel_builder_t* builders, uint32_t n_workers,
                              int64_t nrows);
 
