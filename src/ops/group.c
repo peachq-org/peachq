@@ -5600,7 +5600,32 @@ static ray_t* dict_codes_to_str(const ray_t* codes_col, ray_t* src_col,
     int64_t n = codes_col->len, ndist = dix->u.dict.n_distinct;
     const int32_t* cd   = (const int32_t*)ray_data((ray_t*)codes_col);
     const int32_t* focc = (const int32_t*)ray_data(dix->u.dict.first_occ);
-    ray_t* out = ray_vec_new(RAY_STR, n > 0 ? n : 1);
+    if (n <= 0) return ray_vec_new(RAY_STR, 1);
+    /* Bulk-build in one pass: gather each group's source-string (ptr,len) — the
+     * pointers are stable into src_col's descriptors/pool — then ray_str_vec_
+     * from_parts sizes the pool once, avoiding the per-append realloc/COW (the
+     * memmove that dominated dict_codes_to_str). */
+    const char** ptrs = (const char**)ray_alloc_raw((size_t)n * sizeof(const char*));
+    uint32_t*    lens = (uint32_t*)ray_alloc_raw((size_t)n * sizeof(uint32_t));
+    if (ptrs && lens) {
+        for (int64_t i = 0; i < n; i++) {
+            int32_t code = cd[i];
+            if (code < 0 || code >= ndist) { ptrs[i] = ""; lens[i] = 0; }
+            else {
+                size_t vl; const char* vp = ray_str_vec_get(src_col, focc[code], &vl);
+                ptrs[i] = vp ? vp : "";
+                lens[i] = vp ? (uint32_t)vl : 0;
+            }
+        }
+        ray_t* out = ray_str_vec_from_parts(ptrs, lens, NULL, n);
+        ray_free_raw(ptrs);
+        ray_free_raw(lens);
+        return out;
+    }
+    if (ptrs) ray_free_raw(ptrs);
+    if (lens) ray_free_raw(lens);
+    /* Fallback: per-append build (rare OOM of the scratch arrays). */
+    ray_t* out = ray_vec_new(RAY_STR, n);
     if (!out || RAY_IS_ERR(out)) return out;
     for (int64_t i = 0; i < n; i++) {
         int32_t code = cd[i];
