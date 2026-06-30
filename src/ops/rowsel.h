@@ -184,4 +184,56 @@ ray_t* ray_rowsel_to_indices(ray_t* sel);
  * the old selection after replacing it. */
 ray_t* ray_rowsel_refine(ray_t* existing, ray_t* pred);
 
+/* ──────────────────────────────────────────────────────────────────
+ * Streaming builder — per-morsel selection emitter
+ *
+ * Foundation for the fused predicate→selection path: instead of
+ * materializing a whole-table RAY_BOOL vec and scanning it twice with
+ * ray_rowsel_from_pred, a predicate op streams each morsel's bools
+ * through rowsel_emit_segment as it produces them.  The builder
+ * classifies each segment NONE/ALL/MIX and accumulates the MIX
+ * morsel-local indices into a growable scratch array; rowsel_builder_
+ * finish then lays the accumulated state into a standard ray_rowsel_new
+ * block whose bytes are identical to the whole-vec path's output.
+ *
+ * A builder owns a contiguous, ascending range of segments and must
+ * receive emit_segment calls in increasing `seg` order.  finish takes
+ * an array of per-worker builders whose segment ranges concatenate, in
+ * order, to cover [0, n_segs); for the single-threaded case n_workers
+ * is 1.
+ * ────────────────────────────────────────────────────────────────── */
+typedef struct {
+    uint8_t*  seg_flags;   /* [n_segs] RAY_SEL_NONE/ALL/MIX             */
+    uint32_t* seg_off;     /* [n_segs+1] prefix sum into this builder's
+                            * idx[] (count for seg s is
+                            * seg_off[s+1] - seg_off[s])                */
+    uint16_t* idx;         /* growable; MIX morsel-local indices        */
+    uint32_t  n_segs;      /* segments this builder covers              */
+    uint32_t  idx_cap;     /* idx[] capacity in uint16_t entries        */
+    uint32_t  idx_len;     /* idx[] occupancy in uint16_t entries       */
+    int64_t   total_pass;  /* passing rows (ALL + MIX) across segments  */
+} rowsel_builder_t;
+
+/* Initialize a builder to cover `n_segs` segments.  Allocates
+ * seg_flags[n_segs], seg_off[n_segs+1], and a geometrically growable
+ * idx[] via the raw allocator.  All counters start at zero. */
+void rowsel_builder_init(rowsel_builder_t* b, uint32_t n_segs);
+
+/* Classify one morsel's `n` bools (n <= RAY_MORSEL_ELEMS) into segment
+ * `seg`: NONE if zero set, ALL if all set, else MIX with the
+ * morsel-local uint16 positions of set bits appended to idx[].
+ * Accumulates total_pass.  Segments must be emitted in ascending
+ * `seg` order within a builder. */
+void rowsel_emit_segment(rowsel_builder_t* b, uint32_t seg,
+                         const uint8_t* morsel_bool, int64_t n);
+
+/* Concatenate `n_workers` builders (segment ranges globally ordered by
+ * seg) into a fresh ray_rowsel_new(nrows, total_pass, idx_count) block
+ * with the standard layout: seg_flags, seg_offsets (prefix sum into
+ * idx[]), idx[].  Byte-identical to ray_rowsel_from_pred over the same
+ * bools.  Frees each builder's scratch arrays before returning.
+ * Returns NULL on OOM. */
+ray_t* rowsel_builder_finish(rowsel_builder_t* builders, uint32_t n_workers,
+                             int64_t nrows);
+
 #endif /* RAY_ROWSEL_H */
