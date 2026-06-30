@@ -68,13 +68,8 @@ static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
             return ((const int32_t*)p)[idx] == NULL_I32;
         case RAY_I16:
             return ((const int16_t*)p)[idx] == NULL_I16;
-        case RAY_SYM:
-            switch (v->attrs & 0x3) {
-                case RAY_SYM_W8:  return ((const uint8_t*)p)[idx]  == 0;
-                case RAY_SYM_W16: return ((const uint16_t*)p)[idx] == 0;
-                case RAY_SYM_W32: return ((const uint32_t*)p)[idx] == 0;
-                default:          return ((const int64_t*)p)[idx]  == 0;
-            }
+        /* SYM has no null (kdb+ model: sym id 0 is the empty value, not null) —
+         * no arm here; ray_vec_is_null short-circuits SYM before this switch. */
         case RAY_STR:
             return ((const ray_str_t*)p)[idx].len == 0;
         case RAY_GUID: {
