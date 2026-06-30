@@ -441,7 +441,10 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
         case RAY_DATE:
         case RAY_TIME:      return x->i32 == NULL_I32;
         case RAY_I16:       return x->i16 == NULL_I16;
-        case RAY_SYM:       return x->i64 == 0;
+        case RAY_SYM:
+            /* SYM has no null — sym 0 is the empty symbol ' (a value), mirroring
+             * STR's empty "" below.  A SYM atom is never null. */
+            return false;
         case RAY_STR:
             /* STR has no null distinct from "" (kdb+ model: char lists have no
              * null, only symbols do).  A STR atom is never null — the empty

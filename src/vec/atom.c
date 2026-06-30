@@ -200,6 +200,11 @@ ray_t* ray_typed_null(int8_t type) {
         case -RAY_I64: case -RAY_TIMESTAMP:            v->i64 = NULL_I64; break;
         case -RAY_I32: case -RAY_DATE: case -RAY_TIME: v->i32 = NULL_I32; break;
         case -RAY_I16:                                 v->i16 = NULL_I16; break;
+        case -RAY_SYM:
+            /* SYM has no null — a SYM "typed null" is just the empty symbol '
+             * (sym 0), a value, mirroring STR.  No aux[0] null bit. */
+            v->i64 = 0;
+            return v;
         default:                                       v->i64 = 0; break;
     }
     v->aux[0] |= 1;
