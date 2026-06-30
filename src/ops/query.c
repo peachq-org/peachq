@@ -5435,7 +5435,11 @@ by_dict_done:
                 if (!key_col) continue;
                 int8_t kct = key_col->type;
                 if (RAY_IS_PARTED(kct)) kct = (int8_t)RAY_PARTED_BASETYPE(kct);
-                if (kct == RAY_LIST || kct == RAY_STR) {
+                /* A dict-encoded STR key takes the DAG path: exec_group
+                 * substitutes its int32 codes, so the composite groups as fast
+                 * ints (like SYM) instead of the O(N*ngroups) eval grouper. */
+                if (kct == RAY_LIST ||
+                    (kct == RAY_STR && ray_index_kind(key_col) != RAY_IDX_DICT)) {
                     use_eval_group = 1;
                     break;
                 }
