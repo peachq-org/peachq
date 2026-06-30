@@ -352,9 +352,10 @@ static const char* null_literal(int8_t type) {
     case RAY_DATE:      return "0Nd";
     case RAY_TIME:      return "0Nt";
     case RAY_TIMESTAMP: return "0Np";
-    case RAY_SYM:       return "'";  /* SYM has no null; the empty symbol shows as ' */
-    /* RAY_STR has no null literal: empty and null strings both render
-     * as "" (handled directly by the STR paths, never via this table). */
+    /* SYM has no null literal: the empty symbol is a value (renders as ')
+     * and never reaches this table — callers gate on null, false for SYM.
+     * RAY_STR likewise has no null literal: empty and null strings both
+     * render as "" (handled directly by the STR paths, never via this table). */
     case RAY_GUID:      return "0Ng";
     default:            return "null";
     }
