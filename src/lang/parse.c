@@ -201,17 +201,8 @@ static ray_t* parse_number(ray_parser_t *p) {
         case 'p': p->pos += 3; return ray_typed_null(-RAY_TIMESTAMP);
         case 'l': p->pos += 3; return ray_typed_null(-RAY_I64);
         case 'f': p->pos += 3; return ray_typed_null(-RAY_F64);
-        /* SYM has no typed null — sym 0 (the empty string, reserved
-         * by ray_sym_init) is the canonical "missing" value.  Parse
-         * `0Ns` as the empty symbol so legacy literal text stays
-         * accepted; new code should write `'` (parse_symbol below)
-         * for the same value. */
-        case 's': {
-            p->pos += 3;
-            ray_t* s = ray_sym(0);  /* 0Ns is the literal empty symbol (legacy spelling of ') */
-            if (!RAY_IS_ERR(s)) s->attrs |= ATTR_QUOTED;
-            return s;
-        }
+        /* SYM has no typed null and no `0Ns` literal.  The empty symbol
+         * (sym 0) is written `'` (parse_symbol below). */
         }
         /* Bare 0N: only if the next char is not an identifier continuation
          * (letter/digit/underscore), else fall through to plain number. */
