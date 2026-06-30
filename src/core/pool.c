@@ -32,8 +32,8 @@
 /* Task granularity: RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS elements per task */
 #define TASK_GRAIN  ((int64_t)RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS)
 
-/* Maximum ring capacity (power of 2) */
-#define MAX_RING_CAP  (1u << 16)
+/* Maximum ring capacity (power of 2) — mirrors RAY_POOL_MAX_TASKS in pool.h */
+#define MAX_RING_CAP  RAY_POOL_MAX_TASKS
 
 /* --------------------------------------------------------------------------
  * Worker thread entry
