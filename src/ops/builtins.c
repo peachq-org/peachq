@@ -76,7 +76,7 @@ static const char* null_literal_str(int8_t type) {
         case RAY_DATE:      return "0Nd";
         case RAY_TIME:      return "0Nt";
         case RAY_TIMESTAMP: return "0Np";
-        case RAY_SYM:       return "0Ns";
+        case RAY_SYM:       return "'";  /* SYM has no null; the empty symbol shows as ' */
         default:            return "null";
     }
 }
@@ -217,6 +217,8 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
                 if (ss) {
                     const char* sp = ray_str_ptr(ss);
                     size_t sl = ray_str_len(ss);
+                    /* sym 0 resolves to "" — the empty symbol shows as ' */
+                    if (sl == 0) { sp = "'"; sl = 1; }
                     while (pos + sl + 1 > cap) { cap *= 2; buf = ray_sys_realloc(buf, cap); }
                     memcpy(buf + pos, sp, sl);
                     pos += sl;
