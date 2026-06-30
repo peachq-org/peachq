@@ -5614,10 +5614,36 @@ static ray_t* dict_codes_to_str(const ray_t* codes_col, ray_t* src_col,
     return out;
 }
 
+/* Thread-local stash of the result group dict codes so the
+ * count-distinct path can build row_gid by remapping dict codes (cheap int)
+ * instead of re-hashing strings. */
+static _Thread_local ray_dict_cd_t tl_dict_cd;
+static void ray_dict_cd_stash(ray_t* codes_col, int64_t n_groups, int64_t key_sym,
+                              const ray_t* tbl, int64_t n_distinct) {
+    if (tl_dict_cd.result_codes) { ray_free_raw(tl_dict_cd.result_codes); tl_dict_cd.result_codes = NULL; }
+    tl_dict_cd.valid = 0;
+    if (!codes_col || n_groups <= 0) return;
+    int32_t* rc = ray_alloc_raw((size_t)n_groups * sizeof(int32_t));
+    if (!rc) return;
+    memcpy(rc, ray_data(codes_col), (size_t)n_groups * sizeof(int32_t));
+    tl_dict_cd.result_codes = rc;
+    tl_dict_cd.n_groups = n_groups;
+    tl_dict_cd.key_sym = key_sym;
+    tl_dict_cd.tbl = tbl;
+    tl_dict_cd.n_distinct = n_distinct;
+    tl_dict_cd.valid = 1;
+}
+ray_dict_cd_t ray_dict_cd_get(void) { return tl_dict_cd; }
+void ray_dict_cd_clear(void) {
+    if (tl_dict_cd.result_codes) ray_free_raw(tl_dict_cd.result_codes);
+    memset(&tl_dict_cd, 0, sizeof(tl_dict_cd));
+}
+
 /* exec_group wrapper: when a plain STR scan key carries a RAY_IDX_DICT, group on
  * its int32 codes (cheap integer path) instead of the 16-byte descriptors, then
  * map codes -> strings on the small result.  Falls through otherwise. */
 ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit) {
+    ray_dict_cd_clear();
     if (!tbl || RAY_IS_ERR(tbl) || tbl->type != RAY_TABLE)
         return exec_group_run(g, op, tbl, group_limit);
     ray_op_ext_t* ext = find_ext(g, op->id);
@@ -5674,6 +5700,14 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit)
             if (!key_col[k]) continue;
             ray_t* codes_col = ray_table_get_col_idx(result, k);
             if (codes_col && codes_col->type == RAY_I32) {
+                /* Stash the result group codes (single-key only) so
+                 * the count-distinct can build row_gid from dict codes instead
+                 * of re-hashing strings. */
+                if (nk == 1) {
+                    ray_dict_cd_stash(codes_col, ray_table_nrows(result),
+                                      dict_sym[k], tbl,
+                                      ray_index_payload(key_col[k]->index)->u.dict.n_distinct);
+                }
                 ray_t* str_col = dict_codes_to_str(
                     codes_col, key_col[k], ray_index_payload(key_col[k]->index));
                 if (str_col && !RAY_IS_ERR(str_col)) {
