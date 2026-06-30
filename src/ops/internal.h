@@ -906,6 +906,20 @@ ray_t* ray_wide_minmax_per_group_buf(ray_t* src, uint16_t op,
 
 ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit);
 
+/* Dict-code count-distinct row_gid side-channel: exec_group stashes the
+ * per-result-group dict codes so the count-distinct path can build row_gid
+ * by remapping codes (cheap int) instead of re-hashing strings. */
+typedef struct {
+    int32_t*     result_codes;  /* [n_groups] dict code of each result group */
+    int64_t      n_groups;
+    int64_t      key_sym;
+    const ray_t* tbl;
+    int64_t      n_distinct;
+    uint8_t      valid;
+} ray_dict_cd_t;
+ray_dict_cd_t ray_dict_cd_get(void);
+void ray_dict_cd_clear(void);
+
 /* ── collection.c ── */
 ray_t* distinct_vec_eager(ray_t* x);
 ray_t* reverse_vec_eager(ray_t* x);
