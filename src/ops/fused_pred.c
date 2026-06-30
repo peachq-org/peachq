@@ -165,13 +165,21 @@ static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
         int8_t ct = col->type;
         int is_ord = (code >= 2);  /* LT/LE/GT/GE */
         if (is_ord && ct == RAY_SYM) return -1;
-        /* F32/F64/STR not supported by phase-3 evaluator. */
-        if (ct != RAY_SYM && ct != RAY_BOOL && ct != RAY_U8
+        /* Dict-encoded STR: EQ/NE only, compared on the int32 code vector
+         * (resolve the RHS string literal to its dict code at compile —
+         * see fp_compile_cmp).  Mirrors the SYM W32 path.  Ordering ops
+         * are meaningless on first-occurrence codes, so reject them. */
+        int is_dict_str = (ct == RAY_STR && !is_ord
+                           && rhs->type == -RAY_STR
+                           && ray_index_kind(col) == RAY_IDX_DICT);
+        /* F32/F64/non-dict-STR not supported by phase-3 evaluator. */
+        if (!is_dict_str
+            && ct != RAY_SYM && ct != RAY_BOOL && ct != RAY_U8
             && ct != RAY_I16 && ct != RAY_I32 && ct != RAY_I64
             && ct != RAY_DATE && ct != RAY_TIME && ct != RAY_TIMESTAMP)
             return -1;
         if (!fp_col_supported(col)) return -1;
-        if (!fp_atom_col_compatible(rhs->type, ct)) return -1;
+        if (!is_dict_str && !fp_atom_col_compatible(rhs->type, ct)) return -1;
     }
     return code;
 }
@@ -647,6 +655,27 @@ void fp_eval_pred(const fp_pred_t* p, int64_t start, int64_t end,
     }
 }
 
+/* Resolve a constant string to its dict code in a RAY_IDX_DICT column.
+ * Codes are assigned by first-occurrence (not sorted), so there is no
+ * persisted string->code map; scan the n_distinct first-occurrence rows
+ * and compare the string at each.  One-time per-query compile cost.
+ * Returns the code, or -1 when the string is absent from the dict. */
+static int64_t fp_dict_str_code(ray_t* col, const ray_index_t* dix,
+                                const char* s, size_t slen) {
+    int64_t nd = dix->u.dict.n_distinct;
+    if (nd <= 0 || !dix->u.dict.first_occ || RAY_IS_ERR(dix->u.dict.first_occ))
+        return -1;
+    const int32_t* focc = (const int32_t*)ray_data(dix->u.dict.first_occ);
+    for (int64_t c = 0; c < nd; c++) {
+        size_t l = 0;
+        const char* p = ray_str_vec_get(col, focc[c], &l);
+        if (!p) continue;
+        if (l == slen && (slen == 0 || memcmp(p, s, slen) == 0))
+            return c;
+    }
+    return -1;
+}
+
 /* Compile predicate DAG node (a comparison with OP_SCAN lhs and OP_CONST
  * rhs) against `tbl`.  Returns 0 on success, -1 if the shape can't be
  * handled (caller should bail and let the unfused path run). */
@@ -754,6 +783,32 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
             }
         }
         out->cval_in_dict = 1;
+        return 0;
+    }
+
+    /* Dict-encoded STR EQ/NE: drive the comparison on the column's int32
+     * dict-code vector (like a W32 SYM).  Resolve the constant string to
+     * its code once; absent ⇒ EQ all-false / NE all-true via fold. */
+    if (col->type == RAY_STR && (out->op == FP_EQ || out->op == FP_NE)
+        && ray_index_kind(col) == RAY_IDX_DICT) {
+        if (!fp_col_supported(col)) return -1;
+        ray_t* cv_str = rext->literal;
+        if (!cv_str || cv_str->type != -RAY_STR) return -1;
+        ray_index_t* dix = ray_index_payload(col->index);
+        ray_t* codes = dix->u.dict.codes;
+        if (!codes || RAY_IS_ERR(codes) || codes->len != col->len) return -1;
+        int64_t code = fp_dict_str_code(col, dix,
+                                        ray_str_ptr(cv_str), ray_str_len(cv_str));
+        out->col_type     = RAY_I32;        /* compare codes as int32 */
+        out->col_attrs    = 0;
+        out->col_esz      = 4;
+        out->col_base     = ray_data(codes);
+        out->col_obj      = codes;
+        out->col_len      = col->len;
+        out->cval         = (code >= 0) ? code : 0;
+        out->cval_in_dict = (code >= 0) ? 1 : 0;
+        if (code < 0)
+            out->fold = (out->op == FP_EQ) ? FP_FOLD_FALSE : FP_FOLD_TRUE;
         return 0;
     }
 
