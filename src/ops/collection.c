@@ -816,6 +816,32 @@ ray_t* distinct_vec_eager(ray_t* x) {
         }
     }
 
+    /* Dict-encoded STR: dedup on the int32 dict-code vector (codes in
+     * [0, n_distinct)) via a presence array — first-occurrence order, no
+     * string hashing.  Mirrors the SYM presence path; gated nd<=len so the
+     * seen[] array never costs more than the data it replaces. */
+    if (x->type == RAY_STR && ray_index_kind(x) == RAY_IDX_DICT) {
+        ray_index_t* dix = ray_index_payload(x->index);
+        int64_t nd = dix->u.dict.n_distinct;
+        ray_t* codes_v = dix->u.dict.codes;
+        if (nd > 0 && nd <= len && codes_v && !RAY_IS_ERR(codes_v)
+            && codes_v->len == len) {
+            const int32_t* codes = (const int32_t*)ray_data(codes_v);
+            uint8_t* seen = (uint8_t*)ray_sys_alloc((size_t)nd);
+            if (!seen) { if (idx != idx_stack) ray_sys_free(idx); return ray_error("oom", NULL); }
+            memset(seen, 0, (size_t)nd);
+            int64_t count = 0;
+            for (int64_t i = 0; i < len; i++) {
+                int32_t c = codes[i];
+                if (c >= 0 && c < nd && !seen[c]) { seen[c] = 1; idx[count++] = i; }
+            }
+            ray_sys_free(seen);
+            ray_t* result = gather_by_idx(x, idx, count);
+            if (idx != idx_stack) ray_sys_free(idx);
+            return result;
+        }
+    }
+
     hashset_t hs;
     if (!hashset_init(&hs, x, len)) {
         if (idx != idx_stack) ray_sys_free(idx);
