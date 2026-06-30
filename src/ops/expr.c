@@ -1853,45 +1853,39 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
  * into per-task rowsel builders and stitch them into a single selection.
  * Saves the BOOL allocation + the second full pass.  Strictly additive:
  * unsupported shapes and RAY_NO_FUSED_SEL return to the existing path.
+ *
+ * The per-task-builder scaffolding (allocate one builder per dispatched
+ * grain task, dispatch a worker that streams each morsel's bools via
+ * rowsel_emit_segment, stitch + apply the all-pass→NULL convention) is shared
+ * by two producers: the expr-tree path (expr_full_fn, selection mode) and the
+ * standalone predicate kernels (pred_sel_drive, used by exec_in_to_selection).
+ * pred_sel_builders_alloc / _finish factor that scaffolding so both producers
+ * stay byte-identical to ray_rowsel_from_pred over the same bools.
  * ============================================================================ */
 
-ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
-                              bool* all_pass) {
-    *all_pass = false;
-    if (getenv("RAY_NO_FUSED_SEL")) return NULL;        /* disabled */
-    if (!g || !g->table || !pred) return NULL;          /* unsupported */
-    if (nrows <= 0) { *all_pass = true; return NULL; }  /* empty = all-pass */
-
-    ray_expr_t ex;
-    if (!expr_compile(g, g->table, pred, &ex)) return NULL;
-    if (ex.out_type != RAY_BOOL || ex.has_parted) return NULL;
-
+/* Allocate + init one rowsel builder per dispatched grain task (parallel) or a
+ * single builder over all segments (serial).  ray_pool_dispatch carves task i
+ * as [i*grain, min((i+1)*grain, nrows)); grain is morsel-aligned so each task
+ * owns a contiguous run of whole segments.  On return *parallel and *n_builders
+ * describe the dispatch geometry.  Returns NULL when the table needs more tasks
+ * than the ring holds (pool clamps n_tasks to RAY_POOL_MAX_TASKS and re-derives
+ * a non-morsel-aligned grain, which would trip the worker's `start % grain == 0`
+ * assert) or on OOM — caller falls back to the bool path. */
+static rowsel_builder_t* pred_sel_builders_alloc(int64_t nrows, ray_pool_t* pool,
+                                                 bool* parallel,
+                                                 uint32_t* n_builders_out) {
     const int64_t grain  = (int64_t)RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS;
     int64_t       n_segs = (nrows + RAY_MORSEL_ELEMS - 1) / RAY_MORSEL_ELEMS;
+    bool          par    = (pool && nrows >= RAY_PARALLEL_THRESHOLD);
 
-    ray_pool_t* pool     = ray_pool_get();
-    bool        parallel = (pool && nrows >= RAY_PARALLEL_THRESHOLD);
-
-    /* One builder per dispatched task (parallel) or a single builder covering
-     * all segments (serial).  ray_pool_dispatch carves task i as
-     * [i*grain, min((i+1)*grain, nrows)); since grain is morsel-aligned, each
-     * task owns a contiguous run of whole segments.
-     *
-     * Safety cap: pool clamps n_tasks to RAY_POOL_MAX_TASKS and re-derives a
-     * non-morsel-aligned grain when the natural task count exceeds the ring
-     * capacity.  The worker assert `start % grain == 0` would fire on any
-     * grain-misaligned start.  Fall back to the bool path for such tables
-     * (> 537M rows with default grain). */
-    uint32_t n_builders = parallel
-        ? (uint32_t)((nrows + grain - 1) / grain)
-        : 1u;
-    if (parallel && n_builders > RAY_POOL_MAX_TASKS) return NULL;
+    uint32_t n_builders = par ? (uint32_t)((nrows + grain - 1) / grain) : 1u;
+    if (par && n_builders > RAY_POOL_MAX_TASKS) return NULL;
 
     rowsel_builder_t* builders =
         (rowsel_builder_t*)ray_alloc_raw((size_t)n_builders * sizeof(rowsel_builder_t));
     if (!builders) return NULL;
 
-    if (parallel) {
+    if (par) {
         for (uint32_t i = 0; i < n_builders; i++) {
             int64_t s = (int64_t)i * grain;
             int64_t e = s + grain;
@@ -1902,6 +1896,125 @@ ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
     } else {
         rowsel_builder_init(&builders[0], (uint32_t)n_segs);
     }
+
+    *parallel       = par;
+    *n_builders_out = n_builders;
+    return builders;
+}
+
+/* Stitch builders (global segment order = slot order) into one rowsel block,
+ * free the builder array, and apply the all-pass→NULL convention (a selection
+ * that keeps every row is "no selection", matching ray_rowsel_from_pred and
+ * g->selection == NULL).  Returns NULL+*all_pass=1 for all-pass, NULL+*all_pass
+ * unchanged on OOM, else the block. */
+static ray_t* pred_sel_builders_finish(rowsel_builder_t* builders,
+                                       uint32_t n_builders, int64_t nrows,
+                                       bool* all_pass) {
+    ray_t* block = rowsel_builder_finish(builders, n_builders, nrows);
+    ray_free_raw(builders);
+    if (!block) return NULL;  /* OOM — caller falls back to the bool path */
+
+    ray_rowsel_t* m = ray_rowsel_meta(block);
+    if (m->total_pass == nrows) {
+        ray_rowsel_release(block);
+        *all_pass = true;
+        return NULL;
+    }
+    return block;
+}
+
+/* Generic selection-output driver for standalone predicate kernels.  Each
+ * morsel [ms, me) is filled into a morsel-local bool scratch by `fill` (which
+ * runs the kernel's element logic over global rows [ms, me)) then streamed via
+ * rowsel_emit_segment — the same per-task-builder model as expr_full_fn's
+ * selection mode, only the per-morsel COMPUTE differs.  Returns the same
+ * tri-state as exec_pred_to_selection. */
+typedef struct {
+    pred_sel_fill_fn  fill;
+    void*             fill_ctx;
+    rowsel_builder_t* sel_builders;
+    uint32_t          n_sel_builders;
+} pred_sel_drive_ctx_t;
+
+static void pred_sel_worker(void* vctx, uint32_t worker_id,
+                            int64_t start, int64_t end) {
+    (void)worker_id;
+    pred_sel_drive_ctx_t* c = (pred_sel_drive_ctx_t*)vctx;
+
+    ray_t* scratch_hdr = NULL;
+    uint8_t* scratch = (uint8_t*)scratch_alloc(&scratch_hdr, RAY_MORSEL_ELEMS);
+    if (!scratch) return;
+
+    const int64_t grain = (int64_t)RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS;
+    _Static_assert((RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS) % RAY_MORSEL_ELEMS == 0,
+                   "TASK_GRAIN must be a whole number of morsels");
+    assert(start % grain == 0 && "pred-sel: task start not grain/morsel aligned");
+    uint32_t slot = (uint32_t)(start / grain);
+    assert(slot < c->n_sel_builders && "pred-sel: builder slot OOB");
+    rowsel_builder_t* sb = &c->sel_builders[slot];
+    uint32_t local_base_seg = (uint32_t)(start / RAY_MORSEL_ELEMS);
+
+    for (int64_t ms = start; ms < end; ms += RAY_MORSEL_ELEMS) {
+        int64_t me = (ms + RAY_MORSEL_ELEMS < end) ? ms + RAY_MORSEL_ELEMS : end;
+        c->fill(c->fill_ctx, ms, me - ms, scratch);
+        uint32_t lseg = (uint32_t)(ms / RAY_MORSEL_ELEMS) - local_base_seg;
+        rowsel_emit_segment(sb, lseg, scratch, me - ms);
+    }
+    scratch_free(scratch_hdr);
+}
+
+ray_t* pred_sel_drive(int64_t nrows, pred_sel_fill_fn fill, void* fill_ctx,
+                      bool* all_pass) {
+    *all_pass = false;
+    if (nrows <= 0) { *all_pass = true; return NULL; }
+
+    ray_pool_t* pool = ray_pool_get();
+    bool        parallel;
+    uint32_t    n_builders;
+    rowsel_builder_t* builders =
+        pred_sel_builders_alloc(nrows, pool, &parallel, &n_builders);
+    if (!builders) return NULL;
+
+    pred_sel_drive_ctx_t ctx = {
+        .fill           = fill,
+        .fill_ctx       = fill_ctx,
+        .sel_builders   = builders,
+        .n_sel_builders = n_builders,
+    };
+    if (parallel)
+        ray_pool_dispatch(pool, pred_sel_worker, &ctx, nrows);
+    else
+        pred_sel_worker(&ctx, 0, 0, nrows);
+
+    return pred_sel_builders_finish(builders, n_builders, nrows, all_pass);
+}
+
+ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
+                              bool* all_pass) {
+    *all_pass = false;
+    if (getenv("RAY_NO_FUSED_SEL")) return NULL;        /* disabled */
+    if (!g || !g->table || !pred) return NULL;          /* unsupported */
+    if (nrows <= 0) { *all_pass = true; return NULL; }  /* empty = all-pass */
+
+    /* Standalone predicate kernels that aren't expr-compilable but have a
+     * selection-output worker.  `in`/`not-in` over a flat column + literal set
+     * stream membership bools straight into the rowsel.  (`like` stays on the
+     * bool fallback: its 4 input-shape paths + dict-LUT pipeline don't reduce
+     * to a clean per-morsel fill.  `between` desugars to >=/<= AND and so
+     * already rides the expr path below.) */
+    if (pred->opcode == OP_IN || pred->opcode == OP_NOT_IN)
+        return exec_in_to_selection(g, pred, nrows, all_pass);
+
+    ray_expr_t ex;
+    if (!expr_compile(g, g->table, pred, &ex)) return NULL;
+    if (ex.out_type != RAY_BOOL || ex.has_parted) return NULL;
+
+    ray_pool_t* pool     = ray_pool_get();
+    bool        parallel;
+    uint32_t    n_builders;
+    rowsel_builder_t* builders =
+        pred_sel_builders_alloc(nrows, pool, &parallel, &n_builders);
+    if (!builders) return NULL;
 
     expr_full_ctx_t ctx = {
         .expr           = &ex,
@@ -1915,21 +2028,7 @@ ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
     else
         expr_full_fn(&ctx, 0, 0, nrows);
 
-    /* Stitch builders (global segment order = slot order) into one block;
-     * rowsel_builder_finish frees each builder's scratch arrays. */
-    ray_t* block = rowsel_builder_finish(builders, n_builders, nrows);
-    ray_free_raw(builders);
-    if (!block) return NULL;  /* OOM — caller falls back to the bool path */
-
-    /* All-pass → NULL convention: a selection that keeps every row is "no
-     * selection", matching ray_rowsel_from_pred and g->selection == NULL. */
-    ray_rowsel_t* m = ray_rowsel_meta(block);
-    if (m->total_pass == nrows) {
-        ray_rowsel_release(block);
-        *all_pass = true;
-        return NULL;
-    }
-    return block;
+    return pred_sel_builders_finish(builders, n_builders, nrows, all_pass);
 }
 
 /* ============================================================================
