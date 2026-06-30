@@ -1435,6 +1435,24 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         }
                     }
                 }
+
+                /* 6. Fused predicate→selection: when the WHERE predicate is an
+                 * expr-evaluable BOOL subtree, stream its per-morsel bools
+                 * straight into a rowsel — skipping both the full BOOL vec and
+                 * the second BOOL→rowsel scan.  RAY_NO_FUSED_SEL or any
+                 * unsupported shape falls through to the bool path unchanged. */
+                ray_op_t* pred_root = op_child(g, op, 1);
+                if (fused_sel_supported(g, pred_root)) {
+                    int64_t fnrows = ray_table_nrows(input);
+                    bool all_pass = false;
+                    ray_t* fsel = exec_pred_to_selection(g, pred_root, fnrows,
+                                                         &all_pass);
+                    if (fsel || all_pass) {
+                        g->selection = fsel;  /* NULL when all rows pass */
+                        return input;
+                    }
+                    /* unsupported / OOM at runtime — fall through. */
+                }
             }
 
             ray_t* pred = exec_node(g, op_child(g, op, 1));
