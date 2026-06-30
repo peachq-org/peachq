@@ -31,6 +31,7 @@
 #include "ops/ops.h"
 #include "ops/internal.h"
 #include "ops/hash.h"
+#include "ops/idxop.h"        /* ray_index_kind / RAY_IDX_DICT — dict-code row_gid */
 #include "ops/agg_engine.h"   /* agg_select_distinct — dict-linked pure-distinct path */
 #include "core/runtime.h"     /* __VM — per-thread query/eval context */
 #include "ops/rowsel.h"
@@ -3545,6 +3546,17 @@ typedef struct {
     const char*      spool;
     int64_t*         row_gid;       /* per-row output */
 } rgid_probe_str_ctx_t;
+
+/* Parallel dict-code row_gid gather (disjoint writes, no sync). */
+typedef struct { const int32_t* scan_codes; const int32_t* code_to_gid; int64_t n_distinct; int64_t* row_gid; } dictgid_ctx_t;
+static void dictgid_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t end) {
+    (void)worker_id;
+    dictgid_ctx_t* c = (dictgid_ctx_t*)ctx_;
+    for (int64_t r = start; r < end; r++) {
+        int32_t cc = c->scan_codes[r];
+        c->row_gid[r] = (cc >= 0 && cc < c->n_distinct) ? c->code_to_gid[cc] : -1;
+    }
+}
 
 static void rgid_probe_str_fn(void* ctx_, uint32_t worker_id,
                               int64_t start, int64_t end) {
@@ -8142,6 +8154,46 @@ by_dict_done:
                  * instead so each row is one O(1) probe. */
                 int rgid_did_mask = 0;
                 if (okt == RAY_STR) {
+                    /* Dict-code row_gid fast path: when the group key is a
+                     * dict-encoded STR column, exec_group already grouped on its
+                     * int32 codes and stashed the per-result-group codes.  Build
+                     * row_gid by remapping each row's dict code to its result
+                     * group index (a parallel int gather) instead of re-hashing
+                     * 1.37M strings.  Falls through to the string probe when the
+                     * key isn't dict-encoded or the stash doesn't match. */
+                    if (ray_index_kind(scan_key) == RAY_IDX_DICT) {
+                        ray_dict_cd_t cd = ray_dict_cd_get();
+                        if (cd.valid && cd.key_sym == ks && cd.n_groups == n_groups
+                            && cd.n_distinct > 0
+                            && ray_index_payload(scan_key->index)->u.dict.codes) {
+                            const int32_t* scan_codes = (const int32_t*)ray_data(
+                                ray_index_payload(scan_key->index)->u.dict.codes);
+                            ray_t* c2g_hdr = NULL;
+                            int32_t* code_to_gid = (int32_t*)scratch_alloc(&c2g_hdr,
+                                (size_t)cd.n_distinct * sizeof(int32_t));
+                            if (code_to_gid && scan_codes) {
+                                for (int64_t i = 0; i < cd.n_distinct; i++) code_to_gid[i] = -1;
+                                for (int64_t gi = 0; gi < n_groups; gi++) {
+                                    int32_t cc = cd.result_codes[gi];
+                                    if (cc >= 0 && cc < cd.n_distinct) code_to_gid[cc] = (int32_t)gi;
+                                }
+                                ray_pool_t* dg_pool = ray_pool_get();
+                                if (dg_pool && nrows >= 200000 && ray_pool_total_workers(dg_pool) >= 2) {
+                                    dictgid_ctx_t dctx = { scan_codes, code_to_gid, cd.n_distinct, row_gid };
+                                    ray_pool_dispatch(dg_pool, dictgid_fn, &dctx, nrows);
+                                } else {
+                                    for (int64_t r = 0; r < nrows; r++) {
+                                        int32_t cc = scan_codes[r];
+                                        row_gid[r] = (cc >= 0 && cc < cd.n_distinct) ? code_to_gid[cc] : -1;
+                                    }
+                                }
+                                scratch_free(c2g_hdr);
+                                ray_dict_cd_clear();
+                                goto str_rgid_done;
+                            }
+                            if (c2g_hdr) scratch_free(c2g_hdr);
+                        }
+                    }
                     /* STR keys: hash the group key descriptors → gid, then
                      * probe each input row's descriptor (SSO-aware via the
                      * string pool; inline ≤12 B keys skip the pool).  grp_key
@@ -8216,6 +8268,7 @@ by_dict_done:
                         }
                     }
                     scratch_free(slot_hdr);
+                    str_rgid_done: ;
                 } else {
                     /* Capacity: 2 * n_groups rounded up to power of 2.
                      * Slot stores gid+1 (0 = empty) and the int64 key. */
