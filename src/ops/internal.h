@@ -821,6 +821,23 @@ bool try_linear_sumavg_input_i64(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
                                  agg_linear_t* out_plan);
 bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out);
 ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows);
+
+/* Fused predicate→selection (skips the full BOOL vec).
+ *
+ * fused_sel_supported: true when `root` compiles to an expr-evaluable BOOL
+ * subtree over flat (non-parted) columns and RAY_NO_FUSED_SEL is unset.
+ * Conservative — any unknown shape returns false (caller uses the bool path).
+ *
+ * exec_pred_to_selection: evaluates the supported `root` in selection-output
+ * mode (per-task rowsel builders dispatched over [0,nrows), then finished into
+ * one rowsel block).  Returns:
+ *   - non-NULL rowsel block  → the selection (caller installs / reads it).
+ *   - NULL with *all_pass=1  → every row passed (all-pass = "no selection").
+ *   - NULL with *all_pass=0  → unsupported / OOM — caller falls back to the
+ *                              exec_node→ray_rowsel_from_pred path unchanged. */
+bool   fused_sel_supported(ray_graph_t* g, ray_op_t* root);
+ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
+                              bool* all_pass);
 ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input);
 ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* rhs);
 
