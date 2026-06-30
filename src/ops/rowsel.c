@@ -249,8 +249,14 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
 
 void rowsel_builder_init(rowsel_builder_t* b, uint32_t n_segs) {
     b->n_segs     = n_segs;
-    b->seg_flags  = (uint8_t*)ray_alloc_raw(n_segs ? n_segs : 1);
-    b->seg_off    = (uint32_t*)ray_alloc_raw((size_t)(n_segs + 1) * sizeof(uint32_t));
+    /* ray_calloc_raw zeros the allocation; seg_flags must be zero-initialised
+     * so that a task whose scratch alloc fails (expr_full_fn early-return) has
+     * valid all-NONE state without ever calling rowsel_emit_segment.
+     * RAY_SEL_NONE == 0 — verified (ops.h), so memset-0 is correct.
+     * seg_off zeroed for the same reason: rowsel_builder_finish reads
+     * seg_off[s+1]-seg_off[s] for MIX segments; garbage deltas → OOB memcpy. */
+    b->seg_flags  = (uint8_t*)ray_calloc_raw(n_segs ? n_segs : 1);
+    b->seg_off    = (uint32_t*)ray_calloc_raw((size_t)(n_segs + 1) * sizeof(uint32_t));
     b->idx_cap    = n_segs ? n_segs * 8u : 8u;
     b->idx        = (uint16_t*)ray_alloc_raw((size_t)b->idx_cap * sizeof(uint16_t));
     b->idx_len    = 0;
@@ -260,6 +266,7 @@ void rowsel_builder_init(rowsel_builder_t* b, uint32_t n_segs) {
     assert(b->seg_flags && "rowsel_builder_init: OOM on seg_flags");
     assert(b->seg_off   && "rowsel_builder_init: OOM on seg_off");
     assert(b->idx       && "rowsel_builder_init: OOM on idx");
+    /* seg_off[0] is already 0 from ray_calloc_raw; kept explicit for clarity. */
     b->seg_off[0] = 0;
 }
 
