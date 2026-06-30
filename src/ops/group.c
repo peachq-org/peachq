@@ -1004,6 +1004,7 @@ typedef struct {
  * hot loop avoids the ray_t pointer indirection. */
 static inline bool cdpg_is_null(const void* base, int64_t r,
                                 int8_t in_type, uint8_t esz) {
+    (void)esz;  /* width only mattered for the (now removed) SYM arm */
     switch (in_type) {
         case RAY_F64: { double f = ((const double*)base)[r]; return f != f; }
         case RAY_F32: { float  f = ((const float*) base)[r]; return f != f; }
@@ -1013,13 +1014,9 @@ static inline bool cdpg_is_null(const void* base, int64_t r,
             return ((const int32_t*)base)[r] == NULL_I32;
         case RAY_I16:
             return ((const int16_t*)base)[r] == NULL_I16;
-        case RAY_SYM:
-            switch (esz) {
-                case 1:  return ((const uint8_t*) base)[r] == 0;
-                case 2:  return ((const uint16_t*)base)[r] == 0;
-                case 4:  return ((const uint32_t*)base)[r] == 0;
-                default: return ((const int64_t*) base)[r] == 0;
-            }
+        /* SYM has no null — the empty sym (id 0) is a value, not null.  This
+         * helper is only reached behind a has_nulls guard (= src HAS_NULLS,
+         * never set on SYM), so an in_type==RAY_SYM call cannot occur. */
         default:  /* BOOL / U8 — non-nullable */
             return false;
     }
