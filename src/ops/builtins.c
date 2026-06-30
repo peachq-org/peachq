@@ -76,7 +76,8 @@ static const char* null_literal_str(int8_t type) {
         case RAY_DATE:      return "0Nd";
         case RAY_TIME:      return "0Nt";
         case RAY_TIMESTAMP: return "0Np";
-        case RAY_SYM:       return "'";  /* SYM has no null; the empty symbol shows as ' */
+        /* SYM has no null literal: empty symbol is a value, never reaches
+         * here — callers gate on RAY_ATOM_IS_NULL, always false for SYM. */
         default:            return "null";
     }
 }
