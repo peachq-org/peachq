@@ -233,6 +233,105 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
 }
 
 /* ──────────────────────────────────────────────────────────────────
+ * Streaming builder — per-morsel selection emitter
+ *
+ * rowsel_emit_segment applies the exact same per-segment classify as
+ * ray_rowsel_from_pred's sequential sweep (NONE if zero set, ALL if all
+ * set with no idx stored, else MIX with morsel-local indices), so a
+ * builder fed each morsel in order produces a block byte-identical to
+ * the whole-vec path.  rowsel_builder_finish stitches per-worker
+ * builders (segment ranges concatenated in global order) into the
+ * standard ray_rowsel_new layout.
+ * ────────────────────────────────────────────────────────────────── */
+
+void rowsel_builder_init(rowsel_builder_t* b, uint32_t n_segs) {
+    b->n_segs     = n_segs;
+    b->seg_flags  = (uint8_t*)ray_alloc_raw(n_segs ? n_segs : 1);
+    b->seg_off    = (uint32_t*)ray_alloc_raw((size_t)(n_segs + 1) * sizeof(uint32_t));
+    b->idx_cap    = n_segs ? n_segs * 8u : 8u;
+    b->idx        = (uint16_t*)ray_alloc_raw((size_t)b->idx_cap * sizeof(uint16_t));
+    b->idx_len    = 0;
+    b->total_pass = 0;
+    if (b->seg_off) b->seg_off[0] = 0;
+}
+
+void rowsel_emit_segment(rowsel_builder_t* b, uint32_t seg,
+                         const uint8_t* morsel_bool, int64_t n) {
+    /* Mark this segment's start offset into the local idx[]. */
+    b->seg_off[seg] = b->idx_len;
+
+    uint32_t pc = 0;
+    for (int64_t i = 0; i < n; i++) pc += morsel_bool[i] != 0;
+    b->total_pass += pc;
+
+    if (pc == 0) {
+        b->seg_flags[seg] = RAY_SEL_NONE;
+    } else if ((int64_t)pc == n) {
+        b->seg_flags[seg] = RAY_SEL_ALL;   /* ALL contributes nothing to idx[] */
+    } else {
+        b->seg_flags[seg] = RAY_SEL_MIX;
+        /* Grow idx[] geometrically to fit this segment's pc indices. */
+        if (b->idx_len + pc > b->idx_cap) {
+            uint32_t newcap = b->idx_cap ? b->idx_cap : 8u;
+            while (newcap < b->idx_len + pc) newcap *= 2u;
+            b->idx = (uint16_t*)ray_realloc_raw(b->idx, (size_t)newcap * sizeof(uint16_t));
+            b->idx_cap = newcap;
+        }
+        for (int64_t i = 0; i < n; i++)
+            if (morsel_bool[i]) b->idx[b->idx_len++] = (uint16_t)i;
+    }
+
+    b->seg_off[seg + 1] = b->idx_len;
+}
+
+ray_t* rowsel_builder_finish(rowsel_builder_t* builders, uint32_t n_workers,
+                             int64_t nrows) {
+    int64_t total_pass = 0;
+    int64_t idx_count  = 0;
+    for (uint32_t w = 0; w < n_workers; w++) {
+        total_pass += builders[w].total_pass;
+        idx_count  += builders[w].idx_len;
+    }
+
+    ray_t* block = ray_rowsel_new(nrows, total_pass, idx_count);
+    if (block) {
+        uint8_t*  seg_flags   = ray_rowsel_flags(block);
+        uint32_t* seg_offsets = ray_rowsel_offsets(block);
+        uint16_t* idx_out     = ray_rowsel_idx(block);
+        uint32_t  n_segs      = ray_rowsel_meta(block)->n_segs;
+
+        uint32_t gseg = 0;
+        uint32_t cum  = 0;
+        for (uint32_t w = 0; w < n_workers; w++) {
+            rowsel_builder_t* b = &builders[w];
+            for (uint32_t s = 0; s < b->n_segs && gseg < n_segs; s++, gseg++) {
+                seg_flags[gseg]   = b->seg_flags[s];
+                seg_offsets[gseg] = cum;
+                if (b->seg_flags[s] == RAY_SEL_MIX) {
+                    uint32_t cnt = b->seg_off[s + 1] - b->seg_off[s];
+                    memcpy(idx_out + cum, b->idx + b->seg_off[s],
+                           (size_t)cnt * sizeof(uint16_t));
+                    cum += cnt;
+                }
+            }
+        }
+        seg_offsets[n_segs] = cum;
+    }
+
+    /* Free the builders' scratch regardless of success. */
+    for (uint32_t w = 0; w < n_workers; w++) {
+        ray_free_raw(builders[w].seg_flags);
+        ray_free_raw(builders[w].seg_off);
+        ray_free_raw(builders[w].idx);
+        builders[w].seg_flags = NULL;
+        builders[w].seg_off   = NULL;
+        builders[w].idx       = NULL;
+    }
+
+    return block;
+}
+
+/* ──────────────────────────────────────────────────────────────────
  * ray_rowsel_to_indices — flatten to a dense int64 array
  * ────────────────────────────────────────────────────────────────── */
 
