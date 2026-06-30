@@ -569,7 +569,8 @@ typedef struct {
     const double*  svf;
     const int64_t* svi;
     int64_t        sv_len;
-    uint8_t*       ob;
+    uint8_t*       ob;       /* output base; element i writes ob[i - ob_base] */
+    int64_t        ob_base;  /* 0 for full-vec output; morsel start for fused-sel */
     int8_t         ct;
     bool           col_has_nulls;
     bool           col_atom_null;
@@ -586,7 +587,13 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
     const void* cd = c->col_is_atom ? NULL : ray_data(col);
     int8_t ct = c->ct;
     uint8_t cattrs = c->col_is_atom ? 0 : col->attrs;
+    /* Output index is relative to ob_base so a fused-selection caller can
+     * point ob at a morsel-local scratch (ob_base = morsel start) while the
+     * column is still read at the absolute row index i: element i writes
+     * ob[i - ob_base], which lands at scratch[0..n).  Full-vec callers set
+     * ob_base = 0, leaving the plain ob[i]. */
     uint8_t* ob = c->ob;
+    int64_t ob_base = c->ob_base;
     int64_t sv_len = c->sv_len;
     int negate = c->negate ? 1 : 0;
 
@@ -625,17 +632,17 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
         const double* svf = c->svf;
         if (c->col_atom_null) {
             /* All elements are null — fill zeros */
-            for (int64_t i = start; i < end; i++) ob[i] = 0;
+            for (int64_t i = start; i < end; i++) ob[i - ob_base] = 0;
         } else if (vec_has_nulls) {
             for (int64_t i = start; i < end; i++) {
-                if (ray_vec_is_null(col, i)) { ob[i] = 0; continue; }
+                if (ray_vec_is_null(col, i)) { ob[i - ob_base] = 0; continue; }
                 double cv;
                 if (c->col_is_atom) cv = (ct == RAY_F64) ? col->f64 : (double)col->i64;
                 else IN_READ_F64(cv, i);
                 int found = 0;
                 for (int64_t j = 0; j < sv_len; j++)
                     if (cv == svf[j]) { found = 1; break; }
-                ob[i] = (uint8_t)(found ^ negate);
+                ob[i - ob_base] = (uint8_t)(found ^ negate);
             }
         } else {
             for (int64_t i = start; i < end; i++) {
@@ -645,23 +652,23 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
                 int found = 0;
                 for (int64_t j = 0; j < sv_len; j++)
                     if (cv == svf[j]) { found = 1; break; }
-                ob[i] = (uint8_t)(found ^ negate);
+                ob[i - ob_base] = (uint8_t)(found ^ negate);
             }
         }
     } else {
         const int64_t* svi = c->svi;
         if (c->col_atom_null) {
-            for (int64_t i = start; i < end; i++) ob[i] = 0;
+            for (int64_t i = start; i < end; i++) ob[i - ob_base] = 0;
         } else if (vec_has_nulls) {
             for (int64_t i = start; i < end; i++) {
-                if (ray_vec_is_null(col, i)) { ob[i] = 0; continue; }
+                if (ray_vec_is_null(col, i)) { ob[i - ob_base] = 0; continue; }
                 int64_t cv;
                 if (c->col_is_atom) cv = col->i64;
                 else IN_READ_I64(cv, i);
                 int found = 0;
                 for (int64_t j = 0; j < sv_len; j++)
                     if (cv == svi[j]) { found = 1; break; }
-                ob[i] = (uint8_t)(found ^ negate);
+                ob[i - ob_base] = (uint8_t)(found ^ negate);
             }
         } else {
             for (int64_t i = start; i < end; i++) {
@@ -671,7 +678,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
                 int found = 0;
                 for (int64_t j = 0; j < sv_len; j++)
                     if (cv == svi[j]) { found = 1; break; }
-                ob[i] = (uint8_t)(found ^ negate);
+                ob[i - ob_base] = (uint8_t)(found ^ negate);
             }
         }
     }
@@ -699,34 +706,32 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
  *     simply produces false).
  *   - RAY_STR: deferred (returns nyi).
  * ============================================================================ */
-static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
-    (void)g;
-    bool negate = (op->opcode == OP_NOT_IN);
+/* Build the membership probe buffer + in_worker_ctx_t shared by exec_in
+ * (full BOOL output) and exec_in_to_selection (fused row-selection output).
+ * Resolves the column read type, the int/float/sym classification, the
+ * compacted probe buffer (null set elements dropped, cross-domain SYM ids
+ * translated into the column's domain), and the per-column null flags —
+ * everything in in_worker_ctx_t EXCEPT ob/ob_base, which each caller wires
+ * to its own sink.  Assumes the column is non-empty (callers short-circuit
+ * empty cols).  svf_stack/svi_stack are caller-owned 32-element buffers used
+ * when the set has ≤32 live elements; otherwise *sv_hdr_out is heap-allocated
+ * and must be ray_free'd after the dispatch.  Returns a tri-state status so
+ * the bool path can surface nyi/oom while the fused path falls back. */
+typedef enum { IN_CTX_UNSUPPORTED = 0, IN_CTX_OK = 1, IN_CTX_OOM = 2 } in_ctx_status_t;
 
-    int64_t col_len = ray_is_atom(col) ? 1 : col->len;
+static in_ctx_status_t in_build_worker_ctx(ray_t* col, ray_t* set, bool negate,
+                                           double* svf_stack, int64_t* svi_stack,
+                                           in_worker_ctx_t* out_ctx,
+                                           ray_t** sv_hdr_out) {
+    *sv_hdr_out = NULL;
     int64_t set_len = ray_is_atom(set) ? 1 : set->len;
-
-    /* Empty col: the main loop produces an empty BOOL result
-     * correctly, but there's nothing to iterate, so short-circuit. */
-    if (col_len == 0) {
-        ray_t* out = ray_vec_new(RAY_BOOL, 0);
-        if (!out || RAY_IS_ERR(out)) return out;
-        out->len = 0;
-        return out;
-    }
-
-    /* NOTE: we intentionally do NOT short-circuit on set_len == 0.
-     * Even for an empty probe, the main loop still needs to check
-     * each col row's null flag so null rows never leak through as
-     * true for `not-in` (the old memset bypass did exactly that). */
 
     int8_t ct = ray_is_atom(col) ? (int8_t)(-col->type) : col->type;
     int8_t st = ray_is_atom(set) ? (int8_t)(-set->type) : set->type;
     if (RAY_IS_PARTED(ct)) ct = (int8_t)RAY_PARTED_BASETYPE(ct);
     if (RAY_IS_PARTED(st)) st = (int8_t)RAY_PARTED_BASETYPE(st);
 
-    if (ct == RAY_STR || st == RAY_STR)
-        return ray_error("nyi", "OP_IN on RAY_STR not yet implemented");
+    if (ct == RAY_STR || st == RAY_STR) return IN_CTX_UNSUPPORTED;
 
     /* Classify each side: 0=int-family, 1=float-family, 2=sym. */
     #define CLASSIFY(t)                                                    \
@@ -748,11 +753,6 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     /* Float-promoted path: at least one side is float.  Read both as
      * double and compare. */
     int use_double = (col_class == 1 || set_class == 1);
-
-    ray_t* out = ray_vec_new(RAY_BOOL, col_len);
-    if (!out || RAY_IS_ERR(out)) return out;
-    out->len = col_len;
-    uint8_t* ob = (uint8_t*)ray_data(out);
 
     /* Null-aware: null rows in the column never pass either `in` or
      * `not-in`.  Mirrors SQL-style semantics where NULL IN (…) and
@@ -797,15 +797,13 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     /* Compact probe buffer: drop null set elements up front so the
      * inner loop doesn't special-case them. */
     int64_t sv_len = 0;
-    double  svf_stack[32];
-    int64_t svi_stack[32];
     double* svf = svf_stack;
     int64_t* svi = svi_stack;
     ray_t* sv_hdr = NULL;
     if (set_len > 32) {
         size_t bytes = (size_t)set_len * (use_double ? sizeof(double) : sizeof(int64_t));
         sv_hdr = ray_alloc(bytes);
-        if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
+        if (!sv_hdr) { return IN_CTX_OOM; }
         if (use_double) svf = (double*)ray_data(sv_hdr);
         else            svi = (int64_t*)ray_data(sv_hdr);
     }
@@ -874,16 +872,61 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
         }
     }
 
-    in_worker_ctx_t in_ctx = {
+    #undef READ_I64
+    #undef READ_F64
+    #undef CLASSIFY
+
+    *out_ctx = (in_worker_ctx_t){
         .col = col,
         .svf = svf, .svi = svi, .sv_len = sv_len,
-        .ob = ob, .ct = ct,
+        .ob = NULL, .ob_base = 0, .ct = ct,
         .col_has_nulls = col_has_nulls,
         .col_atom_null = col_atom_null,
         .col_is_atom = ray_is_atom(col),
         .use_double = use_double,
         .negate = negate,
     };
+    *sv_hdr_out = sv_hdr;
+    return IN_CTX_OK;
+}
+
+static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
+    (void)g;
+    bool negate = (op->opcode == OP_NOT_IN);
+
+    int64_t col_len = ray_is_atom(col) ? 1 : col->len;
+
+    /* Empty col: the main loop produces an empty BOOL result
+     * correctly, but there's nothing to iterate, so short-circuit. */
+    if (col_len == 0) {
+        ray_t* out = ray_vec_new(RAY_BOOL, 0);
+        if (!out || RAY_IS_ERR(out)) return out;
+        out->len = 0;
+        return out;
+    }
+
+    /* NOTE: we intentionally do NOT short-circuit on set_len == 0.
+     * Even for an empty probe, the main loop still needs to check
+     * each col row's null flag so null rows never leak through as
+     * true for `not-in` (the old memset bypass did exactly that). */
+
+    double  svf_stack[32];
+    int64_t svi_stack[32];
+    in_worker_ctx_t in_ctx;
+    ray_t* sv_hdr = NULL;
+    in_ctx_status_t st = in_build_worker_ctx(col, set, negate,
+                                             svf_stack, svi_stack,
+                                             &in_ctx, &sv_hdr);
+    if (st == IN_CTX_UNSUPPORTED)
+        return ray_error("nyi", "OP_IN on RAY_STR not yet implemented");
+    if (st == IN_CTX_OOM)
+        return ray_error("oom", NULL);
+
+    ray_t* out = ray_vec_new(RAY_BOOL, col_len);
+    if (!out || RAY_IS_ERR(out)) { if (sv_hdr) ray_free(sv_hdr); return out; }
+    out->len = col_len;
+    in_ctx.ob = (uint8_t*)ray_data(out);
+    in_ctx.ob_base = 0;
 
     ray_pool_t* pool = ray_pool_get();
     if (pool && col_len >= RAY_PARALLEL_THRESHOLD && !ray_is_atom(col))
@@ -892,11 +935,58 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
         exec_in_worker(&in_ctx, 0, 0, col_len);
 
     if (sv_hdr) ray_free(sv_hdr);
-
-    #undef READ_I64
-    #undef READ_F64
-    #undef CLASSIFY
     return out;
+}
+
+/* Fused `in`/`not-in` → row selection.  Decodes a root OP_IN/OP_NOT_IN of the
+ * shape (SCAN flat-col) IN (CONST set) against g->table, builds the same probe
+ * buffer + worker context as exec_in, then drives the per-task rowsel builders
+ * — each morsel runs exec_in_worker into a morsel-local scratch (ob_base =
+ * morsel start) and streams the verdict via rowsel_emit_segment.  Bit-identical
+ * to exec_in's bool output (null rows → 0 → not-selected); only the sink
+ * differs.  Returns NULL+all_pass=0 for any unsupported shape so the caller
+ * falls back to exec_node→ray_rowsel_from_pred unchanged. */
+static int idx_filter_in_decode(ray_graph_t* g, ray_op_t* pred_op,
+                                ray_t** out_col, ray_t** out_set_lit);
+
+typedef struct { in_worker_ctx_t* ic; } in_sel_fill_ctx_t;
+
+static void in_sel_fill(void* vctx, int64_t start, int64_t n, uint8_t* out) {
+    in_sel_fill_ctx_t* c = (in_sel_fill_ctx_t*)vctx;
+    in_worker_ctx_t local = *c->ic;        /* per-call copy: morsel-local sink */
+    local.ob      = out;                    /* element i writes out[i - start] */
+    local.ob_base = start;
+    exec_in_worker(&local, 0, start, start + n);
+}
+
+ray_t* exec_in_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
+                            bool* all_pass) {
+    *all_pass = false;
+    if (pred->opcode != OP_IN && pred->opcode != OP_NOT_IN) return NULL;
+
+    ray_t* col = NULL;
+    ray_t* set_lit = NULL;
+    /* idx_filter_in_decode matches OP_IN of shape (SCAN flat-col) IN (CONST
+     * set) and rejects parted/MAPCOMMON columns + non-CONST sets.  OP_NOT_IN
+     * isn't a decode shape (the shared decode is IN-only), so `not-in` falls
+     * back to the bool path here — still correct, just unfused. */
+    if (!idx_filter_in_decode(g, pred, &col, &set_lit)) return NULL;
+    if (ray_is_atom(col) || col->len != nrows) return NULL;
+
+    bool negate = (pred->opcode == OP_NOT_IN);
+    double  svf_stack[32];
+    int64_t svi_stack[32];
+    in_worker_ctx_t ic;
+    ray_t* sv_hdr = NULL;
+    if (in_build_worker_ctx(col, set_lit, negate, svf_stack, svi_stack,
+                            &ic, &sv_hdr) != IN_CTX_OK)
+        return NULL;  /* STR / OOM → bool-path fallback */
+
+    in_sel_fill_ctx_t fctx = { &ic };
+    ray_t* sel = pred_sel_drive(nrows, in_sel_fill, &fctx, all_pass);
+
+    if (sv_hdr) ray_free(sv_hdr);
+    return sel;
 }
 
 /* ============================================================================
