@@ -25,7 +25,6 @@
 #define RAY_CSV_H
 
 #include <rayforce.h>
-#include <stdbool.h>
 
 /* --------------------------------------------------------------------------
  * Column type tokens used during CSV parse and schema resolution.
