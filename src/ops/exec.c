@@ -1440,9 +1440,10 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                  * expr-evaluable BOOL subtree, stream its per-morsel bools
                  * straight into a rowsel — skipping both the full BOOL vec and
                  * the second BOOL→rowsel scan.  RAY_NO_FUSED_SEL or any
-                 * unsupported shape falls through to the bool path unchanged. */
+                 * unsupported shape (parted, >RAY_POOL_MAX_TASKS, OOM) returns
+                 * NULL+all_pass=false, falling through to the bool path. */
                 ray_op_t* pred_root = op_child(g, op, 1);
-                if (fused_sel_supported(g, pred_root)) {
+                {
                     int64_t fnrows = ray_table_nrows(input);
                     bool all_pass = false;
                     ray_t* fsel = exec_pred_to_selection(g, pred_root, fnrows,
