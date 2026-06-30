@@ -460,7 +460,8 @@ static ray_t* parse_symbol(ray_parser_t *p) {
     }
 
     /* Regular symbol */
-    while (PA(*p->pos) == PA_ALPHA || PA(*p->pos) == PA_DIGIT || *p->pos == '_' || *p->pos == '.')
+    while (PA(*p->pos) == PA_ALPHA || PA(*p->pos) == PA_DIGIT
+           || *p->pos == '_' || *p->pos == '.' || *p->pos == '-')
         p->pos++;
     size_t len = (size_t)(p->pos - start);
     int64_t id = (len == 0) ? 0 : ray_sym_intern(start, len);  /* empty symbol — sym 0 */
