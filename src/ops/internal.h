@@ -835,6 +835,26 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows);
  *                              back to exec_node→ray_rowsel_from_pred unchanged. */
 ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
                               bool* all_pass);
+
+/* Per-morsel "fill this morsel's bool" callback used by pred_sel_drive.
+ * Writes out[0..n) (1=selected, 0=not) for the kernel's verdict on global
+ * rows [start, start+n).  Null rows must resolve to 0 (not-selected). */
+typedef void (*pred_sel_fill_fn)(void* ctx, int64_t start, int64_t n,
+                                 uint8_t* out);
+
+/* Generic selection-output driver: dispatch `fill` over [0,nrows) in the
+ * per-task rowsel-builder model, stitch into one block.  Same tri-state
+ * return as exec_pred_to_selection (block / NULL+all_pass / NULL).  Used by
+ * the standalone predicate kernels (exec_in_to_selection). */
+ray_t* pred_sel_drive(int64_t nrows, pred_sel_fill_fn fill, void* fill_ctx,
+                      bool* all_pass);
+
+/* `in` selection-output worker: a root OP_IN over a flat column + literal set,
+ * streaming membership bools straight into a rowsel.  Same tri-state return as
+ * exec_pred_to_selection; NULL+all_pass=0 for any unsupported shape (non-CONST
+ * set, parted/MAPCOMMON/STR column, or OP_NOT_IN) → bool-path fallback. */
+ray_t* exec_in_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
+                            bool* all_pass);
 ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input);
 ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* rhs);
 
