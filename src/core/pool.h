@@ -79,6 +79,14 @@ struct ray_pool {
 /* Total workers = n_workers + 1 (main thread is worker 0) */
 #define ray_pool_total_workers(p) ((p)->n_workers + 1)
 
+/* Maximum number of tasks per ray_pool_dispatch call (ring capacity ceiling).
+ * Workloads that would require more tasks must either fall back to a serial
+ * path or be restructured — the dispatcher clamps n_tasks and re-derives a
+ * non-morsel-aligned grain, which breaks slot math in morsel-sensitive callers
+ * (e.g. exec_pred_to_selection).  Value must stay in sync with MAX_RING_CAP
+ * in pool.c. */
+#define RAY_POOL_MAX_TASKS  (1u << 16)
+
 /* Initialize pool with n_workers background threads.
  * Pass 0 to auto-detect (nproc - 1). */
 ray_err_t ray_pool_create(ray_pool_t* pool, uint32_t n_workers);
