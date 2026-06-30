@@ -1855,21 +1855,10 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
  * unsupported shapes and RAY_NO_FUSED_SEL return to the existing path.
  * ============================================================================ */
 
-bool fused_sel_supported(ray_graph_t* g, ray_op_t* root) {
-    if (getenv("RAY_NO_FUSED_SEL")) return false;
-    if (!g || !g->table || !root) return false;
-    ray_expr_t ex;
-    if (!expr_compile(g, g->table, root, &ex)) return false;
-    /* Only a flat (non-parted) BOOL subtree streams cleanly here — the parted
-     * path rebinds per segment in expr_eval_full_parted, which the fused
-     * selection driver does not implement.  Conservative: fall back. */
-    if (ex.out_type != RAY_BOOL || ex.has_parted) return false;
-    return true;
-}
-
 ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
                               bool* all_pass) {
     *all_pass = false;
+    if (getenv("RAY_NO_FUSED_SEL")) return NULL;        /* disabled */
     if (!g || !g->table || !pred) return NULL;          /* unsupported */
     if (nrows <= 0) { *all_pass = true; return NULL; }  /* empty = all-pass */
 
@@ -1886,10 +1875,17 @@ ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
     /* One builder per dispatched task (parallel) or a single builder covering
      * all segments (serial).  ray_pool_dispatch carves task i as
      * [i*grain, min((i+1)*grain, nrows)); since grain is morsel-aligned, each
-     * task owns a contiguous run of whole segments. */
+     * task owns a contiguous run of whole segments.
+     *
+     * Safety cap: pool clamps n_tasks to RAY_POOL_MAX_TASKS and re-derives a
+     * non-morsel-aligned grain when the natural task count exceeds the ring
+     * capacity.  The worker assert `start % grain == 0` would fire on any
+     * grain-misaligned start.  Fall back to the bool path for such tables
+     * (> 537M rows with default grain). */
     uint32_t n_builders = parallel
         ? (uint32_t)((nrows + grain - 1) / grain)
         : 1u;
+    if (parallel && n_builders > RAY_POOL_MAX_TASKS) return NULL;
 
     rowsel_builder_t* builders =
         (rowsel_builder_t*)ray_alloc_raw((size_t)n_builders * sizeof(rowsel_builder_t));
