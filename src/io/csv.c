@@ -125,21 +125,21 @@ typedef struct {
 
 /* csv_type_t enum (incl. CSV_TYPE_AUTO) is defined in csv.h */
 
-/* Narrowest integer width holding [min,max].  BOOL/U8 are non-nullable (no
- * sentinel slot) so a nullable column needs a signed sentinel type whose data
- * excludes INT_MIN (NULL_Iw).  min>max means no finite values (empty/all-null)
- * -> safe I64. */
+/* Narrowest integer width holding [min,max], with I16 as the floor.
+ * U8 renders as hex (e.g. 0x1b) and BOOL renders in bool form, so INT
+ * columns — which are decimal integers — must never resolve narrower than
+ * I16.  Nullable columns use a signed sentinel (NULL_Iw == INT_MIN for that
+ * width); data values equal to the sentinel force widening to the next tier.
+ * min>max means no finite values (empty/all-null) -> safe I64. */
 csv_type_t csv_resolve_int_width(int64_t min, int64_t max, bool has_null) {
-    if (min > max) return CSV_TYPE_I64;
+    if (min > max) return CSV_TYPE_I64;          /* empty/all-null — safe default */
     if (has_null) {
         if (min > NULL_I16 && max <= INT16_MAX) return CSV_TYPE_I16;
         if (min > NULL_I32 && max <= INT32_MAX) return CSV_TYPE_I32;
         return CSV_TYPE_I64;
     }
-    if (min >= 0 && max <= 1)                  return CSV_TYPE_BOOL;
-    if (min >= 0 && max <= 255)                return CSV_TYPE_U8;
-    if (min >= INT16_MIN && max <= INT16_MAX)  return CSV_TYPE_I16;
-    if (min >= INT32_MIN && max <= INT32_MAX)  return CSV_TYPE_I32;
+    if (min >= INT16_MIN && max <= INT16_MAX) return CSV_TYPE_I16;
+    if (min >= INT32_MIN && max <= INT32_MAX) return CSV_TYPE_I32;
     return CSV_TYPE_I64;
 }
 
