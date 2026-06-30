@@ -201,6 +201,9 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
         if (seg_end > nrows) seg_end = nrows;
         int64_t seg_len = seg_end - seg_start;
         uint32_t pc = popcount[s];
+        /* NONE/ALL/MIX classify — must stay byte-identical to the classify
+         * in rowsel_emit_segment (rowsel.c ~line 278-291).  See
+         * rowsel/emit_equiv test.  Edit both or neither. */
         if (pc == 0) {
             seg_flags[s] = RAY_SEL_NONE;
         } else if ((int64_t)pc == seg_len) {
@@ -252,11 +255,21 @@ void rowsel_builder_init(rowsel_builder_t* b, uint32_t n_segs) {
     b->idx        = (uint16_t*)ray_alloc_raw((size_t)b->idx_cap * sizeof(uint16_t));
     b->idx_len    = 0;
     b->total_pass = 0;
-    if (b->seg_off) b->seg_off[0] = 0;
+    /* All three allocs must succeed — raw allocator is fatal-by-contract
+     * (no recovery path in Rayforce; same as ray_alloc failure callers). */
+    assert(b->seg_flags && "rowsel_builder_init: OOM on seg_flags");
+    assert(b->seg_off   && "rowsel_builder_init: OOM on seg_off");
+    assert(b->idx       && "rowsel_builder_init: OOM on idx");
+    b->seg_off[0] = 0;
 }
 
 void rowsel_emit_segment(rowsel_builder_t* b, uint32_t seg,
                          const uint8_t* morsel_bool, int64_t n) {
+    /* seg is a BUILDER-LOCAL index — must be in [0, b->n_segs).
+     * Passing a global segment id here would index past the allocated
+     * seg_flags[]/seg_off[] arrays and silently corrupt the heap. */
+    assert(seg < b->n_segs && "rowsel_emit_segment: seg is not builder-local");
+
     /* Mark this segment's start offset into the local idx[]. */
     b->seg_off[seg] = b->idx_len;
 
@@ -264,6 +277,9 @@ void rowsel_emit_segment(rowsel_builder_t* b, uint32_t seg,
     for (int64_t i = 0; i < n; i++) pc += morsel_bool[i] != 0;
     b->total_pass += pc;
 
+    /* NONE/ALL/MIX classify — must stay byte-identical to the sweep in
+     * ray_rowsel_from_pred (rowsel.c ~line 204-213).  See rowsel/emit_equiv
+     * test.  Edit both or neither. */
     if (pc == 0) {
         b->seg_flags[seg] = RAY_SEL_NONE;
     } else if ((int64_t)pc == n) {
@@ -304,7 +320,11 @@ ray_t* rowsel_builder_finish(rowsel_builder_t* builders, uint32_t n_workers,
         uint32_t cum  = 0;
         for (uint32_t w = 0; w < n_workers; w++) {
             rowsel_builder_t* b = &builders[w];
-            for (uint32_t s = 0; s < b->n_segs && gseg < n_segs; s++, gseg++) {
+            for (uint32_t s = 0; s < b->n_segs; s++, gseg++) {
+                /* Over-covering partition: more builder segs than the
+                 * block has — violates the n_segs-sum invariant. */
+                assert(gseg < n_segs &&
+                       "rowsel_builder_finish: builders over-cover n_segs");
                 seg_flags[gseg]   = b->seg_flags[s];
                 seg_offsets[gseg] = cum;
                 if (b->seg_flags[s] == RAY_SEL_MIX) {
@@ -314,6 +334,15 @@ ray_t* rowsel_builder_finish(rowsel_builder_t* builders, uint32_t n_workers,
                     cum += cnt;
                 }
             }
+        }
+        /* Under-covering partition: fewer builder segs than the block
+         * has — the tail would be uninitialized garbage (ray_alloc does
+         * NOT zero the data area).  Assert and zero defensively. */
+        assert(gseg == n_segs &&
+               "rowsel_builder_finish: builders under-cover n_segs");
+        for (uint32_t s = gseg; s < n_segs; s++) {
+            seg_flags[s]   = RAY_SEL_NONE;
+            seg_offsets[s] = cum;
         }
         seg_offsets[n_segs] = cum;
     }
