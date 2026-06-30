@@ -1525,6 +1525,20 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
                                    int ncols, char delimiter,
                                    const int64_t* col_name_ids,
                                    const int8_t* resolved_types) {
+    /* Defensive guard: RAY_CSV_AUTO_TAG must be resolved to a concrete width
+     * before reaching this point (by csv_resolve_auto_in_place or
+     * csv_resolve_auto_streamed).  If a marker slips through, the resolution
+     * step was bypassed — loud failure prevents a silent ray_vec_new(120,…). */
+    for (int c = 0; c < ncols; c++) {
+        if (resolved_types[c] == RAY_CSV_AUTO_TAG) {
+            fprintf(stderr,
+                "csv: BUG: unresolved INT (RAY_CSV_AUTO_TAG=%d) reached "
+                "csv_materialize_rows for column %d\n",
+                (int)RAY_CSV_AUTO_TAG, c);
+            return NULL;
+        }
+    }
+
     ray_t* col_vecs[CSV_MAX_COLS];
     void* col_data[CSV_MAX_COLS];
 
