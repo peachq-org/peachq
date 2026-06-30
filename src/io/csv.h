@@ -52,6 +52,14 @@ typedef enum {
     CSV_TYPE_AUTO
 } csv_type_t;
 
+/* Schema-only marker: the `INT` schema token resolves to this tag in the
+ * RAY-type space carried by a `.csv.{read,splayed,parted}` schema vector.
+ * It is NEVER a runtime vec type — before any column is allocated it is
+ * replaced (csv.c) by the concrete narrowest width csv_resolve_int_width
+ * picks for the column.  Value is distinct from every real RAY type
+ * (all < RAY_TYPE_COUNT, plus RAY_TABLE == 98) and fits int8_t. */
+#define RAY_CSV_AUTO_TAG 120
+
 /* Resolve the narrowest integer column type that can hold all values in
  * [min, max].  BOOL and U8 have no null sentinel, so a nullable column
  * always resolves to a signed type (I16/I32/I64) that excludes INT_MIN.
