@@ -29,6 +29,7 @@
 #include "ops/idxop.h"
 #include "mem/heap.h"
 #include "mem/sys.h"
+#include "core/runtime.h"  /* __VM — filter-compaction projection keep-set */
 
 /* Global profiler instance (zero-initialized = inactive) */
 ray_profile_t g_ray_profile;
@@ -2771,7 +2772,16 @@ static ray_t* ray_execute_inner(ray_graph_t* g, ray_op_t* root) {
         ray_t* result = exec_node(g, root);
         if (g->selection && result && !RAY_IS_ERR(result)
             && result->type == RAY_TABLE) {
-            ray_t* compacted = sel_compact(g, result, g->selection, NULL, 0);
+            /* Projection-aware compaction: a select publishes the keys-only
+             * keep-set of its distinct downstream via __VM->filt_keep before
+             * this ray_execute; gather only those columns.  Depth-gated so a
+             * nested subquery's own finalization does not consume it. */
+            const int64_t* keep = NULL; int keep_n = 0;
+            if (__VM && __VM->filt_keep && __VM->filt_keep_n > 0
+                && __VM->eval_depth == __VM->filt_depth) {
+                keep = __VM->filt_keep; keep_n = __VM->filt_keep_n;
+            }
+            ray_t* compacted = sel_compact(g, result, g->selection, keep, keep_n);
             ray_release(result);
             ray_release(g->selection);
             g->selection = NULL;

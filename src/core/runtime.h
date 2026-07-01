@@ -81,6 +81,15 @@ typedef struct {
     int              proj_keep_n;
     int32_t          proj_depth;  /* eval_depth at publish; consumed only at +1 */
     bool             proj_active;
+    /* ── filter-compaction keep-set: a select about to execute its WHERE-filter
+     * DAG publishes the column syms its (provably keys-only distinct) downstream
+     * will read, so the top-level filter finalization (ray_execute_inner) gathers
+     * only those columns instead of the whole table.  Scoped to one ray_execute
+     * call via save/restore; consumed only at the publishing eval_depth.
+     * NULL/0 (memset) = carry all columns (unchanged behaviour). */
+    const int64_t   *filt_keep;
+    int              filt_keep_n;
+    int32_t          filt_depth;  /* eval_depth at publish; consumed only at == */
     /* ── group-by DA-eligibility hint: exec_group publishes each group key's
      * KNOWN cardinality (dict n_distinct today; extensible to other key types
      * with a cheaply-known TIGHT slot-span bound) so exec_group_v2's direct-
