@@ -1601,9 +1601,9 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 /* 6. Fused predicate→selection: when the WHERE predicate is an
                  * expr-evaluable BOOL subtree, stream its per-morsel bools
                  * straight into a rowsel — skipping both the full BOOL vec and
-                 * the second BOOL→rowsel scan.  RAY_NO_FUSED_SEL or any
-                 * unsupported shape (parted, >RAY_POOL_MAX_TASKS, OOM) returns
-                 * NULL+all_pass=false, falling through to the bool path. */
+                 * the second BOOL→rowsel scan.  Any unsupported shape (parted,
+                 * >RAY_POOL_MAX_TASKS, OOM) returns NULL+all_pass=false,
+                 * falling through to the bool path. */
                 ray_op_t* pred_root = op_child(g, op, 1);
                 {
                     int64_t fnrows = ray_table_nrows(input);
