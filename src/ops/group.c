@@ -5661,11 +5661,36 @@ void ray_dict_cd_clear(void) {
     memset(&tl_dict_cd, 0, sizeof(tl_dict_cd));
 }
 
+/* Known distinct-count of dict-substituted key columns, keyed by column sym.
+ * Populated by exec_group() when it swaps a dict-encoded STR key for its
+ * int32 code vector; consulted by exec_group_v2's DA-eligibility check to
+ * reject an infeasible composite up front (skipping the min/max prescan)
+ * without re-deriving the code range by scanning the survivors.  Dict codes
+ * are dense 0..n_distinct-1 over the full column, so n_distinct is a tight
+ * lower bound on the composite direct-array slot count. */
+typedef struct { int64_t sym; int64_t n_distinct; } ray_dict_card_t;
+static _Thread_local ray_dict_card_t tl_dict_card[8];
+static _Thread_local uint8_t         tl_dict_card_n;
+static void ray_dict_card_clear(void) { tl_dict_card_n = 0; }
+static void ray_dict_card_add(int64_t sym, int64_t n_distinct) {
+    if (tl_dict_card_n < 8) {
+        tl_dict_card[tl_dict_card_n].sym        = sym;
+        tl_dict_card[tl_dict_card_n].n_distinct = n_distinct;
+        tl_dict_card_n++;
+    }
+}
+static int64_t ray_dict_card_lookup(int64_t sym) {
+    for (uint8_t i = 0; i < tl_dict_card_n; i++)
+        if (tl_dict_card[i].sym == sym) return tl_dict_card[i].n_distinct;
+    return 0;
+}
+
 /* exec_group wrapper: when a plain STR scan key carries a RAY_IDX_DICT, group on
  * its int32 codes (cheap integer path) instead of the 16-byte descriptors, then
  * map codes -> strings on the small result.  Falls through otherwise. */
 ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit) {
     ray_dict_cd_clear();
+    ray_dict_card_clear();
     if (!tbl || RAY_IS_ERR(tbl) || tbl->type != RAY_TABLE)
         return exec_group_run(g, op, tbl, group_limit);
     ray_op_ext_t* ext = find_ext(g, op->id);
@@ -5708,7 +5733,12 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t group_limit)
         ray_t* use = ray_table_get_col_idx(tbl, c);
         for (uint8_t k = 0; k < nk; k++)
             if (key_col[k] && dict_sym[k] == name) {
-                use = ray_index_payload(key_col[k]->index)->u.dict.codes; break;
+                const ray_index_t* dix = ray_index_payload(key_col[k]->index);
+                use = dix->u.dict.codes;
+                /* Record the dict's distinct-count so exec_group_v2's DA
+                 * check can reject an infeasible composite without a scan. */
+                ray_dict_card_add(name, dix->u.dict.n_distinct);
+                break;
             }
         sub = ray_table_add_col(sub, name, use);
         if (!sub || RAY_IS_ERR(sub)) return exec_group_run(g, op, tbl, group_limit);
@@ -5930,11 +5960,16 @@ static ray_t* exec_group_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
 
     uint8_t key_owned[vla_keys]; /* 1 = we allocated via exec_node, must free */
     memset(key_owned, 0, vla_keys * sizeof(uint8_t));
+    /* Source-column sym per key (OP_SCAN keys only; -1 for expression keys) —
+     * used to consult the dict known-cardinality map for the DA-reject. */
+    int64_t key_scan_sym[vla_keys];
+    for (uint8_t k = 0; k < vla_keys; k++) key_scan_sym[k] = -1;
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_op_t* key_op = op_node(g, ext->keys[k]);
         ray_op_ext_t* key_ext = find_ext(g, key_op->id);
         if (key_ext && key_ext->base.opcode == OP_SCAN) {
             key_vecs[k] = ray_table_get_col(tbl, key_ext->sym);
+            key_scan_sym[k] = key_ext->sym;
         } else {
             /* Expression key (CASE WHEN etc) — evaluate against current tbl */
             ray_t* saved_table = g->table;
@@ -6543,6 +6578,29 @@ da_path:;
                              ? key_vecs[k]->slice_parent : key_vecs[k];
                 if (src && (src->attrs & RAY_ATTR_HAS_NULLS))
                     da_eligible = false;
+            }
+        }
+
+        /* Upfront known-cardinality reject: a dict-substituted STR key carries
+         * a known distinct-count (dense codes 0..n_distinct-1), so its slot
+         * range is at least n_distinct.  If the product of such KNOWN factors
+         * already exceeds the DA budget, the composite is provably infeasible
+         * — reject now and skip the min/max prescan (a full gather-scan of the
+         * survivors) entirely.  Conservative: keys without a known count
+         * contribute factor 1, so a genuinely small composite is never
+         * wrongly rejected; DA is never wrongly enabled (we only reject). */
+        if (da_eligible && tl_dict_card_n > 0) {
+            uint64_t known_lb = 1;
+            for (uint8_t k = 0; k < n_keys; k++) {
+                if (key_scan_sym[k] < 0) continue;
+                int64_t card = ray_dict_card_lookup(key_scan_sym[k]);
+                if (card <= 1) continue;
+                if ((uint64_t)card > (uint64_t)DA_MAX_COMPOSITE_SLOTS / known_lb) {
+                    da_eligible = false;
+                    break;
+                }
+                known_lb *= (uint64_t)card;
+                if (known_lb > DA_MAX_COMPOSITE_SLOTS) { da_eligible = false; break; }
             }
         }
 
