@@ -8141,7 +8141,11 @@ ht_path:;
              * survivor row list instead of scanning all nrows with a per-row
              * rowsel check.  Scoped to this v2 build; freed right after the
              * (blocking) phase-1 dispatch — phase-2 merges HTs and never reads
-             * match_idx.  Left NULL (scan path) for dense selections. */
+             * match_idx.  Left NULL (scan path) for dense selections.
+             * Byte-identity of results depends on ray_rowsel_to_indices
+             * returning survivors in ASCENDING row order (rowsel.h): that
+             * matches the full-scan skip order, so HT insertion order — and
+             * thus the emitted group order — is unchanged. */
             ray_t*         sel_match_block = NULL;
             const int64_t* sel_match       = NULL;
             int64_t        sel_n           = 0;
