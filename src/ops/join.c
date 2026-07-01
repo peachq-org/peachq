@@ -2213,9 +2213,14 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         int64_t col_name = ray_table_col_name(left_table, c);
         ray_t* src_col = ray_table_get_col_idx(left_table, c);
         int8_t ctype = src_col->type;
-        ray_t* dst_col = ray_vec_new(ctype, out_n);
-
-        uint8_t esz = ray_type_sizes[ctype];
+        /* SYM is adaptive-width (W8/W16/W32/W64): a splayed/loaded source is
+         * typically W32 while ray_vec_new(RAY_SYM,…) yields a W64 dst.  Copy at
+         * the SOURCE element size into a dst of the SAME width — otherwise the
+         * ids are read at the wrong stride and decode to the empty symbol. */
+        uint8_t esz = (ctype == RAY_SYM) ? col_esz(src_col) : ray_type_sizes[ctype];
+        ray_t* dst_col = (ctype == RAY_SYM)
+            ? ray_sym_vec_new((uint8_t)(src_col->attrs & RAY_SYM_W_MASK), out_n)
+            : ray_vec_new(ctype, out_n);
         char* src = (char*)ray_data(src_col);
         char* dst = (char*)ray_data(dst_col);
         for (int64_t wi = 0; wi < out_n; wi++)
@@ -2241,9 +2246,11 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         int64_t col_name = ray_table_col_name(right_table, cidx);
         ray_t* src_col = ray_table_get_col_idx(right_table, cidx);
         int8_t ctype = src_col->type;
-        ray_t* dst_col = ray_vec_new(ctype, out_n);
-
-        uint8_t esz = ray_type_sizes[ctype];
+        /* SYM adaptive-width: match the source width (see left-gather note). */
+        uint8_t esz = (ctype == RAY_SYM) ? col_esz(src_col) : ray_type_sizes[ctype];
+        ray_t* dst_col = (ctype == RAY_SYM)
+            ? ray_sym_vec_new((uint8_t)(src_col->attrs & RAY_SYM_W_MASK), out_n)
+            : ray_vec_new(ctype, out_n);
         char* src = (char*)ray_data(src_col);
         char* dst = (char*)ray_data(dst_col);
         for (int64_t wi = 0; wi < out_n; wi++) {
