@@ -4116,7 +4116,7 @@ ray_t* ray_try_count_select_expr(ray_t* expr, int* handled) {
 
     /* Fused predicate→selection: count directly off the streamed rowsel,
      * skipping the full BOOL vec + the BOOL→rowsel scan.  Unsupported shapes,
-     * RAY_NO_FUSED_SEL, or >RAY_POOL_MAX_TASKS fall through to exec_node. */
+     * or >RAY_POOL_MAX_TASKS fall through to exec_node. */
     {
         bool all_pass = false;
         ray_t* fsel = exec_pred_to_selection(g, pred, pre_nrows, &all_pass);
