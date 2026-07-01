@@ -9359,14 +9359,22 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                     int64_t cn = ray_table_col_name(tbl, c);
                     ray_t* full_col = ray_table_get_col_idx(tbl, c);
                     int8_t ct = full_col->type;
-                    ray_t* sub_col = ray_vec_new(ct, gsize);
+                    /* Create sub_col with the SOURCE column's width. For a SYM
+                     * column that dictionary-index width is adaptive
+                     * (W8/W16/W32/W64); the raw cell-id gather below must use it
+                     * for BOTH src and dst, or a narrow-width column (e.g. a few
+                     * distinct exchanges => W8) is read at an 8-byte stride and
+                     * walks off the end of the buffer. */
+                    ray_t* sub_col = (ct == RAY_SYM)
+                        ? ray_sym_vec_new(full_col->attrs & RAY_SYM_W_MASK, gsize)
+                        : ray_vec_new(ct, gsize);
                     if (RAY_IS_ERR(sub_col)) { ray_release(sub_tbl); ray_release(out_col); ray_release(result); ray_release(groups); ray_release(tbl); return sub_col; }
                     /* per-group gather raw-copies cell ids from ONE
                      * source column — keep its dictionary */
                     if (ct == RAY_SYM)
                         ray_sym_vec_adopt_domain(sub_col, full_col);
                     sub_col->len = gsize;
-                    int esz = ray_elem_size(ct);
+                    int esz = ray_sym_elem_size(ct, full_col->attrs);
                     char* src = (char*)ray_data(full_col);
                     char* dst = (char*)ray_data(sub_col);
                     int64_t* idxs = (int64_t*)ray_data(idx_vec);
