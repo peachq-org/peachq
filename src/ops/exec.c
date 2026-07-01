@@ -628,6 +628,77 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
      * the per-element null check is a single ray_vec_is_null call when
      * nulls are present, or eliminated entirely when they are not. */
     bool vec_has_nulls = c->col_has_nulls && !c->col_is_atom;
+
+    /* ---- SIMD-friendly fast path -----------------------------------------
+     * Common case: non-atom fixed-width INTEGER column, integer set (not
+     * float), small set (1..8 live elements).  Dispatch once to a loop
+     * specialized per column type so the read is a direct typed pointer
+     * access (no per-element `switch`) and the membership is an unrolled
+     * OR-of-equality over 8 fixed slots (no `break`) — structured so
+     * -O3 -march=native auto-vectorizes it.  Set elements that don't fit
+     * the column type can match nothing and are dropped (kfit); unused
+     * slots are padded with tv[0] (a real member, harmless under OR).
+     * Null rows emit 0 regardless of negate (isn masks after the OR).
+     * Bit-identical to the generic loops below; additive, chosen once. */
+    if (!c->col_is_atom && !c->use_double && sv_len >= 1 && sv_len <= 8) {
+        const int64_t* svi = c->svi;
+        uint8_t neg = (uint8_t)negate;
+        #define IN_FAST(CTYPE, FITS, SENT, HASNULL) do {                     \
+            CTYPE tv[8];                                                     \
+            int kfit = 0;                                                    \
+            for (int64_t j = 0; j < sv_len; j++) {                          \
+                int64_t sj = svi[j];                                         \
+                if (FITS) tv[kfit++] = (CTYPE)sj;                            \
+            }                                                                \
+            if (kfit == 0) break; /* nothing representable → generic path */ \
+            const CTYPE* dp = (const CTYPE*)cd;                              \
+            /* pad unused slots with tv[0] (a real member; harmless under    \
+             * OR) via ternaries so tv is never written/read past kfit. */   \
+            CTYPE t0=tv[0],                                                  \
+                  t1=(kfit>1?tv[1]:t0), t2=(kfit>2?tv[2]:t0),                \
+                  t3=(kfit>3?tv[3]:t0), t4=(kfit>4?tv[4]:t0),                \
+                  t5=(kfit>5?tv[5]:t0), t6=(kfit>6?tv[6]:t0),                \
+                  t7=(kfit>7?tv[7]:t0);                                      \
+            if ((HASNULL) && vec_has_nulls) {                                \
+                CTYPE sent = (CTYPE)(SENT);                                  \
+                for (int64_t i = start; i < end; i++) {                      \
+                    CTYPE v = dp[i];                                         \
+                    uint8_t f = (uint8_t)((v==t0)|(v==t1)|(v==t2)|(v==t3)|   \
+                                          (v==t4)|(v==t5)|(v==t6)|(v==t7));  \
+                    uint8_t isn = (uint8_t)(v == sent);                      \
+                    ob[i - ob_base] = (uint8_t)(isn ? 0 : (f ^ neg));       \
+                }                                                            \
+            } else {                                                         \
+                for (int64_t i = start; i < end; i++) {                      \
+                    CTYPE v = dp[i];                                         \
+                    uint8_t f = (uint8_t)((v==t0)|(v==t1)|(v==t2)|(v==t3)|   \
+                                          (v==t4)|(v==t5)|(v==t6)|(v==t7));  \
+                    ob[i - ob_base] = (uint8_t)(f ^ neg);                    \
+                }                                                            \
+            }                                                                \
+            return;                                                          \
+        } while (0)
+
+        switch (ct) {
+            case RAY_BOOL: case RAY_U8:  /* non-nullable → no isn path */
+                IN_FAST(uint8_t, (sj >= 0 && sj <= UINT8_MAX), 0, 0);
+                break;
+            case RAY_I16:
+                IN_FAST(int16_t, (sj >= INT16_MIN && sj <= INT16_MAX),
+                        NULL_I16, 1);
+                break;
+            case RAY_I32: case RAY_DATE: case RAY_TIME:
+                IN_FAST(int32_t, (sj >= INT32_MIN && sj <= INT32_MAX),
+                        NULL_I32, 1);
+                break;
+            case RAY_I64: case RAY_TIMESTAMP:
+                IN_FAST(int64_t, 1, NULL_I64, 1);  /* all i64 fit */
+                break;
+            default: break;  /* SYM / unsupported → generic below */
+        }
+        #undef IN_FAST
+    }
+
     if (c->use_double) {
         const double* svf = c->svf;
         if (c->col_atom_null) {
