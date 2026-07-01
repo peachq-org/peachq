@@ -2623,7 +2623,13 @@ ray_t* ray_group_fn(ray_t* x) {
             continue;
         }
         int64_t v;
-        if (x->type == RAY_SYM || x->type == RAY_I64 || x->type == RAY_TIMESTAMP)
+        /* SYM columns have an adaptive dictionary-index width (W8/W16/W32/W64
+         * in attrs); read through ray_read_sym rather than assuming W64, or a
+         * narrow-width column (e.g. a few distinct exchanges => W8) is read at
+         * an 8-byte stride and walks off the end of the buffer. */
+        if (x->type == RAY_SYM)
+            v = ray_read_sym(ray_data(x), i, x->type, x->attrs);
+        else if (x->type == RAY_I64 || x->type == RAY_TIMESTAMP)
             v = ((int64_t*)ray_data(x))[i];
         else if (x->type == RAY_I32 || x->type == RAY_DATE || x->type == RAY_TIME)
             v = ((int32_t*)ray_data(x))[i];
