@@ -812,7 +812,8 @@ void partitioned_gather(ray_pool_t* pool, const int64_t* idx, int64_t n,
 /* ── filter.c ── */
 ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred);
 ray_t* exec_filter_head(ray_t* input, ray_t* pred, int64_t limit);
-ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel);
+ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel,
+                   const int64_t* keep_syms, int keep_n);
 
 /* ── expr.c ── */
 bool try_affine_sumavg_input(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
