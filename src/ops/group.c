@@ -3106,6 +3106,14 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
 #define RADIX_MASK  (RADIX_P - 1)
 #define RADIX_PART(h) (((uint32_t)((h) >> 16)) & RADIX_MASK)
 
+/* Selection-aware group iteration gate.  When a WHERE leaves fewer than
+ * nrows >> SEL_MATCH_GATE_SHIFT survivors, the high-card group build iterates
+ * the survivor row list (match_idx) instead of scanning all nrows with a
+ * per-row rowsel check.  Dense selections keep the sequential scan (a large
+ * survivor array + scattered row access would not pay off).  Shift of 1 =
+ * "fewer than half the rows survive"; tuned in Task 2. */
+#define SEL_MATCH_GATE_SHIFT 1
+
 /* Per-worker, per-partition buffer of fat entries */
 typedef struct {
     char*    data;           /* flat buffer: data[i * entry_stride] */
@@ -8129,6 +8137,25 @@ ht_path:;
                 if (src && (src->attrs & RAY_ATTR_HAS_NULLS))
                     v2_nullable |= (uint8_t)(1u << k);
             }
+            /* Selection-aware iteration: for a sparse WHERE, iterate the
+             * survivor row list instead of scanning all nrows with a per-row
+             * rowsel check.  Scoped to this v2 build; freed right after the
+             * (blocking) phase-1 dispatch — phase-2 merges HTs and never reads
+             * match_idx.  Left NULL (scan path) for dense selections. */
+            ray_t*         sel_match_block = NULL;
+            const int64_t* sel_match       = NULL;
+            int64_t        sel_n           = 0;
+            if (g->selection) {
+                ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+                if (sm && sm->nrows == nrows
+                    && sm->total_pass < (nrows >> SEL_MATCH_GATE_SHIFT)) {
+                    sel_match_block = ray_rowsel_to_indices(g->selection);
+                    if (sel_match_block) {
+                        sel_match = (const int64_t*)ray_data(sel_match_block);
+                        sel_n     = sm->total_pass;
+                    }
+                }
+            }
             radix_v2_phase1_ctx_t v2p1 = {
                 .key_data      = key_data,
                 .key_types     = key_types,
@@ -8142,10 +8169,12 @@ ht_path:;
                 .wpart_hts     = wpart_hts,
                 .layout        = ght_layout,
                 .rowsel        = rowsel,
-                .match_idx     = match_idx,
+                .match_idx     = sel_match,
                 .oom           = 0,
             };
-            ray_pool_dispatch(pool, radix_v2_phase1_fn, &v2p1, n_scan);
+            ray_pool_dispatch(pool, radix_v2_phase1_fn, &v2p1,
+                              sel_match ? sel_n : n_scan);
+            if (sel_match_block) ray_release(sel_match_block);
             CHECK_CANCEL_GOTO(pool, cleanup);
             if (atomic_load_explicit(&v2p1.oom, memory_order_relaxed)) {
                 for (size_t i = 0; i < v2_n_w; i++)
