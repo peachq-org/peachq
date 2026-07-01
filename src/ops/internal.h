@@ -827,7 +827,7 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows);
  *
  * Compiles and evaluates `pred` in selection-output mode (per-task rowsel
  * builders dispatched over [0,nrows), then finished into one rowsel block).
- * Handles the RAY_NO_FUSED_SEL gate, the parted/non-BOOL guard, and the
+ * Handles the parted/non-BOOL guard and the
  * large-table fallback (>RAY_POOL_MAX_TASKS tasks → non-morsel-aligned grain).
  * Returns:
  *   - non-NULL rowsel block  → the selection (caller installs / reads it).
