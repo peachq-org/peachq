@@ -1905,6 +1905,10 @@ typedef struct {
     size_t              val_off[16];
     size_t              val2_off[16];
     size_t              row_off;
+    /* When false, NO admitted aggregate consults the original row (first_row is
+     * dead): the record omits its 8-byte row index and Phase-2/3 skip it.  Set
+     * once from the agg kinds; row-dependent aggs (FIRST/LAST) flip it true. */
+    bool                needs_row;
     /* Sel-mode (pushed WHERE filter): when sel != NULL, scatter the SELECTED
      * rows of [0,n_sel) (decoded to ORIGINAL row indices) instead of [start,end).
      * The packed record's row_off ALWAYS stores the ORIGINAL decoded row, so
@@ -1939,7 +1943,7 @@ static inline int agg_radix_scatter_one(agg_radix_ctx_t* c, agg_pay_buf_t* my, i
             memcpy(rec + c->val2_off[a], (const char*)c->val2_data[a] + (size_t)r * ez2, ez2);
         }
     }
-    *(int64_t*)(rec + c->row_off) = r;
+    if (c->needs_row) *(int64_t*)(rec + c->row_off) = r;  /* loop-invariant branch */
     return 0;
 }
 
@@ -1991,14 +1995,15 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
         uint64_t htmask = (uint64_t)htcap - 1;
         int32_t* ht        = ray_alloc_raw((size_t)htcap * sizeof(int32_t));
         uint8_t* ht_salt   = ray_alloc_raw((size_t)htcap);  /* parallel salt fingerprint per slot */
-        int64_t* first_row = ray_alloc_raw((size_t)total * sizeof(int64_t));
+        /* first_row is only populated when a row-dependent agg needs it. */
+        int64_t* first_row = c->needs_row ? ray_alloc_raw((size_t)total * sizeof(int64_t)) : NULL;
         char*    states    = ray_alloc_raw((size_t)total * c->block);
         const int64_t** keyp = ray_alloc_raw((size_t)total * sizeof(int64_t*)); /* gid -> packed keys */
         uint32_t* gid      = ray_alloc_raw((size_t)total * sizeof(uint32_t));/* row i -> local gid */
         /* Persist each group's packed keys (build order) so Phase 3 emits the
          * key columns by sequential un-pack rather than scattered gather. */
         int64_t* gkeys     = ray_alloc_raw((size_t)total * (size_t)(n_keys ? n_keys : 1) * sizeof(int64_t));
-        if (!ht || !ht_salt || !first_row || !states || !keyp || !gid || !gkeys) {
+        if (!ht || !ht_salt || (c->needs_row && !first_row) || !states || !keyp || !gid || !gkeys) {
             ray_free_raw(ht); ray_free_raw(ht_salt); ray_free_raw(first_row); ray_free_raw(states); ray_free_raw(keyp); ray_free_raw(gid); ray_free_raw(gkeys);
             pr->oom = 1; return;
         }
@@ -2025,7 +2030,7 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
             const char* rec = b->buf;
             for (uint32_t i = 0; i < b->n; i++, rec += c->rec) {
                 const int64_t* keys = (const int64_t*)rec;
-                int64_t r = *(const int64_t*)(rec + c->row_off);
+                int64_t r = c->needs_row ? *(const int64_t*)(rec + c->row_off) : 0;
                 /* Gather this row's agg values into the dense per-agg buffers
                  * (sequential record read → sequential dense write). */
                 for (uint8_t a = 0; a < n_aggs; a++) {
@@ -2048,7 +2053,7 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                         gg = (int32_t)ng;
                         ht[slot] = gg;
                         ht_salt[slot] = salt;
-                        first_row[gg] = r;
+                        if (c->needs_row) first_row[gg] = r;
                         keyp[gg] = keys;
                         for (uint8_t k = 0; k < n_keys; k++)
                             gkeys[(size_t)gg * n_keys + k] = keys[k];
@@ -2059,7 +2064,7 @@ static void agg_radix_group_fn(void* vctx, uint32_t wid, int64_t start, int64_t 
                     }
                     if (ht_salt[slot] == salt && memcmp(keys, keyp[gp], key_bytes) == 0) {
                         gg = gp;                                     /* salt-gated key compare */
-                        if (r < first_row[gg]) first_row[gg] = r;   /* MIN */
+                        if (c->needs_row && r < first_row[gg]) first_row[gg] = r;   /* MIN */
                         break;
                     }
                     slot = (slot + 1) & htmask;
@@ -2195,14 +2200,28 @@ static ray_t* exec_group_v2_parallel_radix(
         val2_esz[a]     = vc2 ? col_esz(vc2) : 0;
     }
 
-    /* Per-row payload record layout: [packed keys][agg values][row_idx]. */
+    /* Row-dependent aggregates (FIRST/LAST) consult the representative original
+     * row; every other admitted agg (COUNT/SUM/AVG/MIN/MAX/VAR/STDDEV/PEARSON/
+     * MEDIAN/TOP/BOT) accumulates from gathered values and never touches it, and
+     * the key columns are un-packed from the packed keys — so first_row/row_idx
+     * are dead weight.  Drop them from the record layout when none is needed.
+     * NOTE: today FIRST/LAST never reach this kernel (agg_resolve() returns NULL
+     * for them, so the v2 admission gate rejects them), so needs_row is always
+     * false here — the scan below is a forward-guard, NOT a working restore path:
+     * admitting a row-dependent agg would also require finalize wiring to read
+     * the row, not just this layout flag. */
+    bool needs_row = false;
+    for (uint8_t a = 0; a < n_aggs; a++)
+        if (ext->agg_ops[a] == OP_FIRST || ext->agg_ops[a] == OP_LAST) { needs_row = true; break; }
+
+    /* Per-row payload record layout: [packed keys][agg values][row_idx?]. */
     size_t val_off[16] = {0}, val2_off[16] = {0};
     size_t rec_cur = (size_t)n_keys * 8;
     for (uint8_t a = 0; a < n_aggs; a++) {
         if (val_data[a])  { val_off[a]  = rec_cur; rec_cur += val_esz[a]; }
         if (val2_data[a]) { val2_off[a] = rec_cur; rec_cur += val2_esz[a]; }
     }
-    size_t row_off = rec_cur; rec_cur += 8;
+    size_t row_off = rec_cur; if (needs_row) rec_cur += 8;
     size_t rec = (rec_cur + 7u) & ~(size_t)7u;   /* 8-align records */
 
     size_t nbuf = (size_t)nw * AGG_RADIX_P;
@@ -2216,7 +2235,7 @@ static ray_t* exec_group_v2_parallel_radix(
         .val_data = val_data, .val_types = val_types, .val_hasnull = val_hasnull, .val_esz = val_esz,
         .val2_data = val2_data, .val2_types = val2_types, .val2_hasnull = val2_hasnull, .val2_esz = val2_esz,
         .nw = nw, .bufs = bufs, .parts = parts, .phase1_oom = 0,
-        .rec = rec, .row_off = row_off,
+        .rec = rec, .row_off = row_off, .needs_row = needs_row,
         .sel = sel, .sel_prefix = sel_prefix,
     };
     memcpy(ctx.val_off, val_off, sizeof(val_off));
@@ -2263,7 +2282,7 @@ static ray_t* exec_group_v2_parallel_radix(
     { int64_t i = 0;
       for (uint32_t p = 0; p < AGG_RADIX_P; p++)
           for (int64_t gg = 0; gg < parts[p].ng; gg++) {
-              pairs[i].fr  = parts[p].first_row[gg];   /* unused by emit; kept for idx pairing */
+              pairs[i].fr  = parts[p].first_row ? parts[p].first_row[gg] : 0;  /* unused by emit */
               pairs[i].idx = ((int64_t)p << 32) | (uint32_t)gg;   /* part | gid */
               i++;
           }
