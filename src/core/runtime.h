@@ -81,6 +81,14 @@ typedef struct {
     int              proj_keep_n;
     int32_t          proj_depth;  /* eval_depth at publish; consumed only at +1 */
     bool             proj_active;
+    /* ── group-by DA-eligibility hint: exec_group publishes each group key's
+     * KNOWN cardinality (dict n_distinct today; extensible to other key types
+     * with a cheaply-known TIGHT slot-span bound) so exec_group_v2's direct-
+     * array check can reject an infeasible composite without a min/max prescan.
+     * Consume-once per group; cleared at exec_group entry. memset-zero = none. */
+    int64_t          grp_card_sym[8];
+    int64_t          grp_card_val[8];
+    uint8_t          grp_card_n;
     /* ── cold: error paths only */
     ray_t           *trace;      /* error trace list (owned) */
     ray_t           *raise_val;  /* pending (raise x) value (owned) */
