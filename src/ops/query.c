@@ -4303,6 +4303,82 @@ static bool proj_compute_keep(ray_t* dict, int64_t* out, int max, int* out_n) {
     return true;
 }
 
+/* Filter-compaction keep-set for a `select {where: … by: [k1 k2 …]}` whose sole
+ * consumer is the keys-only multi-key DISTINCT path (agg_select_distinct) under
+ * an active projection hint.  In that shape the WHERE filter's result table need
+ * only carry the columns the distinct will read — the group keys plus the outer
+ * select's published proj_keep — so ray_execute_inner gathers those instead of
+ * the whole table.  Returns the deduped keep count, or 0 (carry all) for any
+ * shape that could read a dropped column.
+ *
+ * Correctness — the distinct path (see the distinct_only block below) is taken,
+ * and emits exactly keys ∪ proj_keep, iff ALL hold: (a) a projection hint is
+ * active at this eval_depth (so the distinct projects to keys ∪ proj_keep rather
+ * than first-of-group of every column); (b) the by: is a multi-key SYM vector;
+ * (c) the dict has only from/where/by (no value/take/sort clauses); (d) every
+ * source column is a gatherable type.  Any failure returns 0 and the full table
+ * is carried, exactly as before.  Types are read from the source table — the
+ * WHERE filter preserves each column's type and the projected set is a subset. */
+static int filt_compact_keep(ray_t* dict, ray_t* by_expr, ray_t* tbl,
+                             int64_t from_id, int64_t where_id, int64_t by_id,
+                             int64_t* out, int max) {
+    ray_vm_t* vm = __VM;
+    if (!vm || !vm->proj_active || vm->eval_depth != vm->proj_depth + 1)
+        return 0;                                    /* (a) */
+    if (!by_expr || by_expr->type != RAY_SYM || ray_len(by_expr) <= 1)
+        return 0;                                    /* (b) */
+    DICT_VIEW_DECL(pv);
+    DICT_VIEW_OPEN(dict, pv);
+    if (DICT_VIEW_OVERFLOW(pv)) return 0;
+    for (int64_t i = 0; i + 1 < pv_n; i += 2) {      /* (c) */
+        int64_t kid = pv[i]->i64;
+        if (kid != from_id && kid != where_id && kid != by_id) return 0;
+    }
+    int64_t nk = ray_len(by_expr);
+    const int64_t* key_syms = (const int64_t*)ray_data(by_expr);
+    for (int64_t k = 0; k < nk; k++) {               /* (d) keys */
+        ray_t* kc = ray_table_get_col(tbl, key_syms[k]);
+        if (!kc) return 0;
+        switch (kc->type) {
+            case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+            case RAY_BOOL: case RAY_DATE: case RAY_TIME:
+            case RAY_TIMESTAMP: case RAY_SYM: case RAY_STR: break;
+            default: return 0;
+        }
+    }
+    int64_t nc = ray_table_ncols(tbl);
+    for (int64_t c = 0; c < nc; c++) {               /* (d) all source columns */
+        ray_t* cc = ray_table_get_col_idx(tbl, c);
+        if (!cc) return 0;
+        switch (cc->type) {
+            case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+            case RAY_BOOL: case RAY_DATE: case RAY_TIME:
+            case RAY_TIMESTAMP: case RAY_SYM: case RAY_F64:
+            case RAY_GUID: case RAY_STR: case RAY_LIST: break;
+            default: return 0;
+        }
+    }
+    /* keep = keys ∪ proj_keep.  The proj_keep union is LOAD-BEARING, not
+     * defensive: a plain multi-key `select {by: …}` emits first-of-group of the
+     * NON-key columns too (agg_select_distinct gathers them), and proj_keep is
+     * exactly the set of those the outer consumer references — dropping the
+     * union would silently drop needed columns.  Keys are written first so an
+     * (unreachable) >max overflow can only lose proj_keep entries, never keys. */
+    int n = 0;
+    for (int64_t k = 0; k < nk && n < max; k++) {
+        bool dup = false;
+        for (int j = 0; j < n; j++) if (out[j] == key_syms[k]) { dup = true; break; }
+        if (!dup) out[n++] = key_syms[k];
+    }
+    for (int j = 0; j < vm->proj_keep_n && n < max; j++) {
+        int64_t s = vm->proj_keep[j];
+        bool dup = false;
+        for (int q = 0; q < n; q++) if (out[q] == s) { dup = true; break; }
+        if (!dup) out[n++] = s;
+    }
+    return n;
+}
+
 ray_t* ray_select(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("arity", "select: expects a query dict, got %lld args", (long long)n);
     ray_t* dict = args[0];
@@ -5539,7 +5615,28 @@ by_dict_done:
             ray_t* eval_tbl = tbl;
             if (where_expr) {
                 root = ray_optimize(g, root);
+                /* Projection-aware compaction: when this WHERE filter feeds only
+                 * the keys-only multi-key DISTINCT path under an active outer
+                 * projection hint, publish the keys∪proj_keep keep-set so the
+                 * filter finalization (ray_execute_inner) gathers just those
+                 * columns.  Scoped to this ray_execute via save/restore. */
+                int64_t filt_buf[DICT_VIEW_MAX];
+                ray_vm_t* fvm = __VM;
+                const int64_t* sv_fk = fvm ? fvm->filt_keep   : NULL;
+                int            sv_fn = fvm ? fvm->filt_keep_n : 0;
+                int32_t        sv_fd = fvm ? fvm->filt_depth  : 0;
+                if (fvm) {
+                    int fk_n = filt_compact_keep(dict, by_expr, tbl,
+                                                 from_id, where_id, by_id,
+                                                 filt_buf, DICT_VIEW_MAX);
+                    if (fk_n > 0) {
+                        fvm->filt_keep = filt_buf; fvm->filt_keep_n = fk_n;
+                        fvm->filt_depth = fvm->eval_depth;
+                    }
+                }
                 ray_t* fres = ray_execute(g, root);
+                if (fvm) { fvm->filt_keep = sv_fk; fvm->filt_keep_n = sv_fn;
+                           fvm->filt_depth = sv_fd; }
                 ray_graph_free(g); g = NULL;
                 if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", "select: `where:` filter produced no result"); }
                 if (ray_is_lazy(fres)) fres = ray_lazy_materialize(fres);
