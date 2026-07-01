@@ -729,6 +729,10 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel,
             if (!new_cols[c]) continue;
             ray_t* col = ray_table_get_col_idx(tbl, c);
             if (col->type == RAY_LIST) continue;  /* gathered above with retain */
+            /* RAY_MAPCOMMON is not skipped here: the pre-alloc loop above already
+             * materialized it to a flat new_cols[c], so col_esz returns 0 and the
+             * gather is a no-op.  exec_filter adds an explicit continue for clarity;
+             * sel_compact relies on the 0-byte no-op instead. */
             int64_t ci = mgctx.ncols;
             mgctx.srcs[ci] = (char*)ray_data(col);
             mgctx.dsts[ci] = (char*)ray_data(new_cols[c]);
