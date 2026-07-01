@@ -1852,7 +1852,7 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
  * scanning it with ray_rowsel_from_pred, stream each morsel's bools directly
  * into per-task rowsel builders and stitch them into a single selection.
  * Saves the BOOL allocation + the second full pass.  Strictly additive:
- * unsupported shapes and RAY_NO_FUSED_SEL return to the existing path.
+ * unsupported shapes return to the existing path.
  *
  * The per-task-builder scaffolding (allocate one builder per dispatched
  * grain task, dispatch a worker that streams each morsel's bools via
@@ -1992,7 +1992,6 @@ ray_t* pred_sel_drive(int64_t nrows, pred_sel_fill_fn fill, void* fill_ctx,
 ray_t* exec_pred_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
                               bool* all_pass) {
     *all_pass = false;
-    if (getenv("RAY_NO_FUSED_SEL")) return NULL;        /* disabled */
     if (!g || !g->table || !pred) return NULL;          /* unsupported */
     if (nrows <= 0) { *all_pass = true; return NULL; }  /* empty = all-pass */
 
