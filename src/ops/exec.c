@@ -1376,7 +1376,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
              * set g->selection without materializing a compacted table. */
             bool own_input = (input != g->table);
             if (g->selection && input->type == RAY_TABLE) {
-                ray_t* compacted = sel_compact(g, input, g->selection);
+                ray_t* compacted = sel_compact(g, input, g->selection, NULL, 0);
                 if (own_input) ray_release(input);
                 ray_release(g->selection);
                 g->selection = NULL;
@@ -1657,7 +1657,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             ray_t* tbl = (input->type == RAY_TABLE) ? input : g->table;
             /* Compact lazy selection before sort (needs dense data) */
             if (g->selection && tbl && !RAY_IS_ERR(tbl) && tbl->type == RAY_TABLE) {
-                ray_t* compacted = sel_compact(g, tbl, g->selection);
+                ray_t* compacted = sel_compact(g, tbl, g->selection, NULL, 0);
                 if (input != g->table) ray_release(input);
                 ray_release(g->selection);
                 g->selection = NULL;
@@ -1742,7 +1742,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             ray_t* tbl = g->table;
             ray_t* owned_tbl = NULL;
             if (g->selection) {
-                ray_t* compacted = sel_compact(g, tbl, g->selection);
+                ray_t* compacted = sel_compact(g, tbl, g->selection, NULL, 0);
                 if (!compacted || RAY_IS_ERR(compacted)) return compacted;
                 ray_release(g->selection);
                 g->selection = NULL;
@@ -1761,7 +1761,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             if (!right || RAY_IS_ERR(right)) { ray_release(left); return right; }
             /* Compact lazy selection before join (needs dense data) */
             if (g->selection && left && !RAY_IS_ERR(left) && left->type == RAY_TABLE) {
-                ray_t* compacted = sel_compact(g, left, g->selection);
+                ray_t* compacted = sel_compact(g, left, g->selection, NULL, 0);
                 ray_release(left);
                 ray_release(g->selection);
                 g->selection = NULL;
@@ -1779,7 +1779,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             if (!left || RAY_IS_ERR(left)) { if (right && !RAY_IS_ERR(right)) ray_release(right); return left; }
             if (!right || RAY_IS_ERR(right)) { ray_release(left); return right; }
             if (g->selection && left && !RAY_IS_ERR(left) && left->type == RAY_TABLE) {
-                ray_t* compacted = sel_compact(g, left, g->selection);
+                ray_t* compacted = sel_compact(g, left, g->selection, NULL, 0);
                 ray_release(left);
                 ray_release(g->selection);
                 g->selection = NULL;
@@ -1797,7 +1797,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             if (!left || RAY_IS_ERR(left)) { if (right && !RAY_IS_ERR(right)) ray_release(right); return left; }
             if (!right || RAY_IS_ERR(right)) { ray_release(left); return right; }
             if (g->selection && left && !RAY_IS_ERR(left) && left->type == RAY_TABLE) {
-                ray_t* compacted = sel_compact(g, left, g->selection);
+                ray_t* compacted = sel_compact(g, left, g->selection, NULL, 0);
                 ray_release(left);
                 ray_release(g->selection);
                 g->selection = NULL;
@@ -1815,7 +1815,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             ray_t* wdf = (input->type == RAY_TABLE) ? input : g->table;
             /* Compact lazy selection before window (needs dense data) */
             if (g->selection && wdf && !RAY_IS_ERR(wdf) && wdf->type == RAY_TABLE) {
-                ray_t* compacted = sel_compact(g, wdf, g->selection);
+                ray_t* compacted = sel_compact(g, wdf, g->selection, NULL, 0);
                 if (input != g->table) ray_release(input);
                 ray_release(g->selection);
                 g->selection = NULL;
@@ -1839,7 +1839,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 ray_t* tbl = (sort_input->type == RAY_TABLE) ? sort_input : g->table;
                 /* Compact lazy selection before sort */
                 if (g->selection && tbl && !RAY_IS_ERR(tbl) && tbl->type == RAY_TABLE) {
-                    ray_t* compacted = sel_compact(g, tbl, g->selection);
+                    ray_t* compacted = sel_compact(g, tbl, g->selection, NULL, 0);
                     if (sort_input != g->table) ray_release(sort_input);
                     ray_release(g->selection);
                     g->selection = NULL;
@@ -1884,7 +1884,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         }
                     }
                     if (needs) {
-                        ray_t* compacted = sel_compact(g, tbl, g->selection);
+                        ray_t* compacted = sel_compact(g, tbl, g->selection, NULL, 0);
                         if (!compacted || RAY_IS_ERR(compacted)) return compacted;
                         ray_release(g->selection);
                         g->selection = NULL;
@@ -1909,7 +1909,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 ray_t* ftbl = (filter_input->type == RAY_TABLE)
                            ? filter_input : g->table;
                 if (g->selection && ftbl && ftbl->type == RAY_TABLE) {
-                    ray_t* compacted = sel_compact(g, ftbl, g->selection);
+                    ray_t* compacted = sel_compact(g, ftbl, g->selection, NULL, 0);
                     if (filter_input != g->table) ray_release(filter_input);
                     ray_release(g->selection);
                     g->selection = NULL;
@@ -2771,7 +2771,7 @@ static ray_t* ray_execute_inner(ray_graph_t* g, ray_op_t* root) {
         ray_t* result = exec_node(g, root);
         if (g->selection && result && !RAY_IS_ERR(result)
             && result->type == RAY_TABLE) {
-            ray_t* compacted = sel_compact(g, result, g->selection);
+            ray_t* compacted = sel_compact(g, result, g->selection, NULL, 0);
             ray_release(result);
             ray_release(g->selection);
             g->selection = NULL;
@@ -2870,7 +2870,7 @@ static ray_t* ray_execute_inner(ray_graph_t* g, ray_op_t* root) {
         /* Compact lazy selection for this segment */
         if (g->selection && partial && !RAY_IS_ERR(partial)
             && partial->type == RAY_TABLE) {
-            ray_t* compacted = sel_compact(g, partial, g->selection);
+            ray_t* compacted = sel_compact(g, partial, g->selection, NULL, 0);
             ray_release(partial);
             ray_release(g->selection);
             g->selection = NULL;
