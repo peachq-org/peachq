@@ -252,7 +252,10 @@ static Tokens scan(const char *src) {
             case '[': kk = T_LBRACK; noun_pos = 0; break;
             case ']': kk = T_RBRACK; noun_pos = 1; break;
             case ';': kk = T_SEMI;   noun_pos = 0; break;
-            default:  p++; continue;
+            /* Unknown byte (string quote, hex, stray char, non-ASCII): error
+             * rather than silently skip it — a dropped byte turns unsupported
+             * q into a false "parse OK". */
+            default:  q_die("unexpected character");
             }
             p++;
             EMIT(kk, NULL);
