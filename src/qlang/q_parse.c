@@ -212,6 +212,23 @@ static Tokens scan(const char *src) {
             EMIT(T_NOUN, q_name(src + start, len));
             noun_pos = 1;
         }
+        else if (c == '"') {
+            /* String literal: scan to the closing quote, honouring `\` escapes
+             * (the escaped byte is skipped so an escaped quote does not close
+             * the string).  Emit the raw inner bytes as a RAY_STR — escape
+             * decoding is deferred (the tested subset uses no escapes). */
+            p++;                     /* past opening quote */
+            int s = p;
+            while (src[p] && src[p] != '"') {
+                if (src[p] == '\\' && src[p+1]) p += 2;   /* skip escaped char */
+                else p++;
+            }
+            if (src[p] != '"') q_die("unterminated string");
+            int len = p - s;
+            p++;                     /* past closing quote */
+            EMIT(T_NOUN, ray_str(src + s, (size_t)len));
+            noun_pos = 1;
+        }
         else if (c == '`') {
             /* One or more `name — a single one is a sym-literal atom; more
              * than one is left as a sym-literal atom of the first for the MVP
