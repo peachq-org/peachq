@@ -5,6 +5,7 @@
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
 #include "lang/eval.h"      /* ray_eval */
+#include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <string.h>
 
@@ -30,6 +31,7 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
 
         ray_t* r = ray_eval(ast);
         ray_release(ast);
+        if (ray_is_lazy(r)) r = ray_lazy_materialize(r);
 
         if (RAY_IS_ERR(r)) {
             const char* code = (const char*)r->sdata;
