@@ -9,12 +9,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_repl.h"
+#include "qlang/q_runtime.h"
 #include <rayforce.h>
 #include <stdio.h>
 #include <unistd.h>
 
 int main(int argc, char** argv) {
-    ray_runtime_t* rt = ray_runtime_create(argc, argv);
+    ray_runtime_t* rt = q_runtime_create(argc, argv);
     if (!rt) { fprintf(stderr, "runtime init failed\n"); return 1; }
 
     /* Echo input when stdin is not a terminal (piped / redirected) so the
