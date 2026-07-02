@@ -2639,6 +2639,7 @@ static void ray_register_builtins(void) {
 
     /* Query operations */
     register_vary("select",    RAY_FN_SPECIAL_FORM, ray_select);
+    register_vary("window",    RAY_FN_SPECIAL_FORM, ray_window_fn);
     register_vary("update",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_update);
     register_vary("insert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_insert);
     register_vary("upsert",    RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_upsert);
