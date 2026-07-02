@@ -3756,6 +3756,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 }
 
 /* Map a window function name (C string of given length) to a RAY_WIN_* kind.
+ * Only the 7 spec-exposed names are reachable: min/max/sum/avg/count/first/last.
  * Returns 255 on no match. */
 static uint8_t win_kind_from_name(const char* s, size_t len) {
     switch (len) {
@@ -3764,27 +3765,13 @@ static uint8_t win_kind_from_name(const char* s, size_t len) {
         if (memcmp(s, "avg", 3) == 0) return RAY_WIN_AVG;
         if (memcmp(s, "min", 3) == 0) return RAY_WIN_MIN;
         if (memcmp(s, "max", 3) == 0) return RAY_WIN_MAX;
-        if (memcmp(s, "lag", 3) == 0) return RAY_WIN_LAG;
         break;
     case 4:
-        if (memcmp(s, "lead", 4) == 0) return RAY_WIN_LEAD;
-        if (memcmp(s, "rank", 4) == 0) return RAY_WIN_RANK;
+        if (memcmp(s, "last", 4) == 0) return RAY_WIN_LAST_VALUE;
         break;
     case 5:
         if (memcmp(s, "count", 5) == 0) return RAY_WIN_COUNT;
-        if (memcmp(s, "ntile", 5) == 0) return RAY_WIN_NTILE;
-        break;
-    case 10:
-        if (memcmp(s, "row-number", 10) == 0) return RAY_WIN_ROW_NUMBER;
-        if (memcmp(s, "dense-rank", 10) == 0) return RAY_WIN_DENSE_RANK;
-        if (memcmp(s, "last-value", 10) == 0) return RAY_WIN_LAST_VALUE;
-        if (memcmp(s, "nth-value",  9) == 0) return RAY_WIN_NTH_VALUE; /* len=9 */
-        break;
-    case 9:
-        if (memcmp(s, "nth-value", 9) == 0) return RAY_WIN_NTH_VALUE;
-        break;
-    case 11:
-        if (memcmp(s, "first-value", 11) == 0) return RAY_WIN_FIRST_VALUE;
+        if (memcmp(s, "first", 5) == 0) return RAY_WIN_FIRST_VALUE;
         break;
     default: break;
     }
@@ -3846,14 +3833,21 @@ ray_t* ray_window_fn(ray_t** args, int64_t n) {
     /* ── frame: ── */
     ray_t* frame_expr = dict_get(dict, "frame");
     uint8_t frame_end = RAY_BOUND_UNBOUNDED_FOLLOWING;  /* default: whole partition */
-    if (frame_expr && frame_expr->type == -RAY_SYM) {
+    if (frame_expr) {
+        if (frame_expr->type != -RAY_SYM) {
+            ray_release(tbl);
+            return ray_error("domain", "window: frame must be 'whole or 'running");
+        }
         ray_t* fs = ray_sym_str(frame_expr->i64);
         if (fs) {
             const char* fsp = ray_str_ptr(fs);
             size_t      fsl = ray_str_len(fs);
             if (fsl == 7 && memcmp(fsp, "running", 7) == 0)
                 frame_end = RAY_BOUND_CURRENT_ROW;
-            /* 'whole or anything else: leave UNBOUNDED_FOLLOWING */
+            else if (!(fsl == 5 && memcmp(fsp, "whole", 5) == 0)) {
+                ray_release(tbl);
+                return ray_error("domain", "window: frame must be 'whole or 'running");
+            }
         }
     }
 
@@ -3936,6 +3930,10 @@ ray_t* ray_window_fn(ray_t** args, int64_t n) {
         if (kind == 255) {
             ray_graph_free(g); ray_release(tbl);
             return ray_error("domain", "window: unsupported window function '%s'", ray_str_ptr(fn_s));
+        }
+        if ((kind == RAY_WIN_FIRST_VALUE || kind == RAY_WIN_LAST_VALUE) && n_order == 0) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain", "window: first/last require order:");
         }
         func_kinds[fi]  = kind;
         func_params[fi] = 0;
