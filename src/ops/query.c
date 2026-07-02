@@ -3755,6 +3755,230 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     return ray_select(args, n);
 }
 
+/* Map a window function name (C string of given length) to a RAY_WIN_* kind.
+ * Returns 255 on no match. */
+static uint8_t win_kind_from_name(const char* s, size_t len) {
+    switch (len) {
+    case 3:
+        if (memcmp(s, "sum", 3) == 0) return RAY_WIN_SUM;
+        if (memcmp(s, "avg", 3) == 0) return RAY_WIN_AVG;
+        if (memcmp(s, "min", 3) == 0) return RAY_WIN_MIN;
+        if (memcmp(s, "max", 3) == 0) return RAY_WIN_MAX;
+        if (memcmp(s, "lag", 3) == 0) return RAY_WIN_LAG;
+        break;
+    case 4:
+        if (memcmp(s, "lead", 4) == 0) return RAY_WIN_LEAD;
+        if (memcmp(s, "rank", 4) == 0) return RAY_WIN_RANK;
+        break;
+    case 5:
+        if (memcmp(s, "count", 5) == 0) return RAY_WIN_COUNT;
+        if (memcmp(s, "ntile", 5) == 0) return RAY_WIN_NTILE;
+        break;
+    case 10:
+        if (memcmp(s, "row-number", 10) == 0) return RAY_WIN_ROW_NUMBER;
+        if (memcmp(s, "dense-rank", 10) == 0) return RAY_WIN_DENSE_RANK;
+        if (memcmp(s, "last-value", 10) == 0) return RAY_WIN_LAST_VALUE;
+        if (memcmp(s, "nth-value",  9) == 0) return RAY_WIN_NTH_VALUE; /* len=9 */
+        break;
+    case 9:
+        if (memcmp(s, "nth-value", 9) == 0) return RAY_WIN_NTH_VALUE;
+        break;
+    case 11:
+        if (memcmp(s, "first-value", 11) == 0) return RAY_WIN_FIRST_VALUE;
+        break;
+    default: break;
+    }
+    return 255;
+}
+
+/*
+ * (window {from: T part: [col …] order: [col …] frame: 'whole|'running
+ *          funcs: {outname: (fn inputcol) …}})
+ *
+ * Builds a DAG OP_WINDOW node over the table T, executes it, then renames the
+ * auto-generated _w0/_w1/… output columns to the user-supplied names.
+ *
+ * Special form: args[0] is the unevaluated dict literal AST.
+ * `from:` is the only clause that requires full eval (it's a variable ref).
+ * `part:`/`order:` arrive as RAY_SYM vectors or -RAY_SYM atoms (column refs).
+ * `frame:` arrives as a quoted -RAY_SYM atom ('whole or 'running).
+ * `funcs:` is a nested RAY_DICT whose values are list expressions (fn col).
+ */
+ray_t* ray_window_fn(ray_t** args, int64_t n) {
+    if (n < 1)
+        return ray_error("arity", "window: expects a query dict, got %lld args", (long long)n);
+    ray_t* dict = args[0];
+    if (!dict || dict->type != RAY_DICT)
+        return ray_error("type", "window: argument must be a dict, got %s",
+                         dict ? ray_type_name(dict->type) : "null");
+
+    /* ── from: ── */
+    ray_t* from_expr = dict_get(dict, "from");
+    if (!from_expr)
+        return ray_error("domain", "window: missing `from:` clause");
+    ray_t* tbl = ray_eval(from_expr);
+    if (!tbl || RAY_IS_ERR(tbl))
+        return tbl ? tbl : ray_error("domain", "window: `from:` evaluation failed");
+    if (tbl->type != RAY_TABLE) {
+        int8_t t = tbl->type; ray_release(tbl);
+        return ray_error("type", "window: `from:` must evaluate to a table, got %s",
+                         ray_type_name(t));
+    }
+
+    /* ── funcs: (required) ── */
+    ray_t* funcs_expr = dict_get(dict, "funcs");
+    if (!funcs_expr || funcs_expr->type != RAY_DICT) {
+        ray_release(tbl);
+        return ray_error("domain", "window: missing or invalid `funcs:` clause (must be a dict)");
+    }
+    DICT_VIEW_DECL(fv);
+    DICT_VIEW_OPEN(funcs_expr, fv);
+    if (DICT_VIEW_OVERFLOW(fv)) {
+        ray_release(tbl);
+        return ray_error("domain", "window: `funcs:` has too many entries");
+    }
+    int n_funcs = (int)(fv_n / 2);
+    if (n_funcs == 0 || n_funcs > 32) {
+        ray_release(tbl);
+        return ray_error("domain", "window: `funcs:` must have 1-32 entries, got %d", n_funcs);
+    }
+
+    /* ── frame: ── */
+    ray_t* frame_expr = dict_get(dict, "frame");
+    uint8_t frame_end = RAY_BOUND_UNBOUNDED_FOLLOWING;  /* default: whole partition */
+    if (frame_expr && frame_expr->type == -RAY_SYM) {
+        ray_t* fs = ray_sym_str(frame_expr->i64);
+        if (fs) {
+            const char* fsp = ray_str_ptr(fs);
+            size_t      fsl = ray_str_len(fs);
+            if (fsl == 7 && memcmp(fsp, "running", 7) == 0)
+                frame_end = RAY_BOUND_CURRENT_ROW;
+            /* 'whole or anything else: leave UNBOUNDED_FOLLOWING */
+        }
+    }
+
+    /* ── Build DAG ── */
+    ray_graph_t* g = ray_graph_new(tbl);
+    if (!g) { ray_release(tbl); return ray_error("oom", NULL); }
+    ray_op_t* tbl_node = ray_const_table(g, tbl);
+
+    /* part: – SYM vector or atom naming partition columns */
+    ray_op_t* part_ops[16];
+    uint8_t   n_part = 0;
+    {
+        ray_t* pe = dict_get(dict, "part");
+        if (pe) {
+            if (pe->type == -RAY_SYM && !(pe->attrs & ATTR_QUOTED)) {
+                ray_t* s = ray_sym_str(pe->i64);
+                if (s) part_ops[n_part++] = ray_scan(g, ray_str_ptr(s));
+            } else if (pe->type == RAY_SYM) {
+                for (int64_t i = 0; i < pe->len && n_part < 16; i++) {
+                    int64_t sid = sym_cell_runtime_id(pe, i);
+                    ray_t*  s   = ray_sym_str(sid);
+                    if (s) part_ops[n_part++] = ray_scan(g, ray_str_ptr(s));
+                }
+            }
+        }
+    }
+
+    /* order: – SYM vector or atom naming sort columns (all ascending) */
+    ray_op_t* order_ops[16];
+    uint8_t   order_descs[16];
+    uint8_t   n_order = 0;
+    memset(order_descs, 0, sizeof(order_descs));
+    {
+        ray_t* oe = dict_get(dict, "order");
+        if (oe) {
+            if (oe->type == -RAY_SYM && !(oe->attrs & ATTR_QUOTED)) {
+                ray_t* s = ray_sym_str(oe->i64);
+                if (s) order_ops[n_order++] = ray_scan(g, ray_str_ptr(s));
+            } else if (oe->type == RAY_SYM) {
+                for (int64_t i = 0; i < oe->len && n_order < 16; i++) {
+                    int64_t sid = sym_cell_runtime_id(oe, i);
+                    ray_t*  s   = ray_sym_str(sid);
+                    if (s) order_ops[n_order++] = ray_scan(g, ray_str_ptr(s));
+                }
+            }
+        }
+    }
+
+    /* Parse each funcs: entry: key = output name atom, value = (fn input_col) list */
+    uint8_t    func_kinds[32];
+    ray_op_t*  func_inputs[32];
+    int64_t    func_params[32];
+    int64_t    out_name_ids[32];
+
+    for (int fi = 0; fi < n_funcs; fi++) {
+        ray_t* key_atom = fv[fi * 2];
+        ray_t* val_expr = fv[fi * 2 + 1];
+
+        out_name_ids[fi] = (key_atom && key_atom->type == -RAY_SYM) ? key_atom->i64 : -1;
+
+        /* val_expr must be a list: (fn_name input_col [param]) */
+        if (!val_expr || val_expr->type != RAY_LIST || ray_len(val_expr) < 2) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain",
+                "window: `funcs:` value must be a function call like (min v), got wrong shape at entry %d",
+                fi);
+        }
+        ray_t** fel       = (ray_t**)ray_data(val_expr);
+        ray_t*  fn_expr   = fel[0];
+        ray_t*  col_expr  = fel[1];
+
+        /* Function name → RAY_WIN_* kind */
+        if (!fn_expr || fn_expr->type != -RAY_SYM) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain", "window: function name must be a symbol");
+        }
+        ray_t* fn_s = ray_sym_str(fn_expr->i64);
+        if (!fn_s) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", "window: unknown function"); }
+        uint8_t kind = win_kind_from_name(ray_str_ptr(fn_s), ray_str_len(fn_s));
+        if (kind == 255) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain", "window: unsupported window function '%s'", ray_str_ptr(fn_s));
+        }
+        func_kinds[fi]  = kind;
+        func_params[fi] = 0;
+
+        /* Input column name */
+        if (!col_expr || col_expr->type != -RAY_SYM) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain", "window: function input must be a column name symbol");
+        }
+        ray_t* col_s = ray_sym_str(col_expr->i64);
+        if (!col_s) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", "window: unknown input column"); }
+        func_inputs[fi] = ray_scan(g, ray_str_ptr(col_s));
+    }
+
+    /* ── Assemble and execute ── */
+    ray_op_t* win_op = ray_window_op(g, tbl_node,
+                                     n_part  ? part_ops  : NULL, n_part,
+                                     n_order ? order_ops : NULL,
+                                     n_order ? order_descs : NULL, n_order,
+                                     func_kinds, func_inputs, func_params,
+                                     (uint8_t)n_funcs,
+                                     RAY_FRAME_ROWS,
+                                     RAY_BOUND_UNBOUNDED_PRECEDING, frame_end,
+                                     0, 0);
+    if (!win_op) { ray_graph_free(g); ray_release(tbl); return ray_error("oom", NULL); }
+
+    win_op = ray_optimize(g, win_op);
+    ray_t* result = ray_execute(g, win_op);
+    ray_graph_free(g);
+    ray_release(tbl);
+
+    if (!result || RAY_IS_ERR(result)) return result;
+
+    /* Rename _w0/_w1/… to the user-specified output names */
+    int64_t base_ncols = ray_table_ncols(result) - n_funcs;
+    for (int fi = 0; fi < n_funcs; fi++) {
+        if (out_name_ids[fi] >= 0)
+            ray_table_set_col_name(result, base_ncols + fi, out_name_ids[fi]);
+    }
+
+    return result;
+}
+
 typedef enum {
     COUNT_CMP_EQ = 1,
     COUNT_CMP_NE,
