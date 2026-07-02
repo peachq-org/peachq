@@ -50,12 +50,21 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
 
     ray_t* res = ray_eval(ast);
     ray_release(ast);
+
+    /* An eval error is a failure — NOT empty output that could match an empty
+     * expected.  Otherwise every no-output example we can't run (assignments,
+     * table defs, `select`) would falsely "match". */
+    if (RAY_IS_ERR(res)) {
+        r->failed++;
+        if (verbose)
+            fprintf(out, "  %.60s: FAIL (eval) q)%.110s\n", path, input);
+        return;
+    }
+
     char got[QD_OUT];
     got[0] = '\0';
-    if (!RAY_IS_ERR(res)) {
-        if (!RAY_IS_NULL(res)) q_fmt(res, got, sizeof got);
-        ray_release(res);
-    }
+    if (!RAY_IS_NULL(res)) q_fmt(res, got, sizeof got);
+    ray_release(res);
 
     char ng[QD_OUT], ne[QD_OUT];
     normalize(got, ng, sizeof ng);
