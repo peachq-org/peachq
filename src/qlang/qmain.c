@@ -6,7 +6,7 @@
  * reused later.  See ARCHITECTURE.md and the MVP design doc. */
 #define _POSIX_C_SOURCE 200809L
 
-#include "q_parse.h"
+#include "qlang/q_parse.h"
 #include "lang/eval.h"   /* ray_eval, ray_lang_print */
 #include <rayforce.h>
 #include <stdio.h>
