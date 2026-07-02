@@ -40,9 +40,10 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
     ray_t* ast = q_parse(input);
     if (RAY_IS_ERR(ast)) {
         r->failed++;
-        if (verbose) fprintf(out, "  %.80s: FAIL (parse) q)%.120s\n", path, input);
+        if (verbose) fprintf(out, "  q)%.200s\n    FAIL(parse)\n", input);
         return;
     }
+    r->parsed++;   /* parsed OK — count before eval, regardless of outcome */
     if (mode == QDOC_PARSE_ONLY) {
         ray_release(ast);
         r->passed++;
@@ -57,9 +58,13 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
      * expected.  Otherwise every no-output example we can't run (assignments,
      * table defs, `select`) would falsely "match". */
     if (RAY_IS_ERR(res)) {
+        char ne[QD_OUT];
+        normalize(expect, ne, sizeof ne);
+        ray_release(res);
         r->failed++;
         if (verbose)
-            fprintf(out, "  %.60s: FAIL (eval) q)%.110s\n", path, input);
+            fprintf(out, "  q)%.200s\n    FAIL(eval) got \"<error>\" want \"%.200s\"\n",
+                    input, ne);
         return;
     }
 
@@ -76,14 +81,14 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
     } else {
         r->failed++;
         if (verbose)
-            fprintf(out, "  %.60s: FAIL q)%.100s -> \"%.120s\", want \"%.120s\"\n",
-                    path, input, ng, ne);
+            fprintf(out, "  q)%.200s\n    FAIL(eval) got \"%.200s\" want \"%.200s\"\n",
+                    input, ng, ne);
     }
 }
 
 qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
                             int verbose, FILE* out) {
-    qdoc_result_t r = {0, 0, 0, 0};
+    qdoc_result_t r = {0};
 
     FILE* f = fopen(path, "r");
     if (!f) {
