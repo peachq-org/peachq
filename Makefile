@@ -194,8 +194,15 @@ TEST_CORES ?= 2
 test: CFLAGS = $(DEBUG_CFLAGS)
 test: LDFLAGS = $(DEBUG_LDFLAGS)
 test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
+	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test
+
+# Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
+# rayforce base or an upstream bump — the deliberate acknowledgement that the
+# frozen base moved.  `make test` runs the read-only check (tools/frozen-manifest.sh).
+manifest:
+	@tools/frozen-manifest.sh gen
 
 # Coverage report.  Builds both binaries with clang source-based
 # instrumentation, runs the test suite (writing one .profraw per
@@ -241,7 +248,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test coverage clean
+.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
