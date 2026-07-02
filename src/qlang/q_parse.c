@@ -19,11 +19,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_parse.h"
+#include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
+#include <math.h>
 #include <setjmp.h>
 
 /* ATTR_QUOTED: flag on a -RAY_SYM atom.  SET = literal symbol; CLEAR
@@ -46,8 +48,6 @@ static void q_die(const char *msg) {
 }
 
 /* ===== ray_t leaf builders =================================================== */
-
-static ray_t *q_int(int64_t v) { return ray_i64(v); }
 
 /* name reference (ATTR_QUOTED clear): resolved by eval */
 static ray_t *q_name(const char *s, int len) {
@@ -146,17 +146,193 @@ typedef struct { Token *t; int n; } Tokens;
  * input leaks the token array.  Updated as the scanner emits. */
 static Tokens g_toks = { NULL, 0 };
 
-static int64_t scan_int(const char *src, int *p) {
-    int neg = 0;
-    if (src[*p] == '-') { neg = 1; (*p)++; }
-    int64_t limit = (int64_t)INT_MAX + (neg ? 1 : 0);
-    int64_t n = 0;
-    while (CLASS[(uint8_t)src[*p]] & CL_DIGIT) {
-        n = n * 10 + (src[*p] - '0');
-        if (n > limit) q_die("integer literal out of range");
+/* ===== numeric-literal scanner (q datatypes) ================================
+ * One literal is a space-separated run of magnitudes followed by at most one
+ * trailing type letter (b/h/i/j/e/f), per qlang.g4: the magnitude is scanned
+ * uniformly, the trailing letter fixes the type (no letter => long, or float
+ * if any magnitude was fractional).  Nulls / integer infinities are Specials
+ * that widen to the chosen type's sentinel. */
+
+typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF } el_kind;
+typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
+
+/* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
+ * float context.  Returns bytes consumed (0 = not a Special). */
+static int scan_special(const char *s, int p, num_el *out) {
+    int neg = (s[p] == '-');
+    int q = p + (neg ? 1 : 0);
+    if (s[q] != '0') return 0;
+    char k = s[q + 1];
+    if (k != 'N' && k != 'W' && k != 'n' && k != 'w') return 0;
+    int is_null = (k == 'N' || k == 'n');
+    if (neg && is_null) return 0;            /* -0N is not a literal */
+    out->forces_float = (k == 'n' || k == 'w');
+    out->i = 0; out->f = 0.0;
+    out->kind = is_null ? EL_NULL : (neg ? EL_NINF : EL_PINF);
+    return (q + 2) - p;
+}
+
+/* Scan one magnitude at src[*p] into *out; return 1 on success, 0 on no match. */
+static int scan_one_num(const char *src, int *p, num_el *out) {
+    out->forces_float = 0;
+    int used = scan_special(src, *p, out);
+    if (used) { *p += used; return 1; }
+
+    /* Decide float vs int: a float magnitude contains '.' or an exponent among
+     * its own bytes (before the next whitespace / letter).  Peek the digit run. */
+    int q = *p;
+    if (src[q] == '-' || src[q] == '+') q++;
+    int is_float = 0, saw_digit = 0;
+    for (int r = q; ; r++) {
+        char c = src[r];
+        if (c >= '0' && c <= '9') { saw_digit = 1; continue; }
+        if (c == '.') { is_float = 1; continue; }
+        if ((c == 'e' || c == 'E') && saw_digit &&
+            (src[r + 1] == '+' || src[r + 1] == '-' ||
+             (src[r + 1] >= '0' && src[r + 1] <= '9'))) { is_float = 1; continue; }
+        break;
+    }
+    if (!saw_digit) return 0;
+
+    size_t rem = strlen(src + *p);
+    if (is_float) {
+        double v; size_t u = ray_parse_f64(src + *p, rem, &v);
+        if (u == 0) return 0;
+        *p += (int)u; out->kind = EL_FLOAT; out->f = v; out->forces_float = 1;
+        return 1;
+    }
+    int64_t v; size_t u = ray_parse_i64(src + *p, rem, &v);
+    if (u == 0) return 0;
+    *p += (int)u; out->kind = EL_INT; out->i = v;
+    return 1;
+}
+
+/* Widen the long sentinels/inf to a narrow int width (2 or 4 bytes). */
+static int64_t narrow_special(el_kind k, int width) {
+    int64_t vmin = (width == 2) ? INT16_MIN : (width == 4) ? INT32_MIN : INT64_MIN;
+    int64_t vmax = (width == 2) ? INT16_MAX : (width == 4) ? INT32_MAX : INT64_MAX;
+    if (k == EL_NULL) return vmin;
+    if (k == EL_PINF) return vmax;
+    return -vmax;   /* EL_NINF */
+}
+
+/* Resolve one element to an int64 in the given integer width. */
+static int64_t el_to_int(const num_el *e, int width) {
+    if (e->kind == EL_INT)   return e->i;
+    if (e->kind == EL_FLOAT) return (int64_t)e->f;
+    return narrow_special(e->kind, width);
+}
+
+/* Resolve one element to a double (float context). */
+static double el_to_float(const num_el *e) {
+    if (e->kind == EL_NULL) return NULL_F64;
+    if (e->kind == EL_PINF || e->kind == EL_NINF)
+        q_die("q float infinity unsupported (deferred)");
+    return (e->kind == EL_FLOAT) ? e->f : (double)e->i;
+}
+
+/* Read an optional trailing type letter (b/h/i/j/e/f) at src[*p].  The whole
+ * literal shares one type, but each element in the source may carry the suffix
+ * (q prints `0Nh 0Wh -0Wh 42h`), so we accept a letter after every element and
+ * require them to agree. */
+static void read_type_letter(const char *src, int *p, char *letter) {
+    char c = src[*p];
+    if (c && strchr("bhijef", c)) {
+        if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
+        *letter = c;
         (*p)++;
     }
-    return neg ? -n : n;
+}
+
+/* Scan a full numeric literal (atom or vector) starting at src[*p]. */
+static ray_t *scan_num_literal(const char *src, int *p) {
+    int start = *p;
+    num_el buf[MAX_VEC]; int m = 0;
+    char letter = 0;
+    if (!scan_one_num(src, p, &buf[m++])) q_die("bad number");
+    read_type_letter(src, p, &letter);
+    for (;;) {
+        int sp = *p;
+        while (CLASS[(uint8_t)src[sp]] & CL_WS) sp++;
+        if (sp == *p) break;                     /* no space => run ended */
+        num_el e; int q = sp;
+        if (!scan_one_num(src, &q, &e)) break;   /* not another magnitude */
+        if (m >= MAX_VEC) q_die("numeric literal too long");
+        *p = q; buf[m++] = e;
+        read_type_letter(src, p, &letter);
+    }
+
+    /* Booleans: a 0/1 run ending in 'b' (spaces flattened). */
+    if (letter == 'b') {
+        uint8_t bits[MAX_VEC]; int nb = 0;
+        for (int i = start; i < *p - 1; i++) {
+            if (src[i] == ' ' || src[i] == '\t') continue;
+            if (src[i] != '0' && src[i] != '1') q_die("bad boolean literal");
+            if (nb >= MAX_VEC) q_die("boolean literal too long");
+            bits[nb++] = (uint8_t)(src[i] - '0');
+        }
+        if (nb == 0) q_die("bad boolean literal");
+        if (nb == 1) return ray_bool(bits[0]);
+        return ray_vec_from_raw(RAY_BOOL, bits, nb);
+    }
+
+    /* Float context: explicit e/f letter, or any fractional/lowercase-special. */
+    int is_float = (letter == 'e' || letter == 'f');
+    for (int i = 0; i < m && !is_float; i++)
+        if (buf[i].forces_float) is_float = 1;
+
+    if (is_float) {
+        int f32 = (letter == 'e');
+        if (m == 1) {
+            double v = el_to_float(&buf[0]);
+            return f32 ? ray_f32((float)v) : ray_f64(v);
+        }
+        int8_t type = f32 ? RAY_F32 : RAY_F64;
+        ray_t *vec;
+        if (f32) {
+            float t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = (float)el_to_float(&buf[i]);
+            vec = ray_vec_from_raw(type, t, m);
+        } else {
+            double t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = el_to_float(&buf[i]);
+            vec = ray_vec_from_raw(type, t, m);
+        }
+        if (vec && !RAY_IS_ERR(vec)) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+        }
+        return vec;
+    }
+
+    /* Integer context: h=i16, i=i32, j/none=i64. */
+    int width = (letter == 'h') ? 2 : (letter == 'i') ? 4 : 8;
+    int8_t type = (width == 2) ? RAY_I16 : (width == 4) ? RAY_I32 : RAY_I64;
+    if (m == 1) {
+        int64_t v = el_to_int(&buf[0], width);
+        if (width == 2) return ray_i16((int16_t)v);
+        if (width == 4) return ray_i32((int32_t)v);
+        return ray_i64(v);
+    }
+    ray_t *vec;
+    if (width == 8) {
+        int64_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = el_to_int(&buf[i], 8);
+        vec = ray_vec_from_raw(RAY_I64, t, m);
+    } else if (width == 4) {
+        int32_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+        vec = ray_vec_from_raw(RAY_I32, t, m);
+    } else {
+        int16_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = (int16_t)el_to_int(&buf[i], 2);
+        vec = ray_vec_from_raw(RAY_I16, t, m);
+    }
+    if (vec && !RAY_IS_ERR(vec) && type == RAY_I64) {
+        for (int i = 0; i < m; i++)
+            if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+    }
+    return vec;
 }
 
 static Tokens scan(const char *src) {
@@ -183,22 +359,7 @@ static Tokens scan(const char *src) {
         int neg_sign = (c == '-' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) && !noun_pos);
 
         if ((cl & CL_DIGIT) || neg_sign) {
-            int64_t buf[MAX_VEC]; int m = 0;
-            buf[m++] = scan_int(src, &p);
-            for (;;) {
-                int sp = p;
-                while (CLASS[(uint8_t)src[sp]] & CL_WS) sp++;
-                if (sp == p) break;
-                int has_dig = CLASS[(uint8_t)src[sp]] & CL_DIGIT;
-                int has_neg = src[sp] == '-' && (CLASS[(uint8_t)src[sp+1]] & CL_DIGIT);
-                if (!has_dig && !has_neg) break;
-                if (m >= MAX_VEC) q_die("int vector literal too long");
-                p = sp;
-                buf[m++] = scan_int(src, &p);
-            }
-            ray_t *k = (m == 1) ? q_int(buf[0])
-                                : ray_vec_from_raw(RAY_I64, buf, m);
-            EMIT(T_NOUN, k);
+            EMIT(T_NOUN, scan_num_literal(src, &p));
             noun_pos = 1;
         }
         else if (cl & CL_ALPHA) {
