@@ -18,9 +18,4 @@
  * Requires an initialised rayforce runtime (symbol interning). */
 ray_t* q_parse(const char* src);
 
-/* Format a q_parse() result in kparser's lisp AST notation into buf
- * (NUL-terminated, bounded by bufsz).  Used by the structural test
- * harness to diff parse-tree shape against the golden cases. */
-void q_ast_fmt(ray_t* ast, char* buf, size_t bufsz);
-
 #endif /* Q_PARSE_H */
