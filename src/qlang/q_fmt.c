@@ -111,8 +111,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
 
     /* q prints a simple vector space-separated with NO brackets: `5 6 7`,
      * where rayforce prints `[5 6 7]`.  Booleans concatenate with no spaces
-     * plus one trailing `b` (1001b); every other numeric vector is space-joined
-     * with one trailing type suffix (0N 0W -0W 42, 0Nh 0Wh -0Wh 42h). */
+     * plus one trailing `b` (1001b). */
     if (val->type == RAY_BOOL) {
         int64_t n = ray_len(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
@@ -123,20 +122,39 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         buf[pos] = '\0';
         return;
     }
-    if (val->type == RAY_I16 || val->type == RAY_I32 || val->type == RAY_I64 ||
-        val->type == RAY_F32 || val->type == RAY_F64) {
+    /* Typed integer vector: each element is rendered BARE (no per-element type
+     * char), space-joined, then the type char is appended ONCE at the end —
+     * `0N 0W -0W 42h`, not `0Nh 0Wh -0Wh 42h`.  This matches kdb's own
+     * formatter (K.java KBaseVector.formatVector: child context showType=false,
+     * one trailing typeChar). Long's type char is empty. */
+    if (val->type == RAY_I16 || val->type == RAY_I32 || val->type == RAY_I64) {
+        int width  = (val->type == RAY_I16) ? 2 : (val->type == RAY_I32) ? 4 : 8;
+        char vsuf  = (val->type == RAY_I16) ? 'h' : (val->type == RAY_I32) ? 'i' : 0;
         int64_t n = ray_len(val);
         size_t pos = 0;
         buf[0] = '\0';
         for (int64_t i = 0; i < n; i++) {
             char e[64];
-            switch (val->type) {
-            case RAY_I16: q_int_tok((int64_t)((const int16_t*)ray_data(val))[i], 2, 'h', e, sizeof e); break;
-            case RAY_I32: q_int_tok((int64_t)((const int32_t*)ray_data(val))[i], 4, 'i', e, sizeof e); break;
-            case RAY_I64: q_int_tok(((const int64_t*)ray_data(val))[i],          8, 0,   e, sizeof e); break;
-            case RAY_F32: q_float_tok((double)((const float*)ray_data(val))[i], 1, e, sizeof e); break;
-            default:      q_float_tok(((const double*)ray_data(val))[i],        0, e, sizeof e); break;
-            }
+            int64_t v = (width == 2) ? (int64_t)((const int16_t*)ray_data(val))[i]
+                      : (width == 4) ? (int64_t)((const int32_t*)ray_data(val))[i]
+                      :                ((const int64_t*)ray_data(val))[i];
+            q_int_tok(v, width, 0, e, sizeof e);   /* bare — no per-element suffix */
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        if (vsuf && pos + 1 < bufsz) { buf[pos++] = vsuf; buf[pos] = '\0'; }
+        return;
+    }
+    /* Float/real vectors are deferred (float infinities out of scope); the
+     * per-element tokens still carry the suffix — revisit with the same
+     * bare-element + one-trailing-char rule when float vectors are un-deferred. */
+    if (val->type == RAY_F32 || val->type == RAY_F64) {
+        int64_t n = ray_len(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            if (val->type == RAY_F32) q_float_tok((double)((const float*)ray_data(val))[i], 1, e, sizeof e);
+            else                      q_float_tok(((const double*)ray_data(val))[i],        0, e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
         }
         return;
