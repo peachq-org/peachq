@@ -5,6 +5,8 @@
 #include "lang/format.h"   /* ray_fmt */
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <math.h>
 
 /* The verb characters — a sym atom of one of these (or the generic null `::`)
  * prints bare; every other sym keeps its leading backtick.  Same split the
@@ -39,6 +41,50 @@ static void ray_fallback(ray_t* val, char* buf, size_t bufsz) {
     if (s && !RAY_IS_ERR(s)) ray_release(s);
 }
 
+/* Render one integer element q-style with sentinel detection:
+ * INT*_MIN -> 0N, INT*_MAX -> 0W, -INT*_MAX -> -0W, else the value; the type
+ * suffix (h/i, or none for long) is appended. */
+static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
+    int64_t vmin = (width == 2) ? INT16_MIN : (width == 4) ? INT32_MIN : INT64_MIN;
+    int64_t vmax = (width == 2) ? INT16_MAX : (width == 4) ? INT32_MAX : INT64_MAX;
+    char sfx[2]; sfx[0] = suffix; sfx[1] = '\0';
+    if (!suffix) sfx[0] = '\0';
+    if (v == vmin)       snprintf(out, n, "0N%s", sfx);
+    else if (v == vmax)  snprintf(out, n, "0W%s", sfx);
+    else if (v == -vmax) snprintf(out, n, "-0W%s", sfx);
+    else                 snprintf(out, n, "%lld%s", (long long)v, sfx);
+}
+
+/* Render one float element q-style: NaN -> 0n (f64) / 0Ne (f32); a finite
+ * magnitude reuses ray_fmt on a temp atom of the matching type, then appends
+ * 'e' for f32 (nothing for f64).  Float infinities are out of scope. */
+static void q_float_tok(double v, int f32, char* out, size_t n) {
+    if (isnan(v)) { snprintf(out, n, f32 ? "0Ne" : "0n"); return; }
+    ray_t* a = f32 ? ray_f32((float)v) : ray_f64(v);
+    char mag[64]; mag[0] = '\0';
+    ray_t* s = ray_fmt(a, 0);
+    if (s && !RAY_IS_ERR(s) && s->type == -RAY_STR) {
+        size_t l = ray_str_len(s);
+        if (l >= sizeof mag) l = sizeof mag - 1;
+        memcpy(mag, ray_str_ptr(s), l);
+        mag[l] = '\0';
+    }
+    if (s && !RAY_IS_ERR(s)) ray_release(s);
+    if (a && !RAY_IS_ERR(a)) ray_release(a);
+    snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
+}
+
+/* Join per-element tokens (already rendered) with spaces into buf. */
+static void q_join(char* buf, size_t bufsz, size_t* pos, const char* tok, int first) {
+    size_t tl = strlen(tok);
+    size_t need = tl + (first ? 0 : 1);
+    if (*pos + need + 1 > bufsz) return;
+    if (!first) buf[(*pos)++] = ' ';
+    memcpy(buf + *pos, tok, tl);
+    *pos += tl;
+    buf[*pos] = '\0';
+}
+
 void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0) return;
     buf[0] = '\0';
@@ -51,26 +97,48 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
 
+    /* Typed numeric atoms print q-style with a type suffix (bare for long /
+     * float): 1b, 42h, 42i, 42, 3.14e, 3.14 — plus the nulls/inf tokens. */
+    switch (val->type) {
+    case -RAY_BOOL: snprintf(buf, bufsz, "%db", val->u8 ? 1 : 0);          return;
+    case -RAY_I16:  q_int_tok((int64_t)val->i16, 2, 'h', buf, bufsz);      return;
+    case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', buf, bufsz);      return;
+    case -RAY_I64:  q_int_tok(val->i64,          8, 0,   buf, bufsz);      return;
+    case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
+    case -RAY_F64:  q_float_tok(val->f64,        0, buf, bufsz);           return;
+    default: break;
+    }
+
     /* q prints a simple vector space-separated with NO brackets: `5 6 7`,
-     * where rayforce prints `[5 6 7]`.  Handle int vectors here (the common
-     * arithmetic / til / reverse result); everything else falls back to the
-     * rayforce formatter for now.
-     *
-     * Note: a 1-element vector is left as e.g. `5` rather than q's enlist form
-     * `,5` for the moment — refined when the full q outputter lands. */
-    if (val->type == RAY_I64) {
+     * where rayforce prints `[5 6 7]`.  Booleans concatenate with no spaces
+     * plus one trailing `b` (1001b); every other numeric vector is space-joined
+     * with one trailing type suffix (0N 0W -0W 42, 0Nh 0Wh -0Wh 42h). */
+    if (val->type == RAY_BOOL) {
         int64_t n = ray_len(val);
-        const int64_t* d = (const int64_t*)ray_data(val);
+        const uint8_t* d = (const uint8_t*)ray_data(val);
         size_t pos = 0;
-        for (int64_t i = 0; i < n; i++) {
-            char e[24];
-            int m = snprintf(e, sizeof e, "%s%lld", i ? " " : "", (long long)d[i]);
-            if (m < 0) break;
-            if (pos + (size_t)m + 1 > bufsz) break;   /* keep room for the NUL */
-            memcpy(buf + pos, e, (size_t)m);
-            pos += (size_t)m;
-        }
+        for (int64_t i = 0; i < n && pos + 1 < bufsz; i++)
+            buf[pos++] = d[i] ? '1' : '0';
+        if (pos + 1 < bufsz) buf[pos++] = 'b';
         buf[pos] = '\0';
+        return;
+    }
+    if (val->type == RAY_I16 || val->type == RAY_I32 || val->type == RAY_I64 ||
+        val->type == RAY_F32 || val->type == RAY_F64) {
+        int64_t n = ray_len(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            switch (val->type) {
+            case RAY_I16: q_int_tok((int64_t)((const int16_t*)ray_data(val))[i], 2, 'h', e, sizeof e); break;
+            case RAY_I32: q_int_tok((int64_t)((const int32_t*)ray_data(val))[i], 4, 'i', e, sizeof e); break;
+            case RAY_I64: q_int_tok(((const int64_t*)ray_data(val))[i],          8, 0,   e, sizeof e); break;
+            case RAY_F32: q_float_tok((double)((const float*)ray_data(val))[i], 1, e, sizeof e); break;
+            default:      q_float_tok(((const double*)ray_data(val))[i],        0, e, sizeof e); break;
+            }
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
         return;
     }
 
