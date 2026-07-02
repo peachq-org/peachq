@@ -5,6 +5,7 @@
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
 #include "lang/eval.h"      /* ray_eval */
+#include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <string.h>
 
@@ -50,6 +51,7 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
 
     ray_t* res = ray_eval(ast);
     ray_release(ast);
+    if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
 
     /* An eval error is a failure — NOT empty output that could match an empty
      * expected.  Otherwise every no-output example we can't run (assignments,
