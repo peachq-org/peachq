@@ -1181,6 +1181,11 @@ int32_t ray_term_count_unmatched(ray_term_t* term) {
 #define CONT_PROMPT_VIS  2  /* visual: … + space */
 
 void ray_term_prompt(ray_term_t* term) {
+    if (term->prompt_override_len > 0) {
+        term_write(term->prompt_override, (size_t)term->prompt_override_len);
+        term->prompt_len = term->prompt_override_vis;
+        return;
+    }
     if (term->prompt_prefix_len > 0)
         term_write(term->prompt_prefix, (size_t)term->prompt_prefix_len);
     term_write(PROMPT_STR, PROMPT_LEN);
@@ -1220,6 +1225,42 @@ void ray_term_set_prompt_prefix(ray_term_t* term, const char* prefix) {
     }
     term->prompt_prefix_len = n;
     term->prompt_prefix_vis = ray_term_visual_width(prefix, strlen(prefix)) + 1;
+}
+
+void ray_term_set_prompt(ray_term_t* term, const char* ansi, int32_t vis_width) {
+    if (!term) return;
+    if (!ansi || !*ansi) {
+        term->prompt_override_len = 0;
+        term->prompt_override_vis = 0;
+        term->prompt_override[0]  = '\0';
+        return;
+    }
+    int n = snprintf(term->prompt_override, sizeof(term->prompt_override), "%s", ansi);
+    if (n < 0 || n >= (int)sizeof(term->prompt_override)) {
+        /* Too long for the buffer — clear rather than truncate mid-escape. */
+        term->prompt_override_len = 0;
+        term->prompt_override_vis = 0;
+        term->prompt_override[0]  = '\0';
+        return;
+    }
+    term->prompt_override_len = n;
+    term->prompt_override_vis = vis_width;
+}
+
+void ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn) {
+    if (!term) return;
+    term->highlight_fn = fn;
+}
+
+/* Dispatch to the caller-supplied highlighter when one is installed,
+ * otherwise fall back to the built-in.  Both share term_highlight_into's
+ * signature so the default path stays byte-identical. */
+static int32_t term_highlight(const ray_term_t* term, char* dst, int32_t dst_cap,
+                              const char* buf, int32_t buf_len,
+                              int32_t match_pos1, int32_t match_pos2) {
+    if (term->highlight_fn)
+        return term->highlight_fn(dst, dst_cap, buf, buf_len, match_pos1, match_pos2);
+    return term_highlight_into(dst, dst_cap, buf, buf_len, match_pos1, match_pos2);
 }
 
 /* ===== Redraw ===== */
@@ -1266,6 +1307,9 @@ void ray_term_redraw(ray_term_t* term) {
         if (term->multiline_len > 0) {
             memcpy(hlbuf + hlen, CONT_PROMPT_STR, CONT_PROMPT_LEN);
             hlen += CONT_PROMPT_LEN;
+        } else if (term->prompt_override_len > 0) {
+            memcpy(hlbuf + hlen, term->prompt_override, (size_t)term->prompt_override_len);
+            hlen += term->prompt_override_len;
         } else {
             memcpy(hlbuf + hlen, PROMPT_STR, PROMPT_LEN);
             hlen += PROMPT_LEN;
@@ -1283,10 +1327,10 @@ void ray_term_redraw(ray_term_t* term) {
                 int32_t m = ray_term_find_matching_paren(term->buf, term->buf_len, cursor - 1);
                 if (m >= 0) { match_pos1 = cursor - 1; match_pos2 = m; }
             }
-            hlen += term_highlight_into(hlbuf + hlen,
-                                        (int32_t)sizeof(hlbuf) - hlen,
-                                        term->buf, term->buf_len,
-                                        match_pos1, match_pos2);
+            hlen += term_highlight(term, hlbuf + hlen,
+                                   (int32_t)sizeof(hlbuf) - hlen,
+                                   term->buf, term->buf_len,
+                                   match_pos1, match_pos2);
         }
         /* Append ghost text in gray after buffer content */
         if (term->ghost_len > 0 && term->buf_pos == term->buf_len) {
@@ -1686,12 +1730,15 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
             if (term->multiline_len > 0) {
                 memcpy(hlbuf + hlen, CONT_PROMPT_STR, CONT_PROMPT_LEN);
                 hlen += CONT_PROMPT_LEN;
+            } else if (term->prompt_override_len > 0) {
+                memcpy(hlbuf + hlen, term->prompt_override, (size_t)term->prompt_override_len);
+                hlen += term->prompt_override_len;
             } else {
                 memcpy(hlbuf + hlen, PROMPT_STR, PROMPT_LEN);
                 hlen += PROMPT_LEN;
             }
             if (term->buf_len > 0)
-                hlen += term_highlight_into(hlbuf + hlen,
+                hlen += term_highlight(term, hlbuf + hlen,
                             (int32_t)sizeof(hlbuf) - hlen,
                             term->buf, term->buf_len, -1, -1);
             fflush(stdout);
