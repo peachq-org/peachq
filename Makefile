@@ -80,7 +80,7 @@ LDFLAGS = $(DEBUG_LDFLAGS)
 LIB_SRC  = $(wildcard src/*/*.c)
 # Filter out every binary's entry point so the shared library object set has no
 # main(): rayforce's (src/app/main.c) and openq's q REPL (src/qlang/qmain.c).
-LIB_SRC := $(filter-out src/app/main.c src/qlang/qmain.c, $(LIB_SRC))
+LIB_SRC := $(filter-out src/app/main.c src/qlang/qmain.c src/qlang/qdoctest_main.c, $(LIB_SRC))
 LIB_OBJ  = $(LIB_SRC:.c=.o)
 MAIN_SRC = src/app/main.c
 MAIN_OBJ = $(MAIN_SRC:.c=.o)
@@ -88,6 +88,10 @@ MAIN_OBJ = $(MAIN_SRC:.c=.o)
 Q_TARGET   = q
 Q_MAIN_SRC = src/qlang/qmain.c
 Q_MAIN_OBJ = $(Q_MAIN_SRC:.c=.o)
+# openq: the qdoctest binary and its entry point (kept out of LIB_OBJ above).
+QDOC_TARGET   = qdoctest
+QDOC_MAIN_SRC = src/qlang/qdoctest_main.c
+QDOC_MAIN_OBJ = $(QDOC_MAIN_SRC:.c=.o)
 TEST_SRC = $(wildcard test/*.c)
 TEST_OBJ = $(TEST_SRC:.c=.o)
 
@@ -95,7 +99,7 @@ TEST_OBJ = $(TEST_SRC:.c=.o)
 # The fragments are -included at the very END of this file — including
 # them here would let a .d's first rule (e.g. `foo.o: ...`) become the
 # default goal, so bare `make` would build one object instead of `debug`.
-DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
+DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d) $(QDOC_MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
 
 # Default target (pinned so an -included .d fragment can't steal it).
 .DEFAULT_GOAL := default
@@ -114,15 +118,19 @@ $(TARGET): $(LIB_OBJ) $(MAIN_OBJ)
 $(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ)
 	$(CC) $(CFLAGS) -o $(Q_TARGET) $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS)
 
+# openq: the qdoctest binary — reuses the rayforce library objects.
+$(QDOC_TARGET): $(LIB_OBJ) $(QDOC_MAIN_OBJ)
+	$(CC) $(CFLAGS) -o $(QDOC_TARGET) $(LIB_OBJ) $(QDOC_MAIN_OBJ) $(LIBS) $(LDFLAGS)
+
 # Debug build
 debug: CFLAGS = $(DEBUG_CFLAGS)
 debug: LDFLAGS = $(DEBUG_LDFLAGS)
-debug: $(TARGET) $(Q_TARGET)
+debug: $(TARGET) $(Q_TARGET) $(QDOC_TARGET)
 
 # Release build
 release: CFLAGS = $(RELEASE_CFLAGS)
 release: LDFLAGS = $(RELEASE_LDFLAGS)
-release: $(TARGET) $(Q_TARGET)
+release: $(TARGET) $(Q_TARGET) $(QDOC_TARGET)
 
 # Static library
 lib: CFLAGS = $(RELEASE_CFLAGS)
@@ -259,9 +267,9 @@ coverage:
 	@echo "→ coverage_html/index.html"
 
 clean:
-	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(TEST_OBJ)
+	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
-	-rm -f $(TARGET) $(Q_TARGET) $(TARGET).test lib$(TARGET).a
+	-rm -f $(TARGET) $(Q_TARGET) $(QDOC_TARGET) $(TARGET).test lib$(TARGET).a
 	-rm -rf build build_release dist
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
 	-rm -f rf_test_*.csv
@@ -269,7 +277,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test qtest manifest coverage clean
+.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test qtest qdoctest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
