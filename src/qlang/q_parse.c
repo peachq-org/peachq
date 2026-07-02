@@ -141,6 +141,11 @@ typedef struct {
 
 typedef struct { Token *t; int n; } Tokens;
 
+/* Live token buffer, kept in a static so a q_die() longjmp (which unwinds past
+ * the normal free_tokens call) can still release it — otherwise a malformed
+ * input leaks the token array.  Updated as the scanner emits. */
+static Tokens g_toks = { NULL, 0 };
+
 static int64_t scan_int(const char *src, int *p) {
     int neg = 0;
     if (src[*p] == '-') { neg = 1; (*p)++; }
@@ -164,6 +169,7 @@ static Tokens scan(const char *src) {
         if (n >= cap) { cap = cap ? cap * 2 : 32; toks = realloc(toks, (size_t)cap * sizeof(Token)); \
                         if (!toks) q_die("out of memory"); } \
         toks[n++] = (Token){ .kind = (TK), .start = start, .len = p - start, .k = (KK) }; \
+        g_toks.t = toks; g_toks.n = n; \
     } while (0)
 
     for (;;) {
@@ -256,6 +262,7 @@ static Tokens scan(const char *src) {
     if (n >= cap) { cap = cap ? cap * 2 : 32; toks = realloc(toks, (size_t)cap * sizeof(Token));
                     if (!toks) q_die("out of memory"); }
     toks[n++] = (Token){ .kind = T_EOF, .start = p, .len = 0, .k = NULL };
+    g_toks.t = toks; g_toks.n = n;
 #undef EMIT
     return (Tokens){ toks, n };
 }
@@ -422,8 +429,15 @@ static ray_t *parse_E(Parser *p) {
 
 ray_t *q_parse(const char *src) {
     init_class();
-    if (setjmp(q_err_jmp))
+    g_toks.t = NULL;
+    g_toks.n = 0;
+    if (setjmp(q_err_jmp)) {
+        /* q_die() longjmped here; free whatever the scanner had emitted. */
+        free_tokens(g_toks);
+        g_toks.t = NULL;
+        g_toks.n = 0;
         return ray_error("parse", "%s", q_err_buf);
+    }
 
     Tokens ts = scan(src);
     Parser p = { .src = src, .t = ts, .pos = 0 };
@@ -431,10 +445,12 @@ ray_t *q_parse(const char *src) {
     if (!at(&p, T_EOF)) {
         ray_release(e);
         free_tokens(ts);
+        g_toks.t = NULL; g_toks.n = 0;
         return ray_error("parse", "unexpected token");
     }
     ray_t *prog = seq_of(e);
     free_tokens(ts);
+    g_toks.t = NULL; g_toks.n = 0;
     return prog;
 }
 
