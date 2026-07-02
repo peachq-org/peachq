@@ -60,6 +60,16 @@
 #define TERM_BUF_SIZE 4096
 #define HIST_DEFAULT_CAP 256
 
+/* Pluggable syntax-highlighter hook.  Same signature as term.c's built-in
+ * highlighter: render `buf`/`buf_len` into `dst` (never writing past
+ * `dst_cap`), optionally back-lighting the matched bracket pair at
+ * match_pos1 / match_pos2 (-1 when none), and return the number of bytes
+ * written.  Lets callers (e.g. the q REPL) inject a language-correct
+ * tokenizer while the default (NULL) keeps rayforce's built-in behaviour. */
+typedef int32_t (*ray_highlight_fn)(char* dst, int32_t dst_cap,
+                                    const char* buf, int32_t buf_len,
+                                    int32_t match_pos1, int32_t match_pos2);
+
 typedef struct ray_hist {
     char**   entries;
     int32_t  count;
@@ -97,6 +107,13 @@ typedef struct ray_term {
     char     prompt_prefix[80];
     int32_t  prompt_prefix_len;
     int32_t  prompt_prefix_vis;
+    /* Optional full-prompt override (openq): when set, ray_term_prompt draws
+     * exactly this ANSI string in place of the prefix + built-in `‣` glyph, so
+     * the q REPL can show a bare `q)`.  Empty by default → glyph behaviour
+     * unchanged.  vis is the rendered column width (for cursor math). */
+    char     prompt_override[64];
+    int32_t  prompt_override_len;
+    int32_t  prompt_override_vis;
     int32_t  last_total_rows;
     int32_t  last_cursor_row;
     ray_hist_t hist;
@@ -126,6 +143,8 @@ typedef struct ray_term {
     /* Escape sequence state machine (for event-driven feed) */
     int32_t     esc_state;     /* 0=normal, 1=ESC, 2=ESC[, 3=ESCO, 4=ESC[3, 5=unknown CSI */
     int32_t     esc_buf_len;   /* bytes accumulated in unknown CSI sequence */
+    /* Optional pluggable syntax highlighter; NULL → use the built-in one. */
+    ray_highlight_fn highlight_fn;
 } ray_term_t;
 
 ray_term_t* ray_term_create(void);
@@ -149,12 +168,21 @@ void    ray_term_goto_position(ray_term_t* term, int32_t from_pos, int32_t to_po
 void   ray_term_redraw(ray_term_t* term);
 void   ray_term_prompt(ray_term_t* term);
 
+/* Install a pluggable syntax highlighter (see ray_highlight_fn).  Pass NULL
+ * to restore the built-in highlighter.  Callers own the function; it must
+ * outlive the term. */
+void   ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn);
+
 /* Set (or clear, when prefix == NULL or empty) the prompt prefix.
  * Used by the remote-REPL session to put the server address ahead
  * of `‣` so the user can never mistake it for a local prompt.  The
  * prefix bytes are copied into the term struct; caller may free
  * after the call. */
 void   ray_term_set_prompt_prefix(ray_term_t* term, const char* prefix);
+
+/* Override the entire main prompt with a caller-supplied ANSI string of the
+ * given visual width; pass NULL/"" to restore the default `‣` prompt. */
+void   ray_term_set_prompt(ray_term_t* term, const char* ansi, int32_t vis_width);
 
 /* Event-driven terminal API — split the former blocking line reader into begin + feed.
  * ray_term_begin: show prompt, reset line state.
