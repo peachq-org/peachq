@@ -78,10 +78,16 @@ LDFLAGS = $(DEBUG_LDFLAGS)
 
 # Sources
 LIB_SRC  = $(wildcard src/*/*.c)
-LIB_SRC := $(filter-out src/app/main.c, $(LIB_SRC))
+# Filter out every binary's entry point so the shared library object set has no
+# main(): rayforce's (src/app/main.c) and openq's q REPL (src/qlang/qmain.c).
+LIB_SRC := $(filter-out src/app/main.c src/qlang/qmain.c, $(LIB_SRC))
 LIB_OBJ  = $(LIB_SRC:.c=.o)
 MAIN_SRC = src/app/main.c
 MAIN_OBJ = $(MAIN_SRC:.c=.o)
+# openq: the q binary and its entry point (kept out of LIB_OBJ above).
+Q_TARGET   = q
+Q_MAIN_SRC = src/qlang/qmain.c
+Q_MAIN_OBJ = $(Q_MAIN_SRC:.c=.o)
 TEST_SRC = $(wildcard test/*.c)
 TEST_OBJ = $(TEST_SRC:.c=.o)
 
@@ -89,7 +95,7 @@ TEST_OBJ = $(TEST_SRC:.c=.o)
 # The fragments are -included at the very END of this file — including
 # them here would let a .d's first rule (e.g. `foo.o: ...`) become the
 # default goal, so bare `make` would build one object instead of `debug`.
-DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
+DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
 
 # Default target (pinned so an -included .d fragment can't steal it).
 .DEFAULT_GOAL := default
@@ -103,15 +109,20 @@ default: debug
 $(TARGET): $(LIB_OBJ) $(MAIN_OBJ)
 	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS)
 
+# openq: the q binary — reuses the rayforce library objects, own entry point.
+# Built alongside $(TARGET) by debug/release so `make` produces both.
+$(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ)
+	$(CC) $(CFLAGS) -o $(Q_TARGET) $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS)
+
 # Debug build
 debug: CFLAGS = $(DEBUG_CFLAGS)
 debug: LDFLAGS = $(DEBUG_LDFLAGS)
-debug: $(TARGET)
+debug: $(TARGET) $(Q_TARGET)
 
 # Release build
 release: CFLAGS = $(RELEASE_CFLAGS)
 release: LDFLAGS = $(RELEASE_LDFLAGS)
-release: $(TARGET)
+release: $(TARGET) $(Q_TARGET)
 
 # Static library
 lib: CFLAGS = $(RELEASE_CFLAGS)
@@ -198,6 +209,16 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test
 
+# openq: run ONLY the q suites (names prefixed `qlang/`) from the same unified
+# test binary, via the runner's substring name filter.  `make test` runs them
+# too (unfiltered); this is the fast q-only loop.
+qtest: CFLAGS = $(DEBUG_CFLAGS)
+qtest: LDFLAGS = $(DEBUG_LDFLAGS)
+qtest: $(LIB_OBJ) $(TEST_OBJ)
+	@tools/frozen-manifest.sh check
+	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
+	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test qlang
+
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
 # frozen base moved.  `make test` runs the read-only check (tools/frozen-manifest.sh).
@@ -238,9 +259,9 @@ coverage:
 	@echo "→ coverage_html/index.html"
 
 clean:
-	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ)
+	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
-	-rm -f $(TARGET) $(TARGET).test lib$(TARGET).a
+	-rm -f $(TARGET) $(Q_TARGET) $(TARGET).test lib$(TARGET).a
 	-rm -rf build build_release dist
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
 	-rm -f rf_test_*.csv
@@ -248,7 +269,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test manifest coverage clean
+.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test qtest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
