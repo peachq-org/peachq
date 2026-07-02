@@ -1886,28 +1886,41 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
         }
         return ray_typed_null(-RAY_I64);
     }
-    /* Vector val: (find vec [v1 v2]) → [idx1 idx2] */
-    if (is_collection(val)) {
-        /* If vec is empty, return empty vector */
-        if (is_collection(vec) && ray_len(vec) == 0)
-            return ray_vec_new(RAY_I64, 0);
+    /* Vector val: (find vec [v1 v2]) → dense I64 [idx1 idx2], O(n+m) via hashset. */
+    if (is_collection(val) && !ray_is_atom(val)) {
         int64_t vlen = ray_len(val);
-        ray_t* result = ray_alloc(vlen * sizeof(ray_t*));
-        if (!result) return ray_error("oom", NULL);
-        result->type = RAY_LIST;
+        ray_t* result = ray_vec_new(RAY_I64, vlen);
+        if (RAY_IS_ERR(result)) return result;
         result->len = vlen;
-        ray_t** out = (ray_t**)ray_data(result);
-        for (int64_t j = 0; j < vlen; j++) {
-            int alloc = 0;
-            ray_t* ve = collection_elem(val, j, &alloc);
-            out[j] = ray_find_fn(vec, ve);
-            if (alloc) ray_release(ve);
-            if (RAY_IS_ERR(out[j])) {
-                for (int64_t k = 0; k < j; k++) ray_release(out[k]);
-                ray_release(result);
-                return out[j];
+        int64_t* out = (int64_t*)ray_data(result);
+        bool any_null = false;
+
+        /* Hash fast path: both sides typed vecs — O(n+m), mirrors ray_in_fn. */
+        if (ray_is_vec(val) && ray_is_vec(vec)) {
+            hashset_t hs;
+            if (!hashset_init(&hs, vec, vec->len)) { ray_release(result); return ray_error("oom", NULL); }
+            for (int64_t j = 0; j < vec->len; j++) hashset_insert(&hs, j);
+            int8_t vt = val->type; void* vd = ray_data(val);
+            for (int64_t i = 0; i < vlen; i++) {
+                int64_t row = hashset_find_xrow(&hs, val, i, vt, vd);
+                if (row == HS_EMPTY) { out[i] = NULL_I64; any_null = true; }
+                else out[i] = row;
+            }
+            hashset_destroy(&hs);
+        } else {
+            /* Fallback (LIST/mixed): per-element scalar find into the dense buffer. */
+            for (int64_t j = 0; j < vlen; j++) {
+                int alloc = 0;
+                ray_t* ve = collection_elem(val, j, &alloc);
+                ray_t* one = ray_find_fn(vec, ve);   /* scalar → i64 atom or 0Nl */
+                if (alloc) ray_release(ve);
+                if (RAY_IS_ERR(one)) { ray_release(result); return one; }
+                if (RAY_ATOM_IS_NULL(one)) { out[j] = NULL_I64; any_null = true; }
+                else out[j] = one->i64;
+                ray_release(one);
             }
         }
+        if (any_null) result->attrs |= RAY_ATTR_HAS_NULLS;
         return result;
     }
     /* Typed vector: search without boxing */
