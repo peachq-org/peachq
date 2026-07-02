@@ -14,6 +14,7 @@ typedef enum { QDOC_PARSE_ONLY, QDOC_EVAL_MATCH } qdoc_mode_t;
 
 typedef struct {
     int examples;   /* q) inputs found */
+    int parsed;     /* examples that PARSED (regardless of eval outcome) */
     int passed;
     int failed;
     int skipped;    /* reserved; 0 for now */

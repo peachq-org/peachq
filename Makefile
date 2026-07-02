@@ -222,10 +222,19 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 # too (unfiltered); this is the fast q-only loop.
 qtest: CFLAGS = $(DEBUG_CFLAGS)
 qtest: LDFLAGS = $(DEBUG_LDFLAGS)
-qtest: $(LIB_OBJ) $(TEST_OBJ)
+qtest: $(LIB_OBJ) $(TEST_OBJ) $(QDOC_TARGET)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test -f qlang
+	@rc=0; \
+	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test -f qlang || rc=$$?; \
+	tools/qtest-ledger.sh || rc=$$?; \
+	exit $$rc
+
+# openq: regenerate the checked-in q-docs failure ledger (qtest-results.txt).
+# The user runs this on demand; `make qtest` never writes it (stays side-effect
+# free on tracked files).
+qtest-results: $(QDOC_TARGET)
+	./$(QDOC_TARGET) --results qtest-results.txt --skip-file test/qdoctest.skip qdocs/docs
 
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
@@ -277,7 +286,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test qtest qdoctest manifest coverage clean
+.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test qtest qtest-results qdoctest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
