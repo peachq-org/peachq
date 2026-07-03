@@ -3,6 +3,7 @@
  * and general lists q-style and delegates everything else to rayforce's ray_fmt. */
 #include "qlang/q_fmt.h"
 #include "lang/format.h"   /* ray_fmt */
+#include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -156,6 +157,28 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
             if (val->type == RAY_F32) q_float_tok((double)((const float*)ray_data(val))[i], 1, e, sizeof e);
             else                      q_float_tok(((const double*)ray_data(val))[i],        0, e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        return;
+    }
+
+    /* Symbol vector: backtick-joined, `a`b`c.  Each cell resolves through the
+     * vector's own domain.  EVERY element keeps its leading backtick — a sym
+     * vector is data, so a verb/null-named element (`+`, `::`) must still round-
+     * trip as a symbol literal, not a bare q token.  (The bare-verb rendering
+     * in q_fmt_sym is only for a -RAY_SYM ATOM standing as a parse-tree head.)
+     * The null symbol is a zero-length name and prints as a bare backtick. */
+    if (val->type == RAY_SYM) {
+        int64_t n = ray_len(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* s = ray_sym_vec_cell(val, i);   /* borrowed -RAY_STR */
+            const char* nm = ray_str_ptr(s);
+            size_t l = ray_str_len(s);
+            if (pos + 1 + l + 1 > bufsz) break;
+            buf[pos++] = '`';
+            memcpy(buf + pos, nm, l); pos += l;
+            buf[pos] = '\0';
         }
         return;
     }
