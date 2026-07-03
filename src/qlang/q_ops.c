@@ -87,3 +87,12 @@ int q_lex_is_kw_infix(const char* s, int len) {
     }
     return 0;
 }
+
+int q_ops_is_reserved(const char* s, int len) {
+    for (int i = 0; i < N_Q_OPS; i++) {
+        const char* nm = Q_OPS[i].name;
+        if ((int)strlen(nm) == len && memcmp(nm, s, (size_t)len) == 0)
+            return 1;
+    }
+    return 0;
+}

@@ -618,6 +618,15 @@ static P parse_base(Parser *p) {
         adv(p);
         ray_t *e = parse_E(p);
         expect(p, T_RPAREN, "expected ')'");
+        /* Inside parens an elided element is the generic null (kdb: `(;5)` is
+         * the 2-list (::;5)) — normalize the C-NULL slots parse_E preserves
+         * for top-level statements, so no NULL ever reaches ray_eval through
+         * a value expression (e.g. an assignment RHS). */
+        if (ray_len(e) > 1) {
+            ray_t **slots = (ray_t **)ray_data(e);
+            for (int64_t i = 0; i < ray_len(e); i++)
+                if (!slots[i]) slots[i] = q_null();
+        }
         if (ray_len(e) == 1) {
             ray_t **slots = (ray_t **)ray_data(e);
             ray_t *only = slots[0];
@@ -934,24 +943,118 @@ static void ql_adv_app(ray_t **slot) {
      * map-right/map-left roster rows). */
 }
 
-/* Depth-first rewriting walker.  Children first so nested applications
- * ((+/) each ...) lower inside-out; then the node itself. */
-static void q_lower_walk(ray_t **slot) {
+/* Assignment: rewrite `(:; name; val)` / `(::; name; val)` heads to rayfall
+ * set — or let for a plain `:` INSIDE a lambda body (q locals; `::` stays the
+ * global assign there, kdb-faithful) — enforcing the reserved-verb 'assign
+ * invariant (ADR 0003 Decision 1).  Returns a RAY_ERROR to abort lowering, or
+ * NULL to continue.  Non-sym assign targets (2:3, f[1]:x) are left untouched:
+ * eval errors on them exactly as it does today (indexed assign is 2c+). */
+static ray_t *ql_assign(ray_t **slot, int in_lambda) {
     ray_t *node = *slot;
-    if (!node || node->type != RAY_LIST) return;
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    if (n != 3) return NULL;
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return NULL;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return NULL;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int is_local  = (l == 1 && nm[0] == ':');
+    int is_global = (l == 2 && nm[0] == ':' && nm[1] == ':');
+    ray_release(s);
+    if (!is_local && !is_global) return NULL;
+    if (!e[1] || e[1]->type != -RAY_SYM || (e[1]->attrs & Q_ATTR_QUOTED))
+        return NULL;
+
+    ray_t *ns = ray_sym_str(e[1]->i64);
+    if (!ns) return NULL;
+    int reserved = q_ops_is_reserved(ray_str_ptr(ns), (int)ray_str_len(ns));
+    if (reserved) {
+        ray_t *err = ray_error("assign", "'assign: %.*s is a reserved verb",
+                               (int)ray_str_len(ns), ray_str_ptr(ns));
+        ray_release(ns);
+        return err;
+    }
+    ray_release(ns);
+
+    const char *target = (is_local && in_lambda) ? "let" : "set";
+    ray_t *setv = ql_env_val(target);
+    if (!setv) return NULL;
+    ray_retain(setv);
+    ray_release(e[0]);
+    e[0] = setv;                       /* in-place head swap, arity unchanged */
+    return NULL;
+}
+
+/* True iff node is the `{`-marker lambda form (its body statements bind q
+ * locals with plain `:`). */
+static int ql_is_lambda(ray_t *node) {
+    if (!node || node->type != RAY_LIST || ray_len(node) < 1) return 0;
+    ray_t *h = ((ray_t **)ray_data(node))[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return 0;
+    int r = (ray_str_len(s) == 1 && ray_str_ptr(s)[0] == '{');
+    ray_release(s);
+    return r;
+}
+
+/* Depth-first rewriting walker.  Children first so nested applications
+ * ((+/) each ...) lower inside-out; then the node itself.  Returns a
+ * RAY_ERROR (owned) on an 'assign violation, else NULL. */
+static ray_t *q_lower_walk(ray_t **slot, int in_lambda) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST) return NULL;
     assert(node->rc == 1);                 /* sole-owner precondition */
+    int lambda_body = in_lambda || ql_is_lambda(node);
     int64_t n = ray_len(node);
     ray_t **e = (ray_t **)ray_data(node);
     for (int64_t i = 0; i < n; i++)
-        if (e[i] && e[i]->type == RAY_LIST) q_lower_walk(&e[i]);
+        if (e[i] && e[i]->type == RAY_LIST) {
+            ray_t *err = q_lower_walk(&e[i], lambda_body);
+            if (err) return err;
+        }
+    ray_t *err = ql_assign(slot, in_lambda);
+    if (err) return err;
     ql_adv_app(slot);
+    return NULL;
 }
 
 /* q-lower entrypoint — see q_parse.h.  Dyadic-head resolution (the 2a shim
  * behaviour) plus the lowering walker above.  2b's parser flip moves the head
- * resolution into q_parse and retires q_resolve_verbs. */
+ * resolution into q_parse and retires q_resolve_verbs.  May return a
+ * RAY_ERROR (consuming `ast`): callers must error-check the result. */
 ray_t *q_lower(ray_t *ast) {
     ast = q_resolve_verbs(ast);
-    if (ast && ast->type == RAY_LIST) q_lower_walk(&ast);
+    if (ast && ast->type == RAY_LIST) {
+        ray_t *err = q_lower_walk(&ast, 0);
+        if (err) { ray_release(ast); return err; }
+    }
     return ast;
+}
+
+/* q_ast_is_assign — see q_parse.h.  Checks the PRE-lower shape: head is the
+ * name-ref `:`/`::` with a sym binding target; a `;` statement sequence asks
+ * its last statement. */
+int q_ast_is_assign(const ray_t *cast) {
+    ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
+    if (!ast || ast->type != RAY_LIST || ray_len(ast) < 1) return 0;
+    ray_t **e = (ray_t **)ray_data(ast);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return 0;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int is_semi  = (l == 1 && nm[0] == ';');
+    int is_colon = (l == 1 && nm[0] == ':') ||
+                   (l == 2 && nm[0] == ':' && nm[1] == ':');
+    ray_release(s);
+    if (is_semi) {
+        int64_t n = ray_len(ast);
+        return n >= 2 ? q_ast_is_assign(e[n - 1]) : 0;
+    }
+    return is_colon && ray_len(ast) == 3 &&
+           e[1] && e[1]->type == -RAY_SYM && !(e[1]->attrs & Q_ATTR_QUOTED);
 }
