@@ -2,6 +2,8 @@
  * that will eventually back q's `.Q.s`).  It renders int vectors, symbol atoms
  * and general lists q-style and delegates everything else to rayforce's ray_fmt. */
 #include "qlang/q_fmt.h"
+#include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
+#include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "lang/format.h"   /* ray_fmt */
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
@@ -16,7 +18,8 @@ static const char Q_VERBS[] = ":+-*%!&|<>=~,^#_$?@.";
 
 static int q_sym_bare(const char* nm, size_t l) {
     if (l == 1 && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
-    if (l == 2 && nm[0] == ':' && nm[1] == ':') return 1;
+    /* monadic-marked verbs print bare too: +: #: |: — and :: (null/assign) */
+    if (l == 2 && nm[1] == ':' && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
     return 0;
 }
 
@@ -104,6 +107,25 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     if (val->type == -RAY_SYM) {
         q_fmt_sym(val, buf, bufsz);
         return;
+    }
+
+    /* Registry function VALUES render their q spelling from provenance
+     * (formatter-from-metadata, spec piece 2): glyph rows bare (`+`), monadic
+     * glyph rows with the marker (`-:`), keyword rows the keyword.  Values
+     * with no provenance (internal list/scan wrappers, foreign fns) fall
+     * through to ray_fallback below. */
+    if (val->type == RAY_UNARY || val->type == RAY_BINARY ||
+        val->type == RAY_VARY) {
+        q_provenance_t pv;
+        if (q_registry_provenance(val, &pv) && pv.spelling && pv.spelling[0]) {
+            char c0 = pv.spelling[0];
+            int glyph = !((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z'));
+            if (pv.valence == Q_MONADIC && glyph)
+                snprintf(buf, bufsz, "%s:", pv.spelling);
+            else
+                snprintf(buf, bufsz, "%s", pv.spelling);
+            return;
+        }
     }
 
     /* Typed numeric atoms print q-style with a type suffix (bare for long /
@@ -209,13 +231,59 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
 
+    /* A 104h derived-verb carrier renders as bound-verb + adverb glyph (+/).
+     * The carrier's base is the HOF value (fold / the internal scan wrapper /
+     * the each wrapper); the bound verb sits in the first arg slot. */
+    if (q_deriv_kind_of(val) == Q_DERIV_PROJ && ray_len(val) >= 5) {
+        ray_t* base = q_deriv_base(val);
+        ray_t* v0   = ((ray_t**)ray_data(val))[4];
+        const char* g = NULL;
+        if (base == ray_env_get(ray_sym_intern("fold", 4)))            g = "/";
+        else if (base == q_registry_scan_value())                      g = "\\";
+        else if (base == q_registry_lookup_name("each", 4, Q_DYADIC))  g = "'";
+        if (g && v0) {
+            char vb[256]; vb[0] = '\0';
+            q_fmt(v0, vb, sizeof vb);
+            snprintf(buf, bufsz, "%s%s", vb, g);
+            return;
+        }
+    }
+
+    /* A general list of strings prints one quoted string per line (kdb: a
+     * list of char vectors), not (a;b) — `("one";"two")` shows "one"\n"two". */
+    if (val->type == RAY_LIST && ray_len(val) >= 2) {
+        int64_t n = ray_len(val);
+        ray_t** e = (ray_t**)ray_data(val);
+        int allstr = 1;
+        for (int64_t i = 0; i < n && allstr; i++)
+            if (!e[i] || e[i]->type != -RAY_STR) allstr = 0;
+        if (allstr) {
+            size_t pos = 0;
+            for (int64_t i = 0; i < n; i++) {
+                char elem[1024]; elem[0] = '\0';
+                q_fmt(e[i], elem, sizeof elem);
+                size_t el = strlen(elem);
+                if (pos + el + 2 >= bufsz) break;
+                if (i) buf[pos++] = '\n';
+                memcpy(buf + pos, elem, el);
+                pos += el;
+            }
+            buf[pos] = '\0';
+            return;
+        }
+    }
+
     /* A general list renders q-style as (a;b;c), recursively.  This is how a
-     * parse tree prints: `parse "2+3"` -> (+;2;3). */
+     * parse tree prints: `parse "2+3"` -> (+;2;3).  A literal-constructor
+     * head (the parser's paren-list marker) is HIDDEN: the tree for `(1;2;3)`
+     * is ((list);1;2;3) but must display (1;2;3). */
     if (val->type == RAY_LIST) {
         size_t pos = 0;
         if (pos + 1 < bufsz) buf[pos++] = '(';
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
+        ray_t* lv = q_registry_list_value();
+        if (lv && n >= 1 && e[0] == lv) { e++; n--; }   /* skip hidden head */
         for (int64_t i = 0; i < n; i++) {
             if (i && pos + 1 < bufsz) buf[pos++] = ';';
             char elem[1024];
