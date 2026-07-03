@@ -2,6 +2,7 @@
  * that will eventually back q's `.Q.s`).  It renders int vectors, symbol atoms
  * and general lists q-style and delegates everything else to rayforce's ray_fmt. */
 #include "qlang/q_fmt.h"
+#include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "lang/format.h"   /* ray_fmt */
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
@@ -210,13 +211,41 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
 
+    /* A general list of strings prints one quoted string per line (kdb: a
+     * list of char vectors), not (a;b) — `("one";"two")` shows "one"\n"two". */
+    if (val->type == RAY_LIST && ray_len(val) >= 2) {
+        int64_t n = ray_len(val);
+        ray_t** e = (ray_t**)ray_data(val);
+        int allstr = 1;
+        for (int64_t i = 0; i < n && allstr; i++)
+            if (!e[i] || e[i]->type != -RAY_STR) allstr = 0;
+        if (allstr) {
+            size_t pos = 0;
+            for (int64_t i = 0; i < n; i++) {
+                char elem[1024]; elem[0] = '\0';
+                q_fmt(e[i], elem, sizeof elem);
+                size_t el = strlen(elem);
+                if (pos + el + 2 >= bufsz) break;
+                if (i) buf[pos++] = '\n';
+                memcpy(buf + pos, elem, el);
+                pos += el;
+            }
+            buf[pos] = '\0';
+            return;
+        }
+    }
+
     /* A general list renders q-style as (a;b;c), recursively.  This is how a
-     * parse tree prints: `parse "2+3"` -> (+;2;3). */
+     * parse tree prints: `parse "2+3"` -> (+;2;3).  A literal-constructor
+     * head (the parser's paren-list marker) is HIDDEN: the tree for `(1;2;3)`
+     * is ((list);1;2;3) but must display (1;2;3). */
     if (val->type == RAY_LIST) {
         size_t pos = 0;
         if (pos + 1 < bufsz) buf[pos++] = '(';
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
+        ray_t* lv = q_registry_list_value();
+        if (lv && n >= 1 && e[0] == lv) { e++; n--; }   /* skip hidden head */
         for (int64_t i = 0; i < n; i++) {
             if (i && pos + 1 < bufsz) buf[pos++] = ';';
             char elem[1024];
