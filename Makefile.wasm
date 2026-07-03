@@ -39,12 +39,22 @@ DEFS = -DRAYFORCE_GIT_COMMIT=\"wasm\" -DRAYFORCE_BUILD_DATE=\"wasm\" \
        -DRAY_VERSION_MAJOR=0 -DRAY_VERSION_MINOR=0 -DRAY_VERSION_PATCH=0 \
        -DRAYFORCE_VERSION=\"0.0.0-wasm\"
 
-# Mirror upstream's WASM CFLAGS: -msimd128 (NOT -march=native), fast-math for
-# the throwaway demo. -DSYS_MALLOC is intentionally omitted (unused in this
-# tree; the WASM alloc arm lives in src/core/platform.c + src/mem/sys.c).
+# Based on upstream's WASM CFLAGS: -msimd128 (NOT -march=native) + the
+# vectorization-enabling fast-math flags. -DSYS_MALLOC is intentionally omitted
+# (unused in this tree; the WASM alloc arm lives in src/core/platform.c +
+# src/mem/sys.c).
+#
+# -ffinite-math-only is DELIBERATELY DROPPED (upstream had it): this build
+# compiles the SAME evaluation engine, and that engine encodes F64/F32 nulls as
+# NaN (NULL_F64 = __builtin_nan(""), null checks are literally `x != x` —
+# include/rayforce.h:423-431). -ffinite-math-only lets the compiler assume NaNs
+# never occur, which would mis-evaluate float nulls (0Nf) in the browser. The
+# native release build omits it for exactly this reason; so must this one. The
+# remaining flags (associative/unsafe-math, no-signed-zeros implied) do not
+# assume finiteness and are safe for the NaN-null model.
 CFLAGS = -Wall -std=$(STD) -O3 -msimd128 \
   -fassociative-math -ftree-vectorize -fno-math-errno \
-  -funsafe-math-optimizations -ffinite-math-only -funroll-loops
+  -funsafe-math-optimizations -funroll-loops
 
 # Emscripten link settings.
 #   EXPORTED_FUNCTIONS      — our stable C ABI + malloc/free (ccall string
