@@ -16,7 +16,8 @@ static const char Q_VERBS[] = ":+-*%!&|<>=~,^#_$?@.";
 
 static int q_sym_bare(const char* nm, size_t l) {
     if (l == 1 && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
-    if (l == 2 && nm[0] == ':' && nm[1] == ':') return 1;
+    /* monadic-marked verbs print bare too: +: #: |: — and :: (null/assign) */
+    if (l == 2 && nm[1] == ':' && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
     return 0;
 }
 

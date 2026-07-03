@@ -490,8 +490,17 @@ static Tokens scan(const char *src) {
                 EMIT(T_VERB, q_verb_name(nm, 2));
             } else {
                 p++;
-                if (src[p] == ':') p++;   /* absorb monadic marker; valence at eval */
-                EMIT(T_VERB, q_verb(c));
+                if (src[p] == ':') {
+                    /* explicit monadic marker: keep it in the token name so the
+                     * tree displays kdb-style (+: |: ::) and the parser embeds
+                     * the monadic row.  `::` (c==':' marked) is also the q
+                     * generic null / global-assign verb — same spelling. */
+                    p++;
+                    char nm[2] = { c, ':' };
+                    EMIT(T_VERB, q_verb_name(nm, 2));
+                } else {
+                    EMIT(T_VERB, q_verb(c));
+                }
             }
             noun_pos = 0;
         }
@@ -683,6 +692,23 @@ static P parse_e_from(Parser *p, P t) {
     }
 
     P e = parse_e_from(p, u);
+    /* Prefix application of a bare 1-char glyph verb is MONADIC: respell the
+     * head `+` -> `+:` so the tree displays kdb-style ((+:;1) for "+1") and
+     * the (name, MONADIC) registry row is addressable.  Marked verbs (+:)
+     * already carry the spelling; `:` respells to the generic `::`. */
+    if (t.role == R_VERB && t.v && t.v->type == -RAY_SYM &&
+        !(t.v->attrs & Q_ATTR_QUOTED)) {
+        ray_t *s = ray_sym_str(t.v->i64);
+        if (s) {
+            if (ray_str_len(s) == 1 && strchr(VERB_CHARS, ray_str_ptr(s)[0])) {
+                char nm[2] = { ray_str_ptr(s)[0], ':' };
+                ray_t *m = q_verb_name(nm, 2);
+                ray_release(t.v);
+                t.v = m;
+            }
+            ray_release(s);
+        }
+    }
     ray_t *xs[2] = { t.v, e.v };
     return (P){ R_NOUN, q_list(xs, 2) };
 }
