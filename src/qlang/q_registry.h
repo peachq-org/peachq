@@ -62,7 +62,13 @@ ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);
 
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
- * value.  Consumed by the 2b formatter to print the original q glyph. */
+ * value.  Consumed by the 2b formatter to print the original q glyph.
+ *
+ * EXACT for WRAPPER values (unique objects).  Pass-through/rename values are the
+ * shared env builtin object, and several q spellings may alias one env object
+ * (e.g. `#`-monadic and `count`); for those, this returns the first-registered
+ * spelling — 2b disambiguates aliased pass-throughs from the parse-site glyph,
+ * not from this value-keyed lookup. */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
 
 /* Release every retained entry and reset.  Idempotent; also serves as
