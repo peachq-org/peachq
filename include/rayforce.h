@@ -67,22 +67,26 @@ const char* ray_version_string(void);
 
 /* ===== Type Constants ===== */
 
+/* Type tags use kdb's numbering (list=0, bool=1, guid=2, ... time=19) so
+ * `type` reads the tag directly with no translation seam.  The band 1..19 is
+ * sparse: gaps 3,13,15,16,17,18 are kdb's short-of-3 / month / datetime /
+ * timespan / minute / second, which have no rayfall type yet. */
 #define RAY_LIST       0
 #define RAY_BOOL       1
-#define RAY_U8         2
-#define RAY_I16        3
-#define RAY_I32        4
-#define RAY_I64        5
-#define RAY_F32        6
-#define RAY_F64        7
-#define RAY_DATE       8
-#define RAY_TIME       9
-#define RAY_TIMESTAMP 10
-#define RAY_GUID      11
-/* Unified dictionary-encoded string column (adaptive width) */
-#define RAY_SYM       12
+#define RAY_GUID       2
+#define RAY_U8         4
+#define RAY_I16        5
+#define RAY_I32        6
+#define RAY_I64        7
+#define RAY_F32        8
+#define RAY_F64        9
 /* Variable-length string column (inline + pool) */
-#define RAY_STR       13
+#define RAY_STR       10
+/* Unified dictionary-encoded string column (adaptive width) */
+#define RAY_SYM       11
+#define RAY_TIMESTAMP 12
+#define RAY_DATE      14
+#define RAY_TIME      19
 
 /* Compound types */
 #define RAY_INDEX     97   /* Accelerator index attached to a vector (see ops/idxop.h) */
@@ -237,7 +241,12 @@ void ray_error_free(ray_t* err);
 
 #define ray_type(v)       ((v)->type)
 #define ray_is_atom(v)    ((v)->type < 0 || (v)->type >= RAY_LAMBDA)
-#define ray_is_vec(v)     ((v)->type >= RAY_BOOL && (v)->type <= RAY_STR)
+/* Typed atom-vector predicate (excludes LIST=0).  The kdb 1..19 band is
+ * sparse — gaps 3,13,15-18 fall inside this range but carry no real values
+ * today (month/datetime/timespan/minute/second unimplemented), so the range
+ * is intentionally inclusive; a value's tag is never a gap.  If those slots
+ * are later filled, keep this predicate's intent (real vector types only). */
+#define ray_is_vec(v)     ((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME)
 #define ray_len(v)        ((v)->len)
 
 /* Element type sizes indexed by type tag — covers all uint8_t values.
