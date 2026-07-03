@@ -120,7 +120,7 @@ static qdoc_result_t run_file(const char* path, FILE* out) {
     ray_runtime_t* rt = q_runtime_create(0, NULL);   /* fresh per file */
     qdoc_result_t r = qdoc_run_file(path, g_mode, g_verbose || out != stdout,
                                     out);
-    if (rt) ray_runtime_destroy(rt);
+    if (rt) q_runtime_destroy(rt);
     return r;
 }
 
