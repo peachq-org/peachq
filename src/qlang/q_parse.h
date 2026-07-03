@@ -28,11 +28,16 @@ ray_t* q_parse(const char* src);
 ray_t* q_resolve_verbs(ray_t* ast);
 
 /* q-lower entrypoint (ADR 0003 pipeline stage).  The one call every eval path
- * uses between q_parse and ray_eval to turn the q-AST into a runnable tree.
- * STAGE 2a: a thin shim over q_resolve_verbs — AST shape and eval behaviour are
- * unchanged; it exists so all callers (qdoc, q_repl, ...) go through a single
- * seam that 2b grows into the full value-heads-at-parse lowering (and retires
- * the shim).  PRECONDITION as q_resolve_verbs: `ast` is uniquely owned. */
+ * uses between q_parse and ray_eval to turn the q-AST into a runnable tree:
+ * dyadic verb-head resolution, adverb applications onto rayfall HOFs, and
+ * assignment (`:`/`::` -> set/let with the reserved-verb 'assign invariant).
+ * May return a RAY_ERROR (consuming `ast`) — callers must error-check.
+ * PRECONDITION as q_resolve_verbs: `ast` is uniquely owned. */
 ray_t* q_lower(ray_t* ast);
+
+/* True iff the (pre-lower) statement's RESULT is an assignment's — the q
+ * console prints nothing for `a:5` (statement sequences check their LAST
+ * statement).  Consulted by the REPL/qdoc before printing. */
+int q_ast_is_assign(const ray_t* ast);
 
 #endif /* Q_PARSE_H */
