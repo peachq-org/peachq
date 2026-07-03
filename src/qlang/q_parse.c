@@ -86,12 +86,23 @@ static ray_t *q_symvec_append(ray_t *vec, const char *s, int len) {
 }
 
 /* Build a ray list from n owned children, releasing each after append
- * (append retains).  Children must be non-NULL. */
+ * (append retains).  A C-NULL child (an empty operand, e.g. the value of
+ * `()`, or a missing element) is normalised to q_null() so it never reaches
+ * ray_eval as a bare C NULL — ray_eval asserts value-nulls are RAY_NULL_OBJ,
+ * not C NULL.  The top-level program list is built separately in parse_E,
+ * which DOES preserve C NULL (an empty statement / whole-line comment is a
+ * no-op that must yield no output, not `::`). */
 static ray_t *q_list(ray_t **xs, int n) {
     ray_t *l = ray_list_new(n > 0 ? n : 1);
     for (int i = 0; i < n; i++) {
-        l = ray_list_append(l, xs[i]);
-        if (xs[i]) ray_release(xs[i]);
+        if (xs[i]) {
+            l = ray_list_append(l, xs[i]);
+            ray_release(xs[i]);
+        } else {
+            ray_t *nul = q_null();
+            l = ray_list_append(l, nul);
+            ray_release(nul);
+        }
     }
     return l;
 }
@@ -356,8 +367,16 @@ static Tokens scan(const char *src) {
     } while (0)
 
     for (;;) {
+        int ws0 = p;
         while (CLASS[(uint8_t)src[p]] & CL_WS) p++;
         if (!src[p]) break;
+
+        /* A '/' is a comment iff it has whitespace before it or starts the
+         * line/input; otherwise it is an adverb (e.g. `2+3/x`).  Leading
+         * whitespace — not trailing — is what matters.  (q_parse is single-
+         * line today; the `src[p-1]=='\n'` arm is defensive for a future
+         * multi-line lexer.) */
+        int leading_ws = (p == 0) || (p != ws0) || (src[p - 1] == '\n');
 
         int start = p;
         char c = src[p];
@@ -435,6 +454,15 @@ static Tokens scan(const char *src) {
             noun_pos = 0;
         }
         else if (cl & CL_ADVERB) {
+            /* q line comment: a '/' with leading whitespace (or at the start
+             * of the line) runs to end-of-line and emits no token.  Without
+             * leading whitespace it stays an adverb (div / each-right etc.).
+             * String-internal '/' never reaches here — strings are scanned as
+             * a unit above. */
+            if (c == '/' && leading_ws) {
+                while (src[p] && src[p] != '\n') p++;
+                continue;
+            }
             int base = (c == '\'') ? 0 : (c == '/') ? 1 : 2;
             p++;
             int two = (src[p] == ':');
@@ -625,7 +653,17 @@ static ray_t *parse_E(Parser *p) {
         adv(p);
         buf[n++] = parse_e(p).v;
     }
-    return q_list(buf, n);
+    /* Build the expression list PRESERVING C-NULL slots (unlike q_list, which
+     * normalises them to q_null()).  An empty statement — a whole-line comment
+     * or the `;;` between two expressions — is a C NULL here; seq_of and the
+     * evaluator treat that as a no-op that yields no output.  Normalising to
+     * q_null() would instead print `::`. */
+    ray_t *l = ray_list_new(n > 0 ? n : 1);
+    for (int i = 0; i < n; i++) {
+        l = ray_list_append(l, buf[i]);
+        if (buf[i]) ray_release(buf[i]);
+    }
+    return l;
 }
 
 /* ===== public entry ========================================================== */
@@ -654,5 +692,11 @@ ray_t *q_parse(const char *src) {
     ray_t *prog = seq_of(e);
     free_tokens(ts);
     g_toks.t = NULL; g_toks.n = 0;
-    return prog;
+    /* An empty program (a whole-line comment, or blank/whitespace-only input)
+     * collapses to a C NULL in seq_of.  Return the value-null singleton
+     * instead so callers get an explicit no-op sentinel: RAY_IS_NULL()
+     * recognises it (the REPL prints nothing; qdoc matches empty output) and
+     * ray_eval() self-evaluates it, rather than every caller having to treat a
+     * bare C NULL specially. */
+    return prog ? prog : RAY_NULL_OBJ;
 }
