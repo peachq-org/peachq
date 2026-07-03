@@ -80,6 +80,13 @@ void q_registry_destroy(void);
  * it has no q spelling of its own. */
 ray_t* q_registry_scan_value(void);
 
+/* The internal paren-list constructor (list + collapse) the PARSER embeds at
+ * the head of every multi-element paren list `(1;2;3)` — the head value is
+ * what distinguishes a literal from the shape-identical index call (v;i).
+ * q_fmt hides this head, so the tree still displays (1;2;3).  Borrowed;
+ * NULL before q_registry_init. */
+ray_t* q_registry_list_value(void);
+
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
  * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
  * are simple vectors, not general lists).  Mixed types, non-atom elements,

@@ -634,6 +634,25 @@ static P parse_base(Parser *p) {
             ray_release(e);
             return (P){ R_NOUN, only };
         }
+        /* Multi-element paren list is a LITERAL: prepend the internal
+         * list-constructor value so eval builds (and collapses) it.  The
+         * head value is the only thing distinguishing `(1 2;3 4)` from the
+         * shape-identical bracket-index call (v;i); q_fmt hides it so the
+         * tree still displays (1;2;3).  Cold registry (no q_runtime): keep
+         * the bare list — pre-2b behaviour. */
+        {
+            ray_t *lv = q_registry_list_value();
+            if (lv) {
+                int64_t en = ray_len(e);
+                ray_t **es = (ray_t **)ray_data(e);
+                ray_t *w = ray_list_new(en + 1);
+                w = ray_list_append(w, lv);
+                for (int64_t i = 0; i < en; i++)
+                    w = ray_list_append(w, es[i]);
+                ray_release(e);
+                e = w;
+            }
+        }
         return (P){ R_NOUN, e };
     }
     case T_LBRACE: {
