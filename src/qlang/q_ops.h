@@ -74,4 +74,8 @@ const q_op_t* q_ops_table(int* n);
  * runtime registry dependency. */
 int q_lex_is_kw_infix(const char* s, int len);
 
+/* True iff s[0..len) is a RESERVED q verb name (any manifest row).  q reserves
+ * its primitives — `div:5` raises 'assign (ADR 0003 Decision 1).  Static-only. */
+int q_ops_is_reserved(const char* s, int len);
+
 #endif /* Q_OPS_H */
