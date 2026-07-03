@@ -275,7 +275,12 @@ static void compile_list(compiler_t *c, ray_t *ast) {
         head_sym = head->i64;
         head_named = true;
     } else if (ray_head_is_fn_value(head, &head_sym, &head_fn)) {
-        head_named = true;
+        /* `head_named` gates NAME-based dispatch (inline special forms,
+         * self-call).  Enable it only for a CANONICAL builtin value head
+         * (head_sym >= 0) — a custom/look-alike fn value (head_sym == -1)
+         * must NOT be lowered as the like-named intrinsic; it still gets a
+         * correct direct call below via `fn = head_fn`. */
+        head_named = (head_sym >= 0);
     }
 
     /* Check for special forms by name (name ref = unflagged default) */
