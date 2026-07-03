@@ -1009,9 +1009,14 @@ static void ql_adv_app(ray_t **slot) {
         if (!fexpr) return;
         ray_t *ea = q_registry_lookup_name("each", 4, Q_DYADIC);
         if (ea) ql_rewrite(slot, ea, fexpr);
+    } else if ((adv == 4 || adv == 5) && n == 3) {        /* `/:` `\:` each-right/left */
+        if (!fexpr) return;
+        /* x f\: y -> (map-left f x y): f(x_i, y); x f/: y -> (map-right f x y):
+         * f(x, y_i) — arg order matches, no swap needed. */
+        ray_t *mr = ql_env_val(adv == 4 ? "map-right" : "map-left");
+        if (mr) ql_rewrite(slot, mr, fexpr);
     }
-    /* ': /: \: — deferred (each-prior; each-right/left arrive with the
-     * map-right/map-left roster rows). */
+    /* ': — each-prior stays deferred (no pairwise rayfall HOF). */
 }
 
 /* A bare (adv; V) 2-list in VALUE position (assigned, passed, displayed —
