@@ -127,6 +127,58 @@ static ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
     return ray_neq_fn(a, b);
 }
 
+/* q `f each x` — rayfall map, then collapse the boxed result to a simple
+ * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
+static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
+    ray_t* args[2] = { f, x };
+    ray_t* r = ray_map_fn(args, 2);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* c = q_collapse_list(r);
+    ray_release(r);
+    return c;
+}
+
+/* ---- collapse: homogeneous atom list -> typed vector (see q_registry.h) ---- */
+
+ray_t* q_collapse_list(ray_t* l) {
+    if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || ray_len(l) == 0) {
+        if (l) ray_retain(l);
+        return l;
+    }
+    int64_t n = ray_len(l);
+    ray_t** e = (ray_t**)ray_data(l);
+    int8_t t = e[0] ? e[0]->type : 0;
+    if (t >= 0 || t == -RAY_STR) { ray_retain(l); return l; }   /* not a scalar-atom run */
+    for (int64_t i = 1; i < n; i++)
+        if (!e[i] || e[i]->type != t) { ray_retain(l); return l; }
+
+    if (t == -RAY_SYM) {
+        ray_t* vec = ray_sym_vec_new(RAY_SYM_W64, n);
+        if (RAY_IS_ERR(vec)) return vec;
+        for (int64_t i = 0; i < n; i++) vec = ray_vec_append(vec, &e[i]->i64);
+        return vec;
+    }
+
+    ray_t* vec = ray_vec_new(-t, n);
+    if (RAY_IS_ERR(vec)) return vec;
+    int64_t nulls = 0;
+    for (int64_t i = 0; i < n; i++) {
+        switch (t) {
+        case -RAY_BOOL: vec = ray_vec_append(vec, &e[i]->b8);  break;
+        case -RAY_I16:  vec = ray_vec_append(vec, &e[i]->i16); break;
+        case -RAY_I32:  vec = ray_vec_append(vec, &e[i]->i32); break;
+        case -RAY_F32: { float f = (float)e[i]->f64;            /* F32 atom stores f64 */
+                         vec = ray_vec_append(vec, &f); }       break;
+        case -RAY_F64:  vec = ray_vec_append(vec, &e[i]->f64); break;
+        default:        vec = ray_vec_append(vec, &e[i]->i64); break; /* i64 + temporals */
+        }
+        if (RAY_IS_ERR(vec)) return vec;
+        if (RAY_ATOM_IS_NULL(e[i])) { ray_vec_set_null(vec, i, true); nulls++; }
+    }
+    (void)nulls;
+    return vec;
+}
+
 /* ---- value builders keyed by manifest build-kind ---- */
 
 /* Identity/rename-reuse: snapshot an existing rayfall builtin value by name and
@@ -159,6 +211,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_NE:   return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_ne_wrap);
     case QK_TAKE: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_take_wrap);
     case QK_DROP: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_drop_wrap);
+    case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
     default:      return NULL;
     }
 }

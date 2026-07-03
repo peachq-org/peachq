@@ -47,6 +47,9 @@ static const q_op_t Q_OPS[] = {
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_NONE,  NULL,      NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
+    /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
+     * collapse, since map returns a boxed list where q wants a simple vec). */
+    { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QK_ENV, "neg",      QK_NONE,  NULL,      NULL  },
     { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
