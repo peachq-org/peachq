@@ -9,7 +9,7 @@ retargeted to this `src/`-based tree.
 
 | File          | Purpose                                                            |
 | ------------- | ------------------------------------------------------------------ |
-| `q_wasm.c`    | The browser C ABI. Drives openq's real pipeline (`q_parse` → `q_resolve_verbs` → `ray_eval` → materialize → `q_fmt`). |
+| `q_wasm.c`    | The browser C ABI. Drives openq's real pipeline (`q_parse` → `q_lower` → `ray_eval` → materialize → `q_fmt`). |
 | `ipc_stub.c`  | Inert stubs for the handful of `ray_ipc_*` symbols retained TUs reference — a browser tab has no sockets. |
 | `index.html`  | Self-contained REPL page. Loads `rayforce.js`, `ccall`s the ABI.   |
 | `server.py`   | Stdlib preview server (correct `application/wasm` MIME).           |
