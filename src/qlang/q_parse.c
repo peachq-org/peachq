@@ -21,11 +21,7 @@
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
-
-/* ray_cow (mem/heap.h) is an internal heap primitive — declared locally to
- * avoid pulling heap.h's heavy transitive include (ops/ops.h) into the parser.
- * Returns its argument when the sole owner (rc==1), else a private copy. */
-extern ray_t *ray_cow(ray_t *v);
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -744,20 +740,21 @@ ray_t *q_parse(const char *src) {
  * miss (`:`, `;`, `{`, user names, `f[...]` apply, monadic shapes, and the
  * ordering glyphs `< > <= >=` / `div` whose q spelling already matches the
  * rayfall name) leaves the head untouched — eval then resolves it against
- * rayfall's env exactly as before.  ray_cow() makes the sole-owner guarantee
- * explicit before any slot write; the recursion threads a possibly-COWed child
- * pointer back into its parent slot, so the function is correct for any
- * ownership, not just fresh q_parse output.  Recurses into nested lists so
- * inner calls (e.g. the `(+;3;4)` in `2*3+4`) resolve too. */
+ * rayfall's env exactly as before.  Precondition: `ast` is the uniquely-owned
+ * (rc==1) tree fresh from q_parse — the only thing that ever reaches here (the
+ * `parse` builtin returns its AST without calling this).  Every node built by
+ * q_parse ends at rc==1 (append retains, the local ref is released), so the
+ * in-place slot rewrite mutates memory no one else observes; the assert makes
+ * that precondition explicit and trips loudly under the asan/debug test build
+ * on any future shared-AST misuse.  Recurses into nested lists so inner calls
+ * (e.g. the `(+;3;4)` in `2*3+4`) resolve too. */
 ray_t *q_resolve_verbs(ray_t *ast) {
     if (!ast || ast->type != RAY_LIST) return ast;
-    ast = ray_cow(ast);                    /* sole-owner guard before slot writes */
-    if (RAY_IS_ERR(ast)) return ast;
+    assert(ast->rc == 1);                  /* sole-owner precondition (see above) */
     int64_t n = ray_len(ast);
     ray_t **e = (ray_t **)ray_data(ast);
     for (int64_t i = 0; i < n; i++)
-        if (e[i] && e[i]->type == RAY_LIST)
-            e[i] = q_resolve_verbs(e[i]);  /* thread a possibly-COWed child back */
+        if (e[i] && e[i]->type == RAY_LIST) q_resolve_verbs(e[i]);
     if (n == 3 && e[0] && e[0]->type == -RAY_SYM && !(e[0]->attrs & Q_ATTR_QUOTED)) {
         ray_t *s = ray_sym_str(e[0]->i64);
         if (s) {
