@@ -16,7 +16,7 @@
  *
  * LOWERING METADATA: each wrapper's rayfall aux-name is set to the CANONICAL
  * rayfall verb it lowers as (== != take drop) and it carries RAY_FN_Q_LOWER
- * (src/lang/head_desc.h), so the compiler + query DAG dispatch on that name
+ * (RAY_FN_Q_LOWER, lang/eval.h), so the compiler + query DAG dispatch on that name
  * (q `=`/`<>` hit ray_eq/ray_ne) instead of declining every non-canonical
  * value head to the eval fallback.  Pass-through/rename values ARE the env
  * builtin object, so they name-route via the existing canonical-identity path.
@@ -31,8 +31,7 @@
 #include "qlang/q_registry.h"
 #include "qlang/q_ops.h"      /* Q_OPS manifest, q_build_kind */
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
-#include "lang/eval.h"        /* RAY_FN_* attrs */
-#include "lang/head_desc.h"   /* RAY_FN_Q_LOWER */
+#include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
