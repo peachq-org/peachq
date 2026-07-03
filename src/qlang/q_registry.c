@@ -218,18 +218,29 @@ ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence) {
 }
 
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
+    /* Wrapper values are UNIQUE objects (born rc=1 per row) — pointer identity
+     * is exact for them.  Pass-through/rename values ARE the shared env builtin
+     * object, and several q spellings can alias one env object (e.g. `#`-monadic
+     * and `count` both embed env `count`; `-`-monadic and `neg` both embed env
+     * `neg`).  For those, pointer identity alone cannot recover THE q spelling —
+     * an inherent limitation of the reuse-the-env-object design.  So: prefer the
+     * unique WRAPPER entry (always correct); for an aliased pass-through, return
+     * the first-registered spelling (2b's formatter disambiguates aliased
+     * pass-throughs from the parse-site glyph, not from this value-keyed API). */
+    int first = -1;
     for (int i = 0; i < g_count; i++) {
-        if (g_entries[i].value == value) {
-            if (out) {
-                out->spelling   = g_entries[i].spelling;
-                out->valence    = g_entries[i].valence;
-                out->lower_name = g_entries[i].lower_name;
-                out->is_wrapper = g_entries[i].is_wrapper;
-            }
-            return true;
-        }
+        if (g_entries[i].value != value) continue;
+        if (g_entries[i].is_wrapper) { first = i; break; }   /* unique — exact */
+        if (first < 0) first = i;                            /* remember first */
     }
-    return false;
+    if (first < 0) return false;
+    if (out) {
+        out->spelling   = g_entries[first].spelling;
+        out->valence    = g_entries[first].valence;
+        out->lower_name = g_entries[first].lower_name;
+        out->is_wrapper = g_entries[first].is_wrapper;
+    }
+    return true;
 }
 
 /* Idempotent; also serves as partial-cleanup on a failed init (guards on
