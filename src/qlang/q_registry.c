@@ -138,6 +138,24 @@ static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
     return c;
 }
 
+/* q `(f\)x` — rayfall scan, then collapse (kdb: `(+\)1 2 3` is 1 3 6, a
+ * simple vector).  Vary so a future seeded form passes through unchanged.
+ * Not a manifest row (no q spelling of its own): an internal value handed
+ * out to q_lower via q_registry_scan_value(). */
+static ray_t* q_scan_wrap(ray_t** args, int64_t n) {
+    ray_t* r = ray_scan_fn(args, n);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* c = q_collapse_list(r);
+    ray_release(r);
+    return c;
+}
+
+static ray_t* g_scan_value = NULL;
+
+ray_t* q_registry_scan_value(void) {
+    return g_scan_value;   /* borrowed; NULL before init */
+}
+
 /* ---- collapse: homogeneous atom list -> typed vector (see q_registry.h) ---- */
 
 ray_t* q_collapse_list(ray_t* l) {
@@ -265,6 +283,12 @@ ray_err_t q_registry_init(void) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
+    /* internal (spelling-less) values consumed by q_lower */
+    g_scan_value = ray_fn_vary("scan", RAY_FN_NONE | RAY_FN_Q_LOWER, q_scan_wrap);
+    if (!g_scan_value || RAY_IS_ERR(g_scan_value)) {
+        g_scan_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     g_building = false;
     g_inited   = true;
     return RAY_OK;
@@ -312,6 +336,7 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
 void q_registry_destroy(void) {
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
+    if (g_scan_value) { ray_release(g_scan_value); g_scan_value = NULL; }
     g_count  = 0;
     g_inited = false;
 }
