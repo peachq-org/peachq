@@ -18,21 +18,13 @@
  * Requires an initialised rayforce runtime (symbol interning). */
 ray_t* q_parse(const char* src);
 
-/* Rewrite dyadic q-glyph verb heads in a freshly-parsed AST to their q op
- * registry function values (q semantics: % -> /, = -> ==, <> -> !=), in place.
- * Call between q_parse and ray_eval; do NOT call on the AST returned by the
- * `parse` builtin (that must keep glyphs).  PRECONDITION: `ast` is the
- * uniquely-owned (rc==1) tree straight from q_parse — it is mutated in place.
- * Returns `ast`.  On a cold registry every lookup misses and the AST is
- * unchanged. */
-ray_t* q_resolve_verbs(ray_t* ast);
-
 /* q-lower entrypoint (ADR 0003 pipeline stage).  The one call every eval path
  * uses between q_parse and ray_eval to turn the q-AST into a runnable tree:
  * dyadic verb-head resolution, adverb applications onto rayfall HOFs, and
  * assignment (`:`/`::` -> set/let with the reserved-verb 'assign invariant).
  * May return a RAY_ERROR (consuming `ast`) — callers must error-check.
- * PRECONDITION as q_resolve_verbs: `ast` is uniquely owned. */
+ * PRECONDITION: `ast` is the uniquely-owned (rc==1) tree straight from
+ * q_parse — nodes are rewritten in place / swapped. */
 ray_t* q_lower(ray_t* ast);
 
 /* True iff the (pre-lower) statement's RESULT is an assignment's — the q

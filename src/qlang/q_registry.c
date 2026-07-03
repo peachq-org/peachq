@@ -32,7 +32,9 @@
 #include "qlang/q_ops.h"      /* Q_OPS manifest, q_build_kind */
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
+#include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -282,6 +284,36 @@ static ray_err_t add_entry(const char* name, q_valence_t valence,
     return RAY_OK;
 }
 
+/* ---- serde hooks: q wrappers round-trip through the registry -------------
+ * A RAY_FN_Q_LOWER wrapper serialized by aux-name would deserialize as the
+ * like-named env builtin (wrong arg order for `#`, no binding at all for
+ * `_`->"drop"), silently losing q semantics.  The writer claims registry
+ * wrappers with a `q!<spelling>!<valence>` wire name (fits the standard
+ * 15-byte slot); the reader decodes it back to THE registry value.  Internal
+ * spelling-less values (scan/list) have no provenance and fall through to
+ * the env path — documented, not silently wrong (env scan/list exist). */
+
+static int q_serde_fn_writer(ray_t* fn, char out[16]) {
+    if (!fn || !(fn->attrs & RAY_FN_Q_LOWER)) return 0;
+    q_provenance_t pv;
+    if (!q_registry_provenance(fn, &pv) || !pv.is_wrapper) return 0;
+    int n = snprintf(out, 16, "q!%s!%d", pv.spelling, (int)pv.valence);
+    return n > 0 && n < 16;
+}
+
+static ray_t* q_serde_fn_reader(const char* name) {
+    if (!name || name[0] != 'q' || name[1] != '!') return NULL;
+    const char* sp = name + 2;
+    const char* bang = strrchr(sp, '!');
+    if (!bang || bang == sp) return NULL;
+    q_valence_t v = (q_valence_t)atoi(bang + 1);
+    if (v != Q_MONADIC && v != Q_DYADIC) return NULL;
+    ray_t* hit = q_registry_lookup_name(sp, (size_t)(bang - sp), v);
+    if (!hit) return NULL;      /* falls through to the env path -> name error */
+    ray_retain(hit);
+    return hit;                 /* owned, per the hook contract */
+}
+
 /* ---- API ---- */
 
 ray_err_t q_registry_init(void) {
@@ -315,6 +347,7 @@ ray_err_t q_registry_init(void) {
     }
     g_building = false;
     g_inited   = true;
+    ray_serde_set_fn_hooks(q_serde_fn_writer, q_serde_fn_reader);
     return RAY_OK;
 }
 
@@ -362,6 +395,7 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
 /* Idempotent; also serves as partial-cleanup on a failed init (guards on
  * g_count, not g_inited, so a half-built table is fully released). */
 void q_registry_destroy(void) {
+    ray_serde_set_fn_hooks(NULL, NULL);   /* hooks read g_entries — detach first */
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
     if (g_scan_value) { ray_release(g_scan_value); g_scan_value = NULL; }
