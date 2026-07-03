@@ -115,15 +115,20 @@ static ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
 /* q char-string comparison — q treats a string as a char vector, so `=`/`<>`
  * compare element-wise and yield a boolean vector (`"abc"="abd"` -> 110b).
  * rayfall's `==`/`!=` (ray_eq_fn/ray_neq_fn) compare two -RAY_STR atoms as
- * whole values (a single 0b/1b), so the q verbs wrap them: two equal-length
- * string atoms take the element-wise path here, everything else (ints, floats,
- * vectors, symbols, mismatched-length strings) delegates unchanged to the
- * rayfall builtin.  Returns NULL to signal "not the string case, delegate". */
+ * whole values (a single 0b/1b), so the q verbs wrap them.  Two -RAY_STR
+ * operands take the element-wise path here (equal length -> boolean vector,
+ * unequal -> a q `length` error, matching q's vector-conformance rule and
+ * eval's own length check for typed vectors); everything else (ints, floats,
+ * vectors, symbols, string-vs-nonstring) is not the string case and delegates.
+ * Only the caller knows how to delegate, so a non-string case returns NULL. */
+static int q_is_str_atom(ray_t* x) { return x && x->type == -RAY_STR; }
+
 static ray_t* q_str_cmp_vec(ray_t* a, ray_t* b, int eq) {
-    if (!a || !b || a->type != -RAY_STR || b->type != -RAY_STR) return NULL;
     const char* pa = ray_str_ptr(a); size_t la = ray_str_len(a);
     const char* pb = ray_str_ptr(b); size_t lb = ray_str_len(b);
-    if (la != lb) return NULL;                 /* length mismatch -> delegate */
+    if (la != lb)
+        return ray_error("length", "%s: string lengths must match, got %zu and %zu",
+                         eq ? "=" : "<>", la, lb);
     uint8_t stack[128];
     uint8_t* bits = (la <= sizeof stack) ? stack : (uint8_t*)malloc(la ? la : 1);
     if (!bits) return ray_error("wsfull", "=: out of memory");
@@ -137,14 +142,14 @@ static ray_t* q_str_cmp_vec(ray_t* a, ray_t* b, int eq) {
 /* q `=` — element-wise over char strings, else rayfall `==`.  RAY_FN_ATOMIC so
  * eval broadcasts it over numeric vectors (each element pair hits ray_eq_fn). */
 static ray_t* q_eq_wrap(ray_t* a, ray_t* b) {
-    ray_t* r = q_str_cmp_vec(a, b, 1);
-    return r ? r : ray_eq_fn(a, b);
+    if (q_is_str_atom(a) && q_is_str_atom(b)) return q_str_cmp_vec(a, b, 1);
+    return ray_eq_fn(a, b);
 }
 
 /* q `<>` — element-wise over char strings, else rayfall `!=`. */
 static ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
-    ray_t* r = q_str_cmp_vec(a, b, 0);
-    return r ? r : ray_neq_fn(a, b);
+    if (q_is_str_atom(a) && q_is_str_atom(b)) return q_str_cmp_vec(a, b, 0);
+    return ray_neq_fn(a, b);
 }
 
 /* ---- builders ---- */
