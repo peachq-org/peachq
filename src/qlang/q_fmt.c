@@ -108,6 +108,25 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
 
+    /* Registry function VALUES render their q spelling from provenance
+     * (formatter-from-metadata, spec piece 2): glyph rows bare (`+`), monadic
+     * glyph rows with the marker (`-:`), keyword rows the keyword.  Values
+     * with no provenance (internal list/scan wrappers, foreign fns) fall
+     * through to ray_fallback below. */
+    if (val->type == RAY_UNARY || val->type == RAY_BINARY ||
+        val->type == RAY_VARY) {
+        q_provenance_t pv;
+        if (q_registry_provenance(val, &pv) && pv.spelling && pv.spelling[0]) {
+            char c0 = pv.spelling[0];
+            int glyph = !((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z'));
+            if (pv.valence == Q_MONADIC && glyph)
+                snprintf(buf, bufsz, "%s:", pv.spelling);
+            else
+                snprintf(buf, bufsz, "%s", pv.spelling);
+            return;
+        }
+    }
+
     /* Typed numeric atoms print q-style with a type suffix (bare for long /
      * float): 1b, 42h, 42i, 42, 3.14e, 3.14 — plus the nulls/inf tokens. */
     switch (val->type) {
