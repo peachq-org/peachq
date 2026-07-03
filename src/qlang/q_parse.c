@@ -20,6 +20,7 @@
 
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
+#include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <assert.h>
 #include <stdio.h>
@@ -69,10 +70,13 @@ static ray_t *q_verb_name(const char *s, int len) {
     return ray_sym(ray_sym_intern_runtime(s, (size_t)len));
 }
 
-/* Infix keyword verbs (q keyword functions usable between two nouns).  Only
- * `div` is in the tested subset; it resolves to rayfall integer divide. */
+/* Infix keyword verbs (q keyword functions usable between two nouns).  Derived
+ * from the SINGLE-SOURCE op manifest (q_ops.c QLEX_KW_INFIX rows) — no longer a
+ * hardcoded memcmp, and no runtime-registry dependency (the manifest is a
+ * static table, and the scanner runs before eval).  Classification is
+ * byte-identical to the retired memcmp: the manifest's KW_INFIX set is {div}. */
 static int q_is_kw_verb(const char *s, int len) {
-    return len == 3 && memcmp(s, "div", 3) == 0;
+    return q_lex_is_kw_infix(s, len);
 }
 
 /* marker heads ("{", ";", adverb names): name-ref syms */
@@ -768,4 +772,12 @@ ray_t *q_resolve_verbs(ray_t *ast) {
         }
     }
     return ast;
+}
+
+/* q-lower entrypoint — see q_parse.h.  STAGE 2a: a behaviour-preserving shim
+ * over q_resolve_verbs so every eval path (qdoc, q_repl) funnels through one
+ * seam.  2b replaces the body with the full lowering pass (value-heads-at-parse
+ * carriers, monomorphization) and retires q_resolve_verbs. */
+ray_t *q_lower(ray_t *ast) {
+    return q_resolve_verbs(ast);
 }

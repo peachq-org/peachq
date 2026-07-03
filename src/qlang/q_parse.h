@@ -27,4 +27,12 @@ ray_t* q_parse(const char* src);
  * unchanged. */
 ray_t* q_resolve_verbs(ray_t* ast);
 
+/* q-lower entrypoint (ADR 0003 pipeline stage).  The one call every eval path
+ * uses between q_parse and ray_eval to turn the q-AST into a runnable tree.
+ * STAGE 2a: a thin shim over q_resolve_verbs — AST shape and eval behaviour are
+ * unchanged; it exists so all callers (qdoc, q_repl, ...) go through a single
+ * seam that 2b grows into the full value-heads-at-parse lowering (and retires
+ * the shim).  PRECONDITION as q_resolve_verbs: `ast` is uniquely owned. */
+ray_t* q_lower(ray_t* ast);
+
 #endif /* Q_PARSE_H */
