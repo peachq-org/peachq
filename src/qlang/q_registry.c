@@ -47,13 +47,16 @@ static const spec_t SPECS[] = {
     /* rename-reuse */
     { "-",       Q_MONADIC, build_env,  "neg" },   /* q monadic minus = negate  */
     { "%",       Q_DYADIC,  build_env,  "/" },     /* q float-divide = rayfall / */
-    /* comparison renames — q `=`/`<>` map to rayfall `==`/`!=`.  The ordering
-     * glyphs `< > <= >=` and the `div` keyword are NOT listed: their q spelling
-     * equals the rayfall builtin name, so a registry miss falls through to the
-     * identically-named env binding.  Sources verified present in
-     * ray_register_builtins (eval.c); a missing one trips the init fail-fast. */
+    /* comparison renames — q `=`/`<>` map to rayfall `==`/`!=`. */
     { "=",       Q_DYADIC,  build_eq,   NULL },    /* q equal      = rayfall == */
     { "<>",      Q_DYADIC,  build_ne,   NULL },    /* q not-equal  = rayfall != */
+    /* TODO(registry-completeness): the registry is THE complete list of q verbs
+     * (see ARCHITECTURE.md) — identical-spelling verbs belong here as
+     * pass-through/identity rows too, not omitted. `div` and the ordering
+     * glyphs `< > <= >=` still need rows; until added they resolve via the
+     * identically-named env binding. That fall-through is a TEMPORARY GAP, not
+     * a divergent-only design. Sources verified present in ray_register_builtins
+     * (eval.c); a missing one trips the init fail-fast once listed. */
     /* identity-reuse (monadic keywords) */
     { "neg",     Q_MONADIC, build_env,  "neg" },
     { "til",     Q_MONADIC, build_env,  "til" },
