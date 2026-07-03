@@ -84,6 +84,31 @@ static ray_t *q_marker(const char *s) {
     return ray_sym(ray_sym_intern_runtime(s, strlen(s)));
 }
 
+/* Embed the registry function VALUE for a verb sym at the given valence — the
+ * 2b parser flip (`parse "2+3"` -> (+<fn>;2;3)).  A monadic-marked spelling
+ * ("<g>:") probes the registry under the bare glyph.  On a miss the sym is
+ * returned unchanged (unknown -> name-ref, ADR 0002).  Consumes `sym`,
+ * returns owned. */
+static ray_t *q_embed(ray_t *sym, q_valence_t val) {
+    if (!sym || sym->type != -RAY_SYM || (sym->attrs & Q_ATTR_QUOTED)) return sym;
+    ray_t *s = ray_sym_str(sym->i64);
+    if (!s) return sym;
+    const char *nm = ray_str_ptr(s);
+    size_t nl = ray_str_len(s);
+    if (val == Q_MONADIC && nl == 2 && nm[1] == ':') nl = 1;   /* "+:" -> "+" */
+    ray_t *hit = q_registry_lookup_name(nm, nl, val);
+    ray_release(s);
+    if (!hit) return sym;
+    ray_retain(hit);
+    ray_release(sym);
+    return hit;
+}
+
+/* True iff a sym spells a glyph verb (1 char from VERB_CHARS, optionally with
+ * the monadic marker) — used to keep bare-verb embedding away from user
+ * names, which must stay env-resolved name-refs. */
+static int q_sym_is_glyph(ray_t *sym);   /* defined after VERB_CHARS */
+
 /* generic null :: — the elided-argument hole */
 static ray_t *q_null(void) {
     return ray_sym(ray_sym_intern_runtime("::", 2));
@@ -130,6 +155,18 @@ static ray_t *q_list(ray_t **xs, int n) {
 static const char VERB_CHARS[] = ":+-*%!&|<>=~,^#_$?@.";
 
 static const char *ADVERB_NAMES[] = { "'", "/", "\\", "':", "/:", "\\:" };
+
+static int q_sym_is_glyph(ray_t *sym) {
+    if (!sym || sym->type != -RAY_SYM || (sym->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t *s = ray_sym_str(sym->i64);
+    if (!s) return 0;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int r = (l >= 1 && l <= 2 && strchr(VERB_CHARS, nm[0]) != NULL &&
+             (l == 1 || nm[1] == ':' || strchr(VERB_CHARS, nm[1]) != NULL));
+    ray_release(s);
+    return r;
+}
 
 /* ===== char classes (copied from kparser) ==================================== */
 
@@ -632,6 +669,9 @@ static P parse_base(Parser *p) {
             ray_t *only = slots[0];
             if (only) ray_retain(only);
             ray_release(e);
+            /* a parenthesized lone glyph verb `(+)` is the bare-verb VALUE
+             * (dyadic row); user names keep their name-ref. */
+            if (q_sym_is_glyph(only)) only = q_embed(only, Q_DYADIC);
             return (P){ R_NOUN, only };
         }
         /* Multi-element paren list is a LITERAL: prepend the internal
@@ -677,6 +717,9 @@ static P parse_term(Parser *p) {
             adv(p);
             ray_t *e = parse_E(p);
             expect(p, T_RBRACK, "expected ']'");
+            /* bracket-apply on a bare verb (`+[2;]`) embeds the dyadic row —
+             * an underapplied call becomes a projection downstream (2c). */
+            if (t.role == R_VERB) t.v = q_embed(t.v, Q_DYADIC);
             int64_t en = ray_len(e);
             ray_t **es = (ray_t **)ray_data(e);
             ray_t *w = ray_list_new(en + 1);
@@ -689,6 +732,9 @@ static P parse_term(Parser *p) {
             ray_release(e);
             t.v = w; t.role = R_NOUN;
         } else if (tk->kind == T_ADVERB) {
+            /* a glyph verb under an adverb (`+/`) is a bare-verb VALUE:
+             * embed its dyadic row (names/lambdas stay for eval to resolve) */
+            if (t.role == R_VERB) t.v = q_embed(t.v, Q_DYADIC);
             ray_t *xs[2] = { tk->k, t.v };
             tk->k = NULL;
             t.v = q_list(xs, 2);
@@ -715,6 +761,7 @@ static P parse_e_from(Parser *p, P t) {
     if (t.role == R_NOUN && u.role == R_VERB) {
         P e = parse_e(p);
         ray_t *rhs = e.v ? e.v : q_null();
+        u.v = q_embed(u.v, Q_DYADIC);          /* infix head: the dyadic row */
         ray_t *xs[3] = { u.v, t.v, rhs };
         return (P){ R_NOUN, q_list(xs, 3) };
     }
@@ -737,6 +784,11 @@ static P parse_e_from(Parser *p, P t) {
             ray_release(s);
         }
     }
+    /* Prefix glyph head embeds its MONADIC registry value; a bare glyph verb
+     * standing as the rhs OPERAND (`+ -` applies + to the - value) embeds its
+     * dyadic row (bare-verb-as-value convention). */
+    if (t.role == R_VERB) t.v = q_embed(t.v, Q_MONADIC);
+    if (e.role == R_VERB && q_sym_is_glyph(e.v)) e.v = q_embed(e.v, Q_DYADIC);
     ray_t *xs[2] = { t.v, e.v };
     return (P){ R_NOUN, q_list(xs, 2) };
 }
@@ -765,6 +817,11 @@ static ray_t *parse_E(Parser *p) {
 /* ===== public entry ========================================================== */
 
 ray_t *q_parse(const char *src) {
+    /* Value embedding requires a live registry (codex #1): fail fast rather
+     * than silently emit a mixed sym/value tree.  Every q entry point
+     * bootstraps via q_runtime_create, which initializes the registry. */
+    if (!q_registry_ready())
+        return ray_error("init", "q_parse: op registry not initialized");
     init_class();
     g_toks.t = NULL;
     g_toks.n = 0;
