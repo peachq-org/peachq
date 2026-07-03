@@ -33,8 +33,9 @@
  */
 #include <rayforce.h>
 
-/* Number of types (positive range): must be > max type ID */
-#define RAY_TYPE_COUNT 15
+/* Number of types (positive range): must be > max type ID.
+ * Max data type = RAY_TIME(19); RAY_SEL(20) is the internal selection tag. */
+#define RAY_TYPE_COUNT 21
 
 /* Type sizes lookup table (defined in types.c) */
 extern const uint8_t ray_type_sizes[256];
