@@ -318,6 +318,10 @@ ray_err_t q_registry_init(void) {
     return RAY_OK;
 }
 
+bool q_registry_ready(void) {
+    return g_inited;
+}
+
 ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence) {
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].sym_id == sym_id && g_entries[i].valence == valence)
