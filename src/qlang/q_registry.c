@@ -141,7 +141,19 @@ static ray_t* build_env(const char* env_name) {
 }
 
 /* Bespoke wrapper: aux-name = the canonical rayfall lowering name; flagged
- * RAY_FN_Q_LOWER so the compiler/query DAG name-route it. */
+ * RAY_FN_Q_LOWER so the compiler/query DAG name-route it.
+ *
+ * SERDE LIMITATION (codex P1, deferred to 2b): generic function serialization
+ * (src/store/serde.c) writes ray_fn_name and deserializes via ray_env_get, so a
+ * serialized wrapper would come back as the plain like-named builtin (losing the
+ * q string/arg-swap semantics), and `_`->"drop" has no env binding at all.  This
+ * is NOT reachable in stage 2a: with no parser flip, wrapper VALUES never become
+ * user-visible or serializable — they exist only inside the registry and the
+ * transient AST that q_lower feeds straight to eval.  (The pre-2a wrappers, named
+ * "="/"#"/"_", were equally non-round-trippable — env has no such names.)  2b,
+ * which makes value heads user-visible, must teach serde to recognise
+ * RAY_FN_Q_LOWER and re-derive the wrapper from the registry; that fix has a
+ * testable surface only once the parser embeds these values. */
 static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     switch (kind) {
     case QK_EQ:   return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_eq_wrap);
