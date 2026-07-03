@@ -3,6 +3,7 @@
  * and general lists q-style and delegates everything else to rayforce's ray_fmt. */
 #include "qlang/q_fmt.h"
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
+#include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "lang/format.h"   /* ray_fmt */
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
@@ -228,6 +229,24 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
             buf[pos] = '\0';
         }
         return;
+    }
+
+    /* A 104h derived-verb carrier renders as bound-verb + adverb glyph (+/).
+     * The carrier's base is the HOF value (fold / the internal scan wrapper /
+     * the each wrapper); the bound verb sits in the first arg slot. */
+    if (q_deriv_kind_of(val) == Q_DERIV_PROJ && ray_len(val) >= 5) {
+        ray_t* base = q_deriv_base(val);
+        ray_t* v0   = ((ray_t**)ray_data(val))[4];
+        const char* g = NULL;
+        if (base == ray_env_get(ray_sym_intern("fold", 4)))            g = "/";
+        else if (base == q_registry_scan_value())                      g = "\\";
+        else if (base == q_registry_lookup_name("each", 4, Q_DYADIC))  g = "'";
+        if (g && v0) {
+            char vb[256]; vb[0] = '\0';
+            q_fmt(v0, vb, sizeof vb);
+            snprintf(buf, bufsz, "%s%s", vb, g);
+            return;
+        }
     }
 
     /* A general list of strings prints one quoted string per line (kdb: a
