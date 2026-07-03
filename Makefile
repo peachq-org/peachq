@@ -93,13 +93,19 @@ QDOC_TARGET   = qdoctest
 QDOC_MAIN_SRC = src/qlang/qdoctest_main.c
 QDOC_MAIN_OBJ = $(QDOC_MAIN_SRC:.c=.o)
 TEST_SRC = $(wildcard test/*.c)
+# The TSV parser-diff runner is NON-GATING: excluded from the unified `make
+# test` binary (it reports honest red rows — the parser-divergence ledger).
+# It is linked only into the `test-parse-diff` target below.
+PARSE_DIFF_SRC = test/test_q_parse_tsv.c
+PARSE_DIFF_OBJ = $(PARSE_DIFF_SRC:.c=.o)
+TEST_SRC := $(filter-out $(PARSE_DIFF_SRC), $(TEST_SRC))
 TEST_OBJ = $(TEST_SRC:.c=.o)
 
 # Auto-generated header dependencies (one .d per .o, see DEPFLAGS).
 # The fragments are -included at the very END of this file — including
 # them here would let a .d's first rule (e.g. `foo.o: ...`) become the
 # default goal, so bare `make` would build one object instead of `debug`.
-DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d) $(QDOC_MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d)
+DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d) $(QDOC_MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d) $(PARSE_DIFF_OBJ:.o=.d)
 
 # Default target (pinned so an -included .d fragment can't steal it).
 .DEFAULT_GOAL := default
@@ -230,6 +236,19 @@ qtest: $(LIB_OBJ) $(TEST_OBJ) $(QDOC_TARGET)
 	tools/qtest-ledger.sh || rc=$$?; \
 	exit $$rc
 
+# openq: NON-GATING differential parser-test ledger.  Links the TSV runner
+# (test/test_q_parse_tsv.c) into the test binary alongside the normal suites,
+# then runs ONLY the qlang/parse/* suites.  EXPECTED TO BE RED — it is the
+# honest record of where q_parse+q_fmt diverge from the kparser golden corpus.
+# It does NOT gate `make test`, CI, or the release pipeline; run it explicitly
+# to see the parser-divergence ledger.
+test-parse-diff: CFLAGS = $(DEBUG_CFLAGS)
+test-parse-diff: LDFLAGS = $(DEBUG_LDFLAGS)
+test-parse-diff: $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ)
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o build/$(TARGET).parsediff.test $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ) $(LIBS) $(LDFLAGS) -Itest
+	RAYFORCE_CORES=$(TEST_CORES) ./build/$(TARGET).parsediff.test -f qlang/parse
+
 # openq: regenerate the checked-in q-docs failure ledger (qtest-results.txt).
 # The user runs this on demand; `make qtest` never writes it (stays side-effect
 # free on tracked files).
@@ -279,6 +298,7 @@ clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
 	-rm -f $(TARGET) $(Q_TARGET) $(QDOC_TARGET) $(TARGET).test lib$(TARGET).a
+	-rm -f build/$(TARGET).parsediff.test $(PARSE_DIFF_OBJ) $(PARSE_DIFF_OBJ:.o=.d)
 	-rm -rf build build_release dist
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
 	-rm -f rf_test_*.csv
@@ -286,7 +306,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test qtest qtest-results qdoctest manifest coverage clean
+.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test test-parse-diff qtest qtest-results qdoctest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
