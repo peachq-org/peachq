@@ -19,7 +19,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_parse.h"
+#include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
+
+/* ray_cow (mem/heap.h) is an internal heap primitive — declared locally to
+ * avoid pulling heap.h's heavy transitive include (ops/ops.h) into the parser.
+ * Returns its argument when the sole owner (rc==1), else a private copy. */
+extern ray_t *ray_cow(ray_t *v);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +65,18 @@ static ray_t *q_name(const char *s, int len) {
 static ray_t *q_verb(char c) {
     char b[2] = { c, '\0' };
     return ray_sym(ray_sym_intern_runtime(b, 1));
+}
+
+/* verb by name (multi-char glyph like "<=", "<>", or keyword like "div"):
+ * a name-ref sym, ATTR_QUOTED clear, resolved at eval / by q_resolve_verbs. */
+static ray_t *q_verb_name(const char *s, int len) {
+    return ray_sym(ray_sym_intern_runtime(s, (size_t)len));
+}
+
+/* Infix keyword verbs (q keyword functions usable between two nouns).  Only
+ * `div` is in the tested subset; it resolves to rayfall integer divide. */
+static int q_is_kw_verb(const char *s, int len) {
+    return len == 3 && memcmp(s, "div", 3) == 0;
 }
 
 /* marker heads ("{", ";", adverb names): name-ref syms */
@@ -396,8 +414,15 @@ static Tokens scan(const char *src) {
             }
             int len = p - start;
             if (len >= MAX_NAME) q_die("name too long");
-            EMIT(T_NOUN, q_name(src + start, len));
-            noun_pos = 1;
+            /* Only reclassify as an infix verb in true infix position (after a
+             * noun); a prefix/standalone `div` stays a name-ref noun. */
+            if (noun_pos && q_is_kw_verb(src + start, len)) {
+                EMIT(T_VERB, q_verb_name(src + start, len));
+                noun_pos = 0;
+            } else {
+                EMIT(T_NOUN, q_name(src + start, len));
+                noun_pos = 1;
+            }
         }
         else if (c == '"') {
             /* String literal: scan to the closing quote, honouring `\` escapes
@@ -448,9 +473,19 @@ static Tokens scan(const char *src) {
             noun_pos = 1;
         }
         else if (cl & CL_VERB) {
-            p++;
-            if (src[p] == ':') p++;   /* absorb monadic marker; valence at eval */
-            EMIT(T_VERB, q_verb(c));
+            /* Two-char comparison operators are single q verbs (kdb q.flex:
+             * '<=' LESS_OR_EQUAL, '>=' MORE_OR_EQUAL, '<>' NOT_EQUAL).  p is at
+             * `c` here, so src[p+1] is the following byte. */
+            if ((c == '<' && (src[p+1] == '=' || src[p+1] == '>')) ||
+                (c == '>' &&  src[p+1] == '=')) {
+                char nm[2] = { c, src[p+1] };
+                p += 2;
+                EMIT(T_VERB, q_verb_name(nm, 2));
+            } else {
+                p++;
+                if (src[p] == ':') p++;   /* absorb monadic marker; valence at eval */
+                EMIT(T_VERB, q_verb(c));
+            }
             noun_pos = 0;
         }
         else if (cl & CL_ADVERB) {
@@ -699,4 +734,41 @@ ray_t *q_parse(const char *src) {
      * ray_eval() self-evaluates it, rather than every caller having to treat a
      * bare C NULL specially. */
     return prog ? prog : RAY_NULL_OBJ;
+}
+
+/* ===== q-semantic verb resolution (eval-time) ================================
+ * The AST keeps q-glyph name-ref verb heads so `parse` prints them verbatim.
+ * Just before eval, rewrite each DYADIC call `(verb; a; b)` whose head is a
+ * q-glyph name-ref into the q op registry's function value for that (name,
+ * dyadic) key: `% -> /` (float divide), `= -> ==`, `<> -> !=`.  A registry
+ * miss (`:`, `;`, `{`, user names, `f[...]` apply, monadic shapes, and the
+ * ordering glyphs `< > <= >=` / `div` whose q spelling already matches the
+ * rayfall name) leaves the head untouched — eval then resolves it against
+ * rayfall's env exactly as before.  ray_cow() makes the sole-owner guarantee
+ * explicit before any slot write; the recursion threads a possibly-COWed child
+ * pointer back into its parent slot, so the function is correct for any
+ * ownership, not just fresh q_parse output.  Recurses into nested lists so
+ * inner calls (e.g. the `(+;3;4)` in `2*3+4`) resolve too. */
+ray_t *q_resolve_verbs(ray_t *ast) {
+    if (!ast || ast->type != RAY_LIST) return ast;
+    ast = ray_cow(ast);                    /* sole-owner guard before slot writes */
+    if (RAY_IS_ERR(ast)) return ast;
+    int64_t n = ray_len(ast);
+    ray_t **e = (ray_t **)ray_data(ast);
+    for (int64_t i = 0; i < n; i++)
+        if (e[i] && e[i]->type == RAY_LIST)
+            e[i] = q_resolve_verbs(e[i]);  /* thread a possibly-COWed child back */
+    if (n == 3 && e[0] && e[0]->type == -RAY_SYM && !(e[0]->attrs & Q_ATTR_QUOTED)) {
+        ray_t *s = ray_sym_str(e[0]->i64);
+        if (s) {
+            ray_t *hit = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), Q_DYADIC);
+            ray_release(s);
+            if (hit) {          /* borrowed -> retain one, drop the glyph */
+                ray_retain(hit);
+                ray_release(e[0]);
+                e[0] = hit;
+            }
+        }
+    }
+    return ast;
 }
