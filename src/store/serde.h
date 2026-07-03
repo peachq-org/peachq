@@ -63,6 +63,19 @@ typedef struct ray_ipc_header_t {
 
 _Static_assert(sizeof(ray_ipc_header_t) == 16, "ipc header must be 16 bytes");
 
+/* openq: pluggable builtin-fn serde hooks.  Builtin UNARY/BINARY/VARY values
+ * serialize by aux-name and deserialize via env lookup — wrong for language
+ * layers whose fn values are NOT env bindings (q registry wrappers carry
+ * divergent semantics under a canonical routing name).  The writer may claim
+ * a fn by filling out_name[16] (the standard <=15-byte name slot on the wire)
+ * and returning nonzero; the reader gets the wire name first and may return
+ * an OWNED value (NULL = fall through to the env path).  NULL hooks (the
+ * default) preserve the historic behaviour exactly. */
+typedef int     (*ray_serde_fn_writer_t)(ray_t* fn, char out_name[16]);
+typedef ray_t*  (*ray_serde_fn_reader_t)(const char* name);
+void ray_serde_set_fn_hooks(ray_serde_fn_writer_t writer,
+                            ray_serde_fn_reader_t reader);
+
 /* Calculate serialized size of an object (excluding IPC header) */
 int64_t ray_serde_size(ray_t* obj);
 
