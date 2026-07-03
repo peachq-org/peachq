@@ -47,6 +47,9 @@ static const q_op_t Q_OPS[] = {
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_NONE,  NULL,      NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
+    /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
+     * collapse, since map returns a boxed list where q wants a simple vec). */
+    { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QK_ENV, "neg",      QK_NONE,  NULL,      NULL  },
     { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
@@ -57,16 +60,23 @@ static const q_op_t Q_OPS[] = {
     { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
+    /* q-implemented keywords: env bindings added by q_builtins_register
+     * (same mechanism as `parse`), snapshotted here as pass-through rows. */
+    { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
+    { "upper",   QLEX_KW_PREFIX, QK_ENV, "upper",    QK_NONE,  NULL,      NULL  },
+    { "lower",   QLEX_KW_PREFIX, QK_ENV, "lower",    QK_NONE,  NULL,      NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
-     * In 2b `+/` lowers to a projection of `fold` over `+`, etc.  each-right /
-     * each-left / each-prior (`/: \: ':`) have no clean rayfall HOF yet, so their
-     * mapping is DEFERRED (NULL) — still lexer-classified, not invented. ---- */
-    { "'",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map"  },
-    { "/",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "fold" },
-    { "\\",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "scan" },
-    { "':",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL   },  /* each-prior: deferred */
-    { "/:",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL   },  /* each-right: deferred */
-    { "\\:",   QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL   },  /* each-left:  deferred */
+     * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
+     * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
+     * q each-left, verified against examples/rfl).  Each-prior `':` still has
+     * no rayfall counterpart (the scan-* variants are fold-style, not
+     * pairwise) — DEFERRED, still lexer-classified. ---- */
+    { "'",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map"       },
+    { "/",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "fold"      },
+    { "\\",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "scan"      },
+    { "':",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL        },  /* each-prior: deferred */
+    { "/:",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map-right" },
+    { "\\:",   QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map-left"  },
 };
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
 
@@ -78,6 +88,15 @@ const q_op_t* q_ops_table(int* n) {
 int q_lex_is_kw_infix(const char* s, int len) {
     for (int i = 0; i < N_Q_OPS; i++) {
         if (Q_OPS[i].lex != QLEX_KW_INFIX) continue;
+        const char* nm = Q_OPS[i].name;
+        if ((int)strlen(nm) == len && memcmp(nm, s, (size_t)len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+int q_ops_is_reserved(const char* s, int len) {
+    for (int i = 0; i < N_Q_OPS; i++) {
         const char* nm = Q_OPS[i].name;
         if ((int)strlen(nm) == len && memcmp(nm, s, (size_t)len) == 0)
             return 1;

@@ -48,6 +48,11 @@ typedef struct {
  * miss is a bug, not a soft skip. */
 ray_err_t q_registry_init(void);
 
+/* True once q_registry_init has completed.  The PARSER embeds registry values
+ * at verb heads, so q_parse fails fast when this is false (codex #1: value
+ * embedding must never run against a cold registry). */
+bool q_registry_ready(void);
+
 /* Borrowed ref, or NULL on miss.  A miss is NOT an error — it means "not a
  * registry verb at this valence," and the caller keeps the token a
  * name-reference (ADR 0002's unknown->name-ref rule). */
@@ -74,5 +79,25 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
 /* Release every retained entry and reset.  Idempotent; also serves as
  * partial-cleanup on a failed init.  Must run before ray_env_destroy. */
 void q_registry_destroy(void);
+
+/* The internal scan value (rayfall scan + collapse) q_lower embeds for the
+ * `\` adverb.  Borrowed; NULL before q_registry_init.  Not a roster row —
+ * it has no q spelling of its own. */
+ray_t* q_registry_scan_value(void);
+
+/* The internal paren-list constructor (list + collapse) the PARSER embeds at
+ * the head of every multi-element paren list `(1;2;3)` — the head value is
+ * what distinguishes a literal from the shape-identical index call (v;i).
+ * q_fmt hides this head, so the tree still displays (1;2;3).  Borrowed;
+ * NULL before q_registry_init. */
+ray_t* q_registry_list_value(void);
+
+/* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
+ * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
+ * are simple vectors, not general lists).  Mixed types, non-atom elements,
+ * string atoms (a list of strings IS kdb 0h) and non-lists are returned
+ * unchanged.  Borrows `l`; always returns an OWNED value (a fresh vector, or
+ * `l` retained). */
+ray_t* q_collapse_list(ray_t* l);
 
 #endif /* Q_REGISTRY_H */
