@@ -2,10 +2,10 @@
  *
  * Inert boxed carriers (STAGE 2a): built + inspectable, never evaluated.  A
  * carrier is a RAY_LIST laid out as:
- *   PROJ   : [ `.q.proj  , base, hole_mask(i64), eff_valence(i64), arg0, ... ]
- *   ADVERB : [ `.q.adverb, base, adverb_code(i64), eff_valence(i64) ]
- *   MONAD  : [ `.q.monad , base, eff_valence(i64) ]
- * element[0] is a QUOTED marker sym so the box self-identifies. */
+ *   PROJ   : [ `.q.proj , base, hole_mask(i64), eff_valence(i64), arg0, ... ]
+ *   MONAD  : [ `.q.monad, base, eff_valence(i64) ]
+ * element[0] is a QUOTED marker sym so the box self-identifies.  (Adverbs are
+ * NOT carriers — they map to rayfall HOFs in the op manifest; see q_deriv.h.) */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_deriv.h"
 #include <string.h>
@@ -13,17 +13,15 @@
 #define Q_DERIV_QUOTED 0x20   /* ATTR_QUOTED (src/lang/eval.h) — literal sym */
 
 /* Cached marker sym-ids (lazily interned; -1 = not yet). */
-static int64_t g_sid_proj   = -1;
-static int64_t g_sid_adverb = -1;
-static int64_t g_sid_monad  = -1;
-static int64_t g_sid_hole   = -1;   /* unbound-arg `;` sentinel in a projection */
+static int64_t g_sid_proj  = -1;
+static int64_t g_sid_monad = -1;
+static int64_t g_sid_hole  = -1;   /* unbound-arg `;` sentinel in a projection */
 
 static void ensure_markers(void) {
     if (g_sid_proj < 0) {
-        g_sid_proj   = ray_sym_intern(".q.proj",   7);
-        g_sid_adverb = ray_sym_intern(".q.adverb", 9);
-        g_sid_monad  = ray_sym_intern(".q.monad",  8);
-        g_sid_hole   = ray_sym_intern(".q.hole",   7);
+        g_sid_proj  = ray_sym_intern(".q.proj",  7);
+        g_sid_monad = ray_sym_intern(".q.monad", 8);
+        g_sid_hole  = ray_sym_intern(".q.hole",  7);
     }
 }
 
@@ -68,17 +66,6 @@ ray_t* q_proj_new(ray_t* base, ray_t** args, int64_t argc, uint64_t hole_mask,
     return l;
 }
 
-ray_t* q_adverb_new(ray_t* base, q_adverb_t adverb) {
-    if (!base) return ray_error("type", "q_adverb_new: nil base");
-    ensure_markers();
-    ray_t* l = ray_list_new(4);
-    l = push_owned(l, marker_atom(g_sid_adverb));
-    l = push_borrowed(l, base);
-    l = push_owned(l, ray_i64((int64_t)adverb));
-    l = push_owned(l, ray_i64(2));   /* adverb derivative: dyadic-capable */
-    return l;
-}
-
 ray_t* q_monadic_mark(ray_t* base) {
     if (!base) return ray_error("type", "q_monadic_mark: nil base");
     ensure_markers();
@@ -107,21 +94,14 @@ q_deriv_kind q_deriv_kind_of(const ray_t* v) {
     int64_t sid = head_sid(v);
     if (sid < 0) return Q_DERIV_NONE;
     int64_t n = ray_len((ray_t*)v);
-    if (sid == g_sid_proj   && n >= 4) return Q_DERIV_PROJ;   /* marker,base,mask,val */
-    if (sid == g_sid_adverb && n >= 4) return Q_DERIV_ADVERB; /* marker,base,code,val */
-    if (sid == g_sid_monad  && n >= 3) return Q_DERIV_MONAD;  /* marker,base,val       */
+    if (sid == g_sid_proj  && n >= 4) return Q_DERIV_PROJ;   /* marker,base,mask,val */
+    if (sid == g_sid_monad && n >= 3) return Q_DERIV_MONAD;  /* marker,base,val       */
     return Q_DERIV_NONE;
 }
 
 ray_t* q_deriv_base(const ray_t* v) {
     if (q_deriv_kind_of(v) == Q_DERIV_NONE) return NULL;
     return ((ray_t**)ray_data((ray_t*)v))[1];   /* borrowed */
-}
-
-q_adverb_t q_deriv_adverb(const ray_t* v) {
-    if (q_deriv_kind_of(v) != Q_DERIV_ADVERB) return (q_adverb_t)0;
-    ray_t* code = ((ray_t**)ray_data((ray_t*)v))[2];
-    return (q_adverb_t)(code && code->type == -RAY_I64 ? code->i64 : 0);
 }
 
 uint64_t q_deriv_hole_mask(const ray_t* v) {
@@ -133,7 +113,7 @@ uint64_t q_deriv_hole_mask(const ray_t* v) {
 int q_deriv_valence(const ray_t* v) {
     q_deriv_kind k = q_deriv_kind_of(v);
     if (k == Q_DERIV_NONE) return 0;
-    int idx = (k == Q_DERIV_PROJ) ? 3 : (k == Q_DERIV_ADVERB) ? 3 : 2;
+    int idx = (k == Q_DERIV_PROJ) ? 3 : 2;   /* PROJ: [.,.,mask,val]; MONAD: [.,.,val] */
     ray_t* ev = ((ray_t**)ray_data((ray_t*)v))[idx];
     return (int)(ev && ev->type == -RAY_I64 ? ev->i64 : 0);
 }

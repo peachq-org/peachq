@@ -48,7 +48,13 @@ typedef enum {
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
  * build recipes.  `*_target` is the rayfall env name (QK_ENV) or the canonical
  * lowering name for a wrapper (QK_EQ/NE/TAKE/DROP), or NULL when the kind is
- * QK_NONE. */
+ * QK_NONE.
+ *
+ * `adverb_hof` (adverb rows only) — the rayfall higher-order function the q
+ * adverb IS: `'`(each)->map, `/`(over)->fold, `\`(scan)->scan.  q adverbs are
+ * NOT bespoke objects; in 2b `+/` lowers to a projection of rayfall `fold` over
+ * `+`.  NULL for non-adverb rows, and for adverbs whose HOF mapping is deferred
+ * (each-right/left/prior `/: \: ':` — no clean rayfall equivalent yet). */
 typedef struct {
     const char*  name;
     q_lex_class  lex;
@@ -56,6 +62,7 @@ typedef struct {
     const char*  mon_target;
     q_build_kind dyad_kind;
     const char*  dyad_target;
+    const char*  adverb_hof;
 } q_op_t;
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
