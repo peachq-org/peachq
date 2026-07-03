@@ -415,9 +415,15 @@ static Tokens scan(const char *src) {
     int p = 0;
     int noun_pos = 0;
 
+/* NOTE: g_toks.t is updated IMMEDIATELY after the realloc — the token payload
+ * KK is evaluated as part of the following statement and may q_die (e.g. the
+ * deferred `0we` float-infinity literal); the longjmp handler must see the
+ * live buffer, not a stale/NULL pointer (leak, or free of a moved block).
+ * g_toks.n stays at the OLD count until the slot is actually stored. */
 #define EMIT(TK, KK) do { \
         if (n >= cap) { cap = cap ? cap * 2 : 32; toks = realloc(toks, (size_t)cap * sizeof(Token)); \
-                        if (!toks) q_die("out of memory"); } \
+                        if (!toks) q_die("out of memory"); /* g_toks still tracks the old block */ \
+                        g_toks.t = toks; } \
         toks[n++] = (Token){ .kind = (TK), .start = start, .len = p - start, .k = (KK) }; \
         g_toks.t = toks; g_toks.n = n; \
     } while (0)
