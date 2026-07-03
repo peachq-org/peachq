@@ -40,8 +40,14 @@
  *   Version 3 — atoms: type(1) + flags(1) + value-bytes.  `flags` bit 0
  *               carries the typed-null marker so (de (ser 0Nl)) round-
  *               trips (previously decoded as ray_i64(0) and dropped the
- *               null bit). */
-#define RAY_SERDE_WIRE_VERSION 3
+ *               null bit).
+ *   Version 4 — kdb type-tag renumber: the on-the-wire / on-disk (journal)
+ *               element-type byte now uses kdb's numbering (guid=2, byte=4,
+ *               ... time=19).  The LAYOUT is unchanged; only the type-byte
+ *               VALUES moved, so a v3 peer or v3 journal would mis-decode
+ *               every atom.  Bumped so the mismatch is detected and rejected
+ *               (handshake refuse / JREPLAY_BADTAIL) instead of mis-parsed. */
+#define RAY_SERDE_WIRE_VERSION 4
 
 /* Wire-only null marker (not a valid ray_t type) */
 #define RAY_SERDE_NULL 126

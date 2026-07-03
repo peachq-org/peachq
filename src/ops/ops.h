@@ -33,7 +33,7 @@ extern "C" {
 
 /* ===== Internal Type Constants ===== */
 
-#define RAY_SEL       14   /* selection bitmap (lazy filter) */
+#define RAY_SEL       20   /* selection bitmap (lazy filter); moved off kdb date=14 */
 
 /* Lazy DAG handle (atom-only; stored inline in aux region) */
 #define RAY_LAZY      104

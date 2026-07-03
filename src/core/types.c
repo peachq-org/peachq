@@ -23,24 +23,26 @@
 
 #include "core/types.h"
 
-/* Element sizes indexed by type tag.  Only types 0-14 (vectors) have
- * non-zero entries; remaining indices are zero (safe for non-vector types). */
+/* Element sizes indexed by type tag (kdb numbering).  Sparse designated
+ * initializers: the kdb 1..19 band has gaps 3,13,15-18 (unimplemented
+ * temporals month/datetime/timespan/minute/second) and RAY_SEL(20, variable
+ * layout) which all default to 0 — the correct "no fixed element size"
+ * answer, so they need no explicit entry. */
 const uint8_t ray_type_sizes[256] = {
-    /* [RAY_LIST]      =  0 */ 8,   /* pointer-sized (ray_t*) */
-    /* [RAY_BOOL]      =  1 */ 1,
-    /* [RAY_U8]        =  2 */ 1,
-    /* [RAY_I16]       =  3 */ 2,
-    /* [RAY_I32]       =  4 */ 4,
-    /* [RAY_I64]       =  5 */ 8,
-    /* [RAY_F32]       =  6 */ 4,
-    /* [RAY_F64]       =  7 */ 8,
-    /* [RAY_DATE]      =  8 */ 4,
-    /* [RAY_TIME]      =  9 */ 4,
-    /* [RAY_TIMESTAMP] = 10 */ 8,
-    /* [RAY_GUID]      = 11 */ 16,
-    /* [RAY_SYM]       = 12 */ 8,   /* W64 default; narrow widths use ray_sym_elem_size */
-    /* [RAY_STR]       = 13 */ 16,  /* sizeof(ray_str_t) */
-    /* [RAY_SEL]       = 14 */ 0,   /* variable-size layout, no elem_size */
+    [RAY_LIST]      = 8,   /* pointer-sized (ray_t*) */
+    [RAY_BOOL]      = 1,
+    [RAY_GUID]      = 16,
+    [RAY_U8]        = 1,
+    [RAY_I16]       = 2,
+    [RAY_I32]       = 4,
+    [RAY_I64]       = 8,
+    [RAY_F32]       = 4,
+    [RAY_F64]       = 8,
+    [RAY_STR]       = 16,  /* sizeof(ray_str_t) */
+    [RAY_SYM]       = 8,   /* W64 default; narrow widths use ray_sym_elem_size */
+    [RAY_TIMESTAMP] = 8,
+    [RAY_DATE]      = 4,
+    [RAY_TIME]      = 4,
 };
 
 /* ===== Semantic Version API ===== */
