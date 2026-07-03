@@ -210,6 +210,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err) {
         return;
     }
 
+    ast = q_resolve_verbs(ast);
     ray_t* r = ray_eval(ast);
     ray_release(ast);
     if (ray_is_lazy(r))
