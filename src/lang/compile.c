@@ -24,7 +24,7 @@
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "lang/nfo.h"
-#include "lang/head_desc.h"   /* ray_head_is_fn_value — ADR 0002 Option A */
+/* ray_head_is_fn_value — ADR 0002 Option A — now lives in lang/eval.h */
 #include <stdbool.h>
 #include <string.h>
 
