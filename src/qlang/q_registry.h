@@ -24,8 +24,22 @@
 #include <rayforce.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef enum { Q_MONADIC = 1, Q_DYADIC = 2 } q_valence_t;
+
+/* First-class q-surface provenance carried alongside each registry value.
+ * The value's rayfall aux-name is its LOWERING name (canonical rayfall verb,
+ * e.g. q `=` lowers as "=="); provenance records the ORIGINAL q spelling and
+ * valence so the 2b formatter can render the q glyph without depending on the
+ * (routing-purposed) aux-name.  `is_wrapper` distinguishes a bespoke
+ * q-semantics op from a pass-through/rename. */
+typedef struct {
+    const char* spelling;    /* q surface name, e.g. "=", "#", "%"        */
+    q_valence_t valence;     /* the valence this value serves             */
+    const char* lower_name;  /* canonical rayfall routing name, e.g. "==" */
+    int         is_wrapper;  /* 1 = bespoke q wrapper; 0 = pass-through    */
+} q_provenance_t;
 
 /* Build the table once, AFTER ray_lang_init has populated g_env.  Idempotent:
  * a second call while already initialised is a no-op returning RAY_OK.  Fails
@@ -45,6 +59,11 @@ ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence);
  * for any real verb.  A genuinely novel miss adds one sym-table entry, which
  * matches parser behaviour and is intentional. */
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);
+
+/* Recover the q-surface provenance of a registry value (by pointer identity).
+ * Returns true and fills *out on a hit; false if `value` is not a registry
+ * value.  Consumed by the 2b formatter to print the original q glyph. */
+bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
 
 /* Release every retained entry and reset.  Idempotent; also serves as
  * partial-cleanup on a failed init.  Must run before ray_env_destroy. */
