@@ -75,6 +75,11 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
  * partial-cleanup on a failed init.  Must run before ray_env_destroy. */
 void q_registry_destroy(void);
 
+/* The internal scan value (rayfall scan + collapse) q_lower embeds for the
+ * `\` adverb.  Borrowed; NULL before q_registry_init.  Not a roster row —
+ * it has no q spelling of its own. */
+ray_t* q_registry_scan_value(void);
+
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
  * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
  * are simple vectors, not general lists).  Mixed types, non-atom elements,
