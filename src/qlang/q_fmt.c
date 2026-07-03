@@ -61,6 +61,14 @@ static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
  * 'e' for f32 (nothing for f64).  Float infinities are out of scope. */
 static void q_float_tok(double v, int f32, char* out, size_t n) {
     if (isnan(v)) { snprintf(out, n, f32 ? "0Ne" : "0n"); return; }
+    /* Finite whole-number magnitude prints WITHOUT a fractional part (q shows
+     * `5`, not `5.0`); f32 keeps its per-element `e`.  The disambiguating `f`
+     * for f64 wholes is appended by the caller (atom) or once per vector. */
+    if (isfinite(v) && v == floor(v) && v >= -9.007199254740992e15
+                                     && v <=  9.007199254740992e15) {
+        snprintf(out, n, "%lld%s", (long long)v, f32 ? "e" : "");
+        return;
+    }
     ray_t* a = f32 ? ray_f32((float)v) : ray_f64(v);
     char mag[64]; mag[0] = '\0';
     ray_t* s = ray_fmt(a, 0);
@@ -106,7 +114,16 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', buf, bufsz);      return;
     case -RAY_I64:  q_int_tok(val->i64,          8, 0,   buf, bufsz);      return;
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
-    case -RAY_F64:  q_float_tok(val->f64,        0, buf, bufsz);           return;
+    case -RAY_F64: {
+        /* A whole f64 atom gets a trailing `f` to distinguish it from a long
+         * (`5f`, not `5`); a fractional one (`3.14`) needs no suffix. */
+        q_float_tok(val->f64, 0, buf, bufsz);
+        if (isfinite(val->f64) && val->f64 == floor(val->f64)) {
+            size_t l = strlen(buf);
+            if (l + 1 < bufsz) { buf[l] = 'f'; buf[l + 1] = '\0'; }
+        }
+        return;
+    }
     default: break;
     }
 
@@ -149,15 +166,24 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
      * per-element tokens still carry the suffix — revisit with the same
      * bare-element + one-trailing-char rule when float vectors are un-deferred. */
     if (val->type == RAY_F32 || val->type == RAY_F64) {
+        int is64 = (val->type == RAY_F64);
         int64_t n = ray_len(val);
         size_t pos = 0;
         buf[0] = '\0';
+        int all_whole = (n > 0);   /* f64 gets ONE trailing `f` iff every element is finite & whole */
         for (int64_t i = 0; i < n; i++) {
+            double v = is64 ? ((const double*)ray_data(val))[i]
+                            : (double)((const float*)ray_data(val))[i];
             char e[64];
-            if (val->type == RAY_F32) q_float_tok((double)((const float*)ray_data(val))[i], 1, e, sizeof e);
-            else                      q_float_tok(((const double*)ray_data(val))[i],        0, e, sizeof e);
+            q_float_tok(v, is64 ? 0 : 1, e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
+            if (!(isfinite(v) && v == floor(v))) all_whole = 0;
         }
+        /* f32 vectors already carry a per-element `e` (kdb records e.g.
+         * `0Ne 0We -0We 3.14e`); only f64 wholes take the single trailing `f`
+         * (`1 2 3f`).  A vector with any fractional or non-finite element
+         * (`0.5 1 1.5`, `0n 0w -0w 3.14`) gets no suffix. */
+        if (is64 && all_whole && pos + 1 < bufsz) { buf[pos++] = 'f'; buf[pos] = '\0'; }
         return;
     }
 
