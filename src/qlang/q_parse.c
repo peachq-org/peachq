@@ -21,6 +21,7 @@
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
+#include "qlang/q_deriv.h"    /* q_proj_new — 104h derived-verb carriers */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <assert.h>
 #include <stdio.h>
@@ -1019,6 +1020,37 @@ static void ql_adv_app(ray_t **slot) {
      * map-right/map-left roster rows). */
 }
 
+/* A bare (adv; V) 2-list in VALUE position (assigned, passed, displayed —
+ * NOT the head of an application, which ql_adv_app consumes) becomes a 104h
+ * projection carrier: the HOF with V bound and the data operand open,
+ * shielded from eval by rayfall `quote` (a special form returning its arg
+ * unevaluated).  `g:(+/)` binds the carrier; applying it through a name is
+ * 2c (needs the noun-head fallback). */
+static void ql_deriv_value(ray_t **slot) {
+    ray_t *node = *slot;
+    int64_t n = ray_len(node);
+    if (n != 2) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    int adv = ql_adv_id(e[0]);
+    if (adv < 0) return;
+    ray_t *hof = NULL;
+    if (adv == 1)      hof = ql_env_val("fold");
+    else if (adv == 2) hof = q_registry_scan_value();
+    else if (adv == 0) hof = q_registry_lookup_name("each", 4, Q_DYADIC);
+    if (!hof) return;                        /* ': /: \: stay deferred */
+    ray_t *quote = ql_env_val("quote");
+    if (!quote) return;
+    ray_t *args[2] = { e[1], NULL };         /* V bound, data operand open */
+    ray_t *carrier = q_proj_new(hof, args, 2, 0x2u, 1);
+    if (!carrier || RAY_IS_ERR(carrier)) { if (carrier) ray_release(carrier); return; }
+    ray_t *repl = ray_list_new(2);
+    repl = ray_list_append(repl, quote);
+    repl = ray_list_append(repl, carrier);
+    ray_release(carrier);
+    ray_release(node);
+    *slot = repl;
+}
+
 /* Assignment: rewrite `(:; name; val)` / `(::; name; val)` heads to rayfall
  * set — or let for a plain `:` INSIDE a lambda body (q locals; `::` stays the
  * global assign there, kdb-faithful) — enforcing the reserved-verb 'assign
@@ -1079,7 +1111,7 @@ static int ql_is_lambda(ray_t *node) {
 /* Depth-first rewriting walker.  Children first so nested applications
  * ((+/) each ...) lower inside-out; then the node itself.  Returns a
  * RAY_ERROR (owned) on an 'assign violation, else NULL. */
-static ray_t *q_lower_walk(ray_t **slot, int in_lambda) {
+static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ray_t *node = *slot;
     if (!node || node->type != RAY_LIST) return NULL;
     assert(node->rc == 1);                 /* sole-owner precondition */
@@ -1088,12 +1120,15 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda) {
     ray_t **e = (ray_t **)ray_data(node);
     for (int64_t i = 0; i < n; i++)
         if (e[i] && e[i]->type == RAY_LIST) {
-            ray_t *err = q_lower_walk(&e[i], lambda_body);
+            ray_t *err = q_lower_walk(&e[i], lambda_body, i == 0);
             if (err) return err;
         }
     ray_t *err = ql_assign(slot, in_lambda);
     if (err) return err;
     ql_adv_app(slot);
+    /* head position stays a raw (adv;V) 2-list — the PARENT's ql_adv_app
+     * consumes it; everywhere else a bare derived verb becomes a carrier. */
+    if (!is_head) ql_deriv_value(slot);
     return NULL;
 }
 
@@ -1104,7 +1139,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda) {
 ray_t *q_lower(ray_t *ast) {
     ast = q_resolve_verbs(ast);
     if (ast && ast->type == RAY_LIST) {
-        ray_t *err = q_lower_walk(&ast, 0);
+        ray_t *err = q_lower_walk(&ast, 0, 0);
         if (err) { ray_release(ast); return err; }
     }
     return ast;
