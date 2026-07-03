@@ -26,6 +26,7 @@
 
 #include <rayforce.h>
 #include <stdio.h>
+#include <string.h>
 #include "lang/nfo.h"
 
 /* ===== Function Attribute Flags (stored in attrs byte) ===== */
@@ -109,6 +110,22 @@ enum {
  */
 
 #define RAY_FN_COMPILED  0x40   /* lambda has been compiled to bytecode */
+
+/* openq: q-wrapper lowering marker — a TYPE-SCOPED alias of RAY_FN_COMPILED
+ * (0x40), matching the codebase's existing 0x20 dual-use (RAY_FN_RESTRICTED on
+ * fn values vs ATTR_QUOTED on -RAY_SYM atoms).  RAY_FN_COMPILED is set ONLY on
+ * RAY_LAMBDA objects; `ray_head_is_fn_value` (below) inspects ONLY
+ * RAY_UNARY/BINARY/VARY builtin values, where 0x40 is otherwise unused, so on
+ * those types the bit unambiguously means Q_LOWER.  No builtin registration
+ * sets 0x40.  Set on a q-registry-blessed wrapper (`= <> # _`) whose aux-name
+ * holds the CANONICAL rayfall verb it lowers to (`=`->"==", `<>`->"!=",
+ * `#`->"take", `_`->"drop") so the compiler / query DAG name-route it even
+ * though it is not env-identical.
+ * INVARIANT: only ever set on a value whose aux-name is a NON-INTRINSIC,
+ * non-special-form rayfall name (not set/let/if/do/fn/self/try/return/eval/
+ * resolve) — else head_named name-routing in compile_list would mis-lower it as
+ * that intrinsic.  The four wrapper targets (== != take drop) all satisfy this. */
+#define RAY_FN_Q_LOWER   0x40
 
 #define LAMBDA_PARAMS(lam)    (((ray_t**)ray_data(lam))[0])
 #define LAMBDA_BODY(lam)      (((ray_t**)ray_data(lam))[1])
@@ -321,5 +338,69 @@ ray_t* ray_fn(ray_t** args, int64_t n);
 ray_t* ray_raise_fn(ray_t* val);
 ray_t* ray_try_fn(ray_t* expr, ray_t* handler_expr);
 
+/* ── Call-head descriptor (ADR 0002 Option A) ──────────────────────────────
+ * openq commits to one object model: a q parse tree is a `ray_t` whose call
+ * heads are function VALUES (`parse "2+3"` -> `(+<fn>; 2; 3)`).  rayfall's
+ * compiler and query/DAG planner historically key on name-reference SYMBOL
+ * heads (`-RAY_SYM`), so a value head would miss special-form detection and
+ * `resolve_*_dag`.  This helper is the SINGLE place that recognises a
+ * function-value head and yields the two things the sym-keyed sites need: the
+ * head's interned NAME (so name/sym-id-keyed resolvers work unchanged) and the
+ * value itself.  A function object stores its name in `aux[2..15]`
+ * (`ray_fn_name`), read inline here so eval.h needs no env.h (which would be a
+ * circular include).  `ray_env_get` is declared in <rayforce.h>.
+ *
+ * True iff `head` is a function VALUE usable directly as a call head
+ * (RAY_UNARY / RAY_BINARY / RAY_VARY).  On a hit, fills `*out_fn` (may be NULL)
+ * with the value itself (a BORROWED alias — no retain) and returns true.
+ *
+ * `*out_sym` (may be NULL) receives a NAME id ONLY for semantic routing.  It is
+ * the value's interned aux-name id when the value IS the canonical env binding
+ * of that name (`ray_env_get == head`) OR it is a q-registry-blessed wrapper
+ * (RAY_FN_Q_LOWER set, not env-identical — authorised to route by its canonical
+ * lowering name); otherwise -1.  The -1 guard keeps a flag-less custom /
+ * look-alike fn (built with `ray_fn_*` merely SHARING a builtin's name) from
+ * being lowered as the like-named builtin — it must run its own code via the
+ * generic call / eval path (name-agnostic, always safe).
+ *
+ * Returns false for a symbol head, quoted literal, list, atom, or a bare lambda
+ * value (lambda heads carry no canonical aux name; handled by the generic apply
+ * path, not this fast head-check). */
+static inline bool ray_head_is_fn_value(ray_t* head, int64_t* out_sym,
+                                        ray_t** out_fn) {
+    if (!head) return false;
+    if (head->type == RAY_UNARY || head->type == RAY_BINARY ||
+        head->type == RAY_VARY) {
+        if (out_sym) {
+            const char* nm  = (const char*)head->aux + 2;  /* == ray_fn_name */
+            int64_t     sym = ray_sym_intern(nm, strlen(nm));
+            bool env_identical = (ray_env_get(sym) == head);
+            if (env_identical) {
+                /* the canonical builtin object — name-route as today. */
+                *out_sym = sym;
+            } else if (head->attrs & RAY_FN_Q_LOWER) {
+                /* An openq-blessed q wrapper: a value that is NOT the env
+                 * binding of its aux-name but explicitly opts into routing by
+                 * that canonical name (== != take drop), so it hits the same
+                 * DAG op / decline as the like-named builtin.  Its own impl
+                 * still runs when the value is CALLED (compile.c uses head_fn;
+                 * eval uses the fn pointer), so string `=` / arg-swap `#`
+                 * semantics survive.  Gating on `!env_identical` keeps the
+                 * blessing scoped to genuine wrappers: an accidental flag on a
+                 * real builtin would already route canonically above, and a
+                 * flag-less look-alike still falls through to the -1 guard. */
+                *out_sym = sym;
+            } else {
+                /* Canonical-identity guard: a flag-less non-canonical value
+                 * (custom / look-alike fn) must run its own code, not be
+                 * lowered as the like-named builtin. */
+                *out_sym = -1;
+            }
+        }
+        if (out_fn) *out_fn = head;
+        return true;
+    }
+    return false;
+}
 
 #endif /* RAY_EVAL_H */
