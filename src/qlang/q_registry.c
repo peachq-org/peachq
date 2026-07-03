@@ -156,6 +156,25 @@ ray_t* q_registry_scan_value(void) {
     return g_scan_value;   /* borrowed; NULL before init */
 }
 
+/* q paren-list literal `(1;2;3)` — build the list and collapse a homogeneous
+ * atom run to a simple vector (kdb collapses at construction).  The parser
+ * embeds this value at the head of every multi-element paren list, which is
+ * what DISAMBIGUATES a literal from the shape-identical bracket-index call
+ * (v;i) — the distinction only exists at parse time. */
+static ray_t* q_list_build(ray_t** args, int64_t n) {
+    ray_t* l = ray_list_fn(args, n);
+    if (!l || RAY_IS_ERR(l)) return l;
+    ray_t* c = q_collapse_list(l);
+    ray_release(l);
+    return c;
+}
+
+static ray_t* g_list_value = NULL;
+
+ray_t* q_registry_list_value(void) {
+    return g_list_value;   /* borrowed; NULL before init */
+}
+
 /* ---- collapse: homogeneous atom list -> typed vector (see q_registry.h) ---- */
 
 ray_t* q_collapse_list(ray_t* l) {
@@ -283,10 +302,15 @@ ray_err_t q_registry_init(void) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
-    /* internal (spelling-less) values consumed by q_lower */
+    /* internal (spelling-less) values consumed by q_lower / the parser */
     g_scan_value = ray_fn_vary("scan", RAY_FN_NONE | RAY_FN_Q_LOWER, q_scan_wrap);
     if (!g_scan_value || RAY_IS_ERR(g_scan_value)) {
         g_scan_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_list_value = ray_fn_vary("list", RAY_FN_NONE | RAY_FN_Q_LOWER, q_list_build);
+    if (!g_list_value || RAY_IS_ERR(g_list_value)) {
+        g_list_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
     g_building = false;
@@ -337,6 +361,7 @@ void q_registry_destroy(void) {
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
     if (g_scan_value) { ray_release(g_scan_value); g_scan_value = NULL; }
+    if (g_list_value) { ray_release(g_list_value); g_list_value = NULL; }
     g_count  = 0;
     g_inited = false;
 }
