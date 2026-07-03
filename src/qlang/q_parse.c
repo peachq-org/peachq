@@ -400,7 +400,11 @@ static Tokens scan(const char *src) {
         char c = src[p];
         uint8_t cl = CLASS[(uint8_t)c];
 
-        int neg_sign = (c == '-' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) && !noun_pos);
+        /* kdb sign rule: '-' adjacent to a digit is a SIGN when preceded by
+         * whitespace or start-of-input (`neg -1` applies neg to -1; `x -1`
+         * indexes x at -1); it is the verb only when glued to a noun (a-1). */
+        int neg_sign = (c == '-' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) &&
+                        (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
 
         if ((cl & CL_DIGIT) || neg_sign) {
             EMIT(T_NOUN, scan_num_literal(src, &p));
