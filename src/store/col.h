@@ -45,18 +45,24 @@ struct ray_sym_domain_s;
  * len-vs-filesize + SYM rc saved-count already validate file integrity;
  * this byte only gates the format generation.
  *
- * The CURRENT generation is 0, and this is deliberate.  `order` is
- * on-disk-free and was written 0 by every engine that produced today's
- * splayed layout, so declaring the shipped format generation 0 means all
- * existing on-disk data is read as-is — no migration, no orphaned databases.
- * (An earlier build briefly stamped 1, which rejected every pre-existing file
- * with a "version" error: see ray_col_check_format.  Generation 0 reclaims
- * that data.)  Generation 1 is intentionally SKIPPED because those stray
- * order==1 files carry the identical generation-0 layout; the next genuine
- * breaking layout change bumps MAJOR straight to 2, at which point
- * generation-0 files are correctly rejected and must be migrated rather than
- * silently mis-decoded. */
-#define RAY_COL_FORMAT_MAJOR    ((uint8_t)0)
+ * The CURRENT generation is 2.  The kdb type-tag renumber changed the meaning
+ * of the on-disk element-type byte (guid 11->2, byte 2->4, ... time 9->19), so
+ * generation-0/1 splayed data carries stale type numbers and MUST NOT be
+ * silently mis-decoded.  This is the first genuine breaking layout change, so
+ * MAJOR jumps straight to 2 (generation 1 was historically skipped: stray
+ * order==1 files carried the identical generation-0 layout).  Legacy
+ * generation-0 columns are now REJECTED with a "version" error via
+ * ray_col_check_format; they must be migrated (re-written) under the new
+ * numbering.  Automatic old->new migration is a deferred follow-up.
+ *
+ * SCOPE: this gate covers the 32-byte-header column format only.  The extended
+ * magic formats (STRV/STRL/LSTG/TTBL) are diverted before this check (see the
+ * magic dispatch in col.c) and carry no generation field; they persist raw
+ * type bytes too.  Old-STR extended files self-reject (old STR=13 is now a gap
+ * -> ray_de_raw error); same-elem-width numeric aliasing in old LSTG/TTBL data
+ * can still mis-decode.  Adding a generation field to the extended formats is
+ * a deferred follow-up (see the kdb-type-renumber plan / PR). */
+#define RAY_COL_FORMAT_MAJOR    ((uint8_t)2)
 
 /* Stamp the format generation into a 32-byte on-disk header's `order` byte.
  * Does NOT touch aux (reserved for postponed index persistence).  Writes the
