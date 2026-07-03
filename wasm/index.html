@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openq — q in your browser (WASM)</title>
+<style>
+  html,body{height:100%;margin:0;background:#1e2124;color:#e6e6e6;
+    font-family:'SF Mono','DejaVu Sans Mono',Menlo,Consolas,monospace;}
+  #wrap{display:flex;flex-direction:column;height:100%;max-width:900px;margin:0 auto;}
+  header{padding:10px 14px;border-bottom:1px solid #333;font-size:14px;color:#9fe89f;}
+  header code{color:#7fb3ff;}
+  #out{flex:1;overflow-y:auto;padding:12px 14px;white-space:pre-wrap;font-size:15px;line-height:1.4;}
+  .in{color:#7fb3ff;} .res{color:#e6e6e6;} .err{color:#ff8080;} .sys{color:#8a8a8a;}
+  #bar{display:flex;align-items:center;border-top:1px solid #333;padding:8px 14px;}
+  #prompt{color:#00da1a;font-weight:bold;margin-right:6px;}
+  #inp{flex:1;background:transparent;border:none;outline:none;color:#e6e6e6;
+    font:inherit;caret-color:#00da1a;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>openq WebAssembly REPL — type a q expression and press Enter
+    (e.g. <code>2+3</code>, <code>til 5</code>, <code>sum 1 2 3 4</code>)</header>
+  <div id="out"></div>
+  <div id="bar"><span id="prompt">q)</span><input id="inp" autofocus autocomplete="off" spellcheck="false"></div>
+</div>
+<script src="rayforce.js"></script>
+<script>
+  const out = document.getElementById('out');
+  const inp = document.getElementById('inp');
+  const hist = []; let hi = -1; let M = null;
+
+  function line(txt, cls){
+    const d = document.createElement('div');
+    d.className = cls; d.textContent = txt;
+    out.appendChild(d); out.scrollTop = out.scrollHeight;
+  }
+
+  // MODULARIZE=1: the module is a factory returning a Promise that resolves
+  // to the ready runtime. Build it in Makefile.wasm as createOpenQ.
+  line('loading openq…', 'sys');
+  createOpenQ().then(mod => {
+    M = mod;
+    M.ccall('q_wasm_init', 'number', [], []);
+    line('openq ready.', 'sys');
+    inp.focus();
+  }).catch(e => line('failed to load wasm: ' + e, 'err'));
+
+  function evalLine(src){
+    if(!M){ line('(still loading…)', 'err'); return; }
+    line('q)' + src, 'in');
+    const p = M.ccall('q_wasm_eval', 'number', ['string'], [src]);
+    const s = M.UTF8ToString(p);
+    M.ccall('q_wasm_free', null, ['number'], [p]);
+    if(s.startsWith('parse error') || s.startsWith('error:')) line(s, 'err');
+    else if(s.length) line(s, 'res');
+  }
+
+  inp.addEventListener('keydown', e => {
+    if(e.key === 'Enter'){
+      const v = inp.value.trim();
+      if(v){ hist.push(v); hi = hist.length; evalLine(v); }
+      inp.value = ''; e.preventDefault();
+    } else if(e.key === 'ArrowUp'){
+      if(hi > 0){ hi--; inp.value = hist[hi]; } e.preventDefault();
+    } else if(e.key === 'ArrowDown'){
+      if(hi < hist.length - 1){ hi++; inp.value = hist[hi]; }
+      else { hi = hist.length; inp.value = ''; }
+      e.preventDefault();
+    }
+  });
+</script>
+</body>
+</html>
