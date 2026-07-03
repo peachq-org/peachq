@@ -210,7 +210,14 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err) {
         return;
     }
 
+    int is_assign = q_ast_is_assign(ast);   /* pre-lower shape */
     ast = q_lower(ast);
+    if (RAY_IS_ERR(ast)) {
+        const char* code = (const char*)ast->sdata;
+        fprintf(err, "error: %s\n", (code && *code) ? code : "lower");
+        ray_release(ast);
+        return;
+    }
     ray_t* r = ray_eval(ast);
     ray_release(ast);
     if (ray_is_lazy(r))
@@ -221,7 +228,8 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err) {
         fprintf(err, "error: %s\n", (code && *code) ? code : "eval");
         return;
     }
-    if (!RAY_IS_NULL(r)) {
+    /* q console silence: a (last-statement) assignment prints nothing. */
+    if (!RAY_IS_NULL(r) && !is_assign) {
         char buf[8192];
         q_fmt(r, buf, sizeof buf);
         fputs(buf, out);
