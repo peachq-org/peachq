@@ -69,8 +69,12 @@
  * `compile_list` would mis-lower the wrapper as that intrinsic.  The four 2a
  * wrapper targets (== != take drop) all satisfy this.
  *
- * Bit 0x40 is the sole unused fn-attr bit (0x01/02/04/08/10/20/80 taken).
- * Defined here (openq-authored, non-frozen) rather than in eval.h so no
+ * BIT CHOICE (type-scoped, matching the codebase's existing 0x20 dual-use —
+ * RAY_FN_RESTRICTED on fn values vs ATTR_QUOTED on -RAY_SYM atoms): 0x40 is
+ * RAY_FN_COMPILED (eval.h) but that is set ONLY on RAY_LAMBDA objects, and this
+ * helper inspects ONLY RAY_UNARY/BINARY/VARY builtin values (never a lambda),
+ * so on those types 0x40 is unused and unambiguously means Q_LOWER.  No builtin
+ * registration sets 0x40.  Defined here (openq-authored, non-frozen) so no
  * frozen base file is touched. */
 #define RAY_FN_Q_LOWER 0x40
 
@@ -103,16 +107,27 @@ static inline bool ray_head_is_fn_value(ray_t* head, int64_t* out_sym,
         if (out_sym) {
             const char* nm  = ray_fn_name(head);
             int64_t     sym = ray_sym_intern(nm, strlen(nm));
-            if (head->attrs & RAY_FN_Q_LOWER) {
-                /* openq-blessed q wrapper: route by its canonical aux-name
-                 * (== != take drop) so it hits the same DAG op / decline as
-                 * the like-named builtin.  Its own impl still runs when the
-                 * value is CALLED (compile.c uses head_fn; eval uses the fn
-                 * pointer), so string `=` / arg-swap `#` semantics survive. */
+            bool env_identical = (ray_env_get(sym) == head);
+            if (env_identical) {
+                /* the canonical builtin object — name-route as today. */
+                *out_sym = sym;
+            } else if (head->attrs & RAY_FN_Q_LOWER) {
+                /* An openq-blessed q wrapper: a value that is NOT the env
+                 * binding of its aux-name but explicitly opts into routing by
+                 * that canonical name (== != take drop), so it hits the same
+                 * DAG op / decline as the like-named builtin.  Its own impl
+                 * still runs when the value is CALLED (compile.c uses head_fn;
+                 * eval uses the fn pointer), so string `=` / arg-swap `#`
+                 * semantics survive.  Gating on `!env_identical` keeps the
+                 * blessing scoped to genuine wrappers: an accidental flag on a
+                 * real builtin would already route canonically above, and a
+                 * flag-less look-alike still falls through to the -1 guard. */
                 *out_sym = sym;
             } else {
-                /* Canonical-identity guard: only name-route builtin objects. */
-                *out_sym = (ray_env_get(sym) == head) ? sym : -1;
+                /* Canonical-identity guard: a flag-less non-canonical value
+                 * (custom / look-alike fn) must run its own code, not be
+                 * lowered as the like-named builtin. */
+                *out_sym = -1;
             }
         }
         if (out_fn) *out_fn = head;
