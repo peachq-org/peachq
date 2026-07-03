@@ -60,16 +60,23 @@ static const q_op_t Q_OPS[] = {
     { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
+    /* q-implemented keywords: env bindings added by q_builtins_register
+     * (same mechanism as `parse`), snapshotted here as pass-through rows. */
+    { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
+    { "upper",   QLEX_KW_PREFIX, QK_ENV, "upper",    QK_NONE,  NULL,      NULL  },
+    { "lower",   QLEX_KW_PREFIX, QK_ENV, "lower",    QK_NONE,  NULL,      NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
-     * In 2b `+/` lowers to a projection of `fold` over `+`, etc.  each-right /
-     * each-left / each-prior (`/: \: ':`) have no clean rayfall HOF yet, so their
-     * mapping is DEFERRED (NULL) — still lexer-classified, not invented. ---- */
-    { "'",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map"  },
-    { "/",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "fold" },
-    { "\\",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "scan" },
-    { "':",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL   },  /* each-prior: deferred */
-    { "/:",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL   },  /* each-right: deferred */
-    { "\\:",   QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL   },  /* each-left:  deferred */
+     * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
+     * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
+     * q each-left, verified against examples/rfl).  Each-prior `':` still has
+     * no rayfall counterpart (the scan-* variants are fold-style, not
+     * pairwise) — DEFERRED, still lexer-classified. ---- */
+    { "'",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map"       },
+    { "/",     QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "fold"      },
+    { "\\",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "scan"      },
+    { "':",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      NULL        },  /* each-prior: deferred */
+    { "/:",    QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map-right" },
+    { "\\:",   QLEX_ADVERB,    QK_NONE, NULL,        QK_NONE,  NULL,      "map-left"  },
 };
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
 
