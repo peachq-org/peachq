@@ -54,6 +54,26 @@
 #include <string.h>
 #include <stdbool.h>
 
+/* ── openq: q-wrapper lowering marker (fn-attr flag) ───────────────────────
+ * Set on a q-registry-blessed wrapper function value (`= <> # _`, …) that is
+ * NOT the env binding of the name it lowers as.  A wrapper's aux-name holds
+ * the CANONICAL rayfall verb it lowers to (`=`→"==", `<>`→"!=", `#`→"take",
+ * `_`→"drop"); this flag authorises `ray_head_is_fn_value` to name-route it
+ * (so the query DAG maps `=`→`ray_eq` etc.) even though it is not
+ * env-identical, WITHOUT weakening the look-alike guard for an unflagged
+ * custom fn that merely shares a builtin's name.
+ *
+ * INVARIANT: `RAY_FN_Q_LOWER` may only be set on a value whose aux-name is a
+ * NON-INTRINSIC, non-special-form rayfall name (not set/let/if/do/fn/self/
+ * try/return/eval/resolve) — otherwise `head_named` name-routing in
+ * `compile_list` would mis-lower the wrapper as that intrinsic.  The four 2a
+ * wrapper targets (== != take drop) all satisfy this.
+ *
+ * Bit 0x40 is the sole unused fn-attr bit (0x01/02/04/08/10/20/80 taken).
+ * Defined here (openq-authored, non-frozen) rather than in eval.h so no
+ * frozen base file is touched. */
+#define RAY_FN_Q_LOWER 0x40
+
 /* True iff `head` is a function VALUE usable directly as a call head
  * (RAY_UNARY / RAY_BINARY / RAY_VARY).  On a hit, fills `*out_fn` (may be
  * NULL) with the value itself (a BORROWED alias of `head` — no retain) and
@@ -83,8 +103,17 @@ static inline bool ray_head_is_fn_value(ray_t* head, int64_t* out_sym,
         if (out_sym) {
             const char* nm  = ray_fn_name(head);
             int64_t     sym = ray_sym_intern(nm, strlen(nm));
-            /* Canonical-identity guard: only name-route builtin objects. */
-            *out_sym = (ray_env_get(sym) == head) ? sym : -1;
+            if (head->attrs & RAY_FN_Q_LOWER) {
+                /* openq-blessed q wrapper: route by its canonical aux-name
+                 * (== != take drop) so it hits the same DAG op / decline as
+                 * the like-named builtin.  Its own impl still runs when the
+                 * value is CALLED (compile.c uses head_fn; eval uses the fn
+                 * pointer), so string `=` / arg-swap `#` semantics survive. */
+                *out_sym = sym;
+            } else {
+                /* Canonical-identity guard: only name-route builtin objects. */
+                *out_sym = (ray_env_get(sym) == head) ? sym : -1;
+            }
         }
         if (out_fn) *out_fn = head;
         return true;
