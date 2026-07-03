@@ -17,6 +17,7 @@
 #include "lang/env.h"    /* ray_env_get, ray_fn_binary */
 #include "lang/eval.h"   /* builtin fn decls, RAY_FN_* */
 #include <string.h>
+#include <stdlib.h>
 
 /* A roster row: a q (name, valence) key and a builder that produces its owned
  * function VALUE (rc>=1).  A per-row builder (instead of a kind enum + switch)
@@ -35,6 +36,8 @@ struct spec_s {
 static ray_t* build_env(const spec_t* s);
 static ray_t* build_take(const spec_t* s);
 static ray_t* build_drop(const spec_t* s);
+static ray_t* build_eq(const spec_t* s);
+static ray_t* build_ne(const spec_t* s);
 
 static const spec_t SPECS[] = {
     /* identity-reuse (dyadic glyphs) */
@@ -44,6 +47,13 @@ static const spec_t SPECS[] = {
     /* rename-reuse */
     { "-",       Q_MONADIC, build_env,  "neg" },   /* q monadic minus = negate  */
     { "%",       Q_DYADIC,  build_env,  "/" },     /* q float-divide = rayfall / */
+    /* comparison renames — q `=`/`<>` map to rayfall `==`/`!=`.  The ordering
+     * glyphs `< > <= >=` and the `div` keyword are NOT listed: their q spelling
+     * equals the rayfall builtin name, so a registry miss falls through to the
+     * identically-named env binding.  Sources verified present in
+     * ray_register_builtins (eval.c); a missing one trips the init fail-fast. */
+    { "=",       Q_DYADIC,  build_eq,   NULL },    /* q equal      = rayfall == */
+    { "<>",      Q_DYADIC,  build_ne,   NULL },    /* q not-equal  = rayfall != */
     /* identity-reuse (monadic keywords) */
     { "neg",     Q_MONADIC, build_env,  "neg" },
     { "til",     Q_MONADIC, build_env,  "til" },
@@ -102,6 +112,41 @@ static ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     return r;
 }
 
+/* q char-string comparison — q treats a string as a char vector, so `=`/`<>`
+ * compare element-wise and yield a boolean vector (`"abc"="abd"` -> 110b).
+ * rayfall's `==`/`!=` (ray_eq_fn/ray_neq_fn) compare two -RAY_STR atoms as
+ * whole values (a single 0b/1b), so the q verbs wrap them: two equal-length
+ * string atoms take the element-wise path here, everything else (ints, floats,
+ * vectors, symbols, mismatched-length strings) delegates unchanged to the
+ * rayfall builtin.  Returns NULL to signal "not the string case, delegate". */
+static ray_t* q_str_cmp_vec(ray_t* a, ray_t* b, int eq) {
+    if (!a || !b || a->type != -RAY_STR || b->type != -RAY_STR) return NULL;
+    const char* pa = ray_str_ptr(a); size_t la = ray_str_len(a);
+    const char* pb = ray_str_ptr(b); size_t lb = ray_str_len(b);
+    if (la != lb) return NULL;                 /* length mismatch -> delegate */
+    uint8_t stack[128];
+    uint8_t* bits = (la <= sizeof stack) ? stack : (uint8_t*)malloc(la ? la : 1);
+    if (!bits) return ray_error("wsfull", "=: out of memory");
+    for (size_t i = 0; i < la; i++)
+        bits[i] = (uint8_t)(eq ? (pa[i] == pb[i]) : (pa[i] != pb[i]));
+    ray_t* r = ray_vec_from_raw(RAY_BOOL, bits, (int64_t)la);
+    if (bits != stack) free(bits);
+    return r;
+}
+
+/* q `=` — element-wise over char strings, else rayfall `==`.  RAY_FN_ATOMIC so
+ * eval broadcasts it over numeric vectors (each element pair hits ray_eq_fn). */
+static ray_t* q_eq_wrap(ray_t* a, ray_t* b) {
+    ray_t* r = q_str_cmp_vec(a, b, 1);
+    return r ? r : ray_eq_fn(a, b);
+}
+
+/* q `<>` — element-wise over char strings, else rayfall `!=`. */
+static ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
+    ray_t* r = q_str_cmp_vec(a, b, 0);
+    return r ? r : ray_neq_fn(a, b);
+}
+
 /* ---- builders ---- */
 
 /* Identity/rename-reuse: snapshot an existing rayfall builtin value by name and
@@ -118,6 +163,12 @@ static ray_t* build_take(const spec_t* s) {
 }
 static ray_t* build_drop(const spec_t* s) {
     return ray_fn_binary(s->q_name, RAY_FN_NONE, q_drop_wrap);   /* born rc=1 */
+}
+static ray_t* build_eq(const spec_t* s) {
+    return ray_fn_binary(s->q_name, RAY_FN_ATOMIC, q_eq_wrap);   /* born rc=1 */
+}
+static ray_t* build_ne(const spec_t* s) {
+    return ray_fn_binary(s->q_name, RAY_FN_ATOMIC, q_ne_wrap);   /* born rc=1 */
 }
 
 /* ---- API ---- */
