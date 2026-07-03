@@ -78,6 +78,13 @@ static ray_t *q_symlit(const char *s, int len) {
     return x;
 }
 
+/* Append one interned symbol id into a RAY_SYM vector (W64 index width: no
+ * public width-picker, and correctness beats compactness for literals). */
+static ray_t *q_symvec_append(ray_t *vec, const char *s, int len) {
+    int64_t id = ray_sym_intern_runtime(s, (size_t)len);
+    return ray_vec_append(vec, &id);
+}
+
 /* Build a ray list from n owned children, releasing each after append
  * (append retains).  Children must be non-NULL. */
 static ray_t *q_list(ray_t **xs, int n) {
@@ -391,19 +398,34 @@ static Tokens scan(const char *src) {
             noun_pos = 1;
         }
         else if (c == '`') {
-            /* One or more `name — a single one is a sym-literal atom; more
-             * than one is left as a sym-literal atom of the first for the MVP
-             * (multi-sym vectors are out of the tested subset). */
-            ray_t *k = NULL;
+            /* A run of one-or-more `name symbols.  count == 1 -> the existing
+             * -RAY_SYM literal atom (kdb -11h).  count > 1 -> a RAY_SYM vector
+             * (kdb 11h), literal self-evaluating data (a vector is not a
+             * RAY_LIST, so ray_eval returns it as a value; no ATTR_QUOTED
+             * needed — that flag is only for -RAY_SYM name-refs).  The null
+             * symbol ` is a zero-length name and is preserved (interned ""). */
+            ray_t *first = NULL;   /* the sole atom when count == 1 */
+            ray_t *vec   = NULL;   /* the vector once count >= 2 */
             int count = 0;
             while (src[p] == '`') {
                 p++;
                 int s = p;
                 while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) || src[p] == '.') p++;
-                if (count == 0) k = q_symlit(src + s, p - s);
+                if (count == 0) {
+                    first = q_symlit(src + s, p - s);
+                } else if (count == 1) {
+                    vec = ray_sym_vec_new(RAY_SYM_W64, 4);
+                    ray_t *fs = ray_sym_str(first->i64);
+                    vec = q_symvec_append(vec, ray_str_ptr(fs), (int)ray_str_len(fs));
+                    ray_release(fs);
+                    ray_release(first); first = NULL;
+                    vec = q_symvec_append(vec, src + s, p - s);
+                } else {
+                    vec = q_symvec_append(vec, src + s, p - s);
+                }
                 count++;
             }
-            EMIT(T_NOUN, k);
+            EMIT(T_NOUN, count > 1 ? vec : first);
             noun_pos = 1;
         }
         else if (cl & CL_VERB) {
