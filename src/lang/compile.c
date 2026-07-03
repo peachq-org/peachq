@@ -24,6 +24,7 @@
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "lang/nfo.h"
+#include "lang/head_desc.h"   /* ray_head_is_fn_value — ADR 0002 Option A */
 #include <stdbool.h>
 #include <string.h>
 
@@ -429,8 +430,21 @@ static void compile_list(compiler_t *c, ray_t *ast) {
 
     /* Look up head at compile time to determine call type */
     ray_t *fn = NULL;
-    if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED))
+    if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED)) {
         fn = ray_env_get(head->i64);
+    } else {
+        /* ADR 0002 Option A: a function-VALUE head is first-class.  Bind it as
+         * the resolved fn (borrowed alias of head, like ray_env_get) so the
+         * shared path below emits the specialized OP_CALL1/2/N — and, for a
+         * special-form value (RAY_FN_SPECIAL_FORM), the dynamic OP_CALLD which
+         * receives unevaluated args — instead of the generic OP_CALLF a bare
+         * value head would otherwise take.  Only reachable for a value head
+         * (existing rayfall trees carry symbol heads), so symbol-headed
+         * compilation is unchanged.  `fn` is never released in compile_list;
+         * add_constant retains it. */
+        ray_t *hval;
+        if (ray_head_is_fn_value(head, NULL, &hval)) fn = hval;
+    }
 
     /* Unrecognized special form: dynamic eval on the entire form.  The
      * special form re-evaluates its argument ASTs via the tree walker,
