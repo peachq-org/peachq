@@ -259,9 +259,28 @@ static void compile_list(compiler_t *c, ray_t *ast) {
 
     init_sf_syms();
 
-    /* Check for special forms by name (name ref = unflagged default) */
+    /* Head descriptor (ADR 0002 Option A) — unify a name-reference SYMBOL head
+     * and a function-VALUE head into one {name-id, value} shape so every
+     * symbol-keyed dispatch below (inline special forms, self-call, fn resolve)
+     * treats a value head exactly like the symbol it names.  `head_named` is
+     * true for both; `head_sym` is the interned name (head->i64 for a sym,
+     * intern(aux-name) for a value); `head_fn` is the value itself (else NULL).
+     * A value head thus gets the SAME OP_RET / inline-special-form lowering a
+     * symbol head would — e.g. a value-headed `return` early-exits via OP_RET
+     * rather than being mis-lowered to a plain call. */
+    int64_t head_sym  = -1;
+    ray_t  *head_fn   = NULL;
+    bool    head_named = false;
     if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED)) {
-        int64_t sym_id = head->i64;
+        head_sym = head->i64;
+        head_named = true;
+    } else if (ray_head_is_fn_value(head, &head_sym, &head_fn)) {
+        head_named = true;
+    }
+
+    /* Check for special forms by name (name ref = unflagged default) */
+    if (head_named) {
+        int64_t sym_id = head_sym;
 
         /* (set name value) — bind in the global env.  Compile the value
          * expression (so parameter/local slot references resolve in the
@@ -417,8 +436,7 @@ static void compile_list(compiler_t *c, ray_t *ast) {
     }
 
     /* Self-recursive call: emit OP_CALLS (lean frame reuse, no fn object) */
-    if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED) &&
-        head->i64 == sf_self) {
+    if (head_named && head_sym == sf_self) {
         int64_t argc = n - 1;
         if (argc > 64) { c->error = true; return; }
         for (int64_t i = 1; i < n; i++)
@@ -428,23 +446,16 @@ static void compile_list(compiler_t *c, ray_t *ast) {
         return;
     }
 
-    /* Look up head at compile time to determine call type */
-    ray_t *fn = NULL;
-    if (head->type == -RAY_SYM && !(head->attrs & ATTR_QUOTED)) {
-        fn = ray_env_get(head->i64);
-    } else {
-        /* ADR 0002 Option A: a function-VALUE head is first-class.  Bind it as
-         * the resolved fn (borrowed alias of head, like ray_env_get) so the
-         * shared path below emits the specialized OP_CALL1/2/N — and, for a
-         * special-form value (RAY_FN_SPECIAL_FORM), the dynamic OP_CALLD which
-         * receives unevaluated args — instead of the generic OP_CALLF a bare
-         * value head would otherwise take.  Only reachable for a value head
-         * (existing rayfall trees carry symbol heads), so symbol-headed
-         * compilation is unchanged.  `fn` is never released in compile_list;
-         * add_constant retains it. */
-        ray_t *hval;
-        if (ray_head_is_fn_value(head, NULL, &hval)) fn = hval;
-    }
+    /* Look up head at compile time to determine call type.  For a symbol head
+     * this resolves through the env (borrowed ref); for a function-VALUE head
+     * the value IS the resolved fn (borrowed alias of head).  Binding `fn`
+     * uniformly makes the shared path below emit the specialized
+     * OP_CALL1/2/N — and, for a RAY_FN_SPECIAL_FORM value, the dynamic
+     * OP_CALLD which receives unevaluated args — instead of the generic
+     * OP_CALLF a bare value head would otherwise take.  Symbol-headed
+     * compilation is byte-for-byte unchanged (head_fn is NULL for a sym).
+     * `fn` is never released in compile_list; add_constant retains it. */
+    ray_t *fn = head_fn ? head_fn : (head_named ? ray_env_get(head_sym) : NULL);
 
     /* Unrecognized special form: dynamic eval on the entire form.  The
      * special form re-evaluates its argument ASTs via the tree walker,

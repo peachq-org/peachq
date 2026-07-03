@@ -1035,12 +1035,18 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             fn_sym = head->i64;
         } else if (ray_head_is_fn_value(head, &fn_sym, &fn_val)) {
             /* Piece-1 scope: decline value-headed AGGREGATES.  The has_agg
-             * classifiers (is_agg_expr &c.) still key on symbol heads, so
-             * admitting a value-headed agg here would take the projection/
-             * broadcast path instead of a 1-row reduction (WRONG result).
-             * Return NULL so it falls back to eval exactly as it does today
-             * (today every value head returns NULL at this gate).  Wiring the
-             * classifiers for value heads is piece 2's job (registry emit). */
+             * classifiers that pick the reduction-vs-projection plan
+             * (is_agg_expr &c., query.c:1544+) still key on SYMBOL heads, so a
+             * value-headed agg would be mis-split as a projection.  Returning
+             * NULL here is exactly the PRE-CHANGE behavior for a value head
+             * (before Option A every value head hit `head->type != -RAY_SYM →
+             * return NULL` at this gate), so this introduces no new path and no
+             * regression — it simply keeps value-headed aggregates on the same
+             * eval fallback they already had.  Making the classifier family
+             * value-aware (so value-headed aggs reduce correctly) is piece 2's
+             * job — it owns the parser-emit side and can validate the full
+             * reduction path.  Only value-headed SCALAR binary/unary ops are
+             * admitted to the DAG in this piece. */
             if (resolve_agg_opcode(fn_sym) != 0) return NULL;
         } else {
             return NULL;
