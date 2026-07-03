@@ -807,10 +807,151 @@ ray_t *q_resolve_verbs(ray_t *ast) {
     return ast;
 }
 
-/* q-lower entrypoint — see q_parse.h.  STAGE 2a: a behaviour-preserving shim
- * over q_resolve_verbs so every eval path (qdoc, q_repl) funnels through one
- * seam.  2b replaces the body with the full lowering pass (value-heads-at-parse
- * carriers, monomorphization) and retires q_resolve_verbs. */
+/* ===== q-lower: the ADR 0003 lowering pass =================================
+ * Beyond the dyadic-head resolution above, the lowering walker rewrites the
+ * q-only tree shapes rayfall eval cannot run into pure rayfall applications:
+ *
+ *   ((`/;F); x)     -> (fold; F'; x)          q over        f/x
+ *   ((`/;F); x; y)  -> (fold; F'; x; y)       q seeded over x f/ y
+ *   ((`\;F); x)     -> (q-scan; F'; x)        q scan        f\x   (+collapse)
+ *   ((`';F); x)     -> (q-each; F'; x)        q each        f'x   (+collapse)
+ *   (|/)x, (&/)x    -> (max; x), (min; x)     aggregate monomorphization —
+ *                      rayfall has no dyadic max/min value to fold with.
+ *
+ * F' is the q-semantic DYADIC value for a glyph operand (q `%` folds with
+ * float-divide, not modulo), the untouched subtree for user names / lambdas
+ * (eval resolves those), and the value itself once the parser embeds values.
+ * A glyph operand with no dyadic row and no aggregate mapping leaves the node
+ * untouched — eval then errors exactly as it does today.  In-place rewrite
+ * under the same rc==1 sole-owner precondition as q_resolve_verbs. */
+
+static ray_t *ql_env_val(const char *nm) {
+    return ray_env_get(ray_sym_intern_runtime(nm, strlen(nm)));
+}
+
+/* ADVERB_NAMES index of a name-ref sym (0=' 1=/ 2=\ 3=': 4=/: 5=\:), or -1. */
+static int ql_adv_id(ray_t *x) {
+    if (!x || x->type != -RAY_SYM || (x->attrs & Q_ATTR_QUOTED)) return -1;
+    ray_t *s = ray_sym_str(x->i64);
+    if (!s) return -1;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int r = -1;
+    for (int i = 0; i < 6 && r < 0; i++)
+        if (strlen(ADVERB_NAMES[i]) == l && memcmp(ADVERB_NAMES[i], nm, l) == 0)
+            r = i;
+    ray_release(s);
+    return r;
+}
+
+/* Rebuild *slot as (hof; fexpr; old-args...).  Borrows hof/fexpr (append
+ * retains); releases the old node. */
+static void ql_rewrite(ray_t **slot, ray_t *hof, ray_t *fexpr) {
+    ray_t *node = *slot;
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *repl = ray_list_new(n + 1);
+    repl = ray_list_append(repl, hof);
+    repl = ray_list_append(repl, fexpr);
+    for (int64_t i = 1; i < n; i++) {
+        if (e[i]) { repl = ray_list_append(repl, e[i]); }
+        else      { ray_t *nul = q_null(); repl = ray_list_append(repl, nul); ray_release(nul); }
+    }
+    ray_release(node);
+    *slot = repl;
+}
+
+/* Try the adverb-application rewrite on *slot (see the table above). */
+static void ql_adv_app(ray_t **slot) {
+    ray_t *node = *slot;
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    if (!(n == 2 || n == 3)) return;
+    if (!e[0] || e[0]->type != RAY_LIST || ray_len(e[0]) != 2) return;
+    ray_t **h = (ray_t **)ray_data(e[0]);
+    int adv = ql_adv_id(h[0]);
+    if (adv < 0) return;
+    ray_t *F = h[1];
+
+    int f_is_value = F && (F->type == RAY_UNARY || F->type == RAY_BINARY ||
+                           F->type == RAY_VARY);
+    int f_is_name  = F && F->type == -RAY_SYM && !(F->attrs & Q_ATTR_QUOTED);
+    int f_is_glyph = 0;
+    ray_t *freg = NULL;                    /* registry dyadic value (borrowed) */
+    if (f_is_name) {
+        ray_t *s = ray_sym_str(F->i64);
+        if (!s) return;
+        const char *nm = ray_str_ptr(s);
+        size_t l = ray_str_len(s);
+        f_is_glyph = (l >= 1 && strchr(VERB_CHARS, nm[0]) != NULL);
+        freg = q_registry_lookup_name(nm, l, Q_DYADIC);
+        ray_release(s);
+    }
+
+    /* the operand expression the HOF receives */
+    ray_t *fexpr = NULL;
+    if (f_is_value)                 fexpr = F;     /* post-flip embedded value */
+    else if (freg)                  fexpr = freg;  /* q-semantic dyadic value  */
+    else if (f_is_name && !f_is_glyph) fexpr = F;  /* user name: eval resolves */
+    else if (F && F->type == RAY_LIST) fexpr = F;  /* lambda / nested derived  */
+
+    if (adv == 1) {                                       /* `/` over */
+        if (!fexpr) {
+            /* aggregate monomorphization: no dyadic |/& value exists, but
+             * (|/)x IS max x and (&/)x IS min x. */
+            if (n == 2 && f_is_name && f_is_glyph) {
+                ray_t *s = ray_sym_str(F->i64);
+                ray_t *agg = NULL;
+                if (s && ray_str_len(s) == 1) {
+                    char g = ray_str_ptr(s)[0];
+                    if (g == '|') agg = ql_env_val("max");
+                    if (g == '&') agg = ql_env_val("min");
+                }
+                if (s) ray_release(s);
+                if (agg) {
+                    ray_t *repl = ray_list_new(2);
+                    repl = ray_list_append(repl, agg);
+                    if (e[1]) { repl = ray_list_append(repl, e[1]); }
+                    else      { ray_t *nul = q_null(); repl = ray_list_append(repl, nul); ray_release(nul); }
+                    ray_release(node);
+                    *slot = repl;
+                }
+            }
+            return;
+        }
+        ray_t *fold = ql_env_val("fold");
+        if (fold) ql_rewrite(slot, fold, fexpr);
+    } else if (adv == 2 && n == 2) {                      /* `\` scan (unseeded) */
+        if (!fexpr) return;
+        ray_t *sc = q_registry_scan_value();
+        if (sc) ql_rewrite(slot, sc, fexpr);
+    } else if (adv == 0 && n == 2) {                      /* `'` each (monadic) */
+        if (!fexpr) return;
+        ray_t *ea = q_registry_lookup_name("each", 4, Q_DYADIC);
+        if (ea) ql_rewrite(slot, ea, fexpr);
+    }
+    /* ': /: \: — deferred (each-prior; each-right/left arrive with the
+     * map-right/map-left roster rows). */
+}
+
+/* Depth-first rewriting walker.  Children first so nested applications
+ * ((+/) each ...) lower inside-out; then the node itself. */
+static void q_lower_walk(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST) return;
+    assert(node->rc == 1);                 /* sole-owner precondition */
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    for (int64_t i = 0; i < n; i++)
+        if (e[i] && e[i]->type == RAY_LIST) q_lower_walk(&e[i]);
+    ql_adv_app(slot);
+}
+
+/* q-lower entrypoint — see q_parse.h.  Dyadic-head resolution (the 2a shim
+ * behaviour) plus the lowering walker above.  2b's parser flip moves the head
+ * resolution into q_parse and retires q_resolve_verbs. */
 ray_t *q_lower(ray_t *ast) {
-    return q_resolve_verbs(ast);
+    ast = q_resolve_verbs(ast);
+    if (ast && ast->type == RAY_LIST) q_lower_walk(&ast);
+    return ast;
 }
