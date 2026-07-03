@@ -50,7 +50,18 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
         return;
     }
 
+    int is_assign = q_ast_is_assign(ast);   /* pre-lower shape */
     ast = q_lower(ast);
+    if (RAY_IS_ERR(ast)) {
+        char ne[QD_OUT];
+        normalize(expect, ne, sizeof ne);
+        ray_release(ast);
+        r->failed++;
+        if (verbose)
+            fprintf(out, "  q)%.200s\n    FAIL(lower) got \"<error>\" want \"%.200s\"\n",
+                    input, ne);
+        return;
+    }
     ray_t* res = ray_eval(ast);
     ray_release(ast);
     if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
@@ -71,7 +82,8 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
 
     char got[QD_OUT];
     got[0] = '\0';
-    if (!RAY_IS_NULL(res)) q_fmt(res, got, sizeof got);
+    /* q console silence: a (last-statement) assignment prints nothing. */
+    if (!RAY_IS_NULL(res) && !is_assign) q_fmt(res, got, sizeof got);
     ray_release(res);
 
     char ng[QD_OUT], ne[QD_OUT];

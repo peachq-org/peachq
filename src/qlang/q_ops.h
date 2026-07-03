@@ -42,7 +42,8 @@ typedef enum {
     QK_EQ,              /* q `=`  wrapper (element-wise char-str eq, else ==)    */
     QK_NE,              /* q `<>` wrapper (element-wise char-str neq, else !=)   */
     QK_TAKE,            /* q `#`  wrapper (arg-swap take)                        */
-    QK_DROP             /* q `_`  wrapper (count-drop via range-take)            */
+    QK_DROP,            /* q `_`  wrapper (count-drop via range-take)            */
+    QK_EACH             /* q `each` wrapper (rayfall map + vector collapse)      */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
@@ -72,5 +73,9 @@ const q_op_t* q_ops_table(int* n);
  * row).  Replaces the hardcoded memcmp("div") in the scanner.  Static-only: no
  * runtime registry dependency. */
 int q_lex_is_kw_infix(const char* s, int len);
+
+/* True iff s[0..len) is a RESERVED q verb name (any manifest row).  q reserves
+ * its primitives — `div:5` raises 'assign (ADR 0003 Decision 1).  Static-only. */
+int q_ops_is_reserved(const char* s, int len);
 
 #endif /* Q_OPS_H */

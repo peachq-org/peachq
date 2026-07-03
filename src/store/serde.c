@@ -44,6 +44,24 @@
 #include <string.h>
 #include <stdio.h>
 
+/* openq fn-serde hooks — see serde.h.  NULL = historic env-name behaviour. */
+static ray_serde_fn_writer_t g_fn_writer = NULL;
+static ray_serde_fn_reader_t g_fn_reader = NULL;
+
+void ray_serde_set_fn_hooks(ray_serde_fn_writer_t writer,
+                            ray_serde_fn_reader_t reader) {
+    g_fn_writer = writer;
+    g_fn_reader = reader;
+}
+
+/* The wire name for a builtin fn: the hook's claim when it makes one, else
+ * the aux-name.  `scratch` must be char[16]; the returned pointer is either
+ * `scratch` or the fn's own aux storage. */
+static const char* fn_wire_name(ray_t* obj, char scratch[16]) {
+    if (g_fn_writer && g_fn_writer(obj, scratch)) return scratch;
+    return ray_fn_name(obj);
+}
+
 /* --------------------------------------------------------------------------
  * Wire format:
  *
@@ -218,8 +236,9 @@ int64_t ray_serde_size(ray_t* obj) {
     case RAY_UNARY:
     case RAY_BINARY:
     case RAY_VARY: {
-        /* Serialize by name (null-terminated string in aux) */
-        const char* name = ray_fn_name(obj);
+        /* Serialize by name (aux, or an installed writer hook's claim) */
+        char scratch[16];
+        const char* name = fn_wire_name(obj, scratch);
         size_t nlen = strlen(name); if (nlen > 15) nlen = 15;
         return 1 + (int64_t)nlen + 1; /* type + name + null terminator */
     }
@@ -464,8 +483,9 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
     case RAY_UNARY:
     case RAY_BINARY:
     case RAY_VARY: {
-        /* Serialize builtin by name (null-terminated) */
-        const char* name = ray_fn_name(obj);
+        /* Serialize builtin by name (aux, or a writer hook's claim) */
+        char scratch[16];
+        const char* name = fn_wire_name(obj, scratch);
         size_t nlen = strlen(name); if (nlen > 15) nlen = 15;
         memcpy(buf, name, nlen);
         buf[nlen] = 0;
@@ -861,10 +881,18 @@ static ray_t* de_raw_inner(uint8_t* buf, int64_t* len) {
     case RAY_UNARY:
     case RAY_BINARY:
     case RAY_VARY: {
-        /* Deserialize builtin by name: read null-terminated string,
-         * look up in the global environment. */
+        /* Deserialize builtin by name: read null-terminated string, offer it
+         * to the reader hook first (language-layer fn values), then look up
+         * in the global environment. */
         size_t nlen = safe_strlen(buf, *len);
         if ((int64_t)nlen >= *len) return ray_error("domain", "deserialize builtin: unterminated name, no NUL within %lld bytes", (long long)*len);
+        if (g_fn_reader) {
+            ray_t* hooked = g_fn_reader((const char*)buf);
+            if (hooked) {
+                *len -= (int64_t)nlen + 1;
+                return hooked;   /* owned by contract */
+            }
+        }
         int64_t sym = ray_sym_intern((const char*)buf, nlen);
         ray_t* fn = ray_env_get(sym);
         if (!fn) return ray_error("name", "deserialize builtin: '%s' not in global environment", (const char*)buf);
