@@ -410,7 +410,10 @@ static Tokens scan(const char *src) {
             EMIT(T_NOUN, scan_num_literal(src, &p));
             noun_pos = 1;
         }
-        else if (cl & CL_ALPHA) {
+        /* q names cannot START with '_' (leading '_' is the drop/cut verb);
+         * interior '_' stays a name byte (a_b) via the CL_ALPHA continuation
+         * loops below, so only the token-start byte is excluded here. */
+        else if ((cl & CL_ALPHA) && c != '_') {
             while (CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) p++;
             while (src[p] == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA)) {
                 p++;
