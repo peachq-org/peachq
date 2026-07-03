@@ -1034,6 +1034,13 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (head->type == -RAY_SYM) {
             fn_sym = head->i64;
         } else if (ray_head_is_fn_value(head, &fn_sym, &fn_val)) {
+            /* Only a CANONICAL builtin value head (fn_sym >= 0) may be mapped
+             * onto a builtin DAG operator by name — a custom/look-alike fn
+             * value (fn_sym == -1, e.g. a wrapper like q `=`/`<>` or an
+             * extension fn named like a builtin) must run its own code, so
+             * decline it to the eval fallback rather than lower it as the
+             * like-named DAG op. */
+            if (fn_sym < 0) return NULL;
             /* Piece-1 scope: decline value-headed AGGREGATES.  The has_agg
              * classifiers that pick the reduction-vs-projection plan
              * (is_agg_expr &c., query.c:1544+) still key on SYMBOL heads, so a
