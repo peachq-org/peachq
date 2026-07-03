@@ -48,6 +48,11 @@ typedef struct {
  * miss is a bug, not a soft skip. */
 ray_err_t q_registry_init(void);
 
+/* True once q_registry_init has completed.  The PARSER embeds registry values
+ * at verb heads, so q_parse fails fast when this is false (codex #1: value
+ * embedding must never run against a cold registry). */
+bool q_registry_ready(void);
+
 /* Borrowed ref, or NULL on miss.  A miss is NOT an error — it means "not a
  * registry verb at this valence," and the caller keeps the token a
  * name-reference (ADR 0002's unknown->name-ref rule). */
