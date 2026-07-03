@@ -66,7 +66,7 @@ static ray_t *q_verb(char c) {
 }
 
 /* verb by name (multi-char glyph like "<=", "<>", or keyword like "div"):
- * a name-ref sym, ATTR_QUOTED clear, resolved at eval / by q_resolve_verbs. */
+ * a name-ref sym, ATTR_QUOTED clear; the parser embeds its registry value. */
 static ray_t *q_verb_name(const char *s, int len) {
     return ray_sym(ray_sym_intern_runtime(s, (size_t)len));
 }
@@ -863,34 +863,28 @@ ray_t *q_parse(const char *src) {
  * miss (`:`, `;`, `{`, user names, `f[...]` apply, monadic shapes, and the
  * ordering glyphs `< > <= >=` / `div` whose q spelling already matches the
  * rayfall name) leaves the head untouched — eval then resolves it against
- * rayfall's env exactly as before.  Precondition: `ast` is the uniquely-owned
- * (rc==1) tree fresh from q_parse — the only thing that ever reaches here (the
- * `parse` builtin returns its AST without calling this).  Every node built by
- * q_parse ends at rc==1 (append retains, the local ref is released), so the
- * in-place slot rewrite mutates memory no one else observes; the assert makes
- * that precondition explicit and trips loudly under the asan/debug test build
- * on any future shared-AST misuse.  Recurses into nested lists so inner calls
- * (e.g. the `(+;3;4)` in `2*3+4`) resolve too. */
-ray_t *q_resolve_verbs(ray_t *ast) {
-    if (!ast || ast->type != RAY_LIST) return ast;
-    assert(ast->rc == 1);                  /* sole-owner precondition (see above) */
-    int64_t n = ray_len(ast);
-    ray_t **e = (ray_t **)ray_data(ast);
-    for (int64_t i = 0; i < n; i++)
-        if (e[i] && e[i]->type == RAY_LIST) q_resolve_verbs(e[i]);
-    if (n == 3 && e[0] && e[0]->type == -RAY_SYM && !(e[0]->attrs & Q_ATTR_QUOTED)) {
-        ray_t *s = ray_sym_str(e[0]->i64);
-        if (s) {
-            ray_t *hit = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), Q_DYADIC);
-            ray_release(s);
-            if (hit) {          /* borrowed -> retain one, drop the glyph */
-                ray_retain(hit);
-                ray_release(e[0]);
-                e[0] = hit;
-            }
-        }
+ * rayfall's env exactly as before.
+ *
+ * RETIRED as a public pass (2b): the PARSER now embeds dyadic registry values
+ * at infix/bracket glyph heads, so the only shapes this still serves are
+ * keyword-dyadic rows called in bracket/prefix form (`each[count;x]` — the
+ * scanner keeps prefix keywords as name-ref nouns and `each` has no env
+ * binding).  That residue lives on as ql_dyad_head inside the q_lower walker. */
+static void ql_dyad_head(ray_t **slot) {
+    ray_t *node = *slot;
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    if (n != 3 || !e[0] || e[0]->type != -RAY_SYM || (e[0]->attrs & Q_ATTR_QUOTED))
+        return;
+    ray_t *s = ray_sym_str(e[0]->i64);
+    if (!s) return;
+    ray_t *hit = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), Q_DYADIC);
+    ray_release(s);
+    if (hit) {              /* borrowed -> retain one, drop the name-ref */
+        ray_retain(hit);
+        ray_release(e[0]);
+        e[0] = hit;
     }
-    return ast;
 }
 
 /* ===== q-lower: the ADR 0003 lowering pass =================================
@@ -909,7 +903,7 @@ ray_t *q_resolve_verbs(ray_t *ast) {
  * (eval resolves those), and the value itself once the parser embeds values.
  * A glyph operand with no dyadic row and no aggregate mapping leaves the node
  * untouched — eval then errors exactly as it does today.  In-place rewrite
- * under the same rc==1 sole-owner precondition as q_resolve_verbs. */
+ * under the same rc==1 sole-owner precondition as the whole walker. */
 
 static ray_t *ql_env_val(const char *nm) {
     return ray_env_get(ray_sym_intern_runtime(nm, strlen(nm)));
@@ -1123,6 +1117,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
             ray_t *err = q_lower_walk(&e[i], lambda_body, i == 0);
             if (err) return err;
         }
+    ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
     ray_t *err = ql_assign(slot, in_lambda);
     if (err) return err;
     ql_adv_app(slot);
@@ -1134,10 +1129,9 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
 
 /* q-lower entrypoint — see q_parse.h.  Dyadic-head resolution (the 2a shim
  * behaviour) plus the lowering walker above.  2b's parser flip moves the head
- * resolution into q_parse and retires q_resolve_verbs.  May return a
+ * resolution into q_parse (the 2b flip).  May return a
  * RAY_ERROR (consuming `ast`): callers must error-check the result. */
 ray_t *q_lower(ray_t *ast) {
-    ast = q_resolve_verbs(ast);
     if (ast && ast->type == RAY_LIST) {
         ray_t *err = q_lower_walk(&ast, 0, 0);
         if (err) { ray_release(ast); return err; }
