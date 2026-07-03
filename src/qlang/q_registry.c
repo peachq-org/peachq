@@ -32,7 +32,9 @@
 #include "qlang/q_ops.h"      /* Q_OPS manifest, q_build_kind */
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
+#include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -127,6 +129,95 @@ static ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
     return ray_neq_fn(a, b);
 }
 
+/* q `f each x` — rayfall map, then collapse the boxed result to a simple
+ * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
+static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
+    ray_t* args[2] = { f, x };
+    ray_t* r = ray_map_fn(args, 2);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* c = q_collapse_list(r);
+    ray_release(r);
+    return c;
+}
+
+/* q `(f\)x` — rayfall scan, then collapse (kdb: `(+\)1 2 3` is 1 3 6, a
+ * simple vector).  Vary so a future seeded form passes through unchanged.
+ * Not a manifest row (no q spelling of its own): an internal value handed
+ * out to q_lower via q_registry_scan_value(). */
+static ray_t* q_scan_wrap(ray_t** args, int64_t n) {
+    ray_t* r = ray_scan_fn(args, n);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* c = q_collapse_list(r);
+    ray_release(r);
+    return c;
+}
+
+static ray_t* g_scan_value = NULL;
+
+ray_t* q_registry_scan_value(void) {
+    return g_scan_value;   /* borrowed; NULL before init */
+}
+
+/* q paren-list literal `(1;2;3)` — build the list and collapse a homogeneous
+ * atom run to a simple vector (kdb collapses at construction).  The parser
+ * embeds this value at the head of every multi-element paren list, which is
+ * what DISAMBIGUATES a literal from the shape-identical bracket-index call
+ * (v;i) — the distinction only exists at parse time. */
+static ray_t* q_list_build(ray_t** args, int64_t n) {
+    ray_t* l = ray_list_fn(args, n);
+    if (!l || RAY_IS_ERR(l)) return l;
+    ray_t* c = q_collapse_list(l);
+    ray_release(l);
+    return c;
+}
+
+static ray_t* g_list_value = NULL;
+
+ray_t* q_registry_list_value(void) {
+    return g_list_value;   /* borrowed; NULL before init */
+}
+
+/* ---- collapse: homogeneous atom list -> typed vector (see q_registry.h) ---- */
+
+ray_t* q_collapse_list(ray_t* l) {
+    if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || ray_len(l) == 0) {
+        if (l) ray_retain(l);
+        return l;
+    }
+    int64_t n = ray_len(l);
+    ray_t** e = (ray_t**)ray_data(l);
+    int8_t t = e[0] ? e[0]->type : 0;
+    if (t >= 0 || t == -RAY_STR) { ray_retain(l); return l; }   /* not a scalar-atom run */
+    for (int64_t i = 1; i < n; i++)
+        if (!e[i] || e[i]->type != t) { ray_retain(l); return l; }
+
+    if (t == -RAY_SYM) {
+        ray_t* vec = ray_sym_vec_new(RAY_SYM_W64, n);
+        if (RAY_IS_ERR(vec)) return vec;
+        for (int64_t i = 0; i < n; i++) vec = ray_vec_append(vec, &e[i]->i64);
+        return vec;
+    }
+
+    ray_t* vec = ray_vec_new(-t, n);
+    if (RAY_IS_ERR(vec)) return vec;
+    int64_t nulls = 0;
+    for (int64_t i = 0; i < n; i++) {
+        switch (t) {
+        case -RAY_BOOL: vec = ray_vec_append(vec, &e[i]->b8);  break;
+        case -RAY_I16:  vec = ray_vec_append(vec, &e[i]->i16); break;
+        case -RAY_I32:  vec = ray_vec_append(vec, &e[i]->i32); break;
+        case -RAY_F32: { float f = (float)e[i]->f64;            /* F32 atom stores f64 */
+                         vec = ray_vec_append(vec, &f); }       break;
+        case -RAY_F64:  vec = ray_vec_append(vec, &e[i]->f64); break;
+        default:        vec = ray_vec_append(vec, &e[i]->i64); break; /* i64 + temporals */
+        }
+        if (RAY_IS_ERR(vec)) return vec;
+        if (RAY_ATOM_IS_NULL(e[i])) { ray_vec_set_null(vec, i, true); nulls++; }
+    }
+    (void)nulls;
+    return vec;
+}
+
 /* ---- value builders keyed by manifest build-kind ---- */
 
 /* Identity/rename-reuse: snapshot an existing rayfall builtin value by name and
@@ -159,6 +250,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_NE:   return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_ne_wrap);
     case QK_TAKE: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_take_wrap);
     case QK_DROP: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_drop_wrap);
+    case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
     default:      return NULL;
     }
 }
@@ -192,6 +284,36 @@ static ray_err_t add_entry(const char* name, q_valence_t valence,
     return RAY_OK;
 }
 
+/* ---- serde hooks: q wrappers round-trip through the registry -------------
+ * A RAY_FN_Q_LOWER wrapper serialized by aux-name would deserialize as the
+ * like-named env builtin (wrong arg order for `#`, no binding at all for
+ * `_`->"drop"), silently losing q semantics.  The writer claims registry
+ * wrappers with a `q!<spelling>!<valence>` wire name (fits the standard
+ * 15-byte slot); the reader decodes it back to THE registry value.  Internal
+ * spelling-less values (scan/list) have no provenance and fall through to
+ * the env path — documented, not silently wrong (env scan/list exist). */
+
+static int q_serde_fn_writer(ray_t* fn, char out[16]) {
+    if (!fn || !(fn->attrs & RAY_FN_Q_LOWER)) return 0;
+    q_provenance_t pv;
+    if (!q_registry_provenance(fn, &pv) || !pv.is_wrapper) return 0;
+    int n = snprintf(out, 16, "q!%s!%d", pv.spelling, (int)pv.valence);
+    return n > 0 && n < 16;
+}
+
+static ray_t* q_serde_fn_reader(const char* name) {
+    if (!name || name[0] != 'q' || name[1] != '!') return NULL;
+    const char* sp = name + 2;
+    const char* bang = strrchr(sp, '!');
+    if (!bang || bang == sp) return NULL;
+    q_valence_t v = (q_valence_t)atoi(bang + 1);
+    if (v != Q_MONADIC && v != Q_DYADIC) return NULL;
+    ray_t* hit = q_registry_lookup_name(sp, (size_t)(bang - sp), v);
+    if (!hit) return NULL;      /* falls through to the env path -> name error */
+    ray_retain(hit);
+    return hit;                 /* owned, per the hook contract */
+}
+
 /* ---- API ---- */
 
 ray_err_t q_registry_init(void) {
@@ -212,9 +334,25 @@ ray_err_t q_registry_init(void) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
+    /* internal (spelling-less) values consumed by q_lower / the parser */
+    g_scan_value = ray_fn_vary("scan", RAY_FN_NONE | RAY_FN_Q_LOWER, q_scan_wrap);
+    if (!g_scan_value || RAY_IS_ERR(g_scan_value)) {
+        g_scan_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_list_value = ray_fn_vary("list", RAY_FN_NONE | RAY_FN_Q_LOWER, q_list_build);
+    if (!g_list_value || RAY_IS_ERR(g_list_value)) {
+        g_list_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     g_building = false;
     g_inited   = true;
+    ray_serde_set_fn_hooks(q_serde_fn_writer, q_serde_fn_reader);
     return RAY_OK;
+}
+
+bool q_registry_ready(void) {
+    return g_inited;
 }
 
 ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence) {
@@ -257,8 +395,11 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
 /* Idempotent; also serves as partial-cleanup on a failed init (guards on
  * g_count, not g_inited, so a half-built table is fully released). */
 void q_registry_destroy(void) {
+    ray_serde_set_fn_hooks(NULL, NULL);   /* hooks read g_entries — detach first */
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
+    if (g_scan_value) { ray_release(g_scan_value); g_scan_value = NULL; }
+    if (g_list_value) { ray_release(g_list_value); g_list_value = NULL; }
     g_count  = 0;
     g_inited = false;
 }
