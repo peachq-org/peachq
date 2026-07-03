@@ -50,6 +50,7 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
         return;
     }
 
+    ast = q_resolve_verbs(ast);
     ray_t* res = ray_eval(ast);
     ray_release(ast);
     if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
