@@ -82,7 +82,8 @@ require("./wasm/rayforce.js")().then(M => {
   not compile under emscripten's sysroot. `ipc_stub.c` satisfies the linker.
 - **Single-threaded.** WASM is single-threaded by construction; the build forces
   `RAYFORCE_CORES=0` so the pool never tries to spawn workers.
-- **Fast-math.** The demo mirrors upstream's WASM CFLAGS (`-msimd128`,
-  `-ffinite-math-only`, …). The correctness-critical *native* build deliberately
-  avoids `-ffinite-math-only` (NaN-encoded null sentinels); this throwaway demo
-  target accepts the divergence.
+- **Fast-math.** The demo uses `-msimd128` + the vectorization-enabling
+  fast-math flags, but **not** `-ffinite-math-only` (which upstream's target had):
+  this build compiles the same engine, and that engine encodes F64/F32 nulls as
+  NaN (`x != x` checks). Assuming no-NaN would mis-evaluate float nulls (`0Nf`)
+  in the browser, so it is dropped to match the native build's correctness.
