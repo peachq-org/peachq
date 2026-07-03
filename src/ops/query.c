@@ -28,6 +28,7 @@
 #include "lang/internal.h"
 #include "lang/eval.h"
 #include "lang/env.h"
+#include "lang/head_desc.h"   /* ray_head_is_fn_value — ADR 0002 Option A */
 #include "ops/ops.h"
 #include "ops/internal.h"
 #include "ops/hash.h"
@@ -1023,9 +1024,28 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             }
         }
 
-        /* Head must be a name referencing a builtin */
-        if (head->type != -RAY_SYM) return NULL;
-        int64_t fn_sym = head->i64;
+        /* Head must be a name referencing a builtin OR (ADR 0002 Option A) a
+         * function VALUE.  A value head keys the DAG on its interned aux name,
+         * exactly as a symbol head keys on its sym-id — so a value-headed
+         * column expr / where-predicate hits resolve_*_dag (the optimizer)
+         * instead of returning NULL (eval fallback, no pushdown). */
+        int64_t fn_sym;
+        ray_t*  fn_val = NULL;
+        if (head->type == -RAY_SYM) {
+            fn_sym = head->i64;
+        } else if (ray_head_is_fn_value(head, &fn_sym, &fn_val)) {
+            /* Piece-1 scope: decline value-headed AGGREGATES.  The has_agg
+             * classifiers (is_agg_expr &c.) still key on symbol heads, so
+             * admitting a value-headed agg here would take the projection/
+             * broadcast path instead of a 1-row reduction (WRONG result).
+             * Return NULL so it falls back to eval exactly as it does today
+             * (today every value head returns NULL at this gate).  Wiring the
+             * classifiers for value heads is piece 2's job (registry emit). */
+            if (resolve_agg_opcode(fn_sym) != 0) return NULL;
+        } else {
+            return NULL;
+        }
+        (void)fn_val;
 
         /* Check for xbar */
         ray_t* fn_name_str = ray_sym_str(fn_sym);
