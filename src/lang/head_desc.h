@@ -55,20 +55,36 @@
 #include <stdbool.h>
 
 /* True iff `head` is a function VALUE usable directly as a call head
- * (RAY_UNARY / RAY_BINARY / RAY_VARY).  On a hit, fills `*out_sym` (may be
- * NULL) with the value's interned aux-name id and `*out_fn` (may be NULL)
- * with the value itself (a BORROWED alias of `head` — no retain), and
- * returns true.  Returns false for a symbol head, quoted literal, list,
- * atom, or a bare lambda value (lambda heads carry no canonical aux name
- * and are handled by the generic apply path, not this fast head-check). */
+ * (RAY_UNARY / RAY_BINARY / RAY_VARY).  On a hit, fills `*out_fn` (may be
+ * NULL) with the value itself (a BORROWED alias of `head` — no retain) and
+ * returns true.
+ *
+ * `*out_sym` (may be NULL) receives a NAME id ONLY for semantic routing —
+ * the compiler's inline special forms and the query planner's `resolve_*_dag`
+ * key on this name.  It is set to the value's interned aux-name id *only when
+ * the value IS the canonical env binding of that name* (`ray_env_get == head`);
+ * otherwise it is -1.  This is the guard against a custom / wrapper function
+ * object (built with `ray_fn_*`) that merely SHARES a builtin's display name:
+ * such a value must run its own implementation via the generic call / eval
+ * path, never be lowered as the like-named builtin (e.g. a custom fn named
+ * "return" must not emit OP_RET; a custom fn named "+" must not become the
+ * DAG add op).  A non-canonical value still returns true (it IS callable) so
+ * the compiler can emit a specialized *direct* call of the value — that call
+ * invokes the value's real code and is name-agnostic, hence always safe.
+ *
+ * Returns false for a symbol head, quoted literal, list, atom, or a bare
+ * lambda value (lambda heads carry no canonical aux name and are handled by
+ * the generic apply path, not this fast head-check). */
 static inline bool ray_head_is_fn_value(ray_t* head, int64_t* out_sym,
                                         ray_t** out_fn) {
     if (!head) return false;
     if (head->type == RAY_UNARY || head->type == RAY_BINARY ||
         head->type == RAY_VARY) {
         if (out_sym) {
-            const char* nm = ray_fn_name(head);
-            *out_sym = ray_sym_intern(nm, strlen(nm));
+            const char* nm  = ray_fn_name(head);
+            int64_t     sym = ray_sym_intern(nm, strlen(nm));
+            /* Canonical-identity guard: only name-route builtin objects. */
+            *out_sym = (ray_env_get(sym) == head) ? sym : -1;
         }
         if (out_fn) *out_fn = head;
         return true;
