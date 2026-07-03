@@ -7,9 +7,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
 #include "qlang/q_parse.h"
+#include "qlang/q_registry.h" /* q_registry_init */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include <rayforce.h>
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,5 +40,9 @@ static void bind_unary(const char* name, ray_unary_fn fn) {
 
 void q_builtins_register(void) {
     bind_unary("parse", q_parse_builtin_fn);
-    /* future: take/drop/dict/cast and the divergent operators bind here. */
+    /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
+     * The registry is the authoritative, immutable verb source; it snapshots
+     * builtin values and must be torn down via q_runtime_destroy before the
+     * runtime.  Fail fast: a missing audited builtin is a bug. */
+    assert(q_registry_init() == RAY_OK);
 }
