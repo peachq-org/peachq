@@ -75,4 +75,12 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
  * partial-cleanup on a failed init.  Must run before ray_env_destroy. */
 void q_registry_destroy(void);
 
+/* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
+ * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
+ * are simple vectors, not general lists).  Mixed types, non-atom elements,
+ * string atoms (a list of strings IS kdb 0h) and non-lists are returned
+ * unchanged.  Borrows `l`; always returns an OWNED value (a fresh vector, or
+ * `l` retained). */
+ray_t* q_collapse_list(ray_t* l);
+
 #endif /* Q_REGISTRY_H */
