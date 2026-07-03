@@ -24,6 +24,6 @@ int main(int argc, char** argv) {
     int echo = !isatty(STDIN_FILENO);
     q_repl_run(stdin, stdout, stderr, echo);
 
-    ray_runtime_destroy(rt);
+    q_runtime_destroy(rt);
     return 0;
 }
