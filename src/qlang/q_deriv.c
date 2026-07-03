@@ -16,12 +16,14 @@
 static int64_t g_sid_proj   = -1;
 static int64_t g_sid_adverb = -1;
 static int64_t g_sid_monad  = -1;
+static int64_t g_sid_hole   = -1;   /* unbound-arg `;` sentinel in a projection */
 
 static void ensure_markers(void) {
     if (g_sid_proj < 0) {
         g_sid_proj   = ray_sym_intern(".q.proj",   7);
         g_sid_adverb = ray_sym_intern(".q.adverb", 9);
         g_sid_monad  = ray_sym_intern(".q.monad",  8);
+        g_sid_hole   = ray_sym_intern(".q.hole",   7);
     }
 }
 
@@ -56,8 +58,10 @@ ray_t* q_proj_new(ray_t* base, ray_t** args, int64_t argc, uint64_t hole_mask,
     for (int64_t i = 0; i < argc; i++) {
         if (args[i]) l = push_borrowed(l, args[i]);
         else {
-            /* a hole slot — store the quoted marker so slot count matches argc */
-            ray_t* hole = marker_atom(g_sid_monad); /* reuse a quoted sentinel */
+            /* an unbound-arg hole — a dedicated quoted `.q.hole` sentinel so the
+             * slot count matches argc; the authoritative hole record is
+             * `hole_mask` (this filler is never inspected in 2a). */
+            ray_t* hole = marker_atom(g_sid_hole);
             l = push_owned(l, hole);
         }
     }
@@ -94,13 +98,18 @@ static int64_t head_sid(const ray_t* v) {
     return h->i64;
 }
 
+/* Classify — AND validate the full fixed-field arity so every accessor below
+ * can index its slots without bounds-checking (a forged/truncated list that
+ * happens to carry a marker in slot 0 but lacks the fixed fields classifies as
+ * NONE, never as a carrier whose fields would read past the body). */
 q_deriv_kind q_deriv_kind_of(const ray_t* v) {
     ensure_markers();
     int64_t sid = head_sid(v);
     if (sid < 0) return Q_DERIV_NONE;
-    if (sid == g_sid_proj)   return Q_DERIV_PROJ;
-    if (sid == g_sid_adverb) return Q_DERIV_ADVERB;
-    if (sid == g_sid_monad)  return Q_DERIV_MONAD;
+    int64_t n = ray_len((ray_t*)v);
+    if (sid == g_sid_proj   && n >= 4) return Q_DERIV_PROJ;   /* marker,base,mask,val */
+    if (sid == g_sid_adverb && n >= 4) return Q_DERIV_ADVERB; /* marker,base,code,val */
+    if (sid == g_sid_monad  && n >= 3) return Q_DERIV_MONAD;  /* marker,base,val       */
     return Q_DERIV_NONE;
 }
 
