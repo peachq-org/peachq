@@ -58,6 +58,11 @@ static const q_op_t Q_OPS[] = {
      * Dyadic `$` is cast; the bracket cond form `$[c;t;f]` (3+ args) is a
      * q_lower rewrite onto rayfall `if`, not a registry cell. */
     { "$",     QLEX_GLYPH,     QK_NONE, NULL,        QK_CAST,  "as",      NULL  },
+    /* monadic `@`/`.` stay QK_NONE: `@x` type-of is blocked on the q type
+     * renumber; `.x` (value/get) comes with handles/namespaces.  Ternary+
+     * Trap/Amend forms are deferred cells (error today via arity). */
+    { "@",     QLEX_GLYPH,     QK_NONE, NULL,        QK_AT,    "at",      NULL  },
+    { ".",     QLEX_GLYPH,     QK_NONE, NULL,        QK_DOT,   "apply",   NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
