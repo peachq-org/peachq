@@ -52,6 +52,8 @@ static const q_op_t Q_OPS[] = {
     /* monadic `!` (dict keys) is a K-ism accepted as a deliberate superset
      * (valid q spells it `key`, same value — the `_`/floor precedent). */
     { "!",     QLEX_GLYPH,     QK_KEY,  "key",       QK_BANG,  "dict",    NULL  },
+    /* monadic `?` (distinct) is likewise a K-ism superset of q `distinct`. */
+    { "?",     QLEX_GLYPH,     QK_DISTINCT, "distinct", QK_ROLL, "rand",  NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
