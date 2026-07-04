@@ -295,23 +295,117 @@ ray_t* q_registry_scan_value(void) {
     return g_scan_value;   /* borrowed; NULL before init */
 }
 
-/* q paren-list literal `(1;2;3)` — build the list and collapse a homogeneous
- * atom run to a simple vector (kdb collapses at construction).  The parser
- * embeds this value at the head of every multi-element paren list, which is
- * what DISAMBIGUATES a literal from the shape-identical bracket-index call
- * (v;i) — the distinction only exists at parse time. */
-static ray_t* q_list_build(ray_t** args, int64_t n) {
-    ray_t* l = ray_list_fn(args, n);
-    if (!l || RAY_IS_ERR(l)) return l;
-    ray_t* c = q_collapse_list(l);
-    ray_release(l);
-    return c;
+/* ---- shared right-to-left CONTEXT builder (list + table def) --------------
+ *
+ * THE MANDATE (specs/2026-07-04-table-def.md): list definition `(…)` and table
+ * definition `([] …)` are ONE mechanism, not two.  Evaluating either opens an
+ * env scope, processes the element expressions RIGHT-TO-LEFT (so `x:e` binds x
+ * INTO the scope before a leftward bare `x` RESOLVES from it — this is WHY
+ * `(aa; aa:11 12 13)` yields the value twice and `(bb:11 12 13; bb)` errors
+ * `'bb`), then pops the scope and assembles: `(…)` → the list of element values
+ * (then the existing collapse-to-vector); `([] …)` → a table whose columns are
+ * the per-element assignment targets.
+ *
+ * Both constructor heads are RAY_FN_SPECIAL_FORM: rayforce's VARY arg-eval is
+ * LEFT-to-right, and a special form is the only seam that hands a builtin the
+ * raw (unevaluated) element trees — a hard prerequisite for right-to-left.
+ * q_lower lowers a plain `:` inside a ctx literal to `let` (writes the pushed
+ * frame), so the assignments are scoped, not leaked to the global env. */
+
+/* If `el` is a lowered assignment node `(set/let name val)`, return the target
+ * sym-id; else if `el` is a bare unquoted name-ref sym, return its id (a bare
+ * column reference); else -1 (no column name — a table error, .Q.id deferred). */
+static int64_t q_ctx_colname(ray_t* el) {
+    if (!el) return -1;
+    if (el->type == -RAY_SYM && !(el->attrs & 0x20 /* Q_ATTR_QUOTED */))
+        return el->i64;
+    if (el->type == RAY_LIST && ray_len(el) == 3) {
+        ray_t** e = (ray_t**)ray_data(el);
+        ray_t* h = e[0];
+        if (h && h->type == RAY_BINARY) {
+            const char* nm = ray_fn_name(h);
+            if (nm && (strcmp(nm, "set") == 0 || strcmp(nm, "let") == 0) &&
+                e[1] && e[1]->type == -RAY_SYM && !(e[1]->attrs & 0x20))
+                return e[1]->i64;
+        }
+    }
+    return -1;
 }
 
-static ray_t* g_list_value = NULL;
+/* The shared builder.  `elems[0..n)` are the UNEVALUATED element trees. */
+static ray_t* q_ctx_build(ray_t** elems, int64_t n, int as_table) {
+    if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
+
+    ray_t**  vals  = (n > 0) ? (ray_t**)calloc((size_t)n, sizeof(ray_t*))   : NULL;
+    int64_t* names = (as_table && n > 0)
+                        ? (int64_t*)malloc((size_t)n * sizeof(int64_t)) : NULL;
+    if (n > 0 && (!vals || (as_table && !names))) {
+        free(vals); free(names); ray_env_pop_scope();
+        return ray_error("wsfull", "ctx: out of memory");
+    }
+
+    ray_t* err = NULL;
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (as_table) names[i] = q_ctx_colname(elems[i]);
+        ray_t* v = ray_eval(elems[i]);            /* binds `x:e` into the scope */
+        if (!v) v = ray_error("type", "ctx: null element");
+        if (RAY_IS_ERR(v)) { err = v; break; }
+        vals[i] = v;
+    }
+
+    ray_env_pop_scope();
+
+    if (err) {
+        for (int64_t i = 0; i < n; i++) if (vals[i]) ray_release(vals[i]);
+        free(vals); free(names);
+        return err;
+    }
+
+    ray_t* out;
+    if (!as_table) {
+        ray_t* l = ray_list_fn(vals, n);          /* borrows; retains each */
+        if (l && !RAY_IS_ERR(l)) { out = q_collapse_list(l); ray_release(l); }
+        else                     { out = l; }
+    } else {
+        out = ray_table_new(n);
+        for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+            if (names[i] < 0) {
+                ray_release(out);
+                out = ray_error("type",
+                    "([]…): every column needs a name (a:… ; bare/.Q.id deferred)");
+                break;
+            }
+            out = ray_table_add_col(out, names[i], vals[i]);
+        }
+    }
+
+    for (int64_t i = 0; i < n; i++) if (vals[i]) ray_release(vals[i]);
+    free(vals); free(names);
+    return out;
+}
+
+/* q paren-list literal `(1;2;3)` head — see q_ctx_build.  The parser embeds
+ * this value at the head of every multi-element paren list, which is what
+ * DISAMBIGUATES a literal from the shape-identical bracket-index call (v;i) —
+ * the distinction only exists at parse time. */
+static ray_t* q_list_build(ray_t** args, int64_t n) {
+    return q_ctx_build(args, n, 0);
+}
+
+/* q table literal `([] a:…; b:…)` head — see q_ctx_build. */
+static ray_t* q_table_build(ray_t** args, int64_t n) {
+    return q_ctx_build(args, n, 1);
+}
+
+static ray_t* g_list_value  = NULL;
+static ray_t* g_table_value = NULL;
 
 ray_t* q_registry_list_value(void) {
     return g_list_value;   /* borrowed; NULL before init */
+}
+
+ray_t* q_registry_table_value(void) {
+    return g_table_value;  /* borrowed; NULL before init */
 }
 
 /* ---- collapse: homogeneous atom list -> typed vector (see q_registry.h) ---- */
@@ -479,9 +573,18 @@ ray_err_t q_registry_init(void) {
         g_scan_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
-    g_list_value = ray_fn_vary("list", RAY_FN_NONE | RAY_FN_Q_LOWER, q_list_build);
+    /* Both ctx constructor heads are SPECIAL_FORM: q_ctx_build must receive the
+     * raw element trees to evaluate them right-to-left inside a pushed scope. */
+    g_list_value = ray_fn_vary("list",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_list_build);
     if (!g_list_value || RAY_IS_ERR(g_list_value)) {
         g_list_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_table_value = ray_fn_vary("table",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_table_build);
+    if (!g_table_value || RAY_IS_ERR(g_table_value)) {
+        g_table_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
     g_building = false;
@@ -537,8 +640,9 @@ void q_registry_destroy(void) {
     ray_serde_set_fn_hooks(NULL, NULL);   /* hooks read g_entries — detach first */
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
-    if (g_scan_value) { ray_release(g_scan_value); g_scan_value = NULL; }
-    if (g_list_value) { ray_release(g_list_value); g_list_value = NULL; }
+    if (g_scan_value)  { ray_release(g_scan_value);  g_scan_value  = NULL; }
+    if (g_list_value)  { ray_release(g_list_value);  g_list_value  = NULL; }
+    if (g_table_value) { ray_release(g_table_value); g_table_value = NULL; }
     g_count  = 0;
     g_inited = false;
 }
