@@ -566,7 +566,7 @@ static Tokens scan(const char *src) {
             noun_pos = 0;
         }
         else {
-            TKind kk;
+            TKind kk = T_EOF; /* default path q_die()s; keep Clang definite-init happy */
             switch (c) {
             case '(': kk = T_LPAREN; noun_pos = 0; break;
             case ')': kk = T_RPAREN; noun_pos = 1; break;
@@ -1450,6 +1450,61 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
     return NULL;
 }
 
+/* ===== $[c;t;f] cond ========================================================
+ * q Cond is a control construct spelled with the cast glyph: `$[test;et;ef]`
+ * (ref/cond.md).  Detected by a `$`-provenance head with >= 3 args: the
+ * parser's LBRACK arm embeds the DYADIC registry value (the cast wrapper) at
+ * every `$[...]` head, so we probe provenance; a still-unresolved `$`
+ * name-ref (cold-registry path) is matched by spelling.  A 2-arg `$[t;x]` is
+ * bracket-call CAST and stays untouched. */
+static int ql_is_dollar_head(ray_t *h) {
+    if (!h) return 0;
+    if (h->type == -RAY_SYM && !(h->attrs & Q_ATTR_QUOTED)) {
+        ray_t *s = ray_sym_str(h->i64);
+        int r = s && ray_str_len(s) == 1 && ray_str_ptr(s)[0] == '$';
+        if (s) ray_release(s);
+        return r;
+    }
+    if (h->type == RAY_BINARY) {
+        q_provenance_t pv;
+        return q_registry_provenance(h, &pv) && pv.spelling &&
+               pv.spelling[0] == '$' && pv.spelling[1] == '\0';
+    }
+    return 0;
+}
+
+/* Lower `$[c1;t1;...;f]` onto rayfall `if` (env special form, ray_cond_fn:
+ * lazy — branch args reach it UNEVALUATED — but TRIADIC ONLY: extra args are
+ * ignored, so the kdb flattened multi-way `$[q;a;r;b;c]` <=> `$[q;a;$[r;b;c]]`
+ * (ref/cond.md) is rebuilt as explicitly nested (if q a (if r b c)) lists,
+ * folding pairs from the right.  Even arg counts have no kdb reading (the ref
+ * defines triads + odd flattenings only) -> 'cond error.  Returns a RAY_ERROR
+ * (owned) to abort lowering, else NULL. */
+static ray_t *ql_cond(ray_t **slot) {
+    ray_t *node = *slot;
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    if (n < 4 || !ql_is_dollar_head(e[0])) return NULL;   /* $[c;t;f] = 4 slots */
+    if (n % 2 != 0)                        /* head + even arg count: no reading */
+        return ray_error("cond", "'cond: $[...] needs an odd number of expressions");
+    ray_t *ifv = ql_env_val("if");
+    if (!ifv) return NULL;                 /* borrowed; append retains below */
+    ray_t *acc = e[n - 1];                 /* the final else */
+    ray_retain(acc);
+    for (int64_t i = n - 3; i >= 1; i -= 2) {
+        ray_t *w = ray_list_new(4);
+        w = ray_list_append(w, ifv);
+        w = ray_list_append(w, e[i]);      /* cond_i  (append retains) */
+        w = ray_list_append(w, e[i + 1]);  /* then_i */
+        w = ray_list_append(w, acc);
+        ray_release(acc);
+        acc = w;
+    }
+    ray_release(node);
+    *slot = acc;
+    return NULL;
+}
+
 /* True iff node is the `{`-marker lambda form (its body statements bind q
  * locals with plain `:`). */
 static int ql_is_lambda(ray_t *node) {
@@ -1478,8 +1533,10 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
             ray_t *err = q_lower_walk(&e[i], lambda_body, i == 0);
             if (err) return err;
         }
+    ray_t *err = ql_cond(slot);            /* $[c;t;f] BEFORE any head claim */
+    if (err) return err;
     ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
-    ray_t *err = ql_assign(slot, in_lambda);
+    err = ql_assign(slot, in_lambda);
     if (err) return err;
     ql_adv_app(slot);
     /* head position stays a raw (adv;V) 2-list — the PARENT's ql_adv_app
