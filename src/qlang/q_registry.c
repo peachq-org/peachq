@@ -129,6 +129,58 @@ static ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
     return ray_neq_fn(a, b);
 }
 
+/* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
+ * (`1~1f` is 0b), attribute-blind (`1 2 3~\`s#1 2 3` is 1b), sentinel nulls
+ * compare equal (`0n~0n` is 1b — non-finites canonicalize to one payload).
+ * Unhandled types conservatively mismatch (kdb ~ never errors). */
+static int q_match_rec(ray_t* a, ray_t* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->type != b->type) return 0;
+    if (a->type == -RAY_SYM) return a->i64 == b->i64;
+    if (a->type == -RAY_STR)
+        return ray_str_len(a) == ray_str_len(b) &&
+               memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) == 0;
+    if (ray_is_atom(a)) return memcmp(&a->i64, &b->i64, 8) == 0;  /* payload union */
+    if (a->type == RAY_DICT || a->type == RAY_TABLE) {
+        ray_t** ea = (ray_t**)ray_data(a);
+        ray_t** eb = (ray_t**)ray_data(b);
+        return q_match_rec(ea[0], eb[0]) && q_match_rec(ea[1], eb[1]);
+    }
+    if (a->type == RAY_LIST || ray_is_vec(a)) {
+        int64_t la = ray_len(a);
+        if (la != ray_len(b)) return 0;
+        /* same-type numeric vectors: payload memcmp (nulls are in-payload
+         * sentinels; attrs deliberately not compared).  SYM vecs vary in
+         * index width -> per-element below. */
+        if (ray_is_vec(a) && a->type != RAY_SYM && a->type != RAY_STR) {
+            size_t esz = (a->type == RAY_I64 || a->type == RAY_F64) ? 8
+                       : (a->type == RAY_I32 || a->type == RAY_F32) ? 4
+                       : (a->type == RAY_I16) ? 2
+                       : (a->type == RAY_BOOL || a->type == RAY_U8) ? 1 : 0;
+            if (esz)
+                return memcmp(ray_data(a), ray_data(b), (size_t)la * esz) == 0;
+        }
+        for (int64_t i = 0; i < la; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* xa = ray_at_fn(a, ia);
+            ray_t* xb = ray_at_fn(b, ia);
+            ray_release(ia);
+            int r = (xa && xb && !RAY_IS_ERR(xa) && !RAY_IS_ERR(xb))
+                        ? q_match_rec(xa, xb) : 0;
+            if (xa) ray_release(xa);
+            if (xb) ray_release(xb);
+            if (!r) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
+    return ray_bool(q_match_rec(a, b));
+}
+
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
 static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
@@ -251,6 +303,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_TAKE: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_take_wrap);
     case QK_DROP: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_drop_wrap);
     case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
+    case QK_MATCH:return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_match_wrap);
     default:      return NULL;
     }
 }
