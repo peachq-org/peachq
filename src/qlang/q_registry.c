@@ -30,10 +30,12 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry.h"
 #include "qlang/q_ops.h"      /* Q_OPS manifest, q_build_kind */
+#include "qlang/q_apply.h"    /* q_apply_noun — @/. noun arms */
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
 #include "lang/format.h"      /* ray_type_name — wrapper error messages */
+#include "mem/heap.h"         /* RAY_ATTR_HAS_NULLS — ? find miss remap */
 #include <assert.h>
 #include <math.h>     /* floor/floorf — q monadic `_` */
 #include <stdio.h>
@@ -266,6 +268,306 @@ static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
+/* Call the env-bound BINARY builtin `nm` (the wrapper-over-env pattern:
+ * some base fns — dict — are declared only in internal base headers, so the
+ * wrapper routes through the audited env value instead of a frozen-header
+ * include).  Borrowed args; returns owned. */
+static ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
+    ray_t* f = ray_env_get(ray_sym_intern(nm, strlen(nm)));
+    if (!f || f->type != RAY_BINARY)
+        return ray_error("type", "%s: env builtin missing", nm);
+    return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
+}
+
+/* q `x!y` — dict make.  An atom key enlists to a 1-vector first (kdb `a!1`
+ * is a dict too; rayfall dict wants vector keys); vals pass through as-is
+ * (rayfall dict broadcasts atom vals and boxes the rest itself).  kdb
+ * 'length fidelity: rayfall would null-fill a short vals side, so the
+ * count check lives here.  String keys are a deferred cell (string model). */
+static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "!: nil operand");
+    ray_t* keys = x;
+    ray_t* keys_owned = NULL;
+    if (ray_is_atom(x)) {
+        ray_t* l = ray_list_new(1);
+        l = ray_list_append(l, x);
+        if (RAY_IS_ERR(l)) return l;
+        keys_owned = q_collapse_list(l);
+        ray_release(l);
+        if (!keys_owned || RAY_IS_ERR(keys_owned))
+            return keys_owned ? keys_owned : ray_error("type", NULL);
+        if (!ray_is_vec(keys_owned)) {          /* -RAY_STR & friends stay boxed */
+            ray_release(keys_owned);
+            return ray_error("type", "!: unsupported key type (deferred)");
+        }
+        keys = keys_owned;
+    }
+    if ((ray_is_vec(y) || y->type == RAY_LIST) &&
+        (ray_is_vec(keys) || keys->type == RAY_LIST) &&
+        ray_len(keys) != ray_len(y)) {
+        if (keys_owned) ray_release(keys_owned);
+        return ray_error("length", "!: key and value counts must match");
+    }
+    ray_t* r = q_env_call2("dict", keys, y);
+    if (keys_owned) ray_release(keys_owned);
+    return r;
+}
+
+/* q `key d` / monadic `!` — dict keys.  Non-dict operands (file handles,
+ * namespaces, enumerations, vectors) are deferred cells: error, never a
+ * wrong answer. */
+static ray_t* q_key_wrap(ray_t* x) {
+    if (!x || x->type != RAY_DICT)
+        return ray_error("type", "key: expects a dict (other forms deferred)");
+    ray_t* k = ray_dict_keys(x);                /* borrowed */
+    if (!k) return ray_error("type", "key: nil keys");
+    ray_retain(k);
+    return k;
+}
+
+/* q `value d` — dict values, collapsed to a simple vector where homogeneous
+ * (rayfall's dict stores vals as a boxed list).  Non-dict operands (symbol
+ * name resolution, enumerations, string eval, lambdas) are deferred cells. */
+static ray_t* q_value_wrap(ray_t* x) {
+    if (!x || x->type != RAY_DICT)
+        return ray_error("type", "value: expects a dict (other forms deferred)");
+    ray_t* v = ray_dict_vals(x);                /* borrowed */
+    if (!v) return ray_error("type", "value: nil vals");
+    if (v->type == RAY_LIST) return q_collapse_list(v);   /* returns owned */
+    ray_retain(v);
+    return v;
+}
+
+/* q `distinct x` / monadic `?` — unique items in FIRST-OCCURRENCE order
+ * (kdb).  rayfall's distinct routes typed vectors through the DAG group
+ * path, which SORTS — a rename would pin wrong answers, so this is a
+ * match-based dedup (type-strict, nulls equal — the ~ semantics kdb's
+ * distinct uses), collapsed back to a typed vector.  String operands are
+ * a deferred cell (string model); atoms are kdb 'type. */
+static ray_t* q_distinct_wrap(ray_t* x) {
+    if (!x) return ray_error("type", "distinct: nil");
+    if (x->type == -RAY_STR)
+        return ray_error("nyi", "distinct: string operand deferred (string model)");
+    if (!ray_is_vec(x) && x->type != RAY_LIST)
+        return ray_error("type", "distinct: expects a list, got %s",
+                         ray_type_name(x->type));
+    int64_t n = ray_len(x);
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* e = ray_at_fn(x, ia);
+        ray_release(ia);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+        int dup = 0;
+        int64_t m = ray_len(out);
+        ray_t** oe = (ray_t**)ray_data(out);
+        for (int64_t j = 0; j < m && !dup; j++) dup = q_match_rec(oe[j], e);
+        if (!dup) {
+            out = ray_list_append(out, e);
+            if (RAY_IS_ERR(out)) { ray_release(e); return out; }
+        }
+        ray_release(e);
+    }
+    ray_t* c = q_collapse_list(out);
+    ray_release(out);
+    return c;
+}
+
+/* q `x?y` — find / roll / pick (type-dispatch on the operands).
+ *   list ? y   -> find.  kdb miss semantics: the smallest index NOT in the
+ *                 list, i.e. `count x` — rayfall find returns 0N on a miss
+ *                 (atom result) or per-element 0N (vector needle), so both
+ *                 shapes are remapped to count here.
+ *   n ? int    -> roll: n randoms in [0,int)  (rayfall rand)
+ *   n ? list   -> pick: n random indices gathered from the list
+ *   -n ? m (deal / 0N?m permute), n ? float — DEFERRED cells (no rayfall
+ *   support; error, never a wrong answer). */
+static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
+    if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
+        int64_t cnt = ray_len(x);
+        ray_t* i = ray_find_fn(x, y);
+        if (!i || RAY_IS_ERR(i)) return i;
+        if (ray_is_atom(i) && i->type == -RAY_I64 && RAY_ATOM_IS_NULL(i)) {
+            ray_release(i);
+            return ray_i64(cnt);                    /* kdb: miss -> count x */
+        }
+        if (i->type == RAY_I64) {                   /* vector needle: per-elem */
+            int64_t n = ray_len(i);
+            int64_t* d = (int64_t*)ray_data(i);     /* fresh rc=1 from find */
+            for (int64_t j = 0; j < n; j++)
+                if (d[j] == NULL_I64) d[j] = cnt;
+            i->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
+        }
+        return i;
+    }
+    if (x && (x->type == -RAY_I64 || x->type == -RAY_I32)) {
+        int64_t nx = (x->type == -RAY_I64) ? x->i64 : x->i32;
+        if (RAY_ATOM_IS_NULL(x))
+            return ray_error("nyi", "?: permute (0N?y) is deferred");
+        if (nx < 0)
+            return ray_error("nyi", "?: deal (without replacement) is deferred");
+        if (y && (y->type == -RAY_I64 || y->type == -RAY_I32))  /* roll */
+            return q_env_call2("rand", x, y);
+        if (y && (ray_is_vec(y) || y->type == RAY_LIST)) {      /* pick */
+            ray_t* len = ray_i64(ray_len(y));
+            ray_t* idx = q_env_call2("rand", x, len);
+            ray_release(len);
+            if (!idx || RAY_IS_ERR(idx)) return idx;
+            ray_t* out = ray_at_fn(y, idx);
+            ray_release(idx);
+            if (out && out->type == RAY_LIST) {
+                ray_t* c = q_collapse_list(out);
+                ray_release(out);
+                return c;
+            }
+            return out;
+        }
+        if (y && (y->type == -RAY_F64 || y->type == -RAY_F32))
+            return ray_error("nyi", "?: float roll is deferred");
+        return ray_error("nyi", "?: right operand form is deferred");
+    }
+    return ray_error("type", "?: unsupported operand types");
+}
+
+/* q `t$x` — cast.  t is a sym designator (`long`float`int`short`boolean)
+ * or a lower-case single-char string ("j" "f" "i" "h" "b"); maps to the
+ * rayfall `as` type sym.  Returns NULL for unknown/deferred designators
+ * (`real/"e" — no rayfall F32 cast arm; char/byte/guid/temporals). */
+static const char* q_cast_target(ray_t* t) {
+    char c = 0;
+    if (t && t->type == -RAY_STR && ray_str_len(t) == 1) {
+        c = ray_str_ptr(t)[0];
+    } else if (t && t->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(t->i64);
+        if (!s) return NULL;
+        const char* nm = ray_str_ptr(s);
+        size_t l = ray_str_len(s);
+        const char* r = NULL;
+        if      (l == 4 && !memcmp(nm, "long",    4)) r = "I64";
+        else if (l == 5 && !memcmp(nm, "float",   5)) r = "F64";
+        else if (l == 3 && !memcmp(nm, "int",     3)) r = "I32";
+        else if (l == 5 && !memcmp(nm, "short",   5)) r = "I16";
+        else if (l == 7 && !memcmp(nm, "boolean", 7)) r = "BOOL";
+        ray_release(s);
+        return r;
+    }
+    switch (c) {
+    case 'j': return "I64";  case 'f': return "F64";  case 'i': return "I32";
+    case 'h': return "I16";  case 'b': return "BOOL";
+    default:  return NULL;
+    }
+}
+
+/* kdb float->integer casts ROUND (half-to-even: `long$3.7 is 4, "j"$2.5 is
+ * 2 — the KX ref pins `int$6.6 -> 7), where rayfall `as` truncates — so the
+ * integer targets pre-round here (rint = IEEE nearest/ties-even, kdb's
+ * mode); everything else delegates to ray_cast_fn.  Upper-case designators
+ * are Tok string-parses (ref/tok.md) — deferred on the string model. */
+static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
+    if (t && t->type == -RAY_STR && ray_str_len(t) == 1 &&
+        ray_str_ptr(t)[0] >= 'A' && ray_str_ptr(t)[0] <= 'Z')
+        return ray_error("nyi", "$: string-parse casts (Tok) are deferred");
+    const char* tgt = q_cast_target(t);
+    if (!tgt)
+        return ray_error("nyi", "$: unsupported cast designator (deferred)");
+    int8_t it = 0;
+    if      (!strcmp(tgt, "I64")) it = RAY_I64;
+    else if (!strcmp(tgt, "I32")) it = RAY_I32;
+    else if (!strcmp(tgt, "I16")) it = RAY_I16;
+    if (it && x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-it);
+        double r = rint(x->f64);              /* F32 atoms store f64 payload */
+        if (it == RAY_I64) return ray_i64((int64_t)r);
+        if (it == RAY_I32) return ray_i32((int32_t)r);
+        return ray_i16((int16_t)r);
+    }
+    if (it && x && (x->type == RAY_F64 || x->type == RAY_F32)) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_vec_new(it, n);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = n;
+        int is64 = (x->type == RAY_F64);
+        for (int64_t i = 0; i < n; i++) {
+            double v = is64 ? ((const double*)ray_data(x))[i]
+                            : (double)((const float*)ray_data(x))[i];
+            int isnull = isnan(v);
+            int64_t iv = isnull ? 0 : (int64_t)rint(v);
+            if      (it == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
+            else if (it == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
+            else                    ((int16_t*)ray_data(out))[i] = (int16_t)iv;
+            if (isnull) ray_vec_set_null(out, i, true);
+        }
+        return out;
+    }
+    ray_t* ts = ray_sym(ray_sym_intern(tgt, strlen(tgt)));
+    if (!ts || RAY_IS_ERR(ts)) return ts;
+    ray_t* r = ray_cast_fn(ts, x);
+    ray_release(ts);
+    return r;
+}
+
+/* q `f@x` — Apply At / Index At (ref/apply.md).  A callable f invokes with
+ * the single argument; everything else (vector, list, dict, table, 104h
+ * carrier) delegates to q_apply_noun — identical semantics to `f[x]`/`f x`.
+ * Special forms need UNEVALUATED args, which are already gone here -> error.
+ * Ternary Trap `@[f;fx;e]` / Amend are deferred cells (arity error today). */
+static ray_t* q_at_wrap(ray_t* f, ray_t* x) {
+    if (f && (f->type == RAY_UNARY || f->type == RAY_BINARY || f->type == RAY_VARY)
+          && (f->attrs & RAY_FN_SPECIAL_FORM))
+        return ray_error("type", "@: special forms cannot be applied");
+    if (f && f->type == RAY_UNARY)
+        return ((ray_unary_fn)(uintptr_t)f->i64)(x);
+    if (f && f->type == RAY_VARY) {
+        ray_t* one[1] = { x };
+        return ((ray_vary_fn)(uintptr_t)f->i64)(one, 1);
+    }
+    if (f && f->type == RAY_BINARY)
+        return ray_error("rank", "@: unary application of a binary verb");
+    ray_t* args[1] = { x };
+    ray_t* r = q_apply_noun(f, args, 1);
+    return r ? r : ray_error("type", "@: not applicable");
+}
+
+/* q `v . vx` — Apply / Index (ref/apply.md): the rhs is the ARGUMENT LIST —
+ * a rank-n callable spread-calls over vx's n items; a noun depth-indexes
+ * (m . 1 2 is m[1;2]).  Atom rhs is not a list -> 'type (kdb wants a list).
+ * Ternary Trap `.[g;gx;e]` / Amend are deferred cells (arity error today). */
+static ray_t* q_dot_wrap(ray_t* f, ray_t* a) {
+    if (!a || (!ray_is_vec(a) && a->type != RAY_LIST))
+        return ray_error("type", ".: rhs must be an argument list");
+    if (f && (f->type == RAY_UNARY || f->type == RAY_BINARY || f->type == RAY_VARY)
+          && (f->attrs & RAY_FN_SPECIAL_FORM))
+        return ray_error("type", ".: special forms cannot be applied");
+    int64_t n = ray_len(a);
+    if (n < 1 || n > 8) return ray_error("rank", ".: 1..8 arguments");
+    ray_t* args[8];
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        args[i] = ray_at_fn(a, ia);
+        ray_release(ia);
+        if (!args[i] || RAY_IS_ERR(args[i])) {
+            ray_t* err = args[i];
+            for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+            return err ? err : ray_error("type", ".: bad argument list");
+        }
+    }
+    ray_t* r;
+    if (f && f->type == RAY_UNARY && n == 1)
+        r = ((ray_unary_fn)(uintptr_t)f->i64)(args[0]);
+    else if (f && f->type == RAY_BINARY && n == 2)
+        r = ((ray_binary_fn)(uintptr_t)f->i64)(args[0], args[1]);
+    else if (f && f->type == RAY_VARY)
+        r = ((ray_vary_fn)(uintptr_t)f->i64)(args, n);
+    else if (f && (f->type == RAY_UNARY || f->type == RAY_BINARY))
+        r = ray_error("rank", ".: argument count does not match the verb's rank");
+    else {
+        r = q_apply_noun(f, args, n);
+        if (!r) r = ray_error("type", ".: not applicable");
+    }
+    for (int64_t j = 0; j < n; j++) ray_release(args[j]);
+    return r;
+}
+
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
 static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
@@ -390,6 +692,15 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
     case QK_MATCH:return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_match_wrap);
     case QK_FLOOR:return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_floor_wrap);
+    case QK_BANG: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_bang_wrap);
+    case QK_KEY:  return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_key_wrap);
+    case QK_VALUE:return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_value_wrap);
+    case QK_DISTINCT:
+                  return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_distinct_wrap);
+    case QK_ROLL: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_roll_wrap);
+    case QK_CAST: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cast_wrap);
+    case QK_AT:   return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_at_wrap);
+    case QK_DOT:  return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_dot_wrap);
     default:      return NULL;
     }
 }
