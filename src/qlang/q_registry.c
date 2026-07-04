@@ -34,6 +34,7 @@
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
 #include "lang/format.h"      /* ray_type_name — wrapper error messages */
+#include "mem/heap.h"         /* RAY_ATTR_HAS_NULLS — ? find miss remap */
 #include <assert.h>
 #include <math.h>     /* floor/floorf — q monadic `_` */
 #include <stdio.h>
@@ -371,6 +372,62 @@ static ray_t* q_distinct_wrap(ray_t* x) {
     return c;
 }
 
+/* q `x?y` — find / roll / pick (type-dispatch on the operands).
+ *   list ? y   -> find.  kdb miss semantics: the smallest index NOT in the
+ *                 list, i.e. `count x` — rayfall find returns 0N on a miss
+ *                 (atom result) or per-element 0N (vector needle), so both
+ *                 shapes are remapped to count here.
+ *   n ? int    -> roll: n randoms in [0,int)  (rayfall rand)
+ *   n ? list   -> pick: n random indices gathered from the list
+ *   -n ? m (deal / 0N?m permute), n ? float — DEFERRED cells (no rayfall
+ *   support; error, never a wrong answer). */
+static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
+    if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
+        int64_t cnt = ray_len(x);
+        ray_t* i = ray_find_fn(x, y);
+        if (!i || RAY_IS_ERR(i)) return i;
+        if (ray_is_atom(i) && i->type == -RAY_I64 && RAY_ATOM_IS_NULL(i)) {
+            ray_release(i);
+            return ray_i64(cnt);                    /* kdb: miss -> count x */
+        }
+        if (i->type == RAY_I64) {                   /* vector needle: per-elem */
+            int64_t n = ray_len(i);
+            int64_t* d = (int64_t*)ray_data(i);     /* fresh rc=1 from find */
+            for (int64_t j = 0; j < n; j++)
+                if (d[j] == NULL_I64) d[j] = cnt;
+            i->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
+        }
+        return i;
+    }
+    if (x && (x->type == -RAY_I64 || x->type == -RAY_I32)) {
+        int64_t nx = (x->type == -RAY_I64) ? x->i64 : x->i32;
+        if (RAY_ATOM_IS_NULL(x))
+            return ray_error("nyi", "?: permute (0N?y) is deferred");
+        if (nx < 0)
+            return ray_error("nyi", "?: deal (without replacement) is deferred");
+        if (y && (y->type == -RAY_I64 || y->type == -RAY_I32))  /* roll */
+            return q_env_call2("rand", x, y);
+        if (y && (ray_is_vec(y) || y->type == RAY_LIST)) {      /* pick */
+            ray_t* len = ray_i64(ray_len(y));
+            ray_t* idx = q_env_call2("rand", x, len);
+            ray_release(len);
+            if (!idx || RAY_IS_ERR(idx)) return idx;
+            ray_t* out = ray_at_fn(y, idx);
+            ray_release(idx);
+            if (out && out->type == RAY_LIST) {
+                ray_t* c = q_collapse_list(out);
+                ray_release(out);
+                return c;
+            }
+            return out;
+        }
+        if (y && (y->type == -RAY_F64 || y->type == -RAY_F32))
+            return ray_error("nyi", "?: float roll is deferred");
+        return ray_error("nyi", "?: right operand form is deferred");
+    }
+    return ray_error("type", "?: unsupported operand types");
+}
+
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
 static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
@@ -500,6 +557,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_VALUE:return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_value_wrap);
     case QK_DISTINCT:
                   return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_distinct_wrap);
+    case QK_ROLL: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_roll_wrap);
     default:      return NULL;
     }
 }
