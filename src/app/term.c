@@ -1132,6 +1132,11 @@ static void comp_cycle_insert(ray_term_t* term, int32_t idx) {
 /* ===== Multi-line input ===== */
 
 int32_t ray_term_count_unmatched(ray_term_t* term) {
+    /* openq: a pluggable continuation policy fully replaces the built-in
+     * counter (whose `;`-as-comment rule is rayfall-correct, q-wrong). */
+    if (term->continuation_fn)
+        return term->continuation_fn(term->multiline_buf, term->multiline_len,
+                                     term->buf, term->buf_len);
     int32_t depth = 0;
     int32_t in_string = 0;
 
@@ -1250,6 +1255,11 @@ void ray_term_set_prompt(ray_term_t* term, const char* ansi, int32_t vis_width) 
 void ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn) {
     if (!term) return;
     term->highlight_fn = fn;
+}
+
+void ray_term_set_continuation_fn(ray_term_t* term, ray_continuation_fn fn) {
+    if (!term) return;
+    term->continuation_fn = fn;
 }
 
 /* Dispatch to the caller-supplied highlighter when one is installed,
