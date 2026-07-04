@@ -234,10 +234,10 @@ qtest: LDFLAGS = $(DEBUG_LDFLAGS)
 qtest: $(LIB_OBJ) $(TEST_OBJ) $(QDOC_TARGET)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	@rc=0; \
-	RAY_DFD=1 RAYFORCE_CORES=$(TEST_CORES) timeout 900 ./$(TARGET).test -f qlang || rc=$$?; \
-	tools/qtest-ledger.sh || rc=$$?; \
-	exit $$rc
+	@timeout 900 sh -c 'rc=0; RAY_DFD=1 RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test -f qlang || rc=$$?; tools/qtest-ledger.sh || rc=$$?; exit $$rc' || \
+	  { rc=$$?; if [ $$rc -eq 124 ]; then \
+	      echo "QTEST TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make qtest"; \
+	    fi; exit $$rc; }
 
 # openq: NON-GATING differential parser-test ledger.  Links the TSV runner
 # (test/test_q_parse_tsv.c) into the test binary alongside the normal suites,
@@ -250,13 +250,19 @@ test-parse-diff: LDFLAGS = $(DEBUG_LDFLAGS)
 test-parse-diff: $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o build/$(TARGET).parsediff.test $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=1 RAYFORCE_CORES=$(TEST_CORES) timeout 900 ./build/$(TARGET).parsediff.test -f qlang/parse
+	RAY_DFD=1 RAYFORCE_CORES=$(TEST_CORES) timeout 900 ./build/$(TARGET).parsediff.test -f qlang/parse || \
+	  { rc=$$?; if [ $$rc -eq 124 ]; then \
+	      echo "PARSE-DIFF TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make test-parse-diff"; \
+	    fi; exit $$rc; }
 
 # openq: regenerate the checked-in q-docs failure ledger (qtest-results.txt).
 # The user runs this on demand; `make qtest` never writes it (stays side-effect
 # free on tracked files).
 qtest-results: $(QDOC_TARGET)
-	timeout 900 ./$(QDOC_TARGET) --results qtest-results.txt --skip-file test/qdoctest.skip qdocs/docs
+	timeout 900 ./$(QDOC_TARGET) --results qtest-results.txt --skip-file test/qdoctest.skip qdocs/docs || \
+	  { rc=$$?; if [ $$rc -eq 124 ]; then \
+	      echo "QTEST-RESULTS TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make qtest-results"; \
+	    fi; exit $$rc; }
 
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
