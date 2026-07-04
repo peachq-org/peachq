@@ -624,6 +624,7 @@ static P       parse_e(Parser *p);
 static P       parse_e_from(Parser *p, P t);
 static P       parse_term(Parser *p);
 static P       parse_base(Parser *p);
+static ray_t  *parse_qsql_select(Parser *p, int *ok);   /* piece 3: qSQL SELECT */
 
 /* Statement sequence: one -> its element; two+ -> (`;; ...).  Consumes e. */
 static ray_t *seq_of(ray_t *e) {
@@ -755,6 +756,18 @@ static P parse_term(Parser *p) {
 }
 
 static P parse_e(Parser *p) {
+    /* qSQL interception (piece 3): a `select …` statement lowers to kdb's
+     * functional parse tree (?;`t;c;b;a).  On any unsupported form parse_qsql
+     * soft-fails (restores p->pos, leaves tokens intact) and we fall through to
+     * the ordinary parser — so previously-parseable selects never regress. */
+    if (cur(p)->kind == T_NOUN) {
+        Token *tk = cur(p);
+        if (tk->len == 6 && memcmp(p->src + tk->start, "select", 6) == 0) {
+            int ok = 1;
+            ray_t *q = parse_qsql_select(p, &ok);
+            if (ok && q) return (P){ R_NOUN, q };
+        }
+    }
     P t = parse_term(p);
     if (t.role == R_NONE) return EMPTY;
     return parse_e_from(p, t);
@@ -798,6 +811,325 @@ static P parse_e_from(Parser *p, P t) {
     if (e.role == R_VERB && q_sym_is_glyph(e.v)) e.v = q_embed(e.v, Q_DYADIC);
     ray_t *xs[2] = { t.v, e.v };
     return (P){ R_NOUN, q_list(xs, 2) };
+}
+
+/* ===== qSQL SELECT parser (piece 3) =========================================
+ * Lowers a `select …` statement to kdb's functional parse tree:
+ *
+ *     (?; `t; c; b; a)
+ *
+ *   `t  the from-table NAME as a symbol literal
+ *   c   where-constraints: () when none, else enlist(constraint-list) where
+ *       each constraint is a parse tree (op;`col;arg) — so one constraint
+ *       displays ,,(op;…) and two ,((…);(…)), matching the docs' vertical form.
+ *   b   by-clause: 0b when none, else a name!expr dict.
+ *   a   select-columns: () when none, else a name!expr dict.
+ *
+ * Inside clause expressions a bare identifier is a COLUMN reference (a symbol
+ * literal `col`) unless it resolves to a function value (an aggregate/keyword
+ * like `sum`, embedded as its value so it prints bare); a `sym literal is a
+ * VALUE so it is enlisted (,`s); numbers stay as-is.  This is q's qSQL rule.
+ *
+ * The parser is deliberately CORE-only (no joins/fby/subqueries); on any shape
+ * it does not recognise it sets *ok=0, and the caller restores the token
+ * position and re-parses the statement the ordinary way (no parse regression). */
+
+#define QSQL_MAXCOLS 256
+
+/* token text equals a keyword (only meaningful for T_NOUN identifier tokens) */
+static int qtok_is(Parser *p, Token *tk, const char *kw, int kwlen) {
+    return tk->kind == T_NOUN && tk->len == kwlen &&
+           memcmp(p->src + tk->start, kw, (size_t)kwlen) == 0;
+}
+
+/* a clause boundary: end-of-clause markers plus the ',' column/constraint
+ * separator (a bare comma verb) and the qSQL section keywords. */
+static int qsql_boundary(Parser *p) {
+    Token *tk = cur(p);
+    switch (tk->kind) {
+    case T_EOF: case T_SEMI: case T_RBRACK: case T_RPAREN: case T_RBRACE:
+        return 1;
+    case T_VERB:
+        return tk->len == 1 && p->src[tk->start] == ',';
+    case T_NOUN:
+        return qtok_is(p, tk, "by", 2) || qtok_is(p, tk, "from", 4) ||
+               qtok_is(p, tk, "where", 5);
+    default:
+        return 0;
+    }
+}
+
+/* a symbol-literal column reference `col (ATTR_QUOTED set) from an interned id */
+static ray_t *qsql_colsym(int64_t id) {
+    ray_t *s = ray_sym(id);
+    if (s && !RAY_IS_ERR(s)) s->attrs |= Q_ATTR_QUOTED;
+    return s;
+}
+
+/* enlist an owned value into a 1-element general list (consumes v) */
+static ray_t *qsql_enlist(ray_t *v) {
+    ray_t *l = ray_list_new(1);
+    l = ray_list_append(l, v);
+    ray_release(v);
+    return l;
+}
+
+static ray_t *qsql_expr(Parser *p, int *ok);
+
+/* One clause TERM: a column symbol, an embedded function value, a `sym literal
+ * (enlisted), a number/other literal (as-is), or a parenthesised sub-expr. */
+static ray_t *qsql_term(Parser *p, int *ok) {
+    Token *tk = cur(p);
+    if (tk->kind == T_LPAREN) {
+        adv(p);
+        ray_t *e = qsql_expr(p, ok);
+        if (!*ok) { if (e) ray_release(e); return NULL; }
+        if (!at(p, T_RPAREN)) { *ok = 0; if (e) ray_release(e); return NULL; }
+        adv(p);
+        return e;
+    }
+    if (tk->kind != T_NOUN || !tk->k) { *ok = 0; return NULL; }
+    ray_t *k = tk->k;
+    if (k->type == -RAY_SYM) {
+        if (k->attrs & Q_ATTR_QUOTED) {              /* `sym literal -> ,`sym */
+            adv(p);
+            ray_t *vec = ray_sym_vec_new(RAY_SYM_W64, 1);
+            ray_t *s = ray_sym_str(k->i64);
+            vec = q_symvec_append(vec, ray_str_ptr(s), (int)ray_str_len(s));
+            ray_release(s);
+            return vec;
+        }
+        int64_t id = k->i64;                          /* name reference */
+        adv(p);
+        ray_t *ev = ray_env_get(id);
+        if (ev && (ev->type == RAY_UNARY || ev->type == RAY_BINARY ||
+                   ev->type == RAY_VARY)) {           /* function -> its value */
+            ray_retain(ev);
+            return ev;
+        }
+        return qsql_colsym(id);                        /* else column symbol */
+    }
+    if (k->type == RAY_SYM) {                          /* `a`b vector -> ,`a`b */
+        adv(p);
+        ray_retain(k);
+        return qsql_enlist(k);
+    }
+    adv(p);                                            /* number / other literal */
+    ray_retain(k);
+    return k;
+}
+
+/* A clause EXPRESSION: right-associative infix / prefix application, stopping
+ * at any clause boundary.  Verbs stay bare-glyph symbols so they print `>`,`*`. */
+static ray_t *qsql_expr(Parser *p, int *ok) {
+    ray_t *t = qsql_term(p, ok);
+    if (!*ok) return NULL;
+    if (qsql_boundary(p)) return t;
+    Token *tk = cur(p);
+    if (tk->kind == T_VERB) {                          /* infix: (op; t; rhs) */
+        ray_t *op = tk->k;
+        if (!op) { *ok = 0; ray_release(t); return NULL; }
+        ray_retain(op);
+        adv(p);
+        ray_t *rhs = qsql_expr(p, ok);
+        if (!*ok) { ray_release(op); ray_release(t); if (rhs) ray_release(rhs); return NULL; }
+        ray_t *node = ray_list_new(3);
+        node = ray_list_append(node, op);  ray_release(op);
+        node = ray_list_append(node, t);   ray_release(t);
+        node = ray_list_append(node, rhs); ray_release(rhs);
+        return node;
+    }
+    if (tk->kind == T_NOUN || tk->kind == T_LPAREN) {  /* prefix app: (t; rhs) */
+        /* Prefix application is well-formed ONLY when the term is a FUNCTION
+         * value (an aggregate: `sum col`, `max price`).  A column/literal
+         * followed by another token is a keyword-infix predicate (`a in b`,
+         * `sym like "x"`) — the scanner leaves in/like/within as name-ref
+         * nouns, so we cannot render them kdb-faithfully here.  Soft-fail so
+         * the ordinary parser consumes the whole statement, rather than emit a
+         * malformed tree that the interceptor would wrongly accept. */
+        if (!(t->type == RAY_UNARY || t->type == RAY_BINARY || t->type == RAY_VARY)) {
+            *ok = 0; ray_release(t); return NULL;
+        }
+        ray_t *rhs = qsql_expr(p, ok);
+        if (!*ok) { ray_release(t); if (rhs) ray_release(rhs); return NULL; }
+        ray_t *node = ray_list_new(2);
+        node = ray_list_append(node, t);   ray_release(t);
+        node = ray_list_append(node, rhs); ray_release(rhs);
+        return node;
+    }
+    *ok = 0;
+    ray_release(t);
+    return NULL;
+}
+
+/* Rightmost column symbol in an expression — the default output-column name
+ * (`sum a` -> `a`, `a` -> `a`).  Returns a fresh owned `sym, or NULL. */
+static ray_t *qsql_derive_alias(ray_t *expr) {
+    if (!expr) return NULL;
+    if (expr->type == -RAY_SYM && (expr->attrs & Q_ATTR_QUOTED))
+        return qsql_colsym(expr->i64);
+    if (expr->type == RAY_LIST) {
+        int64_t n = ray_len(expr);
+        ray_t **e = (ray_t **)ray_data(expr);
+        for (int64_t i = n - 1; i >= 0; i--) {
+            ray_t *a = qsql_derive_alias(e[i]);
+            if (a) return a;
+        }
+    }
+    return NULL;
+}
+
+/* One column spec: optional `alias:` then an expression.  On success stores an
+ * owned alias `sym and value expr; returns 0 (with nothing owned) on failure. */
+static int qsql_colspec(Parser *p, ray_t **out_alias, ray_t **out_val) {
+    int ok = 1;
+    ray_t *alias = NULL;
+    Token *t0 = cur(p);
+    Token *t1 = &p->t.t[p->pos + 1];
+    if (t0->kind == T_NOUN && t0->k && t0->k->type == -RAY_SYM &&
+        !(t0->k->attrs & Q_ATTR_QUOTED) &&
+        t1->kind == T_VERB && t1->len == 1 && p->src[t1->start] == ':') {
+        alias = qsql_colsym(t0->k->i64);
+        adv(p); adv(p);
+    }
+    ray_t *val = qsql_expr(p, &ok);
+    if (!ok || !val) { if (alias) ray_release(alias); if (val) ray_release(val); return 0; }
+    if (!alias) alias = qsql_derive_alias(val);
+    if (!alias) { ray_release(val); return 0; }   /* unnameable -> soft-fail */
+    *out_alias = alias; *out_val = val;
+    return 1;
+}
+
+/* Comma-separated column-spec list up to a section boundary.  Fills the caller
+ * arrays; *n stays 0 for an empty list (e.g. `select from`). */
+static int qsql_collist(Parser *p, ray_t **aliases, ray_t **vals, int *n) {
+    *n = 0;
+    if (qsql_boundary(p)) return 1;                 /* empty (immediately by/from) */
+    for (;;) {
+        if (*n >= QSQL_MAXCOLS) return 0;
+        if (!qsql_colspec(p, &aliases[*n], &vals[*n])) return 0;
+        (*n)++;
+        Token *tk = cur(p);
+        if (tk->kind == T_VERB && tk->len == 1 && p->src[tk->start] == ',') { adv(p); continue; }
+        break;
+    }
+    return 1;
+}
+
+/* Build a q name!expr dict from a column list (consumes the alias/val refs). */
+static ray_t *qsql_build_dict(ray_t **aliases, ray_t **vals, int n) {
+    ray_t *keys = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
+    for (int i = 0; i < n; i++) {
+        ray_t *s = ray_sym_str(aliases[i]->i64);
+        keys = q_symvec_append(keys, ray_str_ptr(s), (int)ray_str_len(s));
+        ray_release(s);
+    }
+    int all_sym = 1;
+    for (int i = 0; i < n; i++)
+        if (!(vals[i] && vals[i]->type == -RAY_SYM && (vals[i]->attrs & Q_ATTR_QUOTED)))
+            { all_sym = 0; break; }
+    ray_t *valv;
+    if (all_sym) {
+        valv = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
+        for (int i = 0; i < n; i++) {
+            ray_t *s = ray_sym_str(vals[i]->i64);
+            valv = q_symvec_append(valv, ray_str_ptr(s), (int)ray_str_len(s));
+            ray_release(s);
+        }
+    } else {
+        valv = ray_list_new(n > 0 ? n : 1);
+        for (int i = 0; i < n; i++) valv = ray_list_append(valv, vals[i]);
+    }
+    for (int i = 0; i < n; i++) { ray_release(aliases[i]); ray_release(vals[i]); }
+    return ray_dict_new(keys, valv);   /* consumes keys, valv */
+}
+
+/* where-clause: comma-separated constraints -> enlist(constraint-list). */
+static ray_t *qsql_where(Parser *p, int *ok) {
+    ray_t *cons[QSQL_MAXCOLS]; int nc = 0;
+    for (;;) {
+        if (nc >= QSQL_MAXCOLS) { *ok = 0; break; }
+        ray_t *e = qsql_expr(p, ok);
+        if (!*ok) break;
+        cons[nc++] = e;
+        Token *tk = cur(p);
+        if (tk->kind == T_VERB && tk->len == 1 && p->src[tk->start] == ',') { adv(p); continue; }
+        break;
+    }
+    if (!*ok) { for (int i = 0; i < nc; i++) ray_release(cons[i]); return NULL; }
+    ray_t *clist = ray_list_new(nc);
+    for (int i = 0; i < nc; i++) { clist = ray_list_append(clist, cons[i]); ray_release(cons[i]); }
+    return qsql_enlist(clist);
+}
+
+/* select COLS [by BYCOLS] from TABLE [where CONSTRAINTS] -> (?;`t;c;b;a). */
+static ray_t *parse_qsql_select(Parser *p, int *ok) {
+    *ok = 1;
+    int save = p->pos;
+    ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS]; int na = 0;
+    ray_t *b = NULL, *t = NULL, *c = NULL, *a = NULL, *head = NULL, *q = NULL;
+
+    adv(p);                                       /* consume `select` */
+    if (!qsql_collist(p, aliases, vals, &na)) { *ok = 0; goto fail; }
+
+    if (qtok_is(p, cur(p), "by", 2)) {            /* by-clause */
+        adv(p);
+        ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS]; int nb = 0;
+        if (!qsql_collist(p, bk, bv, &nb) || nb == 0) {
+            for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
+            *ok = 0; goto fail;
+        }
+        b = qsql_build_dict(bk, bv, nb);
+    } else {
+        b = ray_bool(0);
+    }
+
+    if (!qtok_is(p, cur(p), "from", 4)) { *ok = 0; goto fail; }
+    adv(p);
+    Token *tt = cur(p);                           /* from TABLE (a name) */
+    if (tt->kind != T_NOUN || !tt->k || tt->k->type != -RAY_SYM ||
+        (tt->k->attrs & Q_ATTR_QUOTED)) { *ok = 0; goto fail; }
+    t = qsql_colsym(tt->k->i64);
+    adv(p);
+
+    if (qtok_is(p, cur(p), "where", 5)) {         /* where-clause */
+        adv(p);
+        c = qsql_where(p, ok);
+        if (!*ok) goto fail;
+    } else {
+        c = ray_list_new(0);
+    }
+
+    /* Anything beyond the CORE grammar left in the statement (a join `from t,u`
+     * / `from t lj u`, a trailing phrase, …) means this is not a form we lower.
+     * Soft-fail so the ordinary parser consumes the WHOLE statement — otherwise
+     * the leftover tokens would trip q_parse's EOF check (a parse regression). */
+    {
+        Token *end = cur(p);
+        if (end->kind != T_EOF && end->kind != T_SEMI && end->kind != T_RBRACK &&
+            end->kind != T_RPAREN && end->kind != T_RBRACE) { *ok = 0; goto fail; }
+    }
+
+    a = (na == 0) ? ray_list_new(0) : qsql_build_dict(aliases, vals, na);
+    na = 0;                                        /* consumed by build_dict */
+
+    head = q_verb('?');
+    q = ray_list_new(5);
+    q = ray_list_append(q, head); ray_release(head);
+    q = ray_list_append(q, t);    ray_release(t);
+    q = ray_list_append(q, c);    ray_release(c);
+    q = ray_list_append(q, b);    ray_release(b);
+    q = ray_list_append(q, a);    ray_release(a);
+    return q;
+
+fail:
+    for (int i = 0; i < na; i++) { ray_release(aliases[i]); ray_release(vals[i]); }
+    if (b) ray_release(b);
+    if (t) ray_release(t);
+    if (c) ray_release(c);
+    if (a) ray_release(a);
+    p->pos = save;
+    return NULL;
 }
 
 static ray_t *parse_E(Parser *p) {
@@ -879,6 +1211,10 @@ ray_t *q_parse(const char *src) {
 static void ql_dyad_head(ray_t **slot) {
     ray_t *node = *slot;
     int64_t n = ray_len(node);
+    /* Only monadic (n==2) / dyadic (n==3) keyword calls are candidates — guard
+     * BEFORE touching e[0], so an empty list () (e.g. the qSQL `c`/`a` clauses
+     * that q_lower now walks) never reads past the end. */
+    if (n != 2 && n != 3) return;
     ray_t **e = (ray_t **)ray_data(node);
     if (!e[0] || e[0]->type != -RAY_SYM || (e[0]->attrs & Q_ATTR_QUOTED))
         return;
@@ -886,10 +1222,7 @@ static void ql_dyad_head(ray_t **slot) {
      * calls whose registry cell is a q WRAPPER diverging from the env
      * builtin (floor: q returns longs, rayfall env floor keeps f64) —
      * pass-through rows swap to the identical env object (harmless). */
-    q_valence_t val;
-    if (n == 3)      val = Q_DYADIC;
-    else if (n == 2) val = Q_MONADIC;
-    else return;
+    q_valence_t val = (n == 3) ? Q_DYADIC : Q_MONADIC;
     ray_t *s = ray_sym_str(e[0]->i64);
     if (!s) return;
     ray_t *hit = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), val);
