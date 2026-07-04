@@ -880,11 +880,19 @@ static void ql_dyad_head(ray_t **slot) {
     ray_t *node = *slot;
     int64_t n = ray_len(node);
     ray_t **e = (ray_t **)ray_data(node);
-    if (n != 3 || !e[0] || e[0]->type != -RAY_SYM || (e[0]->attrs & Q_ATTR_QUOTED))
+    if (!e[0] || e[0]->type != -RAY_SYM || (e[0]->attrs & Q_ATTR_QUOTED))
         return;
+    /* dyadic bracket/prefix keyword calls (each[f;x]); AND monadic keyword
+     * calls whose registry cell is a q WRAPPER diverging from the env
+     * builtin (floor: q returns longs, rayfall env floor keeps f64) —
+     * pass-through rows swap to the identical env object (harmless). */
+    q_valence_t val;
+    if (n == 3)      val = Q_DYADIC;
+    else if (n == 2) val = Q_MONADIC;
+    else return;
     ray_t *s = ray_sym_str(e[0]->i64);
     if (!s) return;
-    ray_t *hit = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), Q_DYADIC);
+    ray_t *hit = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), val);
     ray_release(s);
     if (hit) {              /* borrowed -> retain one, drop the name-ref */
         ray_retain(hit);
@@ -1045,7 +1053,16 @@ static void ql_deriv_value(ray_t **slot) {
     if (!hof) return;                        /* ': /: \: stay deferred */
     ray_t *quote = ql_env_val("quote");
     if (!quote) return;
-    ray_t *args[2] = { e[1], NULL };         /* V bound, data operand open */
+    /* A keyword operand (`neg'`) is still a name-ref sym — bind its VALUE in
+     * the carrier (kdb derives from the value): env first (keywords, user
+     * fns); glyphs were already embedded by the parser.  Miss -> keep the
+     * sym (name error surfaces at apply). */
+    ray_t *V = e[1];
+    if (V && V->type == -RAY_SYM && !(V->attrs & Q_ATTR_QUOTED)) {
+        ray_t *rv = ray_env_get(V->i64);
+        if (rv) V = rv;                      /* borrowed; q_proj_new retains */
+    }
+    ray_t *args[2] = { V, NULL };            /* V bound, data operand open */
     ray_t *carrier = q_proj_new(hof, args, 2, 0x2u, 1);
     if (!carrier || RAY_IS_ERR(carrier)) { if (carrier) ray_release(carrier); return; }
     ray_t *repl = ray_list_new(2);

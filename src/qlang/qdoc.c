@@ -8,6 +8,8 @@
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <string.h>
+#include <unistd.h>
+#include <stdlib.h>
 
 #define QD_IN   2048
 #define QD_OUT  8192
@@ -50,6 +52,7 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
         return;
     }
 
+    if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
     int is_assign = q_ast_is_assign(ast);   /* pre-lower shape */
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) {

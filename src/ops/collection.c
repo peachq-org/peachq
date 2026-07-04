@@ -1832,7 +1832,12 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
             int alloc = 0;
             ray_t* idx_elem = collection_elem(idx, j, &alloc);
             if (RAY_IS_ERR(idx_elem)) {
+                /* len was pre-set to idxlen: zero it BEFORE the release or
+                 * ray_release walks the unfilled slots as child pointers
+                 * (uninitialized garbage -> heap corruption).  Same pattern
+                 * as ray_map_fn's error path. */
                 for (int64_t k = 0; k < j; k++) ray_release(out[k]);
+                result->len = 0;
                 ray_release(result);
                 return idx_elem;
             }
@@ -1841,6 +1846,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
             if (alloc) ray_release(idx_elem);
             if (RAY_IS_ERR(val)) {
                 for (int64_t k = 0; k < j; k++) ray_release(out[k]);
+                result->len = 0;
                 ray_release(result);
                 return val;
             }
