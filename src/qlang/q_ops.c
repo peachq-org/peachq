@@ -14,9 +14,9 @@
  *   - q `,` dyadic is join -> rayfall `concat`.
  * DEFERRED (QK_NONE — no clean rayfall target, do NOT guess): `&`/`|` dyadic
  *   (min/max are AGGREGATES, not dyadic element-wise lesser/greater), monadic
- *   `+` (flip: no builtin), monadic `%` (reciprocal: no builtin), dyadic `~`
- *   (match: no builtin).  Type-dispatch verbs `! ? $ @ . _` are entirely out of
- *   2a scope (2c).
+ *   `+` (flip: no builtin), monadic `%` (reciprocal: no builtin).  Dyadic `~`
+ *   is the QK_MATCH wrapper (2c-1).  The remaining type-dispatch verbs
+ *   `! ? $ @ .` land in 2c-2.
  *
  * KW_INFIX is held to EXACTLY {div} so the lexer's infix-keyword classification
  * is byte-identical to the retired q_is_kw_verb memcmp — guarding the parse_*
@@ -40,11 +40,14 @@ static const q_op_t Q_OPS[] = {
     { "<>",    QLEX_GLYPH,     QK_NONE, NULL,        QK_NE,    "!=",      NULL  },
     /* ---- structural glyphs ---- */
     { "#",     QLEX_GLYPH,     QK_ENV,  "count",     QK_TAKE,  "take",    NULL  },
-    { "_",     QLEX_GLYPH,     QK_NONE, NULL,        QK_DROP,  "drop",    NULL  },
+    /* monadic `_` is a K-ism (valid q spells it `floor`) — accepting it is a
+     * deliberate SUPERSET of q source; the VALUE is kdb-identical (kdb's own
+     * floor IS k `_:`).  The q spelling is the `floor` keyword row below. */
+    { "_",     QLEX_GLYPH,     QK_FLOOR, "floor",    QK_DROP,  "drop",    NULL  },
     { "|",     QLEX_GLYPH,     QK_ENV,  "reverse",   QK_NONE,  NULL,      NULL  },
     { "&",     QLEX_GLYPH,     QK_ENV,  "where",     QK_NONE,  NULL,      NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
-    { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_NONE,  NULL,      NULL  },
+    { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
@@ -61,6 +64,9 @@ static const q_op_t Q_OPS[] = {
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
     { "avg",     QLEX_KW_PREFIX, QK_ENV, "avg",      QK_NONE,  NULL,      NULL  },
+    /* q `floor` returns LONGS from floats (kdb `floor 3.7` is 3j); rayfall's
+     * env floor keeps f64, so this is the QK_FLOOR wrapper, not a rename. */
+    { "floor",   QLEX_KW_PREFIX, QK_FLOOR, "floor",  QK_NONE,  NULL,      NULL  },
     /* q-implemented keywords: env bindings added by q_builtins_register
      * (same mechanism as `parse`), snapshotted here as pass-through rows. */
     { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
