@@ -266,6 +266,111 @@ static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
+/* Call the env-bound BINARY builtin `nm` (the wrapper-over-env pattern:
+ * some base fns — dict — are declared only in internal base headers, so the
+ * wrapper routes through the audited env value instead of a frozen-header
+ * include).  Borrowed args; returns owned. */
+static ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
+    ray_t* f = ray_env_get(ray_sym_intern(nm, strlen(nm)));
+    if (!f || f->type != RAY_BINARY)
+        return ray_error("type", "%s: env builtin missing", nm);
+    return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
+}
+
+/* q `x!y` — dict make.  An atom key enlists to a 1-vector first (kdb `a!1`
+ * is a dict too; rayfall dict wants vector keys); vals pass through as-is
+ * (rayfall dict broadcasts atom vals and boxes the rest itself).  kdb
+ * 'length fidelity: rayfall would null-fill a short vals side, so the
+ * count check lives here.  String keys are a deferred cell (string model). */
+static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "!: nil operand");
+    ray_t* keys = x;
+    ray_t* keys_owned = NULL;
+    if (ray_is_atom(x)) {
+        ray_t* l = ray_list_new(1);
+        l = ray_list_append(l, x);
+        if (RAY_IS_ERR(l)) return l;
+        keys_owned = q_collapse_list(l);
+        ray_release(l);
+        if (!keys_owned || RAY_IS_ERR(keys_owned))
+            return keys_owned ? keys_owned : ray_error("type", NULL);
+        if (!ray_is_vec(keys_owned)) {          /* -RAY_STR & friends stay boxed */
+            ray_release(keys_owned);
+            return ray_error("type", "!: unsupported key type (deferred)");
+        }
+        keys = keys_owned;
+    }
+    if ((ray_is_vec(y) || y->type == RAY_LIST) &&
+        (ray_is_vec(keys) || keys->type == RAY_LIST) &&
+        ray_len(keys) != ray_len(y)) {
+        if (keys_owned) ray_release(keys_owned);
+        return ray_error("length", "!: key and value counts must match");
+    }
+    ray_t* r = q_env_call2("dict", keys, y);
+    if (keys_owned) ray_release(keys_owned);
+    return r;
+}
+
+/* q `key d` / monadic `!` — dict keys.  Non-dict operands (file handles,
+ * namespaces, enumerations, vectors) are deferred cells: error, never a
+ * wrong answer. */
+static ray_t* q_key_wrap(ray_t* x) {
+    if (!x || x->type != RAY_DICT)
+        return ray_error("type", "key: expects a dict (other forms deferred)");
+    ray_t* k = ray_dict_keys(x);                /* borrowed */
+    if (!k) return ray_error("type", "key: nil keys");
+    ray_retain(k);
+    return k;
+}
+
+/* q `value d` — dict values, collapsed to a simple vector where homogeneous
+ * (rayfall's dict stores vals as a boxed list).  Non-dict operands (symbol
+ * name resolution, enumerations, string eval, lambdas) are deferred cells. */
+static ray_t* q_value_wrap(ray_t* x) {
+    if (!x || x->type != RAY_DICT)
+        return ray_error("type", "value: expects a dict (other forms deferred)");
+    ray_t* v = ray_dict_vals(x);                /* borrowed */
+    if (!v) return ray_error("type", "value: nil vals");
+    if (v->type == RAY_LIST) return q_collapse_list(v);   /* returns owned */
+    ray_retain(v);
+    return v;
+}
+
+/* q `distinct x` / monadic `?` — unique items in FIRST-OCCURRENCE order
+ * (kdb).  rayfall's distinct routes typed vectors through the DAG group
+ * path, which SORTS — a rename would pin wrong answers, so this is a
+ * match-based dedup (type-strict, nulls equal — the ~ semantics kdb's
+ * distinct uses), collapsed back to a typed vector.  String operands are
+ * a deferred cell (string model); atoms are kdb 'type. */
+static ray_t* q_distinct_wrap(ray_t* x) {
+    if (!x) return ray_error("type", "distinct: nil");
+    if (x->type == -RAY_STR)
+        return ray_error("nyi", "distinct: string operand deferred (string model)");
+    if (!ray_is_vec(x) && x->type != RAY_LIST)
+        return ray_error("type", "distinct: expects a list, got %s",
+                         ray_type_name(x->type));
+    int64_t n = ray_len(x);
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* e = ray_at_fn(x, ia);
+        ray_release(ia);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+        int dup = 0;
+        int64_t m = ray_len(out);
+        ray_t** oe = (ray_t**)ray_data(out);
+        for (int64_t j = 0; j < m && !dup; j++) dup = q_match_rec(oe[j], e);
+        if (!dup) {
+            out = ray_list_append(out, e);
+            if (RAY_IS_ERR(out)) { ray_release(e); return out; }
+        }
+        ray_release(e);
+    }
+    ray_t* c = q_collapse_list(out);
+    ray_release(out);
+    return c;
+}
+
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
 static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
@@ -390,6 +495,11 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
     case QK_MATCH:return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_match_wrap);
     case QK_FLOOR:return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_floor_wrap);
+    case QK_BANG: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_bang_wrap);
+    case QK_KEY:  return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_key_wrap);
+    case QK_VALUE:return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_value_wrap);
+    case QK_DISTINCT:
+                  return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_distinct_wrap);
     default:      return NULL;
     }
 }
