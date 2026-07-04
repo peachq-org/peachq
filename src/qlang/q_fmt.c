@@ -87,6 +87,38 @@ static void q_float_tok(double v, int f32, char* out, size_t n) {
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
 }
 
+static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
+    out[0] = '\0';
+    if (!key || RAY_IS_ERR(key)) return;
+
+    if (key->type == -RAY_SYM) {     /* bare, never backticked */
+        ray_t* s = ray_sym_str(key->i64);
+        if (s) {
+            snprintf(out, cap, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
+            ray_release(s);
+        }
+        return;
+    }
+    if (key->type == -RAY_BOOL) {
+        snprintf(out, cap, "%d", key->u8 ? 1 : 0);
+        return;
+    }
+    if (key->type == -RAY_I16 || key->type == -RAY_I32 || key->type == -RAY_I64) {
+        int width = (key->type == -RAY_I16) ? 2 : (key->type == -RAY_I32) ? 4 : 8;
+        int64_t v = (key->type == -RAY_I16) ? (int64_t)key->i16
+                  : (key->type == -RAY_I32) ? (int64_t)key->i32
+                  : key->i64;
+        q_int_tok(v, width, 0, out, cap);
+        return;
+    }
+    if (key->type == -RAY_F32 || key->type == -RAY_F64) {
+        q_float_tok(key->f64, key->type == -RAY_F32, out, cap);
+        return;
+    }
+
+    q_fmt(key, out, cap);
+}
+
 /* Join per-element tokens (already rendered) with spaces into buf. */
 static void q_join(char* buf, size_t bufsz, size_t* pos, const char* tok, int first) {
     size_t tl = strlen(tok);
@@ -265,18 +297,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
                 ray_t* ke = ray_at_fn(k, ia);
                 ray_release(ia);
                 char kb[256]; kb[0] = '\0';
-                if (ke && !RAY_IS_ERR(ke)) {
-                    if (ke->type == -RAY_SYM) {     /* bare, never backticked */
-                        ray_t* s = ray_sym_str(ke->i64);
-                        if (s) {
-                            snprintf(kb, sizeof kb, "%.*s",
-                                     (int)ray_str_len(s), ray_str_ptr(s));
-                            ray_release(s);
-                        }
-                    } else {
-                        q_fmt(ke, kb, sizeof kb);
-                    }
-                }
+                q_fmt_dict_key(ke, kb, sizeof kb);
                 if (ke && !RAY_IS_ERR(ke)) ray_release(ke);
                 size_t kl = strlen(kb);
                 if (pass == 0) {

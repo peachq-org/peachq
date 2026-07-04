@@ -264,6 +264,7 @@ static void q_repl_interactive(FILE* out, FILE* err) {
     const char* hist_path = q_hist_path(hist_buf, sizeof hist_buf);
     ray_hist_load(&t->hist, hist_path);
     ray_term_set_highlighter(t, q_highlight);
+    ray_term_set_comment_mode(t, RAY_TERM_COMMENT_Q_SLASH);
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
 
     ray_term_begin(t);
