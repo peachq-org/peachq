@@ -40,6 +40,9 @@ static const q_op_t Q_OPS[] = {
     { "<>",    QLEX_GLYPH,     QK_NONE, NULL,        QK_NE,    "!=",      NULL  },
     /* ---- structural glyphs ---- */
     { "#",     QLEX_GLYPH,     QK_ENV,  "count",     QK_TAKE,  "take",    NULL  },
+    /* monadic `_` is a K-ism (valid q spells it `floor`) — accepting it is a
+     * deliberate SUPERSET of q source; the VALUE is kdb-identical (kdb's own
+     * floor IS k `_:`).  The q spelling is the `floor` keyword row below. */
     { "_",     QLEX_GLYPH,     QK_FLOOR, "floor",    QK_DROP,  "drop",    NULL  },
     { "|",     QLEX_GLYPH,     QK_ENV,  "reverse",   QK_NONE,  NULL,      NULL  },
     { "&",     QLEX_GLYPH,     QK_ENV,  "where",     QK_NONE,  NULL,      NULL  },
@@ -61,6 +64,9 @@ static const q_op_t Q_OPS[] = {
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
     { "avg",     QLEX_KW_PREFIX, QK_ENV, "avg",      QK_NONE,  NULL,      NULL  },
+    /* q `floor` returns LONGS from floats (kdb `floor 3.7` is 3j); rayfall's
+     * env floor keeps f64, so this is the QK_FLOOR wrapper, not a rename. */
+    { "floor",   QLEX_KW_PREFIX, QK_FLOOR, "floor",  QK_NONE,  NULL,      NULL  },
     /* q-implemented keywords: env bindings added by q_builtins_register
      * (same mechanism as `parse`), snapshotted here as pass-through rows. */
     { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
