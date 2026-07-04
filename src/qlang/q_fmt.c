@@ -5,6 +5,7 @@
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "lang/format.h"   /* ray_fmt */
+#include "lang/eval.h"     /* ray_at_fn — dict display element access */
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
 #include <stdio.h>
@@ -247,6 +248,55 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
             snprintf(buf, bufsz, "%s%s", vb, g);
             return;
         }
+    }
+
+    /* kdb dict display: one `key| value` row per entry, keys padded to the
+     * widest key (kdb pads the key column, then "| ").  Keys print BARE
+     * (`a| 10`, no backtick); values recurse through q_fmt.  Two passes:
+     * first measures the key column, second emits. */
+    if (val->type == RAY_DICT) {
+        ray_t* k = ray_dict_keys(val);          /* borrowed */
+        ray_t* v = ray_dict_vals(val);          /* borrowed */
+        int64_t n = k ? ray_len(k) : 0;
+        size_t pos = 0, maxk = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int64_t i = 0; i < n; i++) {
+                ray_t* ia = ray_i64(i);
+                ray_t* ke = ray_at_fn(k, ia);
+                ray_release(ia);
+                char kb[256]; kb[0] = '\0';
+                if (ke && !RAY_IS_ERR(ke)) {
+                    if (ke->type == -RAY_SYM) {     /* bare, never backticked */
+                        ray_t* s = ray_sym_str(ke->i64);
+                        if (s) {
+                            snprintf(kb, sizeof kb, "%.*s",
+                                     (int)ray_str_len(s), ray_str_ptr(s));
+                            ray_release(s);
+                        }
+                    } else {
+                        q_fmt(ke, kb, sizeof kb);
+                    }
+                }
+                if (ke && !RAY_IS_ERR(ke)) ray_release(ke);
+                size_t kl = strlen(kb);
+                if (pass == 0) {
+                    if (kl > maxk) maxk = kl;
+                    continue;
+                }
+                char vb[1024]; vb[0] = '\0';
+                ray_t* ja = ray_i64(i);
+                ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
+                ray_release(ja);
+                if (ve && !RAY_IS_ERR(ve)) q_fmt(ve, vb, sizeof vb);
+                if (ve && !RAY_IS_ERR(ve)) ray_release(ve);
+                size_t need = (i ? 1 : 0) + maxk + 2 + strlen(vb);
+                if (pos + need + 1 > bufsz) break;
+                pos += (size_t)snprintf(buf + pos, bufsz - pos, "%s%-*s| %s",
+                                        i ? "\n" : "", (int)maxk, kb, vb);
+            }
+        }
+        buf[pos < bufsz ? pos : bufsz - 1] = '\0';
+        return;
     }
 
     /* A general list of strings (kdb: char vectors) or of typed VECTORS
