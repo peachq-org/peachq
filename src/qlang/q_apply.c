@@ -96,6 +96,13 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
         return dict_lookup(head, args[0]);
     }
 
+    if (head->type == RAY_TABLE) {
+        /* t[`col] -> column, t[0] -> row dict — base ray_at special-cases
+         * tables and both forms audited kdb-sane. */
+        if (n != 1) return NULL;
+        return ray_at_fn(head, args[0]);
+    }
+
     if (ray_is_vec(head) || head->type == RAY_LIST) {
         /* v[i] / v[1 3] / v i; v[i;j] = depth indexing, one gather per arg */
         ray_t* cur = head;
