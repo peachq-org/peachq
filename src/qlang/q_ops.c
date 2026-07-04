@@ -53,6 +53,7 @@ static const q_op_t Q_OPS[] = {
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
      * collapse, since map returns a boxed list where q wants a simple vec). */
     { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
+    { "in",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "in",      NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QK_ENV, "neg",      QK_NONE,  NULL,      NULL  },
     { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
