@@ -70,6 +70,15 @@ typedef int32_t (*ray_highlight_fn)(char* dst, int32_t dst_cap,
                                     const char* buf, int32_t buf_len,
                                     int32_t match_pos1, int32_t match_pos2);
 
+/* Optional pluggable multi-line continuation policy.  Given the accumulated
+ * multiline buffer and the current line, return the count of still-open
+ * brackets (>0 keeps reading a continuation line, 0 submits).  NULL → the
+ * built-in counter, whose `;`-as-line-comment rule is correct for rayfall but
+ * WRONG for q (where `;` is a separator, so `(1 2 3;4 5)` false-continued).
+ * The q REPL installs its own (kdb is line-at-a-time → no continuation). */
+typedef int32_t (*ray_continuation_fn)(const char* mbuf, int32_t mbuf_len,
+                                       const char* buf, int32_t buf_len);
+
 typedef struct ray_hist {
     char**   entries;
     int32_t  count;
@@ -145,6 +154,8 @@ typedef struct ray_term {
     int32_t     esc_buf_len;   /* bytes accumulated in unknown CSI sequence */
     /* Optional pluggable syntax highlighter; NULL → use the built-in one. */
     ray_highlight_fn highlight_fn;
+    /* Optional pluggable continuation policy; NULL → built-in counter. */
+    ray_continuation_fn continuation_fn;
 } ray_term_t;
 
 ray_term_t* ray_term_create(void);
@@ -172,6 +183,10 @@ void   ray_term_prompt(ray_term_t* term);
  * to restore the built-in highlighter.  Callers own the function; it must
  * outlive the term. */
 void   ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn);
+
+/* Install a pluggable multi-line continuation policy (see ray_continuation_fn).
+ * Pass NULL to restore the built-in bracket counter. */
+void   ray_term_set_continuation_fn(ray_term_t* term, ray_continuation_fn fn);
 
 /* Set (or clear, when prefix == NULL or empty) the prompt prefix.
  * Used by the remote-REPL session to put the server address ahead
