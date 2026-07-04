@@ -92,6 +92,10 @@ void ray_eval_request_interrupt(void) { ray_request_interrupt(); }
 void ray_eval_clear_interrupt(void)   { ray_clear_interrupt(); }
 int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 
+/* openq noun-head apply hook — see eval.h.  NULL = historic behaviour. */
+static ray_apply_hook_t g_apply_hook = NULL;
+void ray_eval_set_apply_hook(ray_apply_hook_t hook) { g_apply_hook = hook; }
+
 ray_t* ray_eval_get_nfo(void) { return __VM ? __VM->nfo : NULL; }
 void   ray_eval_set_nfo(ray_t* nfo) { if (__VM) __VM->nfo = nfo; }
 
@@ -947,6 +951,12 @@ ray_t* call_fn1(ray_t* fn, ray_t* arg) {
         ray_t* args[1] = { arg };
         return call_lambda(fn, args, 1);
     }
+    /* openq: noun-head apply hook (third site — the OP_CALL1 fast path). */
+    if (g_apply_hook) {
+        ray_t* args[1] = { arg };
+        ray_t* r = g_apply_hook(fn, args, 1);
+        if (r) return r;
+    }
     return ray_error("type", "call: expected a callable function, got %s", ray_type_name(fn->type));
 }
 
@@ -992,6 +1002,12 @@ ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b) {
         /* Partial application not supported, just call with first arg */
         ray_unary_fn f = (ray_unary_fn)(uintptr_t)fn->i64;
         return f(a);
+    }
+    /* openq: noun-head apply hook (the OP_CALL2 fast path). */
+    if (g_apply_hook) {
+        ray_t* args[2] = { a, b };
+        ray_t* r = g_apply_hook(fn, args, 2);
+        if (r) return r;
     }
     return ray_error("type", "call: expected a callable function, got %s", ray_type_name(fn->type));
 }
@@ -2073,6 +2089,12 @@ op_callf: {
             for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]);
             break;
         default:
+            /* openq: apply hook (see the tree-walk default arm) — fn_args are
+             * already evaluated owned refs here; hook borrows, we release. */
+            if (g_apply_hook) {
+                result = g_apply_hook(fn_obj, fn_args, n);
+                if (result) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); break; }
+            }
             for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]);
             result = ray_error("type", "apply: head is not callable, got %s", ray_type_name(fn_obj->type));
             break;
@@ -3230,6 +3252,29 @@ ray_t* ray_eval(ray_t* obj) {
             ret = result; goto out;
         }
         default: {
+            /* openq: offer the noun head to the apply hook (indexing, dict/
+             * table lookup, derived-verb application).  Args are evaluated
+             * here — same discipline and cap as the LAMBDA arm — only on this
+             * would-error path, so callable dispatch pays nothing.  A NULL
+             * return declines to the historic error, byte-identical. */
+            if (g_apply_hook && n - 1 <= 64) {
+                int64_t argc = n - 1;
+                ray_t* args[64];
+                int64_t i = 0;
+                for (; i < argc; i++) {
+                    args[i] = ray_eval(elems[i + 1]);
+                    if (!args[i] || RAY_IS_ERR(args[i])) break;
+                }
+                if (i < argc) {                     /* an arg errored: propagate */
+                    ray_t* err = args[i] ? args[i] : ray_error("type", NULL);
+                    for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+                    ray_release(head);
+                    ret = err; goto out;
+                }
+                ray_t* r = g_apply_hook(head, args, argc);
+                for (int64_t j = 0; j < argc; j++) ray_release(args[j]);
+                if (r) { ray_release(head); ret = r; goto out; }
+            }
             int8_t head_type = head->type;
             ray_release(head);
             ret = ray_error("type", "eval: head of list is not callable, got %s", ray_type_name(head_type)); goto out;

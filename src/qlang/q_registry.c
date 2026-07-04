@@ -33,7 +33,9 @@
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
+#include "lang/format.h"      /* ray_type_name — wrapper error messages */
 #include <assert.h>
+#include <math.h>     /* floor/floorf — q monadic `_` */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -70,6 +72,49 @@ static ray_t* q_take_wrap(ray_t* n, ray_t* list) {
  * count lives in ray_str_len, NOT the ->len union field (which aliases the SSO
  * {slen,sdata} bytes), so ray_len would be garbage for strings. */
 static ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
+    /* q cut: int-VECTOR lhs — `2 4_v` slices [p0,p1) then [p_last,end).
+     * Positions non-decreasing within 0..len; result is a boxed list of
+     * slices (kdb 0h). */
+    if (n && (n->type == RAY_I64 || n->type == RAY_I32 || n->type == RAY_I16)) {
+        if (!list || (!ray_is_vec(list) && list->type != RAY_LIST))
+            return ray_error("type", "_ (cut): expects a list rhs");
+        int64_t len = ray_len(list), np = ray_len(n);
+        ray_t* out = ray_list_new(np > 0 ? np : 1);
+        int64_t prev = 0;
+        for (int64_t i = 0; i < np; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* pe = ray_at_fn(n, ia);
+            ray_release(ia);
+            if (!pe || RAY_IS_ERR(pe)) { ray_release(out); return pe; }
+            int64_t p = pe->i64;
+            ray_release(pe);
+            int64_t nxt = len;
+            if (i + 1 < np) {
+                ray_t* ja = ray_i64(i + 1);
+                ray_t* ne = ray_at_fn(n, ja);
+                ray_release(ja);
+                if (!ne || RAY_IS_ERR(ne)) { ray_release(out); return ne; }
+                nxt = ne->i64;
+                ray_release(ne);
+            }
+            if (p < 0 || p > len || nxt < p || nxt > len || (i > 0 && p < prev)) {
+                ray_release(out);
+                return ray_error("domain",
+                    "_ (cut): positions must be non-decreasing within 0..%lld",
+                    (long long)len);
+            }
+            prev = p;
+            int64_t rng[2] = { p, nxt - p };
+            ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
+            if (RAY_IS_ERR(range)) { ray_release(out); return range; }
+            ray_t* slice = ray_take_fn(list, range);
+            ray_release(range);
+            if (!slice || RAY_IS_ERR(slice)) { ray_release(out); return slice; }
+            out = ray_list_append(out, slice);
+            ray_release(slice);
+        }
+        return out;
+    }
     if (!n || n->type != -RAY_I64)
         return ray_error("type", "_ (drop): count must be an integer");
     if (!list) return ray_error("type", "_ (drop): nil list");
@@ -90,6 +135,28 @@ static ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     ray_t* r = ray_take_fn(list, range);
     ray_release(range);
     return r;
+}
+
+/* q monadic `_` — floor to LONG (kdb `_ 3.7` is 3j; rayfall floor keeps f64).
+ * Ints/bools pass through; f64 null -> long null.  RAY_FN_ATOMIC maps it
+ * element-wise over float vectors. */
+static ray_t* q_floor_wrap(ray_t* x) {
+    if (!x) return ray_error("type", "_ (floor): nil");
+    if (x->type == -RAY_F64) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_I64);
+        return ray_i64((int64_t)floor(x->f64));
+    }
+    if (x->type == -RAY_F32) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_I64);
+        return ray_i64((int64_t)floorf((float)x->f64));
+    }
+    if (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16 ||
+        x->type == -RAY_BOOL) {
+        ray_retain(x);
+        return x;
+    }
+    return ray_error("type", "_ (floor): expects a numeric, got %s",
+                     ray_type_name(x->type));
 }
 
 /* q char-string comparison — q treats a string as a char vector, so `=`/`<>`
@@ -127,6 +194,76 @@ static ray_t* q_eq_wrap(ray_t* a, ray_t* b) {
 static ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
     if (q_is_str_atom(a) && q_is_str_atom(b)) return q_str_cmp_vec(a, b, 0);
     return ray_neq_fn(a, b);
+}
+
+/* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
+ * (`1~1f` is 0b), attribute-blind (`1 2 3~\`s#1 2 3` is 1b), sentinel nulls
+ * compare equal (`0n~0n` is 1b — non-finites canonicalize to one payload).
+ * Unhandled types conservatively mismatch (kdb ~ never errors). */
+static int q_match_rec(ray_t* a, ray_t* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->type != b->type) return 0;
+    if (a->type == -RAY_SYM) return a->i64 == b->i64;
+    if (a->type == -RAY_STR)
+        return ray_str_len(a) == ray_str_len(b) &&
+               memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) == 0;
+    if (a->type == -RAY_GUID) {
+        /* payload lives in a 16-byte U8 buffer behind the obj pointer —
+         * an 8-byte union memcmp would compare POINTERS (codex P2). */
+        return a->obj && b->obj &&
+               memcmp(ray_data(a->obj), ray_data(b->obj), 16) == 0;
+    }
+    if (ray_is_atom(a)) {
+        /* inline-payload scalars ONLY (ray_is_atom also covers LAMBDA and
+         * fn values, whose state is NOT in the union slot — those fall to
+         * the conservative-mismatch tail below). */
+        switch (-a->type) {
+        case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
+        case RAY_F32: case RAY_F64:
+        case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
+            return memcmp(&a->i64, &b->i64, 8) == 0;   /* payload union */
+        default:
+            return 0;
+        }
+    }
+    if (a->type == RAY_DICT || a->type == RAY_TABLE) {
+        ray_t** ea = (ray_t**)ray_data(a);
+        ray_t** eb = (ray_t**)ray_data(b);
+        return q_match_rec(ea[0], eb[0]) && q_match_rec(ea[1], eb[1]);
+    }
+    if (a->type == RAY_LIST || ray_is_vec(a)) {
+        int64_t la = ray_len(a);
+        if (la != ray_len(b)) return 0;
+        /* same-type numeric vectors: payload memcmp (nulls are in-payload
+         * sentinels; attrs deliberately not compared).  SYM vecs vary in
+         * index width -> per-element below. */
+        if (ray_is_vec(a) && a->type != RAY_SYM && a->type != RAY_STR) {
+            size_t esz = (a->type == RAY_I64 || a->type == RAY_F64) ? 8
+                       : (a->type == RAY_I32 || a->type == RAY_F32) ? 4
+                       : (a->type == RAY_I16) ? 2
+                       : (a->type == RAY_BOOL || a->type == RAY_U8) ? 1 : 0;
+            if (esz)
+                return memcmp(ray_data(a), ray_data(b), (size_t)la * esz) == 0;
+        }
+        for (int64_t i = 0; i < la; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* xa = ray_at_fn(a, ia);
+            ray_t* xb = ray_at_fn(b, ia);
+            ray_release(ia);
+            int r = (xa && xb && !RAY_IS_ERR(xa) && !RAY_IS_ERR(xb))
+                        ? q_match_rec(xa, xb) : 0;
+            if (xa) ray_release(xa);
+            if (xb) ray_release(xb);
+            if (!r) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
+    return ray_bool(q_match_rec(a, b));
 }
 
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
@@ -251,6 +388,8 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_TAKE: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_take_wrap);
     case QK_DROP: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_drop_wrap);
     case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
+    case QK_MATCH:return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_match_wrap);
+    case QK_FLOOR:return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_floor_wrap);
     default:      return NULL;
     }
 }
