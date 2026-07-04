@@ -249,15 +249,18 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         }
     }
 
-    /* A general list of strings prints one quoted string per line (kdb: a
-     * list of char vectors), not (a;b) — `("one";"two")` shows "one"\n"two". */
+    /* A general list of strings (kdb: char vectors) or of typed VECTORS
+     * (cut output) prints one element per line, not (a;b) — parse trees
+     * cannot hit this: their heads are atoms/syms/values, never vectors. */
     if (val->type == RAY_LIST && ray_len(val) >= 2) {
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
-        int allstr = 1;
-        for (int64_t i = 0; i < n && allstr; i++)
+        int allstr = 1, allvec = 1;
+        for (int64_t i = 0; i < n && (allstr || allvec); i++) {
             if (!e[i] || e[i]->type != -RAY_STR) allstr = 0;
-        if (allstr) {
+            if (!e[i] || e[i]->type <= 0 || !ray_is_vec(e[i])) allvec = 0;
+        }
+        if (allstr || allvec) {
             size_t pos = 0;
             for (int64_t i = 0; i < n; i++) {
                 char elem[1024]; elem[0] = '\0';
