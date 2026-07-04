@@ -53,8 +53,12 @@ typedef enum {
                          * order; rayfall's distinct DAG path sorts)             */
     QK_ROLL,            /* q `x?y` wrapper (find with kdb miss->count / roll /
                          * pick; deal + float roll are deferred cells)           */
-    QK_CAST             /* q `t$x` wrapper (rayfall as + kdb float->int ROUNDING;
+    QK_CAST,            /* q `t$x` wrapper (rayfall as + kdb float->int ROUNDING;
                          * Tok string-parse and unknown designators deferred)    */
+    QK_AT,              /* q `f@x` wrapper (Apply At / Index At: callables
+                         * invoke unary, nouns index via q_apply_noun)           */
+    QK_DOT              /* q `v . vx` wrapper (Apply / Index: rhs is the ARG
+                         * LIST — spread-call callables, depth-index nouns)      */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
