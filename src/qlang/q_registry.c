@@ -428,6 +428,83 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
     return ray_error("type", "?: unsupported operand types");
 }
 
+/* q `t$x` — cast.  t is a sym designator (`long`float`int`short`boolean)
+ * or a lower-case single-char string ("j" "f" "i" "h" "b"); maps to the
+ * rayfall `as` type sym.  Returns NULL for unknown/deferred designators
+ * (`real/"e" — no rayfall F32 cast arm; char/byte/guid/temporals). */
+static const char* q_cast_target(ray_t* t) {
+    char c = 0;
+    if (t && t->type == -RAY_STR && ray_str_len(t) == 1) {
+        c = ray_str_ptr(t)[0];
+    } else if (t && t->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(t->i64);
+        if (!s) return NULL;
+        const char* nm = ray_str_ptr(s);
+        size_t l = ray_str_len(s);
+        const char* r = NULL;
+        if      (l == 4 && !memcmp(nm, "long",    4)) r = "I64";
+        else if (l == 5 && !memcmp(nm, "float",   5)) r = "F64";
+        else if (l == 3 && !memcmp(nm, "int",     3)) r = "I32";
+        else if (l == 5 && !memcmp(nm, "short",   5)) r = "I16";
+        else if (l == 7 && !memcmp(nm, "boolean", 7)) r = "BOOL";
+        ray_release(s);
+        return r;
+    }
+    switch (c) {
+    case 'j': return "I64";  case 'f': return "F64";  case 'i': return "I32";
+    case 'h': return "I16";  case 'b': return "BOOL";
+    default:  return NULL;
+    }
+}
+
+/* kdb float->integer casts ROUND (half-to-even: `long$3.7 is 4, "j"$2.5 is
+ * 2 — the KX ref pins `int$6.6 -> 7), where rayfall `as` truncates — so the
+ * integer targets pre-round here (rint = IEEE nearest/ties-even, kdb's
+ * mode); everything else delegates to ray_cast_fn.  Upper-case designators
+ * are Tok string-parses (ref/tok.md) — deferred on the string model. */
+static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
+    if (t && t->type == -RAY_STR && ray_str_len(t) == 1 &&
+        ray_str_ptr(t)[0] >= 'A' && ray_str_ptr(t)[0] <= 'Z')
+        return ray_error("nyi", "$: string-parse casts (Tok) are deferred");
+    const char* tgt = q_cast_target(t);
+    if (!tgt)
+        return ray_error("nyi", "$: unsupported cast designator (deferred)");
+    int8_t it = 0;
+    if      (!strcmp(tgt, "I64")) it = RAY_I64;
+    else if (!strcmp(tgt, "I32")) it = RAY_I32;
+    else if (!strcmp(tgt, "I16")) it = RAY_I16;
+    if (it && x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-it);
+        double r = rint(x->f64);              /* F32 atoms store f64 payload */
+        if (it == RAY_I64) return ray_i64((int64_t)r);
+        if (it == RAY_I32) return ray_i32((int32_t)r);
+        return ray_i16((int16_t)r);
+    }
+    if (it && x && (x->type == RAY_F64 || x->type == RAY_F32)) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_vec_new(it, n);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = n;
+        int is64 = (x->type == RAY_F64);
+        for (int64_t i = 0; i < n; i++) {
+            double v = is64 ? ((const double*)ray_data(x))[i]
+                            : (double)((const float*)ray_data(x))[i];
+            int isnull = isnan(v);
+            int64_t iv = isnull ? 0 : (int64_t)rint(v);
+            if      (it == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
+            else if (it == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
+            else                    ((int16_t*)ray_data(out))[i] = (int16_t)iv;
+            if (isnull) ray_vec_set_null(out, i, true);
+        }
+        return out;
+    }
+    ray_t* ts = ray_sym(ray_sym_intern(tgt, strlen(tgt)));
+    if (!ts || RAY_IS_ERR(ts)) return ts;
+    ray_t* r = ray_cast_fn(ts, x);
+    ray_release(ts);
+    return r;
+}
+
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
 static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
@@ -558,6 +635,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_DISTINCT:
                   return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_distinct_wrap);
     case QK_ROLL: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_roll_wrap);
+    case QK_CAST: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cast_wrap);
     default:      return NULL;
     }
 }
