@@ -1450,6 +1450,18 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
     return NULL;
 }
 
+/* True iff node is a ctx-literal — a paren list `(…)` or table `([]…)` whose
+ * head is the shared context-constructor value.  Its element statements run in
+ * a pushed env scope (q_ctx_build), so a plain `:` inside must lower to `let`
+ * (bind the scoped frame) exactly like a lambda body — the mandate's "bind INTO
+ * the scope, pop back OUT". */
+static int ql_is_ctx_literal(ray_t *node) {
+    if (!node || node->type != RAY_LIST || ray_len(node) < 1) return 0;
+    ray_t *h = ((ray_t **)ray_data(node))[0];
+    if (!h) return 0;
+    return h == q_registry_list_value() || h == q_registry_table_value();
+}
+
 /* True iff node is the `{`-marker lambda form (its body statements bind q
  * locals with plain `:`). */
 static int ql_is_lambda(ray_t *node) {
@@ -1470,7 +1482,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ray_t *node = *slot;
     if (!node || node->type != RAY_LIST) return NULL;
     assert(node->rc == 1);                 /* sole-owner precondition */
-    int lambda_body = in_lambda || ql_is_lambda(node);
+    int lambda_body = in_lambda || ql_is_lambda(node) || ql_is_ctx_literal(node);
     int64_t n = ray_len(node);
     ray_t **e = (ray_t **)ray_data(node);
     for (int64_t i = 0; i < n; i++)

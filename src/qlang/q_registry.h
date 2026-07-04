@@ -92,6 +92,12 @@ ray_t* q_registry_scan_value(void);
  * NULL before q_registry_init. */
 ray_t* q_registry_list_value(void);
 
+/* The internal table constructor `([] a:…; b:…)` the PARSER embeds at the head
+ * of every table literal.  Shares the right-to-left context machinery with the
+ * paren-list value (q_ctx_build) — list and table def are ONE mechanism.
+ * Borrowed; NULL before q_registry_init. */
+ray_t* q_registry_table_value(void);
+
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
  * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
  * are simple vectors, not general lists).  Mixed types, non-atom elements,
