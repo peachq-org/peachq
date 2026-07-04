@@ -940,6 +940,16 @@ static ray_t *qsql_expr(Parser *p, int *ok) {
         return node;
     }
     if (tk->kind == T_NOUN || tk->kind == T_LPAREN) {  /* prefix app: (t; rhs) */
+        /* Prefix application is well-formed ONLY when the term is a FUNCTION
+         * value (an aggregate: `sum col`, `max price`).  A column/literal
+         * followed by another token is a keyword-infix predicate (`a in b`,
+         * `sym like "x"`) — the scanner leaves in/like/within as name-ref
+         * nouns, so we cannot render them kdb-faithfully here.  Soft-fail so
+         * the ordinary parser consumes the whole statement, rather than emit a
+         * malformed tree that the interceptor would wrongly accept. */
+        if (!(t->type == RAY_UNARY || t->type == RAY_BINARY || t->type == RAY_VARY)) {
+            *ok = 0; ray_release(t); return NULL;
+        }
         ray_t *rhs = qsql_expr(p, ok);
         if (!*ok) { ray_release(t); if (rhs) ray_release(rhs); return NULL; }
         ray_t *node = ray_list_new(2);
