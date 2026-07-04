@@ -5,6 +5,10 @@
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "lang/format.h"   /* ray_fmt */
+
+/* inline dict display for parse-tree clauses (defined below) */
+static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz);
+#include "lang/eval.h"     /* ray_at_fn — dict display element access */
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
 #include <stdio.h>
@@ -84,6 +88,38 @@ static void q_float_tok(double v, int f32, char* out, size_t n) {
     if (s && !RAY_IS_ERR(s)) ray_release(s);
     if (a && !RAY_IS_ERR(a)) ray_release(a);
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
+}
+
+static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
+    out[0] = '\0';
+    if (!key || RAY_IS_ERR(key)) return;
+
+    if (key->type == -RAY_SYM) {     /* bare, never backticked */
+        ray_t* s = ray_sym_str(key->i64);
+        if (s) {
+            snprintf(out, cap, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
+            ray_release(s);
+        }
+        return;
+    }
+    if (key->type == -RAY_BOOL) {
+        snprintf(out, cap, "%d", key->u8 ? 1 : 0);
+        return;
+    }
+    if (key->type == -RAY_I16 || key->type == -RAY_I32 || key->type == -RAY_I64) {
+        int width = (key->type == -RAY_I16) ? 2 : (key->type == -RAY_I32) ? 4 : 8;
+        int64_t v = (key->type == -RAY_I16) ? (int64_t)key->i16
+                  : (key->type == -RAY_I32) ? (int64_t)key->i32
+                  : key->i64;
+        q_int_tok(v, width, 0, out, cap);
+        return;
+    }
+    if (key->type == -RAY_F32 || key->type == -RAY_F64) {
+        q_float_tok(key->f64, key->type == -RAY_F32, out, cap);
+        return;
+    }
+
+    q_fmt(key, out, cap);
 }
 
 /* Join per-element tokens (already rendered) with spaces into buf. */
@@ -253,25 +289,47 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         }
     }
 
-    /* A dictionary prints q-style keys!vals (piece 3: the by/select clause
-     * dicts inside a functional-query parse tree).  The key side is parenthesised
-     * when it is an enlist (leading ','), so `(,`a)!,`a` binds `!` correctly. */
+    /* Dict VALUE display: kdb `key| value` per row (2c-2).  Keys padded to the
+     * widest key, printed BARE; values recurse.  `1 2!1 2`, `` `a`b!1 2 ``. */
     if (val->type == RAY_DICT) {
-        ray_t* keys = ray_dict_keys(val);   /* borrowed */
-        ray_t* vals = ray_dict_vals(val);   /* borrowed */
-        char kb[2048]; kb[0] = '\0';
-        char vb[2048]; vb[0] = '\0';
-        q_fmt(keys, kb, sizeof kb);
-        q_fmt(vals, vb, sizeof vb);
-        if (kb[0] == ',') snprintf(buf, bufsz, "(%s)!%s", kb, vb);
-        else              snprintf(buf, bufsz, "%s!%s", kb, vb);
+        ray_t* k = ray_dict_keys(val);          /* borrowed */
+        ray_t* v = ray_dict_vals(val);          /* borrowed */
+        int64_t n = k ? ray_len(k) : 0;
+        size_t pos = 0, maxk = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int64_t i = 0; i < n; i++) {
+                ray_t* ia = ray_i64(i);
+                ray_t* ke = ray_at_fn(k, ia);
+                ray_release(ia);
+                char kb[256]; kb[0] = '\0';
+                q_fmt_dict_key(ke, kb, sizeof kb);
+                if (ke && !RAY_IS_ERR(ke)) ray_release(ke);
+                size_t kl = strlen(kb);
+                if (pass == 0) {
+                    if (kl > maxk) maxk = kl;
+                    continue;
+                }
+                char vb[1024]; vb[0] = '\0';
+                ray_t* ja = ray_i64(i);
+                ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
+                ray_release(ja);
+                if (ve && !RAY_IS_ERR(ve)) q_fmt(ve, vb, sizeof vb);
+                if (ve && !RAY_IS_ERR(ve)) ray_release(ve);
+                size_t need = (i ? 1 : 0) + maxk + 2 + strlen(vb);
+                if (pos + need + 1 > bufsz) break;
+                pos += (size_t)snprintf(buf + pos, bufsz - pos, "%s%-*s| %s",
+                                        i ? "\n" : "", (int)maxk, kb, vb);
+            }
+        }
+        buf[pos < bufsz ? pos : bufsz - 1] = '\0';
         return;
     }
 
-    /* The functional qSQL parse tree (?;`t;c;b;a) / (!;…) prints VERTICALLY,
-     * one element per line — kdb's display, pinned by the parse ledgers.  Keyed
-     * on a 5-list headed by the bare `?`/`!` verb symbol; every nested list
-     * inside still prints inline via the recursion below. */
+    /* The functional qSQL parse tree (?;`t;c;b;a) / (!;...) prints VERTICALLY,
+     * one element per line - kdb's display, pinned by the parse ledgers.  A
+     * dict CLAUSE (by/select) inside it renders INLINE as `keys!vals`
+     * (piece-3 display), NOT the k|v value form above - so the 5-list loop
+     * uses q_fmt_dict_inline for dict elements. */
     if (val->type == RAY_LIST && ray_len(val) == 5) {
         ray_t** e = (ray_t**)ray_data(val);
         ray_t* h = e[0];
@@ -285,7 +343,10 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
                 buf[0] = '\0';
                 for (int64_t i = 0; i < 5; i++) {
                     char elem[2048]; elem[0] = '\0';
-                    q_fmt(e[i], elem, sizeof elem);
+                    if (e[i] && e[i]->type == RAY_DICT)
+                        q_fmt_dict_inline(e[i], elem, sizeof elem);
+                    else
+                        q_fmt(e[i], elem, sizeof elem);
                     size_t el = strlen(elem);
                     if (i && pos + 1 < bufsz) buf[pos++] = '\n';
                     if (pos + el >= bufsz) el = (bufsz > pos + 1) ? bufsz - 1 - pos : 0;
@@ -359,4 +420,19 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     }
 
     ray_fallback(val, buf, bufsz);
+}
+
+
+/* Inline dict `keys!vals` (parenthesised key when enlisted: `(,`a)!,`a`) -
+ * ONLY for by/select clause dicts inside a functional qSQL parse tree, where
+ * kdb shows the dict inline rather than as k|v rows. */
+static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz) {
+    ray_t* keys = ray_dict_keys(d);
+    ray_t* vals = ray_dict_vals(d);
+    char kb[2048]; kb[0] = '\0';
+    char vb[2048]; vb[0] = '\0';
+    q_fmt(keys, kb, sizeof kb);
+    q_fmt(vals, vb, sizeof vb);
+    if (kb[0] == ',') snprintf(buf, bufsz, "(%s)!%s", kb, vb);
+    else              snprintf(buf, bufsz, "%s!%s", kb, vb);
 }
