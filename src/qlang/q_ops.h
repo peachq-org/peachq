@@ -45,7 +45,20 @@ typedef enum {
     QK_DROP,            /* q `_`  wrapper (count-drop via range-take)            */
     QK_EACH,            /* q `each` wrapper (rayfall map + vector collapse)      */
     QK_MATCH,           /* q `~`  wrapper (recursive whole-value equivalence)    */
-    QK_FLOOR            /* q monadic `_` wrapper (floor to LONG; rayfall keeps f64) */
+    QK_FLOOR,           /* q monadic `_` wrapper (floor to LONG; rayfall keeps f64) */
+    QK_BANG,            /* q `x!y` wrapper (dict make over rayfall dict)         */
+    QK_KEY,             /* q `key`/monadic `!` wrapper (dict keys)               */
+    QK_VALUE,           /* q `value` wrapper (dict vals, collapsed)              */
+    QK_DISTINCT,        /* q `distinct`/monadic `?` wrapper (FIRST-OCCURRENCE
+                         * order; rayfall's distinct DAG path sorts)             */
+    QK_ROLL,            /* q `x?y` wrapper (find with kdb miss->count / roll /
+                         * pick; deal + float roll are deferred cells)           */
+    QK_CAST,            /* q `t$x` wrapper (rayfall as + kdb float->int ROUNDING;
+                         * Tok string-parse and unknown designators deferred)    */
+    QK_AT,              /* q `f@x` wrapper (Apply At / Index At: callables
+                         * invoke unary, nouns index via q_apply_noun)           */
+    QK_DOT              /* q `v . vx` wrapper (Apply / Index: rhs is the ARG
+                         * LIST — spread-call callables, depth-index nouns)      */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
