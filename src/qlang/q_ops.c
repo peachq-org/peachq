@@ -72,6 +72,18 @@ static const q_op_t Q_OPS[] = {
     { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
     { "upper",   QLEX_KW_PREFIX, QK_ENV, "upper",    QK_NONE,  NULL,      NULL  },
     { "lower",   QLEX_KW_PREFIX, QK_ENV, "lower",    QK_NONE,  NULL,      NULL  },
+    /* ---- additional monadic pass-through keywords (rayfall name == q name,
+     * audited kdb-true element-wise / aggregate semantics). See
+     * docs/recipes/add-q-keyword-verb.md. ---- */
+    { "abs",     QLEX_KW_PREFIX, QK_ENV, "abs",      QK_NONE,  NULL,      NULL  },
+    { "dev",     QLEX_KW_PREFIX, QK_ENV, "dev",      QK_NONE,  NULL,      NULL  },
+    { "exp",     QLEX_KW_PREFIX, QK_ENV, "exp",      QK_NONE,  NULL,      NULL  },
+    { "log",     QLEX_KW_PREFIX, QK_ENV, "log",      QK_NONE,  NULL,      NULL  },
+    { "max",     QLEX_KW_PREFIX, QK_ENV, "max",      QK_NONE,  NULL,      NULL  },
+    { "min",     QLEX_KW_PREFIX, QK_ENV, "min",      QK_NONE,  NULL,      NULL  },
+    { "rank",    QLEX_KW_PREFIX, QK_ENV, "rank",     QK_NONE,  NULL,      NULL  },
+    { "raze",    QLEX_KW_PREFIX, QK_ENV, "raze",     QK_NONE,  NULL,      NULL  },
+    { "sqrt",    QLEX_KW_PREFIX, QK_ENV, "sqrt",     QK_NONE,  NULL,      NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
