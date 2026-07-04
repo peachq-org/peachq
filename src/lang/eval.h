@@ -202,6 +202,16 @@ ray_span_t ray_bc_dbg_get(ray_t* dbg, int32_t ip);
 /* Print a ray_t value to a FILE stream. */
 void ray_lang_print(FILE* fp, ray_t* val);
 
+/* openq: noun-head apply hook (piece 2c) — called from BOTH non-callable
+ * failure sites (the tree-walk eval default arm and the VM generic-apply
+ * default arm) with the EVALUATED head and EVALUATED args (all borrowed).
+ * Returns an OWNED result, or NULL to decline — the caller then raises its
+ * original "not callable" error, byte-identical.  A NULL hook (the default)
+ * preserves historic behaviour exactly; the q layer registers its dispatcher
+ * at boot (q_builtins_register). */
+typedef ray_t* (*ray_apply_hook_t)(ray_t* head, ray_t** args, int64_t n);
+void ray_eval_set_apply_hook(ray_apply_hook_t hook);
+
 /* Interrupt support: allow external code (REPL signal handler) to request
  * that the evaluator abort early.  ray_eval() and the bytecode VM check
  * this flag at function-call and loop boundaries. */
