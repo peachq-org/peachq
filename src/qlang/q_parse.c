@@ -566,7 +566,7 @@ static Tokens scan(const char *src) {
             noun_pos = 0;
         }
         else {
-            TKind kk;
+            TKind kk = T_EOF; /* default path q_die()s; keep Clang definite-init happy */
             switch (c) {
             case '(': kk = T_LPAREN; noun_pos = 0; break;
             case ')': kk = T_RPAREN; noun_pos = 1; break;
