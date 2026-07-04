@@ -86,10 +86,63 @@ static ray_t* dict_lookup(ray_t* d, ray_t* idx) {
               : (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ);
 }
 
+/* Apply a 104h derived-verb carrier: positional assembly = the carrier's
+ * bound slots with holes (hole_mask bits) filled left-to-right from `args`;
+ * EXTRA supplied args append after the assembled list — that is what makes
+ * seeded over work through a name: f:(+/); f[100;v] -> fold(F, 100, v).
+ * The base HOF is called by its fn type.  Args/carrier borrowed; returns
+ * owned (or an owned error). */
+static ray_t* q_deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
+    q_deriv_kind k = q_deriv_kind_of(carrier);
+    ray_t* base = q_deriv_base(carrier);            /* borrowed */
+    if (!base) return NULL;
+    ray_t* call[66];
+    int64_t cn = 0;
+    if (k == Q_DERIV_PROJ) {
+        uint64_t mask = q_deriv_hole_mask(carrier);
+        int64_t slots = ray_len(carrier) - 4;
+        ray_t** e = (ray_t**)ray_data(carrier);
+        int64_t supplied = 0;
+        for (int64_t i = 0; i < slots && cn < 64; i++) {
+            if (mask & (1ull << i)) {
+                if (supplied >= n)
+                    return ray_error("rank", "projection: missing argument %lld",
+                                     (long long)(i + 1));
+                call[cn++] = args[supplied++];
+            } else {
+                call[cn++] = e[4 + i];
+            }
+        }
+        for (; supplied < n && cn < 64; supplied++) call[cn++] = args[supplied];
+    } else if (k == Q_DERIV_MONAD) {
+        if (n != 1)
+            return ray_error("rank", "monadic verb applied to %lld args", (long long)n);
+        call[cn++] = args[0];
+    } else {
+        return NULL;
+    }
+    switch (base->type) {
+    case RAY_UNARY:
+        if (cn != 1) return ray_error("rank", "derived verb: expected 1 arg, got %lld", (long long)cn);
+        return ((ray_unary_fn)(uintptr_t)base->i64)(call[0]);
+    case RAY_BINARY:
+        if (cn != 2) return ray_error("rank", "derived verb: expected 2 args, got %lld", (long long)cn);
+        return ((ray_binary_fn)(uintptr_t)base->i64)(call[0], call[1]);
+    case RAY_VARY:
+        return ((ray_vary_fn)(uintptr_t)base->i64)(call, cn);
+    default:
+        return NULL;
+    }
+}
+
 ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     if (!head || n < 1) return NULL;
 
     if (head->type == -RAY_STR) return NULL;        /* deferred: string model */
+
+    /* 104h carriers are RAY_LISTs — claim them BEFORE the gather arm. */
+    if (head->type == RAY_LIST && q_deriv_kind_of(head) != Q_DERIV_NONE)
+        return q_deriv_apply(head, args, n);
 
     if (head->type == RAY_DICT) {
         if (n != 1) return NULL;                    /* d[k;..] deferred */
