@@ -156,6 +156,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         int64_t n = ray_len(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
         size_t pos = 0;
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,0b */
         for (int64_t i = 0; i < n && pos + 1 < bufsz; i++)
             buf[pos++] = d[i] ? '1' : '0';
         if (pos + 1 < bufsz) buf[pos++] = 'b';
@@ -173,6 +174,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         int64_t n = ray_len(val);
         size_t pos = 0;
         buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,42h */
         for (int64_t i = 0; i < n; i++) {
             char e[64];
             int64_t v = (width == 2) ? (int64_t)((const int16_t*)ray_data(val))[i]
@@ -192,6 +194,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         int64_t n = ray_len(val);
         size_t pos = 0;
         buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,1f */
         int all_whole = (n > 0);   /* f64 gets ONE trailing `f` iff every element is finite & whole */
         for (int64_t i = 0; i < n; i++) {
             double v = is64 ? ((const double*)ray_data(val))[i]
@@ -219,6 +222,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         int64_t n = ray_len(val);
         size_t pos = 0;
         buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,`a */
         for (int64_t i = 0; i < n; i++) {
             ray_t* s = ray_sym_vec_cell(val, i);   /* borrowed -RAY_STR */
             const char* nm = ray_str_ptr(s);
@@ -246,6 +250,51 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
             q_fmt(v0, vb, sizeof vb);
             snprintf(buf, bufsz, "%s%s", vb, g);
             return;
+        }
+    }
+
+    /* A dictionary prints q-style keys!vals (piece 3: the by/select clause
+     * dicts inside a functional-query parse tree).  The key side is parenthesised
+     * when it is an enlist (leading ','), so `(,`a)!,`a` binds `!` correctly. */
+    if (val->type == RAY_DICT) {
+        ray_t* keys = ray_dict_keys(val);   /* borrowed */
+        ray_t* vals = ray_dict_vals(val);   /* borrowed */
+        char kb[2048]; kb[0] = '\0';
+        char vb[2048]; vb[0] = '\0';
+        q_fmt(keys, kb, sizeof kb);
+        q_fmt(vals, vb, sizeof vb);
+        if (kb[0] == ',') snprintf(buf, bufsz, "(%s)!%s", kb, vb);
+        else              snprintf(buf, bufsz, "%s!%s", kb, vb);
+        return;
+    }
+
+    /* The functional qSQL parse tree (?;`t;c;b;a) / (!;…) prints VERTICALLY,
+     * one element per line — kdb's display, pinned by the parse ledgers.  Keyed
+     * on a 5-list headed by the bare `?`/`!` verb symbol; every nested list
+     * inside still prints inline via the recursion below. */
+    if (val->type == RAY_LIST && ray_len(val) == 5) {
+        ray_t** e = (ray_t**)ray_data(val);
+        ray_t* h = e[0];
+        if (h && h->type == -RAY_SYM && !(h->attrs & 0x20)) {
+            ray_t* s = ray_sym_str(h->i64);
+            int vert = (s && ray_str_len(s) == 1 &&
+                        (ray_str_ptr(s)[0] == '?' || ray_str_ptr(s)[0] == '!'));
+            if (s) ray_release(s);
+            if (vert) {
+                size_t pos = 0;
+                buf[0] = '\0';
+                for (int64_t i = 0; i < 5; i++) {
+                    char elem[2048]; elem[0] = '\0';
+                    q_fmt(e[i], elem, sizeof elem);
+                    size_t el = strlen(elem);
+                    if (i && pos + 1 < bufsz) buf[pos++] = '\n';
+                    if (pos + el >= bufsz) el = (bufsz > pos + 1) ? bufsz - 1 - pos : 0;
+                    memcpy(buf + pos, elem, el);
+                    pos += el;
+                    buf[pos] = '\0';
+                }
+                return;
+            }
         }
     }
 
@@ -281,12 +330,19 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
      * head (the parser's paren-list marker) is HIDDEN: the tree for `(1;2;3)`
      * is ((list);1;2;3) but must display (1;2;3). */
     if (val->type == RAY_LIST) {
-        size_t pos = 0;
-        if (pos + 1 < bufsz) buf[pos++] = '(';
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
         ray_t* lv = q_registry_list_value();
         if (lv && n >= 1 && e[0] == lv) { e++; n--; }   /* skip hidden head */
+        /* A 1-element general list is an enlist: prints ,x not (x). */
+        if (n == 1) {
+            char elem[2048]; elem[0] = '\0';
+            q_fmt(e[0], elem, sizeof elem);
+            snprintf(buf, bufsz, ",%s", elem);
+            return;
+        }
+        size_t pos = 0;
+        if (pos + 1 < bufsz) buf[pos++] = '(';
         for (int64_t i = 0; i < n; i++) {
             if (i && pos + 1 < bufsz) buf[pos++] = ';';
             char elem[1024];
