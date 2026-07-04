@@ -661,6 +661,33 @@ static P parse_base(Parser *p) {
     }
     case T_LPAREN: {
         adv(p);
+        /* Table literal `([] col:vals; …)` — a paren whose first token is `[`.
+         * The bracketed section holds KEY columns (empty here = unkeyed); the
+         * body is a `;`-separated column-def sequence.  Emits (table_value;
+         * col1; col2; …) — the SAME shape as a paren list but with the table
+         * constructor head, so the shared right-to-left context builder
+         * (q_ctx_build, table mode) assembles the columns.  q_fmt hides the
+         * head. */
+        if (at(p, T_LBRACK)) {
+            adv(p);                                   /* consume '[' */
+            if (!at(p, T_RBRACK))
+                q_die("nyi: keyed table literal ([k:..] ..) is deferred");
+            expect(p, T_RBRACK, "expected ']' in table literal");
+            ray_t *tv = q_registry_table_value();
+            if (!tv) q_die("table literal: registry not initialized");
+            ray_t *cols = parse_E(p);
+            expect(p, T_RPAREN, "expected ')'");
+            int64_t cn = ray_len(cols);
+            ray_t **cs = (ray_t **)ray_data(cols);
+            ray_t *w = ray_list_new(cn + 1);
+            w = ray_list_append(w, tv);
+            for (int64_t i = 0; i < cn; i++) {
+                if (cs[i]) { w = ray_list_append(w, cs[i]); }
+                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+            }
+            ray_release(cols);
+            return (P){ R_NOUN, w };
+        }
         ray_t *e = parse_E(p);
         expect(p, T_RPAREN, "expected ')'");
         /* Inside parens an elided element is the generic null (kdb: `(;5)` is
