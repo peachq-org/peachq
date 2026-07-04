@@ -33,6 +33,41 @@ static int ends_with(const char* s, const char* suf) {
     return a >= b && strcmp(s + a - b, suf) == 0;
 }
 
+/* Error-expectation rows: an expected output whose FIRST line starts with `'`
+ * (kdb error display: 'type) asserts the example ERRORS.  Only the first
+ * line is consulted — newer kdb appends stack-trace lines we deliberately do
+ * not support yet, so trailing lines are ignored by construction.  Default
+ * is LENIENT (any eval/lower error matches); QDOC_STRICT_ERRORS=1 also
+ * requires the error CLASS to equal the word after the quote ('type ->
+ * code "type").  Returns 1 and fills cls[] (may be empty) when the row is an
+ * error expectation. */
+static int expect_is_error(const char* expect, char* cls, size_t csz) {
+    const char* p = expect;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '\'') return 0;
+    p++;
+    size_t i = 0;
+    while (p[i] && p[i] != '\n' && p[i] != ' ' && i + 1 < csz) {
+        cls[i] = p[i];
+        i++;
+    }
+    cls[i] = '\0';
+    return 1;
+}
+
+static int strict_errors(void) {
+    const char* e = getenv("QDOC_STRICT_ERRORS");
+    return e && *e && *e != '0';
+}
+
+/* Match an actual error object against an error-expectation row.  The error
+ * class lives in the RAY_ERROR's sdata (same field q_repl prints). */
+static int error_row_matches(ray_t* err, const char* cls) {
+    if (!strict_errors() || !cls[0]) return 1;          /* lenient: any error */
+    const char* code = (const char*)err->sdata;
+    return code && strncmp(code, cls, 7) == 0;
+}
+
 /* Run one example; update result; report on failure when verbose. */
 static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
                         int verbose, FILE* out, const char* path,
@@ -53,9 +88,16 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
     }
 
     if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
+    char errcls[8];
+    int want_error = expect_is_error(expect, errcls, sizeof errcls);
     int is_assign = q_ast_is_assign(ast);   /* pre-lower shape */
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) {
+        if (want_error && error_row_matches(ast, errcls)) {
+            ray_release(ast);
+            r->passed++;
+            return;
+        }
         char ne[QD_OUT];
         normalize(expect, ne, sizeof ne);
         ray_release(ast);
@@ -70,9 +112,14 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
     if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
 
     /* An eval error is a failure — NOT empty output that could match an empty
-     * expected.  Otherwise every no-output example we can't run (assignments,
-     * table defs, `select`) would falsely "match". */
+     * expected (otherwise every no-output example we can't run would falsely
+     * "match") — UNLESS the row is an error EXPECTATION ('type). */
     if (RAY_IS_ERR(res)) {
+        if (want_error && error_row_matches(res, errcls)) {
+            ray_release(res);
+            r->passed++;
+            return;
+        }
         char ne[QD_OUT];
         normalize(expect, ne, sizeof ne);
         ray_release(res);
@@ -80,6 +127,19 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
         if (verbose)
             fprintf(out, "  q)%.200s\n    FAIL(eval) got \"<error>\" want \"%.200s\"\n",
                     input, ne);
+        return;
+    }
+
+    /* an error-expectation row that did NOT error is a failure */
+    if (want_error) {
+        char got_ok[QD_OUT];
+        got_ok[0] = '\0';
+        if (!RAY_IS_NULL(res) && !is_assign) q_fmt(res, got_ok, sizeof got_ok);
+        ray_release(res);
+        r->failed++;
+        if (verbose)
+            fprintf(out, "  q)%.200s\n    FAIL(eval) got \"%.200s\" want error '%s\n",
+                    input, got_ok, errcls);
         return;
     }
 
