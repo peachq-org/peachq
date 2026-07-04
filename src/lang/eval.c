@@ -951,6 +951,12 @@ ray_t* call_fn1(ray_t* fn, ray_t* arg) {
         ray_t* args[1] = { arg };
         return call_lambda(fn, args, 1);
     }
+    /* openq: noun-head apply hook (third site — the OP_CALL1 fast path). */
+    if (g_apply_hook) {
+        ray_t* args[1] = { arg };
+        ray_t* r = g_apply_hook(fn, args, 1);
+        if (r) return r;
+    }
     return ray_error("type", "call: expected a callable function, got %s", ray_type_name(fn->type));
 }
 
@@ -996,6 +1002,12 @@ ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b) {
         /* Partial application not supported, just call with first arg */
         ray_unary_fn f = (ray_unary_fn)(uintptr_t)fn->i64;
         return f(a);
+    }
+    /* openq: noun-head apply hook (the OP_CALL2 fast path). */
+    if (g_apply_hook) {
+        ray_t* args[2] = { a, b };
+        ray_t* r = g_apply_hook(fn, args, 2);
+        if (r) return r;
     }
     return ray_error("type", "call: expected a callable function, got %s", ray_type_name(fn->type));
 }
