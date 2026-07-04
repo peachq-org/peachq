@@ -43,7 +43,8 @@ typedef enum {
     QK_NE,              /* q `<>` wrapper (element-wise char-str neq, else !=)   */
     QK_TAKE,            /* q `#`  wrapper (arg-swap take)                        */
     QK_DROP,            /* q `_`  wrapper (count-drop via range-take)            */
-    QK_EACH             /* q `each` wrapper (rayfall map + vector collapse)      */
+    QK_EACH,            /* q `each` wrapper (rayfall map + vector collapse)      */
+    QK_MATCH            /* q `~`  wrapper (recursive whole-value equivalence)    */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
