@@ -14,9 +14,9 @@
  *   - q `,` dyadic is join -> rayfall `concat`.
  * DEFERRED (QK_NONE — no clean rayfall target, do NOT guess): `&`/`|` dyadic
  *   (min/max are AGGREGATES, not dyadic element-wise lesser/greater), monadic
- *   `+` (flip: no builtin), monadic `%` (reciprocal: no builtin), dyadic `~`
- *   (match: no builtin).  Type-dispatch verbs `! ? $ @ . _` are entirely out of
- *   2a scope (2c).
+ *   `+` (flip: no builtin), monadic `%` (reciprocal: no builtin).  Dyadic `~`
+ *   is the QK_MATCH wrapper (2c-1).  The remaining type-dispatch verbs
+ *   `! ? $ @ .` land in 2c-2.
  *
  * KW_INFIX is held to EXACTLY {div} so the lexer's infix-keyword classification
  * is byte-identical to the retired q_is_kw_verb memcmp — guarding the parse_*
@@ -44,7 +44,7 @@ static const q_op_t Q_OPS[] = {
     { "|",     QLEX_GLYPH,     QK_ENV,  "reverse",   QK_NONE,  NULL,      NULL  },
     { "&",     QLEX_GLYPH,     QK_ENV,  "where",     QK_NONE,  NULL,      NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
-    { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_NONE,  NULL,      NULL  },
+    { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
