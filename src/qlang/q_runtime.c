@@ -11,6 +11,7 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_builtins.h"
 #include "qlang/q_registry.h"
+#include "lang/eval.h"        /* ray_eval_set_apply_hook */
 #include <rayforce.h>
 
 ray_runtime_t* q_runtime_create(int argc, char** argv) {
@@ -20,6 +21,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
 }
 
 void q_runtime_destroy(ray_runtime_t* rt) {
+    ray_eval_set_apply_hook(NULL);   /* detach the q dispatcher first */
     q_registry_destroy();      /* free verb snapshots before the env goes away */
     ray_runtime_destroy(rt);
 }
