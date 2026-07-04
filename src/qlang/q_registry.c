@@ -208,7 +208,25 @@ static int q_match_rec(ray_t* a, ray_t* b) {
     if (a->type == -RAY_STR)
         return ray_str_len(a) == ray_str_len(b) &&
                memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) == 0;
-    if (ray_is_atom(a)) return memcmp(&a->i64, &b->i64, 8) == 0;  /* payload union */
+    if (a->type == -RAY_GUID) {
+        /* payload lives in a 16-byte U8 buffer behind the obj pointer —
+         * an 8-byte union memcmp would compare POINTERS (codex P2). */
+        return a->obj && b->obj &&
+               memcmp(ray_data(a->obj), ray_data(b->obj), 16) == 0;
+    }
+    if (ray_is_atom(a)) {
+        /* inline-payload scalars ONLY (ray_is_atom also covers LAMBDA and
+         * fn values, whose state is NOT in the union slot — those fall to
+         * the conservative-mismatch tail below). */
+        switch (-a->type) {
+        case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
+        case RAY_F32: case RAY_F64:
+        case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
+            return memcmp(&a->i64, &b->i64, 8) == 0;   /* payload union */
+        default:
+            return 0;
+        }
+    }
     if (a->type == RAY_DICT || a->type == RAY_TABLE) {
         ray_t** ea = (ray_t**)ray_data(a);
         ray_t** eb = (ray_t**)ray_data(b);
