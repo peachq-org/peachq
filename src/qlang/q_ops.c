@@ -40,7 +40,7 @@ static const q_op_t Q_OPS[] = {
     { "<>",    QLEX_GLYPH,     QK_NONE, NULL,        QK_NE,    "!=",      NULL  },
     /* ---- structural glyphs ---- */
     { "#",     QLEX_GLYPH,     QK_ENV,  "count",     QK_TAKE,  "take",    NULL  },
-    { "_",     QLEX_GLYPH,     QK_NONE, NULL,        QK_DROP,  "drop",    NULL  },
+    { "_",     QLEX_GLYPH,     QK_FLOOR, "floor",    QK_DROP,  "drop",    NULL  },
     { "|",     QLEX_GLYPH,     QK_ENV,  "reverse",   QK_NONE,  NULL,      NULL  },
     { "&",     QLEX_GLYPH,     QK_ENV,  "where",     QK_NONE,  NULL,      NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
