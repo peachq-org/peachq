@@ -253,6 +253,18 @@ static const char* q_hist_path(char* buf, size_t cap) {
 
 /* Interactive TTY loop — mirrors the proven fallback branch of rayforce's
  * run_interactive (src/app/repl.c) but drives the q pipeline. */
+/* q REPL is line-at-a-time, exactly like kdb's `q)` console: every Return
+ * submits.  This replaces rayforce's bracket-continuation counter, whose
+ * `;`-as-line-comment rule (correct for rayfall/lisp) mis-flagged q's `;`
+ * separator inside parens as an open expression — e.g. `(1 2 3;4 5)` dropped
+ * into a `…` continuation prompt instead of evaluating.  Returning 0 means
+ * "never incomplete". */
+static int32_t q_no_continuation(const char* mbuf, int32_t mbuf_len,
+                                 const char* buf, int32_t buf_len) {
+    (void)mbuf; (void)mbuf_len; (void)buf; (void)buf_len;
+    return 0;
+}
+
 static void q_repl_interactive(FILE* out, FILE* err) {
     ray_term_t* t = ray_term_create();
     if (!t) {
@@ -265,6 +277,7 @@ static void q_repl_interactive(FILE* out, FILE* err) {
     ray_hist_load(&t->hist, hist_path);
     ray_term_set_highlighter(t, q_highlight);
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
+    ray_term_set_continuation_fn(t, q_no_continuation);  /* kdb: line-at-a-time */
 
     ray_term_begin(t);
     for (;;) {
