@@ -22,6 +22,8 @@
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/q_deriv.h"    /* q_proj_new — 104h derived-verb carriers */
+#include "lang/env.h"        /* ray_fn_name — qSQL output-expr head normalize */
+#include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <assert.h>
 #include <stdio.h>
@@ -1502,6 +1504,195 @@ static int ql_is_lambda(ray_t *node) {
     return r;
 }
 
+/* ===== qSQL SELECT lowering (piece 3 executor) ==============================
+ * The parser keeps `select … from t` / `?[t;c;b;a]` as the SYMBOLIC functional
+ * 5-list (?;`t;c;b;a) so `parse` prints it kdb-true.  On the EVAL path only,
+ * q_lower rewrites that 5-list onto the base ray_select engine:
+ *
+ *   (?;`t;c;b;a)  ->  (q.select; {from:t [where:…] [by:…] out:expr …}; keycols)
+ *
+ * The q column-symbol references (`a) are turned into bare rayfall column
+ * name-refs (a) that ray_select resolves in column scope.  See q_select_exec
+ * (q_registry.c) for the runtime side (ray_select + by-group keyed split). */
+
+/* Deep-clear the QUOTED bit on every -RAY_SYM atom in a clause expr, so a q
+ * column reference `a becomes a bare column name-ref a.  A genuine `sym literal
+ * survives as an (enlisted) RAY_SYM VECTOR, which this leaves untouched. */
+static void ql_unquote_cols(ray_t *x) {
+    if (!x) return;
+    if (x->type == -RAY_SYM) { x->attrs &= ~Q_ATTR_QUOTED; return; }
+    if (x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t **e = (ray_t **)ray_data(x);
+        for (int64_t i = 0; i < n; i++) ql_unquote_cols(e[i]);
+    }
+}
+
+/* Normalize a qSQL OUTPUT-column expr: unquote column refs AND turn an
+ * embedded function-VALUE head back into a bare name-ref sym.  ray_select's
+ * aggregate detection (is_agg_expr, query.c) keys on a -RAY_SYM head, so
+ * `sum a` — which the parser embeds as (sum<value>;`a) — must become
+ * (sum;a) or it evaluates element-wise (returning the column, not the sum). */
+static void ql_qsql_out(ray_t *x) {
+    if (!x) return;
+    if (x->type == -RAY_SYM) { x->attrs &= ~Q_ATTR_QUOTED; return; }
+    if (x->type != RAY_LIST) return;
+    int64_t n = ray_len(x);
+    ray_t **e = (ray_t **)ray_data(x);
+    if (n >= 1 && e[0] && (e[0]->type == RAY_UNARY || e[0]->type == RAY_BINARY ||
+                           e[0]->type == RAY_VARY)) {
+        const char *nm = ray_fn_name(e[0]);
+        if (nm && nm[0]) {
+            ray_t *s = ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
+            if (s && !RAY_IS_ERR(s)) { ray_release(e[0]); e[0] = s; }
+            else if (s) ray_release(s);
+        }
+    }
+    for (int64_t i = 0; i < n; i++) ql_qsql_out(e[i]);
+}
+
+/* A bare `&` dyadic application (rayfall min / logical-and) combining two
+ * boolean where-masks.  Consumes neither operand's ownership (retained on
+ * append); returns owned. */
+static ray_t *ql_and(ray_t *l, ray_t *r) {
+    ray_t *amp = q_verb('&');
+    ray_t *n = ray_list_new(3);
+    n = ray_list_append(n, amp); ray_release(amp);
+    n = ray_list_append(n, l);
+    n = ray_list_append(n, r);
+    return n;
+}
+
+static void ql_qsql(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) != 5) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *hs = ray_sym_str(h->i64);
+    int is_q = hs && ray_str_len(hs) == 1 && ray_str_ptr(hs)[0] == '?';
+    if (hs) ray_release(hs);
+    if (!is_q) return;
+    ray_t *sv = q_registry_select_value();
+    if (!sv) return;
+
+    ray_t *t = e[1], *c = e[2], *b = e[3], *a = e[4];
+    if (!t || t->type != -RAY_SYM) return;              /* only bare table name */
+
+    ray_t *keyvec  = ray_sym_vec_new(RAY_SYM_W64, 4);
+    ray_t *vallist = ray_list_new(4);
+    ray_t *keycols = ray_sym_vec_new(RAY_SYM_W64, 1);   /* by-key col names */
+
+    /* NB `from:` is appended LAST: the base ray_select mis-handles a computed
+     * output column (`sum a`) when `from:` is the FIRST dict key. */
+
+    /* where: AND the constraints (right-to-left fold), cols unquoted */
+    if (c && c->type == RAY_LIST && ray_len(c) == 1) {
+        ray_t *clist = ((ray_t **)ray_data(c))[0];
+        if (clist && clist->type == RAY_LIST && ray_len(clist) >= 1) {
+            int64_t ncon = ray_len(clist);
+            ray_t **cons = (ray_t **)ray_data(clist);
+            ray_t *acc = NULL;
+            for (int64_t i = ncon - 1; i >= 0; i--) {
+                ray_t *cc = cons[i];
+                if (!cc) continue;
+                ray_retain(cc);
+                ql_unquote_cols(cc);
+                if (!acc) { acc = cc; }
+                else { ray_t *nx = ql_and(cc, acc); ray_release(cc); ray_release(acc); acc = nx; }
+            }
+            if (acc) {
+                keyvec  = q_symvec_append(keyvec, "where", 5);
+                vallist = ray_list_append(vallist, acc); ray_release(acc);
+            }
+        }
+    }
+
+    /* by: single/multi grouping column(s); record their names as key cols */
+    if (b && b->type == RAY_DICT) {
+        ray_t *bk = ray_dict_keys(b);       /* names */
+        ray_t *bv = ray_dict_vals(b);       /* sym vec or expr list */
+        int64_t nb = ray_len(bk);
+        int bv_sym = (bv && bv->type == RAY_SYM);
+        ray_t *byexpr = NULL;
+        for (int64_t i = 0; i < nb; i++) {
+            ray_t *kn = ray_sym_vec_cell(bk, i);        /* borrowed -RAY_STR */
+            keycols = q_symvec_append(keycols, ray_str_ptr(kn), (int)ray_str_len(kn));
+            ray_t *ex;
+            if (bv_sym) {
+                ray_t *vn = ray_sym_vec_cell(bv, i);
+                ex = ray_sym(ray_sym_intern_runtime(ray_str_ptr(vn), ray_str_len(vn)));
+            } else {
+                ex = ((ray_t **)ray_data(bv))[i];
+                ray_retain(ex);
+                ql_unquote_cols(ex);
+            }
+            if (nb == 1) { byexpr = ex; }
+            else { if (!byexpr) byexpr = ray_list_new(nb); byexpr = ray_list_append(byexpr, ex); ray_release(ex); }
+        }
+        if (byexpr) {
+            keyvec  = q_symvec_append(keyvec, "by", 2);
+            vallist = ray_list_append(vallist, byexpr); ray_release(byexpr);
+        }
+    }
+
+    /* output columns: name -> expr.  A computed output column whose q name
+     * equals a source column (`select sum a` -> col `a`) breaks the base
+     * engine's `name: (expr name)` collision handling, so each output column
+     * goes into ray_select under a UNIQUE temp name `QqcN` and q_select_exec
+     * renames the result columns back to the real q names (tempnames/outnames
+     * pair).  Order-independent (rename matches by temp name).  NB the temp
+     * prefix must NOT start with `_` — the base engine treats leading-underscore
+     * column names as reserved/hidden and drops them from the output. */
+    ray_t *tempnames = ray_sym_vec_new(RAY_SYM_W64, 1);
+    ray_t *outnames  = ray_sym_vec_new(RAY_SYM_W64, 1);
+    if (a && a->type == RAY_DICT) {
+        ray_t *ak = ray_dict_keys(a);
+        ray_t *av = ray_dict_vals(a);
+        int64_t na = ray_len(ak);
+        int av_sym = (av && av->type == RAY_SYM);
+        for (int64_t i = 0; i < na; i++) {
+            char tmp[24];
+            int tl = snprintf(tmp, sizeof tmp, "Qqc%lld", (long long)i);
+            keyvec    = q_symvec_append(keyvec, tmp, tl);
+            tempnames = q_symvec_append(tempnames, tmp, tl);
+            ray_t *nm = ray_sym_vec_cell(ak, i);
+            outnames  = q_symvec_append(outnames, ray_str_ptr(nm), (int)ray_str_len(nm));
+            ray_t *ex;
+            if (av_sym) {
+                ray_t *vn = ray_sym_vec_cell(av, i);
+                ex = ray_sym(ray_sym_intern_runtime(ray_str_ptr(vn), ray_str_len(vn)));
+            } else {
+                ex = ((ray_t **)ray_data(av))[i];
+                ray_retain(ex);
+                ql_qsql_out(ex);
+            }
+            vallist = ray_list_append(vallist, ex); ray_release(ex);
+        }
+    }
+
+    /* from: bare table name-ref — appended LAST (see note above) */
+    ray_t *fromv = ray_sym(t->i64);
+    keyvec  = q_symvec_append(keyvec, "from", 4);
+    vallist = ray_list_append(vallist, fromv); ray_release(fromv);
+
+    ray_t *dict = ray_dict_new(keyvec, vallist);   /* consumes keyvec, vallist */
+    if (!dict || RAY_IS_ERR(dict)) {
+        if (dict) ray_release(dict);
+        ray_release(keycols); ray_release(tempnames); ray_release(outnames);
+        return;
+    }
+
+    ray_t *repl = ray_list_new(5);
+    repl = ray_list_append(repl, sv);                  /* borrowed -> retained */
+    repl = ray_list_append(repl, dict);      ray_release(dict);
+    repl = ray_list_append(repl, keycols);   ray_release(keycols);
+    repl = ray_list_append(repl, tempnames); ray_release(tempnames);
+    repl = ray_list_append(repl, outnames);  ray_release(outnames);
+    ray_release(node);
+    *slot = repl;
+}
+
 /* Depth-first rewriting walker.  Children first so nested applications
  * ((+/) each ...) lower inside-out; then the node itself.  Returns a
  * RAY_ERROR (owned) on an 'assign violation, else NULL. */
@@ -1517,6 +1708,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
             ray_t *err = q_lower_walk(&e[i], lambda_body, i == 0);
             if (err) return err;
         }
+    ql_qsql(slot);                         /* (?;`t;c;b;a) -> ray_select call */
     ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
     ray_t *err = ql_assign(slot, in_lambda);
     if (err) return err;
