@@ -70,6 +70,11 @@ typedef int32_t (*ray_highlight_fn)(char* dst, int32_t dst_cap,
                                     const char* buf, int32_t buf_len,
                                     int32_t match_pos1, int32_t match_pos2);
 
+typedef enum ray_term_comment_mode {
+    RAY_TERM_COMMENT_SEMICOLON = 0, /* rayfall: ; to end of line */
+    RAY_TERM_COMMENT_Q_SLASH   = 1, /* q: / to EOL only after whitespace/BOL */
+} ray_term_comment_mode_t;
+
 typedef struct ray_hist {
     char**   entries;
     int32_t  count;
@@ -145,6 +150,7 @@ typedef struct ray_term {
     int32_t     esc_buf_len;   /* bytes accumulated in unknown CSI sequence */
     /* Optional pluggable syntax highlighter; NULL → use the built-in one. */
     ray_highlight_fn highlight_fn;
+    ray_term_comment_mode_t comment_mode;
 } ray_term_t;
 
 ray_term_t* ray_term_create(void);
@@ -172,6 +178,7 @@ void   ray_term_prompt(ray_term_t* term);
  * to restore the built-in highlighter.  Callers own the function; it must
  * outlive the term. */
 void   ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn);
+void   ray_term_set_comment_mode(ray_term_t* term, ray_term_comment_mode_t mode);
 
 /* Set (or clear, when prefix == NULL or empty) the prompt prefix.
  * Used by the remote-REPL session to put the server address ahead
