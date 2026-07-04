@@ -51,8 +51,10 @@ typedef enum {
     QK_VALUE,           /* q `value` wrapper (dict vals, collapsed)              */
     QK_DISTINCT,        /* q `distinct`/monadic `?` wrapper (FIRST-OCCURRENCE
                          * order; rayfall's distinct DAG path sorts)             */
-    QK_ROLL             /* q `x?y` wrapper (find with kdb miss->count / roll /
+    QK_ROLL,            /* q `x?y` wrapper (find with kdb miss->count / roll /
                          * pick; deal + float roll are deferred cells)           */
+    QK_CAST             /* q `t$x` wrapper (rayfall as + kdb float->int ROUNDING;
+                         * Tok string-parse and unknown designators deferred)    */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
