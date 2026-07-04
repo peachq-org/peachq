@@ -1131,21 +1131,34 @@ static void comp_cycle_insert(ray_term_t* term, int32_t idx) {
 
 /* ===== Multi-line input ===== */
 
+static int term_comment_starts(ray_term_comment_mode_t mode, const char* buf,
+                               int32_t i, int32_t line_start) {
+    char c = buf[i];
+    if (mode == RAY_TERM_COMMENT_Q_SLASH) {
+        if (c != '/') return 0;
+        return i == line_start || buf[i - 1] == ' ' || buf[i - 1] == '\t';
+    }
+    return c == ';';
+}
+
 int32_t ray_term_count_unmatched(ray_term_t* term) {
     int32_t depth = 0;
     int32_t in_string = 0;
+    int32_t line_start = 0;
 
     /* Scan multiline_buf first */
     for (int32_t i = 0; i < term->multiline_len; i++) {
         char c = term->multiline_buf[i];
+        if (c == '\n') { line_start = i + 1; continue; }
         if (in_string) {
             if (c == '\\' && i + 1 < term->multiline_len) { i++; continue; }
             if (c == '"') in_string = 0;
             continue;
         }
         if (c == '"') { in_string = 1; continue; }
-        if (c == ';') {
+        if (term_comment_starts(term->comment_mode, term->multiline_buf, i, line_start)) {
             while (i < term->multiline_len && term->multiline_buf[i] != '\n') i++;
+            line_start = i + 1;
             continue;
         }
         if (c == '(' || c == '[' || c == '{') depth++;
@@ -1162,7 +1175,7 @@ int32_t ray_term_count_unmatched(ray_term_t* term) {
             continue;
         }
         if (c == '"') { in_string = 1; continue; }
-        if (c == ';') break; /* rest of current line is a comment */
+        if (term_comment_starts(term->comment_mode, term->buf, i, 0)) break;
         if (c == '(' || c == '[' || c == '{') depth++;
         else if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; }
     }
@@ -1250,6 +1263,11 @@ void ray_term_set_prompt(ray_term_t* term, const char* ansi, int32_t vis_width) 
 void ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn) {
     if (!term) return;
     term->highlight_fn = fn;
+}
+
+void ray_term_set_comment_mode(ray_term_t* term, ray_term_comment_mode_t mode) {
+    if (!term) return;
+    term->comment_mode = mode;
 }
 
 /* Dispatch to the caller-supplied highlighter when one is installed,
@@ -1927,4 +1945,3 @@ ray_t* ray_term_feed(ray_term_t* term) {
 
     return feed_normal(term, key);
 }
-
