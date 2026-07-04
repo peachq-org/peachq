@@ -367,41 +367,48 @@ static ray_t* q_ctx_build(ray_t** elems, int64_t n, int as_table) {
         if (l && !RAY_IS_ERR(l)) { out = q_collapse_list(l); ray_release(l); }
         else                     { out = l; }
     } else {
-        out = ray_table_new(n);
+        /* Row count comes from the vector/list columns, which must all share one
+         * length (mismatch -> 'length).  A scalar-atom column BROADCASTS to that
+         * length (kdb: `([]a:1 2 3;b:0)` -> b is 0 0 0); all-scalar -> 1 row. */
         int64_t nrows = -1;
-        for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
-            if (names[i] < 0) {
-                ray_release(out);
-                out = ray_error("type",
-                    "([]…): every column needs a name (a:… ; bare/.Q.id deferred)");
+        ray_t* err2 = NULL;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* col = vals[i];
+            if (col && (ray_is_vec(col) || col->type == RAY_LIST)) {
+                int64_t clen = ray_len(col);
+                if (nrows < 0) nrows = clen;
+                else if (clen != nrows) {
+                    err2 = ray_error("length", "([]…): column length mismatch");
+                    break;
+                }
+            } else if (!col || col->type >= 0) {
+                err2 = ray_error("type", "([]…): column must be a vector or list");
                 break;
             }
-            /* A scalar-atom column enlists to a 1-row column (kdb: `([]a:1;b:2)`
-             * is a one-row table); a non-vector/non-list column is an error. */
-            ray_t* col = vals[i]; int owned = 0;
-            if (col && col->type < 0) {
-                ray_t* l = ray_list_new(1);
-                l = ray_list_append(l, col);
-                col = q_collapse_list(l); ray_release(l); owned = 1;
-            }
-            int64_t clen = (col && (ray_is_vec(col) || col->type == RAY_LIST))
-                             ? ray_len(col) : -1;
-            if (clen < 0) {
+        }
+        if (err2) { out = err2; }
+        else {
+            if (nrows < 0) nrows = 1;
+            out = ray_table_new(n);
+            for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+                if (names[i] < 0) {
+                    ray_release(out);
+                    out = ray_error("type",
+                        "([]…): every column needs a name (a:… ; bare/.Q.id deferred)");
+                    break;
+                }
+                ray_t* col = vals[i]; int owned = 0;
+                if (col && col->type < 0) {              /* scalar -> broadcast */
+                    ray_t* nn = ray_i64(nrows);
+                    col = ray_take_fn(col, nn); ray_release(nn); owned = 1;
+                    if (!col || RAY_IS_ERR(col)) {
+                        ray_release(out); out = col ? col : ray_error("type", "broadcast");
+                        break;
+                    }
+                }
+                out = ray_table_add_col(out, names[i], col);
                 if (owned) ray_release(col);
-                ray_release(out);
-                out = ray_error("type", "([]…): column must be a vector or list");
-                break;
             }
-            /* All columns must share one row count (kdb: mismatch -> 'length). */
-            if (nrows < 0) nrows = clen;
-            else if (clen != nrows) {
-                if (owned) ray_release(col);
-                ray_release(out);
-                out = ray_error("length", "([]…): column length mismatch");
-                break;
-            }
-            out = ray_table_add_col(out, names[i], col);
-            if (owned) ray_release(col);
         }
     }
 
