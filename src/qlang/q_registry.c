@@ -397,8 +397,80 @@ static ray_t* q_table_build(ray_t** args, int64_t n) {
     return q_ctx_build(args, n, 1);
 }
 
-static ray_t* g_list_value  = NULL;
-static ray_t* g_table_value = NULL;
+/* q qSQL SELECT adapter — lowers the functional 5-list (?;`t;c;b;a) (emitted by
+ * BOTH the string form `select…from t` AND `?[t;c;b;a]`) onto the base
+ * ray_select engine.  q_lower hands it a fully-built rayfall query dict plus the
+ * by-group key column names; this special form calls ray_select and, for a
+ * by-group query, splits the flat result into a KEYED table — a dict from the
+ * key-columns table to the value-columns table (the mandate: "a keyed table is
+ * just a dictionary from one table to another"), which q_fmt renders `k| v`.
+ *   args[0] = query dict (unevaluated — ray_select owns clause-in-scope eval)
+ *   args[1] = by-key column-name sym vector (empty => unkeyed passthrough) */
+static ray_t* q_select_exec(ray_t** args, int64_t n) {
+    ray_t* dict = args[0];
+    ray_t* res  = ray_select(&dict, 1);
+    if (!res || RAY_IS_ERR(res)) return res;
+
+    /* Rename the temp-named output columns (__qcN) back to their real q names
+     * (args[2]=temp sym vec, args[3]=real sym vec, parallel). */
+    if (n >= 4 && res->type == RAY_TABLE &&
+        args[2] && args[2]->type == RAY_SYM && args[3] && args[3]->type == RAY_SYM) {
+        int64_t nt = ray_len(args[2]);
+        int64_t nc = ray_table_ncols(res);
+        for (int64_t i = 0; i < nt; i++) {
+            ray_t* ti = ray_i64(i);
+            ray_t* ta = ray_at_fn(args[2], ti);
+            ray_t* ra = ray_at_fn(args[3], ti);
+            ray_release(ti);
+            int64_t tid = (ta && ta->type == -RAY_SYM) ? ta->i64 : -1;
+            int64_t rid = (ra && ra->type == -RAY_SYM) ? ra->i64 : -1;
+            if (ta) ray_release(ta);
+            if (ra) ray_release(ra);
+            for (int64_t c = 0; c < nc; c++)
+                if (ray_table_col_name(res, c) == tid) {
+                    ray_table_set_col_name(res, c, rid); break;
+                }
+        }
+    }
+
+    ray_t* keys = (n >= 2) ? args[1] : NULL;
+    int64_t nk = (keys && keys->type == RAY_SYM) ? ray_len(keys) : 0;
+    if (nk == 0 || res->type != RAY_TABLE) return res;
+
+    int64_t kids[64];
+    if (nk > 64) nk = 64;
+    for (int64_t k = 0; k < nk; k++) {
+        ray_t* ia = ray_i64(k);
+        ray_t* ka = ray_at_fn(keys, ia);
+        ray_release(ia);
+        kids[k] = (ka && ka->type == -RAY_SYM) ? ka->i64 : -1;
+        if (ka) ray_release(ka);
+    }
+
+    int64_t nc = ray_table_ncols(res);
+    ray_t* kt = ray_table_new(nk);
+    ray_t* vt = ray_table_new(nc - nk > 0 ? nc - nk : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+        int64_t nm  = ray_table_col_name(res, c);
+        ray_t*  col = ray_table_get_col_idx(res, c);
+        int iskey = 0;
+        for (int64_t k = 0; k < nk; k++) if (kids[k] == nm) { iskey = 1; break; }
+        if (iskey) kt = ray_table_add_col(kt, nm, col);
+        else       vt = ray_table_add_col(vt, nm, col);
+    }
+    ray_release(res);
+    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);   /* consumes kt, vt */
+}
+
+static ray_t* g_list_value   = NULL;
+static ray_t* g_table_value  = NULL;
+static ray_t* g_select_value = NULL;
+
+ray_t* q_registry_select_value(void) {
+    return g_select_value;   /* borrowed; NULL before init */
+}
 
 ray_t* q_registry_list_value(void) {
     return g_list_value;   /* borrowed; NULL before init */
@@ -587,6 +659,12 @@ ray_err_t q_registry_init(void) {
         g_table_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_select_value = ray_fn_vary("q.select",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_select_exec);
+    if (!g_select_value || RAY_IS_ERR(g_select_value)) {
+        g_select_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     g_building = false;
     g_inited   = true;
     ray_serde_set_fn_hooks(q_serde_fn_writer, q_serde_fn_reader);
@@ -641,8 +719,9 @@ void q_registry_destroy(void) {
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
     if (g_scan_value)  { ray_release(g_scan_value);  g_scan_value  = NULL; }
-    if (g_list_value)  { ray_release(g_list_value);  g_list_value  = NULL; }
-    if (g_table_value) { ray_release(g_table_value); g_table_value = NULL; }
+    if (g_list_value)   { ray_release(g_list_value);   g_list_value   = NULL; }
+    if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
+    if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
     g_count  = 0;
     g_inited = false;
 }

@@ -98,6 +98,12 @@ ray_t* q_registry_list_value(void);
  * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_table_value(void);
 
+/* The qSQL SELECT adapter value q_lower embeds when it lowers the functional
+ * 5-list (?;`t;c;b;a) onto the base ray_select engine.  Special form; its two
+ * operands are the rayfall query dict and the by-key column-name sym vector.
+ * Borrowed; NULL before q_registry_init. */
+ray_t* q_registry_select_value(void);
+
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
  * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
  * are simple vectors, not general lists).  Mixed types, non-atom elements,
