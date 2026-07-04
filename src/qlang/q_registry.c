@@ -30,6 +30,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry.h"
 #include "qlang/q_ops.h"      /* Q_OPS manifest, q_build_kind */
+#include "qlang/q_apply.h"    /* q_apply_noun — @/. noun arms */
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
@@ -505,6 +506,68 @@ static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
     return r;
 }
 
+/* q `f@x` — Apply At / Index At (ref/apply.md).  A callable f invokes with
+ * the single argument; everything else (vector, list, dict, table, 104h
+ * carrier) delegates to q_apply_noun — identical semantics to `f[x]`/`f x`.
+ * Special forms need UNEVALUATED args, which are already gone here -> error.
+ * Ternary Trap `@[f;fx;e]` / Amend are deferred cells (arity error today). */
+static ray_t* q_at_wrap(ray_t* f, ray_t* x) {
+    if (f && (f->type == RAY_UNARY || f->type == RAY_BINARY || f->type == RAY_VARY)
+          && (f->attrs & RAY_FN_SPECIAL_FORM))
+        return ray_error("type", "@: special forms cannot be applied");
+    if (f && f->type == RAY_UNARY)
+        return ((ray_unary_fn)(uintptr_t)f->i64)(x);
+    if (f && f->type == RAY_VARY) {
+        ray_t* one[1] = { x };
+        return ((ray_vary_fn)(uintptr_t)f->i64)(one, 1);
+    }
+    if (f && f->type == RAY_BINARY)
+        return ray_error("rank", "@: unary application of a binary verb");
+    ray_t* args[1] = { x };
+    ray_t* r = q_apply_noun(f, args, 1);
+    return r ? r : ray_error("type", "@: not applicable");
+}
+
+/* q `v . vx` — Apply / Index (ref/apply.md): the rhs is the ARGUMENT LIST —
+ * a rank-n callable spread-calls over vx's n items; a noun depth-indexes
+ * (m . 1 2 is m[1;2]).  Atom rhs is not a list -> 'type (kdb wants a list).
+ * Ternary Trap `.[g;gx;e]` / Amend are deferred cells (arity error today). */
+static ray_t* q_dot_wrap(ray_t* f, ray_t* a) {
+    if (!a || (!ray_is_vec(a) && a->type != RAY_LIST))
+        return ray_error("type", ".: rhs must be an argument list");
+    if (f && (f->type == RAY_UNARY || f->type == RAY_BINARY || f->type == RAY_VARY)
+          && (f->attrs & RAY_FN_SPECIAL_FORM))
+        return ray_error("type", ".: special forms cannot be applied");
+    int64_t n = ray_len(a);
+    if (n < 1 || n > 8) return ray_error("rank", ".: 1..8 arguments");
+    ray_t* args[8];
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        args[i] = ray_at_fn(a, ia);
+        ray_release(ia);
+        if (!args[i] || RAY_IS_ERR(args[i])) {
+            ray_t* err = args[i];
+            for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+            return err ? err : ray_error("type", ".: bad argument list");
+        }
+    }
+    ray_t* r;
+    if (f && f->type == RAY_UNARY && n == 1)
+        r = ((ray_unary_fn)(uintptr_t)f->i64)(args[0]);
+    else if (f && f->type == RAY_BINARY && n == 2)
+        r = ((ray_binary_fn)(uintptr_t)f->i64)(args[0], args[1]);
+    else if (f && f->type == RAY_VARY)
+        r = ((ray_vary_fn)(uintptr_t)f->i64)(args, n);
+    else if (f && (f->type == RAY_UNARY || f->type == RAY_BINARY))
+        r = ray_error("rank", ".: argument count does not match the verb's rank");
+    else {
+        r = q_apply_noun(f, args, n);
+        if (!r) r = ray_error("type", ".: not applicable");
+    }
+    for (int64_t j = 0; j < n; j++) ray_release(args[j]);
+    return r;
+}
+
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
 static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
@@ -636,6 +699,8 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
                   return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_distinct_wrap);
     case QK_ROLL: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_roll_wrap);
     case QK_CAST: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cast_wrap);
+    case QK_AT:   return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_at_wrap);
+    case QK_DOT:  return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_dot_wrap);
     default:      return NULL;
     }
 }
