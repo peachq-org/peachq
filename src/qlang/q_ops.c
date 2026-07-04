@@ -54,6 +54,10 @@ static const q_op_t Q_OPS[] = {
     { "!",     QLEX_GLYPH,     QK_KEY,  "key",       QK_BANG,  "dict",    NULL  },
     /* monadic `?` (distinct) is likewise a K-ism superset of q `distinct`. */
     { "?",     QLEX_GLYPH,     QK_DISTINCT, "distinct", QK_ROLL, "rand",  NULL  },
+    /* monadic `$` stays QK_NONE: `$x` is the cast-vs-cond ambiguity, deferred.
+     * Dyadic `$` is cast; the bracket cond form `$[c;t;f]` (3+ args) is a
+     * q_lower rewrite onto rayfall `if`, not a registry cell. */
+    { "$",     QLEX_GLYPH,     QK_NONE, NULL,        QK_CAST,  "as",      NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
