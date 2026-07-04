@@ -48,6 +48,21 @@ static const q_op_t Q_OPS[] = {
     { "&",     QLEX_GLYPH,     QK_ENV,  "where",     QK_NONE,  NULL,      NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
+    /* ---- type-dispatch glyphs (2c-2) ---- */
+    /* monadic `!` (dict keys) is a K-ism accepted as a deliberate superset
+     * (valid q spells it `key`, same value — the `_`/floor precedent). */
+    { "!",     QLEX_GLYPH,     QK_KEY,  "key",       QK_BANG,  "dict",    NULL  },
+    /* monadic `?` (distinct) is likewise a K-ism superset of q `distinct`. */
+    { "?",     QLEX_GLYPH,     QK_DISTINCT, "distinct", QK_ROLL, "rand",  NULL  },
+    /* monadic `$` stays QK_NONE: `$x` is the cast-vs-cond ambiguity, deferred.
+     * Dyadic `$` is cast; the bracket cond form `$[c;t;f]` (3+ args) is a
+     * q_lower rewrite onto rayfall `if`, not a registry cell. */
+    { "$",     QLEX_GLYPH,     QK_NONE, NULL,        QK_CAST,  "as",      NULL  },
+    /* monadic `@`/`.` stay QK_NONE: `@x` type-of is blocked on the q type
+     * renumber; `.x` (value/get) comes with handles/namespaces.  Ternary+
+     * Trap/Amend forms are deferred cells (error today via arity). */
+    { "@",     QLEX_GLYPH,     QK_NONE, NULL,        QK_AT,    "at",      NULL  },
+    { ".",     QLEX_GLYPH,     QK_NONE, NULL,        QK_DOT,   "apply",   NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
@@ -67,6 +82,15 @@ static const q_op_t Q_OPS[] = {
     /* q `floor` returns LONGS from floats (kdb `floor 3.7` is 3j); rayfall's
      * env floor keeps f64, so this is the QK_FLOOR wrapper, not a rename. */
     { "floor",   QLEX_KW_PREFIX, QK_FLOOR, "floor",  QK_NONE,  NULL,      NULL  },
+    /* q dict accessors: `key`/`value` are wrappers (dict-only in 2c-2 —
+     * the file-handle/namespace/enumeration overloads are deferred cells);
+     * `distinct` must preserve FIRST-OCCURRENCE order (kdb), while rayfall's
+     * distinct routes typed vectors through the DAG group path, which sorts
+     * — so it too is a wrapper, not a rename (audited: `distinct 2 3 7 3
+     * 5 3` must be 2 3 7 5, env distinct gives 2 3 5 7). */
+    { "key",     QLEX_KW_PREFIX, QK_KEY,      "key",      QK_NONE, NULL,  NULL  },
+    { "value",   QLEX_KW_PREFIX, QK_VALUE,    "value",    QK_NONE, NULL,  NULL  },
+    { "distinct",QLEX_KW_PREFIX, QK_DISTINCT, "distinct", QK_NONE, NULL,  NULL  },
     /* q-implemented keywords: env bindings added by q_builtins_register
      * (same mechanism as `parse`), snapshotted here as pass-through rows. */
     { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
