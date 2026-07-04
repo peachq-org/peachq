@@ -75,6 +75,10 @@ static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
                  ray_release(s); }
     } else {
         q_fmt(c, out, outsz);
+        /* A grouped (by) value cell is a nested vector; q_fmt renders a
+         * 1-element vector with a leading enlist comma (`,10`), but kdb table
+         * cells show the bare value(s) — drop the enlist marker. */
+        if (out[0] == ',') memmove(out, out + 1, strlen(out));
     }
     ray_release(c);
 }
