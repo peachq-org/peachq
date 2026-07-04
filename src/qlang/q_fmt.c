@@ -5,6 +5,7 @@
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "lang/format.h"   /* ray_fmt */
+#include "lang/eval.h"     /* ray_at_fn — per-cell table element */
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
 #include <stdio.h>
@@ -43,6 +44,167 @@ static void ray_fallback(ray_t* val, char* buf, size_t bufsz) {
         buf[n] = '\0';
     }
     if (s && !RAY_IS_ERR(s)) ray_release(s);
+}
+
+void q_fmt(ray_t* val, char* buf, size_t bufsz);   /* fwd */
+
+/* ---- kdb table / keyed-table display -------------------------------------
+ *
+ * kdb prints an unkeyed table as space-joined, left-padded columns under a
+ * dashed rule:
+ *     a b            and a keyed table with the key columns left of a `|`:
+ *     ----               a| b
+ *     1 10               -| --
+ *     2 20               1| 10
+ * Column width = max(header, widest cell); interior lines carry NO trailing
+ * space (the qdoc compare trims only the whole string's ends). */
+
+#define QF_MAXCOL 64
+
+/* Format one table cell q-style into out.  A -RAY_SYM cell prints WITHOUT its
+ * leading backtick (kdb shows `ibm`, not `` `ibm``, inside a table). */
+static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
+    out[0] = '\0';
+    ray_t* ia = ray_i64(row);
+    ray_t* c  = ray_at_fn(col, ia);
+    ray_release(ia);
+    if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return; }
+    if (c->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(c->i64);
+        if (s) { snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
+                 ray_release(s); }
+    } else {
+        q_fmt(c, out, outsz);
+    }
+    ray_release(c);
+}
+
+/* Append `s` left-padded to `w` into buf at *pos (bounded by bufsz). */
+static void q_pad(char* buf, size_t bufsz, size_t* pos, const char* s, int w) {
+    int l = (int)strlen(s);
+    for (int i = 0; i < w; i++) {
+        char ch = (i < l) ? s[i] : ' ';
+        if (*pos + 1 < bufsz) buf[(*pos)++] = ch;
+    }
+    buf[*pos] = '\0';
+}
+
+static void q_trim_trailing(char* buf, size_t* pos) {
+    while (*pos > 0 && buf[*pos - 1] == ' ') (*pos)--;
+    buf[*pos] = '\0';
+}
+
+/* Compute per-column widths + header strings for a table's columns. */
+static int q_table_widths(ray_t* tbl, int64_t nc, int64_t nr,
+                          int* widths, char hdr[][64]) {
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* s = ray_sym_str(ray_table_col_name(tbl, c));
+        snprintf(hdr[c], 64, "%.*s", s ? (int)ray_str_len(s) : 0,
+                 s ? ray_str_ptr(s) : "");
+        if (s) ray_release(s);
+        int w = (int)strlen(hdr[c]);
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        for (int64_t r = 0; r < nr; r++) {
+            char cb[64]; q_cell(col, r, cb, sizeof cb);
+            int l = (int)strlen(cb); if (l > w) w = l;
+        }
+        widths[c] = w;
+    }
+    return 1;
+}
+
+/* Render the ncols/nrows grid of `tbl` (its own columns) into buf at *pos,
+ * one space between columns; caller has already emitted any key prefix. */
+static void q_table_grid(ray_t* tbl, int64_t nc, int64_t nr, const int* widths,
+                         char hdr[][64], char* buf, size_t bufsz, size_t* pos,
+                         const char* joiner) {
+    for (int64_t c = 0; c < nc; c++) {
+        if (c && *pos + 1 < bufsz) { memcpy(buf + *pos, " ", 1); (*pos)++; }
+        q_pad(buf, bufsz, pos, hdr[c], widths[c]);
+    }
+    (void)joiner;
+}
+
+/* Render an unkeyed table. */
+static void q_fmt_table(ray_t* tbl, char* buf, size_t bufsz) {
+    int64_t nc = ray_table_ncols(tbl);
+    int64_t nr = ray_table_nrows(tbl);
+    if (nc <= 0) { snprintf(buf, bufsz, "+`!()"); return; }   /* empty schema */
+    if (nc > QF_MAXCOL) nc = QF_MAXCOL;
+    int  widths[QF_MAXCOL];
+    char hdr[QF_MAXCOL][64];
+    q_table_widths(tbl, nc, nr, widths, hdr);
+
+    size_t pos = 0;
+    /* header */
+    q_table_grid(tbl, nc, nr, widths, hdr, buf, bufsz, &pos, NULL);
+    q_trim_trailing(buf, &pos);
+    if (pos + 1 < bufsz) buf[pos++] = '\n';
+    /* separator */
+    int total = (int)(nc - 1);
+    for (int64_t c = 0; c < nc; c++) total += widths[c];
+    for (int i = 0; i < total && pos + 1 < bufsz; i++) buf[pos++] = '-';
+    if (pos + 1 < bufsz) buf[pos++] = '\n';
+    /* rows */
+    for (int64_t r = 0; r < nr; r++) {
+        size_t line = pos;
+        for (int64_t c = 0; c < nc; c++) {
+            if (c && pos + 1 < bufsz) buf[pos++] = ' ';
+            char cb[64]; q_cell(ray_table_get_col_idx(tbl, c), r, cb, sizeof cb);
+            q_pad(buf, bufsz, &pos, cb, widths[c]);
+        }
+        q_trim_trailing(buf, &pos);
+        (void)line;
+        if (r + 1 < nr && pos + 1 < bufsz) buf[pos++] = '\n';
+    }
+    buf[pos] = '\0';
+}
+
+/* Render a keyed table: a RAY_DICT whose keys AND vals are both tables
+ * (`select … by …`, `([k:…] v:…)`).  Key columns sit left of a `|`. */
+static void q_fmt_keyed(ray_t* kt, ray_t* vt, char* buf, size_t bufsz) {
+    int64_t knc = ray_table_ncols(kt), knr = ray_table_nrows(kt);
+    int64_t vnc = ray_table_ncols(vt), vnr = ray_table_nrows(vt);
+    int64_t nr  = knr < vnr ? knr : vnr;
+    if (knc > QF_MAXCOL) knc = QF_MAXCOL;
+    if (vnc > QF_MAXCOL) vnc = QF_MAXCOL;
+    int  kw[QF_MAXCOL], vw[QF_MAXCOL];
+    char kh[QF_MAXCOL][64], vh[QF_MAXCOL][64];
+    q_table_widths(kt, knc, nr, kw, kh);
+    q_table_widths(vt, vnc, nr, vw, vh);
+
+    size_t pos = 0;
+    /* header: keyhdrs | valhdrs */
+    q_table_grid(kt, knc, nr, kw, kh, buf, bufsz, &pos, NULL);
+    if (pos + 2 < bufsz) { buf[pos++] = '|'; buf[pos++] = ' '; }
+    q_table_grid(vt, vnc, nr, vw, vh, buf, bufsz, &pos, NULL);
+    q_trim_trailing(buf, &pos);
+    if (pos + 1 < bufsz) buf[pos++] = '\n';
+    /* separator: keydashes| valdashes */
+    int kt_tot = (int)(knc - 1); for (int64_t c = 0; c < knc; c++) kt_tot += kw[c];
+    int vt_tot = (int)(vnc - 1); for (int64_t c = 0; c < vnc; c++) vt_tot += vw[c];
+    for (int i = 0; i < kt_tot && pos + 1 < bufsz; i++) buf[pos++] = '-';
+    if (pos + 2 < bufsz) { buf[pos++] = '|'; buf[pos++] = ' '; }
+    for (int i = 0; i < vt_tot && pos + 1 < bufsz; i++) buf[pos++] = '-';
+    q_trim_trailing(buf, &pos);
+    if (pos + 1 < bufsz) buf[pos++] = '\n';
+    /* rows */
+    for (int64_t r = 0; r < nr; r++) {
+        for (int64_t c = 0; c < knc; c++) {
+            if (c && pos + 1 < bufsz) buf[pos++] = ' ';
+            char cb[64]; q_cell(ray_table_get_col_idx(kt, c), r, cb, sizeof cb);
+            q_pad(buf, bufsz, &pos, cb, kw[c]);
+        }
+        if (pos + 2 < bufsz) { buf[pos++] = '|'; buf[pos++] = ' '; }
+        for (int64_t c = 0; c < vnc; c++) {
+            if (c && pos + 1 < bufsz) buf[pos++] = ' ';
+            char cb[64]; q_cell(ray_table_get_col_idx(vt, c), r, cb, sizeof cb);
+            q_pad(buf, bufsz, &pos, cb, vw[c]);
+        }
+        q_trim_trailing(buf, &pos);
+        if (r + 1 < nr && pos + 1 < bufsz) buf[pos++] = '\n';
+    }
+    buf[pos] = '\0';
 }
 
 /* Render one integer element q-style with sentinel detection:
@@ -253,6 +415,25 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         }
     }
 
+    /* An unkeyed table prints kdb-style: space-joined columns under a dashed
+     * rule (`a b` / `----` / rows). */
+    if (val->type == RAY_TABLE) {
+        q_fmt_table(val, buf, bufsz);
+        return;
+    }
+
+    /* A keyed table is a RAY_DICT whose keys AND vals are both tables (the
+     * mandate: "a keyed table is just a dictionary from one table to another").
+     * `select … by …` and `([k:…] v:…)` produce it.  Renders `k| v`. */
+    if (val->type == RAY_DICT) {
+        ray_t* kk = ray_dict_keys(val);
+        ray_t* vv = ray_dict_vals(val);
+        if (kk && vv && kk->type == RAY_TABLE && vv->type == RAY_TABLE) {
+            q_fmt_keyed(kk, vv, buf, bufsz);
+            return;
+        }
+    }
+
     /* A dictionary prints q-style keys!vals (piece 3: the by/select clause
      * dicts inside a functional-query parse tree).  The key side is parenthesised
      * when it is an enlist (leading ','), so `(,`a)!,`a` binds `!` correctly. */
@@ -333,7 +514,9 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
         ray_t* lv = q_registry_list_value();
-        if (lv && n >= 1 && e[0] == lv) { e++; n--; }   /* skip hidden head */
+        ray_t* tv = q_registry_table_value();
+        if (lv && n >= 1 && e[0] == lv) { e++; n--; }   /* skip hidden list head */
+        else if (tv && n >= 1 && e[0] == tv) { e++; n--; } /* skip table head */
         /* A 1-element general list is an enlist: prints ,x not (x). */
         if (n == 1) {
             char elem[2048]; elem[0] = '\0';
