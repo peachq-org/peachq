@@ -49,8 +49,10 @@ typedef enum {
     QK_BANG,            /* q `x!y` wrapper (dict make over rayfall dict)         */
     QK_KEY,             /* q `key`/monadic `!` wrapper (dict keys)               */
     QK_VALUE,           /* q `value` wrapper (dict vals, collapsed)              */
-    QK_DISTINCT         /* q `distinct`/monadic `?` wrapper (FIRST-OCCURRENCE
+    QK_DISTINCT,        /* q `distinct`/monadic `?` wrapper (FIRST-OCCURRENCE
                          * order; rayfall's distinct DAG path sorts)             */
+    QK_ROLL             /* q `x?y` wrapper (find with kdb miss->count / roll /
+                         * pick; deal + float roll are deferred cells)           */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
