@@ -267,7 +267,6 @@ ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred) {
     /* Pre-allocate output columns */
     ray_t* new_cols[ncols];
     int64_t col_names[ncols];
-    int64_t valid_ncols = 0;
 
     bool has_parted_cols = false;
     for (int64_t c = 0; c < ncols; c++) {
@@ -277,8 +276,7 @@ ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred) {
         if (col->type == RAY_MAPCOMMON) {
             /* Materialize MAPCOMMON through filter predicate */
             new_cols[c] = materialize_mapcommon_filter(col, pred, pass_count);
-            if (new_cols[c] && !RAY_IS_ERR(new_cols[c])) valid_ncols++;
-            else new_cols[c] = NULL;
+            if (!new_cols[c] || RAY_IS_ERR(new_cols[c])) new_cols[c] = NULL;
             continue;
         }
         int8_t out_type = RAY_IS_PARTED(col->type)
@@ -298,7 +296,6 @@ ray_t* exec_filter(ray_graph_t* g, ray_op_t* op, ray_t* input, ray_t* pred) {
         if (!nc || RAY_IS_ERR(nc)) { new_cols[c] = NULL; continue; }
         nc->len = pass_count;
         new_cols[c] = nc;
-        valid_ncols++;
     }
 
     if (has_parted_cols) {
@@ -619,7 +616,6 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel,
 
     ray_t* new_cols[ncols];
     int64_t col_names[ncols];
-    int64_t valid_ncols = 0;
     bool has_parted = false;
 
     for (int64_t c = 0; c < ncols; c++) {
@@ -654,7 +650,6 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel,
                 memcpy(out_mc + (size_t)i * esz, kdata + (size_t)pi * esz, esz);
             }
             new_cols[c] = flat;
-            valid_ncols++;
             continue;
         }
         int8_t ct = RAY_IS_PARTED(col->type)
@@ -677,7 +672,6 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel,
         if (!nc || RAY_IS_ERR(nc)) { new_cols[c] = NULL; continue; }
         nc->len = pass_count;
         new_cols[c] = nc;
-        valid_ncols++;
     }
 
     /* LIST columns: gather element pointers with a retain.  The byte-copy
