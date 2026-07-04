@@ -6,6 +6,7 @@
  * registration site — so `parse` overrides rayfall's lisp parse in the env. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
+#include "qlang/q_apply.h"    /* q_apply_noun — the noun-head dispatcher */
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_init */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
@@ -69,6 +70,10 @@ static void bind_unary(const char* name, ray_unary_fn fn) {
 }
 
 void q_builtins_register(void) {
+    /* Noun-head application (indexing, dict/table lookup, 104h carriers):
+     * register the q dispatcher into eval's apply hook.  q_runtime_destroy
+     * clears it before the runtime dies. */
+    ray_eval_set_apply_hook(q_apply_noun);
     bind_unary("parse", q_parse_builtin_fn);
     /* q keywords with no rayfall counterpart — q-owned env bindings (same
      * mechanism as `parse`), snapshotted by the registry as QK_ENV rows. */
