@@ -366,8 +366,54 @@ static void read_type_letter(const char *src, int *p, char *letter,
     }
 }
 
+/* ---- byte literals (q type 4, char x) --------------------------------------
+ * Glued `0x` enters byte-literal mode: consume the maximal hex-digit run.
+ * Doc pins (CLEAN ROOM, qdocs/): basics/datatypes.md row 4 (`0x00`);
+ * ref/sv.md `0x0 sv …` (single digit = atom); ref/read1.md `0#0x` (bare `0x`
+ * = EMPTY byte vector); ref/sv.md `0x0102010201` (multi-digit = vector).
+ * Derived (no doc pin, most defensible reading): an odd digit count left-pads
+ * one zero nibble (generalizes the pinned `0x0` -> 0x00); uppercase hex
+ * digits are accepted (display is always lowercase); a run terminated by a
+ * letter / '_' / '.' (`0xzz`, `0x0az`, `0x1.5`) is a malformed constant.
+ * Bytes have NO null / infinity / type letter (datatypes.md blank columns),
+ * so the Specials and read_type_letter machinery is not involved. */
+static int is_hex_digit(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return c - 'A' + 10;
+}
+/* True iff src[p] starts a byte literal ("0x…" glued).  The sign-glue and
+ * strand machinery use this to keep byte literals out of numeric strands
+ * (`1 0x0a` is noun-noun juxtaposition, never a vector). */
+static int byte_lit_starts(const char *src, int p) {
+    return src[p] == '0' && src[p + 1] == 'x';
+}
+static ray_t *scan_byte_literal(const char *src, int *p) {
+    int q = *p + 2;                               /* past "0x" */
+    int d0 = q;
+    while (is_hex_digit(src[q])) q++;
+    int nd = q - d0;
+    char t = src[q];                              /* run terminator */
+    if ((t >= 'a' && t <= 'z') || (t >= 'A' && t <= 'Z') || t == '_' || t == '.')
+        q_die("bad number");                      /* 0xzz / 0x0az / 0x1.5 */
+    if (nd > 2 * MAX_VEC) q_die("numeric literal too long");
+    uint8_t bytes[MAX_VEC]; int nb = 0;
+    int i = d0;
+    if (nd & 1) bytes[nb++] = (uint8_t)hex_val(src[i++]);   /* left-pad nibble */
+    for (; i < q; i += 2)
+        bytes[nb++] = (uint8_t)((hex_val(src[i]) << 4) | hex_val(src[i + 1]));
+    *p = q;
+    if (nb == 1) return ray_u8(bytes[0]);
+    return ray_vec_from_raw(RAY_U8, bytes, nb);   /* nb==0: empty byte vec */
+}
+
 /* Scan a full numeric literal (atom or vector) starting at src[*p]. */
 static ray_t *scan_num_literal(const char *src, int *p) {
+    if (byte_lit_starts(src, *p)) return scan_byte_literal(src, p);
     int start = *p;
     num_el buf[MAX_VEC]; int m = 0;
     char letter = 0;
@@ -377,6 +423,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         int sp = *p;
         while (CLASS[(uint8_t)src[sp]] & CL_WS) sp++;
         if (sp == *p) break;                     /* no space => run ended */
+        if (byte_lit_starts(src, sp)) break;     /* byte literal: own noun */
         num_el e; int q = sp;
         if (!scan_one_num(src, &q, &e)) break;   /* not another magnitude */
         if (m >= MAX_VEC) q_die("numeric literal too long");
@@ -522,6 +569,7 @@ static Tokens scan(const char *src) {
          * whitespace or start-of-input (`neg -1` applies neg to -1; `x -1`
          * indexes x at -1); it is the verb only when glued to a noun (a-1). */
         int neg_sign = (c == '-' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) &&
+                        !byte_lit_starts(src, p + 1) &&   /* -0x0a: '-' stays the verb (bytes are unsigned) */
                         (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
 
         if ((cl & CL_DIGIT) || neg_sign) {
