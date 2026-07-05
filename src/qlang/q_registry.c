@@ -853,11 +853,26 @@ static ray_t* q_ctx_build(ray_t** elems, int64_t n, int as_table) {
             }
             int64_t gen = 0;
             for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+                int64_t nm;
                 if (names[i] < 0) {
-                    names[i] = q_ctx_generated_name(gen++);
+                    /* Anonymous column: openq invents x, x1, … and dedups to a
+                     * free name (the user supplied none, so this never errors). */
+                    nm = q_ctx_generated_name(gen++);
+                    nm = q_name_dedup(nm, used, i, 0);
+                } else {
+                    /* User-given name: taken VERBATIM — no .Q.id-style sanitize
+                     * or reserved-word repair (that is opt-in via .Q.id).  A
+                     * duplicate is an error, matching kdb (not silently renamed). */
+                    nm = names[i];
+                    for (int64_t j = 0; j < i; j++) {
+                        if (used[j] == nm) {
+                            ray_release(out);
+                            out = ray_error("dup", "([]…): duplicate column name");
+                            break;
+                        }
+                    }
+                    if (RAY_IS_ERR(out)) break;
                 }
-                int64_t nm = q_name_sanitize(names[i]);
-                nm = q_name_dedup(nm, used, i, 1);
                 used[i] = nm;
                 ray_t* col = vals[i]; int owned = 0;
                 if (col && col->type < 0) {              /* scalar -> broadcast */
