@@ -255,6 +255,28 @@ static void q_float_tok(double v, int f32, char* out, size_t n) {
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
 }
 
+/* Render one date element q-style: sentinels 0Nd / 0Wd / -0Wd (kdb datatypes
+ * table); values inside the kdb literal domain render yyyy.mm.dd via a temp
+ * base atom (base fmt_date owns the civil math — the q_float_tok pattern);
+ * out-of-range but non-sentinel day counts display 0000.00.00 (datatypes.md:
+ * "Out-of-range dates ... display as 0000.00.00", pinned by 0001.01.01-1). */
+static void q_date_tok(int32_t v, char* out, size_t n) {
+    if (v == INT32_MIN)  { snprintf(out, n, "0Nd");  return; }
+    if (v == INT32_MAX)  { snprintf(out, n, "0Wd");  return; }
+    if (v == -INT32_MAX) { snprintf(out, n, "-0Wd"); return; }
+    if ((int64_t)v < q_days_from_civil(1, 1, 1) ||
+        (int64_t)v > q_days_from_civil(9999, 12, 31)) {
+        snprintf(out, n, "0000.00.00");
+        return;
+    }
+    out[0] = '\0';
+    ray_t* a = ray_date((int64_t)v);
+    if (a && !RAY_IS_ERR(a)) {
+        ray_fallback(a, out, n);
+        ray_release(a);
+    }
+}
+
 static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
     out[0] = '\0';
     if (!key || RAY_IS_ERR(key)) return;
@@ -336,6 +358,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     case -RAY_I16:  q_int_tok((int64_t)val->i16, 2, 'h', buf, bufsz);      return;
     case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', buf, bufsz);      return;
     case -RAY_I64:  q_int_tok(val->i64,          8, 0,   buf, bufsz);      return;
+    case -RAY_DATE: q_date_tok(val->i32, buf, bufsz);                      return;
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
     case -RAY_F64: {
         /* A whole f64 atom gets a trailing `f` to distinguish it from a long
@@ -387,6 +410,23 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         if (vsuf && pos + 1 < bufsz) { buf[pos++] = vsuf; buf[pos] = '\0'; }
         return;
     }
+    /* Date vector: space-joined full yyyy.mm.dd tokens — dates have no
+     * trailing type char (unlike `0N 0W 42h`), so every element self-
+     * identifies, including the sentinels (`2000.01.01 0Nd`). */
+    if (val->type == RAY_DATE) {
+        int64_t n = ray_len(val);
+        const int32_t* d = (const int32_t*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,2000.01.01 */
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            q_date_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        return;
+    }
+
     /* Float/real vectors are deferred (float infinities out of scope); the
      * per-element tokens still carry the suffix — revisit with the same
      * bare-element + one-trailing-char rule when float vectors are un-deferred. */
