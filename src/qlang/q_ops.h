@@ -57,8 +57,9 @@ typedef enum {
                          * Tok string-parse and unknown designators deferred)    */
     QK_AT,              /* q `f@x` wrapper (Apply At / Index At: callables
                          * invoke unary, nouns index via q_apply_noun)           */
-    QK_DOT              /* q `v . vx` wrapper (Apply / Index: rhs is the ARG
+    QK_DOT,             /* q `v . vx` wrapper (Apply / Index: rhs is the ARG
                          * LIST — spread-call callables, depth-index nouns)      */
+    QK_MIN2             /* q dyadic `&` wrapper (element-wise min / bool-and)     */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic

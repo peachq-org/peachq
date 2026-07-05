@@ -12,6 +12,7 @@
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "lang/format.h"    /* ray_fmt — q string cast */
+#include "table/sym.h"      /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include <assert.h>
 #include <ctype.h>
@@ -63,10 +64,65 @@ static ray_t* q_case_fn(ray_t* x, int up) {
 static ray_t* q_upper_fn(ray_t* x) { return q_case_fn(x, 1); }
 static ray_t* q_lower_fn(ray_t* x) { return q_case_fn(x, 0); }
 
+static ray_t* q_id_table(ray_t* x) {
+    int64_t nc = ray_table_ncols(x);
+    ray_t* out = ray_table_new(nc);
+    int64_t stack[64];
+    int64_t* used = (nc <= 64) ? stack : (int64_t*)malloc((size_t)nc * sizeof(int64_t));
+    if (!used) { ray_release(out); return ray_error("wsfull", ".Q.id: out of memory"); }
+    for (int64_t c = 0; c < nc; c++) {
+        int64_t nm = q_name_sanitize(ray_table_col_name(x, c));
+        nm = q_name_dedup(nm, used, c, 1);
+        used[c] = nm;
+        out = ray_table_add_col(out, nm, ray_table_get_col_idx(x, c));
+        if (!out || RAY_IS_ERR(out)) break;
+    }
+    if (used != stack) free(used);
+    return out;
+}
+
+static ray_t* q_id_dict(ray_t* x) {
+    ray_t* k = ray_dict_keys(x);
+    ray_t* v = ray_dict_vals(x);
+    if (!k || k->type != RAY_SYM)
+        return ray_error("type", ".Q.id: dictionary keys must be symbols");
+    int64_t n = ray_len(k);
+    ray_t* nk = ray_sym_vec_new(RAY_SYM_W64, n);
+    int64_t stack[64];
+    int64_t* used = (n <= 64) ? stack : (int64_t*)malloc((size_t)n * sizeof(int64_t));
+    if (!used) { ray_release(nk); return ray_error("wsfull", ".Q.id: out of memory"); }
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ks = ray_sym_vec_cell(k, i);
+        int64_t id = ray_sym_intern_runtime(ray_str_ptr(ks), ray_str_len(ks));
+        id = q_name_sanitize(id);
+        id = q_name_dedup(id, used, i, 1);
+        used[i] = id;
+        nk = ray_vec_append(nk, &id);
+        if (!nk || RAY_IS_ERR(nk)) break;
+    }
+    if (used != stack) free(used);
+    if (!nk || RAY_IS_ERR(nk)) return nk ? nk : ray_error("oom", NULL);
+    ray_retain(v);
+    return ray_dict_new(nk, v);   /* consumes nk, retained v */
+}
+
+static ray_t* q_id_fn(ray_t* x) {
+    if (!x) return ray_error("type", ".Q.id: nil");
+    if (x->type == -RAY_SYM) return ray_sym(q_name_sanitize(x->i64));
+    if (x->type == RAY_TABLE) return q_id_table(x);
+    if (x->type == RAY_DICT)  return q_id_dict(x);
+    return ray_error("type", ".Q.id: expects a symbol, table, or dictionary");
+}
+
 static void bind_unary(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
     ray_env_bind(ray_sym_intern(name, strlen(name)), obj);
     ray_release(obj);
+}
+
+static void bind_value(const char* name, ray_t* val) {
+    ray_env_bind(ray_sym_intern(name, strlen(name)), val);
+    ray_release(val);
 }
 
 void q_builtins_register(void) {
@@ -80,9 +136,12 @@ void q_builtins_register(void) {
     bind_unary("string", q_string_fn);
     bind_unary("upper",  q_upper_fn);
     bind_unary("lower",  q_lower_fn);
+    bind_value(".Q.an",  ray_str("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", 63));
     /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
      * The registry is the authoritative, immutable verb source; it snapshots
      * builtin values and must be torn down via q_runtime_destroy before the
      * runtime.  Fail fast: a missing audited builtin is a bug. */
     assert(q_registry_init() == RAY_OK);
+    bind_unary(".Q.id", q_id_fn);
+    bind_value(".Q.res", q_name_reserved_words());
 }
