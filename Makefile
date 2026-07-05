@@ -111,6 +111,31 @@ DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d) $(QDOC_MAIN_OBJ:.o
 .DEFAULT_GOAL := default
 default: debug
 
+help:
+	@echo "Available make targets:"
+	@printf "  %-28s %s\n" "make" "Build debug binaries: $(TARGET), $(Q_TARGET), $(QDOC_TARGET)"
+	@printf "  %-28s %s\n" "make help" "Show this help"
+	@printf "  %-28s %s\n" "make debug" "Build debug binaries with sanitizers"
+	@printf "  %-28s %s\n" "make release" "Build optimized release binaries"
+	@printf "  %-28s %s\n" "make $(TARGET)" "Build only the $(TARGET) binary"
+	@printf "  %-28s %s\n" "make $(Q_TARGET)" "Build only the $(Q_TARGET) binary"
+	@printf "  %-28s %s\n" "make $(QDOC_TARGET)" "Build only the $(QDOC_TARGET) binary"
+	@printf "  %-28s %s\n" "make lib" "Build static library lib$(TARGET).a"
+	@printf "  %-28s %s\n" "make dist" "Build release tarball and SHA-256 checksum under dist/"
+	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
+	@printf "  %-28s %s\n" "make qtest" "Run only qlang tests plus the q docs ledger check"
+	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
+	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from q docs"
+	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
+	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
+	@printf "  %-28s %s\n" "make bench-alloc" "Run allocator micro-benchmark"
+	@printf "  %-28s %s\n" "make bench-group-pushdown" "Run group predicate pushdown benchmark"
+	@printf "  %-28s %s\n" "make bench-agg-v2" "Run aggregation engine A/B benchmark"
+	@printf "  %-28s %s\n" "make bench-idx-route" "Run index routing benchmark"
+	@printf "  %-28s %s\n" "make bench-join-buildside" "Run join build-side selection benchmark"
+	@printf "  %-28s %s\n" "make bench-join-dup" "Run join duplicate fallback benchmark"
+	@printf "  %-28s %s\n" "make clean" "Remove build, test, dist, and coverage artifacts"
+
 %.o: %.c
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
@@ -315,7 +340,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default debug release lib dist bench-alloc bench-join-buildside bench-join-dup test test-parse-diff qtest qtest-results qdoctest manifest coverage clean
+.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qtest-results qdoctest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
