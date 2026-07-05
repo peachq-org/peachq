@@ -59,7 +59,14 @@ typedef enum {
                          * invoke unary, nouns index via q_apply_noun)           */
     QK_DOT,             /* q `v . vx` wrapper (Apply / Index: rhs is the ARG
                          * LIST — spread-call callables, depth-index nouns)      */
-    QK_MIN2             /* q dyadic `&` wrapper (element-wise min / bool-and)     */
+    QK_MIN2,            /* q dyadic `&` wrapper (element-wise min / bool-and)     */
+    QK_NEG,             /* q `neg`/monadic `-` wrapper: negates a DATE's day
+                         * count PRESERVING the type (base ray_neg_fn rejects
+                         * temporals); non-date input passes through.  time/
+                         * timestamp arms are deferred with their datatypes.   */
+    QK_WITHIN           /* q `within` wrapper (bounds check; base ray_within_fn
+                         * is vector-vals-only + width-blind, so atom vals
+                         * enlist and widths are guarded)                      */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
