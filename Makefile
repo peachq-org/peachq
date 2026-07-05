@@ -125,7 +125,6 @@ help:
 	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
 	@printf "  %-28s %s\n" "make qtest" "q-only loop; fuzzy filter with F=, e.g. make qtest F=asc"
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
-	@printf "  %-28s %s\n" "make qdocs-ref-qcmd" "Convert ref docs q fences into test/q/ref/*.qcmd"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
 	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
@@ -305,9 +304,6 @@ qtest-results: $(QDOC_TARGET)
 	      echo "QTEST-RESULTS TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest-results"; \
 	    fi; exit $$rc; }
 
-qdocs-ref-qcmd:
-	@tools/qdocs-ref-qcmd.sh
-
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
 # frozen base moved.  `make test` runs the read-only check (tools/frozen-manifest.sh).
@@ -359,7 +355,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdocs-ref-qcmd qdoctest manifest coverage clean
+.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdoctest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
