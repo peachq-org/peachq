@@ -61,6 +61,110 @@ static int     g_count    = 0;
 static bool    g_inited   = false;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
 
+/* ---- shared q-name sanitization (.Q.id + construction clash repair) ------ */
+
+static int q_name_char_ok(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static int q_name_is_keyword_reserved(int64_t sym_id) {
+    ray_t* s = ray_sym_str(sym_id);
+    if (!s) return 0;
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    int nop = 0;
+    const q_op_t* ops = q_ops_table(&nop);
+    int hit = 0;
+    for (int i = 0; i < nop && !hit; i++) {
+        if (ops[i].lex == QLEX_GLYPH || ops[i].lex == QLEX_ADVERB) continue;
+        size_t m = strlen(ops[i].name);
+        hit = (m == n && memcmp(ops[i].name, p, n) == 0);
+    }
+    ray_release(s);
+    return hit;
+}
+
+static int q_name_prev_contains(const int64_t* previous, int64_t n_previous,
+                                int64_t sym_id) {
+    for (int64_t i = 0; i < n_previous; i++)
+        if (previous[i] == sym_id) return 1;
+    return 0;
+}
+
+static int64_t q_name_append_suffix(int64_t sym_id, int64_t suffix) {
+    ray_t* s = ray_sym_str(sym_id);
+    if (!s) return sym_id;
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    char stack[128];
+    char* buf = stack;
+    int need = snprintf(NULL, 0, "%.*s%lld", (int)n, p, (long long)suffix);
+    if (need < 0) { ray_release(s); return sym_id; }
+    if ((size_t)need + 1 > sizeof stack) {
+        buf = (char*)malloc((size_t)need + 1);
+        if (!buf) { ray_release(s); return sym_id; }
+    }
+    snprintf(buf, (size_t)need + 1, "%.*s%lld", (int)n, p, (long long)suffix);
+    int64_t out = ray_sym_intern_runtime(buf, (size_t)need);
+    if (buf != stack) free(buf);
+    ray_release(s);
+    return out;
+}
+
+int64_t q_name_sanitize(int64_t sym_id) {
+    ray_t* s = ray_sym_str(sym_id);
+    if (!s) return ray_sym_intern_runtime("a", 1);
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    char stack[128];
+    char* buf = (n + 2 <= sizeof stack) ? stack : (char*)malloc(n + 2);
+    if (!buf) { ray_release(s); return ray_sym_intern_runtime("a", 1); }
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++)
+        if (q_name_char_ok(p[i])) buf[w++] = p[i];
+    if (w == 0) buf[w++] = 'a';
+    if (buf[0] == '_' || (buf[0] >= '0' && buf[0] <= '9')) {
+        memmove(buf + 1, buf, w);
+        buf[0] = 'a';
+        w++;
+    }
+    int64_t out = ray_sym_intern_runtime(buf, w);
+    if (buf != stack) free(buf);
+    ray_release(s);
+    return out;
+}
+
+int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous,
+                     int check_reserved) {
+    int64_t base = sym_id;
+    if (check_reserved && q_name_is_keyword_reserved(base))
+        base = q_name_append_suffix(base, 1);
+    if (!q_name_prev_contains(previous, n_previous, base)) return base;
+    for (int64_t i = 1; i < INT64_MAX; i++) {
+        int64_t cand = q_name_append_suffix(base, i);
+        if (!q_name_prev_contains(previous, n_previous, cand)) return cand;
+    }
+    return base;
+}
+
+ray_t* q_name_reserved_words(void) {
+    int nop = 0;
+    const q_op_t* ops = q_ops_table(&nop);
+    int n = 0;
+    for (int i = 0; i < nop; i++)
+        if (ops[i].lex != QLEX_GLYPH && ops[i].lex != QLEX_ADVERB) n++;
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    for (int i = 0; i < nop; i++) {
+        if (ops[i].lex == QLEX_GLYPH || ops[i].lex == QLEX_ADVERB) continue;
+        int64_t id = ray_sym_intern_runtime(ops[i].name, strlen(ops[i].name));
+        out = ray_vec_append(out, &id);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    }
+    return out;
+}
+
 /* ---- wrappers (bespoke q semantics over a rayfall primitive) ---- */
 
 /* q `n # list` — take.  rayfall ray_take_fn(vec, n) has the opposite arg
@@ -199,6 +303,30 @@ static ray_t* q_eq_wrap(ray_t* a, ray_t* b) {
 static ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
     if (q_is_str_atom(a) && q_is_str_atom(b)) return q_str_cmp_vec(a, b, 0);
     return ray_neq_fn(a, b);
+}
+
+/* q dyadic `&` — min / boolean-and.  The wrapper is registered ATOMIC, so
+ * vector/scalar and vector/vector cases are mapped by eval over atom pairs. */
+static ray_t* q_min2_wrap(ray_t* a, ray_t* b) {
+    if (!a || !b || !ray_is_atom(a) || !ray_is_atom(b))
+        return ray_error("type", "&: expects numeric atoms");
+    if (a->type == -RAY_BOOL && b->type == -RAY_BOOL)
+        return ray_bool(a->b8 && b->b8);
+    if (a->type == -RAY_F64 || b->type == -RAY_F64 ||
+        a->type == -RAY_F32 || b->type == -RAY_F32) {
+        double av = as_f64(a);
+        double bv = as_f64(b);
+        return ray_f64(av <= bv ? av : bv);
+    }
+    if ((a->type == -RAY_I64 || a->type == -RAY_I32 || a->type == -RAY_I16 ||
+         a->type == -RAY_U8  || a->type == -RAY_BOOL) &&
+        (b->type == -RAY_I64 || b->type == -RAY_I32 || b->type == -RAY_I16 ||
+         b->type == -RAY_U8  || b->type == -RAY_BOOL)) {
+        int64_t av = (a->type == -RAY_BOOL) ? a->b8 : as_i64(a);
+        int64_t bv = (b->type == -RAY_BOOL) ? b->b8 : as_i64(b);
+        return ray_i64(av <= bv ? av : bv);
+    }
+    return ray_error("type", "&: unsupported operands");
 }
 
 /* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
@@ -617,9 +745,24 @@ ray_t* q_registry_scan_value(void) {
  * q_lower lowers a plain `:` inside a ctx literal to `let` (writes the pushed
  * frame), so the assignments are scoped, not leaked to the global env. */
 
+static int64_t q_expr_rightmost_name(ray_t* el) {
+    if (!el) return -1;
+    if (el->type == -RAY_SYM && !(el->attrs & 0x20 /* Q_ATTR_QUOTED */))
+        return el->i64;
+    if (el->type == RAY_LIST) {
+        ray_t** e = (ray_t**)ray_data(el);
+        for (int64_t i = ray_len(el) - 1; i >= 0; i--) {
+            int64_t id = q_expr_rightmost_name(e[i]);
+            if (id >= 0) return id;
+        }
+    }
+    return -1;
+}
+
 /* If `el` is a lowered assignment node `(set/let name val)`, return the target
  * sym-id; else if `el` is a bare unquoted name-ref sym, return its id (a bare
- * column reference); else -1 (no column name — a table error, .Q.id deferred). */
+ * column reference); else use the expression's rightmost name token when one is
+ * available, falling back to generated `x`, `x1`, ... names. */
 static int64_t q_ctx_colname(ray_t* el) {
     if (!el) return -1;
     if (el->type == -RAY_SYM && !(el->attrs & 0x20 /* Q_ATTR_QUOTED */))
@@ -634,7 +777,14 @@ static int64_t q_ctx_colname(ray_t* el) {
                 return e[1]->i64;
         }
     }
-    return -1;
+    return q_expr_rightmost_name(el);
+}
+
+static int64_t q_ctx_generated_name(int64_t ordinal) {
+    if (ordinal == 0) return ray_sym_intern_runtime("x", 1);
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "x%lld", (long long)ordinal);
+    return ray_sym_intern_runtime(buf, (size_t)n);
 }
 
 /* The shared builder.  `elems[0..n)` are the UNEVALUATED element trees. */
@@ -695,13 +845,35 @@ static ray_t* q_ctx_build(ray_t** elems, int64_t n, int as_table) {
         else {
             if (nrows < 0) nrows = 1;
             out = ray_table_new(n);
+            int64_t used_stack[64];
+            int64_t* used = (n <= 64) ? used_stack : (int64_t*)malloc((size_t)n * sizeof(int64_t));
+            if (!used) {
+                ray_release(out);
+                out = ray_error("wsfull", "([]...): out of memory");
+            }
+            int64_t gen = 0;
             for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+                int64_t nm;
                 if (names[i] < 0) {
-                    ray_release(out);
-                    out = ray_error("type",
-                        "([]…): every column needs a name (a:… ; bare/.Q.id deferred)");
-                    break;
+                    /* Anonymous column: openq invents x, x1, … and dedups to a
+                     * free name (the user supplied none, so this never errors). */
+                    nm = q_ctx_generated_name(gen++);
+                    nm = q_name_dedup(nm, used, i, 0);
+                } else {
+                    /* User-given name: taken VERBATIM — no .Q.id-style sanitize
+                     * or reserved-word repair (that is opt-in via .Q.id).  A
+                     * duplicate is an error, matching kdb (not silently renamed). */
+                    nm = names[i];
+                    for (int64_t j = 0; j < i; j++) {
+                        if (used[j] == nm) {
+                            ray_release(out);
+                            out = ray_error("dup", "([]…): duplicate column name");
+                            break;
+                        }
+                    }
+                    if (RAY_IS_ERR(out)) break;
                 }
+                used[i] = nm;
                 ray_t* col = vals[i]; int owned = 0;
                 if (col && col->type < 0) {              /* scalar -> broadcast */
                     ray_t* nn = ray_i64(nrows);
@@ -711,9 +883,10 @@ static ray_t* q_ctx_build(ray_t** elems, int64_t n, int as_table) {
                         break;
                     }
                 }
-                out = ray_table_add_col(out, names[i], col);
+                out = ray_table_add_col(out, nm, col);
                 if (owned) ray_release(col);
             }
+            if (used && used != used_stack) free(used);
         }
     }
 
@@ -735,6 +908,38 @@ static ray_t* q_table_build(ray_t** args, int64_t n) {
     return q_ctx_build(args, n, 1);
 }
 
+static void q_select_rename_temps(ray_t* tbl, ray_t* tempnames, ray_t* realnames) {
+    if (!tbl || tbl->type != RAY_TABLE ||
+        !tempnames || tempnames->type != RAY_SYM ||
+        !realnames || realnames->type != RAY_SYM)
+        return;
+    int64_t nt = ray_len(tempnames);
+    int64_t nc = ray_table_ncols(tbl);
+    int64_t used_stack[64];
+    int64_t* used = (nc <= 64) ? used_stack : (int64_t*)malloc((size_t)nc * sizeof(int64_t));
+    if (!used) return;
+    for (int64_t c = 0; c < nc; c++) used[c] = ray_table_col_name(tbl, c);
+    for (int64_t i = 0; i < nt; i++) {
+        ray_t* ti = ray_i64(i);
+        ray_t* ta = ray_at_fn(tempnames, ti);
+        ray_t* ra = ray_at_fn(realnames, ti);
+        ray_release(ti);
+        int64_t tid = (ta && ta->type == -RAY_SYM) ? ta->i64 : -1;
+        int64_t rid = (ra && ra->type == -RAY_SYM) ? ra->i64 : -1;
+        if (ta) ray_release(ta);
+        if (ra) ray_release(ra);
+        if (tid < 0 || rid < 0) continue;
+        for (int64_t c = 0; c < nc; c++) {
+            if (ray_table_col_name(tbl, c) != tid) continue;
+            int64_t nm = q_name_dedup(rid, used, c, 1);
+            used[c] = nm;
+            ray_table_set_col_name(tbl, c, nm);
+            break;
+        }
+    }
+    if (used != used_stack) free(used);
+}
+
 /* q qSQL SELECT adapter — lowers the functional 5-list (?;`t;c;b;a) (emitted by
  * BOTH the string form `select…from t` AND `?[t;c;b;a]`) onto the base
  * ray_select engine.  q_lower hands it a fully-built rayfall query dict plus the
@@ -749,31 +954,12 @@ static ray_t* q_select_exec(ray_t** args, int64_t n) {
     ray_t* res  = ray_select(&dict, 1);
     if (!res || RAY_IS_ERR(res)) return res;
 
-    /* Rename the temp-named output columns (__qcN) back to their real q names
-     * (args[2]=temp sym vec, args[3]=real sym vec, parallel). */
-    if (n >= 4 && res->type == RAY_TABLE &&
-        args[2] && args[2]->type == RAY_SYM && args[3] && args[3]->type == RAY_SYM) {
-        int64_t nt = ray_len(args[2]);
-        int64_t nc = ray_table_ncols(res);
-        for (int64_t i = 0; i < nt; i++) {
-            ray_t* ti = ray_i64(i);
-            ray_t* ta = ray_at_fn(args[2], ti);
-            ray_t* ra = ray_at_fn(args[3], ti);
-            ray_release(ti);
-            int64_t tid = (ta && ta->type == -RAY_SYM) ? ta->i64 : -1;
-            int64_t rid = (ra && ra->type == -RAY_SYM) ? ra->i64 : -1;
-            if (ta) ray_release(ta);
-            if (ra) ray_release(ra);
-            for (int64_t c = 0; c < nc; c++)
-                if (ray_table_col_name(res, c) == tid) {
-                    ray_table_set_col_name(res, c, rid); break;
-                }
-        }
-    }
-
     ray_t* keys = (n >= 2) ? args[1] : NULL;
     int64_t nk = (keys && keys->type == RAY_SYM) ? ray_len(keys) : 0;
-    if (nk == 0 || res->type != RAY_TABLE) return res;
+    if (nk == 0 || res->type != RAY_TABLE) {
+        if (n >= 4) q_select_rename_temps(res, args[2], args[3]);
+        return res;
+    }
 
     int64_t kids[64];
     if (nk > 64) nk = 64;
@@ -799,6 +985,7 @@ static ray_t* q_select_exec(ray_t** args, int64_t n) {
     ray_release(res);
     if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
     if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    if (n >= 4) q_select_rename_temps(vt, args[2], args[3]);
     return ray_dict_new(kt, vt);   /* consumes kt, vt */
 }
 
@@ -1617,6 +1804,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_CAST: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cast_wrap);
     case QK_AT:   return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_at_wrap);
     case QK_DOT:  return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_dot_wrap);
+    case QK_MIN2: return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_min2_wrap);
     default:      return NULL;
     }
 }
