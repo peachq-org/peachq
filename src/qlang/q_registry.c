@@ -574,21 +574,21 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         int16_t n = t->i16;
         if (n <= 0) { *is_tok = 1; n = (int16_t)-n; }
         switch (n) {
-        case RAY_BOOL: case RAY_I16: case RAY_I32: case RAY_I64:
-        case RAY_F32:  case RAY_F64: case RAY_SYM:
+        case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
+        case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM:
             return (int8_t)n;
-        default: return 0;    /* byte/guid/char/temporals + 0h identity: deferred */
+        default: return 0;    /* guid/char/temporals + 0h identity: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
         char c = ray_str_ptr(t)[0];
         if (c >= 'A' && c <= 'Z') { *is_tok = 1; c = (char)(c - 'A' + 'a'); }
         switch (c) {
-        case 'b': return RAY_BOOL; case 'h': return RAY_I16;
-        case 'i': return RAY_I32;  case 'j': return RAY_I64;
-        case 'e': return RAY_F32;  case 'f': return RAY_F64;
-        case 's': return RAY_SYM;
-        default:  return 0;       /* x g c p m d z n u v t + "*" identity: deferred */
+        case 'b': return RAY_BOOL; case 'x': return RAY_U8;
+        case 'h': return RAY_I16;  case 'i': return RAY_I32;
+        case 'j': return RAY_I64;  case 'e': return RAY_F32;
+        case 'f': return RAY_F64;  case 's': return RAY_SYM;
+        default:  return 0;       /* g c p m d z n u v t + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -603,6 +603,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 3 && !memcmp(nm, "int",     3)) r = RAY_I32;
         else if (l == 5 && !memcmp(nm, "short",   5)) r = RAY_I16;
         else if (l == 7 && !memcmp(nm, "boolean", 7)) r = RAY_BOOL;
+        else if (l == 4 && !memcmp(nm, "byte",    4)) r = RAY_U8;
         else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
         ray_release(s);
@@ -614,9 +615,10 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
 /* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
 static const char* q_tag_rayname(int8_t tag) {
     switch (tag) {
-    case RAY_BOOL: return "BOOL"; case RAY_I16: return "I16";
-    case RAY_I32:  return "I32";  case RAY_I64: return "I64";
-    case RAY_F64:  return "F64";  default:      return NULL;
+    case RAY_BOOL: return "BOOL"; case RAY_U8:  return "U8";
+    case RAY_I16:  return "I16";  case RAY_I32: return "I32";
+    case RAY_I64:  return "I64";  case RAY_F64: return "F64";
+    default:       return NULL;
     }
 }
 
@@ -663,6 +665,36 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
             else if (tag == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
             else                     ((int16_t*)ray_data(out))[i] = (int16_t)iv;
             if (isnull) ray_vec_set_null(out, i, true);
+        }
+        return out;
+    }
+    /* kdb `"x"$str` maps CHARS to bytes ("x"$"abc" -> 0x616263, ref/cast.md
+     * #byte); base's U8 STR arm parses decimal text instead — pre-empt it.
+     * One char = char atom -> byte ATOM; else a byte vector of the raw chars
+     * (empty string -> empty byte vector). */
+    if (tag == RAY_U8 && x && x->type == -RAY_STR) {
+        const char* sp = ray_str_ptr(x);
+        size_t sl = ray_str_len(x);
+        if (sl == 1) return ray_u8((uint8_t)sp[0]);
+        return ray_vec_from_raw(RAY_U8, sp, (int64_t)sl);
+    }
+    /* kdb integer-family casts ROUND floats (`int$6.6 -> 7, ref/cast.md);
+     * byte joins that family (derived — byte float-cast is unpinned).  Float
+     * null -> 0x00: byte has no null (basics/datatypes.md blank column). */
+    if (tag == RAY_U8 && x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_u8(0);
+        return ray_u8((uint8_t)(int64_t)rint(x->f64));  /* F32 stores f64 */
+    }
+    if (tag == RAY_U8 && x && (x->type == RAY_F64 || x->type == RAY_F32)) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_vec_new(RAY_U8, n);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = n;
+        int is64 = (x->type == RAY_F64);
+        for (int64_t i = 0; i < n; i++) {
+            double v = is64 ? ((const double*)ray_data(x))[i]
+                            : (double)((const float*)ray_data(x))[i];
+            ((uint8_t*)ray_data(out))[i] = isnan(v) ? 0 : (uint8_t)(int64_t)rint(v);
         }
         return out;
     }
@@ -745,8 +777,27 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         return (v > INT16_MAX || v < -INT16_MAX)
              ? ray_typed_null(-RAY_I16) : ray_i16((int16_t)v);
     }
+    case RAY_U8: {
+        /* "X"$ reads the string as HEX ("X"$"42" -> 0x42, ref/tok.md).
+         * Unparseable or > 0xff -> 0x00 (derived): tok.md pins out-of-
+         * domain -> typed null, and byte HAS no null (basics/datatypes.md),
+         * so its zero value stands in. */
+        uint64_t v = 0;
+        size_t i = 0;
+        for (; i < len; i++) {
+            char c = p[i];
+            int d = (c >= '0' && c <= '9') ? c - '0'
+                  : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                  : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (d < 0) break;
+            v = (v << 4) | (uint64_t)d;
+            if (v > 0xff) break;
+        }
+        if (len == 0 || i != len || v > 0xff) return ray_u8(0);
+        return ray_u8((uint8_t)v);
+    }
     default:
-        return ray_error("nyi", "$: temporal/byte/char Tok is deferred");
+        return ray_error("nyi", "$: temporal/char Tok is deferred");
     }
 }
 
