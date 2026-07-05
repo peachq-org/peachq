@@ -721,8 +721,8 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
     switch (tag) {
     case RAY_SYM:
         return ray_sym(ray_sym_intern(len ? p : "", len));
-    case RAY_BOOL:
-        return ray_bool(len == 1 && strchr("1TtYy", p[0]) != NULL);
+    case RAY_BOOL:   /* truthy set pinned by ref/tok.md: "txyTXY1" */
+        return ray_bool(len == 1 && strchr("1TtXxYy", p[0]) != NULL);
     case RAY_F64: case RAY_F32: {
         double v = 0;
         size_t used = len ? ray_parse_f64(p, len, &v) : 0;
