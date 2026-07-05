@@ -1746,6 +1746,36 @@ static void ql_qsql(ray_t **slot) {
     *slot = repl;
 }
 
+/* ===== functional qSQL `?[t;c;b;a]` / `![t;c;b;a]` =========================
+ * The by-VALUE functional forms parse as a rank-4 application whose head is the
+ * DYADIC registry value for `?` (select/exec) or `!` (update/delete).  Rewrite
+ * that head to the matching runtime executor value (q_registry_funsql_*), which
+ * receives the four EVALUATED operands and drives the base query engine.  A
+ * dict-make `k!v` (a `!` applied to only 2 args) is a 3-list and never matches.
+ * The result-shaping (table / keyed table / row+column delete) lives in the
+ * executors — see q_registry.c q_funsql_select / q_funsql_bang. */
+static ray_t *ql_funsql_head(ray_t *h, char glyph) {
+    if (!h || (h->type != RAY_UNARY && h->type != RAY_BINARY && h->type != RAY_VARY))
+        return NULL;
+    q_provenance_t pv;
+    if (!q_registry_provenance(h, &pv) || !pv.spelling) return NULL;
+    if (pv.spelling[0] != glyph || pv.spelling[1] != '\0') return NULL;
+    return h;   /* borrowed */
+}
+
+static void ql_funsql(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) != 5) return;  /* head + 4 args */
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *repl_head = NULL;
+    if (ql_funsql_head(e[0], '?'))      repl_head = q_registry_funsql_select_value();
+    else if (ql_funsql_head(e[0], '!')) repl_head = q_registry_funsql_bang_value();
+    if (!repl_head) return;
+    ray_retain(repl_head);
+    ray_release(e[0]);
+    e[0] = repl_head;   /* args e[1..4] stay; eval evaluates them then applies */
+}
+
 /* Depth-first rewriting walker.  Children first so nested applications
  * ((+/) each ...) lower inside-out; then the node itself.  Returns a
  * RAY_ERROR (owned) on an 'assign violation, else NULL. */
@@ -1764,6 +1794,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ray_t *err = ql_cond(slot);            /* $[c;t;f] BEFORE any head claim */
     if (err) return err;
     ql_qsql(slot);                         /* (?;`t;c;b;a) -> ray_select call */
+    ql_funsql(slot);                       /* ?[t;c;b;a] / ![t;c;b;a] runtime */
     ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
     err = ql_assign(slot, in_lambda);
     if (err) return err;
