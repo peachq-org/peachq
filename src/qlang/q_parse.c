@@ -459,7 +459,8 @@ static Tokens scan(const char *src) {
         /* q names cannot START with '_' (leading '_' is the drop/cut verb);
          * interior '_' stays a name byte (a_b) via the CL_ALPHA continuation
          * loops below, so only the token-start byte is excluded here. */
-        else if ((cl & CL_ALPHA) && c != '_') {
+        else if (((cl & CL_ALPHA) && c != '_') ||
+                 (c == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA))) {
             while (CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) p++;
             while (src[p] == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA)) {
                 p++;
@@ -1140,6 +1141,17 @@ static ray_t *qsql_build_dict(ray_t **aliases, ray_t **vals, int n) {
     return ray_dict_new(keys, valv);   /* consumes keys, valv */
 }
 
+static int q_symvec_contains_id(ray_t *v, int64_t id) {
+    if (!v || v->type != RAY_SYM) return 0;
+    for (int64_t i = 0; i < ray_len(v); i++) {
+        ray_t *s = ray_sym_vec_cell(v, i);
+        if (!s) continue;
+        int64_t sid = ray_sym_intern_runtime(ray_str_ptr(s), ray_str_len(s));
+        if (sid == id) return 1;
+    }
+    return 0;
+}
+
 /* where-clause: comma-separated constraints -> enlist(constraint-list). */
 static ray_t *qsql_where(Parser *p, int *ok) {
     ray_t *cons[QSQL_MAXCOLS]; int nc = 0;
@@ -1732,6 +1744,7 @@ static void ql_qsql_out(ray_t *x) {
  * append); returns owned. */
 static ray_t *ql_and(ray_t *l, ray_t *r) {
     ray_t *amp = q_verb('&');
+    amp = q_embed(amp, Q_DYADIC);
     ray_t *n = ray_list_new(3);
     n = ray_list_append(n, amp); ray_release(amp);
     n = ray_list_append(n, l);
@@ -1844,6 +1857,18 @@ static void ql_qsql(ray_t **slot) {
                 ex = ((ray_t **)ray_data(av))[i];
                 ray_retain(ex);
                 ql_qsql_out(ex);
+            }
+            if (ex && ex->type == -RAY_SYM && !(ex->attrs & Q_ATTR_QUOTED) &&
+                q_symvec_contains_id(keycols, ex->i64)) {
+                ray_t *plus = q_verb('+');
+                plus = q_embed(plus, Q_DYADIC);
+                ray_t *zero = ray_i64(0);
+                ray_t *wrap = ray_list_new(3);
+                wrap = ray_list_append(wrap, plus); ray_release(plus);
+                wrap = ray_list_append(wrap, ex);
+                wrap = ray_list_append(wrap, zero); ray_release(zero);
+                ray_release(ex);
+                ex = wrap;
             }
             vallist = ray_list_append(vallist, ex); ray_release(ex);
         }
