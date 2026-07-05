@@ -123,11 +123,11 @@ help:
 	@printf "  %-28s %s\n" "make lib" "Build static library lib$(TARGET).a"
 	@printf "  %-28s %s\n" "make dist" "Build release tarball and SHA-256 checksum under dist/"
 	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
-	@printf "  %-28s %s\n" "make qtest" "Run only qlang tests (units + test/q qcmd suites)"
+	@printf "  %-28s %s\n" "make qtest" "q-only loop; fuzzy filter with F=, e.g. make qtest F=asc"
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
 	@printf "  %-28s %s\n" "make qdocs-ref-qcmd" "Convert ref docs q fences into test/q/ref/*.qcmd"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
-	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from q docs"
+	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
 	@printf "  %-28s %s\n" "make bench-alloc" "Run allocator micro-benchmark"
@@ -248,22 +248,23 @@ test: LDFLAGS = $(DEBUG_LDFLAGS)
 test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=$${RAY_DFD:-1} RAYFORCE_CORES=$(TEST_CORES) timeout 900 ./$(TARGET).test || \
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 300 ./$(TARGET).test || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
-	      echo "TEST TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make test"; \
+	      echo "TEST TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make test"; \
 	    fi; exit $$rc; }
 
 # openq: run ONLY the q suites (names prefixed `qlang/`) from the same unified
 # test binary, via the runner's substring name filter.  `make test` runs them
-# too (unfiltered); this is the fast q-only loop.
+# too (unfiltered); this is the fast q-only loop.  Narrow further with F=,
+# e.g. `make qtest F=asc` (fuzzy: matches anywhere in the suite name).
 qtest: CFLAGS = $(DEBUG_CFLAGS)
 qtest: LDFLAGS = $(DEBUG_LDFLAGS)
 qtest: $(LIB_OBJ) $(TEST_OBJ)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=$${RAY_DFD:-1} RAYFORCE_CORES=$(TEST_CORES) timeout 900 ./$(TARGET).test -f qlang || \
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 300 ./$(TARGET).test --all -f qlang$(if $(F), -f "$(F)",) || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
-	      echo "QTEST TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make qtest"; \
+	      echo "QTEST TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest"; \
 	    fi; exit $$rc; }
 
 # openq: q-docs corpus floors — qdoctest over every ref/*.md, failing if the
@@ -285,18 +286,23 @@ test-parse-diff: LDFLAGS = $(DEBUG_LDFLAGS)
 test-parse-diff: $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o build/$(TARGET).parsediff.test $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=$${RAY_DFD:-1} RAYFORCE_CORES=$(TEST_CORES) timeout 900 ./build/$(TARGET).parsediff.test -f qlang/parse || \
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 300 ./build/$(TARGET).parsediff.test -f qlang/parse || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
-	      echo "PARSE-DIFF TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make test-parse-diff"; \
+	      echo "PARSE-DIFF TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make test-parse-diff"; \
 	    fi; exit $$rc; }
 
-# openq: regenerate the checked-in q-docs failure ledger (qtest-results.txt).
+# openq: regenerate the checked-in test/q qcmd ledger (qtest-results.txt) —
+# ONE row per test/q/**/*.qcmd file (passing or failing) + a TOTAL line.
+# NO --skip-file and NO deferred filtering, EVER: this ledger is the complete,
+# unfiltered failure record. The coverage.csv status=deferred column (Phase 0b)
+# gates make test only — it must never remove a row here. *.qcmd.disabled files
+# are parked and never discovered. Docs-corpus floors live in `make qdocs`.
 # The user runs this on demand; `make qtest` never writes it (stays side-effect
 # free on tracked files).
 qtest-results: $(QDOC_TARGET)
-	timeout 900 ./$(QDOC_TARGET) --results qtest-results.txt --skip-file test/qdoctest.skip qdocs/docs || \
+	timeout 300 ./$(QDOC_TARGET) --qcmd-only --results qtest-results.txt test/q || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
-	      echo "QTEST-RESULTS TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make qtest-results"; \
+	      echo "QTEST-RESULTS TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest-results"; \
 	    fi; exit $$rc; }
 
 qdocs-ref-qcmd:

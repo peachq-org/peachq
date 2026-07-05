@@ -2,7 +2,7 @@
  * transcripts) against the q engine.
  *
  *   qdoctest [--syntax-only] [--verbose] [--skip-file PATH]
- *            [--results PATH] FILE|DIR...
+ *            [--qcmd-only] [--results PATH] FILE|DIR...
  *
  * --syntax-only: only check each example parses (default: parse + eval + match
  * the expected output, whitespace-insensitive).  One fresh runtime per file
@@ -13,11 +13,16 @@
  * skipped page — it is NOT run (used to fence off docs that crash the process,
  * e.g. pages that call `exit`).
  *
+ * --qcmd-only: directory walks collect only `*.qcmd` transcripts, ignoring
+ * `.md` files (used by `make qtest-results` over test/q, where stray .md notes
+ * like test/q/parse/SOURCES.md live beside the suites).
+ *
  * --results PATH: ledger mode.  Runs every non-skipped file in EVAL_MATCH and
- * writes STRICTLY ONE line per file with >0 failures: `<path>\tparse P/N  eval
- * E/N`, then a TOTAL summary line.  Paths are sorted for a stable diff and
- * fully-passing files are omitted, so `wc -l` (minus the TOTAL line) counts the
- * failing files. */
+ * writes STRICTLY ONE line per file — passing or failing — as `<path>\tparse
+ * P/N  eval E/N`, then a TOTAL summary line.  Paths are sorted for a stable
+ * diff, so `wc -l` (minus the TOTAL line) counts the discovered files.  This
+ * ledger is a complete, UNFILTERED record: no ignore/expected-fail mechanism
+ * may drop a row (see the note in ledger()). */
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/qdoc.h"
@@ -32,6 +37,7 @@ extern void ray_runtime_destroy(ray_runtime_t* rt);
 
 static qdoc_mode_t   g_mode    = QDOC_EVAL_MATCH;
 static int           g_verbose = 0;
+static int           g_qcmd_only = 0;  /* --qcmd-only: collect *.qcmd, ignore .md */
 static qdoc_result_t g_tot     = {0};
 static int           g_files   = 0;
 static int           g_skipped = 0;   /* pages skipped via the skip-list */
@@ -111,7 +117,10 @@ static int ends_with(const char* s, const char* suf) {
     return a >= b && strcmp(s + a - b, suf) == 0;
 }
 
+/* NOTE: "*.qcmd.disabled" never matches ends_with(".qcmd") — parked files are
+ * invisible to this walk, same as the test_qcmd.c harness. */
 static int is_doc(const char* path) {
+    if (g_qcmd_only) return ends_with(path, ".qcmd");
     return ends_with(path, ".md") || ends_with(path, ".qcmd");
 }
 
@@ -158,7 +167,7 @@ static void walk(const char* path, void (*visit)(const char*)) {
 }
 
 /* Ledger mode: collect + sort paths, run each capturing verbose per-file, write
- * only failing files (header + failing lines) plus a TOTAL summary. */
+ * one line per file (passing or failing) plus a TOTAL summary. */
 static int ledger(const char* results_path) {
     qsort(g_paths, (size_t)g_paths_n, sizeof *g_paths, path_cmp);
 
@@ -187,13 +196,18 @@ static int ledger(const char* results_path) {
         g_tot.failed   += r.failed;
         g_files++;
 
-        if (r.failed > 0) {
-            /* Strictly ONE line per failing file so `wc -l` counts failing
-             * files directly (the score shows how many examples fail). Per-
-             * example detail is available on demand via `qdoctest --verbose`. */
-            fprintf(rf, "%s\tparse %d/%d  eval %d/%d\n",
-                    path, r.parsed, r.examples, r.passed, r.examples);
-        }
+        /* Strictly ONE line per file — PASSING FILES INCLUDED — so the row
+         * count equals the discovered-file count and the ledger is the
+         * complete, unfiltered record of the corpus.  Per-example detail is
+         * available on demand via `qdoctest --verbose`.
+         *
+         * IMPORTANT (Phase 0b, test/q scoreboard plan): any current or future
+         * ignore/expected-fail mechanism — e.g. the status=deferred column in
+         * test/q/coverage.csv — must NEVER filter a row out of this ledger.
+         * Deferred-ness belongs to the GATE (test/test_qcmd.c), not to this
+         * raw record; the scoreboard computes amber/red FROM these rows. */
+        fprintf(rf, "%s\tparse %d/%d  eval %d/%d\n",
+                path, r.parsed, r.examples, r.passed, r.examples);
         free(buf);   /* verbose captured only to keep it off stdout; discarded */
     }
 
@@ -212,6 +226,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--syntax-only"))  g_mode = QDOC_PARSE_ONLY;
         else if (!strcmp(argv[i], "--verbose")) g_verbose = 1;
+        else if (!strcmp(argv[i], "--qcmd-only")) g_qcmd_only = 1;
         else if (!strcmp(argv[i], "--skip-file") && i + 1 < argc)
             skip_load(argv[++i]);
         else if (!strcmp(argv[i], "--results") && i + 1 < argc)
@@ -222,7 +237,8 @@ int main(int argc, char** argv) {
 
     if (!ntargets) {
         fprintf(stderr, "usage: qdoctest [--syntax-only] [--verbose] "
-                        "[--skip-file PATH] [--results PATH] FILE|DIR...\n");
+                        "[--skip-file PATH] [--qcmd-only] [--results PATH] "
+                        "FILE|DIR...\n");
         skip_free();
         return 2;
     }
