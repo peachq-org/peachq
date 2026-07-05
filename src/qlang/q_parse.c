@@ -1734,7 +1734,9 @@ static void ql_qsql(ray_t **slot) {
     if (!sv) return;
 
     ray_t *t = e[1], *c = e[2], *b = e[3], *a = e[4];
-    if (!t || t->type != -RAY_SYM) return;              /* only bare table name */
+    if (!t) return;
+    /* slot 1: bare name sym (by-name semantics) or an expression subtree —
+     * q_lower_walk already lowered it (children walk before the node). */
 
     ray_t *keyvec  = ray_sym_vec_new(RAY_SYM_W64, 4);
     ray_t *vallist = ray_list_new(4);
@@ -1828,8 +1830,16 @@ static void ql_qsql(ray_t **slot) {
         }
     }
 
-    /* from: bare table name-ref — appended LAST (see note above) */
-    ray_t *fromv = ray_sym(t->i64);
+    /* from: — appended LAST (see note above).  ANY sym slot unquotes to a
+     * bare name-ref (env lookup): the parser's name form emits a QUOTED `t
+     * (qsql_colsym), and a `sym from-EXPRESSION degrades to the same by-name
+     * lookup — kdb's by-name semantics (funsql.md: t "may be a table or the
+     * name of a table"; needed later for partitioned tables).  Any other
+     * slot-1 value is an already-lowered expression subtree embedded as-is —
+     * ray_select ray_eval()s the from: value (query.c), so a table value
+     * flows in. */
+    ray_t *fromv = (t->type == -RAY_SYM) ? ray_sym(t->i64)
+                                         : (ray_retain(t), t);
     keyvec  = q_symvec_append(keyvec, "from", 4);
     vallist = ray_list_append(vallist, fromv); ray_release(fromv);
 
