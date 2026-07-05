@@ -562,6 +562,29 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
     return ray_error("type", "?: unsupported operand types");
 }
 
+/* ===== q calendar home (see q_registry.h) ==================================
+ * Hinnant days_from_civil (public domain, http://howardhinnant.github.io/
+ * date_algorithms.html), rebased to the kdb/base date epoch: the algorithm
+ * yields days since 1970-01-01, and 2000.01.01 is unix day 10957 (the same
+ * constant base temporal.c uses in the inverse direction). */
+int64_t q_days_from_civil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;                                    /* [0,399] */
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;   /* [0,365] */
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;            /* [0,146096] */
+    return era * 146097 + doe - 719468 - 10957;  /* unix days -> 2000.01.01 epoch */
+}
+
+/* kdb literal/value domain: 0001.01.01 .. 9999.12.31 (datatypes.md), real
+ * month lengths, proleptic-Gregorian leap rule. */
+int q_date_valid(int64_t y, int64_t m, int64_t d) {
+    static const int md[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1) return 0;
+    int leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
+    return d <= md[m - 1] + ((m == 2 && leap) ? 1 : 0);
+}
+
 /* ===== q cast home (see q_registry.h for the reuse contract) ===============
  * Designator resolution is separate from conversion so C callers (future
  * bool-widening / promotion work) can invoke q_cast_to(tag, x) directly. */
