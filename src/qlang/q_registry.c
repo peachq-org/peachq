@@ -448,9 +448,14 @@ static ray_t* q_within_wrap(ray_t* x, ray_t* y) {
         if (vals_owned) ray_release(vals_owned);
         return ray_error("type", "within: unsupported value type (deferred)");
     }
-    if (ray_type_sizes[(uint8_t)vals->type] != ray_type_sizes[(uint8_t)y->type]) {
+    /* Base ray_within_fn dispatches on vals->type ONLY and reads the range
+     * buffer as that element type, so ANY type mismatch — not just a width
+     * mismatch — would silently reinterpret raw bits (codex: 1 2 within
+     * 1.5 2.5 read the doubles as int64 -> 00b).  Same-type operands only;
+     * mixed-type coercion is a deferred cell (error, never a wrong answer). */
+    if (vals->type != y->type) {
         if (vals_owned) ray_release(vals_owned);
-        return ray_error("type", "within: value/range element widths differ (mixed-width deferred)");
+        return ray_error("type", "within: value/range types must match (mixed-type deferred)");
     }
     ray_t* r = ray_within_fn(vals, y);
     if (!vals_owned) return r;                    /* vector x: pass through */
