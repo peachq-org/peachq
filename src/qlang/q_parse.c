@@ -1860,15 +1860,21 @@ static void ql_qsql(ray_t **slot) {
             }
             if (ex && ex->type == -RAY_SYM && !(ex->attrs & Q_ATTR_QUOTED) &&
                 q_symvec_contains_id(keycols, ex->i64)) {
-                ray_t *plus = q_verb('+');
-                plus = q_embed(plus, Q_DYADIC);
-                ray_t *zero = ray_i64(0);
-                ray_t *wrap = ray_list_new(3);
-                wrap = ray_list_append(wrap, plus); ray_release(plus);
-                wrap = ray_list_append(wrap, ex);
-                wrap = ray_list_append(wrap, zero); ray_release(zero);
-                ray_release(ex);
-                ex = wrap;
+                /* A by-group output that is a BARE reference to a group-key
+                 * column trips the base engine's key/value collision handling
+                 * (it drops the column).  Disguise it as a computed column via
+                 * a TYPE-AGNOSTIC identity — reverse reverse x — which yields x
+                 * for any column type (sym/char/temporal/nested list), unlike
+                 * an arithmetic x+0 that type-errors on non-numeric columns.
+                 * q_select_exec renames the temp output column back afterwards. */
+                for (int rr = 0; rr < 2; rr++) {
+                    ray_t *rev = q_verb_name("reverse", 7);
+                    rev = q_embed(rev, Q_MONADIC);
+                    ray_t *wrap = ray_list_new(2);
+                    wrap = ray_list_append(wrap, rev); ray_release(rev);
+                    wrap = ray_list_append(wrap, ex);  ray_release(ex);
+                    ex = wrap;
+                }
             }
             vallist = ray_list_append(vallist, ex); ray_release(ex);
         }
