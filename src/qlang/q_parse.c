@@ -76,8 +76,8 @@ static ray_t *q_verb_name(const char *s, int len) {
 /* Infix keyword verbs (q keyword functions usable between two nouns).  Derived
  * from the SINGLE-SOURCE op manifest (q_ops.c QLEX_KW_INFIX rows) — no longer a
  * hardcoded memcmp, and no runtime-registry dependency (the manifest is a
- * static table, and the scanner runs before eval).  Classification is
- * byte-identical to the retired memcmp: the manifest's KW_INFIX set is {div}. */
+ * static table, and the scanner runs before eval).  The manifest's KW_INFIX
+ * set is {div, each, in, within}. */
 static int q_is_kw_verb(const char *s, int len) {
     return q_lex_is_kw_infix(s, len);
 }
@@ -266,12 +266,15 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
      * another dot.  Checked BEFORE the float peek, which would otherwise eat
      * `2000.01` and strand `.01` (the pre-date 'type failure).  Exactly ONE
      * dot stays a float: kdb's bare `2000.01` IS the float 2000.01 (a month
-     * literal needs the `m` suffix, and month has no engine type).  No sign
-     * arm: kdb has no negative date spelling, so `-2000.01.01` keeps the old
-     * float path.  Invalid civil dates (2000.13.01, 2000.02.30, 0000.01.01)
-     * die rather than fall back to the float-strand mess. */
+     * literal needs the `m` suffix, and month has no engine type).  A leading
+     * sign the SCANNER already classified as glued (neg_sign / vector
+     * elements) negates the day count: kdb `-2012.01.01` is 1988.01.01.
+     * Invalid civil dates (2000.13.01, 2000.02.30, 0000.01.01) die rather
+     * than fall back to the float-strand mess. */
     {
         int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
         if (dig_run(src, q) == 4 && src[q + 4] == '.' &&
             dig_run(src, q + 5) == 2 && src[q + 7] == '.' &&
             dig_run(src, q + 8) == 2 &&
@@ -283,6 +286,7 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
             if (!q_date_valid(y, mo, d)) q_die("bad date");
             out->kind = EL_DATE;
             out->i = q_days_from_civil(y, mo, d);
+            if (neg) out->i = -out->i;
             *p = q + 10;
             return 1;
         }
