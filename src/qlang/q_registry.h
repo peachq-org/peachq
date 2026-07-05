@@ -119,4 +119,14 @@ ray_t* q_registry_funsql_bang_value(void);
  * `l` retained). */
 ray_t* q_collapse_list(ray_t* l);
 
+/* q-name sanitization shared by .Q.id and openq construction paths that must
+ * repair name clashes.  q_name_sanitize returns an interned symbol id for the
+ * `.Q.id` atom rule.  q_name_dedup takes an already-sanitized/generated symbol
+ * and resolves reserved-word and previous-name clashes by appending 1,2,...
+ * using the same table/dict column-name rule. */
+int64_t q_name_sanitize(int64_t sym_id);
+int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous,
+                     int check_reserved);
+ray_t* q_name_reserved_words(void);
+
 #endif /* Q_REGISTRY_H */
