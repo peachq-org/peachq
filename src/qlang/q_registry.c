@@ -401,6 +401,68 @@ static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
+/* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
+ * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
+ * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
+ * ray_neg_fn rejects temporals — so the date arm lives here and every other
+ * input delegates.  Registered ATOMIC: eval's atomic_map_unary maps vectors
+ * element-wise and its typed-out path already carries RAY_DATE, so a date
+ * vector comes back a date vector.  time/timestamp arms arrive with their
+ * datatypes (deferred). */
+static ray_t* q_neg_wrap(ray_t* x) {
+    if (x && x->type == -RAY_DATE) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_date(-(int64_t)x->i32);
+    }
+    return ray_neg_fn(x);
+}
+
+/* q `x within y` — bounds check (ref/within.md: 1 3 10 6 4 within 2 6 ->
+ * 01011b; inclusive).  Base ray_within_fn takes VECTOR vals only and reads
+ * the range buffer at the vals' element width, so: an atom x is enlisted
+ * (via list+collapse) and the answer unwrapped back to a bool atom, and the
+ * two element widths must agree ('type — a silent misread otherwise).  The
+ * flip-of-pairs range form and mixed-width operands are deferred cells. */
+static ray_t* q_within_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "within: nil operand");
+    if (!ray_is_vec(y) || ray_len(y) != 2)
+        return ray_error("type", "within: range must be a 2-item vector");
+    ray_t* vals = x;
+    ray_t* vals_owned = NULL;
+    if (ray_is_atom(x)) {
+        ray_t* l = ray_list_new(1);
+        if (RAY_IS_ERR(l)) return l;
+        l = ray_list_append(l, x);
+        if (RAY_IS_ERR(l)) return l;
+        vals_owned = q_collapse_list(l);
+        ray_release(l);
+        if (!vals_owned || RAY_IS_ERR(vals_owned))
+            return vals_owned ? vals_owned : ray_error("type", NULL);
+        if (!ray_is_vec(vals_owned)) {           /* strings & friends: deferred */
+            ray_release(vals_owned);
+            return ray_error("type", "within: unsupported value type (deferred)");
+        }
+        vals = vals_owned;
+    }
+    if (!ray_is_vec(vals)) {
+        if (vals_owned) ray_release(vals_owned);
+        return ray_error("type", "within: unsupported value type (deferred)");
+    }
+    if (ray_type_sizes[(uint8_t)vals->type] != ray_type_sizes[(uint8_t)y->type]) {
+        if (vals_owned) ray_release(vals_owned);
+        return ray_error("type", "within: value/range element widths differ (mixed-width deferred)");
+    }
+    ray_t* r = ray_within_fn(vals, y);
+    if (!vals_owned) return r;                    /* vector x: pass through */
+    ray_release(vals_owned);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* idx = ray_i64(0);                      /* atom x: unwrap 1-vec */
+    ray_t* a = ray_at_fn(r, idx);
+    ray_release(idx);
+    ray_release(r);
+    return a;
+}
+
 /* Call the env-bound BINARY builtin `nm` (the wrapper-over-env pattern:
  * some base fns — dict — are declared only in internal base headers, so the
  * wrapper routes through the audited env value instead of a frozen-header
@@ -2030,6 +2092,8 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_AT:   return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_at_wrap);
     case QK_DOT:  return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_dot_wrap);
     case QK_MIN2: return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_min2_wrap);
+    case QK_NEG:  return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_neg_wrap);
+    case QK_WITHIN: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_within_wrap);
     default:      return NULL;
     }
 }
