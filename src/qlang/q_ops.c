@@ -19,9 +19,9 @@
  *   QK_MATCH wrapper (2c-1).  The remaining type-dispatch verbs `! ? $ @ .`
  *   land in 2c-2.
  *
- * KW_INFIX is held to EXACTLY {div} so the lexer's infix-keyword classification
- * is byte-identical to the retired q_is_kw_verb memcmp — guarding the parse_*
- * ledgers (AST shape unchanged this stage). */
+ * KW_INFIX is {div, each, in, within} — a keyword row here is what makes the
+ * lexer reclassify the name as an infix verb in noun position (the retired
+ * q_is_kw_verb memcmp, now manifest-driven). */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_ops.h"
 #include <string.h>
@@ -30,7 +30,7 @@ static const q_op_t Q_OPS[] = {
     /* name    lex             mon_kind mon_target   dyad_kind dyad_target  adverb_hof */
     /* ---- arithmetic / compare glyphs ---- */
     { "+",     QLEX_GLYPH,     QK_NONE, NULL,        QK_ENV,   "+",       NULL  },
-    { "-",     QLEX_GLYPH,     QK_ENV,  "neg",       QK_ENV,   "-",       NULL  },
+    { "-",     QLEX_GLYPH,     QK_NEG,  "neg",       QK_ENV,   "-",       NULL  },
     { "*",     QLEX_GLYPH,     QK_ENV,  "first",     QK_ENV,   "*",       NULL  },
     { "%",     QLEX_GLYPH,     QK_NONE, NULL,        QK_ENV,   "/",       NULL  },
     { "<",     QLEX_GLYPH,     QK_ENV,  "iasc",      QK_ENV,   "<",       NULL  },
@@ -70,8 +70,11 @@ static const q_op_t Q_OPS[] = {
      * collapse, since map returns a boxed list where q wants a simple vec). */
     { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
     { "in",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "in",      NULL  },
+    /* q `x within y` — inclusive bounds check (ref/within.md); wrapper because
+     * base ray_within_fn is vector-vals-only and width-blind on the range. */
+    { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
-    { "neg",     QLEX_KW_PREFIX, QK_ENV, "neg",      QK_NONE,  NULL,      NULL  },
+    { "neg",     QLEX_KW_PREFIX, QK_NEG, "neg",      QK_NONE,  NULL,      NULL  },
     { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
     { "count",   QLEX_KW_PREFIX, QK_ENV, "count",    QK_NONE,  NULL,      NULL  },
     { "first",   QLEX_KW_PREFIX, QK_ENV, "first",    QK_NONE,  NULL,      NULL  },
