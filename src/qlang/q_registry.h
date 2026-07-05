@@ -104,6 +104,13 @@ ray_t* q_registry_table_value(void);
  * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_select_value(void);
 
+/* The functional-qSQL executor values q_lower embeds at the head of a rank-4
+ * `?[t;c;b;a]` (select/exec) or `![t;c;b;a]` (update/delete) application.  They
+ * are regular (arg-evaluating) vary fns — ray_eval evaluates the four operands
+ * to VALUES first.  Borrowed; NULL before q_registry_init. */
+ray_t* q_registry_funsql_select_value(void);
+ray_t* q_registry_funsql_bang_value(void);
+
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
  * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
  * are simple vectors, not general lists).  Mixed types, non-atom elements,
