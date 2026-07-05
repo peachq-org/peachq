@@ -1187,10 +1187,12 @@ static ray_t *parse_qsql_select(Parser *p, int *ok) {
      * A plain name followed by `where` or a statement boundary keeps the kdb
      * by-name form: slot 1 = the symbol literal `t (byte-identical display;
      * by-name semantics matter later for partitioned tables).  Anything else
-     * parses ONE ordinary term (table literal ([] …), parenthesised
-     * expression — which admits ANY expression — a name[…] indexing chain, …)
-     * as the from-expression, under a token snapshot so a later soft-fail can
-     * still fall back to the ordinary parser (parse_base steals tk->k). */
+     * parses an ordinary EXPRESSION (table literal ([] …), computed table
+     * t,u / 0!kt, indexing chain, parenthesised anything, …) delimited by the
+     * first depth-0 `where` token — temporarily turned into a T_EOF sentinel
+     * so parse_e stops exactly there — as the from-expression, under a token
+     * snapshot so a later soft-fail can still fall back to the ordinary
+     * parser byte-identically (parse_base steals tk->k). */
     Token *tt = cur(p);
     Token *nx = &p->t.t[p->pos + 1];   /* safe: a T_NOUN is never the T_EOF
                                         * terminator, and nx is only read
@@ -1205,10 +1207,27 @@ static ray_t *parse_qsql_select(Parser *p, int *ok) {
         adv(p);
     } else {
         if (tt->kind == T_EOF) { *ok = 0; goto fail; }
+        /* find the where-delimiter: first depth-0 `where` before the
+         * statement end (a `where` nested in ()/[]/{} belongs to the
+         * from-expression, e.g. a lambda body or a nested select) */
+        int widx = -1, depth = 0;
+        for (int i = p->pos; i < p->t.n; i++) {
+            Token *sc = &p->t.t[i];
+            if (sc->kind == T_LPAREN || sc->kind == T_LBRACK ||
+                sc->kind == T_LBRACE) { depth++; continue; }
+            if (sc->kind == T_RPAREN || sc->kind == T_RBRACK ||
+                sc->kind == T_RBRACE) { if (depth == 0) break; depth--; continue; }
+            if (sc->kind == T_EOF) break;
+            if (sc->kind == T_SEMI) { if (depth == 0) break; continue; }
+            if (depth == 0 && qtok_is(p, sc, "where", 5)) { widx = i; break; }
+        }
         qsql_snap_take(p);
         snapped = 1;
-        P fe = parse_term(p);
-        if (fe.role != R_NOUN || !fe.v) {
+        TKind wkind = T_EOF;
+        if (widx >= 0) { wkind = p->t.t[widx].kind; p->t.t[widx].kind = T_EOF; }
+        P fe = parse_e(p);
+        if (widx >= 0) p->t.t[widx].kind = wkind;   /* restore the delimiter */
+        if (fe.role != R_NOUN || !fe.v || (widx >= 0 && p->pos != widx)) {
             if (fe.v) ray_release(fe.v);
             *ok = 0; goto fail;            /* fail: restores the frame */
         }
