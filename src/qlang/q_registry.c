@@ -1247,6 +1247,37 @@ static ray_t* funsql_scatter(ray_t* base, ray_t* idx, ray_t* upd) {
     return col;
 }
 
+/* Scatter for a BRAND-NEW column (absent from the base table): `upd` values land
+ * at the `idx` rows, the unselected rows get the type-correct null (kdb:
+ * `update newcol:… where …` nulls the rows the where didn't match).  `N` is the
+ * full row count. */
+static ray_t* funsql_scatter_new(ray_t* idx, ray_t* upd, int64_t N) {
+    int64_t M = ray_len(idx);
+    /* ray_typed_null wants the ATOM (negative) type: a vector upd of type T
+     * nulls as -T; a scalar upd already carries its negative atom type. */
+    int8_t et = ray_is_vec(upd) ? (int8_t)(-upd->type)
+                                : (upd->type < 0 ? upd->type : (int8_t)(-RAY_I64));
+    int64_t* pos = (int64_t*)malloc((N > 0 ? N : 1) * sizeof(int64_t));
+    if (!pos) return ray_error("oom", NULL);
+    for (int64_t r = 0; r < N; r++) pos[r] = -1;
+    int64_t* ii = (int64_t*)ray_data(idx);
+    for (int64_t k = 0; k < M; k++)
+        if (ii[k] >= 0 && ii[k] < N) pos[ii[k]] = k;
+    ray_t* out = ray_list_new(N > 0 ? N : 1);
+    for (int64_t r = 0; r < N; r++) {
+        ray_t* v;
+        if (pos[r] >= 0) { ray_t* iv = ray_i64(pos[r]); v = ray_at_fn(upd, iv); ray_release(iv); }
+        else             { v = ray_typed_null(et); }
+        if (!v || RAY_IS_ERR(v)) { free(pos); ray_release(out); return v ? v : ray_error("oom", NULL); }
+        out = ray_list_append(out, v);
+        ray_release(v);
+    }
+    free(pos);
+    ray_t* col = q_collapse_list(out);
+    ray_release(out);
+    return col;
+}
+
 /* Build an update query dict {from: TBL [by: KEY] OUT:EXPR …} from the a-dict
  * of computed columns.  `bykey` (borrowed, may be NULL) is a single grouping
  * column name-ref for by-update. */
@@ -1431,6 +1462,20 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
         ray_t* merged = funsql_scatter(base, idx, newvals);
         if (!merged || RAY_IS_ERR(merged)) { ray_release(out); ray_release(idx); ray_release(uft); ray_release(tbl); return merged ? merged : ray_error("oom", NULL); }
         out = ray_table_add_col(out, nm, merged);
+        ray_release(merged);
+    }
+    /* Append columns that `a` CREATED (absent from the base table): the where
+     * path filters to a subtable, so these live only in `uft` — scatter them
+     * across the full row count with nulls on the unselected rows (parity with
+     * the no-where update path, which adds them directly). */
+    int64_t ntbl = ray_table_nrows(tbl);
+    for (int64_t i = 0; i < na && !RAY_IS_ERR(out); i++) {
+        if (ray_table_get_col(tbl, upd_ids[i])) continue;      /* already emitted */
+        ray_t* newvals = ray_table_get_col(uft, upd_ids[i]);
+        if (!newvals) continue;
+        ray_t* merged = funsql_scatter_new(idx, newvals, ntbl);
+        if (!merged || RAY_IS_ERR(merged)) { ray_release(out); ray_release(idx); ray_release(uft); ray_release(tbl); return merged ? merged : ray_error("oom", NULL); }
+        out = ray_table_add_col(out, upd_ids[i], merged);
         ray_release(merged);
     }
     ray_release(idx);
