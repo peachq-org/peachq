@@ -119,6 +119,36 @@ ray_t* q_registry_funsql_bang_value(void);
  * `l` retained). */
 ray_t* q_collapse_list(ray_t* l);
 
+/* ===== q cast home ==========================================================
+ * THE q-layer conversion entry points (reuse mandate): future q-semantics
+ * work that needs a conversion (bool-widening in arithmetic, promotion in
+ * mixed-type ops, ...) MUST call q_cast_to with a rayfall type tag rather
+ * than growing its own conversion — the only sanctioned exception is a
+ * profiled hot path with a specialized SIMD/vectorized kernel (base arith.c's
+ * as_i64/as_f64 atom coercions are that carve-out).
+ *
+ * q_cast_designator: resolve a q cast/Tok designator value to a rayfall type
+ *   tag.  Accepts a sym name (`long`float`int`short`boolean`real`symbol), a
+ *   single-char string ("j" "f" "i" "h" "b" "e" "s"; upper-case = Tok), or a
+ *   short atom holding the kdb type number (positive = cast, negative = Tok
+ *   per ref/tok.md — the rayfall tags already equal the kdb numbers).  The
+ *   null symbol ` is Tok "S".  *is_tok is set to 1 for Tok (string-parse)
+ *   designators.  Returns 0 (RAY_LIST — never a valid target) for unknown or
+ *   deferred designators (byte/guid/char/temporals, and the 0h/"*" identity).
+ * q_cast_to: convert x to the tag type with q semantics.  Exactly: RAY_LIST
+ *   distributes per element (collapsed); float ATOMS and float VECTORS
+ *   pre-round via rint (kdb ties-even) for integer targets; symbol target is
+ *   identity on syms and 'nyi otherwise; every other input delegates to base
+ *   ray_cast_fn (typed vectors included).  Returns owned; 'nyi error for
+ *   deferred targets (F32/char/byte/guid/temporals).
+ * q_tok_to: parse string atom(s) to the tag type (kdb Tok, ref/tok.md).
+ *   Leading/trailing blanks are trimmed; unparseable or out-of-range parses
+ *   yield the TYPED NULL (never an error); lists and string vectors
+ *   distribute (implicit recursion stops at strings, not atoms). */
+int8_t q_cast_designator(ray_t* t, int* is_tok);
+ray_t* q_cast_to(int8_t tag, ray_t* x);
+ray_t* q_tok_to(int8_t tag, ray_t* x);
+
 /* q-name sanitization shared by .Q.id and openq construction paths that must
  * repair name clashes.  q_name_sanitize returns an interned symbol id for the
  * `.Q.id` atom rule.  q_name_dedup takes an already-sanitized/generated symbol
