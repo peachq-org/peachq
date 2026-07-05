@@ -598,9 +598,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         if (n <= 0) { *is_tok = 1; n = (int16_t)-n; }
         switch (n) {
         case RAY_BOOL: case RAY_I16: case RAY_I32: case RAY_I64:
-        case RAY_F32:  case RAY_F64: case RAY_SYM:
+        case RAY_F32:  case RAY_F64: case RAY_SYM: case RAY_DATE:
             return (int8_t)n;
-        default: return 0;    /* byte/guid/char/temporals + 0h identity: deferred */
+        default: return 0;    /* byte/guid/char + time/timestamp/month etc: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
@@ -610,8 +610,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'b': return RAY_BOOL; case 'h': return RAY_I16;
         case 'i': return RAY_I32;  case 'j': return RAY_I64;
         case 'e': return RAY_F32;  case 'f': return RAY_F64;
-        case 's': return RAY_SYM;
-        default:  return 0;       /* x g c p m d z n u v t + "*" identity: deferred */
+        case 's': return RAY_SYM;  case 'd': return RAY_DATE;
+        default:  return 0;       /* x g c p m z n u v t + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -628,6 +628,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 7 && !memcmp(nm, "boolean", 7)) r = RAY_BOOL;
         else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
+        else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
         ray_release(s);
         return r;
     }
@@ -639,7 +640,8 @@ static const char* q_tag_rayname(int8_t tag) {
     switch (tag) {
     case RAY_BOOL: return "BOOL"; case RAY_I16: return "I16";
     case RAY_I32:  return "I32";  case RAY_I64: return "I64";
-    case RAY_F64:  return "F64";  default:      return NULL;
+    case RAY_F64:  return "F64";  case RAY_DATE: return "DATE";
+    default:       return NULL;
     }
 }
 
@@ -706,6 +708,35 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
     return r;
 }
 
+/* "D"$ date-string scan (ref/tok.md date formats).  Supported subset:
+ * yyyymmdd (8 digits, the doc's [yy]yymmdd with an unambiguous 4-digit year)
+ * and yyyy.mm.dd / yyyy-mm-dd / yyyy/mm/dd (the doc's separator variants;
+ * "D"$"2000-12-12" is letter-pinned).  Two-digit years and MMM month names
+ * are deferred.  Returns 1 and fills y/m/d on a shape match; civil validity
+ * is the caller's q_date_valid check. */
+static int q_date_scan(const char* p, size_t len,
+                       int64_t* y, int64_t* m, int64_t* d) {
+    if (len == 8) {
+        for (int i = 0; i < 8; i++)
+            if (p[i] < '0' || p[i] > '9') return 0;
+        *y = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
+        *m = (p[4]-'0')*10 + (p[5]-'0');
+        *d = (p[6]-'0')*10 + (p[7]-'0');
+        return 1;
+    }
+    if (len == 10 && (p[4] == '.' || p[4] == '-' || p[4] == '/') && p[7] == p[4]) {
+        for (int i = 0; i < 10; i++) {
+            if (i == 4 || i == 7) continue;
+            if (p[i] < '0' || p[i] > '9') return 0;
+        }
+        *y = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
+        *m = (p[5]-'0')*10 + (p[6]-'0');
+        *d = (p[8]-'0')*10 + (p[9]-'0');
+        return 1;
+    }
+    return 0;
+}
+
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
@@ -768,8 +799,16 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         return (v > INT16_MAX || v < -INT16_MAX)
              ? ray_typed_null(-RAY_I16) : ray_i16((int16_t)v);
     }
+    case RAY_DATE: {
+        /* Unparseable / invalid civil date / out-of-domain -> 0Nd, never an
+         * error (tok.md pins "D"$"2147483648" -> 0Nd). */
+        int64_t y, mo, d;
+        if (!q_date_scan(p, len, &y, &mo, &d) || !q_date_valid(y, mo, d))
+            return ray_typed_null(-RAY_DATE);
+        return ray_date(q_days_from_civil(y, mo, d));
+    }
     default:
-        return ray_error("nyi", "$: temporal/byte/char Tok is deferred");
+        return ray_error("nyi", "$: time/timestamp/byte/char Tok is deferred");
     }
 }
 
