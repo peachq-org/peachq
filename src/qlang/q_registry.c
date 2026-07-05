@@ -597,23 +597,222 @@ ray_t* q_registry_scan_value(void) {
     return g_scan_value;   /* borrowed; NULL before init */
 }
 
-/* q paren-list literal `(1;2;3)` — build the list and collapse a homogeneous
- * atom run to a simple vector (kdb collapses at construction).  The parser
- * embeds this value at the head of every multi-element paren list, which is
- * what DISAMBIGUATES a literal from the shape-identical bracket-index call
- * (v;i) — the distinction only exists at parse time. */
-static ray_t* q_list_build(ray_t** args, int64_t n) {
-    ray_t* l = ray_list_fn(args, n);
-    if (!l || RAY_IS_ERR(l)) return l;
-    ray_t* c = q_collapse_list(l);
-    ray_release(l);
-    return c;
+/* ---- shared right-to-left CONTEXT builder (list + table def) --------------
+ *
+ * THE MANDATE (specs/2026-07-04-table-def.md): list definition `(…)` and table
+ * definition `([] …)` are ONE mechanism, not two.  Evaluating either opens an
+ * env scope, processes the element expressions RIGHT-TO-LEFT (so `x:e` binds x
+ * INTO the scope before a leftward bare `x` RESOLVES from it — this is WHY
+ * `(aa; aa:11 12 13)` yields the value twice and `(bb:11 12 13; bb)` errors
+ * `'bb`), then pops the scope and assembles: `(…)` → the list of element values
+ * (then the existing collapse-to-vector); `([] …)` → a table whose columns are
+ * the per-element assignment targets.
+ *
+ * Both constructor heads are RAY_FN_SPECIAL_FORM: rayforce's VARY arg-eval is
+ * LEFT-to-right, and a special form is the only seam that hands a builtin the
+ * raw (unevaluated) element trees — a hard prerequisite for right-to-left.
+ * q_lower lowers a plain `:` inside a ctx literal to `let` (writes the pushed
+ * frame), so the assignments are scoped, not leaked to the global env. */
+
+/* If `el` is a lowered assignment node `(set/let name val)`, return the target
+ * sym-id; else if `el` is a bare unquoted name-ref sym, return its id (a bare
+ * column reference); else -1 (no column name — a table error, .Q.id deferred). */
+static int64_t q_ctx_colname(ray_t* el) {
+    if (!el) return -1;
+    if (el->type == -RAY_SYM && !(el->attrs & 0x20 /* Q_ATTR_QUOTED */))
+        return el->i64;
+    if (el->type == RAY_LIST && ray_len(el) == 3) {
+        ray_t** e = (ray_t**)ray_data(el);
+        ray_t* h = e[0];
+        if (h && h->type == RAY_BINARY) {
+            const char* nm = ray_fn_name(h);
+            if (nm && (strcmp(nm, "set") == 0 || strcmp(nm, "let") == 0) &&
+                e[1] && e[1]->type == -RAY_SYM && !(e[1]->attrs & 0x20))
+                return e[1]->i64;
+        }
+    }
+    return -1;
 }
 
-static ray_t* g_list_value = NULL;
+/* The shared builder.  `elems[0..n)` are the UNEVALUATED element trees. */
+static ray_t* q_ctx_build(ray_t** elems, int64_t n, int as_table) {
+    if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
+
+    ray_t**  vals  = (n > 0) ? (ray_t**)calloc((size_t)n, sizeof(ray_t*))   : NULL;
+    int64_t* names = (as_table && n > 0)
+                        ? (int64_t*)malloc((size_t)n * sizeof(int64_t)) : NULL;
+    if (n > 0 && (!vals || (as_table && !names))) {
+        free(vals); free(names); ray_env_pop_scope();
+        return ray_error("wsfull", "ctx: out of memory");
+    }
+
+    ray_t* err = NULL;
+    for (int64_t i = n - 1; i >= 0; i--) {
+        if (as_table) names[i] = q_ctx_colname(elems[i]);
+        ray_t* v = ray_eval(elems[i]);            /* binds `x:e` into the scope */
+        if (!v) v = ray_error("type", "ctx: null element");
+        if (RAY_IS_ERR(v)) { err = v; break; }
+        vals[i] = v;
+    }
+
+    ray_env_pop_scope();
+
+    if (err) {
+        for (int64_t i = 0; i < n; i++) if (vals[i]) ray_release(vals[i]);
+        free(vals); free(names);
+        return err;
+    }
+
+    ray_t* out;
+    if (!as_table) {
+        ray_t* l = ray_list_fn(vals, n);          /* borrows; retains each */
+        if (l && !RAY_IS_ERR(l)) { out = q_collapse_list(l); ray_release(l); }
+        else                     { out = l; }
+    } else {
+        /* Row count comes from the vector/list columns, which must all share one
+         * length (mismatch -> 'length).  A scalar-atom column BROADCASTS to that
+         * length (kdb: `([]a:1 2 3;b:0)` -> b is 0 0 0); all-scalar -> 1 row. */
+        int64_t nrows = -1;
+        ray_t* err2 = NULL;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* col = vals[i];
+            if (col && (ray_is_vec(col) || col->type == RAY_LIST)) {
+                int64_t clen = ray_len(col);
+                if (nrows < 0) nrows = clen;
+                else if (clen != nrows) {
+                    err2 = ray_error("length", "([]…): column length mismatch");
+                    break;
+                }
+            } else if (!col || col->type >= 0) {
+                err2 = ray_error("type", "([]…): column must be a vector or list");
+                break;
+            }
+        }
+        if (err2) { out = err2; }
+        else {
+            if (nrows < 0) nrows = 1;
+            out = ray_table_new(n);
+            for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+                if (names[i] < 0) {
+                    ray_release(out);
+                    out = ray_error("type",
+                        "([]…): every column needs a name (a:… ; bare/.Q.id deferred)");
+                    break;
+                }
+                ray_t* col = vals[i]; int owned = 0;
+                if (col && col->type < 0) {              /* scalar -> broadcast */
+                    ray_t* nn = ray_i64(nrows);
+                    col = ray_take_fn(col, nn); ray_release(nn); owned = 1;
+                    if (!col || RAY_IS_ERR(col)) {
+                        ray_release(out); out = col ? col : ray_error("type", "broadcast");
+                        break;
+                    }
+                }
+                out = ray_table_add_col(out, names[i], col);
+                if (owned) ray_release(col);
+            }
+        }
+    }
+
+    for (int64_t i = 0; i < n; i++) if (vals[i]) ray_release(vals[i]);
+    free(vals); free(names);
+    return out;
+}
+
+/* q paren-list literal `(1;2;3)` head — see q_ctx_build.  The parser embeds
+ * this value at the head of every multi-element paren list, which is what
+ * DISAMBIGUATES a literal from the shape-identical bracket-index call (v;i) —
+ * the distinction only exists at parse time. */
+static ray_t* q_list_build(ray_t** args, int64_t n) {
+    return q_ctx_build(args, n, 0);
+}
+
+/* q table literal `([] a:…; b:…)` head — see q_ctx_build. */
+static ray_t* q_table_build(ray_t** args, int64_t n) {
+    return q_ctx_build(args, n, 1);
+}
+
+/* q qSQL SELECT adapter — lowers the functional 5-list (?;`t;c;b;a) (emitted by
+ * BOTH the string form `select…from t` AND `?[t;c;b;a]`) onto the base
+ * ray_select engine.  q_lower hands it a fully-built rayfall query dict plus the
+ * by-group key column names; this special form calls ray_select and, for a
+ * by-group query, splits the flat result into a KEYED table — a dict from the
+ * key-columns table to the value-columns table (the mandate: "a keyed table is
+ * just a dictionary from one table to another"), which q_fmt renders `k| v`.
+ *   args[0] = query dict (unevaluated — ray_select owns clause-in-scope eval)
+ *   args[1] = by-key column-name sym vector (empty => unkeyed passthrough) */
+static ray_t* q_select_exec(ray_t** args, int64_t n) {
+    ray_t* dict = args[0];
+    ray_t* res  = ray_select(&dict, 1);
+    if (!res || RAY_IS_ERR(res)) return res;
+
+    /* Rename the temp-named output columns (__qcN) back to their real q names
+     * (args[2]=temp sym vec, args[3]=real sym vec, parallel). */
+    if (n >= 4 && res->type == RAY_TABLE &&
+        args[2] && args[2]->type == RAY_SYM && args[3] && args[3]->type == RAY_SYM) {
+        int64_t nt = ray_len(args[2]);
+        int64_t nc = ray_table_ncols(res);
+        for (int64_t i = 0; i < nt; i++) {
+            ray_t* ti = ray_i64(i);
+            ray_t* ta = ray_at_fn(args[2], ti);
+            ray_t* ra = ray_at_fn(args[3], ti);
+            ray_release(ti);
+            int64_t tid = (ta && ta->type == -RAY_SYM) ? ta->i64 : -1;
+            int64_t rid = (ra && ra->type == -RAY_SYM) ? ra->i64 : -1;
+            if (ta) ray_release(ta);
+            if (ra) ray_release(ra);
+            for (int64_t c = 0; c < nc; c++)
+                if (ray_table_col_name(res, c) == tid) {
+                    ray_table_set_col_name(res, c, rid); break;
+                }
+        }
+    }
+
+    ray_t* keys = (n >= 2) ? args[1] : NULL;
+    int64_t nk = (keys && keys->type == RAY_SYM) ? ray_len(keys) : 0;
+    if (nk == 0 || res->type != RAY_TABLE) return res;
+
+    int64_t kids[64];
+    if (nk > 64) nk = 64;
+    for (int64_t k = 0; k < nk; k++) {
+        ray_t* ia = ray_i64(k);
+        ray_t* ka = ray_at_fn(keys, ia);
+        ray_release(ia);
+        kids[k] = (ka && ka->type == -RAY_SYM) ? ka->i64 : -1;
+        if (ka) ray_release(ka);
+    }
+
+    int64_t nc = ray_table_ncols(res);
+    ray_t* kt = ray_table_new(nk);
+    ray_t* vt = ray_table_new(nc - nk > 0 ? nc - nk : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+        int64_t nm  = ray_table_col_name(res, c);
+        ray_t*  col = ray_table_get_col_idx(res, c);
+        int iskey = 0;
+        for (int64_t k = 0; k < nk; k++) if (kids[k] == nm) { iskey = 1; break; }
+        if (iskey) kt = ray_table_add_col(kt, nm, col);
+        else       vt = ray_table_add_col(vt, nm, col);
+    }
+    ray_release(res);
+    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);   /* consumes kt, vt */
+}
+
+static ray_t* g_list_value   = NULL;
+static ray_t* g_table_value  = NULL;
+static ray_t* g_select_value = NULL;
+
+ray_t* q_registry_select_value(void) {
+    return g_select_value;   /* borrowed; NULL before init */
+}
 
 ray_t* q_registry_list_value(void) {
     return g_list_value;   /* borrowed; NULL before init */
+}
+
+ray_t* q_registry_table_value(void) {
+    return g_table_value;  /* borrowed; NULL before init */
 }
 
 /* ---- collapse: homogeneous atom list -> typed vector (see q_registry.h) ---- */
@@ -790,9 +989,24 @@ ray_err_t q_registry_init(void) {
         g_scan_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
-    g_list_value = ray_fn_vary("list", RAY_FN_NONE | RAY_FN_Q_LOWER, q_list_build);
+    /* Both ctx constructor heads are SPECIAL_FORM: q_ctx_build must receive the
+     * raw element trees to evaluate them right-to-left inside a pushed scope. */
+    g_list_value = ray_fn_vary("list",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_list_build);
     if (!g_list_value || RAY_IS_ERR(g_list_value)) {
         g_list_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_table_value = ray_fn_vary("table",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_table_build);
+    if (!g_table_value || RAY_IS_ERR(g_table_value)) {
+        g_table_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_select_value = ray_fn_vary("q.select",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_select_exec);
+    if (!g_select_value || RAY_IS_ERR(g_select_value)) {
+        g_select_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
     g_building = false;
@@ -848,8 +1062,10 @@ void q_registry_destroy(void) {
     ray_serde_set_fn_hooks(NULL, NULL);   /* hooks read g_entries — detach first */
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
-    if (g_scan_value) { ray_release(g_scan_value); g_scan_value = NULL; }
-    if (g_list_value) { ray_release(g_list_value); g_list_value = NULL; }
+    if (g_scan_value)  { ray_release(g_scan_value);  g_scan_value  = NULL; }
+    if (g_list_value)   { ray_release(g_list_value);   g_list_value   = NULL; }
+    if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
+    if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
     g_count  = 0;
     g_inited = false;
 }
