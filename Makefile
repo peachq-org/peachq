@@ -123,7 +123,9 @@ help:
 	@printf "  %-28s %s\n" "make lib" "Build static library lib$(TARGET).a"
 	@printf "  %-28s %s\n" "make dist" "Build release tarball and SHA-256 checksum under dist/"
 	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
-	@printf "  %-28s %s\n" "make qtest" "Run only qlang tests plus the q docs ledger check"
+	@printf "  %-28s %s\n" "make qtest" "Run only qlang tests (units + test/q qcmd suites)"
+	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
+	@printf "  %-28s %s\n" "make qdocs-ref-qcmd" "Convert ref docs q fences into test/q/ref/*.qcmd"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
 	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from q docs"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
@@ -256,13 +258,21 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 # too (unfiltered); this is the fast q-only loop.
 qtest: CFLAGS = $(DEBUG_CFLAGS)
 qtest: LDFLAGS = $(DEBUG_LDFLAGS)
-qtest: $(LIB_OBJ) $(TEST_OBJ) $(QDOC_TARGET)
+qtest: $(LIB_OBJ) $(TEST_OBJ)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	@timeout 900 sh -c 'rc=0; RAY_DFD=$${RAY_DFD:-1} RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test -f qlang || rc=$$?; tools/qtest-ledger.sh || rc=$$?; exit $$rc' || \
+	RAY_DFD=$${RAY_DFD:-1} RAYFORCE_CORES=$(TEST_CORES) timeout 900 ./$(TARGET).test -f qlang || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
 	      echo "QTEST TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make qtest"; \
 	    fi; exit $$rc; }
+
+# openq: q-docs corpus floors — qdoctest over every ref/*.md, failing if the
+# parse / eval-ok counts drop below test/qdoctest.min.  A coverage METRIC, not
+# the correctness gate (that's the curated test/q suites in qtest); split out
+# of qtest 2026-07-05 so the corpus (and its known futex-deadlock flake) never
+# blocks the fast q loop.  CI runs it as its own step.
+qdocs: $(QDOC_TARGET)
+	@tools/qtest-ledger.sh
 
 # openq: NON-GATING differential parser-test ledger.  Links the TSV runner
 # (test/test_q_parse_tsv.c) into the test binary alongside the normal suites,
@@ -288,6 +298,9 @@ qtest-results: $(QDOC_TARGET)
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
 	      echo "QTEST-RESULTS TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make qtest-results"; \
 	    fi; exit $$rc; }
+
+qdocs-ref-qcmd:
+	@tools/qdocs-ref-qcmd.sh
 
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
@@ -340,7 +353,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qtest-results qdoctest manifest coverage clean
+.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdocs-ref-qcmd qdoctest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
