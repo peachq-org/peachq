@@ -229,7 +229,7 @@ static Tokens g_toks = { NULL, 0 };
  * if any magnitude was fractional).  Nulls / integer infinities are Specials
  * that widen to the chosen type's sentinel. */
 
-typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF } el_kind;
+typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE } el_kind;
 typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
@@ -248,11 +248,45 @@ static int scan_special(const char *s, int p, num_el *out) {
     return (q + 2) - p;
 }
 
+/* Length of the digit run starting at s[p]. */
+static int dig_run(const char *s, int p) {
+    int n = 0;
+    while (CLASS[(uint8_t)s[p + n]] & CL_DIGIT) n++;
+    return n;
+}
+
 /* Scan one magnitude at src[*p] into *out; return 1 on success, 0 on no match. */
 static int scan_one_num(const char *src, int *p, num_el *out) {
     out->forces_float = 0;
     int used = scan_special(src, *p, out);
     if (used) { *p += used; return 1; }
+
+    /* Date literal magnitude: strictly yyyy.mm.dd (4-2-2 digits — every
+     * published-doc spelling is zero-padded), next byte neither digit nor
+     * another dot.  Checked BEFORE the float peek, which would otherwise eat
+     * `2000.01` and strand `.01` (the pre-date 'type failure).  Exactly ONE
+     * dot stays a float: kdb's bare `2000.01` IS the float 2000.01 (a month
+     * literal needs the `m` suffix, and month has no engine type).  No sign
+     * arm: kdb has no negative date spelling, so `-2000.01.01` keeps the old
+     * float path.  Invalid civil dates (2000.13.01, 2000.02.30, 0000.01.01)
+     * die rather than fall back to the float-strand mess. */
+    {
+        int q = *p;
+        if (dig_run(src, q) == 4 && src[q + 4] == '.' &&
+            dig_run(src, q + 5) == 2 && src[q + 7] == '.' &&
+            dig_run(src, q + 8) == 2 &&
+            !(CLASS[(uint8_t)src[q + 10]] & CL_DIGIT) && src[q + 10] != '.') {
+            int64_t y = (src[q]     - '0') * 1000 + (src[q + 1] - '0') * 100
+                      + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
+            int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
+            int64_t d  = (src[q + 8] - '0') * 10 + (src[q + 9] - '0');
+            if (!q_date_valid(y, mo, d)) q_die("bad date");
+            out->kind = EL_DATE;
+            out->i = q_days_from_civil(y, mo, d);
+            *p = q + 10;
+            return 1;
+        }
+    }
 
     /* Decide float vs int: a float magnitude contains '.' or an exponent among
      * its own bytes (before the next whitespace / letter).  Peek the digit run. */
@@ -292,9 +326,10 @@ static int64_t narrow_special(el_kind k, int width) {
     return -vmax;   /* EL_NINF */
 }
 
-/* Resolve one element to an int64 in the given integer width. */
+/* Resolve one element to an int64 in the given integer width.  EL_DATE holds
+ * its day count in .i (only reachable in the width-4 date context). */
 static int64_t el_to_int(const num_el *e, int width) {
-    if (e->kind == EL_INT)   return e->i;
+    if (e->kind == EL_INT || e->kind == EL_DATE) return e->i;
     if (e->kind == EL_FLOAT) return (int64_t)e->f;
     return narrow_special(e->kind, width);
 }
@@ -307,13 +342,20 @@ static double el_to_float(const num_el *e) {
     return (e->kind == EL_FLOAT) ? e->f : (double)e->i;
 }
 
-/* Read an optional trailing type letter (b/h/i/j/e/f) at src[*p].  The whole
- * literal shares one type, but each element in the source may carry the suffix
- * (q prints `0Nh 0Wh -0Wh 42h`), so we accept a letter after every element and
- * require them to agree. */
-static void read_type_letter(const char *src, int *p, char *letter) {
+/* Read an optional trailing type letter (b/h/i/j/e/f, plus gated d) at
+ * src[*p].  The whole literal shares one type, but each element in the source
+ * may carry the suffix (q prints `0Nh 0Wh -0Wh 42h`), so we accept a letter
+ * after every element and require them to agree.
+ *
+ * `d` (date) is accepted ONLY after a Special or a date magnitude (0Nd, 0Wd,
+ * -0Wd, 2000.01.01d) — never after plain digits, so corpus tokens like `3d`
+ * keep parsing as `3` juxtaposed with the name `d` (no parse-display churn). */
+static void read_type_letter(const char *src, int *p, char *letter,
+                             const num_el *last) {
     char c = src[*p];
-    if (c && strchr("bhijef", c)) {
+    int date_ok = last && (last->kind == EL_DATE || last->kind == EL_NULL ||
+                           last->kind == EL_PINF || last->kind == EL_NINF);
+    if (c && (strchr("bhijef", c) || (c == 'd' && date_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -326,7 +368,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     num_el buf[MAX_VEC]; int m = 0;
     char letter = 0;
     if (!scan_one_num(src, p, &buf[m++])) q_die("bad number");
-    read_type_letter(src, p, &letter);
+    read_type_letter(src, p, &letter, &buf[m - 1]);
     for (;;) {
         int sp = *p;
         while (CLASS[(uint8_t)src[sp]] & CL_WS) sp++;
@@ -335,7 +377,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         if (!scan_one_num(src, &q, &e)) break;   /* not another magnitude */
         if (m >= MAX_VEC) q_die("numeric literal too long");
         *p = q; buf[m++] = e;
-        read_type_letter(src, p, &letter);
+        read_type_letter(src, p, &letter, &buf[m - 1]);
     }
 
     /* Booleans: a 0/1 run ending in 'b' (spaces flattened). */
@@ -350,6 +392,32 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         if (nb == 0) q_die("bad boolean literal");
         if (nb == 1) return ray_bool(bits[0]);
         return ray_vec_from_raw(RAY_BOOL, bits, nb);
+    }
+
+    /* Date context: a `d` suffix (0Nd / 0Wd / -0Wd) or any yyyy.mm.dd
+     * magnitude.  kdb date == i32 days since 2000.01.01 (the base RAY_DATE
+     * payload), so Specials narrow to the width-4 sentinels and a plain int
+     * widens as a raw day count (the same rule Specials already follow in
+     * typed runs).  A fractional magnitude can never be a date. */
+    int is_date = (letter == 'd');
+    for (int i = 0; i < m && !is_date; i++)
+        if (buf[i].kind == EL_DATE) is_date = 1;
+    if (is_date) {
+        for (int i = 0; i < m; i++)
+            if (buf[i].kind == EL_FLOAT || buf[i].forces_float)
+                q_die("bad number");
+        if (m == 1) {
+            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_DATE);
+            return ray_date(el_to_int(&buf[0], 4));
+        }
+        int32_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+        ray_t *vec = ray_vec_from_raw(RAY_DATE, t, m);
+        if (vec && !RAY_IS_ERR(vec)) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+        }
+        return vec;
     }
 
     /* Float context: explicit e/f letter, or any fractional/lowercase-special. */
