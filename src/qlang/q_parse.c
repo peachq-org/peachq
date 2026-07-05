@@ -865,6 +865,73 @@ static P parse_e_from(Parser *p, P t) {
 
 #define QSQL_MAXCOLS 256
 
+/* ===== from-expression token snapshot ========================================
+ * parse_qsql_select soft-fails by restoring p->pos and letting the ordinary
+ * parser re-parse the SAME token array.  The qsql_* helpers only retain tk->k,
+ * so that restore is trivially safe — but the from-EXPRESSION path calls
+ * parse_term, and parse_base STEALS tk->k (sets it NULL).  Snapshot the k
+ * pointers (one extra retain each) from the from-position to EOF before
+ * calling parse_term; on soft-fail hand the retained refs back to the stolen
+ * slots, on success just drop them.  Frames form a LIFO stack (parse_term
+ * recurses into parse_e, which re-enters parse_qsql_select: nested selects
+ * take nested snapshots); each frame holds its OWN retains so overlapping
+ * frames stay independent.  Heap-allocated and file-static so the q_die
+ * longjmp cleanup in q_parse can free every in-flight frame (parse_term can
+ * die mid-expression, unwinding past any number of frames). */
+typedef struct qsql_snap {
+    ray_t           **k;     /* snapshotted token values, one retain each */
+    int               n;
+    int               at;    /* token index of snapshot start */
+    struct qsql_snap *prev;
+} qsql_snap_t;
+
+static qsql_snap_t *g_qsql_snap = NULL;   /* stack top */
+
+static void qsql_snap_take(Parser *p) {
+    int n = p->t.n - p->pos;
+    qsql_snap_t *f = (qsql_snap_t *)malloc(sizeof *f);
+    f->k  = (ray_t **)malloc(sizeof(ray_t *) * (size_t)(n > 0 ? n : 1));
+    f->n  = n;
+    f->at = p->pos;
+    for (int i = 0; i < n; i++) {
+        ray_t *k = p->t.t[p->pos + i].k;
+        if (k) ray_retain(k);
+        f->k[i] = k;
+    }
+    f->prev = g_qsql_snap;
+    g_qsql_snap = f;
+}
+
+/* success path: pop the top frame, dropping its extra refs */
+static void qsql_snap_drop(void) {
+    qsql_snap_t *f = g_qsql_snap;
+    if (!f) return;
+    for (int i = 0; i < f->n; i++)
+        if (f->k[i]) ray_release(f->k[i]);
+    g_qsql_snap = f->prev;
+    free(f->k);
+    free(f);
+}
+
+/* soft-fail path: pop the top frame, handing refs back to stolen slots */
+static void qsql_snap_restore(Parser *p) {
+    qsql_snap_t *f = g_qsql_snap;
+    if (!f) return;
+    for (int i = 0; i < f->n; i++) {
+        Token *tk = &p->t.t[f->at + i];
+        if (tk->k == NULL) tk->k = f->k[i];            /* transfer our ref */
+        else if (f->k[i]) ray_release(f->k[i]);        /* token untouched */
+    }
+    g_qsql_snap = f->prev;
+    free(f->k);
+    free(f);
+}
+
+/* q_die unwind: free EVERY in-flight frame (the token array is freed too) */
+static void qsql_snap_unwind(void) {
+    while (g_qsql_snap) qsql_snap_drop();
+}
+
 /* token text equals a keyword (only meaningful for T_NOUN identifier tokens) */
 static int qtok_is(Parser *p, Token *tk, const char *kw, int kwlen) {
     return tk->kind == T_NOUN && tk->len == kwlen &&
@@ -1095,6 +1162,7 @@ static ray_t *qsql_where(Parser *p, int *ok) {
 static ray_t *parse_qsql_select(Parser *p, int *ok) {
     *ok = 1;
     int save = p->pos;
+    int snapped = 0;                       /* from-expression token snapshot */
     ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS]; int na = 0;
     ray_t *b = NULL, *t = NULL, *c = NULL, *a = NULL, *head = NULL, *q = NULL;
 
@@ -1115,11 +1183,37 @@ static ray_t *parse_qsql_select(Parser *p, int *ok) {
 
     if (!qtok_is(p, cur(p), "from", 4)) { *ok = 0; goto fail; }
     adv(p);
-    Token *tt = cur(p);                           /* from TABLE (a name) */
-    if (tt->kind != T_NOUN || !tt->k || tt->k->type != -RAY_SYM ||
-        (tt->k->attrs & Q_ATTR_QUOTED)) { *ok = 0; goto fail; }
-    t = qsql_colsym(tt->k->i64);
-    adv(p);
+    /* from TABLE-NAME | from EXPRESSION.
+     * A plain name followed by `where` or a statement boundary keeps the kdb
+     * by-name form: slot 1 = the symbol literal `t (byte-identical display;
+     * by-name semantics matter later for partitioned tables).  Anything else
+     * parses ONE ordinary term (table literal ([] …), parenthesised
+     * expression — which admits ANY expression — a name[…] indexing chain, …)
+     * as the from-expression, under a token snapshot so a later soft-fail can
+     * still fall back to the ordinary parser (parse_base steals tk->k). */
+    Token *tt = cur(p);
+    Token *nx = &p->t.t[p->pos + 1];   /* safe: a T_NOUN is never the T_EOF
+                                        * terminator, and nx is only read
+                                        * behind the T_NOUN check below */
+    int name_form = tt->kind == T_NOUN && tt->k && tt->k->type == -RAY_SYM &&
+        !(tt->k->attrs & Q_ATTR_QUOTED) &&
+        (qtok_is(p, nx, "where", 5) ||
+         nx->kind == T_EOF || nx->kind == T_SEMI || nx->kind == T_RBRACK ||
+         nx->kind == T_RPAREN || nx->kind == T_RBRACE);
+    if (name_form) {
+        t = qsql_colsym(tt->k->i64);
+        adv(p);
+    } else {
+        if (tt->kind == T_EOF) { *ok = 0; goto fail; }
+        qsql_snap_take(p);
+        snapped = 1;
+        P fe = parse_term(p);
+        if (fe.role != R_NOUN || !fe.v) {
+            if (fe.v) ray_release(fe.v);
+            *ok = 0; goto fail;            /* fail: restores the frame */
+        }
+        t = fe.v;
+    }
 
     if (qtok_is(p, cur(p), "where", 5)) {         /* where-clause */
         adv(p);
@@ -1139,6 +1233,11 @@ static ray_t *parse_qsql_select(Parser *p, int *ok) {
             end->kind != T_RPAREN && end->kind != T_RBRACE) { *ok = 0; goto fail; }
     }
 
+    /* Committed: settle the from-expression snapshot (drop the extra refs).
+     * Settle ONLY our own frame — a nested parse_qsql_select inside the
+     * from-expression pushed and popped its own (strict LIFO). */
+    if (snapped) { qsql_snap_drop(); snapped = 0; }
+
     a = (na == 0) ? ray_list_new(0) : qsql_build_dict(aliases, vals, na);
     na = 0;                                        /* consumed by build_dict */
 
@@ -1152,6 +1251,9 @@ static ray_t *parse_qsql_select(Parser *p, int *ok) {
     return q;
 
 fail:
+    /* Hand the snapshotted token values back to any slots parse_term stole,
+     * so the ordinary-parser fallback re-parses pristine tokens. */
+    if (snapped) qsql_snap_restore(p);
     for (int i = 0; i < na; i++) { ray_release(aliases[i]); ray_release(vals[i]); }
     if (b) ray_release(b);
     if (t) ray_release(t);
@@ -1194,7 +1296,9 @@ ray_t *q_parse(const char *src) {
     g_toks.t = NULL;
     g_toks.n = 0;
     if (setjmp(q_err_jmp)) {
-        /* q_die() longjmped here; free whatever the scanner had emitted. */
+        /* q_die() longjmped here; free whatever the scanner had emitted,
+         * plus any in-flight qSQL from-expression token snapshots. */
+        qsql_snap_unwind();
         free_tokens(g_toks);
         g_toks.t = NULL;
         g_toks.n = 0;
