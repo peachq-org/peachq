@@ -401,6 +401,73 @@ static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
+/* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
+ * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
+ * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
+ * ray_neg_fn rejects temporals — so the date arm lives here and every other
+ * input delegates.  Registered ATOMIC: eval's atomic_map_unary maps vectors
+ * element-wise and its typed-out path already carries RAY_DATE, so a date
+ * vector comes back a date vector.  time/timestamp arms arrive with their
+ * datatypes (deferred). */
+static ray_t* q_neg_wrap(ray_t* x) {
+    if (x && x->type == -RAY_DATE) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_date(-(int64_t)x->i32);
+    }
+    return ray_neg_fn(x);
+}
+
+/* q `x within y` — bounds check (ref/within.md: 1 3 10 6 4 within 2 6 ->
+ * 01011b; inclusive).  Base ray_within_fn takes VECTOR vals only and reads
+ * the range buffer at the vals' element width, so: an atom x is enlisted
+ * (via list+collapse) and the answer unwrapped back to a bool atom, and the
+ * two element widths must agree ('type — a silent misread otherwise).  The
+ * flip-of-pairs range form and mixed-width operands are deferred cells. */
+static ray_t* q_within_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "within: nil operand");
+    if (!ray_is_vec(y) || ray_len(y) != 2)
+        return ray_error("type", "within: range must be a 2-item vector");
+    ray_t* vals = x;
+    ray_t* vals_owned = NULL;
+    if (ray_is_atom(x)) {
+        ray_t* l = ray_list_new(1);
+        if (RAY_IS_ERR(l)) return l;
+        l = ray_list_append(l, x);
+        if (RAY_IS_ERR(l)) return l;
+        vals_owned = q_collapse_list(l);
+        ray_release(l);
+        if (!vals_owned || RAY_IS_ERR(vals_owned))
+            return vals_owned ? vals_owned : ray_error("type", NULL);
+        if (!ray_is_vec(vals_owned)) {           /* strings & friends: deferred */
+            ray_release(vals_owned);
+            return ray_error("type", "within: unsupported value type (deferred)");
+        }
+        vals = vals_owned;
+    }
+    if (!ray_is_vec(vals)) {
+        if (vals_owned) ray_release(vals_owned);
+        return ray_error("type", "within: unsupported value type (deferred)");
+    }
+    /* Base ray_within_fn dispatches on vals->type ONLY and reads the range
+     * buffer as that element type, so ANY type mismatch — not just a width
+     * mismatch — would silently reinterpret raw bits (codex: 1 2 within
+     * 1.5 2.5 read the doubles as int64 -> 00b).  Same-type operands only;
+     * mixed-type coercion is a deferred cell (error, never a wrong answer). */
+    if (vals->type != y->type) {
+        if (vals_owned) ray_release(vals_owned);
+        return ray_error("type", "within: value/range types must match (mixed-type deferred)");
+    }
+    ray_t* r = ray_within_fn(vals, y);
+    if (!vals_owned) return r;                    /* vector x: pass through */
+    ray_release(vals_owned);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* idx = ray_i64(0);                      /* atom x: unwrap 1-vec */
+    ray_t* a = ray_at_fn(r, idx);
+    ray_release(idx);
+    ray_release(r);
+    return a;
+}
+
 /* Call the env-bound BINARY builtin `nm` (the wrapper-over-env pattern:
  * some base fns — dict — are declared only in internal base headers, so the
  * wrapper routes through the audited env value instead of a frozen-header
@@ -562,6 +629,29 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
     return ray_error("type", "?: unsupported operand types");
 }
 
+/* ===== q calendar home (see q_registry.h) ==================================
+ * Hinnant days_from_civil (public domain, http://howardhinnant.github.io/
+ * date_algorithms.html), rebased to the kdb/base date epoch: the algorithm
+ * yields days since 1970-01-01, and 2000.01.01 is unix day 10957 (the same
+ * constant base temporal.c uses in the inverse direction). */
+int64_t q_days_from_civil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;                                    /* [0,399] */
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;   /* [0,365] */
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;            /* [0,146096] */
+    return era * 146097 + doe - 719468 - 10957;  /* unix days -> 2000.01.01 epoch */
+}
+
+/* kdb literal/value domain: 0001.01.01 .. 9999.12.31 (datatypes.md), real
+ * month lengths, proleptic-Gregorian leap rule. */
+int q_date_valid(int64_t y, int64_t m, int64_t d) {
+    static const int md[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (y < 1 || y > 9999 || m < 1 || m > 12 || d < 1) return 0;
+    int leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
+    return d <= md[m - 1] + ((m == 2 && leap) ? 1 : 0);
+}
+
 /* ===== q cast home (see q_registry.h for the reuse contract) ===============
  * Designator resolution is separate from conversion so C callers (future
  * bool-widening / promotion work) can invoke q_cast_to(tag, x) directly. */
@@ -575,9 +665,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         if (n <= 0) { *is_tok = 1; n = (int16_t)-n; }
         switch (n) {
         case RAY_BOOL: case RAY_I16: case RAY_I32: case RAY_I64:
-        case RAY_F32:  case RAY_F64: case RAY_SYM:
+        case RAY_F32:  case RAY_F64: case RAY_SYM: case RAY_DATE:
             return (int8_t)n;
-        default: return 0;    /* byte/guid/char/temporals + 0h identity: deferred */
+        default: return 0;    /* byte/guid/char + time/timestamp/month etc: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
@@ -587,8 +677,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'b': return RAY_BOOL; case 'h': return RAY_I16;
         case 'i': return RAY_I32;  case 'j': return RAY_I64;
         case 'e': return RAY_F32;  case 'f': return RAY_F64;
-        case 's': return RAY_SYM;
-        default:  return 0;       /* x g c p m d z n u v t + "*" identity: deferred */
+        case 's': return RAY_SYM;  case 'd': return RAY_DATE;
+        default:  return 0;       /* x g c p m z n u v t + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -605,6 +695,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 7 && !memcmp(nm, "boolean", 7)) r = RAY_BOOL;
         else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
+        else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
         ray_release(s);
         return r;
     }
@@ -616,7 +707,8 @@ static const char* q_tag_rayname(int8_t tag) {
     switch (tag) {
     case RAY_BOOL: return "BOOL"; case RAY_I16: return "I16";
     case RAY_I32:  return "I32";  case RAY_I64: return "I64";
-    case RAY_F64:  return "F64";  default:      return NULL;
+    case RAY_F64:  return "F64";  case RAY_DATE: return "DATE";
+    default:       return NULL;
     }
 }
 
@@ -683,6 +775,35 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
     return r;
 }
 
+/* "D"$ date-string scan (ref/tok.md date formats).  Supported subset:
+ * yyyymmdd (8 digits, the doc's [yy]yymmdd with an unambiguous 4-digit year)
+ * and yyyy.mm.dd / yyyy-mm-dd / yyyy/mm/dd (the doc's separator variants;
+ * "D"$"2000-12-12" is letter-pinned).  Two-digit years and MMM month names
+ * are deferred.  Returns 1 and fills y/m/d on a shape match; civil validity
+ * is the caller's q_date_valid check. */
+static int q_date_scan(const char* p, size_t len,
+                       int64_t* y, int64_t* m, int64_t* d) {
+    if (len == 8) {
+        for (int i = 0; i < 8; i++)
+            if (p[i] < '0' || p[i] > '9') return 0;
+        *y = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
+        *m = (p[4]-'0')*10 + (p[5]-'0');
+        *d = (p[6]-'0')*10 + (p[7]-'0');
+        return 1;
+    }
+    if (len == 10 && (p[4] == '.' || p[4] == '-' || p[4] == '/') && p[7] == p[4]) {
+        for (int i = 0; i < 10; i++) {
+            if (i == 4 || i == 7) continue;
+            if (p[i] < '0' || p[i] > '9') return 0;
+        }
+        *y = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
+        *m = (p[5]-'0')*10 + (p[6]-'0');
+        *d = (p[8]-'0')*10 + (p[9]-'0');
+        return 1;
+    }
+    return 0;
+}
+
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
@@ -745,8 +866,16 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         return (v > INT16_MAX || v < -INT16_MAX)
              ? ray_typed_null(-RAY_I16) : ray_i16((int16_t)v);
     }
+    case RAY_DATE: {
+        /* Unparseable / invalid civil date / out-of-domain -> 0Nd, never an
+         * error (tok.md pins "D"$"2147483648" -> 0Nd). */
+        int64_t y, mo, d;
+        if (!q_date_scan(p, len, &y, &mo, &d) || !q_date_valid(y, mo, d))
+            return ray_typed_null(-RAY_DATE);
+        return ray_date(q_days_from_civil(y, mo, d));
+    }
     default:
-        return ray_error("nyi", "$: temporal/byte/char Tok is deferred");
+        return ray_error("nyi", "$: time/timestamp/byte/char Tok is deferred");
     }
 }
 
@@ -1968,6 +2097,8 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_AT:   return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_at_wrap);
     case QK_DOT:  return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_dot_wrap);
     case QK_MIN2: return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_min2_wrap);
+    case QK_NEG:  return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_neg_wrap);
+    case QK_WITHIN: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_within_wrap);
     default:      return NULL;
     }
 }
