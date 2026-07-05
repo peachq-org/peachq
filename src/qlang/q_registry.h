@@ -149,6 +149,16 @@ int8_t q_cast_designator(ray_t* t, int* is_tok);
 ray_t* q_cast_to(int8_t tag, ray_t* x);
 ray_t* q_tok_to(int8_t tag, ray_t* x);
 
+/* ===== q calendar home (date) ==============================================
+ * kdb date == base RAY_DATE payload: i32 days since 2000.01.01, proleptic
+ * Gregorian (qdocs basics/datatypes.md).  q_days_from_civil is Hinnant's
+ * days_from_civil (public domain) rebased from the unix epoch by -10957;
+ * q_date_valid pins the kdb literal domain 0001.01.01..9999.12.31 with real
+ * (leap-aware) month lengths.  Shared by the literal scanner (q_parse) and
+ * "D"$ Tok (q_tok_to) — ONE conversion home, per the reuse mandate above. */
+int64_t q_days_from_civil(int64_t y, int64_t m, int64_t d);
+int     q_date_valid(int64_t y, int64_t m, int64_t d);
+
 /* q-name sanitization shared by .Q.id and openq construction paths that must
  * repair name clashes.  q_name_sanitize returns an interned symbol id for the
  * `.Q.id` atom rule.  q_name_dedup takes an already-sanitized/generated symbol
