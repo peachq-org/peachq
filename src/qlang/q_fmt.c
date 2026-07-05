@@ -333,6 +333,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
      * float): 1b, 42h, 42i, 42, 3.14e, 3.14 — plus the nulls/inf tokens. */
     switch (val->type) {
     case -RAY_BOOL: snprintf(buf, bufsz, "%db", val->u8 ? 1 : 0);          return;
+    case -RAY_U8:   snprintf(buf, bufsz, "0x%02x", val->u8);               return;
     case -RAY_I16:  q_int_tok((int64_t)val->i16, 2, 'h', buf, bufsz);      return;
     case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', buf, bufsz);      return;
     case -RAY_I64:  q_int_tok(val->i64,          8, 0,   buf, bufsz);      return;
@@ -361,6 +362,24 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         for (int64_t i = 0; i < n && pos + 1 < bufsz; i++)
             buf[pos++] = d[i] ? '1' : '0';
         if (pos + 1 < bufsz) buf[pos++] = 'b';
+        buf[pos] = '\0';
+        return;
+    }
+    /* Byte vector: `0x` prefix + concatenated two-digit lowercase hex, no
+     * separators, no trailing type char (ref/sv.md pins 0x0102010201); the
+     * length-1 vector takes the enlist comma (ref/vs.md pins ,0x01); an empty
+     * vector renders bare `0x` (the literal ref/read1.md pins via `0#0x`). */
+    if (val->type == RAY_U8) {
+        int64_t n = ray_len(val);
+        const uint8_t* d = (const uint8_t*)ray_data(val);
+        static const char hx[] = "0123456789abcdef";
+        size_t pos = 0;
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';
+        if (pos + 2 < bufsz) { buf[pos++] = '0'; buf[pos++] = 'x'; }
+        for (int64_t i = 0; i < n && pos + 2 < bufsz; i++) {
+            buf[pos++] = hx[d[i] >> 4];
+            buf[pos++] = hx[d[i] & 0xf];
+        }
         buf[pos] = '\0';
         return;
     }
