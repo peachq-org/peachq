@@ -127,7 +127,7 @@ help:
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
 	@printf "  %-28s %s\n" "make qdocs-ref-qcmd" "Convert ref docs q fences into test/q/ref/*.qcmd"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
-	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from q docs"
+	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
 	@printf "  %-28s %s\n" "make bench-alloc" "Run allocator micro-benchmark"
@@ -290,11 +290,16 @@ test-parse-diff: $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ)
 	      echo "PARSE-DIFF TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make test-parse-diff"; \
 	    fi; exit $$rc; }
 
-# openq: regenerate the checked-in q-docs failure ledger (qtest-results.txt).
+# openq: regenerate the checked-in test/q qcmd ledger (qtest-results.txt) —
+# ONE row per test/q/**/*.qcmd file (passing or failing) + a TOTAL line.
+# NO --skip-file and NO deferred filtering, EVER: this ledger is the complete,
+# unfiltered failure record. The coverage.csv status=deferred column (Phase 0b)
+# gates make test only — it must never remove a row here. *.qcmd.disabled files
+# are parked and never discovered. Docs-corpus floors live in `make qdocs`.
 # The user runs this on demand; `make qtest` never writes it (stays side-effect
 # free on tracked files).
 qtest-results: $(QDOC_TARGET)
-	timeout 900 ./$(QDOC_TARGET) --results qtest-results.txt --skip-file test/qdoctest.skip qdocs/docs || \
+	timeout 900 ./$(QDOC_TARGET) --qcmd-only --results qtest-results.txt test/q || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
 	      echo "QTEST-RESULTS TIMEOUT after 900s — known futex-deadlock flake (see ARCHITECTURE.md); rerun make qtest-results"; \
 	    fi; exit $$rc; }
