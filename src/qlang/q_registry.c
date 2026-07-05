@@ -39,7 +39,9 @@
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
 #include "lang/format.h"      /* ray_type_name — wrapper error messages */
 #include "mem/heap.h"         /* RAY_ATTR_HAS_NULLS — ? find miss remap */
+#include "core/numparse.h"    /* ray_parse_i64/f64 — Tok string parses */
 #include <assert.h>
+#include <stdint.h>   /* INT*_MAX / INT64_MIN — Tok out-of-domain bounds */
 #include <math.h>     /* floor/floorf — q monadic `_` */
 #include <stdio.h>
 #include <string.h>
@@ -560,61 +562,95 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
     return ray_error("type", "?: unsupported operand types");
 }
 
-/* q `t$x` — cast.  t is a sym designator (`long`float`int`short`boolean)
- * or a lower-case single-char string ("j" "f" "i" "h" "b"); maps to the
- * rayfall `as` type sym.  Returns NULL for unknown/deferred designators
- * (`real/"e" — no rayfall F32 cast arm; char/byte/guid/temporals). */
-static const char* q_cast_target(ray_t* t) {
-    char c = 0;
-    if (t && t->type == -RAY_STR && ray_str_len(t) == 1) {
-        c = ray_str_ptr(t)[0];
-    } else if (t && t->type == -RAY_SYM) {
+/* ===== q cast home (see q_registry.h for the reuse contract) ===============
+ * Designator resolution is separate from conversion so C callers (future
+ * bool-widening / promotion work) can invoke q_cast_to(tag, x) directly. */
+
+int8_t q_cast_designator(ray_t* t, int* is_tok) {
+    *is_tok = 0;
+    if (!t) return 0;
+    if (t->type == -RAY_I16) {          /* kdb type number == rayfall tag */
+        if (RAY_ATOM_IS_NULL(t)) return 0;
+        int16_t n = t->i16;
+        if (n <= 0) { *is_tok = 1; n = (int16_t)-n; }
+        switch (n) {
+        case RAY_BOOL: case RAY_I16: case RAY_I32: case RAY_I64:
+        case RAY_F32:  case RAY_F64: case RAY_SYM:
+            return (int8_t)n;
+        default: return 0;    /* byte/guid/char/temporals + 0h identity: deferred */
+        }
+    }
+    if (t->type == -RAY_STR && ray_str_len(t) == 1) {
+        char c = ray_str_ptr(t)[0];
+        if (c >= 'A' && c <= 'Z') { *is_tok = 1; c = (char)(c - 'A' + 'a'); }
+        switch (c) {
+        case 'b': return RAY_BOOL; case 'h': return RAY_I16;
+        case 'i': return RAY_I32;  case 'j': return RAY_I64;
+        case 'e': return RAY_F32;  case 'f': return RAY_F64;
+        case 's': return RAY_SYM;
+        default:  return 0;       /* x g c p m d z n u v t + "*" identity: deferred */
+        }
+    }
+    if (t->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(t->i64);
-        if (!s) return NULL;
+        if (!s) return 0;
         const char* nm = ray_str_ptr(s);
         size_t l = ray_str_len(s);
-        const char* r = NULL;
-        if      (l == 4 && !memcmp(nm, "long",    4)) r = "I64";
-        else if (l == 5 && !memcmp(nm, "float",   5)) r = "F64";
-        else if (l == 3 && !memcmp(nm, "int",     3)) r = "I32";
-        else if (l == 5 && !memcmp(nm, "short",   5)) r = "I16";
-        else if (l == 7 && !memcmp(nm, "boolean", 7)) r = "BOOL";
+        int8_t r = 0;
+        if      (l == 0)                              { *is_tok = 1; r = RAY_SYM; }
+        else if (l == 4 && !memcmp(nm, "long",    4)) r = RAY_I64;
+        else if (l == 5 && !memcmp(nm, "float",   5)) r = RAY_F64;
+        else if (l == 3 && !memcmp(nm, "int",     3)) r = RAY_I32;
+        else if (l == 5 && !memcmp(nm, "short",   5)) r = RAY_I16;
+        else if (l == 7 && !memcmp(nm, "boolean", 7)) r = RAY_BOOL;
+        else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
+        else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
         ray_release(s);
         return r;
     }
-    switch (c) {
-    case 'j': return "I64";  case 'f': return "F64";  case 'i': return "I32";
-    case 'h': return "I16";  case 'b': return "BOOL";
-    default:  return NULL;
+    return 0;
+}
+
+/* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
+static const char* q_tag_rayname(int8_t tag) {
+    switch (tag) {
+    case RAY_BOOL: return "BOOL"; case RAY_I16: return "I16";
+    case RAY_I32:  return "I32";  case RAY_I64: return "I64";
+    case RAY_F64:  return "F64";  default:      return NULL;
     }
 }
 
-/* kdb float->integer casts ROUND (half-to-even: `long$3.7 is 4, "j"$2.5 is
- * 2 — the KX ref pins `int$6.6 -> 7), where rayfall `as` truncates — so the
- * integer targets pre-round here (rint = IEEE nearest/ties-even, kdb's
- * mode); everything else delegates to ray_cast_fn.  Upper-case designators
- * are Tok string-parses (ref/tok.md) — deferred on the string model. */
-static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
-    if (t && t->type == -RAY_STR && ray_str_len(t) == 1 &&
-        ray_str_ptr(t)[0] >= 'A' && ray_str_ptr(t)[0] <= 'Z')
-        return ray_error("nyi", "$: string-parse casts (Tok) are deferred");
-    const char* tgt = q_cast_target(t);
-    if (!tgt)
-        return ray_error("nyi", "$: unsupported cast designator (deferred)");
-    int8_t it = 0;
-    if      (!strcmp(tgt, "I64")) it = RAY_I64;
-    else if (!strcmp(tgt, "I32")) it = RAY_I32;
-    else if (!strcmp(tgt, "I16")) it = RAY_I16;
-    if (it && x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
-        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-it);
+/* kdb float->integer casts ROUND (rint = IEEE nearest/ties-even: `long$3.7
+ * is 4, "j"$2.5 is 2, `int$6.6 is 7 — KX ref pins), where rayfall `as`
+ * truncates — integer targets pre-round here; everything else delegates to
+ * base ray_cast_fn.  RAY_LIST distributes per element and collapses. */
+ray_t* q_cast_to(int8_t tag, ray_t* x) {
+    if (x && x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t** e = (ray_t**)ray_data(x);
+        ray_t* out = ray_list_new(n);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* r = q_cast_to(tag, e[i]);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);   /* append retains */
+            ray_release(r);
+        }
+        ray_t* c = q_collapse_list(out);
+        ray_release(out);
+        return c;
+    }
+    int isint = (tag == RAY_I64 || tag == RAY_I32 || tag == RAY_I16);
+    if (isint && x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-tag);
         double r = rint(x->f64);              /* F32 atoms store f64 payload */
-        if (it == RAY_I64) return ray_i64((int64_t)r);
-        if (it == RAY_I32) return ray_i32((int32_t)r);
+        if (tag == RAY_I64) return ray_i64((int64_t)r);
+        if (tag == RAY_I32) return ray_i32((int32_t)r);
         return ray_i16((int16_t)r);
     }
-    if (it && x && (x->type == RAY_F64 || x->type == RAY_F32)) {
+    if (isint && x && (x->type == RAY_F64 || x->type == RAY_F32)) {
         int64_t n = ray_len(x);
-        ray_t* out = ray_vec_new(it, n);
+        ray_t* out = ray_vec_new(tag, n);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
         int is64 = (x->type == RAY_F64);
@@ -623,18 +659,145 @@ static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
                             : (double)((const float*)ray_data(x))[i];
             int isnull = isnan(v);
             int64_t iv = isnull ? 0 : (int64_t)rint(v);
-            if      (it == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
-            else if (it == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
-            else                    ((int16_t*)ray_data(out))[i] = (int16_t)iv;
+            if      (tag == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
+            else if (tag == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
+            else                     ((int16_t*)ray_data(out))[i] = (int16_t)iv;
             if (isnull) ray_vec_set_null(out, i, true);
         }
         return out;
     }
-    ray_t* ts = ray_sym(ray_sym_intern(tgt, strlen(tgt)));
+    if (tag == RAY_SYM) {                 /* `symbol$sym is identity; rest nyi */
+        if (x && (x->type == -RAY_SYM || x->type == RAY_SYM)) {
+            ray_retain(x);
+            return x;
+        }
+        return ray_error("nyi", "$: cast to symbol is deferred (use `$ / \"S\"$ on strings)");
+    }
+    const char* nm = q_tag_rayname(tag);
+    if (!nm)                              /* F32 cast: no base arm — deferred */
+        return ray_error("nyi", "$: unsupported cast designator (deferred)");
+    ray_t* ts = ray_sym(ray_sym_intern(nm, strlen(nm)));
     if (!ts || RAY_IS_ERR(ts)) return ts;
     ray_t* r = ray_cast_fn(ts, x);
     ray_release(ts);
     return r;
+}
+
+/* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
+ * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
+ * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
+ * distribute. */
+ray_t* q_tok_to(int8_t tag, ray_t* x) {
+    if (x && (x->type == RAY_LIST || x->type == RAY_STR)) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* xi;
+            if (x->type == RAY_LIST) {
+                xi = ((ray_t**)ray_data(x))[i];
+                ray_retain(xi);
+            } else {
+                size_t sl = 0;
+                const char* sp = ray_str_vec_get(x, i, &sl);
+                xi = ray_str(sp ? sp : "", sp ? sl : 0);
+            }
+            ray_t* r = q_tok_to(tag, xi);
+            ray_release(xi);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);
+            ray_release(r);
+        }
+        ray_t* c = q_collapse_list(out);
+        ray_release(out);
+        return c;
+    }
+    if (!x || x->type != -RAY_STR)
+        return ray_error("type", "$: Tok right operand must be a string");
+    const char* p = ray_str_ptr(x);
+    size_t len = p ? ray_str_len(x) : 0;
+    while (len && *p == ' ') { p++; len--; }            /* trim outer blanks */
+    while (len && p[len - 1] == ' ') len--;
+    switch (tag) {
+    case RAY_SYM:
+        return ray_sym(ray_sym_intern(len ? p : "", len));
+    case RAY_BOOL:
+        return ray_bool(len == 1 && strchr("1TtYy", p[0]) != NULL);
+    case RAY_F64: case RAY_F32: {
+        double v = 0;
+        size_t used = len ? ray_parse_f64(p, len, &v) : 0;
+        if (used != len || len == 0) return ray_typed_null((int8_t)-tag);
+        return tag == RAY_F64 ? ray_f64(v) : ray_f32((float)v);
+    }
+    case RAY_I64: case RAY_I32: case RAY_I16: {
+        int64_t v = 0;
+        size_t used = len ? ray_parse_i64(p, len, &v) : 0;
+        if (used != len || len == 0) return ray_typed_null((int8_t)-tag);
+        /* Out-of-domain -> typed null (tok.md).  The bounds are ±INT*_MAX,
+         * NOT INT*_MIN: the exact minimum IS the null sentinel (0N/0Ni/0Nh)
+         * and must never round-trip as an accepted value. */
+        if (tag == RAY_I64)
+            return (v == INT64_MIN)
+                 ? ray_typed_null(-RAY_I64) : ray_i64(v);
+        if (tag == RAY_I32)
+            return (v > INT32_MAX || v < -INT32_MAX)
+                 ? ray_typed_null(-RAY_I32) : ray_i32((int32_t)v);
+        return (v > INT16_MAX || v < -INT16_MAX)
+             ? ray_typed_null(-RAY_I16) : ray_i16((int16_t)v);
+    }
+    default:
+        return ray_error("nyi", "$: temporal/byte/char Tok is deferred");
+    }
+}
+
+/* q `t$x` — Cast/Tok dispatcher.  Multi-designator LHS ("fiij", `int`float,
+ * 5 6h, (`int;"i";6h)) zips elementwise over x (ref/cast.md pins
+ * (`int;"i";6h)$10 -> 10 10 10i: an ATOM rhs is broadcast).  Single
+ * designators resolve via q_cast_designator and dispatch to the shared
+ * q_cast_to / q_tok_to (the ONE conversion home — see q_registry.h). */
+static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
+    int multi = t && ((t->type == -RAY_STR && ray_str_len(t) > 1) ||
+                      t->type == RAY_SYM || t->type == RAY_I16 ||
+                      t->type == RAY_LIST);
+    if (multi) {
+        int64_t n = (t->type == -RAY_STR) ? (int64_t)ray_str_len(t) : ray_len(t);
+        int x_is_list = x && (ray_is_vec(x) || x->type == RAY_LIST);
+        if (x_is_list && ray_len(x) != n)
+            return ray_error("length", "$: designator/operand length mismatch");
+        ray_t* out = ray_list_new(n);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* ti;
+            if (t->type == -RAY_STR) ti = ray_str(ray_str_ptr(t) + i, 1);
+            else {
+                ray_t* idx = ray_i64(i);
+                ti = ray_at_fn(t, idx);         /* sym/short vec, list */
+                ray_release(idx);
+            }
+            if (!ti || RAY_IS_ERR(ti)) { ray_release(out); return ti; }
+            ray_t* xi;
+            if (x_is_list) {
+                ray_t* idx = ray_i64(i);
+                xi = ray_at_fn(x, idx);
+                ray_release(idx);
+            } else { xi = x; ray_retain(xi); }  /* atom rhs broadcasts */
+            if (!xi || RAY_IS_ERR(xi)) { ray_release(ti); ray_release(out); return xi; }
+            ray_t* r = q_cast_wrap(ti, xi);
+            ray_release(ti);
+            ray_release(xi);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);
+            ray_release(r);
+        }
+        ray_t* c = q_collapse_list(out);
+        ray_release(out);
+        return c;
+    }
+    int is_tok = 0;
+    int8_t tag = q_cast_designator(t, &is_tok);
+    if (!tag)
+        return ray_error("nyi", "$: unsupported cast designator (deferred)");
+    return is_tok ? q_tok_to(tag, x) : q_cast_to(tag, x);
 }
 
 /* q `f@x` — Apply At / Index At (ref/apply.md).  A callable f invokes with
