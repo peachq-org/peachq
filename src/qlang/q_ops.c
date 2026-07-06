@@ -145,6 +145,10 @@ static const q_op_t Q_OPS[] = {
     { "upper",   QLEX_KW_PREFIX, QK_ENV, "upper",    QK_NONE,  NULL,      NULL  },
     { "lower",   QLEX_KW_PREFIX, QK_ENV, "lower",    QK_NONE,  NULL,      NULL  },
     { "show",    QLEX_KW_PREFIX, QK_ENV, "show",     QK_NONE,  NULL,      NULL  },
+    /* table introspection — q-owned bindings (q_builtins_register), snapshotted
+     * here so the parser embeds them over the base env `meta`. */
+    { "meta",    QLEX_KW_PREFIX, QK_ENV, "meta",     QK_NONE,  NULL,      NULL  },
+    { "cols",    QLEX_KW_PREFIX, QK_ENV, "cols",     QK_NONE,  NULL,      NULL  },
     /* ---- additional monadic pass-through keywords (rayfall name == q name,
      * audited kdb-true element-wise / aggregate semantics). See
      * docs/recipes/add-q-keyword-verb.md. ---- */
