@@ -144,6 +144,12 @@ void   q_registry_sig_clear(void);
  * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_select_value(void);
 
+/* The `'[f;g;…]` compose builder the PARSER embeds at the head of a compose
+ * bracket form.  A regular (arg-evaluating) vary fn: ray_eval resolves the
+ * function operands, then it boxes them into a Q_DERIV_COMPOSE carrier.
+ * Borrowed; NULL before q_registry_init. */
+ray_t* q_registry_compose_value(void);
+
 /* The functional-qSQL executor values q_lower embeds at the head of a rank-4
  * `?[t;c;b;a]` (select/exec) or `![t;c;b;a]` (update/delete) application.  They
  * are regular (arg-evaluating) vary fns — ray_eval evaluates the four operands
