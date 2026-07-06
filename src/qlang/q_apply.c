@@ -346,10 +346,13 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     if (!head) return NULL;
 
     /* openq dict function-distribution shim: a builtin verb whose argument is
-     * a dictionary distributes over the values.  Reached only from eval's
-     * dict_retry (the 'type-error path), so a native dict verb never lands
-     * here. */
-    if ((head->type == RAY_UNARY || head->type == RAY_BINARY) && n >= 1) {
+     * a dictionary distributes over the values.  Reached from eval's dict_retry
+     * (the 'type-error path) with matching arity, but ALSO reachable via the
+     * call_fn1/call_fn2 hook tails for a wrong-arity builtin (e.g. `map[+;d]`
+     * applies the BINARY `+` monadically) — so require exact arity here, else
+     * q_dict_distribute would call the wrong kernel signature and crash. */
+    if ((head->type == RAY_UNARY && n == 1) ||
+        (head->type == RAY_BINARY && n == 2)) {
         for (int64_t i = 0; i < n; i++)
             if (args[i] && args[i]->type == RAY_DICT)
                 return q_dict_distribute(head, args, n);
