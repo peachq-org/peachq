@@ -3274,7 +3274,9 @@ static ray_t* q_funsql_select_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
      * (a is a dict), or the last row as a dictionary (a is `()`).  See
      * funsql.md "No grouping". */
     if (funsql_empty(b)) {
-        if (a && (a->type == -RAY_SYM || (a->type == RAY_LIST && funsql_is_fn(((ray_t**)ray_data(a))[0])))) {
+        if (a && (a->type == -RAY_SYM ||
+                  (a->type == RAY_LIST && ray_len(a) > 0 &&        /* guard `()` (empty list): no head to read */
+                   funsql_is_fn(((ray_t**)ray_data(a))[0])))) {
             ray_t* r = funsql_eval(a, ft);          /* exec col / parse-tree -> vector/atom */
             ray_release(ft);
             return r;
