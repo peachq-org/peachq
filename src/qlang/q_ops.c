@@ -75,6 +75,13 @@ static const q_op_t Q_OPS[] = {
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
     /* q `n cut x` — chunk (int atom) / positional cut (int vector). */
     { "cut",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CUT,   "cut",     NULL  },
+    /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
+     * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
+     * do/while by f rank; prior is unary each-prior; peach == each. */
+    { "over",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_OVER,  "over",    NULL  },
+    { "scan",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SCANKW,"scan-kw", NULL  },
+    { "prior", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_PRIORKW,"prior",  NULL  },
+    { "peach", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "peach",   NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QK_NEG, "neg",      QK_NONE,  NULL,      NULL  },
     { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
@@ -116,6 +123,9 @@ static const q_op_t Q_OPS[] = {
     { "rank",    QLEX_KW_PREFIX, QK_ENV, "rank",     QK_NONE,  NULL,      NULL  },
     { "raze",    QLEX_KW_PREFIX, QK_ENV, "raze",     QK_NONE,  NULL,      NULL  },
     { "sqrt",    QLEX_KW_PREFIX, QK_ENV, "sqrt",     QK_NONE,  NULL,      NULL  },
+    /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x. */
+    { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
+    { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
