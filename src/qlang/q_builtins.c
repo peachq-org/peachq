@@ -172,18 +172,216 @@ static int q_is_fn_value(ray_t* x) {
  * full q type map is cast/type.qcmd territory. */
 static ray_t* q_type_fn(ray_t* x) {
     if (x) {
+        /* Function-VALUE carriers first: they are RAY_LISTs under the hood, so
+         * the raw-tag path below would wrongly report them as 0h (general
+         * list). */
         switch (q_deriv_kind_of(x)) {
-        case Q_DERIV_LAMBDA: return ray_i16(100);
-        case Q_DERIV_PROJ:   return ray_i16(104);
-        case Q_DERIV_MONAD:  return ray_i16(102);
+        case Q_DERIV_LAMBDA:  return ray_i16(100);
+        case Q_DERIV_PROJ:    return ray_i16(104);
+        case Q_DERIV_MONAD:   return ray_i16(102);
+        case Q_DERIV_COMPOSE: return ray_i16(105);
         default: break;
         }
         if (x->type == RAY_LAMBDA) return ray_i16(100);
         if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY)
             return ray_i16(102);
+        /* q's `type` IS the internal tag: openq's type tags already ARE kdb's
+         * type numbers (include/rayforce.h — long 7, sym 11, list 0, table 98,
+         * dict 99) and atoms are stored NEGATIVE (`-7h` long atom vs `7h` long
+         * vector).  This replaces the rayfall SYMBOL the base `type` returned
+         * (` `i64 `/` `I64 `/` `LIST `).  NB a native -RAY_STR string reports
+         * -10h (char ATOM); kdb's char VECTOR is 10h — a documented string-model
+         * divergence (ARCHITECTURE.md), pinned in cast/type-deferred.qcmd. */
+        return ray_i16(x->type);
     }
     return g_base_type ? g_base_type(x)
                        : ray_error("type", "type: base verb missing");
+}
+
+/* ---- type-char map + table introspection (type-output feature) ----------- */
+
+/* Single home for the kdb type-number -> type-char map (ref/dotq.md `.Q.ty`,
+ * `meta`'s `t` column).  Indexed by the ABSOLUTE type tag; 0 for tags with no
+ * char (list 0, guid-gap 3, tables/dicts 98/99).  Lowercase = the element
+ * char; `.Q.ty` uppercases it for a uniform list of vectors. */
+static char q_type_char(int8_t tag) {
+    static const char m[20] = {
+        0,   'b', 'g', 0,   'x', 'h', 'i', 'j', 'e', 'f',
+        'c', 's', 'p', 'm', 'd', 'z', 'n', 'u', 'v', 't'
+    };
+    int t = tag < 0 ? -tag : tag;
+    return (t >= 0 && t < 20) ? m[t] : 0;
+}
+
+/* True iff x is a uniform, matrix-mappable list of simple vectors of ONE
+ * element type (kdb `.Q.ty` upper-case case, e.g. `3 2#3 4 5` or
+ * `("abc";"de")`).  *elt receives that element tag (RAY_STR for a list of
+ * char-vector strings). */
+static int q_uniform_list(ray_t* x, int8_t* elt) {
+    if (!x || x->type != RAY_LIST) return 0;
+    int64_t n = ray_len(x);
+    if (n == 0) return 0;
+    ray_t** e = (ray_t**)ray_data(x);
+    int8_t t0 = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ei = e[i];
+        int8_t ti;
+        if (ei && ei->type == -RAY_STR)      ti = (int8_t)RAY_STR;   /* char vec */
+        else if (ei && ray_is_vec(ei))       ti = (int8_t)ei->type;  /* simple vec */
+        else return 0;                                               /* not uniform */
+        if (i == 0) t0 = ti; else if (ti != t0) return 0;
+    }
+    if (elt) *elt = t0;
+    return 1;
+}
+
+/* type char of one value, as `.Q.ty`/`meta` see it.  Simple vector -> lower;
+ * native string (-RAY_STR) -> 'c' (INTROSPECTION shim: openq stores a char
+ * vector as one string atom); uniform list of vectors -> UPPER; else blank. */
+static char q_ty_char(ray_t* x) {
+    int8_t elt;
+    if (x && x->type == -RAY_STR) return 'c';                       /* char-vec shim */
+    if (x && ray_is_vec(x))       return q_type_char((int8_t)x->type);
+    if (q_uniform_list(x, &elt)) {
+        char lc = q_type_char(elt);
+        return (char)(lc ? (lc - 'a' + 'A') : ' ');
+    }
+    return ' ';
+}
+
+/* (.Q.ty x) — LOWER char for a simple vector / string, UPPER for a uniform
+ * list of vectors, blank (" ") otherwise (ref/dotq.md).  Returns a 1-char
+ * string (openq has no char atom; `.Q.ty each` over strings therefore yields a
+ * list of 1-char strings, not one packed char vector — the `"jc JC"` combined
+ * example is a deferred string-model cell). */
+static ray_t* q_dotq_ty_fn(ray_t* x) {
+    char c = q_ty_char(x);
+    return ray_str(&c, 1);
+}
+
+/* Column name ids of a table as a RAY_SYM vector.  A keyed table (RAY_DICT of
+ * key-table -> value-table) yields key cols ++ value cols. */
+static ray_t* q_table_colnames(ray_t* x) {
+    if (x->type == RAY_TABLE) {
+        int64_t nc = ray_table_ncols(x);
+        ray_t* out = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        for (int64_t c = 0; c < nc; c++) {
+            int64_t nm = ray_table_col_name(x, c);
+            out = ray_vec_append(out, &nm);
+            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        }
+        return out;
+    }
+    if (x->type == RAY_DICT) {
+        ray_t* kt = ray_dict_keys(x);      /* borrowed */
+        ray_t* vt = ray_dict_vals(x);      /* borrowed */
+        if (!kt || !vt || kt->type != RAY_TABLE || vt->type != RAY_TABLE)
+            return ray_error("type", "cols: expects a table");
+        int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
+        ray_t* out = ray_sym_vec_new(RAY_SYM_W64, knc + vnc > 0 ? knc + vnc : 1);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        for (int64_t c = 0; c < knc; c++) {
+            int64_t nm = ray_table_col_name(kt, c);
+            out = ray_vec_append(out, &nm);
+            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        }
+        for (int64_t c = 0; c < vnc; c++) {
+            int64_t nm = ray_table_col_name(vt, c);
+            out = ray_vec_append(out, &nm);
+            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        }
+        return out;
+    }
+    return ray_error("type", "cols: expects a table");
+}
+
+/* (cols x) — column names of a table as a symbol vector. */
+static ray_t* q_cols_fn(ray_t* x) {
+    if (!x) return ray_error("type", "cols: nil");
+    return q_table_colnames(x);
+}
+
+/* Flatten a plain-or-keyed table to a single plain RAY_TABLE (key cols first).
+ * Returns owned (retained for a plain table). */
+static ray_t* q_meta_flatten(ray_t* x) {
+    if (x->type == RAY_TABLE) { ray_retain(x); return x; }
+    if (x->type != RAY_DICT) return ray_error("type", "meta: expects a table");
+    ray_t* kt = ray_dict_keys(x);          /* borrowed */
+    ray_t* vt = ray_dict_vals(x);          /* borrowed */
+    if (!kt || !vt || kt->type != RAY_TABLE || vt->type != RAY_TABLE)
+        return ray_error("type", "meta: expects a table");
+    int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
+    ray_t* out = ray_table_new(knc + vnc > 0 ? knc + vnc : 1);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    for (int64_t c = 0; c < knc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(kt, c), ray_table_get_col_idx(kt, c));
+    for (int64_t c = 0; c < vnc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(vt, c), ray_table_get_col_idx(vt, c));
+    return out;
+}
+
+/* (meta x) — table metadata keyed by column name.  Builds the keyed table
+ * (c) -> (t; f; a): `c` column names, `t` per-column type char (via the
+ * single-home map), `f`/`a` blank (foreign-keys/attributes are out of scope).
+ * The result is a RAY_DICT from a 1-col key table to a 3-col value table —
+ * "a keyed table is just a dictionary from one table to another" (q_fmt
+ * renders it `k| v`). */
+static ray_t* q_meta_fn(ray_t* x) {
+    if (!x) return ray_error("type", "meta: nil");
+    ray_t* flat = q_meta_flatten(x);
+    if (!flat || RAY_IS_ERR(flat)) return flat;
+    int64_t nc = ray_table_ncols(flat);
+    int64_t cap = nc > 0 ? nc : 1;
+    ray_t* cvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* c: names          */
+    ray_t* fvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* f: blank per col  */
+    ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* a: blank per col  */
+    char stackt[64];
+    char* tbuf = (cap <= (int64_t)sizeof stackt) ? stackt : (char*)malloc((size_t)cap);
+    if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
+        !avec || RAY_IS_ERR(avec) || !tbuf) {
+        if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
+        if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
+        if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
+        if (tbuf && tbuf != stackt) free(tbuf);
+        ray_release(flat);
+        return ray_error("wsfull", "meta: out of memory");
+    }
+    int64_t blank = ray_sym_intern_runtime("", 0);
+    int ok = 1;
+    for (int64_t c = 0; c < nc && ok; c++) {
+        int64_t nm = ray_table_col_name(flat, c);
+        ray_t* col = ray_table_get_col_idx(flat, c);   /* borrowed */
+        tbuf[c] = q_ty_char(col);
+        cvec = ray_vec_append(cvec, &nm);
+        fvec = ray_vec_append(fvec, &blank);
+        avec = ray_vec_append(avec, &blank);
+        if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
+            !avec || RAY_IS_ERR(avec)) ok = 0;
+    }
+    ray_release(flat);
+    ray_t* tstr = ok ? ray_str(tbuf, (size_t)nc) : NULL;
+    if (tbuf != stackt) free(tbuf);
+    if (!ok || !tstr || RAY_IS_ERR(tstr)) {
+        if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
+        if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
+        if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
+        if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
+        return ray_error("wsfull", "meta: build failed");
+    }
+    /* key table: c ; value table: t f a  -> keyed table dict */
+    ray_t* kt = ray_table_new(1);
+    kt = ray_table_add_col(kt, ray_sym_intern("c", 1), cvec);
+    ray_release(cvec);
+    ray_t* vt = ray_table_new(3);
+    vt = ray_table_add_col(vt, ray_sym_intern("t", 1), tstr); ray_release(tstr);
+    if (!RAY_IS_ERR(vt)) { vt = ray_table_add_col(vt, ray_sym_intern("f", 1), fvec); }
+    ray_release(fvec);
+    if (!RAY_IS_ERR(vt)) { vt = ray_table_add_col(vt, ray_sym_intern("a", 1), avec); }
+    ray_release(avec);
+    if (RAY_IS_ERR(kt)) { if (!RAY_IS_ERR(vt)) ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);   /* consumes kt, vt */
 }
 
 /* q `count` of any function value is 1 (kdb: functions are atoms) — the
@@ -229,6 +427,11 @@ void q_builtins_register(void) {
     bind_unary("upper",  q_upper_fn);
     bind_unary("lower",  q_lower_fn);
     bind_unary("show",   q_show_fn);
+    /* Table introspection — q-owned, snapshotted by the registry's QK_ENV rows
+     * (q_ops.c) so the parser embeds these over the base env `meta`/(absent)
+     * `cols`.  Bound BEFORE q_registry_init, like `string`/`show`. */
+    bind_unary("meta",   q_meta_fn);
+    bind_unary("cols",   q_cols_fn);
     bind_value(".Q.an",  ray_str("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", 63));
     /* `::` — the generic-null VALUE.  Elided call args parse as unquoted `::`
      * name-refs (`f[]` is (`f;::), cases.tsv:43); binding the value makes them
@@ -260,5 +463,6 @@ void q_builtins_register(void) {
      * runtime.  Fail fast: a missing audited builtin is a bug. */
     assert(q_registry_init() == RAY_OK);
     bind_unary(".Q.id", q_id_fn);
+    bind_unary(".Q.ty", q_dotq_ty_fn);
     bind_value(".Q.res", q_name_reserved_words());
 }
