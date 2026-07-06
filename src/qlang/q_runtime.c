@@ -23,6 +23,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
 
 void q_runtime_destroy(ray_runtime_t* rt) {
     ray_eval_set_apply_hook(NULL);   /* detach the q dispatcher first */
+    ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     q_registry_destroy();      /* free verb snapshots before the env goes away */
     q_deriv_reset_markers();   /* marker sym-ids die with this runtime's table */
     ray_runtime_destroy(rt);
