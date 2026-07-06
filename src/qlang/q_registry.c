@@ -1011,6 +1011,52 @@ static ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
     return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
 }
 
+/* A keyed table is a RAY_DICT whose keys AND values are both tables. */
+static int q_is_keyed_table(ray_t* y) {
+    if (!y || y->type != RAY_DICT) return 0;
+    ray_t* k = ray_dict_keys(y);
+    ray_t* v = ray_dict_vals(y);
+    return k && v && k->type == RAY_TABLE && v->type == RAY_TABLE;
+}
+
+/* Flatten a plain-or-keyed table to a single plain table (key cols then value
+ * cols).  Returns owned. */
+static ray_t* q_table_flatten(ray_t* y) {
+    if (y->type == RAY_TABLE) { ray_retain(y); return y; }
+    ray_t* kt = ray_dict_keys(y);          /* borrowed */
+    ray_t* vt = ray_dict_vals(y);          /* borrowed */
+    int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
+    ray_t* out = ray_table_new(knc + vnc > 0 ? knc + vnc : 1);
+    for (int64_t c = 0; c < knc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(kt, c), ray_table_get_col_idx(kt, c));
+    for (int64_t c = 0; c < vnc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(vt, c), ray_table_get_col_idx(vt, c));
+    return out;
+}
+
+/* q enkey/unkey `N!table`: 0 -> plain table (unkey), N>0 -> key the first N
+ * columns into a keyed table (RAY_DICT keycols-table -> valcols-table).
+ * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
+static ray_t* q_enkey(ray_t* y, int64_t nkey) {
+    ray_t* flat = q_table_flatten(y);
+    if (!flat || RAY_IS_ERR(flat)) return flat;
+    int64_t nc = ray_table_ncols(flat);
+    if (nkey <= 0) return flat;                 /* unkey */
+    if (nkey >= nc) { ray_release(flat); return ray_error("length", "!: key count exceeds columns"); }
+    ray_t* kt = ray_table_new(nkey);
+    ray_t* vt = ray_table_new(nc - nkey);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+        int64_t nm = ray_table_col_name(flat, c);
+        ray_t* col = ray_table_get_col_idx(flat, c);
+        if (c < nkey) kt = ray_table_add_col(kt, nm, col);
+        else          vt = ray_table_add_col(vt, nm, col);
+    }
+    ray_release(flat);
+    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);
+}
+
 /* q `x!y` — dict make.  An atom key enlists to a 1-vector first (kdb `a!1`
  * is a dict too; rayfall dict wants vector keys); vals pass through as-is
  * (rayfall dict broadcasts atom vals and boxes the rest itself).  kdb
@@ -1034,6 +1080,23 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
                 return q_wire_deserialize(y);
             default:
                 return ray_error("nyi", "internal function %lld! not yet implemented", (long long)id);
+            }
+        }
+        /* q enkey/unkey: `N!table` / `N!keyedtable` (N>=0). */
+        if (y->type == RAY_TABLE || q_is_keyed_table(y))
+            return q_enkey(y, id);
+        /* by-reference `N!`name`: unkey/enkey the named global IN PLACE, then
+         * return the name (kdb amend-by-reference).  A miss / non-table stays
+         * dict-make below. */
+        if (y->type == -RAY_SYM) {
+            ray_t* g = ray_env_get(y->i64);
+            if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) {
+                ray_t* nt = q_enkey(g, id);
+                if (!nt || RAY_IS_ERR(nt)) return nt;
+                ray_env_bind(y->i64, nt);      /* retains */
+                ray_release(nt);
+                ray_retain(y);
+                return y;
             }
         }
     }
@@ -2527,6 +2590,36 @@ static ray_t* q_table_build(ray_t** args, int64_t n) {
     return q_ctx_build(args, n, 1);
 }
 
+/* q keyed-table literal `([k1:…;k2:…] v1:…; v2:…)` head.  args[0] is an int
+ * atom = the KEY column count; args[1..] are the column-def trees (key columns
+ * first, then value columns).  All columns are built as ONE table (so value
+ * columns can reference key columns via the shared build scope — q_ctx_build's
+ * cross-column binding), then split into a key-columns table and a
+ * value-columns table joined into a RAY_DICT: "a keyed table is just a
+ * dictionary from one table to another" (q_fmt renders it `k| v`). */
+static ray_t* q_keyed_table_build(ray_t** args, int64_t n) {
+    if (n < 1 || !args[0] || args[0]->type != -RAY_I64)
+        return ray_error("parse", "keyed-table literal: missing key count");
+    int64_t nk = args[0]->i64;
+    ray_t* tbl = q_ctx_build(args + 1, n - 1, 1);
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
+    if (tbl->type != RAY_TABLE) { ray_release(tbl); return ray_error("type", "keyed-table literal: not a table"); }
+    int64_t nc = ray_table_ncols(tbl);
+    if (nk < 0 || nk > nc) { ray_release(tbl); return ray_error("length", "keyed-table literal: bad key count"); }
+    ray_t* kt = ray_table_new(nk > 0 ? nk : 1);
+    ray_t* vt = ray_table_new(nc - nk > 0 ? nc - nk : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+        int64_t nm  = ray_table_col_name(tbl, c);
+        ray_t*  col = ray_table_get_col_idx(tbl, c);   /* borrowed; add retains */
+        if (c < nk) kt = ray_table_add_col(kt, nm, col);
+        else        vt = ray_table_add_col(vt, nm, col);
+    }
+    ray_release(tbl);
+    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);   /* consumes kt, vt */
+}
+
 static void q_select_rename_temps(ray_t* tbl, ray_t* tempnames, ray_t* realnames) {
     if (!tbl || tbl->type != RAY_TABLE ||
         !tempnames || tempnames->type != RAY_SYM ||
@@ -3319,6 +3412,7 @@ static ray_t* q_funsql_bang(ray_t** args, int64_t n) {
 
 static ray_t* g_list_value   = NULL;
 static ray_t* g_table_value  = NULL;
+static ray_t* g_keyed_table_value = NULL;
 static ray_t* g_select_value = NULL;
 static ray_t* g_funsql_select_value = NULL;
 static ray_t* g_funsql_bang_value   = NULL;
@@ -3423,6 +3517,10 @@ ray_t* q_registry_select_value(void) {
 
 ray_t* q_registry_list_value(void) {
     return g_list_value;   /* borrowed; NULL before init */
+}
+
+ray_t* q_registry_keyed_table_value(void) {
+    return g_keyed_table_value;  /* borrowed; NULL before init */
 }
 
 ray_t* q_registry_table_value(void) {
@@ -3650,6 +3748,12 @@ ray_err_t q_registry_init(void) {
         g_table_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_keyed_table_value = ray_fn_vary("keyed-table",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_keyed_table_build);
+    if (!g_keyed_table_value || RAY_IS_ERR(g_keyed_table_value)) {
+        g_keyed_table_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     g_select_value = ray_fn_vary("q.select",
                        RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_select_exec);
     if (!g_select_value || RAY_IS_ERR(g_select_value)) {
@@ -3747,6 +3851,7 @@ void q_registry_destroy(void) {
     if (g_mkderiv2_value) { ray_release(g_mkderiv2_value); g_mkderiv2_value = NULL; }
     if (g_list_value)   { ray_release(g_list_value);   g_list_value   = NULL; }
     if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
+    if (g_keyed_table_value) { ray_release(g_keyed_table_value); g_keyed_table_value = NULL; }
     if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
     if (g_funsql_select_value) { ray_release(g_funsql_select_value); g_funsql_select_value = NULL; }
     if (g_funsql_bang_value)   { ray_release(g_funsql_bang_value);   g_funsql_bang_value   = NULL; }
