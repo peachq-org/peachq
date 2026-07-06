@@ -227,6 +227,18 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         goto out;
     }
     case RAY_LIST: {
+        /* kdb has no boxed homogeneous-atom lists — they ARE typed vectors
+         * (a kdb (2i;3i) is 2 3i).  Engine ops (dict vals, map results)
+         * box such runs; collapse for the wire so the bytes match kdb's
+         * canonical form.  q_collapse_list returns the same list (retained)
+         * when it isn't a collapsible atom run. */
+        ray_t* cx = q_collapse_list(x);
+        if (cx && !RAY_IS_ERR(cx) && cx->type != RAY_LIST) {
+            rc = q_wire_write_obj(b, cx);
+            ray_release(cx);
+            goto out;
+        }
+        if (cx && !RAY_IS_ERR(cx)) ray_release(cx);
         if (w_u8(b, 0) || w_u8(b, 0) || w_count(b, x->len)) goto out;
         ray_t** e = (ray_t**)ray_data(x);
         rc = 0;
