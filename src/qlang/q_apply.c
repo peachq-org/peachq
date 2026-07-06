@@ -193,6 +193,34 @@ static ray_t* q_lambda_apply(ray_t* carrier, ray_t** args, int64_t n) {
     return q_proj_new(carrier, slots, r, mask, holes);
 }
 
+/* Apply any function VALUE to args: bare builtins direct, everything else
+ * (carriers, lambdas, VARY, projections) through the noun dispatcher. */
+static ray_t* q_apply_fn(ray_t* fn, ray_t** args, int64_t n) {
+    if (fn && fn->type == RAY_UNARY && n == 1)
+        return ((ray_unary_fn)(uintptr_t)fn->i64)(args[0]);
+    if (fn && fn->type == RAY_BINARY && n == 2)
+        return ((ray_binary_fn)(uintptr_t)fn->i64)(args[0], args[1]);
+    return q_apply_noun(fn, args, n);
+}
+
+/* Apply a composition carrier `'[f;g;…]`: the innermost (rightmost) function
+ * consumes all supplied args, then each function to its left is applied
+ * monadically to the running result.  `'[f;g][a;b]` == `f g[a;b]`. */
+static ray_t* q_compose_apply(ray_t* carrier, ray_t** args, int64_t n) {
+    int64_t nf = q_compose_count(carrier);
+    if (nf < 1) return ray_error("rank", "compose: empty composition");
+    ray_t* acc = q_apply_fn(q_compose_fn_at(carrier, nf - 1), args, n);
+    if (!acc || RAY_IS_ERR(acc)) return acc;
+    for (int64_t i = nf - 2; i >= 0; i--) {
+        ray_t* a1[1] = { acc };
+        ray_t* next = q_apply_fn(q_compose_fn_at(carrier, i), a1, 1);
+        ray_release(acc);
+        if (!next || RAY_IS_ERR(next)) return next;
+        acc = next;
+    }
+    return acc;
+}
+
 ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     if (!head) return NULL;
 
@@ -212,6 +240,11 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
         return ((ray_vary_fn)(uintptr_t)head->i64)(args, n);
 
     if (head->type == -RAY_STR) return NULL;        /* deferred: string model */
+
+    /* Composition `'[f;g;…]` — the rightmost function consumes all args, each
+     * function to its left is then applied monadically to the running result. */
+    if (head->type == RAY_LIST && q_deriv_kind_of(head) == Q_DERIV_COMPOSE)
+        return q_compose_apply(head, args, n);
 
     /* 104h carriers are RAY_LISTs — claim them BEFORE the gather arm. */
     if (head->type == RAY_LIST && q_deriv_kind_of(head) != Q_DERIV_NONE)

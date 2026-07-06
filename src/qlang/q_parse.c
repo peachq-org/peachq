@@ -808,22 +808,52 @@ static P parse_base(Parser *p) {
          * head. */
         if (at(p, T_LBRACK)) {
             adv(p);                                   /* consume '[' */
-            if (!at(p, T_RBRACK))
-                q_die("nyi: keyed table literal ([k:..] ..) is deferred");
-            expect(p, T_RBRACK, "expected ']' in table literal");
-            ray_t *tv = q_registry_table_value();
-            if (!tv) q_die("table literal: registry not initialized");
-            ray_t *cols = parse_E(p);
+            if (at(p, T_RBRACK)) {
+                /* UNKEYED table literal `([] col:…; …)` — empty key section. */
+                expect(p, T_RBRACK, "expected ']' in table literal");
+                ray_t *tv = q_registry_table_value();
+                if (!tv) q_die("table literal: registry not initialized");
+                ray_t *cols = parse_E(p);
+                expect(p, T_RPAREN, "expected ')'");
+                int64_t cn = ray_len(cols);
+                ray_t **cs = (ray_t **)ray_data(cols);
+                ray_t *w = ray_list_new(cn + 1);
+                w = ray_list_append(w, tv);
+                for (int64_t i = 0; i < cn; i++) {
+                    if (cs[i]) { w = ray_list_append(w, cs[i]); }
+                    else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+                }
+                ray_release(cols);
+                return (P){ R_NOUN, w };
+            }
+            /* KEYED table literal `([k1:…;k2:…] v1:…; …)` — a non-empty key
+             * section.  Parse the key column defs, then the value column defs,
+             * and emit (keyed-table-value; key-count; keycol…; valcol…).  The
+             * builder splits them into a key-cols table and value-cols table
+             * joined as a RAY_DICT (q_fmt renders `k| v`). */
+            ray_t *ktv = q_registry_keyed_table_value();
+            if (!ktv) q_die("keyed table literal: registry not initialized");
+            ray_t *kcols = parse_E(p);
+            expect(p, T_RBRACK, "expected ']' in keyed table literal");
+            ray_t *vcols = parse_E(p);
             expect(p, T_RPAREN, "expected ')'");
-            int64_t cn = ray_len(cols);
-            ray_t **cs = (ray_t **)ray_data(cols);
-            ray_t *w = ray_list_new(cn + 1);
-            w = ray_list_append(w, tv);
-            for (int64_t i = 0; i < cn; i++) {
-                if (cs[i]) { w = ray_list_append(w, cs[i]); }
+            int64_t kn = ray_len(kcols), vn = ray_len(vcols);
+            ray_t **ks = (ray_t **)ray_data(kcols);
+            ray_t **vs = (ray_t **)ray_data(vcols);
+            ray_t *w = ray_list_new(kn + vn + 2);
+            w = ray_list_append(w, ktv);
+            ray_t *knv = ray_i64(kn);
+            w = ray_list_append(w, knv); ray_release(knv);
+            for (int64_t i = 0; i < kn; i++) {
+                if (ks[i]) { w = ray_list_append(w, ks[i]); }
                 else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
             }
-            ray_release(cols);
+            for (int64_t i = 0; i < vn; i++) {
+                if (vs[i]) { w = ray_list_append(w, vs[i]); }
+                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+            }
+            ray_release(kcols);
+            ray_release(vcols);
             return (P){ R_NOUN, w };
         }
         ray_t *e = parse_E(p);
@@ -933,6 +963,35 @@ static P parse_base(Parser *p) {
         }
         ray_release(e);
         return (P){ R_NOUN, w };
+    }
+    case T_ADVERB: {
+        /* Compose `'[f;g;…]` — the `'` adverb in BRACKET form composes
+         * functions (rightmost consumes the args, each leftward applied
+         * monadically).  Only this bracketed form is a primary term; a bare
+         * postfix adverb (`f'`) is consumed by parse_term's postfix loop and a
+         * leading signal `'expr` by parse_e, so a `'` here NOT followed by `[`
+         * is not a term.  Emits (compose-value; f; g; …); parse_term's postfix
+         * loop then applies any trailing `[args]`. */
+        if (tk->len == 1 && p->src[tk->start] == '\'' &&
+            p->t.t[p->pos + 1].kind == T_LBRACK) {
+            adv(p);                          /* consume ' */
+            adv(p);                          /* consume [ */
+            ray_t *args = parse_E(p);
+            expect(p, T_RBRACK, "expected ']' in compose '[…]'");
+            ray_t *cv = q_registry_compose_value();
+            if (!cv) q_die("compose: registry not initialized");
+            int64_t an = ray_len(args);
+            ray_t **as = (ray_t **)ray_data(args);
+            ray_t *w = ray_list_new(an + 1);
+            w = ray_list_append(w, cv);
+            for (int64_t i = 0; i < an; i++) {
+                if (as[i]) { w = ray_list_append(w, as[i]); }
+                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+            }
+            ray_release(args);
+            return (P){ R_NOUN, w };
+        }
+        return EMPTY;
     }
     default:
         return EMPTY;
@@ -1545,6 +1604,37 @@ ray_t *q_parse(const char *src) {
      * bootstraps via q_runtime_create, which initializes the registry. */
     if (!q_registry_ready())
         return ray_error("init", "q_parse: op registry not initialized");
+    /* System-command line: a statement starting with '\' (kdb's column-0
+     * convention).  `\t`/`\ts expr` time the expression via the base `timeit`
+     * special form (kdb returns ms; timing rows are never byte-pinned).  Every
+     * other `\X ...` (namespace/precision/console/dir — session state we do not
+     * model) is accepted as a SILENT no-op so the line parses and runs rather
+     * than raising 'parse.  `\` / `\\` alone are also no-ops here (the REPL
+     * intercepts `\\` for exit before ever calling q_parse). */
+    {
+        const char* s = src;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == '\\') {
+            const char* c = s + 1;
+            while ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z')) c++;
+            size_t clen = (size_t)(c - (s + 1));
+            const char* rest = c;
+            while (*rest == ' ' || *rest == '\t') rest++;
+            int is_t  = (clen == 1 && s[1] == 't');
+            int is_ts = (clen == 2 && s[1] == 't' && s[2] == 's');
+            if ((is_t || is_ts) && *rest) {
+                size_t rl = strlen(rest);
+                char* buf = (char*)malloc(rl + 8);
+                if (!buf) return ray_error("wsfull", "q_parse: out of memory");
+                memcpy(buf, "timeit ", 7);
+                memcpy(buf + 7, rest, rl + 1);
+                ray_t* prog = q_parse(buf);      /* buf starts "timeit ": no recursion */
+                free(buf);
+                return prog;
+            }
+            return RAY_NULL_OBJ;                  /* no-op: parses + runs silently */
+        }
+    }
     init_class();
     g_toks.t = NULL;
     g_toks.n = 0;
@@ -2007,7 +2097,8 @@ static int ql_is_ctx_literal(ray_t *node) {
     if (!node || node->type != RAY_LIST || ray_len(node) < 1) return 0;
     ray_t *h = ((ray_t **)ray_data(node))[0];
     if (!h) return 0;
-    return h == q_registry_list_value() || h == q_registry_table_value();}
+    return h == q_registry_list_value() || h == q_registry_table_value() ||
+           h == q_registry_keyed_table_value();}
 
 /* True iff node is the `{`-marker lambda form (its body statements bind q
  * locals with plain `:`). */
