@@ -102,7 +102,13 @@ typedef enum {
     QK_MMIN,            /* N mmin x  — sliding min (nulls skipped)             */
     QK_MCOUNT,          /* N mcount x— sliding count of non-null               */
     QK_MDEV,            /* N mdev x  — sliding population std deviation         */
-    QK_EMA              /* a ema x   — exponential moving average               */
+    QK_EMA,             /* a ema x   — exponential moving average               */
+    /* ---- list verbs (feat/q-list-verbs) ---- */
+    QK_FILL,            /* q `x^y`   — fill nulls in y with x (atom/vector)     */
+    QK_ROTATE,          /* q `n rotate x` — cyclic shift left (neg = right)     */
+    QK_SUBLIST,         /* q `n sublist x` — first/last n, or i j slice         */
+    QK_NEXT,            /* q `next x` — shift left, null-fill vacated tail       */
+    QK_PREV             /* q `prev x` — shift right, null-fill vacated head      */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
