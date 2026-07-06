@@ -19,6 +19,7 @@
 #include "qlang/q_registry.h"   /* q_collapse_list */
 #include "qlang/q_deriv.h"      /* q_deriv_kind_of (carrier arm, Task 5) */
 #include "lang/eval.h"          /* ray_at_fn */
+#include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
 #include <string.h>
 
 /* one indexing step: v[idx].  ray_at null-fills out-of-range; a
@@ -131,12 +132,76 @@ static ray_t* q_deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
     case RAY_VARY:
         return ((ray_vary_fn)(uintptr_t)base->i64)(call, cn);
     default:
+        /* a carrier base (projected lambda, projection-of-projection):
+         * route the assembled args back through the noun dispatcher */
+        if (base->type == RAY_LIST && q_deriv_kind_of(base) != Q_DERIV_NONE)
+            return q_apply_noun(base, call, cn);
         return NULL;
     }
 }
 
+/* Apply a 100h lambda carrier with q semantics.  Base call_lambda enforces
+ * exact arity (class 'arity); q wants 'rank plus kdb's projection-on-elision:
+ *   rank 0:  `f[]` arrives as ONE `::` arg (cases.tsv:43) — ignore it and
+ *            call; kdb ignores even a real value there (q4m3: const42[98.6]).
+ *   rank 1:  one arg always applies (kdb `f[]` == `f[::]` APPLIES a unary).
+ *   rank>=2: `::` args are elision holes; underapplication pads trailing
+ *            holes; any hole -> a .q.proj carrier over THIS carrier (display
+ *            and re-application both read the base); full -> call_lambda. */
+/* call_lambda + interception of the reserved "q.ret" class: a `:x` statement
+ * unwinds the body via the error path with its payload stashed thread-local
+ * (q_registry.c); the innermost lambda application turns it back into a
+ * normal result here. */
+static ray_t* q_call_lambda(ray_t* lam, ray_t** args, int64_t n) {
+    /* Drop any stale payload first (a q.ret swallowed by a user trap), so
+     * the class check below can never be spoofed into returning old data. */
+    ray_t* stale = q_lambda_ret_take();
+    if (stale) ray_release(stale);
+    ray_t* r = call_lambda(lam, args, n);
+    if (r && RAY_IS_ERR(r) && r->slen == 5 && memcmp(r->sdata, "q.ret", 5) == 0) {
+        /* genuine `:x` always stashed a payload (a bare `:` stashes `::`);
+         * a user-forged '"q.ret" signal has none and propagates as an error */
+        ray_t* v = q_lambda_ret_take();               /* owned, or NULL */
+        if (v) { ray_release(r); return v; }
+    }
+    return r;
+}
+
+static ray_t* q_lambda_apply(ray_t* carrier, ray_t** args, int64_t n) {
+    int     r   = q_deriv_valence(carrier);
+    ray_t*  lam = q_deriv_base(carrier);              /* borrowed */
+    if (!lam) return ray_error("type", "lambda carrier: missing base");
+    if (r == 0) {
+        if (n <= 1) return q_call_lambda(lam, NULL, 0);
+        return ray_error("rank", "lambda: rank 0 applied to %lld args", (long long)n);
+    }
+    if (n < 1) return ray_error("rank", "lambda: no arguments");
+    if (n > r)
+        return ray_error("rank", "lambda: rank %d applied to %lld args",
+                         r, (long long)n);
+    if (r == 1) return q_call_lambda(lam, args, 1);
+    if (r > 64) return ray_error("limit", "lambda: rank too large");
+    uint64_t mask  = 0;
+    ray_t*   slots[64];
+    int      holes = 0;
+    for (int i = 0; i < r; i++) {
+        ray_t* a = (i < (int)n) ? args[i] : NULL;
+        if (!a || RAY_IS_NULL(a)) { mask |= 1ull << i; slots[i] = NULL; holes++; }
+        else slots[i] = a;
+    }
+    if (holes == 0) return q_call_lambda(lam, args, n);
+    return q_proj_new(carrier, slots, r, mask, holes);
+}
+
 ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
-    if (!head || n < 1) return NULL;
+    if (!head) return NULL;
+
+    /* 100h lambda carriers — q rank/projection semantics.  Claimed before
+     * the n guard: a rank-0 call shape must not fall through. */
+    if (head->type == RAY_LIST && q_deriv_kind_of(head) == Q_DERIV_LAMBDA)
+        return q_lambda_apply(head, args, n);
+
+    if (n < 1) return NULL;
 
     if (head->type == -RAY_STR) return NULL;        /* deferred: string model */
 
