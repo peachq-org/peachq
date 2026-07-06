@@ -46,7 +46,7 @@ static const q_op_t Q_OPS[] = {
      * floor IS k `_:`).  The q spelling is the `floor` keyword row below. */
     { "_",     QLEX_GLYPH,     QK_FLOOR, "floor",    QK_DROP,  "drop",    NULL  },
     { "|",     QLEX_GLYPH,     QK_ENV,  "reverse",   QK_NONE,  NULL,      NULL  },
-    { "&",     QLEX_GLYPH,     QK_ENV,  "where",     QK_MIN2,  "and",     NULL  },
+    { "&",     QLEX_GLYPH,     QK_WHERE, "where",    QK_MIN2,  "and",     NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
     /* ---- type-dispatch glyphs (2c-2) ---- */
@@ -84,11 +84,11 @@ static const q_op_t Q_OPS[] = {
     { "peach", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "peach",   NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QK_NEG, "neg",      QK_NONE,  NULL,      NULL  },
-    { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
+    { "til",     QLEX_KW_PREFIX, QK_TIL, "til",      QK_NONE,  NULL,      NULL  },
     { "count",   QLEX_KW_PREFIX, QK_ENV, "count",    QK_NONE,  NULL,      NULL  },
     { "first",   QLEX_KW_PREFIX, QK_ENV, "first",    QK_NONE,  NULL,      NULL  },
     { "last",    QLEX_KW_PREFIX, QK_ENV, "last",     QK_NONE,  NULL,      NULL  },
-    { "where",   QLEX_KW_PREFIX, QK_ENV, "where",    QK_NONE,  NULL,      NULL  },
+    { "where",   QLEX_KW_PREFIX, QK_WHERE, "where",  QK_NONE,  NULL,      NULL  },
     { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
