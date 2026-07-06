@@ -7,6 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
 #include "qlang/q_apply.h"    /* q_apply_noun — the noun-head dispatcher */
+#include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_init */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
@@ -114,6 +115,57 @@ static ray_t* q_id_fn(ray_t* x) {
     return ray_error("type", ".Q.id: expects a symbol, table, or dictionary");
 }
 
+/* ---- function-value introspection (stage 2): type / count / value ------- */
+
+static ray_unary_fn g_base_type  = NULL;
+static ray_unary_fn g_base_count = NULL;
+
+static int q_is_fn_value(ray_t* x) {
+    if (!x) return 0;
+    if (q_deriv_kind_of(x) != Q_DERIV_NONE) return 1;
+    return x->type == RAY_LAMBDA || x->type == RAY_UNARY ||
+           x->type == RAY_BINARY || x->type == RAY_VARY;
+}
+
+/* q `type` on FUNCTION values only — 100h lambda, 104h projection, 102h
+ * operator (ref/datatypes.md).  Everything else stays on the base verb; the
+ * full q type map is cast/type.qcmd territory. */
+static ray_t* q_type_fn(ray_t* x) {
+    if (x) {
+        switch (q_deriv_kind_of(x)) {
+        case Q_DERIV_LAMBDA: return ray_i16(100);
+        case Q_DERIV_PROJ:   return ray_i16(104);
+        case Q_DERIV_MONAD:  return ray_i16(102);
+        default: break;
+        }
+        if (x->type == RAY_LAMBDA) return ray_i16(100);
+        if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY)
+            return ray_i16(102);
+    }
+    return g_base_type ? g_base_type(x)
+                       : ray_error("type", "type: base verb missing");
+}
+
+/* q `count` of any function value is 1 (kdb: functions are atoms) — the
+ * carrier is a RAY_LIST, so the base count would leak its slot count. */
+static ray_t* q_count_fn(ray_t* x) {
+    if (q_is_fn_value(x)) return ray_i64(1);
+    return g_base_count ? g_base_count(x)
+                        : ray_error("type", "count: base verb missing");
+}
+
+/* Capture a base unary's fn pointer AND attrs — a wrapper must be bound with
+ * the base flags (count is RAY_FN_AGGR | RAY_FN_LAZY_AWARE; dropping them
+ * would de-aggregate count in the planner and force lazy materialization —
+ * codex stage-2 finding). */
+static void capture_base(const char* name, ray_unary_fn* out, uint8_t* attrs) {
+    ray_t* v = ray_env_get(ray_sym_intern(name, strlen(name)));
+    if (v && v->type == RAY_UNARY) {
+        *out = (ray_unary_fn)(uintptr_t)v->i64;
+        if (attrs) *attrs = v->attrs;
+    }
+}
+
 static void bind_unary(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
     ray_env_bind(ray_sym_intern(name, strlen(name)), obj);
@@ -145,6 +197,22 @@ void q_builtins_register(void) {
      * markers are never evaluated). */
     ray_retain(RAY_NULL_OBJ);
     bind_value("::", RAY_NULL_OBJ);
+    /* Function-value introspection wrappers.  Bound BEFORE q_registry_init so
+     * the registry's QK_ENV rows (`#` monadic = count) snapshot the WRAPPED
+     * values — one home for the carrier special-cases. */
+    uint8_t type_attrs = RAY_FN_NONE, count_attrs = RAY_FN_NONE;
+    capture_base("type",  &g_base_type,  &type_attrs);
+    capture_base("count", &g_base_count, &count_attrs);
+    {
+        ray_t* tv = ray_fn_unary("type", type_attrs, q_type_fn);
+        ray_env_bind(ray_sym_intern("type", 4), tv);
+        ray_release(tv);
+        ray_t* cv = ray_fn_unary("count", count_attrs, q_count_fn);
+        ray_env_bind(ray_sym_intern("count", 5), cv);
+        ray_release(cv);
+    }
+    /* NB `value` is a QK_VALUE manifest row — its lambda/string arms live in
+     * the registry wrapper (q_value_wrap), the single home the parser embeds. */
     /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
      * The registry is the authoritative, immutable verb source; it snapshots
      * builtin values and must be torn down via q_runtime_destroy before the
