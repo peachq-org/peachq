@@ -127,6 +127,7 @@ help:
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
 	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
+	@printf "  %-28s %s\n" "make kwire-conformance" "Cross-check kdb wire bytes vs javakdb (opt-in; needs javac)"
 	@printf "  %-28s %s\n" "make qdash" "Regenerate the peachq conformance dashboard (tools/qdash)"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
@@ -275,6 +276,16 @@ qtest: $(LIB_OBJ) $(TEST_OBJ)
 qdocs: $(QDOC_TARGET)
 	@tools/qtest-ledger.sh
 
+# openq: OPT-IN offline conformance — cross-check the kdb wire bytes
+# (-8!/-9!, src/qlang/q_wire.c) against vendored javakdb (Apache-2.0, the
+# cleared independent reference).  Requires a JDK (javac); skips with a
+# notice if absent.  Deliberately NOT part of `make test`/`make qtest` —
+# the C gate stays zero-dependency.  See tools/kdb-conformance/README.md.
+kwire-conformance: CFLAGS = $(DEBUG_CFLAGS)
+kwire-conformance: LDFLAGS = $(DEBUG_LDFLAGS)
+kwire-conformance: $(Q_TARGET)
+	@tools/kdb-conformance/run.sh
+
 # openq: NON-GATING differential parser-test ledger.  Links the TSV runner
 # (test/test_q_parse_tsv.c) into the test binary alongside the normal suites,
 # then runs ONLY the qlang/parse/* suites.  EXPECTED TO BE RED — it is the
@@ -363,7 +374,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdash qdoctest manifest coverage clean
+.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdash qdoctest kwire-conformance manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
