@@ -59,7 +59,7 @@ typedef struct {
 } entry_t;
 
 /* Upper bound: every manifest row can contribute at most two entries. */
-static entry_t g_entries[2 * 64];
+static entry_t g_entries[2 * 96];   /* 2 slots per manifest row; grown past 64 rows at the display+adverbs merge (2026-07-06) */
 static int     g_count    = 0;
 static bool    g_inited   = false;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
@@ -1203,23 +1203,383 @@ static ray_t* q_each_wrap(ray_t* f, ray_t* x) {
     return c;
 }
 
-/* q `(f\)x` — rayfall scan, then collapse (kdb: `(+\)1 2 3` is 1 3 6, a
- * simple vector).  Vary so a future seeded form passes through unchanged.
- * Not a manifest row (no q spelling of its own): an internal value handed
- * out to q_lower via q_registry_scan_value(). */
-static ray_t* q_scan_wrap(ray_t** args, int64_t n) {
-    ray_t* r = ray_scan_fn(args, n);
-    if (!r || RAY_IS_ERR(r)) return r;
-    ray_t* c = q_collapse_list(r);
-    ray_release(r);
+/* ===== q iterators: each-both ' , each-prior ': , over / , scan \ ==========
+ * (wave-2 adverb completion — docs/superpowers/plans/2026-07-06-q-adverbs.md).
+ * These are internal (spelling-less) HOF VALUES that q_lower embeds at adverb
+ * heads, plus the runtime cores the over/scan/prior/peach/deltas/differ
+ * keyword wrappers delegate to.  Every function operand is applied through
+ * call_fn1/call_fn2, which fall through to q_apply_noun for 100h lambda and
+ * 104h projection carriers — so lambdas, native ops and projections all work.
+ *
+ * Rank of a q value: 1 monadic, 2 dyadic, -1 ambiguous (native vary). */
+static int q_fn_rank(ray_t* f) {
+    if (!f) return -1;
+    switch (f->type) {
+    case RAY_UNARY:  return 1;
+    case RAY_BINARY: return 2;
+    case RAY_VARY:   return -1;
+    case RAY_LAMBDA: return (int)ray_len(LAMBDA_PARAMS(f));
+    default: break;
+    }
+    q_deriv_kind k = q_deriv_kind_of(f);
+    if (k == Q_DERIV_LAMBDA) return q_deriv_valence(f);
+    if (k == Q_DERIV_MONAD)  return 1;
+    if (k == Q_DERIV_PROJ) {
+        uint64_t m = q_deriv_hole_mask(f);
+        int c = 0; while (m) { c += (int)(m & 1u); m >>= 1; }
+        return c;              /* effective rank = open holes */
+    }
+    return -1;
+}
+
+/* True iff x is a callable q value (native fn or carrier) — distinguishes the
+ * `while` test-function argument of `/` `\` from a numeric do-count. */
+static int q_is_fn_value(ray_t* x) {
+    if (!x) return 0;
+    if (x->type == RAY_UNARY || x->type == RAY_BINARY ||
+        x->type == RAY_VARY  || x->type == RAY_LAMBDA) return 1;
+    return q_deriv_kind_of(x) != Q_DERIV_NONE;
+}
+
+/* Whole-value equivalence (converge stop test) — atom_eq handles atoms,
+ * vectors and structural lists. */
+static int q_values_match(ray_t* a, ray_t* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    return atom_eq(a, b);
+}
+
+/* v[i] as an owned atom/element (borrowed v). */
+static ray_t* q_elem_at(ray_t* v, int64_t i) {
+    ray_t* ia = ray_i64(i);
+    ray_t* e  = ray_at_fn(v, ia);   /* owned */
+    ray_release(ia);
+    return e;
+}
+
+/* Apply f to k args (borrowed).  1/2 route via call_fn1/2 (carrier-aware);
+ * k>=3 via the noun dispatcher (lambda/proj carriers) or a native vary. */
+static ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k) {
+    if (k == 1) return call_fn1(f, a[0]);
+    if (k == 2) return call_fn2(f, a[0], a[1]);
+    if (f && f->type == RAY_VARY) return ((ray_vary_fn)(uintptr_t)f->i64)(a, k);
+    ray_t* r = q_apply_noun(f, a, k);
+    if (r) return r;
+    return ray_error("rank", "each-both: cannot apply to %lld args", (long long)k);
+}
+
+/* ---- each-both  x f'y ------------------------------------------------------ */
+static ray_t* q_eachboth_apply(ray_t* f, ray_t** ops, int64_t k);
+
+static int q_op_is_dict(ray_t* v) { return v && v->type == RAY_DICT; }
+
+/* dict each-both (binary): keys come from the dict side; a non-dict operand
+ * pairs with the dict's VALUES (kdb: d+'10 20 conforms values, keys kept).
+ * Mixed operands previously dispatched ray_dict_vals(non-dict)=NULL straight
+ * into a crash (codex round-2 P1). */
+static ray_t* q_eachboth_dict(ray_t* f, ray_t* x, ray_t* y) {
+    ray_t* kd = q_op_is_dict(x) ? x : y;     /* key donor */
+    ray_t* xk = ray_dict_keys(kd);           /* borrowed */
+    if (!xk) return ray_error("type", "each-both: malformed dictionary");
+    ray_t* ops[2] = { q_op_is_dict(x) ? ray_dict_vals(x) : x,
+                      q_op_is_dict(y) ? ray_dict_vals(y) : y };
+    ray_t* rv = q_eachboth_apply(f, ops, 2);
+    if (!rv || RAY_IS_ERR(rv)) return rv;
+    ray_retain(xk);
+    return ray_dict_new(xk, rv);             /* consumes keys + vals */
+}
+static int q_op_is_atom(ray_t* v) { return v && ray_is_atom(v) && !q_op_is_dict(v); }
+
+static ray_t* q_eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
+    int any_dict = 0, all_atom = 1;
+    for (int64_t j = 0; j < k; j++) {
+        if (q_op_is_dict(ops[j])) any_dict = 1;
+        if (!q_op_is_atom(ops[j])) all_atom = 0;
+    }
+    if (any_dict && k == 2) return q_eachboth_dict(f, ops[0], ops[1]);
+    if (all_atom) return q_call_n(f, ops, k);      /* all atoms -> one result */
+
+    int64_t L = -1;
+    for (int64_t j = 0; j < k; j++) {
+        if (!q_op_is_atom(ops[j])) {
+            int64_t lj = ray_len(ops[j]);
+            if (L < 0) L = lj;
+            else if (L != lj) return ray_error("length", "each-both: length mismatch");
+        }
+    }
+    if (L < 0) L = 1;
+    ray_t* out = ray_list_new(L > 0 ? L : 1);
+    for (int64_t i = 0; i < L; i++) {
+        ray_t* a[16]; uint32_t owned = 0;
+        int64_t kk = k < 16 ? k : 16;
+        for (int64_t j = 0; j < kk; j++) {
+            if (!q_op_is_atom(ops[j])) { a[j] = q_elem_at(ops[j], i); owned |= (1u << j); }
+            else                       { a[j] = ops[j]; }   /* atom broadcast */
+        }
+        ray_t* r = q_call_n(f, a, kk);
+        for (int64_t j = 0; j < kk; j++) if (owned & (1u << j)) ray_release(a[j]);
+        if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : ray_error("type", NULL); }
+        out = ray_list_append(out, r);
+        ray_release(r);
+    }
+    ray_t* c = q_collapse_list(out);
+    ray_release(out);
     return c;
 }
 
-static ray_t* g_scan_value = NULL;
-
-ray_t* q_registry_scan_value(void) {
-    return g_scan_value;   /* borrowed; NULL before init */
+/* internal each-both value: args[0]=f, args[1..] operands. */
+static ray_t* q_eachboth_wrap(ray_t** args, int64_t n) {
+    if (n < 2) return ray_error("rank", "each-both: needs a function and operand");
+    return q_eachboth_apply(args[0], args + 1, n - 1);
 }
+
+/* ---- each-prior  (f':)x  /  s f':x ---------------------------------------- */
+/* Seed for the UNARY form: operator identity if known to q, else `first 0#x`
+ * (typed null of the argument's element type) — ref/maps.md 259-279. */
+static ray_t* q_prior_seed(ray_t* f, ray_t* x) {
+    q_provenance_t pv;
+    if (q_registry_provenance(f, &pv) && pv.spelling && pv.spelling[0] &&
+        pv.spelling[1] == '\0') {
+        char g = pv.spelling[0];
+        if (g == '+' || g == '-') return ray_i64(0);       /* I(+) = I(-) = 0 */
+        if (g == '*' || g == '%') return ray_i64(1);       /* I(*) = I(%) = 1 */
+        if (g == ',')             return ray_list_new(0);  /* I(,) = ()       */
+    }
+    if (ray_is_vec(x))    return ray_typed_null((int8_t)(-x->type));
+    if (x && ray_is_atom(x) && x->type != RAY_LIST)
+        return ray_typed_null(x->type);
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
+
+/* result[0]=f(x0,seed); result[i]=f(xi,x[i-1]).  Borrows f/seed/x. */
+static ray_t* q_prior_over_vec(ray_t* f, ray_t* seed, ray_t* x) {
+    if (!x || (!ray_is_vec(x) && x->type != RAY_LIST)) {
+        if (x && ray_is_atom(x)) return call_fn2(f, x, seed);
+        return ray_error("type", "each-prior: expected a list");
+    }
+    int64_t L = ray_len(x);
+    ray_t* out = ray_list_new(L > 0 ? L : 1);
+    ray_t* prev = seed; int prev_owned = 0;
+    for (int64_t i = 0; i < L; i++) {
+        ray_t* cur = q_elem_at(x, i);            /* owned */
+        ray_t* r   = call_fn2(f, cur, prev);
+        if (prev_owned) ray_release(prev);
+        if (!r || RAY_IS_ERR(r)) { ray_release(cur); ray_release(out); return r ? r : ray_error("type", NULL); }
+        out = ray_list_append(out, r);
+        ray_release(r);
+        prev = cur; prev_owned = 1;               /* current becomes next prior */
+    }
+    if (prev_owned) ray_release(prev);
+    ray_t* c = q_collapse_list(out);
+    ray_release(out);
+    return c;
+}
+
+/* internal each-prior value: n==2 (f':)x unary; n==3 s f':x seeded. */
+static ray_t* q_prior_wrap(ray_t** args, int64_t n) {
+    if (n < 2 || n > 3) return ray_error("rank", "each-prior: bad arity");
+    ray_t* f = args[0];
+    ray_t* x = args[n - 1];
+    ray_t* seed; int seed_owned = 0;
+    if (n == 3) seed = args[1];
+    else { seed = q_prior_seed(f, x); seed_owned = 1; }
+    ray_t* r;
+    if (x && x->type == RAY_DICT) {
+        ray_t* k = ray_dict_keys(x);
+        ray_t* rv = q_prior_over_vec(f, seed, ray_dict_vals(x));
+        if (!rv || RAY_IS_ERR(rv)) r = rv;
+        else { ray_retain(k); r = ray_dict_new(k, rv); }
+    } else {
+        r = q_prior_over_vec(f, seed, x);
+    }
+    if (seed_owned) ray_release(seed);
+    return r;
+}
+
+/* deltas x == (-':)x ; differ x == not (~':)x  (ref/maps.md prior section). */
+static ray_t* q_deltas_wrap(ray_t* x) {
+    ray_t* sub = q_registry_lookup_name("-", 1, Q_DYADIC);   /* borrowed */
+    if (!sub) return ray_error("type", "deltas: no subtract");
+    ray_t* a[2] = { sub, x };
+    return q_prior_wrap(a, 2);
+}
+static ray_t* q_differ_wrap(ray_t* x) {
+    ray_t* mt = q_registry_lookup_name("~", 1, Q_DYADIC);    /* borrowed */
+    if (!mt) return ray_error("type", "differ: no match");
+    ray_t* a[2] = { mt, x };
+    ray_t* eq = q_prior_wrap(a, 2);                          /* (~':)x */
+    if (!eq || RAY_IS_ERR(eq)) return eq;
+    ray_t* notv = ray_env_get(ray_sym_intern_runtime("not", 3));  /* borrowed */
+    if (!notv) return eq;
+    ray_t* r = call_fn1(notv, eq);
+    ray_release(eq);
+    return r;
+}
+
+/* ---- over / scan  (converge, do, while, and reduce) ----------------------- */
+static int q_truthy(ray_t* v) {
+    if (!v) return 0;
+    if (v->type == -RAY_BOOL) return v->b8 != 0;
+    if (ray_is_atom(v) && is_numeric(v)) return as_f64(v) != 0.0;
+    return 0;
+}
+
+/* Converge: apply f until the result matches the previous OR the initial x.
+ * collect=1 keeps every step (scan), else returns the last (over). */
+static ray_t* q_converge(ray_t* f, ray_t* x, int collect) {
+    ray_t* first = x; ray_retain(first);
+    ray_t* cur   = x; ray_retain(cur);
+    ray_t* acc   = collect ? ray_list_new(0) : NULL;
+    if (collect) acc = ray_list_append(acc, cur);
+    int64_t guard = 0;
+    for (;;) {
+        ray_t* nxt = call_fn1(f, cur);
+        if (!nxt || RAY_IS_ERR(nxt)) {
+            ray_release(first); ray_release(cur); if (acc) ray_release(acc);
+            return nxt ? nxt : ray_error("type", NULL);
+        }
+        if (q_values_match(nxt, cur) || q_values_match(nxt, first)) { ray_release(nxt); break; }
+        if (collect) acc = ray_list_append(acc, nxt);
+        ray_release(cur);
+        cur = nxt;
+        if (++guard > 100000000) {
+            ray_release(first); ray_release(cur); if (acc) ray_release(acc);
+            return ray_error("limit", "converge: no fixed point");
+        }
+    }
+    ray_release(first);
+    if (collect) { ray_release(cur); ray_t* c = q_collapse_list(acc); ray_release(acc); return c; }
+    return cur;
+}
+
+/* Do: apply f exactly cnt times to x (n f/x).  collect keeps each step. */
+static ray_t* q_ntimes(ray_t* f, int64_t cnt, ray_t* x, int collect) {
+    if (cnt < 0) cnt = 0;
+    ray_t* cur = x; ray_retain(cur);
+    ray_t* acc = NULL;
+    if (collect) { acc = ray_list_new(cnt + 1); acc = ray_list_append(acc, cur); }
+    for (int64_t i = 0; i < cnt; i++) {
+        ray_t* nxt = call_fn1(f, cur);
+        ray_release(cur);
+        if (!nxt || RAY_IS_ERR(nxt)) { if (acc) ray_release(acc); return nxt ? nxt : ray_error("type", NULL); }
+        cur = nxt;
+        if (collect) acc = ray_list_append(acc, cur);
+    }
+    if (collect) { ray_release(cur); ray_t* c = q_collapse_list(acc); ray_release(acc); return c; }
+    return cur;
+}
+
+/* While: apply f while test(cur) holds (test f/x).  collect keeps each step. */
+static ray_t* q_while(ray_t* f, ray_t* test, ray_t* x, int collect) {
+    ray_t* cur = x; ray_retain(cur);
+    ray_t* acc = NULL;
+    if (collect) { acc = ray_list_new(0); acc = ray_list_append(acc, cur); }
+    int64_t guard = 0;
+    for (;;) {
+        ray_t* t = call_fn1(test, cur);
+        if (!t || RAY_IS_ERR(t)) { ray_release(cur); if (acc) ray_release(acc); return t ? t : ray_error("type", NULL); }
+        int go = q_truthy(t);
+        ray_release(t);
+        if (!go) break;
+        ray_t* nxt = call_fn1(f, cur);
+        ray_release(cur);
+        if (!nxt || RAY_IS_ERR(nxt)) { if (acc) ray_release(acc); return nxt ? nxt : ray_error("type", NULL); }
+        cur = nxt;
+        if (collect) acc = ray_list_append(acc, cur);
+        if (++guard > 100000000) { ray_release(cur); if (acc) ray_release(acc); return ray_error("limit", "while: no termination"); }
+    }
+    if (collect) { ray_release(cur); ray_t* c = q_collapse_list(acc); ray_release(acc); return c; }
+    return cur;
+}
+
+/* Seeded scan  x f\y  (kept minimal — ray_scan_fn has no seed slot). */
+static ray_t* q_seeded_scan(ray_t* f, ray_t* seed, ray_t* x) {
+    if (!x || (!ray_is_vec(x) && x->type != RAY_LIST)) return ray_error("type", "scan: expected a list");
+    int64_t L = ray_len(x);
+    ray_t* out = ray_list_new(L > 0 ? L : 1);
+    ray_t* acc = seed; ray_retain(acc);
+    for (int64_t i = 0; i < L; i++) {
+        ray_t* cur = q_elem_at(x, i);
+        ray_t* nxt = call_fn2(f, acc, cur);
+        ray_release(acc); ray_release(cur);
+        if (!nxt || RAY_IS_ERR(nxt)) { ray_release(out); return nxt ? nxt : ray_error("type", NULL); }
+        out = ray_list_append(out, nxt);
+        acc = nxt; ray_retain(acc);
+    }
+    ray_release(acc);
+    ray_t* c = q_collapse_list(out); ray_release(out); return c;
+}
+
+/* `/` over — reduce / converge / do / while by operand shape and f rank. */
+static ray_t* q_over_wrap(ray_t** args, int64_t n) {
+    ray_t* f = args[0];
+    int rank = q_fn_rank(f);
+    if (n == 2) {
+        ray_t* x = args[1];
+        if (rank == 1) return q_converge(f, x, 0);
+        ray_t* fa[2] = { f, x };
+        return ray_fold_fn(fa, 2);                       /* reduce */
+    }
+    if (n == 3) {
+        ray_t* a = args[1], *x = args[2];
+        if (q_is_fn_value(a))  return q_while(f, a, x, 0);
+        if (rank == 1)         return q_ntimes(f, as_i64(a), x, 0);
+        ray_t* fa[3] = { f, a, x };
+        return ray_fold_fn(fa, 3);                       /* seeded reduce */
+    }
+    return ray_error("rank", "over: bad arity");
+}
+
+/* `\` scan — like over but every step is retained. */
+static ray_t* q_scan_wrap(ray_t** args, int64_t n) {
+    ray_t* f = args[0];
+    int rank = q_fn_rank(f);
+    if (n == 2) {
+        ray_t* x = args[1];
+        if (rank == 1) return q_converge(f, x, 1);
+        ray_t* fa[2] = { f, x };
+        ray_t* r = ray_scan_fn(fa, 2);
+        if (!r || RAY_IS_ERR(r)) return r;
+        ray_t* c = q_collapse_list(r); ray_release(r); return c;
+    }
+    if (n == 3) {
+        ray_t* a = args[1], *x = args[2];
+        if (q_is_fn_value(a))  return q_while(f, a, x, 1);
+        if (rank == 1)         return q_ntimes(f, as_i64(a), x, 1);
+        return q_seeded_scan(f, a, x);
+    }
+    return ray_error("rank", "scan: bad arity");
+}
+
+/* over/scan/prior keyword dyadic wrappers `f over x` / `f scan x` /
+ * `f prior x` — delegate to the n==2 core (peach reuses q_each_wrap). */
+static ray_t* q_over_kw(ray_t* f, ray_t* x)  { ray_t* a[2] = { f, x }; return q_over_wrap(a, 2); }
+static ray_t* q_scan_kw(ray_t* f, ray_t* x)  { ray_t* a[2] = { f, x }; return q_scan_wrap(a, 2); }
+static ray_t* q_prior_kw(ray_t* f, ray_t* x) { ray_t* a[2] = { f, x }; return q_prior_wrap(a, 2); }
+
+/* Build a BINARY derived-verb carrier at EVAL time: `hof` with `f` bound in
+ * slot 0 and two data operands open.  Used to lower `(f/:)` / `(f\:)` when the
+ * operand f is an expression (a lambda) that must be EVALUATED to a value
+ * first — a lower-time q_proj would capture the raw `(q.fn …)` tree.  `x f/: y`
+ * then == map-right(f;x;y), which lets a stacked outer adverb (`f/:\:`) drive
+ * it through map-left. */
+static ray_t* q_mkderiv2(ray_t* hof, ray_t* f) {
+    ray_t* args[3] = { f, NULL, NULL };
+    return q_proj_new(hof, args, 3, 0x6u, 2);
+}
+
+static ray_t* g_scan_value     = NULL;
+static ray_t* g_over_value     = NULL;
+static ray_t* g_eachboth_value = NULL;
+static ray_t* g_prior_value    = NULL;
+static ray_t* g_mkderiv2_value = NULL;
+
+ray_t* q_registry_scan_value(void)     { return g_scan_value;     }  /* borrowed */
+ray_t* q_registry_over_value(void)     { return g_over_value;     }  /* borrowed */
+ray_t* q_registry_eachboth_value(void) { return g_eachboth_value; }  /* borrowed */
+ray_t* q_registry_prior_value(void)    { return g_prior_value;    }  /* borrowed */
+ray_t* q_registry_mkderiv2_value(void) { return g_mkderiv2_value; }  /* borrowed */
 
 /* ---- shared right-to-left CONTEXT builder (list + table def) --------------
  *
@@ -2371,6 +2731,11 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_MIN2: return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_min2_wrap);
     case QK_NEG:  return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_neg_wrap);
     case QK_WITHIN: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_within_wrap);
+    case QK_OVER:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_over_kw);
+    case QK_SCANKW: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_scan_kw);
+    case QK_PRIORKW:return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prior_kw);
+    case QK_DELTAS: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_deltas_wrap);
+    case QK_DIFFER: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_differ_wrap);
     default:      return NULL;
     }
 }
@@ -2458,6 +2823,26 @@ ray_err_t q_registry_init(void) {
     g_scan_value = ray_fn_vary("scan", RAY_FN_NONE | RAY_FN_Q_LOWER, q_scan_wrap);
     if (!g_scan_value || RAY_IS_ERR(g_scan_value)) {
         g_scan_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_over_value = ray_fn_vary("over", RAY_FN_NONE | RAY_FN_Q_LOWER, q_over_wrap);
+    if (!g_over_value || RAY_IS_ERR(g_over_value)) {
+        g_over_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_eachboth_value = ray_fn_vary("each-both", RAY_FN_NONE | RAY_FN_Q_LOWER, q_eachboth_wrap);
+    if (!g_eachboth_value || RAY_IS_ERR(g_eachboth_value)) {
+        g_eachboth_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_prior_value = ray_fn_vary("each-prior", RAY_FN_NONE | RAY_FN_Q_LOWER, q_prior_wrap);
+    if (!g_prior_value || RAY_IS_ERR(g_prior_value)) {
+        g_prior_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_mkderiv2_value = ray_fn_binary("q.mkderiv2", RAY_FN_NONE | RAY_FN_Q_LOWER, q_mkderiv2);
+    if (!g_mkderiv2_value || RAY_IS_ERR(g_mkderiv2_value)) {
+        g_mkderiv2_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
     /* Both ctx constructor heads are SPECIAL_FORM: q_ctx_build must receive the
@@ -2565,6 +2950,10 @@ void q_registry_destroy(void) {
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
     if (g_scan_value)  { ray_release(g_scan_value);  g_scan_value  = NULL; }
+    if (g_over_value)     { ray_release(g_over_value);     g_over_value     = NULL; }
+    if (g_eachboth_value) { ray_release(g_eachboth_value); g_eachboth_value = NULL; }
+    if (g_prior_value)    { ray_release(g_prior_value);    g_prior_value    = NULL; }
+    if (g_mkderiv2_value) { ray_release(g_mkderiv2_value); g_mkderiv2_value = NULL; }
     if (g_list_value)   { ray_release(g_list_value);   g_list_value   = NULL; }
     if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
     if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }

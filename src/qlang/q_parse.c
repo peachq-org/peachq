@@ -1674,6 +1674,66 @@ static void ql_rewrite(ray_t **slot, ray_t *hof, ray_t *fexpr) {
     *slot = repl;
 }
 
+/* Is `x` the elided-argument hole `::` (what q_null() emits): an unquoted
+ * name-ref sym spelling "::"? */
+static int ql_is_hole(ray_t *x) {
+    if (!x || x->type != -RAY_SYM || (x->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t *s = ray_sym_str(x->i64);
+    if (!s) return 0;
+    int r = (ray_str_len(s) == 2 && ray_str_ptr(s)[0] == ':' && ray_str_ptr(s)[1] == ':');
+    ray_release(s);
+    return r;
+}
+
+/* Value/native projection: an application `(Fval; a0; a1; …)` whose head is a
+ * plain callable fn-VALUE (unary/binary/vary, NOT a special form) and which
+ * carries at least one `::` elision hole becomes a `.q.proj` carrier over Fval,
+ * shielded from eval by `quote` (returns its arg unevaluated).  The parser
+ * lowers `1+`, `2*`, `+[1;]`, `(3+)`, `(20>)` to `(op;arg;::)`; without this
+ * they would eval `op(arg, ::)` and error.  Zero holes = a full application,
+ * left untouched.  Reuses the existing q_proj_new + q_apply_noun machinery, so
+ * the carrier applies (and stacks under adverbs) exactly like `(+/)`. */
+static void ql_project(ray_t **slot) {
+    ray_t *node = *slot;
+    int64_t n = ray_len(node);
+    if (n < 2) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h) return;
+    if (!(h->type == RAY_UNARY || h->type == RAY_BINARY || h->type == RAY_VARY)) return;
+    if (h->attrs & RAY_FN_SPECIAL_FORM) return;   /* list/table/if/quote/select/… */
+    /* Apply-At / Apply `@` and `.` take REAL `::` arguments (whole-value
+     * amend `@[v;::;f]`, `.[m;();f]`) — a null there is data, not an elision
+     * hole (codex round-2 P1).  Under-application of @/. still projects via
+     * the runtime path; only this lower-time rewrite is exempted. */
+    {
+        q_provenance_t pv;
+        if (q_registry_provenance(h, &pv) && pv.spelling && pv.spelling[0] &&
+            pv.spelling[1] == '\0' &&
+            (pv.spelling[0] == '@' || pv.spelling[0] == '.'))
+            return;
+    }
+    int64_t argc = n - 1;
+    if (argc < 1 || argc > 60) return;
+    uint64_t mask = 0; int holes = 0;
+    for (int64_t i = 0; i < argc; i++)
+        if (ql_is_hole(e[1 + i])) { mask |= (1ull << i); holes++; }
+    if (holes == 0) return;
+    ray_t *args[64];
+    for (int64_t i = 0; i < argc; i++)
+        args[i] = (mask & (1ull << i)) ? NULL : e[1 + i];   /* holes -> NULL */
+    ray_t *carrier = q_proj_new(h, args, argc, mask, holes);
+    if (!carrier || RAY_IS_ERR(carrier)) { if (carrier) ray_release(carrier); return; }
+    ray_t *quote = ql_env_val("quote");
+    if (!quote) { ray_release(carrier); return; }
+    ray_t *repl = ray_list_new(2);
+    repl = ray_list_append(repl, quote);
+    repl = ray_list_append(repl, carrier);
+    ray_release(carrier);
+    ray_release(node);
+    *slot = repl;
+}
+
 /* Try the adverb-application rewrite on *slot (see the table above). */
 static void ql_adv_app(ray_t **slot) {
     ray_t *node = *slot;
@@ -1708,7 +1768,7 @@ static void ql_adv_app(ray_t **slot) {
     else if (f_is_name && !f_is_glyph) fexpr = F;  /* user name: eval resolves */
     else if (F && F->type == RAY_LIST) fexpr = F;  /* lambda / nested derived  */
 
-    if (adv == 1) {                                       /* `/` over */
+    if (adv == 1) {                                       /* `/` over/reduce/converge/do/while */
         if (!fexpr) {
             /* aggregate monomorphization: no dyadic |/& value exists, but
              * (|/)x IS max x and (&/)x IS min x. */
@@ -1732,9 +1792,11 @@ static void ql_adv_app(ray_t **slot) {
             }
             return;
         }
-        ray_t *fold = ql_env_val("fold");
-        if (fold) ql_rewrite(slot, fold, fexpr);
-    } else if (adv == 2 && n == 2) {                      /* `\` scan (unseeded) */
+        /* the over value dispatches reduce vs converge/do/while by f rank and
+         * operand shape at runtime (q_over_wrap). */
+        ray_t *ov = q_registry_over_value();
+        if (ov) ql_rewrite(slot, ov, fexpr);
+    } else if (adv == 2) {                                /* `\` scan (all forms) */
         if (!fexpr) return;
         ray_t *sc = q_registry_scan_value();
         if (sc) ql_rewrite(slot, sc, fexpr);
@@ -1742,6 +1804,14 @@ static void ql_adv_app(ray_t **slot) {
         if (!fexpr) return;
         ray_t *ea = q_registry_lookup_name("each", 4, Q_DYADIC);
         if (ea) ql_rewrite(slot, ea, fexpr);
+    } else if (adv == 0 && n == 3) {                      /* `'` each-both (dyadic) */
+        if (!fexpr) return;
+        ray_t *eb = q_registry_eachboth_value();
+        if (eb) ql_rewrite(slot, eb, fexpr);
+    } else if (adv == 3) {                                /* `':` each-prior (unary/seeded) */
+        if (!fexpr) return;
+        ray_t *pr = q_registry_prior_value();
+        if (pr) ql_rewrite(slot, pr, fexpr);
     } else if ((adv == 4 || adv == 5) && n == 3) {        /* `/:` `\:` each-right/left */
         if (!fexpr) return;
         /* x f\: y -> (map-left f x y): f(x_i, y); x f/: y -> (map-right f x y):
@@ -1749,7 +1819,6 @@ static void ql_adv_app(ray_t **slot) {
         ray_t *mr = ql_env_val(adv == 4 ? "map-right" : "map-left");
         if (mr) ql_rewrite(slot, mr, fexpr);
     }
-    /* ': — each-prior stays deferred (no pairwise rayfall HOF). */
 }
 
 /* A bare (adv; V) 2-list in VALUE position (assigned, passed, displayed —
@@ -1765,11 +1834,34 @@ static void ql_deriv_value(ray_t **slot) {
     ray_t **e = (ray_t **)ray_data(node);
     int adv = ql_adv_id(e[0]);
     if (adv < 0) return;
+
+    /* `/:` `\:` derive a BINARY verb — `x f/: y` == map-right(f;x;y).  Because
+     * the operand f may be an EXPRESSION (a lambda `(q.fn …)` tree) that has to
+     * be evaluated to a value first, the 2-hole carrier is built at EVAL time:
+     * lower to `(q.mkderiv2; <map HOF>; f)`, which evaluates f then binds it.
+     * This is what makes a stacked outer adverb `f/:\:` (map-left over the
+     * map-right carrier) work over a lambda. */
+    if (adv == 4 || adv == 5) {
+        ray_t *hofv = ql_env_val(adv == 4 ? "map-right" : "map-left");
+        ray_t *mk   = q_registry_mkderiv2_value();
+        if (!hofv || !mk) return;
+        ray_t *repl = ray_list_new(3);
+        ray_retain(mk);   repl = ray_list_append(repl, mk);   ray_release(mk);
+        ray_retain(hofv); repl = ray_list_append(repl, hofv); ray_release(hofv);
+        repl = ray_list_append(repl, e[1]);   /* f expression, evaluated at eval */
+        ray_release(node);
+        *slot = repl;
+        return;
+    }
+
+    /* `'` `/` `\` `':` derive a MONADIC verb (1 hole after the bound operand).
+     * These operands are glyph/keyword values already resolvable at lower time. */
     ray_t *hof = NULL;
-    if (adv == 1)      hof = ql_env_val("fold");
+    if (adv == 1)      hof = q_registry_over_value();
     else if (adv == 2) hof = q_registry_scan_value();
     else if (adv == 0) hof = q_registry_lookup_name("each", 4, Q_DYADIC);
-    if (!hof) return;                        /* ': /: \: stay deferred */
+    else if (adv == 3) hof = q_registry_prior_value();
+    if (!hof) return;
     ray_t *quote = ql_env_val("quote");
     if (!quote) return;
     /* A keyword operand (`neg'`) is still a name-ref sym — bind its VALUE in
@@ -2225,6 +2317,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     if (err) return err;
     ql_lambda(slot);
     ql_ret_sig(slot);
+    ql_project(slot);                      /* native/value projection (1+, 2*, +[1;]) */
     ql_adv_app(slot);
     /* head position stays a raw (adv;V) 2-list — the PARENT's ql_adv_app
      * consumes it; everywhere else a bare derived verb becomes a carrier. */
