@@ -76,9 +76,14 @@ typedef enum {
     QK_DIFFER,          /* q `differ x` == `not(~':)x`                          */
     QK_TIL,             /* q `til` wrapper: accepts a boolean (`til 1b`->,0);
                          * base ray_til_fn is int-only.  Delegates otherwise.   */
-    QK_WHERE            /* q `where`/monadic `&` wrapper: an integer vector
+    QK_WHERE,           /* q `where`/monadic `&` wrapper: an integer vector
                          * repeats each index i, x[i] times (`where 2 3 1` ->
                          * 0 0 1 1 1 2); the boolean form delegates to base.     */
+    QK_VS,              /* q `x vs y` — split / base-decompose / byte-encode
+                         * (string split, sym split, int base decompose, byte
+                         * big-endian encode, bit decompose)                    */
+    QK_SV               /* q `x sv y` — join / base-compose / byte-decode
+                         * (inverse of vs)                                      */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic

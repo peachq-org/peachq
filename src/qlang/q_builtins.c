@@ -38,13 +38,38 @@ static ray_t* q_parse_builtin_fn(ray_t* x) {
     return ast ? ast : ray_error("parse", NULL);
 }
 
-/* (string x) — q cast-to-string.  A sym renders bare (`ibm -> "ibm"); other
- * values reuse rayfall's formatter (string 42 -> "42"). */
+/* (string x) — q cast-to-string.  ATOM: a sym renders bare (`ibm -> "ibm"),
+ * a string passes through, other atoms reuse rayfall's formatter (string 42
+ * -> "42").  VECTOR / LIST: q maps string over each item, yielding a LIST of
+ * strings (`string 192 168 1 23` -> ("192";"168";"1";"23")) — the base
+ * formatter would instead render the whole vector as one bracketed string. */
 static ray_t* q_string_fn(ray_t* x) {
     if (!x) return ray_error("type", "string: nil");
-    if (x->type == -RAY_SYM) return ray_sym_str(x->i64);
+    if (x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);        /* borrowed */
+        if (!s) return ray_error("type", "string: bad symbol");
+        ray_retain(s);
+        return s;
+    }
     if (x->type == -RAY_STR) { ray_retain(x); return x; }
-    return ray_fmt(x, 0);
+    if (ray_is_atom(x)) return ray_fmt(x, 0);
+    /* vector or boxed list: per-element string */
+    int64_t n = ray_len(x);
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* e = ray_at_fn(x, ia);
+        ray_release(ia);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+        ray_t* s = q_string_fn(e);
+        ray_release(e);
+        if (!s || RAY_IS_ERR(s)) { ray_release(out); return s; }
+        out = ray_list_append(out, s);
+        ray_release(s);
+        if (RAY_IS_ERR(out)) return out;
+    }
+    return out;
 }
 
 /* upper / lower — whole-string per-char ASCII transforms (spec piece 2's

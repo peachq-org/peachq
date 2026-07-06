@@ -75,6 +75,11 @@ static const q_op_t Q_OPS[] = {
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
     /* q `n cut x` — chunk (int atom) / positional cut (int vector). */
     { "cut",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CUT,   "cut",     NULL  },
+    /* q `x vs y` / `x sv y` — split-join / base-encode family (dyadic infix
+     * keywords; wrappers, native -RAY_STR + sym + base + byte).  Monadic form
+     * is out of scope (kdb `vs`/`sv` are strictly dyadic). */
+    { "vs",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_VS,    "vs",      NULL  },
+    { "sv",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SV,    "sv",      NULL  },
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
      * do/while by f rank; prior is unary each-prior; peach == each. */

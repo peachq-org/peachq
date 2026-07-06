@@ -552,6 +552,382 @@ static ray_t* q_where_wrap(ray_t* x) {
     return ray_where_fn(x);
 }
 
+/* ===== q `vs` / `sv` — split-join / base-encode family ===================
+ * kdb reference vs.md / sv.md.  Both are strictly dyadic.  Native -RAY_STR
+ * strings (split -> boxed list of string atoms, join -> one string atom),
+ * symbol split/join, integer base decompose/compose (atom + vector base),
+ * and big-endian byte/bit encode/decode.  Genuinely out-of-scope forms
+ * (128-bit GUID compose, `1:` reparse, byte-vector base) return 'nyi. */
+
+static int q_is_null_sym(ray_t* x) {
+    if (!x || x->type != -RAY_SYM) return 0;
+    ray_t* s = ray_sym_str(x->i64);
+    int z = s && ray_str_len(s) == 0;
+    return z;
+}
+static int q_is_int_atom(ray_t* x) {
+    return x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16);
+}
+static int q_is_int_vec(ray_t* x) {
+    return x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16);
+}
+static int64_t q_ivec_get(ray_t* v, int64_t i) {
+    const void* d = ray_data(v);
+    return v->type == RAY_I64 ? ((const int64_t*)d)[i]
+         : v->type == RAY_I32 ? (int64_t)((const int32_t*)d)[i]
+                              : (int64_t)((const int16_t*)d)[i];
+}
+static int64_t q_iatom_val(ray_t* x) {
+    return x->type == -RAY_I64 ? x->i64
+         : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
+}
+
+/* split string y on substring sep -> boxed list of -RAY_STR (keeps empties) */
+static ray_t* q_str_split(const char* y, size_t yl, const char* sep, size_t sl) {
+    ray_t* out = ray_list_new(4);
+    if (RAY_IS_ERR(out)) return out;
+    if (sl == 0) {                                 /* empty sep -> one piece */
+        ray_t* s = ray_str(y, yl);
+        out = ray_list_append(out, s); ray_release(s);
+        return out;
+    }
+    size_t seg = 0;
+    for (size_t i = 0; i + sl <= yl; ) {
+        if (memcmp(y + i, sep, sl) == 0) {
+            ray_t* s = ray_str(y + seg, i - seg);
+            out = ray_list_append(out, s); ray_release(s);
+            if (RAY_IS_ERR(out)) return out;
+            i += sl; seg = i;
+        } else i++;
+    }
+    ray_t* last = ray_str(y + seg, yl - seg);
+    out = ray_list_append(out, last); ray_release(last);
+    return out;
+}
+
+/* newline / host-line-separator split: split on '\n', strip a trailing '\r'
+ * from each line, drop a single trailing empty line (kdb ` vs read-lines). */
+static ray_t* q_str_split_lines(const char* y, size_t yl) {
+    ray_t* out = ray_list_new(4);
+    if (RAY_IS_ERR(out)) return out;
+    size_t seg = 0;
+    for (size_t i = 0; i <= yl; i++) {
+        if (i == yl || y[i] == '\n') {
+            size_t end = i;
+            if (end > seg && y[end - 1] == '\r') end--;   /* strip CR */
+            ray_t* s = ray_str(y + seg, end - seg);
+            out = ray_list_append(out, s); ray_release(s);
+            if (RAY_IS_ERR(out)) return out;
+            seg = i + 1;
+            if (i == yl) break;
+        }
+    }
+    /* drop a single trailing empty produced by a terminal '\n' */
+    int64_t n = ray_len(out);
+    if (n >= 1) {
+        ray_t** e = (ray_t**)ray_data(out);
+        if (e[n - 1]->type == -RAY_STR && ray_str_len(e[n - 1]) == 0) {
+            ray_release(e[n - 1]);
+            out->len = n - 1;
+        }
+    }
+    return out;
+}
+
+/* ` vs `sym — split a symbol: leading ':' (file handle) splits at the LAST
+ * '/' into (dir; file); otherwise split on every '.'.  -> RAY_SYM vector. */
+static ray_t* q_sym_split(ray_t* y) {
+    ray_t* s = ray_sym_str(y->i64);
+    if (!s) return ray_error("type", "vs: bad symbol");
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, 4);
+    if (n > 0 && p[0] == ':') {                    /* file handle: last '/' */
+        size_t cut = n;
+        for (size_t i = n; i-- > 0; ) if (p[i] == '/') { cut = i; break; }
+        if (cut == n) {                            /* no '/', single element */
+            int64_t id = ray_sym_intern_runtime(p, n);
+            out = ray_vec_append(out, &id);
+        } else {
+            int64_t a = ray_sym_intern_runtime(p, cut);
+            int64_t b = ray_sym_intern_runtime(p + cut + 1, n - cut - 1);
+            out = ray_vec_append(out, &a);
+            out = ray_vec_append(out, &b);
+        }
+    } else {                                        /* split all '.' */
+        size_t seg = 0;
+        for (size_t i = 0; i <= n; i++) {
+            if (i == n || p[i] == '.') {
+                int64_t id = ray_sym_intern_runtime(p + seg, i - seg);
+                out = ray_vec_append(out, &id);
+                seg = i + 1;
+            }
+        }
+    }
+    return out;
+}
+
+/* big-endian byte encode of a numeric scalar (0x0 vs y) -> U8 vector */
+static ray_t* q_byte_encode(ray_t* y) {
+    uint8_t b[8]; int w = 0; uint64_t bits = 0;
+    switch (y->type) {
+    case -RAY_I16: w = 2; bits = (uint16_t)y->i16; break;
+    case -RAY_I32: w = 4; bits = (uint32_t)y->i32; break;
+    case -RAY_I64: w = 8; bits = (uint64_t)y->i64; break;
+    case -RAY_F32: { float f = (float)y->f64; uint32_t u; memcpy(&u, &f, 4);
+                     w = 4; bits = u; break; }
+    case -RAY_F64: { double d = y->f64; uint64_t u; memcpy(&u, &d, 8);
+                     w = 8; bits = u; break; }
+    default: return ray_error("type", "vs: unsupported byte-encode operand");
+    }
+    for (int i = 0; i < w; i++) b[i] = (uint8_t)(bits >> (8 * (w - 1 - i)));
+    return ray_vec_from_raw(RAY_U8, b, w);
+}
+
+/* big-endian bit decompose of an integer scalar (0b vs y) -> BOOL vector */
+static ray_t* q_bit_decompose(ray_t* y) {
+    int w = 0; uint64_t bits = 0;
+    switch (y->type) {
+    case -RAY_BOOL: w = 1;  bits = y->b8 ? 1 : 0; break;
+    case -RAY_U8:   w = 8;  bits = (uint8_t)y->u8; break;
+    case -RAY_I16:  w = 16; bits = (uint16_t)y->i16; break;
+    case -RAY_I32:  w = 32; bits = (uint32_t)y->i32; break;
+    case -RAY_I64:  w = 64; bits = (uint64_t)y->i64; break;
+    default: return ray_error("type", "vs: unsupported bit-decompose operand");
+    }
+    uint8_t stackb[64];
+    for (int i = 0; i < w; i++) stackb[i] = (uint8_t)((bits >> (w - 1 - i)) & 1);
+    return ray_vec_from_raw(RAY_BOOL, stackb, w);
+}
+
+/* decompose scalar v into minimal base-`base` digits (>=1) -> long vector */
+static ray_t* q_base_decompose_atom(int64_t base, int64_t v) {
+    if (base <= 0) return ray_error("domain", "vs: base must be positive");
+    int64_t buf[64]; int n = 0;
+    uint64_t u = (uint64_t)v;
+    if (u == 0) buf[n++] = 0;
+    while (u > 0 && n < 64) { buf[n++] = (int64_t)(u % (uint64_t)base); u /= (uint64_t)base; }
+    ray_t* out = ray_vec_new(RAY_I64, n);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int64_t* d = (int64_t*)ray_data(out);
+    for (int i = 0; i < n; i++) d[i] = buf[n - 1 - i];   /* MSB first */
+    return out;
+}
+
+/* mixed-radix decompose scalar v by vector base -> long vector len(base) */
+static ray_t* q_base_decompose_vec(ray_t* base, int64_t v) {
+    int64_t n = ray_len(base);
+    ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int64_t* d = (int64_t*)ray_data(out);
+    uint64_t u = (uint64_t)v;
+    for (int64_t i = n - 1; i >= 0; i--) {
+        int64_t bi = q_ivec_get(base, i);
+        if (bi <= 0) { d[i] = (int64_t)u; u = 0; }
+        else { d[i] = (int64_t)(u % (uint64_t)bi); u /= (uint64_t)bi; }
+    }
+    return out;
+}
+
+static ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "vs: nil operand");
+    /* --- string / newline split --- */
+    if (x->type == -RAY_STR) {
+        if (y->type != -RAY_STR)
+            return ray_error("nyi", "vs: string split needs a string rhs (byte-string deferred)");
+        return q_str_split(ray_str_ptr(y), ray_str_len(y),
+                           ray_str_ptr(x), ray_str_len(x));
+    }
+    if (q_is_null_sym(x)) {
+        if (y->type == -RAY_STR)
+            return q_str_split_lines(ray_str_ptr(y), ray_str_len(y));
+        if (y->type == -RAY_SYM) return q_sym_split(y);
+        return ray_error("type", "vs: ` split expects a string or symbol");
+    }
+    /* --- byte encode (0x0 vs scalar) --- */
+    if (x->type == -RAY_U8) {
+        if (ray_is_atom(y) && y->type != -RAY_STR) return q_byte_encode(y);
+        return ray_error("nyi", "vs: byte-vector base decompose deferred");
+    }
+    /* --- bit decompose (0b vs scalar) --- */
+    if (x->type == -RAY_BOOL) {
+        if (ray_is_atom(y)) return q_bit_decompose(y);
+        return ray_error("type", "vs: 0b decompose expects a scalar");
+    }
+    /* --- integer base decompose --- */
+    if (q_is_int_atom(x)) {
+        int64_t base = q_iatom_val(x);
+        if (q_is_int_atom(y)) return q_base_decompose_atom(base, q_iatom_val(y));
+        if (q_is_int_vec(y)) {                     /* matrix: pad to max width */
+            int64_t m = ray_len(y);
+            ray_t* cols = ray_list_new(m > 0 ? m : 1);
+            int64_t maxw = 1;
+            for (int64_t j = 0; j < m; j++) {
+                ray_t* c = q_base_decompose_atom(base, q_ivec_get(y, j));
+                if (RAY_IS_ERR(c)) { ray_release(cols); return c; }
+                if (ray_len(c) > maxw) maxw = ray_len(c);
+                cols = ray_list_append(cols, c); ray_release(c);
+            }
+            ray_t* rows = ray_list_new(maxw);
+            ray_t** cv = (ray_t**)ray_data(cols);
+            for (int64_t r = 0; r < maxw; r++) {
+                ray_t* row = ray_vec_new(RAY_I64, m); row->len = m;
+                int64_t* rd = (int64_t*)ray_data(row);
+                for (int64_t j = 0; j < m; j++) {
+                    int64_t cw = ray_len(cv[j]);
+                    int64_t pad = maxw - cw;         /* left-pad with 0 */
+                    rd[j] = (r < pad) ? 0 : ((const int64_t*)ray_data(cv[j]))[r - pad];
+                }
+                rows = ray_list_append(rows, row); ray_release(row);
+            }
+            ray_release(cols);
+            return rows;
+        }
+        return ray_error("type", "vs: integer decompose expects an integer rhs");
+    }
+    if (q_is_int_vec(x)) {
+        if (q_is_int_atom(y)) return q_base_decompose_vec(x, q_iatom_val(y));
+        return ray_error("nyi", "vs: vector-base matrix decompose deferred");
+    }
+    return ray_error("type", "vs: unsupported operand types");
+}
+
+/* join a boxed list / vector of strings with separator sep (append trailing
+ * when host==1, the ` sv newline form). */
+static ray_t* q_str_join(ray_t* y, const char* sep, size_t sl, int host) {
+    if (!y || y->type != RAY_LIST)
+        return ray_error("type", "sv: join expects a list of strings");
+    int64_t n = ray_len(y);
+    size_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* e = (y->type == RAY_LIST) ? ((ray_t**)ray_data(y))[i] : NULL;
+        if (!e || e->type != -RAY_STR)
+            return ray_error("type", "sv: join expects string elements");
+        total += ray_str_len(e);
+        if (i + 1 < n) total += sl;
+    }
+    if (host) total += 1;
+    char* buf = malloc(total ? total : 1);
+    if (!buf) return ray_error("wsfull", "sv: out of memory");
+    size_t w = 0;
+    ray_t** ev = (ray_t**)ray_data(y);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* e = ev[i];
+        size_t el = ray_str_len(e);
+        memcpy(buf + w, ray_str_ptr(e), el); w += el;
+        if (host) { buf[w++] = '\n'; }
+        else if (i + 1 < n) { memcpy(buf + w, sep, sl); w += sl; }
+    }
+    ray_t* r = ray_str(buf, w);
+    free(buf);
+    return r;
+}
+
+/* ` sv `syms — join symbols: leading ':' (file handle) joins with '/', else
+ * with '.'  -> single -RAY_SYM atom. */
+static ray_t* q_sym_join(ray_t* y) {
+    int64_t n = ray_len(y);
+    if (n == 0) return ray_sym(ray_sym_intern_runtime("", 0));
+    ray_t* first = ray_sym_vec_cell(y, 0);
+    const char* fp = first ? ray_str_ptr(first) : "";
+    char joiner = (ray_str_len(first) > 0 && fp[0] == ':') ? '/' : '.';
+    size_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* c = ray_sym_vec_cell(y, i);
+        total += ray_str_len(c);
+        if (i + 1 < n) total += 1;
+    }
+    char* buf = malloc(total ? total : 1);
+    if (!buf) return ray_error("wsfull", "sv: out of memory");
+    size_t w = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* c = ray_sym_vec_cell(y, i);
+        size_t cl = ray_str_len(c);
+        memcpy(buf + w, ray_str_ptr(c), cl); w += cl;
+        if (i + 1 < n) buf[w++] = joiner;
+    }
+    int64_t id = ray_sym_intern_runtime(buf, w);
+    free(buf);
+    return ray_sym(id);
+}
+
+/* big-endian byte decode: interpret a U8 vector as a signed integer of the
+ * matching width (2->short, 4->int, 8->long). */
+static ray_t* q_byte_decode(ray_t* y) {
+    int64_t n = ray_len(y);
+    const uint8_t* p = (const uint8_t*)ray_data(y);
+    uint64_t v = 0;
+    for (int64_t i = 0; i < n; i++) v = (v << 8) | p[i];
+    if (n == 2) return ray_i16((int16_t)(uint16_t)v);
+    if (n == 4) return ray_i32((int32_t)(uint32_t)v);
+    if (n == 8) return ray_i64((int64_t)v);
+    if (n == 1) return ray_i16((int16_t)(uint8_t)v);
+    return ray_error("nyi", "sv: byte decode width %lld deferred", (long long)n);
+}
+
+/* bits -> integer (8->byte, 16->short, 32->int, 64->long; 128->guid deferred) */
+static ray_t* q_bit_compose(ray_t* y) {
+    int64_t n = ray_len(y);
+    const uint8_t* p = (const uint8_t*)ray_data(y);
+    if (n == 128) return ray_error("nyi", "sv: 128-bit GUID compose deferred");
+    if (n != 8 && n != 16 && n != 32 && n != 64)
+        return ray_error("nyi", "sv: bit compose width %lld deferred", (long long)n);
+    uint64_t v = 0;
+    for (int64_t i = 0; i < n; i++) v = (v << 1) | (p[i] & 1);
+    if (n == 8)  return ray_u8((uint8_t)v);
+    if (n == 16) return ray_i16((int16_t)(uint16_t)v);
+    if (n == 32) return ray_i32((int32_t)(uint32_t)v);
+    return ray_i64((int64_t)v);
+}
+
+static ray_t* q_sv_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "sv: nil operand");
+    /* --- string join --- */
+    if (x->type == -RAY_STR)
+        return q_str_join(y, ray_str_ptr(x), ray_str_len(x), 0);
+    if (q_is_null_sym(x)) {
+        if (y->type == RAY_SYM) return q_sym_join(y);            /* sym join */
+        return q_str_join(y, "\n", 1, 1);                        /* host lines */
+    }
+    /* --- byte decode (0x0 sv bytes) --- */
+    if (x->type == -RAY_U8) {
+        if (y->type == RAY_U8) return q_byte_decode(y);
+        return ray_error("nyi", "sv: byte-vector base compose deferred");
+    }
+    /* --- bit compose (0b sv bits) --- */
+    if (x->type == -RAY_BOOL) {
+        if (y->type == RAY_BOOL) return q_bit_compose(y);
+        return ray_error("type", "sv: 0b compose expects a bool vector");
+    }
+    /* --- integer base compose (Horner) --- */
+    if (q_is_int_atom(x)) {
+        int64_t base = q_iatom_val(x);
+        if (!q_is_int_vec(y) && y->type != RAY_BOOL)
+            return ray_error("type", "sv: integer compose expects an integer vector");
+        int64_t n = ray_len(y);
+        int64_t acc = 0;
+        for (int64_t i = 0; i < n; i++) {
+            int64_t d = (y->type == RAY_BOOL) ? ((const uint8_t*)ray_data(y))[i]
+                                              : q_ivec_get(y, i);
+            acc = acc * base + d;
+        }
+        return ray_i64(acc);
+    }
+    /* --- mixed-radix compose (vector base) --- */
+    if (q_is_int_vec(x)) {
+        if (!q_is_int_vec(y)) return ray_error("type", "sv: mixed-radix expects an integer vector rhs");
+        int64_t n = ray_len(y), bn = ray_len(x);
+        if (n != bn) return ray_error("length", "sv: base and value lengths must match");
+        int64_t acc = 0;
+        for (int64_t i = 0; i < n; i++)
+            acc = acc * q_ivec_get(x, i) + q_ivec_get(y, i);
+        return ray_i64(acc);
+    }
+    return ray_error("type", "sv: unsupported operand types");
+}
+
 /* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
  * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
  * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
@@ -3149,6 +3525,8 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_DIFFER: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_differ_wrap);
     case QK_TIL:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_til_wrap);
     case QK_WHERE:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_where_wrap);
+    case QK_VS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_vs_wrap);
+    case QK_SV:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sv_wrap);
     default:      return NULL;
     }
 }
