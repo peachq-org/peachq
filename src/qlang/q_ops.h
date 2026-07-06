@@ -82,8 +82,19 @@ typedef enum {
     QK_VS,              /* q `x vs y` — split / base-decompose / byte-encode
                          * (string split, sym split, int base decompose, byte
                          * big-endian encode, bit decompose)                    */
-    QK_SV               /* q `x sv y` — join / base-compose / byte-decode
+    QK_SV,              /* q `x sv y` — join / base-compose / byte-decode
                          * (inverse of vs)                                      */
+    /* ---- Wave 5 aggregate / uniform family ---- */
+    QK_SUMS,            /* running sum  (nulls -> 0)                            */
+    QK_PRDS,            /* running product (nulls -> 1)                         */
+    QK_MAXS,            /* running max (nulls skipped; also runs over chars)    */
+    QK_MINS,            /* running min (nulls skipped; also runs over chars)    */
+    QK_AVGS,            /* running average (nulls excluded) -> float            */
+    QK_RATIOS,          /* pairwise ratio: r[0]=x[0], r[i]=x[i]%x[i-1]          */
+    QK_WSUM,            /* weighted sum:  x wsum y == sum x*y (nulls excluded)  */
+    QK_WAVG,            /* weighted avg:  (sum x*y) % sum x (nulls excluded)    */
+    QK_COV,             /* population covariance                                */
+    QK_SCOV             /* sample covariance (n-1)                              */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
