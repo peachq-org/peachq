@@ -37,6 +37,7 @@
 #include "qlang/q_parse.h"    /* q_parse/q_lower — value-of-string (RUNTIME wrapper only; builders must never parse, rule 6) */
 #include "lang/internal.h"    /* ray_where_fn, ray_group_fn (funsql executor) */
 #include "table/sym.h"        /* ray_sym_vec_cell (funsql executor) */
+#include "qlang/q_wire.h"     /* -8!/-9! internal-fn dispatch on dyadic ! */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
 #include "lang/format.h"      /* ray_type_name — wrapper error messages */
 #include "mem/heap.h"         /* RAY_ATTR_HAS_NULLS — ? find miss remap */
@@ -593,6 +594,25 @@ static ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
  * count check lives here.  String keys are a deferred cell (string model). */
 static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return ray_error("type", "!: nil operand");
+    /* kdb reserves a NEGATIVE integer ATOM lhs for internal functions
+     * (`-8!x` serialize, `-9!x` deserialize, ...) — never dict-make.
+     * Typed nulls fall through to dict-make (0N is not an internal id). */
+    if ((x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16) &&
+        !RAY_ATOM_IS_NULL(x)) {
+        int64_t id = x->type == -RAY_I64 ? x->i64
+                   : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
+        if (id < 0) {
+            switch (id) {
+            case -8: return q_wire_serialize(y, Q_WIRE_ASYNC);
+            case -9:
+                if (y->type != RAY_U8)
+                    return ray_error("type", "-9!: expects a byte vector");
+                return q_wire_deserialize(y);
+            default:
+                return ray_error("nyi", "internal function %lld! not yet implemented", (long long)id);
+            }
+        }
+    }
     ray_t* keys = x;
     ray_t* keys_owned = NULL;
     if (ray_is_atom(x)) {
