@@ -1846,8 +1846,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'h': return RAY_I16;  case 'i': return RAY_I32;
         case 'j': return RAY_I64;  case 'e': return RAY_F32;
         case 'f': return RAY_F64;  case 's': return RAY_SYM;
-        case 'd': return RAY_DATE;
-        default:  return 0;       /* g c p m z n u v t + "*" identity: deferred */
+        case 'd': return RAY_DATE; case 'g': return RAY_GUID;
+        default:  return 0;       /* c p m z n u v t + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -2005,6 +2005,36 @@ static int q_date_scan(const char* p, size_t len,
     return 0;
 }
 
+static int q_hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Parse a CANONICAL 36-char UUID (8-4-4-4-12, hyphens at 8/13/18/23, hex
+ * elsewhere, case-insensitive) into out[16].  Returns 1 on success, 0 on any
+ * shape/char mismatch.  kdb "G"$ ALSO accepts IPv4/IPv6 address forms
+ * (test/q/cast/tok.qcmd, skiplisted) — DEFERRED here (see PLAN.md); those
+ * inputs fail this shape check and Tok returns 0Ng. */
+static int q_parse_uuid(const char* p, size_t len, uint8_t out[16]) {
+    if (len != 36) return 0;
+    int bi = 0;
+    for (size_t i = 0; i < 36; ) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (p[i] != '-') return 0;
+            i++;
+            continue;
+        }
+        int h = q_hexval(p[i]);
+        int l = q_hexval(p[i + 1]);
+        if (h < 0 || l < 0) return 0;
+        out[bi++] = (uint8_t)((h << 4) | l);
+        i += 2;
+    }
+    return bi == 16;
+}
+
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
@@ -2093,6 +2123,15 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         }
         if (len == 0 || i != len || v > 0xff) return ray_u8(0);
         return ray_u8((uint8_t)v);
+    }
+    case RAY_GUID: {
+        /* "G"$str -> guid (basics/datatypes.md §Guid).  Tok contract:
+         * unparseable / wrong-shape -> typed null 0Ng, never an error (base
+         * ray_cast_fn "GUID" ERRORS on bad input, so parse here).  Canonical
+         * 36-char UUID only; IPv4/IPv6 forms deferred (see q_parse_uuid). */
+        uint8_t bytes[16];
+        if (!q_parse_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
+        return ray_guid(bytes);
     }
     default:
         return ray_error("nyi", "$: temporal/char Tok is deferred");
@@ -4086,6 +4125,10 @@ ray_t* q_collapse_list(ray_t* l) {
         case -RAY_F32: { float f = (float)e[i]->f64;            /* F32 atom stores f64 */
                          vec = ray_vec_append(vec, &f); }       break;
         case -RAY_F64:  vec = ray_vec_append(vec, &e[i]->f64); break;
+        case -RAY_GUID: {                                      /* 16-byte payload, not i64 */
+            const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
+            vec = ray_vec_append(vec, g);
+        } break;
         default:        vec = ray_vec_append(vec, &e[i]->i64); break; /* i64 + temporals */
         }
         if (RAY_IS_ERR(vec)) return vec;
