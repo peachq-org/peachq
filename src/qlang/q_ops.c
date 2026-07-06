@@ -166,6 +166,11 @@ static const q_op_t Q_OPS[] = {
      * audited kdb-true element-wise / aggregate semantics). See
      * docs/recipes/add-q-keyword-verb.md. ---- */
     { "abs",     QLEX_KW_PREFIX, QK_ENV, "abs",      QK_NONE,  NULL,      NULL  },
+    /* q `null x` — elementwise null test.  Routes to the engine's atomic
+     * `nil?` (RAY_FN_ATOMIC): broadcasts over vectors and nested lists at
+     * every depth.  QK_NULL collapses a homogeneous top-level bool-atom run
+     * (heterogeneous input list) to a bool vector for kdb-true display. */
+    { "null",    QLEX_KW_PREFIX, QK_NULL, "nil?",    QK_NONE,  NULL,      NULL  },
     { "dev",     QLEX_KW_PREFIX, QK_ENV, "dev",      QK_NONE,  NULL,      NULL  },
     { "exp",     QLEX_KW_PREFIX, QK_ENV, "exp",      QK_NONE,  NULL,      NULL  },
     { "log",     QLEX_KW_PREFIX, QK_ENV, "log",      QK_NONE,  NULL,      NULL  },
@@ -177,6 +182,14 @@ static const q_op_t Q_OPS[] = {
     /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x. */
     { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
     { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
+    /* ---- IPC client verbs (feat/q-ipc-client, Phase D) — thin wrappers over the
+     * kdb-speaking `.ipc.*` primitives (Phase C).  `hopen` normalizes int|string|
+     * (conn;timeout) into the `.ipc.open` string API and returns a 1-BASED handle;
+     * `hclose` translates it back and routes to `.ipc.close`.  The sync/async send
+     * verb `h"query"` is handle-as-verb application (q_apply.c int-head arm), not a
+     * manifest row.  Both are monadic prefix keywords (KW_PREFIX). ---- */
+    { "hopen",  QLEX_KW_PREFIX, QK_HOPEN,  "hopen",  QK_NONE, NULL,  NULL  },
+    { "hclose", QLEX_KW_PREFIX, QK_HCLOSE, "hclose", QK_NONE, NULL,  NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
