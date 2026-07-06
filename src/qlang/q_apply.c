@@ -203,6 +203,14 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
 
     if (n < 1) return NULL;
 
+    /* Raw native VARY fn values (e.g. the @/. amend-trap wrappers) reach this
+     * hook via call_fn1/call_fn2, whose fast paths only special-case
+     * UNARY/BINARY/LAMBDA.  Apply it here so a VARY verb works as an adverb
+     * operand (`. /:`, `@ each`) and as a trap/amend applicand.  Special forms
+     * need UNEVALUATED args, which are already gone -> decline. */
+    if (head->type == RAY_VARY && !(head->attrs & RAY_FN_SPECIAL_FORM))
+        return ((ray_vary_fn)(uintptr_t)head->i64)(args, n);
+
     if (head->type == -RAY_STR) return NULL;        /* deferred: string model */
 
     /* 104h carriers are RAY_LISTs — claim them BEFORE the gather arm. */
