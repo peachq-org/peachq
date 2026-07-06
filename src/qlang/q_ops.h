@@ -94,7 +94,15 @@ typedef enum {
     QK_WSUM,            /* weighted sum:  x wsum y == sum x*y (nulls excluded)  */
     QK_WAVG,            /* weighted avg:  (sum x*y) % sum x (nulls excluded)    */
     QK_COV,             /* population covariance                                */
-    QK_SCOV             /* sample covariance (n-1)                              */
+    QK_SCOV,            /* sample covariance (n-1)                              */
+    /* ---- Wave 5 sliding m-windows + ema (dyadic infix) ---- */
+    QK_MSUM,            /* N msum x  — sliding sum (nulls -> 0)                 */
+    QK_MAVG,            /* N mavg x  — sliding average (nulls excluded)        */
+    QK_MMAX,            /* N mmax x  — sliding max (nulls skipped)             */
+    QK_MMIN,            /* N mmin x  — sliding min (nulls skipped)             */
+    QK_MCOUNT,          /* N mcount x— sliding count of non-null               */
+    QK_MDEV,            /* N mdev x  — sliding population std deviation         */
+    QK_EMA              /* a ema x   — exponential moving average               */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
