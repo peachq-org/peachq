@@ -1710,8 +1710,24 @@ static void ql_project(ray_t **slot) {
         q_provenance_t pv;
         if (q_registry_provenance(h, &pv) && pv.spelling && pv.spelling[0] &&
             pv.spelling[1] == '\0' &&
-            (pv.spelling[0] == '@' || pv.spelling[0] == '.'))
+            (pv.spelling[0] == '@' || pv.spelling[0] == '.')) {
+            /* The `:` (assign / replace) function slot of Amend arrives as a
+             * bare verb token that would eval as an unresolved name-ref ('name);
+             * quote it so it self-evaluates to the symbol `:` the amend wrapper
+             * detects.  `::` (len 2, the whole-value null) is left untouched. */
+            for (int64_t i = 1; i < n; i++) {
+                ray_t *a = e[i];
+                if (a && a->type == -RAY_SYM && !(a->attrs & Q_ATTR_QUOTED)) {
+                    ray_t *s = ray_sym_str(a->i64);
+                    if (s) {
+                        if (ray_str_len(s) == 1 && ray_str_ptr(s)[0] == ':')
+                            a->attrs |= Q_ATTR_QUOTED;
+                        ray_release(s);
+                    }
+                }
+            }
             return;
+        }
     }
     int64_t argc = n - 1;
     if (argc < 1 || argc > 60) return;
