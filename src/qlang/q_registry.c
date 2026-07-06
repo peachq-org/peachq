@@ -1148,6 +1148,7 @@ static ray_t* q_dot_apply(ray_t* f, ray_t* a);
 static int    q_is_fn_value(ray_t* x);              /* defined below */
 static ray_t* q_elem_at(ray_t* v, int64_t i);       /* defined below */
 static ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k);  /* defined below */
+static int    q_values_match(ray_t* a, ray_t* b);   /* defined below */
 
 /* The `:` (assign / replace) function slot of Amend.  Arrives either as a
  * symbol atom spelled ":" (quoted verb-sym) or, defensively, a registry value
@@ -1226,28 +1227,53 @@ static ray_t* q_amend_step(ray_t* f, ray_t* cur, ray_t* y, int64_t yi) {
     return r;
 }
 
-/* @[d;key(s);f;y] — dict amend: map key(s) to integer position(s) in the
- * dict's keys, amend the vals vector there, rebuild with the same keys. */
+/* @[d;key(s);f;y] — dict amend.  For each key: if present, amend the value at
+ * its position; if ABSENT, extend the dict with that key (kdb inserts on a
+ * missing-key amend, e.g. @[`a`b!1 2;`c;:;3] -> a|1 b|2 c|3).  Works on
+ * exploded keys/vals boxed lists, collapses back, rebuilds. */
 static ray_t* q_amend_dict(ray_t* d, ray_t* key, ray_t* f, ray_t* y) {
-    ray_t* keys = ray_dict_keys(d);                 /* borrowed */
-    ray_t* vals = ray_dict_vals(d);                 /* borrowed */
-    if (!keys || !vals) return ray_error("type", "@: malformed dictionary");
-    int64_t kn = ray_len(keys);
-    ray_t* pos = ray_find_fn(keys, key);            /* kdb keys?key */
-    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : ray_error("type", NULL);
-    int64_t steps = ray_is_atom(pos) ? 1 : ray_len(pos);
-    for (int64_t k = 0; k < steps; k++) {
-        int64_t p;
-        if (ray_is_atom(pos)) { if (!q_idx_int(pos, &p)) { ray_release(pos); return ray_error("index", NULL); } }
-        else { ray_t* e = q_elem_at(pos, k); int ok = q_idx_int(e, &p); ray_release(e);
-               if (!ok) { ray_release(pos); return ray_error("index", NULL); } }
-        if (p < 0 || p >= kn) { ray_release(pos); return ray_error("index", NULL); }
+    ray_t* keys0 = ray_dict_keys(d);                /* borrowed */
+    ray_t* vals0 = ray_dict_vals(d);                /* borrowed */
+    if (!keys0 || !vals0) return ray_error("type", "@: malformed dictionary");
+    ray_t* keys = q_explode(keys0);
+    if (!keys || RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = q_explode(vals0);
+    if (!vals || RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+    int key_atom = ray_is_atom(key);
+    int64_t steps = key_atom ? 1 : ray_len(key);
+    if (!key_atom && y && (ray_is_vec(y) || y->type == RAY_LIST) && ray_len(y) != steps) {
+        ray_release(keys); ray_release(vals); return ray_error("length", NULL);
     }
-    ray_t* nvals = q_amend_at(vals, pos, f, y);     /* reuse the vector engine */
-    ray_release(pos);
-    if (!nvals || RAY_IS_ERR(nvals)) return nvals;
-    ray_retain(keys);
-    return ray_dict_new(keys, nvals);               /* consumes keys + nvals */
+    for (int64_t k = 0; k < steps; k++) {
+        ray_t* kk = key_atom ? (ray_retain(key), key) : q_elem_at(key, k);  /* owned */
+        if (!kk || RAY_IS_ERR(kk)) { ray_release(keys); ray_release(vals); return kk; }
+        /* locate kk in the working keys (linear; dicts are small) */
+        int64_t pos = -1, kn = ray_len(keys);
+        for (int64_t j = 0; j < kn; j++) {
+            ray_t* kj = ray_list_get(keys, j);       /* borrowed */
+            if (q_values_match(kj, kk)) { pos = j; break; }
+        }
+        int64_t yi = key_atom ? -1 : k;
+        if (pos >= 0) {
+            ray_t* cur = ray_list_get(vals, pos);    /* borrowed */
+            ray_t* nv = q_amend_step(f, cur, y, yi);
+            if (!nv || RAY_IS_ERR(nv)) { ray_release(kk); ray_release(keys); ray_release(vals); return nv; }
+            vals = ray_list_set(vals, pos, nv);
+            ray_release(nv);
+        } else {                                     /* insert: apply to generic null */
+            ray_t* nv = q_amend_step(f, RAY_NULL_OBJ, y, yi);
+            if (!nv || RAY_IS_ERR(nv)) { ray_release(kk); ray_release(keys); ray_release(vals); return nv; }
+            keys = ray_list_append(keys, kk);        /* RETAINS kk */
+            vals = ray_list_append(vals, nv);
+            ray_release(nv);
+        }
+        ray_release(kk);
+    }
+    ray_t* ck = q_collapse_list(keys);  ray_release(keys);
+    ray_t* cv = q_collapse_list(vals);  ray_release(vals);
+    if (!ck || RAY_IS_ERR(ck)) { if (cv) ray_release(cv); return ck; }
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(ck); return cv; }
+    return ray_dict_new(ck, cv);                     /* consumes ck + cv */
 }
 
 /* Amend At — @[v;i;f] / @[v;i;f;y] / @[v;::;f...] (whole) / dict amend.
