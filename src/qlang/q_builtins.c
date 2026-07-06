@@ -52,7 +52,10 @@ static ray_t* q_string_fn(ray_t* x) {
         return s;
     }
     if (x->type == -RAY_STR) { ray_retain(x); return x; }
-    if (ray_is_atom(x)) return ray_fmt(x, 0);
+    /* Only a simple VECTOR or a boxed LIST maps element-wise; atoms and
+     * whole-value containers (tables, dicts, and anything else) keep the base
+     * formatter — indexing a table by 0..ncols would fabricate junk rows. */
+    if (!ray_is_vec(x) && x->type != RAY_LIST) return ray_fmt(x, 0);
     /* vector or boxed list: per-element string */
     int64_t n = ray_len(x);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
