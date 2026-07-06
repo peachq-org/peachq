@@ -212,6 +212,16 @@ void ray_lang_print(FILE* fp, ray_t* val);
 typedef ray_t* (*ray_apply_hook_t)(ray_t* head, ray_t** args, int64_t n);
 void ray_eval_set_apply_hook(ray_apply_hook_t hook);
 
+/* openq: remote-source string evaluation (IPC request payloads, journal
+ * replay).  A language layer may install a hook that owns the parse+eval
+ * of remote SOURCE STRINGS (openq installs q_parse -> q_lower -> ray_eval
+ * at q boot); without a hook the engine's own ray_eval_str runs (rayfall —
+ * the engine binary's IPC dialect).  The hook receives the bytes and
+ * length (NOT NUL-terminated) and returns an OWNED value. */
+typedef ray_t* (*ray_remote_str_fn_t)(const char* src, size_t len);
+void   ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn);
+ray_t* ray_eval_remote_str(const char* src, size_t len);
+
 /* Interrupt support: allow external code (REPL signal handler) to request
  * that the evaluator abort early.  ray_eval() and the bytecode VM check
  * this flag at function-call and loop boundaries. */

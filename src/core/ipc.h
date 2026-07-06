@@ -29,7 +29,12 @@
 #include "core/sock.h"
 #include "store/serde.h"
 
-/* ===== Compression ===== */
+/* ===== Compression =====
+ *
+ * WIRE-DEAD since Phase C: the kdb wire never compresses in either
+ * direction (compression is deferred — Phase F; a compressed inbound
+ * frame is refused).  These functions remain because the journal may
+ * hold Phase-B-era compressed frames within wire version 5. */
 
 #define RAY_IPC_COMPRESS_THRESHOLD 2000
 
@@ -53,14 +58,11 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
  * crash + restart silently elevates restricted commands to full
  * privilege. */
 #define RAY_IPC_FLAG_RESTRICTED 0x02
-/* Set by clients that want a "verbose" eval response: the server
- * captures whatever the eval wrote to stdout/stderr and returns a
- * 2-element list [captured_str, result] instead of bare result.
- * Used by the remote-REPL client wrapper so a `(println x)` from
- * the connected client produces output on the *client's* terminal,
- * not on the server's.  Default sync messages still get the bare
- * result, so existing IPC clients are unaffected. */
-#define RAY_IPC_FLAG_VERBOSE    0x04
+/* NB: both flags above are JOURNAL-ENVELOPE flags only (the 16-byte
+ * ray_ipc_header_t persists as the journal frame envelope).  The kdb
+ * socket wire (Phase C) has no flags byte — its 8-byte header carries
+ * endian/msgtype/compressed only.  The old RAY_IPC_FLAG_VERBOSE wire
+ * flag is gone with the native protocol. */
 #define RAY_IPC_MAX_CONNS 256
 
 /* ===== Connection hooks (.ipc.on.*) ===== */
@@ -86,7 +88,14 @@ typedef struct ray_ipc_conn {
     size_t            rx_len;
     size_t            rx_need;
     uint8_t           phase;
-    ray_ipc_header_t  hdr;
+    /* current kdb frame (8-byte header already parsed) */
+    uint8_t           msgtype;
+    uint8_t           swap;       /* frame is big-endian */
+    uint32_t          plen;       /* payload length (excl. header) */
+    /* handshake creds accumulator ("user:pass" + cap byte, NUL-terminated
+     * on the wire; stored without the NUL) */
+    uint8_t           hs[512];
+    uint16_t          hs_len;
 } ray_ipc_conn_t;
 
 typedef struct ray_ipc_server {
@@ -116,8 +125,11 @@ int       ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms);
 
 /* timeout_ms > 0 bounds the TCP connect and the handshake I/O; <= 0 uses
  * the default budget.  Returns the handle (>= 0) or a negative code:
- * -1 refused/error, -2 auth required, -3 auth failed, -4 wire mismatch,
- * -5 connect timed out. */
+ * -1 refused/error, -3 auth rejected (kdb servers reject by closing the
+ * connection without a capability byte), -5 connect timed out.
+ * (The old -2 "auth required" and -4 "wire version mismatch" codes died
+ * with the native protocol: the kdb handshake always carries creds and
+ * has no version byte.) */
 int64_t   ray_ipc_connect(const char* host, uint16_t port,
                            const char* user, const char* password,
                            int timeout_ms);
@@ -125,12 +137,10 @@ void      ray_ipc_close(int64_t handle);
 ray_t*    ray_ipc_send(int64_t handle, ray_t* msg);
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
 
-/* Remote-REPL helper: send a SYNC message with RAY_IPC_FLAG_VERBOSE
- * set, returning a 2-element list [captured_str, result] where
- * captured_str is whatever the server's eval wrote to stdout/stderr
- * (combined) while running this request.  Used by the `-h` client
- * loop in main.c so output produced by the remote eval is shown on
- * the local user's terminal, not lost on the server. */
+/* Remote-REPL helper.  The kdb wire has no output-capture flag: the
+ * server prints display output on ITS console (kdb behaviour), so
+ * captured_str is now always "".  The 2-element [captured_str, result]
+ * response SHAPE is preserved for the `-h` client loop in main.c. */
 ray_t*    ray_ipc_send_verbose(int64_t handle, ray_t* msg);
 
 #endif /* RAY_IPC_H */

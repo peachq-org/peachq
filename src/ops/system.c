@@ -956,9 +956,9 @@ ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg) {
     if (!ray_is_atom(handle) || (handle->type != -RAY_I64 && handle->type != -RAY_I32))
         return ray_error("type", ".ipc.send expects an i64 or i32 handle, got %s", ray_type_name(handle->type));
     int64_t h = (handle->type == -RAY_I64) ? handle->i64 : handle->i32;
-    /* Validate message is serializable (reject builtins, etc.) */
-    if (ray_serde_size(msg) <= 0)
-        return ray_error("type", "message not serializable");
+    /* Wire-serializability (kdb frames, q_wire) is the send path's call:
+     * serde-expressible values (builtin fns, ext-band records) are NOT
+     * wire-expressible, so no ray_serde_size precheck here (Phase C). */
     return ray_ipc_send(h, msg);
 }
 
@@ -970,9 +970,7 @@ ray_t* ray_hpost_fn(ray_t* handle, ray_t* msg) {
     if (!ray_is_atom(handle) || (handle->type != -RAY_I64 && handle->type != -RAY_I32))
         return ray_error("type", ".ipc.post expects an i64 or i32 handle, got %s", ray_type_name(handle->type));
     int64_t h = (handle->type == -RAY_I64) ? handle->i64 : handle->i32;
-    /* Validate message is serializable (reject builtins, etc.) */
-    if (ray_serde_size(msg) <= 0)
-        return ray_error("type", "message not serializable");
+    /* No serde-size precheck (Phase C) — see ray_hsend_fn above. */
     ray_err_t rc = ray_ipc_send_async(h, msg);
     if (rc != RAY_OK)
         return ray_error("io", "ipc async send failed");
