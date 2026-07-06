@@ -65,10 +65,20 @@ int main(int argc, char** argv) {
     }
 
     if (port > 0) {
-        if (poll && ray_ipc_listen(poll, port) >= 0)
+        if (poll && ray_ipc_listen(poll, port) >= 0) {
             fprintf(stderr, "listening on port %u\n", port);
-        else
+        } else {
+            /* A dead listener must not fall through into a silent
+             * ray_poll_run with nothing registered (a hang) — exit
+             * non-zero so a supervisor flags the failure. */
             fprintf(stderr, "failed to listen on port %u\n", port);
+            if (poll) {
+                ray_runtime_set_poll(NULL);
+                ray_poll_destroy(poll);
+            }
+            q_runtime_destroy(rt);
+            return 2;
+        }
     }
 
     int stdin_tty = isatty(STDIN_FILENO);
