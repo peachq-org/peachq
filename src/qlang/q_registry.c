@@ -1054,8 +1054,16 @@ static ray_t* q_ratios_wrap(ray_t* x) {
     double* o = (double*)ray_data(out);
     for (int64_t i = 0; i < n; i++) {
         int nu; double v = q_velem_f(x, i, &nu);
-        if (i == 0) o[i] = v;
-        else { int pnu; double pv = q_velem_f(x, i-1, &pnu); o[i] = pv==0 ? 0 : v/pv; }
+        if (i == 0) {                       /* r[0] = x[0] (null stays null) */
+            if (nu) { o[i] = 0; ray_vec_set_null(out, i, true); } else o[i] = v;
+            continue;
+        }
+        int pnu; double pv = q_velem_f(x, i-1, &pnu);
+        /* r[i] = x[i] % x[i-1] with q float-divide semantics: a null operand or
+         * a zero divisor yields null (the engine's `%` canonicalizes ±inf/NaN
+         * to 0n), not a fabricated value. */
+        if (nu || pnu || pv == 0) { o[i] = 0; ray_vec_set_null(out, i, true); }
+        else o[i] = v / pv;
     }
     return out;
 }
