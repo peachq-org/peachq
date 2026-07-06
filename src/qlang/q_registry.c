@@ -60,7 +60,7 @@ typedef struct {
 } entry_t;
 
 /* Upper bound: every manifest row can contribute at most two entries. */
-static entry_t g_entries[2 * 96];   /* 2 slots per manifest row; grown past 64 rows at the display+adverbs merge (2026-07-06) */
+static entry_t g_entries[2 * 128];  /* 2 slots per manifest row; grown 96->128 at the list-verb merge (2026-07-06) */
 static int     g_count    = 0;
 static bool    g_inited   = false;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
@@ -1272,6 +1272,182 @@ static ray_t* q_within_wrap(ray_t* x, ray_t* y) {
     return a;
 }
 
+/* ===== q list verbs (feat/q-list-verbs) ===================================
+ * rotate / sublist / next / prev / fill (`^`).  kdb rotate.md, sublist.md,
+ * next.md, prev.md, and `^` (fill).  rotate/sublist reuse q_gather (index-vector
+ * gather via ray_at_fn, collapsed to a typed vector; string-aware); next/prev do
+ * a typed-vector shift with a sentinel-null fill; fill coalesces nulls.  Dict /
+ * table / mixed-list / non-nullable-type forms are DEFERRED cells (error, never
+ * a wrong answer) — their ledger rows live in the *-deferred.qcmd companions. */
+
+/* q `n rotate x` — cyclic shift left by n (negative = right; kdb rotate.md).
+ * n is an int atom; the right arg is a vector/list/string.  Empty x returns a
+ * copy (no modulo-by-zero).  Reuses q_gather with recycle=1. */
+static ray_t* q_rotate_wrap(ray_t* n, ray_t* x) {
+    if (!n || !(n->type == -RAY_I64 || n->type == -RAY_I32 || n->type == -RAY_I16))
+        return ray_error("type", "rotate: left arg must be an int atom");
+    if (RAY_ATOM_IS_NULL(n))
+        return ray_error("nyi", "rotate: 0N left arg is deferred");
+    if (!x || (!ray_is_vec(x) && x->type != RAY_LIST && x->type != -RAY_STR))
+        return ray_error("type", "rotate: right arg must be a list, vector, or string (table deferred)");
+    int64_t total = (x->type == -RAY_STR) ? (int64_t)ray_str_len(x) : ray_len(x);
+    if (total <= 0) { ray_retain(x); return x; }
+    int64_t k = q_iatom_val(n);
+    k = ((k % total) + total) % total;         /* normalize into [0,total) */
+    return q_gather(x, k, total, total, 1);     /* recycle -> cyclic */
+}
+
+/* q `n sublist x` — sub-list (kdb sublist.md).  Atom n>=0 -> first min(n,len);
+ * n<0 -> last min(|n|,len).  Int-pair `i j` -> j items from position i (both
+ * clamped into range; TRUNCATING, never null-extending).  Reuses q_gather with
+ * recycle=0.  Dict / table right args are deferred. */
+static ray_t* q_sublist_wrap(ray_t* n, ray_t* x) {
+    if (!x || (!ray_is_vec(x) && x->type != RAY_LIST && x->type != -RAY_STR))
+        return ray_error("type", "sublist: right arg must be a list, vector, or string (dict/table deferred)");
+    int64_t total = (x->type == -RAY_STR) ? (int64_t)ray_str_len(x) : ray_len(x);
+    int64_t start, count;
+    if (n && (n->type == -RAY_I64 || n->type == -RAY_I32 || n->type == -RAY_I16)) {
+        if (RAY_ATOM_IS_NULL(n)) return ray_error("nyi", "sublist: 0N left arg is deferred");
+        int64_t k = q_iatom_val(n);
+        if (k >= 0) { start = 0; count = (k < total) ? k : total; }
+        else { int64_t kk = -k; count = (kk < total) ? kk : total; start = total - count; }
+    } else if (n && (n->type == RAY_I64 || n->type == RAY_I32 || n->type == RAY_I16) &&
+               ray_len(n) == 2) {
+        int64_t i = q_ivec_get(n, 0), j = q_ivec_get(n, 1);
+        if (i < 0) i = 0;                        /* clamp negative start to 0 */
+        if (j < 0) j = 0;
+        start = (i < total) ? i : total;
+        count = j;
+        if (start + count > total) count = total - start;   /* truncate tail */
+        if (count < 0) count = 0;
+    } else {
+        return ray_error("type", "sublist: left arg must be an int atom or a 2-item int vector");
+    }
+    return q_gather(x, start, count, total, 0);  /* truncating, no recycle */
+}
+
+/* q `next x` / `prev x` — shift a simple vector by one, null-filling the vacated
+ * end (kdb next.md / prev.md).  Restricted to the sentinel-nullable element
+ * types (int / float / temporal): SYM/BOOL/U8/STR/LIST/atom forms have no
+ * shift-in null here and are deferred cells. */
+static ray_t* q_shift1(ray_t* x, int forward) {
+    if (!x || !ray_is_vec(x))
+        return ray_error("nyi", "next/prev: only simple numeric vectors (list/string/sym/atom deferred)");
+    int8_t t = x->type;
+    if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
+          t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP))
+        return ray_error("nyi", "next/prev: %s vectors are deferred", ray_type_name(t));
+    int64_t len = ray_len(x);
+    size_t esz = ray_type_sizes[(uint8_t)t];
+    ray_t* out = ray_vec_new(t, len > 0 ? len : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = len;
+    char* o = (char*)ray_data(out);
+    const char* in = (const char*)ray_data(x);
+    if (len > 0) {
+        if (forward) {                           /* next: o[i]=x[i+1], tail null */
+            if (len > 1) memcpy(o, in + esz, (size_t)(len - 1) * esz);
+            ray_vec_set_null(out, len - 1, true);
+        } else {                                 /* prev: o[i]=x[i-1], head null */
+            if (len > 1) memcpy(o + esz, in, (size_t)(len - 1) * esz);
+            ray_vec_set_null(out, 0, true);
+        }
+    }
+    return out;
+}
+static ray_t* q_next_wrap(ray_t* x) { return q_shift1(x, 1); }
+static ray_t* q_prev_wrap(ray_t* x) { return q_shift1(x, 0); }
+
+/* q `x^y` — fill: coalesce nulls in y with x (kdb `^`).  x may be an atom
+ * (broadcast) or a same-length vector (element-wise).  Numeric result type:
+ * F64 if EITHER operand is float, else I64 (the narrower-int-preserving lattice
+ * is a deferred refinement — the `type` ledger rows that need it are blocked by
+ * a separate `0n 2 3i` parse bug and split out).  Symbol fill is a distinct
+ * path.  Dict / `fills` forward-fill / table / fill-scan forms are deferred. */
+static int q_is_float_t(int8_t t) {
+    return t == RAY_F64 || t == RAY_F32 || t == -RAY_F64 || t == -RAY_F32;
+}
+static int q_is_num_t(int8_t t) {
+    return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+           t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_U8 || t == -RAY_I16 ||
+           t == -RAY_I32 || t == -RAY_I64 || t == -RAY_F32 || t == -RAY_F64;
+}
+static int q_is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
+
+static ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "^: nil operand");
+    int xatom = ray_is_atom(x), yatom = ray_is_atom(y);
+
+    /* ---- symbol fill ---- */
+    if (q_is_sym_t(x->type) || q_is_sym_t(y->type)) {
+        if (!q_is_sym_t(x->type) || !q_is_sym_t(y->type))
+            return ray_error("type", "^: symbol fill needs symbol operands");
+        /* length follows y when it is a vector; a scalar y broadcasts to the
+         * length of a vector x (`` `a`b`c^` `` -> 3 items), matching the
+         * numeric branch below. */
+        int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
+        if (!xatom && !yatom && ray_len(x) != len)
+            return ray_error("length", "^: operand lengths must match");
+        ray_t* outl = ray_list_new(len > 0 ? len : 1);
+        if (RAY_IS_ERR(outl)) return outl;
+        for (int64_t i = 0; i < len; i++) {
+            int64_t yid;
+            if (yatom) yid = y->i64;
+            else { ray_t* ia = ray_i64(i); ray_t* ye = ray_at_fn(y, ia); ray_release(ia);
+                   if (!ye || RAY_IS_ERR(ye)) { ray_release(outl); return ye; }
+                   yid = ye->i64; ray_release(ye); }
+            int64_t use = yid;
+            if (yid == 0) {                      /* empty/null sym -> fill */
+                if (xatom) use = x->i64;
+                else { ray_t* ia = ray_i64(i); ray_t* xe = ray_at_fn(x, ia); ray_release(ia);
+                       if (!xe || RAY_IS_ERR(xe)) { ray_release(outl); return xe; }
+                       use = xe->i64; ray_release(xe); }
+            }
+            ray_t* se = ray_sym(use);
+            outl = ray_list_append(outl, se); ray_release(se);
+            if (RAY_IS_ERR(outl)) return outl;
+        }
+        ray_t* c = q_collapse_list(outl); ray_release(outl);
+        if (yatom && xatom) {                    /* scalar^scalar -> atom */
+            ray_t* ia = ray_i64(0); ray_t* a = ray_at_fn(c, ia); ray_release(ia); ray_release(c);
+            return a;
+        }
+        return c;
+    }
+
+    /* ---- numeric fill ---- */
+    if (!q_is_num_t(x->type) || !q_is_num_t(y->type))
+        return ray_error("type", "^: unsupported operand types (dict/table/list fill deferred)");
+    int is_float = q_is_float_t(x->type) || q_is_float_t(y->type);
+    int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
+    if (!xatom && !yatom && ray_len(x) != ray_len(y))
+        return ray_error("length", "^: operand lengths must match");
+    if (xatom && yatom) {                        /* scalar^scalar -> atom */
+        int yn; double yv = q_velem_f(y, 0, &yn);
+        if (!yn) return is_float ? ray_f64(yv) : ray_i64((int64_t)yv);
+        int xn; double xv = q_velem_f(x, 0, &xn);
+        if (xn) return ray_typed_null(is_float ? -RAY_F64 : -RAY_I64);
+        return is_float ? ray_f64(xv) : ray_i64((int64_t)xv);
+    }
+    ray_t* out = ray_vec_new(is_float ? RAY_F64 : RAY_I64, len > 0 ? len : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = len;
+    void* o = ray_data(out);
+    for (int64_t i = 0; i < len; i++) {
+        int yn; double yv = yatom ? q_velem_f(y, 0, &yn) : q_velem_f(y, i, &yn);
+        double v; int isnull = 0;
+        if (!yn) v = yv;
+        else {
+            int xn; double xv = xatom ? q_velem_f(x, 0, &xn) : q_velem_f(x, i, &xn);
+            if (xn) { v = 0; isnull = 1; } else v = xv;
+        }
+        if (is_float) ((double*)o)[i] = isnull ? NULL_F64 : v;
+        else          ((int64_t*)o)[i] = isnull ? NULL_I64 : (int64_t)v;
+        if (isnull) ray_vec_set_null(out, i, true);
+    }
+    return out;
+}
+
 /* Call the env-bound BINARY builtin `nm` (the wrapper-over-env pattern:
  * some base fns — dict — are declared only in internal base headers, so the
  * wrapper routes through the audited env value instead of a frozen-header
@@ -1500,6 +1676,37 @@ static ray_t* q_distinct_wrap(ray_t* x) {
     return c;
 }
 
+/* Deal n distinct values from [0,total) — partial Fisher-Yates over `til total`,
+ * take the first n (kdb deal / permute; uses the same libc rand() the roll path
+ * does).  n<=total required.  Result is an owned I64 vector. */
+static ray_t* q_deal_indices(int64_t n, int64_t total) {
+    if (n < 0) return ray_error("domain", "?: deal count must be non-negative");
+    if (n > total) return ray_error("length", "?: cannot deal %lld from %lld",
+                                    (long long)n, (long long)total);
+    ray_t* arr = ray_vec_new(RAY_I64, total > 0 ? total : 1);
+    if (RAY_IS_ERR(arr)) return arr;
+    arr->len = total;
+    int64_t* a = (int64_t*)ray_data(arr);
+    for (int64_t i = 0; i < total; i++) a[i] = i;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t range = total - i;
+        int64_t j = i + (int64_t)(rand() % range);
+        int64_t t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    arr->len = n;                          /* take first n (buffer already sized) */
+    return arr;
+}
+
+/* Deal/permute n indices then gather them from the list y (collapsed). */
+static ray_t* q_deal_pick(int64_t n, ray_t* y) {
+    ray_t* idx = q_deal_indices(n, ray_len(y));
+    if (!idx || RAY_IS_ERR(idx)) return idx;
+    ray_t* out = ray_at_fn(y, idx);
+    ray_release(idx);
+    if (out && out->type == RAY_LIST) { ray_t* c = q_collapse_list(out); ray_release(out); return c; }
+    return out;
+}
+
 /* q `x?y` — find / roll / pick (type-dispatch on the operands).
  *   list ? y   -> find.  kdb miss semantics: the smallest index NOT in the
  *                 list, i.e. `count x` — rayfall find returns 0N on a miss
@@ -1529,10 +1736,25 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
     }
     if (x && (x->type == -RAY_I64 || x->type == -RAY_I32)) {
         int64_t nx = (x->type == -RAY_I64) ? x->i64 : x->i32;
-        if (RAY_ATOM_IS_NULL(x))
-            return ray_error("nyi", "?: permute (0N?y) is deferred");
-        if (nx < 0)
-            return ray_error("nyi", "?: deal (without replacement) is deferred");
+        if (RAY_ATOM_IS_NULL(x)) {                  /* 0N ? y — permute all items */
+            if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {
+                int64_t m = (y->type == -RAY_I64) ? y->i64 : y->i32;
+                if (m < 0) return ray_error("type", "?: permute needs a non-negative count");
+                return q_deal_indices(m, m);
+            }
+            if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return q_deal_pick(ray_len(y), y);
+            return ray_error("nyi", "?: permute of this operand is deferred");
+        }
+        if (nx < 0) {                               /* -n ? y — deal, no replacement */
+            int64_t n = -nx;
+            if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {
+                int64_t m = (y->type == -RAY_I64) ? y->i64 : y->i32;
+                if (m <= 0) return ray_error("domain", "?: deal max must be positive");
+                return q_deal_indices(n, m);
+            }
+            if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return q_deal_pick(n, y);
+            return ray_error("nyi", "?: deal of this operand is deferred");
+        }
         if (y && (y->type == -RAY_I64 || y->type == -RAY_I32))  /* roll */
             return q_env_call2("rand", x, y);
         if (y && (ray_is_vec(y) || y->type == RAY_LIST)) {      /* pick */
@@ -3274,7 +3496,9 @@ static ray_t* q_funsql_select_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
      * (a is a dict), or the last row as a dictionary (a is `()`).  See
      * funsql.md "No grouping". */
     if (funsql_empty(b)) {
-        if (a && (a->type == -RAY_SYM || (a->type == RAY_LIST && funsql_is_fn(((ray_t**)ray_data(a))[0])))) {
+        if (a && (a->type == -RAY_SYM ||
+                  (a->type == RAY_LIST && ray_len(a) > 0 &&        /* guard `()` (empty list): no head to read */
+                   funsql_is_fn(((ray_t**)ray_data(a))[0])))) {
             ray_t* r = funsql_eval(a, ft);          /* exec col / parse-tree -> vector/atom */
             ray_release(ft);
             return r;
@@ -3927,6 +4151,11 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_MCOUNT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mcount_wrap);
     case QK_MDEV:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mdev_wrap);
     case QK_EMA:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ema_wrap);
+    case QK_FILL:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_fill_wrap);
+    case QK_ROTATE: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_rotate_wrap);
+    case QK_SUBLIST:return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sublist_wrap);
+    case QK_NEXT:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_next_wrap);
+    case QK_PREV:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prev_wrap);
     default:      return NULL;
     }
 }
