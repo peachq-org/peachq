@@ -2048,6 +2048,76 @@ static ray_t* g_table_value  = NULL;
 static ray_t* g_select_value = NULL;
 static ray_t* g_funsql_select_value = NULL;
 static ray_t* g_funsql_bang_value   = NULL;
+static ray_t* g_lambda_value        = NULL;
+
+/* q.fn — SPECIAL FORM behind every q lambda literal.  q_lower rewrites the
+ * parser's `{`-marker node to (q.fn src params body...); at eval this
+ * delegates lambda creation to the base env `fn` form (same params/body
+ * calling convention) and wraps the resulting RAY_LAMBDA in the 100h
+ * .q.lambda carrier that carries q valence + verbatim source for display.
+ * kdb caps lambdas at 8 arguments -> 'params — signalled HERE (not at parse:
+ * qdoc error rows only match lower/eval errors). */
+static ray_t* q_fn_make(ray_t** args, int64_t n) {
+    if (n < 3 || !args[0] || args[0]->type != -RAY_STR ||
+        !args[1] || args[1]->type != RAY_SYM)
+        return ray_error("type", "q.fn: malformed lambda node");
+    int64_t rank = ray_len(args[1]);
+    if (rank > 8)
+        return ray_error("params", "'params: lambdas take at most 8 arguments");
+    ray_t* fnv = ray_env_get(ray_sym_intern("fn", 2));       /* borrowed */
+    if (!fnv || fnv->type != RAY_VARY)
+        return ray_error("type", "q.fn: base fn form unavailable");
+    ray_t* lam = ((ray_vary_fn)(uintptr_t)fnv->i64)(args + 1, n - 1);
+    if (!lam || RAY_IS_ERR(lam)) return lam;
+    ray_t* c = q_lambda_carrier_new(lam, (int)rank, args[0]);
+    ray_release(lam);                       /* carrier holds its own ref */
+    return c;
+}
+
+ray_t* q_registry_lambda_value(void) { return g_lambda_value; }  /* borrowed */
+
+static ray_t* g_ret_value = NULL;
+static ray_t* g_sig_value = NULL;
+static _Thread_local ray_t* g_qret_payload = NULL;
+
+/* `:x` early return (basics/function-notation.md#explicit-return).  The body
+ * must unwind NOW: eval aborts a lambda body on any RAY_ERROR, so we ride
+ * the error path with the reserved class "q.ret" and stash the payload in a
+ * thread-local for the innermost q_lambda_apply to take. */
+static ray_t* q_ret_fn(ray_t* x) {
+    if (g_qret_payload) { ray_release(g_qret_payload); g_qret_payload = NULL; }
+    if (x) ray_retain(x);
+    g_qret_payload = x;
+    return ray_error("q.ret", NULL);
+}
+
+ray_t* q_lambda_ret_take(void) {
+    ray_t* v = g_qret_payload;      /* owned by the caller now */
+    g_qret_payload = NULL;
+    return v;
+}
+
+/* `'x` Signal (ref/signal.md): abort with error class = the sym spelling /
+ * string text (ray_error copies, 7-char sdata cap — kdb's own classes are
+ * short for the same reason). */
+static ray_t* q_sig_fn(ray_t* x) {
+    char cls[8] = "signal";
+    if (x && x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);
+        if (s) {
+            size_t l = ray_str_len(s); if (l > 7) l = 7;
+            memcpy(cls, ray_str_ptr(s), l); cls[l] = '\0';
+            ray_release(s);
+        }
+    } else if (x && x->type == -RAY_STR) {
+        size_t l = ray_str_len(x); if (l > 7) l = 7;
+        memcpy(cls, ray_str_ptr(x), l); cls[l] = '\0';
+    }
+    return ray_error(cls, NULL);
+}
+
+ray_t* q_registry_ret_value(void) { return g_ret_value; }   /* borrowed */
+ray_t* q_registry_sig_value(void) { return g_sig_value; }   /* borrowed */
 
 ray_t* q_registry_funsql_select_value(void) { return g_funsql_select_value; }
 ray_t* q_registry_funsql_bang_value(void)   { return g_funsql_bang_value; }
@@ -2276,6 +2346,22 @@ ray_err_t q_registry_init(void) {
         g_funsql_bang_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_lambda_value = ray_fn_vary("q.fn",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_fn_make);
+    if (!g_lambda_value || RAY_IS_ERR(g_lambda_value)) {
+        g_lambda_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_ret_value = ray_fn_unary("q.ret", RAY_FN_Q_LOWER, q_ret_fn);
+    if (!g_ret_value || RAY_IS_ERR(g_ret_value)) {
+        g_ret_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_sig_value = ray_fn_unary("q.sig", RAY_FN_Q_LOWER, q_sig_fn);
+    if (!g_sig_value || RAY_IS_ERR(g_sig_value)) {
+        g_sig_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     g_building = false;
     g_inited   = true;
     ray_serde_set_fn_hooks(q_serde_fn_writer, q_serde_fn_reader);
@@ -2335,6 +2421,10 @@ void q_registry_destroy(void) {
     if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
     if (g_funsql_select_value) { ray_release(g_funsql_select_value); g_funsql_select_value = NULL; }
     if (g_funsql_bang_value)   { ray_release(g_funsql_bang_value);   g_funsql_bang_value   = NULL; }
+    if (g_lambda_value)        { ray_release(g_lambda_value);        g_lambda_value        = NULL; }
+    if (g_ret_value)           { ray_release(g_ret_value);           g_ret_value           = NULL; }
+    if (g_sig_value)           { ray_release(g_sig_value);           g_sig_value           = NULL; }
+    if (g_qret_payload)        { ray_release(g_qret_payload);        g_qret_payload        = NULL; }
     g_count  = 0;
     g_inited = false;
 }

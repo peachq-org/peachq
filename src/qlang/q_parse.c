@@ -732,6 +732,12 @@ typedef struct {
     const char *src;
     Tokens t;
     int    pos;
+    /* innermost UNSIGNED lambda's implicit-arg tracker (bit0=x bit1=y bit2=z);
+     * NULL outside lambdas and inside signed ones.  The T_LBRACE arm
+     * saves/restores it so nested lambdas never leak uses outward. */
+    uint8_t *xyz_mask;
+    /* >0 while parsing a lambda body — enables `:expr` early-return syntax */
+    int lambda_depth;
 } Parser;
 
 static Token *cur(Parser *p) { return &p->t.t[p->pos]; }
@@ -773,6 +779,15 @@ static P parse_base(Parser *p) {
     Token *tk = cur(p);
     switch (tk->kind) {
     case T_NOUN: {
+        /* implicit-arg inference: a bare 1-char x/y/z name inside the current
+         * UNSIGNED lambda body bumps its arity (kdb ranks by highest used) */
+        if (p->xyz_mask && tk->len == 1 && tk->k && tk->k->type == -RAY_SYM &&
+            !(tk->k->attrs & Q_ATTR_QUOTED)) {
+            char c = p->src[tk->start];
+            if      (c == 'x') *p->xyz_mask |= 1;
+            else if (c == 'y') *p->xyz_mask |= 2;
+            else if (c == 'z') *p->xyz_mask |= 4;
+        }
         ray_t *v = tk->k; tk->k = NULL;
         adv(p);
         return (P){ R_NOUN, v };
@@ -854,11 +869,70 @@ static P parse_base(Parser *p) {
         return (P){ R_NOUN, e };
     }
     case T_LBRACE: {
+        /* Lambda literal `{[sig] stmt;...}` -> marker node
+         *   ({ src params stmt...)
+         * src is the VERBATIM `{...}` span (kdb echoes it byte-for-byte);
+         * params is a RAY_SYM vector — explicit signature, or x/y/z inferred
+         * by highest implicit used (min rank 1), or empty for `{[] ...}`.
+         * q_lower rewrites the marker head onto the registry `.q.fn` value. */
+        int lb_start = tk->start;
         adv(p);
+        ray_t *params = NULL;              /* NULL until signed / inferred */
+        if (at(p, T_LBRACK)) {
+            adv(p);
+            params = ray_sym_vec_new(RAY_SYM_W64, 4);
+            if (!at(p, T_RBRACK)) {
+                for (;;) {
+                    Token *nt = cur(p);
+                    if (nt->kind != T_NOUN || !nt->k || nt->k->type != -RAY_SYM ||
+                        (nt->k->attrs & Q_ATTR_QUOTED)) {
+                        ray_release(params);
+                        q_die("expected parameter name in lambda signature");
+                    }
+                    int64_t id = nt->k->i64;
+                    params = ray_vec_append(params, &id);
+                    adv(p);
+                    if (at(p, T_SEMI)) { adv(p); continue; }
+                    break;
+                }
+            }
+            expect(p, T_RBRACK, "expected ']' after lambda signature");
+        }
+        uint8_t mine = 0;
+        uint8_t *saved = p->xyz_mask;
+        p->xyz_mask = params ? NULL : &mine;
+        p->lambda_depth++;
         ray_t *e = parse_E(p);
+        p->lambda_depth--;
+        p->xyz_mask = saved;
         expect(p, T_RBRACE, "expected '}'");
-        ray_t *xs[2] = { q_marker("{"), seq_of(e) };
-        return (P){ R_NOUN, q_list(xs, 2) };
+        Token *rb = &p->t.t[p->pos - 1];   /* the consumed '}' */
+        ray_t *src = ray_str(p->src + lb_start,
+                             (size_t)(rb->start + rb->len - lb_start));
+        if (!params) {
+            int hi = (mine & 4) ? 3 : (mine & 2) ? 2 : 1;
+            params = ray_sym_vec_new(RAY_SYM_W64, 4);
+            static const char *xyz[3] = { "x", "y", "z" };
+            for (int i = 0; i < hi; i++) {
+                int64_t id = ray_sym_intern_runtime(xyz[i], 1);
+                params = ray_vec_append(params, &id);
+            }
+        }
+        int64_t bn = ray_len(e);
+        ray_t **bs = (ray_t **)ray_data(e);
+        ray_t *w = ray_list_new(bn + 3);
+        ray_t *m = q_marker("{");
+        w = ray_list_append(w, m);      ray_release(m);
+        w = ray_list_append(w, src);    ray_release(src);
+        w = ray_list_append(w, params); ray_release(params);
+        for (int64_t i = 0; i < bn; i++) {
+            /* empty statements (`{2*x;}`) become `::` name-refs: ray_fn
+             * retains every body expr, so a C NULL here would be fatal */
+            if (bs[i]) { w = ray_list_append(w, bs[i]); }
+            else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+        }
+        ray_release(e);
+        return (P){ R_NOUN, w };
     }
     default:
         return EMPTY;
@@ -906,6 +980,34 @@ static P parse_term(Parser *p) {
 }
 
 static P parse_e(Parser *p) {
+    /* Lambda-body early return `:expr` (basics/function-notation.md): a bare
+     * `:` at expression START inside a lambda body.  Infix assignment never
+     * reaches here with a leading `:` (its lhs noun is consumed first), and
+     * `::` is len 2.  Emits (.q.ret expr); q_lower swaps the head for the
+     * registry q.ret value. */
+    if (p->lambda_depth > 0) {
+        Token *rt = cur(p);
+        if (rt->kind == T_VERB && rt->len == 1 && p->src[rt->start] == ':') {
+            adv(p);
+            P e = parse_e(p);
+            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
+            ray_t *xs[2] = { q_marker(".q.ret"), rhs };
+            return (P){ R_NOUN, q_list(xs, 2) };
+        }
+    }
+    /* Signal `'expr` (ref/signal.md): a bare `'` adverb at expression start
+     * that is NOT the compose form `'[f;g]`.  Emits (.q.sig expr). */
+    {
+        Token *st = cur(p);
+        if (st->kind == T_ADVERB && st->len == 1 && p->src[st->start] == '\'' &&
+            p->t.t[p->pos + 1].kind != T_LBRACK) {
+            adv(p);
+            P e = parse_e(p);
+            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
+            ray_t *xs[2] = { q_marker(".q.sig"), rhs };
+            return (P){ R_NOUN, q_list(xs, 2) };
+        }
+    }
     /* qSQL interception (piece 3): a `select …` statement lowers to kdb's
      * functional parse tree (?;`t;c;b;a).  On any unsupported form parse_qsql
      * soft-fails (restores p->pos, leaves tokens intact) and we fall through to
@@ -1812,6 +1914,45 @@ static int ql_is_lambda(ray_t *node) {
     return r;
 }
 
+/* Lambda literal: swap the `{`-marker head for the registry q.fn value — a
+ * special form that builds the RAY_LAMBDA (via base `fn`) and wraps it in
+ * the 100h .q.lambda carrier.  Runs AFTER the children walk, so body-local
+ * `:` assignments are already `let`.  Registry handout is BORROWED — retain
+ * before embedding.  Cold registry: the marker stays (pre-wave-1 behaviour). */
+static void ql_lambda(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!ql_is_lambda(node)) return;
+    ray_t *v = q_registry_lambda_value();
+    if (!v) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_retain(v);
+    ray_release(e[0]);
+    e[0] = v;
+}
+
+/* Early-return / signal statements: swap the parser's `.q.ret` / `.q.sig`
+ * marker heads for their registry values (same borrowed-handout discipline
+ * as ql_lambda). */
+static void ql_ret_sig(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) != 2) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return;
+    ray_t *v = NULL;
+    if (ray_str_len(s) == 6 && memcmp(ray_str_ptr(s), ".q.ret", 6) == 0)
+        v = q_registry_ret_value();
+    else if (ray_str_len(s) == 6 && memcmp(ray_str_ptr(s), ".q.sig", 6) == 0)
+        v = q_registry_sig_value();
+    ray_release(s);
+    if (!v) return;
+    ray_retain(v);
+    ray_release(e[0]);
+    e[0] = v;
+}
+
 /* ===== qSQL SELECT lowering (piece 3 executor) ==============================
  * The parser keeps `select … from t` / `?[t;c;b;a]` as the SYMBOLIC functional
  * 5-list (?;`t;c;b;a) so `parse` prints it kdb-true.  On the EVAL path only,
@@ -2082,6 +2223,8 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
     err = ql_assign(slot, in_lambda);
     if (err) return err;
+    ql_lambda(slot);
+    ql_ret_sig(slot);
     ql_adv_app(slot);
     /* head position stays a raw (adv;V) 2-list — the PARENT's ql_adv_app
      * consumes it; everywhere else a bare derived verb becomes a carrier. */
