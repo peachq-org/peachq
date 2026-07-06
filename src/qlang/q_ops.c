@@ -80,6 +80,27 @@ static const q_op_t Q_OPS[] = {
      * is out of scope (kdb `vs`/`sv` are strictly dyadic). */
     { "vs",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_VS,    "vs",      NULL  },
     { "sv",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SV,    "sv",      NULL  },
+    /* ---- Wave 5: running scans (monadic prefix keywords) ---- */
+    { "sums",  QLEX_KW_PREFIX, QK_SUMS,  "sums",   QK_NONE,  NULL,      NULL  },
+    { "prds",  QLEX_KW_PREFIX, QK_PRDS,  "prds",   QK_NONE,  NULL,      NULL  },
+    { "maxs",  QLEX_KW_PREFIX, QK_MAXS,  "maxs",   QK_NONE,  NULL,      NULL  },
+    { "mins",  QLEX_KW_PREFIX, QK_MINS,  "mins",   QK_NONE,  NULL,      NULL  },
+    { "avgs",  QLEX_KW_PREFIX, QK_AVGS,  "avgs",   QK_NONE,  NULL,      NULL  },
+    { "ratios",QLEX_KW_PREFIX, QK_RATIOS,"ratios", QK_NONE,  NULL,      NULL  },
+    /* ---- Wave 5: weighted (dyadic infix keywords) ---- */
+    { "wsum",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WSUM,  "wsum",    NULL  },
+    { "wavg",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WAVG,  "wavg",    NULL  },
+    /* ---- Wave 5: statistical (renames of audited base aggregates) ----
+     * kdb `var`/`dev` are POPULATION (÷n); rayfall `var`/`stddev` are SAMPLE
+     * (÷n-1) and `var_pop`/`stddev_pop`/`dev` are population — so q `var`->
+     * `var_pop`, q `svar`->`var`, q `sdev`->`stddev`, q `dev` stays `dev`. */
+    { "med",   QLEX_KW_PREFIX, QK_ENV, "med",       QK_NONE,  NULL,      NULL  },
+    { "var",   QLEX_KW_PREFIX, QK_ENV, "var_pop",   QK_NONE,  NULL,      NULL  },
+    { "svar",  QLEX_KW_PREFIX, QK_ENV, "var",       QK_NONE,  NULL,      NULL  },
+    { "sdev",  QLEX_KW_PREFIX, QK_ENV, "stddev",    QK_NONE,  NULL,      NULL  },
+    { "cor",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "pearson_corr", NULL },
+    { "cov",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_COV,   "cov",     NULL  },
+    { "scov",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SCOV,  "scov",    NULL  },
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
      * do/while by f rank; prior is unary each-prior; peach == each. */
