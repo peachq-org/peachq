@@ -126,6 +126,12 @@ ray_t* q_registry_sig_value(void);
  * reserved "q.ret" error class.  Returns an OWNED value or NULL. */
 ray_t* q_lambda_ret_take(void);
 
+/* Take (and clear) / clear the thread-local full-text payload stashed by a
+ * `'x` signal — Trap hands the handler the whole message, not the ≤7-char
+ * error class.  q_registry_sig_take returns an OWNED string or NULL. */
+ray_t* q_registry_sig_take(void);
+void   q_registry_sig_clear(void);
+
 /* The qSQL SELECT adapter value q_lower embeds when it lowers the functional
  * 5-list (?;`t;c;b;a) onto the base ray_select engine.  Special form; its two
  * operands are the rayfall query dict and the by-key column-name sym vector.
