@@ -1545,6 +1545,37 @@ ray_t *q_parse(const char *src) {
      * bootstraps via q_runtime_create, which initializes the registry. */
     if (!q_registry_ready())
         return ray_error("init", "q_parse: op registry not initialized");
+    /* System-command line: a statement starting with '\' (kdb's column-0
+     * convention).  `\t`/`\ts expr` time the expression via the base `timeit`
+     * special form (kdb returns ms; timing rows are never byte-pinned).  Every
+     * other `\X ...` (namespace/precision/console/dir — session state we do not
+     * model) is accepted as a SILENT no-op so the line parses and runs rather
+     * than raising 'parse.  `\` / `\\` alone are also no-ops here (the REPL
+     * intercepts `\\` for exit before ever calling q_parse). */
+    {
+        const char* s = src;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == '\\') {
+            const char* c = s + 1;
+            while ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z')) c++;
+            size_t clen = (size_t)(c - (s + 1));
+            const char* rest = c;
+            while (*rest == ' ' || *rest == '\t') rest++;
+            int is_t  = (clen == 1 && s[1] == 't');
+            int is_ts = (clen == 2 && s[1] == 't' && s[2] == 's');
+            if ((is_t || is_ts) && *rest) {
+                size_t rl = strlen(rest);
+                char* buf = (char*)malloc(rl + 8);
+                if (!buf) return ray_error("wsfull", "q_parse: out of memory");
+                memcpy(buf, "timeit ", 7);
+                memcpy(buf + 7, rest, rl + 1);
+                ray_t* prog = q_parse(buf);      /* buf starts "timeit ": no recursion */
+                free(buf);
+                return prog;
+            }
+            return RAY_NULL_OBJ;                  /* no-op: parses + runs silently */
+        }
+    }
     init_class();
     g_toks.t = NULL;
     g_toks.n = 0;
