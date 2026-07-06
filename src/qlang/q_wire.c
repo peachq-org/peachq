@@ -131,9 +131,13 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         rc = (w_u8(b, 101) || w_u8(b, 0)) ? -1 : 0;
         goto out;
     }
-    /* q lambda carrier — 100h: root context + source char vector.
-     * Must run BEFORE the generic LIST arm: carriers are boxed lists. */
-    switch (q_deriv_kind_of(x)) {
+    /* q derived-verb carriers — WIRE mode only.  In serde mode ALL carriers
+     * (lambda/projection/monad) are ordinary boxed lists and serialize
+     * STRUCTURALLY (marker sym + fields; the base RAY_LAMBDA goes through
+     * ext 201, builtin bases through ext 200) — exact rebuild, no q-registry
+     * dependence at journal replay, matching v4.  On the wire, a lambda
+     * carrier is kdb 100h (context + source) and projections are 'nyi. */
+    switch (b->serde ? Q_DERIV_NONE : q_deriv_kind_of(x)) {
     case Q_DERIV_LAMBDA: {
         ray_t* src = q_lambda_src(x);                 /* borrowed */
         if (!src || src->type != -RAY_STR) {
@@ -245,8 +249,12 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F32:  case RAY_F64: case RAY_GUID:
     case RAY_TIMESTAMP: case RAY_DATE: case RAY_TIME: {
-        /* fixed-width payloads are bit-identical to kdb on LE hosts */
-        if (w_u8(b, (uint8_t)t) || w_u8(b, 0) || w_count(b, x->len)) goto out;
+        /* fixed-width payloads are bit-identical to kdb on LE hosts.
+         * serde mode carries HAS_NULLS (the reader rescans sentinel types,
+         * but GUID nulls — all-zero payload — are only knowable from the
+         * flag); wire mode emits kdb's 0. */
+        uint8_t vattrs = b->serde ? (uint8_t)(x->attrs & RAY_ATTR_HAS_NULLS) : 0;
+        if (w_u8(b, (uint8_t)t) || w_u8(b, vattrs) || w_count(b, x->len)) goto out;
         uint8_t esz = ray_type_sizes[(uint8_t)t];
         const uint8_t* d = (const uint8_t*)ray_data(x);
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -453,7 +461,7 @@ static ray_t* rd_obj(rcur_t* c);
  * scan sets RAY_ATTR_HAS_NULLS (invariant 16.4, vec.h). */
 static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     if (!r_need(c, 5)) return trunc_err("vector header");
-    (void)r_u8(c);                                    /* attrs — ignored */
+    uint8_t wattrs = r_u8(c);                         /* wire mode: ignored */
     int32_t count = r_i32(c);
     uint8_t esz = ray_type_sizes[(uint8_t)t];
     if (count < 0 || (uint64_t)count * esz > c->rem)
@@ -491,6 +499,9 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     default: break;
     }
     if (has_nulls) v->attrs |= RAY_ATTR_HAS_NULLS;
+    /* serde mode: the flag also covers nulls the scan can't see (GUID
+     * all-zero sentinel) — restore it from the frame. */
+    if (c->serde && (wattrs & RAY_ATTR_HAS_NULLS)) v->attrs |= RAY_ATTR_HAS_NULLS;
     return v;
 }
 
