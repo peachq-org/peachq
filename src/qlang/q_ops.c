@@ -49,6 +49,10 @@ static const q_op_t Q_OPS[] = {
     { "&",     QLEX_GLYPH,     QK_WHERE, "where",    QK_MIN2,  "and",     NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
+    /* q `x^y` — fill: coalesce nulls in y with x.  `^` already lexes as a verb
+     * glyph (VERB_CHARS); this row gives it a registry value.  Monadic `^x`
+     * (kdb: null-of-type / `fills` sans forward-fill) is a deferred cell. */
+    { "^",     QLEX_GLYPH,     QK_NONE, NULL,        QK_FILL,  "fill",    NULL  },
     /* ---- type-dispatch glyphs (2c-2) ---- */
     /* monadic `!` (dict keys) is a K-ism accepted as a deliberate superset
      * (valid q spells it `key`, same value — the `_`/floor precedent). */
@@ -75,6 +79,11 @@ static const q_op_t Q_OPS[] = {
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
     /* q `n cut x` — chunk (int atom) / positional cut (int vector). */
     { "cut",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CUT,   "cut",     NULL  },
+    /* q `n rotate x` / `n sublist x` — dyadic infix keywords (kdb rotate.md /
+     * sublist.md).  Not KW_INFIX -> the scanner would split `n rotate x` into
+     * two statements, so the manifest row is what makes them infix. */
+    { "rotate",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ROTATE, "rotate", NULL  },
+    { "sublist",QLEX_KW_INFIX, QK_NONE, NULL,        QK_SUBLIST,"sublist",NULL  },
     /* q `x vs y` / `x sv y` — split-join / base-encode family (dyadic infix
      * keywords; wrappers, native -RAY_STR + sym + base + byte).  Monadic form
      * is out of scope (kdb `vs`/`sv` are strictly dyadic). */
@@ -122,6 +131,10 @@ static const q_op_t Q_OPS[] = {
     { "count",   QLEX_KW_PREFIX, QK_ENV, "count",    QK_NONE,  NULL,      NULL  },
     { "first",   QLEX_KW_PREFIX, QK_ENV, "first",    QK_NONE,  NULL,      NULL  },
     { "last",    QLEX_KW_PREFIX, QK_ENV, "last",     QK_NONE,  NULL,      NULL  },
+    /* q `next x` / `prev x` — shift a vector by one, null-filling the vacated
+     * end (kdb next.md / prev.md).  No rayfall counterpart, so wrappers. */
+    { "next",    QLEX_KW_PREFIX, QK_NEXT, "next",    QK_NONE,  NULL,      NULL  },
+    { "prev",    QLEX_KW_PREFIX, QK_PREV, "prev",    QK_NONE,  NULL,      NULL  },
     { "where",   QLEX_KW_PREFIX, QK_WHERE, "where",  QK_NONE,  NULL,      NULL  },
     { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
