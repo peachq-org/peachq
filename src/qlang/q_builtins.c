@@ -10,6 +10,7 @@
 #include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_init */
+#include "qlang/q_fmt.h"      /* q_console_show — show's display sink */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "lang/format.h"    /* ray_fmt — q string cast */
@@ -64,6 +65,17 @@ static ray_t* q_case_fn(ray_t* x, int up) {
 }
 static ray_t* q_upper_fn(ray_t* x) { return q_case_fn(x, 1); }
 static ray_t* q_lower_fn(ray_t* x) { return q_case_fn(x, 0); }
+
+/* (show x) — print x's q console display as a SIDE EFFECT (buffered in the q
+ * console sink; the host drains it), then return generic null.  Overrides
+ * rayfall's `show`, which uses the rayfall formatter (`[1 2 3]`) rather than
+ * q_fmt.  qdoc/repl print nothing for the null result, so the row shows only
+ * the buffered display. */
+static ray_t* q_show_fn(ray_t* x) {
+    q_console_show(x);
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
 
 static ray_t* q_id_table(ray_t* x) {
     int64_t nc = ray_table_ncols(x);
@@ -188,6 +200,7 @@ void q_builtins_register(void) {
     bind_unary("string", q_string_fn);
     bind_unary("upper",  q_upper_fn);
     bind_unary("lower",  q_lower_fn);
+    bind_unary("show",   q_show_fn);
     bind_value(".Q.an",  ray_str("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", 63));
     /* `::` — the generic-null VALUE.  Elided call args parse as unquoted `::`
      * name-refs (`f[]` is (`f;::), cases.tsv:43); binding the value makes them

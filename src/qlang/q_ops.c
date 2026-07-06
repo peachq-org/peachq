@@ -73,6 +73,8 @@ static const q_op_t Q_OPS[] = {
     /* q `x within y` — inclusive bounds check (ref/within.md); wrapper because
      * base ray_within_fn is vector-vals-only and width-blind on the range. */
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
+    /* q `n cut x` — chunk (int atom) / positional cut (int vector). */
+    { "cut",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CUT,   "cut",     NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QK_NEG, "neg",      QK_NONE,  NULL,      NULL  },
     { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
@@ -101,6 +103,7 @@ static const q_op_t Q_OPS[] = {
     { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
     { "upper",   QLEX_KW_PREFIX, QK_ENV, "upper",    QK_NONE,  NULL,      NULL  },
     { "lower",   QLEX_KW_PREFIX, QK_ENV, "lower",    QK_NONE,  NULL,      NULL  },
+    { "show",    QLEX_KW_PREFIX, QK_ENV, "show",     QK_NONE,  NULL,      NULL  },
     /* ---- additional monadic pass-through keywords (rayfall name == q name,
      * audited kdb-true element-wise / aggregate semantics). See
      * docs/recipes/add-q-keyword-verb.md. ---- */

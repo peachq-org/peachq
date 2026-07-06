@@ -64,6 +64,7 @@ typedef enum {
                          * count PRESERVING the type (base ray_neg_fn rejects
                          * temporals); non-date input passes through.  time/
                          * timestamp arms are deferred with their datatypes.   */
+    QK_CUT,             /* q `cut` wrapper (int-atom chunk / int-vector cut)     */
     QK_WITHIN           /* q `within` wrapper (bounds check; base ray_within_fn
                          * is vector-vals-only + width-blind, so atom vals
                          * enlist and widths are guarded)                      */

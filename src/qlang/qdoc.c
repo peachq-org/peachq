@@ -77,6 +77,7 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
                         int verbose, FILE* out, const char* path,
                         qdoc_result_t* r) {
     r->examples++;
+    q_console_reset();   /* drop any show/0N! output from a prior example */
 
     ray_t* ast = q_parse(input);
     if (RAY_IS_ERR(ast)) {
@@ -149,8 +150,19 @@ static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
 
     char got[QD_OUT];
     got[0] = '\0';
+    size_t gpos = 0;
+    /* show/0N! side-effect display comes FIRST (e.g. `f 2 3 5 7 3` prints the
+     * `show a` line then the returned sum). */
+    const char* con = q_console_str();
+    if (con && *con) {
+        gpos = strlen(con);
+        if (gpos >= sizeof got) gpos = sizeof got - 1;
+        memcpy(got, con, gpos);
+        got[gpos] = '\0';
+    }
+    q_console_reset();
     /* q console silence: a (last-statement) assignment prints nothing. */
-    if (!RAY_IS_NULL(res) && !is_assign) q_fmt(res, got, sizeof got);
+    if (!RAY_IS_NULL(res) && !is_assign) q_fmt(res, got + gpos, sizeof got - gpos);
     ray_release(res);
 
     char ng[QD_OUT], ne[QD_OUT];
