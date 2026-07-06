@@ -96,6 +96,22 @@ int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 static ray_apply_hook_t g_apply_hook = NULL;
 void ray_eval_set_apply_hook(ray_apply_hook_t hook) { g_apply_hook = hook; }
 
+/* openq remote-source string eval — see eval.h.  NULL = rayfall eval_str. */
+static ray_remote_str_fn_t g_remote_str_fn = NULL;
+void ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn) { g_remote_str_fn = fn; }
+
+ray_t* ray_eval_remote_str(const char* src, size_t len) {
+    if (!src || len == 0) return RAY_NULL_OBJ;
+    if (g_remote_str_fn) return g_remote_str_fn(src, len);
+    char* tmp = (char*)ray_sys_alloc(len + 1);
+    if (!tmp) return ray_error("oom", "remote eval: out of memory");
+    memcpy(tmp, src, len);
+    tmp[len] = '\0';
+    ray_t* r = ray_eval_str(tmp);
+    ray_sys_free(tmp);
+    return r;
+}
+
 ray_t* ray_eval_get_nfo(void) { return __VM ? __VM->nfo : NULL; }
 void   ray_eval_set_nfo(ray_t* nfo) { if (__VM) __VM->nfo = nfo; }
 
