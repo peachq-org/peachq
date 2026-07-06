@@ -101,6 +101,14 @@ static const q_op_t Q_OPS[] = {
     { "cor",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "pearson_corr", NULL },
     { "cov",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_COV,   "cov",     NULL  },
     { "scov",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SCOV,  "scov",    NULL  },
+    /* ---- Wave 5: sliding m-windows + ema (dyadic infix keywords) ---- */
+    { "msum",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MSUM,  "msum",    NULL  },
+    { "mavg",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MAVG,  "mavg",    NULL  },
+    { "mmax",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MMAX,  "mmax",    NULL  },
+    { "mmin",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MMIN,  "mmin",    NULL  },
+    { "mcount",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MCOUNT,"mcount",  NULL  },
+    { "mdev",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MDEV,  "mdev",    NULL  },
+    { "ema",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EMA,   "ema",     NULL  },
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
      * do/while by f rank; prior is unary each-prior; peach == each. */
