@@ -309,10 +309,24 @@ ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype) {
  * Reader
  * ========================================================================== */
 
+/* Host endianness (compile-time).  The `swap` cursor field is FRAME-vs-HOST:
+ * nonzero when the frame's byte order differs from the host's, i.e. the raw
+ * fixed-width payload needs per-element byte swaps.  Scalar readers assemble
+ * from bytes explicitly, driven by the frame's own endianness (`frame_be`),
+ * so they are correct on either host. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define Q_WIRE_HOST_BE 1
+#else
+#define Q_WIRE_HOST_BE 0
+#endif
+
 typedef struct {
     const uint8_t* p;
     size_t rem;
-    int    swap;      /* frame encoded big-endian -> byte-swap scalars */
+    int    frame_be;    /* frame encoded big-endian (header byte 0 == 0x00) */
+    int    swap;        /* frame byte order != host byte order */
+    int    top_err_ok;  /* the TOP-LEVEL object decoded as a wire -128h error */
+    int    depth0;      /* g_wire_depth at cursor creation (top-level marker) */
 } rcur_t;
 
 static int r_need(rcur_t* c, size_t n) { return c->rem >= n; }
@@ -320,18 +334,23 @@ static int r_need(rcur_t* c, size_t n) { return c->rem >= n; }
 static uint8_t r_u8(rcur_t* c) { uint8_t v = c->p[0]; c->p++; c->rem--; return v; }
 
 static int16_t r_i16(rcur_t* c) {
-    uint16_t v; memcpy(&v, c->p, 2); c->p += 2; c->rem -= 2;
-    if (c->swap) v = __builtin_bswap16(v);
+    const uint8_t* d = c->p; c->p += 2; c->rem -= 2;
+    uint16_t v = c->frame_be ? (uint16_t)((uint16_t)d[0] << 8 | d[1])
+                             : (uint16_t)((uint16_t)d[1] << 8 | d[0]);
     int16_t r; memcpy(&r, &v, 2); return r;
 }
 static int32_t r_i32(rcur_t* c) {
-    uint32_t v; memcpy(&v, c->p, 4); c->p += 4; c->rem -= 4;
-    if (c->swap) v = __builtin_bswap32(v);
+    const uint8_t* d = c->p; c->p += 4; c->rem -= 4;
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++)
+        v |= (uint32_t)d[i] << (8 * (c->frame_be ? 3 - i : i));
     int32_t r; memcpy(&r, &v, 4); return r;
 }
 static int64_t r_i64(rcur_t* c) {
-    uint64_t v; memcpy(&v, c->p, 8); c->p += 8; c->rem -= 8;
-    if (c->swap) v = __builtin_bswap64(v);
+    const uint8_t* d = c->p; c->p += 8; c->rem -= 8;
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++)
+        v |= (uint64_t)d[i] << (8 * (c->frame_be ? 7 - i : i));
     int64_t r; memcpy(&r, &v, 8); return r;
 }
 static float r_f32(rcur_t* c) {
@@ -422,6 +441,10 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             char code[16];
             if (n > sizeof code - 1) n = sizeof code - 1;
             memcpy(code, s, n); code[n] = 0;
+            /* mark a SUCCESSFULLY decoded top-level wire error so the frame
+             * gate can still reject trailing junk (a decode FAILURE error
+             * must not be masked by the trailing-bytes check). */
+            if (g_wire_depth == c->depth0 + 1) c->top_err_ok = 1;
             return ray_error(code, NULL);
         }
         case RAY_BOOL: if (!r_need(c, 1)) return trunc_err("bool"); return ray_bool(r_u8(c) != 0);
@@ -605,7 +628,13 @@ static ray_t* rd_obj(rcur_t* c) {
 }
 
 ray_t* q_wire_read_obj(const uint8_t* buf, size_t len, size_t* consumed, int swap) {
-    rcur_t c = { buf, len, swap };
+    /* public contract: `swap` = frame is big-endian (see q_wire.h) */
+    rcur_t c = {0};
+    c.p = buf;
+    c.rem = len;
+    c.frame_be = (swap != 0);
+    c.swap = (swap != 0) != (Q_WIRE_HOST_BE != 0);
+    c.depth0 = g_wire_depth;
     ray_t* r = rd_obj(&c);
     if (consumed) *consumed = len - c.rem;
     return r;
@@ -618,24 +647,32 @@ ray_t* q_wire_deserialize(ray_t* bytes) {
     int64_t n = bytes->len;
     if (n < 9)
         return ray_error("domain", "q_wire: frame shorter than header");
-    int swap;
-    if (p[0] == 0x01)      swap = 0;
-    else if (p[0] == 0x00) swap = 1;
+    int frame_be;
+    if (p[0] == 0x01)      frame_be = 0;
+    else if (p[0] == 0x00) frame_be = 1;
     else return ray_error("domain", "q_wire: bad endianness byte 0x%02x", p[0]);
     if (p[2] != 0)
         return ray_error("nyi", "q_wire: compressed frames not yet implemented");
-    uint32_t total;
-    memcpy(&total, p + 4, 4);
-    if (swap) total = __builtin_bswap32(total);
+    uint32_t total = frame_be
+        ? ((uint32_t)p[4] << 24 | (uint32_t)p[5] << 16 | (uint32_t)p[6] << 8 | p[7])
+        : ((uint32_t)p[7] << 24 | (uint32_t)p[6] << 16 | (uint32_t)p[5] << 8 | p[4]);
     if ((int64_t)total != n)
         return ray_error("domain", "q_wire: frame length %u does not match %lld bytes",
                          (unsigned)total, (long long)n);
-    size_t consumed = 0;
-    ray_t* r = q_wire_read_obj(p + 8, (size_t)(n - 8), &consumed, swap);
-    if (r && !RAY_IS_ERR(r) && consumed != (size_t)(n - 8)) {
-        ray_release(r);
+    rcur_t c = {0};
+    c.p = p + 8;
+    c.rem = (size_t)(n - 8);
+    c.frame_be = frame_be;
+    c.swap = (frame_be != 0) != (Q_WIRE_HOST_BE != 0);
+    c.depth0 = g_wire_depth;
+    ray_t* r = rd_obj(&c);
+    /* the payload must be exactly one object: reject trailing bytes for
+     * ordinary values AND for successfully decoded wire errors (-128h);
+     * a decode-failure error passes through untouched. */
+    if (r && c.rem != 0 && (!RAY_IS_ERR(r) || c.top_err_ok)) {
+        if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         return ray_error("domain", "q_wire: %lld trailing payload bytes",
-                         (long long)((size_t)(n - 8) - consumed));
+                         (long long)c.rem);
     }
     return r;
 }
