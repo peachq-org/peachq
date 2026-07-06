@@ -35,7 +35,13 @@
  *              endiannesses are read, little-endian is emitted.  The
  *              256MB frame guard is enforced here.  A nonzero compressed
  *              byte is refused ('nyi — compression is Phase F): we never
- *              set it on send and close on receipt.
+ *              set it on send and close on receipt.  KNOWN GAP: we still
+ *              reply capability 3 (timestamp/UUID-capable — replying 0
+ *              would make clients downgrade their type usage), so a
+ *              remote NON-localhost kdb client may legally compress a
+ *              >2000-byte message and get dropped; kdb never compresses
+ *              on localhost links, which is every current consumer.
+ *              Phase F closes this.
  *   payload    ONE q_wire object (src/qlang/q_wire.c, kb/serialization.md
  *              grammar).  Whole-payload consumption is enforced; trailing
  *              bytes are protocol corruption and close the connection.
@@ -362,7 +368,10 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
                 name, (long long)handle);
     }
     ray_release(arg);
-    if (r && r != RAY_NULL_OBJ) ray_release(r);
+    if (r) {
+        if (RAY_IS_ERR(r)) ray_error_free(r);
+        else if (r != RAY_NULL_OBJ) ray_release(r);
+    }
 }
 
 /* Call the on.auth hook with (user, pass) string atoms.  Returns:
@@ -409,7 +418,10 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     } else {
         ok = is_truthy(r) ? 1 : 0;
     }
-    if (r && r != RAY_NULL_OBJ) ray_release(r);
+    if (r) {
+        if (RAY_IS_ERR(r)) ray_error_free(r);
+        else if (r != RAY_NULL_OBJ) ray_release(r);
+    }
     return ok;
 }
 
@@ -502,7 +514,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
          * misbehaving. */
         if (result && RAY_IS_ERR(result) && msgtype == RAY_IPC_MSG_ASYNC) {
             fprintf(stderr, "ipc: .ipc.on.async hook raised an error\n");
-            ray_release(result);
+            ray_error_free(result);
             result = NULL;
         }
     } else if (msg->type == -RAY_STR) {
@@ -797,7 +809,8 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         if (cur && cur->data == (void*)cd)
             send_response((ray_sock_t)cur->fd, result);
     }
-    if (result != RAY_NULL_OBJ) ray_release(result);
+    if (RAY_IS_ERR(result)) ray_error_free(result);
+    else if (result != RAY_NULL_OBJ) ray_release(result);
 
     return NULL;
 }
@@ -968,7 +981,8 @@ static void conn_on_payload(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 
     if (c->msgtype == RAY_IPC_MSG_SYNC)
         send_response(c->fd, result);
-    if (result != RAY_NULL_OBJ) ray_release(result);
+    if (RAY_IS_ERR(result)) ray_error_free(result);
+    else if (result != RAY_NULL_OBJ) ray_release(result);
 
     ray_sys_free(c->rx_buf);
     c->rx_buf  = NULL;
