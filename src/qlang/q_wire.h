@@ -63,9 +63,24 @@
 /* msgtype byte values (kdb protocol) */
 enum { Q_WIRE_ASYNC = 0, Q_WIRE_SYNC = 1, Q_WIRE_RESP = 2 };
 
-/* First tag reserved for journal-only extension records (Phase B). */
+/* Serde-only extension tag band (Phase B).  UNSIGNED byte values 200..236:
+ * everything >= 237 (0xed..0xff) is a kdb ATOM tag after the signed cast
+ * (-19..-1) and 0x80/0x7f are error/sorted-dict — the band must stay clear
+ * of them.  The WIRE path ((-8!/-9!, sockets) never emits these and rejects
+ * them with 'domain; only serde mode (storage/journal) uses them:
+ *   200  builtin fn      := 0xC8 valence(1: 101|102|103) name-cstr
+ *   201  engine lambda   := 0xC9 attrs(1) obj(params) obj(body)
+ *   202  str vector      := 0xCA attrs(1) count(int32) [len(int32) bytes]*
+ *   203  quoted sym atom := 0xCB cstr
+ *   204  typed-null atom := 0xCC type(int8)   ; BOOL/U8 aux-bit nulls
+ * 205..236 reserved for future serde records. */
 #define Q_WIRE_EXT_TAG_FIRST 200
-#define Q_WIRE_EXT_TAG_LAST  250
+#define Q_WIRE_EXT_TAG_LAST  236
+#define Q_WIRE_EXT_FN        200
+#define Q_WIRE_EXT_LAMBDA    201
+#define Q_WIRE_EXT_STRVEC    202
+#define Q_WIRE_EXT_QSYM      203
+#define Q_WIRE_EXT_TNULL     204
 
 /* Serialize x into a complete kdb IPC message (8-byte LE header + payload).
  * Returns an owned RAY_U8 vector, or a RAY_ERROR ('nyi for unwireable
@@ -86,6 +101,7 @@ typedef struct q_wire_wbuf {
     uint8_t* p;
     size_t   len, cap;
     ray_t*   err;      /* set on failure (owned RAY_ERROR) */
+    int      serde;    /* serde mode: ext tags on, list collapse off */
 } q_wire_wbuf_t;
 
 /* Append x's payload bytes (no message header).  0 on success; -1 on
@@ -97,5 +113,17 @@ void q_wire_wbuf_free(q_wire_wbuf_t* b);
  * encoded big-endian.  On success *consumed is the byte count read.
  * Returns an owned value or a RAY_ERROR. */
 ray_t* q_wire_read_obj(const uint8_t* buf, size_t len, size_t* consumed, int swap);
+
+/* ---- serde mode (RAY_SERDE_WIRE_VERSION 5, storage/journal) ----
+ * Same grammar as the wire PLUS the extension band above, MINUS the wire's
+ * q-observable normalizations: boxed lists are never collapsed (engine
+ * boxing roundtrips exactly), RAY_STR vectors keep their type (ext 202),
+ * builtin fns / raw lambdas / quoted syms / BOOL-U8 typed nulls use their
+ * ext records.  Vector/list attr bytes carry the engine attrs (HAS_NULLS /
+ * QUOTED restored on read; SLICE never restored).  Payloads are always
+ * emitted little-endian. */
+int    q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde);
+ray_t* q_wire_read_obj_ex(const uint8_t* buf, size_t len, size_t* consumed,
+                          int swap, int serde);
 
 #endif /* Q_WIRE_H */
