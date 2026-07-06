@@ -170,9 +170,86 @@ ray_t* q_name_reserved_words(void) {
 
 /* ---- wrappers (bespoke q semantics over a rayfall primitive) ---- */
 
-/* q `n # list` — take.  rayfall ray_take_fn(vec, n) has the opposite arg
- * order, so swap.  Borrows both args (does not release them). */
+/* Gather `count` elements from x starting at logical index `start`.  recycle:
+ * indices wrap modulo `total` (reshape recycling); else sequential in-range
+ * (chunk / cut).  A string gathers chars into a new string; a vector/list
+ * gathers via ray_at_fn over an i64 index vector.  Borrows x. */
+static ray_t* q_gather(ray_t* x, int64_t start, int64_t count, int64_t total,
+                       int recycle) {
+    if (count < 0) count = 0;
+    if (x && x->type == -RAY_STR) {
+        const char* sp = ray_str_ptr(x);
+        char stackb[1024];
+        char* b = (count < (int64_t)sizeof stackb) ? stackb
+                                                    : malloc((size_t)count + 1);
+        if (!b) return ray_error("wsfull", "#: out of memory");
+        for (int64_t i = 0; i < count; i++)
+            b[i] = sp[recycle && total ? ((start + i) % total) : (start + i)];
+        ray_t* row = ray_str(b, (size_t)count);
+        if (b != stackb) free(b);
+        return row;
+    }
+    int64_t stacki[1024];
+    int64_t* ix = (count <= 1024) ? stacki
+                                  : malloc((size_t)(count ? count : 1) * sizeof(int64_t));
+    if (!ix) return ray_error("wsfull", "#: out of memory");
+    for (int64_t i = 0; i < count; i++)
+        ix[i] = recycle && total ? ((start + i) % total) : (start + i);
+    ray_t* idx = ray_vec_from_raw(RAY_I64, ix, count);
+    if (ix != stacki) free(ix);
+    if (RAY_IS_ERR(idx)) return idx;
+    ray_t* row = ray_at_fn(x, idx);       /* boxed list of atoms */
+    ray_release(idx);
+    if (!row || RAY_IS_ERR(row)) return row;
+    ray_t* c = q_collapse_list(row);      /* -> typed vector when homogeneous */
+    ray_release(row);
+    return c;
+}
+
+/* q `shape # x` — reshape (kdb ref/take): an int-VECTOR left arg reshapes x
+ * row-major into a matrix (2-D case).  A 0N dimension is INFERRED (chunk into
+ * that stride, ragged last row); otherwise x is RECYCLED to fill.  Ranks other
+ * than 2 fall back to rayfall range-take (unchanged behaviour).  Borrows both. */
+static ray_t* q_reshape(ray_t* shape, ray_t* x) {
+    int64_t nd = ray_len(shape);
+    if (nd != 2) return ray_take_fn(x, shape);
+    const int64_t* dv = (const int64_t*)ray_data(shape);
+    int64_t d0 = dv[0], d1 = dv[1];
+    int is_str = (x && x->type == -RAY_STR);
+    int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
+    if (total <= 0) return ray_error("length", "#: reshape of empty");
+    int64_t rows, cols, chunk = 0;
+    if (d0 == INT64_MIN && d1 != INT64_MIN) {
+        if (d1 <= 0) return ray_error("length", "#: inferred reshape needs a positive stride");
+        cols = d1; rows = (total + cols - 1) / cols; chunk = 1;
+    } else if (d1 == INT64_MIN && d0 != INT64_MIN) {
+        if (d0 <= 0) return ray_error("length", "#: inferred reshape needs a positive stride");
+        rows = d0; cols = (total + rows - 1) / rows; chunk = 1;
+    } else if (d0 == INT64_MIN || d1 == INT64_MIN) {
+        return ray_error("length", "#: 0N 0N reshape");
+    } else {
+        rows = d0; cols = d1;
+    }
+    if (rows < 0 || cols < 0) return ray_error("length", "#: negative shape");
+    ray_t* out = ray_list_new(rows > 0 ? rows : 1);
+    if (RAY_IS_ERR(out)) return out;
+    for (int64_t r = 0; r < rows; r++) {
+        int64_t start = r * cols, rc = cols;
+        if (chunk && start + rc > total) rc = total - start;   /* ragged last */
+        ray_t* row = q_gather(x, start, rc, total, !chunk);
+        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : ray_error("domain", "#: reshape"); }
+        out = ray_list_append(out, row);
+        ray_release(row);
+        if (RAY_IS_ERR(out)) return out;
+    }
+    return out;
+}
+
+/* q `n # list` — take.  An int-VECTOR left arg (len>=2) is RESHAPE (matrix);
+ * an atom is take.  rayfall ray_take_fn(vec, n) has the opposite arg order, so
+ * swap.  Borrows both args (does not release them). */
 static ray_t* q_take_wrap(ray_t* n, ray_t* list) {
+    if (n && n->type == RAY_I64 && ray_len(n) >= 2) return q_reshape(n, list);
     return ray_take_fn(list, n);
 }
 
@@ -247,6 +324,35 @@ static ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     ray_t* r = ray_take_fn(list, range);
     ray_release(range);
     return r;
+}
+
+/* q `n cut x` — cut into pieces (kdb ref/cut).  An int ATOM chunks x into
+ * groups of n (ragged last group: `4 cut til 10` -> (0 1 2 3;4 5 6 7;8 9)).
+ * An int VECTOR is a positional cut — identical to `_`, so delegate.  Borrows. */
+static ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
+    if (n && (n->type == -RAY_I64 || n->type == -RAY_I32 || n->type == -RAY_I16)) {
+        int64_t sz = (n->type == -RAY_I64) ? n->i64
+                   : (n->type == -RAY_I32) ? (int64_t)n->i32 : (int64_t)n->i16;
+        if (sz <= 0) return ray_error("domain", "cut: piece size must be positive");
+        int is_str = (x && x->type == -RAY_STR);
+        int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
+        if (!x || (!is_str && !ray_is_vec(x) && x->type != RAY_LIST))
+            return ray_error("type", "cut: expects a list/vector/string rhs");
+        int64_t rows = (total + sz - 1) / sz;
+        ray_t* out = ray_list_new(rows > 0 ? rows : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t r = 0; r < rows; r++) {
+            int64_t start = r * sz, rc = sz;
+            if (start + rc > total) rc = total - start;
+            ray_t* row = q_gather(x, start, rc, total, 0);   /* chunk, no recycle */
+            if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : ray_error("domain", "cut"); }
+            out = ray_list_append(out, row);
+            ray_release(row);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    return q_drop_wrap(n, x);   /* int-vector positional cut == `_` */
 }
 
 /* q monadic `_` — floor to LONG (kdb `_ 3.7` is 3j; rayfall floor keeps f64).
@@ -2249,6 +2355,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_NE:   return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_ne_wrap);
     case QK_TAKE: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_take_wrap);
     case QK_DROP: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_drop_wrap);
+    case QK_CUT:  return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cut_wrap);
     case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
     case QK_MATCH:return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_match_wrap);
     case QK_FLOOR:return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_floor_wrap);
