@@ -3414,6 +3414,14 @@ static ray_t* g_list_value   = NULL;
 static ray_t* g_table_value  = NULL;
 static ray_t* g_keyed_table_value = NULL;
 static ray_t* g_select_value = NULL;
+static ray_t* g_compose_value = NULL;
+
+/* q `'[f;g;…]` compose builder — a normal VARY (args are the resolved function
+ * VALUES): boxes them into a Q_DERIV_COMPOSE carrier (q_deriv.c). */
+static ray_t* q_compose_fn(ray_t** args, int64_t n) {
+    if (n < 1) return ray_error("rank", "': compose needs at least one function");
+    return q_compose_new(args, n);
+}
 static ray_t* g_funsql_select_value = NULL;
 static ray_t* g_funsql_bang_value   = NULL;
 static ray_t* g_lambda_value        = NULL;
@@ -3513,6 +3521,10 @@ ray_t* q_registry_funsql_bang_value(void)   { return g_funsql_bang_value; }
 
 ray_t* q_registry_select_value(void) {
     return g_select_value;   /* borrowed; NULL before init */
+}
+
+ray_t* q_registry_compose_value(void) {
+    return g_compose_value;  /* borrowed; NULL before init */
 }
 
 ray_t* q_registry_list_value(void) {
@@ -3760,6 +3772,12 @@ ray_err_t q_registry_init(void) {
         g_select_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    /* compose builder — a NORMAL vary (args are the resolved function values). */
+    g_compose_value = ray_fn_vary("q.compose", RAY_FN_Q_LOWER, q_compose_fn);
+    if (!g_compose_value || RAY_IS_ERR(g_compose_value)) {
+        g_compose_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     /* functional qSQL executors — SPECIAL FORMs: they receive t/c/b/a
      * UNEVALUATED and evaluate them internally (funsql_operand), so the `()`
      * empty marker (parser `::` name-ref) does not trip ray_eval's name check. */
@@ -3853,6 +3871,7 @@ void q_registry_destroy(void) {
     if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
     if (g_keyed_table_value) { ray_release(g_keyed_table_value); g_keyed_table_value = NULL; }
     if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
+    if (g_compose_value) { ray_release(g_compose_value); g_compose_value = NULL; }
     if (g_funsql_select_value) { ray_release(g_funsql_select_value); g_funsql_select_value = NULL; }
     if (g_funsql_bang_value)   { ray_release(g_funsql_bang_value);   g_funsql_bang_value   = NULL; }
     if (g_lambda_value)        { ray_release(g_lambda_value);        g_lambda_value        = NULL; }
