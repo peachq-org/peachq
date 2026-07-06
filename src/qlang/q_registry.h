@@ -98,6 +98,20 @@ ray_t* q_registry_list_value(void);
  * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_table_value(void);
 
+/* The q.fn special-form value behind every lambda literal (borrowed; NULL
+ * before init).  q_lower embeds it at the head of lowered `{...}` nodes. */
+ray_t* q_registry_lambda_value(void);
+
+/* `:x` early return and `'x` signal (borrowed; NULL before init).  q_lower
+ * embeds them at the head of the parser's .q.ret / .q.sig statement nodes. */
+ray_t* q_registry_ret_value(void);
+ray_t* q_registry_sig_value(void);
+
+/* Take (and clear) the thread-local early-return payload stashed by a `:x`
+ * statement — called by q_lambda_apply when call_lambda comes back with the
+ * reserved "q.ret" error class.  Returns an OWNED value or NULL. */
+ray_t* q_lambda_ret_take(void);
+
 /* The qSQL SELECT adapter value q_lower embeds when it lowers the functional
  * 5-list (?;`t;c;b;a) onto the base ray_select engine.  Special form; its two
  * operands are the rayfall query dict and the by-key column-name sym vector.

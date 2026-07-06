@@ -495,6 +495,19 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
 
+    /* A 100h lambda carrier echoes its VERBATIM q source (kdb: `q)f` prints
+     * `{[x] x*x}` byte-for-byte). */
+    if (q_deriv_kind_of(val) == Q_DERIV_LAMBDA) {
+        ray_t* s = q_lambda_src(val);
+        if (s && s->type == -RAY_STR) {
+            size_t l = ray_str_len(s);
+            if (l >= bufsz) l = bufsz - 1;
+            memcpy(buf, ray_str_ptr(s), l);
+            buf[l] = '\0';
+            return;
+        }
+    }
+
     /* A 104h derived-verb carrier renders as bound-verb + adverb glyph (+/).
      * The carrier's base is the HOF value (fold / the internal scan wrapper /
      * the each wrapper); the bound verb sits in the first arg slot. */
@@ -509,6 +522,32 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
             char vb[256]; vb[0] = '\0';
             q_fmt(v0, vb, sizeof vb);
             snprintf(buf, bufsz, "%s%s", vb, g);
+            return;
+        }
+        /* general projection display — base[a0;a1;...] with hole slots EMPTY
+         * (kdb: `{x+y}[42;]`).  Reached by lambda projections and any other
+         * carrier the adverb arm above does not claim. */
+        {
+            uint64_t mask  = q_deriv_hole_mask(val);
+            int64_t  slots = ray_len(val) - 4;
+            ray_t**  e     = (ray_t**)ray_data(val);
+            char bb[512]; bb[0] = '\0';
+            q_fmt(base, bb, sizeof bb);
+            size_t pos = (size_t)snprintf(buf, bufsz, "%s[", bb);
+            if (pos >= bufsz) pos = bufsz - 1;
+            for (int64_t i = 0; i < slots && pos + 2 < bufsz; i++) {
+                if (i) buf[pos++] = ';';
+                if (!(mask & (1ull << i))) {
+                    char ab[256]; ab[0] = '\0';
+                    q_fmt(e[4 + i], ab, sizeof ab);
+                    size_t al = strlen(ab);
+                    if (pos + al + 2 > bufsz) al = bufsz - pos - 2;
+                    memcpy(buf + pos, ab, al);
+                    pos += al;
+                }
+            }
+            if (pos + 1 < bufsz) buf[pos++] = ']';
+            buf[pos] = '\0';
             return;
         }
     }
