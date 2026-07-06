@@ -52,6 +52,13 @@ ray_t* q_lambda_carrier_new(ray_t* base, int rank, ray_t* src);
 
 /* Inspectors — return Q_DERIV_NONE / NULL / defaults for a non-carrier. */
 q_deriv_kind q_deriv_kind_of(const ray_t* v);
+
+/* Drop the lazily-interned marker sym-id cache.  Called by q_runtime_destroy:
+ * the ids belong to the runtime's sym table, so a NEW runtime in the same
+ * process (tests, embedders) must re-intern — otherwise values rebuilt by
+ * name (serde v5 structural carrier decode) get fresh ids that can never
+ * match a stale cache. */
+void q_deriv_reset_markers(void);
 ray_t*       q_deriv_base(const ray_t* v);        /* borrowed */
 uint64_t     q_deriv_hole_mask(const ray_t* v);   /* Q_DERIV_PROJ only    */
 int          q_deriv_valence(const ray_t* v);     /* effective valence    */
