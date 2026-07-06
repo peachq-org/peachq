@@ -96,6 +96,28 @@ int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 static ray_apply_hook_t g_apply_hook = NULL;
 void ray_eval_set_apply_hook(ray_apply_hook_t hook) { g_apply_hook = hook; }
 
+/* openq dict function-distribution shim — see docs/superpowers/plans/
+ * 2026-07-06-dict-distribution-shim.md.  A builtin verb applied to a
+ * dictionary distributes over its values.  Rather than intercept before
+ * dispatch (which would wrongly grab key/value/count/type/`,`/`#`/`@`, all of
+ * which handle a dict NATIVELY), we retry ONLY on the would-error path: if the
+ * kernel returned a 'type error AND an argument is a RAY_DICT, offer the
+ * application to the q apply hook.  Verbs that already handle dicts succeed and
+ * never reach here; only the verbs that currently 'type get distributed.  The
+ * happy path pays a single already-failed error-class compare.  `result` is
+ * consumed and replaced on success; returned unchanged otherwise. */
+static ray_t* dict_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n) {
+    if (!g_apply_hook || !result || !RAY_IS_ERR(result)) return result;
+    if (result->slen != 4 || memcmp(result->sdata, "type", 4) != 0) return result;
+    bool has_dict = false;
+    for (int64_t i = 0; i < n; i++)
+        if (args[i] && args[i]->type == RAY_DICT) { has_dict = true; break; }
+    if (!has_dict) return result;
+    ray_t* dr = g_apply_hook(head, args, n);
+    if (dr) { ray_release(result); return dr; }
+    return result;
+}
+
 /* openq remote-source string eval — see eval.h.  NULL = rayfall eval_str. */
 static ray_remote_str_fn_t g_remote_str_fn = NULL;
 void ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn) { g_remote_str_fn = fn; }
@@ -1946,6 +1968,7 @@ op_call1: {
         result = atomic_map_unary(fn, arg);
     else
         result = fn(arg);
+    result = dict_retry(fn_obj, result, &arg, 1);   /* openq dict shim */
     ray_release(arg);
     ray_release(fn_obj);
     if (RAY_IS_ERR(result)) { vm_err_obj = result; goto vm_error; }
@@ -1990,6 +2013,8 @@ op_call2: {
         result = atomic_map_binary_op(fn, RAY_FN_OPCODE(fn_obj), left, right);
     else
         result = fn(left, right);
+    { ray_t* dargs[2] = { left, right };            /* openq dict shim */
+      result = dict_retry(fn_obj, result, dargs, 2); }
     ray_release(left);
     ray_release(right);
     ray_release(fn_obj);
@@ -3163,14 +3188,15 @@ ray_t* ray_eval(ray_t* obj) {
                 }
             }
             ray_t* arg = ray_eval(elems[1]);
-            ray_release(head);
-            if (arg && RAY_IS_ERR(arg)) { ret = arg; goto out; }
+            /* openq dict shim: `head` is kept live past the kernel dispatch so
+             * dict_retry can offer a 'type-erroring dict arg to the hook. */
+            if (arg && RAY_IS_ERR(arg)) { ray_release(head); ret = arg; goto out; }
             /* Materialise lazy arg for non-lazy-aware fns.
              * arg is an owned ref (returned from ray_eval); materialise
              * consumes it — no extra ray_release needed after the call. */
             if (!(fn_attrs & RAY_FN_LAZY_AWARE) && arg && ray_is_lazy(arg)) {
                 arg = ray_lazy_materialize(arg); /* consumes owned ref */
-                if (!arg || RAY_IS_ERR(arg)) { ret = arg ? arg : ray_error("type", NULL); goto out; }
+                if (!arg || RAY_IS_ERR(arg)) { ray_release(head); ret = arg ? arg : ray_error("type", NULL); goto out; }
             }
             ray_t* result;
             RAY_ASSERT_VALUE(arg);
@@ -3182,6 +3208,8 @@ ray_t* ray_eval(ray_t* obj) {
                 result = atomic_map_unary(fn, arg);
             else
                 result = fn(arg);
+            result = dict_retry(head, result, &arg, 1);   /* openq dict shim */
+            ray_release(head);
             if (arg) ray_release(arg);
             ret = result; goto out;
         }
@@ -3240,12 +3268,15 @@ ray_t* ray_eval(ray_t* obj) {
                 ret = ray_error("type", "binary op: null operand not supported, got %s and %s", ray_type_name(lt), ray_type_name(rt)); goto out;
             }
             uint16_t fn_opcode = RAY_FN_OPCODE(head);
-            ray_release(head);
+            /* openq dict shim: keep `head` live past the kernel dispatch. */
             ray_t* result;
             if ((fn_attrs & RAY_FN_ATOMIC) && (is_collection(left) || is_collection(right)))
                 result = atomic_map_binary_op(fn, fn_opcode, left, right);
             else
                 result = fn(left, right);
+            { ray_t* dargs[2] = { left, right };            /* openq dict shim */
+              result = dict_retry(head, result, dargs, 2); }
+            ray_release(head);
             ray_release(left);
             ray_release(right);
             ret = result; goto out;
