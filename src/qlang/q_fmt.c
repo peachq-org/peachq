@@ -300,6 +300,27 @@ static void q_date_tok(int32_t v, char* out, size_t n) {
     }
 }
 
+/* GUID token: canonical 8-4-4-4-12 lowercase hex (basics/datatypes.md §Guid).
+ * The null guid is all-zero bytes and renders as the zero UUID
+ * 00000000-0000-0000-0000-000000000000 — NOT the 0Ng token (the doc pins `0Ng`
+ * display to the zero UUID).  Mirrors base fmt_guid; kept here because base
+ * ray_fmt would emit the 0Ng token for the null atom. */
+static void q_guid_tok(const uint8_t* b16, char* out, size_t n) {
+    if (n == 0) return;
+    static const char hx[] = "0123456789abcdef";
+    static const int groups[] = {4, 2, 2, 2, 6};
+    size_t pos = 0; int bi = 0;
+    for (int g = 0; g < 5; g++) {
+        if (g && pos + 1 < n) out[pos++] = '-';
+        for (int j = 0; j < groups[g] && pos + 2 < n; j++) {
+            out[pos++] = hx[b16[bi] >> 4];
+            out[pos++] = hx[b16[bi] & 0xf];
+            bi++;
+        }
+    }
+    out[pos < n ? pos : n - 1] = '\0';
+}
+
 static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
     out[0] = '\0';
     if (!key || RAY_IS_ERR(key)) return;
@@ -387,6 +408,7 @@ static const char* q_empty_vec_qname(int8_t type) {
     case RAY_F64:  return "float";
     case RAY_SYM:  return "symbol";
     case RAY_DATE: return "date";
+    case RAY_GUID: return "guid";
     default:       return NULL;
     }
 }
@@ -536,6 +558,12 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', buf, bufsz);      return;
     case -RAY_I64:  q_int_tok(val->i64,          8, 0,   buf, bufsz);      return;
     case -RAY_DATE: q_date_tok(val->i32, buf, bufsz);                      return;
+    case -RAY_GUID: {
+        const uint8_t* b16 = val->obj ? (const uint8_t*)ray_data(val->obj)
+                                      : (const uint8_t*)ray_data(val);
+        q_guid_tok(b16, buf, bufsz);
+        return;
+    }
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
     case -RAY_F64: {
         /* A whole f64 atom gets a trailing `f` to distinguish it from a long
@@ -580,6 +608,25 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
             buf[pos++] = hx[d[i] & 0xf];
         }
         buf[pos] = '\0';
+        return;
+    }
+    /* Guid vector: full canonical UUID per element, space-joined, no trailing
+     * type char (basics/datatypes.md: -2?0Ng -> "337714f8-... 0a369037-...");
+     * length-1 takes the enlist comma.  Null elements are all-zero bytes ->
+     * the zero UUID, self-identifying like the atom. */
+    if (val->type == RAY_GUID) {
+        int64_t n = ray_len(val);
+        const uint8_t* d = (const uint8_t*)ray_data(val);
+        size_t pos = 0;
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';
+        for (int64_t i = 0; i < n; i++) {
+            if (i && pos + 1 < bufsz) buf[pos++] = ' ';
+            char e[40];
+            q_guid_tok(d + i * 16, e, sizeof e);
+            size_t el = strlen(e);
+            if (pos + el < bufsz) { memcpy(buf + pos, e, el); pos += el; }
+        }
+        buf[pos < bufsz ? pos : bufsz - 1] = '\0';
         return;
     }
     /* Typed integer vector: each element is rendered BARE (no per-element type
