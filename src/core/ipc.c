@@ -21,6 +21,59 @@
  *   SOFTWARE.
  */
 
+/* openq Phase C: this file speaks the KDB IPC PROTOCOL (clean-room, from
+ * qdocs/docs/docs/docs/basics/ipc.md + kb/serialization.md; javakdb c.java
+ * is the cleared interactive reference — never a kdb+ binary).
+ *
+ *   handshake  client sends "user:password" + capability-byte + \0
+ *              (older clients omit the capability byte); the server
+ *              validates (constant-time -u/-U secret compare first, then
+ *              the `.ipc.on.auth` hook may narrow) and replies with ONE
+ *              byte min(cap, 3) — or closes the connection on rejection.
+ *   header     8 bytes: [endian(01=LE) msgtype(0/1/2) compressed 0x00
+ *              total-len:int32] — total-len INCLUDES the header; both
+ *              endiannesses are read, little-endian is emitted.  The
+ *              256MB frame guard is enforced here.  A nonzero compressed
+ *              byte is refused ('nyi — compression is Phase F): we never
+ *              set it on send and close on receipt.  KNOWN GAP: we still
+ *              reply capability 3 (timestamp/UUID-capable — replying 0
+ *              would make clients downgrade their type usage), so a
+ *              remote NON-localhost kdb client may legally compress a
+ *              >2000-byte message and get dropped; kdb never compresses
+ *              on localhost links, which is every current consumer.
+ *              Phase F closes this.
+ *   payload    ONE q_wire object (src/qlang/q_wire.c, kb/serialization.md
+ *              grammar).  Whole-payload consumption is enforced; trailing
+ *              bytes are protocol corruption and close the connection.
+ *   dispatch   STRING-FIRST (human ruling 2026-07-06): `.ipc.on.sync` /
+ *              `.ipc.on.async` hooks take precedence (they receive the
+ *              decoded object); otherwise a string payload evaluates via
+ *              ray_eval_remote_str (the q pipeline when the q runtime is
+ *              up, rayfall in the bare engine binary); a general-list
+ *              payload — the kdb `(func;args)` typed-apply form — is an
+ *              explicit fast-follow answered with 'nyi.
+ *              TODO(ipc-phase-c-followup): route (func;args) through
+ *              value/apply — a SINGLE application of func to the already-
+ *              evaluated args — NEVER through ray_eval (a value object is
+ *              not a parse tree; they diverge for nested lists.  See
+ *              ARCHITECTURE.md "eval vs value").
+ *   auth/eval  matches kdb: an authenticated connection gets full eval;
+ *              restriction only via the -U secret + restricted flag,
+ *              which still wraps every inbound eval and is re-imposed on
+ *              journal replay.
+ *   journal    unchanged 16-byte ray_ipc_header_t envelope (serde v5) —
+ *              only the SOCKET wire moved to kdb frames.  A sync frame is
+ *              journaled ONLY when it will be evaluated by the default
+ *              string path: hook-handled frames are not journaled (replay
+ *              cannot reproduce hook dispatch, and replaying a hook's
+ *              list payload through eval would violate the value-vs-eval
+ *              ruling).
+ *
+ * The native 16-byte-prefix protocol (version handshake, prefix header,
+ * verbose flag, wire compression) is REMOVED.  ray_ipc_compress /
+ * ray_ipc_decompress remain: journals may hold Phase-B-era compressed
+ * frames within wire version 5. */
+
 #ifndef RAY_OS_WINDOWS
   #define _GNU_SOURCE
 #endif
@@ -29,6 +82,7 @@
 #include "mem/sys.h"
 #include "ops/ops.h"
 #include "store/journal.h"
+#include "qlang/q_wire.h"
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -56,7 +110,12 @@
 #include "lang/internal.h"
 #include "table/sym.h"
 
-/* ===== Compression (delta + RLE) ===== */
+/* ===== Compression (delta + RLE) =====
+ *
+ * WIRE-DEAD since Phase C (kdb frames are never compressed by us; inbound
+ * compressed frames are refused).  KEPT because the journal may contain
+ * Phase-B-era compressed frames inside wire version 5 — journal.c's
+ * decompress_if_needed still calls ray_ipc_decompress. */
 
 size_t ray_ipc_compress(const uint8_t* src, size_t len,
                         uint8_t* dst, size_t dst_cap)
@@ -146,12 +205,38 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
     return di;
 }
 
-/* ===== Shared protocol helpers ===== */
+/* ===== kdb frame helpers ===== */
 
 #define RAY_IPC_PHASE_HANDSHAKE 0
 #define RAY_IPC_PHASE_HEADER    1
 #define RAY_IPC_PHASE_PAYLOAD   2
-#define RAY_IPC_PHASE_CREDS     3
+
+#define KDB_HDR_LEN 8
+#define KDB_MAX_MSG (256u * 1024u * 1024u)   /* 256MB frame guard */
+#define KDB_HS_MAX  512                      /* creds line hard cap */
+#define KDB_CAPABILITY 3                     /* what we speak (V3.0 level) */
+
+/* Parse an 8-byte kdb header.  0 ok / -1 bad (caller closes; a nonzero
+ * compressed byte gets a 'nyi log line first — Phase F).  *swap is set
+ * when the frame is big-endian; *payload_len EXCLUDES the header. */
+static int kdb_hdr_parse(const uint8_t in[KDB_HDR_LEN], uint8_t* msgtype,
+                         int* swap, uint32_t* payload_len) {
+    if (in[0] != 0x00 && in[0] != 0x01) return -1;
+    *swap = (in[0] == 0x00);
+    if (in[1] > 2) return -1;
+    *msgtype = in[1];
+    if (in[2] != 0x00) {
+        fprintf(stderr, "ipc: compressed inbound frame refused ('nyi — compression is Phase F)\n");
+        return -1;
+    }
+    if (in[3] != 0x00) return -1;              /* reserved byte must be zero */
+    uint32_t n = *swap
+        ? ((uint32_t)in[4] << 24) | ((uint32_t)in[5] << 16) | ((uint32_t)in[6] << 8) | in[7]
+        : ((uint32_t)in[7] << 24) | ((uint32_t)in[6] << 16) | ((uint32_t)in[5] << 8) | in[4];
+    if (n < KDB_HDR_LEN + 1 || n > KDB_MAX_MSG) return -1;
+    *payload_len = n - KDB_HDR_LEN;
+    return 0;
+}
 
 /* Constant-time comparison — prevents timing side-channel on password. */
 static bool ct_eq(const void* a, const void* b, size_t len) {
@@ -163,19 +248,18 @@ static bool ct_eq(const void* a, const void* b, size_t len) {
     return diff == 0;
 }
 
-/* Validate credential buffer against secret. Returns true if password matches.
- * creds is "user:password\0" with length cred_len.
- * secret MUST point to a char[256] buffer (zero-padded beyond the password).
- * Compares pw against the full 256-byte secret buffer in constant time.
- * No strlen, no secret-length-dependent copies. */
-static bool validate_creds(const uint8_t* buf, uint8_t cred_len,
+/* Validate a creds line against the -u/-U secret.  creds is the RAW
+ * "user:password" byte range from the kdb handshake (NO trailing NUL, NO
+ * capability byte — the handshake reader strips both).  secret MUST point
+ * to a char[256] buffer (zero-padded beyond the password).  Compares pw
+ * against the full 256-byte secret buffer in constant time.  No strlen,
+ * no secret-length-dependent copies. */
+static bool validate_creds(const uint8_t* buf, size_t cred_len,
                            const char* secret) {
-    if (cred_len == 0) return false;
     const char* creds = (const char*)buf;
-    const char* colon = memchr(creds, ':', cred_len);
+    const char* colon = cred_len ? memchr(creds, ':', cred_len) : NULL;
     const char* pw = colon ? colon + 1 : creds;
-    size_t pw_len = colon ? (size_t)(cred_len - (pw - creds)) : cred_len;
-    if (pw_len > 0 && pw[pw_len - 1] == '\0') pw_len--;
+    size_t pw_len = colon ? (size_t)(cred_len - (size_t)(pw - creds)) : cred_len;
     if (pw_len > 255) pw_len = 255;
 
     /* Zero-pad pw into a 256-byte buffer, then compare all 256 bytes
@@ -284,31 +368,33 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
                 name, (long long)handle);
     }
     ray_release(arg);
-    if (r && r != RAY_NULL_OBJ) ray_release(r);
+    if (r) {
+        if (RAY_IS_ERR(r)) ray_error_free(r);
+        else if (r != RAY_NULL_OBJ) ray_release(r);
+    }
 }
 
 /* Call the on.auth hook with (user, pass) string atoms.  Returns:
  *  -  1 → hook ran and returned truthy; caller continues the handshake.
  *  -  0 → hook ran and returned falsy (or errored); caller rejects.
  *  - -1 → no hook installed; caller uses the existing pass-through.
- * The constant-time secret compare in validate_creds always runs first,
- * so this hook can only narrow access — never widen it. */
+ * With a -u/-U secret the constant-time compare always runs FIRST, so
+ * this hook can only narrow access there — never widen it.  Without a
+ * secret (kdb default: accept) the hook alone decides — the kdb
+ * handshake always carries creds, mirroring kdb's -u + .z.pw layering.
+ * `cred_buf/cred_len` is the raw "user:pass" range (no NUL, no cap). */
 static int hook_call_auth(ray_poll_t* poll, int64_t handle,
-                          const uint8_t* cred_buf, uint8_t cred_len) {
+                          const uint8_t* cred_buf, size_t cred_len) {
     ray_t* fn = hook_lookup(IPC_HOOK_AUTH);
     if (!fn) return -1;
 
-    /* Split user:pass exactly the way validate_creds does — colon-
-     * separated, with the leading user part possibly empty.  Strip the
-     * trailing NUL the client appends so the hook sees clean strings. */
     const char* creds = (const char*)cred_buf;
-    const char* colon = memchr(creds, ':', cred_len);
+    const char* colon = cred_len ? memchr(creds, ':', cred_len) : NULL;
     const char* upart = creds;
     size_t      ulen  = colon ? (size_t)(colon - creds) : 0;
     const char* ppart = colon ? colon + 1 : creds;
-    size_t      plen  = colon ? (size_t)(cred_len - (ppart - creds))
-                              : (size_t)cred_len;
-    if (plen > 0 && ppart[plen - 1] == '\0') plen--;
+    size_t      plen  = colon ? (size_t)(cred_len - (size_t)(ppart - creds))
+                              : cred_len;
 
     ray_t* u = ray_str(upart, ulen);
     ray_t* p = ray_str(ppart, plen);
@@ -332,282 +418,153 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     } else {
         ok = is_truthy(r) ? 1 : 0;
     }
-    if (r && r != RAY_NULL_OBJ) ray_release(r);
+    if (r) {
+        if (RAY_IS_ERR(r)) ray_error_free(r);
+        else if (r != RAY_NULL_OBJ) ray_release(r);
+    }
     return ok;
 }
 
+/* Serialize + send one kdb frame.  0 on success, -1 on serialization or
+ * socket failure.  q_wire_serialize emits the COMPLETE frame (8-byte LE
+ * header with msgtype + payload); values with no kdb wire form ('nyi:
+ * builtin fns, projections, engine handles) fail serialization. */
+static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype)
+{
+    ray_t* frame = q_wire_serialize(msg, msgtype);
+    if (!frame) return -1;
+    if (RAY_IS_ERR(frame)) { ray_error_free(frame); return -1; }
+    int64_t rc = ray_sock_send(fd, ray_data(frame), (size_t)frame->len);
+    ray_release(frame);
+    return rc < 0 ? -1 : 0;
+}
+
+/* Send a SYNC response.  A result q_wire cannot express must never leave
+ * the client waiting forever (issue #285): substitute the serialization
+ * error itself — errors always wire as -128h + code. */
 static void send_response(ray_sock_t fd, ray_t* result)
 {
-    int64_t ser_size = ray_serde_size(result);
-
-    /* A result we cannot serialize must never leave the client waiting on
-     * a reply that never arrives.  Substitute a serializable error so the
-     * caller observes a clean failure instead of a silent infinite hang
-     * (issue #285).  ray_error frames serialize, so the substitute always
-     * goes out unless even that fails — in which case there is nothing we
-     * can put on the wire and we drop as before. */
-    ray_t* fallback = NULL;
-    if (ser_size <= 0) {
-        fallback = ray_error("type", "result of type %s is not serializable over IPC",
-                             result ? ray_type_name(result->type) : "null");
-        result   = fallback;
-        ser_size = ray_serde_size(result);
-        if (ser_size <= 0) { if (fallback) ray_error_free(fallback); return; }
+    ray_t* frame = q_wire_serialize(result, RAY_IPC_MSG_RESP);
+    if (!frame) return;
+    if (RAY_IS_ERR(frame)) {
+        ray_t* sub = frame;                 /* the 'nyi/'type explains why */
+        frame = q_wire_serialize(sub, RAY_IPC_MSG_RESP);
+        ray_error_free(sub);
+        if (!frame) return;
+        if (RAY_IS_ERR(frame)) { ray_error_free(frame); return; }
     }
-
-    uint8_t* payload = (uint8_t*)ray_sys_alloc((size_t)ser_size);
-    if (!payload) { if (fallback) ray_error_free(fallback); return; }
-    ray_ser_raw(payload, result);
-
-    uint8_t* send_buf = NULL;
-    size_t   send_len = 0;
-    uint8_t  flags    = 0;
-
-    if ((size_t)ser_size > RAY_IPC_COMPRESS_THRESHOLD) {
-        uint8_t* comp = (uint8_t*)ray_sys_alloc((size_t)ser_size);
-        if (comp) {
-            size_t clen = ray_ipc_compress(payload, (size_t)ser_size,
-                                           comp, (size_t)ser_size);
-            if (clen > 0 && clen + 4 < (size_t)ser_size) {
-                send_len = clen + 4;
-                send_buf = (uint8_t*)ray_sys_alloc(send_len);
-                if (send_buf) {
-                    uint32_t uncomp = (uint32_t)ser_size;
-                    memcpy(send_buf, &uncomp, 4);
-                    memcpy(send_buf + 4, comp, clen);
-                    flags = RAY_IPC_FLAG_COMPRESSED;
-                }
-            }
-            ray_sys_free(comp);
-        }
-    }
-
-    if (!send_buf) {
-        send_buf = payload;
-        send_len = (size_t)ser_size;
-        payload  = NULL;
-    }
-
-    ray_ipc_header_t hdr = {
-        .prefix  = RAY_SERDE_PREFIX,
-        .version = RAY_SERDE_WIRE_VERSION,
-        .flags   = flags,
-        .endian  = 0,
-        .msgtype = RAY_IPC_MSG_RESP,
-        .size    = (int64_t)send_len,
-    };
-    ray_sock_send(fd, &hdr, sizeof(hdr));
-    ray_sock_send(fd, send_buf, send_len);
-
-    ray_sys_free(send_buf);
-    if (payload) ray_sys_free(payload);
-    if (fallback) ray_error_free(fallback);
+    ray_sock_send(fd, ray_data(frame), (size_t)frame->len);
+    ray_release(frame);
 }
 
-/* Decompress (when flagged) + de-serialize one framed payload into an
- * object.  Returns NULL on any decompress/decode failure.  Shared by
- * the request-eval path below and the RESP-frame path in
- * ipc_read_payload. */
-static ray_t* deser_frame(uint8_t* payload, size_t payload_len, uint8_t flags)
+/* Decode one inbound payload (exactly one object, whole-buffer).
+ * *is_wire_err is set when the payload is a well-formed top-level -128h
+ * error — the REMOTE's error object, a valid response value.  Any other
+ * decode failure, or trailing bytes, returns NULL: protocol corruption,
+ * the caller closes the connection. */
+static ray_t* ipc_decode_payload(const uint8_t* p, size_t plen, int swap,
+                                 int* is_wire_err)
 {
-    uint8_t* decompressed = NULL;
-    if (flags & RAY_IPC_FLAG_COMPRESSED) {
-        if (payload_len < 4) return NULL;
-        uint32_t uncomp_size;
-        memcpy(&uncomp_size, payload, 4);
-        if (uncomp_size == 0 || uncomp_size > 256u * 1024u * 1024u) return NULL;
-        decompressed = (uint8_t*)ray_sys_alloc(uncomp_size);
-        if (!decompressed) return NULL;
-        size_t dlen = ray_ipc_decompress(payload + 4, payload_len - 4,
-                                         decompressed, uncomp_size);
-        if (dlen != uncomp_size) {
-            ray_sys_free(decompressed);
-            return NULL;
-        }
-        payload     = decompressed;
-        payload_len = uncomp_size;
+    if (is_wire_err) *is_wire_err = 0;
+    if (plen == 0) return NULL;
+    if (p[0] == 0x80) {                     /* wire error -128h: 0x80 + code cstr */
+        const uint8_t* nul = memchr(p + 1, 0, plen - 1);
+        if (!nul || (size_t)(nul - p) != plen - 1) return NULL;
+        char code[16];
+        size_t n = (size_t)(nul - (p + 1));
+        if (n > sizeof code - 1) n = sizeof code - 1;
+        memcpy(code, p + 1, n); code[n] = 0;
+        if (is_wire_err) *is_wire_err = 1;
+        return ray_error(code, NULL);
     }
-    int64_t de_len = (int64_t)payload_len;
-    ray_t*  msg    = ray_de_raw(payload, &de_len);
-    if (decompressed) ray_sys_free(decompressed);
-    return msg;
+    size_t consumed = 0;
+    ray_t* v = q_wire_read_obj(p, plen, &consumed, swap);
+    if (!v) return NULL;
+    if (RAY_IS_ERR(v)) { ray_error_free(v); return NULL; }
+    if (consumed != plen) { ray_release(v); return NULL; }
+    return v;
 }
 
-/* Run the actual decompress + de-serialize + ray_eval pipeline on a
- * single inbound payload.  The wrapper eval_payload() below decides
- * whether to capture stdout/stderr (RAY_IPC_FLAG_VERBOSE) and whether
- * to wrap the result in a [captured_str, result] list. */
-static ray_t* eval_payload_core(uint8_t* payload, size_t payload_len,
-                                ray_ipc_header_t* hdr)
+/* Dispatch one inbound request frame (msgtype 0/1) — shared by the poll
+ * path and the legacy server path so the two cannot drift.  The caller
+ * has already set the restricted flag + ipc ctx for this connection.
+ * Returns 0 with *out_result owned (never NULL; RAY_NULL_OBJ for "no
+ * result"), or -1 for protocol corruption — the caller must close the
+ * connection and send nothing. */
+static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
+                        int swap, ray_t** out_result)
 {
-    /* Journal hook: log every inbound SYNC message (state-mutation
-     * channel in the IPC model) before evaluation, so a crash mid-handler
-     * still leaves the message on disk for replay.  We write the raw
-     * inbound bytes — header + payload — verbatim, no decompression
-     * round-trip.  Async messages and responses are not logged, so
-     * background pings and result frames don't pollute the log.
-     * No-op when no journal is open or during in-progress replay.
-     *
-     * RAY_IPC_FLAG_RESTRICTED is captured into a LOCAL header copy:
-     * we mark the persisted frame with the connection's restricted
-     * state at write time so replay can re-impose it.  Without this
-     * a `-U` client's writes silently elevate to full privilege on
-     * crash-recovery, since replay runs on the main thread with no
-     * IPC connection context.  The bit is meaningless on the live
-     * IPC wire and doesn't affect this handler's eval — that uses
-     * the connection's own flag set by the caller above us.
-     *
-     * If the journal write fails (disk full, EIO), we ABORT the
-     * eval and return an error to the client.  The documented
-     * behaviour: "the message has not been logged so we cannot
-     * accept it".  Silently evaluating un-logged mutations defeats
-     * the entire durability premise of `-l`/`-L`. */
-    if (ray_journal_is_open() && hdr->msgtype == RAY_IPC_MSG_SYNC) {
-        ray_ipc_header_t log_hdr = *hdr;
-        if (ray_eval_get_restricted())
-            log_hdr.flags |= RAY_IPC_FLAG_RESTRICTED;
-        ray_err_t je = ray_journal_write_bytes(&log_hdr, payload, (int64_t)payload_len);
-        if (je != RAY_OK) {
-            fprintf(stderr, "log: ERROR  journal write failed (rc=%d) — refusing to evaluate\n", (int)je);
-            return ray_error("io", "journal write failed; mutation refused");
-        }
-    }
+    *out_result = NULL;
+    ray_t* msg = ipc_decode_payload(payload, plen, swap, NULL);
+    if (!msg) return -1;
 
-    ray_t* msg = deser_frame(payload, payload_len, hdr->flags);
-
+    int hook_idx = (msgtype == RAY_IPC_MSG_SYNC) ? IPC_HOOK_SYNC
+                                                 : IPC_HOOK_ASYNC;
+    ray_t* hook = hook_lookup(hook_idx);
     ray_t* result = NULL;
-    if (msg && !RAY_IS_ERR(msg)) {
-        /* Dispatch through `.ipc.on.sync` / `.ipc.on.async` hook if
-         * installed; otherwise fall back to v1's inline-eval default.
-         * The hook receives the raw deserialised payload — same shape
-         * any other Rayfall lambda would see — so a hook installed
-         * as `{[m] eval m}` reproduces the default behaviour. */
-        int hook_idx = (hdr->msgtype == RAY_IPC_MSG_SYNC) ? IPC_HOOK_SYNC
-                                                           : IPC_HOOK_ASYNC;
-        ray_t* hook = hook_lookup(hook_idx);
-        if (hook) {
-            result = call_fn1(hook, msg);
-            ray_release(msg);
-            /* Async errors have nowhere to go on the wire (async never
-             * sends a response), so log + drop here.  Without this the
-             * caller would silently release the error and the operator
-             * would never see the hook misbehaving. */
-            if (result && RAY_IS_ERR(result) &&
-                hdr->msgtype == RAY_IPC_MSG_ASYNC) {
-                fprintf(stderr, "ipc: .ipc.on.async hook raised an error\n");
-                ray_release(result);
-                result = NULL;
-            }
-        } else if (msg->type == -RAY_STR) {
-            const char* str  = ray_str_ptr(msg);
-            size_t      slen = ray_str_len(msg);
-            if (str && slen > 0) {
-                char* tmp = (char*)ray_sys_alloc(slen + 1);
-                if (tmp) {
-                    memcpy(tmp, str, slen);
-                    tmp[slen] = '\0';
-                    result = ray_eval_str(tmp);
-                    ray_sys_free(tmp);
-                }
-            }
-            ray_release(msg);
-        } else {
-            result = ray_eval(msg);
-            ray_release(msg);
+
+    if (hook) {
+        /* Hook-handled frames are NOT journaled: replay cannot reproduce
+         * hook dispatch, and replaying a hook's list payload through eval
+         * would violate the value-vs-eval ruling (Phase C decision). */
+        result = call_fn1(hook, msg);
+        ray_release(msg);
+        /* Async errors have nowhere to go on the wire (async never sends
+         * a response) — log + drop so the operator sees the hook
+         * misbehaving. */
+        if (result && RAY_IS_ERR(result) && msgtype == RAY_IPC_MSG_ASYNC) {
+            fprintf(stderr, "ipc: .ipc.on.async hook raised an error\n");
+            ray_error_free(result);
+            result = NULL;
         }
+    } else if (msg->type == -RAY_STR) {
+        /* Journal hook: log the mutation channel BEFORE evaluation, so a
+         * crash mid-handler still leaves the message on disk for replay.
+         * The envelope stays the 16-byte serde header; the payload is the
+         * kdb object bytes verbatim (the v5 serde reader speaks the wire
+         * grammar).  RESTRICTED is captured so replay re-imposes it —
+         * without this a -U client's writes silently elevate to full
+         * privilege on crash-recovery.  A failed journal write ABORTS the
+         * eval ("the message has not been logged so we cannot accept
+         * it") — silently evaluating un-logged mutations defeats -l/-L. */
+        if (ray_journal_is_open() && msgtype == RAY_IPC_MSG_SYNC) {
+            ray_ipc_header_t log_hdr = {
+                .prefix  = RAY_SERDE_PREFIX,
+                .version = RAY_SERDE_WIRE_VERSION,
+                .flags   = ray_eval_get_restricted() ? RAY_IPC_FLAG_RESTRICTED : 0,
+                .endian  = 0,
+                .msgtype = msgtype,
+                .size    = (int64_t)plen,
+            };
+            if (ray_journal_write_bytes(&log_hdr, payload, (int64_t)plen) != RAY_OK) {
+                fprintf(stderr, "log: ERROR  journal write failed — refusing to evaluate\n");
+                ray_release(msg);
+                *out_result = ray_error("io", "journal write failed; mutation refused");
+                return 0;
+            }
+        }
+        result = ray_eval_remote_str(ray_str_ptr(msg), ray_str_len(msg));
+        ray_release(msg);
+    } else if (msg->type == RAY_LIST) {
+        /* kdb (func; args…) typed-apply request — explicit fast-follow.
+         * TODO(ipc-phase-c-followup): implement via value/apply (single
+         * application of func to the already-evaluated args), NEVER via
+         * ray_eval — a value object is not a parse tree (ARCHITECTURE.md
+         * "eval vs value", human ruling 2026-07-06). */
+        ray_release(msg);
+        result = ray_error("nyi", "IPC (func;args) requests not yet implemented — send a q source string");
+    } else {
+        ray_release(msg);
+        result = ray_error("nyi", "IPC request must be a q source string");
     }
+
     /* A lazy result is an internal deferred-DAG representation that cannot
      * be serialized — force it to a concrete value before it reaches the
-     * wire.  The direct ray_eval(msg) path (non-STR payloads, e.g. an
-     * expression list `(first v)`) returns lazy chains verbatim; the
-     * ray_eval_str path already materializes, so this is a no-op there.
-     * Without this, send_response cannot serialize the result and the
-     * client blocks forever waiting for a reply (issue #285). */
+     * wire (issue #285). */
     if (result && ray_is_lazy(result))
         result = ray_lazy_materialize(result);  /* consumes the retain */
-    return result ? result : RAY_NULL_OBJ;
-}
-
-/* eval_payload — outer wrapper.  When the client sets
- * RAY_IPC_FLAG_VERBOSE on the request header, redirect stdout / stderr
- * to a tmpfile for the duration of the eval, then return a 2-element
- * RAY_LIST [captured_str, result] so the client can print the
- * captured output on its own terminal.  Without the flag the bare
- * result is returned (current behaviour, unchanged for existing
- * clients).
- *
- * On any failure of the capture setup (tmpfile, dup, dup2) we fall
- * back to the no-capture path: better to keep the eval running than
- * to fail the whole request because /tmp is full.  The captured
- * string is then empty, and the response shape is still the 2-elem
- * list — clients can rely on that invariant. */
-static ray_t* eval_payload(uint8_t* payload, size_t payload_len,
-                           ray_ipc_header_t* hdr)
-{
-    if (!(hdr->flags & RAY_IPC_FLAG_VERBOSE))
-        return eval_payload_core(payload, payload_len, hdr);
-
-    FILE* cap = tmpfile();
-    int saved_out = -1, saved_err = -1;
-    bool capturing = false;
-
-    if (cap) {
-        fflush(stdout); fflush(stderr);
-        saved_out = dup(STDOUT_FILENO);
-        saved_err = dup(STDERR_FILENO);
-        if (saved_out >= 0 && saved_err >= 0) {
-            int capfd = fileno(cap);
-            if (dup2(capfd, STDOUT_FILENO) >= 0 &&
-                dup2(capfd, STDERR_FILENO) >= 0) {
-                capturing = true;
-            }
-        }
-    }
-
-    ray_t* result = eval_payload_core(payload, payload_len, hdr);
-
-    char* captured = NULL;
-    int   cap_len  = 0;
-    if (capturing) {
-        fflush(stdout); fflush(stderr);
-        dup2(saved_out, STDOUT_FILENO);
-        dup2(saved_err, STDERR_FILENO);
-        long pos = ftell(cap);
-        if (pos > 0) {
-            captured = (char*)ray_sys_alloc((size_t)pos + 1);
-            if (captured) {
-                fseek(cap, 0, SEEK_SET);
-                size_t got = fread(captured, 1, (size_t)pos, cap);
-                captured[got] = '\0';
-                cap_len = (int)got;
-            }
-        }
-    }
-    if (saved_out >= 0) close(saved_out);
-    if (saved_err >= 0) close(saved_err);
-    if (cap) fclose(cap);
-
-    /* Build [captured_str, result] list.  If the result is the
-     * "no result" sentinel (RAY_NULL_OBJ), keep it as-is; the
-     * client can distinguish via the second element's type. */
-    ray_t* cap_str = ray_str(captured ? captured : "", (size_t)cap_len);
-    if (captured) ray_sys_free(captured);
-    if (!cap_str) {
-        /* Allocator pressure on a tiny string is unlikely but possible. */
-        return result;
-    }
-
-    ray_t* response = ray_list_new(2);
-    if (!response) {
-        ray_release(cap_str);
-        return result;
-    }
-    ray_list_append(response, cap_str);
-    ray_list_append(response, result);
-    /* ray_list_append takes its own ref; release ours. */
-    ray_release(cap_str);
-    if (result != RAY_NULL_OBJ) ray_release(result);
-    return response;
+    *out_result = result ? result : RAY_NULL_OBJ;
+    return 0;
 }
 
 /* ======================================================================
@@ -619,8 +576,12 @@ static ray_t* eval_payload(uint8_t* payload, size_t payload_len,
  * registered by ray_ipc_connect — the selector id is the one handle
  * namespace either side of the wire works with. */
 typedef struct {
-    ray_ipc_header_t hdr;
     uint8_t          phase;
+    uint8_t          msgtype;      /* current frame's msgtype */
+    uint8_t          swap;         /* current frame is big-endian */
+    uint32_t         plen;         /* current frame's payload length */
+    uint8_t          hs[KDB_HS_MAX];  /* handshake creds accumulator */
+    uint16_t         hs_len;
     int64_t          listener_id;  /* id of the listener selector; -1 = outbound */
     bool             auth_required;  /* server has -u/-U */
     bool             restricted;     /* server has -U */
@@ -634,7 +595,6 @@ typedef struct {
 } ray_ipc_conn_data_t;
 
 static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel);
-static ray_t* ipc_read_creds(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel);
 static void   ipc_on_close(ray_poll_t* poll, ray_selector_t* sel);
@@ -675,127 +635,94 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
         return NULL;
     }
 
-    /* Request 2 bytes for handshake */
+    /* The kdb creds line is NUL-terminated (variable length): accumulate
+     * one byte at a time until the terminator. */
     ray_selector_t* ns = ray_poll_get(poll, id);
-    if (ns) ray_poll_rx_request(poll, ns, 2);
+    if (ns) ray_poll_rx_request(poll, ns, 1);
 
     return NULL;
+}
+
+/* Shared handshake completion: parse [user:pass][capbyte?] out of the
+ * accumulated creds line, authenticate, and either reply with the common
+ * capability byte (accept) or signal reject (kdb closes silently).
+ * Returns true on accept. */
+static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
+                                   ray_sock_t fd,
+                                   const uint8_t* hs, size_t hs_len,
+                                   bool auth_required, const char* secret)
+{
+    uint8_t cap = 0;
+    size_t  clen = hs_len;
+    /* Capability byte: last pre-NUL byte when <= 6; older clients omit it
+     * (creds are ASCII, so a control byte can only be the capability). */
+    if (clen >= 1 && hs[clen - 1] <= 6) { cap = hs[clen - 1]; clen--; }
+
+    bool ok = true;
+    if (auth_required)
+        ok = validate_creds(hs, clen, secret);
+    if (ok) {
+        int hook_ok = hook_call_auth(poll, handle, hs, clen);
+        if (hook_ok == 0) ok = false;
+    }
+    if (!ok) return false;                    /* kdb rejects by closing */
+
+    uint8_t common = cap < KDB_CAPABILITY ? cap : KDB_CAPABILITY;
+    ray_sock_send(fd, &common, 1);
+    return true;
 }
 
 static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
 {
-    if (!sel->rx.buf || sel->rx.buf->offset < 2) return NULL;
-    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
-
-    /* Refuse peers speaking a different wire version BEFORE we commit to
-     * exchanging any serialized payloads.  Without this check a new
-     * server would happily send v3-layout values to a v2 client, which
-     * would misparse every atom after the version-bump byte. */
-    if (sel->rx.buf->data[0] != RAY_SERDE_WIRE_VERSION) {
-        ray_poll_deregister(poll, sel->id);
-        return NULL;
-    }
-
-    /* Send handshake response: version + auth_required flag */
-    uint8_t resp[2] = { RAY_SERDE_WIRE_VERSION, cd->auth_required ? 0x01 : 0x00 };
-    ray_sock_send((ray_sock_t)sel->fd, resp, 2);
-
-    if (cd->auth_required) {
-        cd->phase = RAY_IPC_PHASE_HANDSHAKE;
-        sel->rx.read_fn = ipc_read_creds;
-        ray_poll_rx_request(poll, sel, 1);  /* length byte first */
-        return NULL;
-    }
-
-    cd->phase = RAY_IPC_PHASE_HEADER;
-    sel->rx.read_fn = ipc_read_header;
-    ray_poll_rx_request(poll, sel, sizeof(ray_ipc_header_t));
-    /* No-auth path: connection is now fully ready for inbound messages.
-     * Fire `.ipc.on.open` AFTER we've requested the next read, so a
-     * hook that calls back into the server can't race the read pump. */
-    hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id);
-    return NULL;
-}
-
-static ray_t* ipc_read_creds(ray_poll_t* poll, ray_selector_t* sel)
-{
     if (!sel->rx.buf || sel->rx.buf->offset < 1) return NULL;
-    uint8_t cred_len = sel->rx.buf->data[0];
-
-    /* The handshake first asks for 1 byte (the cred_len prefix); after
-     * reading it we need to grow the rx buffer to 1 + cred_len without
-     * losing the byte we already have.  ray_poll_rx_request resets the
-     * buffer when it grows, so do the grow in-place here. */
-    int64_t need = 1 + (int64_t)cred_len;
-    if (sel->rx.buf->size < need) {
-        ray_poll_buf_t* old = sel->rx.buf;
-        ray_poll_buf_t* nb  = ray_poll_buf_new(need);
-        if (!nb) { ray_poll_deregister(poll, sel->id); return NULL; }
-        nb->data[0] = cred_len;
-        nb->offset  = 1;
-        nb->size    = need;
-        ray_poll_buf_free(old);
-        sel->rx.buf = nb;
-        return NULL;
-    }
-    if (sel->rx.buf->offset < need) {
-        sel->rx.buf->size = need;
-        return NULL;
-    }
-
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
 
-    bool ok = validate_creds(sel->rx.buf->data + 1, cred_len,
-                             poll->auth_secret);
-
-    /* Secondary user-defined check via `.ipc.on.auth`.  Only consulted
-     * when the constant-time secret compare already passed — this hook
-     * can narrow access (deny extras) but never widen it.  Errors and
-     * falsy returns flip `ok` to false, triggering the same reject byte
-     * + deregister the secret-mismatch path would. */
-    if (ok) {
-        int hook_ok = hook_call_auth(poll, sel->id, sel->rx.buf->data + 1, cred_len);
-        if (hook_ok == 0) ok = false;
+    uint8_t b = sel->rx.buf->data[0];
+    if (b != 0x00) {
+        if (cd->hs_len >= KDB_HS_MAX) {       /* creds line absurdly long */
+            ray_poll_deregister(poll, sel->id);
+            return NULL;
+        }
+        cd->hs[cd->hs_len++] = b;
+        ray_poll_rx_request(poll, sel, 1);
+        return NULL;
     }
 
-    uint8_t result = ok ? 0x00 : 0x01;
-    ray_sock_send((ray_sock_t)sel->fd, &result, 1);
-
-    if (!ok) {
+    if (!kdb_handshake_complete(poll, sel->id, (ray_sock_t)sel->fd,
+                                cd->hs, cd->hs_len,
+                                cd->auth_required, poll->auth_secret)) {
         ray_poll_deregister(poll, sel->id);
         return NULL;
     }
 
     cd->phase = RAY_IPC_PHASE_HEADER;
     sel->rx.read_fn = ipc_read_header;
-    ray_poll_rx_request(poll, sel, sizeof(ray_ipc_header_t));
-    /* Auth path: fully handshaked and authed — connection is now ready
-     * for inbound messages.  Same ordering as the no-auth branch above:
-     * fire AFTER the next read is requested. */
+    ray_poll_rx_request(poll, sel, KDB_HDR_LEN);
+    /* Connection is now fully ready for inbound messages.  Fire
+     * `.ipc.on.open` AFTER we've requested the next read, so a hook that
+     * calls back into the server can't race the read pump. */
     hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id);
     return NULL;
 }
 
 static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel)
 {
-    if (!sel->rx.buf ||
-        sel->rx.buf->offset < (int64_t)sizeof(ray_ipc_header_t))
+    if (!sel->rx.buf || sel->rx.buf->offset < KDB_HDR_LEN)
         return NULL;
 
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
-    memcpy(&cd->hdr, sel->rx.buf->data, sizeof(ray_ipc_header_t));
-
-    if (cd->hdr.prefix != RAY_SERDE_PREFIX ||
-        cd->hdr.version != RAY_SERDE_WIRE_VERSION ||
-        cd->hdr.size <= 0 ||
-        cd->hdr.size > 256 * 1024 * 1024) {
+    uint8_t msgtype; int swap; uint32_t plen;
+    if (kdb_hdr_parse(sel->rx.buf->data, &msgtype, &swap, &plen) != 0) {
         ray_poll_deregister(poll, sel->id);
         return NULL;
     }
+    cd->msgtype = msgtype;
+    cd->swap    = (uint8_t)swap;
+    cd->plen    = plen;
 
     cd->phase = RAY_IPC_PHASE_PAYLOAD;
     sel->rx.read_fn = ipc_read_payload;
-    ray_poll_rx_request(poll, sel, cd->hdr.size);
+    ray_poll_rx_request(poll, sel, (int64_t)plen);
 
     return NULL;
 }
@@ -804,7 +731,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
 {
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
 
-    if (!sel->rx.buf || sel->rx.buf->offset < cd->hdr.size)
+    if (!sel->rx.buf || sel->rx.buf->offset < (int64_t)cd->plen)
         return NULL;
 
     /* Detach the payload buffer and advance the state machine to the
@@ -812,30 +739,40 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
      * connection's rx pump (a hook doing a nested sync round-trip on
      * the same handle), and that pump must find the selector parked on
      * a fresh header read — not on this very payload, which would
-     * re-dispatch it.  Same reason for the local header copy: a nested
-     * frame would overwrite cd->hdr under our feet. */
-    ray_ipc_header_t hdr     = cd->hdr;
+     * re-dispatch it.  Same reason for the local frame-info copies: a
+     * nested frame would overwrite cd->msgtype/swap/plen under us. */
+    uint8_t  msgtype = cd->msgtype;
+    int      swap    = cd->swap;
+    uint32_t plen    = cd->plen;
     ray_poll_buf_t*  payload = sel->rx.buf;
     int64_t          id      = sel->id;
     sel->rx.buf = NULL;
     cd->phase = RAY_IPC_PHASE_HEADER;
     sel->rx.read_fn = ipc_read_header;
-    ray_poll_rx_request(poll, sel, sizeof(ray_ipc_header_t));
+    ray_poll_rx_request(poll, sel, KDB_HDR_LEN);
 
     /* Response frame: deposit it for the sync send waiting on this
      * conn instead of evaluating it.  A response nobody waits for has
-     * no defined meaning — log and drop. */
-    if (hdr.msgtype == RAY_IPC_MSG_RESP) {
-        ray_t* obj = deser_frame(payload->data, (size_t)payload->offset,
-                                 hdr.flags);
+     * no defined meaning — log and drop.  Protocol corruption (decode
+     * failure / trailing bytes) closes the connection so the waiter
+     * observes a clean 'io error instead of a bogus value. */
+    if (msgtype == RAY_IPC_MSG_RESP) {
+        int is_wire_err = 0;
+        ray_t* obj = ipc_decode_payload(payload->data, (size_t)plen, swap,
+                                        &is_wire_err);
         ray_poll_buf_free(payload);
+        if (!obj) {
+            ray_poll_deregister(poll, id);
+            return NULL;
+        }
         if (cd->sync_waiting && !cd->sync_ready) {
             cd->sync_resp  = obj;
             cd->sync_ready = true;
         } else {
             fprintf(stderr, "ipc: dropping unexpected response frame "
                             "(handle=%lld)\n", (long long)id);
-            if (obj && obj != RAY_NULL_OBJ) ray_release(obj);
+            if (RAY_IS_ERR(obj)) ray_error_free(obj);
+            else if (obj != RAY_NULL_OBJ) ray_release(obj);
         }
         return NULL;
     }
@@ -845,30 +782,35 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
 
     /* Expose this connection's selector id to `.ipc.handle` (and its
      * poll to handle resolution) for the duration of any hook that
-     * runs inside eval_payload.  Save/restore so a hook that itself
+     * runs inside the dispatch.  Save/restore so a hook that itself
      * opens a nested IPC round-trip doesn't leave the wrong handle
      * visible when its caller resumes. */
     int64_t prev_handle = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(id, poll);
 
-    /* Eval and produce result */
-    ray_t* result = eval_payload(payload->data,
-                                 (size_t)payload->offset, &hdr);
+    ray_t* result = NULL;
+    int rc = ipc_dispatch(msgtype, payload->data, (size_t)plen, swap, &result);
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev_restricted);
     ray_poll_buf_free(payload);
 
+    if (rc != 0) {                            /* protocol corruption */
+        ray_poll_deregister(poll, id);
+        return NULL;
+    }
+
     /* Send response for sync messages.  The eval may have closed this
      * very connection (`.ipc.close` on its own handle) — revalidate the
      * selector before writing to its fd. */
-    if (hdr.msgtype == RAY_IPC_MSG_SYNC) {
+    if (msgtype == RAY_IPC_MSG_SYNC) {
         ray_selector_t* cur = ray_poll_get(poll, id);
         if (cur && cur->data == (void*)cd)
             send_response((ray_sock_t)cur->fd, result);
     }
-    if (result != RAY_NULL_OBJ) ray_release(result);
+    if (RAY_IS_ERR(result)) ray_error_free(result);
+    else if (result != RAY_NULL_OBJ) ray_release(result);
 
     return NULL;
 }
@@ -897,7 +839,8 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
         /* A RESP deposited for a sync wait that never consumed it
          * (connection died mid-round-trip) would otherwise leak. */
         if (cd->sync_resp) {
-            if (cd->sync_resp != RAY_NULL_OBJ) ray_release(cd->sync_resp);
+            if (RAY_IS_ERR(cd->sync_resp)) ray_error_free(cd->sync_resp);
+            else if (cd->sync_resp != RAY_NULL_OBJ) ray_release(cd->sync_resp);
             cd->sync_resp = NULL;
         }
         ray_sys_free(sel->data);
@@ -929,13 +872,13 @@ int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port)
 }
 
 /* ======================================================================
- * Server API
+ * Server API (legacy — wraps its own poll; used by C test fixtures)
  * ====================================================================== */
 
 static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 {
     /* `.ipc.on.close` fires only for conns that were actually opened —
-     * a slot whose phase never advanced past HANDSHAKE/CREDS was never
+     * a slot whose phase never advanced past HANDSHAKE was never
      * announced via on.open and so shouldn't be announced via on.close.
      * Keeps the pair balanced for the user. */
     if (c->phase == RAY_IPC_PHASE_HEADER ||
@@ -959,6 +902,7 @@ static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     c->rx_buf  = NULL;
     c->rx_len  = 0;
     c->rx_need = 0;
+    c->hs_len  = 0;
 
     uint32_t idx = (uint32_t)(c - srv->conns);
     if (idx + 1 < srv->n_conns)
@@ -966,49 +910,51 @@ static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     if (srv->n_conns > 0) srv->n_conns--;
 }
 
+/* One handshake byte at a time (see the poll path): accumulate into
+ * c->hs until the NUL terminator, then authenticate + reply/close. */
 static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 {
-    /* Refuse peers speaking a different wire version up front — see the
-     * matching check in ipc_read_handshake. */
-    if (!c->rx_buf || c->rx_buf[0] != RAY_SERDE_WIRE_VERSION) {
-        conn_close(srv, c);
+    uint8_t b = c->rx_buf[0];
+    c->rx_len = 0;                       /* reuse the 1-byte buffer */
+
+    if (b != 0x00) {
+        if (c->hs_len >= KDB_HS_MAX) { conn_close(srv, c); return; }
+        c->hs[c->hs_len++] = b;
         return;
     }
 
     bool auth_req = (srv->auth_secret[0] != '\0');
-    uint8_t resp[2] = { RAY_SERDE_WIRE_VERSION, auth_req ? 0x01 : 0x00 };
-    ray_sock_send(c->fd, resp, 2);
+    if (!kdb_handshake_complete(NULL, (int64_t)(c - srv->conns), c->fd,
+                                c->hs, c->hs_len, auth_req,
+                                srv->auth_secret)) {
+        conn_close(srv, c);
+        return;
+    }
 
     ray_sys_free(c->rx_buf);
     c->rx_buf  = NULL;
     c->rx_len  = 0;
-
-    if (auth_req) {
-        c->rx_need = 1; /* length byte */
-        c->phase   = RAY_IPC_PHASE_CREDS;
-        return;
-    }
-
-    c->rx_need = sizeof(ray_ipc_header_t);
+    c->rx_need = KDB_HDR_LEN;
     c->phase   = RAY_IPC_PHASE_HEADER;
-    /* Legacy path mirror of the poll-path post-handshake fire. */
     hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns));
 }
 
 static void conn_on_header(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 {
-    memcpy(&c->hdr, c->rx_buf, sizeof(ray_ipc_header_t));
-
-    if (c->hdr.prefix != RAY_SERDE_PREFIX) { conn_close(srv, c); return; }
-    if (c->hdr.version != RAY_SERDE_WIRE_VERSION) { conn_close(srv, c); return; }
-    if (c->hdr.size <= 0)                  { conn_close(srv, c); return; }
-    if (c->hdr.size > 256 * 1024 * 1024)   { conn_close(srv, c); return; }
+    uint8_t msgtype; int swap; uint32_t plen;
+    if (kdb_hdr_parse(c->rx_buf, &msgtype, &swap, &plen) != 0) {
+        conn_close(srv, c);
+        return;
+    }
+    c->msgtype = msgtype;
+    c->swap    = (uint8_t)swap;
+    c->plen    = plen;
 
     ray_sys_free(c->rx_buf);
-    c->rx_buf = (uint8_t*)ray_sys_alloc((size_t)c->hdr.size);
+    c->rx_buf = (uint8_t*)ray_sys_alloc((size_t)plen);
     if (!c->rx_buf) { conn_close(srv, c); return; }
     c->rx_len  = 0;
-    c->rx_need = (size_t)c->hdr.size;
+    c->rx_need = (size_t)plen;
     c->phase   = RAY_IPC_PHASE_PAYLOAD;
 }
 
@@ -1025,62 +971,24 @@ static void conn_on_payload(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set((int64_t)(c - srv->conns), prev_poll);
 
-    ray_t* result = eval_payload(c->rx_buf, c->rx_len, &c->hdr);
+    ray_t* result = NULL;
+    int rc = ipc_dispatch(c->msgtype, c->rx_buf, c->rx_len, c->swap, &result);
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev);
 
-    if (c->hdr.msgtype == RAY_IPC_MSG_SYNC)
+    if (rc != 0) { conn_close(srv, c); return; }   /* protocol corruption */
+
+    if (c->msgtype == RAY_IPC_MSG_SYNC)
         send_response(c->fd, result);
-    if (result != RAY_NULL_OBJ) ray_release(result);
+    if (RAY_IS_ERR(result)) ray_error_free(result);
+    else if (result != RAY_NULL_OBJ) ray_release(result);
 
     ray_sys_free(c->rx_buf);
     c->rx_buf  = NULL;
     c->rx_len  = 0;
-    c->rx_need = sizeof(ray_ipc_header_t);
+    c->rx_need = KDB_HDR_LEN;
     c->phase   = RAY_IPC_PHASE_HEADER;
-}
-
-static void conn_on_creds(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
-{
-    if (c->rx_len == 1) {
-        /* Got length byte — reallocate buffer for full credential */
-        uint8_t cred_len = c->rx_buf[0];
-        size_t need = 1 + (size_t)cred_len;
-        uint8_t* newbuf = (uint8_t*)ray_sys_alloc(need);
-        if (!newbuf) { conn_close(srv, c); return; }
-        newbuf[0] = cred_len;
-        ray_sys_free(c->rx_buf);
-        c->rx_buf  = newbuf;
-        c->rx_need = need;
-        return;
-    }
-
-    uint8_t cred_len = c->rx_buf[0];
-    bool ok = validate_creds(c->rx_buf + 1, cred_len, srv->auth_secret);
-
-    /* Legacy path mirror of the poll-path on.auth call: same handle-as-
-     * conn-index convention, same narrowing semantics. */
-    if (ok) {
-        int hook_ok = hook_call_auth(NULL, (int64_t)(c - srv->conns),
-                                     c->rx_buf + 1, cred_len);
-        if (hook_ok == 0) ok = false;
-    }
-
-    uint8_t result = ok ? 0x00 : 0x01;
-    ray_sock_send(c->fd, &result, 1);
-
-    if (!ok) {
-        conn_close(srv, c);
-        return;
-    }
-
-    ray_sys_free(c->rx_buf);
-    c->rx_buf  = NULL;
-    c->rx_len  = 0;
-    c->rx_need = sizeof(ray_ipc_header_t);
-    c->phase   = RAY_IPC_PHASE_HEADER;
-    hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns));
 }
 
 static void conn_on_readable(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
@@ -1099,7 +1007,6 @@ static void conn_on_readable(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 
     switch (c->phase) {
     case RAY_IPC_PHASE_HANDSHAKE: conn_on_handshake(srv, c); break;
-    case RAY_IPC_PHASE_CREDS:     conn_on_creds(srv, c);     break;
     case RAY_IPC_PHASE_HEADER:    conn_on_header(srv, c);    break;
     case RAY_IPC_PHASE_PAYLOAD:   conn_on_payload(srv, c);   break;
     }
@@ -1181,10 +1088,9 @@ int ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms)
                 continue;
             }
             ray_ipc_conn_t* c = &srv->conns[srv->n_conns++];
+            memset(c, 0, sizeof(*c));
             c->fd      = new_fd;
-            c->rx_buf  = NULL;
-            c->rx_len  = 0;
-            c->rx_need = 2;
+            c->rx_need = 1;                     /* handshake: byte-at-a-time */
             c->phase   = RAY_IPC_PHASE_HANDSHAKE;
             struct epoll_event cev = { .events = EPOLLIN, .data.fd = new_fd };
             epoll_ctl(srv->poll_fd, EPOLL_CTL_ADD, new_fd, &cev);
@@ -1225,10 +1131,9 @@ int ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms)
                 continue;
             }
             ray_ipc_conn_t* c = &srv->conns[srv->n_conns++];
+            memset(c, 0, sizeof(*c));
             c->fd      = new_fd;
-            c->rx_buf  = NULL;
-            c->rx_len  = 0;
-            c->rx_need = 2;
+            c->rx_need = 1;                     /* handshake: byte-at-a-time */
             c->phase   = RAY_IPC_PHASE_HANDSHAKE;
             struct kevent kev;
             EV_SET(&kev, new_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
@@ -1275,10 +1180,9 @@ int ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms)
                 ray_sock_close(new_fd);
             } else {
                 ray_ipc_conn_t* c = &srv->conns[srv->n_conns++];
+                memset(c, 0, sizeof(*c));
                 c->fd      = new_fd;
-                c->rx_buf  = NULL;
-                c->rx_len  = 0;
-                c->rx_need = 2;
+                c->rx_need = 1;                 /* handshake: byte-at-a-time */
                 c->phase   = RAY_IPC_PHASE_HANDSHAKE;
             }
         }
@@ -1363,67 +1267,6 @@ static int conn_pump(ray_poll_t* poll, int64_t id)
     }
 }
 
-/* Serialize + frame + write one message to a connection's fd.
- * ray_sock_send loops on partial writes/EAGAIN internally, so this is
- * safe on the nonblocking fds the poll owns.  Returns 0 on success,
- * -1 on serialization or socket failure. */
-static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype,
-                              uint8_t extra_flags)
-{
-    int64_t ser_size = ray_serde_size(msg);
-    if (ser_size <= 0) return -1;
-
-    uint8_t* payload = (uint8_t*)ray_sys_alloc((size_t)ser_size);
-    if (!payload) return -1;
-    ray_ser_raw(payload, msg);
-
-    uint8_t* send_buf = NULL;
-    size_t   send_len = 0;
-    uint8_t  flags    = 0;
-
-    if ((size_t)ser_size > RAY_IPC_COMPRESS_THRESHOLD) {
-        uint8_t* comp = (uint8_t*)ray_sys_alloc((size_t)ser_size);
-        if (comp) {
-            size_t clen = ray_ipc_compress(payload, (size_t)ser_size,
-                                           comp, (size_t)ser_size);
-            if (clen > 0 && clen + 4 < (size_t)ser_size) {
-                send_len = clen + 4;
-                send_buf = (uint8_t*)ray_sys_alloc(send_len);
-                if (send_buf) {
-                    uint32_t uncomp = (uint32_t)ser_size;
-                    memcpy(send_buf, &uncomp, 4);
-                    memcpy(send_buf + 4, comp, clen);
-                    flags = RAY_IPC_FLAG_COMPRESSED;
-                }
-            }
-            ray_sys_free(comp);
-        }
-    }
-
-    if (!send_buf) {
-        send_buf = payload;
-        send_len = (size_t)ser_size;
-        payload  = NULL;
-    }
-
-    ray_ipc_header_t hdr = {
-        .prefix  = RAY_SERDE_PREFIX,
-        .version = RAY_SERDE_WIRE_VERSION,
-        .flags   = (uint8_t)(flags | extra_flags),
-        .endian  = 0,
-        .msgtype = msgtype,
-        .size    = (int64_t)send_len,
-    };
-
-    int64_t rc = ray_sock_send(fd, &hdr, sizeof(hdr));
-    if (rc < 0) { ray_sys_free(send_buf); if (payload) ray_sys_free(payload); return -1; }
-    rc = ray_sock_send(fd, send_buf, send_len);
-
-    ray_sys_free(send_buf);
-    if (payload) ray_sys_free(payload);
-    return rc < 0 ? -1 : 0;
-}
-
 int64_t ray_ipc_connect(const char* host, uint16_t port,
                          const char* user, const char* password,
                          int timeout_ms)
@@ -1440,58 +1283,37 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     ray_sock_t fd = ray_sock_connect(host, port, connect_to);
     if (fd == RAY_INVALID_SOCK) return (errno == ETIMEDOUT) ? -5 : -1;
 
-    uint8_t hs[2] = { RAY_SERDE_WIRE_VERSION, 0x00 };
-    if (ray_sock_send(fd, hs, 2) < 0) {
+    /* kdb handshake: "user:password" + capability byte + NUL.  The colon
+     * is ALWAYS present (the no-credential handshake is ":\3\0") so the
+     * server's auth hook sees an unambiguous user/pass split. */
+    char cred[300];
+    int n = snprintf(cred, sizeof(cred) - 2, "%s:%s",
+                     user ? user : "", password ? password : "");
+    if (n < 0 || n >= (int)sizeof(cred) - 2) { ray_sock_close(fd); return -1; }
+    cred[n++] = KDB_CAPABILITY;
+    cred[n++] = 0x00;
+    if (ray_sock_send(fd, cred, (size_t)n) < 0) {
         ray_sock_close(fd);
         return -1;
     }
 
-    uint8_t resp[2];
-    if (recv_full(fd, resp, 2) < 0) {
+    /* Accept = one common-capability byte; reject = the server closes
+     * the connection without sending anything (kdb behaviour). */
+    uint8_t common;
+    if (recv_full(fd, &common, 1) < 0) {
         ray_sock_close(fd);
-        return -1;
+        return -3; /* auth rejected (server closed the connection) */
     }
-
-    /* Refuse a peer that speaks a different wire version.  This gives
-     * the new client an explicit error at connect time rather than
-     * silently sending a v3 payload to a server that would misparse
-     * every atom. */
-    if (resp[0] != RAY_SERDE_WIRE_VERSION) {
+    /* A compliant kdb server replies with the NEGOTIATED capability =
+     * min(client, server), so it can never exceed what we offered.  A byte
+     * above KDB_CAPABILITY means the peer is not speaking our protocol (or a
+     * non-kdb service that accepted the TCP connection): refuse rather than
+     * register a live handle that would hang on the first request.  We still
+     * do not otherwise ACT on the level (no >2GB frames / no compression yet
+     * — Phase F), so any value in [0, KDB_CAPABILITY] is accepted. */
+    if (common > KDB_CAPABILITY) {
         ray_sock_close(fd);
-        return -4; /* wire version mismatch */
-    }
-
-    /* Auth required? */
-    if (resp[1] == 0x01) {
-        if (!password) {
-            ray_sock_close(fd);
-            return -2; /* auth required but no creds */
-        }
-        char cred[256];
-        int cred_len;
-        if (user && user[0])
-            cred_len = snprintf(cred, sizeof(cred), "%s:%s", user, password);
-        else
-            cred_len = snprintf(cred, sizeof(cred), ":%s", password);
-        if (cred_len < 0 || cred_len >= (int)sizeof(cred)) {
-            ray_sock_close(fd);
-            return -1;
-        }
-        cred_len++; /* include null terminator */
-        uint8_t len_byte = (uint8_t)cred_len;
-        if (ray_sock_send(fd, &len_byte, 1) < 0 ||
-            ray_sock_send(fd, cred, cred_len) < 0) {
-            ray_sock_close(fd);
-            return -1;
-        }
-        uint8_t auth_result;
-        if (recv_full(fd, &auth_result, 1) < 0 || auth_result != 0x00) {
-            ray_sock_close(fd);
-            return -3; /* auth rejected */
-        }
-    } else if (resp[1] != 0x00) {
-        ray_sock_close(fd);
-        return -1;
+        return -1; /* handshake failed: capability byte out of range */
     }
 
 #ifdef RAY_OS_WINDOWS
@@ -1533,7 +1355,7 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
         return -1;
     }
     ray_selector_t* ns = ray_poll_get(poll, id);
-    if (ns) ray_poll_rx_request(poll, ns, sizeof(ray_ipc_header_t));
+    if (ns) ray_poll_rx_request(poll, ns, KDB_HDR_LEN);
 
     return id;
 }
@@ -1555,7 +1377,7 @@ void ray_ipc_close(int64_t handle)
  * between: a pushed ASYNC gets evaluated, a nested SYNC request from
  * the peer gets evaluated and answered.  Full-duplex, either side of
  * the wire. */
-static ray_t* sync_send(int64_t handle, ray_t* msg, uint8_t extra_flags)
+static ray_t* sync_send(int64_t handle, ray_t* msg)
 {
     bool owned = false;
     if (ray_is_lazy(msg)) {
@@ -1580,8 +1402,7 @@ static ray_t* sync_send(int64_t handle, ray_t* msg, uint8_t extra_flags)
         return ray_error("io", "nested sync send on busy handle");
     }
 
-    if (conn_write_msg((ray_sock_t)sel->fd, msg, RAY_IPC_MSG_SYNC,
-                       extra_flags) < 0) {
+    if (conn_write_msg((ray_sock_t)sel->fd, msg, RAY_IPC_MSG_SYNC) < 0) {
         if (owned) ray_release(msg);
         return ray_error("io", "ipc send failed");
     }
@@ -1626,7 +1447,7 @@ static ray_t* sync_send(int64_t handle, ray_t* msg, uint8_t extra_flags)
 
 ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
 {
-    return sync_send(handle, msg, 0);
+    return sync_send(handle, msg);
 }
 
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
@@ -1644,17 +1465,30 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
     }
     ray_selector_t* sel = conn_resolve(NULL, handle);
     ray_err_t rc = (!sel || conn_write_msg((ray_sock_t)sel->fd, msg,
-                                           RAY_IPC_MSG_ASYNC, 0) < 0)
+                                           RAY_IPC_MSG_ASYNC) < 0)
                    ? RAY_ERR_IO : RAY_OK;
     if (owned) ray_release(msg);
     return rc;
 }
 
-/* Verbose-eval sync send: sets RAY_IPC_FLAG_VERBOSE on the outbound
- * header so the peer captures whatever the eval writes to
- * stdout/stderr and returns a 2-element list [captured_str, result]
- * instead of bare result.  Same wire path as ray_ipc_send otherwise. */
+/* Remote-REPL sync send.  The kdb wire has no output-capture flag — the
+ * server prints `show`/display output on ITS console, exactly like kdb.
+ * The [captured_str, result] response SHAPE is preserved for repl.c's
+ * remote loop, with captured always "" now. */
 ray_t* ray_ipc_send_verbose(int64_t handle, ray_t* msg)
 {
-    return sync_send(handle, msg, RAY_IPC_FLAG_VERBOSE);
+    ray_t* r = sync_send(handle, msg);
+    if (r && RAY_IS_ERR(r)) return r;
+    ray_t* cap = ray_str("", 0);
+    if (!cap || RAY_IS_ERR(cap)) {
+        if (cap) ray_release(cap);
+        return r;
+    }
+    ray_t* out = ray_list_new(2);
+    if (!out) { ray_release(cap); return r; }
+    ray_list_append(out, cap);
+    ray_release(cap);
+    ray_list_append(out, r);
+    if (r != RAY_NULL_OBJ) ray_release(r);
+    return out;
 }
