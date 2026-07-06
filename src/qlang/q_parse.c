@@ -870,12 +870,21 @@ static P parse_base(Parser *p) {
         if (ray_len(e) == 1) {
             ray_t **slots = (ray_t **)ray_data(e);
             ray_t *only = slots[0];
-            if (only) ray_retain(only);
+            /* A NULL slot is the EMPTY paren `()` — the empty general list
+             * (type 0h), NOT `::`.  Drop e and fall through to the
+             * list-literal block below (it prepends the list-constructor to a
+             * zero-element list, yielding the empty list).  `(1)` is grouping
+             * -> the lone element; only `()` reaches here with a NULL slot. */
+            if (only) {
+                ray_retain(only);
+                ray_release(e);
+                /* a parenthesized lone glyph verb `(+)` is the bare-verb VALUE
+                 * (dyadic row); user names keep their name-ref. */
+                if (q_sym_is_glyph(only)) only = q_embed(only, Q_DYADIC);
+                return (P){ R_NOUN, only };
+            }
             ray_release(e);
-            /* a parenthesized lone glyph verb `(+)` is the bare-verb VALUE
-             * (dyadic row); user names keep their name-ref. */
-            if (q_sym_is_glyph(only)) only = q_embed(only, Q_DYADIC);
-            return (P){ R_NOUN, only };
+            e = ray_list_new(1);   /* 0 elements -> empty list literal below */
         }
         /* Multi-element paren list is a LITERAL: prepend the internal
          * list-constructor value so eval builds (and collapses) it.  The
