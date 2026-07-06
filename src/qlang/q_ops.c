@@ -46,7 +46,7 @@ static const q_op_t Q_OPS[] = {
      * floor IS k `_:`).  The q spelling is the `floor` keyword row below. */
     { "_",     QLEX_GLYPH,     QK_FLOOR, "floor",    QK_DROP,  "drop",    NULL  },
     { "|",     QLEX_GLYPH,     QK_ENV,  "reverse",   QK_NONE,  NULL,      NULL  },
-    { "&",     QLEX_GLYPH,     QK_ENV,  "where",     QK_MIN2,  "and",     NULL  },
+    { "&",     QLEX_GLYPH,     QK_WHERE, "where",    QK_MIN2,  "and",     NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
     /* ---- type-dispatch glyphs (2c-2) ---- */
@@ -75,6 +75,40 @@ static const q_op_t Q_OPS[] = {
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
     /* q `n cut x` — chunk (int atom) / positional cut (int vector). */
     { "cut",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CUT,   "cut",     NULL  },
+    /* q `x vs y` / `x sv y` — split-join / base-encode family (dyadic infix
+     * keywords; wrappers, native -RAY_STR + sym + base + byte).  Monadic form
+     * is out of scope (kdb `vs`/`sv` are strictly dyadic). */
+    { "vs",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_VS,    "vs",      NULL  },
+    { "sv",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SV,    "sv",      NULL  },
+    /* ---- Wave 5: running scans (monadic prefix keywords) ---- */
+    { "sums",  QLEX_KW_PREFIX, QK_SUMS,  "sums",   QK_NONE,  NULL,      NULL  },
+    { "prds",  QLEX_KW_PREFIX, QK_PRDS,  "prds",   QK_NONE,  NULL,      NULL  },
+    { "maxs",  QLEX_KW_PREFIX, QK_MAXS,  "maxs",   QK_NONE,  NULL,      NULL  },
+    { "mins",  QLEX_KW_PREFIX, QK_MINS,  "mins",   QK_NONE,  NULL,      NULL  },
+    { "avgs",  QLEX_KW_PREFIX, QK_AVGS,  "avgs",   QK_NONE,  NULL,      NULL  },
+    { "ratios",QLEX_KW_PREFIX, QK_RATIOS,"ratios", QK_NONE,  NULL,      NULL  },
+    /* ---- Wave 5: weighted (dyadic infix keywords) ---- */
+    { "wsum",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WSUM,  "wsum",    NULL  },
+    { "wavg",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WAVG,  "wavg",    NULL  },
+    /* ---- Wave 5: statistical (renames of audited base aggregates) ----
+     * kdb `var`/`dev` are POPULATION (÷n); rayfall `var`/`stddev` are SAMPLE
+     * (÷n-1) and `var_pop`/`stddev_pop`/`dev` are population — so q `var`->
+     * `var_pop`, q `svar`->`var`, q `sdev`->`stddev`, q `dev` stays `dev`. */
+    { "med",   QLEX_KW_PREFIX, QK_ENV, "med",       QK_NONE,  NULL,      NULL  },
+    { "var",   QLEX_KW_PREFIX, QK_ENV, "var_pop",   QK_NONE,  NULL,      NULL  },
+    { "svar",  QLEX_KW_PREFIX, QK_ENV, "var",       QK_NONE,  NULL,      NULL  },
+    { "sdev",  QLEX_KW_PREFIX, QK_ENV, "stddev",    QK_NONE,  NULL,      NULL  },
+    { "cor",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "pearson_corr", NULL },
+    { "cov",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_COV,   "cov",     NULL  },
+    { "scov",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SCOV,  "scov",    NULL  },
+    /* ---- Wave 5: sliding m-windows + ema (dyadic infix keywords) ---- */
+    { "msum",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MSUM,  "msum",    NULL  },
+    { "mavg",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MAVG,  "mavg",    NULL  },
+    { "mmax",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MMAX,  "mmax",    NULL  },
+    { "mmin",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MMIN,  "mmin",    NULL  },
+    { "mcount",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MCOUNT,"mcount",  NULL  },
+    { "mdev",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MDEV,  "mdev",    NULL  },
+    { "ema",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EMA,   "ema",     NULL  },
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
      * do/while by f rank; prior is unary each-prior; peach == each. */
@@ -84,11 +118,11 @@ static const q_op_t Q_OPS[] = {
     { "peach", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "peach",   NULL  },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QK_NEG, "neg",      QK_NONE,  NULL,      NULL  },
-    { "til",     QLEX_KW_PREFIX, QK_ENV, "til",      QK_NONE,  NULL,      NULL  },
+    { "til",     QLEX_KW_PREFIX, QK_TIL, "til",      QK_NONE,  NULL,      NULL  },
     { "count",   QLEX_KW_PREFIX, QK_ENV, "count",    QK_NONE,  NULL,      NULL  },
     { "first",   QLEX_KW_PREFIX, QK_ENV, "first",    QK_NONE,  NULL,      NULL  },
     { "last",    QLEX_KW_PREFIX, QK_ENV, "last",     QK_NONE,  NULL,      NULL  },
-    { "where",   QLEX_KW_PREFIX, QK_ENV, "where",    QK_NONE,  NULL,      NULL  },
+    { "where",   QLEX_KW_PREFIX, QK_WHERE, "where",  QK_NONE,  NULL,      NULL  },
     { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },

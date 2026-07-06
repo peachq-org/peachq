@@ -112,6 +112,12 @@ ray_t* q_registry_list_value(void);
  * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_table_value(void);
 
+/* The internal keyed-table constructor `([k:…] v:…)` head the PARSER embeds.
+ * args[0] is the key-column count; the columns follow (keys then values).
+ * Builds a RAY_DICT (key-cols table -> value-cols table).  Borrowed; NULL
+ * before q_registry_init. */
+ray_t* q_registry_keyed_table_value(void);
+
 /* The q.fn special-form value behind every lambda literal (borrowed; NULL
  * before init).  q_lower embeds it at the head of lowered `{...}` nodes. */
 ray_t* q_registry_lambda_value(void);
@@ -137,6 +143,12 @@ void   q_registry_sig_clear(void);
  * operands are the rayfall query dict and the by-key column-name sym vector.
  * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_select_value(void);
+
+/* The `'[f;g;…]` compose builder the PARSER embeds at the head of a compose
+ * bracket form.  A regular (arg-evaluating) vary fn: ray_eval resolves the
+ * function operands, then it boxes them into a Q_DERIV_COMPOSE carrier.
+ * Borrowed; NULL before q_registry_init. */
+ray_t* q_registry_compose_value(void);
 
 /* The functional-qSQL executor values q_lower embeds at the head of a rank-4
  * `?[t;c;b;a]` (select/exec) or `![t;c;b;a]` (update/delete) application.  They
