@@ -31,7 +31,8 @@
 typedef enum {
     Q_DERIV_NONE = 0,
     Q_DERIV_PROJ,     /* +[2], f[;2] — bound-arg projection with hole mask */
-    Q_DERIV_MONAD     /* +: — monadic-marked verb                          */
+    Q_DERIV_MONAD,    /* +: — monadic-marked verb                          */
+    Q_DERIV_LAMBDA    /* {x*x} — 100h lambda: base RAY_LAMBDA + q source   */
 } q_deriv_kind;
 
 /* Projection `base[...]` with `argc` bound args (a hole is a NULL slot; the
@@ -44,10 +45,16 @@ ray_t* q_proj_new(ray_t* base, ray_t** args, int64_t argc, uint64_t hole_mask,
 /* Monadic-marked verb `base:` (e.g. `+:`).  Retains `base`. */
 ray_t* q_monadic_mark(ray_t* base);
 
+/* q lambda value `{...}`: base is the rayfall RAY_LAMBDA, `rank` its q valence,
+ * `src` the verbatim `{...}` source text (the kdb display form).  Retains
+ * `base` and `src`. */
+ray_t* q_lambda_carrier_new(ray_t* base, int rank, ray_t* src);
+
 /* Inspectors — return Q_DERIV_NONE / NULL / defaults for a non-carrier. */
 q_deriv_kind q_deriv_kind_of(const ray_t* v);
 ray_t*       q_deriv_base(const ray_t* v);        /* borrowed */
 uint64_t     q_deriv_hole_mask(const ray_t* v);   /* Q_DERIV_PROJ only    */
 int          q_deriv_valence(const ray_t* v);     /* effective valence    */
+ray_t*       q_lambda_src(const ray_t* v);        /* Q_DERIV_LAMBDA only; borrowed */
 
 #endif /* Q_DERIV_H */
