@@ -1382,7 +1382,10 @@ static ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     if (q_is_sym_t(x->type) || q_is_sym_t(y->type)) {
         if (!q_is_sym_t(x->type) || !q_is_sym_t(y->type))
             return ray_error("type", "^: symbol fill needs symbol operands");
-        int64_t len = yatom ? 1 : ray_len(y);
+        /* length follows y when it is a vector; a scalar y broadcasts to the
+         * length of a vector x (`` `a`b`c^` `` -> 3 items), matching the
+         * numeric branch below. */
+        int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
         if (!xatom && !yatom && ray_len(x) != len)
             return ray_error("length", "^: operand lengths must match");
         ray_t* outl = ray_list_new(len > 0 ? len : 1);
