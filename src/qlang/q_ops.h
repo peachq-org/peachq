@@ -73,7 +73,36 @@ typedef enum {
     QK_SCANKW,          /* q `f scan x` == `f\x`                                */
     QK_PRIORKW,         /* q `f prior x` == `(f':)x` (unary each-prior)         */
     QK_DELTAS,          /* q `deltas x` == `(-':)x`                             */
-    QK_DIFFER           /* q `differ x` == `not(~':)x`                          */
+    QK_DIFFER,          /* q `differ x` == `not(~':)x`                          */
+    QK_TIL,             /* q `til` wrapper: accepts a boolean (`til 1b`->,0);
+                         * base ray_til_fn is int-only.  Delegates otherwise.   */
+    QK_WHERE,           /* q `where`/monadic `&` wrapper: an integer vector
+                         * repeats each index i, x[i] times (`where 2 3 1` ->
+                         * 0 0 1 1 1 2); the boolean form delegates to base.     */
+    QK_VS,              /* q `x vs y` — split / base-decompose / byte-encode
+                         * (string split, sym split, int base decompose, byte
+                         * big-endian encode, bit decompose)                    */
+    QK_SV,              /* q `x sv y` — join / base-compose / byte-decode
+                         * (inverse of vs)                                      */
+    /* ---- Wave 5 aggregate / uniform family ---- */
+    QK_SUMS,            /* running sum  (nulls -> 0)                            */
+    QK_PRDS,            /* running product (nulls -> 1)                         */
+    QK_MAXS,            /* running max (nulls skipped; also runs over chars)    */
+    QK_MINS,            /* running min (nulls skipped; also runs over chars)    */
+    QK_AVGS,            /* running average (nulls excluded) -> float            */
+    QK_RATIOS,          /* pairwise ratio: r[0]=x[0], r[i]=x[i]%x[i-1]          */
+    QK_WSUM,            /* weighted sum:  x wsum y == sum x*y (nulls excluded)  */
+    QK_WAVG,            /* weighted avg:  (sum x*y) % sum x (nulls excluded)    */
+    QK_COV,             /* population covariance                                */
+    QK_SCOV,            /* sample covariance (n-1)                              */
+    /* ---- Wave 5 sliding m-windows + ema (dyadic infix) ---- */
+    QK_MSUM,            /* N msum x  — sliding sum (nulls -> 0)                 */
+    QK_MAVG,            /* N mavg x  — sliding average (nulls excluded)        */
+    QK_MMAX,            /* N mmax x  — sliding max (nulls skipped)             */
+    QK_MMIN,            /* N mmin x  — sliding min (nulls skipped)             */
+    QK_MCOUNT,          /* N mcount x— sliding count of non-null               */
+    QK_MDEV,            /* N mdev x  — sliding population std deviation         */
+    QK_EMA              /* a ema x   — exponential moving average               */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic

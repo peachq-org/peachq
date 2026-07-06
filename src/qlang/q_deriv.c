@@ -17,6 +17,7 @@ static int64_t g_sid_proj   = -1;
 static int64_t g_sid_monad  = -1;
 static int64_t g_sid_hole   = -1;  /* unbound-arg `;` sentinel in a projection */
 static int64_t g_sid_lambda = -1;
+static int64_t g_sid_compose = -1;
 
 static void ensure_markers(void) {
     if (g_sid_proj < 0) {
@@ -24,6 +25,7 @@ static void ensure_markers(void) {
         g_sid_monad  = ray_sym_intern(".q.monad",  8);
         g_sid_hole   = ray_sym_intern(".q.hole",   7);
         g_sid_lambda = ray_sym_intern(".q.lambda", 9);
+        g_sid_compose = ray_sym_intern(".q.compose", 10);
     }
 }
 
@@ -80,6 +82,18 @@ ray_t* q_lambda_carrier_new(ray_t* base, int rank, ray_t* src) {
     return l;
 }
 
+ray_t* q_compose_new(ray_t** fns, int64_t nf) {
+    if (nf < 1) return ray_error("rank", "q_compose_new: needs >=1 function");
+    ensure_markers();
+    ray_t* l = ray_list_new(nf + 1);
+    l = push_owned(l, marker_atom(g_sid_compose));
+    for (int64_t i = 0; i < nf; i++) {
+        if (!fns[i]) { ray_release(l); return ray_error("type", "compose: nil function"); }
+        l = push_borrowed(l, fns[i]);   /* append retains */
+    }
+    return l;
+}
+
 ray_t* q_monadic_mark(ray_t* base) {
     if (!base) return ray_error("type", "q_monadic_mark: nil base");
     ensure_markers();
@@ -111,7 +125,20 @@ q_deriv_kind q_deriv_kind_of(const ray_t* v) {
     if (sid == g_sid_proj   && n >= 4) return Q_DERIV_PROJ;   /* marker,base,mask,val */
     if (sid == g_sid_monad  && n >= 3) return Q_DERIV_MONAD;  /* marker,base,val       */
     if (sid == g_sid_lambda && n >= 4) return Q_DERIV_LAMBDA; /* marker,base,val,src   */
+    if (sid == g_sid_compose && n >= 2) return Q_DERIV_COMPOSE; /* marker,fn0,fn1,…    */
     return Q_DERIV_NONE;
+}
+
+int64_t q_compose_count(const ray_t* v) {
+    if (q_deriv_kind_of(v) != Q_DERIV_COMPOSE) return 0;
+    return ray_len((ray_t*)v) - 1;
+}
+
+ray_t* q_compose_fn_at(const ray_t* v, int64_t i) {
+    if (q_deriv_kind_of(v) != Q_DERIV_COMPOSE) return NULL;
+    int64_t nf = ray_len((ray_t*)v) - 1;
+    if (i < 0 || i >= nf) return NULL;
+    return ((ray_t**)ray_data((ray_t*)v))[1 + i];   /* borrowed */
 }
 
 ray_t* q_deriv_base(const ray_t* v) {
