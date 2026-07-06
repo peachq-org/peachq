@@ -13,6 +13,7 @@ static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz);
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <math.h>
 
 /* The verb characters — a sym atom of one of these (or the generic null `::`)
@@ -50,6 +51,34 @@ static void ray_fallback(ray_t* val, char* buf, size_t bufsz) {
 }
 
 void q_fmt(ray_t* val, char* buf, size_t bufsz);   /* fwd */
+
+/* ---- q console sink (see q_fmt.h) ---------------------------------------- */
+static char*  g_console;
+static size_t g_console_len, g_console_cap;
+
+void q_console_reset(void) { g_console_len = 0; if (g_console) g_console[0] = '\0'; }
+
+const char* q_console_str(void) { return g_console ? g_console : ""; }
+
+static void q_console_append(const char* s, size_t n) {
+    if (g_console_len + n + 1 > g_console_cap) {
+        size_t nc = g_console_cap ? g_console_cap * 2 : 256;
+        while (nc < g_console_len + n + 1) nc *= 2;
+        char* nb = realloc(g_console, nc);
+        if (!nb) return;                       /* drop on OOM — best effort */
+        g_console = nb; g_console_cap = nc;
+    }
+    memcpy(g_console + g_console_len, s, n);
+    g_console_len += n;
+    g_console[g_console_len] = '\0';
+}
+
+void q_console_show(ray_t* val) {
+    char buf[8192]; buf[0] = '\0';
+    q_fmt(val, buf, sizeof buf);
+    q_console_append(buf, strlen(buf));
+    q_console_append("\n", 1);
+}
 
 /* ---- kdb table / keyed-table display -------------------------------------
  *
@@ -241,17 +270,11 @@ static void q_float_tok(double v, int f32, char* out, size_t n) {
         snprintf(out, n, "%lld%s", (long long)v, f32 ? "e" : "");
         return;
     }
-    ray_t* a = f32 ? ray_f32((float)v) : ray_f64(v);
-    char mag[64]; mag[0] = '\0';
-    ray_t* s = ray_fmt(a, 0);
-    if (s && !RAY_IS_ERR(s) && s->type == -RAY_STR) {
-        size_t l = ray_str_len(s);
-        if (l >= sizeof mag) l = sizeof mag - 1;
-        memcpy(mag, ray_str_ptr(s), l);
-        mag[l] = '\0';
-    }
-    if (s && !RAY_IS_ERR(s)) ray_release(s);
-    if (a && !RAY_IS_ERR(a)) ray_release(a);
+    /* kdb console precision is 7 significant digits (\P 7): 1%3 -> 0.3333333,
+     * 10%3 -> 3.333333.  %.7g gives exactly that (and kdb-style exponents for
+     * very large / small magnitudes). */
+    char mag[64];
+    snprintf(mag, sizeof mag, "%.7g", v);
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
 }
 
@@ -320,10 +343,163 @@ static void q_join(char* buf, size_t bufsz, size_t* pos, const char* tok, int fi
     buf[*pos] = '\0';
 }
 
+/* ---- value display vs parse-tree display -------------------------------
+ *
+ * A general RAY_LIST is shape-identical whether it is a VALUE (`(1;2 3;`abc)`,
+ * displayed one-item-per-line kdb-style) or a PARSE TREE (`parse "2+3"` ->
+ * `(+;2;3)`, displayed compact — a FROZEN byte-for-byte contract).  The signal
+ * is intrinsic to the object, so display cannot be driven by a caller flag:
+ * `parse` returns a tree that flows through the same eval->q_fmt path as data.
+ *
+ * A list is a PARSE TREE iff its head element is one of:
+ *   - the hidden list/table constructor value (paren-literal marker), or
+ *   - a fn value (RAY_UNARY/BINARY/VARY — a registry verb head like `+`), or
+ *   - a name-ref/verb/marker sym: a -RAY_SYM with ATTR_QUOTED (0x20) CLEAR
+ *     (a DATA sym literal has 0x20 SET — see mem/heap.h), or
+ *   - (recursively) a nested clause list, e.g. a qSQL where-clause
+ *     `((>;`a;1);(=;`b;2))` whose head is itself a predicate sub-tree.
+ * Everything else — a data atom, a typed vector, a string, a dict/table head —
+ * marks a VALUE list. */
+#define Q_ATTR_QUOTED 0x20
+static int q_list_is_parse_tree(ray_t* v, int depth) {
+    if (!v || v->type != RAY_LIST || depth > 64) return 0;
+    int64_t n = ray_len(v);
+    if (n < 1) return 0;
+    ray_t* h = ((ray_t**)ray_data(v))[0];
+    if (!h) return 0;
+    if (h == q_registry_list_value() || h == q_registry_table_value()) return 1;
+    if (h->type == RAY_UNARY || h->type == RAY_BINARY || h->type == RAY_VARY)
+        return 1;
+    if (h->type == -RAY_SYM && !(h->attrs & Q_ATTR_QUOTED)) return 1;
+    if (h->type == RAY_LIST) return q_list_is_parse_tree(h, depth + 1);
+    return 0;
+}
+
+/* The q display name for an empty typed vector: `long$()`, `symbol$()`, ...
+ * (kdb `0#0` -> `` `long$() ``).  Byte (`0x`) and bool empties keep their own
+ * arms; strings are atoms, not vectors.  Returns NULL for un-named types. */
+static const char* q_empty_vec_qname(int8_t type) {
+    switch (type) {
+    case RAY_I16:  return "short";
+    case RAY_I32:  return "int";
+    case RAY_I64:  return "long";
+    case RAY_F32:  return "real";
+    case RAY_F64:  return "float";
+    case RAY_SYM:  return "symbol";
+    case RAY_DATE: return "date";
+    default:       return NULL;
+    }
+}
+
+/* A matrix column-aligns only the SPACE-SEPARATED element types (numeric /
+ * sym / date).  bool (`101b`) and byte (`0x0102`) print each row-vector whole,
+ * one per line — no transpose. */
+static int q_matrix_alignable(int8_t type) {
+    return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
+           type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
+           type == RAY_DATE;
+}
+
+/* Format element `c` of the row-vector `rv` BARE (no per-element type suffix,
+ * no backtick) — a matrix cell token. */
+static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
+    out[0] = '\0';
+    switch (rv->type) {
+    case RAY_I16: q_int_tok((int64_t)((const int16_t*)ray_data(rv))[c], 2, 0, out, outsz); break;
+    case RAY_I32: q_int_tok((int64_t)((const int32_t*)ray_data(rv))[c], 4, 0, out, outsz); break;
+    case RAY_I64: q_int_tok(((const int64_t*)ray_data(rv))[c],          8, 0, out, outsz); break;
+    case RAY_F32: q_float_tok((double)((const float*)ray_data(rv))[c],  1, out, outsz); break;
+    case RAY_F64: q_float_tok(((const double*)ray_data(rv))[c],         0, out, outsz); break;
+    case RAY_DATE:q_date_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
+    case RAY_SYM: {
+        ray_t* s = ray_sym_vec_cell(rv, c);   /* borrowed -RAY_STR */
+        if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
+        break;
+    }
+    default: break;
+    }
+}
+
+/* True iff `v` is a value list of >=2 same-length, same-alignable-type vectors:
+ * a rectangular matrix rendered row-per-line, columns LEFT-aligned with a
+ * single-space minimum (qdocs ref/mmu.md). */
+static int q_is_matrix(ray_t* v) {
+    int64_t n = ray_len(v);
+    if (n < 2) return 0;
+    ray_t** e = (ray_t**)ray_data(v);
+    if (!e[0] || e[0]->type <= 0 || !ray_is_vec(e[0])) return 0;
+    if (!q_matrix_alignable(e[0]->type)) return 0;
+    int8_t  t = e[0]->type;
+    int64_t w = ray_len(e[0]);
+    for (int64_t i = 1; i < n; i++) {
+        if (!e[i] || e[i]->type != t || !ray_is_vec(e[i]) || ray_len(e[i]) != w)
+            return 0;
+    }
+    return 1;
+}
+
+static void q_fmt_matrix(ray_t* v, char* buf, size_t bufsz) {
+    int64_t nr = ray_len(v);
+    ray_t** e  = (ray_t**)ray_data(v);
+    int64_t nc = ray_len(e[0]);
+    /* per-column widths sized to the matrix (no fixed column cap — bufsz is the
+     * only bound, so wide matrices are not silently truncated). */
+    int  stackw[64];
+    int* widths = (nc <= 64) ? stackw : malloc((size_t)(nc > 0 ? nc : 1) * sizeof(int));
+    if (!widths) { buf[0] = '\0'; return; }
+    for (int64_t c = 0; c < nc; c++) {
+        int w = 0;
+        for (int64_t r = 0; r < nr; r++) {
+            char cb[64]; q_matrix_cell(e[r], c, cb, sizeof cb);
+            int l = (int)strlen(cb); if (l > w) w = l;
+        }
+        widths[c] = w;
+    }
+    size_t pos = 0;
+    for (int64_t r = 0; r < nr; r++) {
+        if (r && pos + 1 < bufsz) buf[pos++] = '\n';
+        for (int64_t c = 0; c < nc; c++) {
+            if (c && pos + 1 < bufsz) buf[pos++] = ' ';
+            char cb[64]; q_matrix_cell(e[r], c, cb, sizeof cb);
+            q_pad(buf, bufsz, &pos, cb, widths[c]);   /* left-align */
+        }
+        q_trim_trailing(buf, &pos);                   /* no trailing spaces */
+    }
+    buf[pos < bufsz ? pos : bufsz - 1] = '\0';
+    if (widths != stackw) free(widths);
+}
+
+/* A VALUE list prints one item per line (kdb): each element formatted with
+ * q_fmt, joined by newlines.  `,x` for the 1-element (enlist) case is handled
+ * by the caller. */
+static void q_fmt_value_list(ray_t* v, char* buf, size_t bufsz) {
+    int64_t n = ray_len(v);
+    ray_t** e = (ray_t**)ray_data(v);
+    size_t pos = 0;
+    buf[0] = '\0';
+    for (int64_t i = 0; i < n; i++) {
+        char elem[2048]; elem[0] = '\0';
+        q_fmt(e[i], elem, sizeof elem);
+        size_t el = strlen(elem);
+        if (i && pos + 1 < bufsz) buf[pos++] = '\n';
+        if (pos + el >= bufsz) el = (bufsz > pos + 1) ? bufsz - 1 - pos : 0;
+        memcpy(buf + pos, elem, el);
+        pos += el;
+        buf[pos] = '\0';
+    }
+}
+
 void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0) return;
     buf[0] = '\0';
     if (!val) return;
+
+    /* An empty typed vector prints `` `type$() `` (kdb `0#0` -> `` `long$() ``).
+     * Byte/bool keep their own arms (`0x` / `b`); strings are atoms. */
+    if (val->type > 0 && ray_is_vec(val) && ray_len(val) == 0) {
+        const char* qn = q_empty_vec_qname(val->type);
+        if (qn) { snprintf(buf, bufsz, "`%s$()", qn); return; }
+    }
 
     /* A symbol atom prints q-style: `sym` (or bare for a verb/null name-ref).
      * Handling it here also renders the -RAY_SYM heads of parse-tree lists. */
@@ -641,65 +817,53 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         }
     }
 
-    /* A general list of strings (kdb: char vectors) or of typed VECTORS
-     * (cut output) prints one element per line, not (a;b) — parse trees
-     * cannot hit this: their heads are atoms/syms/values, never vectors. */
-    if (val->type == RAY_LIST && ray_len(val) >= 2) {
-        int64_t n = ray_len(val);
-        ray_t** e = (ray_t**)ray_data(val);
-        int allstr = 1, allvec = 1;
-        for (int64_t i = 0; i < n && (allstr || allvec); i++) {
-            if (!e[i] || e[i]->type != -RAY_STR) allstr = 0;
-            if (!e[i] || e[i]->type <= 0 || !ray_is_vec(e[i])) allvec = 0;
-        }
-        if (allstr || allvec) {
-            size_t pos = 0;
-            for (int64_t i = 0; i < n; i++) {
-                char elem[1024]; elem[0] = '\0';
-                q_fmt(e[i], elem, sizeof elem);
-                size_t el = strlen(elem);
-                if (pos + el + 2 >= bufsz) break;
-                if (i) buf[pos++] = '\n';
-                memcpy(buf + pos, elem, el);
-                pos += el;
-            }
-            buf[pos] = '\0';
-            return;
-        }
-    }
-
-    /* A general list renders q-style as (a;b;c), recursively.  This is how a
-     * parse tree prints: `parse "2+3"` -> (+;2;3).  A literal-constructor
-     * head (the parser's paren-list marker) is HIDDEN: the tree for `(1;2;3)`
-     * is ((list);1;2;3) but must display (1;2;3). */
+    /* A general RAY_LIST is either a PARSE TREE (compact `(a;b;c)`, a frozen
+     * display contract) or a VALUE (kdb one-item-per-line / a matrix,
+     * row-per-line column-aligned).  The classifier inspects the head. */
     if (val->type == RAY_LIST) {
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
-        ray_t* lv = q_registry_list_value();
-        ray_t* tv = q_registry_table_value();
-        if (lv && n >= 1 && e[0] == lv) { e++; n--; }   /* skip hidden list head */
-        else if (tv && n >= 1 && e[0] == tv) { e++; n--; } /* skip table head */
-        /* A 1-element general list is an enlist: prints ,x not (x). */
-        if (n == 1) {
+
+        if (q_list_is_parse_tree(val, 0)) {
+            /* PARSE TREE — compact `(a;b;c)`.  A literal-constructor head (the
+             * parser's paren-list marker) is HIDDEN: `((list);1;2;3)` displays
+             * (1;2;3); a 1-element tail is an enlist `,x`. */
+            ray_t* lv = q_registry_list_value();
+            ray_t* tv = q_registry_table_value();
+            if (lv && n >= 1 && e[0] == lv) { e++; n--; }
+            else if (tv && n >= 1 && e[0] == tv) { e++; n--; }
+            if (n == 1) {
+                char elem[2048]; elem[0] = '\0';
+                q_fmt(e[0], elem, sizeof elem);
+                snprintf(buf, bufsz, ",%s", elem);
+                return;
+            }
+            size_t pos = 0;
+            if (pos + 1 < bufsz) buf[pos++] = '(';
+            for (int64_t i = 0; i < n; i++) {
+                if (i && pos + 1 < bufsz) buf[pos++] = ';';
+                char elem[1024]; elem[0] = '\0';
+                q_fmt(e[i], elem, sizeof elem);   /* recurse */
+                size_t el = strlen(elem);
+                if (pos + el + 1 >= bufsz) el = (bufsz > pos + 1) ? bufsz - 1 - pos : 0;
+                memcpy(buf + pos, elem, el);
+                pos += el;
+            }
+            if (pos + 1 < bufsz) buf[pos++] = ')';
+            buf[pos] = '\0';
+            return;
+        }
+
+        /* VALUE list. */
+        if (n == 0) { snprintf(buf, bufsz, "()"); return; }
+        if (n == 1) {                             /* enlist: ,x */
             char elem[2048]; elem[0] = '\0';
             q_fmt(e[0], elem, sizeof elem);
             snprintf(buf, bufsz, ",%s", elem);
             return;
         }
-        size_t pos = 0;
-        if (pos + 1 < bufsz) buf[pos++] = '(';
-        for (int64_t i = 0; i < n; i++) {
-            if (i && pos + 1 < bufsz) buf[pos++] = ';';
-            char elem[1024];
-            elem[0] = '\0';
-            q_fmt(e[i], elem, sizeof elem);      /* recurse (syms handled above) */
-            size_t el = strlen(elem);
-            if (pos + el + 1 >= bufsz) el = (bufsz > pos + 1) ? bufsz - 1 - pos : 0;
-            memcpy(buf + pos, elem, el);
-            pos += el;
-        }
-        if (pos + 1 < bufsz) buf[pos++] = ')';
-        buf[pos] = '\0';
+        if (q_is_matrix(val)) { q_fmt_matrix(val, buf, bufsz); return; }
+        q_fmt_value_list(val, buf, bufsz);
         return;
     }
 

@@ -223,6 +223,11 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err) {
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
 
+    /* flush any show/0N! side-effect display captured during eval */
+    { const char* con = q_console_str();
+      if (con && *con) fputs(con, out);
+      q_console_reset(); }
+
     if (RAY_IS_ERR(r)) {
         const char* code = (const char*)r->sdata;
         fprintf(err, "error: %s\n", (code && *code) ? code : "eval");
