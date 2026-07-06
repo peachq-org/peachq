@@ -1304,7 +1304,17 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
         ray_sock_close(fd);
         return -3; /* auth rejected (server closed the connection) */
     }
-    (void)common;  /* MVP: no >2GB frames, no compression — cap unused */
+    /* A compliant kdb server replies with the NEGOTIATED capability =
+     * min(client, server), so it can never exceed what we offered.  A byte
+     * above KDB_CAPABILITY means the peer is not speaking our protocol (or a
+     * non-kdb service that accepted the TCP connection): refuse rather than
+     * register a live handle that would hang on the first request.  We still
+     * do not otherwise ACT on the level (no >2GB frames / no compression yet
+     * — Phase F), so any value in [0, KDB_CAPABILITY] is accepted. */
+    if (common > KDB_CAPABILITY) {
+        ray_sock_close(fd);
+        return -1; /* handshake failed: capability byte out of range */
+    }
 
 #ifdef RAY_OS_WINDOWS
     { DWORD z = 0;
