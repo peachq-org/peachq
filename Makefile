@@ -127,6 +127,7 @@ help:
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
 	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
+	@printf "  %-28s %s\n" "make qdash" "Regenerate the peachq conformance dashboard (tools/qdash)"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
 	@printf "  %-28s %s\n" "make bench-alloc" "Run allocator micro-benchmark"
@@ -304,6 +305,13 @@ qtest-results: $(QDOC_TARGET)
 	      echo "QTEST-RESULTS TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest-results"; \
 	    fi; exit $$rc; }
 
+# Regenerate the peachq conformance dashboard data.  The UI (tools/qdash/index.html)
+# is static and reads tools/qdash/data.js; this rebuilds that data from the committed
+# qtest-results.txt ledger (latest state -> heatmap) and its git history (-> trend
+# line).  Run after `make qtest-results`; no UI edits needed.  Stdlib + git only.
+qdash:
+	@python3 tools/qdash/gen.py --open
+
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
 # frozen base moved.  `make test` runs the read-only check (tools/frozen-manifest.sh).
@@ -355,7 +363,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdoctest manifest coverage clean
+.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdash qdoctest manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
