@@ -46,8 +46,18 @@
  *               ... time=19).  The LAYOUT is unchanged; only the type-byte
  *               VALUES moved, so a v3 peer or v3 journal would mis-decode
  *               every atom.  Bumped so the mismatch is detected and rejected
- *               (handshake refuse / JREPLAY_BADTAIL) instead of mis-parsed. */
-#define RAY_SERDE_WIRE_VERSION 4
+ *               (handshake refuse / JREPLAY_BADTAIL) instead of mis-parsed.
+ *   Version 5 — the payload IS kdb's serialization format (kb/serialization.md
+ *               grammar as implemented by src/qlang/q_wire.c) in SERDE mode:
+ *               kdb bytes for every kdb-expressible value plus a serde-only
+ *               extension-tag band (unsigned 200..236, q_wire.h) for engine
+ *               values kdb can't express (builtin fns by name, raw lambdas,
+ *               STR vectors, quoted syms, BOOL/U8 typed nulls).  Atom records
+ *               drop v3's flags byte (nulls are in-band sentinels; aux-bit
+ *               nulls use ext 204); vector counts are int32 ('limit beyond
+ *               2^31-1).  v4 journals/files are rejected by the existing
+ *               version checks (pre-v1 ruling: no migration). */
+#define RAY_SERDE_WIRE_VERSION 5
 
 /* Wire-only null marker (not a valid ray_t type) */
 #define RAY_SERDE_NULL 126
@@ -75,6 +85,10 @@ typedef int     (*ray_serde_fn_writer_t)(ray_t* fn, char out_name[16]);
 typedef ray_t*  (*ray_serde_fn_reader_t)(const char* name);
 void ray_serde_set_fn_hooks(ray_serde_fn_writer_t writer,
                             ray_serde_fn_reader_t reader);
+/* Hook getters — the v5 codec (src/qlang/q_wire.c serde mode) consumes the
+ * hooks at its builtin-fn extension record; serde.c stays their owner. */
+ray_serde_fn_writer_t ray_serde_fn_writer_hook(void);
+ray_serde_fn_reader_t ray_serde_fn_reader_hook(void);
 
 /* Calculate serialized size of an object (excluding IPC header) */
 int64_t ray_serde_size(ray_t* obj);
