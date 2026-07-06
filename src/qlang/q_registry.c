@@ -3267,12 +3267,13 @@ static ray_t* q_funsql_select_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
     ray_release(tbl);
     if (!ft || RAY_IS_ERR(ft)) return ft;
 
-    /* EXEC forms — signalled by the By-phrase being the GENERAL EMPTY LIST `()`
-     * (parser `::`/RAY_NULL), as opposed to `0b` (RAY_BOOL) which is Select's
-     * "no grouping".  Result is a vector (a is a column/parse-tree), a
-     * dictionary (a is a dict), or the last row as a dictionary (a is `()`).
-     * See funsql.md "No grouping". */
-    if (b && b->type == RAY_NULL) {
+    /* EXEC forms — signalled by the By-phrase being EMPTY: the general empty
+     * list `()` OR `::` (both are `funsql_empty`; `()` now parses to the empty
+     * list, not `::`), as opposed to `0b` (RAY_BOOL) which is Select's "no
+     * grouping".  Result is a vector (a is a column/parse-tree), a dictionary
+     * (a is a dict), or the last row as a dictionary (a is `()`).  See
+     * funsql.md "No grouping". */
+    if (funsql_empty(b)) {
         if (a && (a->type == -RAY_SYM || (a->type == RAY_LIST && funsql_is_fn(((ray_t**)ray_data(a))[0])))) {
             ray_t* r = funsql_eval(a, ft);          /* exec col / parse-tree -> vector/atom */
             ray_release(ft);
