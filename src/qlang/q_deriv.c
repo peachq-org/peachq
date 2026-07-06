@@ -18,6 +18,10 @@ static int64_t g_sid_monad  = -1;
 static int64_t g_sid_hole   = -1;  /* unbound-arg `;` sentinel in a projection */
 static int64_t g_sid_lambda = -1;
 
+void q_deriv_reset_markers(void) {
+    g_sid_proj = g_sid_monad = g_sid_hole = g_sid_lambda = -1;
+}
+
 static void ensure_markers(void) {
     if (g_sid_proj < 0) {
         g_sid_proj   = ray_sym_intern(".q.proj",   7);
