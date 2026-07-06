@@ -691,9 +691,13 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         ray_t* base = q_deriv_base(val);
         ray_t* v0   = ((ray_t**)ray_data(val))[4];
         const char* g = NULL;
-        if (base == ray_env_get(ray_sym_intern("fold", 4)))            g = "/";
+        if (base == q_registry_over_value() ||
+            base == ray_env_get(ray_sym_intern("fold", 4)))            g = "/";
         else if (base == q_registry_scan_value())                      g = "\\";
         else if (base == q_registry_lookup_name("each", 4, Q_DYADIC))  g = "'";
+        else if (base == q_registry_prior_value())                     g = "':";
+        else if (base == ray_env_get(ray_sym_intern("map-right", 9)))  g = "/:";
+        else if (base == ray_env_get(ray_sym_intern("map-left", 8)))   g = "\\:";
         if (g && v0) {
             char vb[256]; vb[0] = '\0';
             q_fmt(v0, vb, sizeof vb);
