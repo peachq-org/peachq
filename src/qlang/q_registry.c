@@ -3883,6 +3883,10 @@ ray_t* q_collapse_list(ray_t* l) {
         case -RAY_F32: { float f = (float)e[i]->f64;            /* F32 atom stores f64 */
                          vec = ray_vec_append(vec, &f); }       break;
         case -RAY_F64:  vec = ray_vec_append(vec, &e[i]->f64); break;
+        case -RAY_GUID: {                                      /* 16-byte payload, not i64 */
+            const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
+            vec = ray_vec_append(vec, g);
+        } break;
         default:        vec = ray_vec_append(vec, &e[i]->i64); break; /* i64 + temporals */
         }
         if (RAY_IS_ERR(vec)) return vec;
