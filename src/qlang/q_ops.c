@@ -49,6 +49,10 @@ static const q_op_t Q_OPS[] = {
     { "&",     QLEX_GLYPH,     QK_WHERE, "where",    QK_MIN2,  "and",     NULL  },
     { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
+    /* q `x^y` — fill: coalesce nulls in y with x.  `^` already lexes as a verb
+     * glyph (VERB_CHARS); this row gives it a registry value.  Monadic `^x`
+     * (kdb: null-of-type / `fills` sans forward-fill) is a deferred cell. */
+    { "^",     QLEX_GLYPH,     QK_NONE, NULL,        QK_FILL,  "fill",    NULL  },
     /* ---- type-dispatch glyphs (2c-2) ---- */
     /* monadic `!` (dict keys) is a K-ism accepted as a deliberate superset
      * (valid q spells it `key`, same value — the `_`/floor precedent). */
@@ -75,6 +79,11 @@ static const q_op_t Q_OPS[] = {
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
     /* q `n cut x` — chunk (int atom) / positional cut (int vector). */
     { "cut",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CUT,   "cut",     NULL  },
+    /* q `n rotate x` / `n sublist x` — dyadic infix keywords (kdb rotate.md /
+     * sublist.md).  Not KW_INFIX -> the scanner would split `n rotate x` into
+     * two statements, so the manifest row is what makes them infix. */
+    { "rotate",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ROTATE, "rotate", NULL  },
+    { "sublist",QLEX_KW_INFIX, QK_NONE, NULL,        QK_SUBLIST,"sublist",NULL  },
     /* q `x vs y` / `x sv y` — split-join / base-encode family (dyadic infix
      * keywords; wrappers, native -RAY_STR + sym + base + byte).  Monadic form
      * is out of scope (kdb `vs`/`sv` are strictly dyadic). */
@@ -122,6 +131,10 @@ static const q_op_t Q_OPS[] = {
     { "count",   QLEX_KW_PREFIX, QK_ENV, "count",    QK_NONE,  NULL,      NULL  },
     { "first",   QLEX_KW_PREFIX, QK_ENV, "first",    QK_NONE,  NULL,      NULL  },
     { "last",    QLEX_KW_PREFIX, QK_ENV, "last",     QK_NONE,  NULL,      NULL  },
+    /* q `next x` / `prev x` — shift a vector by one, null-filling the vacated
+     * end (kdb next.md / prev.md).  No rayfall counterpart, so wrappers. */
+    { "next",    QLEX_KW_PREFIX, QK_NEXT, "next",    QK_NONE,  NULL,      NULL  },
+    { "prev",    QLEX_KW_PREFIX, QK_PREV, "prev",    QK_NONE,  NULL,      NULL  },
     { "where",   QLEX_KW_PREFIX, QK_WHERE, "where",  QK_NONE,  NULL,      NULL  },
     { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
@@ -153,6 +166,11 @@ static const q_op_t Q_OPS[] = {
      * audited kdb-true element-wise / aggregate semantics). See
      * docs/recipes/add-q-keyword-verb.md. ---- */
     { "abs",     QLEX_KW_PREFIX, QK_ENV, "abs",      QK_NONE,  NULL,      NULL  },
+    /* q `null x` — elementwise null test.  Routes to the engine's atomic
+     * `nil?` (RAY_FN_ATOMIC): broadcasts over vectors and nested lists at
+     * every depth.  QK_NULL collapses a homogeneous top-level bool-atom run
+     * (heterogeneous input list) to a bool vector for kdb-true display. */
+    { "null",    QLEX_KW_PREFIX, QK_NULL, "nil?",    QK_NONE,  NULL,      NULL  },
     { "dev",     QLEX_KW_PREFIX, QK_ENV, "dev",      QK_NONE,  NULL,      NULL  },
     { "exp",     QLEX_KW_PREFIX, QK_ENV, "exp",      QK_NONE,  NULL,      NULL  },
     { "log",     QLEX_KW_PREFIX, QK_ENV, "log",      QK_NONE,  NULL,      NULL  },
@@ -164,6 +182,14 @@ static const q_op_t Q_OPS[] = {
     /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x. */
     { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
     { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
+    /* ---- IPC client verbs (feat/q-ipc-client, Phase D) — thin wrappers over the
+     * kdb-speaking `.ipc.*` primitives (Phase C).  `hopen` normalizes int|string|
+     * (conn;timeout) into the `.ipc.open` string API and returns a 1-BASED handle;
+     * `hclose` translates it back and routes to `.ipc.close`.  The sync/async send
+     * verb `h"query"` is handle-as-verb application (q_apply.c int-head arm), not a
+     * manifest row.  Both are monadic prefix keywords (KW_PREFIX). ---- */
+    { "hopen",  QLEX_KW_PREFIX, QK_HOPEN,  "hopen",  QK_NONE, NULL,  NULL  },
+    { "hclose", QLEX_KW_PREFIX, QK_HCLOSE, "hclose", QK_NONE, NULL,  NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
