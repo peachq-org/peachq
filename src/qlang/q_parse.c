@@ -964,6 +964,35 @@ static P parse_base(Parser *p) {
         ray_release(e);
         return (P){ R_NOUN, w };
     }
+    case T_ADVERB: {
+        /* Compose `'[f;g;…]` — the `'` adverb in BRACKET form composes
+         * functions (rightmost consumes the args, each leftward applied
+         * monadically).  Only this bracketed form is a primary term; a bare
+         * postfix adverb (`f'`) is consumed by parse_term's postfix loop and a
+         * leading signal `'expr` by parse_e, so a `'` here NOT followed by `[`
+         * is not a term.  Emits (compose-value; f; g; …); parse_term's postfix
+         * loop then applies any trailing `[args]`. */
+        if (tk->len == 1 && p->src[tk->start] == '\'' &&
+            p->t.t[p->pos + 1].kind == T_LBRACK) {
+            adv(p);                          /* consume ' */
+            adv(p);                          /* consume [ */
+            ray_t *args = parse_E(p);
+            expect(p, T_RBRACK, "expected ']' in compose '[…]'");
+            ray_t *cv = q_registry_compose_value();
+            if (!cv) q_die("compose: registry not initialized");
+            int64_t an = ray_len(args);
+            ray_t **as = (ray_t **)ray_data(args);
+            ray_t *w = ray_list_new(an + 1);
+            w = ray_list_append(w, cv);
+            for (int64_t i = 0; i < an; i++) {
+                if (as[i]) { w = ray_list_append(w, as[i]); }
+                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+            }
+            ray_release(args);
+            return (P){ R_NOUN, w };
+        }
+        return EMPTY;
+    }
     default:
         return EMPTY;
     }
