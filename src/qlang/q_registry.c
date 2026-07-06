@@ -34,6 +34,7 @@
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of/base — glyph-verb carriers */
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
+#include "qlang/q_parse.h"    /* q_parse/q_lower — value-of-string (RUNTIME wrapper only; builders must never parse, rule 6) */
 #include "lang/internal.h"    /* ray_where_fn, ray_group_fn (funsql executor) */
 #include "table/sym.h"        /* ray_sym_vec_cell (funsql executor) */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
@@ -529,6 +530,47 @@ static ray_t* q_key_wrap(ray_t* x) {
  * (rayfall's dict stores vals as a boxed list).  Non-dict operands (symbol
  * name resolution, enumerations, string eval, lambdas) are deferred cells. */
 static ray_t* q_value_wrap(ray_t* x) {
+    /* lambda carrier -> the kdb lambda-structure list (ref/value.md#lambda,
+     * V3.5 shape, best-effort fields):
+     *   [0] bytecode (empty 0x)  [1] params  [2] locals  [3] globals
+     *   [4] source map -1  [5] name ""  [6] file ""  [7] line -1  [8] source
+     * The doc-pinned fields are [1] (params) and LAST (source text). */
+    if (x && q_deriv_kind_of(x) == Q_DERIV_LAMBDA) {
+        ray_t* lam = q_deriv_base(x);                 /* borrowed */
+        ray_t* src = q_lambda_src(x);                 /* borrowed */
+        if (!lam || !src) return ray_error("type", "value: malformed lambda");
+        ray_t* l = ray_list_new(9);
+        ray_t* t;
+        t = ray_vec_new(RAY_U8, 0);           l = ray_list_append(l, t); ray_release(t);
+        l = ray_list_append(l, LAMBDA_PARAMS(lam));   /* borrowed; append retains */
+        t = ray_sym_vec_new(RAY_SYM_W64, 0);  l = ray_list_append(l, t); ray_release(t);
+        t = ray_sym_vec_new(RAY_SYM_W64, 0);  l = ray_list_append(l, t); ray_release(t);
+        t = ray_i64(-1);                      l = ray_list_append(l, t); ray_release(t);
+        t = ray_str("", 0);                   l = ray_list_append(l, t); ray_release(t);
+        t = ray_str("", 0);                   l = ray_list_append(l, t); ray_release(t);
+        t = ray_i64(-1);                      l = ray_list_append(l, t); ray_release(t);
+        l = ray_list_append(l, src);
+        return l;
+    }
+    /* string -> EVALUATE as q source (parse -> lower -> eval).  Runtime-only:
+     * the registry is warm here (rule 6 forbids q_parse in BUILDERS, not in
+     * runtime wrappers — q_select_exec sets the precedent). */
+    if (x && x->type == -RAY_STR) {
+        const char* sp = ray_str_ptr(x);
+        size_t sl = ray_str_len(x);
+        char* s = malloc(sl + 1);
+        if (!s) return ray_error("wsfull", "value: out of memory");
+        memcpy(s, sp, sl);
+        s[sl] = '\0';
+        ray_t* ast = q_parse(s);
+        free(s);
+        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : ray_error("parse", NULL);
+        ast = q_lower(ast);
+        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : ray_error("parse", NULL);
+        ray_t* r = ray_eval(ast);
+        ray_release(ast);
+        return r;
+    }
     if (!x || x->type != RAY_DICT)
         return ray_error("type", "value: expects a dict (other forms deferred)");
     ray_t* v = ray_dict_vals(x);                /* borrowed */
