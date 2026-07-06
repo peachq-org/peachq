@@ -1110,6 +1110,88 @@ static ray_t* q_covariance(ray_t* x, ray_t* y, int sample) {
 static ray_t* q_cov_wrap(ray_t* x, ray_t* y){ return q_covariance(x, y, 0); }
 static ray_t* q_scov_wrap(ray_t* x, ray_t* y){ return q_covariance(x, y, 1); }
 
+/* q sliding m-window family `N mf x` — window i covers x[max(0,i-N+1)..i].
+ * msum treats null as 0; avg/max/min/dev/count exclude nulls; N<=0 -> empty
+ * window (sum/count 0, others null). */
+typedef enum { MW_SUM, MW_AVG, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
+
+static ray_t* q_mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
+    if (!nx || !(nx->type==-RAY_I64||nx->type==-RAY_I32||nx->type==-RAY_I16))
+        return ray_error("type", "m-window: left arg must be an int atom");
+    if (!x || !q_vec_is_num(x)) {
+        if (x && ray_is_atom(x)) { ray_retain(x); return x; }
+        return ray_error("type", "m-window: numeric vector rhs");
+    }
+    int64_t N = q_iatom_val(nx);
+    int64_t n = ray_len(x);
+    int isf = q_vec_is_float(x);
+    int8_t otype = (k==MW_SUM || k==MW_MAX || k==MW_MIN) ? (isf ? RAY_F64 : RAY_I64)
+                 : (k==MW_COUNT) ? RAY_I64 : RAY_F64;
+    ray_t* out = ray_vec_new(otype, n > 0 ? n : 1); out->len = n;
+    void* o = ray_data(out);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t lo = (N > 0 && i - N + 1 > 0) ? i - N + 1 : 0;
+        if (N <= 0) lo = i + 1;                  /* empty window */
+        double sum=0, sumsq=0, m=0; int64_t c=0; int started=0;
+        for (int64_t j = lo; j <= i; j++) {
+            int nu; double v = q_velem_f(x, j, &nu);
+            if (k==MW_SUM) { if (!nu) sum += v; continue; }
+            if (nu) continue;
+            c++; sum += v; sumsq += v*v;
+            if (!started) { m=v; started=1; }
+            else if (k==MW_MAX ? v>m : v<m) m=v;
+        }
+        if (otype == RAY_I64) {
+            if (k==MW_SUM)   ((int64_t*)o)[i] = (int64_t)sum;
+            else if (k==MW_COUNT) ((int64_t*)o)[i] = c;
+            else { if (started) ((int64_t*)o)[i] = (int64_t)m;   /* mmax/mmin */
+                   else { ((int64_t*)o)[i] = NULL_I64; ray_vec_set_null(out, i, true); } }
+        } else {
+            double r; int isnull = 0;
+            switch (k) {
+            case MW_SUM: r = sum; break;
+            case MW_MAX: case MW_MIN: if (started) r=m; else { r=0; isnull=1; } break;
+            case MW_AVG: if (c) r=sum/(double)c; else { r=0; isnull=1; } break;
+            case MW_DEV: if (c) { double mean=sum/(double)c; double var=sumsq/(double)c - mean*mean;
+                                  r = var>0 ? sqrt(var) : 0; } else { r=0; isnull=1; } break;
+            default: r = 0; break;
+            }
+            ((double*)o)[i] = r;
+            if (isnull) ray_vec_set_null(out, i, true);
+        }
+    }
+    return out;
+}
+static ray_t* q_msum_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_SUM); }
+static ray_t* q_mavg_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_AVG); }
+static ray_t* q_mmax_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_MAX); }
+static ray_t* q_mmin_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_MIN); }
+static ray_t* q_mcount_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_COUNT); }
+static ray_t* q_mdev_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_DEV); }
+
+/* q `a ema x` — exponential moving average: e[0]=x[0], e[i]=a*x[i]+(1-a)*e[i-1].
+ * `a` is a float atom (the smoothing factor). */
+static ray_t* q_ema_wrap(ray_t* a, ray_t* x) {
+    if (!a || !ray_is_atom(a)) return ray_error("type", "ema: smoothing factor must be an atom");
+    int an; double alpha = q_velem_f(a, 0, &an);
+    if (!x || !q_vec_is_num(x)) {
+        if (x && ray_is_atom(x)) { ray_retain(x); return x; }
+        return ray_error("type", "ema: numeric vector rhs");
+    }
+    int64_t n = ray_len(x);
+    ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
+    double* o = (double*)ray_data(out);
+    double e = 0; int started = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int nu; double v = q_velem_f(x, i, &nu);
+        double xv = nu ? 0 : v;
+        if (!started) { e = xv; started = 1; }
+        else e = alpha * xv + (1.0 - alpha) * e;
+        o[i] = e;
+    }
+    return out;
+}
+
 /* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
  * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
  * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
@@ -3829,6 +3911,13 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_WAVG:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_wavg_wrap);
     case QK_COV:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_cov_wrap);
     case QK_SCOV:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_scov_wrap);
+    case QK_MSUM:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_msum_wrap);
+    case QK_MAVG:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mavg_wrap);
+    case QK_MMAX:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mmax_wrap);
+    case QK_MMIN:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mmin_wrap);
+    case QK_MCOUNT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mcount_wrap);
+    case QK_MDEV:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mdev_wrap);
+    case QK_EMA:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ema_wrap);
     default:      return NULL;
     }
 }
