@@ -509,6 +509,49 @@ static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
+/* q `til` — kdb accepts a boolean (`til 1b` -> ,0); base ray_til_fn is
+ * int-only.  Everything else (int atoms, the error paths) delegates. */
+static ray_t* q_til_wrap(ray_t* x) {
+    if (x && x->type == -RAY_BOOL) {
+        ray_t* n = ray_i64(x->b8 ? 1 : 0);
+        ray_t* r = ray_til_fn(n);
+        ray_release(n);
+        return r;
+    }
+    return ray_til_fn(x);
+}
+
+/* q `where` / monadic `&` — an INTEGER vector repeats each index i, x[i] times
+ * (`where 2 3 1` -> 0 0 1 1 1 2; `where 0 1 0 1 0 1` -> 1 3 5).  Base
+ * ray_where_fn handles the boolean-mask form, so delegate for it and anything
+ * else.  Result is a long vector (kdb).  Negative counts are 'domain. */
+static ray_t* q_where_wrap(ray_t* x) {
+    if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
+        int64_t n = ray_len(x);
+        int64_t total = 0;
+        for (int64_t i = 0; i < n; i++) {
+            int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
+                      : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
+                      : (int64_t)((const int16_t*)ray_data(x))[i];
+            if (c < 0) return ray_error("domain", "where: negative count");
+            total += c;
+        }
+        ray_t* out = ray_vec_new(RAY_I64, total);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = total;
+        int64_t* d = (int64_t*)ray_data(out);
+        int64_t w = 0;
+        for (int64_t i = 0; i < n; i++) {
+            int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
+                      : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
+                      : (int64_t)((const int16_t*)ray_data(x))[i];
+            for (int64_t k = 0; k < c; k++) d[w++] = i;
+        }
+        return out;
+    }
+    return ray_where_fn(x);
+}
+
 /* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
  * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
  * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
@@ -522,6 +565,11 @@ static ray_t* q_neg_wrap(ray_t* x) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
         return ray_date(-(int64_t)x->i32);
     }
+    /* kdb `neg` promotes a boolean to INT and negates (`neg 1b` -> -1i);
+     * base ray_neg_fn rejects bools.  Registered ATOMIC, so a bool vector
+     * arrives here element-wise and the i32 atoms collapse to an i32 vector. */
+    if (x && x->type == -RAY_BOOL)
+        return ray_i32(-(int32_t)(x->b8 ? 1 : 0));
     return ray_neg_fn(x);
 }
 
@@ -3099,6 +3147,8 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_PRIORKW:return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prior_kw);
     case QK_DELTAS: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_deltas_wrap);
     case QK_DIFFER: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_differ_wrap);
+    case QK_TIL:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_til_wrap);
+    case QK_WHERE:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_where_wrap);
     default:      return NULL;
     }
 }
