@@ -73,7 +73,12 @@ typedef enum {
     QK_SCANKW,          /* q `f scan x` == `f\x`                                */
     QK_PRIORKW,         /* q `f prior x` == `(f':)x` (unary each-prior)         */
     QK_DELTAS,          /* q `deltas x` == `(-':)x`                             */
-    QK_DIFFER           /* q `differ x` == `not(~':)x`                          */
+    QK_DIFFER,          /* q `differ x` == `not(~':)x`                          */
+    QK_TIL,             /* q `til` wrapper: accepts a boolean (`til 1b`->,0);
+                         * base ray_til_fn is int-only.  Delegates otherwise.   */
+    QK_WHERE            /* q `where`/monadic `&` wrapper: an integer vector
+                         * repeats each index i, x[i] times (`where 2 3 1` ->
+                         * 0 0 1 1 1 2); the boolean form delegates to base.     */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
