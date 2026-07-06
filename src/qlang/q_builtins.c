@@ -137,6 +137,14 @@ void q_builtins_register(void) {
     bind_unary("upper",  q_upper_fn);
     bind_unary("lower",  q_lower_fn);
     bind_value(".Q.an",  ray_str("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", 63));
+    /* `::` — the generic-null VALUE.  Elided call args parse as unquoted `::`
+     * name-refs (`f[]` is (`f;::), cases.tsv:43); binding the value makes them
+     * evaluate to RAY_NULL_OBJ instead of a 'name error — which is exactly
+     * what lambda application detects as projection holes, and gives a typed
+     * `::` its kdb value.  The funsql special forms are unaffected (their `::`
+     * markers are never evaluated). */
+    ray_retain(RAY_NULL_OBJ);
+    bind_value("::", RAY_NULL_OBJ);
     /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
      * The registry is the authoritative, immutable verb source; it snapshots
      * builtin values and must be torn down via q_runtime_destroy before the
