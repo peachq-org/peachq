@@ -8,6 +8,8 @@
 #include "lang/eval.h"          /* ray_eval */
 #include "table/sym.h"          /* ray_sym_vec_cell */
 #include "mem/heap.h"           /* RAY_ATTR_HAS_NULLS */
+#include "store/serde.h"        /* fn-serde hook getters (serde mode ext 200) */
+#include "lang/env.h"           /* ray_fn_name, ray_env_get */
 #include <math.h>               /* isinf */
 #include <stdint.h>
 #include <string.h>
@@ -106,7 +108,13 @@ static int w_sym_id(q_wire_wbuf_t* b, int64_t id) {
 
 int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     if (b->err) return -1;
-    if (!x) return wbuf_fail(b, ray_error("type", "q_wire: nil value"));
+    /* serde mode: a C-NULL slot (v4 wrote marker 126, read back as the null
+     * singleton) maps to (::) — identical to RAY_NULL_OBJ, matching v4's
+     * read-side conflation.  The wire path refuses C NULL outright. */
+    if (!x) {
+        if (b->serde) return (w_u8(b, 101) || w_u8(b, 0)) ? -1 : 0;
+        return wbuf_fail(b, ray_error("type", "q_wire: nil value"));
+    }
     if (g_wire_depth >= Q_WIRE_MAX_DEPTH)
         return wbuf_fail(b, ray_error("limit", "q_wire: nesting exceeds max depth %d", Q_WIRE_MAX_DEPTH));
     g_wire_depth++;
@@ -144,6 +152,59 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     }
 
     int8_t t = x->type;
+
+    /* ---- serde-mode extension records (storage/journal; q_wire.h) ---- */
+    if (b->serde) {
+        if (t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY) {
+            /* ext 200: builtin fn by name — writer hook first, then aux name */
+            char scratch[16];
+            const char* name = NULL;
+            ray_serde_fn_writer_t wh = ray_serde_fn_writer_hook();
+            if (wh && wh(x, scratch)) name = scratch;
+            else name = ray_fn_name(x);
+            size_t nlen = name ? strlen(name) : 0;
+            if (nlen > 15) nlen = 15;
+            rc = (w_u8(b, Q_WIRE_EXT_FN) || w_u8(b, (uint8_t)t) ||
+                  w_cstr(b, name ? name : "", nlen)) ? -1 : 0;
+            goto out;
+        }
+        if (t == RAY_LAMBDA) {
+            /* ext 201: raw engine lambda — attrs + params + body (v4 shape) */
+            ray_t** slots = (ray_t**)ray_data(x);
+            rc = (w_u8(b, Q_WIRE_EXT_LAMBDA) || w_u8(b, x->attrs) ||
+                  q_wire_write_obj(b, slots[0]) ||
+                  q_wire_write_obj(b, slots[1])) ? -1 : 0;
+            goto out;
+        }
+        if (t == -RAY_SYM && (x->attrs & ATTR_QUOTED)) {
+            /* ext 203: quoted sym atom */
+            rc = w_u8(b, Q_WIRE_EXT_QSYM) ? -1 : 0;
+            if (rc == 0) rc = w_sym_id(b, x->i64) ? -1 : 0;
+            goto out;
+        }
+        if ((t == -RAY_BOOL || t == -RAY_U8) && RAY_ATOM_IS_NULL(x)) {
+            /* ext 204: aux-bit typed null (no in-band sentinel exists) */
+            rc = (w_u8(b, Q_WIRE_EXT_TNULL) || w_u8(b, (uint8_t)t)) ? -1 : 0;
+            goto out;
+        }
+        if (t == RAY_STR) {
+            /* ext 202: string COLUMN keeps its type (col.c requires it) */
+            if (w_u8(b, Q_WIRE_EXT_STRVEC) ||
+                w_u8(b, x->attrs & RAY_ATTR_HAS_NULLS) ||
+                w_count(b, x->len)) goto out;
+            rc = 0;
+            for (int64_t i = 0; i < x->len && rc == 0; i++) {
+                size_t n = 0;
+                const char* s = ray_str_vec_get(x, i, &n);
+                if (n > INT32_MAX) {
+                    rc = wbuf_fail(b, ray_error("limit", "q_wire: string cell exceeds int32"));
+                    break;
+                }
+                rc = (w_i32(b, (int32_t)n) || w_raw(b, s ? s : "", n)) ? -1 : 0;
+            }
+            goto out;
+        }
+    }
 
     /* ---- atoms (negative type; no attrs byte) ---- */
     if (t < 0) {
@@ -227,19 +288,23 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         goto out;
     }
     case RAY_LIST: {
-        /* kdb has no boxed homogeneous-atom lists — they ARE typed vectors
-         * (a kdb (2i;3i) is 2 3i).  Engine ops (dict vals, map results)
-         * box such runs; collapse for the wire so the bytes match kdb's
-         * canonical form.  q_collapse_list returns the same list (retained)
-         * when it isn't a collapsible atom run. */
-        ray_t* cx = q_collapse_list(x);
-        if (cx && !RAY_IS_ERR(cx) && cx->type != RAY_LIST) {
-            rc = q_wire_write_obj(b, cx);
-            ray_release(cx);
-            goto out;
+        /* WIRE mode: kdb has no boxed homogeneous-atom lists — they ARE
+         * typed vectors (a kdb (2i;3i) is 2 3i).  Engine ops (dict vals,
+         * map results) box such runs; collapse so the bytes match kdb's
+         * canonical form.  SERDE mode: engine boxing is value state —
+         * never collapse, and carry the engine attrs byte (QUOTED lists
+         * are journaled expression trees). */
+        if (!b->serde) {
+            ray_t* cx = q_collapse_list(x);
+            if (cx && !RAY_IS_ERR(cx) && cx->type != RAY_LIST) {
+                rc = q_wire_write_obj(b, cx);
+                ray_release(cx);
+                goto out;
+            }
+            if (cx && !RAY_IS_ERR(cx)) ray_release(cx);
         }
-        if (cx && !RAY_IS_ERR(cx)) ray_release(cx);
-        if (w_u8(b, 0) || w_u8(b, 0) || w_count(b, x->len)) goto out;
+        uint8_t attrs = b->serde ? (uint8_t)(x->attrs & ~RAY_ATTR_SLICE) : 0;
+        if (w_u8(b, 0) || w_u8(b, attrs) || w_count(b, x->len)) goto out;
         ray_t** e = (ray_t**)ray_data(x);
         rc = 0;
         for (int64_t i = 0; i < x->len && rc == 0; i++)
@@ -327,6 +392,7 @@ typedef struct {
     int    swap;        /* frame byte order != host byte order */
     int    top_err_ok;  /* the TOP-LEVEL object decoded as a wire -128h error */
     int    depth0;      /* g_wire_depth at cursor creation (top-level marker) */
+    int    serde;       /* serde mode: ext band on, list collapse off */
 } rcur_t;
 
 static int r_need(rcur_t* c, size_t n) { return c->rem >= n; }
@@ -428,9 +494,93 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     return v;
 }
 
+/* serde-mode extension records (q_wire.h band 200..236) */
+static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
+    switch (tag) {
+    case Q_WIRE_EXT_FN: {                 /* valence byte + name cstr */
+        if (!r_need(c, 1)) return trunc_err("builtin valence");
+        uint8_t valence = r_u8(c);
+        if (valence != RAY_UNARY && valence != RAY_BINARY && valence != RAY_VARY)
+            return ray_error("domain", "q_wire: bad builtin valence %d", (int)valence);
+        const char* s; size_t n;
+        if (r_cstr(c, &s, &n)) return trunc_err("builtin name");
+        char name[16];
+        if (n > sizeof name - 1) n = sizeof name - 1;
+        memcpy(name, s, n); name[n] = 0;
+        ray_serde_fn_reader_t rh = ray_serde_fn_reader_hook();
+        if (rh) {
+            ray_t* hooked = rh(name);
+            if (hooked) return hooked;    /* owned by contract */
+        }
+        ray_t* fn = ray_env_get(ray_sym_intern(name, n));
+        if (!fn) return ray_error("name", "q_wire: builtin '%s' not in environment", name);
+        ray_retain(fn);
+        return fn;
+    }
+    case Q_WIRE_EXT_LAMBDA: {             /* attrs + params + body (v4 shape) */
+        if (!r_need(c, 1)) return trunc_err("lambda attrs");
+        uint8_t attrs = r_u8(c);
+        ray_t* params = rd_obj(c);
+        if (!params || RAY_IS_ERR(params)) return params ? params : ray_error("domain", NULL);
+        ray_t* body = rd_obj(c);
+        if (!body || RAY_IS_ERR(body)) { ray_release(params); return body ? body : ray_error("domain", NULL); }
+        ray_t* lam = ray_alloc(7 * sizeof(ray_t*));
+        if (!lam || RAY_IS_ERR(lam)) { ray_release(params); ray_release(body); return lam ? lam : ray_error("wsfull", NULL); }
+        lam->type  = RAY_LAMBDA;
+        lam->attrs = attrs & (uint8_t)~RAY_ATTR_SLICE;
+        lam->len   = 0;
+        memset(ray_data(lam), 0, 7 * sizeof(ray_t*));
+        ((ray_t**)ray_data(lam))[0] = params;
+        ((ray_t**)ray_data(lam))[1] = body;
+        return lam;
+    }
+    case Q_WIRE_EXT_STRVEC: {             /* attrs + count + [len bytes]* */
+        if (!r_need(c, 5)) return trunc_err("str vector header");
+        uint8_t attrs = r_u8(c);
+        int32_t count = r_i32(c);
+        /* every cell needs at least its 4-byte length prefix */
+        if (count < 0 || (uint64_t)count * 4 > c->rem)
+            return ray_error("domain", "q_wire: str vector count %d out of range", (int)count);
+        ray_t* v = ray_vec_new(RAY_STR, count);
+        if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("wsfull", NULL);
+        for (int32_t i = 0; i < count; i++) {
+            if (!r_need(c, 4)) { ray_release(v); return trunc_err("str cell length"); }
+            int32_t n = r_i32(c);
+            if (n < 0 || (uint64_t)n > c->rem) { ray_release(v); return ray_error("domain", "q_wire: str cell length %d out of range", (int)n); }
+            v = ray_str_vec_append(v, (const char*)c->p, (size_t)n);
+            if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("wsfull", NULL);
+            c->p += (size_t)n; c->rem -= (size_t)n;
+        }
+        if (attrs & RAY_ATTR_HAS_NULLS) v->attrs |= RAY_ATTR_HAS_NULLS;
+        return v;
+    }
+    case Q_WIRE_EXT_QSYM: {               /* quoted sym atom */
+        const char* s; size_t n;
+        if (r_cstr(c, &s, &n)) return trunc_err("quoted sym");
+        ray_t* v = ray_sym(ray_sym_intern(s, n));
+        if (v && !RAY_IS_ERR(v)) v->attrs |= ATTR_QUOTED;
+        return v;
+    }
+    case Q_WIRE_EXT_TNULL: {              /* aux-bit typed null (BOOL/U8) */
+        if (!r_need(c, 1)) return trunc_err("typed null");
+        int8_t nt = (int8_t)r_u8(c);
+        if (nt != -RAY_BOOL && nt != -RAY_U8)
+            return ray_error("domain", "q_wire: typed-null ext for type %d", (int)nt);
+        return ray_typed_null(nt);
+    }
+    default:
+        return ray_error("domain", "q_wire: reserved extension tag %d", (int)tag);
+    }
+}
+
 static ray_t* rd_obj_inner(rcur_t* c) {
     if (!r_need(c, 1)) return trunc_err("type tag");
-    int8_t t = (int8_t)r_u8(c);
+    uint8_t raw = r_u8(c);
+    if (raw >= Q_WIRE_EXT_TAG_FIRST && raw <= Q_WIRE_EXT_TAG_LAST) {
+        if (c->serde) return rd_ext(c, raw);
+        return ray_error("domain", "q_wire: unsupported wire type %d", (int)(int8_t)raw);
+    }
+    int8_t t = (int8_t)raw;
 
     /* ---- atoms ---- */
     if (t < 0) {
@@ -520,7 +670,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
     switch (t) {
     case RAY_LIST: {                                  /* 0h general list */
         if (!r_need(c, 5)) return trunc_err("list header");
-        (void)r_u8(c);
+        uint8_t attrs = r_u8(c);
         int32_t count = r_i32(c);
         if (count < 0 || (uint64_t)count > c->rem)    /* every element >= 1 byte */
             return ray_error("domain", "q_wire: list count %d out of range", (int)count);
@@ -532,6 +682,12 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             l = ray_list_append(l, e);
             ray_release(e);
             if (!l || RAY_IS_ERR(l)) return l ? l : ray_error("wsfull", NULL);
+        }
+        if (c->serde) {
+            /* engine boxing is value state: no collapse; restore the engine
+             * attrs (QUOTED expression trees) minus the slice bit. */
+            l->attrs |= attrs & (uint8_t)~RAY_ATTR_SLICE;
+            return l;
         }
         ray_t* out = q_collapse_list(l);              /* owned; parser-identical shape */
         ray_release(l);
@@ -627,7 +783,8 @@ static ray_t* rd_obj(rcur_t* c) {
     return r;
 }
 
-ray_t* q_wire_read_obj(const uint8_t* buf, size_t len, size_t* consumed, int swap) {
+ray_t* q_wire_read_obj_ex(const uint8_t* buf, size_t len, size_t* consumed,
+                          int swap, int serde) {
     /* public contract: `swap` = frame is big-endian (see q_wire.h) */
     rcur_t c = {0};
     c.p = buf;
@@ -635,9 +792,19 @@ ray_t* q_wire_read_obj(const uint8_t* buf, size_t len, size_t* consumed, int swa
     c.frame_be = (swap != 0);
     c.swap = (swap != 0) != (Q_WIRE_HOST_BE != 0);
     c.depth0 = g_wire_depth;
+    c.serde = serde;
     ray_t* r = rd_obj(&c);
     if (consumed) *consumed = len - c.rem;
     return r;
+}
+
+ray_t* q_wire_read_obj(const uint8_t* buf, size_t len, size_t* consumed, int swap) {
+    return q_wire_read_obj_ex(buf, len, consumed, swap, 0);
+}
+
+int q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde) {
+    b->serde = serde;
+    return q_wire_write_obj(b, x);
 }
 
 ray_t* q_wire_deserialize(ray_t* bytes) {
