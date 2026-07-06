@@ -1221,6 +1221,24 @@ static ray_t* q_neg_wrap(ray_t* x) {
     return ray_neg_fn(x);
 }
 
+/* q `null x` — elementwise null test.  Drives the engine's atomic `nil?`
+ * (ray_nil_fn) through atomic_map_unary so it broadcasts over typed vectors
+ * AND nested general lists at every depth; collection_elem reconstructs
+ * typed-null atoms, so nulls are SEEN (unlike other atomics, which stay
+ * null-avoiding via the dispatch guards).  Registered RAY_FN_NONE — NOT
+ * ATOMIC — so it receives the whole argument here and owns the collapse: a
+ * heterogeneous input list yields a homogeneous bool-atom run that
+ * q_collapse_list folds to a bool vector (`null (1;\`a;2.5;"x")` -> 0000b),
+ * while a nested list yields a list of bool VECTORS that q_collapse_list
+ * leaves intact (multi-line, `null (0N 1;2 0N)` -> 10b / 01b). */
+static ray_t* q_null_wrap(ray_t* x) {
+    ray_t* r = is_collection(x) ? atomic_map_unary(ray_nil_fn, x) : ray_nil_fn(x);
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
+    ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
+    ray_release(r);
+    return c;
+}
+
 /* q `x within y` — bounds check (ref/within.md: 1 3 10 6 4 within 2 6 ->
  * 01011b; inclusive).  Base ray_within_fn takes VECTOR vals only and reads
  * the range buffer at the vals' element width, so: an atom x is enlisted
@@ -4271,6 +4289,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_PREV:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prev_wrap);
     case QK_HOPEN:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hopen_wrap);
     case QK_HCLOSE: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hclose_wrap);
+    case QK_NULL:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_null_wrap);
     default:      return NULL;
     }
 }
