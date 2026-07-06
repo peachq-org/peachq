@@ -132,22 +132,15 @@ static bool decompress_if_needed(const ray_ipc_header_t* hdr,
     return true;
 }
 
-/* Evaluate a deserialized message exactly as eval_payload would: string
- * payloads run through ray_eval_str, everything else through ray_eval. */
+/* Evaluate a deserialized message exactly as the IPC dispatch would:
+ * string payloads run through ray_eval_remote_str (the q pipeline when
+ * the q runtime installed its hook, rayfall otherwise — Phase C), other
+ * engine-written frames through ray_eval.  The IPC path only journals
+ * default string-eval frames, so replay reproduces its semantics. */
 static ray_t* eval_one(ray_t* msg) {
     if (!msg || RAY_IS_ERR(msg)) return msg;
-    if (msg->type == -RAY_STR) {
-        const char* s = ray_str_ptr(msg);
-        size_t      n = ray_str_len(msg);
-        if (!s || n == 0) return RAY_NULL_OBJ;
-        char* tmp = (char*)ray_sys_alloc(n + 1);
-        if (!tmp) return ray_error("oom", NULL);
-        memcpy(tmp, s, n);
-        tmp[n] = '\0';
-        ray_t* r = ray_eval_str(tmp);
-        ray_sys_free(tmp);
-        return r;
-    }
+    if (msg->type == -RAY_STR)
+        return ray_eval_remote_str(ray_str_ptr(msg), ray_str_len(msg));
     return ray_eval(msg);
 }
 
