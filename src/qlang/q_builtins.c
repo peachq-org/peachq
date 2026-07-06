@@ -16,6 +16,7 @@
 #include "lang/format.h"    /* ray_fmt — q string cast */
 #include "table/sym.h"      /* ray_sym_vec_cell */
 #include "mem/sys.h"        /* ray_sys_alloc — remote-eval scratch */
+#include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <assert.h>
 #include <ctype.h>
