@@ -65,9 +65,15 @@ typedef enum {
                          * temporals); non-date input passes through.  time/
                          * timestamp arms are deferred with their datatypes.   */
     QK_CUT,             /* q `cut` wrapper (int-atom chunk / int-vector cut)     */
-    QK_WITHIN           /* q `within` wrapper (bounds check; base ray_within_fn
+    QK_WITHIN,          /* q `within` wrapper (bounds check; base ray_within_fn
                          * is vector-vals-only + width-blind, so atom vals
                          * enlist and widths are guarded)                      */
+    /* ---- iterator keyword wrappers (wave-2 adverb completion) ---- */
+    QK_OVER,            /* q `f over x` == `f/x` (reduce/converge/do/while)     */
+    QK_SCANKW,          /* q `f scan x` == `f\x`                                */
+    QK_PRIORKW,         /* q `f prior x` == `(f':)x` (unary each-prior)         */
+    QK_DELTAS,          /* q `deltas x` == `(-':)x`                             */
+    QK_DIFFER           /* q `differ x` == `not(~':)x`                          */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
