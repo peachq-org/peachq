@@ -365,6 +365,29 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
 
     if (n < 1) return NULL;
 
+    /* IPC handle-as-verb application (feat/q-ipc-client, Phase D).  An int atom
+     * applied to a payload is a kdb IPC send: a POSITIVE handle sends SYNC
+     * (`.ipc.send` -> deserialized response); a NEGATIVE handle (from `neg h`)
+     * sends ASYNC (`.ipc.post` -> `::`).  q handles are 1-BASED (hopen offsets the
+     * raw poll id by +1 so 0 stays reserved and neg can sign it), so translate
+     * `|q handle| - 1` back to the raw selector id the primitives expect.  Only
+     * the single-payload form `h x` is handled (n==1); `h[a;b]` keeps its existing
+     * decline.  The `.ipc.*` primitives are RAY_FN_RESTRICTED and we call them
+     * directly, so re-assert the restricted check (a restricted remote connection
+     * must not drive handles).  q handle 0 (console) and null/INT_MIN decline. */
+    if ((head->type == -RAY_I64 || head->type == -RAY_I32) && n == 1) {
+        if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+        int64_t qh = (head->type == -RAY_I64) ? head->i64 : (int64_t)head->i32;
+        if (RAY_ATOM_IS_NULL(head) || qh == 0 || qh == INT64_MIN)
+            return ray_error("type", "handle apply: invalid handle %lld", (long long)qh);
+        int64_t raw   = (qh > 0 ? qh : -qh) - 1;   /* 1-based q handle -> raw id */
+        ray_t*  rawh  = make_i64(raw);
+        ray_t*  r     = (qh > 0) ? ray_hsend_fn(rawh, args[0])   /* sync  */
+                                 : ray_hpost_fn(rawh, args[0]);  /* async */
+        ray_release(rawh);
+        return r;
+    }
+
     /* Raw native VARY fn values (e.g. the @/. amend-trap wrappers) reach this
      * hook via call_fn1/call_fn2, whose fast paths only special-case
      * UNARY/BINARY/LAMBDA.  Apply it here so a VARY verb works as an adverb
