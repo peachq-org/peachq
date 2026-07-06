@@ -166,6 +166,11 @@ static const q_op_t Q_OPS[] = {
      * audited kdb-true element-wise / aggregate semantics). See
      * docs/recipes/add-q-keyword-verb.md. ---- */
     { "abs",     QLEX_KW_PREFIX, QK_ENV, "abs",      QK_NONE,  NULL,      NULL  },
+    /* q `null x` — elementwise null test.  Routes to the engine's atomic
+     * `nil?` (RAY_FN_ATOMIC): broadcasts over vectors and nested lists at
+     * every depth.  QK_NULL collapses a homogeneous top-level bool-atom run
+     * (heterogeneous input list) to a bool vector for kdb-true display. */
+    { "null",    QLEX_KW_PREFIX, QK_NULL, "nil?",    QK_NONE,  NULL,      NULL  },
     { "dev",     QLEX_KW_PREFIX, QK_ENV, "dev",      QK_NONE,  NULL,      NULL  },
     { "exp",     QLEX_KW_PREFIX, QK_ENV, "exp",      QK_NONE,  NULL,      NULL  },
     { "log",     QLEX_KW_PREFIX, QK_ENV, "log",      QK_NONE,  NULL,      NULL  },
