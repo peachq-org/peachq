@@ -116,8 +116,12 @@ typedef enum {
                          * kdb reserves 0 (console) and signs the handle for async,
                          * but openq's raw selector ids START at 0, so the q layer
                          * offsets by 1 and translates back at every handle op.      */
-    QK_HCLOSE           /* q `hclose h` — translate the 1-based q handle back to the
+    QK_HCLOSE,          /* q `hclose h` — translate the 1-based q handle back to the
                          * raw poll id and route to `.ipc.close`.                    */
+    /* ---- null test (feat/q-atomic-extend) ---- */
+    QK_NULL             /* q `null x` — atomic nil? (broadcasts over vectors +
+                           nested lists at every depth), homogeneous top-level
+                           bool-atom run collapsed to a bool vector             */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
