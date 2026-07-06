@@ -509,6 +509,425 @@ static ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
+/* q `til` — kdb accepts a boolean (`til 1b` -> ,0); base ray_til_fn is
+ * int-only.  Everything else (int atoms, the error paths) delegates. */
+static ray_t* q_til_wrap(ray_t* x) {
+    if (x && x->type == -RAY_BOOL) {
+        ray_t* n = ray_i64(x->b8 ? 1 : 0);
+        ray_t* r = ray_til_fn(n);
+        ray_release(n);
+        return r;
+    }
+    return ray_til_fn(x);
+}
+
+/* q `where` / monadic `&` — an INTEGER vector repeats each index i, x[i] times
+ * (`where 2 3 1` -> 0 0 1 1 1 2; `where 0 1 0 1 0 1` -> 1 3 5).  Base
+ * ray_where_fn handles the boolean-mask form, so delegate for it and anything
+ * else.  Result is a long vector (kdb).  Negative counts are 'domain. */
+static ray_t* q_where_wrap(ray_t* x) {
+    if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
+        int64_t n = ray_len(x);
+        int64_t total = 0;
+        for (int64_t i = 0; i < n; i++) {
+            int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
+                      : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
+                      : (int64_t)((const int16_t*)ray_data(x))[i];
+            if (c < 0) return ray_error("domain", "where: negative count");
+            total += c;
+        }
+        ray_t* out = ray_vec_new(RAY_I64, total);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = total;
+        int64_t* d = (int64_t*)ray_data(out);
+        int64_t w = 0;
+        for (int64_t i = 0; i < n; i++) {
+            int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
+                      : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
+                      : (int64_t)((const int16_t*)ray_data(x))[i];
+            for (int64_t k = 0; k < c; k++) d[w++] = i;
+        }
+        return out;
+    }
+    return ray_where_fn(x);
+}
+
+/* ===== q `vs` / `sv` — split-join / base-encode family ===================
+ * kdb reference vs.md / sv.md.  Both are strictly dyadic.  Native -RAY_STR
+ * strings (split -> boxed list of string atoms, join -> one string atom),
+ * symbol split/join, integer base decompose/compose (atom + vector base),
+ * and big-endian byte/bit encode/decode.  Genuinely out-of-scope forms
+ * (128-bit GUID compose, `1:` reparse, byte-vector base) return 'nyi. */
+
+static int q_is_null_sym(ray_t* x) {
+    if (!x || x->type != -RAY_SYM) return 0;
+    ray_t* s = ray_sym_str(x->i64);
+    int z = s && ray_str_len(s) == 0;
+    return z;
+}
+static int q_is_int_atom(ray_t* x) {
+    return x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16);
+}
+static int q_is_int_vec(ray_t* x) {
+    return x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16);
+}
+static int64_t q_ivec_get(ray_t* v, int64_t i) {
+    const void* d = ray_data(v);
+    return v->type == RAY_I64 ? ((const int64_t*)d)[i]
+         : v->type == RAY_I32 ? (int64_t)((const int32_t*)d)[i]
+                              : (int64_t)((const int16_t*)d)[i];
+}
+static int64_t q_iatom_val(ray_t* x) {
+    return x->type == -RAY_I64 ? x->i64
+         : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
+}
+
+/* split string y on substring sep -> boxed list of -RAY_STR (keeps empties) */
+static ray_t* q_str_split(const char* y, size_t yl, const char* sep, size_t sl) {
+    ray_t* out = ray_list_new(4);
+    if (RAY_IS_ERR(out)) return out;
+    if (sl == 0) {                                 /* empty sep -> one piece */
+        ray_t* s = ray_str(y, yl);
+        out = ray_list_append(out, s); ray_release(s);
+        return out;
+    }
+    size_t seg = 0;
+    for (size_t i = 0; i + sl <= yl; ) {
+        if (memcmp(y + i, sep, sl) == 0) {
+            ray_t* s = ray_str(y + seg, i - seg);
+            out = ray_list_append(out, s); ray_release(s);
+            if (RAY_IS_ERR(out)) return out;
+            i += sl; seg = i;
+        } else i++;
+    }
+    ray_t* last = ray_str(y + seg, yl - seg);
+    out = ray_list_append(out, last); ray_release(last);
+    return out;
+}
+
+/* newline / host-line-separator split: split on '\n', strip a trailing '\r'
+ * from each line, drop a single trailing empty line (kdb ` vs read-lines). */
+static ray_t* q_str_split_lines(const char* y, size_t yl) {
+    ray_t* out = ray_list_new(4);
+    if (RAY_IS_ERR(out)) return out;
+    size_t seg = 0;
+    for (size_t i = 0; i <= yl; i++) {
+        if (i == yl || y[i] == '\n') {
+            size_t end = i;
+            if (end > seg && y[end - 1] == '\r') end--;   /* strip CR */
+            ray_t* s = ray_str(y + seg, end - seg);
+            out = ray_list_append(out, s); ray_release(s);
+            if (RAY_IS_ERR(out)) return out;
+            seg = i + 1;
+            if (i == yl) break;
+        }
+    }
+    /* drop a single trailing empty produced by a terminal '\n' */
+    int64_t n = ray_len(out);
+    if (n >= 1) {
+        ray_t** e = (ray_t**)ray_data(out);
+        if (e[n - 1]->type == -RAY_STR && ray_str_len(e[n - 1]) == 0) {
+            ray_release(e[n - 1]);
+            out->len = n - 1;
+        }
+    }
+    return out;
+}
+
+/* ` vs `sym — split a symbol: leading ':' (file handle) splits at the LAST
+ * '/' into (dir; file); otherwise split on every '.'.  -> RAY_SYM vector. */
+static ray_t* q_sym_split(ray_t* y) {
+    ray_t* s = ray_sym_str(y->i64);
+    if (!s) return ray_error("type", "vs: bad symbol");
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, 4);
+    if (n > 0 && p[0] == ':') {                    /* file handle: last '/' */
+        size_t cut = n;
+        for (size_t i = n; i-- > 0; ) if (p[i] == '/') { cut = i; break; }
+        if (cut == n) {                            /* no '/', single element */
+            int64_t id = ray_sym_intern_runtime(p, n);
+            out = ray_vec_append(out, &id);
+        } else {
+            int64_t a = ray_sym_intern_runtime(p, cut);
+            int64_t b = ray_sym_intern_runtime(p + cut + 1, n - cut - 1);
+            out = ray_vec_append(out, &a);
+            out = ray_vec_append(out, &b);
+        }
+    } else {                                        /* split all '.' */
+        size_t seg = 0;
+        for (size_t i = 0; i <= n; i++) {
+            if (i == n || p[i] == '.') {
+                int64_t id = ray_sym_intern_runtime(p + seg, i - seg);
+                out = ray_vec_append(out, &id);
+                seg = i + 1;
+            }
+        }
+    }
+    return out;
+}
+
+/* big-endian byte encode of a numeric scalar (0x0 vs y) -> U8 vector */
+static ray_t* q_byte_encode(ray_t* y) {
+    uint8_t b[8]; int w = 0; uint64_t bits = 0;
+    switch (y->type) {
+    case -RAY_I16: w = 2; bits = (uint16_t)y->i16; break;
+    case -RAY_I32: w = 4; bits = (uint32_t)y->i32; break;
+    case -RAY_I64: w = 8; bits = (uint64_t)y->i64; break;
+    case -RAY_F32: { float f = (float)y->f64; uint32_t u; memcpy(&u, &f, 4);
+                     w = 4; bits = u; break; }
+    case -RAY_F64: { double d = y->f64; uint64_t u; memcpy(&u, &d, 8);
+                     w = 8; bits = u; break; }
+    default: return ray_error("type", "vs: unsupported byte-encode operand");
+    }
+    for (int i = 0; i < w; i++) b[i] = (uint8_t)(bits >> (8 * (w - 1 - i)));
+    return ray_vec_from_raw(RAY_U8, b, w);
+}
+
+/* big-endian bit decompose of an integer scalar (0b vs y) -> BOOL vector */
+static ray_t* q_bit_decompose(ray_t* y) {
+    int w = 0; uint64_t bits = 0;
+    switch (y->type) {
+    case -RAY_BOOL: w = 1;  bits = y->b8 ? 1 : 0; break;
+    case -RAY_U8:   w = 8;  bits = (uint8_t)y->u8; break;
+    case -RAY_I16:  w = 16; bits = (uint16_t)y->i16; break;
+    case -RAY_I32:  w = 32; bits = (uint32_t)y->i32; break;
+    case -RAY_I64:  w = 64; bits = (uint64_t)y->i64; break;
+    default: return ray_error("type", "vs: unsupported bit-decompose operand");
+    }
+    uint8_t stackb[64];
+    for (int i = 0; i < w; i++) stackb[i] = (uint8_t)((bits >> (w - 1 - i)) & 1);
+    return ray_vec_from_raw(RAY_BOOL, stackb, w);
+}
+
+/* decompose scalar v into minimal base-`base` digits (>=1) -> long vector */
+static ray_t* q_base_decompose_atom(int64_t base, int64_t v) {
+    if (base <= 0) return ray_error("domain", "vs: base must be positive");
+    int64_t buf[64]; int n = 0;
+    uint64_t u = (uint64_t)v;
+    if (u == 0) buf[n++] = 0;
+    while (u > 0 && n < 64) { buf[n++] = (int64_t)(u % (uint64_t)base); u /= (uint64_t)base; }
+    ray_t* out = ray_vec_new(RAY_I64, n);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int64_t* d = (int64_t*)ray_data(out);
+    for (int i = 0; i < n; i++) d[i] = buf[n - 1 - i];   /* MSB first */
+    return out;
+}
+
+/* mixed-radix decompose scalar v by vector base -> long vector len(base) */
+static ray_t* q_base_decompose_vec(ray_t* base, int64_t v) {
+    int64_t n = ray_len(base);
+    ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int64_t* d = (int64_t*)ray_data(out);
+    uint64_t u = (uint64_t)v;
+    for (int64_t i = n - 1; i >= 0; i--) {
+        int64_t bi = q_ivec_get(base, i);
+        if (bi <= 0) { d[i] = (int64_t)u; u = 0; }
+        else { d[i] = (int64_t)(u % (uint64_t)bi); u /= (uint64_t)bi; }
+    }
+    return out;
+}
+
+static ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "vs: nil operand");
+    /* --- string / newline split --- */
+    if (x->type == -RAY_STR) {
+        if (y->type != -RAY_STR)
+            return ray_error("nyi", "vs: string split needs a string rhs (byte-string deferred)");
+        return q_str_split(ray_str_ptr(y), ray_str_len(y),
+                           ray_str_ptr(x), ray_str_len(x));
+    }
+    if (q_is_null_sym(x)) {
+        if (y->type == -RAY_STR)
+            return q_str_split_lines(ray_str_ptr(y), ray_str_len(y));
+        if (y->type == -RAY_SYM) return q_sym_split(y);
+        return ray_error("type", "vs: ` split expects a string or symbol");
+    }
+    /* --- byte encode (0x0 vs scalar) --- */
+    if (x->type == -RAY_U8) {
+        if (ray_is_atom(y) && y->type != -RAY_STR) return q_byte_encode(y);
+        return ray_error("nyi", "vs: byte-vector base decompose deferred");
+    }
+    /* --- bit decompose (0b vs scalar) --- */
+    if (x->type == -RAY_BOOL) {
+        if (ray_is_atom(y)) return q_bit_decompose(y);
+        return ray_error("type", "vs: 0b decompose expects a scalar");
+    }
+    /* --- integer base decompose --- */
+    if (q_is_int_atom(x)) {
+        int64_t base = q_iatom_val(x);
+        if (q_is_int_atom(y)) return q_base_decompose_atom(base, q_iatom_val(y));
+        if (q_is_int_vec(y)) {                     /* matrix: pad to max width */
+            int64_t m = ray_len(y);
+            ray_t* cols = ray_list_new(m > 0 ? m : 1);
+            int64_t maxw = 1;
+            for (int64_t j = 0; j < m; j++) {
+                ray_t* c = q_base_decompose_atom(base, q_ivec_get(y, j));
+                if (RAY_IS_ERR(c)) { ray_release(cols); return c; }
+                if (ray_len(c) > maxw) maxw = ray_len(c);
+                cols = ray_list_append(cols, c); ray_release(c);
+            }
+            ray_t* rows = ray_list_new(maxw);
+            ray_t** cv = (ray_t**)ray_data(cols);
+            for (int64_t r = 0; r < maxw; r++) {
+                ray_t* row = ray_vec_new(RAY_I64, m); row->len = m;
+                int64_t* rd = (int64_t*)ray_data(row);
+                for (int64_t j = 0; j < m; j++) {
+                    int64_t cw = ray_len(cv[j]);
+                    int64_t pad = maxw - cw;         /* left-pad with 0 */
+                    rd[j] = (r < pad) ? 0 : ((const int64_t*)ray_data(cv[j]))[r - pad];
+                }
+                rows = ray_list_append(rows, row); ray_release(row);
+            }
+            ray_release(cols);
+            return rows;
+        }
+        return ray_error("type", "vs: integer decompose expects an integer rhs");
+    }
+    if (q_is_int_vec(x)) {
+        if (q_is_int_atom(y)) return q_base_decompose_vec(x, q_iatom_val(y));
+        return ray_error("nyi", "vs: vector-base matrix decompose deferred");
+    }
+    return ray_error("type", "vs: unsupported operand types");
+}
+
+/* join a boxed list / vector of strings with separator sep (append trailing
+ * when host==1, the ` sv newline form). */
+static ray_t* q_str_join(ray_t* y, const char* sep, size_t sl, int host) {
+    if (!y || y->type != RAY_LIST)
+        return ray_error("type", "sv: join expects a list of strings");
+    int64_t n = ray_len(y);
+    size_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* e = (y->type == RAY_LIST) ? ((ray_t**)ray_data(y))[i] : NULL;
+        if (!e || e->type != -RAY_STR)
+            return ray_error("type", "sv: join expects string elements");
+        total += ray_str_len(e);
+        if (i + 1 < n) total += sl;
+    }
+    if (host) total += 1;
+    char* buf = malloc(total ? total : 1);
+    if (!buf) return ray_error("wsfull", "sv: out of memory");
+    size_t w = 0;
+    ray_t** ev = (ray_t**)ray_data(y);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* e = ev[i];
+        size_t el = ray_str_len(e);
+        memcpy(buf + w, ray_str_ptr(e), el); w += el;
+        if (host) { buf[w++] = '\n'; }
+        else if (i + 1 < n) { memcpy(buf + w, sep, sl); w += sl; }
+    }
+    ray_t* r = ray_str(buf, w);
+    free(buf);
+    return r;
+}
+
+/* ` sv `syms — join symbols: leading ':' (file handle) joins with '/', else
+ * with '.'  -> single -RAY_SYM atom. */
+static ray_t* q_sym_join(ray_t* y) {
+    int64_t n = ray_len(y);
+    if (n == 0) return ray_sym(ray_sym_intern_runtime("", 0));
+    ray_t* first = ray_sym_vec_cell(y, 0);
+    const char* fp = first ? ray_str_ptr(first) : "";
+    char joiner = (ray_str_len(first) > 0 && fp[0] == ':') ? '/' : '.';
+    size_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* c = ray_sym_vec_cell(y, i);
+        total += ray_str_len(c);
+        if (i + 1 < n) total += 1;
+    }
+    char* buf = malloc(total ? total : 1);
+    if (!buf) return ray_error("wsfull", "sv: out of memory");
+    size_t w = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* c = ray_sym_vec_cell(y, i);
+        size_t cl = ray_str_len(c);
+        memcpy(buf + w, ray_str_ptr(c), cl); w += cl;
+        if (i + 1 < n) buf[w++] = joiner;
+    }
+    int64_t id = ray_sym_intern_runtime(buf, w);
+    free(buf);
+    return ray_sym(id);
+}
+
+/* big-endian byte decode: interpret a U8 vector as a signed integer of the
+ * matching width (2->short, 4->int, 8->long). */
+static ray_t* q_byte_decode(ray_t* y) {
+    int64_t n = ray_len(y);
+    const uint8_t* p = (const uint8_t*)ray_data(y);
+    uint64_t v = 0;
+    for (int64_t i = 0; i < n; i++) v = (v << 8) | p[i];
+    if (n == 2) return ray_i16((int16_t)(uint16_t)v);
+    if (n == 4) return ray_i32((int32_t)(uint32_t)v);
+    if (n == 8) return ray_i64((int64_t)v);
+    if (n == 1) return ray_i16((int16_t)(uint8_t)v);
+    return ray_error("nyi", "sv: byte decode width %lld deferred", (long long)n);
+}
+
+/* bits -> integer (8->byte, 16->short, 32->int, 64->long; 128->guid deferred) */
+static ray_t* q_bit_compose(ray_t* y) {
+    int64_t n = ray_len(y);
+    const uint8_t* p = (const uint8_t*)ray_data(y);
+    if (n == 128) return ray_error("nyi", "sv: 128-bit GUID compose deferred");
+    if (n != 8 && n != 16 && n != 32 && n != 64)
+        return ray_error("nyi", "sv: bit compose width %lld deferred", (long long)n);
+    uint64_t v = 0;
+    for (int64_t i = 0; i < n; i++) v = (v << 1) | (p[i] & 1);
+    if (n == 8)  return ray_u8((uint8_t)v);
+    if (n == 16) return ray_i16((int16_t)(uint16_t)v);
+    if (n == 32) return ray_i32((int32_t)(uint32_t)v);
+    return ray_i64((int64_t)v);
+}
+
+static ray_t* q_sv_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "sv: nil operand");
+    /* --- string join --- */
+    if (x->type == -RAY_STR)
+        return q_str_join(y, ray_str_ptr(x), ray_str_len(x), 0);
+    if (q_is_null_sym(x)) {
+        if (y->type == RAY_SYM) return q_sym_join(y);            /* sym join */
+        return q_str_join(y, "\n", 1, 1);                        /* host lines */
+    }
+    /* --- byte decode (0x0 sv bytes) --- */
+    if (x->type == -RAY_U8) {
+        if (y->type == RAY_U8) return q_byte_decode(y);
+        return ray_error("nyi", "sv: byte-vector base compose deferred");
+    }
+    /* --- bit compose (0b sv bits) --- */
+    if (x->type == -RAY_BOOL) {
+        if (y->type == RAY_BOOL) return q_bit_compose(y);
+        return ray_error("type", "sv: 0b compose expects a bool vector");
+    }
+    /* --- integer base compose (Horner) --- */
+    if (q_is_int_atom(x)) {
+        int64_t base = q_iatom_val(x);
+        if (!q_is_int_vec(y) && y->type != RAY_BOOL)
+            return ray_error("type", "sv: integer compose expects an integer vector");
+        int64_t n = ray_len(y);
+        int64_t acc = 0;
+        for (int64_t i = 0; i < n; i++) {
+            int64_t d = (y->type == RAY_BOOL) ? ((const uint8_t*)ray_data(y))[i]
+                                              : q_ivec_get(y, i);
+            acc = acc * base + d;
+        }
+        return ray_i64(acc);
+    }
+    /* --- mixed-radix compose (vector base) --- */
+    if (q_is_int_vec(x)) {
+        if (!q_is_int_vec(y)) return ray_error("type", "sv: mixed-radix expects an integer vector rhs");
+        int64_t n = ray_len(y), bn = ray_len(x);
+        if (n != bn) return ray_error("length", "sv: base and value lengths must match");
+        int64_t acc = 0;
+        for (int64_t i = 0; i < n; i++)
+            acc = acc * q_ivec_get(x, i) + q_ivec_get(y, i);
+        return ray_i64(acc);
+    }
+    return ray_error("type", "sv: unsupported operand types");
+}
+
 /* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
  * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
  * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
@@ -522,6 +941,11 @@ static ray_t* q_neg_wrap(ray_t* x) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
         return ray_date(-(int64_t)x->i32);
     }
+    /* kdb `neg` promotes a boolean to INT and negates (`neg 1b` -> -1i);
+     * base ray_neg_fn rejects bools.  Registered ATOMIC, so a bool vector
+     * arrives here element-wise and the i32 atoms collapse to an i32 vector. */
+    if (x && x->type == -RAY_BOOL)
+        return ray_i32(-(int32_t)(x->b8 ? 1 : 0));
     return ray_neg_fn(x);
 }
 
@@ -587,6 +1011,52 @@ static ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
     return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
 }
 
+/* A keyed table is a RAY_DICT whose keys AND values are both tables. */
+static int q_is_keyed_table(ray_t* y) {
+    if (!y || y->type != RAY_DICT) return 0;
+    ray_t* k = ray_dict_keys(y);
+    ray_t* v = ray_dict_vals(y);
+    return k && v && k->type == RAY_TABLE && v->type == RAY_TABLE;
+}
+
+/* Flatten a plain-or-keyed table to a single plain table (key cols then value
+ * cols).  Returns owned. */
+static ray_t* q_table_flatten(ray_t* y) {
+    if (y->type == RAY_TABLE) { ray_retain(y); return y; }
+    ray_t* kt = ray_dict_keys(y);          /* borrowed */
+    ray_t* vt = ray_dict_vals(y);          /* borrowed */
+    int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
+    ray_t* out = ray_table_new(knc + vnc > 0 ? knc + vnc : 1);
+    for (int64_t c = 0; c < knc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(kt, c), ray_table_get_col_idx(kt, c));
+    for (int64_t c = 0; c < vnc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(vt, c), ray_table_get_col_idx(vt, c));
+    return out;
+}
+
+/* q enkey/unkey `N!table`: 0 -> plain table (unkey), N>0 -> key the first N
+ * columns into a keyed table (RAY_DICT keycols-table -> valcols-table).
+ * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
+static ray_t* q_enkey(ray_t* y, int64_t nkey) {
+    ray_t* flat = q_table_flatten(y);
+    if (!flat || RAY_IS_ERR(flat)) return flat;
+    int64_t nc = ray_table_ncols(flat);
+    if (nkey <= 0) return flat;                 /* unkey */
+    if (nkey >= nc) { ray_release(flat); return ray_error("length", "!: key count exceeds columns"); }
+    ray_t* kt = ray_table_new(nkey);
+    ray_t* vt = ray_table_new(nc - nkey);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+        int64_t nm = ray_table_col_name(flat, c);
+        ray_t* col = ray_table_get_col_idx(flat, c);
+        if (c < nkey) kt = ray_table_add_col(kt, nm, col);
+        else          vt = ray_table_add_col(vt, nm, col);
+    }
+    ray_release(flat);
+    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);
+}
+
 /* q `x!y` — dict make.  An atom key enlists to a 1-vector first (kdb `a!1`
  * is a dict too; rayfall dict wants vector keys); vals pass through as-is
  * (rayfall dict broadcasts atom vals and boxes the rest itself).  kdb
@@ -610,6 +1080,23 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
                 return q_wire_deserialize(y);
             default:
                 return ray_error("nyi", "internal function %lld! not yet implemented", (long long)id);
+            }
+        }
+        /* q enkey/unkey: `N!table` / `N!keyedtable` (N>=0). */
+        if (y->type == RAY_TABLE || q_is_keyed_table(y))
+            return q_enkey(y, id);
+        /* by-reference `N!`name`: unkey/enkey the named global IN PLACE, then
+         * return the name (kdb amend-by-reference).  A miss / non-table stays
+         * dict-make below. */
+        if (y->type == -RAY_SYM) {
+            ray_t* g = ray_env_get(y->i64);
+            if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) {
+                ray_t* nt = q_enkey(g, id);
+                if (!nt || RAY_IS_ERR(nt)) return nt;
+                ray_env_bind(y->i64, nt);      /* retains */
+                ray_release(nt);
+                ray_retain(y);
+                return y;
             }
         }
     }
@@ -2103,6 +2590,36 @@ static ray_t* q_table_build(ray_t** args, int64_t n) {
     return q_ctx_build(args, n, 1);
 }
 
+/* q keyed-table literal `([k1:…;k2:…] v1:…; v2:…)` head.  args[0] is an int
+ * atom = the KEY column count; args[1..] are the column-def trees (key columns
+ * first, then value columns).  All columns are built as ONE table (so value
+ * columns can reference key columns via the shared build scope — q_ctx_build's
+ * cross-column binding), then split into a key-columns table and a
+ * value-columns table joined into a RAY_DICT: "a keyed table is just a
+ * dictionary from one table to another" (q_fmt renders it `k| v`). */
+static ray_t* q_keyed_table_build(ray_t** args, int64_t n) {
+    if (n < 1 || !args[0] || args[0]->type != -RAY_I64)
+        return ray_error("parse", "keyed-table literal: missing key count");
+    int64_t nk = args[0]->i64;
+    ray_t* tbl = q_ctx_build(args + 1, n - 1, 1);
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
+    if (tbl->type != RAY_TABLE) { ray_release(tbl); return ray_error("type", "keyed-table literal: not a table"); }
+    int64_t nc = ray_table_ncols(tbl);
+    if (nk < 0 || nk > nc) { ray_release(tbl); return ray_error("length", "keyed-table literal: bad key count"); }
+    ray_t* kt = ray_table_new(nk > 0 ? nk : 1);
+    ray_t* vt = ray_table_new(nc - nk > 0 ? nc - nk : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+        int64_t nm  = ray_table_col_name(tbl, c);
+        ray_t*  col = ray_table_get_col_idx(tbl, c);   /* borrowed; add retains */
+        if (c < nk) kt = ray_table_add_col(kt, nm, col);
+        else        vt = ray_table_add_col(vt, nm, col);
+    }
+    ray_release(tbl);
+    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);   /* consumes kt, vt */
+}
+
 static void q_select_rename_temps(ray_t* tbl, ray_t* tempnames, ray_t* realnames) {
     if (!tbl || tbl->type != RAY_TABLE ||
         !tempnames || tempnames->type != RAY_SYM ||
@@ -2895,7 +3412,16 @@ static ray_t* q_funsql_bang(ray_t** args, int64_t n) {
 
 static ray_t* g_list_value   = NULL;
 static ray_t* g_table_value  = NULL;
+static ray_t* g_keyed_table_value = NULL;
 static ray_t* g_select_value = NULL;
+static ray_t* g_compose_value = NULL;
+
+/* q `'[f;g;…]` compose builder — a normal VARY (args are the resolved function
+ * VALUES): boxes them into a Q_DERIV_COMPOSE carrier (q_deriv.c). */
+static ray_t* q_compose_fn(ray_t** args, int64_t n) {
+    if (n < 1) return ray_error("rank", "': compose needs at least one function");
+    return q_compose_new(args, n);
+}
 static ray_t* g_funsql_select_value = NULL;
 static ray_t* g_funsql_bang_value   = NULL;
 static ray_t* g_lambda_value        = NULL;
@@ -2997,8 +3523,16 @@ ray_t* q_registry_select_value(void) {
     return g_select_value;   /* borrowed; NULL before init */
 }
 
+ray_t* q_registry_compose_value(void) {
+    return g_compose_value;  /* borrowed; NULL before init */
+}
+
 ray_t* q_registry_list_value(void) {
     return g_list_value;   /* borrowed; NULL before init */
+}
+
+ray_t* q_registry_keyed_table_value(void) {
+    return g_keyed_table_value;  /* borrowed; NULL before init */
 }
 
 ray_t* q_registry_table_value(void) {
@@ -3099,6 +3633,10 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_PRIORKW:return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prior_kw);
     case QK_DELTAS: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_deltas_wrap);
     case QK_DIFFER: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_differ_wrap);
+    case QK_TIL:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_til_wrap);
+    case QK_WHERE:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_where_wrap);
+    case QK_VS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_vs_wrap);
+    case QK_SV:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sv_wrap);
     default:      return NULL;
     }
 }
@@ -3222,10 +3760,22 @@ ray_err_t q_registry_init(void) {
         g_table_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_keyed_table_value = ray_fn_vary("keyed-table",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_keyed_table_build);
+    if (!g_keyed_table_value || RAY_IS_ERR(g_keyed_table_value)) {
+        g_keyed_table_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     g_select_value = ray_fn_vary("q.select",
                        RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_select_exec);
     if (!g_select_value || RAY_IS_ERR(g_select_value)) {
         g_select_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    /* compose builder — a NORMAL vary (args are the resolved function values). */
+    g_compose_value = ray_fn_vary("q.compose", RAY_FN_Q_LOWER, q_compose_fn);
+    if (!g_compose_value || RAY_IS_ERR(g_compose_value)) {
+        g_compose_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
     /* functional qSQL executors — SPECIAL FORMs: they receive t/c/b/a
@@ -3319,7 +3869,9 @@ void q_registry_destroy(void) {
     if (g_mkderiv2_value) { ray_release(g_mkderiv2_value); g_mkderiv2_value = NULL; }
     if (g_list_value)   { ray_release(g_list_value);   g_list_value   = NULL; }
     if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
+    if (g_keyed_table_value) { ray_release(g_keyed_table_value); g_keyed_table_value = NULL; }
     if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
+    if (g_compose_value) { ray_release(g_compose_value); g_compose_value = NULL; }
     if (g_funsql_select_value) { ray_release(g_funsql_select_value); g_funsql_select_value = NULL; }
     if (g_funsql_bang_value)   { ray_release(g_funsql_bang_value);   g_funsql_bang_value   = NULL; }
     if (g_lambda_value)        { ray_release(g_lambda_value);        g_lambda_value        = NULL; }
