@@ -4124,28 +4124,45 @@ static ray_t* q_hopen_connstr(ray_t* c) {
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
 static ray_t* q_hopen_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
-    ray_t* conn    = x;
-    ray_t* timeout = NULL;
+    ray_t* conn      = x;
+    ray_t* timeout   = NULL;
+    ray_t* pair_conn = NULL;   /* owned when a pair was a typed int VECTOR */
+    ray_t* pair_to   = NULL;
     if (x && x->type == RAY_LIST && ray_len(x) == 2) {   /* (conn; timeout-ms) */
         ray_t** e = (ray_t**)ray_data(x);
-        conn = e[0]; timeout = e[1];
+        conn = e[0]; timeout = e[1];                     /* borrowed */
+    } else if (q_is_int_vec(x) && ray_len(x) == 2) {
+        /* an all-int (port; timeout-ms) pair collapses to a homogeneous int
+         * VECTOR (not a general list) — recover the two atoms.  (A symbol/string
+         * conn keeps the pair a RAY_LIST, handled above.) */
+        pair_conn = ray_i64(q_ivec_get(x, 0));
+        pair_to   = ray_i64(q_ivec_get(x, 1));
+        conn = pair_conn; timeout = pair_to;
     }
     ray_t* cs = q_hopen_connstr(conn);                   /* owned or error */
-    if (!cs || RAY_IS_ERR(cs)) return cs;
+    if (!cs || RAY_IS_ERR(cs)) {
+        if (pair_conn) ray_release(pair_conn);
+        if (pair_to)   ray_release(pair_to);
+        return cs;
+    }
     ray_t* args[2] = { cs, NULL };
     int64_t nargs = 1;
     ray_t* tv = NULL;
+    if (timeout && !q_is_int_atom(timeout)) {
+        ray_release(cs);
+        if (pair_conn) ray_release(pair_conn);
+        if (pair_to)   ray_release(pair_to);
+        return ray_error("type", "hopen: timeout must be an integer (milliseconds)");
+    }
     if (timeout) {
-        if (!q_is_int_atom(timeout)) {
-            ray_release(cs);
-            return ray_error("type", "hopen: timeout must be an integer (milliseconds)");
-        }
         tv = make_i64(q_iatom_val(timeout));
         args[1] = tv; nargs = 2;
     }
     ray_t* h = ray_hopen_fn(args, nargs);                /* owned handle or error */
     ray_release(cs);
-    if (tv) ray_release(tv);
+    if (tv)        ray_release(tv);
+    if (pair_conn) ray_release(pair_conn);
+    if (pair_to)   ray_release(pair_to);
     if (!h || RAY_IS_ERR(h)) return h;
     /* q handles are 1-BASED: openq's raw poll selector ids start at 0, but kdb
      * reserves 0 (console) and encodes async as a NEGATIVE handle, so 0 must not
