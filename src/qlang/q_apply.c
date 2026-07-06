@@ -221,8 +221,139 @@ static ray_t* q_compose_apply(ray_t* carrier, ray_t** args, int64_t n) {
     return acc;
 }
 
+/* ── dict function-distribution shim (openq) ─────────────────────────────
+ * A builtin verb applied to a dictionary distributes over its VALUES, with
+ * key order preserved.  Reached only via eval's `dict_retry` on the 'type-
+ * error path, so verbs that already handle a dict natively (key/value/count/
+ * type/`,`/`#`/`@`) never arrive here.  The verb is applied to the value
+ * VECTOR (never a dict) exactly as the tree-walk kernel dispatch would, so
+ * every rayfall kernel is reused with zero reimplementation. */
+
+/* Apply a builtin UNARY head to one operand, matching the tree-walk arm:
+ * atomic verbs map over a collection, others call the kernel directly. */
+static ray_t* dict_apply1(ray_t* head, ray_t* a) {
+    ray_unary_fn fn = (ray_unary_fn)(uintptr_t)head->i64;
+    if ((head->attrs & RAY_FN_ATOMIC) && is_collection(a))
+        return atomic_map_unary(fn, a);
+    return fn(a);
+}
+
+/* Apply a builtin BINARY head to two operands, matching the tree-walk arm
+ * (opcode carried so a length-mismatch error names the verb). */
+static ray_t* dict_apply2(ray_t* head, ray_t* a, ray_t* b) {
+    ray_binary_fn fn = (ray_binary_fn)(uintptr_t)head->i64;
+    if ((head->attrs & RAY_FN_ATOMIC) && (is_collection(a) || is_collection(b)))
+        return atomic_map_binary_op(fn, RAY_FN_OPCODE(head), a, b);
+    return fn(a, b);
+}
+
+/* d op e — key-union / upsert.  Result keys = keys of `a` in order, then keys
+ * of `b` absent from `a`; matching keys combine via `op`, others pass through.
+ * Mirrors q_eachboth_dict's key-donor discipline (retain keys before
+ * ray_dict_new). */
+static ray_t* q_dict_union(ray_t* head, ray_t* a, ray_t* b) {
+    ray_t* ka = ray_dict_keys(a);        /* borrowed */
+    ray_t* kb = ray_dict_keys(b);        /* borrowed */
+    if (!ka || !kb) return ray_error("type", "dict op: malformed dictionary");
+    int64_t na = ray_dict_len(a);
+    int64_t nb = ray_dict_len(b);
+    int64_t cap = na + nb; if (cap < 1) cap = 1;
+    ray_t* okeys = ray_list_new(cap);
+    ray_t* ovals = ray_list_new(cap);
+    if (!okeys || !ovals) {
+        if (okeys) ray_release(okeys);
+        if (ovals) ray_release(ovals);
+        return ray_error("oom", NULL);
+    }
+    /* pass 1: every key of `a`, combined with b's matching value if present */
+    for (int64_t i = 0; i < na; i++) {
+        ray_t* ix = ray_i64(i);
+        ray_t* k = ray_at_fn(ka, ix);            /* owned key atom */
+        ray_release(ix);
+        if (!k || RAY_IS_ERR(k)) { ray_release(okeys); ray_release(ovals); return k ? k : ray_error("type", NULL); }
+        ray_t* va = ray_dict_get(a, k);          /* owned, present */
+        ray_t* vb = ray_dict_get(b, k);          /* owned or NULL */
+        ray_t* rv;
+        if (vb) {
+            rv = dict_apply2(head, va, vb);
+            ray_release(va); ray_release(vb);
+            if (!rv || RAY_IS_ERR(rv)) { ray_release(k); ray_release(okeys); ray_release(ovals); return rv ? rv : ray_error("type", NULL); }
+        } else {
+            rv = va;                             /* pass through, owned */
+        }
+        okeys = ray_list_append(okeys, k);
+        ovals = ray_list_append(ovals, rv);
+        ray_release(k); ray_release(rv);
+    }
+    /* pass 2: keys of `b` not present in `a`, values unchanged */
+    for (int64_t j = 0; j < nb; j++) {
+        ray_t* ix = ray_i64(j);
+        ray_t* k = ray_at_fn(kb, ix);
+        ray_release(ix);
+        if (!k || RAY_IS_ERR(k)) { ray_release(okeys); ray_release(ovals); return k ? k : ray_error("type", NULL); }
+        ray_t* pa = ray_dict_get(a, k);          /* present in a? */
+        if (pa) { ray_release(pa); ray_release(k); continue; }
+        ray_t* vb = ray_dict_get(b, k);          /* owned, present */
+        okeys = ray_list_append(okeys, k);
+        ovals = ray_list_append(ovals, vb);
+        ray_release(k);
+        if (vb) ray_release(vb);
+    }
+    ray_t* ck = q_collapse_list(okeys);
+    ray_t* cv = q_collapse_list(ovals);
+    ray_release(okeys); ray_release(ovals);
+    if (!ck || RAY_IS_ERR(ck)) { if (cv && !RAY_IS_ERR(cv)) ray_release(cv); return ck ? ck : ray_error("type", NULL); }
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(ck); return cv ? cv : ray_error("type", NULL); }
+    return ray_dict_new(ck, cv);                 /* consumes ck + cv */
+}
+
+/* The distribution dispatch: monadic map/aggregate, dyadic dict+atom (both
+ * orders) and dyadic dict+dict union.  Returns owned, or NULL to decline. */
+static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
+    if (n == 1) {
+        ray_t* d = args[0];
+        ray_t* keys = ray_dict_keys(d);          /* borrowed */
+        ray_t* vals = ray_dict_vals(d);          /* borrowed */
+        if (!keys || !vals) return NULL;
+        ray_t* r = dict_apply1(head, vals);
+        if (!r || RAY_IS_ERR(r)) return r;
+        /* map (result conforms to values) vs aggregate (scalar result) */
+        if (is_collection(r) && ray_len(r) == ray_dict_len(d)) {
+            ray_retain(keys);
+            return ray_dict_new(keys, r);        /* consumes keys + r */
+        }
+        return r;                                /* aggregate scalar */
+    }
+    if (n == 2) {
+        ray_t* a = args[0];
+        ray_t* b = args[1];
+        bool ad = a && a->type == RAY_DICT;
+        bool bd = b && b->type == RAY_DICT;
+        if (ad && bd) return q_dict_union(head, a, b);
+        ray_t* d = ad ? a : b;
+        ray_t* keys = ray_dict_keys(d);          /* borrowed */
+        ray_t* vals = ray_dict_vals(d);          /* borrowed */
+        if (!keys || !vals) return NULL;
+        ray_t* r = ad ? dict_apply2(head, vals, b) : dict_apply2(head, a, vals);
+        if (!r || RAY_IS_ERR(r)) return r;
+        ray_retain(keys);
+        return ray_dict_new(keys, r);            /* consumes keys + r */
+    }
+    return NULL;
+}
+
 ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     if (!head) return NULL;
+
+    /* openq dict function-distribution shim: a builtin verb whose argument is
+     * a dictionary distributes over the values.  Reached only from eval's
+     * dict_retry (the 'type-error path), so a native dict verb never lands
+     * here. */
+    if ((head->type == RAY_UNARY || head->type == RAY_BINARY) && n >= 1) {
+        for (int64_t i = 0; i < n; i++)
+            if (args[i] && args[i]->type == RAY_DICT)
+                return q_dict_distribute(head, args, n);
+    }
 
     /* 100h lambda carriers — q rank/projection semantics.  Claimed before
      * the n guard: a rank-0 call shape must not fall through. */
