@@ -85,6 +85,20 @@ void q_registry_destroy(void);
  * it has no q spelling of its own. */
 ray_t* q_registry_scan_value(void);
 
+/* Internal (spelling-less) HOF values q_lower embeds at adverb heads (wave-2):
+ *   over      — `/` : reduce / converge / do / while
+ *   each-both — `'` dyadic: zip a binary over conforming operands
+ *   each-prior— `':`: apply a binary between each item and its predecessor
+ * Borrowed; NULL before q_registry_init. */
+ray_t* q_registry_over_value(void);
+ray_t* q_registry_eachboth_value(void);
+ray_t* q_registry_prior_value(void);
+
+/* Binary helper (map-right/map-left-value, f) -> a 2-hole derived-verb carrier,
+ * built at EVAL time so a lambda operand is a real value.  q_lower embeds it to
+ * lower `(f/:)` / `(f\:)` as VALUES (stacked-adverb `f/:\:`).  Borrowed. */
+ray_t* q_registry_mkderiv2_value(void);
+
 /* The internal paren-list constructor (list + collapse) the PARSER embeds at
  * the head of every multi-element paren list `(1;2;3)` — the head value is
  * what distinguishes a literal from the shape-identical index call (v;i).
