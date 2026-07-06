@@ -13,13 +13,17 @@
  *     q `#`/`_` dyadic are arg-swap `take` / count-`drop` wrappers.
  *   - q `,` dyadic is join -> rayfall `concat`.
  * DEFERRED (QK_NONE — no clean rayfall target, do NOT guess): `|` dyadic
- *   (max is an AGGREGATE, not dyadic element-wise greater), monadic `+`
+ *   (max: rayfall has NO dyadic element-wise max — `max` is register_unary
+ *   AGGREGATE, `and`/`or` are register_vary scalar special forms — so wiring
+ *   it needs a q_max2_wrap twin of q_min2_wrap = new logic, HELD), monadic `+`
  *   (flip: no builtin), monadic `%` (reciprocal: no builtin).  Dyadic `&`
- *   is the QK_MIN2 wrapper (element-wise min / bool-and).  Dyadic `~` is the
- *   QK_MATCH wrapper (2c-1).  The remaining type-dispatch verbs `! ? $ @ .`
- *   land in 2c-2.
+ *   is the QK_MIN2 wrapper (element-wise min / bool-and) — the `and` keyword
+ *   reuses it.  Dyadic `~` is the QK_MATCH wrapper (2c-1).  The remaining
+ *   type-dispatch verbs `! ? $ @ .` land in 2c-2.  The bool/null batch keywords
+ *   `null`/`any`/`all` are RESERVED-but-deferred (see their rows below); `or`
+ *   (|-max keyword) is not rostered until `|`-max lands.
  *
- * KW_INFIX is {div, each, in, within} — a keyword row here is what makes the
+ * KW_INFIX includes {div, each, in, within, and, ...} — a keyword row here is what makes the
  * lexer reclassify the name as an infix verb in noun position (the retired
  * q_is_kw_verb memcmp, now manifest-driven). */
 #define _POSIX_C_SOURCE 200809L
@@ -74,6 +78,15 @@ static const q_op_t Q_OPS[] = {
      * collapse, since map returns a boxed list where q wants a simple vec). */
     { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
     { "in",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "in",      NULL  },
+    /* q `and` — keyword spelling of `&` (element-wise min / logical AND,
+     * ref/and.md, ref/lesser.md).  REUSES the SAME QK_MIN2 kernel the glyph
+     * `&` routes to (q_min2_wrap) — no new logic.  Numeric/bool are kdb-true
+     * (`2 and 3`->2, `1010b and 1100b`->1000b); the char-min arm (`"sat" and
+     * "cow"`->"cat") is a shared q_min2_wrap gap (DEFERRED, needs a char arm =
+     * new logic).  Monadic cell stays QK_NONE: q `and` is dyadic-only, so
+     * prefix `and x` misses and eval falls through to rayfall's scalar `and`
+     * special form (DEFERRED edge — a monadic wrapper would be new logic). */
+    { "and",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MIN2,  "and",     NULL  },
     /* q `x within y` — inclusive bounds check (ref/within.md); wrapper because
      * base ray_within_fn is vector-vals-only and width-blind on the range. */
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
@@ -177,6 +190,30 @@ static const q_op_t Q_OPS[] = {
     /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x. */
     { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
     { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
+    /* ---- boolean/null batch: RESERVED-but-DEFERRED (feat/q-bool-null) ----
+     * These are real q keywords, so they are rostered to reserve the name
+     * (`null:5`/`any:5`/`all:5` -> 'assign, kdb-true) and to keep the manifest
+     * the complete verb list.  All three carry QK_NONE at both valences (no
+     * value) — a documented DEFER, NOT a guessed binding — because a clean
+     * rayfall reuse does not exist under the reuse-or-defer policy:
+     *   - `null`: reuse candidate rayfall `nil?` does NOT broadcast (registered
+     *     RAY_FN_NONE, not ATOMIC; ray_nil_fn returns a scalar for any vector),
+     *     so `null 0N 1 2` would give 0b not 100b.  Broadcasting needs an eval
+     *     attr change (frozen) or a wrapper — both HELD.  ref/null.md.
+     *   - `any`/`all`: range is boolean `b` for EVERY domain (ref/all-any.md);
+     *     q coerces to boolean then reduces.  A `max`/`min` rename is type-wrong
+     *     for non-boolean input (`all 2000.01.02 2010.01.02`->1b, but max is a
+     *     DATE), coinciding only on already-boolean vectors.  The boolean
+     *     coercion is new logic (HELD).
+     * KW_PREFIX (not INFIX): reservation must NOT reclassify the scanner (only
+     * QLEX_KW_INFIX rows do), and these are prefix keywords.  (`or` is a keyword
+     * spelling of `|`-max and is NOT rostered: it is INFIX, and a valueless
+     * QLEX_KW_INFIX row would reclassify `x or y` then miss the registry and
+     * expose rayfall's scalar `or` special form — wrong q semantics.  It waits
+     * for `|`-max.) */
+    { "null",    QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
+    { "any",     QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
+    { "all",     QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
