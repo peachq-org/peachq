@@ -243,6 +243,19 @@ static const q_op_t Q_OPS[] = {
     { "rank",    QLEX_KW_PREFIX, QK_ENV, "rank",     QK_NONE,  NULL,      NULL  },
     { "raze",    QLEX_KW_PREFIX, QK_ENV, "raze",     QK_NONE,  NULL,      NULL  },
     { "sqrt",    QLEX_KW_PREFIX, QK_ENV, "sqrt",     QK_NONE,  NULL,      NULL  },
+    /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm.
+     * rayfall has no trig/reciprocal/signum primitive, so these are wrappers
+     * (not QK_ENV renames).  All monadic KW_PREFIX; RAY_FN_ATOMIC broadcast.
+     * `ceiling` is the QK_FLOOR-twin (float->LONG), NOT rayfall `ceil` (f64). */
+    { "sin",       QLEX_KW_PREFIX, QK_SIN,        "sin",       QK_NONE, NULL, NULL },
+    { "cos",       QLEX_KW_PREFIX, QK_COS,        "cos",       QK_NONE, NULL, NULL },
+    { "tan",       QLEX_KW_PREFIX, QK_TAN,        "tan",       QK_NONE, NULL, NULL },
+    { "asin",      QLEX_KW_PREFIX, QK_ASIN,       "asin",      QK_NONE, NULL, NULL },
+    { "acos",      QLEX_KW_PREFIX, QK_ACOS,       "acos",      QK_NONE, NULL, NULL },
+    { "atan",      QLEX_KW_PREFIX, QK_ATAN,       "atan",      QK_NONE, NULL, NULL },
+    { "reciprocal",QLEX_KW_PREFIX, QK_RECIPROCAL, "reciprocal",QK_NONE, NULL, NULL },
+    { "signum",    QLEX_KW_PREFIX, QK_SIGNUM,     "signum",    QK_NONE, NULL, NULL },
+    { "ceiling",   QLEX_KW_PREFIX, QK_CEILING,    "ceiling",   QK_NONE, NULL, NULL },
     /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x. */
     { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
     { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
