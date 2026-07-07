@@ -174,6 +174,11 @@ ray_t* q_registry_funsql_bang_value(void);
  * `l` retained). */
 ray_t* q_collapse_list(ray_t* l);
 
+/* q `ssr[s;p;r]` — string search-and-replace (feat/q-string-fns).  Exposed so
+ * q_builtins_register can env-bind it (a triadic prefix keyword: the parser
+ * name-refs `ssr[a;b;c]`, so it resolves through the env, not the registry). */
+ray_t* q_ssr_wrap(ray_t** args, int64_t n);
+
 /* ===== q cast home ==========================================================
  * THE q-layer conversion entry points (reuse mandate): future q-semantics
  * work that needs a conversion (bool-widening in arithmetic, promotion in
