@@ -2349,6 +2349,77 @@ static int q_time_scan(const char* p, size_t len, int32_t* ms) {
     return 0;
 }
 
+/* tod scan for "P"$: HH:MM:SS[.f{1..9}] -> ns of day (colon form only; the
+ * packed date form is split off by the caller).  Returns 1/0. */
+static int q_tod_scan_ns(const char* p, size_t len, int64_t* ns) {
+    if (len < 8 || !q_all_digits(p, 2) || p[2] != ':' ||
+        !q_all_digits(p + 3, 2) || p[5] != ':' || !q_all_digits(p + 6, 2))
+        return 0;
+    int64_t h  = (p[0]-'0')*10 + (p[1]-'0');
+    int64_t mi = (p[3]-'0')*10 + (p[4]-'0');
+    int64_t s  = (p[6]-'0')*10 + (p[7]-'0');
+    if (mi >= 60 || s >= 60) return 0;
+    int64_t frac = 0;
+    if (len > 8) {
+        if (p[8] != '.' || len == 9) return 0;
+        size_t fd = len - 9;
+        if (fd > 9) return 0;
+        for (size_t k = 0; k < fd; k++) {
+            if (p[9 + k] < '0' || p[9 + k] > '9') return 0;
+            frac = frac * 10 + (p[9 + k] - '0');
+        }
+        for (size_t k = fd; k < 9; k++) frac *= 10;
+    }
+    *ns = (h * 3600 + mi * 60 + s) * 1000000000LL + frac;
+    return 1;
+}
+
+/* "P"$ timestamp-string scan (ref/tok.md Â§Timestamps).  Subset:
+ *   - Unix seconds, 9..11 digits [+ . fraction] (doc-pinned:
+ *     "P"$"10129708800" -> 2290.12.31D00:00:00.000000000,
+ *     "P"$"10129708800.123456789" -> ...D00:00:00.123456789);
+ *   - date part (q_date_scan separator forms or packed yyyymmdd) + one of
+ *     "DT- " + colon tod (pins: "PZ"$\:"20191122-11:11:11.123");
+ *   - date-only -> midnight (derived).
+ * MMM months / 2-digit years / timezone forms deferred.  Returns 1 + payload
+ * ns on success; 0 -> caller yields 0Np (tok.md out-of-domain contract —
+ * CHECKED compose, never the cast path's saturating +-0Wp). */
+static int q_ts_scan(const char* p, size_t len, int64_t* out) {
+    /* unix-seconds: 9..11 digits, optionally . + 1..9 fraction digits */
+    size_t dot = len;
+    for (size_t i = 0; i < len; i++) if (p[i] == '.') { dot = i; break; }
+    if (dot >= 9 && dot <= 11 && q_all_digits(p, dot) &&
+        (dot == len || (len > dot + 1 && len <= dot + 10 &&
+                        q_all_digits(p + dot + 1, len - dot - 1)))) {
+        int64_t secs = 0;
+        for (size_t i = 0; i < dot; i++) secs = secs * 10 + (p[i] - '0');
+        secs -= 946684800LL;                  /* unix epoch -> 2000.01.01 */
+        int64_t ns;
+        if (__builtin_mul_overflow(secs, 1000000000LL, &ns)) return 0;
+        int64_t frac = 0;
+        size_t fd = (dot == len) ? 0 : len - dot - 1;
+        for (size_t k = 0; k < fd; k++) frac = frac * 10 + (p[dot + 1 + k] - '0');
+        for (size_t k = fd; k < 9; k++) frac *= 10;
+        if (__builtin_add_overflow(ns, frac, &ns)) return 0;
+        *out = ns;
+        return 1;
+    }
+    /* date [sep tod] */
+    size_t dl = 0;
+    if (len >= 10 && (p[4] == '.' || p[4] == '-' || p[4] == '/')) dl = 10;
+    else if (len >= 8 && q_all_digits(p, 8)) dl = 8;
+    if (dl == 0 || len < dl) return 0;
+    int64_t y, mo, d;
+    if (!q_date_scan(p, dl, &y, &mo, &d) || !q_date_valid(y, mo, d)) return 0;
+    int64_t tod = 0;
+    if (len > dl) {
+        char sep = p[dl];
+        if (!(sep == 'D' || sep == 'T' || sep == '-' || sep == ' ')) return 0;
+        if (!q_tod_scan_ns(p + dl + 1, len - dl - 1, &tod)) return 0;
+    }
+    return q_ts_compose_checked(q_days_from_civil(y, mo, d), tod, out);
+}
+
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
@@ -2427,6 +2498,14 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
             return ray_typed_null(-RAY_TIME);
         return ray_time(ms);
     }
+    case RAY_TIMESTAMP: {
+        /* "P"$str -> timestamp (ref/tok.md Â§Timestamps).  Unparseable /
+         * out-of-range -> 0Np, never an error (tok contract). */
+        int64_t ns;
+        if (!q_ts_scan(p, len, &ns))
+            return ray_typed_null(-RAY_TIMESTAMP);
+        return ray_timestamp(ns);
+    }
     case RAY_U8: {
         /* "X"$ reads the string as HEX ("X"$"42" -> 0x42, ref/tok.md).
          * Unparseable or > 0xff -> 0x00 (derived): tok.md pins out-of-
@@ -2456,7 +2535,7 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         return ray_guid(bytes);
     }
     default:
-        return ray_error("nyi", "$: temporal/char Tok is deferred");
+        return ray_error("nyi", "$: month/timespan/char Tok is deferred");
     }
 }
 
