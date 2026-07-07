@@ -21,4 +21,10 @@
  * Requires an initialised rayforce runtime. */
 void q_repl_run(FILE* in, FILE* out, FILE* err, int echo);
 
+/* Run a q startup script (`q file.q`): evaluate each line silently (no prompt,
+ * no echo, no auto-display of results) — only explicit side-effects (show/0N!)
+ * are written to `out`, matching kdb script-load semantics.  Returns 0 on
+ * success, non-zero if the file could not be opened. */
+int q_repl_run_file(const char* path, FILE* out, FILE* err);
+
 #endif /* Q_REPL_H */
