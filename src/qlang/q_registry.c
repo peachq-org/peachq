@@ -1940,6 +1940,102 @@ static ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
     return out;
 }
 
+/* ===== q sort / grade / bucket family (feat/q-sort-rank) ===================
+ * Flat typed-vector cores reuse the rayfall primitives verbatim (ray_asc_fn,
+ * ray_desc_fn, ray_iasc_fn, ray_idesc_fn, ray_xbar_fn); the q wrappers add the
+ * arg-swap (xbar) and the DICT container arms.  DEFERRED (error, never a wrong
+ * answer): the sorted `s#` attribute on asc/desc results (rayfall has no sorted
+ * attribute bit — the VALUE is kdb-true, only the attribute display diverges),
+ * the mixed-general-list-by-type-number sort, and table / keyed-table sorts. */
+
+/* Reorder a keys-or-vals vector by a grade-index vector (owned grade), then
+ * collapse the boxed result back to a typed vector.  Releases `grade`. */
+static ray_t* q_reindex_collapse(ray_t* vec, ray_t* grade) {
+    if (!grade || RAY_IS_ERR(grade)) return grade;
+    ray_t* boxed = ray_at_fn(vec, grade);
+    ray_release(grade);
+    if (!boxed || RAY_IS_ERR(boxed)) return boxed;
+    if (boxed->type == RAY_LIST) {
+        ray_t* c = q_collapse_list(boxed);
+        ray_release(boxed);
+        return c;
+    }
+    return boxed;
+}
+
+/* Grade a dict's VALUE vector.  Dict vals are stored as a boxed RAY_LIST, so
+ * collapse to a typed vector before grading (a genuinely mixed value list can't
+ * collapse and ray_iasc_fn errors → the by-type-number sort is DEFERRED). */
+static ray_t* q_dict_value_grade(ray_t* vals, int desc) {
+    ray_t* cv = (vals && vals->type == RAY_LIST) ? q_collapse_list(vals) : NULL;
+    ray_t* use = cv ? cv : vals;
+    /* Empty dict (e.g. `asc 0#d`): an empty value list can't be graded by
+     * ray_iasc_fn (it needs a typed vector, and q_collapse_list leaves an empty
+     * RAY_LIST as-is), so return an empty long grade — reindexing then yields an
+     * empty dict / key list, matching kdb (codex review). */
+    if (use && (ray_is_vec(use) || use->type == RAY_LIST) && ray_len(use) == 0) {
+        if (cv) ray_release(cv);
+        ray_t* g = ray_vec_new(RAY_I64, 0);
+        if (g && !RAY_IS_ERR(g)) g->len = 0;
+        return g;
+    }
+    ray_t* grade = desc ? ray_idesc_fn(use) : ray_iasc_fn(use);
+    if (cv) ray_release(cv);
+    return grade;
+}
+
+/* q `asc`/`desc` on a DICT — sort the entries by VALUE (ascending / descending),
+ * carrying the keys along (kdb ref/asc.md, ref/desc.md dictionary form).  Grades
+ * the values, then reindexes both keys and vals by that grade. */
+static ray_t* q_sort_dict(ray_t* d, int desc) {
+    ray_t* keys = ray_dict_keys(d);      /* borrowed */
+    ray_t* vals = ray_dict_vals(d);      /* borrowed */
+    if (!keys || !vals) return ray_error("type", "asc/desc: malformed dict");
+    ray_t* grade = q_dict_value_grade(vals, desc);
+    if (!grade || RAY_IS_ERR(grade)) return grade ? grade : ray_error("oom", NULL);
+    ray_retain(grade);                   /* one ref per reindex call */
+    ray_t* nk = q_reindex_collapse(keys, grade);        /* releases its grade ref */
+    if (!nk || RAY_IS_ERR(nk)) { ray_release(grade); return nk; }
+    ray_t* nv = q_reindex_collapse(vals, grade);        /* releases the retained ref */
+    if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv; }
+    return ray_dict_new(nk, nv);         /* consumes nk, nv */
+}
+
+/* q `iasc`/`idesc` on a DICT — return the KEYS in ascending / descending VALUE
+ * order (kdb ref/asc.md grade form: `iasc d` grades the values, indexes keys). */
+static ray_t* q_grade_dict(ray_t* d, int desc) {
+    ray_t* keys = ray_dict_keys(d);      /* borrowed */
+    ray_t* vals = ray_dict_vals(d);      /* borrowed */
+    if (!keys || !vals) return ray_error("type", "iasc/idesc: malformed dict");
+    ray_t* grade = q_dict_value_grade(vals, desc);
+    return q_reindex_collapse(keys, grade);             /* releases grade */
+}
+
+static ray_t* q_asc_wrap(ray_t* x) {
+    if (x && x->type == RAY_DICT) return q_sort_dict(x, 0);
+    return ray_asc_fn(x);
+}
+static ray_t* q_desc_wrap(ray_t* x) {
+    if (x && x->type == RAY_DICT) return q_sort_dict(x, 1);
+    return ray_desc_fn(x);
+}
+static ray_t* q_iasc_wrap(ray_t* x) {
+    if (x && x->type == RAY_DICT) return q_grade_dict(x, 0);
+    return ray_iasc_fn(x);
+}
+static ray_t* q_idesc_wrap(ray_t* x) {
+    if (x && x->type == RAY_DICT) return q_grade_dict(x, 1);
+    return ray_idesc_fn(x);
+}
+
+/* q `width xbar list` — interval bucketing.  rayfall ray_xbar_fn is (col,
+ * bucket); q spells it (bucket, col), so swap the arguments.  Everything else
+ * (numeric int/float bucket, temporal cols, list zip) is handled by the base
+ * kernel; dict/keyed-table/qSQL forms fall through to whatever the base does. */
+static ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
+    return ray_xbar_fn(col, bucket);
+}
+
 /* Deal n distinct values from [0,total) — partial Fisher-Yates over `til total`,
  * take the first n (kdb deal / permute; uses the same libc rand() the roll path
  * does).  n<=total required.  Result is an owned I64 vector. */
@@ -5038,6 +5134,11 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_UNION:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_union_wrap);
     case QK_INTER:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_inter_wrap);
     case QK_CROSS:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_cross_wrap);
+    case QK_XBAR:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xbar_wrap);
+    case QK_ASC:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_asc_wrap);
+    case QK_DESC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_desc_wrap);
+    case QK_IASC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_iasc_wrap);
+    case QK_IDESC:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_idesc_wrap);
     default:      return NULL;
     }
 }
