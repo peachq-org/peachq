@@ -1833,9 +1833,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         switch (n) {
         case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM:
-        case RAY_DATE:
+        case RAY_DATE: case RAY_TIME:
             return (int8_t)n;
-        default: return 0;    /* guid/char + time/timestamp/month etc: deferred */
+        default: return 0;    /* guid/char + timestamp/month etc: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
@@ -1847,7 +1847,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'j': return RAY_I64;  case 'e': return RAY_F32;
         case 'f': return RAY_F64;  case 's': return RAY_SYM;
         case 'd': return RAY_DATE; case 'g': return RAY_GUID;
-        default:  return 0;       /* c p m z n u v t + "*" identity: deferred */
+        case 't': return RAY_TIME;
+        default:  return 0;       /* c p m z n u v + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -1866,6 +1867,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
         else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
+        else if (l == 4 && !memcmp(nm, "time",    4)) r = RAY_TIME;
         ray_release(s);
         return r;
     }
@@ -1878,7 +1880,7 @@ static const char* q_tag_rayname(int8_t tag) {
     case RAY_BOOL: return "BOOL"; case RAY_U8:  return "U8";
     case RAY_I16:  return "I16";  case RAY_I32: return "I32";
     case RAY_I64:  return "I64";  case RAY_F64: return "F64";
-    case RAY_DATE: return "DATE";
+    case RAY_DATE: return "DATE"; case RAY_TIME: return "TIME";
     default:       return NULL;
     }
 }
@@ -2035,6 +2037,68 @@ static int q_parse_uuid(const char* p, size_t len, uint8_t out[16]) {
     return bi == 16;
 }
 
+/* "T"$ time-string scan (ref/tok.md).  Two forms, both -> i32 ms of day:
+ *   - PACKED digits HHMMSSmmm (doc-pinned): "T"$"123456789" -> 12:34:56.789,
+ *     "T"$"123456123987654" -> 12:34:56.123 (>=6 digits: HH MM SS then up to 3
+ *     fractional; extra fractional digits ignored).
+ *   - COLON HH:MM:SS[.f…] (derived — the natural literal spelling): the `.`
+ *     fractional is optional; only its first 3 digits (millis) are used.
+ * mm/ss must be < 60, else out-of-domain.  Returns 1 and fills *ms on success,
+ * 0 on any shape/range mismatch (caller -> typed null 0Nt). */
+static int q_all_digits(const char* p, size_t len) {
+    if (len == 0) return 0;
+    for (size_t i = 0; i < len; i++)
+        if (p[i] < '0' || p[i] > '9') return 0;
+    return 1;
+}
+static int q_time_scan(const char* p, size_t len, int32_t* ms) {
+    int64_t h, mi, s, frac = 0;
+    int has_colon = 0;
+    for (size_t i = 0; i < len; i++) if (p[i] == ':') { has_colon = 1; break; }
+    /* colon form: H[H]:MM:SS[.f…] */
+    if (has_colon) {
+        size_t i = 0;
+        int64_t hv = 0;
+        while (i < len && p[i] >= '0' && p[i] <= '9') { hv = hv * 10 + (p[i] - '0'); i++; }
+        if (i == 0 || i > 2 || i >= len || p[i] != ':') return 0;
+        i++;
+        if (i + 2 > len || !q_all_digits(p + i, 2) || i + 2 >= len || p[i + 2] != ':')
+            return 0;
+        mi = (p[i] - '0') * 10 + (p[i + 1] - '0');
+        i += 3;
+        if (i + 2 > len || !q_all_digits(p + i, 2)) return 0;
+        s = (p[i] - '0') * 10 + (p[i + 1] - '0');
+        i += 2;
+        if (i < len) {                        /* optional .fractional */
+            if (p[i] != '.') return 0;
+            i++;
+            int64_t scale = 100;
+            size_t seen = 0;
+            while (i < len && p[i] >= '0' && p[i] <= '9') {
+                if (seen < 3) { frac += (p[i] - '0') * scale; scale /= 10; seen++; }
+                i++;
+            }
+            if (i != len) return 0;           /* trailing junk */
+        }
+        h = hv;
+        if (mi >= 60 || s >= 60) return 0;
+        *ms = (int32_t)(h * 3600000 + mi * 60000 + s * 1000 + frac);
+        return 1;
+    }
+    /* packed HHMMSSmmm: >=6 digits, first 6 = HHMMSS, next up to 3 = millis */
+    if (len >= 6 && q_all_digits(p, len)) {
+        h  = (p[0] - '0') * 10 + (p[1] - '0');
+        mi = (p[2] - '0') * 10 + (p[3] - '0');
+        s  = (p[4] - '0') * 10 + (p[5] - '0');
+        int64_t scale = 100;
+        for (size_t i = 6; i < len && i < 9; i++) { frac += (p[i] - '0') * scale; scale /= 10; }
+        if (mi >= 60 || s >= 60) return 0;
+        *ms = (int32_t)(h * 3600000 + mi * 60000 + s * 1000 + frac);
+        return 1;
+    }
+    return 0;
+}
+
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
@@ -2104,6 +2168,14 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         if (!q_date_scan(p, len, &y, &mo, &d) || !q_date_valid(y, mo, d))
             return ray_typed_null(-RAY_DATE);
         return ray_date(q_days_from_civil(y, mo, d));
+    }
+    case RAY_TIME: {
+        /* "T"$str -> time (ref/tok.md).  Unparseable / out-of-domain -> 0Nt,
+         * never an error (base ray_cast_fn errors on a bad string). */
+        int32_t ms;
+        if (!q_time_scan(p, len, &ms))
+            return ray_typed_null(-RAY_TIME);
+        return ray_time(ms);
     }
     case RAY_U8: {
         /* "X"$ reads the string as HEX ("X"$"42" -> 0x42, ref/tok.md).
