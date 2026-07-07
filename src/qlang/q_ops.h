@@ -144,6 +144,24 @@ typedef enum {
                          * q join (rayfall concat); no cartesian primitive in
                          * rayfall.  String (char-items) and dict/table cross
                          * are deferred cells ('nyi). */
+    /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm, no
+     * rayfall counterpart (rayfall has exp/log/sqrt but not the trig set).
+     * Each wrapper handles ONE atom; RAY_FN_ATOMIC broadcasts over vectors and
+     * nested lists (like q_sqrt/floor).  Float results route through make_f64,
+     * so the sentinel-null float model applies: null in -> null out, and any
+     * non-finite (NaN/±Inf) canonicalizes to 0n (so `sin 1%0` -> 0n). ---- */
+    QK_SIN,             /* q `sin x`  — sine (radians), f64                     */
+    QK_COS,             /* q `cos x`  — cosine (radians), f64                   */
+    QK_TAN,             /* q `tan x`  — tangent (radians), f64                  */
+    QK_ASIN,            /* q `asin x` — arcsine (radians), f64; |x|>1 -> 0n     */
+    QK_ACOS,            /* q `acos x` — arccosine (radians), f64; |x|>1 -> 0n   */
+    QK_ATAN,            /* q `atan x` — arctangent (radians), f64               */
+    QK_RECIPROCAL,      /* q `reciprocal x` — 1%x as float (recip 0 -> 0n under
+                         * the single-null model; kdb's 0w is a deferred cell)  */
+    QK_SIGNUM,          /* q `signum x` — sign as INT (i32): null|neg -> -1i,
+                         * zero -> 0i, positive -> 1i                           */
+    QK_CEILING,         /* q `ceiling x` — least integer >= x, as LONG (mirrors
+                         * QK_FLOOR: float->i64, int passes through)            */
     /* ---- sort / bucket family (feat/q-sort-rank) ---- */
     QK_XBAR,            /* q `width xbar list` — interval bucketing.  ARG-SWAP
                          * wrapper: rayfall ray_xbar_fn is (col, bucket) but q
