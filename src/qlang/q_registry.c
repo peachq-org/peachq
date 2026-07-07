@@ -1221,6 +1221,24 @@ static ray_t* q_neg_wrap(ray_t* x) {
     return ray_neg_fn(x);
 }
 
+/* q `null x` — elementwise null test.  Drives the engine's atomic `nil?`
+ * (ray_nil_fn) through atomic_map_unary so it broadcasts over typed vectors
+ * AND nested general lists at every depth; collection_elem reconstructs
+ * typed-null atoms, so nulls are SEEN (unlike other atomics, which stay
+ * null-avoiding via the dispatch guards).  Registered RAY_FN_NONE — NOT
+ * ATOMIC — so it receives the whole argument here and owns the collapse: a
+ * heterogeneous input list yields a homogeneous bool-atom run that
+ * q_collapse_list folds to a bool vector (`null (1;\`a;2.5;"x")` -> 0000b),
+ * while a nested list yields a list of bool VECTORS that q_collapse_list
+ * leaves intact (multi-line, `null (0N 1;2 0N)` -> 10b / 01b). */
+static ray_t* q_null_wrap(ray_t* x) {
+    ray_t* r = is_collection(x) ? atomic_map_unary(ray_nil_fn, x) : ray_nil_fn(x);
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
+    ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
+    ray_release(r);
+    return c;
+}
+
 /* q `x within y` — bounds check (ref/within.md: 1 3 10 6 4 within 2 6 ->
  * 01011b; inclusive).  Base ray_within_fn takes VECTOR vals only and reads
  * the range buffer at the vals' element width, so: an atom x is enlisted
@@ -1828,8 +1846,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'h': return RAY_I16;  case 'i': return RAY_I32;
         case 'j': return RAY_I64;  case 'e': return RAY_F32;
         case 'f': return RAY_F64;  case 's': return RAY_SYM;
-        case 'd': return RAY_DATE;
-        default:  return 0;       /* g c p m z n u v t + "*" identity: deferred */
+        case 'd': return RAY_DATE; case 'g': return RAY_GUID;
+        default:  return 0;       /* c p m z n u v t + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -1987,6 +2005,36 @@ static int q_date_scan(const char* p, size_t len,
     return 0;
 }
 
+static int q_hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Parse a CANONICAL 36-char UUID (8-4-4-4-12, hyphens at 8/13/18/23, hex
+ * elsewhere, case-insensitive) into out[16].  Returns 1 on success, 0 on any
+ * shape/char mismatch.  kdb "G"$ ALSO accepts IPv4/IPv6 address forms
+ * (test/q/cast/tok.qcmd, skiplisted) — DEFERRED here (see PLAN.md); those
+ * inputs fail this shape check and Tok returns 0Ng. */
+static int q_parse_uuid(const char* p, size_t len, uint8_t out[16]) {
+    if (len != 36) return 0;
+    int bi = 0;
+    for (size_t i = 0; i < 36; ) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (p[i] != '-') return 0;
+            i++;
+            continue;
+        }
+        int h = q_hexval(p[i]);
+        int l = q_hexval(p[i + 1]);
+        if (h < 0 || l < 0) return 0;
+        out[bi++] = (uint8_t)((h << 4) | l);
+        i += 2;
+    }
+    return bi == 16;
+}
+
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
@@ -2075,6 +2123,15 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         }
         if (len == 0 || i != len || v > 0xff) return ray_u8(0);
         return ray_u8((uint8_t)v);
+    }
+    case RAY_GUID: {
+        /* "G"$str -> guid (basics/datatypes.md §Guid).  Tok contract:
+         * unparseable / wrong-shape -> typed null 0Ng, never an error (base
+         * ray_cast_fn "GUID" ERRORS on bad input, so parse here).  Canonical
+         * 36-char UUID only; IPv4/IPv6 forms deferred (see q_parse_uuid). */
+        uint8_t bytes[16];
+        if (!q_parse_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
+        return ray_guid(bytes);
     }
     default:
         return ray_error("nyi", "$: temporal/char Tok is deferred");
@@ -4068,6 +4125,10 @@ ray_t* q_collapse_list(ray_t* l) {
         case -RAY_F32: { float f = (float)e[i]->f64;            /* F32 atom stores f64 */
                          vec = ray_vec_append(vec, &f); }       break;
         case -RAY_F64:  vec = ray_vec_append(vec, &e[i]->f64); break;
+        case -RAY_GUID: {                                      /* 16-byte payload, not i64 */
+            const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
+            vec = ray_vec_append(vec, g);
+        } break;
         default:        vec = ray_vec_append(vec, &e[i]->i64); break; /* i64 + temporals */
         }
         if (RAY_IS_ERR(vec)) return vec;
@@ -4075,6 +4136,119 @@ ray_t* q_collapse_list(ray_t* l) {
     }
     (void)nulls;
     return vec;
+}
+
+/* ---- IPC client verb: q `hopen` (feat/q-ipc-client, Phase D) ----
+ * Thin wrapper over `.ipc.open` (ray_hopen_fn), which takes a
+ * "host:port[:user:password]" string + optional connect-timeout.  q `hopen`
+ * accepts an int PORT (localhost), a "host:port[:user:pass]" STRING (with the
+ * kdb "::PORT"/":host:port" leading-colon conventions), or a 2-list
+ * (conn; timeout-ms).  The kdb hsym-SYMBOL forms (`::PORT`, `:host:port`) do
+ * not lex as a single colon-bearing symbol yet (the scanner stops at ':'), so
+ * they are deferred to a lexer change; the int/string surface parses today. */
+
+/* Normalize a connection descriptor (int atom or string atom) into the
+ * "host:port[:user:password]" form .ipc.open expects.  Owned RAY_STR or error. */
+static ray_t* q_hopen_connstr(ray_t* c) {
+    if (q_is_int_atom(c)) {
+        int64_t p = q_iatom_val(c);
+        if (p <= 0 || p > 65535)
+            return ray_error("domain", "hopen: port must be in 1..65535, got %lld",
+                             (long long)p);
+        char buf[32];
+        int m = snprintf(buf, sizeof buf, "127.0.0.1:%lld", (long long)p);
+        if (m <= 0 || m >= (int)sizeof buf) return ray_error("domain", "hopen: bad port");
+        return ray_str(buf, (size_t)m);
+    }
+    if (c && c->type == -RAY_STR) {
+        const char* s = ray_str_ptr(c);
+        size_t n = ray_str_len(c);
+        if (n > 512) return ray_error("domain", "hopen: descriptor too long");
+        /* kdb leading-colon conventions: "::rest" = localhost, ":host:.." = strip 1 */
+        if (n >= 2 && s[0] == ':' && s[1] == ':') {
+            char buf[600];
+            int m = snprintf(buf, sizeof buf, "127.0.0.1:%.*s", (int)(n - 2), s + 2);
+            if (m <= 0 || m >= (int)sizeof buf)
+                return ray_error("domain", "hopen: descriptor too long");
+            return ray_str(buf, (size_t)m);
+        }
+        if (n >= 1 && s[0] == ':') return ray_str(s + 1, n - 1);   /* strip one ':' */
+        return ray_str(s, n);                                      /* "host:port" */
+    }
+    return ray_error("type",
+                     "hopen: expected an int port or a \"host:port\" string, got %s",
+                     ray_type_name(c ? c->type : 0));
+}
+
+/* q `hopen y` — connect, return an int handle.  Restricted connections must not
+ * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
+ * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
+static ray_t* q_hopen_wrap(ray_t* x) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    ray_t* conn      = x;
+    ray_t* timeout   = NULL;
+    ray_t* pair_conn = NULL;   /* owned when a pair was a typed int VECTOR */
+    ray_t* pair_to   = NULL;
+    if (x && x->type == RAY_LIST && ray_len(x) == 2) {   /* (conn; timeout-ms) */
+        ray_t** e = (ray_t**)ray_data(x);
+        conn = e[0]; timeout = e[1];                     /* borrowed */
+    } else if (q_is_int_vec(x) && ray_len(x) == 2) {
+        /* an all-int (port; timeout-ms) pair collapses to a homogeneous int
+         * VECTOR (not a general list) — recover the two atoms.  (A symbol/string
+         * conn keeps the pair a RAY_LIST, handled above.) */
+        pair_conn = ray_i64(q_ivec_get(x, 0));
+        pair_to   = ray_i64(q_ivec_get(x, 1));
+        conn = pair_conn; timeout = pair_to;
+    }
+    ray_t* cs = q_hopen_connstr(conn);                   /* owned or error */
+    if (!cs || RAY_IS_ERR(cs)) {
+        if (pair_conn) ray_release(pair_conn);
+        if (pair_to)   ray_release(pair_to);
+        return cs;
+    }
+    ray_t* args[2] = { cs, NULL };
+    int64_t nargs = 1;
+    ray_t* tv = NULL;
+    if (timeout && !q_is_int_atom(timeout)) {
+        ray_release(cs);
+        if (pair_conn) ray_release(pair_conn);
+        if (pair_to)   ray_release(pair_to);
+        return ray_error("type", "hopen: timeout must be an integer (milliseconds)");
+    }
+    if (timeout) {
+        tv = make_i64(q_iatom_val(timeout));
+        args[1] = tv; nargs = 2;
+    }
+    ray_t* h = ray_hopen_fn(args, nargs);                /* owned handle or error */
+    ray_release(cs);
+    if (tv)        ray_release(tv);
+    if (pair_conn) ray_release(pair_conn);
+    if (pair_to)   ray_release(pair_to);
+    if (!h || RAY_IS_ERR(h)) return h;
+    /* q handles are 1-BASED: openq's raw poll selector ids start at 0, but kdb
+     * reserves 0 (console) and encodes async as a NEGATIVE handle, so 0 must not
+     * be a live handle (`neg 0` == 0 could not select async).  Offset the raw id
+     * by +1 here; hclose / handle-apply translate back to the raw id. */
+    int64_t raw = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
+    ray_release(h);
+    return make_i64(raw + 1);
+}
+
+/* q `hclose h` — translate the 1-based q handle back to the raw poll id and
+ * route to `.ipc.close` (ray_hclose_fn).  Restricted connections are refused,
+ * matching hopen / the handle-apply path. */
+static ray_t* q_hclose_wrap(ray_t* x) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!q_is_int_atom(x) || RAY_ATOM_IS_NULL(x))
+        return ray_error("type", "hclose: expected an int handle, got %s",
+                         ray_type_name(x ? x->type : 0));
+    int64_t qh = q_iatom_val(x);
+    if (qh <= 0)
+        return ray_error("type", "hclose: invalid handle %lld", (long long)qh);
+    ray_t* raw = make_i64(qh - 1);
+    ray_t* r = ray_hclose_fn(raw);
+    ray_release(raw);
+    return r;
 }
 
 /* ---- value builders keyed by manifest build-kind ---- */
@@ -4156,6 +4330,9 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_SUBLIST:return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sublist_wrap);
     case QK_NEXT:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_next_wrap);
     case QK_PREV:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prev_wrap);
+    case QK_HOPEN:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hopen_wrap);
+    case QK_HCLOSE: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hclose_wrap);
+    case QK_NULL:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_null_wrap);
     default:      return NULL;
     }
 }

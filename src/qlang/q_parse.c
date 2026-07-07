@@ -359,7 +359,9 @@ static void read_type_letter(const char *src, int *p, char *letter,
     char c = src[*p];
     int date_ok = last && (last->kind == EL_DATE || last->kind == EL_NULL ||
                            last->kind == EL_PINF || last->kind == EL_NINF);
-    if (c && (strchr("bhijef", c) || (c == 'd' && date_ok))) {
+    int guid_ok = last && last->kind == EL_NULL;   /* only 0Ng (guid has no inf) */
+    if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
+              (c == 'g' && guid_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -443,6 +445,23 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         if (nb == 0) q_die("bad boolean literal");
         if (nb == 1) return ray_bool(bits[0]);
         return ray_vec_from_raw(RAY_BOOL, bits, nb);
+    }
+
+    /* Guid context: a `g` suffix on a 0N Special (0Ng).  Guid's only literal is
+     * the null (basics/datatypes.md §Guid: "no literal entry for a guid"); every
+     * element must be EL_NULL.  Atom -> typed null (16 zero bytes); a multi-0N
+     * run with the g suffix builds an all-null guid vector via the same
+     * strand-suffix rule as `1 2h` (derived). */
+    if (letter == 'g') {
+        for (int i = 0; i < m; i++)
+            if (buf[i].kind != EL_NULL) q_die("bad number");
+        if (m == 1) return ray_typed_null(-RAY_GUID);
+        ray_t *vec = ray_vec_new(RAY_GUID, m);
+        if (vec && !RAY_IS_ERR(vec)) {
+            vec->len = m;
+            memset(ray_data(vec), 0, (size_t)m * 16);   /* all-null guids */
+        }
+        return vec;
     }
 
     /* Date context: a `d` suffix (0Nd / 0Wd / -0Wd) or any yyyy.mm.dd
