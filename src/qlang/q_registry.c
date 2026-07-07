@@ -1291,7 +1291,25 @@ static ray_t* q_within_wrap(ray_t* x, ray_t* y) {
         if (vals_owned) ray_release(vals_owned);
         return ray_error("type", "within: value/range types must match (mixed-type deferred)");
     }
-    ray_t* r = ray_within_fn(vals, y);
+    ray_t* r;
+    if (vals->type == RAY_TIMESTAMP) {
+        /* base ray_within_fn has no i64-temporal arm; the payload is i64, so
+         * relabel both sides through the one cast home and delegate (the
+         * same-byte-rep TIMESTAMP<->I64 relabel, builtins.c). */
+        ray_t* vi = q_cast_to(RAY_I64, vals);
+        if (!vi || RAY_IS_ERR(vi)) { if (vals_owned) ray_release(vals_owned); return vi; }
+        ray_t* yi = q_cast_to(RAY_I64, y);
+        if (!yi || RAY_IS_ERR(yi)) {
+            ray_release(vi);
+            if (vals_owned) ray_release(vals_owned);
+            return yi;
+        }
+        r = ray_within_fn(vi, yi);
+        ray_release(vi);
+        ray_release(yi);
+    } else {
+        r = ray_within_fn(vals, y);
+    }
     if (!vals_owned) return r;                    /* vector x: pass through */
     ray_release(vals_owned);
     if (!r || RAY_IS_ERR(r)) return r;
@@ -2005,9 +2023,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         switch (n) {
         case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM:
-        case RAY_DATE: case RAY_TIME:
+        case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
             return (int8_t)n;
-        default: return 0;    /* guid/char + timestamp/month etc: deferred */
+        default: return 0;    /* guid/char + month/minute/second etc: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
@@ -2019,8 +2037,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'j': return RAY_I64;  case 'e': return RAY_F32;
         case 'f': return RAY_F64;  case 's': return RAY_SYM;
         case 'd': return RAY_DATE; case 'g': return RAY_GUID;
-        case 't': return RAY_TIME;
-        default:  return 0;       /* c p m z n u v + "*" identity: deferred */
+        case 't': return RAY_TIME; case 'p': return RAY_TIMESTAMP;
+        default:  return 0;       /* c m z n u v + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -2040,6 +2058,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
         else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
         else if (l == 4 && !memcmp(nm, "time",    4)) r = RAY_TIME;
+        else if (l == 9 && !memcmp(nm, "timestamp", 9)) r = RAY_TIMESTAMP;
         ray_release(s);
         return r;
     }
@@ -2053,6 +2072,7 @@ static const char* q_tag_rayname(int8_t tag) {
     case RAY_I16:  return "I16";  case RAY_I32: return "I32";
     case RAY_I64:  return "I64";  case RAY_F64: return "F64";
     case RAY_DATE: return "DATE"; case RAY_TIME: return "TIME";
+    case RAY_TIMESTAMP: return "TIMESTAMP";
     default:       return NULL;
     }
 }
@@ -2133,6 +2153,64 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
         }
         return out;
     }
+    /* kdb `timestamp$date: days -> ns, SATURATING outside the timestamp year
+     * range (`timestamp$1666.09.02 -> -0Wp, datatypes.md:149) — base's arm
+     * multiplies unchecked (i64 overflow, UBSan, builtins.c:1616) — and
+     * mapping the date sentinels to the i64 sentinels (0Nd -> 0Np,
+     * +-0Wd -> +-0Wp, which the saturation clamp yields for free). */
+    if (tag == RAY_TIMESTAMP && x && x->type == -RAY_DATE) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_TIMESTAMP);
+        return ray_timestamp(q_ts_compose((int64_t)x->i32, 0));
+    }
+    if (tag == RAY_TIMESTAMP && x && x->type == RAY_DATE) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_vec_new(RAY_TIMESTAMP, n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = n;
+        const int32_t* d = (const int32_t*)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            int isnull = (d[i] == INT32_MIN);
+            ((int64_t*)ray_data(out))[i] =
+                isnull ? 0 : q_ts_compose((int64_t)d[i], 0);
+            if (isnull) ray_vec_set_null(out, i, true);
+        }
+        return out;
+    }
+    /* kdb `timestamp$time keeps the TIME OF DAY (ms -> ns on day 0, derived:
+     * time is ms-of-day, timestamp ns; base's same-width path relabels the
+     * raw ms payload as ns — a wrong answer, caught by the designator audit).
+     * Sentinels map across (0Nt -> 0Np, +-0Wt -> +-0Wp). */
+    if (tag == RAY_TIMESTAMP && x && x->type == -RAY_TIME) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_TIMESTAMP);
+        if (x->i32 == INT32_MAX)  return ray_timestamp(INT64_MAX);
+        if (x->i32 == -INT32_MAX) return ray_timestamp(-INT64_MAX);
+        return ray_timestamp((int64_t)x->i32 * 1000000LL);
+    }
+    if (tag == RAY_TIMESTAMP && x && x->type == RAY_TIME) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_vec_new(RAY_TIMESTAMP, n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = n;
+        const int32_t* d = (const int32_t*)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            int isnull = (d[i] == INT32_MIN);
+            ((int64_t*)ray_data(out))[i] =
+                isnull ? 0
+                : (d[i] == INT32_MAX)  ? INT64_MAX
+                : (d[i] == -INT32_MAX) ? -INT64_MAX
+                : (int64_t)d[i] * 1000000LL;
+            if (isnull) ray_vec_set_null(out, i, true);
+        }
+        return out;
+    }
+    /* float -> timestamp: base truncates the float to a raw ns count, but
+     * kdb's unit semantics here (rint-ns vs datetime-style fractional DAYS)
+     * is unpinned in the docs corpus — error beats a wrong answer, so the
+     * shape is a deferred cell (designator-audit decision, plan 2026-07-07). */
+    if (tag == RAY_TIMESTAMP && x &&
+        (x->type == -RAY_F64 || x->type == -RAY_F32 ||
+         x->type == RAY_F64  || x->type == RAY_F32))
+        return ray_error("nyi", "$: float->timestamp cast is deferred");
     if (tag == RAY_SYM) {                 /* `symbol$sym is identity; rest nyi */
         if (x && (x->type == -RAY_SYM || x->type == RAY_SYM)) {
             ray_retain(x);
