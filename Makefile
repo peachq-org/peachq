@@ -133,7 +133,7 @@ help:
 	@printf "  %-28s %s\n" "make qmatrix" "Run non-gating op x shape smoke/fuzz harness (TSV)"
 	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
 	@printf "  %-28s %s\n" "make kwire-live" "javakdb client vs live ./q -p server (also in qtest; needs javac)"
-	@printf "  %-28s %s\n" "make qdash" "Regenerate the peachq conformance dashboard (tools/qdash)"
+	@printf "  %-28s %s\n" "make qdash" "Refresh the peachq conformance dashboard: measure + bank + regen (tools/qdash)"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
 	@printf "  %-28s %s\n" "make bench-alloc" "Run allocator micro-benchmark"
@@ -345,12 +345,25 @@ qtest-results: $(QDOC_TARGET) $(Q_TARGET)
 	    fi; exit $$rc; }
 	tools/qscript/run.sh --ledger >> qtest-results.txt   # append the qscript topic rows
 
-# Regenerate the peachq conformance dashboard data.  The UI (tools/qdash/index.html)
-# is static and reads tools/qdash/data.js; this rebuilds that data from the committed
-# qtest-results.txt ledger (latest state -> heatmap) and its git history (-> trend
-# line).  Run after `make qtest-results`; no UI edits needed.  Stdlib + git only.
-qdash:
-	@python3 tools/qdash/gen.py --open
+# Refresh the peachq conformance dashboard end-to-end, in one shot:
+#   1. re-measure every pillar -> tools/qdash/ledger.tsv (the unified snapshot:
+#      C unit + qcmd + qscript + kwire IPC + non-gating qmatrix, one porcelain
+#      `STATUS | pass | total | time | id | text` row per suite; a pillar that
+#      can't run — no JDK, no socket — is recorded absent, never as failures);
+#   2. bank today's point into the durable trend summary tools/qdash/trend.tsv
+#      (`date | pass | total | subject`, idempotent per day);
+#   3. regenerate tools/qdash/data.js (headline % + feature heatmap + qmatrix
+#      heatmap from the snapshot; the "how much of q works, over time" chart
+#      from the trend) and print the file:// URL.
+# Commit ledger.tsv + trend.tsv + data.js at a merge worth recording.
+# Data-only regen without re-measuring: `python3 tools/qdash/gen.py`.
+# QDASH_QMATRIX=cache reuses the previous qmatrix section instead of re-running.
+qdash: CFLAGS = $(DEBUG_CFLAGS)
+qdash: LDFLAGS = $(DEBUG_LDFLAGS)
+qdash: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
+	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) tools/qdash/collect.sh
+	@python3 tools/qdash/gen.py --bank --open
 
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
