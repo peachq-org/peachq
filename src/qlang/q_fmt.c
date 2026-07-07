@@ -300,6 +300,24 @@ static void q_date_tok(int32_t v, char* out, size_t n) {
     }
 }
 
+/* Render one month element q-style, BARE (no trailing `m` — month vectors
+ * follow the trailing-type-char model like `0N 0W 42h`, single `m` at the
+ * end: basics/syntax.md:164 `2018.05 2018.07 2019.01m`; callers append the
+ * suffix once).  Sentinels render bare 0N / 0W / -0W; payloads outside the
+ * civil year domain [1,9999] mirror date's out-of-range rule as `0000.00`
+ * (derived — kdb pins the rule for date only, datatypes.md).  Payload =
+ * months since 2000.01, floor div/mod for pre-2000 months. */
+static void q_month_tok(int32_t v, char* out, size_t n) {
+    if (v == INT32_MIN)  { snprintf(out, n, "0N");  return; }
+    if (v == INT32_MAX)  { snprintf(out, n, "0W");  return; }
+    if (v == -INT32_MAX) { snprintf(out, n, "-0W"); return; }
+    int64_t p = v;
+    int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
+    int64_t m = 1 + (p % 12 + 12) % 12;
+    if (y < 1 || y > 9999) { snprintf(out, n, "0000.00"); return; }
+    snprintf(out, n, "%04lld.%02lld", (long long)y, (long long)m);
+}
+
 /* GUID token: canonical 8-4-4-4-12 lowercase hex (basics/datatypes.md §Guid).
  * The null guid is all-zero bytes and renders as the zero UUID
  * 00000000-0000-0000-0000-000000000000 — NOT the 0Ng token (the doc pins `0Ng`
@@ -443,6 +461,7 @@ static const char* q_empty_vec_qname(int8_t type) {
     case RAY_F32:  return "real";
     case RAY_F64:  return "float";
     case RAY_SYM:  return "symbol";
+    case RAY_MONTH: return "month";
     case RAY_DATE: return "date";
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_GUID: return "guid";
@@ -598,6 +617,12 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', buf, bufsz);      return;
     case -RAY_I64:  q_int_tok(val->i64,          8, 0,   buf, bufsz);      return;
     case -RAY_DATE: q_date_tok(val->i32, buf, bufsz);                      return;
+    case -RAY_MONTH: {
+        q_month_tok(val->i32, buf, bufsz);
+        size_t l = strlen(buf);
+        if (l + 1 < bufsz) { buf[l] = 'm'; buf[l + 1] = '\0'; }
+        return;
+    }
     case -RAY_GUID: {
         const uint8_t* b16 = val->obj ? (const uint8_t*)ray_data(val->obj)
                                       : (const uint8_t*)ray_data(val);
@@ -692,6 +717,25 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
             q_join(buf, bufsz, &pos, e, i == 0);
         }
         if (vsuf && pos + 1 < bufsz) { buf[pos++] = vsuf; buf[pos] = '\0'; }
+        return;
+    }
+    /* Month vector: bare yyyy.mm tokens space-joined + ONE trailing `m` —
+     * months follow the int-vector trailing-type-char model, NOT date's
+     * self-identifying model (basics/syntax.md:164 `2018.05 2018.07
+     * 2019.01m`; basics/math.md:84 `2012.03 2012.04m`); sentinels render
+     * bare (`2020.01 0N 2019.08m`); enlist comma for length-1. */
+    if (val->type == RAY_MONTH) {
+        int64_t n = ray_len(val);
+        const int32_t* d = (const int32_t*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,2000.01m */
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            q_month_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        if (pos + 1 < bufsz) { buf[pos++] = 'm'; buf[pos] = '\0'; }
         return;
     }
     /* Date vector: space-joined full yyyy.mm.dd tokens — dates have no

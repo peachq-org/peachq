@@ -2272,9 +2272,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         switch (n) {
         case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM:
-        case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
+        case RAY_DATE: case RAY_TIME: case RAY_MONTH: case RAY_TIMESTAMP:
             return (int8_t)n;
-        default: return 0;    /* guid/char + month/minute/second etc: deferred */
+        default: return 0;    /* guid/char + minute/second etc: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
@@ -2287,7 +2287,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'f': return RAY_F64;  case 's': return RAY_SYM;
         case 'd': return RAY_DATE; case 'g': return RAY_GUID;
         case 't': return RAY_TIME; case 'p': return RAY_TIMESTAMP;
-        default:  return 0;       /* c m z n u v + "*" identity: deferred */
+        case 'm': return RAY_MONTH;
+        default:  return 0;       /* c z n u v + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -2306,6 +2307,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
         else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
+        else if (l == 5 && !memcmp(nm, "month",   5)) r = RAY_MONTH;
         else if (l == 4 && !memcmp(nm, "time",    4)) r = RAY_TIME;
         else if (l == 9 && !memcmp(nm, "timestamp", 9)) r = RAY_TIMESTAMP;
         ray_release(s);
@@ -2321,6 +2323,7 @@ static const char* q_tag_rayname(int8_t tag) {
     case RAY_I16:  return "I16";  case RAY_I32: return "I32";
     case RAY_I64:  return "I64";  case RAY_F64: return "F64";
     case RAY_DATE: return "DATE"; case RAY_TIME: return "TIME";
+    case RAY_MONTH: return "MONTH";
     case RAY_TIMESTAMP: return "TIMESTAMP";
     default:       return NULL;
     }
@@ -2738,6 +2741,29 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         if (!q_date_scan(p, len, &y, &mo, &d) || !q_date_valid(y, mo, d))
             return ray_typed_null(-RAY_DATE);
         return ray_date(q_days_from_civil(y, mo, d));
+    }
+    case RAY_MONTH: {
+        /* "M"$str -> month (ref/tok.md designator table: month | -13 M).
+         * Subset: "yyyy.mm" / "yyyy-mm" / "yyyy/mm" / packed yyyymm; the
+         * civil month must be 01..12 and the year in the date domain
+         * [1,9999].  Unparseable / out-of-domain -> 0Nm, never an error
+         * (tok contract, mirrors "D"$). */
+        int64_t y = 0, mo = 0;
+        int ok = 0;
+        if (len == 7 && q_all_digits(p, 4) &&
+            (p[4] == '.' || p[4] == '-' || p[4] == '/') &&
+            q_all_digits(p + 5, 2)) {
+            y  = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
+            mo = (p[5]-'0')*10 + (p[6]-'0');
+            ok = 1;
+        } else if (len == 6 && q_all_digits(p, 6)) {   /* packed yyyymm */
+            y  = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
+            mo = (p[4]-'0')*10 + (p[5]-'0');
+            ok = 1;
+        }
+        if (!ok || mo < 1 || mo > 12 || y < 1 || y > 9999)
+            return ray_typed_null(-RAY_MONTH);
+        return ray_month((y - 2000) * 12 + (mo - 1));
     }
     case RAY_TIME: {
         /* "T"$str -> time (ref/tok.md).  Unparseable / out-of-domain -> 0Nt,
