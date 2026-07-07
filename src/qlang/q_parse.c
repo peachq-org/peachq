@@ -230,7 +230,7 @@ static Tokens g_toks = { NULL, 0 };
  * that widen to the chosen type's sentinel. */
 
 typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME,
-               EL_TS } el_kind;
+               EL_TS, EL_MONTH } el_kind;
 typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
@@ -330,6 +330,50 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
         }
     }
 
+    /* Month-SHAPED magnitude: yyyy.mm (4-2 digits), terminator neither digit
+     * nor dot nor an exponent continuation.  UNLIKE date, the month shape IS
+     * a valid float spelling (kdb bare `2000.01` is the float 2000.01; only
+     * the trailing `m` letter makes it a month), so this arm cannot commit:
+     * it records BOTH the month payload (.i = months since 2000.01) and the
+     * float twin (.f) with forces_float=1 — the `m` context in
+     * scan_num_literal reads .i, every other context reverts to the float via
+     * el_to_float's EL_MONTH arm.  A glued sign negates the payload (the
+     * kdb date-literal rule).  An invalid civil month (2000.13 / 2000.00)
+     * stays a float — EXCEPT when the very next byte is the `m` letter
+     * (2000.13m), which can only be a malformed month literal: die, mirroring
+     * the date arm's invalid-civil rule.  Year 0000 is out of the kdb domain
+     * and stays a float. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 4 && src[q + 4] == '.' &&
+            dig_run(src, q + 5) == 2 &&
+            src[q + 7] != '.' &&
+            !((src[q + 7] == 'e' || src[q + 7] == 'E') &&
+              (src[q + 8] == '+' || src[q + 8] == '-' ||
+               (src[q + 8] >= '0' && src[q + 8] <= '9')))) {
+            int64_t y  = (src[q]     - '0') * 1000 + (src[q + 1] - '0') * 100
+                       + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
+            int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
+            int valid = (y >= 1 && mo >= 1 && mo <= 12);
+            if (!valid && src[q + 7] == 'm') q_die("bad number");
+            if (valid) {
+                size_t rem2 = strlen(src + *p);
+                double fv; size_t u = ray_parse_f64(src + *p, rem2, &fv);
+                if (u == (size_t)(q + 7 - *p)) {   /* float twin spans yyyy.mm */
+                    out->kind = EL_MONTH;
+                    out->i = (y - 2000) * 12 + (mo - 1);
+                    if (neg) out->i = -out->i;
+                    out->f = fv;
+                    out->forces_float = 1;
+                    *p = q + 7;
+                    return 1;
+                }
+            }
+        }
+    }
+
     /* Time literal magnitude: HH:MM:SS.f (2-2-2 clock digits + a dot + 1..3
      * fractional digits, padded to milliseconds).  Checked before the float
      * peek for the same reason as date.  The 1..3-digit gate is THE
@@ -410,19 +454,24 @@ static int64_t narrow_special(el_kind k, int width) {
 }
 
 /* Resolve one element to an int64 in the given integer width.  EL_DATE holds
- * its day count in .i (only reachable in the width-4 date context). */
+ * its day count in .i (only reachable in the width-4 date context); EL_MONTH
+ * holds its month payload in .i (only reachable in the width-4 month
+ * context — everywhere else it reverts to its float twin first). */
 static int64_t el_to_int(const num_el *e, int width) {
     if (e->kind == EL_INT || e->kind == EL_DATE || e->kind == EL_TIME ||
-        e->kind == EL_TS) return e->i;
+        e->kind == EL_TS || e->kind == EL_MONTH) return e->i;
     if (e->kind == EL_FLOAT) return (int64_t)e->f;
     return narrow_special(e->kind, width);
 }
 
-/* Resolve one element to a double (float context). */
+/* Resolve one element to a double (float context).  EL_MONTH must return its
+ * float TWIN (.f), not the month payload — a bare `2000.01` is the float
+ * 2000.01, and the payload (0) would silently replace it (review C1). */
 static double el_to_float(const num_el *e) {
     if (e->kind == EL_NULL) return NULL_F64;
     if (e->kind == EL_PINF || e->kind == EL_NINF)
         q_die("q float infinity unsupported (deferred)");
+    if (e->kind == EL_MONTH) return e->f;
     return (e->kind == EL_FLOAT) ? e->f : (double)e->i;
 }
 
@@ -448,9 +497,11 @@ static void read_type_letter(const char *src, int *p, char *letter,
                            last->kind == EL_PINF || last->kind == EL_NINF);
     int ts_ok = last && (last->kind == EL_TS || last->kind == EL_NULL ||
                          last->kind == EL_PINF || last->kind == EL_NINF);
+    int month_ok = last && (last->kind == EL_MONTH || last->kind == EL_NULL ||
+                            last->kind == EL_PINF || last->kind == EL_NINF);
     if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
               (c == 'g' && guid_ok) || (c == 't' && time_ok) ||
-              (c == 'p' && ts_ok))) {
+              (c == 'p' && ts_ok) || (c == 'm' && month_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -639,6 +690,36 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         int32_t t[MAX_VEC];
         for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
         ray_t *vec = ray_vec_from_raw(RAY_TIME, t, m);
+        if (vec && !RAY_IS_ERR(vec)) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+        }
+        return vec;
+    }
+
+    /* Month context: ONLY the `m` suffix (0Nm / 0Wm / -0Wm / 2000.01m) — a
+     * month-shaped magnitude alone is NOT a commitment (bare `2000.01` is the
+     * float; EL_MONTH elements revert to their float twins below).  kdb month
+     * == i32 months since 2000.01 (payload (y-2000)*12+(mo-1)): Specials
+     * narrow to the width-4 sentinels and a plain int widens as a raw month
+     * count (the date-arm rule).  A genuine fractional magnitude or a foreign
+     * temporal mate can never be a month. */
+    if (letter == 'm') {
+        for (int i = 0; i < m; i++)
+            /* EL_MONTH itself carries forces_float=1 (the float-twin machinery)
+             * and is VALID here; lowercase `0nm` is the K-ism null synonym. */
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                (buf[i].forces_float && buf[i].kind != EL_MONTH &&
+                 buf[i].kind != EL_NULL))
+                q_die("bad number");
+        if (m == 1) {
+            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_MONTH);
+            return ray_month(el_to_int(&buf[0], 4));
+        }
+        int32_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+        ray_t *vec = ray_vec_from_raw(RAY_MONTH, t, m);
         if (vec && !RAY_IS_ERR(vec)) {
             for (int i = 0; i < m; i++)
                 if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
