@@ -488,8 +488,12 @@ void q_builtins_register(void) {
         ray_env_bind(ray_sym_intern("count", 5), cv);
         ray_release(cv);
     }
-    /* NB `value` is a QK_VALUE manifest row — its lambda/string arms live in
-     * the registry wrapper (q_value_wrap), the single home the parser embeds. */
+    /* `value` — env-bind the q wrapper (QK_VALUE manifest row) so a BARE `value`
+     * used as a HOF operand (`value each (::;+;-;*;%)`) resolves to q semantics,
+     * not rayfall's dict-only native `value`.  Application heads still embed the
+     * registry copy; both call q_value_wrap (single home).  Bound before
+     * q_registry_init like the other q-owned overrides. */
+    bind_unary("value", q_value_wrap);
     /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
      * The registry is the authoritative, immutable verb source; it snapshots
      * builtin values and must be torn down via q_runtime_destroy before the
