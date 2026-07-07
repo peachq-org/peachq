@@ -292,37 +292,44 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
         }
     }
 
-    /* Time literal magnitude: strictly HH:MM:SS.mmm (2-2-2 clock digits + a
-     * dot + EXACTLY 3 millisecond digits, the 4th char NOT a digit).  Checked
-     * before the float peek for the same reason as date.  The 3-digit gate is
-     * THE disambiguation from the three adjacent temporal shapes (basics/
-     * syntax.md): timespan `00:00:00.000000000` has 9 fractional digits (4th
-     * char is a digit -> this shape fails -> falls through to today's
-     * name-error, deferred); second `00:00:00` and minute `00:00` have no
-     * `.mmm` and also stay name-errors (minute/second/timespan have no engine
-     * type yet).  kdb time == i32 milliseconds of day (the base RAY_TIME
-     * payload).  A leading sign already glued by the scanner negates the ms
-     * count.  m>=60 / s>=60 die rather than fall to the float mess. */
+    /* Time literal magnitude: HH:MM:SS.f (2-2-2 clock digits + a dot + 1..3
+     * fractional digits, padded to milliseconds).  Checked before the float
+     * peek for the same reason as date.  The 1..3-digit gate is THE
+     * disambiguation from the adjacent temporal shapes (basics/syntax.md):
+     * timespan `00:00:00.000000000` has 9 fractional digits (>=4 -> this shape
+     * fails -> falls through to today's name-error, deferred); second
+     * `00:00:00` and minute `00:00` have no `.f` and also stay name-errors
+     * (minute/second/timespan have no engine type yet).  kdb accepts 1..3
+     * fractional digits and pads to ms (`.1`->100, `.11`->110, `.111`->111);
+     * time always DISPLAYS 3 fractional digits.  kdb time == i32 milliseconds
+     * of day (the base RAY_TIME payload).  A leading sign already glued by the
+     * scanner negates the ms count.  m>=60 / s>=60 die rather than fall to the
+     * float mess. */
     {
         int q = *p;
         int neg = (src[q] == '-');
         if (neg) q++;
+        /* The clock-digit / ':' / '.' checks short-circuit BEFORE reading the
+         * fractional run, so dig_run(q+9) is only reached once src[q+8]=='.' is
+         * confirmed in-bounds (else a short input overruns the buffer). */
         if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
             dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
-            dig_run(src, q + 6) == 2 && src[q + 8] == '.' &&
-            dig_run(src, q + 9) == 3 &&
-            !(CLASS[(uint8_t)src[q + 12]] & CL_DIGIT)) {
-            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-            int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-            int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
-            int64_t ms = (src[q + 9] - '0') * 100 + (src[q + 10] - '0') * 10
-                       + (src[q + 11] - '0');
-            if (mi >= 60 || s >= 60) q_die("bad time");
-            out->kind = EL_TIME;
-            out->i = h * 3600000 + mi * 60000 + s * 1000 + ms;
-            if (neg) out->i = -out->i;
-            *p = q + 12;
-            return 1;
+            dig_run(src, q + 6) == 2 && src[q + 8] == '.') {
+            int fd = dig_run(src, q + 9);         /* fractional-digit run length */
+            if (fd >= 1 && fd <= 3) {
+                int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+                int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+                int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
+                int64_t ms = 0;                   /* fractional -> milliseconds */
+                for (int k = 0; k < fd; k++) ms = ms * 10 + (src[q + 9 + k] - '0');
+                for (int k = fd; k < 3; k++) ms *= 10; /* right-pad to 3 digits */
+                if (mi >= 60 || s >= 60) q_die("bad time");
+                out->kind = EL_TIME;
+                out->i = h * 3600000 + mi * 60000 + s * 1000 + ms;
+                if (neg) out->i = -out->i;
+                *p = q + 9 + fd;
+                return 1;
+            }
         }
     }
 
@@ -512,7 +519,11 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         if (buf[i].kind == EL_DATE) is_date = 1;
     if (is_date) {
         for (int i = 0; i < m; i++)
-            if (buf[i].kind == EL_FLOAT || buf[i].forces_float)
+            /* forces_float on a NULL element is just the lowercase `0n` spelling
+             * (openq accepts `0nd` as a K-ism synonym of `0Nd`); it is a typed
+             * null, not a fractional magnitude, so it does NOT bar the date. */
+            if (buf[i].kind == EL_FLOAT ||
+                (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
             if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_DATE);
@@ -538,7 +549,10 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         if (buf[i].kind == EL_TIME) is_time = 1;
     if (is_time) {
         for (int i = 0; i < m; i++)
-            if (buf[i].kind == EL_FLOAT || buf[i].forces_float)
+            /* lowercase `0nt` is the K-ism synonym of `0Nt` — a typed null, not
+             * a fractional magnitude (see the date arm above). */
+            if (buf[i].kind == EL_FLOAT ||
+                (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
             if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIME);

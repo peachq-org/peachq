@@ -1231,8 +1231,20 @@ static ray_t* q_neg_wrap(ray_t* x) {
  * q_collapse_list folds to a bool vector (`null (1;\`a;2.5;"x")` -> 0000b),
  * while a nested list yields a list of bool VECTORS that q_collapse_list
  * leaves intact (multi-line, `null (0N 1;2 0N)` -> 10b / 01b). */
+/* q-layer null test: the base engine's `ray_nil_fn` treats sym id 0 as the
+ * EMPTY symbol (a value, include/rayforce.h SYM case), but q treats the null
+ * symbol `` ` `` AS null (`null \`` -> 1b).  This wrapper special-cases the
+ * null symbol here in the q layer so the divergence stays out of base rayfall,
+ * whose own paths rely on sym-0-as-empty.  Drives `q_null_wrap` for both the
+ * atom path and the per-element `atomic_map_unary` recursion (nested lists /
+ * symbol vectors reconstruct null-sym atoms via collection_elem). */
+static ray_t* q_nil_fn(ray_t* x) {
+    if (q_is_null_sym(x)) return ray_bool(true);
+    return ray_nil_fn(x);
+}
+
 static ray_t* q_null_wrap(ray_t* x) {
-    ray_t* r = is_collection(x) ? atomic_map_unary(ray_nil_fn, x) : ray_nil_fn(x);
+    ray_t* r = is_collection(x) ? atomic_map_unary(q_nil_fn, x) : q_nil_fn(x);
     if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
     ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
     ray_release(r);
