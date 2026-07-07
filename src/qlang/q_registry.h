@@ -136,6 +136,16 @@ ray_t* q_registry_lambda_value(void);
 ray_t* q_registry_ret_value(void);
 ray_t* q_registry_sig_value(void);
 
+/* q imperative control constructs (borrowed; NULL before init).  q_lower
+ * embeds these special-form values at the head of the parser's `;` statement
+ * sequence and its `if` / `do` / `while` control-word bracket applications.
+ * They receive their statement args UNEVALUATED (lazy, left-to-right, side
+ * effects persist, no lexical scope). */
+ray_t* q_registry_seq_value(void);
+ray_t* q_registry_if_value(void);
+ray_t* q_registry_do_value(void);
+ray_t* q_registry_while_value(void);
+
 /* Take (and clear) the thread-local early-return payload stashed by a `:x`
  * statement — called by q_lambda_apply when call_lambda comes back with the
  * reserved "q.ret" error class.  Returns an OWNED value or NULL. */
