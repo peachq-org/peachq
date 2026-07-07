@@ -321,6 +321,23 @@ static void q_guid_tok(const uint8_t* b16, char* out, size_t n) {
     out[pos < n ? pos : n - 1] = '\0';
 }
 
+/* Render one time element q-style: sentinels 0Nt / 0Wt / -0Wt (kdb datatypes
+ * table); an in-range ms count renders HH:MM:SS.mmm via a temp base atom (base
+ * fmt_time owns the clock math — the q_date_tok pattern).  Time is a plain ms
+ * count with no civil domain, so there is no date-style 0000.00.00 out-of-range
+ * rule; base fmt_time renders large-hour / negative values directly. */
+static void q_time_tok(int32_t v, char* out, size_t n) {
+    if (v == INT32_MIN)  { snprintf(out, n, "0Nt");  return; }
+    if (v == INT32_MAX)  { snprintf(out, n, "0Wt");  return; }
+    if (v == -INT32_MAX) { snprintf(out, n, "-0Wt"); return; }
+    out[0] = '\0';
+    ray_t* a = ray_time((int64_t)v);
+    if (a && !RAY_IS_ERR(a)) {
+        ray_fallback(a, out, n);
+        ray_release(a);
+    }
+}
+
 static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
     out[0] = '\0';
     if (!key || RAY_IS_ERR(key)) return;
@@ -409,6 +426,7 @@ static const char* q_empty_vec_qname(int8_t type) {
     case RAY_SYM:  return "symbol";
     case RAY_DATE: return "date";
     case RAY_GUID: return "guid";
+    case RAY_TIME: return "time";
     default:       return NULL;
     }
 }
@@ -419,7 +437,7 @@ static const char* q_empty_vec_qname(int8_t type) {
 static int q_matrix_alignable(int8_t type) {
     return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
            type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
-           type == RAY_DATE;
+           type == RAY_DATE || type == RAY_TIME;
 }
 
 /* Format element `c` of the row-vector `rv` BARE (no per-element type suffix,
@@ -433,6 +451,7 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
     case RAY_F32: q_float_tok((double)((const float*)ray_data(rv))[c],  1, out, outsz); break;
     case RAY_F64: q_float_tok(((const double*)ray_data(rv))[c],         0, out, outsz); break;
     case RAY_DATE:q_date_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
+    case RAY_TIME:q_time_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
     case RAY_SYM: {
         ray_t* s = ray_sym_vec_cell(rv, c);   /* borrowed -RAY_STR */
         if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
@@ -564,6 +583,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         q_guid_tok(b16, buf, bufsz);
         return;
     }
+    case -RAY_TIME: q_time_tok(val->i32, buf, bufsz);                      return;
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
     case -RAY_F64: {
         /* A whole f64 atom gets a trailing `f` to distinguish it from a long
@@ -664,6 +684,22 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         for (int64_t i = 0; i < n; i++) {
             char e[64];
             q_date_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        return;
+    }
+    /* Time vector: space-joined full HH:MM:SS.mmm tokens — like date, times
+     * have no trailing type char, so every element (incl. sentinels 0Nt) self-
+     * identifies; enlist comma for length-1. */
+    if (val->type == RAY_TIME) {
+        int64_t n = ray_len(val);
+        const int32_t* d = (const int32_t*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,09:30:00.000 */
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            q_time_tok(d[i], e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
         }
         return;
