@@ -22,7 +22,7 @@ WARNS   = -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter
 DEFS    = -DRAYFORCE_GIT_COMMIT=\"$(GIT_HASH)\" -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\" \
           -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MINOR) \
           -DRAY_VERSION_PATCH=$(VERSION_PATCH) -DRAYFORCE_VERSION=\"$(RAY_VERSION)\"
-INCLUDES = -Iinclude -Isrc
+INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson
 # Header-dependency tracking: -MMD emits a .d makefile fragment next to
 # each .o listing the headers it included (user headers only, not system);
 # -MP adds a phony target per header so deleting a header doesn't break the
@@ -81,6 +81,10 @@ LIB_SRC  = $(wildcard src/*/*.c)
 # Filter out every binary's entry point so the shared library object set has no
 # main(): rayforce's (src/app/main.c) and openq's q REPL (src/qlang/qmain.c).
 LIB_SRC := $(filter-out src/app/main.c src/qlang/qmain.c src/qlang/qdoctest_main.c, $(LIB_SRC))
+# openq: vendored yyjson (MIT) — powers .j.k JSON deserialization in the q-layer.
+# Lives outside src/*/*.c so it is added explicitly; compiled with a relaxed rule
+# below (it is not part of the frozen zero-dependency base).
+LIB_SRC += third_party/yyjson/yyjson.c
 LIB_OBJ  = $(LIB_SRC:.c=.o)
 MAIN_SRC = src/app/main.c
 MAIN_OBJ = $(MAIN_SRC:.c=.o)
@@ -138,6 +142,14 @@ help:
 	@printf "  %-28s %s\n" "make bench-join-buildside" "Run join build-side selection benchmark"
 	@printf "  %-28s %s\n" "make bench-join-dup" "Run join duplicate fallback benchmark"
 	@printf "  %-28s %s\n" "make clean" "Remove build, test, dist, and coverage artifacts"
+
+# Vendored yyjson: compile with the active CFLAGS (so ASan/UBSan still cover it)
+# but drop -Werror and the fork's stricter prototype/extra warnings — third-party
+# code is not held to the base's warning bar. Sanitizers stay ON to keep the
+# .j.k paths through it leak/UB-clean.
+third_party/yyjson/yyjson.o: third_party/yyjson/yyjson.c
+	$(CC) -c $(filter-out -Werror -Wstrict-prototypes -Wextra,$(CFLAGS)) \
+	  -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 %.o: %.c
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<

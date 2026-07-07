@@ -9,6 +9,7 @@
 #include "qlang/q_apply.h"    /* q_apply_noun — the noun-head dispatcher */
 #include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
+#include "qlang/q_json.h"     /* q_json_register — .j JSON namespace */
 #include "qlang/q_registry.h" /* q_registry_init */
 #include "qlang/q_fmt.h"      /* q_console_show — show's display sink */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
@@ -497,4 +498,7 @@ void q_builtins_register(void) {
     bind_unary(".Q.id", q_id_fn);
     bind_unary(".Q.ty", q_dotq_ty_fn);
     bind_value(".Q.res", q_name_reserved_words());
+    /* .j JSON namespace (.j.j / .j.k / .j.jd) — plain env unaries, same as the
+     * .Q.* bindings above; resolved as dotted name-refs, applied via q_apply_noun. */
+    q_json_register();
 }
