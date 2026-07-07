@@ -2253,13 +2253,17 @@ static ray_t *ql_cond(ray_t **slot) {
     int64_t n = ray_len(node);
     ray_t **e = (ray_t **)ray_data(node);
     if (n < 4 || !ql_is_dollar_head(e[0])) return NULL;   /* $[c;t;f] = 4 slots */
-    if (n % 2 != 0)                        /* head + even arg count: no reading */
-        return ray_error("cond", "'cond: $[...] needs an odd number of expressions");
     ray_t *ifv = ql_env_val("if");
     if (!ifv) return NULL;                 /* borrowed; append retains below */
-    ray_t *acc = e[n - 1];                 /* the final else */
-    ray_retain(acc);
-    for (int64_t i = n - 3; i >= 1; i -= 2) {
+    /* Odd expr count (node len even) ends in a final ELSE (fold pairs before
+     * it).  Even expr count (node len odd) has NO else: V3.6+ defaults to the
+     * generic null (ref/cond.md "Even number of expressions returns either a
+     * result or the generic null").  Seed acc / start index accordingly. */
+    int64_t start;
+    ray_t *acc;
+    if (n % 2 == 0) { acc = e[n - 1]; ray_retain(acc); start = n - 3; }
+    else            { acc = q_null(); start = n - 2; }   /* q_null: owned `::` */
+    for (int64_t i = start; i >= 1; i -= 2) {
         ray_t *w = ray_list_new(4);
         w = ray_list_append(w, ifv);
         w = ray_list_append(w, e[i]);      /* cond_i  (append retains) */
@@ -2272,6 +2276,99 @@ static ray_t *ql_cond(ray_t **slot) {
     *slot = acc;
     return NULL;
 }
+/* ===== `;` sequence + if/do/while control words ============================
+ * The parser leaves a top-level statement sequence as a `;`-marker-headed list
+ * (`(`;;s1;s2;…)`) and the control words `if`/`do`/`while` as plain name-ref
+ * bracket applications (`(`if;test;e1;…)`).  All four are q SPECIAL FORMS: on
+ * the EVAL path only, swap the marker/name head for the matching q-layer
+ * special-form registry value so evaluation is lazy, left-to-right and side-
+ * effecting (see q_{seq,if,do,while}_fn).  `parse` shows the pre-lower tree, so
+ * its display is untouched.  Borrowed registry handout — retain before embed. */
+static void ql_head_swap(ray_t **slot, ray_t *v) {
+    ray_t *node = *slot;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_retain(v);
+    ray_release(e[0]);
+    e[0] = v;
+}
+
+/* `s1;s2;…` -> q.seq.  The `;`-marker head is produced only by seq_of (the
+ * top-level program sequence), so a `;`-headed list is unambiguously it. */
+static void ql_seq(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) < 1) return;
+    ray_t *h = ((ray_t **)ray_data(node))[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return;
+    int is_semi = (ray_str_len(s) == 1 && ray_str_ptr(s)[0] == ';');
+    ray_release(s);
+    if (!is_semi) return;
+    ray_t *v = q_registry_seq_value();
+    if (v) ql_head_swap(slot, v);
+}
+
+/* `if`/`do`/`while` bracket applications -> q.if/q.do/q.while.  These are q
+ * reserved control words (never variable names), so a name-ref head spelled
+ * exactly one of them is unambiguously the control construct. */
+static void ql_control(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) < 1) return;
+    ray_t *h = ((ray_t **)ray_data(node))[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    ray_t *v = NULL;
+    if      (l == 2 && memcmp(nm, "if", 2) == 0)    v = q_registry_if_value();
+    else if (l == 2 && memcmp(nm, "do", 2) == 0)    v = q_registry_do_value();
+    else if (l == 5 && memcmp(nm, "while", 5) == 0) v = q_registry_while_value();
+    ray_release(s);
+    if (v) ql_head_swap(slot, v);
+}
+
+/* Modified (compound) assignment `x op: y` == `x: x op y` (amend by value,
+ * basics/control.md / ref/amend.md).  The parser emits `(op:;`x;y)` with the
+ * head a name-ref sym whose spelling is a dyadic verb glyph followed by `:`.
+ * Lower to `(set/let `x (op `x y))` — the read-ref `x` resolves the CURRENT
+ * value, and the enclosing set/let returns the NEW value (q returns it;
+ * `while[x-:1;…]` relies on it).  Only fires for a sym target and a
+ * registry-resolvable dyadic op; anything else is left for eval to reject.
+ * BORROWED registry/env handouts (append retains; set-head retained). */
+static void ql_mod_assign(ray_t **slot, int in_lambda) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) != 3) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    /* `<op>:` with a non-empty op that is NOT the plain assign colons */
+    if (l < 2 || nm[l - 1] != ':' || nm[0] == ':') { ray_release(s); return; }
+    /* target must be a bare (unquoted) sym name-ref */
+    if (!e[1] || e[1]->type != -RAY_SYM || (e[1]->attrs & Q_ATTR_QUOTED)) {
+        ray_release(s); return;
+    }
+    ray_t *opv = q_registry_lookup_name(nm, l - 1, Q_DYADIC);   /* borrowed */
+    ray_release(s);
+    if (!opv) return;                       /* unknown op -> eval errors as today */
+    ray_t *setv = ql_env_val(in_lambda ? "let" : "set");        /* borrowed */
+    if (!setv) return;
+    /* inner (op `x y): op on x's CURRENT value and y (append retains each) */
+    ray_t *inner = ray_list_new(3);
+    inner = ray_list_append(inner, opv);
+    inner = ray_list_append(inner, e[1]);
+    inner = ray_list_append(inner, e[2]);
+    /* splice node in place -> (set/let `x inner) */
+    ray_retain(setv);
+    ray_release(e[0]); e[0] = setv;         /* head swap, arity unchanged */
+    ray_release(e[2]); e[2] = inner;        /* value slot becomes the op subtree */
+    /* e[1] target stays: node keeps its ref, inner holds its own retained ref */
+}
+
 /* True iff node is a ctx-literal — a paren list `(…)` or table `([]…)` whose
  * head is the shared context-constructor value.  Its element statements run in
  * a pushed env scope (q_ctx_build), so a plain `:` inside must lower to `let`
@@ -2601,6 +2698,9 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
         }
     ray_t *err = ql_cond(slot);            /* $[c;t;f] BEFORE any head claim */
     if (err) return err;
+    ql_seq(slot);                          /* `;` statement sequence -> q.seq */
+    ql_control(slot);                      /* if/do/while -> q.if/q.do/q.while */
+    ql_mod_assign(slot, in_lambda);        /* x op: y -> x: x op y (before others) */
     ql_qsql(slot);                         /* (?;`t;c;b;a) -> ray_select call */
     ql_funsql(slot);                       /* ?[t;c;b;a] / ![t;c;b;a] runtime */
     ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
@@ -2644,11 +2744,14 @@ int q_ast_is_assign(const ray_t *cast) {
     int is_semi  = (l == 1 && nm[0] == ';');
     int is_colon = (l == 1 && nm[0] == ':') ||
                    (l == 2 && nm[0] == ':' && nm[1] == ':');
+    /* modified assignment `x op: y` (head `<op>:`, op non-empty, not the plain
+     * assign colons) is also silent, like a plain assignment */
+    int is_modasg = (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
     ray_release(s);
     if (is_semi) {
         int64_t n = ray_len(ast);
         return n >= 2 ? q_ast_is_assign(e[n - 1]) : 0;
     }
-    return is_colon && ray_len(ast) == 3 &&
+    return (is_colon || is_modasg) && ray_len(ast) == 3 &&
            e[1] && e[1]->type == -RAY_SYM && !(e[1]->attrs & Q_ATTR_QUOTED);
 }
