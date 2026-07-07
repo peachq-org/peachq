@@ -19,6 +19,7 @@
 
 #include "qlang/q_repl.h"
 #include "qlang/q_runtime.h"
+#include "qlang/q_dotz.h"
 #include "core/ipc.h"
 #include "core/poll.h"
 #include "core/runtime.h"
@@ -83,6 +84,14 @@ int main(int argc, char** argv) {
 
     int stdin_tty = isatty(STDIN_FILENO);
 
+    /* Startup script (`q file.q`): run it before the REPL / server loop.
+     * kdb semantics — the script executes first; then a tty drops to the
+     * REPL, a `-p` server serves IPC, and a non-tty non-server run exits 0
+     * (the test/daemon shape) rather than blocking on an empty REPL. */
+    const char* script = q_dotz_script_path();
+    if (script)
+        q_repl_run_file(script, stdout, stderr);
+
     if (port > 0 && poll && !stdin_tty) {
         /* Server-only: daemon/harness shape (`</dev/null`, docker,
          * systemd).  SIGPIPE ignored so a broken log pipe can't kill the
@@ -92,6 +101,9 @@ int main(int argc, char** argv) {
 #endif
         fprintf(stderr, "no terminal — running in server-only mode\n");
         ray_poll_run(poll);
+    } else if (script && !stdin_tty) {
+        /* Ran a startup script with no server on a non-tty (`q file.q
+         * </dev/null`): exit 0 without entering the REPL. */
     } else {
         if (port > 0 && stdin_tty)
             fprintf(stderr, "note: -p with an interactive REPL serves IPC "
