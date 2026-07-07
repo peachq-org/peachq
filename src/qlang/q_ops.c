@@ -13,13 +13,17 @@
  *     q `#`/`_` dyadic are arg-swap `take` / count-`drop` wrappers.
  *   - q `,` dyadic is join -> rayfall `concat`.
  * DEFERRED (QK_NONE — no clean rayfall target, do NOT guess): `|` dyadic
- *   (max is an AGGREGATE, not dyadic element-wise greater), monadic `+`
+ *   (max: rayfall has NO dyadic element-wise max — `max` is register_unary
+ *   AGGREGATE, `and`/`or` are register_vary scalar special forms — so wiring
+ *   it needs a q_max2_wrap twin of q_min2_wrap = new logic, HELD), monadic `+`
  *   (flip: no builtin), monadic `%` (reciprocal: no builtin).  Dyadic `&`
- *   is the QK_MIN2 wrapper (element-wise min / bool-and).  Dyadic `~` is the
- *   QK_MATCH wrapper (2c-1).  The remaining type-dispatch verbs `! ? $ @ .`
- *   land in 2c-2.
+ *   is the QK_MIN2 wrapper (element-wise min / bool-and) — the `and` keyword
+ *   reuses it.  Dyadic `~` is the QK_MATCH wrapper (2c-1).  The remaining
+ *   type-dispatch verbs `! ? $ @ .` land in 2c-2.  The bool/null batch keywords
+ *   `null`/`any`/`all` are RESERVED-but-deferred (see their rows below); `or`
+ *   (|-max keyword) is not rostered until `|`-max lands.
  *
- * KW_INFIX is {div, each, in, within} — a keyword row here is what makes the
+ * KW_INFIX includes {div, each, in, within, and, ...} — a keyword row here is what makes the
  * lexer reclassify the name as an infix verb in noun position (the retired
  * q_is_kw_verb memcmp, now manifest-driven). */
 #define _POSIX_C_SOURCE 200809L
@@ -74,6 +78,15 @@ static const q_op_t Q_OPS[] = {
      * collapse, since map returns a boxed list where q wants a simple vec). */
     { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
     { "in",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "in",      NULL  },
+    /* q `and` — keyword spelling of `&` (element-wise min / logical AND,
+     * ref/and.md, ref/lesser.md).  REUSES the SAME QK_MIN2 kernel the glyph
+     * `&` routes to (q_min2_wrap) — no new logic.  Numeric/bool are kdb-true
+     * (`2 and 3`->2, `1010b and 1100b`->1000b); the char-min arm (`"sat" and
+     * "cow"`->"cat") is a shared q_min2_wrap gap (DEFERRED, needs a char arm =
+     * new logic).  Monadic cell stays QK_NONE: q `and` is dyadic-only, so
+     * prefix `and x` misses and eval falls through to rayfall's scalar `and`
+     * special form (DEFERRED edge — a monadic wrapper would be new logic). */
+    { "and",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_MIN2,  "and",     NULL  },
     /* q `x within y` — inclusive bounds check (ref/within.md); wrapper because
      * base ray_within_fn is vector-vals-only and width-blind on the range. */
     { "within",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_WITHIN,"within",  NULL  },
@@ -182,6 +195,20 @@ static const q_op_t Q_OPS[] = {
     /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x. */
     { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
     { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
+    /* ---- boolean/null batch: RESERVED-but-DEFERRED (feat/q-bool-null) ----
+     * `any`/`all` are real q keywords rostered to reserve the name
+     * (`any:5`/`all:5` -> 'assign, kdb-true) with QK_NONE (no value) — a
+     * documented DEFER: their range is boolean `b` for every domain
+     * (ref/all-any.md) and a `max`/`min` rename is type-wrong for non-boolean
+     * input (`all 2000.01.02 2010.01.02`->1b, but max is a DATE); the boolean
+     * coercion is new logic (HELD).  KW_PREFIX so the reservation does not
+     * reclassify the scanner.
+     * NB: `null` LANDED separately as a real atomic verb (QK_NULL,
+     * feat/q-atomic-extend #67) — its reserved row here was dropped on merge to
+     * avoid a duplicate.  `or` is the keyword spelling of `|`-max and waits for
+     * `|`-max (a valueless QLEX_KW_INFIX row would expose rayfall's scalar `or`). */
+    { "any",     QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
+    { "all",     QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
     /* ---- IPC client verbs (feat/q-ipc-client, Phase D) — thin wrappers over the
      * kdb-speaking `.ipc.*` primitives (Phase C).  `hopen` normalizes int|string|
      * (conn;timeout) into the `.ipc.open` string API and returns a 1-BASED handle;
