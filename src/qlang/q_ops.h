@@ -108,7 +108,20 @@ typedef enum {
     QK_ROTATE,          /* q `n rotate x` — cyclic shift left (neg = right)     */
     QK_SUBLIST,         /* q `n sublist x` — first/last n, or i j slice         */
     QK_NEXT,            /* q `next x` — shift left, null-fill vacated tail       */
-    QK_PREV             /* q `prev x` — shift right, null-fill vacated head      */
+    QK_PREV,            /* q `prev x` — shift right, null-fill vacated head      */
+    /* ---- IPC client verbs (feat/q-ipc-client, Phase D) ---- */
+    QK_HOPEN,           /* q `hopen y` — normalize int|string|(conn;timeout) into
+                         * the `.ipc.open` "host:port[:user:password]" string form
+                         * and connect.  Returns a 1-BASED q handle (raw poll id + 1):
+                         * kdb reserves 0 (console) and signs the handle for async,
+                         * but openq's raw selector ids START at 0, so the q layer
+                         * offsets by 1 and translates back at every handle op.      */
+    QK_HCLOSE,          /* q `hclose h` — translate the 1-based q handle back to the
+                         * raw poll id and route to `.ipc.close`.                    */
+    /* ---- null test (feat/q-atomic-extend) ---- */
+    QK_NULL             /* q `null x` — atomic nil? (broadcasts over vectors +
+                           nested lists at every depth), homogeneous top-level
+                           bool-atom run collapsed to a bool vector             */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
