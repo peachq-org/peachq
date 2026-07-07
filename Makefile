@@ -270,7 +270,7 @@ qtest: LDFLAGS = $(DEBUG_LDFLAGS)
 qtest: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) tools/qtest.sh "$(F)"
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 480 tools/qtest.sh "$(F)"
 
 # openq: q-docs corpus floors — qdoctest over every ref/*.md, failing if the
 # parse / eval-ok counts drop below test/qdoctest.min.  A coverage METRIC, not
