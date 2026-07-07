@@ -380,6 +380,83 @@ static ray_t* q_floor_wrap(ray_t* x) {
                      ray_type_name(x->type));
 }
 
+/* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm ----
+ * rayfall has exp/log/sqrt but no trig/reciprocal/signum, so these are q-layer
+ * wrappers, one libm call per atom.  All are registered RAY_FN_ATOMIC, so the
+ * evaluator (atomic_map_unary) broadcasts them over vectors and nested lists;
+ * each wrapper handles the ATOM case only (mirroring ray_sqrt_fn/q_floor_wrap).
+ * Float results go through make_f64 (internal.h), which canonicalizes every
+ * non-finite (NaN OR ±Inf) to the single float null 0n — so `sin 1%0` -> 0n
+ * and reciprocal of 0 -> 0n (kdb's 0w is unrepresentable under this model, a
+ * deferred cell).  Null in -> typed float null out (kdb: sin/cos/asin/... of a
+ * null is null). */
+#define Q_LIBM_UNARY(NAME, FN, GLYPH)                                          \
+    static ray_t* NAME(ray_t* x) {                                             \
+        if (!x) return ray_error("type", GLYPH ": nil");                       \
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);              \
+        if (is_numeric(x)) return make_f64(FN(as_f64(x)));                     \
+        return ray_error("type", GLYPH ": expects a numeric argument, got %s", \
+                         ray_type_name(x->type));                              \
+    }
+Q_LIBM_UNARY(q_sin_wrap,  sin,  "sin")
+Q_LIBM_UNARY(q_cos_wrap,  cos,  "cos")
+Q_LIBM_UNARY(q_tan_wrap,  tan,  "tan")
+Q_LIBM_UNARY(q_asin_wrap, asin, "asin")
+Q_LIBM_UNARY(q_acos_wrap, acos, "acos")
+Q_LIBM_UNARY(q_atan_wrap, atan, "atan")
+#undef Q_LIBM_UNARY
+
+/* q `reciprocal x` — 1%x as a float (ref/reciprocal.md).  Null -> null;
+ * reciprocal 0 -> +Inf -> 0n under the single-null model (kdb shows 0w). */
+static ray_t* q_reciprocal_wrap(ray_t* x) {
+    if (!x) return ray_error("type", "reciprocal: nil");
+    if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
+    if (is_numeric(x)) return make_f64(1.0 / as_f64(x));
+    return ray_error("type", "reciprocal: expects a numeric argument, got %s",
+                     ray_type_name(x->type));
+}
+
+/* q `signum x` — sign as INT (i32): null or negative -> -1i, zero -> 0i,
+ * positive -> 1i (ref/signum.md).  Kdb ALWAYS returns int, whatever the input
+ * width.  A float null (0n) tests as null -> -1i (kdb treats null as negative). */
+static ray_t* q_signum_wrap(ray_t* x) {
+    if (!x) return ray_error("type", "signum: nil");
+    if (RAY_ATOM_IS_NULL(x)) return ray_i32(-1);
+    if (is_numeric(x)) {
+        /* as_f64 handles BOOL + every int/float width and preserves the sign
+         * exactly (only magnitude precision is lost, irrelevant to sign), so
+         * one branch covers all numeric atoms — avoids as_i64's missing BOOL
+         * case (codex review). */
+        double v = as_f64(x);
+        return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
+    }
+    return ray_error("type", "signum: expects a numeric argument, got %s",
+                     ray_type_name(x->type));
+}
+
+/* q `ceiling x` — least integer >= x, returned as a LONG (kdb `ceiling 2.1` is
+ * 3j).  The QK_FLOOR twin: rayfall's `ceil` keeps f64, so this wrapper rounds
+ * to i64 exactly like q_floor_wrap.  Ints/bools pass through; f64 null -> long
+ * null. */
+static ray_t* q_ceiling_wrap(ray_t* x) {
+    if (!x) return ray_error("type", "ceiling: nil");
+    if (x->type == -RAY_F64) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_I64);
+        return ray_i64((int64_t)ceil(x->f64));
+    }
+    if (x->type == -RAY_F32) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_I64);
+        return ray_i64((int64_t)ceilf((float)x->f64));
+    }
+    if (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16 ||
+        x->type == -RAY_BOOL) {
+        ray_retain(x);
+        return x;
+    }
+    return ray_error("type", "ceiling: expects a numeric argument, got %s",
+                     ray_type_name(x->type));
+}
+
 /* q char-string comparison — q treats a string as a char vector, so `=`/`<>`
  * compare element-wise and yield a boolean vector (`"abc"="abd"` -> 110b).
  * rayfall's `==`/`!=` (ray_eq_fn/ray_neq_fn) compare two -RAY_STR atoms as
@@ -5257,6 +5334,15 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_UNION:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_union_wrap);
     case QK_INTER:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_inter_wrap);
     case QK_CROSS:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_cross_wrap);
+    case QK_SIN:        return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_sin_wrap);
+    case QK_COS:        return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_cos_wrap);
+    case QK_TAN:        return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_tan_wrap);
+    case QK_ASIN:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_asin_wrap);
+    case QK_ACOS:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_acos_wrap);
+    case QK_ATAN:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_atan_wrap);
+    case QK_RECIPROCAL: return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_reciprocal_wrap);
+    case QK_SIGNUM:     return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_signum_wrap);
+    case QK_CEILING:    return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_ceiling_wrap);
     case QK_XBAR:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xbar_wrap);
     case QK_ASC:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_asc_wrap);
     case QK_DESC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_desc_wrap);
