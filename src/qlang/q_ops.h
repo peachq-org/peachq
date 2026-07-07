@@ -139,11 +139,30 @@ typedef enum {
                          * (kdb returns the common VALUES as a list), so the
                          * wrapper guards dict/table operands with 'nyi and
                          * delegates lists to ray_sect_fn. */
-    QK_CROSS            /* q `x cross y` == {raze x,/:\:y} (ref/cross.md) —
+    QK_CROSS,           /* q `x cross y` == {raze x,/:\:y} (ref/cross.md) —
                          * Cartesian product wrapper composing item access +
                          * q join (rayfall concat); no cartesian primitive in
                          * rayfall.  String (char-items) and dict/table cross
                          * are deferred cells ('nyi). */
+    /* ---- sort / bucket family (feat/q-sort-rank) ---- */
+    QK_XBAR,            /* q `width xbar list` — interval bucketing.  ARG-SWAP
+                         * wrapper: rayfall ray_xbar_fn is (col, bucket) but q
+                         * spells it (bucket, col), so the wrapper flips.
+                         * Numeric (int/float bucket) + temporal cols reuse the
+                         * base kernel; dict/keyed-table/qSQL forms deferred. */
+    QK_ASC,            /* q `asc x` — ascending sort.  Flat vectors reuse
+                         * ray_asc_fn (VALUE is kdb-true, but rayfall has no
+                         * sorted `s#` attribute so attribute display is a
+                         * deferred divergence); a DICT arm sorts by value.
+                         * mixed-list-by-type / table / keyed-table deferred. */
+    QK_DESC,           /* q `desc x` — descending sort (mirror of QK_ASC; desc
+                         * carries no `s#` attribute in kdb either, so flat
+                         * vectors are exactly kdb-true).  DICT arm sorts by
+                         * value descending. */
+    QK_IASC,           /* q `iasc x` / monadic `<` — grade up.  Flat vectors
+                         * reuse ray_iasc_fn; a DICT arm returns the keys in
+                         * ascending-value order. */
+    QK_IDESC           /* q `idesc x` / monadic `>` — grade down (mirror). */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
