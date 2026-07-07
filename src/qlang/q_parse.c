@@ -229,7 +229,7 @@ static Tokens g_toks = { NULL, 0 };
  * if any magnitude was fractional).  Nulls / integer infinities are Specials
  * that widen to the chosen type's sentinel. */
 
-typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE } el_kind;
+typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME } el_kind;
 typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
@@ -292,6 +292,40 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
         }
     }
 
+    /* Time literal magnitude: strictly HH:MM:SS.mmm (2-2-2 clock digits + a
+     * dot + EXACTLY 3 millisecond digits, the 4th char NOT a digit).  Checked
+     * before the float peek for the same reason as date.  The 3-digit gate is
+     * THE disambiguation from the three adjacent temporal shapes (basics/
+     * syntax.md): timespan `00:00:00.000000000` has 9 fractional digits (4th
+     * char is a digit -> this shape fails -> falls through to today's
+     * name-error, deferred); second `00:00:00` and minute `00:00` have no
+     * `.mmm` and also stay name-errors (minute/second/timespan have no engine
+     * type yet).  kdb time == i32 milliseconds of day (the base RAY_TIME
+     * payload).  A leading sign already glued by the scanner negates the ms
+     * count.  m>=60 / s>=60 die rather than fall to the float mess. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
+            dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
+            dig_run(src, q + 6) == 2 && src[q + 8] == '.' &&
+            dig_run(src, q + 9) == 3 &&
+            !(CLASS[(uint8_t)src[q + 12]] & CL_DIGIT)) {
+            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+            int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+            int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
+            int64_t ms = (src[q + 9] - '0') * 100 + (src[q + 10] - '0') * 10
+                       + (src[q + 11] - '0');
+            if (mi >= 60 || s >= 60) q_die("bad time");
+            out->kind = EL_TIME;
+            out->i = h * 3600000 + mi * 60000 + s * 1000 + ms;
+            if (neg) out->i = -out->i;
+            *p = q + 12;
+            return 1;
+        }
+    }
+
     /* Decide float vs int: a float magnitude contains '.' or an exponent among
      * its own bytes (before the next whitespace / letter).  Peek the digit run. */
     int q = *p;
@@ -333,7 +367,7 @@ static int64_t narrow_special(el_kind k, int width) {
 /* Resolve one element to an int64 in the given integer width.  EL_DATE holds
  * its day count in .i (only reachable in the width-4 date context). */
 static int64_t el_to_int(const num_el *e, int width) {
-    if (e->kind == EL_INT || e->kind == EL_DATE) return e->i;
+    if (e->kind == EL_INT || e->kind == EL_DATE || e->kind == EL_TIME) return e->i;
     if (e->kind == EL_FLOAT) return (int64_t)e->f;
     return narrow_special(e->kind, width);
 }
@@ -353,15 +387,19 @@ static double el_to_float(const num_el *e) {
  *
  * `d` (date) is accepted ONLY after a Special or a date magnitude (0Nd, 0Wd,
  * -0Wd, 2000.01.01d) — never after plain digits, so corpus tokens like `3d`
- * keep parsing as `3` juxtaposed with the name `d` (no parse-display churn). */
+ * keep parsing as `3` juxtaposed with the name `d` (no parse-display churn).
+ * `t` (time) is gated the same way (0Nt, 0Wt, -0Wt, 09:30:00.000t) so `3t`
+ * stays `3` juxtaposed with the name `t`. */
 static void read_type_letter(const char *src, int *p, char *letter,
                              const num_el *last) {
     char c = src[*p];
     int date_ok = last && (last->kind == EL_DATE || last->kind == EL_NULL ||
                            last->kind == EL_PINF || last->kind == EL_NINF);
     int guid_ok = last && last->kind == EL_NULL;   /* only 0Ng (guid has no inf) */
+    int time_ok = last && (last->kind == EL_TIME || last->kind == EL_NULL ||
+                           last->kind == EL_PINF || last->kind == EL_NINF);
     if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
-              (c == 'g' && guid_ok))) {
+              (c == 'g' && guid_ok) || (c == 't' && time_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -483,6 +521,32 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         int32_t t[MAX_VEC];
         for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
         ray_t *vec = ray_vec_from_raw(RAY_DATE, t, m);
+        if (vec && !RAY_IS_ERR(vec)) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+        }
+        return vec;
+    }
+
+    /* Time context: a `t` suffix (0Nt / 0Wt / -0Wt) or any HH:MM:SS.mmm
+     * magnitude.  kdb time == i32 milliseconds of day (the base RAY_TIME
+     * payload) — identical shape to the date arm (Specials narrow width-4, a
+     * plain int is a raw ms count, a fractional magnitude can never be a
+     * time). */
+    int is_time = (letter == 't');
+    for (int i = 0; i < m && !is_time; i++)
+        if (buf[i].kind == EL_TIME) is_time = 1;
+    if (is_time) {
+        for (int i = 0; i < m; i++)
+            if (buf[i].kind == EL_FLOAT || buf[i].forces_float)
+                q_die("bad number");
+        if (m == 1) {
+            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIME);
+            return ray_time(el_to_int(&buf[0], 4));
+        }
+        int32_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+        ray_t *vec = ray_vec_from_raw(RAY_TIME, t, m);
         if (vec && !RAY_IS_ERR(vec)) {
             for (int i = 0; i < m; i++)
                 if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
