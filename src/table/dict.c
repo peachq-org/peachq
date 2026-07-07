@@ -237,7 +237,8 @@ int64_t ray_dict_find_idx(ray_t* d, ray_t* key_atom) {
         }
         case RAY_I32:
         case RAY_DATE:
-        case RAY_TIME: {
+        case RAY_TIME:
+        case RAY_MONTH: {
             const int32_t* a = (const int32_t*)base;
             int32_t v = key_atom->i32;
             DICT_FIND_LOOP(a[i] == v);
@@ -324,6 +325,7 @@ static ray_t* dict_vals_at(ray_t* vals, int64_t idx, bool* owned_out) {
         case RAY_F32:       atom = ray_f32(((float*)base)[idx]);                     break;
         case RAY_F64:       atom = ray_f64(((double*)base)[idx]);                    break;
         case RAY_DATE:      atom = ray_date(((int32_t*)base)[idx]);                  break;
+        case RAY_MONTH:     atom = ray_month(((int32_t*)base)[idx]);                 break;
         case RAY_TIME:      atom = ray_time(((int32_t*)base)[idx]);                  break;
         case RAY_TIMESTAMP: atom = ray_timestamp(((int64_t*)base)[idx]);              break;
         case RAY_SYM: {

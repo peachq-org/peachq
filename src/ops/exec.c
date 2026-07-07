@@ -602,7 +602,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
         switch (ct) {                                                       \
         case RAY_BOOL: case RAY_U8: (dst) = ((const uint8_t*)cd)[idx]; break; \
         case RAY_I16:  (dst) = ((const int16_t*)cd)[idx]; break;            \
-        case RAY_I32:  case RAY_DATE: case RAY_TIME:                        \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME: case RAY_MONTH:                        \
                        (dst) = ((const int32_t*)cd)[idx]; break;            \
         case RAY_I64:  case RAY_TIMESTAMP:                                  \
                        (dst) = ((const int64_t*)cd)[idx]; break;            \
@@ -615,7 +615,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
         switch (ct) {                                                       \
         case RAY_BOOL: case RAY_U8: (dst) = (double)((const uint8_t*)cd)[idx]; break; \
         case RAY_I16:  (dst) = (double)((const int16_t*)cd)[idx]; break;    \
-        case RAY_I32:  case RAY_DATE: case RAY_TIME:                        \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME: case RAY_MONTH:                        \
                        (dst) = (double)((const int32_t*)cd)[idx]; break;    \
         case RAY_I64:  case RAY_TIMESTAMP:                                  \
                        (dst) = (double)((const int64_t*)cd)[idx]; break;    \
@@ -688,7 +688,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
                 IN_FAST(int16_t, (sj >= INT16_MIN && sj <= INT16_MAX),
                         NULL_I16, 1);
                 break;
-            case RAY_I32: case RAY_DATE: case RAY_TIME:
+            case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
                 IN_FAST(int32_t, (sj >= INT32_MIN && sj <= INT32_MAX),
                         NULL_I32, 1);
                 break;
@@ -841,7 +841,7 @@ static in_ctx_status_t in_build_worker_ctx(ray_t* col, ray_t* set, bool negate,
         switch (type) {                                                    \
         case RAY_BOOL: case RAY_U8: (dst) = ((const uint8_t*)_d)[idx]; break; \
         case RAY_I16:  (dst) = ((const int16_t*)_d)[idx]; break;           \
-        case RAY_I32:  case RAY_DATE: case RAY_TIME:                       \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME: case RAY_MONTH:                       \
                        (dst) = ((const int32_t*)_d)[idx]; break;           \
         case RAY_I64:  case RAY_TIMESTAMP:                                 \
                        (dst) = ((const int64_t*)_d)[idx]; break;           \
@@ -856,7 +856,7 @@ static in_ctx_status_t in_build_worker_ctx(ray_t* col, ray_t* set, bool negate,
         switch (type) {                                                    \
         case RAY_BOOL: case RAY_U8: (dst) = (double)((const uint8_t*)_d)[idx]; break; \
         case RAY_I16:  (dst) = (double)((const int16_t*)_d)[idx]; break;   \
-        case RAY_I32:  case RAY_DATE: case RAY_TIME:                       \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME: case RAY_MONTH:                       \
                        (dst) = (double)((const int32_t*)_d)[idx]; break;   \
         case RAY_I64:  case RAY_TIMESTAMP:                                 \
                        (dst) = (double)((const int64_t*)_d)[idx]; break;   \
@@ -1115,7 +1115,8 @@ static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
     case -RAY_TIMESTAMP: key_i = cv->i64;                  break;
     case -RAY_I32:
     case -RAY_DATE:
-    case -RAY_TIME:      key_i = (int64_t)cv->i32;         break;
+    case -RAY_TIME:
+    case -RAY_MONTH:     key_i = (int64_t)cv->i32;         break;
     case -RAY_I16:       key_i = (int64_t)cv->i16;         break;
     case -RAY_BOOL:
     case -RAY_U8:        key_i = (int64_t)cv->b8;          break;

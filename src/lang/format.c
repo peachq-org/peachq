@@ -151,6 +151,7 @@ const char* ray_type_name(int8_t type) {
     case RAY_I64:       return type < 0 ? "i64"       : "I64";
     case RAY_F32:       return type < 0 ? "f32"       : "F32";
     case RAY_F64:       return type < 0 ? "f64"       : "F64";
+    case RAY_MONTH:     return type < 0 ? "month"     : "MONTH";
     case RAY_DATE:      return type < 0 ? "date"      : "DATE";
     case RAY_TIME:      return type < 0 ? "time"      : "TIME";
     case RAY_TIMESTAMP: return type < 0 ? "timestamp" : "TIMESTAMP";
@@ -306,6 +307,14 @@ static void ts_to_parts(int64_t ns, int* y, int* mo, int* d,
     *s  = (int)(rem % 60);
 }
 
+/* MONTH payload = months since 2000.01; floor div/mod for pre-2000 months. */
+static void fmt_month(fmt_buf_t* b, int32_t val) {
+    int64_t p = val;
+    int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
+    int64_t m = 1 + (p % 12 + 12) % 12;
+    fmt_printf(b, "%04lld.%02lldm", (long long)y, (long long)m);
+}
+
 static void fmt_date(fmt_buf_t* b, int32_t val) {
     int y, m, d;
     date_to_ymd(val, &y, &m, &d);
@@ -349,6 +358,7 @@ static const char* null_literal(int8_t type) {
     case RAY_I64:       return "0Nl";
     case RAY_F64:       return "0Nf";
     case RAY_F32:       return "0Ne";
+    case RAY_MONTH:     return "0Nm";
     case RAY_DATE:      return "0Nd";
     case RAY_TIME:      return "0Nt";
     case RAY_TIMESTAMP: return "0Np";
@@ -381,6 +391,7 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     case RAY_I64:       fmt_i64(b, ((int64_t*)ray_data(vec))[idx]); break;
     case RAY_F32:       fmt_f32(b, ((float*)ray_data(vec))[idx]); break;
     case RAY_F64:       fmt_f64(b, ((double*)ray_data(vec))[idx]); break;
+    case RAY_MONTH:     fmt_month(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_DATE:      fmt_date(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_TIME:      fmt_time(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_TIMESTAMP: fmt_timestamp(b, ((int64_t*)ray_data(vec))[idx]); break;
@@ -530,7 +541,7 @@ static void fmt_dict_key(fmt_buf_t* b, ray_t* keys, int64_t i, int mode) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.i64  = ((int64_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
-    } else if (keys->type == RAY_I32 || keys->type == RAY_DATE || keys->type == RAY_TIME) {
+    } else if (keys->type == RAY_I32 || keys->type == RAY_DATE || keys->type == RAY_TIME || keys->type == RAY_MONTH) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.i32  = ((int32_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
@@ -587,7 +598,8 @@ static void fmt_dict_val(fmt_buf_t* b, ray_t* vals, int64_t i, int mode) {
                                 v_atom = &v_storage; break;
             case RAY_I32:
             case RAY_DATE:
-            case RAY_TIME:      v_storage.type = (int8_t)-vals->type;
+            case RAY_TIME:
+            case RAY_MONTH:     v_storage.type = (int8_t)-vals->type;
                                 v_storage.i32  = ((int32_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_I64:
@@ -1049,6 +1061,7 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
         case RAY_I64:  fmt_i64(b, obj->i64); break;
         case RAY_F32:       fmt_f32(b, (float)obj->f64); break;
         case RAY_F64:       fmt_f64(b, obj->f64); break;
+        case RAY_MONTH:     fmt_month(b, obj->i32); break;
         case RAY_DATE:      fmt_date(b, obj->i32); break;
         case RAY_TIME:      fmt_time(b, obj->i32); break;
         case RAY_TIMESTAMP: fmt_timestamp(b, obj->i64); break;

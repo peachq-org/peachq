@@ -97,15 +97,36 @@ static inline int is_numeric(ray_t* x) {
 
 /* Check if an atom is a temporal type */
 static inline int is_temporal(ray_t* x) {
-    return x->type == -RAY_DATE || x->type == -RAY_TIME || x->type == -RAY_TIMESTAMP;
+    return x->type == -RAY_DATE || x->type == -RAY_TIME ||
+           x->type == -RAY_TIMESTAMP || x->type == -RAY_MONTH;
+}
+
+/* First-of-month day count since 2000.01.01 for a MONTH payload
+ * (= (year-2000)*12 + month-1).  Hinnant days_from_civil (public domain),
+ * rebased to the 2000 epoch, specialised to day==1.  Exact calendar
+ * semantics: monotonic in the payload (same-type compares are exact) and
+ * kdb-correct for cross-type month-vs-date/timestamp comparison (a month
+ * coerces to its first day). */
+static inline int64_t month_payload_as_days(int64_t p) {
+    int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
+    int64_t m = 1 + (p % 12 + 12) % 12;             /* 1..12 */
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;                    /* [0, 399] */
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5; /* day 1 → +0 */
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;  /* [0, 146096] */
+    return era * 146097 + doe - 719468 - 10957;     /* rebase 1970 → 2000 */
 }
 
 /* Convert temporal atom to nanoseconds for cross-temporal comparison.
- * DATE = days since epoch -> ns, TIME = ms since midnight -> ns, TIMESTAMP = ns */
+ * DATE = days since epoch -> ns, TIME = ms since midnight -> ns,
+ * TIMESTAMP = ns, MONTH = first-of-month days -> ns. */
 static inline int64_t temporal_as_ns(ray_t* x) {
     if (x->type == -RAY_TIMESTAMP) return x->i64;
     if (x->type == -RAY_DATE)      return (int64_t)x->i32 * 86400000000000LL;
     if (x->type == -RAY_TIME)      return (int64_t)x->i32 * 1000000LL;
+    if (x->type == -RAY_MONTH)
+        return month_payload_as_days((int64_t)x->i32) * 86400000000000LL;
     return 0;
 }
 
@@ -126,7 +147,8 @@ static inline double as_f64(ray_t* x) {
     if (x->type == -RAY_U8)  return (double)x->u8;
     if (x->type == -RAY_STR && ray_str_len(x) == 1) return (double)(unsigned char)x->sdata[0];
     if (x->type == -RAY_BOOL) return (double)x->b8;
-    if (x->type == -RAY_DATE || x->type == -RAY_TIME) return (double)x->i32;
+    if (x->type == -RAY_DATE || x->type == -RAY_TIME ||
+        x->type == -RAY_MONTH) return (double)x->i32;
     if (x->type == -RAY_TIMESTAMP) return (double)x->i64;
     return (double)x->i64;
 }
@@ -296,6 +318,7 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
          * COLUMN's domain; the atom must carry the runtime id. */
         case RAY_SYM:       return ray_sym(sym_cell_runtime_id(coll, i));
         case RAY_U8:        return ray_u8(((uint8_t*)d)[i]);
+        case RAY_MONTH:     return ray_month((int64_t)((int32_t*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
         case RAY_TIME:      return ray_time((int64_t)((int32_t*)d)[i]);
         case RAY_TIMESTAMP: return ray_timestamp(((int64_t*)d)[i]);
@@ -318,6 +341,7 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
 static inline int64_t elem_as_i64(ray_t* elem) {
     if (elem->type == -RAY_I64 || elem->type == -RAY_TIMESTAMP ||
         elem->type == -RAY_DATE || elem->type == -RAY_TIME ||
+        elem->type == -RAY_MONTH ||
         elem->type == -RAY_SYM) return elem->i64;
     if (elem->type == -RAY_I32)  return (int64_t)elem->i32;
     if (elem->type == -RAY_I16)  return (int64_t)elem->i16;
@@ -336,7 +360,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
                 ((double*)ray_data(vec))[i] = NULL_F64; break;
             case RAY_I64: case RAY_TIMESTAMP:
                 ((int64_t*)ray_data(vec))[i] = NULL_I64; break;
-            case RAY_I32: case RAY_DATE: case RAY_TIME:
+            case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
                 ((int32_t*)ray_data(vec))[i] = NULL_I32; break;
             case RAY_I16:
                 ((int16_t*)ray_data(vec))[i] = NULL_I16; break;
@@ -356,6 +380,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_I16:       ((int16_t*)ray_data(vec))[i]   = (int16_t)elem_as_i64(elem); return 0;
         case RAY_BOOL:      ((bool*)ray_data(vec))[i]      = elem->b8;  return 0;
         case RAY_U8:        ((uint8_t*)ray_data(vec))[i]   = (uint8_t)elem_as_i64(elem); return 0;
+        case RAY_MONTH:     ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIME:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIMESTAMP: ((int64_t*)ray_data(vec))[i]   = elem_as_i64(elem); return 0;
