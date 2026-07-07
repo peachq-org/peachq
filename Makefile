@@ -128,6 +128,9 @@ help:
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
 	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
 	@printf "  %-28s %s\n" "make kwire-conformance" "Cross-check kdb wire bytes vs javakdb (opt-in; needs javac)"
+	@printf "  %-28s %s\n" "make kwire-live" "javakdb client vs live ./q -p server (opt-in; needs javac)"
+	@printf "  %-28s %s\n" "make ipc-loopback" "openq client verbs vs live openq server (opt-in; no java)"
+	@printf "  %-28s %s\n" "make kwire-echo" "openq client vs javakdb echo server (opt-in; needs javac)"
 	@printf "  %-28s %s\n" "make qdash" "Regenerate the peachq conformance dashboard (tools/qdash)"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
@@ -286,6 +289,36 @@ kwire-conformance: LDFLAGS = $(DEBUG_LDFLAGS)
 kwire-conformance: $(Q_TARGET)
 	@tools/kdb-conformance/run.sh
 
+# openq: OPT-IN live conformance — a javakdb CLIENT (vendored c.java,
+# Apache-2.0, the cleared independent reference) drives a live `./q -p`
+# server over a real socket: kdb handshake, framing, sync/async, error
+# responses.  The Phase C acceptance gate.  Requires a JDK (javac);
+# skips with a notice if absent.  Deliberately NOT part of
+# `make test`/`make qtest` — the C gate stays zero-dependency.
+kwire-live: CFLAGS = $(DEBUG_CFLAGS)
+kwire-live: LDFLAGS = $(DEBUG_LDFLAGS)
+kwire-live: $(Q_TARGET)
+	@tools/kdb-conformance/run-live.sh
+
+# openq: OPT-IN Phase D client-verb proof — an openq CLIENT (hopen / h"query" /
+# neg[h] async / hclose) drives a live openq `./q -p` SERVER over a real socket
+# (two processes: the REPL loop can't service its own listener).  Pure
+# openq<->openq, NO java.  Deliberately NOT part of `make test`/`make qtest`.
+ipc-loopback: CFLAGS = $(DEBUG_CFLAGS)
+ipc-loopback: LDFLAGS = $(DEBUG_LDFLAGS)
+ipc-loopback: $(Q_TARGET)
+	@tools/kdb-conformance/run-loopback.sh
+
+# openq: OPT-IN Phase D client-direction conformance — an openq CLIENT talks to
+# a javakdb SERVER (KEchoServer, vendored c.java, Apache-2.0, the cleared
+# independent reference): openq's outbound handshake/framing/serialization must
+# be decodable by code we did not write.  Requires a JDK (javac); skips with a
+# notice if absent.  Deliberately NOT part of `make test`/`make qtest`.
+kwire-echo: CFLAGS = $(DEBUG_CFLAGS)
+kwire-echo: LDFLAGS = $(DEBUG_LDFLAGS)
+kwire-echo: $(Q_TARGET)
+	@tools/kdb-conformance/run-echo.sh
+
 # openq: NON-GATING differential parser-test ledger.  Links the TSV runner
 # (test/test_q_parse_tsv.c) into the test binary alongside the normal suites,
 # then runs ONLY the qlang/parse/* suites.  EXPECTED TO BE RED — it is the
@@ -374,7 +407,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdash qdoctest kwire-conformance manifest coverage clean
+.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdash qdoctest kwire-conformance kwire-live ipc-loopback kwire-echo manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
