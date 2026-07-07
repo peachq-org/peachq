@@ -179,6 +179,11 @@ static const q_op_t Q_OPS[] = {
      * audited kdb-true element-wise / aggregate semantics). See
      * docs/recipes/add-q-keyword-verb.md. ---- */
     { "abs",     QLEX_KW_PREFIX, QK_ENV, "abs",      QK_NONE,  NULL,      NULL  },
+    /* q `null x` — elementwise null test.  Routes to the engine's atomic
+     * `nil?` (RAY_FN_ATOMIC): broadcasts over vectors and nested lists at
+     * every depth.  QK_NULL collapses a homogeneous top-level bool-atom run
+     * (heterogeneous input list) to a bool vector for kdb-true display. */
+    { "null",    QLEX_KW_PREFIX, QK_NULL, "nil?",    QK_NONE,  NULL,      NULL  },
     { "dev",     QLEX_KW_PREFIX, QK_ENV, "dev",      QK_NONE,  NULL,      NULL  },
     { "exp",     QLEX_KW_PREFIX, QK_ENV, "exp",      QK_NONE,  NULL,      NULL  },
     { "log",     QLEX_KW_PREFIX, QK_ENV, "log",      QK_NONE,  NULL,      NULL  },
@@ -191,29 +196,27 @@ static const q_op_t Q_OPS[] = {
     { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
     { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
     /* ---- boolean/null batch: RESERVED-but-DEFERRED (feat/q-bool-null) ----
-     * These are real q keywords, so they are rostered to reserve the name
-     * (`null:5`/`any:5`/`all:5` -> 'assign, kdb-true) and to keep the manifest
-     * the complete verb list.  All three carry QK_NONE at both valences (no
-     * value) — a documented DEFER, NOT a guessed binding — because a clean
-     * rayfall reuse does not exist under the reuse-or-defer policy:
-     *   - `null`: reuse candidate rayfall `nil?` does NOT broadcast (registered
-     *     RAY_FN_NONE, not ATOMIC; ray_nil_fn returns a scalar for any vector),
-     *     so `null 0N 1 2` would give 0b not 100b.  Broadcasting needs an eval
-     *     attr change (frozen) or a wrapper — both HELD.  ref/null.md.
-     *   - `any`/`all`: range is boolean `b` for EVERY domain (ref/all-any.md);
-     *     q coerces to boolean then reduces.  A `max`/`min` rename is type-wrong
-     *     for non-boolean input (`all 2000.01.02 2010.01.02`->1b, but max is a
-     *     DATE), coinciding only on already-boolean vectors.  The boolean
-     *     coercion is new logic (HELD).
-     * KW_PREFIX (not INFIX): reservation must NOT reclassify the scanner (only
-     * QLEX_KW_INFIX rows do), and these are prefix keywords.  (`or` is a keyword
-     * spelling of `|`-max and is NOT rostered: it is INFIX, and a valueless
-     * QLEX_KW_INFIX row would reclassify `x or y` then miss the registry and
-     * expose rayfall's scalar `or` special form — wrong q semantics.  It waits
-     * for `|`-max.) */
-    { "null",    QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
+     * `any`/`all` are real q keywords rostered to reserve the name
+     * (`any:5`/`all:5` -> 'assign, kdb-true) with QK_NONE (no value) — a
+     * documented DEFER: their range is boolean `b` for every domain
+     * (ref/all-any.md) and a `max`/`min` rename is type-wrong for non-boolean
+     * input (`all 2000.01.02 2010.01.02`->1b, but max is a DATE); the boolean
+     * coercion is new logic (HELD).  KW_PREFIX so the reservation does not
+     * reclassify the scanner.
+     * NB: `null` LANDED separately as a real atomic verb (QK_NULL,
+     * feat/q-atomic-extend #67) — its reserved row here was dropped on merge to
+     * avoid a duplicate.  `or` is the keyword spelling of `|`-max and waits for
+     * `|`-max (a valueless QLEX_KW_INFIX row would expose rayfall's scalar `or`). */
     { "any",     QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
     { "all",     QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
+    /* ---- IPC client verbs (feat/q-ipc-client, Phase D) — thin wrappers over the
+     * kdb-speaking `.ipc.*` primitives (Phase C).  `hopen` normalizes int|string|
+     * (conn;timeout) into the `.ipc.open` string API and returns a 1-BASED handle;
+     * `hclose` translates it back and routes to `.ipc.close`.  The sync/async send
+     * verb `h"query"` is handle-as-verb application (q_apply.c int-head arm), not a
+     * manifest row.  Both are monadic prefix keywords (KW_PREFIX). ---- */
+    { "hopen",  QLEX_KW_PREFIX, QK_HOPEN,  "hopen",  QK_NONE, NULL,  NULL  },
+    { "hclose", QLEX_KW_PREFIX, QK_HCLOSE, "hclose", QK_NONE, NULL,  NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
