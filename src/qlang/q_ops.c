@@ -37,8 +37,12 @@ static const q_op_t Q_OPS[] = {
     { "-",     QLEX_GLYPH,     QK_NEG,  "neg",       QK_ENV,   "-",       NULL  },
     { "*",     QLEX_GLYPH,     QK_ENV,  "first",     QK_ENV,   "*",       NULL  },
     { "%",     QLEX_GLYPH,     QK_NONE, NULL,        QK_ENV,   "/",       NULL  },
-    { "<",     QLEX_GLYPH,     QK_ENV,  "iasc",      QK_ENV,   "<",       NULL  },
-    { ">",     QLEX_GLYPH,     QK_ENV,  "idesc",     QK_ENV,   ">",       NULL  },
+    /* monadic `<`/`>` are grade up/down.  Wrappers (QK_IASC/QK_IDESC) so a DICT
+     * arm (grade the values, return the keys in value order) is shared with the
+     * `iasc`/`idesc` keyword rows below; flat vectors delegate to ray_iasc_fn/
+     * ray_idesc_fn unchanged. */
+    { "<",     QLEX_GLYPH,     QK_IASC,  "iasc",     QK_ENV,   "<",       NULL  },
+    { ">",     QLEX_GLYPH,     QK_IDESC, "idesc",    QK_ENV,   ">",       NULL  },
     { "<=",    QLEX_GLYPH,     QK_NONE, NULL,        QK_ENV,   "<=",      NULL  },
     { ">=",    QLEX_GLYPH,     QK_NONE, NULL,        QK_ENV,   ">=",      NULL  },
     { "=",     QLEX_GLYPH,     QK_ENV,  "group",     QK_EQ,    "==",      NULL  },
@@ -120,6 +124,15 @@ static const q_op_t Q_OPS[] = {
      * rayfall cartesian primitive; composes item access + q join).  String
      * and dict/table operands are deferred cells (ref/cross.md). */
     { "cross", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CROSS, "cross",   NULL  },
+    /* ---- sort / bucket family (feat/q-sort-rank) — dyadic infix ----
+     * `bin`/`binr` reuse rayfall verbatim (same arg order: sorted-vec left,
+     * value right).  `xrank` is a clean pass-through (n left, vec right).
+     * `xbar` is an ARG-SWAP wrapper (rayfall xbar is (col,bucket); q spells it
+     * (bucket,col)).  All infix so the scanner treats `a verb b` as one stmt. */
+    { "bin",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "bin",     NULL  },
+    { "binr",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "binr",    NULL  },
+    { "xrank", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "xrank",   NULL  },
+    { "xbar",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_XBAR,  "xbar",    NULL  },
     /* ---- Wave 5: running scans (monadic prefix keywords) ---- */
     { "sums",  QLEX_KW_PREFIX, QK_SUMS,  "sums",   QK_NONE,  NULL,      NULL  },
     { "prds",  QLEX_KW_PREFIX, QK_PRDS,  "prds",   QK_NONE,  NULL,      NULL  },
@@ -170,6 +183,15 @@ static const q_op_t Q_OPS[] = {
     { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
+    /* ---- sort / grade family (feat/q-sort-rank) — monadic prefix ----
+     * asc/desc reuse ray_asc_fn/ray_desc_fn for flat vectors (VALUE kdb-true;
+     * the sorted `s#` attribute is a deferred divergence — rayfall has no sorted
+     * attribute) and add a DICT-sort-by-value arm.  iasc/idesc reuse ray_iasc_fn/
+     * ray_idesc_fn and share the same DICT-grade arm as the `<`/`>` glyphs. */
+    { "asc",     QLEX_KW_PREFIX, QK_ASC,   "asc",    QK_NONE,  NULL,      NULL  },
+    { "desc",    QLEX_KW_PREFIX, QK_DESC,  "desc",   QK_NONE,  NULL,      NULL  },
+    { "iasc",    QLEX_KW_PREFIX, QK_IASC,  "iasc",   QK_NONE,  NULL,      NULL  },
+    { "idesc",   QLEX_KW_PREFIX, QK_IDESC, "idesc",  QK_NONE,  NULL,      NULL  },
     { "avg",     QLEX_KW_PREFIX, QK_ENV, "avg",      QK_NONE,  NULL,      NULL  },
     /* q `floor` returns LONGS from floats (kdb `floor 3.7` is 3j); rayfall's
      * env floor keeps f64, so this is the QK_FLOOR wrapper, not a rename. */
