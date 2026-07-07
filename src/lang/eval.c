@@ -122,6 +122,11 @@ static ray_t* dict_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n) {
 static ray_remote_str_fn_t g_remote_str_fn = NULL;
 void ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn) { g_remote_str_fn = fn; }
 
+/* openq eval-time computed-name resolver (`.z.*`) — see eval.h.  Consulted at
+ * every name-LOAD miss, before raising `'name`.  NULL = historic behaviour. */
+static ray_name_hook_t g_name_hook = NULL;
+void ray_eval_set_name_hook(ray_name_hook_t hook) { g_name_hook = hook; }
+
 ray_t* ray_eval_remote_str(const char* src, size_t len) {
     if (!src || len == 0) return RAY_NULL_OBJ;
     if (g_remote_str_fn) return g_remote_str_fn(src, len);
@@ -1876,6 +1881,7 @@ op_resolve: {
     uint8_t idx = code[ip++];
     ray_t *name_obj = cpool[idx];
     ray_t *val = ray_env_resolve(name_obj->i64);
+    if (!val && g_name_hook) val = g_name_hook(name_obj->i64);  /* openq: `.z.*` */
     if (!val) goto vm_error_name;
     /* env_resolve returns an owned ref (rc >= 1); no extra retain needed.
      * It can also return a real error (e.g. nyi from a parted-target link
@@ -1891,6 +1897,7 @@ op_resolve_w: {
     ip += 2;
     ray_t *name_obj = cpool[idx];
     ray_t *val = ray_env_resolve(name_obj->i64);
+    if (!val && g_name_hook) val = g_name_hook(name_obj->i64);  /* openq: `.z.*` */
     if (!val) goto vm_error_name;
     if (RAY_IS_ERR(val)) { vm_err_obj = val; goto vm_error; }
     PUSH(val);
@@ -3088,6 +3095,9 @@ ray_t* ray_eval(ray_t* obj) {
             }
 
             ray_t* val = ray_env_resolve(obj->i64);
+            /* openq: computed-name (`.z.*`) resolver fires on an env miss,
+             * before `'name` — returns an OWNED value or NULL to decline. */
+            if (!val && g_name_hook) val = g_name_hook(obj->i64);
             if (!val) {
                 ray_t* ns = ray_sym_str(obj->i64);
                 if (ns) {
