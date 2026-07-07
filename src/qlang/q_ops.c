@@ -102,6 +102,24 @@ static const q_op_t Q_OPS[] = {
      * is out of scope (kdb `vs`/`sv` are strictly dyadic). */
     { "vs",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_VS,    "vs",      NULL  },
     { "sv",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SV,    "sv",      NULL  },
+    /* ---- set operations (feat/q-setops) ---- */
+    /* q `x except y` — items of x not in y, x-duplicates and order KEPT
+     * (ref/except.md).  rayfall's ray_except_fn is exactly this (no dedup,
+     * atom y supported), so a clean pass-through. */
+    { "except",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "except",  NULL  },
+    /* q `x union y` == `distinct x,y` — WRAPPER: rayfall union keeps
+     * x-duplicates, kdb dedups the whole join (ref/union.md). */
+    { "union", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_UNION, "union",   NULL  },
+    /* q `x inter y` — items of x that are in y, x-duplicates and order KEPT
+     * (ref/inter.md: "uses the result of x in y to return items from x").
+     * rayfall spells it `sect` (ray_sect_fn) and is exactly this for lists;
+     * the thin wrapper only guards dict/table operands 'nyi (rayfall sect
+     * returns a wrong-shaped dict there; kdb returns common values). */
+    { "inter", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_INTER, "sect",    NULL  },
+    /* q `x cross y` == {raze x,/:\:y} — Cartesian product WRAPPER (no
+     * rayfall cartesian primitive; composes item access + q join).  String
+     * and dict/table operands are deferred cells (ref/cross.md). */
+    { "cross", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CROSS, "cross",   NULL  },
     /* ---- Wave 5: running scans (monadic prefix keywords) ---- */
     { "sums",  QLEX_KW_PREFIX, QK_SUMS,  "sums",   QK_NONE,  NULL,      NULL  },
     { "prds",  QLEX_KW_PREFIX, QK_PRDS,  "prds",   QK_NONE,  NULL,      NULL  },
