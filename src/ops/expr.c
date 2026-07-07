@@ -41,6 +41,7 @@ static bool atom_to_numeric(ray_t* atom, double* out_f, int64_t* out_i, bool* ou
         case -RAY_SYM:
         case -RAY_DATE:
         case -RAY_TIME:
+        case -RAY_MONTH:
         case -RAY_TIMESTAMP:
             *out_i = atom->i64;
             *out_f = (double)atom->i64;
@@ -183,7 +184,7 @@ static bool const_expr_to_i64(ray_graph_t* g, ray_op_t* op, int64_t* out) {
 
 static inline bool type_is_linear_i64_col(int8_t t) {
     return t == RAY_I64 || t == RAY_TIMESTAMP ||
-           t == RAY_I32 || t == RAY_DATE || t == RAY_TIME || t == RAY_I16 ||
+           t == RAY_I32 || t == RAY_DATE || t == RAY_TIME || t == RAY_MONTH || t == RAY_I16 ||
            t == RAY_U8 || t == RAY_BOOL || RAY_IS_SYM(t);
 }
 
@@ -790,7 +791,7 @@ static void expr_load_i64(int64_t* dst, const void* data, int8_t col_type,
             for (int64_t j = 0; j < n; j++)
                 dst[j] = ray_read_sym(data, start + j, col_type, col_attrs);
         } break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
             const int32_t* s = (const int32_t*)data + start;
             if (has_nulls)
                 for (int64_t j = 0; j < n; j++)
@@ -838,7 +839,7 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
             for (int64_t j = 0; j < n; j++)
                 dst[j] = (double)ray_read_sym(data, start + j, col_type, col_attrs);
         } break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
             const int32_t* s = (const int32_t*)data + start;
             if (has_nulls)
                 for (int64_t j = 0; j < n; j++)
@@ -997,7 +998,7 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
             }
         }
         #undef I64_ISN
-    } else if (dt == RAY_I32 || dt == RAY_DATE || dt == RAY_TIME) {
+    } else if (dt == RAY_I32 || dt == RAY_DATE || dt == RAY_TIME || dt == RAY_MONTH) {
         int32_t* d = (int32_t*)dp;
         const int32_t* a = (const int32_t*)ap;
         const int32_t* b = (const int32_t*)bp;
@@ -1194,7 +1195,7 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
             /* CAST bool→i64 — BOOL scratch is 1 byte per elem (0/1). */
             const uint8_t* a = (const uint8_t*)ap;
             for (int64_t j = 0; j < n; j++) d[j] = a[j];
-        } else if (t1 == RAY_I32 || t1 == RAY_DATE || t1 == RAY_TIME) {
+        } else if (t1 == RAY_I32 || t1 == RAY_DATE || t1 == RAY_TIME || t1 == RAY_MONTH) {
             /* CAST i32→i64: with null_aware map NULL_I32 → NULL_I64. */
             const int32_t* a = (const int32_t*)ap;
             if (null_aware)
@@ -2145,7 +2146,7 @@ static void set_all_null(ray_t* result, int64_t len) {
             for (int64_t i = 0; i < len; i++) d[i] = NULL_F32;
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
             int32_t* d = (int32_t*)ray_data(result);
             for (int64_t i = 0; i < len; i++) d[i] = NULL_I32;
             break;
@@ -2304,7 +2305,7 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     } else if (opc == OP_CAST) {
         /* CAST from narrow integer types (I32/I16/U8/BOOL) to I64/F64.
          * in_type is loop-invariant; select the typed read outside the loop. */
-        if (in_type == RAY_I32 || in_type == RAY_DATE || in_type == RAY_TIME) {
+        if (in_type == RAY_I32 || in_type == RAY_DATE || in_type == RAY_TIME || in_type == RAY_MONTH) {
             if (out_type == RAY_I64) {
                 while (ray_morsel_next(&m)) {
                     int64_t n = m.morsel_len;
@@ -2575,6 +2576,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         (lhs->type == RAY_I64 || lhs->type == RAY_TIMESTAMP ||
          lhs->type == RAY_I32 || lhs->type == RAY_DATE   ||
          lhs->type == RAY_TIME || lhs->type == RAY_I16   ||
+         lhs->type == RAY_MONTH ||
          lhs->type == RAY_BOOL || lhs->type == RAY_U8    ||
          RAY_IS_SYM(lhs->type)))
     {
@@ -2656,7 +2658,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
          op->opcode == OP_MAX2) &&
         lhs->type == out_type &&
         (out_type == RAY_I64 || out_type == RAY_TIMESTAMP ||
-         out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME ||
+         out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_MONTH ||
          out_type == RAY_I16))
     {
         int64_t l_off = start;
@@ -2717,7 +2719,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             else if (w == RAY_SYM_W32) lp_u32 = (uint32_t*)lbase;
             else { for (int64_t j = 0; j < n; j++) lsym_buf[j] = ray_read_sym(l_data, l_off+j, lhs->type, lhs->attrs); lp_i64 = lsym_buf; }
         }
-        else if (lhs->type == RAY_I32 || lhs->type == RAY_DATE || lhs->type == RAY_TIME) lp_i32 = (int32_t*)lbase;
+        else if (lhs->type == RAY_I32 || lhs->type == RAY_DATE || lhs->type == RAY_TIME || lhs->type == RAY_MONTH) lp_i32 = (int32_t*)lbase;
         else if (lhs->type == RAY_I16) lp_i16 = (int16_t*)lbase;
         else if (lhs->type == RAY_BOOL || lhs->type == RAY_U8) lp_bool = (uint8_t*)lbase;
     }
@@ -2745,7 +2747,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             else if (w == RAY_SYM_W32) rp_u32 = (uint32_t*)rbase;
             else { for (int64_t j = 0; j < n; j++) rsym_buf[j] = ray_read_sym(r_data, r_off+j, rhs->type, rhs->attrs); rp_i64 = rsym_buf; }
         }
-        else if (rhs->type == RAY_I32 || rhs->type == RAY_DATE || rhs->type == RAY_TIME) rp_i32 = (int32_t*)rbase;
+        else if (rhs->type == RAY_I32 || rhs->type == RAY_DATE || rhs->type == RAY_TIME || rhs->type == RAY_MONTH) rp_i32 = (int32_t*)rbase;
         else if (rhs->type == RAY_I16) rp_i16 = (int16_t*)rbase;
         else if (rhs->type == RAY_BOOL || rhs->type == RAY_U8) rp_bool = (uint8_t*)rbase;
     }
@@ -2805,7 +2807,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_MAX2:for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);odst[i]=li>ri?li:ri;}break;
             default:     for(int64_t i=0;i<n;i++)odst[i]=0;break;
         }
-    } else if (out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME) {
+    } else if (out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_MONTH) {
         int32_t* odst = (int32_t*)dst;
         switch (op->opcode) {
             case OP_ADD: for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);odst[i]=(int32_t)((uint32_t)li+(uint32_t)ri);}break;
@@ -3037,7 +3039,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             l_i64_val = resolved_sym_id;
         else if (ray_is_atom(lhs)) {
             if (lhs->type == -RAY_F64) l_f64_val = lhs->f64;
-            else if (lhs->type == -RAY_I32 || lhs->type == -RAY_DATE || lhs->type == -RAY_TIME)
+            else if (lhs->type == -RAY_I32 || lhs->type == -RAY_DATE || lhs->type == -RAY_TIME || lhs->type == -RAY_MONTH)
                 l_i64_val = (int64_t)lhs->i32;
             else if (lhs->type == -RAY_I16) l_i64_val = (int64_t)lhs->i16;
             else if (lhs->type == -RAY_U8 || lhs->type == -RAY_BOOL) l_i64_val = (int64_t)lhs->u8;
@@ -3055,7 +3057,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             r_i64_val = resolved_sym_id;
         else if (ray_is_atom(rhs)) {
             if (rhs->type == -RAY_F64) r_f64_val = rhs->f64;
-            else if (rhs->type == -RAY_I32 || rhs->type == -RAY_DATE || rhs->type == -RAY_TIME)
+            else if (rhs->type == -RAY_I32 || rhs->type == -RAY_DATE || rhs->type == -RAY_TIME || rhs->type == -RAY_MONTH)
                 r_i64_val = (int64_t)rhs->i32;
             else if (rhs->type == -RAY_I16) r_i64_val = (int64_t)rhs->i16;
             else if (rhs->type == -RAY_U8 || rhs->type == -RAY_BOOL) r_i64_val = (int64_t)rhs->u8;
@@ -3154,7 +3156,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
                 const int64_t* b = (const int64_t*)ray_data(rhs);
                 for (int64_t i = 0; i < len; i++)
                     if (b[i] == 0) ray_vec_set_null(result, i, true);
-            } else if (rt == RAY_I32 || rt == RAY_DATE || rt == RAY_TIME) {
+            } else if (rt == RAY_I32 || rt == RAY_DATE || rt == RAY_TIME || rt == RAY_MONTH) {
                 const int32_t* b = (const int32_t*)ray_data(rhs);
                 for (int64_t i = 0; i < len; i++)
                     if (b[i] == 0) ray_vec_set_null(result, i, true);

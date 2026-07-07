@@ -543,7 +543,7 @@ static int q_match_rec(ray_t* a, ray_t* b) {
         switch (-a->type) {
         case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
         case RAY_F32: case RAY_F64:
-        case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
+        case RAY_DATE: case RAY_TIME: case RAY_MONTH: case RAY_TIMESTAMP:
             return memcmp(&a->i64, &b->i64, 8) == 0;   /* payload union */
         default:
             return 0;
@@ -1292,6 +1292,10 @@ static ray_t* q_neg_wrap(ray_t* x) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
         return ray_date(-(int64_t)x->i32);
     }
+    if (x && x->type == -RAY_MONTH) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_month(-(int64_t)x->i32);
+    }
     /* kdb `neg` promotes a boolean to INT and negates (`neg 1b` -> -1i);
      * base ray_neg_fn rejects bools.  Registered ATOMIC, so a bool vector
      * arrives here element-wise and the i32 atoms collapse to an i32 vector. */
@@ -1462,7 +1466,7 @@ static ray_t* q_shift1(ray_t* x, int forward) {
         return ray_error("nyi", "next/prev: only simple numeric vectors (list/string/sym/atom deferred)");
     int8_t t = x->type;
     if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
-          t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP))
+          t == RAY_DATE || t == RAY_TIME || t == RAY_MONTH || t == RAY_TIMESTAMP))
         return ray_error("nyi", "next/prev: %s vectors are deferred", ray_type_name(t));
     int64_t len = ray_len(x);
     size_t esz = ray_type_sizes[(uint8_t)t];

@@ -69,8 +69,8 @@ const char* ray_version_string(void);
 
 /* Type tags use kdb's numbering (list=0, bool=1, guid=2, ... time=19) so
  * `type` reads the tag directly with no translation seam.  The band 1..19 is
- * sparse: gaps 3,13,15,16,17,18 are kdb's short-of-3 / month / datetime /
- * timespan / minute / second, which have no rayfall type yet. */
+ * sparse: gaps 3,15,16,17,18 are kdb's short-of-3 / datetime / timespan /
+ * minute / second, which have no rayfall type yet. */
 #define RAY_LIST       0
 #define RAY_BOOL       1
 #define RAY_GUID       2
@@ -85,6 +85,8 @@ const char* ray_version_string(void);
 /* Unified dictionary-encoded string column (adaptive width) */
 #define RAY_SYM       11
 #define RAY_TIMESTAMP 12
+/* Months since 2000.01 (i32 payload = (year-2000)*12 + month-1) — kdb `m` */
+#define RAY_MONTH     13
 #define RAY_DATE      14
 #define RAY_TIME      19
 
@@ -242,8 +244,8 @@ void ray_error_free(ray_t* err);
 #define ray_type(v)       ((v)->type)
 #define ray_is_atom(v)    ((v)->type < 0 || (v)->type >= RAY_LAMBDA)
 /* Typed atom-vector predicate (excludes LIST=0).  The kdb 1..19 band is
- * sparse — gaps 3,13,15-18 fall inside this range but carry no real values
- * today (month/datetime/timespan/minute/second unimplemented), so the range
+ * sparse — gaps 3,15-18 fall inside this range but carry no real values
+ * today (datetime/timespan/minute/second unimplemented), so the range
  * is intentionally inclusive; a value's tag is never a gap.  If those slots
  * are later filled, keep this predicate's intent (real vector types only). */
 #define ray_is_vec(v)     ((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME)
@@ -411,6 +413,7 @@ ray_t* ray_f32(float val);
 ray_t* ray_f64(double val);
 ray_t* ray_str(const char* s, size_t len);
 ray_t* ray_sym(int64_t id);
+ray_t* ray_month(int64_t val);
 ray_t* ray_date(int64_t val);
 ray_t* ray_time(int64_t val);
 ray_t* ray_timestamp(int64_t val);
@@ -447,6 +450,7 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
         case RAY_I64:
         case RAY_TIMESTAMP: return x->i64 == NULL_I64;
         case RAY_I32:
+        case RAY_MONTH:
         case RAY_DATE:
         case RAY_TIME:      return x->i32 == NULL_I32;
         case RAY_I16:       return x->i16 == NULL_I16;
