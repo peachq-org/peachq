@@ -200,7 +200,12 @@ int32_t q_highlight(char* dst, int32_t dst_cap, const char* buf, int32_t buf_len
  * Parse + evaluate + print a single input line.  Used verbatim by both the
  * piped and the interactive loops so their observable behaviour is identical
  * (same parse/eval/materialize/format pipeline, same error text). */
-static void run_one_line(const char* s, size_t n, FILE* out, FILE* err) {
+/* print_result: when non-zero (REPL) a non-null, non-assignment result is
+ * q-formatted to `out` (console auto-display).  When zero (script load) the
+ * result is discarded — kdb scripts are silent except explicit side-effects
+ * (show / 0N! / console writes), which still flush below. */
+static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
+                         int print_result) {
     if (n == 0)
         return;
 
@@ -233,8 +238,9 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err) {
         fprintf(err, "error: %s\n", (code && *code) ? code : "eval");
         return;
     }
-    /* q console silence: a (last-statement) assignment prints nothing. */
-    if (!RAY_IS_NULL(r) && !is_assign) {
+    /* q console silence: a (last-statement) assignment prints nothing; a
+     * script load (print_result == 0) prints no result at all. */
+    if (print_result && !RAY_IS_NULL(r) && !is_assign) {
         char buf[8192];
         q_fmt(r, buf, sizeof buf);
         fputs(buf, out);
@@ -320,7 +326,7 @@ static void q_repl_interactive(FILE* out, FILE* err) {
             break;
         }
 
-        run_one_line(str, len, out, err);
+        run_one_line(str, len, out, err, 1);
         ray_release(line);
         ray_term_begin(t);
     }
@@ -354,6 +360,31 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
         if (n == 0) continue;
         if (!strcmp(line, "\\\\") || !strcmp(line, "exit")) break;
 
-        run_one_line(line, n, out, err);
+        run_one_line(line, n, out, err, 1);
     }
+}
+
+/* Run a q startup script (`q file.q`): evaluate each line with NO `q)` prompt,
+ * NO input echo, and NO auto-display of top-level results — only explicit
+ * console side-effects (show / 0N!) reach `out`, matching kdb script-load
+ * semantics.  Line-at-a-time (multi-line constructs are a follow-on).  Returns
+ * 0 on success, non-zero if the file could not be opened. */
+int q_repl_run_file(const char* path, FILE* out, FILE* err) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        fprintf(err, "q: cannot open script '%s'\n", path);
+        return 1;
+    }
+
+    char line[4096];
+    while (fgets(line, sizeof line, f)) {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+        if (n == 0) continue;
+        if (!strcmp(line, "\\\\") || !strcmp(line, "exit")) break;
+        run_one_line(line, n, out, err, 0);
+    }
+
+    fclose(f);
+    return 0;
 }
