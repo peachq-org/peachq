@@ -304,7 +304,7 @@ qdocs: $(QDOC_TARGET)
 kwire-live: CFLAGS = $(DEBUG_CFLAGS)
 kwire-live: LDFLAGS = $(DEBUG_LDFLAGS)
 kwire-live: $(Q_TARGET)
-	@tools/kdb-conformance/run-live.sh
+	@ROW="$(ROW)" tools/kdb-conformance/run-live.sh
 
 # openq: NON-GATING differential parser-test ledger.  Links the TSV runner
 # (test/test_q_parse_tsv.c) into the test binary alongside the normal suites,
