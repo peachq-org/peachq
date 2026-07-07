@@ -255,3 +255,8 @@ int q_ops_is_reserved(const char* s, int len) {
     }
     return 0;
 }
+
+/* Operator->integer opcode (`value +` -> 1) is DEFERRED: the opcode is a property
+ * of the FUNCTION IDENTITY, not the spelling (`get`/`value` are two names for ONE
+ * function, kdb `.:`), so a name-keyed table can't model it.  See PLAN.md; the doc
+ * rows are pinned red-below-floor in test/q/function/value.qcmd. */
