@@ -1870,6 +1870,76 @@ static ray_t* q_distinct_wrap(ray_t* x) {
     return c;
 }
 
+/* q `x union y` — `distinct x,y` (ref/union.md).  A wrapper because rayfall's
+ * ray_union_fn KEEPS x-duplicates (it only filters y against x); kdb dedups
+ * the whole join in first-occurrence order.  Reuses q join (`,` == rayfall
+ * concat) + the q distinct wrapper above — no new set logic.  Operands the
+ * distinct wrapper defers (strings, tables) defer here too: error, never a
+ * wrong answer. */
+static ray_t* q_union_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "union: nil operand");
+    ray_t* j = ray_concat_fn(x, y);
+    if (!j || RAY_IS_ERR(j)) return j;
+    ray_t* r = q_distinct_wrap(j);
+    ray_release(j);
+    return r;
+}
+
+/* q `x inter y` — items of x that are in y, x-duplicates and order kept
+ * (ref/inter.md).  rayfall `sect` (ray_sect_fn) IS this for lists, but on
+ * DICT operands it returns a wrong-shaped dict where kdb returns the common
+ * VALUES as a list — so dict/table operands are guarded 'nyi (error, never a
+ * wrong answer); everything else delegates to ray_sect_fn. */
+static ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "inter: nil operand");
+    if (x->type == RAY_DICT || x->type == RAY_TABLE ||
+        y->type == RAY_DICT || y->type == RAY_TABLE)
+        return ray_error("nyi", "inter: dict/table operands deferred");
+    return ray_sect_fn(x, y);
+}
+
+/* q `x cross y` — Cartesian product, `{raze x,/:\:y}` (ref/cross.md): for
+ * each item a of x (in order), for each item b of y, the JOIN `a,b`.
+ * Composes existing primitives (ray_at_fn item access + q join == rayfall
+ * concat) — rayfall has no cartesian primitive.  Atom operands behave as
+ * one-item lists (each-left/right over an atom).  Deferred cells ('nyi,
+ * never a wrong answer): string operands (kdb iterates a string's CHARS;
+ * openq strings are -RAY_STR atoms — string model) and dict/table cross
+ * (kdb cross-joins tables). */
+static ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "cross: nil operand");
+    if (x->type == -RAY_STR || y->type == -RAY_STR)
+        return ray_error("nyi", "cross: string operands deferred (string model)");
+    if (x->type == RAY_DICT || x->type == RAY_TABLE ||
+        y->type == RAY_DICT || y->type == RAY_TABLE)
+        return ray_error("nyi", "cross: dict/table operands deferred");
+    int xl = ray_is_vec(x) || x->type == RAY_LIST;
+    int yl = ray_is_vec(y) || y->type == RAY_LIST;
+    int64_t nx = xl ? ray_len(x) : 1;
+    int64_t ny = yl ? ray_len(y) : 1;
+    ray_t* out = ray_list_new(nx * ny > 0 ? nx * ny : 1);
+    for (int64_t i = 0; i < nx; i++) {
+        ray_t* a;
+        if (xl) { ray_t* ia = ray_i64(i); a = ray_at_fn(x, ia); ray_release(ia); }
+        else    { ray_retain(x); a = x; }
+        if (!a || RAY_IS_ERR(a)) { ray_release(out); return a; }
+        for (int64_t j = 0; j < ny; j++) {
+            ray_t* b;
+            if (yl) { ray_t* ja = ray_i64(j); b = ray_at_fn(y, ja); ray_release(ja); }
+            else    { ray_retain(y); b = y; }
+            if (!b || RAY_IS_ERR(b)) { ray_release(a); ray_release(out); return b; }
+            ray_t* p = ray_concat_fn(a, b);
+            ray_release(b);
+            if (!p || RAY_IS_ERR(p)) { ray_release(a); ray_release(out); return p; }
+            out = ray_list_append(out, p);
+            if (RAY_IS_ERR(out)) { ray_release(p); ray_release(a); return out; }
+            ray_release(p);
+        }
+        ray_release(a);
+    }
+    return out;
+}
+
 /* Deal n distinct values from [0,total) — partial Fisher-Yates over `til total`,
  * take the first n (kdb deal / permute; uses the same libc rand() the roll path
  * does).  n<=total required.  Result is an owned I64 vector. */
@@ -4965,6 +5035,9 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_LIKE:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_like_wrap);
     case QK_SS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ss_wrap);
     case QK_SSR:    return ray_fn_vary  (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ssr_wrap);
+    case QK_UNION:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_union_wrap);
+    case QK_INTER:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_inter_wrap);
+    case QK_CROSS:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_cross_wrap);
     default:      return NULL;
     }
 }
