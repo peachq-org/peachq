@@ -170,6 +170,17 @@ static const q_op_t Q_OPS[] = {
     { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
     { "upper",   QLEX_KW_PREFIX, QK_ENV, "upper",    QK_NONE,  NULL,      NULL  },
     { "lower",   QLEX_KW_PREFIX, QK_ENV, "lower",    QK_NONE,  NULL,      NULL  },
+    /* ---- string trim / hash / search family (feat/q-string-fns) ----
+     * trim/ltrim/rtrim/md5 are q-owned env unaries (q_builtins_register),
+     * snapshotted here as QK_ENV prefix rows (same mechanism as `string`).
+     * `like`/`ss` are dyadic infix; `ssr` is a triadic-prefix wrapper. */
+    { "trim",    QLEX_KW_PREFIX, QK_ENV, "trim",     QK_NONE,  NULL,      NULL  },
+    { "ltrim",   QLEX_KW_PREFIX, QK_ENV, "ltrim",    QK_NONE,  NULL,      NULL  },
+    { "rtrim",   QLEX_KW_PREFIX, QK_ENV, "rtrim",    QK_NONE,  NULL,      NULL  },
+    { "md5",     QLEX_KW_PREFIX, QK_ENV, "md5",      QK_NONE,  NULL,      NULL  },
+    { "like",    QLEX_KW_INFIX,  QK_NONE, NULL,      QK_LIKE,  "like",    NULL  },
+    { "ss",      QLEX_KW_INFIX,  QK_NONE, NULL,      QK_SS,    "ss",      NULL  },
+    { "ssr",     QLEX_KW_PREFIX, QK_ENV, "ssr",      QK_NONE,  NULL,      NULL  },
     { "show",    QLEX_KW_PREFIX, QK_ENV, "show",     QK_NONE,  NULL,      NULL  },
     /* table introspection — q-owned bindings (q_builtins_register), snapshotted
      * here so the parser embeds them over the base env `meta`. */

@@ -119,9 +119,16 @@ typedef enum {
     QK_HCLOSE,          /* q `hclose h` — translate the 1-based q handle back to the
                          * raw poll id and route to `.ipc.close`.                    */
     /* ---- null test (feat/q-atomic-extend) ---- */
-    QK_NULL             /* q `null x` — atomic nil? (broadcasts over vectors +
+    QK_NULL,            /* q `null x` — atomic nil? (broadcasts over vectors +
                            nested lists at every depth), homogeneous top-level
                            bool-atom run collapsed to a bool vector             */
+    /* ---- string search family (feat/q-string-fns) ---- */
+    QK_LIKE,            /* q `x like p` — glob match sym/str atom|vector -> bool
+                         * (reuses ray_like_fn); dict x -> bool vals, rebuilt.   */
+    QK_SS,              /* q `s ss p` — string search: 0-based start indices of
+                         * every (overlapping) fixed-width glob match of p in s. */
+    QK_SSR              /* q `ssr[s;p;r]` — search-and-replace every match of p
+                         * in s with r (a string, or a fn applied to each match) */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
