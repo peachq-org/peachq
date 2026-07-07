@@ -222,6 +222,17 @@ typedef ray_t* (*ray_remote_str_fn_t)(const char* src, size_t len);
 void   ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn);
 ray_t* ray_eval_remote_str(const char* src, size_t len);
 
+/* openq: eval-time computed-name resolver (the `.z.*` mechanism).  Called at
+ * every name-LOAD site (tree-walk atom deref + VM op_resolve/op_resolve_w)
+ * when env resolution MISSES, BEFORE raising `'name`.  `.z` is NOT a namespace
+ * or dict — the evaluator fills a `.z.<name>` reference with a computed value
+ * the way q fills `.z.p`.  The q layer installs a resolver (q_dotz_resolve) at
+ * boot that returns process-constant values for `.z.f`/`.z.x`/`.z.X`.  Given a
+ * sym_id, returns an OWNED value (rc>=1), or NULL to decline (→ historic
+ * `'name`).  A NULL hook (the default) preserves historic behaviour exactly. */
+typedef ray_t* (*ray_name_hook_t)(int64_t sym_id);
+void ray_eval_set_name_hook(ray_name_hook_t hook);
+
 /* Interrupt support: allow external code (REPL signal handler) to request
  * that the evaluator abort early.  ray_eval() and the bytecode VM check
  * this flag at function-call and loop boundaries. */
