@@ -28,12 +28,16 @@ static int q_sym_bare(const char* nm, size_t l) {
     return 0;
 }
 
-/* Format a -RAY_SYM atom into buf: verbs/null bare, everything else backticked. */
+/* Format a -RAY_SYM atom into buf: verbs/null bare, everything else backticked.
+ * A DATA sym (Q_ATTR_QUOTED, 0x20 — see the parse-tree probe below) always
+ * keeps its backtick, so the `` `. `` handle (q namespaces) renders kdb-true
+ * instead of bare-verb `.`; name-ref/verb heads stay bare. */
 static void q_fmt_sym(ray_t* val, char* buf, size_t bufsz) {
     ray_t* s = ray_sym_str(val->i64);
     const char* nm = ray_str_ptr(s);
     size_t l = ray_str_len(s);
-    snprintf(buf, bufsz, "%s%.*s", q_sym_bare(nm, l) ? "" : "`", (int)l, nm);
+    int bare = q_sym_bare(nm, l) && !(val->attrs & 0x20 /* Q_ATTR_QUOTED */);
+    snprintf(buf, bufsz, "%s%.*s", bare ? "" : "`", (int)l, nm);
     ray_release(s);
 }
 
