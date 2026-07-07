@@ -93,7 +93,7 @@ static void nth_element_dbl(double* a, int64_t lo, int64_t hi, int64_t k) {
 static int agg_parted_numeric_base(int8_t t) {
     return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 ||
            t == RAY_I32 || t == RAY_I64 || t == RAY_F64 ||
-           t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP;
+           t == RAY_DATE || t == RAY_TIME || t == RAY_MONTH || t == RAY_TIMESTAMP;
 }
 
 static int64_t agg_read_i64(ray_t* v, int64_t i) {
@@ -104,7 +104,8 @@ static int64_t agg_read_i64(ray_t* v, int64_t i) {
     case RAY_I16: return ((int16_t*)d)[i];
     case RAY_I32:
     case RAY_DATE:
-    case RAY_TIME: return ((int32_t*)d)[i];
+    case RAY_TIME:
+    case RAY_MONTH: return ((int32_t*)d)[i];
     case RAY_I64:
     case RAY_TIMESTAMP: return ((int64_t*)d)[i];
     default: return 0;
@@ -118,6 +119,7 @@ static ray_t* agg_atom_i64_for_type(int8_t t, int64_t v) {
     case RAY_I16: return ray_i16((int16_t)v);
     case RAY_I32: return ray_i32((int32_t)v);
     case RAY_DATE: return ray_date(v);
+    case RAY_MONTH: return ray_month(v);
     case RAY_TIME: return ray_time(v);
     case RAY_TIMESTAMP: return ray_timestamp(v);
     default: return ray_i64(v);
@@ -126,7 +128,7 @@ static ray_t* agg_atom_i64_for_type(int8_t t, int64_t v) {
 
 static ray_t* agg_parted_sum(ray_t* x) {
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(x->type);
-    if (!agg_parted_numeric_base(base) || base == RAY_DATE)
+    if (!agg_parted_numeric_base(base) || base == RAY_DATE || base == RAY_MONTH)
         return ray_error("type", "sum expects a numeric or time-duration parted column, got %s", ray_type_name(base));
     ray_t** segs = (ray_t**)ray_data(x);
     if (base == RAY_F64) {
@@ -364,6 +366,7 @@ ray_t* ray_min_fn(ray_t* x) {
                     case RAY_I16:       return ray_i16((int16_t)mn);
                     case RAY_I32:       return ray_i32((int32_t)mn);
                     case RAY_DATE:      return ray_date((int32_t)mn);
+                    case RAY_MONTH:     return ray_month((int32_t)mn);
                     case RAY_TIME:      return ray_time(mn);
                     case RAY_TIMESTAMP: return ray_timestamp(mn);
                     default:            return ray_i64(mn);
@@ -418,6 +421,7 @@ ray_t* ray_max_fn(ray_t* x) {
                     case RAY_I16:       return ray_i16((int16_t)mx);
                     case RAY_I32:       return ray_i32((int32_t)mx);
                     case RAY_DATE:      return ray_date((int32_t)mx);
+                    case RAY_MONTH:     return ray_month((int32_t)mx);
                     case RAY_TIME:      return ray_time(mx);
                     case RAY_TIMESTAMP: return ray_timestamp(mx);
                     default:            return ray_i64(mx);
@@ -469,7 +473,7 @@ ray_t* ray_first_fn(ray_t* x) {
          * DATE/TIME/TIMESTAMP/BOOL/U8 — bypass it. */
         if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
             x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
-            x->type == RAY_U8    || x->type == RAY_DATE || x->type == RAY_TIME ||
+            x->type == RAY_U8    || x->type == RAY_DATE || x->type == RAY_TIME || x->type == RAY_MONTH ||
             x->type == RAY_TIMESTAMP) {
             int alloc = 0;
             return collection_elem(x, 0, &alloc);
@@ -507,7 +511,7 @@ ray_t* ray_last_fn(ray_t* x) {
         /* See ray_first_fn for rationale on the type whitelist. */
         if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
             x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
-            x->type == RAY_U8    || x->type == RAY_DATE || x->type == RAY_TIME ||
+            x->type == RAY_U8    || x->type == RAY_DATE || x->type == RAY_TIME || x->type == RAY_MONTH ||
             x->type == RAY_TIMESTAMP) {
             int alloc = 0;
             return collection_elem(x, ray_len(x) - 1, &alloc);
@@ -547,7 +551,7 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
     } else if (x->type == RAY_U8 || x->type == RAY_BOOL) {
         uint8_t* d = (uint8_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
-    } else if (x->type == RAY_DATE || x->type == RAY_TIME) {
+    } else if (x->type == RAY_DATE || x->type == RAY_TIME || x->type == RAY_MONTH) {
         /* temporal stored as int32 days/ms — avg/var/stddev compute over the
          * raw counts (result F64), per the canonical admission table. */
         int32_t* d = (int32_t*)ray_data(x);
