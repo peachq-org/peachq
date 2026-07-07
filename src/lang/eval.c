@@ -96,6 +96,44 @@ int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 static ray_apply_hook_t g_apply_hook = NULL;
 void ray_eval_set_apply_hook(ray_apply_hook_t hook) { g_apply_hook = hook; }
 
+/* openq dict function-distribution shim — see docs/superpowers/plans/
+ * 2026-07-06-dict-distribution-shim.md.  A builtin verb applied to a
+ * dictionary distributes over its values.  Rather than intercept before
+ * dispatch (which would wrongly grab key/value/count/type/`,`/`#`/`@`, all of
+ * which handle a dict NATIVELY), we retry ONLY on the would-error path: if the
+ * kernel returned a 'type error AND an argument is a RAY_DICT, offer the
+ * application to the q apply hook.  Verbs that already handle dicts succeed and
+ * never reach here; only the verbs that currently 'type get distributed.  The
+ * happy path pays a single already-failed error-class compare.  `result` is
+ * consumed and replaced on success; returned unchanged otherwise. */
+static ray_t* dict_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n) {
+    if (!g_apply_hook || !result || !RAY_IS_ERR(result)) return result;
+    if (result->slen != 4 || memcmp(result->sdata, "type", 4) != 0) return result;
+    bool has_dict = false;
+    for (int64_t i = 0; i < n; i++)
+        if (args[i] && args[i]->type == RAY_DICT) { has_dict = true; break; }
+    if (!has_dict) return result;
+    ray_t* dr = g_apply_hook(head, args, n);
+    if (dr) { ray_release(result); return dr; }
+    return result;
+}
+
+/* openq remote-source string eval — see eval.h.  NULL = rayfall eval_str. */
+static ray_remote_str_fn_t g_remote_str_fn = NULL;
+void ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn) { g_remote_str_fn = fn; }
+
+ray_t* ray_eval_remote_str(const char* src, size_t len) {
+    if (!src || len == 0) return RAY_NULL_OBJ;
+    if (g_remote_str_fn) return g_remote_str_fn(src, len);
+    char* tmp = (char*)ray_sys_alloc(len + 1);
+    if (!tmp) return ray_error("oom", "remote eval: out of memory");
+    memcpy(tmp, src, len);
+    tmp[len] = '\0';
+    ray_t* r = ray_eval_str(tmp);
+    ray_sys_free(tmp);
+    return r;
+}
+
 ray_t* ray_eval_get_nfo(void) { return __VM ? __VM->nfo : NULL; }
 void   ray_eval_set_nfo(ray_t* nfo) { if (__VM) __VM->nfo = nfo; }
 
@@ -840,12 +878,32 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     return result;
 }
 
+/* Apply a unary atomic `fn` to ONE collection element, extending over
+ * structure: an atom hits the scalar kernel; a nested collection recurses
+ * through atomic_map_unary (mirroring the binary map's per-element recursion
+ * at atomic_map_binary_op).  Returns an owned ref (the kernel's result or a
+ * recursively-built list); errors pass through. */
+ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg);
+static ray_t* atomic_unary_elem(ray_unary_fn fn, ray_t* e) {
+    if (RAY_IS_ERR(e)) return e;
+    if (is_collection(e)) return atomic_map_unary(fn, e);
+    return fn(e);
+}
+
 /* Map a unary function element-wise over a collection.
- * Produces typed vectors when output is numeric/bool, boxed lists otherwise. */
+ * Produces typed vectors when output is numeric/bool, boxed lists otherwise.
+ * A nested general list (RAY_LIST) recurses per element (atom->scalar,
+ * vector->kernel, nested->recurse) so any RAY_FN_ATOMIC unary op extends
+ * over structure at every depth. */
 ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
     if (!is_collection(arg)) return fn(arg);
 
     int64_t len = ray_len(arg);
+    /* A typed vector's elements are always atoms (fast paths below are safe);
+     * only a RAY_LIST can hold nested collections and MUST take the boxed
+     * path, whose loop recurses via atomic_unary_elem.  Feeding a nested
+     * result into the typed-vector path would corrupt store_typed_elem. */
+    int is_boxed = (arg->type == RAY_LIST);
 
     if (len == 0) {
         /* Empty — fabricate a zero atom of the element type and run
@@ -866,16 +924,18 @@ ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
     /* Probe first element to determine output type */
     int alloc0 = 0;
     ray_t* e0_in = collection_elem(arg, 0, &alloc0);
-    ray_t* e0 = RAY_IS_ERR(e0_in) ? e0_in : fn(e0_in);
+    ray_t* e0 = atomic_unary_elem(fn, e0_in);
     if (alloc0) ray_release(e0_in);
     if (RAY_IS_ERR(e0)) return e0;
 
     int8_t out_type = -(e0->type);
 
-    /* Try typed vector path for numeric/bool/temporal output */
-    if (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
+    /* Try typed vector path for numeric/bool/temporal output — only for a
+     * typed-vector input; a boxed list always falls through to recurse. */
+    if (!is_boxed &&
+        (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
         out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_U8 ||
-        out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_TIMESTAMP) {
+        out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_TIMESTAMP)) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
@@ -905,7 +965,10 @@ ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
     for (int64_t i = 1; i < len; i++) {
         int alloc = 0;
         ray_t* e = collection_elem(arg, i, &alloc);
-        ray_t* elem = RAY_IS_ERR(e) ? e : fn(e);
+        /* Recurse when the element is itself a collection (nested list),
+         * else apply the scalar kernel — the unary mirror of the binary
+         * map's per-element auto-map. */
+        ray_t* elem = atomic_unary_elem(fn, e);
         if (alloc) ray_release(e);
         if (RAY_IS_ERR(elem)) {
             /* Trim to the initialized prefix — see atomic_map_binary_op:
@@ -1905,6 +1968,7 @@ op_call1: {
         result = atomic_map_unary(fn, arg);
     else
         result = fn(arg);
+    result = dict_retry(fn_obj, result, &arg, 1);   /* openq dict shim */
     ray_release(arg);
     ray_release(fn_obj);
     if (RAY_IS_ERR(result)) { vm_err_obj = result; goto vm_error; }
@@ -1949,6 +2013,8 @@ op_call2: {
         result = atomic_map_binary_op(fn, RAY_FN_OPCODE(fn_obj), left, right);
     else
         result = fn(left, right);
+    { ray_t* dargs[2] = { left, right };            /* openq dict shim */
+      result = dict_retry(fn_obj, result, dargs, 2); }
     ray_release(left);
     ray_release(right);
     ray_release(fn_obj);
@@ -2702,6 +2768,12 @@ static void ray_register_builtins(void) {
     /* Additional builtins (ported from rayforce) */
     register_vary("enlist",     RAY_FN_NONE, ray_enlist_fn);
     register_binary("dict",     RAY_FN_NONE, ray_dict_fn);
+    /* nil? stays ATOM-LEVEL (RAY_FN_NONE): rayfall's `nil?` asks "is this whole
+     * value the null" (`(nil? (til 5))` -> `false`, `(nil? (+ 1 2))` -> `false`),
+     * and base tests pin that.  q `null`'s elementwise-at-depth broadcast lives
+     * in the q-layer QK_NULL wrapper (q_null_wrap, src/qlang/q_registry.c), which
+     * drives atomic_map_unary(ray_nil_fn, …) itself — so q semantics stay in the
+     * registry (CLAUDE.md rule 4), never in the base builtin. */
     register_unary("nil?",      RAY_FN_NONE, ray_nil_fn);
     register_unary("where",     RAY_FN_NONE, ray_where_fn);
     register_unary("group",     RAY_FN_NONE, ray_group_fn);
@@ -3116,14 +3188,15 @@ ray_t* ray_eval(ray_t* obj) {
                 }
             }
             ray_t* arg = ray_eval(elems[1]);
-            ray_release(head);
-            if (arg && RAY_IS_ERR(arg)) { ret = arg; goto out; }
+            /* openq dict shim: `head` is kept live past the kernel dispatch so
+             * dict_retry can offer a 'type-erroring dict arg to the hook. */
+            if (arg && RAY_IS_ERR(arg)) { ray_release(head); ret = arg; goto out; }
             /* Materialise lazy arg for non-lazy-aware fns.
              * arg is an owned ref (returned from ray_eval); materialise
              * consumes it — no extra ray_release needed after the call. */
             if (!(fn_attrs & RAY_FN_LAZY_AWARE) && arg && ray_is_lazy(arg)) {
                 arg = ray_lazy_materialize(arg); /* consumes owned ref */
-                if (!arg || RAY_IS_ERR(arg)) { ret = arg ? arg : ray_error("type", NULL); goto out; }
+                if (!arg || RAY_IS_ERR(arg)) { ray_release(head); ret = arg ? arg : ray_error("type", NULL); goto out; }
             }
             ray_t* result;
             RAY_ASSERT_VALUE(arg);
@@ -3135,6 +3208,8 @@ ray_t* ray_eval(ray_t* obj) {
                 result = atomic_map_unary(fn, arg);
             else
                 result = fn(arg);
+            result = dict_retry(head, result, &arg, 1);   /* openq dict shim */
+            ray_release(head);
             if (arg) ray_release(arg);
             ret = result; goto out;
         }
@@ -3193,12 +3268,15 @@ ray_t* ray_eval(ray_t* obj) {
                 ret = ray_error("type", "binary op: null operand not supported, got %s and %s", ray_type_name(lt), ray_type_name(rt)); goto out;
             }
             uint16_t fn_opcode = RAY_FN_OPCODE(head);
-            ray_release(head);
+            /* openq dict shim: keep `head` live past the kernel dispatch. */
             ray_t* result;
             if ((fn_attrs & RAY_FN_ATOMIC) && (is_collection(left) || is_collection(right)))
                 result = atomic_map_binary_op(fn, fn_opcode, left, right);
             else
                 result = fn(left, right);
+            { ray_t* dargs[2] = { left, right };            /* openq dict shim */
+              result = dict_retry(head, result, dargs, 2); }
+            ray_release(head);
             ray_release(left);
             ray_release(right);
             ret = result; goto out;
