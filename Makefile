@@ -263,13 +263,14 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 # e.g. `make qtest F=asc` (fuzzy: matches anywhere in the suite name).
 qtest: CFLAGS = $(DEBUG_CFLAGS)
 qtest: LDFLAGS = $(DEBUG_LDFLAGS)
-qtest: $(LIB_OBJ) $(TEST_OBJ)
+qtest: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
 	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 300 ./$(TARGET).test --all -f qlang$(if $(F), -f "$(F)",) || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
 	      echo "QTEST TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest"; \
 	    fi; exit $$rc; }
+	$(if $(F),,tools/qscript/run.sh)   # script-transcript pillar (skipped when F= filters)
 
 # openq: q-docs corpus floors — qdoctest over every ref/*.md, failing if the
 # parse / eval-ok counts drop below test/qdoctest.min.  A coverage METRIC, not
@@ -343,11 +344,12 @@ test-parse-diff: $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ)
 # are parked and never discovered. Docs-corpus floors live in `make qdocs`.
 # The user runs this on demand; `make qtest` never writes it (stays side-effect
 # free on tracked files).
-qtest-results: $(QDOC_TARGET)
+qtest-results: $(QDOC_TARGET) $(Q_TARGET)
 	timeout 300 ./$(QDOC_TARGET) --qcmd-only --results qtest-results.txt test/q || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
 	      echo "QTEST-RESULTS TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest-results"; \
 	    fi; exit $$rc; }
+	tools/qscript/run.sh --ledger >> qtest-results.txt   # append the qscript topic rows
 
 # Regenerate the peachq conformance dashboard data.  The UI (tools/qdash/index.html)
 # is static and reads tools/qdash/data.js; this rebuilds that data from the committed
