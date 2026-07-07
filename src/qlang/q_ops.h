@@ -127,8 +127,23 @@ typedef enum {
                          * (reuses ray_like_fn); dict x -> bool vals, rebuilt.   */
     QK_SS,              /* q `s ss p` — string search: 0-based start indices of
                          * every (overlapping) fixed-width glob match of p in s. */
-    QK_SSR              /* q `ssr[s;p;r]` — search-and-replace every match of p
+    QK_SSR,             /* q `ssr[s;p;r]` — search-and-replace every match of p
                          * in s with r (a string, or a fn applied to each match) */
+    /* ---- set operations (feat/q-setops) ---- */
+    QK_UNION,           /* q `x union y` == `distinct x,y` (ref/union.md) —
+                         * wrapper because rayfall union KEEPS x-duplicates
+                         * (only dedups y against x); q dedups the whole join. */
+    QK_INTER,           /* q `x inter y` — items of x in y, x-dups kept
+                         * (ref/inter.md).  rayfall `sect` IS this for lists,
+                         * but returns a WRONG-shaped dict for dict operands
+                         * (kdb returns the common VALUES as a list), so the
+                         * wrapper guards dict/table operands with 'nyi and
+                         * delegates lists to ray_sect_fn. */
+    QK_CROSS            /* q `x cross y` == {raze x,/:\:y} (ref/cross.md) —
+                         * Cartesian product wrapper composing item access +
+                         * q join (rayfall concat); no cartesian primitive in
+                         * rayfall.  String (char-items) and dict/table cross
+                         * are deferred cells ('nyi). */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
