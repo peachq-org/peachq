@@ -130,6 +130,7 @@ help:
 	@printf "  %-28s %s\n" "make qtest" "q-only loop; fuzzy filter with F=, e.g. make qtest F=asc"
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
+	@printf "  %-28s %s\n" "make qmatrix" "Run non-gating op x shape smoke/fuzz harness (TSV)"
 	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
 	@printf "  %-28s %s\n" "make kwire-live" "javakdb client vs live ./q -p server (also in qtest; needs javac)"
 	@printf "  %-28s %s\n" "make qdash" "Regenerate the peachq conformance dashboard (tools/qdash)"
@@ -321,6 +322,14 @@ test-parse-diff: $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ)
 	      echo "PARSE-DIFF TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make test-parse-diff"; \
 	    fi; exit $$rc; }
 
+# openq: NON-GATING op x shape smoke/fuzz harness (count tier). One q file per
+# builtin verb (arity 1/2) x shapes, run under ASan -> a qtest-shape ledger
+# (`STATUS | pass | total | time | id | text`, id = keywords/<op>) that parses
+# alongside qtest. NOT an oracle; EXPECTED RED; does NOT gate test/qtest nor the
+# count ratchet. Needs ./q; QMATRIX_TIMEOUT= overrides the per-file timeout.
+qmatrix: $(Q_TARGET)
+	@tools/qmatrix/run.sh
+
 # openq: regenerate the checked-in test/q qcmd ledger (qtest-results.txt) —
 # ONE row per test/q/**/*.qcmd file (passing or failing) + a TOTAL line.
 # NO --skip-file and NO deferred filtering, EVER: this ledger is the complete,
@@ -396,7 +405,7 @@ clean:
 	# JUnit-XML export (tools/qtest.sh) + javakdb build classes (kwire-live).
 	-rm -rf test-results tools/kdb-conformance/.build
 
-.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean
+.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
