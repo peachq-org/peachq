@@ -40,6 +40,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         int64_t v = as_i64(b);
         if (a->type == -RAY_DATE)      return ray_date(a->i64 + v);
         if (a->type == -RAY_TIME)      return ray_time(a->i64 + v);
+        if (a->type == -RAY_MONTH)     return ray_month(a->i64 + v);
         if (a->type == -RAY_TIMESTAMP) return ray_timestamp(a->i64 + v);
     }
     if (is_numeric(a) && a->type != -RAY_F64 && is_temporal(b)) {
@@ -49,6 +50,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         int64_t v = as_i64(a);
         if (b->type == -RAY_DATE)      return ray_date(b->i64 + v);
         if (b->type == -RAY_TIME)      return ray_time(b->i64 + v);
+        if (b->type == -RAY_MONTH)     return ray_month(b->i64 + v);
         if (b->type == -RAY_TIMESTAMP) return ray_timestamp(b->i64 + v);
     }
     /* Reject float + temporal */
@@ -118,6 +120,15 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_I32);
         return ray_i32((int32_t)(a->i64 - b->i64));
     }
+    /* MONTH - int → MONTH (basics/math.md: 2012.05 2012.06m-2 → 2012.03 2012.04m) */
+    if (a->type == -RAY_MONTH && is_numeric(b)) {
+        return ray_month(a->i64 - as_i64(b));
+    }
+    /* MONTH - MONTH → i32 (months difference, mirrors DATE-DATE) */
+    if (a->type == -RAY_MONTH && b->type == -RAY_MONTH) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_I32);
+        return ray_i32((int32_t)(a->i64 - b->i64));
+    }
     /* DATE - TIME → TIMESTAMP */
     if (a->type == -RAY_DATE && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
@@ -182,6 +193,16 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIME);
         return ray_time(a->i64 * as_i64(b));
     }
+    /* int * MONTH → MONTH, MONTH * int → MONTH (basics/math.md:156
+     * 2017.12m*0 1 2 → 2000.01 2017.12 2035.11m — payload multiply). */
+    if (is_numeric(a) && b->type == -RAY_MONTH) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MONTH);
+        return ray_month(as_i64(a) * b->i64);
+    }
+    if (a->type == -RAY_MONTH && is_numeric(b)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MONTH);
+        return ray_month(a->i64 * as_i64(b));
+    }
     /* TIME * TIME → error */
     if (a->type == -RAY_TIME && b->type == -RAY_TIME)
         return ray_error("type", "multiply: cannot multiply %s by %s",
@@ -200,7 +221,11 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
 ray_t* ray_div_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_div_fn, OP_DIV, a, b);
-    if (!is_numeric(a) || !is_numeric(b))
+    /* MONTH/TIME ÷ numeric → f64 payload divide — both doc-pinned
+     * (basics/math.md:158 2017.12m%2 → 107.5; :160 00:10%2 → 5f).
+     * DATE/TIMESTAMP stay rejected (unpinned behavior — do not invent). */
+    int a_div_temporal = (a->type == -RAY_MONTH || a->type == -RAY_TIME);
+    if (!(is_numeric(a) || a_div_temporal) || !is_numeric(b))
         return ray_error("type", "cannot divide %s by %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
@@ -251,6 +276,7 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
         int64_t result = av - bv * q;
         if (a->type == -RAY_TIME)      return ray_time(result);
         if (a->type == -RAY_DATE)      return ray_date(result);
+        if (a->type == -RAY_MONTH)     return ray_month(result);
         return ray_timestamp(result);
     }
     if (!is_numeric(a) || !is_numeric(b))
