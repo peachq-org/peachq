@@ -62,7 +62,7 @@ typedef struct {
 } entry_t;
 
 /* Upper bound: every manifest row can contribute at most two entries. */
-static entry_t g_entries[2 * 128];  /* 2 slots per manifest row; grown 96->128 at the list-verb merge (2026-07-06) */
+static entry_t g_entries[2 * 256];  /* 2 slots per manifest row; grown 96->128 (list-verb 2026-07-06)->256 (2026-07-07: set-ops+sort+control-flow+atomic-math pushed the row count past 128) */
 static int     g_count    = 0;
 static bool    g_inited   = false;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
