@@ -76,6 +76,15 @@ ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);
  * not from this value-keyed lookup. */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
 
+/* q `value` — the full form matrix (ref/value.md): dict->vals, symbol->variable,
+ * string->eval, list->single apply/index, projection->(fn;args), derived->iterator
+ * arg, operator->opcode, lambda->structure.  Exposed so q_builtins can ALSO env-
+ * bind it (like string/meta/type): the parser embeds the registry copy at `value`
+ * application heads, but a bare `value` used as a HOF operand (`value each …`) is
+ * env-resolved, and without this override it would hit rayfall's dict-only native
+ * `value`.  Both bindings call this one function (single home, rule 4). */
+ray_t* q_value_wrap(ray_t* x);
+
 /* Release every retained entry and reset.  Idempotent; also serves as
  * partial-cleanup on a failed init.  Must run before ray_env_destroy. */
 void q_registry_destroy(void);
