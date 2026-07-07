@@ -261,16 +261,16 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 # test binary, via the runner's substring name filter.  `make test` runs them
 # too (unfiltered); this is the fast q-only loop.  Narrow further with F=,
 # e.g. `make qtest F=asc` (fuzzy: matches anywhere in the suite name).
+# openq: the unified q gate.  Builds the test binary, then tools/qtest.sh runs
+# BOTH pillars (C/rfl/qcmd + qscript) in --porcelain mode and prints ONE
+# aggregated `STATUS | pass | total | time | id | text` summary.  F= narrows
+# BOTH pillars (fuzzy, matches anywhere in the suite id): `make qtest F=asc`.
 qtest: CFLAGS = $(DEBUG_CFLAGS)
 qtest: LDFLAGS = $(DEBUG_LDFLAGS)
 qtest: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 300 ./$(TARGET).test --all -f qlang$(if $(F), -f "$(F)",) || \
-	  { rc=$$?; if [ $$rc -eq 124 ]; then \
-	      echo "QTEST TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest"; \
-	    fi; exit $$rc; }
-	$(if $(F),,tools/qscript/run.sh)   # script-transcript pillar (skipped when F= filters)
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) tools/qtest.sh "$(F)"
 
 # openq: q-docs corpus floors — qdoctest over every ref/*.md, failing if the
 # parse / eval-ok counts drop below test/qdoctest.min.  A coverage METRIC, not
