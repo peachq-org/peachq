@@ -36,6 +36,7 @@
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
 #include "qlang/q_parse.h"    /* q_parse/q_lower — value-of-string (RUNTIME wrapper only; builders must never parse, rule 6) */
 #include "lang/internal.h"    /* ray_where_fn, ray_group_fn (funsql executor) */
+#include "ops/glob.h"         /* ray_glob_match — like/ss/ssr pattern matching */
 #include "table/sym.h"        /* ray_sym_vec_cell (funsql executor) */
 #include "qlang/q_wire.h"     /* -8!/-9! internal-fn dispatch on dyadic ! */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
@@ -2539,12 +2540,96 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
     }
 }
 
+/* q `w$s` PAD (ref/pad.md): a LONG width w left-justifies the string s in a
+ * field of |w| spaces (w<0 right-justifies); longer strings truncate to |w|.
+ * Atomic through the container types (a LIST of strings pads each; DICT over
+ * values; TABLE over columns).  Non-string leaves are a 'type error. */
+static ray_t* q_pad(int64_t w, ray_t* x) {
+    if (!x) return ray_error("type", "$: pad nil");
+    if (x->type == -RAY_STR) {
+        int64_t width = w < 0 ? -w : w;
+        int right = w < 0;                 /* w<0 -> right-justify */
+        const char* p = ray_str_ptr(x);
+        int64_t n = (int64_t)ray_str_len(x);
+        int64_t copy = n < width ? n : width;
+        char stack[256];
+        char* b = (width < (int64_t)sizeof stack) ? stack : malloc((size_t)width + 1);
+        if (!b) return ray_error("wsfull", "$: out of memory");
+        memset(b, ' ', (size_t)width);
+        if (right) memcpy(b + (width - copy), p, (size_t)copy);   /* text at right */
+        else       memcpy(b, p, (size_t)copy);                    /* text at left  */
+        ray_t* r = ray_str(b, (size_t)width);
+        if (b != stack) free(b);
+        return r;
+    }
+    if (x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* e = ray_at_fn(x, ia);
+            ray_release(ia);
+            if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+            ray_t* r = q_pad(w, e);
+            ray_release(e);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (x->type == RAY_DICT) {
+        ray_t* k = ray_dict_keys(x);
+        ray_t* v = ray_dict_vals(x);
+        if (!k || !v) return ray_error("type", "$: bad dict");
+        ray_t* nv = q_pad(w, v);
+        if (!nv || RAY_IS_ERR(nv)) return nv;
+        ray_retain(k);
+        return ray_dict_new(k, nv);
+    }
+    if (x->type == RAY_TABLE) {
+        int64_t nc = ray_table_ncols(x);
+        ray_t* out = ray_table_new(nc);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t c = 0; c < nc; c++) {
+            ray_t* col = ray_table_get_col_idx(x, c);
+            ray_t* ncol = q_pad(w, col);
+            if (!ncol || RAY_IS_ERR(ncol)) { ray_release(out); return ncol; }
+            out = ray_table_add_col(out, ray_table_col_name(x, c), ncol);
+            ray_release(ncol);
+            if (!out || RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (x->type == RAY_STR) {            /* string vector -> pad each element */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
+            ray_t* s = ray_str(p ? p : "", p ? sn : 0);
+            ray_t* r = q_pad(w, s);
+            ray_release(s);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    return ray_error("type", "$: pad expects a string");
+}
+
 /* q `t$x` — Cast/Tok dispatcher.  Multi-designator LHS ("fiij", `int`float,
  * 5 6h, (`int;"i";6h)) zips elementwise over x (ref/cast.md pins
  * (`int;"i";6h)$10 -> 10 10 10i: an ATOM rhs is broadcast).  Single
  * designators resolve via q_cast_designator and dispatch to the shared
- * q_cast_to / q_tok_to (the ONE conversion home — see q_registry.h). */
+ * q_cast_to / q_tok_to (the ONE conversion home — see q_registry.h).  A LONG
+ * width LHS (`9$"foo"`) is PAD, not a cast — intercepted before designators. */
 static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
+    if (t && t->type == -RAY_I64) return q_pad(t->i64, x);
     int multi = t && ((t->type == -RAY_STR && ray_str_len(t) > 1) ||
                       t->type == RAY_SYM || t->type == RAY_I16 ||
                       t->type == RAY_LIST);
@@ -4652,6 +4737,149 @@ static ray_t* q_hclose_wrap(ray_t* x) {
     return r;
 }
 
+/* ===== string search family: like / ss / ssr (feat/q-string-fns) =========== */
+
+/* q `x like p` — glob match.  Reuses ray_like_fn for sym/str atoms and
+ * vectors; a DICT maps the match over its values (kdb: keys kept). */
+static ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
+    if (x && x->type == RAY_DICT) {
+        ray_t* k = ray_dict_keys(x);   /* borrowed */
+        ray_t* v = ray_dict_vals(x);   /* borrowed */
+        if (!k || !v) return ray_error("type", "like: bad dict");
+        ray_t* nv = q_like_wrap(v, pattern);
+        if (!nv || RAY_IS_ERR(nv)) return nv;
+        ray_retain(k);
+        return ray_dict_new(k, nv);    /* consumes k + nv */
+    }
+    if (x && x->type == RAY_LIST) {    /* boxed list (e.g. dict values) */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* e = ray_at_fn(x, ia);
+            ray_release(ia);
+            if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+            ray_t* r = q_like_wrap(e, pattern);
+            ray_release(e);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        ray_t* c = q_collapse_list(out);   /* homogeneous bool run -> bool vec */
+        ray_release(out);
+        return c;
+    }
+    return ray_like_fn(x, pattern);
+}
+
+/* Match glob pattern p[0..pn) anchored at s[pos..sn), where every pattern
+ * token consumes exactly one input char: `?` (any), `[..]`/`[^..]` (class,
+ * optional negation), or a literal.  The variable-width `*` form is not used
+ * by q's ss/ssr, so a bare `*` is treated literally.  Returns the number of
+ * input chars consumed on a full match, or -1 on mismatch. */
+static int64_t q_glob_fixed_at(const char* s, size_t sn, size_t pos,
+                               const char* p, size_t pn) {
+    size_t si = pos, pi = 0;
+    while (pi < pn) {
+        if (si >= sn) return -1;
+        char pc = p[pi];
+        if (pc == '?') { pi++; si++; continue; }
+        if (pc == '[') {
+            size_t j = pi + 1;
+            int neg = 0;
+            if (j < pn && p[j] == '^') { neg = 1; j++; }
+            int matched = 0;
+            for (; j < pn && p[j] != ']'; j++)
+                if (p[j] == s[si]) matched = 1;
+            if (j < pn) j++;              /* skip ']' */
+            if (matched == neg) return -1;
+            pi = j; si++; continue;
+        }
+        if (pc != s[si]) return -1;       /* literal */
+        pi++; si++;
+    }
+    return (int64_t)(si - pos);
+}
+
+/* q `s ss p` — string search: 0-based start index of every match of the glob
+ * pattern p in the string s (overlapping, kdb-true).  Returns a long vector. */
+static ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
+    if (!s || s->type != -RAY_STR || !p || p->type != -RAY_STR)
+        return ray_error("type", "ss: expects string arguments");
+    const char* sp = ray_str_ptr(s); size_t sn = ray_str_len(s);
+    const char* pp = ray_str_ptr(p); size_t pn = ray_str_len(p);
+    ray_t* out = ray_vec_new(RAY_I64, 8);
+    if (RAY_IS_ERR(out)) return out;
+    if (pn == 0) return out;                       /* empty pattern -> no hits */
+    /* q_glob_fixed_at anchors at each position; the match WIDTH differs from
+     * the pattern's byte length (a `[..]` class is 1 input char), so iterate
+     * every start position and let the matcher enforce bounds. */
+    for (size_t i = 0; i < sn; i++) {
+        if (q_glob_fixed_at(sp, sn, i, pp, pn) >= 0) {
+            int64_t idx = (int64_t)i;
+            out = ray_vec_append(out, &idx);
+            if (RAY_IS_ERR(out)) return out;
+        }
+    }
+    return out;
+}
+
+/* q `ssr[s;p;r]` — replace every (non-overlapping, left-to-right) match of the
+ * glob pattern p in s.  r is either a replacement string, or a function
+ * applied to each matched substring (kdb: `ssr[s;"t?r";upper]`). */
+ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
+    if (n != 3) return ray_error("rank", "ssr: expects 3 args");
+    ray_t* s = args[0]; ray_t* p = args[1]; ray_t* r = args[2];
+    if (!s || s->type != -RAY_STR || !p || p->type != -RAY_STR)
+        return ray_error("type", "ssr: s and p must be strings");
+    int r_is_fn = q_is_fn_value(r);
+    if (!r_is_fn && (!r || r->type != -RAY_STR))
+        return ray_error("type", "ssr: replacement must be a string or function");
+    const char* sp = ray_str_ptr(s); size_t sn = ray_str_len(s);
+    const char* pp = ray_str_ptr(p); size_t pn = ray_str_len(p);
+    size_t cap = sn + 16, blen = 0;
+    char* b = (char*)malloc(cap);
+    if (!b) return ray_error("wsfull", "ssr: out of memory");
+    #define SSR_PUSH(PTR, L) do { \
+        size_t _l = (L); \
+        if (blen + _l > cap) { cap = (blen + _l) * 2; char* nb = (char*)realloc(b, cap); \
+            if (!nb) { free(b); return ray_error("wsfull", "ssr: out of memory"); } b = nb; } \
+        memcpy(b + blen, (PTR), _l); blen += _l; } while (0)
+    ray_t* err = NULL;
+    size_t i = 0;
+    while (i < sn) {
+        /* q_glob_fixed_at bounds-checks internally (si>=sn -> -1) and a `[..]`
+         * class is multiple pattern bytes but ONE input char, so do NOT gate on
+         * `i + pn <= sn` (that rejected bracket-class matches near the end). */
+        int64_t m = pn ? q_glob_fixed_at(sp, sn, i, pp, pn) : -1;
+        if (m >= 0) {
+            if (r_is_fn) {
+                ray_t* sub = ray_str(sp + i, (size_t)m);
+                ray_t* one[1] = { sub };
+                ray_t* rep = q_call_n(r, one, 1);
+                ray_release(sub);
+                if (!rep || RAY_IS_ERR(rep)) { err = rep; break; }
+                if (rep->type != -RAY_STR) { ray_release(rep); err = ray_error("type", "ssr: replacement fn must return a string"); break; }
+                SSR_PUSH(ray_str_ptr(rep), ray_str_len(rep));
+                ray_release(rep);
+            } else {
+                SSR_PUSH(ray_str_ptr(r), ray_str_len(r));
+            }
+            i += (m > 0) ? (size_t)m : 1;   /* advance past the match */
+        } else {
+            SSR_PUSH(sp + i, 1);
+            i++;
+        }
+    }
+    #undef SSR_PUSH
+    if (err) { free(b); return err; }
+    ray_t* out = ray_str(b, blen);
+    free(b);
+    return out;
+}
+
 /* ---- value builders keyed by manifest build-kind ---- */
 
 /* Identity/rename-reuse: snapshot an existing rayfall builtin value by name and
@@ -4734,6 +4962,9 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_HOPEN:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hopen_wrap);
     case QK_HCLOSE: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hclose_wrap);
     case QK_NULL:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_null_wrap);
+    case QK_LIKE:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_like_wrap);
+    case QK_SS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ss_wrap);
+    case QK_SSR:    return ray_fn_vary  (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ssr_wrap);
     default:      return NULL;
     }
 }
