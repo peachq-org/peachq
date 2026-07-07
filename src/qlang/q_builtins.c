@@ -79,24 +79,246 @@ static ray_t* q_string_fn(ray_t* x) {
     return out;
 }
 
-/* upper / lower — whole-string per-char ASCII transforms (spec piece 2's
- * in-scope string verbs; char-VECTOR semantics wait on the string model). */
-static ray_t* q_case_fn(ray_t* x, int up) {
-    if (!x || x->type != -RAY_STR)
-        return ray_error("type", "%s: expects a string", up ? "upper" : "lower");
-    const char* p = ray_str_ptr(x);
-    size_t n = ray_str_len(x);
-    char stack[256];
-    char* b = (n < sizeof stack) ? stack : malloc(n + 1);
-    if (!b) return ray_error("wsfull", "%s: out of memory", up ? "upper" : "lower");
+/* ---- recursive string-verb driver (upper / lower / trim family) -----------
+ * q's string verbs are atomic through the container types: a LIST maps the
+ * verb over its items, a DICT over its values (keys unchanged), a TABLE over
+ * its columns.  q_str_recurse walks that structure once and hands every
+ * non-container node to `leaf`, so upper/lower/trim share one traversal. */
+typedef ray_t* (*q_str_leaf_fn)(ray_t* x, int mode);
+
+static ray_t* q_str_recurse(ray_t* x, q_str_leaf_fn leaf, int mode) {
+    if (!x) return ray_error("type", "string op: nil");
+    if (x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* e = ray_at_fn(x, ia);
+            ray_release(ia);
+            if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+            ray_t* r = q_str_recurse(e, leaf, mode);
+            ray_release(e);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (x->type == RAY_DICT) {
+        ray_t* k = ray_dict_keys(x);   /* borrowed */
+        ray_t* v = ray_dict_vals(x);   /* borrowed */
+        if (!k || !v) return ray_error("type", "string op: bad dict");
+        ray_t* nv = q_str_recurse(v, leaf, mode);
+        if (!nv || RAY_IS_ERR(nv)) return nv;
+        ray_retain(k);
+        return ray_dict_new(k, nv);    /* consumes k + nv */
+    }
+    if (x->type == RAY_TABLE) {
+        int64_t nc = ray_table_ncols(x);
+        ray_t* out = ray_table_new(nc);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t c = 0; c < nc; c++) {
+            ray_t* col = ray_table_get_col_idx(x, c);   /* borrowed */
+            ray_t* ncol = q_str_recurse(col, leaf, mode);
+            if (!ncol || RAY_IS_ERR(ncol)) { ray_release(out); return ncol; }
+            out = ray_table_add_col(out, ray_table_col_name(x, c), ncol);
+            ray_release(ncol);
+            if (!out || RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    return leaf(x, mode);
+}
+
+/* upper / lower — ASCII case shift for a string atom, a symbol atom, and the
+ * string/symbol VECTOR forms; the container types recurse via q_str_recurse. */
+static void q_case_bytes(const char* p, size_t n, char* b, int up) {
     for (size_t i = 0; i < n; i++)
         b[i] = (char)(up ? toupper((unsigned char)p[i]) : tolower((unsigned char)p[i]));
-    ray_t* r = ray_str(b, n);
-    if (b != stack) free(b);
-    return r;
 }
-static ray_t* q_upper_fn(ray_t* x) { return q_case_fn(x, 1); }
-static ray_t* q_lower_fn(ray_t* x) { return q_case_fn(x, 0); }
+static ray_t* q_case_leaf(ray_t* x, int up) {
+    if (!x) return ray_error("type", "%s: nil", up ? "upper" : "lower");
+    if (x->type == -RAY_STR) {
+        const char* p = ray_str_ptr(x);
+        size_t n = ray_str_len(x);
+        char stack[256];
+        char* b = (n < sizeof stack) ? stack : malloc(n + 1);
+        if (!b) return ray_error("wsfull", "%s: out of memory", up ? "upper" : "lower");
+        q_case_bytes(p, n, b, up);
+        ray_t* r = ray_str(b, n);
+        if (b != stack) free(b);
+        return r;
+    }
+    if (x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);   /* borrowed */
+        if (!s) return ray_error("type", "%s: bad symbol", up ? "upper" : "lower");
+        const char* p = ray_str_ptr(s);
+        size_t n = ray_str_len(s);
+        char stack[256];
+        char* b = (n < sizeof stack) ? stack : malloc(n + 1);
+        if (!b) return ray_error("wsfull", "%s: out of memory", up ? "upper" : "lower");
+        q_case_bytes(p, n, b, up);
+        int64_t id = ray_sym_intern(b, n);
+        if (b != stack) free(b);
+        return ray_sym(id);
+    }
+    if (x->type == RAY_SYM) {   /* symbol vector */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* s = ray_sym_vec_cell(x, i);   /* borrowed str */
+            const char* p = s ? ray_str_ptr(s) : "";
+            size_t sn = s ? ray_str_len(s) : 0;
+            char stack[256];
+            char* b = (sn < sizeof stack) ? stack : malloc(sn + 1);
+            if (!b) { ray_release(out); return ray_error("wsfull", "%s: oom", up ? "upper" : "lower"); }
+            q_case_bytes(p, sn, b, up);
+            int64_t id = ray_sym_intern(b, sn);
+            if (b != stack) free(b);
+            out = ray_vec_append(out, &id);
+            if (!out || RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (x->type == RAY_STR) {   /* string vector -> per-element case shift */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
+            char stack[256];
+            char* b = (sn < sizeof stack) ? stack : malloc(sn + 1);
+            if (!b) { ray_release(out); return ray_error("wsfull", "%s: oom", up ? "upper" : "lower"); }
+            q_case_bytes(p ? p : "", p ? sn : 0, b, up);
+            ray_t* r = ray_str(b, p ? sn : 0);
+            if (b != stack) free(b);
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    return ray_error("type", "%s: expects a string or symbol", up ? "upper" : "lower");
+}
+static ray_t* q_upper_fn(ray_t* x) { return q_str_recurse(x, q_case_leaf, 1); }
+static ray_t* q_lower_fn(ray_t* x) { return q_str_recurse(x, q_case_leaf, 0); }
+
+/* trim / ltrim / rtrim — mode 0=both, 1=leading only, 2=trailing only.
+ * A string atom strips ASCII whitespace; a simple (non-string) vector strips
+ * leading/trailing NULLs (kdb's `trim 0N 0N 1 2 0N` -> 1 2); any other atom
+ * passes through unchanged (`trim 42` -> 42).  Containers recurse. */
+static int q_is_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+static ray_t* q_trim_leaf(ray_t* x, int mode) {
+    if (!x) return ray_error("type", "trim: nil");
+    if (x->type == -RAY_STR) {
+        const char* p = ray_str_ptr(x);
+        size_t n = ray_str_len(x), a = 0, b = n;
+        if (mode != 2) while (a < b && q_is_ws(p[a])) a++;
+        if (mode != 1) while (b > a && q_is_ws(p[b - 1])) b--;
+        return ray_str(p + a, b - a);
+    }
+    if (x->type == RAY_STR) {   /* string vector -> trim each element */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
+            size_t a = 0, b = p ? sn : 0;
+            if (mode != 2) while (a < b && q_is_ws(p[a])) a++;
+            if (mode != 1) while (b > a && q_is_ws(p[b - 1])) b--;
+            ray_t* r = ray_str(p ? p + a : "", b - a);
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (ray_is_vec(x)) {        /* simple non-string vector -> strip NULL ends */
+        int64_t n = ray_len(x), a = 0, b = n;
+        if (mode != 2) while (a < b && ray_vec_is_null(x, a)) a++;
+        if (mode != 1) while (b > a && ray_vec_is_null(x, b - 1)) b--;
+        if (a == 0 && b == n) { ray_retain(x); return x; }
+        ray_t* idx = ray_vec_new(RAY_I64, b - a);
+        if (RAY_IS_ERR(idx)) return idx;
+        for (int64_t i = a; i < b; i++) idx = ray_vec_append(idx, &i);
+        ray_t* r = ray_at_fn(x, idx);
+        ray_release(idx);
+        if (!r || RAY_IS_ERR(r)) return r;
+        ray_t* c = q_collapse_list(r);   /* boxed slice -> typed vector display */
+        ray_release(r);
+        return c;
+    }
+    ray_retain(x);              /* atom passthrough (trim 42 -> 42) */
+    return x;
+}
+static ray_t* q_trim_fn (ray_t* x) { return q_str_recurse(x, q_trim_leaf, 0); }
+static ray_t* q_ltrim_fn(ray_t* x) { return q_str_recurse(x, q_trim_leaf, 1); }
+static ray_t* q_rtrim_fn(ray_t* x) { return q_str_recurse(x, q_trim_leaf, 2); }
+
+/* ---- md5 (RFC 1321, public spec — CLEAN ROOM) -----------------------------
+ * q `md5 s` hashes the string s to a 16-byte digest (a RAY_U8 byte vector,
+ * displayed as `0x…`).  Self-contained implementation of the published
+ * algorithm; no external dependency, no kdb reference. */
+static int q_md5_compute(const uint8_t* msg, size_t len, uint8_t out[16]) {
+    static const uint32_t K[64] = {
+        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+        0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+        0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+        0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+        0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+        0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391 };
+    static const uint32_t S[64] = {
+        7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+        5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+        4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+        6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21 };
+    uint32_t a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+    /* padded length: message + 0x80 + zeros to 56 mod 64 + 8-byte bit length */
+    size_t nblk = ((len + 8) / 64) + 1;
+    uint8_t* buf = calloc(nblk, 64);
+    if (!buf) return 0;                 /* OOM -> caller signals 'wsfull */
+    memcpy(buf, msg, len);
+    buf[len] = 0x80;
+    uint64_t bits = (uint64_t)len * 8;
+    for (int i = 0; i < 8; i++) buf[nblk * 64 - 8 + i] = (uint8_t)(bits >> (8 * i));
+    for (size_t blk = 0; blk < nblk; blk++) {
+        uint32_t M[16];
+        for (int i = 0; i < 16; i++) {
+            const uint8_t* q = buf + blk * 64 + i * 4;
+            M[i] = (uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24);
+        }
+        uint32_t A = a0, B = b0, C = c0, D = d0;
+        for (int i = 0; i < 64; i++) {
+            uint32_t F; int g;
+            if (i < 16)      { F = (B & C) | (~B & D);        g = i; }
+            else if (i < 32) { F = (D & B) | (~D & C);        g = (5 * i + 1) & 15; }
+            else if (i < 48) { F = B ^ C ^ D;                 g = (3 * i + 5) & 15; }
+            else             { F = C ^ (B | ~D);              g = (7 * i) & 15; }
+            F += A + K[i] + M[g];
+            A = D; D = C; C = B;
+            B += (F << S[i]) | (F >> (32 - S[i]));
+        }
+        a0 += A; b0 += B; c0 += C; d0 += D;
+    }
+    free(buf);
+    uint32_t words[4] = { a0, b0, c0, d0 };
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) out[i * 4 + j] = (uint8_t)(words[i] >> (8 * j));
+    return 1;
+}
+static ray_t* q_md5_fn(ray_t* x) {
+    if (!x || x->type != -RAY_STR) return ray_error("type", "md5: expects a string");
+    uint8_t digest[16];
+    if (!q_md5_compute((const uint8_t*)ray_str_ptr(x), ray_str_len(x), digest))
+        return ray_error("wsfull", "md5: out of memory");
+    return ray_vec_from_raw(RAY_U8, digest, 16);
+}
 
 /* (show x) — print x's q console display as a SIDE EFFECT (buffered in the q
  * console sink; the host drains it), then return generic null.  Overrides
@@ -414,6 +636,12 @@ static void bind_unary(const char* name, ray_unary_fn fn) {
     ray_release(obj);
 }
 
+static void bind_vary(const char* name, ray_vary_fn fn) {
+    ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
+    ray_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    ray_release(obj);
+}
+
 static void bind_value(const char* name, ray_t* val) {
     ray_env_bind(ray_sym_intern(name, strlen(name)), val);
     ray_release(val);
@@ -459,6 +687,11 @@ void q_builtins_register(void) {
     bind_unary("string", q_string_fn);
     bind_unary("upper",  q_upper_fn);
     bind_unary("lower",  q_lower_fn);
+    bind_unary("trim",   q_trim_fn);
+    bind_unary("ltrim",  q_ltrim_fn);
+    bind_unary("rtrim",  q_rtrim_fn);
+    bind_unary("md5",    q_md5_fn);
+    bind_vary ("ssr",    q_ssr_wrap);
     bind_unary("show",   q_show_fn);
     /* Table introspection — q-owned, snapshotted by the registry's QK_ENV rows
      * (q_ops.c) so the parser embeds these over the base env `meta`/(absent)
