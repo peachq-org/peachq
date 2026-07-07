@@ -185,6 +185,7 @@ static int64_t numeric_atom_i64(ray_t* x) {
     case -RAY_I32:
     case -RAY_DATE:
     case -RAY_TIME:
+    case -RAY_MONTH:
         return x->i32;
     case -RAY_I16:
         return x->i16;
@@ -428,6 +429,7 @@ static ray_t* zero_atom_for_elem_type(ray_t* coll) {
         case RAY_BOOL:      return make_bool(0);
         case RAY_F64:       return make_f64(0.0);
         case RAY_DATE:      return ray_date(0);
+        case RAY_MONTH:     return ray_month(0);
         case RAY_TIME:      return ray_time(0);
         case RAY_TIMESTAMP: return ray_timestamp(0);
         case RAY_SYM:       return ray_sym(0);
@@ -587,7 +589,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
         if (out_is_int && vec_is_int)
             out_type = vec_type;
         /* For temporal: only override if both are same temporal family */
-        if ((vec_type == RAY_DATE || vec_type == RAY_TIME || vec_type == RAY_TIMESTAMP) &&
+        if ((vec_type == RAY_DATE || vec_type == RAY_TIME || vec_type == RAY_MONTH || vec_type == RAY_TIMESTAMP) &&
             out_type == vec_type)
             out_type = vec_type; /* no-op, just keep it */
     }
@@ -796,7 +798,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     if (!force_boxed &&
         (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
          out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_U8 ||
-         out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_TIMESTAMP)) {
+         out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_MONTH || out_type == RAY_TIMESTAMP)) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
@@ -940,7 +942,7 @@ ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
     if (!is_boxed &&
         (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
         out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_U8 ||
-        out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_TIMESTAMP)) {
+        out_type == RAY_DATE || out_type == RAY_TIME || out_type == RAY_MONTH || out_type == RAY_TIMESTAMP)) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
@@ -1240,7 +1242,7 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             } else if (atype == RAY_F64) {
                 atom_wrap = ray_vec_new(RAY_F64, 1);
                 if (!RAY_IS_ERR(atom_wrap)) { ((double*)ray_data(atom_wrap))[0] = col_src->f64; atom_wrap->len = 1; }
-            } else if (atype == RAY_DATE || atype == RAY_TIME || atype == RAY_I32) {
+            } else if (atype == RAY_DATE || atype == RAY_TIME || atype == RAY_MONTH || atype == RAY_I32) {
                 atom_wrap = ray_vec_new(atype, 1);
                 if (!RAY_IS_ERR(atom_wrap)) { ((int32_t*)ray_data(atom_wrap))[0] = col_src->i32; atom_wrap->len = 1; }
             } else if (atype == RAY_BOOL) {
@@ -1314,6 +1316,7 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             else if (row_elems[0]->type == -RAY_TIMESTAMP) col_type = RAY_TIMESTAMP;
             else if (row_elems[0]->type == -RAY_DATE) col_type = RAY_DATE;
             else if (row_elems[0]->type == -RAY_TIME) col_type = RAY_TIME;
+            else if (row_elems[0]->type == -RAY_MONTH) col_type = RAY_MONTH;
             /* RAY_CHAR removed — char atoms are now -RAY_STR */
         }
         /* Promote I64 → F64 if any element is F64 */
