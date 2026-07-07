@@ -36,6 +36,7 @@
 #include "lang/eval.h"        /* RAY_FN_* attrs, RAY_FN_Q_LOWER */
 #include "qlang/q_parse.h"    /* q_parse/q_lower — value-of-string (RUNTIME wrapper only; builders must never parse, rule 6) */
 #include "lang/internal.h"    /* ray_where_fn, ray_group_fn (funsql executor) */
+#include "ops/ops.h"          /* ray_is_lazy, ray_lazy_materialize (control forms) */
 #include "ops/glob.h"         /* ray_glob_match — like/ss/ssr pattern matching */
 #include "table/sym.h"        /* ray_sym_vec_cell (funsql executor) */
 #include "qlang/q_wire.h"     /* -8!/-9! internal-fn dispatch on dyadic ! */
@@ -4722,6 +4723,128 @@ static ray_t* q_sig_fn(ray_t* x) {
 ray_t* q_registry_ret_value(void) { return g_ret_value; }   /* borrowed */
 ray_t* q_registry_sig_value(void) { return g_sig_value; }   /* borrowed */
 
+/* ===== q imperative control constructs =====================================
+ * The `;` statement sequence and the `if` / `do` / `while` control words are
+ * SPECIAL FORMS (basics/control.md, ref/{if,do,while}.md): they receive their
+ * statement args UNEVALUATED and drive evaluation themselves — lazy, strictly
+ * left-to-right, with side effects PERSISTING.  Unlike a lambda body they do
+ * NOT open a lexical scope: a `:` assignment inside amends the ENCLOSING frame
+ * (q_lower already lowered it to set/let against that frame; "the brackets do
+ * not create lexical scope").  `if`/`do`/`while` always return the generic
+ * null; `;` returns its LAST statement's value.  This is the q-layer home for
+ * the semantics (CLAUDE.md rule 4) — rayfall's own `if`/`do` differ (triadic
+ * cond / scope-pushing progn) so they are NOT reused here. */
+static ray_t* g_seq_value   = NULL;
+static ray_t* g_if_value    = NULL;
+static ray_t* g_do_value    = NULL;
+static ray_t* g_while_value = NULL;
+
+/* q if/while require the test to evaluate to an atom of INTEGRAL type
+ * (ref/if.md, ref/while.md); a float / symbol / vector / generic null is a
+ * 'type error, not a silent truthiness (kdb `if[1 0;…]` signals `type). */
+static int q_ctl_test_ok(ray_t* t) {
+    int8_t ty = t->type;
+    return ty == -RAY_BOOL || ty == -RAY_I64 || ty == -RAY_I32 ||
+           ty == -RAY_I16 || ty == -RAY_U8;
+}
+
+/* Evaluate a test/condition arg to a truthiness, materializing a lazy handle.
+ * On error (eval failure OR a non-integral-atom test), stashes the owned
+ * RAY_ERROR in *err and returns 0. */
+static int q_ctl_truth(ray_t* arg, ray_t** err) {
+    *err = NULL;
+    ray_t* t = ray_eval(arg);
+    if (RAY_IS_ERR(t)) { *err = t; return 0; }
+    if (ray_is_lazy(t)) t = ray_lazy_materialize(t);
+    if (RAY_IS_ERR(t)) { *err = t; return 0; }
+    if (!q_ctl_test_ok(t)) {
+        ray_release(t);
+        *err = ray_error("type", "control test must be an integral atom");
+        return 0;
+    }
+    int truthy = is_truthy(t);
+    ray_release(t);
+    return truthy;
+}
+
+/* Evaluate args[from..n) in order for their side effects, releasing each
+ * result.  Returns an owned RAY_ERROR on the first failure, else NULL. */
+static ray_t* q_ctl_run_body(ray_t** args, int64_t from, int64_t n) {
+    for (int64_t i = from; i < n; i++) {
+        ray_t* r = ray_eval(args[i]);
+        if (RAY_IS_ERR(r)) return r;
+        ray_release(r);
+    }
+    return NULL;
+}
+
+/* `s1; s2; …; sn` — evaluate each statement left-to-right (side effects
+ * persist to the enclosing frame); the value is the LAST statement's. */
+static ray_t* q_seq_fn(ray_t** args, int64_t n) {
+    ray_t* result = RAY_NULL_OBJ;
+    for (int64_t i = 0; i < n; i++) {
+        ray_release(result);                 /* RAY_NULL_OBJ release is a no-op */
+        result = ray_eval(args[i]);
+        if (RAY_IS_ERR(result)) return result;
+    }
+    return result;
+}
+
+/* `if[test; e1; …; en]` — evaluate the body once, in order, unless test is
+ * zero; result is always the generic null (ref/if.md). */
+static ray_t* q_if_fn(ray_t** args, int64_t n) {
+    if (n < 1) return RAY_NULL_OBJ;
+    ray_t* err = NULL;
+    int truthy = q_ctl_truth(args[0], &err);
+    if (err) return err;
+    if (truthy) { err = q_ctl_run_body(args, 1, n); if (err) return err; }
+    return RAY_NULL_OBJ;
+}
+
+/* `do[count; e1; …; en]` — evaluate the body `count` times; result is always
+ * the generic null (ref/do.md).  `count` is a non-negative integer atom. */
+static ray_t* q_do_fn(ray_t** args, int64_t n) {
+    if (n < 1) return RAY_NULL_OBJ;
+    ray_t* cnt = ray_eval(args[0]);
+    if (RAY_IS_ERR(cnt)) return cnt;
+    if (ray_is_lazy(cnt)) cnt = ray_lazy_materialize(cnt);
+    if (RAY_IS_ERR(cnt)) return cnt;
+    if (RAY_ATOM_IS_NULL(cnt) ||
+        (cnt->type != -RAY_I64 && cnt->type != -RAY_I32 &&
+         cnt->type != -RAY_I16 && cnt->type != -RAY_U8)) {
+        ray_release(cnt);
+        return ray_error("type", "do: count must be a non-negative integer atom");
+    }
+    int64_t times = elem_as_i64(cnt);
+    ray_release(cnt);
+    if (times < 0) return ray_error("type", "do: count must be non-negative");
+    for (int64_t k = 0; k < times; k++) {
+        ray_t* err = q_ctl_run_body(args, 1, n);
+        if (err) return err;
+    }
+    return RAY_NULL_OBJ;
+}
+
+/* `while[test; e1; …; en]` — re-evaluate test each pass; while non-zero run
+ * the body in order; result is always the generic null (ref/while.md). */
+static ray_t* q_while_fn(ray_t** args, int64_t n) {
+    if (n < 1) return RAY_NULL_OBJ;
+    for (;;) {
+        ray_t* err = NULL;
+        int truthy = q_ctl_truth(args[0], &err);
+        if (err) return err;
+        if (!truthy) break;
+        err = q_ctl_run_body(args, 1, n);
+        if (err) return err;
+    }
+    return RAY_NULL_OBJ;
+}
+
+ray_t* q_registry_seq_value(void)   { return g_seq_value; }    /* borrowed */
+ray_t* q_registry_if_value(void)    { return g_if_value; }     /* borrowed */
+ray_t* q_registry_do_value(void)    { return g_do_value; }     /* borrowed */
+ray_t* q_registry_while_value(void) { return g_while_value; }  /* borrowed */
+
 ray_t* q_registry_funsql_select_value(void) { return g_funsql_select_value; }
 ray_t* q_registry_funsql_bang_value(void)   { return g_funsql_bang_value; }
 
@@ -5311,6 +5434,30 @@ ray_err_t q_registry_init(void) {
         g_sig_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_seq_value = ray_fn_vary("q.seq",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_seq_fn);
+    if (!g_seq_value || RAY_IS_ERR(g_seq_value)) {
+        g_seq_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_if_value = ray_fn_vary("q.if",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_if_fn);
+    if (!g_if_value || RAY_IS_ERR(g_if_value)) {
+        g_if_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_do_value = ray_fn_vary("q.do",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_do_fn);
+    if (!g_do_value || RAY_IS_ERR(g_do_value)) {
+        g_do_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
+    g_while_value = ray_fn_vary("q.while",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_while_fn);
+    if (!g_while_value || RAY_IS_ERR(g_while_value)) {
+        g_while_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     g_building = false;
     g_inited   = true;
     ray_serde_set_fn_hooks(q_serde_fn_writer, q_serde_fn_reader);
@@ -5379,6 +5526,10 @@ void q_registry_destroy(void) {
     if (g_lambda_value)        { ray_release(g_lambda_value);        g_lambda_value        = NULL; }
     if (g_ret_value)           { ray_release(g_ret_value);           g_ret_value           = NULL; }
     if (g_sig_value)           { ray_release(g_sig_value);           g_sig_value           = NULL; }
+    if (g_seq_value)           { ray_release(g_seq_value);           g_seq_value           = NULL; }
+    if (g_if_value)            { ray_release(g_if_value);            g_if_value            = NULL; }
+    if (g_do_value)            { ray_release(g_do_value);            g_do_value            = NULL; }
+    if (g_while_value)         { ray_release(g_while_value);         g_while_value         = NULL; }
     if (g_qret_payload)        { ray_release(g_qret_payload);        g_qret_payload        = NULL; }
     if (g_qsig_payload)        { ray_release(g_qsig_payload);        g_qsig_payload        = NULL; }
     g_count  = 0;
