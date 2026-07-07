@@ -89,10 +89,15 @@ int main(int argc, char** argv) {
      * REPL, a `-p` server serves IPC, and a non-tty non-server run exits 0
      * (the test/daemon shape) rather than blocking on an empty REPL. */
     const char* script = q_dotz_script_path();
+    int script_rc = 0;
     if (script)
-        q_repl_run_file(script, stdout, stderr);
+        script_rc = q_repl_run_file(script, stdout, stderr);
 
-    if (port > 0 && poll && !stdin_tty) {
+    if (script_rc != 0) {
+        /* Startup script could not be opened/read — skip the REPL/server loop
+         * and exit non-zero (kdb fails a bad `q file.q`; it must not silently
+         * succeed).  q_repl_run_file already printed the open error. */
+    } else if (port > 0 && poll && !stdin_tty) {
         /* Server-only: daemon/harness shape (`</dev/null`, docker,
          * systemd).  SIGPIPE ignored so a broken log pipe can't kill the
          * daemon (writes fail with EPIPE instead). */
@@ -122,5 +127,5 @@ int main(int argc, char** argv) {
         ray_poll_destroy(poll);
     }
     q_runtime_destroy(rt);
-    return 0;
+    return script_rc;
 }

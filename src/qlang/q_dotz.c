@@ -15,7 +15,9 @@ static bool ends_with_dot_q(const char* s) {
 }
 
 /* A value-consuming q flag: its FOLLOWING argv token is a value, not the
- * script.  Kept in sync with qmain.c's own flag parse (-p/--port/-u/-U). */
+ * script.  WARNING — hand-duplicated from qmain.c's flag parse (-p/--port/
+ * -u/-U): if you add a value-taking flag to qmain.c you MUST add it here too,
+ * or its value will be mis-detected as the `*.q` script path (wrong .z.f/.z.x). */
 static bool flag_takes_value(const char* s) {
     return strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
            strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0;
@@ -62,7 +64,10 @@ void q_dotz_init(int argc, char** argv) {
 const char* q_dotz_script_path(void) { return g_script; }
 
 ray_t* q_dotz_resolve(int64_t sym_id) {
-    ray_t* name = ray_sym_str(sym_id);   /* owned */
+    ray_t* name = ray_sym_str(sym_id);   /* BORROWED: the cached arena string
+                                          * atom (RAY_ATTR_ARENA); the
+                                          * ray_release below is a no-op — do
+                                          * not rely on it or "fix a leak" here */
     if (!name) return NULL;
     const char* p = ray_str_ptr(name);
     size_t      n = ray_str_len(name);
