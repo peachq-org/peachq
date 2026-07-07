@@ -15,9 +15,12 @@
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "lang/format.h"    /* ray_fmt — q string cast */
 #include "table/sym.h"      /* ray_sym_vec_cell */
+#include "mem/sys.h"        /* ray_sys_alloc — remote-eval scratch */
+#include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <assert.h>
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -415,11 +418,40 @@ static void bind_value(const char* name, ray_t* val) {
     ray_release(val);
 }
 
+/* Remote-source string eval (IPC request payloads, journal replay): the q
+ * pipeline, mirroring q_repl.c run_one_line — q_parse -> q_lower ->
+ * ray_eval -> materialize.  Buffered q console output (`show`, 0N!) is
+ * drained to the SERVER's stdout after each eval (kdb prints show output
+ * on the server console) and reset so it can't bleed into later requests.
+ * Returns an OWNED value; parse/lower/eval errors return as owned errors
+ * (the IPC layer serializes them as -128h responses). */
+static ray_t* q_remote_eval_str(const char* src, size_t len) {
+    char* tmp = (char*)ray_sys_alloc(len + 1);
+    if (!tmp) return ray_error("oom", "remote eval: out of memory");
+    memcpy(tmp, src, len);
+    tmp[len] = '\0';
+    ray_t* ast = q_parse(tmp);
+    ray_sys_free(tmp);
+    if (RAY_IS_ERR(ast)) return ast;
+    ast = q_lower(ast);
+    if (RAY_IS_ERR(ast)) return ast;
+    ray_t* r = ray_eval(ast);
+    ray_release(ast);
+    if (ray_is_lazy(r))
+        r = ray_lazy_materialize(r);
+    { const char* con = q_console_str();
+      if (con && *con) fputs(con, stdout);
+      q_console_reset(); }
+    return r;
+}
+
 void q_builtins_register(void) {
     /* Noun-head application (indexing, dict/table lookup, 104h carriers):
      * register the q dispatcher into eval's apply hook.  q_runtime_destroy
      * clears it before the runtime dies. */
     ray_eval_set_apply_hook(q_apply_noun);
+    /* Remote strings (IPC/journal) evaluate as q from now on. */
+    ray_eval_set_remote_str_fn(q_remote_eval_str);
     bind_unary("parse", q_parse_builtin_fn);
     /* q keywords with no rayfall counterpart — q-owned env bindings (same
      * mechanism as `parse`), snapshotted by the registry as QK_ENV rows. */
