@@ -20,6 +20,7 @@
 
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
+#include "qlang/q_ns.h"       /* q_ns_current, q_ns_is_unqualifiable */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/q_deriv.h"    /* q_proj_new — 104h derived-verb carriers */
 #include "lang/env.h"        /* ray_fn_name — qSQL output-expr head normalize */
@@ -2207,9 +2208,13 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
         ray_release(ns);
         return err;
     }
+    /* A leading-dot target (`.foo.x:42`) is a GLOBAL namespace write even
+     * inside a lambda body — q dotted names are never locals (q4m3 §12). */
+    int is_dotted_global = (ray_str_len(ns) > 0 && ray_str_ptr(ns)[0] == '.');
     ray_release(ns);
 
-    const char *target = (is_local && in_lambda) ? "let" : "set";
+    const char *target = (is_local && in_lambda && !is_dotted_global)
+                             ? "let" : "set";
     ray_t *setv = ql_env_val(target);
     if (!setv) return NULL;
     ray_retain(setv);
@@ -2355,7 +2360,16 @@ static void ql_mod_assign(ray_t **slot, int in_lambda) {
     ray_t *opv = q_registry_lookup_name(nm, l - 1, Q_DYADIC);   /* borrowed */
     ray_release(s);
     if (!opv) return;                       /* unknown op -> eval errors as today */
-    ray_t *setv = ql_env_val(in_lambda ? "let" : "set");        /* borrowed */
+    /* dotted targets (`.foo.x+:1`) are global namespace amends, never locals */
+    int mod_dotted = 0;
+    {
+        ray_t *ts = ray_sym_str(e[1]->i64);
+        if (ts) {
+            mod_dotted = (ray_str_len(ts) > 0 && ray_str_ptr(ts)[0] == '.');
+            ray_release(ts);
+        }
+    }
+    ray_t *setv = ql_env_val((in_lambda && !mod_dotted) ? "let" : "set"); /* borrowed */
     if (!setv) return;
     /* inner (op `x y): op on x's CURRENT value and y (append retains each) */
     ray_t *inner = ray_list_new(3);
@@ -2720,7 +2734,194 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
  * behaviour) plus the lowering walker above.  2b's parser flip moves the head
  * resolution into q_parse (the 2b flip).  May return a
  * RAY_ERROR (consuming `ast`): callers must error-check the result. */
+/* ===== context qualification (q namespaces, ADR: 2026-07-08 spec) ==========
+ * When the `\d` context is not root, every UNQUALIFIED user name-ref in the
+ * pre-lower tree is rewritten in place to `.ctx.name` — reads and assignment
+ * targets alike.  Because lowering runs at DEFINITION time for lambda bodies,
+ * this rewrite IS q's definition-time binding rule (q4m3 §12.7: an unqualified
+ * global in a function binds to the context in effect at definition).
+ *
+ * What is NOT rewritten:
+ *   - quoted (data) syms and non-identifier names (verb glyphs, markers),
+ *   - q reserved words / control words / BUILTIN env bindings
+ *     (q_ns_is_unqualifiable — user globals only),
+ *   - lambda locals (params + plain-`:`/`op:` targets) and ctx-literal
+ *     element locals — collected per scope below,
+ *   - dotted names (already qualified).
+ * A scope with more than QNS_SCOPE_CAP distinct locals qualifies NOTHING in
+ * its subtree (conservative: preserves the env-cascade behaviour rather than
+ * turning spilled locals into 'name errors). */
+#define QNS_SCOPE_CAP 64
+
+typedef struct qns_scope {
+    struct qns_scope *up;
+    int64_t names[QNS_SCOPE_CAP];
+    int     n;
+    int     spill;
+} qns_scope;
+
+static int qns_scope_has(const qns_scope *sc, int64_t id) {
+    for (; sc; sc = sc->up) {
+        for (int i = 0; i < sc->n; i++)
+            if (sc->names[i] == id) return 1;
+    }
+    return 0;
+}
+
+static int qns_scope_spilled(const qns_scope *sc) {
+    for (; sc; sc = sc->up)
+        if (sc->spill) return 1;
+    return 0;
+}
+
+static void qns_scope_add(qns_scope *sc, int64_t id) {
+    if (qns_scope_has(sc, id)) return;
+    if (sc->n >= QNS_SCOPE_CAP) { sc->spill = 1; return; }
+    sc->names[sc->n++] = id;
+}
+
+static int qns_ident_shaped(const char *p, size_t l) {
+    if (l == 0) return 0;
+    if (!((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')))
+        return 0;
+    for (size_t i = 1; i < l; i++) {
+        char c = p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 1;
+}
+
+/* If `node` is a pre-lower assignment `(:;sym;val)` / `(op:;sym;val)` /
+ * `(::;sym;val)`, classify the head: 1 = local-binding (`:` or `op:`),
+ * 2 = global (`::`), 0 = not an assignment on a sym target. */
+static int qns_assign_kind(ray_t *node) {
+    if (!node || node->type != RAY_LIST || ray_len(node) != 3) return 0;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
+    if (!e[1] || e[1]->type != -RAY_SYM || (e[1]->attrs & Q_ATTR_QUOTED))
+        return 0;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return 0;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int kind = 0;
+    if (l == 1 && nm[0] == ':') kind = 1;                       /* `:`   */
+    else if (l == 2 && nm[0] == ':' && nm[1] == ':') kind = 2;  /* `::`  */
+    else if (l >= 2 && nm[l - 1] == ':' && nm[0] != ':') kind = 1; /* op: */
+    ray_release(s);
+    return kind;
+}
+
+/* Collect local-binding targets of one scope body: plain-`:`/`op:` sym
+ * targets at any expression depth, NOT descending into nested lambdas or
+ * ctx-literals (each gets its own scope when visited). */
+static void qns_collect(ray_t *node, qns_scope *sc, int depth) {
+    if (!node || node->type != RAY_LIST || depth > 128) return;
+    if (ql_is_lambda(node) || ql_is_ctx_literal(node)) return;
+    if (qns_assign_kind(node) == 1) {
+        ray_t **e = (ray_t **)ray_data(node);
+        ray_t *ts = ray_sym_str(e[1]->i64);
+        if (ts) {
+            /* dotted targets are global namespace writes, never locals */
+            if (ray_str_len(ts) > 0 && ray_str_ptr(ts)[0] != '.')
+                qns_scope_add(sc, e[1]->i64);
+            ray_release(ts);
+        }
+    }
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    for (int64_t i = 0; i < n; i++)
+        qns_collect(e[i], sc, depth + 1);
+}
+
+/* Rewrite one unquoted name-ref sym slot to `.ctx.name` when it qualifies. */
+static void qns_maybe_rewrite(ray_t **slot, const qns_scope *sc,
+                              const char *ctx) {
+    ray_t *node = *slot;
+    if (!node || node->type != -RAY_SYM || (node->attrs & Q_ATTR_QUOTED))
+        return;
+    if (qns_scope_spilled(sc) || qns_scope_has(sc, node->i64)) return;
+    ray_t *s = ray_sym_str(node->i64);
+    if (!s) return;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    if (!qns_ident_shaped(nm, l) || q_ns_is_unqualifiable(nm, l)) {
+        ray_release(s);
+        return;
+    }
+    char full[192];
+    int fl = snprintf(full, sizeof full, "%s.%.*s", ctx, (int)l, nm);
+    ray_release(s);
+    if (fl <= 0 || (size_t)fl >= sizeof full) return;
+    ray_t *repl = ray_sym(ray_sym_intern(full, (size_t)fl));
+    if (!repl || RAY_IS_ERR(repl)) return;
+    ray_release(node);
+    *slot = repl;                      /* name-ref: quoted attr stays clear */
+}
+
+static void qns_walk(ray_t **slot, qns_scope *sc, const char *ctx, int depth) {
+    ray_t *node = *slot;
+    if (!node || depth > 128) return;
+    if (node->type == -RAY_SYM) {
+        qns_maybe_rewrite(slot, sc, ctx);
+        return;
+    }
+    if (node->type != RAY_LIST) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    int64_t n = ray_len(node);
+
+    if (ql_is_lambda(node)) {
+        /* `({ src params stmt…)` — fresh scope: params + body locals.  The
+         * parent chain stays visible (openq's eval resolves outer lambda
+         * frames dynamically; not rewriting an outer local preserves that). */
+        qns_scope inner = { .up = (qns_scope *)sc, .n = 0, .spill = 0 };
+        if (n >= 3 && e[2] && e[2]->type == RAY_SYM) {
+            int64_t np = ray_len(e[2]);
+            const int64_t *pids = (const int64_t *)ray_data(e[2]);
+            for (int64_t i = 0; i < np; i++)
+                qns_scope_add(&inner, pids[i]);
+        }
+        for (int64_t i = 3; i < n; i++)
+            qns_collect(e[i], &inner, 0);
+        for (int64_t i = 3; i < n; i++)
+            qns_walk(&e[i], &inner, ctx, depth + 1);
+        return;
+    }
+
+    if (ql_is_ctx_literal(node)) {
+        /* paren/table literal: element `:` bind a pushed scope (q_ctx_build);
+         * enclosing locals stay visible through the parent chain. */
+        qns_scope inner = { .up = (qns_scope *)sc, .n = 0, .spill = 0 };
+        for (int64_t i = 1; i < n; i++)
+            qns_collect(e[i], &inner, 0);
+        for (int64_t i = 1; i < n; i++)
+            qns_walk(&e[i], &inner, ctx, depth + 1);
+        return;
+    }
+
+    int ak = qns_assign_kind(node);
+    if (ak) {
+        /* target: `:`/`op:` bind a local inside a scope (leave it); at the
+         * top level — and `::` everywhere — the target is a context global. */
+        if (ak == 2 || sc == NULL)
+            qns_maybe_rewrite(&e[1], sc, ctx);
+        qns_walk(&e[2], sc, ctx, depth + 1);
+        return;
+    }
+
+    for (int64_t i = 0; i < n; i++)
+        qns_walk(&e[i], sc, ctx, depth + 1);
+}
+
 ray_t *q_lower(ray_t *ast) {
+    /* Context qualification first, on the PRE-lower shapes (assignment heads
+     * still `:`/`::`, lambdas still `{`-marked) — see the block comment. */
+    const char *qctx = q_ns_current();
+    if (ast && !RAY_IS_ERR(ast) && qctx[0])
+        qns_walk(&ast, NULL, qctx, 0);
     if (ast && ast->type == RAY_LIST) {
         ray_t *err = q_lower_walk(&ast, 0, 0);
         if (err) { ray_release(ast); return err; }
