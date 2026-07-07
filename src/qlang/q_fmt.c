@@ -338,6 +338,25 @@ static void q_time_tok(int32_t v, char* out, size_t n) {
     }
 }
 
+/* Render one timestamp element q-style: sentinels 0Np / 0Wp / -0Wp (kdb
+ * datatypes table row 12); any other ns count renders
+ * yyyy.mm.ddDHH:MM:SS.nnnnnnnnn via a temp base atom (base fmt owns the
+ * civil math — the q_date_tok pattern; probed pre-2000-correct and exact at
+ * the +-0Wp-+1 extremes, datatypes.md:161).  Every non-sentinel i64 maps to
+ * a valid civil datetime (~1707..2292), so unlike date there is no
+ * 0000.00.00-style out-of-range rule. */
+static void q_ts_tok(int64_t v, char* out, size_t n) {
+    if (v == INT64_MIN)  { snprintf(out, n, "0Np");  return; }
+    if (v == INT64_MAX)  { snprintf(out, n, "0Wp");  return; }
+    if (v == -INT64_MAX) { snprintf(out, n, "-0Wp"); return; }
+    out[0] = '\0';
+    ray_t* a = ray_timestamp(v);
+    if (a && !RAY_IS_ERR(a)) {
+        ray_fallback(a, out, n);
+        ray_release(a);
+    }
+}
+
 static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
     out[0] = '\0';
     if (!key || RAY_IS_ERR(key)) return;
@@ -425,6 +444,7 @@ static const char* q_empty_vec_qname(int8_t type) {
     case RAY_F64:  return "float";
     case RAY_SYM:  return "symbol";
     case RAY_DATE: return "date";
+    case RAY_TIMESTAMP: return "timestamp";
     case RAY_GUID: return "guid";
     case RAY_TIME: return "time";
     default:       return NULL;
@@ -437,7 +457,7 @@ static const char* q_empty_vec_qname(int8_t type) {
 static int q_matrix_alignable(int8_t type) {
     return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
            type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
-           type == RAY_DATE || type == RAY_TIME;
+           type == RAY_DATE || type == RAY_TIME || type == RAY_TIMESTAMP;
 }
 
 /* Format element `c` of the row-vector `rv` BARE (no per-element type suffix,
@@ -452,6 +472,7 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
     case RAY_F64: q_float_tok(((const double*)ray_data(rv))[c],         0, out, outsz); break;
     case RAY_DATE:q_date_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
     case RAY_TIME:q_time_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
+    case RAY_TIMESTAMP: q_ts_tok(((const int64_t*)ray_data(rv))[c],           out, outsz); break;
     case RAY_SYM: {
         ray_t* s = ray_sym_vec_cell(rv, c);   /* borrowed -RAY_STR */
         if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
@@ -584,6 +605,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
     case -RAY_TIME: q_time_tok(val->i32, buf, bufsz);                      return;
+    case -RAY_TIMESTAMP: q_ts_tok(val->i64, buf, bufsz);                   return;
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
     case -RAY_F64: {
         /* A whole f64 atom gets a trailing `f` to distinguish it from a long
@@ -700,6 +722,22 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         for (int64_t i = 0; i < n; i++) {
             char e[64];
             q_time_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        return;
+    }
+    /* Timestamp vector: space-joined full yyyy.mm.ddDHH:MM:SS.nnnnnnnnn
+     * tokens — like date/time, no trailing type char, sentinels (0Np)
+     * self-identify; enlist comma for length-1. */
+    if (val->type == RAY_TIMESTAMP) {
+        int64_t n = ray_len(val);
+        const int64_t* d = (const int64_t*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            q_ts_tok(d[i], e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
         }
         return;

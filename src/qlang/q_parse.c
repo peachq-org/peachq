@@ -229,7 +229,8 @@ static Tokens g_toks = { NULL, 0 };
  * if any magnitude was fractional).  Nulls / integer infinities are Specials
  * that widen to the chosen type's sentinel. */
 
-typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME } el_kind;
+typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME,
+               EL_TS } el_kind;
 typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
@@ -284,6 +285,43 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
             int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
             int64_t d  = (src[q + 8] - '0') * 10 + (src[q + 9] - '0');
             if (!q_date_valid(y, mo, d)) q_die("bad date");
+            if (src[q + 10] == 'D') {
+                /* Timestamp literal: dateDtimespan (datatypes.md row 12).
+                 * Full clock HH:MM:SS required (cast.md pins both the
+                 * fraction-less 2015.10.28D03:55:58 and the 9-digit
+                 * 2014.11.22D17:43:40.123456789); a fraction of 1..9 digits
+                 * right-pads to nanoseconds.  The part after D is a TIMESPAN
+                 * (no 24h cap — hours normalize through the ns count), so
+                 * only mm/ss >= 60 die, mirroring the time-literal arm.
+                 * Shorter tod forms (bare D / D12 / D12:00) are deferred; an
+                 * invalid tod after D dies rather than half-matching a date
+                 * and stranding the tail (the invalid-civil-date rule). */
+                int r = q + 11;
+                if (!(dig_run(src, r) == 2 && src[r + 2] == ':' &&
+                      dig_run(src, r + 3) == 2 && src[r + 5] == ':' &&
+                      dig_run(src, r + 6) == 2))
+                    q_die("bad timestamp");
+                int64_t h  = (src[r]     - '0') * 10 + (src[r + 1] - '0');
+                int64_t mi = (src[r + 3] - '0') * 10 + (src[r + 4] - '0');
+                int64_t s  = (src[r + 6] - '0') * 10 + (src[r + 7] - '0');
+                if (mi >= 60 || s >= 60) q_die("bad timestamp");
+                int64_t frac = 0;
+                int end = r + 8;
+                if (src[end] == '.') {
+                    int fd = dig_run(src, end + 1);
+                    if (fd < 1 || fd > 9) q_die("bad timestamp");
+                    for (int k = 0; k < fd; k++)
+                        frac = frac * 10 + (src[end + 1 + k] - '0');
+                    for (int k = fd; k < 9; k++) frac *= 10;
+                    end += 1 + fd;
+                }
+                int64_t tod = (h * 3600 + mi * 60 + s) * 1000000000LL + frac;
+                out->kind = EL_TS;
+                out->i = q_ts_compose(q_days_from_civil(y, mo, d), tod);
+                if (neg) out->i = -out->i;
+                *p = end;
+                return 1;
+            }
             out->kind = EL_DATE;
             out->i = q_days_from_civil(y, mo, d);
             if (neg) out->i = -out->i;
@@ -374,7 +412,8 @@ static int64_t narrow_special(el_kind k, int width) {
 /* Resolve one element to an int64 in the given integer width.  EL_DATE holds
  * its day count in .i (only reachable in the width-4 date context). */
 static int64_t el_to_int(const num_el *e, int width) {
-    if (e->kind == EL_INT || e->kind == EL_DATE || e->kind == EL_TIME) return e->i;
+    if (e->kind == EL_INT || e->kind == EL_DATE || e->kind == EL_TIME ||
+        e->kind == EL_TS) return e->i;
     if (e->kind == EL_FLOAT) return (int64_t)e->f;
     return narrow_special(e->kind, width);
 }
@@ -396,7 +435,9 @@ static double el_to_float(const num_el *e) {
  * -0Wd, 2000.01.01d) — never after plain digits, so corpus tokens like `3d`
  * keep parsing as `3` juxtaposed with the name `d` (no parse-display churn).
  * `t` (time) is gated the same way (0Nt, 0Wt, -0Wt, 09:30:00.000t) so `3t`
- * stays `3` juxtaposed with the name `t`. */
+ * stays `3` juxtaposed with the name `t`, and `p` (timestamp) likewise (0Np,
+ * 0Wp, -0Wp; plain-int forms like kdb's `0p`/`42p` are deferred with the
+ * same no-churn rationale). */
 static void read_type_letter(const char *src, int *p, char *letter,
                              const num_el *last) {
     char c = src[*p];
@@ -405,8 +446,11 @@ static void read_type_letter(const char *src, int *p, char *letter,
     int guid_ok = last && last->kind == EL_NULL;   /* only 0Ng (guid has no inf) */
     int time_ok = last && (last->kind == EL_TIME || last->kind == EL_NULL ||
                            last->kind == EL_PINF || last->kind == EL_NINF);
+    int ts_ok = last && (last->kind == EL_TS || last->kind == EL_NULL ||
+                         last->kind == EL_PINF || last->kind == EL_NINF);
     if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
-              (c == 'g' && guid_ok) || (c == 't' && time_ok))) {
+              (c == 'g' && guid_ok) || (c == 't' && time_ok) ||
+              (c == 'p' && ts_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -505,6 +549,40 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         if (vec && !RAY_IS_ERR(vec)) {
             vec->len = m;
             memset(ray_data(vec), 0, (size_t)m * 16);   /* all-null guids */
+        }
+        return vec;
+    }
+
+    /* Timestamp context: a `p` suffix (0Np / 0Wp / -0Wp) or any dateDtod
+     * magnitude.  kdb timestamp == i64 nanoseconds since 2000.01.01 (the
+     * base RAY_TIMESTAMP payload): Specials narrow width-8, a plain int is a
+     * raw ns count, an EL_DATE strand-mate promotes days -> ns (saturating —
+     * checked BEFORE the date arm so a mixed date+timestamp strand promotes
+     * instead of truncating ns into an i32 date), a fractional magnitude or
+     * an EL_TIME mate dies (unpinned corner: error beats a wrong answer). */
+    int is_ts = (letter == 'p');
+    for (int i = 0; i < m && !is_ts; i++)
+        if (buf[i].kind == EL_TS) is_ts = 1;
+    if (is_ts) {
+        for (int i = 0; i < m; i++)
+            /* lowercase `0np` is the K-ism synonym of `0Np` — a typed null,
+             * not a fractional magnitude (see the date arm below). */
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
+                (buf[i].forces_float && buf[i].kind != EL_NULL))
+                q_die("bad number");
+        int64_t t[MAX_VEC];
+        for (int i = 0; i < m; i++)
+            t[i] = (buf[i].kind == EL_DATE)
+                 ? q_ts_compose(buf[i].i, 0)
+                 : el_to_int(&buf[i], 8);
+        if (m == 1) {
+            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIMESTAMP);
+            return ray_timestamp(t[0]);
+        }
+        ray_t *vec = ray_vec_from_raw(RAY_TIMESTAMP, t, m);
+        if (vec && !RAY_IS_ERR(vec)) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
         }
         return vec;
     }

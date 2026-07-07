@@ -1976,6 +1976,21 @@ int q_date_valid(int64_t y, int64_t m, int64_t d) {
     return d <= md[m - 1] + ((m == 2 && leap) ? 1 : 0);
 }
 
+/* Timestamp payload composition (see q_registry.h for the contract and the
+ * boundary rationale — codex plan-review round 1). */
+int q_ts_compose_checked(int64_t days, int64_t tod_ns, int64_t* out) {
+    __int128 ns = (__int128)days * 86400000000000LL + tod_ns;
+    if (ns > INT64_MAX || ns < -(__int128)INT64_MAX) return 0;
+    *out = (int64_t)ns;
+    return 1;
+}
+int64_t q_ts_compose(int64_t days, int64_t tod_ns) {
+    int64_t ns;
+    if (q_ts_compose_checked(days, tod_ns, &ns)) return ns;
+    return ((__int128)days * 86400000000000LL + tod_ns) < 0 ? -INT64_MAX
+                                                            : INT64_MAX;
+}
+
 /* ===== q cast home (see q_registry.h for the reuse contract) ===============
  * Designator resolution is separate from conversion so C callers (future
  * bool-widening / promotion work) can invoke q_cast_to(tag, x) directly. */
