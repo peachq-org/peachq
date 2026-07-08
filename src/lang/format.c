@@ -151,6 +151,7 @@ const char* ray_type_name(int8_t type) {
     case RAY_I64:       return type < 0 ? "i64"       : "I64";
     case RAY_F32:       return type < 0 ? "f32"       : "F32";
     case RAY_F64:       return type < 0 ? "f64"       : "F64";
+    case RAY_DATETIME:  return type < 0 ? "datetime"  : "DATETIME";
     case RAY_MONTH:     return type < 0 ? "month"     : "MONTH";
     case RAY_MINUTE:    return type < 0 ? "minute"    : "MINUTE";
     case RAY_SECOND:    return type < 0 ? "second"    : "SECOND";
@@ -324,6 +325,27 @@ static void fmt_date(fmt_buf_t* b, int32_t val) {
     fmt_printf(b, "%04d.%02d.%02d", y, m, d);
 }
 
+/* DATETIME payload = f64 days since 2000.01.01, fraction = time of day.
+ * kdb datetime renders at MILLISECOND precision (tok.md:227, cast.md:57) —
+ * f64 resolution genuinely is ~microseconds-to-ms for current dates, so ms
+ * is the honest display grain.  Round the time-of-day to ms and carry a
+ * full-day overflow (rounding at 23:59:59.9995 bumps the date).  This is
+ * THE single day/ms split — q_fmt delegates here via a temp atom (its
+ * sentinel/out-of-range checks run first). */
+static void fmt_datetime(fmt_buf_t* b, double val) {
+    double dayf = floor(val);
+    int64_t ms = (int64_t)llround((val - dayf) * 86400000.0);
+    int64_t day = (int64_t)dayf;
+    if (ms >= 86400000LL) { day += 1; ms = 0; }
+    int y, mo, d;
+    date_to_ymd((int32_t)day, &y, &mo, &d);
+    int h  = (int)(ms / 3600000);
+    int mi = (int)(ms / 60000 % 60);
+    int sec = (int)(ms / 1000 % 60);
+    int mss = (int)(ms % 1000);
+    fmt_printf(b, "%04d.%02d.%02dT%02d:%02d:%02d.%03d", y, mo, d, h, mi, sec, mss);
+}
+
 static void fmt_time(fmt_buf_t* b, int32_t val) {
     int h, m, s, ms;
     time_to_hms(val, &h, &m, &s, &ms);
@@ -390,6 +412,7 @@ static const char* null_literal(int8_t type) {
     case RAY_F64:       return "0Nf";
     case RAY_F32:       return "0Ne";
     case RAY_MONTH:     return "0Nm";
+    case RAY_DATETIME:  return "0Nz";
     case RAY_MINUTE:    return "0Nu";
     case RAY_SECOND:    return "0Nv";
     case RAY_TIMESPAN:  return "0Nn";
@@ -426,6 +449,7 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     case RAY_F32:       fmt_f32(b, ((float*)ray_data(vec))[idx]); break;
     case RAY_F64:       fmt_f64(b, ((double*)ray_data(vec))[idx]); break;
     case RAY_MONTH:     fmt_month(b, ((int32_t*)ray_data(vec))[idx]); break;
+    case RAY_DATETIME:  fmt_datetime(b, ((double*)ray_data(vec))[idx]); break;
     case RAY_DATE:      fmt_date(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_TIME:      fmt_time(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_MINUTE:    fmt_minute(b, ((int32_t*)ray_data(vec))[idx]); break;
@@ -1097,6 +1121,7 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
         case RAY_F32:       fmt_f32(b, (float)obj->f64); break;
         case RAY_F64:       fmt_f64(b, obj->f64); break;
         case RAY_MONTH:     fmt_month(b, obj->i32); break;
+        case RAY_DATETIME:  fmt_datetime(b, obj->f64); break;
         case RAY_DATE:      fmt_date(b, obj->i32); break;
         case RAY_TIME:      fmt_time(b, obj->i32); break;
         case RAY_MINUTE:    fmt_minute(b, obj->i32); break;
