@@ -82,6 +82,32 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         return atomic_map_binary_op(ray_add_fn, OP_ADD, a, b);
     /* Vector fast path — only when at least one operand is a typed vector */
 
+    /* DATETIME (f64-backed, excluded from is_temporal) — BEFORE the int-
+     * temporal blocks, whose payload readers assume int slots.
+     * z + num -> z, both orders (float add on days; a NaN payload rides the
+     * add and the ctor canonicalizes non-finite results — decision 1).
+     * Int-null offsets need the explicit guard (INT_MIN is not NaN).
+     * z + z falls through to 'type (two absolute datetimes). */
+    if (a->type == -RAY_DATETIME && is_numeric(b)) {
+        if (RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_DATETIME);
+        return ray_datetime(a->f64 + as_f64(b));
+    }
+    if (is_numeric(a) && b->type == -RAY_DATETIME) {
+        if (RAY_ATOM_IS_NULL(a)) return ray_typed_null(-RAY_DATETIME);
+        return ray_datetime(as_f64(a) + b->f64);
+    }
+    /* date + float -> DATETIME (basics/precision.md:264-271: 2000.01.02 +
+     * sum 1000#1%86400 is 2000.01.02T00:16:40.000), both orders.  Must sit
+     * before the float+temporal reject below. */
+    if (a->type == -RAY_DATE && b->type == -RAY_F64) {
+        if (RAY_ATOM_IS_NULL(a)) return ray_typed_null(-RAY_DATETIME);
+        return ray_datetime((double)a->i32 + b->f64);
+    }
+    if (a->type == -RAY_F64 && b->type == -RAY_DATE) {
+        if (RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_DATETIME);
+        return ray_datetime(a->f64 + (double)b->i32);
+    }
+
     /* Temporal + integer arithmetic (only int types, not float) */
     if (is_temporal(a) && is_numeric(b) && b->type != -RAY_F64) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
@@ -179,6 +205,16 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
 ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_sub_fn, OP_SUB, a, b);
+
+    /* DATETIME (f64-backed, excluded from is_temporal) — see ray_add_fn.
+     * z - z -> f64 days difference (basics/precision.md:274 `0=a-b`);
+     * z - num -> z.  num - z: unpinned, falls through (mirrors date). */
+    if (a->type == -RAY_DATETIME && b->type == -RAY_DATETIME)
+        return make_f64(a->f64 - b->f64);          /* NaN nulls propagate */
+    if (a->type == -RAY_DATETIME && is_numeric(b)) {
+        if (RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_DATETIME);
+        return ray_datetime(a->f64 - as_f64(b));
+    }
 
     /* Temporal - int null propagation (both operands) */
     if (is_temporal(a) && is_numeric(b)) {
