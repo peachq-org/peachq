@@ -27,7 +27,13 @@
 #include "mem/sys.h"
 #include <string.h>
 #include <stdlib.h>
+#ifndef RAY_OS_WINDOWS
 #include <sched.h>
+#else
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>            /* SwitchToThread */
+#define sched_yield() SwitchToThread()
+#endif
 
 /* Task granularity: RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS elements per task */
 #define TASK_GRAIN  ((int64_t)RAY_DISPATCH_MORSELS * RAY_MORSEL_ELEMS)
