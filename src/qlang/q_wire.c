@@ -236,6 +236,10 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         }
         case RAY_SYM: rc = (w_u8(b, (uint8_t)-RAY_SYM) || w_sym_id(b, x->i64)) ? -1 : 0; goto out;
         case RAY_TIMESTAMP: rc = (w_u8(b, (uint8_t)-RAY_TIMESTAMP) || w_i64(b, x->i64)) ? -1 : 0; goto out;
+        /* f64-backed temporal: payload is days since 2000.01.01 (kdb 15h).
+         * Null is the in-band NaN; 0Wz cannot exist (float canon), so no
+         * infinity handling on the write side. */
+        case RAY_DATETIME: rc = (w_u8(b, (uint8_t)-RAY_DATETIME) || w_f64(b, x->f64)) ? -1 : 0; goto out;
         /* i32-class temporal atom payloads are read via the i32 union field:
          * producers are mixed (constructors store i64, ray_typed_null stores
          * i32) and only agree through LE aliasing — x->i32 matches the null
@@ -257,7 +261,8 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F32:  case RAY_F64: case RAY_GUID:
     case RAY_TIMESTAMP: case RAY_DATE: case RAY_TIME:
-    case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND: case RAY_TIMESPAN: {
+    case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND: case RAY_TIMESPAN:
+    case RAY_DATETIME: {
         /* fixed-width payloads are bit-identical to kdb on LE hosts.
          * serde mode carries HAS_NULLS (the reader rescans sentinel types,
          * but GUID nulls — all-zero payload — are only knowable from the
@@ -504,7 +509,7 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I64) { has_nulls = true; break; } } break;
     case RAY_F32: { float* e = (float*)d;
         for (int32_t i = 0; i < count; i++) { e[i] = f32_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
-    case RAY_F64: { double* e = (double*)d;
+    case RAY_F64: case RAY_DATETIME: { double* e = (double*)d;
         for (int32_t i = 0; i < count; i++) { e[i] = f64_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
     default: break;
     }
@@ -642,6 +647,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             return ray_sym(ray_sym_intern(s, n));
         }
         case RAY_TIMESTAMP: if (!r_need(c, 8)) return trunc_err("timestamp"); return ray_timestamp(r_i64(c));
+        case RAY_DATETIME: if (!r_need(c, 8)) return trunc_err("datetime"); return ray_datetime(f64_canon(r_f64(c)));
         case RAY_DATE: if (!r_need(c, 4)) return trunc_err("date"); return ray_date((int64_t)r_i32(c));
         case RAY_TIME: if (!r_need(c, 4)) return trunc_err("time"); return ray_time((int64_t)r_i32(c));
         case RAY_MONTH: if (!r_need(c, 4)) return trunc_err("month"); return ray_month((int64_t)r_i32(c));

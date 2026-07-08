@@ -416,6 +416,15 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
 ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     if (!head) return NULL;
 
+    /* wire pass 3: ray_eval's binary null gate offers applications with a
+     * RAY_NULL_OBJ operand here before raising 'type.  Only registry-blessed
+     * null-tolerant dyadics proceed (`-8!(::)` serialize, `x~(::)` match);
+     * everything else declines -> historic 'type. */
+    if (head->type == RAY_BINARY && n == 2 && args[0] && args[1] &&
+        (RAY_IS_NULL(args[0]) || RAY_IS_NULL(args[1])) &&
+        q_fn_null_ok(head))
+        return ((ray_binary_fn)(uintptr_t)head->i64)(args[0], args[1]);
+
     /* openq dict function-distribution shim: a builtin verb whose argument is
      * a dictionary distributes over the values.  Reached from eval's dict_retry
      * (the 'type-error path) with matching arity, but ALSO reachable via the

@@ -69,6 +69,11 @@ ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);
  * tables (the wave-4 shape shared by the table verbs and q_builtins). */
 int q_is_keyed_table(ray_t* y);
 
+/* wire pass 3: registry-blessed null-tolerant dyadics (`!` internal-fn
+ * band, `~` match) — consulted by q_apply_noun when ray_eval's binary
+ * null gate offers a RAY_NULL_OBJ-operand application to the apply hook. */
+int q_fn_null_ok(const ray_t* fn);
+
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
