@@ -215,7 +215,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
      * unhandled \cmd falls through to the historic path. */
     {
         int handled = 0;
-        ray_t* sr = q_sys_dispatch(s, n, &handled);
+        ray_t* sr = q_sys_dispatch(s, n, &handled, /*is_repl=*/1);
         if (handled) {
             if (sr && RAY_IS_ERR(sr)) {
                 const char* code = (const char*)sr->sdata;
