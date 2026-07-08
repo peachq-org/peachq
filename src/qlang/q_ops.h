@@ -98,6 +98,10 @@ typedef enum {
     /* ---- Wave 5 aggregate / uniform family ---- */
     QK_SUMS,            /* running sum  (nulls -> 0)                            */
     QK_PRDS,            /* running product (nulls -> 1)                         */
+    QK_PRD,             /* q `prd x` — product aggregate (the multiply-over
+                         * fold, ref/prd.md): nulls -> 1s; bool vec -> int
+                         * (0i/1i); list-of-lists element-wise; dict over the
+                         * value list; table -> per-column dict               */
     QK_MAXS,            /* running max (nulls skipped; also runs over chars)    */
     QK_MINS,            /* running min (nulls skipped; also runs over chars)    */
     QK_AVGS,            /* running average (nulls excluded) -> float            */
@@ -186,6 +190,16 @@ typedef enum {
                          * zero -> 0i, positive -> 1i                           */
     QK_CEILING,         /* q `ceiling x` — least integer >= x, as LONG (mirrors
                          * QK_FLOOR: float->i64, int passes through)            */
+    /* ---- dyadic atomic math (feat/q-math-parse-display) — libm wrappers,
+     * RAY_FN_ATOMIC broadcast over both operands (eval's binary atomic map). */
+    QK_XEXP,            /* q `x xexp y` — x to the power y as FLOAT, computed
+                         * as exp(y*log x) (the ref/exp.md-pinned identity):
+                         * null operand or negative x -> 0n; overflow/±inf
+                         * canonicalize to 0n (single-null model; kdb 0w)      */
+    QK_XLOG,            /* q `x xlog y` — base-x log of y as FLOAT
+                         * (ref/log.md): null y -> 0n; y<0 -> 0n; y=0 -> 0n
+                         * (kdb -0w, documented divergence); char args read
+                         * as their code points (`"A" xlog "C"`)               */
     /* ---- sort / bucket family (feat/q-sort-rank) ---- */
     QK_XBAR,            /* q `width xbar list` — interval bucketing.  ARG-SWAP
                          * wrapper: rayfall ray_xbar_fn is (col, bucket) but q
