@@ -452,6 +452,29 @@ static void q_ts_tok(int64_t v, char* out, size_t n) {
     }
 }
 
+/* Render one datetime element q-style: sentinel FIRST (NaN -> 0Nz — the
+ * single-null float model has no live 0Wz, owner ruling 2026-07-09), then
+ * the out-of-civil-range rule (datatypes.md:147/154 pins
+ * "z"$0001.01.01-1 -> 0000.00.00T00:00:00.000), then delegate the civil
+ * rendering to base fmt_datetime via a temp atom (the q_date_tok pattern —
+ * ONE day/ms split, review-r1 item 1).  Display is always ms precision
+ * (tok.md:227, cast.md:57) — f64 resolution is genuinely ~ms-or-finer for
+ * current dates. */
+static void q_datetime_tok(double v, char* out, size_t n) {
+    if (v != v) { snprintf(out, n, "0Nz"); return; }
+    if (v < (double)q_days_from_civil(1, 1, 1) ||
+        v >= (double)(q_days_from_civil(9999, 12, 31) + 1)) {
+        snprintf(out, n, "0000.00.00T00:00:00.000");
+        return;
+    }
+    out[0] = '\0';
+    ray_t* a = ray_datetime(v);
+    if (a && !RAY_IS_ERR(a)) {
+        ray_fallback(a, out, n);
+        ray_release(a);
+    }
+}
+
 static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
     out[0] = '\0';
     if (!key || RAY_IS_ERR(key)) return;
@@ -539,6 +562,7 @@ static const char* q_empty_vec_qname(int8_t type) {
     case RAY_F64:  return "float";
     case RAY_SYM:  return "symbol";
     case RAY_MONTH: return "month";
+    case RAY_DATETIME: return "datetime";
     case RAY_DATE: return "date";
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_GUID: return "guid";
@@ -557,7 +581,8 @@ static int q_matrix_alignable(int8_t type) {
     return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
            type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
            type == RAY_DATE || type == RAY_TIME || type == RAY_TIMESTAMP ||
-           type == RAY_MINUTE || type == RAY_SECOND || type == RAY_TIMESPAN;
+           type == RAY_MINUTE || type == RAY_SECOND || type == RAY_TIMESPAN ||
+           type == RAY_DATETIME;
 }
 
 /* Format element `c` of the row-vector `rv` BARE (no per-element type suffix,
@@ -576,6 +601,7 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
     case RAY_SECOND: q_second_tok(((const int32_t*)ray_data(rv))[c],          out, outsz); break;
     case RAY_TIMESPAN: q_timespan_tok(((const int64_t*)ray_data(rv))[c],      out, outsz); break;
     case RAY_TIMESTAMP: q_ts_tok(((const int64_t*)ray_data(rv))[c],           out, outsz); break;
+    case RAY_DATETIME: q_datetime_tok(((const double*)ray_data(rv))[c],       out, outsz); break;
     case RAY_SYM: {
         ray_t* s = ray_sym_vec_cell(rv, c);   /* borrowed -RAY_STR */
         if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
@@ -727,6 +753,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     case -RAY_SECOND: q_second_tok(val->i32, buf, bufsz);                  return;
     case -RAY_TIMESPAN: q_timespan_tok(val->i64, buf, bufsz);              return;
     case -RAY_TIMESTAMP: q_ts_tok(val->i64, buf, bufsz);                   return;
+    case -RAY_DATETIME: q_datetime_tok(val->f64, buf, bufsz);             return;
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
     case -RAY_F64: {
         /* A whole f64 atom gets a trailing `f` to distinguish it from a long
@@ -911,6 +938,24 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         for (int64_t i = 0; i < n; i++) {
             char e[64];
             q_ts_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        return;
+    }
+
+    /* Datetime vector: space-joined full yyyy.mm.ddTHH:MM:SS.mmm tokens —
+     * the SELF-IDENTIFYING model like date/time/timestamp (every token
+     * carries the T), sentinels (0Nz) self-identify; enlist comma for
+     * length-1. */
+    if (val->type == RAY_DATETIME) {
+        int64_t n = ray_len(val);
+        const double* d = (const double*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            q_datetime_tok(d[i], e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
         }
         return;

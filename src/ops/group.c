@@ -284,7 +284,7 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
         DISPATCH_I(int32_t, NULL_I32, base, start, end, acc, has_nulls, idx); break;
     case RAY_I64: RAY_TEMPORAL64_CASES:
         DISPATCH_I(int64_t, NULL_I64, base, start, end, acc, has_nulls, idx); break;
-    case RAY_F64:
+    case RAY_F64: RAY_TEMPORALF_CASES:
         DISPATCH_F(base, start, end, acc, has_nulls, idx); break;
     case RAY_SYM: {
         /* Adaptive-width SYM columns — read_col_i64 produces the i64
@@ -365,7 +365,7 @@ static void par_reduce_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t 
 
 static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_type,
                          struct ray_sym_domain_s* sym_dom) {
-    if (in_type == RAY_F64) {
+    if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) {
         dst->sum_f += src->sum_f;
         dst->sum_sq_f += src->sum_sq_f;
         dst->prod_f *= src->prod_f;
@@ -2034,13 +2034,19 @@ static ray_t* reduction_i64_result(int64_t val, int8_t out_type, ray_t* src) {
     }
 }
 
+/* f64-lane result, re-tagged for the f64-backed temporal (datetime). */
+static ray_t* reduction_f_result(double v, int8_t t) {
+    return RAY_IS_TEMPORALF(t) ? ray_datetime(v) : ray_f64(v);
+}
+
 static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
                                        double fval, int64_t ival, ray_t* src) {
     int8_t out_type = op->out_type ? op->out_type : in_type;
     if (!found) return ray_typed_null(-out_type);
     /* Single-null float model: min/max of finite inputs is finite, but guard
      * against an ±Inf init sentinel surfacing as a value. */
-    if (out_type == RAY_F64) return ray_f64(ray_f64_fin(fval));
+    if (out_type == RAY_F64 || RAY_IS_TEMPORALF(out_type))
+        return reduction_f_result(ray_f64_fin(fval), out_type);
     return reduction_i64_result(ival, out_type, out_type == RAY_SYM ? src : NULL);
 }
 
@@ -2155,7 +2161,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         if (row < 0 || row >= len)
             return ray_typed_null(-in_type);
         void* base = ray_data(input);
-        if (in_type == RAY_F64) return ray_f64(((const double*)base)[row]);
+        if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type))
+            return reduction_f_result(((const double*)base)[row], in_type);
         return reduction_i64_result(read_col_i64(base, row, in_type, input->attrs), in_type,
                                     in_type == RAY_SYM ? input : NULL);
     }
@@ -2183,14 +2190,16 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         /* first = accs[first worker with data], last = accs[last worker with data] */
         for (uint32_t i = 0; i < nw; i++) {
             if (accs[i].has_first) {
-                if (in_type == RAY_F64) merged.first_f = accs[i].first_f;
+                if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type))
+                    merged.first_f = accs[i].first_f;
                 else merged.first_i = accs[i].first_i;
                 break;
             }
         }
         for (int32_t i = (int32_t)nw - 1; i >= 0; i--) {
             if (accs[i].has_first) {
-                if (in_type == RAY_F64) merged.last_f = accs[i].last_f;
+                if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type))
+                    merged.last_f = accs[i].last_f;
                 else merged.last_i = accs[i].last_i;
                 break;
             }
@@ -2205,15 +2214,15 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             /* COUNT returns total length including nulls — matches ray_count_fn's
              * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
             case OP_COUNT: result = ray_i64(scan_n); break;
-            case OP_AVG:   result = merged.cnt > 0 ? ray_f64(ray_f64_fin(in_type == RAY_F64 ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt)) : ray_typed_null(-RAY_F64); break;
-            case OP_FIRST: result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.first_f) : reduction_i64_result(merged.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
-            case OP_LAST:  result = merged.has_first ? (in_type == RAY_F64 ? ray_f64(merged.last_f) : reduction_i64_result(merged.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
+            case OP_AVG:   result = merged.cnt > 0 ? ray_f64(ray_f64_fin((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt)) : ray_typed_null(-RAY_F64); break;
+            case OP_FIRST: result = merged.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(merged.first_f, in_type) : reduction_i64_result(merged.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
+            case OP_LAST:  result = merged.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(merged.last_f, in_type) : reduction_i64_result(merged.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
             case OP_VAR: case OP_VAR_POP:
             case OP_STDDEV: case OP_STDDEV_POP: {
                 bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? merged.cnt <= 1 : merged.cnt <= 0;
                 if (insufficient) { result = ray_typed_null(-RAY_F64); break; }
                 double mean, var_pop;
-                if (in_type == RAY_F64) { mean = merged.sum_f / merged.cnt; var_pop = merged.sum_sq_f / merged.cnt - mean * mean; }
+                if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) { mean = merged.sum_f / merged.cnt; var_pop = merged.sum_sq_f / merged.cnt - mean * mean; }
                 else { mean = merged.sum_d / merged.cnt; var_pop = (double)merged.sum_sq_i / merged.cnt - mean * mean; }
                 if (var_pop < 0) var_pop = 0;
                 double val;
@@ -2244,15 +2253,15 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         /* COUNT returns total length including nulls — matches ray_count_fn's
          * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
         case OP_COUNT: return ray_i64(scan_n);
-        case OP_AVG:   return acc.cnt > 0 ? ray_f64(ray_f64_fin(in_type == RAY_F64 ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt)) : ray_typed_null(-RAY_F64);
-        case OP_FIRST: return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.first_f) : reduction_i64_result(acc.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
-        case OP_LAST:  return acc.has_first ? (in_type == RAY_F64 ? ray_f64(acc.last_f) : reduction_i64_result(acc.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
+        case OP_AVG:   return acc.cnt > 0 ? ray_f64(ray_f64_fin((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt)) : ray_typed_null(-RAY_F64);
+        case OP_FIRST: return acc.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(acc.first_f, in_type) : reduction_i64_result(acc.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
+        case OP_LAST:  return acc.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(acc.last_f, in_type) : reduction_i64_result(acc.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
         case OP_VAR: case OP_VAR_POP:
         case OP_STDDEV: case OP_STDDEV_POP: {
             bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? acc.cnt <= 1 : acc.cnt <= 0;
             if (insufficient) return ray_typed_null(-RAY_F64);
             double mean, var_pop;
-            if (in_type == RAY_F64) { mean = acc.sum_f / acc.cnt; var_pop = acc.sum_sq_f / acc.cnt - mean * mean; }
+            if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) { mean = acc.sum_f / acc.cnt; var_pop = acc.sum_sq_f / acc.cnt - mean * mean; }
             else { mean = acc.sum_d / acc.cnt; var_pop = (double)acc.sum_sq_i / acc.cnt - mean * mean; }
             if (var_pop < 0) var_pop = 0;
             double val;

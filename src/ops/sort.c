@@ -50,7 +50,7 @@ int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
             if (a_null && b_null) cmp = 0;
             else if (a_null) cmp = nf ? -1 : 1;
             else cmp = nf ? 1 : -1;
-        } else if (col->type == RAY_F64) {
+        } else if (col->type == RAY_F64 || RAY_IS_TEMPORALF(col->type)) {
             double va = ((double*)ray_data(col))[a];
             double vb = ((double*)ray_data(col))[b];
             if (va < vb) cmp = -1;
@@ -957,7 +957,7 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
             }
             break;
         }
-        case RAY_F64: {
+        case RAY_F64: RAY_TEMPORALF_CASES: {
             const double* d = (const double*)c->data;
             bool nf   = c->nulls_first;
             bool desc = c->desc;
@@ -1099,7 +1099,7 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
                     val = (int64_t)c->enum_ranks[k][raw];
                 } else if (col->type == RAY_I64 || RAY_IS_TEMPORAL64(col->type)) {
                     val = ((const int64_t*)ray_data(col))[i];
-                } else if (col->type == RAY_F64) {
+                } else if (col->type == RAY_F64 || RAY_IS_TEMPORALF(col->type)) {
                     uint64_t bits;
                     memcpy(&bits, &((const double*)ray_data(col))[i], 8);
                     uint64_t mask = -(bits >> 63) | ((uint64_t)1 << 63);
@@ -2134,7 +2134,7 @@ void mk_prescan_fn(void* arg, uint32_t wid,
                 if (d[i] < kmin) kmin = d[i];
                 if (d[i] > kmax) kmax = d[i];
             }
-        } else if (col->type == RAY_F64) {
+        } else if (col->type == RAY_F64 || RAY_IS_TEMPORALF(col->type)) {
             const double* d = (const double*)ray_data(col);
             for (int64_t i = start; i < end; i++) {
                 uint64_t bits;
@@ -2184,7 +2184,7 @@ static void radix_decode_into(void* dst, int8_t type, const uint64_t* sorted_key
         else
             for (int64_t i = 0; i < n; i++)
                 d[i] = (int64_t)(sorted_keys[i] ^ ((uint64_t)1 << 63));
-    } else if (type == RAY_F64) {
+    } else if (type == RAY_F64 || RAY_IS_TEMPORALF(type)) {
         double* d = (double*)dst;
         for (int64_t i = 0; i < n; i++) {
             uint64_t k = desc ? ~sorted_keys[i] : sorted_keys[i];
@@ -2283,6 +2283,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
             int8_t t = cols[k]->type;
             if (t == RAY_STR || t == RAY_GUID) { has_wide_key = true; continue; }
             if (t != RAY_I64 && t != RAY_F64 && t != RAY_I32 && t != RAY_I16 &&
+                !RAY_IS_TEMPORALF(t) &&
                 t != RAY_BOOL && t != RAY_U8 && t != RAY_SYM &&
                 !RAY_IS_TEMPORAL32(t) && !RAY_IS_TEMPORAL64(t)) {
                 can_radix = false; break;
@@ -2574,7 +2575,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                                 if (d[i] < kmin) kmin = d[i];
                                 if (d[i] > kmax) kmax = d[i];
                             }
-                        } else if (col->type == RAY_F64) {
+                        } else if (col->type == RAY_F64 || RAY_IS_TEMPORALF(col->type)) {
                             const double* d = (const double*)ray_data(col);
                             for (int64_t i = 0; i < nrows; i++) {
                                 uint64_t bits;
