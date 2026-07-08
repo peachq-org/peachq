@@ -344,6 +344,16 @@ static const q_op_t Q_OPS[] = {
     { "0:",     QLEX_GLYPH,     QK_NONE,   NULL,     QK_FILETEXT, "file-text", NULL },
     { "hsym",   QLEX_KW_PREFIX, QK_HSYM,   "hsym",   QK_NONE, NULL,  NULL  },
     { "read0",  QLEX_KW_PREFIX, QK_READ0,  "read0",  QK_NONE, NULL,  NULL  },
+    /* ---- environment variables (feat/q-getenv-setenv, ref/getenv.md) ----
+     * `getenv` is a monadic prefix keyword (sym -> value string, "" unset);
+     * `setenv` is a dyadic infix keyword (`sym setenv str`), so it MUST be
+     * KW_INFIX or the scanner would split `x setenv y` into two statements
+     * (the `set`/`xkey` precedent).  Both reuse the base .os.getenv/.os.setenv
+     * C primitives (ray_getenv_fn/ray_setenv_fn) via q_registry.c wrappers that
+     * coerce the q symbol arg to the -RAY_STR the C wants — a real divergence,
+     * so QK wrappers, not QK_ENV renames. */
+    { "getenv", QLEX_KW_PREFIX, QK_GETENV, "getenv", QK_NONE,   NULL,     NULL },
+    { "setenv", QLEX_KW_INFIX,  QK_NONE,   NULL,     QK_SETENV, "setenv", NULL },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
