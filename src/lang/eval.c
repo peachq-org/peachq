@@ -3153,6 +3153,31 @@ ray_t* ray_eval(ray_t* obj) {
     if (head->type == -RAY_SYM) {
         ray_t* fn = ray_env_resolve(head->i64);
         if (!fn) {
+            /* openq: before raising 'name, offer the apply hook the UNRESOLVED
+             * symbol head — q's namespace handles apply symbols that have no
+             * env binding of their own (`` `.[`a] `` indexes the root context,
+             * q4m3 §12).  Same evaluated-args discipline and cap as the
+             * default-arm hook below; a NULL return falls through to the
+             * historic 'name, byte-identical when no hook is installed. */
+            int64_t hook_n = ray_len(obj);
+            if (g_apply_hook && hook_n - 1 >= 1 && hook_n - 1 <= 64) {
+                int64_t argc = hook_n - 1;
+                ray_t* args[64];
+                int64_t i = 0;
+                for (; i < argc; i++) {
+                    args[i] = ray_eval(elems[i + 1]);
+                    if (!args[i] || RAY_IS_ERR(args[i])) break;
+                }
+                if (i < argc) {                 /* an arg errored: propagate */
+                    ray_t* err = args[i] ? args[i] : ray_error("type", NULL);
+                    for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+                    ray_release(head);
+                    ret = err; goto out;
+                }
+                ray_t* r = g_apply_hook(head, args, argc);
+                for (int64_t j = 0; j < argc; j++) ray_release(args[j]);
+                if (r) { ray_release(head); ret = r; goto out; }
+            }
             ray_t* ns = ray_sym_str(head->i64);
             if (ns) {
                 ret = ray_error("name", "'%.*s' undefined",
