@@ -432,6 +432,7 @@ static ray_t* zero_atom_for_elem_type(ray_t* coll) {
         case RAY_BOOL:      return make_bool(0);
         case RAY_F64:       return make_f64(0.0);
         case RAY_DATE:      return ray_date(0);
+        case RAY_DATETIME:  return ray_datetime(0.0);
         case RAY_MONTH:     return ray_month(0);
         case RAY_TIME:      return ray_time(0);
         case RAY_MINUTE:    return ray_minute(0);
@@ -804,7 +805,8 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     if (!force_boxed &&
         (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
          out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_U8 ||
-         RAY_IS_TEMPORAL32(out_type) || RAY_IS_TEMPORAL64(out_type))) {
+         RAY_IS_TEMPORAL32(out_type) || RAY_IS_TEMPORAL64(out_type) ||
+         RAY_IS_TEMPORALF(out_type))) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
@@ -948,7 +950,8 @@ ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
     if (!is_boxed &&
         (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
         out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_U8 ||
-        RAY_IS_TEMPORAL32(out_type) || RAY_IS_TEMPORAL64(out_type))) {
+        RAY_IS_TEMPORAL32(out_type) || RAY_IS_TEMPORAL64(out_type) ||
+        RAY_IS_TEMPORALF(out_type))) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
@@ -1245,8 +1248,8 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             } else if (atype == RAY_TIMESTAMP || atype == RAY_I64 || atype == RAY_SYM) {
                 atom_wrap = ray_vec_new(atype, 1);
                 if (!RAY_IS_ERR(atom_wrap)) { ((int64_t*)ray_data(atom_wrap))[0] = col_src->i64; atom_wrap->len = 1; }
-            } else if (atype == RAY_F64) {
-                atom_wrap = ray_vec_new(RAY_F64, 1);
+            } else if (atype == RAY_F64 || RAY_IS_TEMPORALF(atype)) {
+                atom_wrap = ray_vec_new(atype, 1);
                 if (!RAY_IS_ERR(atom_wrap)) { ((double*)ray_data(atom_wrap))[0] = col_src->f64; atom_wrap->len = 1; }
             } else if (RAY_IS_TEMPORAL32(atype) || atype == RAY_I32) {
                 atom_wrap = ray_vec_new(atype, 1);
@@ -1323,6 +1326,7 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             else if (row_elems[0]->type == -RAY_DATE) col_type = RAY_DATE;
             else if (row_elems[0]->type == -RAY_TIME) col_type = RAY_TIME;
             else if (row_elems[0]->type == -RAY_MONTH) col_type = RAY_MONTH;
+            else if (row_elems[0]->type == -RAY_DATETIME) col_type = RAY_DATETIME;
             else if (row_elems[0]->type == -RAY_MINUTE) col_type = RAY_MINUTE;
             else if (row_elems[0]->type == -RAY_SECOND) col_type = RAY_SECOND;
             else if (row_elems[0]->type == -RAY_TIMESPAN) col_type = RAY_TIMESPAN;

@@ -231,7 +231,8 @@ static Tokens g_toks = { NULL, 0 };
  * that widen to the chosen type's sentinel. */
 
 typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME,
-               EL_TS, EL_MONTH, EL_MINUTE, EL_SECOND, EL_TIMESPAN } el_kind;
+               EL_TS, EL_MONTH, EL_MINUTE, EL_SECOND, EL_TIMESPAN,
+               EL_DT /* datetime: f64 days in .f (feat/q-datetime) */ } el_kind;
 typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
@@ -320,6 +321,44 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
                 out->kind = EL_TS;
                 out->i = q_ts_compose(q_days_from_civil(y, mo, d), tod);
                 if (neg) out->i = -out->i;
+                *p = end;
+                return 1;
+            }
+            if (src[q + 10] == 'T') {
+                /* Datetime literal: dateTtime (datatypes.md row 15, q type
+                 * 15).  Full clock HH:MM:SS required (cast.md:172 pins the
+                 * fraction-less 2017.08.23T23:50:12); a fraction of 1..3
+                 * digits right-pads to MILLISECONDS (the time-literal rule —
+                 * tok.md:227 pins the .123 form; display is always ms).
+                 * Unlike the D timestamp arm the clock is a TIME OF DAY, so
+                 * hours >= 24 die alongside mm/ss >= 60.  Payload = f64 days
+                 * since 2000.01.01, fraction = tod/86400000ms. */
+                int r = q + 11;
+                if (!(dig_run(src, r) == 2 && src[r + 2] == ':' &&
+                      dig_run(src, r + 3) == 2 && src[r + 5] == ':' &&
+                      dig_run(src, r + 6) == 2))
+                    q_die("bad datetime");
+                int64_t h  = (src[r]     - '0') * 10 + (src[r + 1] - '0');
+                int64_t mi = (src[r + 3] - '0') * 10 + (src[r + 4] - '0');
+                int64_t sec = (src[r + 6] - '0') * 10 + (src[r + 7] - '0');
+                if (h >= 24 || mi >= 60 || sec >= 60) q_die("bad datetime");
+                int64_t ms = 0;
+                int end = r + 8;
+                if (src[end] == '.') {
+                    int fd = dig_run(src, end + 1);
+                    if (fd < 1 || fd > 3) q_die("bad datetime");
+                    for (int k = 0; k < fd; k++)
+                        ms = ms * 10 + (src[end + 1 + k] - '0');
+                    for (int k = fd; k < 3; k++) ms *= 10;
+                    end += 1 + fd;
+                }
+                double tod = ((double)(h * 3600 + mi * 60 + sec) * 1000.0 +
+                              (double)ms) / 86400000.0;
+                out->kind = EL_DT;
+                out->f = (double)q_days_from_civil(y, mo, d) + tod;
+                if (neg) out->f = -out->f;   /* glued sign negates the payload
+                                              * (the kdb date-literal rule;
+                                              * derived for the T form) */
                 *p = end;
                 return 1;
             }
@@ -639,11 +678,13 @@ static void read_type_letter(const char *src, int *p, char *letter,
                              last->kind == EL_PINF || last->kind == EL_NINF);
     int timespan_ok = last && (last->kind == EL_TIMESPAN || last->kind == EL_NULL ||
                                last->kind == EL_PINF || last->kind == EL_NINF);
+    int dt_ok = last && (last->kind == EL_DT || last->kind == EL_NULL ||
+                         last->kind == EL_PINF || last->kind == EL_NINF);
     if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
               (c == 'g' && guid_ok) || (c == 't' && time_ok) ||
               (c == 'p' && ts_ok) || (c == 'm' && month_ok) ||
               (c == 'u' && minute_ok) || (c == 'v' && second_ok) ||
-              (c == 'n' && timespan_ok))) {
+              (c == 'n' && timespan_ok) || (c == 'z' && dt_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -762,7 +803,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
              * not a fractional magnitude (see the date arm below). */
             if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
                 buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN ||
+                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         int64_t t[MAX_VEC];
@@ -797,7 +838,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
              * null, not a fractional magnitude, so it does NOT bar the date. */
             if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
                 buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN ||
+                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
@@ -828,7 +869,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
              * a fractional magnitude (see the date arm above). */
             if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
                 buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN ||
+                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
@@ -859,7 +900,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
                 buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
                 buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN ||
+                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
                 (buf[i].forces_float && buf[i].kind != EL_MONTH &&
                  buf[i].kind != EL_NULL))
                 q_die("bad number");
@@ -891,7 +932,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
                 if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
                     buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
                     buf[i].kind == EL_MONTH || buf[i].kind == EL_SECOND ||
-                    buf[i].kind == EL_TIMESPAN ||
+                    buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
                     (buf[i].forces_float && buf[i].kind != EL_NULL))
                     q_die("bad number");
             if (m == 1) {
@@ -920,7 +961,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
                 if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
                     buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
                     buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
-                    buf[i].kind == EL_TIMESPAN ||
+                    buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
                     (buf[i].forces_float && buf[i].kind != EL_NULL))
                     q_die("bad number");
             if (m == 1) {
@@ -951,7 +992,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
                 if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
                     buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
                     buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
-                    buf[i].kind == EL_SECOND ||
+                    buf[i].kind == EL_SECOND || buf[i].kind == EL_DT ||
                     (buf[i].forces_float && buf[i].kind != EL_NULL))
                     q_die("bad number");
             int64_t t[MAX_VEC];
@@ -964,6 +1005,46 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             if (vec && !RAY_IS_ERR(vec)) {
                 for (int i = 0; i < m; i++)
                     if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            }
+            return vec;
+        }
+    }
+
+    /* Datetime context: a `z` suffix (0Nz / 0Wz / -0Wz) or any dateTtod
+     * magnitude.  kdb datetime == f64 days since 2000.01.01, fraction = time
+     * of day (datatypes.md row 15; DEPRECATED in kdb, landed for drop-in
+     * fidelity).  Specials all canonicalize to the NaN null — the single-null
+     * float model (owner ruling 2026-07-09): 0Wz/-0Wz PARSE but become 0Nz,
+     * exactly the documented 0w divergence.  A plain int widens as a raw day
+     * count (the date-arm rule); a genuine fractional magnitude or a foreign
+     * temporal mate dies (error beats a wrong answer). */
+    {
+        int is_dt = (letter == 'z');
+        for (int i = 0; i < m && !is_dt; i++)
+            if (buf[i].kind == EL_DT) is_dt = 1;
+        if (is_dt) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
+                    buf[i].kind == EL_SECOND || buf[i].kind == EL_TIMESPAN ||
+                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                    q_die("bad number");
+            if (m == 1) {
+                if (buf[0].kind != EL_DT)   /* 0Nz / 0Wz / -0Wz -> the null */
+                    return ray_typed_null(-RAY_DATETIME);
+                return ray_datetime(buf[0].f);
+            }
+            double t[MAX_VEC];
+            for (int i = 0; i < m; i++)
+                t[i] = (buf[i].kind == EL_DT) ? buf[i].f
+                     : (buf[i].kind == EL_INT) ? (double)buf[i].i
+                     : NULL_F64;             /* Specials -> NaN null slots */
+            ray_t *vec = ray_vec_from_raw(RAY_DATETIME, t, m);
+            if (vec && !RAY_IS_ERR(vec)) {
+                for (int i = 0; i < m; i++)
+                    if (buf[i].kind != EL_DT && buf[i].kind != EL_INT)
+                        ray_vec_set_null(vec, i, true);
             }
             return vec;
         }
