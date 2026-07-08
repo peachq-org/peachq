@@ -40,10 +40,17 @@
 #include <string.h>
 #include <stdlib.h>     /* getenv */
 #include <stdio.h>      /* snprintf */
+#ifndef RAY_OS_WINDOWS
 #include <unistd.h>     /* getpid, close, ftruncate, unlink */
 #include <fcntl.h>      /* open, fcntl, F_PREALLOCATE on macOS */
-#include <errno.h>
 #include <sys/mman.h>   /* mmap, munmap */
+#else
+#include <io.h>         /* close, unlink (backed-pool teardown — dead code on
+                         * Windows: the swap fallback below is POSIX-only, so
+                         * swap_fd is always -1 there) */
+#include <process.h>    /* getpid */
+#endif
+#include <errno.h>
 #include <sys/stat.h>   /* O_*  modes */
 #include <sys/types.h>
 #include <stdatomic.h>
@@ -177,7 +184,10 @@ static void dfd_validate_freelists(void);
  * posix_fallocate natively.  macOS uses fcntl(F_PREALLOCATE) — try
  * contiguous first, fall back to non-contiguous, then ftruncate to
  * extend the file size if needed (F_PREALLOCATE doesn't grow the file
- * beyond its current size). */
+ * beyond its current size).  POSIX-only: the sole caller is the
+ * file-backed swap fallback in heap_add_pool, which is compiled out on
+ * Windows. */
+#ifndef RAY_OS_WINDOWS
 static int heap_preallocate(int fd, off_t offset, off_t len) {
 #if defined(__APPLE__)
     fstore_t fs = {
@@ -201,6 +211,7 @@ static int heap_preallocate(int fd, off_t offset, off_t len) {
     return posix_fallocate(fd, offset, len);
 #endif
 }
+#endif /* !RAY_OS_WINDOWS */
 
 /* --------------------------------------------------------------------------
  * Static asserts
@@ -428,6 +439,12 @@ static bool heap_add_pool(ray_heap_t* h, uint8_t order) {
     char* swap_path = NULL;
 
     if (!mem) {
+#ifdef RAY_OS_WINDOWS
+        /* No file-backed swap fallback on Windows (the reservation trick
+         * below is POSIX mmap-specific); a refused VirtualAlloc surfaces
+         * as a clean false -> ray_alloc NULL -> ray_error("oom"). */
+        return false;
+#else
         /* Anonymous mmap refused — usually means RAM+swap can't satisfy
          * pool_size right now.  Fall back to file-backed mmap: create a
          * tempfile in h->swap_path, reserve `pool_size` bytes of disk
@@ -505,6 +522,7 @@ static bool heap_add_pool(ray_heap_t* h, uint8_t order) {
         }
 
         mem = (void*)aligned;
+#endif /* !RAY_OS_WINDOWS */
     }
 
     /* Enable transparent huge pages on anon pools (Linux).  Self-aligned
