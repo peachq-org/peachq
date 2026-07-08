@@ -121,14 +121,22 @@ static inline int64_t month_payload_as_days(int64_t p) {
  * DATE = days since epoch -> ns, TIME = ms since midnight -> ns,
  * TIMESTAMP = ns, MONTH = first-of-month days -> ns. */
 static inline int64_t temporal_as_ns(ray_t* x) {
+    /* Unit multiplies go through unsigned space: kdb infinity arithmetic is
+     * raw two's-complement (basics/datatypes.md:236-240), and C signed
+     * overflow (e.g. 0Wu = INT32_MAX minutes x 60e9) is UB. */
     if (x->type == -RAY_TIMESTAMP) return x->i64;
     if (x->type == -RAY_TIMESPAN)  return x->i64;
-    if (x->type == -RAY_DATE)      return (int64_t)x->i32 * 86400000000000LL;
-    if (x->type == -RAY_TIME)      return (int64_t)x->i32 * 1000000LL;
-    if (x->type == -RAY_MINUTE)    return (int64_t)x->i32 * 60000000000LL;
-    if (x->type == -RAY_SECOND)    return (int64_t)x->i32 * 1000000000LL;
+    if (x->type == -RAY_DATE)
+        return (int64_t)((uint64_t)x->i32 * 86400000000000ULL);
+    if (x->type == -RAY_TIME)
+        return (int64_t)((uint64_t)x->i32 * 1000000ULL);
+    if (x->type == -RAY_MINUTE)
+        return (int64_t)((uint64_t)x->i32 * 60000000000ULL);
+    if (x->type == -RAY_SECOND)
+        return (int64_t)((uint64_t)x->i32 * 1000000000ULL);
     if (x->type == -RAY_MONTH)
-        return month_payload_as_days((int64_t)x->i32) * 86400000000000LL;
+        return (int64_t)((uint64_t)month_payload_as_days((int64_t)x->i32) *
+                         86400000000000ULL);
     return 0;
 }
 
