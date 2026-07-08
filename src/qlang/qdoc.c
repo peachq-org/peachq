@@ -118,7 +118,7 @@ static void run_example(const char* input, const char* expect,
     /* q system commands (\d \v \f \a) bypass the parser, like the REPL. */
     {
         int handled = 0;
-        ray_t* sr = q_sys_dispatch(input, strlen(input), &handled);
+        ray_t* sr = q_sys_dispatch(input, strlen(input), &handled, /*is_repl=*/0);
         if (handled) {
             r->parsed++;
             if (mode == QDOC_PARSE_ONLY) {
