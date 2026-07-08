@@ -137,6 +137,11 @@ static inline int64_t temporal_as_ns(ray_t* x) {
     if (x->type == -RAY_MONTH)
         return (int64_t)((uint64_t)month_payload_as_days((int64_t)x->i32) *
                          86400000000000ULL);
+    if (x->type == -RAY_DATETIME)
+        /* f64 days -> ns; NaN nulls are guarded by callers' null checks
+         * (a NaN payload converts to INT64_MIN here — harmless for the
+         * ordering paths that reach this). */
+        return (int64_t)(x->f64 * 86400000000000.0);
     return 0;
 }
 
@@ -159,6 +164,7 @@ static inline double as_f64(ray_t* x) {
     if (x->type == -RAY_BOOL) return (double)x->b8;
     if (RAY_IS_TEMPORAL32(-x->type)) return (double)x->i32;
     if (RAY_IS_TEMPORAL64(-x->type)) return (double)x->i64;
+    if (RAY_IS_TEMPORALF(-x->type))  return x->f64;
     return (double)x->i64;
 }
 
@@ -328,6 +334,7 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
         case RAY_SYM:       return ray_sym(sym_cell_runtime_id(coll, i));
         case RAY_U8:        return ray_u8(((uint8_t*)d)[i]);
         case RAY_MONTH:     return ray_month((int64_t)((int32_t*)d)[i]);
+        case RAY_DATETIME:  return ray_datetime(((double*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
         case RAY_TIME:      return ray_time((int64_t)((int32_t*)d)[i]);
         case RAY_MINUTE:    return ray_minute((int64_t)((int32_t*)d)[i]);
@@ -357,7 +364,8 @@ static inline int64_t elem_as_i64(ray_t* elem) {
     if (elem->type == -RAY_I32)  return (int64_t)elem->i32;
     if (elem->type == -RAY_I16)  return (int64_t)elem->i16;
     if (elem->type == -RAY_U8)   return (int64_t)elem->u8;
-    if (elem->type == -RAY_F64)  return (int64_t)elem->f64;
+    if (elem->type == -RAY_F64 ||
+        RAY_IS_TEMPORALF(-elem->type)) return (int64_t)elem->f64;
     return elem->i64;
 }
 
@@ -367,7 +375,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
     if (RAY_ATOM_IS_NULL(elem)) {
         /* Payload carries the width-correct sentinel. */
         switch (vec->type) {
-            case RAY_F64:
+            case RAY_F64: RAY_TEMPORALF_CASES:
                 ((double*)ray_data(vec))[i] = NULL_F64; break;
             case RAY_I64: RAY_TEMPORAL64_CASES:
                 ((int64_t*)ray_data(vec))[i] = NULL_I64; break;
@@ -392,6 +400,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_BOOL:      ((bool*)ray_data(vec))[i]      = elem->b8;  return 0;
         case RAY_U8:        ((uint8_t*)ray_data(vec))[i]   = (uint8_t)elem_as_i64(elem); return 0;
         case RAY_MONTH:     ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
+        case RAY_DATETIME:  ((double*)ray_data(vec))[i]    = (elem->type == -RAY_F64 || elem->type == -RAY_DATETIME) ? elem->f64 : (double)elem_as_i64(elem); return 0;
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIME:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_MINUTE:    ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
