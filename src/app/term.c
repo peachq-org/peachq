@@ -72,6 +72,11 @@ static inline void term_write(const void* buf, size_t len) {
     ssize_t r = write(STDOUT_FILENO, buf, len);
     (void)r;
 }
+#else
+static inline void term_write(const void* buf, size_t len) {
+    int r = _write(1, buf, (unsigned int)len);
+    (void)r;
+}
 #endif
 
 /* ===== Signal handling ===== */

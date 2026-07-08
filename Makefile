@@ -442,7 +442,7 @@ q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
 rayforce.exe: $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ)
 	$(WIN_CC) $(WIN_CFLAGS) -o $@ $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ) $(WIN_LIBS)
 
-win: q.exe
+win: q.exe rayforce.exe
 
 clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)

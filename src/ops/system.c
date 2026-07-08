@@ -47,6 +47,11 @@ void* ray_runtime_get_sys_args(void);
 #include <string.h>
 #if !defined(RAY_OS_WINDOWS)
 #include <unistd.h>
+#else
+#include <io.h>          /* access */
+#ifndef F_OK
+#define F_OK 0
+#endif
 #endif
 
 /* ══════════════════════════════════════════
