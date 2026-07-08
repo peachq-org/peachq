@@ -252,7 +252,7 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
                 if (ray_vec_is_null(result, i)) d[i] = NULL_I64;
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             int32_t* d = (int32_t*)ray_data(result);
             for (int64_t i = 0; i < n; i++)
                 if (ray_vec_is_null(result, i)) d[i] = NULL_I32;
