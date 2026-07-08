@@ -431,8 +431,9 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
      * call_fn1/call_fn2 hook tails for a wrong-arity builtin (e.g. `map[+;d]`
      * applies the BINARY `+` monadically) — so require exact arity here, else
      * q_dict_distribute would call the wrong kernel signature and crash. */
-    if ((head->type == RAY_UNARY && n == 1) ||
-        (head->type == RAY_BINARY && n == 2)) {
+    if (((head->type == RAY_UNARY && n == 1) ||
+         (head->type == RAY_BINARY && n == 2)) &&
+        !q_fn_dict_distribute_veto(head, args, n)) {
         for (int64_t i = 0; i < n; i++)
             if (args[i] && args[i]->type == RAY_DICT)
                 return q_dict_distribute(head, args, n);
