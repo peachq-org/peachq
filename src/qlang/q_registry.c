@@ -650,7 +650,7 @@ static int q_match_rec(ray_t* a, ray_t* b) {
         switch (-a->type) {
         case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
         case RAY_F32: case RAY_F64:
-        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return memcmp(&a->i64, &b->i64, 8) == 0;   /* payload union */
         default:
             return 0;
@@ -668,7 +668,8 @@ static int q_match_rec(ray_t* a, ray_t* b) {
          * sentinels; attrs deliberately not compared).  SYM vecs vary in
          * index width -> per-element below. */
         if (ray_is_vec(a) && a->type != RAY_SYM && a->type != RAY_STR) {
-            size_t esz = (a->type == RAY_I64 || a->type == RAY_F64) ? 8
+            size_t esz = (a->type == RAY_I64 || a->type == RAY_F64 ||
+                          RAY_IS_TEMPORALF(a->type)) ? 8
                        : (a->type == RAY_I32 || a->type == RAY_F32) ? 4
                        : (a->type == RAY_I16) ? 2
                        : (a->type == RAY_BOOL || a->type == RAY_U8) ? 1 : 0;
@@ -1469,6 +1470,10 @@ static ray_t* q_neg_wrap(ray_t* x) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
         return ray_month(-(int64_t)x->i32);
     }
+    if (x && x->type == -RAY_DATETIME) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_datetime(-x->f64);
+    }
     /* kdb `neg` promotes a boolean to INT and negates (`neg 1b` -> -1i);
      * base ray_neg_fn rejects bools.  Registered ATOMIC, so a bool vector
      * arrives here element-wise and the i32 atoms collapse to an i32 vector. */
@@ -1639,7 +1644,7 @@ static ray_t* q_shift1(ray_t* x, int forward) {
         return ray_error("nyi", "next/prev: only simple numeric vectors (list/string/sym/atom deferred)");
     int8_t t = x->type;
     if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
-          RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t)))
+          RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
         return ray_error("nyi", "next/prev: %s vectors are deferred", ray_type_name(t));
     int64_t len = ray_len(x);
     size_t esz = ray_type_sizes[(uint8_t)t];
@@ -6704,7 +6709,9 @@ ray_t* q_collapse_list(ray_t* l) {
         case -RAY_I32:  vec = ray_vec_append(vec, &e[i]->i32); break;
         case -RAY_F32: { float f = (float)e[i]->f64;            /* F32 atom stores f64 */
                          vec = ray_vec_append(vec, &f); }       break;
-        case -RAY_F64:  vec = ray_vec_append(vec, &e[i]->f64); break;
+        case -RAY_F64:
+        case -RAY_DATETIME:
+                        vec = ray_vec_append(vec, &e[i]->f64); break;
         case -RAY_GUID: {                                      /* 16-byte payload, not i64 */
             const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
             vec = ray_vec_append(vec, g);
