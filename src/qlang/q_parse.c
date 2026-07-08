@@ -230,7 +230,7 @@ static Tokens g_toks = { NULL, 0 };
  * that widen to the chosen type's sentinel. */
 
 typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME,
-               EL_TS } el_kind;
+               EL_TS, EL_MONTH, EL_MINUTE, EL_SECOND, EL_TIMESPAN } el_kind;
 typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
@@ -330,6 +330,50 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
         }
     }
 
+    /* Month-SHAPED magnitude: yyyy.mm (4-2 digits), terminator neither digit
+     * nor dot nor an exponent continuation.  UNLIKE date, the month shape IS
+     * a valid float spelling (kdb bare `2000.01` is the float 2000.01; only
+     * the trailing `m` letter makes it a month), so this arm cannot commit:
+     * it records BOTH the month payload (.i = months since 2000.01) and the
+     * float twin (.f) with forces_float=1 — the `m` context in
+     * scan_num_literal reads .i, every other context reverts to the float via
+     * el_to_float's EL_MONTH arm.  A glued sign negates the payload (the
+     * kdb date-literal rule).  An invalid civil month (2000.13 / 2000.00)
+     * stays a float — EXCEPT when the very next byte is the `m` letter
+     * (2000.13m), which can only be a malformed month literal: die, mirroring
+     * the date arm's invalid-civil rule.  Year 0000 is out of the kdb domain
+     * and stays a float. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 4 && src[q + 4] == '.' &&
+            dig_run(src, q + 5) == 2 &&
+            src[q + 7] != '.' &&
+            !((src[q + 7] == 'e' || src[q + 7] == 'E') &&
+              (src[q + 8] == '+' || src[q + 8] == '-' ||
+               (src[q + 8] >= '0' && src[q + 8] <= '9')))) {
+            int64_t y  = (src[q]     - '0') * 1000 + (src[q + 1] - '0') * 100
+                       + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
+            int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
+            int valid = (y >= 1 && mo >= 1 && mo <= 12);
+            if (!valid && src[q + 7] == 'm') q_die("bad number");
+            if (valid) {
+                size_t rem2 = strlen(src + *p);
+                double fv; size_t u = ray_parse_f64(src + *p, rem2, &fv);
+                if (u == (size_t)(q + 7 - *p)) {   /* float twin spans yyyy.mm */
+                    out->kind = EL_MONTH;
+                    out->i = (y - 2000) * 12 + (mo - 1);
+                    if (neg) out->i = -out->i;
+                    out->f = fv;
+                    out->forces_float = 1;
+                    *p = q + 7;
+                    return 1;
+                }
+            }
+        }
+    }
+
     /* Time literal magnitude: HH:MM:SS.f (2-2-2 clock digits + a dot + 1..3
      * fractional digits, padded to milliseconds).  Checked before the float
      * peek for the same reason as date.  The 1..3-digit gate is THE
@@ -368,6 +412,138 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
                 *p = q + 9 + fd;
                 return 1;
             }
+            if (fd >= 4 && fd <= 9) {
+                /* Timespan clock form: HH:MM:SS. + 4..9 fractional digits,
+                 * right-padded to nanoseconds (the pinned spelling is the
+                 * 9-digit 12:00:00.000000000, datatypes.md:134; 4..8 derived
+                 * — mirrors the timestamp arm's 1..9 pad). */
+                int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+                int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+                int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
+                int64_t ns = 0;
+                for (int k = 0; k < fd; k++) ns = ns * 10 + (src[q + 9 + k] - '0');
+                for (int k = fd; k < 9; k++) ns *= 10;
+                if (mi >= 60 || s >= 60) q_die("bad timespan");
+                out->kind = EL_TIMESPAN;
+                out->i = (h * 3600 + mi * 60 + s) * 1000000000LL + ns;
+                if (neg) out->i = -out->i;
+                *p = q + 9 + fd;
+                return 1;
+            }
+        }
+    }
+
+    /* Second literal magnitude: HH:MM:SS with the terminator neither '.'
+     * (time / timespan clock-frac shapes above) nor ':' nor a digit
+     * (basics/syntax.md:90).  The three clock shapes are mutually
+     * exclusive by terminator, so ordering here is not load-bearing. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
+            dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
+            dig_run(src, q + 6) == 2 &&
+            src[q + 8] != '.' && src[q + 8] != ':' &&
+            !(CLASS[(uint8_t)src[q + 8]] & CL_DIGIT)) {
+            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+            int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+            int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
+            if (mi >= 60 || s >= 60) q_die("bad second");
+            out->kind = EL_SECOND;
+            out->i = h * 3600 + mi * 60 + s;
+            if (neg) out->i = -out->i;
+            *p = q + 8;
+            return 1;
+        }
+    }
+
+    /* Minute literal magnitude: HH:MM with the terminator neither ':'
+     * (second/time shapes) nor '.' nor a digit (basics/syntax.md:89). */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
+            dig_run(src, q + 3) == 2 &&
+            src[q + 5] != ':' && src[q + 5] != '.' &&
+            !(CLASS[(uint8_t)src[q + 5]] & CL_DIGIT)) {
+            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+            int64_t mm = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+            if (mm >= 60) q_die("bad minute");
+            out->kind = EL_MINUTE;
+            out->i = h * 60 + mm;
+            if (neg) out->i = -out->i;
+            *p = q + 5;
+            return 1;
+        }
+    }
+
+    /* Timespan D-form: digits 'D' [HH[:MM[:SS[.f{1,9}]]]] (interfaces
+     * usage 0D00:05 / 0D00:00:10; day-count payload derived).  Only
+     * matches when 'D' is followed by exactly-2 clock digits whose next
+     * byte does not continue a name, or by a byte that cannot continue a
+     * name at all — `1D45x` stays a name juxtaposition and `0Dabc` stays
+     * `0` + `Dabc` (the no-churn rule).  Hour overflow normalizes through
+     * the ns count (`123D45` -> 124D21:…, the timestamp-arm D24 rule).
+     * The date arm ran first, so `2000.01.01D…` never reaches here. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        int dd = dig_run(src, q);
+        if (dd >= 1 && src[q + dd] == 'D') {
+            int r = q + dd + 1;
+            int hd = dig_run(src, r);
+            int matched = 0;
+            int64_t days = 0, tod_s = 0, ns = 0;
+            for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
+            if (hd == 2) {
+                int64_t h = (src[r] - '0') * 10 + (src[r + 1] - '0');
+                int e = r + 2;
+                int64_t mi = 0, ss = 0;
+                if (src[e] == ':' && dig_run(src, e + 1) == 2) {
+                    mi = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
+                    e += 3;
+                    if (src[e] == ':' && dig_run(src, e + 1) == 2) {
+                        ss = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
+                        e += 3;
+                        if (src[e] == '.') {
+                            int fd = dig_run(src, e + 1);
+                            if (fd < 1 || fd > 9) q_die("bad timespan");
+                            for (int k = 0; k < fd; k++)
+                                ns = ns * 10 + (src[e + 1 + k] - '0');
+                            for (int k = fd; k < 9; k++) ns *= 10;
+                            e += 1 + fd;
+                        }
+                    }
+                }
+                if (mi >= 60 || ss >= 60) q_die("bad timespan");
+                /* A name byte right after the clock digits means this was
+                 * a name after all (e.g. 1D45x) — not a timespan. */
+                if (!(CLASS[(uint8_t)src[e]] & CL_DIGIT) &&
+                    !((src[e] >= 'a' && src[e] <= 'z') ||
+                      (src[e] >= 'A' && src[e] <= 'Z') || src[e] == '_')) {
+                    tod_s = h * 3600 + mi * 60 + ss;
+                    out->kind = EL_TIMESPAN;
+                    out->i = (days * 86400 + tod_s) * 1000000000LL + ns;
+                    if (neg) out->i = -out->i;
+                    *p = e;
+                    matched = 1;
+                }
+            } else if (hd == 0 &&
+                       !((src[r] >= 'a' && src[r] <= 'z') ||
+                         (src[r] >= 'A' && src[r] <= 'Z') ||
+                         src[r] == '_' || src[r] == '.' || src[r] == ':')) {
+                /* Bare dD day count (kdb 1D; derived — no doc example uses
+                 * a bare form as input, PR-noted). */
+                out->kind = EL_TIMESPAN;
+                out->i = days * 86400000000000LL;
+                if (neg) out->i = -out->i;
+                *p = q + dd + 1;
+                matched = 1;
+            }
+            if (matched) return 1;
         }
     }
 
@@ -410,19 +586,25 @@ static int64_t narrow_special(el_kind k, int width) {
 }
 
 /* Resolve one element to an int64 in the given integer width.  EL_DATE holds
- * its day count in .i (only reachable in the width-4 date context). */
+ * its day count in .i (only reachable in the width-4 date context); EL_MONTH
+ * holds its month payload in .i (only reachable in the width-4 month
+ * context — everywhere else it reverts to its float twin first). */
 static int64_t el_to_int(const num_el *e, int width) {
     if (e->kind == EL_INT || e->kind == EL_DATE || e->kind == EL_TIME ||
-        e->kind == EL_TS) return e->i;
+        e->kind == EL_TS || e->kind == EL_MONTH || e->kind == EL_MINUTE ||
+        e->kind == EL_SECOND || e->kind == EL_TIMESPAN) return e->i;
     if (e->kind == EL_FLOAT) return (int64_t)e->f;
     return narrow_special(e->kind, width);
 }
 
-/* Resolve one element to a double (float context). */
+/* Resolve one element to a double (float context).  EL_MONTH must return its
+ * float TWIN (.f), not the month payload — a bare `2000.01` is the float
+ * 2000.01, and the payload (0) would silently replace it (review C1). */
 static double el_to_float(const num_el *e) {
     if (e->kind == EL_NULL) return NULL_F64;
     if (e->kind == EL_PINF || e->kind == EL_NINF)
         q_die("q float infinity unsupported (deferred)");
+    if (e->kind == EL_MONTH) return e->f;
     return (e->kind == EL_FLOAT) ? e->f : (double)e->i;
 }
 
@@ -448,9 +630,19 @@ static void read_type_letter(const char *src, int *p, char *letter,
                            last->kind == EL_PINF || last->kind == EL_NINF);
     int ts_ok = last && (last->kind == EL_TS || last->kind == EL_NULL ||
                          last->kind == EL_PINF || last->kind == EL_NINF);
+    int month_ok = last && (last->kind == EL_MONTH || last->kind == EL_NULL ||
+                            last->kind == EL_PINF || last->kind == EL_NINF);
+    int minute_ok = last && (last->kind == EL_MINUTE || last->kind == EL_NULL ||
+                             last->kind == EL_PINF || last->kind == EL_NINF);
+    int second_ok = last && (last->kind == EL_SECOND || last->kind == EL_NULL ||
+                             last->kind == EL_PINF || last->kind == EL_NINF);
+    int timespan_ok = last && (last->kind == EL_TIMESPAN || last->kind == EL_NULL ||
+                               last->kind == EL_PINF || last->kind == EL_NINF);
     if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
               (c == 'g' && guid_ok) || (c == 't' && time_ok) ||
-              (c == 'p' && ts_ok))) {
+              (c == 'p' && ts_ok) || (c == 'm' && month_ok) ||
+              (c == 'u' && minute_ok) || (c == 'v' && second_ok) ||
+              (c == 'n' && timespan_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -568,6 +760,8 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             /* lowercase `0np` is the K-ism synonym of `0Np` — a typed null,
              * not a fractional magnitude (see the date arm below). */
             if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         int64_t t[MAX_VEC];
@@ -600,7 +794,9 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             /* forces_float on a NULL element is just the lowercase `0n` spelling
              * (openq accepts `0nd` as a K-ism synonym of `0Nd`); it is a typed
              * null, not a fractional magnitude, so it does NOT bar the date. */
-            if (buf[i].kind == EL_FLOAT ||
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
@@ -629,7 +825,9 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         for (int i = 0; i < m; i++)
             /* lowercase `0nt` is the K-ism synonym of `0Nt` — a typed null, not
              * a fractional magnitude (see the date arm above). */
-            if (buf[i].kind == EL_FLOAT ||
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
@@ -644,6 +842,130 @@ static ray_t *scan_num_literal(const char *src, int *p) {
                 if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
         }
         return vec;
+    }
+
+    /* Month context: ONLY the `m` suffix (0Nm / 0Wm / -0Wm / 2000.01m) — a
+     * month-shaped magnitude alone is NOT a commitment (bare `2000.01` is the
+     * float; EL_MONTH elements revert to their float twins below).  kdb month
+     * == i32 months since 2000.01 (payload (y-2000)*12+(mo-1)): Specials
+     * narrow to the width-4 sentinels and a plain int widens as a raw month
+     * count (the date-arm rule).  A genuine fractional magnitude or a foreign
+     * temporal mate can never be a month. */
+    if (letter == 'm') {
+        for (int i = 0; i < m; i++)
+            /* EL_MONTH itself carries forces_float=1 (the float-twin machinery)
+             * and is VALID here; lowercase `0nm` is the K-ism null synonym. */
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
+                (buf[i].forces_float && buf[i].kind != EL_MONTH &&
+                 buf[i].kind != EL_NULL))
+                q_die("bad number");
+        if (m == 1) {
+            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_MONTH);
+            return ray_month(el_to_int(&buf[0], 4));
+        }
+        int32_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+        ray_t *vec = ray_vec_from_raw(RAY_MONTH, t, m);
+        if (vec && !RAY_IS_ERR(vec)) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+        }
+        return vec;
+    }
+
+    /* Minute context: a `u` suffix (0Nu / 0Wu / -0Wu) or any HH:MM
+     * magnitude.  kdb minute == i32 minutes since midnight
+     * (basics/datatypes.md row 17): Specials narrow to the width-4
+     * sentinels, a plain int widens as a raw minute count (the date-arm
+     * rule), a fractional magnitude or foreign temporal mate dies. */
+    {
+        int is_minute = (letter == 'u');
+        for (int i = 0; i < m && !is_minute; i++)
+            if (buf[i].kind == EL_MINUTE) is_minute = 1;
+        if (is_minute) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                    buf[i].kind == EL_MONTH || buf[i].kind == EL_SECOND ||
+                    buf[i].kind == EL_TIMESPAN ||
+                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                    q_die("bad number");
+            if (m == 1) {
+                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_MINUTE);
+                return ray_minute(el_to_int(&buf[0], 4));
+            }
+            int32_t t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+            ray_t *vec = ray_vec_from_raw(RAY_MINUTE, t, m);
+            if (vec && !RAY_IS_ERR(vec)) {
+                for (int i = 0; i < m; i++)
+                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            }
+            return vec;
+        }
+    }
+
+    /* Second context: a `v` suffix or any HH:MM:SS magnitude.  kdb second
+     * == i32 seconds since midnight (datatypes.md row 18). */
+    {
+        int is_second = (letter == 'v');
+        for (int i = 0; i < m && !is_second; i++)
+            if (buf[i].kind == EL_SECOND) is_second = 1;
+        if (is_second) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
+                    buf[i].kind == EL_TIMESPAN ||
+                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                    q_die("bad number");
+            if (m == 1) {
+                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_SECOND);
+                return ray_second(el_to_int(&buf[0], 4));
+            }
+            int32_t t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+            ray_t *vec = ray_vec_from_raw(RAY_SECOND, t, m);
+            if (vec && !RAY_IS_ERR(vec)) {
+                for (int i = 0; i < m; i++)
+                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            }
+            return vec;
+        }
+    }
+
+    /* Timespan context: an `n` suffix (0Nn / 0Wn / -0Wn) or any timespan
+     * magnitude (dD… / HH:MM:SS.f{4,9}).  kdb timespan == i64 nanoseconds
+     * (datatypes.md row 16): Specials narrow width-8, a plain int is a raw
+     * ns count (the timestamp-arm rule). */
+    {
+        int is_timespan = (letter == 'n');
+        for (int i = 0; i < m && !is_timespan; i++)
+            if (buf[i].kind == EL_TIMESPAN) is_timespan = 1;
+        if (is_timespan) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
+                    buf[i].kind == EL_SECOND ||
+                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                    q_die("bad number");
+            int64_t t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = el_to_int(&buf[i], 8);
+            if (m == 1) {
+                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIMESPAN);
+                return ray_timespan(t[0]);
+            }
+            ray_t *vec = ray_vec_from_raw(RAY_TIMESPAN, t, m);
+            if (vec && !RAY_IS_ERR(vec)) {
+                for (int i = 0; i < m; i++)
+                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            }
+            return vec;
+        }
     }
 
     /* Float context: explicit e/f letter, or any fractional/lowercase-special. */

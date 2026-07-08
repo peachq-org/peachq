@@ -30,6 +30,7 @@
 #include "vec/vec.h"
 #include "lang/nfo.h"
 #include "lang/parse.h"
+#include "lang/cal.h"
 #include "core/pool.h"
 #include "core/types.h"
 #include "io/csv.h"
@@ -73,8 +74,12 @@ static const char* null_literal_str(int8_t type) {
         case RAY_I64:       return "0Nl";
         case RAY_F32:       return "0Ne";
         case RAY_F64:       return "0Nf";
+        case RAY_MONTH:     return "0Nm";
         case RAY_DATE:      return "0Nd";
         case RAY_TIME:      return "0Nt";
+        case RAY_MINUTE:    return "0Nu";
+        case RAY_SECOND:    return "0Nv";
+        case RAY_TIMESPAN:  return "0Nn";
         case RAY_TIMESTAMP: return "0Np";
         /* SYM has no null literal: empty symbol is a value, never reaches
          * here — callers gate on RAY_ATOM_IS_NULL, always false for SYM. */
@@ -501,8 +506,12 @@ static int8_t resolve_type_name(int64_t sym_id) {
     else if (len == 3 && memcmp(name, "STR", 3) == 0) result = RAY_STR;
     else if (len == 3 && memcmp(name, "F32", 3) == 0) result = RAY_F32;
     else if (len == 4 && memcmp(name, "DATE", 4) == 0) result = RAY_DATE;
+    else if (len == 5 && memcmp(name, "MONTH", 5) == 0) result = RAY_MONTH;
     else if (len == 4 && memcmp(name, "TIME", 4) == 0) result = RAY_TIME;
     else if (len == 9 && memcmp(name, "TIMESTAMP", 9) == 0) result = RAY_TIMESTAMP;
+    else if (len == 6 && memcmp(name, "MINUTE", 6) == 0) result = RAY_MINUTE;
+    else if (len == 6 && memcmp(name, "SECOND", 6) == 0) result = RAY_SECOND;
+    else if (len == 8 && memcmp(name, "TIMESPAN", 8) == 0) result = RAY_TIMESPAN;
     else if (len == 4 && memcmp(name, "GUID", 4) == 0) result = RAY_GUID;
     ray_release(s);
     return result;
@@ -827,13 +836,13 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
                     if (ray_vec_is_null(val, j)) d[j] = NULL_F64;
                 break;
             }
-            case RAY_I64: case RAY_TIMESTAMP: {
+            case RAY_I64: RAY_TEMPORAL64_CASES: {
                 int64_t* d = (int64_t*)ray_data(vec);
                 for (int64_t j = 0; j < vec->len; j++)
                     if (ray_vec_is_null(val, j)) d[j] = NULL_I64;
                 break;
             }
-            case RAY_I32: case RAY_DATE: case RAY_TIME: {
+            case RAY_I32: RAY_TEMPORAL32_CASES: {
                 int32_t* d = (int32_t*)ray_data(vec);
                 for (int64_t j = 0; j < vec->len; j++)
                     if (ray_vec_is_null(val, j)) d[j] = NULL_I32;
@@ -869,10 +878,10 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
  * vector.  Returns true on hit. */
 static bool cast_vec_relabel_compat(int8_t a, int8_t b) {
     if (a == b) return true;
-    if ((a == RAY_I64 || a == RAY_TIMESTAMP) &&
-        (b == RAY_I64 || b == RAY_TIMESTAMP)) return true;
-    if ((a == RAY_I32 || a == RAY_DATE || a == RAY_TIME) &&
-        (b == RAY_I32 || b == RAY_DATE || b == RAY_TIME)) return true;
+    if ((a == RAY_I64 || RAY_IS_TEMPORAL64(a)) &&
+        (b == RAY_I64 || RAY_IS_TEMPORAL64(b))) return true;
+    if ((a == RAY_I32 || RAY_IS_TEMPORAL32(a)) &&
+        (b == RAY_I32 || RAY_IS_TEMPORAL32(b))) return true;
     return false;
 }
 
@@ -933,22 +942,22 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
      * in_type); each leaf is a tight typed loop the compiler vectorizes. */
 #define CL(R, W, EXPR) do { CAST_LOOP_RANGE(R, W, EXPR, lo, hi); return true; } while (0)
     switch (out_type) {
-    case RAY_I64: case RAY_TIMESTAMP:
+    case RAY_I64: RAY_TEMPORAL64_CASES:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int64_t, _v ? 1 : 0);
         case RAY_U8:    CL(uint8_t,  int64_t, (int64_t)_v);
         case RAY_I16:   CL(int16_t,  int64_t, (int64_t)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  int64_t, (int64_t)_v);
         case RAY_F64:   CL(double,   int64_t, (int64_t)_v);
         }
         break;
-    case RAY_I32: case RAY_DATE: case RAY_TIME:
+    case RAY_I32: RAY_TEMPORAL32_CASES:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int32_t, _v ? 1 : 0);
         case RAY_U8:    CL(uint8_t,  int32_t, (int32_t)_v);
         case RAY_I16:   CL(int16_t,  int32_t, (int32_t)_v);
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
                         CL(int64_t,  int32_t, (int32_t)_v);
         case RAY_F64:   CL(double,   int32_t, (int32_t)_v);
         }
@@ -957,9 +966,9 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int16_t, _v ? 1 : 0);
         case RAY_U8:    CL(uint8_t,  int16_t, (int16_t)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  int16_t, (int16_t)_v);
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
                         CL(int64_t,  int16_t, (int16_t)_v);
         case RAY_F64:   CL(double,   int16_t, (int16_t)_v);
         }
@@ -968,9 +977,9 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  uint8_t, _v ? 1 : 0);
         case RAY_I16:   CL(int16_t,  uint8_t, (uint8_t)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  uint8_t, (uint8_t)_v);
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
                         CL(int64_t,  uint8_t, (uint8_t)_v);
         case RAY_F64:   CL(double,   uint8_t, (uint8_t)_v);
         }
@@ -980,9 +989,9 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         case RAY_BOOL:  CL(uint8_t,  double, _v ? 1.0 : 0.0);
         case RAY_U8:    CL(uint8_t,  double, (double)_v);
         case RAY_I16:   CL(int16_t,  double, (double)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  double, (double)_v);
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
                         CL(int64_t,  double, (double)_v);
         }
         break;
@@ -990,9 +999,9 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         switch (in_type) {
         case RAY_U8:    CL(uint8_t,  uint8_t, _v != 0 ? 1 : 0);
         case RAY_I16:   CL(int16_t,  uint8_t, _v != 0 ? 1 : 0);
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  uint8_t, _v != 0 ? 1 : 0);
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
                         CL(int64_t,  uint8_t, _v != 0 ? 1 : 0);
         case RAY_F64:   CL(double,   uint8_t, _v != 0.0 ? 1 : 0);
         }
@@ -1019,6 +1028,39 @@ static void cast_par_fn(void* arg, uint32_t worker_id, int64_t lo, int64_t hi) {
     if (ray_interrupted()) return;
     cast_par_ctx_t* ctx = (cast_par_ctx_t*)arg;
     cast_range_worker(ctx->src, ctx->dst, lo, hi, ctx->in_type, ctx->out_type);
+}
+
+/* UNIT-CONVERTING temporal vector casts (single home — codex q-month round-3
+ * P2s): a cast between two temporal types whose payloads are in different
+ * UNITS (month<->date/timestamp civil, duration-family ns ratios,
+ * timestamp->time-of-day) must apply the same conversion the ATOM arm uses,
+ * per element.  The generic cast_vec_numeric path relabels/copies raw
+ * payloads (correct only for pure re-tags like int<->minute) — falling
+ * through to it produced `month$2019.11.19 2019.12.01 -> 2605.03 2606.03m.
+ * Every temporal-target cast arm routes TEMPORAL-source vectors here; the
+ * int-family fast path is untouched.  Nulls pass through as typed nulls. */
+static ray_t* cast_vec_temporal_elems(ray_t* type_sym, ray_t* val, int8_t out_type) {
+    int64_t n = ray_len(val);
+    ray_t* out = ray_vec_new(out_type, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = n;
+    for (int64_t i = 0; i < n; i++) {
+        if (ray_vec_is_null(val, i)) {
+            ray_t* nl = ray_typed_null((int8_t)-out_type);
+            store_typed_elem(out, i, nl);
+            ray_release(nl);
+            continue;
+        }
+        int alloc = 0;
+        ray_t* e = collection_elem(val, i, &alloc);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+        ray_t* c = ray_cast_fn(type_sym, e);      /* the scalar/atom arm */
+        if (alloc) ray_release(e);
+        if (!c || RAY_IS_ERR(c)) { ray_release(out); return c; }
+        store_typed_elem(out, i, c);              /* null atoms set the bit too */
+        ray_release(c);
+    }
+    return out;
 }
 
 /* Threshold below which the dispatch overhead outweighs the speedup.
@@ -1174,7 +1216,7 @@ static void cast_mark_output_sentinels(ray_t* vec, int8_t out_type, int64_t n) {
                 if (d[i] != d[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
             return;
         }
-        case RAY_I64: case RAY_TIMESTAMP: {
+        case RAY_I64: RAY_TEMPORAL64_CASES: {
             const int64_t* d = (const int64_t*)out;
             for (int64_t i = 0; i < n; i++)
                 if (d[i] == NULL_I64) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
@@ -1251,9 +1293,9 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
         if (alloc) ray_release(elem);
         if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
         switch (out_type) {
-        case RAY_I64: case RAY_TIMESTAMP: case RAY_SYM:
+        case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_SYM:
             ((int64_t*)out)[i] = cast->i64; break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)out)[i] = cast->i32; break;
         case RAY_I16:  ((int16_t*)out)[i] = cast->i16; break;
         case RAY_U8:   ((uint8_t*)out)[i] = cast->u8;  break;
@@ -1295,6 +1337,10 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         else if (cast_match(tn, tl, "BOOL") || cast_match(tn, tl, "bool") || cast_match(tn, tl, "B8") || cast_match(tn, tl, "b8")) tt = -RAY_BOOL;
         else if (cast_match(tn, tl, "SYMBOL") || cast_match(tn, tl, "symbol") || cast_match(tn, tl, "sym")) tt = -RAY_SYM;
         else if (cast_match(tn, tl, "DATE") || cast_match(tn, tl, "date")) tt = -RAY_DATE;
+        else if (cast_match(tn, tl, "MONTH") || cast_match(tn, tl, "month")) tt = -RAY_MONTH;
+        else if (cast_match(tn, tl, "MINUTE") || cast_match(tn, tl, "minute")) tt = -RAY_MINUTE;
+        else if (cast_match(tn, tl, "SECOND") || cast_match(tn, tl, "second")) tt = -RAY_SECOND;
+        else if (cast_match(tn, tl, "TIMESPAN") || cast_match(tn, tl, "timespan")) tt = -RAY_TIMESPAN;
         else if (cast_match(tn, tl, "TIME") || cast_match(tn, tl, "time")) tt = -RAY_TIME;
         else if (cast_match(tn, tl, "TIMESTAMP") || cast_match(tn, tl, "timestamp")) tt = -RAY_TIMESTAMP;
         else if (cast_match(tn, tl, "GUID") || cast_match(tn, tl, "guid")) tt = -RAY_GUID;
@@ -1314,9 +1360,9 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I64) { ray_retain(val); return val; }
         if (val->type == -RAY_F64) return make_i64((int64_t)val->f64);
         if (val->type == -RAY_BOOL) return make_i64(val->b8 ? 1 : 0);
-        if (val->type == -RAY_I32 || val->type == -RAY_DATE || val->type == -RAY_TIME)
+        if (val->type == -RAY_I32 || RAY_IS_TEMPORAL32(-val->type))
             return make_i64(val->i32);
-        if (val->type == -RAY_TIMESTAMP) return make_i64(val->i64);
+        if (RAY_IS_TEMPORAL64(-val->type)) return make_i64(val->i64);
         if (val->type == -RAY_I16) return make_i64(val->i16);
         if (val->type == -RAY_U8) return make_i64(val->u8);
         if (val->type == -RAY_STR) {
@@ -1341,8 +1387,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I16) return ray_i32(val->i16);
         if (val->type == -RAY_I64) return ray_i32((int32_t)val->i64);
         if (val->type == -RAY_F64) return ray_i32((int32_t)val->f64);
-        if (val->type == -RAY_DATE || val->type == -RAY_TIME) return ray_i32(val->i32);
-        if (val->type == -RAY_TIMESTAMP) return ray_i32((int32_t)val->i64);
+        if (RAY_IS_TEMPORAL32(-val->type)) return ray_i32(val->i32);
+        if (RAY_IS_TEMPORAL64(-val->type)) return ray_i32((int32_t)val->i64);
         if (val->type == -RAY_STR) {
             const char* sp = ray_str_ptr(val); char* end;
             long v = strtol(sp, &end, 10);
@@ -1363,8 +1409,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I32) return ray_i16((int16_t)val->i32);
         if (val->type == -RAY_I64) return ray_i16((int16_t)val->i64);
         if (val->type == -RAY_F64) return ray_i16((int16_t)val->f64);
-        if (val->type == -RAY_DATE || val->type == -RAY_TIME) return ray_i16((int16_t)val->i32);
-        if (val->type == -RAY_TIMESTAMP) return ray_i16((int16_t)val->i64);
+        if (RAY_IS_TEMPORAL32(-val->type)) return ray_i16((int16_t)val->i32);
+        if (RAY_IS_TEMPORAL64(-val->type)) return ray_i16((int16_t)val->i64);
         if (val->type == -RAY_STR) {
             const char* sp = ray_str_ptr(val); char* end;
             long v = strtol(sp, &end, 10);
@@ -1385,8 +1431,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I32) return make_f64((double)val->i32);
         if (val->type == -RAY_I16) return make_f64((double)val->i16);
         if (val->type == -RAY_U8)  return make_f64((double)val->u8);
-        if (val->type == -RAY_DATE || val->type == -RAY_TIME) return make_f64((double)val->i32);
-        if (val->type == -RAY_TIMESTAMP) return make_f64((double)val->i64);
+        if (RAY_IS_TEMPORAL32(-val->type)) return make_f64((double)val->i32);
+        if (RAY_IS_TEMPORAL64(-val->type)) return make_f64((double)val->i64);
         if (val->type == -RAY_STR) {
             const char* sp = ray_str_ptr(val);
             if (!sp) return ray_error("domain", "as: cannot parse empty str as f64");
@@ -1528,9 +1574,49 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         return ray_error("type", "as: cannot cast %s to sym", ray_type_name(val->type));
     }
     /* Cast to DATE/date */
+    /* Cast to MONTH/month (i32 payload = months since 2000.01) */
+    if (cast_match(tname, tlen, "MONTH") || cast_match(tname, tlen, "month")) {
+        ray_release(s);
+        if (val->type == -RAY_MONTH) { ray_retain(val); return val; }
+        if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
+            return ray_typed_null(-RAY_MONTH);
+        if (val->type == -RAY_BOOL) return ray_month((int64_t)val->b8);
+        if (val->type == -RAY_U8)  return ray_month((int64_t)val->u8);
+        if (val->type == -RAY_I16) return ray_month((int64_t)val->i16);
+        if (val->type == -RAY_I32) return ray_month((int64_t)val->i32);
+        if (val->type == -RAY_I64) return ray_month(val->i64);
+        if (val->type == -RAY_F64) return ray_month((int64_t)val->f64);
+        if (val->type == -RAY_DATE) {
+            /* Civil truncation: date -> its month (kdb `month$, floor rule). */
+            int y, m, d2;
+            date_to_ymd(val->i32, &y, &m, &d2);
+            return ray_month((int64_t)(y - 2000) * 12 + (m - 1));
+        }
+        if (val->type == -RAY_TIMESTAMP) {
+            int y, m, d2;
+            date_to_ymd((int32_t)ts_days_floor(val->i64), &y, &m, &d2);
+            return ray_month((int64_t)(y - 2000) * 12 + (m - 1));
+        }
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_MONTH) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_MONTH);
+        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_MONTH);
+        return ray_error("type", "as: cannot cast %s to month", ray_type_name(val->type));
+    }
     if (cast_match(tname, tlen, "DATE") || cast_match(tname, tlen, "date")) {
         ray_release(s);
         if (val->type == -RAY_DATE) { ray_retain(val); return val; }
+        if (val->type == -RAY_MONTH) {
+            /* First-of-month (kdb `date$2000.02m -> 2000.02.01, ref/xbar.md). */
+            if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_DATE);
+            return ray_date(month_payload_as_days((int64_t)val->i32));
+        }
         if (val->type == -RAY_BOOL) return ray_date((int64_t)val->b8);
         if (val->type == -RAY_U8)  return ray_date((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_date((int64_t)val->i16);
@@ -1556,7 +1642,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             }
             return ray_date(days);
         }
-        /* Vector cast */
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_DATE) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_DATE);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_DATE);
         return ray_error("type", "as: cannot cast %s to date", ray_type_name(val->type));
@@ -1571,6 +1664,21 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I32) return ray_time((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_time(val->i64);
         if (val->type == -RAY_F64) return ray_time((int64_t)val->f64);
+        if (val->type == -RAY_MINUTE) {
+            if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_TIME);
+            return ray_time((int64_t)val->i32 * 60000LL);
+        }
+        if (val->type == -RAY_SECOND) {
+            if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_TIME);
+            return ray_time((int64_t)val->i32 * 1000LL);
+        }
+        if (val->type == -RAY_TIMESPAN) {
+            /* ns -> ms-of-count, floor (cast.md:168-170 truncation rule). */
+            if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_TIME);
+            int64_t v = val->i64, q = v / 1000000LL;
+            if (v < 0 && q * 1000000LL != v) q--;
+            return ray_time(q);
+        }
         if (val->type == -RAY_DATE) return ray_time((int64_t)val->i32);
         if (val->type == -RAY_TIMESTAMP)
             /* TIMESTAMP is ns since epoch; TIME stores ms-of-day.  Use
@@ -1595,10 +1703,122 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             int32_t ms = (int32_t)th * 3600000 + (int32_t)tm * 60000 + (int32_t)ts * 1000 + tms;
             return ray_time((int64_t)ms);
         }
-        /* Vector cast */
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_TIME) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_TIME);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_TIME);
         return ray_error("type", "as: cannot cast %s to time", ray_type_name(val->type));
+    }
+    /* Cast to MINUTE/minute (i32 payload = minutes; cast.md:54-61 17h$42 ->
+     * 00:42).  Cross-family duration casts convert by ns ratio and FLOOR
+     * (cast.md:168-170 "truncates rather than rounds").  timestamp/date
+     * sources (time-of-day extraction) are deferred — unpinned by example. */
+    if (cast_match(tname, tlen, "MINUTE") || cast_match(tname, tlen, "minute")) {
+        ray_release(s);
+        if (val->type == -RAY_MINUTE) { ray_retain(val); return val; }
+        if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
+            return ray_typed_null(-RAY_MINUTE);
+        if (val->type == -RAY_BOOL) return ray_minute((int64_t)val->b8);
+        if (val->type == -RAY_U8)  return ray_minute((int64_t)val->u8);
+        if (val->type == -RAY_I16) return ray_minute((int64_t)val->i16);
+        if (val->type == -RAY_I32) return ray_minute((int64_t)val->i32);
+        if (val->type == -RAY_I64) return ray_minute(val->i64);
+        if (val->type == -RAY_F64) return ray_minute((int64_t)val->f64);
+        if (val->type == -RAY_SECOND) {
+            int64_t v = val->i32, q = v / 60;
+            if (v < 0 && q * 60 != v) q--;
+            return ray_minute(q);
+        }
+        if (val->type == -RAY_TIME) {
+            int64_t v = val->i32, q = v / 60000LL;
+            if (v < 0 && q * 60000LL != v) q--;
+            return ray_minute(q);
+        }
+        if (val->type == -RAY_TIMESPAN) {
+            int64_t v = val->i64, q = v / 60000000000LL;
+            if (v < 0 && q * 60000000000LL != v) q--;
+            return ray_minute(q);
+        }
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_MINUTE) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_MINUTE);
+        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_MINUTE);
+        return ray_error("type", "as: cannot cast %s to minute", ray_type_name(val->type));
+    }
+    /* Cast to SECOND/second (i32 payload = seconds; 18h$42 -> 00:00:42). */
+    if (cast_match(tname, tlen, "SECOND") || cast_match(tname, tlen, "second")) {
+        ray_release(s);
+        if (val->type == -RAY_SECOND) { ray_retain(val); return val; }
+        if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
+            return ray_typed_null(-RAY_SECOND);
+        if (val->type == -RAY_BOOL) return ray_second((int64_t)val->b8);
+        if (val->type == -RAY_U8)  return ray_second((int64_t)val->u8);
+        if (val->type == -RAY_I16) return ray_second((int64_t)val->i16);
+        if (val->type == -RAY_I32) return ray_second((int64_t)val->i32);
+        if (val->type == -RAY_I64) return ray_second(val->i64);
+        if (val->type == -RAY_F64) return ray_second((int64_t)val->f64);
+        if (val->type == -RAY_MINUTE) return ray_second((int64_t)val->i32 * 60LL);
+        if (val->type == -RAY_TIME) {
+            int64_t v = val->i32, q = v / 1000LL;
+            if (v < 0 && q * 1000LL != v) q--;
+            return ray_second(q);
+        }
+        if (val->type == -RAY_TIMESPAN) {
+            int64_t v = val->i64, q = v / 1000000000LL;
+            if (v < 0 && q * 1000000000LL != v) q--;
+            return ray_second(q);
+        }
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_SECOND) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_SECOND);
+        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_SECOND);
+        return ray_error("type", "as: cannot cast %s to second", ray_type_name(val->type));
+    }
+    /* Cast to TIMESPAN/timespan (i64 payload = ns; 16h$42 ->
+     * 0D00:00:00.000000042). */
+    if (cast_match(tname, tlen, "TIMESPAN") || cast_match(tname, tlen, "timespan")) {
+        ray_release(s);
+        if (val->type == -RAY_TIMESPAN) { ray_retain(val); return val; }
+        if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
+            return ray_typed_null(-RAY_TIMESPAN);
+        if (val->type == -RAY_BOOL) return ray_timespan((int64_t)val->b8);
+        if (val->type == -RAY_U8)  return ray_timespan((int64_t)val->u8);
+        if (val->type == -RAY_I16) return ray_timespan((int64_t)val->i16);
+        if (val->type == -RAY_I32) return ray_timespan((int64_t)val->i32);
+        if (val->type == -RAY_I64) return ray_timespan(val->i64);
+        if (val->type == -RAY_F64) return ray_timespan((int64_t)val->f64);
+        if (val->type == -RAY_MINUTE) return ray_timespan((int64_t)val->i32 * 60000000000LL);
+        if (val->type == -RAY_SECOND) return ray_timespan((int64_t)val->i32 * 1000000000LL);
+        if (val->type == -RAY_TIME)   return ray_timespan((int64_t)val->i32 * 1000000LL);
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_TIMESPAN) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_TIMESPAN);
+        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_TIMESPAN);
+        return ray_error("type", "as: cannot cast %s to timespan", ray_type_name(val->type));
     }
     /* Cast to TIMESTAMP/timestamp */
     if (cast_match(tname, tlen, "TIMESTAMP") || cast_match(tname, tlen, "timestamp")) {
@@ -1614,6 +1834,11 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_DATE) {
             int64_t days = val->i32;
             return ray_timestamp(days * 24LL * 60 * 60 * 1000000000LL);
+        }
+        if (val->type == -RAY_MONTH) {
+            /* First-of-month midnight. */
+            if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_TIMESTAMP);
+            return ray_timestamp(month_payload_as_days((int64_t)val->i32) * 86400000000000LL);
         }
         /* ISO string -> timestamp: "YYYY-MM-DD[T ]HH:MM:SS[.nnn...]" or "YYYY.MM.DDDHH:MM:SS.nnn..." */
         if (val->type == -RAY_STR) {
@@ -1684,7 +1909,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             }
             return ray_timestamp(ns);
         }
-        /* Vector cast */
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_TIMESTAMP) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_TIMESTAMP);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_TIMESTAMP);
         return ray_error("type", "as: cannot cast %s to timestamp", ray_type_name(val->type));
@@ -1966,7 +2198,7 @@ ray_t* ray_enlist_fn(ray_t** args, int64_t n) {
         ray_t* vec = ray_vec_new(vtype, n);
         if (RAY_IS_ERR(vec)) return vec;
         switch (vtype) {
-        case RAY_I64: case RAY_TIMESTAMP: {
+        case RAY_I64: RAY_TEMPORAL64_CASES: {
             int64_t* d = (int64_t*)ray_data(vec);
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->i64;
             break;
@@ -1976,7 +2208,7 @@ ray_t* ray_enlist_fn(ray_t** args, int64_t n) {
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->f64;
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             int32_t* d = (int32_t*)ray_data(vec);
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->i32;
             break;
@@ -2629,9 +2861,9 @@ ray_t* ray_group_fn(ray_t* x) {
          * an 8-byte stride and walks off the end of the buffer. */
         if (x->type == RAY_SYM)
             v = ray_read_sym(ray_data(x), i, x->type, x->attrs);
-        else if (x->type == RAY_I64 || x->type == RAY_TIMESTAMP)
+        else if (x->type == RAY_I64 || RAY_IS_TEMPORAL64(x->type))
             v = ((int64_t*)ray_data(x))[i];
-        else if (x->type == RAY_I32 || x->type == RAY_DATE || x->type == RAY_TIME)
+        else if (x->type == RAY_I32 || RAY_IS_TEMPORAL32(x->type))
             v = ((int32_t*)ray_data(x))[i];
         else if (x->type == RAY_I16)
             v = ((int16_t*)ray_data(x))[i];
@@ -2725,7 +2957,7 @@ ray_t* ray_group_fn(ray_t* x) {
         switch (key_type) {
             case RAY_SYM:
             case RAY_I64:
-            case RAY_TIMESTAMP: {
+            RAY_TEMPORAL64_CASES: {
                 int64_t v = gvals[g];
                 keys_vec = ray_vec_append(keys_vec, &v); break;
             }
@@ -2773,9 +3005,9 @@ ray_t* ray_group_fn(ray_t* x) {
                  * agree with the bitmap. */
                 void* base = ray_data(keys_vec);
                 switch (key_type) {
-                    case RAY_I64: case RAY_TIMESTAMP:
+                    case RAY_I64: RAY_TEMPORAL64_CASES:
                         ((int64_t*)base)[g] = NULL_I64; break;
-                    case RAY_I32: case RAY_DATE: case RAY_TIME:
+                    case RAY_I32: RAY_TEMPORAL32_CASES:
                         ((int32_t*)base)[g] = NULL_I32; break;
                     case RAY_I16:
                         ((int16_t*)base)[g] = NULL_I16; break;
@@ -2910,11 +3142,11 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         if (RAY_IS_ERR(result)) return result;
         /* Copy atom value as first element */
         switch (b->type) {
-        case RAY_I64: case RAY_TIMESTAMP: case RAY_SYM:
+        case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_SYM:
             ((int64_t*)ray_data(result))[0] = a->i64; break;
         case RAY_F64:
             ((double*)ray_data(result))[0] = a->f64; break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)ray_data(result))[0] = a->i32; break;
         case RAY_I16:
             ((int16_t*)ray_data(result))[0] = a->i16; break;
@@ -2961,11 +3193,11 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             memcpy(ray_data(result), ray_data(a), (size_t)(na * esz));
         }
         switch (a->type) {
-        case RAY_I64: case RAY_TIMESTAMP: case RAY_SYM:
+        case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_SYM:
             ((int64_t*)ray_data(result))[na] = b->i64; break;
         case RAY_F64:
             ((double*)ray_data(result))[na] = b->f64; break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)ray_data(result))[na] = b->i32; break;
         case RAY_I16:
             ((int16_t*)ray_data(result))[na] = b->i16; break;
@@ -2993,7 +3225,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         if (RAY_IS_ERR(result)) return result;
         result->len = 2;
         switch (vtype) {
-        case RAY_I64: case RAY_TIMESTAMP: case RAY_SYM:
+        case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_SYM:
             ((int64_t*)ray_data(result))[0] = a->i64;
             ((int64_t*)ray_data(result))[1] = b->i64;
             break;
@@ -3001,7 +3233,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((double*)ray_data(result))[0] = a->f64;
             ((double*)ray_data(result))[1] = b->f64;
             break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)ray_data(result))[0] = a->i32;
             ((int32_t*)ray_data(result))[1] = b->i32;
             break;
@@ -3052,7 +3284,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
                 k_storage.type = -RAY_SYM;
                 k_storage.i64  = ray_read_sym(ray_data(bk), i, RAY_SYM, bk->attrs);
                 k = &k_storage;
-            } else if (bk->type == RAY_I64 || bk->type == RAY_TIMESTAMP) {
+            } else if (bk->type == RAY_I64 || RAY_IS_TEMPORAL64(bk->type)) {
                 k_storage.type = -bk->type;
                 k_storage.i64  = ((int64_t*)ray_data(bk))[i];
                 k = &k_storage;
@@ -3354,7 +3586,7 @@ ray_t* ray_within_fn(ray_t* vals, ray_t* range) {
         double* r = (double*)ray_data(range);
         double lo = r[0], hi = r[1];
         for (int64_t i = 0; i < n; i++) out[i] = (d[i] >= lo && d[i] <= hi);
-    } else if (vals->type == RAY_I32 || vals->type == RAY_DATE || vals->type == RAY_TIME) {
+    } else if (vals->type == RAY_I32 || RAY_IS_TEMPORAL32(vals->type)) {
         int32_t* d = (int32_t*)ray_data(vals);
         int32_t* r = (int32_t*)ray_data(range);
         int32_t lo = r[0], hi = r[1];
