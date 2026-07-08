@@ -19,22 +19,9 @@ static char g_ctx[64];
 
 void q_ns_reset(void) { g_ctx[0] = '\0'; }
 
-/* ---- `\S` random-seed state ------------------------------------------------
- * kdb re-initializes its rng to a CONSTANT seed at startup (-314159i,
- * basics/syscmds.md) so scripts using Roll/Deal/rand repeat.  ALL openq
- * randomness (`?` roll/deal/permute + generate arms, `rand`) funnels through
- * libc rand(), so srand IS the whole contract — except the guid generator
- * (src/ops/system.c xorshift64*), which seeds lazily from rand() per thread:
- * `\S` makes guid sequences reproducible only if set before the thread's
- * first guid use (recorded caveat, not fixed here).
- * `\S` displays the LAST-INITIALIZED seed, never evolving rng state; reading
- * the live state (`\S 0N`, V3.6) has no libc counterpart -> 'nyi. */
-static int32_t g_last_seed = -314159;
-
-void q_seed_init(void) {
-    g_last_seed = -314159;
-    srand((unsigned)-314159);
-}
+/* NOTE: the `\S` random-seed state and handler moved to q_sys.c (the unified
+ * `\`-command dispatcher) — \S is its only consumer.  q_sys_seed_init() now
+ * carries the kdb constant-seed-at-startup contract. */
 
 const char* q_ns_current(void) { return g_ctx; }
 
@@ -328,65 +315,13 @@ static ray_t* ns_members(const char* ns, size_t nslen, ns_list_kind kind,
     return out;
 }
 
-/* ---- system-command dispatch ---------------------------------------------- */
-
-ray_t* q_ns_syscmd(const char* line, size_t n, int* handled) {
-    *handled = 0;
-    size_t i = 0;
-    while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
-    if (i >= n || line[i] != '\\') return NULL;
-    i++;
-    if (i >= n) return NULL;
-    char cmd = line[i++];
-    if (cmd != 'd' && cmd != 'v' && cmd != 'f' && cmd != 'a' && cmd != 'S')
-        return NULL;
-    if (i < n && line[i] != ' ' && line[i] != '\t') return NULL; /* \foo etc. */
-    while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
-    /* first token = the optional namespace argument; the rest of the line is
-     * ignored (transcripts carry trailing `/ comments`). */
-    size_t a0 = i;
-    while (i < n && line[i] != ' ' && line[i] != '\t') i++;
-    const char* arg = line + a0;
-    size_t alen = i - a0;
-    if (alen > 0 && arg[0] == '/') alen = 0;     /* bare comment, no arg */
-
-    *handled = 1;
-
-    if (cmd == 'S') {
-        if (alen == 0)                           /* `\S` — last-initialized seed */
-            return ray_i32(g_last_seed);
-        if (alen == 2 && arg[0] == '0' && arg[1] == 'N')  /* `\S 0N` — live state */
-            return ray_error("nyi", "\\S 0N: libc rand state is not readable");
-        char* end = NULL;
-        char abuf[32];
-        if (alen >= sizeof abuf) return ray_error("parse", NULL);
-        memcpy(abuf, arg, alen); abuf[alen] = '\0';
-        long long v = strtoll(abuf, &end, 10);
-        if (!end || *end != '\0' || end == abuf)
-            return ray_error("parse", NULL);     /* non-integer arg (unpinned) */
-        /* The seed is an INT (`\S` displays it as one): out-of-int-range
-         * values (incl. strtoll saturation) and the 0Ni sentinel are
-         * rejected, never silently truncated (codex P2, 2026-07-09). */
-        if (v <= INT32_MIN || v > INT32_MAX)
-            return ray_error("parse", NULL);
-        srand((unsigned)v);                      /* `\S n` — re-initialize */
-        g_last_seed = (int32_t)v;
-        return NULL;                             /* silent, like `\d ns` */
-    }
-
-    if (cmd == 'd') {
-        if (alen == 0) {                         /* `\d` — show current */
-            const char* c = q_ns_current();
-            ray_t* s = (*c) ? ray_sym(ray_sym_intern(c, strlen(c)))
-                            : ray_sym(ray_sym_intern(".", 1));
-            /* DATA sym, not a name-ref: keeps its backtick in q_fmt (`.) */
-            if (s && !RAY_IS_ERR(s)) s->attrs |= 0x20; /* Q_ATTR_QUOTED */
-            return s;
-        }
-        return q_ns_switch(arg, alen);           /* NULL (silent) or error */
-    }
-
-    /* \v \f \a [ns] */
+/* ---- \v \f \a member listing (called by the q_sys.c command handlers) ------
+ * The `\`-command PARSE + dispatch now lives in q_sys.c; this is the shared
+ * enumeration primitive it calls for \v/\f/\a.  cmd is 'v' (vars) | 'f'
+ * (functions) | 'a' (tables); arg/alen is the already-tokenized namespace
+ * argument (empty = current context).  Returns an OWNED RAY_SYM vector, or an
+ * OWNED RAY_ERROR naming a missing namespace. */
+ray_t* q_ns_list(char cmd, const char* arg, size_t alen) {
     ns_list_kind kind = (cmd == 'v') ? NS_LIST_VARS
                        : (cmd == 'f') ? NS_LIST_FNS : NS_LIST_TABLES;
     const char* ns; size_t nslen; int missing_ok;

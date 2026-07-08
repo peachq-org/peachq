@@ -16,11 +16,6 @@
 /* Reset to the root context (called by q_runtime_create/destroy). */
 void q_ns_reset(void);
 
-/* Re-initialize the rng to kdb's constant startup seed (-314159i,
- * basics/syscmds.md \S) and record it as the last-initialized seed.
- * Called by q_runtime_create; `\S n` re-initializes thereafter. */
-void q_seed_init(void);
-
 /* Current context: "" at root, else the dotted name (".jab").  Never NULL. */
 const char* q_ns_current(void);
 
@@ -59,10 +54,10 @@ int q_ns_is_context(const char* dotname, size_t len);
  * env insertion order (RAY_SYM vector). */
 ray_t* q_ns_key_roster(void);
 
-/* System-command dispatch for a console line starting with `\`.  Handles
- * \d [ns], \v [ns], \f [ns], \a [ns], \S [n]; sets *handled and returns an
- * OWNED value to display (NULL = handled silently), or an OWNED RAY_ERROR.
- * Unrecognized commands leave *handled == 0. */
-ray_t* q_ns_syscmd(const char* line, size_t n, int* handled);
+/* List members for the \v/\f/\a `\`-commands (dispatched by q_sys.c).  cmd is
+ * 'v' (vars) | 'f' (functions) | 'a' (tables); arg/alen is the tokenized
+ * namespace argument (empty = current context).  Returns an OWNED RAY_SYM
+ * vector, or an OWNED RAY_ERROR naming a missing namespace. */
+ray_t* q_ns_list(char cmd, const char* arg, size_t alen);
 
 #endif /* Q_NS_H */
