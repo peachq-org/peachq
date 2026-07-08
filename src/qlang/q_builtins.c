@@ -522,10 +522,20 @@ static ray_t* q_table_colnames(ray_t* x) {
     return ray_error("type", "cols: expects a table");
 }
 
+/* Resolve a by-name table operand (cols`t / meta`t): a -RAY_SYM naming a
+ * global plain/keyed table resolves to it (borrowed); else x unchanged. */
+static ray_t* q_bi_deref_table(ray_t* x) {
+    if (x && x->type == -RAY_SYM) {
+        ray_t* g = ray_env_get(x->i64);                 /* borrowed */
+        if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) return g;
+    }
+    return x;
+}
+
 /* (cols x) — column names of a table as a symbol vector. */
 static ray_t* q_cols_fn(ray_t* x) {
     if (!x) return ray_error("type", "cols: nil");
-    return q_table_colnames(x);
+    return q_table_colnames(q_bi_deref_table(x));
 }
 
 /* Flatten a plain-or-keyed table to a single plain RAY_TABLE (key cols first).
@@ -555,7 +565,7 @@ static ray_t* q_meta_flatten(ray_t* x) {
  * renders it `k| v`). */
 static ray_t* q_meta_fn(ray_t* x) {
     if (!x) return ray_error("type", "meta: nil");
-    ray_t* flat = q_meta_flatten(x);
+    ray_t* flat = q_meta_flatten(q_bi_deref_table(x));
     if (!flat || RAY_IS_ERR(flat)) return flat;
     int64_t nc = ray_table_ncols(flat);
     int64_t cap = nc > 0 ? nc : 1;
@@ -732,6 +742,22 @@ void q_builtins_register(void) {
      * builtin values and must be torn down via q_runtime_destroy before the
      * runtime.  Fail fast: a missing audited builtin is a bug. */
     assert(q_registry_init() == RAY_OK);
+    /* Monadic table verbs (feat/q-table-verbs) are REGISTRY wrappers with no
+     * base env builtin behind them — but a bare keyword used as a HOF operand
+     * (`flip each x`, `keys each ts`) resolves through the ENV (the q `value`
+     * precedent), so bind the registry's own immutable value under the same
+     * name.  Application heads still embed the registry copy; both paths call
+     * ONE wrapper. */
+    {
+        static const char* tv_monads[] = { "flip", "keys", "ungroup" };
+        for (size_t i = 0; i < sizeof tv_monads / sizeof *tv_monads; i++) {
+            const char* nm = tv_monads[i];
+            ray_t* v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC); /* borrowed */
+            if (!v) fprintf(stderr, "q_builtins: registry miss for %s\n", nm);
+            assert(v != NULL);
+            ray_env_bind(ray_sym_intern(nm, strlen(nm)), v);             /* retains */
+        }
+    }
     bind_unary(".Q.id", q_id_fn);
     bind_unary(".Q.ty", q_dotq_ty_fn);
     bind_value(".Q.res", q_name_reserved_words());
