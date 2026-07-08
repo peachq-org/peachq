@@ -2622,6 +2622,56 @@ static int q_time_scan(const char* p, size_t len, int32_t* ms) {
     return 0;
 }
 
+/* Clock scan for the duration Toks "U"$/"V"$/"N"$ -> ns.  Two forms
+ * (the q_time_scan scheme generalised to ns):
+ *   - PACKED digits HHMMSS + up to 9 fractional digits right-padded
+ *     (doc-pinned for "N": tok.md:200 "N"$"123456123987654" ->
+ *     0D12:34:56.123987654); >=4 digits HHMM accepted with SS=0 (derived).
+ *   - COLON H[H]:MM[:SS[.f{1..9}]] (derived — the literal spellings).
+ * mm/ss must be < 60.  Returns 1 and fills *ns, else 0 (caller -> null). */
+static int q_clock_scan_ns(const char* p, size_t len, int64_t* ns) {
+    int64_t h = 0, mi = 0, s = 0, frac = 0;
+    int has_colon = 0;
+    for (size_t i = 0; i < len; i++) if (p[i] == ':') { has_colon = 1; break; }
+    if (has_colon) {
+        size_t i = 0;
+        while (i < len && p[i] >= '0' && p[i] <= '9') { h = h * 10 + (p[i] - '0'); i++; }
+        if (i == 0 || i > 2 || i >= len || p[i] != ':') return 0;
+        i++;
+        if (i + 2 > len || !q_all_digits(p + i, 2)) return 0;
+        mi = (p[i] - '0') * 10 + (p[i + 1] - '0');
+        i += 2;
+        if (i < len) {                        /* optional :SS[.f…] */
+            if (p[i] != ':') return 0;
+            i++;
+            if (i + 2 > len || !q_all_digits(p + i, 2)) return 0;
+            s = (p[i] - '0') * 10 + (p[i + 1] - '0');
+            i += 2;
+            if (i < len) {
+                if (p[i] != '.' || i + 1 == len) return 0;
+                i++;
+                size_t fd = len - i;
+                if (fd > 9 || !q_all_digits(p + i, fd)) return 0;
+                for (size_t k = 0; k < fd; k++) frac = frac * 10 + (p[i + k] - '0');
+                for (size_t k = fd; k < 9; k++) frac *= 10;
+            }
+        }
+    } else if (len >= 4 && q_all_digits(p, len)) {
+        h  = (p[0] - '0') * 10 + (p[1] - '0');
+        mi = (p[2] - '0') * 10 + (p[3] - '0');
+        if (len >= 6) {
+            s = (p[4] - '0') * 10 + (p[5] - '0');
+            size_t fd = len - 6;
+            if (fd > 9) return 0;
+            for (size_t k = 0; k < fd; k++) frac = frac * 10 + (p[6 + k] - '0');
+            for (size_t k = fd; k < 9; k++) frac *= 10;
+        } else if (len != 4) return 0;
+    } else return 0;
+    if (mi >= 60 || s >= 60) return 0;
+    *ns = (h * 3600 + mi * 60 + s) * 1000000000LL + frac;
+    return 1;
+}
+
 /* tod scan for "P"$: HH:MM:SS[.f{1..9}] -> ns of day (colon form only; the
  * packed date form is split off by the caller).  Returns 1/0. */
 static int q_tod_scan_ns(const char* p, size_t len, int64_t* ns) {
@@ -2830,8 +2880,32 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         if (!q_parse_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
         return ray_guid(bytes);
     }
+    case RAY_MINUTE: {
+        /* "U"$str -> minute, FLOOR to the minute we are in (ref/tok.md:61
+         * "U"$"12:13:14" -> 12:13; cast.md:168-170 truncation rule). */
+        int64_t ns;
+        if (!q_clock_scan_ns(p, len, &ns))
+            return ray_typed_null(-RAY_MINUTE);
+        return ray_minute(ns / 60000000000LL);
+    }
+    case RAY_SECOND: {
+        /* "V"$str -> second, floor (derived — mirrors "U"$). */
+        int64_t ns;
+        if (!q_clock_scan_ns(p, len, &ns))
+            return ray_typed_null(-RAY_SECOND);
+        return ray_second(ns / 1000000000LL);
+    }
+    case RAY_TIMESPAN: {
+        /* "N"$str -> timespan (tok.md:200-201: the digit run is
+         * HHMMSS + up to 9 fractional digits right-padded, NOT a raw ns
+         * count).  dD… string forms deferred. */
+        int64_t ns;
+        if (!q_clock_scan_ns(p, len, &ns))
+            return ray_typed_null(-RAY_TIMESPAN);
+        return ray_timespan(ns);
+    }
     default:
-        return ray_error("nyi", "$: month/timespan/char Tok is deferred");
+        return ray_error("nyi", "$: char Tok is deferred");
     }
 }
 
