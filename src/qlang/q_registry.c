@@ -623,6 +623,24 @@ static ray_t* q_dict_vals_vec(ray_t* d, int* owned) {
  * ray_where_fn handles the boolean-mask form, so delegate for it and anything
  * else.  Result is a long vector (kdb).  Negative counts are 'domain. */
 static ray_t* q_where_wrap(ray_t* x) {
+    /* where d — keys replicated by the (int/bool) values (ref/where.md):
+     * `where `a`b`c!1 0 2` -> `a`c`c; a bool-valued dict (comparison result)
+     * gives the keys where true.  Key-indexing shape keys[where vals], NOT
+     * value distribution. */
+    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
+        ray_t* keys = ray_dict_keys(x);            /* borrowed */
+        if (!keys) return ray_error("type", "where: malformed dictionary");
+        int vo = 0;
+        ray_t* vv = q_dict_vals_vec(x, &vo);
+        if (!vv) return ray_error("type", "where: malformed dictionary");
+        ray_t* w = q_where_wrap(vv);               /* bool mask or int counts */
+        if (vo) ray_release(vv);
+        if (!w || RAY_IS_ERR(w)) return w;
+        ray_t* r = ray_at_fn(keys, w);
+        ray_release(w);
+        if (r && r->type == RAY_LIST) { ray_t* c = q_collapse_list(r); ray_release(r); return c; }
+        return r;
+    }
     if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
         int64_t n = ray_len(x);
         int64_t total = 0;
