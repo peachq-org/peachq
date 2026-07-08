@@ -6,6 +6,8 @@
 
 #include <stdio.h>
 
+typedef struct ray_poll ray_poll_t;   /* fwd — full API in core/poll.h */
+
 /* Read q source lines from `in`, evaluating each and writing the console
  * transcript to `out`:
  *
@@ -20,6 +22,24 @@
  *
  * Requires an initialised rayforce runtime. */
 void q_repl_run(FILE* in, FILE* out, FILE* err, int echo);
+
+/* Poll-driven REPL: register stdin on `poll` (alongside any IPC listener
+ * already on it) and run ONE event loop, so the console and IPC clients are
+ * serviced concurrently — mirrors rayforce's own run_interactive (repl.c).
+ *
+ * stdin_tty != 0 drives the line-editor console (same behaviour as
+ * q_repl_run's interactive mode); 0 drives the piped transcript loop (prompt
+ * + echo, identical output shape to the fgets loop).  `\\` / `exit` exit the
+ * whole loop (kdb: process exit).  On stdin EOF: when have_listener != 0 the
+ * loop keeps running so IPC clients stay served (the daemon shape); otherwise
+ * the loop exits.
+ *
+ * Returns 0 after the poll loop has run and exited; -1 when stdin cannot be
+ * poll-driven on this platform (Windows IOCP has no stdin selector; epoll
+ * rejects a regular-file redirect) — the caller falls back to the serial
+ * REPL-then-serve shape. */
+int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
+                    int stdin_tty, int have_listener);
 
 /* Run a q startup script (`q file.q`): evaluate each line silently (no prompt,
  * no echo, no auto-display of results) — only explicit side-effects (show/0N!)

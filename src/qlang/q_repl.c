@@ -15,12 +15,17 @@
 #include "qlang/q_ns.h"       /* q_ns_prompt — namespaces */
 #include "qlang/q_sys.h"      /* q_sys_dispatch — `\`-command dispatcher */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
+#include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval */
 #include "lang/env.h"       /* ray_env_has_name — live env-derived name highlight */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <stdlib.h>         /* getenv */
 #include <string.h>
+#ifndef RAY_OS_WINDOWS
+  #include <errno.h>
+  #include <unistd.h>       /* read, STDIN_FILENO — poll-driven stdin */
+#endif
 
 /* ===== q syntax highlighter (matches ray_highlight_fn) =====
  *
@@ -396,6 +401,282 @@ static void q_repl_interactive(FILE* out, FILE* err) {
     ray_hist_save(&t->hist, hist_path);
     ray_term_destroy(t);
 }
+
+/* ===== Poll-driven REPL (concurrent console + IPC) =====
+ *
+ * Mirrors rayforce's own run_interactive (src/app/repl.c ~919): stdin is
+ * registered as a selector on the SAME poll that carries the IPC listener,
+ * so one single-threaded ray_poll_run services keystrokes AND client
+ * sockets — a client round-trips while the console sits at its prompt.
+ *
+ * Two stdin flavours share one context:
+ *   - tty:   ray_term_getc/feed per byte (read_fn) + line dispatch (data_fn),
+ *            byte-for-byte the q_repl_interactive behaviour.
+ *   - piped: a line accumulator over plain read(2); each complete line is
+ *            processed with the same prompt/echo shape as the fgets loop so
+ *            the transcript is unchanged.
+ * `\\` / `exit` exit the poll loop (kdb: process exit).  EOF keeps the loop
+ * serving IPC when a listener is live (the daemon shape), else exits. */
+#ifndef RAY_OS_WINDOWS
+
+typedef struct {
+    ray_term_t* term;            /* tty console; NULL in piped mode / after teardown */
+    FILE*       out;
+    FILE*       err;
+    int         have_listener;   /* EOF → keep serving instead of exiting */
+    char        hist_path[4108];
+    /* piped mode */
+    int         echo;
+    size_t      acc_len;         /* bytes accumulated toward the next line */
+    char        acc[4096];       /* mirrors the fgets loop's 4096 line buffer */
+} q_poll_repl_t;
+
+static q_poll_repl_t g_q_poll_repl;
+
+/* Restore the terminal + save history exactly once (idempotent). */
+static void q_poll_close_term(q_poll_repl_t* c) {
+    if (!c->term)
+        return;
+    ray_hist_save(&c->term->hist, c->hist_path);
+    ray_term_destroy(c->term);
+    c->term = NULL;
+}
+
+/* --- tty flavour: same callbacks shape as repl.c's repl_read/repl_on_data --- */
+
+static ray_t* q_poll_tty_read(ray_poll_t* poll, ray_selector_t* sel) {
+    q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
+    ray_term_t*    t = c->term;
+
+    int64_t sz = ray_term_getc(t);
+    if (sz <= 0) {
+        if (sz == -2) {
+            /* SIGINT at the prompt: clear the line, re-prompt (repl.c contract). */
+            ray_term_clear_interrupt();
+            ray_eval_clear_interrupt();
+            t->comp_cycling = 0;
+            t->esc_state = 0;
+            t->buf_len = 0;
+            t->buf_pos = 0;
+            t->multiline_len = 0;
+            fputs("^C\n", c->out);
+            fflush(c->out);
+            ray_term_prompt(t);
+            return NULL;
+        }
+        goto eof;
+    }
+
+    {
+        ray_t* line = ray_term_feed(t);
+        if (line == RAY_TERM_EOF)
+            goto eof;
+        return line;   /* complete line (or NULL: keep accumulating) */
+    }
+
+eof:
+    /* Ctrl-D: restore the terminal; with a live listener keep serving IPC
+     * clients (the historic REPL-then-serve shape), else exit the loop. */
+    q_poll_close_term(c);
+    if (c->have_listener)
+        ray_poll_deregister(poll, sel->id);
+    else
+        ray_poll_exit(poll, 0);
+    return NULL;
+}
+
+static ray_t* q_poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
+    q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
+    ray_t* line = (ray_t*)data;
+
+    const char* str = ray_str_ptr(line);
+    size_t      len = ray_str_len(line);
+
+    if (len == 0) {
+        ray_release(line);
+        ray_term_begin(c->term);
+        return NULL;
+    }
+
+    if ((len == 2 && memcmp(str, "\\\\", 2) == 0) ||
+        (len == 4 && memcmp(str, "exit", 4) == 0)) {
+        ray_release(line);
+        q_poll_close_term(c);
+        ray_poll_exit(poll, 0);
+        return NULL;
+    }
+
+    /* Interrupt window: identical bracket to q_repl_interactive — Ctrl-C is
+     * SIGINT only while the eval runs; run_one_line reports it as 'stop. */
+    ray_term_clear_interrupt();
+    ray_eval_clear_interrupt();
+    ray_term_eval_begin(c->term);
+    run_one_line(str, len, c->out, c->err, 1);
+    ray_term_eval_end(c->term);
+    ray_release(line);
+
+    /* `\d` may have switched context: refresh the prompt (q.foo). */
+    {
+        char prompt[80];
+        int  pl = q_ns_prompt(prompt, sizeof prompt);
+        ray_term_set_prompt(c->term, prompt, pl);
+    }
+    ray_term_begin(c->term);
+    return NULL;
+}
+
+/* --- piped flavour: fgets-loop transcript over poll-driven read(2) --- */
+
+static void q_pipe_prompt(q_poll_repl_t* c) {
+    char prompt[80];
+    q_ns_prompt(prompt, sizeof prompt);
+    fputs(prompt, c->out);
+    fflush(c->out);
+}
+
+/* Process one complete piped line (prompt already showing, mirrors the fgets
+ * loop's prompt-then-read order).  Returns 1 when the line requests exit. */
+static int q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+        n--;
+    line[n] = '\0';
+
+    if (c->echo) {
+        fputs(line, c->out);
+        fputc('\n', c->out);
+    }
+
+    if (n) {
+        if (!strcmp(line, "\\\\") || !strcmp(line, "exit"))
+            return 1;
+        run_one_line(line, n, c->out, c->err, 1);
+    }
+    q_pipe_prompt(c);
+    return 0;
+}
+
+static ray_t* q_poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
+    q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
+    char tmp[1024];
+
+    /* One read per readable event: the fd is blocking, and a single read
+     * after EPOLLIN/EVFILT_READ never blocks; level-triggered polling
+     * re-fires while more input is pending. */
+    ssize_t rd = read((int)sel->fd, tmp, sizeof tmp);
+    if (rd < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            return NULL;
+        rd = 0;   /* real error → treat as EOF */
+    }
+
+    if (rd == 0) {
+        int quit = 0;
+        if (c->acc_len) {   /* final line without a trailing newline */
+            size_t n = c->acc_len;
+            c->acc_len = 0;
+            quit = q_pipe_line(c, c->acc, n);
+        }
+        if (!quit) {        /* fgets loop prints '\n' after the EOF prompt */
+            fputc('\n', c->out);
+            fflush(c->out);
+        }
+        if (quit || !c->have_listener)
+            ray_poll_exit(poll, 0);
+        else
+            ray_poll_deregister(poll, sel->id);   /* keep serving IPC */
+        return NULL;
+    }
+
+    for (ssize_t i = 0; i < rd; i++) {
+        /* Overlong line (no newline within the buffer): flush it as its own
+         * line — the same split the fgets loop's 4096 buffer produced. */
+        if (tmp[i] == '\n' || c->acc_len >= sizeof(c->acc) - 1) {
+            if (tmp[i] != '\n')
+                c->acc[c->acc_len++] = tmp[i];
+            size_t n = c->acc_len;
+            c->acc_len = 0;
+            if (q_pipe_line(c, c->acc, n)) {
+                ray_poll_exit(poll, 0);
+                return NULL;
+            }
+        } else {
+            c->acc[c->acc_len++] = tmp[i];
+        }
+    }
+    return NULL;
+}
+
+int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
+                    int stdin_tty, int have_listener) {
+    q_poll_repl_t* c = &g_q_poll_repl;
+    memset(c, 0, sizeof *c);
+    c->out = out;
+    c->err = err;
+    c->have_listener = have_listener;
+
+    ray_poll_reg_t reg = {0};
+    reg.fd   = STDIN_FILENO;
+    reg.type = RAY_SEL_STDIN;
+    reg.data = c;
+
+    if (stdin_tty) {
+        ray_term_t* t = ray_term_create();
+        if (!t) {
+            fprintf(err, "q: terminal init failed\n");
+            return -1;
+        }
+        /* Same setup as q_repl_interactive: q history, q highlighter, kdb
+         * `q)` prompt, line-at-a-time (no continuation), SIGINT plumbing. */
+        char hist_buf[4096];
+        const char* hp = q_hist_path(hist_buf, sizeof hist_buf);
+        snprintf(c->hist_path, sizeof c->hist_path, "%s", hp);
+        ray_hist_load(&t->hist, c->hist_path);
+        ray_term_set_highlighter(t, q_highlight);
+        ray_term_set_prompt(t, "q)", 2);
+        ray_term_set_continuation_fn(t, q_no_continuation);
+        ray_term_install_signals(t);
+        c->term = t;
+        reg.read_fn = q_poll_tty_read;
+        reg.data_fn = q_poll_tty_data;
+    } else {
+        c->echo = 1;   /* piped transcript: echo input after the prompt */
+        reg.read_fn = q_poll_pipe_read;
+    }
+
+    if (ray_poll_register(poll, &reg) < 0) {
+        /* Backend can't watch this stdin (e.g. epoll + regular-file
+         * redirect): restore the terminal and let the caller fall back. */
+        if (c->term) {
+            ray_term_destroy(c->term);
+            c->term = NULL;
+        }
+        return -1;
+    }
+
+    if (c->term)
+        ray_term_begin(c->term);   /* draw the first prompt */
+    else
+        q_pipe_prompt(c);
+
+    ray_poll_run(poll);
+
+    /* Loop exited with the console still live (e.g. a remote-initiated
+     * exit): restore the terminal before returning. */
+    q_poll_close_term(c);
+    return 0;
+}
+
+#else /* RAY_OS_WINDOWS */
+
+/* IOCP has no stdin selector yet (event-loop console is a future Windows
+ * stage) — report "can't" so qmain keeps the serial REPL-then-serve shape. */
+int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
+                    int stdin_tty, int have_listener) {
+    (void)poll; (void)out; (void)err; (void)stdin_tty; (void)have_listener;
+    return -1;
+}
+
+#endif /* RAY_OS_WINDOWS */
 
 void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
     /* Interactive TTY (echo == 0): reuse rayforce's line editor. */

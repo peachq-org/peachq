@@ -6,11 +6,12 @@
  * Phase C: `-p PORT` starts the kdb-protocol IPC listener (src/core/ipc.c) on
  * the runtime poll — `q -p 5001` is a kdb-style server.  `-u PW` / `-U PW`
  * arm the constant-time handshake auth (-U additionally restricts inbound
- * evals).  Service shape mirrors src/app/main.c: with `-p` and stdin NOT a
- * tty (daemon/harness: `</dev/null`, docker, systemd) the REPL is skipped and
- * the poll loop runs directly.  With a tty the REPL runs first and IPC is
- * served only after EOF — a documented Phase C limitation (event-loop REPL
- * integration is future work).
+ * evals).  Service shape mirrors src/app/main.c: with `-p`, stdin (tty
+ * console OR pipe) is registered on the SAME poll as the listener and one
+ * event loop serves both CONCURRENTLY (q_repl_run_poll) — clients round-trip
+ * while the REPL sits at its prompt.  stdin EOF (`</dev/null`, docker,
+ * systemd) leaves the loop serving IPC only; `\\` exits.  Windows keeps the
+ * serial REPL-then-serve shape until IOCP grows a stdin selector.
  *
  * Deliberately thin otherwise: no error traces, progress bar, remote session,
  * or piped bracket accumulation — those live in the (frozen) rayforce repl.c
@@ -165,29 +166,43 @@ int main(int argc, char** argv) {
         /* Startup script could not be opened/read — skip the REPL/server loop
          * and exit non-zero (kdb fails a bad `q file.q`; it must not silently
          * succeed).  q_repl_run_file already printed the open error. */
-    } else if (port > 0 && poll && !stdin_tty) {
-        /* Server-only: daemon/harness shape (`</dev/null`, docker,
-         * systemd).  SIGPIPE ignored so a broken log pipe can't kill the
-         * daemon (writes fail with EPIPE instead). */
+    } else if (port > 0 && poll) {
+        /* Live listener + console: register stdin on the SAME poll as the
+         * IPC listener and run ONE event loop (q_repl_run_poll — mirrors
+         * rayforce's run_interactive), so clients are served WHILE the REPL
+         * reads — no EOF needed.  Covers both the tty console and piped
+         * stdin; on stdin EOF the loop keeps serving (the `</dev/null`
+         * daemon shape), on `\\`/`exit` it exits.  SIGPIPE ignored so a
+         * broken client/log pipe can't kill the server (writes fail with
+         * EPIPE instead). */
+        int concurrent = 0;
 #ifndef RAY_OS_WINDOWS
         signal(SIGPIPE, SIG_IGN);
+        concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty,
+                                      /*have_listener=*/1) == 0);
 #endif
-        fprintf(stderr, "no terminal — running in server-only mode\n");
-        ray_poll_run(poll);
+        if (!concurrent) {
+            /* Fallback: Windows (no IOCP stdin selector yet) or a stdin the
+             * poll backend cannot watch (e.g. a regular-file redirect under
+             * epoll).  Legacy serial shape. */
+            if (stdin_tty) {
+                fprintf(stderr, "note: -p with an interactive REPL serves "
+                                "IPC only after EOF on this platform\n");
+                q_repl_run(stdin, stdout, stderr, 0);
+            } else {
+                fprintf(stderr, "no terminal — running in server-only mode\n");
+            }
+            ray_poll_run(poll);
+        }
     } else if (script && !stdin_tty) {
         /* Ran a startup script with no server on a non-tty (`q file.q
          * </dev/null`): exit 0 without entering the REPL. */
     } else {
-        if (port > 0 && stdin_tty)
-            fprintf(stderr, "note: -p with an interactive REPL serves IPC "
-                            "only after EOF (event-loop REPL integration "
-                            "is future work)\n");
-        /* Echo input when stdin is not a terminal (piped / redirected) so
-         * the output is a faithful console transcript; on a real tty the
-         * terminal echoes, so we don't. */
+        /* No listener (or poll init failed): plain console.  Echo input when
+         * stdin is not a terminal (piped / redirected) so the output is a
+         * faithful console transcript; on a real tty the terminal echoes, so
+         * we don't. */
         q_repl_run(stdin, stdout, stderr, !stdin_tty);
-        if (port > 0 && poll)
-            ray_poll_run(poll);
     }
 
     if (poll) {
