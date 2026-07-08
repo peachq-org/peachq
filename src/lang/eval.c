@@ -2029,7 +2029,14 @@ op_call2: {
     RAY_ASSERT_VALUE(left); RAY_ASSERT_VALUE(right);
     if (RAY_UNLIKELY(RAY_IS_NULL(left) || RAY_IS_NULL(right))) {
         result = (fn == (ray_binary_fn)ray_eq_fn || fn == (ray_binary_fn)ray_neq_fn)
-                 ? fn(left, right) : ray_error("type", NULL);
+                 ? fn(left, right) : NULL;
+        if (!result && g_apply_hook) {
+            /* openq: null-operand offer to the apply hook (see tree-walk
+             * twin above); hook-decline keeps the historic 'type. */
+            ray_t* hargs[2] = { left, right };
+            result = g_apply_hook(fn_obj, hargs, 2);
+        }
+        if (!result) result = ray_error("type", NULL);
     /* Fast path: atoms have negative type — skip collection check entirely.
      * Only call is_collection when at least one arg has type >= 0 (vector/list). */
     } else if ((fn_obj->attrs & RAY_FN_ATOMIC) && (left->type >= 0 || right->type >= 0))
@@ -3311,6 +3318,20 @@ ray_t* ray_eval(ray_t* obj) {
                     ray_release(left);
                     ray_release(right);
                     ret = result; goto out;
+                }
+                /* openq: offer the null-operand application to the installed
+                 * apply hook (the q layer whitelists null-tolerant wrappers,
+                 * e.g. `-8!(::)` serialize / `x~(::)` match); NULL return =
+                 * historic 'type.  Additive: byte-identical without a hook. */
+                if (g_apply_hook) {
+                    ray_t* hargs[2] = { left, right };
+                    ray_t* hr = g_apply_hook(head, hargs, 2);
+                    if (hr) {
+                        ray_release(head);
+                        ray_release(left);
+                        ray_release(right);
+                        ret = hr; goto out;
+                    }
                 }
                 int8_t lt = left->type, rt = right->type;
                 ray_release(head);
