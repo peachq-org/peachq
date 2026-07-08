@@ -193,7 +193,9 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
         return make_bool(temporal_as_ns(a) == temporal_as_ns(b) ? 1 : 0);
     /* temporal ~ numeric payload compare (see ray_gt_fn note). */
     if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type))) return ray_error("type", "=: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
-    if (is_float_op(a, b))
+    /* An f64-backed temporal (datetime) forces the FLOAT lane: as_i64 on it
+     * would return the raw bit pattern (codex r2 P2). */
+    if (is_float_op(a, b) || RAY_IS_TEMPORALF(-a->type) || RAY_IS_TEMPORALF(-b->type))
         return make_bool(as_f64(a) == as_f64(b) ? 1 : 0);
     return make_bool(as_i64(a) == as_i64(b) ? 1 : 0);
 }
@@ -216,7 +218,8 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
         return make_bool(temporal_as_ns(a) != temporal_as_ns(b) ? 1 : 0);
     /* temporal ~ numeric payload compare (see ray_gt_fn note). */
     if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type))) return ray_error("type", "<>: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
-    if (is_float_op(a, b))
+    /* f64-backed temporal: float lane (see ray_eq_fn). */
+    if (is_float_op(a, b) || RAY_IS_TEMPORALF(-a->type) || RAY_IS_TEMPORALF(-b->type))
         return make_bool(as_f64(a) != as_f64(b) ? 1 : 0);
     return make_bool(as_i64(a) != as_i64(b) ? 1 : 0);
 }

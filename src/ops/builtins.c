@@ -1346,6 +1346,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         else if (cast_match(tn, tl, "SYMBOL") || cast_match(tn, tl, "symbol") || cast_match(tn, tl, "sym")) tt = -RAY_SYM;
         else if (cast_match(tn, tl, "DATE") || cast_match(tn, tl, "date")) tt = -RAY_DATE;
         else if (cast_match(tn, tl, "MONTH") || cast_match(tn, tl, "month")) tt = -RAY_MONTH;
+        else if (cast_match(tn, tl, "DATETIME") || cast_match(tn, tl, "datetime")) tt = -RAY_DATETIME;
         else if (cast_match(tn, tl, "MINUTE") || cast_match(tn, tl, "minute")) tt = -RAY_MINUTE;
         else if (cast_match(tn, tl, "SECOND") || cast_match(tn, tl, "second")) tt = -RAY_SECOND;
         else if (cast_match(tn, tl, "TIMESPAN") || cast_match(tn, tl, "timespan")) tt = -RAY_TIMESPAN;
