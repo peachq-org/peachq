@@ -27,6 +27,39 @@
 /* Arithmetic builtins (atom-only).
  * Vector dispatch goes through the DAG executor. */
 
+/* ns per unit for the DURATION temporals (u/v/t/n); 0 = not a duration.
+ * The duration/absolute split mirrors ref/add.md / ref/subtract.md:
+ * durations combine to the FINER unit, absolute (p/d/m) ± duration -> p. */
+static int64_t duration_unit_ns(int8_t t) {
+    switch (-t) {
+        case RAY_MINUTE:   return 60000000000LL;
+        case RAY_SECOND:   return 1000000000LL;
+        case RAY_TIME:     return 1000000LL;
+        case RAY_TIMESPAN: return 1LL;
+        default:           return 0;
+    }
+}
+static int is_absolute_temporal(ray_t* x) {
+    return x->type == -RAY_DATE || x->type == -RAY_MONTH ||
+           x->type == -RAY_TIMESTAMP;
+}
+/* duration (+|-) duration -> the finer unit (every cell of the add/subtract
+ * domain-table duration block: u+v->v, u+t->t, n+x->n, t-u->t, ...). */
+static ray_t* duration_pair(ray_t* a, ray_t* b, int sub) {
+    int64_t ua = duration_unit_ns(a->type), ub = duration_unit_ns(b->type);
+    int64_t ur = ua < ub ? ua : ub;
+    int8_t  rt = ua < ub ? a->type : b->type;
+    if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(rt);
+    int64_t r = temporal_as_ns(a) + (sub ? -temporal_as_ns(b) : temporal_as_ns(b));
+    r /= ur;
+    switch (-rt) {
+        case RAY_MINUTE:   return ray_minute(r);
+        case RAY_SECOND:   return ray_second(r);
+        case RAY_TIME:     return ray_time(r);
+        default:           return ray_timespan(r);
+    }
+}
+
 ray_t* ray_add_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_add_fn, OP_ADD, a, b);
@@ -41,6 +74,9 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         if (a->type == -RAY_DATE)      return ray_date(a->i64 + v);
         if (a->type == -RAY_TIME)      return ray_time(a->i64 + v);
         if (a->type == -RAY_MONTH)     return ray_month(a->i64 + v);
+        if (a->type == -RAY_MINUTE)    return ray_minute(a->i64 + v);
+        if (a->type == -RAY_SECOND)    return ray_second(a->i64 + v);
+        if (a->type == -RAY_TIMESPAN)  return ray_timespan(a->i64 + v);
         if (a->type == -RAY_TIMESTAMP) return ray_timestamp(a->i64 + v);
     }
     if (is_numeric(a) && a->type != -RAY_F64 && is_temporal(b)) {
@@ -51,6 +87,9 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         if (b->type == -RAY_DATE)      return ray_date(b->i64 + v);
         if (b->type == -RAY_TIME)      return ray_time(b->i64 + v);
         if (b->type == -RAY_MONTH)     return ray_month(b->i64 + v);
+        if (b->type == -RAY_MINUTE)    return ray_minute(b->i64 + v);
+        if (b->type == -RAY_SECOND)    return ray_second(b->i64 + v);
+        if (b->type == -RAY_TIMESPAN)  return ray_timespan(b->i64 + v);
         if (b->type == -RAY_TIMESTAMP) return ray_timestamp(b->i64 + v);
     }
     /* Reject float + temporal */
@@ -86,6 +125,28 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
     if (a->type == -RAY_TIMESTAMP && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(a->i64 + b->i64 * 1000000LL);
+    }
+    /* duration + duration -> the finer unit (ref/add.md temporal block).
+     * TIME+TIME kept its dedicated arm above; every pair involving u/v/n
+     * (and t with them) lands here. */
+    if (duration_unit_ns(a->type) && duration_unit_ns(b->type))
+        return duration_pair(a, b, 0);
+    /* absolute (p/d/m) + duration -> timestamp, both orders (ref/add.md
+     * rows/cols p,d,m x n,u,v).  DATE/TIMESTAMP + TIME pairs returned via
+     * their dedicated arms above; month converts through civil days. */
+    if (is_absolute_temporal(a) && duration_unit_ns(b->type)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
+        return ray_timestamp(temporal_as_ns(a) + temporal_as_ns(b));
+    }
+    if (duration_unit_ns(a->type) && is_absolute_temporal(b)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
+        return ray_timestamp(temporal_as_ns(a) + temporal_as_ns(b));
+    }
+    /* p + p -> n (ref/add.md row p col p; EXAMPLE-pinned by
+     * basics/datatypes.md:163-166 `0p+ -0W 0Wp+1 -1` -> timespan). */
+    if (a->type == -RAY_TIMESTAMP && b->type == -RAY_TIMESTAMP) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESPAN);
+        return ray_timespan(a->i64 + b->i64);
     }
 
     if (!is_numeric(a) || !is_numeric(b))
@@ -142,6 +203,14 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     if (is_numeric(a) && b->type == -RAY_TIME) {
         return ray_time(as_i64(a) - b->i64);
     }
+    /* duration - int / int - duration → duration (ref/subtract.md rows
+     * b..j × cols n,u,v — durations mirror the TIME arms above). */
+    if (a->type == -RAY_MINUTE && is_numeric(b))   return ray_minute(a->i64 - as_i64(b));
+    if (is_numeric(a) && b->type == -RAY_MINUTE)   return ray_minute(as_i64(a) - b->i64);
+    if (a->type == -RAY_SECOND && is_numeric(b))   return ray_second(a->i64 - as_i64(b));
+    if (is_numeric(a) && b->type == -RAY_SECOND)   return ray_second(as_i64(a) - b->i64);
+    if (a->type == -RAY_TIMESPAN && is_numeric(b)) return ray_timespan(a->i64 - as_i64(b));
+    if (is_numeric(a) && b->type == -RAY_TIMESPAN) return ray_timespan(as_i64(a) - b->i64);
     /* TIME - TIME → TIME */
     if (a->type == -RAY_TIME && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIME);
@@ -156,10 +225,25 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(a->i64 - b->i64 * 1000000LL);
     }
-    /* TIMESTAMP - TIMESTAMP → int (nanos difference) */
+    /* TIMESTAMP - TIMESTAMP → TIMESPAN (kdb p-p->n, ref/subtract.md row p
+     * col p; same ns payload as the old i64 result, only the tag changed —
+     * the base rfl pin (test/rfl/arith/sub.rfl) is re-recorded with it). */
     if (a->type == -RAY_TIMESTAMP && b->type == -RAY_TIMESTAMP) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_I64);
-        return make_i64(a->i64 - b->i64);
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESPAN);
+        return ray_timespan(a->i64 - b->i64);
+    }
+    /* duration - duration -> the finer unit (TIME-TIME kept its arm). */
+    if (duration_unit_ns(a->type) && duration_unit_ns(b->type))
+        return duration_pair(a, b, 1);
+    /* absolute - duration -> timestamp; duration - absolute -> timestamp
+     * (ref/subtract.md rows p,d,m x cols n,u,v and rows n,u,v x cols p,m,d). */
+    if (is_absolute_temporal(a) && duration_unit_ns(b->type)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
+        return ray_timestamp(temporal_as_ns(a) - temporal_as_ns(b));
+    }
+    if (duration_unit_ns(a->type) && is_absolute_temporal(b)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
+        return ray_timestamp(temporal_as_ns(a) - temporal_as_ns(b));
     }
     /* TIMESTAMP - DATE → error */
     if (a->type == -RAY_TIMESTAMP && b->type == -RAY_DATE)
@@ -203,6 +287,32 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MONTH);
         return ray_month(a->i64 * as_i64(b));
     }
+    /* int * duration → duration, both orders (ref/multiply.md temporal
+     * rows/cols × int family; math.md month precedent). */
+    if (is_numeric(a) && b->type == -RAY_MINUTE) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MINUTE);
+        return ray_minute(as_i64(a) * b->i64);
+    }
+    if (a->type == -RAY_MINUTE && is_numeric(b)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MINUTE);
+        return ray_minute(a->i64 * as_i64(b));
+    }
+    if (is_numeric(a) && b->type == -RAY_SECOND) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_SECOND);
+        return ray_second(as_i64(a) * b->i64);
+    }
+    if (a->type == -RAY_SECOND && is_numeric(b)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_SECOND);
+        return ray_second(a->i64 * as_i64(b));
+    }
+    if (is_numeric(a) && b->type == -RAY_TIMESPAN) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESPAN);
+        return ray_timespan(as_i64(a) * b->i64);
+    }
+    if (a->type == -RAY_TIMESPAN && is_numeric(b)) {
+        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESPAN);
+        return ray_timespan(a->i64 * as_i64(b));
+    }
     /* TIME * TIME → error */
     if (a->type == -RAY_TIME && b->type == -RAY_TIME)
         return ray_error("type", "multiply: cannot multiply %s by %s",
@@ -227,7 +337,8 @@ ray_t* ray_div_fn(ray_t* a, ray_t* b) {
      * (test/rfl/arith/branch_cov.rfl:263) — enabling it is a base-behavior
      * decision deferred to its own change; DATE/TIMESTAMP stay rejected
      * (unpinned — do not invent). */
-    if (!(is_numeric(a) || a->type == -RAY_MONTH) || !is_numeric(b))
+    if (!(is_numeric(a) || a->type == -RAY_MONTH || a->type == -RAY_MINUTE ||
+          a->type == -RAY_SECOND || a->type == -RAY_TIMESPAN) || !is_numeric(b))
         return ray_error("type", "cannot divide %s by %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
@@ -279,6 +390,9 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
         if (a->type == -RAY_TIME)      return ray_time(result);
         if (a->type == -RAY_DATE)      return ray_date(result);
         if (a->type == -RAY_MONTH)     return ray_month(result);
+        if (a->type == -RAY_MINUTE)    return ray_minute(result);
+        if (a->type == -RAY_SECOND)    return ray_second(result);
+        if (a->type == -RAY_TIMESPAN)  return ray_timespan(result);
         return ray_timestamp(result);
     }
     if (!is_numeric(a) || !is_numeric(b))

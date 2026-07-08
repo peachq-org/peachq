@@ -235,7 +235,9 @@ ray_t* ray_sum_fn(ray_t* x) {
         /* Narrow/temporal types need specific return constructors that the
          * DAG executor doesn't provide — use scalar path for these. */
         if (x->type == RAY_I32 || x->type == RAY_I16 || x->type == RAY_U8 ||
-            x->type == RAY_TIME || x->type == RAY_TIMESTAMP) {
+            x->type == RAY_TIME || x->type == RAY_TIMESTAMP ||
+            x->type == RAY_MINUTE || x->type == RAY_SECOND ||
+            x->type == RAY_TIMESPAN) {
             int64_t n = x->len;
             bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
             int64_t sum = 0;
@@ -259,6 +261,18 @@ ray_t* ray_sum_fn(ray_t* x) {
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
                 return ray_time(sum);
+            } else if (x->type == RAY_MINUTE || x->type == RAY_SECOND) {
+                /* duration sums keep the type (the TIME rule; kdb sums
+                 * durations — OP_SUM admits them, absolute types reject). */
+                int32_t* d = (int32_t*)ray_data(x);
+                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
+                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                return x->type == RAY_MINUTE ? ray_minute(sum) : ray_second(sum);
+            } else if (x->type == RAY_TIMESPAN) {
+                int64_t* d = (int64_t*)ray_data(x);
+                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
+                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                return ray_timespan(sum);
             } else {
                 int64_t* d = (int64_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
