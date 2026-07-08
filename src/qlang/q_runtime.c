@@ -21,6 +21,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
     ray_runtime_t* rt = ray_runtime_create(argc, argv);
     if (rt) {
         q_ns_reset();          /* fresh runtime starts in the root context */
+        q_seed_init();         /* kdb constant-seed-at-startup contract (\S) */
         q_builtins_register();
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
          * process-constant argv values once and install the name-load hook. */

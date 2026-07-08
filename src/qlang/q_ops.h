@@ -52,7 +52,12 @@ typedef enum {
     QK_DISTINCT,        /* q `distinct`/monadic `?` wrapper (FIRST-OCCURRENCE
                          * order; rayfall's distinct DAG path sorts)             */
     QK_ROLL,            /* q `x?y` wrapper (find with kdb miss->count / roll /
-                         * pick; deal + float roll are deferred cells)           */
+                         * deal / permute / pick / generate arms)                */
+    QK_RAND,            /* q `rand x` keyword == {first 1?x} (ref/rand.md):
+                         * list -> one random item, atom -> one random value of
+                         * y's type via the QK_ROLL generate arms.  The env
+                         * BINARY rayfall `rand` is untouched — the registry
+                         * cell is (name,valence)-keyed, never an env rebind.   */
     QK_CAST,            /* q `t$x` wrapper (rayfall as + kdb float->int ROUNDING;
                          * Tok string-parse and unknown designators deferred)    */
     QK_AT,              /* q `f@x` wrapper (Apply At / Index At: callables

@@ -1768,6 +1768,15 @@ static ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
     return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
 }
 
+/* Unary sibling of q_env_call2 (guid roll/deal routes through the audited
+ * env `guid` value).  Borrowed arg; returns owned. */
+static ray_t* q_env_call1(const char* nm, ray_t* a) {
+    ray_t* f = ray_env_get(ray_sym_intern(nm, strlen(nm)));
+    if (!f || f->type != RAY_UNARY)
+        return ray_error("type", "%s: env builtin missing", nm);
+    return ((ray_unary_fn)(uintptr_t)f->i64)(a);
+}
+
 /* A keyed table is a RAY_DICT whose keys AND values are both tables.
  * Exported (q_registry.h) — q_builtins' by-name deref shares it. */
 int q_is_keyed_table(ray_t* y) {
@@ -3658,6 +3667,148 @@ static ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
     return ray_xbar_fn(col, bucket);
 }
 
+/* ===== `?` GENERATE arms (ref/deal.md "Generate") ===========================
+ * All arms draw from libc rand() — the same stream the roll/deal/permute
+ * paths use — so `\S n` (q_ns.c) re-seeds them all.  Each right-operand form
+ * yields a result of y's type per the docs table.  Deal (`-n?y`) of a
+ * non-integer y is defined only for null-guid y ("y must be a positive long
+ * or null GUID"); the sym form additionally deals (distinct syms) per the
+ * Generate table's Roll,Deal column. */
+
+/* n?`m — n symbols of m chars each from "abcdefghijklmnop"; m is the numeric
+ * symbol's NAME (`2 -> 2), 1<=m<=8 -> 'length otherwise (unpinned error
+ * class; chosen to mirror the docs' n<=8 bound).  distinct (deal) draws by
+ * generate-and-retry with a linear scan over accepted ids — fine at the
+ * 16^m<=4.3e9 space for practical n; n>16^m is 'length. */
+static ray_t* q_gen_syms(int64_t n, ray_t* ysym, int distinct) {
+    static const char letters[] = "abcdefghijklmnop";
+    ray_t* nm = ray_sym_str(ysym->i64);
+    if (!nm || RAY_IS_ERR(nm))
+        return nm ? nm : ray_error("type", "?: malformed symbol operand");
+    const char* s = ray_str_ptr(nm);
+    size_t sl = ray_str_len(nm);
+    int64_t m = 0;
+    int numeric = sl > 0 && sl <= 2;
+    for (size_t i = 0; numeric && i < sl; i++) {
+        if (s[i] < '0' || s[i] > '9') numeric = 0;
+        else m = m * 10 + (s[i] - '0');
+    }
+    ray_release(nm);
+    if (!numeric)
+        return ray_error("type", "?: sym generate needs a numeric symbol (`1..`8)");
+    if (m < 1 || m > 8)
+        return ray_error("length", "?: sym generate length must be 1-8");
+    if (distinct) {
+        int64_t space = 1;
+        for (int64_t j = 0; j < m; j++) space *= 16;
+        if (n > space)
+            return ray_error("length", "?: cannot deal %lld distinct %lld-char syms",
+                             (long long)n, (long long)m);
+    }
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    for (int64_t i = 0; i < n; i++) {
+        char buf[8];
+        int64_t id;
+        for (;;) {
+            for (int64_t j = 0; j < m; j++) buf[j] = letters[rand() % 16];
+            id = ray_sym_intern(buf, (size_t)m);
+            if (!distinct) break;
+            const int64_t* got = (const int64_t*)ray_data(out);
+            int dup = 0;
+            for (int64_t k = 0; k < i; k++) if (got[k] == id) { dup = 1; break; }
+            if (!dup) break;
+        }
+        out = ray_vec_append(out, &id);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    }
+    return out;
+}
+
+/* n?f — uniform floats in [0,y); result is y's type (F64 float / F32 real).
+ * 62 random bits give the fraction; a rounding hit at the top is clamped
+ * back below y so the [0,y) contract holds exactly. */
+static ray_t* q_gen_floats(int64_t n, ray_t* y) {
+    double fy = y->f64;                     /* F32 atoms reuse the f64 slot */
+    int f32 = (y->type == -RAY_F32);
+    if (f32) fy = (double)(float)fy;
+    if (fy != fy || fy < 0)
+        return ray_error("domain", "?: float roll bound must be >= 0");
+    ray_t* out = ray_vec_new(f32 ? RAY_F32 : RAY_F64, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    for (int64_t i = 0; i < n; i++) {
+        uint64_t u = ((uint64_t)rand() << 31) | (uint64_t)rand();
+        double v = fy * ((double)u / 4611686018427387904.0);   /* / 2^62 */
+        if (f32) {
+            float fv = (float)v;
+            if (fv >= (float)fy && fy > 0) fv = nextafterf((float)fy, 0.0f);
+            ((float*)ray_data(out))[i] = fv;
+        } else {
+            if (v >= fy && fy > 0) v = nextafter(fy, 0.0);
+            ((double*)ray_data(out))[i] = v;
+        }
+    }
+    return out;
+}
+
+/* n?0b — random booleans (01b). */
+static ray_t* q_gen_bits(int64_t n) {
+    ray_t* out = ray_vec_new(RAY_BOOL, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    for (int64_t i = 0; i < n; i++) ((bool*)ray_data(out))[i] = rand() & 1;
+    return out;
+}
+
+/* n?0x0 — random bytes 0x00-0xff. */
+static ray_t* q_gen_bytes(int64_t n) {
+    ray_t* out = ray_vec_new(RAY_U8, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    for (int64_t i = 0; i < n; i++)
+        ((uint8_t*)ray_data(out))[i] = (uint8_t)(rand() & 0xFF);
+    return out;
+}
+
+/* n?0 / n?0i — full-range longs/ints.  rand() yields 31 bits, so words are
+ * composed from multiple calls.  The engine's sentinel values (0N=INT_MIN,
+ * -0W=INT_MIN+1, 0W=INT_MAX) are never generated (rejection loop) — a roll
+ * must not fabricate nulls/infinities (decision recorded in the plan). */
+static ray_t* q_gen_longs(int64_t n) {
+    ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int64_t* d = (int64_t*)ray_data(out);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v;
+        do {
+            uint64_t u = ((uint64_t)rand() << 33) |
+                         ((uint64_t)rand() << 2)  |
+                         ((uint64_t)rand() & 3);
+            v = (int64_t)u;
+        } while (v == INT64_MIN || v == INT64_MIN + 1 || v == INT64_MAX);
+        d[i] = v;
+    }
+    return out;
+}
+
+static ray_t* q_gen_ints(int64_t n) {
+    ray_t* out = ray_vec_new(RAY_I32, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int32_t* d = (int32_t*)ray_data(out);
+    for (int64_t i = 0; i < n; i++) {
+        int32_t v;
+        do {
+            uint32_t u = ((uint32_t)rand() << 1) | ((uint32_t)rand() & 1);
+            v = (int32_t)u;
+        } while (v == INT32_MIN || v == INT32_MIN + 1 || v == INT32_MAX);
+        d[i] = v;
+    }
+    return out;
+}
+
 /* Deal n distinct values from [0,total) — partial Fisher-Yates over `til total`,
  * take the first n (kdb deal / permute; uses the same libc rand() the roll path
  * does).  n<=total required.  Result is an owned I64 vector. */
@@ -3696,8 +3847,10 @@ static ray_t* q_deal_pick(int64_t n, ray_t* y) {
  *                 shapes are remapped to count here.
  *   n ? int    -> roll: n randoms in [0,int)  (rayfall rand)
  *   n ? list   -> pick: n random indices gathered from the list
- *   -n ? m (deal / 0N?m permute), n ? float — DEFERRED cells (no rayfall
- *   support; error, never a wrong answer). */
+ *   -n ? m / 0N ? m -> deal / permute (q_deal_indices)
+ *   generate arms (`m sym, float, 0b, 0x0, 0, 0i, 0Ng) -> q_gen_* above.
+ *   Deferred cells (error, never a wrong answer): temporal roll, `n?" "`
+ *   char roll (string model), deal of 0/0i. */
 static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
     /* d?y — reverse dictionary lookup (basics/dictsandtables.md): the key of
      * the FIRST value matching y, i.e. keys[vals?y].  A find miss lands at
@@ -3746,8 +3899,46 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return q_deal_pick(ray_len(y), y);
             return ray_error("nyi", "?: permute of this operand is deferred");
         }
-        if (nx < 0) {                               /* -n ? y — deal, no replacement */
-            int64_t n = -nx;
+        int deal = nx < 0;
+        int64_t n = deal ? -nx : nx;
+        /* ---- generate arms (atom y — non-integer, or the 0/0i forms) ---- */
+        if (y && y->type == -RAY_SYM)               /* n?`m sym roll / deal */
+            return q_gen_syms(n, y, deal);
+        if (y && (y->type == -RAY_F64 || y->type == -RAY_F32)) {
+            if (deal) return ray_error("type", "?: deal needs a positive long or 0Ng right operand");
+            return q_gen_floats(n, y);              /* n?f uniform [0,y) */
+        }
+        if (y && y->type == -RAY_BOOL) {
+            if (deal) return ray_error("type", "?: deal needs a positive long or 0Ng right operand");
+            if (y->b8) return ray_error("nyi", "?: bool roll is defined for 0b only");
+            return q_gen_bits(n);                   /* n?0b */
+        }
+        if (y && y->type == -RAY_U8) {
+            if (deal) return ray_error("type", "?: deal needs a positive long or 0Ng right operand");
+            if (y->u8) return ray_error("nyi", "?: byte roll is defined for 0x0 only");
+            return q_gen_bytes(n);                  /* n?0x0 */
+        }
+        if (y && y->type == -RAY_GUID) {            /* n?0Ng / -n?0Ng — env guid.
+             * Deal reuses the same generator: distinctness rests on the
+             * 122-bit space (collisions negligible); kdb's process/time deal
+             * seed nuance is NOT reproduced (recorded divergence). */
+            if (!RAY_ATOM_IS_NULL(y))
+                return ray_error("type", "?: guid generate needs 0Ng");
+            ray_t* cnt = ray_i64(n);
+            ray_t* g = q_env_call1("guid", cnt);
+            ray_release(cnt);
+            return g;
+        }
+        if (y && (y->type == -RAY_I64 || y->type == -RAY_I32) &&
+            !RAY_ATOM_IS_NULL(y)) {
+            int64_t m = (y->type == -RAY_I64) ? y->i64 : y->i32;
+            if (m == 0) {                           /* n?0 / n?0i full-range */
+                if (deal)
+                    return ray_error("nyi", "?: deal of 0/0i (full-range distinct) is deferred");
+                return (y->type == -RAY_I64) ? q_gen_longs(n) : q_gen_ints(n);
+            }
+        }
+        if (deal) {                                 /* -n ? y — deal, no replacement */
             if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {
                 int64_t m = (y->type == -RAY_I64) ? y->i64 : y->i32;
                 if (m <= 0) return ray_error("domain", "?: deal max must be positive");
@@ -3772,11 +3963,32 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             }
             return out;
         }
-        if (y && (y->type == -RAY_F64 || y->type == -RAY_F32))
-            return ray_error("nyi", "?: float roll is deferred");
-        return ray_error("nyi", "?: right operand form is deferred");
+        return ray_error("nyi", "?: right operand form is deferred (temporal/char roll)");
     }
     return ray_error("type", "?: unsupported operand types");
+}
+
+/* q `rand x` — {first 1?x} exactly (ref/rand.md).  A list picks one random
+ * item; an atom yields one random value of x's type via the q_roll_wrap
+ * generate arms (so every arm and error class above is reused verbatim). */
+static ray_t* q_rand_wrap(ray_t* x) {
+    if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {  /* pick one item */
+        int64_t len = ray_len(x);
+        if (len <= 0) return ray_error("length", "rand: empty list");
+        ray_t* ia = ray_i64((int64_t)(rand() % len));
+        ray_t* out = ray_at_fn(x, ia);
+        ray_release(ia);
+        return out;
+    }
+    ray_t* one = ray_i64(1);
+    ray_t* r = q_roll_wrap(one, x);                     /* 1?x */
+    ray_release(one);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* i0 = ray_i64(0);
+    ray_t* out = ray_at_fn(r, i0);                      /* first */
+    ray_release(i0);
+    ray_release(r);
+    return out;
 }
 
 /* ===== q calendar home (see q_registry.h) ==================================
@@ -7051,6 +7263,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_DISTINCT:
                   return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_distinct_wrap);
     case QK_ROLL: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_roll_wrap);
+    case QK_RAND: return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_rand_wrap);
     case QK_CAST: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cast_wrap);
     case QK_AT:   return ray_fn_vary  (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_at_wrap);
     case QK_DOT:  return ray_fn_vary  (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_dot_wrap);
