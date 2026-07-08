@@ -2737,7 +2737,8 @@ static void ql_indexed_assign(ray_t **slot, int in_lambda) {
     if (!s) return;
     const char *nm = ray_str_ptr(s);
     size_t l = ray_str_len(s);
-    int plain = (l == 1 && nm[0] == ':') || (l == 2 && nm[0] == ':' && nm[1] == ':');
+    int is_global = (l == 2 && nm[0] == ':' && nm[1] == ':');
+    int plain = (l == 1 && nm[0] == ':') || is_global;
     int comp  = (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
     if (!plain && !comp) { ray_release(s); return; }
 
@@ -2772,7 +2773,8 @@ static void ql_indexed_assign(ray_t **slot, int in_lambda) {
     ray_release(s);
     ray_t *amend = q_registry_lookup_name(k == 1 ? "@" : ".", 1, Q_DYADIC);
     if (!amend) return;                       /* cold registry: leave untouched */
-    ray_t *setv = ql_env_val((in_lambda && !dotted) ? "let" : "set");
+    /* `::` is an explicit GLOBAL assign even inside a lambda (mirrors ql_assign) */
+    ray_t *setv = ql_env_val((in_lambda && !dotted && !is_global) ? "let" : "set");
     if (!setv) return;
 
     /* inner amend call (appends retain; te[] stay alive through it) */
