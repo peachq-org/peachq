@@ -2711,6 +2711,106 @@ static void ql_mod_assign(ray_t **slot, int in_lambda) {
     /* e[1] target stays: node keeps its ref, inner holds its own retained ref */
 }
 
+/* Indexed assignment `name[i1;…;ik]: v` / `name[i]op:v` — q amend-in-place
+ * (ref/amend.md).  Parse shape: `(:; (nameref i1..ik); v)` (or `(op:; …; v)`
+ * — ql_mod_assign passed it through, its target not being a bare sym).
+ * Lower to
+ *   k==1: (set/let `name (@ nameref i1  f v))
+ *   k>=2: (set/let `name (. nameref (list i1..ik) f v))
+ * where @/. are the registry VARY amend wrappers, and f is the QUOTED `:`
+ * sym for plain assign (the spelling q_is_assign detects) or the dyadic op
+ * value for a compound `op:`.  The read-ref `nameref` resolves the CURRENT
+ * value; set/let returns the amended whole (kdb returns the assigned VALUE —
+ * accepted divergence, same as plain-assign today).  Fires only for an
+ * identifier-headed application target with no elision holes; anything else
+ * is left for eval to reject exactly as today.  kdb note: index assignment
+ * never CREATES a local — with only in_lambda visible here we mirror
+ * ql_mod_assign (let inside a lambda unless dotted); amending a GLOBAL by
+ * index from inside a lambda is a logged known gap (PLAN.md). */
+static void ql_indexed_assign(ray_t **slot, int in_lambda) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) != 3) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int is_global = (l == 2 && nm[0] == ':' && nm[1] == ':');
+    int plain = (l == 1 && nm[0] == ':') || is_global;
+    int comp  = (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
+    if (!plain && !comp) { ray_release(s); return; }
+
+    ray_t *tgt = e[1];
+    if (!tgt || tgt->type != RAY_LIST || ray_len(tgt) < 2) { ray_release(s); return; }
+    ray_t **te = (ray_t **)ray_data(tgt);
+    ray_t *nmref = te[0];
+    if (!nmref || nmref->type != -RAY_SYM || (nmref->attrs & Q_ATTR_QUOTED)) {
+        ray_release(s); return;
+    }
+    ray_t *ns = ray_sym_str(nmref->i64);
+    if (!ns) { ray_release(s); return; }
+    const char *tn = ray_str_ptr(ns);
+    size_t tl = ray_str_len(ns);
+    /* identifier heads only (a paren-literal / verb-value head is not a sym,
+     * but markers like `{` are — require an identifier first char) */
+    int ident = tl > 0 && ((tn[0] >= 'a' && tn[0] <= 'z') ||
+                           (tn[0] >= 'A' && tn[0] <= 'Z') || tn[0] == '.');
+    int dotted = tl > 0 && tn[0] == '.';
+    ray_release(ns);
+    if (!ident) { ray_release(s); return; }
+
+    int64_t k = ray_len(tgt) - 1;
+    for (int64_t i = 1; i <= k; i++)
+        if (ql_is_hole(te[i])) { ray_release(s); return; }  /* d[;`b]:v deferred */
+
+    ray_t *fval = NULL;                       /* borrowed registry value (op:) */
+    if (comp) {
+        fval = q_registry_lookup_name(nm, l - 1, Q_DYADIC);
+        if (!fval) { ray_release(s); return; }
+    }
+    ray_release(s);
+    ray_t *amend = q_registry_lookup_name(k == 1 ? "@" : ".", 1, Q_DYADIC);
+    if (!amend) return;                       /* cold registry: leave untouched */
+    /* `::` is an explicit GLOBAL assign even inside a lambda (mirrors ql_assign) */
+    ray_t *setv = ql_env_val((in_lambda && !dotted && !is_global) ? "let" : "set");
+    if (!setv) return;
+
+    /* inner amend call (appends retain; te[] stay alive through it) */
+    ray_t *inner = ray_list_new(5);
+    inner = ray_list_append(inner, amend);
+    inner = ray_list_append(inner, nmref);
+    if (k == 1) {
+        inner = ray_list_append(inner, te[1]);
+    } else {
+        ray_t *lc = q_registry_list_value();  /* borrowed paren-literal head */
+        if (!lc) { ray_release(inner); return; }
+        ray_t *lst = ray_list_new(k + 1);
+        lst = ray_list_append(lst, lc);
+        for (int64_t i = 1; i <= k; i++) lst = ray_list_append(lst, te[i]);
+        inner = ray_list_append(inner, lst);
+        ray_release(lst);
+    }
+    if (comp) {
+        inner = ray_list_append(inner, fval);
+    } else {
+        ray_t *colon = ray_sym(ray_sym_intern_runtime(":", 1));
+        if (!colon) { ray_release(inner); return; }
+        colon->attrs |= Q_ATTR_QUOTED;        /* self-evals to `: for q_is_assign */
+        inner = ray_list_append(inner, colon);
+        ray_release(colon);
+    }
+    inner = ray_list_append(inner, e[2]);
+
+    /* splice in place: (set/let; nameref; inner) — build-first, then swap */
+    ray_retain(setv);
+    ray_release(e[0]); e[0] = setv;
+    ray_retain(nmref);
+    ray_release(e[1]); e[1] = nmref;          /* tgt dies; inner holds its own refs */
+    ray_release(e[2]); e[2] = inner;
+}
+
 /* True iff node is a ctx-literal — a paren list `(…)` or table `([]…)` whose
  * head is the shared context-constructor value.  Its element statements run in
  * a pushed env scope (q_ctx_build), so a plain `:` inside must lower to `let`
@@ -3043,6 +3143,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ql_seq(slot);                          /* `;` statement sequence -> q.seq */
     ql_control(slot);                      /* if/do/while -> q.if/q.do/q.while */
     ql_mod_assign(slot, in_lambda);        /* x op: y -> x: x op y (before others) */
+    ql_indexed_assign(slot, in_lambda);    /* d[k]:v / d[k]op:v -> set + @/. amend */
     ql_qsql(slot);                         /* (?;`t;c;b;a) -> ray_select call */
     ql_funsql(slot);                       /* ?[t;c;b;a] / ![t;c;b;a] runtime */
     ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
@@ -3281,6 +3382,14 @@ int q_ast_is_assign(const ray_t *cast) {
         int64_t n = ray_len(ast);
         return n >= 2 ? q_ast_is_assign(e[n - 1]) : 0;
     }
-    return (is_colon || is_modasg) && ray_len(ast) == 3 &&
-           e[1] && e[1]->type == -RAY_SYM && !(e[1]->attrs & Q_ATTR_QUOTED);
+    if (!(is_colon || is_modasg) || ray_len(ast) != 3) return 0;
+    ray_t *t = e[1];
+    if (t && t->type == -RAY_SYM && !(t->attrs & Q_ATTR_QUOTED)) return 1;
+    /* indexed assignment `name[i;…]:v` (target = application headed by an
+     * unquoted name-ref) is silent too — kdb console. */
+    if (t && t->type == RAY_LIST && ray_len(t) >= 2) {
+        ray_t *th = ((ray_t **)ray_data(t))[0];
+        return th && th->type == -RAY_SYM && !(th->attrs & Q_ATTR_QUOTED);
+    }
+    return 0;
 }
