@@ -65,6 +65,10 @@ ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence);
  * matches parser behaviour and is intentional. */
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);
 
+/* True iff y is a keyed table: a RAY_DICT whose keys AND values are both
+ * tables (the wave-4 shape shared by the table verbs and q_builtins). */
+int q_is_keyed_table(ray_t* y);
+
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
