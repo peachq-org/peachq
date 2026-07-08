@@ -266,6 +266,22 @@ static ray_t* q_take_wrap(ray_t* n, ray_t* list) {
  * {slen,sdata} bytes), so ray_len would be garbage for strings. */
 static int q_values_match(ray_t* a, ray_t* b);      /* fwd (amend engine, below) */
 
+/* q_collapse_list leaves a ZERO-length boxed list untyped (no element to infer
+ * from); key-indexing selections must instead inherit the PROTO vector's type
+ * so an empty result keeps its domain (codex r3: `` type key `a _ `a!1 `` must
+ * be 11h / `` `symbol$() ``, not 0h / `()`).  Consumes `collapsed`, borrows
+ * `proto`; passes errors and non-empty results through untouched. */
+static ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
+    if (!collapsed || RAY_IS_ERR(collapsed)) return collapsed;
+    if (collapsed->type != RAY_LIST || ray_len(collapsed) != 0) return collapsed;
+    if (!proto || !ray_is_vec(proto) || proto->type == RAY_LIST) return collapsed;
+    ray_t* tv = (proto->type == RAY_SYM) ? ray_sym_vec_new(RAY_SYM_W64, 0)
+                                         : ray_vec_new(proto->type, 0);
+    if (!tv || RAY_IS_ERR(tv)) { if (tv) ray_release(tv); return collapsed; }
+    ray_release(collapsed);
+    return tv;
+}
+
 /* d without the entries for keys ks (atom or vector) — kdb Drop is tolerant:
  * keys not present are ignored (ref/drop.md `` `a _ `a`b`c!1 2 3 ``).
  * Borrows both; returns an owned dict.  Same append/release discipline as
@@ -315,8 +331,8 @@ static ray_t* q_dict_drop_keys(ray_t* d, ray_t* ks) {
         ray_release(ke);
         ray_release(ve);
     }
-    ray_t* ck = q_collapse_list(ok);
-    ray_t* cv = q_collapse_list(ov);
+    ray_t* ck = q_typed_empty_like(q_collapse_list(ok), dk);
+    ray_t* cv = q_typed_empty_like(q_collapse_list(ov), dv);
     ray_release(ok);
     ray_release(ov);
     if (!ck || RAY_IS_ERR(ck)) { if (cv && !RAY_IS_ERR(cv)) ray_release(cv); return ck ? ck : ray_error("type", NULL); }
@@ -728,7 +744,7 @@ static ray_t* q_where_wrap(ray_t* x) {
         if (!w || RAY_IS_ERR(w)) return w;
         ray_t* r = ray_at_fn(keys, w);
         ray_release(w);
-        if (r && r->type == RAY_LIST) { ray_t* c = q_collapse_list(r); ray_release(r); return c; }
+        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_collapse_list(r), keys); ray_release(r); return c; }
         return r;
     }
     if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
@@ -3672,7 +3688,7 @@ static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         if (!i || RAY_IS_ERR(i)) return i;
         ray_t* r = ray_at_fn(keys, i);
         ray_release(i);
-        if (r && r->type == RAY_LIST) { ray_t* c = q_collapse_list(r); ray_release(r); return c; }
+        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_collapse_list(r), keys); ray_release(r); return c; }
         return r;
     }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
