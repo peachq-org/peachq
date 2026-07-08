@@ -41,7 +41,11 @@ static bool atom_to_numeric(ray_t* atom, double* out_f, int64_t* out_i, bool* ou
         case -RAY_SYM:
         case -RAY_DATE:
         case -RAY_TIME:
+        case -RAY_MONTH:
+        case -RAY_MINUTE:
+        case -RAY_SECOND:
         case -RAY_TIMESTAMP:
+        case -RAY_TIMESPAN:
             *out_i = atom->i64;
             *out_f = (double)atom->i64;
             *out_is_f64 = false;
@@ -182,8 +186,8 @@ static bool const_expr_to_i64(ray_graph_t* g, ray_op_t* op, int64_t* out) {
 }
 
 static inline bool type_is_linear_i64_col(int8_t t) {
-    return t == RAY_I64 || t == RAY_TIMESTAMP ||
-           t == RAY_I32 || t == RAY_DATE || t == RAY_TIME || t == RAY_I16 ||
+    return t == RAY_I64 || RAY_IS_TEMPORAL64(t) ||
+           t == RAY_I32 || RAY_IS_TEMPORAL32(t) || t == RAY_I16 ||
            t == RAY_U8 || t == RAY_BOOL || RAY_IS_SYM(t);
 }
 
@@ -376,7 +380,7 @@ bool try_affine_sumavg_input(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
         return true;
     }
 
-    if (bt == RAY_I64 || bt == RAY_TIMESTAMP ||
+    if (bt == RAY_I64 || RAY_IS_TEMPORAL64(bt) ||
         bt == RAY_I32 || bt == RAY_I16 || bt == RAY_U8 || bt == RAY_BOOL ||
         RAY_IS_SYM(bt)) {
         int64_t c = 0;
@@ -782,7 +786,7 @@ static void expr_load_i64(int64_t* dst, const void* data, int8_t col_type,
                           uint8_t col_attrs, bool has_nulls,
                           int64_t start, int64_t n) {
     switch (col_type) {
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
             /* NULL_I64 already canonical in place — direct copy */
             memcpy(dst, (const int64_t*)data + start, (size_t)n * 8);
             break;
@@ -790,7 +794,7 @@ static void expr_load_i64(int64_t* dst, const void* data, int8_t col_type,
             for (int64_t j = 0; j < n; j++)
                 dst[j] = ray_read_sym(data, start + j, col_type, col_attrs);
         } break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             const int32_t* s = (const int32_t*)data + start;
             if (has_nulls)
                 for (int64_t j = 0; j < n; j++)
@@ -826,7 +830,7 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
             /* NaN already canonical in place — direct copy */
             memcpy(dst, (const double*)data + start, (size_t)n * 8);
             break;
-        case RAY_I64: case RAY_TIMESTAMP: {
+        case RAY_I64: RAY_TEMPORAL64_CASES: {
             const int64_t* s = (const int64_t*)data + start;
             if (has_nulls)
                 for (int64_t j = 0; j < n; j++)
@@ -838,7 +842,7 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
             for (int64_t j = 0; j < n; j++)
                 dst[j] = (double)ray_read_sym(data, start + j, col_type, col_attrs);
         } break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             const int32_t* s = (const int32_t*)data + start;
             if (has_nulls)
                 for (int64_t j = 0; j < n; j++)
@@ -933,7 +937,7 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
             case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
             default: break;
         }
-    } else if (dt == RAY_I64 || dt == RAY_TIMESTAMP) {
+    } else if (dt == RAY_I64 || RAY_IS_TEMPORAL64(dt)) {
         int64_t* d = (int64_t*)dp;
         const int64_t* a = (const int64_t*)ap;
         const int64_t* b = (const int64_t*)bp;
@@ -997,7 +1001,7 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
             }
         }
         #undef I64_ISN
-    } else if (dt == RAY_I32 || dt == RAY_DATE || dt == RAY_TIME) {
+    } else if (dt == RAY_I32 || RAY_IS_TEMPORAL32(dt)) {
         int32_t* d = (int32_t*)dp;
         const int32_t* a = (const int32_t*)ap;
         const int32_t* b = (const int32_t*)bp;
@@ -1194,7 +1198,7 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
             /* CAST bool→i64 — BOOL scratch is 1 byte per elem (0/1). */
             const uint8_t* a = (const uint8_t*)ap;
             for (int64_t j = 0; j < n; j++) d[j] = a[j];
-        } else if (t1 == RAY_I32 || t1 == RAY_DATE || t1 == RAY_TIME) {
+        } else if (t1 == RAY_I32 || RAY_IS_TEMPORAL32(t1)) {
             /* CAST i32→i64: with null_aware map NULL_I32 → NULL_I64. */
             const int32_t* a = (const int32_t*)ap;
             if (null_aware)
@@ -1363,7 +1367,7 @@ static void* expr_eval_morsel(const ray_expr_t* expr, void** scratch,
                 uint8_t ca = expr->regs[r].col_attrs;
                 if (rt == RAY_F64 && ct == RAY_F64) {
                     rptrs[r] = (double*)expr->regs[r].data + start;
-                } else if (rt == RAY_I64 && (ct == RAY_I64 || ct == RAY_TIMESTAMP)) {
+                } else if (rt == RAY_I64 && (ct == RAY_I64 || RAY_IS_TEMPORAL64(ct))) {
                     rptrs[r] = (int64_t*)expr->regs[r].data + start;
                 } else if (rt == RAY_I64 && ct == RAY_SYM &&
                            (ca & RAY_SYM_W_MASK) == RAY_SYM_W64) {
@@ -2135,7 +2139,7 @@ static void set_all_null(ray_t* result, int64_t len) {
             for (int64_t i = 0; i < len; i++) d[i] = NULL_F64;
             break;
         }
-        case RAY_I64: case RAY_TIMESTAMP: {
+        case RAY_I64: RAY_TEMPORAL64_CASES: {
             int64_t* d = (int64_t*)ray_data(result);
             for (int64_t i = 0; i < len; i++) d[i] = NULL_I64;
             break;
@@ -2145,7 +2149,7 @@ static void set_all_null(ray_t* result, int64_t len) {
             for (int64_t i = 0; i < len; i++) d[i] = NULL_F32;
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             int32_t* d = (int32_t*)ray_data(result);
             for (int64_t i = 0; i < len; i++) d[i] = NULL_I32;
             break;
@@ -2304,7 +2308,7 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     } else if (opc == OP_CAST) {
         /* CAST from narrow integer types (I32/I16/U8/BOOL) to I64/F64.
          * in_type is loop-invariant; select the typed read outside the loop. */
-        if (in_type == RAY_I32 || in_type == RAY_DATE || in_type == RAY_TIME) {
+        if (in_type == RAY_I32 || RAY_IS_TEMPORAL32(in_type)) {
             if (out_type == RAY_I64) {
                 while (ray_morsel_next(&m)) {
                     int64_t n = m.morsel_len;
@@ -2572,9 +2576,11 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         (op->opcode == OP_EQ || op->opcode == OP_NE ||
          op->opcode == OP_LT || op->opcode == OP_LE ||
          op->opcode == OP_GT || op->opcode == OP_GE) &&
-        (lhs->type == RAY_I64 || lhs->type == RAY_TIMESTAMP ||
+        (lhs->type == RAY_I64 || RAY_IS_TEMPORAL64(lhs->type) ||
          lhs->type == RAY_I32 || lhs->type == RAY_DATE   ||
          lhs->type == RAY_TIME || lhs->type == RAY_I16   ||
+         lhs->type == RAY_MONTH ||
+         lhs->type == RAY_MINUTE || lhs->type == RAY_SECOND ||
          lhs->type == RAY_BOOL || lhs->type == RAY_U8    ||
          RAY_IS_SYM(lhs->type)))
     {
@@ -2603,7 +2609,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         if (l_esz == 8) {
             if (RAY_IS_SYM(lhs->type)) {
                 BR_FAST(int64_t, d[i]);
-            } else if (lhs->type == RAY_I64 || lhs->type == RAY_TIMESTAMP) {
+            } else if (lhs->type == RAY_I64 || RAY_IS_TEMPORAL64(lhs->type)) {
                 BR_FAST(int64_t, d[i]);
             }
             return;
@@ -2655,8 +2661,8 @@ static void binary_range(ray_op_t* op, int8_t out_type,
          op->opcode == OP_MUL || op->opcode == OP_MIN2 ||
          op->opcode == OP_MAX2) &&
         lhs->type == out_type &&
-        (out_type == RAY_I64 || out_type == RAY_TIMESTAMP ||
-         out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME ||
+        (out_type == RAY_I64 || RAY_IS_TEMPORAL64(out_type) ||
+         out_type == RAY_I32 || RAY_IS_TEMPORAL32(out_type) ||
          out_type == RAY_I16))
     {
         int64_t l_off = start;
@@ -2710,14 +2716,14 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         void* l_data = resolve_vec_data(lhs, &l_off);
         void* lbase = (char*)l_data + l_off * ray_sym_elem_size(lhs->type, lhs->attrs);
         if (lhs->type == RAY_F64) lp_f64 = (double*)lbase;
-        else if (lhs->type == RAY_I64 || lhs->type == RAY_TIMESTAMP) lp_i64 = (int64_t*)lbase;
+        else if (lhs->type == RAY_I64 || RAY_IS_TEMPORAL64(lhs->type)) lp_i64 = (int64_t*)lbase;
         else if (RAY_IS_SYM(lhs->type)) {
             uint8_t w = lhs->attrs & RAY_SYM_W_MASK;
             if (w == RAY_SYM_W64) lp_i64 = (int64_t*)lbase;
             else if (w == RAY_SYM_W32) lp_u32 = (uint32_t*)lbase;
             else { for (int64_t j = 0; j < n; j++) lsym_buf[j] = ray_read_sym(l_data, l_off+j, lhs->type, lhs->attrs); lp_i64 = lsym_buf; }
         }
-        else if (lhs->type == RAY_I32 || lhs->type == RAY_DATE || lhs->type == RAY_TIME) lp_i32 = (int32_t*)lbase;
+        else if (lhs->type == RAY_I32 || RAY_IS_TEMPORAL32(lhs->type)) lp_i32 = (int32_t*)lbase;
         else if (lhs->type == RAY_I16) lp_i16 = (int16_t*)lbase;
         else if (lhs->type == RAY_BOOL || lhs->type == RAY_U8) lp_bool = (uint8_t*)lbase;
     }
@@ -2726,7 +2732,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         void* r_data = resolve_vec_data(rhs, &r_off);
         void* rbase = (char*)r_data + r_off * ray_sym_elem_size(rhs->type, rhs->attrs);
         if (rhs->type == RAY_F64) rp_f64 = (double*)rbase;
-        else if (rhs->type == RAY_I64 || rhs->type == RAY_TIMESTAMP) rp_i64 = (int64_t*)rbase;
+        else if (rhs->type == RAY_I64 || RAY_IS_TEMPORAL64(rhs->type)) rp_i64 = (int64_t*)rbase;
         else if (RAY_IS_SYM(rhs->type)) {
             uint8_t w = rhs->attrs & RAY_SYM_W_MASK;
             if (sym_xlate) {
@@ -2745,7 +2751,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             else if (w == RAY_SYM_W32) rp_u32 = (uint32_t*)rbase;
             else { for (int64_t j = 0; j < n; j++) rsym_buf[j] = ray_read_sym(r_data, r_off+j, rhs->type, rhs->attrs); rp_i64 = rsym_buf; }
         }
-        else if (rhs->type == RAY_I32 || rhs->type == RAY_DATE || rhs->type == RAY_TIME) rp_i32 = (int32_t*)rbase;
+        else if (rhs->type == RAY_I32 || RAY_IS_TEMPORAL32(rhs->type)) rp_i32 = (int32_t*)rbase;
         else if (rhs->type == RAY_I16) rp_i16 = (int16_t*)rbase;
         else if (rhs->type == RAY_BOOL || rhs->type == RAY_U8) rp_bool = (uint8_t*)rbase;
     }
@@ -2792,7 +2798,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             if (any_nan)
                 __atomic_fetch_or(&result->attrs, (uint8_t)RAY_ATTR_HAS_NULLS, __ATOMIC_RELAXED);
         }
-    } else if (out_type == RAY_I64 || out_type == RAY_TIMESTAMP) {
+    } else if (out_type == RAY_I64 || RAY_IS_TEMPORAL64(out_type)) {
         int64_t* odst = (int64_t*)dst;
         switch (op->opcode) {
             case OP_ADD: for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);odst[i]=(int64_t)((uint64_t)li+(uint64_t)ri);}break;
@@ -2805,7 +2811,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_MAX2:for(int64_t i=0;i<n;i++){int64_t li=(int64_t)LV_READ(i),ri=(int64_t)RV_READ(i);odst[i]=li>ri?li:ri;}break;
             default:     for(int64_t i=0;i<n;i++)odst[i]=0;break;
         }
-    } else if (out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME) {
+    } else if (out_type == RAY_I32 || RAY_IS_TEMPORAL32(out_type)) {
         int32_t* odst = (int32_t*)dst;
         switch (op->opcode) {
             case OP_ADD: for(int64_t i=0;i<n;i++){int32_t li=(int32_t)LV_READ(i),ri=(int32_t)RV_READ(i);odst[i]=(int32_t)((uint32_t)li+(uint32_t)ri);}break;
@@ -3037,7 +3043,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             l_i64_val = resolved_sym_id;
         else if (ray_is_atom(lhs)) {
             if (lhs->type == -RAY_F64) l_f64_val = lhs->f64;
-            else if (lhs->type == -RAY_I32 || lhs->type == -RAY_DATE || lhs->type == -RAY_TIME)
+            else if (lhs->type == -RAY_I32 || RAY_IS_TEMPORAL32(-lhs->type))
                 l_i64_val = (int64_t)lhs->i32;
             else if (lhs->type == -RAY_I16) l_i64_val = (int64_t)lhs->i16;
             else if (lhs->type == -RAY_U8 || lhs->type == -RAY_BOOL) l_i64_val = (int64_t)lhs->u8;
@@ -3055,7 +3061,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             r_i64_val = resolved_sym_id;
         else if (ray_is_atom(rhs)) {
             if (rhs->type == -RAY_F64) r_f64_val = rhs->f64;
-            else if (rhs->type == -RAY_I32 || rhs->type == -RAY_DATE || rhs->type == -RAY_TIME)
+            else if (rhs->type == -RAY_I32 || RAY_IS_TEMPORAL32(-rhs->type))
                 r_i64_val = (int64_t)rhs->i32;
             else if (rhs->type == -RAY_I16) r_i64_val = (int64_t)rhs->i16;
             else if (rhs->type == -RAY_U8 || rhs->type == -RAY_BOOL) r_i64_val = (int64_t)rhs->u8;
@@ -3150,11 +3156,11 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
     if (opc == OP_DIV || opc == OP_IDIV || opc == OP_MOD) {
         if (!r_scalar) {
             int8_t rt = rhs->type;
-            if (rt == RAY_I64 || rt == RAY_TIMESTAMP) {
+            if (rt == RAY_I64 || RAY_IS_TEMPORAL64(rt)) {
                 const int64_t* b = (const int64_t*)ray_data(rhs);
                 for (int64_t i = 0; i < len; i++)
                     if (b[i] == 0) ray_vec_set_null(result, i, true);
-            } else if (rt == RAY_I32 || rt == RAY_DATE || rt == RAY_TIME) {
+            } else if (rt == RAY_I32 || RAY_IS_TEMPORAL32(rt)) {
                 const int32_t* b = (const int32_t*)ray_data(rhs);
                 for (int64_t i = 0; i < len; i++)
                     if (b[i] == 0) ray_vec_set_null(result, i, true);
