@@ -12,7 +12,8 @@
 #include "qlang/q_repl.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
-#include "qlang/q_ns.h"       /* q_ns_syscmd, q_ns_prompt — namespaces */
+#include "qlang/q_ns.h"       /* q_ns_prompt — namespaces */
+#include "qlang/q_sys.h"      /* q_sys_dispatch — `\`-command dispatcher */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "lang/eval.h"      /* ray_eval */
 #include "lang/env.h"       /* ray_env_has_name — live env-derived name highlight */
@@ -214,7 +215,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
      * unhandled \cmd falls through to the historic path. */
     {
         int handled = 0;
-        ray_t* sr = q_ns_syscmd(s, n, &handled);
+        ray_t* sr = q_sys_dispatch(s, n, &handled);
         if (handled) {
             if (sr && RAY_IS_ERR(sr)) {
                 const char* code = (const char*)sr->sdata;
