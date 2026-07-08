@@ -2,19 +2,21 @@ CC      ?= clang
 STD     = c17
 AR      = ar
 TARGET  = rayforce
-# Version: the git tag is the single source of truth. Precedence:
-#   explicit override (CI passes RAY_VERSION=X.Y.Z from the release PR title)
-#   > latest git tag (vX.Y.Z) > 0.0.0 dev default.
-# The value is injected into the build via -D below (see DEFS); nothing is
-# hand-edited in source to cut a release. See RELEASE.md.
-RAY_VERSION ?= $(shell git describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 2>/dev/null | sed 's/^v//')
-ifeq ($(strip $(RAY_VERSION)),)
-  RAY_VERSION := 0.0.0
-endif
+# Version: peachq owns its own version line, DECOUPLED from rayforce's vX.Y.Z
+# git tags (peachq is a fork with independent numbering). Overridable for CI /
+# one-off builds (RAY_VERSION=X.Y.Z); otherwise it is the current peachq release.
+# Injected into the build via -D below (see DEFS): .sys.build reads
+# RAYFORCE_VERSION, and q's .z.K/.z.k read RAY_VERSION_MAJOR/MINOR + BUILD_DATE.
+RAY_VERSION ?= 0.41
 VERSION       = $(RAY_VERSION)
 VERSION_MAJOR := $(word 1,$(subst ., ,$(RAY_VERSION)))
 VERSION_MINOR := $(word 2,$(subst ., ,$(RAY_VERSION)))
 VERSION_PATCH := $(word 3,$(subst ., ,$(RAY_VERSION)))
+# A 2-part version (0.41) has no patch word — default it to 0 so the injected
+# -DRAY_VERSION_PATCH macro is never empty (empty breaks ray_version_patch()).
+ifeq ($(strip $(VERSION_PATCH)),)
+  VERSION_PATCH := 0
+endif
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%d)
 
