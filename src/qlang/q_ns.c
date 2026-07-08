@@ -102,11 +102,27 @@ static int ns_is_seed(const char* p, size_t len) {
     return 0;
 }
 
-/* The env entry for a root context name (".foo") if it is a dict; borrowed. */
+/* The env value for a context handle — root (".foo") or NESTED (".fee.fi",
+ * codex round-3 P2): ray_env_get walks the dotted path through the engine's
+ * namespace dicts, so nested handles resolve the same way.  The value counts
+ * as a CONTEXT dict iff it is a RAY_DICT with SYMBOL keys — env_set_dotted
+ * always builds sym-keyed dicts, while a DATA dict assigned into a context
+ * usually is not (`.foo.a:1 2!3 4` must stay a plain dict, ref/key.md pin).
+ * A sym-keyed DATA dict is indistinguishable without kdb's physically-stored
+ * `` ` ``->`::` entry — documented divergence (PR #88 Decisions).  Names in
+ * the `..name` root-qualified spelling are never context handles.  Returns
+ * borrowed, or NULL when not a context. */
 static ray_t* ns_ctx_env_dict(const char* dotname, size_t len) {
-    if (len < 2 || dotname[0] != '.') return NULL;
+    if (len < 2 || dotname[0] != '.' || dotname[1] == '.') return NULL;
     ray_t* v = ray_env_get(ray_sym_intern(dotname, len));
-    return (v && v->type == RAY_DICT) ? v : NULL;
+    if (!v || v->type != RAY_DICT) return NULL;
+    ray_t* k = ray_dict_keys(v);                /* borrowed */
+    if (!k || k->type != RAY_SYM) return NULL;  /* context dicts are sym-keyed */
+    return v;
+}
+
+int q_ns_is_context(const char* dotname, size_t len) {
+    return ns_ctx_env_dict(dotname, len) != NULL;
 }
 
 /* Append one (sym id, value) pair to parallel builders.  Returns 0 on OOM. */
