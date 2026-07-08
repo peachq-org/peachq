@@ -85,6 +85,12 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
  * `value`.  Both bindings call this one function (single home, rule 4). */
 ray_t* q_value_wrap(ray_t* x);
 
+/* Context-aware symbol resolution (q namespaces): `. / `.foo synthesize the
+ * root/context dict views; `..name root-qualifies; a plain name resolves in
+ * the current `\d` context first.  Returns an OWNED ref or NULL when the
+ * name doesn't resolve.  Used by q_apply's symbol-handle arm. */
+ray_t* q_value_resolve_owned(ray_t* symv);
+
 /* Release every retained entry and reset.  Idempotent; also serves as
  * partial-cleanup on a failed init.  Must run before ray_env_destroy. */
 void q_registry_destroy(void);
