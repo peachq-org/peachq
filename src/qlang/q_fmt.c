@@ -510,6 +510,9 @@ static const char* q_empty_vec_qname(int8_t type) {
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_GUID: return "guid";
     case RAY_TIME: return "time";
+    case RAY_MINUTE: return "minute";
+    case RAY_SECOND: return "second";
+    case RAY_TIMESPAN: return "timespan";
     default:       return NULL;
     }
 }
