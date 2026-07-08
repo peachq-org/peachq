@@ -57,9 +57,12 @@ static bool        g_showing;
 
 static inline uint64_t mono_ns(void) {
 #ifdef RAY_OS_WINDOWS
-    /* Same monotonic source as timer.c's Windows branch. */
-    LARGE_INTEGER freq, cnt;
-    QueryPerformanceFrequency(&freq);
+    /* Same monotonic source as timer.c's Windows branch.  freq is
+     * constant after boot; progress state is main-thread-only (see the
+     * globals comment above), so a plain static is fine. */
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER cnt;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&cnt);
     return (uint64_t)((double)cnt.QuadPart * (1000000000.0 / (double)freq.QuadPart));
 #else
