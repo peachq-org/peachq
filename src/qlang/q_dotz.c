@@ -1,6 +1,9 @@
 /* q_dotz — see q_dotz.h.  The eval-time `.z.*` command-line resolver. */
 #include "qlang/q_dotz.h"
+#include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include <rayforce.h>
+#include <stdio.h>             /* snprintf / sscanf for the version producers */
+#include <stdlib.h>            /* strtod */
 #include <string.h>
 
 /* argv is process-lifetime (owned by main), so we cache only the pointers and
@@ -53,11 +56,30 @@ static ray_t* z_X(void) {   /* full raw argv, including the binary */
     return strings_list(0, g_argc);
 }
 
+/* peachq version surface — reads the SAME compile-time macros the Makefile
+ * injects for .sys.build (RAY_VERSION_MAJOR/MINOR, RAYFORCE_BUILD_DATE). */
+static ray_t* z_K(void) {   /* `.z.K` — version as a major.minor float (kdb .z.K) */
+    char buf[32];
+    snprintf(buf, sizeof buf, "%d.%d", RAY_VERSION_MAJOR, RAY_VERSION_MINOR);
+    return ray_f64(strtod(buf, NULL));
+}
+static ray_t* z_k(void) {   /* `.z.k` — build/release date (kdb .z.k) */
+    int y = RAY_DATE_EPOCH, m = 1, d = 1;
+#ifdef RAYFORCE_BUILD_DATE
+    if (sscanf(RAYFORCE_BUILD_DATE, "%d-%d-%d", &y, &m, &d) != 3) {
+        y = RAY_DATE_EPOCH; m = 1; d = 1;
+    }
+#endif
+    return ray_date(ymd_to_date(y, m, d));
+}
+
 static const struct { const char* name; uint8_t len; ray_t* (*make)(void); }
 Z_TAB[] = {
     { ".z.f", 4, z_f },
     { ".z.x", 4, z_x },
     { ".z.X", 4, z_X },
+    { ".z.K", 4, z_K },
+    { ".z.k", 4, z_k },
 };
 
 void q_dotz_init(int argc, char** argv) {
