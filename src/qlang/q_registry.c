@@ -1734,7 +1734,9 @@ static ray_t* q_key_wrap(ray_t* x) {
             ray_release(d);
             return k;
         }
-        if (l >= 2 && nm[0] == '.' && !memchr(nm + 1, '.', l - 1)) {
+        if (l >= 2 && nm[0] == '.' && nm[1] != '.') {
+            /* root OR nested handle (codex round-3 P2): q_ns_ctx_dict walks
+             * the dotted path and decides context-ness itself. */
             ray_t* d = q_ns_ctx_dict(nm, l);    /* owned, placeholder first */
             if (d) {
                 ray_release(s);
@@ -1796,8 +1798,12 @@ static ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         return ray_error("nyi", "set: file handles deferred (file-I/O wave)");
     }
     int is_root = (l == 1 && nm[0] == '.');
-    int is_ctx  = (!is_root && l >= 2 && nm[0] == '.' &&
-                   !memchr(nm + 1, '.', l - 1));
+    /* Restore semantics: any single-segment `.foo` handle (kdb creates the
+     * context), and a NESTED handle only when it ALREADY names a context
+     * (codex round-3 P2) — so `.foo.a set 1 2!3 4` keeps binding the data
+     * dict instead of erroring on non-symbol keys. */
+    int is_ctx  = (!is_root && l >= 2 && nm[0] == '.' && nm[1] != '.' &&
+                   (!memchr(nm + 1, '.', l - 1) || q_ns_is_context(nm, l)));
     if ((is_root || is_ctx) && y && y->type == RAY_DICT) {
         /* context restore: upsert each member under the target root */
         ray_t* dk = ray_dict_keys(y);           /* borrowed */
@@ -1953,10 +1959,12 @@ static ray_t* q_value_resolve_sym_owned(ray_t* symv) {
         ray_retain(v);
         return v;
     }
-    if (l >= 2 && nm[0] == '.' && !memchr(nm + 1, '.', l - 1)) {
+    if (l >= 2 && nm[0] == '.' && nm[1] != '.') {
+        /* root OR nested context handle (codex round-3 P2) */
         ray_t* d = q_ns_ctx_dict(nm, l);          /* owned or NULL */
         if (d) { ray_release(s); return d; }
-        /* not a context — fall through (flat dotted binding, e.g. `.z.f) */
+        /* not a context — fall through (member reads like `.jab.wrong,
+         * flat dotted bindings like `.z.f, data dicts like `.foo.a) */
     }
     /* under \d .ctx an unqualified user name is context-relative */
     const char* ctx = q_ns_current();
@@ -4767,7 +4775,9 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
             size_t hl = ray_str_len(hs);
             int is_root = (hl == 1 && hn[0] == '.');
             int is_ctx  = (hl >= 2 && hn[0] == '.' && hn[1] != ':' &&
-                           !memchr(hn + 1, '.', hl - 1));
+                           hn[1] != '.' &&
+                           (!memchr(hn + 1, '.', hl - 1) ||
+                            q_ns_is_context(hn, hl)));
             if (is_root || is_ctx) {
                 int64_t nn = ray_len(a);
                 for (int64_t i = 0; i < nn; i++) {
