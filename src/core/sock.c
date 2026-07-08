@@ -199,7 +199,11 @@ int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* Wait for write-readiness before retry */
                 struct pollfd pfd = { .fd = s, .events = POLLOUT };
+#ifdef RAY_OS_WINDOWS
+                WSAPoll(&pfd, 1, -1);
+#else
                 poll(&pfd, 1, -1);
+#endif
                 continue;
             }
             return -1;
