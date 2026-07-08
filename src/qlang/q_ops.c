@@ -55,9 +55,9 @@ static const q_op_t Q_OPS[] = {
      * deliberate SUPERSET of q source; the VALUE is kdb-identical (kdb's own
      * floor IS k `_:`).  The q spelling is the `floor` keyword row below. */
     { "_",     QLEX_GLYPH,     QK_FLOOR, "floor",    QK_DROP,  "drop",    NULL  },
-    { "|",     QLEX_GLYPH,     QK_ENV,  "reverse",   QK_NONE,  NULL,      NULL  },
+    { "|",     QLEX_GLYPH,     QK_REV,  "reverse",   QK_NONE,  NULL,      NULL  },
     { "&",     QLEX_GLYPH,     QK_WHERE, "where",    QK_MIN2,  "and",     NULL  },
-    { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
+    { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_JOIN,  "concat",  NULL  },
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
     /* q `x^y` — fill: coalesce nulls in y with x.  `^` already lexes as a verb
      * glyph (VERB_CHARS); this row gives it a registry value.  Monadic `^x`
@@ -184,7 +184,7 @@ static const q_op_t Q_OPS[] = {
     { "next",    QLEX_KW_PREFIX, QK_NEXT, "next",    QK_NONE,  NULL,      NULL  },
     { "prev",    QLEX_KW_PREFIX, QK_PREV, "prev",    QK_NONE,  NULL,      NULL  },
     { "where",   QLEX_KW_PREFIX, QK_WHERE, "where",  QK_NONE,  NULL,      NULL  },
-    { "reverse", QLEX_KW_PREFIX, QK_ENV, "reverse",  QK_NONE,  NULL,      NULL  },
+    { "reverse", QLEX_KW_PREFIX, QK_REV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
     /* ---- sort / grade family (feat/q-sort-rank) — monadic prefix ----
