@@ -79,6 +79,9 @@ typedef enum {
     QK_WHERE,           /* q `where`/monadic `&` wrapper: an integer vector
                          * repeats each index i, x[i] times (`where 2 3 1` ->
                          * 0 0 1 1 1 2); the boolean form delegates to base.     */
+    QK_REV,             /* q `reverse x` / monadic `|` wrapper: a dict reverses
+                         * ENTRIES (keys and values together, ref/reverse.md);
+                         * everything else delegates to base reverse.           */
     QK_VS,              /* q `x vs y` — split / base-decompose / byte-encode
                          * (string split, sym split, int base decompose, byte
                          * big-endian encode, bit decompose)                    */
