@@ -552,7 +552,7 @@ static ray_t* parse_vector(ray_parser_t *p) {
             return vec;
         }
         switch (vec_type) {
-            case RAY_I64: case RAY_TIMESTAMP: {
+            case RAY_I64: RAY_TEMPORAL64_CASES: {
                 int64_t* d = (int64_t*)ray_data(vec);
                 for (int32_t i = 0; i < count; i++) d[i] = elems[i]->i64;
                 break;
