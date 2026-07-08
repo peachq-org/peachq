@@ -180,7 +180,10 @@ typedef enum {
     QK_IASC,           /* q `iasc x` / monadic `<` — grade up.  Flat vectors
                          * reuse ray_iasc_fn; a DICT arm returns the keys in
                          * ascending-value order. */
-    QK_IDESC           /* q `idesc x` / monadic `>` — grade down (mirror). */
+    QK_IDESC,          /* q `idesc x` / monadic `>` — grade down (mirror). */
+    QK_SETG            /* q `nam set y` — assign a global through a sym handle
+                         * (`a / `.ctx / `. context restore); returns nam.
+                         * File symbols (`:path) are the file-I/O wave: 'nyi. */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
