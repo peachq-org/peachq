@@ -28,7 +28,6 @@
 #include <unistd.h>
 #else
 #include <io.h>     /* _close (spill_fd teardown) */
-#define close _close
 #endif
 
 /* --------------------------------------------------------------------------
@@ -59,7 +58,11 @@ void ray_pipe_free(ray_pipe_t* pipe) {
     if (!pipe) return;
 
     if (pipe->spill_fd >= 0) {
+#ifdef RAY_OS_WINDOWS
+        _close(pipe->spill_fd);
+#else
         close(pipe->spill_fd);
+#endif
     }
 
     ray_sys_free(pipe);
