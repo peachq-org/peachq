@@ -82,6 +82,9 @@ typedef enum {
     QK_REV,             /* q `reverse x` / monadic `|` wrapper: a dict reverses
                          * ENTRIES (keys and values together, ref/reverse.md);
                          * everything else delegates to base reverse.           */
+    QK_JOIN,            /* q `x,y` wrapper: table , record-dict appends the
+                         * record (upsert semantics, ref/join.md); every other
+                         * operand pair delegates to base concat unchanged.     */
     QK_VS,              /* q `x vs y` — split / base-decompose / byte-encode
                          * (string split, sym split, int base decompose, byte
                          * big-endian encode, bit decompose)                    */
