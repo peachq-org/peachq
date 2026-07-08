@@ -35,7 +35,7 @@ static inline bool win_keys_differ(ray_t* const* vecs, uint8_t n_keys,
         ray_t* col = vecs[k];
         if (!col) continue;
         switch (col->type) {
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
             if (((const int64_t*)ray_data(col))[ra] !=
                 ((const int64_t*)ray_data(col))[rb]) return true;
             break;
@@ -45,7 +45,7 @@ static inline bool win_keys_differ(ray_t* const* vecs, uint8_t n_keys,
             if (a != b) return true;
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             if (((const int32_t*)ray_data(col))[ra] !=
                 ((const int32_t*)ray_data(col))[rb]) return true;
             break;
@@ -89,9 +89,9 @@ static inline bool win_keys_differ(ray_t* const* vecs, uint8_t n_keys,
 static inline double win_read_f64(ray_t* col, int64_t row) {
     switch (col->type) {
     case RAY_F64: return ((const double*)ray_data(col))[row];
-    case RAY_I64: case RAY_TIMESTAMP:
+    case RAY_I64: RAY_TEMPORAL64_CASES:
         return (double)((const int64_t*)ray_data(col))[row];
-    case RAY_I32: case RAY_DATE: case RAY_TIME:
+    case RAY_I32: RAY_TEMPORAL32_CASES:
         return (double)((const int32_t*)ray_data(col))[row];
     case RAY_SYM:
         return (double)sym_cell_runtime_id(col, row);
@@ -103,9 +103,9 @@ static inline double win_read_f64(ray_t* col, int64_t row) {
 
 static inline int64_t win_read_i64(ray_t* col, int64_t row) {
     switch (col->type) {
-    case RAY_I64: case RAY_TIMESTAMP:
+    case RAY_I64: RAY_TEMPORAL64_CASES:
         return ((const int64_t*)ray_data(col))[row];
-    case RAY_I32: case RAY_DATE: case RAY_TIME:
+    case RAY_I32: RAY_TEMPORAL32_CASES:
         return (int64_t)((const int32_t*)ray_data(col))[row];
     case RAY_SYM:
         return sym_cell_runtime_id(col, row);
@@ -608,7 +608,7 @@ static void pkey_gather_fn(void* arg, uint32_t wid,
         if (RAY_IS_SYM(pk->type)) {
             for (int64_t i = start; i < end; i++)
                 out[i] = (uint64_t)ray_read_sym(pkd, sidx[i], pk->type, pk->attrs);
-        } else if (pk->type == RAY_I32 || pk->type == RAY_DATE || pk->type == RAY_TIME) {
+        } else if (pk->type == RAY_I32 || RAY_IS_TEMPORAL32(pk->type)) {
             const int32_t* src = (const int32_t*)pkd;
             /* Map signed [INT32_MIN..INT32_MAX] to unsigned [0..UINT32_MAX]
              * by flipping the sign bit; computed as unsigned to avoid
@@ -629,7 +629,7 @@ static void pkey_gather_fn(void* arg, uint32_t wid,
                 const void* d = ray_data(col);
                 if (RAY_IS_SYM(col->type))
                     key = (key << 32) | (uint32_t)ray_read_sym(d, r, col->type, col->attrs);
-                else if (col->type == RAY_I32 || col->type == RAY_DATE || col->type == RAY_TIME)
+                else if (col->type == RAY_I32 || RAY_IS_TEMPORAL32(col->type))
                     /* Sign-bit flip: avoids signed-integer-overflow UB. */
                     key = (key << 32) | ((uint32_t)((const int32_t*)d)[r] ^ 0x80000000u);
                 else {
@@ -796,7 +796,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             int8_t t = sort_vecs[k]->type;
             if (t != RAY_I64 && t != RAY_F64 && t != RAY_I32 && t != RAY_I16 &&
                 t != RAY_BOOL && t != RAY_U8 && t != RAY_SYM &&
-                t != RAY_DATE && t != RAY_TIME && t != RAY_TIMESTAMP) {
+                !RAY_IS_TEMPORAL32(t) && !RAY_IS_TEMPORAL64(t)) {
                 can_radix = false; break;
             }
         }
@@ -931,13 +931,13 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                                 if (v < kmin) kmin = v;
                                 if (v > kmax) kmax = v;
                             }
-                        } else if (col->type == RAY_I64 || col->type == RAY_TIMESTAMP) {
+                        } else if (col->type == RAY_I64 || RAY_IS_TEMPORAL64(col->type)) {
                             const int64_t* d = (const int64_t*)ray_data(col);
                             for (int64_t i = 0; i < nrows; i++) {
                                 if (d[i] < kmin) kmin = d[i];
                                 if (d[i] > kmax) kmax = d[i];
                             }
-                        } else if (col->type == RAY_I32 || col->type == RAY_DATE || col->type == RAY_TIME) {
+                        } else if (col->type == RAY_I32 || RAY_IS_TEMPORAL32(col->type)) {
                             const int32_t* d = (const int32_t*)ray_data(col);
                             for (int64_t i = 0; i < nrows; i++) {
                                 if (d[i] < kmin) kmin = (int64_t)d[i];
@@ -1097,7 +1097,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         bool has_64bit_key = false;
         for (uint8_t k = 0; k < n_part; k++) {
             int8_t t = sort_vecs[k]->type;
-            if (RAY_IS_SYM(t) || t == RAY_I32 || t == RAY_DATE || t == RAY_TIME) pk_bits += 32;
+            if (RAY_IS_SYM(t) || t == RAY_I32 || RAY_IS_TEMPORAL32(t)) pk_bits += 32;
             else if (t == RAY_I64 || t == RAY_SYM || t == RAY_TIMESTAMP ||
                      t == RAY_F64) { pk_bits += 64; has_64bit_key = true; }
             else { can_pack = false; break; }
