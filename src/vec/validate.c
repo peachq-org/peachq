@@ -103,7 +103,7 @@ static inline bool reserved_sentinel_at(const ray_t* v, const void* p, int64_t i
         case RAY_F64: { double x = ((const double*)p)[i]; return x != x; }
         case RAY_F32: { float  x = ((const float*)p)[i];  return x != x; }
         case RAY_I64:
-        case RAY_TIMESTAMP: return ((const int64_t*)p)[i] == NULL_I64;
+        RAY_TEMPORAL64_CASES: return ((const int64_t*)p)[i] == NULL_I64;
         /* I16/I32 (+ DATE/TIME) excluded — wraparound makes MIN a real value
          * (see header).  is_reserved_sentinel_type() rejects them upstream. */
         default:            return false;
@@ -116,7 +116,7 @@ static inline bool reserved_sentinel_at(const ray_t* v, const void* p, int64_t i
 static inline bool is_reserved_sentinel_type(int8_t type) {
     switch (type) {
         case RAY_F64: case RAY_F32:
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
             return true;
         default:
             return false;

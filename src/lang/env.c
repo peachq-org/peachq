@@ -568,17 +568,34 @@ static ray_t* lookup_top_frame(int64_t sym_id) {
     return NULL;
 }
 
-/* A sym belongs to the reserved system namespace if its name starts with
- * a dot (e.g. `.sys.gc`, `.os.getenv`).  The leading segment is the
- * category tag; builtin registration populates these via ray_env_bind
- * and every user-level binder refuses such names so the system
- * bindings can't be shadowed in any scope. */
+/* A sym belongs to the reserved system namespace if its ROOT segment names
+ * one of the engine's builtin namespaces (populated via ray_env_bind by
+ * ray_register_builtins) or the q layer's `.q.*` carrier home.  User-level
+ * binders refuse such names so system bindings can't be shadowed in any
+ * scope.  Everything ELSE with a leading dot is a USER namespace — q
+ * contexts (`.foo.x:42`) bind through the ordinary user path and land in
+ * the nested namespace dicts env_set_dotted maintains.
+ *
+ * The root list MUST stay in sync with the dotted register_* calls in
+ * src/lang/eval.c; test/q_ns.c (qlang/ns_reserve_audit) enumerates the live
+ * env at init and fails if a builtin dotted root is missing here. */
 bool ray_sym_is_reserved(int64_t sym_id) {
+    static const char* roots[] = {
+        ".sys", ".os", ".io", ".ipc", ".attr", ".col", ".csv", ".db",
+        ".fs", ".graph", ".idx", ".log", ".qdb", ".repl", ".sym",
+        ".time", ".q",
+    };
     ray_t* s = ray_sym_str(sym_id);
     if (!s) return false;
     const char* p = ray_str_ptr(s);
     size_t n = ray_str_len(s);
-    return n > 0 && p && p[0] == '.';
+    if (n == 0 || !p || p[0] != '.') return false;
+    for (size_t i = 0; i < sizeof roots / sizeof *roots; i++) {
+        size_t rl = strlen(roots[i]);
+        if (n >= rl && memcmp(p, roots[i], rl) == 0 && (n == rl || p[rl] == '.'))
+            return true;
+    }
+    return false;
 }
 
 ray_err_t ray_env_bind(int64_t sym_id, ray_t* val) {
