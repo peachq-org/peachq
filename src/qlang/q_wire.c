@@ -236,8 +236,16 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         }
         case RAY_SYM: rc = (w_u8(b, (uint8_t)-RAY_SYM) || w_sym_id(b, x->i64)) ? -1 : 0; goto out;
         case RAY_TIMESTAMP: rc = (w_u8(b, (uint8_t)-RAY_TIMESTAMP) || w_i64(b, x->i64)) ? -1 : 0; goto out;
+        /* i32-class temporal atom payloads are read via the i32 union field:
+         * producers are mixed (constructors store i64, ray_typed_null stores
+         * i32) and only agree through LE aliasing — x->i32 matches the null
+         * producer and every other q-layer reader (internal.h). */
         case RAY_DATE: rc = (w_u8(b, (uint8_t)-RAY_DATE) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         case RAY_TIME: rc = (w_u8(b, (uint8_t)-RAY_TIME) || w_i32(b, x->i32)) ? -1 : 0; goto out;
+        case RAY_MONTH: rc = (w_u8(b, (uint8_t)-RAY_MONTH) || w_i32(b, x->i32)) ? -1 : 0; goto out;
+        case RAY_TIMESPAN: rc = (w_u8(b, (uint8_t)-RAY_TIMESPAN) || w_i64(b, x->i64)) ? -1 : 0; goto out;
+        case RAY_MINUTE: rc = (w_u8(b, (uint8_t)-RAY_MINUTE) || w_i32(b, x->i32)) ? -1 : 0; goto out;
+        case RAY_SECOND: rc = (w_u8(b, (uint8_t)-RAY_SECOND) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         default:
             rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
             goto out;
@@ -248,7 +256,8 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     switch (t) {
     case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F32:  case RAY_F64: case RAY_GUID:
-    case RAY_TIMESTAMP: case RAY_DATE: case RAY_TIME: {
+    case RAY_TIMESTAMP: case RAY_DATE: case RAY_TIME:
+    case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND: case RAY_TIMESPAN: {
         /* fixed-width payloads are bit-identical to kdb on LE hosts.
          * serde mode carries HAS_NULLS (the reader rescans sentinel types,
          * but GUID nulls — all-zero payload — are only knowable from the
@@ -488,9 +497,10 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     switch (t) {
     case RAY_I16: { int16_t* e = (int16_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I16) { has_nulls = true; break; } } break;
-    case RAY_I32: case RAY_DATE: case RAY_TIME: { int32_t* e = (int32_t*)d;
+    case RAY_I32: case RAY_DATE: case RAY_TIME:
+    case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND: { int32_t* e = (int32_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I32) { has_nulls = true; break; } } break;
-    case RAY_I64: case RAY_TIMESTAMP: { int64_t* e = (int64_t*)d;
+    case RAY_I64: case RAY_TIMESTAMP: case RAY_TIMESPAN: { int64_t* e = (int64_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I64) { has_nulls = true; break; } } break;
     case RAY_F32: { float* e = (float*)d;
         for (int32_t i = 0; i < count; i++) { e[i] = f32_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
@@ -634,6 +644,10 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         case RAY_TIMESTAMP: if (!r_need(c, 8)) return trunc_err("timestamp"); return ray_timestamp(r_i64(c));
         case RAY_DATE: if (!r_need(c, 4)) return trunc_err("date"); return ray_date((int64_t)r_i32(c));
         case RAY_TIME: if (!r_need(c, 4)) return trunc_err("time"); return ray_time((int64_t)r_i32(c));
+        case RAY_MONTH: if (!r_need(c, 4)) return trunc_err("month"); return ray_month((int64_t)r_i32(c));
+        case RAY_TIMESPAN: if (!r_need(c, 8)) return trunc_err("timespan"); return ray_timespan(r_i64(c));
+        case RAY_MINUTE: if (!r_need(c, 4)) return trunc_err("minute"); return ray_minute((int64_t)r_i32(c));
+        case RAY_SECOND: if (!r_need(c, 4)) return trunc_err("second"); return ray_second((int64_t)r_i32(c));
         default:
             return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
         }
