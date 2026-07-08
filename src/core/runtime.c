@@ -387,10 +387,10 @@ uint8_t ray_obj_attrs(ray_t* v) {
 
 int64_t ray_vec_get_i64(ray_t* vec, int64_t idx) {
     if (!vec || idx < 0 || idx >= vec->len) return 0;
-    if (vec->type == RAY_I64 || vec->type == RAY_TIMESTAMP) {
+    if (vec->type == RAY_I64 || RAY_IS_TEMPORAL64(vec->type)) {
         return ((const int64_t*)ray_data(vec))[idx];
     }
-    if (vec->type == RAY_I32 || vec->type == RAY_DATE || vec->type == RAY_TIME) {
+    if (vec->type == RAY_I32 || RAY_IS_TEMPORAL32(vec->type)) {
         return ((const int32_t*)ray_data(vec))[idx];
     }
     if (vec->type == RAY_I16) return ((const int16_t*)ray_data(vec))[idx];

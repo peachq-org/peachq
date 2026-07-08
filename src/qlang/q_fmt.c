@@ -28,12 +28,16 @@ static int q_sym_bare(const char* nm, size_t l) {
     return 0;
 }
 
-/* Format a -RAY_SYM atom into buf: verbs/null bare, everything else backticked. */
+/* Format a -RAY_SYM atom into buf: verbs/null bare, everything else backticked.
+ * A DATA sym (Q_ATTR_QUOTED, 0x20 — see the parse-tree probe below) always
+ * keeps its backtick, so the `` `. `` handle (q namespaces) renders kdb-true
+ * instead of bare-verb `.`; name-ref/verb heads stay bare. */
 static void q_fmt_sym(ray_t* val, char* buf, size_t bufsz) {
     ray_t* s = ray_sym_str(val->i64);
     const char* nm = ray_str_ptr(s);
     size_t l = ray_str_len(s);
-    snprintf(buf, bufsz, "%s%.*s", q_sym_bare(nm, l) ? "" : "`", (int)l, nm);
+    int bare = q_sym_bare(nm, l) && !(val->attrs & 0x20 /* Q_ATTR_QUOTED */);
+    snprintf(buf, bufsz, "%s%.*s", bare ? "" : "`", (int)l, nm);
     ray_release(s);
 }
 
@@ -329,6 +333,24 @@ static void q_date_tok(int32_t v, char* out, size_t n) {
     }
 }
 
+/* Render one month element q-style, BARE (no trailing `m` — month vectors
+ * follow the trailing-type-char model like `0N 0W 42h`, single `m` at the
+ * end: basics/syntax.md:164 `2018.05 2018.07 2019.01m`; callers append the
+ * suffix once).  Sentinels render bare 0N / 0W / -0W; payloads outside the
+ * civil year domain [1,9999] mirror date's out-of-range rule as `0000.00`
+ * (derived — kdb pins the rule for date only, datatypes.md).  Payload =
+ * months since 2000.01, floor div/mod for pre-2000 months. */
+static void q_month_tok(int32_t v, char* out, size_t n) {
+    if (v == INT32_MIN)  { snprintf(out, n, "0N");  return; }
+    if (v == INT32_MAX)  { snprintf(out, n, "0W");  return; }
+    if (v == -INT32_MAX) { snprintf(out, n, "-0W"); return; }
+    int64_t p = v;
+    int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
+    int64_t m = 1 + (p % 12 + 12) % 12;
+    if (y < 1 || y > 9999) { snprintf(out, n, "0000.00"); return; }
+    snprintf(out, n, "%04lld.%02lld", (long long)y, (long long)m);
+}
+
 /* GUID token: canonical 8-4-4-4-12 lowercase hex (basics/datatypes.md §Guid).
  * The null guid is all-zero bytes and renders as the zero UUID
  * 00000000-0000-0000-0000-000000000000 — NOT the 0Ng token (the doc pins `0Ng`
@@ -361,6 +383,50 @@ static void q_time_tok(int32_t v, char* out, size_t n) {
     if (v == -INT32_MAX) { snprintf(out, n, "-0Wt"); return; }
     out[0] = '\0';
     ray_t* a = ray_time((int64_t)v);
+    if (a && !RAY_IS_ERR(a)) {
+        ray_fallback(a, out, n);
+        ray_release(a);
+    }
+}
+
+/* Render one minute element q-style: sentinels 0Nu / 0Wu / -0Wu (kdb
+ * datatypes table row 17); values render HH:MM via a temp base atom (base
+ * fmt_minute owns the clock math — the q_time_tok pattern).  A duration has
+ * no civil domain, so no out-of-range rule. */
+static void q_minute_tok(int32_t v, char* out, size_t n) {
+    if (v == INT32_MIN)  { snprintf(out, n, "0Nu");  return; }
+    if (v == INT32_MAX)  { snprintf(out, n, "0Wu");  return; }
+    if (v == -INT32_MAX) { snprintf(out, n, "-0Wu"); return; }
+    out[0] = '\0';
+    ray_t* a = ray_minute((int64_t)v);
+    if (a && !RAY_IS_ERR(a)) {
+        ray_fallback(a, out, n);
+        ray_release(a);
+    }
+}
+
+/* Render one second element q-style: sentinels 0Nv / 0Wv / -0Wv (row 18). */
+static void q_second_tok(int32_t v, char* out, size_t n) {
+    if (v == INT32_MIN)  { snprintf(out, n, "0Nv");  return; }
+    if (v == INT32_MAX)  { snprintf(out, n, "0Wv");  return; }
+    if (v == -INT32_MAX) { snprintf(out, n, "-0Wv"); return; }
+    out[0] = '\0';
+    ray_t* a = ray_second((int64_t)v);
+    if (a && !RAY_IS_ERR(a)) {
+        ray_fallback(a, out, n);
+        ray_release(a);
+    }
+}
+
+/* Render one timespan element q-style: sentinels 0Nn / 0Wn / -0Wn (row 16);
+ * values render the full dDHH:MM:SS.nnnnnnnnn form (datatypes.md:135-137,
+ * ref/xbar.md:143 — atoms and vector elements always show 9 frac digits). */
+static void q_timespan_tok(int64_t v, char* out, size_t n) {
+    if (v == INT64_MIN)  { snprintf(out, n, "0Nn");  return; }
+    if (v == INT64_MAX)  { snprintf(out, n, "0Wn");  return; }
+    if (v == -INT64_MAX) { snprintf(out, n, "-0Wn"); return; }
+    out[0] = '\0';
+    ray_t* a = ray_timespan(v);
     if (a && !RAY_IS_ERR(a)) {
         ray_fallback(a, out, n);
         ray_release(a);
@@ -472,10 +538,14 @@ static const char* q_empty_vec_qname(int8_t type) {
     case RAY_F32:  return "real";
     case RAY_F64:  return "float";
     case RAY_SYM:  return "symbol";
+    case RAY_MONTH: return "month";
     case RAY_DATE: return "date";
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_GUID: return "guid";
     case RAY_TIME: return "time";
+    case RAY_MINUTE: return "minute";
+    case RAY_SECOND: return "second";
+    case RAY_TIMESPAN: return "timespan";
     default:       return NULL;
     }
 }
@@ -486,7 +556,8 @@ static const char* q_empty_vec_qname(int8_t type) {
 static int q_matrix_alignable(int8_t type) {
     return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
            type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
-           type == RAY_DATE || type == RAY_TIME || type == RAY_TIMESTAMP;
+           type == RAY_DATE || type == RAY_TIME || type == RAY_TIMESTAMP ||
+           type == RAY_MINUTE || type == RAY_SECOND || type == RAY_TIMESPAN;
 }
 
 /* Format element `c` of the row-vector `rv` BARE (no per-element type suffix,
@@ -501,6 +572,9 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
     case RAY_F64: q_float_tok(((const double*)ray_data(rv))[c],         0, out, outsz); break;
     case RAY_DATE:q_date_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
     case RAY_TIME:q_time_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
+    case RAY_MINUTE: q_minute_tok(((const int32_t*)ray_data(rv))[c],          out, outsz); break;
+    case RAY_SECOND: q_second_tok(((const int32_t*)ray_data(rv))[c],          out, outsz); break;
+    case RAY_TIMESPAN: q_timespan_tok(((const int64_t*)ray_data(rv))[c],      out, outsz); break;
     case RAY_TIMESTAMP: q_ts_tok(((const int64_t*)ray_data(rv))[c],           out, outsz); break;
     case RAY_SYM: {
         ray_t* s = ray_sym_vec_cell(rv, c);   /* borrowed -RAY_STR */
@@ -585,6 +659,15 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     buf[0] = '\0';
     if (!val) return;
 
+    /* The generic null prints `::` (kdb: `q)d:`a`b!(::;2)` shows `a| ::`).
+     * Top-level console silence is the CALLER's rule (run_one_line / qdoc
+     * suppress RAY_IS_NULL results), so this only surfaces inside containers
+     * and explicit displays — where kdb shows `::`, never "null". */
+    if (RAY_IS_NULL(val)) {
+        snprintf(buf, bufsz, "::");
+        return;
+    }
+
     /* An empty typed vector prints `` `type$() `` (kdb `0#0` -> `` `long$() ``).
      * Byte/bool keep their own arms (`0x` / `b`); strings are atoms. */
     if (val->type > 0 && ray_is_vec(val) && ray_len(val) == 0) {
@@ -627,6 +710,12 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', buf, bufsz);      return;
     case -RAY_I64:  q_int_tok(val->i64,          8, 0,   buf, bufsz);      return;
     case -RAY_DATE: q_date_tok(val->i32, buf, bufsz);                      return;
+    case -RAY_MONTH: {
+        q_month_tok(val->i32, buf, bufsz);
+        size_t l = strlen(buf);
+        if (l + 1 < bufsz) { buf[l] = 'm'; buf[l + 1] = '\0'; }
+        return;
+    }
     case -RAY_GUID: {
         const uint8_t* b16 = val->obj ? (const uint8_t*)ray_data(val->obj)
                                       : (const uint8_t*)ray_data(val);
@@ -634,6 +723,9 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
     case -RAY_TIME: q_time_tok(val->i32, buf, bufsz);                      return;
+    case -RAY_MINUTE: q_minute_tok(val->i32, buf, bufsz);                  return;
+    case -RAY_SECOND: q_second_tok(val->i32, buf, bufsz);                  return;
+    case -RAY_TIMESPAN: q_timespan_tok(val->i64, buf, bufsz);              return;
     case -RAY_TIMESTAMP: q_ts_tok(val->i64, buf, bufsz);                   return;
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
     case -RAY_F64: {
@@ -723,6 +815,25 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         if (vsuf && pos + 1 < bufsz) { buf[pos++] = vsuf; buf[pos] = '\0'; }
         return;
     }
+    /* Month vector: bare yyyy.mm tokens space-joined + ONE trailing `m` —
+     * months follow the int-vector trailing-type-char model, NOT date's
+     * self-identifying model (basics/syntax.md:164 `2018.05 2018.07
+     * 2019.01m`; basics/math.md:84 `2012.03 2012.04m`); sentinels render
+     * bare (`2020.01 0N 2019.08m`); enlist comma for length-1. */
+    if (val->type == RAY_MONTH) {
+        int64_t n = ray_len(val);
+        const int32_t* d = (const int32_t*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,2000.01m */
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            q_month_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        if (pos + 1 < bufsz) { buf[pos++] = 'm'; buf[pos] = '\0'; }
+        return;
+    }
     /* Date vector: space-joined full yyyy.mm.dd tokens — dates have no
      * trailing type char (unlike `0N 0W 42h`), so every element self-
      * identifies, including the sentinels (`2000.01.01 0Nd`). */
@@ -751,6 +862,39 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         for (int64_t i = 0; i < n; i++) {
             char e[64];
             q_time_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        return;
+    }
+    /* Minute / second / timespan vectors: space-joined full tokens — the
+     * SELF-IDENTIFYING model like date/time, NOT month's trailing-char model
+     * (pinned: learn/tour/index.md:268 `12:30 13:00 13:30 14:00`,
+     * ref/xbar.md:143 `0D00:00:00.000000000 0D00:00:00.000000002 …`;
+     * second derived by family symmetry); sentinels self-identify (0Nu);
+     * enlist comma for length-1. */
+    if (val->type == RAY_MINUTE || val->type == RAY_SECOND) {
+        int64_t n = ray_len(val);
+        const int32_t* d = (const int32_t*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            if (val->type == RAY_MINUTE) q_minute_tok(d[i], e, sizeof e);
+            else                         q_second_tok(d[i], e, sizeof e);
+            q_join(buf, bufsz, &pos, e, i == 0);
+        }
+        return;
+    }
+    if (val->type == RAY_TIMESPAN) {
+        int64_t n = ray_len(val);
+        const int64_t* d = (const int64_t*)ray_data(val);
+        size_t pos = 0;
+        buf[0] = '\0';
+        if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';
+        for (int64_t i = 0; i < n; i++) {
+            char e[64];
+            q_timespan_tok(d[i], e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
         }
         return;
