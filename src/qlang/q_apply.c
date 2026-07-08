@@ -57,7 +57,78 @@ static int8_t dict_val_null_type(ray_t* vals) {
     return 0;
 }
 
+/* Keyed-table lookup: kt[key] — probe the key TABLE row-wise, return the
+ * matching row of the value table as a column dict (q4m3 "a keyed table is a
+ * dictionary from key records to value records").  Accepted index shapes:
+ *   1 key column : an ATOM key                       kt[`A]  -> age| 36
+ *   k key columns: a k-item LIST/vector composite    kt[(`Jo;`LA)]
+ * A miss returns the null row (typed null per value column) — kdb kt[`Z] ->
+ * `age| 0N`, never a silent empty.  Every other shape (vector of keys on a
+ * single-key table = table result) is an explicit 'nyi so nothing falls
+ * through to the plain-dict path with silently-wrong results. */
+static ray_t* keyed_table_lookup(ray_t* d, ray_t* idx) {
+    ray_t* ktab = ray_dict_keys(d);                  /* borrowed key TABLE */
+    ray_t* vtab = ray_dict_vals(d);                  /* borrowed val TABLE */
+    int64_t nk = ray_table_ncols(ktab);
+    int64_t nr = ray_table_nrows(ktab);
+    int composite = idx && (ray_is_vec(idx) || idx->type == RAY_LIST) &&
+                    nk > 1 && ray_len(idx) == nk;
+    if (!composite && !(idx && ray_is_atom(idx) && nk == 1))
+        return ray_error("nyi", "keyed table: unsupported key shape (row-set lookup deferred)");
+    int64_t hit = -1;
+    for (int64_t r = 0; r < nr && hit < 0; r++) {
+        int all = 1;
+        for (int64_t c = 0; c < nk && all; c++) {
+            ray_t* col = ray_table_get_col_idx(ktab, c);   /* borrowed */
+            if (!col) return ray_error("type", "keyed table: malformed key table");
+            ray_t* ra = ray_i64(r);
+            ray_t* cell = ray_at_fn(col, ra);              /* owned */
+            ray_release(ra);
+            if (!cell || RAY_IS_ERR(cell)) return cell ? cell : ray_error("type", NULL);
+            ray_t* want = NULL;                            /* owned iff composite */
+            if (composite) {
+                ray_t* ca = ray_i64(c);
+                want = ray_at_fn(idx, ca);
+                ray_release(ca);
+                if (!want || RAY_IS_ERR(want)) { ray_release(cell); return want ? want : ray_error("type", NULL); }
+            }
+            all = atom_eq(cell, composite ? want : idx);
+            ray_release(cell);
+            if (want) ray_release(want);
+        }
+        if (all) hit = r;
+    }
+    if (hit >= 0) {
+        ray_t* ra = ray_i64(hit);
+        ray_t* row = ray_at_fn(vtab, ra);            /* row dict, owned */
+        ray_release(ra);
+        return row;
+    }
+    /* miss -> null row: colname!typed-null per value column */
+    int64_t nv = ray_table_ncols(vtab);
+    ray_t* names = ray_vec_new(RAY_SYM, nv > 0 ? nv : 1);
+    if (!names || RAY_IS_ERR(names)) return names ? names : ray_error("oom", NULL);
+    names->len = nv;
+    int64_t* nd = (int64_t*)ray_data(names);
+    ray_t* nulls = ray_list_new(nv > 0 ? nv : 1);
+    if (!nulls || RAY_IS_ERR(nulls)) { ray_release(names); return nulls ? nulls : ray_error("oom", NULL); }
+    for (int64_t c = 0; c < nv; c++) {
+        nd[c] = ray_table_col_name(vtab, c);
+        ray_t* col = ray_table_get_col_idx(vtab, c);       /* borrowed */
+        int8_t nt = (col && ray_is_vec(col)) ? (int8_t)-col->type : 0;
+        ray_t* nu = nt ? ray_typed_null(nt)
+                       : (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ);
+        nulls = ray_list_append(nulls, nu);
+        ray_release(nu);
+    }
+    ray_t* cv = q_collapse_list(nulls);
+    ray_release(nulls);
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(names); return cv ? cv : ray_error("type", NULL); }
+    return ray_dict_new(names, cv);                  /* consumes both */
+}
+
 static ray_t* dict_lookup(ray_t* d, ray_t* idx) {
+    if (q_is_keyed_table(d)) return keyed_table_lookup(d, idx);
     ray_t* vals = ray_dict_vals(d);                  /* borrowed accessor */
     int8_t vt = dict_val_null_type(vals);
 
@@ -429,24 +500,32 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     if (head->type == RAY_LIST && q_deriv_kind_of(head) != Q_DERIV_NONE)
         return q_deriv_apply(head, args, n);
 
-    if (head->type == RAY_DICT) {
-        if (n != 1) return NULL;                    /* d[k;..] deferred */
-        return dict_lookup(head, args[0]);
-    }
-
-    if (head->type == RAY_TABLE) {
-        /* t[`col] -> column, t[0] -> row dict — base ray_at special-cases
-         * tables and both forms audited kdb-sane. */
-        if (n != 1) return NULL;
-        return ray_at_fn(head, args[0]);
-    }
-
-    if (ray_is_vec(head) || head->type == RAY_LIST) {
-        /* v[i] / v[1 3] / v i; v[i;j] = depth indexing, one gather per arg */
+    /* Noun indexing, one step per arg — d[k;i] / t[r;c] / m[i;j] drill through
+     * whatever each step yields (dict -> dict_lookup with kdb miss semantics,
+     * table -> ray_at row/column, vec/list -> gather).  Single-arg dict/table
+     * behaviour is byte-identical to the old dedicated arms.  A `::` (null)
+     * index at a dict/table step DECLINES to the caller's historic error —
+     * elision ("all at this level") is a later wave; vec/list steps keep
+     * their pre-existing gather path for it. */
+    if (head->type == RAY_DICT || head->type == RAY_TABLE ||
+        ray_is_vec(head) || head->type == RAY_LIST) {
         ray_t* cur = head;
         ray_retain(cur);
         for (int64_t i = 0; i < n; i++) {
-            ray_t* next = gather(cur, args[i]);
+            ray_t* next;
+            if (cur->type == RAY_DICT) {
+                if (!args[i] || RAY_IS_NULL(args[i])) { ray_release(cur); return NULL; }
+                next = dict_lookup(cur, args[i]);
+            } else if (cur->type == RAY_TABLE) {
+                if (!args[i] || RAY_IS_NULL(args[i])) { ray_release(cur); return NULL; }
+                next = ray_at_fn(cur, args[i]);
+            } else {
+                /* vec/list — AND any mid-path atom, exactly as the old loop:
+                 * gather -> ray_at_fn, which char-indexes string atoms
+                 * ((5 2.14;"abc") . 1 2 -> "c", amend.qcmd) and errors on
+                 * genuinely non-indexable atoms. */
+                next = gather(cur, args[i]);
+            }
             ray_release(cur);
             if (!next || RAY_IS_ERR(next)) return next;
             cur = next;
