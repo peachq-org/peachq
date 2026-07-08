@@ -97,10 +97,38 @@ void q_console_show(ray_t* val) {
 
 #define QF_MAXCOL 64
 
+/* True iff every cell of this LIST column is a 1-item vector/list (and not a
+ * string): kdb's console collapses the display of a uniformly-singleton
+ * nested column (select_simple.qcmd `1| 10`), but keeps the enlist comma in
+ * mixed columns (select.qcmd `c | ,50`, ungroup.md `,"A"`). */
+static int q_col_uniform_singleton(ray_t* col) {
+    if (!col || col->type != RAY_LIST) return 0;
+    int64_t n = ray_len(col);
+    if (n == 0) return 0;
+    ray_t** e = (ray_t**)ray_data(col);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* c = e[i];
+        if (!c || c->type == -RAY_STR || ray_is_atom(c)) return 0;
+        if (!(ray_is_vec(c) || c->type == RAY_LIST) || ray_len(c) != 1) return 0;
+    }
+    return 1;
+}
+
 /* Format one table cell q-style into out.  A -RAY_SYM cell prints WITHOUT its
  * leading backtick (kdb shows `ibm`, not `` `ibm``, inside a table). */
 static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
     out[0] = '\0';
+    /* Char-vector column (string-model shim: the whole column is ONE -RAY_STR
+     * atom, one char per row — meta's `t` column is the producer).  kdb shows
+     * the char BARE (`a| j`, not `a| "j"`). */
+    if (col && col->type == -RAY_STR) {
+        size_t l = ray_str_len(col);
+        if (row >= 0 && (size_t)row < l && outsz > 1) {
+            out[0] = ray_str_ptr(col)[row];
+            out[1] = '\0';
+        }
+        return;
+    }
     ray_t* ia = ray_i64(row);
     ray_t* c  = ray_at_fn(col, ia);
     ray_release(ia);
@@ -111,10 +139,11 @@ static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
                  ray_release(s); }
     } else {
         q_fmt(c, out, outsz);
-        /* A grouped (by) value cell is a nested vector; q_fmt renders a
-         * 1-element vector with a leading enlist comma (`,10`), but kdb table
-         * cells show the bare value(s) — drop the enlist marker. */
-        if (out[0] == ',') memmove(out, out + 1, strlen(out));
+        /* A nested cell renders with a leading enlist comma (`,10`); kdb's
+         * console keeps it for mixed-length columns (`c | ,50`) but shows a
+         * UNIFORMLY-singleton nested column bare (`1| 10`). */
+        if (out[0] == ',' && q_col_uniform_singleton(col))
+            memmove(out, out + 1, strlen(out));
     }
     ray_release(c);
 }
