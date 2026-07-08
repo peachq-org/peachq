@@ -24,9 +24,9 @@ typedef struct {
 static inline bool ray_valid_at(const ray_valid_t* v, int64_t row) {
     if (!v->has_nulls) return true;
     switch (v->type) {
-        case RAY_I64: case RAY_TIMESTAMP:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
             return ((const int64_t*)v->base)[row] != NULL_I64;
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             return ((const int32_t*)v->base)[row] != NULL_I32;
         case RAY_I16:
             return ((const int16_t*)v->base)[row] != NULL_I16;
