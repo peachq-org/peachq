@@ -331,6 +331,34 @@ static void fmt_time(fmt_buf_t* b, int32_t val) {
     fmt_printf(b, "%02d:%02d:%02d.%03d", h, m, s, ms);
 }
 
+/* MINUTE payload = minutes since midnight; sign-then-magnitude (the
+ * duration model — datatypes.md:166 shows signed timespans). */
+static void fmt_minute(fmt_buf_t* b, int32_t val) {
+    uint32_t m = val < 0 ? (uint32_t)-(int64_t)val : (uint32_t)val;
+    if (val < 0) fmt_putc(b, '-');
+    fmt_printf(b, "%02u:%02u", m / 60, m % 60);
+}
+
+/* SECOND payload = seconds since midnight. */
+static void fmt_second(fmt_buf_t* b, int32_t val) {
+    uint32_t s = val < 0 ? (uint32_t)-(int64_t)val : (uint32_t)val;
+    if (val < 0) fmt_putc(b, '-');
+    fmt_printf(b, "%02u:%02u:%02u", s / 3600, (s / 60) % 60, s % 60);
+}
+
+/* TIMESPAN payload = signed ns; dDhh:mm:ss.nnnnnnnnn (datatypes.md:135-137,
+ * ref/xbar.md:143).  INT64_MIN-safe magnitude via unsigned negate. */
+static void fmt_timespan(fmt_buf_t* b, int64_t val) {
+    uint64_t n = val < 0 ? (uint64_t)(-(val + 1)) + 1u : (uint64_t)val;
+    if (val < 0) fmt_putc(b, '-');
+    fmt_printf(b, "%lluD%02llu:%02llu:%02llu.%09llu",
+               (unsigned long long)(n / 86400000000000ULL),
+               (unsigned long long)((n / 3600000000000ULL) % 24),
+               (unsigned long long)((n / 60000000000ULL) % 60),
+               (unsigned long long)((n / 1000000000ULL) % 60),
+               (unsigned long long)(n % 1000000000ULL));
+}
+
 static void fmt_timestamp(fmt_buf_t* b, int64_t val) {
     int y, mo, d, h, mi, s, ns;
     ts_to_parts(val, &y, &mo, &d, &h, &mi, &s, &ns);
@@ -400,6 +428,9 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     case RAY_MONTH:     fmt_month(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_DATE:      fmt_date(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_TIME:      fmt_time(b, ((int32_t*)ray_data(vec))[idx]); break;
+    case RAY_MINUTE:    fmt_minute(b, ((int32_t*)ray_data(vec))[idx]); break;
+    case RAY_SECOND:    fmt_second(b, ((int32_t*)ray_data(vec))[idx]); break;
+    case RAY_TIMESPAN:  fmt_timespan(b, ((int64_t*)ray_data(vec))[idx]); break;
     case RAY_TIMESTAMP: fmt_timestamp(b, ((int64_t*)ray_data(vec))[idx]); break;
     case RAY_SYM:
         /* cell-data: resolve through the column's domain */
@@ -1068,6 +1099,9 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
         case RAY_MONTH:     fmt_month(b, obj->i32); break;
         case RAY_DATE:      fmt_date(b, obj->i32); break;
         case RAY_TIME:      fmt_time(b, obj->i32); break;
+        case RAY_MINUTE:    fmt_minute(b, obj->i32); break;
+        case RAY_SECOND:    fmt_second(b, obj->i32); break;
+        case RAY_TIMESPAN:  fmt_timespan(b, obj->i64); break;
         case RAY_TIMESTAMP: fmt_timestamp(b, obj->i64); break;
         case RAY_SYM:  fmt_sym(b, obj->i64); break;
         case RAY_STR:  fmt_str_atom(b, obj, mode > 0); break;
