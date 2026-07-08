@@ -398,6 +398,28 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
 
     if (head->type == -RAY_STR) return NULL;        /* deferred: string model */
 
+    /* Symbol-handle application (q namespaces, q4m3 §12): applying a symbol
+     * indexes the GLOBAL it names — `` `.[`a] `` reads root `a`,
+     * `` `.jab[`wrong] `` indexes the context dict.  Resolution goes through
+     * the context-aware owned resolver (root/context views synthesized); an
+     * unresolved name declines to the caller's historic error.  File handles
+     * (`` `:path ``) stay declined (file-I/O wave). */
+    if (head->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(head->i64);
+        if (s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':') {
+            ray_release(s);
+            return NULL;                            /* file handle — decline */
+        }
+        if (s) ray_release(s);
+        ray_t* v = q_value_resolve_owned(head);   /* OWNED or NULL */
+        if (!v) return NULL;
+        if (RAY_IS_ERR(v)) return v;
+        if (v->type == -RAY_SYM) { ray_release(v); return NULL; }  /* no handle chains */
+        ray_t* r = q_apply_noun(v, args, n);
+        ray_release(v);
+        return r;
+    }
+
     /* Composition `'[f;g;…]` — the rightmost function consumes all args, each
      * function to its left is then applied monadically to the running result. */
     if (head->type == RAY_LIST && q_deriv_kind_of(head) == Q_DERIV_COMPOSE)
