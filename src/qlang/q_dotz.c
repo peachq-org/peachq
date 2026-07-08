@@ -1,10 +1,14 @@
 /* q_dotz — see q_dotz.h.  The eval-time `.z.*` command-line resolver. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r for the clock producers */
+#endif
 #include "qlang/q_dotz.h"
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include <rayforce.h>
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
 #include <stdlib.h>            /* strtod */
 #include <string.h>
+#include <time.h>             /* clock_gettime / gmtime_r / mktime — .z clock family */
 
 /* argv is process-lifetime (owned by main), so we cache only the pointers and
  * the script's position and MINT each `.z.*` value on demand.  These values
@@ -73,6 +77,45 @@ static ray_t* z_k(void) {   /* `.z.k` — build/release date (kdb .z.k) */
     return ray_date(ymd_to_date(y, m, d));
 }
 
+/* ---- .z clock family (kdb .z.p/.z.P … lowercase=UTC, uppercase=local) -------
+ * Each producer RE-READS the system clock on every reference — q's timing idiom
+ * `a:.z.t; costly[]; .z.t-a` requires re-sampling, never a per-block cache — and
+ * at NANOSECOND resolution (clock_gettime), so sub-second deltas are visible
+ * (the engine's second-granularity (date)/(time)/(timestamp) clock fns can't do
+ * that).  All ten derive from one `z_now_ns` read. */
+#define RAY_EPOCH_UNIX_SECS 946684800LL          /* 2000.01.01 00:00:00 UTC, unix secs */
+#define RAY_NS_PER_DAY      86400000000000LL
+
+/* Current time as nanoseconds since the rayforce epoch (2000.01.01), in UTC
+ * (local=0) or local wall-clock (local=1).  Local offset is derived portably
+ * (no tm_gmtoff): mktime of the UTC fields interprets them as local, so the
+ * signed difference from the real instant IS the east-of-UTC offset. */
+static int64_t z_now_ns(int local) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t unix_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    if (local) {
+        time_t s = ts.tv_sec;
+        struct tm g;
+        gmtime_r(&s, &g);
+        g.tm_isdst = -1;
+        int64_t off = (int64_t)(s - mktime(&g));   /* seconds east of UTC (incl DST) */
+        unix_ns += off * 1000000000LL;
+    }
+    return unix_ns - RAY_EPOCH_UNIX_SECS * 1000000000LL;
+}
+
+static ray_t* z_p(void) { return ray_timestamp(z_now_ns(0)); }                 /* .z.p UTC timestamp */
+static ray_t* z_P(void) { return ray_timestamp(z_now_ns(1)); }                 /* .z.P local timestamp */
+static ray_t* z_d(void) { return ray_date((int64_t)(z_now_ns(0) / RAY_NS_PER_DAY)); } /* .z.d UTC date */
+static ray_t* z_D(void) { return ray_date((int64_t)(z_now_ns(1) / RAY_NS_PER_DAY)); } /* .z.D local date */
+static ray_t* z_t(void) { return ray_time((z_now_ns(0) % RAY_NS_PER_DAY) / 1000000LL); } /* .z.t UTC time (ms) */
+static ray_t* z_T(void) { return ray_time((z_now_ns(1) % RAY_NS_PER_DAY) / 1000000LL); } /* .z.T local time (ms) */
+static ray_t* z_n(void) { return ray_timespan(z_now_ns(0) % RAY_NS_PER_DAY); } /* .z.n UTC timespan since midnight */
+static ray_t* z_N(void) { return ray_timespan(z_now_ns(1) % RAY_NS_PER_DAY); } /* .z.N local timespan since midnight */
+static ray_t* z_z(void) { return ray_datetime((double)z_now_ns(0) / (double)RAY_NS_PER_DAY); } /* .z.z UTC datetime */
+static ray_t* z_Z(void) { return ray_datetime((double)z_now_ns(1) / (double)RAY_NS_PER_DAY); } /* .z.Z local datetime */
+
 static const struct { const char* name; uint8_t len; ray_t* (*make)(void); }
 Z_TAB[] = {
     { ".z.f", 4, z_f },
@@ -80,6 +123,16 @@ Z_TAB[] = {
     { ".z.X", 4, z_X },
     { ".z.K", 4, z_K },
     { ".z.k", 4, z_k },
+    { ".z.p", 4, z_p },
+    { ".z.P", 4, z_P },
+    { ".z.d", 4, z_d },
+    { ".z.D", 4, z_D },
+    { ".z.t", 4, z_t },
+    { ".z.T", 4, z_T },
+    { ".z.n", 4, z_n },
+    { ".z.N", 4, z_N },
+    { ".z.z", 4, z_z },
+    { ".z.Z", 4, z_Z },
 };
 
 void q_dotz_init(int argc, char** argv) {
