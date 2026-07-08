@@ -16,6 +16,11 @@
 /* Reset to the root context (called by q_runtime_create/destroy). */
 void q_ns_reset(void);
 
+/* Re-initialize the rng to kdb's constant startup seed (-314159i,
+ * basics/syscmds.md \S) and record it as the last-initialized seed.
+ * Called by q_runtime_create; `\S n` re-initializes thereafter. */
+void q_seed_init(void);
+
 /* Current context: "" at root, else the dotted name (".jab").  Never NULL. */
 const char* q_ns_current(void);
 
@@ -55,8 +60,8 @@ int q_ns_is_context(const char* dotname, size_t len);
 ray_t* q_ns_key_roster(void);
 
 /* System-command dispatch for a console line starting with `\`.  Handles
- * \d [ns], \v [ns], \f [ns], \a [ns]; sets *handled and returns an OWNED
- * value to display (NULL = handled silently), or an OWNED RAY_ERROR.
+ * \d [ns], \v [ns], \f [ns], \a [ns], \S [n]; sets *handled and returns an
+ * OWNED value to display (NULL = handled silently), or an OWNED RAY_ERROR.
  * Unrecognized commands leave *handled == 0. */
 ray_t* q_ns_syscmd(const char* line, size_t n, int* handled);
 
