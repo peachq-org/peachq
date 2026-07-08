@@ -543,7 +543,7 @@ static int q_match_rec(ray_t* a, ray_t* b) {
         switch (-a->type) {
         case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
         case RAY_F32: case RAY_F64:
-        case RAY_DATE: case RAY_TIME: case RAY_MONTH: case RAY_TIMESTAMP:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
             return memcmp(&a->i64, &b->i64, 8) == 0;   /* payload union */
         default:
             return 0;
@@ -1466,7 +1466,7 @@ static ray_t* q_shift1(ray_t* x, int forward) {
         return ray_error("nyi", "next/prev: only simple numeric vectors (list/string/sym/atom deferred)");
     int8_t t = x->type;
     if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
-          t == RAY_DATE || t == RAY_TIME || t == RAY_MONTH || t == RAY_TIMESTAMP))
+          RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t)))
         return ray_error("nyi", "next/prev: %s vectors are deferred", ray_type_name(t));
     int64_t len = ray_len(x);
     size_t esz = ray_type_sizes[(uint8_t)t];
@@ -2272,7 +2272,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         switch (n) {
         case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM:
-        case RAY_DATE: case RAY_TIME: case RAY_MONTH: case RAY_TIMESTAMP:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
             return (int8_t)n;
         default: return 0;    /* guid/char + minute/second etc: deferred */
         }

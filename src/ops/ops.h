@@ -239,7 +239,7 @@ static inline bool agg_type_admitted(uint16_t op, int8_t t) {
      * wrappers (e.g. RAY_MAPCOMMON) and out_type==0 to the runtime so a
      * plan-time guard never false-rejects a column it can't classify. */
     bool nonnum   = (t == RAY_SYM || t == RAY_STR || t == RAY_GUID);
-    bool temporal = (t == RAY_DATE || t == RAY_TIME || t == RAY_MONTH || t == RAY_TIMESTAMP);
+    bool temporal = (RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t));
     switch (op) {
         /* sum: numeric + TIME (duration-like ms count).  SYM/STR/GUID and the
          * absolute temporals DATE/TIMESTAMP are meaningless to sum → reject. */
