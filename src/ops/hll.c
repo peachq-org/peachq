@@ -270,7 +270,7 @@ static void cda_scalar_fn(void* raw, uint32_t worker_id, int64_t start, int64_t 
     bool    hn = c->has_nulls;
     const int64_t CHK = 65535;
 
-    if (t == RAY_I64 || t == RAY_TIMESTAMP) {
+    if (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) {
         const int64_t* d = (const int64_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
@@ -278,7 +278,7 @@ static void cda_scalar_fn(void* raw, uint32_t worker_id, int64_t start, int64_t 
             if (hn && v_i == NULL_I64) continue;
             ray_hll_add(sh, ray_hash_i64(v_i));
         }
-    } else if (t == RAY_I32 || t == RAY_DATE || t == RAY_TIME) {
+    } else if (t == RAY_I32 || RAY_IS_TEMPORAL32(t)) {
         const int32_t* d = (const int32_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
@@ -372,7 +372,7 @@ ray_t* ray_count_distinct_approx(ray_t* x) {
     int8_t t = x->type;
     /* Reject types we don't hash. */
     if (t != RAY_I64 && t != RAY_I32 && t != RAY_I16 && t != RAY_U8 &&
-        t != RAY_BOOL && t != RAY_F64 && t != RAY_DATE && t != RAY_TIME &&
+        t != RAY_BOOL && t != RAY_F64 && !RAY_IS_TEMPORAL32(t) &&
         t != RAY_TIMESTAMP && t != RAY_STR && !RAY_IS_SYM(t))
         return ray_error("type", "count_distinct_approx: unsupported element type");
     int64_t n = x->len;
@@ -471,7 +471,7 @@ static void cda_pg_buf_task(void* raw, uint32_t worker_id, int64_t start, int64_
                             RAY_HLL_SPARSE_CAP, regs);
         int64_t s = c->offsets[g];
         int64_t e = s + c->counts[g];
-        if (t == RAY_I64 || t == RAY_TIMESTAMP) {
+        if (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) {
             const int64_t* d = (const int64_t*)base;
             for (int64_t k = s; k < e; k++) {
                 int64_t r = c->idx_buf[k];
@@ -479,7 +479,7 @@ static void cda_pg_buf_task(void* raw, uint32_t worker_id, int64_t start, int64_
                 if (hn && v == NULL_I64) continue;
                 ray_hll_add(&sk, ray_hash_i64(v));
             }
-        } else if (t == RAY_I32 || t == RAY_DATE || t == RAY_TIME) {
+        } else if (t == RAY_I32 || RAY_IS_TEMPORAL32(t)) {
             const int32_t* d = (const int32_t*)base;
             for (int64_t k = s; k < e; k++) {
                 int64_t r = c->idx_buf[k];
@@ -557,7 +557,7 @@ int ray_count_distinct_approx_pg_buf(ray_t* src,
     int8_t t = src->type;
     bool hashable = (t == RAY_I64 || t == RAY_I32 || t == RAY_I16 ||
                       t == RAY_U8 || t == RAY_BOOL || t == RAY_F64 ||
-                      t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP ||
+                      RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) ||
                       RAY_IS_SYM(t));
     if (!hashable) return -1;
     if (n_groups <= 0) return 0;
@@ -643,7 +643,7 @@ static void cda_pg_stream_task(void* raw, uint32_t worker_id,
     bool           hn      = c->has_nulls;
     const int64_t  CHK     = 65535;
 
-    if (t == RAY_I64 || t == RAY_TIMESTAMP) {
+    if (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) {
         const int64_t* d = (const int64_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
@@ -653,7 +653,7 @@ static void cda_pg_stream_task(void* raw, uint32_t worker_id,
             if (hn && v == NULL_I64) continue;
             ray_hll_add(&bank[gid], ray_hash_i64(v));
         }
-    } else if (t == RAY_I32 || t == RAY_DATE || t == RAY_TIME) {
+    } else if (t == RAY_I32 || RAY_IS_TEMPORAL32(t)) {
         const int32_t* d = (const int32_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
@@ -744,7 +744,7 @@ int ray_count_distinct_approx_pg_stream(ray_t* src,
     int8_t t = src->type;
     bool hashable = (t == RAY_I64 || t == RAY_I32 || t == RAY_I16 ||
                       t == RAY_U8 || t == RAY_BOOL || t == RAY_F64 ||
-                      t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP ||
+                      RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) ||
                       RAY_IS_SYM(t));
     if (!hashable) return -1;
     if (p < 4) p = 4;

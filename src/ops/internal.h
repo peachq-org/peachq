@@ -164,7 +164,7 @@ static inline int64_t sym_intern_safe(const char* s, size_t len) {
 static inline int64_t read_col_i64(const void* data, int64_t row,
                                     int8_t type, uint8_t attrs) {
     switch (type) {
-    case RAY_I64: case RAY_TIMESTAMP:
+    case RAY_I64: RAY_TEMPORAL64_CASES:
         return ((const int64_t*)data)[row];
     case RAY_SYM:
         switch (attrs & RAY_SYM_W_MASK) {
@@ -173,7 +173,7 @@ static inline int64_t read_col_i64(const void* data, int64_t row,
         case RAY_SYM_W32: return (int64_t)((const uint32_t*)data)[row];
         default:         return ((const int64_t*)data)[row];
         }
-    case RAY_I32: case RAY_DATE: case RAY_TIME:
+    case RAY_I32: RAY_TEMPORAL32_CASES:
         return (int64_t)((const int32_t*)data)[row];
     case RAY_I16:
         return (int64_t)((const int16_t*)data)[row];
@@ -185,11 +185,11 @@ static inline int64_t read_col_i64(const void* data, int64_t row,
 static inline void write_col_i64(void* data, int64_t row, int64_t val,
                                   int8_t type, uint8_t attrs) {
     switch (type) {
-    case RAY_I64: case RAY_TIMESTAMP:
+    case RAY_I64: RAY_TEMPORAL64_CASES:
         ((int64_t*)data)[row] = val; return;
     case RAY_SYM:
         ray_write_sym(data, row, (uint64_t)val, type, attrs); return;
-    case RAY_I32: case RAY_DATE: case RAY_TIME:
+    case RAY_I32: RAY_TEMPORAL32_CASES:
         ((int32_t*)data)[row] = (int32_t)val; return;
     case RAY_I16:
         ((int16_t*)data)[row] = (int16_t)val; return;
@@ -793,7 +793,7 @@ static inline uint8_t radix_key_bytes(int8_t type) {
     switch (type) {
     case RAY_BOOL: case RAY_U8:   return 1;
     case RAY_I16:                return 2;
-    case RAY_I32: case RAY_DATE: case RAY_TIME: return 4;
+    case RAY_I32: RAY_TEMPORAL32_CASES: return 4;
     default:                    return 8;  /* I64, F64, TIMESTAMP, SYM */
     }
 }
@@ -1239,8 +1239,8 @@ static inline void par_set_null(ray_t* vec, int64_t idx) {
     switch (vec->type) {
         case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
         case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
-        case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
+        case RAY_I64: RAY_TEMPORAL64_CASES:      ((int64_t*)p)[idx] = NULL_I64; break;
+        case RAY_I32: RAY_TEMPORAL32_CASES: ((int32_t*)p)[idx] = NULL_I32; break;
         case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
         default: return;
     }
@@ -1269,13 +1269,13 @@ static inline void par_finalize_nulls(ray_t* vec) {
                 if (d[i] != d[i]) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
             return;
         }
-        case RAY_I64: case RAY_TIMESTAMP: {
+        case RAY_I64: RAY_TEMPORAL64_CASES: {
             const int64_t* d = (const int64_t*)p;
             for (int64_t i = 0; i < n; i++)
                 if (d[i] == NULL_I64) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }
             return;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             const int32_t* d = (const int32_t*)p;
             for (int64_t i = 0; i < n; i++)
                 if (d[i] == NULL_I32) { vec->attrs |= RAY_ATTR_HAS_NULLS; return; }

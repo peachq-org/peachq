@@ -54,8 +54,7 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         if (!kc) return false;
         switch (kc->type) {
             case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
-            case RAY_BOOL: case RAY_DATE: case RAY_TIME:
-            case RAY_TIMESTAMP: case RAY_SYM: break;
+            case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: break;
             default: return false;
         }
     }
@@ -123,8 +122,7 @@ bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
         ray_t* kc = key_cols[k];
         switch (kc->type) {
             case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
-            case RAY_BOOL: case RAY_DATE: case RAY_TIME:
-            case RAY_TIMESTAMP: case RAY_SYM: break;
+            case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: break;
             default: return false;
         }
         if (kc->attrs & RAY_ATTR_HAS_NULLS) return false;
@@ -165,8 +163,8 @@ bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
                      if (v > mx) mx = v;                                \
                  } } while (0)
         switch (kc->type) {
-            case RAY_I64: case RAY_TIMESTAMP: DENSE_MINMAX(int64_t); break;
-            case RAY_I32: case RAY_DATE: case RAY_TIME: DENSE_MINMAX(int32_t); break;
+            case RAY_I64: RAY_TEMPORAL64_CASES: DENSE_MINMAX(int64_t); break;
+            case RAY_I32: RAY_TEMPORAL32_CASES: DENSE_MINMAX(int32_t); break;
             case RAY_I16: DENSE_MINMAX(int16_t); break;
             case RAY_U8: case RAY_BOOL: DENSE_MINMAX(uint8_t); break;
             case RAY_SYM:
@@ -525,8 +523,7 @@ static bool agg_dense_plan_sel(ray_t** key_cols, uint8_t n_keys, int64_t n_sel,
         ray_t* kc = key_cols[k];
         switch (kc->type) {
             case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
-            case RAY_BOOL: case RAY_DATE: case RAY_TIME:
-            case RAY_TIMESTAMP: case RAY_SYM: break;
+            case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: break;
             default: return false;
         }
         if (kc->attrs & RAY_ATTR_HAS_NULLS) return false;
@@ -1058,8 +1055,8 @@ static void agg_dense_phaseA_fn(void* vctx, uint32_t wid, int64_t start, int64_t
                 if (r < fr[slot]) fr[slot] = r;                            \
             }
         switch (c->key_cols[0]->type) {
-            case RAY_I64: case RAY_TIMESTAMP: DENSE_SLOT1(((const int64_t*)kd)[r]); break;
-            case RAY_I32: case RAY_DATE: case RAY_TIME: DENSE_SLOT1(((const int32_t*)kd)[r]); break;
+            case RAY_I64: RAY_TEMPORAL64_CASES: DENSE_SLOT1(((const int64_t*)kd)[r]); break;
+            case RAY_I32: RAY_TEMPORAL32_CASES: DENSE_SLOT1(((const int32_t*)kd)[r]); break;
             case RAY_I16: DENSE_SLOT1(((const int16_t*)kd)[r]); break;
             case RAY_U8: case RAY_BOOL: DENSE_SLOT1(((const uint8_t*)kd)[r]); break;
             case RAY_SYM:
@@ -2504,8 +2501,7 @@ static ray_t* exec_group_v2_run(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             ray_t* kc = key_cols[k];
             switch (kc->type) {
                 case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
-                case RAY_BOOL: case RAY_DATE: case RAY_TIME:
-                case RAY_TIMESTAMP: case RAY_SYM: break;
+                case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: break;
                 default: keys_intsym = false;
             }
             if (kc->attrs & RAY_ATTR_HAS_NULLS) keys_intsym = false;
@@ -2713,8 +2709,8 @@ ray_t* exec_group_v2(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 /* Read element `row` of an integer/temporal/SYM column widened to int64. */
 static inline int64_t agg_read_key_i64(ray_t* col, const void* data, int64_t row) {
     switch (col->type) {
-        case RAY_I64: case RAY_TIMESTAMP: return ((const int64_t*)data)[row];
-        case RAY_I32: case RAY_DATE: case RAY_TIME: return ((const int32_t*)data)[row];
+        case RAY_I64: RAY_TEMPORAL64_CASES: return ((const int64_t*)data)[row];
+        case RAY_I32: RAY_TEMPORAL32_CASES: return ((const int32_t*)data)[row];
         case RAY_I16: return ((const int16_t*)data)[row];
         case RAY_U8:  case RAY_BOOL: return ((const uint8_t*)data)[row];
         case RAY_SYM: return (int64_t)ray_read_sym(data, row, col->type, col->attrs);

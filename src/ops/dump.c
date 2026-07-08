@@ -147,8 +147,12 @@ static const char* type_name(int8_t t) {
         case RAY_I32:       return "I32";
         case RAY_I64:       return "I64";
         case RAY_F64:       return "F64";
+        case RAY_MONTH:     return "MONTH";
         case RAY_DATE:      return "DATE";
         case RAY_TIME:      return "TIME";
+        case RAY_MINUTE:    return "MINUTE";
+        case RAY_SECOND:    return "SECOND";
+        case RAY_TIMESPAN:  return "TIMESPAN";
         case RAY_TIMESTAMP: return "TIMESTAMP";
         case RAY_TABLE:     return "TABLE";
         case RAY_SEL:       return "SEL";
