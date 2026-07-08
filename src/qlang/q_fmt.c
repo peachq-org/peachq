@@ -1052,6 +1052,17 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         ray_t* v = ray_dict_vals(val);          /* borrowed */
         int64_t n = k ? ray_len(k) : 0;
         size_t pos = 0, maxk = 0;
+        /* A uniform SYM value column (typed sym vector, or the constructor's
+         * boxed list holding only sym atoms) prints its atoms BARE, like a
+         * table column (kdb ref/apply.md `cat | chat`).  Anything mixed keeps
+         * the sym-literal backtick form (`a`b!(`x;1) -> a| `x). */
+        int sym_col = v && v->type == RAY_SYM;
+        if (v && v->type == RAY_LIST && ray_len(v) > 0) {
+            ray_t** vel = (ray_t**)ray_data(v);
+            sym_col = 1;
+            for (int64_t i = 0; i < ray_len(v) && sym_col; i++)
+                if (!vel[i] || vel[i]->type != -RAY_SYM) sym_col = 0;
+        }
         for (int pass = 0; pass < 2; pass++) {
             for (int64_t i = 0; i < n; i++) {
                 ray_t* ia = ray_i64(i);
@@ -1069,7 +1080,12 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
                 ray_t* ja = ray_i64(i);
                 ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
                 ray_release(ja);
-                if (ve && !RAY_IS_ERR(ve)) q_fmt(ve, vb, sizeof vb);
+                if (ve && !RAY_IS_ERR(ve)) {
+                    if (sym_col && ve->type == -RAY_SYM)
+                        q_fmt_dict_key(ve, vb, sizeof vb);
+                    else
+                        q_fmt(ve, vb, sizeof vb);
+                }
                 if (ve && !RAY_IS_ERR(ve)) ray_release(ve);
                 size_t need = (i ? 1 : 0) + maxk + 2 + strlen(vb);
                 if (pos + need + 1 > bufsz) break;
