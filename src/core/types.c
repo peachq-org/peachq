@@ -24,10 +24,10 @@
 #include "core/types.h"
 
 /* Element sizes indexed by type tag (kdb numbering).  Sparse designated
- * initializers: the kdb 1..19 band has gaps 3,13,15-18 (unimplemented
- * temporals month/datetime/timespan/minute/second) and RAY_SEL(20, variable
- * layout) which all default to 0 — the correct "no fixed element size"
- * answer, so they need no explicit entry. */
+ * initializers: the kdb 1..19 band has gaps 3 and 15 (short-of-3 and the
+ * deprecated f64-backed datetime) and RAY_SEL(20, variable layout) which
+ * default to 0 — the correct "no fixed element size" answer, so they need
+ * no explicit entry. */
 const uint8_t ray_type_sizes[256] = {
     [RAY_LIST]      = 8,   /* pointer-sized (ray_t*) */
     [RAY_BOOL]      = 1,
@@ -41,7 +41,11 @@ const uint8_t ray_type_sizes[256] = {
     [RAY_STR]       = 16,  /* sizeof(ray_str_t) */
     [RAY_SYM]       = 8,   /* W64 default; narrow widths use ray_sym_elem_size */
     [RAY_TIMESTAMP] = 8,
+    [RAY_MONTH]     = 4,
     [RAY_DATE]      = 4,
+    [RAY_TIMESPAN]  = 8,
+    [RAY_MINUTE]    = 4,
+    [RAY_SECOND]    = 4,
     [RAY_TIME]      = 4,
 };
 
