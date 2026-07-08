@@ -40,10 +40,15 @@ int q_ns_is_unqualifiable(const char* s, size_t len);
  * NO `::` placeholder (key.md / q4m3 pin root without it). */
 ray_t* q_ns_root_dict(void);
 
-/* Context `.foo` as a dict: leading `` ` ``->`::` placeholder entry, then the
- * members.  Seed contexts (q/Q/o/h) that have no bindings yet synthesize as
- * placeholder-only.  Returns NULL if `dotname` names no context. */
+/* Context `.foo` (or NESTED `.fee.fi`) as a dict: leading `` ` ``->`::`
+ * placeholder entry, then the members.  Seed contexts (q/Q/o/h) that have no
+ * bindings yet synthesize as placeholder-only.  Returns NULL if `dotname`
+ * names no context. */
 ray_t* q_ns_ctx_dict(const char* dotname, size_t len);
+
+/* True iff `dotname` CURRENTLY names a context: a leading-dot (non-`..`)
+ * path resolving to a sym-keyed namespace dict, any depth. */
+int q_ns_is_context(const char* dotname, size_t len);
 
 /* `key `` ` `` roster: the seeds `q`Q`o`h then user-created root contexts in
  * env insertion order (RAY_SYM vector). */
