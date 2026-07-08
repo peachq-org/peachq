@@ -8815,6 +8815,56 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     return out;
 }
 
+/* q `getenv x` (ref/getenv.md) — x is a SYMBOL atom naming an environment
+ * variable; returns its value as a string, or "" when the variable is unset
+ * (kdb-true, and exactly what the base ray_getenv_fn already returns for a
+ * missing var).  The base primitive wants a -RAY_STR arg, so coerce the
+ * symbol's name to a string atom first — the ONLY divergence from the raw C,
+ * hence a wrapper rather than a QK_ENV rename.
+ * String-model seam: the result is a native -RAY_STR atom, so `type getenv`X`
+ * is -10h where kdb's char vector is 10h (a known, tracked divergence). */
+static ray_t* q_getenv_wrap(ray_t* x) {
+    /* .os.getenv is RAY_FN_RESTRICTED; calling the C fn directly bypasses the
+     * eval-layer check, so re-assert it here (the q_hopen_wrap/file precedent). */
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!x || x->type != -RAY_SYM)
+        return ray_error("type", "getenv: expected a symbol, got %s",
+                         ray_type_name(x ? x->type : 0));
+    ray_t* s = ray_sym_str(x->i64);                     /* borrowed */
+    if (!s) return ray_error("type", "getenv: bad symbol");
+    ray_t* name = ray_str(ray_str_ptr(s), ray_str_len(s));  /* owned -RAY_STR */
+    if (!name || RAY_IS_ERR(name)) return name ? name : ray_error("oom", NULL);
+    ray_t* r = ray_getenv_fn(name);                     /* "" when unset */
+    ray_release(name);
+    return r;
+}
+
+/* q `x setenv y` (ref/getenv.md#setenv) — x is a SYMBOL atom (the variable
+ * name), y is a string.  Sets the environment variable and returns generic
+ * null (kdb: setenv's result displays as nothing in the console).  The base
+ * ray_setenv_fn takes two -RAY_STR args and echoes y retained; coerce the sym
+ * name to a string, discard that echo, and return :: to match kdb. */
+static ray_t* q_setenv_wrap(ray_t* x, ray_t* y) {
+    /* .os.setenv is RAY_FN_RESTRICTED; re-assert here (calling the C fn directly
+     * bypasses the eval-layer check — the q_hopen_wrap/file-wrapper precedent). */
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!x || x->type != -RAY_SYM)
+        return ray_error("type", "setenv: name must be a symbol, got %s",
+                         ray_type_name(x ? x->type : 0));
+    if (!y || y->type != -RAY_STR)
+        return ray_error("type", "setenv: value must be a string, got %s",
+                         ray_type_name(y ? y->type : 0));
+    ray_t* s = ray_sym_str(x->i64);                     /* borrowed */
+    if (!s) return ray_error("type", "setenv: bad symbol");
+    ray_t* name = ray_str(ray_str_ptr(s), ray_str_len(s));  /* owned -RAY_STR */
+    if (!name || RAY_IS_ERR(name)) return name ? name : ray_error("oom", NULL);
+    ray_t* r = ray_setenv_fn(name, y);                  /* echoes y, or error */
+    ray_release(name);
+    if (r && RAY_IS_ERR(r)) return r;
+    if (r) ray_release(r);                              /* discard echoed value */
+    return RAY_NULL_OBJ;                                /* kdb: setenv -> :: */
+}
+
 /* ---- value builders keyed by manifest build-kind ---- */
 
 /* Identity/rename-reuse: snapshot an existing rayfall builtin value by name and
@@ -8950,6 +9000,9 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_UPSERT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_upsert_wrap);
     case QK_EXCEPT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_except_wrap);
     case QK_SETG:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_setg_wrap);
+    /* ---- environment variables (feat/q-getenv-setenv) ---- */
+    case QK_GETENV: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_getenv_wrap);
+    case QK_SETENV: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_setenv_wrap);
     default:      return NULL;
     }
 }
