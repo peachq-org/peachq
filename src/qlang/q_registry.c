@@ -2905,6 +2905,11 @@ static ray_t* q_except_wrap(ray_t* x, ray_t* y) {
  * count check lives here.  String keys are a deferred cell (string model). */
 static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return ray_error("type", "!: nil operand");
+    /* wire pass 3: null operands are reachable (q_fn_null_ok blesses `!` at
+     * the eval null gate; call_fn2 was never gated).  A generic-null VALUE
+     * serializes (`-8!(::)` -> 101h in the internal-fn branch below); every
+     * other null shape 'types exactly like the historic gate. */
+    if (RAY_IS_NULL(x)) return ray_error("type", "!: null key operand");
     /* kdb reserves a NEGATIVE integer ATOM lhs for internal functions
      * (`-8!x` serialize, `-9!x` deserialize, ...) — never dict-make.
      * Typed nulls fall through to dict-make (0N is not an internal id). */
@@ -2941,6 +2946,10 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
             }
         }
     }
+    /* wire pass 3: a generic-null y only makes sense in the internal-fn
+     * band handled above — dict-make/enkey with (::) vals keeps the
+     * historic 'type. */
+    if (RAY_IS_NULL(y)) return ray_error("type", "!: null value operand");
     /* table!table — a keyed table IS a dict from key records to value records
      * (dict.qcmd `([]k..)!([]v..)`); row counts must match ('length, kdb). */
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
@@ -2975,6 +2984,19 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
     ray_t* r = q_env_call2("dict", keys, y);
     if (keys_owned) ray_release(keys_owned);
     return r;
+}
+
+/* wire pass 3: registry-blessed null-tolerant dyadics.  ray_eval's binary
+ * null gate (tree-walk + VM op_call2) offers a RAY_NULL_OBJ-operand
+ * application to the apply hook before raising 'type; q_apply_noun consults
+ * this to decide whether the head may run (`-8!(::)` serialize via the `!`
+ * internal-fn band, `x~(::)` match).  Everything else declines -> the
+ * historic 'type stands.  Fn-pointer identity keeps this single-homed with
+ * the wrappers themselves (registry values are immutable snapshots). */
+int q_fn_null_ok(const ray_t* fn) {
+    if (!fn || fn->type != RAY_BINARY) return 0;
+    ray_binary_fn p = (ray_binary_fn)(uintptr_t)fn->i64;
+    return p == q_bang_wrap || p == q_match_wrap;
 }
 
 static ray_t* q_value_resolve_sym_owned(ray_t* symv);   /* fwd (below) */
