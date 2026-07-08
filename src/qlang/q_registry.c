@@ -667,6 +667,25 @@ static ray_t* q_where_wrap(ray_t* x) {
     return ray_where_fn(x);
 }
 
+/* q `reverse x` / monadic `|` — a dict reverses ENTRIES (keys and values
+ * together, ref/reverse.md: "on dictionaries, reverses the keys"); everything
+ * else delegates to base reverse unchanged. */
+static ray_t* q_reverse_wrap(ray_t* x) {
+    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
+        ray_t* k = ray_dict_keys(x);                 /* borrowed */
+        ray_t* v = ray_dict_vals(x);                 /* borrowed */
+        if (!k || !v) return ray_error("type", "reverse: malformed dictionary");
+        ray_t* rk = ray_reverse_fn(k);
+        if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);   /* dict slots must be concrete */
+        if (!rk || RAY_IS_ERR(rk)) return rk;
+        ray_t* rv = ray_reverse_fn(v);
+        if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
+        if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
+        return ray_dict_new(rk, rv);                 /* consumes both */
+    }
+    return ray_reverse_fn(x);
+}
+
 /* ===== q `vs` / `sv` — split-join / base-encode family ===================
  * kdb reference vs.md / sv.md.  Both are strictly dyadic.  Native -RAY_STR
  * strings (split -> boxed list of string atoms, join -> one string atom),
@@ -6829,6 +6848,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_DIFFER: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_differ_wrap);
     case QK_TIL:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_til_wrap);
     case QK_WHERE:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_where_wrap);
+    case QK_REV:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_reverse_wrap);
     case QK_VS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_vs_wrap);
     case QK_SV:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sv_wrap);
     case QK_SUMS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sums_wrap);
