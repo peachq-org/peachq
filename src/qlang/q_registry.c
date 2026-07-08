@@ -598,10 +598,25 @@ static ray_t* q_reciprocal_wrap(ray_t* x) {
 
 /* q `signum x` — sign as INT (i32): null or negative -> -1i, zero -> 0i,
  * positive -> 1i (ref/signum.md).  Kdb ALWAYS returns int, whatever the input
- * width.  A float null (0n) tests as null -> -1i (kdb treats null as negative). */
-static ray_t* q_signum_wrap(ray_t* x) {
+ * width.  A float null (0n) tests as null -> -1i (kdb treats null as negative).
+ * TEMPORAL atoms sign their underlying payload (ref/signum.md pins
+ * `signum 1999.12.31` -> -1i — a pre-epoch date is negative), and every typed
+ * null is null (-1i). */
+static ray_t* q_signum_atom(ray_t* x) {
     if (!x) return ray_error("type", "signum: nil");
     if (RAY_ATOM_IS_NULL(x)) return ray_i32(-1);
+    if (x->type < 0 && RAY_IS_TEMPORAL32(-x->type)) {
+        int32_t v = x->i32;
+        return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
+    }
+    if (x->type < 0 && RAY_IS_TEMPORAL64(-x->type)) {
+        int64_t v = x->i64;
+        return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
+    }
+    if (x->type == -RAY_DATETIME) {                    /* f64-payload temporal */
+        double v = x->f64;
+        return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
+    }
     if (is_numeric(x)) {
         /* as_f64 handles BOOL + every int/float width and preserves the sign
          * exactly (only magnitude precision is lost, irrelevant to sign), so
@@ -612,6 +627,19 @@ static ray_t* q_signum_wrap(ray_t* x) {
     }
     return ray_error("type", "signum: expects a numeric argument, got %s",
                      ray_type_name(x->type));
+}
+
+/* Broadcast + collapse carrier (the q_null_wrap pattern): registered
+ * RAY_FN_NONE so THIS wrapper drives the broadcast, letting a top-level boxed
+ * list of i32 atoms collapse to an int vector — kdb shows `signum (0n;0N;0Nt)`
+ * as ONE `-1 -1 -1i` line, not one atom per line. */
+static ray_t* q_signum_wrap(ray_t* x) {
+    ray_t* r = is_collection(x) ? atomic_map_unary(q_signum_atom, x)
+                                : q_signum_atom(x);
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
+    ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
+    ray_release(r);
+    return c;
 }
 
 /* q `ceiling x` — least integer >= x, returned as a LONG (kdb `ceiling 2.1` is
@@ -635,6 +663,58 @@ static ray_t* q_ceiling_wrap(ray_t* x) {
     }
     return ray_error("type", "ceiling: expects a numeric argument, got %s",
                      ray_type_name(x->type));
+}
+
+/* ---- dyadic atomic math (feat/q-math-parse-display) ----------------------
+ * q `x xexp y` — x to the power y as a FLOAT (ref/exp.md).  The doc pins the
+ * COMPUTATION, not just the value: "The calculation is performed as
+ * exp y * log x" (so `2 xexp 3` is 7.999…, NOT C pow's exact 8 — codex r1).
+ * All the doc's edge rules fall out of the identity: x null or NEGATIVE ->
+ * log NaN -> 0n; y null -> 0n; x=0,y>0 -> 0f; overflow +inf -> 0n via
+ * make_f64 (single-null model; kdb shows 0w — documented divergence).
+ * Domain is numeric-only: ref/exp.md's table rejects char args. */
+static ray_t* q_xexp_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "xexp: nil operand");
+    if (!is_numeric(x) && !RAY_ATOM_IS_NULL(x))
+        return ray_error("type", "xexp: expects numeric arguments, got %s",
+                         ray_type_name(x->type));
+    if (!is_numeric(y) && !RAY_ATOM_IS_NULL(y))
+        return ray_error("type", "xexp: expects numeric arguments, got %s",
+                         ray_type_name(y->type));
+    if (RAY_ATOM_IS_NULL(x) || RAY_ATOM_IS_NULL(y))
+        return ray_typed_null(-RAY_F64);
+    return make_f64(exp(as_f64(y) * log(as_f64(x))));
+}
+
+/* q `x xlog y` — base-x logarithm of y as a FLOAT: log(yf)/log(xf) with both
+ * operands cast to float first (ref/log.md "the base-xf logarithm of yf").
+ * y null -> 0n; y negative -> 0n (log NaN); y zero -> -inf -> 0n (kdb -0w —
+ * the documented single-null divergence).  CHAR operands read as their code
+ * points (ref/log.md pins `"A" xlog "C"` == `65 xlog 67` -> 1.00726); xexp
+ * does NOT share the char arm (its domain table rejects chars). */
+static int q_xlog_operand(ray_t* v, double* out) {
+    if (!v) return 0;
+    if (v->type == -RAY_STR && ray_str_len(v) == 1) {   /* char atom */
+        *out = (double)(unsigned char)ray_str_ptr(v)[0];
+        return 1;
+    }
+    /* Temporal operands cast to float via their payload (ref/log.md domain
+     * table: p m d n u v t all map to f; z and s are excluded — codex r2).
+     * Temporal NULLS pass through here too; the wrap's null gate turns them
+     * into 0n before the payload is used. */
+    if (v->type < 0 && RAY_IS_TEMPORAL32(-v->type)) { *out = (double)v->i32; return 1; }
+    if (v->type < 0 && RAY_IS_TEMPORAL64(-v->type)) { *out = (double)v->i64; return 1; }
+    if (is_numeric(v) || RAY_ATOM_IS_NULL(v)) { *out = as_f64(v); return 1; }
+    return 0;
+}
+static ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
+    double xf, yf;
+    if (!q_xlog_operand(x, &xf) || !q_xlog_operand(y, &yf))
+        return ray_error("type", "xlog: expects numeric or char arguments");
+    if ((x->type != -RAY_STR && RAY_ATOM_IS_NULL(x)) ||
+        (y->type != -RAY_STR && RAY_ATOM_IS_NULL(y)))
+        return ray_typed_null(-RAY_F64);
+    return make_f64(log(yf) / log(xf));
 }
 
 /* q char-string comparison — q treats a string as a char vector, so `=`/`<>`
@@ -1380,6 +1460,96 @@ static ray_t* q_ratios_wrap(ray_t* x) {
         else o[i] = v / pv;
     }
     return out;
+}
+
+static ray_t* q_fill_wrap(ray_t* x, ray_t* y);   /* fwd — prd's nulls-as-1 fill */
+
+/* q `prd x` — product aggregate, the multiply-over fold twin of prds (ref/prd.md):
+ * an atom is returned unchanged; a numeric vector folds to its product with
+ * NULLS TREATED AS 1s (`prd 2 3 0N 7` -> 42); a BOOL vector returns an int
+ * (`prd 101b` -> 0i); a list of lists multiplies element-wise (`prd (1 2 3 4;
+ * 2 3 5 7)` -> 2 6 15 28 — the fold over the registered atomic multiply);
+ * a dict folds over its value list (`prd d` -> 40 105 18); a table returns a
+ * per-column dict (`prd t` -> a| 630 …), a keyed table folds its VALUE table
+ * (`prd k` — implicit-iteration section).  Non-numeric -> 'type. */
+static ray_t* q_prd_wrap(ray_t* x) {
+    if (!x) return ray_error("type", "prd: nil");
+    if (x->type == -RAY_STR || x->type == RAY_SYM)
+        return ray_error("type", "prd: expects numeric values, got %s",
+                         ray_type_name(x->type));
+    if (ray_is_atom(x)) { ray_retain(x); return x; }   /* doc: atom unchanged */
+    if (q_is_keyed_table(x))                           /* prd k == prd value t */
+        return q_prd_wrap(ray_dict_vals(x));           /* vals borrowed — fine */
+    if (x->type == RAY_TABLE) {                        /* per-column dict */
+        int64_t nc = ray_table_ncols(x);
+        ray_t* k = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+        if (!k || RAY_IS_ERR(k)) return k ? k : ray_error("oom", NULL);
+        ray_t* v = ray_list_new(nc > 0 ? nc : 1);
+        if (RAY_IS_ERR(v)) { ray_release(k); return v; }
+        for (int64_t c = 0; c < nc; c++) {
+            int64_t nm = ray_table_col_name(x, c);
+            k = ray_vec_append(k, &nm);
+            if (!k || RAY_IS_ERR(k)) { ray_release(v); return k ? k : ray_error("oom", NULL); }
+            ray_t* p = q_prd_wrap(ray_table_get_col_idx(x, c));
+            if (!p || RAY_IS_ERR(p)) { ray_release(k); ray_release(v);
+                                       return p ? p : ray_error("type", NULL); }
+            v = ray_list_append(v, p);                 /* retains */
+            ray_release(p);
+            if (RAY_IS_ERR(v)) { ray_release(k); return v; }
+        }
+        ray_t* cv = q_collapse_list(v);                /* owned */
+        ray_release(v);
+        if (!cv || RAY_IS_ERR(cv)) { ray_release(k); return cv; }
+        return ray_dict_new(k, cv);                    /* consumes both */
+    }
+    if (x->type == RAY_DICT)                           /* fold the value list */
+        return q_prd_wrap(ray_dict_vals(x));           /* vals borrowed — fine */
+    if (x->type == RAY_LIST) {                         /* element-wise fold */
+        int64_t n = ray_len(x);
+        ray_t** e = (ray_t**)ray_data(x);
+        if (n == 0) return ray_i64(1);                 /* empty product (derived) */
+        /* Nulls are 1s here too (ref/prd.md's unconditional rule — codex r2:
+         * `prd (1 0N;2 3)` must be 2 3, not 2 0N), so every operand is
+         * null-filled with 1 (q `1^`) before it enters the multiply. */
+        ray_t* one = ray_i64(1);
+        ray_t* acc = q_fill_wrap(one, e[0]);
+        if (!acc || RAY_IS_ERR(acc)) { ray_release(one);
+                                       return acc ? acc : ray_error("type", NULL); }
+        for (int64_t i = 1; i < n; i++) {
+            ray_t* fi = q_fill_wrap(one, e[i]);
+            if (!fi || RAY_IS_ERR(fi)) { ray_release(acc); ray_release(one);
+                                         return fi ? fi : ray_error("type", NULL); }
+            /* ray_mul_fn is the ATOM kernel; atomic_map_binary is eval's
+             * broadcast (vector*vector, atom*vector, nested) around it. */
+            ray_t* nx = atomic_map_binary(ray_mul_fn, acc, fi);
+            ray_release(fi);
+            ray_release(acc);
+            if (!nx || RAY_IS_ERR(nx)) { ray_release(one);
+                                         return nx ? nx : ray_error("type", NULL); }
+            acc = nx;
+        }
+        ray_release(one);
+        return acc;
+    }
+    if (!q_vec_is_num(x))
+        return ray_error("type", "prd: expects numeric values, got %s",
+                         ray_type_name(x->type));
+    int64_t n = ray_len(x);
+    if (q_vec_is_float(x)) {
+        double acc = 1;
+        for (int64_t i = 0; i < n; i++) {
+            int nu; double v = q_velem_f(x, i, &nu);
+            if (!nu) acc *= v;                         /* nulls are 1s */
+        }
+        return make_f64(acc);
+    }
+    int64_t acc = 1;
+    for (int64_t i = 0; i < n; i++) {
+        int nu; double v = q_velem_f(x, i, &nu);
+        if (!nu) acc *= (int64_t)v;
+    }
+    if (x->type == RAY_BOOL) return ray_i32((int32_t)acc);   /* prd 101b -> 0i */
+    return ray_i64(acc);
 }
 
 /* q `x wsum y` — weighted sum sum(x*y); `x wavg y` — (sum x*y) % sum x.
@@ -8707,6 +8877,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_SV:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sv_wrap);
     case QK_SUMS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sums_wrap);
     case QK_PRDS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prds_wrap);
+    case QK_PRD:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prd_wrap);
     case QK_MAXS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_maxs_wrap);
     case QK_MINS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mins_wrap);
     case QK_AVGS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_avgs_wrap);
@@ -8754,8 +8925,12 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_ACOS:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_acos_wrap);
     case QK_ATAN:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_atan_wrap);
     case QK_RECIPROCAL: return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_reciprocal_wrap);
-    case QK_SIGNUM:     return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_signum_wrap);
+    /* signum drives its own broadcast (q_null_wrap pattern) so a top-level
+     * boxed-list result collapses to an int vector — see q_signum_wrap. */
+    case QK_SIGNUM:     return ray_fn_unary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_signum_wrap);
     case QK_CEILING:    return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_ceiling_wrap);
+    case QK_XEXP:       return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_xexp_wrap);
+    case QK_XLOG:       return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_xlog_wrap);
     case QK_XBAR:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xbar_wrap);
     case QK_ASC:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_asc_wrap);
     case QK_DESC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_desc_wrap);
