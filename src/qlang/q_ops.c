@@ -204,6 +204,11 @@ static const q_op_t Q_OPS[] = {
      * 5 3` must be 2 3 7 5, env distinct gives 2 3 5 7). */
     { "key",     QLEX_KW_PREFIX, QK_KEY,      "key",      QK_NONE, NULL,  NULL  },
     { "value",   QLEX_KW_PREFIX, QK_VALUE,    "value",    QK_NONE, NULL,  NULL  },
+    /* q `get` is a SYNONYM of `value` (ref/get.md: "completely interchangeable")
+     * — same QK_VALUE wrapper, one home.  `nam set y` writes the named global
+     * (sym-handle assign / `. context restore); file forms are 'nyi cells. */
+    { "get",     QLEX_KW_PREFIX, QK_VALUE,    "value",    QK_NONE, NULL,  NULL  },
+    { "set",     QLEX_KW_INFIX,  QK_NONE,     NULL,       QK_SETG, "set-g", NULL },
     { "distinct",QLEX_KW_PREFIX, QK_DISTINCT, "distinct", QK_NONE, NULL,  NULL  },
     /* q-implemented keywords: env bindings added by q_builtins_register
      * (same mechanism as `parse`), snapshotted here as pass-through rows. */
