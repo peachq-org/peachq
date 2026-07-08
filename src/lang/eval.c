@@ -1747,6 +1747,15 @@ ray_t* call_lambda(ray_t* lambda, ray_t** call_args, int64_t argc) {
  * allocates a private ray_exec_t per invocation and leaves __VM alone. */
 
 static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
+    /* Mirror ray_eval's entry poll ("Check for external interrupt"): C-loop
+     * HOFs (map/fold in ops/collection.c) invoke a compiled lambda via
+     * call_lambda -> vm_exec per element; without an entry poll a straight-
+     * line body never reaches the backward-jump / compiled-call checks and
+     * a Ctrl-C is only observed after the whole loop completes. */
+    if (g_eval_interrupted)
+        return ray_error("limit", "interrupted");   /* args stay caller-owned,
+                                                     * same as the arity error */
+
     /* Computed goto dispatch table */
     static void *dispatch[OP__COUNT] = {
         [OP_RET]        = &&op_ret,
@@ -1949,7 +1958,7 @@ op_jmp: {
     int16_t offset = (int16_t)((code[ip] << 8) | code[ip + 1]);
     ip += 2;
     ip += offset;
-    if (offset < 0 && g_eval_interrupted) goto vm_error_limit;
+    if (offset < 0 && g_eval_interrupted) goto vm_error_interrupted;
     DISPATCH();
 }
 
@@ -2115,7 +2124,7 @@ op_callf: {
                 ray_release(fn_args[i]);  /* excess args */
 
             /* Check for Ctrl-C interrupt on each compiled call */
-            if (g_eval_interrupted) goto vm_error_limit;
+            if (g_eval_interrupted) goto vm_error_interrupted;
 
             /* Switch to callee bytecode */
             code = (uint8_t *)ray_data(LAMBDA_BC(fn_obj));
@@ -2375,6 +2384,13 @@ op_scope_end: {
 vm_error_limit:
     vm_err_str = "limit";
     vm_err_detail = "stack overflow";
+    goto vm_error_cleanup;
+
+vm_error_interrupted:
+    /* Ctrl-C / external interrupt — same "limit" class as the tree-walk
+     * ray_eval entry check, but the detail must not claim stack overflow. */
+    vm_err_str = "limit";
+    vm_err_detail = "interrupted";
     goto vm_error_cleanup;
 
 vm_error_name:
