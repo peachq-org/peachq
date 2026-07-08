@@ -33,7 +33,9 @@
 static const q_op_t Q_OPS[] = {
     /* name    lex             mon_kind mon_target   dyad_kind dyad_target  adverb_hof */
     /* ---- arithmetic / compare glyphs ---- */
-    { "+",     QLEX_GLYPH,     QK_NONE, NULL,        QK_ENV,   "+",       NULL  },
+    /* monadic `+` is flip — a k-ism accepted as a deliberate superset (valid q
+     * spells it `flip`, same QK_FLIP wrapper — the `_`/floor precedent). */
+    { "+",     QLEX_GLYPH,     QK_FLIP, "flip",      QK_ENV,   "+",       NULL  },
     { "-",     QLEX_GLYPH,     QK_NEG,  "neg",       QK_ENV,   "-",       NULL  },
     { "*",     QLEX_GLYPH,     QK_ENV,  "first",     QK_ENV,   "*",       NULL  },
     { "%",     QLEX_GLYPH,     QK_NONE, NULL,        QK_ENV,   "/",       NULL  },
@@ -108,9 +110,11 @@ static const q_op_t Q_OPS[] = {
     { "sv",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_SV,    "sv",      NULL  },
     /* ---- set operations (feat/q-setops) ---- */
     /* q `x except y` — items of x not in y, x-duplicates and order KEPT
-     * (ref/except.md).  rayfall's ray_except_fn is exactly this (no dedup,
-     * atom y supported), so a clean pass-through. */
-    { "except",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "except",  NULL  },
+     * (ref/except.md).  rayfall's ray_except_fn is exactly this for lists;
+     * the QK_EXCEPT wrapper adds a TABLE-pair arm (row membership) and
+     * delegates everything else to ray_except_fn unchanged (was QK_ENV
+     * pre-table-verbs).  dyad_target stays "except" for provenance/serde. */
+    { "except",QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EXCEPT,"except",  NULL  },
     /* q `x union y` == `distinct x,y` — WRAPPER: rayfall union keeps
      * x-duplicates, kdb dedups the whole join (ref/union.md). */
     { "union", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_UNION, "union",   NULL  },
@@ -261,6 +265,23 @@ static const q_op_t Q_OPS[] = {
     { "reciprocal",QLEX_KW_PREFIX, QK_RECIPROCAL, "reciprocal",QK_NONE, NULL, NULL },
     { "signum",    QLEX_KW_PREFIX, QK_SIGNUM,     "signum",    QK_NONE, NULL, NULL },
     { "ceiling",   QLEX_KW_PREFIX, QK_CEILING,    "ceiling",   QK_NONE, NULL, NULL },
+    /* ---- table verbs (feat/q-table-verbs) — all QK wrappers in q_registry.c,
+     * built over the wave-4 keyed primitives (q_enkey/q_table_flatten) and the
+     * base sort kernel (ray_xasc_fn, ARG-SWAPPED like xbar).  `insert`/`upsert`
+     * intentionally SHADOW the base env special forms of the same name: q
+     * semantics differ (by-name targets, keyed collision/update, row-index
+     * results), so the registry value is a wrapper, never the env snapshot. */
+    { "flip",   QLEX_KW_PREFIX, QK_FLIP,    "flip",    QK_NONE,   NULL,      NULL },
+    { "keys",   QLEX_KW_PREFIX, QK_KEYS,    "keys",    QK_NONE,   NULL,      NULL },
+    { "ungroup",QLEX_KW_PREFIX, QK_UNGROUP, "ungroup", QK_NONE,   NULL,      NULL },
+    { "xkey",   QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_XKEY,   "xkey",    NULL },
+    { "xcol",   QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_XCOL,   "xcol",    NULL },
+    { "xcols",  QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_XCOLS,  "xcols",   NULL },
+    { "xasc",   QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_XASC,   "xasc",    NULL },
+    { "xdesc",  QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_XDESC,  "xdesc",   NULL },
+    { "xgroup", QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_XGROUP, "xgroup",  NULL },
+    { "insert", QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_INSERT, "insert",  NULL },
+    { "upsert", QLEX_KW_INFIX,  QK_NONE,    NULL,      QK_UPSERT, "upsert",  NULL },
     /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x. */
     { "deltas",  QLEX_KW_PREFIX, QK_DELTAS, "deltas", QK_NONE, NULL,      NULL  },
     { "differ",  QLEX_KW_PREFIX, QK_DIFFER, "differ", QK_NONE, NULL,      NULL  },
