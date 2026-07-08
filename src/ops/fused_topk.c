@@ -325,7 +325,7 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
         if (RAY_IS_PARTED(kt) || kt == RAY_MAPCOMMON) return NULL;
         if (kt != RAY_SYM && kt != RAY_STR && kt != RAY_BOOL && kt != RAY_U8
             && kt != RAY_I16 && kt != RAY_I32 && kt != RAY_I64
-            && kt != RAY_DATE && kt != RAY_TIME && kt != RAY_TIMESTAMP)
+            && !RAY_IS_TEMPORAL32(kt) && !RAY_IS_TEMPORAL64(kt))
             return NULL;
         ctx.keys[i].type      = kt;
         ctx.keys[i].attrs     = col->attrs;
