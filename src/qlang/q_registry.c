@@ -5221,7 +5221,13 @@ static ray_t* q_converge(ray_t* f, ray_t* x, int collect) {
         if (collect) acc = ray_list_append(acc, nxt);
         ray_release(cur);
         cur = nxt;
-        if (++guard > 100000000) {
+        /* kdb has NO cap here (`(not/) 42` hangs until interrupt — doc-pinned
+         * "never returns!"); the cap is openq's deliberate divergence.  1e6 keeps
+         * ~4 orders of magnitude of headroom over any real fixpoint (tens of
+         * iterations) while making the pathological oscillators cheap: at 1e8 the
+         * accumulators suite burned ~50s CPU under ASan to produce this same
+         * 'limit (2026-07-09). */
+        if (++guard > 1000000) {
             ray_release(first); ray_release(cur); if (acc) ray_release(acc);
             return ray_error("limit", "converge: no fixed point");
         }
