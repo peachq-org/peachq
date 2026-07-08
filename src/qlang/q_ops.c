@@ -80,9 +80,16 @@ static const q_op_t Q_OPS[] = {
     { ".",     QLEX_GLYPH,     QK_NONE, NULL,        QK_DOT,   "apply",   NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
-    /* q `x mod y` — remainder, divisor-sign convention.  rayfall `%` IS kdb
-     * mod (audited: (% -3 2) -> 1, (% 7.5 2) -> 1.5) — pure QK_ENV rename. */
+    /* q `x mod y` — modulus (ref/mod.md).  PURE RENAME: rayfall `%` IS floored
+     * modulo with the sign following the divisor, exactly kdb mod (audited
+     * live: -3 -2 mod 3 -> 0 1; 7 mod -2 -> -1; -7 mod -2.5 -> -2; null
+     * passes through) — the mirror trick of q `%` -> rayfall `/`.  Base `%`
+     * is registered RAY_FN_ATOMIC, so vector/dict broadcast comes free. */
     { "mod",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "%",       NULL  },
+    /* q `x xexp y` / `x xlog y` — dyadic atomic libm wrappers (the #84
+     * atomic-math recipe at valence 2); see q_ops.h QK_XEXP/QK_XLOG. */
+    { "xexp",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_XEXP,  "xexp",    NULL  },
+    { "xlog",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_XLOG,  "xlog",    NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
      * collapse, since map returns a boxed list where q wants a simple vec). */
     { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
@@ -146,6 +153,10 @@ static const q_op_t Q_OPS[] = {
     /* ---- Wave 5: running scans (monadic prefix keywords) ---- */
     { "sums",  QLEX_KW_PREFIX, QK_SUMS,  "sums",   QK_NONE,  NULL,      NULL  },
     { "prds",  QLEX_KW_PREFIX, QK_PRDS,  "prds",   QK_NONE,  NULL,      NULL  },
+    /* q `prd x` — the multiply-over fold twin of prds (ref/prd.md): nulls
+     * are 1s, bool vector -> int, list-of-lists element-wise, dict/table
+     * implicit iteration.  Wrapper (no rayfall product aggregate). */
+    { "prd",   QLEX_KW_PREFIX, QK_PRD,   "prd",    QK_NONE,  NULL,      NULL  },
     { "maxs",  QLEX_KW_PREFIX, QK_MAXS,  "maxs",   QK_NONE,  NULL,      NULL  },
     { "mins",  QLEX_KW_PREFIX, QK_MINS,  "mins",   QK_NONE,  NULL,      NULL  },
     { "avgs",  QLEX_KW_PREFIX, QK_AVGS,  "avgs",   QK_NONE,  NULL,      NULL  },

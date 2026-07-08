@@ -154,6 +154,10 @@ static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
          * type in kdb's table display (`300`, not `300f`). */
         if (RAY_ATOM_IS_NULL(c)) snprintf(out, outsz, c->type == -RAY_F32 ? "0Ne" : "0n");
         else q_float_tok(c->f64, c->type == -RAY_F32, out, outsz);  /* F32 atoms store f64 */
+    } else if (c->type == -RAY_BOOL) {
+        /* kdb table cells show booleans BARE (`t>5` -> rows `1 0`,
+         * ref/greater-than.md:56-59) — no per-cell `b` suffix. */
+        snprintf(out, outsz, "%d", c->u8 ? 1 : 0);
     } else {
         q_fmt(c, out, outsz);
         /* A nested cell renders with a leading enlist comma (`,10`); kdb's
@@ -312,11 +316,14 @@ static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
  * 'e' for f32 (nothing for f64).  Float infinities are out of scope. */
 static void q_float_tok(double v, int f32, char* out, size_t n) {
     if (isnan(v)) { snprintf(out, n, f32 ? "0Ne" : "0n"); return; }
-    /* Finite whole-number magnitude prints WITHOUT a fractional part (q shows
-     * `5`, not `5.0`); f32 keeps its per-element `e`.  The disambiguating `f`
-     * for f64 wholes is appended by the caller (atom) or once per vector. */
-    if (isfinite(v) && v == floor(v) && v >= -9.007199254740992e15
-                                     && v <=  9.007199254740992e15) {
+    /* Finite whole-number magnitude BELOW the 7-significant-digit horizon
+     * prints WITHOUT a fractional part (q shows `5`, not `5.0`); f32 keeps
+     * its per-element `e`.  The disambiguating `f` for f64 wholes is appended
+     * by the caller (atom) or once per vector.  AT/ABOVE 1e7 the %lld
+     * shortcut would print every digit where kdb's \P 7 console switches to
+     * exponent form (`3e+11`, `1.234568e+08` — timespan.qcmd:162 pins
+     * 00:10:00.000000000%2 -> 3e+11), so large wholes fall through to %.7g. */
+    if (isfinite(v) && v == floor(v) && v > -1e7 && v < 1e7) {
         snprintf(out, n, "%lld%s", (long long)v, f32 ? "e" : "");
         return;
     }
@@ -326,6 +333,19 @@ static void q_float_tok(double v, int f32, char* out, size_t n) {
     char mag[64];
     snprintf(mag, sizeof mag, "%.7g", v);
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
+}
+
+/* True iff a rendered f64 token is DIGIT-ONLY (optional leading '-') — the
+ * token-shape test that drives the disambiguating `f` suffix: `256` needs
+ * `256f`, but `3e+11` / `2.5` / `0n` self-identify and take none.  (The old
+ * numeric v==floor(v) test mis-suffixed exponent-rendered wholes and skipped
+ * wholes that only ROUND whole at \P 7, e.g. exp(8*log 2) -> "256".) */
+static int q_tok_is_bare_int(const char* tok) {
+    if (*tok == '-') tok++;
+    if (!*tok) return 0;
+    for (; *tok; tok++)
+        if (*tok < '0' || *tok > '9') return 0;
+    return 1;
 }
 
 /* Render one date element q-style: sentinels 0Nd / 0Wd / -0Wd (kdb datatypes
@@ -883,9 +903,13 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     case -RAY_F32:  q_float_tok((float)val->f64, 1, buf, bufsz);           return;
     case -RAY_F64: {
         /* A whole f64 atom gets a trailing `f` to distinguish it from a long
-         * (`5f`, not `5`); a fractional one (`3.14`) needs no suffix. */
+         * (`5f`, not `5`); a fractional or exponent-rendered one (`3.14`,
+         * `3e+11`) self-identifies and needs no suffix — TOKEN-shape test,
+         * not numeric wholeness (`3e+11f` is not a kdb token, and a value
+         * that only rounds whole at \P 7, e.g. exp 8*log 2 -> `256`, still
+         * needs its `f`). */
         q_float_tok(val->f64, 0, buf, bufsz);
-        if (isfinite(val->f64) && val->f64 == floor(val->f64)) {
+        if (q_tok_is_bare_int(buf)) {
             size_t l = strlen(buf);
             if (l + 1 < bufsz) { buf[l] = 'f'; buf[l + 1] = '\0'; }
         }
@@ -1096,19 +1120,20 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
         size_t pos = 0;
         buf[0] = '\0';
         if (n == 1 && pos + 1 < bufsz) buf[pos++] = ',';   /* enlist: ,1f */
-        int all_whole = (n > 0);   /* f64 gets ONE trailing `f` iff every element is finite & whole */
+        int all_whole = (n > 0);   /* f64 gets ONE trailing `f` iff every element RENDERS digit-only */
         for (int64_t i = 0; i < n; i++) {
             double v = is64 ? ((const double*)ray_data(val))[i]
                             : (double)((const float*)ray_data(val))[i];
             char e[64];
             q_float_tok(v, is64 ? 0 : 1, e, sizeof e);
             q_join(buf, bufsz, &pos, e, i == 0);
-            if (!(isfinite(v) && v == floor(v))) all_whole = 0;
+            if (!q_tok_is_bare_int(e)) all_whole = 0;
         }
         /* f32 vectors already carry a per-element `e` (kdb records e.g.
          * `0Ne 0We -0We 3.14e`); only f64 wholes take the single trailing `f`
-         * (`1 2 3f`).  A vector with any fractional or non-finite element
-         * (`0.5 1 1.5`, `0n 0w -0w 3.14`) gets no suffix. */
+         * (`1 2 3f`).  A vector with any fractional, exponent-rendered or
+         * non-finite element (`0.5 1 1.5`, `1 3e+11`, `0n 3.14`) gets no
+         * suffix — TOKEN-shape test, matching the atom rule. */
         if (is64 && all_whole && pos + 1 < bufsz) { buf[pos++] = 'f'; buf[pos] = '\0'; }
         return;
     }
@@ -1259,6 +1284,12 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
                      * (1-char char VECTORS) — that side stays red-below-floor
                      * until the C3 string model splits the two. */
                     if (sym_col && ve->type == -RAY_SYM)
+                        q_fmt_dict_key(ve, vb, sizeof vb);
+                    else if (ve->type == -RAY_BOOL)
+                        /* A bool ATOM row prints BARE (`a| 0`, ref/like.md's
+                         * dict example); a bool VECTOR value keeps its packed
+                         * `100b` form (`d>=5` -> `a| 100b`, ref/greater-than
+                         * .md:51-53) via the plain q_fmt path below. */
                         q_fmt_dict_key(ve, vb, sizeof vb);
                     else
                         q_fmt(ve, vb, sizeof vb);
