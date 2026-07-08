@@ -4754,6 +4754,48 @@ static ray_t* funsql_by_key(ray_t* b) {
 
 /* `![t;c;b;a]` — update (a is a dict) or delete (a is a symbol vector). */
 static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
+    /* Namespace EXPUNGE (q4m3 §12.5): `delete x from `.` / `delete wrong
+     * from `.jab` — the "table" is a context handle and `a` names the
+     * bindings to remove.  Engine env_set_dotted(NULL) does the dict
+     * delete + empty-context cascade; result is the handle (kdb returns
+     * `.).  Claimed BEFORE table resolution — `.` is not a table. */
+    if (t && t->type == -RAY_SYM && a && a->type == RAY_SYM && ray_len(a) > 0) {
+        ray_t* hs = ray_sym_str(t->i64);
+        if (hs) {
+            const char* hn = ray_str_ptr(hs);
+            size_t hl = ray_str_len(hs);
+            int is_root = (hl == 1 && hn[0] == '.');
+            int is_ctx  = (hl >= 2 && hn[0] == '.' && hn[1] != ':' &&
+                           !memchr(hn + 1, '.', hl - 1));
+            if (is_root || is_ctx) {
+                int64_t nn = ray_len(a);
+                for (int64_t i = 0; i < nn; i++) {
+                    ray_t* cn = ray_sym_vec_cell(a, i);
+                    char full[192];
+                    int fl = is_root
+                        ? snprintf(full, sizeof full, "%.*s",
+                                   (int)ray_str_len(cn), ray_str_ptr(cn))
+                        : snprintf(full, sizeof full, "%.*s.%.*s", (int)hl, hn,
+                                   (int)ray_str_len(cn), ray_str_ptr(cn));
+                    ray_err_t err = (fl > 0 && (size_t)fl < sizeof full)
+                        ? ray_env_set(ray_sym_intern(full, (size_t)fl), NULL)
+                        : RAY_ERR_TYPE;
+                    if (err != RAY_OK) {
+                        ray_release(hs);
+                        return err == RAY_ERR_RESERVED
+                            ? ray_error("reserve", "delete: '%s' is reserved", full)
+                            : ray_error(ray_err_code_str(err),
+                                        "delete: '%s' failed", full);
+                    }
+                }
+                ray_release(hs);
+                ray_retain(t);
+                return t;
+            }
+            ray_release(hs);
+        }
+    }
+
     ray_t* tbl = funsql_resolve_table(t);
     if (RAY_IS_ERR(tbl)) return tbl;
 
