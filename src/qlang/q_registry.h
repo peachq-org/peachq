@@ -216,6 +216,11 @@ ray_t* q_collapse_list(ray_t* l);
  * name-refs `ssr[a;b;c]`, so it resolves through the env, not the registry). */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);
 
+/* q `read0 x` (feat/q-file-text) — exposed so q_builtins can ALSO env-bind it
+ * for the bracket-call form `read0[(f;o)]` (the ssr/value precedent: two fn
+ * objects, one implementation). */
+ray_t* q_read0_wrap(ray_t* x);
+
 /* ===== q cast home ==========================================================
  * THE q-layer conversion entry points (reuse mandate): future q-semantics
  * work that needs a conversion (bool-widening in arithmetic, promotion in

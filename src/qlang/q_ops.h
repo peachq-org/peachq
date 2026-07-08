@@ -237,9 +237,25 @@ typedef enum {
     QK_EXCEPT,           /* q `x except y` — table rows of x not in y (row
                          * membership); non-table operands delegate to base
                          * ray_except_fn (the pre-wave QK_ENV pass-through).  */
-    QK_SETG            /* q `nam set y` — assign a global through a sym handle
+    QK_SETG,           /* q `nam set y` — assign a global through a sym handle
                          * (`a / `.ctx / `. context restore); returns nam.
                          * File symbols (`:path) are the file-I/O wave: 'nyi. */
+    /* ---- File Text (feat/q-file-text, ref/file-text.md) ---- */
+    QK_FILETEXT,        /* q `x 0: y` — dispatch on x's shape: file symbol ->
+                         * Save Text; len-1 string -> Prepare Text; len-3/4
+                         * "K f [*] r" string -> Key-Value pairs; (types;delim
+                         * [;flag]) -> Load CSV; (types;widths) -> Load Fixed.
+                         * Text forms ONLY (binary 1:/2: are an owner-ruled
+                         * non-goal).                                          */
+    QK_HSYM,            /* q `hsym x` — sym atom/vector -> file symbol (prefix
+                         * ':' unless already present; ref/hsym.md).           */
+    QK_READ0,           /* q `read0 x` — file sym -> list of line strings;
+                         * (f;o) -> chars from o; (f;o;n) -> n chars.  Console
+                         * / fifo handles deferred 'nyi (ref/read0.md).        */
+    QK_SUM              /* q `sum x` — rayfall sum is a typed-vector aggregate;
+                         * q ALSO sums the ITEMS of a boxed list (`sum(d;t)` ->
+                         * timestamps, ref/file-text.md Load Fixed).  List arm
+                         * folds ray_add_fn; other inputs pass to ray_sum_fn.  */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
