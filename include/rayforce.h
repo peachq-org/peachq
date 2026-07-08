@@ -69,8 +69,8 @@ const char* ray_version_string(void);
 
 /* Type tags use kdb's numbering (list=0, bool=1, guid=2, ... time=19) so
  * `type` reads the tag directly with no translation seam.  The band 1..19 is
- * sparse: gaps 3 and 15 are kdb's short-of-3 and datetime (deprecated,
- * f64-backed), which have no rayfall type. */
+ * sparse: gap 3 is kdb's short-of-3, which has no rayfall type.  (15 was a
+ * gap too until datetime landed 2026-07-09 on owner demand — f64-backed.) */
 #define RAY_LIST       0
 #define RAY_BOOL       1
 #define RAY_GUID       2
@@ -88,6 +88,11 @@ const char* ray_version_string(void);
 /* Months since 2000.01 (i32 payload = (year-2000)*12 + month-1) — kdb `m` */
 #define RAY_MONTH     13
 #define RAY_DATE      14
+/* Days since 2000.01.01 with fractional time of day (f64 payload) — kdb `z`
+ * (deprecated in kdb in favour of timestamp; landed here for drop-in
+ * fidelity).  Single-null float model: NaN is the one null (0Nz); non-finite
+ * payloads canonicalize to it at the constructor — 0Wz cannot live. */
+#define RAY_DATETIME  15
 /* Nanoseconds duration (i64 payload) — kdb `n` */
 #define RAY_TIMESPAN  16
 /* Minutes since midnight (i32 payload) — kdb `u` */
@@ -108,6 +113,11 @@ const char* ray_version_string(void);
 #define RAY_IS_TEMPORAL32(t) ((t) == RAY_DATE || (t) == RAY_TIME || (t) == RAY_MONTH || \
                               (t) == RAY_MINUTE || (t) == RAY_SECOND)
 #define RAY_IS_TEMPORAL64(t) ((t) == RAY_TIMESTAMP || (t) == RAY_TIMESPAN)
+/* f64-backed temporal ("a float wearing a costume"): enrolls beside the
+ * FLOAT-family case-lists, never the int-temporal macros above (int payload
+ * readers would misread the f64 union slot). */
+#define RAY_TEMPORALF_CASES  case RAY_DATETIME
+#define RAY_IS_TEMPORALF(t)  ((t) == RAY_DATETIME)
 
 /* Compound types */
 #define RAY_INDEX     97   /* Accelerator index attached to a vector (see ops/idxop.h) */
@@ -439,6 +449,7 @@ ray_t* ray_timespan(int64_t val);   /* nanoseconds duration (i64 payload) */
 ray_t* ray_date(int64_t val);
 ray_t* ray_time(int64_t val);
 ray_t* ray_timestamp(int64_t val);
+ray_t* ray_datetime(double val);    /* days since 2000.01.01, frac = tod (f64 payload) */
 ray_t* ray_guid(const uint8_t* bytes);
 ray_t* ray_typed_null(int8_t type);
 
@@ -463,7 +474,8 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
     if (RAY_IS_NULL(x)) return true;
     if (x->type >= 0) return false;
     switch (-x->type) {
-        case RAY_F64:       return x->f64 != x->f64;
+        case RAY_F64:
+        case RAY_DATETIME:  return x->f64 != x->f64;
         case RAY_F32: {
             /* F32 atoms reuse the f64 union slot — see ray_f32 / atom.c. */
             float f = (float)x->f64;
