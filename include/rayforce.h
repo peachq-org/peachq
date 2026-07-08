@@ -90,6 +90,17 @@ const char* ray_version_string(void);
 #define RAY_DATE      14
 #define RAY_TIME      19
 
+/* Width-class temporal aliases ("an int wearing a costume").  Bucket-1
+ * generic paths enroll a thin temporal by joining its backing-int co-list;
+ * these macros are that co-list's single home — a new int-backed temporal
+ * tag joins here once instead of at ~90 call sites.  Sites keyed on
+ * SEMANTICS rather than width (e.g. OP_SUM's absolute-temporal reject list,
+ * per-tag re-tag chains, civil-field extraction) stay explicit. */
+#define RAY_TEMPORAL32_CASES case RAY_DATE: case RAY_TIME: case RAY_MONTH
+#define RAY_TEMPORAL64_CASES case RAY_TIMESTAMP
+#define RAY_IS_TEMPORAL32(t) ((t) == RAY_DATE || (t) == RAY_TIME || (t) == RAY_MONTH)
+#define RAY_IS_TEMPORAL64(t) ((t) == RAY_TIMESTAMP)
+
 /* Compound types */
 #define RAY_INDEX     97   /* Accelerator index attached to a vector (see ops/idxop.h) */
 #define RAY_TABLE     98

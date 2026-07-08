@@ -390,7 +390,7 @@ int64_t ray_vec_get_i64(ray_t* vec, int64_t idx) {
     if (vec->type == RAY_I64 || vec->type == RAY_TIMESTAMP) {
         return ((const int64_t*)ray_data(vec))[idx];
     }
-    if (vec->type == RAY_I32 || vec->type == RAY_DATE || vec->type == RAY_TIME || vec->type == RAY_MONTH) {
+    if (vec->type == RAY_I32 || RAY_IS_TEMPORAL32(vec->type)) {
         return ((const int32_t*)ray_data(vec))[idx];
     }
     if (vec->type == RAY_I16) return ((const int16_t*)ray_data(vec))[idx];
