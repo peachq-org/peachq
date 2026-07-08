@@ -551,10 +551,14 @@ static int q_list_is_parse_tree(ray_t* v, int depth) {
 }
 
 /* The q display name for an empty typed vector: `long$()`, `symbol$()`, ...
- * (kdb `0#0` -> `` `long$() ``).  Byte (`0x`) and bool empties keep their own
- * arms; strings are atoms, not vectors.  Returns NULL for un-named types. */
+ * (kdb `0#0` -> `` `long$() ``).  BOOL is here too (`null ()` ->
+ * `` `boolean$() ``, the ref null.md transcript).  Byte keeps its own bare-0x
+ * arm — test/q/datatypes/byte_impl.qcmd pins `0#0x` -> `0x` from ref/read1.md
+ * (documented conflict with the `` `byte$() `` spelling; the banked pin wins).
+ * Strings are atoms, not vectors.  Returns NULL for un-named types. */
 static const char* q_empty_vec_qname(int8_t type) {
     switch (type) {
+    case RAY_BOOL: return "boolean";
     case RAY_I16:  return "short";
     case RAY_I32:  return "int";
     case RAY_I64:  return "long";
