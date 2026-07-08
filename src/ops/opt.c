@@ -76,9 +76,13 @@ static int8_t promote_type(int8_t a, int8_t b) {
     if (a == RAY_F64 || b == RAY_F64) return RAY_F64;
     /* Treat SYM/TIMESTAMP/DATE/TIME as integer-class types */
     if (a == RAY_I64 || b == RAY_I64 || a == RAY_SYM || b == RAY_SYM ||
-        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP) return RAY_I64;
+        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP ||
+        a == RAY_TIMESPAN || b == RAY_TIMESPAN) return RAY_I64;
     if (a == RAY_I32 || b == RAY_I32 ||
-        a == RAY_DATE || b == RAY_DATE || a == RAY_TIME || b == RAY_TIME) return RAY_I32;
+        a == RAY_DATE || b == RAY_DATE || a == RAY_TIME || b == RAY_TIME ||
+        a == RAY_MONTH || b == RAY_MONTH ||
+        a == RAY_MINUTE || b == RAY_MINUTE ||
+        a == RAY_SECOND || b == RAY_SECOND) return RAY_I32;
     if (a == RAY_I16 || b == RAY_I16) return RAY_I16;
     if (a == RAY_U8 || b == RAY_U8) return RAY_U8;
     return RAY_BOOL;
@@ -292,7 +296,11 @@ static bool atom_to_numeric(ray_t* v, double* out_f, int64_t* out_i, bool* is_f6
         case -RAY_SYM:
         case -RAY_DATE:
         case -RAY_TIME:
+        case -RAY_MONTH:
+        case -RAY_MINUTE:
+        case -RAY_SECOND:
         case -RAY_TIMESTAMP:
+        case -RAY_TIMESPAN:
             *out_i = v->i64;
             *out_f = (double)v->i64;
             *is_f64 = false;
@@ -471,7 +479,7 @@ static bool fold_binary_const(ray_graph_t* g, ray_op_t* node) {
             folded = ray_bool(r);
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             int32_t lv = (int32_t)(l_is_f64 ? (int64_t)lf : li);
             int32_t rv = (int32_t)(r_is_f64 ? (int64_t)rf : ri);
             int32_t r = 0;
@@ -1415,7 +1423,7 @@ static int filter_cost(ray_graph_t* g, ray_op_t* pred) {
     switch (t) {
         case RAY_BOOL: case RAY_U8:  cost += 0; break;
         case RAY_I16:               cost += 1; break;
-        case RAY_I32:  case RAY_DATE: case RAY_TIME: cost += 2; break;
+        case RAY_I32:  RAY_TEMPORAL32_CASES: cost += 2; break;
         default:                   cost += 3; break;  /* I64, F64, SYM, STR */
     }
 
@@ -1939,8 +1947,8 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
         ray_t*  set_heap  = NULL;
 
         int8_t lt = lit->type < 0 ? (int8_t)(-lit->type) : lit->type;
-        bool narrow32 = (lt == RAY_I32 || lt == RAY_DATE || lt == RAY_TIME);
-        bool wide64   = (lt == RAY_I64 || lt == RAY_TIMESTAMP || lt == RAY_SYM);
+        bool narrow32 = (lt == RAY_I32 || RAY_IS_TEMPORAL32(lt));
+        bool wide64   = (lt == RAY_I64 || RAY_IS_TEMPORAL64(lt) || lt == RAY_SYM);
         if (!narrow32 && !wide64) {
             ray_sys_free(mask);
             continue;  /* unsupported type for partition pruning */
@@ -2018,7 +2026,7 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
 
         for (int64_t p = 0; p < n_parts; p++) {
             int64_t pkey = 0;
-            if (key_values->type == RAY_DATE || key_values->type == RAY_I32 || key_values->type == RAY_TIME) {
+            if (key_values->type == RAY_I32 || RAY_IS_TEMPORAL32(key_values->type)) {
                 int32_t v32;
                 memcpy(&v32, (char*)ray_data(key_values) + p * sizeof(int32_t), sizeof(int32_t));
                 pkey = v32;
