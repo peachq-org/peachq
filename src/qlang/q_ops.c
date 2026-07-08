@@ -57,7 +57,7 @@ static const q_op_t Q_OPS[] = {
     { "_",     QLEX_GLYPH,     QK_FLOOR, "floor",    QK_DROP,  "drop",    NULL  },
     { "|",     QLEX_GLYPH,     QK_REV,  "reverse",   QK_NONE,  NULL,      NULL  },
     { "&",     QLEX_GLYPH,     QK_WHERE, "where",    QK_MIN2,  "and",     NULL  },
-    { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_ENV,   "concat",  NULL  },
+    { ",",     QLEX_GLYPH,     QK_ENV,  "enlist",    QK_JOIN,  "concat",  NULL  },
     { "~",     QLEX_GLYPH,     QK_ENV,  "not",       QK_MATCH, "match",   NULL  },
     /* q `x^y` — fill: coalesce nulls in y with x.  `^` already lexes as a verb
      * glyph (VERB_CHARS); this row gives it a registry value.  Monadic `^x`
