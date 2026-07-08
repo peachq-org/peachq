@@ -12,6 +12,7 @@
 #include "qlang/q_repl.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
+#include "qlang/q_ns.h"       /* q_ns_syscmd, q_ns_prompt — namespaces */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "lang/eval.h"      /* ray_eval */
 #include "lang/env.h"       /* ray_env_has_name — live env-derived name highlight */
@@ -209,6 +210,30 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
     if (n == 0)
         return;
 
+    /* q system commands (\d \v \f \a — q_ns.c) run before the parser; an
+     * unhandled \cmd falls through to the historic path. */
+    {
+        int handled = 0;
+        ray_t* sr = q_ns_syscmd(s, n, &handled);
+        if (handled) {
+            if (sr && RAY_IS_ERR(sr)) {
+                const char* code = (const char*)sr->sdata;
+                fprintf(err, "error: %s\n", (code && *code) ? code : "syscmd");
+                ray_error_free(sr);
+            } else if (sr) {
+                if (print_result && !RAY_IS_NULL(sr)) {
+                    char buf[8192];
+                    q_fmt(sr, buf, sizeof buf);
+                    fputs(buf, out);
+                    fputc('\n', out);
+                }
+                ray_release(sr);
+            }
+            fflush(out);
+            return;
+        }
+    }
+
     ray_t* ast = q_parse(s);
     if (RAY_IS_ERR(ast)) {
         fprintf(err, "parse error\n");
@@ -328,6 +353,12 @@ static void q_repl_interactive(FILE* out, FILE* err) {
 
         run_one_line(str, len, out, err, 1);
         ray_release(line);
+        /* `\d` may have switched context: refresh the prompt (q.foo). */
+        {
+            char prompt[80];
+            int pl = q_ns_prompt(prompt, sizeof prompt);
+            ray_term_set_prompt(t, prompt, pl);
+        }
         ray_term_begin(t);
     }
 
@@ -343,11 +374,14 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
     }
 
     /* Piped / redirected stdin: original fgets loop, kept byte-for-byte
-     * identical so the qcmd transcript tests stay stable. */
+     * identical so the qcmd transcript tests stay stable.  The prompt is
+     * context-derived: `q)` at root, `q.foo)` after `\d .foo`. */
     char line[4096];
 
     for (;;) {
-        fputs("q)", out);
+        char prompt[80];
+        q_ns_prompt(prompt, sizeof prompt);
+        fputs(prompt, out);
         fflush(out);
 
         if (!fgets(line, sizeof line, in)) { fputc('\n', out); break; }
