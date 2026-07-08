@@ -47,10 +47,42 @@
 
 /* ===== Socket Implementation ===== */
 
+/* ---- error channel --------------------------------------------------------
+ * Winsock reports failures via WSAGetLastError(), NOT errno (mingw's errno
+ * stays stale after a socket call).  sock_errno() returns the last socket
+ * error mapped onto the POSIX codes this file tests for, and mirrors it
+ * into errno so callers up the stack (ipc.c reads errno for EINTR /
+ * EWOULDBLOCK / ETIMEDOUT) see the same value on both platforms.  On POSIX
+ * both helpers are the identity / plain errno. */
+#ifdef RAY_OS_WINDOWS
+static int sock_map_err(int e) {
+    switch (e) {
+    case WSAEINTR:        return EINTR;
+    case WSAEWOULDBLOCK:  return EWOULDBLOCK;
+    case WSAEINPROGRESS:  return EINPROGRESS;
+    case WSAEALREADY:     return EALREADY;
+    case WSAEINVAL:       return EINVAL;
+    case WSAETIMEDOUT:    return ETIMEDOUT;
+    case WSAECONNREFUSED: return ECONNREFUSED;
+    case WSAECONNRESET:   return ECONNRESET;
+    case WSAECONNABORTED: return ECONNABORTED;
+    case WSAENETUNREACH:  return ENETUNREACH;
+    case WSAEHOSTUNREACH: return EHOSTUNREACH;
+    case WSAEADDRINUSE:   return EADDRINUSE;
+    case WSAENOTCONN:     return ENOTCONN;
+    default:              return EIO;
+    }
+}
+static int sock_errno(void) { errno = sock_map_err(WSAGetLastError()); return errno; }
+#else
+static int sock_map_err(int e) { return e; }
+static int sock_errno(void) { return errno; }
+#endif
+
 ray_sock_t ray_sock_listen(uint16_t port)
 {
     ray_sock_t fd = (ray_sock_t)socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == RAY_INVALID_SOCK) return RAY_INVALID_SOCK;
+    if (fd == RAY_INVALID_SOCK) { (void)sock_errno(); return RAY_INVALID_SOCK; }
 
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
@@ -62,10 +94,12 @@ ray_sock_t ray_sock_listen(uint16_t port)
     addr.sin_port        = htons(port);
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        (void)sock_errno();     /* capture before close overwrites it */
         ray_sock_close(fd);
         return RAY_INVALID_SOCK;
     }
     if (listen(fd, 128) < 0) {
+        (void)sock_errno();
         ray_sock_close(fd);
         return RAY_INVALID_SOCK;
     }
@@ -77,7 +111,7 @@ ray_sock_t ray_sock_accept(ray_sock_t srv)
     ray_sock_t fd;
     do {
         fd = (ray_sock_t)accept(srv, NULL, NULL);
-    } while (fd == RAY_INVALID_SOCK && errno == EINTR);
+    } while (fd == RAY_INVALID_SOCK && sock_errno() == EINTR);
 
     if (fd == RAY_INVALID_SOCK) return RAY_INVALID_SOCK;
 
@@ -95,34 +129,38 @@ ray_sock_t ray_sock_accept(ray_sock_t srv)
 static int sock_connect_one(ray_sock_t fd, const struct sockaddr* addr,
                             socklen_t addrlen, int timeout_ms)
 {
-    if (timeout_ms <= 0)
-        return connect(fd, addr, addrlen) < 0 ? -1 : 0;
+    if (timeout_ms <= 0) {
+        if (connect(fd, addr, addrlen) < 0) { (void)sock_errno(); return -1; }
+        return 0;
+    }
 
     ray_sock_set_nonblocking(fd);
     int rc = connect(fd, addr, addrlen);
     if (rc < 0) {
-#ifdef RAY_OS_WINDOWS
-        int werr = WSAGetLastError();
-        int in_progress = (werr == WSAEWOULDBLOCK || werr == WSAEINPROGRESS);
-#else
-        int in_progress = (errno == EINPROGRESS);
-#endif
+        /* Non-blocking connect in flight: POSIX says EINPROGRESS (AF_UNIX
+         * may say EWOULDBLOCK); winsock says WSAEWOULDBLOCK — sock_errno
+         * maps it, so one test covers both platforms. */
+        int e = sock_errno();
+        int in_progress = (e == EINPROGRESS || e == EWOULDBLOCK);
         if (!in_progress) return -1;
         struct pollfd pfd = { .fd = fd, .events = POLLOUT };
         int pr;
 #ifdef RAY_OS_WINDOWS
         pr = WSAPoll(&pfd, 1, timeout_ms);
+        if (pr < 0) { (void)sock_errno(); return -1; }
 #else
         do { pr = poll(&pfd, 1, timeout_ms); } while (pr < 0 && errno == EINTR);
+        if (pr < 0) return -1;
 #endif
         if (pr == 0) { errno = ETIMEDOUT; return -1; }
-        if (pr < 0) return -1;
-        /* Writable: harvest the pending connect result via SO_ERROR. */
+        /* Writable: harvest the pending connect result via SO_ERROR
+         * (a winsock SO_ERROR is a WSA code — map it for callers). */
         int soerr = 0;
         socklen_t soerr_len = sizeof(soerr);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)&soerr, &soerr_len) < 0
             || soerr != 0) {
-            if (soerr != 0) errno = soerr;
+            if (soerr != 0) errno = sock_map_err(soerr);
+            else (void)sock_errno();
             return -1;
         }
     }
@@ -164,11 +202,11 @@ ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms)
     int saved_errno = 0;
     for (rp = res; rp != NULL; rp = rp->ai_next) {
         fd = (ray_sock_t)socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd == RAY_INVALID_SOCK) { saved_errno = errno; continue; }
+        if (fd == RAY_INVALID_SOCK) { saved_errno = sock_errno(); continue; }
         if (sock_connect_one(fd, rp->ai_addr, (socklen_t)rp->ai_addrlen,
                              timeout_ms) == 0)
             break;                          /* connected */
-        saved_errno = errno;
+        saved_errno = errno;                /* sock_connect_one mapped it */
         ray_sock_close(fd);
         fd = RAY_INVALID_SOCK;
     }
@@ -195,14 +233,12 @@ int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
         ssize_t n = send(s, p, rem, MSG_NOSIGNAL);
 #endif
         if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            int e = sock_errno();
+            if (e == EINTR) continue;
+            if (e == EAGAIN || e == EWOULDBLOCK) {
                 /* Wait for write-readiness before retry */
                 struct pollfd pfd = { .fd = s, .events = POLLOUT };
 #ifdef RAY_OS_WINDOWS
-                /* stage-2: mingw's errno mapping for winsock send() is
-                 * unverified — this EAGAIN retry arm may be dead until
-                 * error handling moves to WSAGetLastError(). */
                 WSAPoll(&pfd, 1, -1);
 #else
                 poll(&pfd, 1, -1);
@@ -226,7 +262,7 @@ int64_t ray_sock_recv(ray_sock_t s, void* buf, size_t len)
         ssize_t n = recv(s, buf, len, 0);
 #endif
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (sock_errno() == EINTR) continue;
             return -1;
         }
         return (int64_t)n;   /* 0 = peer closed */
@@ -244,7 +280,7 @@ int ray_sock_wait_readable(ray_sock_t s, int timeout_ms)
         int n = poll(&pfd, 1, timeout_ms);
 #endif
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (sock_errno() == EINTR) continue;
             return -1;
         }
         if (n == 0) return 0;
@@ -267,7 +303,7 @@ ray_err_t ray_sock_set_nonblocking(ray_sock_t s)
 #ifdef RAY_OS_WINDOWS
     u_long mode = 1;
     if (ioctlsocket(s, FIONBIO, &mode) != 0)
-        return RAY_ERR_IO;
+        { (void)sock_errno(); return RAY_ERR_IO; }
 #else
     int flags = fcntl(s, F_GETFL, 0);
     if (flags < 0) return RAY_ERR_IO;
@@ -282,7 +318,7 @@ ray_err_t ray_sock_set_blocking(ray_sock_t s)
 #ifdef RAY_OS_WINDOWS
     u_long mode = 0;
     if (ioctlsocket(s, FIONBIO, &mode) != 0)
-        return RAY_ERR_IO;
+        { (void)sock_errno(); return RAY_ERR_IO; }
 #else
     int flags = fcntl(s, F_GETFL, 0);
     if (flags < 0) return RAY_ERR_IO;
