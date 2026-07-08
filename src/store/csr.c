@@ -23,6 +23,7 @@
 
 #include "csr.h"
 #include "store/col.h"
+#include "store/fileio.h"
 #include "mem/sys.h"
 #include <stdlib.h>
 #include <string.h>
@@ -463,8 +464,8 @@ static ray_err_t csr_load_impl(ray_csr_t* csr, const char* dir, const char* pref
 ray_err_t ray_rel_save(ray_rel_t* rel, const char* dir) {
     if (!rel || !dir) return RAY_ERR_IO;
 
-    /* Create directory */
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) return RAY_ERR_IO;
+    /* Create directory (ray_mkdir: shared impl, EEXIST-tolerant, portable) */
+    if (ray_mkdir(dir) != RAY_OK) return RAY_ERR_IO;
 
     ray_err_t err = csr_save(&rel->fwd, dir, "fwd");
     if (err != RAY_OK) return err;
