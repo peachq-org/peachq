@@ -366,7 +366,7 @@ static void pearson_init(void* s) {
 static inline double pearson_read_f64(const ray_valid_t* v, int64_t i) {
     switch (v->type) {
         case RAY_F64:                       return ((const double*)v->base)[i];
-        case RAY_I64: case RAY_TIMESTAMP:   return (double)((const int64_t*)v->base)[i];
+        case RAY_I64: RAY_TEMPORAL64_CASES:   return (double)((const int64_t*)v->base)[i];
         case RAY_I32: RAY_TEMPORAL32_CASES:
                                             return (double)((const int32_t*)v->base)[i];
         case RAY_I16:                       return (double)((const int16_t*)v->base)[i];

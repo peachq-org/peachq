@@ -152,6 +152,9 @@ const char* ray_type_name(int8_t type) {
     case RAY_F32:       return type < 0 ? "f32"       : "F32";
     case RAY_F64:       return type < 0 ? "f64"       : "F64";
     case RAY_MONTH:     return type < 0 ? "month"     : "MONTH";
+    case RAY_MINUTE:    return type < 0 ? "minute"    : "MINUTE";
+    case RAY_SECOND:    return type < 0 ? "second"    : "SECOND";
+    case RAY_TIMESPAN:  return type < 0 ? "timespan"  : "TIMESPAN";
     case RAY_DATE:      return type < 0 ? "date"      : "DATE";
     case RAY_TIME:      return type < 0 ? "time"      : "TIME";
     case RAY_TIMESTAMP: return type < 0 ? "timestamp" : "TIMESTAMP";
@@ -359,6 +362,9 @@ static const char* null_literal(int8_t type) {
     case RAY_F64:       return "0Nf";
     case RAY_F32:       return "0Ne";
     case RAY_MONTH:     return "0Nm";
+    case RAY_MINUTE:    return "0Nu";
+    case RAY_SECOND:    return "0Nv";
+    case RAY_TIMESPAN:  return "0Nn";
     case RAY_DATE:      return "0Nd";
     case RAY_TIME:      return "0Nt";
     case RAY_TIMESTAMP: return "0Np";
@@ -537,7 +543,7 @@ static void fmt_dict_key(fmt_buf_t* b, ray_t* keys, int64_t i, int mode) {
         const char* sp = ray_str_vec_get(keys, i, &slen);
         k_atom = ray_str(sp ? sp : "", sp ? slen : 0);
         k_owned = true;
-    } else if (keys->type == RAY_I64 || keys->type == RAY_TIMESTAMP) {
+    } else if (keys->type == RAY_I64 || RAY_IS_TEMPORAL64(keys->type)) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.i64  = ((int64_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
@@ -601,7 +607,7 @@ static void fmt_dict_val(fmt_buf_t* b, ray_t* vals, int64_t i, int mode) {
                                 v_storage.i32  = ((int32_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_I64:
-            case RAY_TIMESTAMP: v_storage.type = (int8_t)-vals->type;
+            RAY_TEMPORAL64_CASES: v_storage.type = (int8_t)-vals->type;
                                 v_storage.i64  = ((int64_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_F32:       v_storage.type = -RAY_F32;
