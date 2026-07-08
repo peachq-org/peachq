@@ -9324,8 +9324,7 @@ static void xbar_par_fn(void* vctx, uint32_t worker_id,
                 o[i] = q * b;
             }
         }
-    } else if (c->out_type == RAY_I32 || c->out_type == RAY_DATE ||
-               c->out_type == RAY_TIME || c->out_type == RAY_MONTH) {
+    } else if (c->out_type == RAY_I32 || RAY_IS_TEMPORAL32(c->out_type)) {
         const int32_t* in = (const int32_t*)c->in;
         int32_t* o = (int32_t*)c->out;
         int32_t b32 = (int32_t)b;
