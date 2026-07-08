@@ -264,7 +264,97 @@ static ray_t* q_take_wrap(ray_t* n, ray_t* list) {
  * Length is derived string-aware: a q string is a -RAY_STR atom whose char
  * count lives in ray_str_len, NOT the ->len union field (which aliases the SSO
  * {slen,sdata} bytes), so ray_len would be garbage for strings. */
+static int q_values_match(ray_t* a, ray_t* b);      /* fwd (amend engine, below) */
+
+/* d without the entries for keys ks (atom or vector) — kdb Drop is tolerant:
+ * keys not present are ignored (ref/drop.md `` `a _ `a`b`c!1 2 3 ``).
+ * Borrows both; returns an owned dict.  Same append/release discipline as
+ * q_dict_union (q_apply.c). */
+static ray_t* q_dict_drop_keys(ray_t* d, ray_t* ks) {
+    ray_t* dk = ray_dict_keys(d);                    /* borrowed */
+    ray_t* dv = ray_dict_vals(d);                    /* borrowed */
+    if (!dk || !dv) return ray_error("type", "_ (drop): malformed dictionary");
+    int64_t nd = ray_dict_len(d);
+    int64_t nk = (ks && (ray_is_vec(ks) || ks->type == RAY_LIST)) ? ray_len(ks) : -1;
+    ray_t* ok = ray_list_new(nd > 0 ? nd : 1);
+    ray_t* ov = ray_list_new(nd > 0 ? nd : 1);
+    if (!ok || !ov) {
+        if (ok) ray_release(ok);
+        if (ov) ray_release(ov);
+        return ray_error("oom", NULL);
+    }
+    for (int64_t i = 0; i < nd; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* ke = ray_at_fn(dk, ia);               /* owned key */
+        ray_release(ia);
+        if (!ke || RAY_IS_ERR(ke)) { ray_release(ok); ray_release(ov); return ke ? ke : ray_error("type", NULL); }
+        int hit = 0;
+        if (nk < 0) {
+            hit = q_values_match(ke, ks);
+        } else {
+            for (int64_t j = 0; j < nk && !hit; j++) {
+                ray_t* ja = ray_i64(j);
+                ray_t* kj = ray_at_fn(ks, ja);       /* owned */
+                ray_release(ja);
+                if (kj && !RAY_IS_ERR(kj)) {
+                    hit = q_values_match(ke, kj);
+                    ray_release(kj);
+                } else if (kj) {
+                    ray_release(ke); ray_release(ok); ray_release(ov);
+                    return kj;
+                }
+            }
+        }
+        if (hit) { ray_release(ke); continue; }
+        ray_t* ja2 = ray_i64(i);
+        ray_t* ve = ray_at_fn(dv, ja2);              /* owned value */
+        ray_release(ja2);
+        if (!ve || RAY_IS_ERR(ve)) { ray_release(ke); ray_release(ok); ray_release(ov); return ve ? ve : ray_error("type", NULL); }
+        ok = ray_list_append(ok, ke);
+        ov = ray_list_append(ov, ve);
+        ray_release(ke);
+        ray_release(ve);
+    }
+    ray_t* ck = q_collapse_list(ok);
+    ray_t* cv = q_collapse_list(ov);
+    ray_release(ok);
+    ray_release(ov);
+    if (!ck || RAY_IS_ERR(ck)) { if (cv && !RAY_IS_ERR(cv)) ray_release(cv); return ck ? ck : ray_error("type", NULL); }
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(ck); return cv ? cv : ray_error("type", NULL); }
+    return ray_dict_new(ck, cv);                     /* consumes both */
+}
+
 static ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
+    /* ---- dict arms (ref/drop.md) — claimed BEFORE the int-vector cut arm so
+     * `1 2 _ intkeyed_dict` is a key-drop, and before the int-atom count tail
+     * so `1_d` drops ENTRIES (keys and values together), never values-only. */
+    if (list && list->type == RAY_DICT && !q_is_keyed_table(list)) {
+        /* n _ d — int ATOM drops the first/last n entries */
+        if (n && n->type == -RAY_I64 && !RAY_ATOM_IS_NULL(n)) {
+            ray_t* k = ray_dict_keys(list);          /* borrowed */
+            ray_t* v = ray_dict_vals(list);          /* borrowed */
+            if (!k || !v) return ray_error("type", "_ (drop): malformed dictionary");
+            ray_t* rk = q_drop_wrap(n, k);
+            if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);
+            if (!rk || RAY_IS_ERR(rk)) return rk;
+            ray_t* rv = q_drop_wrap(n, v);
+            if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
+            if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
+            return ray_dict_new(rk, rv);             /* consumes both */
+        }
+        /* keys _ d — sym atom / sym vector / int vector lhs drops entries by
+         * key (other lhs kinds keep today's error tail) */
+        if (n && (n->type == -RAY_SYM || n->type == RAY_SYM ||
+                  n->type == RAY_I64 || n->type == RAY_I32 || n->type == RAY_I16))
+            return q_dict_drop_keys(list, n);
+    }
+    /* d _ key — dict lhs drops the entry at an ATOM key; a vector rhs is
+     * 'type (ref/drop.md pins `(`a`b`c!1 2 3) _ `a`b` -> 'type). */
+    if (n && n->type == RAY_DICT && !q_is_keyed_table(n)) {
+        if (list && ray_is_atom(list))
+            return q_dict_drop_keys(n, list);
+        return ray_error("type", "_ (drop): dict drop takes an atom key");
+    }
     /* q cut: int-VECTOR lhs — `2 4_v` slices [p0,p1) then [p_last,end).
      * Positions non-decreasing within 0..len; result is a boxed list of
      * slices (kdb 0h). */
