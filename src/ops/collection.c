@@ -138,9 +138,7 @@ static int hs_eq_rows(ray_t* a_src, int64_t ai, int8_t at, void* a_data,
             case RAY_U8:        return ((const uint8_t*)a_data)[ai] == ((const uint8_t*)b_data)[bi];
             case RAY_BOOL:      return ((const bool*)a_data)[ai] == ((const bool*)b_data)[bi];
             case RAY_F64:       return ((const double*)a_data)[ai] == ((const double*)b_data)[bi];
-            case RAY_DATE:
-            case RAY_TIME:
-            case RAY_MONTH:     return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
+            RAY_TEMPORAL32_CASES:     return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
             case RAY_TIMESTAMP: return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
             case RAY_SYM: {
                 /* Raw index equality is only meaningful within ONE id
@@ -304,7 +302,7 @@ static int distinct_sort_cmp(const void* a, const void* b) {
             int64_t vb = ((const int64_t*)g_dsort_data)[ib];
             return (va > vb) - (va < vb);
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             int32_t va = ((const int32_t*)g_dsort_data)[ia];
             int32_t vb = ((const int32_t*)g_dsort_data)[ib];
             return (va > vb) - (va < vb);

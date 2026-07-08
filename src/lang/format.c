@@ -541,7 +541,7 @@ static void fmt_dict_key(fmt_buf_t* b, ray_t* keys, int64_t i, int mode) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.i64  = ((int64_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
-    } else if (keys->type == RAY_I32 || keys->type == RAY_DATE || keys->type == RAY_TIME || keys->type == RAY_MONTH) {
+    } else if (keys->type == RAY_I32 || RAY_IS_TEMPORAL32(keys->type)) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.i32  = ((int32_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
@@ -597,9 +597,7 @@ static void fmt_dict_val(fmt_buf_t* b, ray_t* vals, int64_t i, int mode) {
                                 v_storage.i16  = ((int16_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_I32:
-            case RAY_DATE:
-            case RAY_TIME:
-            case RAY_MONTH:     v_storage.type = (int8_t)-vals->type;
+            RAY_TEMPORAL32_CASES:     v_storage.type = (int8_t)-vals->type;
                                 v_storage.i32  = ((int32_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_I64:
