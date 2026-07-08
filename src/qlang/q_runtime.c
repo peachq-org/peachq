@@ -18,7 +18,13 @@
 #include <rayforce.h>
 
 ray_runtime_t* q_runtime_create(int argc, char** argv) {
+    /* q owns dotted namespaces for user code, and real q has no .sys/.os/.ipc:
+     * suppress the rayfall system-plumbing namespaces for this runtime, then
+     * restore the default so a later ray_runtime_create (same process) is
+     * unaffected — the flag governs only the next builtin registration. */
+    ray_set_load_rayfall_ns(false);
     ray_runtime_t* rt = ray_runtime_create(argc, argv);
+    ray_set_load_rayfall_ns(true);
     if (rt) {
         q_ns_reset();          /* fresh runtime starts in the root context */
         q_seed_init();         /* kdb constant-seed-at-startup contract (\S) */
