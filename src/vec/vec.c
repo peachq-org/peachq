@@ -60,11 +60,10 @@ static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
             return x != x;
         }
         case RAY_I64:
-        case RAY_TIMESTAMP:
+        RAY_TEMPORAL64_CASES:
             return ((const int64_t*)p)[idx] == NULL_I64;
         case RAY_I32:
-        case RAY_DATE:
-        case RAY_TIME:
+        RAY_TEMPORAL32_CASES:
             return ((const int32_t*)p)[idx] == NULL_I32;
         case RAY_I16:
             return ((const int16_t*)p)[idx] == NULL_I16;
@@ -969,8 +968,8 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
         switch (vec->type) {
             case RAY_F64:                          ((double*)p)[idx] = NULL_F64; break;
             case RAY_F32:                          ((float*)p)[idx]  = NULL_F32; break;
-            case RAY_I64: case RAY_TIMESTAMP:      ((int64_t*)p)[idx] = NULL_I64; break;
-            case RAY_I32: case RAY_DATE: case RAY_TIME: ((int32_t*)p)[idx] = NULL_I32; break;
+            case RAY_I64: RAY_TEMPORAL64_CASES:      ((int64_t*)p)[idx] = NULL_I64; break;
+            case RAY_I32: RAY_TEMPORAL32_CASES: ((int32_t*)p)[idx] = NULL_I32; break;
             case RAY_I16:                          ((int16_t*)p)[idx] = NULL_I16; break;
             case RAY_STR:
                 /* STR has no null distinct from "" (kdb+ model): write the
@@ -1443,8 +1442,8 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     switch (vec->type) {
         case RAY_F64:
         case RAY_F32:
-        case RAY_I64: case RAY_TIMESTAMP:
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I64: RAY_TEMPORAL64_CASES:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
         case RAY_I16:
         case RAY_STR:
         case RAY_GUID:
