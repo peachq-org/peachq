@@ -1586,8 +1586,9 @@ static ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
     return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
 }
 
-/* A keyed table is a RAY_DICT whose keys AND values are both tables. */
-static int q_is_keyed_table(ray_t* y) {
+/* A keyed table is a RAY_DICT whose keys AND values are both tables.
+ * Exported (q_registry.h) — q_builtins' by-name deref shares it. */
+int q_is_keyed_table(ray_t* y) {
     if (!y || y->type != RAY_DICT) return 0;
     ray_t* k = ray_dict_keys(y);
     ray_t* v = ray_dict_vals(y);
@@ -1892,8 +1893,8 @@ static ray_t* q_keys_wrap(ray_t* x) {
 /* q `x xkey y` — set key columns: reorder x-first, enkey count x (reuses
  * q_enkey).  By-reference (y a name): rebind and return the name. */
 static ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
-    int64_t names[16];
-    int64_t n = q_sym_ids(x, names, 16);
+    int64_t names[64];
+    int64_t n = q_sym_ids(x, names, 64);
     if (n < 0) return ray_error("type", "xkey: keys must be symbols");
     int64_t sym;
     ray_t* t = q_table_operand(y, &sym);
@@ -2031,8 +2032,8 @@ static ray_t* q_xdesc_wrap(ray_t* x, ray_t* y) { return q_xsort(x, y, 1); }
 /* q `x xgroup y` — key by x, remaining columns become per-group nested lists
  * (first-occurrence group order, ref/xgroup.md). */
 static ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
-    int64_t names[16];
-    int64_t nk = q_sym_ids(x, names, 16);
+    int64_t names[64];
+    int64_t nk = q_sym_ids(x, names, 64);
     if (nk <= 0) return ray_error("type", "xgroup: expects symbol column names");
     int64_t sym;
     ray_t* t = q_table_operand(y, &sym);
@@ -2413,6 +2414,16 @@ static ray_t* q_rows_normalize(ray_t* flat, ray_t* y, int partial) {
 static ray_t* q_table_append(ray_t* flat, ray_t* rows) {
     int64_t nc = ray_table_ncols(flat);
     if (ray_table_nrows(flat) == 0) {
+        /* untyped empty columns (RAY_LIST) adopt the payload type; a TYPED
+         * 0-row column keeps kdb type-strictness. */
+        if (ray_table_nrows(rows) > 0) {
+            for (int64_t c = 0; c < nc; c++) {
+                ray_t* oc = ray_table_get_col_idx(flat, c);
+                ray_t* pc = ray_table_get_col_idx(rows, c);
+                if (oc && pc && ray_is_vec(oc) && pc->type != oc->type)
+                    return ray_error("type", NULL);
+            }
+        }
         ray_t* out = ray_table_new(nc > 0 ? nc : 1);
         for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++)
             out = ray_table_add_col(out, ray_table_col_name(flat, c),
@@ -2680,6 +2691,10 @@ static ray_t* q_table_distinct(ray_t* t) {
  * underlying find, so keep it simple: rows of x not in y, x-dups kept).
  * Non-table operands delegate to base ray_except_fn (pre-wave behaviour). */
 static ray_t* q_except_wrap(ray_t* x, ray_t* y) {
+    /* keyed tables / dicts are deferred cells — the base list kernel would
+     * mangle the dict structure (mirror of the inter guard). */
+    if ((x && x->type == RAY_DICT) || (y && y->type == RAY_DICT))
+        return ray_error("nyi", "except: dict/keyed-table operands deferred");
     if (x && x->type == RAY_TABLE && y && y->type == RAY_TABLE) {
         ray_t* idx = q_table_member_idx(x, y, 0);
         if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
@@ -3015,6 +3030,9 @@ static ray_t* q_distinct_wrap(ray_t* x) {
  * wrong answer. */
 static ray_t* q_union_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return ray_error("type", "union: nil operand");
+    /* keyed tables / dicts are deferred cells (mirror of the inter guard). */
+    if (x->type == RAY_DICT || y->type == RAY_DICT)
+        return ray_error("nyi", "union: dict/keyed-table operands deferred");
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* distinct of t,u */
         ray_t* j = q_env_call2("concat", x, y);
         if (!j || RAY_IS_ERR(j)) return j ? j : ray_error("oom", NULL);
