@@ -360,7 +360,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
                 ((double*)ray_data(vec))[i] = NULL_F64; break;
             case RAY_I64: case RAY_TIMESTAMP:
                 ((int64_t*)ray_data(vec))[i] = NULL_I64; break;
-            case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+            case RAY_I32: RAY_TEMPORAL32_CASES:
                 ((int32_t*)ray_data(vec))[i] = NULL_I32; break;
             case RAY_I16:
                 ((int16_t*)ray_data(vec))[i] = NULL_I16; break;
