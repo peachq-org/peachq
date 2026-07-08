@@ -1151,7 +1151,21 @@ static Tokens scan(const char *src) {
                         !byte_lit_starts(src, p + 1) &&   /* -0x0a: '-' stays the verb (bytes are unsigned) */
                         (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
 
-        if ((cl & CL_DIGIT) || neg_sign) {
+        /* kdb digit-colon verbs: `0:` (File Text; ref/file-text.md), `1:`/`2:`
+         * (File Binary / Dynamic Load — tokenized identically; without a
+         * manifest row the name stays a name-ref per the registry-miss rule).
+         * A single digit glued to ':' can never start a clock literal (minute
+         * / second / time / timespan all need dig_run == 2 before ':'), so
+         * this is unambiguous.  `0::` is left alone (the second ':' would be
+         * a monadic marker / assign shape, not the verb). */
+        if ((c == '0' || c == '1' || c == '2') &&
+            src[p+1] == ':' && src[p+2] != ':') {
+            char nm[2] = { c, ':' };
+            p += 2;
+            EMIT(T_VERB, q_verb_name(nm, 2));
+            noun_pos = 0;
+        }
+        else if ((cl & CL_DIGIT) || neg_sign) {
             EMIT(T_NOUN, scan_num_literal(src, &p));
             noun_pos = 1;
         }
@@ -1180,8 +1194,10 @@ static Tokens scan(const char *src) {
         else if (c == '"') {
             /* String literal: scan to the closing quote, honouring `\` escapes
              * (the escaped byte is skipped so an escaped quote does not close
-             * the string).  Emit the raw inner bytes as a RAY_STR — escape
-             * decoding is deferred (the tested subset uses no escapes). */
+             * the string).  Escapes DECODE here (feat/q-file-text): \" \\ \n
+             * \t \r and 1..3-digit octal \ooo (the "\001" FIX-separator idiom
+             * in ref/file-text.md).  q_fmt re-escapes on display, so literal
+             * round-trips are unchanged; `count "a\nb"` becomes kdb-true. */
             p++;                     /* past opening quote */
             int s = p;
             while (src[p] && src[p] != '"') {
@@ -1191,7 +1207,32 @@ static Tokens scan(const char *src) {
             if (src[p] != '"') q_die("unterminated string");
             int len = p - s;
             p++;                     /* past closing quote */
-            EMIT(T_NOUN, ray_str(src + s, (size_t)len));
+            char* db = malloc((size_t)len + 1);
+            if (!db) q_die("out of memory");
+            int dl = 0;
+            for (int i = 0; i < len; ) {
+                char ch = src[s + i];
+                if (ch != '\\' || i + 1 >= len) { db[dl++] = ch; i++; continue; }
+                char esc = src[s + i + 1];
+                if      (esc == 'n')  { db[dl++] = '\n'; i += 2; }
+                else if (esc == 't')  { db[dl++] = '\t'; i += 2; }
+                else if (esc == 'r')  { db[dl++] = '\r'; i += 2; }
+                else if (esc == '"')  { db[dl++] = '"';  i += 2; }
+                else if (esc == '\\') { db[dl++] = '\\'; i += 2; }
+                else if (esc >= '0' && esc <= '7') {
+                    int v = 0, k = 0;
+                    while (k < 3 && i + 1 + k < len &&
+                           src[s + i + 1 + k] >= '0' && src[s + i + 1 + k] <= '7') {
+                        v = v * 8 + (src[s + i + 1 + k] - '0');
+                        k++;
+                    }
+                    db[dl++] = (char)v;
+                    i += 1 + k;
+                }
+                else { db[dl++] = ch; i++; }   /* unknown escape: keep the '\' */
+            }
+            EMIT(T_NOUN, ray_str(db, (size_t)dl));
+            free(db);
             noun_pos = 1;
         }
         else if (c == '`') {
@@ -1207,7 +1248,20 @@ static Tokens scan(const char *src) {
             while (src[p] == '`') {
                 p++;
                 int s = p;
-                while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) || src[p] == '.') p++;
+                if (src[p] == ':') {
+                    /* FILE symbol `:path (ref/file-text.md, hsym): a leading
+                     * ':' pulls ':' and '/' into the name so `:/tmp/a.txt is
+                     * ONE symbol.  Constrained to the leading-':' shape on
+                     * purpose (plan-review round 1): general handle symbols
+                     * (`fifo:x, `host:port) stay two tokens — that spelling
+                     * is a hard 'arity error today, so no green row can flip. */
+                    p++;
+                    while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
+                           src[p] == '.' || src[p] == ':' || src[p] == '/')
+                        p++;
+                } else {
+                    while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) || src[p] == '.') p++;
+                }
                 if (count == 0) {
                     first = q_symlit(src + s, p - s);
                 } else if (count == 1) {
@@ -1873,7 +1927,17 @@ static ray_t *qsql_term(Parser *p, int *ok) {
         }
         int64_t id = k->i64;                          /* name reference */
         adv(p);
-        ray_t *ev = ray_env_get(id);
+        /* Prefer the REGISTRY monadic value (q semantics + provenance
+         * display — an env-shadowing wrapper like `sum` must not embed the
+         * base env object, whose display fell to the <name> fallback);
+         * non-manifest names keep the env object. */
+        ray_t *ev = NULL;
+        {
+            ray_t *s = ray_sym_str(id);               /* borrowed */
+            if (s) ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s),
+                                               Q_MONADIC);   /* borrowed */
+        }
+        if (!ev) ev = ray_env_get(id);
         if (ev && (ev->type == RAY_UNARY || ev->type == RAY_BINARY ||
                    ev->type == RAY_VARY)) {           /* function -> its value */
             ray_retain(ev);
