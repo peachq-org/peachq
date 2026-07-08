@@ -152,6 +152,14 @@ ray_t* ray_sym(int64_t id) {
  * narrowed to the correct element width.
  * -------------------------------------------------------------------------- */
 
+ray_t* ray_month(int64_t val) {
+    ray_t* v = ray_alloc(0);
+    if (RAY_IS_ERR(v)) return v;
+    v->type = -RAY_MONTH;
+    v->i64 = val;
+    return v;
+}
+
 ray_t* ray_date(int64_t val) {
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;
@@ -172,6 +180,30 @@ ray_t* ray_timestamp(int64_t val) {
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;
     v->type = -RAY_TIMESTAMP;
+    v->i64 = val;
+    return v;
+}
+
+ray_t* ray_minute(int64_t val) {
+    ray_t* v = ray_alloc(0);
+    if (RAY_IS_ERR(v)) return v;
+    v->type = -RAY_MINUTE;
+    v->i64 = val;
+    return v;
+}
+
+ray_t* ray_second(int64_t val) {
+    ray_t* v = ray_alloc(0);
+    if (RAY_IS_ERR(v)) return v;
+    v->type = -RAY_SECOND;
+    v->i64 = val;
+    return v;
+}
+
+ray_t* ray_timespan(int64_t val) {
+    ray_t* v = ray_alloc(0);
+    if (RAY_IS_ERR(v)) return v;
+    v->type = -RAY_TIMESPAN;
     v->i64 = val;
     return v;
 }
@@ -197,8 +229,9 @@ ray_t* ray_typed_null(int8_t type) {
     switch (type) {
         case -RAY_F64:                                 v->f64 = NULL_F64; break;
         case -RAY_F32:                                 v->f64 = (double)NULL_F32; break;
-        case -RAY_I64: case -RAY_TIMESTAMP:            v->i64 = NULL_I64; break;
-        case -RAY_I32: case -RAY_DATE: case -RAY_TIME: v->i32 = NULL_I32; break;
+        case -RAY_I64: case -RAY_TIMESTAMP: case -RAY_TIMESPAN: v->i64 = NULL_I64; break;
+        case -RAY_I32: case -RAY_MONTH: case -RAY_DATE: case -RAY_TIME:
+        case -RAY_MINUTE: case -RAY_SECOND:            v->i32 = NULL_I32; break;
         case -RAY_I16:                                 v->i16 = NULL_I16; break;
         case -RAY_SYM:
             /* SYM has no null — a SYM "typed null" is just the empty symbol '

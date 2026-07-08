@@ -20,6 +20,7 @@
 
 #include "qlang/q_parse.h"
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
+#include "qlang/q_ns.h"       /* q_ns_current, q_ns_is_unqualifiable */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/q_deriv.h"    /* q_proj_new — 104h derived-verb carriers */
 #include "lang/env.h"        /* ray_fn_name — qSQL output-expr head normalize */
@@ -230,7 +231,7 @@ static Tokens g_toks = { NULL, 0 };
  * that widen to the chosen type's sentinel. */
 
 typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME,
-               EL_TS } el_kind;
+               EL_TS, EL_MONTH, EL_MINUTE, EL_SECOND, EL_TIMESPAN } el_kind;
 typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
@@ -330,6 +331,50 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
         }
     }
 
+    /* Month-SHAPED magnitude: yyyy.mm (4-2 digits), terminator neither digit
+     * nor dot nor an exponent continuation.  UNLIKE date, the month shape IS
+     * a valid float spelling (kdb bare `2000.01` is the float 2000.01; only
+     * the trailing `m` letter makes it a month), so this arm cannot commit:
+     * it records BOTH the month payload (.i = months since 2000.01) and the
+     * float twin (.f) with forces_float=1 — the `m` context in
+     * scan_num_literal reads .i, every other context reverts to the float via
+     * el_to_float's EL_MONTH arm.  A glued sign negates the payload (the
+     * kdb date-literal rule).  An invalid civil month (2000.13 / 2000.00)
+     * stays a float — EXCEPT when the very next byte is the `m` letter
+     * (2000.13m), which can only be a malformed month literal: die, mirroring
+     * the date arm's invalid-civil rule.  Year 0000 is out of the kdb domain
+     * and stays a float. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 4 && src[q + 4] == '.' &&
+            dig_run(src, q + 5) == 2 &&
+            src[q + 7] != '.' &&
+            !((src[q + 7] == 'e' || src[q + 7] == 'E') &&
+              (src[q + 8] == '+' || src[q + 8] == '-' ||
+               (src[q + 8] >= '0' && src[q + 8] <= '9')))) {
+            int64_t y  = (src[q]     - '0') * 1000 + (src[q + 1] - '0') * 100
+                       + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
+            int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
+            int valid = (y >= 1 && mo >= 1 && mo <= 12);
+            if (!valid && src[q + 7] == 'm') q_die("bad number");
+            if (valid) {
+                size_t rem2 = strlen(src + *p);
+                double fv; size_t u = ray_parse_f64(src + *p, rem2, &fv);
+                if (u == (size_t)(q + 7 - *p)) {   /* float twin spans yyyy.mm */
+                    out->kind = EL_MONTH;
+                    out->i = (y - 2000) * 12 + (mo - 1);
+                    if (neg) out->i = -out->i;
+                    out->f = fv;
+                    out->forces_float = 1;
+                    *p = q + 7;
+                    return 1;
+                }
+            }
+        }
+    }
+
     /* Time literal magnitude: HH:MM:SS.f (2-2-2 clock digits + a dot + 1..3
      * fractional digits, padded to milliseconds).  Checked before the float
      * peek for the same reason as date.  The 1..3-digit gate is THE
@@ -368,6 +413,138 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
                 *p = q + 9 + fd;
                 return 1;
             }
+            if (fd >= 4 && fd <= 9) {
+                /* Timespan clock form: HH:MM:SS. + 4..9 fractional digits,
+                 * right-padded to nanoseconds (the pinned spelling is the
+                 * 9-digit 12:00:00.000000000, datatypes.md:134; 4..8 derived
+                 * — mirrors the timestamp arm's 1..9 pad). */
+                int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+                int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+                int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
+                int64_t ns = 0;
+                for (int k = 0; k < fd; k++) ns = ns * 10 + (src[q + 9 + k] - '0');
+                for (int k = fd; k < 9; k++) ns *= 10;
+                if (mi >= 60 || s >= 60) q_die("bad timespan");
+                out->kind = EL_TIMESPAN;
+                out->i = (h * 3600 + mi * 60 + s) * 1000000000LL + ns;
+                if (neg) out->i = -out->i;
+                *p = q + 9 + fd;
+                return 1;
+            }
+        }
+    }
+
+    /* Second literal magnitude: HH:MM:SS with the terminator neither '.'
+     * (time / timespan clock-frac shapes above) nor ':' nor a digit
+     * (basics/syntax.md:90).  The three clock shapes are mutually
+     * exclusive by terminator, so ordering here is not load-bearing. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
+            dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
+            dig_run(src, q + 6) == 2 &&
+            src[q + 8] != '.' && src[q + 8] != ':' &&
+            !(CLASS[(uint8_t)src[q + 8]] & CL_DIGIT)) {
+            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+            int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+            int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
+            if (mi >= 60 || s >= 60) q_die("bad second");
+            out->kind = EL_SECOND;
+            out->i = h * 3600 + mi * 60 + s;
+            if (neg) out->i = -out->i;
+            *p = q + 8;
+            return 1;
+        }
+    }
+
+    /* Minute literal magnitude: HH:MM with the terminator neither ':'
+     * (second/time shapes) nor '.' nor a digit (basics/syntax.md:89). */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
+            dig_run(src, q + 3) == 2 &&
+            src[q + 5] != ':' && src[q + 5] != '.' &&
+            !(CLASS[(uint8_t)src[q + 5]] & CL_DIGIT)) {
+            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
+            int64_t mm = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
+            if (mm >= 60) q_die("bad minute");
+            out->kind = EL_MINUTE;
+            out->i = h * 60 + mm;
+            if (neg) out->i = -out->i;
+            *p = q + 5;
+            return 1;
+        }
+    }
+
+    /* Timespan D-form: digits 'D' [HH[:MM[:SS[.f{1,9}]]]] (interfaces
+     * usage 0D00:05 / 0D00:00:10; day-count payload derived).  Only
+     * matches when 'D' is followed by exactly-2 clock digits whose next
+     * byte does not continue a name, or by a byte that cannot continue a
+     * name at all — `1D45x` stays a name juxtaposition and `0Dabc` stays
+     * `0` + `Dabc` (the no-churn rule).  Hour overflow normalizes through
+     * the ns count (`123D45` -> 124D21:…, the timestamp-arm D24 rule).
+     * The date arm ran first, so `2000.01.01D…` never reaches here. */
+    {
+        int q = *p;
+        int neg = (src[q] == '-');
+        if (neg) q++;
+        int dd = dig_run(src, q);
+        if (dd >= 1 && src[q + dd] == 'D') {
+            int r = q + dd + 1;
+            int hd = dig_run(src, r);
+            int matched = 0;
+            int64_t days = 0, tod_s = 0, ns = 0;
+            for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
+            if (hd == 2) {
+                int64_t h = (src[r] - '0') * 10 + (src[r + 1] - '0');
+                int e = r + 2;
+                int64_t mi = 0, ss = 0;
+                if (src[e] == ':' && dig_run(src, e + 1) == 2) {
+                    mi = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
+                    e += 3;
+                    if (src[e] == ':' && dig_run(src, e + 1) == 2) {
+                        ss = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
+                        e += 3;
+                        if (src[e] == '.') {
+                            int fd = dig_run(src, e + 1);
+                            if (fd < 1 || fd > 9) q_die("bad timespan");
+                            for (int k = 0; k < fd; k++)
+                                ns = ns * 10 + (src[e + 1 + k] - '0');
+                            for (int k = fd; k < 9; k++) ns *= 10;
+                            e += 1 + fd;
+                        }
+                    }
+                }
+                if (mi >= 60 || ss >= 60) q_die("bad timespan");
+                /* A name byte right after the clock digits means this was
+                 * a name after all (e.g. 1D45x) — not a timespan. */
+                if (!(CLASS[(uint8_t)src[e]] & CL_DIGIT) &&
+                    !((src[e] >= 'a' && src[e] <= 'z') ||
+                      (src[e] >= 'A' && src[e] <= 'Z') || src[e] == '_')) {
+                    tod_s = h * 3600 + mi * 60 + ss;
+                    out->kind = EL_TIMESPAN;
+                    out->i = (days * 86400 + tod_s) * 1000000000LL + ns;
+                    if (neg) out->i = -out->i;
+                    *p = e;
+                    matched = 1;
+                }
+            } else if (hd == 0 &&
+                       !((src[r] >= 'a' && src[r] <= 'z') ||
+                         (src[r] >= 'A' && src[r] <= 'Z') ||
+                         src[r] == '_' || src[r] == '.' || src[r] == ':')) {
+                /* Bare dD day count (kdb 1D; derived — no doc example uses
+                 * a bare form as input, PR-noted). */
+                out->kind = EL_TIMESPAN;
+                out->i = days * 86400000000000LL;
+                if (neg) out->i = -out->i;
+                *p = q + dd + 1;
+                matched = 1;
+            }
+            if (matched) return 1;
         }
     }
 
@@ -410,19 +587,25 @@ static int64_t narrow_special(el_kind k, int width) {
 }
 
 /* Resolve one element to an int64 in the given integer width.  EL_DATE holds
- * its day count in .i (only reachable in the width-4 date context). */
+ * its day count in .i (only reachable in the width-4 date context); EL_MONTH
+ * holds its month payload in .i (only reachable in the width-4 month
+ * context — everywhere else it reverts to its float twin first). */
 static int64_t el_to_int(const num_el *e, int width) {
     if (e->kind == EL_INT || e->kind == EL_DATE || e->kind == EL_TIME ||
-        e->kind == EL_TS) return e->i;
+        e->kind == EL_TS || e->kind == EL_MONTH || e->kind == EL_MINUTE ||
+        e->kind == EL_SECOND || e->kind == EL_TIMESPAN) return e->i;
     if (e->kind == EL_FLOAT) return (int64_t)e->f;
     return narrow_special(e->kind, width);
 }
 
-/* Resolve one element to a double (float context). */
+/* Resolve one element to a double (float context).  EL_MONTH must return its
+ * float TWIN (.f), not the month payload — a bare `2000.01` is the float
+ * 2000.01, and the payload (0) would silently replace it (review C1). */
 static double el_to_float(const num_el *e) {
     if (e->kind == EL_NULL) return NULL_F64;
     if (e->kind == EL_PINF || e->kind == EL_NINF)
         q_die("q float infinity unsupported (deferred)");
+    if (e->kind == EL_MONTH) return e->f;
     return (e->kind == EL_FLOAT) ? e->f : (double)e->i;
 }
 
@@ -448,9 +631,19 @@ static void read_type_letter(const char *src, int *p, char *letter,
                            last->kind == EL_PINF || last->kind == EL_NINF);
     int ts_ok = last && (last->kind == EL_TS || last->kind == EL_NULL ||
                          last->kind == EL_PINF || last->kind == EL_NINF);
+    int month_ok = last && (last->kind == EL_MONTH || last->kind == EL_NULL ||
+                            last->kind == EL_PINF || last->kind == EL_NINF);
+    int minute_ok = last && (last->kind == EL_MINUTE || last->kind == EL_NULL ||
+                             last->kind == EL_PINF || last->kind == EL_NINF);
+    int second_ok = last && (last->kind == EL_SECOND || last->kind == EL_NULL ||
+                             last->kind == EL_PINF || last->kind == EL_NINF);
+    int timespan_ok = last && (last->kind == EL_TIMESPAN || last->kind == EL_NULL ||
+                               last->kind == EL_PINF || last->kind == EL_NINF);
     if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
               (c == 'g' && guid_ok) || (c == 't' && time_ok) ||
-              (c == 'p' && ts_ok))) {
+              (c == 'p' && ts_ok) || (c == 'm' && month_ok) ||
+              (c == 'u' && minute_ok) || (c == 'v' && second_ok) ||
+              (c == 'n' && timespan_ok))) {
         if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
         *letter = c;
         (*p)++;
@@ -568,6 +761,8 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             /* lowercase `0np` is the K-ism synonym of `0Np` — a typed null,
              * not a fractional magnitude (see the date arm below). */
             if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         int64_t t[MAX_VEC];
@@ -600,7 +795,9 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             /* forces_float on a NULL element is just the lowercase `0n` spelling
              * (openq accepts `0nd` as a K-ism synonym of `0Nd`); it is a typed
              * null, not a fractional magnitude, so it does NOT bar the date. */
-            if (buf[i].kind == EL_FLOAT ||
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
@@ -629,7 +826,9 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         for (int i = 0; i < m; i++)
             /* lowercase `0nt` is the K-ism synonym of `0Nt` — a typed null, not
              * a fractional magnitude (see the date arm above). */
-            if (buf[i].kind == EL_FLOAT ||
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
                 (buf[i].forces_float && buf[i].kind != EL_NULL))
                 q_die("bad number");
         if (m == 1) {
@@ -644,6 +843,130 @@ static ray_t *scan_num_literal(const char *src, int *p) {
                 if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
         }
         return vec;
+    }
+
+    /* Month context: ONLY the `m` suffix (0Nm / 0Wm / -0Wm / 2000.01m) — a
+     * month-shaped magnitude alone is NOT a commitment (bare `2000.01` is the
+     * float; EL_MONTH elements revert to their float twins below).  kdb month
+     * == i32 months since 2000.01 (payload (y-2000)*12+(mo-1)): Specials
+     * narrow to the width-4 sentinels and a plain int widens as a raw month
+     * count (the date-arm rule).  A genuine fractional magnitude or a foreign
+     * temporal mate can never be a month. */
+    if (letter == 'm') {
+        for (int i = 0; i < m; i++)
+            /* EL_MONTH itself carries forces_float=1 (the float-twin machinery)
+             * and is VALID here; lowercase `0nm` is the K-ism null synonym. */
+            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
+                buf[i].kind == EL_TIMESPAN ||
+                (buf[i].forces_float && buf[i].kind != EL_MONTH &&
+                 buf[i].kind != EL_NULL))
+                q_die("bad number");
+        if (m == 1) {
+            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_MONTH);
+            return ray_month(el_to_int(&buf[0], 4));
+        }
+        int32_t t[MAX_VEC];
+        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+        ray_t *vec = ray_vec_from_raw(RAY_MONTH, t, m);
+        if (vec && !RAY_IS_ERR(vec)) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+        }
+        return vec;
+    }
+
+    /* Minute context: a `u` suffix (0Nu / 0Wu / -0Wu) or any HH:MM
+     * magnitude.  kdb minute == i32 minutes since midnight
+     * (basics/datatypes.md row 17): Specials narrow to the width-4
+     * sentinels, a plain int widens as a raw minute count (the date-arm
+     * rule), a fractional magnitude or foreign temporal mate dies. */
+    {
+        int is_minute = (letter == 'u');
+        for (int i = 0; i < m && !is_minute; i++)
+            if (buf[i].kind == EL_MINUTE) is_minute = 1;
+        if (is_minute) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                    buf[i].kind == EL_MONTH || buf[i].kind == EL_SECOND ||
+                    buf[i].kind == EL_TIMESPAN ||
+                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                    q_die("bad number");
+            if (m == 1) {
+                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_MINUTE);
+                return ray_minute(el_to_int(&buf[0], 4));
+            }
+            int32_t t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+            ray_t *vec = ray_vec_from_raw(RAY_MINUTE, t, m);
+            if (vec && !RAY_IS_ERR(vec)) {
+                for (int i = 0; i < m; i++)
+                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            }
+            return vec;
+        }
+    }
+
+    /* Second context: a `v` suffix or any HH:MM:SS magnitude.  kdb second
+     * == i32 seconds since midnight (datatypes.md row 18). */
+    {
+        int is_second = (letter == 'v');
+        for (int i = 0; i < m && !is_second; i++)
+            if (buf[i].kind == EL_SECOND) is_second = 1;
+        if (is_second) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
+                    buf[i].kind == EL_TIMESPAN ||
+                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                    q_die("bad number");
+            if (m == 1) {
+                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_SECOND);
+                return ray_second(el_to_int(&buf[0], 4));
+            }
+            int32_t t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
+            ray_t *vec = ray_vec_from_raw(RAY_SECOND, t, m);
+            if (vec && !RAY_IS_ERR(vec)) {
+                for (int i = 0; i < m; i++)
+                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            }
+            return vec;
+        }
+    }
+
+    /* Timespan context: an `n` suffix (0Nn / 0Wn / -0Wn) or any timespan
+     * magnitude (dD… / HH:MM:SS.f{4,9}).  kdb timespan == i64 nanoseconds
+     * (datatypes.md row 16): Specials narrow width-8, a plain int is a raw
+     * ns count (the timestamp-arm rule). */
+    {
+        int is_timespan = (letter == 'n');
+        for (int i = 0; i < m && !is_timespan; i++)
+            if (buf[i].kind == EL_TIMESPAN) is_timespan = 1;
+        if (is_timespan) {
+            for (int i = 0; i < m; i++)
+                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
+                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
+                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
+                    buf[i].kind == EL_SECOND ||
+                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                    q_die("bad number");
+            int64_t t[MAX_VEC];
+            for (int i = 0; i < m; i++) t[i] = el_to_int(&buf[i], 8);
+            if (m == 1) {
+                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIMESPAN);
+                return ray_timespan(t[0]);
+            }
+            ray_t *vec = ray_vec_from_raw(RAY_TIMESPAN, t, m);
+            if (vec && !RAY_IS_ERR(vec)) {
+                for (int i = 0; i < m; i++)
+                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            }
+            return vec;
+        }
     }
 
     /* Float context: explicit e/f letter, or any fractional/lowercase-special. */
@@ -2213,9 +2536,13 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
         ray_release(ns);
         return err;
     }
+    /* A leading-dot target (`.foo.x:42`) is a GLOBAL namespace write even
+     * inside a lambda body — q dotted names are never locals (q4m3 §12). */
+    int is_dotted_global = (ray_str_len(ns) > 0 && ray_str_ptr(ns)[0] == '.');
     ray_release(ns);
 
-    const char *target = (is_local && in_lambda) ? "let" : "set";
+    const char *target = (is_local && in_lambda && !is_dotted_global)
+                             ? "let" : "set";
     ray_t *setv = ql_env_val(target);
     if (!setv) return NULL;
     ray_retain(setv);
@@ -2361,7 +2688,16 @@ static void ql_mod_assign(ray_t **slot, int in_lambda) {
     ray_t *opv = q_registry_lookup_name(nm, l - 1, Q_DYADIC);   /* borrowed */
     ray_release(s);
     if (!opv) return;                       /* unknown op -> eval errors as today */
-    ray_t *setv = ql_env_val(in_lambda ? "let" : "set");        /* borrowed */
+    /* dotted targets (`.foo.x+:1`) are global namespace amends, never locals */
+    int mod_dotted = 0;
+    {
+        ray_t *ts = ray_sym_str(e[1]->i64);
+        if (ts) {
+            mod_dotted = (ray_str_len(ts) > 0 && ray_str_ptr(ts)[0] == '.');
+            ray_release(ts);
+        }
+    }
+    ray_t *setv = ql_env_val((in_lambda && !mod_dotted) ? "let" : "set"); /* borrowed */
     if (!setv) return;
     /* inner (op `x y): op on x's CURRENT value and y (append retains each) */
     ray_t *inner = ray_list_new(3);
@@ -2726,7 +3062,194 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
  * behaviour) plus the lowering walker above.  2b's parser flip moves the head
  * resolution into q_parse (the 2b flip).  May return a
  * RAY_ERROR (consuming `ast`): callers must error-check the result. */
+/* ===== context qualification (q namespaces, ADR: 2026-07-08 spec) ==========
+ * When the `\d` context is not root, every UNQUALIFIED user name-ref in the
+ * pre-lower tree is rewritten in place to `.ctx.name` — reads and assignment
+ * targets alike.  Because lowering runs at DEFINITION time for lambda bodies,
+ * this rewrite IS q's definition-time binding rule (q4m3 §12.7: an unqualified
+ * global in a function binds to the context in effect at definition).
+ *
+ * What is NOT rewritten:
+ *   - quoted (data) syms and non-identifier names (verb glyphs, markers),
+ *   - q reserved words / control words / BUILTIN env bindings
+ *     (q_ns_is_unqualifiable — user globals only),
+ *   - lambda locals (params + plain-`:`/`op:` targets) and ctx-literal
+ *     element locals — collected per scope below,
+ *   - dotted names (already qualified).
+ * A scope with more than QNS_SCOPE_CAP distinct locals qualifies NOTHING in
+ * its subtree (conservative: preserves the env-cascade behaviour rather than
+ * turning spilled locals into 'name errors). */
+#define QNS_SCOPE_CAP 64
+
+typedef struct qns_scope {
+    struct qns_scope *up;
+    int64_t names[QNS_SCOPE_CAP];
+    int     n;
+    int     spill;
+} qns_scope;
+
+static int qns_scope_has(const qns_scope *sc, int64_t id) {
+    for (; sc; sc = sc->up) {
+        for (int i = 0; i < sc->n; i++)
+            if (sc->names[i] == id) return 1;
+    }
+    return 0;
+}
+
+static int qns_scope_spilled(const qns_scope *sc) {
+    for (; sc; sc = sc->up)
+        if (sc->spill) return 1;
+    return 0;
+}
+
+static void qns_scope_add(qns_scope *sc, int64_t id) {
+    if (qns_scope_has(sc, id)) return;
+    if (sc->n >= QNS_SCOPE_CAP) { sc->spill = 1; return; }
+    sc->names[sc->n++] = id;
+}
+
+static int qns_ident_shaped(const char *p, size_t l) {
+    if (l == 0) return 0;
+    if (!((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')))
+        return 0;
+    for (size_t i = 1; i < l; i++) {
+        char c = p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 1;
+}
+
+/* If `node` is a pre-lower assignment `(:;sym;val)` / `(op:;sym;val)` /
+ * `(::;sym;val)`, classify the head: 1 = local-binding (`:` or `op:`),
+ * 2 = global (`::`), 0 = not an assignment on a sym target. */
+static int qns_assign_kind(ray_t *node) {
+    if (!node || node->type != RAY_LIST || ray_len(node) != 3) return 0;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
+    if (!e[1] || e[1]->type != -RAY_SYM || (e[1]->attrs & Q_ATTR_QUOTED))
+        return 0;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return 0;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int kind = 0;
+    if (l == 1 && nm[0] == ':') kind = 1;                       /* `:`   */
+    else if (l == 2 && nm[0] == ':' && nm[1] == ':') kind = 2;  /* `::`  */
+    else if (l >= 2 && nm[l - 1] == ':' && nm[0] != ':') kind = 1; /* op: */
+    ray_release(s);
+    return kind;
+}
+
+/* Collect local-binding targets of one scope body: plain-`:`/`op:` sym
+ * targets at any expression depth, NOT descending into nested lambdas or
+ * ctx-literals (each gets its own scope when visited). */
+static void qns_collect(ray_t *node, qns_scope *sc, int depth) {
+    if (!node || node->type != RAY_LIST || depth > 128) return;
+    if (ql_is_lambda(node) || ql_is_ctx_literal(node)) return;
+    if (qns_assign_kind(node) == 1) {
+        ray_t **e = (ray_t **)ray_data(node);
+        ray_t *ts = ray_sym_str(e[1]->i64);
+        if (ts) {
+            /* dotted targets are global namespace writes, never locals */
+            if (ray_str_len(ts) > 0 && ray_str_ptr(ts)[0] != '.')
+                qns_scope_add(sc, e[1]->i64);
+            ray_release(ts);
+        }
+    }
+    int64_t n = ray_len(node);
+    ray_t **e = (ray_t **)ray_data(node);
+    for (int64_t i = 0; i < n; i++)
+        qns_collect(e[i], sc, depth + 1);
+}
+
+/* Rewrite one unquoted name-ref sym slot to `.ctx.name` when it qualifies. */
+static void qns_maybe_rewrite(ray_t **slot, const qns_scope *sc,
+                              const char *ctx) {
+    ray_t *node = *slot;
+    if (!node || node->type != -RAY_SYM || (node->attrs & Q_ATTR_QUOTED))
+        return;
+    if (qns_scope_spilled(sc) || qns_scope_has(sc, node->i64)) return;
+    ray_t *s = ray_sym_str(node->i64);
+    if (!s) return;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    if (!qns_ident_shaped(nm, l) || q_ns_is_unqualifiable(nm, l)) {
+        ray_release(s);
+        return;
+    }
+    char full[192];
+    int fl = snprintf(full, sizeof full, "%s.%.*s", ctx, (int)l, nm);
+    ray_release(s);
+    if (fl <= 0 || (size_t)fl >= sizeof full) return;
+    ray_t *repl = ray_sym(ray_sym_intern(full, (size_t)fl));
+    if (!repl || RAY_IS_ERR(repl)) return;
+    ray_release(node);
+    *slot = repl;                      /* name-ref: quoted attr stays clear */
+}
+
+static void qns_walk(ray_t **slot, qns_scope *sc, const char *ctx, int depth) {
+    ray_t *node = *slot;
+    if (!node || depth > 128) return;
+    if (node->type == -RAY_SYM) {
+        qns_maybe_rewrite(slot, sc, ctx);
+        return;
+    }
+    if (node->type != RAY_LIST) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    int64_t n = ray_len(node);
+
+    if (ql_is_lambda(node)) {
+        /* `({ src params stmt…)` — fresh scope: params + body locals.  The
+         * parent chain stays visible (openq's eval resolves outer lambda
+         * frames dynamically; not rewriting an outer local preserves that). */
+        qns_scope inner = { .up = (qns_scope *)sc, .n = 0, .spill = 0 };
+        if (n >= 3 && e[2] && e[2]->type == RAY_SYM) {
+            int64_t np = ray_len(e[2]);
+            const int64_t *pids = (const int64_t *)ray_data(e[2]);
+            for (int64_t i = 0; i < np; i++)
+                qns_scope_add(&inner, pids[i]);
+        }
+        for (int64_t i = 3; i < n; i++)
+            qns_collect(e[i], &inner, 0);
+        for (int64_t i = 3; i < n; i++)
+            qns_walk(&e[i], &inner, ctx, depth + 1);
+        return;
+    }
+
+    if (ql_is_ctx_literal(node)) {
+        /* paren/table literal: element `:` bind a pushed scope (q_ctx_build);
+         * enclosing locals stay visible through the parent chain. */
+        qns_scope inner = { .up = (qns_scope *)sc, .n = 0, .spill = 0 };
+        for (int64_t i = 1; i < n; i++)
+            qns_collect(e[i], &inner, 0);
+        for (int64_t i = 1; i < n; i++)
+            qns_walk(&e[i], &inner, ctx, depth + 1);
+        return;
+    }
+
+    int ak = qns_assign_kind(node);
+    if (ak) {
+        /* target: `:`/`op:` bind a local inside a scope (leave it); at the
+         * top level — and `::` everywhere — the target is a context global. */
+        if (ak == 2 || sc == NULL)
+            qns_maybe_rewrite(&e[1], sc, ctx);
+        qns_walk(&e[2], sc, ctx, depth + 1);
+        return;
+    }
+
+    for (int64_t i = 0; i < n; i++)
+        qns_walk(&e[i], sc, ctx, depth + 1);
+}
+
 ray_t *q_lower(ray_t *ast) {
+    /* Context qualification first, on the PRE-lower shapes (assignment heads
+     * still `:`/`::`, lambdas still `{`-marked) — see the block comment. */
+    const char *qctx = q_ns_current();
+    if (ast && !RAY_IS_ERR(ast) && qctx[0])
+        qns_walk(&ast, NULL, qctx, 0);
     if (ast && ast->type == RAY_LIST) {
         ray_t *err = q_lower_walk(&ast, 0, 0);
         if (err) { ray_release(ast); return err; }
