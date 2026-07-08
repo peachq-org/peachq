@@ -203,7 +203,13 @@ static char* dom_resolve_path(const char* path) {
      * realpath(NULL)/strdup's libc-malloc'd buffers, so the returned key is
      * uniformly buddy-allocated and the caller releases it with ray_free_raw. */
     char resolved[PATH_MAX];
+#ifdef RAY_OS_WINDOWS
+    /* _fullpath canonicalizes lexically (no symlink resolution, no
+     * existence check) — closest CRT equivalent; stage-2 revisit. */
+    if (_fullpath(resolved, path, sizeof(resolved))) {
+#else
     if (realpath(path, resolved)) {
+#endif
         size_t n = strlen(resolved);
         char* out = (char*)ray_sys_alloc(n + 1);
         if (out) memcpy(out, resolved, n + 1);
@@ -223,7 +229,11 @@ static char* dom_resolve_path(const char* path) {
     memcpy(tmp, path, plen + 1);
     char* dir = dirname(tmp);
     char rdir[PATH_MAX];
+#ifdef RAY_OS_WINDOWS
+    if (!_fullpath(rdir, dir, sizeof(rdir))) return NULL;
+#else
     if (!realpath(dir, rdir)) return NULL;
+#endif
     size_t dlen = strlen(rdir);
     char* out = (char*)ray_sys_alloc(dlen + 1 + blen + 1);
     if (!out) return NULL;
