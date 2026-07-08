@@ -264,7 +264,113 @@ static ray_t* q_take_wrap(ray_t* n, ray_t* list) {
  * Length is derived string-aware: a q string is a -RAY_STR atom whose char
  * count lives in ray_str_len, NOT the ->len union field (which aliases the SSO
  * {slen,sdata} bytes), so ray_len would be garbage for strings. */
+static int q_values_match(ray_t* a, ray_t* b);      /* fwd (amend engine, below) */
+
+/* q_collapse_list leaves a ZERO-length boxed list untyped (no element to infer
+ * from); key-indexing selections must instead inherit the PROTO vector's type
+ * so an empty result keeps its domain (codex r3: `` type key `a _ `a!1 `` must
+ * be 11h / `` `symbol$() ``, not 0h / `()`).  Consumes `collapsed`, borrows
+ * `proto`; passes errors and non-empty results through untouched. */
+static ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
+    if (!collapsed || RAY_IS_ERR(collapsed)) return collapsed;
+    if (collapsed->type != RAY_LIST || ray_len(collapsed) != 0) return collapsed;
+    if (!proto || !ray_is_vec(proto) || proto->type == RAY_LIST) return collapsed;
+    ray_t* tv = (proto->type == RAY_SYM) ? ray_sym_vec_new(RAY_SYM_W64, 0)
+                                         : ray_vec_new(proto->type, 0);
+    if (!tv || RAY_IS_ERR(tv)) { if (tv) ray_release(tv); return collapsed; }
+    ray_release(collapsed);
+    return tv;
+}
+
+/* d without the entries for keys ks (atom or vector) — kdb Drop is tolerant:
+ * keys not present are ignored (ref/drop.md `` `a _ `a`b`c!1 2 3 ``).
+ * Borrows both; returns an owned dict.  Same append/release discipline as
+ * q_dict_union (q_apply.c). */
+static ray_t* q_dict_drop_keys(ray_t* d, ray_t* ks) {
+    ray_t* dk = ray_dict_keys(d);                    /* borrowed */
+    ray_t* dv = ray_dict_vals(d);                    /* borrowed */
+    if (!dk || !dv) return ray_error("type", "_ (drop): malformed dictionary");
+    int64_t nd = ray_dict_len(d);
+    int64_t nk = (ks && (ray_is_vec(ks) || ks->type == RAY_LIST)) ? ray_len(ks) : -1;
+    ray_t* ok = ray_list_new(nd > 0 ? nd : 1);
+    ray_t* ov = ray_list_new(nd > 0 ? nd : 1);
+    if (!ok || !ov) {
+        if (ok) ray_release(ok);
+        if (ov) ray_release(ov);
+        return ray_error("oom", NULL);
+    }
+    for (int64_t i = 0; i < nd; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* ke = ray_at_fn(dk, ia);               /* owned key */
+        ray_release(ia);
+        if (!ke || RAY_IS_ERR(ke)) { ray_release(ok); ray_release(ov); return ke ? ke : ray_error("type", NULL); }
+        int hit = 0;
+        if (nk < 0) {
+            hit = q_values_match(ke, ks);
+        } else {
+            for (int64_t j = 0; j < nk && !hit; j++) {
+                ray_t* ja = ray_i64(j);
+                ray_t* kj = ray_at_fn(ks, ja);       /* owned */
+                ray_release(ja);
+                if (kj && !RAY_IS_ERR(kj)) {
+                    hit = q_values_match(ke, kj);
+                    ray_release(kj);
+                } else if (kj) {
+                    ray_release(ke); ray_release(ok); ray_release(ov);
+                    return kj;
+                }
+            }
+        }
+        if (hit) { ray_release(ke); continue; }
+        ray_t* ja2 = ray_i64(i);
+        ray_t* ve = ray_at_fn(dv, ja2);              /* owned value */
+        ray_release(ja2);
+        if (!ve || RAY_IS_ERR(ve)) { ray_release(ke); ray_release(ok); ray_release(ov); return ve ? ve : ray_error("type", NULL); }
+        ok = ray_list_append(ok, ke);
+        ov = ray_list_append(ov, ve);
+        ray_release(ke);
+        ray_release(ve);
+    }
+    ray_t* ck = q_typed_empty_like(q_collapse_list(ok), dk);
+    ray_t* cv = q_typed_empty_like(q_collapse_list(ov), dv);
+    ray_release(ok);
+    ray_release(ov);
+    if (!ck || RAY_IS_ERR(ck)) { if (cv && !RAY_IS_ERR(cv)) ray_release(cv); return ck ? ck : ray_error("type", NULL); }
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(ck); return cv ? cv : ray_error("type", NULL); }
+    return ray_dict_new(ck, cv);                     /* consumes both */
+}
+
 static ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
+    /* ---- dict arms (ref/drop.md) — claimed BEFORE the int-vector cut arm so
+     * `1 2 _ intkeyed_dict` is a key-drop, and before the int-atom count tail
+     * so `1_d` drops ENTRIES (keys and values together), never values-only. */
+    if (list && list->type == RAY_DICT && !q_is_keyed_table(list)) {
+        /* n _ d — int ATOM drops the first/last n entries */
+        if (n && n->type == -RAY_I64 && !RAY_ATOM_IS_NULL(n)) {
+            ray_t* k = ray_dict_keys(list);          /* borrowed */
+            ray_t* v = ray_dict_vals(list);          /* borrowed */
+            if (!k || !v) return ray_error("type", "_ (drop): malformed dictionary");
+            ray_t* rk = q_drop_wrap(n, k);
+            if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);
+            if (!rk || RAY_IS_ERR(rk)) return rk;
+            ray_t* rv = q_drop_wrap(n, v);
+            if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
+            if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
+            return ray_dict_new(rk, rv);             /* consumes both */
+        }
+        /* keys _ d — sym atom / sym vector / int vector lhs drops entries by
+         * key (other lhs kinds keep today's error tail) */
+        if (n && (n->type == -RAY_SYM || n->type == RAY_SYM ||
+                  n->type == RAY_I64 || n->type == RAY_I32 || n->type == RAY_I16))
+            return q_dict_drop_keys(list, n);
+    }
+    /* d _ key — dict lhs drops the entry at an ATOM key; a vector rhs is
+     * 'type (ref/drop.md pins `(`a`b`c!1 2 3) _ `a`b` -> 'type). */
+    if (n && n->type == RAY_DICT && !q_is_keyed_table(n)) {
+        if (list && ray_is_atom(list))
+            return q_dict_drop_keys(n, list);
+        return ray_error("type", "_ (drop): dict drop takes an atom key");
+    }
     /* q cut: int-VECTOR lhs — `2 4_v` slices [p0,p1) then [p_last,end).
      * Positions non-decreasing within 0..len; result is a boxed list of
      * slices (kdb 0h). */
@@ -601,11 +707,46 @@ static ray_t* q_til_wrap(ray_t* x) {
     return ray_til_fn(x);
 }
 
+/* Borrow-or-collapse a dict's VALUES for a kernel call: a typed vector passes
+ * through BORROWED (*owned=0); a boxed list collapses (q_collapse_list, owned
+ * result, *owned=1) so homogeneous literal dicts hit the typed kernels.
+ * Caller releases iff *owned.  NULL on a malformed dict. */
+static ray_t* q_dict_vals_vec(ray_t* d, int* owned) {
+    *owned = 0;
+    ray_t* vals = ray_dict_vals(d);              /* borrowed accessor */
+    if (!vals) return NULL;
+    if (vals->type == RAY_LIST) {
+        ray_t* c = q_collapse_list(vals);        /* owned */
+        if (c && !RAY_IS_ERR(c)) { *owned = 1; return c; }
+        if (c) ray_release(c);
+        return vals;                             /* uncollapsible: borrowed */
+    }
+    return vals;
+}
+
 /* q `where` / monadic `&` — an INTEGER vector repeats each index i, x[i] times
  * (`where 2 3 1` -> 0 0 1 1 1 2; `where 0 1 0 1 0 1` -> 1 3 5).  Base
  * ray_where_fn handles the boolean-mask form, so delegate for it and anything
  * else.  Result is a long vector (kdb).  Negative counts are 'domain. */
 static ray_t* q_where_wrap(ray_t* x) {
+    /* where d — keys replicated by the (int/bool) values (ref/where.md):
+     * `where `a`b`c!1 0 2` -> `a`c`c; a bool-valued dict (comparison result)
+     * gives the keys where true.  Key-indexing shape keys[where vals], NOT
+     * value distribution. */
+    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
+        ray_t* keys = ray_dict_keys(x);            /* borrowed */
+        if (!keys) return ray_error("type", "where: malformed dictionary");
+        int vo = 0;
+        ray_t* vv = q_dict_vals_vec(x, &vo);
+        if (!vv) return ray_error("type", "where: malformed dictionary");
+        ray_t* w = q_where_wrap(vv);               /* bool mask or int counts */
+        if (vo) ray_release(vv);
+        if (!w || RAY_IS_ERR(w)) return w;
+        ray_t* r = ray_at_fn(keys, w);
+        ray_release(w);
+        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_collapse_list(r), keys); ray_release(r); return c; }
+        return r;
+    }
     if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
         int64_t n = ray_len(x);
         int64_t total = 0;
@@ -630,6 +771,25 @@ static ray_t* q_where_wrap(ray_t* x) {
         return out;
     }
     return ray_where_fn(x);
+}
+
+/* q `reverse x` / monadic `|` — a dict reverses ENTRIES (keys and values
+ * together, ref/reverse.md: "on dictionaries, reverses the keys"); everything
+ * else delegates to base reverse unchanged. */
+static ray_t* q_reverse_wrap(ray_t* x) {
+    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
+        ray_t* k = ray_dict_keys(x);                 /* borrowed */
+        ray_t* v = ray_dict_vals(x);                 /* borrowed */
+        if (!k || !v) return ray_error("type", "reverse: malformed dictionary");
+        ray_t* rk = ray_reverse_fn(k);
+        if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);   /* dict slots must be concrete */
+        if (!rk || RAY_IS_ERR(rk)) return rk;
+        ray_t* rv = ray_reverse_fn(v);
+        if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
+        if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
+        return ray_dict_new(rk, rv);                 /* consumes both */
+    }
+    return ray_reverse_fn(x);
 }
 
 /* ===== q `vs` / `sv` — split-join / base-encode family ===================
@@ -2638,6 +2798,17 @@ static ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     return nt;
 }
 
+/* q `x,y` join — table , record-dict appends the record (ref/join.md +
+ * ref/upsert.md: a simple table's Join of a matching record is the same
+ * append upsert performs); EVERY other operand pair delegates to base concat
+ * (register_binary("concat") == ray_concat_fn) byte-identically — dict,dict
+ * upsert-union and table,table row-join already live there. */
+static ray_t* q_join_wrap(ray_t* x, ray_t* y) {
+    if (x && x->type == RAY_TABLE && y && y->type == RAY_DICT && !q_is_keyed_table(y))
+        return q_upsert_wrap(x, y);
+    return ray_concat_fn(x, y);
+}
+
 /* ---- table set-ops core (distinct/union/except/inter arms) --------------- */
 
 /* Indices of x-rows [not] present in y (whole-row membership). */
@@ -2765,6 +2936,15 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
             }
         }
     }
+    /* table!table — a keyed table IS a dict from key records to value records
+     * (dict.qcmd `([]k..)!([]v..)`); row counts must match ('length, kdb). */
+    if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
+        if (ray_table_nrows(x) != ray_table_nrows(y))
+            return ray_error("length", "!: key and value row counts must match");
+        ray_retain(x);
+        ray_retain(y);
+        return ray_dict_new(x, y);               /* consumes both retains */
+    }
     ray_t* keys = x;
     ray_t* keys_owned = NULL;
     if (ray_is_atom(x)) {
@@ -2802,7 +2982,24 @@ static ray_t* q_value_resolve_sym_owned(ray_t* symv);   /* fwd (below) */
  *                   bound to a non-dict; `()` if unbound (context-aware)
  * File handles (`` `:path ``) are the file-I/O wave: 'nyi.  Everything else
  * non-dict stays a deferred 'type cell. */
+static const char* q_type_qname(int8_t t);          /* fwd (cast map, below) */
+
 static ray_t* q_key_wrap(ray_t* x) {
+    /* type of a vector (ref/key.md): `key 0#5` -> `long; a native string
+     * atom IS the provisional char vector -> `char; `key 10` -> til 10. */
+    if (x && ray_is_vec(x)) {
+        const char* nm = q_type_qname(x->type);
+        if (nm) return ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
+        /* unnamed vector types keep the deferred 'type tail below */
+    }
+    if (x && x->type == -RAY_STR)
+        return ray_sym(ray_sym_intern_runtime("char", 4));
+    if (x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16) &&
+        !RAY_ATOM_IS_NULL(x)) {
+        int64_t v = (x->type == -RAY_I64) ? x->i64
+                  : (x->type == -RAY_I32) ? (int64_t)x->i32 : (int64_t)x->i16;
+        if (v >= 0) return q_til_wrap(x);           /* key n == til n */
+    }
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);
         if (!s) return ray_error("type", "key: bad symbol");
@@ -3475,6 +3672,25 @@ static ray_t* q_deal_pick(int64_t n, ray_t* y) {
  *   -n ? m (deal / 0N?m permute), n ? float — DEFERRED cells (no rayfall
  *   support; error, never a wrong answer). */
 static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
+    /* d?y — reverse dictionary lookup (basics/dictsandtables.md): the key of
+     * the FIRST value matching y, i.e. keys[vals?y].  A find miss lands at
+     * count vals, and ray_at_fn null-fills that out-of-range key index — the
+     * typed null of the key domain, kdb's miss result.  Keyed tables keep
+     * their own (deferred) path. */
+    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
+        ray_t* keys = ray_dict_keys(x);              /* borrowed */
+        if (!keys) return ray_error("type", "?: malformed dictionary");
+        int vo = 0;
+        ray_t* vv = q_dict_vals_vec(x, &vo);
+        if (!vv) return ray_error("type", "?: malformed dictionary");
+        ray_t* i = q_roll_wrap(vv, y);               /* find arm: miss -> count */
+        if (vo) ray_release(vv);
+        if (!i || RAY_IS_ERR(i)) return i;
+        ray_t* r = ray_at_fn(keys, i);
+        ray_release(i);
+        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_collapse_list(r), keys); ray_release(r); return c; }
+        return r;
+    }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
         int64_t cnt = ray_len(x);
         ray_t* i = ray_find_fn(x, y);
@@ -3636,6 +3852,29 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         return r;
     }
     return 0;
+}
+
+/* RAY vector type -> q type-name (ref/key.md "type of a vector"; the exact
+ * REVERSE of the cast-designator name map above — keep the two in sync). */
+static const char* q_type_qname(int8_t t) {
+    switch (t) {
+    case RAY_BOOL:      return "boolean";
+    case RAY_U8:        return "byte";
+    case RAY_I16:       return "short";
+    case RAY_I32:       return "int";
+    case RAY_I64:       return "long";
+    case RAY_F32:       return "real";
+    case RAY_F64:       return "float";
+    case RAY_SYM:       return "symbol";
+    case RAY_DATE:      return "date";
+    case RAY_MONTH:     return "month";
+    case RAY_MINUTE:    return "minute";
+    case RAY_SECOND:    return "second";
+    case RAY_TIME:      return "time";
+    case RAY_TIMESPAN:  return "timespan";
+    case RAY_TIMESTAMP: return "timestamp";
+    default:            return NULL;
+    }
 }
 
 /* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
@@ -6775,6 +7014,8 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_DIFFER: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_differ_wrap);
     case QK_TIL:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_til_wrap);
     case QK_WHERE:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_where_wrap);
+    case QK_REV:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_reverse_wrap);
+    case QK_JOIN:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_join_wrap);
     case QK_VS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_vs_wrap);
     case QK_SV:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sv_wrap);
     case QK_SUMS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sums_wrap);
