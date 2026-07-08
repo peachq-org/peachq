@@ -259,15 +259,23 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
       if (con && *con) fputs(con, out);
       q_console_reset(); }
 
+    /* Mirror repl.c's post-eval contract: a Ctrl-C that landed during eval
+     * means "stop" even when a non-polling C kernel absorbed it and the
+     * eval completed with a normal result — the result is discarded, never
+     * printed (repl.c prints ^C there; q reports the qdocs 'stop error:
+     * "Current operation stopped due to user interrupt (Ctrl-c)").  The
+     * polling paths surface the same flag as a 'limit error, so this one
+     * check covers both. */
+    if (ray_eval_is_interrupted() || ray_term_interrupted()) {
+        ray_eval_clear_interrupt();
+        ray_term_clear_interrupt();
+        if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
+        fprintf(err, "error: stop\n");
+        return;
+    }
+
     if (RAY_IS_ERR(r)) {
         const char* code = (const char*)r->sdata;
-        if (ray_eval_is_interrupted()) {
-            /* qdocs basics/errors.md: 'stop' = "Current operation stopped
-             * due to user interrupt (Ctrl-c) or time limit (-T)". */
-            code = "stop";
-            ray_eval_clear_interrupt();
-            ray_term_clear_interrupt();
-        }
         fprintf(err, "error: %s\n", (code && *code) ? code : "eval");
         ray_error_free(r);
         return;
