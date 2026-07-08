@@ -639,13 +639,22 @@ static int64_t el_to_int(const num_el *e, int width) {
 
 /* Resolve one element to a double (float context).  EL_MONTH must return its
  * float TWIN (.f), not the month payload — a bare `2000.01` is the float
- * 2000.01, and the payload (0) would silently replace it (review C1). */
+ * 2000.01, and the payload (0) would silently replace it (review C1).
+ * EL_PINF/EL_NINF (`0w`/`-0w`) PARSE but canonicalize to the float null —
+ * the single-null float model (owner ruling 2026-07-09): no live infinity is
+ * ever created, exactly the datetime 0Wz -> 0Nz precedent.  Display is `0n`
+ * where kdb shows `0w` (documented divergence, cases.tsv + ARCHITECTURE.md). */
 static double el_to_float(const num_el *e) {
     if (e->kind == EL_NULL) return NULL_F64;
-    if (e->kind == EL_PINF || e->kind == EL_NINF)
-        q_die("q float infinity unsupported (deferred)");
+    if (e->kind == EL_PINF || e->kind == EL_NINF) return NULL_F64;
     if (e->kind == EL_MONTH) return e->f;
     return (e->kind == EL_FLOAT) ? e->f : (double)e->i;
+}
+
+/* True iff this element lands on the float NULL in a float context (a real
+ * null OR a canonicalized infinity) — drives the vector null bitmap. */
+static int el_float_is_null(const num_el *e) {
+    return e->kind == EL_NULL || e->kind == EL_PINF || e->kind == EL_NINF;
 }
 
 /* Read an optional trailing type letter (b/h/i/j/e/f, plus gated d) at
@@ -1074,7 +1083,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         }
         if (vec && !RAY_IS_ERR(vec)) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                if (el_float_is_null(&buf[i])) ray_vec_set_null(vec, i, true);
         }
         return vec;
     }
@@ -1151,6 +1160,16 @@ static Tokens scan(const char *src) {
                         !byte_lit_starts(src, p + 1) &&   /* -0x0a: '-' stays the verb (bytes are unsigned) */
                         (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
 
+        /* Leading-dot float literal: '.' glued to a digit starts a number
+         * (`.2` -> 0.2, `2+.5` -> 2.5, `cos (.2;.3 .4)`) under the SAME gate
+         * as the sign rule — glued to a preceding noun (`x.2`, `.2.3` after
+         * `.2`) the '.' stays the apply/index verb (kdb's exact behaviour
+         * there is not doc-pinned; no-churn).  `.z`-style namespace names
+         * are untouched (gate requires a DIGIT after the dot); the strand
+         * continuation (`2 .3`) already accepted these via ray_parse_f64. */
+        int dot_float = (c == '.' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) &&
+                         (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
+
         /* kdb digit-colon verbs: `0:` (File Text; ref/file-text.md), `1:`/`2:`
          * (File Binary / Dynamic Load — tokenized identically; without a
          * manifest row the name stays a name-ref per the registry-miss rule).
@@ -1165,7 +1184,7 @@ static Tokens scan(const char *src) {
             EMIT(T_VERB, q_verb_name(nm, 2));
             noun_pos = 0;
         }
-        else if ((cl & CL_DIGIT) || neg_sign) {
+        else if ((cl & CL_DIGIT) || neg_sign || dot_float) {
             EMIT(T_NOUN, scan_num_literal(src, &p));
             noun_pos = 1;
         }
