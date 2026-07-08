@@ -97,8 +97,7 @@ static inline int is_numeric(ray_t* x) {
 
 /* Check if an atom is a temporal type */
 static inline int is_temporal(ray_t* x) {
-    return x->type == -RAY_DATE || x->type == -RAY_TIME ||
-           x->type == -RAY_TIMESTAMP || x->type == -RAY_MONTH;
+    return RAY_IS_TEMPORAL32(-x->type) || RAY_IS_TEMPORAL64(-x->type);
 }
 
 /* First-of-month day count since 2000.01.01 for a MONTH payload
@@ -123,8 +122,11 @@ static inline int64_t month_payload_as_days(int64_t p) {
  * TIMESTAMP = ns, MONTH = first-of-month days -> ns. */
 static inline int64_t temporal_as_ns(ray_t* x) {
     if (x->type == -RAY_TIMESTAMP) return x->i64;
+    if (x->type == -RAY_TIMESPAN)  return x->i64;
     if (x->type == -RAY_DATE)      return (int64_t)x->i32 * 86400000000000LL;
     if (x->type == -RAY_TIME)      return (int64_t)x->i32 * 1000000LL;
+    if (x->type == -RAY_MINUTE)    return (int64_t)x->i32 * 60000000000LL;
+    if (x->type == -RAY_SECOND)    return (int64_t)x->i32 * 1000000000LL;
     if (x->type == -RAY_MONTH)
         return month_payload_as_days((int64_t)x->i32) * 86400000000000LL;
     return 0;
@@ -147,9 +149,8 @@ static inline double as_f64(ray_t* x) {
     if (x->type == -RAY_U8)  return (double)x->u8;
     if (x->type == -RAY_STR && ray_str_len(x) == 1) return (double)(unsigned char)x->sdata[0];
     if (x->type == -RAY_BOOL) return (double)x->b8;
-    if (x->type == -RAY_DATE || x->type == -RAY_TIME ||
-        x->type == -RAY_MONTH) return (double)x->i32;
-    if (x->type == -RAY_TIMESTAMP) return (double)x->i64;
+    if (RAY_IS_TEMPORAL32(-x->type)) return (double)x->i32;
+    if (RAY_IS_TEMPORAL64(-x->type)) return (double)x->i64;
     return (double)x->i64;
 }
 
@@ -321,7 +322,10 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
         case RAY_MONTH:     return ray_month((int64_t)((int32_t*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
         case RAY_TIME:      return ray_time((int64_t)((int32_t*)d)[i]);
+        case RAY_MINUTE:    return ray_minute((int64_t)((int32_t*)d)[i]);
+        case RAY_SECOND:    return ray_second((int64_t)((int32_t*)d)[i]);
         case RAY_TIMESTAMP: return ray_timestamp(((int64_t*)d)[i]);
+        case RAY_TIMESPAN:  return ray_timespan(((int64_t*)d)[i]);
         case RAY_GUID: {
             const uint8_t* gd = ((uint8_t*)d) + i * 16;
             return ray_guid(gd);
@@ -339,9 +343,8 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
 /* Extract a value from an atom for storage, handling cross-type casting.
  * Returns the value as int64_t (for integer/temporal types). */
 static inline int64_t elem_as_i64(ray_t* elem) {
-    if (elem->type == -RAY_I64 || elem->type == -RAY_TIMESTAMP ||
-        elem->type == -RAY_DATE || elem->type == -RAY_TIME ||
-        elem->type == -RAY_MONTH ||
+    if (elem->type == -RAY_I64 || RAY_IS_TEMPORAL64(-elem->type) ||
+        RAY_IS_TEMPORAL32(-elem->type) ||
         elem->type == -RAY_SYM) return elem->i64;
     if (elem->type == -RAY_I32)  return (int64_t)elem->i32;
     if (elem->type == -RAY_I16)  return (int64_t)elem->i16;
@@ -358,7 +361,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         switch (vec->type) {
             case RAY_F64:
                 ((double*)ray_data(vec))[i] = NULL_F64; break;
-            case RAY_I64: case RAY_TIMESTAMP:
+            case RAY_I64: RAY_TEMPORAL64_CASES:
                 ((int64_t*)ray_data(vec))[i] = NULL_I64; break;
             case RAY_I32: RAY_TEMPORAL32_CASES:
                 ((int32_t*)ray_data(vec))[i] = NULL_I32; break;
@@ -383,7 +386,10 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_MONTH:     ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIME:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
+        case RAY_MINUTE:    ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
+        case RAY_SECOND:    ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIMESTAMP: ((int64_t*)ray_data(vec))[i]   = elem_as_i64(elem); return 0;
+        case RAY_TIMESPAN:  ((int64_t*)ray_data(vec))[i]   = elem_as_i64(elem); return 0;
         /* SYM atoms are runtime-domain by design.  Runtime-domain target:
          * the id is written raw (today's behavior).  FILE-domain target
          * (a loaded column mutated in place, e.g. alter's set path):

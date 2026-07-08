@@ -76,10 +76,13 @@ static int8_t promote_type(int8_t a, int8_t b) {
     if (a == RAY_F64 || b == RAY_F64) return RAY_F64;
     /* Treat SYM/TIMESTAMP/DATE/TIME as integer-class types */
     if (a == RAY_I64 || b == RAY_I64 || a == RAY_SYM || b == RAY_SYM ||
-        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP) return RAY_I64;
+        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP ||
+        a == RAY_TIMESPAN || b == RAY_TIMESPAN) return RAY_I64;
     if (a == RAY_I32 || b == RAY_I32 ||
         a == RAY_DATE || b == RAY_DATE || a == RAY_TIME || b == RAY_TIME ||
-        a == RAY_MONTH || b == RAY_MONTH) return RAY_I32;
+        a == RAY_MONTH || b == RAY_MONTH ||
+        a == RAY_MINUTE || b == RAY_MINUTE ||
+        a == RAY_SECOND || b == RAY_SECOND) return RAY_I32;
     if (a == RAY_I16 || b == RAY_I16) return RAY_I16;
     if (a == RAY_U8 || b == RAY_U8) return RAY_U8;
     return RAY_BOOL;
@@ -294,7 +297,10 @@ static bool atom_to_numeric(ray_t* v, double* out_f, int64_t* out_i, bool* is_f6
         case -RAY_DATE:
         case -RAY_TIME:
         case -RAY_MONTH:
+        case -RAY_MINUTE:
+        case -RAY_SECOND:
         case -RAY_TIMESTAMP:
+        case -RAY_TIMESPAN:
             *out_i = v->i64;
             *out_f = (double)v->i64;
             *is_f64 = false;
@@ -1942,7 +1948,7 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
 
         int8_t lt = lit->type < 0 ? (int8_t)(-lit->type) : lit->type;
         bool narrow32 = (lt == RAY_I32 || RAY_IS_TEMPORAL32(lt));
-        bool wide64   = (lt == RAY_I64 || lt == RAY_TIMESTAMP || lt == RAY_SYM);
+        bool wide64   = (lt == RAY_I64 || RAY_IS_TEMPORAL64(lt) || lt == RAY_SYM);
         if (!narrow32 && !wide64) {
             ray_sys_free(mask);
             continue;  /* unsupported type for partition pruning */
