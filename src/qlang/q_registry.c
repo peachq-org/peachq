@@ -2909,6 +2909,15 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
             }
         }
     }
+    /* table!table — a keyed table IS a dict from key records to value records
+     * (dict.qcmd `([]k..)!([]v..)`); row counts must match ('length, kdb). */
+    if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
+        if (ray_table_nrows(x) != ray_table_nrows(y))
+            return ray_error("length", "!: key and value row counts must match");
+        ray_retain(x);
+        ray_retain(y);
+        return ray_dict_new(x, y);               /* consumes both retains */
+    }
     ray_t* keys = x;
     ray_t* keys_owned = NULL;
     if (ray_is_atom(x)) {
