@@ -26,6 +26,9 @@
 #include <string.h>
 #ifndef RAY_OS_WINDOWS
 #include <unistd.h>
+#else
+#include <io.h>     /* _close (spill_fd teardown) */
+#define close _close
 #endif
 
 /* --------------------------------------------------------------------------
