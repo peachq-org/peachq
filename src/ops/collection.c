@@ -76,7 +76,9 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
         case RAY_I16:       return ray_hash_i64((int64_t)((const int16_t*)data)[i]);
         case RAY_U8:        return ray_hash_i64((int64_t)((const uint8_t*)data)[i]);
         case RAY_BOOL:      return ray_hash_i64((int64_t)((const bool*)data)[i]);
-        case RAY_F64:       return ray_hash_f64(((const double*)data)[i]);
+        case RAY_F64:
+        RAY_TEMPORALF_CASES:
+                            return ray_hash_f64(((const double*)data)[i]);
         case RAY_DATE:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_MONTH:     return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_TIME:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
@@ -115,6 +117,7 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
                 case -RAY_SECOND:    return ray_hash_i64((int64_t)e->i32);
                 case -RAY_TIMESTAMP:
                 case -RAY_TIMESPAN:  return ray_hash_i64(e->i64);
+                case -RAY_DATETIME:  return ray_hash_f64(e->f64);
                 case -RAY_GUID: {
                     const uint8_t* g = e->obj
                         ? (const uint8_t*)ray_data(e->obj)
@@ -143,7 +146,9 @@ static int hs_eq_rows(ray_t* a_src, int64_t ai, int8_t at, void* a_data,
             case RAY_I16:       return ((const int16_t*)a_data)[ai] == ((const int16_t*)b_data)[bi];
             case RAY_U8:        return ((const uint8_t*)a_data)[ai] == ((const uint8_t*)b_data)[bi];
             case RAY_BOOL:      return ((const bool*)a_data)[ai] == ((const bool*)b_data)[bi];
-            case RAY_F64:       return ((const double*)a_data)[ai] == ((const double*)b_data)[bi];
+            case RAY_F64:
+            RAY_TEMPORALF_CASES:
+                                return ((const double*)a_data)[ai] == ((const double*)b_data)[bi];
             RAY_TEMPORAL32_CASES:     return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
             case RAY_TIMESTAMP: return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
             case RAY_SYM: {
@@ -323,7 +328,7 @@ static int distinct_sort_cmp(const void* a, const void* b) {
             uint8_t vb = ((const uint8_t*)g_dsort_data)[ib];
             return (va > vb) - (va < vb);
         }
-        case RAY_F64: {
+        case RAY_F64: RAY_TEMPORALF_CASES: {
             double va = ((const double*)g_dsort_data)[ia];
             double vb = ((const double*)g_dsort_data)[ib];
             return (va > vb) - (va < vb);
