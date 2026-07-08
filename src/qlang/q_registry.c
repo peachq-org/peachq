@@ -601,6 +601,23 @@ static ray_t* q_til_wrap(ray_t* x) {
     return ray_til_fn(x);
 }
 
+/* Borrow-or-collapse a dict's VALUES for a kernel call: a typed vector passes
+ * through BORROWED (*owned=0); a boxed list collapses (q_collapse_list, owned
+ * result, *owned=1) so homogeneous literal dicts hit the typed kernels.
+ * Caller releases iff *owned.  NULL on a malformed dict. */
+static ray_t* q_dict_vals_vec(ray_t* d, int* owned) {
+    *owned = 0;
+    ray_t* vals = ray_dict_vals(d);              /* borrowed accessor */
+    if (!vals) return NULL;
+    if (vals->type == RAY_LIST) {
+        ray_t* c = q_collapse_list(vals);        /* owned */
+        if (c && !RAY_IS_ERR(c)) { *owned = 1; return c; }
+        if (c) ray_release(c);
+        return vals;                             /* uncollapsible: borrowed */
+    }
+    return vals;
+}
+
 /* q `where` / monadic `&` — an INTEGER vector repeats each index i, x[i] times
  * (`where 2 3 1` -> 0 0 1 1 1 2; `where 0 1 0 1 0 1` -> 1 3 5).  Base
  * ray_where_fn handles the boolean-mask form, so delegate for it and anything
@@ -3475,6 +3492,25 @@ static ray_t* q_deal_pick(int64_t n, ray_t* y) {
  *   -n ? m (deal / 0N?m permute), n ? float — DEFERRED cells (no rayfall
  *   support; error, never a wrong answer). */
 static ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
+    /* d?y — reverse dictionary lookup (basics/dictsandtables.md): the key of
+     * the FIRST value matching y, i.e. keys[vals?y].  A find miss lands at
+     * count vals, and ray_at_fn null-fills that out-of-range key index — the
+     * typed null of the key domain, kdb's miss result.  Keyed tables keep
+     * their own (deferred) path. */
+    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
+        ray_t* keys = ray_dict_keys(x);              /* borrowed */
+        if (!keys) return ray_error("type", "?: malformed dictionary");
+        int vo = 0;
+        ray_t* vv = q_dict_vals_vec(x, &vo);
+        if (!vv) return ray_error("type", "?: malformed dictionary");
+        ray_t* i = q_roll_wrap(vv, y);               /* find arm: miss -> count */
+        if (vo) ray_release(vv);
+        if (!i || RAY_IS_ERR(i)) return i;
+        ray_t* r = ray_at_fn(keys, i);
+        ray_release(i);
+        if (r && r->type == RAY_LIST) { ray_t* c = q_collapse_list(r); ray_release(r); return c; }
+        return r;
+    }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
         int64_t cnt = ray_len(x);
         ray_t* i = ray_find_fn(x, y);
