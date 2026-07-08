@@ -836,7 +836,7 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
                     if (ray_vec_is_null(val, j)) d[j] = NULL_I64;
                 break;
             }
-            case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
+            case RAY_I32: RAY_TEMPORAL32_CASES: {
                 int32_t* d = (int32_t*)ray_data(vec);
                 for (int64_t j = 0; j < vec->len; j++)
                     if (ray_vec_is_null(val, j)) d[j] = NULL_I32;
@@ -874,8 +874,8 @@ static bool cast_vec_relabel_compat(int8_t a, int8_t b) {
     if (a == b) return true;
     if ((a == RAY_I64 || a == RAY_TIMESTAMP) &&
         (b == RAY_I64 || b == RAY_TIMESTAMP)) return true;
-    if ((a == RAY_I32 || a == RAY_DATE || a == RAY_TIME || a == RAY_MONTH) &&
-        (b == RAY_I32 || b == RAY_DATE || b == RAY_TIME || b == RAY_MONTH)) return true;
+    if ((a == RAY_I32 || RAY_IS_TEMPORAL32(a)) &&
+        (b == RAY_I32 || RAY_IS_TEMPORAL32(b))) return true;
     return false;
 }
 
@@ -941,12 +941,12 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         case RAY_BOOL:  CL(uint8_t,  int64_t, _v ? 1 : 0);
         case RAY_U8:    CL(uint8_t,  int64_t, (int64_t)_v);
         case RAY_I16:   CL(int16_t,  int64_t, (int64_t)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  int64_t, (int64_t)_v);
         case RAY_F64:   CL(double,   int64_t, (int64_t)_v);
         }
         break;
-    case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+    case RAY_I32: RAY_TEMPORAL32_CASES:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int32_t, _v ? 1 : 0);
         case RAY_U8:    CL(uint8_t,  int32_t, (int32_t)_v);
@@ -960,7 +960,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int16_t, _v ? 1 : 0);
         case RAY_U8:    CL(uint8_t,  int16_t, (int16_t)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  int16_t, (int16_t)_v);
         case RAY_I64: case RAY_TIMESTAMP:
                         CL(int64_t,  int16_t, (int16_t)_v);
@@ -971,7 +971,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  uint8_t, _v ? 1 : 0);
         case RAY_I16:   CL(int16_t,  uint8_t, (uint8_t)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  uint8_t, (uint8_t)_v);
         case RAY_I64: case RAY_TIMESTAMP:
                         CL(int64_t,  uint8_t, (uint8_t)_v);
@@ -983,7 +983,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         case RAY_BOOL:  CL(uint8_t,  double, _v ? 1.0 : 0.0);
         case RAY_U8:    CL(uint8_t,  double, (double)_v);
         case RAY_I16:   CL(int16_t,  double, (double)_v);
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  double, (double)_v);
         case RAY_I64: case RAY_TIMESTAMP:
                         CL(int64_t,  double, (double)_v);
@@ -993,7 +993,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         switch (in_type) {
         case RAY_U8:    CL(uint8_t,  uint8_t, _v != 0 ? 1 : 0);
         case RAY_I16:   CL(int16_t,  uint8_t, _v != 0 ? 1 : 0);
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  uint8_t, _v != 0 ? 1 : 0);
         case RAY_I64: case RAY_TIMESTAMP:
                         CL(int64_t,  uint8_t, _v != 0 ? 1 : 0);
@@ -1256,7 +1256,7 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
         switch (out_type) {
         case RAY_I64: case RAY_TIMESTAMP: case RAY_SYM:
             ((int64_t*)out)[i] = cast->i64; break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)out)[i] = cast->i32; break;
         case RAY_I16:  ((int16_t*)out)[i] = cast->i16; break;
         case RAY_U8:   ((uint8_t*)out)[i] = cast->u8;  break;
@@ -1318,7 +1318,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I64) { ray_retain(val); return val; }
         if (val->type == -RAY_F64) return make_i64((int64_t)val->f64);
         if (val->type == -RAY_BOOL) return make_i64(val->b8 ? 1 : 0);
-        if (val->type == -RAY_I32 || val->type == -RAY_DATE || val->type == -RAY_TIME || val->type == -RAY_MONTH)
+        if (val->type == -RAY_I32 || RAY_IS_TEMPORAL32(-val->type))
             return make_i64(val->i32);
         if (val->type == -RAY_TIMESTAMP) return make_i64(val->i64);
         if (val->type == -RAY_I16) return make_i64(val->i16);
@@ -2019,7 +2019,7 @@ ray_t* ray_enlist_fn(ray_t** args, int64_t n) {
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->f64;
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             int32_t* d = (int32_t*)ray_data(vec);
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->i32;
             break;
@@ -2674,7 +2674,7 @@ ray_t* ray_group_fn(ray_t* x) {
             v = ray_read_sym(ray_data(x), i, x->type, x->attrs);
         else if (x->type == RAY_I64 || x->type == RAY_TIMESTAMP)
             v = ((int64_t*)ray_data(x))[i];
-        else if (x->type == RAY_I32 || x->type == RAY_DATE || x->type == RAY_TIME || x->type == RAY_MONTH)
+        else if (x->type == RAY_I32 || RAY_IS_TEMPORAL32(x->type))
             v = ((int32_t*)ray_data(x))[i];
         else if (x->type == RAY_I16)
             v = ((int16_t*)ray_data(x))[i];
@@ -2818,7 +2818,7 @@ ray_t* ray_group_fn(ray_t* x) {
                 switch (key_type) {
                     case RAY_I64: case RAY_TIMESTAMP:
                         ((int64_t*)base)[g] = NULL_I64; break;
-                    case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+                    case RAY_I32: RAY_TEMPORAL32_CASES:
                         ((int32_t*)base)[g] = NULL_I32; break;
                     case RAY_I16:
                         ((int16_t*)base)[g] = NULL_I16; break;
@@ -2957,7 +2957,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((int64_t*)ray_data(result))[0] = a->i64; break;
         case RAY_F64:
             ((double*)ray_data(result))[0] = a->f64; break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)ray_data(result))[0] = a->i32; break;
         case RAY_I16:
             ((int16_t*)ray_data(result))[0] = a->i16; break;
@@ -3008,7 +3008,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((int64_t*)ray_data(result))[na] = b->i64; break;
         case RAY_F64:
             ((double*)ray_data(result))[na] = b->f64; break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)ray_data(result))[na] = b->i32; break;
         case RAY_I16:
             ((int16_t*)ray_data(result))[na] = b->i16; break;
@@ -3044,7 +3044,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((double*)ray_data(result))[0] = a->f64;
             ((double*)ray_data(result))[1] = b->f64;
             break;
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)ray_data(result))[0] = a->i32;
             ((int32_t*)ray_data(result))[1] = b->i32;
             break;
@@ -3397,7 +3397,7 @@ ray_t* ray_within_fn(ray_t* vals, ray_t* range) {
         double* r = (double*)ray_data(range);
         double lo = r[0], hi = r[1];
         for (int64_t i = 0; i < n; i++) out[i] = (d[i] >= lo && d[i] <= hi);
-    } else if (vals->type == RAY_I32 || vals->type == RAY_DATE || vals->type == RAY_TIME || vals->type == RAY_MONTH) {
+    } else if (vals->type == RAY_I32 || RAY_IS_TEMPORAL32(vals->type)) {
         int32_t* d = (int32_t*)ray_data(vals);
         int32_t* r = (int32_t*)ray_data(range);
         int32_t lo = r[0], hi = r[1];

@@ -236,9 +236,7 @@ int64_t ray_dict_find_idx(ray_t* d, ray_t* key_atom) {
             DICT_FIND_LOOP(a[i] == v);
         }
         case RAY_I32:
-        case RAY_DATE:
-        case RAY_TIME:
-        case RAY_MONTH: {
+        RAY_TEMPORAL32_CASES: {
             const int32_t* a = (const int32_t*)base;
             int32_t v = key_atom->i32;
             DICT_FIND_LOOP(a[i] == v);

@@ -473,7 +473,7 @@ static bool fold_binary_const(ray_graph_t* g, ray_op_t* node) {
             folded = ray_bool(r);
             break;
         }
-        case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
+        case RAY_I32: RAY_TEMPORAL32_CASES: {
             int32_t lv = (int32_t)(l_is_f64 ? (int64_t)lf : li);
             int32_t rv = (int32_t)(r_is_f64 ? (int64_t)rf : ri);
             int32_t r = 0;
@@ -1417,7 +1417,7 @@ static int filter_cost(ray_graph_t* g, ray_op_t* pred) {
     switch (t) {
         case RAY_BOOL: case RAY_U8:  cost += 0; break;
         case RAY_I16:               cost += 1; break;
-        case RAY_I32:  case RAY_DATE: case RAY_TIME: case RAY_MONTH: cost += 2; break;
+        case RAY_I32:  RAY_TEMPORAL32_CASES: cost += 2; break;
         default:                   cost += 3; break;  /* I64, F64, SYM, STR */
     }
 
@@ -1941,7 +1941,7 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
         ray_t*  set_heap  = NULL;
 
         int8_t lt = lit->type < 0 ? (int8_t)(-lit->type) : lit->type;
-        bool narrow32 = (lt == RAY_I32 || lt == RAY_DATE || lt == RAY_TIME || lt == RAY_MONTH);
+        bool narrow32 = (lt == RAY_I32 || RAY_IS_TEMPORAL32(lt));
         bool wide64   = (lt == RAY_I64 || lt == RAY_TIMESTAMP || lt == RAY_SYM);
         if (!narrow32 && !wide64) {
             ray_sys_free(mask);
@@ -2020,7 +2020,7 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
 
         for (int64_t p = 0; p < n_parts; p++) {
             int64_t pkey = 0;
-            if (key_values->type == RAY_DATE || key_values->type == RAY_I32 || key_values->type == RAY_TIME || key_values->type == RAY_MONTH) {
+            if (key_values->type == RAY_I32 || RAY_IS_TEMPORAL32(key_values->type)) {
                 int32_t v32;
                 memcpy(&v32, (char*)ray_data(key_values) + p * sizeof(int32_t), sizeof(int32_t));
                 pkey = v32;
