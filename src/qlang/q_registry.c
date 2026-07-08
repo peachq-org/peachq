@@ -2782,6 +2782,17 @@ static ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     return nt;
 }
 
+/* q `x,y` join — table , record-dict appends the record (ref/join.md +
+ * ref/upsert.md: a simple table's Join of a matching record is the same
+ * append upsert performs); EVERY other operand pair delegates to base concat
+ * (register_binary("concat") == ray_concat_fn) byte-identically — dict,dict
+ * upsert-union and table,table row-join already live there. */
+static ray_t* q_join_wrap(ray_t* x, ray_t* y) {
+    if (x && x->type == RAY_TABLE && y && y->type == RAY_DICT && !q_is_keyed_table(y))
+        return q_upsert_wrap(x, y);
+    return ray_concat_fn(x, y);
+}
+
 /* ---- table set-ops core (distinct/union/except/inter arms) --------------- */
 
 /* Indices of x-rows [not] present in y (whole-row membership). */
@@ -6948,6 +6959,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_TIL:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_til_wrap);
     case QK_WHERE:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_where_wrap);
     case QK_REV:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_reverse_wrap);
+    case QK_JOIN:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_join_wrap);
     case QK_VS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_vs_wrap);
     case QK_SV:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sv_wrap);
     case QK_SUMS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sums_wrap);
