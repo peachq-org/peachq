@@ -604,7 +604,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
         case RAY_I16:  (dst) = ((const int16_t*)cd)[idx]; break;            \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                        \
                        (dst) = ((const int32_t*)cd)[idx]; break;            \
-        case RAY_I64:  case RAY_TIMESTAMP:                                  \
+        case RAY_I64:  RAY_TEMPORAL64_CASES:                                  \
                        (dst) = ((const int64_t*)cd)[idx]; break;            \
         case RAY_SYM:  (dst) = ray_read_sym(cd, (idx), ct, cattrs); break;  \
         default:       (dst) = 0; break;                                    \
@@ -617,7 +617,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
         case RAY_I16:  (dst) = (double)((const int16_t*)cd)[idx]; break;    \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                        \
                        (dst) = (double)((const int32_t*)cd)[idx]; break;    \
-        case RAY_I64:  case RAY_TIMESTAMP:                                  \
+        case RAY_I64:  RAY_TEMPORAL64_CASES:                                  \
                        (dst) = (double)((const int64_t*)cd)[idx]; break;    \
         case RAY_F32:  (dst) = (double)((const float*)cd)[idx]; break;      \
         case RAY_F64:  (dst) = ((const double*)cd)[idx]; break;             \
@@ -692,7 +692,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
                 IN_FAST(int32_t, (sj >= INT32_MIN && sj <= INT32_MAX),
                         NULL_I32, 1);
                 break;
-            case RAY_I64: case RAY_TIMESTAMP:
+            case RAY_I64: RAY_TEMPORAL64_CASES:
                 IN_FAST(int64_t, 1, NULL_I64, 1);  /* all i64 fit */
                 break;
             default: break;  /* SYM / unsupported → generic below */
@@ -843,7 +843,7 @@ static in_ctx_status_t in_build_worker_ctx(ray_t* col, ray_t* set, bool negate,
         case RAY_I16:  (dst) = ((const int16_t*)_d)[idx]; break;           \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                       \
                        (dst) = ((const int32_t*)_d)[idx]; break;           \
-        case RAY_I64:  case RAY_TIMESTAMP:                                 \
+        case RAY_I64:  RAY_TEMPORAL64_CASES:                                 \
                        (dst) = ((const int64_t*)_d)[idx]; break;           \
         case RAY_SYM:  (dst) = ray_read_sym(_d, (idx), (type),             \
                                             (vec)->attrs); break;          \
@@ -858,7 +858,7 @@ static in_ctx_status_t in_build_worker_ctx(ray_t* col, ray_t* set, bool negate,
         case RAY_I16:  (dst) = (double)((const int16_t*)_d)[idx]; break;   \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                       \
                        (dst) = (double)((const int32_t*)_d)[idx]; break;   \
-        case RAY_I64:  case RAY_TIMESTAMP:                                 \
+        case RAY_I64:  RAY_TEMPORAL64_CASES:                                 \
                        (dst) = (double)((const int64_t*)_d)[idx]; break;   \
         case RAY_F32:  (dst) = (double)((const float*)_d)[idx]; break;     \
         case RAY_F64:  (dst) = ((const double*)_d)[idx]; break;            \
@@ -1112,11 +1112,14 @@ static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
     int     is_float = 0;
     switch (cv->type) {
     case -RAY_I64:
-    case -RAY_TIMESTAMP: key_i = cv->i64;                  break;
+    case -RAY_TIMESTAMP:
+    case -RAY_TIMESPAN:  key_i = cv->i64;                  break;
     case -RAY_I32:
     case -RAY_DATE:
     case -RAY_TIME:
-    case -RAY_MONTH:     key_i = (int64_t)cv->i32;         break;
+    case -RAY_MONTH:
+    case -RAY_MINUTE:
+    case -RAY_SECOND:    key_i = (int64_t)cv->i32;         break;
     case -RAY_I16:       key_i = (int64_t)cv->i16;         break;
     case -RAY_BOOL:
     case -RAY_U8:        key_i = (int64_t)cv->b8;          break;
