@@ -4,7 +4,8 @@
 #include "qlang/qdoc.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
-#include "qlang/q_ns.h"     /* q_ns_syscmd, q_ns_prompt — namespace transcripts */
+#include "qlang/q_ns.h"     /* q_ns_prompt — namespace transcripts */
+#include "qlang/q_sys.h"    /* q_sys_dispatch — `\`-command dispatcher */
 #include "lang/eval.h"      /* ray_eval */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
@@ -117,7 +118,7 @@ static void run_example(const char* input, const char* expect,
     /* q system commands (\d \v \f \a) bypass the parser, like the REPL. */
     {
         int handled = 0;
-        ray_t* sr = q_ns_syscmd(input, strlen(input), &handled);
+        ray_t* sr = q_sys_dispatch(input, strlen(input), &handled);
         if (handled) {
             r->parsed++;
             if (mode == QDOC_PARSE_ONLY) {
