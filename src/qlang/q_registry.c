@@ -3804,9 +3804,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         switch (n) {
         case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM:
-        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return (int8_t)n;
-        default: return 0;    /* guid/char + minute/second etc: deferred */
+        default: return 0;    /* guid/char: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
@@ -3823,7 +3823,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'u': return RAY_MINUTE;
         case 'v': return RAY_SECOND;
         case 'n': return RAY_TIMESPAN;
-        default:  return 0;       /* c z n u v + "*" identity: deferred */
+        case 'z': return RAY_DATETIME;
+        default:  return 0;       /* c + "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -3848,6 +3849,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 8 && !memcmp(nm, "timespan",8)) r = RAY_TIMESPAN;
         else if (l == 4 && !memcmp(nm, "time",    4)) r = RAY_TIME;
         else if (l == 9 && !memcmp(nm, "timestamp", 9)) r = RAY_TIMESTAMP;
+        else if (l == 8 && !memcmp(nm, "datetime", 8)) r = RAY_DATETIME;
         ray_release(s);
         return r;
     }
@@ -3873,6 +3875,7 @@ static const char* q_type_qname(int8_t t) {
     case RAY_TIME:      return "time";
     case RAY_TIMESPAN:  return "timespan";
     case RAY_TIMESTAMP: return "timestamp";
+    case RAY_DATETIME:  return "datetime";
     default:            return NULL;
     }
 }
@@ -3889,6 +3892,7 @@ static const char* q_tag_rayname(int8_t tag) {
     case RAY_SECOND: return "SECOND";
     case RAY_TIMESPAN: return "TIMESPAN";
     case RAY_TIMESTAMP: return "TIMESTAMP";
+    case RAY_DATETIME: return "DATETIME";
     default:       return NULL;
     }
 }
@@ -4394,6 +4398,17 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         if (!q_ts_scan(p, len, &ns))
             return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(ns);
+    }
+    case RAY_DATETIME: {
+        /* "Z"$str -> datetime.  tok.md:222-227 pins "PZ"$\: over ONE input
+         * ("20191122-11:11:11.123" -> 2019.11.22T11:11:11.123): Z shares P's
+         * accepted shapes at ms display precision, so reuse q_ts_scan (the
+         * single P parser) and convert ns -> fractional days.  Unparseable /
+         * invalid -> 0Nz, never an error (tok contract). */
+        int64_t ns;
+        if (!q_ts_scan(p, len, &ns))
+            return ray_typed_null(-RAY_DATETIME);
+        return ray_datetime((double)ns / 86400000000000.0);
     }
     case RAY_U8: {
         /* "X"$ reads the string as HEX ("X"$"42" -> 0x42, ref/tok.md).
