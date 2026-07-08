@@ -30,6 +30,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry.h"
 #include "qlang/q_ops.h"      /* Q_OPS manifest, q_build_kind */
+#include "qlang/q_ns.h"       /* q_ns_* — context views (get/key/set arms) */
 #include "qlang/q_apply.h"    /* q_apply_noun — @/. noun arms + carrier apply */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of/base — glyph-verb carriers */
 #include "lang/env.h"         /* ray_env_get, ray_fn_binary */
@@ -1702,16 +1703,161 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
     return r;
 }
 
-/* q `key d` / monadic `!` — dict keys.  Non-dict operands (file handles,
- * namespaces, enumerations, vectors) are deferred cells: error, never a
- * wrong answer. */
+static ray_t* q_value_resolve_sym_owned(ray_t* symv);   /* fwd (below) */
+
+/* q `key x` (ref/key.md) — dict keys, plus the name/namespace overloads:
+ *   `` ` ``      -> root context roster (namespaces other than .z)
+ *   `` `. ``     -> objects in the root (user variable names)
+ *   `` `.foo ``  -> the context's keys (leading `` ` `` placeholder + members)
+ *   `` `name ``  -> keys of the named dict; the sym itself if the name is
+ *                   bound to a non-dict; `()` if unbound (context-aware)
+ * File handles (`` `:path ``) are the file-I/O wave: 'nyi.  Everything else
+ * non-dict stays a deferred 'type cell. */
 static ray_t* q_key_wrap(ray_t* x) {
+    if (x && x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);
+        if (!s) return ray_error("type", "key: bad symbol");
+        const char* nm = ray_str_ptr(s);
+        size_t l = ray_str_len(s);
+        if (l == 0) { ray_release(s); return q_ns_key_roster(); }
+        if (nm[0] == ':') {
+            ray_release(s);
+            return ray_error("nyi", "key: file handles deferred (file-I/O wave)");
+        }
+        if (l == 1 && nm[0] == '.') {           /* `. — root objects */
+            ray_release(s);
+            ray_t* d = q_ns_root_dict();
+            if (!d || RAY_IS_ERR(d)) return d ? d : ray_error("oom", NULL);
+            ray_t* k = ray_dict_keys(d);        /* borrowed from owned d */
+            if (!k) { ray_release(d); return ray_error("type", "key: nil keys"); }
+            ray_retain(k);
+            ray_release(d);
+            return k;
+        }
+        if (l >= 2 && nm[0] == '.' && !memchr(nm + 1, '.', l - 1)) {
+            ray_t* d = q_ns_ctx_dict(nm, l);    /* owned, placeholder first */
+            if (d) {
+                ray_release(s);
+                if (RAY_IS_ERR(d)) return d;
+                ray_t* k = ray_dict_keys(d);
+                if (!k) { ray_release(d); return ray_error("type", "key: nil keys"); }
+                ray_retain(k);
+                ray_release(d);
+                return k;
+            }
+            /* not a context — fall through to the named-variable arm */
+        }
+        ray_release(s);
+        /* named variable (context-aware): dict -> keys; bound -> the sym
+         * itself; unbound -> () (ref/key.md "whether a name exists"). */
+        ray_t* v = q_value_resolve_sym_owned(x);
+        if (!v) return ray_list_new(1);         /* () — empty general list */
+        if (RAY_IS_ERR(v)) return v;
+        if (v->type == RAY_DICT) {
+            ray_t* k = ray_dict_keys(v);
+            if (!k) { ray_release(v); return ray_error("type", "key: nil keys"); }
+            ray_retain(k);
+            ray_release(v);
+            return k;
+        }
+        ray_release(v);
+        ray_retain(x);
+        return x;
+    }
     if (!x || x->type != RAY_DICT)
         return ray_error("type", "key: expects a dict (other forms deferred)");
     ray_t* k = ray_dict_keys(x);                /* borrowed */
     if (!k) return ray_error("type", "key: nil keys");
     ray_retain(k);
     return k;
+}
+
+/* q `nam set y` (ref/get.md) — assign a global through a symbol handle:
+ *   `a set 42        -> bind the global (dotted names create contexts)
+ *   `.foo set d      -> restore a context: upsert every member of dict d
+ *                       (the empty-sym :: placeholder entry is skipped)
+ *   `. set d         -> restore root variables from dict d
+ *   `.foo set 42     -> plain rebind: WIPES the context (q4m3's gotcha)
+ * File handles (`:path) and the compressed/splay list forms are the
+ * file-I/O wave: 'nyi.  Returns the handle (kdb returns nam). */
+static ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
+    if (!x || x->type != -RAY_SYM)
+        return ray_error("nyi", "set: only symbol handles (file forms deferred)");
+    ray_t* s = ray_sym_str(x->i64);
+    if (!s) return ray_error("type", "set: bad symbol");
+    const char* nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    if (l == 0) {
+        ray_release(s);
+        return ray_error("type", "set: empty name");
+    }
+    if (nm[0] == ':') {
+        ray_release(s);
+        return ray_error("nyi", "set: file handles deferred (file-I/O wave)");
+    }
+    int is_root = (l == 1 && nm[0] == '.');
+    int is_ctx  = (!is_root && l >= 2 && nm[0] == '.' &&
+                   !memchr(nm + 1, '.', l - 1));
+    if ((is_root || is_ctx) && y && y->type == RAY_DICT) {
+        /* context restore: upsert each member under the target root */
+        ray_t* dk = ray_dict_keys(y);           /* borrowed */
+        ray_t* dv = ray_dict_vals(y);           /* borrowed */
+        int64_t n = ray_dict_len(y);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* k = ray_at_fn(dk, ia);       /* owned */
+            ray_t* v = ray_at_fn(dv, ia);       /* owned */
+            ray_release(ia);
+            if (!k || RAY_IS_ERR(k) || k->type != -RAY_SYM || !v || RAY_IS_ERR(v)) {
+                if (k && !RAY_IS_ERR(k)) ray_release(k);
+                if (v && !RAY_IS_ERR(v)) ray_release(v);
+                ray_release(s);
+                return ray_error("type", "set: context dict needs symbol keys");
+            }
+            ray_t* ks = ray_sym_str(k->i64);
+            if (!ks || ray_str_len(ks) == 0) {  /* :: placeholder — skip */
+                if (ks) ray_release(ks);
+                ray_release(k);
+                ray_release(v);
+                continue;
+            }
+            char full[192];
+            int fl = is_root
+                ? snprintf(full, sizeof full, "%.*s",
+                           (int)ray_str_len(ks), ray_str_ptr(ks))
+                : snprintf(full, sizeof full, "%.*s.%.*s", (int)l, nm,
+                           (int)ray_str_len(ks), ray_str_ptr(ks));
+            ray_release(ks);
+            ray_release(k);
+            ray_err_t err = (fl > 0 && (size_t)fl < sizeof full)
+                ? ray_env_set(ray_sym_intern(full, (size_t)fl), v)
+                : RAY_ERR_TYPE;
+            ray_release(v);
+            if (err == RAY_ERR_RESERVED) {
+                ray_release(s);
+                return ray_error("reserve", "set: '%s' is reserved", full);
+            }
+            if (err != RAY_OK) {
+                ray_release(s);
+                return ray_error(ray_err_code_str(err), "set: '%s' failed", full);
+            }
+        }
+        ray_release(s);
+        ray_retain(x);
+        return x;
+    }
+    if (is_root) {                              /* `. set non-dict: no reading */
+        ray_release(s);
+        return ray_error("type", "set: root handle takes a dictionary");
+    }
+    ray_release(s);
+    ray_err_t err = ray_env_set(x->i64, y);     /* plain/dotted global assign */
+    if (err == RAY_ERR_RESERVED)
+        return ray_error("reserve", "set: name is reserved");
+    if (err != RAY_OK)
+        return ray_error(ray_err_code_str(err), "set: assign failed");
+    ray_retain(x);
+    return x;
 }
 
 /* ===== q `value` (ref/value.md) — the full form matrix =====================
@@ -1776,6 +1922,63 @@ static ray_t* q_value_resolve_sym(ray_t* symv) {
     }
     ray_release(s);
     return r;                                     /* borrowed */
+}
+
+/* Owned-resolution variant for `get`/`value`/`key` sym arms — the q-namespace
+ * views SYNTHESIZE fresh dicts, so this returns OWNED refs on every path (the
+ * borrowed q_value_resolve_sym contract stays untouched; review-1 decision):
+ *   `.        -> root context dict (user vars, no :: placeholder)
+ *   `.foo     -> context dict with the leading :: placeholder
+ *   `..name   -> the ROOT variable `name` (k-style root qualification)
+ *   `name     -> under `\d .ctx`, `.ctx.name` first (kdb: unqualified names
+ *                are context-relative; reserved words stay reserved), else
+ *                the plain env/registry resolution.
+ * Returns NULL when unresolved. */
+static ray_t* q_value_resolve_sym_owned(ray_t* symv) {
+    if (!symv || symv->type != -RAY_SYM) return NULL;
+    ray_t* s = ray_sym_str(symv->i64);
+    if (!s) return NULL;
+    const char* nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    if (l == 1 && nm[0] == '.') {                 /* `. — root view */
+        ray_release(s);
+        return q_ns_root_dict();
+    }
+    if (l > 2 && nm[0] == '.' && nm[1] == '.') {  /* `..name — root variable */
+        int64_t rid = ray_sym_intern(nm + 2, l - 2);
+        ray_release(s);
+        ray_t* v = ray_env_get(rid);
+        if (!v) return NULL;
+        ray_retain(v);
+        return v;
+    }
+    if (l >= 2 && nm[0] == '.' && !memchr(nm + 1, '.', l - 1)) {
+        ray_t* d = q_ns_ctx_dict(nm, l);          /* owned or NULL */
+        if (d) { ray_release(s); return d; }
+        /* not a context — fall through (flat dotted binding, e.g. `.z.f) */
+    }
+    /* under \d .ctx an unqualified user name is context-relative */
+    const char* ctx = q_ns_current();
+    if (ctx[0] && l > 0 && nm[0] != '.' && !q_ns_is_unqualifiable(nm, l)) {
+        char full[192];
+        int fl = snprintf(full, sizeof full, "%s.%.*s", ctx, (int)l, nm);
+        ray_release(s);
+        if (fl <= 0 || (size_t)fl >= sizeof full) return NULL;
+        ray_t* v = ray_env_get(ray_sym_intern(full, (size_t)fl));
+        if (!v) return NULL;
+        ray_retain(v);
+        return v;
+    }
+    ray_release(s);
+    ray_t* v = q_value_resolve_sym(symv);         /* borrowed */
+    if (!v) return NULL;
+    ray_retain(v);
+    return v;                                     /* owned from here on */
+}
+
+/* Public alias — see q_registry.h (q_apply's symbol-handle arm). */
+ray_t* q_value_resolve_owned(ray_t* symv) {
+    return q_value_resolve_sym_owned(symv);
 }
 
 /* Single-apply a resolved head VALUE to argc data args (borrowed).  Value-object
@@ -1869,11 +2072,10 @@ ray_t* q_value_wrap(ray_t* x) {
     if (dk == Q_DERIV_MONAD || dk == Q_DERIV_COMPOSE)
         return ray_error("nyi", "value: composition/monadic-mark deferred");
 
-    /* ---- symbol atom -> variable/keyword value ---- */
+    /* ---- symbol atom -> variable/keyword/namespace value ---- */
     if (x->type == -RAY_SYM) {
-        ray_t* v = q_value_resolve_sym(x);            /* borrowed */
+        ray_t* v = q_value_resolve_sym_owned(x);      /* OWNED (or NULL) */
         if (!v) return ray_error("name", "value: unresolved symbol");
-        ray_retain(v);
         return v;
     }
 
@@ -1887,9 +2089,11 @@ ray_t* q_value_wrap(ray_t* x) {
         if (n < 1) return ray_error("type", "value: empty list");
         ray_t* head = e[0];                           /* borrowed */
         if (head && head->type == -RAY_SYM) {         /* form 2: symbol head */
-            ray_t* hv = q_value_resolve_sym(head);    /* borrowed */
+            ray_t* hv = q_value_resolve_sym_owned(head);  /* OWNED (or NULL) */
             if (!hv) return ray_error("name", "value: unresolved symbol head");
-            return q_value_apply_head(hv, e + 1, n - 1);
+            ray_t* r = q_value_apply_head(hv, e + 1, n - 1);
+            ray_release(hv);
+            return r;
         }
         if (head && head->type == -RAY_STR) {         /* form 3: string head */
             ray_t* hv = q_value_eval_str(head);       /* owned */
@@ -5348,6 +5552,7 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_DESC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_desc_wrap);
     case QK_IASC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_iasc_wrap);
     case QK_IDESC:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_idesc_wrap);
+    case QK_SETG:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_setg_wrap);
     default:      return NULL;
     }
 }
