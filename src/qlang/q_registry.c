@@ -2966,7 +2966,24 @@ static ray_t* q_value_resolve_sym_owned(ray_t* symv);   /* fwd (below) */
  *                   bound to a non-dict; `()` if unbound (context-aware)
  * File handles (`` `:path ``) are the file-I/O wave: 'nyi.  Everything else
  * non-dict stays a deferred 'type cell. */
+static const char* q_type_qname(int8_t t);          /* fwd (cast map, below) */
+
 static ray_t* q_key_wrap(ray_t* x) {
+    /* type of a vector (ref/key.md): `key 0#5` -> `long; a native string
+     * atom IS the provisional char vector -> `char; `key 10` -> til 10. */
+    if (x && ray_is_vec(x)) {
+        const char* nm = q_type_qname(x->type);
+        if (nm) return ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
+        /* unnamed vector types keep the deferred 'type tail below */
+    }
+    if (x && x->type == -RAY_STR)
+        return ray_sym(ray_sym_intern_runtime("char", 4));
+    if (x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16) &&
+        !RAY_ATOM_IS_NULL(x)) {
+        int64_t v = (x->type == -RAY_I64) ? x->i64
+                  : (x->type == -RAY_I32) ? (int64_t)x->i32 : (int64_t)x->i16;
+        if (v >= 0) return q_til_wrap(x);           /* key n == til n */
+    }
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);
         if (!s) return ray_error("type", "key: bad symbol");
@@ -3819,6 +3836,29 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         return r;
     }
     return 0;
+}
+
+/* RAY vector type -> q type-name (ref/key.md "type of a vector"; the exact
+ * REVERSE of the cast-designator name map above — keep the two in sync). */
+static const char* q_type_qname(int8_t t) {
+    switch (t) {
+    case RAY_BOOL:      return "boolean";
+    case RAY_U8:        return "byte";
+    case RAY_I16:       return "short";
+    case RAY_I32:       return "int";
+    case RAY_I64:       return "long";
+    case RAY_F32:       return "real";
+    case RAY_F64:       return "float";
+    case RAY_SYM:       return "symbol";
+    case RAY_DATE:      return "date";
+    case RAY_MONTH:     return "month";
+    case RAY_MINUTE:    return "minute";
+    case RAY_SECOND:    return "second";
+    case RAY_TIME:      return "time";
+    case RAY_TIMESPAN:  return "timespan";
+    case RAY_TIMESTAMP: return "timestamp";
+    default:            return NULL;
+    }
 }
 
 /* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
