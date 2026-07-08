@@ -522,22 +522,12 @@ static ray_t* q_table_colnames(ray_t* x) {
     return ray_error("type", "cols: expects a table");
 }
 
-/* True iff x is a keyed table (RAY_DICT mapping a key table to a value
- * table) — local twin of q_registry's predicate (that one is static there;
- * the shape check is two loads, not logic worth exporting). */
-static int q_bi_is_keyed(ray_t* x) {
-    if (!x || x->type != RAY_DICT) return 0;
-    ray_t* k = ray_dict_keys(x);
-    ray_t* v = ray_dict_vals(x);
-    return k && v && k->type == RAY_TABLE && v->type == RAY_TABLE;
-}
-
 /* Resolve a by-name table operand (cols`t / meta`t): a -RAY_SYM naming a
  * global plain/keyed table resolves to it (borrowed); else x unchanged. */
 static ray_t* q_bi_deref_table(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* g = ray_env_get(x->i64);                 /* borrowed */
-        if (g && (g->type == RAY_TABLE || q_bi_is_keyed(g))) return g;
+        if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) return g;
     }
     return x;
 }
