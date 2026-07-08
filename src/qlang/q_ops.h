@@ -210,9 +210,12 @@ typedef enum {
     QK_UPSERT,          /* q `x upsert y` — append / keyed update-or-append;
                          * value target returns the table, named target
                          * rebinds and returns the name.                      */
-    QK_EXCEPT           /* q `x except y` — table rows of x not in y (row
+    QK_EXCEPT,           /* q `x except y` — table rows of x not in y (row
                          * membership); non-table operands delegate to base
                          * ray_except_fn (the pre-wave QK_ENV pass-through).  */
+    QK_SETG            /* q `nam set y` — assign a global through a sym handle
+                         * (`a / `.ctx / `. context restore); returns nam.
+                         * File symbols (`:path) are the file-I/O wave: 'nyi. */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
