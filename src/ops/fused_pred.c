@@ -80,6 +80,14 @@ static int fp_atom_col_compatible(int8_t atom_type, int8_t col_type) {
         return atom_type == -RAY_SYM || atom_type == -RAY_STR;
     case RAY_DATE:
         return atom_type == -RAY_DATE;
+    case RAY_MONTH:
+        return atom_type == -RAY_MONTH;
+    case RAY_MINUTE:
+        return atom_type == -RAY_MINUTE;
+    case RAY_SECOND:
+        return atom_type == -RAY_SECOND;
+    case RAY_TIMESPAN:
+        return atom_type == -RAY_TIMESPAN;
     case RAY_TIME:
         return atom_type == -RAY_TIME;
     case RAY_TIMESTAMP:
@@ -176,7 +184,7 @@ static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
         if (!is_dict_str
             && ct != RAY_SYM && ct != RAY_BOOL && ct != RAY_U8
             && ct != RAY_I16 && ct != RAY_I32 && ct != RAY_I64
-            && ct != RAY_DATE && ct != RAY_TIME && ct != RAY_TIMESTAMP)
+            && !RAY_IS_TEMPORAL32(ct) && !RAY_IS_TEMPORAL64(ct))
             return -1;
         if (!fp_col_supported(col)) return -1;
         if (!is_dict_str && !fp_atom_col_compatible(rhs->type, ct)) return -1;
@@ -207,7 +215,7 @@ static int fp_check_like(ray_t* expr, ray_t* tbl) {
 
 static int fp_int_family(int8_t t) {
     return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 || t == RAY_I32 ||
-           t == RAY_I64 || t == RAY_DATE || t == RAY_TIME ||
+           t == RAY_I64 || RAY_IS_TEMPORAL32(t) ||
            t == RAY_TIMESTAMP;
 }
 
@@ -730,10 +738,9 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
             case RAY_U8:        out->cvals[out_n++] = ((uint8_t*)ray_data(sv))[i]; break;
             case RAY_I16:       out->cvals[out_n++] = ((int16_t*)ray_data(sv))[i]; break;
             case RAY_I32:
-            case RAY_DATE:
-            case RAY_TIME:      out->cvals[out_n++] = ((int32_t*)ray_data(sv))[i]; break;
+            RAY_TEMPORAL32_CASES:     out->cvals[out_n++] = ((int32_t*)ray_data(sv))[i]; break;
             case RAY_I64:
-            case RAY_TIMESTAMP: out->cvals[out_n++] = ((int64_t*)ray_data(sv))[i]; break;
+            RAY_TEMPORAL64_CASES: out->cvals[out_n++] = ((int64_t*)ray_data(sv))[i]; break;
             default: return -1;
             }
         }
@@ -865,9 +872,11 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
          * fp_atom_col_compatible above, so each branch knows the
          * stored unit matches the column's. */
         switch (cv->type) {
-        case -RAY_I64:       case -RAY_TIMESTAMP: out->cval = cv->i64;            break;
+        case -RAY_I64:       case -RAY_TIMESTAMP:
+        case -RAY_TIMESPAN:                        out->cval = cv->i64;           break;
         case -RAY_I32:       case -RAY_DATE:
-        case -RAY_TIME:                            out->cval = (int64_t)cv->i32;  break;
+        case -RAY_TIME:      case -RAY_MONTH:
+        case -RAY_MINUTE:    case -RAY_SECOND:     out->cval = (int64_t)cv->i32;  break;
         case -RAY_I16:                             out->cval = (int64_t)cv->i16;  break;
         case -RAY_BOOL:      case -RAY_U8:         out->cval = (int64_t)cv->b8;   break;
         default: return -1;
