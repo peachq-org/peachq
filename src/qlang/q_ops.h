@@ -266,6 +266,16 @@ typedef enum {
     QK_READ0,           /* q `read0 x` — file sym -> list of line strings;
                          * (f;o) -> chars from o; (f;o;n) -> n chars.  Console
                          * / fifo handles deferred 'nyi (ref/read0.md).        */
+    /* ---- environment variables (feat/q-getenv-setenv, ref/getenv.md) ---- */
+    QK_GETENV,          /* q `getenv x` — x is a SYMBOL naming an environment
+                         * variable; returns its value as a string, "" when
+                         * unset (kdb-true).  Reuses the base ray_getenv_fn;
+                         * the wrapper only coerces the sym arg to the -RAY_STR
+                         * the C primitive wants (hence a wrapper, not QK_ENV). */
+    QK_SETENV,          /* q `x setenv y` — set the env var named by symbol x to
+                         * string y; returns generic null (kdb prints nothing).
+                         * Reuses base ray_setenv_fn: coerce the sym name to a
+                         * string, discard the echoed value, return ::.         */
     QK_SUM              /* q `sum x` — rayfall sum is a typed-vector aggregate;
                          * q ALSO sums the ITEMS of a boxed list (`sum(d;t)` ->
                          * timestamps, ref/file-text.md Load Fixed).  List arm
