@@ -237,6 +237,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
     ray_t* ast = q_parse(s);
     if (RAY_IS_ERR(ast)) {
         fprintf(err, "parse error\n");
+        ray_error_free(ast);
         return;
     }
 
@@ -260,7 +261,15 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
 
     if (RAY_IS_ERR(r)) {
         const char* code = (const char*)r->sdata;
+        if (ray_eval_is_interrupted()) {
+            /* qdocs basics/errors.md: 'stop' = "Current operation stopped
+             * due to user interrupt (Ctrl-c) or time limit (-T)". */
+            code = "stop";
+            ray_eval_clear_interrupt();
+            ray_term_clear_interrupt();
+        }
         fprintf(err, "error: %s\n", (code && *code) ? code : "eval");
+        ray_error_free(r);
         return;
     }
     /* q console silence: a (last-statement) assignment prints nothing; a
@@ -315,6 +324,11 @@ static void q_repl_interactive(FILE* out, FILE* err) {
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
     ray_term_set_continuation_fn(t, q_no_continuation);  /* kdb: line-at-a-time */
 
+    /* SIGINT/console-ctrl plumbing (mirrors rayforce's repl.c contract):
+     * at the prompt interrupts stay raw keypresses (0x03 clears the line);
+     * ray_term_eval_begin below arms them only for the eval window. */
+    ray_term_install_signals(t);
+
     ray_term_begin(t);
     for (;;) {
         int64_t sz = ray_term_getc(t);
@@ -351,7 +365,15 @@ static void q_repl_interactive(FILE* out, FILE* err) {
             break;
         }
 
+        /* Interrupt window: Ctrl-C becomes SIGINT (POSIX, ISIG) or
+         * CTRL_C_EVENT (Windows, processed input) ONLY while eval runs;
+         * both set the eval-interrupt flag run_one_line reports as 'stop.
+         * Keep this bracket tight — no early exits between begin and end. */
+        ray_term_clear_interrupt();
+        ray_eval_clear_interrupt();
+        ray_term_eval_begin(t);
         run_one_line(str, len, out, err, 1);
+        ray_term_eval_end(t);
         ray_release(line);
         /* `\d` may have switched context: refresh the prompt (q.foo). */
         {
