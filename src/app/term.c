@@ -107,6 +107,31 @@ static void signal_handler(int sig) {
     }
 }
 
+#if defined(RAY_OS_WINDOWS)
+/* Console analogue of the POSIX SIGINT path.  The console dispatches this
+ * on a separate thread; it only touches the two one-way interrupt flags
+ * (x86-64 TSO + volatile makes the 0->1 store visible to the polling eval
+ * loop — the same pattern Microsoft's SetConsoleCtrlHandler examples use).
+ * CTRL_C   -> interrupt the running eval (handled, return TRUE).
+ * CTRL_BREAK/CLOSE -> restore console modes and let the default handler
+ * terminate (the SIGTERM/SIGQUIT analogue). */
+static BOOL WINAPI win_ctrl_handler(DWORD type) {
+    if (type == CTRL_C_EVENT) {
+        g_interrupted = 1;
+        ray_eval_request_interrupt();
+        return TRUE;
+    }
+    if (type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
+        if (g_active_term) {
+            SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
+            SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
+        }
+        return FALSE;   /* default action: terminate */
+    }
+    return FALSE;
+}
+#endif
+
 static void atexit_handler(void) {
     if (g_active_term) {
 #if defined(RAY_OS_WINDOWS)
@@ -136,7 +161,11 @@ void ray_term_install_signals(ray_term_t* term) {
     }
 
 #if defined(RAY_OS_WINDOWS)
-    signal(SIGINT,  signal_handler);
+    /* SIGINT via the CRT never fires while ENABLE_PROCESSED_INPUT is off
+     * (Ctrl-C stays a keypress); the console ctrl handler is the real
+     * Windows channel once ray_term_eval_begin re-enables processed input
+     * for the duration of an eval. */
+    SetConsoleCtrlHandler(win_ctrl_handler, TRUE);
     signal(SIGTERM, signal_handler);
 #else
     struct sigaction sa;
@@ -152,22 +181,34 @@ void ray_term_install_signals(ray_term_t* term) {
 }
 
 void ray_term_eval_begin(ray_term_t* term) {
-#if !defined(RAY_OS_WINDOWS)
+#if defined(RAY_OS_WINDOWS)
+    /* ENABLE_PROCESSED_INPUT is the ISIG analogue: with it set the console
+     * dispatches Ctrl-C as CTRL_C_EVENT (win_ctrl_handler) instead of
+     * queueing a raw 0x03 keypress the busy eval loop will never read. */
+    DWORD mode;
+    if (GetConsoleMode(term->h_stdin, &mode))
+        SetConsoleMode(term->h_stdin, mode | ENABLE_PROCESSED_INPUT);
+#else
     /* Enable ISIG so Ctrl-C generates SIGINT during evaluation */
     struct termios tio;
     tcgetattr(STDIN_FILENO, &tio);
     tio.c_lflag |= ISIG;
     tcsetattr(STDIN_FILENO, TCSANOW, &tio);
-#endif
     (void)term;
+#endif
 }
 
 void ray_term_eval_end(ray_term_t* term) {
-#if !defined(RAY_OS_WINDOWS)
+#if defined(RAY_OS_WINDOWS)
+    /* Back to raw editing: Ctrl-C is a keypress again (KEYCODE_CTRL_C
+     * clears the line at the prompt, matching the POSIX raw mode). */
+    DWORD mode;
+    if (GetConsoleMode(term->h_stdin, &mode))
+        SetConsoleMode(term->h_stdin, mode & ~(DWORD)ENABLE_PROCESSED_INPUT);
+#else
     /* Restore raw mode (ISIG off) for input handling */
     tcsetattr(STDIN_FILENO, TCSANOW, &term->newattr);
 #endif
-    (void)term;
 }
 
 /* ===== Cursor helpers ===== */
