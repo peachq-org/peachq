@@ -233,6 +233,13 @@ ray_t* ray_eval_remote_str(const char* src, size_t len);
 typedef ray_t* (*ray_name_hook_t)(int64_t sym_id);
 void ray_eval_set_name_hook(ray_name_hook_t hook);
 
+/* Gate the rayfall system-plumbing namespaces (.sys/.os/.ipc/.fs/.repl/.log/
+ * .time) at builtin registration.  Defaults ON (rayforce persona unchanged);
+ * the q runtime flips it OFF before creating its runtime so those namespaces
+ * are absent under q, then restores the default.  Must be set BEFORE
+ * ray_runtime_create (registration happens inside it). */
+void ray_set_load_rayfall_ns(bool on);
+
 /* Interrupt support: allow external code (REPL signal handler) to request
  * that the evaluator abort early.  ray_eval() and the bytecode VM check
  * this flag at function-call and loop boundaries. */
