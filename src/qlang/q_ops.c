@@ -214,6 +214,10 @@ static const q_op_t Q_OPS[] = {
     { "get",     QLEX_KW_PREFIX, QK_VALUE,    "value",    QK_NONE, NULL,  NULL  },
     { "set",     QLEX_KW_INFIX,  QK_NONE,     NULL,       QK_SETG, "set-g", NULL },
     { "distinct",QLEX_KW_PREFIX, QK_DISTINCT, "distinct", QK_NONE, NULL,  NULL  },
+    /* q `rand x` == {first 1?x} (ref/rand.md) — QK_RAND wrapper reusing the
+     * `?` roll/generate arms.  NOT the rayfall binary `rand` (which stays the
+     * env-bound engine builtin the QK_ROLL wrapper calls). */
+    { "rand",    QLEX_KW_PREFIX, QK_RAND,     "rand-1",   QK_NONE, NULL,  NULL  },
     /* q-implemented keywords: env bindings added by q_builtins_register
      * (same mechanism as `parse`), snapshotted here as pass-through rows. */
     { "string",  QLEX_KW_PREFIX, QK_ENV, "string",   QK_NONE,  NULL,      NULL  },
