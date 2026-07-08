@@ -22,4 +22,11 @@ void        q_console_show(ray_t* val);   /* append q_fmt(val) + '\n' */
 const char* q_console_str(void);          /* buffered text ("" if empty) */
 void        q_console_reset(void);        /* clear the buffer */
 
+/* Single-line k-repr (kdb `0N!x` / .Q.s1 style): generic lists inline as
+ * (a;b;c), enlist as ,x, strings quoted-escaped (a len-1 string renders
+ * `,"c"` — the string-model conflation rule); vectors/atoms via q_fmt. */
+void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);
+void q_console_show_krepr(ray_t* val);    /* append q_fmt_krepr(val) + '\n' */
+void q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles) */
+
 #endif /* Q_FMT_H */

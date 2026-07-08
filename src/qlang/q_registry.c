@@ -45,6 +45,9 @@
 #include "lang/format.h"      /* ray_type_name — wrapper error messages */
 #include "mem/heap.h"         /* RAY_ATTR_HAS_NULLS — ? find miss remap */
 #include "core/numparse.h"    /* ray_parse_i64/f64 — Tok string parses */
+#include "store/fileio.h"     /* ray_mkdir_p — 0: Save Text missing dirs */
+#include "qlang/q_builtins.h" /* q_string_fn — 0: Prepare Text cell text */
+#include "qlang/q_fmt.h"      /* q_console_show_krepr — 0N! debug print */
 #include <assert.h>
 #include <stdint.h>   /* INT*_MAX / INT64_MIN — Tok out-of-domain bounds */
 #include <math.h>     /* floor/floorf — q monadic `_` */
@@ -3323,6 +3326,17 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
      * serializes (`-8!(::)` -> 101h in the internal-fn branch below); every
      * other null shape 'types exactly like the historic gate. */
     if (RAY_IS_NULL(x)) return ray_error("type", "!: null key operand");
+    /* kdb `0N!x` — debug print: write x's single-line k-repr to the console
+     * sink and pass x through unchanged (ref/display.md; the file-text.md KV
+     * examples pin the repr).  A NULL integer atom lhs can never be an
+     * internal-fn id (negative) or an enkey count (>= 0), so the intercept
+     * is exact. */
+    if ((x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16) &&
+        RAY_ATOM_IS_NULL(x)) {
+        q_console_show_krepr(y);
+        ray_retain(y);
+        return y;
+    }
     /* kdb reserves a NEGATIVE integer ATOM lhs for internal functions
      * (`-8!x` serialize, `-9!x` deserialize, ...) — never dict-make.
      * Typed nulls fall through to dict-make (0N is not an internal id). */
@@ -7575,6 +7589,919 @@ static ray_t* q_hclose_wrap(ray_t* x) {
     return r;
 }
 
+/* ===== File Text: `0:` + hsym + read0 (feat/q-file-text) ====================
+ * Oracle: ref/file-text.md, ref/read0.md, ref/hsym.md (CLEAN ROOM).  TEXT
+ * forms only — binary file formats (1:/2:, get/set on data files) are an
+ * owner-ruled NON-GOAL (2026-07-09 ruling).
+ *
+ * Ownership contract (plan round 1): helper inputs are BORROWED, helper
+ * outputs are OWNED by the caller; on any partial failure a helper releases
+ * everything it allocated before returning the error.
+ *
+ * RAY_FN_RESTRICTED note: the base file primitives carry the flag on their
+ * ENV fn objects; calling the C functions directly bypasses the eval-layer
+ * check, so every file-touching arm re-asserts ray_eval_get_restricted()
+ * (the q_hopen_wrap precedent). */
+
+/* file symbol -> OWNED RAY_STR filesystem path (leading ':' stripped), or
+ * NULL when x is not a `:path symbol. */
+static ray_t* q_ft_path(ray_t* x) {
+    if (!x || x->type != -RAY_SYM) return NULL;
+    ray_t* s = ray_sym_str(x->i64);                       /* borrowed */
+    if (!s) return NULL;
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    if (n < 2 || p[0] != ':') return NULL;
+    return ray_str(p + 1, n - 1);
+}
+
+/* Read a whole file (restricted-guarded).  OWNED RAY_STR or error. */
+static ray_t* q_ft_read_all(ray_t* pathstr) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    return ray_read_file_fn(pathstr);
+}
+
+/* q `hsym x` — sym atom/vector -> file symbol: prefix ':' unless already
+ * present (ref/hsym.md). */
+static int64_t q_hsym_id(const char* p, size_t n) {
+    if (n > 0 && p[0] == ':') return ray_sym_intern_runtime(p, n);
+    char* buf = (char*)malloc(n + 1);
+    if (!buf) return ray_sym_intern_runtime(":", 1);
+    buf[0] = ':';
+    memcpy(buf + 1, p, n);
+    int64_t id = ray_sym_intern_runtime(buf, n + 1);
+    free(buf);
+    return id;
+}
+static ray_t* q_hsym_wrap(ray_t* x) {
+    if (x && x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);                   /* borrowed */
+        if (!s) return ray_error("type", "hsym: bad symbol");
+        const char* p = ray_str_ptr(s);
+        size_t n = ray_str_len(s);
+        if (n > 0 && p[0] == ':') { ray_retain(x); return x; }
+        return ray_sym(q_hsym_id(p, n));
+    }
+    if (x && x->type == RAY_SYM) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* c = ray_sym_vec_cell(x, i);            /* borrowed domain atom */
+            if (!c) { ray_release(out); return ray_error("type", "hsym: bad symbol"); }
+            int64_t id = q_hsym_id(ray_str_ptr(c), ray_str_len(c));
+            out = ray_vec_append(out, &id);
+            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        }
+        return out;
+    }
+    return ray_error("type", "hsym: expected a symbol, got %s",
+                     ray_type_name(x ? x->type : 0));
+}
+
+/* q `read0 x` — ref/read0.md.  File sym -> list of line strings (LF/CRLF
+ * delimiters removed); (f;o) -> chars from offset o to EOF minus one trailing
+ * line break (the doc pins `read0(`:foo;6)` -> "world" on a file ending \n);
+ * (f;o;n) -> exactly n chars from o (clamped).  Console (0) and fifo handles
+ * are deferred 'nyi.  Offsets accept 0 (superset of the doc wording). */
+ray_t* q_read0_wrap(ray_t* x) {
+    if (x && x->type == -RAY_SYM) {
+        ray_t* path = q_ft_path(x);
+        if (!path) return ray_error("type", "read0: expected a file symbol `:path");
+        ray_t* all = q_ft_read_all(path);
+        ray_release(path);
+        if (!all || RAY_IS_ERR(all)) return all;
+        ray_t* lines = q_str_split_lines(ray_str_ptr(all), ray_str_len(all));
+        ray_release(all);
+        return lines;
+    }
+    if (x && x->type == RAY_LIST && (ray_len(x) == 2 || ray_len(x) == 3)) {
+        ray_t** e = (ray_t**)ray_data(x);
+        int three = ray_len(x) == 3;
+        if (e[0] && e[0]->type == -RAY_SYM) {
+            ray_t* path = q_ft_path(e[0]);
+            if (!path) return ray_error("type", "read0: expected (filesymbol;offset[;length])");
+            if (!q_is_int_atom(e[1]) || (three && !q_is_int_atom(e[2]))) {
+                ray_release(path);
+                return ray_error("type", "read0: offset/length must be integers");
+            }
+            int64_t off  = q_iatom_val(e[1]);
+            int64_t want = three ? q_iatom_val(e[2]) : -1;
+            if (off < 0 || (three && want < 0)) {
+                ray_release(path);
+                return ray_error("domain", "read0: negative offset/length");
+            }
+            ray_t* all = q_ft_read_all(path);
+            ray_release(path);
+            if (!all || RAY_IS_ERR(all)) return all;
+            const char* p = ray_str_ptr(all);
+            int64_t n = (int64_t)ray_str_len(all);
+            if (off > n) off = n;
+            int64_t end = three ? (off + want > n ? n : off + want) : n;
+            if (!three) {                          /* strip one trailing \n / \r\n */
+                if (end > off && p[end - 1] == '\n') end--;
+                if (end > off && p[end - 1] == '\r') end--;
+            }
+            ray_t* out = ray_str(p + off, (size_t)(end - off));
+            ray_release(all);
+            return out;
+        }
+        return ray_error("nyi", "read0: fifo handles are deferred");
+    }
+    if (x && q_is_int_atom(x))
+        return ray_error("nyi", "read0: console/connection handles are deferred");
+    return ray_error("type", "read0: expected a file symbol or (filesymbol;offset[;length])");
+}
+
+/* ---- Save Text: `:path 0: strings -------------------------------------- */
+static ray_t* q_ft_save_text(ray_t* fsym, ray_t* y) {
+    ray_t* path = q_ft_path(fsym);
+    if (!path) return ray_error("type", "0:: bad file symbol");
+    if (ray_eval_get_restricted()) { ray_release(path); return ray_error("access", "restricted"); }
+    if (!y || !(y->type == RAY_LIST || y->type == RAY_STR)) {
+        ray_release(path);
+        return ray_error("type", "0:: Save Text needs a list of strings");
+    }
+    int64_t n = ray_len(y);
+    size_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* e = ray_at_fn(y, ia);
+        ray_release(ia);
+        if (!e || RAY_IS_ERR(e)) { ray_release(path); return e ? e : ray_error("oom", NULL); }
+        if (e->type != -RAY_STR) {
+            ray_release(e); ray_release(path);
+            return ray_error("type", "0:: Save Text needs a list of strings");
+        }
+        total += ray_str_len(e) + 1;                       /* line + '\n' */
+        ray_release(e);
+    }
+    char* buf = (char*)malloc(total ? total : 1);
+    if (!buf) { ray_release(path); return ray_error("oom", NULL); }
+    size_t w = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* e = ray_at_fn(y, ia);
+        ray_release(ia);
+        if (!e || RAY_IS_ERR(e)) { free(buf); ray_release(path); return e ? e : ray_error("oom", NULL); }
+        size_t l = ray_str_len(e);
+        memcpy(buf + w, ray_str_ptr(e), l);
+        w += l;
+        buf[w++] = '\n';
+        ray_release(e);
+    }
+    /* create missing parent directories (the doc's "any missing containing
+     * directories"); ray_mkdir_p is the shared portable impl. */
+    {
+        const char* pp = ray_str_ptr(path);
+        size_t pn = ray_str_len(path);
+        size_t cut = pn;
+        while (cut > 0 && pp[cut - 1] != '/') cut--;
+        if (cut > 1) {
+            char* dir = (char*)malloc(cut);
+            if (dir) {
+                memcpy(dir, pp, cut - 1);
+                dir[cut - 1] = '\0';
+                (void)ray_mkdir_p(dir);
+                free(dir);
+            }
+        }
+    }
+    ray_t* content = ray_str(buf, w);
+    free(buf);
+    if (!content || RAY_IS_ERR(content)) { ray_release(path); return content ? content : ray_error("oom", NULL); }
+    ray_t* r = ray_write_file_fn(path, content);
+    ray_release(path);
+    ray_release(content);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_release(r);
+    ray_retain(fsym);
+    return fsym;
+}
+
+/* ---- Prepare Text: delim 0: table | list-of-columns --------------------- */
+
+/* One cell -> OWNED RAY_STR raw text (no quoting).  Borrows atom. */
+static ray_t* q_ft_cell_text(ray_t* atom) {
+    ray_t* s = q_string_fn(atom);
+    if (!s || RAY_IS_ERR(s)) return s;
+    if (atom->type == -RAY_DATE && s->type == -RAY_STR) {
+        /* Prepare Text renders temporals ISO 8601 (doc: 2022-03-14) — the
+         * date dots become dashes; other temporals already match. */
+        size_t n = ray_str_len(s);
+        char* b = (char*)malloc(n ? n : 1);
+        if (b) {
+            const char* p = ray_str_ptr(s);
+            for (size_t i = 0; i < n; i++) b[i] = p[i] == '.' ? '-' : p[i];
+            ray_t* d = ray_str(b, n);
+            free(b);
+            ray_release(s);
+            return d;
+        }
+    }
+    return s;
+}
+
+/* Quote rule (doc): a cell containing the delimiter or a line break is
+ * embraced with '"' and every embedded '"' doubled; otherwise raw.  Appends
+ * the (possibly embraced) cell to *buf/(w..cap).  Returns 0 on OOM. */
+static int q_ft_quote_append(char** buf, size_t* w, size_t* cap,
+                             const char* c, size_t n, char delim) {
+    int embrace = 0;
+    size_t extra = 2;
+    for (size_t i = 0; i < n; i++) {
+        if (c[i] == delim || c[i] == '\n') embrace = 1;
+        if (c[i] == '"') extra++;
+    }
+    size_t need = *w + n + (embrace ? extra : 0) + 2;
+    if (need > *cap) {
+        size_t nc = *cap ? *cap : 64;
+        while (nc < need) nc *= 2;
+        char* nb = (char*)realloc(*buf, nc);
+        if (!nb) return 0;
+        *buf = nb; *cap = nc;
+    }
+    char* b = *buf;
+    if (!embrace) {
+        memcpy(b + *w, c, n);
+        *w += n;
+        return 1;
+    }
+    b[(*w)++] = '"';
+    for (size_t i = 0; i < n; i++) {
+        if (c[i] == '"') b[(*w)++] = '"';
+        b[(*w)++] = c[i];
+    }
+    b[(*w)++] = '"';
+    return 1;
+}
+
+static ray_t* q_ft_prepare(char delim, ray_t* y) {
+    /* columns + optional names */
+    int64_t nc = 0;
+    ray_t* namev = NULL;                 /* borrowed via table introspection */
+    ray_t** litems = NULL;
+    int is_table = y && y->type == RAY_TABLE;
+    if (is_table) nc = ray_table_ncols(y);
+    else if (y && y->type == RAY_LIST) { nc = ray_len(y); litems = (ray_t**)ray_data(y); }
+    else return ray_error("type", "0:: Prepare Text needs a table or a list of columns");
+    (void)namev;
+    if (nc == 0) return ray_list_new(1);
+    /* validate columns; find the shared row count */
+    int64_t L = -1;
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = is_table ? ray_table_get_col_idx(y, c) : litems[c];  /* borrowed */
+        int64_t l;
+        if (col && col->type == -RAY_STR) l = (int64_t)ray_str_len(col);  /* char column */
+        else if (col && (ray_is_vec(col) || col->type == RAY_LIST)) {
+            l = ray_len(col);
+            if (col->type == RAY_LIST) {                  /* must be all strings */
+                ray_t** it = (ray_t**)ray_data(col);
+                for (int64_t i = 0; i < l; i++)
+                    if (!it[i] || it[i]->type != -RAY_STR)
+                        return ray_error("type", "0:: column is neither a vector nor a list of strings");
+            }
+        } else return ray_error("type", "0:: column is neither a vector nor a list of strings");
+        if (L < 0) L = l;
+        else if (l != L) return ray_error("length", "0:: column lengths differ");
+    }
+    ray_t* out = ray_list_new(L + 1 > 0 ? L + 1 : 1);
+    if (RAY_IS_ERR(out)) return out;
+    char* buf = NULL;
+    size_t cap = 0;
+    /* header row: table column names */
+    if (is_table) {
+        size_t w = 0;
+        for (int64_t c = 0; c < nc; c++) {
+            if (c) {
+                if (w + 1 > cap) { cap = cap ? cap * 2 : 64; buf = (char*)realloc(buf, cap); if (!buf) { ray_release(out); return ray_error("oom", NULL); } }
+                buf[w++] = delim;
+            }
+            int64_t nm = ray_table_col_name(y, c);
+            ray_t* ns = ray_sym_str(nm);                   /* borrowed */
+            if (!ns || !q_ft_quote_append(&buf, &w, &cap, ray_str_ptr(ns), ray_str_len(ns), delim)) {
+                free(buf); ray_release(out);
+                return ray_error("oom", NULL);
+            }
+        }
+        ray_t* line = ray_str(buf ? buf : "", w);
+        out = ray_list_append(out, line);
+        ray_release(line);
+        if (RAY_IS_ERR(out)) { free(buf); return out; }
+    }
+    for (int64_t i = 0; i < L; i++) {
+        size_t w = 0;
+        for (int64_t c = 0; c < nc; c++) {
+            if (c) {
+                if (w + 1 > cap) { cap = cap ? cap * 2 : 64; buf = (char*)realloc(buf, cap); if (!buf) { ray_release(out); return ray_error("oom", NULL); } }
+                buf[w++] = delim;
+            }
+            ray_t* col = is_table ? ray_table_get_col_idx(y, c) : litems[c];  /* borrowed */
+            int ok;
+            if (col->type == -RAY_STR) {                   /* char column: one char */
+                char ch = ray_str_ptr(col)[i];
+                ok = q_ft_quote_append(&buf, &w, &cap, &ch, 1, delim);
+            } else if (col->type == RAY_LIST) {            /* string column */
+                ray_t** it = (ray_t**)ray_data(col);
+                ok = q_ft_quote_append(&buf, &w, &cap, ray_str_ptr(it[i]), ray_str_len(it[i]), delim);
+            } else {
+                ray_t* ia = ray_i64(i);
+                ray_t* atom = ray_at_fn(col, ia);
+                ray_release(ia);
+                if (!atom || RAY_IS_ERR(atom)) { free(buf); ray_release(out); return atom ? atom : ray_error("oom", NULL); }
+                ray_t* cs = q_ft_cell_text(atom);
+                ray_release(atom);
+                if (!cs || RAY_IS_ERR(cs)) { free(buf); ray_release(out); return cs ? cs : ray_error("oom", NULL); }
+                if (cs->type != -RAY_STR) { ray_release(cs); free(buf); ray_release(out); return ray_error("type", "0:: unformattable cell"); }
+                ok = q_ft_quote_append(&buf, &w, &cap, ray_str_ptr(cs), ray_str_len(cs), delim);
+                ray_release(cs);
+            }
+            if (!ok) { free(buf); ray_release(out); return ray_error("oom", NULL); }
+        }
+        ray_t* line = ray_str(buf ? buf : "", w);
+        out = ray_list_append(out, line);
+        ray_release(line);
+        if (RAY_IS_ERR(out)) { free(buf); return out; }
+    }
+    free(buf);
+    return out;
+}
+
+/* ---- Load CSV / Load Fixed shared plumbing ------------------------------ */
+
+/* Type char -> Tok tag via THE cast home (q_cast_designator; upper case =
+ * Tok).  '*' keeps the field a string, ' ' skips the column, unknown -> 0. */
+static int8_t q_ft_tag(char c, int* is_str, int* is_skip) {
+    *is_str = 0; *is_skip = 0;
+    if (c == ' ') { *is_skip = 1; return 0; }
+    if (c == '*') { *is_str = 1; return 0; }
+    if (c < 'A' || c > 'Z') return 0;                      /* doc: upper case */
+    ray_t* d = ray_str(&c, 1);
+    if (!d || RAY_IS_ERR(d)) return 0;
+    int is_tok = 0;
+    int8_t tag = q_cast_designator(d, &is_tok);
+    ray_release(d);
+    return is_tok ? tag : 0;
+}
+
+/* Normalize the RIGHT operand of Load CSV / Load Fixed into an OWNED
+ * RAY_LIST of row strings.  *single = 1 for the one-string-no-newline form
+ * (kdb returns a list of parsed ATOMS for it, not columns). */
+static ray_t* q_ft_rows(ray_t* y, int* single) {
+    *single = 0;
+    if (!y) return ray_error("type", "0:: nil right operand");
+    if (y->type == -RAY_STR) {
+        const char* p = ray_str_ptr(y);
+        size_t n = ray_str_len(y);
+        if (memchr(p, '\n', n)) return q_str_split_lines(p, n);
+        *single = 1;
+        ray_t* out = ray_list_new(1);
+        if (RAY_IS_ERR(out)) return out;
+        out = ray_list_append(out, y);                     /* retains y */
+        return out;
+    }
+    if (y->type == -RAY_SYM) {
+        ray_t* path = q_ft_path(y);
+        if (!path) return ray_error("type", "0:: expected a file symbol `:path");
+        ray_t* all = q_ft_read_all(path);
+        ray_release(path);
+        if (!all || RAY_IS_ERR(all)) return all;
+        ray_t* rows = q_str_split_lines(ray_str_ptr(all), ray_str_len(all));
+        ray_release(all);
+        return rows;
+    }
+    if (y->type == RAY_LIST || y->type == RAY_STR) {
+        int64_t n = ray_len(y);
+        ray_t** e = y->type == RAY_LIST ? (ray_t**)ray_data(y) : NULL;
+        /* (filesymbol; offset[; length]) chunk form */
+        if (e && n >= 2 && n <= 3 && e[0] && e[0]->type == -RAY_SYM) {
+            ray_t* path = q_ft_path(e[0]);
+            if (!path) return ray_error("type", "0:: expected (filesymbol;offset[;length])");
+            if (!q_is_int_atom(e[1]) || (n == 3 && !q_is_int_atom(e[2]))) {
+                ray_release(path);
+                return ray_error("type", "0:: offset/length must be integers");
+            }
+            int64_t off  = q_iatom_val(e[1]);
+            int64_t want = n == 3 ? q_iatom_val(e[2]) : -1;
+            ray_t* all = q_ft_read_all(path);
+            ray_release(path);
+            if (!all || RAY_IS_ERR(all)) return all;
+            const char* p = ray_str_ptr(all);
+            int64_t len = (int64_t)ray_str_len(all);
+            if (off < 0) off = 0;
+            if (off > len) off = len;
+            int64_t end = want >= 0 && off + want < len ? off + want : len;
+            ray_t* rows = q_str_split_lines(p + off, (size_t)(end - off));
+            ray_release(all);
+            return rows;
+        }
+        /* list / str-vector of row strings */
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* ia = ray_i64(i);
+            ray_t* it = ray_at_fn(y, ia);
+            ray_release(ia);
+            if (!it || RAY_IS_ERR(it)) { ray_release(out); return it ? it : ray_error("oom", NULL); }
+            if (it->type != -RAY_STR) {
+                ray_release(it); ray_release(out);
+                return ray_error("type", "0:: expected a list of strings");
+            }
+            out = ray_list_append(out, it);
+            ray_release(it);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    return ray_error("type", "0:: unsupported right operand");
+}
+
+/* flag=1 (embedded line returns): merge physical rows whose quotes are
+ * unbalanced with the following row, restoring the '\n'.  Owns+returns. */
+static ray_t* q_ft_merge_quoted(ray_t* rows) {
+    int64_t n = ray_len(rows);
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) { ray_release(rows); return out; }
+    ray_t** e = (ray_t**)ray_data(rows);
+    char* acc = NULL;                        /* pending logical row */
+    size_t used = 0;                         /* bytes of acc in use */
+    size_t quotes = 0;                       /* running '"' parity  */
+    for (int64_t i = 0; i < n; i++) {
+        const char* p = ray_str_ptr(e[i]);
+        size_t l = ray_str_len(e[i]);
+        char* na = (char*)realloc(acc, used + l + 2);
+        if (!na) { free(acc); ray_release(out); ray_release(rows); return ray_error("oom", NULL); }
+        acc = na;
+        if (used) acc[used++] = '\n';        /* rejoin the split line (codex P2:
+                                              * the old spare-byte scheme wrote
+                                              * the '\n' where the next row's
+                                              * memcpy landed, corrupting it) */
+        memcpy(acc + used, p, l);
+        used += l;
+        for (size_t k = 0; k < l; k++) if (p[k] == '"') quotes++;
+        if ((quotes & 1) == 0) {
+            ray_t* s = ray_str(acc, used);
+            out = ray_list_append(out, s);
+            ray_release(s);
+            free(acc); acc = NULL; used = 0; quotes = 0;
+            if (RAY_IS_ERR(out)) { ray_release(rows); return out; }
+        }
+    }
+    if (acc) {                               /* unterminated tail row */
+        ray_t* s = ray_str(acc, used);
+        out = ray_list_append(out, s);
+        ray_release(s);
+        free(acc);
+        if (RAY_IS_ERR(out)) { ray_release(rows); return out; }
+    }
+    ray_release(rows);
+    return out;
+}
+
+/* Split one row into fields on a delimiter; '"'-opened fields are
+ * quote-scanned ('""' -> literal '"').  Appends OWNED strings to `fields`. */
+static ray_t* q_ft_fields(ray_t* fields, const char* r, size_t n, char delim) {
+    size_t i = 0;
+    for (;;) {
+        char* fb = (char*)malloc(n + 1);
+        if (!fb) { ray_release(fields); return ray_error("oom", NULL); }
+        size_t fl = 0;
+        if (i < n && r[i] == '"') {
+            i++;
+            while (i < n) {
+                if (r[i] == '"') {
+                    if (i + 1 < n && r[i + 1] == '"') { fb[fl++] = '"'; i += 2; }
+                    else { i++; break; }
+                } else fb[fl++] = r[i++];
+            }
+            while (i < n && r[i] != delim) i++;             /* junk after quote */
+        } else {
+            while (i < n && r[i] != delim) fb[fl++] = r[i++];
+        }
+        ray_t* f = ray_str(fb, fl);
+        free(fb);
+        fields = ray_list_append(fields, f);
+        ray_release(f);
+        if (RAY_IS_ERR(fields)) return fields;
+        if (i >= n) break;
+        i++;                                                /* past delim */
+        if (i == n) {                                       /* trailing delim */
+            ray_t* z = ray_str("", 0);
+            fields = ray_list_append(fields, z);
+            ray_release(z);
+            break;
+        }
+    }
+    return fields;
+}
+
+/* Parse one field per its column recipe.  OWNED atom/string. */
+static ray_t* q_ft_parse_field(ray_t* field, int8_t tag, int is_str) {
+    if (is_str) { ray_retain(field); return field; }
+    return q_tok_to(tag, field);
+}
+
+/* Collapse a column accumulator: '*' columns stay lists of strings; typed
+ * columns Tok-parse (q_tok_to distributes over lists) then collapse. */
+static ray_t* q_ft_finish_col(ray_t* colacc, int8_t tag, int is_str) {
+    if (is_str) { ray_retain(colacc); return colacc; }
+    ray_t* parsed = q_tok_to(tag, colacc);
+    if (!parsed || RAY_IS_ERR(parsed)) return parsed;
+    ray_t* v = q_collapse_list(parsed);                     /* owned */
+    ray_release(parsed);
+    return v;
+}
+
+static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y) {
+    const char* ts = ray_str_ptr(types);
+    size_t nt = ray_str_len(types);
+    if (nt == 0) return ray_error("type", "0:: empty types string");
+    /* delimiter: char atom (len-1 string) or enlisted -> header row */
+    char delim;
+    int header = 0;
+    if (delimspec && delimspec->type == -RAY_STR && ray_str_len(delimspec) == 1)
+        delim = ray_str_ptr(delimspec)[0];
+    else if (delimspec &&
+             (delimspec->type == RAY_LIST || delimspec->type == RAY_STR) &&
+             ray_len(delimspec) == 1) {
+        /* enlisted delimiter -> first row is column names.  `enlist ","` is
+         * an engine STR VECTOR (10h), a boxed 1-list also accepted. */
+        ray_t* ia = ray_i64(0);
+        ray_t* d0 = ray_at_fn(delimspec, ia);
+        ray_release(ia);
+        if (!d0 || RAY_IS_ERR(d0)) return d0 ? d0 : ray_error("oom", NULL);
+        if (d0->type != -RAY_STR || ray_str_len(d0) != 1) {
+            ray_release(d0);
+            return ray_error("type", "0:: bad delimiter");
+        }
+        delim = ray_str_ptr(d0)[0];
+        ray_release(d0);
+        header = 1;
+    } else return ray_error("type", "0:: bad delimiter");
+    int embed_nl = 0;
+    if (flag) {
+        if (!q_is_int_atom(flag)) return ray_error("type", "0:: flag must be 0 or 1");
+        embed_nl = q_iatom_val(flag) != 0;
+    }
+    /* column recipes */
+    int8_t* tags = (int8_t*)malloc(nt);
+    int* fstr = (int*)malloc(nt * sizeof(int));
+    int* fskip = (int*)malloc(nt * sizeof(int));
+    if (!tags || !fstr || !fskip) { free(tags); free(fstr); free(fskip); return ray_error("oom", NULL); }
+    for (size_t j = 0; j < nt; j++) {
+        tags[j] = q_ft_tag(ts[j], &fstr[j], &fskip[j]);
+        if (!tags[j] && !fstr[j] && !fskip[j]) {
+            char bad = ts[j];
+            free(tags); free(fstr); free(fskip);
+            if (bad == 'C')
+                return ray_error("nyi", "0:: type char C needs the char type (string-model C3)");
+            return ray_error("type", "0:: bad column type char '%c'", bad);
+        }
+    }
+    int single = 0;
+    ray_t* rows = q_ft_rows(y, &single);
+    if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
+    if (embed_nl) {
+        rows = q_ft_merge_quoted(rows);
+        if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
+    }
+    ray_t** rp = (ray_t**)ray_data(rows);
+    int64_t nrows = ray_len(rows);
+    ray_t* result = NULL;
+    if (single) {
+        /* one delimited string -> list of parsed atoms */
+        ray_t* fields = ray_list_new((int64_t)nt);
+        if (RAY_IS_ERR(fields)) { result = fields; goto done; }
+        fields = q_ft_fields(fields, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
+        if (RAY_IS_ERR(fields)) { result = fields; goto done; }
+        ray_t** fp = (ray_t**)ray_data(fields);
+        int64_t nf = ray_len(fields);
+        ray_t* out = ray_list_new((int64_t)nt);
+        if (RAY_IS_ERR(out)) { ray_release(fields); result = out; goto done; }
+        ray_t* empty = ray_str("", 0);
+        for (size_t j = 0; j < nt && !RAY_IS_ERR(out); j++) {
+            if (fskip[j]) continue;
+            ray_t* f = (int64_t)j < nf ? fp[j] : empty;     /* borrowed */
+            ray_t* a = q_ft_parse_field(f, tags[j], fstr[j]);
+            if (!a || RAY_IS_ERR(a)) { ray_release(empty); ray_release(fields); ray_release(out); result = a ? a : ray_error("oom", NULL); goto done; }
+            out = ray_list_append(out, a);
+            ray_release(a);
+        }
+        ray_release(empty);
+        ray_release(fields);
+        result = out;
+        goto done;
+    }
+    {
+        /* rows mode: per-column accumulators over the data rows */
+        int64_t first = header ? 1 : 0;
+        int64_t ndata = nrows - first;
+        if (ndata < 0) ndata = 0;
+        int64_t nout = 0;
+        for (size_t j = 0; j < nt; j++) if (!fskip[j]) nout++;
+        ray_t** acc = (ray_t**)calloc((size_t)(nout > 0 ? nout : 1), sizeof(ray_t*));
+        if (!acc) { result = ray_error("oom", NULL); goto done; }
+        int64_t k = 0;
+        for (size_t j = 0; j < nt; j++) {
+            if (fskip[j]) continue;
+            acc[k] = ray_list_new(ndata > 0 ? ndata : 1);
+            if (RAY_IS_ERR(acc[k])) {
+                result = acc[k];
+                for (int64_t z = 0; z < k; z++) ray_release(acc[z]);
+                free(acc);
+                goto done;
+            }
+            k++;
+        }
+        ray_t* empty = ray_str("", 0);
+        for (int64_t i = first; i < nrows; i++) {
+            ray_t* fields = ray_list_new((int64_t)nt);
+            if (!RAY_IS_ERR(fields))
+                fields = q_ft_fields(fields, ray_str_ptr(rp[i]), ray_str_len(rp[i]), delim);
+            if (RAY_IS_ERR(fields)) {
+                for (int64_t z = 0; z < nout; z++) ray_release(acc[z]);
+                free(acc); ray_release(empty);
+                result = fields;
+                goto done;
+            }
+            ray_t** fp = (ray_t**)ray_data(fields);
+            int64_t nf = ray_len(fields);
+            int64_t c = 0;
+            for (size_t j = 0; j < nt; j++) {
+                if (fskip[j]) continue;
+                ray_t* f = (int64_t)j < nf ? fp[j] : empty; /* borrowed */
+                acc[c] = ray_list_append(acc[c], f);
+                c++;
+            }
+            ray_release(fields);
+        }
+        ray_release(empty);
+        /* finish columns */
+        ray_t* cols = ray_list_new(nout > 0 ? nout : 1);
+        for (int64_t z = 0; z < nout && !RAY_IS_ERR(cols); z++) {
+            int64_t j = -1, seen = -1;
+            for (size_t t = 0; t < nt; t++) {
+                if (fskip[t]) continue;
+                if (++seen == z) { j = (int64_t)t; break; }
+            }
+            ray_t* col = q_ft_finish_col(acc[z], tags[j], fstr[j]);
+            if (!col || RAY_IS_ERR(col)) {
+                ray_release(cols);
+                cols = col ? col : ray_error("oom", NULL);
+                break;
+            }
+            cols = ray_list_append(cols, col);
+            ray_release(col);
+        }
+        for (int64_t z = 0; z < nout; z++) ray_release(acc[z]);
+        free(acc);
+        if (RAY_IS_ERR(cols)) { result = cols; goto done; }
+        if (!header) { result = cols; goto done; }
+        /* header: first row = column names -> table */
+        ray_t* nmf = ray_list_new((int64_t)nt);
+        if (!RAY_IS_ERR(nmf) && nrows > 0)
+            nmf = q_ft_fields(nmf, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
+        if (RAY_IS_ERR(nmf)) { ray_release(cols); result = nmf; goto done; }
+        ray_t** np = (ray_t**)ray_data(nmf);
+        int64_t nn = ray_len(nmf);
+        ray_t* tbl = ray_table_new(nout > 0 ? nout : 1);
+        int64_t c2 = 0;
+        ray_t** cp = (ray_t**)ray_data(cols);
+        for (size_t j = 0; j < nt && !RAY_IS_ERR(tbl); j++) {
+            if (fskip[j]) continue;
+            int64_t nm = (int64_t)j < nn
+                ? ray_sym_intern_runtime(ray_str_ptr(np[j]), ray_str_len(np[j]))
+                : ray_sym_intern_runtime("", 0);
+            tbl = ray_table_add_col(tbl, nm, cp[c2]);
+            c2++;
+        }
+        ray_release(nmf);
+        ray_release(cols);
+        result = tbl;
+    }
+done:
+    ray_release(rows);
+    free(tags); free(fstr); free(fskip);
+    return result;
+}
+
+static ray_t* q_ft_load_fixed(ray_t* types, ray_t* widths, ray_t* y) {
+    const char* ts = ray_str_ptr(types);
+    size_t nt = ray_str_len(types);
+    if (nt == 0 || (int64_t)nt != ray_len(widths))
+        return ray_error("length", "0:: types and widths must have equal count");
+    /* widths must be positive (codex P1: a negative width made the slice
+     * length negative and reached memcpy as a huge size_t). */
+    for (int64_t j = 0; j < (int64_t)nt; j++)
+        if (q_ivec_get(widths, j) <= 0)
+            return ray_error("domain", "0:: field widths must be positive");
+    int8_t* tags = (int8_t*)malloc(nt);
+    int* fstr = (int*)malloc(nt * sizeof(int));
+    int* fskip = (int*)malloc(nt * sizeof(int));
+    if (!tags || !fstr || !fskip) { free(tags); free(fstr); free(fskip); return ray_error("oom", NULL); }
+    for (size_t j = 0; j < nt; j++) {
+        tags[j] = q_ft_tag(ts[j], &fstr[j], &fskip[j]);
+        if (!tags[j] && !fstr[j] && !fskip[j]) {
+            free(tags); free(fstr); free(fskip);
+            return ray_error("type", "0:: bad column type char");
+        }
+    }
+    int single = 0;
+    ray_t* rows = q_ft_rows(y, &single);
+    if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
+    ray_t** rp = (ray_t**)ray_data(rows);
+    int64_t nrows = ray_len(rows);
+    int64_t nout = 0;
+    for (size_t j = 0; j < nt; j++) if (!fskip[j]) nout++;
+    ray_t* result = NULL;
+    ray_t** acc = (ray_t**)calloc((size_t)(nout > 0 ? nout : 1), sizeof(ray_t*));
+    if (!acc) { result = ray_error("oom", NULL); goto done; }
+    for (int64_t z = 0; z < nout; z++) {
+        acc[z] = ray_list_new(nrows > 0 ? nrows : 1);
+        if (RAY_IS_ERR(acc[z])) {
+            result = acc[z];
+            for (int64_t q = 0; q < z; q++) ray_release(acc[q]);
+            free(acc);
+            goto done;
+        }
+    }
+    for (int64_t i = 0; i < nrows; i++) {
+        const char* p = ray_str_ptr(rp[i]);
+        int64_t n = (int64_t)ray_str_len(rp[i]);
+        int64_t pos = 0, c = 0;
+        for (size_t j = 0; j < nt; j++) {
+            int64_t w = q_ivec_get(widths, (int64_t)j);
+            int64_t s = pos > n ? n : pos;
+            int64_t e = pos + w > n ? n : pos + w;
+            pos += w;
+            if (fskip[j]) continue;
+            ray_t* f = ray_str(p + s, (size_t)(e - s));
+            if (!f || RAY_IS_ERR(f)) {
+                for (int64_t z = 0; z < nout; z++) ray_release(acc[z]);
+                free(acc);
+                result = f ? f : ray_error("oom", NULL);
+                goto done;
+            }
+            acc[c] = ray_list_append(acc[c], f);
+            ray_release(f);
+            c++;
+        }
+    }
+    {
+        ray_t* cols = ray_list_new(nout > 0 ? nout : 1);
+        int64_t z = 0;
+        for (size_t j = 0; j < nt && !RAY_IS_ERR(cols); j++) {
+            if (fskip[j]) continue;
+            ray_t* col = q_ft_finish_col(acc[z], tags[j], fstr[j]);
+            if (!col || RAY_IS_ERR(col)) {
+                ray_release(cols);
+                cols = col ? col : ray_error("oom", NULL);
+                break;
+            }
+            cols = ray_list_append(cols, col);
+            ray_release(col);
+            z++;
+        }
+        for (int64_t q = 0; q < nout; q++) ray_release(acc[q]);
+        free(acc);
+        result = cols;
+    }
+done:
+    ray_release(rows);
+    free(tags); free(fstr); free(fskip);
+    return result;
+}
+
+/* ---- Key-Value Pairs: "K f [*] r" 0: string ------------------------------ */
+static ray_t* q_ft_kv(const char* spec, size_t sn, ray_t* y) {
+    char ktype = spec[0];
+    int star = sn == 4;
+    if (star && spec[2] != '*') return ray_error("type", "0:: bad key-value spec");
+    char fsep = spec[1];
+    char rsep = star ? spec[3] : spec[2];
+    if (!y || y->type != -RAY_STR)
+        return ray_error("type", "0:: key-value parse needs a string");
+    int8_t ktag;
+    {
+        int is_str = 0, is_skip = 0;
+        ktag = q_ft_tag(ktype, &is_str, &is_skip);
+        if (!ktag) return ray_error("type", "0:: bad key-value key type");
+    }
+    const char* p = ray_str_ptr(y);
+    size_t n = ray_str_len(y);
+    ray_t* keys = ray_list_new(4);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(4);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+    size_t i = 0;
+    while (i < n) {
+        /* one record: up to rsep (quote-aware in '*' mode) */
+        size_t start = i;
+        int inq = 0;
+        while (i < n && (inq || p[i] != rsep)) {
+            if (star && p[i] == '"') inq = !inq;
+            i++;
+        }
+        size_t end = i;
+        if (i < n) i++;                                     /* past rsep */
+        if (end == start) continue;                         /* empty record */
+        /* split at the FIRST fsep */
+        size_t f = start;
+        while (f < end && p[f] != fsep) f++;
+        ray_t* k = ray_str(p + start, f - start);
+        size_t vs = f < end ? f + 1 : end;
+        ray_t* v;
+        if (star && vs < end && p[vs] == '"' && p[end - 1] == '"' && end - vs >= 2) {
+            /* quoted value: strip the outer quotes, un-double inner ones */
+            char* vb = (char*)malloc(end - vs);
+            size_t vl = 0;
+            if (!vb) { ray_release(k); ray_release(keys); ray_release(vals); return ray_error("oom", NULL); }
+            for (size_t t = vs + 1; t < end - 1; t++) {
+                if (p[t] == '"' && t + 1 < end - 1 && p[t + 1] == '"') { vb[vl++] = '"'; t++; }
+                else vb[vl++] = p[t];
+            }
+            v = ray_str(vb, vl);
+            free(vb);
+        } else v = ray_str(p + vs, end - vs);
+        if (!k || RAY_IS_ERR(k) || !v || RAY_IS_ERR(v)) {
+            if (k && !RAY_IS_ERR(k)) ray_release(k);
+            if (v && !RAY_IS_ERR(v)) ray_release(v);
+            ray_release(keys); ray_release(vals);
+            return ray_error("oom", NULL);
+        }
+        ray_t* ka = q_tok_to(ktag, k);
+        ray_release(k);
+        if (!ka || RAY_IS_ERR(ka)) { ray_release(v); ray_release(keys); ray_release(vals); return ka ? ka : ray_error("oom", NULL); }
+        keys = ray_list_append(keys, ka);
+        ray_release(ka);
+        vals = ray_list_append(vals, v);
+        ray_release(v);
+        if (RAY_IS_ERR(keys) || RAY_IS_ERR(vals)) {
+            ray_t* err = RAY_IS_ERR(keys) ? keys : vals;
+            if (!RAY_IS_ERR(keys)) ray_release(keys);
+            if (!RAY_IS_ERR(vals)) ray_release(vals);
+            return err;
+        }
+    }
+    ray_t* kv = q_collapse_list(keys);                      /* typed key vector */
+    ray_release(keys);
+    if (!kv || RAY_IS_ERR(kv)) { ray_release(vals); return kv ? kv : ray_error("oom", NULL); }
+    ray_t* out = ray_list_new(2);
+    if (RAY_IS_ERR(out)) { ray_release(kv); ray_release(vals); return out; }
+    out = ray_list_append(out, kv);
+    ray_release(kv);
+    if (RAY_IS_ERR(out)) { ray_release(vals); return out; }
+    out = ray_list_append(out, vals);
+    ray_release(vals);
+    return out;
+}
+
+/* q `sum x` — LIST arm sums the items (kdb: `sum(2013.03.15;18:55:40.686)`
+ * is a timestamp; Load Fixed pins `sum("DT";8 9)0:enlist"…"`).  Non-lists
+ * keep the base vector aggregate. */
+static ray_t* q_sum_wrap(ray_t* x) {
+    if (x && x->type == RAY_LIST && ray_len(x) > 0) {
+        /* fold q `+` over the items via call_fn2 (the ATOMIC dispatch —
+         * ray_add_fn alone is the atom kernel; vectors broadcast in eval). */
+        ray_t* plus = q_registry_lookup_name("+", 1, Q_DYADIC);   /* borrowed */
+        if (!plus) return ray_error("type", "sum: + unavailable");
+        ray_t** e = (ray_t**)ray_data(x);
+        ray_t* acc = e[0];
+        ray_retain(acc);
+        for (int64_t i = 1; i < ray_len(x); i++) {
+            ray_t* nx = call_fn2(plus, acc, e[i]);
+            ray_release(acc);
+            if (!nx || RAY_IS_ERR(nx)) return nx ? nx : ray_error("oom", NULL);
+            acc = nx;
+        }
+        return acc;
+    }
+    return ray_sum_fn(x);
+}
+
+/* ---- the `0:` dispatcher -------------------------------------------------- */
+static ray_t* q_filetext_wrap(ray_t* x, ray_t* y) {
+    if (!x) return ray_error("type", "0:: nil left operand");
+    if (x->type == -RAY_SYM) return q_ft_save_text(x, y);
+    if (x->type == -RAY_STR) {
+        const char* s = ray_str_ptr(x);
+        size_t n = ray_str_len(x);
+        if (n == 1) return q_ft_prepare(s[0], y);
+        if ((n == 3 || n == 4) && (s[0] == 'S' || s[0] == 'I' || s[0] == 'J'))
+            return q_ft_kv(s, n, y);
+        return ray_error("type", "0:: bad left operand");
+    }
+    if (x->type == RAY_LIST && (ray_len(x) == 2 || ray_len(x) == 3)) {
+        ray_t** e = (ray_t**)ray_data(x);
+        if (e[0] && e[0]->type == -RAY_STR) {
+            if (ray_len(x) == 2 && q_is_int_vec(e[1]))
+                return q_ft_load_fixed(e[0], e[1], y);
+            return q_ft_load_csv(e[0], e[1], ray_len(x) == 3 ? e[2] : NULL, y);
+        }
+    }
+    return ray_error("type", "0:: unsupported left operand");
+}
+
 /* ===== string search family: like / ss / ssr (feat/q-string-fns) =========== */
 
 /* q `x like p` — glob match.  Reuses ray_like_fn for sym/str atoms and
@@ -7805,6 +8732,13 @@ static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
     case QK_FILLS:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_fills_wrap);
     case QK_HOPEN:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hopen_wrap);
     case QK_HCLOSE: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hclose_wrap);
+    case QK_FILETEXT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_filetext_wrap);
+    case QK_HSYM:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hsym_wrap);
+    case QK_READ0:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_read0_wrap);
+    /* NB: deliberately NOT RAY_FN_AGGR — the eval aggregate fast path claims
+     * AGGR fns before the wrapper runs and 'types on a boxed list-of-vectors;
+     * name-routing (RAY_FN_Q_LOWER + aux "sum") keeps query/DAG behaviour. */
+    case QK_SUM:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sum_wrap);
     case QK_NULL:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_null_wrap);
     case QK_RAZE:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_raze_wrap);
     case QK_LIKE:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_like_wrap);

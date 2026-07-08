@@ -195,7 +195,9 @@ static const q_op_t Q_OPS[] = {
     { "fills",   QLEX_KW_PREFIX, QK_FILLS, "fills",  QK_NONE,  NULL,      NULL  },
     { "where",   QLEX_KW_PREFIX, QK_WHERE, "where",  QK_NONE,  NULL,      NULL  },
     { "reverse", QLEX_KW_PREFIX, QK_REV, "reverse",  QK_NONE,  NULL,      NULL  },
-    { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
+    /* q `sum` over a boxed LIST sums the items (`sum(dates;times)` ->
+     * timestamps, ref/file-text.md); rayfall sum is vector-only, so wrapper. */
+    { "sum",     QLEX_KW_PREFIX, QK_SUM, "sum",      QK_NONE,  NULL,      NULL  },
     { "group",   QLEX_KW_PREFIX, QK_ENV, "group",    QK_NONE,  NULL,      NULL  },
     /* ---- sort / grade family (feat/q-sort-rank) — monadic prefix ----
      * asc/desc reuse ray_asc_fn/ray_desc_fn for flat vectors (VALUE kdb-true;
@@ -321,6 +323,16 @@ static const q_op_t Q_OPS[] = {
      * manifest row.  Both are monadic prefix keywords (KW_PREFIX). ---- */
     { "hopen",  QLEX_KW_PREFIX, QK_HOPEN,  "hopen",  QK_NONE, NULL,  NULL  },
     { "hclose", QLEX_KW_PREFIX, QK_HCLOSE, "hclose", QK_NONE, NULL,  NULL  },
+    /* ---- File Text (feat/q-file-text) — the `0:` operator + companions.
+     * `0:` is tokenized by the scanner's digit-colon arm (a single 0/1/2
+     * glued to ':' can never start a clock literal) and dispatches on the
+     * LEFT operand's shape (see QK_FILETEXT).  `1:`/`2:` tokenize the same
+     * way but have NO row here — binary file formats are an owner-ruled
+     * non-goal, so they stay name-refs ('name).  `read0` is also env-bound
+     * by q_builtins for the bracket-call form (the ssr/value precedent). */
+    { "0:",     QLEX_GLYPH,     QK_NONE,   NULL,     QK_FILETEXT, "file-text", NULL },
+    { "hsym",   QLEX_KW_PREFIX, QK_HSYM,   "hsym",   QK_NONE, NULL,  NULL  },
+    { "read0",  QLEX_KW_PREFIX, QK_READ0,  "read0",  QK_NONE, NULL,  NULL  },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =

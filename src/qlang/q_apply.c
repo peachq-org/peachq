@@ -20,6 +20,7 @@
 #include "qlang/q_deriv.h"      /* q_deriv_kind_of (carrier arm, Task 5) */
 #include "lang/eval.h"          /* ray_at_fn */
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
+#include "qlang/q_fmt.h"        /* q_console_write — 1/-1/2/-2 console handles */
 #include <string.h>
 
 /* one indexing step: v[idx].  ray_at null-fills out-of-range; a
@@ -457,8 +458,38 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
      * directly, so re-assert the restricted check (a restricted remote connection
      * must not drive handles).  q handle 0 (console) and null/INT_MIN decline. */
     if ((head->type == -RAY_I64 || head->type == -RAY_I32) && n == 1) {
-        if (ray_eval_get_restricted()) return ray_error("access", "restricted");
         int64_t qh = (head->type == -RAY_I64) ? head->i64 : (int64_t)head->i32;
+        /* Console text-write handles (kdb basics/handles.md; feat/q-file-text):
+         * 1/-1 stdout, 2/-2 stderr — both route to the q console sink so the
+         * REPL/qdoctest see the text.  A NEGATIVE handle appends '\n' after
+         * each string; positive writes raw.  Payload: a string or a list of
+         * strings.  Returns the handle (kdb chains `-1 sums "ab";`). */
+        if (!RAY_ATOM_IS_NULL(head) && (qh == 1 || qh == -1 || qh == 2 || qh == -2)) {
+            ray_t* y = args[0];
+            int nl = qh < 0;
+            if (y && y->type == -RAY_STR) {
+                q_console_write(ray_str_ptr(y), ray_str_len(y));
+                if (nl) q_console_write("\n", 1);
+            } else if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
+                int64_t m = ray_len(y);
+                for (int64_t i = 0; i < m; i++) {
+                    ray_t* ia = ray_i64(i);
+                    ray_t* it = ray_at_fn(y, ia);
+                    ray_release(ia);
+                    if (!it || RAY_IS_ERR(it)) return it ? it : ray_error("oom", NULL);
+                    if (it->type != -RAY_STR) {
+                        ray_release(it);
+                        return ray_error("type", "handle write: expected strings");
+                    }
+                    q_console_write(ray_str_ptr(it), ray_str_len(it));
+                    if (nl) q_console_write("\n", 1);
+                    ray_release(it);
+                }
+            } else
+                return ray_error("type", "handle write: expected a string or list of strings");
+            return make_i64(qh);
+        }
+        if (ray_eval_get_restricted()) return ray_error("access", "restricted");
         if (RAY_ATOM_IS_NULL(head) || qh == 0 || qh == INT64_MIN)
             return ray_error("type", "handle apply: invalid handle %lld", (long long)qh);
         int64_t raw   = (qh > 0 ? qh : -qh) - 1;   /* 1-based q handle -> raw id */
@@ -486,12 +517,12 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
      * unresolved name declines to the caller's historic error.  File handles
      * (`` `:path ``) stay declined (file-I/O wave). */
     if (head->type == -RAY_SYM) {
+        /* ray_sym_str returns a BORROWED interned string (table/sym.c) — the
+         * former ray_release here over-released the sym table's own ref
+         * (latent until `:path symbols began lexing, feat/q-file-text). */
         ray_t* s = ray_sym_str(head->i64);
-        if (s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':') {
-            ray_release(s);
+        if (s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':')
             return NULL;                            /* file handle — decline */
-        }
-        if (s) ray_release(s);
         ray_t* v = q_value_resolve_owned(head);   /* OWNED or NULL */
         if (!v) return NULL;
         if (RAY_IS_ERR(v)) return v;
