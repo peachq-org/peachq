@@ -180,7 +180,39 @@ typedef enum {
     QK_IASC,           /* q `iasc x` / monadic `<` — grade up.  Flat vectors
                          * reuse ray_iasc_fn; a DICT arm returns the keys in
                          * ascending-value order. */
-    QK_IDESC           /* q `idesc x` / monadic `>` — grade down (mirror). */
+    QK_IDESC,          /* q `idesc x` / monadic `>` — grade down (mirror). */
+    /* ---- table verbs (feat/q-table-verbs) ---- */
+    QK_FLIP,            /* q `flip x` / monadic `+` — transpose: table<->dict,
+                         * list-of-lists transpose (atom broadcast).  Keyed
+                         * tables and atoms are 'rank cells. */
+    QK_KEYS,            /* q `keys x` — primary key column names (empty sym
+                         * vector when unkeyed); table by value or by name.   */
+    QK_XKEY,            /* q `x xkey y` — set key columns: reorder x first,
+                         * enkey count x (reuses q_enkey); by-name rebinds.   */
+    QK_XCOL,            /* q `x xcol y` — rename columns (sym vector renames
+                         * the first n; dict / all-key keyed map renames
+                         * selected; unknown name -> 'length).                */
+    QK_XCOLS,           /* q `x xcols y` — reorder columns, x first.          */
+    QK_XASC,            /* q `x xasc y` — sort table ascending by columns.
+                         * ARG-SWAP over base ray_xasc_fn (QK_XBAR precedent);
+                         * by-name sorts the global in place.  No `s#`
+                         * attribute (deferred divergence, like QK_ASC).      */
+    QK_XDESC,           /* q `x xdesc y` — descending mirror of QK_XASC.      */
+    QK_XGROUP,          /* q `x xgroup y` — key by x; remaining columns become
+                         * per-group nested lists (first-occurrence order).   */
+    QK_UNGROUP,         /* q `ungroup x` — inverse: explode nested list
+                         * columns, repeating simple cells ('length on ragged
+                         * rows).  Keyed tables flatten first.                */
+    QK_INSERT,          /* q `x insert y` — append rows to the NAMED global
+                         * table (kdb insert is by reference); unbound name +
+                         * table payload creates it; keyed key collision ->
+                         * 'insert; returns inserted row indices.             */
+    QK_UPSERT,          /* q `x upsert y` — append / keyed update-or-append;
+                         * value target returns the table, named target
+                         * rebinds and returns the name.                      */
+    QK_EXCEPT           /* q `x except y` — table rows of x not in y (row
+                         * membership); non-table operands delegate to base
+                         * ray_except_fn (the pre-wave QK_ENV pass-through).  */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
