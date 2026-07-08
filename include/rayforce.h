@@ -69,8 +69,8 @@ const char* ray_version_string(void);
 
 /* Type tags use kdb's numbering (list=0, bool=1, guid=2, ... time=19) so
  * `type` reads the tag directly with no translation seam.  The band 1..19 is
- * sparse: gaps 3,15,16,17,18 are kdb's short-of-3 / datetime / timespan /
- * minute / second, which have no rayfall type yet. */
+ * sparse: gaps 3 and 15 are kdb's short-of-3 and datetime (deprecated,
+ * f64-backed), which have no rayfall type. */
 #define RAY_LIST       0
 #define RAY_BOOL       1
 #define RAY_GUID       2
@@ -88,6 +88,12 @@ const char* ray_version_string(void);
 /* Months since 2000.01 (i32 payload = (year-2000)*12 + month-1) — kdb `m` */
 #define RAY_MONTH     13
 #define RAY_DATE      14
+/* Nanoseconds duration (i64 payload) — kdb `n` */
+#define RAY_TIMESPAN  16
+/* Minutes since midnight (i32 payload) — kdb `u` */
+#define RAY_MINUTE    17
+/* Seconds since midnight (i32 payload) — kdb `v` */
+#define RAY_SECOND    18
 #define RAY_TIME      19
 
 /* Width-class temporal aliases ("an int wearing a costume").  Bucket-1
@@ -96,10 +102,12 @@ const char* ray_version_string(void);
  * tag joins here once instead of at ~90 call sites.  Sites keyed on
  * SEMANTICS rather than width (e.g. OP_SUM's absolute-temporal reject list,
  * per-tag re-tag chains, civil-field extraction) stay explicit. */
-#define RAY_TEMPORAL32_CASES case RAY_DATE: case RAY_TIME: case RAY_MONTH
-#define RAY_TEMPORAL64_CASES case RAY_TIMESTAMP
-#define RAY_IS_TEMPORAL32(t) ((t) == RAY_DATE || (t) == RAY_TIME || (t) == RAY_MONTH)
-#define RAY_IS_TEMPORAL64(t) ((t) == RAY_TIMESTAMP)
+#define RAY_TEMPORAL32_CASES case RAY_DATE: case RAY_TIME: case RAY_MONTH: \
+                             case RAY_MINUTE: case RAY_SECOND
+#define RAY_TEMPORAL64_CASES case RAY_TIMESTAMP: case RAY_TIMESPAN
+#define RAY_IS_TEMPORAL32(t) ((t) == RAY_DATE || (t) == RAY_TIME || (t) == RAY_MONTH || \
+                              (t) == RAY_MINUTE || (t) == RAY_SECOND)
+#define RAY_IS_TEMPORAL64(t) ((t) == RAY_TIMESTAMP || (t) == RAY_TIMESPAN)
 
 /* Compound types */
 #define RAY_INDEX     97   /* Accelerator index attached to a vector (see ops/idxop.h) */
@@ -425,6 +433,9 @@ ray_t* ray_f64(double val);
 ray_t* ray_str(const char* s, size_t len);
 ray_t* ray_sym(int64_t id);
 ray_t* ray_month(int64_t val);
+ray_t* ray_minute(int64_t val);     /* minutes since midnight (i32 payload) */
+ray_t* ray_second(int64_t val);     /* seconds since midnight (i32 payload) */
+ray_t* ray_timespan(int64_t val);   /* nanoseconds duration (i64 payload) */
 ray_t* ray_date(int64_t val);
 ray_t* ray_time(int64_t val);
 ray_t* ray_timestamp(int64_t val);
@@ -459,10 +470,13 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
             return f != f;
         }
         case RAY_I64:
-        case RAY_TIMESTAMP: return x->i64 == NULL_I64;
+        case RAY_TIMESTAMP:
+        case RAY_TIMESPAN:  return x->i64 == NULL_I64;
         case RAY_I32:
         case RAY_MONTH:
         case RAY_DATE:
+        case RAY_MINUTE:
+        case RAY_SECOND:
         case RAY_TIME:      return x->i32 == NULL_I32;
         case RAY_I16:       return x->i16 == NULL_I16;
         case RAY_SYM:
