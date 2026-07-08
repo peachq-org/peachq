@@ -763,6 +763,7 @@ void q_builtins_register(void) {
         for (size_t i = 0; i < sizeof tv_monads / sizeof *tv_monads; i++) {
             const char* nm = tv_monads[i];
             ray_t* v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC); /* borrowed */
+            if (!v) fprintf(stderr, "q_builtins: registry miss for %s\n", nm);
             assert(v != NULL);
             ray_env_bind(ray_sym_intern(nm, strlen(nm)), v);             /* retains */
         }
