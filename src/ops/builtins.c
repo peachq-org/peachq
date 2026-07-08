@@ -1030,6 +1030,39 @@ static void cast_par_fn(void* arg, uint32_t worker_id, int64_t lo, int64_t hi) {
     cast_range_worker(ctx->src, ctx->dst, lo, hi, ctx->in_type, ctx->out_type);
 }
 
+/* UNIT-CONVERTING temporal vector casts (single home — codex q-month round-3
+ * P2s): a cast between two temporal types whose payloads are in different
+ * UNITS (month<->date/timestamp civil, duration-family ns ratios,
+ * timestamp->time-of-day) must apply the same conversion the ATOM arm uses,
+ * per element.  The generic cast_vec_numeric path relabels/copies raw
+ * payloads (correct only for pure re-tags like int<->minute) — falling
+ * through to it produced `month$2019.11.19 2019.12.01 -> 2605.03 2606.03m.
+ * Every temporal-target cast arm routes TEMPORAL-source vectors here; the
+ * int-family fast path is untouched.  Nulls pass through as typed nulls. */
+static ray_t* cast_vec_temporal_elems(ray_t* type_sym, ray_t* val, int8_t out_type) {
+    int64_t n = ray_len(val);
+    ray_t* out = ray_vec_new(out_type, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = n;
+    for (int64_t i = 0; i < n; i++) {
+        if (ray_vec_is_null(val, i)) {
+            ray_t* nl = ray_typed_null((int8_t)-out_type);
+            store_typed_elem(out, i, nl);
+            ray_release(nl);
+            continue;
+        }
+        int alloc = 0;
+        ray_t* e = collection_elem(val, i, &alloc);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+        ray_t* c = ray_cast_fn(type_sym, e);      /* the scalar/atom arm */
+        if (alloc) ray_release(e);
+        if (!c || RAY_IS_ERR(c)) { ray_release(out); return c; }
+        store_typed_elem(out, i, c);              /* null atoms set the bit too */
+        ray_release(c);
+    }
+    return out;
+}
+
 /* Threshold below which the dispatch overhead outweighs the speedup.
  * Memory-bound conversions saturate ~3 GB/s single-thread; with 8
  * workers we approach DRAM peak (~25 GB/s).  Below ~256 K elements the
@@ -1564,8 +1597,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             date_to_ymd((int32_t)ts_days_floor(val->i64), &y, &m, &d2);
             return ray_month((int64_t)(y - 2000) * 12 + (m - 1));
         }
-        /* Vector cast (int-family re-tags on the fast path; date/timestamp
-         * sources fall to the per-element atom path above). */
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_MONTH) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_MONTH);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_MONTH);
         return ray_error("type", "as: cannot cast %s to month", ray_type_name(val->type));
@@ -1603,7 +1642,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             }
             return ray_date(days);
         }
-        /* Vector cast */
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_DATE) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_DATE);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_DATE);
         return ray_error("type", "as: cannot cast %s to date", ray_type_name(val->type));
@@ -1657,7 +1703,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             int32_t ms = (int32_t)th * 3600000 + (int32_t)tm * 60000 + (int32_t)ts * 1000 + tms;
             return ray_time((int64_t)ms);
         }
-        /* Vector cast */
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_TIME) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_TIME);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_TIME);
         return ray_error("type", "as: cannot cast %s to time", ray_type_name(val->type));
@@ -1692,6 +1745,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             if (v < 0 && q * 60000000000LL != v) q--;
             return ray_minute(q);
         }
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_MINUTE) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_MINUTE);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_MINUTE);
         return ray_error("type", "as: cannot cast %s to minute", ray_type_name(val->type));
@@ -1719,6 +1780,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             if (v < 0 && q * 1000000000LL != v) q--;
             return ray_second(q);
         }
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_SECOND) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_SECOND);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_SECOND);
         return ray_error("type", "as: cannot cast %s to second", ray_type_name(val->type));
@@ -1739,6 +1808,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_MINUTE) return ray_timespan((int64_t)val->i32 * 60000000000LL);
         if (val->type == -RAY_SECOND) return ray_timespan((int64_t)val->i32 * 1000000000LL);
         if (val->type == -RAY_TIME)   return ray_timespan((int64_t)val->i32 * 1000000LL);
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_TIMESPAN) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_TIMESPAN);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_TIMESPAN);
         return ray_error("type", "as: cannot cast %s to timespan", ray_type_name(val->type));
@@ -1832,7 +1909,14 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             }
             return ray_timestamp(ns);
         }
-        /* Vector cast */
+        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
+         * per-element unit conversion (cast_vec_temporal_elems — the atom
+         * arm's semantics); int-family stays on the generic fast path. */
+        if (ray_is_vec(val)) {
+            if (val->type == RAY_TIMESTAMP) { ray_retain(val); return val; }
+            if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type))
+                return cast_vec_temporal_elems(type_sym, val, RAY_TIMESTAMP);
+        }
         if (ray_is_vec(val) || val->type == RAY_LIST)
             return cast_vec_numeric(type_sym, val, RAY_TIMESTAMP);
         return ray_error("type", "as: cannot cast %s to timestamp", ray_type_name(val->type));
