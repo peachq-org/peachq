@@ -80,10 +80,16 @@ static const q_op_t Q_OPS[] = {
     { ".",     QLEX_GLYPH,     QK_NONE, NULL,        QK_DOT,   "apply",   NULL  },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "div",     NULL  },
+    /* q `x mod y` — remainder, divisor-sign convention.  rayfall `%` IS kdb
+     * mod (audited: (% -3 2) -> 1, (% 7.5 2) -> 1.5) — pure QK_ENV rename. */
+    { "mod",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "%",       NULL  },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
      * collapse, since map returns a boxed list where q wants a simple vec). */
     { "each",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_EACH,  "map",     NULL  },
-    { "in",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ENV,   "in",      NULL  },
+    /* q `x in y` — QK_IN wrapper (ref/in.md): typed-vector y left-atomic via
+     * base ray_in_fn; generic-list y is whole-item, rank-sensitive; mixed
+     * numeric families gated to atom/1-item y. */
+    { "in",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_IN,    "in",      NULL  },
     /* q `and` — keyword spelling of `&` (element-wise min / logical AND,
      * ref/and.md, ref/lesser.md).  REUSES the SAME QK_MIN2 kernel the glyph
      * `&` routes to (q_min2_wrap) — no new logic.  Numeric/bool are kdb-true
@@ -183,6 +189,10 @@ static const q_op_t Q_OPS[] = {
      * end (kdb next.md / prev.md).  No rayfall counterpart, so wrappers. */
     { "next",    QLEX_KW_PREFIX, QK_NEXT, "next",    QK_NONE,  NULL,      NULL  },
     { "prev",    QLEX_KW_PREFIX, QK_PREV, "prev",    QK_NONE,  NULL,      NULL  },
+    /* q `n xprev x` — n-item shift (ref/next.md); dyadic infix like rotate. */
+    { "xprev",   QLEX_KW_INFIX,  QK_NONE, NULL,      QK_XPREV, "xprev",   NULL  },
+    /* q `fills x` — forward-fill nulls (ref/fill.md; the `^\` fill-scan). */
+    { "fills",   QLEX_KW_PREFIX, QK_FILLS, "fills",  QK_NONE,  NULL,      NULL  },
     { "where",   QLEX_KW_PREFIX, QK_WHERE, "where",  QK_NONE,  NULL,      NULL  },
     { "reverse", QLEX_KW_PREFIX, QK_REV, "reverse",  QK_NONE,  NULL,      NULL  },
     { "sum",     QLEX_KW_PREFIX, QK_ENV, "sum",      QK_NONE,  NULL,      NULL  },
@@ -254,7 +264,7 @@ static const q_op_t Q_OPS[] = {
     { "max",     QLEX_KW_PREFIX, QK_ENV, "max",      QK_NONE,  NULL,      NULL  },
     { "min",     QLEX_KW_PREFIX, QK_ENV, "min",      QK_NONE,  NULL,      NULL  },
     { "rank",    QLEX_KW_PREFIX, QK_ENV, "rank",     QK_NONE,  NULL,      NULL  },
-    { "raze",    QLEX_KW_PREFIX, QK_ENV, "raze",     QK_NONE,  NULL,      NULL  },
+    { "raze",    QLEX_KW_PREFIX, QK_RAZE, "raze",    QK_NONE,  NULL,      NULL  },
     { "sqrt",    QLEX_KW_PREFIX, QK_ENV, "sqrt",     QK_NONE,  NULL,      NULL  },
     /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm.
      * rayfall has no trig/reciprocal/signum primitive, so these are wrappers
