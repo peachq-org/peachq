@@ -23,6 +23,7 @@
 
 #include "atom.h"
 #include "lang/format.h"  /* ray_type_name */
+#include <math.h>         /* isfinite — datetime non-finite canonicalization */
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -208,6 +209,18 @@ ray_t* ray_timespan(int64_t val) {
     return v;
 }
 
+/* datetime: f64 days since 2000.01.01, fraction = time of day.  Single-null
+ * float model (owner decision 2026-07-09): non-finite payloads canonicalize
+ * to the one NaN null here — the constructor is the single home, so no
+ * producer (scanner, casts, arith) can mint a live 0Wz. */
+ray_t* ray_datetime(double val) {
+    ray_t* v = ray_alloc(0);
+    if (RAY_IS_ERR(v)) return v;
+    v->type = -RAY_DATETIME;
+    v->f64  = isfinite(val) ? val : NULL_F64;
+    return v;
+}
+
 ray_t* ray_typed_null(int8_t type) {
     if (type >= 0) return ray_error("type", "typed_null: expects a negative atom type tag, got %s", ray_type_name(type));
     /* GUID null is the canonical all-zero 16-byte value: allocate the
@@ -227,7 +240,7 @@ ray_t* ray_typed_null(int8_t type) {
     if (RAY_IS_ERR(v)) return v;
     v->type = type;
     switch (type) {
-        case -RAY_F64:                                 v->f64 = NULL_F64; break;
+        case -RAY_F64: case -RAY_DATETIME:             v->f64 = NULL_F64; break;
         case -RAY_F32:                                 v->f64 = (double)NULL_F32; break;
         case -RAY_I64: case -RAY_TIMESTAMP: case -RAY_TIMESPAN: v->i64 = NULL_I64; break;
         case -RAY_I32: case -RAY_MONTH: case -RAY_DATE: case -RAY_TIME:
