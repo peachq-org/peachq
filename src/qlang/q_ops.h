@@ -133,6 +133,19 @@ typedef enum {
     QK_NULL,            /* q `null x` — atomic nil? (broadcasts over vectors +
                            nested lists at every depth), homogeneous top-level
                            bool-atom run collapsed to a bool vector             */
+    /* ---- lists quick-wins (feat/q-list-quick-wins) ---- */
+    QK_RAZE,            /* q `raze x` — base ray_raze_fn plus the kdb atom arm
+                         * (`raze 42` -> ,42; ref/raze.md "atom returned as a
+                         * list")                                               */
+    QK_FILLS,           /* q `fills x` — forward-fill nulls with the last non-
+                         * null (the `^\` fill-scan, ref/fill.md); numeric +
+                         * sym vectors, leading nulls stay null                 */
+    QK_XPREV,           /* q `n xprev x` — shift x by n items (pos = prev-by-n,
+                         * neg = next-by-|n|; ref/next.md), null-filling the
+                         * vacated end; string atoms shift chars filling ' '    */
+    QK_IN,              /* q `x in y` — membership (ref/in.md): typed-vector y
+                         * is left-atomic; generic-list y tests WHOLE-x item
+                         * membership (rank-sensitive, no iteration through x)  */
     /* ---- string search family (feat/q-string-fns) ---- */
     QK_LIKE,            /* q `x like p` — glob match sym/str atom|vector -> bool
                          * (reuses ray_like_fn); dict x -> bool vals, rebuilt.   */

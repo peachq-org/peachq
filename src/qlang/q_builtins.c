@@ -737,6 +737,9 @@ void q_builtins_register(void) {
      * registry copy; both call q_value_wrap (single home).  Bound before
      * q_registry_init like the other q-owned overrides. */
     bind_unary("value", q_value_wrap);
+    /* `enlist` — q dict arm (1-row table); the `,` monadic QK_ENV snapshot
+     * inherits it (bound before q_registry_init, q_value_wrap precedent). */
+    bind_vary ("enlist", q_enlist_wrap_vary);
     /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
      * The registry is the authoritative, immutable verb source; it snapshots
      * builtin values and must be torn down via q_runtime_destroy before the

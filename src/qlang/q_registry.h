@@ -74,6 +74,13 @@ int q_is_keyed_table(ray_t* y);
  * null gate offers a RAY_NULL_OBJ-operand application to the apply hook. */
 int q_fn_null_ok(const ray_t* fn);
 
+/* Distribution veto: the dict function-distribution shim consults this before
+ * retrying a 'type-failed builtin over a dict's values.  Returns 1 when the
+ * WRAPPER owns that operand shape end-to-end and the retry must not happen
+ * (q `,`: `10,d` is 'type per ref/join.md — a bare dict joins only with a
+ * dict; dict,dict and keyed-table pairs still distribute/union). */
+int q_fn_dict_distribute_veto(const ray_t* fn, ray_t** args, int64_t n);
+
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
@@ -93,6 +100,11 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
  * env-resolved, and without this override it would hit rayfall's dict-only native
  * `value`.  Both bindings call this one function (single home, rule 4). */
 ray_t* q_value_wrap(ray_t* x);
+
+/* q `enlist` vary wrapper (base ray_enlist_fn + dict -> 1-row table arm) —
+ * env-bound by q_builtins_register before registry init (q_value_wrap
+ * precedent) so both `enlist` and monadic `,` share it. */
+ray_t* q_enlist_wrap_vary(ray_t** args, int64_t n);
 
 /* Context-aware symbol resolution (q namespaces): `. / `.foo synthesize the
  * root/context dict views; `..name root-qualifies; a plain name resolves in
