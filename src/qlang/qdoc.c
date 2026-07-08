@@ -4,6 +4,7 @@
 #include "qlang/qdoc.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
+#include "qlang/q_ns.h"     /* q_ns_syscmd, q_ns_prompt — namespace transcripts */
 #include "lang/eval.h"      /* ray_eval */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
@@ -31,6 +32,28 @@ static void normalize(const char* s, char* out, size_t osz) {
 static int ends_with(const char* s, const char* suf) {
     size_t a = strlen(s), b = strlen(suf);
     return a >= b && strcmp(s + a - b, suf) == 0;
+}
+
+/* Input-prompt prefix: `q)` or `q.<ident>)` (namespace transcripts after
+ * `\d .foo` — basics/syscmds.md).  Strict: the ident must be
+ * [A-Za-z][A-Za-z0-9_]* and the closing paren present, so ordinary output
+ * lines starting with `q` never reclassify.  Returns the prefix length
+ * (including `)`) or 0. */
+static size_t prompt_prefix_len(const char* line) {
+    if (line[0] != 'q') return 0;
+    if (line[1] == ')') return 2;
+    if (line[1] != '.') return 0;
+    size_t i = 2;
+    char c = line[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return 0;
+    for (i = 3; line[i]; i++) {
+        c = line[i];
+        if (c == ')') return i + 1;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 0;
 }
 
 /* Error-expectation rows: an expected output whose FIRST line starts with `'`
@@ -73,11 +96,85 @@ static void classify(qdoc_result_t* r, int ok) {
     if (ok) r->passed++; else r->failed++;
 }
 
-static void run_example(const char* input, const char* expect, qdoc_mode_t mode,
+static void run_example(const char* input, const char* expect,
+                        const char* tprompt, qdoc_mode_t mode,
                         int verbose, FILE* out, const char* path,
                         qdoc_result_t* r) {
     r->examples++;
     q_console_reset();   /* drop any show/0N! output from a prior example */
+
+    /* Prompt pin: the transcript's prompt (`q)` / `q.foo)`) must match the
+     * LIVE context prompt at this point — that is what tests the `\d` prompt
+     * without a pty.  Mismatch fails the row; the input still executes so
+     * the rest of the transcript stays in sync. */
+    int prompt_ok = 1;
+    if (tprompt && *tprompt) {
+        char live[80];
+        q_ns_prompt(live, sizeof live);
+        prompt_ok = (strcmp(tprompt, live) == 0);
+    }
+
+    /* q system commands (\d \v \f \a) bypass the parser, like the REPL. */
+    {
+        int handled = 0;
+        ray_t* sr = q_ns_syscmd(input, strlen(input), &handled);
+        if (handled) {
+            r->parsed++;
+            if (mode == QDOC_PARSE_ONLY) {
+                if (sr && RAY_IS_ERR(sr)) ray_error_free(sr);
+                else if (sr) ray_release(sr);
+                classify(r, prompt_ok);
+                return;
+            }
+            char errcls[8];
+            int want_error = expect_is_error(expect, errcls, sizeof errcls);
+            char got[QD_OUT];
+            got[0] = '\0';
+            int ok;
+            if (sr && RAY_IS_ERR(sr)) {
+                ok = want_error && error_row_matches(sr, errcls);
+                snprintf(got, sizeof got, "<error>");
+                ray_error_free(sr);
+            } else {
+                if (sr && !RAY_IS_NULL(sr)) q_fmt(sr, got, sizeof got);
+                if (sr) ray_release(sr);
+                if (want_error) {
+                    ok = 0;
+                } else {
+                    char ng[QD_OUT], ne[QD_OUT];
+                    normalize(got, ng, sizeof ng);
+                    normalize(expect, ne, sizeof ne);
+                    ok = (strcmp(ng, ne) == 0);
+                }
+            }
+            ok = ok && prompt_ok;
+            classify(r, ok);
+            if (!ok && verbose)
+                fprintf(out, "  q)%.200s\n    FAIL(syscmd%s) got \"%.200s\" want \"%.200s\"\n",
+                        input, prompt_ok ? "" : ":prompt", got, expect);
+            return;
+        }
+    }
+
+    /* Transcript prompt out of sync with the live context: fail the row but
+     * still execute the input so later rows see the intended state. */
+    if (!prompt_ok) {
+        ray_t* past = q_parse(input);
+        if (!RAY_IS_ERR(past)) {
+            r->parsed++;
+            past = q_lower(past);
+            if (!RAY_IS_ERR(past)) {
+                ray_t* pres = ray_eval(past);
+                ray_release(pres);
+            }
+            ray_release(past);
+        }
+        classify(r, 0);
+        if (verbose)
+            fprintf(out, "  %s%.200s\n    FAIL(prompt) transcript prompt \"%s\" != live context\n",
+                    tprompt, input, tprompt);
+        return;
+    }
 
     ray_t* ast = q_parse(input);
     if (RAY_IS_ERR(ast)) {
@@ -194,9 +291,10 @@ qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
     char line[QD_OUT];
     char input[QD_IN]  = {0};
     char expect[QD_OUT] = {0};
+    char tprompt[80] = {0};
     int  have = 0;
 
-#define FLUSH() do { if (have) { run_example(input, expect, mode, verbose, out, path, &r); \
+#define FLUSH() do { if (have) { run_example(input, expect, tprompt, mode, verbose, out, path, &r); \
                                  have = 0; expect[0] = '\0'; } } while (0)
 
     while (fgets(line, sizeof line, f)) {
@@ -217,10 +315,15 @@ qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
             }
         }
 
-        if (strncmp(line, "q)", 2) == 0) {
+        size_t pl = prompt_prefix_len(line);
+        if (pl) {
             FLUSH();
-            snprintf(input, sizeof input, "%.2047s", line + 2);
+            snprintf(tprompt, sizeof tprompt, "%.*s", (int)(pl < 79 ? pl : 79), line);
+            snprintf(input, sizeof input, "%.2047s", line + pl);
             expect[0] = '\0';
+            /* Empty and comment-only inputs stay examples — they always
+             * were (parse to nothing, pass), so the committed floors hold;
+             * a trailing prompt-only `q.nn)` line just pins its prompt. */
             have = 1;
         } else if (have) {
             size_t e = strlen(expect);

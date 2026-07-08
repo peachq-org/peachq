@@ -366,8 +366,8 @@ static void pearson_init(void* s) {
 static inline double pearson_read_f64(const ray_valid_t* v, int64_t i) {
     switch (v->type) {
         case RAY_F64:                       return ((const double*)v->base)[i];
-        case RAY_I64: case RAY_TIMESTAMP:   return (double)((const int64_t*)v->base)[i];
-        case RAY_I32: case RAY_DATE: case RAY_TIME:
+        case RAY_I64: RAY_TEMPORAL64_CASES:   return (double)((const int64_t*)v->base)[i];
+        case RAY_I32: RAY_TEMPORAL32_CASES:
                                             return (double)((const int32_t*)v->base)[i];
         case RAY_I16:                       return (double)((const int16_t*)v->base)[i];
         case RAY_U8:  case RAY_BOOL:        return (double)((const uint8_t*)v->base)[i];
@@ -516,7 +516,7 @@ const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
     if (agg_kind == OP_PEARSON_CORR &&
         (in_type == RAY_F64 || in_type == RAY_I64 || in_type == RAY_I32 ||
          in_type == RAY_I16 || in_type == RAY_U8  || in_type == RAY_BOOL ||
-         in_type == RAY_DATE || in_type == RAY_TIME || in_type == RAY_TIMESTAMP))
+         RAY_IS_TEMPORAL32(in_type) || RAY_IS_TEMPORAL64(in_type)))
         return &PEARSON_F64;
     if (agg_kind == OP_SUM && in_type == RAY_I64) return &SUM_I64;
     if (agg_kind == OP_COUNT)                     return &COUNT_ANY;
