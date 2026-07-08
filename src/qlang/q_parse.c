@@ -1012,9 +1012,11 @@ static P parse_base(Parser *p) {
             expect(p, T_RBRACK, "expected ']' in keyed table literal");
             /* kdb accepts an optional `;` between the key bracket and the
              * first value column — `([a:`x`y];b:10 20)` == `([a:`x`y]b:10 20)`
-             * (insert.qcmd/upsert.qcmd spell it with the semicolon). */
+             * (insert.qcmd/upsert.qcmd spell it with the semicolon).  An
+             * ALL-KEY literal `([a:`A;c:`C])` has NO value columns (used as
+             * xcol's rename map, ref/cols.md) — emit an empty vcols list. */
             if (at(p, T_SEMI)) adv(p);
-            ray_t *vcols = parse_E(p);
+            ray_t *vcols = at(p, T_RPAREN) ? ray_list_new(1) : parse_E(p);
             expect(p, T_RPAREN, "expected ')'");
             int64_t kn = ray_len(kcols), vn = ray_len(vcols);
             ray_t **ks = (ray_t **)ray_data(kcols);
