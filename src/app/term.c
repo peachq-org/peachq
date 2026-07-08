@@ -1843,6 +1843,15 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
     }
 
     case KEYCODE_CTRL_C: {
+#if defined(RAY_OS_WINDOWS)
+        /* Windows q exits on Ctrl-C at an idle prompt; keep line-clear
+         * when there is typed input so a stray ^C can't lose it. */
+        if (term->buf_len == 0 && term->multiline_len == 0) {
+            putchar('\n');
+            fflush(stdout);
+            return RAY_TERM_EOF;
+        }
+#endif
         term->comp_cycling = 0;
         term->esc_state = 0;
         term->buf_len = 0;
