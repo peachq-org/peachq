@@ -14,6 +14,7 @@
 #include "qlang/q_deriv.h"    /* q_deriv_reset_markers — per-runtime sym-id cache */
 #include "qlang/q_dotz.h"     /* q_dotz_init/resolve/destroy — `.z.*` resolver */
 #include "qlang/q_ns.h"       /* q_ns_reset — `\d` context state */
+#include "qlang/q_sys.h"      /* q_sys_seed_init — `\S` constant-seed contract */
 #include "lang/eval.h"        /* ray_eval_set_apply_hook / _name_hook */
 #include <rayforce.h>
 
@@ -27,7 +28,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
     ray_set_load_rayfall_ns(true);
     if (rt) {
         q_ns_reset();          /* fresh runtime starts in the root context */
-        q_seed_init();         /* kdb constant-seed-at-startup contract (\S) */
+        q_sys_seed_init();     /* kdb constant-seed-at-startup contract (\S) */
         q_builtins_register();
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
          * process-constant argv values once and install the name-load hook. */
