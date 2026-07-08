@@ -126,7 +126,8 @@ help:
 	@printf "  %-28s %s\n" "make $(QDOC_TARGET)" "Build only the $(QDOC_TARGET) binary"
 	@printf "  %-28s %s\n" "make lib" "Build static library lib$(TARGET).a"
 	@printf "  %-28s %s\n" "make dist" "Build release tarball and SHA-256 checksum under dist/"
-	@printf "  %-28s %s\n" "make win" "Cross-compile q.exe with mingw (WIN_CROSS=$(WIN_CROSS))"
+	@printf "  %-28s %s\n" "make win" "Cross-compile q.exe + rayforce.exe with mingw (WIN_CROSS=$(WIN_CROSS))"
+	@printf "  %-28s %s\n" "make win-smoke" "Deploy exes to the Windows host and run the native battery over SSH"
 	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
 	@printf "  %-28s %s\n" "make qtest" "q-only loop; fuzzy filter with F=, e.g. make qtest F=asc"
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
@@ -444,6 +445,13 @@ rayforce.exe: $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ)
 
 win: q.exe rayforce.exe
 
+# Native Windows smoke battery (stage 2): cross-build, deploy to the
+# VirtualBox share, run pinned checks on the real host over SSH.  Needs the
+# native ./q (transcript oracle) — build it first.  Skips loudly (exit 0)
+# when the host is unreachable; every remote call has a hard timeout.
+win-smoke: win $(Q_TARGET)
+	bash tools/win-smoke.sh
+
 clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
@@ -459,7 +467,7 @@ clean:
 	# JUnit-XML export (tools/qtest.sh) + javakdb build classes (kwire-live).
 	-rm -rf test-results tools/kdb-conformance/.build
 
-.PHONY: default help debug release lib dist win bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean
+.PHONY: default help debug release lib dist win win-smoke bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
