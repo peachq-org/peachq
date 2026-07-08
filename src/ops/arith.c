@@ -221,11 +221,13 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
 ray_t* ray_div_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_div_fn, OP_DIV, a, b);
-    /* MONTH/TIME ÷ numeric → f64 payload divide — both doc-pinned
-     * (basics/math.md:158 2017.12m%2 → 107.5; :160 00:10%2 → 5f).
-     * DATE/TIMESTAMP stay rejected (unpinned behavior — do not invent). */
-    int a_div_temporal = (a->type == -RAY_MONTH || a->type == -RAY_TIME);
-    if (!(is_numeric(a) || a_div_temporal) || !is_numeric(b))
+    /* MONTH ÷ numeric → f64 payload divide — doc-pinned (basics/math.md:158
+     * 2017.12m%2 → 107.5).  TIME ÷ int is ALSO doc-pinned (math.md:160
+     * 00:10%2 → 5f) but the base rfl suite pins (/ TIME x) → 'type
+     * (test/rfl/arith/branch_cov.rfl:263) — enabling it is a base-behavior
+     * decision deferred to its own change; DATE/TIMESTAMP stay rejected
+     * (unpinned — do not invent). */
+    if (!(is_numeric(a) || a->type == -RAY_MONTH) || !is_numeric(b))
         return ray_error("type", "cannot divide %s by %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
