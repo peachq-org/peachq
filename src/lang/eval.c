@@ -180,12 +180,15 @@ static int64_t numeric_atom_i64(ray_t* x) {
     switch (x->type) {
     case -RAY_I64:
     case -RAY_TIMESTAMP:
+    case -RAY_TIMESPAN:
     case -RAY_SYM:
         return x->i64;
     case -RAY_I32:
     case -RAY_DATE:
     case -RAY_TIME:
     case -RAY_MONTH:
+    case -RAY_MINUTE:
+    case -RAY_SECOND:
         return x->i32;
     case -RAY_I16:
         return x->i16;
@@ -431,7 +434,10 @@ static ray_t* zero_atom_for_elem_type(ray_t* coll) {
         case RAY_DATE:      return ray_date(0);
         case RAY_MONTH:     return ray_month(0);
         case RAY_TIME:      return ray_time(0);
+        case RAY_MINUTE:    return ray_minute(0);
+        case RAY_SECOND:    return ray_second(0);
         case RAY_TIMESTAMP: return ray_timestamp(0);
+        case RAY_TIMESPAN:  return ray_timespan(0);
         case RAY_SYM:       return ray_sym(0);
         case RAY_STR:       return ray_str("", 0);
         case RAY_GUID: {
@@ -1317,6 +1323,9 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             else if (row_elems[0]->type == -RAY_DATE) col_type = RAY_DATE;
             else if (row_elems[0]->type == -RAY_TIME) col_type = RAY_TIME;
             else if (row_elems[0]->type == -RAY_MONTH) col_type = RAY_MONTH;
+            else if (row_elems[0]->type == -RAY_MINUTE) col_type = RAY_MINUTE;
+            else if (row_elems[0]->type == -RAY_SECOND) col_type = RAY_SECOND;
+            else if (row_elems[0]->type == -RAY_TIMESPAN) col_type = RAY_TIMESPAN;
             /* RAY_CHAR removed — char atoms are now -RAY_STR */
         }
         /* Promote I64 → F64 if any element is F64 */

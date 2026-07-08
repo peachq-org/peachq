@@ -561,7 +561,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                 switch (kt) {
                     case RAY_F64:
                         ((double*)ray_data(new_col))[r] = NULL_F64; break;
-                    case RAY_I64: case RAY_TIMESTAMP:
+                    case RAY_I64: RAY_TEMPORAL64_CASES:
                         ((int64_t*)ray_data(new_col))[r] = NULL_I64; break;
                     case RAY_I32: RAY_TEMPORAL32_CASES:
                         ((int32_t*)ray_data(new_col))[r] = NULL_I32; break;
@@ -624,7 +624,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                 for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_F32;
                 break;
             }
-            case RAY_I64: case RAY_TIMESTAMP: {
+            case RAY_I64: RAY_TEMPORAL64_CASES: {
                 int64_t* d = (int64_t*)ray_data(new_col);
                 for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_I64;
                 break;

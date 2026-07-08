@@ -175,7 +175,7 @@ static ray_t* groups_to_pair_list(ray_t* d) {
                  * the atom rule (no-op while keys is runtime-domain). */
                 case RAY_SYM: k = ray_sym(sym_cell_runtime_id(keys, i)); break;
                 case RAY_I64:
-                case RAY_TIMESTAMP: k = ray_i64(((int64_t*)base)[i]); break;
+                RAY_TEMPORAL64_CASES: k = ray_i64(((int64_t*)base)[i]); break;
                 case RAY_I32:
                 RAY_TEMPORAL32_CASES: k = ray_i32(((int32_t*)base)[i]); break;
                 case RAY_I16: k = ray_i16(((int16_t*)base)[i]); break;
@@ -1658,9 +1658,12 @@ static int atom_i64_const(ray_t* v, int64_t* out) {
     case -RAY_I32:
     case -RAY_DATE:
     case -RAY_TIME:
-    case -RAY_MONTH: *out = v->i32; return 1;
+    case -RAY_MONTH:
+    case -RAY_MINUTE:
+    case -RAY_SECOND: *out = v->i32; return 1;
     case -RAY_I64:
-    case -RAY_TIMESTAMP: *out = v->i64; return 1;
+    case -RAY_TIMESTAMP:
+    case -RAY_TIMESPAN: *out = v->i64; return 1;
     default: return 0;
     }
 }
@@ -1703,8 +1706,8 @@ static int expr_affine_of_sym(ray_t* expr, int64_t sym, int64_t* bias) {
 
 static int key_type_i64_projectable(int8_t t) {
     return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 ||
-           t == RAY_I32 || t == RAY_I64 || t == RAY_DATE ||
-           t == RAY_TIME || t == RAY_MONTH || t == RAY_TIMESTAMP;
+           t == RAY_I32 || t == RAY_I64 ||
+           RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t);
 }
 
 static int64_t key_col_read_i64(ray_t* col, int64_t row) {
@@ -1716,7 +1719,7 @@ static int64_t key_col_read_i64(ray_t* col, int64_t row) {
     case RAY_I32:
     RAY_TEMPORAL32_CASES: return ((const int32_t*)d)[row];
     case RAY_I64:
-    case RAY_TIMESTAMP: return ((const int64_t*)d)[row];
+    RAY_TEMPORAL64_CASES: return ((const int64_t*)d)[row];
     default: return 0;
     }
 }
@@ -1737,11 +1740,14 @@ static bool parse_gt_name_i64(ray_t* expr, int64_t* out_name, int64_t* out_thres
         return false;
     int64_t threshold;
     switch (e[2]->type) {
-        case -RAY_I64: threshold = e[2]->i64; break;
+        case -RAY_I64:
+        case -RAY_TIMESPAN: threshold = e[2]->i64; break;
         case -RAY_I32:
         case -RAY_DATE:
         case -RAY_TIME:
-        case -RAY_MONTH: threshold = e[2]->i32; break;
+        case -RAY_MONTH:
+        case -RAY_MINUTE:
+        case -RAY_SECOND: threshold = e[2]->i32; break;
         case -RAY_I16: threshold = e[2]->i16; break;
         case -RAY_U8:
         case -RAY_BOOL: threshold = e[2]->u8; break;
@@ -3443,7 +3449,7 @@ static inline int64_t key_read_i64(const void* d, int64_t idx,
     case RAY_I32:
     RAY_TEMPORAL32_CASES:     return ((const int32_t*)d)[idx];
     case RAY_I64:
-    case RAY_TIMESTAMP: return ((const int64_t*)d)[idx];
+    RAY_TEMPORAL64_CASES: return ((const int64_t*)d)[idx];
     case RAY_F32: { uint32_t u;
         memcpy(&u, &((const float*)d)[idx], 4);
         return (int64_t)u; }
@@ -3723,7 +3729,7 @@ static ray_t* atom_broadcast_vec(ray_t* a, int64_t n) {
         break;
     }
     case RAY_I64:
-    case RAY_TIMESTAMP: {
+    RAY_TEMPORAL64_CASES: {
         int64_t val = a->i64;
         int64_t* d = (int64_t*)dst;
         for (int64_t i = 0; i < n; i++) d[i] = val;
@@ -4074,7 +4080,7 @@ static inline int64_t count_atom_i64(ray_t* a) {
     if (a->type == -RAY_I16) return (int64_t)a->i16;
     if (a->type == -RAY_I32 || RAY_IS_TEMPORAL32(-a->type))
         return (int64_t)a->i32;
-    if (a->type == -RAY_I64 || a->type == -RAY_TIMESTAMP || a->type == -RAY_SYM)
+    if (a->type == -RAY_I64 || RAY_IS_TEMPORAL64(-a->type) || a->type == -RAY_SYM)
         return a->i64;
     return 0;
 }
@@ -4140,7 +4146,7 @@ static void count_compare_task(void* vctx, uint32_t worker_id, int64_t start, in
         break;
     }
     case RAY_I64:
-    case RAY_TIMESTAMP: {
+    RAY_TEMPORAL64_CASES: {
         const int64_t* x = (const int64_t*)data;
         for (int64_t i = start; i < end; i++) local += count_compare_i64(x[i], rhs, op);
         break;
@@ -6086,7 +6092,7 @@ by_dict_done:
                                 switch (kt) {
                                     case RAY_SYM: atom = ray_sym(key_vals[off]); break;
                                     case RAY_I64:
-                                    case RAY_TIMESTAMP: atom = ray_i64(key_vals[off]); break;
+                                    RAY_TEMPORAL64_CASES: atom = ray_i64(key_vals[off]); break;
                                     case RAY_I32:
                                     RAY_TEMPORAL32_CASES: atom = ray_i32((int32_t)key_vals[off]); break;
                                     case RAY_I16: atom = ray_i16((int16_t)key_vals[off]); break;
@@ -9304,7 +9310,7 @@ static void xbar_par_fn(void* vctx, uint32_t worker_id,
     (void)worker_id;
     xbar_par_ctx_t* c = (xbar_par_ctx_t*)vctx;
     int64_t b = c->b;
-    if (c->out_type == RAY_I64 || c->out_type == RAY_TIMESTAMP) {
+    if (c->out_type == RAY_I64 || RAY_IS_TEMPORAL64(c->out_type)) {
         const int64_t* in = (const int64_t*)c->in;
         int64_t* o = (int64_t*)c->out;
         if (c->pow2) {
@@ -9376,7 +9382,7 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
 
         int8_t out_type = col->type;
         int pow2 = 0;
-        if (out_type == RAY_I64 || out_type == RAY_TIMESTAMP) {
+        if (out_type == RAY_I64 || RAY_IS_TEMPORAL64(out_type)) {
             pow2 = (b > 0 && (b & (b - 1)) == 0);
         } else if (out_type == RAY_I32 || RAY_IS_TEMPORAL32(out_type)) {
             int32_t b32 = (int32_t)b;
@@ -9458,6 +9464,9 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
         if (col->type == -RAY_TIME) return ray_time(result);
         if (col->type == -RAY_DATE) return ray_date(result);
         if (col->type == -RAY_MONTH) return ray_month(result);
+        if (col->type == -RAY_MINUTE) return ray_minute(result);
+        if (col->type == -RAY_SECOND) return ray_second(result);
+        if (col->type == -RAY_TIMESPAN) return ray_timespan(result);
         return ray_timestamp(result);
     }
     return ray_error("type", "xbar: unsupported operand types, got %s and %s",
@@ -9545,6 +9554,21 @@ static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
     case RAY_MONTH: {
         if (at != -RAY_MONTH) return ray_error("type", "insert: month column requires a month value, got %s", ray_type_name(at));
         int32_t v = atom->i32;
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_MINUTE: {
+        if (at != -RAY_MINUTE) return ray_error("type", "insert: minute column requires a minute value, got %s", ray_type_name(at));
+        int32_t v = atom->i32;
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_SECOND: {
+        if (at != -RAY_SECOND) return ray_error("type", "insert: second column requires a second value, got %s", ray_type_name(at));
+        int32_t v = atom->i32;
+        return ray_vec_append(col_vec, &v);
+    }
+    case RAY_TIMESPAN: {
+        if (at != -RAY_TIMESPAN) return ray_error("type", "insert: timespan column requires a timespan value, got %s", ray_type_name(at));
+        int64_t v = atom->i64;
         return ray_vec_append(col_vec, &v);
     }
     case RAY_TIME: {
@@ -9927,7 +9951,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                             ray_vec_set_null(new_col, r, true);
                             switch (ct) {
                                 case RAY_F64:                              ((double*)ray_data(new_col))[r]  = NULL_F64; break;
-                                case RAY_I64: case RAY_TIMESTAMP:          ((int64_t*)ray_data(new_col))[r] = NULL_I64; break;
+                                case RAY_I64: RAY_TEMPORAL64_CASES:          ((int64_t*)ray_data(new_col))[r] = NULL_I64; break;
                                 case RAY_I32: RAY_TEMPORAL32_CASES:((int32_t*)ray_data(new_col))[r] = NULL_I32; break;
                                 case RAY_I16:                              ((int16_t*)ray_data(new_col))[r] = NULL_I16; break;
                                 default: break;
@@ -10015,7 +10039,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                                 for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
                                 break;
                             }
-                            case RAY_I64: case RAY_TIMESTAMP: {
+                            case RAY_I64: RAY_TEMPORAL64_CASES: {
                                 int64_t* d = (int64_t*)ray_data(bcast);
                                 for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I64;
                                 break;
@@ -10259,7 +10283,7 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                             for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
                             break;
                         }
-                        case RAY_I64: case RAY_TIMESTAMP: {
+                        case RAY_I64: RAY_TEMPORAL64_CASES: {
                             int64_t* d = (int64_t*)ray_data(bcast);
                             for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I64;
                             break;
@@ -10395,7 +10419,7 @@ no_where_add_col:
                         for (int64_t r = 0; r < nrows; r++) d[r] = NULL_F64;
                         break;
                     }
-                    case RAY_I64: case RAY_TIMESTAMP: {
+                    case RAY_I64: RAY_TEMPORAL64_CASES: {
                         int64_t* d = (int64_t*)ray_data(bcast);
                         for (int64_t r = 0; r < nrows; r++) d[r] = NULL_I64;
                         break;
@@ -11211,7 +11235,7 @@ ray_t* ray_upsert(ray_t** args, int64_t n) {
                 if (rl != nl || (nl > 0 && (!rs || !ns || memcmp(rs, ns, nl) != 0))) match = 0;
             } else {
                 int64_t needle = elem_as_i64(key_atom);
-                int64_t existing = (kt == RAY_I64 || kt == RAY_TIMESTAMP) ?
+                int64_t existing = (kt == RAY_I64 || RAY_IS_TEMPORAL64(kt)) ?
                     ((int64_t*)ray_data(key_col))[r] :
                     (kt == RAY_I32 || RAY_IS_TEMPORAL32(kt)) ?
                     (int64_t)((int32_t*)ray_data(key_col))[r] :
@@ -11824,7 +11848,7 @@ static void wj_scan_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t en
             void* rd = c->result_data[a];
             if (rty == RAY_F64)       ((double*)rd)[lr] = out_f;
             else if (rty == RAY_F32)  ((float*)rd)[lr]  = (float)out_f;
-            else if (rty == RAY_I64 || rty == RAY_TIMESTAMP)
+            else if (rty == RAY_I64 || RAY_IS_TEMPORAL64(rty))
                 ((int64_t*)rd)[lr] = out_i;
             else if (rty == RAY_I32 || RAY_IS_TEMPORAL32(rty))
                 ((int32_t*)rd)[lr] = (int32_t)out_i;

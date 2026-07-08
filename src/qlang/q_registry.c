@@ -1292,6 +1292,18 @@ static ray_t* q_neg_wrap(ray_t* x) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
         return ray_date(-(int64_t)x->i32);
     }
+    if (x && x->type == -RAY_MINUTE) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_minute(-(int64_t)x->i32);
+    }
+    if (x && x->type == -RAY_SECOND) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_second(-(int64_t)x->i32);
+    }
+    if (x && x->type == -RAY_TIMESPAN) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_timespan(-x->i64);
+    }
     if (x && x->type == -RAY_MONTH) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
         return ray_month(-(int64_t)x->i32);
@@ -2288,6 +2300,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'd': return RAY_DATE; case 'g': return RAY_GUID;
         case 't': return RAY_TIME; case 'p': return RAY_TIMESTAMP;
         case 'm': return RAY_MONTH;
+        case 'u': return RAY_MINUTE;
+        case 'v': return RAY_SECOND;
+        case 'n': return RAY_TIMESPAN;
         default:  return 0;       /* c z n u v + "*" identity: deferred */
         }
     }
@@ -2308,6 +2323,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
         else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
         else if (l == 5 && !memcmp(nm, "month",   5)) r = RAY_MONTH;
+        else if (l == 6 && !memcmp(nm, "minute",  6)) r = RAY_MINUTE;
+        else if (l == 6 && !memcmp(nm, "second",  6)) r = RAY_SECOND;
+        else if (l == 8 && !memcmp(nm, "timespan",8)) r = RAY_TIMESPAN;
         else if (l == 4 && !memcmp(nm, "time",    4)) r = RAY_TIME;
         else if (l == 9 && !memcmp(nm, "timestamp", 9)) r = RAY_TIMESTAMP;
         ray_release(s);
@@ -2324,6 +2342,9 @@ static const char* q_tag_rayname(int8_t tag) {
     case RAY_I64:  return "I64";  case RAY_F64: return "F64";
     case RAY_DATE: return "DATE"; case RAY_TIME: return "TIME";
     case RAY_MONTH: return "MONTH";
+    case RAY_MINUTE: return "MINUTE";
+    case RAY_SECOND: return "SECOND";
+    case RAY_TIMESPAN: return "TIMESPAN";
     case RAY_TIMESTAMP: return "TIMESTAMP";
     default:       return NULL;
     }

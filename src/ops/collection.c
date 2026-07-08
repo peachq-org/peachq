@@ -80,7 +80,10 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
         case RAY_DATE:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_MONTH:     return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_TIME:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
+        case RAY_MINUTE:    return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
+        case RAY_SECOND:    return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_TIMESTAMP: return ray_hash_i64(((const int64_t*)data)[i]);
+        case RAY_TIMESPAN:  return ray_hash_i64(((const int64_t*)data)[i]);
         case RAY_SYM: {
             /* Hashes the raw cell id, i.e. the BUILD side's id space.
              * Cross-domain probes never reach this hash — they are
@@ -107,8 +110,11 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
                 case -RAY_SYM:       return ray_hash_i64(e->i64);
                 case -RAY_DATE:
                 case -RAY_TIME:
-                case -RAY_MONTH:     return ray_hash_i64((int64_t)e->i32);
-                case -RAY_TIMESTAMP: return ray_hash_i64(e->i64);
+                case -RAY_MONTH:
+                case -RAY_MINUTE:
+                case -RAY_SECOND:    return ray_hash_i64((int64_t)e->i32);
+                case -RAY_TIMESTAMP:
+                case -RAY_TIMESPAN:  return ray_hash_i64(e->i64);
                 case -RAY_GUID: {
                     const uint8_t* g = e->obj
                         ? (const uint8_t*)ray_data(e->obj)
@@ -297,7 +303,7 @@ static int distinct_sort_cmp(const void* a, const void* b) {
     int64_t ia = *(const int64_t*)a;
     int64_t ib = *(const int64_t*)b;
     switch (g_dsort_type) {
-        case RAY_I64: case RAY_TIMESTAMP: {
+        case RAY_I64: RAY_TEMPORAL64_CASES: {
             int64_t va = ((const int64_t*)g_dsort_data)[ia];
             int64_t vb = ((const int64_t*)g_dsort_data)[ib];
             return (va > vb) - (va < vb);
@@ -719,8 +725,9 @@ int atom_eq(ray_t* a, ray_t* b) {
     case -RAY_BOOL: return a->b8 == b->b8;
     case -RAY_SYM:  return a->i64 == b->i64;
     case -RAY_DATE: case -RAY_TIME: case -RAY_MONTH:
+    case -RAY_MINUTE: case -RAY_SECOND:
         return a->i32 == b->i32;
-    case -RAY_TIMESTAMP:
+    case -RAY_TIMESTAMP: case -RAY_TIMESPAN:
         return a->i64 == b->i64;
     case -RAY_GUID: {
         const uint8_t* ga = a->obj ? (const uint8_t*)ray_data(a->obj) : (const uint8_t*)ray_data((ray_t*)a);
@@ -1945,11 +1952,14 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
             int eligible = 1;
             switch (val->type) {
             case -RAY_I64:
-            case -RAY_TIMESTAMP: needle = val->i64;              break;
+            case -RAY_TIMESTAMP:
+            case -RAY_TIMESPAN:  needle = val->i64;              break;
             case -RAY_I32:
             case -RAY_DATE:
             case -RAY_TIME:
-            case -RAY_MONTH:     needle = (int64_t)val->i32;     break;
+            case -RAY_MONTH:
+            case -RAY_MINUTE:
+            case -RAY_SECOND:    needle = (int64_t)val->i32;     break;
             case -RAY_I16:       needle = (int64_t)val->i16;     break;
             case -RAY_BOOL:
             case -RAY_U8:        needle = (int64_t)val->b8;      break;

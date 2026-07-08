@@ -105,7 +105,7 @@ static int64_t agg_read_i64(ray_t* v, int64_t i) {
     case RAY_I32:
     RAY_TEMPORAL32_CASES: return ((int32_t*)d)[i];
     case RAY_I64:
-    case RAY_TIMESTAMP: return ((int64_t*)d)[i];
+    RAY_TEMPORAL64_CASES: return ((int64_t*)d)[i];
     default: return 0;
     }
 }
@@ -119,7 +119,10 @@ static ray_t* agg_atom_i64_for_type(int8_t t, int64_t v) {
     case RAY_DATE: return ray_date(v);
     case RAY_MONTH: return ray_month(v);
     case RAY_TIME: return ray_time(v);
+    case RAY_MINUTE: return ray_minute(v);
+    case RAY_SECOND: return ray_second(v);
     case RAY_TIMESTAMP: return ray_timestamp(v);
+    case RAY_TIMESPAN: return ray_timespan(v);
     default: return ray_i64(v);
     }
 }
@@ -366,7 +369,10 @@ ray_t* ray_min_fn(ray_t* x) {
                     case RAY_DATE:      return ray_date((int32_t)mn);
                     case RAY_MONTH:     return ray_month((int32_t)mn);
                     case RAY_TIME:      return ray_time(mn);
+                    case RAY_MINUTE:    return ray_minute((int32_t)mn);
+                    case RAY_SECOND:    return ray_second((int32_t)mn);
                     case RAY_TIMESTAMP: return ray_timestamp(mn);
+                    case RAY_TIMESPAN:  return ray_timespan(mn);
                     default:            return ray_i64(mn);
                     }
                 }
@@ -421,7 +427,10 @@ ray_t* ray_max_fn(ray_t* x) {
                     case RAY_DATE:      return ray_date((int32_t)mx);
                     case RAY_MONTH:     return ray_month((int32_t)mx);
                     case RAY_TIME:      return ray_time(mx);
+                    case RAY_MINUTE:    return ray_minute((int32_t)mx);
+                    case RAY_SECOND:    return ray_second((int32_t)mx);
                     case RAY_TIMESTAMP: return ray_timestamp(mx);
+                    case RAY_TIMESPAN:  return ray_timespan(mx);
                     default:            return ray_i64(mx);
                     }
                 }

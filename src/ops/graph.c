@@ -382,10 +382,13 @@ static int8_t promote(int8_t a, int8_t b) {
     if (a == RAY_STR || b == RAY_STR) return RAY_STR;
     if (a == RAY_F64 || b == RAY_F64) return RAY_F64;
     if (a == RAY_I64 || b == RAY_I64 || a == RAY_SYM || b == RAY_SYM ||
-        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP) return RAY_I64;
+        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP ||
+        a == RAY_TIMESPAN || b == RAY_TIMESPAN) return RAY_I64;
     if (a == RAY_I32 || b == RAY_I32 ||
         a == RAY_DATE || b == RAY_DATE || a == RAY_TIME || b == RAY_TIME ||
-        a == RAY_MONTH || b == RAY_MONTH) return RAY_I32;
+        a == RAY_MONTH || b == RAY_MONTH ||
+        a == RAY_MINUTE || b == RAY_MINUTE ||
+        a == RAY_SECOND || b == RAY_SECOND) return RAY_I32;
     if (a == RAY_I16 || b == RAY_I16) return RAY_I16;
     if (a == RAY_U8 || b == RAY_U8) return RAY_U8;
     return RAY_BOOL;

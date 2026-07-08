@@ -270,7 +270,7 @@ static void cda_scalar_fn(void* raw, uint32_t worker_id, int64_t start, int64_t 
     bool    hn = c->has_nulls;
     const int64_t CHK = 65535;
 
-    if (t == RAY_I64 || t == RAY_TIMESTAMP) {
+    if (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) {
         const int64_t* d = (const int64_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
@@ -471,7 +471,7 @@ static void cda_pg_buf_task(void* raw, uint32_t worker_id, int64_t start, int64_
                             RAY_HLL_SPARSE_CAP, regs);
         int64_t s = c->offsets[g];
         int64_t e = s + c->counts[g];
-        if (t == RAY_I64 || t == RAY_TIMESTAMP) {
+        if (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) {
             const int64_t* d = (const int64_t*)base;
             for (int64_t k = s; k < e; k++) {
                 int64_t r = c->idx_buf[k];
@@ -643,7 +643,7 @@ static void cda_pg_stream_task(void* raw, uint32_t worker_id,
     bool           hn      = c->has_nulls;
     const int64_t  CHK     = 65535;
 
-    if (t == RAY_I64 || t == RAY_TIMESTAMP) {
+    if (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) {
         const int64_t* d = (const int64_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
