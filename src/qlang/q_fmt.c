@@ -560,6 +560,15 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     buf[0] = '\0';
     if (!val) return;
 
+    /* The generic null prints `::` (kdb: `q)d:`a`b!(::;2)` shows `a| ::`).
+     * Top-level console silence is the CALLER's rule (run_one_line / qdoc
+     * suppress RAY_IS_NULL results), so this only surfaces inside containers
+     * and explicit displays — where kdb shows `::`, never "null". */
+    if (RAY_IS_NULL(val)) {
+        snprintf(buf, bufsz, "::");
+        return;
+    }
+
     /* An empty typed vector prints `` `type$() `` (kdb `0#0` -> `` `long$() ``).
      * Byte/bool keep their own arms (`0x` / `b`); strings are atoms. */
     if (val->type > 0 && ray_is_vec(val) && ray_len(val) == 0) {
