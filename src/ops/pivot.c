@@ -563,7 +563,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                         ((double*)ray_data(new_col))[r] = NULL_F64; break;
                     case RAY_I64: case RAY_TIMESTAMP:
                         ((int64_t*)ray_data(new_col))[r] = NULL_I64; break;
-                    case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH:
+                    case RAY_I32: RAY_TEMPORAL32_CASES:
                         ((int32_t*)ray_data(new_col))[r] = NULL_I32; break;
                     case RAY_I16:
                         ((int16_t*)ray_data(new_col))[r] = NULL_I16; break;
@@ -629,7 +629,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                 for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_I64;
                 break;
             }
-            case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_MONTH: {
+            case RAY_I32: RAY_TEMPORAL32_CASES: {
                 int32_t* d = (int32_t*)ray_data(new_col);
                 for (int64_t r = 0; r < (int64_t)ix_count; r++) d[r] = NULL_I32;
                 break;
@@ -744,7 +744,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             } else if (pt == RAY_BOOL) {
                 len = snprintf(buf, sizeof(buf), "%s", pval ? "true" : "false");
             } else if (pt == RAY_I64 || pt == RAY_I32 || pt == RAY_I16 ||
-                       pt == RAY_DATE || pt == RAY_TIME || pt == RAY_MONTH || pt == RAY_TIMESTAMP) {
+                       RAY_IS_TEMPORAL32(pt) || RAY_IS_TEMPORAL64(pt)) {
                 len = snprintf(buf, sizeof(buf), "%ld", (long)pval);
             } else {
                 len = snprintf(buf, sizeof(buf), "col%ld", (long)pval);
