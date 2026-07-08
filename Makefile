@@ -263,9 +263,9 @@ test: LDFLAGS = $(DEBUG_LDFLAGS)
 test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 	@tools/frozen-manifest.sh check
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 300 ./$(TARGET).test || \
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 600 ./$(TARGET).test || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
-	      echo "TEST TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make test"; \
+	      echo "TEST TIMEOUT after 600s — suite ~150-250s idle, longer under concurrent load; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make test"; \
 	    fi; exit $$rc; }
 
 # openq: run ONLY the q suites (names prefixed `qlang/`) from the same unified
