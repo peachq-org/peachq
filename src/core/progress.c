@@ -33,6 +33,10 @@
 #include "rayforce.h"
 #include "mem/heap.h"
 #include <time.h>
+#ifdef RAY_OS_WINDOWS
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>            /* QueryPerformanceCounter */
+#endif
 #include <string.h>
 
 static ray_progress_cb g_cb;
@@ -52,6 +56,13 @@ static uint64_t    g_last_fire_ns;
 static bool        g_showing;
 
 static inline uint64_t mono_ns(void) {
+#ifdef RAY_OS_WINDOWS
+    /* Same monotonic source as timer.c's Windows branch. */
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    return (uint64_t)((double)cnt.QuadPart * (1000000000.0 / (double)freq.QuadPart));
+#else
     struct timespec ts;
 #ifdef CLOCK_MONOTONIC_COARSE
     clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
@@ -59,6 +70,7 @@ static inline uint64_t mono_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
 #endif
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
 }
 
 void ray_progress_set_callback(ray_progress_cb cb, void* user,

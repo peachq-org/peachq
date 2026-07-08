@@ -23,6 +23,7 @@
 
 #include "hnsw.h"
 #include "mem/sys.h"
+#include "store/fileio.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -803,7 +804,7 @@ typedef struct {
 ray_err_t ray_hnsw_save(const ray_hnsw_t* idx, const char* dir) {
     if (!idx || !dir) return RAY_ERR_IO;
 
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) return RAY_ERR_IO;
+    if (ray_mkdir(dir) != RAY_OK) return RAY_ERR_IO;   /* shared impl, EEXIST-tolerant, portable */
 
     char path[1024];
     FILE* f;
