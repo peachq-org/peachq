@@ -126,6 +126,7 @@ help:
 	@printf "  %-28s %s\n" "make $(QDOC_TARGET)" "Build only the $(QDOC_TARGET) binary"
 	@printf "  %-28s %s\n" "make lib" "Build static library lib$(TARGET).a"
 	@printf "  %-28s %s\n" "make dist" "Build release tarball and SHA-256 checksum under dist/"
+	@printf "  %-28s %s\n" "make win" "Cross-compile q.exe with mingw (WIN_CROSS=$(WIN_CROSS))"
 	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
 	@printf "  %-28s %s\n" "make qtest" "q-only loop; fuzzy filter with F=, e.g. make qtest F=asc"
 	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
@@ -404,9 +405,49 @@ coverage:
 	@echo
 	@echo "→ coverage_html/index.html"
 
+# ---------------------------------------------------------------------------
+# openq: Windows cross-build (stage 1: compile/link; runtime under Wine is
+# stage 2).  Separate WIN_* namespace + .win.o object suffix so nothing
+# collides with the native build; bare `make` builds exactly what it did.
+#   RAY_OS_WINDOWS=1 is passed on the command line because many base files
+#   test it BEFORE core/platform.h is visible (platform.h's own #define is
+#   identical, so redefinition is benign) — the upstream Windows convention.
+#   _WIN32_WINNT=0x0A00: platform.c uses Win8.1+ memory APIs
+#   (PrefetchVirtualMemory, DiscardVirtualMemory); mingw defaults to 0x502.
+#   __USE_MINGW_ANSI_STDIO=1: C99 %zu/PRId64 printf used throughout.
+#   NO sanitizers under mingw (the Linux ASan build stays the safety net) and
+#   NO -Werror (GCC 10-win32 + windows.h macro leaks, e.g. KEY_READ in
+#   query.c, emit benign warnings).  No -march: target CPU unknown.
+WIN_CROSS  ?= x86_64-w64-mingw32-
+WIN_CC      = $(WIN_CROSS)gcc
+WIN_WARNS   = -Wall -Wextra -Wno-unused-parameter
+WIN_CFLAGS  = $(WIN_WARNS) -std=$(STD) -O2 \
+  -DRAY_OS_WINDOWS=1 -D_WIN32_WINNT=0x0A00 -D__USE_MINGW_ANSI_STDIO=1
+WIN_LIBS    = -lws2_32 -lm
+WIN_LIB_OBJ    = $(LIB_SRC:.c=.win.o)
+WIN_MAIN_OBJ   = $(MAIN_SRC:.c=.win.o)
+WIN_Q_MAIN_OBJ = $(Q_MAIN_SRC:.c=.win.o)
+WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_MAIN_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
+
+# Vendored yyjson: same warning relaxation as the native rule above.
+third_party/yyjson/yyjson.win.o: third_party/yyjson/yyjson.c
+	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+%.win.o: %.c
+	$(WIN_CC) -c $(WIN_CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
+	$(WIN_CC) $(WIN_CFLAGS) -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS)
+
+rayforce.exe: $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ)
+	$(WIN_CC) $(WIN_CFLAGS) -o $@ $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ) $(WIN_LIBS)
+
+win: q.exe
+
 clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
+	-rm -f $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_DEPS) q.exe rayforce.exe
 	-rm -f $(TARGET) $(Q_TARGET) $(QDOC_TARGET) $(TARGET).test lib$(TARGET).a
 	-rm -f build/$(TARGET).parsediff.test $(PARSE_DIFF_OBJ) $(PARSE_DIFF_OBJ:.o=.d)
 	-rm -rf build build_release dist
@@ -418,9 +459,10 @@ clean:
 	# JUnit-XML export (tools/qtest.sh) + javakdb build classes (kwire-live).
 	-rm -rf test-results tools/kdb-conformance/.build
 
-.PHONY: default help debug release lib dist bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean
+.PHONY: default help debug release lib dist win bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
 # -include silently skips any that don't exist yet (first build).
 -include $(DEPS)
+-include $(WIN_DEPS)
