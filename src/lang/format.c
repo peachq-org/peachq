@@ -151,6 +151,10 @@ const char* ray_type_name(int8_t type) {
     case RAY_I64:       return type < 0 ? "i64"       : "I64";
     case RAY_F32:       return type < 0 ? "f32"       : "F32";
     case RAY_F64:       return type < 0 ? "f64"       : "F64";
+    case RAY_MONTH:     return type < 0 ? "month"     : "MONTH";
+    case RAY_MINUTE:    return type < 0 ? "minute"    : "MINUTE";
+    case RAY_SECOND:    return type < 0 ? "second"    : "SECOND";
+    case RAY_TIMESPAN:  return type < 0 ? "timespan"  : "TIMESPAN";
     case RAY_DATE:      return type < 0 ? "date"      : "DATE";
     case RAY_TIME:      return type < 0 ? "time"      : "TIME";
     case RAY_TIMESTAMP: return type < 0 ? "timestamp" : "TIMESTAMP";
@@ -306,6 +310,14 @@ static void ts_to_parts(int64_t ns, int* y, int* mo, int* d,
     *s  = (int)(rem % 60);
 }
 
+/* MONTH payload = months since 2000.01; floor div/mod for pre-2000 months. */
+static void fmt_month(fmt_buf_t* b, int32_t val) {
+    int64_t p = val;
+    int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
+    int64_t m = 1 + (p % 12 + 12) % 12;
+    fmt_printf(b, "%04lld.%02lldm", (long long)y, (long long)m);
+}
+
 static void fmt_date(fmt_buf_t* b, int32_t val) {
     int y, m, d;
     date_to_ymd(val, &y, &m, &d);
@@ -317,6 +329,34 @@ static void fmt_time(fmt_buf_t* b, int32_t val) {
     time_to_hms(val, &h, &m, &s, &ms);
     if (val < 0) fmt_putc(b, '-');
     fmt_printf(b, "%02d:%02d:%02d.%03d", h, m, s, ms);
+}
+
+/* MINUTE payload = minutes since midnight; sign-then-magnitude (the
+ * duration model — datatypes.md:166 shows signed timespans). */
+static void fmt_minute(fmt_buf_t* b, int32_t val) {
+    uint32_t m = val < 0 ? (uint32_t)-(int64_t)val : (uint32_t)val;
+    if (val < 0) fmt_putc(b, '-');
+    fmt_printf(b, "%02u:%02u", m / 60, m % 60);
+}
+
+/* SECOND payload = seconds since midnight. */
+static void fmt_second(fmt_buf_t* b, int32_t val) {
+    uint32_t s = val < 0 ? (uint32_t)-(int64_t)val : (uint32_t)val;
+    if (val < 0) fmt_putc(b, '-');
+    fmt_printf(b, "%02u:%02u:%02u", s / 3600, (s / 60) % 60, s % 60);
+}
+
+/* TIMESPAN payload = signed ns; dDhh:mm:ss.nnnnnnnnn (datatypes.md:135-137,
+ * ref/xbar.md:143).  INT64_MIN-safe magnitude via unsigned negate. */
+static void fmt_timespan(fmt_buf_t* b, int64_t val) {
+    uint64_t n = val < 0 ? (uint64_t)(-(val + 1)) + 1u : (uint64_t)val;
+    if (val < 0) fmt_putc(b, '-');
+    fmt_printf(b, "%lluD%02llu:%02llu:%02llu.%09llu",
+               (unsigned long long)(n / 86400000000000ULL),
+               (unsigned long long)((n / 3600000000000ULL) % 24),
+               (unsigned long long)((n / 60000000000ULL) % 60),
+               (unsigned long long)((n / 1000000000ULL) % 60),
+               (unsigned long long)(n % 1000000000ULL));
 }
 
 static void fmt_timestamp(fmt_buf_t* b, int64_t val) {
@@ -349,6 +389,10 @@ static const char* null_literal(int8_t type) {
     case RAY_I64:       return "0Nl";
     case RAY_F64:       return "0Nf";
     case RAY_F32:       return "0Ne";
+    case RAY_MONTH:     return "0Nm";
+    case RAY_MINUTE:    return "0Nu";
+    case RAY_SECOND:    return "0Nv";
+    case RAY_TIMESPAN:  return "0Nn";
     case RAY_DATE:      return "0Nd";
     case RAY_TIME:      return "0Nt";
     case RAY_TIMESTAMP: return "0Np";
@@ -381,8 +425,12 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     case RAY_I64:       fmt_i64(b, ((int64_t*)ray_data(vec))[idx]); break;
     case RAY_F32:       fmt_f32(b, ((float*)ray_data(vec))[idx]); break;
     case RAY_F64:       fmt_f64(b, ((double*)ray_data(vec))[idx]); break;
+    case RAY_MONTH:     fmt_month(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_DATE:      fmt_date(b, ((int32_t*)ray_data(vec))[idx]); break;
     case RAY_TIME:      fmt_time(b, ((int32_t*)ray_data(vec))[idx]); break;
+    case RAY_MINUTE:    fmt_minute(b, ((int32_t*)ray_data(vec))[idx]); break;
+    case RAY_SECOND:    fmt_second(b, ((int32_t*)ray_data(vec))[idx]); break;
+    case RAY_TIMESPAN:  fmt_timespan(b, ((int64_t*)ray_data(vec))[idx]); break;
     case RAY_TIMESTAMP: fmt_timestamp(b, ((int64_t*)ray_data(vec))[idx]); break;
     case RAY_SYM:
         /* cell-data: resolve through the column's domain */
@@ -526,11 +574,11 @@ static void fmt_dict_key(fmt_buf_t* b, ray_t* keys, int64_t i, int mode) {
         const char* sp = ray_str_vec_get(keys, i, &slen);
         k_atom = ray_str(sp ? sp : "", sp ? slen : 0);
         k_owned = true;
-    } else if (keys->type == RAY_I64 || keys->type == RAY_TIMESTAMP) {
+    } else if (keys->type == RAY_I64 || RAY_IS_TEMPORAL64(keys->type)) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.i64  = ((int64_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
-    } else if (keys->type == RAY_I32 || keys->type == RAY_DATE || keys->type == RAY_TIME) {
+    } else if (keys->type == RAY_I32 || RAY_IS_TEMPORAL32(keys->type)) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.i32  = ((int32_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
@@ -586,12 +634,11 @@ static void fmt_dict_val(fmt_buf_t* b, ray_t* vals, int64_t i, int mode) {
                                 v_storage.i16  = ((int16_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_I32:
-            case RAY_DATE:
-            case RAY_TIME:      v_storage.type = (int8_t)-vals->type;
+            RAY_TEMPORAL32_CASES:     v_storage.type = (int8_t)-vals->type;
                                 v_storage.i32  = ((int32_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_I64:
-            case RAY_TIMESTAMP: v_storage.type = (int8_t)-vals->type;
+            RAY_TEMPORAL64_CASES: v_storage.type = (int8_t)-vals->type;
                                 v_storage.i64  = ((int64_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_F32:       v_storage.type = -RAY_F32;
@@ -1049,8 +1096,12 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
         case RAY_I64:  fmt_i64(b, obj->i64); break;
         case RAY_F32:       fmt_f32(b, (float)obj->f64); break;
         case RAY_F64:       fmt_f64(b, obj->f64); break;
+        case RAY_MONTH:     fmt_month(b, obj->i32); break;
         case RAY_DATE:      fmt_date(b, obj->i32); break;
         case RAY_TIME:      fmt_time(b, obj->i32); break;
+        case RAY_MINUTE:    fmt_minute(b, obj->i32); break;
+        case RAY_SECOND:    fmt_second(b, obj->i32); break;
+        case RAY_TIMESPAN:  fmt_timespan(b, obj->i64); break;
         case RAY_TIMESTAMP: fmt_timestamp(b, obj->i64); break;
         case RAY_SYM:  fmt_sym(b, obj->i64); break;
         case RAY_STR:  fmt_str_atom(b, obj, mode > 0); break;
