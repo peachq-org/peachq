@@ -47,7 +47,7 @@ static ray_t* q_parse_builtin_fn(ray_t* x) {
  * -> "42").  VECTOR / LIST: q maps string over each item, yielding a LIST of
  * strings (`string 192 168 1 23` -> ("192";"168";"1";"23")) — the base
  * formatter would instead render the whole vector as one bracketed string. */
-static ray_t* q_string_fn(ray_t* x) {
+ray_t* q_string_fn(ray_t* x) {
     if (!x) return ray_error("type", "string: nil");
     if (x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);        /* borrowed */
@@ -703,6 +703,11 @@ void q_builtins_register(void) {
     bind_unary("md5",    q_md5_fn);
     bind_vary ("ssr",    q_ssr_wrap);
     bind_unary("show",   q_show_fn);
+    /* File Text companions (feat/q-file-text): `read0[(f;o)]` bracket calls
+     * name-ref through the env (the ssr precedent — same C fn as the registry
+     * row); `csv` is kdb's comma global (ref/file-text.md `csv 0: t`). */
+    bind_unary("read0",  q_read0_wrap);
+    bind_value("csv",    ray_str(",", 1));
     /* Table introspection — q-owned, snapshotted by the registry's QK_ENV rows
      * (q_ops.c) so the parser embeds these over the base env `meta`/(absent)
      * `cols`.  Bound BEFORE q_registry_init, like `string`/`show`. */
