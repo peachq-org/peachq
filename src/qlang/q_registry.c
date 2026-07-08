@@ -1822,6 +1822,7 @@ static ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
                 continue;
             }
             char full[192];
+            full[0] = '\0';                   /* error paths print `full` */
             int fl = is_root
                 ? snprintf(full, sizeof full, "%.*s",
                            (int)ray_str_len(ks), ray_str_ptr(ks))
@@ -4772,6 +4773,7 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
                 for (int64_t i = 0; i < nn; i++) {
                     ray_t* cn = ray_sym_vec_cell(a, i);
                     char full[192];
+                    full[0] = '\0';           /* error paths print `full` */
                     int fl = is_root
                         ? snprintf(full, sizeof full, "%.*s",
                                    (int)ray_str_len(cn), ray_str_ptr(cn))
