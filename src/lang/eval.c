@@ -2657,6 +2657,18 @@ static void register_vary(const char* name, uint8_t attrs, ray_vary_fn fn) {
     ray_release(obj);
 }
 
+/* When false, ray_register_builtins skips the rayfall system-plumbing
+ * namespaces (.sys/.os/.ipc/.fs/.repl/.log/.time).  Defaults ON so the
+ * rayforce persona is unchanged; the q runtime flips it OFF for its own
+ * registration (see ray_set_load_rayfall_ns / q_runtime_create).  q owns
+ * dotted namespaces for user code, and real q has no .sys/.os/.ipc — so
+ * they must not be squatted before release (backward-compat is one-way).
+ * The DATA namespaces (.db/.csv/.graph/.attr/.col) are intentionally NOT
+ * gated — they return q-usable data; their exposure is a separate ruling. */
+static bool g_load_rayfall_ns = true;
+
+void ray_set_load_rayfall_ns(bool on) { g_load_rayfall_ns = on; }
+
 static void ray_register_builtins(void) {
     register_binary_op("+",   RAY_FN_ATOMIC, ray_add_fn, OP_ADD);
     register_binary_op("-",   RAY_FN_ATOMIC, ray_sub_fn, OP_SUB);
@@ -2886,6 +2898,10 @@ static void ray_register_builtins(void) {
     register_vary("print",       RAY_FN_NONE, ray_print_fn);
     register_unary("meta",       RAY_FN_NONE, ray_meta_fn);
 
+    /* Rayfall system-plumbing namespaces (.sys/.os/.fs/.ipc/.repl/.log) —
+     * gated OFF under the q runtime by g_load_rayfall_ns.  Body kept at the
+     * original indent to minimise the frozen-base diff. */
+    if (g_load_rayfall_ns) {
     /* System builtins — bound under the reserved `.sys.*` namespace so
      * user code can't shadow them and a glance at the name identifies
      * the category. */
@@ -2940,6 +2956,7 @@ static void ray_register_builtins(void) {
     register_vary(".log.sync",     RAY_FN_NONE,       ray_log_sync_fn);
     register_vary(".log.close",    RAY_FN_RESTRICTED, ray_log_close_fn);
     register_vary(".log.purge",    RAY_FN_RESTRICTED, ray_log_purge_fn);
+    }  /* end g_load_rayfall_ns plumbing block */
 
     /* quote — special form (unevaluated argument) */
     register_vary("quote",       RAY_FN_SPECIAL_FORM, ray_quote_fn);
@@ -2962,10 +2979,12 @@ static void ray_register_builtins(void) {
     /* row — single row from table */
     register_binary("row",       RAY_FN_NONE, ray_row_fn);
 
-    /* .time.* — monotonic clock and scheduled timers */
+    /* .time.* — monotonic clock and scheduled timers (rayfall plumbing) */
+    if (g_load_rayfall_ns) {
     register_vary (".time.now",       RAY_FN_NONE,       ray_time_now_fn);
     register_vary (".time.timer.set", RAY_FN_RESTRICTED, ray_time_timer_set_fn);
     register_unary(".time.timer.del", RAY_FN_RESTRICTED, ray_time_timer_del_fn);
+    }
 
     /* env — list all global environment bindings */
     register_unary("env",        RAY_FN_NONE, ray_env_fn);
@@ -2979,11 +2998,11 @@ static void ray_register_builtins(void) {
     /* del, modify, pivot remain top-level language primitives.
      * Runtime/heap introspection moves under `.sys.*`. */
     register_vary("del",          RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_del_fn);
-    register_vary(".sys.build", RAY_FN_NONE, ray_internals_fn);
-    register_vary(".sys.mem",   RAY_FN_NONE, ray_memstat_fn);
+    if (g_load_rayfall_ns) register_vary(".sys.build", RAY_FN_NONE, ray_internals_fn);
+    if (g_load_rayfall_ns) register_vary(".sys.mem",   RAY_FN_NONE, ray_memstat_fn);
     register_vary("modify",     RAY_FN_RESTRICTED, ray_modify_fn);
     register_vary("pivot",      RAY_FN_NONE, ray_pivot_fn);
-    register_vary(".sys.info",  RAY_FN_NONE, ray_sysinfo_fn);
+    if (g_load_rayfall_ns) register_vary(".sys.info",  RAY_FN_NONE, ray_sysinfo_fn);
     register_unary("sym-name",   RAY_FN_NONE, ray_sym_name_fn);
     register_binary("unify",     RAY_FN_NONE, ray_unify_fn);
     register_binary("xrank",     RAY_FN_NONE, ray_xrank_fn);
