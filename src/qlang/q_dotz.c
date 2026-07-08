@@ -3,11 +3,15 @@
 #include <rayforce.h>
 #include <string.h>
 
-/* Cached process-constant values (owned refs, rc>=1) and the script path. */
-static ray_t*      g_z_f = NULL;   /* script file, symbol (null sym if none)   */
-static ray_t*      g_z_x = NULL;   /* args after the script, list of strings   */
-static ray_t*      g_z_X = NULL;   /* full raw argv incl. binary, list of str  */
-static const char* g_script = NULL;
+/* argv is process-lifetime (owned by main), so we cache only the pointers and
+ * the script's position and MINT each `.z.*` value on demand.  These values
+ * are immutable argv snapshots, cheap to build, and read rarely — caching them
+ * as owned `ray_t*` would add lifecycle (init/destroy/retain) without benefit.
+ * Adding a `.z.*` name = one Z_TAB row + a small producer; init/destroy and the
+ * resolver are untouched. */
+static int    g_argc       = 0;
+static char** g_argv       = NULL;
+static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
 
 static bool ends_with_dot_q(const char* s) {
     size_t n = strlen(s);
@@ -23,69 +27,80 @@ static bool flag_takes_value(const char* s) {
            strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0;
 }
 
-static ray_t* strings_list(char** argv, int lo, int hi) {
+/* argv[lo..hi) as a q list of strings (empty list, not null, when lo==hi). */
+static ray_t* strings_list(int lo, int hi) {
     int    n   = hi - lo;
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int i = lo; i < hi; i++) {
-        ray_t* s = ray_str(argv[i], strlen(argv[i]));
+        ray_t* s = ray_str(g_argv[i], strlen(g_argv[i]));
         out = ray_list_append(out, s);   /* append RETAINS */
         ray_release(s);
     }
     return out;
 }
 
-void q_dotz_init(int argc, char** argv) {
-    q_dotz_destroy();
-
-    /* Locate the positional `*.q` script: the first token ending in ".q" that
-     * is not the value of a value-consuming flag. */
-    int script_idx = -1;
-    for (int i = 1; i < argc; i++) {
-        if (i > 1 && flag_takes_value(argv[i - 1])) continue;  /* skip flag value */
-        if (ends_with_dot_q(argv[i])) { script_idx = i; break; }
-    }
-
-    if (script_idx >= 0) {
-        g_script = argv[script_idx];
-        g_z_f    = ray_sym(ray_sym_intern(g_script, strlen(g_script)));
-        /* `.z.x` = every token positioned AFTER the script (kdb also drops its
-         * own recognized options; increment-1 tests pass only non-flag args,
-         * so position-based is kdb-true here — flag stripping is a follow-on). */
-        g_z_x = strings_list(argv, script_idx + 1, argc);
-    } else {
-        g_script = NULL;
-        g_z_f    = ray_sym(ray_sym_intern("", 0));  /* null symbol */
-        g_z_x    = ray_list_new(1);                 /* empty list  */
-    }
-
-    g_z_X = strings_list(argv, 0, argc);
+/* `.z.*` producers — each mints a FRESH owned ref (rc>=1), matching the
+ * name-hook contract (the resolver returns an owned value or NULL). */
+static ray_t* z_f(void) {   /* script file symbol; null sym when no script */
+    const char* s = g_script_idx < 0 ? "" : g_argv[g_script_idx];
+    return ray_sym(ray_sym_intern(s, strlen(s)));
+}
+static ray_t* z_x(void) {   /* args positioned AFTER the script (empty if none) */
+    int lo = g_script_idx < 0 ? g_argc : g_script_idx + 1;
+    return strings_list(lo, g_argc);
+}
+static ray_t* z_X(void) {   /* full raw argv, including the binary */
+    return strings_list(0, g_argc);
 }
 
-const char* q_dotz_script_path(void) { return g_script; }
+static const struct { const char* name; uint8_t len; ray_t* (*make)(void); }
+Z_TAB[] = {
+    { ".z.f", 4, z_f },
+    { ".z.x", 4, z_x },
+    { ".z.X", 4, z_X },
+};
+
+void q_dotz_init(int argc, char** argv) {
+    g_argc = argc;
+    g_argv = argv;
+
+    /* Locate the positional `*.q` script: the first token ending in ".q" that
+     * is not the value of a value-consuming flag.  (`.z.x` = every token AFTER
+     * it; kdb also drops its own recognized options — position-based is
+     * kdb-true for the non-flag args the increment-1 tests pass.) */
+    g_script_idx = -1;
+    for (int i = 1; i < argc; i++) {
+        if (i > 1 && flag_takes_value(argv[i - 1])) continue;  /* skip flag value */
+        if (ends_with_dot_q(argv[i])) { g_script_idx = i; break; }
+    }
+}
+
+const char* q_dotz_script_path(void) {
+    return g_script_idx < 0 ? NULL : g_argv[g_script_idx];
+}
 
 ray_t* q_dotz_resolve(int64_t sym_id) {
-    ray_t* name = ray_sym_str(sym_id);   /* BORROWED: the cached arena string
-                                          * atom (RAY_ATTR_ARENA); the
-                                          * ray_release below is a no-op — do
-                                          * not rely on it or "fix a leak" here */
+    ray_t* name = ray_sym_str(sym_id);   /* BORROWED: cached arena string atom
+                                          * (RAY_ATTR_ARENA); the ray_release
+                                          * below is a no-op — do not rely on it
+                                          * or "fix a leak" here */
     if (!name) return NULL;
     const char* p = ray_str_ptr(name);
     size_t      n = ray_str_len(name);
 
-    ray_t* hit = NULL;
-    if (n == 4 && memcmp(p, ".z.f", 4) == 0) hit = g_z_f;
-    else if (n == 4 && memcmp(p, ".z.x", 4) == 0) hit = g_z_x;
-    else if (n == 4 && memcmp(p, ".z.X", 4) == 0) hit = g_z_X;
+    ray_t* out = NULL;
+    for (size_t i = 0; i < sizeof Z_TAB / sizeof *Z_TAB; i++)
+        if (n == Z_TAB[i].len && memcmp(p, Z_TAB[i].name, n) == 0) {
+            out = Z_TAB[i].make();   /* already owned (rc>=1) */
+            break;
+        }
 
     ray_release(name);
-    if (!hit) return NULL;
-    ray_retain(hit);
-    return hit;
+    return out;
 }
 
 void q_dotz_destroy(void) {
-    if (g_z_f) { ray_release(g_z_f); g_z_f = NULL; }
-    if (g_z_x) { ray_release(g_z_x); g_z_x = NULL; }
-    if (g_z_X) { ray_release(g_z_X); g_z_X = NULL; }
-    g_script = NULL;
+    g_argc       = 0;
+    g_argv       = NULL;
+    g_script_idx = -1;
 }
