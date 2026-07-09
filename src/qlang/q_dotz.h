@@ -29,6 +29,10 @@ ray_t* q_dotz_resolve(int64_t sym_id);
  * this to decide whether to run a script.  Points into argv (process-lifetime). */
 const char* q_dotz_script_path(void);
 
+/* Whether `-q` (quiet mode, kdb .z.q) was on the command line — qmain reads
+ * this to suppress the interactive startup banner.  Valid after q_dotz_init. */
+bool q_dotz_quiet(void);
+
 /* Clear the cached argv pointers (no owned values to release). */
 void q_dotz_destroy(void);
 
