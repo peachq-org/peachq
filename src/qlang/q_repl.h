@@ -47,6 +47,16 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
  * success, non-zero if the file could not be opened. */
 int q_repl_run_file(const char* path, FILE* out, FILE* err);
 
+/* Mark this process as having an IPC listener (startup `-p` or a runtime `\p`).
+ * The unified poll loop then keeps serving past stdin EOF instead of exiting —
+ * a client that `\p`s a port becomes a long-lived server, like kdb/rayforce. */
+void q_repl_mark_listener_active(void);
+
+/* True if a listener has been started (startup `-p` or a runtime `\p`).  qmain
+ * consults it after a startup script so `q file.q` where file.q does `\p N`
+ * becomes a server (serve loop) instead of exiting at the non-tty script end. */
+int  q_repl_listener_active(void);
+
 /* Strip pasted kdb `q)` console prompts from the front of an intake line and
  * return the advanced pointer.  Repeated exact `q)` only: `q)q)2+2` -> `2+2`,
  * but the debug prompt `q))…`, namespace prompts `q.foo)`, and `k)` mode are
