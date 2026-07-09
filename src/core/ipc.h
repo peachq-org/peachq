@@ -143,4 +143,20 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
  * response SHAPE is preserved for the `-h` client loop in main.c. */
 ray_t*    ray_ipc_send_verbose(int64_t handle, ray_t* msg);
 
+/* ===== q-layer handle<->fd accessors =====
+ *
+ * The rayfall handle namespace above is the poll SELECTOR ID; those ids
+ * are dense array indices starting at 0 and are NOT the underlying socket
+ * fd.  kdb, by contrast, presents a connection handle AS its OS socket fd
+ * (0/1/2 reserved for console/stdout/stderr, so connections land at 3+ and
+ * never collide with the std streams — qdocs basics/handles.md).  The q
+ * wrapper therefore shows the socket fd and translates it back to the
+ * selector id the .ipc.* primitives expect.  These accessors surface that
+ * mapping WITHOUT changing what ray_ipc_connect/.ipc.open return (rayfall
+ * behaviour is unchanged; only the q layer presents the fd).  Both resolve
+ * in the active poll, exactly like the .ipc.* primitives.  Return -1 when
+ * the handle/fd is not a live handshake-complete IPC connection. */
+int64_t   ray_ipc_fd_of_handle(int64_t handle);
+int64_t   ray_ipc_handle_of_fd(int64_t fd);
+
 #endif /* RAY_IPC_H */
