@@ -831,7 +831,31 @@ static void q_fmt_value_list(ray_t* v, char* buf, size_t bufsz) {
     }
 }
 
+static void q_fmt_body(ray_t* val, char* buf, size_t bufsz);   /* fwd */
+
+/* Public entry: an attributed vector renders with kdb's `` `s#``/`u#``/`g#``/
+ * `p# `` prefix, then the bare vector (reusing q_attr_letter so the display and
+ * the `attr` verb share ONE letter mapping).  Everything else formats directly.
+ * Recurses through q_fmt so an attributed vector nested in a general list also
+ * carries its prefix (kdb-true).  Table columns render via q_cell, not q_fmt,
+ * so an attributed COLUMN stays bare in the grid (its attribute shows in
+ * `meta`, a Stage-2 surface). */
 void q_fmt(ray_t* val, char* buf, size_t bufsz) {
+    if (bufsz == 0) return;
+    buf[0] = '\0';
+    if (!val) return;
+    char al = q_attr_letter(val);              /* 0 unless an attributed vector */
+    if (al) {
+        const char pfx[3] = { '`', al, '#' };
+        if (bufsz <= 3) { snprintf(buf, bufsz, "`%c#", al); return; }
+        memcpy(buf, pfx, 3);
+        q_fmt_body(val, buf + 3, bufsz - 3);
+        return;
+    }
+    q_fmt_body(val, buf, bufsz);
+}
+
+static void q_fmt_body(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0) return;
     buf[0] = '\0';
     if (!val) return;

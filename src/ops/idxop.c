@@ -191,6 +191,49 @@ static bool vec_all_distinct(const ray_t* v) {
     return ok;
 }
 
+/* True iff every distinct value forms EXACTLY ONE contiguous run — the kdb `p#`
+ * layout requirement.  Blocks may appear in ANY order (unlike `s#`, which needs
+ * global ascending order); the sole failure is a distinct value re-appearing in
+ * a later, separate run (e.g. `3 3 1 2 2 1` — value 1 in two runs).  Detection:
+ * hash-set the value at each run boundary; a boundary value already in the set
+ * means the value's blocks are not contiguous -> reject (maps to `'u-fail`).
+ *
+ * v1: rejects a null-bearing column (returns false).  Nulls in a parted column
+ * are out of scope for now — and numeric_key_word buckets each NaN to its own
+ * per-row word, which would spuriously split a null run; excluding nulls keeps
+ * run detection exact for every accepted value.  Numeric vectors only (caller
+ * guarantees numeric_elem_size>0).  Returns false on OOM (conservative). */
+static bool vec_is_parted_contiguous(const ray_t* v) {
+    int64_t n = v->len;
+    if (n < 2) return true;
+    if (v->attrs & RAY_ATTR_HAS_NULLS) {
+        for (int64_t i = 0; i < n; i++)
+            if (ray_vec_is_null((ray_t*)v, i)) return false;
+    }
+    const uint8_t* base = (const uint8_t*)ray_data((ray_t*)v);
+    uint64_t cap = next_pow2((uint64_t)n * 2 + 1);
+    if (cap < 16) cap = 16;
+    uint64_t mask = cap - 1;
+    /* Transient scratch (freed before return); 0 = empty, store run-start i+1. */
+    int64_t* slot = (int64_t*)ray_calloc_raw((size_t)cap * sizeof(int64_t));
+    if (!slot) return false;
+    bool ok = true;
+    for (int64_t i = 0; i < n && ok; i++) {
+        uint64_t hi = numeric_key_word(base, v->type, i);
+        if (i > 0 && numeric_key_word(base, v->type, i - 1) == hi)
+            continue;                       /* same run — not a boundary */
+        uint64_t h = mix64(hi) & mask;      /* run boundary: value must be new */
+        for (;;) {
+            int64_t cur = slot[h];
+            if (cur == 0) { slot[h] = i + 1; break; }
+            if (numeric_key_word(base, v->type, cur - 1) == hi) { ok = false; break; }
+            h = (h + 1) & mask;
+        }
+    }
+    ray_free_raw(slot);
+    return ok;
+}
+
 /* --------------------------------------------------------------------------
  * Index ray_t allocation / destruction helpers
  *
@@ -2066,6 +2109,47 @@ ray_t* ray_idx_info_fn(ray_t* v) {
  * Semantic attributes — (.attr.*) family.  See docs spec
  * 2026-06-01-column-attributes-design.md.
  * -------------------------------------------------------------------------- */
+
+/* Neutral marker-stamp primitive.  Attach a marker-only index block (kind NONE)
+ * carrying `mark`, or fold `mark` into an already-attached (shared, post-cow)
+ * block by cloning it first.  Carries NO attribute-name / verification policy —
+ * pure mechanism; the q layer composes kdb `u#`/`p#` semantics on top of it (and
+ * the rayfall-native float attr paths, which set the assertion without a
+ * find-hash, use it too).  Borrows v (retains internally); returns an owning ref
+ * of the COW'd parent. */
+ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark) {
+    ray_retain(v);
+    ray_t* w = ray_cow(v);
+    if (!w || RAY_IS_ERR(w)) return w ? w : ray_error("oom", NULL);
+
+    if (w->attrs & RAY_ATTR_HAS_INDEX) {
+        /* Post-cow w->index is SHARED with the original (ray_cow retains the
+         * block, it does not deep-copy it).  Clone it before mutating markers
+         * so the original's block is untouched.  Then the clone is sole-owned. */
+        ray_t* nb = clone_index_block(w->index);
+        if (!nb || RAY_IS_ERR(nb)) { ray_release(w); return nb ? nb : ray_error("oom", NULL); }
+        ray_release(w->index);
+        w->index = nb;
+        ray_index_payload(nb)->markers |= mark;
+        return w;
+    }
+    /* No backing index: attach a marker-only block (kind NONE). */
+    ray_t* idx = ray_index_alloc(RAY_IDX_NONE, w->type, w->len);
+    if (!idx || RAY_IS_ERR(idx)) { ray_release(w); return idx ? idx : ray_error("oom", NULL); }
+    ray_index_payload(idx)->markers = mark;
+    return attach_finalize(w, idx);
+}
+
+/* Neutral verification/classification wrappers exposed for the q layer to
+ * compose kdb attribute policy without baking attribute-name or error-text
+ * choices into the engine.  They carry NO policy — pure mechanism. */
+bool ray_attr_verify_distinct(const ray_t* v) { return vec_all_distinct(v); }
+bool ray_attr_verify_contiguous(const ray_t* v) { return vec_is_parted_contiguous(v); }
+int ray_attr_numeric_class(int8_t t) {
+    if (t == RAY_F32 || t == RAY_F64) return 0;
+    if (numeric_elem_size(t) > 0) return 1;
+    return -1;
+}
 
 /* unique: verify distinctness, then set a block-resident marker bit.  If the
  * column already carries an index block, clone it (it is shared post-cow) and
