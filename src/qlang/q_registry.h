@@ -190,6 +190,11 @@ void   q_registry_sig_clear(void);
  * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_select_value(void);
 
+/* The `q.delete` special form q_lower embeds when it lowers the symbolic string
+ * delete tree (!;`t;c;0b;a) — the executor drives q_funsql_bang_impl (delete
+ * rows / delete columns / namespace expunge).  Borrowed; NULL before init. */
+ray_t* q_registry_delete_value(void);
+
 /* The `'[f;g;…]` compose builder the PARSER embeds at the head of a compose
  * bracket form.  A regular (arg-evaluating) vary fn: ray_eval resolves the
  * function operands, then it boxes them into a Q_DERIV_COMPOSE carrier.
