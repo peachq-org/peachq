@@ -202,6 +202,30 @@ int32_t q_highlight(char* dst, int32_t dst_cap, const char* buf, int32_t buf_len
     return n;
 }
 
+/* Strip pasted kdb `q)` REPL prompts from the front of an intake line.
+ *
+ * kdb lets you paste a transcript line that still carries its `q)` console
+ * prompt and it "just works" — the line-reader drops a leading `q)` before
+ * parsing.  We mirror that here, and ONLY here (the line-intake layer), never
+ * in q_parse: the strip is a console/loader affordance, not a language feature,
+ * so a `q)` inside a lambda body, a string literal, or an argument to
+ * `parse`/`value` must survive untouched — and it does, because run_one_line
+ * only ever sees whole top-level intake lines (openq is line-at-a-time).
+ *
+ * Rule: repeated exact `q)` only.  The `s[2] != ')'` guard is what tells a
+ * repeated prompt (`q)q)…`, strip) apart from the debug prompt (`q))…`, leave
+ * alone).  Namespace prompts (`q.foo)`) and `k)` mode fail the `s[1] == ')'` /
+ * `s[0] == 'q'` tests and are likewise left alone.  No leading-whitespace trim:
+ * an indented line is not a prompt.  Returns the advanced pointer.
+ *
+ * Reads are in-bounds on any NUL-terminated string: s[1] is only reached when
+ * s[0]=='q' (so s[0] != '\0'), and s[2] only when s[1]==')' (so s[1] != '\0'). */
+const char* q_strip_repl_prompt(const char* s) {
+    while (s[0] == 'q' && s[1] == ')' && s[2] != ')')
+        s += 2;
+    return s;
+}
+
 /* ===== Shared line processing =====
  *
  * Parse + evaluate + print a single input line.  Used verbatim by both the
@@ -213,6 +237,14 @@ int32_t q_highlight(char* dst, int32_t dst_cap, const char* buf, int32_t buf_len
  * (show / 0N! / console writes), which still flush below. */
 static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
                          int print_result) {
+    /* Drop any pasted `q)` console prompt(s) before anything else sees the
+     * line — covers REPL (piped + interactive) and the `q file.q` loader, all
+     * of which funnel through here.  Adjust n by the bytes we advanced past. */
+    {
+        const char* stripped = q_strip_repl_prompt(s);
+        n -= (size_t)(stripped - s);
+        s = stripped;
+    }
     if (n == 0)
         return;
 
