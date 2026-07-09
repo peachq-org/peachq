@@ -12,6 +12,14 @@
 /* Render val into buf (NUL-terminated, bounded by bufsz). */
 void q_fmt(ray_t* val, char* buf, size_t bufsz);
 
+/* ---- `\P` display precision -----------------------------------------------
+ * Significant digits shown when a float is converted to a string (kdb `\P`,
+ * default 7, range [0,17]; 0 = maximum = 17).  q_sys.c's `\P` handler is the
+ * sole writer; q_fmt's float renderer is the sole reader.  q_runtime_create
+ * resets it to the default per runtime. */
+void q_fmt_set_prec(int p);
+int  q_fmt_prec(void);
+
 /* ---- q console sink -------------------------------------------------------
  * `show` (and, in principle, `0N!`) print a value's q display as a SIDE EFFECT
  * and return generic null.  Since qdoc compares only the row's rendered output
