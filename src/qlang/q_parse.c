@@ -1427,6 +1427,7 @@ static P       parse_base(Parser *p);
 static ray_t  *parse_qsql_select(Parser *p, int *ok);   /* piece 3: qSQL SELECT */
 static ray_t  *parse_qsql_delete(Parser *p, int *ok);   /* qSQL DELETE string form */
 static ray_t  *parse_qsql_update(Parser *p, int *ok);   /* qSQL UPDATE string form */
+static ray_t  *parse_qsql_exec(Parser *p, int *ok);     /* qSQL EXEC string form */
 
 /* Statement sequence: one -> its element; two+ -> (`;; ...).  Consumes e. */
 static ray_t *seq_of(ray_t *e) {
@@ -1771,6 +1772,8 @@ static P parse_e(Parser *p) {
             q = parse_qsql_delete(p, &ok);
         else if (tk->len == 6 && memcmp(p->src + tk->start, "update", 6) == 0)
             q = parse_qsql_update(p, &ok);
+        else if (tk->len == 4 && memcmp(p->src + tk->start, "exec", 4) == 0)
+            q = parse_qsql_exec(p, &ok);
         if (ok && q) return (P){ R_NOUN, q };
     }
     P t = parse_term(p);
@@ -2066,16 +2069,22 @@ static ray_t *qsql_derive_alias(ray_t *expr) {
 }
 
 /* One column spec: optional `alias:` then an expression.  On success stores an
- * owned alias `sym and value expr; returns 0 (with nothing owned) on failure. */
-static int qsql_colspec(Parser *p, ray_t **out_alias, ray_t **out_val) {
+ * owned alias `sym and value expr; returns 0 (with nothing owned) on failure.
+ * *out_named (NULL-safe) reports whether the alias was WRITTEN explicitly
+ * (`name:expr`) vs derived from the expression — exec needs this to distinguish
+ * a single unnamed column (returns the column value) from a named/assigned one
+ * (returns a dict). */
+static int qsql_colspec(Parser *p, ray_t **out_alias, ray_t **out_val, int *out_named) {
     int ok = 1;
     ray_t *alias = NULL;
+    int named = 0;
     Token *t0 = cur(p);
     Token *t1 = &p->t.t[p->pos + 1];
     if (t0->kind == T_NOUN && t0->k && t0->k->type == -RAY_SYM &&
         !(t0->k->attrs & Q_ATTR_QUOTED) &&
         t1->kind == T_VERB && t1->len == 1 && p->src[t1->start] == ':') {
         alias = qsql_colsym(t0->k->i64);
+        named = 1;
         adv(p); adv(p);
     }
     ray_t *val = qsql_expr(p, &ok);
@@ -2083,17 +2092,19 @@ static int qsql_colspec(Parser *p, ray_t **out_alias, ray_t **out_val) {
     if (!alias) alias = qsql_derive_alias(val);
     if (!alias) { ray_release(val); return 0; }   /* unnameable -> soft-fail */
     *out_alias = alias; *out_val = val;
+    if (out_named) *out_named = named;
     return 1;
 }
 
 /* Comma-separated column-spec list up to a section boundary.  Fills the caller
- * arrays; *n stays 0 for an empty list (e.g. `select from`). */
-static int qsql_collist(Parser *p, ray_t **aliases, ray_t **vals, int *n) {
+ * arrays; *n stays 0 for an empty list (e.g. `select from`).  `named` (NULL-safe)
+ * receives the per-column explicit-alias flags. */
+static int qsql_collist(Parser *p, ray_t **aliases, ray_t **vals, int *named, int *n) {
     *n = 0;
     if (qsql_boundary(p)) return 1;                 /* empty (immediately by/from) */
     for (;;) {
         if (*n >= QSQL_MAXCOLS) return 0;
-        if (!qsql_colspec(p, &aliases[*n], &vals[*n])) return 0;
+        if (!qsql_colspec(p, &aliases[*n], &vals[*n], named ? &named[*n] : NULL)) return 0;
         (*n)++;
         Token *tk = cur(p);
         if (tk->kind == T_VERB && tk->len == 1 && p->src[tk->start] == ',') { adv(p); continue; }
@@ -2168,12 +2179,12 @@ static ray_t *parse_qsql_select(Parser *p, int *ok) {
     ray_t *b = NULL, *t = NULL, *c = NULL, *a = NULL, *head = NULL, *q = NULL;
 
     adv(p);                                       /* consume `select` */
-    if (!qsql_collist(p, aliases, vals, &na)) { *ok = 0; goto fail; }
+    if (!qsql_collist(p, aliases, vals, NULL, &na)) { *ok = 0; goto fail; }
 
     if (qtok_is(p, cur(p), "by", 2)) {            /* by-clause */
         adv(p);
         ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS]; int nb = 0;
-        if (!qsql_collist(p, bk, bv, &nb) || nb == 0) {
+        if (!qsql_collist(p, bk, bv, NULL, &nb) || nb == 0) {
             for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
             *ok = 0; goto fail;
         }
@@ -2420,13 +2431,13 @@ static ray_t *parse_qsql_update(Parser *p, int *ok) {
     ray_t *b = NULL, *t = NULL, *c = NULL, *a = NULL, *head = NULL, *q = NULL;
 
     adv(p);                                       /* consume `update` */
-    if (!qsql_collist(p, aliases, vals, &na)) { *ok = 0; goto fail; }
+    if (!qsql_collist(p, aliases, vals, NULL, &na)) { *ok = 0; goto fail; }
     if (na == 0) { *ok = 0; goto fail; }          /* update needs a select-phrase */
 
     if (qtok_is(p, cur(p), "by", 2)) {            /* by-clause */
         adv(p);
         ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS]; int nb = 0;
-        if (!qsql_collist(p, bk, bv, &nb) || nb == 0) {
+        if (!qsql_collist(p, bk, bv, NULL, &nb) || nb == 0) {
             for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
             *ok = 0; goto fail;
         }
@@ -2496,6 +2507,164 @@ static ray_t *parse_qsql_update(Parser *p, int *ok) {
     na = 0;                                        /* consumed by build_dict */
 
     head = q_verb('!');
+    q = ray_list_new(5);
+    q = ray_list_append(q, head); ray_release(head);
+    q = ray_list_append(q, t);    ray_release(t);
+    q = ray_list_append(q, c);    ray_release(c);
+    q = ray_list_append(q, b);    ray_release(b);
+    q = ray_list_append(q, a);    ray_release(a);
+    return q;
+
+fail:
+    if (snapped) qsql_snap_restore(p);
+    for (int i = 0; i < na; i++) { ray_release(aliases[i]); ray_release(vals[i]); }
+    if (b) ray_release(b);
+    if (t) ray_release(t);
+    if (c) ray_release(c);
+    if (a) ray_release(a);
+    p->pos = save;
+    return NULL;
+}
+
+/* Build the exec By-phrase VALUE from a parsed by-column list.  kdb encodes an
+ * exec By as a bare symbol (single group column) or symbol vector (multiple)
+ * when the columns are unnamed bare column references — routed to the grouped-
+ * exec branch of q_funsql_select_impl (currently deferred).  A named/computed
+ * By (`by k:expr`) degrades to a name!expr DICT, the same shape Select uses, so
+ * ql_qsql_exec skips it and it lowers via the Select path (keyed-table result).
+ * Consumes the bk/bv refs.  Returns an OWNED value. */
+static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, int *bnamed, int nb) {
+    int all_bare = 1;
+    for (int i = 0; i < nb; i++)
+        if (bnamed[i] || !(bv[i] && bv[i]->type == -RAY_SYM &&
+                           (bv[i]->attrs & Q_ATTR_QUOTED))) { all_bare = 0; break; }
+    if (all_bare) {
+        ray_t *b;
+        if (nb == 1) {
+            b = ray_sym(bv[0]->i64);                 /* bare group-by symbol */
+        } else {
+            b = ray_sym_vec_new(RAY_SYM_W64, nb);
+            for (int i = 0; i < nb; i++) {
+                ray_t *s = ray_sym_str(bv[i]->i64);
+                b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
+                ray_release(s);
+            }
+        }
+        for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
+        return b;
+    }
+    return qsql_build_dict(bk, bv, nb);              /* consumes bk/bv */
+}
+
+/* exec [PS] [by PB] from TABLE [where PW]  ->  (?;`t;c;b;a).
+ * Shares the `?` functional head with Select but shapes the RESULT differently
+ * (last record / column value / dict), which is decided by the b and a slots and
+ * carried out by q_funsql_select_impl.  The Select-vs-exec distinction is the
+ * By-phrase encoding: Select uses `0b` (no grouping) or a name!expr DICT; exec
+ * uses the general empty list `()` (no grouping) or a bare/vector SYMBOL By.
+ * ql_qsql_exec claims exactly the `()`/symbol-By trees and head-swaps them onto
+ * the q.exec executor; anything else (`0b`, dict By) stays a Select.
+ *   a   `()`             omitted phrase -> last record (dict)
+ *       bare column expr  single unnamed column -> the column value (list)
+ *       name!expr dict    named / multiple columns -> dict by column name
+ * Soft-fails (restores p->pos) on any shape outside this subset, exactly like
+ * parse_qsql_select/update, so unsupported exec forms fall through to the
+ * ordinary parser (no parse regression). */
+static ray_t *parse_qsql_exec(Parser *p, int *ok) {
+    *ok = 1;
+    int save = p->pos;
+    int snapped = 0;                       /* from-expression token snapshot */
+    ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS]; int named[QSQL_MAXCOLS]; int na = 0;
+    ray_t *b = NULL, *t = NULL, *c = NULL, *a = NULL, *head = NULL, *q = NULL;
+
+    adv(p);                                       /* consume `exec` */
+    if (!qsql_collist(p, aliases, vals, named, &na)) { *ok = 0; goto fail; }
+
+    if (qtok_is(p, cur(p), "by", 2)) {            /* by-clause */
+        adv(p);
+        ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS]; int bnamed[QSQL_MAXCOLS]; int nb = 0;
+        if (!qsql_collist(p, bk, bv, bnamed, &nb) || nb == 0) {
+            for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
+            *ok = 0; goto fail;
+        }
+        b = qsql_exec_by(bk, bv, bnamed, nb);     /* consumes bk/bv */
+    } else {
+        b = ray_list_new(0);                      /* exec: no grouping = empty list */
+    }
+
+    if (!qtok_is(p, cur(p), "from", 4)) { *ok = 0; goto fail; }
+    adv(p);
+    /* from TABLE-NAME | from EXPRESSION — identical to parse_qsql_select. */
+    Token *tt = cur(p);
+    Token *nx = &p->t.t[p->pos + 1];
+    int name_form = tt->kind == T_NOUN && tt->k && tt->k->type == -RAY_SYM &&
+        !(tt->k->attrs & Q_ATTR_QUOTED) &&
+        (qtok_is(p, nx, "where", 5) ||
+         nx->kind == T_EOF || nx->kind == T_SEMI || nx->kind == T_RBRACK ||
+         nx->kind == T_RPAREN || nx->kind == T_RBRACE);
+    if (name_form) {
+        t = qsql_colsym(tt->k->i64);
+        adv(p);
+    } else {
+        if (tt->kind == T_EOF) { *ok = 0; goto fail; }
+        int widx = -1, depth = 0;
+        for (int i = p->pos; i < p->t.n; i++) {
+            Token *sc = &p->t.t[i];
+            if (sc->kind == T_LPAREN || sc->kind == T_LBRACK ||
+                sc->kind == T_LBRACE) { depth++; continue; }
+            if (sc->kind == T_RPAREN || sc->kind == T_RBRACK ||
+                sc->kind == T_RBRACE) { if (depth == 0) break; depth--; continue; }
+            if (sc->kind == T_EOF) break;
+            if (sc->kind == T_SEMI) { if (depth == 0) break; continue; }
+            if (depth == 0 && qtok_is(p, sc, "where", 5)) { widx = i; break; }
+        }
+        qsql_snap_take(p);
+        snapped = 1;
+        TKind wkind = T_EOF;
+        if (widx >= 0) { wkind = p->t.t[widx].kind; p->t.t[widx].kind = T_EOF; }
+        P fe = parse_e(p);
+        if (widx >= 0) p->t.t[widx].kind = wkind;
+        if (fe.role != R_NOUN || !fe.v || (widx >= 0 && p->pos != widx)) {
+            if (fe.v) ray_release(fe.v);
+            *ok = 0; goto fail;
+        }
+        t = fe.v;
+    }
+
+    if (qtok_is(p, cur(p), "where", 5)) {         /* where-clause */
+        adv(p);
+        c = qsql_where(p, ok);
+        if (!*ok) goto fail;
+    } else {
+        c = ray_list_new(0);
+    }
+
+    /* Anything left beyond the CORE grammar => not our form: soft-fail so the
+     * ordinary parser consumes the whole statement (mirror parse_qsql_select). */
+    {
+        Token *end = cur(p);
+        if (end->kind != T_EOF && end->kind != T_SEMI && end->kind != T_RBRACK &&
+            end->kind != T_RPAREN && end->kind != T_RBRACE) { *ok = 0; goto fail; }
+    }
+
+    if (snapped) { qsql_snap_drop(); snapped = 0; }
+
+    /* Select-phrase shaping (kdb exec.md "Select phrase"):
+     *   omitted             -> `()` : last record
+     *   single unnamed col  -> the bare column expr : the column value
+     *   named / multiple    -> name!expr DICT : dict by column name */
+    if (na == 0) {
+        a = ray_list_new(0);
+    } else if (na == 1 && !named[0]) {
+        a = vals[0];                              /* transfer ownership */
+        ray_release(aliases[0]);
+        na = 0;                                   /* consumed */
+    } else {
+        a = qsql_build_dict(aliases, vals, na);   /* consumes aliases/vals */
+        na = 0;
+    }
+
+    head = q_verb('?');
     q = ray_list_new(5);
     q = ray_list_append(q, head); ray_release(head);
     q = ray_list_append(q, t);    ray_release(t);
@@ -3598,6 +3767,63 @@ static void ql_qsql_bang(ray_t **slot) {
     e[0] = dv;   /* (q.delete; t; c; b; a) — args e[1..4] pass through */
 }
 
+static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head);
+
+/* String `exec` lowering: the symbolic (?;`t;c;b;a) statement tree (bare
+ * unquoted `?` head, 5-list) head-swaps onto the q.exec special form, whose
+ * executor drives q_funsql_select_impl (the SAME result-shaping engine as the
+ * functional `?[t;c;b;a]` exec) — string and functional exec stay equivalent.
+ *
+ * Select and exec SHARE the `?` head, so the By-phrase slot (e[3]) disambiguates
+ * exactly as kdb encodes it: exec uses the general empty list `()` (no grouping)
+ * or a bare/vector SYMBOL By (grouped exec); Select uses `0b` (RAY_BOOL) or a
+ * name!expr DICT.  Claim only the exec encodings here (runs BEFORE ql_qsql), so
+ * Select trees fall through to ql_qsql unchanged, and a `by k:expr` exec (a DICT
+ * By) intentionally degrades to the Select path (keyed-table result). */
+static void ql_qsql_exec(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) != 5) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *hs = ray_sym_str(h->i64);
+    int is_q = hs && ray_str_len(hs) == 1 && ray_str_ptr(hs)[0] == '?';
+    if (hs) ray_release(hs);
+    if (!is_q) return;
+    ray_t *b = e[3];
+    int is_exec = b && ((b->type == RAY_LIST && ray_len(b) == 0) ||   /* () no-grouping */
+                        b->type == -RAY_SYM || b->type == RAY_SYM);   /* symbol By */
+    if (!is_exec) return;
+    ray_t *xv = q_registry_exec_value();
+    if (!xv) return;
+
+    /* Lower the Select-phrase DICT's value expressions.  A name!expr `a` dict is
+     * SKIPPED by q_lower_walk (it recurses only RAY_LIST children), so its output
+     * expressions keep their raw parse-tree operator heads — a bare-list `a`
+     * (single unnamed column) is walked and works, but a dict escapes.  The exec
+     * executor's funsql_eval needs the lowered (fn-VALUE / carrier) heads, so run
+     * the standard walker over each dict value here — exactly the lowering the
+     * bare-list case gets, keeping the string form identical to the functional
+     * `?[t;c;b;a]` exec.  (Select instead re-normalizes these via ql_qsql_out for
+     * ray_select; the two engines want opposite head encodings.) */
+    ray_t *a = e[4];
+    if (a && a->type == RAY_DICT) {
+        ray_t *av = ray_dict_vals(a);              /* borrowed internal list */
+        if (av && av->type == RAY_LIST) {
+            int64_t nv = ray_len(av);
+            ray_t **ve = (ray_t **)ray_data(av);
+            for (int64_t i = 0; i < nv; i++)
+                if (ve[i] && ve[i]->type == RAY_LIST && ve[i]->rc == 1) {
+                    ray_t *err = q_lower_walk(&ve[i], 0, 0);
+                    if (err) ray_release(err);     /* an 'assign in an output expr: drop */
+                }
+        }
+    }
+    ray_retain(xv);
+    ray_release(e[0]);
+    e[0] = xv;   /* (q.exec; t; c; b; a) — args e[1..4] pass through */
+}
+
 /* ===== functional qSQL `?[t;c;b;a]` / `![t;c;b;a]` =========================
  * The by-VALUE functional forms parse as a rank-4 application whose head is the
  * DYADIC registry value for `?` (select/exec) or `!` (update/delete).  Rewrite
@@ -3649,6 +3875,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ql_control(slot);                      /* if/do/while -> q.if/q.do/q.while */
     ql_mod_assign(slot, in_lambda);        /* x op: y -> x: x op y (before others) */
     ql_indexed_assign(slot, in_lambda);    /* d[k]:v / d[k]op:v -> set + @/. amend */
+    ql_qsql_exec(slot);                    /* (?;`t;c;();a) -> q.exec call (BEFORE ql_qsql) */
     ql_qsql(slot);                         /* (?;`t;c;b;a) -> ray_select call */
     ql_qsql_bang(slot);                    /* (!;`t;c;0b;a) -> q.delete call  */
     ql_funsql(slot);                       /* ?[t;c;b;a] / ![t;c;b;a] runtime */
