@@ -7222,6 +7222,45 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
         }
     }
 
+    /* Dict-entry delete (delete.md "Dictionary entries"): a plain symbol-keyed
+     * dictionary that is neither a namespace handle nor a table.  `a` names the
+     * keys to drop (same shape as the del-cols column list); `c` is empty.
+     *   by-name  (`delete b from `d`, t = `d):   amend the env binding IN PLACE
+     *            and return the name (mirrors the expunge path's handle return).
+     *   by-value (![d;();0b;enlist`b], t = a dict value): return the pruned dict.
+     * Claimed BEFORE funsql_resolve_table, which rejects non-tables.  Reuses the
+     * engine's ray_dict_remove (single-home drop) per dropped key.  Excludes
+     * keyed tables (RAY_DICT whose keys are a table, not a RAY_SYM vector). */
+    if (a && a->type == RAY_SYM && ray_len(a) > 0) {
+        int by_name = (t && t->type == -RAY_SYM);
+        ray_t* dv = by_name ? ray_env_get(t->i64) : t;      /* borrowed */
+        if (dv && !RAY_IS_ERR(dv) && dv->type == RAY_DICT) {
+            ray_t* dk = ray_dict_keys(dv);
+            if (dk && dk->type == RAY_SYM) {
+                ray_retain(dv);                             /* ray_dict_remove consumes */
+                int64_t nd = ray_len(a);
+                for (int64_t i = 0; i < nd && dv && !RAY_IS_ERR(dv); i++) {
+                    ray_t* cn = ray_sym_vec_cell(a, i);
+                    ray_t* katom = ray_sym(ray_sym_intern_runtime(
+                        ray_str_ptr(cn), ray_str_len(cn)));
+                    dv = ray_dict_remove(dv, katom);        /* consumes dv; katom borrowed */
+                    ray_release(katom);
+                }
+                if (!dv || RAY_IS_ERR(dv)) return dv ? dv : ray_error("oom", NULL);
+                if (by_name) {
+                    ray_err_t err = ray_env_set(t->i64, dv);   /* retains dv */
+                    ray_release(dv);
+                    if (err != RAY_OK)
+                        return ray_error(ray_err_code_str(err),
+                                         "delete: dict update failed");
+                    ray_retain(t);
+                    return t;
+                }
+                return dv;
+            }
+        }
+    }
+
     ray_t* tbl = funsql_resolve_table(t);
     if (RAY_IS_ERR(tbl)) return tbl;
 
@@ -7250,6 +7289,16 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
                 out = ray_table_add_col(out, nm, cv);
             }
             ray_release(tbl);
+            /* Deleting EVERY column wipes the table's schema — kdb signals
+             * (owner-confirmed behaviour; the error code/text here are ours,
+             * not doc-derived).  Dropping a non-existent column is a no-op and
+             * must NOT error, so key on the RESULT having zero columns while the
+             * source had >=1 (not on the drop-set size). */
+            if (!RAY_IS_ERR(out) && nc > 0 && ray_table_ncols(out) == 0) {
+                ray_release(out);
+                return ray_error("domain",
+                                 "delete: cannot delete all columns from a table");
+            }
             return out;
         }
         /* delete rows matching c: keep the complement.  Empty c => delete ALL
