@@ -10,6 +10,9 @@
 #include "qlang/q_sys.h"
 #include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec / q_fmt_prec — `\P` precision */
+#include "qlang/q_repl.h"     /* q_repl_mark_listener_active — `\p` runtime listen */
+#include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
+#include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
 #include <stdlib.h>           /* srand, strtoll, system, exit */
@@ -196,6 +199,30 @@ static ray_t* h_nyi(const char* arg, size_t alen, const char* rest, size_t restl
  *   - `\c`/`\C` and `\o` render WITHOUT a suffix in the doc (`45 160`,
  *     `10 10`, `0N`) — i.e. LONGS — so those getters return i64. */
 
+/* `\p N` — listening port.  Binds a kdb-protocol IPC listener on port N
+ * (1..65535) on the runtime event poll; the unified REPL loop (q_repl.c) then
+ * serves it, and q_repl_mark_listener_active keeps the process alive past stdin
+ * EOF (a client that `\p`s a port becomes a server).  Deferred (kept `'nyi`):
+ * the getter `\p` (report current port), `\p 0` (close), and `\p 0W` (any-free)
+ * — startup `-p` already covers the fixed/0W bind path. */
+static ray_t* h_p(const char* arg, size_t alen, const char* rest, size_t restlen) {
+    (void)rest; (void)restlen;
+    if (alen == 0) return ray_error("nyi", NULL);        /* getter — deferred */
+    long long v;
+    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (v == 0) return ray_error("nyi", NULL);           /* `\p 0` close — deferred */
+    if (v < 1 || v > 65535) return ray_error("domain", NULL);
+    ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
+    if (!poll) return ray_error("io", NULL);             /* no event poll (e.g. qdoctest) */
+    if (ray_ipc_listen(poll, (uint16_t)v) < 0)
+        return ray_error("io", NULL);                    /* bind/listen failed (EADDRINUSE, …) */
+    q_repl_mark_listener_active();
+    /* Same readiness line startup `-p` prints (qmain) — lets a supervisor/test
+     * detect the now-live listener; stderr so it never taints an stdout golden. */
+    fprintf(stderr, "listening on port %u\n", (uint16_t)v);
+    return NULL;                                          /* setter: silent */
+}
+
 /* `\P` — display precision.  `\P`→`7i`; `\P n` sets n∈[0,17] (0 = max = 17),
  * silent.  The float formatter (q_fmt.c) is the sole reader. */
 static ray_t* h_P(const char* arg, size_t alen, const char* rest, size_t restlen) {
@@ -366,7 +393,7 @@ static const struct {
     { "z",  1, 1, Q_SYS_F_NONE, h_getset },   /* date parsing */
     { "E",  1, 1, Q_SYS_F_NONE, h_getset },   /* TLS server mode */
     { "l",  1, 1, Q_SYS_F_NONE, h_getset },   /* load file/dir */
-    { "p",  1, 1, Q_SYS_F_NONE, h_getset },   /* listening port */
+    { "p",  1, 1, Q_SYS_F_NONE, h_p },        /* listening port — runtime \p N binds */
     { "r",  1, 2, Q_SYS_F_NONE, h_getset },   /* replication / rename */
     { "T",  1, 1, Q_SYS_F_NONE, h_getset },   /* client timeout */
     { "u",  1, 1, Q_SYS_F_NONE, h_getset },   /* reload user pwd file */
