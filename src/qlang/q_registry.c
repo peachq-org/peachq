@@ -7277,6 +7277,28 @@ static ray_t* funsql_update_dict(ray_t* tbl, ray_t* bykey, ray_t* a) {
         } else {
             ex = funsql_lower_expr(((ray_t**)ray_data(av))[i]);
         }
+        /* A length-1 literal vector is kdb's scalar-broadcast form: a single-sym
+         * assignment `col:`x` parses to (,`col)!,,`x — value ,`x, a 1-vector —
+         * which must fill EVERY selected row.  It cannot be reduced to a `x atom
+         * (funsql reads a bare symbol as a column/name reference, not a literal —
+         * that is why kdb keeps the enlist), and the base ray_update null-fills
+         * rather than broadcasts a short literal, so replicate the 1-vector to
+         * the target row count (`tbl` is the full table, or the where-filtered
+         * subtable) with take.  Excludes RAY_STR (ray_len garbage on the SSO
+         * string atom) and general lists; multi-element literals keep length.
+         * Skipped under a by-clause (grouped assignment realigns per group; the
+         * doc by-forms use aggregate/uniform exprs, never bare literals). */
+        if (!bykey && ex && ray_is_vec(ex) && ex->type != RAY_STR &&
+            ray_len(ex) == 1) {
+            int64_t nrow = ray_table_nrows(tbl);
+            if (nrow > 1) {
+                ray_t* nobj = ray_i64(nrow);
+                ray_t* rep = ray_take_fn(ex, nobj);
+                ray_release(nobj);
+                if (rep && !RAY_IS_ERR(rep)) { ray_release(ex); ex = rep; }
+                else if (rep) ray_release(rep);
+            }
+        }
         vl = ray_list_append(vl, ex);
         ray_release(ex);
     }
@@ -7482,8 +7504,22 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
         return res;
     }
 
-    /* UPDATE.  where (if any) is applied by filtering, running the update on
-     * the subtable, then scattering the changed columns back — this composes
+    /* UPDATE.  Multi-column `by a,b` is not yet supported: funsql_by_key
+     * collapses the by-dict to its FIRST grouping column, so a two-key by
+     * would silently group by `a` alone and return WRONG aggregates.  Reject
+     * it here (single-home — both the string `update … by a,b` and functional
+     * ![t;c;(`a`b)!…;a] forms hit this) rather than mis-evaluate; single-column
+     * by (the doc-covered form) is unaffected.  See PLAN.md Known defects. */
+    if (b && b->type == RAY_DICT) {
+        ray_t* bkeys = ray_dict_keys(b);
+        if (bkeys && ray_len(bkeys) > 1) {
+            ray_release(tbl);
+            return ray_error("nyi", "update: multi-column by is not supported");
+        }
+    }
+
+    /* where (if any) is applied by filtering, running the update on the
+     * subtable, then scattering the changed columns back — this composes
      * where+by, which the base ray_update declines to do in one pass. */
     int has_where = !funsql_empty(c);
     ray_t* bykey = funsql_by_key(b);
