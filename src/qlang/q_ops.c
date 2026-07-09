@@ -328,7 +328,8 @@ static const q_op_t Q_OPS[] = {
     { "all",     QLEX_KW_PREFIX, QK_NONE, NULL,       QK_NONE, NULL,      NULL  },
     /* ---- IPC client verbs (feat/q-ipc-client, Phase D) — thin wrappers over the
      * kdb-speaking `.ipc.*` primitives (Phase C).  `hopen` normalizes int|string|
-     * (conn;timeout) into the `.ipc.open` string API and returns a 1-BASED handle;
+     * (conn;timeout) into the `.ipc.open` string API and returns the connection's
+     * socket fd as the handle (kdb-faithful — 0/1/2 reserved, connections at 3+);
      * `hclose` translates it back and routes to `.ipc.close`.  The sync/async send
      * verb `h"query"` is handle-as-verb application (q_apply.c int-head arm), not a
      * manifest row.  Both are monadic prefix keywords (KW_PREFIX). ---- */
