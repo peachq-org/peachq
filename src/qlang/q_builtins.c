@@ -684,6 +684,20 @@ static ray_t* q_remote_eval_str(const char* src, size_t len) {
     return r;
 }
 
+/* Remote (func;args) value-apply (IPC request payloads): the kdb value/apply
+ * wire shape.  Reuse the single-home q `value` (q_value_wrap), which already
+ * does a SINGLE list-apply — resolving a symbol head (`sum`), a string-source
+ * head (`"+"`), a value head, or a 100h lambda carrier (`{x*2}`) — and applies
+ * it to the already-evaluated tail args, NEVER re-evaluating them (ADR-0004:
+ * value, not eval).  `list` is BORROWED (the ipc layer releases it); q_value_wrap
+ * does not consume it and returns an OWNED value.  Restricted mode needs no
+ * re-assert here: ipc_dispatch sets ray_eval_get_restricted() around the whole
+ * dispatch, and any restricted primitive reached by the apply (`hopen`,
+ * `system`…) self-checks it — the exact contract the string hook relies on. */
+static ray_t* q_remote_apply(ray_t* list) {
+    return q_value_wrap(list);
+}
+
 void q_builtins_register(void) {
     /* Noun-head application (indexing, dict/table lookup, 104h carriers):
      * register the q dispatcher into eval's apply hook.  q_runtime_destroy
@@ -691,6 +705,8 @@ void q_builtins_register(void) {
     ray_eval_set_apply_hook(q_apply_noun);
     /* Remote strings (IPC/journal) evaluate as q from now on. */
     ray_eval_set_remote_str_fn(q_remote_eval_str);
+    /* Remote (func;args) value-apply (IPC): single value-object apply via q `value`. */
+    ray_eval_set_remote_apply_fn(q_remote_apply);
     bind_unary("parse", q_parse_builtin_fn);
     /* q keywords with no rayfall counterpart — q-owned env bindings (same
      * mechanism as `parse`), snapshotted by the registry as QK_ENV rows. */
