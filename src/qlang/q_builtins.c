@@ -485,6 +485,23 @@ static ray_t* q_dotq_ty_fn(ray_t* x) {
     return ray_str(&c, 1);
 }
 
+/* (.Q.qt x) — is-table predicate (ref/dotq.md `qt`): 1b if x is a table
+ * (simple OR keyed), else 0b. */
+static ray_t* q_dotq_qt_fn(ray_t* x) {
+    return ray_bool(x && (x->type == RAY_TABLE || q_is_keyed_table(x)));
+}
+
+/* (.Q.qp x) — is-partitioned predicate (ref/dotq.md `qp`): partitioned table
+ * -> 1b, splayed table -> 0b, anything else -> 0 (a LONG, not a bool).  openq
+ * has no on-disk partitioned or splayed tables, so nothing in memory is either
+ * — every value falls into the "anything else" arm and returns the long 0.
+ * The doc's own `.Q.qp select from B -> 0` pins this: an in-memory table (as
+ * openq's tables always are) is NOT splayed, so it returns 0 (long), not 0b. */
+static ray_t* q_dotq_qp_fn(ray_t* x) {
+    (void)x;
+    return ray_i64(0);
+}
+
 /* Column name ids of a table as a RAY_SYM vector.  A keyed table (RAY_DICT of
  * key-table -> value-table) yields key cols ++ value cols. */
 static ray_t* q_table_colnames(ray_t* x) {
@@ -784,6 +801,15 @@ void q_builtins_register(void) {
     }
     bind_unary(".Q.id", q_id_fn);
     bind_unary(".Q.ty", q_dotq_ty_fn);
+    bind_unary(".Q.qt", q_dotq_qt_fn);
+    bind_unary(".Q.qp", q_dotq_qp_fn);
+    /* .Q.pn (partition counts) is DELIBERATELY left unbound: kdb leaves the
+     * partitioned-DB state vars undefined in a non-partitioned workspace
+     * (ref/dotq.md: "In non-partitioned databases the partitioned database
+     * state variables remain undefined").  openq has no HDB, so `pn` stays
+     * absent — `` `pn in key `.Q `` returns 0b, which is what callers like
+     * qStudio's safeCount guard rely on to fall through to plain `count`.
+     * Binding an empty dict here would flip that guard and be LESS faithful. */
     bind_value(".Q.res", q_name_reserved_words());
     /* .j JSON namespace (.j.j / .j.k / .j.jd) — plain env unaries, same as the
      * .Q.* bindings above; resolved as dotted name-refs, applied via q_apply_noun. */
