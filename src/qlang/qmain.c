@@ -182,8 +182,10 @@ int main(int argc, char** argv) {
         /* Startup script could not be opened/read — skip the REPL/server loop
          * and exit non-zero (kdb fails a bad `q file.q`; it must not silently
          * succeed).  q_repl_run_file already printed the open error. */
-    } else if (port > 0 && poll) {
-        /* Live listener + console: register stdin on the SAME poll as the
+    } else if ((port > 0 || q_repl_listener_active()) && poll) {
+        /* A listener exists — from startup `-p` (port>0) OR a runtime/script
+         * `\p N` (q_repl_listener_active) — so serve, don't exit at a non-tty
+         * script end.  Live listener + console: register stdin on the SAME poll
          * IPC listener and run ONE event loop (q_repl_run_poll — mirrors
          * rayforce's run_interactive), so clients are served WHILE the REPL
          * reads — no EOF needed.  Covers both the tty console and piped
@@ -214,11 +216,19 @@ int main(int argc, char** argv) {
         /* Ran a startup script with no server on a non-tty (`q file.q
          * </dev/null`): exit 0 without entering the REPL. */
     } else {
-        /* No listener (or poll init failed): plain console.  Echo input when
-         * stdin is not a terminal (piped / redirected) so the output is a
-         * faithful console transcript; on a real tty the terminal echoes, so
-         * we don't. */
-        q_repl_run(stdin, stdout, stderr, !stdin_tty);
+        /* No listener: run the SAME poll event loop the server uses (Bundle 3
+         * — unify on rayforce's run_interactive shape) so an idle client
+         * services its open outbound IPC conns (server pushes dispatch the
+         * instant they arrive, not only during a sync-send) and a runtime `\p`
+         * joins this poll.  have_listener=0 → the loop exits at stdin EOF, so a
+         * piped client still finishes.  Fall back to the blocking console where
+         * the poll backend can't watch stdin (regular-file redirect, Windows). */
+        int concurrent = 0;
+        if (poll)
+            concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty,
+                                          /*have_listener=*/0) == 0);
+        if (!concurrent)
+            q_repl_run(stdin, stdout, stderr, !stdin_tty);
     }
 
     if (poll) {
