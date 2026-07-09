@@ -21,6 +21,12 @@
  * q_runtime_create; `\S n` re-initializes thereafter. */
 void q_sys_seed_init(void);
 
+/* Reset the Tier-2 `\`-command config (\c \C \g \o \W \e \s) AND the `\P`
+ * display precision to their kdb defaults.  Called by q_runtime_create so a
+ * config change in one .qcmd file (fresh-per-file runtime) never leaks into
+ * the next. */
+void q_sys_cfg_init(void);
+
 /* Dispatch a console line that may begin with `\`.  Sets *handled and returns an
  * OWNED value to display (NULL = handled silently), or an OWNED RAY_ERROR.
  *
