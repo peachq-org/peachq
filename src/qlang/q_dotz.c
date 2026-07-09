@@ -6,9 +6,16 @@
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include <rayforce.h>
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
-#include <stdlib.h>            /* strtod */
+#include <stdlib.h>            /* strtod / getenv */
 #include <string.h>
 #include <time.h>             /* clock_gettime / gmtime_r / mktime — .z clock family */
+#include <unistd.h>          /* getpid / gethostname / getuid — .z.i/.z.h/.z.u */
+#ifndef RAY_OS_WINDOWS
+  #include <pwd.h>             /* getpwuid — .z.u OS username */
+  #include <netdb.h>          /* getaddrinfo — .z.a local IPv4 */
+  #include <netinet/in.h>     /* struct sockaddr_in */
+  #include <arpa/inet.h>      /* ntohl */
+#endif
 
 /* argv is process-lifetime (owned by main), so we cache only the pointers and
  * the script's position and MINT each `.z.*` value on demand.  These values
@@ -19,19 +26,30 @@
 static int    g_argc       = 0;
 static char** g_argv       = NULL;
 static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
+static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
 
 static bool ends_with_dot_q(const char* s) {
     size_t n = strlen(s);
     return n >= 2 && s[n - 2] == '.' && s[n - 1] == 'q';
 }
 
-/* A value-consuming q flag: its FOLLOWING argv token is a value, not the
- * script.  WARNING — hand-duplicated from qmain.c's flag parse (-p/--port/
- * -u/-U): if you add a value-taking flag to qmain.c you MUST add it here too,
- * or its value will be mis-detected as the `*.q` script path (wrong .z.f/.z.x). */
-static bool flag_takes_value(const char* s) {
-    return strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
-           strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0;
+/* Launcher-flag classification — THE single home for which argv tokens the q
+ * launcher (qmain.c) recognizes and consumes.  kdb consumes its recognized
+ * options, so the `.z.x` view (args after the script) OMITS them while `.z.X`
+ * (raw argv) keeps everything.  This same table drives the `*.q` script
+ * locator (a value-flag's following token is a value, not the script) and the
+ * `-q`/`.z.q` quiet-mode probe.  Returns:
+ *   Q_FLAG_NONE   not a recognized launcher flag (positional / script)
+ *   Q_FLAG_BOOL   recognized flag consuming NO following token: -q
+ *   Q_FLAG_VALUE  recognized flag consuming its FOLLOWING token: -p/--port/-u/-U
+ * KEEP IN SYNC with qmain.c's arg-parse switch (it acts on -p/-u/-U and reads
+ * `.z.q` back via q_dotz_quiet()) — this classifier is the canonical list. */
+enum { Q_FLAG_NONE = 0, Q_FLAG_BOOL = 1, Q_FLAG_VALUE = 2 };
+static int flag_kind(const char* s) {
+    if (strcmp(s, "-q") == 0) return Q_FLAG_BOOL;
+    if (strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
+        strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0) return Q_FLAG_VALUE;
+    return Q_FLAG_NONE;
 }
 
 /* argv[lo..hi) as a q list of strings (empty list, not null, when lo==hi). */
@@ -52,12 +70,110 @@ static ray_t* z_f(void) {   /* script file symbol; null sym when no script */
     const char* s = g_script_idx < 0 ? "" : g_argv[g_script_idx];
     return ray_sym(ray_sym_intern(s, strlen(s)));
 }
-static ray_t* z_x(void) {   /* args positioned AFTER the script (empty if none) */
-    int lo = g_script_idx < 0 ? g_argc : g_script_idx + 1;
-    return strings_list(lo, g_argc);
+static ray_t* z_x(void) {   /* args AFTER the script, MINUS launcher-consumed flags */
+    int    lo  = g_script_idx < 0 ? g_argc : g_script_idx + 1;
+    int    cap = g_argc - lo;
+    ray_t* out = ray_list_new(cap > 0 ? cap : 1);   /* over-cap ok — length grows on append */
+    for (int i = lo; i < g_argc; i++) {
+        int k = flag_kind(g_argv[i]);
+        if (k == Q_FLAG_VALUE) { i++; continue; }   /* drop flag AND its value token */
+        if (k == Q_FLAG_BOOL)  { continue; }        /* drop the bare flag (e.g. -q) */
+        ray_t* s = ray_str(g_argv[i], strlen(g_argv[i]));
+        out = ray_list_append(out, s);   /* append RETAINS */
+        ray_release(s);
+    }
+    return out;
 }
-static ray_t* z_X(void) {   /* full raw argv, including the binary */
+static ray_t* z_X(void) {   /* full raw argv, including the binary (UNFILTERED) */
     return strings_list(0, g_argc);
+}
+static ray_t* z_Xs(void) { /* raw command line as ONE space-joined string (kdb .z.Xs) */
+    size_t tot = 0;
+    for (int i = 0; i < g_argc; i++) tot += strlen(g_argv[i]) + 1;   /* +1 for space/NUL */
+    char*  buf = tot ? (char*)malloc(tot) : NULL;
+    size_t off = 0;
+    for (int i = 0; i < g_argc; i++) {
+        size_t l = strlen(g_argv[i]);
+        memcpy(buf + off, g_argv[i], l);
+        off += l;
+        if (i + 1 < g_argc) buf[off++] = ' ';
+    }
+    ray_t* s = ray_str(buf ? buf : "", off);
+    free(buf);
+    return s;
+}
+
+/* ---- system / host / process producers (kdb .z.o/.z.i/.z.h/.z.u/.z.a) -------
+ * Read-only, minted fresh per reference like the rest of Z_TAB.  POSIX-first
+ * (this file is already POSIX for the clock family); Windows fidelity is
+ * deferred with the clock family (see dotz-status.md). */
+static ray_t* z_q(void) { return ray_bool(g_quiet); }   /* .z.q — quiet mode */
+
+static ray_t* z_o(void) {   /* .z.o — OS/build symbol (l64/m64/w64 …), kdb-token set */
+    const char* os;
+#if defined(__linux__)
+  #if defined(__aarch64__) || defined(__arm__)
+    os = (sizeof(void*) == 8) ? "l64arm" : "l32arm";  /* l64arm since kdb 4.1t */
+  #else
+    os = (sizeof(void*) == 8) ? "l64" : "l32";
+  #endif
+#elif defined(__APPLE__)
+    os = (sizeof(void*) == 8) ? "m64" : "m32";
+#elif defined(_WIN32) || defined(RAY_OS_WINDOWS)
+    os = (sizeof(void*) == 8) ? "w64" : "w32";
+#else
+    os = (sizeof(void*) == 8) ? "l64" : "l32";
+#endif
+    return ray_sym(ray_sym_intern(os, strlen(os)));
+}
+
+/* .z.i — PID.  The published .z reference displays it with NO `i` suffix (a
+ * long/-7h), unlike .z.a which shows the `i` suffix (int/-6h). */
+static ray_t* z_i(void) { return ray_i64((int64_t)getpid()); }
+
+static ray_t* z_h(void) {   /* .z.h — host name as a symbol (gethostname) */
+    char host[256];
+    if (gethostname(host, sizeof host) != 0) host[0] = '\0';
+    host[sizeof host - 1] = '\0';
+    return ray_sym(ray_sym_intern(host, strlen(host)));
+}
+
+/* .z.u — the OS username the process runs under (console handle-0 semantics:
+ * "the userid under which the process is running").  NOT the -u/-U auth flag
+ * (those are the access-control file, unrelated).  getpwuid then $USER/$LOGNAME. */
+static ray_t* z_u(void) {
+    const char* name = NULL;
+#ifndef RAY_OS_WINDOWS
+    struct passwd* pw = getpwuid(getuid());
+    if (pw && pw->pw_name) name = pw->pw_name;
+#endif
+    if (!name || !*name) name = getenv("USER");
+    if (!name || !*name) name = getenv("LOGNAME");
+    if (!name) name = "";
+    return ray_sym(ray_sym_intern(name, strlen(name)));
+}
+
+/* .z.a — local IPv4 as a 32-bit int (kdb: `0x0 vs .z.a` yields the octets,
+ * most-significant first — i.e. host-order ntohl of the network address).
+ * Resolve the primary IPv4 of the hostname; 0i if it cannot be determined. */
+static ray_t* z_a(void) {
+    int32_t addr = 0;
+#ifndef RAY_OS_WINDOWS
+    char host[256];
+    if (gethostname(host, sizeof host) == 0) {
+        host[sizeof host - 1] = '\0';
+        struct addrinfo hints;
+        struct addrinfo* res = NULL;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        if (getaddrinfo(host, NULL, &hints, &res) == 0 && res) {
+            struct sockaddr_in* sin = (struct sockaddr_in*)(void*)res->ai_addr;
+            addr = (int32_t)ntohl(sin->sin_addr.s_addr);
+            freeaddrinfo(res);
+        }
+    }
+#endif
+    return ray_i32(addr);
 }
 
 /* peachq version surface — reads the SAME compile-time macros the Makefile
@@ -121,6 +237,13 @@ Z_TAB[] = {
     { ".z.f", 4, z_f },
     { ".z.x", 4, z_x },
     { ".z.X", 4, z_X },
+    { ".z.Xs", 5, z_Xs },
+    { ".z.q", 4, z_q },
+    { ".z.o", 4, z_o },
+    { ".z.i", 4, z_i },
+    { ".z.h", 4, z_h },
+    { ".z.u", 4, z_u },
+    { ".z.a", 4, z_a },
     { ".z.K", 4, z_K },
     { ".z.k", 4, z_k },
     { ".z.p", 4, z_p },
@@ -145,10 +268,21 @@ void q_dotz_init(int argc, char** argv) {
      * kdb-true for the non-flag args the increment-1 tests pass.) */
     g_script_idx = -1;
     for (int i = 1; i < argc; i++) {
-        if (i > 1 && flag_takes_value(argv[i - 1])) continue;  /* skip flag value */
+        if (i > 1 && flag_kind(argv[i - 1]) == Q_FLAG_VALUE) continue;  /* skip flag value */
         if (ends_with_dot_q(argv[i])) { g_script_idx = i; break; }
     }
+
+    /* Quiet mode (`-q`, kdb .z.q): scan argv, skipping value-flag values so a
+     * `-p -q` (where `-q` is a port value, not the flag) doesn't false-trigger. */
+    g_quiet = false;
+    for (int i = 1; i < argc; i++) {
+        int k = flag_kind(argv[i]);
+        if (k == Q_FLAG_VALUE) { i++; continue; }
+        if (k == Q_FLAG_BOOL && strcmp(argv[i], "-q") == 0) g_quiet = true;
+    }
 }
+
+bool q_dotz_quiet(void) { return g_quiet; }
 
 const char* q_dotz_script_path(void) {
     return g_script_idx < 0 ? NULL : g_argv[g_script_idx];
@@ -178,4 +312,5 @@ void q_dotz_destroy(void) {
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;
+    g_quiet      = false;
 }
