@@ -6,6 +6,7 @@
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
+#include "core/ipc.h"      /* ray_ipc_current_handle — handler console write-through */
 
 /* inline dict display for parse-tree clauses (defined below) */
 static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz);
@@ -90,21 +91,39 @@ static void q_console_append(const char* s, size_t n) {
     g_console[g_console_len] = '\0';
 }
 
+/* Console sink write.  Normally buffers into g_console for the host (REPL /
+ * qdoc) to drain after each eval.  BUT when we're servicing an IPC message —
+ * i.e. running inside a `.z.p*` handler or a client's remote eval, detected by
+ * a live connection handle — there is NO host drain in the poll loop (the
+ * event loop blocks in one ray_poll_run for the server's whole life, and the
+ * per-message dispatch lives in frozen core/ipc.c).  So write straight to the
+ * server's stdout and flush, matching kdb: a handler's `show`/`0N!`/`-1`
+ * prints on the SERVER console immediately while its return value goes back
+ * over the wire.  handle < 0 => not in a handler => buffer as before. */
+static void q_console_emit(const char* s, size_t n) {
+    if (ray_ipc_current_handle() >= 0) {
+        fwrite(s, 1, n, stdout);
+        fflush(stdout);
+    } else {
+        q_console_append(s, n);
+    }
+}
+
 void q_console_show(ray_t* val) {
     char buf[8192]; buf[0] = '\0';
     q_fmt(val, buf, sizeof buf);
-    q_console_append(buf, strlen(buf));
-    q_console_append("\n", 1);
+    q_console_emit(buf, strlen(buf));
+    q_console_emit("\n", 1);
 }
 
 void q_console_show_krepr(ray_t* val) {
     char buf[8192]; buf[0] = '\0';
     q_fmt_krepr(val, buf, sizeof buf);
-    q_console_append(buf, strlen(buf));
-    q_console_append("\n", 1);
+    q_console_emit(buf, strlen(buf));
+    q_console_emit("\n", 1);
 }
 
-void q_console_write(const char* s, size_t n) { q_console_append(s, n); }
+void q_console_write(const char* s, size_t n) { q_console_emit(s, n); }
 
 /* ---- kdb table / keyed-table display -------------------------------------
  *
