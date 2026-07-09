@@ -42,6 +42,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
 void q_runtime_destroy(ray_runtime_t* rt) {
     ray_eval_set_apply_hook(NULL);   /* detach the q dispatcher first */
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
+    ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
     ray_eval_set_name_hook(NULL);    /* detach `.z.*` before its values die */
     q_dotz_destroy();          /* free the `.z.*` argv snapshots */
     q_registry_destroy();      /* free verb snapshots before the env goes away */

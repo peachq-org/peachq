@@ -124,6 +124,12 @@ static ray_t* dict_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n) {
 static ray_remote_str_fn_t g_remote_str_fn = NULL;
 void ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn) { g_remote_str_fn = fn; }
 
+/* openq remote (func;args) value-apply — see eval.h.  NULL = no q runtime
+ * (pure rayfall), which has no value-apply IPC dialect, so a list request
+ * safe-errors 'nyi rather than being coerced into an apply. */
+static ray_remote_apply_fn_t g_remote_apply_fn = NULL;
+void ray_eval_set_remote_apply_fn(ray_remote_apply_fn_t fn) { g_remote_apply_fn = fn; }
+
 /* openq eval-time computed-name resolver (`.z.*`) — see eval.h.  Consulted at
  * every name-LOAD miss, before raising `'name`.  NULL = historic behaviour. */
 static ray_name_hook_t g_name_hook = NULL;
@@ -139,6 +145,16 @@ ray_t* ray_eval_remote_str(const char* src, size_t len) {
     ray_t* r = ray_eval_str(tmp);
     ray_sys_free(tmp);
     return r;
+}
+
+ray_t* ray_eval_remote_apply(ray_t* list) {
+    if (g_remote_apply_fn) return g_remote_apply_fn(list);
+    /* No q runtime installed (pure rayfall): the engine binary has no
+     * value-apply IPC dialect, and a generic list is not a rayfall apply
+     * shape.  Safe-error rather than guess — never a wrong answer, never a
+     * crash (ADR-0004: a value object is not a parse tree, so we do NOT
+     * ray_eval it either). */
+    return ray_error("nyi", "IPC (func;args) value-apply requires the q runtime");
 }
 
 ray_t* ray_eval_get_nfo(void) { return __VM ? __VM->nfo : NULL; }
