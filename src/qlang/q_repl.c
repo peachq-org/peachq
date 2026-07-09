@@ -449,6 +449,16 @@ static void q_repl_interactive(FILE* out, FILE* err) {
  *            the transcript is unchanged.
  * `\\` / `exit` exit the poll loop (kdb: process exit).  EOF keeps the loop
  * serving IPC when a listener is live (the daemon shape), else exits. */
+
+/* A `\p N` (or startup `-p`) listener makes this process a server even if it
+ * began as a client: like rayforce/kdb, once it has a listener it keeps serving
+ * past stdin EOF instead of exiting.  Set by the `\p` handler (q_sys.c).
+ * Platform-neutral (a plain flag), declared BEFORE the poll-only guard so the
+ * POSIX event loop, the Windows serial path, and common code all see it. */
+static int g_listener_active = 0;
+void q_repl_mark_listener_active(void) { g_listener_active = 1; }
+int  q_repl_listener_active(void)      { return g_listener_active; }
+
 #ifndef RAY_OS_WINDOWS
 
 typedef struct {
@@ -587,13 +597,6 @@ static int q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
     q_pipe_prompt(c);
     return 0;
 }
-
-/* A `\p N` (or startup `-p`) listener makes this process a server even if it
- * began as a client: like rayforce/kdb, once it has a listener it keeps serving
- * past stdin EOF instead of exiting.  Set by the `\p` handler (q_sys.c). */
-static int g_listener_active = 0;
-void q_repl_mark_listener_active(void) { g_listener_active = 1; }
-int  q_repl_listener_active(void)      { return g_listener_active; }
 
 /* Single-home stdin-EOF handling.  Reached from BOTH a draining read()==0
  * (EPOLLIN) and a bare EPOLLHUP (an empty pipe whose writer closed reports HUP
