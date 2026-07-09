@@ -17,6 +17,9 @@
   #include <netdb.h>          /* getaddrinfo — .z.a local IPv4 */
   #include <netinet/in.h>     /* struct sockaddr_in */
   #include <arpa/inet.h>      /* ntohl */
+#else
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>         /* GetSystemTimePreciseAsFileTime — CLOCK_REALTIME shim */
 #endif
 
 /* argv is process-lifetime (owned by main), so we cache only the pointers and
@@ -239,7 +242,20 @@ static ray_t* z_k(void) {   /* `.z.k` — build/release date (kdb .z.k) */
  * signed difference from the real instant IS the east-of-UTC offset. */
 static int64_t z_now_ns(int local) {
     struct timespec ts;
+#ifdef RAY_OS_WINDOWS
+    /* Windows has no clock_gettime(CLOCK_REALTIME).  FILETIME counts 100ns
+     * ticks since 1601-01-01 UTC — rebase to the unix epoch (11644473600s in
+     * 100ns units) and split into sec/nsec.  Precise variant needs Win8+, which
+     * the build's _WIN32_WINNT=0x0A00 (Win10) guarantees. */
+    FILETIME ft;
+    GetSystemTimePreciseAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    t -= 116444736000000000ULL;
+    ts.tv_sec  = (time_t)(t / 10000000ULL);
+    ts.tv_nsec = (long)((t % 10000000ULL) * 100);
+#else
     clock_gettime(CLOCK_REALTIME, &ts);
+#endif
     int64_t unix_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
     if (local) {
         time_t s = ts.tv_sec;
