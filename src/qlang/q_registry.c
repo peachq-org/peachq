@@ -7252,8 +7252,20 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
             ray_release(tbl);
             return out;
         }
-        /* delete rows matching c: keep the complement */
-        ray_t* res = funsql_filter(tbl, c, 0);
+        /* delete rows matching c: keep the complement.  Empty c => delete ALL
+         * rows (kdb: `delete from t` with no where empties the table) — index
+         * the table at an empty row-index so the columns/schema survive.
+         * funsql_filter returns the RETAINED full table when there are no
+         * constraints (right for select keep=1, wrong for delete keep=0). */
+        ray_t* res;
+        if (funsql_empty(c)) {
+            ray_t* idx = ray_vec_new(RAY_I64, 0);
+            if (!idx) { ray_release(tbl); return ray_error("oom", NULL); }
+            res = ray_at_fn(tbl, idx);
+            ray_release(idx);
+        } else {
+            res = funsql_filter(tbl, c, 0);
+        }
         ray_release(tbl);
         return res;
     }
@@ -7366,10 +7378,39 @@ static ray_t* q_funsql_bang(ray_t** args, int64_t n) {
     return q_funsql_dispatch(args, n, q_funsql_bang_impl, "!");
 }
 
+/* String `delete` statement executor.  Lowered from the symbolic (!;`t;c;0b;a)
+ * tree by ql_qsql_bang: a SPECIAL FORM receiving the four operands UNEVALUATED.
+ *   t  the from-table: a `t name-sym (by-name), a `. context handle, or an
+ *      already-lowered expression subtree — funsql_operand resolves all three.
+ *   c  where-constraints: `enlist(constraint-list)` (row form) or `()`; the
+ *      parse-trees stay UNevaluated — funsql_build_mask (via q_funsql_bang_impl)
+ *      interprets them against the table columns.
+ *   b  0b (unused by delete).
+ *   a  empty symbol vector (row form) or the column-name symbol vector (col form).
+ * Reuses q_funsql_bang_impl wholesale (delete-rows / delete-cols / expunge).
+ * Refcount: q_funsql_bang_impl BORROWS its four operands (it never consumes
+ * them — it retains what it keeps), so `cc`/args[2]/args[3] are passed without
+ * a transfer; only the OWNED `tv` from funsql_operand is released here. */
+static ray_t* q_delete_exec(ray_t** args, int64_t n) {
+    if (n != 4)
+        return ray_error("rank", "delete[t;c;b;a]: expects 4 args, got %lld", (long long)n);
+    ray_t* tv = funsql_operand(args[0]);
+    if (!tv || RAY_IS_ERR(tv)) return tv;
+    /* statement c = enlist(constraint-list); the engine wants the inner list */
+    ray_t* c = args[1];
+    ray_t* cc = (c && c->type == RAY_LIST && ray_len(c) == 1)
+                    ? ((ray_t**)ray_data(c))[0]
+                    : c;
+    ray_t* res = q_funsql_bang_impl(tv, cc, args[2], args[3]);
+    ray_release(tv);
+    return res;
+}
+
 static ray_t* g_list_value   = NULL;
 static ray_t* g_table_value  = NULL;
 static ray_t* g_keyed_table_value = NULL;
 static ray_t* g_select_value = NULL;
+static ray_t* g_delete_value = NULL;   /* q.delete: string `delete` statement executor */
 static ray_t* g_compose_value = NULL;
 
 /* q `'[f;g;…]` compose builder — a normal VARY (args are the resolved function
@@ -7600,6 +7641,8 @@ ray_t* q_registry_funsql_bang_value(void)   { return g_funsql_bang_value; }
 ray_t* q_registry_select_value(void) {
     return g_select_value;   /* borrowed; NULL before init */
 }
+
+ray_t* q_registry_delete_value(void) { return g_delete_value; }   /* borrowed; NULL before init */
 
 ray_t* q_registry_compose_value(void) {
     return g_compose_value;  /* borrowed; NULL before init */
@@ -9174,6 +9217,12 @@ ray_err_t q_registry_init(void) {
         g_select_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_delete_value = ray_fn_vary("q.delete",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_delete_exec);
+    if (!g_delete_value || RAY_IS_ERR(g_delete_value)) {
+        g_delete_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     /* compose builder — a NORMAL vary (args are the resolved function values). */
     g_compose_value = ray_fn_vary("q.compose", RAY_FN_Q_LOWER, q_compose_fn);
     if (!g_compose_value || RAY_IS_ERR(g_compose_value)) {
@@ -9297,6 +9346,7 @@ void q_registry_destroy(void) {
     if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
     if (g_keyed_table_value) { ray_release(g_keyed_table_value); g_keyed_table_value = NULL; }
     if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
+    if (g_delete_value) { ray_release(g_delete_value); g_delete_value = NULL; }
     if (g_compose_value) { ray_release(g_compose_value); g_compose_value = NULL; }
     if (g_funsql_select_value) { ray_release(g_funsql_select_value); g_funsql_select_value = NULL; }
     if (g_funsql_bang_value)   { ray_release(g_funsql_bang_value);   g_funsql_bang_value   = NULL; }
