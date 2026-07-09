@@ -101,18 +101,20 @@ void ray_eval_set_apply_hook(ray_apply_hook_t hook) { g_apply_hook = hook; }
  * dictionary distributes over its values.  Rather than intercept before
  * dispatch (which would wrongly grab key/value/count/type/`,`/`#`/`@`, all of
  * which handle a dict NATIVELY), we retry ONLY on the would-error path: if the
- * kernel returned a 'type error AND an argument is a RAY_DICT, offer the
- * application to the q apply hook.  Verbs that already handle dicts succeed and
- * never reach here; only the verbs that currently 'type get distributed.  The
- * happy path pays a single already-failed error-class compare.  `result` is
- * consumed and replaced on success; returned unchanged otherwise. */
+ * kernel returned a 'type error AND an argument is a RAY_DICT (or a RAY_TABLE —
+ * a monadic aggregation over a table distributes per column, see the openq
+ * table arm in q_dict_distribute), offer the application to the q apply hook.
+ * Verbs that already handle dicts/tables succeed and never reach here; only the
+ * verbs that currently 'type get distributed.  The happy path pays a single
+ * already-failed error-class compare.  `result` is consumed and replaced on
+ * success; returned unchanged otherwise. */
 static ray_t* dict_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n) {
     if (!g_apply_hook || !result || !RAY_IS_ERR(result)) return result;
     if (result->slen != 4 || memcmp(result->sdata, "type", 4) != 0) return result;
-    bool has_dict = false;
+    bool has_coll = false;
     for (int64_t i = 0; i < n; i++)
-        if (args[i] && args[i]->type == RAY_DICT) { has_dict = true; break; }
-    if (!has_dict) return result;
+        if (args[i] && (args[i]->type == RAY_DICT || args[i]->type == RAY_TABLE)) { has_coll = true; break; }
+    if (!has_coll) return result;
     ray_t* dr = g_apply_hook(head, args, n);
     if (dr) { ray_release(result); return dr; }
     return result;
