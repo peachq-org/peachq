@@ -159,6 +159,23 @@ third_party/yyjson/yyjson.o: third_party/yyjson/yyjson.c
 %.o: %.c
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
+# openq: embedded q bootstrap. tools/gen-bootstrap.sh compiles the authored
+# src/qlang/dotq.q into a generated C header (OPENQ_BOOTSTRAP[]) baked into the
+# binary and run at the tail of q_runtime_create. Generated-on-build (NOT
+# committed; gitignored). q_runtime.c #includes it, so q_runtime.o depends on it
+# explicitly for the FIRST build (before the auto .d fragment exists). The
+# bench-* targets below direct-compile $(LIB_SRC) (which includes q_runtime.c)
+# without going through the object rule, so they list the header too.
+src/qlang/dotq_gen.h: src/qlang/dotq.q tools/gen-bootstrap.sh
+	tools/gen-bootstrap.sh $< $@
+
+src/qlang/q_runtime.o src/qlang/q_runtime.win.o: src/qlang/dotq_gen.h
+
+# The bench-* targets compile $(LIB_SRC) (incl. q_runtime.c) directly, so the
+# generated header must exist before they run (else a post-`make clean` bench
+# build fails on the missing include).
+bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup: src/qlang/dotq_gen.h
+
 # Main binary — shared by debug/release/test (test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as a server, so test depends on it too).
 $(TARGET): $(LIB_OBJ) $(MAIN_OBJ)
@@ -459,6 +476,8 @@ clean:
 	-rm -f $(DEPS)
 	-rm -f $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_DEPS) q.exe rayforce.exe
 	-rm -f $(TARGET) $(Q_TARGET) $(QDOC_TARGET) $(TARGET).test lib$(TARGET).a
+	# openq: generated embedded-bootstrap header (codegen'd from src/qlang/dotq.q).
+	-rm -f src/qlang/dotq_gen.h
 	-rm -f build/$(TARGET).parsediff.test $(PARSE_DIFF_OBJ) $(PARSE_DIFF_OBJ:.o=.d)
 	-rm -rf build build_release dist
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
