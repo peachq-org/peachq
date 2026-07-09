@@ -22,6 +22,7 @@
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
 #include "qlang/q_fmt.h"        /* q_console_write — 1/-1/2/-2 console handles */
 #include "core/ipc.h"           /* ray_ipc_handle_of_fd — q true-fd handle -> selector id */
+#include "ops/ops.h"            /* ray_is_lazy / ray_lazy_materialize — DAG agg results */
 #include <string.h>
 
 /* one indexing step: v[idx].  ray_at null-fills out-of-range; a
@@ -380,11 +381,72 @@ static ray_t* q_dict_union(ray_t* head, ray_t* a, ray_t* b) {
     return ray_dict_new(ck, cv);                 /* consumes ck + cv */
 }
 
+/* Apply a unary verb PER COLUMN of a plain TABLE, keeping column names — the
+ * uniform-function-over-a-table rule (kdb: `f t` == `f each flip t`).  The
+ * RESULT SHAPE follows the per-column result, exactly as the dict path's
+ * map-vs-aggregate split does:
+ *   - each column reduces to a SCALAR (an aggregation: sum/min/max/prd/...)
+ *     -> a colname->scalar DICT.   sum ([]a:10 21 3;b:4 5 6) -> `a`b!34 15
+ *   - each column maps to a length-nrows VECTOR (element-wise or a scan:
+ *     neg/abs/sqrt/sums/deltas/...) -> a TABLE, row count preserved.
+ *     neg ([]a:1 2;b:3 4) -> ([]a:-1 -2;b:-3 -4)
+ * The kernel is applied via dict_apply1 (the same tree-walk arm the dict path
+ * uses), so every rayfall verb is reused with no new code.  Returns owned, or
+ * an owned error (a per-column 'type propagates). */
+static ray_t* q_table_distribute1(ray_t* head, ray_t* t) {
+    int64_t nc = ray_table_ncols(t);
+    int64_t nr = ray_table_nrows(t);
+    ray_t* names = ray_vec_new(RAY_SYM, nc > 0 ? nc : 1);
+    if (!names || RAY_IS_ERR(names)) return names ? names : ray_error("oom", NULL);
+    names->len = nc;
+    int64_t* nd = (int64_t*)ray_data(names);
+    ray_t* out = ray_list_new(nc > 0 ? nc : 1);
+    if (!out || RAY_IS_ERR(out)) { ray_release(names); return out ? out : ray_error("oom", NULL); }
+    int all_conform = (nc > 0);   /* every column result is a length-nrows vector -> TABLE */
+    for (int64_t c = 0; c < nc; c++) {
+        nd[c] = ray_table_col_name(t, c);
+        ray_t* col = ray_table_get_col_idx(t, c);       /* borrowed */
+        if (!col) { ray_release(names); ray_release(out); return ray_error("type", "table: malformed column"); }
+        ray_t* r = dict_apply1(head, col);              /* owned */
+        if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);  /* DAG agg -> atom, so it collapses */
+        if (!r || RAY_IS_ERR(r)) { ray_release(names); ray_release(out); return r ? r : ray_error("type", NULL); }
+        if (!(is_collection(r) && ray_len(r) == nr)) all_conform = 0;
+        out = ray_list_append(out, r);                  /* retains r */
+        ray_release(r);
+    }
+    if (all_conform) {                                   /* per-column MAP -> preserve table shape */
+        ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
+        if (!tbl || RAY_IS_ERR(tbl)) { ray_release(names); ray_release(out); return tbl ? tbl : ray_error("oom", NULL); }
+        ray_t** e = (ray_t**)ray_data(out);              /* borrowed column vectors */
+        for (int64_t c = 0; c < nc && !RAY_IS_ERR(tbl); c++)
+            tbl = ray_table_add_col(tbl, nd[c], e[c]);   /* retains e[c] */
+        ray_release(names);
+        ray_release(out);
+        return tbl;
+    }
+    ray_t* cv = q_collapse_list(out);                    /* per-column AGGREGATE -> dict */
+    ray_release(out);
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(names); return cv ? cv : ray_error("type", NULL); }
+    return ray_dict_new(names, cv);                      /* consumes names + cv */
+}
+
 /* The distribution dispatch: monadic map/aggregate, dyadic dict+atom (both
  * orders) and dyadic dict+dict union.  Returns owned, or NULL to decline. */
 static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
     if (n == 1) {
         ray_t* d = args[0];
+        /* table arm (openq): a monadic aggregation over a plain OR keyed table
+         * is per-column (keys = column names), NOT the dict-value reduce below.
+         * A keyed table aggregates its VALUE table's columns (key columns are
+         * not aggregated) — kdb `sum k`.  Claimed before the plain-dict path so
+         * a keyed table (a RAY_DICT) does not fall into the reduce. */
+        if (d && d->type == RAY_TABLE)
+            return q_table_distribute1(head, d);
+        if (d && d->type == RAY_DICT && q_is_keyed_table(d)) {
+            ray_t* vt = ray_dict_vals(d);        /* value table, borrowed */
+            if (!vt || vt->type != RAY_TABLE) return NULL;
+            return q_table_distribute1(head, vt);
+        }
         ray_t* keys = ray_dict_keys(d);          /* borrowed */
         ray_t* vals = ray_dict_vals(d);          /* borrowed */
         if (!keys || !vals) return NULL;
@@ -400,6 +462,11 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
     if (n == 2) {
         ray_t* a = args[0];
         ray_t* b = args[1];
+        /* Dyadic table distribution (e.g. `2 msum t`) is out of scope for the
+         * monadic-aggregation widening: decline any table-only pair so the
+         * caller's historic 'type stands (dict+dict / dict+atom below are the
+         * only shapes this shim handles). */
+        if (a && a->type != RAY_DICT && b && b->type != RAY_DICT) return NULL;
         bool ad = a && a->type == RAY_DICT;
         bool bd = b && b->type == RAY_DICT;
         if (ad && bd) return q_dict_union(head, a, b);
@@ -437,7 +504,7 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
          (head->type == RAY_BINARY && n == 2)) &&
         !q_fn_dict_distribute_veto(head, args, n)) {
         for (int64_t i = 0; i < n; i++)
-            if (args[i] && args[i]->type == RAY_DICT)
+            if (args[i] && (args[i]->type == RAY_DICT || args[i]->type == RAY_TABLE))
                 return q_dict_distribute(head, args, n);
     }
 
