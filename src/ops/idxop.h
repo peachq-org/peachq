@@ -85,6 +85,13 @@ typedef enum {
  * passenger index by pointer.  Clear = heap-resident index (freed normally),
  * including a runtime-built index attached to an mmap'd column. */
 #define RAY_MARK_MMAP    0x02
+/* Neutral bit reservation for the kdb `` `p# `` (parted) attribute, STAMPED and
+ * READ BACK BY THE q LAYER — not by rayfall-native `.attr.*`.  The q parted path
+ * (q_registry.c) attaches a find-hash and stamps this marker via
+ * ray_attr_stamp_marker; q_attr_letter reads it back to report `p`.  The engine
+ * reserves the bit but ascribes no policy to it (ray_attr_get_fn does NOT read
+ * it — rayfall parted comes from RAY_IDX_PART). */
+#define RAY_MARK_PARTED  0x04
 
 /* The payload stored inside data[] of a RAY_INDEX ray_t. */
 typedef struct {
@@ -417,5 +424,13 @@ ray_t* ray_idx_info_fn (ray_t* v);  /* (.idx.info  v) -> dict of metadata */
 ray_t* ray_attr_set_fn (ray_t* name, ray_t* v); /* (.attr.set 'name v) */
 ray_t* ray_attr_get_fn (ray_t* v);              /* (.attr.get v) -> sym vec */
 ray_t* ray_attr_drop_fn(ray_t* v);              /* (.attr.drop v) -> v cleared */
+
+/* Neutral attribute primitives exposed for the q layer to compose kdb `u#`/`p#`
+ * policy without engine-side attribute-name / error-text choices.  Pure
+ * mechanism — no policy. */
+ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark); /* borrow v -> owned; stamp marker bit */
+bool   ray_attr_verify_distinct(const ray_t* v);      /* all rows distinct? */
+bool   ray_attr_verify_contiguous(const ray_t* v);    /* each value one contiguous run? */
+int    ray_attr_numeric_class(int8_t t);              /* 0=float, 1=integer-family, -1=non-numeric */
 
 #endif /* RAY_IDXOP_H */
