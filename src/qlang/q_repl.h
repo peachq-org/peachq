@@ -47,4 +47,13 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
  * success, non-zero if the file could not be opened. */
 int q_repl_run_file(const char* path, FILE* out, FILE* err);
 
+/* Strip pasted kdb `q)` console prompts from the front of an intake line and
+ * return the advanced pointer.  Repeated exact `q)` only: `q)q)2+2` -> `2+2`,
+ * but the debug prompt `q))…`, namespace prompts `q.foo)`, and `k)` mode are
+ * left untouched (the `s[2] != ')'` guard is what excludes `q))`).  No
+ * leading-whitespace trim — an indented line is not a prompt.  A console/loader
+ * affordance, applied at line-intake (run_one_line), never in the parser.
+ * Exposed for direct unit testing (test/q_repl_strip.c). */
+const char* q_strip_repl_prompt(const char* s);
+
 #endif /* Q_REPL_H */
