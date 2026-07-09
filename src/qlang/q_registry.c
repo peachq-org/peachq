@@ -3721,6 +3721,17 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */
     }
+    /* kdb `()!()` — the canonical EMPTY dictionary.  An empty general list `()`
+     * (RAY_LIST, type 0h) is a legal (empty) key list in q, but rayfall's native
+     * `dict` (ray_dict_fn) demands a TYPED key vector (`!ray_is_vec` -> 'type),
+     * so `()!()`/`()!(0#0)`/`` (`$())!() `` all 'type.  Build the empty dict
+     * directly: keys stay the empty general list (kdb-faithful), vals an empty
+     * boxed list — matching the shape ray_dict_fn produces for `(0#`)!(0#0)`.
+     * Non-empty general-list keys stay unsupported (fall through to 'type). */
+    if (x->type == RAY_LIST && ray_len(x) == 0 && ray_len(y) == 0) {
+        ray_retain(x);
+        return ray_dict_new(x, ray_list_new(0)); /* consumes x + fresh empty list */
+    }
     ray_t* keys = x;
     ray_t* keys_owned = NULL;
     if (ray_is_atom(x)) {
