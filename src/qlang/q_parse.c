@@ -1408,6 +1408,7 @@ static P       parse_term(Parser *p);
 static P       parse_base(Parser *p);
 static ray_t  *parse_qsql_select(Parser *p, int *ok);   /* piece 3: qSQL SELECT */
 static ray_t  *parse_qsql_delete(Parser *p, int *ok);   /* qSQL DELETE string form */
+static ray_t  *parse_qsql_update(Parser *p, int *ok);   /* qSQL UPDATE string form */
 
 /* Statement sequence: one -> its element; two+ -> (`;; ...).  Consumes e. */
 static ray_t *seq_of(ray_t *e) {
@@ -1748,6 +1749,8 @@ static P parse_e(Parser *p) {
             q = parse_qsql_select(p, &ok);
         else if (tk->len == 6 && memcmp(p->src + tk->start, "delete", 6) == 0)
             q = parse_qsql_delete(p, &ok);
+        else if (tk->len == 6 && memcmp(p->src + tk->start, "update", 6) == 0)
+            q = parse_qsql_update(p, &ok);
         if (ok && q) return (P){ R_NOUN, q };
     }
     P t = parse_term(p);
@@ -1968,10 +1971,14 @@ static ray_t *qsql_term(Parser *p, int *ok) {
         }
         return qsql_colsym(id);                        /* else column symbol */
     }
-    if (k->type == RAY_SYM) {                          /* `a`b vector -> ,`a`b */
+    if (k->type == RAY_SYM) {                          /* `a`b`c vector literal */
+        /* Return the symvec BARE (consistent with the single-`sym branch
+         * above).  qsql_build_dict / qsql_where wrap it in the enclosing
+         * value-list exactly once — enlisting here too double-wraps it
+         * (`,,`a`b`c), which ray_update/ray_select reject with type/domain. */
         adv(p);
         ray_retain(k);
-        return qsql_enlist(k);
+        return k;
     }
     adv(p);                                            /* number / other literal */
     ray_retain(k);
@@ -2365,6 +2372,122 @@ static ray_t *parse_qsql_delete(Parser *p, int *ok) {
 
 fail:
     if (snapped) qsql_snap_restore(p);
+    if (t) ray_release(t);
+    if (c) ray_release(c);
+    if (a) ray_release(a);
+    p->pos = save;
+    return NULL;
+}
+
+/* update PS [by PB] from TABLE [where PW]  ->  (!;`t;c;b;a).
+ *   a   the select-phrase as a q name!expr assignment DICT (REQUIRED, non-empty:
+ *       kdb's `update` needs a select-phrase; an empty col-list soft-fails).
+ *   b   the by-dict when a `by` clause is present, else 0b.
+ *   c   enlist(constraint-list) when a `where` clause is present, else ().
+ * Structurally the (!;…) sibling of parse_qsql_delete — the SAME bare-`!` 5-list
+ * that ql_qsql_bang head-swaps onto q.delete (a generic bang executor whose
+ * q_funsql_bang_impl fires the is_update branch on the DICT `a`).  The parser
+ * only BUILDS the tree; every update semantic lives in the ! engine, so the
+ * string and functional ![t;c;b;a] forms stay automatically equivalent.
+ * Soft-fails (restores p->pos) on any shape outside this subset, exactly like
+ * parse_qsql_select/delete, so unsupported updates fall through to the ordinary
+ * parser (no parse regression). */
+static ray_t *parse_qsql_update(Parser *p, int *ok) {
+    *ok = 1;
+    int save = p->pos;
+    int snapped = 0;                       /* from-expression token snapshot */
+    ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS]; int na = 0;
+    ray_t *b = NULL, *t = NULL, *c = NULL, *a = NULL, *head = NULL, *q = NULL;
+
+    adv(p);                                       /* consume `update` */
+    if (!qsql_collist(p, aliases, vals, &na)) { *ok = 0; goto fail; }
+    if (na == 0) { *ok = 0; goto fail; }          /* update needs a select-phrase */
+
+    if (qtok_is(p, cur(p), "by", 2)) {            /* by-clause */
+        adv(p);
+        ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS]; int nb = 0;
+        if (!qsql_collist(p, bk, bv, &nb) || nb == 0) {
+            for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
+            *ok = 0; goto fail;
+        }
+        b = qsql_build_dict(bk, bv, nb);
+    } else {
+        b = ray_bool(0);
+    }
+
+    if (!qtok_is(p, cur(p), "from", 4)) { *ok = 0; goto fail; }
+    adv(p);
+    /* from TABLE-NAME | from EXPRESSION — identical to parse_qsql_select. */
+    Token *tt = cur(p);
+    Token *nx = &p->t.t[p->pos + 1];
+    int name_form = tt->kind == T_NOUN && tt->k && tt->k->type == -RAY_SYM &&
+        !(tt->k->attrs & Q_ATTR_QUOTED) &&
+        (qtok_is(p, nx, "where", 5) ||
+         nx->kind == T_EOF || nx->kind == T_SEMI || nx->kind == T_RBRACK ||
+         nx->kind == T_RPAREN || nx->kind == T_RBRACE);
+    if (name_form) {
+        t = qsql_colsym(tt->k->i64);
+        adv(p);
+    } else {
+        if (tt->kind == T_EOF) { *ok = 0; goto fail; }
+        int widx = -1, depth = 0;
+        for (int i = p->pos; i < p->t.n; i++) {
+            Token *sc = &p->t.t[i];
+            if (sc->kind == T_LPAREN || sc->kind == T_LBRACK ||
+                sc->kind == T_LBRACE) { depth++; continue; }
+            if (sc->kind == T_RPAREN || sc->kind == T_RBRACK ||
+                sc->kind == T_RBRACE) { if (depth == 0) break; depth--; continue; }
+            if (sc->kind == T_EOF) break;
+            if (sc->kind == T_SEMI) { if (depth == 0) break; continue; }
+            if (depth == 0 && qtok_is(p, sc, "where", 5)) { widx = i; break; }
+        }
+        qsql_snap_take(p);
+        snapped = 1;
+        TKind wkind = T_EOF;
+        if (widx >= 0) { wkind = p->t.t[widx].kind; p->t.t[widx].kind = T_EOF; }
+        P fe = parse_e(p);
+        if (widx >= 0) p->t.t[widx].kind = wkind;
+        if (fe.role != R_NOUN || !fe.v || (widx >= 0 && p->pos != widx)) {
+            if (fe.v) ray_release(fe.v);
+            *ok = 0; goto fail;
+        }
+        t = fe.v;
+    }
+
+    if (qtok_is(p, cur(p), "where", 5)) {         /* where-clause */
+        adv(p);
+        c = qsql_where(p, ok);
+        if (!*ok) goto fail;
+    } else {
+        c = ray_list_new(0);
+    }
+
+    /* Anything left beyond the CORE grammar => not our form: soft-fail so the
+     * ordinary parser consumes the whole statement (mirror parse_qsql_select). */
+    {
+        Token *end = cur(p);
+        if (end->kind != T_EOF && end->kind != T_SEMI && end->kind != T_RBRACK &&
+            end->kind != T_RPAREN && end->kind != T_RBRACE) { *ok = 0; goto fail; }
+    }
+
+    if (snapped) { qsql_snap_drop(); snapped = 0; }
+
+    a = qsql_build_dict(aliases, vals, na);
+    na = 0;                                        /* consumed by build_dict */
+
+    head = q_verb('!');
+    q = ray_list_new(5);
+    q = ray_list_append(q, head); ray_release(head);
+    q = ray_list_append(q, t);    ray_release(t);
+    q = ray_list_append(q, c);    ray_release(c);
+    q = ray_list_append(q, b);    ray_release(b);
+    q = ray_list_append(q, a);    ray_release(a);
+    return q;
+
+fail:
+    if (snapped) qsql_snap_restore(p);
+    for (int i = 0; i < na; i++) { ray_release(aliases[i]); ray_release(vals[i]); }
+    if (b) ray_release(b);
     if (t) ray_release(t);
     if (c) ray_release(c);
     if (a) ray_release(a);
