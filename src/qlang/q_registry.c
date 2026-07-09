@@ -46,6 +46,7 @@
 #include "mem/heap.h"         /* RAY_ATTR_HAS_NULLS — ? find miss remap */
 #include "core/numparse.h"    /* ray_parse_i64/f64 — Tok string parses */
 #include "store/fileio.h"     /* ray_mkdir_p — 0: Save Text missing dirs */
+#include "core/ipc.h"         /* ray_ipc_fd_of_handle/handle_of_fd — q true-fd handles */
 #include "qlang/q_builtins.h" /* q_string_fn — 0: Prepare Text cell text */
 #include "qlang/q_fmt.h"      /* q_console_show_krepr — 0N! debug print */
 #include <assert.h>
@@ -7733,18 +7734,34 @@ static ray_t* q_hopen_wrap(ray_t* x) {
     if (pair_conn) ray_release(pair_conn);
     if (pair_to)   ray_release(pair_to);
     if (!h || RAY_IS_ERR(h)) return h;
-    /* q handles are 1-BASED: openq's raw poll selector ids start at 0, but kdb
-     * reserves 0 (console) and encodes async as a NEGATIVE handle, so 0 must not
-     * be a live handle (`neg 0` == 0 could not select async).  Offset the raw id
-     * by +1 here; hclose / handle-apply translate back to the raw id. */
+    /* kdb-faithful "true fd" handle model: a q connection handle IS the socket
+     * fd (qdocs basics/handles.md — 0 console, 1 stdout, 2 stderr, connections
+     * at 3+).  ray_hopen_fn returns the rayfall poll SELECTOR ID (dense, starts
+     * at 0); translate it to the connection's socket fd, which is always >= 3
+     * (0/1/2 held by the std streams) and thus disjoint from the console-write
+     * handles.  handle-apply / hclose translate the fd back to the selector id
+     * the .ipc.* primitives expect. */
     int64_t raw = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
     ray_release(h);
-    return make_i64(raw + 1);
+    int64_t fd = ray_ipc_fd_of_handle(raw);
+    if (fd < 0) {
+        /* Connection vanished between connect and fd lookup — close the raw
+         * selector and surface, rather than hand back a bogus handle. */
+        ray_t* rid = make_i64(raw);
+        ray_t* cr = ray_hclose_fn(rid);
+        ray_release(rid);
+        if (cr) ray_release(cr);
+        return ray_error("io", "hopen: connection lost");
+    }
+    return make_i64(fd);
 }
 
-/* q `hclose h` — translate the 1-based q handle back to the raw poll id and
+/* q `hclose h` — translate the q fd handle back to the poll selector id and
  * route to `.ipc.close` (ray_hclose_fn).  Restricted connections are refused,
- * matching hopen / the handle-apply path. */
+ * matching hopen / the handle-apply path.  A q handle is the socket fd; map it
+ * to the selector id the primitive expects.  A handle that is not a live IPC
+ * connection (already closed, or a console handle) is a no-op, matching kdb's
+ * tolerance of hclose on a dead handle. */
 static ray_t* q_hclose_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     if (!q_is_int_atom(x) || RAY_ATOM_IS_NULL(x))
@@ -7753,7 +7770,9 @@ static ray_t* q_hclose_wrap(ray_t* x) {
     int64_t qh = q_iatom_val(x);
     if (qh <= 0)
         return ray_error("type", "hclose: invalid handle %lld", (long long)qh);
-    ray_t* raw = make_i64(qh - 1);
+    int64_t id = ray_ipc_handle_of_fd(qh);
+    if (id < 0) return RAY_NULL_OBJ;          /* not a live handle — no-op */
+    ray_t* raw = make_i64(id);
     ray_t* r = ray_hclose_fn(raw);
     ray_release(raw);
     return r;
