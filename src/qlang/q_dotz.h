@@ -25,6 +25,13 @@ void q_dotz_init(int argc, char** argv);
  * time, well after q_dotz_init). */
 ray_t* q_dotz_resolve(int64_t sym_id);
 
+/* kdb `.z.p*` connection-handler alias -> the `.ipc.on.*` hook INDEX
+ * (0=open 1=close 2=sync 3=async 4=auth, matching env.c's ray_sym_ipc_hook),
+ * or -1 if `name` is not a handler alias.  Shared by the read path
+ * (q_dotz_resolve) and the write path (q_setg_wrap in q_registry.c) so the two
+ * spellings (`.z.pg` and `.ipc.on.sync`) resolve to ONE env slot. */
+int q_dotz_ipc_hook_index(const char* name, size_t len);
+
 /* The positional `*.q` startup script from argv, or NULL if none — qmain uses
  * this to decide whether to run a script.  Points into argv (process-lifetime). */
 const char* q_dotz_script_path(void);
