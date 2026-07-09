@@ -1233,6 +1233,34 @@ static ray_selector_t* conn_resolve(ray_poll_t** poll_out, int64_t handle)
     return sel;
 }
 
+/* q-layer support: map a connection handle (poll selector id) to its
+ * underlying OS socket fd (kdb presents the handle AS the fd), and back.
+ * ray_ipc_fd_of_handle resolves through conn_resolve so only a live,
+ * handshake-complete IPC connection yields a fd; ray_ipc_handle_of_fd walks
+ * the active poll's selector table for the IPC connection whose fd matches,
+ * applying the same read_fn filter conn_resolve uses so a listener/stdin fd
+ * can never be selected.  Both return -1 on no match.  These do NOT alter
+ * ray_ipc_connect's return value — rayfall still sees the selector id. */
+int64_t ray_ipc_fd_of_handle(int64_t handle)
+{
+    ray_selector_t* sel = conn_resolve(NULL, handle);
+    return sel ? sel->fd : -1;
+}
+
+int64_t ray_ipc_handle_of_fd(int64_t fd)
+{
+    ray_poll_t* poll = ipc_active_poll();
+    if (!poll || fd < 0) return -1;
+    for (uint32_t i = 0; i < poll->n_sels; i++) {
+        ray_selector_t* sel = poll->sels[i];
+        if (sel && sel->fd == fd && sel->type == RAY_SEL_SOCKET && sel->data &&
+            (sel->rx.read_fn == ipc_read_header ||
+             sel->rx.read_fn == ipc_read_payload))
+            return sel->id;
+    }
+    return -1;
+}
+
 /* Drain whatever is available on one connection's socket through its rx
  * state machine WITHOUT blocking: fill the requested rx buffer, invoke
  * read_fn for each completed phase, repeat until the socket is dry.
