@@ -135,6 +135,12 @@ ray_t* q_registry_prior_value(void);
  * lower `(f/:)` / `(f\:)` as VALUES (stacked-adverb `f/:\:`).  Borrowed. */
 ray_t* q_registry_mkderiv2_value(void);
 
+/* Builder (base@/., n, mask, bound-values…) -> a projection carrier over an
+ * `@`/`.` operator with ELIDED args, built at EVAL time so the bound args are
+ * evaluated (name-ref / lambda-literal become their value).  q_lower embeds it
+ * to lower `@[count;;-1]` / `type @[;;0h]`.  Borrowed. */
+ray_t* q_registry_mkopproj_value(void);
+
 /* The internal paren-list constructor (list + collapse) the PARSER embeds at
  * the head of every multi-element paren list `(1;2;3)` — the head value is
  * what distinguishes a literal from the shape-identical index call (v;i).
