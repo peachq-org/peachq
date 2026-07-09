@@ -593,8 +593,29 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
          * former ray_release here over-released the sym table's own ref
          * (latent until `:path symbols began lexing, feat/q-file-text). */
         ray_t* s = ray_sym_str(head->i64);
-        if (s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':')
+        if (s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':') {
+            /* One-shot synchronous IPC request (ref/hopen.md "One-shot
+             * request"):  `` `:host:port "query" `` == connect -> send -> get
+             * -> disconnect.  A leading-`:` COMMUNICATION handle applied to
+             * exactly one STRING is the one-shot form; a `:path` file handle or
+             * a non-string arg still declines to the caller's historic error.
+             * Single-home reuse: q_hopen_wrap (descriptor normalize + restricted
+             * gate + fd translation, incl. clean 'nyi for deferred transports),
+             * the int-head handle-apply SYNC-send arm above (via a recursive
+             * q_apply_noun on the fd handle), and q_hclose_wrap (fd -> selector
+             * close).  The handle is hclosed on EVERY path — send success AND
+             * error — so a one-shot never leaks a connection. */
+            if (n == 1 && args[0] && args[0]->type == -RAY_STR) {
+                ray_t* h = q_hopen_wrap(head);       /* owned fd handle or error */
+                if (!h || RAY_IS_ERR(h)) return h;
+                ray_t* r = q_apply_noun(h, args, 1); /* int-head SYNC send */
+                ray_t* c = q_hclose_wrap(h);         /* close regardless of r */
+                if (c) ray_release(c);               /* swallow close status; r wins */
+                ray_release(h);
+                return r;
+            }
             return NULL;                            /* file handle — decline */
+        }
         ray_t* v = q_value_resolve_owned(head);   /* OWNED or NULL */
         if (!v) return NULL;
         if (RAY_IS_ERR(v)) return v;
