@@ -546,13 +546,18 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
         result = ray_eval_remote_str(ray_str_ptr(msg), ray_str_len(msg));
         ray_release(msg);
     } else if (msg->type == RAY_LIST) {
-        /* kdb (func; args…) typed-apply request — explicit fast-follow.
-         * TODO(ipc-phase-c-followup): implement via value/apply (single
-         * application of func to the already-evaluated args), NEVER via
-         * ray_eval — a value object is not a parse tree (ARCHITECTURE.md
-         * "eval vs value", human ruling 2026-07-06). */
+        /* kdb (func; args…) value-apply request (ADR-0004): a SINGLE
+         * application of func to the already-evaluated args via the q value
+         * hook — NEVER ray_eval (a value object is not a parse tree; human
+         * ruling 2026-07-06).  NOT journaled: the journal contract only logs
+         * IPC STRING payloads (journal.c eval_one replays a non-string frame
+         * through ray_eval, which would mis-evaluate a value object as an
+         * AST).  A durable mutation must therefore be sent on the string
+         * channel (which IS journaled) — value-apply journaling is a tracked
+         * deferral (PLAN.md), not a silent gap.  Ownership: borrowed msg to
+         * the hook, owned result back, one ray_release(msg). */
+        result = ray_eval_remote_apply(msg);
         ray_release(msg);
-        result = ray_error("nyi", "IPC (func;args) requests not yet implemented — send a q source string");
     } else {
         ray_release(msg);
         result = ray_error("nyi", "IPC request must be a q source string");

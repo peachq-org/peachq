@@ -222,6 +222,20 @@ typedef ray_t* (*ray_remote_str_fn_t)(const char* src, size_t len);
 void   ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn);
 ray_t* ray_eval_remote_str(const char* src, size_t len);
 
+/* openq: remote-source (func;args) VALUE-APPLY evaluation (IPC request
+ * payloads).  The kdb "value/apply" wire shape is a general list whose head is
+ * the function (symbol / string source / value / lambda carrier) and whose tail
+ * are ALREADY-EVALUATED data args.  A language layer installs a hook that does a
+ * SINGLE application of the head to the args — NEVER a recursive ray_eval (a
+ * value object is not a parse tree; ARCHITECTURE.md "eval vs value").  openq
+ * installs a thin wrapper over the single-home q `value` at boot.  Without a
+ * hook (pure rayfall — the engine binary has no value-apply IPC dialect) the
+ * request SAFE-ERRORS `'nyi` rather than guessing an apply.  The hook receives
+ * the list BORROWED (the caller releases it) and returns an OWNED value. */
+typedef ray_t* (*ray_remote_apply_fn_t)(ray_t* list);
+void   ray_eval_set_remote_apply_fn(ray_remote_apply_fn_t fn);
+ray_t* ray_eval_remote_apply(ray_t* list);
+
 /* openq: eval-time computed-name resolver (the `.z.*` mechanism).  Called at
  * every name-LOAD site (tree-walk atom deref + VM op_resolve/op_resolve_w)
  * when env resolution MISSES, BEFORE raising `'name`.  `.z` is NOT a namespace
