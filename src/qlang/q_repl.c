@@ -456,6 +456,7 @@ typedef struct {
     FILE*       out;
     FILE*       err;
     int         have_listener;   /* EOF → keep serving instead of exiting */
+    int         eof_done;        /* stdin EOF handled once (EPOLLIN and/or EPOLLHUP) */
     char        hist_path[4108];
     /* piped mode */
     int         echo;
@@ -587,6 +588,46 @@ static int q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
     return 0;
 }
 
+/* A `\p N` (or startup `-p`) listener makes this process a server even if it
+ * began as a client: like rayforce/kdb, once it has a listener it keeps serving
+ * past stdin EOF instead of exiting.  Set by the `\p` handler (q_sys.c). */
+static int g_listener_active = 0;
+void q_repl_mark_listener_active(void) { g_listener_active = 1; }
+int  q_repl_listener_active(void)      { return g_listener_active; }
+
+/* Single-home stdin-EOF handling.  Reached from BOTH a draining read()==0
+ * (EPOLLIN) and a bare EPOLLHUP (an empty pipe whose writer closed reports HUP
+ * with NO EPOLLIN, so the read_fn never runs — see q_poll_stdin_hup).  Flush any
+ * partial final line, then a CLIENT (no listener) exits the poll loop while a
+ * SERVER deregisters stdin and keeps serving IPC.  Idempotent via eof_done so an
+ * EPOLLIN|EPOLLHUP event can't double-process (double prompt / double-free). */
+static void q_poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_t* c) {
+    if (c->eof_done) return;
+    c->eof_done = 1;
+    int quit = 0;
+    if (c->acc_len) {   /* final line without a trailing newline */
+        size_t n = c->acc_len;
+        c->acc_len = 0;
+        quit = q_pipe_line(c, c->acc, n);
+    }
+    if (!quit) {        /* fgets loop prints '\n' after the EOF prompt */
+        fputc('\n', c->out);
+        fflush(c->out);
+    }
+    if (quit || (!c->have_listener && !g_listener_active))
+        ray_poll_exit(poll, 0);
+    else
+        ray_poll_deregister(poll, sel->id);   /* keep serving IPC (has a listener) */
+}
+
+/* stdin hangup handler (registered as the stdin selector's error_fn).  The
+ * frozen epoll loop's default HUP action is a bare deregister — for a client
+ * that strands ray_poll_run with poll->code still < 0 (an idle hang, the whole
+ * point of Bundle 3).  Route HUP through the same EOF path instead. */
+static void q_poll_stdin_hup(ray_poll_t* poll, ray_selector_t* sel) {
+    if (sel && sel->data) q_poll_stdin_eof(poll, sel, (q_poll_repl_t*)sel->data);
+}
+
 static ray_t* q_poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
     q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
     char tmp[1024];
@@ -602,20 +643,7 @@ static ray_t* q_poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
     }
 
     if (rd == 0) {
-        int quit = 0;
-        if (c->acc_len) {   /* final line without a trailing newline */
-            size_t n = c->acc_len;
-            c->acc_len = 0;
-            quit = q_pipe_line(c, c->acc, n);
-        }
-        if (!quit) {        /* fgets loop prints '\n' after the EOF prompt */
-            fputc('\n', c->out);
-            fflush(c->out);
-        }
-        if (quit || !c->have_listener)
-            ray_poll_exit(poll, 0);
-        else
-            ray_poll_deregister(poll, sel->id);   /* keep serving IPC */
+        q_poll_stdin_eof(poll, sel, c);
         return NULL;
     }
 
@@ -647,9 +675,10 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
     c->have_listener = have_listener;
 
     ray_poll_reg_t reg = {0};
-    reg.fd   = STDIN_FILENO;
-    reg.type = RAY_SEL_STDIN;
-    reg.data = c;
+    reg.fd       = STDIN_FILENO;
+    reg.type     = RAY_SEL_STDIN;
+    reg.data     = c;
+    reg.error_fn = q_poll_stdin_hup;   /* HUP → same EOF path (else a client hangs) */
 
     if (stdin_tty) {
         ray_term_t* t = ray_term_create();
