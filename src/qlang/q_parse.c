@@ -23,7 +23,8 @@
 #include "qlang/q_ns.h"       /* q_ns_current, q_ns_is_unqualifiable */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/q_deriv.h"    /* q_proj_new — 104h derived-verb carriers */
-#include "lang/env.h"        /* ray_fn_name — qSQL output-expr head normalize */
+#include "qlang/q_dotz.h"     /* q_dotz_ipc_hook_index — .z.p* handler aliases */
+#include "lang/env.h"        /* ray_fn_name; ray_sym_is_ipc_hook — IPC hook slots */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <assert.h>
@@ -2703,7 +2704,28 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
     /* A leading-dot target (`.foo.x:42`) is a GLOBAL namespace write even
      * inside a lambda body — q dotted names are never locals (q4m3 §12). */
     int is_dotted_global = (ray_str_len(ns) > 0 && ray_str_ptr(ns)[0] == '.');
+    /* IPC connection-hook slot? — a kdb `.z.p*` handler alias, OR the native
+     * `.ipc.on.*` spelling.  These must route through the REGISTRY set wrapper
+     * (q_setg_wrap) so the alias-canonicalization + q-lambda-carrier unwrap
+     * run — the env special-form `set` (ray_set_fn) stores the carrier verbatim
+     * into the `.z.p*` slot, which ipc.c's hook_lookup (bare-lambda only, and a
+     * different sym) never fires.  q_ast_is_assign already flagged the pre-lower
+     * `:` shape, so REPL/qdoc output stays suppressed after this head swap. */
+    int is_hook_slot = (q_dotz_ipc_hook_index(ray_str_ptr(ns),
+                                               ray_str_len(ns)) >= 0) ||
+                       ray_sym_is_ipc_hook(e[1]->i64);
     ray_release(ns);
+
+    if (is_hook_slot) {
+        ray_t *setv = q_registry_lookup_name("set", 3, Q_DYADIC);  /* q_setg_wrap; borrowed */
+        if (setv) {                        /* cold registry -> fall through */
+            ray_retain(setv);
+            ray_release(e[0]);
+            e[0] = setv;                   /* head = value-set wrapper (args eval'd) */
+            e[1]->attrs |= Q_ATTR_QUOTED;  /* target sym self-evaluates to the handle */
+            return NULL;
+        }
+    }
 
     const char *target = (is_local && in_lambda && !is_dotted_global)
                              ? "let" : "set";
