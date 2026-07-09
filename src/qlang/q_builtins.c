@@ -746,7 +746,6 @@ void q_builtins_register(void) {
      * `cols`.  Bound BEFORE q_registry_init, like `string`/`show`. */
     bind_unary("meta",   q_meta_fn);
     bind_unary("cols",   q_cols_fn);
-    bind_value(".Q.an",  ray_str("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", 63));
     /* `::` — the generic-null VALUE.  Elided call args parse as unquoted `::`
      * name-refs (`f[]` is (`f;::), cases.tsv:43); binding the value makes them
      * evaluate to RAY_NULL_OBJ instead of a 'name error — which is exactly
