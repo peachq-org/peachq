@@ -6002,7 +6002,9 @@ static ray_t* q_at_apply2(ray_t* f, ray_t* x) {
 }
 
 /* @ VARY: 2 args Apply/Index; 3 args Trap-At (callable) or Amend-At (data);
- * 4 args Amend-At (quaternary). */
+ * 4 args Amend-At (quaternary).  An ELIDED argument (`@[count;;-1]`) is turned
+ * into a projection at lower time (q.mkopproj, q_parse.c) — so every call that
+ * reaches here is a fully-bound apply/trap/amend, never a projection. */
 static ray_t* q_at_wrap(ray_t** args, int64_t n) {
     if (n == 2) return q_at_apply2(args[0], args[1]);
     if (n == 3) {
@@ -6053,7 +6055,8 @@ static ray_t* q_dot_apply(ray_t* f, ray_t* a) {
 }
 
 /* . VARY: 2 args Apply/Index; 3 args Trap (callable) or Amend deep (data);
- * 4 args Amend deep (quaternary). */
+ * 4 args Amend deep (quaternary).  An elided argument projects at lower time
+ * (q.mkopproj) — reached here only fully bound. */
 static ray_t* q_dot_wrap(ray_t** args, int64_t n) {
     if (n == 2) return q_dot_apply(args[0], args[1]);
     if (n == 3) {
@@ -6182,7 +6185,15 @@ static ray_t* q_eachboth_dict(ray_t* f, ray_t* x, ray_t* y) {
     ray_retain(xk);
     return ray_dict_new(xk, rv);             /* consumes keys + vals */
 }
-static int q_op_is_atom(ray_t* v) { return v && ray_is_atom(v) && !q_op_is_dict(v); }
+/* An each-both operand "conforms as an atom" (broadcast, not zipped) when it
+ * is a true atom OR a callable FUNCTION VALUE.  A function has no depth (kdb
+ * `count` on a lambda is 'type), so `.'` / `f'` broadcast the function operand
+ * against the list of argument-lists — `{x+y} .' (1 2;3 4)` == 3 7 — instead
+ * of mis-zipping a lambda/projection CARRIER (a RAY_LIST) against the data. */
+static int q_op_is_atom(ray_t* v) {
+    if (!v || q_op_is_dict(v)) return 0;
+    return ray_is_atom(v) || q_is_fn_value(v);
+}
 
 static ray_t* q_eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
     int any_dict = 0, all_atom = 1;
@@ -6469,17 +6480,48 @@ static ray_t* q_mkderiv2(ray_t* hof, ray_t* f) {
     return q_proj_new(hof, args, 3, 0x6u, 2);
 }
 
+/* q.mkopproj — build a projection carrier over an `@`/`.` operator with an
+ * ELIDED argument (`@[count;;-1]`, `type @[;;0h]`), at EVAL time so the bound
+ * (non-hole) args are already VALUES: a name-ref `count` or a lambda literal
+ * `{x+1}` has been evaluated before it is bound.  This is what distinguishes
+ * an elision (project) from an explicit `::` (amend/trap data) — the parser
+ * only lowers a genuine bracket elision here (q_parse.c ql_project).  Args:
+ *   [0] base — the @/. VARY value (the carrier's base)
+ *   [1] n    — total slot count
+ *   [2] mask — hole bitmask over slots 0..n-1
+ *   [3..k)   — the non-hole bound values, in slot order
+ * Returns an owned .q.proj carrier (kdb 104h). */
+static ray_t* q_mkopproj(ray_t** args, int64_t k) {
+    if (k < 3) return ray_error("rank", "q.mkopproj: need base, n, mask");
+    ray_t* base = args[0];
+    int64_t n; int64_t m;
+    if (!q_idx_int(args[1], &n) || !q_idx_int(args[2], &m))
+        return ray_error("type", "q.mkopproj: n/mask must be integers");
+    if (n < 1 || n > 60) return ray_error("rank", "q.mkopproj: bad slot count");
+    uint64_t mask = (uint64_t)m;
+    ray_t* slots[64];
+    int64_t j = 3; int holes = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (mask & (1ull << i)) { slots[i] = NULL; holes++; }
+        else                    { slots[i] = (j < k) ? args[j++] : NULL; }
+    }
+    if (holes == 0) return ray_error("rank", "q.mkopproj: no holes");
+    return q_proj_new(base, slots, n, mask, holes);   /* retains base + slots */
+}
+
 static ray_t* g_scan_value     = NULL;
 static ray_t* g_over_value     = NULL;
 static ray_t* g_eachboth_value = NULL;
 static ray_t* g_prior_value    = NULL;
 static ray_t* g_mkderiv2_value = NULL;
+static ray_t* g_mkopproj_value = NULL;
 
 ray_t* q_registry_scan_value(void)     { return g_scan_value;     }  /* borrowed */
 ray_t* q_registry_over_value(void)     { return g_over_value;     }  /* borrowed */
 ray_t* q_registry_eachboth_value(void) { return g_eachboth_value; }  /* borrowed */
 ray_t* q_registry_prior_value(void)    { return g_prior_value;    }  /* borrowed */
 ray_t* q_registry_mkderiv2_value(void) { return g_mkderiv2_value; }  /* borrowed */
+ray_t* q_registry_mkopproj_value(void) { return g_mkopproj_value; }  /* borrowed */
 
 /* ---- shared right-to-left CONTEXT builder (list + table def) --------------
  *
@@ -9472,6 +9514,11 @@ ray_err_t q_registry_init(void) {
         g_mkderiv2_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_mkopproj_value = ray_fn_vary("q.mkopproj", RAY_FN_NONE | RAY_FN_Q_LOWER, q_mkopproj);
+    if (!g_mkopproj_value || RAY_IS_ERR(g_mkopproj_value)) {
+        g_mkopproj_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     /* Both ctx constructor heads are SPECIAL_FORM: q_ctx_build must receive the
      * raw element trees to evaluate them right-to-left inside a pushed scope. */
     g_list_value = ray_fn_vary("list",
@@ -9623,6 +9670,7 @@ void q_registry_destroy(void) {
     if (g_eachboth_value) { ray_release(g_eachboth_value); g_eachboth_value = NULL; }
     if (g_prior_value)    { ray_release(g_prior_value);    g_prior_value    = NULL; }
     if (g_mkderiv2_value) { ray_release(g_mkderiv2_value); g_mkderiv2_value = NULL; }
+    if (g_mkopproj_value) { ray_release(g_mkopproj_value); g_mkopproj_value = NULL; }
     if (g_list_value)   { ray_release(g_list_value);   g_list_value   = NULL; }
     if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
     if (g_keyed_table_value) { ray_release(g_keyed_table_value); g_keyed_table_value = NULL; }
