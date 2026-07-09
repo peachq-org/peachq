@@ -262,6 +262,11 @@ static const q_op_t Q_OPS[] = {
      * here so the parser embeds them over the base env `meta`. */
     { "meta",    QLEX_KW_PREFIX, QK_ENV, "meta",     QK_NONE,  NULL,      NULL  },
     { "cols",    QLEX_KW_PREFIX, QK_ENV, "cols",     QK_NONE,  NULL,      NULL  },
+    /* q `attr x` — column attribute as a single symbol (ref/set-attribute.md,
+     * ref/attr.md).  Monadic wrapper (QK_ATTR) over the engine's `.attr.get`,
+     * collapsing the full-name sym vector to kdb's one letter.  The set/clear
+     * side is the `#` verb's symbol-atom arm (q_take_wrap), not a row here. */
+    { "attr",    QLEX_KW_PREFIX, QK_ATTR, "attr",    QK_NONE,  NULL,      NULL  },
     /* ---- additional monadic pass-through keywords (rayfall name == q name,
      * audited kdb-true element-wise / aggregate semantics). See
      * docs/recipes/add-q-keyword-verb.md. ---- */

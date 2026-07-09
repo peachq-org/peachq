@@ -276,10 +276,15 @@ typedef enum {
                          * string y; returns generic null (kdb prints nothing).
                          * Reuses base ray_setenv_fn: coerce the sym name to a
                          * string, discard the echoed value, return ::.         */
-    QK_SUM              /* q `sum x` — rayfall sum is a typed-vector aggregate;
+    QK_SUM,             /* q `sum x` — rayfall sum is a typed-vector aggregate;
                          * q ALSO sums the ITEMS of a boxed list (`sum(d;t)` ->
                          * timestamps, ref/file-text.md Load Fixed).  List arm
                          * folds ray_add_fn; other inputs pass to ray_sum_fn.  */
+    QK_ATTR             /* q `attr x` — read the column attribute as a SINGLE
+                         * symbol letter (`` ` ``/`s`/`u`/`g`/`p`), collapsing the
+                         * engine's `.attr.get` full-name sym vector.  Atoms and
+                         * unattributed vectors return the empty symbol.  See the
+                         * set-attribute arm on the `#` wrapper (q_take_wrap).   */
 } q_build_kind;
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic

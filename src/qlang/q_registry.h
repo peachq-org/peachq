@@ -216,6 +216,21 @@ ray_t* q_registry_funsql_bang_value(void);
  * `l` retained). */
 ray_t* q_collapse_list(ray_t* l);
 
+/* Column attribute as kdb's single letter: 's'/'u'/'g'/'p', or 0 for none.
+ * Reads the block markers/kind DIRECTLY (the kdb u#/p# policy is composed in the
+ * q layer, not the rayfall-native engine `.attr.get`, so a hash-backed u#/p#
+ * must be labelled by its marker, not the RAY_IDX_HASH kind — see q_registry.c).
+ * Shared by the `attr` verb wrapper AND q_fmt's `` `s#``/`u#``/`g#``/`p# ``
+ * display prefix so both agree on one mapping.  Borrows v. */
+char q_attr_letter(ray_t* v);
+
+/* Set a column attribute via the q `#` surface (`s`/`u`/`g`/`p`, or 0 to clear).
+ * The kdb u#/p# accelerator (find-hash + marker) is COMPOSED in the q layer here,
+ * not baked into the frozen engine.  Borrows vec; returns an owned attributed
+ * column (or a remapped q error).  Exposed for the attribute-acceleration
+ * C-unit (test/q_attr_accel.c) to exercise the real q set-attribute path. */
+ray_t* q_attr_set_letter(char letter, ray_t* vec);
+
 /* q `ssr[s;p;r]` — string search-and-replace (feat/q-string-fns).  Exposed so
  * q_builtins_register can env-bind it (a triadic prefix keyword: the parser
  * name-refs `ssr[a;b;c]`, so it resolves through the env, not the registry). */
