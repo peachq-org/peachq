@@ -7707,11 +7707,44 @@ static ray_t* q_delete_exec(ray_t** args, int64_t n) {
     return res;
 }
 
+/* String `exec` statement executor.  Lowered from the symbolic (?;`t;c;b;a)
+ * statement tree by ql_qsql_exec: a SPECIAL FORM receiving the four operands
+ * UNEVALUATED.  Reuses q_funsql_select_impl wholesale so the STRING `exec …`
+ * form and the FUNCTIONAL `?[t;c;b;a]` exec form share ONE result-shaping engine
+ * (single-home) and stay automatically equivalent.
+ *   t  the from-table: a `t name-sym (by-name) or an already-lowered expression
+ *      subtree — funsql_operand resolves both (evaluates it to the table value).
+ *   c  where-constraints: `enlist(constraint-list)` (statement form) or `()`;
+ *      unwrapped to the inner constraint-list, then interpreted UNEVALUATED
+ *      against the table columns by q_funsql_select_impl (funsql_build_mask).
+ *   b  the By-phrase: `()` (no grouping, exec shaping) or a bare/vector symbol
+ *      (grouped exec — deferred by the impl).  Passed RAW.
+ *   a  the Select-phrase: `()` (last record), a bare column symbol (the column
+ *      value), or a name!expr dict (dict result).  Passed RAW (its parse-trees
+ *      stay unevaluated — funsql_eval interprets them against the columns).
+ * Refcount: q_funsql_select_impl BORROWS its four operands (retains what it
+ * keeps), so c/b/a pass without a transfer; only the OWNED `tv` is released. */
+static ray_t* q_exec_exec(ray_t** args, int64_t n) {
+    if (n != 4)
+        return ray_error("rank", "exec[t;c;b;a]: expects 4 args, got %lld", (long long)n);
+    ray_t* tv = funsql_operand(args[0]);
+    if (!tv || RAY_IS_ERR(tv)) return tv;
+    /* statement c = enlist(constraint-list); the engine wants the inner list */
+    ray_t* c = args[1];
+    ray_t* cc = (c && c->type == RAY_LIST && ray_len(c) == 1)
+                    ? ((ray_t**)ray_data(c))[0]
+                    : c;
+    ray_t* res = q_funsql_select_impl(tv, cc, args[2], args[3]);
+    ray_release(tv);
+    return res;
+}
+
 static ray_t* g_list_value   = NULL;
 static ray_t* g_table_value  = NULL;
 static ray_t* g_keyed_table_value = NULL;
 static ray_t* g_select_value = NULL;
 static ray_t* g_delete_value = NULL;   /* q.delete: string `delete` statement executor */
+static ray_t* g_exec_value   = NULL;   /* q.exec:   string `exec`   statement executor */
 static ray_t* g_compose_value = NULL;
 
 /* q `'[f;g;…]` compose builder — a normal VARY (args are the resolved function
@@ -7944,6 +7977,8 @@ ray_t* q_registry_select_value(void) {
 }
 
 ray_t* q_registry_delete_value(void) { return g_delete_value; }   /* borrowed; NULL before init */
+
+ray_t* q_registry_exec_value(void) { return g_exec_value; }       /* borrowed; NULL before init */
 
 ray_t* q_registry_compose_value(void) {
     return g_compose_value;  /* borrowed; NULL before init */
@@ -9562,6 +9597,12 @@ ray_err_t q_registry_init(void) {
         g_delete_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
+    g_exec_value = ray_fn_vary("q.exec",
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_exec_exec);
+    if (!g_exec_value || RAY_IS_ERR(g_exec_value)) {
+        g_exec_value = NULL;
+        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    }
     /* compose builder — a NORMAL vary (args are the resolved function values). */
     g_compose_value = ray_fn_vary("q.compose", RAY_FN_Q_LOWER, q_compose_fn);
     if (!g_compose_value || RAY_IS_ERR(g_compose_value)) {
@@ -9687,6 +9728,7 @@ void q_registry_destroy(void) {
     if (g_keyed_table_value) { ray_release(g_keyed_table_value); g_keyed_table_value = NULL; }
     if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
     if (g_delete_value) { ray_release(g_delete_value); g_delete_value = NULL; }
+    if (g_exec_value)   { ray_release(g_exec_value);   g_exec_value   = NULL; }
     if (g_compose_value) { ray_release(g_compose_value); g_compose_value = NULL; }
     if (g_funsql_select_value) { ray_release(g_funsql_select_value); g_funsql_select_value = NULL; }
     if (g_funsql_bang_value)   { ray_release(g_funsql_bang_value);   g_funsql_bang_value   = NULL; }
