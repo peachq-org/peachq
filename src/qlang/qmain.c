@@ -153,6 +153,22 @@ int main(int argc, char** argv) {
 
     int stdin_tty = isatty(STDIN_FILENO);
 
+    /* Startup banner (kdb-style version + build date, via the same macros as
+     * .z.K/.z.k).  GUARDRAIL: print ONLY on an interactive tty REPL and NOT
+     * under `-q` (.z.q).  Piped/redirected stdin (the qcmd/qscript runners,
+     * `printf … | ./q`, `</dev/null` daemons) is NOT a tty, so it never leaks
+     * into an equality golden; the qdoctest runner is a separate binary that
+     * never reaches this path. */
+    if (stdin_tty && !q_dotz_quiet()) {
+#ifdef RAYFORCE_BUILD_DATE
+        const char* build = RAYFORCE_BUILD_DATE;
+#else
+        const char* build = "";
+#endif
+        printf("openq %d.%d %s\n", RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
+        fflush(stdout);
+    }
+
     /* Startup script (`q file.q`): run it before the REPL / server loop.
      * kdb semantics — the script executes first; then a tty drops to the
      * REPL, a `-p` server serves IPC, and a non-tty non-server run exits 0
