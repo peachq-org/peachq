@@ -41,6 +41,15 @@
  * src/lang/eval.h (0x20) — kept local so the parser needs no eval header. */
 #define Q_ATTR_QUOTED 0x20
 
+/* Q_ATTR_HOLE: flag on the `::` sym of an ELIDED bracket-call slot (`f[a;;b]`)
+ * — a projection hole, as distinct from an explicit `::` (a real generic-null
+ * VALUE, e.g. the whole-value amend index `@[v;::;f]` or a trap fx).  The two
+ * spell identically (`::`), so this flag is the only signal that lets the
+ * `@`/`.` lowering tell an elision (project) from an explicit `::` (amend/trap
+ * data).  0x40 is unused on a -RAY_SYM atom (it is RAY_FN_COMPILED/Q_LOWER on
+ * fn/lambda values only), and the marked node never survives lowering. */
+#define Q_ATTR_HOLE   0x40
+
 #define MAX_VEC  4096
 #define MAX_NAME 256
 
@@ -117,6 +126,15 @@ static int q_sym_is_glyph(ray_t *sym);   /* defined after VERB_CHARS */
 /* generic null :: — the elided-argument hole */
 static ray_t *q_null(void) {
     return ray_sym(ray_sym_intern_runtime("::", 2));
+}
+
+/* An ELIDED bracket-call slot `f[a;;b]` — a projection hole.  Same `::`
+ * spelling (so every existing hole check still matches), plus Q_ATTR_HOLE so
+ * the @/. lowering can tell it from an explicit `::` value. */
+static ray_t *q_hole(void) {
+    ray_t *x = q_null();
+    if (x && !RAY_IS_ERR(x)) x->attrs |= Q_ATTR_HOLE;
+    return x;
 }
 
 /* symbol literal (ATTR_QUOTED set) */
@@ -1688,7 +1706,9 @@ static P parse_term(Parser *p) {
             ray_release(t.v);
             for (int64_t i = 0; i < en; i++) {
                 if (es[i]) { w = ray_list_append(w, es[i]); }
-                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+                /* an elided bracket slot is a projection hole (Q_ATTR_HOLE),
+                 * distinct from an explicit `::` value in the same position */
+                else       { ray_t *nul = q_hole(); w = ray_list_append(w, nul); ray_release(nul); }
             }
             ray_release(e);
             t.v = w; t.role = R_NOUN;
@@ -2695,6 +2715,13 @@ static int ql_is_hole(ray_t *x) {
     return r;
 }
 
+/* Is `x` a genuine ELIDED bracket slot (Q_ATTR_HOLE), as opposed to an
+ * explicit `::` value?  Used only by the @/. lowering, which must treat an
+ * explicit `::` as amend/trap data, never a projection hole. */
+static int ql_is_elision_hole(ray_t *x) {
+    return x && (x->attrs & Q_ATTR_HOLE) && ql_is_hole(x);
+}
+
 /* Value/native projection: an application `(Fval; a0; a1; …)` whose head is a
  * plain callable fn-VALUE (unary/binary/vary, NOT a special form) and which
  * carries at least one `::` elision hole becomes a `.q.proj` carrier over Fval,
@@ -2712,10 +2739,11 @@ static void ql_project(ray_t **slot) {
     if (!h) return;
     if (!(h->type == RAY_UNARY || h->type == RAY_BINARY || h->type == RAY_VARY)) return;
     if (h->attrs & RAY_FN_SPECIAL_FORM) return;   /* list/table/if/quote/select/… */
-    /* Apply-At / Apply `@` and `.` take REAL `::` arguments (whole-value
-     * amend `@[v;::;f]`, `.[m;();f]`) — a null there is data, not an elision
-     * hole (codex round-2 P1).  Under-application of @/. still projects via
-     * the runtime path; only this lower-time rewrite is exempted. */
+    /* Apply-At / Apply `@` and `.`.  An EXPLICIT `::` argument is REAL data
+     * (whole-value amend `@[v;::;f]`, `.[m;();f]`, or a trap fx) — never a
+     * projection hole; only a genuine bracket ELISION (Q_ATTR_HOLE) projects.
+     * Because openq's parser collapses `::` and an elided slot to the same
+     * spelling, this per-arg flag is the sole disambiguator. */
     {
         q_provenance_t pv;
         if (q_registry_provenance(h, &pv) && pv.spelling && pv.spelling[0] &&
@@ -2734,6 +2762,34 @@ static void ql_project(ray_t **slot) {
                             a->attrs |= Q_ATTR_QUOTED;
                         ray_release(s);
                     }
+                }
+            }
+            /* An elided argument (`@[count;;-1]`, `type @[;;0h]`) makes the
+             * operator a PROJECTION.  Lower to the q.mkopproj builder so the
+             * bound (non-hole) args are EVALUATED before binding — a name-ref
+             * `count` or a lambda literal `{x+1}` becomes its value, which a
+             * raw lower-time q_proj_new cannot do.  Explicit `::` args carry no
+             * Q_ATTR_HOLE, so amend/trap forms never reach this. */
+            int64_t oargc = n - 1;
+            uint64_t omask = 0; int oholes = 0;
+            if (oargc >= 1 && oargc <= 60)
+                for (int64_t i = 0; i < oargc; i++)
+                    if (ql_is_elision_hole(e[1 + i])) { omask |= (1ull << i); oholes++; }
+            if (oholes > 0) {
+                ray_t *mk = q_registry_mkopproj_value();
+                if (mk) {
+                    ray_t *repl = ray_list_new(oargc + 3);
+                    ray_retain(mk); repl = ray_list_append(repl, mk); ray_release(mk);
+                    ray_retain(h);  repl = ray_list_append(repl, h);  ray_release(h);
+                    ray_t *ni = ray_i64(oargc);
+                    repl = ray_list_append(repl, ni); ray_release(ni);
+                    ray_t *mi = ray_i64((int64_t)omask);
+                    repl = ray_list_append(repl, mi); ray_release(mi);
+                    for (int64_t i = 0; i < oargc; i++)
+                        if (!(omask & (1ull << i)))
+                            repl = ray_list_append(repl, e[1 + i]);  /* bound value, RETAINED */
+                    ray_release(node);
+                    *slot = repl;
                 }
             }
             return;
