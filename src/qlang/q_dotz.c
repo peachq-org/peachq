@@ -4,6 +4,8 @@
 #endif
 #include "qlang/q_dotz.h"
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
+#include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get — .z.p* alias slots */
+#include "core/ipc.h"          /* ray_ipc_current_handle / ray_ipc_fd_of_handle — .z.w */
 #include <rayforce.h>
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
 #include <stdlib.h>            /* strtod / getenv */
@@ -27,6 +29,20 @@ static int    g_argc       = 0;
 static char** g_argv       = NULL;
 static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
 static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
+
+int q_dotz_ipc_hook_index(const char* name, size_t len) {
+    if (len != 5 || name[0] != '.' || name[1] != 'z' || name[2] != '.' ||
+        name[3] != 'p')
+        return -1;
+    switch (name[4]) {
+        case 'o': return 0;   /* .z.po -> .ipc.on.open  */
+        case 'c': return 1;   /* .z.pc -> .ipc.on.close */
+        case 'g': return 2;   /* .z.pg -> .ipc.on.sync  */
+        case 's': return 3;   /* .z.ps -> .ipc.on.async */
+        case 'w': return 4;   /* .z.pw -> .ipc.on.auth  */
+        default:  return -1;
+    }
+}
 
 static bool ends_with_dot_q(const char* s) {
     size_t n = strlen(s);
@@ -176,6 +192,21 @@ static ray_t* z_a(void) {
     return ray_i32(addr);
 }
 
+/* .z.w — the current IPC connection handle, as the kdb int handle.  Inside a
+ * server-side hook (.z.pg/.z.ps/.z.po/…) this is the CALLER's handle; OUTSIDE
+ * any hook kdb yields 0i.  ray_ipc_current_handle() returns the internal
+ * SELECTOR ID (-1 when no connection is on this stack); the q-visible handle
+ * namespace is the socket FD (fix/q-hopen-fd — a q handle IS the fd), so
+ * convert selector->fd via ray_ipc_fd_of_handle so `.z.w` matches what
+ * hopen/hclose/handle-apply see.  -1 or an unresolvable selector -> 0i.
+ * (.ipc.handle keeps the raw selector-id/-1 surface; unchanged.) */
+static ray_t* z_w(void) {
+    int64_t sel = ray_ipc_current_handle();   /* selector id, or -1 outside a hook */
+    if (sel < 0) return ray_i32(0);
+    int64_t fd = ray_ipc_fd_of_handle(sel);   /* q handle == socket fd */
+    return ray_i32(fd < 0 ? 0 : (int32_t)fd);
+}
+
 /* peachq version surface — reads the SAME compile-time macros the Makefile
  * injects for .sys.build (RAY_VERSION_MAJOR/MINOR, RAYFORCE_BUILD_DATE). */
 static ray_t* z_K(void) {   /* `.z.K` — version as a major.minor float (kdb .z.K) */
@@ -244,6 +275,7 @@ Z_TAB[] = {
     { ".z.h", 4, z_h },
     { ".z.u", 4, z_u },
     { ".z.a", 4, z_a },
+    { ".z.w", 4, z_w },
     { ".z.K", 4, z_K },
     { ".z.k", 4, z_k },
     { ".z.p", 4, z_p },
@@ -303,6 +335,19 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             out = Z_TAB[i].make();   /* already owned (rc>=1) */
             break;
         }
+
+    /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
+     * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
+     * `.ipc.on.sync:{…}` assignment and vice-versa.  An UNSET alias declines
+     * (NULL -> eval raises 'name, matching an unset name); kdb's default-handler
+     * exposure is deferred (see the plan's accepted decisions). */
+    if (!out) {
+        int hk = q_dotz_ipc_hook_index(p, n);
+        if (hk >= 0) {
+            ray_t* fn = ray_env_get(ray_sym_ipc_hook(hk));   /* borrowed */
+            if (fn) { ray_retain(fn); out = fn; }
+        }
+    }
 
     ray_release(name);
     return out;

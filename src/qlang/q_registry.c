@@ -49,6 +49,7 @@
 #include "core/ipc.h"         /* ray_ipc_fd_of_handle/handle_of_fd — q true-fd handles */
 #include "qlang/q_builtins.h" /* q_string_fn — 0: Prepare Text cell text */
 #include "qlang/q_fmt.h"      /* q_console_show_krepr — 0N! debug print */
+#include "qlang/q_dotz.h"     /* q_dotz_ipc_hook_index — .z.p* handler aliases */
 #include <assert.h>
 #include <stdint.h>   /* INT*_MAX / INT64_MIN — Tok out-of-domain bounds */
 #include <math.h>     /* floor/floorf — q monadic `_` */
@@ -3778,8 +3779,24 @@ static ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         ray_release(s);
         return ray_error("type", "set: root handle takes a dictionary");
     }
+    /* kdb `.z.p*` connection-handler aliases resolve to the SAME `.ipc.on.*`
+     * slot that ipc.c's hook_lookup reads (one slot, two spellings).  AND
+     * hook_lookup accepts only a bare RAY_LAMBDA, whereas a q `{…}` is a
+     * `.q.lambda` carrier — so unwrap the carrier to its base lambda before
+     * binding, or the hook silently never fires.  This unwrap also fixes the
+     * NATIVE `.ipc.on.*` spelling, which had the same q-carrier gap.  (Computed
+     * BEFORE ray_release(s): `nm` points into `s`.) */
+    int64_t tgt = x->i64;
+    int hk = q_dotz_ipc_hook_index(nm, l);
+    if (hk >= 0) tgt = ray_sym_ipc_hook(hk);
+    ray_t* bind_val = y;
+    if ((hk >= 0 || ray_sym_is_ipc_hook(tgt)) && y &&
+        y->type == RAY_LIST && q_deriv_kind_of(y) == Q_DERIV_LAMBDA) {
+        ray_t* base = q_deriv_base(y);          /* borrowed bare RAY_LAMBDA */
+        if (base) bind_val = base;
+    }
     ray_release(s);
-    ray_err_t err = ray_env_set(x->i64, y);     /* plain/dotted global assign */
+    ray_err_t err = ray_env_set(tgt, bind_val); /* plain/dotted global assign */
     if (err == RAY_ERR_RESERVED)
         return ray_error("reserve", "set: name is reserved");
     if (err != RAY_OK)
