@@ -7756,17 +7756,54 @@ ray_t* q_collapse_list(ray_t* l) {
     return vec;
 }
 
-/* ---- IPC client verb: q `hopen` (feat/q-ipc-client, Phase D) ----
+/* ---- IPC client verb: q `hopen` (feat/q-ipc-client, Phase D; hsym Bundle 2b) --
  * Thin wrapper over `.ipc.open` (ray_hopen_fn), which takes a
  * "host:port[:user:password]" string + optional connect-timeout.  q `hopen`
- * accepts an int PORT (localhost), a "host:port[:user:pass]" STRING (with the
- * kdb "::PORT"/":host:port" leading-colon conventions), or a 2-list
- * (conn; timeout-ms).  The kdb hsym-SYMBOL forms (`::PORT`, `:host:port`) do
- * not lex as a single colon-bearing symbol yet (the scanner stops at ':'), so
- * they are deferred to a lexer change; the int/string surface parses today. */
+ * accepts an int PORT (localhost), a "host:port[:user:pass]" STRING or the
+ * equivalent hsym SYMBOL (both with the kdb "::PORT"/":host:port" leading-colon
+ * conventions — the leading-`:` scanner lexes `` `::5000 ``/`` `:host:port `` as
+ * one colon-bearing symbol, so both surfaces reach q_hopen_norm_descriptor and
+ * share ONE parser), or a 2-list (conn; timeout-ms).  DEFERRED (clean 'nyi, not
+ * a silent TCP attempt): the transport schemes `unix://` / `tcps://` /
+ * `unixs://` / `fifo://` (need a transport layer openq lacks) and FILE-handle
+ * hopen (`hopen ":path"`, distinct from IPC). */
 
-/* Normalize a connection descriptor (int atom or string atom) into the
- * "host:port[:user:password]" form .ipc.open expects.  Owned RAY_STR or error. */
+/* Normalize a "host:port[:user:password]" descriptor string (raw name text of a
+ * string atom or an hsym symbol) into the form .ipc.open expects.  Applies the
+ * kdb leading-colon conventions ("::rest" = localhost, ":rest" = strip one ':')
+ * and rejects the not-yet-supported transport schemes with a clean 'nyi (so
+ * BOTH the string and symbol surfaces decline them the same way, rather than
+ * feeding e.g. "unix://5000" into a TCP connect).  Owned RAY_STR or error. */
+static ray_t* q_hopen_norm_descriptor(const char* s, size_t n) {
+    if (n > 512) return ray_error("domain", "hopen: descriptor too long");
+    /* Strip the leading-colon marker: "::rest" localhost, single ":rest" strip 1. */
+    const char* rest = s;
+    size_t      rn   = n;
+    bool        localhost = false;
+    if (rn >= 2 && rest[0] == ':' && rest[1] == ':') { rest += 2; rn -= 2; localhost = true; }
+    else if (rn >= 1 && rest[0] == ':')              { rest += 1; rn -= 1; }
+    /* Deferred transports: a "scheme://" prefix after the leading colon(s). */
+    static const char* const schemes[] = { "unixs://", "unix://", "tcps://", "fifo://" };
+    for (size_t i = 0; i < sizeof schemes / sizeof *schemes; i++) {
+        size_t sl = strlen(schemes[i]);
+        if (rn >= sl && memcmp(rest, schemes[i], sl) == 0)
+            return ray_error("nyi",
+                             "hopen: %.*s transport not supported yet",
+                             (int)(sl - 3), schemes[i]);   /* scheme sans "://" */
+    }
+    if (localhost) {
+        char buf[600];
+        int m = snprintf(buf, sizeof buf, "127.0.0.1:%.*s", (int)rn, rest);
+        if (m <= 0 || m >= (int)sizeof buf)
+            return ray_error("domain", "hopen: descriptor too long");
+        return ray_str(buf, (size_t)m);
+    }
+    return ray_str(rest, rn);   /* "host:port[:user:pass]" (host omitted = as-is) */
+}
+
+/* Normalize a connection descriptor (int atom, string atom, or hsym symbol)
+ * into the "host:port[:user:password]" form .ipc.open expects.  Owned RAY_STR
+ * or error. */
 static ray_t* q_hopen_connstr(ray_t* c) {
     if (q_is_int_atom(c)) {
         int64_t p = q_iatom_val(c);
@@ -7778,20 +7815,15 @@ static ray_t* q_hopen_connstr(ray_t* c) {
         if (m <= 0 || m >= (int)sizeof buf) return ray_error("domain", "hopen: bad port");
         return ray_str(buf, (size_t)m);
     }
-    if (c && c->type == -RAY_STR) {
-        const char* s = ray_str_ptr(c);
-        size_t n = ray_str_len(c);
-        if (n > 512) return ray_error("domain", "hopen: descriptor too long");
-        /* kdb leading-colon conventions: "::rest" = localhost, ":host:.." = strip 1 */
-        if (n >= 2 && s[0] == ':' && s[1] == ':') {
-            char buf[600];
-            int m = snprintf(buf, sizeof buf, "127.0.0.1:%.*s", (int)(n - 2), s + 2);
-            if (m <= 0 || m >= (int)sizeof buf)
-                return ray_error("domain", "hopen: descriptor too long");
-            return ray_str(buf, (size_t)m);
-        }
-        if (n >= 1 && s[0] == ':') return ray_str(s + 1, n - 1);   /* strip one ':' */
-        return ray_str(s, n);                                      /* "host:port" */
+    if (c && c->type == -RAY_STR)
+        return q_hopen_norm_descriptor(ray_str_ptr(c), ray_str_len(c));
+    if (c && c->type == -RAY_SYM) {
+        /* ray_sym_str returns a BORROWED interned string (table/sym.c) — do NOT
+         * release it (that over-releases the sym table's own ref; the q_apply.c
+         * `:path` precedent).  q_hopen_norm_descriptor copies out a new atom. */
+        ray_t* nm = ray_sym_str(c->i64);
+        if (!nm) return ray_error("type", "hopen: bad symbol handle");
+        return q_hopen_norm_descriptor(ray_str_ptr(nm), ray_str_len(nm));
     }
     return ray_error("type",
                      "hopen: expected an int port or a \"host:port\" string, got %s",
@@ -7801,7 +7833,7 @@ static ray_t* q_hopen_connstr(ray_t* c) {
 /* q `hopen y` — connect, return an int handle.  Restricted connections must not
  * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
-static ray_t* q_hopen_wrap(ray_t* x) {
+ray_t* q_hopen_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     ray_t* conn      = x;
     ray_t* timeout   = NULL;
@@ -7871,7 +7903,7 @@ static ray_t* q_hopen_wrap(ray_t* x) {
  * to the selector id the primitive expects.  A handle that is not a live IPC
  * connection (already closed, or a console handle) is a no-op, matching kdb's
  * tolerance of hclose on a dead handle. */
-static ray_t* q_hclose_wrap(ray_t* x) {
+ray_t* q_hclose_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     if (!q_is_int_atom(x) || RAY_ATOM_IS_NULL(x))
         return ray_error("type", "hclose: expected an int handle, got %s",
