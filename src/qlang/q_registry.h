@@ -226,6 +226,15 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n);
  * objects, one implementation). */
 ray_t* q_read0_wrap(ray_t* x);
 
+/* q `hopen`/`hclose` IPC client wrappers (feat/q-ipc-client; hsym Bundle 2b).
+ * Exposed so q_apply.c's one-shot sync request (`` `:host:port "query" ``) can
+ * REUSE the exact hopen normalization + restricted gate + fd/selector handle
+ * translation rather than duplicating them.  q_hopen_wrap: descriptor/port ->
+ * owned int fd handle (or error, incl. clean 'nyi for deferred transports).
+ * q_hclose_wrap: fd handle -> closed (no-op on a dead/console handle). */
+ray_t* q_hopen_wrap(ray_t* x);
+ray_t* q_hclose_wrap(ray_t* x);
+
 /* ===== q cast home ==========================================================
  * THE q-layer conversion entry points (reuse mandate): future q-semantics
  * work that needs a conversion (bool-widening in arithmetic, promotion in
