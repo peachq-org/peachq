@@ -16,6 +16,18 @@ static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz);
 #include <stdlib.h>
 #include <math.h>
 
+/* ---- `\P` display precision (single-home: this is the ONLY reader) --------
+ * kdb's `\P n` sets the number of significant digits shown when a float is
+ * converted to a string (default 7, range [0,17]; 0 = maximum = 17).  The syscmd
+ * handler (q_sys.c h_P) is the sole writer via q_fmt_set_prec; q_float_tok is the
+ * sole reader.  q_runtime_create resets it to the default per runtime so a
+ * `\P 0` in one .qcmd file never leaks into the next (fresh-per-file runtime). */
+#define Q_PRINT_PREC_DEFAULT 7
+static int g_print_prec = Q_PRINT_PREC_DEFAULT;
+
+void q_fmt_set_prec(int p) { g_print_prec = p; }
+int  q_fmt_prec(void)      { return g_print_prec; }
+
 /* The verb characters — a sym atom of one of these (or the generic null `::`)
  * prints bare; every other sym keeps its leading backtick.  Same split the
  * retired q_ast_fmt made between verbs/null and names/sym-literals. */
@@ -316,22 +328,35 @@ static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
  * 'e' for f32 (nothing for f64).  Float infinities are out of scope. */
 static void q_float_tok(double v, int f32, char* out, size_t n) {
     if (isnan(v)) { snprintf(out, n, f32 ? "0Ne" : "0n"); return; }
-    /* Finite whole-number magnitude BELOW the 7-significant-digit horizon
-     * prints WITHOUT a fractional part (q shows `5`, not `5.0`); f32 keeps
-     * its per-element `e`.  The disambiguating `f` for f64 wholes is appended
-     * by the caller (atom) or once per vector.  AT/ABOVE 1e7 the %lld
-     * shortcut would print every digit where kdb's \P 7 console switches to
-     * exponent form (`3e+11`, `1.234568e+08` — timespan.qcmd:162 pins
-     * 00:10:00.000000000%2 -> 3e+11), so large wholes fall through to %.7g. */
-    if (isfinite(v) && v == floor(v) && v > -1e7 && v < 1e7) {
+    /* Effective precision: `\P` significant digits (default 7); `\P 0` = maximum
+     * (17, full IEEE754 round-trip). */
+    int prec = g_print_prec ? g_print_prec : 17;
+    /* Finite whole-number magnitude that fits WITHIN the active precision prints
+     * WITHOUT a fractional part (q shows `5`, not `5.0`); f32 keeps its per-
+     * element `e`.  The disambiguating `f` for f64 wholes is appended by the
+     * caller (atom) or once per vector.  The horizon is 10^prec: a whole float
+     * with MORE integer digits than the precision (e.g. `12345f` at `\P 3`, or
+     * any whole ≥1e7 at the default `\P 7` — timespan.qcmd:162 pins
+     * 00:10:00.000000000%2 -> 3e+11) switches to kdb's exponent form, so it must
+     * fall through to %.*g rather than take this full-integer shortcut.  The
+     * horizon comes from an EXACT power-of-10 table (all of 1e0..1e17 are exact
+     * doubles) so the `\P 7` boundary stays literally 1e7 — a `pow(10,7)` that
+     * rounded to 10000000.0000001 would wrongly keep `1e7` on the shortcut. */
+    static const double POW10[18] = {
+        1e0,1e1,1e2,1e3,1e4,1e5,1e6,1e7,1e8,1e9,
+        1e10,1e11,1e12,1e13,1e14,1e15,1e16,1e17 };
+    double horizon = POW10[prec < 0 ? 0 : prec > 17 ? 17 : prec];
+    if (isfinite(v) && v == floor(v) && v > -horizon && v < horizon) {
         snprintf(out, n, "%lld%s", (long long)v, f32 ? "e" : "");
         return;
     }
-    /* kdb console precision is 7 significant digits (\P 7): 1%3 -> 0.3333333,
-     * 10%3 -> 3.333333.  %.7g gives exactly that (and kdb-style exponents for
-     * very large / small magnitudes). */
+    /* kdb console precision is `\P` significant digits (default 7): 1%3 ->
+     * 0.3333333, 10%3 -> 3.333333.  %.*g gives exactly that (and kdb-style
+     * exponents for very large / small magnitudes).  `\P 0` selects maximum
+     * precision (17 sig digits, full IEEE754 round-trip): 1%3 ->
+     * 0.33333333333333331, 2 xexp 3 -> 7.9999999999999982. */
     char mag[64];
-    snprintf(mag, sizeof mag, "%.7g", v);
+    snprintf(mag, sizeof mag, "%.*g", prec, v);
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
 }
 
