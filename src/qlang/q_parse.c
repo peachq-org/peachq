@@ -1407,6 +1407,7 @@ static P       parse_e_from(Parser *p, P t);
 static P       parse_term(Parser *p);
 static P       parse_base(Parser *p);
 static ray_t  *parse_qsql_select(Parser *p, int *ok);   /* piece 3: qSQL SELECT */
+static ray_t  *parse_qsql_delete(Parser *p, int *ok);   /* qSQL DELETE string form */
 
 /* Statement sequence: one -> its element; two+ -> (`;; ...).  Consumes e. */
 static ray_t *seq_of(ray_t *e) {
@@ -1741,11 +1742,13 @@ static P parse_e(Parser *p) {
      * the ordinary parser — so previously-parseable selects never regress. */
     if (cur(p)->kind == T_NOUN) {
         Token *tk = cur(p);
-        if (tk->len == 6 && memcmp(p->src + tk->start, "select", 6) == 0) {
-            int ok = 1;
-            ray_t *q = parse_qsql_select(p, &ok);
-            if (ok && q) return (P){ R_NOUN, q };
-        }
+        int ok = 1;
+        ray_t *q = NULL;
+        if (tk->len == 6 && memcmp(p->src + tk->start, "select", 6) == 0)
+            q = parse_qsql_select(p, &ok);
+        else if (tk->len == 6 && memcmp(p->src + tk->start, "delete", 6) == 0)
+            q = parse_qsql_delete(p, &ok);
+        if (ok && q) return (P){ R_NOUN, q };
     }
     P t = parse_term(p);
     if (t.role == R_NONE) return EMPTY;
@@ -2246,6 +2249,122 @@ fail:
     if (snapped) qsql_snap_restore(p);
     for (int i = 0; i < na; i++) { ray_release(aliases[i]); ray_release(vals[i]); }
     if (b) ray_release(b);
+    if (t) ray_release(t);
+    if (c) ray_release(c);
+    if (a) ray_release(a);
+    p->pos = save;
+    return NULL;
+}
+
+/* delete [PS] from TABLE [where PW]  ->  (!;`t;c;0b;a).
+ *   row form  `delete from t [where P]` : PS absent; a = `symbol$() (empty sym
+ *                                         vec), c = enlist(constraints) | ().
+ *   col form  `delete p1,p2 from t`     : PS present; a = `p1`p2 (sym VECTOR),
+ *                                         c = (); a trailing `where` is rejected.
+ * kdb: exactly one of c / a is non-empty.  Disambiguation: after `delete`, a
+ * `from` keyword means row form, anything else starts the column-name list.
+ * Soft-fails (restores p->pos) on any shape outside this subset, exactly like
+ * parse_qsql_select, so unsupported delete forms fall through to the ordinary
+ * parser (no parse regression). */
+static ray_t *parse_qsql_delete(Parser *p, int *ok) {
+    *ok = 1;
+    int save = p->pos;
+    int snapped = 0;                          /* from-expression token snapshot */
+    ray_t *t = NULL, *c = NULL, *a = NULL, *head = NULL, *q = NULL;
+
+    adv(p);                                   /* consume `delete` */
+
+    int col_form = !qtok_is(p, cur(p), "from", 4);
+    if (col_form) {
+        a = ray_sym_vec_new(RAY_SYM_W64, 1);  /* column names -> symbol VECTOR */
+        for (;;) {
+            Token *tk = cur(p);
+            if (tk->kind != T_NOUN || !tk->k || tk->k->type != -RAY_SYM) { *ok = 0; goto fail; }
+            ray_t *nm = ray_sym_str(tk->k->i64);
+            if (!nm) { *ok = 0; goto fail; }
+            a = q_symvec_append(a, ray_str_ptr(nm), (int)ray_str_len(nm));
+            ray_release(nm);
+            adv(p);
+            Token *sep = cur(p);
+            if (sep->kind == T_VERB && sep->len == 1 && p->src[sep->start] == ',') { adv(p); continue; }
+            break;
+        }
+        c = ray_list_new(0);                  /* col form: no where-clause */
+    } else {
+        a = ray_sym_vec_new(RAY_SYM_W64, 0);  /* row form: empty symbol vector */
+    }
+
+    if (!qtok_is(p, cur(p), "from", 4)) { *ok = 0; goto fail; }
+    adv(p);
+
+    /* from TABLE-NAME | from EXPRESSION — identical to parse_qsql_select. */
+    Token *tt = cur(p);
+    Token *nx = &p->t.t[p->pos + 1];
+    int name_form = tt->kind == T_NOUN && tt->k && tt->k->type == -RAY_SYM &&
+        !(tt->k->attrs & Q_ATTR_QUOTED) &&
+        (qtok_is(p, nx, "where", 5) ||
+         nx->kind == T_EOF || nx->kind == T_SEMI || nx->kind == T_RBRACK ||
+         nx->kind == T_RPAREN || nx->kind == T_RBRACE);
+    if (name_form) {
+        t = qsql_colsym(tt->k->i64);
+        adv(p);
+    } else {
+        if (tt->kind == T_EOF) { *ok = 0; goto fail; }
+        int widx = -1, depth = 0;
+        for (int i = p->pos; i < p->t.n; i++) {
+            Token *sc = &p->t.t[i];
+            if (sc->kind == T_LPAREN || sc->kind == T_LBRACK ||
+                sc->kind == T_LBRACE) { depth++; continue; }
+            if (sc->kind == T_RPAREN || sc->kind == T_RBRACK ||
+                sc->kind == T_RBRACE) { if (depth == 0) break; depth--; continue; }
+            if (sc->kind == T_EOF) break;
+            if (sc->kind == T_SEMI) { if (depth == 0) break; continue; }
+            if (depth == 0 && qtok_is(p, sc, "where", 5)) { widx = i; break; }
+        }
+        qsql_snap_take(p);
+        snapped = 1;
+        TKind wkind = T_EOF;
+        if (widx >= 0) { wkind = p->t.t[widx].kind; p->t.t[widx].kind = T_EOF; }
+        P fe = parse_e(p);
+        if (widx >= 0) p->t.t[widx].kind = wkind;
+        if (fe.role != R_NOUN || !fe.v || (widx >= 0 && p->pos != widx)) {
+            if (fe.v) ray_release(fe.v);
+            *ok = 0; goto fail;
+        }
+        t = fe.v;
+    }
+
+    /* where — row form only. */
+    if (qtok_is(p, cur(p), "where", 5)) {
+        if (col_form) { *ok = 0; goto fail; }   /* kdb: no where with column delete */
+        adv(p);
+        c = qsql_where(p, ok);
+        if (!*ok) goto fail;
+    } else if (!col_form) {
+        c = ray_list_new(0);                     /* row form, no where */
+    }
+
+    /* Anything left beyond the CORE grammar => not our form: soft-fail so the
+     * ordinary parser consumes the whole statement (mirror parse_qsql_select). */
+    {
+        Token *end = cur(p);
+        if (end->kind != T_EOF && end->kind != T_SEMI && end->kind != T_RBRACK &&
+            end->kind != T_RPAREN && end->kind != T_RBRACE) { *ok = 0; goto fail; }
+    }
+
+    if (snapped) { qsql_snap_drop(); snapped = 0; }
+
+    head = q_verb('!');
+    q = ray_list_new(5);
+    q = ray_list_append(q, head); ray_release(head);
+    q = ray_list_append(q, t);    ray_release(t);
+    q = ray_list_append(q, c);    ray_release(c);
+    { ray_t *b0 = ray_bool(0); q = ray_list_append(q, b0); ray_release(b0); }
+    q = ray_list_append(q, a);    ray_release(a);
+    return q;
+
+fail:
+    if (snapped) qsql_snap_restore(p);
     if (t) ray_release(t);
     if (c) ray_release(c);
     if (a) ray_release(a);
@@ -3279,6 +3398,27 @@ static void ql_qsql(ray_t **slot) {
     *slot = repl;
 }
 
+/* String `delete` lowering: the symbolic (!;`t;c;0b;a) statement tree (bare
+ * unquoted `!` head, 5-list) head-swaps onto the q.delete special form, whose
+ * executor drives q_funsql_bang_impl.  A functional ![t;c;b;a] (fn-VALUE head)
+ * is handled by ql_funsql; a dict-make k!v is a 3-list — neither matches. */
+static void ql_qsql_bang(ray_t **slot) {
+    ray_t *node = *slot;
+    if (!node || node->type != RAY_LIST || ray_len(node) != 5) return;
+    ray_t **e = (ray_t **)ray_data(node);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *hs = ray_sym_str(h->i64);
+    int is_bang = hs && ray_str_len(hs) == 1 && ray_str_ptr(hs)[0] == '!';
+    if (hs) ray_release(hs);
+    if (!is_bang) return;
+    ray_t *dv = q_registry_delete_value();
+    if (!dv) return;
+    ray_retain(dv);
+    ray_release(e[0]);
+    e[0] = dv;   /* (q.delete; t; c; b; a) — args e[1..4] pass through */
+}
+
 /* ===== functional qSQL `?[t;c;b;a]` / `![t;c;b;a]` =========================
  * The by-VALUE functional forms parse as a rank-4 application whose head is the
  * DYADIC registry value for `?` (select/exec) or `!` (update/delete).  Rewrite
@@ -3331,6 +3471,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ql_mod_assign(slot, in_lambda);        /* x op: y -> x: x op y (before others) */
     ql_indexed_assign(slot, in_lambda);    /* d[k]:v / d[k]op:v -> set + @/. amend */
     ql_qsql(slot);                         /* (?;`t;c;b;a) -> ray_select call */
+    ql_qsql_bang(slot);                    /* (!;`t;c;0b;a) -> q.delete call  */
     ql_funsql(slot);                       /* ?[t;c;b;a] / ![t;c;b;a] runtime */
     ql_dyad_head(slot);                    /* keyword-dyadic bracket calls */
     err = ql_assign(slot, in_lambda);
