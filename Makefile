@@ -13,11 +13,13 @@ STD     = c17
 AR      = ar
 TARGET  = rayforce
 # Version: peachq owns its own version line, DECOUPLED from rayforce's vX.Y.Z
-# git tags (peachq is a fork with independent numbering). Overridable for CI /
-# one-off builds (RAY_VERSION=X.Y.Z); otherwise it is the current peachq release.
-# Injected into the build via -D below (see DEFS): .sys.build reads
-# RAYFORCE_VERSION, and q's .z.K/.z.k read RAY_VERSION_MAJOR/MINOR + BUILD_DATE.
-RAY_VERSION ?= 0.41
+# git tags (peachq is a fork with independent numbering). The SINGLE SOURCE OF
+# TRUTH is packaging/public/VERSION — the same file the public mirror ships and
+# its release-gate workflow reads to cut a release. Overridable for CI / one-off
+# builds (RAY_VERSION=X.Y.Z). Injected into the build via -D below (see DEFS):
+# .sys.build reads RAYFORCE_VERSION, and q's .z.K/.z.k read
+# RAY_VERSION_MAJOR/MINOR + BUILD_DATE.
+RAY_VERSION ?= $(shell cat packaging/public/VERSION 2>/dev/null || echo 0.41)
 VERSION       = $(RAY_VERSION)
 VERSION_MAJOR := $(word 1,$(subst ., ,$(RAY_VERSION)))
 VERSION_MINOR := $(word 2,$(subst ., ,$(RAY_VERSION)))
@@ -147,7 +149,7 @@ help:
 	@printf "  %-28s %s\n" "make $(QDOC_TARGET)" "Build only the $(QDOC_TARGET) binary"
 	@printf "  %-28s %s\n" "make lib" "Build static library lib$(TARGET).a"
 	@printf "  %-28s %s\n" "make dist" "Build release tarball and SHA-256 checksum under dist/"
-	@printf "  %-28s %s\n" "make win" "Cross-compile q.exe + rayforce.exe with mingw (WIN_CROSS=$(WIN_CROSS))"
+	@printf "  %-28s %s\n" "make win" "Cross-compile q.exe with mingw (WIN_CROSS=$(WIN_CROSS))"
 	@printf "  %-28s %s\n" "make win-smoke" "Deploy exes to the Windows host and run the native battery over SSH"
 	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
 	@printf "  %-28s %s\n" "make qtest" "q-only loop; fuzzy filter with F=, e.g. make qtest F=asc"
@@ -158,6 +160,9 @@ help:
 	@printf "  %-28s %s\n" "make kwire-live" "javakdb client vs live ./q -p server (also in qtest; needs javac)"
 	@printf "  %-28s %s\n" "make qdash" "Refresh the peachq conformance dashboard: measure + bank + regen (tools/qdash)"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
+	@printf "  %-28s %s\n" "make sync-github" "Mirror the public subset to github.com/peachq-org/peachq (push)"
+	@printf "  %-28s %s\n" "make sync-github-dry" "Dry-run the peachq mirror (build export, no push)"
+	@printf "  %-28s %s\n" "make release-github" "Build portable binaries and upload to a peachq release (TAG=vX.Y.Z)"
 	@printf "  %-28s %s\n" "make coverage" "Generate clang/llvm HTML coverage report"
 	@printf "  %-28s %s\n" "make bench-alloc" "Run allocator micro-benchmark"
 	@printf "  %-28s %s\n" "make bench-group-pushdown" "Run group predicate pushdown benchmark"
@@ -238,6 +243,38 @@ dist: release
 	 rm -rf $$stage; \
 	 ( cd dist && { command -v sha256sum >/dev/null 2>&1 && sha256sum $$name.tar.gz || shasum -a 256 $$name.tar.gz; } > $$name.tar.gz.sha256 ); \
 	 echo "built dist/$$name.tar.gz"
+
+# --- peachq public release mirror ----------------------------------------------
+# Mirror the minimal public subset (src + a minimal Makefile) to the public
+# github.com/peachq-org/peachq repo. All rewriting happens on a throwaway clone;
+# this private repo is never touched. See tools/publish-peachq.sh.
+PEACHQ_EXPORT = build/peachq
+
+sync-github:
+	tools/publish-peachq.sh --push
+
+# Re-mirror with a force push — needed once after any overlay-file change (the
+# overlay is injected into every commit, so every SHA shifts). Rewrites public
+# history; use deliberately.
+sync-github-force:
+	tools/publish-peachq.sh --push --force
+
+# Build the filtered public export locally and keep it for inspection (no push).
+sync-github-dry:
+	tools/publish-peachq.sh --export-dir $(PEACHQ_EXPORT)
+	@echo "peachq export kept at $(PEACHQ_EXPORT)/ (build it with: make -C $(PEACHQ_EXPORT))"
+
+# Build portable Linux binaries FROM the public export and upload them to an
+# existing peachq release. Usage: make release-github TAG=v0.41.0
+release-github:
+	@test -n "$(TAG)" || { echo "release-github: set TAG=vX.Y.Z (an existing peachq release tag)"; exit 2; }
+	tools/publish-peachq.sh --export-dir $(PEACHQ_EXPORT)
+	$(MAKE) -C $(PEACHQ_EXPORT) RAY_MARCH=x86-64-v2 RAY_VERSION=$(patsubst v%,%,$(TAG))
+	cd $(PEACHQ_EXPORT) && mkdir -p dist && \
+	  tar -czf dist/peachq-$(TAG)-linux-x86_64.tar.gz q rayforce LICENSE NOTICE README.md && \
+	  ( cd dist && { command -v sha256sum >/dev/null 2>&1 && sha256sum *.tar.gz || shasum -a 256 *.tar.gz; } > dist/SHA256SUMS.txt ) || true
+	gh release upload $(TAG) $(PEACHQ_EXPORT)/dist/peachq-$(TAG)-linux-x86_64.tar.gz --clobber -R peachq-org/peachq
+	@echo "uploaded peachq-$(TAG)-linux-x86_64.tar.gz to peachq-org/peachq release $(TAG)"
 
 # Allocator micro-benchmark (release-optimized, linked against lib objects).
 # Compile all sources fresh with RELEASE_CFLAGS so the benchmark measures
@@ -464,9 +501,8 @@ WIN_CFLAGS  = $(WIN_WARNS) -std=$(STD) -O2 \
   -DRAY_OS_WINDOWS=1 -D_WIN32_WINNT=0x0A00 -D__USE_MINGW_ANSI_STDIO=1
 WIN_LIBS    = -lws2_32 -lm
 WIN_LIB_OBJ    = $(LIB_SRC:.c=.win.o)
-WIN_MAIN_OBJ   = $(MAIN_SRC:.c=.win.o)
 WIN_Q_MAIN_OBJ = $(Q_MAIN_SRC:.c=.win.o)
-WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_MAIN_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
+WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
 
 # Vendored yyjson: same warning relaxation as the native rule above.
 third_party/yyjson/yyjson.win.o: third_party/yyjson/yyjson.c
@@ -478,10 +514,7 @@ third_party/yyjson/yyjson.win.o: third_party/yyjson/yyjson.c
 q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
 	$(WIN_CC) $(WIN_CFLAGS) -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS)
 
-rayforce.exe: $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ)
-	$(WIN_CC) $(WIN_CFLAGS) -o $@ $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ) $(WIN_LIBS)
-
-win: q.exe rayforce.exe
+win: q.exe
 
 # Native Windows smoke battery (stage 2): cross-build, deploy to the
 # VirtualBox share, run pinned checks on the real host over SSH.  Needs the
@@ -497,7 +530,7 @@ win-smoke: win $(Q_TARGET)
 clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
-	-rm -f $(WIN_LIB_OBJ) $(WIN_MAIN_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_DEPS) q.exe rayforce.exe
+	-rm -f $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_DEPS) q.exe
 	-rm -f $(TARGET) $(Q_TARGET) $(QDOC_TARGET) $(TARGET).test lib$(TARGET).a
 	# openq: generated embedded-bootstrap header (codegen'd from src/qlang/dotq.q).
 	-rm -f src/qlang/dotq_gen.h
@@ -511,7 +544,7 @@ clean:
 	# JUnit-XML export (tools/qtest.sh) + javakdb build classes (kwire-live).
 	-rm -rf test-results tools/kdb-conformance/.build
 
-.PHONY: default help debug release lib dist win win-smoke bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean
+.PHONY: default help debug release lib dist win win-smoke bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean sync-github sync-github-force sync-github-dry release-github
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
