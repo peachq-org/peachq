@@ -18,4 +18,9 @@ ray_t* q_string_fn(ray_t* x);
 ray_t* q_parse_builtin_fn(ray_t* x);
 ray_t* q_md5_fn(ray_t* x);
 ray_t* q_dotq_btoa_fn(ray_t* x);
+
+/* q `.Q.sha1` — SHA-1 digest of a string/byte vector as a 20-byte bytestream.
+ * Exported so the `-33!` bang alias routes to this same stable C single home
+ * (kdb keeps `-33!` as the SHA-1 primitive; `.Q.sha1` is the utility twin). */
+ray_t* q_dotq_sha1_fn(ray_t* x);
 #endif /* Q_BUILTINS_H */
