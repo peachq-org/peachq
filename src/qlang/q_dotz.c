@@ -23,7 +23,26 @@
   #include <arpa/inet.h>      /* ntohl */
 #else
   #define WIN32_LEAN_AND_MEAN
+  #include <winsock2.h>        /* gethostname/getaddrinfo/ntohl — .z.h/.z.a (winsock, needs WSAStartup) */
+  #include <ws2tcpip.h>        /* struct addrinfo / getaddrinfo on Windows */
   #include <windows.h>         /* GetSystemTimePreciseAsFileTime — CLOCK_REALTIME shim */
+#endif
+
+#ifdef RAY_OS_WINDOWS
+/* On Windows gethostname()/getaddrinfo() are winsock calls that fail with
+ * WSANOTINITIALISED until WSAStartup() has run.  Nothing in the engine starts
+ * winsock (the socket layer relies on the OS lazy-init on its own paths), so
+ * .z.h returned EMPTY and .z.a fell through to 0i (0.0.0.0).  Ensure winsock is
+ * up here with a one-time guarded WSAStartup.  We deliberately never WSACleanup:
+ * winsock is a process-lifetime resource the OS reclaims at exit, and a matched
+ * teardown could pull it out from under a concurrent socket.  WSAStartup itself
+ * is refcounted/idempotent, so even a benign flag race just calls it twice. */
+static void win_wsa_ensure(void) {
+    static bool started = false;
+    if (started) return;
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) started = true;
+}
 #endif
 
 /* argv is process-lifetime (owned by main), so we cache only the pointers and
@@ -157,6 +176,9 @@ static ray_t* z_i(void) { return ray_i64((int64_t)getpid()); }
 
 static ray_t* z_h(void) {   /* .z.h — host name as a symbol (gethostname) */
     char host[256];
+#ifdef RAY_OS_WINDOWS
+    win_wsa_ensure();        /* gethostname is a winsock call on Windows */
+#endif
     if (gethostname(host, sizeof host) != 0) host[0] = '\0';
     host[sizeof host - 1] = '\0';
     return ray_sym(ray_sym_intern(host, strlen(host)));
@@ -182,8 +204,13 @@ static ray_t* z_u(void) {
  * Resolve the primary IPv4 of the hostname; 0i if it cannot be determined. */
 static ray_t* z_a(void) {
     int32_t addr = 0;
-#ifndef RAY_OS_WINDOWS
     char host[256];
+#ifdef RAY_OS_WINDOWS
+    win_wsa_ensure();        /* gethostname/getaddrinfo are winsock calls on Windows */
+#endif
+    /* Identical selection on both platforms: the FIRST AF_INET result of
+     * getaddrinfo(hostname) — winsock exposes the same getaddrinfo/addrinfo API
+     * as POSIX (ws2tcpip.h), so this is a single shared path, not a fork. */
     if (gethostname(host, sizeof host) == 0) {
         host[sizeof host - 1] = '\0';
         struct addrinfo hints;
@@ -196,7 +223,6 @@ static ray_t* z_a(void) {
             freeaddrinfo(res);
         }
     }
-#endif
     return ray_i32(addr);
 }
 
