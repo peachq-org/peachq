@@ -500,7 +500,12 @@ WIN_WARNS   = -Wall -Wextra -Wno-unused-parameter
 WIN_CFLAGS  = $(WIN_WARNS) -std=$(STD) -O2 \
   -DRAY_OS_WINDOWS=1 -D_WIN32_WINNT=0x0A00 -D__USE_MINGW_ANSI_STDIO=1
 WIN_LIBS    = -lws2_32 -lm
-WIN_LIB_OBJ    = $(LIB_SRC:.c=.win.o)
+# The frozen IOCP stub (src/core/iocp.c) is excluded from the WINDOWS link
+# only — the openq-owned real backend src/core/iocp_win.c (auto-picked by the
+# LIB_SRC wildcard) provides ray_poll_* there.  On native builds both are
+# empty TUs (each is wholly #if defined(RAY_OS_WINDOWS)), so LIB_OBJ needs no
+# filter and the stub file stays byte-identical (frozen.manifest untouched).
+WIN_LIB_OBJ    = $(filter-out src/core/iocp.win.o, $(LIB_SRC:.c=.win.o))
 WIN_Q_MAIN_OBJ = $(Q_MAIN_SRC:.c=.win.o)
 WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
 
