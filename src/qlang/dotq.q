@@ -49,3 +49,30 @@
 / default key: if present in opt, coerce its string to the default atom's type (typed null
 / on failure); else keep the default. DEPENDS ON .Q.opt above (loader is top-to-bottom).
 .Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;$[-10h=type o k;(type d k)$o k;first 0#d k];d k]}[d;o;]each key d}
+
+/ ---- Wave-B general-purpose utils (ref/dotq.md) ----
+/ .Q.dd — join symbols (ref/dotq.md, "dd"): shorthand for ` sv x,`$string y. Builds
+/ dotted names / filepaths / suffixed syms. `:handle joins with "/", plain sym with ".".
+.Q.dd:{` sv x,`$string y}
+/ .Q.addmonths — x (date) + y (int) months (ref/dotq.md, "addmonths"). Cast to month, add
+/ y, take first-of-month back to a date, then re-add x's 0-based day offset; a day offset
+/ past the shorter target month spills forward naturally (2006.10.29+4 -> 2007.03.01).
+.Q.addmonths:{[x;y] (`date$(`month$x)+y)+x-`date$`month$x}
+/ .Q.fu — apply-unique (ref/dotq.md, "fu"): eval unary f on the DISTINCT items of list y,
+/ then reindex to full length (u?y). Atom y short-circuits to f y. Inner lambda takes u
+/ explicitly (openq lambdas do not close over outer locals).
+.Q.fu:{[f;y] $[0>type y;f y;{[f;y;u]f[u]u?y}[f;y]distinct y]}
+/ .Q.ft — apply-simple to a keyed table (ref/dotq.md, "ft"): unkey (0!), apply f to the
+/ simple table, re-key on the original key cols (k xkey). Non-keyed t just applies f.
+.Q.ft:{[f;t] k:keys t; $[count k;k xkey f 0!t;f t]}
+/ .Q.ff — append null-filled columns (ref/dotq.md, "ff"): add cols of table y absent from
+/ table x, each a count[x] null of that col's type; common cols keep x's values. (Contract:
+/ y is a TABLE — relies on cols y / y nc; not a general dict utility.)
+.Q.ff:{[x;y] nc:cols[y] except cols x; flip (flip x),nc!{[n;v](type v)$n#0N}[count x]each y nc}
+/ .Q.s1 — single-line string representation (ref/dotq.md, "s1"): the -3! internal. -3! is
+/ currently nyi in openq, so this is red-below-floor until it lands (then auto-greens).
+.Q.s1:{-3!x}
+/ .Q.s — console plain-text of x (ref/dotq.md, "s"): multi-line, console-size aware. The correct
+/ backend is a console-format-to-string primitive that openq does not yet expose (-3! is the
+/ single-line form, not this). Bound as an honest -3! placeholder; stays red until that lands.
+.Q.s:{-3!x}
