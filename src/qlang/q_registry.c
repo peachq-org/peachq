@@ -4893,10 +4893,10 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         if (n <= 0) { *is_tok = 1; n = (int16_t)-n; }
         switch (n) {
         case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
-        case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM:
+        case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM: case RAY_STR:
         RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return (int8_t)n;
-        default: return 0;    /* guid/char: deferred */
+        default: return 0;    /* guid: deferred */
         }
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
@@ -4914,7 +4914,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'v': return RAY_SECOND;
         case 'n': return RAY_TIMESPAN;
         case 'z': return RAY_DATETIME;
-        default:  return 0;       /* c + "*" identity: deferred */
+        case 'c': return RAY_STR;   /* char cast: "c"$x reinterprets as chars */
+        default:  return 0;       /* "*" identity: deferred */
         }
     }
     if (t->type == -RAY_SYM) {
@@ -4924,6 +4925,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         size_t l = ray_str_len(s);
         int8_t r = 0;
         if      (l == 0)                              { *is_tok = 1; r = RAY_SYM; }
+        else if (l == 4 && !memcmp(nm, "char",    4)) r = RAY_STR;
         else if (l == 4 && !memcmp(nm, "long",    4)) r = RAY_I64;
         else if (l == 5 && !memcmp(nm, "float",   5)) r = RAY_F64;
         else if (l == 3 && !memcmp(nm, "int",     3)) r = RAY_I32;
@@ -4992,6 +4994,58 @@ static const char* q_tag_rayname(int8_t tag) {
  * truncates — integer targets pre-round here; everything else delegates to
  * base ray_cast_fn.  RAY_LIST distributes per element and collapses. */
 ray_t* q_cast_to(int8_t tag, ray_t* x) {
+    /* char cast (`10h$`/`` `char$``/`"c"$`): reinterpret an integer/byte value as
+     * chars, producing a native string (openq has no char-atom type distinct from
+     * a 1-char string).  Handled BEFORE the generic RAY_LIST distribution so a
+     * boxed integer list packs into ONE string rather than a list of 1-char
+     * strings (q_collapse_list refuses to pack -RAY_STR atoms). */
+    if (tag == RAY_STR) {
+        if (x && x->type == -RAY_STR) { ray_retain(x); return x; }   /* identity */
+        if (x && x->type == RAY_U8)                                  /* byte vec */
+            return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
+        if (x && x->type == -RAY_U8) { char c = (char)x->u8; return ray_str(&c, 1); }
+        if (x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16)) {
+            int64_t v = (x->type == -RAY_I64) ? x->i64
+                      : (x->type == -RAY_I32) ? (int64_t)x->i32 : (int64_t)x->i16;
+            char c = (char)v; return ray_str(&c, 1);
+        }
+        if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
+            int64_t n = ray_len(x);
+            char* buf = (char*)malloc(n ? (size_t)n : 1);
+            if (!buf) return ray_error("wsfull", "$: out of memory");
+            for (int64_t i = 0; i < n; i++) {
+                int64_t v = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
+                          : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
+                          :                        (int64_t)((const int16_t*)ray_data(x))[i];
+                buf[i] = (char)v;
+            }
+            ray_t* r = ray_str(buf, (size_t)n);
+            free(buf);
+            return r;
+        }
+        if (x && x->type == RAY_LIST) {          /* boxed list of int/byte -> string */
+            int64_t n = ray_len(x);
+            ray_t** e = (ray_t**)ray_data(x);
+            char* buf = (char*)malloc(n ? (size_t)n : 1);
+            if (!buf) return ray_error("wsfull", "$: out of memory");
+            for (int64_t i = 0; i < n; i++) {
+                ray_t* ei = e[i];
+                int64_t v;
+                if      (ei && ei->type == -RAY_I64) v = ei->i64;
+                else if (ei && ei->type == -RAY_I32) v = ei->i32;
+                else if (ei && ei->type == -RAY_I16) v = ei->i16;
+                else if (ei && ei->type == -RAY_U8)  v = ei->u8;
+                else if (ei && ei->type == -RAY_STR && ray_str_len(ei) == 1)
+                    v = (unsigned char)ray_str_ptr(ei)[0];
+                else { free(buf); return ray_error("type", "$: cannot cast list element to char"); }
+                buf[i] = (char)v;
+            }
+            ray_t* r = ray_str(buf, (size_t)n);
+            free(buf);
+            return r;
+        }
+        return ray_error("type", "$: cannot cast to char");
+    }
     if (x && x->type == RAY_LIST) {
         int64_t n = ray_len(x);
         ray_t** e = (ray_t**)ray_data(x);
@@ -5688,6 +5742,10 @@ static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
     int8_t tag = q_cast_designator(t, &is_tok);
     if (!tag)
         return ray_error("nyi", "$: unsupported cast designator (deferred)");
+    /* `10h$`/`` `char$``/`"c"$` all land here with is_tok=0 and reinterpret via
+     * q_cast_to; only the UPPERCASE char token `"C"$` carries is_tok=1 and stays
+     * a deferred char-Tok — q_tok_to's default errors 'nyi (pinned by the
+     * cast_tok_deferred unit test), so no RAY_STR special-case is needed here. */
     return is_tok ? q_tok_to(tag, x) : q_cast_to(tag, x);
 }
 
