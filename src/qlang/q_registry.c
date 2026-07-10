@@ -42,6 +42,7 @@
 #include "ops/glob.h"         /* ray_glob_match — like/ss/ssr pattern matching */
 #include "table/sym.h"        /* ray_sym_vec_cell (funsql executor) */
 #include "qlang/q_wire.h"     /* -8!/-9! internal-fn dispatch on dyadic ! */
+#include "qlang/q_bang.h"     /* q_bang_dispatch — the `-N!` internal-fn manifest */
 #include "store/serde.h"      /* ray_serde_set_fn_hooks — wrapper round-trip */
 #include "lang/format.h"      /* ray_type_name — wrapper error messages */
 #include "mem/heap.h"         /* RAY_ATTR_HAS_NULLS — ? find miss remap */
@@ -282,8 +283,9 @@ char q_attr_letter(ray_t* v) {
 }
 
 /* q `attr x` — the column attribute as a symbol atom (`` ` ``/`s`/`u`/`g`/`p`).
- * Atoms and unattributed vectors return the empty symbol.  Borrows x. */
-static ray_t* q_attr_wrap(ray_t* x) {
+ * Atoms and unattributed vectors return the empty symbol.  Borrows x.
+ * Exported (q_registry.h) so the `-2!` internal-fn alias single-homes here. */
+ray_t* q_attr_wrap(ray_t* x) {
     char c = q_attr_letter(x);
     char s1[1]; s1[0] = c;
     int64_t id = ray_sym_intern_runtime(c ? s1 : "", c ? 1 : 0);
@@ -3679,17 +3681,13 @@ static ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
         !RAY_ATOM_IS_NULL(x)) {
         int64_t id = x->type == -RAY_I64 ? x->i64
                    : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
-        if (id < 0) {
-            switch (id) {
-            case -8: return q_wire_serialize(y, Q_WIRE_ASYNC);
-            case -9:
-                if (y->type != RAY_U8)
-                    return ray_error("type", "-9!: expects a byte vector");
-                return q_wire_deserialize(y);
-            default:
-                return ray_error("nyi", "internal function %lld! not yet implemented", (long long)id);
-            }
-        }
+        /* A negative id is an internal function (`-8!x` serialize, `-9!x`
+         * deserialize, `-5!x` parse, ...) — dispatched through the Q_BANG[]
+         * manifest (q_bang.c).  `-8!`/`-9!` moved into the table as rows
+         * calling the SAME q_wire_serialize/q_wire_deserialize; the negative
+         * band never dict-makes. */
+        if (id < 0)
+            return q_bang_dispatch(id, y);
         /* q enkey/unkey: `N!table` / `N!keyedtable` (N>=0). */
         if (y->type == RAY_TABLE || q_is_keyed_table(y))
             return q_enkey(y, id);
@@ -8436,7 +8434,8 @@ static int64_t q_hsym_id(const char* p, size_t n) {
     free(buf);
     return id;
 }
-static ray_t* q_hsym_wrap(ray_t* x) {
+/* Exported (q_registry.h) so the `-1!` internal-fn alias single-homes here. */
+ray_t* q_hsym_wrap(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);                   /* borrowed */
         if (!s) return ray_error("type", "hsym: bad symbol");
