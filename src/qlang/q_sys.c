@@ -11,10 +11,11 @@
 #include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec / q_fmt_prec — `\P` precision */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
+#include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
-#include "core/poll.h"        /* ray_poll_get / ray_selector_t — `\p 0W` fd readback */
+#include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
-#include "core/poll.h"        /* ray_poll_deregister — `\p 0` closes the listener */
+#include "core/timer.h"       /* ray_timers_create/add/del — `\t N` timer heap */
 #include "lang/eval.h"        /* ray_eval_get_restricted — `system` access guard */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
@@ -80,6 +81,12 @@ static int32_t g_week_offset;             /* \W week offset   (default 2)       
 static int32_t g_err_trap;                /* \e error trap    (default 0)       */
 static int32_t g_sec_threads;             /* \s secondary thr (default 0)       */
 
+/* \t timer: current interval (ms; 0 = off) and the live timer id (-1 = none). */
+static int64_t g_timer_ms = 0;
+static int64_t g_timer_id = -1;
+
+bool q_sys_timer_active(void) { return g_timer_ms > 0; }
+
 /* `\p` listening-port state.  g_listen_port is what the `\p` getter reports
  * (0 = not listening, kdb default); g_listen_sel is the poll selector id of the
  * live listener so `\p 0` can deregister it (deregister fires ipc_on_close ->
@@ -95,6 +102,8 @@ void q_sys_cfg_init(void) {
     g_week_offset = 2;           /* Monday (0 = Saturday) */
     g_err_trap  = 0;             /* trapping off */
     g_sec_threads = 0;           /* no secondary threads configured */
+    g_timer_ms  = 0;             /* `\t` off per runtime */
+    g_timer_id  = -1;
     g_listen_port = 0;           /* `\p` — no listening port by default */
     g_listen_sel  = -1;          /* no live listener selector */
     q_fmt_set_prec(7);           /* `\P` default (single-homed in q_fmt.c) */
@@ -356,6 +365,74 @@ static ray_t* h_l(const char* arg, size_t alen, const char* rest, size_t restlen
 
 /* `\P` — display precision.  `\P`→`7i`; `\P n` sets n∈[0,17] (0 = max = 17),
  * silent.  The float formatter (q_fmt.c) is the sole reader. */
+/* `\t` — timer.  Integer-interval forms only (the expression-timing form
+ * `\t expr` is OUT OF SCOPE → 'nyi):
+ *   `\t`     getter → current interval as a long (`0` when off, kdb-true bare).
+ *   `\t 0`   stop the repeating timer (silent); works with no poll loop.
+ *   `\t N`   (N>0) fire `.z.ts` every N ms via a forwarding thunk on the poll
+ *            timer heap (silent).  Needs an event poll; under ./qdoctest there
+ *            is none → 'io (honest, like `\p`), never a hang.
+ * A non-integer first token (`\t log til 100000`) OR a multi-token integer tail
+ * (`\t 2 + 2`) is expression timing → 'nyi (openq has no pre-eval timing hook —
+ * tracked in PLAN.md).  Reentrancy note: `ray_timers_fire_expired` pops the
+ * timer before the callback, so a `\t 0`/`\t N` issued from INSIDE `.z.ts`
+ * cannot delete the in-flight timer — the thunk's q_sys_timer_active() guard
+ * stops a reentrant `\t 0` from re-invoking `.z.ts`; a reentrant interval change
+ * may transiently double-fire (documented edge). */
+static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen) {
+    if (alen == 0) return ray_i64(g_timer_ms);           /* getter → bare long */
+    long long v;
+    if (!q_parse_i64(arg, alen, &v))
+        return ray_error("nyi", NULL);                   /* \t expr timing — deferred */
+    /* The integer-interval form requires the WHOLE arg region to be a lone
+     * integer (a trailing `/comment` is fine).  `\t 2 + 2` tokenizes to first
+     * token "2" but is expression timing — reject the multi-token tail. */
+    const char* p   = rest + alen;                       /* just past the 1st token */
+    const char* end = rest + restlen;
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    if (p < end && *p != '/')
+        return ray_error("nyi", NULL);                   /* multi-token → \t expr */
+    if (v < 0) return ray_error("domain", NULL);
+    /* Overflow guard: ray_timers_add computes now+tic_ms with no check (a UBSan
+     * trap on a huge value).  Cap at INT32_MAX ms (~24.8 days) — generous. */
+    if (v > 2147483647LL) return ray_error("domain", NULL);
+    ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
+    if (v == 0) {                                        /* stop (silent) */
+        if (poll && poll->timers && g_timer_id >= 0)
+            ray_timers_del((ray_timers_t*)poll->timers, g_timer_id);
+        g_timer_id = -1;
+        g_timer_ms = 0;
+        return NULL;
+    }
+    if (!poll) return ray_error("io", NULL);             /* no event poll (qdoctest) */
+    if (!poll->timers) {
+        poll->timers = ray_timers_create(16);
+        if (!poll->timers) return ray_error("oom", NULL);
+    }
+    /* Replace any existing timer.  Set state to OFF first so an add-failure
+     * below leaves an honest "no timer" state, not a stale id. */
+    if (g_timer_id >= 0)
+        ray_timers_del((ray_timers_t*)poll->timers, g_timer_id);
+    g_timer_id = -1;
+    g_timer_ms = 0;
+    ray_t* thunk = q_dotz_timer_thunk();                 /* rc=1 */
+    if (!thunk || RAY_IS_ERR(thunk)) return thunk ? thunk : ray_error("oom", NULL);
+    int64_t id = ray_timers_add((ray_timers_t*)poll->timers, v, /*num=*/0, thunk);
+    ray_release(thunk);                                  /* add RETAINED its own ref */
+    if (id < 0) return ray_error("oom", NULL);           /* state already off */
+    g_timer_id = id;
+    g_timer_ms = v;
+    /* Deliberately NO process-keepalive here.  Timers fire whenever the poll
+     * loop is already running — a `-p`/`\p` server (its listener keeps it alive)
+     * or an interactive/piped REPL (q_repl_run_poll → ray_poll_run pumps the
+     * heap between reads).  A headless, listener-less process (`q script.q
+     * </dev/null` with no `-p`) exits at end-of-input rather than blocking a
+     * server-only loop with nothing to serve — never a hang.  (Reusing the
+     * irreversible listener-active flag OR a timer-keepalive both stranded a
+     * `\t N`→`\t 0` process in an idle serve loop — codex r1/r2.) */
+    return NULL;                                         /* silent */
+}
+
 static ray_t* h_P(const char* arg, size_t alen, const char* rest, size_t restlen) {
     (void)rest; (void)restlen;
     if (alen == 0) return ray_i32(q_fmt_prec());          /* getter */
@@ -536,9 +613,8 @@ static const struct {
     /* value-printing / getter-only → 'nyi (no silent form to match) */
     { "b",  1, 1, Q_SYS_F_NONE, h_nyi },      /* views (lists) */
     { "B",  1, 1, Q_SYS_F_NONE, h_nyi },      /* pending views (lists) */
-    { "t",  1, 1, Q_SYS_F_NONE, h_nyi },      /* timer set (silent) + \t expr timing
-                                               * (prints ms): openq has neither → 'nyi,
-                                               * honest for both forms (never silent) */
+    { "t",  1, 1, Q_SYS_F_NONE, h_t },        /* timer interval (\t N / \t 0 / \t);
+                                               * \t expr timing stays 'nyi (out of scope) */
     { "ts", 2, 1, Q_SYS_F_NONE, h_nyi },      /* time and space (prints value) */
     /* process-exit / REPL-only — gated in q_sys_dispatch, never exit a doctest */
     { "\\", 1, 0, Q_SYS_F_EXIT,      h_nyi }, /* \\ quit the process */
