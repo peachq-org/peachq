@@ -214,6 +214,10 @@ static void init_class(void) {
     CLASS[(int)'\\'] |= CL_ADVERB;
     CLASS[(int)' ']  |= CL_WS;
     CLASS[(int)'\t'] |= CL_WS;
+    CLASS[(int)'\n'] |= CL_WS;   /* multiline scripts: a joined logical line
+                                  * carries embedded newlines between its
+                                  * continuation fragments (q_repl_run_file). */
+    CLASS[(int)'\r'] |= CL_WS;
 }
 
 /* ===== scanner =============================================================== */
