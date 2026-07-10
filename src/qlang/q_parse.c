@@ -3257,15 +3257,18 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
      * inside a lambda body — q dotted names are never locals (q4m3 §12). */
     int is_dotted_global = (ray_str_len(ns) > 0 && ray_str_ptr(ns)[0] == '.');
     /* IPC connection-hook slot? — a kdb `.z.p*` handler alias, OR the native
-     * `.ipc.on.*` spelling.  These must route through the REGISTRY set wrapper
-     * (q_setg_wrap) so the alias-canonicalization + q-lambda-carrier unwrap
-     * run — the env special-form `set` (ray_set_fn) stores the carrier verbatim
-     * into the `.z.p*` slot, which ipc.c's hook_lookup (bare-lambda only, and a
-     * different sym) never fires.  q_ast_is_assign already flagged the pre-lower
+     * `.ipc.on.*` spelling, OR the `.z.ts` timer handler.  These must route
+     * through the REGISTRY set wrapper (q_setg_wrap) so the alias-canonicalization
+     * + q-lambda-carrier unwrap run — the env special-form `set` (ray_set_fn)
+     * stores the carrier verbatim into a plain env binding, which the C callers
+     * (ipc.c hook_lookup / the `.z.ts` timer thunk — both bare-lambda only, and a
+     * different slot) never see.  q_ast_is_assign already flagged the pre-lower
      * `:` shape, so REPL/qdoc output stays suppressed after this head swap. */
-    int is_hook_slot = (q_dotz_ipc_hook_index(ray_str_ptr(ns),
-                                               ray_str_len(ns)) >= 0) ||
-                       ray_sym_is_ipc_hook(e[1]->i64);
+    size_t nsl = ray_str_len(ns);
+    const char* nsp = ray_str_ptr(ns);
+    int is_hook_slot = (q_dotz_ipc_hook_index(nsp, nsl) >= 0) ||
+                       ray_sym_is_ipc_hook(e[1]->i64) ||
+                       (nsl == 5 && memcmp(nsp, ".z.ts", 5) == 0);  /* .z.ts timer slot */
     ray_release(ns);
 
     if (is_hook_slot) {
