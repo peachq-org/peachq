@@ -13,6 +13,10 @@
 / .Q.K (version date) / .Q.k (version number): the q.k spec openq targets, distinct from .z.K/.z.k.
 .Q.K:2020.10.02;
 .Q.k:4f;
+/ .Q.M: chunk size for .Q.dsftg (load-process-save); defaults to long infinity.
+.Q.M:0W;
+/ .Q.t: type letters indexed by datatype number.
+.Q.t:" bg xhijefcspmdznuvts";
 
 / ---- Encoders (ref/dotq.md): pure-q against .Q.b6 (base-64, width 10) / .Q.nA (base-36, width 12) ----
 .Q.x10:{raze {1#x _ .Q.b6} each (10#64) vs x};
