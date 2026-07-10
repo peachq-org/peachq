@@ -1449,8 +1449,41 @@ static ray_t *seq_of(ray_t *e) {
     return w;
 }
 
+/* qSQL interception (piece 3): if the cursor sits on a `select`/`delete`/
+ * `update`/`exec` keyword that begins a supported qSQL template, lower it to
+ * kdb's functional parse tree (?;`t;c;b;a) / (!;…) and return the OWNED tree;
+ * otherwise return NULL with p->pos unchanged (parse_qsql_* soft-fail restores
+ * it) so the ordinary parser consumes the tokens.  Called both at statement
+ * start (parse_e) AND as a primary term (parse_base), so a template can appear
+ * as an operand — e.g. `show select from t`, the argument of any prefix fn. */
+static ray_t *try_parse_qsql(Parser *p) {
+    if (cur(p)->kind != T_NOUN) return NULL;
+    Token *tk = cur(p);
+    int ok = 1;
+    ray_t *q = NULL;
+    if (tk->len == 6 && memcmp(p->src + tk->start, "select", 6) == 0)
+        q = parse_qsql_select(p, &ok);
+    else if (tk->len == 6 && memcmp(p->src + tk->start, "delete", 6) == 0)
+        q = parse_qsql_delete(p, &ok);
+    else if (tk->len == 6 && memcmp(p->src + tk->start, "update", 6) == 0)
+        q = parse_qsql_update(p, &ok);
+    else if (tk->len == 4 && memcmp(p->src + tk->start, "exec", 4) == 0)
+        q = parse_qsql_exec(p, &ok);
+    if (ok && q) return q;
+    if (q) ray_release(q);          /* defensive: soft-fail returns NULL, not (0,q) */
+    return NULL;
+}
+
 static P parse_base(Parser *p) {
     Token *tk = cur(p);
+    /* A qSQL template may stand as a primary term (an operand), e.g. the
+     * argument of `show`.  Attempt the interception here too; it soft-fails and
+     * restores on any non-template so ordinary operands are unaffected. */
+    if (tk->kind == T_NOUN) {
+        ray_t *q = try_parse_qsql(p);
+        if (q) return (P){ R_NOUN, q };
+        tk = cur(p);                /* pos unchanged on soft-fail, but re-fetch */
+    }
     switch (tk->kind) {
     case T_NOUN: {
         /* implicit-arg inference: a bare 1-char x/y/z name inside the current
@@ -1762,19 +1795,9 @@ static P parse_e(Parser *p) {
      * functional parse tree (?;`t;c;b;a).  On any unsupported form parse_qsql
      * soft-fails (restores p->pos, leaves tokens intact) and we fall through to
      * the ordinary parser — so previously-parseable selects never regress. */
-    if (cur(p)->kind == T_NOUN) {
-        Token *tk = cur(p);
-        int ok = 1;
-        ray_t *q = NULL;
-        if (tk->len == 6 && memcmp(p->src + tk->start, "select", 6) == 0)
-            q = parse_qsql_select(p, &ok);
-        else if (tk->len == 6 && memcmp(p->src + tk->start, "delete", 6) == 0)
-            q = parse_qsql_delete(p, &ok);
-        else if (tk->len == 6 && memcmp(p->src + tk->start, "update", 6) == 0)
-            q = parse_qsql_update(p, &ok);
-        else if (tk->len == 4 && memcmp(p->src + tk->start, "exec", 4) == 0)
-            q = parse_qsql_exec(p, &ok);
-        if (ok && q) return (P){ R_NOUN, q };
+    {
+        ray_t *q = try_parse_qsql(p);
+        if (q) return (P){ R_NOUN, q };
     }
     P t = parse_term(p);
     if (t.role == R_NONE) return EMPTY;
@@ -1951,6 +1974,31 @@ static ray_t *qsql_enlist(ray_t *v) {
 
 static ray_t *qsql_expr(Parser *p, int *ok);
 
+/* A callable VALUE usable as a select/exec/update phrase head: a builtin verb
+ * (RAY_UNARY/BINARY/VARY), a bare RAY_LAMBDA, OR a q lambda / derived-verb
+ * CARRIER (a RAY_LIST whose q_deriv_kind_of is set — a named q `{…}` binds in
+ * the env as such a carrier, NOT a bare RAY_LAMBDA).  Mirrors funsql_is_fn in
+ * q_registry.c so the string and functional qSQL forms agree on what a phrase
+ * head is: `select f price` embeds the `f` value rather than demoting it to a
+ * column symbol (qsql-status roadmap #2). */
+static inline int qsql_is_fn_value(const ray_t *v) {
+    if (!v) return 0;
+    if (v->type >= RAY_LAMBDA && v->type <= RAY_VARY) return 1;
+    if (v->type == RAY_LIST && q_deriv_kind_of(v) != Q_DERIV_NONE) return 1;
+    return 0;
+}
+
+/* Does the token AFTER the just-consumed phrase name begin a PREFIX-CALL operand
+ * (so the name is a function being applied, `f price`), as opposed to a clause
+ * boundary or an infix verb (where the name is a left operand / a bare column
+ * ref)?  Mirrors the prefix-application trigger in qsql_expr (T_NOUN / T_LPAREN,
+ * plus a lambda-literal operand). */
+static int qsql_next_is_operand(Parser *p) {
+    if (qsql_boundary(p)) return 0;                    /* by/from/where/,/;/)/EOF */
+    TKind k = cur(p)->kind;
+    return k == T_NOUN || k == T_LPAREN || k == T_LBRACE;
+}
+
 /* One clause TERM: a column symbol, an embedded function value, a `sym literal
  * (enlisted), a number/other literal (as-is), or a parenthesised sub-expr. */
 static ray_t *qsql_term(Parser *p, int *ok) {
@@ -1959,6 +2007,34 @@ static ray_t *qsql_term(Parser *p, int *ok) {
         adv(p);
         ray_t *e = qsql_expr(p, ok);
         if (!*ok) { if (e) ray_release(e); return NULL; }
+        /* Parenthesised SEMICOLON list `(e1;e2;…)` — a select-phrase producing a
+         * list per column (`exec (qty;s) from t`, kdb exec.md).  Emit kdb's tree
+         * shape `(enlist;e1;e2;…)`: the enlist VALUE at the head, so the exec
+         * funsql_eval fn-head branch evaluates each column expr then enlists the
+         * results into a ragged list (qsql-status roadmap #2). */
+        if (at(p, T_SEMI)) {
+            ray_t *elems[QSQL_MAXCOLS]; int ne = 0;
+            elems[ne++] = e;
+            while (at(p, T_SEMI)) {
+                adv(p);
+                if (ne >= QSQL_MAXCOLS) { *ok = 0; break; }
+                ray_t *ei = qsql_expr(p, ok);
+                if (!*ok) break;
+                elems[ne++] = ei;
+            }
+            if (*ok && !at(p, T_RPAREN)) *ok = 0;
+            ray_t *enl = *ok ? q_registry_lookup_name(",", 1, Q_MONADIC) : NULL;
+            if (!*ok || !enl) {
+                *ok = 0;
+                for (int i = 0; i < ne; i++) ray_release(elems[i]);
+                return NULL;
+            }
+            adv(p);                                    /* consume ')' */
+            ray_t *node = ray_list_new(ne + 1);
+            node = ray_list_append(node, enl);         /* append retains the borrowed ref */
+            for (int i = 0; i < ne; i++) { node = ray_list_append(node, elems[i]); ray_release(elems[i]); }
+            return node;
+        }
         if (!at(p, T_RPAREN)) { *ok = 0; if (e) ray_release(e); return NULL; }
         adv(p);
         return e;
@@ -1981,16 +2057,25 @@ static ray_t *qsql_term(Parser *p, int *ok) {
          * base env object, whose display fell to the <name> fallback);
          * non-manifest names keep the env object. */
         ray_t *ev = NULL;
+        int from_registry = 0;
         {
             ray_t *s = ray_sym_str(id);               /* borrowed */
             if (s) ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s),
                                                Q_MONADIC);   /* borrowed */
+            if (ev) from_registry = 1;
         }
         if (!ev) ev = ray_env_get(id);
-        if (ev && (ev->type == RAY_UNARY || ev->type == RAY_BINARY ||
-                   ev->type == RAY_VARY)) {           /* function -> its value */
-            ray_retain(ev);
-            return ev;
+        if (qsql_is_fn_value(ev)) {
+            /* A REGISTRY verb (`sum`, `neg`, …) is a reserved name — embed its
+             * value unconditionally, as before.  A user ENV function (a named
+             * `{…}` lambda) embeds ONLY when it is APPLIED to an operand (a
+             * prefix call `f price`); standing alone it stays a column ref,
+             * because a table column shadows a like-named global in the qSQL
+             * phrase scope (kdb) — `select f from t` selects column `f`. */
+            if (from_registry || qsql_next_is_operand(p)) {
+                ray_retain(ev);
+                return ev;
+            }
         }
         return qsql_colsym(id);                        /* else column symbol */
     }
@@ -2036,7 +2121,7 @@ static ray_t *qsql_expr(Parser *p, int *ok) {
          * nouns, so we cannot render them kdb-faithfully here.  Soft-fail so
          * the ordinary parser consumes the whole statement, rather than emit a
          * malformed tree that the interceptor would wrongly accept. */
-        if (!(t->type == RAY_UNARY || t->type == RAY_BINARY || t->type == RAY_VARY)) {
+        if (!qsql_is_fn_value(t)) {
             *ok = 0; ray_release(t); return NULL;
         }
         ray_t *rhs = qsql_expr(p, ok);
@@ -3875,7 +3960,12 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
     int64_t n = ray_len(node);
     ray_t **e = (ray_t **)ray_data(node);
     for (int64_t i = 0; i < n; i++)
-        if (e[i] && e[i]->type == RAY_LIST) {
+        if (e[i] && e[i]->type == RAY_LIST &&
+            q_deriv_kind_of(e[i]) == Q_DERIV_NONE) {
+            /* Skip an already-lowered derived-verb / lambda CARRIER: it is an
+             * embedded runtime VALUE (e.g. a named q `{…}` fetched from the env
+             * for a qSQL phrase head), not a parse subtree to lower — and being
+             * shared it has rc>1, so recursing would trip the rc==1 assert. */
             ray_t *err = q_lower_walk(&e[i], lambda_body, i == 0);
             if (err) return err;
         }
