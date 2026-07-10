@@ -6785,6 +6785,8 @@ static void q_select_rename_temps(ray_t* tbl, ray_t* tempnames, ray_t* realnames
  * just a dictionary from one table to another"), which q_fmt renders `k| v`.
  *   args[0] = query dict (unevaluated — ray_select owns clause-in-scope eval)
  *   args[1] = by-key column-name sym vector (empty => unkeyed passthrough) */
+static ray_t* funsql_sort_keyed(ray_t* dict);   /* fwd: by-key ascending sort (consumes dict) */
+
 static ray_t* q_select_exec(ray_t** args, int64_t n) {
     ray_t* dict = args[0];
     ray_t* res  = ray_select(&dict, 1);
@@ -6822,7 +6824,8 @@ static ray_t* q_select_exec(ray_t** args, int64_t n) {
     if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
     if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
     if (n >= 4) q_select_rename_temps(vt, args[2], args[3]);
-    return ray_dict_new(kt, vt);   /* consumes kt, vt */
+    ray_t* keyed = ray_dict_new(kt, vt);   /* consumes kt, vt */
+    return funsql_sort_keyed(keyed);       /* kdb `by`: groups ascending by key (consumes) */
 }
 
 /* ===== functional qSQL executor (piece 3) =================================
@@ -7110,6 +7113,106 @@ static ray_t* funsql_sort_keyed(ray_t* dict) {
     return nd;
 }
 
+/* Grouped-EXEC helpers: a bare/vector By-symbol groups exactly like a Select
+ * name!col by-dict, so build that Select query and reshape the keyed table into
+ * exec's group->value dictionary (funsql.md "By phrase"). */
+
+/* Build a name!col by-DICT from a bare or vector By-symbol (values a SYM vec so
+ * funsql_add_by emits bare column-refs). */
+static ray_t* funsql_sym_to_bydict(ray_t* b) {
+    int64_t cnt = (b->type == -RAY_SYM) ? 1 : ray_len(b);
+    int64_t cap = cnt > 0 ? cnt : 1;
+    ray_t* k = ray_sym_vec_new(RAY_SYM_W64, cap);
+    ray_t* v = ray_sym_vec_new(RAY_SYM_W64, cap);
+    for (int64_t i = 0; i < cnt; i++) {
+        ray_t* s = (b->type == -RAY_SYM) ? ray_sym_str(b->i64) : ray_sym_vec_cell(b, i);
+        if (s) {
+            k = rsymvec_append(k, ray_str_ptr(s), (int)ray_str_len(s));
+            v = rsymvec_append(v, ray_str_ptr(s), (int)ray_str_len(s));
+            if (b->type == -RAY_SYM) ray_release(s);   /* ray_sym_str owns; cell borrows */
+        }
+    }
+    return ray_dict_new(k, v);   /* consumes k, v */
+}
+
+/* Wrap a single unnamed select-phrase (`a` = bare col -RAY_SYM or fn expr) into
+ * a 1-entry name!expr out-dict so the shared has_out path materialises it. */
+static ray_t* funsql_exec_out_wrap(ray_t* a) {
+    ray_t* k = ray_sym_vec_new(RAY_SYM_W64, 1);
+    k = rsymvec_append(k, "Qexec0", 6);
+    ray_t* v;
+    if (a->type == -RAY_SYM) {
+        v = ray_sym_vec_new(RAY_SYM_W64, 1);
+        ray_t* s = ray_sym_str(a->i64);
+        if (s) { v = rsymvec_append(v, ray_str_ptr(s), (int)ray_str_len(s)); ray_release(s); }
+    } else {
+        v = ray_list_new(1);
+        ray_retain(a);
+        v = ray_list_append(v, a);
+        ray_release(a);
+    }
+    return ray_dict_new(k, v);   /* consumes k, v */
+}
+
+/* Reshape a sorted keyed table (RAY_DICT{keytab,valtab}) into exec's group->value
+ * dict.  keys = the single group column (a list) or the key table (multi col);
+ * vals = the whole value table (named phrase -> list!table) or its single column
+ * (unnamed phrase -> group->aggregate/collected list).  Consumes `res`. */
+static ray_t* funsql_exec_reshape(ray_t* res, int named) {
+    if (!res || res->type != RAY_DICT) return res;   /* error / non-keyed passthrough */
+    ray_t* kt = ray_dict_keys(res);
+    ray_t* vt = ray_dict_vals(res);
+    if (!kt || kt->type != RAY_TABLE || !vt || vt->type != RAY_TABLE) return res;
+    ray_t* keys = (ray_table_ncols(kt) == 1) ? ray_table_get_col_idx(kt, 0) : kt;
+    ray_t* vals = named ? vt : ray_table_get_col_idx(vt, 0);
+    if (!keys || !vals) return res;
+    ray_retain(keys);
+    ray_retain(vals);
+    ray_release(res);
+    return ray_dict_new(keys, vals);   /* consumes keys, vals */
+}
+
+/* Is symbol id `q` one of the grouping columns named by By-symbol `b`? */
+static int funsql_sym_is_key(ray_t* b, int64_t q) {
+    int64_t cnt = (b->type == -RAY_SYM) ? 1 : ray_len(b);
+    for (int64_t i = 0; i < cnt; i++) {
+        ray_t* s = (b->type == -RAY_SYM) ? ray_sym_str(b->i64) : ray_sym_vec_cell(b, i);
+        if (!s) continue;
+        int64_t id = ray_sym_intern_runtime(ray_str_ptr(s), ray_str_len(s));
+        if (b->type == -RAY_SYM) ray_release(s);   /* ray_sym_str owns; cell borrows */
+        if (id == q) return 1;
+    }
+    return 0;
+}
+
+/* Grouped exec whose select-phrase BARE-references a grouping column (`exec g by g`,
+ * `exec v:g by g`) hits the base engine's key/value name collision (the string
+ * select path wraps such refs in `reverse reverse`; the funsql path does not).
+ * Detect that case so the caller can reject it cleanly rather than emit wrong
+ * values.  Only a bare col-ref output collides — an aggregate over a key column
+ * (`exec first g by g`) is a computed column and is fine. */
+static int funsql_exec_key_collision(ray_t* b, ray_t* a) {
+    if (!a) return 0;
+    if (a->type == -RAY_SYM) return funsql_sym_is_key(b, a->i64);
+    if (a->type == RAY_DICT) {
+        ray_t* av = ray_dict_vals(a);
+        if (!av) return 0;
+        if (av->type == RAY_SYM) {
+            int64_t na = ray_len(av);
+            for (int64_t i = 0; i < na; i++) {
+                ray_t* vn = ray_sym_vec_cell(av, i);
+                if (vn && funsql_sym_is_key(b, ray_sym_intern_runtime(ray_str_ptr(vn), ray_str_len(vn)))) return 1;
+            }
+        } else if (av->type == RAY_LIST) {
+            int64_t na = ray_len(av);
+            ray_t** e = (ray_t**)ray_data(av);
+            for (int64_t i = 0; i < na; i++)
+                if (e[i] && e[i]->type == -RAY_SYM && funsql_sym_is_key(b, e[i]->i64)) return 1;
+        }
+    }
+    return 0;
+}
+
 /* `?[t;c;b;a]` select — returns a table (or a keyed table for a by-group). */
 static ray_t* q_funsql_select_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
     ray_t* tbl = funsql_resolve_table(t);
@@ -7173,12 +7276,34 @@ static ray_t* q_funsql_select_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
         }
     }
 
-    /* A symbol / symbol-vector By-phrase is the grouped-EXEC family (dict-shaped
-     * results whose type depends on the a×b matrix) — deferred beyond CORE.
-     * Only a `name!col` By-DICT drives a Select by-group (keyed table). */
+    /* A symbol / symbol-vector By-phrase is grouped EXEC: the base engine groups
+     * on it exactly like a Select name!col by-dict, so build that Select query
+     * (b -> name!col dict; a single unnamed phrase wrapped as an out-dict) and
+     * reshape the keyed table into exec's group->value dict below. */
+    ray_t* gx_by = NULL, *gx_a = NULL;
+    int gx = 0, gx_named = 0;
     if (b && (b->type == -RAY_SYM || b->type == RAY_SYM)) {
-        ray_release(ft);
-        return ray_error("nyi", "?: symbol By-phrase (grouped exec) is not supported; use a name!col dict");
+        if (funsql_empty(a)) {                     /* `exec by g` (all cols) — not built */
+            ray_release(ft);
+            return ray_error("nyi", "?: by-group exec without a select-phrase");
+        }
+        if (funsql_exec_key_collision(b, a)) {     /* bare key-col output — needs the
+                                                    * reverse-reverse identity wrap the
+                                                    * string path has; deferred (would be
+                                                    * a wrong answer otherwise). */
+            ray_release(ft);
+            return ray_error("nyi", "?: grouped exec of a grouping column is not supported");
+        }
+        gx = 1;
+        gx_by = funsql_sym_to_bydict(b);
+        if (!gx_by || RAY_IS_ERR(gx_by)) { ray_release(ft); return gx_by ? gx_by : ray_error("oom", NULL); }
+        b = gx_by;
+        if (a->type == RAY_DICT) { gx_named = 1; }
+        else {
+            gx_a = funsql_exec_out_wrap(a);
+            if (!gx_a || RAY_IS_ERR(gx_a)) { ray_release(ft); ray_release(gx_by); return gx_a ? gx_a : ray_error("oom", NULL); }
+            a = gx_a; gx_named = 0;
+        }
     }
 
     int has_by  = b && b->type == RAY_DICT;
@@ -7238,9 +7363,11 @@ static ray_t* q_funsql_select_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
         return dict ? dict : ray_error("oom", NULL);
     }
     ray_t* sargs[4] = { dict, keycols, tempnames, outnames };
-    ray_t* res = q_select_exec(sargs, 4);
+    ray_t* res = q_select_exec(sargs, 4);   /* sorts the keyed result ascending by key */
     ray_release(dict); ray_release(keycols); ray_release(tempnames); ray_release(outnames);
-    if (res && res->type == RAY_DICT) res = funsql_sort_keyed(res);  /* by-group key order */
+    if (gx) res = funsql_exec_reshape(res, gx_named);   /* keyed table -> exec dict */
+    if (gx_by) ray_release(gx_by);
+    if (gx_a) ray_release(gx_a);
     return res;
 }
 

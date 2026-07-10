@@ -3635,13 +3635,17 @@ static void ql_qsql(ray_t **slot) {
         }
     }
 
-    /* by: single/multi grouping column(s); record their names as key cols */
+    /* by: single/multi grouping column(s); record their names as key cols.
+     * Single key -> the bare col-ref / expr (base ray_select single-key form).
+     * Multi key  -> a name!expr DICT (base by-dict, query.c:4926); a bare list
+     * is rejected with 'domain. */
     if (b && b->type == RAY_DICT) {
         ray_t *bk = ray_dict_keys(b);       /* names */
         ray_t *bv = ray_dict_vals(b);       /* sym vec or expr list */
         int64_t nb = ray_len(bk);
         int bv_sym = (bv && bv->type == RAY_SYM);
-        ray_t *byexpr = NULL;
+        ray_t *byexpr = NULL;               /* single-key: bare col/expr */
+        ray_t *bynames = NULL, *byvals = NULL;   /* multi-key: name!expr dict */
         for (int64_t i = 0; i < nb; i++) {
             ray_t *kn = ray_sym_vec_cell(bk, i);        /* borrowed -RAY_STR */
             keycols = q_symvec_append(keycols, ray_str_ptr(kn), (int)ray_str_len(kn));
@@ -3655,11 +3659,17 @@ static void ql_qsql(ray_t **slot) {
                 ql_unquote_cols(ex);
             }
             if (nb == 1) { byexpr = ex; }
-            else { if (!byexpr) byexpr = ray_list_new(nb); byexpr = ray_list_append(byexpr, ex); ray_release(ex); }
+            else {
+                if (!bynames) { bynames = ray_sym_vec_new(RAY_SYM_W64, nb); byvals = ray_list_new(nb); }
+                bynames = q_symvec_append(bynames, ray_str_ptr(kn), (int)ray_str_len(kn));
+                byvals  = ray_list_append(byvals, ex); ray_release(ex);
+            }
         }
-        if (byexpr) {
+        ray_t *byval = byexpr ? byexpr
+                              : (bynames ? ray_dict_new(bynames, byvals) : NULL);
+        if (byval) {
             keyvec  = q_symvec_append(keyvec, "by", 2);
-            vallist = ray_list_append(vallist, byexpr); ray_release(byexpr);
+            vallist = ray_list_append(vallist, byval); ray_release(byval);
         }
     }
 
