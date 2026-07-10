@@ -12,12 +12,24 @@
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec / q_fmt_prec — `\P` precision */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active — `\p` runtime listen */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
+#include "core/poll.h"        /* ray_poll_get / ray_selector_t — `\p 0W` fd readback */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
 #include <stdlib.h>           /* srand, strtoll, system, exit */
 #include <string.h>           /* strlen, memcpy, memcmp */
 #include <errno.h>            /* ERANGE — strtoll overflow guard */
+
+/* `\p 0W` reads the OS-chosen port back off the listener fd (getsockname),
+ * mirroring qmain.c's startup `-p 0W` path — the two share one readiness line. */
+#ifdef RAY_OS_WINDOWS
+  #define WIN32_LEAN_AND_MEAN
+  #include <winsock2.h>
+  #include <ws2tcpip.h>       /* socklen_t */
+#else
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+#endif
 
 /* Reused base fn (src/ops/system.c), declared not edited (frozen-clean): the
  * gc trigger is a no-op stub returning 0 — `\g` reports the mode; real
@@ -199,27 +211,57 @@ static ray_t* h_nyi(const char* arg, size_t alen, const char* rest, size_t restl
  *   - `\c`/`\C` and `\o` render WITHOUT a suffix in the doc (`45 160`,
  *     `10 10`, `0N`) — i.e. LONGS — so those getters return i64. */
 
+/* Read the actual bound port back off a listener fd (getsockname) — the `0W`
+ * auto-bind path needs the OS-chosen port to report it.  Copy of qmain.c's
+ * listener_bound_port (the two `0W` paths are deliberately identical); 0 on
+ * failure. */
+static uint16_t p_bound_port(int64_t fd) {
+    struct sockaddr_in sa;
+    socklen_t          len = sizeof(sa);
+    memset(&sa, 0, sizeof(sa));
+    if (getsockname((ray_sock_t)fd, (struct sockaddr*)&sa, &len) != 0)
+        return 0;
+    return ntohs(sa.sin_port);
+}
+
 /* `\p N` — listening port.  Binds a kdb-protocol IPC listener on port N
- * (1..65535) on the runtime event poll; the unified REPL loop (q_repl.c) then
- * serves it, and q_repl_mark_listener_active keeps the process alive past stdin
- * EOF (a client that `\p`s a port becomes a server).  Deferred (kept `'nyi`):
- * the getter `\p` (report current port), `\p 0` (close), and `\p 0W` (any-free)
- * — startup `-p` already covers the fixed/0W bind path. */
+ * (1..65535, or `0W` = any OS-chosen free port) on the runtime event poll; the
+ * unified REPL loop (q_repl.c) then serves it, and q_repl_mark_listener_active
+ * keeps the process alive past stdin EOF (a client that `\p`s a port becomes a
+ * server).  `0W` mirrors startup `-p 0W` (qmain.c): bind 0, read the real port
+ * back via getsockname, print it — so the runtime path is symmetric with the
+ * flag path (this is what lets tools/qscript run each server on an ephemeral
+ * port, immune to a busy 5000 and to concurrent runners).  Deferred (kept
+ * `'nyi`): the getter `\p` (report current port) and `\p 0` (close). */
 static ray_t* h_p(const char* arg, size_t alen, const char* rest, size_t restlen) {
     (void)rest; (void)restlen;
     if (alen == 0) return ray_error("nyi", NULL);        /* getter — deferred */
-    long long v;
-    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
-    if (v == 0) return ray_error("nyi", NULL);           /* `\p 0` close — deferred */
-    if (v < 1 || v > 65535) return ray_error("domain", NULL);
+    /* `0W`/`0w` auto token (same shape as h_S's `0N` probe) — bind port 0. */
+    bool port_auto = (alen == 2 && arg[0] == '0' && (arg[1] == 'W' || arg[1] == 'w'));
+    long long v = 0;
+    if (!port_auto) {
+        if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+        if (v == 0) return ray_error("nyi", NULL);       /* `\p 0` close — deferred */
+        if (v < 1 || v > 65535) return ray_error("domain", NULL);
+    }
     ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
     if (!poll) return ray_error("io", NULL);             /* no event poll (e.g. qdoctest) */
-    if (ray_ipc_listen(poll, (uint16_t)v) < 0)
+    int64_t lid = ray_ipc_listen(poll, port_auto ? 0 : (uint16_t)v);
+    if (lid < 0)
         return ray_error("io", NULL);                    /* bind/listen failed (EADDRINUSE, …) */
+    uint16_t bound = (uint16_t)v;
+    if (port_auto) {
+        /* Report the ACTUAL bound port; a readback failure after a successful
+         * bind is an `'io` error — never advertise `listening on port 0`
+         * (readiness would pass but every client would then fail to connect). */
+        ray_selector_t* ls = ray_poll_get(poll, lid);
+        bound = ls ? p_bound_port(ls->fd) : 0;
+        if (!bound) return ray_error("io", NULL);
+    }
     q_repl_mark_listener_active();
     /* Same readiness line startup `-p` prints (qmain) — lets a supervisor/test
      * detect the now-live listener; stderr so it never taints an stdout golden. */
-    fprintf(stderr, "listening on port %u\n", (uint16_t)v);
+    fprintf(stderr, "listening on port %u\n", bound);
     return NULL;                                          /* setter: silent */
 }
 
