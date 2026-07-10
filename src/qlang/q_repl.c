@@ -817,6 +817,12 @@ int q_repl_run_file(const char* path, FILE* out, FILE* err) {
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+        /* Strip TRAILING whitespace too, so a block delimiter with superfluous
+         * blanks (`/   ` / `\   `) still classifies as a singleton and a code
+         * line's insignificant trailing spaces don't skew anything (kdb ignores
+         * superfluous blanks — language.md).  Trailing spaces inside a string
+         * literal are safe: such a line ends with `"`, not whitespace. */
+        while (n && (line[n - 1] == ' ' || line[n - 1] == '\t')) line[--n] = '\0';
 
         /* trimmed view (leading whitespace skipped) drives classification */
         size_t lead = 0;
