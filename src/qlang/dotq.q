@@ -36,3 +36,16 @@
 / .Q.x12 / .Q.j12 — base-36 encode / decode vs .Q.nA; fixed width 12.
 .Q.x12:{raze {1#x _ .Q.nA} each (12#36) vs x}
 .Q.j12:{36 sv {[c] first where {x~1#y _ .Q.nA}[c;] each til count .Q.nA} each {[s;i]1#i _ s}[x;] each til count x}
+
+/ ---- Wave-D command-line / environment (ref/dotq.md) ----
+/ .Q.x — non-command parameters; initialised empty, (re)set by .Q.opt on each call.
+.Q.x:()
+/ .Q.opt — command-line args -> dict (ref/dotq.md, "opt"). Command params start "-";
+/ each flag's value is the tokens up to the next flag (0 -> (), 1 -> the string, many ->
+/ a list). Empty argv is guarded (where errors on empty; inner lambda runs only when
+/ argv is non-empty). Also sets .Q.x to the leading non-command tokens ("Set by .Q.opt").
+.Q.opt:{[a] $[count a;{[a] i:where {"-"~1#x} each a; e:(1_i),count a; .Q.x:$[count i;(first i)#a;a]; k:`$1_'a i; j:til count i; k!{[a;i;e;j] s:(1+i j)_(e j)#a; $[1=count s;first s;s]}[a;i;e;]each j}[a];(`$())!()]}
+/ .Q.def — defaults + tok-typed coercion over .Q.opt output (ref/dotq.md, "def"). For each
+/ default key: if present in opt, coerce its string to the default atom's type (typed null
+/ on failure); else keep the default. DEPENDS ON .Q.opt above (loader is top-to-bottom).
+.Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;(type d k)$o k;d k]}[d;o;]each key d}
