@@ -3,8 +3,12 @@
 #define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r for the clock producers */
 #endif
 #include "qlang/q_dotz.h"
+#include "qlang/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
+#include "qlang/q_fmt.h"       /* q_console_str/_reset — drain .z.ts show/0N! output */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
-#include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get — .z.p* alias slots */
+#include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get / ray_fn_unary */
+#include "lang/eval.h"         /* RAY_FN_NONE — .z.ts timer thunk attrs */
+#include "lang/internal.h"     /* call_fn1 — .z.ts timer dispatch */
 #include "core/ipc.h"          /* ray_ipc_current_handle / ray_ipc_fd_of_handle — .z.w */
 #include <rayforce.h>
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
@@ -32,6 +36,7 @@ static int    g_argc       = 0;
 static char** g_argv       = NULL;
 static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
 static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
+static ray_t* g_zts        = NULL;  /* current `.z.ts` timer handler (owned), or NULL */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
     if (len != 5 || name[0] != '.' || name[1] != 'z' || name[2] != '.' ||
@@ -279,6 +284,44 @@ static ray_t* z_N(void) { return ray_timespan(z_now_ns(1) % RAY_NS_PER_DAY); } /
 static ray_t* z_z(void) { return ray_datetime((double)z_now_ns(0) / (double)RAY_NS_PER_DAY); } /* .z.z UTC datetime */
 static ray_t* z_Z(void) { return ray_datetime((double)z_now_ns(1) / (double)RAY_NS_PER_DAY); } /* .z.Z local datetime */
 
+/* ---- `.z.ts` timer handler ------------------------------------------------
+ * `.z.ts` is a SETTABLE handler fired on each `\t N` tick (server-initiated
+ * periodic push).  It is NOT an `.ipc.on.*` connection hook, so it does not use
+ * env.c's frozen ipc-hook carve-out — it lives in this q-layer slot, set via
+ * q_setg_wrap and read back via q_dotz_resolve.  The single forwarding thunk
+ * (q_zts_tick) is registered ONCE per `\t N` and resolves the CURRENT `.z.ts`
+ * each fire, so re-assigning `.z.ts` takes effect with no re-registration. */
+static ray_t* q_zts_tick(ray_t* tick) {
+    (void)tick;                                  /* fire_expired's monotonic ms — kdb passes local ts */
+    if (!q_sys_timer_active()) return NULL;      /* stopped (incl. reentrant \t 0) → no-op */
+    ray_t* fn = g_zts;
+    if (!fn) return NULL;                         /* .z.ts unset → no-op */
+    ray_retain(fn);                               /* survive a re-assign mid-call */
+    ray_t* ts = ray_timestamp(z_now_ns(1));       /* .z.P local timestamp arg */
+    ray_t* r  = call_fn1(fn, ts);
+    ray_release(ts);
+    ray_release(fn);
+    /* Drain any show/0N! console output the handler produced to the SERVER
+     * stdout — the timer fires outside run_one_line / remote-eval / an IPC hook,
+     * so nothing else drains q_console_str here; without this the output is
+     * delayed until the next eval or (in an idle timer server) accumulates
+     * unbounded.  fflush so an otherwise-idle server surfaces it promptly. */
+    { const char* con = q_console_str();
+      if (con && *con) { fputs(con, stdout); fflush(stdout); }
+      q_console_reset(); }
+    return r;                                      /* fire_expired frees/prints it */
+}
+
+void q_dotz_zts_set(ray_t* fn) {
+    if (fn) ray_retain(fn);          /* retain-new before release-old (robust slot order) */
+    if (g_zts) ray_release(g_zts);
+    g_zts = fn;
+}
+
+ray_t* q_dotz_timer_thunk(void) {
+    return ray_fn_unary(".z.ts", RAY_FN_NONE, q_zts_tick);
+}
+
 static const struct { const char* name; uint8_t len; ray_t* (*make)(void); }
 Z_TAB[] = {
     { ".z.f", 4, z_f },
@@ -352,6 +395,13 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             break;
         }
 
+    /* `.z.ts` timer handler read-back: return the stored handler (retained),
+     * or decline when unset (→ eval raises 'name, like the `.z.p*` aliases). */
+    if (!out && n == 5 && memcmp(p, ".z.ts", 5) == 0 && g_zts) {
+        ray_retain(g_zts);
+        out = g_zts;
+    }
+
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
      * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
      * `.ipc.on.sync:{…}` assignment and vice-versa.  An UNSET alias declines
@@ -370,6 +420,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
 }
 
 void q_dotz_destroy(void) {
+    if (g_zts) { ray_release(g_zts); g_zts = NULL; }   /* release the `.z.ts` handler */
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;
