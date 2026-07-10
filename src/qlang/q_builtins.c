@@ -29,7 +29,8 @@
 /* (parse str) — parse q SOURCE into a ray_t AST (overrides rayfall's lisp
  * parse).  q_parse needs a NUL-terminated C string; a RAY_STR atom's bytes are
  * not guaranteed terminated, so copy through a bounded scratch buffer. */
-static ray_t* q_parse_builtin_fn(ray_t* x) {
+/* Exported (q_builtins.h) so the `-5!` internal-fn alias single-homes here. */
+ray_t* q_parse_builtin_fn(ray_t* x) {
     if (!x || x->type != -RAY_STR) return ray_error("type", "parse expects a string");
     const char* sp = ray_str_ptr(x);
     size_t sl = ray_str_len(x);
@@ -313,7 +314,8 @@ static int q_md5_compute(const uint8_t* msg, size_t len, uint8_t out[16]) {
         for (int j = 0; j < 4; j++) out[i * 4 + j] = (uint8_t)(words[i] >> (8 * j));
     return 1;
 }
-static ray_t* q_md5_fn(ray_t* x) {
+/* Exported (q_builtins.h) so the `-15!` internal-fn alias single-homes here. */
+ray_t* q_md5_fn(ray_t* x) {
     if (!x || x->type != -RAY_STR) return ray_error("type", "md5: expects a string");
     uint8_t digest[16];
     if (!q_md5_compute((const uint8_t*)ray_str_ptr(x), ray_str_len(x), digest))
@@ -452,8 +454,9 @@ static int q_sha1_compute(const uint8_t* msg, size_t n, uint8_t out[20]) {
     return 1;
 }
 
-/* (.Q.btoa x) — base64-encode a string or byte vector to a char string. */
-static ray_t* q_dotq_btoa_fn(ray_t* x) {
+/* (.Q.btoa x) — base64-encode a string or byte vector to a char string.
+ * Exported (q_builtins.h) so the `-32!` internal-fn alias single-homes here. */
+ray_t* q_dotq_btoa_fn(ray_t* x) {
     const uint8_t* p; size_t n;
     if (!q_bytes_of(x, &p, &n))
         return ray_error("type", ".Q.btoa: expects a string or byte vector");
@@ -481,8 +484,9 @@ static ray_t* q_dotq_atob_fn(ray_t* x) {
 }
 
 /* (.Q.sha1 x) — SHA-1 digest of a string (or byte vector) as a 20-byte
- * bytestream (ref/dotq.md). */
-static ray_t* q_dotq_sha1_fn(ray_t* x) {
+ * bytestream (ref/dotq.md).  Exported (see q_builtins.h) so the `-33!` bang
+ * alias routes to this single-home C impl. */
+ray_t* q_dotq_sha1_fn(ray_t* x) {
     const uint8_t* p; size_t n;
     if (!q_bytes_of(x, &p, &n))
         return ray_error("type", ".Q.sha1: expects a string or byte vector");
