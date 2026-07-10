@@ -232,9 +232,9 @@ static ray_t* h_nyi(const char* arg, size_t alen, const char* rest, size_t restl
  *     `10 10`, `0N`) — i.e. LONGS — so those getters return i64. */
 
 /* Read the actual bound port back off a listener fd (getsockname) — the `0W`
- * auto-bind path needs the OS-chosen port to report it.  Copy of qmain.c's
- * listener_bound_port (the two `0W` paths are deliberately identical); 0 on
- * failure. */
+ * auto-bind path needs the OS-chosen port to report it.  The SINGLE home of the
+ * readback (qmain.c's startup `-p` now calls q_sys_listen below rather than
+ * duplicating this); 0 on failure. */
 static uint16_t p_bound_port(int64_t fd) {
     struct sockaddr_in sa;
     socklen_t          len = sizeof(sa);
@@ -243,6 +243,35 @@ static uint16_t p_bound_port(int64_t fd) {
         return 0;
     return ntohs(sa.sin_port);
 }
+
+/* Single-home the listen+readback+state-swap shared by `\p N`/`\p 0W` and the
+ * startup `-p` path (see q_sys.h).  port==0 → OS-chosen ephemeral.  Silent. */
+uint16_t q_sys_listen(uint16_t port) {
+    ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
+    if (!poll) return 0;                                  /* no event poll (e.g. qdoctest) */
+    int64_t sel = ray_ipc_listen(poll, port);            /* port==0 → OS picks a free port */
+    if (sel < 0) return 0;                               /* bind/listen failed — old listener intact */
+    ray_selector_t* ls = ray_poll_get(poll, sel);
+    uint16_t bound = ls ? p_bound_port(ls->fd) : 0;
+    if (!bound) {
+        /* Readback failed after a successful bind: tear the new listener down
+         * (so it doesn't leak) and report failure — never advertise port 0
+         * (readiness would pass but every client would fail to connect). */
+        ray_poll_deregister(poll, sel);
+        return 0;
+    }
+    /* kdb listens on ONE port: drop the previous listener now the new bind
+     * succeeded (a failed bind above left the old one intact). */
+    if (g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
+    g_listen_sel  = sel;
+    g_listen_port = bound;                               /* authoritative — `system "p"` reports it */
+    q_repl_mark_listener_active();                       /* keep the process alive past stdin EOF */
+    return bound;
+}
+
+/* The authoritative live listening port (0 = none) — see q_sys.h.  qmain reads
+ * it for the post-script server-mode decision instead of a stale local port. */
+uint16_t q_sys_listen_port(void) { return (uint16_t)g_listen_port; }
 
 /* `\p` — listening port (basics/syscmds.md, listening-port.md).  Merges this
  * feature's getter/close/rebind with #127's `0W` ephemeral bind:
@@ -254,12 +283,15 @@ static uint16_t p_bound_port(int64_t fd) {
  *                        q_repl_mark_listener_active keeps the process alive past
  *                        stdin EOF (a client that `\p`s a port becomes a server).
  *   `\p 0W`            -> bind any OS-chosen free port, read it back via
- *                        getsockname and report it (mirrors startup `-p 0W`,
- *                        qmain.c) — what lets tools/qscript run each server on an
- *                        ephemeral port, immune to a busy 5000 / concurrent runners.
+ *                        getsockname and record it (mirrors startup `-p 0W`,
+ *                        qmain.c — both call q_sys_listen) — what lets
+ *                        tools/qscript run each server on an ephemeral port,
+ *                        immune to a busy 5000 / concurrent runners.
  * `\p N`/`0W` rebind drops the previous listener only AFTER the new bind
- * succeeds (a failed bind leaves the old one intact; codex diff P2).  The getter
- * reports the ACTUAL bound port (incl. the `0W`-chosen one). */
+ * succeeds (a failed bind leaves the old one intact; codex diff P2 — enforced
+ * inside q_sys_listen).  The getter reports the ACTUAL bound port (incl. the
+ * `0W`-chosen one).  NO port is ANNOUNCED on any path — full kdb fidelity; a
+ * supervisor/test reads the port back with the `\p`/`system "p"` getter. */
 static ray_t* h_p(const char* arg, size_t alen, const char* rest, size_t restlen) {
     (void)rest; (void)restlen;
     if (alen == 0) return ray_i32(g_listen_port);        /* getter -> `0i` default */
@@ -270,35 +302,16 @@ static ray_t* h_p(const char* arg, size_t alen, const char* rest, size_t restlen
         if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
         if (v < 0 || v > 65535) return ray_error("domain", NULL);
     }
-    ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
     if (!port_auto && v == 0) {                          /* `\p 0` — stop listening */
+        ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
         if (poll && g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
         g_listen_sel  = -1;
         g_listen_port = 0;
         return NULL;                                     /* silent */
     }
-    if (!poll) return ray_error("io", NULL);             /* no event poll (e.g. qdoctest) */
-    int64_t sel = ray_ipc_listen(poll, port_auto ? 0 : (uint16_t)v);
-    if (sel < 0) return ray_error("io", NULL);           /* bind/listen failed (EADDRINUSE, …) — old listener untouched */
-    uint16_t bound = (uint16_t)v;
-    if (port_auto) {
-        /* Report the ACTUAL bound port; a readback failure after a successful
-         * bind is an `'io` error — never advertise `listening on port 0`
-         * (readiness would pass but every client would then fail to connect). */
-        ray_selector_t* ls = ray_poll_get(poll, sel);
-        bound = ls ? p_bound_port(ls->fd) : 0;
-        if (!bound) return ray_error("io", NULL);
-    }
-    /* kdb listens on ONE port: drop the previous listener now that the new bind
-     * succeeded (a failed bind above leaves the old one intact, and `\p 0` can
-     * still close it — codex diff P2). */
-    if (g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
-    g_listen_sel  = sel;
-    g_listen_port = bound;
-    q_repl_mark_listener_active();
-    /* Same readiness line startup `-p` prints (qmain) — lets a supervisor/test
-     * detect the now-live listener; stderr so it never taints an stdout golden. */
-    fprintf(stderr, "listening on port %u\n", bound);
+    /* Bind/readback/state-swap single-homed in q_sys_listen (shared with startup
+     * `-p`).  0 → no poll (qdoctest) / bind-listen / readback failure → `'io`. */
+    if (!q_sys_listen(port_auto ? 0 : (uint16_t)v)) return ray_error("io", NULL);
     return NULL;                                          /* setter: silent */
 }
 
