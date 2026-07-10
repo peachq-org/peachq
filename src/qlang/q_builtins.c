@@ -11,6 +11,7 @@
 #include "qlang/q_parse.h"
 #include "qlang/q_json.h"     /* q_json_register — .j JSON namespace */
 #include "qlang/q_registry.h" /* q_registry_init */
+#include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_fmt.h"      /* q_console_show — show's display sink */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
 #include "lang/eval.h"      /* RAY_FN_NONE */
@@ -907,6 +908,9 @@ void q_builtins_register(void) {
     bind_unary("md5",    q_md5_fn);
     bind_vary ("ssr",    q_ssr_wrap);
     bind_unary("show",   q_show_fn);
+    /* `system "…"` — q-owned string form; single-homes with the `\`-slash
+     * dispatcher (q_sys.c). QK_ENV row in q_ops.c snapshots this binding. */
+    bind_unary("system", q_system_fn);
     /* File Text companions (feat/q-file-text): `read0[(f;o)]` bracket calls
      * name-ref through the env (the ssr precedent — same C fn as the registry
      * row); `csv` is kdb's comma global (ref/file-text.md `csv 0: t`). */

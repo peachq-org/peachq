@@ -10,15 +10,22 @@
 #include "qlang/q_sys.h"
 #include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec / q_fmt_prec — `\P` precision */
-#include "qlang/q_repl.h"     /* q_repl_mark_listener_active — `\p` runtime listen */
+#include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / ray_selector_t — `\p 0W` fd readback */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
+#include "core/poll.h"        /* ray_poll_deregister — `\p 0` closes the listener */
+#include "lang/eval.h"        /* ray_eval_get_restricted — `system` access guard */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
-#include <stdlib.h>           /* srand, strtoll, system, exit */
+#include <stdlib.h>           /* srand, strtoll, system, malloc */
 #include <string.h>           /* strlen, memcpy, memcmp */
 #include <errno.h>            /* ERANGE — strtoll overflow guard */
+#include <stdio.h>            /* popen / pclose — `system "…"` stdout capture */
+#include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
+#include <limits.h>          /* PATH_MAX */
+#include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
+#include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
 
 /* `\p 0W` reads the OS-chosen port back off the listener fd (getsockname),
  * mirroring qmain.c's startup `-p 0W` path — the two share one readiness line. */
@@ -73,6 +80,13 @@ static int32_t g_week_offset;             /* \W week offset   (default 2)       
 static int32_t g_err_trap;                /* \e error trap    (default 0)       */
 static int32_t g_sec_threads;             /* \s secondary thr (default 0)       */
 
+/* `\p` listening-port state.  g_listen_port is what the `\p` getter reports
+ * (0 = not listening, kdb default); g_listen_sel is the poll selector id of the
+ * live listener so `\p 0` can deregister it (deregister fires ipc_on_close ->
+ * ray_sock_close on the listen fd).  -1 = none. */
+static int32_t g_listen_port;
+static int64_t g_listen_sel = -1;
+
 void q_sys_cfg_init(void) {
     g_con_rows  = 25; g_con_cols  = 80;
     g_http_rows = 36; g_http_cols = 2000;
@@ -81,8 +95,14 @@ void q_sys_cfg_init(void) {
     g_week_offset = 2;           /* Monday (0 = Saturday) */
     g_err_trap  = 0;             /* trapping off */
     g_sec_threads = 0;           /* no secondary threads configured */
+    g_listen_port = 0;           /* `\p` — no listening port by default */
+    g_listen_sel  = -1;          /* no live listener selector */
     q_fmt_set_prec(7);           /* `\P` default (single-homed in q_fmt.c) */
 }
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 /* Parse a base-10 signed integer from [s,s+len) into *out; returns 1 on a
  * clean full parse (no empty, no trailing garbage, no int64 overflow). */
@@ -224,45 +244,101 @@ static uint16_t p_bound_port(int64_t fd) {
     return ntohs(sa.sin_port);
 }
 
-/* `\p N` — listening port.  Binds a kdb-protocol IPC listener on port N
- * (1..65535, or `0W` = any OS-chosen free port) on the runtime event poll; the
- * unified REPL loop (q_repl.c) then serves it, and q_repl_mark_listener_active
- * keeps the process alive past stdin EOF (a client that `\p`s a port becomes a
- * server).  `0W` mirrors startup `-p 0W` (qmain.c): bind 0, read the real port
- * back via getsockname, print it — so the runtime path is symmetric with the
- * flag path (this is what lets tools/qscript run each server on an ephemeral
- * port, immune to a busy 5000 and to concurrent runners).  Deferred (kept
- * `'nyi`): the getter `\p` (report current port) and `\p 0` (close). */
+/* `\p` — listening port (basics/syscmds.md, listening-port.md).  Merges this
+ * feature's getter/close/rebind with #127's `0W` ephemeral bind:
+ *   getter `\p`        -> current listening port, `0i` when none (kdb default).
+ *   `\p 0`             -> stop listening: deregister the live listener selector
+ *                        (fires ipc_on_close -> closes the fd), reset to 0.
+ *   `\p N` (1..65535)  -> bind a kdb-protocol IPC listener on the runtime event
+ *                        poll; the unified REPL loop (q_repl.c) serves it, and
+ *                        q_repl_mark_listener_active keeps the process alive past
+ *                        stdin EOF (a client that `\p`s a port becomes a server).
+ *   `\p 0W`            -> bind any OS-chosen free port, read it back via
+ *                        getsockname and report it (mirrors startup `-p 0W`,
+ *                        qmain.c) — what lets tools/qscript run each server on an
+ *                        ephemeral port, immune to a busy 5000 / concurrent runners.
+ * `\p N`/`0W` rebind drops the previous listener only AFTER the new bind
+ * succeeds (a failed bind leaves the old one intact; codex diff P2).  The getter
+ * reports the ACTUAL bound port (incl. the `0W`-chosen one). */
 static ray_t* h_p(const char* arg, size_t alen, const char* rest, size_t restlen) {
     (void)rest; (void)restlen;
-    if (alen == 0) return ray_error("nyi", NULL);        /* getter — deferred */
+    if (alen == 0) return ray_i32(g_listen_port);        /* getter -> `0i` default */
     /* `0W`/`0w` auto token (same shape as h_S's `0N` probe) — bind port 0. */
     bool port_auto = (alen == 2 && arg[0] == '0' && (arg[1] == 'W' || arg[1] == 'w'));
     long long v = 0;
     if (!port_auto) {
         if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
-        if (v == 0) return ray_error("nyi", NULL);       /* `\p 0` close — deferred */
-        if (v < 1 || v > 65535) return ray_error("domain", NULL);
+        if (v < 0 || v > 65535) return ray_error("domain", NULL);
     }
     ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
+    if (!port_auto && v == 0) {                          /* `\p 0` — stop listening */
+        if (poll && g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
+        g_listen_sel  = -1;
+        g_listen_port = 0;
+        return NULL;                                     /* silent */
+    }
     if (!poll) return ray_error("io", NULL);             /* no event poll (e.g. qdoctest) */
-    int64_t lid = ray_ipc_listen(poll, port_auto ? 0 : (uint16_t)v);
-    if (lid < 0)
-        return ray_error("io", NULL);                    /* bind/listen failed (EADDRINUSE, …) */
+    int64_t sel = ray_ipc_listen(poll, port_auto ? 0 : (uint16_t)v);
+    if (sel < 0) return ray_error("io", NULL);           /* bind/listen failed (EADDRINUSE, …) — old listener untouched */
     uint16_t bound = (uint16_t)v;
     if (port_auto) {
         /* Report the ACTUAL bound port; a readback failure after a successful
          * bind is an `'io` error — never advertise `listening on port 0`
          * (readiness would pass but every client would then fail to connect). */
-        ray_selector_t* ls = ray_poll_get(poll, lid);
+        ray_selector_t* ls = ray_poll_get(poll, sel);
         bound = ls ? p_bound_port(ls->fd) : 0;
         if (!bound) return ray_error("io", NULL);
     }
+    /* kdb listens on ONE port: drop the previous listener now that the new bind
+     * succeeded (a failed bind above leaves the old one intact, and `\p 0` can
+     * still close it — codex diff P2). */
+    if (g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
+    g_listen_sel  = sel;
+    g_listen_port = bound;
     q_repl_mark_listener_active();
     /* Same readiness line startup `-p` prints (qmain) — lets a supervisor/test
      * detect the now-live listener; stderr so it never taints an stdout golden. */
     fprintf(stderr, "listening on port %u\n", bound);
     return NULL;                                          /* setter: silent */
+}
+
+/* `\cd` — change directory (basics/syscmds.md).  getter -> current directory as
+ * a char vector; `\cd fp` -> real chdir (the kx "wrong directory" footgun fix,
+ * ARCHITECTURE decision: cwd must be controllable + predictable).  DEFERRED:
+ * kdb's create-if-missing on a set (a missing target -> 'os here). */
+static ray_t* h_cd(const char* arg, size_t alen, const char* rest, size_t restlen) {
+    (void)rest; (void)restlen;
+    if (alen == 0) {                                     /* getter: current dir */
+        char buf[PATH_MAX];
+        if (!getcwd(buf, sizeof buf)) return ray_error("os", NULL);
+        return ray_str(buf, strlen(buf));                /* char vector */
+    }
+    if (alen >= PATH_MAX) return ray_error("os", NULL);
+    char path[PATH_MAX];
+    memcpy(path, arg, alen); path[alen] = '\0';
+    if (chdir(path) != 0) return ray_error("os", NULL);
+    return NULL;                                          /* setter: silent */
+}
+
+/* `\l name` — load a q script (basics/syscmds.md).  A REGULAR readable file is
+ * executed line-at-a-time (q_parse -> q_lower -> ray_eval, silent — kdb loads
+ * silently) by reusing the public q_repl_run_file (mirrors the `q file.q`
+ * loader).  A missing/unreadable path or a DIRECTORY is a silent no-op: this
+ * preserves the banked `\l sp.q` / `\l .` / `\l /tmp/db*` corpus rows (whose
+ * targets are absent or directories in the runner cwd) and defers the
+ * directory / splayed-table / serialized-object load forms.  Getter form (no
+ * arg) stays 'nyi. */
+static ray_t* h_l(const char* arg, size_t alen, const char* rest, size_t restlen) {
+    (void)rest; (void)restlen;
+    if (alen == 0) return ray_error("nyi", NULL);        /* `\l` (bare) — reload cwd, deferred */
+    if (alen >= PATH_MAX) return NULL;
+    char path[PATH_MAX];
+    memcpy(path, arg, alen); path[alen] = '\0';
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || access(path, R_OK) != 0)
+        return NULL;                                     /* missing/dir/unreadable — silent */
+    q_repl_run_file(path, stdout, stderr);               /* load the script (silent) */
+    return NULL;
 }
 
 /* `\P` — display precision.  `\P`→`7i`; `\P n` sets n∈[0,17] (0 = max = 17),
@@ -434,13 +510,13 @@ static const struct {
     /* silent setter / action form (arg present) → NULL; getter form → 'nyi */
     { "z",  1, 1, Q_SYS_F_NONE, h_getset },   /* date parsing */
     { "E",  1, 1, Q_SYS_F_NONE, h_getset },   /* TLS server mode */
-    { "l",  1, 1, Q_SYS_F_NONE, h_getset },   /* load file/dir */
-    { "p",  1, 1, Q_SYS_F_NONE, h_p },        /* listening port — runtime \p N binds */
+    { "l",  1, 1, Q_SYS_F_NONE, h_l },        /* load q script (regular file) */
+    { "p",  1, 1, Q_SYS_F_NONE, h_p },        /* listening port — get / \p N bind / \p 0 close */
     { "r",  1, 2, Q_SYS_F_NONE, h_getset },   /* replication / rename */
     { "T",  1, 1, Q_SYS_F_NONE, h_getset },   /* client timeout */
     { "u",  1, 1, Q_SYS_F_NONE, h_getset },   /* reload user pwd file */
     { "x",  1, 1, Q_SYS_F_NONE, h_getset },   /* expunge */
-    { "cd", 2, 1, Q_SYS_F_NONE, h_getset },   /* change directory */
+    { "cd", 2, 1, Q_SYS_F_NONE, h_cd },       /* change directory (real chdir) */
     { "1",  1, 1, Q_SYS_F_NONE, h_getset },   /* stdout redirect */
     { "2",  1, 1, Q_SYS_F_NONE, h_getset },   /* stderr redirect */
     { "_",  1, 1, Q_SYS_F_NONE, h_getset },   /* hide q code */
@@ -456,10 +532,11 @@ static const struct {
     { "",   0, 0, Q_SYS_F_REPL_ONLY, h_nyi }, /* bare \ terminate / toggle q-k */
 };
 
-/* Shell escape (REPL only).  `rem`/`rlen` is a SLICE of the console line, so
- * copy it NUL-terminated before system() — stack buffer for the common case,
+/* Shell escape for the interactive REPL `\`-form (declared in q_sys.h; the REPL
+ * adapter calls it on QS_UNKNOWN).  `rem`/`rlen` is a SLICE of the console line,
+ * so copy it NUL-terminated before system() — stack buffer for the common case,
  * ray_alloc fallback for long commands (mirrors frozen src/lang/syscmd.c). */
-static ray_t* q_sys_shell(const char* rem, size_t rlen) {
+ray_t* q_sys_shell(const char* rem, size_t rlen) {
     char   stackbuf[1024];
     char*  cmd = stackbuf;
     ray_t* blk = NULL;
@@ -475,16 +552,119 @@ static ray_t* q_sys_shell(const char* rem, size_t rlen) {
     return ray_i64(rc);
 }
 
-ray_t* q_sys_dispatch(const char* line, size_t n, int* handled, int is_repl) {
-    *handled = 0;
+/* Shell escape for the q `system "…"` STRING form.  Runs the command in the
+ * current PROCESS cwd (popen -> /bin/sh -c) and captures its STDOUT as a q
+ * LIST of character vectors, one per line, with the line feed and any
+ * associated carriage return removed (ref/system.md).  A nonzero shell exit
+ * throws 'os (ref/system.md `@[system;"ls egg";…]` -> "error - os"); stderr is
+ * NOT captured (popen "r" reads stdout only).  Ownership-heavy: every failure
+ * path releases the partial list, the current row, and both scratch buffers. */
+static ray_t* q_sys_shell_capture(const char* rem, size_t rlen) {
+    char   stackbuf[1024];
+    char*  cmd = stackbuf;
+    ray_t* blk = NULL;
+    if (rlen + 1 > sizeof stackbuf) {
+        blk = ray_alloc(rlen + 1);
+        if (!blk) return ray_error("oom", NULL);
+        cmd = (char*)ray_data(blk);
+    }
+    memcpy(cmd, rem, rlen);
+    cmd[rlen] = '\0';
+
+    FILE* p = popen(cmd, "r");
+    if (blk) ray_free(blk);
+    if (!p) return ray_error("os", NULL);
+
+    /* Slurp all stdout into a growable buffer. */
+    size_t cap = 4096, len = 0;
+    char*  out = (char*)malloc(cap);
+    if (!out) { pclose(p); return ray_error("oom", NULL); }
+    size_t got;
+    char   rbuf[4096];
+    while ((got = fread(rbuf, 1, sizeof rbuf, p)) > 0) {
+        if (len + got > cap) {
+            while (len + got > cap) cap *= 2;
+            char* nb = (char*)realloc(out, cap);
+            if (!nb) { free(out); pclose(p); return ray_error("oom", NULL); }
+            out = nb;
+        }
+        memcpy(out + len, rbuf, got);
+        len += got;
+    }
+    int status = pclose(p);
+    if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        free(out);
+        return ray_error("os", NULL);                    /* nonzero / signalled */
+    }
+
+    /* Split on '\n', dropping a trailing '\r' per line (LF + associated CR
+     * removed).  A trailing newline does NOT yield an empty final row. */
+    ray_t* list = ray_list_new(1);
+    if (RAY_IS_ERR(list)) { free(out); return list; }
+    size_t i = 0;
+    while (i < len) {
+        size_t j = i;
+        while (j < len && out[j] != '\n') j++;
+        size_t end = j;
+        if (end > i && out[end - 1] == '\r') end--;      /* strip associated CR */
+        ray_t* row = ray_str(out + i, end - i);
+        if (!row || RAY_IS_ERR(row)) { ray_release(list); free(out); return row ? row : ray_error("oom", NULL); }
+        list = ray_list_append(list, row);               /* retains row */
+        ray_release(row);                                /* drop our local ref */
+        if (RAY_IS_ERR(list)) { free(out); return list; }
+        i = (j < len) ? j + 1 : j;                       /* skip the '\n' */
+    }
+    free(out);
+    return list;                                         /* empty stdout -> empty list */
+}
+
+/* The q-owned `system "…"` verb — the STRING-form adapter.  Single-homes with
+ * the `\`-slash form by normalizing the string (conceptually prepends `\`) and
+ * running the mode-less core: a known leading token runs the kdb system command
+ * (QS_VALUE), an unknown token shells out capturing stdout as a list of char
+ * vectors (QS_UNKNOWN), and the exit/terminate commands are benign here.
+ * `system` is a restricted primitive under IPC reval (kdb blocks it) -> 'access. */
+ray_t* q_system_fn(ray_t* x) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!x || x->type != -RAY_STR) return ray_error("type", "system expects a string");
+    const char* sp = ray_str_ptr(x);
+    size_t sl = ray_str_len(x);
+
+    char   stackbuf[1024];
+    char*  buf = stackbuf;
+    ray_t* blk = NULL;
+    if (sl + 2 > sizeof stackbuf) {                      /* '\' + cmd + NUL */
+        blk = ray_alloc(sl + 2);
+        if (!blk) return ray_error("oom", NULL);
+        buf = (char*)ray_data(blk);
+    }
+    buf[0] = '\\';
+    if (sl) memcpy(buf + 1, sp, sl);
+    buf[sl + 1] = '\0';
+
+    q_sys_result d = q_sys_dispatch(buf, sl + 1);
+    /* d.shell points INTO buf, so capture before releasing buf. */
+    ray_t* out;
+    switch (d.kind) {
+    case QS_UNKNOWN: out = q_sys_shell_capture(d.shell, d.shell_len); break;
+    case QS_VALUE:   out = d.val; break;                 /* may be NULL (silent) */
+    default:         out = NULL; break;                  /* quit / toggle: benign */
+    }
+    if (blk) ray_free(blk);
+    if (!out) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }  /* silent -> generic null */
+    return out;
+}
+
+q_sys_result q_sys_dispatch(const char* line, size_t n) {
+    q_sys_result res = { QS_NOT_CMD, NULL, NULL, 0 };
     size_t i = 0;
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
-    if (i >= n || line[i] != '\\') return NULL;   /* not a `\`-command line */
+    if (i >= n || line[i] != '\\') return res;    /* not a `\`-command line */
     i++;
 
     /* Command token = run of chars that are neither whitespace nor `:`.  The
      * `:` stop resolves kdb's repetition suffix (\t:100, \ts:10000) to the base
-     * command.  The remainder (token..EOL) is what a miss hands the shell. */
+     * command.  The remainder (token..EOL) is the slice a miss hands back. */
     size_t rem0 = i;
     size_t c0 = i;
     while (i < n && line[i] != ' ' && line[i] != '\t' && line[i] != ':') i++;
@@ -499,25 +679,19 @@ ray_t* q_sys_dispatch(const char* line, size_t n, int* handled, int is_repl) {
         }
 
     if (row < 0) {
-        /* Unknown `\`-token.  REPL → OS shell escape (kdb-true `\foo`).  Doctest
-         * / script → do NOT execute; leave it to the parser (handled stays 0,
-         * byte-identical to the historic fall-through). */
-        if (!is_repl) return NULL;
-        *handled = 1;
-        return q_sys_shell(line + rem0, n - rem0);
+        /* Unknown `\`-token: classify only; hand the command slice back and let
+         * the caller decide whether/how to shell out (REPL: raw status;
+         * system"…": stdout capture; doctest: don't execute, leave to parser). */
+        res.kind      = QS_UNKNOWN;
+        res.shell     = line + rem0;
+        res.shell_len = n - rem0;
+        return res;
     }
 
-    /* Flag gating on the resolved row. */
+    /* The process-level commands are CLASSIFIED, never acted on here. */
     uint8_t flags = Q_SYS[row].flags;
-    if (flags & Q_SYS_F_EXIT) {
-        *handled = 1;
-        if (is_repl) exit(0);        /* real quit — kdb-true */
-        return NULL;                 /* doctest: survive silently */
-    }
-    if ((flags & Q_SYS_F_REPL_ONLY) && !is_repl) {
-        *handled = 1;
-        return NULL;                 /* doctest: benign, never exit */
-    }
+    if (flags & Q_SYS_F_EXIT)      { res.kind = QS_QUIT;   return res; }  /* \\  */
+    if (flags & Q_SYS_F_REPL_ONLY) { res.kind = QS_TOGGLE; return res; }  /* bare \ */
 
     /* Optional first-token argument.  Skip a `:`-repetition suffix (\t:100)
      * first; then the first whitespace-delimited token (rest of the line is
@@ -539,6 +713,7 @@ ray_t* q_sys_dispatch(const char* line, size_t n, int* handled, int is_repl) {
      * Stage-1 `arg[0]=='/'` guard wrongly swallowed absolute paths. */
     if (alen == 1 && arg[0] == '/') alen = 0;
 
-    *handled = 1;
-    return Q_SYS[row].handler(arg, alen, rest, restlen);
+    res.kind = QS_VALUE;
+    res.val  = Q_SYS[row].handler(arg, alen, rest, restlen);
+    return res;
 }
