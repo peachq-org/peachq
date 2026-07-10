@@ -66,9 +66,10 @@
 / simple table, re-key on the original key cols (k xkey). Non-keyed t just applies f.
 .Q.ft:{[f;t] k:keys t; $[count k;k xkey f 0!t;f t]}
 / .Q.ff — append null-filled columns (ref/dotq.md, "ff"): add cols of table y absent from
-/ table x, each a count[x] null of that col's type; common cols keep x's values. (Contract:
-/ y is a TABLE — relies on cols y / y nc; not a general dict utility.)
-.Q.ff:{[x;y] nc:cols[y] except cols x; flip (flip x),nc!{[n;v](type v)$n#0N}[count x]each y nc}
+/ table x, each a count[x] null of that col's type; common cols keep x's values. Works via
+/ column dicts (flip) so multi-row y is handled (index the col-dict dy by the missing keys,
+/ NOT the table by nc). Contract: y is a TABLE (uses flip y / key); not a general dict util.
+.Q.ff:{[x;y] dx:flip x; dy:flip y; nc:key[dy] except key dx; flip dx,nc!{[n;v](type v)$n#0N}[count x]each dy nc}
 / .Q.s1 — single-line string representation (ref/dotq.md, "s1"): the -3! internal. -3! is
 / currently nyi in openq, so this is red-below-floor until it lands (then auto-greens).
 .Q.s1:{-3!x}
