@@ -31,6 +31,19 @@
 / .Q.def: defaults + tok-typed coercion over .Q.opt output (typed null on absent value / bad coerce).
 .Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;$[-10h=type o k;(type d k)$o k;first 0#d k];d k]}[d;o;]each key d};
 
+/ ---- Precision format (ref/dotq.md): thin wrappers over -27! (IEEE754 precision format) ----
+/ .Q.f[x;y]: y to x decimals as a string. DECIMAL rounding (not -27!'s IEEE754): nudge y by a
+/ tiny relative epsilon so decimal ties cross the boundary (.045->"0.05", cf -27!(2i;.045)->"0.04").
+.Q.f:{-27!(x;(1+1e-15)*"f"$y)};
+/ .Q.fmt[x;y;z]: z as a string of LENGTH x, formatted to y decimal places (left-padded via `$`).
+.Q.fmt:{[x;y;z] neg[x]$.Q.f[y;z]};
+
+/ ---- Value / table-dict (ref/dotq.md) ----
+/ .Q.v: filepath -> splayed table (unsupported in-memory); other symbol -> global named x; else -> x.
+.Q.v:{$[-11h=type x;value x;x]};
+/ .Q.V: table -> dictionary of its column values (a table is a flipped column-dict).
+.Q.V:{flip x};
+
 / ---- General-purpose utils (ref/dotq.md) ----
 .Q.dd:{` sv x,`$string y};
 / .Q.addmonths: x(date) + y months; a day offset past the shorter target month spills forward.
