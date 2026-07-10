@@ -48,4 +48,4 @@
 / .Q.def — defaults + tok-typed coercion over .Q.opt output (ref/dotq.md, "def"). For each
 / default key: if present in opt, coerce its string to the default atom's type (typed null
 / on failure); else keep the default. DEPENDS ON .Q.opt above (loader is top-to-bottom).
-.Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;(type d k)$o k;d k]}[d;o;]each key d}
+.Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;$[-10h=type o k;(type d k)$o k;first 0#d k];d k]}[d;o;]each key d}
