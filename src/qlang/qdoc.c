@@ -308,7 +308,11 @@ qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
                     memcpy(qh + l, sub, strlen(sub) + 1);
                     struct stat st;
                     if (stat(qh, &st) == 0 && S_ISDIR(st.st_mode))
+#if defined(RAY_OS_WINDOWS)
+                        _putenv_s("QHOME", qh);        /* mingw has no setenv */
+#else
                         setenv("QHOME", qh, /*overwrite=*/1);
+#endif
                 }
             }
             qhome_set = 1;
