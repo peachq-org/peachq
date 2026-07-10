@@ -32,6 +32,16 @@ ray_t* q_dotz_resolve(int64_t sym_id);
  * spellings (`.z.pg` and `.ipc.on.sync`) resolve to ONE env slot. */
 int q_dotz_ipc_hook_index(const char* name, size_t len);
 
+/* `.z.ts` timer handler slot.  q_setg_wrap routes a `.z.ts:` assignment here;
+ * q_dotz_resolve reads it back.  set RETAINS its own ref; passing NULL clears. */
+void   q_dotz_zts_set(ray_t* fn);
+
+/* A fresh RAY_UNARY fn-value (rc=1) that, each time the poll timer fires it,
+ * resolves the CURRENT `.z.ts` binding and calls it with a fresh LOCAL
+ * timestamp (`.z.P`).  Unset `.z.ts` (or a stopped timer) → no-op.  Used by the
+ * `\t N` handler as the repeating timer's callback. */
+ray_t* q_dotz_timer_thunk(void);
+
 /* The positional `*.q` startup script from argv, or NULL if none — qmain uses
  * this to decide whether to run a script.  Points into argv (process-lifetime). */
 const char* q_dotz_script_path(void);
