@@ -487,8 +487,12 @@ win: q.exe rayforce.exe
 # VirtualBox share, run pinned checks on the real host over SSH.  Needs the
 # native ./q (transcript oracle) — build it first.  Skips loudly (exit 0)
 # when the host is unreachable; every remote call has a hard timeout.
+# F= is a fuzzy substring over the ledger ids (Phase-A suites = their corpus
+# path e.g. `math/simple`; Phase-B checks = `native/<check>`), narrowing BOTH
+# phases before the remote batch — mirrors `make qtest F=` (dev-loop only; the
+# qdash pillar always runs unfiltered).  e.g. `make win-smoke F=math`.
 win-smoke: win $(Q_TARGET)
-	bash tools/win-smoke.sh
+	bash tools/win-smoke.sh "$(F)"
 
 clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)
