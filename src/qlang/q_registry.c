@@ -6857,6 +6857,7 @@ ray_t* ray_sort_indices(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
 static int funsql_is_fn(const ray_t* x) {
     if (!x) return 0;
     if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY) return 1;
+    if (x->type == RAY_LAMBDA) return 1;   /* user lambda / named fn in a phrase head */
     if (x->type == RAY_LIST && q_deriv_kind_of(x) != Q_DERIV_NONE) return 1;
     return 0;
 }
