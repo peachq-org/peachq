@@ -5742,7 +5742,10 @@ static ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
     int8_t tag = q_cast_designator(t, &is_tok);
     if (!tag)
         return ray_error("nyi", "$: unsupported cast designator (deferred)");
-    if (tag == RAY_STR) is_tok = 0;   /* char is a reinterpret, never a Tok-parse */
+    /* `10h$`/`` `char$``/`"c"$` all land here with is_tok=0 and reinterpret via
+     * q_cast_to; only the UPPERCASE char token `"C"$` carries is_tok=1 and stays
+     * a deferred char-Tok — q_tok_to's default errors 'nyi (pinned by the
+     * cast_tok_deferred unit test), so no RAY_STR special-case is needed here. */
     return is_tok ? q_tok_to(tag, x) : q_cast_to(tag, x);
 }
 
