@@ -37,6 +37,8 @@
 .Q.ft:{[f;t] k:keys t; $[count k;k xkey f 0!t;f t]};
 / .Q.ff: append y's missing columns to table x as count[x] typed nulls (via column dicts).
 .Q.ff:{[x;y] dx:flip x; dy:flip y; nc:key[dy] except key dx; flip dx,nc!{[n;v](type v)$n#0N}[count x]each dy nc};
-/ .Q.s / .Q.s1: console / single-line repr; -3! is nyi in openq, so both stay red until it lands.
+/ .Q.s / .Q.s1: console / single-line repr, both thin wrappers over the `-3!`
+/ internal fn (landed Group 2).  .Q.s1 greens; .Q.s (multi-line console form)
+/ still reuses the single-line repr pending a dedicated 2D formatter.
 .Q.s1:{-3!x};
 .Q.s:{-3!x};
