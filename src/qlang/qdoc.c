@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <fcntl.h>          /* open — per-file cwd containment (\cd / system"cd") */
+#include <limits.h>         /* PATH_MAX — Windows cwd-restore buffer */
 
 #define QD_IN   2048
 #define QD_OUT  8192
@@ -297,7 +298,13 @@ qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
      * PROCESS now, so a transcript that changes directory (or fails to restore)
      * must NOT leak into the next file's relative paths (\l, save/load). Snapshot
      * cwd via a dir fd and fchdir() back after the file — handles a deleted cwd. */
+#ifdef RAY_OS_WINDOWS
+    /* mingw has neither O_CLOEXEC nor fchdir; snapshot the path and chdir() back. */
+    char  cwd_buf[PATH_MAX];
+    char* cwd_saved = getcwd(cwd_buf, sizeof cwd_buf);
+#else
     int cwd_fd = open(".", O_RDONLY | O_CLOEXEC);
+#endif
 
     int is_qcmd  = ends_with(path, ".qcmd");
     int in_block = is_qcmd;   /* .qcmd: whole file is one block */
@@ -352,10 +359,17 @@ qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
 #undef FLUSH
 
     fclose(f);
+#ifdef RAY_OS_WINDOWS
+    if (cwd_saved) {                   /* restore cwd (contain any `\cd` in-file) */
+        int rc = chdir(cwd_saved);
+        (void)rc;                      /* best effort — nothing to recover to */
+    }
+#else
     if (cwd_fd >= 0) {                 /* restore cwd (contain any `\cd` in-file) */
         int rc = fchdir(cwd_fd);
         (void)rc;                      /* best effort — nothing to recover to */
         close(cwd_fd);
     }
+#endif
     return r;
 }
