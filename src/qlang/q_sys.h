@@ -30,6 +30,11 @@ void q_sys_seed_init(void);
  * the next. */
 void q_sys_cfg_init(void);
 
+/* True iff a `\t N` timer is currently armed (interval > 0).  The `.z.ts`
+ * forwarding thunk (q_dotz.c) consults it to no-op after a reentrant `\t 0`
+ * that could not delete the in-flight (popped) timer. */
+bool q_sys_timer_active(void);
+
 /* Bind a kdb-protocol IPC listener on the runtime event poll and record it as
  * the live `\p` listener — the SINGLE HOME for both `\p N`/`\p 0W` (q_sys.c
  * h_p) and startup `-p`/`-p 0W` (qmain.c).  `port == 0` → OS-chosen ephemeral
