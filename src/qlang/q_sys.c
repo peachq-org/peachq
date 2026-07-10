@@ -344,24 +344,54 @@ static ray_t* h_cd(const char* arg, size_t alen, const char* rest, size_t restle
     return NULL;                                          /* setter: silent */
 }
 
-/* `\l name` — load a q script (basics/syscmds.md).  A REGULAR readable file is
- * executed line-at-a-time (q_parse -> q_lower -> ray_eval, silent — kdb loads
- * silently) by reusing the public q_repl_run_file (mirrors the `q file.q`
- * loader).  A missing/unreadable path or a DIRECTORY is a silent no-op: this
- * preserves the banked `\l sp.q` / `\l .` / `\l /tmp/db*` corpus rows (whose
- * targets are absent or directories in the runner cwd) and defers the
- * directory / splayed-table / serialized-object load forms.  Getter form (no
- * arg) stays 'nyi. */
+/* A load candidate is usable iff it is a REGULAR, READABLE file (a directory or
+ * a missing/unreadable path is a silent no-op — preserves the banked `\l .`,
+ * `\l /tmp/db*` rows).  mingw-portable (stat/S_ISREG/access). */
+static int l_is_regular_readable(const char* p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISREG(st.st_mode) && access(p, R_OK) == 0;
+}
+
+/* `\l name` — load a q script (basics/syscmds.md).  Resolution chain (first hit
+ * wins): (a) the literal path relative to cwd; (b) the literal + ".q" (kdb loads
+ * `\l script` as `script.q`); (c)/(d) for a RELATIVE name only, `$QHOME/name`
+ * then `$QHOME/name.q` — a fixtures/QHOME-style search root (the doctest runner
+ * points QHOME at test/qscript).  An absolute path never gets QHOME prepended.
+ * The resolved REGULAR readable file is executed line-at-a-time via the public
+ * q_repl_run_file (multiline-aware; silent — kdb loads silently).  A
+ * still-missing path or a DIRECTORY stays a silent no-op: this preserves the
+ * banked `\l .` / `\l /tmp/db*` corpus rows (absent / directory targets) and
+ * defers the directory / splayed-table / serialized-object load forms.  Getter
+ * form (no arg) stays 'nyi.  `system "l …"` single-homes through here. */
 static ray_t* h_l(const char* arg, size_t alen, const char* rest, size_t restlen) {
     (void)rest; (void)restlen;
     if (alen == 0) return ray_error("nyi", NULL);        /* `\l` (bare) — reload cwd, deferred */
     if (alen >= PATH_MAX) return NULL;
-    char path[PATH_MAX];
-    memcpy(path, arg, alen); path[alen] = '\0';
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || access(path, R_OK) != 0)
-        return NULL;                                     /* missing/dir/unreadable — silent */
-    q_repl_run_file(path, stdout, stderr);               /* load the script (silent) */
+    char lit[PATH_MAX];
+    memcpy(lit, arg, alen); lit[alen] = '\0';
+
+    char cand[PATH_MAX];
+    char found[PATH_MAX];                                 /* stable copy of the resolved path */
+    int  ok = 0;
+
+    /* (a) literal path, relative to cwd (kdb: `\l name` as given). */
+    if (l_is_regular_readable(lit)) { memcpy(found, lit, alen + 1); ok = 1; }
+    /* (b) literal + ".q" (kdb loads `\l script` as `script.q`). */
+    if (!ok && snprintf(cand, sizeof cand, "%s.q", lit) < (int)sizeof cand
+        && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
+    /* (c)/(d) fixtures/QHOME search — RELATIVE names only (an absolute path is
+     * literal in kdb; never prepend a root to it — keeps `\l /tmp/db*` a no-op). */
+    if (!ok && lit[0] != '/') {
+        const char* qh = getenv("QHOME");
+        if (qh && *qh) {
+            if (snprintf(cand, sizeof cand, "%s/%s", qh, lit) < (int)sizeof cand
+                && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
+            if (!ok && snprintf(cand, sizeof cand, "%s/%s.q", qh, lit) < (int)sizeof cand
+                && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
+        }
+    }
+    if (!ok) return NULL;                                 /* missing/dir/unreadable — silent */
+    q_repl_run_file(found, stdout, stderr);               /* load the script (silent) */
     return NULL;
 }
 
