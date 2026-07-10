@@ -154,15 +154,6 @@ int main(int argc, char** argv) {
 
     int stdin_tty = isatty(STDIN_FILENO);
 
-    /* Set the terminal window/tab title (OSC 0) to "QSQL" on an interactive
-     * console, so a user juggling several q/rayforce sessions can tell the
-     * qSQL console apart at a glance.  tty-only, exactly like the banner
-     * below — the escape must never leak into a piped qcmd/qscript golden. */
-    if (stdin_tty) {
-        printf("\033]0;QSQL\a");
-        fflush(stdout);
-    }
-
     /* Startup banner (kdb-style version + build date, via the same macros as
      * .z.K/.z.k).  GUARDRAIL: print ONLY on an interactive tty REPL and NOT
      * under `-q` (.z.q).  Piped/redirected stdin (the qcmd/qscript runners,
