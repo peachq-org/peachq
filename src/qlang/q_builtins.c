@@ -320,6 +320,177 @@ static ray_t* q_md5_fn(ray_t* x) {
     return ray_vec_from_raw(RAY_U8, digest, 16);
 }
 
+/* ---- .Q base64 + SHA-1 encoding primitives (ref/dotq.md; clean-room: RFC 4648
+ * base64 + FIPS 180 SHA-1, both public standards, implemented from scratch —
+ * zero-dependency, portable (fixed-width stdint, no POSIX calls)) ----------- */
+
+static const char Q_B64_ALPHA[64] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Borrow the raw bytes of a string atom (-RAY_STR; use ray_str_len — SSO union
+ * aliasing makes ray_len garbage on a string atom) or a byte vector (RAY_U8).
+ * Returns 0 for any other type. */
+static int q_bytes_of(ray_t* x, const uint8_t** p, size_t* n) {
+    if (!x) return 0;
+    if (x->type == -RAY_STR) { *p = (const uint8_t*)ray_str_ptr(x); *n = ray_str_len(x); return 1; }
+    if (x->type == RAY_U8)   { *p = (const uint8_t*)ray_data(x);    *n = (size_t)ray_len(x); return 1; }
+    return 0;
+}
+
+/* base64-encode n bytes of src into a fresh malloc'd buffer; *outlen set.
+ * Returns NULL on OOM (caller frees the result). */
+static char* q_base64_encode(const uint8_t* src, size_t n, size_t* outlen) {
+    size_t olen = ((n + 2) / 3) * 4;
+    char* out = (char*)malloc(olen ? olen : 1);
+    if (!out) return NULL;
+    size_t o = 0, i = 0;
+    for (; i + 3 <= n; i += 3) {
+        uint32_t v = ((uint32_t)src[i] << 16) | ((uint32_t)src[i+1] << 8) | src[i+2];
+        out[o++] = Q_B64_ALPHA[(v >> 18) & 63];
+        out[o++] = Q_B64_ALPHA[(v >> 12) & 63];
+        out[o++] = Q_B64_ALPHA[(v >> 6) & 63];
+        out[o++] = Q_B64_ALPHA[v & 63];
+    }
+    size_t rem = n - i;
+    if (rem == 1) {
+        uint32_t v = (uint32_t)src[i] << 16;
+        out[o++] = Q_B64_ALPHA[(v >> 18) & 63];
+        out[o++] = Q_B64_ALPHA[(v >> 12) & 63];
+        out[o++] = '='; out[o++] = '=';
+    } else if (rem == 2) {
+        uint32_t v = ((uint32_t)src[i] << 16) | ((uint32_t)src[i+1] << 8);
+        out[o++] = Q_B64_ALPHA[(v >> 18) & 63];
+        out[o++] = Q_B64_ALPHA[(v >> 12) & 63];
+        out[o++] = Q_B64_ALPHA[(v >> 6) & 63];
+        out[o++] = '=';
+    }
+    *outlen = o;
+    return out;
+}
+
+/* base64-decode n chars of src into a fresh malloc'd byte buffer; *outlen set.
+ * Returns NULL on OOM, and sets *bad=1 on malformed / incorrectly-padded input
+ * (caller raises 'domain, per ref/dotq.md).  Skips ASCII whitespace; rejects any
+ * non-alphabet char, data after padding, a non-multiple-of-4 group length, and
+ * (RFC 4648 canonical form) non-zero residual pad bits. */
+static uint8_t* q_base64_decode(const char* src, size_t n, size_t* outlen, int* bad) {
+    static int8_t rev[256];
+    static int inited = 0;
+    if (!inited) {
+        for (int i = 0; i < 256; i++) rev[i] = -1;
+        for (int i = 0; i < 64; i++) rev[(unsigned char)Q_B64_ALPHA[i]] = (int8_t)i;
+        inited = 1;
+    }
+    *bad = 0;
+    uint8_t* out = (uint8_t*)malloc((n / 4) * 3 + 3);
+    if (!out) return NULL;
+    size_t o = 0;
+    uint32_t acc = 0;
+    int nbits = 0, pad = 0, ngroup = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = src[i];
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+        if (c == '=') { pad++; ngroup++; continue; }
+        if (pad) { *bad = 1; break; }                  /* data after padding */
+        int8_t d = rev[(unsigned char)c];
+        if (d < 0) { *bad = 1; break; }                /* non-alphabet char */
+        acc = (acc << 6) | (uint32_t)d;
+        nbits += 6; ngroup++;
+        if (nbits >= 8) { nbits -= 8; out[o++] = (uint8_t)((acc >> nbits) & 0xFF); }
+    }
+    /* canonical form: whole groups of 4, at most 2 pad chars, and no stray
+     * (non-zero) leftover bits in the final partial group. */
+    if (!*bad && (ngroup % 4 != 0 || pad > 2 || (nbits && (acc & ((1u << nbits) - 1)))))
+        *bad = 1;
+    if (*bad) { free(out); return NULL; }
+    *outlen = o;
+    return out;
+}
+
+static uint32_t q_sha1_rol(uint32_t v, int b) { return (v << b) | (v >> (32 - b)); }
+
+/* SHA-1 (FIPS 180) of n bytes -> 20-byte big-endian digest.  Returns 1 on
+ * success, 0 on OOM (caller raises 'wsfull — never a silent all-zero digest). */
+static int q_sha1_compute(const uint8_t* msg, size_t n, uint8_t out[20]) {
+    uint32_t h0 = 0x67452301, h1 = 0xEFCDAB89, h2 = 0x98BADCFE,
+             h3 = 0x10325476, h4 = 0xC3D2E1F0;
+    uint64_t ml = (uint64_t)n * 8;
+    size_t total = n + 1;
+    while (total % 64 != 56) total++;
+    total += 8;
+    uint8_t* buf = (uint8_t*)calloc(total, 1);
+    if (!buf) return 0;
+    memcpy(buf, msg, n);
+    buf[n] = 0x80;
+    for (int i = 0; i < 8; i++) buf[total - 1 - i] = (uint8_t)(ml >> (8 * i));
+    for (size_t off = 0; off < total; off += 64) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; i++) {
+            const uint8_t* p = buf + off + i * 4;
+            w[i] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                   ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+        }
+        for (int i = 16; i < 80; i++)
+            w[i] = q_sha1_rol(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
+        uint32_t a = h0, b = h1, c = h2, d = h3, e = h4;
+        for (int i = 0; i < 80; i++) {
+            uint32_t f, k;
+            if      (i < 20) { f = (b & c) | (~b & d);          k = 0x5A827999; }
+            else if (i < 40) { f = b ^ c ^ d;                   k = 0x6ED9EBA1; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
+            else             { f = b ^ c ^ d;                   k = 0xCA62C1D6; }
+            uint32_t tmp = q_sha1_rol(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = q_sha1_rol(b, 30); b = a; a = tmp;
+        }
+        h0 += a; h1 += b; h2 += c; h3 += d; h4 += e;
+    }
+    free(buf);
+    uint32_t hs[5] = { h0, h1, h2, h3, h4 };
+    for (int i = 0; i < 5; i++)
+        for (int j = 0; j < 4; j++) out[i * 4 + j] = (uint8_t)(hs[i] >> (24 - 8 * j));
+    return 1;
+}
+
+/* (.Q.btoa x) — base64-encode a string or byte vector to a char string. */
+static ray_t* q_dotq_btoa_fn(ray_t* x) {
+    const uint8_t* p; size_t n;
+    if (!q_bytes_of(x, &p, &n))
+        return ray_error("type", ".Q.btoa: expects a string or byte vector");
+    size_t olen = 0;
+    char* enc = q_base64_encode(p, n, &olen);
+    if (!enc) return ray_error("wsfull", ".Q.btoa: out of memory");
+    ray_t* r = ray_str(enc, olen);
+    free(enc);
+    return r;
+}
+
+/* (.Q.atob x) — base64-decode a char/byte input to a byte vector (ref/dotq.md:
+ * throws 'domain if the data is not correctly padded). */
+static ray_t* q_dotq_atob_fn(ray_t* x) {
+    const uint8_t* p; size_t n;
+    if (!q_bytes_of(x, &p, &n))
+        return ray_error("type", ".Q.atob: expects a string or byte vector");
+    size_t olen = 0; int bad = 0;
+    uint8_t* dec = q_base64_decode((const char*)p, n, &olen, &bad);
+    if (bad) return ray_error("domain", ".Q.atob: invalid base64 padding");
+    if (!dec) return ray_error("wsfull", ".Q.atob: out of memory");
+    ray_t* r = ray_vec_from_raw(RAY_U8, dec, (int64_t)olen);
+    free(dec);
+    return r;
+}
+
+/* (.Q.sha1 x) — SHA-1 digest of a string (or byte vector) as a 20-byte
+ * bytestream (ref/dotq.md). */
+static ray_t* q_dotq_sha1_fn(ray_t* x) {
+    const uint8_t* p; size_t n;
+    if (!q_bytes_of(x, &p, &n))
+        return ray_error("type", ".Q.sha1: expects a string or byte vector");
+    uint8_t digest[20];
+    if (!q_sha1_compute(p, n, digest))
+        return ray_error("wsfull", ".Q.sha1: out of memory");
+    return ray_vec_from_raw(RAY_U8, digest, 20);
+}
+
 /* (show x) — print x's q console display as a SIDE EFFECT (buffered in the q
  * console sink; the host drains it), then return generic null.  Overrides
  * rayfall's `show`, which uses the rayfall formatter (`[1 2 3]`) rather than
@@ -802,6 +973,12 @@ void q_builtins_register(void) {
     bind_unary(".Q.ty", q_dotq_ty_fn);
     bind_unary(".Q.qt", q_dotq_qt_fn);
     bind_unary(".Q.qp", q_dotq_qp_fn);
+    /* Encoding primitives (Wave-C): base64 + SHA-1, genuine C primitives (the
+     * algorithms are public standards; .Q.b6 lives in dotq.q, the C embeds its
+     * own alphabet).  .Q.gz stays unbound — needs zlib (zero-dependency rule). */
+    bind_unary(".Q.btoa", q_dotq_btoa_fn);
+    bind_unary(".Q.atob", q_dotq_atob_fn);
+    bind_unary(".Q.sha1", q_dotq_sha1_fn);
     /* .Q.pn (partition counts) is DELIBERATELY left unbound: kdb leaves the
      * partitioned-DB state vars undefined in a non-partitioned workspace
      * (ref/dotq.md: "In non-partitioned databases the partitioned database
