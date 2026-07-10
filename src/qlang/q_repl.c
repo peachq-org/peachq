@@ -797,14 +797,63 @@ int q_repl_run_file(const char* path, FILE* out, FILE* err) {
         return 1;
     }
 
-    char line[4096];
+    /* kdb script semantics (learn/startingkdb/language.md):
+     *  - an INDENTED line CONTINUES the previous logical line;
+     *  - blank lines, whitespace-only lines, and comment lines (trimmed first
+     *    char '/') are IGNORED for continuation — they do NOT flush the
+     *    accumulator (so `a:1 2` <blank> `/c` <blank> ` 3` ` + 4` => a:5 6 7);
+     *  - a trimmed singleton `/` opens a `/`..`\` block comment (skip to a
+     *    trimmed singleton `\`); a trimmed singleton `\` (outside a block) EXITS
+     *    the script; `\\` / `exit` also stop the load.
+     * Continuation fragments are joined with '\n' (now whitespace to the
+     * scanner), so each fragment's trailing `/ comment` ends at its own newline. */
+    static char acc[1 << 16];               /* one logical line (joined) */
+    size_t      alen = 0;
+    int         in_block = 0;
+    char        line[4096];
+
+    #define FLUSH() do { if (alen) { run_one_line(acc, alen, out, err, 0); alen = 0; acc[0] = '\0'; } } while (0)
+
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
-        if (n == 0) continue;
-        if (!strcmp(line, "\\\\") || !strcmp(line, "exit")) break;
-        run_one_line(line, n, out, err, 0);
+        /* Strip TRAILING whitespace too, so a block delimiter with superfluous
+         * blanks (`/   ` / `\   `) still classifies as a singleton and a code
+         * line's insignificant trailing spaces don't skew anything (kdb ignores
+         * superfluous blanks — language.md).  Trailing spaces inside a string
+         * literal are safe: such a line ends with `"`, not whitespace. */
+        while (n && (line[n - 1] == ' ' || line[n - 1] == '\t')) line[--n] = '\0';
+
+        /* trimmed view (leading whitespace skipped) drives classification */
+        size_t lead = 0;
+        while (lead < n && (line[lead] == ' ' || line[lead] == '\t')) lead++;
+        const char* trim = line + lead;
+        size_t      tlen = n - lead;
+        int indented = (lead > 0);
+
+        if (in_block) {                          /* inside a /..\ block comment */
+            if (tlen == 1 && trim[0] == '\\') in_block = 0;   /* singleton \ closes; no flush */
+            continue;
+        }
+        if (tlen == 0) continue;                 /* blank/whitespace-only: ignored, no flush */
+        if (tlen == 1 && trim[0] == '/') { in_block = 1; continue; }   /* open block; no flush */
+        if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
+        if (!strcmp(trim, "\\\\") || !strcmp(trim, "exit")) break;      /* \\ / exit           */
+        if (trim[0] == '/') continue;            /* comment-only line: ignored, no flush        */
+
+        int is_cont = indented && alen > 0;
+        if (!is_cont) FLUSH();                    /* a fresh logical line: eval the prior one   */
+
+        /* append this physical line (join continuation fragments with '\n') */
+        if (alen && alen + 1 < sizeof acc) acc[alen++] = '\n';
+        size_t room = (alen < sizeof acc) ? sizeof acc - 1 - alen : 0;
+        if (n > room) n = room;                   /* truncate pathological long line, never overflow */
+        memcpy(acc + alen, line, n);
+        alen += n;
+        acc[alen] = '\0';
     }
+    FLUSH();                                       /* eval any pending logical line (incl. before a lone \) */
+    #undef FLUSH
 
     fclose(f);
     return 0;
