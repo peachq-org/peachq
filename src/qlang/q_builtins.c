@@ -678,6 +678,54 @@ static ray_t* q_dotq_qp_fn(ray_t* x) {
     return ray_i64(0);
 }
 
+/* (.Q.s x) — x formatted to plain text as the console prints it (ref/dotq.md
+ * `.Q.s`), returned as a q string.  SINGLE-HOMES to q_fmt — the same console
+ * formatter `show` uses (q_console_show = q_fmt + '\n') — so `.Q.s x` is
+ * byte-identical to what `show x` prints, INCLUDING the line-terminating
+ * trailing newline.  It therefore already obeys the `\c` console width/height
+ * and `\P` precision that q_fmt honours.  We do NOT reuse q_console_show here:
+ * that appends into the global console sink the REPL/qdoc host drains after
+ * each eval, so routing through it would inject `.Q.s`'s text into the host's
+ * output — `.Q.s` must be side-effect-free and RETURN the string.
+ * q_fmt truncates silently into a bounded buffer, so grow until the rendered
+ * length CONVERGES (a larger buffer yields no more bytes).  NB `len < cap-1` is
+ * NOT a reliable fit test: q_fmt stops at an element boundary when the buffer
+ * fills, so a truncated render can still leave room at the tail (e.g. `.Q.s til
+ * 5000` fills only ~8190 of 8192).  Convergence is reliable because q_fmt's
+ * output length is monotonic non-decreasing in buffer size — equal length after
+ * doubling means the whole display fit.  Capped to stay bounded.  (Whether
+ * q_fmt itself honours the `\c` console width/height for oversized output is
+ * q_fmt's concern, shared with `show`; this seam faithfully returns q_fmt's
+ * full output.) */
+static ray_t* q_dotq_s_fn(ray_t* x) {
+    size_t cap = 8192;
+    char* buf = malloc(cap);
+    if (!buf) return ray_error("wsfull", ".Q.s: out of memory");
+    buf[0] = '\0';
+    q_fmt(x, buf, cap);
+    size_t len = strlen(buf);
+    while (cap < (1u << 24)) {                       /* grow until length settles */
+        size_t ncap = cap * 2;
+        char* nb = realloc(buf, ncap);
+        if (!nb) { free(buf); return ray_error("wsfull", ".Q.s: out of memory"); }
+        buf = nb;
+        cap = ncap;
+        buf[0] = '\0';
+        q_fmt(x, buf, cap);
+        size_t nlen = strlen(buf);
+        if (nlen == len) break;                      /* converged: full display */
+        len = nlen;
+    }
+    char* out = malloc(len + 2);
+    if (!out) { free(buf); return ray_error("wsfull", ".Q.s: out of memory"); }
+    memcpy(out, buf, len);
+    out[len] = '\n';                                 /* console line terminator */
+    ray_t* r = ray_str(out, len + 1);
+    free(out);
+    free(buf);
+    return r;
+}
+
 /* Column name ids of a table as a RAY_SYM vector.  A keyed table (RAY_DICT of
  * key-table -> value-table) yields key cols ++ value cols. */
 static ray_t* q_table_colnames(ray_t* x) {
@@ -981,6 +1029,10 @@ void q_builtins_register(void) {
     bind_unary(".Q.ty", q_dotq_ty_fn);
     bind_unary(".Q.qt", q_dotq_qt_fn);
     bind_unary(".Q.qp", q_dotq_qp_fn);
+    /* .Q.s (console plain-text): C-bound like the .Q.* primitives above, single-
+     * homing to q_fmt.  NB dotq.q loads AFTER q_builtins_register, so any
+     * `.Q.s:` there would shadow this — dotq.q keeps only `.Q.s1:{-3!x}`. */
+    bind_unary(".Q.s",  q_dotq_s_fn);
     /* Encoding primitives (Wave-C): base64 + SHA-1, genuine C primitives (the
      * algorithms are public standards; .Q.b6 lives in dotq.q, the C embeds its
      * own alphabet).  .Q.gz stays unbound — needs zlib (zero-dependency rule). */
