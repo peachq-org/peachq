@@ -258,6 +258,9 @@ static const q_op_t Q_OPS[] = {
     { "ss",      QLEX_KW_INFIX,  QK_NONE, NULL,      QK_SS,    "ss",      NULL  },
     { "ssr",     QLEX_KW_PREFIX, QK_ENV, "ssr",      QK_NONE,  NULL,      NULL  },
     { "show",    QLEX_KW_PREFIX, QK_ENV, "show",     QK_NONE,  NULL,      NULL  },
+    /* `system "…"` — q-owned env unary (q_builtins_register), snapshotted here
+     * so the parser embeds it; routes through q_sys_dispatch (q_sys.c). */
+    { "system",  QLEX_KW_PREFIX, QK_ENV, "system",   QK_NONE,  NULL,      NULL  },
     /* table introspection — q-owned bindings (q_builtins_register), snapshotted
      * here so the parser embeds them over the base env `meta`. */
     { "meta",    QLEX_KW_PREFIX, QK_ENV, "meta",     QK_NONE,  NULL,      NULL  },

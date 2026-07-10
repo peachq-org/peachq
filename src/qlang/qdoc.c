@@ -12,6 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <fcntl.h>          /* open — per-file cwd containment (\cd / system"cd") */
 
 #define QD_IN   2048
 #define QD_OUT  8192
@@ -115,10 +116,16 @@ static void run_example(const char* input, const char* expect,
         prompt_ok = (strcmp(tprompt, live) == 0);
     }
 
-    /* q system commands (\d \v \f \a) bypass the parser, like the REPL. */
+    /* q system commands (\d \v \f \a) bypass the parser, like the REPL.  This is
+     * the DOCTEST-runner adapter over the mode-less core, and it OWNS the
+     * runner-safe policy (kept HERE, never baked into the shared dispatcher):
+     * survive the exit/terminate commands (QS_QUIT/QS_TOGGLE — the runner-kill
+     * hazard), and DECLINE to execute an unknown `\foo` (QS_UNKNOWN → leave it
+     * to the parser, so \ls/\cat/\curl corpus rows never touch the FS / net). */
     {
-        int handled = 0;
-        ray_t* sr = q_sys_dispatch(input, strlen(input), &handled, /*is_repl=*/0);
+        q_sys_result d = q_sys_dispatch(input, strlen(input));
+        int handled = (d.kind == QS_VALUE || d.kind == QS_QUIT || d.kind == QS_TOGGLE);
+        ray_t* sr = (d.kind == QS_VALUE) ? d.val : NULL;
         if (handled) {
             r->parsed++;
             if (mode == QDOC_PARSE_ONLY) {
@@ -286,6 +293,12 @@ qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
         return r;
     }
 
+    /* Per-file cwd containment: `\cd` / `system "cd …"` really chdir() the
+     * PROCESS now, so a transcript that changes directory (or fails to restore)
+     * must NOT leak into the next file's relative paths (\l, save/load). Snapshot
+     * cwd via a dir fd and fchdir() back after the file — handles a deleted cwd. */
+    int cwd_fd = open(".", O_RDONLY | O_CLOEXEC);
+
     int is_qcmd  = ends_with(path, ".qcmd");
     int in_block = is_qcmd;   /* .qcmd: whole file is one block */
 
@@ -339,5 +352,10 @@ qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
 #undef FLUSH
 
     fclose(f);
+    if (cwd_fd >= 0) {                 /* restore cwd (contain any `\cd` in-file) */
+        int rc = fchdir(cwd_fd);
+        (void)rc;                      /* best effort — nothing to recover to */
+        close(cwd_fd);
+    }
     return r;
 }

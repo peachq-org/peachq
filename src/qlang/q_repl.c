@@ -249,10 +249,21 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
         return;
 
     /* q system commands (\d \v \f \a — q_ns.c) run before the parser; an
-     * unhandled \cmd falls through to the historic path. */
+     * unhandled \cmd falls through to the historic path.  This is the REPL
+     * adapter over the mode-less core: it OWNS the interactive policy —
+     * `\\` really quits, bare `\` is a not-yet-implemented q/k toggle, and an
+     * unknown `\foo` shells out returning its raw system(3) status. */
     {
-        int handled = 0;
-        ray_t* sr = q_sys_dispatch(s, n, &handled, /*is_repl=*/1);
+        q_sys_result d = q_sys_dispatch(s, n);
+        int handled = (d.kind != QS_NOT_CMD);
+        ray_t* sr = NULL;
+        switch (d.kind) {
+        case QS_QUIT:    exit(0);                             /* real quit — kdb-true */
+        case QS_TOGGLE:  sr = ray_error("nyi", NULL); break;  /* q/k toggle NYI */
+        case QS_UNKNOWN: sr = q_sys_shell(d.shell, d.shell_len); break;
+        case QS_VALUE:   sr = d.val; break;
+        case QS_NOT_CMD: break;
+        }
         if (handled) {
             if (sr && RAY_IS_ERR(sr)) {
                 const char* code = (const char*)sr->sdata;
