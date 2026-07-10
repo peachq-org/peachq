@@ -21,7 +21,7 @@
 #include "qlang/q_repl.h"
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
-#include "core/ipc.h"
+#include "qlang/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
 #include "core/poll.h"
 #include "core/runtime.h"
 #include <rayforce.h>
@@ -31,15 +31,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#ifdef RAY_OS_WINDOWS
-  #define WIN32_LEAN_AND_MEAN
-  #include <winsock2.h>
-  #include <ws2tcpip.h>   /* socklen_t */
-#else
-  #include <sys/socket.h>
-  #include <netinet/in.h>
-#endif
 
 /* Parse a `-p` port spec.  Returns 1 → *out holds a concrete port in
  * 1..65535; 2 → the `0W` auto token (bind any OS-chosen free port); 0 →
@@ -56,18 +47,6 @@ static int parse_port_spec(const char* s, uint16_t* out) {
     if (v < 1 || v > 65535) return 0;
     *out = (uint16_t)v;
     return 1;
-}
-
-/* Read the actual bound port back off a listener fd (getsockname).  The
- * `0W` auto-bind path needs this to report the OS-chosen port so a client
- * can discover it.  Returns 0 on failure. */
-static uint16_t listener_bound_port(int64_t fd) {
-    struct sockaddr_in sa;
-    socklen_t          len = sizeof(sa);
-    memset(&sa, 0, sizeof(sa));
-    if (getsockname((ray_sock_t)fd, (struct sockaddr*)&sa, &len) != 0)
-        return 0;
-    return ntohs(sa.sin_port);
 }
 
 int main(int argc, char** argv) {
@@ -118,20 +97,19 @@ int main(int argc, char** argv) {
     }
 
     if (have_port) {
-        /* `0W` (port_auto) binds port 0 → the OS chooses a free port. */
-        int64_t lid = poll ? ray_ipc_listen(poll, port_auto ? 0 : port) : -1;
-        int     listen_errno = errno;
-        if (lid >= 0) {
-            /* Report the ACTUAL bound port (read back via getsockname) so
-             * a client/test can discover an auto-chosen `0W` port. */
-            ray_selector_t* ls = ray_poll_get(poll, lid);
-            if (ls) {
-                uint16_t bound = listener_bound_port(ls->fd);
-                if (bound) port = bound;
-            }
-            /* port is now the real listener port (>0) — the server-mode
-             * checks below key off it identically for fixed and 0W. */
-            fprintf(stderr, "listening on port %u\n", port);
+        /* `0W` (port_auto) binds port 0 → the OS chooses a free port.  The
+         * bind + getsockname readback + `\p` getter-state (g_listen_port) are
+         * single-homed in q_sys_listen, shared with the runtime `\p N`/`\p 0W`
+         * path — so `system "p"` reports the real port after an arg-bind too.
+         * NO port is announced (full kdb fidelity); a supervisor/test reads it
+         * back with the `\p`/`system "p"` getter. */
+        uint16_t bound = poll ? q_sys_listen(port_auto ? 0 : port) : 0;
+        int      listen_errno = errno;
+        if (bound) {
+            /* Bound OK — the real listener port now lives in the authoritative
+             * `\p` getter state (q_sys_listen_port), which the post-script
+             * server-mode decision reads; the local `port` is no longer
+             * consulted past this point. */
         } else {
             /* Strict: an unusable port (invalid, EADDRINUSE, EACCES, or
              * any bind/listen failure) must NOT fall through into a
@@ -183,10 +161,15 @@ int main(int argc, char** argv) {
         /* Startup script could not be opened/read — skip the REPL/server loop
          * and exit non-zero (kdb fails a bad `q file.q`; it must not silently
          * succeed).  q_repl_run_file already printed the open error. */
-    } else if ((port > 0 || q_repl_listener_active()) && poll) {
-        /* A listener exists — from startup `-p` (port>0) OR a runtime/script
-         * `\p N` (q_repl_listener_active) — so serve, don't exit at a non-tty
-         * script end.  Live listener + console: register stdin on the SAME poll
+    } else if (q_sys_listen_port() > 0 && poll) {
+        /* A listener is LIVE — from startup `-p` OR a runtime/script `\p N` —
+         * so serve, don't exit at a non-tty script end.  Keyed off the
+         * authoritative `\p` getter state (q_sys_listen_port), not the local
+         * `port`/sticky `q_repl_listener_active`: a startup-script `\p 0` that
+         * closes the `-p` listener now correctly drops OUT of server mode
+         * (else a non-tty `q script.q -p 0W </dev/null` with `\p 0` would hang
+         * in a listener-less poll loop).  Live listener + console: register
+         * stdin on the SAME poll
          * IPC listener and run ONE event loop (q_repl_run_poll — mirrors
          * rayforce's run_interactive), so clients are served WHILE the REPL
          * reads — no EOF needed.  Covers both the tty console and piped
