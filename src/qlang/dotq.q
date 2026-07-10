@@ -44,7 +44,7 @@
 / each flag's value is the tokens up to the next flag (0 -> (), 1 -> the string, many ->
 / a list). Empty argv is guarded (where errors on empty; inner lambda runs only when
 / argv is non-empty). Also sets .Q.x to the leading non-command tokens ("Set by .Q.opt").
-.Q.opt:{[a] .Q.x:(); $[count a;{[a] i:where {"-"~1#x} each a; e:(1_i),count a; .Q.x:$[count i;(first i)#a;a]; k:`$1_'a i; j:til count i; k!{[a;i;e;j] s:(1+i j)_(e j)#a; $[1=count s;first s;s]}[a;i;e;]each j}[a];(`$())!()]}
+.Q.opt:{[a] a:$[-10h=type a;enlist a;a]; .Q.x:(); $[count a;{[a] i:where {"-"~1#x} each a; e:(1_i),count a; .Q.x:$[count i;(first i)#a;a]; k:`$1_'a i; j:til count i; k!{[a;i;e;j] s:(1+i j)_(e j)#a; $[1=count s;first s;s]}[a;i;e;]each j}[a];(`$())!()]}
 / .Q.def — defaults + tok-typed coercion over .Q.opt output (ref/dotq.md, "def"). For each
 / default key: if present in opt, coerce its string to the default atom's type (typed null
 / on failure); else keep the default. DEPENDS ON .Q.opt above (loader is top-to-bottom).
