@@ -7,11 +7,14 @@
  * land in Group 2 stacked on this branch. */
 #include "qlang/q_bang.h"
 #include "qlang/q_registry.h"   /* q_value_wrap, q_hsym_wrap, q_attr_wrap */
-#include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn */
+#include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/q_wire.h"       /* q_wire_serialize / q_wire_deserialize, Q_WIRE_ASYNC */
+#include "qlang/q_fmt.h"        /* q_fmt_krepr — single-line repr backing `-3!` / .Q.s1 */
 #include <rayforce.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 /* ---- per-id handlers (VALUE-shaped: borrowed args, OWNED return) -----------
  * Each is a THIN ALIAS: it calls the SAME STABLE C impl the keyword is bound
@@ -34,6 +37,86 @@ static ray_t* h_md5  (ray_t** a, int64_t n) { (void)n; return q_md5_fn(a[0]); } 
 static ray_t* h_jk   (ray_t** a, int64_t n) { (void)n; return q_json_deserialize(a[0]); }   /* -29! */
 static ray_t* h_jj   (ray_t** a, int64_t n) { (void)n; return q_json_serialize(a[0]); }     /* -31! */
 static ray_t* h_btoa (ray_t** a, int64_t n) { (void)n; return q_dotq_btoa_fn(a[0]); }       /* -32! */
+static ray_t* h_sha1 (ray_t** a, int64_t n) { (void)n; return q_dotq_sha1_fn(a[0]); }       /* -33! */
+
+/* ---- Group 2 active-band handlers (no keyword twin) -----------------------
+ * These are the PRIMITIVE homes (kdb has no keyword alias for them), so unlike
+ * the Direction-B thin aliases above they carry their own small C impl. */
+
+/* -3!x — single-line string representation (== `.Q.s1`).  Routes to the
+ * existing q_fmt_krepr single-line formatter and returns its buffer as a q
+ * string (RAY_STR).  Byte-for-byte the same text `0N!x` shows. */
+static ray_t* h_s1(ray_t** a, int64_t n) {
+    (void)n;
+    char buf[4096];
+    q_fmt_krepr(a[0], buf, sizeof buf);
+    return ray_str(buf, strlen(buf));
+}
+
+/* -16!x — reference count of x.  DIVERGENCE: kdb returns the number of q-level
+ * aliases bound to a variable (`a:b:c:1 2 3` -> 3); openq exposes the ray_t
+ * heap refcount, which counts internal owners, not source aliases.  The ledger
+ * pins openq's ACTUAL number (smoked), and the PR Decisions flag the gap — we
+ * do NOT fabricate kdb's count. */
+static ray_t* h_refcnt(ray_t** a, int64_t n) {
+    (void)n;
+    if (!a[0]) return ray_error("type", "-16!: nil argument");
+    return ray_i64((int64_t)a[0]->rc);
+}
+
+/* Read an integer-ish atom as int64 (for `-27!`'s decimal-places operand). */
+static int q_bang_as_i64(ray_t* v, int64_t* out) {
+    if (!v || v->type >= 0) return 0;      /* must be an atom */
+    switch (-v->type) {
+        case RAY_BOOL: *out = v->b8 ? 1 : 0; return 1;
+        case RAY_U8:   *out = v->u8;  return 1;
+        case RAY_I16:  *out = v->i16; return 1;
+        case RAY_I32:  *out = v->i32; return 1;
+        case RAY_I64:  *out = v->i64; return 1;
+        default: return 0;
+    }
+}
+
+/* Format one double to `places` decimals with IEEE754 rounding (C's %.*f is
+ * exactly round-half-to-even on the stored binary value — matching kdb's
+ * `-27!`, which ignores \P).  Returns an owned RAY_STR. */
+static ray_t* q_bang_fmt_one(int places, double y) {
+    char buf[512];
+    int m = snprintf(buf, sizeof buf, "%.*f", places, y);
+    if (m < 0) m = 0;
+    if ((size_t)m >= sizeof buf) m = (int)sizeof buf - 1;
+    return ray_str(buf, (size_t)m);
+}
+
+/* -27!(x;y) — IEEE754 precision format.  `x` is an int atom (decimal places),
+ * `y` a float atom or float vector; returns a string (atom) or list of strings
+ * (vector), formatted with IEEE754 rounding, ignoring \P. */
+static ray_t* h_format(ray_t** a, int64_t n) {
+    (void)n;
+    int64_t places64;
+    if (!q_bang_as_i64(a[0], &places64))
+        return ray_error("type", "-27!: first argument must be an int atom");
+    if (places64 < 0) places64 = 0;
+    if (places64 > 320) places64 = 320;       /* guard the snprintf width */
+    int places = (int)places64;
+    ray_t* y = a[1];
+    if (!y) return ray_error("type", "-27!: nil float argument");
+    if (y->type == -RAY_F64) {                 /* float atom -> one string */
+        return q_bang_fmt_one(places, y->f64);
+    }
+    if (y->type == RAY_F64) {                  /* float vector -> list of strings */
+        int64_t len = ray_len(y);
+        const double* d = (const double*)ray_data(y);
+        ray_t* out = ray_list_new(len);
+        for (int64_t i = 0; i < len; i++) {
+            ray_t* s = q_bang_fmt_one(places, d[i]);
+            ray_list_append(out, s);
+            ray_release(s);
+        }
+        return out;
+    }
+    return ray_error("type", "-27!: second argument must be a float atom or vector");
+}
 
 /* ---- the single-source manifest -------------------------------------------
  * {id (negative), name (doc heading of the id / its keyword twin), valence
@@ -65,14 +148,16 @@ static const struct {
     { -31, ".j.j",       1, Q_BANG_F_NONE, h_jj    },
     { -32, ".Q.btoa",    1, Q_BANG_F_NONE, h_btoa  },
 
+    /* ---- Group 2: active-band handlers (no keyword twin, own C impl) -------- */
+    { -3,  ".Q.s1",              1, Q_BANG_F_NONE, h_s1     },  /* string repr */
+    { -16, "ref count",          1, Q_BANG_F_NONE, h_refcnt },  /* refcount (openq rc — see PR) */
+    { -27, "format",             2, Q_BANG_F_NONE, h_format },  /* IEEE754 precision fmt */
+    { -33, "SHA-1 hash",         1, Q_BANG_F_NONE, h_sha1   },  /* SHA-1 -> 20-byte digest */
+
     /* ---- blocked / deferred inventory (NULL handler -> 'nyi) ---------------
-     * Active band (no keyword twin) — Group 2 lands the doable ones here: */
-    { -3,  ".Q.s1",              1, Q_BANG_F_BLOCKED, NULL },  /* string repr */
+     * Active band, still blocked (clean-room / support gaps — see PR Deferrals): */
     { -4,  "tokens",             1, Q_BANG_F_BLOCKED, NULL },  /* scanner token list */
     { -14, "quote escape",       1, Q_BANG_F_BLOCKED, NULL },  /* CSV quote escaping */
-    { -16, "ref count",          1, Q_BANG_F_BLOCKED, NULL },  /* variable refcount */
-    { -27, "format",             2, Q_BANG_F_BLOCKED, NULL },  /* IEEE754 precision fmt */
-    { -33, "SHA-1 hash",         1, Q_BANG_F_BLOCKED, NULL },  /* needs SHA-1 impl */
     /* Replaced band whose keyword openq lacks OR whose doc is ambiguous: */
     { -7,  "hcount",             1, Q_BANG_F_BLOCKED, NULL },  /* file size */
     { -12, ".Q.host",            1, Q_BANG_F_BLOCKED, NULL },  /* ip->hostname */

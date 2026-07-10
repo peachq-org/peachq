@@ -484,8 +484,9 @@ static ray_t* q_dotq_atob_fn(ray_t* x) {
 }
 
 /* (.Q.sha1 x) — SHA-1 digest of a string (or byte vector) as a 20-byte
- * bytestream (ref/dotq.md). */
-static ray_t* q_dotq_sha1_fn(ray_t* x) {
+ * bytestream (ref/dotq.md).  Exported (see q_builtins.h) so the `-33!` bang
+ * alias routes to this single-home C impl. */
+ray_t* q_dotq_sha1_fn(ray_t* x) {
     const uint8_t* p; size_t n;
     if (!q_bytes_of(x, &p, &n))
         return ray_error("type", ".Q.sha1: expects a string or byte vector");
