@@ -101,6 +101,12 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
  * `value`.  Both bindings call this one function (single home, rule 4). */
 ray_t* q_value_wrap(ray_t* x);
 
+/* q `hsym x` / `attr x` verb implementations — exported so the q_bang.c
+ * internal-fn aliases (`-1!` -> hsym, `-2!` -> attr) route to the SAME single
+ * home the registry verb uses (Direction B, bang-ops-internal-status.md). */
+ray_t* q_hsym_wrap(ray_t* x);
+ray_t* q_attr_wrap(ray_t* x);
+
 /* q `enlist` vary wrapper (base ray_enlist_fn + dict -> 1-row table arm) —
  * env-bound by q_builtins_register before registry init (q_value_wrap
  * precedent) so both `enlist` and monadic `,` share it. */
