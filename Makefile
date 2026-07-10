@@ -1,4 +1,14 @@
 CC      ?= clang
+# ccache: transparent compiler cache — auto-used for the NATIVE build when ccache
+# is installed (no-op otherwise; the win cross-build is deliberately left alone).
+# CCACHE_BASEDIR rewrites absolute source paths to relative, so cache hits carry
+# across worktrees as well as across commits/days (now that the volatile -Ds below
+# are dropped/scoped). Binaries are byte-identical to a non-ccache build.
+CCACHE  := $(shell command -v ccache 2>/dev/null)
+ifneq ($(CCACHE),)
+CC := $(CCACHE) $(CC)
+export CCACHE_BASEDIR := $(CURDIR)
+endif
 STD     = c17
 AR      = ar
 TARGET  = rayforce
@@ -17,13 +27,22 @@ VERSION_PATCH := $(word 3,$(subst ., ,$(RAY_VERSION)))
 ifeq ($(strip $(VERSION_PATCH)),)
   VERSION_PATCH := 0
 endif
-GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%d)
 
 WARNS   = -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter
-DEFS    = -DRAYFORCE_GIT_COMMIT=\"$(GIT_HASH)\" -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\" \
-          -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MINOR) \
+# Version macros are STABLE (change only on a release bump), so they stay global.
+# RAYFORCE_GIT_COMMIT was dropped: it is dead (never referenced in any TU — only a
+# `#define "unknown"` fallback exists in repl.c) and, being the current commit
+# hash, it invalidated EVERY cached object on every commit for zero benefit.
+DEFS    = -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MINOR) \
           -DRAY_VERSION_PATCH=$(VERSION_PATCH) -DRAYFORCE_VERSION=\"$(RAY_VERSION)\"
+# RAYFORCE_BUILD_DATE changes daily; only repl.c (banner), system.c (.sys.build),
+# q_dotz.c (.z.K/.z.k) and qmain.c (openq version line) read it. Scope it to just
+# those objects (native + .win.o twins) via target-specific DEFS so a new day does
+# not bust every cached object — the whole point of dropping GIT_COMMIT above.
+DATE_DEF   = -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
+DATE_STEMS = src/app/repl src/ops/system src/qlang/q_dotz src/qlang/qmain
+$(addsuffix .o,$(DATE_STEMS)) $(addsuffix .win.o,$(DATE_STEMS)): DEFS += $(DATE_DEF)
 INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson
 # Header-dependency tracking: -MMD emits a .d makefile fragment next to
 # each .o listing the headers it included (user headers only, not system);
