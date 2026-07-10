@@ -54,8 +54,8 @@
 .Q.ft:{[f;t] k:keys t; $[count k;k xkey f 0!t;f t]};
 / .Q.ff: append y's missing columns to table x as count[x] typed nulls (via column dicts).
 .Q.ff:{[x;y] dx:flip x; dy:flip y; nc:key[dy] except key dx; flip dx,nc!{[n;v](type v)$n#0N}[count x]each dy nc};
-/ .Q.s / .Q.s1: console / single-line repr, both thin wrappers over the `-3!`
-/ internal fn (landed Group 2).  .Q.s1 greens; .Q.s (multi-line console form)
-/ still reuses the single-line repr pending a dedicated 2D formatter.
+/ .Q.s1: single-line string repr, a thin wrapper over the `-3!` internal fn.
+/ .Q.s (multi-line console plain-text) is C-bound in q_builtins.c, single-homing
+/ to the q_fmt console formatter (the same one `show` prints), so it is NOT
+/ redefined here — a `.Q.s:` line would shadow the C binding (dotq.q loads last).
 .Q.s1:{-3!x};
-.Q.s:{-3!x};
