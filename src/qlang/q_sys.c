@@ -26,7 +26,9 @@
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
 #include <limits.h>          /* PATH_MAX */
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
+#ifndef RAY_OS_WINDOWS
 #include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
+#endif                       /* mingw has no <sys/wait.h>; _pclose gives the code directly */
 
 /* `\p 0W` reads the OS-chosen port back off the listener fd (getsockname),
  * mirroring qmain.c's startup `-p 0W` path — the two share one readiness line. */
@@ -681,7 +683,13 @@ static ray_t* q_sys_shell_capture(const char* rem, size_t rlen) {
         len += got;
     }
     int status = pclose(p);
+#ifdef RAY_OS_WINDOWS
+    /* _pclose returns the command's exit code directly (-1 on spawn failure),
+     * NOT a wait(2)-encoded status — no WIFEXITED/WEXITSTATUS on Windows. */
+    if (status != 0) {
+#else
     if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+#endif
         free(out);
         return ray_error("os", NULL);                    /* nonzero / signalled */
     }
