@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <fcntl.h>          /* open — per-file cwd containment (\cd / system"cd") */
 #include <limits.h>         /* PATH_MAX — Windows cwd-restore buffer */
+#include <sys/stat.h>       /* stat / S_ISDIR — QHOME fixtures-root probe */
 
 #define QD_IN   2048
 #define QD_OUT  8192
@@ -287,6 +288,36 @@ static void run_example(const char* input, const char* expect,
 qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
                             int verbose, FILE* out) {
     qdoc_result_t r = {0};
+
+    /* Fixture resolution for `\l name` (h_l's QHOME search): point QHOME at the
+     * committed fixtures root test/qscript so corpus rows like `\l sp.q` resolve
+     * to test/qscript/sp.q.  Absolute (from cwd == repo root at entry, before any
+     * in-file `\cd`); set once.  We OVERRIDE any inherited QHOME so a developer's
+     * own kdb QHOME can't make the fixture-dependent suites non-deterministic.
+     * A missing dir (odd cwd) leaves QHOME untouched -> those rows stay no-ops.
+     * (Known limit: a standalone qdoctest run from a non-repo-root cwd won't set
+     * it — consistent with the runner already requiring repo-root cwd.) */
+    {
+        static int qhome_set = 0;
+        if (!qhome_set) {
+            char qh[PATH_MAX];
+            if (getcwd(qh, sizeof qh)) {
+                size_t l = strlen(qh);
+                const char* sub = "/test/qscript";
+                if (l + strlen(sub) + 1 < sizeof qh) {
+                    memcpy(qh + l, sub, strlen(sub) + 1);
+                    struct stat st;
+                    if (stat(qh, &st) == 0 && S_ISDIR(st.st_mode))
+#if defined(RAY_OS_WINDOWS)
+                        _putenv_s("QHOME", qh);        /* mingw has no setenv */
+#else
+                        setenv("QHOME", qh, /*overwrite=*/1);
+#endif
+                }
+            }
+            qhome_set = 1;
+        }
+    }
 
     FILE* f = fopen(path, "r");
     if (!f) {
