@@ -14,6 +14,7 @@
 #include <rayforce.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- per-id handlers (VALUE-shaped: borrowed args, OWNED return) -----------
@@ -45,12 +46,31 @@ static ray_t* h_sha1 (ray_t** a, int64_t n) { (void)n; return q_dotq_sha1_fn(a[0
 
 /* -3!x — single-line string representation (== `.Q.s1`).  Routes to the
  * existing q_fmt_krepr single-line formatter and returns its buffer as a q
- * string (RAY_STR).  Byte-for-byte the same text `0N!x` shows. */
+ * string (RAY_STR).  Byte-for-byte the same text `0N!x` shows.
+ * q_fmt_krepr truncates silently into a caller buffer, so grow-and-retry until
+ * the whole repr fits (kdb returns the full string) — cap the growth to stay
+ * bounded.  (q_fmt_krepr still caps each NESTED-list element at its own 2048
+ * internal buffer; that residual limit is shared with `0N!`/`.Q.s1` and out of
+ * scope here.) */
 static ray_t* h_s1(ray_t** a, int64_t n) {
     (void)n;
-    char buf[4096];
-    q_fmt_krepr(a[0], buf, sizeof buf);
-    return ray_str(buf, strlen(buf));
+    size_t cap = 8192;
+    char* buf = malloc(cap);
+    if (!buf) return ray_error("wsfull", "-3!: out of memory");
+    for (;;) {
+        buf[0] = '\0';
+        q_fmt_krepr(a[0], buf, cap);
+        size_t len = strlen(buf);
+        if (len < cap - 1 || cap >= (1u << 24)) {   /* fit whole (or growth cap) */
+            ray_t* r = ray_str(buf, len);
+            free(buf);
+            return r;
+        }
+        cap *= 2;
+        char* nb = realloc(buf, cap);
+        if (!nb) { free(buf); return ray_error("wsfull", "-3!: out of memory"); }
+        buf = nb;
+    }
 }
 
 /* -16!x — reference count of x.  DIVERGENCE: kdb returns the number of q-level
@@ -79,13 +99,21 @@ static int q_bang_as_i64(ray_t* v, int64_t* out) {
 
 /* Format one double to `places` decimals with IEEE754 rounding (C's %.*f is
  * exactly round-half-to-even on the stored binary value — matching kdb's
- * `-27!`, which ignores \P).  Returns an owned RAY_STR. */
+ * `-27!`, which ignores \P).  Returns an owned RAY_STR (or 'wsfull error).
+ * A large-magnitude float can need more than the stack buffer (the integer
+ * part is unbounded), so allocate exactly what snprintf reports rather than
+ * truncating. */
 static ray_t* q_bang_fmt_one(int places, double y) {
-    char buf[512];
-    int m = snprintf(buf, sizeof buf, "%.*f", places, y);
-    if (m < 0) m = 0;
-    if ((size_t)m >= sizeof buf) m = (int)sizeof buf - 1;
-    return ray_str(buf, (size_t)m);
+    char stackbuf[512];
+    int m = snprintf(stackbuf, sizeof stackbuf, "%.*f", places, y);
+    if (m < 0) return ray_str("", 0);
+    if ((size_t)m < sizeof stackbuf) return ray_str(stackbuf, (size_t)m);
+    char* heap = malloc((size_t)m + 1);
+    if (!heap) return ray_error("wsfull", "-27!: out of memory");
+    snprintf(heap, (size_t)m + 1, "%.*f", places, y);
+    ray_t* r = ray_str(heap, (size_t)m);
+    free(heap);
+    return r;
 }
 
 /* -27!(x;y) — IEEE754 precision format.  `x` is an int atom (decimal places),
@@ -110,6 +138,7 @@ static ray_t* h_format(ray_t** a, int64_t n) {
         ray_t* out = ray_list_new(len);
         for (int64_t i = 0; i < len; i++) {
             ray_t* s = q_bang_fmt_one(places, d[i]);
+            if (RAY_IS_ERR(s)) { ray_release(out); return s; }
             ray_list_append(out, s);
             ray_release(s);
         }
