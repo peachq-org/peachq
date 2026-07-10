@@ -30,6 +30,25 @@ void q_sys_seed_init(void);
  * the next. */
 void q_sys_cfg_init(void);
 
+/* Bind a kdb-protocol IPC listener on the runtime event poll and record it as
+ * the live `\p` listener — the SINGLE HOME for both `\p N`/`\p 0W` (q_sys.c
+ * h_p) and startup `-p`/`-p 0W` (qmain.c).  `port == 0` → OS-chosen ephemeral
+ * (the `0W` path).  On success: reads the ACTUAL bound port back via
+ * getsockname, drops any previous listener (kdb listens on ONE port), sets the
+ * authoritative `\p` getter state (`g_listen_port`, so `system "p"` reports the
+ * real port after EITHER path) and marks the listener active, then returns the
+ * bound port (>0).  On any failure (no poll, bind/listen, or readback) returns
+ * 0 and leaves the previous listener intact — never advertises port 0.  Silent
+ * (prints nothing — full kdb port fidelity). */
+uint16_t q_sys_listen(uint16_t port);
+
+/* The AUTHORITATIVE live listening port (`\p` getter state): the bound port
+ * (>0) while a listener is up, 0 after `\p 0` / when never bound.  qmain's
+ * post-script server-mode decision keys off THIS (not a stale local `port`),
+ * so a startup-script `\p 0` that closes the `-p` listener no longer strands
+ * the process in a listener-less server loop. */
+uint16_t q_sys_listen_port(void);
+
 /* What the mode-less core made of a `\`-command line.  The core CLASSIFIES and
  * hands policy back to the caller — it never exit()s or shells out itself.  Each
  * per-form adapter acts on the kind: the REPL exits on QS_QUIT and shells out on
