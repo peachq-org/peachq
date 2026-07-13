@@ -146,7 +146,7 @@ static void run_example(const char* input, const char* expect,
                 snprintf(got, sizeof got, "<error>");
                 ray_error_free(sr);
             } else {
-                if (sr && !RAY_IS_NULL(sr)) q_fmt(sr, got, sizeof got);
+                if (sr && !RAY_IS_NULL(sr)) q_fmt_console(sr, got, sizeof got);
                 if (sr) ray_release(sr);
                 if (want_error) {
                     ok = 0;
@@ -268,8 +268,10 @@ static void run_example(const char* input, const char* expect,
         got[gpos] = '\0';
     }
     q_console_reset();
-    /* q console silence: a (last-statement) assignment prints nothing. */
-    if (!RAY_IS_NULL(res) && !is_assign) q_fmt(res, got + gpos, sizeof got - gpos);
+    /* q console silence: a (last-statement) assignment prints nothing.  Auto-
+     * echo uses the DISPLAY seam so an in-transcript `\c` clips output (c.qcmd);
+     * the fresh-per-file runtime arms `\c 25 80` by default (q_sys_cfg_init). */
+    if (!RAY_IS_NULL(res) && !is_assign) q_fmt_console(res, got + gpos, sizeof got - gpos);
     ray_release(res);
 
     char ng[QD_OUT], ne[QD_OUT];
