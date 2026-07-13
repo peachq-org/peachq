@@ -273,7 +273,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
             } else if (sr) {
                 if (print_result && !RAY_IS_NULL(sr)) {
                     char buf[8192];
-                    q_fmt(sr, buf, sizeof buf);
+                    q_fmt_console(sr, buf, sizeof buf);   /* obey \c on display */
                     fputs(buf, out);
                     fputc('\n', out);
                 }
@@ -334,7 +334,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
      * script load (print_result == 0) prints no result at all. */
     if (print_result && !RAY_IS_NULL(r) && !is_assign) {
         char buf[8192];
-        q_fmt(r, buf, sizeof buf);
+        q_fmt_console(r, buf, sizeof buf);   /* obey \c on auto-echo display */
         fputs(buf, out);
         fputc('\n', out);
     }
