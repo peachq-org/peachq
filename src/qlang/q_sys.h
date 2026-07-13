@@ -30,6 +30,15 @@ void q_sys_seed_init(void);
  * the next. */
 void q_sys_cfg_init(void);
 
+/* `\c` console DISPLAY clipping (read by q_fmt.c's console emitter,
+ * q_fmt_console).  q_con_display fills the rows/cols out-params with the live
+ * `\c` size and returns true iff clipping is armed (ON by default;
+ * q_sys_cfg_init).  q_con_display_disable turns it OFF — qmain calls it for a
+ * pure non-tty script load so `.z.f`/script output is not clipped (a batch
+ * context, not a display). */
+bool q_con_display(int32_t* rows, int32_t* cols);
+void q_con_display_disable(void);
+
 /* True iff a `\t N` timer is currently armed (interval > 0).  The `.z.ts`
  * forwarding thunk (q_dotz.c) consults it to no-op after a reentrant `\t 0`
  * that could not delete the in-flight (popped) timer. */
