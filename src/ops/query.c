@@ -1600,6 +1600,269 @@ static int expr_contains_agg(ray_t* expr) {
     return 0;
 }
 
+/* ==== General-eval recognition (qSQL eval unification, stage 1) ==========
+ * Recognition-time dispatch: a select phrase that is NOT a recognized
+ * name-dispatch shape routes to the general ray_eval machinery
+ * (eval_expr_whole_col below / nonagg_eval_per_group*).  Purely structural —
+ * no q-layer knowledge — and it fires only on shapes that previously errored
+ * or crashed:
+ *   (a) an application head that is an embedded fn VALUE whose routing name
+ *       the env cannot resolve (e.g. q wrappers sums/prds), or a bare
+ *       RAY_LAMBDA value;
+ *   (b) a computed head: a LIST head whose own head is a fn VALUE, or a
+ *       (quote …) wrapper (embedded lambda / derived-verb carriers — the
+ *       q layer quote-wraps those so head-eval returns them intact);
+ *   (c) a bare reference to the virtual row-index `i` (no such column, no
+ *       such global) — kdb's virtual column;
+ *   (d) a recognized-aggregate call whose argument references a name that is
+ *       neither a column nor resolvable — previously compiled to a DAG scan
+ *       of a missing column and aborted on the null-invariant check.
+ *
+ * INVARIANT (applies to every output-expr collector in ray_select): if
+ * expr_needs_general_eval(expr, tbl) holds, no specialized aggregate /
+ * count-distinct / streaming / full-eval+gather path may inspect the
+ * expression first.  Full-table eval + per-group GATHER in particular is
+ * semantically wrong for order-sensitive uniform fns (`sums x by g` must
+ * restart per group). */
+
+static int query_head_is_quote(ray_t* h) {
+    if (!h || h->type != RAY_LIST || ray_len(h) < 1) return 0;
+    ray_t* hh = ((ray_t**)ray_data(h))[0];
+    if (!hh || hh->type != -RAY_SYM || (hh->attrs & ATTR_QUOTED)) return 0;
+    ray_t* s = ray_sym_str(hh->i64);          /* borrowed — do not release */
+    return s && ray_str_len(s) == 5 && memcmp(ray_str_ptr(s), "quote", 5) == 0;
+}
+
+/* Virtual `i`: the name is exactly "i", no table column shadows it, and no
+ * global is bound to it (legacy rayfall queries may use a global `i` as a
+ * constant — those keep their historical meaning; kdb divergence accepted
+ * and documented). */
+static int sym_is_virtual_i(int64_t sym_id, ray_t* tbl) {
+    ray_t* s = ray_sym_str(sym_id);           /* borrowed — do not release */
+    if (!(s && ray_str_len(s) == 1 && ray_str_ptr(s)[0] == 'i')) return 0;
+    if (tbl && ray_table_get_col(tbl, sym_id)) return 0;   /* real column wins */
+    if (ray_env_get(sym_id)) return 0;
+    return 1;
+}
+
+static int expr_refs_virtual_i(ray_t* expr, ray_t* tbl) {
+    if (!expr) return 0;
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED))
+        return sym_is_virtual_i(expr->i64, tbl);
+    if (expr->type != RAY_LIST) return 0;
+    ray_t** e = (ray_t**)ray_data(expr);
+    int64_t n = ray_len(expr);
+    for (int64_t i = 0; i < n; i++)
+        if (expr_refs_virtual_i(e[i], tbl)) return 1;
+    return 0;
+}
+
+/* Rule (d) walker: an unresolvable bare name in ARG position (heads are
+ * covered by rules a/b; an unknown NAME head keeps its historic 'name). */
+static int expr_has_unresolvable_name(ray_t* expr, ray_t* tbl) {
+    if (!expr) return 0;
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED)) {
+        if (ray_table_get_col(tbl, expr->i64)) return 0;
+        if (sym_is_virtual_i(expr->i64, tbl)) return 0;    /* rule (c) owns it */
+        if (ray_sym_is_dotted(expr->i64)) {
+            const int64_t* segs;
+            int nsegs = ray_sym_segs(expr->i64, &segs);
+            if (nsegs >= 1 && ray_table_get_col(tbl, segs[0])) return 0;
+        }
+        if (ray_env_get(expr->i64)) return 0;
+        return 1;
+    }
+    if (expr->type != RAY_LIST) return 0;
+    ray_t** e = (ray_t**)ray_data(expr);
+    int64_t n = ray_len(expr);
+    for (int64_t i = 1; i < n; i++)
+        if (expr_has_unresolvable_name(e[i], tbl)) return 1;
+    return 0;
+}
+
+static int expr_needs_general_eval(ray_t* expr, ray_t* tbl) {
+    if (!expr) return 0;
+    if (expr->type == -RAY_SYM && !(expr->attrs & ATTR_QUOTED))
+        return sym_is_virtual_i(expr->i64, tbl);           /* rule (c), bare */
+    if (expr->type != RAY_LIST) return 0;
+    int64_t n = ray_len(expr);
+    if (n == 0) return 0;
+    ray_t** e = (ray_t**)ray_data(expr);
+    ray_t* h = e[0];
+    if (h) {
+        if (h->type == RAY_LAMBDA) return 1;               /* rule (a) */
+        if (h->type == RAY_UNARY || h->type == RAY_BINARY || h->type == RAY_VARY) {
+            const char* nm = ray_fn_name(h);
+            int64_t id = (nm && nm[0])
+                       ? ray_sym_intern(nm, strlen(nm)) : -1;
+            if (id < 0 || !ray_env_get(id)) return 1;      /* rule (a) */
+        }
+        if (h->type == RAY_LIST) {
+            if (query_head_is_quote(h)) return 1;          /* rule (b) */
+            ray_t** he = (ray_t**)ray_data(h);
+            if (ray_len(h) >= 1 && he[0] &&
+                (he[0]->type == RAY_UNARY || he[0]->type == RAY_BINARY ||
+                 he[0]->type == RAY_VARY || he[0]->type == RAY_LAMBDA))
+                return 1;                                  /* rule (b) */
+        }
+    }
+    if (is_agg_expr(expr) && expr_has_unresolvable_name(expr, tbl))
+        return 1;                                          /* rule (d) */
+    for (int64_t i = 0; i < n; i++)
+        if (expr_needs_general_eval(e[i], tbl)) return 1;
+    return 0;
+}
+
+/* Bind the virtual row-index column `i` in the CURRENT env scope.  idx:
+ * NULL → whole-table 0..nrows-1; else the group's original-row index vector
+ * (kdb: per-group `i` = original row positions).  Owned err or NULL. */
+static ray_t* bind_virtual_i(ray_t* idx, int64_t nrows) {
+    int64_t i_sym = ray_sym_intern("i", 1);
+    if (idx) {
+        ray_env_set_local(i_sym, idx);        /* set_local retains */
+        return NULL;
+    }
+    ray_t* iv = ray_vec_new(RAY_I64, nrows > 0 ? nrows : 1);
+    if (!iv || RAY_IS_ERR(iv)) return iv ? iv : ray_error("oom", NULL);
+    iv->len = nrows;
+    int64_t* d = (int64_t*)ray_data(iv);
+    for (int64_t r = 0; r < nrows; r++) d[r] = r;
+    ray_env_set_local(i_sym, iv);
+    ray_release(iv);
+    return NULL;
+}
+
+/* General whole-column phrase eval: mount columns (+ virtual i when the
+ * expression references it), ray_eval the tree once, materialize lazies.
+ * Returns an owned value (atom / vec / list) or an owned error. */
+static ray_t* eval_expr_whole_col(ray_t* expr, ray_t* tbl) {
+    if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
+    ray_t* _aqt = bind_all_columns(tbl);
+    if (expr_refs_virtual_i(expr, tbl)) {
+        ray_t* err = bind_virtual_i(NULL, ray_table_nrows(tbl));
+        if (err) { g_active_query_table = _aqt; ray_env_pop_scope(); return err; }
+    }
+    ray_t* v = ray_eval(expr);
+    if (v && !RAY_IS_ERR(v) && ray_is_lazy(v)) v = ray_lazy_materialize(v);
+    g_active_query_table = _aqt;
+    ray_env_pop_scope();
+    if (!v) return ray_error("domain", "select: general phrase evaluation failed");
+    return v;
+}
+
+/* Broadcast an atom to an n-row column (typed when store_typed_elem supports
+ * the type, generic LIST otherwise). */
+static ray_t* query_broadcast_atom(ray_t* atom, int64_t n) {
+    int8_t t = atom->type;
+    if (t < 0 && t != -RAY_SYM && t != -RAY_STR && t != -RAY_GUID) {
+        ray_t* v = ray_vec_new((int8_t)-t, n > 0 ? n : 1);
+        if (v && !RAY_IS_ERR(v)) {
+            v->len = n;
+            int ok = 1;
+            for (int64_t r = 0; r < n; r++)
+                if (store_typed_elem(v, r, atom) != 0) { ok = 0; break; }
+            if (ok) return v;
+            ray_release(v);
+        } else if (v) {
+            ray_release(v);
+        }
+    }
+    ray_t* l = ray_list_new(n > 0 ? n : 1);
+    if (!l || RAY_IS_ERR(l)) return l ? l : ray_error("oom", NULL);
+    for (int64_t r = 0; r < n; r++) l = ray_list_append(l, atom);
+    return l;
+}
+
+/* General `where`: evaluate the predicate whole-column, demand a boolean
+ * mask (or bool atom), gather the surviving rows into a fresh table. */
+static ray_t* general_where_filter(ray_t* tbl, ray_t* where_expr) {
+    ray_t* mask = eval_expr_whole_col(where_expr, tbl);
+    if (RAY_IS_ERR(mask)) return mask;
+    int64_t nrows = ray_table_nrows(tbl);
+    int64_t nkeep = 0;
+    ray_t* idx = NULL;
+    if (mask->type == -RAY_BOOL) {                        /* atom: all/none */
+        nkeep = mask->b8 ? nrows : 0;
+        idx = ray_vec_new(RAY_I64, nkeep > 0 ? nkeep : 1);
+        if (idx && !RAY_IS_ERR(idx)) {
+            idx->len = nkeep;
+            int64_t* d = (int64_t*)ray_data(idx);
+            for (int64_t r = 0; r < nkeep; r++) d[r] = r;
+        }
+    } else if (ray_is_vec(mask) && mask->type == RAY_BOOL && mask->len == nrows) {
+        const uint8_t* m = (const uint8_t*)ray_data(mask);
+        idx = ray_vec_new(RAY_I64, nrows > 0 ? nrows : 1);
+        if (idx && !RAY_IS_ERR(idx)) {
+            int64_t* d = (int64_t*)ray_data(idx);
+            for (int64_t r = 0; r < nrows; r++) if (m[r]) d[nkeep++] = r;
+            idx->len = nkeep;
+        }
+    } else {
+        int8_t mt = mask->type;                /* capture BEFORE free */
+        ray_release(mask);
+        return ray_error("type",
+            "select: `where:` must produce a boolean mask, got %s",
+            ray_type_name(mt));
+    }
+    ray_release(mask);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+
+    /* Row-gather every column into a fresh table (schema preserved). */
+    int64_t nc = ray_table_ncols(tbl);
+    ray_t* out = ray_table_new(nc);
+    if (!out || RAY_IS_ERR(out)) {
+        ray_release(idx);
+        return out ? out : ray_error("oom", NULL);
+    }
+    const int64_t* id = (const int64_t*)ray_data(idx);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        int64_t cn = ray_table_col_name(tbl, c);
+        ray_t* g = NULL;
+        if (col && ray_is_vec(col)) g = gather_by_idx(col, (int64_t*)id, nkeep);
+        if (!g) g = ray_at_fn(col, idx);
+        if (!g || RAY_IS_ERR(g)) {
+            ray_release(out); ray_release(idx);
+            return g ? g : ray_error("oom", NULL);
+        }
+        out = ray_table_add_col(out, cn, g);
+        ray_release(g);
+        if (!out || RAY_IS_ERR(out)) {
+            ray_release(idx);
+            return out ? out : ray_error("oom", NULL);
+        }
+    }
+    ray_release(idx);
+    return out;
+}
+
+/* Filter `tbl` by an ORDINARY (DAG-compilable) where predicate, producing a
+ * materialized table.  Used by the no-by eval fallback when a GENERAL output
+ * expression forced it off the DAG pipeline but the `where` itself is a
+ * recognized shape — the DAG comparison kernels own conventions (e.g. the
+ * q layer's enlisted-symbol literal RHS) that plain ray_eval does not, so a
+ * non-general where must stay on the engine path (codex diff-review P2).
+ * A compile decline (NULL — recognition, not a runtime error) falls through
+ * to the general filter, which is at least honest about what it can't eval. */
+static ray_t* dag_where_filter(ray_t* tbl, ray_t* where_expr) {
+    ray_graph_t* fg = ray_graph_new(tbl);
+    if (!fg) return ray_error("oom", NULL);
+    ray_op_t* froot = ray_const_table(fg, tbl);
+    ray_op_t* pred = compile_expr_dag(fg, where_expr);
+    if (!pred) {
+        ray_graph_free(fg);
+        return general_where_filter(tbl, where_expr);
+    }
+    froot = ray_filter(fg, froot, pred);
+    ray_t* filtered = ray_execute(fg, froot);
+    ray_graph_free(fg);
+    if (filtered && !RAY_IS_ERR(filtered) && ray_is_lazy(filtered))
+        filtered = ray_lazy_materialize(filtered);
+    if (!filtered)
+        return ray_error("domain", "select: `where:` filter produced no result");
+    return filtered;
+}
+
 static int expr_contains_call_named(ray_t* expr, const char* name, size_t name_len) {
     if (!expr) return 0;
     if (expr->type != RAY_LIST) return 0;
@@ -2226,6 +2489,11 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
     int direct_typed = 0;       /* non-zero → result is a typed vec */
     int8_t typed_t = 0;         /* atom type sentinel for the typed path */
 
+    /* Virtual `i` (kdb): inside a grouped phrase, `i` is the group's
+     * ORIGINAL row indices — exactly the per-group idx_list.  Bound only
+     * when the expression references it (general-eval rule c). */
+    int wants_i = expr_refs_virtual_i(expr, tbl);
+
     for (int64_t gi = 0; gi < n_groups; gi++) {
         ray_t* idx_list = feeder(gi, fstate);
         if (!idx_list) {
@@ -2236,6 +2504,15 @@ static ray_t* nonagg_eval_per_group_core(ray_t* expr, ray_t* tbl,
         }
         for (int i = 0; i < n_cols; i++) {
             ray_t* err = bind_col_slice(col_syms[i], cols[i], idx_list);
+            if (err) {
+                g_active_query_table = _aqt;
+                ray_env_pop_scope();
+                if (result) ray_release(result);
+                return err;
+            }
+        }
+        if (wants_i) {
+            ray_t* err = bind_virtual_i(idx_list, 0);
             if (err) {
                 g_active_query_table = _aqt;
                 ray_env_pop_scope();
@@ -4671,6 +4948,23 @@ ray_t* ray_select(ray_t** args, int64_t n) {
     if (RAY_IS_ERR(tbl)) return tbl;
     if (tbl->type != RAY_TABLE) { int8_t tbl_t = tbl->type; ray_release(tbl); return ray_error("type", "select: `from:` must evaluate to a table, got %s", ray_type_name(tbl_t)); }
 
+    /* General `where` (stage-1 eval unification): a predicate the DAG/name
+     * dispatch family can't serve (lambda/carrier head, virtual i, …) filters
+     * HERE, once, and the rest of ray_select proceeds where-less.  This is
+     * recognition-time dispatch — never a fallback on a runtime error.  Every
+     * downstream consumer reads the LOCAL where_expr, so NULLing it makes the
+     * remaining pipeline see a plain unfiltered select over the filtered
+     * table.  (The kid==where_id skips key off the dict and are unaffected.) */
+    if (where_expr && expr_needs_general_eval(where_expr, tbl)) {
+        ray_t* filtered = general_where_filter(tbl, where_expr);
+        ray_release(tbl);
+        if (!filtered || RAY_IS_ERR(filtered))
+            return filtered ? filtered
+                            : ray_error("domain", "select: `where:` failed");
+        tbl = filtered;
+        where_expr = NULL;
+    }
+
     ray_t* by_expr = dict_get(dict, "by");
     ray_t* take_expr = dict_get(dict, "take");
     ray_t* nearest_expr = dict_get(dict, "nearest");
@@ -5762,6 +6056,11 @@ by_dict_done:
                 int64_t kid = dict_elems[i]->i64;
                 if (kid == from_id || kid == where_id || kid == by_id ||
                     kid == take_id || kid == asc_id || kid == desc_id) continue;
+                /* General exprs are non-aggs by definition (INVARIANT: no
+                 * specialized path may inspect them first). */
+                if (expr_needs_general_eval(dict_elems[i + 1], tbl)) {
+                    any_nonagg = 1; any_true_nonagg = 1; break;
+                }
                 if (is_single_group_key_projection(by_expr, dict_elems[i + 1]))
                     continue;
                 if (is_group_dag_agg_expr(dict_elems[i + 1])) continue;
@@ -6218,6 +6517,22 @@ by_dict_done:
                     if (kid == from_id || kid == where_id || kid == by_id ||
                         kid == take_id || kid == asc_id || kid == desc_id) continue;
                     ray_t* val_expr_item = dict_elems[i + 1];
+
+                    /* General exprs first (INVARIANT): per-group ray_eval —
+                     * no count-distinct / streaming kernel may steal them. */
+                    if (expr_needs_general_eval(val_expr_item, eval_tbl)) {
+                        ray_t* per_group = nonagg_eval_per_group(
+                            val_expr_item, eval_tbl, groups, n_groups);
+                        if (!per_group || RAY_IS_ERR(per_group)) {
+                            for (int ai = 0; ai < n_agg_out; ai++) if (agg_results[ai]) ray_release(agg_results[ai]);
+                            ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                            return per_group ? per_group : ray_error("domain", "select by: per-group general evaluation failed");
+                        }
+                        agg_names[n_agg_out] = kid;
+                        agg_results[n_agg_out] = per_group;
+                        n_agg_out++;
+                        continue;
+                    }
 
                     /* Per-group count(distinct) — bypass full ray_eval per
                      * group and dispatch directly to exec_count_distinct on
@@ -6729,6 +7044,24 @@ by_dict_done:
                 int64_t kid = dict_elems[i]->i64;
                 if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id) continue;
                 ray_t* val_expr_item = dict_elems[i + 1];
+
+                /* General exprs first (INVARIANT): per-group ray_eval — the
+                 * full-table-eval+GATHER below is semantically wrong for
+                 * order-sensitive uniform fns (sums must restart per group),
+                 * and no count-distinct / streaming kernel may steal them. */
+                if (expr_needs_general_eval(val_expr_item, eval_tbl)) {
+                    ray_t* per_group = nonagg_eval_per_group(
+                        val_expr_item, eval_tbl, groups, n_groups);
+                    if (!per_group || RAY_IS_ERR(per_group)) {
+                        for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
+                        ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                        return per_group ? per_group : ray_error("domain", "select by: per-group general evaluation failed");
+                    }
+                    agg_names[n_agg_out] = kid;
+                    agg_results[n_agg_out] = per_group;
+                    n_agg_out++;
+                    continue;
+                }
 
                 /* Per-group count(distinct) — bypass full ray_eval per
                  * group and dispatch directly to exec_count_distinct. */
@@ -7290,7 +7623,13 @@ by_dict_done:
             if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id) continue;
 
             ray_t* val_expr = dict_elems[i + 1];
-            if (is_group_dag_agg_expr(val_expr) && n_aggs < 16) {
+            /* INVARIANT: a general expr (value/lambda head, virtual i,
+             * missing-column agg arg) is NEVER a DAG agg — it routes to the
+             * per-group general lane below.  In particular an aggregate over
+             * a missing column previously compiled to a DAG scan and aborted
+             * on the null-invariant; the general lane raises 'name instead. */
+            if (is_group_dag_agg_expr(val_expr) &&
+                !expr_needs_general_eval(val_expr, tbl) && n_aggs < 16) {
                 ray_t** agg_elems = (ray_t**)ray_data(val_expr);
                 uint16_t op = resolve_agg_opcode(agg_elems[0]->i64);
                 ray_t* agg_arg = agg_elems[1];
@@ -7337,7 +7676,8 @@ by_dict_done:
                     has_agg_k = 1;
                 }
                 n_aggs++;
-            } else if (!is_group_dag_agg_expr(val_expr) && n_nonaggs < 16) {
+            } else if ((!is_group_dag_agg_expr(val_expr) ||
+                        expr_needs_general_eval(val_expr, tbl)) && n_nonaggs < 16) {
                 if (is_single_group_key_projection(by_expr, val_expr))
                     continue;
                 nonagg_names[n_nonaggs] = kid;
@@ -7977,15 +8317,19 @@ by_dict_done:
          * scope for this fix. */
         int has_agg = 0;
         int has_nonagg_out = 0;
+        int has_general = 0;
         for (int64_t i = 0; i + 1 < dict_n; i += 2) {
             int64_t kid = dict_elems[i]->i64;
             if (kid == from_id || kid == where_id || kid == by_id ||
                 kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
+            /* INVARIANT: a general expr never enters the scalar-reduction
+             * DAG aggregate compiler — it forces the eval fallback below. */
+            if (expr_needs_general_eval(dict_elems[i + 1], tbl)) has_general = 1;
             if (is_agg_expr(dict_elems[i + 1])) has_agg = 1;
             else has_nonagg_out = 1;
         }
 
-        if (has_agg && !has_nonagg_out && !nearest_expr) {
+        if (has_agg && !has_nonagg_out && !has_general && !nearest_expr) {
             /* Scalar reduction.  Pre-execute the WHERE filter (already
              * wired as ray_filter at the top) so OP_FILTER on the table
              * input populates g->selection, which exec_group then
@@ -8063,8 +8407,8 @@ by_dict_done:
             /* Projection only (no group by) — select specific columns */
             ray_op_t* col_ops[16];
             uint8_t nc = 0;
-            int use_eval_fallback = 0;
-            for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+            int use_eval_fallback = has_general;   /* INVARIANT: skip compile */
+            for (int64_t i = 0; i + 1 < dict_n && !use_eval_fallback; i += 2) {
                 int64_t kid = dict_elems[i]->i64;
                 if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
                 if (nc < 16) {
@@ -8084,30 +8428,121 @@ by_dict_done:
                     ray_graph_free(g); ray_release(tbl);
                     return result ? result : ray_error("oom", NULL);
                 }
-                int64_t nrows = ray_table_nrows(tbl);
-                for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-                    int64_t kid = dict_elems[i]->i64;
-                    if (kid == from_id || kid == where_id || kid == by_id ||
-                        kid == take_id || kid == asc_id || kid == desc_id ||
-                        kid == nearest_id) continue;
-                    ray_t* col = eval_expr_per_row(dict_elems[i + 1], tbl, nrows);
-                    if (!col || RAY_IS_ERR(col)) {
-                        ray_t* err = col ? col : ray_error("domain", "select: failed to evaluate output column expression");
+
+                /* General mode (any general output expr): whole-column
+                 * evaluation with kdb conformance — vectors must share one
+                 * length, atoms broadcast, all-atom output is one row.  The
+                 * pending `where` (not yet executed — the DAG that carried it
+                 * is discarded on this path) filters the eval table FIRST.
+                 * Legacy mode (no general expr) keeps the historic per-row
+                 * eval semantics byte-identical. */
+                ray_t* eval_tbl = tbl;
+                if (has_general && where_expr) {
+                    ray_t* filtered = expr_needs_general_eval(where_expr, tbl)
+                                    ? general_where_filter(tbl, where_expr)
+                                    : dag_where_filter(tbl, where_expr);
+                    if (!filtered || RAY_IS_ERR(filtered)) {
                         ray_release(result);
                         if (nearest_handle_owned) ray_release(nearest_handle_owned);
                         if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
                         ray_graph_free(g); ray_release(tbl);
-                        return err;
+                        return filtered ? filtered : ray_error("domain", "select: `where:` failed");
                     }
-                    result = ray_table_add_col(result, kid, col);
-                    ray_release(col);
-                    if (RAY_IS_ERR(result)) {
+                    eval_tbl = filtered;
+                }
+                int64_t nrows = ray_table_nrows(eval_tbl);
+
+                if (has_general) {
+                    int64_t out_names[DICT_VIEW_MAX];
+                    ray_t*  out_vals[DICT_VIEW_MAX];
+                    int     n_outc = 0;
+                    ray_t*  fail = NULL;
+                    int64_t target_rows = -1;      /* common vector length */
+                    for (int64_t i = 0; i + 1 < dict_n && !fail; i += 2) {
+                        int64_t kid = dict_elems[i]->i64;
+                        if (kid == from_id || kid == where_id || kid == by_id ||
+                            kid == take_id || kid == asc_id || kid == desc_id ||
+                            kid == nearest_id) continue;
+                        ray_t* vexpr = dict_elems[i + 1];
+                        int general = expr_needs_general_eval(vexpr, eval_tbl);
+                        int agg_ish = is_agg_expr(vexpr) || expr_contains_agg(vexpr);
+                        ray_t* col = (general || agg_ish)
+                                   ? eval_expr_whole_col(vexpr, eval_tbl)
+                                   : eval_expr_per_row(vexpr, eval_tbl, nrows);
+                        if (!col || RAY_IS_ERR(col)) {
+                            fail = col ? col : ray_error("domain", "select: failed to evaluate output column expression");
+                            break;
+                        }
+                        int is_vec = ray_is_vec(col) || col->type == RAY_LIST;
+                        if (is_vec) {
+                            if (target_rows >= 0 && col->len != target_rows) {
+                                ray_release(col);
+                                fail = ray_error("length", "select: output columns have mismatched lengths (%lld vs %lld)",
+                                                 (long long)target_rows, (long long)col->len);
+                                break;
+                            }
+                            target_rows = col->len;
+                        }
+                        out_names[n_outc] = kid;
+                        out_vals[n_outc]  = col;
+                        n_outc++;
+                    }
+                    if (!fail && target_rows < 0) target_rows = 1;  /* all atoms */
+                    for (int oi = 0; oi < n_outc && !fail; oi++) {
+                        ray_t* col = out_vals[oi];
+                        if (!(ray_is_vec(col) || col->type == RAY_LIST)) {
+                            ray_t* bc = query_broadcast_atom(col, target_rows);
+                            ray_release(col);
+                            out_vals[oi] = NULL;
+                            if (!bc || RAY_IS_ERR(bc)) {
+                                fail = bc ? bc : ray_error("oom", NULL);
+                                break;
+                            }
+                            out_vals[oi] = bc;
+                        }
+                        result = ray_table_add_col(result, out_names[oi], out_vals[oi]);
+                        ray_release(out_vals[oi]);
+                        out_vals[oi] = NULL;
+                        if (RAY_IS_ERR(result)) { fail = result; result = NULL; break; }
+                    }
+                    if (fail) {
+                        for (int oi = 0; oi < n_outc; oi++)
+                            if (out_vals[oi]) ray_release(out_vals[oi]);
+                        if (result) ray_release(result);
+                        if (eval_tbl != tbl) ray_release(eval_tbl);
                         if (nearest_handle_owned) ray_release(nearest_handle_owned);
                         if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
                         ray_graph_free(g); ray_release(tbl);
-                        return result;
+                        return fail;
+                    }
+                } else {
+                    for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+                        int64_t kid = dict_elems[i]->i64;
+                        if (kid == from_id || kid == where_id || kid == by_id ||
+                            kid == take_id || kid == asc_id || kid == desc_id ||
+                            kid == nearest_id) continue;
+                        ray_t* col = eval_expr_per_row(dict_elems[i + 1], eval_tbl, nrows);
+                        if (!col || RAY_IS_ERR(col)) {
+                            ray_t* err = col ? col : ray_error("domain", "select: failed to evaluate output column expression");
+                            ray_release(result);
+                            if (eval_tbl != tbl) ray_release(eval_tbl);
+                            if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                            if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                            ray_graph_free(g); ray_release(tbl);
+                            return err;
+                        }
+                        result = ray_table_add_col(result, kid, col);
+                        ray_release(col);
+                        if (RAY_IS_ERR(result)) {
+                            if (eval_tbl != tbl) ray_release(eval_tbl);
+                            if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                            if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                            ray_graph_free(g); ray_release(tbl);
+                            return result;
+                        }
                     }
                 }
+                if (eval_tbl != tbl) ray_release(eval_tbl);
                 if (nearest_handle_owned) ray_release(nearest_handle_owned);
                 if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
                 ray_graph_free(g); ray_release(tbl);
@@ -8869,6 +9304,10 @@ by_dict_done:
                  * which requires idx_buf+offsets+grp_cnt. */
                 int needs_slice_idx = 0;
                 for (uint8_t ni = 0; ni < n_nonaggs && !needs_slice_idx; ni++) {
+                    if (expr_needs_general_eval(nonagg_exprs[ni], tbl)) {
+                        needs_slice_idx = 1;   /* general lane needs idx_buf */
+                        break;
+                    }
                     ray_t* cd_inner = match_count_distinct(nonagg_exprs[ni]);
                     int simple_cd_global = (cd_inner &&
                                             cd_inner->type == -RAY_SYM &&
@@ -8985,6 +9424,20 @@ by_dict_done:
 
                 ray_t* scatter_err = NULL;
                 for (uint8_t ni = 0; ni < n_nonaggs && !scatter_err; ni++) {
+                    /* General exprs first (INVARIANT): per-group ray_eval —
+                     * no count-distinct / streaming / full-eval+gather path
+                     * may inspect them (gather is wrong for order-sensitive
+                     * uniform fns; kernels can't bind virtual i). */
+                    if (expr_needs_general_eval(nonagg_exprs[ni], tbl)) {
+                        ray_t* per_group = nonagg_eval_per_group_buf(
+                            nonagg_exprs[ni], tbl, idx_buf, offsets, grp_cnt, n_groups);
+                        if (RAY_IS_ERR(per_group)) { scatter_err = per_group; break; }
+                        result = ray_table_add_col(result, nonagg_names[ni], per_group);
+                        ray_release(per_group);
+                        if (RAY_IS_ERR(result)) { scatter_err = result; result = NULL; break; }
+                        continue;
+                    }
+
                     /* Per-group count(distinct) — dispatch directly to
                      * exec_count_distinct on each group's slice using
                      * the same idx_buf+offsets+grp_cnt layout the
