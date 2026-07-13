@@ -10,8 +10,10 @@
  * console OR pipe) is registered on the SAME poll as the listener and one
  * event loop serves both CONCURRENTLY (q_repl_run_poll) — clients round-trip
  * while the REPL sits at its prompt.  stdin EOF (`</dev/null`, docker,
- * systemd) leaves the loop serving IPC only; `\\` exits.  Windows keeps the
- * serial REPL-then-serve shape until IOCP grows a stdin selector.
+ * systemd) leaves the loop serving IPC only; `\\` exits.  Windows shares the
+ * same shape: the IOCP backend delivers stdin readiness (console watcher
+ * thread / PeekNamedPipe — see src/core/iocp_win.c), so `q.exe -p` serves
+ * clients while the console sits at a live prompt too.
  *
  * Deliberately thin otherwise: no error traces, progress bar, remote session,
  * or piped bracket accumulation — those live in the (frozen) rayforce repl.c
@@ -179,14 +181,14 @@ int main(int argc, char** argv) {
          * EPIPE instead). */
         int concurrent = 0;
 #ifndef RAY_OS_WINDOWS
-        signal(SIGPIPE, SIG_IGN);
+        signal(SIGPIPE, SIG_IGN);   /* no SIGPIPE on Windows; send errors
+                                     * surface as WSAECONNRESET instead */
+#endif
         concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty,
                                       /*have_listener=*/1) == 0);
-#endif
         if (!concurrent) {
-            /* Fallback: Windows (no IOCP stdin selector yet) or a stdin the
-             * poll backend cannot watch (e.g. a regular-file redirect under
-             * epoll).  Legacy serial shape. */
+            /* Fallback: a stdin the poll backend cannot watch (e.g. a
+             * regular-file redirect under epoll).  Legacy serial shape. */
             if (stdin_tty) {
                 fprintf(stderr, "note: -p with an interactive REPL serves "
                                 "IPC only after EOF on this platform\n");
@@ -206,7 +208,8 @@ int main(int argc, char** argv) {
          * instant they arrive, not only during a sync-send) and a runtime `\p`
          * joins this poll.  have_listener=0 → the loop exits at stdin EOF, so a
          * piped client still finishes.  Fall back to the blocking console where
-         * the poll backend can't watch stdin (regular-file redirect, Windows). */
+         * the poll backend can't watch stdin (regular-file redirect under
+         * epoll; the IOCP backend watches every stdin kind). */
         int concurrent = 0;
         if (poll)
             concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty,
