@@ -9,8 +9,19 @@
 #include <rayforce.h>
 #include <stddef.h>
 
-/* Render val into buf (NUL-terminated, bounded by bufsz). */
+/* Render val into buf (NUL-terminated, bounded by bufsz), UNCLIPPED.  The
+ * round-trippable paths (`string`, `-3!`/`.Q.s1`, CSV) and every recursive
+ * cell/element render use this. */
 void q_fmt(ray_t* val, char* buf, size_t bufsz);
+
+/* Render val for the CONSOLE, honouring the live `\c rows cols` DISPLAY clip
+ * when armed (q_sys.c q_con_display): a line longer than cols-1 chars keeps
+ * its first cols-3 chars + `..` at columns cols-2,cols-1 (fixed-column,
+ * type-blind); a display taller than rows-2 lines shows rows-3 lines + a bare
+ * `..` row.  Applied IN-RENDER by q_fmt.c's emitter, so a huge value never
+ * renders in full.  The DISPLAY seam — REPL auto-echo, `show`, `.Q.s` route
+ * through here; unarmed (or for a parse tree — rule 2) it equals q_fmt. */
+void q_fmt_console(ray_t* val, char* buf, size_t bufsz);
 
 /* ---- `\P` display precision -----------------------------------------------
  * Significant digits shown when a float is converted to a string (kdb `\P`,
