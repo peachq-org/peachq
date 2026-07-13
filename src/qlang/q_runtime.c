@@ -79,6 +79,31 @@ static void q_bootstrap_load(void) {
     }
 }
 
+/* Name-load resolver: `.z.*` computed names first, then — stage-1 general
+ * eval (2026-07-11) — a REGISTRY fallback so a bare q keyword verb stands as
+ * a noun exactly as kdb's does (`sums` alone is the unary value; `(sums;`x)`
+ * functional-form literals need the element to evaluate).  Fires only on an
+ * env MISS, so every env-bound name keeps its meaning; registry handouts are
+ * BORROWED — retain before returning the owned ref the hook contract wants. */
+static ray_t* q_name_resolve(int64_t sym_id) {
+    ray_t* v = q_dotz_resolve(sym_id);
+    if (v) return v;
+    ray_t* name = ray_sym_str(sym_id);   /* borrowed arena string */
+    if (!name) return NULL;
+    const char* p = ray_str_ptr(name);
+    size_t      n = ray_str_len(name);
+    /* KEYWORD verbs only: kdb lets `sums` stand bare as a noun, but a bare
+     * GLYPH (`#`, `,`, `+`) is k-syntax and must stay an error (`',`) — see
+     * the q-verb-forms rule.  Glyph values are reachable as `(#)` etc. */
+    if (n == 0 || !((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')))
+        return NULL;
+    ray_t* hit = q_registry_lookup_name(p, n, Q_MONADIC);
+    if (!hit) hit = q_registry_lookup_name(p, n, Q_DYADIC);
+    if (!hit) return NULL;
+    ray_retain(hit);
+    return hit;
+}
+
 ray_runtime_t* q_runtime_create(int argc, char** argv) {
     /* q owns dotted namespaces for user code, and real q has no .sys/.os/.ipc:
      * suppress the rayfall system-plumbing namespaces for this runtime, then
@@ -95,7 +120,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
          * process-constant argv values once and install the name-load hook. */
         q_dotz_init(argc, argv);
-        ray_eval_set_name_hook(q_dotz_resolve);
+        ray_eval_set_name_hook(q_name_resolve);
         q_bootstrap_load();    /* embedded .q stdlib, post-registry (rule 6) */
     }
     return rt;
