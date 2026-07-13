@@ -7079,9 +7079,30 @@ static ray_t* funsql_lower_expr(ray_t* x) {
         for (int64_t i = 0; i < n; i++) {
             ray_t* c;
             if (i == 0) {
+                /* Stage-1 general eval (2026-07-11): convert the head to a
+                 * name sym ONLY when the base env can resolve that name (the
+                 * engine's name-dispatch fast paths).  An unresolvable head
+                 * (q wrapper like sums/prds, spelling-less value) keeps the
+                 * VALUE — ray_select's general-eval recognizer routes it.  A
+                 * lambda/derived-verb CARRIER (a runtime LIST value) or bare
+                 * RAY_LAMBDA is embedded as (quote <carrier>): ray_eval's
+                 * head-eval returns it intact and the noun-head arm applies
+                 * it through the q apply hook. */
                 const char* nm = funsql_head_name(e[0]);
-                if (nm && nm[0]) c = ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
-                else { ray_retain(e[0]); c = e[0]; }
+                int64_t id = (nm && nm[0])
+                           ? ray_sym_intern_runtime(nm, strlen(nm)) : -1;
+                if (id >= 0 && ray_env_get(id)) {
+                    c = ray_sym(id);
+                } else if (e[0]->type == RAY_UNARY || e[0]->type == RAY_BINARY ||
+                           e[0]->type == RAY_VARY) {
+                    ray_retain(e[0]); c = e[0];    /* value head: eval-safe */
+                } else {                            /* carrier / RAY_LAMBDA */
+                    ray_t* qs = ray_sym(ray_sym_intern_runtime("quote", 5));
+                    ray_t* wrap = ray_list_new(2);
+                    wrap = ray_list_append(wrap, qs);   ray_release(qs);
+                    wrap = ray_list_append(wrap, e[0]); /* retains carrier */
+                    c = wrap;
+                }
             } else {
                 c = funsql_lower_expr(e[i]);
             }
