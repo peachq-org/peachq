@@ -679,30 +679,29 @@ static ray_t* q_dotq_qp_fn(ray_t* x) {
 }
 
 /* (.Q.s x) — x formatted to plain text as the console prints it (ref/dotq.md
- * `.Q.s`), returned as a q string.  SINGLE-HOMES to q_fmt — the same console
- * formatter `show` uses (q_console_show = q_fmt + '\n') — so `.Q.s x` is
- * byte-identical to what `show x` prints, INCLUDING the line-terminating
- * trailing newline.  It therefore already obeys the `\c` console width/height
- * and `\P` precision that q_fmt honours.  We do NOT reuse q_console_show here:
- * that appends into the global console sink the REPL/qdoc host drains after
- * each eval, so routing through it would inject `.Q.s`'s text into the host's
- * output — `.Q.s` must be side-effect-free and RETURN the string.
- * q_fmt truncates silently into a bounded buffer, so grow until the rendered
- * length CONVERGES (a larger buffer yields no more bytes).  NB `len < cap-1` is
- * NOT a reliable fit test: q_fmt stops at an element boundary when the buffer
- * fills, so a truncated render can still leave room at the tail (e.g. `.Q.s til
- * 5000` fills only ~8190 of 8192).  Convergence is reliable because q_fmt's
- * output length is monotonic non-decreasing in buffer size — equal length after
- * doubling means the whole display fit.  Capped to stay bounded.  (Whether
- * q_fmt itself honours the `\c` console width/height for oversized output is
- * q_fmt's concern, shared with `show`; this seam faithfully returns q_fmt's
- * full output.) */
+ * `.Q.s`), returned as a q string.  SINGLE-HOMES to q_fmt_console — the same
+ * DISPLAY seam `show` uses (q_console_show = q_fmt_console + '\n') — so
+ * `.Q.s x` is byte-identical to what `show x` prints, INCLUDING the
+ * line-terminating trailing newline, and OBEYS the `\c` console width/height
+ * ("Obeys console width and height set by \c", ref/dotq.md) and `\P`
+ * precision.  We do NOT reuse q_console_show here: that appends into the
+ * global console sink the REPL/qdoc host drains after each eval, so routing
+ * through it would inject `.Q.s`'s text into the host's output — `.Q.s` must
+ * be side-effect-free and RETURN the string.
+ * The renderer truncates silently into a bounded buffer, so grow until the
+ * rendered length CONVERGES (a larger buffer yields no more bytes).  NB
+ * `len < cap-1` is NOT a reliable fit test: the renderer stops at an element
+ * boundary when the buffer fills, so a truncated render can still leave room
+ * at the tail (e.g. an unclipped `.Q.s til 5000` fills only ~8190 of 8192).
+ * Convergence is reliable because the output length is monotonic
+ * non-decreasing in buffer size — equal length after doubling means the whole
+ * display fit.  Capped to stay bounded. */
 static ray_t* q_dotq_s_fn(ray_t* x) {
     size_t cap = 8192;
     char* buf = malloc(cap);
     if (!buf) return ray_error("wsfull", ".Q.s: out of memory");
     buf[0] = '\0';
-    q_fmt(x, buf, cap);
+    q_fmt_console(x, buf, cap);                      /* `.Q.s` OBEYS `\c` */
     size_t len = strlen(buf);
     while (cap < (1u << 24)) {                       /* grow until length settles */
         size_t ncap = cap * 2;
@@ -711,7 +710,7 @@ static ray_t* q_dotq_s_fn(ray_t* x) {
         buf = nb;
         cap = ncap;
         buf[0] = '\0';
-        q_fmt(x, buf, cap);
+        q_fmt_console(x, buf, cap);
         size_t nlen = strlen(buf);
         if (nlen == len) break;                      /* converged: full display */
         len = nlen;
