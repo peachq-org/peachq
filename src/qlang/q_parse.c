@@ -2342,6 +2342,16 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
             ray_t *v  = qsql_convert_expr(ph[i]);
             ray_t *al = qsql_derive_alias(v);
             if (!al) { ray_release(v); continue; }  /* unnameable (clone soft-fails) */
+            /* kdb: a bare `select i` (the VIRTUAL row-index column) outputs
+             * under the name `x`, not `i` (qsql.md — i is not a real column,
+             * so the default rightmost-name alias does not apply). */
+            if (v && v->type == -RAY_SYM && al->type == -RAY_SYM) {
+                ray_t *als = ray_sym_str(al->i64);
+                if (als && ray_str_len(als) == 1 && ray_str_ptr(als)[0] == 'i') {
+                    ray_release(al);
+                    al = qsql_colsym(ray_sym_intern_runtime("x", 1));
+                }
+            }
             aliases[na] = al;
             vals[na]    = v;
         }
@@ -3360,7 +3370,14 @@ static void ql_unquote_cols(ray_t *x) {
  * embedded function-VALUE head back into a bare name-ref sym.  ray_select's
  * aggregate detection (is_agg_expr, query.c) keys on a -RAY_SYM head, so
  * `sum a` — which the parser embeds as (sum<value>;`a) — must become
- * (sum;a) or it evaluates element-wise (returning the column, not the sum). */
+ * (sum;a) or it evaluates element-wise (returning the column, not the sum).
+ *
+ * Stage-1 general eval (2026-07-11): the conversion is now CONDITIONAL — a
+ * head whose routing name the base env cannot resolve (q wrappers like
+ * sums/prds/deltas, spelling-less values) KEEPS the VALUE.  Converting those
+ * to name syms manufactured a guaranteed 'name at eval; a preserved value
+ * head is exactly what ray_select's general-eval recognizer keys on, and
+ * compile_expr_dag/ray_eval both apply value heads natively. */
 static void ql_qsql_out(ray_t *x) {
     if (!x) return;
     if (x->type == -RAY_SYM) { x->attrs &= ~Q_ATTR_QUOTED; return; }
@@ -3371,12 +3388,91 @@ static void ql_qsql_out(ray_t *x) {
                            e[0]->type == RAY_VARY)) {
         const char *nm = ray_fn_name(e[0]);
         if (nm && nm[0]) {
-            ray_t *s = ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
-            if (s && !RAY_IS_ERR(s)) { ray_release(e[0]); e[0] = s; }
-            else if (s) ray_release(s);
+            int64_t id = ray_sym_intern_runtime(nm, strlen(nm));
+            if (ray_env_get(id)) {              /* engine can name-dispatch it */
+                ray_t *s = ray_sym(id);
+                if (s && !RAY_IS_ERR(s)) { ray_release(e[0]); e[0] = s; }
+                else if (s) ray_release(s);
+            }                                   /* else: keep the VALUE head */
         }
     }
     for (int64_t i = 0; i < n; i++) ql_qsql_out(e[i]);
+}
+
+static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head);
+
+/* Lower a phrase subtree that q_lower_walk skipped: name!expr DICT values are
+ * not walked (the walker recurses only RAY_LIST children), so select-phrase
+ * expressions keep their raw parse heads (`{` lambda markers, control markers)
+ * unless lowered here.  Mirrors the loop in ql_qsql_exec.  Operates on the
+ * dict's INTERNAL slot (rc==1) — never on a retained copy (the walker asserts
+ * sole ownership). */
+static void qsql_lower_phrase(ray_t **slot) {
+    if (*slot && (*slot)->type == RAY_LIST && (*slot)->rc == 1 &&
+        q_deriv_kind_of(*slot) == Q_DERIV_NONE) {
+        ray_t *err = q_lower_walk(slot, 0, 0);
+        if (err) ray_release(err);      /* an 'assign in a phrase expr: drop */
+    }
+}
+
+/* An application whose HEAD is an embedded lambda/derived-verb CARRIER (a
+ * runtime VALUE) or a bare RAY_LAMBDA would be re-walked by ray_eval's
+ * head-eval and die 'name on the internal marker sym.  Wrap such heads as
+ * (quote <carrier>): `quote` is a base special form, so head-eval returns the
+ * carrier itself and eval's noun-head arm dispatches it through the q apply
+ * hook.  Narrow by design (codex plan-review item 7): ordinary value/sym
+ * heads are never wrapped.  Mutates only the OWNED application node — the
+ * carrier itself is untouched (it may be rc-shared with the env). */
+static void qsql_quote_carrier_heads(ray_t *x) {
+    if (!x || x->type != RAY_LIST || q_deriv_kind_of(x) != Q_DERIV_NONE) return;
+    int64_t n = ray_len(x);
+    ray_t **e = (ray_t **)ray_data(x);
+    if (n >= 2 && e[0] &&
+        ((e[0]->type == RAY_LIST && q_deriv_kind_of(e[0]) != Q_DERIV_NONE) ||
+         e[0]->type == RAY_LAMBDA)) {
+        ray_t *q = q_marker("quote");
+        ray_t *wrap = ray_list_new(2);
+        wrap = ray_list_append(wrap, q);    ray_release(q);
+        wrap = ray_list_append(wrap, e[0]);            /* retains carrier */
+        ray_release(e[0]);                             /* drop old slot ref */
+        e[0] = wrap;                                   /* own the wrapper */
+    }
+    if (e[0] && e[0]->type == RAY_LIST && q_deriv_kind_of(e[0]) == Q_DERIV_NONE)
+        qsql_quote_carrier_heads(e[0]);                /* computed heads nest */
+    for (int64_t i = 1; i < n; i++) qsql_quote_carrier_heads(e[i]);
+}
+
+/* Run the two passes above over every phrase expression a Select tree embeds:
+ * the where-constraint list (slot 2), a by-DICT's values (slot 3) and the
+ * output DICT's values (slot 4).  All three are dict/list INTERNALS the
+ * walker skipped; lowering must happen before ql_qsql retains copies. */
+static void qsql_lower_select_phrases(ray_t *c, ray_t *b, ray_t *a) {
+    if (c && c->type == RAY_LIST && ray_len(c) == 1) {
+        ray_t *clist = ((ray_t **)ray_data(c))[0];
+        if (clist && clist->type == RAY_LIST) {
+            int64_t nc = ray_len(clist);
+            ray_t **ce = (ray_t **)ray_data(clist);
+            for (int64_t i = 0; i < nc; i++) {
+                if (ce[i] && ce[i]->type == RAY_LIST && ce[i]->rc == 1)
+                    qsql_lower_phrase(&ce[i]);
+                if (ce[i] && ce[i]->rc == 1) qsql_quote_carrier_heads(ce[i]);
+            }
+        }
+    }
+    ray_t *dicts[2] = { b, a };
+    for (int di = 0; di < 2; di++) {
+        ray_t *d = dicts[di];
+        if (!d || d->type != RAY_DICT) continue;
+        ray_t *dv = ray_dict_vals(d);              /* borrowed internal list */
+        if (!dv || dv->type != RAY_LIST) continue;
+        int64_t nv = ray_len(dv);
+        ray_t **ve = (ray_t **)ray_data(dv);
+        for (int64_t i = 0; i < nv; i++) {
+            if (ve[i] && ve[i]->type == RAY_LIST && ve[i]->rc == 1)
+                qsql_lower_phrase(&ve[i]);
+            if (ve[i] && ve[i]->rc == 1) qsql_quote_carrier_heads(ve[i]);
+        }
+    }
 }
 
 /* A bare `&` dyadic application (rayfall min / logical-and) combining two
@@ -3409,6 +3505,11 @@ static void ql_qsql(ray_t **slot) {
     if (!t) return;
     /* slot 1: bare name sym (by-name semantics) or an expression subtree —
      * q_lower_walk already lowered it (children walk before the node). */
+
+    /* Stage-1 general eval: lower the phrase subtrees the walker skipped
+     * (dict values / where-constraint list) and quote-wrap embedded carrier
+     * heads so the trees handed to ray_select are ray_eval-able. */
+    qsql_lower_select_phrases(c, b, a);
 
     ray_t *keyvec  = ray_sym_vec_new(RAY_SYM_W64, 4);
     ray_t *vallist = ray_list_new(4);
