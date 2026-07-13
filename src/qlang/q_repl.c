@@ -22,10 +22,11 @@
 #include <rayforce.h>
 #include <stdlib.h>         /* getenv */
 #include <string.h>
-#ifndef RAY_OS_WINDOWS
-  #include <errno.h>
-  #include <unistd.h>       /* read, STDIN_FILENO — poll-driven stdin */
-#endif
+#include <errno.h>
+#include <unistd.h>         /* read, STDIN_FILENO — poll-driven stdin
+                             * (mingw-w64 provides both; the CRT read() on fd 0
+                             * covers pipes/files, and the tty flavour reads
+                             * through ray_term_getc, never this fd) */
 
 /* ===== q syntax highlighter (matches ray_highlight_fn) =====
  *
@@ -470,8 +471,6 @@ static int g_listener_active = 0;
 void q_repl_mark_listener_active(void) { g_listener_active = 1; }
 int  q_repl_listener_active(void)      { return g_listener_active; }
 
-#ifndef RAY_OS_WINDOWS
-
 typedef struct {
     ray_term_t* term;            /* tty console; NULL in piped mode / after teardown */
     FILE*       out;
@@ -740,18 +739,6 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
     q_poll_close_term(c);
     return 0;
 }
-
-#else /* RAY_OS_WINDOWS */
-
-/* IOCP has no stdin selector yet (event-loop console is a future Windows
- * stage) — report "can't" so qmain keeps the serial REPL-then-serve shape. */
-int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
-                    int stdin_tty, int have_listener) {
-    (void)poll; (void)out; (void)err; (void)stdin_tty; (void)have_listener;
-    return -1;
-}
-
-#endif /* RAY_OS_WINDOWS */
 
 void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
     /* Interactive TTY (echo == 0): reuse rayforce's line editor. */
