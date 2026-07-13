@@ -155,6 +155,18 @@ int main(int argc, char** argv) {
      * REPL, a `-p` server serves IPC, and a non-tty non-server run exits 0
      * (the test/daemon shape) rather than blocking on an empty REPL. */
     const char* script = q_dotz_script_path();
+
+    /* `\c` console-size DISPLAY clipping is ARMED BY DEFAULT (q_sys_cfg_init)
+     * so a fresh interactive tty REPL and a piped `printf … | ./q` truncate at
+     * the 25 80 default (kdb-true).  The ONE carve-out: a PURE non-tty SCRIPT
+     * LOAD (`./q file.q </dev/null`, the qscript/daemon shape) is a BATCH
+     * context, NOT a display — DISARM clipping so the script's `show`/`.z.f`
+     * (an absolute path, often > 80 chars) renders full-width.  A tty that
+     * drops to the REPL after the script, or an explicit `\c` in the script,
+     * keeps/re-arms clipping. */
+    if (script != NULL && !stdin_tty)
+        q_con_display_disable();
+
     int script_rc = 0;
     if (script)
         script_rc = q_repl_run_file(script, stdout, stderr);
