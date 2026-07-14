@@ -444,7 +444,10 @@ static void compile_list(compiler_t *c, ray_t *ast) {
     if (head_named && head_sym == sf_self) {
         int64_t argc = n - 1;
         if (argc > 64) { c->error = true; return; }
-        for (int64_t i = 1; i < n; i++)
+        /* q/kdb: argument expressions evaluate RIGHT-to-left (basics/
+         * syntax.md), so args land on the stack reversed (leftmost on
+         * top); OP_CALLS reverses the slots before they become locals. */
+        for (int64_t i = n - 1; i >= 1; i--)
             compile_expr(c, elems[i]);
         emit(c, OP_CALLS);
         emit(c, (uint8_t)argc);
@@ -513,7 +516,11 @@ static void compile_list(compiler_t *c, ray_t *ast) {
     }
     int64_t argc = n - 1;
     if (argc > 64) { c->error = true; return; }
-    for (int64_t i = 1; i < n; i++)
+    /* q/kdb: argument expressions evaluate RIGHT-to-left (basics/syntax.md).
+     * Args land on the stack reversed (leftmost on top); the call ops'
+     * pop order matches (op_call2 pops left first, op_calln/op_callf
+     * fill fn_args[] ascending). */
+    for (int64_t i = n - 1; i >= 1; i--)
         compile_expr(c, elems[i]);
 
     /* Record call-site span so errors point to the call expression, not the last arg */
