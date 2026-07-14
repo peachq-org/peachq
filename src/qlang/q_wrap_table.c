@@ -1718,9 +1718,11 @@ ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
  * (then the existing collapse-to-vector); `([] …)` → a table whose columns are
  * the per-element assignment targets.
  *
- * Both constructor heads are RAY_FN_SPECIAL_FORM: rayforce's VARY arg-eval is
- * LEFT-to-right, and a special form is the only seam that hands a builtin the
- * raw (unevaluated) element trees — a hard prerequisite for right-to-left.
+ * Both constructor heads are RAY_FN_SPECIAL_FORM: a special form is the only
+ * seam that hands a builtin the raw (unevaluated) element trees, which the
+ * builder needs so the element `x:e` bindings evaluate inside the scope it
+ * pushes.  (Engine arg-eval is right-to-left everywhere since the 2026-07-14
+ * RTL fix, so the special form is no longer about ordering — only scoping.)
  * q_lower lowers a plain `:` inside a ctx literal to `let` (writes the pushed
  * frame), so the assignments are scoped, not leaked to the global env. */
 
