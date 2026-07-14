@@ -33,8 +33,13 @@
  *       needs no thread: PeekNamedPipe piggybacks on the bounded wait the
  *       listener probe already imposes.  Other stdin kinds (disk redirect,
  *       NUL) are level-readable until EOF and are dispatched every turn.
- *   C3 (next) — timers: bound the wait by ray_timers_next_deadline_ms and call
- *       ray_timers_fire_expired after each drain.  NOT implemented here.
+ *   C3 (THIS FILE) — timers: the wait is bounded by
+ *       ray_timers_next_deadline_ms (min'd with the listener/pipe-stdin cap)
+ *       and ray_timers_fire_expired runs on the eval thread at the end of
+ *       every turn, after completions/stdin/accepts are serviced — the exact
+ *       epoll.c:165-266 shape, so `\t N` / `.z.ts` fire while the process is
+ *       inside ray_poll_run (and ONLY then — no process keepalive, the
+ *       deliberate openq departure pinned by PR #124).
  *
  * Backend-private state lives in EXTENDED CONTAINER STRUCTS whose first member
  * is the frozen base struct (poll.h must not change; a file-scope id-keyed
@@ -74,6 +79,7 @@
 #include "mem/sys.h"
 #include <string.h>
 #include <errno.h>
+#include <limits.h>   /* INT_MAX — timer-deadline clamp (C3) */
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>   /* WSAStartup / WSABUF / WSARecv / WSAPoll; pulls in
@@ -642,7 +648,7 @@ static ray_selector_t* iocp_find_stdin(ray_poll_t* poll)
     return NULL;
 }
 
-/* The unified IOCP event loop: sockets + stdin (+ C3 timers) in ONE reactor —
+/* The unified IOCP event loop: sockets + stdin + timers in ONE reactor —
  * the same single loop epoll/kqueue give POSIX, so an interactive `-p`
  * console answers IPC clients between keystrokes (retires the C1 blocking-
  * console special case and its "serves IPC only after EOF" limitation). */
@@ -713,12 +719,30 @@ static int64_t iocp_run_reactor(ray_poll_t* poll)
         /* 3. Wait.  Zero when stdin is already readable (drain any socket
          *    completions, then service it); bounded when a listener needs its
          *    WSAPoll probe or a pipe-stdin needs re-peeking; else INFINITE —
-         *    a console wake packet or a socket completion ends the wait.  C3
-         *    will min this with the timer deadline. */
+         *    a console wake packet or a socket completion ends the wait. */
         DWORD wait_ms;
         if (stdin_ready)                       wait_ms = 0;
         else if (has_listener || stdin_polled) wait_ms = RAY_LISTENER_POLL_MS;
         else                                   wait_ms = INFINITE;
+
+        /* C3: bound the wait by the next timer deadline so an idle reactor
+         * still wakes to fire `.z.ts` on time (mirrors epoll.c:166-177 —
+         * clamp negative deltas to 0, cap at INT_MAX so the DWORD cast can
+         * never alias INFINITE).  min() against the listener/stdin cap above:
+         * whichever source needs servicing first bounds the sleep, so a
+         * firing timer never adds accept latency and a busy listener never
+         * delays a timer beyond its own ≤50ms cap. */
+        if (poll->timers) {
+            int64_t deadline = ray_timers_next_deadline_ms(
+                (ray_timers_t*)poll->timers);
+            if (deadline != INT64_MAX) {
+                int64_t delta = deadline - ray_time_now_ms();
+                if (delta < 0) delta = 0;
+                if (delta > INT_MAX) delta = INT_MAX;
+                if (wait_ms == INFINITE || (int64_t)wait_ms > delta)
+                    wait_ms = (DWORD)delta;
+            }
+        }
 
         bool stdin_wake = false;   /* console watcher packet drained this turn */
         ULONG n = 0;
@@ -776,8 +800,14 @@ static int64_t iocp_run_reactor(ray_poll_t* poll)
         /* 5. Accept any pending connections. */
         iocp_service_listeners(poll);
 
-        /* C3 (deferred): if (poll->timers)
-         *     ray_timers_fire_expired((ray_timers_t*)poll->timers); */
+        /* 6. C3: fire expired timers on this (the eval) thread, after
+         *    completions/stdin/accepts — the exact epoll.c:265-266 placement.
+         *    ray_timers_fire_expired re-resolves the `.z.ts` handler through
+         *    the q_sys forwarding thunk each fire and re-schedules forever
+         *    timers itself; `\t 0` (ray_timers_del) empties the heap, which
+         *    reverts the deadline bound above to INFINITE/the listener cap. */
+        if (poll->timers)
+            ray_timers_fire_expired((ray_timers_t*)poll->timers);
     }
 
     return poll->code;
