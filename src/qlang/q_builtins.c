@@ -10,6 +10,7 @@
 #include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
 #include "qlang/q_json.h"     /* q_json_register — .j JSON namespace */
+#include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
 #include "qlang/q_registry.h" /* q_registry_init */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_fmt.h"      /* q_console_show — show's display sink */
@@ -954,6 +955,89 @@ static ray_t* q_remote_apply(ray_t* list) {
     return q_value_wrap(list);
 }
 
+/* ---- .Q.ops — Q_OPS[] as a read-only introspection table ------------------
+ * (.Q.ops[]) materializes the verb manifest (src/qlang/q_ops.c) as a fresh
+ * unkeyed table each call, so user code can query the op roster without any
+ * path into the immutable registry — mutating the returned table cannot change
+ * how verbs resolve.  OWNER RULING 2026-07-14: lives under `.Q` (openq
+ * extension entry beside .Q.qt/.Q.qp; kdb has no .Q.ops).  Columns:
+ *   name          sym   verb spelling
+ *   lexclass      sym   `glyph / `kw_infix / `kw_prefix / `adverb (QLEX_*)
+ *   monadic       bool  1b iff Q_OPS gives a build recipe at the monadic slot
+ *                       (mon_kind != QK_NONE).  NB for the VARY prefix-keyword
+ *                       verbs (ej/aj/wj/... — QK_ENV in the monadic slot) this
+ *                       means "resolvable in prefix/bracket position", NOT that
+ *                       the verb is strictly arity-1; true arity is not modelled
+ *                       in the manifest (a stage-1 `family`/arity concern).
+ *   dyadic        bool  1b iff Q_OPS gives a build recipe at the dyadic slot
+ *   deterministic bool  1b unless the verb's result is nondeterministic
+ *   sideeffect    bool  1b iff evaluation performs an observable side effect
+ * The x argument (`.Q.ops[]` passes `::`) is ignored — the table is constant
+ * per build, keyed only off the static manifest. */
+static const char* q_lexclass_name(q_lex_class c) {
+    switch (c) {
+    case QLEX_GLYPH:     return "glyph";
+    case QLEX_KW_INFIX:  return "kw_infix";
+    case QLEX_KW_PREFIX: return "kw_prefix";
+    case QLEX_ADVERB:    return "adverb";
+    }
+    return "unknown";
+}
+
+static ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
+    (void)args; (void)nargs;                   /* `.Q.ops[]` / `.Q.ops x` — arg ignored */
+    int n = 0;
+    const q_op_t* ops = q_ops_table(&n);
+    int64_t cap = n > 0 ? n : 1;
+    ray_t* name = ray_sym_vec_new(RAY_SYM_W64, cap);
+    ray_t* lexc = ray_sym_vec_new(RAY_SYM_W64, cap);
+    ray_t* mon  = ray_vec_new(RAY_BOOL, cap);
+    ray_t* dya  = ray_vec_new(RAY_BOOL, cap);
+    ray_t* det  = ray_vec_new(RAY_BOOL, cap);
+    ray_t* eff  = ray_vec_new(RAY_BOOL, cap);
+    ray_t* cols[6] = { name, lexc, mon, dya, det, eff };
+    for (int i = 0; i < 6; i++)
+        if (!cols[i] || RAY_IS_ERR(cols[i])) {
+            for (int j = 0; j < 6; j++)
+                if (cols[j] && !RAY_IS_ERR(cols[j])) ray_release(cols[j]);
+            return ray_error("wsfull", ".Q.ops: out of memory");
+        }
+    int ok = 1;
+    for (int i = 0; i < n && ok; i++) {
+        int64_t nm  = ray_sym_intern(ops[i].name, strlen(ops[i].name));
+        const char* lc = q_lexclass_name(ops[i].lex);
+        int64_t lci = ray_sym_intern(lc, strlen(lc));
+        uint8_t bm = ops[i].mon_kind  != QK_NONE;
+        uint8_t bd = ops[i].dyad_kind != QK_NONE;
+        uint8_t bt = ops[i].deterministic ? 1 : 0;
+        uint8_t be = ops[i].sideeffect ? 1 : 0;
+        name = ray_vec_append(name, &nm);
+        lexc = ray_vec_append(lexc, &lci);
+        mon  = ray_vec_append(mon,  &bm);
+        dya  = ray_vec_append(dya,  &bd);
+        det  = ray_vec_append(det,  &bt);
+        eff  = ray_vec_append(eff,  &be);
+        if (!name || RAY_IS_ERR(name) || !lexc || RAY_IS_ERR(lexc) ||
+            !mon || RAY_IS_ERR(mon) || !dya || RAY_IS_ERR(dya) ||
+            !det || RAY_IS_ERR(det) || !eff || RAY_IS_ERR(eff)) ok = 0;
+    }
+    ray_t* built[6] = { name, lexc, mon, dya, det, eff };
+    if (!ok) {
+        for (int j = 0; j < 6; j++)
+            if (built[j] && !RAY_IS_ERR(built[j])) ray_release(built[j]);
+        return ray_error("wsfull", ".Q.ops: build failed");
+    }
+    static const char* colnames[6] =
+        { "name", "lexclass", "monadic", "dyadic", "deterministic", "sideeffect" };
+    ray_t* t = ray_table_new(6);
+    for (int i = 0; i < 6; i++) {
+        if (!RAY_IS_ERR(t))               /* stop adding once errored... */
+            t = ray_table_add_col(t, ray_sym_intern(colnames[i], strlen(colnames[i])), built[i]);
+        ray_release(built[i]);            /* ...but always drop our ref (add_col retains) */
+    }
+    return t;
+}
+
 void q_builtins_register(void) {
     /* Noun-head application (indexing, dict/table lookup, 104h carriers):
      * register the q dispatcher into eval's apply hook.  q_runtime_destroy
@@ -1050,6 +1134,12 @@ void q_builtins_register(void) {
             ray_env_bind(ray_sym_intern(nm, strlen(nm)), v);             /* retains */
         }
     }
+    /* .Q.ops — openq-private op-manifest introspection (feat/q-ops-introspection).
+     * Bound under `.Q` (owner ruling — an openq extension row beside .Q.qt) as a VARY so
+     * the niladic call `.Q.ops[]` (and `.Q.ops x`) both apply; env_set_dotted
+     * rides the standard `.Q.*` builtin binding, so it stays out
+     * of `\d`/`\v` user rosters and `key \`. `. */
+    bind_vary(".Q.ops", q_dotq_ops_fn);
     bind_unary(".Q.id", q_id_fn);
     bind_unary(".Q.ty", q_dotq_ty_fn);
     bind_unary(".Q.qt", q_dotq_qt_fn);
