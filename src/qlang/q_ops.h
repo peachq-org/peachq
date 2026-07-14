@@ -251,6 +251,21 @@ typedef enum {
     QK_EXCEPT,           /* q `x except y` — table rows of x not in y (row
                          * membership); non-table operands delegate to base
                          * ray_except_fn (the pre-wave QK_ENV pass-through).  */
+    /* ---- q join family (feat/q-joins-rebuild) — dyadic infix keywords.
+     * Matching is ALWAYS the engine's (ray_left_join_fn / ray_asof_join_fn);
+     * the wrappers prepare rowid key tables and gather-assemble columns.
+     * ej / the aj family / wj / wj1 are env-bound VARY prefixes (ssr
+     * precedent), not QK rows. */
+    QK_LJ,              /* q `x lj y`  — left join on keyed rhs (q3.0: matched
+                         * y cells win wholesale, nulls included)             */
+    QK_LJF,             /* q `x ljf y` — lj, but y nulls keep x's cell        */
+    QK_IJ,              /* q `x ij y`  — inner join (matched x rows only)     */
+    QK_IJF,             /* q `x ijf y` — ij with the ljf fill rule            */
+    QK_UJ,              /* q `x uj y`  — column union / keyed upsert merge    */
+    QK_UJF,             /* q `x ujf y` — keyed merge with the fill rule       */
+    QK_PJ,              /* q `x pj y`  — plus join (adds matched numeric
+                         * columns; new columns zero-filled)                  */
+    QK_ASOF,            /* q `t asof d` — prevailing values as of d's time(s) */
     QK_SETG,           /* q `nam set y` — assign a global through a sym handle
                          * (`a / `.ctx / `. context restore); returns nam.
                          * File symbols (`:path) are the file-I/O wave: 'nyi. */

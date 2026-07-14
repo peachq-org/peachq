@@ -383,6 +383,16 @@ static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
     ray_t* c  = ray_at_fn(col, ia);
     ray_release(ia);
     if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return; }
+    if (ray_is_atom(c) && c->type != -RAY_STR && c->type != -RAY_SYM &&
+        RAY_ATOM_IS_NULL(c)) {
+        /* q-null cells are BLANK inside a table (ref/lj.md `2 J 20`,
+         * ref/uj.md keyed `1|   1`) — kdb never prints 0N/0n in a cell.
+         * MUST run before the float branch below (it prints 0n/0Ne).
+         * Sym nulls (id 0) already render empty via ray_sym_str; char
+         * columns never reach here (handled above). */
+        ray_release(c);
+        return;
+    }
     if (c->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(c->i64);
         if (s) { snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
@@ -1024,7 +1034,9 @@ static void q_fmt_matrix(ray_t* v) {
 
 /* A VALUE list prints one item per line (kdb): each element formatted with
  * q_fmt, joined by newlines.  `,x` for the 1-element (enlist) case is handled
- * by the caller. */
+ * by the caller.  (A #56-style one-line nested-item form was tried in the
+ * joins-rebuild wave and REVERTED: banked ledgers pin the multi-line nested
+ * display — math/atomic_nested, list/null_atomic, assign/identity.) */
 static void q_fmt_value_list(ray_t* v) {
     int64_t n = ray_len(v);
     ray_t** e = (ray_t**)ray_data(v);
