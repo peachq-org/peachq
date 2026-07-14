@@ -974,6 +974,16 @@ void q_builtins_register(void) {
     bind_unary("rtrim",  q_rtrim_fn);
     bind_unary("md5",    q_md5_fn);
     bind_vary ("ssr",    q_ssr_wrap);
+    /* bracket-form joins (feat/q-joins-rebuild): triadic/quaternary prefix
+     * keywords resolve through the env (the ssr precedent); implementations
+     * in q_registry.c over the engine join machinery. */
+    bind_vary ("ej",     q_ej_wrap);
+    bind_vary ("aj",     q_aj_wrap);
+    bind_vary ("aj0",    q_aj0_wrap);
+    bind_vary ("ajf",    q_ajf_wrap);
+    bind_vary ("ajf0",   q_ajf0_wrap);
+    bind_vary ("wj",     q_wj_wrap);
+    bind_vary ("wj1",    q_wj1_wrap);
     bind_unary("show",   q_show_fn);
     /* `system "…"` — q-owned string form; single-homes with the `\`-slash
      * dispatcher (q_sys.c). QK_ENV row in q_ops.c snapshots this binding. */
