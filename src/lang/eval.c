@@ -2027,8 +2027,9 @@ op_call1: {
 }
 
 op_call2: {
-    ray_t *right = POP();
+    /* Args are emitted right-to-left (q order) — leftmost is on top. */
     ray_t *left = POP();
+    ray_t *right = POP();
     ray_t *fn_obj = POP();
     ray_binary_fn fn = (ray_binary_fn)(uintptr_t)fn_obj->i64;
     ray_t *result;
@@ -2084,7 +2085,8 @@ op_calln: {
     uint8_t n = code[ip++];
     if (n > 64) goto vm_error;
     ray_t *fn_args[64];
-    for (int32_t i = n - 1; i >= 0; i--)
+    /* Args are emitted right-to-left (q order) — leftmost is on top. */
+    for (int32_t i = 0; i < n; i++)
         fn_args[i] = POP();
     ray_t *fn_obj = POP();
     ray_vary_fn fn = (ray_vary_fn)(uintptr_t)fn_obj->i64;
@@ -2105,7 +2107,8 @@ op_callf: {
     uint8_t n = code[ip++];
     if (n > 64) goto vm_error;
     ray_t *fn_args[64];
-    for (int32_t i = n - 1; i >= 0; i--)
+    /* Args are emitted right-to-left (q order) — leftmost is on top. */
+    for (int32_t i = 0; i < n; i++)
         fn_args[i] = POP();
     ray_t *fn_obj = POP();
 
@@ -2243,8 +2246,16 @@ op_calls: {
     vm.rs[vm.rp++] = (vm_ctx_t){ .fn = NULL, .fp = vm.fp, .ip = ip };
 
     /* Args on stack become the new frame's first locals.
-     * Compiler guarantees argc == param count, so argc <= n_locals. */
+     * Compiler guarantees argc == param count, so argc <= n_locals.
+     * Args are emitted right-to-left (q order), so the slots sit
+     * reversed (leftmost on top) — reverse in place so slot i is
+     * parameter i. */
     vm.fp = vm.sp - argc;
+    for (int32_t i = 0, j = argc - 1; i < j; i++, j--) {
+        ray_t *t = vm.ps[vm.fp + i];
+        vm.ps[vm.fp + i] = vm.ps[vm.fp + j];
+        vm.ps[vm.fp + j] = t;
+    }
 
     /* Extend stack for extra locals beyond params (let bindings etc.) */
     for (int32_t i = argc; i < n_locals; i++)
@@ -3239,14 +3250,17 @@ ray_t* ray_eval(ray_t* obj) {
             if (g_apply_hook && hook_n - 1 >= 1 && hook_n - 1 <= 64) {
                 int64_t argc = hook_n - 1;
                 ray_t* args[64];
-                int64_t i = 0;
-                for (; i < argc; i++) {
+                /* q/kdb: argument expressions evaluate RIGHT-to-left
+                 * (basics/syntax.md) — a rightward `x:e` binds before a
+                 * leftward same-line read resolves it. */
+                int64_t erri = -1;
+                for (int64_t i = argc - 1; i >= 0; i--) {
                     args[i] = ray_eval(elems[i + 1]);
-                    if (!args[i] || RAY_IS_ERR(args[i])) break;
+                    if (!args[i] || RAY_IS_ERR(args[i])) { erri = i; break; }
                 }
-                if (i < argc) {                 /* an arg errored: propagate */
-                    ray_t* err = args[i] ? args[i] : ray_error("type", NULL);
-                    for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+                if (erri >= 0) {                /* an arg errored: propagate */
+                    ray_t* err = args[erri] ? args[erri] : ray_error("type", NULL);
+                    for (int64_t j = erri + 1; j < argc; j++) ray_release(args[j]);
                     ray_release(head);
                     ret = err; goto out;
                 }
@@ -3333,15 +3347,17 @@ ray_t* ray_eval(ray_t* obj) {
                 ray_release(head);
                 ret = fn(elems[1], elems[2]); goto out;
             }
-            ray_t* left = ray_eval(elems[1]);
-            if (left && RAY_IS_ERR(left)) {
-                ray_release(head);
-                ret = left; goto out;
-            }
+            /* q/kdb: operands evaluate RIGHT-to-left (basics/syntax.md) —
+             * the right operand (incl. any `x:e` binding) runs first. */
             ray_t* right = ray_eval(elems[2]);
             if (right && RAY_IS_ERR(right)) {
-                ray_release(head); if (left) ray_release(left);
+                ray_release(head);
                 ret = right; goto out;
+            }
+            ray_t* left = ray_eval(elems[1]);
+            if (left && RAY_IS_ERR(left)) {
+                ray_release(head); if (right) ray_release(right);
+                ret = left; goto out;
             }
             /* Materialise lazy args for non-lazy-aware fns.
              * left/right are owned refs (returned from ray_eval); materialise
@@ -3416,11 +3432,12 @@ ray_t* ray_eval(ray_t* obj) {
             int64_t argc = n - 1;
             if (argc > 64) { ray_release(head); ret = ray_error("domain", "call: too many args, max 64, got %lld", (long long)argc); goto out; }
             ray_t* args[64];
-            for (int64_t i = 0; i < argc; i++) {
+            /* q/kdb: argument expressions evaluate RIGHT-to-left (basics/syntax.md). */
+            for (int64_t i = argc - 1; i >= 0; i--) {
                 args[i] = ray_eval(elems[i + 1]);
                 if (!args[i] || RAY_IS_ERR(args[i])) {
                     ray_t* err = (!args[i]) ? ray_error("type", NULL) : args[i];
-                    for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+                    for (int64_t j = i + 1; j < argc; j++) ray_release(args[j]);
                     ray_release(head);
                     ret = err; goto out;
                 }
@@ -3438,11 +3455,12 @@ ray_t* ray_eval(ray_t* obj) {
             int64_t argc = n - 1;
             if (argc > 64) { ray_release(head); ret = ray_error("domain", "call: too many args, max 64, got %lld", (long long)argc); goto out; }
             ray_t* args[64];
-            for (int64_t i = 0; i < argc; i++) {
+            /* q/kdb: argument expressions evaluate RIGHT-to-left (basics/syntax.md). */
+            for (int64_t i = argc - 1; i >= 0; i--) {
                 args[i] = ray_eval(elems[i + 1]);
                 if (!args[i] || RAY_IS_ERR(args[i])) {
                     ray_t* err = (!args[i]) ? ray_error("type", NULL) : args[i];
-                    for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+                    for (int64_t j = i + 1; j < argc; j++) ray_release(args[j]);
                     ray_release(head);
                     ret = err; goto out;
                 }
@@ -3463,14 +3481,16 @@ ray_t* ray_eval(ray_t* obj) {
             if (g_apply_hook && n - 1 <= 64) {
                 int64_t argc = n - 1;
                 ray_t* args[64];
-                int64_t i = 0;
-                for (; i < argc; i++) {
+                /* q/kdb: argument/index expressions evaluate RIGHT-to-left
+                 * (basics/syntax.md). */
+                int64_t erri = -1;
+                for (int64_t i = argc - 1; i >= 0; i--) {
                     args[i] = ray_eval(elems[i + 1]);
-                    if (!args[i] || RAY_IS_ERR(args[i])) break;
+                    if (!args[i] || RAY_IS_ERR(args[i])) { erri = i; break; }
                 }
-                if (i < argc) {                     /* an arg errored: propagate */
-                    ray_t* err = args[i] ? args[i] : ray_error("type", NULL);
-                    for (int64_t j = 0; j < i; j++) ray_release(args[j]);
+                if (erri >= 0) {                    /* an arg errored: propagate */
+                    ray_t* err = args[erri] ? args[erri] : ray_error("type", NULL);
+                    for (int64_t j = erri + 1; j < argc; j++) ray_release(args[j]);
                     ray_release(head);
                     ret = err; goto out;
                 }
