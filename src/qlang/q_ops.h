@@ -19,6 +19,7 @@
 #define Q_OPS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Lexical class — how the scanner treats the token.  Only KW_INFIX is
  * reclassified from a name-ref noun into an infix verb (in noun position);
@@ -311,7 +312,21 @@ typedef enum {
  * adverb IS: `'`(each)->map, `/`(over)->fold, `\`(scan)->scan.  q adverbs are
  * NOT bespoke objects; in 2b `+/` lowers to a projection of rayfall `fold` over
  * `+`.  NULL for non-adverb rows, and for adverbs whose HOF mapping is deferred
- * (each-right/left/prior `/: \: ':` — no clean rayfall equivalent yet). */
+ * (each-right/left/prior `/: \: ':` — no clean rayfall equivalent yet).
+ *
+ * `deterministic` / `sideeffect` — introspection metadata (feat/q-ops-
+ * introspection), exposed verbatim as the like-named `.oq.ops[]` columns.
+ * Every row carries both explicitly (the build's -Wmissing-field-initializers
+ * forbids relying on a zero default); the AUDIT block in q_ops.c is the roster
+ * of the non-default rows and the rationale:
+ *   deterministic = 0 iff any valence's result is nondeterministic (rand /
+ *                   deal / `?`-roll); 1 otherwise.
+ *   sideeffect    = 1 iff evaluation performs an observable side effect (global
+ *                   assignment, table mutation, IPC, `system`, console/file
+ *                   I/O); 0 otherwise.
+ * The generated verb×structure grid (tools/opsmatrix-gen.py) drives ONLY the
+ * `deterministic AND NOT sideeffect` rows, so both flags stay pure metadata —
+ * no verb behaviour depends on them. */
 typedef struct {
     const char*  name;
     q_lex_class  lex;
@@ -320,6 +335,8 @@ typedef struct {
     q_build_kind dyad_kind;
     const char*  dyad_target;
     const char*  adverb_hof;
+    uint8_t      deterministic; /* 0 = nondeterministic result (see above) */
+    uint8_t      sideeffect;    /* 1 = performs an observable side effect  */
 } q_op_t;
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
