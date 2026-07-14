@@ -74,6 +74,10 @@ static ray_t* keyed_table_lookup(ray_t* d, ray_t* idx) {
     ray_t* vtab = ray_dict_vals(d);                  /* borrowed val TABLE */
     int64_t nk = ray_table_ncols(ktab);
     int64_t nr = ray_table_nrows(ktab);
+    /* row-set lookup: kt[keytable] — one value row per keytbl row, misses
+     * null-filled (ref/lj.md `y[select a,b from x]`; joins wave). */
+    if (idx && idx->type == RAY_TABLE)
+        return q_keyed_lookup_rows(d, idx);
     int composite = idx && (ray_is_vec(idx) || idx->type == RAY_LIST) &&
                     nk > 1 && ray_len(idx) == nk;
     if (!composite && !(idx && ray_is_atom(idx) && nk == 1))

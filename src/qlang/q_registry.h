@@ -254,6 +254,22 @@ ray_t* q_attr_set_letter(char letter, ray_t* vec);
  * name-refs `ssr[a;b;c]`, so it resolves through the env, not the registry). */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);
 
+/* q join family bracket forms (feat/q-joins-rebuild) — triadic/quaternary
+ * prefix keywords env-bound by q_builtins_register (the ssr precedent):
+ * ej[c;t1;t2], aj[c;t1;t2] + variants, wj/wj1[w;f;t;(q;aggs..)]. */
+ray_t* q_ej_wrap(ray_t** args, int64_t n);
+ray_t* q_aj_wrap(ray_t** args, int64_t n);
+ray_t* q_aj0_wrap(ray_t** args, int64_t n);
+ray_t* q_ajf_wrap(ray_t** args, int64_t n);
+ray_t* q_ajf0_wrap(ray_t** args, int64_t n);
+ray_t* q_wj_wrap(ray_t** args, int64_t n);
+ray_t* q_wj1_wrap(ray_t** args, int64_t n);
+
+/* Keyed-table lookup by a table of key rows (`y[select a,b from x]`) — the
+ * q_apply.c table-index arm.  keytbl must carry ALL key columns by name;
+ * extra columns ignored; keytbl row order preserved; miss => null row. */
+ray_t* q_keyed_lookup_rows(ray_t* kt, ray_t* keytbl);
+
 /* q `read0 x` (feat/q-file-text) — exposed so q_builtins can ALSO env-bind it
  * for the bracket-call form `read0[(f;o)]` (the ssr/value precedent: two fn
  * objects, one implementation). */

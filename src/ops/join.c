@@ -1782,9 +1782,13 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     if (!lt_time_vec || !rt_time_vec) return ray_error("schema", NULL);
     int8_t time_type = lt_time_vec->type;
 
-    /* Helper macro to read time value as int64_t regardless of storage type */
+    /* Helper macro to read time value as int64_t regardless of storage type.
+     * ALL 4-byte temporals must take the i32 lane (RAY_IS_TEMPORAL32:
+     * DATE/TIME/MONTH/MINUTE/SECOND — the original TIME||DATE test predated
+     * the later temporal types and read MINUTE/SECOND columns as i64,
+     * pairing adjacent i32 lanes into garbage keys). */
     #define READ_TIME(vec, idx) \
-        ((time_type == RAY_TIME || time_type == RAY_DATE) \
+        (RAY_IS_TEMPORAL32(time_type) \
             ? (int64_t)((int32_t*)ray_data(vec))[(idx)] \
             : ((int64_t*)ray_data(vec))[(idx)])
 
