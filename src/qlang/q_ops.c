@@ -141,6 +141,29 @@ static const q_op_t Q_OPS[] = {
      * rayfall cartesian primitive; composes item access + q join).  String
      * and dict/table operands are deferred cells (ref/cross.md). */
     { "cross", QLEX_KW_INFIX,  QK_NONE, NULL,        QK_CROSS, "cross",   NULL  },
+    /* ---- q join family (feat/q-joins-rebuild) ----
+     * Dyadic infix keywords over the engine hash/asof join (pair-relation
+     * core in q_registry.c: rowid-augmented key tables through
+     * ray_left_join_fn / ray_asof_join_fn, kdb-ordered, gather-assembled). */
+    { "lj",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_LJ,    "lj",      NULL  },
+    { "ljf",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_LJF,   "ljf",     NULL  },
+    { "ij",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_IJ,    "ij",      NULL  },
+    { "ijf",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_IJF,   "ijf",     NULL  },
+    { "uj",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_UJ,    "uj",      NULL  },
+    { "ujf",   QLEX_KW_INFIX,  QK_NONE, NULL,        QK_UJF,   "ujf",     NULL  },
+    { "pj",    QLEX_KW_INFIX,  QK_NONE, NULL,        QK_PJ,    "pj",      NULL  },
+    { "asof",  QLEX_KW_INFIX,  QK_NONE, NULL,        QK_ASOF,  "asof",    NULL  },
+    /* Bracket-form joins (ej[c;t1;t2], aj[...], wj[w;f;t;spec]): triadic-plus
+     * prefix keywords — q-owned env VARY bindings (q_builtins_register),
+     * snapshotted here as QK_ENV rows (the ssr precedent: the parser
+     * name-refs `ej[a;b;c]`, so it resolves through the env). */
+    { "ej",    QLEX_KW_PREFIX, QK_ENV,  "ej",        QK_NONE,  NULL,      NULL  },
+    { "aj",    QLEX_KW_PREFIX, QK_ENV,  "aj",        QK_NONE,  NULL,      NULL  },
+    { "aj0",   QLEX_KW_PREFIX, QK_ENV,  "aj0",       QK_NONE,  NULL,      NULL  },
+    { "ajf",   QLEX_KW_PREFIX, QK_ENV,  "ajf",       QK_NONE,  NULL,      NULL  },
+    { "ajf0",  QLEX_KW_PREFIX, QK_ENV,  "ajf0",      QK_NONE,  NULL,      NULL  },
+    { "wj",    QLEX_KW_PREFIX, QK_ENV,  "wj",        QK_NONE,  NULL,      NULL  },
+    { "wj1",   QLEX_KW_PREFIX, QK_ENV,  "wj1",       QK_NONE,  NULL,      NULL  },
     /* ---- sort / bucket family (feat/q-sort-rank) — dyadic infix ----
      * `bin`/`binr` reuse rayfall verbatim (same arg order: sorted-vec left,
      * value right).  `xrank` is a clean pass-through (n left, vec right).
