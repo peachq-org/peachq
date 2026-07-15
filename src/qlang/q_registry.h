@@ -270,6 +270,15 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n);
  * extra columns ignored; keytbl row order preserved; miss => null row. */
 ray_t* q_keyed_lookup_rows(ray_t* kt, ray_t* keytbl);
 
+/* Universal table row indexing (uniform-structure-dispatch stage 0; defined
+ * in q_wrap_table.c).  q_table_at: t[idx] for an integer atom (-> the row
+ * dict) or an integer vector (-> row gather, misses null-filled per the
+ * basics/application.md out-of-bounds law); returns NULL to DECLINE any
+ * other index shape.  q_table_row_at: the row-dict arm — row < 0 (incl.
+ * int nulls) or >= count t yields the typed all-null row. */
+ray_t* q_table_at(ray_t* t, ray_t* idx);
+ray_t* q_table_row_at(ray_t* t, int64_t row);
+
 /* q `read0 x` (feat/q-file-text) — exposed so q_builtins can ALSO env-bind it
  * for the bracket-call form `read0[(f;o)]` (the ssr/value precedent: two fn
  * objects, one implementation). */

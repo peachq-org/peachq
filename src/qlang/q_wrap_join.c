@@ -61,6 +61,18 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
         if (b != stackb) free(b);
         return r;
     }
+    /* Dense fast path for typed vectors: every index a hit -> ONE engine
+     * gather (vectorized memcpy loops).  Any miss falls to the boxed
+     * ray_at path below, whose per-cell null-fill is the miss law; LIST
+     * columns stay boxed too (that path collapses homogeneous results).
+     * gather_by_idx never mutates idx — the cast only drops the const
+     * this wrapper adds. */
+    if (col && ray_is_vec(col) && col->type != RAY_LIST) {
+        int64_t len = ray_len(col);
+        int64_t hits = 0;
+        while (hits < n && idx[hits] >= 0 && idx[hits] < len) hits++;
+        if (hits == n) return gather_by_idx(col, (int64_t*)idx, n);
+    }
     ray_t* iv = ray_vec_new(RAY_I64, n > 0 ? n : 1);
     if (RAY_IS_ERR(iv)) return iv;
     iv->len = n;
