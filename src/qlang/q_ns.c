@@ -75,9 +75,22 @@ static int ns_id_is_user(int64_t id) {
     return 0;
 }
 
+/* `.q.<name>` env probe (bare identifiers only) — see q_ns.h; only the
+ * bootstrap's privileged binder populates `.q` (a reserved root, env.c). */
+ray_t* q_ns_dotq_get(const char* name, size_t len) {
+    char full[64];
+    if (len == 0 || len + 3 >= sizeof full) return NULL;
+    if (memchr(name, '.', len)) return NULL;
+    memcpy(full, ".q.", 3);
+    memcpy(full + 3, name, len);
+    return ray_env_get(ray_sym_intern(full, len + 3));
+}
+
 int q_ns_is_unqualifiable(const char* s, size_t len) {
     /* q reserved words from the single-source manifest. */
     if (q_ops_is_reserved(s, (int)len)) return 1;
+    /* `.q`-hosted keywords (q.q) resolve as themselves in any context */
+    if (q_ns_dotq_get(s, len)) return 1;
     /* control / qSQL statement words + `self` (recursion) — syntax, not env. */
     static const char* words[] = {
         "if", "do", "while", "self",

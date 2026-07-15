@@ -626,19 +626,22 @@ ray_t* q_sublist_wrap(ray_t* n, ray_t* x) {
     return q_gather(x, start, count, total, 0);  /* truncating, no recycle */
 }
 
-/* q `next x` / `prev x` — shift a simple vector by one, null-filling the vacated
- * end (kdb next.md / prev.md).  Restricted to the sentinel-nullable element
- * types (int / float / temporal): SYM/BOOL/U8/STR/LIST/atom forms have no
- * shift-in null here and are deferred cells. */
-static ray_t* q_shift1(ray_t* x, int forward) {
-    /* generic-list arm (ref/next.md): the vacated slot takes an EMPTY of the
-     * FIRST item of the ORIGINAL list (`prev (1 2;"abc";`ibm)` ->
-     * (`long$();1 2;"abc")); next fills the TAIL, prev the HEAD.  `0#first`
-     * via ray_take_fn; a take that cannot empty (odd atom kinds) degrades to
-     * the empty generic list. */
+/* q `n xprev x` — n-item shift, null-filling the vacated end (ref/next.md:
+ * +n is prev-by-n, -n is next); `next`/`prev` are its q.q unit shifts, so
+ * every arm here is theirs too.  Strings shift CHARS with ' ' fill
+ * (`1 xprev "abcde"` -> " abcd"); a generic LIST fills each vacated slot
+ * with `0#first` of the ORIGINAL (`prev (1 2;"abc";`ibm)` -> (`long$();1 2;"abc")). */
+ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
+    if (!nx || !(nx->type == -RAY_I64 || nx->type == -RAY_I32 || nx->type == -RAY_I16) ||
+        RAY_ATOM_IS_NULL(nx))
+        return ray_error("type", "xprev: left arg must be an int atom");
+    int64_t k = q_iatom_val(nx);
     if (x && x->type == RAY_LIST) {
+        /* fill = 0#first (a take that cannot empty degrades to ()) */
         int64_t len = ray_len(x);
         if (len == 0) { ray_retain(x); return x; }
+        int64_t sh = k >= 0 ? k : -k;
+        if (sh > len) sh = len;
         ray_t** e = (ray_t**)ray_data(x);
         ray_t* zero = ray_i64(0);
         ray_t* fill = e[0] ? ray_take_fn(e[0], zero) : NULL;   /* owned 0#first */
@@ -650,59 +653,17 @@ static ray_t* q_shift1(ray_t* x, int forward) {
         }
         ray_t* out = ray_list_new(len);
         if (RAY_IS_ERR(out)) { ray_release(fill); return out; }
-        if (!forward) {                              /* prev: fill leads */
-            out = ray_list_append(out, fill);
-            if (RAY_IS_ERR(out)) { ray_release(fill); return out; }
-        }
-        int64_t from = forward ? 1 : 0, to = forward ? len : len - 1;
-        for (int64_t i = from; i < to; i++) {
-            out = ray_list_append(out, e[i]);        /* retains */
-            if (RAY_IS_ERR(out)) { ray_release(fill); return out; }
-        }
-        if (forward) {                               /* next: fill trails */
-            out = ray_list_append(out, fill);
+        int64_t keep = len - sh;
+        for (int64_t i = 0; i < len; i++) {
+            /* prev (k>=0): fills lead; next: fills trail */
+            ray_t* item = (k >= 0) ? (i < sh ? fill : e[i - sh])
+                                   : (i < keep ? e[i + sh] : fill);
+            out = ray_list_append(out, item);        /* retains */
             if (RAY_IS_ERR(out)) { ray_release(fill); return out; }
         }
         ray_release(fill);
         return out;
     }
-    if (!x || !ray_is_vec(x))
-        return ray_error("nyi", "next/prev: only simple numeric vectors (string/sym/atom deferred)");
-    int8_t t = x->type;
-    if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
-          RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
-        return ray_error("nyi", "next/prev: %s vectors are deferred", ray_type_name(t));
-    int64_t len = ray_len(x);
-    size_t esz = ray_type_sizes[(uint8_t)t];
-    ray_t* out = ray_vec_new(t, len > 0 ? len : 1);
-    if (RAY_IS_ERR(out)) return out;
-    out->len = len;
-    char* o = (char*)ray_data(out);
-    const char* in = (const char*)ray_data(x);
-    if (len > 0) {
-        if (forward) {                           /* next: o[i]=x[i+1], tail null */
-            if (len > 1) memcpy(o, in + esz, (size_t)(len - 1) * esz);
-            ray_vec_set_null(out, len - 1, true);
-        } else {                                 /* prev: o[i]=x[i-1], head null */
-            if (len > 1) memcpy(o + esz, in, (size_t)(len - 1) * esz);
-            ray_vec_set_null(out, 0, true);
-        }
-    }
-    return out;
-}
-ray_t* q_next_wrap(ray_t* x) { return q_shift1(x, 1); }
-ray_t* q_prev_wrap(ray_t* x) { return q_shift1(x, 0); }
-
-/* q `n xprev x` — shift x by n items (ref/next.md: positive n is prev-by-n,
- * negative is next-by-|n|), null-filling the vacated end — the same typed-
- * vector shift as next/prev generalized to |n|.  A -RAY_STR atom shifts its
- * CHARS, vacated positions taking ' ' (kdb's null char): `1 xprev "abcde"`
- * -> " abcd". */
-ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
-    if (!nx || !(nx->type == -RAY_I64 || nx->type == -RAY_I32 || nx->type == -RAY_I16) ||
-        RAY_ATOM_IS_NULL(nx))
-        return ray_error("type", "xprev: left arg must be an int atom");
-    int64_t k = q_iatom_val(nx);
     if (x && x->type == -RAY_STR) {
         int64_t len = (int64_t)ray_str_len(x);
         const char* s = ray_str_ptr(x);
@@ -718,7 +679,7 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
         return r;
     }
     if (!x || !ray_is_vec(x))
-        return ray_error("nyi", "xprev: only simple vectors and strings (list/dict/table deferred)");
+        return ray_error("nyi", "xprev: only simple vectors, strings and lists (dict/table deferred)");
     int8_t t = x->type;
     if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
           RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
