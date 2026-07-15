@@ -170,7 +170,16 @@ static ray_t* q_amend_at(ray_t* v, ray_t* idx, ray_t* f, ray_t* y) {
             ray_retain(y); return y;
         }
         if (y) return ray_error("nyi", "@[d;::;v;vy] deferred");  /* v'[d;vy] */
-        return q_each_over(f, v);                     /* u'[d] */
+        ray_t* r = q_each_over(f, v);                 /* u'[d] */
+        /* amend-entire conform rule (ref/amend.md: @[1 2;::;3 4*] -> 'type):
+         * boxed per-item results cannot fit back into a typed-vector d.
+         * Checked here, not in q_each_over — `each` itself may box freely. */
+        if (r && !RAY_IS_ERR(r) && ray_is_vec(v) && r->type == RAY_LIST) {
+            ray_release(r);
+            return ray_error("type", "@: amend result does not conform to a %s vector",
+                             ray_type_name(v->type));
+        }
+        return r;
     }
     if (v->type == RAY_DICT) return q_amend_dict(v, idx, f, y);
     if (!ray_is_vec(v) && v->type != RAY_LIST)

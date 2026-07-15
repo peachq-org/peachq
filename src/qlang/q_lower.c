@@ -407,7 +407,10 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
 
     ray_t *ns = ray_sym_str(e[1]->i64);
     if (!ns) return NULL;
-    int reserved = q_ops_is_reserved(ray_str_ptr(ns), (int)ray_str_len(ns));
+    /* reserved = manifest verbs + `.q`-hosted keywords (`reciprocal:5` stays
+     * 'assign with its row moved to q.q; dotted targets never match) */
+    int reserved = q_ops_is_reserved(ray_str_ptr(ns), (int)ray_str_len(ns)) ||
+                   q_ns_dotq_get(ray_str_ptr(ns), ray_str_len(ns)) != NULL;
     if (reserved) {
         ray_t *err = ray_error("assign", "'assign: %.*s is a reserved verb",
                                (int)ray_str_len(ns), ray_str_ptr(ns));
