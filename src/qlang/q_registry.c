@@ -219,8 +219,10 @@ static ray_t* build_env(const char* env_name) {
     return e;
 }
 
-/* Bespoke wrapper: aux-name = the canonical rayfall lowering name; flagged
- * RAY_FN_Q_LOWER so the compiler/query DAG name-route it.
+/* Bespoke wrapper: the manifest row carries the wrapper FUNCTION POINTER and
+ * its binding shape (q_recipe_t arity/atomic) — no per-verb enum dispatch.
+ * aux-name = the canonical rayfall lowering name; flagged RAY_FN_Q_LOWER so
+ * the compiler/query DAG name-route it.
  *
  * SERDE LIMITATION (codex P1, deferred to 2b): generic function serialization
  * (src/store/serde.c) writes ray_fn_name and deserializes via ray_env_get, so a
@@ -233,157 +235,34 @@ static ray_t* build_env(const char* env_name) {
  * which makes value heads user-visible, must teach serde to recognise
  * RAY_FN_Q_LOWER and re-derive the wrapper from the registry; that fix has a
  * testable surface only once the parser embeds these values. */
-static ray_t* build_wrapper(q_build_kind kind, const char* lower_name) {
-    switch (kind) {
-    case QK_EQ:   return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_eq_wrap);
-    case QK_NE:   return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_ne_wrap);
-    case QK_TAKE: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_take_wrap);
-    case QK_DROP: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_drop_wrap);
-    case QK_CUT:  return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cut_wrap);
-    case QK_EACH: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_each_wrap);
-    case QK_MATCH:return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_match_wrap);
-    case QK_FLOOR:return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_floor_wrap);
-    case QK_BANG: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_bang_wrap);
-    case QK_KEY:  return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_key_wrap);
-    case QK_VALUE:return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_value_wrap);
-    case QK_DISTINCT:
-                  return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_distinct_wrap);
-    case QK_ROLL: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_roll_wrap);
-    case QK_RAND: return ray_fn_unary (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_rand_wrap);
-    case QK_CAST: return ray_fn_binary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_cast_wrap);
-    case QK_AT:   return ray_fn_vary  (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_at_wrap);
-    case QK_DOT:  return ray_fn_vary  (lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_dot_wrap);
-    case QK_MIN2: return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_min2_wrap);
-    case QK_NEG:  return ray_fn_unary (lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_neg_wrap);
-    case QK_WITHIN: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_within_wrap);
-    case QK_OVER:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_over_kw);
-    case QK_SCANKW: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_scan_kw);
-    case QK_PRIORKW:return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prior_kw);
-    case QK_DELTAS: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_deltas_wrap);
-    case QK_DIFFER: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_differ_wrap);
-    case QK_TIL:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_til_wrap);
-    case QK_WHERE:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_where_wrap);
-    case QK_REV:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_reverse_wrap);
-    case QK_JOIN:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_join_wrap);
-    case QK_VS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_vs_wrap);
-    case QK_SV:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sv_wrap);
-    case QK_SUMS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sums_wrap);
-    case QK_PRDS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prds_wrap);
-    case QK_PRD:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prd_wrap);
-    case QK_MAXS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_maxs_wrap);
-    case QK_MINS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mins_wrap);
-    case QK_AVGS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_avgs_wrap);
-    case QK_RATIOS: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ratios_wrap);
-    case QK_WSUM:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_wsum_wrap);
-    case QK_WAVG:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_wavg_wrap);
-    case QK_COV:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_cov_wrap);
-    case QK_SCOV:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_scov_wrap);
-    case QK_MSUM:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_msum_wrap);
-    case QK_MAVG:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mavg_wrap);
-    case QK_MMAX:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mmax_wrap);
-    case QK_MMIN:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mmin_wrap);
-    case QK_MCOUNT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mcount_wrap);
-    case QK_MDEV:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_mdev_wrap);
-    case QK_EMA:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ema_wrap);
-    case QK_FILL:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_fill_wrap);
-    case QK_ROTATE: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_rotate_wrap);
-    case QK_SUBLIST:return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sublist_wrap);
-    case QK_NEXT:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_next_wrap);
-    case QK_PREV:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_prev_wrap);
-    case QK_XPREV:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xprev_wrap);
-    case QK_IN:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_in_wrap);
-    case QK_FILLS:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_fills_wrap);
-    case QK_HOPEN:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hopen_wrap);
-    case QK_HCLOSE: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hclose_wrap);
-    case QK_FILETEXT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_filetext_wrap);
-    case QK_HSYM:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_hsym_wrap);
-    case QK_READ0:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_read0_wrap);
-    /* NB: deliberately NOT RAY_FN_AGGR — the eval aggregate fast path claims
-     * AGGR fns before the wrapper runs and 'types on a boxed list-of-vectors;
-     * name-routing (RAY_FN_Q_LOWER + aux "sum") keeps query/DAG behaviour. */
-    case QK_SUM:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_sum_wrap);
-    case QK_ATTR:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_attr_wrap);
-    case QK_NULL:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_null_wrap);
-    case QK_RAZE:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_raze_wrap);
-    case QK_LIKE:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_like_wrap);
-    case QK_SS:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ss_wrap);
-    case QK_SSR:    return ray_fn_vary  (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ssr_wrap);
-    case QK_UNION:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_union_wrap);
-    case QK_INTER:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_inter_wrap);
-    case QK_CROSS:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_cross_wrap);
-    case QK_SIN:        return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_sin_wrap);
-    case QK_COS:        return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_cos_wrap);
-    case QK_TAN:        return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_tan_wrap);
-    case QK_ASIN:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_asin_wrap);
-    case QK_ACOS:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_acos_wrap);
-    case QK_ATAN:       return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_atan_wrap);
-    case QK_RECIPROCAL: return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_reciprocal_wrap);
-    /* signum drives its own broadcast (q_null_wrap pattern) so a top-level
-     * boxed-list result collapses to an int vector — see q_signum_wrap. */
-    case QK_SIGNUM:     return ray_fn_unary(lower_name, RAY_FN_NONE   | RAY_FN_Q_LOWER, q_signum_wrap);
-    case QK_CEILING:    return ray_fn_unary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_ceiling_wrap);
-    case QK_XEXP:       return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_xexp_wrap);
-    case QK_XLOG:       return ray_fn_binary(lower_name, RAY_FN_ATOMIC | RAY_FN_Q_LOWER, q_xlog_wrap);
-    case QK_XBAR:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xbar_wrap);
-    case QK_ASC:    return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_asc_wrap);
-    case QK_DESC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_desc_wrap);
-    case QK_IASC:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_iasc_wrap);
-    case QK_IDESC:  return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_idesc_wrap);
-    /* ---- table verbs (feat/q-table-verbs) ---- */
-    case QK_FLIP:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_flip_wrap);
-    case QK_KEYS:   return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_keys_wrap);
-    case QK_UNGROUP:return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ungroup_wrap);
-    case QK_XKEY:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xkey_wrap);
-    case QK_XCOL:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xcol_wrap);
-    case QK_XCOLS:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xcols_wrap);
-    case QK_XASC:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xasc_wrap);
-    case QK_XDESC:  return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xdesc_wrap);
-    case QK_XGROUP: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_xgroup_wrap);
-    case QK_INSERT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_insert_wrap);
-    case QK_UPSERT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_upsert_wrap);
-    case QK_EXCEPT: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_except_wrap);
-    case QK_LJ:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_lj_wrap);
-    case QK_LJF:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ljf_wrap);
-    case QK_IJ:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ij_wrap);
-    case QK_IJF:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ijf_wrap);
-    case QK_UJ:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_uj_wrap);
-    case QK_UJF:    return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_ujf_wrap);
-    case QK_PJ:     return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_pj_wrap);
-    case QK_ASOF:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_asof_wrap);
-    case QK_SETG:   return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_setg_wrap);
-    /* ---- environment variables (feat/q-getenv-setenv) ---- */
-    case QK_GETENV: return ray_fn_unary (lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_getenv_wrap);
-    case QK_SETENV: return ray_fn_binary(lower_name, RAY_FN_NONE | RAY_FN_Q_LOWER, q_setenv_wrap);
-    default:      return NULL;
+static ray_t* build_wrapper(const q_recipe_t* r) {
+    uint8_t attrs = (uint8_t)((r->atomic ? RAY_FN_ATOMIC : RAY_FN_NONE) | RAY_FN_Q_LOWER);
+    switch (r->arity) {
+    case 1:  return ray_fn_unary (r->target, attrs, (ray_unary_fn)r->fn);
+    case 2:  return ray_fn_binary(r->target, attrs, (ray_binary_fn)r->fn);
+    default: return ray_fn_vary  (r->target, attrs, (ray_vary_fn)r->fn);
     }
 }
 
-/* Build the owned value for one (kind, target). */
-static ray_t* build_value(q_build_kind kind, const char* target) {
-    if (kind == QK_NONE) return NULL;
-    if (kind == QK_ENV)  return build_env(target);
-    return build_wrapper(kind, target);
-}
-
 /* Record one (name, valence) entry.  Returns RAY_OK, or RAY_ERR_DOMAIN if the
- * builder produced NULL/err for a non-QK_NONE kind (audited source missing). */
+ * builder produced NULL/err for a non-QR_NONE recipe (audited source missing). */
 static ray_err_t add_entry(const char* name, q_valence_t valence,
-                           q_build_kind kind, const char* target) {
+                           const q_recipe_t* r) {
     /* Bootstrap invariant (codex #1): entries are only ever built inside
      * q_registry_init's build window, and a builder must never re-enter the
-     * parser.  build_value below touches only ray_env_get / ray_fn_* — never
+     * parser.  The builders below touch only ray_env_get / ray_fn_* — never
      * q_parse — so this holds by construction; the assert pins it. */
     assert(g_building);
-    if (kind == QK_NONE) return RAY_OK;                 /* nothing at this valence */
-    ray_t* val = build_value(kind, target);
+    if (r->kind == QK_NONE) return RAY_OK;              /* nothing at this valence */
+    ray_t* val = (r->kind == QK_ENV) ? build_env(r->target) : build_wrapper(r);
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN; /* fail-fast: audited bug */
     entry_t* e    = &g_entries[g_count++];
     e->sym_id     = ray_sym_intern(name, strlen(name));
     e->valence    = valence;
     e->value      = val;
     e->spelling   = name;
-    e->lower_name = target;                             /* rayfall routing name */
-    e->is_wrapper = (kind != QK_ENV);
+    e->lower_name = r->target;                          /* rayfall routing name */
+    e->is_wrapper = (r->kind != QK_ENV);
     return RAY_OK;
 }
 
@@ -430,10 +309,10 @@ ray_err_t q_registry_init(void) {
     assert(2 * n <= (int)(sizeof g_entries / sizeof g_entries[0]));
     for (int i = 0; i < n; i++) {
         const q_op_t* op = &ops[i];
-        if (add_entry(op->name, Q_MONADIC, op->mon_kind,  op->mon_target)  != RAY_OK) {
+        if (add_entry(op->name, Q_MONADIC, &op->mon)  != RAY_OK) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
-        if (add_entry(op->name, Q_DYADIC,  op->dyad_kind, op->dyad_target) != RAY_OK) {
+        if (add_entry(op->name, Q_DYADIC,  &op->dyad) != RAY_OK) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
