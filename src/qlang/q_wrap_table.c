@@ -1298,8 +1298,7 @@ ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
      * examples pin the repr).  A NULL integer atom lhs can never be an
      * internal-fn id (negative) or an enkey count (>= 0), so the intercept
      * is exact. */
-    if ((x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16) &&
-        RAY_ATOM_IS_NULL(x)) {
+    if (q_is_int_atom(x) && RAY_ATOM_IS_NULL(x)) {
         q_console_show_krepr(y);
         ray_retain(y);
         return y;
@@ -1307,10 +1306,8 @@ ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
     /* kdb reserves a NEGATIVE integer ATOM lhs for internal functions
      * (`-8!x` serialize, `-9!x` deserialize, ...) — never dict-make.
      * Typed nulls fall through to dict-make (0N is not an internal id). */
-    if ((x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16) &&
-        !RAY_ATOM_IS_NULL(x)) {
-        int64_t id = x->type == -RAY_I64 ? x->i64
-                   : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
+    if (q_is_int_atom(x) && !RAY_ATOM_IS_NULL(x)) {
+        int64_t id = q_iatom_val(x);
         /* A negative id is an internal function (`-8!x` serialize, `-9!x`
          * deserialize, `-5!x` parse, ...) — dispatched through the Q_BANG[]
          * manifest (q_bang.c).  `-8!`/`-9!` moved into the table as rows
@@ -1428,12 +1425,8 @@ ray_t* q_key_wrap(ray_t* x) {
     }
     if (x && x->type == -RAY_STR)
         return ray_sym(ray_sym_intern_runtime("char", 4));
-    if (x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16) &&
-        !RAY_ATOM_IS_NULL(x)) {
-        int64_t v = (x->type == -RAY_I64) ? x->i64
-                  : (x->type == -RAY_I32) ? (int64_t)x->i32 : (int64_t)x->i16;
-        if (v >= 0) return q_til_wrap(x);           /* key n == til n */
-    }
+    if (q_is_int_atom(x) && !RAY_ATOM_IS_NULL(x) && q_iatom_val(x) >= 0)
+        return q_til_wrap(x);                       /* key n == til n */
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);
         if (!s) return ray_error("type", "key: bad symbol");

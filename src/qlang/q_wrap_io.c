@@ -120,14 +120,16 @@ ray_t* q_hopen_wrap(ray_t* x) {
     ray_t* args[2] = { cs, NULL };
     int64_t nargs = 1;
     ray_t* tv = NULL;
-    if (timeout && !q_is_int_atom(timeout)) {
+    int64_t tmo = 0;
+    ray_t* terr = timeout ? q_i64_or_err(timeout, &tmo, "hopen: timeout") : NULL;
+    if (terr) {
         ray_release(cs);
         if (pair_conn) ray_release(pair_conn);
         if (pair_to)   ray_release(pair_to);
-        return ray_error("type", "hopen: timeout must be an integer (milliseconds)");
+        return terr;
     }
     if (timeout) {
-        tv = make_i64(q_iatom_val(timeout));
+        tv = make_i64(tmo);
         args[1] = tv; nargs = 2;
     }
     ray_t* h = ray_hopen_fn(args, nargs);                /* owned handle or error */
@@ -166,12 +168,9 @@ ray_t* q_hopen_wrap(ray_t* x) {
  * tolerance of hclose on a dead handle. */
 ray_t* q_hclose_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
-    if (!q_is_int_atom(x) || RAY_ATOM_IS_NULL(x))
-        return ray_error("type", "hclose: expected an int handle, got %s",
-                         ray_type_name(x ? x->type : 0));
-    int64_t qh = q_iatom_val(x);
-    if (qh <= 0)
-        return ray_error("type", "hclose: invalid handle %lld", (long long)qh);
+    int64_t qh;
+    if (!q_strict_i64(x, &qh) || RAY_ATOM_IS_NULL(x) || qh <= 0)
+        return ray_error("type", "hclose: h");
     int64_t id = ray_ipc_handle_of_fd(qh);
     if (id < 0) return RAY_NULL_OBJ;          /* not a live handle — no-op */
     ray_t* raw = make_i64(id);
@@ -272,16 +271,15 @@ ray_t* q_read0_wrap(ray_t* x) {
         int three = ray_len(x) == 3;
         if (e[0] && e[0]->type == -RAY_SYM) {
             ray_t* path = q_ft_path(e[0]);
-            if (!path) return ray_error("type", "read0: expected (filesymbol;offset[;length])");
-            if (!q_is_int_atom(e[1]) || (three && !q_is_int_atom(e[2]))) {
+            if (!path) return ray_error("type", "read0: x");
+            int64_t off, want = -1;
+            if (!q_strict_i64(e[1], &off) || (three && !q_strict_i64(e[2], &want))) {
                 ray_release(path);
-                return ray_error("type", "read0: offset/length must be integers");
+                return ray_error("type", "read0: offset/length");
             }
-            int64_t off  = q_iatom_val(e[1]);
-            int64_t want = three ? q_iatom_val(e[2]) : -1;
             if (off < 0 || (three && want < 0)) {
                 ray_release(path);
-                return ray_error("domain", "read0: negative offset/length");
+                return ray_error("domain", "read0: offset/length");
             }
             ray_t* all = q_ft_read_all(path);
             ray_release(path);
@@ -568,13 +566,12 @@ static ray_t* q_ft_rows(ray_t* y, int* single) {
         /* (filesymbol; offset[; length]) chunk form */
         if (e && n >= 2 && n <= 3 && e[0] && e[0]->type == -RAY_SYM) {
             ray_t* path = q_ft_path(e[0]);
-            if (!path) return ray_error("type", "0:: expected (filesymbol;offset[;length])");
-            if (!q_is_int_atom(e[1]) || (n == 3 && !q_is_int_atom(e[2]))) {
+            if (!path) return ray_error("type", "0:: x");
+            int64_t off, want = -1;
+            if (!q_strict_i64(e[1], &off) || (n == 3 && !q_strict_i64(e[2], &want))) {
                 ray_release(path);
-                return ray_error("type", "0:: offset/length must be integers");
+                return ray_error("type", "0:: offset/length");
             }
-            int64_t off  = q_iatom_val(e[1]);
-            int64_t want = n == 3 ? q_iatom_val(e[2]) : -1;
             ray_t* all = q_ft_read_all(path);
             ray_release(path);
             if (!all || RAY_IS_ERR(all)) return all;
@@ -732,8 +729,10 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
     } else return ray_error("type", "0:: bad delimiter");
     int embed_nl = 0;
     if (flag) {
-        if (!q_is_int_atom(flag)) return ray_error("type", "0:: flag must be 0 or 1");
-        embed_nl = q_iatom_val(flag) != 0;
+        int64_t fv;
+        ray_t* ferr = q_i64_or_err(flag, &fv, "0:: flag");
+        if (ferr) return ferr;
+        embed_nl = fv != 0;
     }
     /* column recipes */
     int8_t* tags = (int8_t*)malloc(nt);

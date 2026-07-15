@@ -426,22 +426,6 @@ int q_is_null_sym(ray_t* x) {
     int z = s && ray_str_len(s) == 0;
     return z;
 }
-int q_is_int_atom(ray_t* x) {
-    return x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16);
-}
-int q_is_int_vec(ray_t* x) {
-    return x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16);
-}
-int64_t q_ivec_get(ray_t* v, int64_t i) {
-    const void* d = ray_data(v);
-    return v->type == RAY_I64 ? ((const int64_t*)d)[i]
-         : v->type == RAY_I32 ? (int64_t)((const int32_t*)d)[i]
-                              : (int64_t)((const int16_t*)d)[i];
-}
-int64_t q_iatom_val(ray_t* x) {
-    return x->type == -RAY_I64 ? x->i64
-         : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
-}
 
 /* split string y on substring sep -> boxed list of -RAY_STR (keeps empties) */
 static ray_t* q_str_split(const char* y, size_t yl, const char* sep, size_t sl) {
