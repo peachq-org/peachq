@@ -16,24 +16,59 @@
 #include "qlang/q_ns.h"       /* q_ns_reset — `\d` context state */
 #include "qlang/q_sys.h"      /* q_sys_seed_init — `\S` constant-seed contract */
 #include "qlang/q_parse.h"    /* q_parse, q_lower — embedded-bootstrap loader */
-#include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/dotq.q */
+#include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
+#include "lang/env.h"         /* ray_env_bind — `.q.*` keyword bindings */
 #include "lang/eval.h"        /* ray_eval_set_apply_hook / _name_hook / ray_eval */
 #include <rayforce.h>
 #include <stdio.h>            /* fprintf, stderr — bootstrap diagnostics */
-#include <string.h>           /* memcpy, strchr, strlen — bootstrap line split */
+#include <string.h>           /* memcpy, strchr, strlen, strncmp — line split */
 
-/* Load the embedded q bootstrap (src/qlang/dotq.q -> OPENQ_BOOTSTRAP) line at a
- * time, AFTER the registry and name hook are live (rule 6: registry builders
- * never q_parse; the bootstrap runs post-build).  Mirrors the REPL script-load
- * path (parse -> lower -> eval) but SILENT: results are discarded (assignments
- * print nothing anyway).  Blank lines and `/` full-line comments are skipped so
- * dotq.q reads as ordinary q source.  A malformed / overlong line is reported on
- * stderr and skipped — never fatal to runtime creation.
- *
- * Refcount discipline mirrors run_one_line exactly (q_repl.c): q_lower consumes
- * its input AST and returns a fresh value/error, so `ast` is reassigned to its
- * return; parse error -> ray_error_free; lower error -> ray_release (the
- * returned err); eval error -> ray_error_free; success -> release AST then r. */
+/* One q line -> owned value; NULL after a stderr report (never fatal).
+ * Refcounts mirror q_repl.c run_one_line (q_lower consumes its input AST). */
+static ray_t* q_bootstrap_eval(const char* src) {
+    ray_t* ast = q_parse(src);
+    if (RAY_IS_ERR(ast)) {
+        fprintf(stderr, "q bootstrap: parse error: %s\n", src);
+        ray_error_free(ast);
+        return NULL;
+    }
+    ast = q_lower(ast);
+    if (RAY_IS_ERR(ast)) {
+        fprintf(stderr, "q bootstrap: lower error: %s\n", src);
+        ray_release(ast);
+        return NULL;
+    }
+    ray_t* r = ray_eval(ast);
+    ray_release(ast);
+    if (RAY_IS_ERR(r)) {
+        fprintf(stderr, "q bootstrap: eval error: %s\n", src);
+        ray_error_free(r);
+        return NULL;
+    }
+    return r;
+}
+
+/* `.q.NAME:RHS` (q.q keyword): eval RHS, bind via the BUILTIN binder — `.q`
+ * is a reserved root (env.c) user `set` refuses; the bootstrap is the one
+ * privileged writer (kdb: q.k populates .q).  1 = handled, 0 = fall through. */
+static int q_bootstrap_dotq_line(const char* s) {
+    if (strncmp(s, ".q.", 3) != 0) return 0;
+    const char* p = s + 3;
+    while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+           (*p >= '0' && *p <= '9') || *p == '_')
+        p++;
+    if (p == s + 3 || *p != ':') return 0;
+    ray_t* v = q_bootstrap_eval(p + 1);
+    if (!v) return 1;                       /* reported by q_bootstrap_eval */
+    if (ray_env_bind(ray_sym_intern(s, (size_t)(p - s)), v) != RAY_OK)
+        fprintf(stderr, "q bootstrap: bind error: %s\n", s);
+    ray_release(v);                         /* bind retains */
+    return 1;
+}
+
+/* Load the embedded bootstrap (q.q then dotq.q -> OPENQ_BOOTSTRAP) line at a
+ * time, post-registry (rule 6), silently; blank/`/`-comment lines skipped,
+ * `.q.name:` lines take the privileged binder, errors reported, never fatal. */
 static void q_bootstrap_load(void) {
     const char* p = OPENQ_BOOTSTRAP;
     char line[4096];
@@ -56,26 +91,10 @@ static void q_bootstrap_load(void) {
         if (*s == '\0' || *s == '/')   /* blank line or leading `/` comment */
             continue;
 
-        ray_t* ast = q_parse(line);
-        if (RAY_IS_ERR(ast)) {
-            fprintf(stderr, "q bootstrap: parse error: %s\n", line);
-            ray_error_free(ast);
+        if (q_bootstrap_dotq_line(s))  /* q.q keyword -> privileged binder */
             continue;
-        }
-        ast = q_lower(ast);
-        if (RAY_IS_ERR(ast)) {
-            fprintf(stderr, "q bootstrap: lower error: %s\n", line);
-            ray_release(ast);
-            continue;
-        }
-        ray_t* r = ray_eval(ast);
-        ray_release(ast);
-        if (RAY_IS_ERR(r)) {
-            fprintf(stderr, "q bootstrap: eval error: %s\n", line);
-            ray_error_free(r);
-            continue;
-        }
-        ray_release(r);
+        ray_t* r = q_bootstrap_eval(line);
+        if (r) ray_release(r);
     }
 }
 
@@ -99,7 +118,11 @@ static ray_t* q_name_resolve(int64_t sym_id) {
         return NULL;
     ray_t* hit = q_registry_lookup_name(p, n, Q_MONADIC);
     if (!hit) hit = q_registry_lookup_name(p, n, Q_DYADIC);
-    if (!hit) return NULL;
+    if (!hit) {
+        /* unbound bare name -> `.q.<name>` (kdb: keywords ARE .q entries) */
+        hit = q_ns_dotq_get(p, n);               /* borrowed or NULL */
+        if (!hit) return NULL;
+    }
     ray_retain(hit);
     return hit;
 }
