@@ -39,15 +39,14 @@ ray_t* q_floor_wrap(ray_t* x) {
 }
 
 /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm ----
- * rayfall has exp/log/sqrt but no trig/reciprocal/signum, so these are q-layer
- * wrappers, one libm call per atom.  All are registered RAY_FN_ATOMIC, so the
- * evaluator (atomic_map_unary) broadcasts them over vectors and nested lists;
- * each wrapper handles the ATOM case only (mirroring ray_sqrt_fn/q_floor_wrap).
+ * rayfall has exp/log/sqrt but no trig/signum, so these are q-layer wrappers,
+ * one libm call per atom.  All are registered RAY_FN_ATOMIC, so the evaluator
+ * (atomic_map_unary) broadcasts them over vectors and nested lists; each
+ * wrapper handles the ATOM case only (mirroring ray_sqrt_fn/q_floor_wrap).
  * Float results go through make_f64 (internal.h), which canonicalizes every
  * non-finite (NaN OR ±Inf) to the single float null 0n — so `sin 1%0` -> 0n
- * and reciprocal of 0 -> 0n (kdb's 0w is unrepresentable under this model, a
- * deferred cell).  Null in -> typed float null out (kdb: sin/cos/asin/... of a
- * null is null). */
+ * (kdb's 0w is unrepresentable under this model, a deferred cell).  Null in
+ * -> typed float null out (kdb: sin/cos/asin/... of a null is null). */
 #define Q_LIBM_UNARY(NAME, FN, GLYPH)                                          \
     ray_t* NAME(ray_t* x) {                                                    \
         if (!x) return ray_error("type", GLYPH ": nil");                       \
@@ -63,16 +62,6 @@ Q_LIBM_UNARY(q_asin_wrap, asin, "asin")
 Q_LIBM_UNARY(q_acos_wrap, acos, "acos")
 Q_LIBM_UNARY(q_atan_wrap, atan, "atan")
 #undef Q_LIBM_UNARY
-
-/* q `reciprocal x` — 1%x as a float (ref/reciprocal.md).  Null -> null;
- * reciprocal 0 -> +Inf -> 0n under the single-null model (kdb shows 0w). */
-ray_t* q_reciprocal_wrap(ray_t* x) {
-    if (!x) return ray_error("type", "reciprocal: nil");
-    if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
-    if (is_numeric(x)) return make_f64(1.0 / as_f64(x));
-    return ray_error("type", "reciprocal: expects a numeric argument, got %s",
-                     ray_type_name(x->type));
-}
 
 /* q `signum x` — sign as INT (i32): null or negative -> -1i, zero -> 0i,
  * positive -> 1i (ref/signum.md).  Kdb ALWAYS returns int, whatever the input
