@@ -50,7 +50,13 @@ static ray_t* q_bootstrap_eval(const char* src) {
 
 /* `.q.NAME:RHS` (q.q keyword): eval RHS, bind via the BUILTIN binder — `.q`
  * is a reserved root (env.c) user `set` refuses; the bootstrap is the one
- * privileged writer (kdb: q.k populates .q).  1 = handled, 0 = fall through. */
+ * privileged writer (kdb: q.k populates .q).  1 = handled, 0 = fall through.
+ *
+ * Shadow-rebind: bare-name resolution reaches `.q` only on an env MISS, so a
+ * same-named rayfall builtin at root (env `med` unary, env `rand` dyadic)
+ * would win over the q.q keyword.  When root NAME is already bound, rebind it
+ * to the q.q value too — in the q runtime the q keyword IS the name's meaning
+ * (engine code calls its kernels by function, not by env name). */
 static int q_bootstrap_dotq_line(const char* s) {
     if (strncmp(s, ".q.", 3) != 0) return 0;
     const char* p = s + 3;
@@ -62,6 +68,9 @@ static int q_bootstrap_dotq_line(const char* s) {
     if (!v) return 1;                       /* reported by q_bootstrap_eval */
     if (ray_env_bind(ray_sym_intern(s, (size_t)(p - s)), v) != RAY_OK)
         fprintf(stderr, "q bootstrap: bind error: %s\n", s);
+    int64_t bare = ray_sym_intern(s + 3, (size_t)(p - s - 3));
+    if (ray_env_get(bare) && ray_env_bind(bare, v) != RAY_OK)
+        fprintf(stderr, "q bootstrap: shadow-rebind error: %s\n", s);
     ray_release(v);                         /* bind retains */
     return 1;
 }
@@ -145,6 +154,10 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         q_dotz_init(argc, argv);
         ray_eval_set_name_hook(q_name_resolve);
         q_bootstrap_load();    /* embedded .q stdlib, post-registry (rule 6) */
+        /* QK_QSRC manifest cells (infix q.q keywords) snapshot their `.q`
+         * definitions now that the bootstrap has bound them. */
+        if (q_registry_bind_qsrc() != RAY_OK)
+            fprintf(stderr, "q bootstrap: qsrc registry bind failed\n");
     }
     return rt;
 }

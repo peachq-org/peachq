@@ -48,6 +48,14 @@ typedef struct {
  * miss is a bug, not a soft skip. */
 ray_err_t q_registry_init(void);
 
+/* Install the QK_QSRC manifest cells: for every row whose recipe is marked
+ * value-from-q.q, snapshot the (now-loaded) `.q.<target>` binding as the
+ * cell's immutable value.  Called once by q_runtime_create AFTER the q.q
+ * bootstrap load (the definitions cannot exist at q_registry_init time).
+ * Fails fast (RAY_ERR_DOMAIN) on a missing `.q` binding — a q.q/manifest
+ * drift bug, mirroring q_registry_init's missing-builtin policy. */
+ray_err_t q_registry_bind_qsrc(void);
+
 /* True once q_registry_init has completed.  The PARSER embeds registry values
  * at verb heads, so q_parse fails fast when this is false (codex #1: value
  * embedding must never run against a cold registry). */

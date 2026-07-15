@@ -58,8 +58,11 @@ static void ql_dyad_head(ray_t **slot) {
     if (!s) return;
     ray_t *hit = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), val);
     ray_release(s);
-    if (hit) {              /* borrowed -> retain one, drop the name-ref */
-        ray_retain(hit);
+    /* ray_fn values only — a QK_QSRC cell's carrier value must stay a
+     * name-ref (see q_embed): eval would re-walk an embedded carrier. */
+    if (hit && (hit->type == RAY_UNARY || hit->type == RAY_BINARY ||
+                hit->type == RAY_VARY)) {
+        ray_retain(hit);    /* borrowed -> retain one, drop the name-ref */
         ray_release(e[0]);
         e[0] = hit;
     }
@@ -85,6 +88,18 @@ static void ql_dyad_head(ray_t **slot) {
 
 static ray_t *ql_env_val(const char *nm) {
     return ray_env_get(ray_sym_intern_runtime(nm, strlen(nm)));
+}
+
+/* Registry DYADIC value for nm[0..l) usable EMBEDDED in a lowered tree:
+ * ray_fn values only.  A QK_QSRC cell holds a carrier (q.q lambda/projection)
+ * that eval would re-walk as an expression — callers get NULL and keep/emit a
+ * name-ref sym instead (eval's name path resolves it to the same value). */
+static ray_t *ql_reg_fnval(const char *nm, size_t l) {
+    ray_t *v = q_registry_lookup_name(nm, l, Q_DYADIC);
+    if (v && (v->type == RAY_UNARY || v->type == RAY_BINARY ||
+              v->type == RAY_VARY))
+        return v;
+    return NULL;
 }
 
 /* ADVERB_NAMES index of a name-ref sym (0=' 1=/ 2=\ 3=': 4=/: 5=\:), or -1. */
@@ -254,7 +269,7 @@ static void ql_adv_app(ray_t **slot) {
         const char *nm = ray_str_ptr(s);
         size_t l = ray_str_len(s);
         f_is_glyph = (l >= 1 && strchr(VERB_CHARS, nm[0]) != NULL);
-        freg = q_registry_lookup_name(nm, l, Q_DYADIC);
+        freg = ql_reg_fnval(nm, l);  /* carrier cells: keep the name-ref */
         ray_release(s);
     }
 
@@ -590,9 +605,12 @@ static void ql_mod_assign(ray_t **slot, int in_lambda) {
     if (!e[1] || e[1]->type != -RAY_SYM || (e[1]->attrs & Q_ATTR_QUOTED)) {
         ray_release(s); return;
     }
-    ray_t *opv = q_registry_lookup_name(nm, l - 1, Q_DYADIC);   /* borrowed */
+    ray_t *opv = ql_reg_fnval(nm, l - 1);   /* borrowed */
+    /* q.q-hosted op (carrier cell): the inner head becomes a name-ref sym */
+    int64_t opsid = (!opv && q_registry_lookup_name(nm, l - 1, Q_DYADIC))
+                    ? ray_sym_intern(nm, l - 1) : 0;
     ray_release(s);
-    if (!opv) return;                       /* unknown op -> eval errors as today */
+    if (!opv && !opsid) return;             /* unknown op -> eval errors as today */
     /* dotted targets (`.foo.x+:1`) are global namespace amends, never locals */
     int mod_dotted = 0;
     {
@@ -606,7 +624,13 @@ static void ql_mod_assign(ray_t **slot, int in_lambda) {
     if (!setv) return;
     /* inner (op `x y): op on x's CURRENT value and y (append retains each) */
     ray_t *inner = ray_list_new(3);
-    inner = ray_list_append(inner, opv);
+    if (opsid) {
+        ray_t *opsym = ray_sym(opsid);      /* owned name-ref */
+        inner = ray_list_append(inner, opsym);
+        ray_release(opsym);
+    } else {
+        inner = ray_list_append(inner, opv);
+    }
     inner = ray_list_append(inner, e[1]);
     inner = ray_list_append(inner, e[2]);
     /* splice node in place -> (set/let `x inner) */
@@ -671,9 +695,12 @@ static void ql_indexed_assign(ray_t **slot, int in_lambda) {
         if (ql_is_hole(te[i])) { ray_release(s); return; }  /* d[;`b]:v deferred */
 
     ray_t *fval = NULL;                       /* borrowed registry value (op:) */
+    int64_t fsid = 0;       /* q.q-hosted op: f seat gets a name-ref sym */
     if (comp) {
-        fval = q_registry_lookup_name(nm, l - 1, Q_DYADIC);
-        if (!fval) { ray_release(s); return; }
+        fval = ql_reg_fnval(nm, l - 1);
+        if (!fval && q_registry_lookup_name(nm, l - 1, Q_DYADIC))
+            fsid = ray_sym_intern(nm, l - 1);
+        if (!fval && !fsid) { ray_release(s); return; }
     }
     ray_release(s);
     ray_t *amend = q_registry_lookup_name(k == 1 ? "@" : ".", 1, Q_DYADIC);
@@ -697,7 +724,11 @@ static void ql_indexed_assign(ray_t **slot, int in_lambda) {
         inner = ray_list_append(inner, lst);
         ray_release(lst);
     }
-    if (comp) {
+    if (comp && fsid) {
+        ray_t *fsym = ray_sym(fsid);          /* owned name-ref */
+        inner = ray_list_append(inner, fsym);
+        ray_release(fsym);
+    } else if (comp) {
         inner = ray_list_append(inner, fval);
     } else {
         ray_t *colon = ray_sym(ray_sym_intern_runtime(":", 1));
@@ -865,6 +896,28 @@ static void qsql_quote_carrier_heads(ray_t *x) {
     if (!x || x->type != RAY_LIST || q_deriv_kind_of(x) != Q_DERIV_NONE) return;
     int64_t n = ray_len(x);
     ray_t **e = (ray_t **)ray_data(x);
+    /* A name-ref head with NO env binding whose value is q.q-hosted (a
+     * QK_QSRC registry cell or a bare `.q` keyword — deltas, trim, cov, …):
+     * ray_select can neither name-dispatch nor general-eval it, so swap in
+     * the carrier value; the wrap below quotes it for the q apply hook. */
+    if (n >= 2 && e[0] && e[0]->type == -RAY_SYM &&
+        !(e[0]->attrs & Q_ATTR_QUOTED) && !ray_env_get(e[0]->i64)) {
+        ray_t *s = ray_sym_str(e[0]->i64);
+        if (s) {
+            const char *nm = ray_str_ptr(s);
+            size_t l = ray_str_len(s);
+            ray_t *v = q_registry_lookup_name(nm, l,
+                                              n == 2 ? Q_MONADIC : Q_DYADIC);
+            if (!v) v = q_ns_dotq_get(nm, l);          /* borrowed or NULL */
+            ray_release(s);
+            if (v && ((v->type == RAY_LIST && q_deriv_kind_of(v) != Q_DERIV_NONE) ||
+                      v->type == RAY_LAMBDA)) {
+                ray_retain(v);
+                ray_release(e[0]);
+                e[0] = v;
+            }
+        }
+    }
     if (n >= 2 && e[0] &&
         ((e[0]->type == RAY_LIST && q_deriv_kind_of(e[0]) != Q_DERIV_NONE) ||
          e[0]->type == RAY_LAMBDA)) {

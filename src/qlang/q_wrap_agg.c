@@ -243,9 +243,11 @@ ray_t* q_prd_wrap(ray_t* x) {
     return ray_i64(acc);
 }
 
-/* q `x wsum y` — weighted sum sum(x*y); `x wavg y` — (sum x*y) % sum x.
- * A pair where EITHER side is null is excluded (kdb).  An atom x broadcasts. */
-static ray_t* q_weighted(ray_t* x, ray_t* y, int avg) {
+/* q `x wavg y` — weighted average (sum x*y) % sum x, pairs where EITHER side
+ * is null excluded (kdb); an atom x broadcasts.  Kept in C: the q.q
+ * composition's bool-multiply denominator measured 16x slower (2026-07-15).
+ * wsum/cov/scov are q.q-hosted (their doc formulas ride engine kernels). */
+ray_t* q_wavg_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return ray_error("type", "wsum/wavg: nil operand");
     int xatom = ray_is_atom(x);
     if (!q_vec_is_num(y) && !ray_is_atom(y)) return ray_error("type", "wsum/wavg: numeric args only");
@@ -261,42 +263,14 @@ static ray_t* q_weighted(ray_t* x, ray_t* y, int avg) {
         if (xn || yn) continue;                 /* exclude null pairs */
         sp += xv * yv; sw += xv;
     }
-    if (!avg) return ray_f64(sp);
     if (sw == 0) return ray_typed_null(-RAY_F64);
     return ray_f64(sp / sw);
 }
-ray_t* q_wsum_wrap(ray_t* x, ray_t* y){ return q_weighted(x, y, 0); }
-ray_t* q_wavg_wrap(ray_t* x, ray_t* y){ return q_weighted(x, y, 1); }
-
-/* q `x cov y` — population covariance (÷n); `x scov y` — sample (÷n-1).
- * Null pairs excluded. */
-static ray_t* q_covariance(ray_t* x, ray_t* y, int sample) {
-    if (!x || !y || !q_vec_is_num(x) || !q_vec_is_num(y))
-        return ray_error("type", "cov: numeric vectors only");
-    int64_t n = ray_len(x);
-    if (n != ray_len(y)) return ray_error("length", "cov: length mismatch");
-    double sx=0, sy=0; int64_t c=0;
-    for (int64_t i = 0; i < n; i++) {
-        int xn, yn; double xv=q_velem_f(x,i,&xn), yv=q_velem_f(y,i,&yn);
-        if (xn||yn) continue;
-        sx+=xv; sy+=yv; c++;
-    }
-    if (c == 0 || (sample && c < 2)) return ray_typed_null(-RAY_F64);
-    double mx=sx/(double)c, my=sy/(double)c, acc=0;
-    for (int64_t i = 0; i < n; i++) {
-        int xn, yn; double xv=q_velem_f(x,i,&xn), yv=q_velem_f(y,i,&yn);
-        if (xn||yn) continue;
-        acc += (xv-mx)*(yv-my);
-    }
-    return ray_f64(acc / (double)(sample ? c-1 : c));
-}
-ray_t* q_cov_wrap(ray_t* x, ray_t* y){ return q_covariance(x, y, 0); }
-ray_t* q_scov_wrap(ray_t* x, ray_t* y){ return q_covariance(x, y, 1); }
 
 /* q sliding m-window family `N mf x` — window i covers x[max(0,i-N+1)..i].
- * msum treats null as 0; avg/max/min/dev/count exclude nulls; N<=0 -> empty
- * window (sum/count 0, others null). */
-typedef enum { MW_SUM, MW_AVG, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
+ * msum treats null as 0; max/min/dev/count exclude nulls; N<=0 -> empty
+ * window (sum/count 0, others null).  mavg is q.q-hosted (msum%mcount). */
+typedef enum { MW_SUM, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
 
 static ray_t* q_mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     int64_t N;
@@ -334,7 +308,6 @@ static ray_t* q_mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
             switch (k) {
             case MW_SUM: r = sum; break;
             case MW_MAX: case MW_MIN: if (started) r=m; else { r=0; isnull=1; } break;
-            case MW_AVG: if (c) r=sum/(double)c; else { r=0; isnull=1; } break;
             case MW_DEV: if (c) { double mean=sum/(double)c; double var=sumsq/(double)c - mean*mean;
                                   r = var>0 ? sqrt(var) : 0; } else { r=0; isnull=1; } break;
             default: r = 0; break;
@@ -346,7 +319,6 @@ static ray_t* q_mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     return out;
 }
 ray_t* q_msum_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_SUM); }
-ray_t* q_mavg_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_AVG); }
 ray_t* q_mmax_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_MAX); }
 ray_t* q_mmin_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_MIN); }
 ray_t* q_mcount_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_COUNT); }

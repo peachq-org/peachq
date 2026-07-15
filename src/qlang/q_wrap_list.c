@@ -478,6 +478,8 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     int64_t len;
     if (list->type == -RAY_STR)
         len = (int64_t)ray_str_len(list);           /* SSO-safe string length */
+    else if (list->type == RAY_TABLE)
+        len = ray_table_nrows(list);                 /* count-drop is a row drop */
     else if (ray_is_vec(list) || list->type == RAY_LIST)
         len = ray_len(list);                         /* typed vector / boxed list */
     else
@@ -485,6 +487,8 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     int64_t start, amount;
     if (k >= 0) { start = (k < len) ? k : len; amount = len - start; }
     else        { start = 0; amount = len + k; if (amount < 0) amount = 0; }
+    if (list->type == RAY_TABLE)                     /* rows stay a table */
+        return q_row_gather(list, start, amount, 0);
     int64_t rng[2] = { start, amount };
     ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
     if (RAY_IS_ERR(range)) return range;
@@ -520,84 +524,10 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
     }
     return q_drop_wrap(n, x);   /* int-vector positional cut == `_` */
 }
-/* ===== q list verbs: rotate / sublist / next / prev / fill (`^`) ==========
- * ref rotate.md, sublist.md, next.md, prev.md; deferred forms error, never
- * wrong-answer (*-deferred.qcmd companions). */
-
-/* q `n rotate x` — cyclic shift left by n (negative = right; kdb rotate.md).
- * n is an int atom; the right arg is a vector/list/string.  Empty x returns a
- * copy (no modulo-by-zero).  Reuses q_gather with recycle=1. */
-ray_t* q_rotate_wrap(ray_t* n, ray_t* x) {
-    int64_t k;
-    ray_t* err = q_i64_or_err(n, &k, "rotate: n");
-    if (err) return err;
-    if (RAY_ATOM_IS_NULL(n))
-        return ray_error("nyi", "rotate: 0N");
-    /* table arm (ref/rotate.md: a table rotates its ROWS) — cyclic row gather */
-    if (x && x->type == RAY_TABLE) {
-        int64_t total = ray_table_nrows(x);
-        if (total <= 0) { ray_retain(x); return x; }
-        return q_row_gather(x, ((k % total) + total) % total, total, 1);
-    }
-    if (!x || (!ray_is_vec(x) && x->type != RAY_LIST && x->type != -RAY_STR))
-        return ray_error("type", "rotate: x");  /* keyed table deferred */
-    int64_t total = (x->type == -RAY_STR) ? (int64_t)ray_str_len(x) : ray_len(x);
-    if (total <= 0) { ray_retain(x); return x; }
-    k = ((k % total) + total) % total;         /* normalize into [0,total) */
-    return q_gather(x, k, total, total, 1);     /* recycle -> cyclic */
-}
-
-/* q `n sublist x` — sub-list (kdb sublist.md).  Atom n>=0 -> first min(n,len);
- * n<0 -> last min(|n|,len).  Int-pair `i j` -> j items from position i (both
- * clamped into range; TRUNCATING, never null-extending).  Reuses q_gather with
- * recycle=0.  Dict / table right args are deferred. */
-ray_t* q_sublist_wrap(ray_t* n, ray_t* x) {
-    int is_tbl  = x && x->type == RAY_TABLE;
-    int is_dict = x && x->type == RAY_DICT && !q_is_keyed_table(x);
-    if (!x || (!is_tbl && !is_dict && !ray_is_vec(x) && x->type != RAY_LIST &&
-               x->type != -RAY_STR))
-        return ray_error("type", "sublist: x"); /* keyed table deferred */
-    int64_t total = is_tbl  ? ray_table_nrows(x)
-                  : is_dict ? ray_dict_len(x)
-                  : (x->type == -RAY_STR) ? (int64_t)ray_str_len(x) : ray_len(x);
-    int64_t start, count, k;
-    if (q_strict_i64(n, &k)) {
-        if (RAY_ATOM_IS_NULL(n)) return ray_error("nyi", "sublist: 0N");
-        if (k >= 0) { start = 0; count = (k < total) ? k : total; }
-        else { int64_t kk = -k; count = (kk < total) ? kk : total; start = total - count; }
-    } else if (q_is_int_vec(n) && ray_len(n) == 2) {
-        int64_t i = q_ivec_get(n, 0), j = q_ivec_get(n, 1);
-        if (i < 0) i = 0;                        /* clamp negative start to 0 */
-        if (j < 0) j = 0;
-        start = (i < total) ? i : total;
-        count = j;
-        if (start + count > total) count = total - start;   /* truncate tail */
-        if (count < 0) count = 0;
-    } else {
-        return ray_error("type", "sublist: n");
-    }
-    if (is_tbl) return q_row_gather(x, start, count, 0);   /* rows stay a table */
-    if (is_dict) {
-        /* ENTRY-structural: keys and values move together (the drop-arm split;
-         * ray_take_fn range takes work on both typed key vectors and boxed
-         * value lists).  Borrowed accessors; ray_dict_new consumes both. */
-        ray_t* k = ray_dict_keys(x);                 /* borrowed */
-        ray_t* v = ray_dict_vals(x);                 /* borrowed */
-        if (!k || !v) return ray_error("type", "sublist: malformed dictionary");
-        int64_t rng[2] = { start, count };
-        ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
-        if (RAY_IS_ERR(range)) return range;
-        ray_t* rk = ray_take_fn(k, range);           /* owned */
-        if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);
-        if (!rk || RAY_IS_ERR(rk)) { ray_release(range); return rk; }
-        ray_t* rv = ray_take_fn(v, range);           /* owned */
-        ray_release(range);
-        if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
-        if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
-        return ray_dict_new(rk, rv);                 /* consumes both */
-    }
-    return q_gather(x, start, count, total, 0);  /* truncating, no recycle */
-}
+/* ===== q list verbs: xprev / fill (`^`) ====================================
+ * ref next.md, fill.md; deferred forms error, never wrong-answer
+ * (*-deferred.qcmd companions).  `rotate` and `sublist` are self-hosted in
+ * q.q over `#`/`_` — the table arms ride q_drop_wrap's row-drop tail. */
 
 /* q `n xprev x` — n-item shift, null-filling the vacated end (ref/next.md:
  * +n is prev-by-n, -n is next); `next`/`prev` are its q.q unit shifts, so
@@ -1418,16 +1348,18 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return q_deal_pick(n, y);
             return ray_error("nyi", "?: deal y");
         }
+        /* roll/pick draw via the engine KERNEL directly (ray_rand_fn), not the
+         * env name — the bootstrap shadow-rebinds root `rand` to `.q.rand`. */
         if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {  /* roll */
-            ray_t* cnt = ray_i64(nx);               /* normalized count for env rand */
-            ray_t* r = q_env_call2("rand", cnt, y);
+            ray_t* cnt = ray_i64(nx);               /* normalized count */
+            ray_t* r = ray_rand_fn(cnt, y);
             ray_release(cnt);
             return r;
         }
         if (y && (ray_is_vec(y) || y->type == RAY_LIST)) {      /* pick */
             ray_t* cnt = ray_i64(nx);
             ray_t* len = ray_i64(ray_len(y));
-            ray_t* idx = q_env_call2("rand", cnt, len);
+            ray_t* idx = ray_rand_fn(cnt, len);
             ray_release(cnt);
             ray_release(len);
             if (!idx || RAY_IS_ERR(idx)) return idx;
@@ -1443,27 +1375,4 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         return ray_error("nyi", "?: y");   /* temporal/char roll deferred */
     }
     return ray_error("type", "?: x");
-}
-
-/* q `rand x` — {first 1?x} exactly (ref/rand.md).  A list picks one random
- * item; an atom yields one random value of x's type via the q_roll_wrap
- * generate arms (so every arm and error class above is reused verbatim). */
-ray_t* q_rand_wrap(ray_t* x) {
-    if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {  /* pick one item */
-        int64_t len = ray_len(x);
-        if (len <= 0) return ray_error("length", "rand: empty list");
-        ray_t* ia = ray_i64((int64_t)(rand() % len));
-        ray_t* out = ray_at_fn(x, ia);
-        ray_release(ia);
-        return out;
-    }
-    ray_t* one = ray_i64(1);
-    ray_t* r = q_roll_wrap(one, x);                     /* 1?x */
-    ray_release(one);
-    if (!r || RAY_IS_ERR(r)) return r;
-    ray_t* i0 = ray_i64(0);
-    ray_t* out = ray_at_fn(r, i0);                      /* first */
-    ray_release(i0);
-    ray_release(r);
-    return out;
 }

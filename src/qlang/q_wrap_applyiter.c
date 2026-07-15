@@ -637,26 +637,6 @@ ray_t* q_prior_wrap(ray_t** args, int64_t n) {
     return r;
 }
 
-/* deltas x == (-':)x ; differ x == not (~':)x  (ref/maps.md prior section). */
-ray_t* q_deltas_wrap(ray_t* x) {
-    ray_t* sub = q_registry_lookup_name("-", 1, Q_DYADIC);   /* borrowed */
-    if (!sub) return ray_error("type", "deltas: no subtract");
-    ray_t* a[2] = { sub, x };
-    return q_prior_wrap(a, 2);
-}
-ray_t* q_differ_wrap(ray_t* x) {
-    ray_t* mt = q_registry_lookup_name("~", 1, Q_DYADIC);    /* borrowed */
-    if (!mt) return ray_error("type", "differ: no match");
-    ray_t* a[2] = { mt, x };
-    ray_t* eq = q_prior_wrap(a, 2);                          /* (~':)x */
-    if (!eq || RAY_IS_ERR(eq)) return eq;
-    ray_t* notv = ray_env_get(ray_sym_intern_runtime("not", 3));  /* borrowed */
-    if (!notv) return eq;
-    ray_t* r = call_fn1(notv, eq);
-    ray_release(eq);
-    return r;
-}
-
 /* ---- over / scan  (converge, do, while, and reduce) ----------------------- */
 static int q_truthy(ray_t* v) {
     if (!v) return 0;

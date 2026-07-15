@@ -42,12 +42,8 @@ ray_t* q_mins_wrap(ray_t* x);
 ray_t* q_avgs_wrap(ray_t* x);
 ray_t* q_ratios_wrap(ray_t* x);
 ray_t* q_prd_wrap(ray_t* x);
-ray_t* q_wsum_wrap(ray_t* x, ray_t* y);
 ray_t* q_wavg_wrap(ray_t* x, ray_t* y);
-ray_t* q_cov_wrap(ray_t* x, ray_t* y);
-ray_t* q_scov_wrap(ray_t* x, ray_t* y);
 ray_t* q_msum_wrap(ray_t* n, ray_t* x);
-ray_t* q_mavg_wrap(ray_t* n, ray_t* x);
 ray_t* q_mmax_wrap(ray_t* n, ray_t* x);
 ray_t* q_mmin_wrap(ray_t* n, ray_t* x);
 ray_t* q_mcount_wrap(ray_t* n, ray_t* x);
@@ -64,8 +60,6 @@ ray_t* q_dot_wrap(ray_t** args, int64_t n);
 ray_t* q_each_wrap(ray_t* f, ray_t* x);
 ray_t* q_eachboth_wrap(ray_t** args, int64_t n);
 ray_t* q_prior_wrap(ray_t** args, int64_t n);
-ray_t* q_deltas_wrap(ray_t* x);
-ray_t* q_differ_wrap(ray_t* x);
 ray_t* q_scan_wrap(ray_t** args, int64_t n);
 ray_t* q_over_kw(ray_t* f, ray_t* x);
 ray_t* q_scan_kw(ray_t* f, ray_t* x);
@@ -126,8 +120,6 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d);
 /* ---- defined in q_wrap_list.c ---- */
 ray_t* q_drop_wrap(ray_t* n, ray_t* list);
 ray_t* q_cut_wrap(ray_t* n, ray_t* x);
-ray_t* q_rotate_wrap(ray_t* n, ray_t* x);
-ray_t* q_sublist_wrap(ray_t* n, ray_t* x);
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
 ray_t* q_fills_wrap(ray_t* x);
 ray_t* q_in_wrap(ray_t* x, ray_t* y);
@@ -137,7 +129,6 @@ ray_t* q_iasc_wrap(ray_t* x);
 ray_t* q_idesc_wrap(ray_t* x);
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
 ray_t* q_roll_wrap(ray_t* x, ray_t* y);
-ray_t* q_rand_wrap(ray_t* x);
 
 /* ---- defined in q_wrap_math.c ---- */
 ray_t* q_sin_wrap(ray_t* x);
