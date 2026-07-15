@@ -123,8 +123,6 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x);
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
 ray_t* q_fills_wrap(ray_t* x);
 ray_t* q_in_wrap(ray_t* x, ray_t* y);
-ray_t* q_asc_wrap(ray_t* x);
-ray_t* q_desc_wrap(ray_t* x);
 ray_t* q_iasc_wrap(ray_t* x);
 ray_t* q_idesc_wrap(ray_t* x);
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
@@ -152,8 +150,6 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 /* ---- defined in q_wrap_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y);
-ray_t* q_xasc_wrap(ray_t* x, ray_t* y);
-ray_t* q_xdesc_wrap(ray_t* x, ray_t* y);
 ray_t* q_xgroup_wrap(ray_t* x, ray_t* y);
 ray_t* q_ungroup_wrap(ray_t* x);
 ray_t* q_insert_wrap(ray_t* x, ray_t* y);

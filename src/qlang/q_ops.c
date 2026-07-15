@@ -273,14 +273,14 @@ static const q_op_t Q_OPS[] = {
     { "wj1",   QLEX_KW_PREFIX, QR_ENV("wj1"),                  QR_NONE,           NULL, 1, 0, "structural" },
     /* ---- sort / bucket family (feat/q-sort-rank) — dyadic infix ----
      * `bin`/`binr` reuse rayfall verbatim (same arg order: sorted-vec left,
-     * value right; ordering-based search -> rowid).  `xrank` is a clean
-     * pass-through (n left, vec right; ref/xrank.md "right-uniform" — the
+     * value right; ordering-based search -> rowid).  `xrank` is a q.q
+     * derivation over the grade (QR_QSRC; ref/xrank.md "right-uniform" — the
      * ordering essence puts it in rowid).  `xbar` is an ARG-SWAP wrapper
      * (rayfall xbar is (col,bucket); q spells it (bucket,col)) — "xbar is
      * atomic" (ref/xbar.md).  All infix so `a verb b` is one stmt. */
     { "bin",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("bin"),     NULL, 1, 0, "rowid" },
     { "binr",  QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("binr"),    NULL, 1, 0, "rowid" },
-    { "xrank", QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("xrank"),   NULL, 1, 0, "rowid" },
+    { "xrank", QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("xrank"),  NULL, 1, 0, "rowid" },
     { "xbar",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("xbar", q_xbar_wrap), NULL, 1, 0, "atomic" },
     /* ---- Wave 5: running scans (monadic prefix keywords) — all doc-labelled
      * uniform (ref/{sum,prd,max,min,avg}.md); null discipline at the bodies
@@ -362,14 +362,16 @@ static const q_op_t Q_OPS[] = {
     { "sum",     QLEX_KW_PREFIX, QR_FN1("sum", q_sum_wrap),    QR_NONE,           NULL, 1, 0, "aggregate" },
     /* group — rowid (item equality; spec §3 lists it; a §9 border flag). */
     { "group",   QLEX_KW_PREFIX, QR_ENV("group"),              QR_NONE,           NULL, 1, 0, "rowid" },
-    /* ---- sort / grade family (feat/q-sort-rank) — monadic prefix; rowid
-     * (ordering — spec §3 row-identity, the #174 stable-grade kernels) ----
-     * asc/desc reuse ray_asc_fn/ray_desc_fn for flat vectors (VALUE kdb-true;
-     * the sorted `s#` attribute is a deferred divergence — rayfall has no sorted
-     * attribute) and add a DICT-sort-by-value arm.  iasc/idesc reuse ray_iasc_fn/
-     * ray_idesc_fn and share the same DICT-grade arm as the `<`/`>` glyphs. */
-    { "asc",     QLEX_KW_PREFIX, QR_FN1("asc", q_asc_wrap),    QR_NONE,           NULL, 1, 0, "rowid" },
-    { "desc",    QLEX_KW_PREFIX, QR_FN1("desc", q_desc_wrap),  QR_NONE,           NULL, 1, 0, "rowid" },
+    /* ---- grade: THE ordering primitive — monadic prefix; rowid (spec §3
+     * row-identity, the #174 stable-grade kernel) ----
+     * iasc/idesc own ordering for EVERY structure (vector -> ray_iasc_fn; dict
+     * -> keys by the value grade; table/keyed -> the engine composite-radix row
+     * grade) and share those arms with the `<`/`>` glyphs.  Direction is a
+     * kernel flag, NOT `reverse iasc`: ties must not reverse (idesc 2 1 2 =
+     * 0 2 1).  asc/desc/rank are q.q derivations over these and carry NO row
+     * (prefix names resolve via .q); xasc/xdesc/xrank keep infix rows (QR_QSRC).
+     * The `s#` attribute stays a divergence: the attr-take arm accepts long
+     * vectors only, so asc cannot set it without regressing symbol sorts. */
     { "iasc",    QLEX_KW_PREFIX, QR_FN1("iasc", q_iasc_wrap),  QR_NONE,           NULL, 1, 0, "rowid" },
     { "idesc",   QLEX_KW_PREFIX, QR_FN1("idesc", q_idesc_wrap), QR_NONE,          NULL, 1, 0, "rowid" },
     { "avg",     QLEX_KW_PREFIX, QR_ENV("avg"),                QR_NONE,           NULL, 1, 0, "aggregate" },
@@ -447,7 +449,6 @@ static const q_op_t Q_OPS[] = {
     { "max",     QLEX_KW_PREFIX, QR_ENV("max"),                QR_NONE,           NULL, 1, 0, "aggregate" },
     { "min",     QLEX_KW_PREFIX, QR_ENV("min"),                QR_NONE,           NULL, 1, 0, "aggregate" },
     /* rank == iasc iasc (ref/rank.md) — the grade family, rowid. */
-    { "rank",    QLEX_KW_PREFIX, QR_ENV("rank"),               QR_NONE,           NULL, 1, 0, "rowid" },
     /* q `raze x` — flattens one level of structure (ref/raze.md; base
      * ray_raze_fn plus the kdb atom arm `raze 42` -> ,42). */
     { "raze",    QLEX_KW_PREFIX, QR_FN1("raze", q_raze_wrap),  QR_NONE,           NULL, 1, 0, "structural" },
@@ -473,22 +474,22 @@ static const q_op_t Q_OPS[] = {
      * EXCEPT xcol/xcols, which are q.q derivations over `.Q.ft` (QR_QSRC:
      * bound post-bootstrap; the row is only what keeps them infix).
      * The wrappers build over the wave-4 keyed primitives (q_enkey/
-     * q_table_flatten) and the base sort kernel (ray_xasc_fn, ARG-SWAPPED
-     * like xbar).  `insert`/`upsert` intentionally SHADOW the base env
+     * q_table_flatten).  `insert`/`upsert` intentionally SHADOW the base env
      * special forms of the same name: q semantics differ (by-name targets,
      * keyed collision/update, row-index results), so the registry value is a
      * wrapper, never the env snapshot.
      * Families: flip/keys/xkey/xcol/xcols/ungroup/insert/upsert define or
-     * rearrange the structures (structural, spec §3); xasc/xdesc sort
-     * (rowid); xgroup groups (rowid — border ruling in the AUDIT). */
+     * rearrange the structures (structural, spec §3); xasc/xdesc sort (rowid —
+     * q.q derivations grading the named columns, then ONE row gather);
+     * xgroup groups (rowid — border ruling in the AUDIT). */
     { "flip",   QLEX_KW_PREFIX, QR_FN1("flip", q_flip_wrap),   QR_NONE,           NULL, 1, 0, "structural" },
     { "keys",   QLEX_KW_PREFIX, QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 1, 0, "structural" },
     { "ungroup",QLEX_KW_PREFIX, QR_FN1("ungroup", q_ungroup_wrap), QR_NONE,       NULL, 1, 0, "structural" },
     { "xkey",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xkey", q_xkey_wrap), NULL, 1, 0, "structural" },
     { "xcol",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcol"),   NULL, 1, 0, "structural" },
     { "xcols",  QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcols"),  NULL, 1, 0, "structural" },
-    { "xasc",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xasc", q_xasc_wrap), NULL, 1, 0, "rowid" },
-    { "xdesc",  QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xdesc", q_xdesc_wrap), NULL, 1, 0, "rowid" },
+    { "xasc",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xasc"),   NULL, 1, 0, "rowid" },
+    { "xdesc",  QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xdesc"),  NULL, 1, 0, "rowid" },
     { "xgroup", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid" },
     { "insert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 1, 1, "structural" },
     { "upsert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("upsert", q_upsert_wrap), NULL, 1, 1, "structural" },
