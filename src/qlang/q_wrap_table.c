@@ -16,7 +16,7 @@
 #include "qlang/q_dotz.h"  /* q_dotz_ipc_hook_index, q_dotz_zts_set — .z.* handler arms */
 #include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
 #include "lang/eval.h"     /* ray_eval; ray_list_fn, ray_except_fn, ray_sect_fn, ray_take_fn */
-#include "lang/internal.h" /* ray_xasc_fn/ray_xdesc_fn, ray_concat_fn, ray_typed_null, ray_error */
+#include "lang/internal.h" /* ray_concat_fn, ray_typed_null, ray_error */
 #include "lang/format.h"   /* ray_type_name — error messages */
 #include "table/sym.h"     /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
 #include <stdio.h>         /* snprintf, rename */
@@ -409,37 +409,6 @@ ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
     return keyed;
 }
 
-/* q `x xasc y` / `x xdesc y` — sort a table by columns (stable base kernel,
- * ARG-SWAP like q_xbar_wrap).  y by name: sort the global in place, rebind,
- * return the name.  A keyed table sorts its flattened columns and re-keys.
- * No `s#` attribute (deferred divergence, same as q_asc_wrap). */
-static ray_t* q_xsort(ray_t* x, ray_t* y, int desc) {
-    int64_t sym;
-    ray_t* t = q_table_operand(y, &sym);
-    if (!t) return ray_error("type", "xasc/xdesc: expects a table");
-    int keyed = q_is_keyed_table(t);
-    int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(t)) : 0;
-    ray_t* flat = q_table_flatten(t);
-    if (!flat || RAY_IS_ERR(flat)) return flat;
-    ray_t* sorted = desc ? ray_xdesc_fn(flat, x) : ray_xasc_fn(flat, x);
-    ray_release(flat);
-    if (!sorted || RAY_IS_ERR(sorted)) return sorted;
-    if (keyed) {
-        ray_t* rk = q_enkey(sorted, nkey);
-        ray_release(sorted);
-        if (!rk || RAY_IS_ERR(rk)) return rk;
-        sorted = rk;
-    }
-    if (sym >= 0) {
-        ray_env_bind(sym, sorted);                        /* retains */
-        ray_release(sorted);
-        ray_retain(y);
-        return y;
-    }
-    return sorted;
-}
-ray_t* q_xasc_wrap(ray_t* x, ray_t* y)  { return q_xsort(x, y, 0); }
-ray_t* q_xdesc_wrap(ray_t* x, ray_t* y) { return q_xsort(x, y, 1); }
 
 /* q `x xgroup y` — key by x, remaining columns become per-group nested lists
  * (first-occurrence group order, ref/xgroup.md). */
