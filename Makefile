@@ -184,14 +184,15 @@ third_party/yyjson/yyjson.o: third_party/yyjson/yyjson.c
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 # openq: embedded q bootstrap. tools/gen-bootstrap.sh compiles the authored
-# src/qlang/dotq.q into a generated C header (OPENQ_BOOTSTRAP[]) baked into the
+# src/qlang/q.q + dotq.q (IN THAT ORDER — dotq.q may use q.q keywords, never
+# the reverse) into a generated C header (OPENQ_BOOTSTRAP[]) baked into the
 # binary and run at the tail of q_runtime_create. Generated-on-build (NOT
 # committed; gitignored). q_runtime.c #includes it, so q_runtime.o depends on it
 # explicitly for the FIRST build (before the auto .d fragment exists). The
 # bench-* targets below direct-compile $(LIB_SRC) (which includes q_runtime.c)
 # without going through the object rule, so they list the header too.
-src/qlang/dotq_gen.h: src/qlang/dotq.q tools/gen-bootstrap.sh
-	tools/gen-bootstrap.sh $< $@
+src/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.sh
+	tools/gen-bootstrap.sh $@ src/qlang/q.q src/qlang/dotq.q
 
 src/qlang/q_runtime.o src/qlang/q_runtime.win.o: src/qlang/dotq_gen.h
 
