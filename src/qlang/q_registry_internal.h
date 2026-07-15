@@ -9,11 +9,12 @@
  *      deleting the file once these five lose their last caller; keep the
  *      seam from growing.
  *   2. REGISTRY ENTRYPOINTS — wrapper bodies living in q_wrap_*.c, referenced
- *      ONLY by q_registry.c's builders (bound into immutable fn-values, or
- *      init/teardown-managed singletons).  Exactly one caller BY DESIGN —
- *      do not re-staticize (that would move the bodies back into the
- *      monolith); new wrapper => declare it here, define it in the domain
- *      file, bind it in q_registry.c's build_wrapper.
+ *      ONLY as manifest build recipes: the Q_OPS[] rows (q_ops.c) carry these
+ *      function pointers in their QR_FN* recipes, and q_registry.c's generic
+ *      build_wrapper binds them into immutable fn-values (or init/teardown-
+ *      managed singletons).  Do not re-staticize (that would move the bodies
+ *      back into the monolith); new wrapper => declare it here, define it in
+ *      the domain file, point a QR_FN* manifest row at it.
  *   3. SHARED HELPERS — called from sibling files beyond the registry
  *      builders (the defining file typically calls them too); each line
  *      names the consumers.  This block IS the split's lateral-dependency
