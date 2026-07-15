@@ -412,9 +412,7 @@ ray_t* q_each_wrap(ray_t* f, ray_t* x) {
         ray_t* outl = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(outl)) return outl;
         for (int64_t i = 0; i < n; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* row = ray_at_fn(x, ia);           /* owned row dict */
-            ray_release(ia);
+            ray_t* row = q_table_row_at(x, i);       /* owned row dict (char-column safe) */
             if (!row || RAY_IS_ERR(row)) { ray_release(outl); return row; }
             ray_t* r = call_fn1(f, row);
             ray_release(row);
