@@ -6,7 +6,7 @@
  * (`-3! -4! -14! -16! -27! -33!`, no keyword twin) are BLOCKED rows here and
  * land in Group 2 stacked on this branch. */
 #include "qlang/q_bang.h"
-#include "qlang/q_registry.h"   /* q_value_wrap, q_hsym_wrap, q_attr_wrap */
+#include "qlang/q_registry_internal.h"  /* q_value_wrap, q_hsym_wrap, q_attr_wrap, q_strict_i64 */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/q_wire.h"       /* q_wire_serialize / q_wire_deserialize, Q_WIRE_ASYNC */
@@ -84,19 +84,6 @@ static ray_t* h_refcnt(ray_t** a, int64_t n) {
     return ray_i64((int64_t)a[0]->rc);
 }
 
-/* Read an integer-ish atom as int64 (for `-27!`'s decimal-places operand). */
-static int q_bang_as_i64(ray_t* v, int64_t* out) {
-    if (!v || v->type >= 0) return 0;      /* must be an atom */
-    switch (-v->type) {
-        case RAY_BOOL: *out = v->b8 ? 1 : 0; return 1;
-        case RAY_U8:   *out = v->u8;  return 1;
-        case RAY_I16:  *out = v->i16; return 1;
-        case RAY_I32:  *out = v->i32; return 1;
-        case RAY_I64:  *out = v->i64; return 1;
-        default: return 0;
-    }
-}
-
 /* Format one double to `places` decimals with IEEE754 rounding (C's %.*f is
  * exactly round-half-to-even on the stored binary value — matching kdb's
  * `-27!`, which ignores \P).  Returns an owned RAY_STR (or 'wsfull error).
@@ -122,8 +109,9 @@ static ray_t* q_bang_fmt_one(int places, double y) {
 static ray_t* h_format(ray_t** a, int64_t n) {
     (void)n;
     int64_t places64;
-    if (!q_bang_as_i64(a[0], &places64))
-        return ray_error("type", "-27!: first argument must be an int atom");
+    if (a[0] && a[0]->type == -RAY_BOOL) places64 = a[0]->b8;
+    else if (!q_strict_i64(a[0], &places64))
+        return ray_error("type", "-27!: places");
     if (places64 < 0) places64 = 0;
     if (places64 > 320) places64 = 320;       /* guard the snprintf width */
     int places = (int)places64;
@@ -144,7 +132,7 @@ static ray_t* h_format(ray_t** a, int64_t n) {
         }
         return out;
     }
-    return ray_error("type", "-27!: second argument must be a float atom or vector");
+    return ray_error("type", "-27!: y");
 }
 
 /* ---- the single-source manifest -------------------------------------------
