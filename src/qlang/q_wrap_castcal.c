@@ -320,6 +320,27 @@ int64_t q_ts_compose(int64_t days, int64_t tod_ns) {
  * Designator resolution is separate from conversion so C callers (future
  * bool-widening / promotion work) can invoke q_cast_to(tag, x) directly. */
 
+/* Is vector tag `t` legal as a ROW INDEX (uniform-structure-dispatch §2.2:
+ * any int-backed index indexes)?  Returns the element width in bytes so
+ * consumers key on WIDTH, never enumerate tags: 8/4/2 read signed, 1 reads
+ * unsigned (U8); 0 = not an int index.  SYM is i64-backed but EXCLUDED —
+ * a sym index means column access, never a row.  BOOL is excluded pending
+ * a doc citation for boolean indexing.  Atom callers pass -atom->type;
+ * every accepted ATOM stores its payload in .i64 (vec/atom.c), so as_i64's
+ * fallback reads it correctly. */
+int q_int_index_width(int8_t t) {
+    switch (t) {
+    case RAY_I64: return 8;
+    case RAY_I32: return 4;
+    case RAY_I16: return 2;
+    case RAY_U8:  return 1;
+    default:
+        if (RAY_IS_TEMPORAL64(t)) return 8;   /* timestamp, timespan */
+        if (RAY_IS_TEMPORAL32(t)) return 4;   /* month date minute second time */
+        return 0;
+    }
+}
+
 int8_t q_cast_designator(ray_t* t, int* is_tok) {
     *is_tok = 0;
     if (!t) return 0;
