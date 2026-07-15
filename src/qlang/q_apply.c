@@ -144,12 +144,20 @@ static ray_t* dict_lookup(ray_t* d, ray_t* idx) {
               : (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ);
 }
 
+/* defined below with the dict/table distribution shim they belong to */
+static ray_t* call_builtin1(ray_t* head, ray_t* a);
+static ray_t* call_builtin2(ray_t* head, ray_t* a, ray_t* b);
+static ray_t* distribute_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n);
+
 /* Apply a 104h derived-verb carrier: positional assembly = the carrier's
  * bound slots with holes (hole_mask bits) filled left-to-right from `args`;
  * EXTRA supplied args append after the assembled list — that is what makes
  * seeded over work through a name: f:(+/); f[100;v] -> fold(F, 100, v).
- * The base HOF is called by its fn type.  Args/carrier borrowed; returns
- * owned (or an owned error). */
+ * UNARY/BINARY bases go through call_builtin* + distribute_retry so a carrier
+ * call behaves exactly like the tree-walk call of the same base (atomic
+ * broadcast; dict/table distribution on 'type) — what makes q.q's
+ * `.q.reciprocal:%[1;]` match the retired C wrapper on vectors/dicts/tables.
+ * Args/carrier borrowed; returns owned (or an owned error). */
 static ray_t* q_deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
     q_deriv_kind k = q_deriv_kind_of(carrier);
     ray_t* base = q_deriv_base(carrier);            /* borrowed */
@@ -182,10 +190,10 @@ static ray_t* q_deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
     switch (base->type) {
     case RAY_UNARY:
         if (cn != 1) return ray_error("rank", "derived verb: expected 1 arg, got %lld", (long long)cn);
-        return ((ray_unary_fn)(uintptr_t)base->i64)(call[0]);
+        return distribute_retry(base, call_builtin1(base, call[0]), call, 1);
     case RAY_BINARY:
         if (cn != 2) return ray_error("rank", "derived verb: expected 2 args, got %lld", (long long)cn);
-        return ((ray_binary_fn)(uintptr_t)base->i64)(call[0], call[1]);
+        return distribute_retry(base, call_builtin2(base, call[0], call[1]), call, 2);
     case RAY_VARY:
         return ((ray_vary_fn)(uintptr_t)base->i64)(call, cn);
     default:
@@ -286,18 +294,18 @@ static ray_t* q_compose_apply(ray_t* carrier, ray_t** args, int64_t n) {
  * VECTOR (never a dict) exactly as the tree-walk kernel dispatch would, so
  * every rayfall kernel is reused with zero reimplementation. */
 
-/* Apply a builtin UNARY head to one operand, matching the tree-walk arm:
- * atomic verbs map over a collection, others call the kernel directly. */
-static ray_t* dict_apply1(ray_t* head, ray_t* a) {
+/* Builtin UNARY call matching the tree-walk arm (atomic verbs map over a
+ * collection) — the one q-layer home, shared by the distribution shim and
+ * q_deriv_apply. */
+static ray_t* call_builtin1(ray_t* head, ray_t* a) {
     ray_unary_fn fn = (ray_unary_fn)(uintptr_t)head->i64;
     if ((head->attrs & RAY_FN_ATOMIC) && is_collection(a))
         return atomic_map_unary(fn, a);
     return fn(a);
 }
 
-/* Apply a builtin BINARY head to two operands, matching the tree-walk arm
- * (opcode carried so a length-mismatch error names the verb). */
-static ray_t* dict_apply2(ray_t* head, ray_t* a, ray_t* b) {
+/* Builtin BINARY twin (opcode carried so a length error names the verb). */
+static ray_t* call_builtin2(ray_t* head, ray_t* a, ray_t* b) {
     ray_binary_fn fn = (ray_binary_fn)(uintptr_t)head->i64;
     if ((head->attrs & RAY_FN_ATOMIC) && (is_collection(a) || is_collection(b)))
         return atomic_map_binary_op(fn, RAY_FN_OPCODE(head), a, b);
@@ -332,7 +340,7 @@ static ray_t* q_dict_union(ray_t* head, ray_t* a, ray_t* b) {
         ray_t* vb = ray_dict_get(b, k);          /* owned or NULL */
         ray_t* rv;
         if (vb) {
-            rv = dict_apply2(head, va, vb);
+            rv = call_builtin2(head, va, vb);
             ray_release(va); ray_release(vb);
             if (!rv || RAY_IS_ERR(rv)) { ray_release(k); ray_release(okeys); ray_release(ovals); return rv ? rv : ray_error("type", NULL); }
         } else {
@@ -373,10 +381,12 @@ static ray_t* q_dict_union(ray_t* head, ray_t* a, ray_t* b) {
  *   - each column maps to a length-nrows VECTOR (element-wise or a scan:
  *     neg/abs/sqrt/sums/deltas/...) -> a TABLE, row count preserved.
  *     neg ([]a:1 2;b:3 4) -> ([]a:-1 -2;b:-3 -4)
- * The kernel is applied via dict_apply1 (the same tree-walk arm the dict path
- * uses), so every rayfall verb is reused with no new code.  Returns owned, or
- * an owned error (a per-column 'type propagates). */
-static ray_t* q_table_distribute1(ray_t* head, ray_t* t) {
+ * The kernel is applied via call_builtin* (the same tree-walk arm the dict
+ * path uses), so every rayfall verb is reused with no new code.  x == NULL is
+ * the unary form; else dyadic with atom x (`x_is_left` places it — kdb atomic
+ * dyadics pierce tables: `1%t`, `t>2`).  Returns owned, or an owned error (a
+ * per-column 'type propagates). */
+static ray_t* q_table_distribute(ray_t* head, ray_t* t, ray_t* x, int x_is_left) {
     int64_t nc = ray_table_ncols(t);
     int64_t nr = ray_table_nrows(t);
     ray_t* names = ray_vec_new(RAY_SYM, nc > 0 ? nc : 1);
@@ -390,7 +400,9 @@ static ray_t* q_table_distribute1(ray_t* head, ray_t* t) {
         nd[c] = ray_table_col_name(t, c);
         ray_t* col = ray_table_get_col_idx(t, c);       /* borrowed */
         if (!col) { ray_release(names); ray_release(out); return ray_error("type", "table: malformed column"); }
-        ray_t* r = dict_apply1(head, col);              /* owned */
+        ray_t* r = !x        ? call_builtin1(head, col)
+                 : x_is_left ? call_builtin2(head, x, col)
+                             : call_builtin2(head, col, x);   /* owned */
         if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);  /* DAG agg -> atom, so it collapses */
         if (!r || RAY_IS_ERR(r)) { ray_release(names); ray_release(out); return r ? r : ray_error("type", NULL); }
         if (!(is_collection(r) && ray_len(r) == nr)) all_conform = 0;
@@ -414,7 +426,8 @@ static ray_t* q_table_distribute1(ray_t* head, ray_t* t) {
 }
 
 /* The distribution dispatch: monadic map/aggregate, dyadic dict+atom (both
- * orders) and dyadic dict+dict union.  Returns owned, or NULL to decline. */
+ * orders), dyadic dict+dict union, and dyadic ATOMIC table+atom.  Returns
+ * owned, or NULL to decline. */
 static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
     if (n == 1) {
         ray_t* d = args[0];
@@ -424,16 +437,16 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
          * not aggregated) — kdb `sum k`.  Claimed before the plain-dict path so
          * a keyed table (a RAY_DICT) does not fall into the reduce. */
         if (d && d->type == RAY_TABLE)
-            return q_table_distribute1(head, d);
+            return q_table_distribute(head, d, NULL, 0);
         if (d && d->type == RAY_DICT && q_is_keyed_table(d)) {
             ray_t* vt = ray_dict_vals(d);        /* value table, borrowed */
             if (!vt || vt->type != RAY_TABLE) return NULL;
-            return q_table_distribute1(head, vt);
+            return q_table_distribute(head, vt, NULL, 0);
         }
         ray_t* keys = ray_dict_keys(d);          /* borrowed */
         ray_t* vals = ray_dict_vals(d);          /* borrowed */
         if (!keys || !vals) return NULL;
-        ray_t* r = dict_apply1(head, vals);
+        ray_t* r = call_builtin1(head, vals);
         if (!r || RAY_IS_ERR(r)) return r;
         /* map (result conforms to values) vs aggregate (scalar result) */
         if (is_collection(r) && ray_len(r) == ray_dict_len(d)) {
@@ -445,10 +458,15 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
     if (n == 2) {
         ray_t* a = args[0];
         ray_t* b = args[1];
-        /* Dyadic table distribution (e.g. `2 msum t`) is out of scope for the
-         * monadic-aggregation widening: decline any table-only pair so the
-         * caller's historic 'type stands (dict+dict / dict+atom below are the
-         * only shapes this shim handles). */
+        /* ATOMIC table+atom only: non-atomic dyadics (join/in/msum/…) and
+         * table+table / table+vector are NOT a per-column map in kdb — the
+         * caller's historic 'type stands. */
+        if (head->attrs & RAY_FN_ATOMIC) {
+            if (a && a->type == RAY_TABLE && b && ray_is_atom(b) && b->type != RAY_DICT)
+                return q_table_distribute(head, a, b, 0);   /* col OP x */
+            if (b && b->type == RAY_TABLE && a && ray_is_atom(a) && a->type != RAY_DICT)
+                return q_table_distribute(head, b, a, 1);   /* x OP col */
+        }
         if (a && a->type != RAY_DICT && b && b->type != RAY_DICT) return NULL;
         bool ad = a && a->type == RAY_DICT;
         bool bd = b && b->type == RAY_DICT;
@@ -457,12 +475,27 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
         ray_t* keys = ray_dict_keys(d);          /* borrowed */
         ray_t* vals = ray_dict_vals(d);          /* borrowed */
         if (!keys || !vals) return NULL;
-        ray_t* r = ad ? dict_apply2(head, vals, b) : dict_apply2(head, a, vals);
+        ray_t* r = ad ? call_builtin2(head, vals, b) : call_builtin2(head, a, vals);
         if (!r || RAY_IS_ERR(r)) return r;
         ray_retain(keys);
         return ray_dict_new(keys, r);            /* consumes keys + r */
     }
     return NULL;
+}
+
+/* Mirror of eval's dict_retry for q_deriv_apply's base-fn calls: 'type ONLY
+ * (a 'nyi/'length stands — `prev d` keeps xprev's 'nyi, no structure arm).
+ * Consumes/returns `result`. */
+static ray_t* distribute_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n) {
+    if (!result || !RAY_IS_ERR(result)) return result;
+    if (result->slen != 4 || memcmp(result->sdata, "type", 4) != 0) return result;
+    bool has_coll = false;
+    for (int64_t i = 0; i < n; i++)
+        if (args[i] && (args[i]->type == RAY_DICT || args[i]->type == RAY_TABLE)) { has_coll = true; break; }
+    if (!has_coll || q_fn_dict_distribute_veto(head, args, n)) return result;
+    ray_t* dr = q_dict_distribute(head, args, n);
+    if (dr) { ray_release(result); return dr; }
+    return result;
 }
 
 ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
