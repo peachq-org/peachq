@@ -5,7 +5,9 @@
  *                        a RAY_LIST and must not fall into the gather arm)
  *   dict              -> direct ray_dict_get; on a miss, the typed null of
  *                        the dict's VALUE type (ray_at would hardcode 0Nl)
- *   table             -> ray_at row/column access (base special-cases tables)
+ *   table             -> q_table_at row gather (int atom/vector; misses
+ *                        null-filled, char columns byte-permuted), declining
+ *                        to ray_at for column access and everything else
  *   typed vec / list  -> gather: ray_at (already kdb null-fill for
  *                        out-of-range/negative), then collapse a boxed
  *                        multi-index result to the typed vector
@@ -16,7 +18,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_apply.h"
-#include "qlang/q_registry.h"   /* q_collapse_list */
+#include "qlang/q_registry.h"   /* q_collapse_list, q_table_at/q_table_row_at, q_keyed_lookup_rows */
 #include "qlang/q_deriv.h"      /* q_deriv_kind_of (carrier arm, Task 5) */
 #include "lang/eval.h"          /* ray_at_fn */
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
@@ -105,33 +107,10 @@ static ray_t* keyed_table_lookup(ray_t* d, ray_t* idx) {
         }
         if (all) hit = r;
     }
-    if (hit >= 0) {
-        ray_t* ra = ray_i64(hit);
-        ray_t* row = ray_at_fn(vtab, ra);            /* row dict, owned */
-        ray_release(ra);
-        return row;
-    }
-    /* miss -> null row: colname!typed-null per value column */
-    int64_t nv = ray_table_ncols(vtab);
-    ray_t* names = ray_vec_new(RAY_SYM, nv > 0 ? nv : 1);
-    if (!names || RAY_IS_ERR(names)) return names ? names : ray_error("oom", NULL);
-    names->len = nv;
-    int64_t* nd = (int64_t*)ray_data(names);
-    ray_t* nulls = ray_list_new(nv > 0 ? nv : 1);
-    if (!nulls || RAY_IS_ERR(nulls)) { ray_release(names); return nulls ? nulls : ray_error("oom", NULL); }
-    for (int64_t c = 0; c < nv; c++) {
-        nd[c] = ray_table_col_name(vtab, c);
-        ray_t* col = ray_table_get_col_idx(vtab, c);       /* borrowed */
-        int8_t nt = (col && ray_is_vec(col)) ? (int8_t)-col->type : 0;
-        ray_t* nu = nt ? ray_typed_null(nt)
-                       : (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ);
-        nulls = ray_list_append(nulls, nu);
-        ray_release(nu);
-    }
-    ray_t* cv = q_collapse_list(nulls);
-    ray_release(nulls);
-    if (!cv || RAY_IS_ERR(cv)) { ray_release(names); return cv ? cv : ray_error("type", NULL); }
-    return ray_dict_new(names, cv);                  /* consumes both */
+    /* hit -> that row of the value table; miss -> the typed all-null row.
+     * Both are q_table_row_at (the universal row-dict arm, q_wrap_table.c):
+     * a miss is just an out-of-range row. */
+    return q_table_row_at(vtab, hit);
 }
 
 static ray_t* dict_lookup(ray_t* d, ray_t* idx) {
@@ -640,11 +619,10 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
 
     /* Noun indexing, one step per arg — d[k;i] / t[r;c] / m[i;j] drill through
      * whatever each step yields (dict -> dict_lookup with kdb miss semantics,
-     * table -> ray_at row/column, vec/list -> gather).  Single-arg dict/table
-     * behaviour is byte-identical to the old dedicated arms.  A `::` (null)
-     * index at a dict/table step DECLINES to the caller's historic error —
-     * elision ("all at this level") is a later wave; vec/list steps keep
-     * their pre-existing gather path for it. */
+     * table -> q_table_at row gather then ray_at column access, vec/list ->
+     * gather).  A `::` (null) index at a dict/table step DECLINES to the
+     * caller's historic error — elision ("all at this level") is a later
+     * wave; vec/list steps keep their pre-existing gather path for it. */
     if (head->type == RAY_DICT || head->type == RAY_TABLE ||
         ray_is_vec(head) || head->type == RAY_LIST) {
         ray_t* cur = head;
@@ -656,7 +634,11 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                 next = dict_lookup(cur, args[i]);
             } else if (cur->type == RAY_TABLE) {
                 if (!args[i] || RAY_IS_NULL(args[i])) { ray_release(cur); return NULL; }
-                next = ray_at_fn(cur, args[i]);
+                /* integer atom/vector -> the universal row gather (q_wrap_table.c:
+                 * char columns byte-permuted, misses null-filled); anything else
+                 * (sym -> column, ...) declines to the historic ray_at arms. */
+                next = q_table_at(cur, args[i]);
+                if (!next) next = ray_at_fn(cur, args[i]);
             } else {
                 /* vec/list — AND any mid-path atom, exactly as the old loop:
                  * gather -> ray_at_fn, which char-indexes string atoms
