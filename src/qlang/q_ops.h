@@ -39,8 +39,11 @@ typedef enum {
 typedef enum {
     QK_NONE = 0,        /* no value at this valence (deferred / not applicable) */
     QK_ENV,             /* reuse env builtin named `target` (pass-through/rename)*/
-    QK_FN               /* bespoke q-semantics wrapper: bind the row's fn per
+    QK_FN,              /* bespoke q-semantics wrapper: bind the row's fn per
                          * its arity/atomic fields (see q_recipe_t)             */
+    QK_QSRC             /* value is the q.q definition `.q.<target>`: skipped at
+                         * registry init (q.q loads after), installed by the
+                         * post-bootstrap q_registry_bind_qsrc pass             */
 } q_build_kind;
 
 /* Wrapper-fn carrier for the manifest rows.  A generic function-pointer type
@@ -71,6 +74,7 @@ typedef struct {
 #define QR_FN2(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   2, 0 }
 #define QR_FN2A(t, f) { QK_FN,   (t),  (q_wrap_fn_t)(f),   2, 1 }
 #define QR_FNV(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   0, 0 }
+#define QR_QSRC(t)    { QK_QSRC, (t),  NULL,               0, 0 }
 
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
  * build recipes (QR_* above).
