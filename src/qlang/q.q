@@ -24,6 +24,23 @@
 .q.scov:{cov[x;y]*count[x]%-1+count x}
 .q.mavg:{(x msum y)%x mcount y}
 
+/ ---- wave 3: the sort wave — every sort verb derives from the grade ----
+/ ref/asc.md: atom = already sorted (carries the RAY_STR atom too); 99h = dict AND keyed
+/ table, entries gathered by the value grade (the non-key-column rule; .Q.ft would sort a
+/ keyed table by its KEY cols).  No `s#: the attr-take arm takes longs only (PLAN.md).
+.q.asc:{$[0h>type x;x;99h=type x;(key x)[g]!(value x)g:iasc value x;x iasc x]}
+.q.desc:{$[0h>type x;x;99h=type x;(key x)[g]!(value x)g:idesc value x;x idesc x]}
+/ ref/rank.md: "the same as calling iasc twice on the list"
+.q.rank:{iasc iasc x}
+/ ref/xrank.md prints no source; bucket = floor(x*rank y % count y) reproduces all 5
+/ of its examples (4 xrank til 8/9, 7 xrank til 9, 3 xrank 1 37 5 4 0 3 / 1 7 5 4 0 3)
+.q.xrank:{(x*rank y) div count y}
+/ ref/asc.md: by the first column given, then the second within it = the grade of the named
+/ columns, then ONE gather.  y a SYMBOL updates in place, returns the name (set returns its
+/ target).  t@/:x throws 'domain on a bad column — (flip t)x misses silently and truncates.
+.q.xasc:{[x;y]$[-11h=type y;y set .q.xasc[x;get y];.Q.ft[{[x;t]t iasc flip x!t@/:x:$[0h>type x;1#x;x]}[x;];y]]}
+.q.xdesc:{[x;y]$[-11h=type y;y set .q.xdesc[x;get y];.Q.ft[{[x;t]t idesc flip x!t@/:x:$[0h>type x;1#x;x]}[x;];y]]}
+
 / ---- wave 3 (ref/cols.md) ----
 / lifted via .Q.ft (defined later, in dotq.q — a lambda resolves it at call time);
 / names pair with the unchanged column values, so a bad rename/reorder goes ragged
