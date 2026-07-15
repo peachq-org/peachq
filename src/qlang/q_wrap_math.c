@@ -121,7 +121,7 @@ ray_t* q_signum_wrap(ray_t* x) {
 }
 
 /* q `ceiling x` — least integer >= x, returned as a LONG (kdb `ceiling 2.1` is
- * 3j).  The QK_FLOOR twin: rayfall's `ceil` keeps f64, so this wrapper rounds
+ * 3j).  The q_floor_wrap twin: rayfall's `ceil` keeps f64, so this wrapper rounds
  * to i64 exactly like q_floor_wrap.  Ints/bools pass through; f64 null -> long
  * null. */
 ray_t* q_ceiling_wrap(ray_t* x) {
