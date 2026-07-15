@@ -964,14 +964,17 @@ static ray_t* q_remote_apply(ray_t* list) {
  *   name          sym   verb spelling
  *   lexclass      sym   `glyph / `kw_infix / `kw_prefix / `adverb (QLEX_*)
  *   monadic       bool  1b iff Q_OPS gives a build recipe at the monadic slot
- *                       (mon_kind != QK_NONE).  NB for the VARY prefix-keyword
- *                       verbs (ej/aj/wj/... — QK_ENV in the monadic slot) this
+ *                       (mon.kind != QK_NONE).  NB for the VARY prefix-keyword
+ *                       verbs (ej/aj/wj/... — QR_ENV in the monadic slot) this
  *                       means "resolvable in prefix/bracket position", NOT that
  *                       the verb is strictly arity-1; true arity is not modelled
- *                       in the manifest (a stage-1 `family`/arity concern).
+ *                       in the manifest.
  *   dyadic        bool  1b iff Q_OPS gives a build recipe at the dyadic slot
  *   deterministic bool  1b unless the verb's result is nondeterministic
  *   sideeffect    bool  1b iff evaluation performs an observable side effect
+ *   family        sym   structure-dispatch family (`atomic`map`aggregate`index
+ *                       `rowid`structural`irregular`none — q_ops.h vocabulary,
+ *                       FAMILY AUDIT in q_ops.c; pure metadata this stage)
  * The x argument (`.Q.ops[]` passes `::`) is ignored — the table is constant
  * per build, keyed only off the static manifest. */
 static const char* q_lexclass_name(q_lex_class c) {
@@ -995,10 +998,11 @@ static ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
     ray_t* dya  = ray_vec_new(RAY_BOOL, cap);
     ray_t* det  = ray_vec_new(RAY_BOOL, cap);
     ray_t* eff  = ray_vec_new(RAY_BOOL, cap);
-    ray_t* cols[6] = { name, lexc, mon, dya, det, eff };
-    for (int i = 0; i < 6; i++)
+    ray_t* fam  = ray_sym_vec_new(RAY_SYM_W64, cap);
+    ray_t* cols[7] = { name, lexc, mon, dya, det, eff, fam };
+    for (int i = 0; i < 7; i++)
         if (!cols[i] || RAY_IS_ERR(cols[i])) {
-            for (int j = 0; j < 6; j++)
+            for (int j = 0; j < 7; j++)
                 if (cols[j] && !RAY_IS_ERR(cols[j])) ray_release(cols[j]);
             return ray_error("wsfull", ".Q.ops: out of memory");
         }
@@ -1007,30 +1011,34 @@ static ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
         int64_t nm  = ray_sym_intern(ops[i].name, strlen(ops[i].name));
         const char* lc = q_lexclass_name(ops[i].lex);
         int64_t lci = ray_sym_intern(lc, strlen(lc));
-        uint8_t bm = ops[i].mon_kind  != QK_NONE;
-        uint8_t bd = ops[i].dyad_kind != QK_NONE;
+        uint8_t bm = ops[i].mon.kind  != QK_NONE;
+        uint8_t bd = ops[i].dyad.kind != QK_NONE;
         uint8_t bt = ops[i].deterministic ? 1 : 0;
         uint8_t be = ops[i].sideeffect ? 1 : 0;
+        int64_t fmi = ray_sym_intern(ops[i].family, strlen(ops[i].family));
         name = ray_vec_append(name, &nm);
         lexc = ray_vec_append(lexc, &lci);
         mon  = ray_vec_append(mon,  &bm);
         dya  = ray_vec_append(dya,  &bd);
         det  = ray_vec_append(det,  &bt);
         eff  = ray_vec_append(eff,  &be);
+        fam  = ray_vec_append(fam,  &fmi);
         if (!name || RAY_IS_ERR(name) || !lexc || RAY_IS_ERR(lexc) ||
             !mon || RAY_IS_ERR(mon) || !dya || RAY_IS_ERR(dya) ||
-            !det || RAY_IS_ERR(det) || !eff || RAY_IS_ERR(eff)) ok = 0;
+            !det || RAY_IS_ERR(det) || !eff || RAY_IS_ERR(eff) ||
+            !fam || RAY_IS_ERR(fam)) ok = 0;
     }
-    ray_t* built[6] = { name, lexc, mon, dya, det, eff };
+    ray_t* built[7] = { name, lexc, mon, dya, det, eff, fam };
     if (!ok) {
-        for (int j = 0; j < 6; j++)
+        for (int j = 0; j < 7; j++)
             if (built[j] && !RAY_IS_ERR(built[j])) ray_release(built[j]);
         return ray_error("wsfull", ".Q.ops: build failed");
     }
-    static const char* colnames[6] =
-        { "name", "lexclass", "monadic", "dyadic", "deterministic", "sideeffect" };
-    ray_t* t = ray_table_new(6);
-    for (int i = 0; i < 6; i++) {
+    static const char* colnames[7] =
+        { "name", "lexclass", "monadic", "dyadic", "deterministic", "sideeffect",
+          "family" };
+    ray_t* t = ray_table_new(7);
+    for (int i = 0; i < 7; i++) {
         if (!RAY_IS_ERR(t))               /* stop adding once errored... */
             t = ray_table_add_col(t, ray_sym_intern(colnames[i], strlen(colnames[i])), built[i]);
         ray_release(built[i]);            /* ...but always drop our ref (add_col retains) */
@@ -1104,7 +1112,7 @@ void q_builtins_register(void) {
         ray_env_bind(ray_sym_intern("count", 5), cv);
         ray_release(cv);
     }
-    /* `value` — env-bind the q wrapper (QK_VALUE manifest row) so a BARE `value`
+    /* `value` — env-bind the q wrapper (the q_value_wrap manifest row) so a BARE `value`
      * used as a HOF operand (`value each (::;+;-;*;%)`) resolves to q semantics,
      * not rayfall's dict-only native `value`.  Application heads still embed the
      * registry copy; both call q_value_wrap (single home).  Bound before
