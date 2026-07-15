@@ -341,6 +341,61 @@ int q_int_index_width(int8_t t) {
     }
 }
 
+/* Strict cast: cast-or-fail, TYPE-strict (an integral-valued float refuses);
+ * typed nulls pass through as sentinel payloads — value checks stay at the
+ * call site.  Accepted set = the q_int_index_width law: I64/I32/I16/U8 +
+ * int-backed temporal ATOMS; never sym/bool/float/structures.
+ * Returns 1 + *out, or 0 on refusal. */
+int q_strict_i64(ray_t* x, int64_t* out) {
+    if (!x || x->type >= 0) return 0;
+    switch (q_int_index_width((int8_t)-x->type)) {
+    case 8: *out = x->i64;          return 1;
+    case 4: *out = (int64_t)x->i32; return 1;
+    case 2: *out = (int64_t)x->i16; return 1;
+    case 1: *out = (int64_t)x->u8;  return 1;
+    default: return 0;
+    }
+}
+
+/* Float twin: F64/F32/DATETIME (f64-slot payloads) + the q_strict_i64 set. */
+int q_strict_f64(ray_t* x, double* out) {
+    if (!x || x->type >= 0) return 0;
+    if (x->type == -RAY_F64 || RAY_IS_TEMPORALF(-x->type)) { *out = x->f64; return 1; }
+    if (x->type == -RAY_F32) { *out = (double)(float)x->f64; return 1; }
+    int64_t v;
+    if (!q_strict_i64(x, &v)) return 0;
+    *out = (double)v;
+    return 1;
+}
+
+/* Throwing gates for TERMINAL sites (failure = error): NULL on success, else
+ * an owned 'type error carrying `what` — short site context, "verb: role".
+ * The silent probe form above is for dispatch sites (failure = next arm). */
+ray_t* q_i64_or_err(ray_t* x, int64_t* out, const char* what) {
+    return q_strict_i64(x, out) ? NULL : ray_error("type", what);
+}
+ray_t* q_f64_or_err(ray_t* x, double* out, const char* what) {
+    return q_strict_f64(x, out) ? NULL : ray_error("type", what);
+}
+
+/* Type-facts helpers (I64/I32/I16 only — vs/sv base-encode domain). */
+int q_is_int_atom(ray_t* x) {
+    return x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16);
+}
+int q_is_int_vec(ray_t* x) {
+    return x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16);
+}
+int64_t q_ivec_get(ray_t* v, int64_t i) {
+    const void* d = ray_data(v);
+    return v->type == RAY_I64 ? ((const int64_t*)d)[i]
+         : v->type == RAY_I32 ? (int64_t)((const int32_t*)d)[i]
+                              : (int64_t)((const int16_t*)d)[i];
+}
+int64_t q_iatom_val(ray_t* x) {
+    return x->type == -RAY_I64 ? x->i64
+         : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
+}
+
 int8_t q_cast_designator(ray_t* t, int* is_tok) {
     *is_tok = 0;
     if (!t) return 0;
@@ -461,21 +516,15 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
         if (x && x->type == RAY_U8)                                  /* byte vec */
             return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
         if (x && x->type == -RAY_U8) { char c = (char)x->u8; return ray_str(&c, 1); }
-        if (x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16)) {
-            int64_t v = (x->type == -RAY_I64) ? x->i64
-                      : (x->type == -RAY_I32) ? (int64_t)x->i32 : (int64_t)x->i16;
-            char c = (char)v; return ray_str(&c, 1);
+        if (q_is_int_atom(x)) {
+            char c = (char)q_iatom_val(x); return ray_str(&c, 1);
         }
-        if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
+        if (q_is_int_vec(x)) {
             int64_t n = ray_len(x);
             char* buf = (char*)malloc(n ? (size_t)n : 1);
-            if (!buf) return ray_error("wsfull", "$: out of memory");
-            for (int64_t i = 0; i < n; i++) {
-                int64_t v = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
-                          : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
-                          :                        (int64_t)((const int16_t*)ray_data(x))[i];
-                buf[i] = (char)v;
-            }
+            if (!buf) return ray_error("wsfull", "$: char cast");
+            for (int64_t i = 0; i < n; i++)
+                buf[i] = (char)q_ivec_get(x, i);
             ray_t* r = ray_str(buf, (size_t)n);
             free(buf);
             return r;
