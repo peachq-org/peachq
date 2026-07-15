@@ -8,13 +8,12 @@
  *      (name, valence) -> ray_t function value + q-surface provenance, by
  *      iterating q_ops_table().
  *
- * Scope = STAGE 2a: pass-through / rename / wrapper verbs only.  Type-dispatch
- * verbs (`! ? $ @ . _`... the polymorphic ones) and qSQL are OUT (2c / piece 3),
- * so they are absent here — a registry miss means "not resolvable at that
- * valence," exactly as today.  Deferred glyphs whose q semantics have NO clean
- * rayfall target (audited: no dyadic element-wise min/max for `&`/`|`, no
- * `flip`, no `reciprocal`, no `match`) carry QK_NONE at that valence rather
- * than a guessed binding. */
+ * Scope: every rostered q verb, including the type-dispatch glyphs (`! ? $ @ .
+ * _`, landed in 2c-2+).  A registry miss still means "not resolvable at that
+ * valence."  Cells whose q semantics have NO clean rayfall target stay QR_NONE
+ * rather than a guessed binding — currently `|` dyadic (element-wise max),
+ * monadic `%` (reciprocal glyph), monadic `$`/`@`/`.`/`^`, and the reserved
+ * `any`/`all` rows; qSQL forms are q_lower rewrites, not registry cells. */
 #ifndef Q_OPS_H
 #define Q_OPS_H
 
@@ -33,289 +32,57 @@ typedef enum {
     QLEX_ADVERB         /* / \ ' /: \: ':                                       */
 } q_lex_class;
 
-/* How the registry builds the value for one (row, valence).  QK_ENV reuses a
- * rayfall builtin by name (identity or rename); the QK_* wrappers are the
- * bespoke q-semantics ops whose canonical rayfall lowering name is the target
- * string (== != take drop). */
+/* How the registry builds the value for one (row, valence).  Three kinds only
+ * (the per-verb QK_* members were retired 2026-07-14 — rows now carry the
+ * wrapper FUNCTION POINTER directly, so adding a common verb is one manifest
+ * row + one wrapper body + one decl, with no enum member or switch case): */
 typedef enum {
     QK_NONE = 0,        /* no value at this valence (deferred / not applicable) */
     QK_ENV,             /* reuse env builtin named `target` (pass-through/rename)*/
-    QK_EQ,              /* q `=`  wrapper (element-wise char-str eq, else ==)    */
-    QK_NE,              /* q `<>` wrapper (element-wise char-str neq, else !=)   */
-    QK_TAKE,            /* q `#`  wrapper (arg-swap take)                        */
-    QK_DROP,            /* q `_`  wrapper (count-drop via range-take)            */
-    QK_EACH,            /* q `each` wrapper (rayfall map + vector collapse)      */
-    QK_MATCH,           /* q `~`  wrapper (recursive whole-value equivalence)    */
-    QK_FLOOR,           /* q monadic `_` wrapper (floor to LONG; rayfall keeps f64) */
-    QK_BANG,            /* q `x!y` wrapper (dict make over rayfall dict)         */
-    QK_KEY,             /* q `key`/monadic `!` wrapper (dict keys)               */
-    QK_VALUE,           /* q `value` wrapper (dict vals, collapsed)              */
-    QK_DISTINCT,        /* q `distinct`/monadic `?` wrapper (FIRST-OCCURRENCE
-                         * order; rayfall's distinct DAG path sorts)             */
-    QK_ROLL,            /* q `x?y` wrapper (find with kdb miss->count / roll /
-                         * deal / permute / pick / generate arms)                */
-    QK_RAND,            /* q `rand x` keyword == {first 1?x} (ref/rand.md):
-                         * list -> one random item, atom -> one random value of
-                         * y's type via the QK_ROLL generate arms.  The env
-                         * BINARY rayfall `rand` is untouched — the registry
-                         * cell is (name,valence)-keyed, never an env rebind.   */
-    QK_CAST,            /* q `t$x` wrapper (rayfall as + kdb float->int ROUNDING;
-                         * Tok string-parse and unknown designators deferred)    */
-    QK_AT,              /* q `f@x` wrapper (Apply At / Index At: callables
-                         * invoke unary, nouns index via q_apply_noun)           */
-    QK_DOT,             /* q `v . vx` wrapper (Apply / Index: rhs is the ARG
-                         * LIST — spread-call callables, depth-index nouns)      */
-    QK_MIN2,            /* q dyadic `&` wrapper (element-wise min / bool-and)     */
-    QK_NEG,             /* q `neg`/monadic `-` wrapper: negates a DATE's day
-                         * count PRESERVING the type (base ray_neg_fn rejects
-                         * temporals); non-date input passes through.  time/
-                         * timestamp arms are deferred with their datatypes.   */
-    QK_CUT,             /* q `cut` wrapper (int-atom chunk / int-vector cut)     */
-    QK_WITHIN,          /* q `within` wrapper (bounds check; base ray_within_fn
-                         * is vector-vals-only + width-blind, so atom vals
-                         * enlist and widths are guarded)                      */
-    /* ---- iterator keyword wrappers (wave-2 adverb completion) ---- */
-    QK_OVER,            /* q `f over x` == `f/x` (reduce/converge/do/while)     */
-    QK_SCANKW,          /* q `f scan x` == `f\x`                                */
-    QK_PRIORKW,         /* q `f prior x` == `(f':)x` (unary each-prior)         */
-    QK_DELTAS,          /* q `deltas x` == `(-':)x`                             */
-    QK_DIFFER,          /* q `differ x` == `not(~':)x`                          */
-    QK_TIL,             /* q `til` wrapper: accepts a boolean (`til 1b`->,0);
-                         * base ray_til_fn is int-only.  Delegates otherwise.   */
-    QK_WHERE,           /* q `where`/monadic `&` wrapper: an integer vector
-                         * repeats each index i, x[i] times (`where 2 3 1` ->
-                         * 0 0 1 1 1 2); the boolean form delegates to base.     */
-    QK_REV,             /* q `reverse x` / monadic `|` wrapper: a dict reverses
-                         * ENTRIES (keys and values together, ref/reverse.md);
-                         * everything else delegates to base reverse.           */
-    QK_JOIN,            /* q `x,y` wrapper: table , record-dict appends the
-                         * record (upsert semantics, ref/join.md); every other
-                         * operand pair delegates to base concat unchanged.     */
-    QK_VS,              /* q `x vs y` — split / base-decompose / byte-encode
-                         * (string split, sym split, int base decompose, byte
-                         * big-endian encode, bit decompose)                    */
-    QK_SV,              /* q `x sv y` — join / base-compose / byte-decode
-                         * (inverse of vs)                                      */
-    /* ---- Wave 5 aggregate / uniform family ---- */
-    QK_SUMS,            /* running sum  (nulls -> 0)                            */
-    QK_PRDS,            /* running product (nulls -> 1)                         */
-    QK_PRD,             /* q `prd x` — product aggregate (the multiply-over
-                         * fold, ref/prd.md): nulls -> 1s; bool vec -> int
-                         * (0i/1i); list-of-lists element-wise; dict over the
-                         * value list; table -> per-column dict               */
-    QK_MAXS,            /* running max (nulls skipped; also runs over chars)    */
-    QK_MINS,            /* running min (nulls skipped; also runs over chars)    */
-    QK_AVGS,            /* running average (nulls excluded) -> float            */
-    QK_RATIOS,          /* pairwise ratio: r[0]=x[0], r[i]=x[i]%x[i-1]          */
-    QK_WSUM,            /* weighted sum:  x wsum y == sum x*y (nulls excluded)  */
-    QK_WAVG,            /* weighted avg:  (sum x*y) % sum x (nulls excluded)    */
-    QK_COV,             /* population covariance                                */
-    QK_SCOV,            /* sample covariance (n-1)                              */
-    /* ---- Wave 5 sliding m-windows + ema (dyadic infix) ---- */
-    QK_MSUM,            /* N msum x  — sliding sum (nulls -> 0)                 */
-    QK_MAVG,            /* N mavg x  — sliding average (nulls excluded)        */
-    QK_MMAX,            /* N mmax x  — sliding max (nulls skipped)             */
-    QK_MMIN,            /* N mmin x  — sliding min (nulls skipped)             */
-    QK_MCOUNT,          /* N mcount x— sliding count of non-null               */
-    QK_MDEV,            /* N mdev x  — sliding population std deviation         */
-    QK_EMA,             /* a ema x   — exponential moving average               */
-    /* ---- list verbs (feat/q-list-verbs) ---- */
-    QK_FILL,            /* q `x^y`   — fill nulls in y with x (atom/vector)     */
-    QK_ROTATE,          /* q `n rotate x` — cyclic shift left (neg = right)     */
-    QK_SUBLIST,         /* q `n sublist x` — first/last n, or i j slice         */
-    QK_NEXT,            /* q `next x` — shift left, null-fill vacated tail       */
-    QK_PREV,            /* q `prev x` — shift right, null-fill vacated head      */
-    /* ---- IPC client verbs (feat/q-ipc-client, Phase D) ---- */
-    QK_HOPEN,           /* q `hopen y` — normalize int|string|(conn;timeout) into
-                         * the `.ipc.open` "host:port[:user:password]" string form
-                         * and connect.  Returns a 1-BASED q handle (raw poll id + 1):
-                         * kdb reserves 0 (console) and signs the handle for async,
-                         * but openq's raw selector ids START at 0, so the q layer
-                         * offsets by 1 and translates back at every handle op.      */
-    QK_HCLOSE,          /* q `hclose h` — translate the 1-based q handle back to the
-                         * raw poll id and route to `.ipc.close`.                    */
-    /* ---- null test (feat/q-atomic-extend) ---- */
-    QK_NULL,            /* q `null x` — atomic nil? (broadcasts over vectors +
-                           nested lists at every depth), homogeneous top-level
-                           bool-atom run collapsed to a bool vector             */
-    /* ---- lists quick-wins (feat/q-list-quick-wins) ---- */
-    QK_RAZE,            /* q `raze x` — base ray_raze_fn plus the kdb atom arm
-                         * (`raze 42` -> ,42; ref/raze.md "atom returned as a
-                         * list")                                               */
-    QK_FILLS,           /* q `fills x` — forward-fill nulls with the last non-
-                         * null (the `^\` fill-scan, ref/fill.md); numeric +
-                         * sym vectors, leading nulls stay null                 */
-    QK_XPREV,           /* q `n xprev x` — shift x by n items (pos = prev-by-n,
-                         * neg = next-by-|n|; ref/next.md), null-filling the
-                         * vacated end; string atoms shift chars filling ' '    */
-    QK_IN,              /* q `x in y` — membership (ref/in.md): typed-vector y
-                         * is left-atomic; generic-list y tests WHOLE-x item
-                         * membership (rank-sensitive, no iteration through x)  */
-    /* ---- string search family (feat/q-string-fns) ---- */
-    QK_LIKE,            /* q `x like p` — glob match sym/str atom|vector -> bool
-                         * (reuses ray_like_fn); dict x -> bool vals, rebuilt.   */
-    QK_SS,              /* q `s ss p` — string search: 0-based start indices of
-                         * every (overlapping) fixed-width glob match of p in s. */
-    QK_SSR,             /* q `ssr[s;p;r]` — search-and-replace every match of p
-                         * in s with r (a string, or a fn applied to each match) */
-    /* ---- set operations (feat/q-setops) ---- */
-    QK_UNION,           /* q `x union y` == `distinct x,y` (ref/union.md) —
-                         * wrapper because rayfall union KEEPS x-duplicates
-                         * (only dedups y against x); q dedups the whole join. */
-    QK_INTER,           /* q `x inter y` — items of x in y, x-dups kept
-                         * (ref/inter.md).  rayfall `sect` IS this for lists,
-                         * but returns a WRONG-shaped dict for dict operands
-                         * (kdb returns the common VALUES as a list), so the
-                         * wrapper guards dict/table operands with 'nyi and
-                         * delegates lists to ray_sect_fn. */
-    QK_CROSS,           /* q `x cross y` == {raze x,/:\:y} (ref/cross.md) —
-                         * Cartesian product wrapper composing item access +
-                         * q join (rayfall concat); no cartesian primitive in
-                         * rayfall.  String (char-items) and dict/table cross
-                         * are deferred cells ('nyi). */
-    /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm, no
-     * rayfall counterpart (rayfall has exp/log/sqrt but not the trig set).
-     * Each wrapper handles ONE atom; RAY_FN_ATOMIC broadcasts over vectors and
-     * nested lists (like q_sqrt/floor).  Float results route through make_f64,
-     * so the sentinel-null float model applies: null in -> null out, and any
-     * non-finite (NaN/±Inf) canonicalizes to 0n (so `sin 1%0` -> 0n). ---- */
-    QK_SIN,             /* q `sin x`  — sine (radians), f64                     */
-    QK_COS,             /* q `cos x`  — cosine (radians), f64                   */
-    QK_TAN,             /* q `tan x`  — tangent (radians), f64                  */
-    QK_ASIN,            /* q `asin x` — arcsine (radians), f64; |x|>1 -> 0n     */
-    QK_ACOS,            /* q `acos x` — arccosine (radians), f64; |x|>1 -> 0n   */
-    QK_ATAN,            /* q `atan x` — arctangent (radians), f64               */
-    QK_RECIPROCAL,      /* q `reciprocal x` — 1%x as float (recip 0 -> 0n under
-                         * the single-null model; kdb's 0w is a deferred cell)  */
-    QK_SIGNUM,          /* q `signum x` — sign as INT (i32): null|neg -> -1i,
-                         * zero -> 0i, positive -> 1i                           */
-    QK_CEILING,         /* q `ceiling x` — least integer >= x, as LONG (mirrors
-                         * QK_FLOOR: float->i64, int passes through)            */
-    /* ---- dyadic atomic math (feat/q-math-parse-display) — libm wrappers,
-     * RAY_FN_ATOMIC broadcast over both operands (eval's binary atomic map). */
-    QK_XEXP,            /* q `x xexp y` — x to the power y as FLOAT, computed
-                         * as exp(y*log x) (the ref/exp.md-pinned identity):
-                         * null operand or negative x -> 0n; overflow/±inf
-                         * canonicalize to 0n (single-null model; kdb 0w)      */
-    QK_XLOG,            /* q `x xlog y` — base-x log of y as FLOAT
-                         * (ref/log.md): null y -> 0n; y<0 -> 0n; y=0 -> 0n
-                         * (kdb -0w, documented divergence); char args read
-                         * as their code points (`"A" xlog "C"`)               */
-    /* ---- sort / bucket family (feat/q-sort-rank) ---- */
-    QK_XBAR,            /* q `width xbar list` — interval bucketing.  ARG-SWAP
-                         * wrapper: rayfall ray_xbar_fn is (col, bucket) but q
-                         * spells it (bucket, col), so the wrapper flips.
-                         * Numeric (int/float bucket) + temporal cols reuse the
-                         * base kernel; dict/keyed-table/qSQL forms deferred. */
-    QK_ASC,            /* q `asc x` — ascending sort.  Flat vectors reuse
-                         * ray_asc_fn (VALUE is kdb-true, but rayfall has no
-                         * sorted `s#` attribute so attribute display is a
-                         * deferred divergence); a DICT arm sorts by value.
-                         * mixed-list-by-type / table / keyed-table deferred. */
-    QK_DESC,           /* q `desc x` — descending sort (mirror of QK_ASC; desc
-                         * carries no `s#` attribute in kdb either, so flat
-                         * vectors are exactly kdb-true).  DICT arm sorts by
-                         * value descending. */
-    QK_IASC,           /* q `iasc x` / monadic `<` — grade up.  Flat vectors
-                         * reuse ray_iasc_fn; a DICT arm returns the keys in
-                         * ascending-value order. */
-    QK_IDESC,          /* q `idesc x` / monadic `>` — grade down (mirror). */
-    /* ---- table verbs (feat/q-table-verbs) ---- */
-    QK_FLIP,            /* q `flip x` / monadic `+` — transpose: table<->dict,
-                         * list-of-lists transpose (atom broadcast).  Keyed
-                         * tables and atoms are 'rank cells. */
-    QK_KEYS,            /* q `keys x` — primary key column names (empty sym
-                         * vector when unkeyed); table by value or by name.   */
-    QK_XKEY,            /* q `x xkey y` — set key columns: reorder x first,
-                         * enkey count x (reuses q_enkey); by-name rebinds.   */
-    QK_XCOL,            /* q `x xcol y` — rename columns (sym vector renames
-                         * the first n; dict / all-key keyed map renames
-                         * selected; unknown name -> 'length).                */
-    QK_XCOLS,           /* q `x xcols y` — reorder columns, x first.          */
-    QK_XASC,            /* q `x xasc y` — sort table ascending by columns.
-                         * ARG-SWAP over base ray_xasc_fn (QK_XBAR precedent);
-                         * by-name sorts the global in place.  No `s#`
-                         * attribute (deferred divergence, like QK_ASC).      */
-    QK_XDESC,           /* q `x xdesc y` — descending mirror of QK_XASC.      */
-    QK_XGROUP,          /* q `x xgroup y` — key by x; remaining columns become
-                         * per-group nested lists (first-occurrence order).   */
-    QK_UNGROUP,         /* q `ungroup x` — inverse: explode nested list
-                         * columns, repeating simple cells ('length on ragged
-                         * rows).  Keyed tables flatten first.                */
-    QK_INSERT,          /* q `x insert y` — append rows to the NAMED global
-                         * table (kdb insert is by reference); unbound name +
-                         * table payload creates it; keyed key collision ->
-                         * 'insert; returns inserted row indices.             */
-    QK_UPSERT,          /* q `x upsert y` — append / keyed update-or-append;
-                         * value target returns the table, named target
-                         * rebinds and returns the name.                      */
-    QK_EXCEPT,           /* q `x except y` — table rows of x not in y (row
-                         * membership); non-table operands delegate to base
-                         * ray_except_fn (the pre-wave QK_ENV pass-through).  */
-    /* ---- q join family (feat/q-joins-rebuild) — dyadic infix keywords.
-     * Matching is ALWAYS the engine's (ray_left_join_fn / ray_asof_join_fn);
-     * the wrappers prepare rowid key tables and gather-assemble columns.
-     * ej / the aj family / wj / wj1 are env-bound VARY prefixes (ssr
-     * precedent), not QK rows. */
-    QK_LJ,              /* q `x lj y`  — left join on keyed rhs (q3.0: matched
-                         * y cells win wholesale, nulls included)             */
-    QK_LJF,             /* q `x ljf y` — lj, but y nulls keep x's cell        */
-    QK_IJ,              /* q `x ij y`  — inner join (matched x rows only)     */
-    QK_IJF,             /* q `x ijf y` — ij with the ljf fill rule            */
-    QK_UJ,              /* q `x uj y`  — column union / keyed upsert merge    */
-    QK_UJF,             /* q `x ujf y` — keyed merge with the fill rule       */
-    QK_PJ,              /* q `x pj y`  — plus join (adds matched numeric
-                         * columns; new columns zero-filled)                  */
-    QK_ASOF,            /* q `t asof d` — prevailing values as of d's time(s) */
-    QK_SETG,           /* q `nam set y` — assign a global through a sym handle
-                         * (`a / `.ctx / `. context restore); returns nam.
-                         * File symbols (`:path) are the file-I/O wave: 'nyi. */
-    /* ---- File Text (feat/q-file-text, ref/file-text.md) ---- */
-    QK_FILETEXT,        /* q `x 0: y` — dispatch on x's shape: file symbol ->
-                         * Save Text; len-1 string -> Prepare Text; len-3/4
-                         * "K f [*] r" string -> Key-Value pairs; (types;delim
-                         * [;flag]) -> Load CSV; (types;widths) -> Load Fixed.
-                         * Text forms ONLY (binary 1:/2: are an owner-ruled
-                         * non-goal).                                          */
-    QK_HSYM,            /* q `hsym x` — sym atom/vector -> file symbol (prefix
-                         * ':' unless already present; ref/hsym.md).           */
-    QK_READ0,           /* q `read0 x` — file sym -> list of line strings;
-                         * (f;o) -> chars from o; (f;o;n) -> n chars.  Console
-                         * / fifo handles deferred 'nyi (ref/read0.md).        */
-    /* ---- environment variables (feat/q-getenv-setenv, ref/getenv.md) ---- */
-    QK_GETENV,          /* q `getenv x` — x is a SYMBOL naming an environment
-                         * variable; returns its value as a string, "" when
-                         * unset (kdb-true).  Reuses the base ray_getenv_fn;
-                         * the wrapper only coerces the sym arg to the -RAY_STR
-                         * the C primitive wants (hence a wrapper, not QK_ENV). */
-    QK_SETENV,          /* q `x setenv y` — set the env var named by symbol x to
-                         * string y; returns generic null (kdb prints nothing).
-                         * Reuses base ray_setenv_fn: coerce the sym name to a
-                         * string, discard the echoed value, return ::.         */
-    QK_SUM,             /* q `sum x` — rayfall sum is a typed-vector aggregate;
-                         * q ALSO sums the ITEMS of a boxed list (`sum(d;t)` ->
-                         * timestamps, ref/file-text.md Load Fixed).  List arm
-                         * folds ray_add_fn; other inputs pass to ray_sum_fn.  */
-    QK_ATTR             /* q `attr x` — read the column attribute as a SINGLE
-                         * symbol letter (`` ` ``/`s`/`u`/`g`/`p`), collapsing the
-                         * engine's `.attr.get` full-name sym vector.  Atoms and
-                         * unattributed vectors return the empty symbol.  See the
-                         * set-attribute arm on the `#` wrapper (q_take_wrap).   */
+    QK_FN               /* bespoke q-semantics wrapper: bind the row's fn per
+                         * its arity/atomic fields (see q_recipe_t)             */
 } q_build_kind;
 
+/* Wrapper-fn carrier for the manifest rows.  A generic function-pointer type
+ * so this header stays free of runtime types (ray_t) for the lexer's sake;
+ * q_registry.c casts back to the exact ray_{unary,binary,vary}_fn signature
+ * selected by `arity` before binding (round-tripping a function pointer
+ * through another function-pointer type is well-defined C). */
+typedef void (*q_wrap_fn_t)(void);
+
+/* One (row, valence) build recipe.  `target` is the rayfall env name (QK_ENV)
+ * or the canonical rayfall LOWERING name for a wrapper (QK_FN) — the aux-name
+ * the compiler/query DAG route on (RAY_FN_Q_LOWER); NULL when QK_NONE. */
+typedef struct {
+    q_build_kind kind;
+    const char*  target;
+    q_wrap_fn_t  fn;      /* QK_FN: the wrapper body (decl: q_registry_internal.h) */
+    uint8_t      arity;   /* QK_FN: 1 = ray_unary_fn, 2 = ray_binary_fn, 0 = vary  */
+    uint8_t      atomic;  /* QK_FN: build with RAY_FN_ATOMIC (eval auto-broadcast) */
+} q_recipe_t;
+
+/* Row-recipe constructors — the manifest's whole build vocabulary.
+ * A = RAY_FN_ATOMIC (eval broadcasts over vectors/structures; wrappers
+ * without it drive their own iteration or are shape-changing). */
+#define QR_NONE       { QK_NONE, NULL, NULL,               0, 0 }
+#define QR_ENV(t)     { QK_ENV,  (t),  NULL,               0, 0 }
+#define QR_FN1(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   1, 0 }
+#define QR_FN1A(t, f) { QK_FN,   (t),  (q_wrap_fn_t)(f),   1, 1 }
+#define QR_FN2(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   2, 0 }
+#define QR_FN2A(t, f) { QK_FN,   (t),  (q_wrap_fn_t)(f),   2, 1 }
+#define QR_FNV(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   0, 0 }
+
 /* One manifest row: a q verb name, its lexical class, and its monadic/dyadic
- * build recipes.  `*_target` is the rayfall env name (QK_ENV) or the canonical
- * lowering name for a wrapper (QK_EQ/NE/TAKE/DROP), or NULL when the kind is
- * QK_NONE.
+ * build recipes (QR_* above).
  *
  * `adverb_hof` (adverb rows only) — the rayfall higher-order function the q
  * adverb IS: `'`(each)->map, `/`(over)->fold, `\`(scan)->scan.  q adverbs are
  * NOT bespoke objects; in 2b `+/` lowers to a projection of rayfall `fold` over
  * `+`.  NULL for non-adverb rows, and for adverbs whose HOF mapping is deferred
- * (each-right/left/prior `/: \: ':` — no clean rayfall equivalent yet).
+ * (each-prior `':` — no clean rayfall equivalent yet).
  *
  * `deterministic` / `sideeffect` — introspection metadata (feat/q-ops-
- * introspection), exposed verbatim as the like-named `.oq.ops[]` columns.
+ * introspection), exposed verbatim as the like-named `.Q.ops[]` columns.
  * Every row carries both explicitly (the build's -Wmissing-field-initializers
  * forbids relying on a zero default); the AUDIT block in q_ops.c is the roster
  * of the non-default rows and the rationale:
@@ -324,19 +91,34 @@ typedef enum {
  *   sideeffect    = 1 iff evaluation performs an observable side effect (global
  *                   assignment, table mutation, IPC, `system`, console/file
  *                   I/O); 0 otherwise.
- * The generated verb×structure grid (tools/opsmatrix-gen.py) drives ONLY the
- * `deterministic AND NOT sideeffect` rows, so both flags stay pure metadata —
- * no verb behaviour depends on them. */
+ * Both flags stay pure metadata — no verb behaviour depends on them.
+ *
+ * `family` — the verb's structure-dispatch family (actionable-plans/
+ * 2026-07-15-uniform-structure-dispatch.md §2/§3), doc-verified per verb
+ * against qdocs at classification time and exposed as the `.Q.ops[]` `family`
+ * column.  PURE METADATA in this stage: nothing dispatches on it yet (stage 1
+ * of the spec is the first consumer).  Vocabulary (the FAMILY AUDIT block in
+ * q_ops.c is the classification roster + border rulings):
+ *   atomic     L1: broadcast elementwise, recursing through structure
+ *   map        L2: uniform, length-preserving; keys/columns preserved
+ *   aggregate  L3: reducing; structure discarded (agg d = agg value d)
+ *   index      L4: index-lift (op t = t @ op til count t; dicts on entries)
+ *   rowid      row-identity: needs row equality/ordering (engine kernels)
+ *   structural defines/inspects the structures themselves (bespoke by nature)
+ *   irregular  documented behaviour deviates from its family's law (catalogue)
+ *   none       no structure semantics (I/O, iterators, apply, codecs, RNG)
+ * A row carries ONE family (the deterministic-flag precedent); when valences
+ * diverge, it reflects the valence the structure-dispatch spec consumes, and
+ * the divergence is noted at the row. */
 typedef struct {
     const char*  name;
     q_lex_class  lex;
-    q_build_kind mon_kind;
-    const char*  mon_target;
-    q_build_kind dyad_kind;
-    const char*  dyad_target;
+    q_recipe_t   mon;           /* monadic build recipe */
+    q_recipe_t   dyad;          /* dyadic build recipe  */
     const char*  adverb_hof;
     uint8_t      deterministic; /* 0 = nondeterministic result (see above) */
     uint8_t      sideeffect;    /* 1 = performs an observable side effect  */
+    const char*  family;        /* structure-dispatch family (see above)   */
 } q_op_t;
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
