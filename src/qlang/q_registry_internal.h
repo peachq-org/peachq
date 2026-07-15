@@ -214,6 +214,14 @@ int8_t q_cast_designator(ray_t* t, int* is_tok);              /* used by: io */
 const char* q_type_qname(int8_t t);                           /* used by: table */
 ray_t* q_cast_to(int8_t tag, ray_t* x);                       /* used by: agg */
 int    q_int_index_width(int8_t t);                           /* used by: table */
+int    q_strict_i64(ray_t* x, int64_t* out);                  /* strict-cast probe (type-judgment home) — used by: applyiter, bang, io, list */
+int    q_strict_f64(ray_t* x, double* out);                   /* used by: list */
+ray_t* q_i64_or_err(ray_t* x, int64_t* out, const char* what);/* throwing gate — used by: agg, io, list */
+ray_t* q_f64_or_err(ray_t* x, double* out, const char* what); /* f64 twin (no gate site yet) */
+int q_is_int_atom(ray_t* x);                                  /* used by: io, table */
+int q_is_int_vec(ray_t* x);                                   /* used by: io, list */
+int64_t q_ivec_get(ray_t* v, int64_t i);                      /* used by: io, list */
+int64_t q_iatom_val(ray_t* x);                                /* used by: io, list, table */
 ray_t* q_tok_to(int8_t tag, ray_t* x);                        /* used by: io */
 
 /* ---- defined in q_wrap_io.c ---- */
@@ -245,10 +253,6 @@ ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: regist
 ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
 ray_t* q_dict_vals_vec(ray_t* d, int* owned);                 /* used by: list */
 int q_is_null_sym(ray_t* x);                                  /* used by: agg */
-int q_is_int_atom(ray_t* x);                                  /* used by: io */
-int q_is_int_vec(ray_t* x);                                   /* used by: io */
-int64_t q_ivec_get(ray_t* v, int64_t i);                      /* used by: io, list */
-int64_t q_iatom_val(ray_t* x);                                /* used by: agg, io, list */
 ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io */
 
 /* ---- defined in q_wrap_table.c ---- */
