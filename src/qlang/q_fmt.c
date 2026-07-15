@@ -1,6 +1,4 @@
-/* q_fmt — see q_fmt.h.  The start of a q-correct value formatter (the outputter
- * that will eventually back q's `.Q.s`).  It renders int vectors, symbol atoms
- * and general lists q-style and delegates everything else to rayforce's ray_fmt. */
+/* q_fmt — the q-style value formatter (q_fmt.h); non-q shapes -> ray_fmt. */
 #include "qlang/q_fmt.h"
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
@@ -9,8 +7,6 @@
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
 #include "core/ipc.h"      /* ray_ipc_current_handle — handler console write-through */
 
-/* inline dict display for parse-tree clauses (defined below) */
-static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz);
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
 #include <string.h>
 #include <stdio.h>
@@ -20,52 +16,29 @@ static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz);
 #include <stdbool.h>
 #include <math.h>
 
-/* ---- `\P` display precision (single-home: this is the ONLY reader) --------
- * kdb's `\P n` sets the number of significant digits shown when a float is
- * converted to a string (default 7, range [0,17]; 0 = maximum = 17).  The syscmd
- * handler (q_sys.c h_P) is the sole writer via q_fmt_set_prec; q_float_tok is the
- * sole reader.  q_runtime_create resets it to the default per runtime so a
- * `\P 0` in one .qcmd file never leaks into the next (fresh-per-file runtime). */
+/* `\P n` float precision (default 7, 0=max 17); writer q_sys.c h_P, reader q_float_tok. */
 #define Q_PRINT_PREC_DEFAULT 7
 static int g_print_prec = Q_PRINT_PREC_DEFAULT;
 
 void q_fmt_set_prec(int p) { g_print_prec = p; }
 int  q_fmt_prec(void)      { return g_print_prec; }
 
-/* The verb characters — a sym atom of one of these (or the generic null `::`)
- * prints bare; every other sym keeps its leading backtick.  Same split the
- * retired q_ast_fmt made between verbs/null and names/sym-literals. */
-static const char Q_VERBS[] = ":+-*%!&|<>=~,^#_$?@.";
+/* Name-ref syms of these chars print bare (kdb `(/;+)`, basics/parsetrees.md). */
+static const char Q_VERBS[] = ":+-*%!&|<>=~,^#_$?@./\\'";
 
 static int q_sym_bare(const char* nm, size_t l) {
     if (l == 1 && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
-    /* monadic-marked verbs print bare too: +: #: |: — and :: (null/assign) */
     if (l == 2 && nm[1] == ':' && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
     return 0;
 }
 
-/* ---- console output emitter: THE single write path -------------------------
- *
- * Every renderer below writes its OUTPUT through this emitter (qe_*); token
- * producers (q_int_tok, q_cell, …) still render into local scratch, which the
- * renderer then emits.  q_fmt pushes a plain (unclipped) target over the
- * caller's buffer; q_fmt_console pushes a CLIP-armed target that applies the
- * `\c rows cols` console rule (golden spec,
- * actionable-plans/2026-07-13-console-clip.md, owner-ratified):
- *
- *   width  — a display line longer than cols-1 chars keeps its first cols-3
- *            chars and gets `..` at columns cols-2,cols-1.  Mid-token cuts are
- *            correct: the rule is fixed-column and type-blind (ints, floats,
- *            guids, strings, syms all clip at the same dot column).
- *   height — a display of more than rows-2 lines shows its first rows-3 lines
- *            then a bare `..` row (rows-2 lines total).
- *
- * ALL clip logic lives in qe_putc + qe_flush_line; renderer loops may consult
- * qe_done() / qe_line_done() for an OPTIONAL early exit (the perf win: a huge
- * value never renders in full) — correctness never depends on a renderer
- * cooperating, because overflow chars are counted-then-swallowed here.
- * Recursive q_fmt calls (element renders into local scratch) push a nested
- * plain target, so the clip applies only to the OUTERMOST console render. */
+/* ---- console emitter (qe_*): THE single write path.  q_fmt = plain target;
+ * q_fmt_console = the one CLIP-armed target with the `\c rows cols` rule
+ * (2026-07-13 golden spec): width — over cols-1 keeps cols-3 chars + `..`
+ * (fixed-column, type-blind); height — over rows-2 lines shows rows-3 + a
+ * bare `..` row.  All clip logic is in qe_putc/qe_flush_line; early exits
+ * are OPTIONAL (overflow is counted-then-swallowed); only the OUTERMOST
+ * console render clips. */
 
 typedef struct {
     char*  buf;   /* caller-owned output buffer (NUL-terminated throughout) */
@@ -79,8 +52,6 @@ static qe_tgt g_qe[QE_MAX];
 static int    g_qe_n;          /* stack depth; deeper-than-QE_MAX renders empty */
 static qe_tgt g_qe_void;       /* overflow sink (buf NULL — all writes no-op) */
 
-/* Clip state for the single armed target (q_fmt_console is not reentrant —
- * guarded by g_clip_active). */
 static struct {
     int32_t rows, cols;   /* live `\c` size (already clamped to [10,2000]) */
     int32_t nlines;       /* completed (flushed) display lines */
@@ -104,7 +75,6 @@ static void qe_push(char* buf, size_t cap, int clip) {
     if (buf && cap > 0) buf[0] = '\0';
 }
 
-/* Raw bounded write into a target (silent truncate — snprintf-like). */
 static void qe_raw(qe_tgt* t, const char* s, size_t n) {
     if (!t->buf || t->cap == 0) return;
     size_t avail = t->cap - 1 - t->pos;
@@ -114,7 +84,6 @@ static void qe_raw(qe_tgt* t, const char* s, size_t n) {
     t->buf[t->pos] = '\0';
 }
 
-/* Flush the buffered clip line into the target, applying the WIDTH rule. */
 static void qe_flush_line(qe_tgt* t) {
     if (g_clip.llog > (size_t)(g_clip.cols - 1)) {
         qe_raw(t, g_clip.line, (size_t)(g_clip.cols - 3));
@@ -137,10 +106,7 @@ static void qe_putc(char c) {
     if (g_clip.stop) return;
     if (c == '\n') {
         if (g_clip.nlines + 1 >= g_clip.rows - 2) {
-            /* Line rows-2 just completed AND more content follows (q_fmt output
-             * never ends in '\n', so a '\n' means another line is coming): the
-             * display is taller than rows-2 — this last line becomes the bare
-             * `..` row and everything else is swallowed. */
+            /* output never ends in '\n', so more follows: this line becomes `..` */
             g_clip.llen = g_clip.llog = g_clip.ltrail = 0;
             qe_raw(t, "..", 2);
             g_clip.stop = 1;
@@ -176,21 +142,14 @@ static void qe_printf(const char* fmt, ...) {
     qe_putn(tmp, (size_t)n);
 }
 
-/* Would `need` more chars fit?  Unclipped: the historical whole-token guard
- * (pos + need + 1 <= cap).  Clipped: only the height stop matters — the width
- * rule replaces buffer-fit token skipping. */
+/* Fits? unclipped: whole-token buffer guard; clipped: only the height stop. */
 static int qe_fits(size_t need) {
     qe_tgt* t = qe_top();
     if (t->clip) return !g_clip.stop;
     return t->buf && t->pos + need + 1 <= t->cap;
 }
 
-/* OPTIONAL early-exit probes (armed target only — unclipped rendering keeps
- * its historical write-nothing-when-full loop behaviour byte-for-byte).
- * qe_done: no further output can change the display (height cap hit).
- * qe_line_done: no further SAME-LINE output can change it (line overflowed).
- * qe_line_done must NOT be used by renderers that later qe_trim the line — a
- * trailing-space overflow can be trimmed back under the width. */
+/* qe_done: height cap hit; qe_line_done: line over width — never before qe_trim. */
 static int qe_done(void) {
     qe_tgt* t = qe_top();
     return t->clip && g_clip.stop;
@@ -201,13 +160,11 @@ static int qe_line_done(void) {
            (g_clip.stop || g_clip.llog > (size_t)(g_clip.cols - 1));
 }
 
-/* Append `s` left-padded to width `w`. */
 static void qe_pad(const char* s, int w) {
     int l = (int)strlen(s);
     for (int i = 0; i < w; i++) qe_putc(i < l ? s[i] : ' ');
 }
 
-/* Trim trailing spaces off the current line (table/matrix interior lines). */
 static void qe_trim(void) {
     qe_tgt* t = qe_top();
     if (!t->clip) {
@@ -229,18 +186,13 @@ static void qe_pop(void) {
     g_qe_n--;
 }
 
-/* Width-sizing row budget: when the top target is clip-armed, column sizing
- * must scan only rows that can possibly be shown (spec §1.4 — a huge table is
- * never scanned in full just to size columns).  0 = unarmed, scan all rows. */
+/* Clip-armed row budget for column sizing (spec §1.4); 0 = all rows. */
 static int64_t qe_clip_rows(void) {
     qe_tgt* t = qe_top();
     return t->clip ? (int64_t)g_clip.rows : 0;
 }
 
-/* Format a -RAY_SYM atom: verbs/null bare, everything else backticked.
- * A DATA sym (Q_ATTR_QUOTED, 0x20 — see the parse-tree probe below) always
- * keeps its backtick, so the `` `. `` handle (q namespaces) renders kdb-true
- * instead of bare-verb `.`; name-ref/verb heads stay bare. */
+/* Sym atom: verb/null name-refs bare, else backticked; a DATA sym (Q_ATTR_QUOTED) never bare. */
 static void qe_sym(ray_t* val) {
     ray_t* s = ray_sym_str(val->i64);
     const char* nm = ray_str_ptr(s);
@@ -251,9 +203,6 @@ static void qe_sym(ray_t* val) {
     ray_release(s);
 }
 
-/* rayforce's formatter, captured as a string — the fallback for values q_fmt
- * doesn't yet render q-style; its output is post-filtered through the emitter
- * (so the console clip applies without touching frozen src/lang/format.c). */
 static void qe_ray_fallback(ray_t* val) {
     ray_t* s = ray_fmt(val, 0);
     if (s && !RAY_IS_ERR(s) && s->type == -RAY_STR)
@@ -261,8 +210,6 @@ static void qe_ray_fallback(ray_t* val) {
     if (s && !RAY_IS_ERR(s)) ray_release(s);
 }
 
-/* Scratch twin of qe_ray_fallback for the token producers (q_date_tok & co.)
- * that render into a caller-local buffer rather than the emitter target. */
 static void ray_fallback(ray_t* val, char* buf, size_t bufsz) {
     ray_t* s = ray_fmt(val, 0);
     if (s && !RAY_IS_ERR(s) && s->type == -RAY_STR) {
@@ -277,7 +224,6 @@ static void ray_fallback(ray_t* val, char* buf, size_t bufsz) {
 void q_fmt(ray_t* val, char* buf, size_t bufsz);   /* fwd */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);   /* fwd (impl at EOF) */
 
-/* ---- q console sink (see q_fmt.h) ---------------------------------------- */
 static char*  g_console;
 static size_t g_console_len, g_console_cap;
 
@@ -298,15 +244,7 @@ static void q_console_append(const char* s, size_t n) {
     g_console[g_console_len] = '\0';
 }
 
-/* Console sink write.  Normally buffers into g_console for the host (REPL /
- * qdoc) to drain after each eval.  BUT when we're servicing an IPC message —
- * i.e. running inside a `.z.p*` handler or a client's remote eval, detected by
- * a live connection handle — there is NO host drain in the poll loop (the
- * event loop blocks in one ray_poll_run for the server's whole life, and the
- * per-message dispatch lives in frozen core/ipc.c).  So write straight to the
- * server's stdout and flush, matching kdb: a handler's `show`/`0N!`/`-1`
- * prints on the SERVER console immediately while its return value goes back
- * over the wire.  handle < 0 => not in a handler => buffer as before. */
+/* g_console buffer for the host to drain; in an IPC handler (no host drain) straight to stdout, kdb's server-console behaviour. */
 static void q_console_emit(const char* s, size_t n) {
     if (ray_ipc_current_handle() >= 0) {
         fwrite(s, 1, n, stdout);
@@ -332,23 +270,11 @@ void q_console_show_krepr(ray_t* val) {
 
 void q_console_write(const char* s, size_t n) { q_console_emit(s, n); }
 
-/* ---- kdb table / keyed-table display -------------------------------------
- *
- * kdb prints an unkeyed table as space-joined, left-padded columns under a
- * dashed rule:
- *     a b            and a keyed table with the key columns left of a `|`:
- *     ----               a| b
- *     1 10               -| --
- *     2 20               1| 10
- * Column width = max(header, widest cell); interior lines carry NO trailing
- * space (the qdoc compare trims only the whole string's ends). */
+/* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`; NO trailing spaces. */
 
 #define QF_MAXCOL 64
 
-/* True iff every cell of this LIST column is a 1-item vector/list (and not a
- * string): kdb's console collapses the display of a uniformly-singleton
- * nested column (select_simple.qcmd `1| 10`), but keeps the enlist comma in
- * mixed columns (select.qcmd `c | ,50`, ungroup.md `,"A"`). */
+/* Uniformly-singleton nested column collapses (`1| 10`); mixed keeps `,50`. */
 static int q_col_uniform_singleton(ray_t* col) {
     if (!col || col->type != RAY_LIST) return 0;
     int64_t n = ray_len(col);
@@ -364,14 +290,10 @@ static int q_col_uniform_singleton(ray_t* col) {
 
 static void q_float_tok(double v, int f32, char* out, size_t n);   /* fwd */
 
-/* Format one table cell q-style into out.  A -RAY_SYM cell prints WITHOUT its
- * leading backtick (kdb shows `ibm`, not `` `ibm``, inside a table). */
+/* One table cell: sym cells print WITHOUT the backtick (kdb `ibm`). */
 static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
     out[0] = '\0';
-    /* Char-vector column (string-model shim: the whole column is ONE -RAY_STR
-     * atom, one char per row — meta's `t` column is the producer).  kdb shows
-     * the char BARE (`a| j`, not `a| "j"`). */
-    if (col && col->type == -RAY_STR) {
+    if (col && col->type == -RAY_STR) {     /* char-column shim: bare char */
         size_t l = ray_str_len(col);
         if (row >= 0 && (size_t)row < l && outsz > 1) {
             out[0] = ray_str_ptr(col)[row];
@@ -385,11 +307,7 @@ static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
     if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return; }
     if (ray_is_atom(c) && c->type != -RAY_STR && c->type != -RAY_SYM &&
         RAY_ATOM_IS_NULL(c)) {
-        /* q-null cells are BLANK inside a table (ref/lj.md `2 J 20`,
-         * ref/uj.md keyed `1|   1`) — kdb never prints 0N/0n in a cell.
-         * MUST run before the float branch below (it prints 0n/0Ne).
-         * Sym nulls (id 0) already render empty via ray_sym_str; char
-         * columns never reach here (handled above). */
+        /* null cells are BLANK (ref/lj.md) — must precede the float branch */
         ray_release(c);
         return;
     }
@@ -398,28 +316,22 @@ static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
         if (s) { snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
                  ray_release(s); }
     } else if (c->type == -RAY_F64 || c->type == -RAY_F32) {
-        /* float cells drop the disambiguating `f` — the column carries the
-         * type in kdb's table display (`300`, not `300f`). */
+        /* float cells drop the `f` — the column carries the type (`300`) */
         if (RAY_ATOM_IS_NULL(c)) snprintf(out, outsz, c->type == -RAY_F32 ? "0Ne" : "0n");
         else q_float_tok(c->f64, c->type == -RAY_F32, out, outsz);  /* F32 atoms store f64 */
     } else if (c->type == -RAY_BOOL) {
-        /* kdb table cells show booleans BARE (`t>5` -> rows `1 0`,
-         * ref/greater-than.md:56-59) — no per-cell `b` suffix. */
+        /* bool cells BARE (ref/greater-than.md:56-59) — no `b` suffix */
         snprintf(out, outsz, "%d", c->u8 ? 1 : 0);
     } else {
         q_fmt(c, out, outsz);
-        /* A nested cell renders with a leading enlist comma (`,10`); kdb's
-         * console keeps it for mixed-length columns (`c | ,50`) but shows a
-         * UNIFORMLY-singleton nested column bare (`1| 10`). */
         if (out[0] == ',' && q_col_uniform_singleton(col))
             memmove(out, out + 1, strlen(out));
     }
     ray_release(c);
 }
 
-/* Compute per-column widths + header strings for a table's columns. */
-static int q_table_widths(ray_t* tbl, int64_t nc, int64_t nr,
-                          int* widths, char hdr[][64]) {
+static void q_table_widths(ray_t* tbl, int64_t nc, int64_t nr,
+                           int* widths, char hdr[][64]) {
     for (int64_t c = 0; c < nc; c++) {
         ray_t* s = ray_sym_str(ray_table_col_name(tbl, c));
         snprintf(hdr[c], 64, "%.*s", s ? (int)ray_str_len(s) : 0,
@@ -433,11 +345,8 @@ static int q_table_widths(ray_t* tbl, int64_t nc, int64_t nr,
         }
         widths[c] = w;
     }
-    return 1;
 }
 
-/* Emit the header grid of `tbl` (its own columns), one space between columns;
- * caller has already emitted any key prefix. */
 static void q_table_grid(int64_t nc, const int* widths, char hdr[][64]) {
     for (int64_t c = 0; c < nc; c++) {
         if (c) qe_putc(' ');
@@ -445,13 +354,11 @@ static void q_table_grid(int64_t nc, const int* widths, char hdr[][64]) {
     }
 }
 
-/* Cap a sizing scan to the rows a clip-armed console can possibly show. */
 static int64_t q_size_rows(int64_t nr) {
     int64_t cr = qe_clip_rows();
     return (cr && cr < nr) ? cr : nr;
 }
 
-/* Render an unkeyed table. */
 static void q_fmt_table(ray_t* tbl) {
     int64_t nc = ray_table_ncols(tbl);
     int64_t nr = ray_table_nrows(tbl);
@@ -461,16 +368,13 @@ static void q_fmt_table(ray_t* tbl) {
     char hdr[QF_MAXCOL][64];
     q_table_widths(tbl, nc, q_size_rows(nr), widths, hdr);
 
-    /* header */
     q_table_grid(nc, widths, hdr);
     qe_trim();
     qe_putc('\n');
-    /* separator */
     int total = (int)(nc - 1);
     for (int64_t c = 0; c < nc; c++) total += widths[c];
     for (int i = 0; i < total; i++) qe_putc('-');
     qe_putc('\n');
-    /* rows */
     for (int64_t r = 0; r < nr; r++) {
         for (int64_t c = 0; c < nc; c++) {
             if (c) qe_putc(' ');
@@ -483,8 +387,6 @@ static void q_fmt_table(ray_t* tbl) {
     }
 }
 
-/* Render a keyed table: a RAY_DICT whose keys AND vals are both tables
- * (`select … by …`, `([k:…] v:…)`).  Key columns sit left of a `|`. */
 static void q_fmt_keyed(ray_t* kt, ray_t* vt) {
     int64_t knc = ray_table_ncols(kt), knr = ray_table_nrows(kt);
     int64_t vnc = ray_table_ncols(vt), vnr = ray_table_nrows(vt);
@@ -496,13 +398,11 @@ static void q_fmt_keyed(ray_t* kt, ray_t* vt) {
     q_table_widths(kt, knc, q_size_rows(nr), kw, kh);
     q_table_widths(vt, vnc, q_size_rows(nr), vw, vh);
 
-    /* header: keyhdrs | valhdrs */
     q_table_grid(knc, kw, kh);
     qe_putc('|'); qe_putc(' ');
     q_table_grid(vnc, vw, vh);
     qe_trim();
     qe_putc('\n');
-    /* separator: keydashes| valdashes */
     int kt_tot = (int)(knc - 1); for (int64_t c = 0; c < knc; c++) kt_tot += kw[c];
     int vt_tot = (int)(vnc - 1); for (int64_t c = 0; c < vnc; c++) vt_tot += vw[c];
     for (int i = 0; i < kt_tot; i++) qe_putc('-');
@@ -510,7 +410,6 @@ static void q_fmt_keyed(ray_t* kt, ray_t* vt) {
     for (int i = 0; i < vt_tot; i++) qe_putc('-');
     qe_trim();
     qe_putc('\n');
-    /* rows */
     for (int64_t r = 0; r < nr; r++) {
         for (int64_t c = 0; c < knc; c++) {
             if (c) qe_putc(' ');
@@ -529,39 +428,30 @@ static void q_fmt_keyed(ray_t* kt, ray_t* vt) {
     }
 }
 
-/* Render one integer element q-style with sentinel detection:
- * INT*_MIN -> 0N, INT*_MAX -> 0W, -INT*_MAX -> -0W, else the value; the type
- * suffix (h/i, or none for long) is appended. */
-static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
-    int64_t vmin = (width == 2) ? INT16_MIN : (width == 4) ? INT32_MIN : INT64_MIN;
+/* Integer-backed sentinels (kdb datatypes table): MIN->0N, MAX->0W, -MAX->-0W, + suffix (0=bare). */
+static int q_sentinel_tok(int64_t v, int width, char suffix, char* out, size_t n) {
     int64_t vmax = (width == 2) ? INT16_MAX : (width == 4) ? INT32_MAX : INT64_MAX;
-    char sfx[2]; sfx[0] = suffix; sfx[1] = '\0';
-    if (!suffix) sfx[0] = '\0';
-    if (v == vmin)       snprintf(out, n, "0N%s", sfx);
-    else if (v == vmax)  snprintf(out, n, "0W%s", sfx);
-    else if (v == -vmax) snprintf(out, n, "-0W%s", sfx);
-    else                 snprintf(out, n, "%lld%s", (long long)v, sfx);
+    const char* base = (v == -vmax - 1) ? "0N" : (v == vmax) ? "0W"
+                     : (v == -vmax)     ? "-0W" : NULL;
+    if (!base) return 0;
+    char sfx[2] = { suffix, '\0' };
+    snprintf(out, n, "%s%s", base, sfx);
+    return 1;
 }
 
-/* Render one float element q-style: NaN -> 0n (f64) / 0Ne (f32); a finite
- * magnitude reuses ray_fmt on a temp atom of the matching type, then appends
- * 'e' for f32 (nothing for f64).  Float infinities are out of scope. */
+static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
+    if (q_sentinel_tok(v, width, suffix, out, n)) return;
+    char sfx[2] = { suffix, '\0' };
+    snprintf(out, n, "%lld%s", (long long)v, sfx);
+}
+
+/* Float token: NaN->0n/0Ne; wholes within `\P` print integral (`5`), past
+ * the horizon exponent-form (timespan.qcmd:162 pins 3e+11); else %.*g.  The
+ * 10^prec horizon must be EXACT powers of 10 (pow() drift would move the
+ * `\P 7` boundary off 1e7).  Infinities: out of scope (sentinel-null). */
 static void q_float_tok(double v, int f32, char* out, size_t n) {
     if (isnan(v)) { snprintf(out, n, f32 ? "0Ne" : "0n"); return; }
-    /* Effective precision: `\P` significant digits (default 7); `\P 0` = maximum
-     * (17, full IEEE754 round-trip). */
     int prec = g_print_prec ? g_print_prec : 17;
-    /* Finite whole-number magnitude that fits WITHIN the active precision prints
-     * WITHOUT a fractional part (q shows `5`, not `5.0`); f32 keeps its per-
-     * element `e`.  The disambiguating `f` for f64 wholes is appended by the
-     * caller (atom) or once per vector.  The horizon is 10^prec: a whole float
-     * with MORE integer digits than the precision (e.g. `12345f` at `\P 3`, or
-     * any whole ≥1e7 at the default `\P 7` — timespan.qcmd:162 pins
-     * 00:10:00.000000000%2 -> 3e+11) switches to kdb's exponent form, so it must
-     * fall through to %.*g rather than take this full-integer shortcut.  The
-     * horizon comes from an EXACT power-of-10 table (all of 1e0..1e17 are exact
-     * doubles) so the `\P 7` boundary stays literally 1e7 — a `pow(10,7)` that
-     * rounded to 10000000.0000001 would wrongly keep `1e7` on the shortcut. */
     static const double POW10[18] = {
         1e0,1e1,1e2,1e3,1e4,1e5,1e6,1e7,1e8,1e9,
         1e10,1e11,1e12,1e13,1e14,1e15,1e16,1e17 };
@@ -570,21 +460,12 @@ static void q_float_tok(double v, int f32, char* out, size_t n) {
         snprintf(out, n, "%lld%s", (long long)v, f32 ? "e" : "");
         return;
     }
-    /* kdb console precision is `\P` significant digits (default 7): 1%3 ->
-     * 0.3333333, 10%3 -> 3.333333.  %.*g gives exactly that (and kdb-style
-     * exponents for very large / small magnitudes).  `\P 0` selects maximum
-     * precision (17 sig digits, full IEEE754 round-trip): 1%3 ->
-     * 0.33333333333333331, 2 xexp 3 -> 7.9999999999999982. */
     char mag[64];
     snprintf(mag, sizeof mag, "%.*g", prec, v);
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
 }
 
-/* True iff a rendered f64 token is DIGIT-ONLY (optional leading '-') — the
- * token-shape test that drives the disambiguating `f` suffix: `256` needs
- * `256f`, but `3e+11` / `2.5` / `0n` self-identify and take none.  (The old
- * numeric v==floor(v) test mis-suffixed exponent-rendered wholes and skipped
- * wholes that only ROUND whole at \P 7, e.g. exp(8*log 2) -> "256".) */
+/* Digit-only token — the shape test behind the f64 `f` suffix (`256f`). */
 static int q_tok_is_bare_int(const char* tok) {
     if (*tok == '-') tok++;
     if (!*tok) return 0;
@@ -593,51 +474,33 @@ static int q_tok_is_bare_int(const char* tok) {
     return 1;
 }
 
-/* Render one date element q-style: sentinels 0Nd / 0Wd / -0Wd (kdb datatypes
- * table); values inside the kdb literal domain render yyyy.mm.dd via a temp
- * base atom (base fmt_date owns the civil math — the q_float_tok pattern);
- * out-of-range but non-sentinel day counts display 0000.00.00 (datatypes.md:
- * "Out-of-range dates ... display as 0000.00.00", pinned by 0001.01.01-1). */
-static void q_date_tok(int32_t v, char* out, size_t n) {
-    if (v == INT32_MIN)  { snprintf(out, n, "0Nd");  return; }
-    if (v == INT32_MAX)  { snprintf(out, n, "0Wd");  return; }
-    if (v == -INT32_MAX) { snprintf(out, n, "-0Wd"); return; }
-    if ((int64_t)v < q_days_from_civil(1, 1, 1) ||
-        (int64_t)v > q_days_from_civil(9999, 12, 31)) {
-        snprintf(out, n, "0000.00.00");
-        return;
-    }
+/* Payload via a temp base atom (base fmt owns the math); consumes `a`. */
+static void q_tok_via_atom(ray_t* a, char* out, size_t n) {
     out[0] = '\0';
-    ray_t* a = ray_date((int64_t)v);
     if (a && !RAY_IS_ERR(a)) {
         ray_fallback(a, out, n);
         ray_release(a);
     }
 }
 
-/* Render one month element q-style, BARE (no trailing `m` — month vectors
- * follow the trailing-type-char model like `0N 0W 42h`, single `m` at the
- * end: basics/syntax.md:164 `2018.05 2018.07 2019.01m`; callers append the
- * suffix once).  Sentinels render bare 0N / 0W / -0W; payloads outside the
- * civil year domain [1,9999] mirror date's out-of-range rule as `0000.00`
- * (derived — kdb pins the rule for date only, datatypes.md).  Payload =
- * months since 2000.01, floor div/mod for pre-2000 months. */
-static void q_month_tok(int32_t v, char* out, size_t n) {
-    if (v == INT32_MIN)  { snprintf(out, n, "0N");  return; }
-    if (v == INT32_MAX)  { snprintf(out, n, "0W");  return; }
-    if (v == -INT32_MAX) { snprintf(out, n, "-0W"); return; }
-    int64_t p = v;
+/* Date payload; out-of-civil-range displays 0000.00.00 (datatypes.md). */
+static void q_date_payload(int64_t v, char* out, size_t n) {
+    if (v < q_days_from_civil(1, 1, 1) || v > q_days_from_civil(9999, 12, 31)) {
+        snprintf(out, n, "0000.00.00");
+        return;
+    }
+    q_tok_via_atom(ray_date(v), out, n);
+}
+
+/* Month payload: months since 2000.01; outside year [1,9999] -> `0000.00`. */
+static void q_month_payload(int64_t p, char* out, size_t n) {
     int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
     int64_t m = 1 + (p % 12 + 12) % 12;
     if (y < 1 || y > 9999) { snprintf(out, n, "0000.00"); return; }
     snprintf(out, n, "%04lld.%02lld", (long long)y, (long long)m);
 }
 
-/* GUID token: canonical 8-4-4-4-12 lowercase hex (basics/datatypes.md §Guid).
- * The null guid is all-zero bytes and renders as the zero UUID
- * 00000000-0000-0000-0000-000000000000 — NOT the 0Ng token (the doc pins `0Ng`
- * display to the zero UUID).  Mirrors base fmt_guid; kept here because base
- * ray_fmt would emit the 0Ng token for the null atom. */
+/* GUID: 8-4-4-4-12 lowercase hex; null = zero UUID, never 0Ng (datatypes.md). */
 static void q_guid_tok(const uint8_t* b16, char* out, size_t n) {
     if (n == 0) return;
     static const char hx[] = "0123456789abcdef";
@@ -654,94 +517,8 @@ static void q_guid_tok(const uint8_t* b16, char* out, size_t n) {
     out[pos < n ? pos : n - 1] = '\0';
 }
 
-/* Render one time element q-style: sentinels 0Nt / 0Wt / -0Wt (kdb datatypes
- * table); an in-range ms count renders HH:MM:SS.mmm via a temp base atom (base
- * fmt_time owns the clock math — the q_date_tok pattern).  Time is a plain ms
- * count with no civil domain, so there is no date-style 0000.00.00 out-of-range
- * rule; base fmt_time renders large-hour / negative values directly. */
-static void q_time_tok(int32_t v, char* out, size_t n) {
-    if (v == INT32_MIN)  { snprintf(out, n, "0Nt");  return; }
-    if (v == INT32_MAX)  { snprintf(out, n, "0Wt");  return; }
-    if (v == -INT32_MAX) { snprintf(out, n, "-0Wt"); return; }
-    out[0] = '\0';
-    ray_t* a = ray_time((int64_t)v);
-    if (a && !RAY_IS_ERR(a)) {
-        ray_fallback(a, out, n);
-        ray_release(a);
-    }
-}
-
-/* Render one minute element q-style: sentinels 0Nu / 0Wu / -0Wu (kdb
- * datatypes table row 17); values render HH:MM via a temp base atom (base
- * fmt_minute owns the clock math — the q_time_tok pattern).  A duration has
- * no civil domain, so no out-of-range rule. */
-static void q_minute_tok(int32_t v, char* out, size_t n) {
-    if (v == INT32_MIN)  { snprintf(out, n, "0Nu");  return; }
-    if (v == INT32_MAX)  { snprintf(out, n, "0Wu");  return; }
-    if (v == -INT32_MAX) { snprintf(out, n, "-0Wu"); return; }
-    out[0] = '\0';
-    ray_t* a = ray_minute((int64_t)v);
-    if (a && !RAY_IS_ERR(a)) {
-        ray_fallback(a, out, n);
-        ray_release(a);
-    }
-}
-
-/* Render one second element q-style: sentinels 0Nv / 0Wv / -0Wv (row 18). */
-static void q_second_tok(int32_t v, char* out, size_t n) {
-    if (v == INT32_MIN)  { snprintf(out, n, "0Nv");  return; }
-    if (v == INT32_MAX)  { snprintf(out, n, "0Wv");  return; }
-    if (v == -INT32_MAX) { snprintf(out, n, "-0Wv"); return; }
-    out[0] = '\0';
-    ray_t* a = ray_second((int64_t)v);
-    if (a && !RAY_IS_ERR(a)) {
-        ray_fallback(a, out, n);
-        ray_release(a);
-    }
-}
-
-/* Render one timespan element q-style: sentinels 0Nn / 0Wn / -0Wn (row 16);
- * values render the full dDHH:MM:SS.nnnnnnnnn form (datatypes.md:135-137,
- * ref/xbar.md:143 — atoms and vector elements always show 9 frac digits). */
-static void q_timespan_tok(int64_t v, char* out, size_t n) {
-    if (v == INT64_MIN)  { snprintf(out, n, "0Nn");  return; }
-    if (v == INT64_MAX)  { snprintf(out, n, "0Wn");  return; }
-    if (v == -INT64_MAX) { snprintf(out, n, "-0Wn"); return; }
-    out[0] = '\0';
-    ray_t* a = ray_timespan(v);
-    if (a && !RAY_IS_ERR(a)) {
-        ray_fallback(a, out, n);
-        ray_release(a);
-    }
-}
-
-/* Render one timestamp element q-style: sentinels 0Np / 0Wp / -0Wp (kdb
- * datatypes table row 12); any other ns count renders
- * yyyy.mm.ddDHH:MM:SS.nnnnnnnnn via a temp base atom (base fmt owns the
- * civil math — the q_date_tok pattern; probed pre-2000-correct and exact at
- * the +-0Wp-+1 extremes, datatypes.md:161).  Every non-sentinel i64 maps to
- * a valid civil datetime (~1707..2292), so unlike date there is no
- * 0000.00.00-style out-of-range rule. */
-static void q_ts_tok(int64_t v, char* out, size_t n) {
-    if (v == INT64_MIN)  { snprintf(out, n, "0Np");  return; }
-    if (v == INT64_MAX)  { snprintf(out, n, "0Wp");  return; }
-    if (v == -INT64_MAX) { snprintf(out, n, "-0Wp"); return; }
-    out[0] = '\0';
-    ray_t* a = ray_timestamp(v);
-    if (a && !RAY_IS_ERR(a)) {
-        ray_fallback(a, out, n);
-        ray_release(a);
-    }
-}
-
-/* Render one datetime element q-style: sentinel FIRST (NaN -> 0Nz — the
- * single-null float model has no live 0Wz, owner ruling 2026-07-09), then
- * the out-of-civil-range rule (datatypes.md:147/154 pins
- * "z"$0001.01.01-1 -> 0000.00.00T00:00:00.000), then delegate the civil
- * rendering to base fmt_datetime via a temp atom (the q_date_tok pattern —
- * ONE day/ms split, review-r1 item 1).  Display is always ms precision
- * (tok.md:227, cast.md:57) — f64 resolution is genuinely ~ms-or-finer for
- * current dates. */
+/* Datetime (f64 — Q_TTOK width 0): NaN->0Nz (no live 0Wz, 2026-07-09);
+ * out-of-range -> 0000.00.00T00:00:00.000; ms precision (tok.md:227). */
 static void q_datetime_tok(double v, char* out, size_t n) {
     if (v != v) { snprintf(out, n, "0Nz"); return; }
     if (v < (double)q_days_from_civil(1, 1, 1) ||
@@ -749,12 +526,50 @@ static void q_datetime_tok(double v, char* out, size_t n) {
         snprintf(out, n, "0000.00.00T00:00:00.000");
         return;
     }
-    out[0] = '\0';
-    ray_t* a = ray_datetime(v);
-    if (a && !RAY_IS_ERR(a)) {
-        ray_fallback(a, out, n);
-        ray_release(a);
+    q_tok_via_atom(ray_datetime(v), out, n);
+}
+
+/* THE temporal token table: sentinel suffix (0=bare), once-per-value trailing
+ * char (month's `m`, basics/syntax.md:164), width (0 = f64), ctor-or-payload. */
+typedef struct {
+    int8_t  type;                               /* RAY_* vector type (atom: -type) */
+    char    sfx;                                /* sentinel suffix letter */
+    char    vsfx;                               /* trailing char, once per value */
+    int     width;                              /* element bytes; 0 = f64 */
+    ray_t* (*ctor)(int64_t);                    /* payload via temp atom … */
+    void   (*payload)(int64_t, char*, size_t);  /* … unless overridden here */
+} q_ttok_t;
+
+static const q_ttok_t Q_TTOK[] = {
+    { RAY_DATE,      'd', 0,   4, NULL,          q_date_payload },
+    { RAY_MONTH,      0,  'm', 4, NULL,          q_month_payload },
+    { RAY_TIME,      't', 0,   4, ray_time,      NULL },
+    { RAY_MINUTE,    'u', 0,   4, ray_minute,    NULL },
+    { RAY_SECOND,    'v', 0,   4, ray_second,    NULL },
+    { RAY_TIMESPAN,  'n', 0,   8, ray_timespan,  NULL },
+    { RAY_TIMESTAMP, 'p', 0,   8, ray_timestamp, NULL },
+    { RAY_DATETIME,   0,  0,   0, NULL,          NULL },
+};
+
+static const q_ttok_t* q_ttok_find(int8_t t) {
+    for (size_t i = 0; i < sizeof Q_TTOK / sizeof *Q_TTOK; i++)
+        if (Q_TTOK[i].type == t) return &Q_TTOK[i];
+    return NULL;
+}
+
+static void q_ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i,
+                        char* out, size_t n) {
+    if (r->width == 0) {
+        q_datetime_tok(i < 0 ? v->f64 : ((const double*)ray_data(v))[i], out, n);
+        return;
     }
+    int64_t x = (i < 0)
+        ? (r->width == 4 ? (int64_t)v->i32 : v->i64)
+        : (r->width == 4 ? (int64_t)((const int32_t*)ray_data(v))[i]
+                         : ((const int64_t*)ray_data(v))[i]);
+    if (q_sentinel_tok(x, r->width, r->sfx, out, n)) return;
+    if (r->payload) { r->payload(x, out, n); return; }
+    q_tok_via_atom(r->ctor(x), out, n);
 }
 
 static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
@@ -789,7 +604,6 @@ static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
     q_fmt(key, out, cap);
 }
 
-/* Join per-element tokens (already rendered) with spaces into buf. */
 static void qe_join(const char* tok, int first) {
     size_t tl = strlen(tok);
     if (!qe_fits(tl + (first ? 0 : 1))) return;   /* historical whole-token skip */
@@ -797,23 +611,9 @@ static void qe_join(const char* tok, int first) {
     qe_putn(tok, tl);
 }
 
-/* ---- value display vs parse-tree display -------------------------------
- *
- * A general RAY_LIST is shape-identical whether it is a VALUE (`(1;2 3;`abc)`,
- * displayed one-item-per-line kdb-style) or a PARSE TREE (`parse "2+3"` ->
- * `(+;2;3)`, displayed compact — a FROZEN byte-for-byte contract).  The signal
- * is intrinsic to the object, so display cannot be driven by a caller flag:
- * `parse` returns a tree that flows through the same eval->q_fmt path as data.
- *
- * A list is a PARSE TREE iff its head element is one of:
- *   - the hidden list/table constructor value (paren-literal marker), or
- *   - a fn value (RAY_UNARY/BINARY/VARY — a registry verb head like `+`), or
- *   - a name-ref/verb/marker sym: a -RAY_SYM with ATTR_QUOTED (0x20) CLEAR
- *     (a DATA sym literal has 0x20 SET — see mem/heap.h), or
- *   - (recursively) a nested clause list, e.g. a qSQL where-clause
- *     `((>;`a;1);(=;`b;2))` whose head is itself a predicate sub-tree.
- * Everything else — a data atom, a typed vector, a string, a dict/table head —
- * marks a VALUE list. */
+/* Parse-tree probe — sole consumer: the q_fmt_console clip exemption (parse
+ * display is byte-for-byte contract, CLAUDE.md rule 2, never clips).  Tree
+ * iff head is a ctor, fn value, name-ref sym (0x20 clear) or clause list. */
 #define Q_ATTR_QUOTED 0x20
 static int q_list_is_parse_tree(ray_t* v, int depth) {
     if (!v || v->type != RAY_LIST || depth > 64) return 0;
@@ -829,12 +629,7 @@ static int q_list_is_parse_tree(ray_t* v, int depth) {
     return 0;
 }
 
-/* The q display name for an empty typed vector: `long$()`, `symbol$()`, ...
- * (kdb `0#0` -> `` `long$() ``).  BOOL is here too (`null ()` ->
- * `` `boolean$() ``, the ref null.md transcript).  Byte keeps its own bare-0x
- * arm — test/q/datatypes/byte_impl.qcmd pins `0#0x` -> `0x` from ref/read1.md
- * (documented conflict with the `` `byte$() `` spelling; the banked pin wins).
- * Strings are atoms, not vectors.  Returns NULL for un-named types. */
+/* Empty-vector name (`long$()`); byte stays bare-0x (byte_impl.qcmd pin). */
 static const char* q_empty_vec_qname(int8_t type) {
     switch (type) {
     case RAY_BOOL: return "boolean";
@@ -857,10 +652,7 @@ static const char* q_empty_vec_qname(int8_t type) {
     }
 }
 
-/* Escape one string byte kdb-style into out[8] (\" \\ \n \t \r, 1..3-digit
- * octal \ooo for other control bytes); returns the emitted length.  The single
- * home for the display inverse of the scanner's escape decode — shared by the
- * scratch renderer (q_fmt_qstring) and the emitter renderer (qe_qstring). */
+/* Escape one byte kdb-style — THE display-inverse of the scanner decode. */
 static size_t q_char_esc(unsigned char ch, char out[8]) {
     switch (ch) {
     case '"':  out[0] = '\\'; out[1] = '"';  return 2;
@@ -875,9 +667,6 @@ static size_t q_char_esc(unsigned char ch, char out[8]) {
     }
 }
 
-/* Render a -RAY_STR atom kdb-style into a caller scratch buffer: quoted +
- * escaped (q_char_esc).  Used by cell/element renderers that need the token
- * as a string (matrix cells, list items, krepr). */
 static void q_fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
     const char* p = ray_str_ptr(val);
     size_t n = ray_str_len(val);
@@ -893,9 +682,6 @@ static void q_fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
     buf[w < bufsz ? w : bufsz - 1] = '\0';
 }
 
-/* Emitter twin of q_fmt_qstring — the top-level string-atom display arm.
- * Unbounded by scratch (a huge string renders fully into a big .Q.s buffer);
- * under the console clip the early exit stops the walk at the dot column. */
 static void qe_qstring(ray_t* val) {
     const char* p = ray_str_ptr(val);
     size_t n = ray_str_len(val);
@@ -908,9 +694,7 @@ static void qe_qstring(ray_t* val) {
     qe_putc('"');
 }
 
-/* A matrix column-aligns only the SPACE-SEPARATED element types (numeric /
- * sym / date).  bool (`101b`) and byte (`0x0102`) print each row-vector whole,
- * one per line — no transpose. */
+/* Alignable = space-separated element types; bool/byte rows print whole. */
 static int q_matrix_alignable(int8_t type) {
     return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
            type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
@@ -919,8 +703,6 @@ static int q_matrix_alignable(int8_t type) {
            type == RAY_DATETIME;
 }
 
-/* Format element `c` of the row-vector `rv` BARE (no per-element type suffix,
- * no backtick) — a matrix cell token. */
 static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
     out[0] = '\0';
     switch (rv->type) {
@@ -929,24 +711,13 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
     case RAY_I64: q_int_tok(((const int64_t*)ray_data(rv))[c],          8, 0, out, outsz); break;
     case RAY_F32: q_float_tok((double)((const float*)ray_data(rv))[c],  1, out, outsz); break;
     case RAY_F64: q_float_tok(((const double*)ray_data(rv))[c],         0, out, outsz); break;
-    case RAY_DATE:q_date_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
-    case RAY_TIME:q_time_tok(((const int32_t*)ray_data(rv))[c],            out, outsz); break;
-    case RAY_MINUTE: q_minute_tok(((const int32_t*)ray_data(rv))[c],          out, outsz); break;
-    case RAY_SECOND: q_second_tok(((const int32_t*)ray_data(rv))[c],          out, outsz); break;
-    case RAY_TIMESPAN: q_timespan_tok(((const int64_t*)ray_data(rv))[c],      out, outsz); break;
-    case RAY_TIMESTAMP: q_ts_tok(((const int64_t*)ray_data(rv))[c],           out, outsz); break;
-    case RAY_DATETIME: q_datetime_tok(((const double*)ray_data(rv))[c],       out, outsz); break;
     case RAY_SYM: {
         ray_t* s = ray_sym_vec_cell(rv, c);   /* borrowed -RAY_STR */
         if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
         break;
     }
     case RAY_LIST: {
-        /* boxed row of atoms (feat/q-file-text widening): sym cells BARE,
-         * string cells quoted-escaped — a LEN-1 string renders `,"c"` (in
-         * kdb a 1-char string is an enlisted char; openq's RAY_STR atoms
-         * conflate the two, and inside a matrix the field is semantically a
-         * char vector).  Other atoms recurse through q_fmt. */
+        /* boxed row of atoms: syms BARE, strings quoted (len-1 as ,"c") */
         ray_t* a = ((ray_t**)ray_data(rv))[c];
         if (!a) break;
         if (a->type == -RAY_SYM) {
@@ -962,12 +733,14 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
             q_fmt(a, out, outsz);
         break;
     }
-    default: break;
+    default: {
+        const q_ttok_t* tr = q_ttok_find(rv->type);
+        if (tr) q_ttok_elem(tr, rv, c, out, outsz);
+        break;
+    }
     }
 }
 
-/* One matrix ROW: an alignable typed vector, or (feat/q-file-text widening) a
- * boxed RAY_LIST whose items are all atoms — sym/string/numeric cells. */
 static int q_matrix_row_ok(ray_t* r) {
     if (!r || RAY_IS_ERR(r)) return 0;
     if (r->type > 0 && ray_is_vec(r) && q_matrix_alignable(r->type)) return 1;
@@ -983,15 +756,9 @@ static int q_matrix_row_ok(ray_t* r) {
     return 0;
 }
 
-/* True iff `v` is a value list of >=2 same-length alignable rows: a
- * rectangular matrix rendered row-per-line, columns LEFT-aligned with a
- * single-space minimum (qdocs ref/mmu.md).  Since feat/q-file-text rows may
- * MIX types (`(`a`b`c;1 2 3)`) and include boxed rows of atoms — kdb aligns
- * any rectangular list (ref/file-text.md Load-CSV / Key-Value displays). */
-static int q_is_matrix(ray_t* v) {
-    int64_t n = ray_len(v);
+/* e[0..n) is >=2 same-length alignable rows: a LEFT-aligned matrix (ref/mmu.md). */
+static int q_is_matrix(ray_t** e, int64_t n) {
     if (n < 2) return 0;
-    ray_t** e = (ray_t**)ray_data(v);
     if (!q_matrix_row_ok(e[0])) return 0;
     int64_t w = ray_len(e[0]);
     if (w == 0) return 0;
@@ -1000,13 +767,9 @@ static int q_is_matrix(ray_t* v) {
     return 1;
 }
 
-static void q_fmt_matrix(ray_t* v) {
-    int64_t nr = ray_len(v);
-    ray_t** e  = (ray_t**)ray_data(v);
+static void q_fmt_matrix(ray_t** e, int64_t nr) {
     int64_t nc = ray_len(e[0]);
-    /* per-column widths sized to the matrix (no fixed column cap — the target
-     * buffer is the only bound, so wide matrices are not silently truncated);
-     * a clip-armed console sizes over the showable rows only (spec §1.4). */
+    /* no fixed column cap; clip-armed sizing scans showable rows only */
     int  stackw[64];
     int* widths = (nc <= 64) ? stackw : malloc((size_t)(nc > 0 ? nc : 1) * sizeof(int));
     if (!widths) return;
@@ -1032,40 +795,9 @@ static void q_fmt_matrix(ray_t* v) {
     if (widths != stackw) free(widths);
 }
 
-/* A VALUE list prints one item per line (kdb): each element formatted with
- * q_fmt, joined by newlines.  `,x` for the 1-element (enlist) case is handled
- * by the caller.  (A #56-style one-line nested-item form was tried in the
- * joins-rebuild wave and REVERTED: banked ledgers pin the multi-line nested
- * display — math/atomic_nested, list/null_atomic, assign/identity.) */
-static void q_fmt_value_list(ray_t* v) {
-    int64_t n = ray_len(v);
-    ray_t** e = (ray_t**)ray_data(v);
-    for (int64_t i = 0; i < n; i++) {
-        if (qe_done()) break;                    /* height cap hit — early exit */
-        char elem[2048]; elem[0] = '\0';
-        if (e[i] && e[i]->type == -RAY_STR && ray_str_len(e[i]) == 1) {
-            /* a len-1 string ITEM of a list renders `,"c"` (kdb: strings in a
-             * list are char vectors, and a 1-item vector displays enlisted —
-             * `string 192 168 1 23` shows ,"1"). */
-            elem[0] = ',';
-            q_fmt_qstring(e[i], elem + 1, sizeof elem - 1);
-        } else
-            q_fmt(e[i], elem, sizeof elem);
-        if (i) qe_putc('\n');
-        qe_puts(elem);
-    }
-}
-
 static void q_fmt_body(ray_t* val);   /* fwd */
 
-/* Render one value into the CURRENT emitter target: an attributed vector
- * renders with kdb's `` `s#``/`u#``/`g#``/`p# `` prefix, then the bare vector
- * (reusing q_attr_letter so the display and the `attr` verb share ONE letter
- * mapping).  Everything else formats directly.  Recurses through q_fmt so an
- * attributed vector nested in a general list also carries its prefix
- * (kdb-true).  Table columns render via q_cell, not q_fmt, so an attributed
- * COLUMN stays bare in the grid (its attribute shows in `meta`, a Stage-2
- * surface). */
+/* Attributed vectors get `` `s#`` (q_attr_letter — shared with `attr`); table columns stay bare via q_cell. */
 static void q_fmt_render(ray_t* val) {
     if (!val) return;
     char al = q_attr_letter(val);              /* 0 unless an attributed vector */
@@ -1075,8 +807,7 @@ static void q_fmt_render(ray_t* val) {
     q_fmt_body(val);
 }
 
-/* Public entry, UNCLIPPED: the round-trippable paths (`string`, `-3!`/`.Q.s1`,
- * CSV) and every recursive cell/element render use this. */
+/* Public entry, UNCLIPPED (`string`, `-3!`, CSV, recursive renders). */
 void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0 || !buf) return;
     qe_push(buf, bufsz, 0);
@@ -1084,10 +815,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     qe_pop();
 }
 
-/* Public entry, CONSOLE: honours the live `\c rows cols` DISPLAY clip when
- * armed (q_sys.c q_con_display) — the display seam.  REPL auto-echo, `show`,
- * `.Q.s` route through here; unarmed (or for a parse tree, whose display is a
- * byte-for-byte contract — CLAUDE.md rule 2) it equals q_fmt. */
+/* Public entry, CONSOLE: the `\c` clip when armed; unarmed — or a parse tree — equals q_fmt. */
 void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0 || !buf) return;
     int32_t rows = 0, cols = 0;
@@ -1111,41 +839,29 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
 static void q_fmt_body(ray_t* val) {
     if (!val) return;
 
-    /* The generic null prints `::` (kdb: `q)d:`a`b!(::;2)` shows `a| ::`).
-     * Top-level console silence is the CALLER's rule (run_one_line / qdoc
-     * suppress RAY_IS_NULL results), so this only surfaces inside containers
-     * and explicit displays — where kdb shows `::`, never "null". */
+    /* generic null prints `::` (top-level silence is the CALLER's rule) */
     if (RAY_IS_NULL(val)) {
         qe_puts("::");
         return;
     }
 
-    /* An empty typed vector prints `` `type$() `` (kdb `0#0` -> `` `long$() ``).
-     * Byte/bool keep their own arms (`0x` / `b`); strings are atoms. */
+    /* empty typed vector: `` `type$() `` (byte keeps its bare-0x arm) */
     if (val->type > 0 && ray_is_vec(val) && ray_len(val) == 0) {
         const char* qn = q_empty_vec_qname(val->type);
         if (qn) { qe_printf("`%s$()", qn); return; }
     }
 
-    /* A symbol atom prints q-style: `sym` (or bare for a verb/null name-ref).
-     * Handling it here also renders the -RAY_SYM heads of parse-tree lists. */
     if (val->type == -RAY_SYM) {
         qe_sym(val);
         return;
     }
 
-    /* A string atom prints quoted with kdb escapes (\" \\ \n \t \r, octal for
-     * other control bytes) — the display inverse of the scanner's decode.
-     * Previously strings fell through to the base formatter, which dumps raw
-     * bytes; with decoded literals that would print real newlines. */
     if (val->type == -RAY_STR) {
         qe_qstring(val);
         return;
     }
 
-    /* An engine STRING VECTOR displays like a list of strings: one quoted
-     * line per item (enlist form `,"…"` when singleton; len-1 items `,"c"`)
-     * — previously it fell to the base formatter's bracket dump. */
+    /* string vector: one quoted line per item; `,` on singleton and len-1 */
     if (val->type == RAY_STR && ray_is_vec(val)) {
         int64_t n = ray_len(val);
         if (n == 0) { qe_puts("()"); return; }   /* kdb: empty list */
@@ -1168,13 +884,11 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* Registry function VALUES render their q spelling from provenance
-     * (formatter-from-metadata, spec piece 2): glyph rows bare (`+`), monadic
-     * glyph rows with the marker (`-:`), keyword rows the keyword.  Values
-     * with no provenance (internal list/scan wrappers, foreign fns) fall
-     * through to ray_fallback below. */
+    /* fn values render their provenance spelling: `+`, `-:`, keywords */
     if (val->type == RAY_UNARY || val->type == RAY_BINARY ||
         val->type == RAY_VARY) {
+        /* the paren-list ctor IS kdb's enlist (basics/parsetrees.md fby) */
+        if (val == q_registry_list_value()) { qe_puts("enlist"); return; }
         q_provenance_t pv;
         if (q_registry_provenance(val, &pv) && pv.spelling && pv.spelling[0]) {
             char c0 = pv.spelling[0];
@@ -1185,11 +899,16 @@ static void q_fmt_body(ray_t* val) {
         }
     }
 
-    /* Typed numeric atoms print q-style with a type suffix (bare for long /
-     * float): 1b, 42h, 42i, 42, 3.14e, 3.14 — plus the nulls/inf tokens.
-     * Tokens render into local scratch, then the emitter writes them. */
     {
         char tok[64]; tok[0] = '\0';
+        const q_ttok_t* tr = (val->type < 0) ? q_ttok_find((int8_t)-val->type)
+                                             : NULL;
+        if (tr) {
+            q_ttok_elem(tr, val, -1, tok, sizeof tok);
+            qe_puts(tok);
+            if (tr->vsfx) qe_putc(tr->vsfx);
+            return;
+        }
         switch (val->type) {
         case -RAY_BOOL: qe_printf("%db", val->u8 ? 1 : 0);                 return;
         case -RAY_U8:   qe_printf("0x%02x", val->u8);                      return;
@@ -1199,12 +918,6 @@ static void q_fmt_body(ray_t* val) {
                         qe_puts(tok);                                      return;
         case -RAY_I64:  q_int_tok(val->i64,          8, 0,   tok, sizeof tok);
                         qe_puts(tok);                                      return;
-        case -RAY_DATE: q_date_tok(val->i32, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_MONTH:
-            q_month_tok(val->i32, tok, sizeof tok);
-            qe_puts(tok); qe_putc('m');
-            return;
         case -RAY_GUID: {
             const uint8_t* b16 = val->obj ? (const uint8_t*)ray_data(val->obj)
                                           : (const uint8_t*)ray_data(val);
@@ -1212,27 +925,10 @@ static void q_fmt_body(ray_t* val) {
             qe_puts(tok);
             return;
         }
-        case -RAY_TIME: q_time_tok(val->i32, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_MINUTE: q_minute_tok(val->i32, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_SECOND: q_second_tok(val->i32, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_TIMESPAN: q_timespan_tok(val->i64, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_TIMESTAMP: q_ts_tok(val->i64, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_DATETIME: q_datetime_tok(val->f64, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
         case -RAY_F32:  q_float_tok((float)val->f64, 1, tok, sizeof tok);
                         qe_puts(tok);                                      return;
         case -RAY_F64: {
-            /* A whole f64 atom gets a trailing `f` to distinguish it from a
-             * long (`5f`, not `5`); a fractional or exponent-rendered one
-             * (`3.14`, `3e+11`) self-identifies and needs no suffix —
-             * TOKEN-shape test, not numeric wholeness (`3e+11f` is not a kdb
-             * token, and a value that only rounds whole at \P 7, e.g.
-             * exp 8*log 2 -> `256`, still needs its `f`). */
+            /* digit-only tokens take `f` (`5f`); `3e+11` self-identifies */
             q_float_tok(val->f64, 0, tok, sizeof tok);
             if (q_tok_is_bare_int(tok)) {
                 size_t l = strlen(tok);
@@ -1245,10 +941,7 @@ static void q_fmt_body(ray_t* val) {
         }
     }
 
-    /* q prints a simple vector space-separated with NO brackets: `5 6 7`,
-     * where rayforce prints `[5 6 7]`.  Booleans concatenate with no spaces
-     * plus one trailing `b` (1001b). */
-    if (val->type == RAY_BOOL) {
+    if (val->type == RAY_BOOL) {            /* 1001b */
         int64_t n = ray_len(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
         if (n == 1) qe_putc(',');                          /* enlist: ,0b */
@@ -1257,10 +950,7 @@ static void q_fmt_body(ray_t* val) {
         qe_putc('b');
         return;
     }
-    /* Byte vector: `0x` prefix + concatenated two-digit lowercase hex, no
-     * separators, no trailing type char (ref/sv.md pins 0x0102010201); the
-     * length-1 vector takes the enlist comma (ref/vs.md pins ,0x01); an empty
-     * vector renders bare `0x` (the literal ref/read1.md pins via `0#0x`). */
+    /* byte vector: 0x + hex pairs (ref/sv.md); empty is bare `0x` */
     if (val->type == RAY_U8) {
         int64_t n = ray_len(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
@@ -1274,10 +964,6 @@ static void q_fmt_body(ray_t* val) {
         }
         return;
     }
-    /* Guid vector: full canonical UUID per element, space-joined, no trailing
-     * type char (basics/datatypes.md: -2?0Ng -> "337714f8-... 0a369037-...");
-     * length-1 takes the enlist comma.  Null elements are all-zero bytes ->
-     * the zero UUID, self-identifying like the atom. */
     if (val->type == RAY_GUID) {
         int64_t n = ray_len(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
@@ -1290,11 +976,7 @@ static void q_fmt_body(ray_t* val) {
         }
         return;
     }
-    /* Typed integer vector: each element is rendered BARE (no per-element type
-     * char), space-joined, then the type char is appended ONCE at the end —
-     * `0N 0W -0W 42h`, not `0Nh 0Wh -0Wh 42h`.  This matches kdb's own
-     * formatter (K.java KBaseVector.formatVector: child context showType=false,
-     * one trailing typeChar). Long's type char is empty. */
+    /* int vector: bare elements + type char ONCE (`0N 0W -0W 42h`) */
     if (val->type == RAY_I16 || val->type == RAY_I32 || val->type == RAY_I64) {
         int width  = (val->type == RAY_I16) ? 2 : (val->type == RAY_I32) ? 4 : 8;
         char vsuf  = (val->type == RAY_I16) ? 'h' : (val->type == RAY_I32) ? 'i' : 0;
@@ -1311,114 +993,24 @@ static void q_fmt_body(ray_t* val) {
         if (vsuf) qe_putc(vsuf);
         return;
     }
-    /* Month vector: bare yyyy.mm tokens space-joined + ONE trailing `m` —
-     * months follow the int-vector trailing-type-char model, NOT date's
-     * self-identifying model (basics/syntax.md:164 `2018.05 2018.07
-     * 2019.01m`; basics/math.md:84 `2012.03 2012.04m`); sentinels render
-     * bare (`2020.01 0N 2019.08m`); enlist comma for length-1. */
-    if (val->type == RAY_MONTH) {
-        int64_t n = ray_len(val);
-        const int32_t* d = (const int32_t*)ray_data(val);
-        if (n == 1) qe_putc(',');                          /* enlist: ,2000.01m */
-        for (int64_t i = 0; i < n && !qe_line_done(); i++) {
-            char e[64];
-            q_month_tok(d[i], e, sizeof e);
-            qe_join(e, i == 0);
+    /* temporal vector: bare tokens space-joined; only month has a trailing
+     * type char (`m`) — the other temporals' full tokens self-identify,
+     * sentinels included (`2000.01.01 0Nd`) */
+    {
+        const q_ttok_t* tr = q_ttok_find(val->type);
+        if (tr) {
+            int64_t n = ray_len(val);
+            if (n == 1) qe_putc(',');                      /* enlist: ,2000.01.01 */
+            for (int64_t i = 0; i < n && !qe_line_done(); i++) {
+                char e[64];
+                q_ttok_elem(tr, val, i, e, sizeof e);
+                qe_join(e, i == 0);
+            }
+            if (tr->vsfx) qe_putc(tr->vsfx);
+            return;
         }
-        qe_putc('m');
-        return;
-    }
-    /* Date vector: space-joined full yyyy.mm.dd tokens — dates have no
-     * trailing type char (unlike `0N 0W 42h`), so every element self-
-     * identifies, including the sentinels (`2000.01.01 0Nd`). */
-    if (val->type == RAY_DATE) {
-        int64_t n = ray_len(val);
-        const int32_t* d = (const int32_t*)ray_data(val);
-        if (n == 1) qe_putc(',');                          /* enlist: ,2000.01.01 */
-        for (int64_t i = 0; i < n && !qe_line_done(); i++) {
-            char e[64];
-            q_date_tok(d[i], e, sizeof e);
-            qe_join(e, i == 0);
-        }
-        return;
-    }
-    /* Time vector: space-joined full HH:MM:SS.mmm tokens — like date, times
-     * have no trailing type char, so every element (incl. sentinels 0Nt) self-
-     * identifies; enlist comma for length-1. */
-    if (val->type == RAY_TIME) {
-        int64_t n = ray_len(val);
-        const int32_t* d = (const int32_t*)ray_data(val);
-        if (n == 1) qe_putc(',');                          /* enlist: ,09:30:00.000 */
-        for (int64_t i = 0; i < n && !qe_line_done(); i++) {
-            char e[64];
-            q_time_tok(d[i], e, sizeof e);
-            qe_join(e, i == 0);
-        }
-        return;
-    }
-    /* Minute / second / timespan vectors: space-joined full tokens — the
-     * SELF-IDENTIFYING model like date/time, NOT month's trailing-char model
-     * (pinned: learn/tour/index.md:268 `12:30 13:00 13:30 14:00`,
-     * ref/xbar.md:143 `0D00:00:00.000000000 0D00:00:00.000000002 …`;
-     * second derived by family symmetry); sentinels self-identify (0Nu);
-     * enlist comma for length-1. */
-    if (val->type == RAY_MINUTE || val->type == RAY_SECOND) {
-        int64_t n = ray_len(val);
-        const int32_t* d = (const int32_t*)ray_data(val);
-        if (n == 1) qe_putc(',');
-        for (int64_t i = 0; i < n && !qe_line_done(); i++) {
-            char e[64];
-            if (val->type == RAY_MINUTE) q_minute_tok(d[i], e, sizeof e);
-            else                         q_second_tok(d[i], e, sizeof e);
-            qe_join(e, i == 0);
-        }
-        return;
-    }
-    if (val->type == RAY_TIMESPAN) {
-        int64_t n = ray_len(val);
-        const int64_t* d = (const int64_t*)ray_data(val);
-        if (n == 1) qe_putc(',');
-        for (int64_t i = 0; i < n && !qe_line_done(); i++) {
-            char e[64];
-            q_timespan_tok(d[i], e, sizeof e);
-            qe_join(e, i == 0);
-        }
-        return;
-    }
-    /* Timestamp vector: space-joined full yyyy.mm.ddDHH:MM:SS.nnnnnnnnn
-     * tokens — like date/time, no trailing type char, sentinels (0Np)
-     * self-identify; enlist comma for length-1. */
-    if (val->type == RAY_TIMESTAMP) {
-        int64_t n = ray_len(val);
-        const int64_t* d = (const int64_t*)ray_data(val);
-        if (n == 1) qe_putc(',');
-        for (int64_t i = 0; i < n && !qe_line_done(); i++) {
-            char e[64];
-            q_ts_tok(d[i], e, sizeof e);
-            qe_join(e, i == 0);
-        }
-        return;
     }
 
-    /* Datetime vector: space-joined full yyyy.mm.ddTHH:MM:SS.mmm tokens —
-     * the SELF-IDENTIFYING model like date/time/timestamp (every token
-     * carries the T), sentinels (0Nz) self-identify; enlist comma for
-     * length-1. */
-    if (val->type == RAY_DATETIME) {
-        int64_t n = ray_len(val);
-        const double* d = (const double*)ray_data(val);
-        if (n == 1) qe_putc(',');
-        for (int64_t i = 0; i < n && !qe_line_done(); i++) {
-            char e[64];
-            q_datetime_tok(d[i], e, sizeof e);
-            qe_join(e, i == 0);
-        }
-        return;
-    }
-
-    /* Float/real vectors are deferred (float infinities out of scope); the
-     * per-element tokens still carry the suffix — revisit with the same
-     * bare-element + one-trailing-char rule when float vectors are un-deferred. */
     if (val->type == RAY_F32 || val->type == RAY_F64) {
         int is64 = (val->type == RAY_F64);
         int64_t n = ray_len(val);
@@ -1432,24 +1024,13 @@ static void q_fmt_body(ray_t* val) {
             qe_join(e, i == 0);
             if (!q_tok_is_bare_int(e)) all_whole = 0;
         }
-        /* f32 vectors already carry a per-element `e` (kdb records e.g.
-         * `0Ne 0We -0We 3.14e`); only f64 wholes take the single trailing `f`
-         * (`1 2 3f`).  A vector with any fractional, exponent-rendered or
-         * non-finite element (`0.5 1 1.5`, `1 3e+11`, `0n 3.14`) gets no
-         * suffix — TOKEN-shape test, matching the atom rule.  (An early-exited
-         * clipped line may mis-set all_whole for UNSEEN elements; the suffix
-         * lands past the dot column and is swallowed, so the display is
-         * unaffected.) */
+        /* all-digit-token f64 vectors take ONE trailing `f` (`1 2 3f`); a
+         * clipped early exit's stale all_whole is swallowed past the dots */
         if (is64 && all_whole) qe_putc('f');
         return;
     }
 
-    /* Symbol vector: backtick-joined, `a`b`c.  Each cell resolves through the
-     * vector's own domain.  EVERY element keeps its leading backtick — a sym
-     * vector is data, so a verb/null-named element (`+`, `::`) must still round-
-     * trip as a symbol literal, not a bare q token.  (The bare-verb rendering
-     * in q_fmt_sym is only for a -RAY_SYM ATOM standing as a parse-tree head.)
-     * The null symbol is a zero-length name and prints as a bare backtick. */
+    /* sym vector: `a`b`c — every element backticked (data must round-trip) */
     if (val->type == RAY_SYM) {
         int64_t n = ray_len(val);
         if (n == 1) qe_putc(',');                          /* enlist: ,`a */
@@ -1464,9 +1045,7 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* A 100h lambda carrier echoes its VERBATIM q source (kdb: `q)f` prints
-     * `{[x] x*x}` byte-for-byte). */
-    if (q_deriv_kind_of(val) == Q_DERIV_LAMBDA) {
+    if (q_deriv_kind_of(val) == Q_DERIV_LAMBDA) {   /* verbatim q source */
         ray_t* s = q_lambda_src(val);
         if (s && s->type == -RAY_STR) {
             qe_putn(ray_str_ptr(s), ray_str_len(s));
@@ -1474,9 +1053,7 @@ static void q_fmt_body(ray_t* val) {
         }
     }
 
-    /* A 104h derived-verb carrier renders as bound-verb + adverb glyph (+/).
-     * The carrier's base is the HOF value (fold / the internal scan wrapper /
-     * the each wrapper); the bound verb sits in the first arg slot. */
+    /* 104h carrier: bound-verb + adverb glyph (+/); base = the HOF value */
     if (q_deriv_kind_of(val) == Q_DERIV_PROJ && ray_len(val) >= 5) {
         ray_t* base = q_deriv_base(val);
         ray_t* v0   = ((ray_t**)ray_data(val))[4];
@@ -1495,9 +1072,7 @@ static void q_fmt_body(ray_t* val) {
             qe_puts(g);
             return;
         }
-        /* general projection display — base[a0;a1;...] with hole slots EMPTY
-         * (kdb: `{x+y}[42;]`).  Reached by lambda projections and any other
-         * carrier the adverb arm above does not claim. */
+        /* general projection: base[a0;a1;...] with hole slots EMPTY */
         {
             uint64_t mask  = q_deriv_hole_mask(val);
             int64_t  slots = ray_len(val) - 4;
@@ -1519,17 +1094,12 @@ static void q_fmt_body(ray_t* val) {
         }
     }
 
-    /* An unkeyed table prints kdb-style: space-joined columns under a dashed
-     * rule (`a b` / `----` / rows). */
     if (val->type == RAY_TABLE) {
         q_fmt_table(val);
         return;
     }
 
-    /* A keyed table is a RAY_DICT whose keys AND vals are both tables (the
-     * mandate: "a keyed table is just a dictionary from one table to another").
-     * `select … by …` and `([k:…] v:…)` produce it.  Renders `k| v`. */
-    if (val->type == RAY_DICT) {
+    if (val->type == RAY_DICT) {            /* keyed table = table!table */
         ray_t* kk = ray_dict_keys(val);
         ray_t* vv = ray_dict_vals(val);
         if (kk && vv && kk->type == RAY_TABLE && vv->type == RAY_TABLE) {
@@ -1538,17 +1108,12 @@ static void q_fmt_body(ray_t* val) {
         }
     }
 
-    /* Dict VALUE display: kdb `key| value` per row (2c-2).  Keys padded to the
-     * widest key, printed BARE; values recurse.  `1 2!1 2`, `` `a`b!1 2 ``. */
-    if (val->type == RAY_DICT) {
+    if (val->type == RAY_DICT) {            /* dict: `key| value` rows */
         ray_t* k = ray_dict_keys(val);          /* borrowed */
         ray_t* v = ray_dict_vals(val);          /* borrowed */
         int64_t n = k ? ray_len(k) : 0;
         size_t maxk = 0;
-        /* A uniform SYM value column (typed sym vector, or the constructor's
-         * boxed list holding only sym atoms) prints its atoms BARE, like a
-         * table column (kdb ref/apply.md `cat | chat`).  Anything mixed keeps
-         * the sym-literal backtick form (`a`b!(`x;1) -> a| `x). */
+        /* uniform sym value column prints BARE (ref/apply.md); mixed keeps ` */
         int sym_col = v && v->type == RAY_SYM;
         if (v && v->type == RAY_LIST && ray_len(v) > 0) {
             ray_t** vel = (ray_t**)ray_data(v);
@@ -1556,10 +1121,7 @@ static void q_fmt_body(ray_t* val) {
             for (int64_t i = 0; i < ray_len(v) && sym_col; i++)
                 if (!vel[i] || vel[i]->type != -RAY_SYM) sym_col = 0;
         }
-        /* Key-column width: sized over the showable rows only when the console
-         * clip is armed (spec §1.4 — a huge dict is not scanned in full just to
-         * pad keys); over every row otherwise (historical behaviour). */
-        int64_t n_size = q_size_rows(n);
+        int64_t n_size = q_size_rows(n);   /* clip-armed: size showable rows only */
         for (int pass = 0; pass < 2; pass++) {
             int64_t n_pass = (pass == 0) ? n_size : n;
             for (int64_t i = 0; i < n_pass; i++) {
@@ -1579,19 +1141,11 @@ static void q_fmt_body(ray_t* val) {
                 ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
                 ray_release(ja);
                 if (ve && !RAY_IS_ERR(ve)) {
-                    /* NB: a len-1 string value renders "c", NOT ,"c" — the
-                     * banked list/first ledger pins `c| "h"` (first "hello"
-                     * is a char ATOM in kdb).  The RAY_STR conflation cannot
-                     * also satisfy the KV dict rows that pin `35| ,"D"`
-                     * (1-char char VECTORS) — that side stays red-below-floor
-                     * until the C3 string model splits the two. */
+                    /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`) */
                     if (sym_col && ve->type == -RAY_SYM)
                         q_fmt_dict_key(ve, vb, sizeof vb);
                     else if (ve->type == -RAY_BOOL)
-                        /* A bool ATOM row prints BARE (`a| 0`, ref/like.md's
-                         * dict example); a bool VECTOR value keeps its packed
-                         * `100b` form (`d>=5` -> `a| 100b`, ref/greater-than
-                         * .md:51-53) via the plain q_fmt path below. */
+                        /* bool ATOM rows BARE; vectors keep `100b` */
                         q_fmt_dict_key(ve, vb, sizeof vb);
                     else
                         q_fmt(ve, vb, sizeof vb);
@@ -1605,105 +1159,50 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* The functional qSQL parse tree (?;`t;c;b;a) / (!;...) prints VERTICALLY,
-     * one element per line - kdb's display, pinned by the parse ledgers.  A
-     * dict CLAUSE (by/select) inside it renders INLINE as `keys!vals`
-     * (piece-3 display), NOT the k|v value form above - so the 5-list loop
-     * uses q_fmt_dict_inline for dict elements. */
-    if (val->type == RAY_LIST && ray_len(val) == 5) {
-        ray_t** e = (ray_t**)ray_data(val);
-        ray_t* h = e[0];
-        if (h && h->type == -RAY_SYM && !(h->attrs & 0x20)) {
-            ray_t* s = ray_sym_str(h->i64);
-            int vert = (s && ray_str_len(s) == 1 &&
-                        (ray_str_ptr(s)[0] == '?' || ray_str_ptr(s)[0] == '!'));
-            if (s) ray_release(s);
-            if (vert) {
-                for (int64_t i = 0; i < 5; i++) {
-                    if (qe_done()) break;
-                    char elem[2048]; elem[0] = '\0';
-                    if (e[i] && e[i]->type == RAY_DICT)
-                        q_fmt_dict_inline(e[i], elem, sizeof elem);
-                    else
-                        q_fmt(e[i], elem, sizeof elem);
-                    if (i) qe_putc('\n');
-                    qe_puts(elem);
-                }
-                return;
-            }
-        }
-    }
-
-    /* A general RAY_LIST is either a PARSE TREE (compact `(a;b;c)`, a frozen
-     * display contract) or a VALUE (kdb one-item-per-line / a matrix,
-     * row-per-line column-aligned).  The classifier inspects the head. */
+    /* General list, kdb-true: one item per line, each a single-line k-repr —
+     * parse trees and values alike (basics/parsetrees.md; implicit-iteration
+     * .md pins nested items inline `(110b;0b)`).  TABLE-ctor head hidden;
+     * one item = `,x`; rectangular = aligned matrix (ref/mmu.md). */
     if (val->type == RAY_LIST) {
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
-
-        if (q_list_is_parse_tree(val, 0)) {
-            /* PARSE TREE — compact `(a;b;c)`.  A literal-constructor head (the
-             * parser's paren-list marker) is HIDDEN: `((list);1;2;3)` displays
-             * (1;2;3); a 1-element tail is an enlist `,x`. */
-            ray_t* lv = q_registry_list_value();
-            ray_t* tv = q_registry_table_value();
-            if (lv && n >= 1 && e[0] == lv) { e++; n--; }
-            else if (tv && n >= 1 && e[0] == tv) { e++; n--; }
-            if (n == 1) {
-                char elem[2048]; elem[0] = '\0';
-                q_fmt(e[0], elem, sizeof elem);
-                qe_putc(',');
-                qe_puts(elem);
-                return;
-            }
-            qe_putc('(');
-            for (int64_t i = 0; i < n; i++) {
-                if (i) qe_putc(';');
-                char elem[1024]; elem[0] = '\0';
-                q_fmt(e[i], elem, sizeof elem);   /* recurse */
-                qe_puts(elem);
-            }
-            qe_putc(')');
-            return;
-        }
-
-        /* VALUE list. */
+        ray_t* tv = q_registry_table_value();
+        if (tv && n >= 1 && e[0] == tv) { e++; n--; }
+        /* a bare constructor (parse "()") is the empty-list application */
+        if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
         if (n == 0) { qe_puts("()"); return; }
         if (n == 1) {                             /* enlist: ,x */
             char elem[2048]; elem[0] = '\0';
-            q_fmt(e[0], elem, sizeof elem);
+            q_fmt_krepr(e[0], elem, sizeof elem);
             qe_putc(',');
             qe_puts(elem);
             return;
         }
-        if (q_is_matrix(val)) { q_fmt_matrix(val); return; }
-        q_fmt_value_list(val);
+        if (q_is_matrix(e, n)) { q_fmt_matrix(e, n); return; }
+        for (int64_t i = 0; i < n; i++) {
+            if (qe_done()) break;                /* height cap hit — early exit */
+            char elem[2048]; elem[0] = '\0';
+            q_fmt_krepr(e[i], elem, sizeof elem);
+            if (i) qe_putc('\n');
+            qe_puts(elem);
+        }
         return;
     }
 
     qe_ray_fallback(val);
 }
 
-
-/* Inline dict `keys!vals` (parenthesised key when enlisted: `(,`a)!,`a`) -
- * ONLY for by/select clause dicts inside a functional qSQL parse tree, where
- * kdb shows the dict inline rather than as k|v rows. */
-static void q_fmt_dict_inline(ray_t* d, char* buf, size_t bufsz) {
-    ray_t* keys = ray_dict_keys(d);
-    ray_t* vals = ray_dict_vals(d);
-    char kb[2048]; kb[0] = '\0';
-    char vb[2048]; vb[0] = '\0';
-    q_fmt(keys, kb, sizeof kb);
-    q_fmt(vals, vb, sizeof vb);
-    if (kb[0] == ',') snprintf(buf, bufsz, "(%s)!%s", kb, vb);
-    else              snprintf(buf, bufsz, "%s!%s", kb, vb);
+/* Bounded append for the krepr assemblers; returns the new write position
+ * (reserves 2 bytes for a closing paren + NUL). */
+static size_t q_krepr_cat(char* buf, size_t bufsz, size_t pos, const char* s) {
+    size_t el = strlen(s);
+    if (pos + el + 2 > bufsz) el = bufsz > pos + 2 ? bufsz - pos - 2 : 0;
+    memcpy(buf + pos, s, el);
+    return pos + el;
 }
 
-/* ---- single-line k-repr (kdb `0N!x`, feat/q-file-text) --------------------
- * Generic lists render inline `(a;b;c)` (enlist `,x`); a string renders
- * quoted-escaped with the len-1 `,"c"` conflation rule (see q_matrix_cell);
- * typed vectors, atoms and containers reuse q_fmt (already single-line for
- * vectors: `5 6i`). */
+/* Single-line k-repr (kdb `0N!x`, `-3!`, every list ITEM above): lists
+ * inline `(a;b;c)` / `,x`; len-1 string conflation `,"c"`; else q_fmt. */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0) return;
     buf[0] = '\0';
@@ -1717,17 +1216,12 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
     if (val->type == RAY_DICT) {
-        /* A plain dict k-reprs INLINE `keys!vals` (kdb `-3!`a`b!1 2` ->
-         * "`a`b!1 2"), parenthesising an enlisted key (`(,`a)!,1`) — the same
-         * rule as q_fmt_dict_inline, recursing through krepr.  A KEYED TABLE
-         * (table!table) keeps the multi-line q_fmt fallback below (its flip
-         * repr is a tracked gap). */
+        /* dict inline `keys!vals` (`(,`a)!,1`); a KEYED TABLE keeps the
+         * q_fmt fallback (flip repr = tracked gap) */
         ray_t* kk = ray_dict_keys(val);
         ray_t* vv = ray_dict_vals(val);
         if (kk && vv && !(kk->type == RAY_TABLE && vv->type == RAY_TABLE)) {
-            /* dict storage may keep homogeneous atom runs BOXED — collapse to
-             * typed vectors for the repr (`1 2`, not `(1;2)`), the same
-             * q_collapse_list the HOF wrappers use (single-home). */
+            /* boxed homogeneous runs collapse to typed vectors (`1 2`) */
             ray_t* ck = q_collapse_list(kk);   /* owned */
             ray_t* cv = q_collapse_list(vv);   /* owned */
             char kb[2048]; kb[0] = '\0';
@@ -1742,9 +1236,16 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         }
     }
     if (val->type == RAY_LIST) {
+        /* deriv carriers are lists structurally but display as functions */
+        if (q_deriv_kind_of(val) != Q_DERIV_NONE) { q_fmt(val, buf, bufsz); return; }
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
-        if (n == 0) { snprintf(buf, bufsz, "()"); return; }
+        ray_t* tv = q_registry_table_value();   /* hidden table-literal head */
+        if (tv && n >= 1 && e[0] == tv) { e++; n--; }
+        if (n == 0 || (n == 1 && e[0] == q_registry_list_value())) {
+            snprintf(buf, bufsz, "()");
+            return;
+        }
         if (n == 1 && bufsz > 1) {
             buf[0] = ',';
             q_fmt_krepr(e[0], buf + 1, bufsz - 1);
@@ -1756,12 +1257,34 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             if (i && pos + 1 < bufsz) buf[pos++] = ';';
             char eb[2048]; eb[0] = '\0';
             q_fmt_krepr(e[i], eb, sizeof eb);
-            size_t el = strlen(eb);
-            if (pos + el + 2 > bufsz) el = bufsz > pos + 2 ? bufsz - pos - 2 : 0;
-            memcpy(buf + pos, eb, el);
-            pos += el;
+            pos = q_krepr_cat(buf, bufsz, pos, eb);
         }
         if (pos + 1 < bufsz) buf[pos++] = ')';
+        buf[pos] = '\0';
+        return;
+    }
+    /* string vector inline: `("hello,world";,"1")` (ref/file-text.md:348) */
+    if (val->type == RAY_STR && ray_is_vec(val)) {
+        int64_t n = ray_len(val);
+        if (n == 0) { snprintf(buf, bufsz, "()"); return; }
+        size_t pos = 0;
+        if (pos + 1 < bufsz) buf[pos++] = (n == 1) ? ',' : '(';
+        for (int64_t i = 0; i < n; i++) {
+            if (i && pos + 1 < bufsz) buf[pos++] = ';';
+            ray_t* ia = ray_i64(i);
+            ray_t* it = ray_at_fn(val, ia);
+            ray_release(ia);
+            if (!it || RAY_IS_ERR(it)) { if (it) ray_release(it); break; }
+            char eb[2048];
+            if (n > 1 && it->type == -RAY_STR && ray_str_len(it) == 1) {
+                eb[0] = ',';
+                q_fmt_qstring(it, eb + 1, sizeof eb - 1);
+            } else
+                q_fmt_qstring(it, eb, sizeof eb);
+            ray_release(it);
+            pos = q_krepr_cat(buf, bufsz, pos, eb);
+        }
+        if (n > 1 && pos + 1 < bufsz) buf[pos++] = ')';
         buf[pos] = '\0';
         return;
     }
