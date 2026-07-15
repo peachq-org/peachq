@@ -370,12 +370,13 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     /* ---- dict arms (ref/drop.md) — claimed BEFORE the int-vector cut arm so
      * `1 2 _ intkeyed_dict` is a key-drop, and before the int-atom count tail
      * so `1_d` drops ENTRIES (keys and values together), never values-only. */
+    int64_t dk;
     if (list && list->type == RAY_DICT && !q_is_keyed_table(list)) {
         /* n _ d — int ATOM drops the first/last n entries */
-        if (n && n->type == -RAY_I64 && !RAY_ATOM_IS_NULL(n)) {
+        if (q_strict_i64(n, &dk) && !RAY_ATOM_IS_NULL(n)) {
             ray_t* k = ray_dict_keys(list);          /* borrowed */
             ray_t* v = ray_dict_vals(list);          /* borrowed */
-            if (!k || !v) return ray_error("type", "_ (drop): malformed dictionary");
+            if (!k || !v) return ray_error("type", "_: dict");
             ray_t* rk = q_drop_wrap(n, k);
             if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);
             if (!rk || RAY_IS_ERR(rk)) return rk;
@@ -386,8 +387,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
         }
         /* keys _ d — sym atom / sym vector / int vector lhs drops entries by
          * key (other lhs kinds keep today's error tail) */
-        if (n && (n->type == -RAY_SYM || n->type == RAY_SYM ||
-                  n->type == RAY_I64 || n->type == RAY_I32 || n->type == RAY_I16))
+        if (n && (n->type == -RAY_SYM || n->type == RAY_SYM || q_is_int_vec(n)))
             return q_dict_drop_keys(list, n);
     }
     /* d _ key — dict lhs drops the entry at an ATOM key; a vector rhs is
@@ -395,7 +395,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     if (n && n->type == RAY_DICT && !q_is_keyed_table(n)) {
         if (list && ray_is_atom(list))
             return q_dict_drop_keys(n, list);
-        return ray_error("type", "_ (drop): dict drop takes an atom key");
+        return ray_error("type", "_: key");
     }
     /* syms _ t — table column-drop (ref/drop.md `` `a`b _ t ``): sym-VECTOR
      * lhs only (a sym ATOM lhs on a table stays 'type — pinned rows).  One
@@ -414,13 +414,10 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     /* x _ i — delete the item at index i (ref/drop.md `0 1 ... 8 _ 5`):
      * list/vector lhs, int-ATOM rhs.  Two clamped range-takes joined; an
      * out-of-range index returns x unchanged (Drop is tolerant). */
+    int64_t i;
     if (n && (ray_is_vec(n) || n->type == RAY_LIST) && n->type != RAY_DICT &&
-        list && (list->type == -RAY_I64 || list->type == -RAY_I32 ||
-                 list->type == -RAY_I16)) {
+        q_strict_i64(list, &i)) {
         int64_t len = ray_len(n);
-        int64_t i = (list->type == -RAY_I64) ? list->i64
-                  : (list->type == -RAY_I32) ? (int64_t)list->i32
-                  : (int64_t)list->i16;
         if (i < 0 || i >= len) { ray_retain(n); return n; }
         int64_t r1[2] = { 0, i }, r2[2] = { i + 1, len - i - 1 };
         ray_t* rng1 = ray_vec_from_raw(RAY_I64, r1, 2);
@@ -441,36 +438,21 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     /* q cut: int-VECTOR lhs — `2 4_v` slices [p0,p1) then [p_last,end).
      * Positions non-decreasing within 0..len; result is a boxed list of
      * slices (kdb 0h). */
-    if (n && (n->type == RAY_I64 || n->type == RAY_I32 || n->type == RAY_I16)) {
+    if (q_is_int_vec(n)) {
         if (!list || (!ray_is_vec(list) && list->type != RAY_LIST &&
                       list->type != RAY_TABLE))
-            return ray_error("type", "_ (cut): expects a list rhs");
+            return ray_error("type", "_: x");
         int64_t len = (list->type == RAY_TABLE) ? ray_table_nrows(list)
                                                 : ray_len(list);
         int64_t np = ray_len(n);
         ray_t* out = ray_list_new(np > 0 ? np : 1);
         int64_t prev = 0;
         for (int64_t i = 0; i < np; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* pe = ray_at_fn(n, ia);
-            ray_release(ia);
-            if (!pe || RAY_IS_ERR(pe)) { ray_release(out); return pe; }
-            int64_t p = pe->i64;
-            ray_release(pe);
-            int64_t nxt = len;
-            if (i + 1 < np) {
-                ray_t* ja = ray_i64(i + 1);
-                ray_t* ne = ray_at_fn(n, ja);
-                ray_release(ja);
-                if (!ne || RAY_IS_ERR(ne)) { ray_release(out); return ne; }
-                nxt = ne->i64;
-                ray_release(ne);
-            }
+            int64_t p = q_ivec_get(n, i);
+            int64_t nxt = (i + 1 < np) ? q_ivec_get(n, i + 1) : len;
             if (p < 0 || p > len || nxt < p || nxt > len || (i > 0 && p < prev)) {
                 ray_release(out);
-                return ray_error("domain",
-                    "_ (cut): positions must be non-decreasing within 0..%lld",
-                    (long long)len);
+                return ray_error("domain", "_: positions");
             }
             prev = p;
             ray_t* slice;
@@ -489,17 +471,17 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
         }
         return out;
     }
-    if (!n || n->type != -RAY_I64)
-        return ray_error("type", "_ (drop): count must be an integer");
-    if (!list) return ray_error("type", "_ (drop): nil list");
+    int64_t k;
+    ray_t* err = q_i64_or_err(n, &k, "_: n");
+    if (err) return err;
+    if (!list) return ray_error("type", "_: x");
     int64_t len;
     if (list->type == -RAY_STR)
         len = (int64_t)ray_str_len(list);           /* SSO-safe string length */
     else if (ray_is_vec(list) || list->type == RAY_LIST)
         len = ray_len(list);                         /* typed vector / boxed list */
     else
-        return ray_error("type", "_ (drop): expects a list, vector, or string");
-    int64_t k = n->i64;
+        return ray_error("type", "_: x");
     int64_t start, amount;
     if (k >= 0) { start = (k < len) ? k : len; amount = len - start; }
     else        { start = 0; amount = len + k; if (amount < 0) amount = 0; }
@@ -515,14 +497,13 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
  * groups of n (ragged last group: `4 cut til 10` -> (0 1 2 3;4 5 6 7;8 9)).
  * An int VECTOR is a positional cut — identical to `_`, so delegate.  Borrows. */
 ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
-    if (n && (n->type == -RAY_I64 || n->type == -RAY_I32 || n->type == -RAY_I16)) {
-        int64_t sz = (n->type == -RAY_I64) ? n->i64
-                   : (n->type == -RAY_I32) ? (int64_t)n->i32 : (int64_t)n->i16;
-        if (sz <= 0) return ray_error("domain", "cut: piece size must be positive");
+    int64_t sz;
+    if (q_strict_i64(n, &sz)) {
+        if (sz <= 0) return ray_error("domain", "cut: n");
         int is_str = (x && x->type == -RAY_STR);
         int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
         if (!x || (!is_str && !ray_is_vec(x) && x->type != RAY_LIST))
-            return ray_error("type", "cut: expects a list/vector/string rhs");
+            return ray_error("type", "cut: x");
         int64_t rows = (total + sz - 1) / sz;
         ray_t* out = ray_list_new(rows > 0 ? rows : 1);
         if (RAY_IS_ERR(out)) return out;
@@ -539,35 +520,29 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
     }
     return q_drop_wrap(n, x);   /* int-vector positional cut == `_` */
 }
-/* ===== q list verbs (feat/q-list-verbs) ===================================
- * rotate / sublist / next / prev / fill (`^`).  kdb rotate.md, sublist.md,
- * next.md, prev.md, and `^` (fill).  rotate/sublist reuse q_gather (index-vector
- * gather via ray_at_fn, collapsed to a typed vector; string-aware); next/prev do
- * a typed-vector shift with a sentinel-null fill; fill coalesces nulls.  Dict /
- * table / mixed-list / non-nullable-type forms are DEFERRED cells (error, never
- * a wrong answer) — their ledger rows live in the *-deferred.qcmd companions. */
+/* ===== q list verbs: rotate / sublist / next / prev / fill (`^`) ==========
+ * ref rotate.md, sublist.md, next.md, prev.md; deferred forms error, never
+ * wrong-answer (*-deferred.qcmd companions). */
 
 /* q `n rotate x` — cyclic shift left by n (negative = right; kdb rotate.md).
  * n is an int atom; the right arg is a vector/list/string.  Empty x returns a
  * copy (no modulo-by-zero).  Reuses q_gather with recycle=1. */
 ray_t* q_rotate_wrap(ray_t* n, ray_t* x) {
-    if (!n || !(n->type == -RAY_I64 || n->type == -RAY_I32 || n->type == -RAY_I16))
-        return ray_error("type", "rotate: left arg must be an int atom");
+    int64_t k;
+    ray_t* err = q_i64_or_err(n, &k, "rotate: n");
+    if (err) return err;
     if (RAY_ATOM_IS_NULL(n))
-        return ray_error("nyi", "rotate: 0N left arg is deferred");
+        return ray_error("nyi", "rotate: 0N");
     /* table arm (ref/rotate.md: a table rotates its ROWS) — cyclic row gather */
     if (x && x->type == RAY_TABLE) {
         int64_t total = ray_table_nrows(x);
         if (total <= 0) { ray_retain(x); return x; }
-        int64_t k = q_iatom_val(n);
-        k = ((k % total) + total) % total;
-        return q_row_gather(x, k, total, 1);
+        return q_row_gather(x, ((k % total) + total) % total, total, 1);
     }
     if (!x || (!ray_is_vec(x) && x->type != RAY_LIST && x->type != -RAY_STR))
-        return ray_error("type", "rotate: right arg must be a list, vector, or string (keyed table deferred)");
+        return ray_error("type", "rotate: x");  /* keyed table deferred */
     int64_t total = (x->type == -RAY_STR) ? (int64_t)ray_str_len(x) : ray_len(x);
     if (total <= 0) { ray_retain(x); return x; }
-    int64_t k = q_iatom_val(n);
     k = ((k % total) + total) % total;         /* normalize into [0,total) */
     return q_gather(x, k, total, total, 1);     /* recycle -> cyclic */
 }
@@ -581,18 +556,16 @@ ray_t* q_sublist_wrap(ray_t* n, ray_t* x) {
     int is_dict = x && x->type == RAY_DICT && !q_is_keyed_table(x);
     if (!x || (!is_tbl && !is_dict && !ray_is_vec(x) && x->type != RAY_LIST &&
                x->type != -RAY_STR))
-        return ray_error("type", "sublist: right arg must be a list, vector, string, dict, or table (keyed table deferred)");
+        return ray_error("type", "sublist: x"); /* keyed table deferred */
     int64_t total = is_tbl  ? ray_table_nrows(x)
                   : is_dict ? ray_dict_len(x)
                   : (x->type == -RAY_STR) ? (int64_t)ray_str_len(x) : ray_len(x);
-    int64_t start, count;
-    if (n && (n->type == -RAY_I64 || n->type == -RAY_I32 || n->type == -RAY_I16)) {
-        if (RAY_ATOM_IS_NULL(n)) return ray_error("nyi", "sublist: 0N left arg is deferred");
-        int64_t k = q_iatom_val(n);
+    int64_t start, count, k;
+    if (q_strict_i64(n, &k)) {
+        if (RAY_ATOM_IS_NULL(n)) return ray_error("nyi", "sublist: 0N");
         if (k >= 0) { start = 0; count = (k < total) ? k : total; }
         else { int64_t kk = -k; count = (kk < total) ? kk : total; start = total - count; }
-    } else if (n && (n->type == RAY_I64 || n->type == RAY_I32 || n->type == RAY_I16) &&
-               ray_len(n) == 2) {
+    } else if (q_is_int_vec(n) && ray_len(n) == 2) {
         int64_t i = q_ivec_get(n, 0), j = q_ivec_get(n, 1);
         if (i < 0) i = 0;                        /* clamp negative start to 0 */
         if (j < 0) j = 0;
@@ -601,7 +574,7 @@ ray_t* q_sublist_wrap(ray_t* n, ray_t* x) {
         if (start + count > total) count = total - start;   /* truncate tail */
         if (count < 0) count = 0;
     } else {
-        return ray_error("type", "sublist: left arg must be an int atom or a 2-item int vector");
+        return ray_error("type", "sublist: n");
     }
     if (is_tbl) return q_row_gather(x, start, count, 0);   /* rows stay a table */
     if (is_dict) {
@@ -1111,12 +1084,8 @@ ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
 }
 
 /* ===== `?` GENERATE arms (ref/deal.md "Generate") ===========================
- * All arms draw from libc rand() — the same stream the roll/deal/permute
- * paths use — so `\S n` (q_ns.c) re-seeds them all.  Each right-operand form
- * yields a result of y's type per the docs table.  Deal (`-n?y`) of a
- * non-integer y is defined only for null-guid y ("y must be a positive long
- * or null GUID"); the sym form additionally deals (distinct syms) per the
- * Generate table's Roll,Deal column. */
+ * All arms draw from libc rand() (one stream — `\S n` re-seeds them all);
+ * each right-operand form yields a result of y's type per the docs table. */
 
 /* n?`m — n symbols of m chars each from "abcdefghijklmnop"; m is the numeric
  * symbol's NAME (`2 -> 2), 1<=m<=8 -> 'length otherwise (unpinned error
@@ -1172,11 +1141,10 @@ static ray_t* q_gen_syms(int64_t n, ray_t* ysym, int distinct) {
  * 62 random bits give the fraction; a rounding hit at the top is clamped
  * back below y so the [0,y) contract holds exactly. */
 static ray_t* q_gen_floats(int64_t n, ray_t* y) {
-    double fy = y->f64;                     /* F32 atoms reuse the f64 slot */
+    double fy;
     int f32 = (y->type == -RAY_F32);
-    if (f32) fy = (double)(float)fy;
-    if (fy != fy || fy < 0)
-        return ray_error("domain", "?: float roll bound must be >= 0");
+    if (!q_strict_f64(y, &fy) || fy != fy || fy < 0)
+        return ray_error("domain", "?: bound");
     ray_t* out = ray_vec_new(f32 ? RAY_F32 : RAY_F64, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -1311,10 +1279,10 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
      * their own (deferred) path. */
     if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
         ray_t* keys = ray_dict_keys(x);              /* borrowed */
-        if (!keys) return ray_error("type", "?: malformed dictionary");
+        if (!keys) return ray_error("type", "?: dict");
         int vo = 0;
         ray_t* vv = q_dict_vals_vec(x, &vo);
-        if (!vv) return ray_error("type", "?: malformed dictionary");
+        if (!vv) return ray_error("type", "?: dict");
         ray_t* i = q_roll_wrap(vv, y);               /* find arm: miss -> count */
         if (vo) ray_release(vv);
         if (!i || RAY_IS_ERR(i)) return i;
@@ -1392,16 +1360,16 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         }
         return i;
     }
-    if (x && (x->type == -RAY_I64 || x->type == -RAY_I32)) {
-        int64_t nx = (x->type == -RAY_I64) ? x->i64 : x->i32;
+    int64_t nx;
+    if (q_strict_i64(x, &nx)) {
         if (RAY_ATOM_IS_NULL(x)) {                  /* 0N ? y — permute all items */
             if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {
-                int64_t m = (y->type == -RAY_I64) ? y->i64 : y->i32;
-                if (m < 0) return ray_error("type", "?: permute needs a non-negative count");
+                int64_t m = q_iatom_val(y);
+                if (m < 0) return ray_error("type", "?: permute n");
                 return q_deal_indices(m, m);
             }
             if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return q_deal_pick(ray_len(y), y);
-            return ray_error("nyi", "?: permute of this operand is deferred");
+            return ray_error("nyi", "?: permute y");
         }
         int deal = nx < 0;
         int64_t n = deal ? -nx : nx;
@@ -1409,17 +1377,17 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         if (y && y->type == -RAY_SYM)               /* n?`m sym roll / deal */
             return q_gen_syms(n, y, deal);
         if (y && (y->type == -RAY_F64 || y->type == -RAY_F32)) {
-            if (deal) return ray_error("type", "?: deal needs a positive long or 0Ng right operand");
+            if (deal) return ray_error("type", "?: deal y");
             return q_gen_floats(n, y);              /* n?f uniform [0,y) */
         }
         if (y && y->type == -RAY_BOOL) {
-            if (deal) return ray_error("type", "?: deal needs a positive long or 0Ng right operand");
-            if (y->b8) return ray_error("nyi", "?: bool roll is defined for 0b only");
+            if (deal) return ray_error("type", "?: deal y");
+            if (y->b8) return ray_error("nyi", "?: y");   /* roll defined for 0b only */
             return q_gen_bits(n);                   /* n?0b */
         }
         if (y && y->type == -RAY_U8) {
-            if (deal) return ray_error("type", "?: deal needs a positive long or 0Ng right operand");
-            if (y->u8) return ray_error("nyi", "?: byte roll is defined for 0x0 only");
+            if (deal) return ray_error("type", "?: deal y");
+            if (y->u8) return ray_error("nyi", "?: y");   /* roll defined for 0x0 only */
             return q_gen_bytes(n);                  /* n?0x0 */
         }
         if (y && y->type == -RAY_GUID) {            /* n?0Ng / -n?0Ng — env guid.
@@ -1427,7 +1395,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
              * 122-bit space (collisions negligible); kdb's process/time deal
              * seed nuance is NOT reproduced (recorded divergence). */
             if (!RAY_ATOM_IS_NULL(y))
-                return ray_error("type", "?: guid generate needs 0Ng");
+                return ray_error("type", "?: y");   /* guid generate needs 0Ng */
             ray_t* cnt = ray_i64(n);
             ray_t* g = q_env_call1("guid", cnt);
             ray_release(cnt);
@@ -1435,27 +1403,32 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         }
         if (y && (y->type == -RAY_I64 || y->type == -RAY_I32) &&
             !RAY_ATOM_IS_NULL(y)) {
-            int64_t m = (y->type == -RAY_I64) ? y->i64 : y->i32;
-            if (m == 0) {                           /* n?0 / n?0i full-range */
+            if (q_iatom_val(y) == 0) {              /* n?0 / n?0i full-range */
                 if (deal)
-                    return ray_error("nyi", "?: deal of 0/0i (full-range distinct) is deferred");
+                    return ray_error("nyi", "?: deal 0");
                 return (y->type == -RAY_I64) ? q_gen_longs(n) : q_gen_ints(n);
             }
         }
         if (deal) {                                 /* -n ? y — deal, no replacement */
             if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {
-                int64_t m = (y->type == -RAY_I64) ? y->i64 : y->i32;
-                if (m <= 0) return ray_error("domain", "?: deal max must be positive");
+                int64_t m = q_iatom_val(y);
+                if (m <= 0) return ray_error("domain", "?: deal m");
                 return q_deal_indices(n, m);
             }
             if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return q_deal_pick(n, y);
-            return ray_error("nyi", "?: deal of this operand is deferred");
+            return ray_error("nyi", "?: deal y");
         }
-        if (y && (y->type == -RAY_I64 || y->type == -RAY_I32))  /* roll */
-            return q_env_call2("rand", x, y);
+        if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {  /* roll */
+            ray_t* cnt = ray_i64(nx);               /* normalized count for env rand */
+            ray_t* r = q_env_call2("rand", cnt, y);
+            ray_release(cnt);
+            return r;
+        }
         if (y && (ray_is_vec(y) || y->type == RAY_LIST)) {      /* pick */
+            ray_t* cnt = ray_i64(nx);
             ray_t* len = ray_i64(ray_len(y));
-            ray_t* idx = q_env_call2("rand", x, len);
+            ray_t* idx = q_env_call2("rand", cnt, len);
+            ray_release(cnt);
             ray_release(len);
             if (!idx || RAY_IS_ERR(idx)) return idx;
             ray_t* out = ray_at_fn(y, idx);
@@ -1467,9 +1440,9 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             }
             return out;
         }
-        return ray_error("nyi", "?: right operand form is deferred (temporal/char roll)");
+        return ray_error("nyi", "?: y");   /* temporal/char roll deferred */
     }
-    return ray_error("type", "?: unsupported operand types");
+    return ray_error("type", "?: x");
 }
 
 /* q `rand x` — {first 1?x} exactly (ref/rand.md).  A list picks one random

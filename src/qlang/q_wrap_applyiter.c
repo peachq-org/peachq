@@ -51,17 +51,10 @@ static int q_is_assign(ray_t* f) {
         && pv.spelling[0] == ':' && pv.spelling[1] == '\0';
 }
 
-/* An index element must be a non-negative integer atom.  Returns 1 + writes
- * *out on success; 0 on a non-integer (symbol/float/list/null/error). */
+/* Index element read: bool arm + the strict-cast law (callers value-check). */
 static int q_idx_int(ray_t* e, int64_t* out) {
-    if (!e || !ray_is_atom(e)) return 0;
-    switch (e->type) {
-    case -RAY_BOOL: *out = e->b8;  return 1;
-    case -RAY_I16:  *out = e->i16; return 1;
-    case -RAY_I32:  *out = e->i32; return 1;
-    case -RAY_I64:  *out = e->i64; return 1;
-    default: return 0;
-    }
+    if (e && e->type == -RAY_BOOL) { *out = e->b8; return 1; }
+    return q_strict_i64(e, out);
 }
 
 /* Copy v's items into a fresh rc==1 boxed list (amend in place with
@@ -838,7 +831,7 @@ ray_t* q_mkopproj(ray_t** args, int64_t k) {
     ray_t* base = args[0];
     int64_t n; int64_t m;
     if (!q_idx_int(args[1], &n) || !q_idx_int(args[2], &m))
-        return ray_error("type", "q.mkopproj: n/mask must be integers");
+        return ray_error("type", "q.mkopproj: n/mask");
     if (n < 1 || n > 60) return ray_error("rank", "q.mkopproj: bad slot count");
     uint64_t mask = (uint64_t)m;
     ray_t* slots[64];
@@ -989,13 +982,11 @@ ray_t* g_if_value    = NULL;
 ray_t* g_do_value    = NULL;
 ray_t* g_while_value = NULL;
 
-/* q if/while require the test to evaluate to an atom of INTEGRAL type
- * (ref/if.md, ref/while.md); a float / symbol / vector / generic null is a
- * 'type error, not a silent truthiness (kdb `if[1 0;…]` signals `type). */
+/* q if/while tests must be INTEGRAL atoms (ref/if.md, ref/while.md): a float
+ * / symbol / vector / generic null is 'type, never a silent truthiness. */
 static int q_ctl_test_ok(ray_t* t) {
-    int8_t ty = t->type;
-    return ty == -RAY_BOOL || ty == -RAY_I64 || ty == -RAY_I32 ||
-           ty == -RAY_I16 || ty == -RAY_U8;
+    int64_t v;
+    return t->type == -RAY_BOOL || q_strict_i64(t, &v);
 }
 
 /* Evaluate a test/condition arg to a truthiness, materializing a lazy handle.
@@ -1009,7 +1000,7 @@ static int q_ctl_truth(ray_t* arg, ray_t** err) {
     if (RAY_IS_ERR(t)) { *err = t; return 0; }
     if (!q_ctl_test_ok(t)) {
         ray_release(t);
-        *err = ray_error("type", "control test must be an integral atom");
+        *err = ray_error("type", "control: test");
         return 0;
     }
     int truthy = is_truthy(t);
@@ -1059,15 +1050,13 @@ ray_t* q_do_fn(ray_t** args, int64_t n) {
     if (RAY_IS_ERR(cnt)) return cnt;
     if (ray_is_lazy(cnt)) cnt = ray_lazy_materialize(cnt);
     if (RAY_IS_ERR(cnt)) return cnt;
-    if (RAY_ATOM_IS_NULL(cnt) ||
-        (cnt->type != -RAY_I64 && cnt->type != -RAY_I32 &&
-         cnt->type != -RAY_I16 && cnt->type != -RAY_U8)) {
+    int64_t times;
+    if (RAY_ATOM_IS_NULL(cnt) || !q_strict_i64(cnt, &times)) {
         ray_release(cnt);
-        return ray_error("type", "do: count must be a non-negative integer atom");
+        return ray_error("type", "do: n");
     }
-    int64_t times = elem_as_i64(cnt);
     ray_release(cnt);
-    if (times < 0) return ray_error("type", "do: count must be non-negative");
+    if (times < 0) return ray_error("type", "do: n");
     for (int64_t k = 0; k < times; k++) {
         ray_t* err = q_ctl_run_body(args, 1, n);
         if (err) return err;
