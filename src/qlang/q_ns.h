@@ -29,10 +29,14 @@ ray_t* q_ns_switch(const char* name, size_t len);
 int q_ns_prompt(char* buf, size_t cap);
 
 /* True iff `s` must NOT be context-qualified by the q_lower pass: q manifest
- * reserved words (q_ops_is_reserved), control/qSQL words, or a BUILTIN env
- * binding (q keywords implemented as env fns — parse/type/not/…).  User
- * globals never match. */
+ * reserved words (q_ops_is_reserved), `.q`-hosted keywords (q.q bootstrap),
+ * control/qSQL words, or a BUILTIN env binding (q keywords implemented as env
+ * fns — parse/type/not/…).  User globals never match. */
 int q_ns_is_unqualifiable(const char* s, size_t len);
+
+/* `.q.<name>` binding for a BARE identifier (kdb: keywords are `.q` entries).
+ * BORROWED, or NULL when dotted/oversized/unbound; non-NULL = q.q keyword. */
+ray_t* q_ns_dotq_get(const char* name, size_t len);
 
 /* ---- directory <-> dictionary views (all results OWNED) ---- */
 
