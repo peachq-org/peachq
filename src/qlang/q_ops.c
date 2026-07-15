@@ -469,12 +469,15 @@ static const q_op_t Q_OPS[] = {
     /* `reciprocal` is self-hosted in q.q (`.q.reciprocal:%[1;]`) — no row. */
     { "signum",    QLEX_KW_PREFIX, QR_FN1("signum", q_signum_wrap), QR_NONE, NULL, 1, 0, "atomic" },
     { "ceiling",   QLEX_KW_PREFIX, QR_FN1A("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic" },
-    /* ---- table verbs (feat/q-table-verbs) — wrappers in q_wrap_table.c over
-     * the wave-4 keyed primitives (q_enkey/q_table_flatten) and the base sort
-     * kernel (ray_xasc_fn, ARG-SWAPPED like xbar).  `insert`/`upsert`
-     * intentionally SHADOW the base env special forms of the same name: q
-     * semantics differ (by-name targets, keyed collision/update, row-index
-     * results), so the registry value is a wrapper, never the env snapshot.
+    /* ---- table verbs (feat/q-table-verbs) — all wrappers in q_wrap_table.c
+     * EXCEPT xcol/xcols, which are q.q derivations over `.Q.ft` (QR_QSRC:
+     * bound post-bootstrap; the row is only what keeps them infix).
+     * The wrappers build over the wave-4 keyed primitives (q_enkey/
+     * q_table_flatten) and the base sort kernel (ray_xasc_fn, ARG-SWAPPED
+     * like xbar).  `insert`/`upsert` intentionally SHADOW the base env
+     * special forms of the same name: q semantics differ (by-name targets,
+     * keyed collision/update, row-index results), so the registry value is a
+     * wrapper, never the env snapshot.
      * Families: flip/keys/xkey/xcol/xcols/ungroup/insert/upsert define or
      * rearrange the structures (structural, spec §3); xasc/xdesc sort
      * (rowid); xgroup groups (rowid — border ruling in the AUDIT). */
@@ -482,8 +485,8 @@ static const q_op_t Q_OPS[] = {
     { "keys",   QLEX_KW_PREFIX, QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 1, 0, "structural" },
     { "ungroup",QLEX_KW_PREFIX, QR_FN1("ungroup", q_ungroup_wrap), QR_NONE,       NULL, 1, 0, "structural" },
     { "xkey",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xkey", q_xkey_wrap), NULL, 1, 0, "structural" },
-    { "xcol",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xcol", q_xcol_wrap), NULL, 1, 0, "structural" },
-    { "xcols",  QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xcols", q_xcols_wrap), NULL, 1, 0, "structural" },
+    { "xcol",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcol"),   NULL, 1, 0, "structural" },
+    { "xcols",  QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcols"),  NULL, 1, 0, "structural" },
     { "xasc",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xasc", q_xasc_wrap), NULL, 1, 0, "rowid" },
     { "xdesc",  QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xdesc", q_xdesc_wrap), NULL, 1, 0, "rowid" },
     { "xgroup", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid" },
