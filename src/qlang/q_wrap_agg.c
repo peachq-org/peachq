@@ -299,13 +299,13 @@ ray_t* q_scov_wrap(ray_t* x, ray_t* y){ return q_covariance(x, y, 1); }
 typedef enum { MW_SUM, MW_AVG, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
 
 static ray_t* q_mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
-    if (!nx || !(nx->type==-RAY_I64||nx->type==-RAY_I32||nx->type==-RAY_I16))
-        return ray_error("type", "m-window: left arg must be an int atom");
+    int64_t N;
+    ray_t* err = q_i64_or_err(nx, &N, "m-window: n");
+    if (err) return err;
     if (!x || !q_vec_is_num(x)) {
         if (x && ray_is_atom(x)) { ray_retain(x); return x; }
-        return ray_error("type", "m-window: numeric vector rhs");
+        return ray_error("type", "m-window: x");
     }
-    int64_t N = q_iatom_val(nx);
     int64_t n = ray_len(x);
     int isf = q_vec_is_float(x);
     int8_t otype = (k==MW_SUM || k==MW_MAX || k==MW_MIN) ? (isf ? RAY_F64 : RAY_I64)
