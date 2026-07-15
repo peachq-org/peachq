@@ -487,9 +487,9 @@ ray_t* q_xcols_wrap(ray_t* x, ray_t* y) {
 }
 
 /* q `x xasc y` / `x xdesc y` — sort a table by columns (stable base kernel,
- * ARG-SWAP like QK_XBAR).  y by name: sort the global in place, rebind,
+ * ARG-SWAP like q_xbar_wrap).  y by name: sort the global in place, rebind,
  * return the name.  A keyed table sorts its flattened columns and re-keys.
- * No `s#` attribute (deferred divergence, same as QK_ASC). */
+ * No `s#` attribute (deferred divergence, same as q_asc_wrap). */
 static ray_t* q_xsort(ray_t* x, ray_t* y, int desc) {
     int64_t sym;
     ray_t* t = q_table_operand(y, &sym);
