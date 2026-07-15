@@ -336,13 +336,11 @@ static const q_op_t Q_OPS[] = {
     /* first/last — aggregates (ref/first.md: "first is an aggregate"). */
     { "first",   QLEX_KW_PREFIX, QR_ENV("first"),              QR_NONE,           NULL, 1, 0, "aggregate" },
     { "last",    QLEX_KW_PREFIX, QR_ENV("last"),               QR_NONE,           NULL, 1, 0, "aggregate" },
-    /* q `next x` / `prev x` — shift by one, null-filling the vacated end
-     * (ref/next.md: uniform).  L4 index: a shift IS a gather by shifted
-     * indices (spec §2 lists next/prev/xprev in the index family). */
-    { "next",    QLEX_KW_PREFIX, QR_FN1("next", q_next_wrap),  QR_NONE,           NULL, 1, 0, "index" },
-    { "prev",    QLEX_KW_PREFIX, QR_FN1("prev", q_prev_wrap),  QR_NONE,           NULL, 1, 0, "index" },
-    /* q `n xprev x` — n-item shift (ref/next.md: right-uniform); dyadic infix
-     * like rotate. */
+    /* q `n xprev x` — n-item shift (ref/next.md: right-uniform), null-filling
+     * the vacated end; dyadic infix like rotate.  L4 index: a shift IS a
+     * gather by shifted indices (spec §2 lists next/prev/xprev in the index
+     * family).  `next`/`prev` are its unit shifts, self-hosted in q.q
+     * (`.q.next:xprev[-1;]` / `.q.prev:xprev[1;]`) — no manifest rows. */
     { "xprev",   QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("xprev", q_xprev_wrap), NULL, 1, 0, "index" },
     /* q `fills x` — forward-fill nulls (ref/fill.md: uniform; the `^\`
      * fill-scan).  Computes values (not a gather) -> map. */
@@ -451,7 +449,7 @@ static const q_op_t Q_OPS[] = {
     { "sqrt",    QLEX_KW_PREFIX, QR_ENV("sqrt"),               QR_NONE,           NULL, 1, 0, "atomic" },
     /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm, no
      * rayfall counterpart (rayfall has exp/log/sqrt but not the trig set).
-     * All monadic KW_PREFIX, doc-labelled atomic (ref/{trig,reciprocal,
+     * All monadic KW_PREFIX, doc-labelled atomic (ref/{trig,
      * signum,ceiling}.md); sentinel-null discipline at the bodies
      * (q_wrap_math.c).  `ceiling` is the floor-wrapper twin (float->LONG),
      * NOT rayfall `ceil` (f64).  `signum` is family-atomic but built WITHOUT
@@ -463,7 +461,7 @@ static const q_op_t Q_OPS[] = {
     { "asin",      QLEX_KW_PREFIX, QR_FN1A("asin", q_asin_wrap), QR_NONE, NULL, 1, 0, "atomic" },
     { "acos",      QLEX_KW_PREFIX, QR_FN1A("acos", q_acos_wrap), QR_NONE, NULL, 1, 0, "atomic" },
     { "atan",      QLEX_KW_PREFIX, QR_FN1A("atan", q_atan_wrap), QR_NONE, NULL, 1, 0, "atomic" },
-    { "reciprocal",QLEX_KW_PREFIX, QR_FN1A("reciprocal", q_reciprocal_wrap), QR_NONE, NULL, 1, 0, "atomic" },
+    /* `reciprocal` is self-hosted in q.q (`.q.reciprocal:%[1;]`) — no row. */
     { "signum",    QLEX_KW_PREFIX, QR_FN1("signum", q_signum_wrap), QR_NONE, NULL, 1, 0, "atomic" },
     { "ceiling",   QLEX_KW_PREFIX, QR_FN1A("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic" },
     /* ---- table verbs (feat/q-table-verbs) — wrappers in q_wrap_table.c over
