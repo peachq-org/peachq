@@ -291,21 +291,20 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
 }
 
 /* Gather table rows [start, start+count) (recycle=1 wraps cyclically) into an
- * OWNED table via ray_at_fn(t, idx) — the same primitive `t[0 2]` reaches
- * through q_apply_noun.  The result is never collapsed: tables stay tables. */
+ * OWNED table via qj_table_gather_idx — the same single-home gather `t[0 2]`
+ * reaches through q_apply_noun (char columns byte-permuted, misses
+ * null-filled).  The result is never collapsed: tables stay tables. */
 static ray_t* q_row_gather(ray_t* t, int64_t start, int64_t count, int recycle) {
     int64_t n = ray_table_nrows(t);
-    ray_t* idx = ray_vec_new(RAY_I64, count > 0 ? count : 1);
-    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
-    idx->len = count;
-    int64_t* p = (int64_t*)ray_data(idx);
+    int64_t* p = (int64_t*)malloc((size_t)(count > 0 ? count : 1) * sizeof(int64_t));
+    if (!p) return ray_error("wsfull", "take: out of memory");
     for (int64_t i = 0; i < count; i++) {
         int64_t j = start + i;
         if (recycle && n > 0) j = ((j % n) + n) % n;
         p[i] = j;
     }
-    ray_t* r = ray_at_fn(t, idx);                    /* owned */
-    ray_release(idx);
+    ray_t* r = qj_table_gather_idx(t, p, count);     /* owned */
+    free(p);
     return r;
 }
 
