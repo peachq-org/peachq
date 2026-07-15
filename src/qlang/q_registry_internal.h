@@ -152,8 +152,6 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 /* ---- defined in q_wrap_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y);
-ray_t* q_xcol_wrap(ray_t* x, ray_t* y);
-ray_t* q_xcols_wrap(ray_t* x, ray_t* y);
 ray_t* q_xasc_wrap(ray_t* x, ray_t* y);
 ray_t* q_xdesc_wrap(ray_t* x, ray_t* y);
 ray_t* q_xgroup_wrap(ray_t* x, ray_t* y);

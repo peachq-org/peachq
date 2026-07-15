@@ -23,3 +23,10 @@
 .q.cov:{avg[x*y]-avg[x]*avg y}
 .q.scov:{cov[x;y]*count[x]%-1+count x}
 .q.mavg:{(x msum y)%x mcount y}
+
+/ ---- wave 3 (ref/cols.md) ----
+/ lifted via .Q.ft (defined later, in dotq.q — a lambda resolves it at call time);
+/ names pair with the unchanged column values, so a bad rename/reorder goes ragged
+/ at `!` and throws its own 'length (ref/cols.md: nonexistent key x -> 'length)
+.q.xcol:{[x;y] .Q.ft[{[x;t] c:cols t; flip ($[99h=type x;{[c;m](c^m c),(key m)except c}[c;$[98h=type key x;first each flip key x;x]];x,(count x)_c])!value flip t}[x;];y]}
+.q.xcols:{[x;y] .Q.ft[{[x;t] c:cols t; n:x,c except x; flip n!(flip t) n inter c}[x;];y]}

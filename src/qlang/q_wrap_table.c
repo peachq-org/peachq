@@ -1,4 +1,4 @@
-/* q_wrap_table.c — table verbs: flip/keys/xkey/xcol/xgroup/ungroup, insert/upsert,
+/* q_wrap_table.c — table verbs: flip/keys/xkey/xgroup/ungroup, insert/upsert,
  * dict-make !, key, set, set-ops (distinct/union/inter/except/cross),
  * and the shared right-to-left context builder (list/table literals)
  *
@@ -24,7 +24,7 @@
 #include <stdlib.h>        /* malloc/calloc/free */
 
 /* ===== table verbs (feat/q-table-verbs) ====================================
- * flip/keys/xkey/xcol/xcols/xasc/xdesc/xgroup/ungroup/insert/upsert + the
+ * flip/keys/xkey/xasc/xdesc/xgroup/ungroup/insert/upsert + the
  * table arms of distinct/union/inter/except.  All built over the wave-4
  * keyed primitives (q_wrap_list.c: q_is_keyed_table / q_enkey /
  * q_table_flatten) — NEVER duplicated (the #56 failure mode).  Row-equality is boxed q-match
@@ -407,83 +407,6 @@ ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
         return y;
     }
     return keyed;
-}
-
-/* q `x xcol y` — rename columns.  x: sym atom/vector renames the FIRST n
- * columns; a dict (`a`c!`A`C) or an all-key keyed table (([a:`A;c:`C]))
- * renames selected columns.  Unknown old name -> 'length (ref/cols.md). */
-ray_t* q_xcol_wrap(ray_t* x, ray_t* y) {
-    if (!y || y->type != RAY_TABLE) return ray_error("type", "xcol: expects a table");
-    int64_t nc = ray_table_ncols(y);
-    if (nc > 64) return ray_error("limit", "xcol: too many columns");
-    int64_t newnm[64];
-    for (int64_t c = 0; c < nc; c++) newnm[c] = ray_table_col_name(y, c);
-    int64_t names[64];
-    int64_t n = q_sym_ids(x, names, 64);
-    if (n >= 0) {                                         /* positional rename */
-        if (n > nc) return ray_error("length", "xcol: more names than columns");
-        for (int64_t i = 0; i < n; i++) newnm[i] = names[i];
-    } else if (x && x->type == RAY_DICT) {
-        ray_t* k = ray_dict_keys(x);                      /* borrowed */
-        ray_t* v = ray_dict_vals(x);                      /* borrowed */
-        if (k && k->type == RAY_TABLE) {                  /* all-key keyed map */
-            int64_t mn = ray_table_ncols(k);
-            for (int64_t i = 0; i < mn; i++) {
-                int64_t old = ray_table_col_name(k, i);
-                ray_t* ia = ray_i64(0);
-                ray_t* cell = ray_at_fn(ray_table_get_col_idx(k, i), ia);
-                ray_release(ia);
-                if (!cell || RAY_IS_ERR(cell) || cell->type != -RAY_SYM) {
-                    if (cell && !RAY_IS_ERR(cell)) { ray_release(cell); return ray_error("type", "xcol: bad rename map"); }
-                    return cell ? cell : ray_error("type", "xcol: bad rename map");
-                }
-                int64_t c = q_col_index(y, old);
-                if (c < 0) { ray_release(cell); return ray_error("length", "xcol: column not found"); }
-                newnm[c] = cell->i64;
-                ray_release(cell);
-            }
-        } else {                                          /* plain sym!sym dict */
-            /* keys: RAY_SYM vector; vals: RAY_SYM vector OR a boxed LIST of
-             * sym atoms (rayfall dict boxes heterogeneous-looking vals) —
-             * read both sides via boxed access. */
-            if (!k || k->type != RAY_SYM || !v ||
-                !(v->type == RAY_SYM || v->type == RAY_LIST))
-                return ray_error("type", "xcol: dict must map symbols to symbols");
-            int64_t mn = ray_len(k);
-            if (ray_len(v) != mn)
-                return ray_error("length", "xcol: rename map is ragged");
-            for (int64_t i = 0; i < mn; i++) {
-                /* borrowed domain atom — never released (table/sym.h) */
-                ray_t* ks = ray_sym_vec_cell(k, i);
-                int64_t old = ks ? ray_sym_intern_runtime(ray_str_ptr(ks), ray_str_len(ks)) : 0;
-                ray_t* ia = ray_i64(i);
-                ray_t* vs = ray_at_fn(v, ia);             /* owned */
-                ray_release(ia);
-                if (!vs || RAY_IS_ERR(vs) || vs->type != -RAY_SYM) {
-                    if (vs && !RAY_IS_ERR(vs)) { ray_release(vs); return ray_error("type", "xcol: dict must map symbols to symbols"); }
-                    return vs ? vs : ray_error("type", "xcol: dict must map symbols to symbols");
-                }
-                int64_t nw = vs->i64;
-                ray_release(vs);
-                int64_t c = q_col_index(y, old);
-                if (c < 0) return ray_error("length", "xcol: column not found");
-                newnm[c] = nw;
-            }
-        }
-    } else return ray_error("type", "xcol: expects symbols or a rename dict");
-    ray_t* out = ray_table_new(nc > 0 ? nc : 1);
-    for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++)
-        out = ray_table_add_col(out, newnm[c], ray_table_get_col_idx(y, c));
-    return out;
-}
-
-/* q `x xcols y` — reorder: x columns first (ref/cols.md). */
-ray_t* q_xcols_wrap(ray_t* x, ray_t* y) {
-    if (!y || y->type != RAY_TABLE) return ray_error("type", "xcols: expects a table");
-    int64_t names[64];
-    int64_t n = q_sym_ids(x, names, 64);
-    if (n < 0) return ray_error("type", "xcols: expects symbol column names");
-    return q_table_reorder(y, names, n);
 }
 
 /* q `x xasc y` / `x xdesc y` — sort a table by columns (stable base kernel,
