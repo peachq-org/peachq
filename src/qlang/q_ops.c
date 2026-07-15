@@ -43,8 +43,8 @@
  *   `?`   — dyadic `n?x` roll / `-n?x` deal / permute draw on the RNG
  *           (ref/deal.md, ref/roll.md).  Monadic `?` (distinct) is
  *           deterministic, but a row carries one flag for the whole verb, so
- *           the RNG valence makes the verb nondeterministic.
- *   rand  — `rand x` == {first 1?x}, an RNG draw (ref/rand.md).
+ *           the RNG valence makes the verb nondeterministic.  (`rand`, the
+ *           other RNG keyword, is q.q-hosted — no manifest row.)
  *
  * sideeffect = 1 (observable effect beyond the returned value):
  *   set     — assigns a global through a sym handle (ref/get.md `set`).
@@ -217,9 +217,10 @@ static const q_op_t Q_OPS[] = {
     /* q `n rotate x` / `n sublist x` — dyadic infix keywords (ref/rotate.md
      * "uniform" / ref/sublist.md) — both pure index-space gathers (L4).
      * Not KW_INFIX -> the scanner would split `n rotate x` into two
-     * statements, so the manifest row is what makes them infix. */
-    { "rotate",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("rotate", q_rotate_wrap), NULL, 1, 0, "index" },
-    { "sublist",QLEX_KW_INFIX, QR_NONE,                        QR_FN2("sublist", q_sublist_wrap), NULL, 1, 0, "index" },
+     * statements, so the manifest row is what makes them infix; the VALUE is
+     * the q.q derivation over `#`/`_` (QR_QSRC: bound post-bootstrap). */
+    { "rotate",QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("rotate"), NULL, 1, 0, "index" },
+    { "sublist",QLEX_KW_INFIX, QR_NONE,                        QR_QSRC("sublist"), NULL, 1, 0, "index" },
     /* q `x vs y` / `x sv y` — split-join / base-encode family (dyadic infix
      * keywords; wrappers, native -RAY_STR + sym + base + byte).  Monadic form
      * is out of scope (kdb `vs`/`sv` are strictly dyadic).  Codecs: none. */
@@ -296,25 +297,28 @@ static const q_op_t Q_OPS[] = {
     { "avgs",  QLEX_KW_PREFIX, QR_FN1("avgs", q_avgs_wrap),    QR_NONE,           NULL, 1, 0, "map" },
     { "ratios",QLEX_KW_PREFIX, QR_FN1("ratios", q_ratios_wrap),QR_NONE,           NULL, 1, 0, "map" },
     /* ---- Wave 5: weighted (dyadic infix keywords) — aggregates
-     * (ref/sum.md wsum, ref/avg.md wavg) ---- */
-    { "wsum",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("wsum", q_wsum_wrap), NULL, 1, 0, "aggregate" },
+     * (ref/sum.md wsum, ref/avg.md wavg).  wsum is q.q-hosted; wavg stays a
+     * wrapper (its composition's bool-multiply path measured 16x slower). ---- */
+    { "wsum",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("wsum"),   NULL, 1, 0, "aggregate" },
     { "wavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("wavg", q_wavg_wrap), NULL, 1, 0, "aggregate" },
     /* ---- Wave 5: statistical (renames of audited base aggregates; all
      * doc-labelled aggregate — ref/{med,var,dev,cor,cov}.md) ----
      * kdb `var`/`dev` are POPULATION (÷n); rayfall `var`/`stddev` are SAMPLE
      * (÷n-1) and `var_pop`/`stddev_pop`/`dev` are population — so q `var`->
      * `var_pop`, q `svar`->`var`, q `sdev`->`stddev`, q `dev` stays `dev`. */
-    { "med",   QLEX_KW_PREFIX, QR_ENV("med"),                  QR_NONE,           NULL, 1, 0, "aggregate" },
+    /* `med` is self-hosted in q.q (ref/med.md docs formula) — no row; the
+     * bootstrap shadow-rebind points root `med` at `.q.med` (the engine env
+     * `med` would otherwise win name resolution). */
     { "var",   QLEX_KW_PREFIX, QR_ENV("var_pop"),              QR_NONE,           NULL, 1, 0, "aggregate" },
     { "svar",  QLEX_KW_PREFIX, QR_ENV("var"),                  QR_NONE,           NULL, 1, 0, "aggregate" },
     { "sdev",  QLEX_KW_PREFIX, QR_ENV("stddev"),               QR_NONE,           NULL, 1, 0, "aggregate" },
     { "cor",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("pearson_corr"), NULL, 1, 0, "aggregate" },
-    { "cov",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("cov", q_cov_wrap), NULL, 1, 0, "aggregate" },
-    { "scov",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("scov", q_scov_wrap), NULL, 1, 0, "aggregate" },
+    { "cov",   QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("cov"),    NULL, 1, 0, "aggregate" },
+    { "scov",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("scov"),   NULL, 1, 0, "aggregate" },
     /* ---- Wave 5: sliding m-windows + ema (dyadic infix keywords) — all
      * doc-labelled uniform (ref/{sum,avg,max,min,dev,count,ema}.md) ---- */
     { "msum",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("msum", q_msum_wrap), NULL, 1, 0, "map" },
-    { "mavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mavg", q_mavg_wrap), NULL, 1, 0, "map" },
+    { "mavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("mavg"),   NULL, 1, 0, "map" },
     { "mmax",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmax", q_mmax_wrap), NULL, 1, 0, "map" },
     { "mmin",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmin", q_mmin_wrap), NULL, 1, 0, "map" },
     { "mcount",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mcount", q_mcount_wrap), NULL, 1, 0, "map" },
@@ -386,11 +390,10 @@ static const q_op_t Q_OPS[] = {
     { "get",     QLEX_KW_PREFIX, QR_FN1("value", q_value_wrap), QR_NONE,          NULL, 1, 0, "structural" },
     { "set",     QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("set-g", q_setg_wrap), NULL, 1, 1, "none" },
     { "distinct",QLEX_KW_PREFIX, QR_FN1("distinct", q_distinct_wrap), QR_NONE,    NULL, 1, 0, "rowid" },
-    /* q `rand x` == {first 1?x} (ref/rand.md) — q_rand_wrap reuses the
-     * `?` roll/generate arms (family follows `?`: a random-index gather).
-     * NOT the rayfall binary `rand` (which stays the env-bound engine builtin
-     * the roll wrapper calls). */
-    { "rand",    QLEX_KW_PREFIX, QR_FN1("rand-1", q_rand_wrap), QR_NONE,          NULL, 0, 0, "index" },
+    /* q `rand x` == {first 1?x} — self-hosted in q.q verbatim from ref/rand.md;
+     * no row.  The bootstrap shadow-rebind points root `rand` at `.q.rand`
+     * (rayfall's env `rand` is dyadic and would otherwise win name
+     * resolution; the `?` roll wrapper calls ray_rand_fn directly). */
     /* q-implemented keywords: env bindings added by q_builtins_register
      * (same mechanism as `parse`), snapshotted here as pass-through rows.
      * string is atomic (ref/string.md: "atomic … iterates through
@@ -402,9 +405,11 @@ static const q_op_t Q_OPS[] = {
     /* ---- string trim / hash / search family (feat/q-string-fns) ----
      * trim/ltrim/rtrim/md5 are q-owned env unaries (q_builtins_register),
      * snapshotted here as QR_ENV prefix rows (same mechanism as `string`).
-     * trim family is elementwise over string atoms (atomic at string
-     * granularity); md5 consumes a whole string as a digest codec (none).
-     * `like`/`ss` are dyadic infix; `ssr` is a triadic-prefix wrapper. */
+     * (trim stays C: its q.q form {ltrim rtrim x} measured 3.7x on a 1M
+     * string list — two passes + an intermediate list.)  trim family is
+     * elementwise over string atoms (atomic at string granularity); md5
+     * consumes a whole string as a digest codec (none).  `like`/`ss` are
+     * dyadic infix; `ssr` is a triadic-prefix wrapper. */
     { "trim",    QLEX_KW_PREFIX, QR_ENV("trim"),               QR_NONE,           NULL, 1, 0, "atomic" },
     { "ltrim",   QLEX_KW_PREFIX, QR_ENV("ltrim"),              QR_NONE,           NULL, 1, 0, "atomic" },
     { "rtrim",   QLEX_KW_PREFIX, QR_ENV("rtrim"),              QR_NONE,           NULL, 1, 0, "atomic" },
@@ -484,10 +489,9 @@ static const q_op_t Q_OPS[] = {
     { "xgroup", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid" },
     { "insert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 1, 1, "structural" },
     { "upsert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("upsert", q_upsert_wrap), NULL, 1, 1, "structural" },
-    /* each-prior mnemonics: deltas x == (-':)x, differ x == not(~':)x —
-     * length-preserving computed values (ref/differ.md: uniform) -> map. */
-    { "deltas",  QLEX_KW_PREFIX, QR_FN1("deltas", q_deltas_wrap), QR_NONE,        NULL, 1, 0, "map" },
-    { "differ",  QLEX_KW_PREFIX, QR_FN1("differ", q_differ_wrap), QR_NONE,        NULL, 1, 0, "map" },
+    /* each-prior mnemonics `deltas` ((-':)x) and `differ` (not(~':)x) are
+     * self-hosted in q.q — no rows (both ride the each-prior HOF the C
+     * wrappers called anyway; measured parity). */
     /* ---- boolean/null batch: RESERVED-but-DEFERRED (feat/q-bool-null) ----
      * `any`/`all` are real q keywords rostered to reserve the name
      * (`any:5`/`all:5` -> 'assign, kdb-true) with QR_NONE (no value) — a

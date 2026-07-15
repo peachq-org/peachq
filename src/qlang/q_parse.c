@@ -98,6 +98,12 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
     ray_t *hit = q_registry_lookup_name(nm, nl, val);
     ray_release(s);
     if (!hit) return sym;
+    /* q.q-hosted cells (QK_QSRC) hold CARRIER values (lambdas/projections),
+     * not ray_fn objects; an embedded carrier would be re-walked by eval as an
+     * expression tree.  Those verbs stay name-ref syms — eval's name path
+     * resolves them to the same registry value and applies via the hook. */
+    if (hit->type != RAY_UNARY && hit->type != RAY_BINARY && hit->type != RAY_VARY)
+        return sym;
     ray_retain(hit);
     ray_release(sym);
     return hit;
