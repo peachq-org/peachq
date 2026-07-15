@@ -215,6 +215,7 @@ ray_t* q_value_wrap(ray_t* x);                                /* used by: bang, 
 int8_t q_cast_designator(ray_t* t, int* is_tok);              /* used by: io */
 const char* q_type_qname(int8_t t);                           /* used by: table */
 ray_t* q_cast_to(int8_t tag, ray_t* x);                       /* used by: agg */
+int    q_int_index_width(int8_t t);                           /* used by: table */
 ray_t* q_tok_to(int8_t tag, ray_t* x);                        /* used by: io */
 
 /* ---- defined in q_wrap_io.c ---- */
@@ -226,7 +227,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n);                   /* used by: builti
 
 /* ---- defined in q_wrap_join.c ---- */
 int qj_same_schema(ray_t* a, ray_t* b);                       /* used by: table */
-ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: table */
+ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: table, list */
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, table */
 
 /* ---- defined in q_wrap_list.c ---- */
