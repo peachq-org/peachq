@@ -86,6 +86,105 @@ static ray_t* q_table_reorder(ray_t* t, const int64_t* names, int64_t n) {
     return out;
 }
 
+/* ===== universal table row indexing (uniform-structure-dispatch stage 0) ===
+ * THE row-access primitive behind t[i] / t[indexvector] / each-over-rows /
+ * count-drop and sublist row slices.  Base ray_at's table arms error on char
+ * columns ('type) and out-of-range rows ('domain); the q law
+ * (basics/application.md "Indexing out of bounds") is null-fill: a miss
+ * yields the typed null of each column (char -> the blank " "; LIST -> the
+ * null of the first item's type).  The vector arm is qj_table_gather_idx
+ * (q_wrap_join.c) — ONE gather home for joins, funsql scatters and row
+ * indexing alike. */
+
+/* t[row] -> the ROW DICT.  An out-of-range/negative/null row (miss) yields
+ * the typed all-null row.  Values collapse like kdb row dicts do (a uniform
+ * table's row has a typed vector value, not a boxed list). */
+ray_t* q_table_row_at(ray_t* t, int64_t row) {
+    int64_t nc = ray_table_ncols(t);
+    int64_t nr = ray_table_nrows(t);
+    int hit = row >= 0 && row < nr;
+    ray_t* names = ray_vec_new(RAY_SYM, nc > 0 ? nc : 1);
+    if (!names || RAY_IS_ERR(names)) return names ? names : ray_error("oom", NULL);
+    names->len = nc;
+    int64_t* nd = (int64_t*)ray_data(names);
+    ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
+    if (!vals || RAY_IS_ERR(vals)) { ray_release(names); return vals ? vals : ray_error("oom", NULL); }
+    for (int64_t c = 0; c < nc; c++) {
+        nd[c] = ray_table_col_name(t, c);
+        ray_t* col = ray_table_get_col_idx(t, c);            /* borrowed */
+        ray_t* cell;
+        if (col && col->type == -RAY_STR) {                  /* char column: one byte = one row */
+            cell = (hit && row < (int64_t)ray_str_len(col))
+                 ? ray_str(ray_str_ptr(col) + row, 1)
+                 : ray_str(" ", 1);                          /* the char null is the blank */
+        } else if (col && col->type == RAY_LIST) {
+            if (hit && row < ray_len(col)) {
+                cell = ((ray_t**)ray_data(col))[row];
+                ray_retain(cell);
+            } else {
+                /* miss: the null of the first item's type (doc law); a string
+                 * item nulls to the empty string, non-atom items to :: */
+                ray_t** e = (ray_t**)ray_data(col);
+                if (ray_len(col) > 0 && e[0] && e[0]->type == -RAY_STR)
+                    cell = ray_str("", 0);
+                else if (ray_len(col) > 0 && e[0] && e[0]->type < 0)
+                    cell = ray_typed_null(e[0]->type);
+                else { ray_retain(RAY_NULL_OBJ); cell = RAY_NULL_OBJ; }
+            }
+        } else if (col) {                                    /* typed vector: ray_at null-fills a miss */
+            ray_t* ia = ray_i64(row);
+            cell = ray_at_fn(col, ia);
+            ray_release(ia);
+        } else {
+            ray_release(names); ray_release(vals);
+            return ray_error("type", "at: malformed table column");
+        }
+        if (!cell || RAY_IS_ERR(cell)) { ray_release(names); ray_release(vals); return cell ? cell : ray_error("type", NULL); }
+        vals = ray_list_append(vals, cell);
+        ray_release(cell);
+        if (RAY_IS_ERR(vals)) { ray_release(names); return vals; }
+    }
+    ray_t* cv = q_collapse_list(vals);
+    ray_release(vals);
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(names); return cv ? cv : ray_error("type", NULL); }
+    return ray_dict_new(names, cv);                          /* consumes both */
+}
+
+/* t[idx] dispatcher over the single-home gather: an integer ATOM is the row
+ * dict, an integer VECTOR is a row gather (misses null-filled).  Returns
+ * NULL to DECLINE any other index shape — the caller keeps its historic
+ * path (sym -> column access, boxed lists, errors). */
+ray_t* q_table_at(ray_t* t, ray_t* idx) {
+    if (!t || t->type != RAY_TABLE || !idx) return NULL;
+    if (ray_is_atom(idx)) {
+        if (!q_int_index_width((int8_t)-idx->type)) return NULL;
+        return q_table_row_at(t, as_i64(idx));               /* int/temporal nulls land <0 -> miss */
+    }
+    int w = ray_is_vec(idx) ? q_int_index_width(idx->type) : 0;
+    if (!w) return NULL;
+    int64_t n = ray_len(idx);
+    int64_t nr = ray_table_nrows(t);
+    int64_t* ids = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
+    if (!ids) return ray_error("wsfull", "at: out of memory");
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v;
+        switch (w) {                                         /* width, never tag (spec §2.2) */
+        case 8: v = ((int64_t*)ray_data(idx))[i]; break;
+        case 4: v = ((int32_t*)ray_data(idx))[i]; break;
+        case 2: v = ((int16_t*)ray_data(idx))[i]; break;
+        default: v = ((uint8_t*)ray_data(idx))[i]; break;
+        }
+        /* normalize EVERY miss (bitmap null, sentinel null <0, out-of-range)
+         * to the gather's documented miss encoding idx[i] < 0 — never lean
+         * on the boxed path's incidental out-of-range handling */
+        if (v < 0 || v >= nr || ray_vec_is_null(idx, i)) v = -1;
+        ids[i] = v;
+    }
+    ray_t* r = qj_table_gather_idx(t, ids, n);
+    free(ids);
+    return r;
+}
+
 /* Whole-value equality of two boxed cells (q match semantics). */
 static int q_cell_eq(ray_t* a, ray_t* b) {
     return q_match_rec(a, b);
