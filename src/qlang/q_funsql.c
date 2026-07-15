@@ -141,6 +141,24 @@ static int funsql_is_fn(const ray_t* x) {
     return 0;
 }
 
+/* Resolve a phrase-head NAME-REF to its q.q-hosted verb value (a QK_QSRC
+ * registry cell or a bare `.q` keyword — deltas, trim, cov, …): the lowerer
+ * keeps those heads as name-ref syms (a carrier cannot sit embedded in an
+ * eval tree), so the phrase evaluator resolves them here.  BORROWED, or NULL
+ * when the sym is not a q.q verb usable at this arity. */
+static ray_t* funsql_qsrc_head(ray_t* h, int64_t argc) {
+    /* sym CONSTANTS ride the enlist encoding in this tree shape, so a bare
+     * -RAY_SYM head is a name (no quoted-attr check needed here) */
+    if (!h || h->type != -RAY_SYM) return NULL;
+    ray_t* s = ray_sym_str(h->i64);
+    if (!s) return NULL;
+    ray_t* v = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s),
+                                      argc == 1 ? Q_MONADIC : Q_DYADIC);
+    if (!v) v = q_ns_dotq_get(ray_str_ptr(s), ray_str_len(s));
+    ray_release(s);
+    return (v && funsql_is_fn(v)) ? v : NULL;
+}
+
 /* The rayfall routing name of a verb head (plain value or carrier), or NULL. */
 static const char* funsql_head_name(ray_t* fn) {
     if (fn->type == RAY_LIST && q_deriv_kind_of(fn) != Q_DERIV_NONE) {
@@ -191,7 +209,9 @@ static ray_t* funsql_eval(ray_t* x, ray_t* tbl) {
     if (x->type == RAY_LIST) {
         int64_t n = ray_len(x);
         ray_t** e = (ray_t**)ray_data(x);
-        if (n >= 1 && funsql_is_fn(e[0])) {
+        ray_t* fn = (n >= 1 && funsql_is_fn(e[0])) ? e[0] : NULL;
+        if (!fn && n >= 2) fn = funsql_qsrc_head(e[0], n - 1);  /* q.q verb head */
+        if (fn) {
             int64_t na = n - 1;
             if (na < 1 || na > 7)
                 return ray_error("rank", "funsql: constraint arity %lld", (long long)na);
@@ -203,7 +223,7 @@ static ray_t* funsql_eval(ray_t* x, ray_t* tbl) {
                     return av[i] ? av[i] : ray_error("domain", "funsql: constraint arg");
                 }
             }
-            ray_t* r = funsql_call(e[0], av, na);
+            ray_t* r = funsql_call(fn, av, na);
             for (int64_t i = 0; i < na; i++) ray_release(av[i]);
             return r;
         }
@@ -532,7 +552,8 @@ static ray_t* q_funsql_select_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
     if (funsql_empty(b)) {
         if (a && (a->type == -RAY_SYM ||
                   (a->type == RAY_LIST && ray_len(a) > 0 &&        /* guard `()` (empty list): no head to read */
-                   funsql_is_fn(((ray_t**)ray_data(a))[0])))) {
+                   (funsql_is_fn(((ray_t**)ray_data(a))[0]) ||
+                    funsql_qsrc_head(((ray_t**)ray_data(a))[0], ray_len(a) - 1))))) {
             ray_t* r = funsql_eval(a, ft);          /* exec col / parse-tree -> vector/atom */
             ray_release(ft);
             return r;

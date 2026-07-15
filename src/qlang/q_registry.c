@@ -254,6 +254,9 @@ static ray_err_t add_entry(const char* name, q_valence_t valence,
      * q_parse — so this holds by construction; the assert pins it. */
     assert(g_building);
     if (r->kind == QK_NONE) return RAY_OK;              /* nothing at this valence */
+    if (r->kind == QK_QSRC) return RAY_OK;              /* value comes from q.q —
+                                                         * installed post-bootstrap
+                                                         * by q_registry_bind_qsrc */
     ray_t* val = (r->kind == QK_ENV) ? build_env(r->target) : build_wrapper(r);
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN; /* fail-fast: audited bug */
     entry_t* e    = &g_entries[g_count++];
@@ -454,6 +457,53 @@ ray_err_t q_registry_init(void) {
 
 bool q_registry_ready(void) {
     return g_inited;
+}
+
+/* Install the QK_QSRC cells from the loaded q.q definitions (contract in
+ * q_registry.h).  Same entry shape as add_entry, but the value is a SNAPSHOT
+ * of the `.q.<target>` env binding rather than a built one — immutable like
+ * every other cell (`.q` is a reserved root only the bootstrap writes).
+ * is_wrapper=1: the value is unique per cell, so pointer-identity provenance
+ * is exact (q_registry_provenance).  Serde is UNTOUCHED by that flag: the
+ * `q!…` fn-hook fires only for RAY_FN_Q_LOWER function values; carriers keep
+ * riding whatever generic carrier serde exists. */
+static ray_err_t bind_qsrc_one(const char* name, q_valence_t valence,
+                               const q_recipe_t* r) {
+    if (r->kind != QK_QSRC) return RAY_OK;
+    char full[64];
+    size_t tl = strlen(r->target);
+    if (tl + 3 >= sizeof full) return RAY_ERR_DOMAIN;
+    memcpy(full, ".q.", 3);
+    memcpy(full + 3, r->target, tl);
+    ray_t* val = ray_env_get(ray_sym_intern(full, tl + 3));   /* borrowed */
+    if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN;       /* q.q drift bug */
+    ray_retain(val);
+    entry_t* e    = &g_entries[g_count++];
+    e->sym_id     = ray_sym_intern(name, strlen(name));
+    e->valence    = valence;
+    e->value      = val;
+    e->spelling   = name;
+    e->lower_name = r->target;
+    e->is_wrapper = 1;
+    return RAY_OK;
+}
+
+ray_err_t q_registry_bind_qsrc(void) {
+    if (!g_inited) return RAY_ERR_DOMAIN;
+    int n = 0;
+    const q_op_t* ops = q_ops_table(&n);
+    for (int i = 0; i < n; i++) {
+        /* idempotent per runtime: a cell already present was bound earlier */
+        if (ops[i].mon.kind == QK_QSRC &&
+            !q_registry_lookup_name(ops[i].name, strlen(ops[i].name), Q_MONADIC) &&
+            bind_qsrc_one(ops[i].name, Q_MONADIC, &ops[i].mon) != RAY_OK)
+            return RAY_ERR_DOMAIN;
+        if (ops[i].dyad.kind == QK_QSRC &&
+            !q_registry_lookup_name(ops[i].name, strlen(ops[i].name), Q_DYADIC) &&
+            bind_qsrc_one(ops[i].name, Q_DYADIC, &ops[i].dyad) != RAY_OK)
+            return RAY_ERR_DOMAIN;
+    }
+    return RAY_OK;
 }
 
 ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence) {
