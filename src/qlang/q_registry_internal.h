@@ -197,7 +197,7 @@ ray_t* q_value_resolve_sym_owned(ray_t* symv);                /* used by: table 
 ray_t* q_value_wrap(ray_t* x);                                /* used by: bang, builtins, registry */
 int8_t q_cast_designator(ray_t* t, int* is_tok);              /* used by: io */
 const char* q_type_qname(int8_t t);                           /* used by: table */
-ray_t* q_cast_to(int8_t tag, ray_t* x);                       /* used by: agg */
+ray_t* q_cast_to(int8_t tag, ray_t* x);                       /* used by: agg, applyiter */
 int    q_int_index_width(int8_t t);                           /* used by: table */
 int    q_strict_i64(ray_t* x, int64_t* out);                  /* strict-cast probe (type-judgment home) — used by: applyiter, bang, io, list */
 int    q_strict_f64(ray_t* x, double* out);                   /* used by: list */
