@@ -9,6 +9,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_sys.h"
 #include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
+#include "qlang/q_ops.h"      /* q_ops_find — the `\h` doc lookup */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`); q_console_str/reset (timed-expr side effects) */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
@@ -475,14 +476,6 @@ static ray_t* q_time_expr(const char* expr, size_t len, int64_t reps,
     ray_mem_stats(&after);                               /* last result still live */
     ray_release(ast);
     if (r) ray_release(r);
-    /* Drain the timed expression's buffered console side effects (show / 0N!)
-     * to stdout and clear the buffer — the same contract every eval path
-     * honours (q_repl.c, q_remote_eval_str); the syscmd path returns before
-     * the REPL's own flush, so without this the buffered output bleeds into the
-     * NEXT command's result (codex r1). */
-    { const char* con = q_console_str();
-      if (con && *con) fputs(con, stdout);
-      q_console_reset(); }
     if (err) return err;                                 /* propagate the eval error */
     *ms = (double)(t1 - t0) / 1e6;
     int64_t d = (int64_t)after.bytes_allocated - (int64_t)before.bytes_allocated;
@@ -737,6 +730,48 @@ static ray_t* h_s(const char* arg, size_t alen, const char* rest, size_t restlen
     return NULL;
 }
 
+/* `\h <verb>` — the verb's help, from the Q_OPS[] doc/syntax/example columns (openq
+ * extension; kdb has no `\h`, so a bare `\h` used to shell out to `h`).  Prints up
+ * to three bare lines to the CONSOLE BUFFER (not stdout — it prints unquoted while
+ * the core stays mode-less, and every entry point already drains that buffer):
+ *   the one-line doc (always, when documented);
+ *   the ```syntax form (`x xexp y    xexp[x;y]`), when the page carries one;
+ *   an `expr -> output` example from ./q, when a curated one exists.
+ * Each is self-labelling — prose, a bracket form, an arrow — so no headers.  A
+ * trivial monad may show only doc+example; a setup-heavy verb (aj) shows syntax and
+ * no example; a directional dyadic (xexp) shows all three.  Errors are bare classes,
+ * per the 7-byte contract:
+ *   `\h`, `\h notaverb`  -> 'domain  (names no manifest row)
+ *   `\h <>`              -> 'nyi     (a verb, but deliberately undocumented —
+ *                                     see tools/qdocs-docmap.pins.tsv)
+ * The shared dispatcher strips a lone `/` token as a trailing comment (`\P /
+ * default`), which would wrongly hide the `/` over verb from `\h`; recover it
+ * from the un-stripped `rest` so `\h /` matches its manifest row ('nyi) like
+ * `\h \`, rather than 'domain. */
+static void h_line(const char* s) {
+    if (!s) return;
+    q_console_write(s, strlen(s));
+    q_console_write("\n", 1);
+}
+static ray_t* h_h(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
+    (void)rep;
+    /* Recover a lone `/` the dispatcher stripped as a trailing comment (any
+     * trailing blanks tolerated, so `\h / ` matches `\h /` -> 'nyi, not 'domain). */
+    if (alen == 0 && restlen >= 1 && rest[0] == '/') {
+        size_t k = 1;
+        while (k < restlen && (rest[k] == ' ' || rest[k] == '\t')) k++;
+        if (k == restlen) { arg = rest; alen = 1; }
+    }
+    if (alen == 0) return ray_error("domain", NULL);
+    const q_op_t* op = q_ops_find(arg, (int)alen);
+    if (!op) return ray_error("domain", NULL);
+    if (!op->doc) return ray_error("nyi", NULL);
+    h_line(op->doc);
+    h_line(op->syntax);
+    h_line(op->example);
+    return NULL;
+}
+
 /* ---- the single-source manifest -------------------------------------------
  * {cmd (token, "" = bare terminate/toggle, "\\" = quit), len, valence, flags,
  * handler}.  Lookup is by the parsed command TOKEN (multi-char `ts`/`cd` and
@@ -762,6 +797,7 @@ static const struct {
     { "f",  1, 1, Q_SYS_F_NONE, h_f },
     { "a",  1, 1, Q_SYS_F_NONE, h_a },
     { "S",  1, 1, Q_SYS_F_NONE, h_S },
+    { "h",  1, 1, Q_SYS_F_NONE, h_h },        /* verb help — openq extension */
     /* Stage 3 — real get/set + kdb-true getter values */
     { "P",  1, 1, Q_SYS_F_NONE, h_P },        /* display precision */
     { "c",  1, 2, Q_SYS_F_NONE, h_c },        /* console size */
