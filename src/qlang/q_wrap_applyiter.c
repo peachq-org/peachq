@@ -11,7 +11,7 @@
 #include "qlang/q_deriv.h" /* q_proj_new, q_compose_new, q_lambda_carrier_new — 104h carriers */
 #include "lang/env.h"      /* ray_env_get */
 #include "lang/eval.h"     /* ray_eval; ray_fold_fn/ray_map_fn/ray_scan_fn HOFs; RAY_FN_SPECIAL_FORM, LAMBDA_PARAMS */
-#include "lang/internal.h" /* call_fn1/2, atom_eq, is_truthy, as_i64/as_f64, ray_error */
+#include "lang/internal.h" /* call_fn1/2, atom_eq, as_i64, ray_error */
 #include "lang/format.h"   /* ray_type_name — error messages */
 #include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize — control forms */
 #include "table/sym.h"     /* ray_sym_intern_runtime */
@@ -638,11 +638,31 @@ ray_t* q_prior_wrap(ray_t** args, int64_t n) {
 }
 
 /* ---- over / scan  (converge, do, while, and reduce) ----------------------- */
-static int q_truthy(ray_t* v) {
-    if (!v) return 0;
-    if (v->type == -RAY_BOOL) return v->b8 != 0;
-    if (ray_is_atom(v) && is_numeric(v)) return as_f64(v) != 0.0;
-    return 0;
+
+/* The ONE truthiness home: the `if`/`while` test and the `f/`/`f\` while-adverb
+ * condition (`do` takes a COUNT, not a truthiness, and keeps its own gate).
+ * Owner ruling 2026-07-15, the authority where the docs are silent on the error
+ * codes: materialize -> exclude float/real -> cast with the SAME fn `"b"$` uses
+ * -> boolean ATOM = 1b, else 'type.  Deciding via q_cast_to keeps ONE type
+ * judgment; the ATOM check subsumes an arity gate ("b"$1 2 -> 11b, a vector).
+ * float/real go BEFORE the cast: the cast accepts them ("b"$1.5 -> 1b) but
+ * ref/if.md:20 / ref/while.md:21 require "an atom of integral type".
+ * CONSUMES v (ray_lazy_materialize releases its arg and passes a non-lazy one
+ * through, so one release covers both); an owned error lands in *err. */
+static int q_truth(ray_t* v, ray_t** err) {
+    *err = NULL;
+    if (!v) { *err = ray_error("type", NULL); return 0; }
+    v = ray_lazy_materialize(v);
+    if (RAY_IS_ERR(v)) { *err = v; return 0; }
+    int8_t t = v->type < 0 ? (int8_t)-v->type : v->type;
+    if (t == RAY_F64 || t == RAY_F32) { ray_release(v); *err = ray_error("type", NULL); return 0; }
+    ray_t* b = q_cast_to(RAY_BOOL, v);
+    ray_release(v);
+    if (!b || RAY_IS_ERR(b)) { *err = b ? b : ray_error("type", NULL); return 0; }
+    if (b->type != -RAY_BOOL) { ray_release(b); *err = ray_error("type", NULL); return 0; }
+    int go = b->b8 != 0;
+    ray_release(b);
+    return go;
 }
 
 /* Converge: apply f until the result matches the previous OR the initial x.
@@ -703,10 +723,9 @@ static ray_t* q_while(ray_t* f, ray_t* test, ray_t* x, int collect) {
     if (collect) { acc = ray_list_new(0); acc = ray_list_append(acc, cur); }
     int64_t guard = 0;
     for (;;) {
-        ray_t* t = call_fn1(test, cur);
-        if (!t || RAY_IS_ERR(t)) { ray_release(cur); if (acc) ray_release(acc); return t ? t : ray_error("type", NULL); }
-        int go = q_truthy(t);
-        ray_release(t);
+        ray_t* terr = NULL;
+        int go = q_truth(call_fn1(test, cur), &terr);   /* consumes the test result */
+        if (terr) { ray_release(cur); if (acc) ray_release(acc); return terr; }
         if (!go) break;
         ray_t* nxt = call_fn1(f, cur);
         ray_release(cur);
@@ -962,30 +981,9 @@ ray_t* g_if_value    = NULL;
 ray_t* g_do_value    = NULL;
 ray_t* g_while_value = NULL;
 
-/* q if/while tests must be INTEGRAL atoms (ref/if.md, ref/while.md): a float
- * / symbol / vector / generic null is 'type, never a silent truthiness. */
-static int q_ctl_test_ok(ray_t* t) {
-    int64_t v;
-    return t->type == -RAY_BOOL || q_strict_i64(t, &v);
-}
-
-/* Evaluate a test/condition arg to a truthiness, materializing a lazy handle.
- * On error (eval failure OR a non-integral-atom test), stashes the owned
- * RAY_ERROR in *err and returns 0. */
+/* Evaluate an if/while test arg and decide it at the one truthiness home. */
 static int q_ctl_truth(ray_t* arg, ray_t** err) {
-    *err = NULL;
-    ray_t* t = ray_eval(arg);
-    if (RAY_IS_ERR(t)) { *err = t; return 0; }
-    if (ray_is_lazy(t)) t = ray_lazy_materialize(t);
-    if (RAY_IS_ERR(t)) { *err = t; return 0; }
-    if (!q_ctl_test_ok(t)) {
-        ray_release(t);
-        *err = ray_error("type", "control: test");
-        return 0;
-    }
-    int truthy = is_truthy(t);
-    ray_release(t);
-    return truthy;
+    return q_truth(ray_eval(arg), err);   /* q_truth consumes the eval result */
 }
 
 /* Evaluate args[from..n) in order for their side effects, releasing each
