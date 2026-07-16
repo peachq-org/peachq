@@ -24,8 +24,9 @@
 #define QP_MIN_ROWS 10     /* digest fires only past this many TABLE rows */
 
 static bool g_pipe_on;
-void q_pipe_enable(void) { g_pipe_on = true; }
-bool q_pipe_on(void)     { return g_pipe_on; }
+void q_pipe_enable(void)  { g_pipe_on = true; }
+void q_pipe_disable(void) { g_pipe_on = false; }
+bool q_pipe_on(void)      { return g_pipe_on; }
 
 bool q_pipe_is_table(ray_t* val) {
     if (!val) return false;
