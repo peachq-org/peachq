@@ -14,7 +14,7 @@
  * e.g. pages that call `exit`).
  *
  * --qcmd-only: directory walks collect only `*.qcmd` transcripts, ignoring
- * `.md` files (used by `make qtest-results` over test/q, where stray .md notes
+ * `.md` files (used by `make q-test-results` over test/q, where stray .md notes
  * like test/q/parse/SOURCES.md live beside the suites).
  *
  * --results PATH: ledger mode.  Runs every non-skipped file in EVAL_MATCH and

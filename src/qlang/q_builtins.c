@@ -990,7 +990,7 @@ static ray_t* q_remote_apply(ray_t* list) {
  *                       ("til 5 -> 0 1 2 3 4"), "" when the verb has no curated
  *                       example.  SPARSE by design (tools/qdocs/qdocs-example.tsv).
  * doc+docsrc+syntax are re-derived by tools/qdocs/qdocs-doccheck.sh (on demand, not
- * gated); example by tools/qdocs/qdocs-examplecheck.sh (in `make qtest`).
+ * gated); example by tools/qdocs/qdocs-examplecheck.sh (in `make q-test`).
  * Strings (not syms): docs are prose, and interning 162 sentences into the
  * symbol table forever would be a leak by another name.
  * The x argument (`.Q.ops[]` passes `::`) is ignored — the table is constant
