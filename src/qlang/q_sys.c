@@ -28,6 +28,7 @@
 #include <string.h>           /* strlen, memcpy, memcmp */
 #include <errno.h>            /* ERANGE — strtoll overflow guard */
 #include <stdio.h>            /* popen / pclose — `system "…"` stdout capture */
+#include <ctype.h>           /* tolower — `\h` case-insensitive fuzzy search */
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
 #include <limits.h>          /* PATH_MAX */
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
@@ -744,46 +745,139 @@ static ray_t* h_nonlegacy(const char* arg, size_t alen, const char* rest, size_t
     return NULL;                                     /* setter: silent */
 }
 
-/* `\h <verb>` — the verb's help, from the Q_OPS[] doc/syntax/example columns (openq
- * extension; kdb has no `\h`, so a bare `\h` used to shell out to `h`).  Prints up
- * to three bare lines to the CONSOLE BUFFER (not stdout — it prints unquoted while
- * the core stays mode-less, and every entry point already drains that buffer):
- *   the one-line doc (always, when documented);
- *   the ```syntax form (`x xexp y    xexp[x;y]`), when the page carries one;
- *   an `expr -> output` example from ./q, when a curated one exists.
- * Each is self-labelling — prose, a bracket form, an arrow — so no headers.  A
- * trivial monad may show only doc+example; a setup-heavy verb (aj) shows syntax and
- * no example; a directional dyadic (xexp) shows all three.  Errors are bare classes,
- * per the 7-byte contract:
- *   `\h`, `\h notaverb`  -> 'domain  (names no manifest row)
- *   `\h <>`              -> 'nyi     (a verb, but deliberately undocumented —
- *                                     see tools/qdocs-docmap.pins.tsv)
+/* `\h` — verb help + discovery, all composing on q_ops_table() (rule 3: one
+ * source of truth) and writing straight to the CONSOLE BUFFER (unquoted, like
+ * `show`; no ray_t, so no refcount surface).  Three modes (openq extension; kdb
+ * has no `\h`).  Errors are bare 7-byte classes — no per-verb message strings:
+ *   `\h`          -> a dense roster of every verb name, grouped by lexical class;
+ *   `\h <verb>`   -> exact match: doc, ```syntax form, `expr -> output` example,
+ *                    and the derived code.kx.com page URL (when the row cites one);
+ *   `\h <query>`  -> no exact row: a case-insensitive SUBSTRING search over every
+ *                    verb's name and doc, ranked name-prefix > name-substr >
+ *                    doc-substr; no hit at all -> 'domain.
  * The shared dispatcher strips a lone `/` token as a trailing comment (`\P /
- * default`), which would wrongly hide the `/` over verb from `\h`; recover it
- * from the un-stripped `rest` so `\h /` matches its manifest row ('nyi) like
- * `\h \`, rather than 'domain. */
+ * default`), which would hide the `/` over verb; recover it from `rest` so
+ * `\h /` matches the `/` row like `\h \`, rather than searching. */
 static void h_line(const char* s) {
     if (!s) return;
     q_console_write(s, strlen(s));
     q_console_write("\n", 1);
 }
+
+/* Derive the code.kx.com page URL from a docsrc path at DISPLAY time — never
+ * stored (qdocs is transitional, so the scheme lives in this ONE place; #199
+ * stored the path for exactly this).  docsrc = `<H_REF_PREFIX><page>.md[#anchor]`;
+ * drop prefix, `.md`, and any anchor -> `<H_REF_BASE><page>`.  Writes into buf;
+ * returns 1 on success, 0 when docsrc is NULL or off-shape (no URL line). */
+static const char H_REF_PREFIX[] = "qdocs/docs/docs/docs/ref/";
+static const char H_REF_BASE[]   = "https://code.kx.com/q/ref/";
+static int h_doc_url(const char* docsrc, char* buf, size_t bufsz) {
+    if (!docsrc) return 0;
+    size_t pfx = sizeof H_REF_PREFIX - 1;
+    if (strncmp(docsrc, H_REF_PREFIX, pfx) != 0) return 0;
+    const char* page = docsrc + pfx;
+    const char* dot = strstr(page, ".md");           /* page name ends at `.md` */
+    if (!dot) return 0;
+    size_t plen = (size_t)(dot - page), base = sizeof H_REF_BASE - 1;
+    if (base + plen + 1 > bufsz) return 0;
+    memcpy(buf, H_REF_BASE, base);
+    memcpy(buf + base, page, plen);
+    buf[base + plen] = '\0';
+    return 1;
+}
+
+/* The two case-insensitive matchers the search ranks on: is needle[0..nlen) a
+ * SUBSTRING of hay (h_ci_contains), or a PREFIX of it (h_ci_prefix)? */
+static int h_ci_contains(const char* hay, const char* needle, size_t nlen) {
+    if (nlen == 0) return 0;
+    for (const char* p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < nlen && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) i++;
+        if (i == nlen) return 1;
+    }
+    return 0;
+}
+static int h_ci_prefix(const char* hay, const char* needle, size_t nlen) {
+    for (size_t i = 0; i < nlen; i++)
+        if (!hay[i] || tolower((unsigned char)hay[i]) != tolower((unsigned char)needle[i])) return 0;
+    return nlen != 0;
+}
+
+/* Bare `\h`: every verb name, grouped by lexical class, wrapped at H_WRAP columns
+ * (a FIXED width, deliberately NOT the runtime `\c` console size, so the golden
+ * transcript is stable).  Roster-coupled by design — a new verb changes it. */
+static void h_list_all(void) {
+    enum { H_WRAP = 72 };
+    int n; const q_op_t* t = q_ops_table(&n);
+    static const struct { int cls; const char* label; } groups[] = {
+        { QLEX_GLYPH,     "glyph  " }, { QLEX_KW_INFIX,  "infix  " },
+        { QLEX_KW_PREFIX, "prefix " }, { QLEX_ADVERB,    "adverb " },
+    };
+    for (size_t g = 0; g < sizeof groups / sizeof groups[0]; g++) {
+        char line[256];
+        size_t lab = strlen(groups[g].label), len = lab;
+        memcpy(line, groups[g].label, lab); line[len] = '\0';
+        int any = 0;
+        for (int i = 0; i < n; i++) {
+            if ((int)t[i].lex != groups[g].cls) continue;
+            size_t nl = strlen(t[i].name);
+            if (len > lab && len + 1 + nl >= sizeof line) continue;   /* guard */
+            if (len > lab && len + 1 + nl > H_WRAP) {                 /* wrap */
+                h_line(line);
+                memset(line, ' ', lab); len = lab; line[len] = '\0';
+            }
+            if (len > lab) line[len++] = ' ';
+            memcpy(line + len, t[i].name, nl); len += nl; line[len] = '\0';
+            any = 1;
+        }
+        if (any) h_line(line);
+    }
+}
+
+/* `\h <query>` fuzzy search: three ranked passes (name-prefix, name-substr,
+ * doc-substr) over q_ops_table(), printing `name  doc` per hit in rank then
+ * table order.  Returns the hit count (0 -> caller raises 'domain). */
+static int h_search(const char* q, size_t qlen) {
+    int n, hits = 0; const q_op_t* t = q_ops_table(&n);
+    for (int rank = 3; rank >= 1; rank--) {
+        for (int i = 0; i < n; i++) {
+            const q_op_t* op = &t[i];
+            int r = h_ci_prefix(op->name, q, qlen) ? 3
+                  : h_ci_contains(op->name, q, qlen) ? 2
+                  : (op->doc && h_ci_contains(op->doc, q, qlen)) ? 1 : 0;
+            if (r != rank) continue;
+            char line[256];
+            snprintf(line, sizeof line, "%-8s %s", op->name, op->doc ? op->doc : "");
+            h_line(line);
+            hits++;
+        }
+    }
+    return hits;
+}
+
 static ray_t* h_h(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
     (void)rep;
-    /* Recover a lone `/` the dispatcher stripped as a trailing comment (any
-     * trailing blanks tolerated, so `\h / ` matches `\h /` -> 'nyi, not 'domain). */
+    /* Recover a lone `/` the dispatcher stripped as a trailing comment (trailing
+     * blanks tolerated, so `\h / ` matches the `/` row like `\h \`). */
     if (alen == 0 && restlen >= 1 && rest[0] == '/') {
         size_t k = 1;
         while (k < restlen && (rest[k] == ' ' || rest[k] == '\t')) k++;
         if (k == restlen) { arg = rest; alen = 1; }
     }
-    if (alen == 0) return ray_error("domain", NULL);
+    if (alen == 0) { h_list_all(); return NULL; }                    /* bare -> roster */
     const q_op_t* op = q_ops_find(arg, (int)alen);
-    if (!op) return ray_error("domain", NULL);
-    if (!op->doc) return ray_error("nyi", NULL);
-    h_line(op->doc);
-    h_line(op->syntax);
-    h_line(op->example);
-    return NULL;
+    if (op && op->doc) {                                             /* exact match */
+        h_line(op->doc);
+        h_line(op->syntax);
+        h_line(op->example);
+        char url[256];
+        if (h_doc_url(op->docsrc, url, sizeof url)) h_line(url);
+        return NULL;
+    }
+    /* No documented exact row -> fuzzy search (an undocumented verb, if any ever
+     * existed, surfaces itself by name at rank 3).  Nothing found -> 'domain. */
+    if (h_search(arg, alen) > 0) return NULL;
+    return ray_error("domain", NULL);
 }
 
 /* ---- the single-source manifest -------------------------------------------
