@@ -11,9 +11,9 @@ retargeted to this `src/`-based tree.
 | ------------- | ------------------------------------------------------------------ |
 | `q_wasm.c`    | The browser C ABI. Drives openq's real pipeline (`q_parse` → `q_lower` → `ray_eval` → materialize → `q_fmt`). |
 | `ipc_stub.c`  | Inert stubs for the handful of `ray_ipc_*` symbols retained TUs reference — a browser tab has no sockets. |
-| `index.html`  | Self-contained REPL page. Loads `rayforce.js`, `ccall`s the ABI.   |
+| `index.html`  | Self-contained REPL page. Loads `peach.js`, `ccall`s the ABI.   |
 | `server.py`   | Stdlib preview server (correct `application/wasm` MIME).           |
-| `rayforce.js` / `rayforce.wasm` | Build artifacts (generated; git-ignored).       |
+| `peach.js` / `peach.wasm` | Build artifacts (generated; git-ignored).       |
 
 The build wiring lives in `../Makefile.wasm` (a **separate** file — the root
 `Makefile` is a frozen-base file, so it is deliberately left untouched).
@@ -44,7 +44,7 @@ cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
 Then, from the repo root:
 
 ```sh
-make -f Makefile.wasm wasm      # -> wasm/rayforce.js + wasm/rayforce.wasm
+make -f Makefile.wasm wasm      # -> wasm/peach.js + wasm/peach.wasm
 ```
 
 ## Run
@@ -63,7 +63,7 @@ Node 12 can't parse) can drive the ABI directly:
 
 ```sh
 node -e '
-require("./wasm/rayforce.js")().then(M => {
+require("./wasm/peach.js")().then(M => {
   M.ccall("q_wasm_init","number",[],[]);
   const p = M.ccall("q_wasm_eval","number",["string"],["2+3"]);
   console.log("2+3 =>", M.UTF8ToString(p));
