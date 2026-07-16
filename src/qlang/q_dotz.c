@@ -89,7 +89,7 @@ static bool ends_with_dot_q(const char* s) {
  * `.z.q` back via q_dotz_quiet()) — this classifier is the canonical list. */
 enum { Q_FLAG_NONE = 0, Q_FLAG_BOOL = 1, Q_FLAG_VALUE = 2 };
 static int flag_kind(const char* s) {
-    if (strcmp(s, "-q") == 0) return Q_FLAG_BOOL;
+    if (strcmp(s, "-q") == 0 || strcmp(s, "--nonlegacy") == 0) return Q_FLAG_BOOL;
     if (strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
         strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0) return Q_FLAG_VALUE;
     return Q_FLAG_NONE;
