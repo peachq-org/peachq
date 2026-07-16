@@ -47,3 +47,20 @@
 / at `!` and throws its own 'length (ref/cols.md: nonexistent key x -> 'length)
 .q.xcol:{[x;y] .Q.ft[{[x;t] c:cols t; flip ($[99h=type x;{[c;m](c^m c),(key m)except c}[c;$[98h=type key x;first each flip key x;x]];x,(count x)_c])!value flip t}[x;];y]}
 .q.xcols:{[x;y] .Q.ft[{[x;t] c:cols t; n:x,c except x; flip n!(flip t) n inter c}[x;];y]}
+
+/ ---- wave 4: verbs with no kernel to lose ----
+/ ref/all-any.md: CAST then fold — (&/)1 2 3 is 1 (a raw min), but `all 1 2 3` is 1b.
+/ Three arms the fold cannot serve: 98h table "iterates over its columns and returns a
+/ dictionary" (flip gives the 99h dict; each gives the doc's shape); an atom cast is an
+/ atom ("a nonzero atom" -> 1b) and folding an atom throws; the empty list is the fold's
+/ identity ("this includes the empty list" -> 1b).  Sym/GUID exclusion is the cast's own
+/ 'type, never a hand-written gate.  Bare all/any recurse via .q at call time.
+.q.all:{$[98h=type x;all each flip x;0h>type b:"b"$x;b;0=count b;1b;(&/)b]}
+.q.any:{$[98h=type x;any each flip x;0h>type b:"b"$x;b;0=count b;0b;(|/)b]}
+/ ref/tables.md "default is root namespace" — and bare `system"a"` lists the CURRENT
+/ context, so [] must pass `. itself.  f[] binds x to :: , but type/null/count/string
+/ all THROW on :: and `(::)~x` elides to a projection (PLAN.md) — matching against a
+/ constructed null is the one total test.  A bad namespace throws \a's own error.
+.q.tables:{system"a ",string $[({x}[])~x;`.;x]}
+/ ref/view.md: views[] is niladic, "views defined in the default namespace".
+.q.views:{system"b"}
