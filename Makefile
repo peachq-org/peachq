@@ -152,13 +152,11 @@ help:
 	@printf "  %-28s %s\n" "make win" "Cross-compile q.exe with mingw (WIN_CROSS=$(WIN_CROSS))"
 	@printf "  %-28s %s\n" "make win-smoke" "Deploy exes to the Windows host and run the native battery over SSH"
 	@printf "  %-28s %s\n" "make test" "Run the full debug test suite"
-	@printf "  %-28s %s\n" "make qtest" "q-only loop; fuzzy filter with F=, e.g. make qtest F=asc"
-	@printf "  %-28s %s\n" "make qdocs" "Check q docs corpus floors (test/qdoctest.min)"
+	@printf "  %-28s %s\n" "make q-test" "q-only loop; fuzzy filter with F=, e.g. make q-test F=asc"
 	@printf "  %-28s %s\n" "make test-parse-diff" "Run non-gating q parser differential ledger tests"
-	@printf "  %-28s %s\n" "make qmatrix" "Run non-gating op x shape smoke/fuzz harness (TSV)"
-	@printf "  %-28s %s\n" "make qtest-results" "Regenerate qtest-results.txt from test/q qcmd suites"
-	@printf "  %-28s %s\n" "make kwire-live" "javakdb client vs live ./q -p server (also in qtest; needs javac)"
-	@printf "  %-28s %s\n" "make qdash" "Refresh the peachq conformance dashboard: measure + bank + regen (tools/qdash)"
+	@printf "  %-28s %s\n" "make q-matrix" "Run non-gating op x shape smoke/fuzz harness (TSV)"
+	@printf "  %-28s %s\n" "make q-test-results" "Regenerate qtest-results.txt from test/q qcmd suites"
+	@printf "  %-28s %s\n" "make q-kwire" "javakdb client vs live ./q -p server (also in qtest; needs javac)"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make sync-github" "Mirror the public subset to github.com/peachq-org/peachq (push)"
 	@printf "  %-28s %s\n" "make sync-github-dry" "Dry-run the peachq mirror (build export, no push)"
@@ -348,35 +346,27 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 # openq: run ONLY the q suites (names prefixed `qlang/`) from the same unified
 # test binary, via the runner's substring name filter.  `make test` runs them
 # too (unfiltered); this is the fast q-only loop.  Narrow further with F=,
-# e.g. `make qtest F=asc` (fuzzy: matches anywhere in the suite name).
+# e.g. `make q-test F=asc` (fuzzy: matches anywhere in the suite name).
 # openq: the unified q gate.  Builds the test binary, then tools/qtest.sh runs
 # BOTH pillars (C/rfl/qcmd + qscript) in --porcelain mode and prints ONE
 # aggregated `STATUS | pass | total | time | id | text` summary.  F= narrows
-# BOTH pillars (fuzzy, matches anywhere in the suite id): `make qtest F=asc`.
+# BOTH pillars (fuzzy, matches anywhere in the suite id): `make q-test F=asc`.
 # examplecheck re-runs each Q_OPS[] example through OUR ./q (no qdocs dependency) and
 # stays honest — so it is gated.  qdocs-doccheck.sh (doc/syntax verbatim-vs-qdocs) is
 # NOT gated: qdocs is a transitional corpus (removed once we host our own docs), and
 # coupling the gate to it is fragile; run tools/qdocs/qdocs-doccheck.sh on demand.
-qtest: CFLAGS = $(DEBUG_CFLAGS)
-qtest: LDFLAGS = $(DEBUG_LDFLAGS)
-qtest: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
+q-test: CFLAGS = $(DEBUG_CFLAGS)
+q-test: LDFLAGS = $(DEBUG_LDFLAGS)
+q-test: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
 	@tools/frozen-manifest.sh check
 	@tools/qdocs/qdocs-examplecheck.sh
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
 	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 480 tools/qtest.sh "$(F)"
 
-# openq: q-docs corpus floors — qdoctest over every ref/*.md, failing if the
-# parse / eval-ok counts drop below test/qdoctest.min.  A coverage METRIC, not
-# the correctness gate (that's the curated test/q suites in qtest); split out
-# of qtest 2026-07-05 so the corpus (and its known futex-deadlock flake) never
-# blocks the fast q loop.  CI runs it as its own step.
-qdocs: $(QDOC_TARGET)
-	@tools/qtest-ledger.sh
-
 # openq: live IPC conformance — a javakdb CLIENT (vendored c.java, Apache-2.0,
 # the cleared independent reference) drives a live `./q -p` server over a real
 # socket: kdb handshake, framing, sync/async, error responses.  The primary IPC
-# oracle (openq-as-a-kdb-server), ALSO folded into `make qtest` as the third
+# oracle (openq-as-a-kdb-server), ALSO folded into `make q-test` as the third
 # (IPC) pillar — this standalone target stays exposed for a focused run.
 # Requires a JDK (javac); skips with a notice if absent.  run-live.sh
 # self-contains its flake surface (hard timeout + guaranteed server teardown).
@@ -384,9 +374,9 @@ qdocs: $(QDOC_TARGET)
 # Dormant sibling debug tools (sources kept under tools/kdb-conformance/, no make
 # target — invoke the .sh directly): run.sh (kwire-conformance, offline byte-diff
 # localizer) and run-echo.sh (kwire-echo, openq-client vs javakdb-echo-server).
-kwire-live: CFLAGS = $(DEBUG_CFLAGS)
-kwire-live: LDFLAGS = $(DEBUG_LDFLAGS)
-kwire-live: $(Q_TARGET)
+q-kwire: CFLAGS = $(DEBUG_CFLAGS)
+q-kwire: LDFLAGS = $(DEBUG_LDFLAGS)
+q-kwire: $(Q_TARGET)
 	@ROW="$(ROW)" tools/kdb-conformance/run-live.sh
 
 # openq: NON-GATING differential parser-test ledger.  Links the TSV runner
@@ -410,7 +400,7 @@ test-parse-diff: $(LIB_OBJ) $(TEST_OBJ) $(PARSE_DIFF_OBJ)
 # (`STATUS | pass | total | time | id | text`, id = keywords/<op>) that parses
 # alongside qtest. NOT an oracle; EXPECTED RED; does NOT gate test/qtest nor the
 # count ratchet. Needs ./q; QMATRIX_TIMEOUT= overrides the per-file timeout.
-qmatrix: $(Q_TARGET)
+q-matrix: $(Q_TARGET)
 	@tools/qmatrix/run.sh
 
 # openq: regenerate the checked-in test/q qcmd ledger (qtest-results.txt) —
@@ -418,35 +408,16 @@ qmatrix: $(Q_TARGET)
 # NO --skip-file and NO deferred filtering, EVER: this ledger is the complete,
 # unfiltered failure record. The coverage.csv status=deferred column (Phase 0b)
 # gates make test only — it must never remove a row here. *.qcmd.disabled files
-# are parked and never discovered. Docs-corpus floors live in `make qdocs`.
-# The user runs this on demand; `make qtest` never writes it (stays side-effect
+# are parked and never discovered. Docs-corpus floors: tools/qtest-ledger.sh (run directly).
+# The user runs this on demand; `make q-test` never writes it (stays side-effect
 # free on tracked files).
-qtest-results: $(QDOC_TARGET) $(Q_TARGET)
+q-test-results: $(QDOC_TARGET) $(Q_TARGET)
 	timeout 300 ./$(QDOC_TARGET) --qcmd-only --results qtest-results.txt test/q || \
 	  { rc=$$?; if [ $$rc -eq 124 ]; then \
-	      echo "QTEST-RESULTS TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make qtest-results"; \
+	      echo "QTEST-RESULTS TIMEOUT after 300s — suite normally ~105s; with RAY_DFD=1 suspect the DFD spinlock stall (ARCHITECTURE.md); rerun make q-test-results"; \
 	    fi; exit $$rc; }
 	tools/qscript/run.sh --ledger >> qtest-results.txt   # append the qscript topic rows
 
-# Refresh the peachq conformance dashboard end-to-end, in one shot:
-#   1. re-measure every pillar -> tools/qdash/ledger.tsv (the unified snapshot:
-#      C unit + qcmd + qscript + kwire IPC + non-gating qmatrix, one porcelain
-#      `STATUS | pass | total | time | id | text` row per suite; a pillar that
-#      can't run — no JDK, no socket — is recorded absent, never as failures);
-#   2. bank today's point into the durable trend summary tools/qdash/trend.tsv
-#      (`date | pass | total | subject`, idempotent per day);
-#   3. regenerate tools/qdash/data.js (headline % + feature heatmap + qmatrix
-#      heatmap from the snapshot; the "how much of q works, over time" chart
-#      from the trend) and print the file:// URL.
-# Commit ledger.tsv + trend.tsv + data.js at a merge worth recording.
-# Data-only regen without re-measuring: `python3 tools/qdash/gen.py`.
-# QDASH_QMATRIX=cache reuses the previous qmatrix section instead of re-running.
-qdash: CFLAGS = $(DEBUG_CFLAGS)
-qdash: LDFLAGS = $(DEBUG_LDFLAGS)
-qdash: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
-	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
-	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) tools/qdash/collect.sh
-	@python3 tools/qdash/gen.py --bank --open
 
 # Re-baseline tools/frozen.manifest.  Run ONLY after an authorized change to the
 # rayforce base or an upstream bump — the deliberate acknowledgement that the
@@ -533,21 +504,24 @@ win: q.exe
 # when the host is unreachable; every remote call has a hard timeout.
 # F= is a fuzzy substring over the ledger ids (Phase-A suites = their corpus
 # path e.g. `math/simple`; Phase-B checks = `native/<check>`), narrowing BOTH
-# phases before the remote batch — mirrors `make qtest F=` (dev-loop only; the
+# phases before the remote batch — mirrors `make q-test F=` (dev-loop only; the
 # qdash pillar always runs unfiltered).  e.g. `make win-smoke F=math`.
 win-smoke: win $(Q_TARGET)
 	bash tools/win-smoke.sh "$(F)"
 
 # One-shot release publish — run at a merge worth recording, infrequently.
-# Chains the four steps in order: Windows cross-build + on-host smoke (best
-# effort — the `-` prefix lets a down VM host or a timing-diff not abort the
-# rest), bank the ratchet, refresh the qdash dashboard, rebuild the browser
-# wasm (needs emsdk on PATH; sourced inline). Each step re-measures the corpus
-# independently — cheap enough at release cadence not to bother de-duplicating.
-publish:
+# SUPERSEDED by `make q-release` + `make q-upload` (spec:
+# docs/superpowers/specs/2026-07-17-q-release-tooling.md); kept working until
+# those land. Windows cross-build + on-host smoke (best effort — the `-` prefix
+# lets a down VM host or a timing-diff not abort the rest), bank the ratchet,
+# refresh the qdash dashboard (tools/qdash, inlined here since `make qdash` was
+# retired), rebuild the browser wasm (needs emsdk on PATH; sourced inline).
+publish: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
 	-$(MAKE) win-smoke
-	$(MAKE) qtest-results
-	$(MAKE) qdash
+	$(MAKE) q-test-results
+	$(CC) $(DEBUG_CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(DEBUG_LDFLAGS) -Itest
+	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) tools/qdash/collect.sh
+	@python3 tools/qdash/gen.py --bank --open
 	. $(HOME)/emsdk/emsdk_env.sh && $(MAKE) -f Makefile.wasm wasm
 
 clean:
@@ -564,10 +538,10 @@ clean:
 	# Coverage artefacts (see `make coverage`).
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
-	# JUnit-XML export (tools/qtest.sh) + javakdb build classes (kwire-live).
+	# JUnit-XML export (tools/qtest.sh) + javakdb build classes (q-kwire).
 	-rm -rf test-results tools/kdb-conformance/.build
 
-.PHONY: default help debug release lib dist win win-smoke bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff qtest qmatrix qdocs qtest-results qdash qdoctest kwire-live manifest coverage clean sync-github sync-github-force sync-github-dry release-github
+.PHONY: default help debug release lib dist win win-smoke bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff q-test q-matrix q-test-results qdoctest q-kwire manifest coverage clean sync-github sync-github-force sync-github-dry release-github
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
