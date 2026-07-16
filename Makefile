@@ -533,6 +533,18 @@ win: q.exe
 win-smoke: win $(Q_TARGET)
 	bash tools/win-smoke.sh "$(F)"
 
+# One-shot release publish — run at a merge worth recording, infrequently.
+# Chains the four steps in order: Windows cross-build + on-host smoke (best
+# effort — the `-` prefix lets a down VM host or a timing-diff not abort the
+# rest), bank the ratchet, refresh the qdash dashboard, rebuild the browser
+# wasm (needs emsdk on PATH; sourced inline). Each step re-measures the corpus
+# independently — cheap enough at release cadence not to bother de-duplicating.
+publish:
+	-$(MAKE) win-smoke
+	$(MAKE) qtest-results
+	$(MAKE) qdash
+	. $(HOME)/emsdk/emsdk_env.sh && $(MAKE) -f Makefile.wasm wasm
+
 clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(Q_MAIN_OBJ) $(QDOC_MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(DEPS)
