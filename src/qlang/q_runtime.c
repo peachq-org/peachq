@@ -15,6 +15,7 @@
 #include "qlang/q_dotz.h"     /* q_dotz_init/resolve/destroy — `.z.*` resolver */
 #include "qlang/q_ns.h"       /* q_ns_reset — `\d` context state */
 #include "qlang/q_sys.h"      /* q_sys_seed_init — `\S` constant-seed contract */
+#include "qlang/q_fmt_pipe.h" /* q_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_parse.h"    /* q_parse, q_lower — embedded-bootstrap loader */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
 #include "lang/env.h"         /* ray_env_bind — `.q.*` keyword bindings */
@@ -171,5 +172,8 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_registry_destroy();      /* free verb snapshots before the env goes away */
     q_deriv_reset_markers();   /* marker sym-ids die with this runtime's table */
     q_ns_reset();              /* drop the `\d` context with its runtime */
+    q_pipe_disable();          /* reset the `\nonlegacy` display global — the
+                                * process-wide pipe mode never leaks into the next
+                                * runtime (fresh-per-file doctest, wasm re-init) */
     ray_runtime_destroy(rt);
 }
