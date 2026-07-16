@@ -1,5 +1,7 @@
 /* q_fmt — the q-style value formatter (q_fmt.h); non-q shapes -> ray_fmt. */
 #include "qlang/q_fmt.h"
+#include "qlang/q_fmt_internal.h" /* q_cell — shared with the pipe renderer */
+#include "qlang/q_fmt_pipe.h"  /* `--nonlegacy` console table render */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "qlang/q_sys.h"   /* q_con_display — live `\c rows cols` clip state */
@@ -291,7 +293,7 @@ static int q_col_uniform_singleton(ray_t* col) {
 static void q_float_tok(double v, int f32, char* out, size_t n);   /* fwd */
 
 /* One table cell: sym cells print WITHOUT the backtick (kdb `ibm`). */
-static void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
+void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
     out[0] = '\0';
     if (col && col->type == -RAY_STR) {     /* char-column shim: bare char */
         size_t l = ray_str_len(col);
@@ -818,6 +820,10 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
 /* Public entry, CONSOLE: the `\c` clip when armed; unarmed — or a parse tree — equals q_fmt. */
 void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0 || !buf) return;
+    /* `--nonlegacy` (OFF by default): tables render as the pipe table.  Gated
+     * HERE — the console seam — and never in q_fmt_body, which the UNCLIPPED
+     * q_fmt (`string`, `-3!`, CSV, every cell) shares and must keep legacy. */
+    if (q_pipe_on() && q_pipe_is_table(val)) { q_pipe_console(val, buf, bufsz); return; }
     int32_t rows = 0, cols = 0;
     int armed = q_con_display(&rows, &cols) && !g_clip_active;
     if (armed && val && val->type == RAY_LIST && q_list_is_parse_tree(val, 0))
