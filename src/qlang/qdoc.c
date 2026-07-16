@@ -141,12 +141,25 @@ static void run_example(const char* input, const char* expect,
             char got[QD_OUT];
             got[0] = '\0';
             int ok;
+            /* A `\`-command's console side effects come FIRST, then its value —
+             * the same order the eval path below uses. `\h` emits its doc line
+             * this way and returns no value at all, so without this the row
+             * would compare against an empty string. */
+            size_t gpos = 0;
+            { const char* con = q_console_str();
+              if (con && *con) {
+                  gpos = strlen(con);
+                  if (gpos >= sizeof got) gpos = sizeof got - 1;
+                  memcpy(got, con, gpos);
+                  got[gpos] = '\0';
+              }
+              q_console_reset(); }
             if (sr && RAY_IS_ERR(sr)) {
                 ok = want_error && error_row_matches(sr, errcls);
                 snprintf(got, sizeof got, "<error>");
                 ray_error_free(sr);
             } else {
-                if (sr && !RAY_IS_NULL(sr)) q_fmt_console(sr, got, sizeof got);
+                if (sr && !RAY_IS_NULL(sr)) q_fmt_console(sr, got + gpos, sizeof got - gpos);
                 if (sr) ray_release(sr);
                 if (want_error) {
                     ok = 0;
