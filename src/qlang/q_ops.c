@@ -17,8 +17,9 @@
  *   AGGREGATE, `and`/`or` are register_vary scalar special forms — so wiring
  *   it needs a q_max2_wrap twin of q_min2_wrap = new logic, HELD), monadic `%`
  *   (reciprocal: no builtin).  Dyadic `&` is the q_min2_wrap recipe
- *   (element-wise min / bool-and) — the `and` keyword reuses it.  The bool/null
- *   batch keywords `any`/`all` are RESERVED-but-deferred (see their rows
+ *   (element-wise min / bool-and) — the `and` keyword reuses it.  `any`/`all`
+ *   keep QR_NONE rows to reserve the name and fix the lexical class, but they
+ *   are no longer deferred — their VALUE is self-hosted in q.q (see their rows
  *   below); `or` (|-max keyword) is not rostered until `|`-max lands.
  *
  * Wrapper recipes carry the wrapper FUNCTION POINTER directly (QR_FN*); the
@@ -496,18 +497,12 @@ static const q_op_t Q_OPS[] = {
     /* each-prior mnemonics `deltas` ((-':)x) and `differ` (not(~':)x) are
      * self-hosted in q.q — no rows (both ride the each-prior HOF the C
      * wrappers called anyway; measured parity). */
-    /* ---- boolean/null batch: RESERVED-but-DEFERRED (feat/q-bool-null) ----
-     * `any`/`all` are real q keywords rostered to reserve the name
-     * (`any:5`/`all:5` -> 'assign, kdb-true) with QR_NONE (no value) — a
-     * documented DEFER: their range is boolean `b` for every domain
-     * (ref/all-any.md: both aggregates) and a `max`/`min` rename is type-wrong
-     * for non-boolean input (`all 2000.01.02 2010.01.02`->1b, but max is a
-     * DATE); the boolean coercion is new logic (HELD).  KW_PREFIX so the
-     * reservation does not reclassify the scanner.
-     * NB: `null` LANDED separately as a real atomic verb (q_null_wrap,
-     * feat/q-atomic-extend #67) — its reserved row here was dropped on merge to
-     * avoid a duplicate.  `or` is the keyword spelling of `|`-max and waits for
-     * `|`-max (a valueless QLEX_KW_INFIX row would expose rayfall's scalar `or`). */
+    /* `any`/`all` are self-hosted in q.q (the boolean coercion the DEFER here
+     * once held: cast then fold — a `max`/`min` rename is type-wrong, since
+     * ref/all-any.md ranges every domain to boolean).  The rows keep the names
+     * reserved and fix the lexical class; the VALUE comes from `.q`.
+     * NB: `or` is the keyword spelling of `|`-max and still waits for `|`-max
+     * (a valueless QLEX_KW_INFIX row would expose rayfall's scalar `or`). */
     { "any",     QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate" },
     { "all",     QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate" },
     /* ---- IPC client verbs (feat/q-ipc-client, Phase D) — thin wrappers over the
