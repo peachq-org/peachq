@@ -8,6 +8,7 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
+#include "qlang/q_sys.h"  /* q_sys_dispatch — `\`-command handling (mirrors run_one_line) */
 #include "lang/eval.h"    /* ray_eval */
 #include "ops/ops.h"      /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
@@ -50,6 +51,37 @@ char* q_wasm_eval(const char* src) {
     if (!src)
         return strdup("");
 
+    /* `\`-commands (\c, \nonlegacy, \h, ...) run before the parser — the same
+     * q_sys_dispatch the native REPL (q_repl.c:run_one_line) and `system "…"`
+     * use.  Without this the browser REPL silently drops every `\`-line.  There
+     * is no shell in wasm, so an unknown `\token` (QS_UNKNOWN) falls through to
+     * the parser rather than shelling out (the doctest-runner policy). */
+    {
+        q_sys_result d = q_sys_dispatch(src, strlen(src));
+        if (d.kind == QS_QUIT)   return strdup("");            /* nothing to quit in a browser */
+        if (d.kind == QS_TOGGLE) return strdup("error: nyi");  /* q/k toggle NYI */
+        if (d.kind == QS_VALUE) {
+            char out[8192]; out[0] = '\0'; size_t off = 0;     /* silent set (sr==NULL, no console) must return "" */
+            const char* con = q_console_str();                 /* \h doc line, \t show, ... */
+            if (con && *con) { snprintf(out, sizeof out, "%s", con); off = strlen(out); }
+            q_console_reset();
+            ray_t* sr = d.val;                                 /* may be NULL (silent), a value, or an error */
+            if (sr && RAY_IS_ERR(sr)) {
+                const char* code = (const char*)sr->sdata;
+                snprintf(out + off, sizeof out - off, "error: %s", (code && *code) ? code : "syscmd");
+                ray_error_free(sr);
+            } else if (sr) {
+                if (!RAY_IS_NULL(sr)) {
+                    char vb[8192]; q_fmt_console(sr, vb, sizeof vb);   /* obey \c / nonlegacy, as run_one_line does */
+                    snprintf(out + off, sizeof out - off, "%s", vb);
+                }
+                ray_release(sr);
+            }
+            return strdup(out);
+        }
+        /* QS_UNKNOWN / QS_NOT_CMD: fall through to parse/eval. */
+    }
+
     ray_t* ast = q_parse(src);
     if (RAY_IS_ERR(ast)) {
         ray_release(ast);
@@ -82,7 +114,7 @@ char* q_wasm_eval(const char* src) {
     /* q console silence: a (last-statement) assignment prints nothing —
      * mirrors src/qlang/q_repl.c:run_one_line. */
     if (!RAY_IS_NULL(r) && !is_assign)
-        q_fmt(r, buf, sizeof buf);
+        q_fmt_console(r, buf, sizeof buf);   /* obey \c / nonlegacy on auto-echo, as run_one_line does */
     else
         buf[0] = '\0';
     ray_release(r);
