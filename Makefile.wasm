@@ -62,7 +62,7 @@ CFLAGS = -Wall -std=$(STD) -O3 -msimd128 \
 #   EXPORTED_RUNTIME_METHODS— ccall/cwrap to call in; UTF8ToString to read the
 #                             char* q_wasm_eval returns; FS for future scripts.
 #   ALLOW_MEMORY_GROWTH     — the q heap grows on demand.
-#   MODULARIZE + EXPORT_NAME— emit a factory (createOpenQ) returning a Promise;
+#   MODULARIZE + EXPORT_NAME— emit a factory (createPeachQ) returning a Promise;
 #                             robust to load in both Node (require) and browser.
 #   --no-entry              — the glue has no main(); runtime inits lazily.
 EMFLAGS = \
@@ -70,7 +70,7 @@ EMFLAGS = \
   -s "EXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','FS']" \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s MODULARIZE=1 \
-  -s EXPORT_NAME=createOpenQ \
+  -s EXPORT_NAME=createPeachQ \
   --no-entry
 
 wasm: $(SRC)
