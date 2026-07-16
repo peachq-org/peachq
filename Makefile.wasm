@@ -7,7 +7,7 @@
 #
 # Adapted from upstream rayforce's `wasm:` target (upstream/sizeof-unary),
 # retargeted from the old core/-based tree to this src/-based one and wired to
-# openq's q pipeline via wasm/q_wasm.c. Produces wasm/peach.js + .wasm.
+# openq's q pipeline via wasm/q_wasm.c. Produces wasm/peachq.js + .wasm.
 
 CC  = emcc
 STD = c17
@@ -29,7 +29,7 @@ LIB_SRC := $(filter-out src/core/ipc.c, $(LIB_SRC))
 GLUE_SRC = wasm/q_wasm.c wasm/ipc_stub.c
 SRC      = $(LIB_SRC) $(GLUE_SRC) third_party/yyjson/yyjson.c
 
-TARGET = peach
+TARGET = peachq
 OUTDIR = wasm
 
 INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson
