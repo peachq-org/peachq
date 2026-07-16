@@ -24,6 +24,7 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
+#include "qlang/q_fmt_pipe.h" /* q_pipe_enable — the `--nonlegacy` display */
 #include "core/poll.h"
 #include "core/runtime.h"
 #include <rayforce.h>
@@ -72,6 +73,11 @@ int main(int argc, char** argv) {
             }
             have_port = true;
             port_auto = (k == 2);
+        } else if (strcmp(argv[i], "--nonlegacy") == 0) {
+            /* Opt IN to the pipe-table display (q_fmt_pipe.c).  Launch-only and
+             * OFF by default: kdb-true legacy display stays the default, and one
+             * process has exactly one display path. */
+            q_pipe_enable();
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             auth_pw = argv[++i];
             auth_restricted = false;
