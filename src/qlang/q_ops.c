@@ -153,8 +153,8 @@ static const q_op_t Q_OPS[] = {
       "flags where its arguments are equal", "qdocs/docs/docs/docs/ref/equal.md",
       "x=y    =[x;y]", NULL },
     { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2A("!=", q_ne_wrap), NULL, 1, 0, "atomic",
-      NULL, NULL,
-      NULL, NULL },
+      "Not equal (returns 1b where arguments differ)", NULL,   /* HAND-AUTHORED: docsrc NULL, see tools/qdocs/qdocs-docmap.pins.tsv */
+      "x<>y   <>[x;y]", "1 2 3 <> 3 2 1 -> 101b" },
     /* ---- structural glyphs ---- */
     /* `#` monadic is count (aggregate — the `count` row); family = dyadic
      * Take, the L4 pilot op (`-3#t`).  The arg-swap lives in q_take_wrap. */
@@ -858,14 +858,14 @@ static const q_op_t Q_OPS[] = {
       "Apply a value item-wise to a dictionary, list, or conforming lists and/or dictionaries.", "qdocs/docs/docs/docs/ref/maps.md#Each",
       "(v1')x    v1'[x]       v1 each x", NULL },
     { "/",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "fold",      1, 0, "none",
-      NULL, NULL,
-      NULL, NULL },
+      "Reduce a list with a binary value, keeping the last result", NULL,  /* HAND-AUTHORED: docsrc NULL, see tools/qdocs/qdocs-docmap.pins.tsv */
+      "f/ x", "(+/)1 2 3 -> 6" },
     { "\\",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "scan",      1, 0, "none",
-      NULL, NULL,
-      NULL, NULL },
+      "Like Over, but returns each intermediate result", NULL,  /* HAND-AUTHORED */
+      "f\\ x", "(+\\)1 2 3 -> 1 3 6" },
     { "':",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  NULL,        1, 0, "none",
-      NULL, NULL,
-      NULL, NULL },  /* each-prior: deferred */
+      "Each Prior: apply a binary value between each item and its predecessor", NULL,  /* HAND-AUTHORED; verb itself DEFERRED (adverb_hof NULL) */
+      "(f':)x   f':[x]", NULL },  /* no example: each-prior is not yet wired */
     { "/:",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-right", 1, 0, "none",
       "Apply a binary value between one argument and each item of the other.", "qdocs/docs/docs/docs/ref/maps.md#Each Left and Each Right",
       "Each Left     x v2\\: y    v2\\:[x;y]   |->   v2[;y] each x", NULL },

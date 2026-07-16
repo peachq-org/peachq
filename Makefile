@@ -353,12 +353,15 @@ test: $(TARGET) $(LIB_OBJ) $(TEST_OBJ)
 # BOTH pillars (C/rfl/qcmd + qscript) in --porcelain mode and prints ONE
 # aggregated `STATUS | pass | total | time | id | text` summary.  F= narrows
 # BOTH pillars (fuzzy, matches anywhere in the suite id): `make qtest F=asc`.
+# examplecheck re-runs each Q_OPS[] example through OUR ./q (no qdocs dependency) and
+# stays honest — so it is gated.  qdocs-doccheck.sh (doc/syntax verbatim-vs-qdocs) is
+# NOT gated: qdocs is a transitional corpus (removed once we host our own docs), and
+# coupling the gate to it is fragile; run tools/qdocs/qdocs-doccheck.sh on demand.
 qtest: CFLAGS = $(DEBUG_CFLAGS)
 qtest: LDFLAGS = $(DEBUG_LDFLAGS)
 qtest: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
 	@tools/frozen-manifest.sh check
-	@tools/qdocs-doccheck.sh
-	@tools/qdocs-examplecheck.sh
+	@tools/qdocs/qdocs-examplecheck.sh
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
 	RAY_DFD=$${RAY_DFD:-0} RAYFORCE_CORES=$(TEST_CORES) timeout 480 tools/qtest.sh "$(F)"
 
