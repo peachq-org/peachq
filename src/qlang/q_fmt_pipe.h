@@ -16,9 +16,11 @@
 #include <rayforce.h>
 #include <stdbool.h>
 
-/* Arm the mode.  qmain's arg loop is the sole caller (launch-only: there is no
- * runtime toggle, so one process has exactly one display path). */
+/* Arm/disarm/read the pipe display global.  Callers: qmain's `--nonlegacy` arg
+ * and the `\nonlegacy` syscmd (arm/disarm live); q_runtime_destroy resets it (no
+ * cross-runtime leak). */
 void q_pipe_enable(void);
+void q_pipe_disable(void);
 bool q_pipe_on(void);
 
 /* True iff val is a shape this mode renders: a table, or a keyed table
