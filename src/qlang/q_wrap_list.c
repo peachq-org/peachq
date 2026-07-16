@@ -70,13 +70,13 @@ static ray_t* q_reshape(ray_t* shape, ray_t* x) {
     int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
     if (total <= 0) return ray_error("length", "#: reshape of empty");
     int64_t rows, cols, chunk = 0;
-    if (d0 == INT64_MIN && d1 != INT64_MIN) {
+    if (d0 == NULL_I64 && d1 != NULL_I64) {   /* 0N dimension -> inferred stride */
         if (d1 <= 0) return ray_error("length", "#: inferred reshape needs a positive stride");
         cols = d1; rows = (total + cols - 1) / cols; chunk = 1;
-    } else if (d1 == INT64_MIN && d0 != INT64_MIN) {
+    } else if (d1 == NULL_I64 && d0 != NULL_I64) {
         if (d0 <= 0) return ray_error("length", "#: inferred reshape needs a positive stride");
         rows = d0; cols = (total + rows - 1) / rows; chunk = 1;
-    } else if (d0 == INT64_MIN || d1 == INT64_MIN) {
+    } else if (d0 == NULL_I64 || d1 == NULL_I64) {
         return ray_error("length", "#: 0N 0N reshape");
     } else {
         rows = d0; cols = d1;
@@ -535,10 +535,9 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
  * (`1 xprev "abcde"` -> " abcd"); a generic LIST fills each vacated slot
  * with `0#first` of the ORIGINAL (`prev (1 2;"abc";`ibm)` -> (`long$();1 2;"abc")). */
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
-    if (!nx || !(nx->type == -RAY_I64 || nx->type == -RAY_I32 || nx->type == -RAY_I16) ||
-        RAY_ATOM_IS_NULL(nx))
-        return ray_error("type", "xprev: left arg must be an int atom");
-    int64_t k = q_iatom_val(nx);
+    int64_t k;   /* strict cast owns the type axis; 0N rejected here */
+    if (!q_strict_i64(nx, &k) || RAY_ATOM_IS_NULL(nx))
+        return ray_error("type", "xprev: n");
     if (x && x->type == RAY_LIST) {
         /* fill = 0#first (a take that cannot empty degrades to ()) */
         int64_t len = ray_len(x);
