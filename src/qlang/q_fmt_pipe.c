@@ -20,7 +20,7 @@
 #define QP_DGLINE   2048
 #define QP_DIST_CAP 10000  /* bounded distinct (spec decision 7 = DBHelper MAX_SIZE) */
 #define QP_HT       16384  /* open-addressed slots; load <= 0.61 at the cap */
-#define QP_FIXED    4      /* header + name row + type row + divider */
+#define QP_FIXED    3      /* name row + type row + divider (no rows/cols banner) */
 #define QP_MIN_ROWS 10     /* digest fires only past this many TABLE rows */
 
 static bool g_pipe_on;
@@ -90,20 +90,16 @@ static int64_t qp_take(ray_t* t, qp_col* cs, int64_t at, int64_t max) {
 }
 
 /* Flatten val to columns (keyed table = key cols then value cols, one grid).
- * Returns the count TAKEN (<= max); *nctotal is the TRUE count so the banner
- * reports M honestly even when display caps at QP_MAXCOL. */
-static int64_t qp_gather(ray_t* val, qp_col* cs, int64_t max,
-                         int64_t* nrows, int64_t* nctotal) {
+ * Returns the count TAKEN (<= max). */
+static int64_t qp_gather(ray_t* val, qp_col* cs, int64_t max, int64_t* nrows) {
     if (val->type == RAY_TABLE) {
-        *nrows   = ray_table_nrows(val);
-        *nctotal = ray_table_ncols(val);
+        *nrows = ray_table_nrows(val);
         return qp_take(val, cs, 0, max);
     }
     ray_t* kk = ray_dict_keys(val);                  /* borrowed */
     ray_t* vv = ray_dict_vals(val);                  /* borrowed */
     int64_t kn = ray_table_nrows(kk), vn = ray_table_nrows(vv);
-    *nrows   = kn < vn ? kn : vn;
-    *nctotal = ray_table_ncols(kk) + ray_table_ncols(vv);
+    *nrows = kn < vn ? kn : vn;
     return qp_take(vv, cs, qp_take(kk, cs, 0, max), max);
 }
 
@@ -255,8 +251,8 @@ static void qp_mark_overflow(char* line, size_t lim) {
 
 /* Facts left-to-right, wrapped at the `\c` cols budget, hard-capped at QP_DIGEST
  * lines with `...` marking what did not fit.  nc = columns with a fact (display
- * cap); nct = the TRUE column count named in the header.  Returns lines used. */
-static int qp_digest(qp_col* cs, int64_t nc, int64_t nct, int64_t nr, int32_t cols,
+ * cap).  The row/column counts live once, in the footer.  Returns lines used. */
+static int qp_digest(qp_col* cs, int64_t nc, int64_t nr, int32_t cols,
                      char lines[QP_DIGEST][QP_DGLINE]) {
     size_t lim = (size_t)(cols - 1);
     if (lim > QP_DGLINE - 1) lim = QP_DGLINE - 1;
@@ -264,10 +260,8 @@ static int qp_digest(qp_col* cs, int64_t nc, int64_t nct, int64_t nr, int32_t co
 
     char tok[QP_CELL * 6];
     int  li = 0;
-    snprintf(tok, sizeof tok, "%lld rows. %lld columns.",
-             (long long)nr, (long long)nct);
-    for (int64_t c = -1; c < nc; c++) {
-        if (c >= 0) qp_fact(&cs[c], nr, tok, sizeof tok);
+    for (int64_t c = 0; c < nc; c++) {
+        qp_fact(&cs[c], nr, tok, sizeof tok);
         size_t have = strlen(lines[li]), need = strlen(tok);
         if (have + (have ? 1 : 0) + need <= lim) {
             if (have) strcat(lines[li], " ");
@@ -315,8 +309,8 @@ void q_pipe_console(ray_t* val, char* buf, size_t bufsz) {
     int32_t cols = armed ? ccols : 0;
 
     qp_col  cs[QP_MAXCOL];
-    int64_t nr = 0, nct = 0;
-    int64_t nc = qp_gather(val, cs, QP_MAXCOL, &nr, &nct);   /* nc shown, nct true */
+    int64_t nr = 0;
+    int64_t nc = qp_gather(val, cs, QP_MAXCOL, &nr);
     if (nc <= 0) { qp_line(&o, "+`!()", cols); return; }
 
     /* Budget (spec decision 4): the WHOLE render fits `\c` rows, so the digest
@@ -326,7 +320,7 @@ void q_pipe_console(ray_t* val, char* buf, size_t bufsz) {
     bool    clipped = armed && nr > (budget - QP_FIXED > 1 ? budget - QP_FIXED : 1);
 
     char dl[QP_DIGEST][QP_DGLINE];
-    int  dn = (clipped && nr > QP_MIN_ROWS) ? qp_digest(cs, nc, nct, nr, cols, dl) : 0;
+    int  dn = (clipped && nr > QP_MIN_ROWS) ? qp_digest(cs, nc, nr, cols, dl) : 0;
     if (clipped) {
         shown = budget - QP_FIXED - 1 - (dn ? dn + 1 : 0);   /* footer; blank + digest */
         if (shown < 1) shown = 1;
@@ -336,10 +330,6 @@ void q_pipe_console(ray_t* val, char* buf, size_t bufsz) {
     qp_widths(cs, nc, shown, w);
 
     char line[QP_LINE], cells[QP_MAXCOL][QP_CELL];
-    snprintf(line, sizeof line, "rows: %lld columns: %lld",
-             (long long)nr, (long long)nct);
-    qp_line(&o, line, cols);
-
     for (int64_t c = 0; c < nc; c++)
         snprintf(cells[c], QP_CELL, "%s", cs[c].name);
     qp_cells(line, sizeof line, cells, w, nc);
