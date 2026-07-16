@@ -11,6 +11,7 @@
 #include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
 #include "qlang/q_ops.h"      /* q_ops_find — the `\h` doc lookup */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`); q_console_str/reset (timed-expr side effects) */
+#include "qlang/q_fmt_pipe.h" /* q_pipe_on/enable/disable — `\nonlegacy` display toggle */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/q_parse.h"    /* q_parse / q_lower — `\t expr` / `\ts expr` timing */
@@ -730,6 +731,19 @@ static ray_t* h_s(const char* arg, size_t alen, const char* rest, size_t restlen
     return NULL;
 }
 
+/* `\nonlegacy` — pipe-table display toggle (openq; runtime twin of #198's
+ * launch-only `--nonlegacy`, reachable from the argv-less wasm REPL).  Bare form
+ * shows the state as a boolean (`1b`/`0b`, like bare `\c`); `1`/`0`/`1b`/`0b`
+ * sets it, silent.  A non-boolean arg is a bare `'type` (a boolean is expected). */
+static ray_t* h_nonlegacy(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
+    (void)rest; (void)restlen; (void)rep;
+    if (alen == 0) return ray_bool(q_pipe_on());     /* getter → 1b/0b */
+    size_t n = (alen == 2 && arg[1] == 'b') ? 1 : alen;   /* strip the 1b/0b literal */
+    if (n != 1 || (arg[0] != '0' && arg[0] != '1')) return ray_error("type", NULL);
+    if (arg[0] == '1') q_pipe_enable(); else q_pipe_disable();
+    return NULL;                                     /* setter: silent */
+}
+
 /* `\h <verb>` — the verb's help, from the Q_OPS[] doc/syntax/example columns (openq
  * extension; kdb has no `\h`, so a bare `\h` used to shell out to `h`).  Prints up
  * to three bare lines to the CONSOLE BUFFER (not stdout — it prints unquoted while
@@ -808,6 +822,7 @@ static const struct {
     { "W",  1, 1, Q_SYS_F_NONE, h_W },        /* week offset */
     { "e",  1, 1, Q_SYS_F_NONE, h_e },        /* error-trap clients */
     { "w",  1, 1, Q_SYS_F_NONE, h_w },        /* workspace stats (6 longs) */
+    { "nonlegacy", 9, 1, Q_SYS_F_NONE, h_nonlegacy }, /* pipe-table display toggle (openq) */
     /* silent setter / action form (arg present) → NULL; getter form → 'nyi */
     { "z",  1, 1, Q_SYS_F_NONE, h_getset },   /* date parsing */
     { "E",  1, 1, Q_SYS_F_NONE, h_getset },   /* TLS server mode */
