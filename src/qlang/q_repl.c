@@ -266,6 +266,14 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
         case QS_NOT_CMD: break;
         }
         if (handled) {
+            /* Console side effects FIRST, then the value — `\h`'s doc line,
+             * `\t exp`'s show/0N! output. This path returns before the eval
+             * path's flush below, so the adapter drains here; qdoc.c's adapter
+             * already does the same, and draining in the mode-less core instead
+             * would steal the text the doctest runner compares against. */
+            { const char* con = q_console_str();
+              if (con && *con) fputs(con, out);
+              q_console_reset(); }
             if (sr && RAY_IS_ERR(sr)) {
                 const char* code = (const char*)sr->sdata;
                 fprintf(err, "error: %s\n", (code && *code) ? code : "syscmd");
