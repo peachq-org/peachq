@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Zero-dependency static preview server for the openq WASM REPL.
 
-Serves the wasm/ directory (index.html + rayforce.js/.wasm) with the correct
+Serves the wasm/ directory (index.html + peach.js/.wasm) with the correct
 MIME type for .wasm so the browser streams/instantiates it. Stdlib only —
 upstream's livereload dependency is intentionally avoided to keep with the
 project's zero-dependency ethos.
