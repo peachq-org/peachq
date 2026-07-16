@@ -114,7 +114,7 @@ void q_sys_cfg_init(void) {
     g_con_trunc = 1;             /* display clipping ARMED at the 25 80 default */
     g_http_rows = 36; g_http_cols = 2000;
     g_gc_mode   = 0;
-    g_utc_offset = INT64_MIN;    /* 0N — "use the machine offset" (deferred) */
+    g_utc_offset = NULL_I64;     /* 0N — "use the machine offset" (deferred) */
     g_week_offset = 2;           /* Monday (0 = Saturday) */
     g_err_trap  = 0;             /* trapping off */
     g_sec_threads = 0;           /* no secondary threads configured */
