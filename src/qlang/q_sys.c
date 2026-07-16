@@ -232,7 +232,7 @@ static ray_t* h_S(const char* arg, size_t alen, const char* rest, size_t restlen
  * value for) can't yet report the value → honest 'nyi.
  *
  * h_nyi serves the remaining commands that print a VALUE even in their arg-form
- * or are getter-only — \b \B (views): there is no silent form to match, so
+ * or are getter-only — \B (pending views): there is no silent form to match, so
  * 'nyi is both honest and non-regressing.  It is also the observable "known but
  * not implemented" signal, distinct from an unknown-token shell-out. */
 static ray_t* h_getset(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
@@ -244,6 +244,17 @@ static ray_t* h_getset(const char* arg, size_t alen, const char* rest, size_t re
 static ray_t* h_nyi(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
     (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
     return ray_error("nyi", NULL);
+}
+
+/* `\b` — views.  openq has no view mechanism; the owner ruling (2026-07-15) is
+ * that \b always reports an empty list "for now".  This is a DELIBERATE LIE
+ * (PLAN.md, Known defects): an empty listing is indistinguishable from "no views
+ * defined", so `if[count views[];..]` gets a confidently wrong answer where 'nyi
+ * was honest.  The namespace arg is accepted and ignored — nothing to filter.
+ * Shape mirrors \a's empty listing (ns_members, q_ns.c): len 0, capacity 1. */
+static ray_t* h_b(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
+    (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
+    return ray_sym_vec_new(RAY_SYM_W64, 1);
 }
 
 /* ---- Stage-3 implemented handlers -----------------------------------------
@@ -775,7 +786,7 @@ static const struct {
     { "2",  1, 1, Q_SYS_F_NONE, h_getset },   /* stderr redirect */
     { "_",  1, 1, Q_SYS_F_NONE, h_getset },   /* hide q code */
     /* value-printing / getter-only → 'nyi (no silent form to match) */
-    { "b",  1, 1, Q_SYS_F_NONE, h_nyi },      /* views (lists) */
+    { "b",  1, 1, Q_SYS_F_NONE, h_b },        /* views — always empty (owner ruling) */
     { "B",  1, 1, Q_SYS_F_NONE, h_nyi },      /* pending views (lists) */
     { "t",  1, 1, Q_SYS_F_NONE, h_t },        /* timer (\t N/\t 0/\t) + expr timing (\t exp/\t:n) */
     { "ts", 2, 1, Q_SYS_F_NONE, h_ts },       /* time and space (\ts exp / \ts:n) */
