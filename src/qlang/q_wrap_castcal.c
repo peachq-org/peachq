@@ -460,10 +460,16 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
     return 0;
 }
 
-/* RAY vector type -> q type-name (ref/key.md "type of a vector"; the exact
- * REVERSE of the cast-designator name map above — keep the two in sync). */
+/* RAY vector type -> q type-name (ref/key.md "type of a vector"). Mirrors the
+ * cast-designator name map above for every castable tag; `guid` is display-only
+ * (no `$`guid designator, so it has no entry there). No `default:` — total over
+ * the value band (#209): a new datatype refuses to build until it names its
+ * q-spelling here, the single home for empty-vec display (q_fmt) + `meta`/`key`
+ * type rows. LIST/STR have no scalar vector-type name (a STR vector is a list of
+ * strings in the provisional model); the -RAY_STR atom shim names `char` at the
+ * call sites (q_fmt_pipe/q_key_wrap). */
 const char* q_type_qname(int8_t t) {
-    switch (t) {
+    switch ((ray_type_e)t) {
     case RAY_BOOL:      return "boolean";
     case RAY_U8:        return "byte";
     case RAY_I16:       return "short";
@@ -472,6 +478,7 @@ const char* q_type_qname(int8_t t) {
     case RAY_F32:       return "real";
     case RAY_F64:       return "float";
     case RAY_SYM:       return "symbol";
+    case RAY_GUID:      return "guid";       /* `key 0#0Ng` -> `guid (was a gap) */
     case RAY_DATE:      return "date";
     case RAY_MONTH:     return "month";
     case RAY_MINUTE:    return "minute";
@@ -480,8 +487,9 @@ const char* q_type_qname(int8_t t) {
     case RAY_TIMESPAN:  return "timespan";
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_DATETIME:  return "datetime";
-    default:            return NULL;
+    case RAY_LIST: case RAY_STR: return NULL;
     }
+    return NULL;   /* unreachable: value band is exhausted above */
 }
 
 /* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
