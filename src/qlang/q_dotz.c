@@ -56,6 +56,7 @@ static char** g_argv       = NULL;
 static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
 static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
 static ray_t* g_zts        = NULL;  /* current `.z.ts` timer handler (owned), or NULL */
+static ray_t* g_zexit      = NULL;  /* current `.z.exit` process-exit handler */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
     if (len != 5 || name[0] != '.' || name[1] != 'z' || name[2] != '.' ||
@@ -344,6 +345,32 @@ void q_dotz_zts_set(ray_t* fn) {
     g_zts = fn;
 }
 
+/* `.z.exit` slot — same shape as `.z.ts` above: set via q_setg_wrap, read back
+ * via q_dotz_resolve, released (never FIRED) by q_dotz_destroy — a per-runtime
+ * teardown is not a process exit.  Firing is q_exit's job (q_sys.c). */
+void q_dotz_zexit_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zexit) ray_release(g_zexit);
+    g_zexit = fn;
+}
+
+/* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
+ * exit parameter; default = do nothing), then drain its show/0N! console
+ * output to stdout — this runs moments before exit(), nothing else drains. */
+void q_dotz_exit_fire(int code) {
+    ray_t* fn = g_zexit;
+    if (!fn) return;
+    ray_retain(fn);                      /* survive a re-assign mid-call */
+    ray_t* arg = ray_i64(code);
+    ray_t* r = call_fn1(fn, arg);
+    ray_release(arg);
+    ray_release(fn);
+    if (r) ray_release(r);
+    { const char* con = q_console_str();
+      if (con && *con) { fputs(con, stdout); fflush(stdout); }
+      q_console_reset(); }
+}
+
 ray_t* q_dotz_timer_thunk(void) {
     return ray_fn_unary(".z.ts", RAY_FN_NONE, q_zts_tick);
 }
@@ -427,6 +454,10 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
         ray_retain(g_zts);
         out = g_zts;
     }
+    if (!out && n == 7 && memcmp(p, ".z.exit", 7) == 0 && g_zexit) {
+        ray_retain(g_zexit);
+        out = g_zexit;
+    }
 
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
      * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
@@ -447,6 +478,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
 
 void q_dotz_destroy(void) {
     if (g_zts) { ray_release(g_zts); g_zts = NULL; }   /* release the `.z.ts` handler */
+    if (g_zexit) { ray_release(g_zexit); g_zexit = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;

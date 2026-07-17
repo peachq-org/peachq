@@ -1,11 +1,10 @@
 /* q_sys — see q_sys.h.  The unified `\`-command dispatcher: one Q_SYS[] static
- * manifest ({cmd, len, valence, flags, handler}, in the q_dotz.c idiom) plus one
- * parse/resolve loop.  Stage 1 folded the five working commands (\d \v \f \a \S)
- * into rows.  Stage 2 enumerates EVERY kdb `\`-command as a row (see q_sys.h for
- * the taxonomy: working / getset / nyi / exit-gated), adds the OS shell escape
- * on an unknown-token miss (REPL only), and flag-gates the process-exit commands
- * so the doctest runner survives them.  \d and \v/\f/\a lean on q_ns.c (context
- * state + member enumeration); \S owns its seed state here (its only consumer). */
+ * manifest ({cmd, len, handler}, in the q_dotz.c idiom) plus one
+ * parse/resolve loop.  Every kdb `\`-command is a row; a handler returns an
+ * OWNED value (NULL = silent) or an OWNED error — including `\\` (h_quit →
+ * q_exit) and the unknown-token shell miss, both gated by the g_own_process
+ * capability rather than by the caller.  \d and \v/\f/\a lean on q_ns.c
+ * (context state + member enumeration); \S owns its seed state here. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_sys.h"
 #include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
@@ -98,6 +97,8 @@ static int64_t g_utc_offset;              /* \o UTC offset    (default 0N)      
 static int32_t g_week_offset;             /* \W week offset   (default 2)       */
 static int32_t g_err_trap;                /* \e error trap    (default 0)       */
 static int32_t g_sec_threads;             /* \s secondary thr (default 0)       */
+static int     g_own_process;             /* this runtime may exit/shell process */
+static int     g_exiting;                 /* .z.exit reentry guard */
 
 /* \t timer: current interval (ms; 0 = off) and the live timer id (-1 = none). */
 static int64_t g_timer_ms = 0;
@@ -113,6 +114,8 @@ static int32_t g_listen_port;
 static int64_t g_listen_sel = -1;
 
 void q_sys_cfg_init(void) {
+    g_own_process = 0;
+    g_exiting = 0;
     g_con_rows  = 25; g_con_cols  = 80;
     g_con_trunc = 1;             /* display clipping ARMED at the 25 80 default */
     g_http_rows = 36; g_http_cols = 2000;
@@ -126,6 +129,23 @@ void q_sys_cfg_init(void) {
     g_listen_port = 0;           /* `\p` — no listening port by default */
     g_listen_sel  = -1;          /* no live listener selector */
     q_fmt_set_prec(7);           /* `\P` default (single-homed in q_fmt.c) */
+}
+
+void q_sys_own_process(bool on) { g_own_process = on ? 1 : 0; }
+
+/* See q_sys.h.  `.z.exit` runs AFTER the console is restored (its 0N! output
+ * must land on a cooked terminal) and cannot cancel or rewrite the exit: a
+ * reentrant q_exit from inside the handler skips it and exits with the
+ * ORIGINAL code (dotz.md: "The handler cannot cancel the exit"). */
+static int g_exit_code;
+void q_exit(int code) {
+    if (!g_own_process) return;
+    if (g_exiting) exit(g_exit_code);
+    g_exiting  = 1;
+    g_exit_code = code;
+    q_repl_console_close();
+    q_dotz_exit_fire(code);
+    exit(code);
 }
 
 #ifndef PATH_MAX
@@ -881,70 +901,85 @@ static ray_t* h_h(const char* arg, size_t alen, const char* rest, size_t restlen
 }
 
 /* ---- the single-source manifest -------------------------------------------
- * {cmd (token, "" = bare terminate/toggle, "\\" = quit), len, valence, flags,
- * handler}.  Lookup is by the parsed command TOKEN (multi-char `ts`/`cd` and
- * `\\` are representable).  Flags gate the process-exit commands per entry
- * point (see q_sys_dispatch). */
-enum {
-    Q_SYS_F_NONE      = 0,
-    Q_SYS_F_REPL_ONLY = 0x01,   /* benign no-op from the doctest path */
-    Q_SYS_F_EXIT      = 0x02,   /* exits the process — REPL only */
-};
+ * {cmd (token, "" = bare toggle, "\\" = quit), len, handler}.  Lookup
+ * is by the parsed command TOKEN (multi-char `ts`/`cd` and `\\` are
+ * representable).  The process-level rows carry ordinary handlers: the
+ * capability gate lives inside q_exit / q_sys_shell, never in a caller. */
+
+/* `\\` — quit.  q_exit is capability-gated: a real q process exits (firing
+ * `.z.exit`); an embedder runtime (doctest, wasm) returns and the row is
+ * silent — kdb-true display either way (quit prints nothing). */
+static ray_t* h_quit(const char* arg, size_t alen, const char* rest,
+                     size_t restlen, int64_t rep) {
+    (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
+    q_exit(0);
+    return NULL;
+}
+
+/* bare `\` — the q/k toggle.  kdb prints NOTHING for it, so silence is the
+ * display-true surface; the k-mode switch itself is deferred (no k mode). */
+static ray_t* h_toggle(const char* arg, size_t alen, const char* rest,
+                       size_t restlen, int64_t rep) {
+    (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
+    return NULL;
+}
 
 static const struct {
     const char* cmd;
     uint8_t     len;
-    uint8_t     valence;     /* max args the command reads (informational) */
-    uint8_t     flags;
     ray_t*    (*handler)(const char* arg, size_t alen,
                          const char* rest, size_t restlen, int64_t rep);
 } Q_SYS[] = {
     /* working — Stage 1 behaviour, unchanged */
-    { "d",  1, 1, Q_SYS_F_NONE, h_d },
-    { "v",  1, 1, Q_SYS_F_NONE, h_v },
-    { "f",  1, 1, Q_SYS_F_NONE, h_f },
-    { "a",  1, 1, Q_SYS_F_NONE, h_a },
-    { "S",  1, 1, Q_SYS_F_NONE, h_S },
-    { "h",  1, 1, Q_SYS_F_NONE, h_h },        /* verb help — openq extension */
+    { "d",  1, h_d },
+    { "v",  1, h_v },
+    { "f",  1, h_f },
+    { "a",  1, h_a },
+    { "S",  1, h_S },
+    { "h",  1, h_h },        /* verb help — openq extension */
     /* Stage 3 — real get/set + kdb-true getter values */
-    { "P",  1, 1, Q_SYS_F_NONE, h_P },        /* display precision */
-    { "c",  1, 2, Q_SYS_F_NONE, h_c },        /* console size */
-    { "C",  1, 2, Q_SYS_F_NONE, h_C },        /* HTTP display size */
-    { "o",  1, 1, Q_SYS_F_NONE, h_o },        /* offset from UTC */
-    { "g",  1, 1, Q_SYS_F_NONE, h_g },        /* gc mode */
-    { "s",  1, 1, Q_SYS_F_NONE, h_s },        /* secondary threads */
-    { "W",  1, 1, Q_SYS_F_NONE, h_W },        /* week offset */
-    { "e",  1, 1, Q_SYS_F_NONE, h_e },        /* error-trap clients */
-    { "w",  1, 1, Q_SYS_F_NONE, h_w },        /* workspace stats (6 longs) */
-    { "nonlegacy", 9, 1, Q_SYS_F_NONE, h_nonlegacy }, /* pipe-table display toggle (openq) */
+    { "P",  1, h_P },        /* display precision */
+    { "c",  1, h_c },        /* console size */
+    { "C",  1, h_C },        /* HTTP display size */
+    { "o",  1, h_o },        /* offset from UTC */
+    { "g",  1, h_g },        /* gc mode */
+    { "s",  1, h_s },        /* secondary threads */
+    { "W",  1, h_W },        /* week offset */
+    { "e",  1, h_e },        /* error-trap clients */
+    { "w",  1, h_w },        /* workspace stats (6 longs) */
+    { "nonlegacy", 9, h_nonlegacy }, /* pipe-table display toggle (openq) */
     /* silent setter / action form (arg present) → NULL; getter form → 'nyi */
-    { "z",  1, 1, Q_SYS_F_NONE, h_getset },   /* date parsing */
-    { "E",  1, 1, Q_SYS_F_NONE, h_getset },   /* TLS server mode */
-    { "l",  1, 1, Q_SYS_F_NONE, h_l },        /* load q script (regular file) */
-    { "p",  1, 1, Q_SYS_F_NONE, h_p },        /* listening port — get / \p N bind / \p 0 close */
-    { "r",  1, 2, Q_SYS_F_NONE, h_getset },   /* replication / rename */
-    { "T",  1, 1, Q_SYS_F_NONE, h_getset },   /* client timeout */
-    { "u",  1, 1, Q_SYS_F_NONE, h_getset },   /* reload user pwd file */
-    { "x",  1, 1, Q_SYS_F_NONE, h_getset },   /* expunge */
-    { "cd", 2, 1, Q_SYS_F_NONE, h_cd },       /* change directory (real chdir) */
-    { "1",  1, 1, Q_SYS_F_NONE, h_getset },   /* stdout redirect */
-    { "2",  1, 1, Q_SYS_F_NONE, h_getset },   /* stderr redirect */
-    { "_",  1, 1, Q_SYS_F_NONE, h_getset },   /* hide q code */
+    { "z",  1, h_getset },   /* date parsing */
+    { "E",  1, h_getset },   /* TLS server mode */
+    { "l",  1, h_l },        /* load q script (regular file) */
+    { "p",  1, h_p },        /* listening port — get / \p N bind / \p 0 close */
+    { "r",  1, h_getset },   /* replication / rename */
+    { "T",  1, h_getset },   /* client timeout */
+    { "u",  1, h_getset },   /* reload user pwd file */
+    { "x",  1, h_getset },   /* expunge */
+    { "cd", 2, h_cd },       /* change directory (real chdir) */
+    { "1",  1, h_getset },   /* stdout redirect */
+    { "2",  1, h_getset },   /* stderr redirect */
+    { "_",  1, h_getset },   /* hide q code */
     /* value-printing / getter-only → 'nyi (no silent form to match) */
-    { "b",  1, 1, Q_SYS_F_NONE, h_b },        /* views — always empty (owner ruling) */
-    { "B",  1, 1, Q_SYS_F_NONE, h_nyi },      /* pending views (lists) */
-    { "t",  1, 1, Q_SYS_F_NONE, h_t },        /* timer (\t N/\t 0/\t) + expr timing (\t exp/\t:n) */
-    { "ts", 2, 1, Q_SYS_F_NONE, h_ts },       /* time and space (\ts exp / \ts:n) */
-    /* process-exit / REPL-only — gated in q_sys_dispatch, never exit a doctest */
-    { "\\", 1, 0, Q_SYS_F_EXIT,      h_nyi }, /* \\ quit the process */
-    { "",   0, 0, Q_SYS_F_REPL_ONLY, h_nyi }, /* bare \ terminate / toggle q-k */
+    { "b",  1, h_b },        /* views — always empty (owner ruling) */
+    { "B",  1, h_nyi },      /* pending views (lists) */
+    { "t",  1, h_t },        /* timer (\t N/\t 0/\t) + expr timing (\t exp/\t:n) */
+    { "ts", 2, h_ts },       /* time and space (\ts exp / \ts:n) */
+    /* process-level — ordinary rows; the capability gate is inside q_exit */
+    { "\\", 1, h_quit },   /* \\ quit the process */
+    { "",   0, h_toggle }, /* bare \ q/k toggle (deferred) */
 };
 
-/* Shell escape for the interactive REPL `\`-form (declared in q_sys.h; the REPL
- * adapter calls it on QS_UNKNOWN).  `rem`/`rlen` is a SLICE of the console line,
- * so copy it NUL-terminated before system() — stack buffer for the common case,
- * ray_alloc fallback for long commands (mirrors frozen src/lang/syscmd.c). */
-ray_t* q_sys_shell(const char* rem, size_t rlen) {
+/* Raw console shell for an unknown `\cmd` (capture=0): system(3), stdout
+ * inherited, returns the raw status as a long (kdb-true `\foo`).  Capability-
+ * gated: a runtime that does not own the process (doctest, wasm) does NOT
+ * execute and is SILENT — corpus `\ls`/`\curl` rows must never touch the
+ * FS / network, and silence is kdb's display for a succeeding command (banked
+ * rows like dict/key's `\mkdir foo` -> "" pin it).  `rem`/`rlen` is a SLICE
+ * of the console line; copied NUL-terminated before system(). */
+static ray_t* q_sys_shell(const char* rem, size_t rlen) {
+    if (!g_own_process) return NULL;
     char   stackbuf[1024];
     char*  cmd = stackbuf;
     ray_t* blk = NULL;
@@ -1032,12 +1067,10 @@ static ray_t* q_sys_shell_capture(const char* rem, size_t rlen) {
     return list;                                         /* empty stdout -> empty list */
 }
 
-/* The q-owned `system "…"` verb — the STRING-form adapter.  Single-homes with
- * the `\`-slash form by normalizing the string (conceptually prepends `\`) and
- * running the mode-less core: a known leading token runs the kdb system command
- * (QS_VALUE), an unknown token shells out capturing stdout as a list of char
- * vectors (QS_UNKNOWN), and the exit/terminate commands are benign here.
- * `system` is a restricted primitive under IPC reval (kdb blocks it) -> 'access. */
+/* The q-owned `system "…"` verb: prepend `\` and PASS THROUGH q_sys_run —
+ * `system "X"` ≡ `\X` for every command, one path.  capture=1: an unknown
+ * token shells via popen, stdout -> list of char vectors.  `system` is a
+ * restricted primitive under IPC reval (kdb blocks it) -> 'access. */
 ray_t* q_system_fn(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     if (!x || x->type != -RAY_STR) return ray_error("type", "system expects a string");
@@ -1056,24 +1089,22 @@ ray_t* q_system_fn(ray_t* x) {
     if (sl) memcpy(buf + 1, sp, sl);
     buf[sl + 1] = '\0';
 
-    q_sys_result d = q_sys_dispatch(buf, sl + 1);
-    /* d.shell points INTO buf, so capture before releasing buf. */
-    ray_t* out;
-    switch (d.kind) {
-    case QS_UNKNOWN: out = q_sys_shell_capture(d.shell, d.shell_len); break;
-    case QS_VALUE:   out = d.val; break;                 /* may be NULL (silent) */
-    default:         out = NULL; break;                  /* quit / toggle: benign */
-    }
+    ray_t* out = q_sys_run(buf, sl + 1, 1);
     if (blk) ray_free(blk);
     if (!out) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }  /* silent -> generic null */
     return out;
 }
 
-q_sys_result q_sys_dispatch(const char* line, size_t n) {
-    q_sys_result res = { QS_NOT_CMD, NULL, NULL, 0 };
+bool q_sys_is_cmd(const char* line, size_t n) {
     size_t i = 0;
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
-    if (i >= n || line[i] != '\\') return res;    /* not a `\`-command line */
+    return i < n && line[i] == '\\';
+}
+
+ray_t* q_sys_run(const char* line, size_t n, int capture) {
+    size_t i = 0;
+    while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i >= n || line[i] != '\\') return ray_error("type", NULL);  /* caller guard: q_sys_is_cmd */
     i++;
 
     /* Command token = run of chars that are neither whitespace nor `:`.  The
@@ -1093,19 +1124,9 @@ q_sys_result q_sys_dispatch(const char* line, size_t n) {
         }
 
     if (row < 0) {
-        /* Unknown `\`-token: classify only; hand the command slice back and let
-         * the caller decide whether/how to shell out (REPL: raw status;
-         * system"…": stdout capture; doctest: don't execute, leave to parser). */
-        res.kind      = QS_UNKNOWN;
-        res.shell     = line + rem0;
-        res.shell_len = n - rem0;
-        return res;
+        return capture ? q_sys_shell_capture(line + rem0, n - rem0)
+                       : q_sys_shell(line + rem0, n - rem0);
     }
-
-    /* The process-level commands are CLASSIFIED, never acted on here. */
-    uint8_t flags = Q_SYS[row].flags;
-    if (flags & Q_SYS_F_EXIT)      { res.kind = QS_QUIT;   return res; }  /* \\  */
-    if (flags & Q_SYS_F_REPL_ONLY) { res.kind = QS_TOGGLE; return res; }  /* bare \ */
 
     /* Optional first-token argument.  Capture a `:`-repetition suffix
      * (\t:100, \ts:10000) first — its count is the `do[n; exp]` reps for the
@@ -1137,7 +1158,30 @@ q_sys_result q_sys_dispatch(const char* line, size_t n) {
      * Stage-1 `arg[0]=='/'` guard wrongly swallowed absolute paths. */
     if (alen == 1 && arg[0] == '/') alen = 0;
 
-    res.kind = QS_VALUE;
-    res.val  = Q_SYS[row].handler(arg, alen, rest, restlen, rep);
-    return res;
+    return Q_SYS[row].handler(arg, alen, rest, restlen, rep);
+}
+
+/* See q_sys.h — the shared console glue.  Console side effects come FIRST in
+ * buf, then the value (`\h`'s doc lines, `\t exp`'s show/0N! output precede a
+ * result), matching the eval path's display order in every adapter. */
+ray_t* q_sys_line(const char* line, size_t n, int print_value,
+                  char* buf, size_t cap) {
+    if (cap) buf[0] = '\0';
+    ray_t* v = q_sys_run(line, n, 0);
+    const char* con = q_console_str();
+    size_t used = 0;
+    if (cap && con && *con) {
+        used = strlen(con);
+        if (used >= cap) used = cap - 1;
+        memcpy(buf, con, used);
+        buf[used] = '\0';
+    }
+    q_console_reset();
+    if (v && RAY_IS_ERR(v)) return v;
+    if (v) {
+        if (print_value && !RAY_IS_NULL(v) && used < cap)
+            q_fmt_console(v, buf + used, cap - used);
+        ray_release(v);
+    }
+    return NULL;
 }
