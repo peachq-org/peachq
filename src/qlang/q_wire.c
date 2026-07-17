@@ -212,7 +212,10 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
 
     /* ---- atoms (negative type; no attrs byte) ---- */
     if (t < 0) {
-        switch (-t) {
+        /* -Wswitch is inert on negative tags; switch the recovered POSITIVE
+         * tag so it is exhaustive over the value enum (#209 — a new datatype
+         * must name its wire tag).  Out-of-band negatives fall to the nyi below. */
+        switch ((ray_type_e)-t) {
         case RAY_BOOL: rc = (w_u8(b, (uint8_t)-RAY_BOOL) || w_u8(b, x->b8 ? 1 : 0)) ? -1 : 0; goto out;
         case RAY_GUID: {
             static const uint8_t zero[16] = {0};
@@ -250,14 +253,41 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         case RAY_TIMESPAN: rc = (w_u8(b, (uint8_t)-RAY_TIMESPAN) || w_i64(b, x->i64)) ? -1 : 0; goto out;
         case RAY_MINUTE: rc = (w_u8(b, (uint8_t)-RAY_MINUTE) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         case RAY_SECOND: rc = (w_u8(b, (uint8_t)-RAY_SECOND) || w_i32(b, x->i32)) ? -1 : 0; goto out;
-        default:
-            rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
-            goto out;
+        case RAY_LIST: break;   /* dead: -t >= 1, so tag 0 is never an atom — named for totality */
         }
+        rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
+        goto out;
     }
 
-    /* ---- vectors / compounds ---- */
-    switch (t) {
+    /* ---- structural containers (recurse) — kept out of the value-enum switch ---- */
+    if (t == RAY_DICT) {
+        /* generic recursion — keyed tables (dict of two tables) fall out */
+        ray_t** slots = (ray_t**)ray_data(x);
+        rc = (w_u8(b, 99) || q_wire_write_obj(b, slots[0]) ||
+              q_wire_write_obj(b, slots[1])) ? -1 : 0;
+        goto out;
+    }
+    if (t == RAY_TABLE) {
+        /* 0x62 attrs 0x63 symvector(names) list(columns) */
+        ray_t** slots = (ray_t**)ray_data(x);
+        ray_t* schema = slots[0];                     /* I64 vec of name ids */
+        ray_t* cols   = slots[1];                     /* RAY_LIST of columns */
+        if (!schema || schema->type != RAY_I64 || !cols || cols->type != RAY_LIST) {
+            rc = wbuf_fail(b, ray_error("type", "q_wire: malformed table slots"));
+            goto out;
+        }
+        if (w_u8(b, 98) || w_u8(b, 0) || w_u8(b, 99)) goto out;
+        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, 0) || w_count(b, schema->len)) goto out;
+        const int64_t* ids = (const int64_t*)ray_data(schema);
+        rc = 0;
+        for (int64_t i = 0; i < schema->len && rc == 0; i++)
+            rc = w_sym_id(b, ids[i]);
+        if (rc == 0) rc = q_wire_write_obj(b, cols);
+        goto out;
+    }
+
+    /* ---- value vectors — exhaustive over the value band (#209) ---- */
+    switch ((ray_type_e)t) {
     case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F32:  case RAY_F64: case RAY_GUID:
     case RAY_TIMESTAMP: case RAY_DATE: case RAY_TIME:
@@ -333,35 +363,11 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             rc = q_wire_write_obj(b, e[i]);
         goto out;
     }
-    case RAY_DICT: {
-        /* generic recursion — keyed tables (dict of two tables) fall out */
-        ray_t** slots = (ray_t**)ray_data(x);
-        rc = (w_u8(b, 99) || q_wire_write_obj(b, slots[0]) ||
-              q_wire_write_obj(b, slots[1])) ? -1 : 0;
-        goto out;
     }
-    case RAY_TABLE: {
-        /* 0x62 attrs 0x63 symvector(names) list(columns) */
-        ray_t** slots = (ray_t**)ray_data(x);
-        ray_t* schema = slots[0];                     /* I64 vec of name ids */
-        ray_t* cols   = slots[1];                     /* RAY_LIST of columns */
-        if (!schema || schema->type != RAY_I64 || !cols || cols->type != RAY_LIST) {
-            rc = wbuf_fail(b, ray_error("type", "q_wire: malformed table slots"));
-            goto out;
-        }
-        if (w_u8(b, 98) || w_u8(b, 0) || w_u8(b, 99)) goto out;
-        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, 0) || w_count(b, schema->len)) goto out;
-        const int64_t* ids = (const int64_t*)ray_data(schema);
-        rc = 0;
-        for (int64_t i = 0; i < schema->len && rc == 0; i++)
-            rc = w_sym_id(b, ids[i]);
-        if (rc == 0) rc = q_wire_write_obj(b, cols);
-        goto out;
-    }
-    default:
-        rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
-        goto out;
-    }
+    /* value band exhausted above; an out-of-band tag (INDEX 97, or the sparse
+     * gap 3) falls here — same 'nyi the old `default:` returned. */
+    rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
+    goto out;
 
 out:
     g_wire_depth--;
@@ -499,19 +505,25 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
         }
     }
     bool has_nulls = false;
-    switch (t) {
+    /* Sentinel-null scan, keyed on the type's payload group.  No `default:` —
+     * exhaustive over the value band (#209): a new fixed type must declare
+     * whether it carries an in-band sentinel null, or the build refuses. */
+    switch ((ray_type_e)t) {
     case RAY_I16: { int16_t* e = (int16_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I16) { has_nulls = true; break; } } break;
-    case RAY_I32: case RAY_DATE: case RAY_TIME:
-    case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND: { int32_t* e = (int32_t*)d;
+    case RAY_I32: RAY_TEMPORAL32_CASES: { int32_t* e = (int32_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I32) { has_nulls = true; break; } } break;
-    case RAY_I64: case RAY_TIMESTAMP: case RAY_TIMESPAN: { int64_t* e = (int64_t*)d;
+    case RAY_I64: RAY_TEMPORAL64_CASES: { int64_t* e = (int64_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I64) { has_nulls = true; break; } } break;
     case RAY_F32: { float* e = (float*)d;
         for (int32_t i = 0; i < count; i++) { e[i] = f32_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
-    case RAY_F64: case RAY_DATETIME: { double* e = (double*)d;
+    case RAY_F64: RAY_TEMPORALF_CASES: { double* e = (double*)d;
         for (int32_t i = 0; i < count; i++) { e[i] = f64_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
-    default: break;
+    /* no in-band sentinel: bool/byte have no null; GUID's all-zero-payload null
+     * is only knowable from the serde attrs flag (restored below). */
+    case RAY_BOOL: case RAY_U8: case RAY_GUID: break;
+    /* never reach rd_fixed_vec: STR/SYM decode on their own paths; LIST is not fixed. */
+    case RAY_LIST: case RAY_STR: case RAY_SYM: break;
     }
     if (has_nulls) v->attrs |= RAY_ATTR_HAS_NULLS;
     /* serde mode: the flag also covers nulls the scan can't see (GUID
@@ -610,8 +622,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
 
     /* ---- atoms ---- */
     if (t < 0) {
-        switch (-t) {
-        case 128: {                                   /* error -128h */
+        if (-t == 128) {                              /* error -128h (not a value tag) */
             const char* s; size_t n;
             if (r_cstr(c, &s, &n)) return trunc_err("error text");
             char code[16];
@@ -623,6 +634,10 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             if (g_wire_depth == c->depth0 + 1) c->top_err_ok = 1;
             return ray_error(code, NULL);
         }
+        /* switch the recovered POSITIVE tag; exhaustive over the value enum
+         * (#209 — a new datatype must decode).  Out-of-band negatives fall to
+         * the domain error below. */
+        switch ((ray_type_e)-t) {
         case RAY_BOOL: if (!r_need(c, 1)) return trunc_err("bool"); return ray_bool(r_u8(c) != 0);
         case RAY_GUID: {
             if (!r_need(c, 16)) return trunc_err("guid");
@@ -654,9 +669,9 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         case RAY_TIMESPAN: if (!r_need(c, 8)) return trunc_err("timespan"); return ray_timespan(r_i64(c));
         case RAY_MINUTE: if (!r_need(c, 4)) return trunc_err("minute"); return ray_minute((int64_t)r_i32(c));
         case RAY_SECOND: if (!r_need(c, 4)) return trunc_err("second"); return ray_second((int64_t)r_i32(c));
-        default:
-            return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
+        case RAY_LIST: break;   /* dead: -t >= 1, tag 0 is never an atom — named for totality */
         }
+        return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
     }
 
     /* ---- vectors ---- */
