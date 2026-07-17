@@ -838,6 +838,130 @@ int q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde) {
     return q_wire_write_obj(b, x);
 }
 
+/* ===== Phase F: compression codec ========================================
+ * Transcribed from javakdb c.java compress()/uncompress() (Apache-2.0, the
+ * cleared reference — kx documents the LZ scheme only by implementation).
+ * A frame compresses only when >2000 bytes AND the result is under HALF the
+ * original; otherwise the input ships unchanged (the give-up path).  Layout:
+ * hdr[0..3] (byte2=1), compressed total @4, uncompressed total @8 (both
+ * include the 8-byte header and follow the frame's endianness: read either
+ * way, written to match the input frame's byte-0), token stream @12. */
+
+#define Q_WIRE_ZIP_MAX (256u * 1024u * 1024u)   /* mirrors ipc.c KDB_MAX_MSG */
+
+ray_t* q_wire_compress(ray_t* frame) {
+    if (!frame || frame->type != RAY_U8)
+        return ray_error("type", "q_wire: compress expects a byte vector");
+    const uint8_t* y = (const uint8_t*)ray_data(frame);
+    size_t t = (size_t)frame->len;
+    if (t <= 2000) { ray_retain(frame); return frame; }     /* kdb threshold */
+    int be = (y[0] == 0x00);                                /* frame's byte order */
+    size_t e = t / 2;                                       /* under-half cap */
+    uint8_t* z = (uint8_t*)ray_alloc_raw(e);
+    if (!z) return ray_error("wsfull", NULL);
+    uint8_t i = 0;
+    int g;
+    size_t f = 0, h0 = 0, h = 0, c = 12, d = 12, p = 0, q, r, s0 = 0, s = 8;
+    size_t a[256] = {0};
+    memcpy(z, y, 4);
+    z[2] = 1;
+    z[8 + (be ? 3 : 0)] = (uint8_t)t;                       /* uncompressed total */
+    z[8 + (be ? 2 : 1)] = (uint8_t)(t >> 8);
+    z[8 + (be ? 1 : 2)] = (uint8_t)(t >> 16);
+    z[8 + (be ? 0 : 3)] = (uint8_t)(t >> 24);
+    for (; s < t; i = (uint8_t)(i * 2)) {
+        if (i == 0) {
+            if (d > e - 17) {                               /* give-up: not under half */
+                ray_free_raw(z);
+                ray_retain(frame);
+                return frame;
+            }
+            i = 1;
+            z[c] = (uint8_t)f;
+            c = d++;
+            f = 0;
+        }
+        g = (s > t - 3) || (0 == (p = a[h = (uint8_t)(y[s] ^ y[s + 1])])) ||
+            (0 != (y[s] ^ y[p]));
+        if (0 < s0) { a[h0] = s0; s0 = 0; }
+        if (g) { h0 = h; s0 = s; z[d++] = y[s++]; }
+        else {
+            a[h] = s;
+            f |= i;
+            p += 2;
+            r = s += 2;
+            q = s + 255 < t ? s + 255 : t;
+            while (y[p] == y[s] && ++s < q) ++p;
+            z[d++] = (uint8_t)h;
+            z[d++] = (uint8_t)(s - r);
+        }
+    }
+    z[c] = (uint8_t)f;
+    z[4 + (be ? 3 : 0)] = (uint8_t)d;                       /* compressed total */
+    z[4 + (be ? 2 : 1)] = (uint8_t)(d >> 8);
+    z[4 + (be ? 1 : 2)] = (uint8_t)(d >> 16);
+    z[4 + (be ? 0 : 3)] = (uint8_t)(d >> 24);
+    ray_t* out = ray_vec_from_raw(RAY_U8, z, (int64_t)d);
+    ray_free_raw(z);
+    return out;
+}
+
+/* Decompress a compressed frame's PAYLOAD (bytes after the 8-byte header:
+ * uint32 uncompressed total, then tokens).  Inbound bytes are attacker-
+ * controlled: the claimed size is capped and ratio-guarded (a token triple
+ * expands to at most 257 bytes), and every stream read / output write is
+ * bounds-checked — corrupt frames return 'domain, never scribble. */
+ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
+    if (plen < 6)
+        return ray_error("domain", "q_wire: compressed frame too short");
+    uint32_t usz = frame_be
+        ? ((uint32_t)pl[0] << 24 | (uint32_t)pl[1] << 16 | (uint32_t)pl[2] << 8 | pl[3])
+        : ((uint32_t)pl[3] << 24 | (uint32_t)pl[2] << 16 | (uint32_t)pl[1] << 8 | pl[0]);
+    if (usz < 9 || usz > Q_WIRE_ZIP_MAX)
+        return ray_error("domain", "q_wire: bad uncompressed length %u", (unsigned)usz);
+    if ((uint64_t)usz - 8 > (uint64_t)(plen - 4) * 86)      /* bomb guard */
+        return ray_error("domain", "q_wire: impossible compression ratio");
+    /* dst mirrors c.java's whole-frame buffer: [0..8) is the never-written
+     * header region, zeroed so a corrupt back-reference reads zeros in-bounds. */
+    uint8_t* dst = (uint8_t*)ray_alloc_raw(usz);
+    if (!dst) return ray_error("wsfull", NULL);
+    memset(dst, 0, 8);
+    size_t n = 0, r = 0, f = 0, s = 8, p = 8, d = 4;
+    uint32_t i = 0;
+    size_t aa[256] = {0};
+    while (s < usz) {
+        if (i == 0) {
+            if (d >= plen) goto corrupt;
+            f = pl[d++];
+            i = 1;
+        }
+        if (f & i) {
+            if (d >= plen || s + 2 > usz) goto corrupt;
+            r = aa[pl[d++]];
+            dst[s++] = dst[r++];
+            dst[s++] = dst[r++];
+            if (d >= plen) goto corrupt;
+            n = pl[d++];
+            if (s + n > usz) goto corrupt;
+            for (size_t m = 0; m < n; m++) dst[s + m] = dst[r + m];
+        } else {
+            if (d >= plen) goto corrupt;
+            dst[s++] = pl[d++];
+        }
+        while (p < s - 1) { aa[dst[p] ^ dst[p + 1]] = p; p++; }
+        if (f & i) p = s += n;
+        i *= 2;
+        if (i == 256) i = 0;
+    }
+    if (d != plen) goto corrupt;    /* whole-stream consumption, like raw frames */
+    ray_t* out = ray_vec_from_raw(RAY_U8, dst + 8, (int64_t)(usz - 8));
+    ray_free_raw(dst);
+    return out;
+corrupt:
+    ray_free_raw(dst);
+    return ray_error("domain", "q_wire: corrupt compressed frame");
+}
+
 ray_t* q_wire_deserialize(ray_t* bytes) {
     if (!bytes || bytes->type != RAY_U8)
         return ray_error("type", "q_wire: -9! expects a byte vector");
@@ -849,17 +973,26 @@ ray_t* q_wire_deserialize(ray_t* bytes) {
     if (p[0] == 0x01)      frame_be = 0;
     else if (p[0] == 0x00) frame_be = 1;
     else return ray_error("domain", "q_wire: bad endianness byte 0x%02x", p[0]);
-    if (p[2] != 0)
-        return ray_error("nyi", "q_wire: compressed frames not yet implemented");
+    if (p[2] > 1)
+        return ray_error("domain", "q_wire: bad compressed byte 0x%02x", p[2]);
     uint32_t total = frame_be
         ? ((uint32_t)p[4] << 24 | (uint32_t)p[5] << 16 | (uint32_t)p[6] << 8 | p[7])
         : ((uint32_t)p[7] << 24 | (uint32_t)p[6] << 16 | (uint32_t)p[5] << 8 | p[4]);
     if ((int64_t)total != n)
         return ray_error("domain", "q_wire: frame length %u does not match %lld bytes",
                          (unsigned)total, (long long)n);
+    const uint8_t* body = p + 8;
+    size_t blen = (size_t)(n - 8);
+    ray_t* ub = NULL;
+    if (p[2] == 1) {
+        ub = q_wire_uncompress_payload(body, blen, frame_be);
+        if (!ub || RAY_IS_ERR(ub)) return ub ? ub : ray_error("wsfull", NULL);
+        body = (const uint8_t*)ray_data(ub);
+        blen = (size_t)ub->len;
+    }
     rcur_t c = {0};
-    c.p = p + 8;
-    c.rem = (size_t)(n - 8);
+    c.p = body;
+    c.rem = blen;
     c.frame_be = frame_be;
     c.swap = (frame_be != 0) != (Q_WIRE_HOST_BE != 0);
     c.depth0 = g_wire_depth;
@@ -869,8 +1002,9 @@ ray_t* q_wire_deserialize(ray_t* bytes) {
      * a decode-failure error passes through untouched. */
     if (r && c.rem != 0 && (!RAY_IS_ERR(r) || c.top_err_ok)) {
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
-        return ray_error("domain", "q_wire: %lld trailing payload bytes",
-                         (long long)c.rem);
+        r = ray_error("domain", "q_wire: %lld trailing payload bytes",
+                      (long long)c.rem);
     }
+    if (ub) ray_release(ub);
     return r;
 }
