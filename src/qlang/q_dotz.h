@@ -26,7 +26,8 @@ void q_dotz_init(int argc, char** argv);
 ray_t* q_dotz_resolve(int64_t sym_id);
 
 /* kdb `.z.p*` connection-handler alias -> the `.ipc.on.*` hook INDEX
- * (0=open 1=close 2=sync 3=async 4=auth, matching env.c's ray_sym_ipc_hook),
+ * (0=open 1=close 2=sync 3=async 4=auth 5=badmsg — `.z.bm` — matching
+ * env.c's ray_sym_ipc_hook),
  * or -1 if `name` is not a handler alias.  Shared by the read path
  * (q_dotz_resolve) and the write path (q_setg_wrap in q_registry.c) so the two
  * spellings (`.z.pg` and `.ipc.on.sync`) resolve to ONE env slot. */
