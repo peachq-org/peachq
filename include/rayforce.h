@@ -70,36 +70,41 @@ const char* ray_version_string(void);
 /* Type tags use kdb's numbering (list=0, bool=1, guid=2, ... time=19) so
  * `type` reads the tag directly with no translation seam.  The band 1..19 is
  * sparse: gap 3 is kdb's short-of-3, which has no rayfall type.  (15 was a
- * gap too until datetime landed 2026-07-09 on owner demand — f64-backed.) */
-#define RAY_LIST       0
-#define RAY_BOOL       1
-#define RAY_GUID       2
-#define RAY_U8         4
-#define RAY_I16        5
-#define RAY_I32        6
-#define RAY_I64        7
-#define RAY_F32        8
-#define RAY_F64        9
-/* Variable-length string column (inline + pool) */
-#define RAY_STR       10
-/* Unified dictionary-encoded string column (adaptive width) */
-#define RAY_SYM       11
-#define RAY_TIMESTAMP 12
-/* Months since 2000.01 (i32 payload = (year-2000)*12 + month-1) — kdb `m` */
-#define RAY_MONTH     13
-#define RAY_DATE      14
-/* Days since 2000.01.01 with fractional time of day (f64 payload) — kdb `z`
- * (deprecated in kdb in favour of timestamp; landed here for drop-in
- * fidelity).  Single-null float model: NaN is the one null (0Nz); non-finite
- * payloads canonicalize to it at the constructor — 0Wz cannot live. */
-#define RAY_DATETIME  15
-/* Nanoseconds duration (i64 payload) — kdb `n` */
-#define RAY_TIMESPAN  16
-/* Minutes since midnight (i32 payload) — kdb `u` */
-#define RAY_MINUTE    17
-/* Seconds since midnight (i32 payload) — kdb `v` */
-#define RAY_SECOND    18
-#define RAY_TIME      19
+ * gap too until datetime landed 2026-07-09 on owner demand — f64-backed.)
+ *
+ * The VALUE band is a real enum so a switch over `(ray_type_e)tag` with no
+ * `default:` gets -Wswitch exhaustiveness (+ -Werror = build refusal on a
+ * missing arm).  Structural tags (INDEX..VARY, NULL, ERROR below) stay out on
+ * purpose: exhaustive sites are total over values only, and must filter
+ * structural inputs BEFORE the switch (leftovers as statements AFTER it — a
+ * `default:` would disarm the check).  The `type` field stays int8_t: the
+ * SIGN carries atom-vs-vector (-RAY_I64 = i64 atom), so atom dispatch
+ * switches on the negated tag. */
+typedef enum {
+    RAY_LIST      = 0,
+    RAY_BOOL      = 1,
+    RAY_GUID      = 2,
+    RAY_U8        = 4,
+    RAY_I16       = 5,
+    RAY_I32       = 6,
+    RAY_I64       = 7,
+    RAY_F32       = 8,
+    RAY_F64       = 9,
+    RAY_STR       = 10,  /* Variable-length string column (inline + pool) */
+    RAY_SYM       = 11,  /* Unified dictionary-encoded string column (adaptive width) */
+    RAY_TIMESTAMP = 12,
+    RAY_MONTH     = 13,  /* Months since 2000.01 (i32 = (year-2000)*12+month-1) — kdb `m` */
+    RAY_DATE      = 14,
+    /* Days since 2000.01.01 with fractional time of day (f64 payload) — kdb `z`
+     * (deprecated in kdb in favour of timestamp; landed here for drop-in
+     * fidelity).  Single-null float model: NaN is the one null (0Nz); non-finite
+     * payloads canonicalize to it at the constructor — 0Wz cannot live. */
+    RAY_DATETIME  = 15,
+    RAY_TIMESPAN  = 16,  /* Nanoseconds duration (i64 payload) — kdb `n` */
+    RAY_MINUTE    = 17,  /* Minutes since midnight (i32 payload) — kdb `u` */
+    RAY_SECOND    = 18,  /* Seconds since midnight (i32 payload) — kdb `v` */
+    RAY_TIME      = 19
+} ray_type_e;
 
 /* Width-class temporal aliases ("an int wearing a costume").  Bucket-1
  * generic paths enroll a thin temporal by joining its backing-int co-list;
