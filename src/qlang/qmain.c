@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
 
     ray_runtime_t* rt = q_runtime_create(argc, argv);
     if (!rt) { fprintf(stderr, "runtime init failed\n"); return 1; }
+    q_sys_own_process(true);   /* the real q binary: `\\`/`exit x` exit, `\cmd` shells */
 
     /* Poll owns the IPC handle namespace; publish it so `.ipc.open` /
      * listeners resolve handles the same way rayforce's main.c does. */
@@ -184,8 +185,8 @@ int main(int argc, char** argv) {
     } else if (q_sys_listen_port() > 0 && poll) {
         /* A listener is LIVE — from startup `-p` OR a runtime/script `\p N` —
          * so serve, don't exit at a non-tty script end.  Keyed off the
-         * authoritative `\p` getter state (q_sys_listen_port), not the local
-         * `port`/sticky `q_repl_listener_active`: a startup-script `\p 0` that
+         * authoritative `\p` getter state (q_sys_listen_port), not a stale
+         * local `port` or a sticky listener flag: a startup-script `\p 0` that
          * closes the `-p` listener now correctly drops OUT of server mode
          * (else a non-tty `q script.q -p 0W </dev/null` with `\p 0` would hang
          * in a listener-less poll loop).  Live listener + console: register
@@ -236,10 +237,11 @@ int main(int argc, char** argv) {
             q_repl_run(stdin, stdout, stderr, !stdin_tty);
     }
 
-    if (poll) {
-        ray_runtime_set_poll(NULL);
-        ray_poll_destroy(poll);
-    }
-    q_runtime_destroy(rt);
-    return script_rc;
+    /* Natural end-of-session (stdin EOF / script end) is a process exit too:
+     * route it through THE exit home, so `.z.exit` fires exactly once with the
+     * exit status (dotz.md) on EVERY session exit — `\\`/`exit x` never reach
+     * here (q_exit already terminated).  q_exit does not return; the OS
+     * reclaims the poll/runtime (same as the `exit x` path, kdb-true). */
+    q_exit(script_rc);
+    return script_rc;   /* unreachable */
 }

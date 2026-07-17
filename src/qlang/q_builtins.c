@@ -907,11 +907,10 @@ static void bind_value(const char* name, ray_t* val) {
  * (the IPC layer serializes them as -128h responses). */
 static ray_t* q_remote_eval_str(const char* src, size_t len) {
     /* A leading `\` is a system command, not q source: kdb runs a solo `\l`/`\p`
-     * received on the wire, but a remote string reached q_parse here and never
-     * q_sys_dispatch, so the `\` was swallowed.  `system"X"` is exactly `\X`, so
-     * strip the `\` and reuse q_system_fn — single-homing q_sys_dispatch, the
-     * restricted-mode guard, and `\`-shell stdout capture.  A loaded script's
-     * `show`/0N! output is drained to the server console just like the q path. */
+     * received on the wire.  `system"X"` is exactly `\X`, so strip the `\` and
+     * reuse q_system_fn — single-homing q_sys_run, the restricted-mode guard,
+     * and the `\`-shell stdout capture.  A loaded script's `show`/0N! output
+     * is drained to the server console just like the q path. */
     if (len > 0 && src[0] == '\\') {
         ray_t* arg = ray_str(src + 1, len - 1);   /* the command minus its leading `\` */
         if (!arg) return ray_error("oom", "remote eval: out of memory");

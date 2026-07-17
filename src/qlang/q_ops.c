@@ -53,6 +53,7 @@
  *   upsert  — named-target upsert rebinds the global (ref/upsert.md).
  *   show    — writes the console display sink (ref/show.md).
  *   system  — runs a `\`-command / shell command (ref/system.md).
+ *   exit    — terminates the process, firing `.z.exit` (ref/exit.md).
  *   hopen   — opens an IPC connection (ref/hopen.md).
  *   hclose  — closes an IPC connection (ref/hopen.md).
  *   0:      — File Text: Save Text writes / Load CSV reads a file (ref/file-text.md).
@@ -652,10 +653,15 @@ static const q_op_t Q_OPS[] = {
       "Format and display at the console.", "qdocs/docs/docs/docs/ref/show.md",
       "show x    show[x]", NULL },
     /* `system "…"` — q-owned env unary (q_builtins_register), snapshotted here
-     * so the parser embeds it; routes through q_sys_dispatch (q_sys.c). */
+     * so the parser embeds it; passes through q_sys_run (q_sys.c). */
     { "system",  QLEX_KW_PREFIX, QR_ENV("system"),             QR_NONE,           NULL, 1, 1, "none",
       "Execute a system command", "qdocs/docs/docs/docs/ref/system.md",
       "system x     system[x]", NULL },
+    /* `exit x` — process termination via q_exit (q_sys.c: `.z.exit`, then
+     * exit(x); capability-gated so doctest/wasm runtimes survive it). */
+    { "exit",    QLEX_KW_PREFIX, QR_FN1("exit", q_exit_wrap), QR_NONE,           NULL, 1, 1, "none",
+      "Terminate kdb+", "qdocs/docs/docs/docs/ref/exit.md",
+      "exit x    exit[x]", NULL },
     /* table introspection — q-owned bindings (q_builtins_register), snapshotted
      * here so the parser embeds them over the base env `meta`. */
     { "meta",    QLEX_KW_PREFIX, QR_ENV("meta"),               QR_NONE,           NULL, 1, 0, "structural",
