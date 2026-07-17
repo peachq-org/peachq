@@ -1462,21 +1462,24 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         ray_release(s);
         return ray_error("type", "set: root handle takes a dictionary");
     }
-    /* kdb `.z.ts` timer handler is settable but is NOT an `.ipc.on.*` hook — it
-     * has its own q-layer slot (env.c's ipc-hook carve-out is frozen).  Route
-     * the assignment there; read-back is via q_dotz_resolve.  Unwrap a q `{…}`
-     * carrier to its base RAY_LAMBDA (same reason as the ipc hooks below): the
-     * timer thunk calls it via call_fn1, which invokes a bare RAY_LAMBDA
-     * directly — a carrier would need the apply hook (not installed at
-     * timer-fire time) and would silently never fire. */
-    if (l == 5 && memcmp(nm, ".z.ts", 5) == 0) {
+    /* kdb `.z.ts` (timer) and `.z.exit` (process exit) handlers are settable
+     * but are NOT `.ipc.on.*` hooks — each has its own q-layer slot (env.c's
+     * ipc-hook carve-out is frozen).  Route the assignment there; read-back is
+     * via q_dotz_resolve.  Unwrap a q `{…}` carrier to its base RAY_LAMBDA
+     * (same reason as the ipc hooks below): both fire via call_fn1, which
+     * invokes a bare RAY_LAMBDA directly — a carrier would need the apply hook
+     * (not installed at fire time) and would silently never fire. */
+    if ((l == 5 && memcmp(nm, ".z.ts", 5) == 0) ||
+        (l == 7 && memcmp(nm, ".z.exit", 7) == 0)) {
+        int is_exit = l == 7;
         ray_t* zv = y;
         if (y && y->type == RAY_LIST && q_deriv_kind_of(y) == Q_DERIV_LAMBDA) {
             ray_t* base = q_deriv_base(y);      /* borrowed bare RAY_LAMBDA */
             if (base) zv = base;
         }
         ray_release(s);
-        q_dotz_zts_set(zv);         /* set RETAINS its own ref (zv is borrowed here) */
+        if (is_exit) q_dotz_zexit_set(zv);
+        else q_dotz_zts_set(zv);    /* setters RETAIN (zv is borrowed here) */
         ray_retain(x);
         return x;
     }
