@@ -59,6 +59,8 @@ static ray_t* g_zts        = NULL;  /* current `.z.ts` timer handler (owned), or
 static ray_t* g_zexit      = NULL;  /* current `.z.exit` process-exit handler */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
+    if (len == 5 && memcmp(name, ".z.bm", 5) == 0)
+        return 5;             /* .z.bm -> .ipc.on.badmsg (dotz.md msg validator) */
     if (len != 5 || name[0] != '.' || name[1] != 'z' || name[2] != '.' ||
         name[3] != 'p')
         return -1;
