@@ -48,6 +48,11 @@ ray_sock_t ray_sock_accept(ray_sock_t srv);
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms);
 int64_t    ray_sock_send(ray_sock_t s, const void* buf, size_t len);
 int64_t    ray_sock_recv(ray_sock_t s, void* buf, size_t len);
+/* True when s's connected peer is a loopback/local endpoint (127.0.0.0/8,
+ * ::1, ::ffff:127.x, or AF_UNIX).  kdb never compresses outbound messages on
+ * a local link (basics/ipc.md); a getpeername failure returns true so the
+ * caller stays on the safe side (no compression) when the peer is unknown. */
+bool       ray_sock_is_loopback(ray_sock_t s);
 /* Block until s is readable (or hung up).  timeout_ms < 0 = no timeout.
  * Returns 1 readable, 0 timed out, -1 error. */
 int        ray_sock_wait_readable(ray_sock_t s, int timeout_ms);

@@ -39,6 +39,7 @@
   #include <netdb.h>
   #include <sys/socket.h>
   #include <sys/time.h>
+  #include <netinet/in.h>
   #include <arpa/inet.h>
   #include <netinet/tcp.h>
   #include <poll.h>
@@ -267,6 +268,28 @@ int64_t ray_sock_recv(ray_sock_t s, void* buf, size_t len)
         }
         return (int64_t)n;   /* 0 = peer closed */
     }
+}
+
+bool ray_sock_is_loopback(ray_sock_t s)
+{
+    /* Peer address decides: kdb compresses only on a non-local link.  An
+     * unresolvable peer (getpeername failure) is treated as local so the
+     * caller errs toward NOT compressing. */
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof(ss);
+    if (getpeername(s, (struct sockaddr*)&ss, &slen) != 0) return true;
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in* a4 = (const struct sockaddr_in*)&ss;
+        return (ntohl(a4->sin_addr.s_addr) >> 24) == 127;   /* 127.0.0.0/8 */
+    }
+    if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6* a6 = (const struct sockaddr_in6*)&ss;
+        if (IN6_IS_ADDR_LOOPBACK(&a6->sin6_addr)) return true;
+        if (IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr))
+            return a6->sin6_addr.s6_addr[12] == 127;        /* ::ffff:127.x */
+        return false;
+    }
+    return true;                                            /* AF_UNIX / local */
 }
 
 int ray_sock_wait_readable(ray_sock_t s, int timeout_ms)
