@@ -403,13 +403,22 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         if (RAY_ATOM_IS_NULL(t)) return 0;
         int16_t n = t->i16;
         if (n <= 0) { *is_tok = 1; n = (int16_t)-n; }
-        switch (n) {
+        /* Numeric designator == rayfall tag.  No `default:` — exhaustive over
+         * the value band (#209): a new datatype must name its designator here.
+         * An out-of-band n (98h table, sparse gap 3) falls to the trailing
+         * `return 0` = "not a designator", exactly as the old default did. */
+        switch ((ray_type_e)n) {
         case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM: case RAY_STR:
+        case RAY_GUID:      /* cast.md:20 `2h "g" `guid` are one designator row;
+                             * `-2h$"uuid"` = guid Tok (q_tok_to parses it). The
+                             * `2h$` CAST stays deferred at q_cast_to. */
         RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return (int8_t)n;
-        default: return 0;    /* guid: deferred */
+        case RAY_LIST:      /* 0h is Identity (cast.md:40), not a cast tag — deferred */
+            return 0;
         }
+        return 0;   /* unreachable for in-band n; out-of-band handled here */
     }
     if (t->type == -RAY_STR && ray_str_len(t) == 1) {
         char c = ray_str_ptr(t)[0];
@@ -988,6 +997,25 @@ static int q_clock_scan_ns(const char* p, size_t len, int64_t* ns) {
     return 1;
 }
 
+/* "N"$ timespan scan: an optional `<days>D` prefix (1D02:03:04.005006007)
+ * then the q_clock_scan_ns clock/packed form; days*86400e9 + tod via the
+ * checked compose home.  Bare clock = 0 days (tok.md:200).  Sign/`dD…` forms
+ * deferred like the clock scan -> caller yields 0Nn.  Returns 1 + *ns else 0. */
+static int q_timespan_scan_ns(const char* p, size_t len, int64_t* ns) {
+    size_t i = 0;
+    while (i < len && p[i] >= '0' && p[i] <= '9') i++;
+    if (i > 0 && i < len && p[i] == 'D') {
+        int64_t days = 0, tod;
+        for (size_t k = 0; k < i; k++)                /* checked: a long run must not UB-overflow */
+            if (__builtin_mul_overflow(days, (int64_t)10, &days) ||
+                __builtin_add_overflow(days, (int64_t)(p[k] - '0'), &days))
+                return 0;
+        if (!q_clock_scan_ns(p + i + 1, len - i - 1, &tod)) return 0;
+        return q_ts_compose_checked(days, tod, ns);
+    }
+    return q_clock_scan_ns(p, len, ns);
+}
+
 /* tod scan for "P"$: HH:MM:SS[.f{1..9}] -> ns of day (colon form only; the
  * packed date form is split off by the caller).  Returns 1/0. */
 static int q_tod_scan_ns(const char* p, size_t len, int64_t* ns) {
@@ -1223,11 +1251,10 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         return ray_second(ns / 1000000000LL);
     }
     case RAY_TIMESPAN: {
-        /* "N"$str -> timespan (tok.md:200-201: the digit run is
-         * HHMMSS + up to 9 fractional digits right-padded, NOT a raw ns
-         * count).  dD… string forms deferred. */
+        /* "N"$str -> timespan; grammar in q_timespan_scan_ns.  Unparseable /
+         * out-of-range -> 0Nn (tok contract). */
         int64_t ns;
-        if (!q_clock_scan_ns(p, len, &ns))
+        if (!q_timespan_scan_ns(p, len, &ns))
             return ray_typed_null(-RAY_TIMESPAN);
         return ray_timespan(ns);
     }
