@@ -3,6 +3,7 @@
 #include "qlang/q_fmt_internal.h" /* q_cell — shared with the pipe renderer */
 #include "qlang/q_fmt_pipe.h"  /* `--nonlegacy` console table render */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
+#include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "qlang/q_sys.h"   /* q_con_display — live `\c rows cols` clip state */
 #include "lang/format.h"   /* ray_fmt */
@@ -631,27 +632,13 @@ static int q_list_is_parse_tree(ray_t* v, int depth) {
     return 0;
 }
 
-/* Empty-vector name (`long$()`); byte stays bare-0x (byte_impl.qcmd pin). */
+/* Empty-vector name (`long$()`) via the guarded q_type_qname home; byte alone
+ * stays bare-0x (byte_impl.qcmd:120 pin), so it names no `byte$()`. Composing on
+ * the single home means the #209 value-band guard there transitively protects
+ * empty-vec display — no parallel table to keep in sync. */
 static const char* q_empty_vec_qname(int8_t type) {
-    switch (type) {
-    case RAY_BOOL: return "boolean";
-    case RAY_I16:  return "short";
-    case RAY_I32:  return "int";
-    case RAY_I64:  return "long";
-    case RAY_F32:  return "real";
-    case RAY_F64:  return "float";
-    case RAY_SYM:  return "symbol";
-    case RAY_MONTH: return "month";
-    case RAY_DATETIME: return "datetime";
-    case RAY_DATE: return "date";
-    case RAY_TIMESTAMP: return "timestamp";
-    case RAY_GUID: return "guid";
-    case RAY_TIME: return "time";
-    case RAY_MINUTE: return "minute";
-    case RAY_SECOND: return "second";
-    case RAY_TIMESPAN: return "timespan";
-    default:       return NULL;
-    }
+    if (type == RAY_U8) return NULL;
+    return q_type_qname(type);
 }
 
 /* Escape one byte kdb-style — THE display-inverse of the scanner decode. */
