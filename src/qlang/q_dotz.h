@@ -36,6 +36,12 @@ int q_dotz_ipc_hook_index(const char* name, size_t len);
  * q_dotz_resolve reads it back.  set RETAINS its own ref; passing NULL clears. */
 void   q_dotz_zts_set(ray_t* fn);
 
+/* `.z.exit` process-exit handler slot (same lifecycle as `.z.ts`).  fire runs
+ * the handler with the exit code — called ONLY by q_exit (q_sys.c), the one
+ * process-exit home; never from q_runtime_destroy. */
+void   q_dotz_zexit_set(ray_t* fn);
+void   q_dotz_exit_fire(int code);
+
 /* A fresh RAY_UNARY fn-value (rc=1) that, each time the poll timer fires it,
  * resolves the CURRENT `.z.ts` binding and calls it with a fresh LOCAL
  * timestamp (`.z.P`).  Unset `.z.ts` (or a stopped timer) → no-op.  Used by the
