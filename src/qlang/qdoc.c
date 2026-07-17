@@ -5,7 +5,7 @@
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
 #include "qlang/q_ns.h"     /* q_ns_prompt — namespace transcripts */
-#include "qlang/q_sys.h"    /* q_sys_dispatch — `\`-command dispatcher */
+#include "qlang/q_sys.h"    /* q_sys_is_cmd / q_sys_line — `\`-command glue */
 #include "lang/eval.h"      /* ray_eval */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
@@ -118,65 +118,40 @@ static void run_example(const char* input, const char* expect,
         prompt_ok = (strcmp(tprompt, live) == 0);
     }
 
-    /* q system commands (\d \v \f \a) bypass the parser, like the REPL.  This is
-     * the DOCTEST-runner adapter over the mode-less core, and it OWNS the
-     * runner-safe policy (kept HERE, never baked into the shared dispatcher):
-     * survive the exit/terminate commands (QS_QUIT/QS_TOGGLE — the runner-kill
-     * hazard), and DECLINE to execute an unknown `\foo` (QS_UNKNOWN → leave it
-     * to the parser, so \ls/\cat/\curl corpus rows never touch the FS / net). */
-    {
-        q_sys_result d = q_sys_dispatch(input, strlen(input));
-        int handled = (d.kind == QS_VALUE || d.kind == QS_QUIT || d.kind == QS_TOGGLE);
-        ray_t* sr = (d.kind == QS_VALUE) ? d.val : NULL;
-        if (handled) {
-            r->parsed++;
-            if (mode == QDOC_PARSE_ONLY) {
-                if (sr && RAY_IS_ERR(sr)) ray_error_free(sr);
-                else if (sr) ray_release(sr);
-                classify(r, prompt_ok);
-                return;
-            }
-            char errcls[8];
-            int want_error = expect_is_error(expect, errcls, sizeof errcls);
-            char got[QD_OUT];
-            got[0] = '\0';
-            int ok;
-            /* A `\`-command's console side effects come FIRST, then its value —
-             * the same order the eval path below uses. `\h` emits its doc line
-             * this way and returns no value at all, so without this the row
-             * would compare against an empty string. */
-            size_t gpos = 0;
-            { const char* con = q_console_str();
-              if (con && *con) {
-                  gpos = strlen(con);
-                  if (gpos >= sizeof got) gpos = sizeof got - 1;
-                  memcpy(got, con, gpos);
-                  got[gpos] = '\0';
-              }
-              q_console_reset(); }
-            if (sr && RAY_IS_ERR(sr)) {
-                ok = want_error && error_row_matches(sr, errcls);
-                snprintf(got, sizeof got, "<error>");
-                ray_error_free(sr);
-            } else {
-                if (sr && !RAY_IS_NULL(sr)) q_fmt_console(sr, got + gpos, sizeof got - gpos);
-                if (sr) ray_release(sr);
-                if (want_error) {
-                    ok = 0;
-                } else {
-                    char ng[QD_OUT], ne[QD_OUT];
-                    normalize(got, ng, sizeof ng);
-                    normalize(expect, ne, sizeof ne);
-                    ok = (strcmp(ng, ne) == 0);
-                }
-            }
-            ok = ok && prompt_ok;
-            classify(r, ok);
-            if (!ok && verbose)
-                fprintf(out, "  q)%.200s\n    FAIL(syscmd%s) got \"%.200s\" want \"%.200s\"\n",
-                        input, prompt_ok ? "" : ":prompt", got, expect);
+    /* `\`-system-command rows bypass the parser, like the REPL — same shared
+     * q_sys_line glue, no runner-side policy: this runtime never enables the
+     * process capability, so `\\`/`exit` rows are silent no-ops (the runner
+     * survives) and an unknown `\ls`/`\curl` row is silent, never a real shell. */
+    if (q_sys_is_cmd(input, strlen(input))) {
+        char got[QD_OUT];
+        ray_t* sr = q_sys_line(input, strlen(input), 1, got, sizeof got);
+        r->parsed++;
+        if (mode == QDOC_PARSE_ONLY) {
+            if (sr) ray_error_free(sr);
+            classify(r, prompt_ok);
             return;
         }
+        char errcls[8];
+        int want_error = expect_is_error(expect, errcls, sizeof errcls);
+        int ok;
+        if (sr) {
+            ok = want_error && error_row_matches(sr, errcls);
+            snprintf(got, sizeof got, "<error>");
+            ray_error_free(sr);
+        } else if (want_error) {
+            ok = 0;
+        } else {
+            char ng[QD_OUT], ne[QD_OUT];
+            normalize(got, ng, sizeof ng);
+            normalize(expect, ne, sizeof ne);
+            ok = (strcmp(ng, ne) == 0);
+        }
+        ok = ok && prompt_ok;
+        classify(r, ok);
+        if (!ok && verbose)
+            fprintf(out, "  q)%.200s\n    FAIL(syscmd%s) got \"%.200s\" want \"%.200s\"\n",
+                    input, prompt_ok ? "" : ":prompt", got, expect);
+        return;
     }
 
     /* Transcript prompt out of sync with the live context: fail the row but

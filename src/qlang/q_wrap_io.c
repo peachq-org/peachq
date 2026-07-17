@@ -7,6 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_builtins.h" /* q_string_fn — 0: Prepare Text cell text */
+#include "qlang/q_sys.h"
 #include "lang/eval.h"      /* ray_eval_get_restricted, ray_read_file_fn/ray_write_file_fn */
 #include "lang/internal.h"  /* ray_hopen_fn/ray_hclose_fn, ray_like_fn, ray_getenv_fn/ray_setenv_fn, make_i64 */
 #include "lang/format.h"    /* ray_type_name — error messages */
@@ -16,6 +17,18 @@
 #include <stdio.h>          /* snprintf */
 #include <string.h>
 #include <stdlib.h>         /* getenv/setenv, calloc/realloc */
+
+/* q `exit x` — terminate with exit code x (ref/exit.md; blocked during reval
+ * -> 'access, kdb-true).  All processing lives in q_exit (fires `.z.exit`,
+ * capability-gated): under the doctest/wasm runtimes q_exit returns and the
+ * verb is a silent null — the runner survives corpus `exit 0` rows. */
+ray_t* q_exit_wrap(ray_t* x) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!q_is_int_atom(x) || RAY_ATOM_IS_NULL(x)) return ray_error("type", NULL);
+    q_exit((int)q_iatom_val(x));
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
 
 /* ---- IPC client verb: q `hopen` (feat/q-ipc-client, Phase D; hsym Bundle 2b) --
  * Thin wrapper over `.ipc.open` (ray_hopen_fn), which takes a
