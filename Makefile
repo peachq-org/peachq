@@ -14,12 +14,13 @@ AR      = ar
 TARGET  = rayforce
 # Version: peachq owns its own version line, DECOUPLED from rayforce's vX.Y.Z
 # git tags (peachq is a fork with independent numbering). The SINGLE SOURCE OF
-# TRUTH is packaging/public/VERSION — the same file the public mirror ships and
-# its release-gate workflow reads to cut a release. Overridable for CI / one-off
-# builds (RAY_VERSION=X.Y.Z). Injected into the build via -D below (see DEFS):
-# .sys.build reads RAYFORCE_VERSION, and q's .z.K/.z.k read
-# RAY_VERSION_MAJOR/MINOR + BUILD_DATE.
-RAY_VERSION ?= $(shell cat packaging/public/VERSION 2>/dev/null || echo 0.41)
+# TRUTH is the root VERSION file — the SAME file the public mirror ships (carried
+# through the allowlist, not overlaid) and its release-gate workflow reads to cut
+# a release, so the private and public builds read one identical version source.
+# Overridable for CI / one-off builds (RAY_VERSION=X.Y.Z). Injected into the build
+# via -D below (see DEFS): .sys.build reads RAYFORCE_VERSION, and q's .z.K/.z.k
+# read RAY_VERSION_MAJOR/MINOR + BUILD_DATE.
+RAY_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.41)
 VERSION       = $(RAY_VERSION)
 VERSION_MAJOR := $(word 1,$(subst ., ,$(RAY_VERSION)))
 VERSION_MINOR := $(word 2,$(subst ., ,$(RAY_VERSION)))
@@ -513,7 +514,7 @@ win-smoke: win $(Q_TARGET)
 
 # Release in two commands (spec: docs/superpowers/specs/2026-07-17-q-release-tooling.md).
 #   q-release — LOCAL gates (test + q-test) + win-smoke + qdash, then bump
-#     packaging/public/VERSION + sync-github to TRIGGER the mirror CI binary build
+#     VERSION + sync-github to TRIGGER the mirror CI binary build
 #     (portable linux/windows/macOS + wasm). Does NOT build binaries — CI does.
 #     `make q-release VERSION=0.42` (default: current VERSION).
 #   q-upload  — pull the CI-built assets from the GitHub Release, generate
