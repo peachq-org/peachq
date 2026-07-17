@@ -9,8 +9,10 @@
  * Message layout (basics/ipc.md):
  *   byte 0    endianness of the encoder: 0x01 little, 0x00 big
  *   byte 1    msgtype: 0 async, 1 sync, 2 response
- *   byte 2    compressed flag — the wire EMIT path never sets it (deliberate
- *             wire policy); inbound 0x01 decompresses (Phase F codec below)
+ *   byte 2    compressed flag — set by q_wire_compress (Phase F codec below)
+ *             when ipc.c's send path elects to compress; inbound 0x01
+ *             decompresses.  q_wire_serialize itself always emits 0 (it has
+ *             no connection context); compression is a send-path decision.
  *   byte 3    0x00
  *   bytes 4-7 total message length (int32, includes these 8 header bytes)
  *   bytes 8.. payload (one serialized object)
