@@ -13,7 +13,7 @@
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
 #include "qlang/q_ns.h"       /* q_ns_prompt — namespaces */
-#include "qlang/q_sys.h"      /* q_sys_dispatch — `\`-command dispatcher */
+#include "qlang/q_sys.h"      /* q_sys_is_cmd / q_sys_line — `\`-command glue */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval */
@@ -249,47 +249,24 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
     if (n == 0)
         return;
 
-    /* q system commands (\d \v \f \a — q_ns.c) run before the parser; an
-     * unhandled \cmd falls through to the historic path.  This is the REPL
-     * adapter over the mode-less core: it OWNS the interactive policy —
-     * `\\` really quits, bare `\` is a not-yet-implemented q/k toggle, and an
-     * unknown `\foo` shells out returning its raw system(3) status. */
-    {
-        q_sys_result d = q_sys_dispatch(s, n);
-        int handled = (d.kind != QS_NOT_CMD);
-        ray_t* sr = NULL;
-        switch (d.kind) {
-        case QS_QUIT:    exit(0);                             /* real quit — kdb-true */
-        case QS_TOGGLE:  sr = ray_error("nyi", NULL); break;  /* q/k toggle NYI */
-        case QS_UNKNOWN: sr = q_sys_shell(d.shell, d.shell_len); break;
-        case QS_VALUE:   sr = d.val; break;
-        case QS_NOT_CMD: break;
+    /* `\`-system-command line: the shared q_sys glue renders console side
+     * effects + value into buf (value-or-throw; `\\`/exit act inside q_sys).
+     * Console lines arrive '\n'-terminated, a rendered value does not — the
+     * append-if-missing keeps this byte-identical to the historic output. */
+    if (q_sys_is_cmd(s, n)) {
+        char buf[8192];
+        ray_t* sr = q_sys_line(s, n, print_result, buf, sizeof buf);
+        if (buf[0]) {
+            fputs(buf, out);
+            if (buf[strlen(buf) - 1] != '\n') fputc('\n', out);
         }
-        if (handled) {
-            /* Console side effects FIRST, then the value — `\h`'s doc line,
-             * `\t exp`'s show/0N! output. This path returns before the eval
-             * path's flush below, so the adapter drains here; qdoc.c's adapter
-             * already does the same, and draining in the mode-less core instead
-             * would steal the text the doctest runner compares against. */
-            { const char* con = q_console_str();
-              if (con && *con) fputs(con, out);
-              q_console_reset(); }
-            if (sr && RAY_IS_ERR(sr)) {
-                const char* code = (const char*)sr->sdata;
-                fprintf(err, "error: %s\n", (code && *code) ? code : "syscmd");
-                ray_error_free(sr);
-            } else if (sr) {
-                if (print_result && !RAY_IS_NULL(sr)) {
-                    char buf[8192];
-                    q_fmt_console(sr, buf, sizeof buf);   /* obey \c on display */
-                    fputs(buf, out);
-                    fputc('\n', out);
-                }
-                ray_release(sr);
-            }
-            fflush(out);
-            return;
+        if (sr) {
+            const char* code = (const char*)sr->sdata;
+            fprintf(err, "error: %s\n", (code && *code) ? code : "syscmd");
+            ray_error_free(sr);
         }
+        fflush(out);
+        return;
     }
 
     ray_t* ast = q_parse(s);
@@ -362,6 +339,12 @@ static const char* q_hist_path(char* buf, size_t cap) {
     return ".qhist";
 }
 
+/* The live non-poll interactive terminal (q_repl_interactive), so q_exit can
+ * restore it + save history from inside an eval (q_repl_console_close).  The
+ * poll flavour's terminal lives in g_q_poll_repl and is closed there. */
+static ray_term_t* g_live_term;
+static char g_live_hist_path[4108];
+
 /* Interactive TTY loop — mirrors the proven fallback branch of rayforce's
  * run_interactive (src/app/repl.c) but drives the q pipeline. */
 /* q REPL is line-at-a-time, exactly like kdb's `q)` console: every Return
@@ -385,6 +368,8 @@ static void q_repl_interactive(FILE* out, FILE* err) {
 
     char hist_buf[4096];
     const char* hist_path = q_hist_path(hist_buf, sizeof hist_buf);
+    snprintf(g_live_hist_path, sizeof g_live_hist_path, "%s", hist_path);
+    g_live_term = t;
     ray_hist_load(&t->hist, hist_path);
     ray_term_set_highlighter(t, q_highlight);
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
@@ -425,12 +410,6 @@ static void q_repl_interactive(FILE* out, FILE* err) {
         const char* str = ray_str_ptr(line);
         size_t len = ray_str_len(line);
 
-        if ((len == 2 && memcmp(str, "\\\\", 2) == 0) ||
-            (len == 4 && memcmp(str, "exit", 4) == 0)) {
-            ray_release(line);
-            break;
-        }
-
         /* Interrupt window: Ctrl-C becomes SIGINT (POSIX, ISIG) or
          * CTRL_C_EVENT (Windows, processed input) ONLY while eval runs;
          * both set the eval-interrupt flag run_one_line reports as 'stop.
@@ -452,6 +431,7 @@ static void q_repl_interactive(FILE* out, FILE* err) {
 
     ray_hist_save(&t->hist, hist_path);
     ray_term_destroy(t);
+    g_live_term = NULL;
 }
 
 /* ===== Poll-driven REPL (concurrent console + IPC) =====
@@ -467,8 +447,8 @@ static void q_repl_interactive(FILE* out, FILE* err) {
  *   - piped: a line accumulator over plain read(2); each complete line is
  *            processed with the same prompt/echo shape as the fgets loop so
  *            the transcript is unchanged.
- * `\\` / `exit` exit the poll loop (kdb: process exit).  EOF keeps the loop
- * serving IPC when a listener is live (the daemon shape), else exits. */
+ * `\\` / `exit x` terminate inside the eval (q_exit — kdb: process exit).
+ * EOF keeps the loop serving IPC when a listener is live, else exits. */
 
 /* A `\p N` (or startup `-p`) listener makes this process a server even if it
  * began as a client: like rayforce/kdb, once it has a listener it keeps serving
@@ -477,7 +457,6 @@ static void q_repl_interactive(FILE* out, FILE* err) {
  * POSIX event loop, the Windows serial path, and common code all see it. */
 static int g_listener_active = 0;
 void q_repl_mark_listener_active(void) { g_listener_active = 1; }
-int  q_repl_listener_active(void)      { return g_listener_active; }
 
 typedef struct {
     ray_term_t* term;            /* tty console; NULL in piped mode / after teardown */
@@ -501,6 +480,18 @@ static void q_poll_close_term(q_poll_repl_t* c) {
     ray_hist_save(&c->term->hist, c->hist_path);
     ray_term_destroy(c->term);
     c->term = NULL;
+}
+
+/* See q_repl.h — q_exit's console teardown: whichever REPL flavour holds a
+ * live terminal, restore it and save history BEFORE `.z.exit` runs (its 0N!
+ * output must land on a cooked terminal).  Idempotent; no-op when piped. */
+void q_repl_console_close(void) {
+    q_poll_close_term(&g_q_poll_repl);
+    if (g_live_term) {
+        ray_hist_save(&g_live_term->hist, g_live_hist_path);
+        ray_term_destroy(g_live_term);
+        g_live_term = NULL;
+    }
 }
 
 /* --- tty flavour: same callbacks shape as repl.c's repl_read/repl_on_data --- */
@@ -559,14 +550,6 @@ static ray_t* q_poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data)
         return NULL;
     }
 
-    if ((len == 2 && memcmp(str, "\\\\", 2) == 0) ||
-        (len == 4 && memcmp(str, "exit", 4) == 0)) {
-        ray_release(line);
-        q_poll_close_term(c);
-        ray_poll_exit(poll, 0);
-        return NULL;
-    }
-
     /* Interrupt window: identical bracket to q_repl_interactive — Ctrl-C is
      * SIGINT only while the eval runs; run_one_line reports it as 'stop. */
     ray_term_clear_interrupt();
@@ -596,8 +579,9 @@ static void q_pipe_prompt(q_poll_repl_t* c) {
 }
 
 /* Process one complete piped line (prompt already showing, mirrors the fgets
- * loop's prompt-then-read order).  Returns 1 when the line requests exit. */
-static int q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
+ * loop's prompt-then-read order).  `\\`/`exit x` terminate inside q_exit, so
+ * there is no quit signal to propagate. */
+static void q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
         n--;
     line[n] = '\0';
@@ -607,13 +591,9 @@ static int q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
         fputc('\n', c->out);
     }
 
-    if (n) {
-        if (!strcmp(line, "\\\\") || !strcmp(line, "exit"))
-            return 1;
+    if (n)
         run_one_line(line, n, c->out, c->err, 1);
-    }
     q_pipe_prompt(c);
-    return 0;
 }
 
 /* Single-home stdin-EOF handling.  Reached from BOTH a draining read()==0
@@ -625,17 +605,14 @@ static int q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
 static void q_poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_t* c) {
     if (c->eof_done) return;
     c->eof_done = 1;
-    int quit = 0;
     if (c->acc_len) {   /* final line without a trailing newline */
         size_t n = c->acc_len;
         c->acc_len = 0;
-        quit = q_pipe_line(c, c->acc, n);
+        q_pipe_line(c, c->acc, n);
     }
-    if (!quit) {        /* fgets loop prints '\n' after the EOF prompt */
-        fputc('\n', c->out);
-        fflush(c->out);
-    }
-    if (quit || (!c->have_listener && !g_listener_active))
+    fputc('\n', c->out);   /* fgets loop prints '\n' after the EOF prompt */
+    fflush(c->out);
+    if (!c->have_listener && !g_listener_active)
         ray_poll_exit(poll, 0);
     else
         ray_poll_deregister(poll, sel->id);   /* keep serving IPC (has a listener) */
@@ -676,10 +653,7 @@ static ray_t* q_poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
                 c->acc[c->acc_len++] = tmp[i];
             size_t n = c->acc_len;
             c->acc_len = 0;
-            if (q_pipe_line(c, c->acc, n)) {
-                ray_poll_exit(poll, 0);
-                return NULL;
-            }
+            q_pipe_line(c, c->acc, n);
         } else {
             c->acc[c->acc_len++] = tmp[i];
         }
@@ -774,8 +748,6 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
         if (echo) { fputs(line, out); fputc('\n', out); }
 
         if (n == 0) continue;
-        if (!strcmp(line, "\\\\") || !strcmp(line, "exit")) break;
-
         run_one_line(line, n, out, err, 1);
     }
 }
@@ -799,7 +771,8 @@ int q_repl_run_file(const char* path, FILE* out, FILE* err) {
      *    accumulator (so `a:1 2` <blank> `/c` <blank> ` 3` ` + 4` => a:5 6 7);
      *  - a trimmed singleton `/` opens a `/`..`\` block comment (skip to a
      *    trimmed singleton `\`); a trimmed singleton `\` (outside a block) EXITS
-     *    the script; `\\` / `exit` also stop the load.
+     *    the script (load-time syntax); `\\` / `exit x` evaluate normally and
+     *    terminate the PROCESS via q_exit (kdb-true).
      * Continuation fragments are joined with '\n' (now whitespace to the
      * scanner), so each fragment's trailing `/ comment` ends at its own newline. */
     static char acc[1 << 16];               /* one logical line (joined) */
@@ -833,7 +806,6 @@ int q_repl_run_file(const char* path, FILE* out, FILE* err) {
         if (tlen == 0) continue;                 /* blank/whitespace-only: ignored, no flush */
         if (tlen == 1 && trim[0] == '/') { in_block = 1; continue; }   /* open block; no flush */
         if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
-        if (!strcmp(trim, "\\\\") || !strcmp(trim, "exit")) break;      /* \\ / exit           */
         if (trim[0] == '/') continue;            /* comment-only line: ignored, no flush        */
 
         int is_cont = indented && alen > 0;

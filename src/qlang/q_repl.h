@@ -6,6 +6,9 @@
 
 #include <stdio.h>
 
+/* Restore the live terminal and save history, if any.  Idempotent. */
+void q_repl_console_close(void);
+
 typedef struct ray_poll ray_poll_t;   /* fwd — full API in core/poll.h */
 
 /* Read q source lines from `in`, evaluating each and writing the console
@@ -29,10 +32,10 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo);
  *
  * stdin_tty != 0 drives the line-editor console (same behaviour as
  * q_repl_run's interactive mode); 0 drives the piped transcript loop (prompt
- * + echo, identical output shape to the fgets loop).  `\\` / `exit` exit the
- * whole loop (kdb: process exit).  On stdin EOF: when have_listener != 0 the
- * loop keeps running so IPC clients stay served (the daemon shape); otherwise
- * the loop exits.
+ * + echo, identical output shape to the fgets loop).  `\\` / `exit x`
+ * terminate inside the eval (q_exit).  On stdin EOF: when have_listener != 0
+ * the loop keeps running so IPC clients stay served (the daemon shape);
+ * otherwise the loop exits.
  *
  * Returns 0 after the poll loop has run and exited; -1 when stdin cannot be
  * poll-driven on this platform (Windows IOCP has no stdin selector; epoll
@@ -51,11 +54,6 @@ int q_repl_run_file(const char* path, FILE* out, FILE* err);
  * The unified poll loop then keeps serving past stdin EOF instead of exiting —
  * a client that `\p`s a port becomes a long-lived server, like kdb/rayforce. */
 void q_repl_mark_listener_active(void);
-
-/* True if a listener has been started (startup `-p` or a runtime `\p`).  qmain
- * consults it after a startup script so `q file.q` where file.q does `\p N`
- * becomes a server (serve loop) instead of exiting at the non-tty script end. */
-int  q_repl_listener_active(void);
 
 /* Strip pasted kdb `q)` console prompts from the front of an intake line and
  * return the advanced pointer.  Repeated exact `q)` only: `q)q)2+2` -> `2+2`,
