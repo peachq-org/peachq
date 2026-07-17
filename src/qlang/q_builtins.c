@@ -928,6 +928,11 @@ static ray_t* q_remote_eval_str(const char* src, size_t len) {
     ray_t* ast = q_parse(tmp);
     ray_sys_free(tmp);
     if (RAY_IS_ERR(ast)) return ast;
+    /* A trailing assignment answers with the generic null, not the assigned
+     * value (basics/ipc.md: `h"fn:{2+x}"` displays nothing).  Checked on the
+     * PRE-lower shape — q_lower rewrites assignment into a `set` application —
+     * which is why q_repl.c/qdoc.c ask here too. */
+    const int is_assign = q_ast_is_assign(ast);
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) return ast;
     ray_t* r = ray_eval(ast);
@@ -937,6 +942,11 @@ static ray_t* q_remote_eval_str(const char* src, size_t len) {
     { const char* con = q_console_str();
       if (con && *con) fputs(con, stdout);
       q_console_reset(); }
+    if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
+        ray_release(r);
+        ray_retain(RAY_NULL_OBJ);        /* owned return (q_sys.c's silent-null precedent) */
+        return RAY_NULL_OBJ;
+    }
     return r;
 }
 
