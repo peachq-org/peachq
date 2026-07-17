@@ -115,14 +115,14 @@ static struct {
 int32_t ray_env_scope_depth(void) { return __VM ? __VM->scope_depth : 0; }
 int32_t ray_env_global_count(void) { return g_env.count; }
 
-/* The five connection-hook sym ids carved out of the reserved-name reject.
+/* The six connection-hook sym ids carved out of the reserved-name reject.
  * Populated lazily on first probe; idempotent — ray_sym_intern is content-
  * keyed, so repeated calls return the same id.  The carve-out applies ONLY
- * to these five names; everything else under `.ipc.*` (open/send/close/
+ * to these six names; everything else under `.ipc.*` (open/send/close/
  * handle) stays unsettable, as do all `.sys.*` / `.os.*` / etc.
  * Lambda parameters with these names remain forbidden — that's pure
  * shadowing with no legitimate use. */
-static int64_t g_ipc_hook_syms[5] = {0};
+static int64_t g_ipc_hook_syms[6] = {0};
 static bool    g_ipc_hook_syms_ready = false;
 
 /* Cached `self` sym id for ray_env_scope_bind — interned once per sym
@@ -136,18 +136,19 @@ static void ipc_hook_syms_ensure(void) {
     g_ipc_hook_syms[2] = ray_sym_intern(".ipc.on.sync",  strlen(".ipc.on.sync"));
     g_ipc_hook_syms[3] = ray_sym_intern(".ipc.on.async", strlen(".ipc.on.async"));
     g_ipc_hook_syms[4] = ray_sym_intern(".ipc.on.auth",  strlen(".ipc.on.auth"));
+    g_ipc_hook_syms[5] = ray_sym_intern(".ipc.on.badmsg", strlen(".ipc.on.badmsg"));
     g_ipc_hook_syms_ready = true;
 }
 
 bool ray_sym_is_ipc_hook(int64_t sym_id) {
     ipc_hook_syms_ensure();
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 6; i++)
         if (g_ipc_hook_syms[i] == sym_id) return true;
     return false;
 }
 
 int64_t ray_sym_ipc_hook(int idx) {
-    if (idx < 0 || idx >= 5) return -1;
+    if (idx < 0 || idx >= 6) return -1;
     ipc_hook_syms_ensure();
     return g_ipc_hook_syms[idx];
 }
