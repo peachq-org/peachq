@@ -245,5 +245,6 @@ ray_t* q_flip_wrap(ray_t* x);                                 /* used by: regist
 ray_t* qj_item(ray_t* x, int64_t i);                          /* used by: join */
 ray_t* qj_gen_item(ray_t* x, int64_t i);                      /* used by: join */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y);                       /* used by: dotz, lower, registry */
+ray_t* q_exit_wrap(ray_t* x);                                 /* used by: ops */
 
 #endif
