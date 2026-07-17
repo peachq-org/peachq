@@ -157,6 +157,8 @@ help:
 	@printf "  %-28s %s\n" "make q-matrix" "Run non-gating op x shape smoke/fuzz harness (TSV)"
 	@printf "  %-28s %s\n" "make q-test-results" "Regenerate qtest-results.txt from test/q qcmd suites"
 	@printf "  %-28s %s\n" "make q-kwire" "javakdb client vs live ./q -p server (also in qtest; needs javac)"
+	@printf "  %-28s %s\n" "make q-release" "Release step 1: gate + qdash + trigger CI build. VERSION= to override current"
+	@printf "  %-28s %s\n" "make q-upload" "Release step 2: ship to peachq.org. GO=1 uploads (default: dry-run)"
 	@printf "  %-28s %s\n" "make manifest" "Regenerate tools/frozen.manifest"
 	@printf "  %-28s %s\n" "make sync-github" "Mirror the public subset to github.com/peachq-org/peachq (push)"
 	@printf "  %-28s %s\n" "make sync-github-dry" "Dry-run the peachq mirror (build export, no push)"
@@ -509,6 +511,20 @@ win: q.exe
 win-smoke: win $(Q_TARGET)
 	bash tools/win-smoke.sh "$(F)"
 
+# Release in two commands (spec: docs/superpowers/specs/2026-07-17-q-release-tooling.md).
+#   q-release — LOCAL gates (test + q-test) + win-smoke + qdash, then bump
+#     packaging/public/VERSION + sync-github to TRIGGER the mirror CI binary build
+#     (portable linux/windows/macOS + wasm). Does NOT build binaries — CI does.
+#     `make q-release VERSION=0.42` (default: current VERSION).
+#   q-upload  — pull the CI-built assets from the GitHub Release, generate
+#     latest.json + wasm manifest, rsync to peachq.org in contract order.
+#     DRY-RUN unless GO=1. GitHub -> website is a PULL (this box holds the key).
+q-release:
+	VERSION="$(VERSION)" tools/q-release.sh
+
+q-upload:
+	GO="$(GO)" tools/q-upload.sh
+
 # One-shot release publish — run at a merge worth recording, infrequently.
 # SUPERSEDED by `make q-release` + `make q-upload` (spec:
 # docs/superpowers/specs/2026-07-17-q-release-tooling.md); kept working until
@@ -541,7 +557,7 @@ clean:
 	# JUnit-XML export (tools/qtest.sh) + javakdb build classes (q-kwire).
 	-rm -rf test-results tools/kdb-conformance/.build
 
-.PHONY: default help debug release lib dist win win-smoke bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff q-test q-matrix q-test-results qdoctest q-kwire manifest coverage clean sync-github sync-github-force sync-github-dry release-github
+.PHONY: default help debug release lib dist win win-smoke bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup test test-parse-diff q-test q-matrix q-test-results qdoctest q-kwire q-release q-upload manifest coverage clean sync-github sync-github-force sync-github-dry release-github
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.
