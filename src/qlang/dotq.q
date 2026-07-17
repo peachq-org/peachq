@@ -10,9 +10,9 @@
 .Q.an:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
 .Q.n:"0123456789";
 .Q.nA:"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-/ .Q.K (version date) / .Q.k (version number): the q.k spec openq targets, distinct from .z.K/.z.k.
-.Q.K:2020.10.02;
-.Q.k:4f;
+/ .Q.k (version number) / .Q.K (version date): openq's own, tracking .z.K/.z.k (from the VERSION file).
+.Q.k:.z.K;
+.Q.K:.z.k;
 / .Q.M: chunk size for .Q.dsftg (load-process-save); defaults to long infinity.
 .Q.M:0W;
 / .Q.t: type letters indexed by datatype number.
