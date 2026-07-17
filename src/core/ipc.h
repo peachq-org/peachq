@@ -91,6 +91,7 @@ typedef struct ray_ipc_conn {
     /* current kdb frame (8-byte header already parsed) */
     uint8_t           msgtype;
     uint8_t           swap;       /* frame is big-endian */
+    uint8_t           zip;        /* frame is compressed */
     uint32_t          plen;       /* payload length (excl. header) */
     /* handshake creds accumulator ("user:pass" + cap byte, NUL-terminated
      * on the wire; stored without the NUL) */
