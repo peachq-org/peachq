@@ -9,7 +9,7 @@
 #include "qlang/q_registry_internal.h"  /* q_value_wrap, q_hsym_wrap, q_attr_wrap, q_strict_i64 */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
-#include "qlang/q_wire.h"       /* q_wire_serialize / q_wire_deserialize, Q_WIRE_ASYNC */
+#include "qlang/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — single-line repr backing `-3!` / .Q.s1 */
 #include <rayforce.h>
 #include <stdint.h>
@@ -35,6 +35,14 @@ static ray_t* h_deser(ray_t** a, int64_t n) {                                   
     return q_wire_deserialize(a[0]);
 }
 static ray_t* h_md5  (ray_t** a, int64_t n) { (void)n; return q_md5_fn(a[0]); }             /* -15! */
+static ray_t* h_zip  (ray_t** a, int64_t n) {                                               /* -18! */
+    (void)n;
+    ray_t* f = q_wire_serialize(a[0], Q_WIRE_ASYNC);
+    if (!f || RAY_IS_ERR(f)) return f;
+    ray_t* z = q_wire_compress(f);      /* >2000b + under-half, else f unchanged */
+    ray_release(f);
+    return z;
+}
 static ray_t* h_jk   (ray_t** a, int64_t n) { (void)n; return q_json_deserialize(a[0]); }   /* -29! */
 static ray_t* h_jj   (ray_t** a, int64_t n) { (void)n; return q_json_serialize(a[0]); }     /* -31! */
 static ray_t* h_btoa (ray_t** a, int64_t n) { (void)n; return q_dotq_btoa_fn(a[0]); }       /* -32! */
@@ -160,6 +168,7 @@ static const struct {
     { -6,  "value",      1, Q_BANG_F_NONE, h_value },
     { -8,  "to bytes",   1, Q_BANG_F_NONE, h_ser   },
     { -9,  "from bytes", 1, Q_BANG_F_NONE, h_deser },
+    { -18, "compress bytes", 1, Q_BANG_F_NONE, h_zip },
     { -15, "md5",        1, Q_BANG_F_NONE, h_md5   },
     { -29, ".j.k",       1, Q_BANG_F_NONE, h_jk    },
     { -31, ".j.j",       1, Q_BANG_F_NONE, h_jj    },
@@ -188,7 +197,6 @@ static const struct {
     /* Blocked on a subsystem openq does not have (IPC/TLS/codec/enums/DARE): */
     { -10, "type enum",          1, Q_BANG_F_BLOCKED, NULL },  /* enumerations */
     { -11, "streaming execute",  1, Q_BANG_F_BLOCKED, NULL },  /* logging + .z.ps */
-    { -18, "compress bytes",     1, Q_BANG_F_BLOCKED, NULL },  /* compression codec */
     { -21, "compression stats",  1, Q_BANG_F_BLOCKED, NULL },  /* codec + file compress */
     { -22, "uncompressed length",1, Q_BANG_F_BLOCKED, NULL },  /* serde length shortcut */
     { -23, "memory map",         1, Q_BANG_F_BLOCKED, NULL },  /* mmap-backed objects */
