@@ -33,11 +33,17 @@ TARGET = peachq
 OUTDIR = wasm
 
 INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson
-# Minimal version macros so the version/nfo paths compile without the root
-# Makefile's git-derived DEFS.
-DEFS = -DRAYFORCE_GIT_COMMIT=\"wasm\" -DRAYFORCE_BUILD_DATE=\"wasm\" \
-       -DRAY_VERSION_MAJOR=0 -DRAY_VERSION_MINOR=0 -DRAY_VERSION_PATCH=0 \
-       -DRAYFORCE_VERSION=\"0.0.0-wasm\"
+# Real version + build date from the root VERSION file (same source as the
+# native build), so .z.K / .z.k / the banner are correct in the browser.
+RAY_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0)
+V_MAJ := $(word 1,$(subst ., ,$(RAY_VERSION)))
+V_MIN := $(word 2,$(subst ., ,$(RAY_VERSION)))
+V_PAT := $(word 3,$(subst ., ,$(RAY_VERSION)))
+V_PAT := $(if $(V_PAT),$(V_PAT),0)
+BUILD_DATE := $(shell date -u +%Y-%m-%d)
+DEFS = -DRAYFORCE_GIT_COMMIT=\"wasm\" -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\" \
+       -DRAY_VERSION_MAJOR=$(V_MAJ) -DRAY_VERSION_MINOR=$(V_MIN) -DRAY_VERSION_PATCH=$(V_PAT) \
+       -DRAYFORCE_VERSION=\"$(RAY_VERSION)\"
 
 # Based on upstream's WASM CFLAGS: -msimd128 (NOT -march=native) + the
 # vectorization-enabling fast-math flags. -DSYS_MALLOC is intentionally omitted
