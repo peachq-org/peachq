@@ -633,6 +633,35 @@ static ray_t* q_cast_distribute(int8_t tag, ray_t* x) {
 /* Integer targets (I64/I32/I16): kdb ROUNDS floats (rint = IEEE nearest/
  * ties-even: `long$3.7 -> 4, "j"$2.5 -> 2, `int$6.6 -> 7 — KX ref pins) where
  * rayfall `as` truncates, so pre-round here; the rest is base's. */
+/* Real (float32) target.  Base rayfall has an `as float` (F64) arm but no
+ * `real`/F32 one, so `"e"$` used to 'nyi. Reuse the base F64 cast (handles every
+ * numeric input + string parse, exactly like `"f"$`), then narrow F64 -> F32. */
+static ray_t* q_cast_real(ray_t* x) {
+    ray_t* f = q_cast_delegate(RAY_F64, x);
+    if (RAY_IS_ERR(f)) return f;
+    if (f->type == -RAY_F64) {                              /* atom */
+        ray_t* r = RAY_ATOM_IS_NULL(f) ? ray_typed_null(-RAY_F32)
+                                       : ray_f32((float)f->f64);
+        ray_release(f);
+        return r;
+    }
+    if (f->type == RAY_F64) {                               /* vector */
+        int64_t n = ray_len(f);
+        ray_t* out = ray_vec_new(RAY_F32, n);
+        if (RAY_IS_ERR(out)) { ray_release(f); return out; }
+        out->len = n;
+        const double* src = (const double*)ray_data(f);
+        for (int64_t i = 0; i < n; i++) {
+            double v = src[i];
+            ((float*)ray_data(out))[i] = (float)v;
+            if (isnan(v)) ray_vec_set_null(out, i, true);
+        }
+        ray_release(f);
+        return out;
+    }
+    return f;
+}
+
 static ray_t* q_cast_int(int8_t tag, ray_t* x) {
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-tag);
@@ -780,7 +809,7 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
     case QC_STR:  break;                    /* hoisted above: packs boxed lists */
     case QC_LIST: break;                    /* tag 0 is not a cast designator */
     case QC_GUID: break;                    /* guid target: no base arm — deferred */
-    case QC_F32:  break;                    /* real target: no base arm — deferred */
+    case QC_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
     case QC_BOOL: return q_cast_bool(x);
     case QC_U8:   return q_cast_u8(x);
     case QC_I16: case QC_I32: case QC_I64:
