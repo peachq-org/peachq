@@ -36,9 +36,11 @@
  *              256MB frame guard is enforced here.  Compressed inbound
  *              frames (byte 2 == 1, kdb's >2000-byte non-localhost rule)
  *              decompress via q_wire_uncompress_payload before routing —
- *              Phase F.  EMIT stays uncompressed by wire policy: the
- *              compress-on-send leg is deferred (needed later for the
- *              Python-driver acceptance work).
+ *              Phase F.  EMIT mirrors it: a frame is compressed on send
+ *              (q_wire_compress) only when the peer negotiated compression
+ *              (handshake capability >= 1) AND the link is not loopback —
+ *              kdb's `zip && msgLen>2000 && !isLoopback` gate, with the
+ *              >2000/under-half halves owned by q_wire_compress.
  *   payload    ONE q_wire object (src/qlang/q_wire.c, kb/serialization.md
  *              grammar).  Whole-payload consumption is enforced; trailing
  *              bytes are protocol corruption and close the connection.
@@ -469,15 +471,33 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     return ok;
 }
 
+/* Apply kdb's outbound compression policy to an already-serialized frame:
+ * compress only when this connection qualifies (peer negotiated zip AND the
+ * link is not loopback).  q_wire_compress owns the >2000-byte + under-half
+ * rules — it returns the frame unchanged (retained) when they do not hold,
+ * and a compression error leaves the plain frame.  Consumes one ref of
+ * `frame`, returns an owned frame (compressed or the original). */
+static ray_t* frame_apply_zip(ray_t* frame, bool zip_ok)
+{
+    if (!zip_ok) return frame;
+    ray_t* z = q_wire_compress(frame);
+    if (RAY_IS_ERR(z)) { ray_error_free(z); return frame; }
+    ray_release(frame);        /* z is the compressed frame, or `frame` retained */
+    return z;
+}
+
 /* Serialize + send one kdb frame.  0 on success, -1 on serialization or
  * socket failure.  q_wire_serialize emits the COMPLETE frame (8-byte LE
  * header with msgtype + payload); values with no kdb wire form ('nyi:
- * builtin fns, projections, engine handles) fail serialization. */
-static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype)
+ * builtin fns, projections, engine handles) fail serialization.  zip_ok
+ * enables emit compression per the connection's policy. */
+static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype,
+                              bool zip_ok)
 {
     ray_t* frame = q_wire_serialize(msg, msgtype);
     if (!frame) return -1;
     if (RAY_IS_ERR(frame)) { ray_error_free(frame); return -1; }
+    frame = frame_apply_zip(frame, zip_ok);
     int64_t rc = ray_sock_send(fd, ray_data(frame), (size_t)frame->len);
     ray_release(frame);
     return rc < 0 ? -1 : 0;
@@ -486,7 +506,7 @@ static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype)
 /* Send a SYNC response.  A result q_wire cannot express must never leave
  * the client waiting forever (issue #285): substitute the serialization
  * error itself — errors always wire as -128h + code. */
-static void send_response(ray_sock_t fd, ray_t* result)
+static void send_response(ray_sock_t fd, ray_t* result, bool zip_ok)
 {
     ray_t* frame = q_wire_serialize(result, RAY_IPC_MSG_RESP);
     if (!frame) return;
@@ -497,6 +517,7 @@ static void send_response(ray_sock_t fd, ray_t* result)
         if (!frame) return;
         if (RAY_IS_ERR(frame)) { ray_error_free(frame); return; }
     }
+    frame = frame_apply_zip(frame, zip_ok);
     ray_sock_send(fd, ray_data(frame), (size_t)frame->len);
     ray_release(frame);
 }
@@ -631,6 +652,8 @@ typedef struct {
     uint8_t          msgtype;      /* current frame's msgtype */
     uint8_t          swap;         /* current frame is big-endian */
     uint8_t          zip;          /* current frame is compressed */
+    bool             peer_zip;     /* peer negotiated compression (cap >= 1) */
+    bool             loopback;     /* peer is a local/loopback endpoint */
     uint32_t         plen;         /* current frame's payload length */
     uint8_t          hs[KDB_HS_MAX];  /* handshake creds accumulator */
     uint16_t         hs_len;
@@ -646,6 +669,12 @@ typedef struct {
     bool             sync_badmsg;   /* deposited resp is a local 'badmsg — waiter closes after consuming */
     ray_t*           sync_resp;
 } ray_ipc_conn_data_t;
+
+/* kdb's emit-compression gate for a connection: the peer negotiated
+ * compression AND the link is not loopback (basics/ipc.md). */
+static inline bool conn_zip_ok(const ray_ipc_conn_data_t* cd) {
+    return cd->peer_zip && !cd->loopback;
+}
 
 static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel);
@@ -672,6 +701,7 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
     cd->listener_id = sel->id;
     cd->auth_required = (poll->auth_secret[0] != '\0');
     cd->restricted    = poll->restricted;
+    cd->loopback      = ray_sock_is_loopback(new_fd);   /* emit-zip gate */
 
     ray_poll_reg_t reg = {0};
     reg.fd       = (int64_t)new_fd;
@@ -700,10 +730,14 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
  * accumulated creds line, authenticate, and either reply with the common
  * capability byte (accept) or signal reject (kdb closes silently).
  * Returns true on accept. */
+/* out_common (nullable) receives the negotiated capability byte we reply
+ * with — its >= 1 bit is the peer's compression eligibility (basics/ipc.md
+ * capability table). */
 static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
                                    ray_sock_t fd,
                                    const uint8_t* hs, size_t hs_len,
-                                   bool auth_required, const char* secret)
+                                   bool auth_required, const char* secret,
+                                   uint8_t* out_common)
 {
     uint8_t cap = 0;
     size_t  clen = hs_len;
@@ -721,6 +755,7 @@ static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
     if (!ok) return false;                    /* kdb rejects by closing */
 
     uint8_t common = cap < KDB_CAPABILITY ? cap : KDB_CAPABILITY;
+    if (out_common) *out_common = common;
     ray_sock_send(fd, &common, 1);
     return true;
 }
@@ -741,12 +776,15 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
         return NULL;
     }
 
+    uint8_t neg_cap = 0;
     if (!kdb_handshake_complete(poll, sel->id, (ray_sock_t)sel->fd,
                                 cd->hs, cd->hs_len,
-                                cd->auth_required, poll->auth_secret)) {
+                                cd->auth_required, poll->auth_secret,
+                                &neg_cap)) {
         ray_poll_deregister(poll, sel->id);
         return NULL;
     }
+    cd->peer_zip = (neg_cap >= 1);            /* emit-compression eligibility */
 
     cd->phase = RAY_IPC_PHASE_HEADER;
     sel->rx.read_fn = ipc_read_header;
@@ -891,7 +929,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
             ray_selector_t* cur = ray_poll_get(poll, id);
             if (cur && cur->data == (void*)cd) {
                 ray_t* e = ray_error("badmsg", NULL);
-                send_response((ray_sock_t)cur->fd, e);
+                send_response((ray_sock_t)cur->fd, e, conn_zip_ok(cd));
                 ray_error_free(e);
             }
         }
@@ -909,7 +947,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     if (msgtype == RAY_IPC_MSG_SYNC) {
         ray_selector_t* cur = ray_poll_get(poll, id);
         if (cur && cur->data == (void*)cd)
-            send_response((ray_sock_t)cur->fd, result);
+            send_response((ray_sock_t)cur->fd, result, conn_zip_ok(cd));
     }
     if (RAY_IS_ERR(result)) ray_error_free(result);
     else if (result != RAY_NULL_OBJ) ray_release(result);
@@ -1026,9 +1064,14 @@ static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     }
 
     bool auth_req = (srv->auth_secret[0] != '\0');
+    /* Legacy C-fixture server (ray_ipc_conn_t): this struct tracks neither
+     * peer capability nor loopback (ipc.h is unchanged), so it cannot compute
+     * the emit-compression policy — by design it never compresses (see the
+     * send_response call below).  An intentional limitation of the legacy
+     * path, not an assumed invariant; the negotiated capability is unused. */
     if (!kdb_handshake_complete(NULL, (int64_t)(c - srv->conns), c->fd,
                                 c->hs, c->hs_len, auth_req,
-                                srv->auth_secret)) {
+                                srv->auth_secret, NULL)) {
         conn_close(srv, c);
         return;
     }
@@ -1100,7 +1143,7 @@ static void conn_on_payload(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     if (rc != 0) { conn_close(srv, c); return; }   /* protocol corruption */
 
     if (c->msgtype == RAY_IPC_MSG_SYNC)
-        send_response(c->fd, result);
+        send_response(c->fd, result, false);   /* legacy path: no emit compression (see conn_on_handshake) */
     if (RAY_IS_ERR(result)) ray_error_free(result);
     else if (result != RAY_NULL_OBJ) ray_release(result);
 
@@ -1492,6 +1535,8 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     cd->phase       = RAY_IPC_PHASE_HEADER;
     cd->listener_id = -1;               /* outbound — no lifecycle hooks */
     cd->restricted  = poll->restricted; /* -U narrows pushed evals too */
+    cd->peer_zip    = (common >= 1);    /* negotiated compression eligibility */
+    cd->loopback    = ray_sock_is_loopback(fd);   /* emit-zip gate */
 
     ray_sock_set_nonblocking(fd);
 
@@ -1557,7 +1602,8 @@ static ray_t* sync_send(int64_t handle, ray_t* msg)
         return ray_error("io", "nested sync send on busy handle");
     }
 
-    if (conn_write_msg((ray_sock_t)sel->fd, msg, RAY_IPC_MSG_SYNC) < 0) {
+    if (conn_write_msg((ray_sock_t)sel->fd, msg, RAY_IPC_MSG_SYNC,
+                       conn_zip_ok(cd)) < 0) {
         if (owned) ray_release(msg);
         return ray_error("io", "ipc send failed");
     }
@@ -1625,8 +1671,11 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
         owned = true;
     }
     ray_selector_t* sel = conn_resolve(NULL, handle);
+    /* conn_write_msg (and its cd deref) run only when sel is non-NULL —
+     * the `!sel ||` short-circuit guards the data pointer. */
     ray_err_t rc = (!sel || conn_write_msg((ray_sock_t)sel->fd, msg,
-                                           RAY_IPC_MSG_ASYNC) < 0)
+                                           RAY_IPC_MSG_ASYNC,
+                                           conn_zip_ok((ray_ipc_conn_data_t*)sel->data)) < 0)
                    ? RAY_ERR_IO : RAY_OK;
     if (owned) ray_release(msg);
     return rc;
