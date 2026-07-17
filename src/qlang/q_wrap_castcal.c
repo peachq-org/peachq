@@ -484,23 +484,6 @@ const char* q_type_qname(int8_t t) {
     }
 }
 
-/* A MANUAL mirror of the frozen RAY_* tags (rayforce.h:74-102, which cannot
- * become an enum while frozen).  Tag ownership therefore still lives in that
- * header: a new #define never lands here by itself, so the datatype checklist
- * owns the mirroring step (learnings/add-a-q-datatype-template.md step 3).
- * What the mirror BUYS, once a tag is in it: -Wswitch + -Werror refuse to build
- * a cast target no arm states, while q_cast_to's switch has no `default:` (a
- * `default:` label would silently disarm it; statements AFTER the switch do
- * not — which is how the sparse band, 3 = kdb's short-of-3, stays handled). */
-typedef enum {
-    QC_LIST = RAY_LIST, QC_BOOL = RAY_BOOL, QC_GUID = RAY_GUID, QC_U8 = RAY_U8,
-    QC_I16 = RAY_I16, QC_I32 = RAY_I32, QC_I64 = RAY_I64, QC_F32 = RAY_F32,
-    QC_F64 = RAY_F64, QC_STR = RAY_STR, QC_SYM = RAY_SYM,
-    QC_TIMESTAMP = RAY_TIMESTAMP, QC_MONTH = RAY_MONTH, QC_DATE = RAY_DATE,
-    QC_DATETIME = RAY_DATETIME, QC_TIMESPAN = RAY_TIMESPAN,
-    QC_MINUTE = RAY_MINUTE, QC_SECOND = RAY_SECOND, QC_TIME = RAY_TIME
-} q_cast_type_e;
-
 /* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
 static const char* q_tag_rayname(int8_t tag) {
     switch (tag) {
@@ -805,19 +788,19 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
     if (tag == RAY_STR) return q_cast_str(x);
     if (x && x->type == RAY_LIST) return q_cast_distribute(tag, x);
 
-    switch ((q_cast_type_e)tag) {
-    case QC_STR:  break;                    /* hoisted above: packs boxed lists */
-    case QC_LIST: break;                    /* tag 0 is not a cast designator */
-    case QC_GUID: break;                    /* guid target: no base arm — deferred */
-    case QC_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
-    case QC_BOOL: return q_cast_bool(x);
-    case QC_U8:   return q_cast_u8(x);
-    case QC_I16: case QC_I32: case QC_I64:
+    switch ((ray_type_e)tag) {
+    case RAY_STR:  break;                    /* hoisted above: packs boxed lists */
+    case RAY_LIST: break;                    /* tag 0 is not a cast designator */
+    case RAY_GUID: break;                    /* guid target: no base arm — deferred */
+    case RAY_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
+    case RAY_BOOL: return q_cast_bool(x);
+    case RAY_U8:   return q_cast_u8(x);
+    case RAY_I16: case RAY_I32: case RAY_I64:
         return q_cast_int(tag, x);
-    case QC_TIMESTAMP: return q_cast_timestamp(x);
-    case QC_SYM:  return q_cast_sym(x);
-    case QC_F64: case QC_MONTH: case QC_DATE: case QC_DATETIME:
-    case QC_TIMESPAN: case QC_MINUTE: case QC_SECOND: case QC_TIME:
+    case RAY_TIMESTAMP: return q_cast_timestamp(x);
+    case RAY_SYM:  return q_cast_sym(x);
+    case RAY_F64: case RAY_MONTH: case RAY_DATE: case RAY_DATETIME:
+    case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: case RAY_TIME:
         return q_cast_delegate(tag, x);
     }
     /* the `break` arms above + any out-of-band tag (the band is sparse: 3 is
