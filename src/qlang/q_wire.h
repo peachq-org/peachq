@@ -9,8 +9,8 @@
  * Message layout (basics/ipc.md):
  *   byte 0    endianness of the encoder: 0x01 little, 0x00 big
  *   byte 1    msgtype: 0 async, 1 sync, 2 response
- *   byte 2    compressed flag — Phase A NEVER sets it on emit; a nonzero
- *             inbound flag is refused with 'nyi (compression is Phase F)
+ *   byte 2    compressed flag — the wire EMIT path never sets it (deliberate
+ *             wire policy); inbound 0x01 decompresses (Phase F codec below)
  *   byte 3    0x00
  *   bytes 4-7 total message length (int32, includes these 8 header bytes)
  *   bytes 8.. payload (one serialized object)
@@ -88,10 +88,21 @@ enum { Q_WIRE_ASYNC = 0, Q_WIRE_SYNC = 1, Q_WIRE_RESP = 2 };
 ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype);
 
 /* Deserialize a complete kdb IPC message.  Accepts either endianness
- * (header byte 0); a nonzero compressed flag is 'nyi; the payload must
+ * (header byte 0) and compressed frames (byte 2 == 1); the payload must
  * decode to exactly one object consuming the whole frame.  `bytes` must
  * be a RAY_U8 vector.  Returns an owned value or a RAY_ERROR. */
 ray_t* q_wire_deserialize(ray_t* bytes);
+
+/* ---- Phase F compression codec (javakdb c.java scheme) ----
+ * Compress a complete frame: returns the compressed frame when the input is
+ * >2000 bytes AND compresses to under half, else the input retained
+ * unchanged (kdb's threshold / give-up rules).  Owned RAY_U8 or RAY_ERROR. */
+ray_t* q_wire_compress(ray_t* frame);
+
+/* Decompress a compressed frame's payload (the bytes AFTER the 8-byte
+ * header).  Bounds-checked against corrupt/bomb frames ('domain).  Returns
+ * an owned RAY_U8 holding the uncompressed payload, or a RAY_ERROR. */
+ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be);
 
 /* ---- payload-only entry points (Phase B serde v5 / Phase C ipc.c) ---- */
 

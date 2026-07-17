@@ -30,18 +30,15 @@
  *              validates (constant-time -u/-U secret compare first, then
  *              the `.ipc.on.auth` hook may narrow) and replies with ONE
  *              byte min(cap, 3) — or closes the connection on rejection.
- *   header     8 bytes: [endian(01=LE) msgtype(0/1/2) compressed 0x00
+ *   header     8 bytes: [endian(01=LE) msgtype(0/1/2) compressed(0/1)
  *              total-len:int32] — total-len INCLUDES the header; both
  *              endiannesses are read, little-endian is emitted.  The
- *              256MB frame guard is enforced here.  A nonzero compressed
- *              byte is refused ('nyi — compression is Phase F): we never
- *              set it on send and close on receipt.  KNOWN GAP: we still
- *              reply capability 3 (timestamp/UUID-capable — replying 0
- *              would make clients downgrade their type usage), so a
- *              remote NON-localhost kdb client may legally compress a
- *              >2000-byte message and get dropped; kdb never compresses
- *              on localhost links, which is every current consumer.
- *              Phase F closes this.
+ *              256MB frame guard is enforced here.  Compressed inbound
+ *              frames (byte 2 == 1, kdb's >2000-byte non-localhost rule)
+ *              decompress via q_wire_uncompress_payload before routing —
+ *              Phase F.  EMIT stays uncompressed by wire policy: the
+ *              compress-on-send leg is deferred (needed later for the
+ *              Python-driver acceptance work).
  *   payload    ONE q_wire object (src/qlang/q_wire.c, kb/serialization.md
  *              grammar).  Whole-payload consumption is enforced; trailing
  *              bytes are protocol corruption and close the connection.
@@ -112,10 +109,11 @@
 
 /* ===== Compression (delta + RLE) =====
  *
- * WIRE-DEAD since Phase C (kdb frames are never compressed by us; inbound
- * compressed frames are refused).  KEPT because the journal may contain
- * Phase-B-era compressed frames inside wire version 5 — journal.c's
- * decompress_if_needed still calls ray_ipc_decompress. */
+ * NOT the kdb wire codec (that is q_wire compress/uncompress, Phase F).
+ * WIRE-DEAD since Phase C: kdb frames never use this scheme.  KEPT because
+ * the journal may contain Phase-B-era compressed frames inside wire
+ * version 5 — journal.c's decompress_if_needed still calls
+ * ray_ipc_decompress. */
 
 size_t ray_ipc_compress(const uint8_t* src, size_t len,
                         uint8_t* dst, size_t dst_cap)
@@ -216,19 +214,18 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define KDB_HS_MAX  512                      /* creds line hard cap */
 #define KDB_CAPABILITY 3                     /* what we speak (V3.0 level) */
 
-/* Parse an 8-byte kdb header.  0 ok / -1 bad (caller closes; a nonzero
- * compressed byte gets a 'nyi log line first — Phase F).  *swap is set
- * when the frame is big-endian; *payload_len EXCLUDES the header. */
+/* Parse an 8-byte kdb header.  0 ok / -1 bad (caller closes).  *swap is
+ * set when the frame is big-endian; *zip when the frame is compressed
+ * (byte 2 == 1, decompressed by the payload readers — Phase F);
+ * *payload_len EXCLUDES the header. */
 static int kdb_hdr_parse(const uint8_t in[KDB_HDR_LEN], uint8_t* msgtype,
-                         int* swap, uint32_t* payload_len) {
+                         int* swap, uint8_t* zip, uint32_t* payload_len) {
     if (in[0] != 0x00 && in[0] != 0x01) return -1;
     *swap = (in[0] == 0x00);
     if (in[1] > 2) return -1;
     *msgtype = in[1];
-    if (in[2] != 0x00) {
-        fprintf(stderr, "ipc: compressed inbound frame refused ('nyi — compression is Phase F)\n");
-        return -1;
-    }
+    if (in[2] > 0x01) return -1;
+    *zip = in[2];
     if (in[3] != 0x00) return -1;              /* reserved byte must be zero */
     uint32_t n = *swap
         ? ((uint32_t)in[4] << 24) | ((uint32_t)in[5] << 16) | ((uint32_t)in[6] << 8) | in[7]
@@ -584,6 +581,7 @@ typedef struct {
     uint8_t          phase;
     uint8_t          msgtype;      /* current frame's msgtype */
     uint8_t          swap;         /* current frame is big-endian */
+    uint8_t          zip;          /* current frame is compressed */
     uint32_t         plen;         /* current frame's payload length */
     uint8_t          hs[KDB_HS_MAX];  /* handshake creds accumulator */
     uint16_t         hs_len;
@@ -716,13 +714,14 @@ static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel)
         return NULL;
 
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
-    uint8_t msgtype; int swap; uint32_t plen;
-    if (kdb_hdr_parse(sel->rx.buf->data, &msgtype, &swap, &plen) != 0) {
+    uint8_t msgtype; int swap; uint8_t zip; uint32_t plen;
+    if (kdb_hdr_parse(sel->rx.buf->data, &msgtype, &swap, &zip, &plen) != 0) {
         ray_poll_deregister(poll, sel->id);
         return NULL;
     }
     cd->msgtype = msgtype;
     cd->swap    = (uint8_t)swap;
+    cd->zip     = zip;
     cd->plen    = plen;
 
     cd->phase = RAY_IPC_PHASE_PAYLOAD;
@@ -748,6 +747,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
      * nested frame would overwrite cd->msgtype/swap/plen under us. */
     uint8_t  msgtype = cd->msgtype;
     int      swap    = cd->swap;
+    uint8_t  zip     = cd->zip;
     uint32_t plen    = cd->plen;
     ray_poll_buf_t*  payload = sel->rx.buf;
     int64_t          id      = sel->id;
@@ -756,6 +756,24 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     sel->rx.read_fn = ipc_read_header;
     ray_poll_rx_request(poll, sel, KDB_HDR_LEN);
 
+    /* Compressed frame (Phase F): decompress BEFORE any routing so the
+     * RESP-deposit and dispatch legs below both see plain payload bytes.
+     * A corrupt frame is protocol corruption — close, like any other. */
+    uint8_t* pdata = payload->data;
+    ray_t*   uz    = NULL;
+    if (zip) {
+        uz = q_wire_uncompress_payload(payload->data, (size_t)plen, swap);
+        ray_poll_buf_free(payload);
+        payload = NULL;
+        if (!uz || RAY_IS_ERR(uz)) {
+            if (uz) ray_error_free(uz);
+            ray_poll_deregister(poll, id);
+            return NULL;
+        }
+        pdata = (uint8_t*)ray_data(uz);
+        plen  = (uint32_t)uz->len;
+    }
+
     /* Response frame: deposit it for the sync send waiting on this
      * conn instead of evaluating it.  A response nobody waits for has
      * no defined meaning — log and drop.  Protocol corruption (decode
@@ -763,9 +781,10 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
      * observes a clean 'io error instead of a bogus value. */
     if (msgtype == RAY_IPC_MSG_RESP) {
         int is_wire_err = 0;
-        ray_t* obj = ipc_decode_payload(payload->data, (size_t)plen, swap,
+        ray_t* obj = ipc_decode_payload(pdata, (size_t)plen, swap,
                                         &is_wire_err);
-        ray_poll_buf_free(payload);
+        if (payload) ray_poll_buf_free(payload);
+        if (uz) ray_release(uz);
         if (!obj) {
             ray_poll_deregister(poll, id);
             return NULL;
@@ -795,11 +814,12 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     ipc_ctx_set(id, poll);
 
     ray_t* result = NULL;
-    int rc = ipc_dispatch(msgtype, payload->data, (size_t)plen, swap, &result);
+    int rc = ipc_dispatch(msgtype, pdata, (size_t)plen, swap, &result);
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev_restricted);
-    ray_poll_buf_free(payload);
+    if (payload) ray_poll_buf_free(payload);
+    if (uz) ray_release(uz);
 
     if (rc != 0) {                            /* protocol corruption */
         ray_poll_deregister(poll, id);
@@ -946,13 +966,14 @@ static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 
 static void conn_on_header(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 {
-    uint8_t msgtype; int swap; uint32_t plen;
-    if (kdb_hdr_parse(c->rx_buf, &msgtype, &swap, &plen) != 0) {
+    uint8_t msgtype; int swap; uint8_t zip; uint32_t plen;
+    if (kdb_hdr_parse(c->rx_buf, &msgtype, &swap, &zip, &plen) != 0) {
         conn_close(srv, c);
         return;
     }
     c->msgtype = msgtype;
     c->swap    = (uint8_t)swap;
+    c->zip     = zip;
     c->plen    = plen;
 
     ray_sys_free(c->rx_buf);
@@ -965,6 +986,22 @@ static void conn_on_header(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 
 static void conn_on_payload(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 {
+    /* Compressed frame (Phase F): decompress before dispatch, mirroring
+     * the poll path.  Corrupt frames close the connection. */
+    uint8_t* pdata = c->rx_buf;
+    size_t   pdlen = c->rx_len;
+    ray_t*   uz    = NULL;
+    if (c->zip) {
+        uz = q_wire_uncompress_payload(c->rx_buf, c->rx_len, c->swap);
+        if (!uz || RAY_IS_ERR(uz)) {
+            if (uz) ray_error_free(uz);
+            conn_close(srv, c);
+            return;
+        }
+        pdata = (uint8_t*)ray_data(uz);
+        pdlen = (size_t)uz->len;
+    }
+
     bool prev = ray_eval_get_restricted();
     ray_eval_set_restricted(srv->restricted);
 
@@ -977,10 +1014,11 @@ static void conn_on_payload(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     ipc_ctx_set((int64_t)(c - srv->conns), prev_poll);
 
     ray_t* result = NULL;
-    int rc = ipc_dispatch(c->msgtype, c->rx_buf, c->rx_len, c->swap, &result);
+    int rc = ipc_dispatch(c->msgtype, pdata, pdlen, c->swap, &result);
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev);
+    if (uz) ray_release(uz);
 
     if (rc != 0) { conn_close(srv, c); return; }   /* protocol corruption */
 

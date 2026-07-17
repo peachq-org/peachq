@@ -374,9 +374,12 @@ q-test: $(LIB_OBJ) $(TEST_OBJ) $(Q_TARGET)
 # Requires a JDK (javac); skips with a notice if absent.  run-live.sh
 # self-contains its flake surface (hard timeout + guaranteed server teardown).
 #
-# Dormant sibling debug tools (sources kept under tools/kdb-conformance/, no make
-# target — invoke the .sh directly): run.sh (kwire-conformance, offline byte-diff
-# localizer) and run-echo.sh (kwire-echo, openq-client vs javakdb-echo-server).
+# Sibling scripts under tools/kdb-conformance/ have NO make target — qtest.sh
+# runs them directly, so a target would only duplicate it; invoke the .sh by
+# hand to debug: run.sh (kwire-conformance, offline whole-value echo incl. the
+# Phase F `-18!` compressed rows) and run-echo.sh (kwire-echo, openq client vs
+# javakdb echo server; its leg 2 is the only end-to-end cover of ipc.c's
+# compressed-inbound routing — javac + routable-IPv4 gated).
 q-kwire: CFLAGS = $(DEBUG_CFLAGS)
 q-kwire: LDFLAGS = $(DEBUG_LDFLAGS)
 q-kwire: $(Q_TARGET)
