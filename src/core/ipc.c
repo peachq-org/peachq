@@ -269,7 +269,7 @@ static bool validate_creds(const uint8_t* buf, size_t cred_len,
 
 /* ===== Connection hooks (.ipc.on.*) =====
  *
- * Five user-settable lambdas that intercept the connection lifecycle.
+ * Six user-settable lambdas that intercept the connection lifecycle.
  * Lookup is by interned sym id; we cache the ids in `hook_syms[]` so the
  * fast path is a single ray_env_get + RAY_LAMBDA-type check per dispatch.
  *
@@ -281,7 +281,7 @@ static bool validate_creds(const uint8_t* buf, size_t cred_len,
  * stack" — exposed verbatim through the builtin.
  *
  * Errors:
- *   - on.open / on.close / on.async: logged to stderr, swallowed.
+ *   - on.open / on.close / on.async / on.badmsg: logged to stderr, swallowed.
  *   - on.sync: error becomes the response (same as a raw `eval` error).
  *   - on.auth: error treated as reject (handshake refused). */
 
@@ -289,12 +289,13 @@ static bool validate_creds(const uint8_t* buf, size_t cred_len,
  * (g_ipc_hook_syms[]) — the `ray_sym_ipc_hook(idx)` getter assumes this
  * mapping.  Keep them in lockstep. */
 enum {
-    IPC_HOOK_OPEN  = 0,
-    IPC_HOOK_CLOSE = 1,
-    IPC_HOOK_SYNC  = 2,
-    IPC_HOOK_ASYNC = 3,
-    IPC_HOOK_AUTH  = 4,
-    IPC_HOOK_COUNT = 5,
+    IPC_HOOK_OPEN   = 0,
+    IPC_HOOK_CLOSE  = 1,
+    IPC_HOOK_SYNC   = 2,
+    IPC_HOOK_ASYNC  = 3,
+    IPC_HOOK_AUTH   = 4,
+    IPC_HOOK_BADMSG = 5,   /* .z.bm msg validator (ref/dotz.md) */
+    IPC_HOOK_COUNT  = 6,
 };
 
 /* The IPC dispatch context — which connection's hook/eval is on this
@@ -364,6 +365,52 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
         fprintf(stderr, "ipc: %s hook raised an error (handle=%lld)\n",
                 name, (long long)handle);
     }
+    ray_release(arg);
+    if (r) {
+        if (RAY_IS_ERR(r)) ray_error_free(r);
+        else if (r != RAY_NULL_OBJ) ray_release(r);
+    }
+}
+
+/* dotz.md `.z.bm`: on a malformed inbound data structure, fire the msg
+ * validator with the 2-list (handle;msgBytes) BEFORE the close/.z.pc that
+ * follows.  msgBytes = the (already-decompressed) payload bytes as a byte
+ * vector, built only when a handler is installed.  Errors are logged and
+ * swallowed like the lifecycle hooks. */
+static void hook_call_badmsg(ray_poll_t* poll, int64_t handle,
+                             const uint8_t* bytes, size_t len)
+{
+    ray_t* fn = hook_lookup(IPC_HOOK_BADMSG);
+    if (!fn) return;
+    ray_t* mb = ray_vec_new(RAY_U8, (int64_t)len);
+    if (!mb || RAY_IS_ERR(mb)) { if (mb) ray_error_free(mb); return; }
+    memcpy(ray_data(mb), bytes, len);
+    mb->len = (int64_t)len;
+    ray_t* h = make_i64(handle);
+    if (!h || RAY_IS_ERR(h)) {
+        if (h) ray_error_free(h);
+        ray_release(mb);
+        return;
+    }
+    ray_t* arg = ray_list_new(2);
+    if (!arg || RAY_IS_ERR(arg)) {
+        if (arg) ray_error_free(arg);
+        ray_release(h);
+        ray_release(mb);
+        return;
+    }
+    ray_list_append(arg, h);            /* append RETAINS */
+    ray_list_append(arg, mb);
+    ray_release(h);
+    ray_release(mb);
+    int64_t prev = ipc_ctx_handle();
+    ray_poll_t* prev_poll = ipc_ctx_poll();
+    ipc_ctx_set(handle, poll ? poll : prev_poll);
+    ray_t* r = call_fn1(fn, arg);
+    ipc_ctx_set(prev, prev_poll);
+    if (r && RAY_IS_ERR(r))
+        fprintf(stderr, "ipc: .ipc.on.badmsg hook raised an error (handle=%lld)\n",
+                (long long)handle);
     ray_release(arg);
     if (r) {
         if (RAY_IS_ERR(r)) ray_error_free(r);
@@ -487,7 +534,9 @@ static ray_t* ipc_decode_payload(const uint8_t* p, size_t plen, int swap,
  * has already set the restricted flag + ipc ctx for this connection.
  * Returns 0 with *out_result owned (never NULL; RAY_NULL_OBJ for "no
  * result"), or -1 for protocol corruption — the caller must close the
- * connection and send nothing. */
+ * connection and send nothing.  Only the poll path fires `.z.bm` /
+ * answers 'badmsg on -1; the legacy server (C-fixture-only) keeps the
+ * plain silent close. */
 static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
                         int swap, ray_t** out_result)
 {
@@ -594,6 +643,7 @@ typedef struct {
      * dispatch normally during the wait. */
     bool             sync_waiting;
     bool             sync_ready;
+    bool             sync_badmsg;   /* deposited resp is a local 'badmsg — waiter closes after consuming */
     ray_t*           sync_resp;
 } ray_ipc_conn_data_t;
 
@@ -783,12 +833,26 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         int is_wire_err = 0;
         ray_t* obj = ipc_decode_payload(pdata, (size_t)plen, swap,
                                         &is_wire_err);
-        if (payload) ray_poll_buf_free(payload);
-        if (uz) ray_release(uz);
-        if (!obj) {
-            ray_poll_deregister(poll, id);
+        if (!obj) {              /* malformed data structure — .z.bm (dotz.md) */
+            hook_call_badmsg(poll, id, pdata, (size_t)plen);          /* (1) */
+            if (payload) ray_poll_buf_free(payload);
+            if (uz) ray_release(uz);
+            /* the hook may itself have closed this handle — revalidate
+             * before touching cd */
+            ray_selector_t* cur = ray_poll_get(poll, id);
+            if (!cur || cur->data != (void*)cd) return NULL;
+            if (cd->sync_waiting && !cd->sync_ready) {
+                /* deposit 'badmsg; the waiter closes after consuming (2,3) */
+                cd->sync_resp   = ray_error("badmsg", NULL);
+                cd->sync_ready  = true;
+                cd->sync_badmsg = true;
+            } else {
+                ray_poll_deregister(poll, id);
+            }
             return NULL;
         }
+        if (payload) ray_poll_buf_free(payload);
+        if (uz) ray_release(uz);
         if (cd->sync_waiting && !cd->sync_ready) {
             cd->sync_resp  = obj;
             cd->sync_ready = true;
@@ -818,13 +882,26 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev_restricted);
-    if (payload) ray_poll_buf_free(payload);
-    if (uz) ray_release(uz);
 
-    if (rc != 0) {                            /* protocol corruption */
-        ray_poll_deregister(poll, id);
+    if (rc != 0) {           /* malformed data structure — .z.bm (dotz.md) */
+        hook_call_badmsg(poll, id, pdata, (size_t)plen);              /* (1) */
+        if (msgtype == RAY_IPC_MSG_SYNC) {
+            /* bare 'badmsg to the requester (3) — the hook may have closed
+             * this handle, so revalidate before writing to its fd */
+            ray_selector_t* cur = ray_poll_get(poll, id);
+            if (cur && cur->data == (void*)cd) {
+                ray_t* e = ray_error("badmsg", NULL);
+                send_response((ray_sock_t)cur->fd, e);
+                ray_error_free(e);
+            }
+        }
+        if (payload) ray_poll_buf_free(payload);
+        if (uz) ray_release(uz);
+        ray_poll_deregister(poll, id);        /* close + .z.pc (2) */
         return NULL;
     }
+    if (payload) ray_poll_buf_free(payload);
+    if (uz) ray_release(uz);
 
     /* Send response for sync messages.  The eval may have closed this
      * very connection (`.ipc.close` on its own handle) — revalidate the
@@ -1335,6 +1412,13 @@ static int conn_pump(ray_poll_t* poll, int64_t id)
          * may deregister the selector or re-arm it for the next phase;
          * the loop re-validates from scratch either way. */
         sel->rx.read_fn(poll, sel);
+        /* Surface a deposited RESP to the waiter driving this pump before
+         * draining more — an EOF right behind the response would deregister
+         * the conn and free the deposit ('io masking a delivered answer). */
+        sel = ray_poll_get(poll, id);
+        if (sel && sel->data &&
+            ((ray_ipc_conn_data_t*)sel->data)->sync_ready)
+            return 0;
     }
 }
 
@@ -1481,6 +1565,7 @@ static ray_t* sync_send(int64_t handle, ray_t* msg)
 
     cd->sync_waiting = true;
     cd->sync_ready   = false;
+    cd->sync_badmsg  = false;
     cd->sync_resp    = NULL;
     int64_t id = sel->id;
 
@@ -1497,9 +1582,14 @@ static ray_t* sync_send(int64_t handle, ray_t* msg)
             return ray_error("io", "connection closed");
         if (cd->sync_ready) {
             ray_t* result = cd->sync_resp;
+            bool   badmsg = cd->sync_badmsg;
             cd->sync_resp    = NULL;
             cd->sync_ready   = false;
+            cd->sync_badmsg  = false;
             cd->sync_waiting = false;
+            if (badmsg)                      /* local decode failure: close +
+                                              * .z.pc (2), then signal (3) */
+                ray_poll_deregister(poll, id);
             if (!result)
                 return ray_error("io", "ipc bad response");
             return result;
