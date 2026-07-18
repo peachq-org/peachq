@@ -12,6 +12,7 @@
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`); q_console_str/reset (timed-expr side effects) */
 #include "qlang/q_fmt_pipe.h" /* q_pipe_on/enable/disable — `\nonlegacy` display toggle */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
+#include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/q_parse.h"    /* q_parse / q_lower — `\t expr` / `\ts expr` timing */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
@@ -437,9 +438,20 @@ static ray_t* h_l(const char* arg, size_t alen, const char* rest, size_t restlen
                 && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
         }
     }
-    if (!ok) return NULL;                                 /* missing/dir/unreadable — silent */
-    q_repl_run_file(found, stdout, stderr);               /* load the script (silent) */
-    return NULL;
+    if (ok) { q_repl_run_file(found, stdout, stderr); return NULL; }  /* disk hit — load (silent) */
+    /* openq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
+     * a/b/c/d chain above) wins; else a cwd directory literally named `pq`
+     * keeps existing dir semantics (no-op, below); ELSE the embedded stdlib.
+     * Every OTHER argument keeps its existing behaviour unchanged (the branch is
+     * scoped to the exact literal `pq`). */
+    if (alen == 2 && arg[0] == 'p' && arg[1] == 'q') {
+        struct stat st;
+        if (!(stat("pq", &st) == 0 && S_ISDIR(st.st_mode))) {   /* not a `pq` dir → embedded */
+            q_pq_load();
+            return NULL;
+        }
+    }
+    return NULL;                                          /* missing/dir/unreadable — silent */
 }
 
 /* ---- expression timing (`\t expr`, `\t:n`, `\ts expr`, `\ts:n`) ------------
