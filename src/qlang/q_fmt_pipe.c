@@ -127,7 +127,7 @@ static bool qp_is_temporal(int8_t t) {
 }
 
 static bool qp_is_numeric(int8_t t) {
-    return t == RAY_U8 || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+    return t == RAY_BYTE_ONLY || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
            t == RAY_F32 || t == RAY_F64;
 }
 

@@ -64,7 +64,7 @@ static inline bool win_keys_differ(ray_t* const* vecs, uint8_t n_keys,
             if (((const int16_t*)ray_data(col))[ra] !=
                 ((const int16_t*)ray_data(col))[rb]) return true;
             break;
-        case RAY_BOOL: case RAY_U8:
+        case RAY_BOOL: RAY_BYTE_CASES:
             if (((const uint8_t*)ray_data(col))[ra] !=
                 ((const uint8_t*)ray_data(col))[rb]) return true;
             break;
@@ -96,7 +96,7 @@ static inline double win_read_f64(ray_t* col, int64_t row) {
     case RAY_SYM:
         return (double)sym_cell_runtime_id(col, row);
     case RAY_I16: return (double)((const int16_t*)ray_data(col))[row];
-    case RAY_BOOL: case RAY_U8: return (double)((const uint8_t*)ray_data(col))[row];
+    case RAY_BOOL: case RAY_BYTE_ONLY: return (double)((const uint8_t*)ray_data(col))[row];
     default: return 0.0;
     }
 }
@@ -111,7 +111,7 @@ static inline int64_t win_read_i64(ray_t* col, int64_t row) {
         return sym_cell_runtime_id(col, row);
     case RAY_F64: return (int64_t)((const double*)ray_data(col))[row];
     case RAY_I16: return (int64_t)((const int16_t*)ray_data(col))[row];
-    case RAY_BOOL: case RAY_U8: return (int64_t)((const uint8_t*)ray_data(col))[row];
+    case RAY_BOOL: case RAY_BYTE_ONLY: return (int64_t)((const uint8_t*)ray_data(col))[row];
     default: return 0;
     }
 }
@@ -795,7 +795,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             if (!sort_vecs[k]) { can_radix = false; break; }
             int8_t t = sort_vecs[k]->type;
             if (t != RAY_I64 && t != RAY_F64 && t != RAY_I32 && t != RAY_I16 &&
-                t != RAY_BOOL && t != RAY_U8 && t != RAY_SYM &&
+                t != RAY_BOOL && !ray_is_bytelike(t) && t != RAY_SYM &&
                 !RAY_IS_TEMPORAL32(t) && !RAY_IS_TEMPORAL64(t)) {
                 can_radix = false; break;
             }
@@ -823,7 +823,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                  * keep the radix pass aligned with the wider key. */
                 if ((sort_vecs[0]->attrs & RAY_ATTR_HAS_NULLS) &&
                     (sort_vecs[0]->type == RAY_BOOL ||
-                     sort_vecs[0]->type == RAY_U8 ||
+                     ray_is_bytelike(sort_vecs[0]->type) ||
                      sort_vecs[0]->type == RAY_I16) &&
                     key_nbytes < 8) {
                     key_nbytes++;
@@ -949,7 +949,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                                 if (d[i] < kmin) kmin = (int64_t)d[i];
                                 if (d[i] > kmax) kmax = (int64_t)d[i];
                             }
-                        } else if (col->type == RAY_BOOL || col->type == RAY_U8) {
+                        } else if (col->type == RAY_BOOL || ray_is_bytelike(col->type)) {
                             const uint8_t* d = (const uint8_t*)ray_data(col);
                             for (int64_t i = 0; i < nrows; i++) {
                                 if (d[i] < kmin) kmin = (int64_t)d[i];

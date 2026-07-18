@@ -1243,7 +1243,7 @@ void ray_free(ray_t* v) {
 void* ray_alloc_raw(size_t n) {
     ray_t* v = ray_alloc(n);
     if (!v || RAY_IS_ERR(v)) return NULL;
-    v->type = RAY_U8;          /* plain byte vec: ray_free reclaims, no child walk */
+    v->type = RAY_BYTE_ONLY;          /* plain byte vec: ray_free reclaims, no child walk */
     v->len  = (int64_t)n;
     return ray_data(v);
 }
@@ -1314,7 +1314,7 @@ ray_t* ray_alloc_copy(ray_t* v) {
             uint8_t esz = 0;
             switch ((ray_type_e)t) {
             case RAY_LIST: break;                    /* unreachable: filtered above */
-            case RAY_BOOL: case RAY_GUID: case RAY_U8: case RAY_I16:
+            case RAY_BOOL: case RAY_GUID: RAY_BYTE_CASES: case RAY_I16:
             case RAY_I32: case RAY_I64: case RAY_F32: case RAY_F64:
             case RAY_STR: case RAY_SYM: case RAY_TIMESTAMP: case RAY_MONTH:
             case RAY_DATE: case RAY_DATETIME: case RAY_TIMESPAN: case RAY_MINUTE:
