@@ -44,7 +44,7 @@ ray_t* ray_bool(bool val) {
 ray_t* ray_u8(uint8_t val) {
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;
-    v->type = -RAY_U8;
+    v->type = -RAY_BYTE_ONLY;
     v->u8 = val;
     return v;
 }
@@ -116,7 +116,7 @@ ray_t* ray_str(const char* s, size_t len) {
     size_t data_size = len + 1;
     ray_t* chars = ray_alloc(data_size);
     if (!chars || RAY_IS_ERR(chars)) return chars;
-    chars->type = RAY_U8;
+    chars->type = RAY_BYTE_ONLY;
     chars->len = (int64_t)len;
     memcpy(ray_data(chars), s, len);
     ((char*)ray_data(chars))[len] = '\0';
@@ -265,7 +265,7 @@ ray_t* ray_guid(const uint8_t* bytes) {
     /* Allocate U8 vector of length 16 */
     ray_t* vec = ray_alloc(16);
     if (!vec || RAY_IS_ERR(vec)) return vec;
-    vec->type = RAY_U8;
+    vec->type = RAY_BYTE_ONLY;
     vec->len = 16;
     memcpy(ray_data(vec), bytes, 16);
 

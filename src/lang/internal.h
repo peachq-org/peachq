@@ -92,7 +92,7 @@ static inline ray_t* make_bool(uint8_t v) {
 static inline int is_numeric(ray_t* x) {
     return x->type == -RAY_I64 || x->type == -RAY_F64 ||
            x->type == -RAY_I16 || x->type == -RAY_I32 ||
-           x->type == -RAY_U8  || x->type == -RAY_BOOL;
+           x->type == -RAY_BYTE_ONLY || x->type == -RAY_BOOL;
 }
 
 /* Check if an atom is a temporal type */
@@ -150,7 +150,7 @@ static inline int64_t as_i64(ray_t* x) {
     if (x->type == -RAY_I64)  return x->i64;
     if (x->type == -RAY_I32)  return (int64_t)x->i32;
     if (x->type == -RAY_I16)  return (int64_t)x->i16;
-    if (x->type == -RAY_U8)   return (int64_t)x->u8;
+    if (x->type == -RAY_BYTE_ONLY)   return (int64_t)x->u8;
     return x->i64; /* fallback */
 }
 
@@ -159,7 +159,7 @@ static inline double as_f64(ray_t* x) {
     if (x->type == -RAY_I64) return (double)x->i64;
     if (x->type == -RAY_I32) return (double)x->i32;
     if (x->type == -RAY_I16) return (double)x->i16;
-    if (x->type == -RAY_U8)  return (double)x->u8;
+    if (x->type == -RAY_BYTE_ONLY)  return (double)x->u8;
     if (x->type == -RAY_STR && ray_str_len(x) == 1) return (double)(unsigned char)x->sdata[0];
     if (x->type == -RAY_BOOL) return (double)x->b8;
     if (RAY_IS_TEMPORAL32(-x->type)) return (double)x->i32;
@@ -200,9 +200,9 @@ static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
 static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
     if (a->type == -RAY_I64 || b->type == -RAY_I64) return -RAY_I64;
     if (a->type == -RAY_I32 || b->type == -RAY_I32) return -RAY_I32;
-    if (a->type == -RAY_U8 || b->type == -RAY_U8) {
+    if (a->type == -RAY_BYTE_ONLY || b->type == -RAY_BYTE_ONLY) {
         /* u8 op u8 -> u8, but u8 op i16 -> i16 etc */
-        if (a->type == -RAY_U8 && b->type == -RAY_U8) return -RAY_U8;
+        if (a->type == -RAY_BYTE_ONLY && b->type == -RAY_BYTE_ONLY) return -RAY_BYTE_ONLY;
         return (a->type == -RAY_I16 || b->type == -RAY_I16) ? -RAY_I16 : -RAY_I64;
     }
     if (a->type == -RAY_I16 || b->type == -RAY_I16) return -RAY_I16;
@@ -213,10 +213,10 @@ static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
 static inline int8_t promote_int_type_right(ray_t* a, ray_t* b) {
     (void)a;
     int8_t bt = b->type;
-    if (bt == -RAY_I32 || bt == -RAY_I16 || bt == -RAY_U8 || bt == -RAY_I64)
+    if (bt == -RAY_I32 || bt == -RAY_I16 || bt == -RAY_BYTE_ONLY || bt == -RAY_I64)
         return bt;
     int8_t at = a->type;
-    if (at == -RAY_I32 || at == -RAY_I16 || at == -RAY_U8 || at == -RAY_I64)
+    if (at == -RAY_I32 || at == -RAY_I16 || at == -RAY_BYTE_ONLY || at == -RAY_I64)
         return at;
     return -RAY_I64;
 }
@@ -226,7 +226,7 @@ static inline ray_t* make_typed_int(int8_t atom_type, int64_t val) {
     switch (atom_type) {
     case -RAY_I16: return make_i16((int16_t)val);
     case -RAY_I32: return make_i32((int32_t)val);
-    case -RAY_U8:  return make_u8((uint8_t)val);
+    case -RAY_BYTE_ONLY: return make_u8((uint8_t)val);
     default:       return make_i64(val);
     }
 }
@@ -332,7 +332,7 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
         /* Atom rule (Task-3 review): the cell id is a position in the
          * COLUMN's domain; the atom must carry the runtime id. */
         case RAY_SYM:       return ray_sym(sym_cell_runtime_id(coll, i));
-        case RAY_U8:        return ray_u8(((uint8_t*)d)[i]);
+        case RAY_BYTE_ONLY: return ray_u8(((uint8_t*)d)[i]);
         case RAY_MONTH:     return ray_month((int64_t)((int32_t*)d)[i]);
         case RAY_DATETIME:  return ray_datetime(((double*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
@@ -363,7 +363,7 @@ static inline int64_t elem_as_i64(ray_t* elem) {
         elem->type == -RAY_SYM) return elem->i64;
     if (elem->type == -RAY_I32)  return (int64_t)elem->i32;
     if (elem->type == -RAY_I16)  return (int64_t)elem->i16;
-    if (elem->type == -RAY_U8)   return (int64_t)elem->u8;
+    if (elem->type == -RAY_BYTE_ONLY)   return (int64_t)elem->u8;
     if (elem->type == -RAY_F64 ||
         RAY_IS_TEMPORALF(-elem->type)) return (int64_t)elem->f64;
     return elem->i64;
@@ -398,7 +398,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_I32:       ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_I16:       ((int16_t*)ray_data(vec))[i]   = (int16_t)elem_as_i64(elem); return 0;
         case RAY_BOOL:      ((bool*)ray_data(vec))[i]      = elem->b8;  return 0;
-        case RAY_U8:        ((uint8_t*)ray_data(vec))[i]   = (uint8_t)elem_as_i64(elem); return 0;
+        case RAY_BYTE_ONLY: ((uint8_t*)ray_data(vec))[i]   = (uint8_t)elem_as_i64(elem); return 0;
         case RAY_MONTH:     ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_DATETIME:  ((double*)ray_data(vec))[i]    = (elem->type == -RAY_F64 || elem->type == -RAY_DATETIME) ? elem->f64 : (double)elem_as_i64(elem); return 0;
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
