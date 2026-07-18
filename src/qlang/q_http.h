@@ -3,8 +3,8 @@
  * complete request-header block to q_http_respond; everything HTTP-semantic
  * (parse via vendored picohttpparser, traversal guard, MIME, the `.z.ph`
  * override hook, response bytes) lives here, outside the frozen base.
- * Scope: GET + `.z.ph` only — no TLS, no WebSockets (Upgrade -> 501).  The
- * docroot and MIME map are single-homed on the `.h` constants (`.h.HOME` /
+ * Scope: GET + `.z.ph` + the WebSocket upgrade hand-off (q_ws.c) — no TLS.
+ * The docroot and MIME map are single-homed on the `.h` constants (`.h.HOME` /
  * `.h.ty`, defined in src/qlang/h.q) at request time, with the built-in "html"
  * docroot and MIME table as defensive fallbacks; both are user-overridable. */
 #ifndef Q_HTTP_H
@@ -46,10 +46,17 @@ int q_http_open_doc(const char* rel, size_t n, int64_t* size_out);
 /* Compose + send one minimal text/plain response (used for all error codes). */
 void q_http_send_simple(ray_sock_t fd, int code, const char* reason);
 
+/* Bounded-deadline whole-buffer send (the #217 anti-wedge policy); shared
+ * with q_ws.c's frame writes.  0 ok / -1 failed-or-expired. */
+int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs);
+
 /* Serve one complete request-header block: 401 on authed listeners, `.z.ph`
- * override for GET when set, else the static file server; non-GET/Upgrade ->
- * 501; unparseable -> 400.  Never closes fd (the caller owns the socket). */
-void q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
-                    bool auth_required);
+ * override for GET when set, else the static file server; a GET with
+ * `Upgrade: websocket` routes to q_ws_handshake — returns 1 when the
+ * connection upgraded to WebSocket (101 sent; caller switches protocol),
+ * else 0 (response fully handled: file/404/400/426/501...).  Non-GET -> 501;
+ * unparseable -> 400.  Never closes fd (the caller owns the socket). */
+int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
+                   bool auth_required);
 
 #endif /* Q_HTTP_H */

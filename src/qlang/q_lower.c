@@ -449,6 +449,9 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
                        ray_sym_is_ipc_hook(e[1]->i64) ||
                        (nsl == 5 && memcmp(nsp, ".z.ts", 5) == 0) ||   /* .z.ts timer slot */
                        (nsl == 5 && memcmp(nsp, ".z.ph", 5) == 0) ||   /* .z.ph HTTP-GET slot */
+                       (nsl == 5 && memcmp(nsp, ".z.ws", 5) == 0) ||   /* .z.ws/.z.wo/.z.wc */
+                       (nsl == 5 && memcmp(nsp, ".z.wo", 5) == 0) ||   /*   WebSocket slots  */
+                       (nsl == 5 && memcmp(nsp, ".z.wc", 5) == 0) ||   /*   (q_ws.c)         */
                        (nsl == 7 && memcmp(nsp, ".z.exit", 7) == 0);   /* .z.exit exit slot */
     ray_release(ns);
 

@@ -6,6 +6,7 @@
 #include <rayforce.h>
 #include "qlang/q_http.h"
 #include "qlang/q_dotz.h"      /* q_dotz_zph — the `.z.ph` handler slot */
+#include "qlang/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler show output */
 #include "lang/env.h"          /* ray_env_get / ray_sym_intern — `.h.HOME` / `.h.ty` */
 #include "lang/internal.h"     /* call_fn1 */
@@ -38,11 +39,12 @@
 #define Q_HTTP_SEND_SECS   30                     /* whole-response send deadline */
 
 /* Bounded-deadline send: ray_sock_send waits FOREVER, so a stalled reader on a
- * 32 MiB body would wedge the poll loop — sock.c's loop + a deadline.  0/-1. */
-static int http_send(ray_sock_t fd, const void* buf, size_t len) {
+ * 32 MiB body would wedge the poll loop — sock.c's loop + a deadline.  0/-1.
+ * Exported (q_http.h): q_ws.c frames ride the same bounded-send policy. */
+int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs) {
     const uint8_t* p   = (const uint8_t*)buf;
     size_t         rem = len;
-    time_t         end = time(NULL) + Q_HTTP_SEND_SECS;
+    time_t         end = time(NULL) + secs;
     while (rem > 0) {
 #ifdef RAY_OS_WINDOWS
         int n = send(fd, (const char*)p, (int)rem, 0);
@@ -273,8 +275,8 @@ void q_http_send_simple(ray_sock_t fd, int code, const char* reason) {
                       "Content-Length: %d\r\nConnection: close\r\n\r\n",
                       code, reason, bl);
     if (bl < 0 || hl < 0) return;
-    if (http_send(fd, hdr, (size_t)hl) == 0)
-        http_send(fd, body, (size_t)bl);
+    if (q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0)
+        q_http_send_all(fd, body, (size_t)bl, Q_HTTP_SEND_SECS);
 }
 
 /* True when there is NO docroot at all (the `.h.HOME`/"html" dir is absent, not a
@@ -318,8 +320,8 @@ static void serve_welcome(ray_sock_t fd, const char* root) {
     int hl = snprintf(hdr, sizeof hdr,
                       "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
                       "Content-Length: %zu\r\nConnection: close\r\n\r\n", n);
-    if (hl > 0 && http_send(fd, hdr, (size_t)hl) == 0)
-        http_send(fd, b, n);
+    if (hl > 0 && q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0)
+        q_http_send_all(fd, b, n, Q_HTTP_SEND_SECS);
 }
 
 static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
@@ -373,8 +375,8 @@ static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
                       q_http_mime_lookup(rel, mimebuf, sizeof mimebuf),
                       (long long)size);
     if (hl > 0) {
-        if (http_send(fd, hdr, (size_t)hl) == 0 && size)
-            http_send(fd, buf, (size_t)size);
+        if (q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0 && size)
+            q_http_send_all(fd, buf, (size_t)size, Q_HTTP_SEND_SECS);
     }
     if (buf) ray_sys_free(buf);
 }
@@ -440,7 +442,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
       q_console_reset(); }
 
     if (r && !RAY_IS_ERR(r) && r->type == -RAY_STR) {
-        http_send(fd, ray_str_ptr(r), ray_str_len(r));
+        q_http_send_all(fd, ray_str_ptr(r), ray_str_len(r), Q_HTTP_SEND_SECS);
         ray_release(r);
         return 0;
     }
@@ -454,11 +456,11 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
     return 0;
 }
 
-void q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
-                    bool auth_required)
+int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
+                   bool auth_required)
 {
     /* authed listener (-u/-U) must not be an auth bypass — .z.ac deferred */
-    if (auth_required) { q_http_send_simple(fd, 401, "Unauthorized"); return; }
+    if (auth_required) { q_http_send_simple(fd, 401, "Unauthorized"); return 0; }
 
     const char* method; const char* target;
     size_t mlen, tlen, nh = Q_HTTP_MAX_HEADERS;
@@ -468,20 +470,25 @@ void q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
                                  &target, &tlen, &minor, hdrs, &nh, 0);
     if (pret <= 0) {          /* -1 malformed; -2 still-incomplete after \r\n\r\n */
         q_http_send_simple(fd, 400, "Bad Request");
-        return;
+        return 0;
     }
     if (!(mlen == 3 && memcmp(method, "GET", 3) == 0)) {
         q_http_send_simple(fd, 501, "Not Implemented");   /* .z.pp/.z.pm deferred */
-        return;
+        return 0;
     }
+    /* WebSocket upgrade (kb/websockets.md: same-port WS server): a GET whose
+     * Upgrade header names the websocket protocol hands off to q_ws.c.  Any
+     * OTHER Upgrade target keeps #217's 501. */
     for (size_t i = 0; i < nh; i++)
-        if (str_ieq(hdrs[i].name, hdrs[i].name_len, "upgrade")) {
-            q_http_send_simple(fd, 501, "Not Implemented"); /* no WebSockets */
-            return;
+        if (hdrs[i].name && str_ieq(hdrs[i].name, hdrs[i].name_len, "upgrade")) {
+            if (str_ieq(hdrs[i].value, hdrs[i].value_len, "websocket"))
+                return q_ws_handshake(fd, hdrs, nh);
+            q_http_send_simple(fd, 501, "Not Implemented");
+            return 0;
         }
 
     /* `.z.ph` override owns the whole GET surface (kdb shape); else static. */
-    if (zph_dispatch(fd, target, tlen, hdrs, nh) == 0) return;
+    if (zph_dispatch(fd, target, tlen, hdrs, nh) == 0) return 0;
 
     /* raw target cut at `?`/`#` BEFORE decoding (encoded %3f/%23 stay in path) */
     size_t pl = 0;
@@ -493,7 +500,7 @@ void q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
     int  dl = q_http_decode_path(t, tl, dec, sizeof dec);
     if (dl < 0 || !q_http_path_ok(dec, (size_t)dl)) {
         q_http_send_simple(fd, 404, "Not Found");
-        return;
+        return 0;
     }
     char rel[Q_HTTP_MAX_PATH + 16];
     int  rl = (dl == 0 || dec[dl - 1] == '/')
@@ -501,7 +508,8 @@ void q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
         : snprintf(rel, sizeof rel, "%.*s", dl, dec);
     if (rl < 0 || (size_t)rl >= sizeof rel) {
         q_http_send_simple(fd, 404, "Not Found");
-        return;
+        return 0;
     }
     serve_file(fd, rel, (size_t)rl);
+    return 0;
 }
