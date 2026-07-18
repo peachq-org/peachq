@@ -3,8 +3,10 @@
  * complete request-header block to q_http_respond; everything HTTP-semantic
  * (parse via vendored picohttpparser, traversal guard, MIME, the `.z.ph`
  * override hook, response bytes) lives here, outside the frozen base.
- * Scope: GET + `.z.ph` only — no TLS, no WebSockets (Upgrade -> 501), no
- * `.h` namespace; docroot is `./html` under the process cwd at request time. */
+ * Scope: GET + `.z.ph` only — no TLS, no WebSockets (Upgrade -> 501).  The
+ * docroot and MIME map are single-homed on the `.h` constants (`.h.HOME` /
+ * `.h.ty`, defined in src/qlang/h.q) at request time, with the built-in "html"
+ * docroot and MIME table as defensive fallbacks; both are user-overridable. */
 #ifndef Q_HTTP_H
 #define Q_HTTP_H
 
@@ -22,8 +24,17 @@ int q_http_decode_path(const char* in, size_t n, char* out, size_t outsz);
 bool q_http_path_ok(const char* p, size_t n);
 
 /* ext -> Content-Type (case-insensitive, last extension wins);
- * application/octet-stream fallback. */
+ * application/octet-stream fallback.  The built-in table (no `.h.ty` consult). */
 const char* q_http_mime_type(const char* path);
+
+/* ext(path) -> Content-Type honoring a user `.h.ty` override (env dict), copying
+ * an override hit into scratch[]; falls back to q_http_mime_type on any miss /
+ * wrong-shape / unsafe (control-byte) value.  Returns scratch or a static literal. */
+const char* q_http_mime_lookup(const char* path, char* scratch, size_t scratchsz);
+
+/* Resolve the static docroot dir: `.h.HOME` (env string) when usable, else the
+ * built-in "html".  Rejects control bytes (NUL/CR/LF).  Fills buf; returns it. */
+const char* q_http_docroot(char* buf, size_t bufsz);
 
 /* Open `./html/<rel>` for reading with NO pathname re-resolution: a dirfd +
  * per-segment openat(O_NOFOLLOW) walk (symlinks are never followed — policy).
