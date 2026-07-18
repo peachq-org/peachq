@@ -1713,6 +1713,45 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     return id;
 }
 
+/* Register an already-open, handshake-complete outbound WebSocket socket as a
+ * poll WS handle: phase RAY_IPC_PHASE_WS, ipc_read_ws pump, cd->ws = ws_conn,
+ * listener_id = -1 (a client connection — no `.z.wo`, matching kb/websockets.md;
+ * `.z.wc` still fires via ipc_on_close's WS arm).  Mirrors ray_ipc_connect's
+ * poll-register tail.  Ownership: on a -1 return the CALLER frees ws_conn and
+ * closes fd; on success (>= 0) the connection owns both (freed by ipc_on_close
+ * when the handle is deregistered/closed). */
+int64_t ray_ws_client_register(ray_sock_t fd, void* ws_conn)
+{
+    ray_poll_t* poll = ipc_active_poll();
+    if (!poll) return -1;
+
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)ray_sys_alloc(
+                                    sizeof(ray_ipc_conn_data_t));
+    if (!cd) return -1;
+    memset(cd, 0, sizeof(*cd));
+    cd->phase       = RAY_IPC_PHASE_WS;
+    cd->listener_id = -1;               /* outbound client — no `.z.wo` */
+    cd->restricted  = poll->restricted;
+    cd->loopback    = ray_sock_is_loopback(fd);
+    cd->ws          = ws_conn;
+
+    ray_sock_set_nonblocking(fd);
+
+    ray_poll_reg_t reg = {0};
+    reg.fd       = (int64_t)fd;
+    reg.type     = RAY_SEL_SOCKET;
+    reg.recv_fn  = ipc_recv_fn;
+    reg.read_fn  = ipc_read_ws;
+    reg.close_fn = ipc_on_close;
+    reg.data     = cd;
+
+    int64_t id = ray_poll_register(poll, &reg);
+    if (id < 0) { ray_sys_free(cd); return -1; }   /* caller frees ws_conn + fd */
+    ray_selector_t* ns = ray_poll_get(poll, id);
+    if (ns) ray_poll_rx_request(poll, ns, q_ws_want((q_ws_conn_t*)ws_conn));
+    return id;
+}
+
 void ray_ipc_close(int64_t handle)
 {
     ray_poll_t* poll;
@@ -1835,7 +1874,8 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
      * kdb-IPC bytes — the `neg[h] msg` reply path (ref/dotz.md §.z.ws). */
     ray_err_t rc;
     if (sel && ((ray_ipc_conn_data_t*)sel->data)->phase == RAY_IPC_PHASE_WS)
-        rc = q_ws_send((ray_sock_t)sel->fd, msg) == 0 ? RAY_OK : RAY_ERR_IO;
+        rc = q_ws_send((q_ws_conn_t*)((ray_ipc_conn_data_t*)sel->data)->ws,
+                       (ray_sock_t)sel->fd, msg) == 0 ? RAY_OK : RAY_ERR_IO;
     else
         rc = (!sel || conn_write_msg((ray_sock_t)sel->fd, msg,
                                      RAY_IPC_MSG_ASYNC,
