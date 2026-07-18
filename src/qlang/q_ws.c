@@ -1,5 +1,8 @@
 /* q_ws — see q_ws.h.  Behaviour pinned from qdocs kb/websockets.md +
  * ref/dotz.md (clean room); doc-unpinned choices recorded in the PR Decisions. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
+#endif
 #include <rayforce.h>
 #include "qlang/q_ws.h"
 #include "qlang/q_http.h"      /* q_http_send_all — bounded sends */
@@ -11,6 +14,14 @@
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
+#ifdef RAY_OS_WINDOWS
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+#else
+  #include <fcntl.h>     /* open — /dev/urandom mask-key seed */
+  #include <unistd.h>    /* read, close */
+#endif
 
 #define Q_WS_MAX_MSG    (32ll * 1024 * 1024)  /* per-message cap (#217 parity) */
 #define Q_WS_MAX_FRAGS  65536u                /* fragment-count cap per message */
@@ -23,6 +34,40 @@
 #define Q_WS_OP_CLOSE 0x8
 #define Q_WS_OP_PING  0x9
 #define Q_WS_OP_PONG  0xA
+
+/* Per-thread PRNG for the 4-byte per-frame mask key (client role, RFC §5.3).
+ * Independent of the q `rand` RNG so masking never perturbs user-visible random
+ * sequences.  xorshift64* (as the GUID generator, src/ops/system.c) SEEDED from
+ * /dev/urandom (a strong entropy source, RFC §5.3) on POSIX — clock+address is
+ * the fallback (and the Windows rot-guard path).  A 4-byte key is inherently
+ * 32-bit, so a birthday repeat after ~2^16 frames is intrinsic to the WS mask
+ * size, not this generator.  An openq choice (masking is transparent); PR. */
+static __thread uint64_t ws_mask_rng = 0;
+static uint64_t ws_mask_seed(void) {
+    uint64_t x;
+#ifdef RAY_OS_WINDOWS
+    x = (uint64_t)GetTickCount64() ^ ((uint64_t)time(NULL) << 20)
+        ^ (uint64_t)(uintptr_t)&ws_mask_rng ^ 0x9E3779B97F4A7C15ULL;
+#else
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        ssize_t got = read(fd, &x, sizeof x);
+        close(fd);
+        if (got == (ssize_t)sizeof x && x != 0) return x;   /* strong entropy */
+    }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    x = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 32)
+        ^ (uint64_t)(uintptr_t)&ws_mask_rng ^ 0x9E3779B97F4A7C15ULL;
+#endif
+    return x ? x : 0x9E3779B97F4A7C15ULL;
+}
+static uint32_t ws_mask_next(void) {
+    uint64_t x = ws_mask_rng;
+    if (x == 0) x = ws_mask_seed();
+    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+    ws_mask_rng = x;
+    return (uint32_t)((x * 0x2545F4914F6CDD1DULL) >> 32);
+}
 
 /* ---- pure codec ---- */
 
@@ -98,18 +143,40 @@ bool q_ws_utf8_ok(const uint8_t* p, size_t n) {
 
 /* ---- frame sends (server frames unmasked; bounded deadlines) ---- */
 
+/* Emit one frame.  mask != 0 (client role) masks the payload with a fresh key
+ * (RFC §5.3): the masked payload is built and the header keyed BEFORE any bytes
+ * leave, so an allocation failure can never ship a truncated/dangling frame. */
 static int ws_frame_send(ray_sock_t fd, int opcode, const void* payload,
-                         size_t n, int secs) {
-    uint8_t hdr[10];
+                         size_t n, int secs, int mask) {
+    uint8_t hdr[14];
     size_t  hl = q_ws_hdr_encode(hdr, 1, opcode, n);
-    if (q_http_send_all(fd, hdr, hl, secs) != 0) return -1;
-    if (n && q_http_send_all(fd, payload, n, secs) != 0) return -1;
-    return 0;
+    uint8_t  stackbuf[256];
+    uint8_t* mp = NULL;
+    uint8_t  key[4];
+    if (mask) {
+        uint32_t k = ws_mask_next();
+        key[0] = (uint8_t)(k >> 24); key[1] = (uint8_t)(k >> 16);
+        key[2] = (uint8_t)(k >> 8);  key[3] = (uint8_t)k;
+        hdr[1] |= 0x80;                       /* set the mask bit */
+        memcpy(hdr + hl, key, 4);
+        hl += 4;
+        if (n) {                              /* mask a private copy up-front */
+            mp = n <= sizeof stackbuf ? stackbuf : (uint8_t*)ray_sys_alloc(n);
+            if (!mp) return -1;
+            memcpy(mp, payload, n);
+            q_ws_mask_apply(mp, n, key, 0);
+        }
+    }
+    int rc = q_http_send_all(fd, hdr, hl, secs);
+    if (rc == 0 && n)
+        rc = q_http_send_all(fd, mask ? (const void*)mp : payload, n, secs);
+    if (mp && mp != stackbuf) ray_sys_free(mp);
+    return rc == 0 ? 0 : -1;
 }
 
-static void ws_close_send(ray_sock_t fd, int code) {
+static void ws_close_send(ray_sock_t fd, int code, int mask) {
     uint8_t body[2] = { (uint8_t)(code >> 8), (uint8_t)code };
-    ws_frame_send(fd, Q_WS_OP_CLOSE, body, code ? 2 : 0, Q_WS_CTRL_SECS);
+    ws_frame_send(fd, Q_WS_OP_CLOSE, body, code ? 2 : 0, Q_WS_CTRL_SECS, mask);
 }
 
 /* ---- `.z.ws`/`.z.wo`/`.z.wc` dispatch ---- */
@@ -152,17 +219,37 @@ void q_ws_on_close(int64_t qhandle) {
     ray_release(h);
 }
 
+/* ---- per-connection state machine (type visible to the dispatch below) ---- */
+
+enum { WS_HDR = 0, WS_HDREXT = 1, WS_PAYLOAD = 2 };
+
+struct q_ws_conn {
+    int        st;
+    int        role;           /* Q_WS_SERVER / Q_WS_CLIENT */
+    uint8_t    hbuf[14];       /* header accumulator (max 2+8+4) */
+    size_t     hlen;
+    q_ws_hdr_t h;              /* current frame's parsed header */
+    uint8_t*   msg;            /* fragmentation accumulator */
+    size_t     msg_len, msg_cap;
+    int        msg_op;         /* TEXT/BIN of the in-flight message; 0 = none */
+    uint32_t   msg_frames;     /* fragment count (D12 cap) */
+    int64_t    want;
+};
+
 /* One complete message: text -> string atom, binary -> byte vector (the
- * PROVISIONAL pre-C3 arg contract).  Unset handler: binary echoes verbatim
- * (kb/websockets.md pins the default byte-vector echo); text drops (D1).
- * Called only with conn state already advanced (handler may close us). */
-static void ws_dispatch(ray_sock_t fd, int opcode, const uint8_t* p, size_t n) {
+ * PROVISIONAL pre-C3 arg contract).  Unset handler: the SERVER default echoes
+ * a binary message verbatim (kb/websockets.md); text drops (D1).  A CLIENT with
+ * `.z.ws` unset drops BOTH — echoing a server's message back to it is not a
+ * client default (D-B).  Called only with conn state already advanced (handler
+ * may close us). */
+static void ws_dispatch(q_ws_conn_t* c, ray_sock_t fd, int opcode,
+                        const uint8_t* p, size_t n) {
     ray_t* fn = q_dotz_zws();             /* borrowed; NULL = unset */
     if (!fn) {
-        if (opcode == Q_WS_OP_BIN)
-            ws_frame_send(fd, Q_WS_OP_BIN, p, n, Q_WS_DATA_SECS);
+        if (opcode == Q_WS_OP_BIN && c->role == Q_WS_SERVER)
+            ws_frame_send(fd, Q_WS_OP_BIN, p, n, Q_WS_DATA_SECS, 0);
         else
-            fprintf(stderr, "ws: text message dropped (.z.ws not set)\n");
+            fprintf(stderr, "ws: message dropped (.z.ws not set)\n");
         return;
     }
     ray_t* arg = (opcode == Q_WS_OP_TEXT)
@@ -177,27 +264,14 @@ static void ws_dispatch(ray_sock_t fd, int opcode, const uint8_t* p, size_t n) {
     ray_release(arg);
 }
 
-/* ---- per-connection state machine ---- */
+q_ws_conn_t* q_ws_conn_new(void) { return q_ws_conn_new_role(0); }
 
-enum { WS_HDR = 0, WS_HDREXT = 1, WS_PAYLOAD = 2 };
-
-struct q_ws_conn {
-    int        st;
-    uint8_t    hbuf[14];       /* header accumulator (max 2+8+4) */
-    size_t     hlen;
-    q_ws_hdr_t h;              /* current frame's parsed header */
-    uint8_t*   msg;            /* fragmentation accumulator */
-    size_t     msg_len, msg_cap;
-    int        msg_op;         /* TEXT/BIN of the in-flight message; 0 = none */
-    uint32_t   msg_frames;     /* fragment count (D12 cap) */
-    int64_t    want;
-};
-
-q_ws_conn_t* q_ws_conn_new(void) {
+q_ws_conn_t* q_ws_conn_new_role(int is_client) {
     q_ws_conn_t* c = (q_ws_conn_t*)ray_sys_alloc(sizeof *c);
     if (!c) return NULL;
     memset(c, 0, sizeof *c);
     c->st   = WS_HDR;
+    c->role = is_client ? Q_WS_CLIENT : Q_WS_SERVER;
     c->want = 2;
     return c;
 }
@@ -230,22 +304,23 @@ static int msg_append(q_ws_conn_t* c, const uint8_t* p, size_t n) {
  * dispatch is tail-positioned — state advances BEFORE q code runs (q_ws.h). */
 static int64_t ws_process(q_ws_conn_t* c, ray_sock_t fd,
                           uint8_t* p, size_t n) {
-    int op  = c->h.opcode;
-    int fin = c->h.fin;
+    int op   = c->h.opcode;
+    int fin  = c->h.fin;
+    int mask = (c->role == Q_WS_CLIENT);         /* client emits masked frames */
     c->st   = WS_HDR;
     c->hlen = 0;
     c->want = 2;
 
     if (op == Q_WS_OP_PING) {
-        if (ws_frame_send(fd, Q_WS_OP_PONG, p, n, Q_WS_CTRL_SECS) != 0)
+        if (ws_frame_send(fd, Q_WS_OP_PONG, p, n, Q_WS_CTRL_SECS, mask) != 0)
             return 0;              /* unsendable pong: broken/flooding peer */
         return c->want;
     }
     if (op == Q_WS_OP_PONG) return c->want;      /* unsolicited — ignored */
     if (op == Q_WS_OP_CLOSE) {
-        if (n == 1) { ws_close_send(fd, 1002); return 0; }  /* RFC §5.5.1 */
+        if (n == 1) { ws_close_send(fd, 1002, mask); return 0; }  /* RFC §5.5.1 */
         int code = (n >= 2) ? ((p[0] << 8) | p[1]) : 0;
-        ws_close_send(fd, code);   /* echo the code (or empty close) — D10 */
+        ws_close_send(fd, code, mask);  /* echo the code (or empty close) — D10 */
         return 0;
     }
 
@@ -253,19 +328,19 @@ static int64_t ws_process(q_ws_conn_t* c, ray_sock_t fd,
         if (!fin) {                              /* start of a fragmented msg */
             c->msg_op     = op;
             c->msg_frames = 1;
-            if (msg_append(c, p, n) != 0) { ws_close_send(fd, 1009); return 0; }
+            if (msg_append(c, p, n) != 0) { ws_close_send(fd, 1009, mask); return 0; }
             return c->want;
         }
         int64_t ret = c->want;
         if (op == Q_WS_OP_TEXT && !q_ws_utf8_ok(p, n)) {
-            ws_close_send(fd, 1007);
+            ws_close_send(fd, 1007, mask);
             return 0;
         }
-        ws_dispatch(fd, op, p, n);               /* tail — c not touched after */
+        ws_dispatch(c, fd, op, p, n);            /* tail — c not touched after */
         return ret;
     }
 
-    if (msg_append(c, p, n) != 0) { ws_close_send(fd, 1009); return 0; }
+    if (msg_append(c, p, n) != 0) { ws_close_send(fd, 1009, mask); return 0; }
     if (!fin) return c->want;
     /* message complete: detach the accumulator, reset state, THEN dispatch */
     uint8_t* m    = c->msg;
@@ -276,25 +351,26 @@ static int64_t ws_process(q_ws_conn_t* c, ray_sock_t fd,
     c->msg_op = 0; c->msg_frames = 0;
     if (mop == Q_WS_OP_TEXT && !q_ws_utf8_ok(m, mlen)) {
         ray_sys_free(m);
-        ws_close_send(fd, 1007);
+        ws_close_send(fd, 1007, mask);
         return 0;
     }
-    ws_dispatch(fd, mop, m ? m : (uint8_t*)"", mlen);
+    ws_dispatch(c, fd, mop, m ? m : (uint8_t*)"", mlen);
     if (m) ray_sys_free(m);
     return ret;
 }
 
 int64_t q_ws_feed(q_ws_conn_t* c, ray_sock_t fd, uint8_t* data, size_t len) {
+    int m = (c->role == Q_WS_CLIENT);            /* our protocol-close frames */
     if (c->st == WS_PAYLOAD) {
-        q_ws_mask_apply(data, len, c->h.mask, 0);
+        if (c->h.masked) q_ws_mask_apply(data, len, c->h.mask, 0);  /* server input only */
         return ws_process(c, fd, data, len);
     }
 
-    if (c->hlen + len > sizeof c->hbuf) { ws_close_send(fd, 1002); return 0; }
+    if (c->hlen + len > sizeof c->hbuf) { ws_close_send(fd, 1002, m); return 0; }
     memcpy(c->hbuf + c->hlen, data, len);
     c->hlen += len;
     int pr = q_ws_hdr_parse(c->hbuf, c->hlen, &c->h);
-    if (pr < 0) { ws_close_send(fd, 1002); return 0; }
+    if (pr < 0) { ws_close_send(fd, 1002, m); return 0; }
     if (pr == 0) {
         uint8_t len7   = (uint8_t)(c->hbuf[1] & 0x7F);
         int     masked = (c->hbuf[1] & 0x80) != 0;
@@ -305,23 +381,26 @@ int64_t q_ws_feed(q_ws_conn_t* c, ray_sock_t fd, uint8_t* data, size_t len) {
         return c->want;
     }
 
-    /* header complete — validate (all client frames MUST be masked, §5.1) */
-    if (!c->h.masked || c->h.rsv != 0) { ws_close_send(fd, 1002); return 0; }
+    /* header complete — validate the mask per role (RFC §5.1): a SERVER
+     * requires masked client frames; a CLIENT requires UNMASKED server frames
+     * (a masked frame from the server is a protocol error -> 1002). */
+    int want_masked = (c->role == Q_WS_SERVER);
+    if (c->h.masked != want_masked || c->h.rsv != 0) { ws_close_send(fd, 1002, m); return 0; }
     if (c->h.opcode >= 0x8) {                    /* control frame */
         if (c->h.opcode > Q_WS_OP_PONG ||
-            !c->h.fin || c->h.len > 125) { ws_close_send(fd, 1002); return 0; }
+            !c->h.fin || c->h.len > 125) { ws_close_send(fd, 1002, m); return 0; }
     } else if (c->h.opcode > Q_WS_OP_BIN) {      /* reserved data opcode */
-        ws_close_send(fd, 1002); return 0;
+        ws_close_send(fd, 1002, m); return 0;
     } else if (c->h.opcode == Q_WS_OP_CONT) {
-        if (c->msg_op == 0) { ws_close_send(fd, 1002); return 0; }
-        if (++c->msg_frames > Q_WS_MAX_FRAGS) { ws_close_send(fd, 1009); return 0; }
+        if (c->msg_op == 0) { ws_close_send(fd, 1002, m); return 0; }
+        if (++c->msg_frames > Q_WS_MAX_FRAGS) { ws_close_send(fd, 1009, m); return 0; }
     } else if (c->msg_op != 0) {                 /* fresh data mid-message */
-        ws_close_send(fd, 1002); return 0;
+        ws_close_send(fd, 1002, m); return 0;
     }
     if (c->h.opcode < 0x8 &&
         (c->h.len > (uint64_t)Q_WS_MAX_MSG ||
          c->msg_len + c->h.len > (uint64_t)Q_WS_MAX_MSG)) {
-        ws_close_send(fd, 1009); return 0;
+        ws_close_send(fd, 1009, m); return 0;
     }
 
     if (c->h.len == 0)                           /* no payload to wait for */
@@ -333,13 +412,15 @@ int64_t q_ws_feed(q_ws_conn_t* c, ray_sock_t fd, uint8_t* data, size_t len) {
 
 /* ---- outbound: the neg[h] framed-write arm ---- */
 
-int q_ws_send(ray_sock_t fd, ray_t* msg) {
-    if (msg && msg->type == -RAY_STR)
+int q_ws_send(q_ws_conn_t* c, ray_sock_t fd, ray_t* msg) {
+    int mask = c && c->role == Q_WS_CLIENT;      /* client masks; server plain */
+    if (!msg || RAY_IS_NULL(msg)) return 0;      /* neg[h][] flush -> no-op */
+    if (msg->type == -RAY_STR)
         return ws_frame_send(fd, Q_WS_OP_TEXT, ray_str_ptr(msg),
-                             ray_str_len(msg), Q_WS_DATA_SECS);
-    if (msg && msg->type == RAY_U8)
+                             ray_str_len(msg), Q_WS_DATA_SECS, mask);
+    if (msg->type == RAY_U8)
         return ws_frame_send(fd, Q_WS_OP_BIN, ray_data(msg),
-                             (size_t)msg->len, Q_WS_DATA_SECS);
+                             (size_t)msg->len, Q_WS_DATA_SECS, mask);
     return -2;
 }
 
