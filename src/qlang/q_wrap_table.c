@@ -1469,9 +1469,11 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
      * (same reason as the ipc hooks below): both fire via call_fn1, which
      * invokes a bare RAY_LAMBDA directly — a carrier would need the apply hook
      * (not installed at fire time) and would silently never fire. */
-    if ((l == 5 && memcmp(nm, ".z.ts", 5) == 0) ||
+    if ((l == 5 && (memcmp(nm, ".z.ts", 5) == 0 ||
+                    memcmp(nm, ".z.ph", 5) == 0)) ||   /* HTTP GET handler (q_http.c) */
         (l == 7 && memcmp(nm, ".z.exit", 7) == 0)) {
         int is_exit = l == 7;
+        int is_ph   = l == 5 && nm[3] == 'p';
         ray_t* zv = y;
         if (y && y->type == RAY_LIST && q_deriv_kind_of(y) == Q_DERIV_LAMBDA) {
             ray_t* base = q_deriv_base(y);      /* borrowed bare RAY_LAMBDA */
@@ -1479,6 +1481,7 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         }
         ray_release(s);
         if (is_exit) q_dotz_zexit_set(zv);
+        else if (is_ph) q_dotz_zph_set(zv);
         else q_dotz_zts_set(zv);    /* setters RETAIN (zv is borrowed here) */
         ray_retain(x);
         return x;

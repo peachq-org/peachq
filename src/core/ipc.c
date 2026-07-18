@@ -82,6 +82,7 @@
 #include "ops/ops.h"
 #include "store/journal.h"
 #include "qlang/q_wire.h"
+#include "qlang/q_http.h"
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -210,6 +211,7 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define RAY_IPC_PHASE_HANDSHAKE 0
 #define RAY_IPC_PHASE_HEADER    1
 #define RAY_IPC_PHASE_PAYLOAD   2
+#define RAY_IPC_PHASE_HTTP      3   /* sniffed as HTTP (kb/http.md same-port serving) */
 
 #define KDB_HDR_LEN 8
 #define KDB_MAX_MSG (256u * 1024u * 1024u)   /* 256MB frame guard */
@@ -660,6 +662,12 @@ typedef struct {
     int64_t          listener_id;  /* id of the listener selector; -1 = outbound */
     bool             auth_required;  /* server has -u/-U */
     bool             restricted;     /* server has -U */
+    /* HTTP mode (phase RAY_IPC_PHASE_HTTP): request-header accumulator, byte
+     * at a time like the handshake (the rx pump fires read_fn only on a FULL
+     * buffer, so delimiter-terminated input cannot bulk-read). */
+    uint8_t*         http_buf;
+    uint32_t         http_len;
+    uint32_t         http_cap;
     /* Sync round-trip state: while a ray_ipc_send waits on this conn it
      * pumps the rx machinery itself; a RESP frame is deposited here
      * instead of being evaluated.  Interleaved ASYNC/SYNC frames still
@@ -679,6 +687,7 @@ static inline bool conn_zip_ok(const ray_ipc_conn_data_t* cd) {
 static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel);
+static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel);
 static void   ipc_on_close(ray_poll_t* poll, ray_selector_t* sel);
 
 /* Wrappers matching ray_io_fn signature for socket recv */
@@ -760,6 +769,69 @@ static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
     return true;
 }
 
+/* ===== Same-port HTTP (kb/http.md: the IPC listening port doubles as the
+ * webserver).  An IPC handshake is "user:pass\0" — consumed at its NUL — so a
+ * connection whose accumulated first bytes exactly spell an HTTP method token
+ * is a browser, not a kdb client (a creds line starting "GET " is the
+ * inherent single-port ambiguity, accepted; anything NOT matching a token
+ * keeps the existing garbage-input path).  Semantics live in qlang/q_http.c;
+ * this file only accumulates the request and routes it. */
+#define KDB_HTTP_MAX (16u * 1024u)            /* request-header hard cap */
+
+/* Sniff the request-line SHAPE, not a fixed method list: >=1 uppercase-ASCII
+ * method chars followed by a single space (covers GET/POST and any extension
+ * method — PROPFIND, MKCOL, … — which the responder then answers 501).  Fires
+ * exactly when the accumulator IS "<UPPER>+ " so the byte-at-a-time caller
+ * triggers on the space.  A kdb creds line ("user:pass") has no such prefix. */
+static bool http_sniff(const uint8_t* hs, uint16_t n) {
+    if (n < 2 || hs[n - 1] != ' ') return false;
+    for (uint16_t i = 0; i + 1 < n; i++)
+        if (hs[i] < 'A' || hs[i] > 'Z') return false;
+    return true;
+}
+
+static int http_append(ray_ipc_conn_data_t* cd, const uint8_t* b, size_t n) {
+    if (cd->http_len + n > KDB_HTTP_MAX) return -1;
+    if (cd->http_len + n > cd->http_cap) {
+        uint32_t cap = cd->http_cap ? cd->http_cap * 2 : 512;
+        while (cap < cd->http_len + n) cap *= 2;
+        uint8_t* nb = (uint8_t*)ray_sys_alloc(cap);
+        if (!nb) return -1;
+        if (cd->http_buf) {
+            memcpy(nb, cd->http_buf, cd->http_len);
+            ray_sys_free(cd->http_buf);
+        }
+        cd->http_buf = nb;
+        cd->http_cap = cap;
+    }
+    memcpy(cd->http_buf + cd->http_len, b, n);
+    cd->http_len += (uint32_t)n;
+    return 0;
+}
+
+static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel)
+{
+    if (!sel->rx.buf || sel->rx.buf->offset < 1) return NULL;
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    uint8_t b = sel->rx.buf->data[0];
+    if (http_append(cd, &b, 1) != 0) {        /* 16 KiB cap or OOM */
+        if (cd->http_len >= KDB_HTTP_MAX)
+            q_http_send_simple((ray_sock_t)sel->fd, 431,
+                               "Request Header Fields Too Large");
+        ray_poll_deregister(poll, sel->id);
+        return NULL;
+    }
+    if (cd->http_len >= 4 &&
+        memcmp(cd->http_buf + cd->http_len - 4, "\r\n\r\n", 4) == 0) {
+        q_http_respond((ray_sock_t)sel->fd, cd->http_buf, cd->http_len,
+                       cd->auth_required);
+        ray_poll_deregister(poll, sel->id);   /* Connection: close — one request */
+        return NULL;
+    }
+    ray_poll_rx_request(poll, sel, 1);
+    return NULL;
+}
+
 static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
 {
     if (!sel->rx.buf || sel->rx.buf->offset < 1) return NULL;
@@ -772,6 +844,14 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
             return NULL;
         }
         cd->hs[cd->hs_len++] = b;
+        if (http_sniff(cd->hs, cd->hs_len)) { /* browser, not a kdb client */
+            if (http_append(cd, cd->hs, cd->hs_len) != 0) {
+                ray_poll_deregister(poll, sel->id);
+                return NULL;
+            }
+            cd->phase = RAY_IPC_PHASE_HTTP;
+            sel->rx.read_fn = ipc_read_http;
+        }
         ray_poll_rx_request(poll, sel, 1);
         return NULL;
     }
@@ -975,6 +1055,10 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
             (cd->phase == RAY_IPC_PHASE_HEADER ||
              cd->phase == RAY_IPC_PHASE_PAYLOAD)) {
             hook_call_lifecycle(poll, IPC_HOOK_CLOSE, sel->id);
+        }
+        if (cd->http_buf) {     /* HTTP-mode request accumulator */
+            ray_sys_free(cd->http_buf);
+            cd->http_buf = NULL;
         }
         /* A RESP deposited for a sync wait that never consumed it
          * (connection died mid-round-trip) would otherwise leak. */
