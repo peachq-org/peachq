@@ -32,7 +32,7 @@
  * Internal buffers are ray_t objects whose data area holds the raw
  * bytes / pointers. This avoids calling malloc/free. */
 typedef struct {
-    ray_t    *code_obj;   /* RAY_U8 vector used as growable byte buffer */
+    ray_t    *code_obj;   /* RAY_BYTE_ONLY vector used as growable byte buffer */
     uint8_t *code;       /* == ray_data(code_obj) */
     int32_t  code_len;
     int32_t  code_cap;
@@ -59,7 +59,7 @@ static bool compiler_init(compiler_t *c) {
     c->code_cap = 256;
     c->code_obj = ray_alloc(c->code_cap);
     if (!c->code_obj) return false;
-    c->code_obj->type = RAY_U8;
+    c->code_obj->type = RAY_BYTE_ONLY;
     c->code_obj->len = 0;
     c->code = (uint8_t *)ray_data(c->code_obj);
 
@@ -104,7 +104,7 @@ static void emit(compiler_t *c, uint8_t byte) {
         int32_t new_cap = c->code_cap * 2;
         ray_t *new_obj = ray_alloc(new_cap);
         if (!new_obj) { c->error = true; return; }
-        new_obj->type = RAY_U8;
+        new_obj->type = RAY_BYTE_ONLY;
         new_obj->len = 0;
         memcpy(ray_data(new_obj), c->code, c->code_len);
         ray_release(c->code_obj);
@@ -631,7 +631,7 @@ void ray_compile(ray_t *lambda) {
     /* Build bytecode vector */
     ray_t *bc = ray_alloc(c.code_len);
     if (!bc) { compiler_destroy(&c); return; }
-    bc->type = RAY_U8;
+    bc->type = RAY_BYTE_ONLY;
     bc->len = c.code_len;
     memcpy(ray_data(bc), c.code, c.code_len);
 

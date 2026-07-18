@@ -683,8 +683,8 @@ static int q_is_float_t(int8_t t) {
     return t == RAY_F64 || t == RAY_F32 || t == -RAY_F64 || t == -RAY_F32;
 }
 static int q_is_num_t(int8_t t) {
-    return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
-           t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_U8 || t == -RAY_I16 ||
+    return t == RAY_BOOL || t == RAY_BYTE_ONLY || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+           t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_BYTE_ONLY || t == -RAY_I16 ||
            t == -RAY_I32 || t == -RAY_I64 || t == -RAY_F32 || t == -RAY_F64;
 }
 static int q_is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
@@ -1168,7 +1168,7 @@ static ray_t* q_gen_bits(int64_t n) {
 
 /* n?0x0 — random bytes 0x00-0xff. */
 static ray_t* q_gen_bytes(int64_t n) {
-    ray_t* out = ray_vec_new(RAY_U8, n > 0 ? n : 1);
+    ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
     for (int64_t i = 0; i < n; i++)
@@ -1468,7 +1468,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             ray_release(cnt);
             return g;
         }
-        case RAY_U8:
+        case RAY_BYTE_ONLY:
             if (deal) return ray_error("type", "?: deal y");
             if (y->u8) return ray_error("nyi", "?: y");   /* roll defined for 0x0 only */
             return q_gen_bytes(n);              /* n?0x0 */

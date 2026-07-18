@@ -118,7 +118,7 @@ static ray_t* widen_to_i64(ray_t* col) {
         case RAY_I16:
             for (int64_t i = 0; i < n; i++) dst[i] = (int64_t)((int16_t*)src)[i];
             break;
-        case RAY_U8:
+        case RAY_BYTE_ONLY:
         case RAY_BOOL:
             for (int64_t i = 0; i < n; i++) dst[i] = (int64_t)((uint8_t*)src)[i];
             break;

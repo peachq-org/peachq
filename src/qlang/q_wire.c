@@ -186,7 +186,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             if (rc == 0) rc = w_sym_id(b, x->i64) ? -1 : 0;
             goto out;
         }
-        if ((t == -RAY_BOOL || t == -RAY_U8) && RAY_ATOM_IS_NULL(x)) {
+        if ((t == -RAY_BOOL || t == -RAY_BYTE_ONLY) && RAY_ATOM_IS_NULL(x)) {
             /* ext 204: aux-bit typed null (no in-band sentinel exists) */
             rc = (w_u8(b, Q_WIRE_EXT_TNULL) || w_u8(b, (uint8_t)t)) ? -1 : 0;
             goto out;
@@ -223,7 +223,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             rc = (w_u8(b, (uint8_t)-RAY_GUID) || w_raw(b, g, 16)) ? -1 : 0;
             goto out;
         }
-        case RAY_U8:  rc = (w_u8(b, (uint8_t)-RAY_U8)  || w_u8(b, x->u8))   ? -1 : 0; goto out;
+        case RAY_BYTE_ONLY: rc = (w_u8(b, (uint8_t)-RAY_BYTE_ONLY)  || w_u8(b, x->u8))   ? -1 : 0; goto out;
         case RAY_I16: rc = (w_u8(b, (uint8_t)-RAY_I16) || w_i16(b, x->i16)) ? -1 : 0; goto out;
         case RAY_I32: rc = (w_u8(b, (uint8_t)-RAY_I32) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         case RAY_I64: rc = (w_u8(b, (uint8_t)-RAY_I64) || w_i64(b, x->i64)) ? -1 : 0; goto out;
@@ -288,7 +288,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
 
     /* ---- value vectors — exhaustive over the value band (#209) ---- */
     switch ((ray_type_e)t) {
-    case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
+    case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F32:  case RAY_F64: case RAY_GUID:
     case RAY_TIMESTAMP: case RAY_DATE: case RAY_TIME:
     case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND: case RAY_TIMESPAN:
@@ -393,7 +393,7 @@ ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype) {
     b.p[5] = (uint8_t)(total >> 8);
     b.p[6] = (uint8_t)(total >> 16);
     b.p[7] = (uint8_t)(total >> 24);
-    ray_t* out = ray_vec_from_raw(RAY_U8, b.p, (int64_t)b.len);
+    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, b.p, (int64_t)b.len);
     q_wire_wbuf_free(&b);
     return out;
 }
@@ -521,7 +521,7 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
         for (int32_t i = 0; i < count; i++) { e[i] = f64_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
     /* no in-band sentinel: bool/byte have no null; GUID's all-zero-payload null
      * is only knowable from the serde attrs flag (restored below). */
-    case RAY_BOOL: case RAY_U8: case RAY_GUID: break;
+    case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_GUID: break;
     /* never reach rd_fixed_vec: STR/SYM decode on their own paths; LIST is not fixed. */
     case RAY_LIST: case RAY_STR: case RAY_SYM: break;
     }
@@ -602,7 +602,7 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
     case Q_WIRE_EXT_TNULL: {              /* aux-bit typed null (BOOL/U8) */
         if (!r_need(c, 1)) return trunc_err("typed null");
         int8_t nt = (int8_t)r_u8(c);
-        if (nt != -RAY_BOOL && nt != -RAY_U8)
+        if (nt != -RAY_BOOL && nt != -RAY_BYTE_ONLY)
             return ray_error("domain", "q_wire: typed-null ext for type %d", (int)nt);
         return ray_typed_null(nt);
     }
@@ -645,7 +645,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             c->p += 16; c->rem -= 16;
             return g;
         }
-        case RAY_U8:  if (!r_need(c, 1)) return trunc_err("byte");  return ray_u8(r_u8(c));
+        case RAY_BYTE_ONLY: if (!r_need(c, 1)) return trunc_err("byte");  return ray_u8(r_u8(c));
         case RAY_I16: if (!r_need(c, 2)) return trunc_err("short"); return ray_i16(r_i16(c));
         case RAY_I32: if (!r_need(c, 4)) return trunc_err("int");   return ray_i32(r_i32(c));
         case RAY_I64: if (!r_need(c, 8)) return trunc_err("long");  return ray_i64(r_i64(c));
@@ -865,7 +865,7 @@ int q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde) {
 #define Q_WIRE_ZIP_MAX (256u * 1024u * 1024u)   /* mirrors ipc.c KDB_MAX_MSG */
 
 ray_t* q_wire_compress(ray_t* frame) {
-    if (!frame || frame->type != RAY_U8)
+    if (!frame || frame->type != RAY_BYTE_ONLY)
         return ray_error("type", "q_wire: compress expects a byte vector");
     const uint8_t* y = (const uint8_t*)ray_data(frame);
     size_t t = (size_t)frame->len;
@@ -916,7 +916,7 @@ ray_t* q_wire_compress(ray_t* frame) {
     z[4 + (be ? 2 : 1)] = (uint8_t)(d >> 8);
     z[4 + (be ? 1 : 2)] = (uint8_t)(d >> 16);
     z[4 + (be ? 0 : 3)] = (uint8_t)(d >> 24);
-    ray_t* out = ray_vec_from_raw(RAY_U8, z, (int64_t)d);
+    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, z, (int64_t)d);
     ray_free_raw(z);
     return out;
 }
@@ -969,7 +969,7 @@ ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
         if (i == 256) i = 0;
     }
     if (d != plen) goto corrupt;    /* whole-stream consumption, like raw frames */
-    ray_t* out = ray_vec_from_raw(RAY_U8, dst + 8, (int64_t)(usz - 8));
+    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, dst + 8, (int64_t)(usz - 8));
     ray_free_raw(dst);
     return out;
 corrupt:
@@ -978,7 +978,7 @@ corrupt:
 }
 
 ray_t* q_wire_deserialize(ray_t* bytes) {
-    if (!bytes || bytes->type != RAY_U8)
+    if (!bytes || bytes->type != RAY_BYTE_ONLY)
         return ray_error("type", "q_wire: -9! expects a byte vector");
     const uint8_t* p = (const uint8_t*)ray_data(bytes);
     int64_t n = bytes->len;

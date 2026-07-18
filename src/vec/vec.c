@@ -78,7 +78,7 @@ static inline bool sentinel_is_null(const ray_t* v, int64_t idx) {
             return memcmp((const uint8_t*)p + idx * 16, Z, 16) == 0;
         }
         case RAY_BOOL:
-        case RAY_U8:
+        RAY_BYTE_CASES:
         default:
             return false;
     }
@@ -427,7 +427,7 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
                 ray_release(result);
                 return ray_error("oom", NULL);
             }
-            result->str_pool->type = RAY_U8;
+            result->str_pool->type = RAY_BYTE_ONLY;
             result->str_pool->len = total_pool;
             char* pool_dst = (char*)ray_data(result->str_pool);
             if (a_pool_size > 0)
@@ -951,7 +951,7 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
      *     null, so reject to keep the producer surface clean. */
     if (vec->type == RAY_SYM ||
         vec->type == RAY_BOOL ||
-        vec->type == RAY_U8) return RAY_ERR_TYPE;
+        ray_is_bytelike(vec->type)) return RAY_ERR_TYPE;
 
     /* Mutation invalidates any attached accelerator index — drop it inline.
      * Caller must already hold a unique ref (set-null on a shared vec is a
@@ -1072,7 +1072,7 @@ ray_t* ray_str_vec_append(ray_t* vec, const char* s, size_t len) {
                 vec->str_pool = NULL;
                 goto fail_oom;
             }
-            vec->str_pool->type = RAY_U8;
+            vec->str_pool->type = RAY_BYTE_ONLY;
             vec->str_pool->len = 0;
         }
 
@@ -1173,7 +1173,7 @@ ray_t* ray_str_vec_from_parts(const char* const* ptrs, const uint32_t* lens,
             ray_release(v);
             return ray_error("oom", NULL);
         }
-        v->str_pool->type = RAY_U8;
+        v->str_pool->type = RAY_BYTE_ONLY;
         v->str_pool->len  = 0;
     }
 
@@ -1276,7 +1276,7 @@ ray_t* ray_str_vec_set(ray_t* vec, int64_t idx, const char* s, size_t len) {
                 vec->str_pool = NULL;
                 goto fail_oom;
             }
-            vec->str_pool->type = RAY_U8;
+            vec->str_pool->type = RAY_BYTE_ONLY;
             vec->str_pool->len = 0;
         }
 
@@ -1382,7 +1382,7 @@ ray_t* ray_str_vec_compact(ray_t* vec) {
 
     ray_t* new_pool = ray_alloc(live_size);
     if (!new_pool || RAY_IS_ERR(new_pool)) return vec;
-    new_pool->type = RAY_U8;
+    new_pool->type = RAY_BYTE_ONLY;
     new_pool->len = 0;
     memset(new_pool->aux, 0, 16);
 

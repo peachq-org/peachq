@@ -600,7 +600,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
 
     #define IN_READ_I64(dst, idx) do {                                      \
         switch (ct) {                                                       \
-        case RAY_BOOL: case RAY_U8: (dst) = ((const uint8_t*)cd)[idx]; break; \
+        case RAY_BOOL: RAY_BYTE_CASES: (dst) = ((const uint8_t*)cd)[idx]; break; \
         case RAY_I16:  (dst) = ((const int16_t*)cd)[idx]; break;            \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                        \
                        (dst) = ((const int32_t*)cd)[idx]; break;            \
@@ -613,7 +613,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
 
     #define IN_READ_F64(dst, idx) do {                                      \
         switch (ct) {                                                       \
-        case RAY_BOOL: case RAY_U8: (dst) = (double)((const uint8_t*)cd)[idx]; break; \
+        case RAY_BOOL: RAY_BYTE_CASES: (dst) = (double)((const uint8_t*)cd)[idx]; break; \
         case RAY_I16:  (dst) = (double)((const int16_t*)cd)[idx]; break;    \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                        \
                        (dst) = (double)((const int32_t*)cd)[idx]; break;    \
@@ -681,7 +681,7 @@ static void exec_in_worker(void* vctx, uint32_t worker_id,
         } while (0)
 
         switch (ct) {
-            case RAY_BOOL: case RAY_U8:  /* non-nullable → no isn path */
+            case RAY_BOOL: RAY_BYTE_CASES: /* non-nullable → no isn path */
                 IN_FAST(uint8_t, (sj >= 0 && sj <= UINT8_MAX), 0, 0);
                 break;
             case RAY_I16:
@@ -839,7 +839,7 @@ static in_ctx_status_t in_build_worker_ctx(ray_t* col, ray_t* set, bool negate,
     #define READ_I64(dst, vec, type, idx) do {                             \
         const void* _d = ray_data(vec);                                    \
         switch (type) {                                                    \
-        case RAY_BOOL: case RAY_U8: (dst) = ((const uint8_t*)_d)[idx]; break; \
+        case RAY_BOOL: RAY_BYTE_CASES: (dst) = ((const uint8_t*)_d)[idx]; break; \
         case RAY_I16:  (dst) = ((const int16_t*)_d)[idx]; break;           \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                       \
                        (dst) = ((const int32_t*)_d)[idx]; break;           \
@@ -854,7 +854,7 @@ static in_ctx_status_t in_build_worker_ctx(ray_t* col, ray_t* set, bool negate,
     #define READ_F64(dst, vec, type, idx) do {                             \
         const void* _d = ray_data(vec);                                    \
         switch (type) {                                                    \
-        case RAY_BOOL: case RAY_U8: (dst) = (double)((const uint8_t*)_d)[idx]; break; \
+        case RAY_BOOL: RAY_BYTE_CASES: (dst) = (double)((const uint8_t*)_d)[idx]; break; \
         case RAY_I16:  (dst) = (double)((const int16_t*)_d)[idx]; break;   \
         case RAY_I32:  RAY_TEMPORAL32_CASES:                       \
                        (dst) = (double)((const int32_t*)_d)[idx]; break;   \
@@ -1122,7 +1122,7 @@ static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
     case -RAY_SECOND:    key_i = (int64_t)cv->i32;         break;
     case -RAY_I16:       key_i = (int64_t)cv->i16;         break;
     case -RAY_BOOL:
-    case -RAY_U8:        key_i = (int64_t)cv->b8;          break;
+    RAY_BYTE_ATOM_CASES: key_i = (int64_t)cv->b8;          break;
     case -RAY_F64:       key_f = cv->f64;    is_float = 1; break;
     case -RAY_F32:       key_f = cv->f64;    is_float = 1; break; /* F32 atoms use f64 slot */
     default: return 0;  /* sym / str / guid — not eligible */

@@ -60,7 +60,7 @@ void ray_idx_stats_init(void) {
 /* Width of one element of a numeric vector type, or 0 if unsupported. */
 static int numeric_elem_size(int8_t t) {
     switch (t) {
-    case RAY_BOOL: case RAY_U8:                       return 1;
+    case RAY_BOOL: RAY_BYTE_CASES:                    return 1;
     case RAY_I16:                                     return 2;
     case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_F32:  return 4;
     case RAY_I64: case RAY_TIMESTAMP: case RAY_F64:            return 8;
@@ -107,7 +107,7 @@ static bool vec_is_ascending(const ray_t* v) {
     }
     const uint8_t* b = (const uint8_t*)ray_data((ray_t*)v);
     switch (v->type) {
-    case RAY_BOOL: case RAY_U8: {
+    case RAY_BOOL: RAY_BYTE_CASES: {
         const uint8_t* p = b;
         for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
         return true;
@@ -451,7 +451,7 @@ static ray_err_t zone_scan_float(ray_t* v, ray_index_t* ix, int elem_size) {
 static ray_err_t zone_scan(ray_t* v, ray_index_t* ix) {
     switch (v->type) {
     case RAY_BOOL:
-    case RAY_U8:        return zone_scan_int(v, ix, 1);
+    RAY_BYTE_CASES:     return zone_scan_int(v, ix, 1);
     case RAY_I16:       return zone_scan_int(v, ix, 2);
     case RAY_I32:
     case RAY_DATE:
@@ -552,7 +552,7 @@ static ray_err_t chunk_zone_scan_float(ray_t* v, ray_index_t* ix,
 static ray_err_t chunk_zone_scan(ray_t* v, ray_index_t* ix) {
     switch (v->type) {
     case RAY_BOOL:
-    case RAY_U8:        return chunk_zone_scan_int(v, ix, 1);
+    RAY_BYTE_CASES:     return chunk_zone_scan_int(v, ix, 1);
     case RAY_I16:       return chunk_zone_scan_int(v, ix, 2);
     case RAY_I32:
     case RAY_DATE:
@@ -673,7 +673,7 @@ ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2) {
     ray_t* mins = ray_vec_new(arr_type, (int64_t)n_chunks);
     ray_t* maxs = ray_vec_new(arr_type, (int64_t)n_chunks);
     int64_t nb_len = (int64_t)((n_chunks + 7) / 8);
-    ray_t* nbits = ray_vec_new(RAY_U8, nb_len);
+    ray_t* nbits = ray_vec_new(RAY_BYTE_ONLY, nb_len);
     if (!mins || RAY_IS_ERR(mins) || !maxs || RAY_IS_ERR(maxs) ||
         !nbits || RAY_IS_ERR(nbits))
     {
@@ -724,7 +724,7 @@ ray_t* ray_index_chunk_zone_compute(ray_t* v, uint8_t chunk_log2) {
     ray_t* mins = ray_vec_new(arr_type, (int64_t)n_chunks);
     ray_t* maxs = ray_vec_new(arr_type, (int64_t)n_chunks);
     int64_t nb_len = (int64_t)((n_chunks + 7) / 8);
-    ray_t* nbits = ray_vec_new(RAY_U8, nb_len);
+    ray_t* nbits = ray_vec_new(RAY_BYTE_ONLY, nb_len);
     if (!mins || RAY_IS_ERR(mins) || !maxs || RAY_IS_ERR(maxs) ||
         !nbits || RAY_IS_ERR(nbits)) {
         if (mins && !RAY_IS_ERR(mins)) ray_release(mins);
@@ -1013,7 +1013,7 @@ ray_t* ray_index_attach_hash(ray_t** vp) {
 
 static int hash_key_in_range(int8_t t, int64_t k) {
     switch (t) {
-    case RAY_BOOL: case RAY_U8:        return k >= 0 && k <= UINT8_MAX;
+    case RAY_BOOL: RAY_BYTE_CASES:     return k >= 0 && k <= UINT8_MAX;
     case RAY_I16:                      return k >= INT16_MIN && k <= INT16_MAX;
     case RAY_I32: case RAY_DATE:
     case RAY_TIME:                     return k >= INT32_MIN && k <= INT32_MAX;
@@ -1027,7 +1027,7 @@ static int hash_key_in_range(int8_t t, int64_t k) {
 static int64_t hash_col_read_i64(const uint8_t* base, int8_t t, int64_t i) {
     int es;
     switch (t) {
-    case RAY_BOOL: case RAY_U8:        es = 1; break;
+    case RAY_BOOL: RAY_BYTE_CASES:     es = 1; break;
     case RAY_I16:                      es = 2; break;
     case RAY_I32: case RAY_DATE:
     case RAY_TIME:                     es = 4; break;  /* TIME is 4-byte int32 */
@@ -1309,7 +1309,7 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
  * hash_col_read_i64 but operates on the set_vec type, not the column type. */
 static int64_t set_vec_read_i64(const uint8_t* base, int8_t t, int64_t i) {
     switch (t) {
-    case RAY_BOOL: case RAY_U8:        return (int64_t)base[i];
+    case RAY_BOOL: RAY_BYTE_CASES:     return (int64_t)base[i];
     case RAY_I16:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
     case RAY_I32: case RAY_DATE: case RAY_TIME:
                    { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
@@ -1785,7 +1785,7 @@ ray_t* ray_index_attach_bloom(ray_t** vp) {
     uint64_t mbytes = m / 8;
     uint32_t k = 3;
 
-    ray_t* bits = ray_vec_new(RAY_U8, (int64_t)mbytes);
+    ray_t* bits = ray_vec_new(RAY_BYTE_ONLY, (int64_t)mbytes);
     if (!bits || RAY_IS_ERR(bits)) return bits ? bits : ray_error("oom", NULL);
     bits->len = (int64_t)mbytes;
     memset(ray_data(bits), 0, (size_t)mbytes);

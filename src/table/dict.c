@@ -247,7 +247,7 @@ int64_t ray_dict_find_idx(ray_t* d, ray_t* key_atom) {
             DICT_FIND_LOOP(a[i] == v);
         }
         case RAY_BOOL:
-        case RAY_U8: {
+        RAY_BYTE_CASES: {
             const uint8_t* a = (const uint8_t*)base;
             uint8_t v = key_atom->u8;
             DICT_FIND_LOOP(a[i] == v);
@@ -316,7 +316,7 @@ static ray_t* dict_vals_at(ray_t* vals, int64_t idx, bool* owned_out) {
     void* base = ray_data(vals);
     switch (vals->type) {
         case RAY_BOOL:      atom = ray_bool(((uint8_t*)base)[idx]);                  break;
-        case RAY_U8:        atom = ray_u8(((uint8_t*)base)[idx]);                    break;
+        case RAY_BYTE_ONLY: atom = ray_u8(((uint8_t*)base)[idx]);                    break;
         case RAY_I16:       atom = ray_i16(((int16_t*)base)[idx]);                   break;
         case RAY_I32:       atom = ray_i32(((int32_t*)base)[idx]);                   break;
         case RAY_I64:       atom = ray_i64(((int64_t*)base)[idx]);                   break;
