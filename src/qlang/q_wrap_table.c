@@ -1472,6 +1472,8 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
     if ((l == 5 && (memcmp(nm, ".z.ts", 5) == 0 ||
                     memcmp(nm, ".z.ph", 5) == 0 ||     /* HTTP GET handler (q_http.c) */
                     memcmp(nm, ".z.pp", 5) == 0 ||     /* HTTP POST handler (q_http.c) */
+                    memcmp(nm, ".z.pm", 5) == 0 ||     /* HTTP other-methods (q_http.c) */
+                    memcmp(nm, ".z.ac", 5) == 0 ||     /* HTTP auth gate (q_http.c) */
                     memcmp(nm, ".z.ws", 5) == 0 ||     /* WS handlers (q_ws.c) */
                     memcmp(nm, ".z.wo", 5) == 0 ||
                     memcmp(nm, ".z.wc", 5) == 0)) ||
@@ -1485,8 +1487,10 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         }
         ray_release(s);
         if (c3 == 'e')      q_dotz_zexit_set(zv);
+        else if (c3 == 'a') q_dotz_zac_set(zv);            /* .z.ac */
         else if (c3 == 'p' && c4 == 'h') q_dotz_zph_set(zv);
         else if (c3 == 'p' && c4 == 'p') q_dotz_zpp_set(zv);
+        else if (c3 == 'p' && c4 == 'm') q_dotz_zpm_set(zv);  /* .z.pm */
         else if (c3 == 'w' && c4 == 's') q_dotz_zws_set(zv);
         else if (c3 == 'w' && c4 == 'o') q_dotz_zwo_set(zv);
         else if (c3 == 'w' && c4 == 'c') q_dotz_zwc_set(zv);
