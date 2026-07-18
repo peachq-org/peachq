@@ -49,6 +49,16 @@ void   q_dotz_exit_fire(int code);
 void   q_dotz_zph_set(ray_t* fn);
 ray_t* q_dotz_zph(void);
 
+/* `.z.ws`/`.z.wo`/`.z.wc` WebSocket handler slots (ref/dotz.md; `.z.ph`
+ * lifecycle).  q_ws.c reads them via the BORROWED getters (retain across the
+ * call — a handler may reassign its own slot from inside itself). */
+void   q_dotz_zws_set(ray_t* fn);
+void   q_dotz_zwo_set(ray_t* fn);
+void   q_dotz_zwc_set(ray_t* fn);
+ray_t* q_dotz_zws(void);
+ray_t* q_dotz_zwo(void);
+ray_t* q_dotz_zwc(void);
+
 /* A fresh RAY_UNARY fn-value (rc=1) that, each time the poll timer fires it,
  * resolves the CURRENT `.z.ts` binding and calls it with a fresh LOCAL
  * timestamp (`.z.P`).  Unset `.z.ts` (or a stopped timer) → no-op.  Used by the

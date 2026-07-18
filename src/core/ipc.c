@@ -83,6 +83,7 @@
 #include "store/journal.h"
 #include "qlang/q_wire.h"
 #include "qlang/q_http.h"
+#include "qlang/q_ws.h"
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -212,6 +213,7 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define RAY_IPC_PHASE_HEADER    1
 #define RAY_IPC_PHASE_PAYLOAD   2
 #define RAY_IPC_PHASE_HTTP      3   /* sniffed as HTTP (kb/http.md same-port serving) */
+#define RAY_IPC_PHASE_WS        4   /* upgraded WebSocket (kb/websockets.md; q_ws.c) */
 
 #define KDB_HDR_LEN 8
 #define KDB_MAX_MSG (256u * 1024u * 1024u)   /* 256MB frame guard */
@@ -668,6 +670,10 @@ typedef struct {
     uint8_t*         http_buf;
     uint32_t         http_len;
     uint32_t         http_cap;
+    /* WS mode (phase RAY_IPC_PHASE_WS): opaque q_ws.c frame state.  Non-NULL
+     * IS the "WS-marked handle" — the send paths below frame instead of
+     * writing kdb-IPC bytes. */
+    void*            ws;
     /* Sync round-trip state: while a ray_ipc_send waits on this conn it
      * pumps the rx machinery itself; a RESP frame is deposited here
      * instead of being evaluated.  Interleaved ASYNC/SYNC frames still
@@ -688,6 +694,7 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel);
+static ray_t* ipc_read_ws(ray_poll_t* poll, ray_selector_t* sel);
 static void   ipc_on_close(ray_poll_t* poll, ray_selector_t* sel);
 
 /* Wrappers matching ray_io_fn signature for socket recv */
@@ -823,12 +830,65 @@ static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel)
     }
     if (cd->http_len >= 4 &&
         memcmp(cd->http_buf + cd->http_len - 4, "\r\n\r\n", 4) == 0) {
-        q_http_respond((ray_sock_t)sel->fd, cd->http_buf, cd->http_len,
-                       cd->auth_required);
+        int up = q_http_respond((ray_sock_t)sel->fd, cd->http_buf, cd->http_len,
+                                cd->auth_required);
+        /* 1 = 101 sent (kb/websockets.md): switch this connection to the WS
+         * frame pump.  Alloc failure after the 101 just closes (plan D13). */
+        if (up == 1 && (cd->ws = q_ws_conn_new()) != NULL) {
+            ray_sys_free(cd->http_buf);
+            cd->http_buf = NULL; cd->http_len = 0; cd->http_cap = 0;
+            cd->phase = RAY_IPC_PHASE_WS;
+            sel->rx.read_fn = ipc_read_ws;
+            ray_poll_rx_request(poll, sel, q_ws_want((q_ws_conn_t*)cd->ws));
+            /* fire `.z.wo` AFTER arming the read (the .ipc.on.open pattern);
+             * handle ctx exposed so `.z.w` resolves inside the hook.  The hook
+             * may close this very conn — sel is not touched after. */
+            int64_t prev = ipc_ctx_handle();
+            ray_poll_t* pp = ipc_ctx_poll();
+            ipc_ctx_set(sel->id, poll);
+            q_ws_on_open(sel->fd);
+            ipc_ctx_set(prev, pp);
+            return NULL;
+        }
         ray_poll_deregister(poll, sel->id);   /* Connection: close — one request */
         return NULL;
     }
     ray_poll_rx_request(poll, sel, 1);
+    return NULL;
+}
+
+/* WS frame pump: exact-size reads sized by q_ws.c (header, then extension,
+ * then payload).  All framing/dispatch semantics live in qlang/q_ws.c; this
+ * leg only moves bytes and applies the eval context, like ipc_read_payload. */
+static ray_t* ipc_read_ws(ray_poll_t* poll, ray_selector_t* sel)
+{
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    if (!sel->rx.buf || sel->rx.buf->offset < sel->rx.buf->size) return NULL;
+    int64_t    id = sel->id;
+    ray_sock_t fd = (ray_sock_t)sel->fd;
+    /* Detach the buffer BEFORE dispatch (the ipc_read_payload pattern): a
+     * `.z.ws` handler may close this very connection, freeing the selector's
+     * rx state under q_ws_feed. */
+    ray_poll_buf_t* buf = sel->rx.buf;
+    sel->rx.buf = NULL;
+    bool prev_restricted = ray_eval_get_restricted();
+    ray_eval_set_restricted(cd->restricted);
+    int64_t prev = ipc_ctx_handle();
+    ray_poll_t* pp = ipc_ctx_poll();
+    ipc_ctx_set(id, poll);
+    int64_t want = q_ws_feed((q_ws_conn_t*)cd->ws, fd,
+                             buf->data, (size_t)buf->offset);
+    ipc_ctx_set(prev, pp);
+    ray_eval_set_restricted(prev_restricted);
+    ray_poll_buf_free(buf);
+    /* Re-resolve: the handler may have closed us.  The read_fn check also
+     * defeats slot-id/allocation reuse (a fresh conn can never be parked on
+     * ipc_read_ws synchronously — an upgrade needs its own poll cycles). */
+    sel = ray_poll_get(poll, id);
+    if (!sel || sel->data != (void*)cd || sel->rx.read_fn != ipc_read_ws)
+        return NULL;
+    if (want <= 0) { ray_poll_deregister(poll, id); return NULL; }
+    ray_poll_rx_request(poll, sel, want);
     return NULL;
 }
 
@@ -1059,6 +1119,13 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
         if (cd->http_buf) {     /* HTTP-mode request accumulator */
             ray_sys_free(cd->http_buf);
             cd->http_buf = NULL;
+        }
+        if (cd->ws) {           /* WS frame state + `.z.wc` (fires AFTER close
+                                 * semantics, dotz.md — no handle ctx set) */
+            if (cd->phase == RAY_IPC_PHASE_WS)
+                q_ws_on_close(sel->fd);
+            q_ws_conn_free((q_ws_conn_t*)cd->ws);
+            cd->ws = NULL;
         }
         /* A RESP deposited for a sync wait that never consumed it
          * (connection died mid-round-trip) would otherwise leak. */
@@ -1475,7 +1542,8 @@ static ray_selector_t* conn_resolve(ray_poll_t** poll_out, int64_t handle)
     ray_selector_t* sel = ray_poll_get(poll, handle);
     if (!sel || sel->type != RAY_SEL_SOCKET || !sel->data) return NULL;
     if (sel->rx.read_fn != ipc_read_header &&
-        sel->rx.read_fn != ipc_read_payload) return NULL;
+        sel->rx.read_fn != ipc_read_payload &&
+        sel->rx.read_fn != ipc_read_ws) return NULL;   /* WS handles resolve too */
     if (poll_out) *poll_out = poll;
     return sel;
 }
@@ -1502,7 +1570,8 @@ int64_t ray_ipc_handle_of_fd(int64_t fd)
         ray_selector_t* sel = poll->sels[i];
         if (sel && sel->fd == fd && sel->type == RAY_SEL_SOCKET && sel->data &&
             (sel->rx.read_fn == ipc_read_header ||
-             sel->rx.read_fn == ipc_read_payload))
+             sel->rx.read_fn == ipc_read_payload ||
+             sel->rx.read_fn == ipc_read_ws))
             return sel->id;
     }
     return -1;
@@ -1678,6 +1747,11 @@ static ray_t* sync_send(int64_t handle, ray_t* msg)
         return ray_error("io", "connection closed");
     }
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    if (cd->phase == RAY_IPC_PHASE_WS) {
+        /* WS messaging is async-only (ref/dotz.md §.z.ws: sync is 'nyi) */
+        if (owned) ray_release(msg);
+        return ray_error("nyi", "sync send on a websocket handle");
+    }
     if (cd->sync_waiting) {
         /* A sync wait is already pumping this conn further down the
          * stack (hook → nested send on the SAME handle).  Two waiters
@@ -1756,11 +1830,17 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
     }
     ray_selector_t* sel = conn_resolve(NULL, handle);
     /* conn_write_msg (and its cd deref) run only when sel is non-NULL —
-     * the `!sel ||` short-circuit guards the data pointer. */
-    ray_err_t rc = (!sel || conn_write_msg((ray_sock_t)sel->fd, msg,
-                                           RAY_IPC_MSG_ASYNC,
-                                           conn_zip_ok((ray_ipc_conn_data_t*)sel->data)) < 0)
-                   ? RAY_ERR_IO : RAY_OK;
+     * the `!sel ||` short-circuit guards the data pointer.  A WS-marked
+     * handle FRAMES the payload (text/binary, q_ws.c) instead of writing
+     * kdb-IPC bytes — the `neg[h] msg` reply path (ref/dotz.md §.z.ws). */
+    ray_err_t rc;
+    if (sel && ((ray_ipc_conn_data_t*)sel->data)->phase == RAY_IPC_PHASE_WS)
+        rc = q_ws_send((ray_sock_t)sel->fd, msg) == 0 ? RAY_OK : RAY_ERR_IO;
+    else
+        rc = (!sel || conn_write_msg((ray_sock_t)sel->fd, msg,
+                                     RAY_IPC_MSG_ASYNC,
+                                     conn_zip_ok((ray_ipc_conn_data_t*)sel->data)) < 0)
+             ? RAY_ERR_IO : RAY_OK;
     if (owned) ray_release(msg);
     return rc;
 }
