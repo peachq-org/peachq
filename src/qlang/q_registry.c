@@ -185,21 +185,31 @@ ray_t* q_collapse_list(ray_t* l) {
     if (RAY_IS_ERR(vec)) return vec;
     int64_t nulls = 0;
     for (int64_t i = 0; i < n; i++) {
-        switch (t) {
-        case -RAY_BOOL: vec = ray_vec_append(vec, &e[i]->b8);  break;
-        case -RAY_I16:  vec = ray_vec_append(vec, &e[i]->i16); break;
-        case -RAY_I32:  vec = ray_vec_append(vec, &e[i]->i32); break;
-        case -RAY_F32: { float f = (float)e[i]->f64;            /* F32 atom stores f64 */
-                         vec = ray_vec_append(vec, &f); }       break;
-        case -RAY_F64:
-        case -RAY_DATETIME:
-                        vec = ray_vec_append(vec, &e[i]->f64); break;
-        case -RAY_GUID: {                                      /* 16-byte payload, not i64 */
+        /* Switch the recovered POSITIVE tag, exhaustive over ray_type_e (no
+         * default) so a future member demands a lane (#209 guard).  Only the
+         * non-i64 reads live here; i64/temporal tags AND any out-of-enum tag
+         * fall to the shared i64 append below — byte-identical to the old
+         * default (U8 LE-aliased).  LIST/STR/SYM are dead arms (filtered above). */
+        bool appended = false;
+        switch ((ray_type_e)-t) {
+        case RAY_BOOL: vec = ray_vec_append(vec, &e[i]->b8);  appended = true; break;
+        case RAY_I16:  vec = ray_vec_append(vec, &e[i]->i16); appended = true; break;
+        case RAY_I32:  vec = ray_vec_append(vec, &e[i]->i32); appended = true; break;
+        case RAY_F32: { float f = (float)e[i]->f64;           /* F32 atom stores f64 */
+                        vec = ray_vec_append(vec, &f); appended = true; } break;
+        case RAY_F64:
+        case RAY_DATETIME:
+                       vec = ray_vec_append(vec, &e[i]->f64); appended = true; break;
+        case RAY_GUID: {                                      /* 16-byte payload, not i64 */
             const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
-            vec = ray_vec_append(vec, g);
+            vec = ray_vec_append(vec, g); appended = true;
         } break;
-        default:        vec = ray_vec_append(vec, &e[i]->i64); break; /* i64 + temporals */
+        case RAY_U8:   case RAY_I64:      case RAY_TIMESTAMP: case RAY_MONTH:
+        case RAY_DATE: case RAY_TIMESPAN: case RAY_MINUTE:    case RAY_SECOND:
+        case RAY_TIME: case RAY_LIST: case RAY_STR: case RAY_SYM:
+                       break;
         }
+        if (!appended) vec = ray_vec_append(vec, &e[i]->i64);   /* i64/temporal + out-of-enum */
         if (RAY_IS_ERR(vec)) return vec;
         if (RAY_ATOM_IS_NULL(e[i])) { ray_vec_set_null(vec, i, true); nulls++; }
     }
