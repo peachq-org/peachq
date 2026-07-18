@@ -58,6 +58,9 @@ static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
 static ray_t* g_zts        = NULL;  /* current `.z.ts` timer handler (owned), or NULL */
 static ray_t* g_zexit      = NULL;  /* current `.z.exit` process-exit handler */
 static ray_t* g_zph        = NULL;  /* current `.z.ph` HTTP-GET handler (owned) */
+static ray_t* g_zws        = NULL;  /* current `.z.ws` WS-message handler (owned) */
+static ray_t* g_zwo        = NULL;  /* current `.z.wo` WS-open handler (owned) */
+static ray_t* g_zwc        = NULL;  /* current `.z.wc` WS-close handler (owned) */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
     if (len == 5 && memcmp(name, ".z.bm", 5) == 0)
@@ -367,6 +370,27 @@ void q_dotz_zph_set(ray_t* fn) {
 
 ray_t* q_dotz_zph(void) { return g_zph; }   /* BORROWED; NULL = unset */
 
+/* `.z.ws`/`.z.wo`/`.z.wc` WebSocket handler slots (ref/dotz.md; same shape as
+ * `.z.ph` above) — FIRED by q_ws.c per message / open / close. */
+void q_dotz_zws_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zws) ray_release(g_zws);
+    g_zws = fn;
+}
+void q_dotz_zwo_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zwo) ray_release(g_zwo);
+    g_zwo = fn;
+}
+void q_dotz_zwc_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zwc) ray_release(g_zwc);
+    g_zwc = fn;
+}
+ray_t* q_dotz_zws(void) { return g_zws; }   /* BORROWED; NULL = unset */
+ray_t* q_dotz_zwo(void) { return g_zwo; }
+ray_t* q_dotz_zwc(void) { return g_zwc; }
+
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
  * exit parameter; default = do nothing), then drain its show/0N! console
  * output to stdout — this runs moments before exit(), nothing else drains. */
@@ -475,6 +499,18 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
         ray_retain(g_zph);
         out = g_zph;
     }
+    if (!out && n == 5 && memcmp(p, ".z.ws", 5) == 0 && g_zws) {
+        ray_retain(g_zws);
+        out = g_zws;
+    }
+    if (!out && n == 5 && memcmp(p, ".z.wo", 5) == 0 && g_zwo) {
+        ray_retain(g_zwo);
+        out = g_zwo;
+    }
+    if (!out && n == 5 && memcmp(p, ".z.wc", 5) == 0 && g_zwc) {
+        ray_retain(g_zwc);
+        out = g_zwc;
+    }
 
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
      * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
@@ -497,6 +533,9 @@ void q_dotz_destroy(void) {
     if (g_zts) { ray_release(g_zts); g_zts = NULL; }   /* release the `.z.ts` handler */
     if (g_zexit) { ray_release(g_zexit); g_zexit = NULL; }
     if (g_zph) { ray_release(g_zph); g_zph = NULL; }
+    if (g_zws) { ray_release(g_zws); g_zws = NULL; }
+    if (g_zwo) { ray_release(g_zwo); g_zwo = NULL; }
+    if (g_zwc) { ray_release(g_zwc); g_zwc = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;
