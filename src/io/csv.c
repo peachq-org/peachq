@@ -913,7 +913,7 @@ static bool csv_fill_str_cols(csv_strref_t** str_refs, int n_cols,
         if (pool_bytes > 0) {
             ray_t* pool = ray_alloc((size_t)pool_bytes);
             if (!pool || RAY_IS_ERR(pool)) return false;
-            pool->type = RAY_U8;
+            pool->type = RAY_BYTE_ONLY;
             pool->len = 0;
             vec->str_pool = pool;
         }
@@ -1328,7 +1328,7 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
  * caller skips them. */
 static int csv_hash_elem_size(int8_t t) {
     switch (t) {
-    case RAY_BOOL: case RAY_U8:                       return 1;
+    case RAY_BOOL: RAY_BYTE_CASES:                    return 1;
     case RAY_I16:                                     return 2;
     case RAY_I32: case RAY_DATE:                      return 4;
     case RAY_I64: case RAY_TIME: case RAY_TIMESTAMP:  return 8;
@@ -1605,7 +1605,7 @@ static ray_t* csv_materialize_rows(const char* buf, size_t file_size,
     for (int c = 0; c < ncols; c++) {
         switch (resolved_types[c]) {
             case RAY_BOOL:      parse_types[c] = CSV_TYPE_BOOL;      break;
-            case RAY_U8:        parse_types[c] = CSV_TYPE_U8;        break;
+            case RAY_BYTE_ONLY: parse_types[c] = CSV_TYPE_U8;        break;
             case RAY_I16:       parse_types[c] = CSV_TYPE_I16;       break;
             case RAY_I32:       parse_types[c] = CSV_TYPE_I32;       break;
             case RAY_I64:       parse_types[c] = CSV_TYPE_I64;       break;
@@ -2025,7 +2025,7 @@ ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
     for (int c = 0; c < ncols; c++) {
         switch (resolved_types[c]) {
             case RAY_BOOL:      parse_types[c] = CSV_TYPE_BOOL;      break;
-            case RAY_U8:        parse_types[c] = CSV_TYPE_U8;        break;
+            case RAY_BYTE_ONLY: parse_types[c] = CSV_TYPE_U8;        break;
             case RAY_I16:       parse_types[c] = CSV_TYPE_I16;       break;
             case RAY_I32:       parse_types[c] = CSV_TYPE_I32;       break;
             case RAY_I64:       parse_types[c] = CSV_TYPE_I64;       break;
@@ -3124,7 +3124,7 @@ static void csv_write_cell(csv_writer_t* w, const csv_col_info_t* ci, int64_t r)
     case RAY_BOOL:
         cw_puts(w, ((const uint8_t*)d)[dr] ? "true" : "false");
         break;
-    case RAY_U8:
+    case RAY_BYTE_ONLY:
         cw_printf(w, "%u", (unsigned)((const uint8_t*)d)[dr]);
         break;
     case RAY_F64:

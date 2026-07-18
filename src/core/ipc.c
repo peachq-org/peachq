@@ -388,7 +388,7 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle,
 {
     ray_t* fn = hook_lookup(IPC_HOOK_BADMSG);
     if (!fn) return;
-    ray_t* mb = ray_vec_new(RAY_U8, (int64_t)len);
+    ray_t* mb = ray_vec_new(RAY_BYTE_ONLY, (int64_t)len);
     if (!mb || RAY_IS_ERR(mb)) { if (mb) ray_error_free(mb); return; }
     memcpy(ray_data(mb), bytes, len);
     mb->len = (int64_t)len;

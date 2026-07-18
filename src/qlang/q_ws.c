@@ -167,7 +167,7 @@ static void ws_dispatch(ray_sock_t fd, int opcode, const uint8_t* p, size_t n) {
     }
     ray_t* arg = (opcode == Q_WS_OP_TEXT)
         ? ray_str((const char*)p, n)
-        : ray_vec_from_raw(RAY_U8, p, (int64_t)n);
+        : ray_vec_from_raw(RAY_BYTE_ONLY, p, (int64_t)n);
     if (!arg || RAY_IS_ERR(arg)) {
         if (arg) ray_error_free(arg);
         fprintf(stderr, "ws: message arg allocation failed\n");
@@ -337,7 +337,7 @@ int q_ws_send(ray_sock_t fd, ray_t* msg) {
     if (msg && msg->type == -RAY_STR)
         return ws_frame_send(fd, Q_WS_OP_TEXT, ray_str_ptr(msg),
                              ray_str_len(msg), Q_WS_DATA_SECS);
-    if (msg && msg->type == RAY_U8)
+    if (msg && msg->type == RAY_BYTE_ONLY)
         return ws_frame_send(fd, Q_WS_OP_BIN, ray_data(msg),
                              (size_t)msg->len, Q_WS_DATA_SECS);
     return -2;
