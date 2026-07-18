@@ -145,7 +145,7 @@ void ray_fmt_set_width(int cols) {
 const char* ray_type_name(int8_t type) {
     switch (type < 0 ? -type : type) {
     case RAY_BOOL:      return type < 0 ? "b8"        : "B8";
-    case RAY_U8:        return type < 0 ? "u8"        : "U8";
+    case RAY_BYTE_ONLY: return type < 0 ? "u8"        : "U8";
     case RAY_I16:       return type < 0 ? "i16"       : "I16";
     case RAY_I32:       return type < 0 ? "i32"       : "I32";
     case RAY_I64:       return type < 0 ? "i64"       : "I64";
@@ -405,7 +405,7 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode);
 static const char* null_literal(int8_t type) {
     switch (type) {
     case RAY_BOOL:      return "0Nb";
-    case RAY_U8:        return "0Nu";
+    case RAY_BYTE_ONLY: return "0Nu";
     case RAY_I16:       return "0Nh";
     case RAY_I32:       return "0Ni";
     case RAY_I64:       return "0Nl";
@@ -441,7 +441,7 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
 
     switch (vec->type) {
     case RAY_BOOL:      fmt_bool(b, ((bool*)ray_data(vec))[idx]); break;
-    case RAY_U8:        fmt_u8(b, ((uint8_t*)ray_data(vec))[idx]); break;
+    case RAY_BYTE_ONLY: fmt_u8(b, ((uint8_t*)ray_data(vec))[idx]); break;
 
     case RAY_I16:       fmt_i16(b, ((int16_t*)ray_data(vec))[idx]); break;
     case RAY_I32:       fmt_i32(b, ((int32_t*)ray_data(vec))[idx]); break;
@@ -610,7 +610,7 @@ static void fmt_dict_key(fmt_buf_t* b, ray_t* keys, int64_t i, int mode) {
         k_atom_storage.type = -RAY_I16;
         k_atom_storage.i16  = ((int16_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
-    } else if (keys->type == RAY_BOOL || keys->type == RAY_U8) {
+    } else if (keys->type == RAY_BOOL || keys->type == RAY_BYTE_ONLY) {
         k_atom_storage.type = (int8_t)-keys->type;
         k_atom_storage.u8   = ((uint8_t*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
@@ -651,7 +651,7 @@ static void fmt_dict_val(fmt_buf_t* b, ray_t* vals, int64_t i, int mode) {
         bool   v_owned = false;
         switch (vals->type) {
             case RAY_BOOL:
-            case RAY_U8:        v_storage.type = (int8_t)-vals->type;
+            case RAY_BYTE_ONLY: v_storage.type = (int8_t)-vals->type;
                                 v_storage.u8   = ((uint8_t*)ray_data(vals))[i];
                                 v_atom = &v_storage; break;
             case RAY_I16:       v_storage.type = -RAY_I16;
@@ -1113,7 +1113,7 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
         /* Atom: type is negated */
         switch (-type) {
         case RAY_BOOL: fmt_bool(b, obj->b8); break;
-        case RAY_U8:   fmt_u8(b, obj->u8); break;
+        case RAY_BYTE_ONLY: fmt_u8(b, obj->u8); break;
 
         case RAY_I16:  fmt_i16(b, obj->i16); break;
         case RAY_I32:  fmt_i32(b, obj->i32); break;

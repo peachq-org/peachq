@@ -180,7 +180,7 @@ static ray_t* groups_to_pair_list(ray_t* d) {
                 RAY_TEMPORAL32_CASES: k = ray_i32(((int32_t*)base)[i]); break;
                 case RAY_I16: k = ray_i16(((int16_t*)base)[i]); break;
                 case RAY_BOOL:
-                case RAY_U8:  k = ray_u8(((uint8_t*)base)[i]); break;
+                case RAY_BYTE_ONLY: k = ray_u8(((uint8_t*)base)[i]); break;
                 case RAY_F64: k = ray_f64(((double*)base)[i]); break;
                 case RAY_STR: { size_t sl = 0; const char* sp = ray_str_vec_get(keys, i, &sl);
                                  k = ray_str(sp ? sp : "", sp ? sl : 0); break; }
@@ -1187,7 +1187,7 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
                 else if (tl == 3 && memcmp(tn, "I32", 3) == 0)  tgt = RAY_I32;
                 else if (tl == 3 && memcmp(tn, "I16", 3) == 0)  tgt = RAY_I16;
                 else if (tl == 3 && memcmp(tn, "F32", 3) == 0)  tgt = RAY_F32;
-                else if (tl == 2 && memcmp(tn, "U8", 2) == 0)   tgt = RAY_U8;
+                else if (tl == 2 && memcmp(tn, "U8", 2) == 0)   tgt = RAY_BYTE_ONLY;
                 else if (tl == 4 && memcmp(tn, "BOOL", 4) == 0) tgt = RAY_BOOL;
             }
             if (tgt < 0) return NULL;
@@ -1916,7 +1916,7 @@ static int atom_i64_const(ray_t* v, int64_t* out) {
         return 0;
     switch (v->type) {
     case -RAY_BOOL:
-    case -RAY_U8: *out = v->u8; return 1;
+    RAY_BYTE_ATOM_CASES: *out = v->u8; return 1;
     case -RAY_I16: *out = v->i16; return 1;
     case -RAY_I32:
     case -RAY_DATE:
@@ -1968,7 +1968,7 @@ static int expr_affine_of_sym(ray_t* expr, int64_t sym, int64_t* bias) {
 }
 
 static int key_type_i64_projectable(int8_t t) {
-    return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 ||
+    return t == RAY_BOOL || ray_is_bytelike(t) || t == RAY_I16 ||
            t == RAY_I32 || t == RAY_I64 ||
            RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t);
 }
@@ -1977,7 +1977,7 @@ static int64_t key_col_read_i64(ray_t* col, int64_t row) {
     const void* d = ray_data(col);
     switch (col->type) {
     case RAY_BOOL:
-    case RAY_U8: return ((const uint8_t*)d)[row];
+    RAY_BYTE_CASES: return ((const uint8_t*)d)[row];
     case RAY_I16: return ((const int16_t*)d)[row];
     case RAY_I32:
     RAY_TEMPORAL32_CASES: return ((const int32_t*)d)[row];
@@ -2012,7 +2012,7 @@ static bool parse_gt_name_i64(ray_t* expr, int64_t* out_name, int64_t* out_thres
         case -RAY_MINUTE:
         case -RAY_SECOND: threshold = e[2]->i32; break;
         case -RAY_I16: threshold = e[2]->i16; break;
-        case -RAY_U8:
+        RAY_BYTE_ATOM_CASES:
         case -RAY_BOOL: threshold = e[2]->u8; break;
         default: return false;
     }
@@ -2063,7 +2063,7 @@ static bool can_defer_single_key_where(ray_t* by_expr, ray_t* where_expr,
     int8_t kt = key_col->type;
     if (!RAY_IS_PARTED(kt)) return false;
     if (RAY_IS_PARTED(kt)) kt = (int8_t)RAY_PARTED_BASETYPE(kt);
-    return kt == RAY_SYM || kt == RAY_BOOL || kt == RAY_U8 ||
+    return kt == RAY_SYM || kt == RAY_BOOL || ray_is_bytelike(kt) ||
            kt == RAY_I16 || kt == RAY_I32 || kt == RAY_I64 ||
            RAY_IS_TEMPORAL32(kt) || RAY_IS_TEMPORAL64(kt) ||
            kt == RAY_F32 || kt == RAY_F64;
@@ -3305,7 +3305,7 @@ static ray_t* try_count_distinct_v2_rewrite(
         int8_t kct_j = K_cols[j]->type;
         if (RAY_IS_PARTED(kct_j) || kct_j == RAY_MAPCOMMON) return NULL;
         if (K_cols[j]->attrs & RAY_ATTR_HAS_NULLS) return NULL;
-        int kct_ok_j = (kct_j == RAY_SYM  || kct_j == RAY_BOOL || kct_j == RAY_U8 ||
+        int kct_ok_j = (kct_j == RAY_SYM  || kct_j == RAY_BOOL || ray_is_bytelike(kct_j) ||
                         kct_j == RAY_I16  || kct_j == RAY_I32  || kct_j == RAY_I64 ||
                         RAY_IS_TEMPORAL32(kct_j) || RAY_IS_TEMPORAL64(kct_j));
         if (!kct_ok_j) return NULL;
@@ -3321,7 +3321,7 @@ static ray_t* try_count_distinct_v2_rewrite(
     /* X gets the same per-type acceptability check as the K columns
      * (validated in the loop above).  SYM is allowed — mk_compile packs
      * it by storage width into the composite key. */
-    int xct_ok = (xct == RAY_SYM  || xct == RAY_BOOL || xct == RAY_U8 ||
+    int xct_ok = (xct == RAY_SYM  || xct == RAY_BOOL || ray_is_bytelike(xct) ||
                   xct == RAY_I16  || xct == RAY_I32  || xct == RAY_I64 ||
                   RAY_IS_TEMPORAL32(xct) || RAY_IS_TEMPORAL64(xct));
     if (!xct_ok) return NULL;
@@ -3505,7 +3505,7 @@ static ray_t* count_distinct_per_group_buf(ray_t* inner_expr, ray_t* tbl,
      * to the existing serial path on type mismatch, error, or OOM. */
     {
         int8_t st = src->type;
-        bool flat_ok = (st == RAY_BOOL || st == RAY_U8 ||
+        bool flat_ok = (st == RAY_BOOL || ray_is_bytelike(st) ||
                         st == RAY_I16  || st == RAY_I32 || st == RAY_I64 ||
                         st == RAY_F64  || RAY_IS_TEMPORAL32(st) ||
                         st == RAY_TIMESTAMP || RAY_IS_SYM(st));
@@ -3721,7 +3721,7 @@ static inline int64_t key_read_i64(const void* d, int64_t idx,
                                    int8_t bt, uint8_t attrs) {
     switch (bt) {
     case RAY_BOOL:
-    case RAY_U8:        return ((const uint8_t*)d)[idx];
+    RAY_BYTE_CASES:     return ((const uint8_t*)d)[idx];
     case RAY_I16:       return ((const int16_t*)d)[idx];
     case RAY_I32:
     RAY_TEMPORAL32_CASES:     return ((const int32_t*)d)[idx];
@@ -3939,7 +3939,7 @@ static int can_atom_broadcast(ray_t* a) {
     if (a->type == -RAY_SYM && !(a->attrs & ATTR_QUOTED)) return 0;
     int8_t vt = (int8_t)(-a->type);
     switch (vt) {
-    case RAY_BOOL: case RAY_U8:
+    case RAY_BOOL: RAY_BYTE_CASES:
     case RAY_I16:  case RAY_I32:
     case RAY_I64:  case RAY_F64:
     RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
@@ -3988,7 +3988,7 @@ static ray_t* atom_broadcast_vec(ray_t* a, int64_t n) {
     void* dst = ray_data(v);
     switch (vec_type) {
     case RAY_BOOL:
-    case RAY_U8: {
+    RAY_BYTE_CASES: {
         memset(dst, a->b8, (size_t)n);
         break;
     }
@@ -4353,7 +4353,7 @@ static void count_compare_cache_store(ray_t* col, count_cmp_op_t op,
 
 static inline int64_t count_atom_i64(ray_t* a) {
     if (a->type == -RAY_BOOL) return (int64_t)a->b8;
-    if (a->type == -RAY_U8) return (int64_t)a->u8;
+    if (a->type == -RAY_BYTE_ONLY) return (int64_t)a->u8;
     if (a->type == -RAY_I16) return (int64_t)a->i16;
     if (a->type == -RAY_I32 || RAY_IS_TEMPORAL32(-a->type))
         return (int64_t)a->i32;
@@ -4394,7 +4394,7 @@ static void count_compare_task(void* vctx, uint32_t worker_id, int64_t start, in
 
     switch (col->type) {
     case RAY_BOOL:
-    case RAY_U8: {
+    RAY_BYTE_CASES: {
         const uint8_t* x = (const uint8_t*)data;
         if ((op == COUNT_CMP_EQ || op == COUNT_CMP_NE) && rhs >= 0 && rhs <= 255) {
             uint8_t needle = (uint8_t)rhs;
@@ -4494,7 +4494,7 @@ static int try_count_simple_compare(ray_t* tbl, ray_t* where_expr, int64_t* out_
 
     switch (col->type) {
     case RAY_BOOL:
-    case RAY_U8:
+    RAY_BYTE_CASES:
     case RAY_I16:
     case RAY_I32:
     case RAY_I64:
@@ -4873,7 +4873,7 @@ static int filt_compact_keep(ray_t* dict, ray_t* by_expr, ray_t* tbl,
         ray_t* kc = ray_table_get_col(tbl, key_syms[k]);
         if (!kc) return 0;
         switch (kc->type) {
-            case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+            case RAY_I64: case RAY_I32: case RAY_I16: RAY_BYTE_CASES:
             case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: case RAY_STR: break;
             default: return 0;
         }
@@ -4883,7 +4883,7 @@ static int filt_compact_keep(ray_t* dict, ray_t* by_expr, ray_t* tbl,
         ray_t* cc = ray_table_get_col_idx(tbl, c);
         if (!cc) return 0;
         switch (cc->type) {
-            case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+            case RAY_I64: case RAY_I32: case RAY_I16: RAY_BYTE_CASES:
             case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: case RAY_F64:
             case RAY_GUID: case RAY_STR: case RAY_LIST: break;
             default: return 0;
@@ -6234,7 +6234,7 @@ by_dict_done:
                  * agg_group_keys) — agg_select_distinct handles both. */
                 for (int64_t k = 0; k < nk && distinct_only; k++) {
                     switch (key_cols[k]->type) {
-                        case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+                        case RAY_I64: case RAY_I32: case RAY_I16: RAY_BYTE_CASES:
                         case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: case RAY_STR: break;
                         default: distinct_only = false; break;
                     }
@@ -6246,7 +6246,7 @@ by_dict_done:
                     ray_t* cc = ray_table_get_col_idx(eval_tbl, c);
                     if (!cc) { distinct_only = false; break; }
                     switch (cc->type) {
-                        case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+                        case RAY_I64: case RAY_I32: case RAY_I16: RAY_BYTE_CASES:
                         case RAY_BOOL: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: case RAY_SYM: case RAY_F64:
                         case RAY_GUID: case RAY_STR: case RAY_LIST: break;
                         default: distinct_only = false; break;
@@ -6396,7 +6396,7 @@ by_dict_done:
                                     RAY_TEMPORAL32_CASES: atom = ray_i32((int32_t)key_vals[off]); break;
                                     case RAY_I16: atom = ray_i16((int16_t)key_vals[off]); break;
                                     case RAY_BOOL:
-                                    case RAY_U8: atom = ray_u8((uint8_t)key_vals[off]); break;
+                                    case RAY_BYTE_ONLY: atom = ray_u8((uint8_t)key_vals[off]); break;
                                     case RAY_F64: {
                                         double dv;
                                         memcpy(&dv, &key_vals[off], 8);
@@ -8895,7 +8895,7 @@ by_dict_done:
                     const void* _d = ray_data(vec);                            \
                     switch (base_type) {                                       \
                     case RAY_BOOL:                                             \
-                    case RAY_U8:   (dst) = ((const uint8_t* )_d)[idx]; break;  \
+                    RAY_BYTE_CASES: (dst) = ((const uint8_t* )_d)[idx]; break;  \
                     case RAY_I16:  (dst) = ((const int16_t* )_d)[idx]; break;  \
                     case RAY_I32:  (dst) = ((const int32_t* )_d)[idx]; break;  \
                     case RAY_I64:  (dst) = ((const int64_t* )_d)[idx]; break;  \
@@ -8932,7 +8932,7 @@ by_dict_done:
                  * are already routed through use_eval_group earlier;
                  * this is the last-line defense for future additions. */
                 int key_supported =
-                    (okt == RAY_BOOL || okt == RAY_U8   ||
+                    (okt == RAY_BOOL || ray_is_bytelike(okt) ||
                      okt == RAY_I16  || okt == RAY_I32  || okt == RAY_I64 ||
                      okt == RAY_F32  || okt == RAY_F64  ||
                      RAY_IS_TEMPORAL32(okt) || RAY_IS_TEMPORAL64(okt) ||
@@ -9966,14 +9966,14 @@ static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
     int8_t at = atom->type;
     /* Integer atoms accepted (with width narrowing) by the numeric columns. */
     bool is_int = (at == -RAY_I64 || at == -RAY_I32 ||
-                   at == -RAY_I16 || at == -RAY_U8);
+                   at == -RAY_I16 || at == -RAY_BYTE_ONLY);
     switch (ct) {
     case RAY_BOOL: {
         if (at != -RAY_BOOL) return ray_error("type", "insert: value type does not match bool column, got %s", ray_type_name(at));
         uint8_t v = atom->b8;
         return ray_vec_append(col_vec, &v);
     }
-    case RAY_U8: {
+    case RAY_BYTE_ONLY: {
         if (!is_int) return ray_error("type", "insert: u8 column requires an integer value, got %s", ray_type_name(at));
         uint8_t v = (uint8_t)as_i64(atom);
         return ray_vec_append(col_vec, &v);
@@ -12462,7 +12462,7 @@ static ray_t* window_join_impl(ray_t** args, int64_t n, int mode) {
              * other aggregation reads v_i/v_f and requires a numeric source. */
             if (agg_ops[a] != OP_COUNT) {
                 switch (t) {
-                case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+                case RAY_I64: case RAY_I32: case RAY_I16: case RAY_BYTE_ONLY:
                 case RAY_F64: case RAY_F32: case RAY_BOOL:
                 RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
                     break;

@@ -204,7 +204,7 @@ ray_t* q_collapse_list(ray_t* l) {
             const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
             vec = ray_vec_append(vec, g); appended = true;
         } break;
-        case RAY_U8:   case RAY_I64:      case RAY_TIMESTAMP: case RAY_MONTH:
+        RAY_BYTE_CASES: case RAY_I64:      case RAY_TIMESTAMP: case RAY_MONTH:
         case RAY_DATE: case RAY_TIMESPAN: case RAY_MINUTE:    case RAY_SECOND:
         case RAY_TIME: case RAY_LIST: case RAY_STR: case RAY_SYM:
                        break;

@@ -124,6 +124,21 @@ typedef enum {
 #define RAY_TEMPORALF_CASES  case RAY_DATETIME
 #define RAY_IS_TEMPORALF(t)  ((t) == RAY_DATETIME)
 
+/* Byte-lane single home (string-C3).  Two deliberate spellings:
+ * BYTE_CASES/ray_is_bytelike mark the byte-LIKE lane — generic 1-byte kernel
+ * paths (compare, sort/grade, group, distinct, find, index, take/drop, hash,
+ * copy) that the char vector joins in 1a-ii by growing this membership.
+ * RAY_BYTE_ONLY/ray_is_byte_only (value form: usable as case label, negated
+ * atom tag, or constructor stamp) mark sites deliberately about the BYTE type
+ * itself — 0x display, "x"$ targets, byte parsing, wire tag 4, arith
+ * promotion, byte-buffer internals — which charv must NOT join.  Bare RAY_U8
+ * is poisoned at the end of this header so every new site picks a lane. */
+#define RAY_BYTE_CASES        case RAY_U8
+#define RAY_BYTE_ATOM_CASES   case -RAY_U8
+#define ray_is_bytelike(t)    ((t) == RAY_U8)
+#define RAY_BYTE_ONLY         RAY_U8
+#define ray_is_byte_only(t)   ((t) == RAY_U8)
+
 /* Compound types */
 #define RAY_INDEX     97   /* Accelerator index attached to a vector (see ops/idxop.h) */
 #define RAY_TABLE     98
@@ -723,6 +738,15 @@ ray_t*    ray_ipc_send_verbose(int64_t handle, ray_t* msg);
 
 #ifdef __cplusplus
 }
+#endif
+
+/* Bare RAY_U8 is a compile error — spell the site through the byte-lane
+ * macros above (expansions of pre-poison macros are exempt), so every new
+ * site makes the byte-like vs byte-only call explicitly.  A file that truly
+ * needs the raw enumerator defines RAY_ALLOW_RAW_U8 before any include;
+ * keep that set minimal and justified. */
+#ifndef RAY_ALLOW_RAW_U8
+#pragma GCC poison RAY_U8
 #endif
 
 #endif /* RAY_H */

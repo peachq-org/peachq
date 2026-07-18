@@ -81,7 +81,7 @@ int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
             int16_t vb = ((int16_t*)ray_data(col))[b];
             if (va < vb) cmp = -1;
             else if (va > vb) cmp = 1;
-        } else if (col->type == RAY_BOOL || col->type == RAY_U8) {
+        } else if (col->type == RAY_BOOL || ray_is_bytelike(col->type)) {
             uint8_t va = ((uint8_t*)ray_data(col))[a];
             uint8_t vb = ((uint8_t*)ray_data(col))[b];
             if (va < vb) cmp = -1;
@@ -1056,7 +1056,7 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
             }
             break;
         }
-        case RAY_BOOL: case RAY_U8: {
+        case RAY_BOOL: RAY_BYTE_CASES: {
             const uint8_t* d = (const uint8_t*)c->data;
             bool has_nulls = c->col && (c->col->attrs & RAY_ATTR_HAS_NULLS);
             bool nf = c->nulls_first;
@@ -1108,7 +1108,7 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
                     val = (int64_t)((const int32_t*)ray_data(col))[i];
                 } else if (col->type == RAY_I16) {
                     val = (int64_t)((const int16_t*)ray_data(col))[i];
-                } else if (col->type == RAY_BOOL || col->type == RAY_U8) {
+                } else if (col->type == RAY_BOOL || ray_is_bytelike(col->type)) {
                     val = (int64_t)((const uint8_t*)ray_data(col))[i];
                 } else {
                     val = 0;
@@ -2158,7 +2158,7 @@ void mk_prescan_fn(void* arg, uint32_t wid,
                 if (v < kmin) kmin = v;
                 if (v > kmax) kmax = v;
             }
-        } else if (col->type == RAY_BOOL || col->type == RAY_U8) {
+        } else if (col->type == RAY_BOOL || ray_is_bytelike(col->type)) {
             const uint8_t* d = (const uint8_t*)ray_data(col);
             for (int64_t i = start; i < end; i++) {
                 int64_t v = (int64_t)d[i];
@@ -2210,7 +2210,7 @@ static void radix_decode_into(void* dst, int8_t type, const uint64_t* sorted_key
         else
             for (int64_t i = 0; i < n; i++)
                 d[i] = (int16_t)((uint16_t)sorted_keys[i] ^ ((uint16_t)1 << 15));
-    } else if (type == RAY_BOOL || type == RAY_U8) {
+    } else if (type == RAY_BOOL || ray_is_bytelike(type)) {
         uint8_t* d = (uint8_t*)dst;
         if (desc)
             for (int64_t i = 0; i < n; i++) d[i] = (uint8_t)(~sorted_keys[i]);
@@ -2284,7 +2284,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
             if (t == RAY_STR || t == RAY_GUID) { has_wide_key = true; continue; }
             if (t != RAY_I64 && t != RAY_F64 && t != RAY_I32 && t != RAY_I16 &&
                 !RAY_IS_TEMPORALF(t) &&
-                t != RAY_BOOL && t != RAY_U8 && t != RAY_SYM &&
+                t != RAY_BOOL && !ray_is_bytelike(t) && t != RAY_SYM &&
                 !RAY_IS_TEMPORAL32(t) && !RAY_IS_TEMPORAL64(t)) {
                 can_radix = false; break;
             }
@@ -2316,7 +2316,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                  * the null sentinel sits one byte beyond the data
                  * range; reserve that extra byte for the radix pass. */
                 if ((cols[0]->attrs & RAY_ATTR_HAS_NULLS) &&
-                    (cols[0]->type == RAY_BOOL || cols[0]->type == RAY_U8 ||
+                    (cols[0]->type == RAY_BOOL || ray_is_bytelike(cols[0]->type) ||
                      cols[0]->type == RAY_I16) &&
                     key_nbytes_max < 8) {
                     key_nbytes_max++;
@@ -2597,7 +2597,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                                 if (d[i] < kmin) kmin = (int64_t)d[i];
                                 if (d[i] > kmax) kmax = (int64_t)d[i];
                             }
-                        } else if (col->type == RAY_BOOL || col->type == RAY_U8) {
+                        } else if (col->type == RAY_BOOL || ray_is_bytelike(col->type)) {
                             const uint8_t* d = (const uint8_t*)ray_data(col);
                             for (int64_t i = 0; i < nrows; i++) {
                                 if (d[i] < kmin) kmin = (int64_t)d[i];
@@ -3019,7 +3019,7 @@ static ray_t* topk_indices_single(ray_t* col, uint8_t desc, uint8_t nf,
     bool ok = (type == RAY_I64 || RAY_IS_TEMPORAL64(type) || type == RAY_F64 ||
                type == RAY_I32 || RAY_IS_TEMPORAL32(type) ||
                type == RAY_SYM || type == RAY_I16 ||
-               type == RAY_BOOL || type == RAY_U8);
+               type == RAY_BOOL || ray_is_bytelike(type));
     if (!ok) return NULL;
 
     if (type == RAY_SYM)
@@ -3286,7 +3286,7 @@ ray_t* ray_sort(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
 
         bool c0_shifted = (cols[0]->attrs & RAY_ATTR_HAS_NULLS) &&
                           (cols[0]->type == RAY_BOOL ||
-                           cols[0]->type == RAY_U8 ||
+                           ray_is_bytelike(cols[0]->type) ||
                            cols[0]->type == RAY_I16);
         if (sorted_keys && !RAY_IS_SYM(cols[0]->type) && !c0_shifted) {
             /* Decode path: sequential writes, no random access */
@@ -3547,7 +3547,7 @@ sort_idx_ready:;
     int8_t sk0_type = sort_vecs[0] ? sort_vecs[0]->type : 0;
     bool sk0_shifted = sort_vecs[0] &&
                        (sort_vecs[0]->attrs & RAY_ATTR_HAS_NULLS) &&
-                       (sk0_type == RAY_BOOL || sk0_type == RAY_U8 ||
+                       (sk0_type == RAY_BOOL || ray_is_bytelike(sk0_type) ||
                         sk0_type == RAY_I16);
     int64_t sort_key_sym = -1;
     if (sorted_keys && n_sort == 1 && !RAY_IS_SYM(sk0_type) && !sk0_shifted) {
@@ -3874,7 +3874,7 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
     int64_t decode_col_idx = -1;
     int8_t k0_type = key_cols[0]->type;
     bool k0_shifted = (key_cols[0]->attrs & RAY_ATTR_HAS_NULLS) &&
-                      (k0_type == RAY_BOOL || k0_type == RAY_U8 ||
+                      (k0_type == RAY_BOOL || ray_is_bytelike(k0_type) ||
                        k0_type == RAY_I16);
     if (sorted_keys && n_keys == 1 && !RAY_IS_SYM(k0_type) && !k0_shifted) {
         for (int64_t c = 0; c < ncols; c++) {

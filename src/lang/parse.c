@@ -582,7 +582,7 @@ static ray_t* parse_vector(ray_parser_t *p) {
                 for (int32_t i = 0; i < count; i++) d[i] = elems[i]->i64;
                 break;
             }
-            case RAY_U8: {
+            case RAY_BYTE_ONLY: {
                 uint8_t* d = (uint8_t*)ray_data(vec);
                 for (int32_t i = 0; i < count; i++) d[i] = elems[i]->u8;
                 break;

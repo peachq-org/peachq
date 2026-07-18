@@ -310,9 +310,9 @@ ray_t* q_min2_wrap(ray_t* a, ray_t* b) {
         return ray_f64(av <= bv ? av : bv);
     }
     if ((a->type == -RAY_I64 || a->type == -RAY_I32 || a->type == -RAY_I16 ||
-         a->type == -RAY_U8  || a->type == -RAY_BOOL) &&
+         a->type == -RAY_BYTE_ONLY || a->type == -RAY_BOOL) &&
         (b->type == -RAY_I64 || b->type == -RAY_I32 || b->type == -RAY_I16 ||
-         b->type == -RAY_U8  || b->type == -RAY_BOOL)) {
+         b->type == -RAY_BYTE_ONLY || b->type == -RAY_BOOL)) {
         int64_t av = (a->type == -RAY_BOOL) ? a->b8 : as_i64(a);
         int64_t bv = (b->type == -RAY_BOOL) ? b->b8 : as_i64(b);
         return ray_i64(av <= bv ? av : bv);
@@ -343,7 +343,7 @@ int q_match_rec(ray_t* a, ray_t* b) {
          * fn values, whose state is NOT in the union slot — those fall to
          * the conservative-mismatch tail below). */
         switch (-a->type) {
-        case RAY_BOOL: case RAY_U8: case RAY_I16: case RAY_I32: case RAY_I64:
+        case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64:
         case RAY_F32: case RAY_F64:
         RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return memcmp(&a->i64, &b->i64, 8) == 0;   /* payload union */
@@ -367,7 +367,7 @@ int q_match_rec(ray_t* a, ray_t* b) {
                           RAY_IS_TEMPORALF(a->type)) ? 8
                        : (a->type == RAY_I32 || a->type == RAY_F32) ? 4
                        : (a->type == RAY_I16) ? 2
-                       : (a->type == RAY_BOOL || a->type == RAY_U8) ? 1 : 0;
+                       : (a->type == RAY_BOOL || ray_is_bytelike(a->type)) ? 1 : 0;
             if (esz)
                 return memcmp(ray_data(a), ray_data(b), (size_t)la * esz) == 0;
         }
@@ -601,7 +601,7 @@ static ray_t* q_byte_encode(ray_t* y) {
     default: return ray_error("type", "vs: unsupported byte-encode operand");
     }
     for (int i = 0; i < w; i++) b[i] = (uint8_t)(bits >> (8 * (w - 1 - i)));
-    return ray_vec_from_raw(RAY_U8, b, w);
+    return ray_vec_from_raw(RAY_BYTE_ONLY, b, w);
 }
 
 /* big-endian bit decompose of an integer scalar (0b vs y) -> BOOL vector */
@@ -609,7 +609,7 @@ static ray_t* q_bit_decompose(ray_t* y) {
     int w = 0; uint64_t bits = 0;
     switch (y->type) {
     case -RAY_BOOL: w = 1;  bits = y->b8 ? 1 : 0; break;
-    case -RAY_U8:   w = 8;  bits = (uint8_t)y->u8; break;
+    case -RAY_BYTE_ONLY: w = 8;  bits = (uint8_t)y->u8; break;
     case -RAY_I16:  w = 16; bits = (uint16_t)y->i16; break;
     case -RAY_I32:  w = 32; bits = (uint32_t)y->i32; break;
     case -RAY_I64:  w = 64; bits = (uint64_t)y->i64; break;
@@ -667,7 +667,7 @@ ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
         return ray_error("type", "vs: ` split expects a string or symbol");
     }
     /* --- byte encode (0x0 vs scalar) --- */
-    if (x->type == -RAY_U8) {
+    if (x->type == -RAY_BYTE_ONLY) {
         if (ray_is_atom(y) && y->type != -RAY_STR) return q_byte_encode(y);
         return ray_error("nyi", "vs: byte-vector base decompose deferred");
     }
@@ -812,8 +812,8 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y) {
         return q_str_join(y, "\n", 1, 1);                        /* host lines */
     }
     /* --- byte decode (0x0 sv bytes) --- */
-    if (x->type == -RAY_U8) {
-        if (y->type == RAY_U8) return q_byte_decode(y);
+    if (x->type == -RAY_BYTE_ONLY) {
+        if (y->type == RAY_BYTE_ONLY) return q_byte_decode(y);
         return ray_error("nyi", "sv: byte-vector base compose deferred");
     }
     /* --- bit compose (0b sv bits) --- */

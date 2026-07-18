@@ -637,7 +637,7 @@ static int q_list_is_parse_tree(ray_t* v, int depth) {
  * the single home means the #209 value-band guard there transitively protects
  * empty-vec display — no parallel table to keep in sync. */
 static const char* q_empty_vec_qname(int8_t type) {
-    if (type == RAY_U8) return NULL;
+    if (type == RAY_BYTE_ONLY) return NULL;
     return q_type_qname(type);
 }
 
@@ -904,7 +904,7 @@ static void q_fmt_body(ray_t* val) {
         }
         switch (val->type) {
         case -RAY_BOOL: qe_printf("%db", val->u8 ? 1 : 0);                 return;
-        case -RAY_U8:   qe_printf("0x%02x", val->u8);                      return;
+        case -RAY_BYTE_ONLY: qe_printf("0x%02x", val->u8);                      return;
         case -RAY_I16:  q_int_tok((int64_t)val->i16, 2, 'h', tok, sizeof tok);
                         qe_puts(tok);                                      return;
         case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', tok, sizeof tok);
@@ -944,7 +944,7 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
     /* byte vector: 0x + hex pairs (ref/sv.md); empty is bare `0x` */
-    if (val->type == RAY_U8) {
+    if (val->type == RAY_BYTE_ONLY) {
         int64_t n = ray_len(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
         static const char hx[] = "0123456789abcdef";

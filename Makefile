@@ -192,6 +192,11 @@ third_party/picohttpparser/picohttpparser.o: third_party/picohttpparser/picohttp
 %.o: %.c
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
+# Test tier is exempt from the RAY_U8 poison (rayforce.h): tests assert raw
+# byte tags by design and are not byte-lane enrollment sites.
+test/%.o: test/%.c
+	$(CC) -c $(CFLAGS) -DRAY_ALLOW_RAW_U8 $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
 # openq: embedded q bootstrap. tools/gen-bootstrap.sh compiles the authored
 # src/qlang/q.q + dotq.q (IN THAT ORDER — dotq.q may use q.q keywords, never
 # the reverse) into a generated C header (OPENQ_BOOTSTRAP[]) baked into the

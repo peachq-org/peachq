@@ -91,7 +91,7 @@ static void nth_element_dbl(double* a, int64_t lo, int64_t hi, int64_t k) {
 } while(0)
 
 static int agg_parted_numeric_base(int8_t t) {
-    return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 ||
+    return t == RAY_BOOL || t == RAY_BYTE_ONLY || t == RAY_I16 ||
            t == RAY_I32 || t == RAY_I64 || t == RAY_F64 ||
            RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t);
 }
@@ -100,7 +100,7 @@ static int64_t agg_read_i64(ray_t* v, int64_t i) {
     void* d = ray_data(v);
     switch (v->type) {
     case RAY_BOOL:
-    case RAY_U8: return ((uint8_t*)d)[i];
+    RAY_BYTE_CASES: return ((uint8_t*)d)[i];
     case RAY_I16: return ((int16_t*)d)[i];
     case RAY_I32:
     RAY_TEMPORAL32_CASES: return ((int32_t*)d)[i];
@@ -113,7 +113,7 @@ static int64_t agg_read_i64(ray_t* v, int64_t i) {
 static ray_t* agg_atom_i64_for_type(int8_t t, int64_t v) {
     switch (t) {
     case RAY_BOOL: return ray_bool(v != 0);
-    case RAY_U8: return ray_u8((uint8_t)v);
+    case RAY_BYTE_ONLY: return ray_u8((uint8_t)v);
     case RAY_I16: return ray_i16((int16_t)v);
     case RAY_I32: return ray_i32((int32_t)v);
     case RAY_DATE: return ray_date(v);
@@ -224,7 +224,7 @@ ray_t* ray_sum_fn(ray_t* x) {
     if (RAY_IS_PARTED(x->type)) return agg_parted_sum(x);
     if (ray_is_atom(x)) {
         /* u8/i16 scalar sum promotes to i64 */
-        if (x->type == -RAY_U8)  return make_i64((int64_t)x->u8);
+        if (x->type == -RAY_BYTE_ONLY)  return make_i64((int64_t)x->u8);
         if (x->type == -RAY_I16) return make_i64((int64_t)x->i16);
         ray_retain(x); return x;
     }
@@ -234,7 +234,7 @@ ray_t* ray_sum_fn(ray_t* x) {
         if (!agg_type_admitted(OP_SUM, x->type)) return ray_error("type", "sum expects a numeric or time-duration vector, got %s", ray_type_name(x->type));
         /* Narrow/temporal types need specific return constructors that the
          * DAG executor doesn't provide — use scalar path for these. */
-        if (x->type == RAY_I32 || x->type == RAY_I16 || x->type == RAY_U8 ||
+        if (x->type == RAY_I32 || x->type == RAY_I16 || x->type == RAY_BYTE_ONLY ||
             x->type == RAY_TIME || x->type == RAY_TIMESTAMP ||
             x->type == RAY_MINUTE || x->type == RAY_SECOND ||
             x->type == RAY_TIMESPAN) {
@@ -251,7 +251,7 @@ ray_t* ray_sum_fn(ray_t* x) {
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
                 return make_i64(sum);
-            } else if (x->type == RAY_U8) {
+            } else if (x->type == RAY_BYTE_ONLY) {
                 uint8_t* d = (uint8_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
@@ -377,7 +377,7 @@ ray_t* ray_min_fn(ray_t* x) {
                     /* Preserve the column's storage width on the result. */
                     switch (x->type) {
                     case RAY_BOOL:      return ray_bool((bool)mn);
-                    case RAY_U8:        return ray_u8((uint8_t)mn);
+                    case RAY_BYTE_ONLY: return ray_u8((uint8_t)mn);
                     case RAY_I16:       return ray_i16((int16_t)mn);
                     case RAY_I32:       return ray_i32((int32_t)mn);
                     case RAY_DATE:      return ray_date((int32_t)mn);
@@ -435,7 +435,7 @@ ray_t* ray_max_fn(ray_t* x) {
                     if (mx == INT64_MIN) return ray_typed_null(-x->type);
                     switch (x->type) {
                     case RAY_BOOL:      return ray_bool((bool)mx);
-                    case RAY_U8:        return ray_u8((uint8_t)mx);
+                    case RAY_BYTE_ONLY: return ray_u8((uint8_t)mx);
                     case RAY_I16:       return ray_i16((int16_t)mx);
                     case RAY_I32:       return ray_i32((int32_t)mx);
                     case RAY_DATE:      return ray_date((int32_t)mx);
@@ -494,7 +494,7 @@ ray_t* ray_first_fn(ray_t* x) {
          * DATE/TIME/TIMESTAMP/BOOL/U8 — bypass it. */
         if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
             x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
-            x->type == RAY_U8    || RAY_IS_TEMPORAL32(x->type) ||
+            ray_is_bytelike(x->type) || RAY_IS_TEMPORAL32(x->type) ||
             x->type == RAY_TIMESTAMP) {
             int alloc = 0;
             return collection_elem(x, 0, &alloc);
@@ -532,7 +532,7 @@ ray_t* ray_last_fn(ray_t* x) {
         /* See ray_first_fn for rationale on the type whitelist. */
         if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
             x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
-            x->type == RAY_U8    || RAY_IS_TEMPORAL32(x->type) ||
+            ray_is_bytelike(x->type) || RAY_IS_TEMPORAL32(x->type) ||
             x->type == RAY_TIMESTAMP) {
             int alloc = 0;
             return collection_elem(x, ray_len(x) - 1, &alloc);
@@ -569,7 +569,7 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
     } else if (x->type == RAY_I16) {
         int16_t* d = (int16_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
-    } else if (x->type == RAY_U8 || x->type == RAY_BOOL) {
+    } else if (x->type == RAY_BYTE_ONLY || x->type == RAY_BOOL) {
         uint8_t* d = (uint8_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
     } else if (RAY_IS_TEMPORAL32(x->type)) {
