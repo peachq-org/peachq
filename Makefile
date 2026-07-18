@@ -46,7 +46,7 @@ DEFS    = -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MIN
 DATE_DEF   = -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
 DATE_STEMS = src/app/repl src/ops/system src/qlang/q_dotz src/qlang/qmain
 $(addsuffix .o,$(DATE_STEMS)) $(addsuffix .win.o,$(DATE_STEMS)): DEFS += $(DATE_DEF)
-INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson
+INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson -Ithird_party/picohttpparser
 # Header-dependency tracking: -MMD emits a .d makefile fragment next to
 # each .o listing the headers it included (user headers only, not system);
 # -MP adds a phony target per header so deleting a header doesn't break the
@@ -109,6 +109,9 @@ LIB_SRC := $(filter-out src/app/main.c src/qlang/qmain.c src/qlang/qdoctest_main
 # Lives outside src/*/*.c so it is added explicitly; compiled with a relaxed rule
 # below (it is not part of the frozen zero-dependency base).
 LIB_SRC += third_party/yyjson/yyjson.c
+# openq: vendored picohttpparser (MIT) — request-line/header tokenizing for the
+# single-port HTTP slice (src/qlang/q_http.c owns all semantics).
+LIB_SRC += third_party/picohttpparser/picohttpparser.c
 LIB_OBJ  = $(LIB_SRC:.c=.o)
 MAIN_SRC = src/app/main.c
 MAIN_OBJ = $(MAIN_SRC:.c=.o)
@@ -178,6 +181,11 @@ help:
 # code is not held to the base's warning bar. Sanitizers stay ON to keep the
 # .j.k paths through it leak/UB-clean.
 third_party/yyjson/yyjson.o: third_party/yyjson/yyjson.c
+	$(CC) -c $(filter-out -Werror -Wstrict-prototypes -Wextra,$(CFLAGS)) \
+	  -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+# Vendored picohttpparser: same relaxation as yyjson above.
+third_party/picohttpparser/picohttpparser.o: third_party/picohttpparser/picohttpparser.c
 	$(CC) -c $(filter-out -Werror -Wstrict-prototypes -Wextra,$(CFLAGS)) \
 	  -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
@@ -494,6 +502,10 @@ WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
 
 # Vendored yyjson: same warning relaxation as the native rule above.
 third_party/yyjson/yyjson.win.o: third_party/yyjson/yyjson.c
+	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+# Vendored picohttpparser: same warning relaxation as the native rule above.
+third_party/picohttpparser/picohttpparser.win.o: third_party/picohttpparser/picohttpparser.c
 	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 %.win.o: %.c
