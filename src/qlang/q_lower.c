@@ -448,6 +448,7 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
     int is_hook_slot = (q_dotz_ipc_hook_index(nsp, nsl) >= 0) ||
                        ray_sym_is_ipc_hook(e[1]->i64) ||
                        (nsl == 5 && memcmp(nsp, ".z.ts", 5) == 0) ||   /* .z.ts timer slot */
+                       (nsl == 5 && memcmp(nsp, ".z.ph", 5) == 0) ||   /* .z.ph HTTP-GET slot */
                        (nsl == 7 && memcmp(nsp, ".z.exit", 7) == 0);   /* .z.exit exit slot */
     ray_release(ns);
 
