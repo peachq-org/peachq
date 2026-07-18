@@ -49,6 +49,7 @@ ray_t* q_mmin_wrap(ray_t* n, ray_t* x);
 ray_t* q_mcount_wrap(ray_t* n, ray_t* x);
 ray_t* q_mdev_wrap(ray_t* n, ray_t* x);
 ray_t* q_ema_wrap(ray_t* a, ray_t* x);
+ray_t* q_mmu_wrap(ray_t* x, ray_t* y);                        /* matrix multiply / dot product — used by: math */
 ray_t* q_neg_wrap(ray_t* x);
 ray_t* q_raze_wrap(ray_t* x);
 ray_t* q_within_wrap(ray_t* x, ray_t* y);
@@ -241,7 +242,7 @@ int q_is_null_sym(ray_t* x);                                  /* used by: agg */
 ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io */
 
 /* ---- defined in q_wrap_table.c ---- */
-ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, agg, list */
+ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, agg, list, math */
 ray_t* qj_item(ray_t* x, int64_t i);                          /* used by: join */
 ray_t* qj_gen_item(ray_t* x, int64_t i);                      /* used by: join */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y);                       /* used by: dotz, lower, registry */
