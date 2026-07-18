@@ -486,6 +486,11 @@ static const q_op_t Q_OPS[] = {
     { "ema",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ema", q_ema_wrap), NULL, 1, 0, "map",
       "Exponential moving average", "qdocs/docs/docs/docs/ref/ema.md",
       "x ema y    ema[x;y]", NULL },
+    /* mmu (matrix multiply / dot product) — bespoke matrix op owning its own
+     * shape logic (family none, like @ .); the `$` matmul overload is deferred. */
+    { "mmu",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmu", q_mmu_wrap), NULL, 1, 0, "none",
+      "Matrix multiply, dot product", "qdocs/docs/docs/docs/ref/mmu.md",
+      "x mmu y    mmu[x;y]", NULL },
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
      * do/while by f rank; prior is unary each-prior; peach == each. */
