@@ -64,6 +64,14 @@ ray_t* q_dotz_zwc(void);
 void   q_dotz_zpp_set(ray_t* fn);
 ray_t* q_dotz_zpp(void);
 
+/* `.z.ac` HTTP-auth + `.z.pm` HTTP-methods handler slots (ref/dotz.md; same
+ * lifecycle as `.z.ph`).  q_http.c reads them per request via the BORROWED
+ * getters (retain across the call — a handler may reassign its own slot). */
+void   q_dotz_zac_set(ray_t* fn);
+ray_t* q_dotz_zac(void);
+void   q_dotz_zpm_set(ray_t* fn);
+ray_t* q_dotz_zpm(void);
+
 /* A fresh RAY_UNARY fn-value (rc=1) that, each time the poll timer fires it,
  * resolves the CURRENT `.z.ts` binding and calls it with a fresh LOCAL
  * timestamp (`.z.P`).  Unset `.z.ts` (or a stopped timer) → no-op.  Used by the
