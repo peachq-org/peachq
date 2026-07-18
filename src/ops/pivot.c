@@ -212,7 +212,7 @@ ray_t* exec_if(ray_graph_t* g, ray_op_t* op) {
             int64_t ev = else_scalar ? e_scalar : sym_cell_runtime_id(else_v, i);
             dst[i] = cond_p[i] ? tv : ev;
         }
-    } else if (out_type == RAY_BOOL || out_type == RAY_U8) {
+    } else if (out_type == RAY_BOOL || ray_is_bytelike(out_type)) {
         uint8_t t_scalar = then_scalar ? then_v->b8 : 0;
         uint8_t e_scalar = else_scalar ? else_v->b8 : 0;
         uint8_t* t_arr = then_scalar ? NULL : (uint8_t*)ray_data(then_v);
