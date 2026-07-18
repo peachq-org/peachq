@@ -46,7 +46,7 @@ DEFS    = -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MIN
 DATE_DEF   = -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
 DATE_STEMS = src/app/repl src/ops/system src/qlang/q_dotz src/qlang/qmain
 $(addsuffix .o,$(DATE_STEMS)) $(addsuffix .win.o,$(DATE_STEMS)): DEFS += $(DATE_DEF)
-INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson -Ithird_party/picohttpparser
+INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson -Ithird_party/picohttpparser -Ithird_party/miniz
 # Header-dependency tracking: -MMD emits a .d makefile fragment next to
 # each .o listing the headers it included (user headers only, not system);
 # -MP adds a phony target per header so deleting a header doesn't break the
@@ -112,6 +112,10 @@ LIB_SRC += third_party/yyjson/yyjson.c
 # openq: vendored picohttpparser (MIT) — request-line/header tokenizing for the
 # single-port HTTP slice (src/qlang/q_http.c owns all semantics).
 LIB_SRC += third_party/picohttpparser/picohttpparser.c
+# openq: vendored miniz (MIT) — raw deflate/inflate + CRC32 behind .Q.gz.
+# Gzip (RFC 1952) framing is hand-rolled in src/qlang/q_gz.c (miniz's zlib-compat
+# layer has no gzip windowBits+16 mode). Compiled LEAN below (archive/stdio off).
+LIB_SRC += third_party/miniz/miniz.c
 LIB_OBJ  = $(LIB_SRC:.c=.o)
 MAIN_SRC = src/app/main.c
 MAIN_OBJ = $(MAIN_SRC:.c=.o)
@@ -188,6 +192,14 @@ third_party/yyjson/yyjson.o: third_party/yyjson/yyjson.c
 third_party/picohttpparser/picohttpparser.o: third_party/picohttpparser/picohttpparser.c
 	$(CC) -c $(filter-out -Werror -Wstrict-prototypes -Wextra,$(CFLAGS)) \
 	  -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+# Vendored miniz: relaxed warnings like yyjson; compiled LEAN — the ZIP archive
+# read/write and stdio APIs are off (we use only tdefl/tinfl/mz_crc32). Sanitizers
+# stay ON so the .Q.gz codec paths are leak/UB-clean.
+third_party/miniz/miniz.o: third_party/miniz/miniz.c
+	$(CC) -c $(filter-out -Werror -Wstrict-prototypes -Wextra,$(CFLAGS)) \
+	  -Wno-error -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_STDIO \
+	  $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 %.o: %.c
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
@@ -521,6 +533,12 @@ third_party/yyjson/yyjson.win.o: third_party/yyjson/yyjson.c
 # Vendored picohttpparser: same warning relaxation as the native rule above.
 third_party/picohttpparser/picohttpparser.win.o: third_party/picohttpparser/picohttpparser.c
 	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+# Vendored miniz: same relaxation + LEAN flags as the native rule above.
+third_party/miniz/miniz.win.o: third_party/miniz/miniz.c
+	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) \
+	  -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_STDIO \
+	  $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 %.win.o: %.c
 	$(WIN_CC) -c $(WIN_CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
