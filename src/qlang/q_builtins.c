@@ -10,6 +10,7 @@
 #include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
 #include "qlang/q_json.h"     /* q_json_register — .j JSON namespace */
+#include "qlang/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
 #include "qlang/q_registry.h" /* q_registry_init */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
@@ -1221,10 +1222,12 @@ void q_builtins_register(void) {
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.btoa", q_dotq_btoa_fn },
         { ".Q.c.atob", q_dotq_atob_fn }, { ".Q.c.sha1", q_dotq_sha1_fn },
+        { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
     };
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
     bind_vary (".Q.c.ops", q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
+    bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_value(".Q.c.res", q_name_reserved_words());
     /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
     /* .j JSON namespace (.j.j/.j.k/.j.jd) — plain env unaries, resolved as dotted name-refs. */
