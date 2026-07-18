@@ -1306,7 +1306,22 @@ ray_t* ray_alloc_copy(ray_t* v) {
         if (t <= 0 || t >= RAY_TYPE_COUNT)
             data_size = 0;
         else {
-            uint8_t esz = ray_sym_elem_size(t, v->attrs);
+            /* Value band 1..19: exhaustive over (ray_type_e), no default, so a
+             * future member (e.g. RAY_CHARV=21) can't land without stating its
+             * element-size lane here — the alloc-copy data-loss trap this guards.
+             * RAY_SEL(20) reaches the switch, matches no arm, keeps esz 0 (its
+             * bitmap has no fixed esz) — unchanged. */
+            uint8_t esz = 0;
+            switch ((ray_type_e)t) {
+            case RAY_LIST: break;                    /* unreachable: filtered above */
+            case RAY_BOOL: case RAY_GUID: case RAY_U8: case RAY_I16:
+            case RAY_I32: case RAY_I64: case RAY_F32: case RAY_F64:
+            case RAY_STR: case RAY_SYM: case RAY_TIMESTAMP: case RAY_MONTH:
+            case RAY_DATE: case RAY_DATETIME: case RAY_TIMESPAN: case RAY_MINUTE:
+            case RAY_SECOND: case RAY_TIME:
+                esz = ray_sym_elem_size(t, v->attrs);
+                break;
+            }
             if (v->len < 0 || (esz > 0 && (uint64_t)v->len > SIZE_MAX / esz))
                 return ray_error("oom", NULL);
             data_size = (size_t)ray_len(v) * esz;
