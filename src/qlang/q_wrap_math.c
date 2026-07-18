@@ -184,6 +184,81 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
     return make_f64(log(yf) / log(xf));
 }
 
+/* q `x mmu y` — matrix multiply / dot product (ref/mmu.md).  f64-only (`real`/int
+ * -> type; the doc says "float").  Each entry is ray_inner_prod_fn over a row of x
+ * and a column of q_flip_wrap y (reusing both kernels).  A vector is an f64 vec
+ * whose axis drops from the result; a matrix is a rectangular list of f64 vecs.
+ * Shape validated up front: ragged / count-y != count-first-x -> length. */
+enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };
+static int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* */
+    if (v && v->type == RAY_F64) { *first = ray_len(v); return 0; }   /* count x */
+    if (v && v->type == RAY_LIST && ray_len(v) > 0) {
+        ray_t** e = (ray_t**)ray_data(v);
+        int64_t w = -1;
+        for (int64_t i = 0; i < ray_len(v); i++) {
+            if (!e[i] || e[i]->type != RAY_F64) return QMMU_BAD;
+            int64_t l = ray_len(e[i]);
+            if (w < 0) w = l; else if (l != w) return QMMU_RAGGED;
+        }
+        *first = w;                                                   /* count first x */
+        return 1;
+    }
+    return QMMU_BAD;
+}
+
+ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
+    int64_t kx, ky;                                     /* count-first (matrix) / count (vec) */
+    int xc = q_mmu_class(x, &kx), yc = q_mmu_class(y, &ky);
+    if (xc == QMMU_BAD || yc == QMMU_BAD) return ray_error("type", NULL);
+    if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return ray_error("length", NULL);
+    if (kx != ray_len(y)) return ray_error("length", NULL);          /* count y must match */
+
+    ray_t* ycols = yc ? q_flip_wrap(y) : NULL;          /* owned: cols of y as f64 vecs */
+    if (yc && (!ycols || RAY_IS_ERR(ycols))) return ycols ? ycols : ray_error("oom", NULL);
+    ray_t** rowv = xc ? (ray_t**)ray_data(x) : NULL;
+    ray_t** colv = yc ? (ray_t**)ray_data(ycols) : NULL;
+    int64_t R = xc ? ray_len(x) : 1;                    /* result rows (dropped if x is a vec) */
+    int64_t C = yc ? ky : 1;                            /* result cols (dropped if y is a vec) */
+
+    /* scalar: vector . vector -> float atom (or propagated kernel error) */
+    if (!xc && !yc) return ray_inner_prod_fn(x, y);
+
+    /* matrix . matrix -> list of R f64 vecs, each length C */
+    if (xc && yc) {
+        ray_t* out = ray_list_new(R > 0 ? R : 1);
+        if (!out || RAY_IS_ERR(out)) { ray_release(ycols); return out ? out : ray_error("oom", NULL); }
+        for (int64_t i = 0; i < R; i++) {
+            ray_t* row = ray_vec_new(RAY_F64, C > 0 ? C : 1);
+            if (!row || RAY_IS_ERR(row)) { ray_release(out); ray_release(ycols); return row ? row : ray_error("oom", NULL); }
+            row->len = C;
+            double* od = (double*)ray_data(row);
+            for (int64_t j = 0; j < C; j++) {
+                ray_t* d = ray_inner_prod_fn(rowv[i], colv[j]);
+                if (!d || RAY_IS_ERR(d)) { ray_release(row); ray_release(out); ray_release(ycols); return d ? d : ray_error("oom", NULL); }
+                od[j] = as_f64(d); ray_release(d);
+            }
+            out = ray_list_append(out, row); ray_release(row);   /* append RETAINS */
+            if (RAY_IS_ERR(out)) { ray_release(ycols); return out; }
+        }
+        ray_release(ycols);
+        return out;
+    }
+
+    /* exactly one matrix operand -> f64 vec (the other axis drops) */
+    int64_t n = xc ? R : C;
+    ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1);
+    if (!out || RAY_IS_ERR(out)) { if (ycols) ray_release(ycols); return out ? out : ray_error("oom", NULL); }
+    out->len = n;
+    double* od = (double*)ray_data(out);
+    for (int64_t k = 0; k < n; k++) {
+        ray_t* d = ray_inner_prod_fn(xc ? rowv[k] : x, yc ? colv[k] : y);
+        if (!d || RAY_IS_ERR(d)) { ray_release(out); if (ycols) ray_release(ycols); return d ? d : ray_error("oom", NULL); }
+        od[k] = as_f64(d); ray_release(d);
+    }
+    if (ycols) ray_release(ycols);
+    return out;
+}
+
 /* q char-string comparison — q treats a string as a char vector, so `=`/`<>`
  * compare element-wise and yield a boolean vector (`"abc"="abd"` -> 110b).
  * rayfall's `==`/`!=` (ray_eq_fn/ray_neq_fn) compare two -RAY_STR atoms as
