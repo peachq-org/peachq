@@ -7,8 +7,11 @@
 #include "qlang/q_http.h"
 #include "qlang/q_dotz.h"      /* q_dotz_zph — the `.z.ph` handler slot */
 #include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler show output */
+#include "lang/env.h"          /* ray_env_get / ray_sym_intern — `.h.HOME` / `.h.ty` */
 #include "lang/internal.h"     /* call_fn1 */
+#include "core/runtime.h"      /* __VM — env lookups require a bound per-thread VM */
 #include "mem/sys.h"
+#include "table/dict.h"        /* ray_dict_find_sym — `.h.ty` override probe */
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
@@ -153,11 +156,73 @@ const char* q_http_mime_type(const char* path) {
     return "application/octet-stream";
 }
 
+/* Read a name from the global q env, but ONLY when a per-thread VM is bound —
+ * ray_env_get walks the scope stack via __VM and derefs it unconditionally.  The
+ * live server always serves on the runtime's main thread (VM bound), so `.h.*`
+ * resolves; a caller with no bound VM (the pure-C-seam unit tests) degrades to
+ * the fallback instead of crashing.  Borrowed ref (never release). */
+static ray_t* http_env_get(int64_t sym_id) {
+    return __VM ? ray_env_get(sym_id) : NULL;
+}
+
+/* Copy a RAY_STR ATOM's bytes into out[] (NUL-terminated) iff every byte is a
+ * safe, non-control character (>= 0x20 and != 0x7f).  Rejects CR/LF (HTTP
+ * header injection) and embedded NUL (silent truncation).  false = wrong type /
+ * empty / oversize / control byte -> caller uses its own fallback.  SSO: accepts
+ * ONLY a string atom (-RAY_STR), never a RAY_STR column, and reads it through
+ * ray_str_ptr/_len (never ray_len). */
+static bool http_str_atom_safe(ray_t* v, char* out, size_t outsz) {
+    if (!v || RAY_IS_ERR(v) || v->type != -RAY_STR) return false;
+    size_t n = ray_str_len(v);
+    if (n == 0 || n >= outsz) return false;
+    const char* s = ray_str_ptr(v);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == 0x7f) return false;
+    }
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return true;
+}
+
+const char* q_http_docroot(char* buf, size_t bufsz) {
+    ray_t* home = http_env_get(ray_sym_intern(".h.HOME", 7));  /* borrowed, NULL if unset */
+    if (http_str_atom_safe(home, buf, bufsz)) return buf;
+    if (bufsz > 4) { memcpy(buf, "html", 5); return buf; }     /* fallback (incl. NUL) */
+    return "html";
+}
+
+const char* q_http_mime_lookup(const char* path, char* scratch, size_t scratchsz) {
+    const char* dot = strrchr(path, '.');
+    if (dot && dot[1]) {
+        char   low[24];
+        size_t el = strlen(dot + 1);
+        if (el > 0 && el < sizeof low) {
+            for (size_t i = 0; i < el; i++) {         /* `.h.ty` keys are lowercase syms */
+                unsigned char c = (unsigned char)dot[1 + i];
+                low[i] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+            }
+            ray_t* ty = http_env_get(ray_sym_intern(".h.ty", 5));  /* borrowed */
+            if (ty && !RAY_IS_ERR(ty) && ty->type == RAY_DICT) {
+                ray_t* key = ray_sym(ray_sym_intern(low, el));     /* owned atom */
+                ray_t* v   = key ? ray_dict_get(ty, key) : NULL;   /* owned or NULL (miss) */
+                if (key) ray_release(key);
+                bool ok = http_str_atom_safe(v, scratch, scratchsz);
+                if (v) { if (RAY_IS_ERR(v)) ray_error_free(v); else ray_release(v); }
+                if (ok) return scratch;
+            }
+        }
+    }
+    return q_http_mime_type(path);
+}
+
 int q_http_open_doc(const char* rel, size_t n, int64_t* size_out) {
     if (!q_http_path_ok(rel, n)) return -1;             /* defense in depth */
 
+    char rootbuf[Q_HTTP_MAX_PATH];
+    const char* root = q_http_docroot(rootbuf, sizeof rootbuf);   /* `.h.HOME` or "html" */
 #ifndef RAY_OS_WINDOWS
-    int dir = open("html", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    int dir = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     if (dir < 0) return -1;
     size_t i = 0;
     while (i < n) {
@@ -184,9 +249,9 @@ int q_http_open_doc(const char* rel, size_t n, int64_t* size_out) {
     if (size_out) *size_out = (int64_t)st.st_size;
     return dir;
 #else
-    char path[Q_HTTP_MAX_PATH + 8];
-    if (n + 6 >= sizeof path) return -1;
-    snprintf(path, sizeof path, "html/%.*s", (int)n, rel);
+    char path[2 * Q_HTTP_MAX_PATH];
+    int  pl = snprintf(path, sizeof path, "%s/%.*s", root, (int)n, rel);
+    if (pl < 0 || (size_t)pl >= sizeof path) return -1;
     int fd = _open(path, _O_RDONLY | _O_BINARY);
     if (fd < 0) return -1;
     struct _stat64 st;
@@ -212,41 +277,60 @@ void q_http_send_simple(ray_sock_t fd, int code, const char* reason) {
         http_send(fd, body, (size_t)bl);
 }
 
-/* True when there is NO ./html docroot at all (absent, not a missing file inside
- * one) — drives the built-in landing page below instead of a bare 404. */
+/* True when there is NO docroot at all (the `.h.HOME`/"html" dir is absent, not a
+ * missing file inside one) — drives the built-in landing page below. */
 static bool http_docroot_absent(void) {
+    char rootbuf[Q_HTTP_MAX_PATH];
+    const char* root = q_http_docroot(rootbuf, sizeof rootbuf);
 #ifndef RAY_OS_WINDOWS
-    int d = open("html", O_RDONLY | O_DIRECTORY);
+    int d = open(root, O_RDONLY | O_DIRECTORY);
     if (d >= 0) { close(d); return false; }
     return errno == ENOENT;
 #else
     struct _stat64 st;
-    return !(_stat64("html", &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFDIR);
+    return !(_stat64(root, &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFDIR);
 #endif
 }
 
 /* Friendly 200 when no docroot exists yet: the server is up, tell the operator
- * how to serve content, rather than 404-ing every path. */
-static void serve_welcome(ray_sock_t fd) {
-    static const char body[] =
+ * how to serve content, rather than 404-ing every path.  `root` is the resolved
+ * docroot dir (already validated safe by q_http_docroot). */
+static void serve_welcome(ray_sock_t fd, const char* root) {
+    static const char generic[] =
         "<!doctype html><meta charset=utf-8><title>openq</title>\n"
         "<h1>openq HTTP server is running</h1>\n"
-        "<p>No <code>./html</code> directory was found. Create one (with an "
+        "<p>No docroot directory was found. Create one (with an "
         "<code>index.html</code>) beside the process to serve your own pages.</p>\n";
+    char body[512];
+    int bl = snprintf(body, sizeof body,
+        "<!doctype html><meta charset=utf-8><title>openq</title>\n"
+        "<h1>openq HTTP server is running</h1>\n"
+        "<p>No <code>%s</code> directory was found. Create one (with an "
+        "<code>index.html</code>) beside the process to serve your own pages.</p>\n",
+        root);
+    const char* b = body;
+    size_t      n = (size_t)bl;
+    if (bl < 0 || (size_t)bl >= sizeof body) {   /* over-long root -> generic body */
+        b = generic;
+        n = sizeof generic - 1;
+    }
     char hdr[192];
     int hl = snprintf(hdr, sizeof hdr,
                       "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-                      "Content-Length: %zu\r\nConnection: close\r\n\r\n",
-                      sizeof body - 1);
+                      "Content-Length: %zu\r\nConnection: close\r\n\r\n", n);
     if (hl > 0 && http_send(fd, hdr, (size_t)hl) == 0)
-        http_send(fd, body, sizeof body - 1);
+        http_send(fd, b, n);
 }
 
 static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
     int64_t size = 0;
     int doc = q_http_open_doc(rel, rl, &size);
     if (doc < 0) {
-        if (http_docroot_absent()) { serve_welcome(fd); return; }
+        if (http_docroot_absent()) {
+            char rootbuf[Q_HTTP_MAX_PATH];
+            serve_welcome(fd, q_http_docroot(rootbuf, sizeof rootbuf));
+            return;
+        }
         q_http_send_simple(fd, 404, "Not Found");
         return;
     }
@@ -282,10 +366,12 @@ static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
         return;
     }
     char hdr[256];
+    char mimebuf[64];
     int hl = snprintf(hdr, sizeof hdr,
                       "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n"
                       "Content-Length: %lld\r\nConnection: close\r\n\r\n",
-                      q_http_mime_type(rel), (long long)size);
+                      q_http_mime_lookup(rel, mimebuf, sizeof mimebuf),
+                      (long long)size);
     if (hl > 0) {
         if (http_send(fd, hdr, (size_t)hl) == 0 && size)
             http_send(fd, buf, (size_t)size);
