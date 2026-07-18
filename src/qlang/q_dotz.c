@@ -62,6 +62,8 @@ static ray_t* g_zws        = NULL;  /* current `.z.ws` WS-message handler (owned
 static ray_t* g_zwo        = NULL;  /* current `.z.wo` WS-open handler (owned) */
 static ray_t* g_zwc        = NULL;  /* current `.z.wc` WS-close handler (owned) */
 static ray_t* g_zpp        = NULL;  /* current `.z.pp` HTTP-POST handler (owned) */
+static ray_t* g_zac        = NULL;  /* current `.z.ac` HTTP-auth handler (owned) */
+static ray_t* g_zpm        = NULL;  /* current `.z.pm` HTTP-methods handler (owned) */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
     if (len == 5 && memcmp(name, ".z.bm", 5) == 0)
@@ -401,6 +403,22 @@ void q_dotz_zpp_set(ray_t* fn) {
 
 ray_t* q_dotz_zpp(void) { return g_zpp; }   /* BORROWED; NULL = unset */
 
+/* `.z.ac` (HTTP auth) + `.z.pm` (HTTP other-methods) slots — `.z.ph` lifecycle;
+ * FIRED by q_http.c (the auth gate / the non-GET-POST method dispatch). */
+void q_dotz_zac_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zac) ray_release(g_zac);
+    g_zac = fn;
+}
+ray_t* q_dotz_zac(void) { return g_zac; }   /* BORROWED; NULL = unset */
+
+void q_dotz_zpm_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zpm) ray_release(g_zpm);
+    g_zpm = fn;
+}
+ray_t* q_dotz_zpm(void) { return g_zpm; }   /* BORROWED; NULL = unset */
+
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
  * exit parameter; default = do nothing), then drain its show/0N! console
  * output to stdout — this runs moments before exit(), nothing else drains. */
@@ -525,6 +543,14 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
         ray_retain(g_zpp);
         out = g_zpp;
     }
+    if (!out && n == 5 && memcmp(p, ".z.ac", 5) == 0 && g_zac) {
+        ray_retain(g_zac);
+        out = g_zac;
+    }
+    if (!out && n == 5 && memcmp(p, ".z.pm", 5) == 0 && g_zpm) {
+        ray_retain(g_zpm);
+        out = g_zpm;
+    }
 
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
      * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
@@ -551,6 +577,8 @@ void q_dotz_destroy(void) {
     if (g_zwo) { ray_release(g_zwo); g_zwo = NULL; }
     if (g_zwc) { ray_release(g_zwc); g_zwc = NULL; }
     if (g_zpp) { ray_release(g_zpp); g_zpp = NULL; }
+    if (g_zac) { ray_release(g_zac); g_zac = NULL; }
+    if (g_zpm) { ray_release(g_zpm); g_zpm = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;

@@ -3,7 +3,9 @@
  * complete request-header block to q_http_respond; everything HTTP-semantic
  * (parse via vendored picohttpparser, traversal guard, MIME, the `.z.ph`
  * override hook, response bytes) lives here, outside the frozen base.
- * Scope: GET + `.z.ph` + the WebSocket upgrade hand-off (q_ws.c) — no TLS.
+ * Scope: GET (`.z.ph`), POST (`.z.pp`), the other HTTP methods (`.z.pm`:
+ * OPTIONS/PUT/DELETE/PATCH), the `.z.ac` auth gate that precedes every
+ * handler, and the WebSocket upgrade hand-off (q_ws.c) — no TLS.
  * The docroot and MIME map are single-homed on the `.h` constants (`.h.HOME` /
  * `.h.ty`, defined in src/qlang/h.q) at request time, with the built-in "html"
  * docroot and MIME table as defensive fallbacks; both are user-overridable. */
@@ -13,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <rayforce.h>          /* ray_t — the `.z.ac` return-value parser prototype */
 #include "core/sock.h"
 
 /* Percent-decode a request path exactly once into out (NUL-terminated).
@@ -58,5 +61,14 @@ int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs);
  * unparseable -> 400.  Never closes fd (the caller owns the socket). */
 int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
                    bool auth_required);
+
+/* Structural parse of a `.z.ac` return value `(status; payload)` (ref/dotz.md):
+ * item0 an integer atom (byte/short/int/long), item1 a RAY_STR atom.  On a
+ * well-formed 2-item list writes *status_out and the payload ptr/len (aliasing
+ * r's storage — valid only while r is retained) and returns true; false on any
+ * other shape.  Pure (no socket/send) so it is unit-tested directly; the caller
+ * (the gate) maps the status to reject / proceed / custom / fallback. */
+bool q_http_zac_parse(const ray_t* r, int64_t* status_out,
+                      const char** pay_out, size_t* paylen_out);
 
 #endif /* Q_HTTP_H */
