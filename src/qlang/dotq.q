@@ -16,6 +16,7 @@
 .Q.res:.Q.c.res;
 .Q.hg:.Q.c.hg;
 .Q.hp:.Q.c.hp;
+.Q.gz:.Q.c.gz;
 
 / ---- Constants (ref/dotq.md) ----
 .Q.b6:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
