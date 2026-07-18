@@ -18,6 +18,7 @@
 #include "qlang/q_fmt_pipe.h" /* q_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_parse.h"    /* q_parse, q_lower — embedded-bootstrap loader */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
+#include "qlang/h_gen.h"      /* OPENQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
 #include "lang/env.h"         /* ray_env_bind — `.q.*` keyword bindings */
 #include "lang/eval.h"        /* ray_eval_set_apply_hook / _name_hook / ray_eval */
 #include <rayforce.h>
@@ -76,11 +77,11 @@ static int q_bootstrap_dotq_line(const char* s) {
     return 1;
 }
 
-/* Load the embedded bootstrap (q.q then dotq.q -> OPENQ_BOOTSTRAP) line at a
- * time, post-registry (rule 6), silently; blank/`/`-comment lines skipped,
- * `.q.name:` lines take the privileged binder, errors reported, never fatal. */
-static void q_bootstrap_load(void) {
-    const char* p = OPENQ_BOOTSTRAP;
+/* Load one embedded bootstrap source (`src`) line at a time, post-registry
+ * (rule 6), silently; blank/`/`-comment lines skipped, `.q.name:` lines take the
+ * privileged binder, errors reported, never fatal.  Called for the q.q+dotq.q
+ * bundle and then the always-on `.h` constants (h.q). */
+static void q_bootstrap_load_src(const char* p) {
     char line[4096];
     while (*p) {
         const char* nl = strchr(p, '\n');
@@ -154,7 +155,8 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
          * process-constant argv values once and install the name-load hook. */
         q_dotz_init(argc, argv);
         ray_eval_set_name_hook(q_name_resolve);
-        q_bootstrap_load();    /* embedded .q stdlib, post-registry (rule 6) */
+        q_bootstrap_load_src(OPENQ_BOOTSTRAP);  /* embedded .q stdlib, post-registry (rule 6) */
+        q_bootstrap_load_src(OPENQ_H_BOOTSTRAP); /* `.h` constants (h.q), always-on beside dotq */
         /* QK_QSRC manifest cells (infix q.q keywords) snapshot their `.q`
          * definitions now that the bootstrap has bound them. */
         if (q_registry_bind_qsrc() != RAY_OK)
