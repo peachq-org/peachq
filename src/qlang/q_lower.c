@@ -452,6 +452,7 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
                        (nsl == 5 && memcmp(nsp, ".z.ws", 5) == 0) ||   /* .z.ws/.z.wo/.z.wc */
                        (nsl == 5 && memcmp(nsp, ".z.wo", 5) == 0) ||   /*   WebSocket slots  */
                        (nsl == 5 && memcmp(nsp, ".z.wc", 5) == 0) ||   /*   (q_ws.c)         */
+                       (nsl == 5 && memcmp(nsp, ".z.pp", 5) == 0) ||   /* .z.pp HTTP-POST slot */
                        (nsl == 7 && memcmp(nsp, ".z.exit", 7) == 0);   /* .z.exit exit slot */
     ray_release(ns);
 
