@@ -35,8 +35,9 @@
 
 #define Q_HTTP_MAX_HEADERS 64
 #define Q_HTTP_MAX_PATH    1024
-#define Q_HTTP_MAX_FILE    (32ll * 1024 * 1024)   /* served-file cap (slice) */
+#define Q_HTTP_MAX_FILE    (32ll * 1024 * 1024)   /* served-file / POST-body cap (slice) */
 #define Q_HTTP_SEND_SECS   30                     /* whole-response send deadline */
+#define Q_HTTP_RECV_SECS   30                     /* whole POST-body read deadline */
 
 /* Bounded-deadline send: ray_sock_send waits FOREVER, so a stalled reader on a
  * 32 MiB body would wedge the poll loop — sock.c's loop + a deadline.  0/-1.
@@ -72,6 +73,46 @@ int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs) {
         }
         p   += n;
         rem -= (size_t)n;
+    }
+    return 0;
+}
+
+/* Bounded-deadline body read: the frozen ipc.c accumulator stops at the header
+ * terminator (\r\n\r\n), so a POST body is still unread in the socket.  fd is
+ * non-blocking in the poll loop — poll for readability like http_send does for
+ * writability.  Synchronous in-poll read is a temporary degradation (a slow
+ * POST stalls the loop); the async body state machine belongs in frozen ipc.c.
+ * Returns 0 (want bytes read) / -1 (error/timeout/early close). */
+static int http_recv_n(ray_sock_t fd, uint8_t* buf, size_t want) {
+    size_t got = 0;
+    time_t end = time(NULL) + Q_HTTP_RECV_SECS;
+    while (got < want) {
+#ifdef RAY_OS_WINDOWS
+        int n = recv(fd, (char*)buf + got, (int)(want - got), 0);
+        int e = (n < 0) ? WSAGetLastError() : 0;
+        bool again = (e == WSAEWOULDBLOCK);
+        bool intr  = (e == WSAEINTR);
+#else
+        ssize_t n = recv(fd, buf + got, want - got, 0);
+        bool again = (n < 0) && (errno == EAGAIN || errno == EWOULDBLOCK);
+        bool intr  = (n < 0) && (errno == EINTR);
+#endif
+        if (n == 0) return -1;                    /* peer closed before full body */
+        if (n < 0) {
+            if (intr) continue;
+            if (!again) return -1;
+            time_t now = time(NULL);
+            if (now >= end) return -1;
+#ifdef RAY_OS_WINDOWS
+            WSAPOLLFD pfd = { fd, POLLIN, 0 };
+            if (WSAPoll(&pfd, 1, (INT)((end - now) * 1000)) <= 0) return -1;
+#else
+            struct pollfd pfd = { .fd = fd, .events = POLLIN };
+            if (poll(&pfd, 1, (int)((end - now) * 1000)) <= 0) return -1;
+#endif
+            continue;
+        }
+        got += (size_t)n;
     }
     return 0;
 }
@@ -381,22 +422,19 @@ static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
     if (buf) ray_sys_free(buf);
 }
 
-/* `.z.ph` dispatch (ref/dotz.md; PROVISIONAL pre-C3: string ATOMS): call the
- * handler with (requestText; sym-keyed headerDict), write its returned response
- * string VERBATIM.  Error/non-string -> 500.  0 handled / -1 no handler. */
-static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
-                        const struct phr_header* hdrs, size_t nh)
+/* Shared `.z.ph`/`.z.pp` dispatch core (ref/dotz.md; PROVISIONAL pre-C3: string
+ * ATOMS): call fn (BORROWED, caller-retained) with (text; sym-keyed headerDict),
+ * write its returned response string VERBATIM.  Error/non-string -> 500.  Always
+ * returns 0 (a response was sent).  `which` names the handler for the log. */
+static int zh_dispatch_call(ray_sock_t fd, const char* text_p, size_t text_len,
+                            const struct phr_header* hdrs, size_t nh,
+                            ray_t* fn, const char* which)
 {
-    ray_t* fn = q_dotz_zph();                  /* borrowed, NULL = unset */
-    if (!fn) return -1;
-    ray_retain(fn);                            /* handler may reassign .z.ph */
-
     /* picohttpparser sets name==NULL for an obsolete folded header — skip it. */
     size_t nk = 0;
     for (size_t i = 0; i < nh; i++) if (hdrs[i].name) nk++;
 
-    if (tlen && target[0] == '/') { target++; tlen--; }
-    ray_t* text = ray_str(target, tlen);
+    ray_t* text = ray_str(text_p, text_len);
     ray_t* keys = ray_vec_new(RAY_SYM, nk > 0 ? (int64_t)nk : 1);
     ray_t* vals = ray_list_new(nk > 0 ? (int64_t)nk : 1);
     ray_t* arg  = ray_list_new(2);
@@ -418,24 +456,34 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
             vals = nv;
         }
     }
+    ray_t* hdrd = NULL;
+    if (!bad) {
+        hdrd = ray_dict_new(keys, vals);       /* consumes keys+vals */
+        keys = vals = NULL;
+        if (!hdrd || RAY_IS_ERR(hdrd)) bad = true;
+    }
+    if (!bad) {
+        ray_t* a1 = ray_list_append(arg, text);      /* append RETAINS */
+        if (RAY_IS_ERR(a1)) bad = true; else arg = a1;
+    }
+    if (!bad) {
+        ray_t* a2 = ray_list_append(arg, hdrd);
+        if (RAY_IS_ERR(a2)) bad = true; else arg = a2;
+    }
     if (bad) {
-        if (text && !RAY_IS_ERR(text)) ray_release(text);
-        if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
-        if (vals && !RAY_IS_ERR(vals)) ray_release(vals);
-        if (arg  && !RAY_IS_ERR(arg))  ray_release(arg);
-        ray_release(fn);
+        /* free both plain and error objects (constructors may return either). */
+        #define ZH_DROP(o) do { if (o) { if (RAY_IS_ERR(o)) ray_error_free(o); \
+                                         else ray_release(o); } } while (0)
+        ZH_DROP(text); ZH_DROP(keys); ZH_DROP(vals); ZH_DROP(hdrd); ZH_DROP(arg);
+        #undef ZH_DROP
         q_http_send_simple(fd, 500, "Internal Server Error");
         return 0;
     }
-    ray_t* hdrd = ray_dict_new(keys, vals);    /* consumes both; dup keys kept as-is */
-    arg = ray_list_append(arg, text);
     ray_release(text);
-    arg = ray_list_append(arg, hdrd);
     ray_release(hdrd);
 
     ray_t* r = call_fn1(fn, arg);
     ray_release(arg);
-    ray_release(fn);
     /* drain handler show/0N! to the server console (q_zts_tick pattern) */
     { const char* con = q_console_str();
       if (con && *con) { fputs(con, stdout); fflush(stdout); }
@@ -446,7 +494,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
         ray_release(r);
         return 0;
     }
-    fprintf(stderr, "http: .z.ph returned %s — sending 500\n",
+    fprintf(stderr, "http: %s returned %s — sending 500\n", which,
             (r && RAY_IS_ERR(r)) ? "an error" : "a non-string");
     if (r) {
         if (RAY_IS_ERR(r)) ray_error_free(r);
@@ -454,6 +502,71 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
     }
     q_http_send_simple(fd, 500, "Internal Server Error");
     return 0;
+}
+
+/* `.z.ph` (HTTP GET) — requestText is the request target (leading '/' stripped).
+ * 0 handled / -1 no handler set. */
+static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
+                        const struct phr_header* hdrs, size_t nh)
+{
+    ray_t* fn = q_dotz_zph();                  /* borrowed, NULL = unset */
+    if (!fn) return -1;
+    ray_retain(fn);                            /* handler may reassign .z.ph */
+    if (tlen && target[0] == '/') { target++; tlen--; }
+    int r = zh_dispatch_call(fd, target, tlen, hdrs, nh, fn, ".z.ph");
+    ray_release(fn);
+    return r;
+}
+
+/* `.z.pp` (HTTP POST) — the request body (read from the socket; the frozen
+ * ipc.c accumulator stops at the header terminator) is requestText.  No `.z.pp`
+ * set -> 501 (openq policy; ref/dotz.md pins no default).  Transfer-Encoding on
+ * the request -> 400 (chunked request bodies deferred).  Sends a response in
+ * every branch. */
+static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh)
+{
+    ray_t* fn = q_dotz_zpp();                  /* borrowed, NULL = unset */
+    if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
+
+    int64_t cl = 0; bool have_cl = false;
+    for (size_t i = 0; i < nh; i++) {
+        if (!hdrs[i].name) continue;
+        if (str_ieq(hdrs[i].name, hdrs[i].name_len, "transfer-encoding")) {
+            q_http_send_simple(fd, 400, "Bad Request"); return;
+        }
+        if (str_ieq(hdrs[i].name, hdrs[i].name_len, "content-length")) {
+            /* strict: leading/trailing OWS only, all-digit body (an embedded
+             * space would let a client under-declare and stall the read). */
+            const char* vp = hdrs[i].value; size_t vn = hdrs[i].value_len;
+            size_t s = 0; while (s < vn && (vp[s] == ' ' || vp[s] == '\t')) s++;
+            size_t e = vn; while (e > s && (vp[e-1] == ' ' || vp[e-1] == '\t')) e--;
+            if (s == e) { q_http_send_simple(fd, 400, "Bad Request"); return; }
+            int64_t v = 0; bool over = false;
+            for (size_t k = s; k < e; k++) {
+                if (vp[k] < '0' || vp[k] > '9') { q_http_send_simple(fd, 400, "Bad Request"); return; }
+                v = v * 10 + (vp[k] - '0');
+                if (v > Q_HTTP_MAX_FILE) { over = true; break; }
+            }
+            if (over) { q_http_send_simple(fd, 413, "Payload Too Large"); return; }
+            if (have_cl && v != cl) { q_http_send_simple(fd, 400, "Bad Request"); return; }
+            have_cl = true; cl = v;
+        }
+    }
+
+    ray_retain(fn);                            /* handler may reassign .z.pp */
+    uint8_t* body = NULL;
+    if (have_cl && cl > 0) {
+        body = (uint8_t*)ray_sys_alloc((size_t)cl);
+        if (!body) { ray_release(fn); q_http_send_simple(fd, 500, "Internal Server Error"); return; }
+        if (http_recv_n(fd, body, (size_t)cl) != 0) {
+            ray_sys_free(body); ray_release(fn);
+            q_http_send_simple(fd, 400, "Bad Request"); return;
+        }
+    }
+    zh_dispatch_call(fd, body ? (const char*)body : "", have_cl ? (size_t)cl : 0,
+                     hdrs, nh, fn, ".z.pp");
+    if (body) ray_sys_free(body);
+    ray_release(fn);
 }
 
 int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
@@ -472,8 +585,12 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
         q_http_send_simple(fd, 400, "Bad Request");
         return 0;
     }
+    if (mlen == 4 && memcmp(method, "POST", 4) == 0) {
+        zpp_dispatch(fd, hdrs, nh);   /* `.z.pp` override, else 501 */
+        return 0;
+    }
     if (!(mlen == 3 && memcmp(method, "GET", 3) == 0)) {
-        q_http_send_simple(fd, 501, "Not Implemented");   /* .z.pp/.z.pm deferred */
+        q_http_send_simple(fd, 501, "Not Implemented");   /* .z.pm deferred */
         return 0;
     }
     /* WebSocket upgrade (kb/websockets.md: same-port WS server): a GET whose
