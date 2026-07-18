@@ -205,10 +205,18 @@ src/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.sh
 
 src/qlang/q_runtime.o src/qlang/q_runtime.win.o: src/qlang/dotq_gen.h
 
+# openq: the PeachQ stdlib embedded header — SAME codegen as dotq_gen.h but a
+# distinct symbol (OPENQ_PQ_BOOTSTRAP) via the SYMBOL override. NOT loaded at
+# q_runtime_create; only q_pq.c #includes it, wired to the `\l pq` gate.
+src/qlang/pq_gen.h: src/qlang/pq.q tools/gen-bootstrap.sh
+	SYMBOL=OPENQ_PQ_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/pq.q
+
+src/qlang/q_pq.o src/qlang/q_pq.win.o: src/qlang/pq_gen.h
+
 # The bench-* targets compile $(LIB_SRC) (incl. q_runtime.c) directly, so the
 # generated header must exist before they run (else a post-`make clean` bench
 # build fails on the missing include).
-bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup: src/qlang/dotq_gen.h
+bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup: src/qlang/dotq_gen.h src/qlang/pq_gen.h
 
 # Main binary — shared by debug/release/test (test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as a server, so test depends on it too).
@@ -563,6 +571,8 @@ clean:
 	-rm -f $(TARGET) $(Q_TARGET) $(QDOC_TARGET) $(TARGET).test lib$(TARGET).a
 	# openq: generated embedded-bootstrap header (codegen'd from src/qlang/dotq.q).
 	-rm -f src/qlang/dotq_gen.h
+	# openq: generated PeachQ stdlib header (codegen'd from src/qlang/pq.q).
+	-rm -f src/qlang/pq_gen.h
 	-rm -f build/$(TARGET).parsediff.test $(PARSE_DIFF_OBJ) $(PARSE_DIFF_OBJ:.o=.d)
 	-rm -rf build build_release dist
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
