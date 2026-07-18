@@ -1470,18 +1470,24 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
      * invokes a bare RAY_LAMBDA directly — a carrier would need the apply hook
      * (not installed at fire time) and would silently never fire. */
     if ((l == 5 && (memcmp(nm, ".z.ts", 5) == 0 ||
-                    memcmp(nm, ".z.ph", 5) == 0)) ||   /* HTTP GET handler (q_http.c) */
+                    memcmp(nm, ".z.ph", 5) == 0 ||     /* HTTP GET handler (q_http.c) */
+                    memcmp(nm, ".z.ws", 5) == 0 ||     /* WS handlers (q_ws.c) */
+                    memcmp(nm, ".z.wo", 5) == 0 ||
+                    memcmp(nm, ".z.wc", 5) == 0)) ||
         (l == 7 && memcmp(nm, ".z.exit", 7) == 0)) {
-        int is_exit = l == 7;
-        int is_ph   = l == 5 && nm[3] == 'p';
+        char c3 = l == 7 ? 'e' : nm[3];
+        char c4 = l == 7 ? '\0' : nm[4];
         ray_t* zv = y;
         if (y && y->type == RAY_LIST && q_deriv_kind_of(y) == Q_DERIV_LAMBDA) {
             ray_t* base = q_deriv_base(y);      /* borrowed bare RAY_LAMBDA */
             if (base) zv = base;
         }
         ray_release(s);
-        if (is_exit) q_dotz_zexit_set(zv);
-        else if (is_ph) q_dotz_zph_set(zv);
+        if (c3 == 'e')      q_dotz_zexit_set(zv);
+        else if (c3 == 'p') q_dotz_zph_set(zv);
+        else if (c3 == 'w' && c4 == 's') q_dotz_zws_set(zv);
+        else if (c3 == 'w' && c4 == 'o') q_dotz_zwo_set(zv);
+        else if (c3 == 'w' && c4 == 'c') q_dotz_zwc_set(zv);
         else q_dotz_zts_set(zv);    /* setters RETAIN (zv is borrowed here) */
         ray_retain(x);
         return x;
