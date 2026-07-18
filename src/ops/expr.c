@@ -60,7 +60,7 @@ static bool atom_to_numeric(ray_t* atom, double* out_f, int64_t* out_i, bool* ou
             *out_f = (double)atom->i16;
             *out_is_f64 = false;
             return true;
-        case -RAY_U8:
+        RAY_BYTE_ATOM_CASES:
         case -RAY_BOOL:
             *out_i = (int64_t)atom->u8;
             *out_f = (double)atom->u8;
@@ -188,7 +188,7 @@ static bool const_expr_to_i64(ray_graph_t* g, ray_op_t* op, int64_t* out) {
 static inline bool type_is_linear_i64_col(int8_t t) {
     return t == RAY_I64 || RAY_IS_TEMPORAL64(t) ||
            t == RAY_I32 || RAY_IS_TEMPORAL32(t) || t == RAY_I16 ||
-           t == RAY_U8 || t == RAY_BOOL || RAY_IS_SYM(t);
+           t == RAY_BYTE_ONLY || t == RAY_BOOL || RAY_IS_SYM(t);
 }
 
 static bool linear_expr_add_term(linear_expr_i64_t* e, int64_t sym, int64_t coeff) {
@@ -381,7 +381,7 @@ bool try_affine_sumavg_input(ray_graph_t* g, ray_t* tbl, ray_op_t* input_op,
     }
 
     if (bt == RAY_I64 || RAY_IS_TEMPORAL64(bt) ||
-        bt == RAY_I32 || bt == RAY_I16 || bt == RAY_U8 || bt == RAY_BOOL ||
+        bt == RAY_I32 || bt == RAY_I16 || bt == RAY_BYTE_ONLY || bt == RAY_BOOL ||
         RAY_IS_SYM(bt)) {
         int64_t c = 0;
         if (c_is_f64) {
@@ -715,7 +715,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                                          op == OP_AND || op == OP_OR || op == OP_NOT;
                         dst_nullable = false;
                     } else if (op == OP_CAST) {
-                        dst_nullable   = (ot != RAY_BOOL && ot != RAY_U8);
+                        dst_nullable   = (ot != RAY_BOOL && ot != RAY_BYTE_ONLY);
                         ins_null_aware = true;
                     } else {
                         /* Arithmetic:
@@ -735,7 +735,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                         ins_null_aware = !f64_ieee_propagates;
                         dst_nullable   = true;
                     }
-                    if (ot == RAY_U8)
+                    if (ot == RAY_BYTE_ONLY)
                         EXPR_BAIL(EXPR_BAIL_NULL_SHAPE); /* no U8 sentinel */
                 }
 
@@ -802,7 +802,7 @@ static void expr_load_i64(int64_t* dst, const void* data, int8_t col_type,
             else
                 for (int64_t j = 0; j < n; j++) dst[j] = s[j];
         } break;
-        case RAY_U8: case RAY_BOOL: {
+        RAY_BYTE_CASES: case RAY_BOOL: {
             /* U8/BOOL are non-nullable — no sentinel mapping needed */
             const uint8_t* s = (const uint8_t*)data + start;
             for (int64_t j = 0; j < n; j++) dst[j] = s[j];
@@ -850,7 +850,7 @@ static void expr_load_f64(double* dst, const void* data, int8_t col_type,
             else
                 for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
         } break;
-        case RAY_U8: case RAY_BOOL: {
+        RAY_BYTE_CASES: case RAY_BOOL: {
             /* U8/BOOL are non-nullable — no sentinel mapping needed */
             const uint8_t* s = (const uint8_t*)data + start;
             for (int64_t j = 0; j < n; j++) dst[j] = (double)s[j];
@@ -1039,7 +1039,7 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
             case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
             default: break;
         }
-    } else if (dt == RAY_U8) {
+    } else if (dt == RAY_BYTE_ONLY) {
         uint8_t* d2 = (uint8_t*)dp;
         const uint8_t* a2 = (const uint8_t*)ap;
         const uint8_t* b2 = (const uint8_t*)bp;
@@ -1333,7 +1333,7 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
             else
                 for (int64_t j = 0; j < n; j++) d[j] = (int16_t)a[j];
         }
-    } else if (dt == RAY_U8) {
+    } else if (dt == RAY_BYTE_ONLY) {
         uint8_t* d = (uint8_t*)dp;
         if (t1 == RAY_F64) {
             const double* a = (const double*)ap;
@@ -2344,7 +2344,7 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                     out_off += n;
                 }
             }
-        } else if (in_type == RAY_U8 || in_type == RAY_BOOL) {
+        } else if (in_type == RAY_BYTE_ONLY || in_type == RAY_BOOL) {
             if (out_type == RAY_I64) {
                 while (ray_morsel_next(&m)) {
                     int64_t n = m.morsel_len;
@@ -2380,7 +2380,7 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                     for (int64_t i = 0; i < n; i++) dst[i] = (int16_t)src[i];
                     out_off += n;
                 }
-            } else if (out_type == RAY_U8 || out_type == RAY_BOOL) {
+            } else if (out_type == RAY_BYTE_ONLY || out_type == RAY_BOOL) {
                 while (ray_morsel_next(&m)) {
                     int64_t n = m.morsel_len;
                     int64_t* src = (int64_t*)m.morsel_ptr;
@@ -2411,7 +2411,7 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                     for (int64_t i = 0; i < n; i++) dst[i] = (int16_t)src[i];
                     out_off += n;
                 }
-            } else if (out_type == RAY_U8 || out_type == RAY_BOOL) {
+            } else if (out_type == RAY_BYTE_ONLY || out_type == RAY_BOOL) {
                 while (ray_morsel_next(&m)) {
                     int64_t n = m.morsel_len;
                     double* src = (double*)m.morsel_ptr;
@@ -2581,7 +2581,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
          lhs->type == RAY_TIME || lhs->type == RAY_I16   ||
          lhs->type == RAY_MONTH ||
          lhs->type == RAY_MINUTE || lhs->type == RAY_SECOND ||
-         lhs->type == RAY_BOOL || lhs->type == RAY_U8    ||
+         lhs->type == RAY_BOOL || ray_is_bytelike(lhs->type) ||
          RAY_IS_SYM(lhs->type)))
     {
         int64_t l_off = start;
@@ -2725,7 +2725,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         }
         else if (lhs->type == RAY_I32 || RAY_IS_TEMPORAL32(lhs->type)) lp_i32 = (int32_t*)lbase;
         else if (lhs->type == RAY_I16) lp_i16 = (int16_t*)lbase;
-        else if (lhs->type == RAY_BOOL || lhs->type == RAY_U8) lp_bool = (uint8_t*)lbase;
+        else if (lhs->type == RAY_BOOL || ray_is_bytelike(lhs->type)) lp_bool = (uint8_t*)lbase;
     }
     if (!r_scalar) {
         int64_t r_off = start;
@@ -2753,7 +2753,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         }
         else if (rhs->type == RAY_I32 || RAY_IS_TEMPORAL32(rhs->type)) rp_i32 = (int32_t*)rbase;
         else if (rhs->type == RAY_I16) rp_i16 = (int16_t*)rbase;
-        else if (rhs->type == RAY_BOOL || rhs->type == RAY_U8) rp_bool = (uint8_t*)rbase;
+        else if (rhs->type == RAY_BOOL || ray_is_bytelike(rhs->type)) rp_bool = (uint8_t*)rbase;
     }
 
     /* Resolve the lhs/rhs reader to a single decision made once before the loop.
@@ -2838,7 +2838,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
             case OP_MAX2:for(int64_t i=0;i<n;i++){int16_t li=(int16_t)LV_READ(i),ri=(int16_t)RV_READ(i);odst[i]=li>ri?li:ri;}break;
             default:     for(int64_t i=0;i<n;i++)odst[i]=0;break;
         }
-    } else if (out_type == RAY_U8) {
+    } else if (out_type == RAY_BYTE_ONLY) {
         uint8_t* odst = (uint8_t*)dst;
         switch (op->opcode) {
             case OP_ADD: for(int64_t i=0;i<n;i++){uint8_t li=(uint8_t)LV_READ(i),ri=(uint8_t)RV_READ(i);odst[i]=li+ri;}break;
@@ -3046,7 +3046,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             else if (lhs->type == -RAY_I32 || RAY_IS_TEMPORAL32(-lhs->type))
                 l_i64_val = (int64_t)lhs->i32;
             else if (lhs->type == -RAY_I16) l_i64_val = (int64_t)lhs->i16;
-            else if (lhs->type == -RAY_U8 || lhs->type == -RAY_BOOL) l_i64_val = (int64_t)lhs->u8;
+            else if (ray_is_bytelike(-lhs->type) || lhs->type == -RAY_BOOL) l_i64_val = (int64_t)lhs->u8;
             else l_i64_val = lhs->i64;
         } else {
             int8_t t = lhs->type;
@@ -3064,7 +3064,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             else if (rhs->type == -RAY_I32 || RAY_IS_TEMPORAL32(-rhs->type))
                 r_i64_val = (int64_t)rhs->i32;
             else if (rhs->type == -RAY_I16) r_i64_val = (int64_t)rhs->i16;
-            else if (rhs->type == -RAY_U8 || rhs->type == -RAY_BOOL) r_i64_val = (int64_t)rhs->u8;
+            else if (ray_is_bytelike(-rhs->type) || rhs->type == -RAY_BOOL) r_i64_val = (int64_t)rhs->u8;
             else r_i64_val = rhs->i64;
         } else {
             int8_t t = rhs->type;

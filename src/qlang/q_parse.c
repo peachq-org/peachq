@@ -756,7 +756,7 @@ static ray_t *scan_byte_literal(const char *src, int *p) {
         bytes[nb++] = (uint8_t)((hex_val(src[i]) << 4) | hex_val(src[i + 1]));
     *p = q;
     if (nb == 1) return ray_u8(bytes[0]);
-    return ray_vec_from_raw(RAY_U8, bytes, nb);   /* nb==0: empty byte vec */
+    return ray_vec_from_raw(RAY_BYTE_ONLY, bytes, nb);   /* nb==0: empty byte vec */
 }
 
 /* Scan a full numeric literal (atom or vector) starting at src[*p]. */

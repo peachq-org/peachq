@@ -93,13 +93,13 @@ static int fp_atom_col_compatible(int8_t atom_type, int8_t col_type) {
     case RAY_TIMESTAMP:
         return atom_type == -RAY_TIMESTAMP;
     case RAY_BOOL:
-    case RAY_U8:
+    RAY_BYTE_CASES:
     case RAY_I16:
     case RAY_I32:
     case RAY_I64:
         /* Any signed/unsigned integer literal; we still range-check
          * cval against the column width to fold out-of-range. */
-        return atom_type == -RAY_BOOL || atom_type == -RAY_U8
+        return atom_type == -RAY_BOOL || ray_is_bytelike(-atom_type)
             || atom_type == -RAY_I16  || atom_type == -RAY_I32
             || atom_type == -RAY_I64;
     default:
@@ -182,7 +182,7 @@ static int fp_check_simple_cmp(ray_t* expr, ray_t* tbl) {
                            && ray_index_kind(col) == RAY_IDX_DICT);
         /* F32/F64/non-dict-STR not supported by phase-3 evaluator. */
         if (!is_dict_str
-            && ct != RAY_SYM && ct != RAY_BOOL && ct != RAY_U8
+            && ct != RAY_SYM && ct != RAY_BOOL && !ray_is_bytelike(ct)
             && ct != RAY_I16 && ct != RAY_I32 && ct != RAY_I64
             && !RAY_IS_TEMPORAL32(ct) && !RAY_IS_TEMPORAL64(ct))
             return -1;
@@ -214,7 +214,7 @@ static int fp_check_like(ray_t* expr, ray_t* tbl) {
 }
 
 static int fp_int_family(int8_t t) {
-    return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 || t == RAY_I32 ||
+    return t == RAY_BOOL || ray_is_bytelike(t) || t == RAY_I16 || t == RAY_I32 ||
            t == RAY_I64 || RAY_IS_TEMPORAL32(t) ||
            t == RAY_TIMESTAMP;
 }
@@ -547,7 +547,7 @@ void fp_eval_cmp(const fp_cmp_t* p, int64_t start, int64_t end,
 
 static inline int64_t fp_cmp_read_i64_at(const fp_cmp_t* p, int64_t row) {
     const void* base = p->col_base;
-    if (p->col_type == RAY_SYM || p->col_type == RAY_BOOL || p->col_type == RAY_U8)
+    if (p->col_type == RAY_SYM || p->col_type == RAY_BOOL || ray_is_bytelike(p->col_type))
         return read_by_esz(base, row, p->col_esz);
     switch (p->col_esz) {
     case 1:  return (int64_t)((const uint8_t*)base)[row];
@@ -735,7 +735,7 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
                 continue;
             switch (st) {
             case RAY_BOOL:
-            case RAY_U8:        out->cvals[out_n++] = ((uint8_t*)ray_data(sv))[i]; break;
+            RAY_BYTE_CASES:     out->cvals[out_n++] = ((uint8_t*)ray_data(sv))[i]; break;
             case RAY_I16:       out->cvals[out_n++] = ((int16_t*)ray_data(sv))[i]; break;
             case RAY_I32:
             RAY_TEMPORAL32_CASES:     out->cvals[out_n++] = ((int32_t*)ray_data(sv))[i]; break;
@@ -878,7 +878,7 @@ static int fp_compile_cmp(ray_graph_t* g, ray_op_t* pred_op, ray_t* tbl,
         case -RAY_TIME:      case -RAY_MONTH:
         case -RAY_MINUTE:    case -RAY_SECOND:     out->cval = (int64_t)cv->i32;  break;
         case -RAY_I16:                             out->cval = (int64_t)cv->i16;  break;
-        case -RAY_BOOL:      case -RAY_U8:         out->cval = (int64_t)cv->b8;   break;
+        case -RAY_BOOL:      RAY_BYTE_ATOM_CASES:  out->cval = (int64_t)cv->b8;   break;
         default: return -1;
         }
         out->cval_in_dict = 1;
