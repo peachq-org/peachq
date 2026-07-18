@@ -57,6 +57,7 @@ static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
 static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
 static ray_t* g_zts        = NULL;  /* current `.z.ts` timer handler (owned), or NULL */
 static ray_t* g_zexit      = NULL;  /* current `.z.exit` process-exit handler */
+static ray_t* g_zph        = NULL;  /* current `.z.ph` HTTP-GET handler (owned) */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
     if (len == 5 && memcmp(name, ".z.bm", 5) == 0)
@@ -356,6 +357,16 @@ void q_dotz_zexit_set(ray_t* fn) {
     g_zexit = fn;
 }
 
+/* `.z.ph` slot — set/read-back shape of `.z.ts` above; FIRED by q_http.c per
+ * HTTP GET (which retains across the call), never from here. */
+void q_dotz_zph_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zph) ray_release(g_zph);
+    g_zph = fn;
+}
+
+ray_t* q_dotz_zph(void) { return g_zph; }   /* BORROWED; NULL = unset */
+
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
  * exit parameter; default = do nothing), then drain its show/0N! console
  * output to stdout — this runs moments before exit(), nothing else drains. */
@@ -460,6 +471,10 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
         ray_retain(g_zexit);
         out = g_zexit;
     }
+    if (!out && n == 5 && memcmp(p, ".z.ph", 5) == 0 && g_zph) {
+        ray_retain(g_zph);
+        out = g_zph;
+    }
 
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
      * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
@@ -481,6 +496,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
 void q_dotz_destroy(void) {
     if (g_zts) { ray_release(g_zts); g_zts = NULL; }   /* release the `.z.ts` handler */
     if (g_zexit) { ray_release(g_zexit); g_zexit = NULL; }
+    if (g_zph) { ray_release(g_zph); g_zph = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;
