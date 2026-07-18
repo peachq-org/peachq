@@ -3,6 +3,18 @@
 / (tools/gen-bootstrap.sh -> src/qlang/dotq_gen.h) and loaded at the tail of q_runtime_create.
 / Loader is line-at-a-time: each definition MUST be ONE line (some exceed 120 by necessity).
 
+/ ---- C-backed members: each delegates to its raw `.Q.c.*` primitive (bound in C before this loads; `.Q.c.*` is internal/unstable) ----
+.Q.id:.Q.c.id;
+.Q.ty:.Q.c.ty;
+.Q.qt:.Q.c.qt;
+.Q.qp:.Q.c.qp;
+.Q.s:.Q.c.s;
+.Q.btoa:.Q.c.btoa;
+.Q.atob:.Q.c.atob;
+.Q.sha1:.Q.c.sha1;
+.Q.ops:.Q.c.ops;
+.Q.res:.Q.c.res;
+
 / ---- Constants (ref/dotq.md) ----
 .Q.b6:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 .Q.A:"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -55,7 +67,4 @@
 / .Q.ff: append y's missing columns to table x as count[x] typed nulls (via column dicts).
 .Q.ff:{[x;y] dx:flip x; dy:flip y; nc:key[dy] except key dx; flip dx,nc!{[n;v](type v)$n#0N}[count x]each dy nc};
 / .Q.s1: single-line string repr, a thin wrapper over the `-3!` internal fn.
-/ .Q.s (multi-line console plain-text) is C-bound in q_builtins.c, single-homing
-/ to the q_fmt console formatter (the same one `show` prints), so it is NOT
-/ redefined here — a `.Q.s:` line would shadow the C binding (dotq.q loads last).
 .Q.s1:{-3!x};

@@ -1211,35 +1211,22 @@ void q_builtins_register(void) {
             ray_env_bind(ray_sym_intern(nm, strlen(nm)), v);             /* retains */
         }
     }
-    /* .Q.ops — openq-private op-manifest introspection (feat/q-ops-introspection).
-     * Bound under `.Q` (owner ruling — an openq extension row beside .Q.qt) as a VARY so
-     * the niladic call `.Q.ops[]` (and `.Q.ops x`) both apply; env_set_dotted
-     * rides the standard `.Q.*` builtin binding, so it stays out
-     * of `\d`/`\v` user rosters and `key \`. `. */
-    bind_vary(".Q.ops", q_dotq_ops_fn);
-    bind_unary(".Q.id", q_id_fn);
-    bind_unary(".Q.ty", q_dotq_ty_fn);
-    bind_unary(".Q.qt", q_dotq_qt_fn);
-    bind_unary(".Q.qp", q_dotq_qp_fn);
-    /* .Q.s (console plain-text): C-bound like the .Q.* primitives above, single-
-     * homing to q_fmt.  NB dotq.q loads AFTER q_builtins_register, so any
-     * `.Q.s:` there would shadow this — dotq.q keeps only `.Q.s1:{-3!x}`. */
-    bind_unary(".Q.s",  q_dotq_s_fn);
-    /* Encoding primitives (Wave-C): base64 + SHA-1, genuine C primitives (the
-     * algorithms are public standards; .Q.b6 lives in dotq.q, the C embeds its
-     * own alphabet).  .Q.gz stays unbound — needs zlib (zero-dependency rule). */
-    bind_unary(".Q.btoa", q_dotq_btoa_fn);
-    bind_unary(".Q.atob", q_dotq_atob_fn);
-    bind_unary(".Q.sha1", q_dotq_sha1_fn);
-    /* .Q.pn (partition counts) is DELIBERATELY left unbound: kdb leaves the
-     * partitioned-DB state vars undefined in a non-partitioned workspace
-     * (ref/dotq.md: "In non-partitioned databases the partitioned database
-     * state variables remain undefined").  openq has no HDB, so `pn` stays
-     * absent — `` `pn in key `.Q `` returns 0b, which is what callers like
-     * qStudio's safeCount guard rely on to fall through to plain `count`.
-     * Binding an empty dict here would flip that guard and be LESS faithful. */
-    bind_value(".Q.res", q_name_reserved_words());
-    /* .j JSON namespace (.j.j / .j.k / .j.jd) — plain env unaries, same as the
-     * .Q.* bindings above; resolved as dotted name-refs, applied via q_apply_noun. */
+    /* .Q.c.* — the raw C primitives behind the .Q namespace (internal/unstable).
+     * dotq.q delegates each public `.Q.<name>` to these (rule 6, loaded next) →
+     * dotq.q is the single .Q manifest.  The value keeps its true `.Q.c.<name>`
+     * identity, so `.Q.qt` displays <.Q.c.qt> (owner: show the implementation, it's
+     * fine).  New C-backed .Q members (queued .Q.hg/.Q.hp) bind HERE, pre-bootstrap. */
+    static const struct { const char* name; ray_unary_fn fn; } dotq_c_unary[] = {
+        { ".Q.c.id",   q_id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   },
+        { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
+        { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.btoa", q_dotq_btoa_fn },
+        { ".Q.c.atob", q_dotq_atob_fn }, { ".Q.c.sha1", q_dotq_sha1_fn },
+    };
+    for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
+        bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
+    bind_vary (".Q.c.ops", q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
+    bind_value(".Q.c.res", q_name_reserved_words());
+    /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
+    /* .j JSON namespace (.j.j/.j.k/.j.jd) — plain env unaries, resolved as dotted name-refs. */
     q_json_register();
 }
