@@ -604,16 +604,34 @@ static ray_t* q_type_fn(ray_t* x) {
 /* ---- type-char map + table introspection (type-output feature) ----------- */
 
 /* Single home for the kdb type-number -> type-char map (ref/dotq.md `.Q.ty`,
- * `meta`'s `t` column).  Indexed by the ABSOLUTE type tag; 0 for tags with no
- * char (list 0, guid-gap 3, tables/dicts 98/99).  Lowercase = the element
+ * `meta`'s `t` column).  Exhaustive switch over the ABSOLUTE type tag; 0 for
+ * tags with no char (list 0, guid-gap 3, out-of-band).  Lowercase = the element
  * char; `.Q.ty` uppercases it for a uniform list of vectors. */
 static char q_type_char(int8_t tag) {
-    static const char m[20] = {
-        0,   'b', 'g', 0,   'x', 'h', 'i', 'j', 'e', 'f',
-        'c', 's', 'p', 'm', 'd', 'z', 'n', 'u', 'v', 't'
-    };
-    int t = tag < 0 ? -tag : tag;
-    return (t >= 0 && t < 20) ? m[t] : 0;
+    int t = tag < 0 ? -tag : tag;                   /* int arith: |INT8_MIN|==128, no UB */
+    if (t <= 0 || t >= RAY_TYPE_COUNT) return 0;    /* list 0, gap 3 & out-of-band: no char */
+    switch ((ray_type_e)t) {                        /* exhaustive: a new member demands a lane */
+    case RAY_LIST:      return 0;                   /* unreachable: filtered above */
+    case RAY_BOOL:      return 'b';
+    case RAY_GUID:      return 'g';
+    case RAY_U8:        return 'x';
+    case RAY_I16:       return 'h';
+    case RAY_I32:       return 'i';
+    case RAY_I64:       return 'j';
+    case RAY_F32:       return 'e';
+    case RAY_F64:       return 'f';
+    case RAY_STR:       return 'c';
+    case RAY_SYM:       return 's';
+    case RAY_TIMESTAMP: return 'p';
+    case RAY_MONTH:     return 'm';
+    case RAY_DATE:      return 'd';
+    case RAY_DATETIME:  return 'z';
+    case RAY_TIMESPAN:  return 'n';
+    case RAY_MINUTE:    return 'u';
+    case RAY_SECOND:    return 'v';
+    case RAY_TIME:      return 't';
+    }
+    return 0;   /* SEL(20) etc.: no type char (unchanged) */
 }
 
 /* True iff x is a uniform, matrix-mappable list of simple vectors of ONE
