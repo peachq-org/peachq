@@ -135,6 +135,15 @@ int64_t   ray_ipc_connect(const char* host, uint16_t port,
                            const char* user, const char* password,
                            int timeout_ms);
 void      ray_ipc_close(int64_t handle);
+
+/* Register an already-open, handshake-complete outbound WebSocket socket as a
+ * poll WS handle (phase RAY_IPC_PHASE_WS, ipc_read_ws pump, cd->ws = ws_conn;
+ * the HTTP Upgrade was done by the caller).  `ws_conn` is an opaque
+ * q_ws_conn_t*.  Returns the selector id (>= 0) or -1; on -1 the caller frees
+ * ws_conn + closes fd, on success the connection owns them (kb/websockets.md
+ * client). */
+int64_t   ray_ws_client_register(ray_sock_t fd, void* ws_conn);
+
 ray_t*    ray_ipc_send(int64_t handle, ray_t* msg);
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
 

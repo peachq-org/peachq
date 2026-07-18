@@ -24,6 +24,7 @@
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
 #include "qlang/q_fmt.h"        /* q_console_write — 1/-1/2/-2 console handles */
 #include "core/ipc.h"           /* ray_ipc_handle_of_fd — q true-fd handle -> selector id */
+#include "qlang/q_ws.h"         /* q_ws_client_open — ws:// hsym-apply */
 #include "ops/ops.h"            /* ray_is_lazy / ray_lazy_materialize — DAG agg results */
 #include <string.h>
 
@@ -610,6 +611,21 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
          * (latent until `:path symbols began lexing, feat/q-file-text). */
         ray_t* s = ray_sym_str(head->i64);
         if (s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':') {
+            /* WebSocket client (kb/websockets.md): `:ws://[user:pass@]host:port`
+             * applied to a raw HTTP request string opens a WS client ->
+             * (handle;response).  Claimed BEFORE the one-shot IPC arm so a ws://
+             * handle never TCP-connects as a kdb peer; `:wss://` -> 'nyi inside
+             * q_ws_client_open.  A non-string arg declines to the historic error. */
+            {
+                const char* sp = ray_str_ptr(s);
+                size_t sl = ray_str_len(s);
+                if ((sl >= 6 && memcmp(sp, ":ws://", 6) == 0) ||
+                    (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
+                    if (n == 1 && args[0] && args[0]->type == -RAY_STR)
+                        return q_ws_client_open(head, args[0]);
+                    return NULL;
+                }
+            }
             /* One-shot synchronous IPC request (ref/hopen.md "One-shot
              * request"):  `` `:host:port "query" `` == connect -> send -> get
              * -> disconnect.  A leading-`:` COMMUNICATION handle applied to
