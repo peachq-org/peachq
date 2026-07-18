@@ -61,6 +61,7 @@ static ray_t* g_zph        = NULL;  /* current `.z.ph` HTTP-GET handler (owned) 
 static ray_t* g_zws        = NULL;  /* current `.z.ws` WS-message handler (owned) */
 static ray_t* g_zwo        = NULL;  /* current `.z.wo` WS-open handler (owned) */
 static ray_t* g_zwc        = NULL;  /* current `.z.wc` WS-close handler (owned) */
+static ray_t* g_zpp        = NULL;  /* current `.z.pp` HTTP-POST handler (owned) */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
     if (len == 5 && memcmp(name, ".z.bm", 5) == 0)
@@ -391,6 +392,15 @@ ray_t* q_dotz_zws(void) { return g_zws; }   /* BORROWED; NULL = unset */
 ray_t* q_dotz_zwo(void) { return g_zwo; }
 ray_t* q_dotz_zwc(void) { return g_zwc; }
 
+/* `.z.pp` slot — HTTP POST handler; identical lifecycle to `.z.ph` above. */
+void q_dotz_zpp_set(ray_t* fn) {
+    if (fn) ray_retain(fn);
+    if (g_zpp) ray_release(g_zpp);
+    g_zpp = fn;
+}
+
+ray_t* q_dotz_zpp(void) { return g_zpp; }   /* BORROWED; NULL = unset */
+
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
  * exit parameter; default = do nothing), then drain its show/0N! console
  * output to stdout — this runs moments before exit(), nothing else drains. */
@@ -511,6 +521,10 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
         ray_retain(g_zwc);
         out = g_zwc;
     }
+    if (!out && n == 5 && memcmp(p, ".z.pp", 5) == 0 && g_zpp) {
+        ray_retain(g_zpp);
+        out = g_zpp;
+    }
 
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
      * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
@@ -536,6 +550,7 @@ void q_dotz_destroy(void) {
     if (g_zws) { ray_release(g_zws); g_zws = NULL; }
     if (g_zwo) { ray_release(g_zwo); g_zwo = NULL; }
     if (g_zwc) { ray_release(g_zwc); g_zwc = NULL; }
+    if (g_zpp) { ray_release(g_zpp); g_zpp = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;
