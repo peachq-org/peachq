@@ -228,6 +228,31 @@ static bool http_str_atom_safe(ray_t* v, char* out, size_t outsz) {
     return true;
 }
 
+/* `.z.ac` return `(status; payload)` parser — see q_http.h.  Accepts any signed
+ * integer atom for status; payload must be a RAY_STR atom.  Structural only. */
+bool q_http_zac_parse(const ray_t* r, int64_t* status_out,
+                      const char** pay_out, size_t* paylen_out) {
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST || ray_len(r) != 2)
+        return false;
+    ray_t** it = (ray_t**)ray_data((ray_t*)r);
+    ray_t*  s  = it[0];
+    ray_t*  pv = it[1];
+    if (!s || !pv) return false;
+    int64_t st;
+    switch (s->type) {
+        case -RAY_U8:  st = (int64_t)s->u8;  break;
+        case -RAY_I16: st = (int64_t)s->i16; break;
+        case -RAY_I32: st = (int64_t)s->i32; break;
+        case -RAY_I64: st = s->i64;          break;
+        default: return false;
+    }
+    if (pv->type != -RAY_STR) return false;
+    *status_out = st;
+    *pay_out    = ray_str_ptr(pv);
+    *paylen_out = ray_str_len(pv);
+    return true;
+}
+
 const char* q_http_docroot(char* buf, size_t bufsz) {
     ray_t* home = http_env_get(ray_sym_intern(".h.HOME", 7));  /* borrowed, NULL if unset */
     if (http_str_atom_safe(home, buf, bufsz)) return buf;
@@ -422,23 +447,27 @@ static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
     if (buf) ray_sys_free(buf);
 }
 
-/* Shared `.z.ph`/`.z.pp` dispatch core (ref/dotz.md; PROVISIONAL pre-C3: string
- * ATOMS): call fn (BORROWED, caller-retained) with (text; sym-keyed headerDict),
- * write its returned response string VERBATIM.  Error/non-string -> 500.  Always
- * returns 0 (a response was sent).  `which` names the handler for the log. */
-static int zh_dispatch_call(ray_sock_t fd, const char* text_p, size_t text_len,
-                            const struct phr_header* hdrs, size_t nh,
-                            ray_t* fn, const char* which)
+/* Build a handler arg (ref/dotz.md; PROVISIONAL pre-C3: string ATOMS).
+ *   method != NULL -> 3-item (methodSym; text; sym-keyed hdrDict) for `.z.pm`;
+ *   method == NULL -> 2-item (text; hdrDict) for `.z.ph`/`.z.pp`/`.z.ac`.
+ * Returns an OWNED list (rc=1; caller releases) or NULL on ANY failure — every
+ * intermediate (incl. error objects from the constructors/append) is freed
+ * internally, so the caller only tests NULL and never receives a RAY_IS_ERR. */
+static ray_t* zh_build_arg(const char* method, size_t mlen,
+                           const char* text_p, size_t text_len,
+                           const struct phr_header* hdrs, size_t nh)
 {
     /* picohttpparser sets name==NULL for an obsolete folded header — skip it. */
     size_t nk = 0;
     for (size_t i = 0; i < nh; i++) if (hdrs[i].name) nk++;
 
+    ray_t* msym = method ? ray_sym(ray_sym_intern(method, mlen)) : NULL;
     ray_t* text = ray_str(text_p, text_len);
     ray_t* keys = ray_vec_new(RAY_SYM, nk > 0 ? (int64_t)nk : 1);
     ray_t* vals = ray_list_new(nk > 0 ? (int64_t)nk : 1);
-    ray_t* arg  = ray_list_new(2);
-    bool bad = !text || !keys || !vals || !arg ||
+    ray_t* arg  = ray_list_new(method ? 3 : 2);
+    bool bad = (method && (!msym || RAY_IS_ERR(msym))) ||
+               !text || !keys || !vals || !arg ||
                RAY_IS_ERR(text) || RAY_IS_ERR(keys) ||
                RAY_IS_ERR(vals) || RAY_IS_ERR(arg);
     if (!bad) {
@@ -452,7 +481,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* text_p, size_t text_len,
             if (!v || RAY_IS_ERR(v)) { if (v) ray_error_free(v); bad = true; break; }
             ray_t* nv = ray_list_append(vals, v);   /* append RETAINS */
             ray_release(v);
-            if (RAY_IS_ERR(nv)) { bad = true; break; }
+            if (RAY_IS_ERR(nv)) { ray_error_free(nv); bad = true; break; }
             vals = nv;
         }
     }
@@ -462,25 +491,47 @@ static int zh_dispatch_call(ray_sock_t fd, const char* text_p, size_t text_len,
         keys = vals = NULL;
         if (!hdrd || RAY_IS_ERR(hdrd)) bad = true;
     }
+    /* append RETAINS; on error it returns a fresh error object (the input list
+     * stays owned by us) — free that error, keep `arg`, and clean up below. */
+    if (!bad && method) {
+        ray_t* a0 = ray_list_append(arg, msym);      /* method symbol first */
+        if (RAY_IS_ERR(a0)) { ray_error_free(a0); bad = true; } else arg = a0;
+    }
     if (!bad) {
-        ray_t* a1 = ray_list_append(arg, text);      /* append RETAINS */
-        if (RAY_IS_ERR(a1)) bad = true; else arg = a1;
+        ray_t* a1 = ray_list_append(arg, text);
+        if (RAY_IS_ERR(a1)) { ray_error_free(a1); bad = true; } else arg = a1;
     }
     if (!bad) {
         ray_t* a2 = ray_list_append(arg, hdrd);
-        if (RAY_IS_ERR(a2)) bad = true; else arg = a2;
+        if (RAY_IS_ERR(a2)) { ray_error_free(a2); bad = true; } else arg = a2;
     }
+    /* free both plain and error objects (constructors may return either). */
+    #define ZH_DROP(o) do { if (o) { if (RAY_IS_ERR(o)) ray_error_free(o); \
+                                     else ray_release(o); } } while (0)
     if (bad) {
-        /* free both plain and error objects (constructors may return either). */
-        #define ZH_DROP(o) do { if (o) { if (RAY_IS_ERR(o)) ray_error_free(o); \
-                                         else ray_release(o); } } while (0)
-        ZH_DROP(text); ZH_DROP(keys); ZH_DROP(vals); ZH_DROP(hdrd); ZH_DROP(arg);
+        ZH_DROP(msym); ZH_DROP(text); ZH_DROP(keys); ZH_DROP(vals);
+        ZH_DROP(hdrd); ZH_DROP(arg);
         #undef ZH_DROP
-        q_http_send_simple(fd, 500, "Internal Server Error");
-        return 0;
+        return NULL;
     }
+    if (msym) ray_release(msym);   /* appended into arg (retained) — drop local */
     ray_release(text);
     ray_release(hdrd);
+    return arg;
+}
+
+/* Shared `.z.ph`/`.z.pp`/`.z.pm` dispatch core (ref/dotz.md): call fn (BORROWED,
+ * caller-retained) with the built arg, write its returned response string
+ * VERBATIM.  Error/non-string -> 500.  Always returns 0 (a response was sent).
+ * `method` (NULL for .z.ph/.z.pp) selects the 2- vs 3-item arg; `which` names
+ * the handler for the log. */
+static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
+                            const char* text_p, size_t text_len,
+                            const struct phr_header* hdrs, size_t nh,
+                            ray_t* fn, const char* which)
+{
+    ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
+    if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
 
     ray_t* r = call_fn1(fn, arg);
     ray_release(arg);
@@ -513,7 +564,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
     if (!fn) return -1;
     ray_retain(fn);                            /* handler may reassign .z.ph */
     if (tlen && target[0] == '/') { target++; tlen--; }
-    int r = zh_dispatch_call(fd, target, tlen, hdrs, nh, fn, ".z.ph");
+    int r = zh_dispatch_call(fd, NULL, 0, target, tlen, hdrs, nh, fn, ".z.ph");
     ray_release(fn);
     return r;
 }
@@ -563,17 +614,101 @@ static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh
             q_http_send_simple(fd, 400, "Bad Request"); return;
         }
     }
-    zh_dispatch_call(fd, body ? (const char*)body : "", have_cl ? (size_t)cl : 0,
-                     hdrs, nh, fn, ".z.pp");
+    zh_dispatch_call(fd, NULL, 0, body ? (const char*)body : "",
+                     have_cl ? (size_t)cl : 0, hdrs, nh, fn, ".z.pp");
     if (body) ray_sys_free(body);
     ray_release(fn);
+}
+
+/* `.z.pm` (HTTP OPTIONS/PUT/DELETE/PATCH — ref/dotz.md) — 3-item
+ * (methodSym; target; hdrDict) arg.  No `.z.pm` set -> 501 (openq policy;
+ * dotz.md pins no default).  requestText = the request-target with leading '/'
+ * stripped (`.z.ph` normalization); PUT/PATCH request bodies are not read
+ * (deferred — the connection is close-per-response, so unread bytes are dropped
+ * on close). */
+static void zpm_dispatch(ray_sock_t fd, const char* method, size_t mlen,
+                         const char* target, size_t tlen,
+                         const struct phr_header* hdrs, size_t nh)
+{
+    ray_t* fn = q_dotz_zpm();                  /* borrowed, NULL = unset */
+    if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
+    ray_retain(fn);                            /* handler may reassign .z.pm */
+    if (tlen && target[0] == '/') { target++; tlen--; }
+    zh_dispatch_call(fd, method, mlen, target, tlen, hdrs, nh, fn, ".z.pm");
+    ray_release(fn);
+}
+
+/* Default 401 with a Basic challenge — the `.z.ac` reject arm (dotz.md L137)
+ * and the basic-auth-fallback not-permitted case.  Distinct from
+ * q_http_send_simple (which the legacy -u/-U listener path keeps unchanged, so
+ * an undefined `.z.ac` stays byte-identical). */
+static void zac_send_401(ray_sock_t fd) {
+    static const char body[] = "401 Unauthorized\n";
+    char hdr[192];
+    int hl = snprintf(hdr, sizeof hdr,
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"openq\"\r\n"
+        "Content-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        sizeof body - 1);
+    if (hl > 0 && q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0)
+        q_http_send_all(fd, body, sizeof body - 1, Q_HTTP_SEND_SECS);
+}
+
+/* `.z.ac` auth gate (ref/dotz.md).  fn is BORROWED (caller-retained).  Runs
+ * `.z.ac` with (target; hdrDict) — target = request-target, leading '/' stripped
+ * (header inspection is the documented job; the body is NOT read to feed auth).
+ * Return protocol (dotz.md L129-166): 0 -> default 401 (reject); 1 -> proceed
+ * (accept; the username -> `.z.u` is DEFERRED — openq `.z.u` is a computed
+ * producer); 2 -> send the custom response VERBATIM; 4 -> basic-auth fallback
+ * (caller re-applies the -u/-U policy).  A malformed/error/unknown-status return
+ * fails CLOSED (500, no handler).  Never logs the arg or the return payload. */
+enum { ZAC_PROCEED = 0, ZAC_DONE = 1, ZAC_FALLBACK = 2 };
+static int zac_gate(ray_sock_t fd, ray_t* fn, const char* target, size_t tlen,
+                    const struct phr_header* hdrs, size_t nh)
+{
+    if (tlen && target[0] == '/') { target++; tlen--; }
+    ray_t* arg = zh_build_arg(NULL, 0, target, tlen, hdrs, nh);
+    if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return ZAC_DONE; }
+
+    ray_t* r = call_fn1(fn, arg);
+    ray_release(arg);
+    { const char* con = q_console_str();     /* drain handler show/0N! */
+      if (con && *con) { fputs(con, stdout); fflush(stdout); }
+      q_console_reset(); }
+
+    int result = ZAC_DONE;
+    int64_t st; const char* pay; size_t paylen;
+    if (r && !RAY_IS_ERR(r) && q_http_zac_parse(r, &st, &pay, &paylen)) {
+        switch (st) {
+            case 1: result = ZAC_PROCEED;  break;   /* accept -> reach handler */
+            case 4: result = ZAC_FALLBACK; break;   /* basic-auth fallback */
+            case 0: zac_send_401(fd);      break;   /* reject */
+            case 2: q_http_send_all(fd, pay, paylen, Q_HTTP_SEND_SECS); break; /* custom */
+            default:
+                fprintf(stderr, "http: .z.ac returned an unknown status — 500\n");
+                q_http_send_simple(fd, 500, "Internal Server Error");
+        }
+    } else {
+        fprintf(stderr, "http: .z.ac returned %s — 500\n",
+                (r && RAY_IS_ERR(r)) ? "an error" : "a malformed value");
+        q_http_send_simple(fd, 500, "Internal Server Error");
+    }
+    if (r) { if (RAY_IS_ERR(r)) ray_error_free(r);
+             else if (r != RAY_NULL_OBJ) ray_release(r); }
+    return result;
 }
 
 int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
                    bool auth_required)
 {
-    /* authed listener (-u/-U) must not be an auth bypass — .z.ac deferred */
-    if (auth_required) { q_http_send_simple(fd, 401, "Unauthorized"); return 0; }
+    /* Undefined `.z.ac` on an authed (-u/-U) listener: today's behaviour,
+     * BYTE-IDENTICAL — 401 BEFORE parse (so a malformed authed request stays
+     * 401, not 400).  A defined `.z.ac` owns the auth decision (its gate runs
+     * after parse, below), so the pre-parse 401 is skipped when it is set. */
+    ray_t* ac = q_dotz_zac();                 /* borrowed; NULL = unset */
+    if (!ac && auth_required) {
+        q_http_send_simple(fd, 401, "Unauthorized");
+        return 0;
+    }
 
     const char* method; const char* target;
     size_t mlen, tlen, nh = Q_HTTP_MAX_HEADERS;
@@ -585,12 +720,48 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
         q_http_send_simple(fd, 400, "Bad Request");
         return 0;
     }
+
+    /* `.z.ac` GATE — the single auth choke point.  Runs ONCE, after parse and
+     * before EVERY method branch (POST/.z.pm/GET/WS-upgrade/static), so no
+     * request path can reach a handler ahead of it (openq policy; dotz.md is
+     * silent on ordering + WS).  Accept -> fall through (bypassing the -u/-U
+     * 401); reject/custom/error -> a response was sent; fallback -> re-apply the
+     * listener's basic-auth policy (deferred to today's authed-401). */
+    if (ac) {
+        ray_retain(ac);                        /* handler may reassign .z.ac */
+        int g = zac_gate(fd, ac, target, tlen, hdrs, nh);
+        ray_release(ac);
+        if (g == ZAC_DONE) return 0;
+        if (g == ZAC_FALLBACK && auth_required) {
+            q_http_send_simple(fd, 401, "Unauthorized");
+            return 0;
+        }
+        /* ZAC_PROCEED, or ZAC_FALLBACK on a non-authed listener -> continue. */
+    }
+
     if (mlen == 4 && memcmp(method, "POST", 4) == 0) {
         zpp_dispatch(fd, hdrs, nh);   /* `.z.pp` override, else 501 */
         return 0;
     }
     if (!(mlen == 3 && memcmp(method, "GET", 3) == 0)) {
-        q_http_send_simple(fd, 501, "Not Implemented");   /* .z.pm deferred */
+        /* `.z.pm` methods (ref/dotz.md L739-744): OPTIONS/PUT/DELETE/PATCH.
+         * HEAD is NOT among them and is neither GET nor POST -> 501, but a HEAD
+         * response must carry NO body (RFC 7231 §4.3.2), so it gets a
+         * headers-only 501.  Any other unknown method keeps the textual 501. */
+        bool pm = (mlen == 7 && memcmp(method, "OPTIONS", 7) == 0) ||
+                  (mlen == 3 && memcmp(method, "PUT",     3) == 0) ||
+                  (mlen == 6 && memcmp(method, "DELETE",  6) == 0) ||
+                  (mlen == 5 && memcmp(method, "PATCH",   5) == 0);
+        if (pm) {
+            zpm_dispatch(fd, method, mlen, target, tlen, hdrs, nh);
+        } else if (mlen == 4 && memcmp(method, "HEAD", 4) == 0) {
+            static const char h[] = "HTTP/1.1 501 Not Implemented\r\n"
+                "Content-Type: text/plain\r\nContent-Length: 0\r\n"
+                "Connection: close\r\n\r\n";
+            q_http_send_all(fd, h, sizeof h - 1, Q_HTTP_SEND_SECS);
+        } else {
+            q_http_send_simple(fd, 501, "Not Implemented");
+        }
         return 0;
     }
     /* WebSocket upgrade (kb/websockets.md: same-port WS server): a GET whose
