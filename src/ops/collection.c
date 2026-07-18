@@ -74,7 +74,7 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
         case RAY_I64:       return ray_hash_i64(((const int64_t*)data)[i]);
         case RAY_I32:       return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_I16:       return ray_hash_i64((int64_t)((const int16_t*)data)[i]);
-        case RAY_U8:        return ray_hash_i64((int64_t)((const uint8_t*)data)[i]);
+        RAY_BYTE_CASES:     return ray_hash_i64((int64_t)((const uint8_t*)data)[i]);
         case RAY_BOOL:      return ray_hash_i64((int64_t)((const bool*)data)[i]);
         case RAY_F64:
         RAY_TEMPORALF_CASES:
@@ -144,7 +144,7 @@ static int hs_eq_rows(ray_t* a_src, int64_t ai, int8_t at, void* a_data,
             case RAY_I64:       return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
             case RAY_I32:       return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
             case RAY_I16:       return ((const int16_t*)a_data)[ai] == ((const int16_t*)b_data)[bi];
-            case RAY_U8:        return ((const uint8_t*)a_data)[ai] == ((const uint8_t*)b_data)[bi];
+            RAY_BYTE_CASES:     return ((const uint8_t*)a_data)[ai] == ((const uint8_t*)b_data)[bi];
             case RAY_BOOL:      return ((const bool*)a_data)[ai] == ((const bool*)b_data)[bi];
             case RAY_F64:
             RAY_TEMPORALF_CASES:
@@ -323,7 +323,7 @@ static int distinct_sort_cmp(const void* a, const void* b) {
             int16_t vb = ((const int16_t*)g_dsort_data)[ib];
             return (va > vb) - (va < vb);
         }
-        case RAY_U8: case RAY_BOOL: {
+        RAY_BYTE_CASES: case RAY_BOOL: {
             uint8_t va = ((const uint8_t*)g_dsort_data)[ia];
             uint8_t vb = ((const uint8_t*)g_dsort_data)[ib];
             return (va > vb) - (va < vb);
@@ -725,7 +725,7 @@ int atom_eq(ray_t* a, ray_t* b) {
     case -RAY_I64:  return a->i64 == b->i64;
     case -RAY_I32:  return a->i32 == b->i32;
     case -RAY_I16:  return a->i16 == b->i16;
-    case -RAY_U8:   return a->u8 == b->u8;
+    RAY_BYTE_ATOM_CASES: return a->u8 == b->u8;
     case -RAY_F64:  return a->f64 == b->f64;
     case -RAY_BOOL: return a->b8 == b->b8;
     case -RAY_SYM:  return a->i64 == b->i64;
@@ -1743,7 +1743,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
     /* Table row access by integer index: (at table 0) → {col1: val1, col2: val2} */
     if (vec->type == RAY_TABLE && ray_is_atom(idx) &&
         (idx->type == -RAY_I64 || idx->type == -RAY_I32 ||
-         idx->type == -RAY_I16 || idx->type == -RAY_U8)) {
+         idx->type == -RAY_I16 || idx->type == -RAY_BYTE_ONLY)) {
         int64_t row = as_i64(idx);
         int64_t nrows = ray_table_nrows(vec);
         if (row < 0 || row >= nrows) return ray_error("domain", "at: row index %lld out of range for table of %lld rows", (long long)row, (long long)nrows);
@@ -1869,7 +1869,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
     }
 
     if (idx->type != -RAY_I64 && idx->type != -RAY_I32 &&
-        idx->type != -RAY_I16 && idx->type != -RAY_U8)
+        idx->type != -RAY_I16 && idx->type != -RAY_BYTE_ONLY)
         return ray_error("type", "at: index must be an integer, got %s", ray_type_name(idx->type));
     int64_t i = as_i64(idx);
 
@@ -1967,7 +1967,7 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
             case -RAY_SECOND:    needle = (int64_t)val->i32;     break;
             case -RAY_I16:       needle = (int64_t)val->i16;     break;
             case -RAY_BOOL:
-            case -RAY_U8:        needle = (int64_t)val->b8;      break;
+            RAY_BYTE_ATOM_CASES: needle = (int64_t)val->b8;      break;
             default:             eligible = 0;                   break;
             }
             if (eligible) {

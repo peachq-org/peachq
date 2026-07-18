@@ -210,7 +210,7 @@ static int64_t numeric_atom_i64(ray_t* x) {
         return x->i32;
     case -RAY_I16:
         return x->i16;
-    case -RAY_U8:
+    case -RAY_BYTE_ONLY:
     case -RAY_BOOL:
         return x->u8;
     default:
@@ -446,7 +446,7 @@ static ray_t* zero_atom_for_elem_type(ray_t* coll) {
         case RAY_I64:       return ray_i64(0);
         case RAY_I32:       return ray_i32(0);
         case RAY_I16:       return ray_i16(0);
-        case RAY_U8:        return ray_u8(0);
+        case RAY_BYTE_ONLY: return ray_u8(0);
         case RAY_BOOL:      return make_bool(0);
         case RAY_F64:       return make_f64(0.0);
         case RAY_DATE:      return ray_date(0);
@@ -609,8 +609,8 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     if (!e0_null && !e0_bool && !left_coll && right_coll && ray_is_vec(right) && out_type != RAY_F64) {
         int8_t vec_type = right->type;
         /* Only override for integer family: if probed type is wider int, downcast */
-        int out_is_int = (out_type == RAY_I64 || out_type == RAY_I32 || out_type == RAY_I16 || out_type == RAY_U8);
-        int vec_is_int = (vec_type == RAY_I64 || vec_type == RAY_I32 || vec_type == RAY_I16 || vec_type == RAY_U8);
+        int out_is_int = (out_type == RAY_I64 || out_type == RAY_I32 || out_type == RAY_I16 || out_type == RAY_BYTE_ONLY);
+        int vec_is_int = (vec_type == RAY_I64 || vec_type == RAY_I32 || vec_type == RAY_I16 || vec_type == RAY_BYTE_ONLY);
         if (out_is_int && vec_is_int)
             out_type = vec_type;
         /* For temporal: only override if both are same temporal family */
@@ -623,17 +623,17 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     if (!e0_null && !e0_bool && left_coll && !right_coll && ray_is_vec(left) && out_type != RAY_F64 &&
         ray_is_atom(right)) {
         int8_t vt = left->type, st = -(right->type);
-        int vt_int = (vt == RAY_I64 || vt == RAY_I32 || vt == RAY_I16 || vt == RAY_U8);
-        int st_int = (st == RAY_I64 || st == RAY_I32 || st == RAY_I16 || st == RAY_U8);
-        int out_is_int = (out_type == RAY_I64 || out_type == RAY_I32 || out_type == RAY_I16 || out_type == RAY_U8);
+        int vt_int = (vt == RAY_I64 || vt == RAY_I32 || vt == RAY_I16 || vt == RAY_BYTE_ONLY);
+        int st_int = (st == RAY_I64 || st == RAY_I32 || st == RAY_I16 || st == RAY_BYTE_ONLY);
+        int out_is_int = (out_type == RAY_I64 || out_type == RAY_I32 || out_type == RAY_I16 || out_type == RAY_BYTE_ONLY);
         if (out_is_int && vt_int && st_int)
             out_type = (vt >= st) ? vt : st; /* wider wins */
     }
     /* When both are vectors, output type follows wider integer type */
     if (!e0_null && !e0_bool && left_coll && right_coll && ray_is_vec(left) && ray_is_vec(right) && out_type != RAY_F64) {
         int8_t lt = left->type, rt = right->type;
-        int lt_int = (lt == RAY_I64 || lt == RAY_I32 || lt == RAY_I16 || lt == RAY_U8);
-        int rt_int = (rt == RAY_I64 || rt == RAY_I32 || rt == RAY_I16 || rt == RAY_U8);
+        int lt_int = (lt == RAY_I64 || lt == RAY_I32 || lt == RAY_I16 || lt == RAY_BYTE_ONLY);
+        int rt_int = (rt == RAY_I64 || rt == RAY_I32 || rt == RAY_I16 || rt == RAY_BYTE_ONLY);
         if (lt_int && rt_int) {
             /* Pick wider: I64 > I32 > I16 > U8 (using type tag ordering) */
             out_type = (lt >= rt) ? lt : rt;
@@ -656,7 +656,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
         int8_t lt = left_coll ? left->type : -(left->type);
         int8_t rt = right_coll ? right->type : -(right->type);
         #define IS_NUM_TYPE(t) ((t)==RAY_I64||(t)==RAY_F64||(t)==RAY_I32||(t)==RAY_I16|| \
-                                (t)==RAY_U8||(t)==RAY_DATE||(t)==RAY_TIME||(t)==RAY_TIMESTAMP)
+                                (t)==RAY_BYTE_ONLY||(t)==RAY_DATE||(t)==RAY_TIME||(t)==RAY_TIMESTAMP)
         int l_num_vec = left_coll && ray_is_vec(left) && IS_NUM_TYPE(lt);
         int r_num_vec = right_coll && ray_is_vec(right) && IS_NUM_TYPE(rt);
         int l_num_scalar = !left_coll && IS_NUM_TYPE(lt);
@@ -822,7 +822,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     /* SLOW PATH: per-element scalar loop (fallback for mixed types, temporal, etc.) */
     if (!force_boxed &&
         (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
-         out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_U8 ||
+         out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_BYTE_ONLY ||
          RAY_IS_TEMPORAL32(out_type) || RAY_IS_TEMPORAL64(out_type) ||
          RAY_IS_TEMPORALF(out_type))) {
         ray_t* vec = ray_vec_new(out_type, len);
@@ -854,7 +854,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
         ray_t* scalar = (!left_coll) ? left : (!right_coll ? right : NULL);
         if (scalar && ray_is_atom(scalar)) {
             int8_t st = scalar->type;
-            if (st == -RAY_I16 || st == -RAY_I32 || st == -RAY_I64 || st == -RAY_U8)
+            if (st == -RAY_I16 || st == -RAY_I32 || st == -RAY_I64 || st == -RAY_BYTE_ONLY)
                 scalar_int_type = st;
         }
     }
@@ -967,7 +967,7 @@ ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
      * typed-vector input; a boxed list always falls through to recurse. */
     if (!is_boxed &&
         (out_type == RAY_I64 || out_type == RAY_F64 || out_type == RAY_I32 ||
-        out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_U8 ||
+        out_type == RAY_I16 || out_type == RAY_BOOL || out_type == RAY_BYTE_ONLY ||
         RAY_IS_TEMPORAL32(out_type) || RAY_IS_TEMPORAL64(out_type) ||
         RAY_IS_TEMPORALF(out_type))) {
         ray_t* vec = ray_vec_new(out_type, len);

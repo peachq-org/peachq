@@ -501,7 +501,7 @@ static int8_t resolve_type_name(int64_t sym_id) {
     else if (len == 3 && memcmp(name, "INT", 3) == 0) result = RAY_CSV_AUTO_TAG;
     else if (len == 3 && memcmp(name, "F64", 3) == 0) result = RAY_F64;
     else if (len == 2 && memcmp(name, "B8", 2) == 0) result = RAY_BOOL;
-    else if (len == 2 && memcmp(name, "U8", 2) == 0) result = RAY_U8;
+    else if (len == 2 && memcmp(name, "U8", 2) == 0) result = RAY_BYTE_ONLY;
     else if (len == 6 && memcmp(name, "SYMBOL", 6) == 0) result = RAY_SYM;
     else if (len == 3 && memcmp(name, "STR", 3) == 0) result = RAY_STR;
     else if (len == 3 && memcmp(name, "F32", 3) == 0) result = RAY_F32;
@@ -807,7 +807,7 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
      * null marker.  Casting a nullable source to one of these types
      * silently collapses the null to the type's zero value (already
      * written by the cast loop). */
-    if (vec->type == RAY_BOOL || vec->type == RAY_U8) return vec;
+    if (vec->type == RAY_BOOL || vec->type == RAY_BYTE_ONLY) return vec;
 
     if (ray_is_vec(val)) {
         if (ray_vec_copy_nulls(vec, val) != RAY_OK)
@@ -948,7 +948,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
     case RAY_I64: RAY_TEMPORAL64_CASES:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int64_t, _v ? 1 : 0);
-        case RAY_U8:    CL(uint8_t,  int64_t, (int64_t)_v);
+        case RAY_BYTE_ONLY: CL(uint8_t,  int64_t, (int64_t)_v);
         case RAY_I16:   CL(int16_t,  int64_t, (int64_t)_v);
         case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  int64_t, (int64_t)_v);
@@ -959,7 +959,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
     case RAY_I32: RAY_TEMPORAL32_CASES:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int32_t, _v ? 1 : 0);
-        case RAY_U8:    CL(uint8_t,  int32_t, (int32_t)_v);
+        case RAY_BYTE_ONLY: CL(uint8_t,  int32_t, (int32_t)_v);
         case RAY_I16:   CL(int16_t,  int32_t, (int32_t)_v);
         case RAY_I64: RAY_TEMPORAL64_CASES:
                         CL(int64_t,  int32_t, (int32_t)_v);
@@ -970,7 +970,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
     case RAY_I16:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  int16_t, _v ? 1 : 0);
-        case RAY_U8:    CL(uint8_t,  int16_t, (int16_t)_v);
+        case RAY_BYTE_ONLY: CL(uint8_t,  int16_t, (int16_t)_v);
         case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  int16_t, (int16_t)_v);
         case RAY_I64: RAY_TEMPORAL64_CASES:
@@ -979,7 +979,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
                         CL(double,   int16_t, (int16_t)_v);
         }
         break;
-    case RAY_U8:
+    case RAY_BYTE_ONLY:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  uint8_t, _v ? 1 : 0);
         case RAY_I16:   CL(int16_t,  uint8_t, (uint8_t)_v);
@@ -993,7 +993,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
     case RAY_F64: RAY_TEMPORALF_CASES:
         switch (in_type) {
         case RAY_BOOL:  CL(uint8_t,  double, _v ? 1.0 : 0.0);
-        case RAY_U8:    CL(uint8_t,  double, (double)_v);
+        case RAY_BYTE_ONLY: CL(uint8_t,  double, (double)_v);
         case RAY_I16:   CL(int16_t,  double, (double)_v);
         case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  double, (double)_v);
@@ -1003,7 +1003,7 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         break;
     case RAY_BOOL:
         switch (in_type) {
-        case RAY_U8:    CL(uint8_t,  uint8_t, _v != 0 ? 1 : 0);
+        case RAY_BYTE_ONLY: CL(uint8_t,  uint8_t, _v != 0 ? 1 : 0);
         case RAY_I16:   CL(int16_t,  uint8_t, _v != 0 ? 1 : 0);
         case RAY_I32: RAY_TEMPORAL32_CASES:
                         CL(int32_t,  uint8_t, _v != 0 ? 1 : 0);
@@ -1305,7 +1305,7 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
         case RAY_I32: RAY_TEMPORAL32_CASES:
             ((int32_t*)out)[i] = cast->i32; break;
         case RAY_I16:  ((int16_t*)out)[i] = cast->i16; break;
-        case RAY_U8:   ((uint8_t*)out)[i] = cast->u8;  break;
+        case RAY_BYTE_ONLY: ((uint8_t*)out)[i] = cast->u8;  break;
         case RAY_F64: RAY_TEMPORALF_CASES:
                        ((double*)out)[i]  = cast->f64;  break;
         case RAY_BOOL: ((bool*)out)[i]    = cast->b8;   break;
@@ -1340,7 +1340,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (cast_match(tn, tl, "I64") || cast_match(tn, tl, "i64")) tt = -RAY_I64;
         else if (cast_match(tn, tl, "I32") || cast_match(tn, tl, "i32")) tt = -RAY_I32;
         else if (cast_match(tn, tl, "I16") || cast_match(tn, tl, "i16")) tt = -RAY_I16;
-        else if (cast_match(tn, tl, "U8") || cast_match(tn, tl, "u8")) tt = -RAY_U8;
+        else if (cast_match(tn, tl, "U8") || cast_match(tn, tl, "u8")) tt = -RAY_BYTE_ONLY;
         else if (cast_match(tn, tl, "F64") || cast_match(tn, tl, "f64")) tt = -RAY_F64;
         else if (cast_match(tn, tl, "BOOL") || cast_match(tn, tl, "bool") || cast_match(tn, tl, "B8") || cast_match(tn, tl, "b8")) tt = -RAY_BOOL;
         else if (cast_match(tn, tl, "SYMBOL") || cast_match(tn, tl, "symbol") || cast_match(tn, tl, "sym")) tt = -RAY_SYM;
@@ -1374,7 +1374,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return make_i64(val->i32);
         if (RAY_IS_TEMPORAL64(-val->type)) return make_i64(val->i64);
         if (val->type == -RAY_I16) return make_i64(val->i16);
-        if (val->type == -RAY_U8) return make_i64(val->u8);
+        if (val->type == -RAY_BYTE_ONLY) return make_i64(val->u8);
         if (val->type == -RAY_STR) {
             const char* sp = ray_str_ptr(val);
             if (!sp) return ray_error("domain", "as: cannot parse empty str as i64");
@@ -1393,7 +1393,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         ray_release(s);
         if (val->type == -RAY_I32) { ray_retain(val); return val; }
         if (val->type == -RAY_BOOL) return ray_i32(val->b8 ? 1 : 0);
-        if (val->type == -RAY_U8)  return ray_i32((int32_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_i32((int32_t)val->u8);
         if (val->type == -RAY_I16) return ray_i32(val->i16);
         if (val->type == -RAY_I64) return ray_i32((int32_t)val->i64);
         if (val->type == -RAY_F64 || RAY_IS_TEMPORALF(-val->type))
@@ -1416,7 +1416,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         ray_release(s);
         if (val->type == -RAY_I16) { ray_retain(val); return val; }
         if (val->type == -RAY_BOOL) return ray_i16(val->b8 ? 1 : 0);
-        if (val->type == -RAY_U8)  return ray_i16((int16_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_i16((int16_t)val->u8);
         if (val->type == -RAY_I32) return ray_i16((int16_t)val->i32);
         if (val->type == -RAY_I64) return ray_i16((int16_t)val->i64);
         if (val->type == -RAY_F64 || RAY_IS_TEMPORALF(-val->type))
@@ -1442,7 +1442,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I64) return make_f64((double)val->i64);
         if (val->type == -RAY_I32) return make_f64((double)val->i32);
         if (val->type == -RAY_I16) return make_f64((double)val->i16);
-        if (val->type == -RAY_U8)  return make_f64((double)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return make_f64((double)val->u8);
         if (RAY_IS_TEMPORAL32(-val->type)) return make_f64((double)val->i32);
         if (RAY_IS_TEMPORAL64(-val->type)) return make_f64((double)val->i64);
         if (RAY_IS_TEMPORALF(-val->type))  return make_f64(val->f64);
@@ -1471,7 +1471,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I64) return make_bool(val->i64 != 0 ? 1 : 0);
         if (val->type == -RAY_I32) return make_bool(val->i32 != 0 ? 1 : 0);
         if (val->type == -RAY_I16) return make_bool(val->i16 != 0 ? 1 : 0);
-        if (val->type == -RAY_U8) return make_bool(val->u8 != 0 ? 1 : 0);
+        if (val->type == -RAY_BYTE_ONLY) return make_bool(val->u8 != 0 ? 1 : 0);
         if (val->type == -RAY_F64) return make_bool(val->f64 != 0.0 ? 1 : 0);
         if (val->type == -RAY_DATE) return make_bool(val->i32 != 0 ? 1 : 0);
         if (val->type == -RAY_TIME) return make_bool(val->i32 != 0 ? 1 : 0);
@@ -1555,7 +1555,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (ray_is_atom(val) && (is_numeric(val) || val->type == -RAY_BOOL)) {
             char buf[64]; int n2;
             if (val->type == -RAY_BOOL)     n2 = snprintf(buf, sizeof(buf), "%d", (int)val->b8);
-            else if (val->type == -RAY_U8)  n2 = snprintf(buf, sizeof(buf), "%u", (unsigned)val->u8);
+            else if (val->type == -RAY_BYTE_ONLY)  n2 = snprintf(buf, sizeof(buf), "%u", (unsigned)val->u8);
             else if (val->type == -RAY_I16) n2 = snprintf(buf, sizeof(buf), "%d", (int)val->i16);
             else if (val->type == -RAY_I32) n2 = snprintf(buf, sizeof(buf), "%d", (int)val->i32);
             else if (val->type == -RAY_F64) {
@@ -1598,7 +1598,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
             return ray_typed_null(-RAY_DATETIME);
         if (val->type == -RAY_BOOL) return ray_datetime((double)val->b8);
-        if (val->type == -RAY_U8)  return ray_datetime((double)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_datetime((double)val->u8);
         if (val->type == -RAY_I16) return ray_datetime((double)val->i16);
         if (val->type == -RAY_I32) return ray_datetime((double)val->i32);
         if (val->type == -RAY_I64) return ray_datetime((double)val->i64);
@@ -1628,7 +1628,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
             return ray_typed_null(-RAY_MONTH);
         if (val->type == -RAY_BOOL) return ray_month((int64_t)val->b8);
-        if (val->type == -RAY_U8)  return ray_month((int64_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_month((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_month((int64_t)val->i16);
         if (val->type == -RAY_I32) return ray_month((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_month(val->i64);
@@ -1666,7 +1666,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_date(month_payload_as_days((int64_t)val->i32));
         }
         if (val->type == -RAY_BOOL) return ray_date((int64_t)val->b8);
-        if (val->type == -RAY_U8)  return ray_date((int64_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_date((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_date((int64_t)val->i16);
         if (val->type == -RAY_I32) return ray_date((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_date(val->i64);
@@ -1714,7 +1714,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         ray_release(s);
         if (val->type == -RAY_TIME) { ray_retain(val); return val; }
         if (val->type == -RAY_BOOL) return ray_time((int64_t)val->b8);
-        if (val->type == -RAY_U8)  return ray_time((int64_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_time((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_time((int64_t)val->i16);
         if (val->type == -RAY_I32) return ray_time((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_time(val->i64);
@@ -1788,7 +1788,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
             return ray_typed_null(-RAY_MINUTE);
         if (val->type == -RAY_BOOL) return ray_minute((int64_t)val->b8);
-        if (val->type == -RAY_U8)  return ray_minute((int64_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_minute((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_minute((int64_t)val->i16);
         if (val->type == -RAY_I32) return ray_minute((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_minute(val->i64);
@@ -1828,7 +1828,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
             return ray_typed_null(-RAY_SECOND);
         if (val->type == -RAY_BOOL) return ray_second((int64_t)val->b8);
-        if (val->type == -RAY_U8)  return ray_second((int64_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_second((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_second((int64_t)val->i16);
         if (val->type == -RAY_I32) return ray_second((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_second(val->i64);
@@ -1865,7 +1865,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (RAY_ATOM_IS_NULL(val) && ray_is_atom(val))
             return ray_typed_null(-RAY_TIMESPAN);
         if (val->type == -RAY_BOOL) return ray_timespan((int64_t)val->b8);
-        if (val->type == -RAY_U8)  return ray_timespan((int64_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_timespan((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_timespan((int64_t)val->i16);
         if (val->type == -RAY_I32) return ray_timespan((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_timespan(val->i64);
@@ -1891,7 +1891,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         ray_release(s);
         if (val->type == -RAY_TIMESTAMP) { ray_retain(val); return val; }
         if (val->type == -RAY_BOOL) return ray_timestamp((int64_t)val->b8);
-        if (val->type == -RAY_U8)  return ray_timestamp((int64_t)val->u8);
+        if (val->type == -RAY_BYTE_ONLY)  return ray_timestamp((int64_t)val->u8);
         if (val->type == -RAY_I16) return ray_timestamp((int64_t)val->i16);
         if (val->type == -RAY_I32) return ray_timestamp((int64_t)val->i32);
         if (val->type == -RAY_I64) return ray_timestamp(val->i64);
@@ -2047,7 +2047,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
     /* Cast to U8/u8 */
     if (cast_match(tname, tlen, "U8") || cast_match(tname, tlen, "u8")) {
         ray_release(s);
-        if (val->type == -RAY_U8) { ray_retain(val); return val; }
+        if (val->type == -RAY_BYTE_ONLY) { ray_retain(val); return val; }
         if (val->type == -RAY_BOOL) return ray_u8(val->b8 ? 1 : 0);
         if (val->type == -RAY_I16) return ray_u8((uint8_t)val->i16);
         if (val->type == -RAY_I32) return ray_u8((uint8_t)val->i32);
@@ -2061,7 +2061,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         }
         /* Vector cast */
         if (ray_is_vec(val) || val->type == RAY_LIST)
-            return cast_vec_numeric(type_sym, val, RAY_U8);
+            return cast_vec_numeric(type_sym, val, RAY_BYTE_ONLY);
         return ray_error("type", "as: cannot cast %s to u8", ray_type_name(val->type));
     }
     /* Cast to DICT */
@@ -2306,7 +2306,7 @@ ray_t* ray_enlist_fn(ray_t** args, int64_t n) {
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->i64;
             break;
         }
-        case RAY_U8: {
+        RAY_BYTE_CASES: {
             uint8_t* d = (uint8_t*)ray_data(vec);
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->u8;
             break;
@@ -2945,7 +2945,7 @@ ray_t* ray_group_fn(ray_t* x) {
             v = ((int32_t*)ray_data(x))[i];
         else if (x->type == RAY_I16)
             v = ((int16_t*)ray_data(x))[i];
-        else if (x->type == RAY_BOOL || x->type == RAY_U8)
+        else if (x->type == RAY_BOOL || ray_is_bytelike(x->type))
             v = ((uint8_t*)ray_data(x))[i];
         else if (x->type == RAY_F64 || x->type == RAY_F32 ||
                  RAY_IS_TEMPORALF(x->type)) {
@@ -3048,7 +3048,7 @@ ray_t* ray_group_fn(ray_t* x) {
             }
             case RAY_I16: { int16_t v = (int16_t)gvals[g]; keys_vec = ray_vec_append(keys_vec, &v); break; }
             case RAY_BOOL:
-            case RAY_U8:  { uint8_t v = (uint8_t)gvals[g]; keys_vec = ray_vec_append(keys_vec, &v); break; }
+            RAY_BYTE_CASES: { uint8_t v = (uint8_t)gvals[g]; keys_vec = ray_vec_append(keys_vec, &v); break; }
             case RAY_F64: RAY_TEMPORALF_CASES: {
                 /* gvals[g] holds the IEEE-754 bit pattern packed by the
                  * row-loop above; reinterpret rather than int->double
@@ -3231,7 +3231,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((int16_t*)ray_data(result))[0] = a->i16; break;
         case RAY_BOOL:
             ((bool*)ray_data(result))[0] = a->b8; break;
-        case RAY_U8:
+        RAY_BYTE_CASES:
             ((uint8_t*)ray_data(result))[0] = a->u8; break;
         case RAY_GUID: {
             const uint8_t* gd = a->obj ? (const uint8_t*)ray_data(a->obj) : (const uint8_t*)ray_data((ray_t*)a);
@@ -3282,7 +3282,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((int16_t*)ray_data(result))[na] = b->i16; break;
         case RAY_BOOL:
             ((bool*)ray_data(result))[na] = b->b8; break;
-        case RAY_U8:
+        RAY_BYTE_CASES:
             ((uint8_t*)ray_data(result))[na] = b->u8; break;
         case RAY_GUID: {
             const uint8_t* gd = b->obj ? (const uint8_t*)ray_data(b->obj) : (const uint8_t*)ray_data((ray_t*)b);
@@ -3324,7 +3324,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((bool*)ray_data(result))[0] = a->b8;
             ((bool*)ray_data(result))[1] = b->b8;
             break;
-        case RAY_U8:
+        RAY_BYTE_CASES:
             ((uint8_t*)ray_data(result))[0] = a->u8;
             ((uint8_t*)ray_data(result))[1] = b->u8;
             break;

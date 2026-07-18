@@ -323,7 +323,7 @@ ray_t* ray_fused_topk_select(ray_t* tbl,
         if (!col) return NULL;
         int8_t kt = col->type;
         if (RAY_IS_PARTED(kt) || kt == RAY_MAPCOMMON) return NULL;
-        if (kt != RAY_SYM && kt != RAY_STR && kt != RAY_BOOL && kt != RAY_U8
+        if (kt != RAY_SYM && kt != RAY_STR && kt != RAY_BOOL && !ray_is_bytelike(kt)
             && kt != RAY_I16 && kt != RAY_I32 && kt != RAY_I64
             && !RAY_IS_TEMPORAL32(kt) && !RAY_IS_TEMPORAL64(kt))
             return NULL;

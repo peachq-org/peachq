@@ -30,7 +30,7 @@ double q_velem_f(ray_t* x, int64_t i, int* isnull) {
         case -RAY_I32: if (x->i32==NULL_I32){*isnull=1;} return (double)x->i32;
         case -RAY_I16: if (x->i16==NULL_I16){*isnull=1;} return (double)x->i16;
         case -RAY_BOOL:return (double)x->b8;
-        case -RAY_U8:  return (double)x->u8;
+        case -RAY_BYTE_ONLY: return (double)x->u8;
         case -RAY_F64: case -RAY_F32: if (isnan(x->f64)){*isnull=1;} return x->f64;
         default: *isnull = 1; return 0;
         }
@@ -41,7 +41,7 @@ double q_velem_f(ray_t* x, int64_t i, int* isnull) {
     case RAY_I32: { int32_t v = ((const int32_t*)d)[i]; if (v==NULL_I32){*isnull=1;} return (double)v; }
     case RAY_I16: { int16_t v = ((const int16_t*)d)[i]; if (v==NULL_I16){*isnull=1;} return (double)v; }
     case RAY_BOOL:return (double)((const uint8_t*)d)[i];
-    case RAY_U8:  return (double)((const uint8_t*)d)[i];
+    case RAY_BYTE_ONLY: return (double)((const uint8_t*)d)[i];
     case RAY_F64: { double v = ((const double*)d)[i]; if (isnan(v)){*isnull=1;} return v; }
     case RAY_F32: { float  v = ((const float*)d)[i];  if (isnan(v)){*isnull=1;} return (double)v; }
     default: *isnull = 1; return 0;
@@ -50,7 +50,7 @@ double q_velem_f(ray_t* x, int64_t i, int* isnull) {
 int q_vec_is_float(ray_t* x) { return x->type == RAY_F64 || x->type == RAY_F32; }
 int q_vec_is_num(ray_t* x) {
     return x && (x->type==RAY_I64||x->type==RAY_I32||x->type==RAY_I16||
-                 x->type==RAY_BOOL||x->type==RAY_U8||x->type==RAY_F64||x->type==RAY_F32);
+                 x->type==RAY_BOOL||x->type==RAY_BYTE_ONLY||x->type==RAY_F64||x->type==RAY_F32);
 }
 
 typedef enum { RS_SUMS, RS_PRDS, RS_MAXS, RS_MINS, RS_AVGS } q_rs_kind;

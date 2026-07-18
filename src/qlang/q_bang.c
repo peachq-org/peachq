@@ -30,7 +30,7 @@ static ray_t* h_value(ray_t** a, int64_t n) { (void)n; return q_value_wrap(a[0])
 static ray_t* h_ser  (ray_t** a, int64_t n) { (void)n; return q_wire_serialize(a[0], Q_WIRE_ASYNC); } /* -8! */
 static ray_t* h_deser(ray_t** a, int64_t n) {                                               /* -9!  */
     (void)n;
-    if (!a[0] || a[0]->type != RAY_U8)
+    if (!a[0] || a[0]->type != RAY_BYTE_ONLY)
         return ray_error("type", "-9!: expects a byte vector");
     return q_wire_deserialize(a[0]);
 }

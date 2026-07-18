@@ -263,7 +263,7 @@ static ray_t* q_ltrim_fn(ray_t* x) { return q_str_recurse(x, q_trim_leaf, 1); }
 static ray_t* q_rtrim_fn(ray_t* x) { return q_str_recurse(x, q_trim_leaf, 2); }
 
 /* ---- md5 (RFC 1321, public spec — CLEAN ROOM) -----------------------------
- * q `md5 s` hashes the string s to a 16-byte digest (a RAY_U8 byte vector,
+ * q `md5 s` hashes the string s to a 16-byte digest (a RAY_BYTE_ONLY byte vector,
  * displayed as `0x…`).  Self-contained implementation of the published
  * algorithm; no external dependency, no kdb reference. */
 static int q_md5_compute(const uint8_t* msg, size_t len, uint8_t out[16]) {
@@ -321,7 +321,7 @@ ray_t* q_md5_fn(ray_t* x) {
     uint8_t digest[16];
     if (!q_md5_compute((const uint8_t*)ray_str_ptr(x), ray_str_len(x), digest))
         return ray_error("wsfull", "md5: out of memory");
-    return ray_vec_from_raw(RAY_U8, digest, 16);
+    return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 16);
 }
 
 /* ---- .Q base64 + SHA-1 encoding primitives (ref/dotq.md; clean-room: RFC 4648
@@ -332,12 +332,12 @@ static const char Q_B64_ALPHA[64] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /* Borrow the raw bytes of a string atom (-RAY_STR; use ray_str_len — SSO union
- * aliasing makes ray_len garbage on a string atom) or a byte vector (RAY_U8).
+ * aliasing makes ray_len garbage on a string atom) or a byte vector (RAY_BYTE_ONLY).
  * Returns 0 for any other type. */
 static int q_bytes_of(ray_t* x, const uint8_t** p, size_t* n) {
     if (!x) return 0;
     if (x->type == -RAY_STR) { *p = (const uint8_t*)ray_str_ptr(x); *n = ray_str_len(x); return 1; }
-    if (x->type == RAY_U8)   { *p = (const uint8_t*)ray_data(x);    *n = (size_t)ray_len(x); return 1; }
+    if (x->type == RAY_BYTE_ONLY)   { *p = (const uint8_t*)ray_data(x);    *n = (size_t)ray_len(x); return 1; }
     return 0;
 }
 
@@ -479,7 +479,7 @@ static ray_t* q_dotq_atob_fn(ray_t* x) {
     uint8_t* dec = q_base64_decode((const char*)p, n, &olen, &bad);
     if (bad) return ray_error("domain", ".Q.atob: invalid base64 padding");
     if (!dec) return ray_error("wsfull", ".Q.atob: out of memory");
-    ray_t* r = ray_vec_from_raw(RAY_U8, dec, (int64_t)olen);
+    ray_t* r = ray_vec_from_raw(RAY_BYTE_ONLY, dec, (int64_t)olen);
     free(dec);
     return r;
 }
@@ -494,7 +494,7 @@ ray_t* q_dotq_sha1_fn(ray_t* x) {
     uint8_t digest[20];
     if (!q_sha1_compute(p, n, digest))
         return ray_error("wsfull", ".Q.sha1: out of memory");
-    return ray_vec_from_raw(RAY_U8, digest, 20);
+    return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 20);
 }
 
 /* (show x) — print x's q console display as a SIDE EFFECT (buffered in the q
@@ -614,7 +614,7 @@ static char q_type_char(int8_t tag) {
     case RAY_LIST:      return 0;                   /* unreachable: filtered above */
     case RAY_BOOL:      return 'b';
     case RAY_GUID:      return 'g';
-    case RAY_U8:        return 'x';
+    case RAY_BYTE_ONLY: return 'x';
     case RAY_I16:       return 'h';
     case RAY_I32:       return 'i';
     case RAY_I64:       return 'j';
