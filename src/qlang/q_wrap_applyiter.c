@@ -35,6 +35,13 @@ static ray_t* q_at_apply2(ray_t* f, ray_t* x);
 static ray_t* q_dot_apply(ray_t* f, ray_t* a);
 static ray_t* q_elem_at(ray_t* v, int64_t i);       /* defined below */
 
+/* The ray_map_fn discipline (collection.c:414), for every apply/iterate site
+ * in this file: a step result may be a LAZY DAG node BORROWING an operand the
+ * site is about to release — force it before the release/store. */
+static ray_t* q_force(ray_t* r) {
+    return (r && ray_is_lazy(r)) ? ray_lazy_materialize(r) : r;
+}
+
 /* The `:` (assign / replace) function slot of Amend.  Arrives either as a
  * symbol atom spelled ":" (quoted verb-sym) or, defensively, a registry value
  * whose provenance spelling is ":". */
@@ -99,8 +106,8 @@ static ray_t* q_amend_step(ray_t* f, ray_t* cur, ray_t* y, int64_t yi) {
     }
     ray_t* r;
     if (q_is_assign(f)) { r = ry; ray_retain(r); }   /* replace: new = ry */
-    else if (y)         r = call_fn2(f, cur, ry);    /* binary f(cur, ry) */
-    else                r = call_fn1(f, cur);        /* unary  f(cur)     */
+    else if (y)         r = q_force(call_fn2(f, cur, ry)); /* binary f(cur, ry) */
+    else                r = q_force(call_fn1(f, cur));     /* unary  f(cur)     */
     if (ry) ray_release(ry);
     return r;
 }
@@ -314,7 +321,7 @@ static ray_t* q_trap_dot(ray_t* g, ray_t* gx, ray_t* e) {
     if (k < 1 || k > 8) return ray_error("rank", ".: 1..8 trap args");
     ray_t* a[8];
     for (int64_t i = 0; i < k; i++) a[i] = q_elem_at(gx, i);   /* owned */
-    ray_t* r = q_call_n(g, a, k);
+    ray_t* r = q_force(q_call_n(g, a, k));
     for (int64_t i = 0; i < k; i++) ray_release(a[i]);
     return q_trap_finish(r, e);
 }
@@ -388,6 +395,7 @@ static ray_t* q_dot_apply(ray_t* f, ray_t* a) {
         r = q_apply_noun(f, args, n);
         if (!r) r = ray_error("type", ".: not applicable");
     }
+    r = q_force(r);
     for (int64_t j = 0; j < n; j++) ray_release(args[j]);
     return r;
 }
@@ -417,7 +425,7 @@ ray_t* q_each_wrap(ray_t* f, ray_t* x) {
         for (int64_t i = 0; i < n; i++) {
             ray_t* row = q_table_row_at(x, i);       /* owned row dict (char-column safe) */
             if (!row || RAY_IS_ERR(row)) { ray_release(outl); return row; }
-            ray_t* r = call_fn1(f, row);
+            ray_t* r = q_force(call_fn1(f, row));
             ray_release(row);
             if (!r || RAY_IS_ERR(r)) { ray_release(outl); return r; }
             outl = ray_list_append(outl, r);         /* retains */
@@ -482,8 +490,17 @@ int q_values_match(ray_t* a, ray_t* b) {
     return atom_eq(a, b);
 }
 
-/* v[i] as an owned atom/element (borrowed v). */
+/* v[i] as an owned atom/element (borrowed v): direct payload read for
+ * vectors/lists (collection_elem — no index atom, no ray_at_fn dispatch);
+ * generic indexing for every other shape.  alloc==0 results are BORROWED
+ * list slots — retain, never release (r0 review). */
 static ray_t* q_elem_at(ray_t* v, int64_t i) {
+    if (v && (ray_is_vec(v) || v->type == RAY_LIST)) {
+        int alloc = 0;
+        ray_t* e = collection_elem(v, i, &alloc);
+        if (e && !RAY_IS_ERR(e)) { if (!alloc) ray_retain(e); return e; }
+        if (e && alloc) ray_release(e);   /* allocated error: generic fallback */
+    }
     ray_t* ia = ray_i64(i);
     ray_t* e  = ray_at_fn(v, ia);   /* owned */
     ray_release(ia);
@@ -557,12 +574,10 @@ static ray_t* q_eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
             if (!q_op_is_atom(ops[j])) { a[j] = q_elem_at(ops[j], i); owned |= (1u << j); }
             else                       { a[j] = ops[j]; }   /* atom broadcast */
         }
-        ray_t* r = q_call_n(f, a, kk);
+        /* Force BEFORE releasing the operands the lazy may borrow (r2 review;
+         * the ray_map_fn discipline). */
+        ray_t* r = q_force(q_call_n(f, a, kk));
         for (int64_t j = 0; j < kk; j++) if (owned & (1u << j)) ray_release(a[j]);
-        /* Materialise a lazy per-element result (distinct/count of a vector is
-         * a DAG node): an unforced lazy stored past the eval line dangles once
-         * its graph dies — the ray_map_fn discipline, mirrored here. */
-        if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
         if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : ray_error("type", NULL); }
         out = ray_list_append(out, r);
         ray_release(r);
@@ -600,7 +615,7 @@ static ray_t* q_prior_seed(ray_t* f, ray_t* x) {
 /* result[0]=f(x0,seed); result[i]=f(xi,x[i-1]).  Borrows f/seed/x. */
 static ray_t* q_prior_over_vec(ray_t* f, ray_t* seed, ray_t* x) {
     if (!x || (!ray_is_vec(x) && x->type != RAY_LIST)) {
-        if (x && ray_is_atom(x)) return call_fn2(f, x, seed);
+        if (x && ray_is_atom(x)) return q_force(call_fn2(f, x, seed));
         return ray_error("type", "each-prior: expected a list");
     }
     int64_t L = ray_len(x);
@@ -608,7 +623,7 @@ static ray_t* q_prior_over_vec(ray_t* f, ray_t* seed, ray_t* x) {
     ray_t* prev = seed; int prev_owned = 0;
     for (int64_t i = 0; i < L; i++) {
         ray_t* cur = q_elem_at(x, i);            /* owned */
-        ray_t* r   = call_fn2(f, cur, prev);
+        ray_t* r   = q_force(call_fn2(f, cur, prev));
         if (prev_owned) ray_release(prev);
         if (!r || RAY_IS_ERR(r)) { ray_release(cur); ray_release(out); return r ? r : ray_error("type", NULL); }
         out = ray_list_append(out, r);
@@ -679,7 +694,7 @@ static ray_t* q_converge(ray_t* f, ray_t* x, int collect) {
     if (collect) acc = ray_list_append(acc, cur);
     int64_t guard = 0;
     for (;;) {
-        ray_t* nxt = call_fn1(f, cur);
+        ray_t* nxt = q_force(call_fn1(f, cur));
         if (!nxt || RAY_IS_ERR(nxt)) {
             ray_release(first); ray_release(cur); if (acc) ray_release(acc);
             return nxt ? nxt : ray_error("type", NULL);
@@ -711,7 +726,7 @@ static ray_t* q_ntimes(ray_t* f, int64_t cnt, ray_t* x, int collect) {
     ray_t* acc = NULL;
     if (collect) { acc = ray_list_new(cnt + 1); acc = ray_list_append(acc, cur); }
     for (int64_t i = 0; i < cnt; i++) {
-        ray_t* nxt = call_fn1(f, cur);
+        ray_t* nxt = q_force(call_fn1(f, cur));
         ray_release(cur);
         if (!nxt || RAY_IS_ERR(nxt)) { if (acc) ray_release(acc); return nxt ? nxt : ray_error("type", NULL); }
         cur = nxt;
@@ -732,7 +747,7 @@ static ray_t* q_while(ray_t* f, ray_t* test, ray_t* x, int collect) {
         int go = q_truth(call_fn1(test, cur), &terr);   /* consumes the test result */
         if (terr) { ray_release(cur); if (acc) ray_release(acc); return terr; }
         if (!go) break;
-        ray_t* nxt = call_fn1(f, cur);
+        ray_t* nxt = q_force(call_fn1(f, cur));
         ray_release(cur);
         if (!nxt || RAY_IS_ERR(nxt)) { if (acc) ray_release(acc); return nxt ? nxt : ray_error("type", NULL); }
         cur = nxt;
@@ -743,22 +758,68 @@ static ray_t* q_while(ray_t* f, ray_t* test, ray_t* x, int collect) {
     return cur;
 }
 
-/* Seeded scan  x f\y  (kept minimal — ray_scan_fn has no seed slot). */
-static ray_t* q_seeded_scan(ray_t* f, ray_t* seed, ray_t* x) {
+/* Seeded scan  x f\y  (kept minimal — ray_scan_fn has no seed slot).
+ * collapse_steps: the identity-seeded (f\)x path collapses EACH step —
+ * openq's `(),atom` join stays a boxed list where kdb promotes to a typed
+ * vector, so the running acc must re-collapse to keep (,\)2 3 4 -> ,2 / 2 3 /
+ * 2 3 4 (ref/accumulators.md:263-267).  The user-seeded x f\y path keeps its
+ * uncollapsed steps (banked behavior). */
+static ray_t* q_seeded_scan(ray_t* f, ray_t* seed, ray_t* x, int collapse_steps) {
     if (!x || (!ray_is_vec(x) && x->type != RAY_LIST)) return ray_error("type", "scan: expected a list");
     int64_t L = ray_len(x);
     ray_t* out = ray_list_new(L > 0 ? L : 1);
     ray_t* acc = seed; ray_retain(acc);
     for (int64_t i = 0; i < L; i++) {
         ray_t* cur = q_elem_at(x, i);
-        ray_t* nxt = call_fn2(f, acc, cur);
+        ray_t* nxt = q_force(call_fn2(f, acc, cur));
         ray_release(acc); ray_release(cur);
         if (!nxt || RAY_IS_ERR(nxt)) { ray_release(out); return nxt ? nxt : ray_error("type", NULL); }
+        if (collapse_steps && nxt->type == RAY_LIST) {
+            ray_t* cn = q_collapse_list(nxt);
+            ray_release(nxt);
+            if (!cn || RAY_IS_ERR(cn)) { ray_release(out); return cn ? cn : ray_error("type", NULL); }
+            nxt = cn;
+        }
         out = ray_list_append(out, nxt);
         acc = nxt; ray_retain(acc);
     }
     ray_release(acc);
     ray_t* c = q_collapse_list(out); ray_release(out); return c;
+}
+
+/* Identity element I of a q operator for the ACCUMULATOR context
+ * (ref/accumulators.md:261-267 unary-seed, 420-428 empty-Over): + -> 0,
+ * * -> 1, , -> ().  Owned result; NULL when q knows none.  (Each-prior keeps
+ * its OWN maps.md-cited seed set in q_prior_seed — different doc contract.) */
+static ray_t* q_acc_identity(ray_t* f) {
+    q_provenance_t pv;
+    if (!q_registry_provenance(f, &pv) || !pv.spelling || !pv.spelling[0] ||
+        pv.spelling[1] != '\0') return NULL;
+    switch (pv.spelling[0]) {
+    case '+': return ray_i64(0);
+    case '*': return ray_i64(1);
+    case ',': return ray_list_new(0);
+    default:  return NULL;
+    }
+}
+
+/* Over/Scan on an EMPTY right argument (ref/accumulators.md:396-399 Scan,
+ * 408-437 Over): known identity -> I; a LIST/vector VALUE (pinned for Over
+ * only: 1 0 3h/[til 0] -> 5h) -> empty of the value's type; else (). */
+static ray_t* q_acc_empty(ray_t* f, int scan) {
+    ray_t* ident = q_acc_identity(f);
+    if (ident) return ident;
+    if (!scan && f) {
+        if (f->type == RAY_LIST) return ray_list_new(0);
+        if (ray_is_vec(f))
+            return (f->type == RAY_SYM) ? ray_sym_vec_new(RAY_SYM_W64, 0)
+                                        : ray_vec_new(f->type, 0);
+    }
+    return ray_list_new(0);
+}
+
+static int q_acc_is_coll(ray_t* x) {
+    return x && (ray_is_vec(x) || x->type == RAY_LIST);
 }
 
 /* `/` over — reduce / converge / do / while by operand shape and f rank. */
@@ -768,15 +829,26 @@ ray_t* q_over_wrap(ray_t** args, int64_t n) {
     if (n == 2) {
         ray_t* x = args[1];
         if (rank == 1) return q_converge(f, x, 0);
+        if (q_acc_is_coll(x) && ray_len(x) == 0) return q_acc_empty(f, 0);
+        if (x && ray_is_atom(x) && x->type != RAY_LIST) {
+            /* atom right argument with known I: one evaluation f(I, x) —
+             * (,/)42 -> ,42 (raze == ,/ and raze 42 -> ,42, ref/raze.md) */
+            ray_t* ident = q_acc_identity(f);
+            if (ident) {
+                ray_t* r = q_force(call_fn2(f, ident, x));
+                ray_release(ident);
+                return r;
+            }
+        }
         ray_t* fa[2] = { f, x };
-        return ray_fold_fn(fa, 2);                       /* reduce */
+        return q_force(ray_fold_fn(fa, 2));              /* reduce */
     }
     if (n == 3) {
         ray_t* a = args[1], *x = args[2];
         if (q_is_fn_value(a))  return q_while(f, a, x, 0);
         if (rank == 1)         return q_ntimes(f, as_i64(a), x, 0);
         ray_t* fa[3] = { f, a, x };
-        return ray_fold_fn(fa, 3);                       /* seeded reduce */
+        return q_force(ray_fold_fn(fa, 3));              /* seeded reduce */
     }
     return ray_error("rank", "over: bad arity");
 }
@@ -788,16 +860,47 @@ ray_t* q_scan_wrap(ray_t** args, int64_t n) {
     if (n == 2) {
         ray_t* x = args[1];
         if (rank == 1) return q_converge(f, x, 1);
+        if (q_acc_is_coll(x) && ray_len(x) == 0) return q_acc_empty(f, 1);
+        {   /* unary-seed rule (ref/accumulators.md:261-267): a known I is the
+             * left argument of the FIRST evaluation — (,\)2 3 4 -> ,2 / 2 3 /
+             * 2 3 4.  Applied for `,` only: seeding + and * is
+             * value-identical but would promote the first step's type. */
+            ray_t* ident = q_acc_identity(f);
+            if (ident) {
+                if (ident->type == RAY_LIST && q_acc_is_coll(x)) {
+                    ray_t* r = q_seeded_scan(f, ident, x, 1);
+                    ray_release(ident);
+                    return r;
+                }
+                ray_release(ident);
+            }
+        }
         ray_t* fa[2] = { f, x };
         ray_t* r = ray_scan_fn(fa, 2);
         if (!r || RAY_IS_ERR(r)) return r;
+        if (r->type == RAY_LIST) {
+            /* engine scan has no lazy discipline — force each retained step
+             * in place (rc==1 result); propagate a materialize error with the
+             * atomic_map trim pattern (free exactly the initialized prefix) */
+            ray_t** e = (ray_t**)ray_data(r);
+            for (int64_t i = 0; i < ray_len(r); i++) {
+                if (!e[i] || !ray_is_lazy(e[i])) continue;
+                e[i] = ray_lazy_materialize(e[i]);
+                if (!e[i] || RAY_IS_ERR(e[i])) {
+                    ray_t* err = e[i] ? e[i] : ray_error("type", NULL);
+                    r->len = i;
+                    ray_release(r);
+                    return err;
+                }
+            }
+        }
         ray_t* c = q_collapse_list(r); ray_release(r); return c;
     }
     if (n == 3) {
         ray_t* a = args[1], *x = args[2];
         if (q_is_fn_value(a))  return q_while(f, a, x, 1);
         if (rank == 1)         return q_ntimes(f, as_i64(a), x, 1);
-        return q_seeded_scan(f, a, x);
+        return q_seeded_scan(f, a, x, 0);
     }
     return ray_error("rank", "scan: bad arity");
 }

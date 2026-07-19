@@ -150,10 +150,10 @@ static const q_op_t Q_OPS[] = {
       "compare their arguments", "qdocs/docs/docs/docs/ref/greater-than.md",
       "x>=y   >=[x;y]", NULL },
     /* `=` monadic is group (rowid — the `group` row); family = dyadic Equal. */
-    { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2A("==", q_eq_wrap), NULL, 1, 0, "atomic",
+    { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic",
       "flags where its arguments are equal", "qdocs/docs/docs/docs/ref/equal.md",
       "x=y    =[x;y]", NULL },
-    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2A("!=", q_ne_wrap), NULL, 1, 0, "atomic",
+    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic",
       "Not equal (returns 1b where arguments differ)", NULL,   /* HAND-AUTHORED: docsrc NULL, see tools/qdocs/qdocs-docmap.pins.tsv */
       "x<>y   <>[x;y]", "1 2 3 <> 3 2 1 -> 101b" },
     /* ---- structural glyphs ---- */
