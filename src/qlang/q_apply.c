@@ -25,6 +25,7 @@
 #include "qlang/q_fmt.h"        /* q_console_write — 1/-1/2/-2 console handles */
 #include "core/ipc.h"           /* ray_ipc_handle_of_fd — q true-fd handle -> selector id */
 #include "qlang/q_ws.h"         /* q_ws_client_open — ws:// hsym-apply */
+#include "qlang/q_http_client.h" /* q_http_raw_client — http:// hsym-apply */
 #include "ops/ops.h"            /* ray_is_lazy / ray_lazy_materialize — DAG agg results */
 #include <string.h>
 
@@ -623,6 +624,22 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                     (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
                     if (n == 1 && args[0] && args[0]->type == -RAY_STR)
                         return q_ws_client_open(head, args[0]);
+                    return NULL;
+                }
+            }
+            /* Low-level HTTP client (kb/http.md §low level HTTP request
+             * mechanism): `:http://host:port` applied to a raw HTTP request
+             * string sends it verbatim and returns the full response string.
+             * Claimed BEFORE the one-shot IPC arm (as ws:// is) so an http://
+             * handle never TCP-connects as a kdb peer; `:https://` -> 'nyi
+             * inside q_http_raw_client.  A non-string arg declines. */
+            {
+                const char* hp = ray_str_ptr(s);
+                size_t hl = ray_str_len(s);
+                if ((hl >= 8 && memcmp(hp, ":http://", 8) == 0) ||
+                    (hl >= 9 && memcmp(hp, ":https://", 9) == 0)) {
+                    if (n == 1 && args[0] && args[0]->type == -RAY_STR)
+                        return q_http_raw_client(head, args[0]);
                     return NULL;
                 }
             }
