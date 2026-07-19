@@ -238,8 +238,8 @@ static inline bool agg_type_admitted(uint16_t op, int8_t t) {
     /* Reject only the element types we KNOW are inadmissible; defer unknown
      * wrappers (e.g. RAY_MAPCOMMON) and out_type==0 to the runtime so a
      * plan-time guard never false-rejects a column it can't classify. */
-    bool nonnum   = (t == RAY_SYM || t == RAY_STR || t == RAY_GUID ||
-                     t == RAY_CHARV);   /* sum "abc"→'type (ref/sum.md); richer char arith (c%y, c+f, int-c, c+temporal) is C3 stage-2/4, not agg */
+    bool nonnum   = (t == RAY_SYM || t == RAY_STR || t == RAY_GUID);
+                     /* charv admits: chars ARE bytes (owner ruling 2026-07-19) */
     bool temporal = (RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) ||
                      RAY_IS_TEMPORALF(t));
     switch (op) {

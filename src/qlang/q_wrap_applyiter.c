@@ -787,20 +787,13 @@ static ray_t* q_seeded_scan(ray_t* f, ray_t* seed, ray_t* x, int collapse_steps)
     ray_t* c = q_collapse_list(out); ray_release(out); return c;
 }
 
-/* Identity element I of a q operator for the ACCUMULATOR context
- * (ref/accumulators.md:261-267 unary-seed, 420-428 empty-Over): + -> 0,
- * * -> 1, , -> ().  Owned result; NULL when q knows none.  (Each-prior keeps
- * its OWN maps.md-cited seed set in q_prior_seed — different doc contract.) */
+/* Identity element I for the ACCUMULATOR context — resolved from the
+ * MANIFEST (q_ops_acc_identity; rule 3: the manifest owns per-verb facts).
+ * (Each-prior keeps its OWN maps.md-cited seed set in q_prior_seed.) */
 static ray_t* q_acc_identity(ray_t* f) {
     q_provenance_t pv;
-    if (!q_registry_provenance(f, &pv) || !pv.spelling || !pv.spelling[0] ||
-        pv.spelling[1] != '\0') return NULL;
-    switch (pv.spelling[0]) {
-    case '+': return ray_i64(0);
-    case '*': return ray_i64(1);
-    case ',': return ray_list_new(0);
-    default:  return NULL;
-    }
+    if (!q_registry_provenance(f, &pv)) return NULL;
+    return q_ops_acc_identity(pv.spelling);
 }
 
 /* Over/Scan on an EMPTY right argument (ref/accumulators.md:396-399 Scan,
