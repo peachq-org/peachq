@@ -231,10 +231,25 @@ src/qlang/pq_gen.h: src/qlang/pq.q tools/gen-bootstrap.sh
 
 src/qlang/q_pq.o src/qlang/q_pq.win.o: src/qlang/pq_gen.h
 
+# openq: embedded web assets. tools/gen-assets.sh walks src/qlang/html/ (sorted,
+# recursive) and bakes each file into a C byte array + a {path,bytes,len} table
+# (html_assets_gen.h). Generated-on-build (gitignored). q_http.c #includes it, so
+# q_http.o depends on it. A FORCE prereq runs the recipe EVERY build so ADDING or
+# DELETING an asset (a fileset membership change a static prerequisite list can't
+# detect for removals) is always reflected; the script writes atomically
+# (temp + cmp + mv), so the header mtime — and thus a q_http.o rebuild — only
+# changes when the embedded bytes actually change.
+.PHONY: force-html-assets
+force-html-assets: ;
+src/qlang/html_assets_gen.h: force-html-assets tools/gen-assets.sh
+	@tools/gen-assets.sh $@ src/qlang/html
+
+src/qlang/q_http.o src/qlang/q_http.win.o: src/qlang/html_assets_gen.h
+
 # The bench-* targets compile $(LIB_SRC) (incl. q_runtime.c) directly, so the
 # generated header must exist before they run (else a post-`make clean` bench
 # build fails on the missing include).
-bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup: src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/pq_gen.h
+bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup: src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/pq_gen.h src/qlang/html_assets_gen.h
 
 # Main binary — shared by debug/release/test (test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as a server, so test depends on it too).
@@ -599,6 +614,8 @@ clean:
 	-rm -f src/qlang/h_gen.h
 	# openq: generated PeachQ stdlib header (codegen'd from src/qlang/pq.q).
 	-rm -f src/qlang/pq_gen.h
+	# openq: generated embedded web-assets header (codegen'd from src/qlang/html/).
+	-rm -f src/qlang/html_assets_gen.h
 	-rm -f build/$(TARGET).parsediff.test $(PARSE_DIFF_OBJ) $(PARSE_DIFF_OBJ:.o=.d)
 	-rm -rf build build_release dist
 	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
