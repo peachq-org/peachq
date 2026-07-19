@@ -33,10 +33,12 @@ int q_http_url_parse(const char* url, size_t n, q_http_url_t* out);
 
 /* Extract the body from a COMPLETE response buffer (headers + framed body).
  * On success sets status and body/body_len (body points into buf; a chunked
- * body is de-framed IN PLACE, so buf is mutated).  Returns 0 ok, -1 malformed,
- * -2 decoded body exceeds Q_HTTP_CLIENT_MAX. */
+ * body is de-framed IN PLACE, so buf is mutated).  When `gzip` is non-NULL it is
+ * set to 1 iff the response carried `Content-Encoding: gzip` (caller inflates the
+ * extracted body), else 0.  Returns 0 ok, -1 malformed, -2 decoded body exceeds
+ * Q_HTTP_CLIENT_MAX. */
 int q_http_client_extract(char* buf, size_t len, int* status,
-                          const char** body, size_t* body_len);
+                          const char** body, size_t* body_len, int* gzip);
 
 /* --- reusable blocking pipeline seams (also the WS-client hook) --- */
 
