@@ -49,6 +49,16 @@ ray_t* ray_u8(uint8_t val) {
     return v;
 }
 
+/* Char atom (charv element form) — same 1-byte payload as the byte atom,
+ * distinct tag; kdb `-10h` after the 1b renumber. */
+ray_t* ray_char(uint8_t val) {
+    ray_t* v = ray_alloc(0);
+    if (RAY_IS_ERR(v)) return v;
+    v->type = -RAY_CHARV;
+    v->u8 = val;
+    return v;
+}
+
 ray_t* ray_i16(int16_t val) {
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;
@@ -245,6 +255,7 @@ ray_t* ray_typed_null(int8_t type) {
         case -RAY_I64: case -RAY_TIMESTAMP: case -RAY_TIMESPAN: v->i64 = NULL_I64; break;
         case -RAY_I32: case -RAY_MONTH: case -RAY_DATE: case -RAY_TIME:
         case -RAY_MINUTE: case -RAY_SECOND:            v->i32 = NULL_I32; break;
+        case -RAY_CHARV:                               v->u8  = 0x20; break;  /* char null = " " */
         case -RAY_I16:                                 v->i16 = NULL_I16; break;
         case -RAY_SYM:
             /* SYM has no null — a SYM "typed null" is just the empty symbol '

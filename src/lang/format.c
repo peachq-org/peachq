@@ -161,6 +161,7 @@ const char* ray_type_name(int8_t type) {
     case RAY_TIMESTAMP: return type < 0 ? "timestamp" : "TIMESTAMP";
     case RAY_SYM:       return type < 0 ? "sym"       : "SYM";
     case RAY_STR:       return type < 0 ? "str"       : "STR";
+    case RAY_CHARV:     return type < 0 ? "char"      : "CHARV";
     case RAY_GUID:      return type < 0 ? "guid"      : "GUID";
     case RAY_TABLE:     return "TABLE";
     case RAY_DICT:      return "DICT";

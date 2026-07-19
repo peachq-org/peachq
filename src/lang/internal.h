@@ -333,6 +333,7 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
          * COLUMN's domain; the atom must carry the runtime id. */
         case RAY_SYM:       return ray_sym(sym_cell_runtime_id(coll, i));
         case RAY_BYTE_ONLY: return ray_u8(((uint8_t*)d)[i]);
+        case RAY_CHARV:     return ray_char(((uint8_t*)d)[i]);   /* char atom, not byte */
         case RAY_MONTH:     return ray_month((int64_t)((int32_t*)d)[i]);
         case RAY_DATETIME:  return ray_datetime(((double*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
@@ -372,6 +373,13 @@ static inline int64_t elem_as_i64(ray_t* elem) {
 /* Store a scalar result into a typed vector at position i.
  * Returns 0 on success, -1 if the element type doesn't match. */
 static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
+    if (vec->type == RAY_CHARV) {
+        /* Before the null branch: the char null " " is an ORDINARY 0x20 byte,
+         * not a memset-0 sentinel.  Strict: only char atoms store into charv. */
+        if (elem->type != -RAY_CHARV) return -1;
+        ((uint8_t*)ray_data(vec))[i] = elem->u8;
+        return 0;
+    }
     if (RAY_ATOM_IS_NULL(elem)) {
         /* Payload carries the width-correct sentinel. */
         switch (vec->type) {
