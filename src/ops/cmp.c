@@ -73,6 +73,10 @@ int sym_atom_cmp(ray_t* a, ray_t* b) {
 /* Comparison */
 ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c > 0 ? 1 : 0); }
+    /* char~char compares by byte payload (all six fns; enrolled class).
+     * char~numeric stays 'type until 1b pins the kdb cross-type rule. */
+    if (a->type == -RAY_CHARV && b->type == -RAY_CHARV)
+        return make_bool(a->u8 > b->u8 ? 1 : 0);
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) > 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
@@ -99,6 +103,8 @@ ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
 
 ray_t* ray_lt_fn(ray_t* a, ray_t* b) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c < 0 ? 1 : 0); }
+    if (a->type == -RAY_CHARV && b->type == -RAY_CHARV)
+        return make_bool(a->u8 < b->u8 ? 1 : 0);
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) < 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
@@ -124,6 +130,8 @@ ray_t* ray_lt_fn(ray_t* a, ray_t* b) {
 
 ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c >= 0 ? 1 : 0); }
+    if (a->type == -RAY_CHARV && b->type == -RAY_CHARV)
+        return make_bool(a->u8 >= b->u8 ? 1 : 0);
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) >= 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
@@ -150,6 +158,8 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
 
 ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c <= 0 ? 1 : 0); }
+    if (a->type == -RAY_CHARV && b->type == -RAY_CHARV)
+        return make_bool(a->u8 <= b->u8 ? 1 : 0);
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) <= 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
@@ -182,6 +192,8 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
     if (na && nb) return make_bool(1);
     if (na || nb) return make_bool(0);
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c == 0 ? 1 : 0); }
+    if (a->type == -RAY_CHARV && b->type == -RAY_CHARV)
+        return make_bool(a->u8 == b->u8 ? 1 : 0);
     if (a->type == -RAY_BOOL && b->type == -RAY_BOOL)
         return make_bool(a->b8 == b->b8 ? 1 : 0);
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
@@ -207,6 +219,8 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
     if (na && nb) return make_bool(0);
     if (na || nb) return make_bool(1);
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c != 0 ? 1 : 0); }
+    if (a->type == -RAY_CHARV && b->type == -RAY_CHARV)
+        return make_bool(a->u8 != b->u8 ? 1 : 0);
     if (a->type == -RAY_BOOL && b->type == -RAY_BOOL)
         return make_bool(a->b8 != b->b8 ? 1 : 0);
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)

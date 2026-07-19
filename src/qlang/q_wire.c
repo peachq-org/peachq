@@ -254,6 +254,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         case RAY_MINUTE: rc = (w_u8(b, (uint8_t)-RAY_MINUTE) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         case RAY_SECOND: rc = (w_u8(b, (uint8_t)-RAY_SECOND) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         case RAY_LIST: break;   /* dead: -t >= 1, so tag 0 is never an atom — named for totality */
+        case RAY_CHARV: break;  /* wire/serde of charv lands with the 1b boundary flip */
         }
         rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
         goto out;
@@ -363,6 +364,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             rc = q_wire_write_obj(b, e[i]);
         goto out;
     }
+    case RAY_CHARV: break;  /* wire/serde of charv lands with the 1b boundary flip */
     }
     /* value band exhausted above; an out-of-band tag (INDEX 97, or the sparse
      * gap 3) falls here — same 'nyi the old `default:` returned. */
@@ -520,8 +522,9 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     case RAY_F64: RAY_TEMPORALF_CASES: { double* e = (double*)d;
         for (int32_t i = 0; i < count; i++) { e[i] = f64_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
     /* no in-band sentinel: bool/byte have no null; GUID's all-zero-payload null
-     * is only knowable from the serde attrs flag (restored below). */
-    case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_GUID: break;
+     * is only knowable from the serde attrs flag (restored below).  CHARV is
+     * unreachable until the 1b wire-read flip; blank-is-null never sets the flag. */
+    case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_GUID: case RAY_CHARV: break;
     /* never reach rd_fixed_vec: STR/SYM decode on their own paths; LIST is not fixed. */
     case RAY_LIST: case RAY_STR: case RAY_SYM: break;
     }
@@ -670,6 +673,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         case RAY_MINUTE: if (!r_need(c, 4)) return trunc_err("minute"); return ray_minute((int64_t)r_i32(c));
         case RAY_SECOND: if (!r_need(c, 4)) return trunc_err("second"); return ray_second((int64_t)r_i32(c));
         case RAY_LIST: break;   /* dead: -t >= 1, tag 0 is never an atom — named for totality */
+        case RAY_CHARV: break;  /* wire byte -21 is not a kdb tag; charv decode = 1b */
         }
         return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
     }

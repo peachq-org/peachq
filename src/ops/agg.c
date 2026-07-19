@@ -114,6 +114,7 @@ static ray_t* agg_atom_i64_for_type(int8_t t, int64_t v) {
     switch (t) {
     case RAY_BOOL: return ray_bool(v != 0);
     case RAY_BYTE_ONLY: return ray_u8((uint8_t)v);
+    case RAY_CHARV: return ray_char((uint8_t)v);
     case RAY_I16: return ray_i16((int16_t)v);
     case RAY_I32: return ray_i32((int32_t)v);
     case RAY_DATE: return ray_date(v);
@@ -378,6 +379,7 @@ ray_t* ray_min_fn(ray_t* x) {
                     switch (x->type) {
                     case RAY_BOOL:      return ray_bool((bool)mn);
                     case RAY_BYTE_ONLY: return ray_u8((uint8_t)mn);
+                    case RAY_CHARV:     return ray_char((uint8_t)mn);
                     case RAY_I16:       return ray_i16((int16_t)mn);
                     case RAY_I32:       return ray_i32((int32_t)mn);
                     case RAY_DATE:      return ray_date((int32_t)mn);
@@ -436,6 +438,7 @@ ray_t* ray_max_fn(ray_t* x) {
                     switch (x->type) {
                     case RAY_BOOL:      return ray_bool((bool)mx);
                     case RAY_BYTE_ONLY: return ray_u8((uint8_t)mx);
+                    case RAY_CHARV:     return ray_char((uint8_t)mx);
                     case RAY_I16:       return ray_i16((int16_t)mx);
                     case RAY_I32:       return ray_i32((int32_t)mx);
                     case RAY_DATE:      return ray_date((int32_t)mx);

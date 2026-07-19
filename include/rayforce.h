@@ -103,7 +103,12 @@ typedef enum {
     RAY_TIMESPAN  = 16,  /* Nanoseconds duration (i64 payload) — kdb `n` */
     RAY_MINUTE    = 17,  /* Minutes since midnight (i32 payload) — kdb `u` */
     RAY_SECOND    = 18,  /* Seconds since midnight (i32 payload) — kdb `v` */
-    RAY_TIME      = 19
+    RAY_TIME      = 19,
+    /* Char vector (1-byte payload, atom = char) — kdb `c`/10h.  TEMPORARY tag
+     * 21 (out-of-band, next to RAY_SEL=20); the stage-1b atomic renumber swap
+     * moves charv to 10 and RAY_STR to 21 (string-model spec §A/§C) — keep
+     * every site symbolic so that swap is a constants-only edit. */
+    RAY_CHARV     = 21
 } ray_type_e;
 
 /* Width-class temporal aliases ("an int wearing a costume").  Bucket-1
@@ -133,9 +138,9 @@ typedef enum {
  * itself — 0x display, "x"$ targets, byte parsing, wire tag 4, arith
  * promotion, byte-buffer internals — which charv must NOT join.  Bare RAY_U8
  * is poisoned at the end of this header so every new site picks a lane. */
-#define RAY_BYTE_CASES        case RAY_U8
-#define RAY_BYTE_ATOM_CASES   case -RAY_U8
-#define ray_is_bytelike(t)    ((t) == RAY_U8)
+#define RAY_BYTE_CASES        case RAY_U8: case RAY_CHARV
+#define RAY_BYTE_ATOM_CASES   case -RAY_U8: case -RAY_CHARV
+#define ray_is_bytelike(t)    ((t) == RAY_U8 || (t) == RAY_CHARV)
 #define RAY_BYTE_ONLY         RAY_U8
 #define ray_is_byte_only(t)   ((t) == RAY_U8)
 
@@ -297,7 +302,10 @@ void ray_error_free(ray_t* err);
  * today (datetime/timespan/minute/second unimplemented), so the range
  * is intentionally inclusive; a value's tag is never a gap.  If those slots
  * are later filled, keep this predicate's intent (real vector types only). */
-#define ray_is_vec(v)     ((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME)
+/* `|| == RAY_CHARV` is TEMPORARY: charv sits out-of-band at 21 until the 1b
+ * renumber puts it in-band at 10 — then this extension flips to RAY_STR
+ * (the physical type exiled to 21), per string-model spec §A. */
+#define ray_is_vec(v)     (((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME) || (v)->type == RAY_CHARV)
 #define ray_len(v)        ((v)->len)
 
 /* Element type sizes indexed by type tag — covers all uint8_t values.
@@ -455,6 +463,7 @@ void     ray_release(ray_t* v);
 
 ray_t* ray_bool(bool val);
 ray_t* ray_u8(uint8_t val);
+ray_t* ray_char(uint8_t val);       /* char atom (-RAY_CHARV, u8 payload) */
 ray_t* ray_i16(int16_t val);
 ray_t* ray_i32(int32_t val);
 ray_t* ray_i64(int64_t val);
@@ -520,6 +529,10 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
              * null, only symbols do).  A STR atom is never null — the empty
              * string is a value. */
             return false;
+        case RAY_CHARV:
+            /* char null IS the blank " " (0x20) — an in-band ordinary byte,
+             * kdb-true (`null " "` -> 1b; string-model spec Design 7). */
+            return x->u8 == 0x20;
         case RAY_GUID: {
             /* GUID null = 16 all-zero bytes in obj's U8 buffer.
              * obj is always populated by ray_guid / ray_typed_null —
