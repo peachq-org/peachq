@@ -263,13 +263,6 @@ ray_t* q_attr_set_letter(char letter, ray_t* vec) {
 ray_t* q_take_wrap(ray_t* n, ray_t* list) {
     if (n && n->type == -RAY_SYM && list && ray_is_vec(list))
         return q_attr_set_dispatch(n, list);
-    if (list && list->type == -RAY_CHARV && n && n->type != -RAY_SYM) {
-        ray_t* ls = q_str_in(list);          /* char atom rides the legacy 1-char
-                                              * string take/reshape body */
-        ray_t* r = q_take_wrap(n, ls);
-        ray_release(ls);
-        return q_charv_out(r);
-    }
     if (n && n->type == RAY_I64 && ray_len(n) >= 2) return q_reshape(n, list);
     return ray_take_fn(list, n);
 }
