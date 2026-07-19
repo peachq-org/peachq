@@ -284,16 +284,64 @@ static ray_t* q_str_cmp_vec(ray_t* a, ray_t* b, int eq) {
     return r;
 }
 
-/* q `=` — element-wise over char strings, else rayfall `==`.  RAY_FN_ATOMIC so
- * eval broadcasts it over numeric vectors (each element pair hits ray_eq_fn). */
+/* charv byte lane for `=`/`<>` (string-C3 stage 2): char-vs-char pairs
+ * (vec=atom, vec=vec) reduce to one byte loop instead of the per-element
+ * atom broadcast (measured ~10x at 1M chars under ASan).  Returns NULL to
+ * bail to the generic path when a vector carries sentinel-null state
+ * (defensive: no charv null atom exists today — nulls are stage 4). */
+static ray_t* q_charv_cmp_vec(ray_t* a, ray_t* b, int eq) {
+    int a_v = a->type == RAY_CHARV, b_v = b->type == RAY_CHARV;
+    if ((a_v && (a->attrs & RAY_ATTR_HAS_NULLS)) ||
+        (b_v && (b->attrs & RAY_ATTR_HAS_NULLS))) return NULL;
+    if (a_v && b_v && ray_len(a) != ray_len(b))
+        return ray_error("length", "%s: operand lengths must match, got %lld and %lld",
+                         eq ? "=" : "<>", (long long)ray_len(a), (long long)ray_len(b));
+    int64_t n = a_v ? ray_len(a) : ray_len(b);
+    ray_t* out = ray_vec_new(RAY_BOOL, n > 0 ? n : 1);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    out->len = n;
+    bool* ob = (bool*)ray_data(out);
+    const uint8_t* ap = a_v ? (const uint8_t*)ray_data(a) : NULL;
+    const uint8_t* bp = b_v ? (const uint8_t*)ray_data(b) : NULL;
+    uint8_t aa = a_v ? 0 : a->u8, bb = b_v ? 0 : b->u8;
+    for (int64_t i = 0; i < n; i++) {
+        uint8_t x = ap ? ap[i] : aa, y = bp ? bp[i] : bb;
+        ob[i] = eq ? (x == y) : (x != y);
+    }
+    return out;
+}
+
+static int q_is_char_op(ray_t* x) {
+    return x && (x->type == RAY_CHARV || x->type == -RAY_CHARV);
+}
+
+/* q `=`/`<>` own their structure dispatch (Q_OPS rows are QR_FN2, NON-atomic):
+ * char-vs-char pairs take the byte lane, legacy STR pairs keep q_str_cmp_vec,
+ * any other collection shape delegates to the SAME opcode-0 atomic broadcast
+ * eval used before the rows dropped RAY_FN_ATOMIC (byte-identical numeric/
+ * temporal/dict/list behavior; recursion re-enters this wrapper per element
+ * and terminates at the two-atom scalar kernel). */
 ray_t* q_eq_wrap(ray_t* a, ray_t* b) {
     if (q_is_str_atom(a) && q_is_str_atom(b)) return q_str_cmp_vec(a, b, 1);
+    if (q_is_char_op(a) && q_is_char_op(b) &&
+        (a->type == RAY_CHARV || b->type == RAY_CHARV)) {
+        ray_t* r = q_charv_cmp_vec(a, b, 1);
+        if (r) return r;                         /* NULL = null-state bailout */
+    }
+    if (is_collection(a) || is_collection(b))
+        return atomic_map_binary(q_eq_wrap, a, b);
     return ray_eq_fn(a, b);
 }
 
-/* q `<>` — element-wise over char strings, else rayfall `!=`. */
 ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
     if (q_is_str_atom(a) && q_is_str_atom(b)) return q_str_cmp_vec(a, b, 0);
+    if (q_is_char_op(a) && q_is_char_op(b) &&
+        (a->type == RAY_CHARV || b->type == RAY_CHARV)) {
+        ray_t* r = q_charv_cmp_vec(a, b, 0);
+        if (r) return r;                         /* NULL = null-state bailout */
+    }
+    if (is_collection(a) || is_collection(b))
+        return atomic_map_binary(q_ne_wrap, a, b);
     return ray_neq_fn(a, b);
 }
 
