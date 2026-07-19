@@ -220,6 +220,7 @@ void ray_eval_set_apply_hook(ray_apply_hook_t hook);
  * length (NOT NUL-terminated) and returns an OWNED value. */
 typedef ray_t* (*ray_remote_str_fn_t)(const char* src, size_t len);
 void   ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn);
+bool   ray_eval_remote_str_installed(void);   /* q runtime present? (IPC text dialect) */
 ray_t* ray_eval_remote_str(const char* src, size_t len);
 
 /* openq: remote-source (func;args) VALUE-APPLY evaluation (IPC request

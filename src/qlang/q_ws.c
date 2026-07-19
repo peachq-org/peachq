@@ -11,6 +11,7 @@
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
+#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
 
 #define Q_WS_MAX_MSG    (32ll * 1024 * 1024)  /* per-message cap (#217 parity) */
 #define Q_WS_MAX_FRAGS  65536u                /* fragment-count cap per message */
@@ -334,9 +335,9 @@ int64_t q_ws_feed(q_ws_conn_t* c, ray_sock_t fd, uint8_t* data, size_t len) {
 /* ---- outbound: the neg[h] framed-write arm ---- */
 
 int q_ws_send(ray_sock_t fd, ray_t* msg) {
-    if (msg && msg->type == -RAY_STR)
-        return ws_frame_send(fd, Q_WS_OP_TEXT, ray_str_ptr(msg),
-                             ray_str_len(msg), Q_WS_DATA_SECS);
+    const char* tp; int64_t tn;
+    if (msg && q_text_bytes(msg, &tp, &tn))
+        return ws_frame_send(fd, Q_WS_OP_TEXT, tp, (size_t)tn, Q_WS_DATA_SECS);
     if (msg && msg->type == RAY_BYTE_ONLY)
         return ws_frame_send(fd, Q_WS_OP_BIN, ray_data(msg),
                              (size_t)msg->len, Q_WS_DATA_SECS);

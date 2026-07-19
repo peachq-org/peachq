@@ -45,7 +45,7 @@ struct ray_sym_domain_s;
  * len-vs-filesize + SYM rc saved-count already validate file integrity;
  * this byte only gates the format generation.
  *
- * The CURRENT generation is 2.  The kdb type-tag renumber changed the meaning
+ * Generation 2 (historical).  The kdb type-tag renumber changed the meaning
  * of the on-disk element-type byte (guid 11->2, byte 2->4, ... time 9->19), so
  * generation-0/1 splayed data carries stale type numbers and MUST NOT be
  * silently mis-decoded.  This is the first genuine breaking layout change, so
@@ -55,14 +55,19 @@ struct ray_sym_domain_s;
  * ray_col_check_format; they must be migrated (re-written) under the new
  * numbering.  Automatic old->new migration is a deferred follow-up.
  *
+ * Generation 3 (2026-07-19): the STR<->CHARV tag renumber — the on-disk
+ * element-type byte 10 now means char vector and STR moved to 21 (string-model
+ * 1b).  Pre-v1, no persisted data: gen-2 files hard-reject, no migration shim.
+ *
  * SCOPE: this gate covers the 32-byte-header column format only.  The extended
- * magic formats (STRV/STRL/LSTG/TTBL) are diverted before this check (see the
- * magic dispatch in col.c) and carry no generation field; they persist raw
- * type bytes too.  Old-STR extended files self-reject (old STR=13 is now a gap
- * -> ray_de_raw error); same-elem-width numeric aliasing in old LSTG/TTBL data
- * can still mis-decode.  Adding a generation field to the extended formats is
- * a deferred follow-up (see the kdb-type-renumber plan / PR). */
-#define RAY_COL_FORMAT_MAJOR    ((uint8_t)2)
+ * magic formats are diverted before this check (see the magic dispatch in
+ * col.c) and carry no generation field.  STRL/STRV persist no type-tag bytes
+ * (renumber-immune); the recursive LSTG/TTBL formats DO persist raw tags, so
+ * their magic rev letters were bumped at gen 3 (col.c) — pre-swap files miss
+ * the magic and reject via plain-header validation instead of mis-decoding.
+ * Adding a real generation field to the extended formats is a deferred
+ * follow-up. */
+#define RAY_COL_FORMAT_MAJOR    ((uint8_t)3)
 
 /* Stamp the format generation into a 32-byte on-disk header's `order` byte.
  * Does NOT touch aux (reserved for postponed index persistence).  Writes the
