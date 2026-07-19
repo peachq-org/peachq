@@ -46,6 +46,17 @@ const char* q_http_docroot(char* buf, size_t bufsz);
  * O_NOFOLLOW; reparse-point escape is a documented platform divergence). */
 int q_http_open_doc(const char* rel, size_t n, int64_t* size_out);
 
+/* Embedded default site (src/qlang/html/, baked in via html_assets_gen.h): the
+ * fallback served when no on-disk ./html docroot exists. Pure table match (no
+ * filesystem, no traversal). q_http_asset_lookup normalizes `path` (strips
+ * leading '/', empty/"/" -> "index.html") then exact-matches the table; returns
+ * the bytes + *len_out (Content-Length; the array's trailing NUL is excluded),
+ * or NULL on a miss. The count/at accessors expose the table for tests. */
+const unsigned char* q_http_asset_lookup(const char* path, size_t* len_out);
+size_t               q_http_asset_count(void);
+bool                 q_http_asset_at(size_t i, const char** path_out,
+                                     const unsigned char** bytes_out, size_t* len_out);
+
 /* Compose + send one minimal text/plain response (used for all error codes). */
 void q_http_send_simple(ray_sock_t fd, int code, const char* reason);
 
