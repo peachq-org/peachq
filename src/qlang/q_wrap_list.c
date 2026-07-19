@@ -1474,6 +1474,8 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             return q_gen_bytes(n);              /* n?0x0 */
         case RAY_I16:
             return ray_error("nyi", "?: y");    /* short roll/deal deferred */
+        case RAY_CHARV:
+            return ray_error("nyi", "?: y");    /* char roll (n?"abc" vector form) = 1b+ */
         case RAY_I32: case RAY_I64: {
             if (!RAY_ATOM_IS_NULL(y) && q_iatom_val(y) == 0) {  /* n?0 / n?0i full-range */
                 if (deal) return ray_error("nyi", "?: deal 0");

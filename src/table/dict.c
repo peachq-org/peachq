@@ -317,6 +317,7 @@ static ray_t* dict_vals_at(ray_t* vals, int64_t idx, bool* owned_out) {
     switch (vals->type) {
         case RAY_BOOL:      atom = ray_bool(((uint8_t*)base)[idx]);                  break;
         case RAY_BYTE_ONLY: atom = ray_u8(((uint8_t*)base)[idx]);                    break;
+        case RAY_CHARV:     atom = ray_char(((uint8_t*)base)[idx]);                  break;
         case RAY_I16:       atom = ray_i16(((int16_t*)base)[idx]);                   break;
         case RAY_I32:       atom = ray_i32(((int32_t*)base)[idx]);                   break;
         case RAY_I64:       atom = ray_i64(((int64_t*)base)[idx]);                   break;
