@@ -447,6 +447,7 @@ static ray_t* zero_atom_for_elem_type(ray_t* coll) {
         case RAY_I32:       return ray_i32(0);
         case RAY_I16:       return ray_i16(0);
         case RAY_BYTE_ONLY: return ray_u8(0);
+        case RAY_CHARV:     return ray_char(0);
         case RAY_BOOL:      return make_bool(0);
         case RAY_F64:       return make_f64(0.0);
         case RAY_DATE:      return ray_date(0);
