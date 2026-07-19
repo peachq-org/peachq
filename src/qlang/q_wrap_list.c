@@ -263,6 +263,13 @@ ray_t* q_attr_set_letter(char letter, ray_t* vec) {
 ray_t* q_take_wrap(ray_t* n, ray_t* list) {
     if (n && n->type == -RAY_SYM && list && ray_is_vec(list))
         return q_attr_set_dispatch(n, list);
+    if (list && list->type == -RAY_CHARV && n && n->type != -RAY_SYM) {
+        ray_t* ls = q_str_in(list);          /* char atom rides the legacy 1-char
+                                              * string take/reshape body */
+        ray_t* r = q_take_wrap(n, ls);
+        ray_release(ls);
+        return q_charv_out(r);
+    }
     if (n && n->type == RAY_I64 && ray_len(n) >= 2) return q_reshape(n, list);
     return ray_take_fn(list, n);
 }
@@ -566,17 +573,18 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
         ray_release(fill);
         return out;
     }
-    if (x && x->type == -RAY_STR) {
-        int64_t len = (int64_t)ray_str_len(x);
-        const char* s = ray_str_ptr(x);
+    if (x && (x->type == -RAY_STR || x->type == RAY_CHARV)) {
+        const char* s; int64_t len;
+        (void)q_text_bytes(x, &s, &len);
+        if (x->type == -RAY_STR) { s = ray_str_ptr(x); len = (int64_t)ray_str_len(x); }
         char stackb[256];
         char* b = (len <= (int64_t)sizeof stackb) ? stackb : malloc((size_t)(len > 0 ? len : 1));
         if (!b) return ray_error("oom", NULL);
         for (int64_t i = 0; i < len; i++) {
             int64_t j = i - k;
-            b[i] = (j >= 0 && j < len) ? s[j] : ' ';
+            b[i] = (j >= 0 && j < len) ? s[j] : ' ';   /* char null is the blank */
         }
-        ray_t* r = ray_str(b, (size_t)len);
+        ray_t* r = (x->type == RAY_CHARV) ? ray_charv(b, len) : ray_str(b, (size_t)len);
         if (b != stackb) free(b);
         return r;
     }
@@ -787,9 +795,13 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
         int rank1_seek = ny > 0 && e[0] && !ray_is_atom(e[0]);
         if (rank1_seek) {
             if (ray_is_atom(x)) return ray_bool(false);
-            return ray_bool(q_seq_has_item(y, x) != 0);
-        }
-        if (ray_is_atom(x)) return ray_bool(q_seq_has_item(y, x) != 0);
+            /* whole-x seek when x IS one item shape: a simple vector, or a
+             * boxed list while y's items are boxed too ((1 2;3 4) in (...;9)).
+             * Per-item only when x is boxed OVER y's simple-vector items —
+             * e.g. list-of-strings in list-of-strings. */
+            if (x->type != RAY_LIST || e[0]->type == RAY_LIST || e[0]->type == RAY_TABLE)
+                return ray_bool(q_seq_has_item(y, x) != 0);
+        } else if (ray_is_atom(x)) return ray_bool(q_seq_has_item(y, x) != 0);
         int64_t nx = ray_len(x);                     /* left-atomic over x */
         ray_t* outl = ray_list_new(nx > 0 ? nx : 1);
         if (RAY_IS_ERR(outl)) return outl;
@@ -1474,8 +1486,6 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             return q_gen_bytes(n);              /* n?0x0 */
         case RAY_I16:
             return ray_error("nyi", "?: y");    /* short roll/deal deferred */
-        case RAY_CHARV:
-            return ray_error("nyi", "?: y");    /* char roll (n?"abc" vector form) = 1b+ */
         case RAY_I32: case RAY_I64: {
             if (!RAY_ATOM_IS_NULL(y) && q_iatom_val(y) == 0) {  /* n?0 / n?0i full-range */
                 if (deal) return ray_error("nyi", "?: deal 0");
@@ -1494,12 +1504,15 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         case RAY_F32: case RAY_F64:
             if (deal) return ray_error("type", "?: deal y");
             return q_gen_floats(n, y);          /* n?f uniform [0,y) */
-        case RAY_STR:                           /* char atom: only `" "` has a
-             * roll law (-> .Q.a); other strings are pick-from-chars =
-             * string-model territory, deferred. */
+        case RAY_STR:                           /* legacy 1-char string blank */
             if (deal) return ray_error("type", "?: deal y");
             if (ray_str_len(y) == 1 && ray_str_ptr(y)[0] == ' ')
                 return q_gen_chars(n);
+            return ray_error("nyi", "?: y");
+        case RAY_CHARV:                         /* char atom: only `" "` has a
+             * roll law (-> .Q.a); pick-from-string is a stage-2+ cell. */
+            if (deal) return ray_error("type", "?: deal y");
+            if (y->u8 == ' ') return q_charv_out(q_gen_chars(n));
             return ray_error("nyi", "?: y");
         case RAY_SYM:
             return q_gen_syms(n, y, deal);      /* n?`m sym roll / deal */

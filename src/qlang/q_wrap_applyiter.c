@@ -289,6 +289,7 @@ static ray_t* q_trap_finish(ray_t* r, ray_t* e) {
     if (!r || !RAY_IS_ERR(r)) return r;              /* success passes through */
     ray_t* text = q_registry_sig_take();             /* full signal text, owned */
     if (!text) { const char* c = ray_err_code(r); text = ray_str(c ? c : "", c ? strlen(c) : 0); }
+    text = q_charv_out(text);                        /* handler receives a charv */
     ray_error_free(r);
     if (!q_is_fn_value(e)) { ray_release(text); ray_retain(e); return e; }
     ray_t* hr = call_fn1(e, text);
@@ -558,6 +559,10 @@ static ray_t* q_eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
         }
         ray_t* r = q_call_n(f, a, kk);
         for (int64_t j = 0; j < kk; j++) if (owned & (1u << j)) ray_release(a[j]);
+        /* Materialise a lazy per-element result (distinct/count of a vector is
+         * a DAG node): an unforced lazy stored past the eval line dangles once
+         * its graph dies — the ray_map_fn discipline, mirrored here. */
+        if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
         if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : ray_error("type", NULL); }
         out = ray_list_append(out, r);
         ray_release(r);
@@ -952,10 +957,13 @@ ray_t* q_sig_fn(ray_t* x) {
             full = ray_str(ray_str_ptr(s), l);
             ray_release(s);
         }
-    } else if (x && x->type == -RAY_STR) {
-        size_t l = ray_str_len(x); size_t c = l > 7 ? 7 : l;
-        memcpy(cls, ray_str_ptr(x), c); cls[c] = '\0';
-        full = ray_str(ray_str_ptr(x), l);
+    } else if (x) {
+        const char* p; int64_t l;                     /* string / charv / char atom */
+        if (q_text_bytes(x, &p, &l)) {
+            size_t c = (size_t)l > 7 ? 7 : (size_t)l;
+            memcpy(cls, p, c); cls[c] = '\0';
+            full = ray_str(p, (size_t)l);
+        }
     }
     if (g_qsig_payload) ray_release(g_qsig_payload);
     g_qsig_payload = full;              /* owned (or NULL) */

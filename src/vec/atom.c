@@ -59,6 +59,15 @@ ray_t* ray_char(uint8_t val) {
     return v;
 }
 
+/* Char vector from raw bytes (n >= 0; "" is the empty charv, a value). */
+ray_t* ray_charv(const char* p, int64_t n) {
+    ray_t* v = ray_vec_new(RAY_CHARV, n);
+    if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("oom", NULL);
+    if (n > 0) memcpy(ray_data(v), p, (size_t)n);
+    v->len = n;
+    return v;
+}
+
 ray_t* ray_i16(int16_t val) {
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;

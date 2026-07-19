@@ -1631,7 +1631,8 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
         char* src = (char*)ray_data(vec);
         char* dst = (char*)ray_data(result);
         if (len == 0) {
-            memset(dst, 0, (size_t)(abs_n * esz));
+            /* charv null is the BLANK (0x20), not the zero byte */
+            memset(dst, vtype == RAY_CHARV ? 0x20 : 0, (size_t)(abs_n * esz));
         } else if (n >= 0 && abs_n > 0) {
             /* Doubling tile-copy: O(log(abs_n/len)) memcpys instead of
              * abs_n calls of esz bytes each.  Invariant: after every
