@@ -263,7 +263,18 @@ ray_t* q_attr_set_letter(char letter, ray_t* vec) {
 ray_t* q_take_wrap(ray_t* n, ray_t* list) {
     if (n && n->type == -RAY_SYM && list && ray_is_vec(list))
         return q_attr_set_dispatch(n, list);
-    if (n && n->type == RAY_I64 && ray_len(n) >= 2) return q_reshape(n, list);
+    if (n && n->type == RAY_I64 && ray_len(n) >= 2) {
+        if (list && ray_is_atom(list)) {         /* n1 n2#atom — TYPE-BLIND: kdb
+                                                  * reshapes any atom by cycling
+                                                  * its enlist (ints/bytes/chars) */
+            ray_t* v = ray_enlist_fn(&list, 1);
+            if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("oom", NULL);
+            ray_t* r = q_reshape(n, v);
+            ray_release(v);
+            return r;
+        }
+        return q_reshape(n, list);
+    }
     return ray_take_fn(list, n);
 }
 
