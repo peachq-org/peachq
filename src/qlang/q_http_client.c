@@ -528,7 +528,8 @@ ray_t* q_http_raw_client(ray_t* hsym, ray_t* request) {
     char* resp = q_http_client_read_response(fd, &rlen, deadline, &err);
     if (!resp) goto done;
     int st; const char* body; size_t body_len;
-    int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len);
+    /* raw client returns the response verbatim — no transparent gzip inflate (NULL) */
+    int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len, NULL);
     if (ex == 0) {
         size_t total = (size_t)(body - resp) + body_len;   /* headers + framed body */
         result = ray_str(resp, total);
