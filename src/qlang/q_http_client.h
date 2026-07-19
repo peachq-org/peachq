@@ -64,4 +64,15 @@ ray_t* q_dotq_hg_fn(ray_t* x);
 /* `.Q.c.hp` — POST [url; mimeType; body], returns the body string (vary/3). */
 ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs);
 
+/* Low-level raw HTTP client (kb/http.md §"low level HTTP request mechanism"):
+ * apply a raw request STRING to a `:http://host[:port]` hsym.  Sends the request
+ * VERBATIM (no header injection — the caller supplies the full request line +
+ * headers + terminating blank line) and returns the ENTIRE response (status line
+ * + headers + blank line + body) as a string atom.  Chunked bodies are
+ * reassembled (V3.3); the response headers are returned unchanged.  `https://`
+ * -> 'nyi (TLS tier).  Reuses the #223 connect (30s) + send/read (30s) budgets
+ * and the 32 MiB cap.  PROVISIONAL pre-C3: the return is a string ATOM.  hsym +
+ * request are BORROWED; returns owned (or an owned bare-class ray_error). */
+ray_t* q_http_raw_client(ray_t* hsym, ray_t* request);
+
 #endif /* Q_HTTP_CLIENT_H */
