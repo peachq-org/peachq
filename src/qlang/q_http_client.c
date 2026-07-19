@@ -7,6 +7,8 @@
 #include <rayforce.h>
 #include "qlang/q_http_client.h"
 #include "qlang/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
+#include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
+#include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
@@ -485,4 +487,57 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
     if (!bodyv || bodyv->type != -RAY_STR) return ray_error("type", NULL);
     return http_do(args[0], ray_str_ptr(mimev), ray_str_len(mimev),
                    ray_str_ptr(bodyv), ray_str_len(bodyv));
+}
+
+/* ---- low-level raw client (kb/http.md §low level HTTP request mechanism) ----
+ * The ONLY divergence from http_do: the caller supplies the whole request (sent
+ * verbatim, nothing injected) and we return the ENTIRE response — status line +
+ * headers + framed body — not just the body.  q_http_client_extract normalizes
+ * framing (Content-Length trim / chunked de-frame-in-place / close-to-EOF /
+ * bodyless) and sets body = resp + header_len, so the full raw response is
+ * exactly [resp, (body-resp)+body_len).  Chunked reassembly leaves the response
+ * headers unchanged (doc: "constructed from the chunks").  A HEAD/CONNECT
+ * response is framed by the reader as if it had a body (the reader is
+ * method-agnostic, inherited from #223) — an accepted limitation for this
+ * escape hatch. */
+ray_t* q_http_raw_client(ray_t* hsym, ray_t* request) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!request || request->type != -RAY_STR) return ray_error("type", NULL);
+    if (!hsym || hsym->type != -RAY_SYM) return ray_error("type", NULL);
+
+    /* hsym text (BORROWED interned string) -> ":http://host[:port]" */
+    ray_t* nm = ray_sym_str(hsym->i64);
+    if (!nm) return ray_error("type", NULL);
+    const char* s = ray_str_ptr(nm);
+    size_t sn = ray_str_len(nm);
+    if (sn < 1 || s[0] != ':') return ray_error("domain", NULL);
+
+    q_http_url_t u;                       /* q_http_url_parse strips the ':' */
+    if (q_http_url_parse(s, sn, &u) != 0) return ray_error("domain", NULL);
+    if (u.scheme == 1) return ray_error("nyi", NULL);        /* https: TLS tier */
+
+    const char* err = "conn";
+    ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);
+    if (fd == RAY_INVALID_SOCK) return ray_error(err, NULL);
+
+    int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;
+    ray_t* result = NULL;
+    if (q_http_client_send_all(fd, ray_str_ptr(request), ray_str_len(request),
+                               deadline) != 0) { err = "conn"; goto done; }
+    size_t rlen = 0;
+    char* resp = q_http_client_read_response(fd, &rlen, deadline, &err);
+    if (!resp) goto done;
+    int st; const char* body; size_t body_len;
+    int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len);
+    if (ex == 0) {
+        size_t total = (size_t)(body - resp) + body_len;   /* headers + framed body */
+        result = ray_str(resp, total);
+        if (!result) err = "oom";                          /* NULL: OOM, not 'conn */
+    } else if (ex == -2) err = "wsfull";
+    else err = "conn";
+    free(resp);
+done:
+    ray_sock_close(fd);
+    if (result) return result;
+    return ray_error(err, NULL);
 }
