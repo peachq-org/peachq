@@ -32,6 +32,7 @@
   #include <errno.h>
 #endif
 #include <time.h>
+#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
 
 #define Q_HTTP_MAX_HEADERS 64
 #define Q_HTTP_MAX_PATH    1024
@@ -167,17 +168,16 @@ static ray_t* http_env_get(int64_t sym_id) {
     return __VM ? ray_env_get(sym_id) : NULL;
 }
 
-/* Copy a RAY_STR ATOM's bytes into out[] (NUL-terminated) iff every byte is a
- * safe, non-control character (>= 0x20 and != 0x7f).  Rejects CR/LF (HTTP
- * header injection) and embedded NUL (silent truncation).  false = wrong type /
- * empty / oversize / control byte -> caller uses its own fallback.  SSO: accepts
- * ONLY a string atom (-RAY_STR), never a RAY_STR column, and reads it through
- * ray_str_ptr/_len (never ray_len). */
+/* Copy a q text value's bytes (charv / char atom / string atom, via
+ * q_text_bytes — never a RAY_STR column) into out[] (NUL-terminated) iff every
+ * byte is a safe, non-control character (>= 0x20 and != 0x7f).  Rejects CR/LF
+ * (HTTP header injection) and embedded NUL (silent truncation).  false = wrong
+ * type / empty / oversize / control byte -> caller uses its own fallback. */
 static bool http_str_atom_safe(ray_t* v, char* out, size_t outsz) {
-    if (!v || RAY_IS_ERR(v) || v->type != -RAY_STR) return false;
-    size_t n = ray_str_len(v);
+    const char* s; int64_t sn;
+    if (!v || RAY_IS_ERR(v) || !q_text_bytes(v, &s, &sn)) return false;
+    size_t n = (size_t)sn;
     if (n == 0 || n >= outsz) return false;
-    const char* s = ray_str_ptr(v);
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
         if (c < 0x20 || c == 0x7f) return false;
@@ -396,7 +396,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
     for (size_t i = 0; i < nh; i++) if (hdrs[i].name) nk++;
 
     if (tlen && target[0] == '/') { target++; tlen--; }
-    ray_t* text = ray_str(target, tlen);
+    ray_t* text = ray_charv(target, (int64_t)tlen);
     ray_t* keys = ray_vec_new(RAY_SYM, nk > 0 ? (int64_t)nk : 1);
     ray_t* vals = ray_list_new(nk > 0 ? (int64_t)nk : 1);
     ray_t* arg  = ray_list_new(2);
@@ -410,7 +410,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
         for (size_t i = 0; i < nh && !bad; i++) {
             if (!hdrs[i].name) continue;
             kd[k++] = ray_sym_intern(hdrs[i].name, hdrs[i].name_len);
-            ray_t* v = ray_str(hdrs[i].value, hdrs[i].value_len);
+            ray_t* v = ray_charv(hdrs[i].value, (int64_t)hdrs[i].value_len);
             if (!v || RAY_IS_ERR(v)) { if (v) ray_error_free(v); bad = true; break; }
             ray_t* nv = ray_list_append(vals, v);   /* append RETAINS */
             ray_release(v);
@@ -441,11 +441,12 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
       if (con && *con) { fputs(con, stdout); fflush(stdout); }
       q_console_reset(); }
 
-    if (r && !RAY_IS_ERR(r) && r->type == -RAY_STR) {
-        q_http_send_all(fd, ray_str_ptr(r), ray_str_len(r), Q_HTTP_SEND_SECS);
-        ray_release(r);
-        return 0;
-    }
+    { const char* rp; int64_t rn;
+      if (r && !RAY_IS_ERR(r) && q_text_bytes(r, &rp, &rn)) {
+          q_http_send_all(fd, rp, (size_t)rn, Q_HTTP_SEND_SECS);
+          ray_release(r);
+          return 0;
+      } }
     fprintf(stderr, "http: .z.ph returned %s — sending 500\n",
             (r && RAY_IS_ERR(r)) ? "an error" : "a non-string");
     if (r) {

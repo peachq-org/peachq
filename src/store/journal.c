@@ -139,8 +139,14 @@ static bool decompress_if_needed(const ray_ipc_header_t* hdr,
  * default string-eval frames, so replay reproduces its semantics. */
 static ray_t* eval_one(ray_t* msg) {
     if (!msg || RAY_IS_ERR(msg)) return msg;
+    /* q source: char vector/atom (kdb wire tag 10/-10) or legacy string atom.
+     * SAME acceptance set as the ipc.c dispatch — keep them identical. */
     if (msg->type == -RAY_STR)
         return ray_eval_remote_str(ray_str_ptr(msg), ray_str_len(msg));
+    if (msg->type == RAY_CHARV)
+        return ray_eval_remote_str((const char*)ray_data(msg), (size_t)msg->len);
+    if (msg->type == -RAY_CHARV)
+        return ray_eval_remote_str((const char*)&msg->u8, 1);
     return ray_eval(msg);
 }
 

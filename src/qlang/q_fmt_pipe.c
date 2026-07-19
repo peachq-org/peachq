@@ -73,7 +73,7 @@ typedef struct { ray_t* col; char name[QP_CELL]; const char* type; } qp_col;
 static const char* qp_typename(ray_t* col) {
     const char* n = col ? q_type_qname(col->type) : NULL;
     if (n) return n;
-    if (col && col->type == -RAY_STR) return "char";
+    if (col && (col->type == -RAY_STR || col->type == RAY_CHARV)) return "char";
     return "";
 }
 

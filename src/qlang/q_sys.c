@@ -34,6 +34,7 @@
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
 #ifndef RAY_OS_WINDOWS
 #include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
+#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
 #endif                       /* mingw has no <sys/wait.h>; _pclose gives the code directly */
 
 /* `\p 0W` reads the OS-chosen port back off the listener fd (getsockname),
@@ -1085,9 +1086,9 @@ static ray_t* q_sys_shell_capture(const char* rem, size_t rlen) {
  * restricted primitive under IPC reval (kdb blocks it) -> 'access. */
 ray_t* q_system_fn(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
-    if (!x || x->type != -RAY_STR) return ray_error("type", "system expects a string");
-    const char* sp = ray_str_ptr(x);
-    size_t sl = ray_str_len(x);
+    const char* sp; int64_t sn;
+    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "system expects a string");
+    size_t sl = (size_t)sn;
 
     char   stackbuf[1024];
     char*  buf = stackbuf;
@@ -1104,7 +1105,7 @@ ray_t* q_system_fn(ray_t* x) {
     ray_t* out = q_sys_run(buf, sl + 1, 1);
     if (blk) ray_free(blk);
     if (!out) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }  /* silent -> generic null */
-    return out;
+    return q_charv_out(out);            /* captured lines cross as char vectors */
 }
 
 bool q_sys_is_cmd(const char* line, size_t n) {

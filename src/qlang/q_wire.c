@@ -230,9 +230,20 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         case RAY_F32: rc = (w_u8(b, (uint8_t)-RAY_F32) || w_f32(b, (float)x->f64)) ? -1 : 0; goto out;
         case RAY_F64: rc = (w_u8(b, (uint8_t)-RAY_F64) || w_f64(b, x->f64)) ? -1 : 0; goto out;
         case RAY_STR: {
-            /* len 1 -> char atom (kdb "a"); else char vector.  q_wire.h. */
             size_t n = ray_str_len(x);
             const char* p = ray_str_ptr(x);
+            if (b->serde) {
+                /* SERDE: an internal STR atom (lambda-source carrier) must
+                 * come back -RAY_STR, not charv — its own ext record. */
+                if (n > INT32_MAX) {
+                    rc = wbuf_fail(b, ray_error("limit", "q_wire: str atom length %zu exceeds wire int32", n));
+                    goto out;
+                }
+                rc = (w_u8(b, Q_WIRE_EXT_STRATOM) || w_i32(b, (int32_t)n) ||
+                      w_raw(b, p, n)) ? -1 : 0;
+                goto out;
+            }
+            /* wire: len 1 -> char atom (kdb "a"); else char vector.  q_wire.h. */
             if (n == 1) rc = (w_u8(b, 0xf6) || w_u8(b, (uint8_t)p[0])) ? -1 : 0;
             else        rc = w_charvec(b, p, (int64_t)n);
             goto out;
@@ -254,7 +265,9 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         case RAY_MINUTE: rc = (w_u8(b, (uint8_t)-RAY_MINUTE) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         case RAY_SECOND: rc = (w_u8(b, (uint8_t)-RAY_SECOND) || w_i32(b, x->i32)) ? -1 : 0; goto out;
         case RAY_LIST: break;   /* dead: -t >= 1, so tag 0 is never an atom — named for totality */
-        case RAY_CHARV: break;  /* wire/serde of charv lands with the 1b boundary flip */
+        case RAY_CHARV:         /* char atom: kdb -10 (0xf6) + payload byte */
+            rc = (w_u8(b, 0xf6) || w_u8(b, x->u8)) ? -1 : 0;
+            goto out;
         }
         rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
         goto out;
@@ -364,7 +377,10 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             rc = q_wire_write_obj(b, e[i]);
         goto out;
     }
-    case RAY_CHARV: break;  /* wire/serde of charv lands with the 1b boundary flip */
+    case RAY_CHARV:         /* char vector: raw kdb tag 10 (len-1 stays a VECTOR
+                             * on the wire — the 1-char-string conflation is gone) */
+        rc = w_charvec(b, (const char*)ray_data(x), x->len);
+        goto out;
     }
     /* value band exhausted above; an out-of-band tag (INDEX 97, or the sparse
      * gap 3) falls here — same 'nyi the old `default:` returned. */
@@ -522,8 +538,8 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     case RAY_F64: RAY_TEMPORALF_CASES: { double* e = (double*)d;
         for (int32_t i = 0; i < count; i++) { e[i] = f64_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
     /* no in-band sentinel: bool/byte have no null; GUID's all-zero-payload null
-     * is only knowable from the serde attrs flag (restored below).  CHARV is
-     * unreachable until the 1b wire-read flip; blank-is-null never sets the flag. */
+     * is only knowable from the serde attrs flag (restored below).  CHARV's
+     * blank "null" is an ordinary byte and never sets the flag. */
     case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_GUID: case RAY_CHARV: break;
     /* never reach rd_fixed_vec: STR/SYM decode on their own paths; LIST is not fixed. */
     case RAY_LIST: case RAY_STR: case RAY_SYM: break;
@@ -602,6 +618,15 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         if (v && !RAY_IS_ERR(v)) v->attrs |= ATTR_QUOTED;
         return v;
     }
+    case Q_WIRE_EXT_STRATOM: {            /* serde-internal STR atom: len + bytes */
+        if (!r_need(c, 4)) return trunc_err("str atom length");
+        int32_t n = r_i32(c);
+        if (n < 0 || (uint64_t)n > c->rem)
+            return ray_error("domain", "q_wire: str atom length %d out of range", (int)n);
+        ray_t* s = ray_str((const char*)c->p, (size_t)n);
+        c->p += (size_t)n; c->rem -= (size_t)n;
+        return s;
+    }
     case Q_WIRE_EXT_TNULL: {              /* aux-bit typed null (BOOL/U8) */
         if (!r_need(c, 1)) return trunc_err("typed null");
         int8_t nt = (int8_t)r_u8(c);
@@ -654,10 +679,16 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         case RAY_I64: if (!r_need(c, 8)) return trunc_err("long");  return ray_i64(r_i64(c));
         case RAY_F32: if (!r_need(c, 4)) return trunc_err("real");  return ray_f32(f32_canon(r_f32(c)));
         case RAY_F64: if (!r_need(c, 8)) return trunc_err("float"); return ray_f64(f64_canon(r_f64(c)));
-        case RAY_STR: {                               /* char atom -> 1-char string */
+        case RAY_CHARV: {                             /* wire -10 -> char atom */
             if (!r_need(c, 1)) return trunc_err("char");
-            char ch = (char)r_u8(c);
-            return ray_str(&ch, 1);
+            uint8_t ch = r_u8(c);
+            /* legacy dialect (WIRE mode only — serde must preserve value
+             * types): a pure-rayfall process keeps 1-char string atoms */
+            if (!c->serde && !ray_eval_remote_str_installed()) {
+                char cc = (char)ch;
+                return ray_str(&cc, 1);
+            }
+            return ray_char(ch);
         }
         case RAY_SYM: {
             const char* s; size_t n;
@@ -673,24 +704,28 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         case RAY_MINUTE: if (!r_need(c, 4)) return trunc_err("minute"); return ray_minute((int64_t)r_i32(c));
         case RAY_SECOND: if (!r_need(c, 4)) return trunc_err("second"); return ray_second((int64_t)r_i32(c));
         case RAY_LIST: break;   /* dead: -t >= 1, tag 0 is never an atom — named for totality */
-        case RAY_CHARV: break;  /* wire byte -21 is not a kdb tag; charv decode = 1b */
+        case RAY_STR: break;    /* wire byte -21 is not a kdb tag (STR is physical-only) */
         }
         return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
     }
 
     /* ---- vectors ---- */
     if (t >= RAY_BOOL && t <= RAY_TIME) {
-        switch (t) {
-        case RAY_STR: {                               /* 10h char vector -> string atom */
+        /* tag 10 (char vector) rides the generic rd_fixed_vec default (esz 1,
+         * no in-band null scan) — a true charv value (string-C3 1b) — EXCEPT
+         * on the live WIRE into a pure-rayfall process (no q runtime), which
+         * keeps its legacy string atoms; serde always preserves value types. */
+        if (t == RAY_CHARV && !c->serde && !ray_eval_remote_str_installed()) {
             if (!r_need(c, 5)) return trunc_err("char vector header");
             (void)r_u8(c);
             int32_t count = r_i32(c);
             if (count < 0 || (uint64_t)count > c->rem)
                 return ray_error("domain", "q_wire: char vector count %d out of range", (int)count);
-            ray_t* s = ray_str((const char*)c->p, (size_t)count);
+            ray_t* sa = ray_str((const char*)c->p, (size_t)count);
             c->p += (size_t)count; c->rem -= (size_t)count;
-            return s;
+            return sa;
         }
+        switch (t) {
         case RAY_SYM: {
             if (!r_need(c, 5)) return trunc_err("sym vector header");
             (void)r_u8(c);
@@ -786,8 +821,15 @@ static ray_t* rd_obj_inner(rcur_t* c) {
     case 100: {                                       /* lambda: context + source */
         const char* ctx; size_t ctxn;
         if (r_cstr(c, &ctx, &ctxn)) return trunc_err("lambda context");
-        ray_t* src = rd_obj(c);                       /* char vector -> string atom */
+        ray_t* src = rd_obj(c);
         if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        if (src->type == RAY_CHARV || src->type == -RAY_CHARV) {
+            /* decoded char vector -> the internal -RAY_STR source carrier */
+            ray_t* s2 = q_str_of_charv(src);
+            ray_release(src);
+            src = s2;
+            if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("oom", NULL);
+        }
         if (src->type != -RAY_STR) {
             ray_release(src);
             return ray_error("domain", "q_wire: lambda body must be a char vector");

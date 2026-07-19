@@ -135,6 +135,10 @@ void ray_eval_set_remote_apply_fn(ray_remote_apply_fn_t fn) { g_remote_apply_fn 
 static ray_name_hook_t g_name_hook = NULL;
 void ray_eval_set_name_hook(ray_name_hook_t hook) { g_name_hook = hook; }
 
+/* string-C3 dialect probe: true iff the q runtime installed its remote-eval
+ * hook — IPC hands hook text as char vectors then, legacy strings otherwise. */
+bool ray_eval_remote_str_installed(void) { return g_remote_str_fn != NULL; }
+
 ray_t* ray_eval_remote_str(const char* src, size_t len) {
     if (!src || len == 0) return RAY_NULL_OBJ;
     if (g_remote_str_fn) return g_remote_str_fn(src, len);

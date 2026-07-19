@@ -161,10 +161,11 @@ ray_t* q_xexp_wrap(ray_t* x, ray_t* y) {
  * does NOT share the char arm (its domain table rejects chars). */
 static int q_xlog_operand(ray_t* v, double* out) {
     if (!v) return 0;
-    if (v->type == -RAY_STR && ray_str_len(v) == 1) {   /* char atom */
+    if (v->type == -RAY_STR && ray_str_len(v) == 1) {   /* legacy 1-char string */
         *out = (double)(unsigned char)ray_str_ptr(v)[0];
         return 1;
     }
+    if (v->type == -RAY_CHARV) { *out = (double)v->u8; return 1; }  /* char atom */
     /* Temporal operands cast to float via their payload (ref/log.md domain
      * table: p m d n u v t all map to f; z and s are excluded — codex r2).
      * Temporal NULLS pass through here too; the wrap's null gate turns them
@@ -651,7 +652,19 @@ static ray_t* q_base_decompose_vec(ray_t* base, int64_t v) {
     return out;
 }
 
+static ray_t* q_vs_impl(ray_t* x, ray_t* y);
 ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
+    /* charv args ride the legacy -RAY_STR body; results cross back as charv */
+    ray_t* xs = q_str_in(x); ray_t* ys = q_str_in(y);
+    if (xs != x || ys != y) {
+        ray_t* r = q_vs_impl(xs, ys);
+        ray_release(xs); ray_release(ys);
+        return q_charv_out(r);
+    }
+    ray_release(xs); ray_release(ys);
+    return q_vs_impl(x, y);
+}
+static ray_t* q_vs_impl(ray_t* x, ray_t* y) {
     if (!x || !y) return ray_error("type", "vs: nil operand");
     /* --- string / newline split --- */
     if (x->type == -RAY_STR) {
@@ -802,7 +815,18 @@ static ray_t* q_bit_compose(ray_t* y) {
     return ray_i64((int64_t)v);
 }
 
+static ray_t* q_sv_impl(ray_t* x, ray_t* y);
 ray_t* q_sv_wrap(ray_t* x, ray_t* y) {
+    ray_t* xs = q_str_in(x); ray_t* ys = q_str_in(y);
+    if (xs != x || ys != y) {
+        ray_t* r = q_sv_impl(xs, ys);
+        ray_release(xs); ray_release(ys);
+        return q_charv_out(r);
+    }
+    ray_release(xs); ray_release(ys);
+    return q_sv_impl(x, y);
+}
+static ray_t* q_sv_impl(ray_t* x, ray_t* y) {
     if (!x || !y) return ray_error("type", "sv: nil operand");
     /* --- string join --- */
     if (x->type == -RAY_STR)
