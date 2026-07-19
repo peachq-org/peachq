@@ -1,0 +1,4 @@
+:root { color-scheme: light dark; }
+body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; }
+h1 { font-weight: 700; }
+code { background: rgba(127,127,127,.18); padding: .1em .3em; border-radius: .25em; }
