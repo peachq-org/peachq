@@ -181,6 +181,7 @@ static ray_t* groups_to_pair_list(ray_t* d) {
                 case RAY_I16: k = ray_i16(((int16_t*)base)[i]); break;
                 case RAY_BOOL:
                 case RAY_BYTE_ONLY: k = ray_u8(((uint8_t*)base)[i]); break;
+                case RAY_CHARV: k = ray_char(((uint8_t*)base)[i]); break;
                 case RAY_F64: k = ray_f64(((double*)base)[i]); break;
                 case RAY_STR: { size_t sl = 0; const char* sp = ray_str_vec_get(keys, i, &sl);
                                  k = ray_str(sp ? sp : "", sp ? sl : 0); break; }
@@ -6397,6 +6398,7 @@ by_dict_done:
                                     case RAY_I16: atom = ray_i16((int16_t)key_vals[off]); break;
                                     case RAY_BOOL:
                                     case RAY_BYTE_ONLY: atom = ray_u8((uint8_t)key_vals[off]); break;
+                                    case RAY_CHARV: atom = ray_char((uint8_t)key_vals[off]); break;
                                     case RAY_F64: {
                                         double dv;
                                         memcpy(&dv, &key_vals[off], 8);

@@ -621,6 +621,7 @@ static char q_type_char(int8_t tag) {
     case RAY_F32:       return 'e';
     case RAY_F64:       return 'f';
     case RAY_STR:       return 'c';
+    case RAY_CHARV:     return 'c';   /* char vector — same q char as STR until the 1b swap */
     case RAY_SYM:       return 's';
     case RAY_TIMESTAMP: return 'p';
     case RAY_MONTH:     return 'm';

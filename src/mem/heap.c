@@ -1306,11 +1306,11 @@ ray_t* ray_alloc_copy(ray_t* v) {
         if (t <= 0 || t >= RAY_TYPE_COUNT)
             data_size = 0;
         else {
-            /* Value band 1..19: exhaustive over (ray_type_e), no default, so a
-             * future member (e.g. RAY_CHARV=21) can't land without stating its
-             * element-size lane here — the alloc-copy data-loss trap this guards.
-             * RAY_SEL(20) reaches the switch, matches no arm, keeps esz 0 (its
-             * bitmap has no fixed esz) — unchanged. */
+            /* Value band: exhaustive over (ray_type_e), no default, so a future
+             * member can't land without stating its element-size lane here —
+             * the alloc-copy data-loss trap this guards (CHARV rides
+             * RAY_BYTE_CASES; C-unit pinned in test/q_charv.c).  RAY_SEL(20)
+             * reaches the switch, matches no arm, keeps esz 0 — unchanged. */
             uint8_t esz = 0;
             switch ((ray_type_e)t) {
             case RAY_LIST: break;                    /* unreachable: filtered above */
