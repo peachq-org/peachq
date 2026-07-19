@@ -5,6 +5,7 @@
 #endif
 #include <rayforce.h>
 #include "qlang/q_http.h"
+#include "qlang/q_gz.h"        /* q_gz_deflate — `form?` response gzip (#6) */
 #include "qlang/q_dotz.h"      /* q_dotz_zph — the `.z.ph` handler slot */
 #include "qlang/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler show output */
@@ -38,6 +39,8 @@
 #define Q_HTTP_MAX_FILE    (32ll * 1024 * 1024)   /* served-file / POST-body cap (slice) */
 #define Q_HTTP_SEND_SECS   30                     /* whole-response send deadline */
 #define Q_HTTP_RECV_SECS   30                     /* whole POST-body read deadline */
+#define Q_HTTP_GZIP_MIN    2000                   /* body chars before gzip (kb/http.md L54, V4.0) */
+#define Q_HTTP_GZIP_LEVEL  6                      /* deflate level (doc-neutral; balanced) */
 
 /* Bounded-deadline send: ray_sock_send waits FOREVER, so a stalled reader on a
  * 32 MiB body would wedge the poll loop — sock.c's loop + a deadline.  0/-1.
@@ -520,15 +523,106 @@ static ray_t* zh_build_arg(const char* method, size_t mlen,
     return arg;
 }
 
+/* Request offers `Accept-Encoding: gzip` with a non-zero q-value (kb/http.md L54).
+ * Comma-token scan; a `gzip;q=0`/`q=0.0` qualifier means NOT acceptable. */
+static bool accept_encoding_has_gzip(const struct phr_header* hdrs, size_t nh) {
+    for (size_t i = 0; i < nh; i++) {
+        if (!hdrs[i].name || !str_ieq(hdrs[i].name, hdrs[i].name_len, "accept-encoding"))
+            continue;
+        const char* v = hdrs[i].value; size_t n = hdrs[i].value_len;
+        for (size_t s = 0; s < n; ) {
+            size_t e = s; while (e < n && v[e] != ',') e++;          /* one token */
+            size_t ts = s, te = e;
+            while (ts < te && (v[ts] == ' ' || v[ts] == '\t')) ts++;
+            size_t ce = ts; while (ce < te && v[ce] != ';') ce++;    /* coding vs params */
+            size_t ce2 = ce; while (ce2 > ts && (v[ce2-1] == ' ' || v[ce2-1] == '\t')) ce2--;
+            if (str_ieq(v + ts, ce2 - ts, "gzip")) {
+                bool q0 = false;                                     /* ;q=0 (not 0.x>0) */
+                for (size_t p = ce; p + 1 < te; p++)
+                    if ((v[p] == 'q' || v[p] == 'Q') && v[p+1] == '=') {
+                        size_t d = p + 2; while (d < te && (v[d] == ' ' || v[d] == '\t')) d++;
+                        if (d < te && v[d] == '0') {
+                            size_t f = d + 1; bool nz = false;
+                            if (f < te && v[f] == '.')
+                                for (size_t g = f + 1; g < te; g++) if (v[g] >= '1' && v[g] <= '9') nz = true;
+                            q0 = !nz;
+                        }
+                        break;
+                    }
+                if (!q0) return true;
+            }
+            s = (e < n) ? e + 1 : e;
+        }
+        return false;   /* header present but no acceptable gzip token */
+    }
+    return false;
+}
+
+/* Compress the handler's complete HTTP response (`form?` path, #6) when it is a
+ * parseable response whose plaintext body is >= Q_HTTP_GZIP_MIN and carries no
+ * Transfer-Encoding / existing Content-Encoding.  Rebuilds: status line + every
+ * original header except Content-Length/Content-Encoding, then a recomputed
+ * Content-Length, `Content-Encoding: gzip`, and the gzipped body.  Returns a
+ * malloc'd buffer (caller frees, *out set) or NULL to send the original verbatim. */
+static uint8_t* http_gzip_response(const char* resp, size_t len, size_t* out) {
+    int minor, st; const char* msg; size_t mlen2, nh = Q_HTTP_MAX_HEADERS;
+    struct phr_header h[Q_HTTP_MAX_HEADERS];
+    int hl = phr_parse_response(resp, len, &minor, &st, &msg, &mlen2, h, &nh, 0);
+    if (hl <= 0) return NULL;                          /* not a full response */
+    for (size_t i = 0; i < nh; i++) {
+        if (!h[i].name) continue;
+        if (str_ieq(h[i].name, h[i].name_len, "transfer-encoding") ||
+            str_ieq(h[i].name, h[i].name_len, "content-encoding"))
+            return NULL;                               /* chunked / already-coded: skip */
+    }
+    const char* body = resp + hl; size_t blen = len - (size_t)hl;
+    if (blen < Q_HTTP_GZIP_MIN) return NULL;           /* threshold (kb/http.md L54) */
+
+    size_t gzlen = 0; const char* gerr = NULL;
+    uint8_t* gz = q_gz_deflate((const uint8_t*)body, blen, Q_HTTP_GZIP_LEVEL, &gzlen, &gerr);
+    if (!gz) return NULL;                              /* deflate failed -> verbatim */
+
+    /* status line = resp up to and including the first CRLF (within the header block). */
+    size_t sl = 0; while (sl + 1 < (size_t)hl && !(resp[sl] == '\r' && resp[sl+1] == '\n')) sl++;
+    sl += 2;                                           /* include CRLF */
+
+    /* upper bound: kept status+headers re-serialized as "name: value\r\n" can add up
+     * to 1 byte/header over the original block (phr strips OWS) — bound that by
+     * Q_HTTP_MAX_HEADERS, plus the two appended lines + final CRLF + gz body.  The
+     * header-copy loop below is unchecked memcpy, so cap MUST cover it. */
+    size_t cap = (size_t)hl + (size_t)Q_HTTP_MAX_HEADERS + 128 + gzlen;
+    uint8_t* o = (uint8_t*)malloc(cap);
+    if (!o) { free(gz); return NULL; }
+    size_t p = 0;
+    memcpy(o + p, resp, sl); p += sl;                  /* status line */
+    for (size_t i = 0; i < nh; i++) {                  /* kept headers, verbatim casing */
+        if (!h[i].name) continue;
+        if (str_ieq(h[i].name, h[i].name_len, "content-length")) continue;
+        memcpy(o + p, h[i].name, h[i].name_len);  p += h[i].name_len;
+        o[p++] = ':'; o[p++] = ' ';
+        memcpy(o + p, h[i].value, h[i].value_len); p += h[i].value_len;
+        o[p++] = '\r'; o[p++] = '\n';
+    }
+    int nl = snprintf((char*)o + p, cap - p,
+                      "Content-Length: %zu\r\nContent-Encoding: gzip\r\n\r\n", gzlen);
+    if (nl < 0 || (size_t)nl >= cap - p) { free(o); free(gz); return NULL; }
+    p += (size_t)nl;
+    memcpy(o + p, gz, gzlen); p += gzlen;
+    free(gz);
+    *out = p;
+    return o;
+}
+
 /* Shared `.z.ph`/`.z.pp`/`.z.pm` dispatch core (ref/dotz.md): call fn (BORROWED,
  * caller-retained) with the built arg, write its returned response string
  * VERBATIM.  Error/non-string -> 500.  Always returns 0 (a response was sent).
  * `method` (NULL for .z.ph/.z.pp) selects the 2- vs 3-item arg; `which` names
- * the handler for the log. */
+ * the handler for the log.  `may_gzip` (only the `.z.ph` GET path) enables the
+ * `form?`-response gzip when the client offered Accept-Encoding + body >= 2000. */
 static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
                             const char* text_p, size_t text_len,
                             const struct phr_header* hdrs, size_t nh,
-                            ray_t* fn, const char* which)
+                            ray_t* fn, const char* which, bool may_gzip)
 {
     ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
@@ -541,7 +635,12 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
       q_console_reset(); }
 
     if (r && !RAY_IS_ERR(r) && r->type == -RAY_STR) {
-        q_http_send_all(fd, ray_str_ptr(r), ray_str_len(r), Q_HTTP_SEND_SECS);
+        const char* rp = ray_str_ptr(r); size_t rn = ray_str_len(r);
+        uint8_t* gz = NULL; size_t gn = 0;
+        if (may_gzip && accept_encoding_has_gzip(hdrs, nh))
+            gz = http_gzip_response(rp, rn, &gn);      /* NULL -> send verbatim */
+        if (gz) { q_http_send_all(fd, gz, gn, Q_HTTP_SEND_SECS); free(gz); }
+        else      q_http_send_all(fd, rp, rn, Q_HTTP_SEND_SECS);
         ray_release(r);
         return 0;
     }
@@ -564,7 +663,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
     if (!fn) return -1;
     ray_retain(fn);                            /* handler may reassign .z.ph */
     if (tlen && target[0] == '/') { target++; tlen--; }
-    int r = zh_dispatch_call(fd, NULL, 0, target, tlen, hdrs, nh, fn, ".z.ph");
+    int r = zh_dispatch_call(fd, NULL, 0, target, tlen, hdrs, nh, fn, ".z.ph", true);
     ray_release(fn);
     return r;
 }
@@ -615,7 +714,7 @@ static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh
         }
     }
     zh_dispatch_call(fd, NULL, 0, body ? (const char*)body : "",
-                     have_cl ? (size_t)cl : 0, hdrs, nh, fn, ".z.pp");
+                     have_cl ? (size_t)cl : 0, hdrs, nh, fn, ".z.pp", false);
     if (body) ray_sys_free(body);
     ray_release(fn);
 }
@@ -634,7 +733,7 @@ static void zpm_dispatch(ray_sock_t fd, const char* method, size_t mlen,
     if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
     ray_retain(fn);                            /* handler may reassign .z.pm */
     if (tlen && target[0] == '/') { target++; tlen--; }
-    zh_dispatch_call(fd, method, mlen, target, tlen, hdrs, nh, fn, ".z.pm");
+    zh_dispatch_call(fd, method, mlen, target, tlen, hdrs, nh, fn, ".z.pm", false);
     ray_release(fn);
 }
 
