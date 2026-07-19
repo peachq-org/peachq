@@ -242,6 +242,30 @@ ray_t* q_registry_funsql_bang_value(void);
  * `l` retained). */
 ray_t* q_collapse_list(ray_t* l);
 
+/* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
+ * appears in q-space; values in flight are charv; columns stay pooled). ---- */
+
+/* THE single-home STR->charv constructor.  MATERIALIZES (one O(len) memcpy);
+ * borrows s, returns an owned fresh charv vector (always a vector). */
+ray_t* q_charv_of_str(ray_t* s);
+
+/* charv vector or char atom -> owned -RAY_STR atom (for engine internals that
+ * need pooled/NUL-terminated physical form).  Borrows x. */
+ray_t* q_str_of_charv(ray_t* x);
+
+/* Text-bytes accessor over all q text forms: -RAY_STR atom, charv vector,
+ * char atom.  Borrowed pointer valid while x lives; false = not text. */
+bool q_text_bytes(ray_t* x, const char** p, int64_t* n);
+
+/* Boundary-out walk: CONSUMES r, returns owned.  -RAY_STR atom -> charv;
+ * RAY_STR vector -> 0h list of charv; LIST/DICT values converted (in place
+ * only at rc==1); TABLE (incl. keyed-table value side) passes untouched. */
+ray_t* q_charv_out(ray_t* r);
+
+/* Inverse adapter for legacy string-verb bodies: BORROWS x, returns OWNED
+ * legacy form (charv/char atom -> -RAY_STR atom, LIST recursed). */
+ray_t* q_str_in(ray_t* x);
+
 /* Column attribute as kdb's single letter: 's'/'u'/'g'/'p', or 0 for none.
  * Reads the block markers/kind DIRECTLY (the kdb u#/p# policy is composed in the
  * q layer, not the rayfall-native engine `.attr.get`, so a hash-backed u#/p#

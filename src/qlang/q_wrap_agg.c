@@ -79,6 +79,16 @@ static ray_t* q_runscan(ray_t* x, q_rs_kind k) {
         if (k==RS_MAXS || k==RS_MINS) return q_runscan_str(x, k);
         return ray_error("type", "running scan: non-numeric");
     }
+    if (x->type == RAY_CHARV) {                  /* char vector rides the STR body */
+        if (k==RS_MAXS || k==RS_MINS) {
+            ray_t* s = q_str_of_charv(x);
+            if (!s || RAY_IS_ERR(s)) return s ? s : ray_error("oom", NULL);
+            ray_t* r = q_runscan_str(s, k);
+            ray_release(s);
+            return q_charv_out(r);
+        }
+        return ray_error("type", "running scan: non-numeric");
+    }
     if (ray_is_atom(x)) {                 /* atom returned unchanged (avgs->float) */
         if (k == RS_AVGS) { int nu; double v = q_velem_f(x, 0, &nu);
                             return nu ? ray_typed_null(-RAY_F64) : ray_f64(v); }
@@ -165,7 +175,7 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y);   /* fwd — prd's nulls-as-1 fill */
  * (`prd k` — implicit-iteration section).  Non-numeric -> 'type. */
 ray_t* q_prd_wrap(ray_t* x) {
     if (!x) return ray_error("type", "prd: nil");
-    if (x->type == -RAY_STR || x->type == RAY_SYM)
+    if (x->type == -RAY_STR || x->type == RAY_SYM || x->type == RAY_CHARV)
         return ray_error("type", "prd: expects numeric values, got %s",
                          ray_type_name(x->type));
     if (ray_is_atom(x)) { ray_retain(x); return x; }   /* doc: atom unchanged */

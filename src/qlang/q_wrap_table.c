@@ -1068,7 +1068,9 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
      * (error beats a wrong answer; the wider kdb mixed-list rule is a
      * deferred cell). */
     int64_t nx = qj_gen_len(x), ny = qj_gen_len(y);
-    if (nx < 0 || ny < 0 || (x->type != -RAY_STR && y->type != -RAY_STR) ||
+    int x_chr = x->type == -RAY_STR || x->type == RAY_CHARV || x->type == -RAY_CHARV;
+    int y_chr = y->type == -RAY_STR || y->type == RAY_CHARV || y->type == -RAY_CHARV;
+    if (nx < 0 || ny < 0 || (!x_chr && !y_chr) ||
         x->type == RAY_DICT || y->type == RAY_DICT ||
         x->type == RAY_TABLE || y->type == RAY_TABLE)
         return r;                          /* keep the base error */
