@@ -47,6 +47,7 @@ const uint8_t ray_type_sizes[256] = {
     [RAY_MINUTE]    = 4,
     [RAY_SECOND]    = 4,
     [RAY_TIME]      = 4,
+    [RAY_CHARV]     = 1,
 };
 
 /* ===== Semantic Version API ===== */

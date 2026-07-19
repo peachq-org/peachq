@@ -417,6 +417,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
             return (int8_t)n;
         case RAY_LIST:      /* 0h is Identity (cast.md:40), not a cast tag — deferred */
             return 0;
+        case RAY_CHARV:     /* 21h is no designator today; the 1b renumber re-keys 10h */
+            return 0;
         }
         return 0;   /* unreachable for in-band n; out-of-band handled here */
     }
@@ -496,7 +498,7 @@ const char* q_type_qname(int8_t t) {
     case RAY_TIMESPAN:  return "timespan";
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_DATETIME:  return "datetime";
-    case RAY_LIST: case RAY_STR: return NULL;
+    case RAY_LIST: case RAY_STR: case RAY_CHARV: return NULL;  /* charv display = 1b */
     }
     return NULL;   /* unreachable: value band is exhausted above */
 }
@@ -809,6 +811,7 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
     case RAY_STR:  break;                    /* hoisted above: packs boxed lists */
     case RAY_LIST: break;                    /* tag 0 is not a cast designator */
     case RAY_GUID: break;                    /* guid target: no base arm — deferred */
+    case RAY_CHARV: break;                   /* casts into charv land in 1b */
     case RAY_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
     case RAY_BOOL: return q_cast_bool(x);
     case RAY_BYTE_ONLY: return q_cast_u8(x);
