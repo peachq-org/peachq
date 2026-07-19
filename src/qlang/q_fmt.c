@@ -304,6 +304,13 @@ void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
         }
         return;
     }
+    if (col && col->type == RAY_CHARV) {    /* char column: bare char cell */
+        if (row >= 0 && row < ray_len(col) && outsz > 1) {
+            out[0] = ((const char*)ray_data(col))[row];
+            out[1] = '\0';
+        }
+        return;
+    }
     ray_t* ia = ray_i64(row);
     ray_t* c  = ray_at_fn(col, ia);
     ray_release(ia);
@@ -656,6 +663,21 @@ static size_t q_char_esc(unsigned char ch, char out[8]) {
     }
 }
 
+/* Quoted-text renderer over raw bytes — shared by the -RAY_STR atom form and
+ * the charv vector/atom forms. */
+static void q_fmt_qtext(const char* p, size_t n, char* buf, size_t bufsz) {
+    size_t w = 0;
+    if (w + 1 < bufsz) buf[w++] = '"';
+    for (size_t i = 0; i < n && w + 6 < bufsz; i++) {
+        char e[8];
+        size_t el = q_char_esc((unsigned char)p[i], e);
+        memcpy(buf + w, e, el);
+        w += el;
+    }
+    if (w + 1 < bufsz) buf[w++] = '"';
+    buf[w < bufsz ? w : bufsz - 1] = '\0';
+}
+
 static void q_fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
     const char* p = ray_str_ptr(val);
     size_t n = ray_str_len(val);
@@ -718,6 +740,14 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
                 q_fmt_qstring(a, out + 1, outsz - 1);
             } else
                 q_fmt_qstring(a, out, outsz);
+        } else if (a->type == -RAY_CHARV) {
+            q_fmt_qtext((const char*)&a->u8, 1, out, outsz);
+        } else if (a->type == RAY_CHARV) {
+            if (ray_len(a) == 1 && outsz > 1) {
+                out[0] = ',';
+                q_fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
+            } else
+                q_fmt_qtext((const char*)ray_data(a), (size_t)ray_len(a), out, outsz);
         } else
             q_fmt(a, out, outsz);
         break;
@@ -737,7 +767,8 @@ static int q_matrix_row_ok(ray_t* r) {
         ray_t** it = (ray_t**)ray_data(r);
         int64_t n = ray_len(r);
         for (int64_t i = 0; i < n; i++)
-            if (!it[i] || RAY_IS_ERR(it[i]) || !ray_is_atom(it[i]) ||
+            if (!it[i] || RAY_IS_ERR(it[i]) ||
+                !(ray_is_atom(it[i]) || it[i]->type == RAY_CHARV) ||   /* strings are cells */
                 RAY_IS_NULL(it[i]))
                 return 0;
         return 1;
@@ -835,6 +866,29 @@ static void q_fmt_body(ray_t* val) {
     /* generic null prints `::` (top-level silence is the CALLER's rule) */
     if (RAY_IS_NULL(val)) {
         qe_puts("::");
+        return;
+    }
+
+    /* char atom / char vector: kdb quoted forms — "a", "abc", ,"a", "" —
+     * BEFORE the empty-typed-vector arm ("" is the empty charv, never `char$()) */
+    if (val->type == -RAY_CHARV) {
+        char e[8];
+        qe_putc('"');
+        qe_putn(e, q_char_esc(val->u8, e));
+        qe_putc('"');
+        return;
+    }
+    if (val->type == RAY_CHARV) {
+        int64_t n = ray_len(val);
+        const char* p = (const char*)ray_data(val);
+        if (n == 1) qe_putc(',');                /* len-1 vector: ,"a" */
+        qe_putc('"');
+        for (int64_t i = 0; i < n; i++) {
+            if (qe_line_done()) break;
+            char e[8];
+            qe_putn(e, q_char_esc((unsigned char)p[i], e));
+        }
+        qe_putc('"');
         return;
     }
 
@@ -1208,6 +1262,18 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             q_fmt_qstring(val, buf, bufsz);
         return;
     }
+    if (val->type == -RAY_CHARV) {                 /* char atom: "a" */
+        q_fmt_qtext((const char*)&val->u8, 1, buf, bufsz);
+        return;
+    }
+    if (val->type == RAY_CHARV) {                  /* charv: "abc" / ,"a" */
+        if (ray_len(val) == 1 && bufsz > 1) {
+            buf[0] = ',';
+            q_fmt_qtext((const char*)ray_data(val), 1, buf + 1, bufsz - 1);
+        } else
+            q_fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
+        return;
+    }
     if (val->type == RAY_DICT) {
         /* dict inline `keys!vals` (`(,`a)!,1`); a KEYED TABLE keeps the
          * q_fmt fallback (flip repr = tracked gap) */
@@ -1272,6 +1338,8 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             if (n > 1 && it->type == -RAY_STR && ray_str_len(it) == 1) {
                 eb[0] = ',';
                 q_fmt_qstring(it, eb + 1, sizeof eb - 1);
+            } else if (it->type == RAY_CHARV || it->type == -RAY_CHARV) {
+                q_fmt_krepr(it, eb, sizeof eb);
             } else
                 q_fmt_qstring(it, eb, sizeof eb);
             ray_release(it);
