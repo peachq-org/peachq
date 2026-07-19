@@ -18,6 +18,7 @@
 #define Q_OPS_H
 
 #include <stddef.h>
+#include "rayforce.h"   /* ray_t (q_ops_acc_identity) */
 #include <stdint.h>
 
 /* Lexical class — how the scanner treats the token.  Only KW_INFIX is
@@ -107,6 +108,11 @@ typedef struct {
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
 const q_op_t* q_ops_table(int* n);
+
+/* Accumulator identity element I for a verb spelling (ref/accumulators.md:
+ * unary-seed + empty-Over) — manifest-owned metadata.  Owned result; NULL
+ * when q knows none (callers fall back to the doc's generic-() rule). */
+ray_t* q_ops_acc_identity(const char* spelling);
 
 /* The manifest row named s[0..len), or NULL if the name is not a q verb.  The
  * one lookup into Q_OPS[] by spelling (rule 3: never an env lookup by q
