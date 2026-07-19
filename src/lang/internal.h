@@ -92,7 +92,7 @@ static inline ray_t* make_bool(uint8_t v) {
 static inline int is_numeric(ray_t* x) {
     return x->type == -RAY_I64 || x->type == -RAY_F64 ||
            x->type == -RAY_I16 || x->type == -RAY_I32 ||
-           x->type == -RAY_BYTE_ONLY || x->type == -RAY_BOOL;
+           ray_is_bytelike(-x->type) || x->type == -RAY_BOOL;
 }
 
 /* Check if an atom is a temporal type */
@@ -150,7 +150,7 @@ static inline int64_t as_i64(ray_t* x) {
     if (x->type == -RAY_I64)  return x->i64;
     if (x->type == -RAY_I32)  return (int64_t)x->i32;
     if (x->type == -RAY_I16)  return (int64_t)x->i16;
-    if (x->type == -RAY_BYTE_ONLY)   return (int64_t)x->u8;
+    if (ray_is_bytelike(-x->type))   return (int64_t)x->u8;
     return x->i64; /* fallback */
 }
 
@@ -159,7 +159,7 @@ static inline double as_f64(ray_t* x) {
     if (x->type == -RAY_I64) return (double)x->i64;
     if (x->type == -RAY_I32) return (double)x->i32;
     if (x->type == -RAY_I16) return (double)x->i16;
-    if (x->type == -RAY_BYTE_ONLY)  return (double)x->u8;
+    if (ray_is_bytelike(-x->type))  return (double)x->u8;
     if (x->type == -RAY_STR && ray_str_len(x) == 1) return (double)(unsigned char)x->sdata[0];
     if (x->type == -RAY_BOOL) return (double)x->b8;
     if (RAY_IS_TEMPORAL32(-x->type)) return (double)x->i32;
@@ -200,9 +200,12 @@ static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
 static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
     if (a->type == -RAY_I64 || b->type == -RAY_I64) return -RAY_I64;
     if (a->type == -RAY_I32 || b->type == -RAY_I32) return -RAY_I32;
-    if (a->type == -RAY_BYTE_ONLY || b->type == -RAY_BYTE_ONLY) {
-        /* u8 op u8 -> u8, but u8 op i16 -> i16 etc */
-        if (a->type == -RAY_BYTE_ONLY && b->type == -RAY_BYTE_ONLY) return -RAY_BYTE_ONLY;
+    if (ray_is_bytelike(-a->type) || ray_is_bytelike(-b->type)) {
+        /* u8 op u8 -> u8 (charv twin -> charv; char dominates a mixed pair),
+         * but u8 op i16 -> i16 etc */
+        if (ray_is_bytelike(-a->type) && ray_is_bytelike(-b->type))
+            return (a->type == -RAY_CHARV || b->type == -RAY_CHARV) ? -RAY_CHARV
+                                                                    : -RAY_BYTE_ONLY;
         return (a->type == -RAY_I16 || b->type == -RAY_I16) ? -RAY_I16 : -RAY_I64;
     }
     if (a->type == -RAY_I16 || b->type == -RAY_I16) return -RAY_I16;
@@ -213,10 +216,10 @@ static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
 static inline int8_t promote_int_type_right(ray_t* a, ray_t* b) {
     (void)a;
     int8_t bt = b->type;
-    if (bt == -RAY_I32 || bt == -RAY_I16 || bt == -RAY_BYTE_ONLY || bt == -RAY_I64)
+    if (bt == -RAY_I32 || bt == -RAY_I16 || ray_is_bytelike(-bt) || bt == -RAY_I64)
         return bt;
     int8_t at = a->type;
-    if (at == -RAY_I32 || at == -RAY_I16 || at == -RAY_BYTE_ONLY || at == -RAY_I64)
+    if (at == -RAY_I32 || at == -RAY_I16 || ray_is_bytelike(-at) || at == -RAY_I64)
         return at;
     return -RAY_I64;
 }
@@ -227,6 +230,7 @@ static inline ray_t* make_typed_int(int8_t atom_type, int64_t val) {
     case -RAY_I16: return make_i16((int16_t)val);
     case -RAY_I32: return make_i32((int32_t)val);
     case -RAY_BYTE_ONLY: return make_u8((uint8_t)val);
+    case -RAY_CHARV:     return ray_char((uint8_t)val);
     default:       return make_i64(val);
     }
 }
@@ -364,7 +368,7 @@ static inline int64_t elem_as_i64(ray_t* elem) {
         elem->type == -RAY_SYM) return elem->i64;
     if (elem->type == -RAY_I32)  return (int64_t)elem->i32;
     if (elem->type == -RAY_I16)  return (int64_t)elem->i16;
-    if (elem->type == -RAY_BYTE_ONLY)   return (int64_t)elem->u8;
+    if (ray_is_bytelike(-elem->type))   return (int64_t)elem->u8;
     if (elem->type == -RAY_F64 ||
         RAY_IS_TEMPORALF(-elem->type)) return (int64_t)elem->f64;
     return elem->i64;
@@ -374,10 +378,10 @@ static inline int64_t elem_as_i64(ray_t* elem) {
  * Returns 0 on success, -1 if the element type doesn't match. */
 static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
     if (vec->type == RAY_CHARV) {
-        /* Before the null branch: the char null " " is an ORDINARY 0x20 byte,
-         * not a memset-0 sentinel.  Strict: only char atoms store into charv. */
-        if (elem->type != -RAY_CHARV) return -1;
-        ((uint8_t*)ray_data(vec))[i] = elem->u8;
+        /* char null " " is an ORDINARY 0x20 byte, not the memset-0 sentinel;
+         * otherwise charv stores exactly like u8 (chars ARE bytes). */
+        ((uint8_t*)ray_data(vec))[i] =
+            RAY_ATOM_IS_NULL(elem) ? 0x20 : (uint8_t)elem_as_i64(elem);
         return 0;
     }
     if (RAY_ATOM_IS_NULL(elem)) {

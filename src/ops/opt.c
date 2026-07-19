@@ -84,6 +84,7 @@ static int8_t promote_type(int8_t a, int8_t b) {
         a == RAY_MINUTE || b == RAY_MINUTE ||
         a == RAY_SECOND || b == RAY_SECOND) return RAY_I32;
     if (a == RAY_I16 || b == RAY_I16) return RAY_I16;
+    if (a == RAY_CHARV || b == RAY_CHARV) return RAY_CHARV; /* chars ARE bytes; char tag dominates */
     if (a == RAY_BYTE_ONLY || b == RAY_BYTE_ONLY) return RAY_BYTE_ONLY;
     return RAY_BOOL;
 }

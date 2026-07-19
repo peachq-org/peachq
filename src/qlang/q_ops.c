@@ -886,6 +886,19 @@ static const q_op_t Q_OPS[] = {
 };
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
 
+/* Accumulator identity elements (ref/accumulators.md:261-267 unary-seed,
+ * 420-428 empty-Over): the manifest owns this per-verb knowledge, beside the
+ * rows it annotates — never a spelling switch in a wrapper (rule 3). */
+ray_t* q_ops_acc_identity(const char* spelling) {
+    if (!spelling || !spelling[0] || spelling[1] != '\0') return NULL;
+    switch (spelling[0]) {
+    case '+': return ray_i64(0);
+    case '*': return ray_i64(1);
+    case ',': return ray_list_new(0);
+    default:  return NULL;
+    }
+}
+
 const q_op_t* q_ops_table(int* n) {
     if (n) *n = N_Q_OPS;
     return Q_OPS;
