@@ -8,6 +8,7 @@
 #include "qlang/q_gz.h"        /* q_gz_deflate — `form?` response gzip (#6) */
 #include "qlang/q_dotz.h"      /* q_dotz_zph — the `.z.ph` handler slot */
 #include "qlang/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
+#include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler show output */
 #include "lang/env.h"          /* ray_env_get / ray_sym_intern — `.h.HOME` / `.h.ty` */
 #include "lang/internal.h"     /* call_fn1 */
@@ -363,45 +364,54 @@ static bool http_docroot_absent(void) {
 #endif
 }
 
-/* Friendly 200 when no docroot exists yet: the server is up, tell the operator
- * how to serve content, rather than 404-ing every path.  `root` is the resolved
- * docroot dir (already validated safe by q_http_docroot). */
-static void serve_welcome(ray_sock_t fd, const char* root) {
-    static const char generic[] =
-        "<!doctype html><meta charset=utf-8><title>openq</title>\n"
-        "<h1>openq HTTP server is running</h1>\n"
-        "<p>No docroot directory was found. Create one (with an "
-        "<code>index.html</code>) beside the process to serve your own pages.</p>\n";
-    char body[512];
-    int bl = snprintf(body, sizeof body,
-        "<!doctype html><meta charset=utf-8><title>openq</title>\n"
-        "<h1>openq HTTP server is running</h1>\n"
-        "<p>No <code>%s</code> directory was found. Create one (with an "
-        "<code>index.html</code>) beside the process to serve your own pages.</p>\n",
-        root);
-    const char* b = body;
-    size_t      n = (size_t)bl;
-    if (bl < 0 || (size_t)bl >= sizeof body) {   /* over-long root -> generic body */
-        b = generic;
-        n = sizeof generic - 1;
-    }
-    char hdr[192];
+const unsigned char* q_http_asset_lookup(const char* path, size_t* len_out) {
+    if (!path) return NULL;
+    while (*path == '/') path++;                 /* strip leading slash(es) */
+    if (*path == '\0') path = "index.html";      /* "/" or "" -> index */
+    for (size_t i = 0; i < q_html_assets_count; i++)
+        if (strcmp(path, q_html_assets[i].path) == 0) {
+            if (len_out) *len_out = q_html_assets[i].len;
+            return q_html_assets[i].bytes;
+        }
+    return NULL;
+}
+
+size_t q_http_asset_count(void) { return q_html_assets_count; }
+
+bool q_http_asset_at(size_t i, const char** path_out,
+                     const unsigned char** bytes_out, size_t* len_out) {
+    if (i >= q_html_assets_count) return false;
+    if (path_out)  *path_out  = q_html_assets[i].path;
+    if (bytes_out) *bytes_out = q_html_assets[i].bytes;
+    if (len_out)   *len_out   = q_html_assets[i].len;
+    return true;
+}
+
+/* Serve one request from the embedded table (no on-disk docroot). `rel` is the
+ * respond()-normalized path (leading '/' stripped; "/" -> "index.html"). Hit ->
+ * 200 with Content-Length + Content-Type (`.h.ty` override, else the C table);
+ * miss -> 404. Fixed-table match: no filesystem, no traversal surface. */
+static void serve_embedded(ray_sock_t fd, const char* rel) {
+    size_t len = 0;
+    const unsigned char* body = q_http_asset_lookup(rel, &len);
+    if (!body) { q_http_send_simple(fd, 404, "Not Found"); return; }
+    char hdr[256], mimebuf[64];
     int hl = snprintf(hdr, sizeof hdr,
-                      "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-                      "Content-Length: %zu\r\nConnection: close\r\n\r\n", n);
-    if (hl > 0 && q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0)
-        q_http_send_all(fd, b, n, Q_HTTP_SEND_SECS);
+                      "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n"
+                      "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                      q_http_mime_lookup(rel, mimebuf, sizeof mimebuf), len);
+    if (hl > 0 && q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0 && len)
+        q_http_send_all(fd, body, len, Q_HTTP_SEND_SECS);
 }
 
 static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
+    if (http_docroot_absent()) {         /* ALL-OR-NOTHING: no ./html -> embedded site */
+        serve_embedded(fd, rel);
+        return;
+    }
     int64_t size = 0;
     int doc = q_http_open_doc(rel, rl, &size);
-    if (doc < 0) {
-        if (http_docroot_absent()) {
-            char rootbuf[Q_HTTP_MAX_PATH];
-            serve_welcome(fd, q_http_docroot(rootbuf, sizeof rootbuf));
-            return;
-        }
+    if (doc < 0) {                        /* docroot present but file missing -> 404 */
         q_http_send_simple(fd, 404, "Not Found");
         return;
     }
