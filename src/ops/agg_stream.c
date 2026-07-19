@@ -370,7 +370,8 @@ static inline double pearson_read_f64(const ray_valid_t* v, int64_t i) {
         case RAY_I32: RAY_TEMPORAL32_CASES:
                                             return (double)((const int32_t*)v->base)[i];
         case RAY_I16:                       return (double)((const int16_t*)v->base)[i];
-        case RAY_BYTE_ONLY: case RAY_BOOL:        return (double)((const uint8_t*)v->base)[i];
+        case RAY_BYTE_ONLY: case RAY_CHARV: case RAY_BOOL:
+                                                  return (double)((const uint8_t*)v->base)[i];
         default:                            return 0.0;  /* gate admits only the above */
     }
 }
@@ -515,7 +516,7 @@ const agg_vtable_t* agg_resolve(uint16_t agg_kind, int8_t in_type) {
      * accepts any numeric/temporal input column, not just F64. */
     if (agg_kind == OP_PEARSON_CORR &&
         (in_type == RAY_F64 || in_type == RAY_I64 || in_type == RAY_I32 ||
-         in_type == RAY_I16 || in_type == RAY_BYTE_ONLY || in_type == RAY_BOOL ||
+         in_type == RAY_I16 || ray_is_bytelike(in_type) || in_type == RAY_BOOL ||
          RAY_IS_TEMPORAL32(in_type) || RAY_IS_TEMPORAL64(in_type)))
         return &PEARSON_F64;
     if (agg_kind == OP_SUM && in_type == RAY_I64) return &SUM_I64;
