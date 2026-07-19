@@ -6,6 +6,7 @@
 #endif
 #include <rayforce.h>
 #include "qlang/q_http_client.h"
+#include "qlang/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
@@ -114,6 +115,21 @@ static int hdr_ieq(const struct phr_header* h, const char* lower) {
     }
     return 1;
 }
+/* A header value's trimmed body equals the single token `gzip` (case-insensitive).
+ * Used for `Content-Encoding: gzip` — the only content coding openq inflates. */
+static int val_is_gzip(const char* v, size_t n) {
+    size_t s = 0; while (s < n && (v[s] == ' ' || v[s] == '\t')) s++;
+    size_t e = n; while (e > s && (v[e-1] == ' ' || v[e-1] == '\t')) e--;
+    if (e - s != 4) return 0;
+    static const char* t = "gzip";
+    for (size_t k = 0; k < 4; k++) {
+        unsigned char c = (unsigned char)v[s + k];
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        if (c != (unsigned char)t[k]) return 0;
+    }
+    return 1;
+}
+
 /* Terminal transfer coding is exactly `chunked` (case-insensitive).  A TE header
  * whose last comma-separated token is not `chunked` (e.g. gzip) is unsupported. */
 static int te_terminal_chunked(const char* v, size_t n) {
@@ -190,13 +206,20 @@ static int chunked_complete(const char* body, size_t blen) {
 }
 
 int q_http_client_extract(char* buf, size_t len, int* status,
-                          const char** body, size_t* body_len)
+                          const char** body, size_t* body_len, int* gzip)
 {
+    if (gzip) *gzip = 0;
     int minor, st; const char* msg; size_t msg_len, nh = Q_HTTP_MAX_HDRS;
     struct phr_header h[Q_HTTP_MAX_HDRS];
     int hl = phr_parse_response(buf, len, &minor, &st, &msg, &msg_len, h, &nh, 0);
     if (hl <= 0) return -1;
     if (status) *status = st;
+    /* Content-Encoding: gzip -> caller inflates (headers read intact, before the
+     * chunked in-place de-frame below; TE is the outer coding, dechunked first). */
+    if (gzip)
+        for (size_t i = 0; i < nh; i++)
+            if (h[i].name && hdr_ieq(&h[i], "content-encoding") &&
+                val_is_gzip(h[i].value, h[i].value_len)) { *gzip = 1; break; }
 
     int chunked, have_cl, bodyless; int64_t cl;
     if (response_framing(st, h, nh, &chunked, &have_cl, &cl, &bodyless) != 0) return -1;
@@ -407,11 +430,13 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
         if (!scan_ok(mime, mime_len)) return ray_error("domain", NULL);   /* injection guard */
         rl = snprintf(req, sizeof req,
             "POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
+            "Accept-Encoding: gzip\r\n"
             "Content-Type: %.*s\r\nContent-Length: %zu\r\n%s\r\n",
             u.path, hosthdr, (int)mime_len, mime, body_len, authhdr);
     } else {
         rl = snprintf(req, sizeof req,
-            "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n%s\r\n",
+            "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
+            "Accept-Encoding: gzip\r\n%s\r\n",
             u.path, hosthdr, authhdr);
     }
     if (rl < 0 || (size_t)rl >= sizeof req) return ray_error("limit", NULL);
@@ -429,9 +454,16 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
     size_t rlen = 0;
     char* resp = q_http_client_read_response(fd, &rlen, deadline, &err);
     if (!resp) goto done;
-    int st; const char* rbody; size_t rbl;
-    int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl);
-    if (ex == 0) result = ray_str(rbody, rbl);
+    int st; const char* rbody; size_t rbl; int gz = 0;
+    int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz);
+    if (ex == 0 && gz) {
+        /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard). */
+        size_t ilen = 0; const char* ierr = NULL;
+        uint8_t* infl = q_gz_inflate((const uint8_t*)rbody, rbl, &ilen, &ierr);
+        if (infl) { result = ray_str((const char*)infl, ilen); free(infl); }
+        else err = ierr ? ierr : "domain";
+    }
+    else if (ex == 0) result = ray_str(rbody, rbl);
     else if (ex == -2) err = "wsfull";
     else err = "conn";
     free(resp);
