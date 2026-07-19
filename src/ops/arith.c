@@ -453,10 +453,11 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
                          ray_type_name(a->type), ray_type_name(b->type));
 
     /* u8: unsigned byte modulo, no null sentinel — mod by 0 returns 0 */
-    if (b->type == -RAY_BYTE_ONLY) {
+    if (b->type == -RAY_BYTE_ONLY || b->type == -RAY_CHARV) {
         uint8_t bv = b->u8;
-        if (bv == 0) return make_u8(0);
-        return make_u8((uint8_t)((uint8_t)as_i64(a) % bv));
+        if (bv == 0) return b->type == -RAY_CHARV ? ray_char(0) : make_u8(0);
+        uint8_t rv = (uint8_t)((uint8_t)as_i64(a) % bv);
+        return b->type == -RAY_CHARV ? ray_char(rv) : make_u8(rv);
     }
     if (a->type == -RAY_BYTE_ONLY) {
         /* a is u8 but b is not u8 — treat as integer, result follows b's type */
@@ -496,6 +497,7 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
     if (b->type == -RAY_I32) return make_i32((int32_t)result);
     if (b->type == -RAY_I16) return make_i16((int16_t)result);
     if (b->type == -RAY_BYTE_ONLY) return make_u8((uint8_t)result);
+    if (b->type == -RAY_CHARV) return ray_char((uint8_t)result);
     return make_i64(result);
 }
 
