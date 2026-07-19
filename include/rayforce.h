@@ -90,7 +90,10 @@ typedef enum {
     RAY_I64       = 7,
     RAY_F32       = 8,
     RAY_F64       = 9,
-    RAY_STR       = 10,  /* Variable-length string column (inline + pool) */
+    /* Char vector (1-byte payload, atom = char) — kdb `c`/10h.  In-band at 10:
+     * internal tag = kdb number, so `type`, display, and wire emit read the
+     * raw tag with no remap seam (string-model spec §A, landed 1b). */
+    RAY_CHARV     = 10,
     RAY_SYM       = 11,  /* Unified dictionary-encoded string column (adaptive width) */
     RAY_TIMESTAMP = 12,
     RAY_MONTH     = 13,  /* Months since 2000.01 (i32 = (year-2000)*12+month-1) — kdb `m` */
@@ -104,11 +107,11 @@ typedef enum {
     RAY_MINUTE    = 17,  /* Minutes since midnight (i32 payload) — kdb `u` */
     RAY_SECOND    = 18,  /* Seconds since midnight (i32 payload) — kdb `v` */
     RAY_TIME      = 19,
-    /* Char vector (1-byte payload, atom = char) — kdb `c`/10h.  TEMPORARY tag
-     * 21 (out-of-band, next to RAY_SEL=20); the stage-1b atomic renumber swap
-     * moves charv to 10 and RAY_STR to 21 (string-model spec §A/§C) — keep
-     * every site symbolic so that swap is a constants-only edit. */
-    RAY_CHARV     = 21
+    /* PHYSICAL variable-length string storage (inline + pool), out-of-band at
+     * 21 next to RAY_SEL=20: never a q type — q-space sees charv; columns and
+     * engine internals keep pooled STR and convert at the q boundary
+     * (string-model spec Design §3). */
+    RAY_STR       = 21
 } ray_type_e;
 
 /* Width-class temporal aliases ("an int wearing a costume").  Bucket-1
@@ -302,10 +305,10 @@ void ray_error_free(ray_t* err);
  * today (datetime/timespan/minute/second unimplemented), so the range
  * is intentionally inclusive; a value's tag is never a gap.  If those slots
  * are later filled, keep this predicate's intent (real vector types only). */
-/* `|| == RAY_CHARV` is TEMPORARY: charv sits out-of-band at 21 until the 1b
- * renumber puts it in-band at 10 — then this extension flips to RAY_STR
- * (the physical type exiled to 21), per string-model spec §A. */
-#define ray_is_vec(v)     (((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME) || (v)->type == RAY_CHARV)
+/* `|| == RAY_STR` because the physical string type sits out-of-band at 21
+ * (charv owns in-band 10); STR columns still ride every generic vector path
+ * below the q boundary, per string-model spec §A/§3. */
+#define ray_is_vec(v)     (((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME) || (v)->type == RAY_STR)
 #define ray_len(v)        ((v)->len)
 
 /* Element type sizes indexed by type tag — covers all uint8_t values.
@@ -464,6 +467,7 @@ void     ray_release(ray_t* v);
 ray_t* ray_bool(bool val);
 ray_t* ray_u8(uint8_t val);
 ray_t* ray_char(uint8_t val);       /* char atom (-RAY_CHARV, u8 payload) */
+ray_t* ray_charv(const char* p, int64_t n);  /* char vector from raw bytes */
 ray_t* ray_i16(int16_t val);
 ray_t* ray_i32(int32_t val);
 ray_t* ray_i64(int64_t val);

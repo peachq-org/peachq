@@ -446,8 +446,12 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     size_t      plen  = colon ? (size_t)(cred_len - (size_t)(ppart - creds))
                               : cred_len;
 
-    ray_t* u = ray_str(upart, ulen);
-    ray_t* p = ray_str(ppart, plen);
+    /* Dialect seam (string-C3): with the q runtime installed, hooks are q
+     * code and receive char vectors; a pure-rayfall process keeps the
+     * legacy string atoms. */
+    int q_dialect = ray_eval_remote_str_installed();
+    ray_t* u = q_dialect ? ray_charv(upart, (int64_t)ulen) : ray_str(upart, ulen);
+    ray_t* p = q_dialect ? ray_charv(ppart, (int64_t)plen) : ray_str(ppart, plen);
     if (!u || !p || RAY_IS_ERR(u) || RAY_IS_ERR(p)) {
         if (u && !RAY_IS_ERR(u)) ray_release(u);
         if (p && !RAY_IS_ERR(p)) ray_release(p);
@@ -577,7 +581,15 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
     if (hook) {
         /* Hook-handled frames are NOT journaled: replay cannot reproduce
          * hook dispatch, and replaying a hook's list payload through eval
-         * would violate the value-vs-eval ruling (Phase C decision). */
+         * would violate the value-vs-eval ruling (Phase C decision).
+         * Dialect seam (string-C3): wire text decodes to a char vector; a
+         * pure-rayfall process (no q runtime hook installed) still expects
+         * the legacy string atom. */
+        if (msg->type == RAY_CHARV && !ray_eval_remote_str_installed()) {
+            ray_t* s = ray_str((const char*)ray_data(msg), (size_t)msg->len);
+            ray_release(msg);
+            msg = s;
+        }
         result = call_fn1(hook, msg);
         ray_release(msg);
         /* Async errors have nowhere to go on the wire (async never sends
@@ -588,7 +600,16 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
             ray_error_free(result);
             result = NULL;
         }
-    } else if (msg->type == -RAY_STR) {
+    } else if (msg->type == -RAY_STR || msg->type == RAY_CHARV ||
+               msg->type == -RAY_CHARV) {
+        /* q source text: a char vector/atom on the wire (kdb tag 10/-10), or
+         * a legacy string atom.  SAME acceptance set as journal.c eval_one —
+         * keep the two predicates identical (string-C3 1b). */
+        const char* sp = msg->type == -RAY_STR  ? ray_str_ptr(msg)
+                       : msg->type == RAY_CHARV ? (const char*)ray_data(msg)
+                                                : (const char*)&msg->u8;
+        size_t      sn = msg->type == -RAY_STR  ? ray_str_len(msg)
+                       : msg->type == RAY_CHARV ? (size_t)msg->len : 1;
         /* Journal hook: log the mutation channel BEFORE evaluation, so a
          * crash mid-handler still leaves the message on disk for replay.
          * The envelope stays the 16-byte serde header; the payload is the
@@ -614,7 +635,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
                 return 0;
             }
         }
-        result = ray_eval_remote_str(ray_str_ptr(msg), ray_str_len(msg));
+        result = ray_eval_remote_str(sp, sn);
         ray_release(msg);
     } else if (msg->type == RAY_LIST) {
         /* kdb (func; args…) value-apply request (ADR-0004): a SINGLE

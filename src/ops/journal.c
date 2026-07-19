@@ -33,9 +33,11 @@
 /* Copy a Rayfall string atom into a NUL-terminated C buffer.  Returns
  * NULL if the atom isn't a string or doesn't fit. */
 static const char* str_to_cpath(ray_t* s, char* buf, size_t bufsz) {
-    if (!s || s->type != -RAY_STR) return NULL;
-    const char* p = ray_str_ptr(s);
-    size_t      n = ray_str_len(s);
+    const char* p; size_t n;
+    if (!s) return NULL;
+    if (s->type == -RAY_STR)       { p = ray_str_ptr(s); n = ray_str_len(s); }
+    else if (s->type == RAY_CHARV) { p = (const char*)ray_data(s); n = (size_t)s->len; }
+    else return NULL;
     if (n + 1 > bufsz) return NULL;
     memcpy(buf, p, n);
     buf[n] = '\0';
@@ -57,7 +59,7 @@ ray_t* ray_log_open_fn(ray_t** args, int64_t n) {
         return ray_error("rank", ".log.open expects (`async|`sync; \"base\")");
     if (!args[0] || args[0]->type != -RAY_SYM)
         return ray_error("type", ".log.open mode must be `async or `sync");
-    if (!args[1] || args[1]->type != -RAY_STR)
+    if (!args[1] || (args[1]->type != -RAY_STR && args[1]->type != RAY_CHARV))
         return ray_error("type", ".log.open base must be a string");
 
     int64_t sym_async = ray_sym_intern("async", 5);
