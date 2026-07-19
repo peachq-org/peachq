@@ -85,10 +85,16 @@ static ray_err_t validate_sym_bounds(const void* data, int64_t len,
 }
 
 /* Magic numbers for extended column formats */
+/* STRL/STRV persist NO type-tag bytes (slen-framed strings / ext-202 wire
+ * records with literal tags) — magics unchanged; STRL is also the symfile
+ * format (sym.c SYM_STRL_MAGIC).  The recursive LSTG/TTBL formats DO write
+ * raw obj->type bytes per node, so their rev letters bumped G->H, L->M at
+ * the STR<->CHARV tag renumber (format gen 3): pre-swap files miss the
+ * magic and reject via plain-header validation instead of mis-decoding. */
 #define STR_LIST_MAGIC  0x4C525453U  /* "STRL" */
 #define STR_VEC_MAGIC   0x56525453U  /* "STRV" */
-#define LIST_MAGIC      0x4754534CU  /* "LSTG" */
-#define TABLE_MAGIC     0x4C425454U  /* "TTBL" */
+#define LIST_MAGIC      0x4854534CU  /* "LSTH" */
+#define TABLE_MAGIC     0x4D425454U  /* "TTBM" */
 
 static size_t col_str_pool_payload_len(const ray_t* vec);
 

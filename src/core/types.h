@@ -34,7 +34,7 @@
 #include <rayforce.h>
 
 /* Number of types (positive range): must be > max type ID.
- * Max data type = RAY_CHARV(21, temporary out-of-band tag — spec §A);
+ * Max data type = RAY_STR(21, physical string storage, out-of-band);
  * RAY_SEL(20) is the internal selection tag. */
 #define RAY_TYPE_COUNT 22
 
