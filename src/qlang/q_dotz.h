@@ -33,44 +33,18 @@ ray_t* q_dotz_resolve(int64_t sym_id);
  * spellings (`.z.pg` and `.ipc.on.sync`) resolve to ONE env slot. */
 int q_dotz_ipc_hook_index(const char* name, size_t len);
 
-/* `.z.ts` timer handler slot.  q_setg_wrap routes a `.z.ts:` assignment here;
- * q_dotz_resolve reads it back.  set RETAINS its own ref; passing NULL clears. */
-void   q_dotz_zts_set(ray_t* fn);
-
-/* `.z.exit` process-exit handler slot (same lifecycle as `.z.ts`).  fire runs
- * the handler with the exit code — called ONLY by q_exit (q_sys.c), the one
- * process-exit home; never from q_runtime_destroy. */
-void   q_dotz_zexit_set(ray_t* fn);
+/* Settable `.z.*` handler slots (`.z.ts`/`.z.exit`/`.z.ph`/`.z.pp`/`.z.pm`/
+ * `.z.ac`/`.z.ws`/`.z.wo`/`.z.wc`) — ONE name->slot map, exposed only as:
+ *   q_dotz_set — the write path (q_setg_wrap); returns true iff `name` is a
+ *                handler slot (else the caller falls to `.ipc.on.*`/plain env).
+ *                RETAINS its own ref, unwraps a q `{…}` carrier, NULL clears.
+ *   q_dotz_get — BORROWED read-back for the C fire consumers (q_http.c/q_ws.c),
+ *                NULL = unset.  (q_dotz_resolve retains it for q read-back.)
+ * Who FIRES each (never from dotz.c): `.z.ts` the poll timer, `.z.exit` q_exit
+ * (q_sys.c), `.z.p*`/`.z.ac` q_http.c, `.z.w*` q_ws.c. */
+bool   q_dotz_set(const char* name, size_t len, ray_t* val);
+ray_t* q_dotz_get(const char* name, size_t len);
 void   q_dotz_exit_fire(int code);
-
-/* `.z.ph` HTTP-GET handler slot (ref/dotz.md; same lifecycle as `.z.ts`).
- * q_http.c reads it per request via the BORROWED getter (retain across the
- * call — the handler may reassign `.z.ph` from inside itself). */
-void   q_dotz_zph_set(ray_t* fn);
-ray_t* q_dotz_zph(void);
-
-/* `.z.ws`/`.z.wo`/`.z.wc` WebSocket handler slots (ref/dotz.md; `.z.ph`
- * lifecycle).  q_ws.c reads them via the BORROWED getters (retain across the
- * call — a handler may reassign its own slot from inside itself). */
-void   q_dotz_zws_set(ray_t* fn);
-void   q_dotz_zwo_set(ray_t* fn);
-void   q_dotz_zwc_set(ray_t* fn);
-ray_t* q_dotz_zws(void);
-ray_t* q_dotz_zwo(void);
-ray_t* q_dotz_zwc(void);
-
-/* `.z.pp` HTTP-POST handler slot (ref/dotz.md; same lifecycle as `.z.ph`).
- * q_http.c reads it per POST request via the BORROWED getter. */
-void   q_dotz_zpp_set(ray_t* fn);
-ray_t* q_dotz_zpp(void);
-
-/* `.z.ac` HTTP-auth + `.z.pm` HTTP-methods handler slots (ref/dotz.md; same
- * lifecycle as `.z.ph`).  q_http.c reads them per request via the BORROWED
- * getters (retain across the call — a handler may reassign its own slot). */
-void   q_dotz_zac_set(ray_t* fn);
-ray_t* q_dotz_zac(void);
-void   q_dotz_zpm_set(ray_t* fn);
-ray_t* q_dotz_zpm(void);
 
 /* A fresh RAY_UNARY fn-value (rc=1) that, each time the poll timer fires it,
  * resolves the CURRENT `.z.ts` binding and calls it with a fresh LOCAL
