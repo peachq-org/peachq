@@ -142,7 +142,7 @@ static const char* type_name(int8_t t) {
     switch (t) {
         case RAY_LIST:      return "LIST";
         case RAY_BOOL:      return "BOOL";
-        case RAY_U8:        return "U8";
+        case RAY_BYTE_ONLY: return "U8";
         case RAY_I16:       return "I16";
         case RAY_I32:       return "I32";
         case RAY_I64:       return "I64";

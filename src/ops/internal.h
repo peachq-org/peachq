@@ -791,7 +791,7 @@ typedef struct {
  * Returns 1..8: the number of byte passes radix_sort_run needs. */
 static inline uint8_t radix_key_bytes(int8_t type) {
     switch (type) {
-    case RAY_BOOL: case RAY_U8:   return 1;
+    case RAY_BOOL: RAY_BYTE_CASES: return 1;
     case RAY_I16:                return 2;
     case RAY_I32: RAY_TEMPORAL32_CASES: return 4;
     default:                    return 8;  /* I64, F64, TIMESTAMP, SYM */

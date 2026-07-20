@@ -129,7 +129,7 @@ ray_t* ray_arena_str(ray_arena_t* arena, const char* s, size_t len) {
     size_t chars_block = ((32 + data_size) + 31) & ~(size_t)31;  /* align up to 32 */
     ray_t* chars = ray_arena_alloc(arena, chars_block);
     if (!chars) return NULL;
-    chars->type = RAY_U8;
+    chars->type = RAY_BYTE_ONLY;
     chars->len  = (int64_t)len;
     memcpy(ray_data(chars), s, len);
     ((char*)ray_data(chars))[len] = '\0';

@@ -107,7 +107,14 @@ static ray_t* q_hopen_connstr(ray_t* c) {
 /* q `hopen y` — connect, return an int handle.  Restricted connections must not
  * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
+static ray_t* q_hopen_wrap_impl(ray_t* x);
 ray_t* q_hopen_wrap(ray_t* x) {
+    ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
+    ray_t* r = q_hopen_wrap_impl(xs);
+    ray_release(xs);
+    return r;
+}
+static ray_t* q_hopen_wrap_impl(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     ray_t* conn      = x;
     ray_t* timeout   = NULL;
@@ -237,7 +244,14 @@ static int64_t q_hsym_id(const char* p, size_t n) {
     return id;
 }
 /* Exported (q_registry.h) so the `-1!` internal-fn alias single-homes here. */
+static ray_t* q_hsym_wrap_impl(ray_t* x);
 ray_t* q_hsym_wrap(ray_t* x) {
+    ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
+    ray_t* r = q_hsym_wrap_impl(xs);
+    ray_release(xs);
+    return r;
+}
+static ray_t* q_hsym_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);                   /* borrowed */
         if (!s) return ray_error("type", "hsym: bad symbol");
@@ -268,7 +282,14 @@ ray_t* q_hsym_wrap(ray_t* x) {
  * line break (the doc pins `read0(`:foo;6)` -> "world" on a file ending \n);
  * (f;o;n) -> exactly n chars from o (clamped).  Console (0) and fifo handles
  * are deferred 'nyi.  Offsets accept 0 (superset of the doc wording). */
+static ray_t* q_read0_wrap_impl(ray_t* x);
 ray_t* q_read0_wrap(ray_t* x) {
+    ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
+    ray_t* r = q_read0_wrap_impl(xs);
+    ray_release(xs);
+    return q_charv_out(r);              /* lines cross as char vectors */
+}
+static ray_t* q_read0_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* path = q_ft_path(x);
         if (!path) return ray_error("type", "read0: expected a file symbol `:path");
@@ -386,7 +407,10 @@ static ray_t* q_ft_save_text(ray_t* fsym, ray_t* y) {
 
 /* One cell -> OWNED RAY_STR raw text (no quoting).  Borrows atom. */
 static ray_t* q_ft_cell_text(ray_t* atom) {
-    ray_t* s = q_string_fn(atom);
+    ray_t* s0 = q_string_fn(atom);              /* charv post-1b */
+    if (!s0 || RAY_IS_ERR(s0)) return s0;
+    ray_t* s = q_str_in(s0);                    /* legacy STR for the writers */
+    ray_release(s0);
     if (!s || RAY_IS_ERR(s)) return s;
     if (atom->type == -RAY_DATE && s->type == -RAY_STR) {
         /* Prepare Text renders temporals ISO 8601 (doc: 2022-03-14) — the
@@ -461,7 +485,7 @@ static ray_t* q_ft_prepare(char delim, ray_t* y) {
             if (col->type == RAY_LIST) {                  /* must be all strings */
                 ray_t** it = (ray_t**)ray_data(col);
                 for (int64_t i = 0; i < l; i++)
-                    if (!it[i] || it[i]->type != -RAY_STR)
+                    if (!it[i] || (it[i]->type != -RAY_STR && it[i]->type != RAY_CHARV))
                         return ray_error("type", "0:: column is neither a vector nor a list of strings");
             }
         } else return ray_error("type", "0:: column is neither a vector nor a list of strings");
@@ -504,9 +528,14 @@ static ray_t* q_ft_prepare(char delim, ray_t* y) {
             if (col->type == -RAY_STR) {                   /* char column: one char */
                 char ch = ray_str_ptr(col)[i];
                 ok = q_ft_quote_append(&buf, &w, &cap, &ch, 1, delim);
+            } else if (col->type == RAY_CHARV) {           /* char column (charv) */
+                char ch = ((const char*)ray_data(col))[i];
+                ok = q_ft_quote_append(&buf, &w, &cap, &ch, 1, delim);
             } else if (col->type == RAY_LIST) {            /* string column */
                 ray_t** it = (ray_t**)ray_data(col);
-                ok = q_ft_quote_append(&buf, &w, &cap, ray_str_ptr(it[i]), ray_str_len(it[i]), delim);
+                const char* cp; int64_t cn;
+                if (!q_text_bytes(it[i], &cp, &cn)) { cp = ""; cn = 0; }
+                ok = q_ft_quote_append(&buf, &w, &cap, cp, (size_t)cn, delim);
             } else {
                 ray_t* ia = ray_i64(i);
                 ray_t* atom = ray_at_fn(col, ia);
@@ -1062,7 +1091,50 @@ static ray_t* q_ft_kv(const char* spec, size_t sn, ray_t* y) {
 
 
 /* ---- the `0:` dispatcher -------------------------------------------------- */
+static ray_t* q_filetext_impl(ray_t* x, ray_t* y);
+/* x-normalize preserving the bare-vs-ENLISTED delimiter distinction the
+ * charv model carries natively: char ATOM -> 1-char STR (bare delim); charv
+ * len-1 -> boxed 1-list of a 1-char STR (the legacy enlisted form, header
+ * row); other charv -> STR (types/kv spec); LIST -> per-element.  Owned. */
+static ray_t* q_ft_norm_x(ray_t* x) {
+    if (x && x->type == -RAY_CHARV) { char c = (char)x->u8; return ray_str(&c, 1); }
+    if (x && x->type == RAY_CHARV) {
+        if (ray_len(x) == 1) {
+            ray_t* s = q_str_of_charv(x);
+            if (!s || RAY_IS_ERR(s)) return s;
+            ray_t* l = ray_list_new(1);
+            if (!l || RAY_IS_ERR(l)) { ray_release(s); return l; }
+            l = ray_list_append(l, s);
+            ray_release(s);
+            return l;
+        }
+        return q_str_of_charv(x);
+    }
+    if (x && x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t** e = (ray_t**)ray_data(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (!out || RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* c = q_ft_norm_x(e[i]);
+            if (!c) { ray_retain(e[i]); c = e[i]; }
+            if (RAY_IS_ERR(c)) { ray_release(out); return c; }
+            out = ray_list_append(out, c);
+            ray_release(c);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (x) ray_retain(x);
+    return x;
+}
 ray_t* q_filetext_wrap(ray_t* x, ray_t* y) {
+    ray_t* xs = q_ft_norm_x(x); ray_t* ys = q_str_in(y);
+    ray_t* r = q_filetext_impl(xs, ys);
+    ray_release(xs); ray_release(ys);
+    return q_charv_out(r);              /* parsed strings cross as charv */
+}
+static ray_t* q_filetext_impl(ray_t* x, ray_t* y) {
     if (!x) return ray_error("type", "0:: nil left operand");
     if (x->type == -RAY_SYM) return q_ft_save_text(x, y);
     if (x->type == -RAY_STR) {
@@ -1118,7 +1190,12 @@ ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
         ray_release(out);
         return c;
     }
-    return ray_like_fn(x, pattern);
+    { /* charv leaf/pattern -> legacy -RAY_STR forms for the engine matcher */
+        ray_t* xs = q_str_in(x); ray_t* ps = q_str_in(pattern);
+        ray_t* r = ray_like_fn(xs, ps);
+        ray_release(xs); ray_release(ps);
+        return r;
+    }
 }
 
 /* Match glob pattern p[0..pn) anchored at s[pos..sn), where every pattern
@@ -1153,10 +1230,10 @@ static int64_t q_glob_fixed_at(const char* s, size_t sn, size_t pos,
 /* q `s ss p` — string search: 0-based start index of every match of the glob
  * pattern p in the string s (overlapping, kdb-true).  Returns a long vector. */
 ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
-    if (!s || s->type != -RAY_STR || !p || p->type != -RAY_STR)
+    const char* sp; int64_t sn64; const char* pp; int64_t pn64;
+    if (!q_text_bytes(s, &sp, &sn64) || !q_text_bytes(p, &pp, &pn64))
         return ray_error("type", "ss: expects string arguments");
-    const char* sp = ray_str_ptr(s); size_t sn = ray_str_len(s);
-    const char* pp = ray_str_ptr(p); size_t pn = ray_str_len(p);
+    size_t sn = (size_t)sn64, pn = (size_t)pn64;
     ray_t* out = ray_vec_new(RAY_I64, 8);
     if (RAY_IS_ERR(out)) return out;
     if (pn == 0) return out;                       /* empty pattern -> no hits */
@@ -1179,13 +1256,14 @@ ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
 ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     if (n != 3) return ray_error("rank", "ssr: expects 3 args");
     ray_t* s = args[0]; ray_t* p = args[1]; ray_t* r = args[2];
-    if (!s || s->type != -RAY_STR || !p || p->type != -RAY_STR)
+    const char* sp; int64_t sn64; const char* pp; int64_t pn64;
+    if (!q_text_bytes(s, &sp, &sn64) || !q_text_bytes(p, &pp, &pn64))
         return ray_error("type", "ssr: s and p must be strings");
     int r_is_fn = q_is_fn_value(r);
-    if (!r_is_fn && (!r || r->type != -RAY_STR))
-        return ray_error("type", "ssr: replacement must be a string or function");
-    const char* sp = ray_str_ptr(s); size_t sn = ray_str_len(s);
-    const char* pp = ray_str_ptr(p); size_t pn = ray_str_len(p);
+    { const char* rp_; int64_t rn_;
+      if (!r_is_fn && !q_text_bytes(r, &rp_, &rn_))
+          return ray_error("type", "ssr: replacement must be a string or function"); }
+    size_t sn = (size_t)sn64, pn = (size_t)pn64;
     size_t cap = sn + 16, blen = 0;
     char* b = (char*)malloc(cap);
     if (!b) return ray_error("wsfull", "ssr: out of memory");
@@ -1203,16 +1281,19 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
         int64_t m = pn ? q_glob_fixed_at(sp, sn, i, pp, pn) : -1;
         if (m >= 0) {
             if (r_is_fn) {
-                ray_t* sub = ray_str(sp + i, (size_t)m);
+                ray_t* sub = ray_charv(sp + i, m);      /* matched text, in flight */
                 ray_t* one[1] = { sub };
                 ray_t* rep = q_call_n(r, one, 1);
                 ray_release(sub);
                 if (!rep || RAY_IS_ERR(rep)) { err = rep; break; }
-                if (rep->type != -RAY_STR) { ray_release(rep); err = ray_error("type", "ssr: replacement fn must return a string"); break; }
-                SSR_PUSH(ray_str_ptr(rep), ray_str_len(rep));
+                { const char* qp; int64_t qn;
+                  if (!q_text_bytes(rep, &qp, &qn)) { ray_release(rep); err = ray_error("type", "ssr: replacement fn must return a string"); break; }
+                  SSR_PUSH(qp, (size_t)qn); }
                 ray_release(rep);
             } else {
-                SSR_PUSH(ray_str_ptr(r), ray_str_len(r));
+                const char* rp2; int64_t rn2;
+                (void)q_text_bytes(r, &rp2, &rn2);
+                SSR_PUSH(rp2, (size_t)rn2);
             }
             i += (m > 0) ? (size_t)m : 1;   /* advance past the match */
         } else {
@@ -1222,7 +1303,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     }
     #undef SSR_PUSH
     if (err) { free(b); return err; }
-    ray_t* out = ray_str(b, blen);
+    ray_t* out = ray_charv(b, (int64_t)blen);
     free(b);
     return out;
 }
@@ -1248,7 +1329,7 @@ ray_t* q_getenv_wrap(ray_t* x) {
     if (!name || RAY_IS_ERR(name)) return name ? name : ray_error("oom", NULL);
     ray_t* r = ray_getenv_fn(name);                     /* "" when unset */
     ray_release(name);
-    return r;
+    return q_charv_out(r);
 }
 
 /* q `x setenv y` (ref/getenv.md#setenv) — x is a SYMBOL atom (the variable
@@ -1256,7 +1337,14 @@ ray_t* q_getenv_wrap(ray_t* x) {
  * null (kdb: setenv's result displays as nothing in the console).  The base
  * ray_setenv_fn takes two -RAY_STR args and echoes y retained; coerce the sym
  * name to a string, discard that echo, and return :: to match kdb. */
+static ray_t* q_setenv_impl(ray_t* x, ray_t* y);
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y) {
+    ray_t* ys = q_str_in(y);
+    ray_t* r = q_setenv_impl(x, ys);
+    ray_release(ys);
+    return r;
+}
+static ray_t* q_setenv_impl(ray_t* x, ray_t* y) {
     /* .os.setenv is RAY_FN_RESTRICTED; re-assert here (calling the C fn directly
      * bypasses the eval-layer check — the q_hopen_wrap/file-wrapper precedent). */
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");

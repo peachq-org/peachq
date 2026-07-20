@@ -239,6 +239,7 @@ static inline bool agg_type_admitted(uint16_t op, int8_t t) {
      * wrappers (e.g. RAY_MAPCOMMON) and out_type==0 to the runtime so a
      * plan-time guard never false-rejects a column it can't classify. */
     bool nonnum   = (t == RAY_SYM || t == RAY_STR || t == RAY_GUID);
+                     /* charv admits: chars ARE bytes (owner ruling 2026-07-19) */
     bool temporal = (RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) ||
                      RAY_IS_TEMPORALF(t));
     switch (op) {

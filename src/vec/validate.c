@@ -54,7 +54,7 @@
  *                     they are out of the mechanism's scope.  (Producers that
  *                     INTEND an I16/I32 null still set HAS_NULLS via
  *                     ray_vec_set_null; this only declines to *assert* it.)
- *   BOOL, U8        — non-nullable, no sentinel.
+ *   BOOL, U8, CHARV — non-nullable / blank-is-a-value, no reserved sentinel.
  *   SYM             — no-null by design: ray_vec_is_null() short-circuits to
  *                     false for SYM regardless of payload, and sym-id 0 is a
  *                     legitimate (interned empty-string) value.
