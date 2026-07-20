@@ -10,3 +10,8 @@ system "nonlegacy 1";
 / .pq.ray: the generic rayfall (lisp) escape hatch. Results are RAW engine values
 / — exotic rayfall shapes may display oddly through q_fmt (accepted; internal).
 .pq.ray:.pq.c.ray;
+/ .pq.parse / .pq.tree: rayforce-native tree introspection via ray_fmt (unlike
+/ `parse`, which renders q notation). .pq.parse = raw pre-lower AST; .pq.tree =
+/ post-lower tree (what ray_eval receives). Both take/return a q char-vector.
+.pq.parse:.pq.c.parse;
+.pq.tree:.pq.c.tree;
