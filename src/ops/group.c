@@ -259,7 +259,7 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                          const int64_t* idx) {
     void* base = ray_data(input);
     switch (input->type) {
-    case RAY_BOOL: case RAY_U8: {
+    case RAY_BOOL: RAY_BYTE_CASES: {
         /* BOOL/U8 are non-nullable; has_nulls is always false here,
          * so the per-element null check is dead code in practice. */
         const uint8_t* d = (const uint8_t*)base;
@@ -552,7 +552,7 @@ static void cd_hist_fn(void* ctx, uint32_t worker_id,
             uint64_t p = (h ^ (h >> 33)) & p_mask;
             hist[p]++;
         }
-    } else if (in_type == RAY_BOOL || in_type == RAY_U8) {
+    } else if (in_type == RAY_BOOL || ray_is_bytelike(in_type)) {
         const uint8_t* d = (const uint8_t*)base;
         for (int64_t i = start; i < end; i++) {
             int64_t val = d[i];
@@ -633,7 +633,7 @@ static void cd_scatter_fn(void* ctx, uint32_t worker_id,
     } else if (in_type == RAY_I16) {
         const int16_t* d = (const int16_t*)base;
         SCATTER_BODY(d[i])
-    } else if (in_type == RAY_BOOL || in_type == RAY_U8) {
+    } else if (in_type == RAY_BOOL || ray_is_bytelike(in_type)) {
         const uint8_t* d = (const uint8_t*)base;
         SCATTER_BODY(d[i])
     } else { /* RAY_SYM */
@@ -762,7 +762,7 @@ ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input) {
      * tests still match `len-after-distinct` byte-for-byte. */
 
     switch (in_type) {
-    case RAY_BOOL: case RAY_U8:
+    case RAY_BOOL: RAY_BYTE_CASES:
     case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F64: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
     case RAY_SYM:
@@ -1357,7 +1357,7 @@ ray_t* ray_count_distinct_per_group(ray_t* src, const int64_t* row_gid,
     if (n_groups < 0) return ray_error("domain", "count distinct per group: group count must be non-negative, got %lld", (long long)n_groups);
     int8_t in_type = src->type;
     switch (in_type) {
-    case RAY_BOOL: case RAY_U8:
+    case RAY_BOOL: RAY_BYTE_CASES:
     case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F64: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
     case RAY_SYM:
@@ -1587,7 +1587,7 @@ static inline double med_read_as_f64(const void* base, int8_t t, int64_t row) {
         case RAY_I64: { int64_t v; memcpy(&v, (const char*)base + (size_t)row * 8, 8); return (double)v; }
         case RAY_I32: { int32_t v; memcpy(&v, (const char*)base + (size_t)row * 4, 4); return (double)v; }
         case RAY_I16: { int16_t v; memcpy(&v, (const char*)base + (size_t)row * 2, 2); return (double)v; }
-        case RAY_U8:  return (double)((const uint8_t*)base)[row];
+        case RAY_BYTE_ONLY: return (double)((const uint8_t*)base)[row];
         default:      return 0.0;
     }
 }
@@ -1601,7 +1601,7 @@ static inline bool med_is_null(const void* base, int8_t t, int64_t row) {
         case RAY_I64: return ((const int64_t*)base)[row] == NULL_I64;
         case RAY_I32: return ((const int32_t*)base)[row] == NULL_I32;
         case RAY_I16: return ((const int16_t*)base)[row] == NULL_I16;
-        case RAY_U8:  return false;  /* non-nullable */
+        case RAY_BYTE_ONLY: return false;  /* non-nullable */
         default:      return false;
     }
 }
@@ -1644,7 +1644,7 @@ ray_t* ray_median_per_group_buf(ray_t* src,
     if (!src || RAY_IS_ERR(src) || n_groups < 0) return NULL;
     int8_t t = src->type;
     if (t != RAY_F64 && t != RAY_I64 && t != RAY_I32 &&
-        t != RAY_I16 && t != RAY_U8) return NULL;
+        t != RAY_I16 && t != RAY_BYTE_ONLY) return NULL;
 
     int64_t total = 0;
     for (int64_t g = 0; g < n_groups; g++) total += grp_cnt[g];
@@ -1741,7 +1741,7 @@ static inline int64_t topk_read_i64(const void* base, int8_t t, int64_t row) {
             { int32_t v; memcpy(&v, (const char*)base + (size_t)row * 4, 4); return (int64_t)v; }
         case RAY_I16:
             { int16_t v; memcpy(&v, (const char*)base + (size_t)row * 2, 2); return (int64_t)v; }
-        case RAY_BOOL: case RAY_U8:
+        case RAY_BOOL: RAY_BYTE_CASES:
             return (int64_t)((const uint8_t*)base)[row];
         default: return 0;
     }
@@ -1908,7 +1908,7 @@ ray_t* ray_topk_per_group_buf(ray_t* src,
     if (k < 1 || k > 1024) return NULL;
     int8_t t = src->type;
     if (t != RAY_F64 && t != RAY_I64 && t != RAY_I32 && t != RAY_I16 &&
-        t != RAY_U8  && t != RAY_BOOL && !RAY_IS_TEMPORAL32(t) &&
+        !ray_is_bytelike(t) && t != RAY_BOOL && !RAY_IS_TEMPORAL32(t) &&
         t != RAY_TIMESTAMP)
         return NULL;
 
@@ -2028,7 +2028,8 @@ static ray_t* reduction_i64_result(int64_t val, int8_t out_type, ray_t* src) {
         case RAY_TIMESPAN:  return ray_timespan(val);
         case RAY_I32:       return ray_i32((int32_t)val);
         case RAY_I16:       return ray_i16((int16_t)val);
-        case RAY_U8:        return ray_u8((uint8_t)val);
+        case RAY_BYTE_ONLY: return ray_u8((uint8_t)val);
+        case RAY_CHARV:     return ray_char((uint8_t)val);
         case RAY_SYM:       return ray_sym(src ? sym_id_runtime(src, val) : val);
         default:            return ray_i64(val);
     }
@@ -2142,7 +2143,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
      * to the serial reduction path below. */
     if ((op->opcode == OP_FIRST || op->opcode == OP_LAST) &&
         (in_type == RAY_I64 || in_type == RAY_F64 || in_type == RAY_I32 ||
-         in_type == RAY_I16 || in_type == RAY_BOOL || in_type == RAY_U8 ||
+         in_type == RAY_I16 || in_type == RAY_BOOL || ray_is_bytelike(in_type) ||
          in_type == RAY_TIMESTAMP || RAY_IS_TEMPORAL32(in_type) ||
          in_type == RAY_SYM)) {
         int64_t row = -1;
@@ -3921,7 +3922,7 @@ static void minmax_scan_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t
         else if (w == RAY_SYM_W16) MINMAX_SEG_LOOP(uint16_t, );
         else MINMAX_SEG_LOOP(uint8_t, );
     }
-    else if (t == RAY_BOOL || t == RAY_U8)
+    else if (t == RAY_BOOL || ray_is_bytelike(t))
         MINMAX_SEG_LOOP(uint8_t, );
     else if (t == RAY_I16)
         MINMAX_SEG_LOOP(int16_t, );
@@ -4576,7 +4577,7 @@ static ray_t* materialize_broadcast_input(ray_t* src, int64_t nrows) {
             for (int64_t i = 0; i < nrows; i++) ((int16_t*)ray_data(out))[i] = v;
             return out;
         }
-        case -RAY_U8:
+        RAY_BYTE_ATOM_CASES:
         case -RAY_BOOL: {
             uint8_t v = src->u8;
             for (int64_t i = 0; i < nrows; i++) ((uint8_t*)ray_data(out))[i] = v;
@@ -6621,7 +6622,7 @@ da_path:;
             int8_t t = key_types[k];
             if (t != RAY_I64 && t != RAY_SYM && t != RAY_I32
                 && t != RAY_TIMESTAMP && !RAY_IS_TEMPORAL32(t)
-                && t != RAY_BOOL && t != RAY_U8 && t != RAY_I16) {
+                && t != RAY_BOOL && !ray_is_bytelike(t) && t != RAY_I16) {
                 da_eligible = false;
             }
             /* DA path cannot represent nulls — fall back to HT path. */
@@ -7279,7 +7280,7 @@ da_path:;
         bool sp_eligible = (nrows > 0 && n_keys == 1 && key_data[0] != NULL);
         int8_t kt = sp_eligible ? key_types[0] : 0;
         if (sp_eligible && kt != RAY_I64 && kt != RAY_I32 && kt != RAY_I16 &&
-            kt != RAY_U8 && kt != RAY_BOOL && !RAY_IS_TEMPORAL32(kt) &&
+            !ray_is_bytelike(kt) && kt != RAY_BOOL && !RAY_IS_TEMPORAL32(kt) &&
             !RAY_IS_TEMPORAL64(kt) && kt != RAY_SYM)
             sp_eligible = false;
         if (sp_eligible && key_vecs[0]) {

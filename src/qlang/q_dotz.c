@@ -110,7 +110,7 @@ static ray_t* strings_list(int lo, int hi) {
     int    n   = hi - lo;
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int i = lo; i < hi; i++) {
-        ray_t* s = ray_str(g_argv[i], strlen(g_argv[i]));
+        ray_t* s = ray_charv(g_argv[i], (int64_t)strlen(g_argv[i]));
         out = ray_list_append(out, s);   /* append RETAINS */
         ray_release(s);
     }
@@ -131,7 +131,7 @@ static ray_t* z_x(void) {   /* args AFTER the script, MINUS launcher-consumed fl
         int k = flag_kind(g_argv[i]);
         if (k == Q_FLAG_VALUE) { i++; continue; }   /* drop flag AND its value token */
         if (k == Q_FLAG_BOOL)  { continue; }        /* drop the bare flag (e.g. -q) */
-        ray_t* s = ray_str(g_argv[i], strlen(g_argv[i]));
+        ray_t* s = ray_charv(g_argv[i], (int64_t)strlen(g_argv[i]));
         out = ray_list_append(out, s);   /* append RETAINS */
         ray_release(s);
     }
@@ -140,22 +140,6 @@ static ray_t* z_x(void) {   /* args AFTER the script, MINUS launcher-consumed fl
 static ray_t* z_X(void) {   /* full raw argv, including the binary (UNFILTERED) */
     return strings_list(0, g_argc);
 }
-static ray_t* z_Xs(void) { /* raw command line as ONE space-joined string (kdb .z.Xs) */
-    size_t tot = 0;
-    for (int i = 0; i < g_argc; i++) tot += strlen(g_argv[i]) + 1;   /* +1 for space/NUL */
-    char*  buf = tot ? (char*)malloc(tot) : NULL;
-    size_t off = 0;
-    for (int i = 0; i < g_argc; i++) {
-        size_t l = strlen(g_argv[i]);
-        memcpy(buf + off, g_argv[i], l);
-        off += l;
-        if (i + 1 < g_argc) buf[off++] = ' ';
-    }
-    ray_t* s = ray_str(buf ? buf : "", off);
-    free(buf);
-    return s;
-}
-
 /* ---- system / host / process producers (kdb .z.o/.z.i/.z.h/.z.u/.z.a) -------
  * Read-only, minted fresh per reference like the rest of Z_TAB.  POSIX-first
  * (this file is already POSIX for the clock family); Windows fidelity is
@@ -445,7 +429,6 @@ Z_TAB[] = {
     { ".z.f", 4, z_f },
     { ".z.x", 4, z_x },
     { ".z.X", 4, z_X },
-    { ".z.Xs", 5, z_Xs },
     { ".z.q", 4, z_q },
     { ".z.o", 4, z_o },
     { ".z.i", 4, z_i },
