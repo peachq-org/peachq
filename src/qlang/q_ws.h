@@ -38,8 +38,15 @@ struct phr_header;   /* picohttpparser */
 int q_ws_handshake(ray_sock_t fd, const struct phr_header* hdrs, size_t nh);
 
 /* ---- per-connection state machine (driven by ipc.c's read pump) ---- */
+
+/* Connection role (RFC 6455 §5.1): a SERVER emits unmasked frames and requires
+ * masked client input; a CLIENT emits masked frames and requires unmasked
+ * server input.  The role selects both the encode-mask and the decode check. */
+typedef enum { Q_WS_SERVER = 0, Q_WS_CLIENT = 1 } q_ws_role_t;
+
 typedef struct q_ws_conn q_ws_conn_t;
-q_ws_conn_t* q_ws_conn_new(void);
+q_ws_conn_t* q_ws_conn_new(void);                 /* server role (unchanged) */
+q_ws_conn_t* q_ws_conn_new_role(int is_client);   /* role-selecting ctor */
 void         q_ws_conn_free(q_ws_conn_t* c);
 int64_t      q_ws_want(const q_ws_conn_t* c);   /* next rx size to request */
 
@@ -51,11 +58,21 @@ int64_t      q_ws_feed(q_ws_conn_t* c, ray_sock_t fd,
                        uint8_t* data, size_t len);
 
 /* neg[h] write path: string -> text frame, byte vector -> binary frame
- * (ref/dotz.md).  0 ok; -1 io failure; -2 bad payload type. */
-int q_ws_send(ray_sock_t fd, ray_t* msg);
+ * (ref/dotz.md).  Frames are MASKED when c is a CLIENT conn (RFC §5.3); a
+ * nil/`::` payload is a no-op flush.  0 ok; -1 io failure; -2 bad payload. */
+int q_ws_send(q_ws_conn_t* c, ray_sock_t fd, ray_t* msg);
 
 /* ---- lifecycle (called from ipc.c) ---- */
 void q_ws_on_open(int64_t qhandle);    /* fires `.z.wo` if set */
 void q_ws_on_close(int64_t qhandle);   /* fires `.z.wc` if set */
+
+/* ---- WS client open (kb/websockets.md lines 111-185) ----
+ * `:ws://[user:pass@]host:port` (a file-symbol hsym) applied to a raw HTTP
+ * request string opens a WebSocket CLIENT: connect, inject the Upgrade/Key
+ * headers, validate the 101 accept, register the fd as a poll WS handle.
+ * Returns the 2-list (handle;response) on 101, (0Ni;response) on a clean
+ * non-101 upgrade failure, or a signalled 'conn/'nyi/'type error.  wss:// is
+ * 'nyi (TLS tier).  Owns its result. */
+ray_t* q_ws_client_open(ray_t* hsym, ray_t* request);
 
 #endif /* Q_WS_H */
