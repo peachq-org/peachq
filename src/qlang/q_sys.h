@@ -1,6 +1,7 @@
-/* q_sys — the unified q `\`-command dispatcher.  A single Q_SYS[] manifest
- * (mirroring q_dotz.c's static-table idiom) maps each `\`-command token to its
- * handler; every kdb `\`-command is a row (working / silent get-set / 'nyi).
+/* q_sys — the unified q `\`-command dispatcher.  One line pre-parse feeds a
+ * SWITCH on the command char (mirroring q_dotz.c's z_slot_ptr idiom), each case
+ * calling its handler with tailored args; every kdb `\`-command is a case
+ * (working / silent get-set / 'nyi).
  * CONTRACT (value-or-throw, 2026-07-16): a syscmd RETURNS AN OWNED q value
  * (NULL = silent) or an OWNED error — callers never branch on result kinds.
  * Exit (`\\`, `exit x` → q_exit) and the raw console shell (unknown `\cmd`)
