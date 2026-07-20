@@ -31,7 +31,7 @@ const uint8_t ray_type_sizes[256] = {
     [RAY_LIST]      = 8,   /* pointer-sized (ray_t*) */
     [RAY_BOOL]      = 1,
     [RAY_GUID]      = 16,
-    [RAY_U8]        = 1,
+    [RAY_BYTE_ONLY] = 1,
     [RAY_I16]       = 2,
     [RAY_I32]       = 4,
     [RAY_I64]       = 8,
@@ -47,6 +47,7 @@ const uint8_t ray_type_sizes[256] = {
     [RAY_MINUTE]    = 4,
     [RAY_SECOND]    = 4,
     [RAY_TIME]      = 4,
+    [RAY_CHARV]     = 1,
 };
 
 /* ===== Semantic Version API ===== */

@@ -10,6 +10,7 @@
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
+#include "qlang/q_registry.h"   /* q_text_bytes — charv/legacy text accessor */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -388,7 +389,8 @@ static int b64(const char* s, size_t n, char* out, size_t outsz) {
 /* URL bytes from a q value (string or symbol atom) into a bounded buffer. */
 static int url_of(ray_t* x, char* out, size_t outsz, size_t* n) {
     const char* p; size_t l;
-    if (x && x->type == -RAY_STR) { p = ray_str_ptr(x); l = ray_str_len(x); }
+    int64_t tl;
+    if (x && q_text_bytes(x, &p, &tl)) { l = (size_t)tl; }
     else if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);   /* borrowed */
         if (!s) return -1;
@@ -462,10 +464,10 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
         /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard). */
         size_t ilen = 0; const char* ierr = NULL;
         uint8_t* infl = q_gz_inflate((const uint8_t*)rbody, rbl, &ilen, &ierr);
-        if (infl) { result = ray_str((const char*)infl, ilen); free(infl); }
+        if (infl) { result = ray_charv((const char*)infl, (int64_t)ilen); free(infl); }
         else err = ierr ? ierr : "domain";
     }
-    else if (ex == 0) result = ray_str(rbody, rbl);
+    else if (ex == 0) result = ray_charv(rbody, (int64_t)rbl);
     else if (ex == -2) err = "wsfull";
     else err = "conn";
     free(resp);
@@ -483,10 +485,10 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
     if (nargs != 3) return ray_error("rank", NULL);
     ray_t* mimev = args[1];
     ray_t* bodyv = args[2];
-    if (!mimev || mimev->type != -RAY_STR) return ray_error("type", NULL);
-    if (!bodyv || bodyv->type != -RAY_STR) return ray_error("type", NULL);
-    return http_do(args[0], ray_str_ptr(mimev), ray_str_len(mimev),
-                   ray_str_ptr(bodyv), ray_str_len(bodyv));
+    const char* mp; int64_t ml; const char* bp; int64_t bl;
+    if (!mimev || !q_text_bytes(mimev, &mp, &ml)) return ray_error("type", NULL);
+    if (!bodyv || !q_text_bytes(bodyv, &bp, &bl)) return ray_error("type", NULL);
+    return http_do(args[0], mp, (size_t)ml, bp, (size_t)bl);
 }
 
 /* ---- low-level raw client (kb/http.md §low level HTTP request mechanism) ----
@@ -502,7 +504,8 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
  * escape hatch. */
 ray_t* q_http_raw_client(ray_t* hsym, ray_t* request) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
-    if (!request || request->type != -RAY_STR) return ray_error("type", NULL);
+    const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
+    if (!request || !q_text_bytes(request, &reqp, &reqn)) return ray_error("type", NULL);
     if (!hsym || hsym->type != -RAY_SYM) return ray_error("type", NULL);
 
     /* hsym text (BORROWED interned string) -> ":http://host[:port]" */
@@ -522,7 +525,7 @@ ray_t* q_http_raw_client(ray_t* hsym, ray_t* request) {
 
     int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;
     ray_t* result = NULL;
-    if (q_http_client_send_all(fd, ray_str_ptr(request), ray_str_len(request),
+    if (q_http_client_send_all(fd, reqp, (size_t)reqn,
                                deadline) != 0) { err = "conn"; goto done; }
     size_t rlen = 0;
     char* resp = q_http_client_read_response(fd, &rlen, deadline, &err);
@@ -532,7 +535,7 @@ ray_t* q_http_raw_client(ray_t* hsym, ray_t* request) {
     int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len, NULL);
     if (ex == 0) {
         size_t total = (size_t)(body - resp) + body_len;   /* headers + framed body */
-        result = ray_str(resp, total);
+        result = ray_charv(resp, (int64_t)total);
         if (!result) err = "oom";                          /* NULL: OOM, not 'conn */
     } else if (ex == -2) err = "wsfull";
     else err = "conn";

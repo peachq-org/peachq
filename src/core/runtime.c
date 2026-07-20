@@ -394,7 +394,7 @@ int64_t ray_vec_get_i64(ray_t* vec, int64_t idx) {
         return ((const int32_t*)ray_data(vec))[idx];
     }
     if (vec->type == RAY_I16) return ((const int16_t*)ray_data(vec))[idx];
-    if (vec->type == RAY_U8 || vec->type == RAY_BOOL) return ((const uint8_t*)ray_data(vec))[idx];
+    if (ray_is_bytelike(vec->type) || vec->type == RAY_BOOL) return ((const uint8_t*)ray_data(vec))[idx];
     return 0;
 }
 

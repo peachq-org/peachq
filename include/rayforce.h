@@ -90,7 +90,10 @@ typedef enum {
     RAY_I64       = 7,
     RAY_F32       = 8,
     RAY_F64       = 9,
-    RAY_STR       = 10,  /* Variable-length string column (inline + pool) */
+    /* Char vector (1-byte payload, atom = char) — kdb `c`/10h.  In-band at 10:
+     * internal tag = kdb number, so `type`, display, and wire emit read the
+     * raw tag with no remap seam (string-model spec §A, landed 1b). */
+    RAY_CHARV     = 10,
     RAY_SYM       = 11,  /* Unified dictionary-encoded string column (adaptive width) */
     RAY_TIMESTAMP = 12,
     RAY_MONTH     = 13,  /* Months since 2000.01 (i32 = (year-2000)*12+month-1) — kdb `m` */
@@ -103,7 +106,12 @@ typedef enum {
     RAY_TIMESPAN  = 16,  /* Nanoseconds duration (i64 payload) — kdb `n` */
     RAY_MINUTE    = 17,  /* Minutes since midnight (i32 payload) — kdb `u` */
     RAY_SECOND    = 18,  /* Seconds since midnight (i32 payload) — kdb `v` */
-    RAY_TIME      = 19
+    RAY_TIME      = 19,
+    /* PHYSICAL variable-length string storage (inline + pool), out-of-band at
+     * 21 next to RAY_SEL=20: never a q type — q-space sees charv; columns and
+     * engine internals keep pooled STR and convert at the q boundary
+     * (string-model spec Design §3). */
+    RAY_STR       = 21
 } ray_type_e;
 
 /* Width-class temporal aliases ("an int wearing a costume").  Bucket-1
@@ -123,6 +131,21 @@ typedef enum {
  * readers would misread the f64 union slot). */
 #define RAY_TEMPORALF_CASES  case RAY_DATETIME
 #define RAY_IS_TEMPORALF(t)  ((t) == RAY_DATETIME)
+
+/* Byte-lane single home (string-C3).  Two deliberate spellings:
+ * BYTE_CASES/ray_is_bytelike mark the byte-LIKE lane — generic 1-byte kernel
+ * paths (compare, sort/grade, group, distinct, find, index, take/drop, hash,
+ * copy) that the char vector joins in 1a-ii by growing this membership.
+ * RAY_BYTE_ONLY/ray_is_byte_only (value form: usable as case label, negated
+ * atom tag, or constructor stamp) mark sites deliberately about the BYTE type
+ * itself — 0x display, "x"$ targets, byte parsing, wire tag 4, arith
+ * promotion, byte-buffer internals — which charv must NOT join.  Bare RAY_U8
+ * is poisoned at the end of this header so every new site picks a lane. */
+#define RAY_BYTE_CASES        case RAY_U8: case RAY_CHARV
+#define RAY_BYTE_ATOM_CASES   case -RAY_U8: case -RAY_CHARV
+#define ray_is_bytelike(t)    ((t) == RAY_U8 || (t) == RAY_CHARV)
+#define RAY_BYTE_ONLY         RAY_U8
+#define ray_is_byte_only(t)   ((t) == RAY_U8)
 
 /* Compound types */
 #define RAY_INDEX     97   /* Accelerator index attached to a vector (see ops/idxop.h) */
@@ -282,7 +305,10 @@ void ray_error_free(ray_t* err);
  * today (datetime/timespan/minute/second unimplemented), so the range
  * is intentionally inclusive; a value's tag is never a gap.  If those slots
  * are later filled, keep this predicate's intent (real vector types only). */
-#define ray_is_vec(v)     ((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME)
+/* `|| == RAY_STR` because the physical string type sits out-of-band at 21
+ * (charv owns in-band 10); STR columns still ride every generic vector path
+ * below the q boundary, per string-model spec §A/§3. */
+#define ray_is_vec(v)     (((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME) || (v)->type == RAY_STR)
 #define ray_len(v)        ((v)->len)
 
 /* Element type sizes indexed by type tag — covers all uint8_t values.
@@ -440,6 +466,8 @@ void     ray_release(ray_t* v);
 
 ray_t* ray_bool(bool val);
 ray_t* ray_u8(uint8_t val);
+ray_t* ray_char(uint8_t val);       /* char atom (-RAY_CHARV, u8 payload) */
+ray_t* ray_charv(const char* p, int64_t n);  /* char vector from raw bytes */
 ray_t* ray_i16(int16_t val);
 ray_t* ray_i32(int32_t val);
 ray_t* ray_i64(int64_t val);
@@ -505,6 +533,10 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
              * null, only symbols do).  A STR atom is never null — the empty
              * string is a value. */
             return false;
+        case RAY_CHARV:
+            /* char null IS the blank " " (0x20) — an in-band ordinary byte,
+             * kdb-true (`null " "` -> 1b; string-model spec Design 7). */
+            return x->u8 == 0x20;
         case RAY_GUID: {
             /* GUID null = 16 all-zero bytes in obj's U8 buffer.
              * obj is always populated by ray_guid / ray_typed_null —
@@ -723,6 +755,15 @@ ray_t*    ray_ipc_send_verbose(int64_t handle, ray_t* msg);
 
 #ifdef __cplusplus
 }
+#endif
+
+/* Bare RAY_U8 is a compile error — spell the site through the byte-lane
+ * macros above (expansions of pre-poison macros are exempt), so every new
+ * site makes the byte-like vs byte-only call explicitly.  A file that truly
+ * needs the raw enumerator defines RAY_ALLOW_RAW_U8 before any include;
+ * keep that set minimal and justified. */
+#ifndef RAY_ALLOW_RAW_U8
+#pragma GCC poison RAY_U8
 #endif
 
 #endif /* RAY_H */

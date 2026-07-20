@@ -191,7 +191,7 @@ ray_t* q_value_wrap(ray_t* x) {
         if (!lam || !src) return ray_error("type", "value: malformed lambda");
         ray_t* l = ray_list_new(9);
         ray_t* t;
-        t = ray_vec_new(RAY_U8, 0);           l = ray_list_append(l, t); ray_release(t);
+        t = ray_vec_new(RAY_BYTE_ONLY, 0);           l = ray_list_append(l, t); ray_release(t);
         l = ray_list_append(l, LAMBDA_PARAMS(lam));   /* borrowed; append retains */
         t = ray_sym_vec_new(RAY_SYM_W64, 0);  l = ray_list_append(l, t); ray_release(t);
         t = ray_sym_vec_new(RAY_SYM_W64, 0);  l = ray_list_append(l, t); ray_release(t);
@@ -241,8 +241,15 @@ ray_t* q_value_wrap(ray_t* x) {
         return v;
     }
 
-    /* ---- string atom -> evaluate as q source ---- */
+    /* ---- string / char vector -> evaluate as q source ---- */
     if (x->type == -RAY_STR) return q_value_eval_str(x);
+    if (x->type == RAY_CHARV || x->type == -RAY_CHARV) {
+        ray_t* s = q_str_of_charv(x);
+        if (!s || RAY_IS_ERR(s)) return s ? s : ray_error("oom", NULL);
+        ray_t* r = q_value_eval_str(s);
+        ray_release(s);
+        return r;
+    }
 
     /* ---- general list -> single apply/index of the head over the rest ---- */
     if (x->type == RAY_LIST) {
@@ -257,8 +264,12 @@ ray_t* q_value_wrap(ray_t* x) {
             ray_release(hv);
             return r;
         }
-        if (head && head->type == -RAY_STR) {         /* form 3: string head */
-            ray_t* hv = q_value_eval_str(head);       /* owned */
+        if (head && (head->type == -RAY_STR || head->type == RAY_CHARV ||
+                     head->type == -RAY_CHARV)) {
+            ray_t* hs = head->type != -RAY_STR ? q_str_of_charv(head)
+                                               : (ray_retain(head), head);
+            ray_t* hv = q_value_eval_str(hs);         /* form 3: string head */
+            ray_release(hs);
             if (!hv || RAY_IS_ERR(hv)) return hv ? hv : ray_error("parse", NULL);
             ray_t* r = q_value_apply_head(hv, e + 1, n - 1);
             ray_release(hv);
@@ -333,7 +344,7 @@ int q_int_index_width(int8_t t) {
     case RAY_I64: return 8;
     case RAY_I32: return 4;
     case RAY_I16: return 2;
-    case RAY_U8:  return 1;
+    case RAY_BYTE_ONLY: return 1;
     default:
         if (RAY_IS_TEMPORAL64(t)) return 8;   /* timestamp, timespan */
         if (RAY_IS_TEMPORAL32(t)) return 4;   /* month date minute second time */
@@ -408,8 +419,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
          * An out-of-band n (98h table, sparse gap 3) falls to the trailing
          * `return 0` = "not a designator", exactly as the old default did. */
         switch ((ray_type_e)n) {
-        case RAY_BOOL: case RAY_U8:  case RAY_I16: case RAY_I32:
-        case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM: case RAY_STR:
+        case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32:
+        case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM: case RAY_CHARV:
         case RAY_GUID:      /* cast.md:20 `2h "g" `guid` are one designator row;
                              * `-2h$"uuid"` = guid Tok (q_tok_to parses it). The
                              * `2h$` CAST stays deferred at q_cast_to. */
@@ -417,14 +428,20 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
             return (int8_t)n;
         case RAY_LIST:      /* 0h is Identity (cast.md:40), not a cast tag — deferred */
             return 0;
+        case RAY_STR:       /* 21h: physical storage tag, never a q designator */
+            return 0;
         }
         return 0;   /* unreachable for in-band n; out-of-band handled here */
     }
-    if (t->type == -RAY_STR && ray_str_len(t) == 1) {
-        char c = ray_str_ptr(t)[0];
+    if ((t->type == -RAY_STR && ray_str_len(t) == 1) ||
+        t->type == -RAY_CHARV ||
+        (t->type == RAY_CHARV && ray_len(t) == 1)) {
+        char c = t->type == -RAY_CHARV ? (char)t->u8
+               : t->type == RAY_CHARV  ? ((const char*)ray_data(t))[0]
+                                       : ray_str_ptr(t)[0];
         if (c >= 'A' && c <= 'Z') { *is_tok = 1; c = (char)(c - 'A' + 'a'); }
         switch (c) {
-        case 'b': return RAY_BOOL; case 'x': return RAY_U8;
+        case 'b': return RAY_BOOL; case 'x': return RAY_BYTE_ONLY;
         case 'h': return RAY_I16;  case 'i': return RAY_I32;
         case 'j': return RAY_I64;  case 'e': return RAY_F32;
         case 'f': return RAY_F64;  case 's': return RAY_SYM;
@@ -435,7 +452,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'v': return RAY_SECOND;
         case 'n': return RAY_TIMESPAN;
         case 'z': return RAY_DATETIME;
-        case 'c': return RAY_STR;   /* char cast: "c"$x reinterprets as chars */
+        case 'c': return RAY_CHARV; /* char cast: "c"$x reinterprets as chars */
         default:  return 0;       /* "*" identity: deferred */
         }
     }
@@ -446,13 +463,13 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         size_t l = ray_str_len(s);
         int8_t r = 0;
         if      (l == 0)                              { *is_tok = 1; r = RAY_SYM; }
-        else if (l == 4 && !memcmp(nm, "char",    4)) r = RAY_STR;
+        else if (l == 4 && !memcmp(nm, "char",    4)) r = RAY_CHARV;
         else if (l == 4 && !memcmp(nm, "long",    4)) r = RAY_I64;
         else if (l == 5 && !memcmp(nm, "float",   5)) r = RAY_F64;
         else if (l == 3 && !memcmp(nm, "int",     3)) r = RAY_I32;
         else if (l == 5 && !memcmp(nm, "short",   5)) r = RAY_I16;
         else if (l == 7 && !memcmp(nm, "boolean", 7)) r = RAY_BOOL;
-        else if (l == 4 && !memcmp(nm, "byte",    4)) r = RAY_U8;
+        else if (l == 4 && !memcmp(nm, "byte",    4)) r = RAY_BYTE_ONLY;
         else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
         else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
@@ -480,7 +497,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
 const char* q_type_qname(int8_t t) {
     switch ((ray_type_e)t) {
     case RAY_BOOL:      return "boolean";
-    case RAY_U8:        return "byte";
+    case RAY_BYTE_ONLY: return "byte";
     case RAY_I16:       return "short";
     case RAY_I32:       return "int";
     case RAY_I64:       return "long";
@@ -496,7 +513,8 @@ const char* q_type_qname(int8_t t) {
     case RAY_TIMESPAN:  return "timespan";
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_DATETIME:  return "datetime";
-    case RAY_LIST: case RAY_STR: return NULL;
+    case RAY_CHARV: return "char";
+    case RAY_LIST: case RAY_STR: return NULL;   /* boxed / physical: unnamed */
     }
     return NULL;   /* unreachable: value band is exhausted above */
 }
@@ -504,7 +522,7 @@ const char* q_type_qname(int8_t t) {
 /* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
 static const char* q_tag_rayname(int8_t tag) {
     switch (tag) {
-    case RAY_BOOL: return "BOOL"; case RAY_U8:  return "U8";
+    case RAY_BOOL: return "BOOL"; case RAY_BYTE_ONLY: return "U8";
     case RAY_I16:  return "I16";  case RAY_I32: return "I32";
     case RAY_I64:  return "I64";  case RAY_F64: return "F64";
     case RAY_DATE: return "DATE"; case RAY_TIME: return "TIME";
@@ -548,6 +566,8 @@ static ray_t* q_cast_bool(ray_t* x) {
     /* string atom: emptiness, not a numeric law — the provisional string model
      * (ARCHITECTURE.md) owns it; preserved verbatim from base's arm. */
     if (x->type == -RAY_STR) return ray_bool(ray_str_len(x) > 0);
+    if (x->type == RAY_CHARV) return ray_bool(ray_len(x) > 0);  /* same emptiness law */
+    if (x->type == -RAY_CHARV) return ray_bool(1);              /* a char is non-empty */
     /* An atom reaching here (guid, sym) has no boolean law.  Atoms never
      * delegate: that re-enters the null-propagation being intercepted, which is
      * how 0Ng returned 0b while a non-null guid errored. */
@@ -573,11 +593,14 @@ static ray_t* q_cast_bool(ray_t* x) {
  * (q_collapse_list refuses to pack -RAY_STR atoms). */
 static ray_t* q_cast_str(ray_t* x) {
     if (x && x->type == -RAY_STR) { ray_retain(x); return x; }   /* identity */
-    if (x && x->type == RAY_U8)                                  /* byte vec */
+    if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV)) {  /* charv identity */
+        ray_retain(x); return x;
+    }
+    if (x && x->type == RAY_BYTE_ONLY)                                  /* byte vec */
         return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
-    if (x && x->type == -RAY_U8) { char c = (char)x->u8; return ray_str(&c, 1); }
+    if (x && x->type == -RAY_BYTE_ONLY) return ray_char(x->u8);  /* byte atom -> char atom */
     if (q_is_int_atom(x)) {
-        char c = (char)q_iatom_val(x); return ray_str(&c, 1);
+        return ray_char((uint8_t)q_iatom_val(x));   /* `char$65 -> "A" (atom) */
     }
     if (q_is_int_vec(x)) {
         int64_t n = ray_len(x);
@@ -600,9 +623,10 @@ static ray_t* q_cast_str(ray_t* x) {
             if      (ei && ei->type == -RAY_I64) v = ei->i64;
             else if (ei && ei->type == -RAY_I32) v = ei->i32;
             else if (ei && ei->type == -RAY_I16) v = ei->i16;
-            else if (ei && ei->type == -RAY_U8)  v = ei->u8;
+            else if (ei && ei->type == -RAY_BYTE_ONLY)  v = ei->u8;
             else if (ei && ei->type == -RAY_STR && ray_str_len(ei) == 1)
                 v = (unsigned char)ray_str_ptr(ei)[0];
+            else if (ei && ei->type == -RAY_CHARV) v = ei->u8;
             else { free(buf); return ray_error("type", "$: cannot cast list element to char"); }
             buf[i] = (char)v;
         }
@@ -702,15 +726,18 @@ static ray_t* q_cast_u8(ray_t* x) {
         const char* sp = ray_str_ptr(x);
         size_t sl = ray_str_len(x);
         if (sl == 1) return ray_u8((uint8_t)sp[0]);
-        return ray_vec_from_raw(RAY_U8, sp, (int64_t)sl);
+        return ray_vec_from_raw(RAY_BYTE_ONLY, sp, (int64_t)sl);
     }
+    if (x && x->type == -RAY_CHARV) return ray_u8(x->u8);
+    if (x && x->type == RAY_CHARV)
+        return ray_vec_from_raw(RAY_BYTE_ONLY, ray_data(x), ray_len(x));
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_u8(0);
         return ray_u8((uint8_t)(int64_t)rint(x->f64));  /* F32 stores f64 */
     }
     if (x && (x->type == RAY_F64 || x->type == RAY_F32)) {
         int64_t n = ray_len(x);
-        ray_t* out = ray_vec_new(RAY_U8, n);
+        ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
         int is64 = (x->type == RAY_F64);
@@ -721,7 +748,7 @@ static ray_t* q_cast_u8(ray_t* x) {
         }
         return out;
     }
-    return q_cast_delegate(RAY_U8, x);
+    return q_cast_delegate(RAY_BYTE_ONLY, x);
 }
 
 /* Timestamp target.  `timestamp$date: days -> ns, SATURATING outside the
@@ -802,16 +829,28 @@ static ray_t* q_cast_sym(ray_t* x) {
 ray_t* q_cast_to(int8_t tag, ray_t* x) {
     /* Both precede the switch by ORDER, not preference: "c"$ packs a boxed list
      * into ONE string, so it must beat the generic per-element distribution. */
-    if (tag == RAY_STR) return q_cast_str(x);
+    if (tag == RAY_CHARV) return q_charv_out(q_cast_str(x));
+    /* numeric cast of char text = code points (`int$"ABC" -> 65 66 67i;
+     * `float$"AC" -> 65 67f, ref/log.md:101) — via the byte cast, then cast. */
+    if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV) &&
+        (tag == RAY_I16 || tag == RAY_I32 || tag == RAY_I64 ||
+         tag == RAY_F32 || tag == RAY_F64)) {
+        ray_t* b = q_cast_u8(x);
+        if (!b || RAY_IS_ERR(b)) return b;
+        ray_t* r = q_cast_to(tag, b);
+        ray_release(b);
+        return r;
+    }
     if (x && x->type == RAY_LIST) return q_cast_distribute(tag, x);
 
     switch ((ray_type_e)tag) {
-    case RAY_STR:  break;                    /* hoisted above: packs boxed lists */
+    case RAY_CHARV: break;                   /* hoisted above: packs boxed lists */
     case RAY_LIST: break;                    /* tag 0 is not a cast designator */
     case RAY_GUID: break;                    /* guid target: no base arm — deferred */
+    case RAY_STR:  break;                    /* physical tag: never a cast target */
     case RAY_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
     case RAY_BOOL: return q_cast_bool(x);
-    case RAY_U8:   return q_cast_u8(x);
+    case RAY_BYTE_ONLY: return q_cast_u8(x);
     case RAY_I16: case RAY_I32: case RAY_I64:
         return q_cast_int(tag, x);
     case RAY_TIMESTAMP: return q_cast_timestamp(x);
@@ -1116,10 +1155,11 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
         ray_release(out);
         return c;
     }
-    if (!x || x->type != -RAY_STR)
+    const char* tp; int64_t tn;
+    if (!q_text_bytes(x, &tp, &tn))
         return ray_error("type", "$: Tok right operand must be a string");
-    const char* p = ray_str_ptr(x);
-    size_t len = p ? ray_str_len(x) : 0;
+    const char* p = tp;
+    size_t len = p ? (size_t)tn : 0;
     while (len && *p == ' ') { p++; len--; }            /* trim outer blanks */
     while (len && p[len - 1] == ' ') len--;
     switch (tag) {
@@ -1207,7 +1247,7 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
             return ray_typed_null(-RAY_DATETIME);
         return ray_datetime((double)ns / 86400000000000.0);
     }
-    case RAY_U8: {
+    case RAY_BYTE_ONLY: {
         /* "X"$ reads the string as HEX ("X"$"42" -> 0x42, ref/tok.md).
          * Unparseable or > 0xff -> 0x00 (derived): tok.md pins out-of-
          * domain -> typed null, and byte HAS no null (basics/datatypes.md),
@@ -1269,6 +1309,22 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
  * values; TABLE over columns).  Non-string leaves are a 'type error. */
 static ray_t* q_pad(int64_t w, ray_t* x) {
     if (!x) return ray_error("type", "$: pad nil");
+    if (x->type == RAY_CHARV || x->type == -RAY_CHARV) {   /* char text -> charv */
+        const char* p; int64_t pn;
+        (void)q_text_bytes(x, &p, &pn);
+        int64_t width = w < 0 ? -w : w;
+        int right = w < 0;
+        int64_t copy = pn < width ? pn : width;
+        char stack[256];
+        char* b = (width < (int64_t)sizeof stack) ? stack : malloc((size_t)width + 1);
+        if (!b) return ray_error("wsfull", "$: out of memory");
+        memset(b, ' ', (size_t)width);
+        if (right) memcpy(b + (width - copy), p, (size_t)copy);
+        else       memcpy(b, p, (size_t)copy);
+        ray_t* r = ray_charv(b, width);
+        if (b != stack) free(b);
+        return r;
+    }
     if (x->type == -RAY_STR) {
         int64_t width = w < 0 ? -w : w;
         int right = w < 0;                 /* w<0 -> right-justify */
@@ -1354,6 +1410,7 @@ static ray_t* q_pad(int64_t w, ray_t* x) {
 ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
     if (t && t->type == -RAY_I64) return q_pad(t->i64, x);
     int multi = t && ((t->type == -RAY_STR && ray_str_len(t) > 1) ||
+                      (t->type == RAY_CHARV && ray_len(t) > 1) ||
                       t->type == RAY_SYM || t->type == RAY_I16 ||
                       t->type == RAY_LIST);
     if (multi) {
@@ -1366,6 +1423,7 @@ ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
         for (int64_t i = 0; i < n; i++) {
             ray_t* ti;
             if (t->type == -RAY_STR) ti = ray_str(ray_str_ptr(t) + i, 1);
+            else if (t->type == RAY_CHARV) ti = ray_char(((const uint8_t*)ray_data(t))[i]);
             else {
                 ray_t* idx = ray_i64(i);
                 ti = ray_at_fn(t, idx);         /* sym/short vec, list */

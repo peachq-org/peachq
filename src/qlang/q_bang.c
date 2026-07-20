@@ -30,7 +30,7 @@ static ray_t* h_value(ray_t** a, int64_t n) { (void)n; return q_value_wrap(a[0])
 static ray_t* h_ser  (ray_t** a, int64_t n) { (void)n; return q_wire_serialize(a[0], Q_WIRE_ASYNC); } /* -8! */
 static ray_t* h_deser(ray_t** a, int64_t n) {                                               /* -9!  */
     (void)n;
-    if (!a[0] || a[0]->type != RAY_U8)
+    if (!a[0] || a[0]->type != RAY_BYTE_ONLY)
         return ray_error("type", "-9!: expects a byte vector");
     return q_wire_deserialize(a[0]);
 }
@@ -70,7 +70,7 @@ static ray_t* h_s1(ray_t** a, int64_t n) {
         q_fmt_krepr(a[0], buf, cap);
         size_t len = strlen(buf);
         if (len < cap - 1 || cap >= (1u << 24)) {   /* fit whole (or growth cap) */
-            ray_t* r = ray_str(buf, len);
+            ray_t* r = ray_charv(buf, (int64_t)len);
             free(buf);
             return r;
         }
@@ -101,12 +101,12 @@ static ray_t* h_refcnt(ray_t** a, int64_t n) {
 static ray_t* q_bang_fmt_one(int places, double y) {
     char stackbuf[512];
     int m = snprintf(stackbuf, sizeof stackbuf, "%.*f", places, y);
-    if (m < 0) return ray_str("", 0);
-    if ((size_t)m < sizeof stackbuf) return ray_str(stackbuf, (size_t)m);
+    if (m < 0) return ray_charv("", 0);
+    if ((size_t)m < sizeof stackbuf) return ray_charv(stackbuf, (int64_t)m);
     char* heap = malloc((size_t)m + 1);
     if (!heap) return ray_error("wsfull", "-27!: out of memory");
     snprintf(heap, (size_t)m + 1, "%.*f", places, y);
-    ray_t* r = ray_str(heap, (size_t)m);
+    ray_t* r = ray_charv(heap, (int64_t)m);
     free(heap);
     return r;
 }

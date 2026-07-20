@@ -17,6 +17,7 @@
 #include "core/sock.h"
 #include "table/sym.h"             /* ray_sym_str */
 #include "picohttpparser.h"
+#include "qlang/q_registry.h"   /* q_text_bytes — charv/legacy text accessor */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -168,7 +169,7 @@ static int64_t ws_content_length(const struct phr_header* h, size_t nh) {
 /* Build (handle;response) — handle OWNED, response copied.  Capacity-2 list
  * never reallocs, so the two appends cannot fail. */
 static ray_t* ws_pair(ray_t* handle, const char* resp, size_t rlen) {
-    ray_t* rs = ray_str(resp, rlen);
+    ray_t* rs = ray_charv(resp, (int64_t)rlen);
     if (!rs || RAY_IS_ERR(rs)) { ray_release(handle); return rs ? rs : ray_error("oom", NULL); }
     ray_t* out = ray_list_new(2);
     if (!out || RAY_IS_ERR(out)) { ray_release(handle); ray_release(rs); return out ? out : ray_error("oom", NULL); }
@@ -181,7 +182,8 @@ static ray_t* ws_pair(ray_t* handle, const char* resp, size_t rlen) {
 
 ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
-    if (!request || request->type != -RAY_STR) return ray_error("type", NULL);
+    const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
+    if (!request || !q_text_bytes(request, &reqp, &reqn)) return ray_error("type", NULL);
     if (!hsym || hsym->type != -RAY_SYM) return ray_error("type", NULL);
 
     /* hsym text (BORROWED interned string) -> ":ws://..." */
@@ -258,8 +260,8 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     /* Compose the request: splice our headers before the user's blank line.
      * The user string ends "...\r\n\r\n"; keep one CRLF, then append the WS
      * upgrade headers + the blank line (D-D: unconditional injection). */
-    const char* uq = ray_str_ptr(request);
-    size_t uqn = ray_str_len(request);
+    const char* uq = reqp;
+    size_t uqn = (size_t)reqn;
     size_t head = uqn;
     if (uqn >= 4 && memcmp(uq + uqn - 4, "\r\n\r\n", 4) == 0) head = uqn - 2;
     else if (uqn >= 2 && memcmp(uq + uqn - 2, "\r\n", 2) == 0) head = uqn;

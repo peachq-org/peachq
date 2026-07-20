@@ -85,10 +85,16 @@ static ray_err_t validate_sym_bounds(const void* data, int64_t len,
 }
 
 /* Magic numbers for extended column formats */
+/* STRL/STRV persist NO type-tag bytes (slen-framed strings / ext-202 wire
+ * records with literal tags) — magics unchanged; STRL is also the symfile
+ * format (sym.c SYM_STRL_MAGIC).  The recursive LSTG/TTBL formats DO write
+ * raw obj->type bytes per node, so their rev letters bumped G->H, L->M at
+ * the STR<->CHARV tag renumber (format gen 3): pre-swap files miss the
+ * magic and reject via plain-header validation instead of mis-decoding. */
 #define STR_LIST_MAGIC  0x4C525453U  /* "STRL" */
 #define STR_VEC_MAGIC   0x56525453U  /* "STRV" */
-#define LIST_MAGIC      0x4754534CU  /* "LSTG" */
-#define TABLE_MAGIC     0x4C425454U  /* "TTBL" */
+#define LIST_MAGIC      0x4854534CU  /* "LSTH" */
+#define TABLE_MAGIC     0x4D425454U  /* "TTBM" */
 
 static size_t col_str_pool_payload_len(const ray_t* vec);
 
@@ -145,7 +151,7 @@ static size_t col_str_pool_payload_len(const ray_t* vec);
  * without deserializing string contents. */
 static bool is_serializable_type(int8_t t) {
     switch (t) {
-    case RAY_BOOL: case RAY_U8:   case RAY_I16:
+    case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16:
     case RAY_I32:  case RAY_I64:  case RAY_F64:
     case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP: case RAY_GUID:
     case RAY_SYM:  case RAY_STR:
@@ -478,7 +484,7 @@ static ray_t* col_read_recursive(const uint8_t** pp, size_t* remaining) {
                     ray_release(vec);
                     return err;
                 }
-                vec->str_pool->type = RAY_U8;
+                vec->str_pool->type = RAY_BYTE_ONLY;
                 vec->str_pool->len = (int64_t)pool_size;
                 memcpy(ray_data(vec->str_pool), *pp, (size_t)pool_size);
             }
@@ -840,7 +846,7 @@ static ray_err_t col_save_impl(ray_t* vec, const char* path, bool durable) {
             }
             pool_header.mmod = 0;
             pool_header.order = 0;
-            pool_header.type = RAY_U8;
+            pool_header.type = RAY_BYTE_ONLY;
             pool_header.attrs = 0;
             pool_header.rc = 0;
             pool_header.len = (int64_t)pool_size;
@@ -1124,7 +1130,7 @@ static ray_err_t col_validate_str_region(ray_t* hdr, const void* ptr,
         return RAY_ERR_CORRUPT;
 
     ray_t* pool = (ray_t*)((char*)ptr + offset);
-    if (pool->type != RAY_U8 || pool->len < 0)
+    if (pool->type != RAY_BYTE_ONLY || pool->len < 0)
         return RAY_ERR_CORRUPT;
 
     size_t pool_size = (size_t)pool->len;

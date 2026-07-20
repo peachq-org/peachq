@@ -294,7 +294,7 @@ static void cda_scalar_fn(void* raw, uint32_t worker_id, int64_t start, int64_t 
             if (hn && v_i == NULL_I16) continue;
             ray_hll_add(sh, ray_hash_i64((int64_t)v_i));
         }
-    } else if (t == RAY_BOOL || t == RAY_U8) {
+    } else if (t == RAY_BOOL || ray_is_bytelike(t)) {
         const uint8_t* d = (const uint8_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
@@ -371,7 +371,7 @@ ray_t* ray_count_distinct_approx(ray_t* x) {
     }
     int8_t t = x->type;
     /* Reject types we don't hash. */
-    if (t != RAY_I64 && t != RAY_I32 && t != RAY_I16 && t != RAY_U8 &&
+    if (t != RAY_I64 && t != RAY_I32 && t != RAY_I16 && !ray_is_bytelike(t) &&
         t != RAY_BOOL && t != RAY_F64 && !RAY_IS_TEMPORAL32(t) &&
         t != RAY_TIMESTAMP && t != RAY_STR && !RAY_IS_SYM(t))
         return ray_error("type", "count_distinct_approx: unsupported element type");
@@ -495,7 +495,7 @@ static void cda_pg_buf_task(void* raw, uint32_t worker_id, int64_t start, int64_
                 if (hn && v == NULL_I16) continue;
                 ray_hll_add(&sk, ray_hash_i64((int64_t)v));
             }
-        } else if (t == RAY_BOOL || t == RAY_U8) {
+        } else if (t == RAY_BOOL || ray_is_bytelike(t)) {
             const uint8_t* d = (const uint8_t*)base;
             for (int64_t k = s; k < e; k++) {
                 int64_t r = c->idx_buf[k];
@@ -556,7 +556,7 @@ int ray_count_distinct_approx_pg_buf(ray_t* src,
         return -1;
     int8_t t = src->type;
     bool hashable = (t == RAY_I64 || t == RAY_I32 || t == RAY_I16 ||
-                      t == RAY_U8 || t == RAY_BOOL || t == RAY_F64 ||
+                      ray_is_bytelike(t) || t == RAY_BOOL || t == RAY_F64 ||
                       RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) ||
                       RAY_IS_SYM(t));
     if (!hashable) return -1;
@@ -673,7 +673,7 @@ static void cda_pg_stream_task(void* raw, uint32_t worker_id,
             if (hn && v == NULL_I16) continue;
             ray_hll_add(&bank[gid], ray_hash_i64((int64_t)v));
         }
-    } else if (t == RAY_BOOL || t == RAY_U8) {
+    } else if (t == RAY_BOOL || ray_is_bytelike(t)) {
         const uint8_t* d = (const uint8_t*)base;
         for (int64_t r = start; r < end; r++) {
             if (((r - start) & CHK) == 0 && ray_interrupted()) return;
@@ -743,7 +743,7 @@ int ray_count_distinct_approx_pg_stream(ray_t* src,
     if (n_rows <= 0 || n_groups <= 0) return -1;
     int8_t t = src->type;
     bool hashable = (t == RAY_I64 || t == RAY_I32 || t == RAY_I16 ||
-                      t == RAY_U8 || t == RAY_BOOL || t == RAY_F64 ||
+                      ray_is_bytelike(t) || t == RAY_BOOL || t == RAY_F64 ||
                       RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) ||
                       RAY_IS_SYM(t));
     if (!hashable) return -1;

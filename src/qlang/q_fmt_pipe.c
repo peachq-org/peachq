@@ -73,7 +73,7 @@ typedef struct { ray_t* col; char name[QP_CELL]; const char* type; } qp_col;
 static const char* qp_typename(ray_t* col) {
     const char* n = col ? q_type_qname(col->type) : NULL;
     if (n) return n;
-    if (col && col->type == -RAY_STR) return "char";
+    if (col && (col->type == -RAY_STR || col->type == RAY_CHARV)) return "char";
     return "";
 }
 
@@ -127,7 +127,7 @@ static bool qp_is_temporal(int8_t t) {
 }
 
 static bool qp_is_numeric(int8_t t) {
-    return t == RAY_U8 || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+    return t == RAY_BYTE_ONLY || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
            t == RAY_F32 || t == RAY_F64;
 }
 
