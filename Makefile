@@ -226,7 +226,13 @@ src/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.sh
 src/qlang/h_gen.h: src/qlang/h.q tools/gen-bootstrap.sh
 	SYMBOL=OPENQ_H_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/h.q
 
-src/qlang/q_runtime.o src/qlang/q_runtime.win.o: src/qlang/dotq_gen.h src/qlang/h_gen.h
+# openq: the `.j` JSON namespace bindings — SAME codegen (SYMBOL override,
+# OPENQ_J_BOOTSTRAP). ALWAYS-ON: loaded at q_runtime_create after h_gen.h, so
+# q_runtime.c #includes it.
+src/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
+	SYMBOL=OPENQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
+
+src/qlang/q_runtime.o src/qlang/q_runtime.win.o: src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/j_gen.h
 
 # openq: the PeachQ stdlib embedded header — SAME codegen as dotq_gen.h but a
 # distinct symbol (OPENQ_PQ_BOOTSTRAP) via the SYMBOL override. NOT loaded at
@@ -254,7 +260,7 @@ src/qlang/q_http.o src/qlang/q_http.win.o: src/qlang/html_assets_gen.h
 # The bench-* targets compile $(LIB_SRC) (incl. q_runtime.c) directly, so the
 # generated header must exist before they run (else a post-`make clean` bench
 # build fails on the missing include).
-bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup: src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/pq_gen.h src/qlang/html_assets_gen.h
+bench-alloc bench-group-pushdown bench-agg-v2 bench-idx-route bench-join-buildside bench-join-dup: src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/j_gen.h src/qlang/pq_gen.h src/qlang/html_assets_gen.h
 
 # Main binary — shared by debug/release/test (test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as a server, so test depends on it too).
@@ -617,6 +623,8 @@ clean:
 	-rm -f src/qlang/dotq_gen.h
 	# openq: generated `.h` constants header (codegen'd from src/qlang/h.q).
 	-rm -f src/qlang/h_gen.h
+	# openq: generated `.j` JSON namespace header (codegen'd from src/qlang/j.q).
+	-rm -f src/qlang/j_gen.h
 	# openq: generated PeachQ stdlib header (codegen'd from src/qlang/pq.q).
 	-rm -f src/qlang/pq_gen.h
 	# openq: generated embedded web-assets header (codegen'd from src/qlang/html/).
