@@ -1,8 +1,9 @@
-/* q_sys — see q_sys.h.  The unified `\`-command dispatcher: one Q_SYS[] static
- * manifest ({cmd, len, handler}, in the q_dotz.c idiom) plus one
- * parse/resolve loop.  Every kdb `\`-command is a row; a handler returns an
- * OWNED value (NULL = silent) or an OWNED error — including `\\` (h_quit →
- * q_exit) and the unknown-token shell miss, both gated by the g_own_process
+/* q_sys — see q_sys.h.  The unified `\`-command dispatcher: one line pre-parse
+ * (command token / `:n` repeat suffix / first-arg token / whole argument
+ * region) feeding a SWITCH on the command char (the q_dotz.c z_slot_ptr idiom),
+ * each case calling its handler with only the arguments it needs.  A handler
+ * returns an OWNED value (NULL = silent) or an OWNED error — including `\\`
+ * (q_exit) and the unknown-token shell miss, both gated by the g_own_process
  * capability rather than by the caller.  \d and \v/\f/\a lean on q_ns.c
  * (context state + member enumeration); \S owns its seed state here. */
 #define _POSIX_C_SOURCE 200809L
@@ -18,15 +19,15 @@
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
+#include "core/numparse.h"    /* ray_parse_i64 — the shared engine int parser (reuse) */
 #include "core/timer.h"       /* ray_timers_create/add/del — `\t N` timer heap */
 #include "core/profile.h"     /* ray_profile_now_ns — `\t`/`\ts` wall clock */
 #include "lang/eval.h"        /* ray_eval / ray_eval_get_restricted — timing + guard */
 #include "ops/ops.h"          /* ray_is_lazy / ray_lazy_materialize — timed-expr result */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
-#include <stdlib.h>           /* srand, strtoll, system, malloc */
+#include <stdlib.h>           /* srand, system, malloc */
 #include <string.h>           /* strlen, memcpy, memcmp */
-#include <errno.h>            /* ERANGE — strtoll overflow guard */
 #include <stdio.h>            /* popen / pclose — `system "…"` stdout capture */
 #include <ctype.h>           /* tolower — `\h` case-insensitive fuzzy search */
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
@@ -154,31 +155,22 @@ void q_exit(int code) {
 #define PATH_MAX 4096
 #endif
 
-/* Parse a base-10 signed integer from [s,s+len) into *out; returns 1 on a
- * clean full parse (no empty, no trailing garbage, no int64 overflow). */
-static int q_parse_i64(const char* s, size_t len, long long* out) {
-    if (len == 0 || len >= 32) return 0;
-    char buf[32];
-    memcpy(buf, s, len); buf[len] = '\0';
-    char* end = NULL;
-    errno = 0;
-    long long v = strtoll(buf, &end, 10);
-    if (!end || *end != '\0' || end == buf || errno == ERANGE) return 0;
-    *out = v;
-    return 1;
+/* Whole-span signed-int parse: 1 iff ray_parse_i64 (numparse.c) consumes ALL of [s,s+len). */
+static int q_parse_i64(const char* s, size_t len, int64_t* out) {
+    return len > 0 && ray_parse_i64(s, len, out) == len;
 }
 
 /* Parse up to `max` whitespace-separated base-10 integers from [s,s+len),
  * stopping at the first non-integer token (e.g. a trailing `/ comment`).
  * Returns the count stored into out[]. */
-static int q_parse_ints(const char* s, size_t len, long long* out, int max) {
+static int q_parse_ints(const char* s, size_t len, int64_t* out, int max) {
     int cnt = 0; size_t i = 0;
     while (cnt < max && i < len) {
         while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
         size_t t0 = i;
         while (i < len && s[i] != ' ' && s[i] != '\t') i++;
         if (i == t0) break;
-        long long v;
+        int64_t v;
         if (!q_parse_i64(s + t0, i - t0, &v)) break;
         out[cnt++] = v;
     }
@@ -194,14 +186,16 @@ static ray_t* q_pair_i64(int64_t a, int64_t b) {
     return ray_vec_append(v, &b);
 }
 
-/* ---- per-command handlers: (arg, alen, rest, restlen) ----------------------
- * arg/alen is the already-tokenized FIRST argument (empty when absent).
- * rest/restlen is the FULL argument region (first token through EOL, including
- * any trailing `/ comment`) for the multi-argument commands (`\c`/`\C`).
+/* ---- per-command handlers ---------------------------------------------------
+ * Each handler takes ONLY the arguments its command needs — the switch in
+ * q_sys_run passes them tailored (no uniform signature, no ignored params).
+ * The common shapes: `arg`/`alen` is the already-tokenized FIRST argument
+ * (empty when absent); `rest`/`restlen` is the FULL argument region (first
+ * token through EOL, trailing `/ comment` included) for the multi-token
+ * commands (`\c`/`\C`/`\t`/`\ts`); `rep` is the `:n` repeat count (`\t:n`).
  * Return: OWNED value | NULL (silent) | OWNED error. */
 
-static ray_t* h_d(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_d(const char* arg, size_t alen) {
     if (alen == 0) {                             /* `\d` — show current */
         const char* c = q_ns_current();
         ray_t* s = (*c) ? ray_sym(ray_sym_intern(c, strlen(c)))
@@ -213,32 +207,17 @@ static ray_t* h_d(const char* arg, size_t alen, const char* rest, size_t restlen
     return q_ns_switch(arg, alen);               /* NULL (silent) or error */
 }
 
-static ray_t* h_v(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep; return q_ns_list('v', arg, alen);
-}
-static ray_t* h_f(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep; return q_ns_list('f', arg, alen);
-}
-static ray_t* h_a(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep; return q_ns_list('a', arg, alen);
-}
-
-static ray_t* h_S(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_S(const char* arg, size_t alen) {
     if (alen == 0)                               /* `\S` — last-initialized seed */
         return ray_i32(g_last_seed);
     if (alen == 2 && arg[0] == '0' && arg[1] == 'N')  /* `\S 0N` — live state */
         return ray_error("nyi", "\\S 0N: libc rand state is not readable");
-    char* end = NULL;
-    char abuf[32];
-    if (alen >= sizeof abuf) return ray_error("parse", NULL);
-    memcpy(abuf, arg, alen); abuf[alen] = '\0';
-    long long v = strtoll(abuf, &end, 10);
-    if (!end || *end != '\0' || end == abuf)
+    int64_t v;
+    if (!q_parse_i64(arg, alen, &v))
         return ray_error("parse", NULL);         /* non-integer arg (unpinned) */
     /* The seed is an INT (`\S` displays it as one): out-of-int-range values
-     * (incl. strtoll saturation) and the 0Ni sentinel are rejected, never
-     * silently truncated (codex P2, 2026-07-09). */
+     * and the 0Ni sentinel are rejected, never silently truncated (codex P2,
+     * 2026-07-09). */
     if (v <= INT32_MIN || v > INT32_MAX)
         return ray_error("parse", NULL);
     srand((unsigned)v);                          /* `\S n` — re-initialize */
@@ -256,19 +235,14 @@ static ray_t* h_S(const char* arg, size_t alen, const char* rest, size_t restlen
  * side-effect is a tracked gap; the GETTER form (no arg, which kdb prints a
  * value for) can't yet report the value → honest 'nyi.
  *
- * h_nyi serves the remaining commands that print a VALUE even in their arg-form
- * or are getter-only — \B (pending views): there is no silent form to match, so
- * 'nyi is both honest and non-regressing.  It is also the observable "known but
- * not implemented" signal, distinct from an unknown-token shell-out. */
-static ray_t* h_getset(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)arg; (void)rest; (void)restlen; (void)rep;
+ * The remaining commands that print a VALUE even in their arg-form or are
+ * getter-only — \B (pending views) — inline `ray_error("nyi", NULL)` in the
+ * switch: there is no silent form to match, so 'nyi is both honest and non-
+ * regressing, the observable "known but not implemented" signal distinct from
+ * an unknown-token shell-out. */
+static ray_t* h_getset(size_t alen) {
     if (alen > 0) return NULL;                   /* setter/action form → silent */
     return ray_error("nyi", NULL);               /* getter form → not yet */
-}
-
-static ray_t* h_nyi(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
-    return ray_error("nyi", NULL);
 }
 
 /* `\b` — views.  openq has no view mechanism; the owner ruling (2026-07-15) is
@@ -277,8 +251,7 @@ static ray_t* h_nyi(const char* arg, size_t alen, const char* rest, size_t restl
  * defined", so `if[count views[];..]` gets a confidently wrong answer where 'nyi
  * was honest.  The namespace arg is accepted and ignored — nothing to filter.
  * Shape mirrors \a's empty listing (ns_members, q_ns.c): len 0, capacity 1. */
-static ray_t* h_b(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
+static ray_t* h_b(void) {
     return ray_sym_vec_new(RAY_SYM_W64, 1);
 }
 
@@ -352,12 +325,11 @@ uint16_t q_sys_listen_port(void) { return (uint16_t)g_listen_port; }
  * inside q_sys_listen).  The getter reports the ACTUAL bound port (incl. the
  * `0W`-chosen one).  NO port is ANNOUNCED on any path — full kdb fidelity; a
  * supervisor/test reads the port back with the `\p`/`system "p"` getter. */
-static ray_t* h_p(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_p(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_listen_port);        /* getter -> `0i` default */
     /* `0W`/`0w` auto token (same shape as h_S's `0N` probe) — bind port 0. */
     bool port_auto = (alen == 2 && arg[0] == '0' && (arg[1] == 'W' || arg[1] == 'w'));
-    long long v = 0;
+    int64_t v = 0;
     if (!port_auto) {
         if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
         if (v < 0 || v > 65535) return ray_error("domain", NULL);
@@ -379,8 +351,7 @@ static ray_t* h_p(const char* arg, size_t alen, const char* rest, size_t restlen
  * a char vector; `\cd fp` -> real chdir (the kx "wrong directory" footgun fix,
  * ARCHITECTURE decision: cwd must be controllable + predictable).  DEFERRED:
  * kdb's create-if-missing on a set (a missing target -> 'os here). */
-static ray_t* h_cd(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_cd(const char* arg, size_t alen) {
     if (alen == 0) {                                     /* getter: current dir */
         char buf[PATH_MAX];
         if (!getcwd(buf, sizeof buf)) return ray_error("os", NULL);
@@ -412,8 +383,7 @@ static int l_is_regular_readable(const char* p) {
  * banked `\l .` / `\l /tmp/db*` corpus rows (absent / directory targets) and
  * defers the directory / splayed-table / serialized-object load forms.  Getter
  * form (no arg) stays 'nyi.  `system "l …"` single-homes through here. */
-static ray_t* h_l(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_l(const char* arg, size_t alen) {
     if (alen == 0) return ray_error("nyi", NULL);        /* `\l` (bare) — reload cwd, deferred */
     if (alen >= PATH_MAX) return NULL;
     char lit[PATH_MAX];
@@ -542,7 +512,7 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
      * timing; without one, only a LONE integer (whole arg region, trailing
      * /comment allowed) is the timer — anything else is a timed expression. */
     bool      expr_form = (rep >= 0);
-    long long v         = 0;
+    int64_t   v         = 0;
     if (!expr_form) {
         if (!q_parse_i64(arg, alen, &v)) {
             expr_form = true;                            /* non-integer first token */
@@ -608,8 +578,7 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
  * Unlike `\t`, `\ts` has NO integer-timer form — every argument is a timed
  * expression, including a lone integer (`\ts 42`).  See q_time_expr for the
  * space-metric divergence from kdb. */
-static ray_t* h_ts(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)arg;
+static ray_t* h_ts(size_t alen, const char* rest, size_t restlen, int64_t rep) {
     if (alen == 0) return ray_error("nyi", NULL);        /* `\ts` needs an expression */
     double  ms;
     int64_t bytes;
@@ -620,10 +589,9 @@ static ray_t* h_ts(const char* arg, size_t alen, const char* rest, size_t restle
 
 /* `\P` — display precision.  `\P`→`7i`; `\P n` sets n∈[0,17] (0 = max = 17),
  * silent.  The float formatter (q_fmt.c) is the sole reader. */
-static ray_t* h_P(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_P(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(q_fmt_prec());          /* getter */
-    long long v;
+    int64_t v;
     if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     /* Range [0,17].  syscmds.md does not specify the out-of-range action, so
      * we make it a silent no-op leaving precision unchanged — we neither
@@ -639,8 +607,7 @@ static ray_t* h_P(const char* arg, size_t alen, const char* rest, size_t restlen
  * (wmax: no -w limit; physical: not introspected here — deferred).  Values are
  * host-variable; the ledger pins type/count, not the numbers.  `\w 0|1|n` (sym
  * stats / limit-set) is deferred → 'nyi. */
-static ray_t* h_w(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_w(size_t alen) {
     if (alen != 0) return ray_error("nyi", NULL);
     ray_mem_stats_t st;
     ray_mem_stats(&st);
@@ -667,12 +634,11 @@ static ray_t* h_w(const char* arg, size_t alen, const char* rest, size_t restlen
  * height row-cap); a `\c size` setter (re-)ARMS clipping (g_con_trunc) so a
  * transcript that set it stays clipped.  `\C` (HTTP size) display wrapping is
  * still DEFERRED (openq has no HTTP renderer yet). */
-static int64_t q_clamp_cc(long long v) {
+static int64_t q_clamp_cc(int64_t v) {
     return v < 10 ? 10 : v > 2000 ? 2000 : v;
 }
-static ray_t* h_c(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)arg; (void)alen; (void)rep;
-    long long p[2];
+static ray_t* h_c(const char* rest, size_t restlen) {
+    int64_t p[2];
     int cnt = q_parse_ints(rest, restlen, p, 2);
     if (cnt == 0) return q_pair_i64(g_con_rows, g_con_cols);   /* getter */
     if (cnt >= 2) {                                            /* setter */
@@ -694,9 +660,8 @@ bool q_con_display(int32_t* rows, int32_t* cols) {
 /* Disarm display clipping — qmain calls this for a pure non-tty SCRIPT LOAD (a
  * batch context, so `.z.f`/script output renders full-width). */
 void q_con_display_disable(void) { g_con_trunc = 0; }
-static ray_t* h_C(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)arg; (void)alen; (void)rep;
-    long long p[2];
+static ray_t* h_C(const char* rest, size_t restlen) {
+    int64_t p[2];
     int cnt = q_parse_ints(rest, restlen, p, 2);
     if (cnt == 0) return q_pair_i64(g_http_rows, g_http_cols);
     if (cnt >= 2) {
@@ -708,10 +673,9 @@ static ray_t* h_C(const char* arg, size_t alen, const char* rest, size_t restlen
 
 /* `\g` — garbage-collection mode.  `\g`→`0i`; `\g 0|1` sets it.  kdb calls
  * .Q.gc[] on a set; openq's ray_gc_fn is a no-op stub (real gc deferred). */
-static ray_t* h_g(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_g(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_gc_mode);
-    long long v;
+    int64_t v;
     if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     if (v != 0 && v != 1) return NULL;               /* only 0|1 valid */
     g_gc_mode = (int32_t)v;
@@ -722,10 +686,9 @@ static ray_t* h_g(const char* arg, size_t alen, const char* rest, size_t restlen
 
 /* `\o` — offset from UTC (hours; minutes if abs>23).  `\o`→`0N` (machine
  * offset), else the set value.  Temporal-display wiring is DEFERRED. */
-static ray_t* h_o(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_o(const char* arg, size_t alen) {
     if (alen == 0) return ray_i64(g_utc_offset);     /* 0N default, or set value */
-    long long v;
+    int64_t v;
     if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     g_utc_offset = v;
     return NULL;
@@ -733,10 +696,9 @@ static ray_t* h_o(const char* arg, size_t alen, const char* rest, size_t restlen
 
 /* `\W` — start-of-week offset (0 = Saturday, default 2 = Monday).  `\W`→`2i`.
  * Week-start wiring into temporal ops is DEFERRED. */
-static ray_t* h_W(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_W(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_week_offset);
-    long long v;
+    int64_t v;
     if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     g_week_offset = (int32_t)v;
     return NULL;
@@ -744,10 +706,9 @@ static ray_t* h_W(const char* arg, size_t alen, const char* rest, size_t restlen
 
 /* `\e` — error-trap mode (0 off / 1 suspend / 2 dump).  `\e`→`0i`.  The trap
  * behaviour itself is DEFERRED. */
-static ray_t* h_e(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_e(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_err_trap);
-    long long v;
+    int64_t v;
     if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     if (v < 0 || v > 2) return NULL;                 /* modes 0|1|2 */
     g_err_trap = (int32_t)v;
@@ -756,10 +717,9 @@ static ray_t* h_e(const char* arg, size_t alen, const char* rest, size_t restlen
 
 /* `\s` — secondary threads.  `\s`→configured count (`0i`).  Runtime re-tuning
  * (and `\s 0N` = show max) is DEFERRED; `\s 0N` returns a parse error for now. */
-static ray_t* h_s(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_s(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_sec_threads);
-    long long v;
+    int64_t v;
     if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     g_sec_threads = (int32_t)v;
     return NULL;
@@ -769,8 +729,7 @@ static ray_t* h_s(const char* arg, size_t alen, const char* rest, size_t restlen
  * launch-only `--nonlegacy`, reachable from the argv-less wasm REPL).  Bare form
  * shows the state as a boolean (`1b`/`0b`, like bare `\c`); `1`/`0`/`1b`/`0b`
  * sets it, silent.  A non-boolean arg is a bare `'type` (a boolean is expected). */
-static ray_t* h_nonlegacy(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rest; (void)restlen; (void)rep;
+static ray_t* h_nonlegacy(const char* arg, size_t alen) {
     if (alen == 0) return ray_bool(q_pipe_on());     /* getter → 1b/0b */
     size_t n = (alen == 2 && arg[1] == 'b') ? 1 : alen;   /* strip the 1b/0b literal */
     if (n != 1 || (arg[0] != '0' && arg[0] != '1')) return ray_error("type", NULL);
@@ -888,8 +847,7 @@ static int h_search(const char* q, size_t qlen) {
     return hits;
 }
 
-static ray_t* h_h(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    (void)rep;
+static ray_t* h_h(const char* arg, size_t alen, const char* rest, size_t restlen) {
     /* Recover a lone `/` the dispatcher stripped as a trailing comment (trailing
      * blanks tolerated, so `\h / ` matches the `/` row like `\h \`). */
     if (alen == 0 && restlen >= 1 && rest[0] == '/') {
@@ -913,76 +871,6 @@ static ray_t* h_h(const char* arg, size_t alen, const char* rest, size_t restlen
     return ray_error("domain", NULL);
 }
 
-/* ---- the single-source manifest -------------------------------------------
- * {cmd (token, "" = bare toggle, "\\" = quit), len, handler}.  Lookup
- * is by the parsed command TOKEN (multi-char `ts`/`cd` and `\\` are
- * representable).  The process-level rows carry ordinary handlers: the
- * capability gate lives inside q_exit / q_sys_shell, never in a caller. */
-
-/* `\\` — quit.  q_exit is capability-gated: a real q process exits (firing
- * `.z.exit`); an embedder runtime (doctest, wasm) returns and the row is
- * silent — kdb-true display either way (quit prints nothing). */
-static ray_t* h_quit(const char* arg, size_t alen, const char* rest,
-                     size_t restlen, int64_t rep) {
-    (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
-    q_exit(0);
-    return NULL;
-}
-
-/* bare `\` — the q/k toggle.  kdb prints NOTHING for it, so silence is the
- * display-true surface; the k-mode switch itself is deferred (no k mode). */
-static ray_t* h_toggle(const char* arg, size_t alen, const char* rest,
-                       size_t restlen, int64_t rep) {
-    (void)arg; (void)alen; (void)rest; (void)restlen; (void)rep;
-    return NULL;
-}
-
-static const struct {
-    const char* cmd;
-    uint8_t     len;
-    ray_t*    (*handler)(const char* arg, size_t alen,
-                         const char* rest, size_t restlen, int64_t rep);
-} Q_SYS[] = {
-    /* working — Stage 1 behaviour, unchanged */
-    { "d",  1, h_d },
-    { "v",  1, h_v },
-    { "f",  1, h_f },
-    { "a",  1, h_a },
-    { "S",  1, h_S },
-    { "h",  1, h_h },        /* verb help — openq extension */
-    /* Stage 3 — real get/set + kdb-true getter values */
-    { "P",  1, h_P },        /* display precision */
-    { "c",  1, h_c },        /* console size */
-    { "C",  1, h_C },        /* HTTP display size */
-    { "o",  1, h_o },        /* offset from UTC */
-    { "g",  1, h_g },        /* gc mode */
-    { "s",  1, h_s },        /* secondary threads */
-    { "W",  1, h_W },        /* week offset */
-    { "e",  1, h_e },        /* error-trap clients */
-    { "w",  1, h_w },        /* workspace stats (6 longs) */
-    { "nonlegacy", 9, h_nonlegacy }, /* pipe-table display toggle (openq) */
-    /* silent setter / action form (arg present) → NULL; getter form → 'nyi */
-    { "z",  1, h_getset },   /* date parsing */
-    { "E",  1, h_getset },   /* TLS server mode */
-    { "l",  1, h_l },        /* load q script (regular file) */
-    { "p",  1, h_p },        /* listening port — get / \p N bind / \p 0 close */
-    { "r",  1, h_getset },   /* replication / rename */
-    { "T",  1, h_getset },   /* client timeout */
-    { "u",  1, h_getset },   /* reload user pwd file */
-    { "x",  1, h_getset },   /* expunge */
-    { "cd", 2, h_cd },       /* change directory (real chdir) */
-    { "1",  1, h_getset },   /* stdout redirect */
-    { "2",  1, h_getset },   /* stderr redirect */
-    { "_",  1, h_getset },   /* hide q code */
-    /* value-printing / getter-only → 'nyi (no silent form to match) */
-    { "b",  1, h_b },        /* views — always empty (owner ruling) */
-    { "B",  1, h_nyi },      /* pending views (lists) */
-    { "t",  1, h_t },        /* timer (\t N/\t 0/\t) + expr timing (\t exp/\t:n) */
-    { "ts", 2, h_ts },       /* time and space (\ts exp / \ts:n) */
-    /* process-level — ordinary rows; the capability gate is inside q_exit */
-    { "\\", 1, h_quit },   /* \\ quit the process */
-    { "",   0, h_toggle }, /* bare \ q/k toggle (deferred) */
-};
 
 /* Raw console shell for an unknown `\cmd` (capture=0): system(3), stdout
  * inherited, returns the raw status as a long (kdb-true `\foo`).  Capability-
@@ -1129,49 +1017,83 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
     const char* cmd = line + c0;
     size_t cmd_len = i - c0;
 
-    int row = -1;
-    for (size_t k = 0; k < sizeof Q_SYS / sizeof *Q_SYS; k++)
-        if (Q_SYS[k].len == cmd_len && memcmp(Q_SYS[k].cmd, cmd, cmd_len) == 0) {
-            row = (int)k;
-            break;
-        }
-
-    if (row < 0) {
-        return capture ? q_sys_shell_capture(line + rem0, n - rem0)
-                       : q_sys_shell(line + rem0, n - rem0);
-    }
-
-    /* Optional first-token argument.  Capture a `:`-repetition suffix
-     * (\t:100, \ts:10000) first — its count is the `do[n; exp]` reps for the
-     * timing commands; rep = -1 means no suffix, and a non-integer/negative
-     * suffix also leaves -1 (the handler falls through to the non-repeat form).
-     * Then skip to the first whitespace-delimited token (rest of the line is
-     * ignored by single-token commands — transcripts carry trailing
-     * `/ comments`). */
+    /* Optional `:`-repetition suffix (\t:100, \ts:10000) — its count is the
+     * `do[n; exp]` reps for the timing commands; rep = -1 means no suffix (a
+     * non-integer/negative one also leaves -1, so the handler takes the
+     * non-repeat form).  Then the first whitespace-delimited token (arg/alen)
+     * and the WHOLE argument region (rest/restlen, first token through EOL,
+     * trailing `/ comment` included — parsed by the multi-token commands). */
     int64_t rep = -1;
     if (i < n && line[i] == ':') {
         i++;                                         /* skip the ':' */
         size_t d0 = i;
         while (i < n && line[i] != ' ' && line[i] != '\t') i++;
-        long long rv;
+        int64_t rv;
         if (q_parse_i64(line + d0, i - d0, &rv) && rv >= 0) rep = rv;
     }
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
     size_t a0 = i;
-    /* rest = the WHOLE argument region (first token through EOL, trailing
-     * comment included) — the multi-arg commands (`\c`/`\C`) parse it; the
-     * single-token commands use arg/alen below and ignore it. */
     const char* rest = line + a0;
     size_t restlen = n - a0;
     while (i < n && line[i] != ' ' && line[i] != '\t') i++;
     const char* arg = line + a0;
     size_t alen = i - a0;
     /* A LONE `/` token is a bare trailing comment (`\P / default`) → no arg.
-     * A multi-char `/…` token is a file PATH (`\l /tmp/db`) → keep it: the
-     * Stage-1 `arg[0]=='/'` guard wrongly swallowed absolute paths. */
+     * A multi-char `/…` token is a file PATH (`\l /tmp/db`) → keep it. */
     if (alen == 1 && arg[0] == '/') alen = 0;
 
-    return Q_SYS[row].handler(arg, alen, rest, restlen, rep);
+    /* Dispatch on the command TOKEN — a switch on the single command char in
+     * the common case, a short length+char check for the multi-char forms
+     * (\ts \cd \nonlegacy).  Case-sensitive (\c ≠ \C), the q_dotz.c z_slot_ptr
+     * idiom.  Each case passes ONLY the arguments its handler needs (no uniform
+     * signature).  An unmatched single char (no case, no default) or any other
+     * unrecognized token falls through to the shell-out; bare `\` is the silent
+     * q/k toggle (deferred, no k mode). */
+    if (cmd_len == 1) {
+        switch (cmd[0]) {
+            case 'd': return h_d(arg, alen);
+            case 'v': return q_ns_list('v', arg, alen);          /* namespace vars      */
+            case 'f': return q_ns_list('f', arg, alen);          /* namespace functions */
+            case 'a': return q_ns_list('a', arg, alen);          /* namespace tables    */
+            case 'S': return h_S(arg, alen);                     /* random seed         */
+            case 'h': return h_h(arg, alen, rest, restlen);      /* verb help (openq)   */
+            case 'P': return h_P(arg, alen);                     /* display precision   */
+            case 'c': return h_c(rest, restlen);                 /* console size        */
+            case 'C': return h_C(rest, restlen);                 /* HTTP display size   */
+            case 'o': return h_o(arg, alen);                     /* offset from UTC     */
+            case 'g': return h_g(arg, alen);                     /* gc mode             */
+            case 's': return h_s(arg, alen);                     /* secondary threads   */
+            case 'W': return h_W(arg, alen);                     /* week offset         */
+            case 'e': return h_e(arg, alen);                     /* error-trap mode     */
+            case 'w': return h_w(alen);                          /* workspace stats     */
+            case 'l': return h_l(arg, alen);                     /* load q script       */
+            case 'p': return h_p(arg, alen);                     /* listening port      */
+            case 't': return h_t(arg, alen, rest, restlen, rep); /* timer / \t exp      */
+            case 'b': return h_b();                              /* views — empty (owner ruling) */
+            case 'B': return ray_error("nyi", NULL);             /* pending views — getter-only  */
+            /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
+             * \z date-parse, \E TLS, \r replicate, \T timeout, \u user-pwd,
+             * \x expunge, \1 stdout, \2 stderr, \_ hide-q-code. */
+            case 'z': case 'E': case 'r': case 'T':
+            case 'u': case 'x': case '1': case '2': case '_':
+                return h_getset(alen);
+            /* \\ quit — q_exit is capability-gated (a real process exits firing
+             * .z.exit; an embedder returns silently, kdb-true either way). */
+            case '\\': q_exit(0); return NULL;
+        }
+    } else if (cmd_len == 2 && cmd[0] == 't' && cmd[1] == 's') {
+        return h_ts(alen, rest, restlen, rep);                   /* time and space      */
+    } else if (cmd_len == 2 && cmd[0] == 'c' && cmd[1] == 'd') {
+        return h_cd(arg, alen);                                  /* change directory    */
+    } else if (cmd_len == 9 && memcmp(cmd, "nonlegacy", 9) == 0) {
+        return h_nonlegacy(arg, alen);                          /* pipe-table toggle (openq) */
+    } else if (cmd_len == 0) {
+        return NULL;                                            /* bare \ — silent q/k toggle */
+    }
+
+    /* Unrecognized command → shell out on the raw remainder (token..EOL). */
+    return capture ? q_sys_shell_capture(line + rem0, n - rem0)
+                   : q_sys_shell(line + rem0, n - rem0);
 }
 
 /* See q_sys.h — the shared console glue.  Console side effects come FIRST in
