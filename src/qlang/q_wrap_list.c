@@ -263,7 +263,18 @@ ray_t* q_attr_set_letter(char letter, ray_t* vec) {
 ray_t* q_take_wrap(ray_t* n, ray_t* list) {
     if (n && n->type == -RAY_SYM && list && ray_is_vec(list))
         return q_attr_set_dispatch(n, list);
-    if (n && n->type == RAY_I64 && ray_len(n) >= 2) return q_reshape(n, list);
+    if (n && n->type == RAY_I64 && ray_len(n) >= 2) {
+        if (list && ray_is_atom(list)) {         /* n1 n2#atom — TYPE-BLIND: kdb
+                                                  * reshapes any atom by cycling
+                                                  * its enlist (ints/bytes/chars) */
+            ray_t* v = ray_enlist_fn(&list, 1);
+            if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("oom", NULL);
+            ray_t* r = q_reshape(n, v);
+            ray_release(v);
+            return r;
+        }
+        return q_reshape(n, list);
+    }
     return ray_take_fn(list, n);
 }
 
@@ -566,17 +577,18 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
         ray_release(fill);
         return out;
     }
-    if (x && x->type == -RAY_STR) {
-        int64_t len = (int64_t)ray_str_len(x);
-        const char* s = ray_str_ptr(x);
+    if (x && (x->type == -RAY_STR || x->type == RAY_CHARV)) {
+        const char* s; int64_t len;
+        (void)q_text_bytes(x, &s, &len);
+        if (x->type == -RAY_STR) { s = ray_str_ptr(x); len = (int64_t)ray_str_len(x); }
         char stackb[256];
         char* b = (len <= (int64_t)sizeof stackb) ? stackb : malloc((size_t)(len > 0 ? len : 1));
         if (!b) return ray_error("oom", NULL);
         for (int64_t i = 0; i < len; i++) {
             int64_t j = i - k;
-            b[i] = (j >= 0 && j < len) ? s[j] : ' ';
+            b[i] = (j >= 0 && j < len) ? s[j] : ' ';   /* char null is the blank */
         }
-        ray_t* r = ray_str(b, (size_t)len);
+        ray_t* r = (x->type == RAY_CHARV) ? ray_charv(b, len) : ray_str(b, (size_t)len);
         if (b != stackb) free(b);
         return r;
     }
@@ -683,8 +695,8 @@ static int q_is_float_t(int8_t t) {
     return t == RAY_F64 || t == RAY_F32 || t == -RAY_F64 || t == -RAY_F32;
 }
 static int q_is_num_t(int8_t t) {
-    return t == RAY_BOOL || t == RAY_U8 || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
-           t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_U8 || t == -RAY_I16 ||
+    return t == RAY_BOOL || t == RAY_BYTE_ONLY || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+           t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_BYTE_ONLY || t == -RAY_I16 ||
            t == -RAY_I32 || t == -RAY_I64 || t == -RAY_F32 || t == -RAY_F64;
 }
 static int q_is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
@@ -787,9 +799,13 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
         int rank1_seek = ny > 0 && e[0] && !ray_is_atom(e[0]);
         if (rank1_seek) {
             if (ray_is_atom(x)) return ray_bool(false);
-            return ray_bool(q_seq_has_item(y, x) != 0);
-        }
-        if (ray_is_atom(x)) return ray_bool(q_seq_has_item(y, x) != 0);
+            /* whole-x seek when x IS one item shape: a simple vector, or a
+             * boxed list while y's items are boxed too ((1 2;3 4) in (...;9)).
+             * Per-item only when x is boxed OVER y's simple-vector items —
+             * e.g. list-of-strings in list-of-strings. */
+            if (x->type != RAY_LIST || e[0]->type == RAY_LIST || e[0]->type == RAY_TABLE)
+                return ray_bool(q_seq_has_item(y, x) != 0);
+        } else if (ray_is_atom(x)) return ray_bool(q_seq_has_item(y, x) != 0);
         int64_t nx = ray_len(x);                     /* left-atomic over x */
         ray_t* outl = ray_list_new(nx > 0 ? nx : 1);
         if (RAY_IS_ERR(outl)) return outl;
@@ -1168,7 +1184,7 @@ static ray_t* q_gen_bits(int64_t n) {
 
 /* n?0x0 — random bytes 0x00-0xff. */
 static ray_t* q_gen_bytes(int64_t n) {
-    ray_t* out = ray_vec_new(RAY_U8, n > 0 ? n : 1);
+    ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
     for (int64_t i = 0; i < n; i++)
@@ -1468,7 +1484,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             ray_release(cnt);
             return g;
         }
-        case RAY_U8:
+        case RAY_BYTE_ONLY:
             if (deal) return ray_error("type", "?: deal y");
             if (y->u8) return ray_error("nyi", "?: y");   /* roll defined for 0x0 only */
             return q_gen_bytes(n);              /* n?0x0 */
@@ -1492,12 +1508,15 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         case RAY_F32: case RAY_F64:
             if (deal) return ray_error("type", "?: deal y");
             return q_gen_floats(n, y);          /* n?f uniform [0,y) */
-        case RAY_STR:                           /* char atom: only `" "` has a
-             * roll law (-> .Q.a); other strings are pick-from-chars =
-             * string-model territory, deferred. */
+        case RAY_STR:                           /* legacy 1-char string blank */
             if (deal) return ray_error("type", "?: deal y");
             if (ray_str_len(y) == 1 && ray_str_ptr(y)[0] == ' ')
                 return q_gen_chars(n);
+            return ray_error("nyi", "?: y");
+        case RAY_CHARV:                         /* char atom: only `" "` has a
+             * roll law (-> .Q.a); pick-from-string is a stage-2+ cell. */
+            if (deal) return ray_error("type", "?: deal y");
+            if (y->u8 == ' ') return q_charv_out(q_gen_chars(n));
             return ray_error("nyi", "?: y");
         case RAY_SYM:
             return q_gen_syms(n, y, deal);      /* n?`m sym roll / deal */

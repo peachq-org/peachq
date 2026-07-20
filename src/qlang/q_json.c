@@ -138,7 +138,8 @@ static void j_atom(jbuf* b, ray_t* x) {
         case RAY_I64:  RAY_ATOM_IS_NULL(x) ? jbuf_puts(b, "null") : jbuf_int(b, x->i64); break;
         case RAY_F32:  jbuf_flt(b, x->f64); break;   /* F32 atom reuses f64 slot */
         case RAY_F64:  jbuf_flt(b, x->f64); break;
-        case RAY_STR:  jbuf_str(b, ray_str_ptr(x), ray_str_len(x)); break;  /* char atom / vector */
+        case RAY_STR:  jbuf_str(b, ray_str_ptr(x), ray_str_len(x)); break;  /* string atom */
+        case RAY_CHARV: jbuf_str(b, (const char*)&x->u8, 1); break;         /* char atom */
         case RAY_SYM: {
             ray_t* s = ray_sym_str(x->i64);          /* borrowed */
             if (s) jbuf_str(b, ray_str_ptr(s), ray_str_len(s));
@@ -158,7 +159,8 @@ static void j_key(jbuf* b, ray_t* k) {
         jbuf_str(b, s ? ray_str_ptr(s) : "", s ? ray_str_len(s) : 0);
         return;
     }
-    if (k && k->type == -RAY_STR) { jbuf_str(b, ray_str_ptr(k), ray_str_len(k)); return; }
+    { const char* kp; int64_t kn;
+      if (k && k->type != -RAY_SYM && q_text_bytes(k, &kp, &kn)) { jbuf_str(b, kp, (size_t)kn); return; } }
     /* numeric / other key: render its JSON, quote if not already a string */
     size_t start = b->len;
     int wrap = 1;
@@ -290,6 +292,10 @@ static void j_emit(jbuf* b, ray_t* x) {
     if (b->oom || b->nyi) return;
     if (!x) { j_nyi(b, 0); return; }
     if (x->type < 0) { j_atom(b, x); return; }
+    if (x->type == RAY_CHARV) {                      /* char vector -> ONE string */
+        jbuf_str(b, (const char*)ray_data(x), (size_t)ray_len(x));
+        return;
+    }
     switch (x->type) {
         case RAY_LIST: {
             int64_t n = ray_len(x);
@@ -317,7 +323,7 @@ ray_t* q_json_serialize(ray_t* x) {
         free(b.p);
         return ray_error("nyi", ".j.j: unimplemented type %d", (int)b.nyi_type);
     }
-    ray_t* r = ray_str(b.p ? b.p : "", b.len);
+    ray_t* r = ray_charv(b.p ? b.p : "", (int64_t)b.len);
     free(b.p);
     return r;
 }
@@ -337,7 +343,7 @@ static ray_t* jk_node(yyjson_val* v) {
             return isfinite(d) ? ray_f64(d) : ray_f64(NULL_F64);  /* inf/nan -> 0n */
         }
         case YYJSON_TYPE_STR:
-            return ray_str(yyjson_get_str(v), yyjson_get_len(v)); /* char vector */
+            return ray_charv(yyjson_get_str(v), (int64_t)yyjson_get_len(v));
         case YYJSON_TYPE_ARR: {
             size_t idx, max;
             yyjson_val* e;
@@ -384,9 +390,9 @@ static ray_t* jk_node(yyjson_val* v) {
 }
 
 ray_t* q_json_deserialize(ray_t* x) {
-    if (!x || x->type != -RAY_STR) return ray_error("type", ".j.k expects a string");
-    size_t n = ray_str_len(x);
-    const char* sp = ray_str_ptr(x);
+    const char* sp; int64_t sn;
+    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", ".j.k expects a string");
+    size_t n = (size_t)sn;
     char* buf = malloc(n + 1);
     if (!buf) return ray_error("wsfull", ".j.k: out of memory");
     if (n) memcpy(buf, sp, n);

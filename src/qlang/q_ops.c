@@ -150,10 +150,10 @@ static const q_op_t Q_OPS[] = {
       "compare their arguments", "qdocs/docs/docs/docs/ref/greater-than.md",
       "x>=y   >=[x;y]", NULL },
     /* `=` monadic is group (rowid — the `group` row); family = dyadic Equal. */
-    { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2A("==", q_eq_wrap), NULL, 1, 0, "atomic",
+    { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic",
       "flags where its arguments are equal", "qdocs/docs/docs/docs/ref/equal.md",
       "x=y    =[x;y]", NULL },
-    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2A("!=", q_ne_wrap), NULL, 1, 0, "atomic",
+    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic",
       "Not equal (returns 1b where arguments differ)", NULL,   /* HAND-AUTHORED: docsrc NULL, see tools/qdocs/qdocs-docmap.pins.tsv */
       "x<>y   <>[x;y]", "1 2 3 <> 3 2 1 -> 101b" },
     /* ---- structural glyphs ---- */
@@ -885,6 +885,19 @@ static const q_op_t Q_OPS[] = {
       "Each Left     x v2\\: y    v2\\:[x;y]   |->   v2[;y] each x", NULL },
 };
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
+
+/* Accumulator identity elements (ref/accumulators.md:261-267 unary-seed,
+ * 420-428 empty-Over): the manifest owns this per-verb knowledge, beside the
+ * rows it annotates — never a spelling switch in a wrapper (rule 3). */
+ray_t* q_ops_acc_identity(const char* spelling) {
+    if (!spelling || !spelling[0] || spelling[1] != '\0') return NULL;
+    switch (spelling[0]) {
+    case '+': return ray_i64(0);
+    case '*': return ray_i64(1);
+    case ',': return ray_list_new(0);
+    default:  return NULL;
+    }
+}
 
 const q_op_t* q_ops_table(int* n) {
     if (n) *n = N_Q_OPS;

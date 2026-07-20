@@ -554,8 +554,9 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
         if (!RAY_ATOM_IS_NULL(head) && (qh == 1 || qh == -1 || qh == 2 || qh == -2)) {
             ray_t* y = args[0];
             int nl = qh < 0;
-            if (y && y->type == -RAY_STR) {
-                q_console_write(ray_str_ptr(y), ray_str_len(y));
+            const char* yp; int64_t yn;
+            if (y && q_text_bytes(y, &yp, &yn)) {
+                q_console_write(yp, (size_t)yn);
                 if (nl) q_console_write("\n", 1);
             } else if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
                 int64_t m = ray_len(y);
@@ -564,11 +565,12 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                     ray_t* it = ray_at_fn(y, ia);
                     ray_release(ia);
                     if (!it || RAY_IS_ERR(it)) return it ? it : ray_error("oom", NULL);
-                    if (it->type != -RAY_STR) {
+                    const char* ip; int64_t in_;
+                    if (!q_text_bytes(it, &ip, &in_)) {
                         ray_release(it);
                         return ray_error("type", "handle write: expected strings");
                     }
-                    q_console_write(ray_str_ptr(it), ray_str_len(it));
+                    q_console_write(ip, (size_t)in_);
                     if (nl) q_console_write("\n", 1);
                     ray_release(it);
                 }
@@ -598,7 +600,13 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     if (head->type == RAY_VARY && !(head->attrs & RAY_FN_SPECIAL_FORM))
         return ((ray_vary_fn)(uintptr_t)head->i64)(args, n);
 
-    if (head->type == -RAY_STR) return NULL;        /* deferred: string model */
+    if (head->type == -RAY_STR) {       /* stray physical string: convert, retry */
+        ray_t* cv = q_charv_of_str(head);
+        if (!cv || RAY_IS_ERR(cv)) return cv;
+        ray_t* r = q_apply_noun(cv, args, n);
+        ray_release(cv);
+        return r;
+    }
 
     /* Symbol-handle application (q namespaces, q4m3 §12): applying a symbol
      * indexes the GLOBAL it names — `` `.[`a] `` reads root `a`,
@@ -622,7 +630,8 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                 size_t sl = ray_str_len(s);
                 if ((sl >= 6 && memcmp(sp, ":ws://", 6) == 0) ||
                     (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
-                    if (n == 1 && args[0] && args[0]->type == -RAY_STR)
+                    if (n == 1 && args[0] && (args[0]->type == -RAY_STR ||
+                                          args[0]->type == RAY_CHARV || args[0]->type == -RAY_CHARV))
                         return q_ws_client_open(head, args[0]);
                     return NULL;
                 }
@@ -638,7 +647,8 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                 size_t hl = ray_str_len(s);
                 if ((hl >= 8 && memcmp(hp, ":http://", 8) == 0) ||
                     (hl >= 9 && memcmp(hp, ":https://", 9) == 0)) {
-                    if (n == 1 && args[0] && args[0]->type == -RAY_STR)
+                    if (n == 1 && args[0] && (args[0]->type == -RAY_STR ||
+                                          args[0]->type == RAY_CHARV || args[0]->type == -RAY_CHARV))
                         return q_http_raw_client(head, args[0]);
                     return NULL;
                 }
@@ -654,7 +664,8 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
              * q_apply_noun on the fd handle), and q_hclose_wrap (fd -> selector
              * close).  The handle is hclosed on EVERY path — send success AND
              * error — so a one-shot never leaks a connection. */
-            if (n == 1 && args[0] && args[0]->type == -RAY_STR) {
+            if (n == 1 && args[0] && (args[0]->type == -RAY_STR ||
+                                      args[0]->type == RAY_CHARV)) {
                 ray_t* h = q_hopen_wrap(head);       /* owned fd handle or error */
                 if (!h || RAY_IS_ERR(h)) return h;
                 ray_t* r = q_apply_noun(h, args, 1); /* int-head SYNC send */
@@ -716,7 +727,9 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
             if (!next || RAY_IS_ERR(next)) return next;
             cur = next;
         }
-        return cur;
+        /* boundary-out: cell reads / row dicts / extracted columns cross into
+         * q-space as charv, never physical STR (string-C3 rule 3). */
+        return q_charv_out(cur);
     }
 
     return NULL;

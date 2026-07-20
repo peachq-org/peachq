@@ -11,6 +11,7 @@
 #include <stdio.h>             /* fprintf, stderr — gate diagnostics */
 #include <string.h>            /* strchr, memcpy, strlen */
 #include <stdlib.h>            /* malloc, free */
+#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
 
 /* (.pq.c.ray str) — the generic rayfall (lisp) escape hatch. Parse+eval the
  * SOURCE string through the engine's own rayfall dialect (ray_eval_str) and
@@ -20,9 +21,9 @@
  * terminated, so copy through a bounded scratch buffer. Errors propagate as
  * ordinary q errors. */
 static ray_t* q_pq_ray_fn(ray_t* x) {
-    if (!x || x->type != -RAY_STR) return ray_error("type", "ray expects a string");
-    const char* sp = ray_str_ptr(x);
-    size_t sl = ray_str_len(x);
+    const char* sp; int64_t sn;
+    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "ray expects a string");
+    size_t sl = (size_t)sn;
     if (!sp) return ray_error("domain", "ray: bad source string");
     char* src = malloc(sl + 1);
     if (!src) return ray_error("wsfull", "ray: out of memory");
