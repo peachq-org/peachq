@@ -756,7 +756,7 @@ static ray_t *scan_byte_literal(const char *src, int *p) {
         bytes[nb++] = (uint8_t)((hex_val(src[i]) << 4) | hex_val(src[i + 1]));
     *p = q;
     if (nb == 1) return ray_u8(bytes[0]);
-    return ray_vec_from_raw(RAY_U8, bytes, nb);   /* nb==0: empty byte vec */
+    return ray_vec_from_raw(RAY_BYTE_ONLY, bytes, nb);   /* nb==0: empty byte vec */
 }
 
 /* Scan a full numeric literal (atom or vector) starting at src[*p]. */
@@ -1264,7 +1264,10 @@ static Tokens scan(const char *src) {
                 }
                 else { db[dl++] = ch; i++; }   /* unknown escape: keep the '\' */
             }
-            EMIT(T_NOUN, ray_str(db, (size_t)dl));
+            /* string-C3: "a" is a char ATOM (-10h), anything else a char
+             * VECTOR (10h) — "" included (THE empty char vector). */
+            if (dl == 1) EMIT(T_NOUN, ray_char((uint8_t)db[0]));
+            else         EMIT(T_NOUN, ray_charv(db, (int64_t)dl));
             free(db);
             noun_pos = 1;
         }

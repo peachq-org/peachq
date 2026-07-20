@@ -29,13 +29,14 @@
  *
  * openq mapping notes (q-observable target, divergences documented):
  *   - Type tags are ALREADY kdb's numbers (include/rayforce.h) — no seam.
- *   - RAY_STR atom of length 1 emits a char ATOM (-10h), matching kdb's
- *     "a"; any other length emits a char vector (10h).  openq has no char
- *     atom type, so -10h decodes to a 1-char string.
+ *     Char vectors ARE RAY_CHARV (tag 10, string-C3 1b): emit is the raw
+ *     tag, decode of 10h/-10h builds charv/char atoms.  Internal RAY_STR
+ *     atoms (length 1 -> -10h, else 10h) still emit kdb-true bytes; on the
+ *     live wire into a PURE-RAYFALL process (no q runtime) decode keeps the
+ *     legacy 1-char-string form (the dialect seam, eval.h probe).
  *   - A RAY_STR *vector* (string column) emits a general list of char
- *     vectors (kdb's list-of-strings shape).  Decoding yields the boxed
- *     RAY_LIST-of-strings form — the same value openq's own ("ab";"cd")
- *     literal builds; byte-level roundtrip identity holds.
+ *     vectors (kdb's list-of-strings shape); decoding yields the boxed
+ *     list-of-charv form; byte-level roundtrip identity holds.
  *   - RAY_TIMESTAMP is i64 nanoseconds since 2000-01-01 in every live
  *     producer path — identical to kdb 12h; raw payload, no conversion.
  *     RAY_DATE (days since 2000-01-01) and RAY_TIME (ms since midnight)
@@ -75,7 +76,8 @@ enum { Q_WIRE_ASYNC = 0, Q_WIRE_SYNC = 1, Q_WIRE_RESP = 2 };
  *   202  str vector      := 0xCA attrs(1) count(int32) [len(int32) bytes]*
  *   203  quoted sym atom := 0xCB cstr
  *   204  typed-null atom := 0xCC type(int8)   ; BOOL/U8 aux-bit nulls
- * 205..236 reserved for future serde records. */
+ *   205  str atom        := 0xCD len(int32) bytes   ; internal -RAY_STR carrier
+ * 206..236 reserved for future serde records. */
 #define Q_WIRE_EXT_TAG_FIRST 200
 #define Q_WIRE_EXT_TAG_LAST  236
 #define Q_WIRE_EXT_FN        200
@@ -83,6 +85,7 @@ enum { Q_WIRE_ASYNC = 0, Q_WIRE_SYNC = 1, Q_WIRE_RESP = 2 };
 #define Q_WIRE_EXT_STRVEC    202
 #define Q_WIRE_EXT_QSYM      203
 #define Q_WIRE_EXT_TNULL     204
+#define Q_WIRE_EXT_STRATOM   205   /* serde-only: internal -RAY_STR atom (len+bytes) */
 
 /* Serialize x into a complete kdb IPC message (8-byte LE header + payload).
  * Returns an owned RAY_U8 vector, or a RAY_ERROR ('nyi for unwireable

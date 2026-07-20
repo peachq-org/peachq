@@ -147,7 +147,7 @@ ray_t* ray_ser(ray_t* obj) {
     }
 
     int64_t total = (int64_t)sizeof(ray_ipc_header_t) + payload;
-    ray_t* buf = ray_vec_new(RAY_U8, total);
+    ray_t* buf = ray_vec_new(RAY_BYTE_ONLY, total);
     if (!buf || RAY_IS_ERR(buf)) {
         if (owned) ray_release(obj);
         return buf;
@@ -180,7 +180,7 @@ ray_t* ray_ser(ray_t* obj) {
 
 ray_t* ray_de(ray_t* bytes) {
     if (!bytes || RAY_IS_ERR(bytes)) return ray_error("type", "deserialize: input must be a u8 byte buffer, got %s", bytes ? ray_type_name(bytes->type) : "null");
-    if (bytes->type != RAY_U8 && bytes->type != -RAY_U8)
+    if (bytes->type != RAY_BYTE_ONLY && bytes->type != -RAY_BYTE_ONLY)
         return ray_error("type", "deserialize: input must be a u8 byte buffer, got %s", ray_type_name(bytes->type));
 
     int64_t total = bytes->len;
@@ -276,7 +276,7 @@ ray_t* ray_obj_load(const char* path) {
 
     if (sz == 0) { fclose(f); return ray_error("io", "empty file"); }
 
-    ray_t* buf = ray_vec_new(RAY_U8, sz);
+    ray_t* buf = ray_vec_new(RAY_BYTE_ONLY, sz);
     if (!buf || RAY_IS_ERR(buf)) { fclose(f); return buf; }
     buf->len = sz;
 

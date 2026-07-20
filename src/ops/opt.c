@@ -84,7 +84,8 @@ static int8_t promote_type(int8_t a, int8_t b) {
         a == RAY_MINUTE || b == RAY_MINUTE ||
         a == RAY_SECOND || b == RAY_SECOND) return RAY_I32;
     if (a == RAY_I16 || b == RAY_I16) return RAY_I16;
-    if (a == RAY_U8 || b == RAY_U8) return RAY_U8;
+    if (a == RAY_CHARV || b == RAY_CHARV) return RAY_CHARV; /* chars ARE bytes; char tag dominates */
+    if (a == RAY_BYTE_ONLY || b == RAY_BYTE_ONLY) return RAY_BYTE_ONLY;
     return RAY_BOOL;
 }
 
@@ -315,7 +316,7 @@ static bool atom_to_numeric(ray_t* v, double* out_f, int64_t* out_i, bool* is_f6
             *out_f = (double)v->i16;
             *is_f64 = false;
             return true;
-        case -RAY_U8:
+        RAY_BYTE_ATOM_CASES:
         case -RAY_BOOL:
             *out_i = (int64_t)v->u8;
             *out_f = (double)v->u8;
@@ -1421,7 +1422,7 @@ static int filter_cost(ray_graph_t* g, ray_op_t* pred) {
     if (pred->arity >= 1 && pin0)
         t = pin0->out_type;
     switch (t) {
-        case RAY_BOOL: case RAY_U8:  cost += 0; break;
+        case RAY_BOOL: RAY_BYTE_CASES: cost += 0; break;
         case RAY_I16:               cost += 1; break;
         case RAY_I32:  RAY_TEMPORAL32_CASES: cost += 2; break;
         default:                   cost += 3; break;  /* I64, F64, SYM, STR */
@@ -1483,7 +1484,7 @@ static int filter_selectivity_rank(ray_graph_t* g, ray_op_t* pred) {
      * reorder only on a CONFIDENT static signal). */
     bool wide   = (col_type == RAY_I64 || col_type == RAY_F64 ||
                    col_type == RAY_STR);
-    bool narrow = (col_type == RAY_BOOL || col_type == RAY_U8 ||
+    bool narrow = (col_type == RAY_BOOL || ray_is_bytelike(col_type) ||
                    col_type == RAY_I16);
 
     switch (pred->opcode) {
