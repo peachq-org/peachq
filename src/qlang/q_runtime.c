@@ -19,6 +19,7 @@
 #include "qlang/q_parse.h"    /* q_parse, q_lower — embedded-bootstrap loader */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
 #include "qlang/h_gen.h"      /* OPENQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
+#include "qlang/j_gen.h"      /* OPENQ_J_BOOTSTRAP — codegen'd from src/qlang/j.q (`.j` JSON ns) */
 #include "lang/env.h"         /* ray_env_bind — `.q.*` keyword bindings */
 #include "lang/eval.h"        /* ray_eval_set_apply_hook / _name_hook / ray_eval */
 #include <rayforce.h>
@@ -157,6 +158,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         ray_eval_set_name_hook(q_name_resolve);
         q_bootstrap_load_src(OPENQ_BOOTSTRAP);  /* embedded .q stdlib, post-registry (rule 6) */
         q_bootstrap_load_src(OPENQ_H_BOOTSTRAP); /* `.h` constants (h.q), always-on beside dotq */
+        q_bootstrap_load_src(OPENQ_J_BOOTSTRAP); /* `.j` JSON ns (j.q), delegates to -29!/-31! bangs */
         /* QK_QSRC manifest cells (infix q.q keywords) snapshot their `.q`
          * definitions now that the bootstrap has bound them. */
         if (q_registry_bind_qsrc() != RAY_OK)

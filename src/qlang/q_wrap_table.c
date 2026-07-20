@@ -1203,10 +1203,9 @@ ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
     if (q_is_int_atom(x) && !RAY_ATOM_IS_NULL(x)) {
         int64_t id = q_iatom_val(x);
         /* A negative id is an internal function (`-8!x` serialize, `-9!x`
-         * deserialize, `-5!x` parse, ...) — dispatched through the Q_BANG[]
-         * manifest (q_bang.c).  `-8!`/`-9!` moved into the table as rows
-         * calling the SAME q_wire_serialize/q_wire_deserialize; the negative
-         * band never dict-makes. */
+         * deserialize, `-5!x` parse, ...) — dispatched through the
+         * q_bang_dispatch switch (q_bang.c).  The negative band never
+         * dict-makes. */
         if (id < 0)
             return q_bang_dispatch(id, y);
         /* q enkey/unkey: `N!table` / `N!keyedtable` (N>=0). */

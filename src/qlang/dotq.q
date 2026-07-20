@@ -9,9 +9,10 @@
 .Q.qt:.Q.c.qt;
 .Q.qp:.Q.c.qp;
 .Q.s:.Q.c.s;
-.Q.btoa:.Q.c.btoa;
+/ .Q.btoa/.Q.sha1: the bang is the single C home (`-32!`/`-33!`); delegate here so a user rebind never touches the bang.
+.Q.btoa:-32!;
 .Q.atob:.Q.c.atob;
-.Q.sha1:.Q.c.sha1;
+.Q.sha1:-33!;
 .Q.ops:.Q.c.ops;
 .Q.res:.Q.c.res;
 .Q.hg:.Q.c.hg;

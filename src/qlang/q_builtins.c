@@ -9,7 +9,6 @@
 #include "qlang/q_apply.h"    /* q_apply_noun — the noun-head dispatcher */
 #include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
-#include "qlang/q_json.h"     /* q_json_register — .j JSON namespace */
 #include "qlang/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #include "qlang/q_gz.h"        /* .Q.c.gz — gzip deflate/inflate seam */
 #include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
@@ -1286,11 +1285,13 @@ void q_builtins_register(void) {
      * dotq.q is the single .Q manifest.  The value keeps its true `.Q.c.<name>`
      * identity, so `.Q.qt` displays <.Q.c.qt> (owner: show the implementation, it's
      * fine).  New C-backed .Q members (queued .Q.hg/.Q.hp) bind HERE, pre-bootstrap. */
+    /* .Q.btoa/.Q.sha1 are NOT here: their C home is the `-32!`/`-33!` bang, and
+     * dotq.q delegates `.Q.btoa:-32!` / `.Q.sha1:-33!` (the bang is the single
+     * home).  .Q.c.atob stays C-bound — it has no bang twin. */
     static const struct { const char* name; ray_unary_fn fn; } dotq_c_unary[] = {
         { ".Q.c.id",   q_id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   },
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
-        { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.btoa", q_dotq_btoa_fn },
-        { ".Q.c.atob", q_dotq_atob_fn }, { ".Q.c.sha1", q_dotq_sha1_fn },
+        { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
     };
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
@@ -1300,6 +1301,6 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_value(".Q.c.res", q_name_reserved_words());
     /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
-    /* .j JSON namespace (.j.j/.j.k/.j.jd) — plain env unaries, resolved as dotted name-refs. */
-    q_json_register();
+    /* .j JSON namespace (.j.j/.j.k/.j.jd) is defined in q — src/qlang/j.q, loaded
+     * at q_runtime_create; the C homes are the `-31!`/`-29!` bangs (q_bang.c). */
 }
