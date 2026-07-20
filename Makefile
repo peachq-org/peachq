@@ -535,11 +535,19 @@ coverage:
 #   (PrefetchVirtualMemory, DiscardVirtualMemory); mingw defaults to 0x502.
 #   __USE_MINGW_ANSI_STDIO=1: C99 %zu/PRId64 printf used throughout.
 #   NO sanitizers under mingw (the Linux ASan build stays the safety net) and
-#   NO -Werror (GCC 10-win32 + windows.h macro leaks, e.g. KEY_READ in
+#   NO blanket -Werror (GCC 10-win32 + windows.h macro leaks, e.g. KEY_READ in
 #   query.c, emit benign warnings).  No -march: target CPU unknown.
+#   The two -Werror= EXCEPTIONS are the ones a Linux clang build cannot catch
+#   for us: a declaration reachable only under #ifndef RAY_OS_WINDOWS leaves the
+#   Windows TU with an implicit int-returning decl, and a returned ray_t* is
+#   then TRUNCATED to 32 bits -> access violation at runtime.  That is exactly
+#   how `system "…"` segfaulted on Windows while the Linux build was clean
+#   (q_sys.c's q_charv_out); both diagnostics are hard errors now so the class
+#   cannot ship again.
 WIN_CROSS  ?= x86_64-w64-mingw32-
 WIN_CC      = $(WIN_CROSS)gcc
-WIN_WARNS   = -Wall -Wextra -Wno-unused-parameter
+WIN_WARNS   = -Wall -Wextra -Wno-unused-parameter \
+  -Werror=implicit-function-declaration -Werror=int-conversion
 WIN_CFLAGS  = $(WIN_WARNS) -std=$(STD) -O2 \
   -DRAY_OS_WINDOWS=1 -D_WIN32_WINNT=0x0A00 -D__USE_MINGW_ANSI_STDIO=1
 WIN_LIBS    = -lws2_32 -lm

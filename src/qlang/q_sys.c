@@ -33,9 +33,9 @@
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
 #include <limits.h>          /* PATH_MAX */
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
+#include "qlang/q_registry.h" /* q_text_bytes / q_charv_out — charv text accessors */
 #ifndef RAY_OS_WINDOWS
 #include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
-#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
 #endif                       /* mingw has no <sys/wait.h>; _pclose gives the code directly */
 
 /* `\p 0W` reads the OS-chosen port back off the listener fd (getsockname),
