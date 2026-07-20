@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r for the clock producers */
 #endif
 #include "qlang/q_dotz.h"
+#include "qlang/q_deriv.h"     /* q_deriv_kind_of / q_deriv_base — unwrap {…} carrier */
 #include "qlang/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
 #include "qlang/q_fmt.h"       /* q_console_str/_reset — drain .z.ts show/0N! output */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
@@ -49,8 +50,8 @@ static void win_wsa_ensure(void) {
  * the script's position and MINT each `.z.*` value on demand.  These values
  * are immutable argv snapshots, cheap to build, and read rarely — caching them
  * as owned `ray_t*` would add lifecycle (init/destroy/retain) without benefit.
- * Adding a `.z.*` name = one Z_TAB row + a small producer; init/destroy and the
- * resolver are untouched. */
+ * Adding a computed `.z.*` name = one switch case in q_dotz_resolve + a small
+ * producer; init/destroy are untouched. */
 static int    g_argc       = 0;
 static char** g_argv       = NULL;
 static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
@@ -140,11 +141,11 @@ static ray_t* z_x(void) {   /* args AFTER the script, MINUS launcher-consumed fl
 static ray_t* z_X(void) {   /* full raw argv, including the binary (UNFILTERED) */
     return strings_list(0, g_argc);
 }
+
 /* ---- system / host / process producers (kdb .z.o/.z.i/.z.h/.z.u/.z.a) -------
- * Read-only, minted fresh per reference like the rest of Z_TAB.  POSIX-first
+ * Read-only, minted fresh per reference like the other computed producers.  POSIX-first
  * (this file is already POSIX for the clock family); Windows fidelity is
  * deferred with the clock family (see dotz-status.md). */
-static ray_t* z_q(void) { return ray_bool(g_quiet); }   /* .z.q — quiet mode */
 
 static ray_t* z_o(void) {   /* .z.o — OS/build symbol (l64/m64/w64 …), kdb-token set */
     const char* os;
@@ -166,7 +167,6 @@ static ray_t* z_o(void) {   /* .z.o — OS/build symbol (l64/m64/w64 …), kdb-t
 
 /* .z.i — PID.  The published .z reference displays it with NO `i` suffix (a
  * long/-7h), unlike .z.a which shows the `i` suffix (int/-6h). */
-static ray_t* z_i(void) { return ray_i64((int64_t)getpid()); }
 
 static ray_t* z_h(void) {   /* .z.h — host name as a symbol (gethostname) */
     char host[256];
@@ -293,16 +293,6 @@ static int64_t z_now_ns(int local) {
     return unix_ns - RAY_EPOCH_UNIX_SECS * 1000000000LL;
 }
 
-static ray_t* z_p(void) { return ray_timestamp(z_now_ns(0)); }                 /* .z.p UTC timestamp */
-static ray_t* z_P(void) { return ray_timestamp(z_now_ns(1)); }                 /* .z.P local timestamp */
-static ray_t* z_d(void) { return ray_date((int64_t)(z_now_ns(0) / RAY_NS_PER_DAY)); } /* .z.d UTC date */
-static ray_t* z_D(void) { return ray_date((int64_t)(z_now_ns(1) / RAY_NS_PER_DAY)); } /* .z.D local date */
-static ray_t* z_t(void) { return ray_time((z_now_ns(0) % RAY_NS_PER_DAY) / 1000000LL); } /* .z.t UTC time (ms) */
-static ray_t* z_T(void) { return ray_time((z_now_ns(1) % RAY_NS_PER_DAY) / 1000000LL); } /* .z.T local time (ms) */
-static ray_t* z_n(void) { return ray_timespan(z_now_ns(0) % RAY_NS_PER_DAY); } /* .z.n UTC timespan since midnight */
-static ray_t* z_N(void) { return ray_timespan(z_now_ns(1) % RAY_NS_PER_DAY); } /* .z.N local timespan since midnight */
-static ray_t* z_z(void) { return ray_datetime((double)z_now_ns(0) / (double)RAY_NS_PER_DAY); } /* .z.z UTC datetime */
-static ray_t* z_Z(void) { return ray_datetime((double)z_now_ns(1) / (double)RAY_NS_PER_DAY); } /* .z.Z local datetime */
 
 /* ---- `.z.ts` timer handler ------------------------------------------------
  * `.z.ts` is a SETTABLE handler fired on each `\t N` tick (server-initiated
@@ -332,76 +322,53 @@ static ray_t* q_zts_tick(ray_t* tick) {
     return r;                                      /* fire_expired frees/prints it */
 }
 
-void q_dotz_zts_set(ray_t* fn) {
-    if (fn) ray_retain(fn);          /* retain-new before release-old (robust slot order) */
-    if (g_zts) ray_release(g_zts);
-    g_zts = fn;
+/* The ONE home for the settable `.z.*` handler name->slot mapping: q_dotz_get
+ * (the C fire consumers) and q_dotz_set (the write path) both route through it,
+ * so nothing outside dotz.c needs per-slot functions.  Who FIRES each (never
+ * from here): `.z.ts` the poll-loop timer, `.z.exit` q_exit (q_sys.c),
+ * `.z.ph`/`.z.pp`/`.z.ac`/`.z.pm` q_http.c, `.z.ws`/`.z.wo`/`.z.wc` q_ws.c. */
+static ray_t** z_slot_ptr(const char* nm, size_t l) {
+    if (l == 7 && memcmp(nm, ".z.exit", 7) == 0) return &g_zexit;
+    if (l != 5 || nm[0] != '.' || nm[1] != 'z' || nm[2] != '.') return NULL;
+    switch (nm[3]) {
+        case 'p': switch (nm[4]) { case 'h': return &g_zph;    /* .z.ph */
+                                   case 'p': return &g_zpp;    /* .z.pp */
+                                   case 'm': return &g_zpm; }  /* .z.pm */
+                  break;
+        case 'w': switch (nm[4]) { case 's': return &g_zws;    /* .z.ws */
+                                   case 'o': return &g_zwo;    /* .z.wo */
+                                   case 'c': return &g_zwc; }  /* .z.wc */
+                  break;
+        case 't': if (nm[4] == 's') return &g_zts; break;      /* .z.ts */
+        case 'a': if (nm[4] == 'c') return &g_zac; break;      /* .z.ac */
+    }
+    return NULL;
 }
 
-/* `.z.exit` slot — same shape as `.z.ts` above: set via q_setg_wrap, read back
- * via q_dotz_resolve, released (never FIRED) by q_dotz_destroy — a per-runtime
- * teardown is not a process exit.  Firing is q_exit's job (q_sys.c). */
-void q_dotz_zexit_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zexit) ray_release(g_zexit);
-    g_zexit = fn;
+/* Read-back a settable handler by name — BORROWED, NULL = unset/not-a-handler.
+ * The C fire consumers (q_http.c / q_ws.c) call this on their request/event
+ * path (named lookup, not a hot loop); q_dotz_resolve retains it for q. */
+ray_t* q_dotz_get(const char* name, size_t len) {
+    ray_t** slot = z_slot_ptr(name, len);
+    return slot ? *slot : NULL;
 }
 
-/* `.z.ph` slot — set/read-back shape of `.z.ts` above; FIRED by q_http.c per
- * HTTP GET (which retains across the call), never from here. */
-void q_dotz_zph_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zph) ray_release(g_zph);
-    g_zph = fn;
+/* Assign a settable handler by name — returns true iff `name` IS one (caller
+ * then stops; else it falls to the `.ipc.on.*` / plain-env path).  Retains its
+ * own ref; unwraps a q `{…}` lambda carrier to its base RAY_LAMBDA (call_fn1
+ * fires a bare lambda, never the apply-hook carrier).  Passing NULL clears. */
+bool q_dotz_set(const char* name, size_t len, ray_t* val) {
+    ray_t** slot = z_slot_ptr(name, len);
+    if (!slot) return false;
+    if (val && val->type == RAY_LIST && q_deriv_kind_of(val) == Q_DERIV_LAMBDA) {
+        ray_t* base = q_deriv_base(val);        /* borrowed bare RAY_LAMBDA */
+        if (base) val = base;
+    }
+    if (val) ray_retain(val);
+    if (*slot) ray_release(*slot);
+    *slot = val;
+    return true;
 }
-
-ray_t* q_dotz_zph(void) { return g_zph; }   /* BORROWED; NULL = unset */
-
-/* `.z.ws`/`.z.wo`/`.z.wc` WebSocket handler slots (ref/dotz.md; same shape as
- * `.z.ph` above) — FIRED by q_ws.c per message / open / close. */
-void q_dotz_zws_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zws) ray_release(g_zws);
-    g_zws = fn;
-}
-void q_dotz_zwo_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zwo) ray_release(g_zwo);
-    g_zwo = fn;
-}
-void q_dotz_zwc_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zwc) ray_release(g_zwc);
-    g_zwc = fn;
-}
-ray_t* q_dotz_zws(void) { return g_zws; }   /* BORROWED; NULL = unset */
-ray_t* q_dotz_zwo(void) { return g_zwo; }
-ray_t* q_dotz_zwc(void) { return g_zwc; }
-
-/* `.z.pp` slot — HTTP POST handler; identical lifecycle to `.z.ph` above. */
-void q_dotz_zpp_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zpp) ray_release(g_zpp);
-    g_zpp = fn;
-}
-
-ray_t* q_dotz_zpp(void) { return g_zpp; }   /* BORROWED; NULL = unset */
-
-/* `.z.ac` (HTTP auth) + `.z.pm` (HTTP other-methods) slots — `.z.ph` lifecycle;
- * FIRED by q_http.c (the auth gate / the non-GET-POST method dispatch). */
-void q_dotz_zac_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zac) ray_release(g_zac);
-    g_zac = fn;
-}
-ray_t* q_dotz_zac(void) { return g_zac; }   /* BORROWED; NULL = unset */
-
-void q_dotz_zpm_set(ray_t* fn) {
-    if (fn) ray_retain(fn);
-    if (g_zpm) ray_release(g_zpm);
-    g_zpm = fn;
-}
-ray_t* q_dotz_zpm(void) { return g_zpm; }   /* BORROWED; NULL = unset */
 
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
  * exit parameter; default = do nothing), then drain its show/0N! console
@@ -423,32 +390,6 @@ void q_dotz_exit_fire(int code) {
 ray_t* q_dotz_timer_thunk(void) {
     return ray_fn_unary(".z.ts", RAY_FN_NONE, q_zts_tick);
 }
-
-static const struct { const char* name; uint8_t len; ray_t* (*make)(void); }
-Z_TAB[] = {
-    { ".z.f", 4, z_f },
-    { ".z.x", 4, z_x },
-    { ".z.X", 4, z_X },
-    { ".z.q", 4, z_q },
-    { ".z.o", 4, z_o },
-    { ".z.i", 4, z_i },
-    { ".z.h", 4, z_h },
-    { ".z.u", 4, z_u },
-    { ".z.a", 4, z_a },
-    { ".z.w", 4, z_w },
-    { ".z.K", 4, z_K },
-    { ".z.k", 4, z_k },
-    { ".z.p", 4, z_p },
-    { ".z.P", 4, z_P },
-    { ".z.d", 4, z_d },
-    { ".z.D", 4, z_D },
-    { ".z.t", 4, z_t },
-    { ".z.T", 4, z_T },
-    { ".z.n", 4, z_n },
-    { ".z.N", 4, z_N },
-    { ".z.z", 4, z_z },
-    { ".z.Z", 4, z_Z },
-};
 
 void q_dotz_init(int argc, char** argv) {
     g_argc = argc;
@@ -480,6 +421,10 @@ const char* q_dotz_script_path(void) {
     return g_script_idx < 0 ? NULL : g_argv[g_script_idx];
 }
 
+/* Borrow a settable-handler slot for read-back: retained (owned) or NULL when
+ * unset (NULL -> eval raises 'name, matching an unset name). */
+static ray_t* z_slot(ray_t* g) { if (g) ray_retain(g); return g; }
+
 ray_t* q_dotz_resolve(int64_t sym_id) {
     ray_t* name = ray_sym_str(sym_id);   /* BORROWED: cached arena string atom
                                           * (RAY_ATTR_ARENA); the ray_release
@@ -489,51 +434,50 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
     const char* p = ray_str_ptr(name);
     size_t      n = ray_str_len(name);
 
-    ray_t* out = NULL;
-    for (size_t i = 0; i < sizeof Z_TAB / sizeof *Z_TAB; i++)
-        if (n == Z_TAB[i].len && memcmp(p, Z_TAB[i].name, n) == 0) {
-            out = Z_TAB[i].make();   /* already owned (rc>=1) */
-            break;
-        }
+    /* Everything this resolver knows is `.z.*` — reject other names up front
+     * (they fall to env/registry in q_name_resolve). */
+    if (n < 4 || p[0] != '.' || p[1] != 'z' || p[2] != '.') return NULL;
 
-    /* `.z.ts` timer handler read-back: return the stored handler (retained),
-     * or decline when unset (→ eval raises 'name, like the `.z.p*` aliases). */
-    if (!out && n == 5 && memcmp(p, ".z.ts", 5) == 0 && g_zts) {
-        ray_retain(g_zts);
-        out = g_zts;
+    ray_t* out = NULL;
+    /* Computed read-only `.z.*` — all 4-char names, dispatched on the char
+     * after ".z.".  The per-name producers (z_*) are the single home and each
+     * returns an OWNED ref (rc>=1).  The len-5 settable-handler names
+     * (.z.ts/.z.ph/.z.ws/.z.wo/.z.wc/.z.pp/.z.ac/.z.pm) miss here and fall
+     * through to their g_z* read-backs below. */
+    if (n == 4) {
+        switch (p[3]) {
+            /* multi-line producers keep their z_* home (argv/host/version logic) */
+            case 'f': out = z_f(); break;
+            case 'x': out = z_x(); break;
+            case 'X': out = z_X(); break;
+            case 'o': out = z_o(); break;
+            case 'h': out = z_h(); break;
+            case 'u': out = z_u(); break;
+            case 'a': out = z_a(); break;
+            case 'w': out = z_w(); break;
+            case 'K': out = z_K(); break;
+            case 'k': out = z_k(); break;
+            /* one-line producers inlined; z_now_ns(0)=UTC, (1)=local */
+            case 'q': out = ray_bool(g_quiet); break;                            /* .z.q quiet */
+            case 'i': out = ray_i64((int64_t)getpid()); break;                   /* .z.i pid   */
+            case 'p': out = ray_timestamp(z_now_ns(0)); break;                   /* .z.p / .z.P */
+            case 'P': out = ray_timestamp(z_now_ns(1)); break;
+            case 'd': out = ray_date((int64_t)(z_now_ns(0) / RAY_NS_PER_DAY)); break;    /* .z.d / .z.D */
+            case 'D': out = ray_date((int64_t)(z_now_ns(1) / RAY_NS_PER_DAY)); break;
+            case 't': out = ray_time((z_now_ns(0) % RAY_NS_PER_DAY) / 1000000LL); break; /* .z.t / .z.T */
+            case 'T': out = ray_time((z_now_ns(1) % RAY_NS_PER_DAY) / 1000000LL); break;
+            case 'n': out = ray_timespan(z_now_ns(0) % RAY_NS_PER_DAY); break;           /* .z.n / .z.N */
+            case 'N': out = ray_timespan(z_now_ns(1) % RAY_NS_PER_DAY); break;
+            case 'z': out = ray_datetime((double)z_now_ns(0) / (double)RAY_NS_PER_DAY); break; /* .z.z / .z.Z */
+            case 'Z': out = ray_datetime((double)z_now_ns(1) / (double)RAY_NS_PER_DAY); break;
+        }
     }
-    if (!out && n == 7 && memcmp(p, ".z.exit", 7) == 0 && g_zexit) {
-        ray_retain(g_zexit);
-        out = g_zexit;
-    }
-    if (!out && n == 5 && memcmp(p, ".z.ph", 5) == 0 && g_zph) {
-        ray_retain(g_zph);
-        out = g_zph;
-    }
-    if (!out && n == 5 && memcmp(p, ".z.ws", 5) == 0 && g_zws) {
-        ray_retain(g_zws);
-        out = g_zws;
-    }
-    if (!out && n == 5 && memcmp(p, ".z.wo", 5) == 0 && g_zwo) {
-        ray_retain(g_zwo);
-        out = g_zwo;
-    }
-    if (!out && n == 5 && memcmp(p, ".z.wc", 5) == 0 && g_zwc) {
-        ray_retain(g_zwc);
-        out = g_zwc;
-    }
-    if (!out && n == 5 && memcmp(p, ".z.pp", 5) == 0 && g_zpp) {
-        ray_retain(g_zpp);
-        out = g_zpp;
-    }
-    if (!out && n == 5 && memcmp(p, ".z.ac", 5) == 0 && g_zac) {
-        ray_retain(g_zac);
-        out = g_zac;
-    }
-    if (!out && n == 5 && memcmp(p, ".z.pm", 5) == 0 && g_zpm) {
-        ray_retain(g_zpm);
-        out = g_zpm;
-    }
+
+    /* Settable-handler read-back via the shared name->slot map (owned copy for
+     * q).  The `.z.p*` IPC hooks (.z.pg/.z.ps/.z.po/.z.pc/.z.pw) aren't handler
+     * slots — z_slot_ptr declines them and they fall to the `.ipc.on.*` aliases
+     * below. */
+    if (!out) out = z_slot(q_dotz_get(p, n));
 
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
      * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
