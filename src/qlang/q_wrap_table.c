@@ -1464,39 +1464,12 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         ray_release(s);
         return ray_error("type", "set: root handle takes a dictionary");
     }
-    /* kdb `.z.ts` (timer) and `.z.exit` (process exit) handlers are settable
-     * but are NOT `.ipc.on.*` hooks — each has its own q-layer slot (env.c's
-     * ipc-hook carve-out is frozen).  Route the assignment there; read-back is
-     * via q_dotz_resolve.  Unwrap a q `{…}` carrier to its base RAY_LAMBDA
-     * (same reason as the ipc hooks below): both fire via call_fn1, which
-     * invokes a bare RAY_LAMBDA directly — a carrier would need the apply hook
-     * (not installed at fire time) and would silently never fire. */
-    if ((l == 5 && (memcmp(nm, ".z.ts", 5) == 0 ||
-                    memcmp(nm, ".z.ph", 5) == 0 ||     /* HTTP GET handler (q_http.c) */
-                    memcmp(nm, ".z.pp", 5) == 0 ||     /* HTTP POST handler (q_http.c) */
-                    memcmp(nm, ".z.pm", 5) == 0 ||     /* HTTP other-methods (q_http.c) */
-                    memcmp(nm, ".z.ac", 5) == 0 ||     /* HTTP auth gate (q_http.c) */
-                    memcmp(nm, ".z.ws", 5) == 0 ||     /* WS handlers (q_ws.c) */
-                    memcmp(nm, ".z.wo", 5) == 0 ||
-                    memcmp(nm, ".z.wc", 5) == 0)) ||
-        (l == 7 && memcmp(nm, ".z.exit", 7) == 0)) {
-        char c3 = l == 7 ? 'e' : nm[3];
-        char c4 = l == 7 ? '\0' : nm[4];
-        ray_t* zv = y;
-        if (y && y->type == RAY_LIST && q_deriv_kind_of(y) == Q_DERIV_LAMBDA) {
-            ray_t* base = q_deriv_base(y);      /* borrowed bare RAY_LAMBDA */
-            if (base) zv = base;
-        }
+    /* Settable `.z.*` handler slots (`.z.ts`/`.z.exit`/`.z.p*`/`.z.w*`/`.z.ac`) —
+     * NOT `.ipc.on.*` hooks.  dotz.c owns the name->slot dispatch AND the
+     * {…}-carrier unwrap (call_fn1 fires a bare lambda); q_dotz_set declines any
+     * non-handler name so it falls through to the `.ipc.on.*`/plain-env path. */
+    if (q_dotz_set(nm, l, y)) {
         ray_release(s);
-        if (c3 == 'e')      q_dotz_zexit_set(zv);
-        else if (c3 == 'a') q_dotz_zac_set(zv);            /* .z.ac */
-        else if (c3 == 'p' && c4 == 'h') q_dotz_zph_set(zv);
-        else if (c3 == 'p' && c4 == 'p') q_dotz_zpp_set(zv);
-        else if (c3 == 'p' && c4 == 'm') q_dotz_zpm_set(zv);  /* .z.pm */
-        else if (c3 == 'w' && c4 == 's') q_dotz_zws_set(zv);
-        else if (c3 == 'w' && c4 == 'o') q_dotz_zwo_set(zv);
-        else if (c3 == 'w' && c4 == 'c') q_dotz_zwc_set(zv);
-        else q_dotz_zts_set(zv);    /* setters RETAIN (zv is borrowed here) */
         ray_retain(x);
         return x;
     }

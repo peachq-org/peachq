@@ -671,7 +671,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
 static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
                         const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_dotz_zph();                  /* borrowed, NULL = unset */
+    ray_t* fn = q_dotz_get(".z.ph", 5);                  /* borrowed, NULL = unset */
     if (!fn) return -1;
     ray_retain(fn);                            /* handler may reassign .z.ph */
     if (tlen && target[0] == '/') { target++; tlen--; }
@@ -687,7 +687,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
  * every branch. */
 static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_dotz_zpp();                  /* borrowed, NULL = unset */
+    ray_t* fn = q_dotz_get(".z.pp", 5);                  /* borrowed, NULL = unset */
     if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
 
     int64_t cl = 0; bool have_cl = false;
@@ -741,7 +741,7 @@ static void zpm_dispatch(ray_sock_t fd, const char* method, size_t mlen,
                          const char* target, size_t tlen,
                          const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_dotz_zpm();                  /* borrowed, NULL = unset */
+    ray_t* fn = q_dotz_get(".z.pm", 5);                  /* borrowed, NULL = unset */
     if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
     ray_retain(fn);                            /* handler may reassign .z.pm */
     if (tlen && target[0] == '/') { target++; tlen--; }
@@ -815,7 +815,7 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
      * BYTE-IDENTICAL — 401 BEFORE parse (so a malformed authed request stays
      * 401, not 400).  A defined `.z.ac` owns the auth decision (its gate runs
      * after parse, below), so the pre-parse 401 is skipped when it is set. */
-    ray_t* ac = q_dotz_zac();                 /* borrowed; NULL = unset */
+    ray_t* ac = q_dotz_get(".z.ac", 5);                 /* borrowed; NULL = unset */
     if (!ac && auth_required) {
         q_http_send_simple(fd, 401, "Unauthorized");
         return 0;
