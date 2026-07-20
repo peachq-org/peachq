@@ -1243,7 +1243,7 @@ void ray_free(ray_t* v) {
 void* ray_alloc_raw(size_t n) {
     ray_t* v = ray_alloc(n);
     if (!v || RAY_IS_ERR(v)) return NULL;
-    v->type = RAY_U8;          /* plain byte vec: ray_free reclaims, no child walk */
+    v->type = RAY_BYTE_ONLY;          /* plain byte vec: ray_free reclaims, no child walk */
     v->len  = (int64_t)n;
     return ray_data(v);
 }
@@ -1306,15 +1306,15 @@ ray_t* ray_alloc_copy(ray_t* v) {
         if (t <= 0 || t >= RAY_TYPE_COUNT)
             data_size = 0;
         else {
-            /* Value band 1..19: exhaustive over (ray_type_e), no default, so a
-             * future member (e.g. RAY_CHARV=21) can't land without stating its
-             * element-size lane here — the alloc-copy data-loss trap this guards.
-             * RAY_SEL(20) reaches the switch, matches no arm, keeps esz 0 (its
-             * bitmap has no fixed esz) — unchanged. */
+            /* Value band: exhaustive over (ray_type_e), no default, so a future
+             * member can't land without stating its element-size lane here —
+             * the alloc-copy data-loss trap this guards (CHARV rides
+             * RAY_BYTE_CASES; C-unit pinned in test/q_charv.c).  RAY_SEL(20)
+             * reaches the switch, matches no arm, keeps esz 0 — unchanged. */
             uint8_t esz = 0;
             switch ((ray_type_e)t) {
             case RAY_LIST: break;                    /* unreachable: filtered above */
-            case RAY_BOOL: case RAY_GUID: case RAY_U8: case RAY_I16:
+            case RAY_BOOL: case RAY_GUID: RAY_BYTE_CASES: case RAY_I16:
             case RAY_I32: case RAY_I64: case RAY_F32: case RAY_F64:
             case RAY_STR: case RAY_SYM: case RAY_TIMESTAMP: case RAY_MONTH:
             case RAY_DATE: case RAY_DATETIME: case RAY_TIMESPAN: case RAY_MINUTE:

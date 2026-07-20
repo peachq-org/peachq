@@ -34,9 +34,9 @@
  * not guaranteed terminated, so copy through a bounded scratch buffer. */
 /* Exported (q_builtins.h) so the `-5!` internal-fn alias single-homes here. */
 ray_t* q_parse_builtin_fn(ray_t* x) {
-    if (!x || x->type != -RAY_STR) return ray_error("type", "parse expects a string");
-    const char* sp = ray_str_ptr(x);
-    size_t sl = ray_str_len(x);
+    const char* sp; int64_t sn;
+    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "parse expects a string");
+    size_t sl = (size_t)sn;
     if (!sp) return ray_error("domain", "parse: bad source string");
     char* src = malloc(sl + 1);
     if (!src) return ray_error("wsfull", "parse: out of memory");
@@ -57,14 +57,17 @@ ray_t* q_string_fn(ray_t* x) {
     if (x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);        /* borrowed */
         if (!s) return ray_error("type", "string: bad symbol");
-        ray_retain(s);
-        return s;
+        return q_charv_of_str(s);              /* `ibm -> "ibm" (charv) */
     }
     if (x->type == -RAY_STR) { ray_retain(x); return x; }
+    if (x->type == -RAY_CHARV)                                 /* string "a" -> ,"a" */
+        return ray_charv((const char*)&x->u8, 1);
+    /* NB a charv vector falls to the element-wise arm below: kdb `string
+     * "cat"` -> (,"c";,"a";,"t") (ref/string.md:37-39). */
     /* Only a simple VECTOR or a boxed LIST maps element-wise; atoms and
      * whole-value containers (tables, dicts, and anything else) keep the base
      * formatter — indexing a table by 0..ncols would fabricate junk rows. */
-    if (!ray_is_vec(x) && x->type != RAY_LIST) return ray_fmt(x, 0);
+    if (!ray_is_vec(x) && x->type != RAY_LIST) return q_charv_out(ray_fmt(x, 0));
     /* vector or boxed list: per-element string */
     int64_t n = ray_len(x);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
@@ -145,6 +148,15 @@ static void q_case_bytes(const char* p, size_t n, char* b, int up) {
 }
 static ray_t* q_case_leaf(ray_t* x, int up) {
     if (!x) return ray_error("type", "%s: nil", up ? "upper" : "lower");
+    if (x->type == -RAY_CHARV)                       /* char atom stays an atom */
+        return ray_char((uint8_t)(up ? toupper(x->u8) : tolower(x->u8)));
+    if (x->type == RAY_CHARV) {                      /* char vector, in place-of-copy */
+        int64_t n = ray_len(x);
+        ray_t* r = ray_charv((const char*)ray_data(x), n);
+        if (RAY_IS_ERR(r)) return r;
+        q_case_bytes((const char*)ray_data(r), (size_t)n, (char*)ray_data(r), up);
+        return r;
+    }
     if (x->type == -RAY_STR) {
         const char* p = ray_str_ptr(x);
         size_t n = ray_str_len(x);
@@ -226,6 +238,17 @@ static ray_t* q_trim_leaf(ray_t* x, int mode) {
         if (mode != 1) while (b > a && q_is_ws(p[b - 1])) b--;
         return ray_str(p + a, b - a);
     }
+    if (x->type == -RAY_CHARV) {                 /* char atom: ws -> "", else itself */
+        if (q_is_ws((char)x->u8)) return ray_charv("", 0);
+        ray_retain(x); return x;
+    }
+    if (x->type == RAY_CHARV) {                  /* char vector -> trimmed charv */
+        const char* p = (const char*)ray_data(x);
+        size_t n = (size_t)ray_len(x), a = 0, b = n;
+        if (mode != 2) while (a < b && q_is_ws(p[a])) a++;
+        if (mode != 1) while (b > a && q_is_ws(p[b - 1])) b--;
+        return ray_charv(p + a, (int64_t)(b - a));
+    }
     if (x->type == RAY_STR) {   /* string vector -> trim each element */
         int64_t n = ray_len(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
@@ -265,7 +288,7 @@ static ray_t* q_ltrim_fn(ray_t* x) { return q_str_recurse(x, q_trim_leaf, 1); }
 static ray_t* q_rtrim_fn(ray_t* x) { return q_str_recurse(x, q_trim_leaf, 2); }
 
 /* ---- md5 (RFC 1321, public spec — CLEAN ROOM) -----------------------------
- * q `md5 s` hashes the string s to a 16-byte digest (a RAY_U8 byte vector,
+ * q `md5 s` hashes the string s to a 16-byte digest (a RAY_BYTE_ONLY byte vector,
  * displayed as `0x…`).  Self-contained implementation of the published
  * algorithm; no external dependency, no kdb reference. */
 static int q_md5_compute(const uint8_t* msg, size_t len, uint8_t out[16]) {
@@ -319,11 +342,12 @@ static int q_md5_compute(const uint8_t* msg, size_t len, uint8_t out[16]) {
 }
 /* Exported (q_builtins.h) so the `-15!` internal-fn alias single-homes here. */
 ray_t* q_md5_fn(ray_t* x) {
-    if (!x || x->type != -RAY_STR) return ray_error("type", "md5: expects a string");
+    const char* sp; int64_t sn;
+    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "md5: expects a string");
     uint8_t digest[16];
-    if (!q_md5_compute((const uint8_t*)ray_str_ptr(x), ray_str_len(x), digest))
+    if (!q_md5_compute((const uint8_t*)sp, (size_t)sn, digest))
         return ray_error("wsfull", "md5: out of memory");
-    return ray_vec_from_raw(RAY_U8, digest, 16);
+    return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 16);
 }
 
 /* ---- .Q base64 + SHA-1 encoding primitives (ref/dotq.md; clean-room: RFC 4648
@@ -334,12 +358,13 @@ static const char Q_B64_ALPHA[64] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /* Borrow the raw bytes of a string atom (-RAY_STR; use ray_str_len — SSO union
- * aliasing makes ray_len garbage on a string atom) or a byte vector (RAY_U8).
+ * aliasing makes ray_len garbage on a string atom) or a byte vector (RAY_BYTE_ONLY).
  * Returns 0 for any other type. */
 static int q_bytes_of(ray_t* x, const uint8_t** p, size_t* n) {
+    const char* tp; int64_t tn;
     if (!x) return 0;
-    if (x->type == -RAY_STR) { *p = (const uint8_t*)ray_str_ptr(x); *n = ray_str_len(x); return 1; }
-    if (x->type == RAY_U8)   { *p = (const uint8_t*)ray_data(x);    *n = (size_t)ray_len(x); return 1; }
+    if (q_text_bytes(x, &tp, &tn)) { *p = (const uint8_t*)tp; *n = (size_t)tn; return 1; }
+    if (x->type == RAY_BYTE_ONLY)  { *p = (const uint8_t*)ray_data(x); *n = (size_t)ray_len(x); return 1; }
     return 0;
 }
 
@@ -481,7 +506,7 @@ static ray_t* q_dotq_atob_fn(ray_t* x) {
     uint8_t* dec = q_base64_decode((const char*)p, n, &olen, &bad);
     if (bad) return ray_error("domain", ".Q.atob: invalid base64 padding");
     if (!dec) return ray_error("wsfull", ".Q.atob: out of memory");
-    ray_t* r = ray_vec_from_raw(RAY_U8, dec, (int64_t)olen);
+    ray_t* r = ray_vec_from_raw(RAY_BYTE_ONLY, dec, (int64_t)olen);
     free(dec);
     return r;
 }
@@ -496,7 +521,7 @@ ray_t* q_dotq_sha1_fn(ray_t* x) {
     uint8_t digest[20];
     if (!q_sha1_compute(p, n, digest))
         return ray_error("wsfull", ".Q.sha1: out of memory");
-    return ray_vec_from_raw(RAY_U8, digest, 20);
+    return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 20);
 }
 
 /* (.Q.c.gz x) — GZip (ref/dotq.md). x is one of:
@@ -525,7 +550,7 @@ static ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc) {
         size_t olen = 0; const char* err = NULL;
         uint8_t* out = q_gz_deflate(p, n, (int)cl->i64, &olen, &err);
         if (!out) return ray_error(err ? err : "wsfull", NULL);
-        ray_t* r = ray_vec_from_raw(RAY_U8, out, (int64_t)olen);
+        ray_t* r = ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
         free(out);
         return r ? r : ray_error("wsfull", NULL);
     }
@@ -534,8 +559,9 @@ static ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc) {
     size_t olen = 0; const char* err = NULL;
     uint8_t* out = q_gz_inflate(p, n, &olen, &err);
     if (!out) return ray_error(err ? err : "domain", NULL);
-    ray_t* r = (x->type == -RAY_STR) ? ray_str((const char*)out, olen)
-                                     : ray_vec_from_raw(RAY_U8, out, (int64_t)olen);
+    int textin = x->type == -RAY_STR || x->type == RAY_CHARV || x->type == -RAY_CHARV;
+    ray_t* r = textin ? ray_charv((const char*)out, (int64_t)olen)
+                      : ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
     free(out);
     return r ? r : ray_error("wsfull", NULL);
 }
@@ -657,13 +683,14 @@ static char q_type_char(int8_t tag) {
     case RAY_LIST:      return 0;                   /* unreachable: filtered above */
     case RAY_BOOL:      return 'b';
     case RAY_GUID:      return 'g';
-    case RAY_U8:        return 'x';
+    case RAY_BYTE_ONLY: return 'x';
     case RAY_I16:       return 'h';
     case RAY_I32:       return 'i';
     case RAY_I64:       return 'j';
     case RAY_F32:       return 'e';
     case RAY_F64:       return 'f';
-    case RAY_STR:       return 'c';
+    case RAY_STR:       return 'c';   /* physical string storage: still char text */
+    case RAY_CHARV:     return 'c';
     case RAY_SYM:       return 's';
     case RAY_TIMESTAMP: return 'p';
     case RAY_MONTH:     return 'm';
