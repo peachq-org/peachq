@@ -15,8 +15,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_json.h"
 #include "qlang/q_registry.h" /* q_collapse_list */
-#include "lang/env.h"         /* ray_fn_unary, ray_env_bind */
-#include "lang/eval.h"        /* RAY_FN_NONE, ray_at_fn */
+#include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include "yyjson.h"
@@ -408,32 +407,4 @@ ray_t* q_json_deserialize(ray_t* x) {
     yyjson_doc_free(doc);
     free(buf);
     return r;
-}
-
-/* ======================================================================== *
- *  .j.jd — serialize infinity (thin wrapper; 0w->null effect moot in openq)
- * ======================================================================== */
-
-static ray_t* q_json_jd(ray_t* x) {
-    /* .j.jd (x;d): a 2-element list; serialize x.  d[`null0w] mapping 0w/-0w to
-     * "null" is a no-op here — openq has no 0w (canonicalized to 0n->null). */
-    if (x && x->type == RAY_LIST && ray_len(x) == 2)
-        return q_json_serialize(((ray_t**)ray_data(x))[0]);
-    return q_json_serialize(x);
-}
-
-/* ======================================================================== *
- *  Registration
- * ======================================================================== */
-
-static void bind_json_unary(const char* name, ray_unary_fn fn) {
-    ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    ray_env_bind(ray_sym_intern(name, strlen(name)), obj);
-    ray_release(obj);
-}
-
-void q_json_register(void) {
-    bind_json_unary(".j.j",  q_json_serialize);
-    bind_json_unary(".j.k",  q_json_deserialize);
-    bind_json_unary(".j.jd", q_json_jd);
 }
