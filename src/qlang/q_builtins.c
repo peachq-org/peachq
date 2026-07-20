@@ -10,6 +10,8 @@
 #include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
 #include "qlang/q_json.h"     /* q_json_register — .j JSON namespace */
+#include "qlang/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
+#include "qlang/q_gz.h"        /* .Q.c.gz — gzip deflate/inflate seam */
 #include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
 #include "qlang/q_registry.h" /* q_registry_init */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
@@ -520,6 +522,48 @@ ray_t* q_dotq_sha1_fn(ray_t* x) {
     if (!q_sha1_compute(p, n, digest))
         return ray_error("wsfull", ".Q.sha1: out of memory");
     return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 20);
+}
+
+/* (.Q.c.gz x) — GZip (ref/dotq.md). x is one of:
+ *   general null (::)  → 1b   (capability is embedded; owner-ratified divergence
+ *                              from the doc's "whether Zlib is loaded")
+ *   char/byte vector   → the INFLATED vector (string→string atom, bytes→byte vec)
+ *   2-list (cl;cbv)    → the DEFLATED BYTE vector (gzip bytes contain NULs; a
+ *                        pre-C3 string atom can't carry them), cl a long 1..9.
+ * A VARY (not unary): the VM's op_call1 null gate hard-whitelists only nil/type,
+ * so a unary here could never see the general null; the VARY apply path has no
+ * such gate, so `.Q.gz[::]` reaches this fn as `::` and answers the capability.
+ * Framing lives in q_gz.c; list/atom refs here are BORROWED (never released) and
+ * the constructors copy before the malloc'd buffer is freed. */
+static ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc) {
+    if (argc != 1) return ray_error("rank", NULL);       /* VARY is a unary facade */
+    ray_t* x = args[0];
+    if (!x) return ray_error("type", NULL);
+    if (RAY_IS_NULL(x)) return ray_bool(1);              /* .Q.gz[::] — capability */
+    if (x->type == RAY_LIST && ray_len(x) == 2) {        /* deflate */
+        ray_t* cl  = ray_list_get(x, 0);                 /* borrowed */
+        ray_t* cbv = ray_list_get(x, 1);                 /* borrowed */
+        if (!cl || cl->type != -RAY_I64) return ray_error("type", NULL);
+        if (cl->i64 < 1 || cl->i64 > 9) return ray_error("domain", NULL);  /* before the int cast */
+        const uint8_t* p; size_t n;
+        if (!q_bytes_of(cbv, &p, &n)) return ray_error("type", NULL);
+        size_t olen = 0; const char* err = NULL;
+        uint8_t* out = q_gz_deflate(p, n, (int)cl->i64, &olen, &err);
+        if (!out) return ray_error(err ? err : "wsfull", NULL);
+        ray_t* r = ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
+        free(out);
+        return r ? r : ray_error("wsfull", NULL);
+    }
+    const uint8_t* p; size_t n;                          /* inflate */
+    if (!q_bytes_of(x, &p, &n)) return ray_error("type", NULL);
+    size_t olen = 0; const char* err = NULL;
+    uint8_t* out = q_gz_inflate(p, n, &olen, &err);
+    if (!out) return ray_error(err ? err : "domain", NULL);
+    int textin = x->type == -RAY_STR || x->type == RAY_CHARV || x->type == -RAY_CHARV;
+    ray_t* r = textin ? ray_charv((const char*)out, (int64_t)olen)
+                      : ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
+    free(out);
+    return r ? r : ray_error("wsfull", NULL);
 }
 
 /* (show x) — print x's q console display as a SIDE EFFECT (buffered in the q
@@ -1247,10 +1291,13 @@ void q_builtins_register(void) {
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.btoa", q_dotq_btoa_fn },
         { ".Q.c.atob", q_dotq_atob_fn }, { ".Q.c.sha1", q_dotq_sha1_fn },
+        { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
     };
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
     bind_vary (".Q.c.ops", q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
+    bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
+    bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_value(".Q.c.res", q_name_reserved_words());
     /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
     /* .j JSON namespace (.j.j/.j.k/.j.jd) — plain env unaries, resolved as dotted name-refs. */

@@ -3,7 +3,9 @@
  * complete request-header block to q_http_respond; everything HTTP-semantic
  * (parse via vendored picohttpparser, traversal guard, MIME, the `.z.ph`
  * override hook, response bytes) lives here, outside the frozen base.
- * Scope: GET + `.z.ph` + the WebSocket upgrade hand-off (q_ws.c) — no TLS.
+ * Scope: GET (`.z.ph`), POST (`.z.pp`), the other HTTP methods (`.z.pm`:
+ * OPTIONS/PUT/DELETE/PATCH), the `.z.ac` auth gate that precedes every
+ * handler, and the WebSocket upgrade hand-off (q_ws.c) — no TLS.
  * The docroot and MIME map are single-homed on the `.h` constants (`.h.HOME` /
  * `.h.ty`, defined in src/qlang/h.q) at request time, with the built-in "html"
  * docroot and MIME table as defensive fallbacks; both are user-overridable. */
@@ -13,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <rayforce.h>          /* ray_t — the `.z.ac` return-value parser prototype */
 #include "core/sock.h"
 
 /* Percent-decode a request path exactly once into out (NUL-terminated).
@@ -43,6 +46,17 @@ const char* q_http_docroot(char* buf, size_t bufsz);
  * O_NOFOLLOW; reparse-point escape is a documented platform divergence). */
 int q_http_open_doc(const char* rel, size_t n, int64_t* size_out);
 
+/* Embedded default site (src/qlang/html/, baked in via html_assets_gen.h): the
+ * fallback served when no on-disk ./html docroot exists. Pure table match (no
+ * filesystem, no traversal). q_http_asset_lookup normalizes `path` (strips
+ * leading '/', empty/"/" -> "index.html") then exact-matches the table; returns
+ * the bytes + *len_out (Content-Length; the array's trailing NUL is excluded),
+ * or NULL on a miss. The count/at accessors expose the table for tests. */
+const unsigned char* q_http_asset_lookup(const char* path, size_t* len_out);
+size_t               q_http_asset_count(void);
+bool                 q_http_asset_at(size_t i, const char** path_out,
+                                     const unsigned char** bytes_out, size_t* len_out);
+
 /* Compose + send one minimal text/plain response (used for all error codes). */
 void q_http_send_simple(ray_sock_t fd, int code, const char* reason);
 
@@ -58,5 +72,14 @@ int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs);
  * unparseable -> 400.  Never closes fd (the caller owns the socket). */
 int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
                    bool auth_required);
+
+/* Structural parse of a `.z.ac` return value `(status; payload)` (ref/dotz.md):
+ * item0 an integer atom (byte/short/int/long), item1 a RAY_STR atom.  On a
+ * well-formed 2-item list writes *status_out and the payload ptr/len (aliasing
+ * r's storage — valid only while r is retained) and returns true; false on any
+ * other shape.  Pure (no socket/send) so it is unit-tested directly; the caller
+ * (the gate) maps the status to reject / proceed / custom / fallback. */
+bool q_http_zac_parse(const ray_t* r, int64_t* status_out,
+                      const char** pay_out, size_t* paylen_out);
 
 #endif /* Q_HTTP_H */
