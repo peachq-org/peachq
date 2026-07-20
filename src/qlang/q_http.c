@@ -244,7 +244,8 @@ bool q_http_zac_parse(const ray_t* r, int64_t* status_out,
     if (!s || !pv) return false;
     int64_t st;
     switch (s->type) {
-        case -RAY_U8:  st = (int64_t)s->u8;  break;
+        case -RAY_BYTE_ONLY: case -RAY_CHARV:
+                       st = (int64_t)s->u8;  break;
         case -RAY_I16: st = (int64_t)s->i16; break;
         case -RAY_I32: st = (int64_t)s->i32; break;
         case -RAY_I64: st = s->i64;          break;
