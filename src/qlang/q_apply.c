@@ -630,7 +630,8 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                 size_t sl = ray_str_len(s);
                 if ((sl >= 6 && memcmp(sp, ":ws://", 6) == 0) ||
                     (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
-                    if (n == 1 && args[0] && args[0]->type == -RAY_STR)
+                    if (n == 1 && args[0] && (args[0]->type == -RAY_STR ||
+                                          args[0]->type == RAY_CHARV || args[0]->type == -RAY_CHARV))
                         return q_ws_client_open(head, args[0]);
                     return NULL;
                 }
@@ -646,7 +647,8 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                 size_t hl = ray_str_len(s);
                 if ((hl >= 8 && memcmp(hp, ":http://", 8) == 0) ||
                     (hl >= 9 && memcmp(hp, ":https://", 9) == 0)) {
-                    if (n == 1 && args[0] && args[0]->type == -RAY_STR)
+                    if (n == 1 && args[0] && (args[0]->type == -RAY_STR ||
+                                          args[0]->type == RAY_CHARV || args[0]->type == -RAY_CHARV))
                         return q_http_raw_client(head, args[0]);
                     return NULL;
                 }
