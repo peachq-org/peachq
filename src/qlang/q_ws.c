@@ -14,6 +14,7 @@
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
+#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
 #include <time.h>
 #ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN
@@ -253,8 +254,8 @@ static void ws_dispatch(q_ws_conn_t* c, ray_sock_t fd, int opcode,
         return;
     }
     ray_t* arg = (opcode == Q_WS_OP_TEXT)
-        ? ray_str((const char*)p, n)
-        : ray_vec_from_raw(RAY_U8, p, (int64_t)n);
+        ? ray_charv((const char*)p, (int64_t)n)
+        : ray_vec_from_raw(RAY_BYTE_ONLY, p, (int64_t)n);
     if (!arg || RAY_IS_ERR(arg)) {
         if (arg) ray_error_free(arg);
         fprintf(stderr, "ws: message arg allocation failed\n");
@@ -415,10 +416,11 @@ int64_t q_ws_feed(q_ws_conn_t* c, ray_sock_t fd, uint8_t* data, size_t len) {
 int q_ws_send(q_ws_conn_t* c, ray_sock_t fd, ray_t* msg) {
     int mask = c && c->role == Q_WS_CLIENT;      /* client masks; server plain */
     if (!msg || RAY_IS_NULL(msg)) return 0;      /* neg[h][] flush -> no-op */
-    if (msg->type == -RAY_STR)
-        return ws_frame_send(fd, Q_WS_OP_TEXT, ray_str_ptr(msg),
-                             ray_str_len(msg), Q_WS_DATA_SECS, mask);
-    if (msg->type == RAY_U8)
+    { const char* tp; int64_t tn;                /* charv OR legacy STR text */
+      if (q_text_bytes(msg, &tp, &tn))
+          return ws_frame_send(fd, Q_WS_OP_TEXT, tp, (size_t)tn,
+                               Q_WS_DATA_SECS, mask); }
+    if (msg->type == RAY_BYTE_ONLY)
         return ws_frame_send(fd, Q_WS_OP_BIN, ray_data(msg),
                              (size_t)msg->len, Q_WS_DATA_SECS, mask);
     return -2;
