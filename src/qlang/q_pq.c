@@ -11,28 +11,70 @@
 #include <stdio.h>             /* fprintf, stderr — gate diagnostics */
 #include <string.h>            /* strchr, memcpy, strlen */
 #include <stdlib.h>            /* malloc, free */
-#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
+#include "qlang/q_registry.h"   /* q_text_bytes, q_charv_out — text accessors */
+#include "lang/format.h"        /* ray_fmt — rayforce-native tree display */
+
+/* Copy a q text arg (charv / char atom / -RAY_STR) into a malloc'd NUL-
+ * terminated C string. q_parse / ray_eval_str need termination; a charv's
+ * bytes are not guaranteed terminated. On failure returns NULL and sets *err
+ * to an owned RAY_ERROR the caller returns as-is. Free the result with free(). */
+static char* q_pq_src_dup(ray_t* x, ray_t** err) {
+    const char* sp; int64_t sn;
+    if (!q_text_bytes(x, &sp, &sn)) { *err = ray_error("type", "pq: expects a string"); return NULL; }
+    if (!sp) { *err = ray_error("domain", "pq: bad source string"); return NULL; }
+    size_t sl = (size_t)sn;
+    char* src = malloc(sl + 1);
+    if (!src) { *err = ray_error("wsfull", "pq: out of memory"); return NULL; }
+    memcpy(src, sp, sl);
+    src[sl] = '\0';
+    return src;
+}
 
 /* (.pq.c.ray str) — the generic rayfall (lisp) escape hatch. Parse+eval the
  * SOURCE string through the engine's own rayfall dialect (ray_eval_str) and
  * return the value as-is. Results are RAW engine values (exotic rayfall shapes
- * may display oddly through q_fmt — accepted; internal hatch). ray_eval_str
- * needs a NUL-terminated C string; a RAY_STR atom's bytes are not guaranteed
- * terminated, so copy through a bounded scratch buffer. Errors propagate as
- * ordinary q errors. */
+ * may display oddly through q_fmt — accepted; internal hatch). Errors propagate
+ * as ordinary q errors. */
 static ray_t* q_pq_ray_fn(ray_t* x) {
-    const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "ray expects a string");
-    size_t sl = (size_t)sn;
-    if (!sp) return ray_error("domain", "ray: bad source string");
-    char* src = malloc(sl + 1);
-    if (!src) return ray_error("wsfull", "ray: out of memory");
-    memcpy(src, sp, sl);
-    src[sl] = '\0';
+    ray_t* err = NULL;
+    char* src = q_pq_src_dup(x, &err);
+    if (!src) return err;
     ray_t* r = ray_eval_str(src);
     free(src);
     return r;   /* owned value / owned error / NULL void — all propagate as-is
                  * (the q apply layer treats NULL as a legitimate void result) */
+}
+
+/* (.pq.c.parse str) — the RAW pre-lower AST rendered in RAYFORCE-native
+ * notation via ray_fmt (unlike `parse`, which renders q notation). Returns a q
+ * char-vector so the tree text is composable. */
+static ray_t* q_pq_parse_fn(ray_t* x) {
+    ray_t* err = NULL;
+    char* src = q_pq_src_dup(x, &err);
+    if (!src) return err;
+    ray_t* ast = q_parse(src);
+    free(src);
+    if (RAY_IS_ERR(ast)) return ast;   /* q parse error -> q error, as-is */
+    ray_t* repr = ray_fmt(ast, 0);
+    ray_release(ast);
+    return q_charv_out(repr);   /* consumes repr, returns owned q charv */
+}
+
+/* (.pq.c.tree str) — the POST-lower tree (exactly what ray_eval receives)
+ * rendered via ray_fmt (rayforce-native). q_lower rewrites the fresh q_parse
+ * AST in place (sole-owner). Returns a q char-vector. */
+static ray_t* q_pq_tree_fn(ray_t* x) {
+    ray_t* err = NULL;
+    char* src = q_pq_src_dup(x, &err);
+    if (!src) return err;
+    ray_t* ast = q_parse(src);
+    free(src);
+    if (RAY_IS_ERR(ast)) return ast;
+    ray_t* low = q_lower(ast);          /* in place, no retain first */
+    if (RAY_IS_ERR(low)) return low;
+    ray_t* repr = ray_fmt(low, 0);
+    ray_release(low);
+    return q_charv_out(repr);
 }
 
 /* Eval one q source line via the q pipeline (q_parse -> q_lower -> ray_eval),
@@ -55,12 +97,20 @@ static ray_t* q_pq_eval(const char* src) {
  * pq.q so the `.pq.ray:.pq.c.ray` alias resolves. Returns RAY_OK, else the
  * bind error (e.g. `.pq` pre-exists as a non-dict → 'type) so the loader can
  * fail fast without a partial install. */
-static ray_err_t q_pq_bind_natives(void) {
-    ray_t* rayfn = ray_fn_unary(".pq.c.ray", RAY_FN_NONE, q_pq_ray_fn);
-    if (RAY_IS_ERR(rayfn)) { ray_error_free(rayfn); return RAY_ERR_OOM; }  /* ray_fn_unary → owned 'oom on failure */
-    ray_err_t rc = ray_env_bind(ray_sym_intern(".pq.c.ray", 9), rayfn);
-    ray_release(rayfn);   /* bind retains */
+static ray_err_t q_pq_bind_one(const char* name, int nlen, ray_t* (*fn)(ray_t*)) {
+    ray_t* v = ray_fn_unary(name, RAY_FN_NONE, fn);
+    if (RAY_IS_ERR(v)) { ray_error_free(v); return RAY_ERR_OOM; }  /* ray_fn_unary → owned 'oom on failure */
+    ray_err_t rc = ray_env_bind(ray_sym_intern(name, nlen), v);
+    ray_release(v);   /* bind retains */
     return rc;
+}
+
+static ray_err_t q_pq_bind_natives(void) {
+    ray_err_t rc = q_pq_bind_one(".pq.c.ray", 9, q_pq_ray_fn);
+    if (rc != RAY_OK) return rc;
+    rc = q_pq_bind_one(".pq.c.parse", 11, q_pq_parse_fn);
+    if (rc != RAY_OK) return rc;                                   /* fail fast: no partial install */
+    return q_pq_bind_one(".pq.c.tree", 10, q_pq_tree_fn);
 }
 
 void q_pq_load(void) {
