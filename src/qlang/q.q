@@ -58,9 +58,8 @@
 .q.all:{$[98h=type x;all each flip x;0h>type b:"b"$x;b;0=count b;1b;(&/)b]}
 .q.any:{$[98h=type x;any each flip x;0h>type b:"b"$x;b;0=count b;0b;(|/)b]}
 / ref/tables.md "default is root namespace" — and bare `system"a"` lists the CURRENT
-/ context, so [] must pass `. itself.  f[] binds x to :: , but type/null/count/string
-/ all THROW on :: and `(::)~x` elides to a projection (PLAN.md) — matching against a
-/ constructed null is the one total test.  A bad namespace throws \a's own error.
-.q.tables:{system"a ",string $[({x}[])~x;`.;x]}
+/ context, so [] must pass `. itself.  f[] binds x to :: , and the kdb null-test
+/ idiom `(::)~x` is the one total test.  A bad namespace throws \a's own error.
+.q.tables:{system"a ",string $[(::)~x;`.;x]}
 / ref/view.md: views[] is niladic, "views defined in the default namespace".
 .q.views:{system"b"}
