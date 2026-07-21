@@ -1,12 +1,22 @@
-/* q_bang — the `-N!` internal-function dispatcher (see q_bang.h): a switch over the
- * negative bang id.  The bang is the single C home; the q name (`.j.k`, `.Q.btoa`)
- * delegates to it in q (`name:-N!`).  Monadic (`-27!` takes a 2-list); unknown -> 'nyi. */
+/* q_bang — the single C home for the `!` verb.  Principles:
+ *  - PURE value semantics: every function maps values -> values with no env or
+ *    runtime state, so the whole `!` surface is unit-testable in isolation.
+ *  - Amend-by-reference (`N!`name`) is deliberately NOT here — it needs global
+ *    env read/write, so it belongs to a runtime amend layer, not the verb.
+ *  - q_bang_dispatch owns every INT left operand: 0N show, negative internal
+ *    fns (the `-N!` home; q names delegate `name:-N!`), N>=0 enkey; else dict. 
+ * 
+ * It contains one fully generic ``ray_t* q_bang(ray_t* x, ray_t* y)`` that works on ray_t objects and exactly matches q public API.
+ * and for each significant operation it exposes a specialized function with types where possible e.g. ``q_bang_dispatch(int64_t id, ray_t* y)``  ``ray_t* q_bang_make_dict(ray_t* x, ray_t* y)`` 
+ * These more specific names are for reuse in the code base. Having the specific types also helps. 
+ */
 #include "qlang/q_bang.h"
-#include "qlang/q_registry_internal.h"  /* q_value_wrap, q_hsym_wrap, q_attr_wrap, q_strict_i64 */
+#include "qlang/q_registry_internal.h"  /* q_value_wrap, q_hsym_wrap, q_attr_wrap, q_strict_i64,
+                                         * q_is_int_atom, q_iatom_val, q_table_flatten, q_env_call2 */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
-#include "qlang/q_fmt.h"        /* q_fmt_krepr — single-line repr backing `-3!` / .Q.s1 */
+#include "qlang/q_fmt.h"        /* q_fmt_krepr / q_console_write — `-3!`, .Q.s1, 0N! */
 #include <rayforce.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -121,10 +131,78 @@ static ray_t* h_format(ray_t* arg) {
     return ray_error("type", "-27!: y");
 }
 
-/* Dispatch a q internal function `-N!`.  See q_bang.h for the operand contract.
+/* ---- the non-negative band: enkey / dict-make ------------------------------ */
+
+/* q enkey/unkey `N!table`: 0 -> plain table (unkey), N>0 -> key the first N
+ * columns into a keyed table (RAY_DICT keycols-table -> valcols-table).
+ * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
+ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
+    if (!y || (y->type != RAY_TABLE && !q_is_keyed_table(y)))
+        return ray_error("type", "!: enkey/unkey needs a table");
+    ray_t* flat = q_table_flatten(y);
+    if (!flat || RAY_IS_ERR(flat)) return flat;
+    int64_t nc = ray_table_ncols(flat);
+    if (nkey <= 0) return flat;                 /* unkey */
+    if (nkey >= nc) { ray_release(flat); return ray_error("length", "!: key count exceeds columns"); }
+    ray_t* kt = ray_table_new(nkey);
+    ray_t* vt = ray_table_new(nc - nkey);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+        int64_t nm = ray_table_col_name(flat, c);
+        ray_t* col = ray_table_get_col_idx(flat, c);
+        if (c < nkey) kt = ray_table_add_col(kt, nm, col);
+        else          vt = ray_table_add_col(vt, nm, col);
+    }
+    ray_release(flat);
+    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);
+}
+
+/* q `x!y` — dict make.  x and y must be equal-length LISTS (kdb: atom!atom is
+ * NOT a dict; enlist first).  One `count` gate covers vector!vector AND
+ * table!table (rows).  ()!() is the empty dict; a keyed table is a table!table
+ * dict.  vals pass through as-is (rayfall `dict` broadcasts/boxes). */
+ray_t* q_bang_make_dict(ray_t* x, ray_t* y) {
+    if (q_count_long(x) != q_count_long(y))
+        return ray_error("length", "!: key and value counts must match");
+    if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
+        ray_retain(x);
+        ray_retain(y);
+        return ray_dict_new(x, y);               /* consumes both retains */
+    }
+    /* `()!()` — rayfall's dict rejects the empty general list, so build it
+     * directly: empty general-list keys, empty boxed vals. */
+    if (x->type == RAY_LIST && ray_len(x) == 0 && ray_len(y) == 0) {
+        ray_retain(x);
+        return ray_dict_new(x, ray_list_new(0)); /* consumes x + fresh empty list */
+    }
+    if ((ray_is_vec(x) || x->type == RAY_LIST) && (ray_is_vec(y) || y->type == RAY_LIST))
+        return q_env_call2("dict", x, y);
+    return ray_error("type", "!: key and value must be lists");
+}
+
+
+/* `0N!x` — debug print: write x's single-line k-repr to the console sink and pass
+ * x through unchanged (ref/display.md; file-text.md pins the repr).  Borrowed y in,
+ * OWNED y out — the retain balances the caller's release of the result. */
+static ray_t* q_bang_show(ray_t* y) {
+    char buf[8192]; buf[0] = '\0';
+    q_fmt_krepr(y, buf, sizeof buf);
+    q_console_write(buf, strlen(buf));
+    q_console_write("\n", 1);
+    ray_retain(y);
+    return y;
+}
+
+
+/* Dispatch every INT left operand of `!`.  See q_bang.h for the contract.
  * Borrowed `y`; returns an OWNED value or error. */
 ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
+    if (id >= 0) {
+        return q_bang_enkey(id, y);
+    }
     switch (id) {
+        case NULL_I64: return q_bang_show(y);   /* 0N!x — debug print, pass through */
         case -1:  return q_hsym_wrap(y);
         case -2:  return q_attr_wrap(y);
         case -3:  return h_s1(y);
@@ -172,4 +250,15 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         default:   /* unknown id -> not an internal function -> 'nyi           */
             return ray_error("nyi", NULL);
     }
+}
+
+/* The `!` verb (registry row in q_ops.c).  An INT atom lhs IS the dispatch band
+ * (show / internal / enkey / dict) — delegated whole.  A typed null (0Nh/0Ni/0N)
+ * canonicalizes to NULL_I64 so every null width lands on the one `0N!` show case;
+ * a plain 0N already IS NULL_I64.  Everything else is a dict. */
+ray_t* q_bang(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "!: nil operand");
+    if (q_is_int_atom(x))
+        return q_bang_dispatch(RAY_ATOM_IS_NULL(x) ? NULL_I64 : q_iatom_val(x), y);
+    return q_bang_make_dict(x, y);
 }
