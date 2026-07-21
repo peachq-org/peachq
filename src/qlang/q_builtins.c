@@ -14,7 +14,7 @@
 #include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
 #include "qlang/q_registry.h" /* q_registry_init */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
-#include "qlang/q_fmt.h"      /* q_console_show — show's display sink */
+#include "qlang/q_fmt.h"      /* q_console_show — show's display sink; q_float_tok — string's float leaf */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "lang/format.h"    /* ray_fmt — q string cast */
@@ -49,7 +49,8 @@ ray_t* q_parse_builtin_fn(ray_t* x) {
 }
 
 /* (string x) — q cast-to-string.  ATOM: a sym renders bare (`ibm -> "ibm"),
- * a string passes through, other atoms reuse rayfall's formatter (string 42
+ * a string passes through, floats take the q float->text leaf (q_float_tok),
+ * remaining atoms reuse rayfall's formatter (string 42
  * -> "42").  VECTOR / LIST: q maps string over each item, yielding a LIST of
  * strings (`string 192 168 1 23` -> ("192";"168";"1";"23")) — the base
  * formatter would instead render the whole vector as one bracketed string. */
@@ -65,6 +66,16 @@ ray_t* q_string_fn(ray_t* x) {
         return ray_charv((const char*)&x->u8, 1);
     /* NB a charv vector falls to the element-wise arm below: kdb `string
      * "cat"` -> (,"c";,"a";,"t") (ref/string.md:37-39). */
+    /* Float atoms take THE q float->text leaf (q_float_tok, \P-honouring) in
+     * suffix-free mode — never rayfall's base formatter, whose ".0" padding /
+     * 0Nf null are rayfall conventions, not q's.  0: Prepare Text inherits
+     * this arm through q_ft_cell_text -> q_string_fn. */
+    if (x->type == -RAY_F64 || x->type == -RAY_F32) {   /* F32 atoms store f64 */
+        char tok[64];
+        double v = (x->type == -RAY_F32) ? (double)(float)x->f64 : x->f64;
+        q_float_tok(v, 0, tok, sizeof tok);   /* narrow reals like display does */
+        return ray_charv(tok, (int64_t)strlen(tok));
+    }
     /* Only a simple VECTOR or a boxed LIST maps element-wise; atoms and
      * whole-value containers (tables, dicts, and anything else) keep the base
      * formatter — indexing a table by 0..ncols would fabricate junk rows. */

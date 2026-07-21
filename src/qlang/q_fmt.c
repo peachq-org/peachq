@@ -291,7 +291,6 @@ static int q_col_uniform_singleton(ray_t* col) {
     return 1;
 }
 
-static void q_float_tok(double v, int f32, char* out, size_t n);   /* fwd */
 
 /* One table cell: sym cells print WITHOUT the backtick (kdb `ibm`). */
 void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
@@ -459,7 +458,7 @@ static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
  * the horizon exponent-form (timespan.qcmd:162 pins 3e+11); else %.*g.  The
  * 10^prec horizon must be EXACT powers of 10 (pow() drift would move the
  * `\P 7` boundary off 1e7).  Infinities: out of scope (sentinel-null). */
-static void q_float_tok(double v, int f32, char* out, size_t n) {
+void q_float_tok(double v, int f32, char* out, size_t n) {
     if (isnan(v)) { snprintf(out, n, f32 ? "0Ne" : "0n"); return; }
     int prec = g_print_prec ? g_print_prec : 17;
     static const double POW10[18] = {
