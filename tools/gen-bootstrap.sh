@@ -31,17 +31,31 @@ fi
 # safety), backslash first, then double-quote; emit one "..\n" chunk per line
 # so the embedded text keeps its newlines (the loader splits on '\n' and skips
 # blank / `/`-comment lines). One chunk per line keeps the seed's inner quotes
-# (e.g. .Q.b6's "..+/") correctly escaped. The replacements are DOUBLY escaped —
-# awk unescapes the string literal, then gsub unescapes the replacement — so four
-# source backslashes emit the two a C literal needs. Under-escaping is silent for
-# quotes but turns a .q `"\t"` into a raw TAB and `"\r\n"` into a raw newline,
-# splitting a definition across the line-at-a-time loader.
+# (e.g. .Q.b6's "..+/") correctly escaped.
+#
+# The escaping walks the line CHARACTER BY CHARACTER rather than using gsub.
+# gsub's REPLACEMENT text has its own escaping layer, and mawk and gawk disagree
+# about how many backslashes it eats — the same script emitted `\"` on mawk and
+# `\\"` on gawk, so the build passed locally and broke on the CI runner (which
+# defaults to gawk). Concatenating plain string literals has no second layer, so
+# every awk produces identical bytes.
 {
     printf '/* AUTO-GENERATED from %s by tools/gen-bootstrap.sh — DO NOT EDIT. */\n' "$*"
     printf '#ifndef %s\n#define %s\n' "$guard" "$guard"
     printf 'static const char %s[] =\n' "$sym"
     awk '
-        { sub(/\r$/, ""); gsub(/\\/, "\\\\\\\\"); gsub(/"/, "\\\\\""); printf "\"%s\\n\"\n", $0 }
+        {
+            sub(/\r$/, "");
+            out = ""; n = length($0);
+            for (i = 1; i <= n; i++) {
+                c = substr($0, i, 1);
+                # awk comments are #, not /* */ — a /*..*/ here parses as a regex.
+                if      (c == "\\") out = out "\\\\";   # one backslash -> two
+                else if (c == "\"")  out = out "\\\"";    # one quote -> backslash quote
+                else                out = out c;
+            }
+            printf "\"%s\\n\"\n", out;
+        }
         END { print ";" }
     ' "$@"
     printf '#endif /* %s */\n' "$guard"
