@@ -157,7 +157,6 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y);
 ray_t* q_upsert_wrap(ray_t* x, ray_t* y);
 ray_t* q_join_wrap(ray_t* x, ray_t* y);
 ray_t* q_except_wrap(ray_t* x, ray_t* y);
-ray_t* q_bang_wrap(ray_t* x, ray_t* y);
 ray_t* q_key_wrap(ray_t* x);
 ray_t* q_distinct_wrap(ray_t* x);
 ray_t* q_union_wrap(ray_t* x, ray_t* y);
@@ -230,7 +229,6 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: regist
 ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, table */
 int q_is_keyed_table(ray_t* y);                               /* used by: apply, builtins, agg, join, math, table */
 ray_t* q_table_flatten(ray_t* y);                             /* used by: ops, join, table */
-ray_t* q_enkey(ray_t* y, int64_t nkey);                       /* used by: ops, join, table */
 
 /* ---- defined in q_wrap_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */

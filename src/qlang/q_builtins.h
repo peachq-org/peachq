@@ -23,4 +23,10 @@ ray_t* q_dotq_btoa_fn(ray_t* x);
  * Exported so the `-33!` bang alias routes to this same stable C single home
  * (kdb keeps `-33!` as the SHA-1 primitive; `.Q.sha1` is the utility twin). */
 ray_t* q_dotq_sha1_fn(ray_t* x);
+
+/* q `count x` (fn-value -> 1, else the base count).  Exported so `!`'s length
+ * gate (q_bang_make_dict) measures key/value counts with q semantics.
+ * q_count_long is the int64 specialization for callers wanting the number. */
+ray_t* q_count_fn(ray_t* x);
+int64_t q_count_long(ray_t* x);
 #endif /* Q_BUILTINS_H */
