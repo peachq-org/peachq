@@ -178,37 +178,12 @@ static bool str_ieq(const char* s, size_t n, const char* lower_tok) {
     return true;
 }
 
-const char* q_http_mime_type(const char* path) {
-    const char* dot = strrchr(path, '.');
-    if (!dot || !dot[1]) return "application/octet-stream";
-    /* Covers kdb .h.ty's extensions (ref/doth.md: htm/html/csv/txt/xml/xls/gif...)
-     * plus the web essentials a static server needs; VALUES are modern-correct
-     * (kdb's .h.ty is dated, e.g. xml->text/plain) since this serves live browsers. */
-    static const struct { const char* ext; const char* ty; } M[] = {
-        { "html", "text/html" },   { "htm",  "text/html" },
-        { "css",  "text/css" },    { "js",   "application/javascript" },
-        { "mjs",  "application/javascript" },
-        { "png",  "image/png" },   { "jpg",  "image/jpeg" },
-        { "jpeg", "image/jpeg" },  { "gif",  "image/gif" },
-        { "svg",  "image/svg+xml" }, { "ico", "image/x-icon" },
-        { "webp", "image/webp" },
-        { "json", "application/json" }, { "txt", "text/plain" },
-        { "csv",  "text/csv" },     { "xml",  "application/xml" },
-        { "pdf",  "application/pdf" }, { "wasm", "application/wasm" },
-        { "woff", "font/woff" },    { "woff2", "font/woff2" },
-        { "xls",  "application/vnd.ms-excel" },
-    };
-    const char* ext = dot + 1;
-    for (size_t i = 0; i < sizeof M / sizeof *M; i++)
-        if (str_ieq(ext, strlen(ext), M[i].ext)) return M[i].ty;
-    return "application/octet-stream";
-}
 
 /* Read a name from the global q env, but ONLY when a per-thread VM is bound —
  * ray_env_get walks the scope stack via __VM and derefs it unconditionally.  The
  * live server always serves on the runtime's main thread (VM bound), so `.h.*`
- * resolves; a caller with no bound VM (the pure-C-seam unit tests) degrades to
- * the fallback instead of crashing.  Borrowed ref (never release). */
+ * resolves; a caller with no bound VM degrades to the octet-stream default
+ * instead of crashing.  Borrowed ref (never release). */
 static ray_t* http_env_get(int64_t sym_id) {
     return __VM ? ray_env_get(sym_id) : NULL;
 }
@@ -287,7 +262,14 @@ const char* q_http_mime_lookup(const char* path, char* scratch, size_t scratchsz
             }
         }
     }
-    return q_http_mime_type(path);
+    /* Miss (no dot, unknown extension, unusable value, `.h.ty` unset or not a
+     * dict): the documented default for an unknown type (ref/doth.md .h.hn).
+     * NOTE: `.h.ty` is the ONE MIME table (src/qlang/h.q), so a process without
+     * the q bootstrap — the bare `rayforce` binary, which still routes HTTP —
+     * serves every asset as octet-stream.  ACCEPTED, owner ruling 2026-07-21:
+     * rayforce's web slice has no users, and a second C table would reintroduce
+     * the drift that silently beat user `.h.ty` overrides.  Not a bug to fix. */
+    return "application/octet-stream";
 }
 
 int q_http_open_doc(const char* rel, size_t n, int64_t* size_out) {
