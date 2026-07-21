@@ -27,12 +27,19 @@ LIB_SRC := $(filter-out src/core/ipc.c, $(LIB_SRC))
 # wasm/ipc_stub.c — inert stubs for the ipc symbols the retained TUs reference
 #                   (ipc.c is excluded above; there is no networking in a tab).
 GLUE_SRC = wasm/q_wasm.c wasm/ipc_stub.c
-SRC      = $(LIB_SRC) $(GLUE_SRC) third_party/yyjson/yyjson.c
+# Vendored deps the retained TUs #include: yyjson (.j JSON), miniz (.Q.gz, via
+# q_gz.c) and picohttpparser (the HTTP slice, via q_http.c). Listed explicitly
+# rather than globbed so a new third_party/ component is a deliberate decision
+# here — but note the whole directory ships to the release mirror, so anything
+# src/ references MUST be added or the wasm build breaks (miniz did, 2026-07-21).
+VENDOR_SRC = third_party/yyjson/yyjson.c third_party/miniz/miniz.c \
+             third_party/picohttpparser/picohttpparser.c
+SRC      = $(LIB_SRC) $(GLUE_SRC) $(VENDOR_SRC)
 
 TARGET = peachq
 OUTDIR = wasm
 
-INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson
+INCLUDES = -Iinclude -Isrc -Ithird_party/yyjson -Ithird_party/miniz -Ithird_party/picohttpparser
 # Real version + build date from the root VERSION file (same source as the
 # native build), so .z.K / .z.k / the banner are correct in the browser.
 RAY_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0)
