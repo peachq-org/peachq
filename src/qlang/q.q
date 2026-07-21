@@ -63,3 +63,10 @@
 .q.tables:{system"a ",string $[(::)~x;`.;x]}
 / ref/view.md: views[] is niladic, "views defined in the default namespace".
 .q.views:{system"b"}
+
+/ ---- wave 5 (ref/save.md) ----
+/ `[path/to/]v.ext`: get the global v, dispatch .ext through .h.tx, write with Save Text
+/ (which creates parent dirs, overwrites, and returns the filename) — no formatting of its
+/ own, every byte comes from .h.tx/0:.  No .ext = the binary arm: 'nyi while `:f set x is
+/ (PLAN.md).  An .ext .h.tx does not key signals that ext (`xls: openq writes no Excel).
+.q.save:{f:{p:"." vs last "/" vs string x;$[2>count p;'`nyi;not (e:`$last p) in key .h.tx;'e;(hsym x) 0: .h.tx[e] get `$"." sv -1_p]};$[-11h=type x;f x;11h=type x;f each x;'`type]}
