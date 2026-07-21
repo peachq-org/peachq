@@ -909,29 +909,6 @@ ray_t* q_table_flatten(ray_t* y) {
     return out;
 }
 
-/* q enkey/unkey `N!table`: 0 -> plain table (unkey), N>0 -> key the first N
- * columns into a keyed table (RAY_DICT keycols-table -> valcols-table).
- * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
-ray_t* q_enkey(ray_t* y, int64_t nkey) {
-    ray_t* flat = q_table_flatten(y);
-    if (!flat || RAY_IS_ERR(flat)) return flat;
-    int64_t nc = ray_table_ncols(flat);
-    if (nkey <= 0) return flat;                 /* unkey */
-    if (nkey >= nc) { ray_release(flat); return ray_error("length", "!: key count exceeds columns"); }
-    ray_t* kt = ray_table_new(nkey);
-    ray_t* vt = ray_table_new(nc - nkey);
-    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
-        int64_t nm = ray_table_col_name(flat, c);
-        ray_t* col = ray_table_get_col_idx(flat, c);
-        if (c < nkey) kt = ray_table_add_col(kt, nm, col);
-        else          vt = ray_table_add_col(vt, nm, col);
-    }
-    ray_release(flat);
-    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
-    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
-    return ray_dict_new(kt, vt);
-}
-
 /* ===== q grade / bucket family ============================================
  * GRADE IS THE PRIMITIVE: iasc/idesc own ordering for every structure (vector →
  * ray_iasc_fn; dict → keys by the value grade; table/keyed → q_grade_table), and

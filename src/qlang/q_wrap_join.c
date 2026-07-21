@@ -6,6 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_bang.h"  /* q_bang_enkey — keyed-result construction */
 #include "lang/env.h"      /* ray_env_get */
 #include "lang/eval.h"     /* ray_eval; ray_left_join_fn, ray_window_join*_fn */
 #include "lang/internal.h" /* ray_asof_join_fn, ray_concat_fn, ray_vec_set_null, ray_error */
@@ -22,7 +23,7 @@
  * src/ops/join.c machinery); this section only prepares rowid-augmented key
  * tables, reorders the engine's match relation to kdb row order, and
  * assembles result columns by vector gather.  Keyed-table primitives are the
- * single-home helpers in q_wrap_list.c (q_is_keyed_table / q_enkey /
+ * single-home helpers (q_is_keyed_table in q_wrap_list.c, q_bang_enkey in q_bang.c,
  * q_table_flatten) — never redefined.  Refcounts: wrapper args BORROWED, results OWNED;
  * ray_list_append/ray_table_add_col RETAIN (release local after);
  * ray_table_get_col* return BORROWED columns. */
@@ -365,7 +366,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
         ray_t* r = qj_lj_core(xp, y, mode, inner);
         ray_release(xp);
         if (!r || RAY_IS_ERR(r)) return r;
-        ray_t* kr = q_enkey(r, nkeys);
+        ray_t* kr = q_bang_enkey(nkeys, r);
         ray_release(r);
         return kr;
     }
@@ -619,7 +620,7 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
     free(rmap);
     ray_release(yf);
     if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("type", NULL);
-    ray_t* kr = q_enkey(out, nkeys);
+    ray_t* kr = q_bang_enkey(nkeys, out);
     ray_release(out);
     return kr;
 }

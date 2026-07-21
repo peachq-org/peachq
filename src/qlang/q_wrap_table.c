@@ -1,5 +1,5 @@
 /* q_wrap_table.c — table verbs: flip/keys/xkey/xgroup/ungroup, insert/upsert,
- * dict-make !, key, set, set-ops (distinct/union/inter/except/cross),
+ * key, set, set-ops (distinct/union/inter/except/cross),
  * and the shared right-to-left context builder (list/table literals)
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
@@ -12,7 +12,6 @@
 #include "qlang/q_deriv.h" /* q_deriv_kind_of/base, Q_DERIV_LAMBDA */
 #include "qlang/q_wire.h"  /* -8!/-9! serde arms on dyadic ! */
 #include "qlang/q_bang.h"  /* q_bang_dispatch — the `-N!` internal-fn manifest */
-#include "qlang/q_fmt.h"   /* q_console_show_krepr — 0N! debug print */
 #include "qlang/q_dotz.h"  /* q_dotz_ipc_hook_index, q_dotz_zts_set — .z.* handler arms */
 #include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
 #include "lang/eval.h"     /* ray_eval; ray_list_fn, ray_except_fn, ray_sect_fn, ray_take_fn */
@@ -26,7 +25,7 @@
 /* ===== table verbs (feat/q-table-verbs) ====================================
  * flip/keys/xkey/xasc/xdesc/xgroup/ungroup/insert/upsert + the
  * table arms of distinct/union/inter/except.  All built over the wave-4
- * keyed primitives (q_wrap_list.c: q_is_keyed_table / q_enkey /
+ * keyed primitives (q_is_keyed_table in q_wrap_list.c, q_bang_enkey in q_bang.c,
  * q_table_flatten) — NEVER duplicated (the #56 failure mode).  Row-equality is boxed q-match
  * compares: O(n^2) wrapper-tier code at test scale by design (single-home
  * principle; SIMD paths belong to the engine).                              */
@@ -380,7 +379,7 @@ ray_t* q_keys_wrap(ray_t* x) {
 }
 
 /* q `x xkey y` — set key columns: reorder x-first, enkey count x (reuses
- * q_enkey).  By-reference (y a name): rebind and return the name. */
+ * q_bang_enkey).  By-reference (y a name): rebind and return the name. */
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
     int64_t names[64];
     int64_t n = q_sym_ids(x, names, 64);
@@ -396,7 +395,7 @@ ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
         ray_t* reord = q_table_reorder(flat, names, n);
         ray_release(flat);
         if (!reord || RAY_IS_ERR(reord)) return reord;
-        keyed = q_enkey(reord, n);
+        keyed = q_bang_enkey(n, reord);
         ray_release(reord);
         if (!keyed || RAY_IS_ERR(keyed)) return keyed;
     }
@@ -872,7 +871,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     ray_release(flat); ray_release(rows);
     if (!nf || RAY_IS_ERR(nf)) return nf;
     ray_t* nt;
-    if (keyed) { nt = q_enkey(nf, nkey); ray_release(nf); }
+    if (keyed) { nt = q_bang_enkey(nkey, nf); ray_release(nf); }
     else nt = nf;
     if (!nt || RAY_IS_ERR(nt)) return nt;
     ray_env_bind(x->i64, nt);                             /* retains */
@@ -990,7 +989,7 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     ray_release(flat); ray_release(rows);
     if (!nf || RAY_IS_ERR(nf)) return nf;
     ray_t* nt;
-    if (keyed) { nt = q_enkey(nf, nkey); ray_release(nf); }
+    if (keyed) { nt = q_bang_enkey(nkey, nf); ray_release(nf); }
     else nt = nf;
     if (!nt || RAY_IS_ERR(nt)) return nt;
     if (sym >= 0) {
@@ -1175,108 +1174,6 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
     return ray_except_fn(x, y);
 }
 
-/* q `x!y` — dict make.  An atom key enlists to a 1-vector first (kdb `a!1`
- * is a dict too; rayfall dict wants vector keys); vals pass through as-is
- * (rayfall dict broadcasts atom vals and boxes the rest itself).  kdb
- * 'length fidelity: rayfall would null-fill a short vals side, so the
- * count check lives here.  String keys are a deferred cell (string model). */
-ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "!: nil operand");
-    /* wire pass 3: null operands are reachable (q_fn_null_ok blesses `!` at
-     * the eval null gate; call_fn2 was never gated).  A generic-null VALUE
-     * serializes (`-8!(::)` -> 101h in the internal-fn branch below); every
-     * other null shape 'types exactly like the historic gate. */
-    if (RAY_IS_NULL(x)) return ray_error("type", "!: null key operand");
-    /* kdb `0N!x` — debug print: write x's single-line k-repr to the console
-     * sink and pass x through unchanged (ref/display.md; the file-text.md KV
-     * examples pin the repr).  A NULL integer atom lhs can never be an
-     * internal-fn id (negative) or an enkey count (>= 0), so the intercept
-     * is exact. */
-    if (q_is_int_atom(x) && RAY_ATOM_IS_NULL(x)) {
-        q_console_show_krepr(y);
-        ray_retain(y);
-        return y;
-    }
-    /* kdb reserves a NEGATIVE integer ATOM lhs for internal functions
-     * (`-8!x` serialize, `-9!x` deserialize, ...) — never dict-make.
-     * Typed nulls fall through to dict-make (0N is not an internal id). */
-    if (q_is_int_atom(x) && !RAY_ATOM_IS_NULL(x)) {
-        int64_t id = q_iatom_val(x);
-        /* A negative id is an internal function (`-8!x` serialize, `-9!x`
-         * deserialize, `-5!x` parse, ...) — dispatched through the
-         * q_bang_dispatch switch (q_bang.c).  The negative band never
-         * dict-makes. */
-        if (id < 0)
-            return q_bang_dispatch(id, y);
-        /* q enkey/unkey: `N!table` / `N!keyedtable` (N>=0). */
-        if (y->type == RAY_TABLE || q_is_keyed_table(y))
-            return q_enkey(y, id);
-        /* by-reference `N!`name`: unkey/enkey the named global IN PLACE, then
-         * return the name (kdb amend-by-reference).  A miss / non-table stays
-         * dict-make below. */
-        if (y->type == -RAY_SYM) {
-            ray_t* g = ray_env_get(y->i64);
-            if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) {
-                ray_t* nt = q_enkey(g, id);
-                if (!nt || RAY_IS_ERR(nt)) return nt;
-                ray_env_bind(y->i64, nt);      /* retains */
-                ray_release(nt);
-                ray_retain(y);
-                return y;
-            }
-        }
-    }
-    /* wire pass 3: a generic-null y only makes sense in the internal-fn
-     * band handled above — dict-make/enkey with (::) vals keeps the
-     * historic 'type. */
-    if (RAY_IS_NULL(y)) return ray_error("type", "!: null value operand");
-    /* table!table — a keyed table IS a dict from key records to value records
-     * (dict.qcmd `([]k..)!([]v..)`); row counts must match ('length, kdb). */
-    if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
-        if (ray_table_nrows(x) != ray_table_nrows(y))
-            return ray_error("length", "!: key and value row counts must match");
-        ray_retain(x);
-        ray_retain(y);
-        return ray_dict_new(x, y);               /* consumes both retains */
-    }
-    /* kdb `()!()` — the canonical EMPTY dictionary.  An empty general list `()`
-     * (RAY_LIST, type 0h) is a legal (empty) key list in q, but rayfall's native
-     * `dict` (ray_dict_fn) demands a TYPED key vector (`!ray_is_vec` -> 'type),
-     * so `()!()`/`()!(0#0)`/`` (`$())!() `` all 'type.  Build the empty dict
-     * directly: keys stay the empty general list (kdb-faithful), vals an empty
-     * boxed list — matching the shape ray_dict_fn produces for `(0#`)!(0#0)`.
-     * Non-empty general-list keys stay unsupported (fall through to 'type). */
-    if (x->type == RAY_LIST && ray_len(x) == 0 && ray_len(y) == 0) {
-        ray_retain(x);
-        return ray_dict_new(x, ray_list_new(0)); /* consumes x + fresh empty list */
-    }
-    ray_t* keys = x;
-    ray_t* keys_owned = NULL;
-    if (ray_is_atom(x)) {
-        ray_t* l = ray_list_new(1);
-        l = ray_list_append(l, x);
-        if (RAY_IS_ERR(l)) return l;
-        keys_owned = q_collapse_list(l);
-        ray_release(l);
-        if (!keys_owned || RAY_IS_ERR(keys_owned))
-            return keys_owned ? keys_owned : ray_error("type", NULL);
-        if (!ray_is_vec(keys_owned)) {          /* -RAY_STR & friends stay boxed */
-            ray_release(keys_owned);
-            return ray_error("type", "!: unsupported key type (deferred)");
-        }
-        keys = keys_owned;
-    }
-    if ((ray_is_vec(y) || y->type == RAY_LIST) &&
-        (ray_is_vec(keys) || keys->type == RAY_LIST) &&
-        ray_len(keys) != ray_len(y)) {
-        if (keys_owned) ray_release(keys_owned);
-        return ray_error("length", "!: key and value counts must match");
-    }
-    ray_t* r = q_env_call2("dict", keys, y);
-    if (keys_owned) ray_release(keys_owned);
-    return r;
-}
-
 /* wire pass 3: registry-blessed null-tolerant dyadics.  ray_eval's binary
  * null gate (tree-walk + VM op_call2) offers a RAY_NULL_OBJ-operand
  * application to the apply hook before raising 'type; q_apply_noun consults
@@ -1287,7 +1184,7 @@ ray_t* q_bang_wrap(ray_t* x, ray_t* y) {
 int q_fn_null_ok(const ray_t* fn) {
     if (!fn || fn->type != RAY_BINARY) return 0;
     ray_binary_fn p = (ray_binary_fn)(uintptr_t)fn->i64;
-    return p == q_bang_wrap || p == q_match_wrap;
+    return p == q_bang || p == q_match_wrap;
 }
 
 /* The join wrapper owns the MIXED bare-dict shape ('type, ref/join.md

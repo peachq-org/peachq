@@ -32,6 +32,7 @@
  * q_is_kw_verb memcmp, now manifest-driven). */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* wrapper decls for the QR_FN* recipes (brings q_ops.h) */
+#include "qlang/q_bang.h"               /* q_bang — the `!` row */
 #include <string.h>
 
 /* ===== deterministic / sideeffect AUDIT (feat/q-ops-introspection) =========
@@ -198,7 +199,7 @@ static const q_op_t Q_OPS[] = {
     /* ---- type-dispatch glyphs (2c-2) ---- */
     /* monadic `!` (dict keys) is a K-ism accepted as a deliberate superset
      * (valid q spells it `key`, same value — the `_`/floor precedent). */
-    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FN2("dict", q_bang_wrap), NULL, 1, 0, "structural",
+    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FN2("dict", q_bang), NULL, 1, 0, "structural",
       "Make a dictionary or keyed table; remove a key from a table", "qdocs/docs/docs/docs/ref/dict.md",
       "x!y    ![x;y]", NULL },
     /* monadic `?` (distinct, rowid — the `distinct` row) is likewise a K-ism
@@ -757,7 +758,7 @@ static const q_op_t Q_OPS[] = {
     /* ---- table verbs (feat/q-table-verbs) — all wrappers in q_wrap_table.c
      * EXCEPT xcol/xcols, which are q.q derivations over `.Q.ft` (QR_QSRC:
      * bound post-bootstrap; the row is only what keeps them infix).
-     * The wrappers build over the wave-4 keyed primitives (q_enkey/
+     * The wrappers build over the wave-4 keyed primitives (q_bang_enkey/
      * q_table_flatten).  `insert`/`upsert` intentionally SHADOW the base env
      * special forms of the same name: q semantics differ (by-name targets,
      * keyed collision/update, row-index results), so the registry value is a

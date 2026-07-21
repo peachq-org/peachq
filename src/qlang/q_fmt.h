@@ -54,7 +54,6 @@ void        q_console_reset(void);        /* clear the buffer */
  * (a;b;c), enlist as ,x, strings quoted-escaped (a len-1 string renders
  * `,"c"` — the string-model conflation rule); vectors/atoms via q_fmt. */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);
-void q_console_show_krepr(ray_t* val);    /* append q_fmt_krepr(val) + '\n' */
 void q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles) */
 
 #endif /* Q_FMT_H */
