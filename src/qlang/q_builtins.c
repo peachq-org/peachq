@@ -963,10 +963,21 @@ static ray_t* q_meta_fn(ray_t* x) {
 
 /* q `count` of any function value is 1 (kdb: functions are atoms) — the
  * carrier is a RAY_LIST, so the base count would leak its slot count. */
-static ray_t* q_count_fn(ray_t* x) {
+ray_t* q_count_fn(ray_t* x) {
     if (q_is_fn_value(x)) return ray_i64(1);
     return g_base_count ? g_base_count(x)
                         : ray_error("type", "count: base verb missing");
+}
+
+/* C-long specialization of q_count_fn: the count as an int64 (-1 on error),
+ * for callers that want the number rather than a q value.  Consumes the
+ * intermediate count value. */
+int64_t q_count_long(ray_t* x) {
+    ray_t* c = q_count_fn(x);
+    if (!c || RAY_IS_ERR(c)) { ray_release(c); return -1; }
+    int64_t n = c->i64;
+    ray_release(c);
+    return n;
 }
 
 /* Capture a base unary's fn pointer AND attrs — a wrapper must be bound with
