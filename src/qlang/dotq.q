@@ -72,3 +72,24 @@
 .Q.ff:{[x;y] dx:flip x; dy:flip y; nc:key[dy] except key dx; flip dx,nc!{[n;v](type v)$n#0N}[count x]each dy nc};
 / .Q.s1: single-line string repr, a thin wrapper over the `-3!` internal fn.
 .Q.s1:{-3!x};
+
+/ ---- No-partition surface (ref/dotq.md) ----
+/ openq DOES NOT SUPPORT partitioned/segmented DBs — a PERMANENT divergence from kdb, not pending
+/ work: honest values where derivable, the empty DATE domain elsewhere, so a probe sees a well-typed
+/ EMPTY date-partitioned HDB (`type .Q.pv` -> 14h) rather than a 'name error. `.Q.D` is conformant
+/ to `.Q.P`, which has no segments here; `.Q.par` is a plain dir/partition/table join, no par.txt.
+.Q.cn:count;
+.Q.ind:{[x;y] x y};
+.Q.par:{[d;p;t] .Q.dd[.Q.dd[d;p];t]};
+.Q.pf:`date;
+.Q.PV:0#0Nd;
+.Q.pv:0#0Nd;
+.Q.D:();
+.Q.PD:0#`;
+.Q.pd:0#`;
+.Q.pt:0#`;
+.Q.pn:()!();
+.Q.vp:()!();
+/ .Q.bvi/.Q.MAP: nullary no-ops yielding `()` — kdb's generic null is neither `type`-able nor `~`-able here (PLAN.md defect).
+.Q.bvi:{[] ()};
+.Q.MAP:{[] ()};
