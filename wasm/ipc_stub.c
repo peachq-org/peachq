@@ -53,6 +53,14 @@ void ray_poll_deregister(ray_poll_t* poll, int64_t id) { (void)poll; (void)id; }
 int64_t ray_ipc_fd_of_handle(int64_t handle) { (void)handle; return -1; }
 int64_t ray_ipc_handle_of_fd(int64_t fd) { (void)fd; return -1; }
 
+/* q_ws_client.c is retained (it is q-layer, not networking-only), but the
+ * registration it calls lives in ipc.c. A browser tab has no socket to register:
+ * -1 is the real function's own failure return, so `ws://` hsym apply fails
+ * inertly rather than half-opening. */
+int64_t ray_ws_client_register(ray_sock_t fd, void* ws_conn) {
+    (void)fd; (void)ws_conn; return -1;
+}
+
 /* Real RLE+delta decompressor, preserved verbatim from src/core/ipc.c so
  * compressed journal replay/validate works under WASM. Pure; no networking. */
 size_t ray_ipc_decompress(const uint8_t* src, size_t clen, uint8_t* dst,
