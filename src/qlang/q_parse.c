@@ -1290,10 +1290,17 @@ static Tokens scan(const char *src) {
                      * ONE symbol.  Constrained to the leading-':' shape on
                      * purpose (plan-review round 1): general handle symbols
                      * (`fifo:x, `host:port) stay two tokens — that spelling
-                     * is a hard 'arity error today, so no green row can flip. */
+                     * is a hard 'arity error today, so no green row can flip.
+                     * '-' is a path/name byte HERE only (`:/tmp/a-b.txt is
+                     * ONE symbol; greedy, so `:a-1 too) — a BARE symbol body
+                     * stays valid-name chars (alnum/_/.) per basics/syntax.md
+                     * (its non-name example `a-b!` needs the `"…" quoted
+                     * form), so `a-b / `a-`b keep meaning subtraction.
+                     * Spaced `:a - 1 stays subtraction (not glued). */
                     p++;
                     while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
-                           src[p] == '.' || src[p] == ':' || src[p] == '/')
+                           src[p] == '.' || src[p] == ':' || src[p] == '/' ||
+                           src[p] == '-')
                         p++;
                 } else {
                     while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) || src[p] == '.') p++;
@@ -1462,6 +1469,23 @@ static ray_t *seq_of(ray_t *e) {
     for (int64_t i = 0; i < n; i++) w = ray_list_append(w, slots[i]);
     ray_release(e);
     return w;
+}
+
+/* q_ast_fill_empty_stmts — see q_parse.h.  DATA-boundary twin of seq_of: the
+ * eval path needs the C-NULL empty-statement slots (no-op, no output), but a
+ * tree handed out as a VALUE must be kdb-shaped: `parse ";"` is (;;();()). */
+void q_ast_fill_empty_stmts(ray_t *ast) {
+    if (!ast || ast->type != RAY_LIST || ray_len(ast) < 2) return;
+    ray_t **e = (ray_t **)ray_data(ast);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return;
+    int is_semi = (ray_str_len(s) == 1 && ray_str_ptr(s)[0] == ';');
+    ray_release(s);
+    if (!is_semi) return;
+    for (int64_t i = 1; i < ray_len(ast); i++)
+        if (!e[i]) e[i] = ray_list_new(1);   /* len-0 general list: () */
 }
 
 /* ===== qSQL context predicates (Task 1 scaffolding) =========================
@@ -1643,6 +1667,18 @@ static P parse_base(Parser *p) {
              * zero-element list, yielding the empty list).  `(1)` is grouping
              * -> the lone element; only `()` reaches here with a NULL slot. */
             if (only) {
+                /* A parenthesized lone `(::)` is the generic-null VALUE
+                 * itself (kdb null-test idiom `x~(::)`), never the `::`
+                 * name-ref whose spelling downstream elision checks
+                 * (ql_is_hole) would turn into a projection hole.  Emit the
+                 * self-evaluating null singleton; q_fmt prints it `::`. */
+                if (only->type == -RAY_SYM && !(only->attrs & Q_ATTR_QUOTED)) {
+                    ray_t *s = ray_sym_str(only->i64);
+                    int is_dcolon = s && ray_str_len(s) == 2 &&
+                                    ray_str_ptr(s)[0] == ':' && ray_str_ptr(s)[1] == ':';
+                    if (s) ray_release(s);
+                    if (is_dcolon) { ray_release(e); return (P){ R_NOUN, RAY_NULL_OBJ }; }
+                }
                 ray_retain(only);
                 ray_release(e);
                 /* a parenthesized lone glyph verb `(+)` is the bare-verb VALUE

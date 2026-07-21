@@ -43,6 +43,8 @@ ray_t* q_parse_builtin_fn(ray_t* x) {
     src[sl] = '\0';
     ray_t* ast = q_parse(src);
     free(src);
+    /* handed out as DATA: empty statements become () (kdb parse ";") */
+    if (ast && !RAY_IS_ERR(ast)) q_ast_fill_empty_stmts(ast);
     return ast ? ast : ray_error("parse", NULL);
 }
 
