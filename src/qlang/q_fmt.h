@@ -31,6 +31,15 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz);
 void q_fmt_set_prec(int p);
 int  q_fmt_prec(void);
 
+/* THE q float->text leaf (`\P`-honouring; NaN -> 0n/0Ne; wholes within the \P
+ * horizon print integral, past it exponent-form).  f32=1 renders DISPLAY reals
+ * (`e` suffix, 0Ne null); q_string_fn passes f32=0 — string "results contain
+ * none of the special notation that distinguishes types" (q1.txt:620) — and 0:
+ * Prepare Text inherits through it.  RULE: anything composing text above
+ * string/0: must inherit, never re-format floats itself.  out (non-null,
+ * n>0) is always NUL-terminated; over-long magnitudes are truncated. */
+void q_float_tok(double v, int f32, char* out, size_t n);
+
 /* ---- q console sink -------------------------------------------------------
  * `show` (and, in principle, `0N!`) print a value's q display as a SIDE EFFECT
  * and return generic null.  Since qdoc compares only the row's rendered output
