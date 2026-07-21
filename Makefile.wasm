@@ -86,7 +86,25 @@ EMFLAGS = \
   -s EXPORT_NAME=createPeachQ \
   --no-entry
 
-wasm: $(SRC)
+# Build-time codegen, identical to the root Makefile's rules: src/ #includes these
+# generated headers, so a CLEAN checkout cannot compile without them. They were
+# missing here entirely — the local tree only ever built because a native `make`
+# had left them behind, so CI was the first place it showed (2026-07-21).
+GEN_HDRS = src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/j_gen.h \
+           src/qlang/pq_gen.h src/qlang/html_assets_gen.h
+
+src/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.sh
+	tools/gen-bootstrap.sh $@ src/qlang/q.q src/qlang/dotq.q
+src/qlang/h_gen.h: src/qlang/h.q tools/gen-bootstrap.sh
+	SYMBOL=OPENQ_H_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/h.q
+src/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
+	SYMBOL=OPENQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
+src/qlang/pq_gen.h: src/qlang/pq.q tools/gen-bootstrap.sh
+	SYMBOL=OPENQ_PQ_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/pq.q
+src/qlang/html_assets_gen.h: tools/gen-assets.sh $(wildcard src/qlang/html/*)
+	@tools/gen-assets.sh $@ src/qlang/html
+
+wasm: $(GEN_HDRS) $(SRC)
 	@mkdir -p $(OUTDIR)
 	$(CC) $(CFLAGS) $(DEFS) $(INCLUDES) -o $(OUTDIR)/$(TARGET).js $(SRC) $(EMFLAGS)
 
