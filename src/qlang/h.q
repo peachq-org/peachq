@@ -1,8 +1,7 @@
 / h.q — openq's `.h` namespace, authored from the PUBLISHED qdocs (ref/doth.md, CC BY 4.0).
 / ALWAYS-ON: baked in by tools/gen-bootstrap.sh -> h_gen.h, loaded at q_runtime_create after
 / q.q+dotq.q. One definition per line (the loader is line-at-a-time; no LITERAL newline inside
-/ one). The members absent here — .h.ed .h.edsn .h.jx .h.ht .h.tx .h.fram — are deliberate:
-/ PLAN.md's "Known defects" table names the gap blocking each.
+/ one). Absent by design: .h.ed .h.edsn .h.jx .h.ht .h.fram — doth-status.md names each gap.
 
 .h.br:"<br>";
 .h.c0:`024C7E;
@@ -55,10 +54,12 @@
 / .h.xd escapes cell text with .h.xs, as the printed source of `.h.tx[`xml]` does with `xs'`.
 .h.xd:{c:cols x; (enlist "<R>"),({[c;r] "<r>",(raze {[k;v] "<",(string k),">",(.h.xs $[10h=type v;v;string v]),"</",(string k),">"}'[c;r]),"</r>"}[c;] each value each 0!x),enlist "</R>"};
 .h.xt:{[x;y] .j.k each y};
+/ .h.tx: the doc's dict MINUS `xls (openq writes no Excel); `json is its printed source, JSON Lines.
+.h.tx:`raw`json`csv`txt`xml!(enlist;{.j.j each $[.Q.qt x;0!x;x]};.h.cd;.h.td;.h.xd);
 
 .h.hug:{h:"0123456789abcdef"; c:"c"$til 256; c!{[s;h;c] i:"i"$c; $[c in s;enlist c;"%",h[i div 16],h[i mod 16]]}[x;h] each c};
 / Written as the natural dict lookup (ref/doth.md: .h.hug maps chars to their escapes).
-/ RED until dict lookup stops missing on `" "`, the char null — see PLAN.md.
+/ RED until dict lookup stops missing on `" "`, the char null — see doth-status.md.
 .h.hu:{raze .h.hug[.h.sc] x};
 .h.uh:{s:"%" vs x; raze (enlist first s),{("c"$"X"$2#x),2_x} each 1_s};
 .h.iso8601:{s:string "p"$x; (4#s),"-",(2#5_s),"-",(2#8_s),"T",11_s};
