@@ -264,13 +264,6 @@ void q_console_show(ray_t* val) {
     q_console_emit("\n", 1);
 }
 
-void q_console_show_krepr(ray_t* val) {
-    char buf[8192]; buf[0] = '\0';
-    q_fmt_krepr(val, buf, sizeof buf);
-    q_console_emit(buf, strlen(buf));
-    q_console_emit("\n", 1);
-}
-
 void q_console_write(const char* s, size_t n) { q_console_emit(s, n); }
 
 /* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`; NO trailing spaces. */
