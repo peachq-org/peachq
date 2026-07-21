@@ -32,4 +32,11 @@ ray_t* q_lower(ray_t* ast);
  * statement).  Consulted by the REPL/qdoc before printing. */
 int q_ast_is_assign(const ray_t* ast);
 
+/* Fill the top-level `;`-headed statement list's C-NULL slots (empty
+ * statements) with empty general lists, IN PLACE: kdb `parse ";"` is
+ * (;;();()).  ONLY for trees handed out as DATA (the q `parse` builtin and
+ * its TSV harness) — the eval path keeps the raw C-NULL slots, which encode
+ * "no-op statement, no output".  No-op on any other tree shape. */
+void q_ast_fill_empty_stmts(ray_t* ast);
+
 #endif /* Q_PARSE_H */
