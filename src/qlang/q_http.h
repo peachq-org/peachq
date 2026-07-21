@@ -26,13 +26,11 @@ int q_http_decode_path(const char* in, size_t n, char* out, size_t outsz);
  * Empty segments are allowed (skipped by the opener). */
 bool q_http_path_ok(const char* p, size_t n);
 
-/* ext -> Content-Type (case-insensitive, last extension wins);
- * application/octet-stream fallback.  The built-in table (no `.h.ty` consult). */
-const char* q_http_mime_type(const char* path);
-
-/* ext(path) -> Content-Type honoring a user `.h.ty` override (env dict), copying
- * an override hit into scratch[]; falls back to q_http_mime_type on any miss /
- * wrong-shape / unsafe (control-byte) value.  Returns scratch or a static literal. */
+/* ext(path) -> Content-Type from `.h.ty` (src/qlang/h.q — the ONE MIME table;
+ * user-extensible exactly as kdb allows), copying the hit into scratch[].
+ * Case-insensitive, last extension wins.  Any miss / wrong-shape / unsafe
+ * (control-byte) value / no bound VM yields the documented default
+ * "application/octet-stream".  Returns scratch or a static literal. */
 const char* q_http_mime_lookup(const char* path, char* scratch, size_t scratchsz);
 
 /* Resolve the static docroot dir: `.h.HOME` (env string) when usable, else the
