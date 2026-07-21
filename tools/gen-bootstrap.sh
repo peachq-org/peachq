@@ -31,13 +31,17 @@ fi
 # safety), backslash first, then double-quote; emit one "..\n" chunk per line
 # so the embedded text keeps its newlines (the loader splits on '\n' and skips
 # blank / `/`-comment lines). One chunk per line keeps the seed's inner quotes
-# (e.g. .Q.b6's "..+/") correctly escaped.
+# (e.g. .Q.b6's "..+/") correctly escaped. The replacements are DOUBLY escaped —
+# awk unescapes the string literal, then gsub unescapes the replacement — so four
+# source backslashes emit the two a C literal needs. Under-escaping is silent for
+# quotes but turns a .q `"\t"` into a raw TAB and `"\r\n"` into a raw newline,
+# splitting a definition across the line-at-a-time loader.
 {
     printf '/* AUTO-GENERATED from %s by tools/gen-bootstrap.sh — DO NOT EDIT. */\n' "$*"
     printf '#ifndef %s\n#define %s\n' "$guard" "$guard"
     printf 'static const char %s[] =\n' "$sym"
     awk '
-        { sub(/\r$/, ""); gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "\"%s\\n\"\n", $0 }
+        { sub(/\r$/, ""); gsub(/\\/, "\\\\\\\\"); gsub(/"/, "\\\\\""); printf "\"%s\\n\"\n", $0 }
         END { print ";" }
     ' "$@"
     printf '#endif /* %s */\n' "$guard"
