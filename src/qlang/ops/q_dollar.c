@@ -206,7 +206,7 @@ const char* q_type_qname(int8_t t) {
 }
 
 /* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
-static const char* q_tag_rayname(int8_t tag) {
+static const char* tag_rayname(int8_t tag) {
     switch (tag) {
     case RAY_BOOL: return "BOOL"; case RAY_BYTE_ONLY: return "U8";
     case RAY_I16:  return "I16";  case RAY_I32: return "I32";
@@ -224,8 +224,8 @@ static const char* q_tag_rayname(int8_t tag) {
 
 /* tag -> base `as` spelling, then delegate; 'nyi when the tag has no spelling
  * (LIST/GUID/F32 targets). */
-static ray_t* q_cast_delegate(int8_t tag, ray_t* x) {
-    const char* nm = q_tag_rayname(tag);
+static ray_t* cast_delegate(int8_t tag, ray_t* x) {
+    const char* nm = tag_rayname(tag);
     if (!nm) return ray_error("nyi", "$: unsupported cast designator (deferred)");
     ray_t* ts = ray_sym(ray_sym_intern(nm, strlen(nm)));
     if (!ts || RAY_IS_ERR(ts)) return ts;
@@ -242,7 +242,7 @@ static ray_t* q_cast_delegate(int8_t tag, ray_t* x) {
  * because builtins.c is frozen.  Sources ride the #187 strict-cast home, not a
  * new ladder: q_strict_i64 = ints + int-backed temporals, q_strict_f64 adds
  * F64/F32/DATETIME. */
-static ray_t* q_cast_bool(ray_t* x) {
+static ray_t* cast_bool(ray_t* x) {
     if (!x) return ray_error("type", "$: boolean");
     if (x->type == -RAY_BOOL || x->type == RAY_BOOL) { ray_retain(x); return x; }
     int64_t i;
@@ -269,7 +269,7 @@ static ray_t* q_cast_bool(ray_t* x) {
         for (int64_t k = 0; k < n; k++) ((uint8_t*)ray_data(out))[k] = (f[k] != 0.0f);
         return out;
     }
-    return q_cast_delegate(RAY_BOOL, x);   /* other vectors: base's arm IS this law */
+    return cast_delegate(RAY_BOOL, x);   /* other vectors: base's arm IS this law */
 }
 
 /* char cast (`10h$`/`` `char$``/`"c"$`): reinterpret an integer/byte value as
@@ -277,7 +277,7 @@ static ray_t* q_cast_bool(ray_t* x) {
  * a 1-char string).  Runs BEFORE the generic RAY_LIST distribution so a boxed
  * integer list packs into ONE string rather than a list of 1-char strings
  * (q_collapse_list refuses to pack -RAY_STR atoms). */
-static ray_t* q_cast_str(ray_t* x) {
+static ray_t* cast_str(ray_t* x) {
     if (x && x->type == -RAY_STR) { ray_retain(x); return x; }   /* identity */
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV)) {  /* charv identity */
         ray_retain(x); return x;
@@ -332,7 +332,7 @@ static ray_t* cast_leaf(ray_t* x, int64_t tag) { return q_dollar_cast((int8_t)ta
  * `real`/F32 one, so `"e"$` used to 'nyi. Reuse the base F64 cast (handles every
  * numeric input + string parse, exactly like `"f"$`), then narrow F64 -> F32. */
 static ray_t* q_cast_real(ray_t* x) {
-    ray_t* f = q_cast_delegate(RAY_F64, x);
+    ray_t* f = cast_delegate(RAY_F64, x);
     if (RAY_IS_ERR(f)) return f;
     if (f->type == -RAY_F64) {                              /* atom */
         ray_t* r = RAY_ATOM_IS_NULL(f) ? ray_typed_null(-RAY_F32)
@@ -357,7 +357,7 @@ static ray_t* q_cast_real(ray_t* x) {
     return f;
 }
 
-static ray_t* q_cast_int(int8_t tag, ray_t* x) {
+static ray_t* cast_int(int8_t tag, ray_t* x) {
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-tag);
         double r = rint(x->f64);              /* F32 atoms store f64 payload */
@@ -383,7 +383,7 @@ static ray_t* q_cast_int(int8_t tag, ray_t* x) {
         }
         return out;
     }
-    return q_cast_delegate(tag, x);
+    return cast_delegate(tag, x);
 }
 
 /* Byte target.  kdb `"x"$str` maps CHARS to bytes ("x"$"abc" -> 0x616263,
@@ -392,7 +392,7 @@ static ray_t* q_cast_int(int8_t tag, ray_t* x) {
  * (empty string -> empty byte vector).  Byte joins the integer family for
  * float rounding (derived — byte float-cast is unpinned); float null -> 0x00:
  * byte has no null (basics/datatypes.md blank column). */
-static ray_t* q_cast_u8(ray_t* x) {
+static ray_t* cast_u8(ray_t* x) {
     if (x && x->type == -RAY_STR) {
         const char* sp = ray_str_ptr(x);
         size_t sl = ray_str_len(x);
@@ -419,7 +419,7 @@ static ray_t* q_cast_u8(ray_t* x) {
         }
         return out;
     }
-    return q_cast_delegate(RAY_BYTE_ONLY, x);
+    return cast_delegate(RAY_BYTE_ONLY, x);
 }
 
 /* Timestamp target.  `timestamp$date: days -> ns, SATURATING outside the
@@ -427,7 +427,7 @@ static ray_t* q_cast_u8(ray_t* x) {
  * base's arm multiplies unchecked (i64 overflow, UBSan, builtins.c:1616) — and
  * mapping the date sentinels to the i64 sentinels (0Nd -> 0Np, +-0Wd -> +-0Wp,
  * which the saturation clamp yields for free). */
-static ray_t* q_cast_timestamp(ray_t* x) {
+static ray_t* cast_timestamp(ray_t* x) {
     if (x && x->type == -RAY_DATE) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(q_calendar_ts_compose((int64_t)x->i32, 0));
@@ -480,11 +480,11 @@ static ray_t* q_cast_timestamp(ray_t* x) {
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32 ||
               x->type == RAY_F64  || x->type == RAY_F32))
         return ray_error("nyi", "$: float->timestamp cast is deferred");
-    return q_cast_delegate(RAY_TIMESTAMP, x);
+    return cast_delegate(RAY_TIMESTAMP, x);
 }
 
 /* Symbol target: `symbol$sym is identity; every other source is deferred. */
-static ray_t* q_cast_sym(ray_t* x) {
+static ray_t* cast_sym(ray_t* x) {
     if (x && (x->type == -RAY_SYM || x->type == RAY_SYM)) {
         ray_retain(x);
         return x;
@@ -502,13 +502,13 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
      * into ONE string, so it must beat the generic per-element distribution —
      * but dict/table still descend (the walker below reaches this arm per value). */
     if (tag == RAY_CHARV && !(x && (x->type == RAY_DICT || x->type == RAY_TABLE)))
-        return q_charv_out(q_cast_str(x));
+        return q_charv_out(cast_str(x));
     /* numeric cast of char text = code points (`int$"ABC" -> 65 66 67i;
      * `float$"AC" -> 65 67f, ref/log.md:101) — via the byte cast, then cast. */
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV) &&
         (tag == RAY_I16 || tag == RAY_I32 || tag == RAY_I64 ||
          tag == RAY_F32 || tag == RAY_F64)) {
-        ray_t* b = q_cast_u8(x);
+        ray_t* b = cast_u8(x);
         if (!b || RAY_IS_ERR(b)) return b;
         ray_t* r = q_dollar_cast(tag, b);
         ray_release(b);
@@ -523,20 +523,20 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     case RAY_GUID: break;                    /* guid target: no base arm — deferred */
     case RAY_STR:  break;                    /* physical tag: never a cast target */
     case RAY_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
-    case RAY_BOOL: return q_cast_bool(x);
-    case RAY_BYTE_ONLY: return q_cast_u8(x);
+    case RAY_BOOL: return cast_bool(x);
+    case RAY_BYTE_ONLY: return cast_u8(x);
     case RAY_I16: case RAY_I32: case RAY_I64:
-        return q_cast_int(tag, x);
-    case RAY_TIMESTAMP: return q_cast_timestamp(x);
-    case RAY_SYM:  return q_cast_sym(x);
+        return cast_int(tag, x);
+    case RAY_TIMESTAMP: return cast_timestamp(x);
+    case RAY_SYM:  return cast_sym(x);
     case RAY_F64: case RAY_MONTH: case RAY_DATE: case RAY_DATETIME:
     case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: case RAY_TIME:
-        return q_cast_delegate(tag, x);
+        return cast_delegate(tag, x);
     }
     /* the `break` arms above + any out-of-band tag (the band is sparse: 3 is
-     * kdb's short-of-3).  q_cast_delegate has no spelling for them -> 'nyi,
+     * kdb's short-of-3).  cast_delegate has no spelling for them -> 'nyi,
      * which is what each returned before — no bespoke error strings needed. */
-    return q_cast_delegate(tag, x);
+    return cast_delegate(tag, x);
 }
 
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
