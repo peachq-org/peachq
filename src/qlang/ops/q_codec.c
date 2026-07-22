@@ -58,7 +58,7 @@ static int codec_md5_compute(const uint8_t* msg, size_t len, uint8_t out[16]) {
         a0 += A; b0 += B; c0 += C; d0 += D;
     }
     free(buf);
-    uint32_t words[4] = { a0, b0, c0, d0 };
+    const uint32_t words[4] = { a0, b0, c0, d0 };
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++) out[i * 4 + j] = (uint8_t)(words[i] >> (8 * j));
     return 1;
@@ -199,7 +199,7 @@ static int codec_sha1_compute(const uint8_t* msg, size_t n, uint8_t out[20]) {
         h0 += a; h1 += b; h2 += c; h3 += d; h4 += e;
     }
     free(buf);
-    uint32_t hs[5] = { h0, h1, h2, h3, h4 };
+    const uint32_t hs[5] = { h0, h1, h2, h3, h4 };
     for (int i = 0; i < 5; i++)
         for (int j = 0; j < 4; j++) out[i * 4 + j] = (uint8_t)(hs[i] >> (24 - 8 * j));
     return 1;
