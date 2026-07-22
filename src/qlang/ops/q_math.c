@@ -1,4 +1,4 @@
-/* q_wrap_math.c — atomic unary/dyadic math (libm family, xexp/xlog), comparison
+/* q_math.c — atomic unary/dyadic math (libm family, xexp/xlog), comparison
  * wrappers (= <> & ~), til/where/reverse, and the vs/sv family
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared

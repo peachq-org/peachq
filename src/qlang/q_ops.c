@@ -466,7 +466,7 @@ static const q_op_t Q_OPS[] = {
      * rayfall counterpart (rayfall has exp/log/sqrt but not the trig set).
      * All monadic KW_PREFIX, doc-labelled atomic (ref/{trig,
      * signum,ceiling}.md); sentinel-null discipline at the bodies
-     * (q_wrap_math.c).  `ceiling` is the floor-wrapper twin (float->LONG),
+     * (ops/q_math.c).  `ceiling` is the floor-wrapper twin (float->LONG),
      * NOT rayfall `ceil` (f64).  `signum` is family-atomic but built WITHOUT
      * RAY_FN_ATOMIC — it drives its own broadcast so a top-level boxed-list
      * result collapses to an int vector (see q_signum_wrap). */

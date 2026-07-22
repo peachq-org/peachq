@@ -128,7 +128,7 @@ ray_t* q_idesc_wrap(ray_t* x);
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
 ray_t* q_roll_wrap(ray_t* x, ray_t* y);
 
-/* ---- defined in q_wrap_math.c ---- */
+/* ---- defined in ops/q_math.c ---- */
 ray_t* q_sin_wrap(ray_t* x);
 ray_t* q_cos_wrap(ray_t* x);
 ray_t* q_tan_wrap(ray_t* x);
@@ -227,7 +227,7 @@ ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, 
 int q_is_keyed_table(ray_t* y);                               /* used by: apply, builtins, agg, join, math, table */
 ray_t* q_table_flatten(ray_t* y);                             /* used by: ops, join, table */
 
-/* ---- defined in q_wrap_math.c ---- */
+/* ---- defined in ops/q_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
 int q_match_rec(ray_t* a, ray_t* b);                          /* used by: table */
 ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
