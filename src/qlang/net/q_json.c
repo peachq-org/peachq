@@ -13,7 +13,7 @@
  * kdb `inf`/`-inf` emit case is structurally impossible — openq emits `null`.
  * Pure q-layer: no frozen-base edits. */
 #define _POSIX_C_SOURCE 200809L
-#include "qlang/q_json.h"
+#include "qlang/net/q_json.h"
 #include "qlang/q_registry.h" /* q_collapse_list */
 #include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
 #include "table/sym.h"        /* ray_sym_vec_cell */

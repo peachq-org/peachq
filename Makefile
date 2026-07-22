@@ -5,7 +5,7 @@
 CC      ?= cc
 
 RAY_ENTRY_SRC = src/app/main.c src/qlang/qmain.c src/qlang/qdoctest_main.c
-RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/ops/*.c))
+RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/ops/*.c src/qlang/net/*.c))
 
 RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
                  third_party/picohttpparser/picohttpparser.c \
@@ -47,7 +47,7 @@ BUILD_DIR = build
 $(BUILD_DIR)/src/qlang/q_runtime.o $(BUILD_DIR)/src/qlang/q_runtime.win.o: \
     src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/j_gen.h
 $(BUILD_DIR)/src/qlang/q_pq.o   $(BUILD_DIR)/src/qlang/q_pq.win.o:   src/qlang/pq_gen.h
-$(BUILD_DIR)/src/qlang/q_http.o $(BUILD_DIR)/src/qlang/q_http.win.o: src/qlang/html_assets_gen.h
+$(BUILD_DIR)/src/qlang/net/q_http.o $(BUILD_DIR)/src/qlang/net/q_http.win.o: src/qlang/html_assets_gen.h
 
 STD      = c17
 Q_TARGET = q
