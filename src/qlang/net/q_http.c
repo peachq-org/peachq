@@ -9,7 +9,7 @@
 #include "qlang/q_dotz.h"      /* q_dotz_zph — the `.z.ph` handler slot */
 #include "qlang/net/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
-#include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler show output */
+#include "qlang/q_console.h"   /* q_console_str/_reset — drain handler show output */
 #include "lang/env.h"          /* ray_env_get / ray_sym_intern — `.h.HOME` / `.h.ty` */
 #include "lang/internal.h"     /* call_fn1 */
 #include "core/runtime.h"      /* __VM — env lookups require a bound per-thread VM */

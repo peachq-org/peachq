@@ -1,4 +1,4 @@
-/* q_fmt internals shared with the pipe renderer (q_fmt_pipe.c).
+/* q_fmt internals shared with the pipe renderer (q_console.c).
  *
  * The ONE thing the nonlegacy render borrows from q_fmt.c: its table-CELL
  * renderer.  Cells must read identically in both modes (sym cells bare, bool
@@ -13,6 +13,6 @@
 #include <stddef.h>
 
 /* One table cell of `col` at `row`, NUL-terminated into out[0..outsz). */
-void q_cell(ray_t* col, int64_t row, char* out, size_t outsz);
+void q_fmt_cell(ray_t* col, int64_t row, char* out, size_t outsz);
 
 #endif /* Q_FMT_INTERNAL_H */
