@@ -876,9 +876,9 @@ static void ql_qsql_out(ray_t *x) {
     for (int64_t i = 0; i < n; i++) ql_qsql_out(e[i]);
 }
 
-static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head);
+static ray_t *lower_walk(ray_t **slot, int in_lambda, int is_head);
 
-/* Lower a phrase subtree that q_lower_walk skipped: name!expr DICT values are
+/* Lower a phrase subtree that lower_walk skipped: name!expr DICT values are
  * not walked (the walker recurses only RAY_LIST children), so select-phrase
  * expressions keep their raw parse heads (`{` lambda markers, control markers)
  * unless lowered here.  Mirrors the loop in ql_qsql_exec.  Operates on the
@@ -887,7 +887,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head);
 static void qsql_lower_phrase(ray_t **slot) {
     if (*slot && (*slot)->type == RAY_LIST && (*slot)->rc == 1 &&
         q_deriv_kind_of(*slot) == Q_DERIV_NONE) {
-        ray_t *err = q_lower_walk(slot, 0, 0);
+        ray_t *err = lower_walk(slot, 0, 0);
         if (err) ray_release(err);      /* an 'assign in a phrase expr: drop */
     }
 }
@@ -1003,7 +1003,7 @@ static void ql_qsql(ray_t **slot) {
     ray_t *t = e[1], *c = e[2], *b = e[3], *a = e[4];
     if (!t) return;
     /* slot 1: bare name sym (by-name semantics) or an expression subtree —
-     * q_lower_walk already lowered it (children walk before the node). */
+     * lower_walk already lowered it (children walk before the node). */
 
     /* Stage-1 general eval: lower the phrase subtrees the walker skipped
      * (dict values / where-constraint list) and quote-wrap embedded carrier
@@ -1181,7 +1181,7 @@ static void ql_qsql_bang(ray_t **slot) {
     e[0] = dv;   /* (q.delete; t; c; b; a) — args e[1..4] pass through */
 }
 
-static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head);
+static ray_t *lower_walk(ray_t **slot, int in_lambda, int is_head);
 
 /* String `exec` lowering: the symbolic (?;`t;c;b;a) statement tree (bare
  * unquoted `?` head, 5-list) head-swaps onto the q.exec special form, whose
@@ -1212,7 +1212,7 @@ static void ql_qsql_exec(ray_t **slot) {
     if (!xv) return;
 
     /* Lower the Select-phrase DICT's value expressions.  A name!expr `a` dict is
-     * SKIPPED by q_lower_walk (it recurses only RAY_LIST children), so its output
+     * SKIPPED by lower_walk (it recurses only RAY_LIST children), so its output
      * expressions keep their raw parse-tree operator heads — a bare-list `a`
      * (single unnamed column) is walked and works, but a dict escapes.  The exec
      * executor's funsql_eval needs the lowered (fn-VALUE / carrier) heads, so run
@@ -1228,7 +1228,7 @@ static void ql_qsql_exec(ray_t **slot) {
             ray_t **ve = (ray_t **)ray_data(av);
             for (int64_t i = 0; i < nv; i++)
                 if (ve[i] && ve[i]->type == RAY_LIST && ve[i]->rc == 1) {
-                    ray_t *err = q_lower_walk(&ve[i], 0, 0);
+                    ray_t *err = lower_walk(&ve[i], 0, 0);
                     if (err) ray_release(err);     /* an 'assign in an output expr: drop */
                 }
         }
@@ -1271,7 +1271,7 @@ static void ql_funsql(ray_t **slot) {
 /* Depth-first rewriting walker.  Children first so nested applications
  * ((+/) each ...) lower inside-out; then the node itself.  Returns a
  * RAY_ERROR (owned) on an 'assign violation, else NULL. */
-static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
+static ray_t *lower_walk(ray_t **slot, int in_lambda, int is_head) {
     ray_t *node = *slot;
     if (!node || node->type != RAY_LIST) return NULL;
     assert(node->rc == 1);                 /* sole-owner precondition */
@@ -1285,7 +1285,7 @@ static ray_t *q_lower_walk(ray_t **slot, int in_lambda, int is_head) {
              * embedded runtime VALUE (e.g. a named q `{…}` fetched from the env
              * for a qSQL phrase head), not a parse subtree to lower — and being
              * shared it has rc>1, so recursing would trip the rc==1 assert. */
-            ray_t *err = q_lower_walk(&e[i], lambda_body, i == 0);
+            ray_t *err = lower_walk(&e[i], lambda_body, i == 0);
             if (err) return err;
         }
     ray_t *err = ql_cond(slot);            /* $[c;t;f] BEFORE any head claim */
@@ -1504,7 +1504,7 @@ ray_t *q_lower(ray_t *ast) {
     if (ast && !RAY_IS_ERR(ast) && qctx[0])
         qns_walk(&ast, NULL, qctx, 0);
     if (ast && ast->type == RAY_LIST) {
-        ray_t *err = q_lower_walk(&ast, 0, 0);
+        ray_t *err = lower_walk(&ast, 0, 0);
         if (err) { ray_release(ast); return err; }
     }
     return ast;
