@@ -25,13 +25,14 @@
 #include "ops/ops.h"          /* ray_is_lazy / ray_lazy_materialize — timed-expr result */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
-#include <stdlib.h>           /* srand, system, malloc */
+#include <stdlib.h>           /* system, malloc */
 #include <string.h>           /* strlen, memcpy, memcmp */
 #include <stdio.h>            /* popen / pclose — `system "…"` stdout capture */
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
 #include <limits.h>          /* PATH_MAX */
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
 #include "qlang/q_registry.h" /* q_text_bytes / q_charv_out — charv text accessors */
+#include "qlang/q_registry_internal.h" /* q_rand_seed — the rng stream home */
 #ifndef RAY_OS_WINDOWS
 #include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
 #endif                       /* mingw has no <sys/wait.h>; _pclose gives the code directly */
@@ -53,20 +54,16 @@
 ray_t* ray_gc_fn(ray_t** args, int64_t n);
 
 /* ---- `\S` random-seed state (moved from q_ns.c; \S is its only consumer) ----
- * kdb re-initializes its rng to a CONSTANT seed at startup (-314159i,
- * basics/syscmds.md) so scripts using Roll/Deal/rand repeat.  ALL openq
- * randomness (`?` roll/deal/permute + generate arms, `rand`) funnels through
- * libc rand(), so srand IS the whole contract — except the guid generator
- * (src/ops/system.c xorshift64*), which seeds lazily from rand() per thread:
- * `\S` makes guid sequences reproducible only if set before the thread's first
- * guid use (recorded caveat, not fixed here).
- * `\S` displays the LAST-INITIALIZED seed, never evolving rng state; reading
- * the live state (`\S 0N`, V3.6) has no libc counterpart -> 'nyi. */
+ * The rand() stream CONTRACT (constant default seed, one stream, the guid
+ * caveat) lives with q_rand_seed in ops/q_rand.c; \S here is the command
+ * surface.  `\S` displays the LAST-INITIALIZED seed, never evolving rng
+ * state; reading the live state (`\S 0N`, V3.6) has no libc counterpart
+ * -> 'nyi. */
 static int32_t g_last_seed = -314159;
 
 void q_sys_seed_init(void) {
     g_last_seed = -314159;
-    srand((unsigned)-314159);
+    q_rand_seed(-314159);
 }
 
 /* ---- Tier-2 config state (kdb `\`-command get/set) -------------------------
@@ -218,7 +215,7 @@ static ray_t* h_S(const char* arg, size_t alen) {
      * 2026-07-09). */
     if (v <= INT32_MIN || v > INT32_MAX)
         return ray_error("parse", NULL);
-    srand((unsigned)v);                          /* `\S n` — re-initialize */
+    q_rand_seed(v);                              /* `\S n` — re-initialize */
     g_last_seed = (int32_t)v;
     return NULL;                                 /* silent, like `\d ns` */
 }

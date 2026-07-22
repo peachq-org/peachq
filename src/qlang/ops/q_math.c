@@ -1,15 +1,15 @@
 /* q_math.c — atomic unary/dyadic math (libm family, xexp/xlog), comparison
- * wrappers (= <> & ~), til/where/reverse, and the vs/sv family
+ * wrappers (= <> & ~), neg/null/within, and the vs/sv family
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_til_fn, ray_reverse_fn */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
+#include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64/as_i64, is_numeric, RAY_IS_TEMPORAL64, ray_error */
 #include "lang/format.h"   /* ray_type_name — error messages */
-#include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize */
 #include "table/sym.h"     /* ray_sym_vec_cell, ray_sym_intern_runtime — vs/sv sym arms */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
@@ -130,6 +130,77 @@ ray_t* q_ceiling_wrap(ray_t* x) {
     }
     return ray_error("type", "ceiling: expects a numeric argument, got %s",
                      ray_type_name(x->type));
+}
+
+/* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
+ * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
+ * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
+ * ray_neg_fn rejects temporals — so the date arm lives here and every other
+ * input delegates.  Registered ATOMIC: eval's atomic_map_unary maps vectors
+ * element-wise and its typed-out path already carries RAY_DATE, so a date
+ * vector comes back a date vector.  time/timestamp arms arrive with their
+ * datatypes (deferred). */
+ray_t* q_neg_wrap(ray_t* x) {
+    if (x && x->type == -RAY_DATE) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_date(-(int64_t)x->i32);
+    }
+    if (x && x->type == -RAY_MINUTE) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_minute(-(int64_t)x->i32);
+    }
+    if (x && x->type == -RAY_SECOND) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_second(-(int64_t)x->i32);
+    }
+    if (x && x->type == -RAY_TIMESPAN) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_timespan(-x->i64);
+    }
+    if (x && x->type == -RAY_MONTH) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_month(-(int64_t)x->i32);
+    }
+    if (x && x->type == -RAY_DATETIME) {
+        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
+        return ray_datetime(-x->f64);
+    }
+    /* kdb `neg` promotes a boolean to INT and negates (`neg 1b` -> -1i);
+     * base ray_neg_fn rejects bools.  Registered ATOMIC, so a bool vector
+     * arrives here element-wise and the i32 atoms collapse to an i32 vector. */
+    if (x && x->type == -RAY_BOOL)
+        return ray_i32(-(int32_t)(x->b8 ? 1 : 0));
+    return ray_neg_fn(x);
+}
+
+/* q `null x` — elementwise null test.  Drives the engine's atomic `nil?`
+ * (ray_nil_fn) through atomic_map_unary so it broadcasts over typed vectors
+ * AND nested general lists at every depth; collection_elem reconstructs
+ * typed-null atoms, so nulls are SEEN (unlike other atomics, which stay
+ * null-avoiding via the dispatch guards).  Registered RAY_FN_NONE — NOT
+ * ATOMIC — so it receives the whole argument here and owns the collapse: a
+ * heterogeneous input list yields a homogeneous bool-atom run that
+ * q_collapse_list folds to a bool vector (`null (1;\`a;2.5;"x")` -> 0000b),
+ * while a nested list yields a list of bool VECTORS that q_collapse_list
+ * leaves intact (multi-line, `null (0N 1;2 0N)` -> 10b / 01b). */
+/* q-layer null test: the base engine's `ray_nil_fn` treats sym id 0 as the
+ * EMPTY symbol (a value, include/rayforce.h SYM case), but q treats the null
+ * symbol `` ` `` AS null (`null \`` -> 1b).  This wrapper special-cases the
+ * null symbol here in the q layer so the divergence stays out of base rayfall,
+ * whose own paths rely on sym-0-as-empty.  Drives `q_null_wrap` for both the
+ * atom path and the per-element `atomic_map_unary` recursion (nested lists /
+ * symbol vectors reconstruct null-sym atoms via collection_elem). */
+static ray_t* nil_fn(ray_t* x) {
+    if (q_is_null_sym(x)) return ray_bool(true);
+    return ray_nil_fn(x);
+}
+
+ray_t* q_null_wrap(ray_t* x) {
+    ray_t* r = is_collection(x) ? atomic_map_unary(nil_fn, x) : nil_fn(x);
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
+    ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
+    ray_release(r);
+    return c;
 }
 
 /* ---- dyadic atomic math (feat/q-math-parse-display) ----------------------
@@ -397,101 +468,73 @@ ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
-/* q `til` — kdb accepts a boolean (`til 1b` -> ,0); base ray_til_fn is
- * int-only.  Everything else (int atoms, the error paths) delegates. */
-ray_t* q_til_wrap(ray_t* x) {
-    if (x && x->type == -RAY_BOOL) {
-        ray_t* n = ray_i64(x->b8 ? 1 : 0);
-        ray_t* r = ray_til_fn(n);
-        ray_release(n);
-        return r;
-    }
-    return ray_til_fn(x);
-}
-
-/* Borrow-or-collapse a dict's VALUES for a kernel call: a typed vector passes
- * through BORROWED (*owned=0); a boxed list collapses (q_collapse_list, owned
- * result, *owned=1) so homogeneous literal dicts hit the typed kernels.
- * Caller releases iff *owned.  NULL on a malformed dict. */
-ray_t* q_dict_vals_vec(ray_t* d, int* owned) {
-    *owned = 0;
-    ray_t* vals = ray_dict_vals(d);              /* borrowed accessor */
-    if (!vals) return NULL;
-    if (vals->type == RAY_LIST) {
-        ray_t* c = q_collapse_list(vals);        /* owned */
-        if (c && !RAY_IS_ERR(c)) { *owned = 1; return c; }
-        if (c) ray_release(c);
-        return vals;                             /* uncollapsible: borrowed */
-    }
-    return vals;
-}
-
-/* q `where` / monadic `&` — an INTEGER vector repeats each index i, x[i] times
- * (`where 2 3 1` -> 0 0 1 1 1 2; `where 0 1 0 1 0 1` -> 1 3 5).  Base
- * ray_where_fn handles the boolean-mask form, so delegate for it and anything
- * else.  Result is a long vector (kdb).  Negative counts are 'domain. */
-ray_t* q_where_wrap(ray_t* x) {
-    /* where d — keys replicated by the (int/bool) values (ref/where.md):
-     * `where `a`b`c!1 0 2` -> `a`c`c; a bool-valued dict (comparison result)
-     * gives the keys where true.  Key-indexing shape keys[where vals], NOT
-     * value distribution. */
-    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
-        ray_t* keys = ray_dict_keys(x);            /* borrowed */
-        if (!keys) return ray_error("type", "where: malformed dictionary");
-        int vo = 0;
-        ray_t* vv = q_dict_vals_vec(x, &vo);
-        if (!vv) return ray_error("type", "where: malformed dictionary");
-        ray_t* w = q_where_wrap(vv);               /* bool mask or int counts */
-        if (vo) ray_release(vv);
-        if (!w || RAY_IS_ERR(w)) return w;
-        ray_t* r = ray_at_fn(keys, w);
-        ray_release(w);
-        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_collapse_list(r), keys); ray_release(r); return c; }
-        return r;
-    }
-    if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
-        int64_t n = ray_len(x);
-        int64_t total = 0;
-        for (int64_t i = 0; i < n; i++) {
-            int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
-                      : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
-                      : (int64_t)((const int16_t*)ray_data(x))[i];
-            if (c < 0) return ray_error("domain", "where: negative count");
-            total += c;
+/* q `x within y` — bounds check (ref/within.md: 1 3 10 6 4 within 2 6 ->
+ * 01011b; inclusive).  Base ray_within_fn takes VECTOR vals only and reads
+ * the range buffer at the vals' element width, so: an atom x is enlisted
+ * (via list+collapse) and the answer unwrapped back to a bool atom, and the
+ * two element widths must agree ('type — a silent misread otherwise).  The
+ * flip-of-pairs range form and mixed-width operands are deferred cells. */
+ray_t* q_within_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return ray_error("type", "within: nil operand");
+    if (!ray_is_vec(y) || ray_len(y) != 2)
+        return ray_error("type", "within: range must be a 2-item vector");
+    ray_t* vals = x;
+    ray_t* vals_owned = NULL;
+    if (ray_is_atom(x)) {
+        ray_t* l = ray_list_new(1);
+        if (RAY_IS_ERR(l)) return l;
+        l = ray_list_append(l, x);
+        if (RAY_IS_ERR(l)) return l;
+        vals_owned = q_collapse_list(l);
+        ray_release(l);
+        if (!vals_owned || RAY_IS_ERR(vals_owned))
+            return vals_owned ? vals_owned : ray_error("type", NULL);
+        if (!ray_is_vec(vals_owned)) {           /* strings & friends: deferred */
+            ray_release(vals_owned);
+            return ray_error("type", "within: unsupported value type (deferred)");
         }
-        ray_t* out = ray_vec_new(RAY_I64, total);
-        if (RAY_IS_ERR(out)) return out;
-        out->len = total;
-        int64_t* d = (int64_t*)ray_data(out);
-        int64_t w = 0;
-        for (int64_t i = 0; i < n; i++) {
-            int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
-                      : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
-                      : (int64_t)((const int16_t*)ray_data(x))[i];
-            for (int64_t k = 0; k < c; k++) d[w++] = i;
+        vals = vals_owned;
+    }
+    if (!ray_is_vec(vals)) {
+        if (vals_owned) ray_release(vals_owned);
+        return ray_error("type", "within: unsupported value type (deferred)");
+    }
+    /* Base ray_within_fn dispatches on vals->type ONLY and reads the range
+     * buffer as that element type, so ANY type mismatch — not just a width
+     * mismatch — would silently reinterpret raw bits (codex: 1 2 within
+     * 1.5 2.5 read the doubles as int64 -> 00b).  Same-type operands only;
+     * mixed-type coercion is a deferred cell (error, never a wrong answer). */
+    if (vals->type != y->type) {
+        if (vals_owned) ray_release(vals_owned);
+        return ray_error("type", "within: value/range types must match (mixed-type deferred)");
+    }
+    ray_t* r;
+    if (vals->type == RAY_TIMESTAMP) {
+        /* base ray_within_fn has no i64-temporal arm; the payload is i64, so
+         * relabel both sides through the one cast home and delegate (the
+         * same-byte-rep TIMESTAMP<->I64 relabel, builtins.c). */
+        ray_t* vi = q_dollar_cast(RAY_I64, vals);
+        if (!vi || RAY_IS_ERR(vi)) { if (vals_owned) ray_release(vals_owned); return vi; }
+        ray_t* yi = q_dollar_cast(RAY_I64, y);
+        if (!yi || RAY_IS_ERR(yi)) {
+            ray_release(vi);
+            if (vals_owned) ray_release(vals_owned);
+            return yi;
         }
-        return out;
+        r = ray_within_fn(vi, yi);
+        ray_release(vi);
+        ray_release(yi);
+    } else {
+        r = ray_within_fn(vals, y);
     }
-    return ray_where_fn(x);
-}
-
-/* q `reverse x` / monadic `|` — a dict reverses ENTRIES (keys and values
- * together, ref/reverse.md: "on dictionaries, reverses the keys"); everything
- * else delegates to base reverse unchanged. */
-ray_t* q_reverse_wrap(ray_t* x) {
-    if (x && x->type == RAY_DICT && !q_is_keyed_table(x)) {
-        ray_t* k = ray_dict_keys(x);                 /* borrowed */
-        ray_t* v = ray_dict_vals(x);                 /* borrowed */
-        if (!k || !v) return ray_error("type", "reverse: malformed dictionary");
-        ray_t* rk = ray_reverse_fn(k);
-        if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);   /* dict slots must be concrete */
-        if (!rk || RAY_IS_ERR(rk)) return rk;
-        ray_t* rv = ray_reverse_fn(v);
-        if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
-        if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
-        return ray_dict_new(rk, rv);                 /* consumes both */
-    }
-    return ray_reverse_fn(x);
+    if (!vals_owned) return r;                    /* vector x: pass through */
+    ray_release(vals_owned);
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* idx = ray_i64(0);                      /* atom x: unwrap 1-vec */
+    ray_t* a = ray_at_fn(r, idx);
+    ray_release(idx);
+    ray_release(r);
+    return a;
 }
 
 /* ===== q `vs` / `sv` — split-join / base-encode family ===================

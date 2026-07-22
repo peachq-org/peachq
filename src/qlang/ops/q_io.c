@@ -1157,6 +1157,30 @@ static ray_t* filetext_impl(ray_t* x, ray_t* y) {
     return ray_error("type", "0:: unsupported left operand");
 }
 
+/* q `getenv x` (ref/getenv.md) — x is a SYMBOL atom naming an environment
+ * variable; returns its value as a string, or "" when the variable is unset
+ * (kdb-true, and exactly what the base ray_getenv_fn already returns for a
+ * missing var).  The base primitive wants a -RAY_STR arg, so coerce the
+ * symbol's name to a string atom first — the ONLY divergence from the raw C,
+ * hence a wrapper rather than a QK_ENV rename.
+ * String-model seam: the result is a native -RAY_STR atom, so `type getenv`X`
+ * is -10h where kdb's char vector is 10h (a known, tracked divergence). */
+ray_t* q_getenv_wrap(ray_t* x) {
+    /* .os.getenv is RAY_FN_RESTRICTED; calling the C fn directly bypasses the
+     * eval-layer check, so re-assert it here (the q_hopen_wrap/file precedent). */
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!x || x->type != -RAY_SYM)
+        return ray_error("type", "getenv: expected a symbol, got %s",
+                         ray_type_name(x ? x->type : 0));
+    ray_t* s = ray_sym_str(x->i64);                     /* borrowed */
+    if (!s) return ray_error("type", "getenv: bad symbol");
+    ray_t* name = ray_str(ray_str_ptr(s), ray_str_len(s));  /* owned -RAY_STR */
+    if (!name || RAY_IS_ERR(name)) return name ? name : ray_error("oom", NULL);
+    ray_t* r = ray_getenv_fn(name);                     /* "" when unset */
+    ray_release(name);
+    return q_charv_out(r);
+}
+
 /* q `x setenv y` (ref/getenv.md#setenv) — x is a SYMBOL atom (the variable
  * name), y is a string.  Sets the environment variable and returns generic
  * null (kdb: setenv's result displays as nothing in the console).  The base
