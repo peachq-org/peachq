@@ -34,7 +34,7 @@ ray_t* q_rtrim_fn(ray_t* x);
 ray_t* q_dotq_sha1_fn(ray_t* x);
 
 /* q `count x` (fn-value -> 1, else the base count).  Exported so `!`'s length
- * gate (q_bang_make_dict) measures key/value counts with q semantics.
+ * gate (bang_make_dict) measures key/value counts with q semantics.
  * q_count_long is the int64 specialization for callers wanting the number. */
 ray_t* q_count_fn(ray_t* x);
 int64_t q_count_long(ray_t* x);
