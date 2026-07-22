@@ -429,7 +429,7 @@ static const q_op_t Q_OPS[] = {
     /* `system "…"` — q-owned env unary (q_builtins_register), snapshotted here
      * so the parser embeds it; passes through q_sys_run (q_sys.c). */
     { "system",  QLEX_KW_PREFIX, QR_ENV("system"),             QR_NONE,           NULL, 1, 1, "none" },
-    /* `exit x` — process termination via q_exit (q_sys.c: `.z.exit`, then
+    /* `exit x` — process termination via q_sys_exit (q_sys.c: `.z.exit`, then
      * exit(x); capability-gated so doctest/wasm runtimes survive it). */
     { "exit",    QLEX_KW_PREFIX, QR_FN1("exit", q_exit_wrap), QR_NONE,           NULL, 1, 1, "none" },
     /* table introspection — q-owned bindings (q_builtins_register), snapshotted

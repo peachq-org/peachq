@@ -98,8 +98,8 @@ ray_t* q_compose_new(ray_t** fns, int64_t nf) {
     return l;
 }
 
-ray_t* q_monadic_mark(ray_t* base) {
-    if (!base) return ray_error("type", "q_monadic_mark: nil base");
+ray_t* q_deriv_monadic_mark(ray_t* base) {
+    if (!base) return ray_error("type", "q_deriv_monadic_mark: nil base");
     ensure_markers();
     ray_t* l = ray_list_new(3);
     l = push_owned(l, marker_atom(g_sid_monad));
@@ -133,12 +133,12 @@ q_deriv_kind q_deriv_kind_of(const ray_t* v) {
     return Q_DERIV_NONE;
 }
 
-int64_t q_compose_count(const ray_t* v) {
+int64_t q_deriv_compose_count(const ray_t* v) {
     if (q_deriv_kind_of(v) != Q_DERIV_COMPOSE) return 0;
     return ray_len((ray_t*)v) - 1;
 }
 
-ray_t* q_compose_fn_at(const ray_t* v, int64_t i) {
+ray_t* q_deriv_compose_fn_at(const ray_t* v, int64_t i) {
     if (q_deriv_kind_of(v) != Q_DERIV_COMPOSE) return NULL;
     int64_t nf = ray_len((ray_t*)v) - 1;
     if (i < 0 || i >= nf) return NULL;

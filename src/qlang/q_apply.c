@@ -1,7 +1,7 @@
 /* q_apply — see q_apply.h.  The per-head semantic table (spec 2c, revised
  * after adversarial codex review):
  *
- *   104h carrier      -> q_deriv_apply (Task 5; claimed FIRST — a carrier IS
+ *   104h carrier      -> deriv_apply (Task 5; claimed FIRST — a carrier IS
  *                        a RAY_LIST and must not fall into the gather arm)
  *   dict              -> direct ray_dict_get; on a miss, the typed null of
  *                        the dict's VALUE type (ray_at would hardcode 0Nl)
@@ -18,14 +18,14 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_apply.h"
-#include "qlang/q_registry.h"   /* q_collapse_list, q_table_at/q_table_row_at, q_keyed_lookup_rows */
+#include "qlang/q_registry.h"   /* q_collapse_list, q_table_at/q_table_row_at, q_join_keyed_lookup_rows */
 #include "qlang/q_deriv.h"      /* q_deriv_kind_of (carrier arm, Task 5) */
 #include "lang/eval.h"          /* ray_at_fn */
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
 #include "qlang/q_console.h"    /* q_console_write — 1/-1/2/-2 console handles */
 #include "core/ipc.h"           /* ray_ipc_handle_of_fd — q true-fd handle -> selector id */
 #include "qlang/net/q_ws.h"         /* q_ws_client_open — ws:// hsym-apply */
-#include "qlang/net/q_http_client.h" /* q_http_raw_client — http:// hsym-apply */
+#include "qlang/net/q_http_client.h" /* q_http_client_raw — http:// hsym-apply */
 #include "ops/ops.h"            /* ray_is_lazy / ray_lazy_materialize — DAG agg results */
 #include <string.h>
 
@@ -81,7 +81,7 @@ static ray_t* keyed_table_lookup(ray_t* d, ray_t* idx) {
     /* row-set lookup: kt[keytable] — one value row per keytbl row, misses
      * null-filled (ref/lj.md `y[select a,b from x]`; joins wave). */
     if (idx && idx->type == RAY_TABLE)
-        return q_keyed_lookup_rows(d, idx);
+        return q_join_keyed_lookup_rows(d, idx);
     int composite = idx && (ray_is_vec(idx) || idx->type == RAY_LIST) &&
                     nk > 1 && ray_len(idx) == nk;
     if (!composite && !(idx && ray_is_atom(idx) && nk == 1))
@@ -160,7 +160,7 @@ static ray_t* distribute_retry(ray_t* head, ray_t* result, ray_t** args, int64_t
  * broadcast; dict/table distribution on 'type) — what makes q.q's
  * `.q.reciprocal:%[1;]` match the retired C wrapper on vectors/dicts/tables.
  * Args/carrier borrowed; returns owned (or an owned error). */
-static ray_t* q_deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
+static ray_t* deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
     q_deriv_kind k = q_deriv_kind_of(carrier);
     ray_t* base = q_deriv_base(carrier);            /* borrowed */
     if (!base) return NULL;
@@ -219,7 +219,7 @@ static ray_t* q_deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
  * unwinds the body via the error path with its payload stashed thread-local
  * (q_registry.c); the innermost lambda application turns it back into a
  * normal result here. */
-static ray_t* q_call_lambda(ray_t* lam, ray_t** args, int64_t n) {
+static ray_t* i_call_lambda(ray_t* lam, ray_t** args, int64_t n) {
     /* Drop any stale payload first (a q.ret swallowed by a user trap), so
      * the class check below can never be spoofed into returning old data. */
     ray_t* stale = q_lambda_ret_take();
@@ -234,19 +234,19 @@ static ray_t* q_call_lambda(ray_t* lam, ray_t** args, int64_t n) {
     return r;
 }
 
-static ray_t* q_lambda_apply(ray_t* carrier, ray_t** args, int64_t n) {
+static ray_t* lambda_apply(ray_t* carrier, ray_t** args, int64_t n) {
     int     r   = q_deriv_valence(carrier);
     ray_t*  lam = q_deriv_base(carrier);              /* borrowed */
     if (!lam) return ray_error("type", "lambda carrier: missing base");
     if (r == 0) {
-        if (n <= 1) return q_call_lambda(lam, NULL, 0);
+        if (n <= 1) return i_call_lambda(lam, NULL, 0);
         return ray_error("rank", "lambda: rank 0 applied to %lld args", (long long)n);
     }
     if (n < 1) return ray_error("rank", "lambda: no arguments");
     if (n > r)
         return ray_error("rank", "lambda: rank %d applied to %lld args",
                          r, (long long)n);
-    if (r == 1) return q_call_lambda(lam, args, 1);
+    if (r == 1) return i_call_lambda(lam, args, 1);
     if (r > 64) return ray_error("limit", "lambda: rank too large");
     uint64_t mask  = 0;
     ray_t*   slots[64];
@@ -256,13 +256,13 @@ static ray_t* q_lambda_apply(ray_t* carrier, ray_t** args, int64_t n) {
         if (!a || RAY_IS_NULL(a)) { mask |= 1ull << i; slots[i] = NULL; holes++; }
         else slots[i] = a;
     }
-    if (holes == 0) return q_call_lambda(lam, args, n);
+    if (holes == 0) return i_call_lambda(lam, args, n);
     return q_proj_new(carrier, slots, r, mask, holes);
 }
 
 /* Apply any function VALUE to args: bare builtins direct, everything else
  * (carriers, lambdas, VARY, projections) through the noun dispatcher. */
-static ray_t* q_apply_fn(ray_t* fn, ray_t** args, int64_t n) {
+static ray_t* apply_fn(ray_t* fn, ray_t** args, int64_t n) {
     if (fn && fn->type == RAY_UNARY && n == 1)
         return ((ray_unary_fn)(uintptr_t)fn->i64)(args[0]);
     if (fn && fn->type == RAY_BINARY && n == 2)
@@ -273,14 +273,14 @@ static ray_t* q_apply_fn(ray_t* fn, ray_t** args, int64_t n) {
 /* Apply a composition carrier `'[f;g;…]`: the innermost (rightmost) function
  * consumes all supplied args, then each function to its left is applied
  * monadically to the running result.  `'[f;g][a;b]` == `f g[a;b]`. */
-static ray_t* q_compose_apply(ray_t* carrier, ray_t** args, int64_t n) {
-    int64_t nf = q_compose_count(carrier);
+static ray_t* compose_apply(ray_t* carrier, ray_t** args, int64_t n) {
+    int64_t nf = q_deriv_compose_count(carrier);
     if (nf < 1) return ray_error("rank", "compose: empty composition");
-    ray_t* acc = q_apply_fn(q_compose_fn_at(carrier, nf - 1), args, n);
+    ray_t* acc = apply_fn(q_deriv_compose_fn_at(carrier, nf - 1), args, n);
     if (!acc || RAY_IS_ERR(acc)) return acc;
     for (int64_t i = nf - 2; i >= 0; i--) {
         ray_t* a1[1] = { acc };
-        ray_t* next = q_apply_fn(q_compose_fn_at(carrier, i), a1, 1);
+        ray_t* next = apply_fn(q_deriv_compose_fn_at(carrier, i), a1, 1);
         ray_release(acc);
         if (!next || RAY_IS_ERR(next)) return next;
         acc = next;
@@ -298,7 +298,7 @@ static ray_t* q_compose_apply(ray_t* carrier, ray_t** args, int64_t n) {
 
 /* Builtin UNARY call matching the tree-walk arm (atomic verbs map over a
  * collection) — the one q-layer home, shared by the distribution shim and
- * q_deriv_apply. */
+ * deriv_apply. */
 static ray_t* call_builtin1(ray_t* head, ray_t* a) {
     ray_unary_fn fn = (ray_unary_fn)(uintptr_t)head->i64;
     if ((head->attrs & RAY_FN_ATOMIC) && is_collection(a))
@@ -318,7 +318,7 @@ static ray_t* call_builtin2(ray_t* head, ray_t* a, ray_t* b) {
  * of `b` absent from `a`; matching keys combine via `op`, others pass through.
  * Mirrors q_eachboth_dict's key-donor discipline (retain keys before
  * ray_dict_new). */
-static ray_t* q_dict_union(ray_t* head, ray_t* a, ray_t* b) {
+static ray_t* dict_union(ray_t* head, ray_t* a, ray_t* b) {
     ray_t* ka = ray_dict_keys(a);        /* borrowed */
     ray_t* kb = ray_dict_keys(b);        /* borrowed */
     if (!ka || !kb) return ray_error("type", "dict op: malformed dictionary");
@@ -388,7 +388,7 @@ static ray_t* q_dict_union(ray_t* head, ray_t* a, ray_t* b) {
  * the unary form; else dyadic with atom x (`x_is_left` places it — kdb atomic
  * dyadics pierce tables: `1%t`, `t>2`).  Returns owned, or an owned error (a
  * per-column 'type propagates). */
-static ray_t* q_table_distribute(ray_t* head, ray_t* t, ray_t* x, int x_is_left) {
+static ray_t* table_distribute(ray_t* head, ray_t* t, ray_t* x, int x_is_left) {
     int64_t nc = ray_table_ncols(t);
     int64_t nr = ray_table_nrows(t);
     ray_t* names = ray_vec_new(RAY_SYM, nc > 0 ? nc : 1);
@@ -430,7 +430,7 @@ static ray_t* q_table_distribute(ray_t* head, ray_t* t, ray_t* x, int x_is_left)
 /* The distribution dispatch: monadic map/aggregate, dyadic dict+atom (both
  * orders), dyadic dict+dict union, and dyadic ATOMIC table+atom.  Returns
  * owned, or NULL to decline. */
-static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
+static ray_t* dict_distribute(ray_t* head, ray_t** args, int64_t n) {
     if (n == 1) {
         ray_t* d = args[0];
         /* table arm (openq): a monadic aggregation over a plain OR keyed table
@@ -439,11 +439,11 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
          * not aggregated) — kdb `sum k`.  Claimed before the plain-dict path so
          * a keyed table (a RAY_DICT) does not fall into the reduce. */
         if (d && d->type == RAY_TABLE)
-            return q_table_distribute(head, d, NULL, 0);
+            return table_distribute(head, d, NULL, 0);
         if (d && d->type == RAY_DICT && q_table_is_keyed(d)) {
             ray_t* vt = ray_dict_vals(d);        /* value table, borrowed */
             if (!vt || vt->type != RAY_TABLE) return NULL;
-            return q_table_distribute(head, vt, NULL, 0);
+            return table_distribute(head, vt, NULL, 0);
         }
         ray_t* keys = ray_dict_keys(d);          /* borrowed */
         ray_t* vals = ray_dict_vals(d);          /* borrowed */
@@ -465,14 +465,14 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
          * caller's historic 'type stands. */
         if (head->attrs & RAY_FN_ATOMIC) {
             if (a && a->type == RAY_TABLE && b && ray_is_atom(b) && b->type != RAY_DICT)
-                return q_table_distribute(head, a, b, 0);   /* col OP x */
+                return table_distribute(head, a, b, 0);   /* col OP x */
             if (b && b->type == RAY_TABLE && a && ray_is_atom(a) && a->type != RAY_DICT)
-                return q_table_distribute(head, b, a, 1);   /* x OP col */
+                return table_distribute(head, b, a, 1);   /* x OP col */
         }
         if (a && a->type != RAY_DICT && b && b->type != RAY_DICT) return NULL;
         bool ad = a && a->type == RAY_DICT;
         bool bd = b && b->type == RAY_DICT;
-        if (ad && bd) return q_dict_union(head, a, b);
+        if (ad && bd) return dict_union(head, a, b);
         ray_t* d = ad ? a : b;
         ray_t* keys = ray_dict_keys(d);          /* borrowed */
         ray_t* vals = ray_dict_vals(d);          /* borrowed */
@@ -485,7 +485,7 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
     return NULL;
 }
 
-/* Mirror of eval's dict_retry for q_deriv_apply's base-fn calls: 'type ONLY
+/* Mirror of eval's dict_retry for deriv_apply's base-fn calls: 'type ONLY
  * (a 'nyi/'length stands — `prev d` keeps xprev's 'nyi, no structure arm).
  * Consumes/returns `result`. */
 static ray_t* distribute_retry(ray_t* head, ray_t* result, ray_t** args, int64_t n) {
@@ -495,7 +495,7 @@ static ray_t* distribute_retry(ray_t* head, ray_t* result, ray_t** args, int64_t
     for (int64_t i = 0; i < n; i++)
         if (args[i] && (args[i]->type == RAY_DICT || args[i]->type == RAY_TABLE)) { has_coll = true; break; }
     if (!has_coll || q_fn_dict_distribute_veto(head, args, n)) return result;
-    ray_t* dr = q_dict_distribute(head, args, n);
+    ray_t* dr = dict_distribute(head, args, n);
     if (dr) { ray_release(result); return dr; }
     return result;
 }
@@ -517,19 +517,19 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
      * (the 'type-error path) with matching arity, but ALSO reachable via the
      * call_fn1/call_fn2 hook tails for a wrong-arity builtin (e.g. `map[+;d]`
      * applies the BINARY `+` monadically) — so require exact arity here, else
-     * q_dict_distribute would call the wrong kernel signature and crash. */
+     * dict_distribute would call the wrong kernel signature and crash. */
     if (((head->type == RAY_UNARY && n == 1) ||
          (head->type == RAY_BINARY && n == 2)) &&
         !q_fn_dict_distribute_veto(head, args, n)) {
         for (int64_t i = 0; i < n; i++)
             if (args[i] && (args[i]->type == RAY_DICT || args[i]->type == RAY_TABLE))
-                return q_dict_distribute(head, args, n);
+                return dict_distribute(head, args, n);
     }
 
     /* 100h lambda carriers — q rank/projection semantics.  Claimed before
      * the n guard: a rank-0 call shape must not fall through. */
     if (head->type == RAY_LIST && q_deriv_kind_of(head) == Q_DERIV_LAMBDA)
-        return q_lambda_apply(head, args, n);
+        return lambda_apply(head, args, n);
 
     if (n < 1) return NULL;
 
@@ -641,7 +641,7 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
              * string sends it verbatim and returns the full response string.
              * Claimed BEFORE the one-shot IPC arm (as ws:// is) so an http://
              * handle never TCP-connects as a kdb peer; `:https://` -> 'nyi
-             * inside q_http_raw_client.  A non-string arg declines. */
+             * inside q_http_client_raw.  A non-string arg declines. */
             {
                 const char* hp = ray_str_ptr(s);
                 size_t hl = ray_str_len(s);
@@ -649,7 +649,7 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                     (hl >= 9 && memcmp(hp, ":https://", 9) == 0)) {
                     if (n == 1 && args[0] && (args[0]->type == -RAY_STR ||
                                           args[0]->type == RAY_CHARV || args[0]->type == -RAY_CHARV))
-                        return q_http_raw_client(head, args[0]);
+                        return q_http_client_raw(head, args[0]);
                     return NULL;
                 }
             }
@@ -688,11 +688,11 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
     /* Composition `'[f;g;…]` — the rightmost function consumes all args, each
      * function to its left is then applied monadically to the running result. */
     if (head->type == RAY_LIST && q_deriv_kind_of(head) == Q_DERIV_COMPOSE)
-        return q_compose_apply(head, args, n);
+        return compose_apply(head, args, n);
 
     /* 104h carriers are RAY_LISTs — claim them BEFORE the gather arm. */
     if (head->type == RAY_LIST && q_deriv_kind_of(head) != Q_DERIV_NONE)
-        return q_deriv_apply(head, args, n);
+        return deriv_apply(head, args, n);
 
     /* Noun indexing, one step per arg — d[k;i] / t[r;c] / m[i;j] drill through
      * whatever each step yields (dict -> dict_lookup with kdb miss semantics,

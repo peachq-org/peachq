@@ -74,7 +74,7 @@ char* q_wasm_eval(const char* src) {
         return strdup("parse error");
     }
 
-    int is_assign = q_ast_is_assign(ast);   /* pre-lower shape */
+    int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) {
         const char* code = (const char*)ast->sdata;

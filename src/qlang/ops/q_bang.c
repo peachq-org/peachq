@@ -164,7 +164,7 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
  * table!table (rows).  ()!() is the empty dict; a keyed table is a table!table
  * dict.  vals pass through as-is (rayfall `dict` broadcasts/boxes). */
 static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
-    if (q_count_long(x) != q_count_long(y))
+    if (q_builtins_count_long(x) != q_builtins_count_long(y))
         return ray_error("length", "!: key and value counts must match");
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
         ray_retain(x);
