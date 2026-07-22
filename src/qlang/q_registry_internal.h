@@ -49,7 +49,9 @@ ray_t* q_mmin_wrap(ray_t* n, ray_t* x);
 ray_t* q_mcount_wrap(ray_t* n, ray_t* x);
 ray_t* q_mdev_wrap(ray_t* n, ray_t* x);
 ray_t* q_ema_wrap(ray_t* a, ray_t* x);
-ray_t* q_mmu_wrap(ray_t* x, ray_t* y);                        /* matrix multiply / dot product — used by: math */
+ray_t* q_mmu_wrap(ray_t* x, ray_t* y);                        /* matrix multiply / dot product — used by: math, dollar */
+enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };                     /* RAGGED is mmu-shaped: mmu owns its 'length */
+int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix, else QMMU_*; *first = count(-first) — used by: dollar */
 ray_t* q_neg_wrap(ray_t* x);
 ray_t* q_raze_wrap(ray_t* x);
 ray_t* q_within_wrap(ray_t* x, ray_t* y);
@@ -97,9 +99,6 @@ ray_t* q_seq_fn(ray_t** args, int64_t n);
 ray_t* q_if_fn(ray_t** args, int64_t n);
 ray_t* q_do_fn(ray_t** args, int64_t n);
 ray_t* q_while_fn(ray_t** args, int64_t n);
-
-/* ---- defined in q_wrap_castcal.c ---- */
-ray_t* q_cast_wrap(ray_t* t, ray_t* x);
 
 /* ---- defined in q_wrap_io.c ---- */
 ray_t* q_filetext_wrap(ray_t* x, ray_t* y);
@@ -170,7 +169,7 @@ ray_t* q_keyed_table_build(ray_t** args, int64_t n);
 
 /* ---- defined in q_registry.c ---- */
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, funsql, table */
-ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, funsql, json, wire, agg, applyiter, castcal, io, join, list, math, table, value */
+ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, funsql, json, wire, agg, applyiter, dollar, io, join, list, math, table, value */
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, applyiter, value */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, lower, applyiter, join */
 
@@ -195,10 +194,8 @@ ray_t* q_registry_list_value(void);                           /* used by: fmt, l
 /* ---- defined in q_value.c (q_value_wrap is public — q_registry.h) ---- */
 ray_t* q_value_resolve_sym_owned(ray_t* symv);                /* used by: table */
 
-/* ---- defined in q_wrap_castcal.c ---- */
-int8_t q_cast_designator(ray_t* t, int* is_tok);              /* used by: io */
+/* ---- defined in q_dollar.c (the `$` verb API is public — q_dollar.h) ---- */
 const char* q_type_qname(int8_t t);                           /* used by: table */
-ray_t* q_cast_to(int8_t tag, ray_t* x);                       /* used by: agg, applyiter, list */
 int    q_int_index_width(int8_t t);                           /* used by: table */
 int    q_strict_i64(ray_t* x, int64_t* out);                  /* strict-cast probe (type-judgment home) — used by: applyiter, bang, io, list */
 int    q_strict_f64(ray_t* x, double* out);                   /* used by: list */
@@ -208,7 +205,6 @@ int q_is_int_atom(ray_t* x);                                  /* used by: io, ta
 int q_is_int_vec(ray_t* x);                                   /* used by: io, list */
 int64_t q_ivec_get(ray_t* v, int64_t i);                      /* used by: io, list */
 int64_t q_iatom_val(ray_t* x);                                /* used by: io, list, table */
-ray_t* q_tok_to(int8_t tag, ray_t* x);                        /* used by: io */
 
 /* ---- defined in q_wrap_io.c ---- */
 ray_t* q_hopen_wrap(ray_t* x);                                /* used by: apply, registry */

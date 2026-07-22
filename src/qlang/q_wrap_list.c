@@ -6,6 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "qlang/q_apply.h" /* q_apply_noun */
 #include "lang/env.h"      /* ray_env_get — q_env_call2 */
 #include "lang/eval.h"     /* ray_take_fn, ray_in_fn, ray_find_fn, ray_xbar_fn */
@@ -1227,7 +1228,7 @@ static int64_t q_rand_below(int64_t m) {
 
 /* n?t — temporal roll, uniform on [0,y) over the backing payload (ref/deal.md:
  * "float, temporal >=0 -> 0 to y"; `4?2012.09m` is its transcript).  Draw an
- * i64 within the backing payload range, then re-tag through q_cast_to — THE
+ * i64 within the backing payload range, then re-tag through q_dollar_cast — THE
  * one conversion home (q_registry.h) — so the payload->temporal law stays
  * there.  y=0 degenerates
  * to all-zero items (the float row's y*0 behaviour); y<0 or null -> the
@@ -1248,7 +1249,7 @@ static ray_t* q_gen_temporal(int64_t n, ray_t* y) {
         for (int64_t i = 0; i < n; i++) d[i] = m ? q_rand_below(m) : 0;
     }
     if (!v || RAY_IS_ERR(v)) return v;
-    ray_t* r = q_cast_to(tag, v);
+    ray_t* r = q_dollar_cast(tag, v);
     ray_release(v);
     return r;
 }

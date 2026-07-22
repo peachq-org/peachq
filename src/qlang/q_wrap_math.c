@@ -190,8 +190,7 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
  * and a column of q_flip_wrap y (reusing both kernels).  A vector is an f64 vec
  * whose axis drops from the result; a matrix is a rectangular list of f64 vecs.
  * Shape validated up front: ragged / count-y != count-first-x -> length. */
-enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };
-static int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* */
+int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* */
     if (v && v->type == RAY_F64) { *first = ray_len(v); return 0; }   /* count x */
     if (v && v->type == RAY_LIST && ray_len(v) > 0) {
         ray_t** e = (ray_t**)ray_data(v);
