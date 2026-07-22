@@ -413,6 +413,22 @@ static ray_t* read1_wrap_impl(ray_t* x) {
     return ray_error("type", "read1: expected a file symbol or (filesymbol;offset[;length])");
 }
 
+/* q `hdel x` — ref/hdel.md.  Delete the file or (empty) folder named by the
+ * file symbol `:path and return x.  POSIX remove() dispatches unlink/rmdir, so
+ * a folder is removed only when empty (the doc's "folders only if empty").  A
+ * missing path or non-empty folder surfaces 'io (the read0 ENOENT precedent).
+ * WRITES the filesystem, so restricted mode refuses (the file-verb precedent). */
+ray_t* q_hdel_wrap(ray_t* x) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    ray_t* path = ft_path(x);            /* NULL unless a `:path symbol atom */
+    if (!path) return ray_error("type", "hdel: expected a file symbol `:path");
+    int rc = remove(ray_str_ptr(path));  /* ray_str path is NUL-terminated */
+    ray_release(path);
+    if (rc != 0) return ray_error("io", NULL);
+    ray_retain(x);
+    return x;
+}
+
 /* ---- Save Text: `:path 0: strings -------------------------------------- */
 static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
     ray_t* path = ft_path(fsym);
