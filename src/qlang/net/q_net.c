@@ -1,4 +1,4 @@
-/* q_hostaddr — see q_hostaddr.h.  Behaviour pinned from qdocs ref/dotq.md
+/* q_net — see q_net.h.  Behaviour pinned from qdocs ref/dotq.md
  * (clean room): .Q.addr returns the IPv4 as a host-order int, dotted-quad
  * input parses without DNS, unresolvable -> -1i; .Q.host maps an int address
  * to a hostname sym via the OS resolver (order/choice is OS-governed). */
