@@ -38,22 +38,11 @@ int  q_fmt_prec(void);
  * Prepare Text inherits through it.  RULE: anything composing text above
  * string/0: must inherit, never re-format floats itself.  out (non-null,
  * n>0) is always NUL-terminated; over-long magnitudes are truncated. */
-void q_float_tok(double v, int f32, char* out, size_t n);
-
-/* ---- q console sink -------------------------------------------------------
- * `show` (and, in principle, `0N!`) print a value's q display as a SIDE EFFECT
- * and return generic null.  Since qdoc compares only the row's rendered output
- * and the REPL prints per line, the side-effect text is buffered here: the
- * host (qdoc / repl) drains it before/instead of the result and resets it once
- * per example / line. */
-void        q_console_show(ray_t* val);   /* append q_fmt(val) + '\n' */
-const char* q_console_str(void);          /* buffered text ("" if empty) */
-void        q_console_reset(void);        /* clear the buffer */
+void q_fmt_float(double v, int f32, char* out, size_t n);
 
 /* Single-line k-repr (kdb `0N!x` / .Q.s1 style): generic lists inline as
  * (a;b;c), enlist as ,x, strings quoted-escaped (a len-1 string renders
  * `,"c"` — the string-model conflation rule); vectors/atoms via q_fmt. */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);
-void q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles) */
 
 #endif /* Q_FMT_H */

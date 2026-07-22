@@ -14,7 +14,7 @@
 #include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
 #include "qlang/q_registry_internal.h" /* q_registry_init + q_is_fn_value (shared; brings q_registry.h) */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
-#include "qlang/q_fmt.h"      /* q_console_show — show's display sink; q_float_tok — string's float leaf */
+#include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "lang/format.h"    /* ray_fmt — q string cast */
