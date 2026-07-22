@@ -35,7 +35,7 @@ ray_t* q_qsql_normalize_probe(const char* src, int ctx, int verb);
 /* True iff the (pre-lower) statement's RESULT is an assignment's — the q
  * console prints nothing for `a:5` (statement sequences check their LAST
  * statement).  Consulted by the REPL/qdoc before printing. */
-int q_ast_is_assign(const ray_t* ast);
+int q_lower_ast_is_assign(const ray_t* ast);
 
 /* Fill the top-level `;`-headed statement list's C-NULL slots (empty
  * statements) with empty general lists, IN PLACE: kdb `parse ";"` is

@@ -20,13 +20,13 @@
 #include <stdlib.h>         /* getenv/setenv, calloc/realloc */
 
 /* q `exit x` — terminate with exit code x (ref/exit.md; blocked during reval
- * -> 'access, kdb-true).  All processing lives in q_exit (fires `.z.exit`,
- * capability-gated): under the doctest/wasm runtimes q_exit returns and the
+ * -> 'access, kdb-true).  All processing lives in q_sys_exit (fires `.z.exit`,
+ * capability-gated): under the doctest/wasm runtimes q_sys_exit returns and the
  * verb is a silent null — the runner survives corpus `exit 0` rows. */
 ray_t* q_exit_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     if (!q_is_int_atom(x) || RAY_ATOM_IS_NULL(x)) return ray_error("type", NULL);
-    q_exit((int)q_iatom_val(x));
+    q_sys_exit((int)q_iatom_val(x));
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
@@ -407,7 +407,7 @@ static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
 /* ---- Prepare Text: delim 0: table | list-of-columns --------------------- */
 
 /* One cell -> OWNED RAY_STR raw text (no quoting).  Borrows atom. */
-static ray_t* q_ft_cell_text(ray_t* atom) {
+static ray_t* ft_cell_text(ray_t* atom) {
     ray_t* s0 = q_string_fn(atom);              /* charv post-1b */
     if (!s0 || RAY_IS_ERR(s0)) return s0;
     ray_t* s = q_str_in(s0);                    /* legacy STR for the writers */
@@ -542,7 +542,7 @@ static ray_t* ft_prepare(char delim, ray_t* y) {
                 ray_t* atom = ray_at_fn(col, ia);
                 ray_release(ia);
                 if (!atom || RAY_IS_ERR(atom)) { free(buf); ray_release(out); return atom ? atom : ray_error("oom", NULL); }
-                ray_t* cs = q_ft_cell_text(atom);
+                ray_t* cs = ft_cell_text(atom);
                 ray_release(atom);
                 if (!cs || RAY_IS_ERR(cs)) { free(buf); ray_release(out); return cs ? cs : ray_error("oom", NULL); }
                 if (cs->type != -RAY_STR) { ray_release(cs); free(buf); ray_release(out); return ray_error("type", "0:: unformattable cell"); }
