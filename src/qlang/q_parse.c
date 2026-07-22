@@ -20,6 +20,7 @@
 
 #include "qlang/q_parse.h"
 #include "qlang/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
+#include "qlang/q_calendar.h" /* q_calendar_ts_compose — timestamp vector literals */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ns.h"       /* q_ns_current, q_ns_is_unqualifiable */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
