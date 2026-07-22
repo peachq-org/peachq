@@ -9,9 +9,9 @@
 # Usage: gen-assets.sh <output.h> <asset-root-dir>
 # Deterministic: files walked in LC_ALL=C sorted order; only relative paths and
 # a FIXED banner are embedded (never $root or a timestamp) — a second run is
-# byte-identical. Written atomically (temp + cmp + mv): the output mtime only
-# changes when the content changes, so a Makefile FORCE-run does not needlessly
-# rebuild dependents, and a failed run never leaves a half-written header.
+# byte-identical. Written atomically (temp + mv): a failed run never leaves a
+# half-written header, and the output mtime moves on every successful run so
+# make's prerequisite chain quiesces (the Makefile rule lists the real inputs).
 # Portable: POSIX sh + od + awk + wc; runs on the BUILD host.
 set -eu
 
@@ -66,9 +66,4 @@ done
     printf '#endif /* %s */\n' "$guard"
 } > "$tmp"
 
-# Atomic replace: only touch $out (and its mtime) when the content changed.
-if [ -f "$out" ] && cmp -s "$tmp" "$out"; then
-    rm -f "$tmp"
-else
-    mv -f "$tmp" "$out"
-fi
+mv -f "$tmp" "$out"
