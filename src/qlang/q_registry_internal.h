@@ -54,11 +54,13 @@ enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };                     /* RAGGED is mmu-s
 int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix, else QMMU_*; *first = count(-first) — used by: dollar */
 ray_t* q_sum_wrap(ray_t* x);
 
-/* ---- defined in ops/q_applyiter.c ---- */
-/* (q_at_wrap / q_dot_wrap moved to q_apply.c — declared in q_apply.h; the
- * registry specials' accessors + the `'x` signal channel moved to
- * q_registry.c — accessors declared in q_registry.h.  The SPECIALS[] table
- * in q_registry.c binds these wrapper bodies as its build recipes.) */
+/* ---- defined in ops/q_iter.c ---- */
+/* The iterator + control-form wrapper bodies stay declared HERE (the manifest's
+ * linkage twin): the Q_OPS[] over/scan/prior/peach rows and the registry
+ * SPECIALS[] table both bind these pointers as build recipes.  (q_at_wrap /
+ * q_dot_wrap moved to q_apply.c — declared in q_apply.h; the registry specials'
+ * accessors + the `'x` signal channel moved to q_registry.c — accessors
+ * declared in q_registry.h.) */
 ray_t* q_each_wrap(ray_t* f, ray_t* x);
 ray_t* q_eachboth_wrap(ray_t** args, int64_t n);
 ray_t* q_prior_wrap(ray_t** args, int64_t n);
@@ -145,16 +147,16 @@ ray_t* q_keyed_table_build(ray_t** args, int64_t n);
 
 /* ---- defined in q_registry.c ---- */
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, funsql, table */
-ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, funsql, json, wire, agg, applyiter, dollar, io, join, list, math, table, value */
-ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, applyiter, value */
-bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, lower, applyiter, join */
+ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, funsql, json, wire, agg, iter, dollar, io, join, list, math, table, value */
+ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, iter, value */
+bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, lower, iter, join */
 
 /* ---- defined in ops/q_agg.c ---- */
 double q_velem_f(ray_t* x, int64_t i, int* isnull);           /* used by: list */
 int q_vec_is_float(ray_t* x);                                 /* used by: list */
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
 
-/* ---- defined in ops/q_applyiter.c ---- */
+/* ---- defined in ops/q_iter.c ---- */
 ray_t* q_over_wrap(ray_t** args, int64_t n);                  /* used by: lower, registry */
 /* (the q_registry_*_value accessors live in q_registry.c — decls in q_registry.h) */
 
@@ -164,7 +166,7 @@ ray_t* q_value_resolve_sym_owned(ray_t* symv);                /* used by: table 
 /* ---- defined in q_dollar.c (the `$` verb API is public — q_dollar.h) ---- */
 const char* q_type_qname(int8_t t);                           /* used by: table */
 int    q_int_index_width(int8_t t);                           /* used by: table */
-int    q_strict_i64(ray_t* x, int64_t* out);                  /* strict-cast probe (type-judgment home) — used by: applyiter, bang, io, list */
+int    q_strict_i64(ray_t* x, int64_t* out);                  /* strict-cast probe (type-judgment home) — used by: iter, bang, io, list */
 int    q_strict_f64(ray_t* x, double* out);                   /* used by: list */
 ray_t* q_i64_or_err(ray_t* x, int64_t* out, const char* what);/* throwing gate — used by: agg, io, list */
 ray_t* q_f64_or_err(ray_t* x, double* out, const char* what); /* f64 twin (no gate site yet) */
