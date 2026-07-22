@@ -222,6 +222,23 @@ ray_t* q_collapse_list(ray_t* l) {
     return vec;
 }
 
+/* v[i] as an owned atom/element (borrowed v): direct payload read for
+ * vectors/lists (collection_elem — no index atom, no ray_at_fn dispatch);
+ * generic indexing for every other shape.  alloc==0 results are BORROWED
+ * list slots — retain, never release (r0 review). */
+ray_t* q_registry_elem_at(ray_t* v, int64_t i) {
+    if (v && (ray_is_vec(v) || v->type == RAY_LIST)) {
+        int alloc = 0;
+        ray_t* e = collection_elem(v, i, &alloc);
+        if (e && !RAY_IS_ERR(e)) { if (!alloc) ray_retain(e); return e; }
+        if (e && alloc) ray_release(e);   /* allocated error: generic fallback */
+    }
+    ray_t* ia = ray_i64(i);
+    ray_t* e  = ray_at_fn(v, ia);   /* owned */
+    ray_release(ia);
+    return e;
+}
+
 /* ---- string-C3 boundary conversion (single home, q_registry.h) ---- */
 
 /* MATERIALIZES (one O(len) memcpy), never a view: engine amend writes through
