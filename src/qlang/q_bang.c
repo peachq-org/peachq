@@ -11,7 +11,7 @@
  * These more specific names are for reuse in the code base. Having the specific types also helps. 
  */
 #include "qlang/q_bang.h"
-#include "qlang/q_registry_internal.h"  /* q_value_wrap, q_hsym_wrap, q_attr_wrap, q_strict_i64,
+#include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_strict_i64,
                                          * q_is_int_atom, q_iatom_val, q_table_flatten, q_env_call2 */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
