@@ -5,13 +5,12 @@
  * for reuse.  The per-target q_cast_* matrix and the general int-atom helpers
  * (q_is_int_atom, q_iatom_val, ...) live here too (q_registry_internal.h). */
 #include "qlang/q_dollar.h"
-#include "qlang/q_tok.h"   /* the Tok string scanners (q_tok_date, q_tok_ts, ...) */
+#include "qlang/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */
 #include "lang/internal.h"  /* ray_typed_null, ray_guid, ray_str_vec_get, ray_error */
-#include "core/numparse.h"  /* ray_parse_i64/f64 — Tok string parses */
 #include <math.h>           /* isnan */
-#include <stdint.h>         /* INT16/32/64 MIN/MAX — Tok out-of-domain bounds */
+#include <stdint.h>         /* INT32/64 MAX — temporal infinity mapping */
 #include <string.h>
 #include <stdlib.h>
 
@@ -584,134 +583,7 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
     const char* tp; int64_t tn;
     if (!q_text_bytes(x, &tp, &tn))
         return ray_error("type", "$: Tok right operand must be a string");
-    const char* p = tp;
-    size_t len = p ? (size_t)tn : 0;
-    while (len && *p == ' ') { p++; len--; }            /* trim outer blanks */
-    while (len && p[len - 1] == ' ') len--;
-    switch (tag) {
-    case RAY_SYM:
-        return ray_sym(ray_sym_intern(len ? p : "", len));
-    case RAY_BOOL:   /* truthy set pinned by ref/tok.md: "txyTXY1" */
-        return ray_bool(len == 1 && strchr("1TtXxYy", p[0]) != NULL);
-    case RAY_F64: case RAY_F32: {
-        double v = 0;
-        size_t used = len ? ray_parse_f64(p, len, &v) : 0;
-        if (used != len || len == 0) return ray_typed_null((int8_t)-tag);
-        return tag == RAY_F64 ? ray_f64(v) : ray_f32((float)v);
-    }
-    case RAY_I64: case RAY_I32: case RAY_I16: {
-        int64_t v = 0;
-        size_t used = len ? ray_parse_i64(p, len, &v) : 0;
-        if (used != len || len == 0) return ray_typed_null((int8_t)-tag);
-        /* Out-of-domain -> typed null (tok.md).  The bounds are ±INT*_MAX,
-         * NOT INT*_MIN: the exact minimum IS the null sentinel (0N/0Ni/0Nh)
-         * and must never round-trip as an accepted value. */
-        if (tag == RAY_I64)
-            return (v == INT64_MIN)
-                 ? ray_typed_null(-RAY_I64) : ray_i64(v);
-        if (tag == RAY_I32)
-            return (v > INT32_MAX || v < -INT32_MAX)
-                 ? ray_typed_null(-RAY_I32) : ray_i32((int32_t)v);
-        return (v > INT16_MAX || v < -INT16_MAX)
-             ? ray_typed_null(-RAY_I16) : ray_i16((int16_t)v);
-    }
-    case RAY_DATE: {
-        /* Unparseable / invalid civil date / out-of-domain -> 0Nd, never an
-         * error (tok.md pins "D"$"2147483648" -> 0Nd). */
-        int64_t y, mo, d;
-        if (!q_tok_date(p, len, &y, &mo, &d) || !q_calendar_date_valid(y, mo, d))
-            return ray_typed_null(-RAY_DATE);
-        return ray_date(q_calendar_days_from_civil(y, mo, d));
-    }
-    case RAY_MONTH: {
-        /* "M"$str -> month (ref/tok.md).  Unparseable / out-of-domain -> 0Nm,
-         * never an error (tok contract, mirrors "D"$). */
-        int64_t mo;
-        if (!q_tok_month(p, len, &mo))
-            return ray_typed_null(-RAY_MONTH);
-        return ray_month(mo);
-    }
-    case RAY_TIME: {
-        /* "T"$str -> time (ref/tok.md).  Unparseable / out-of-domain -> 0Nt,
-         * never an error (base ray_cast_fn errors on a bad string). */
-        int32_t ms;
-        if (!q_tok_time(p, len, &ms))
-            return ray_typed_null(-RAY_TIME);
-        return ray_time(ms);
-    }
-    case RAY_TIMESTAMP: {
-        /* "P"$str -> timestamp (ref/tok.md Â§Timestamps).  Unparseable /
-         * out-of-range -> 0Np, never an error (tok contract). */
-        int64_t ns;
-        if (!q_tok_ts(p, len, &ns))
-            return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(ns);
-    }
-    case RAY_DATETIME: {
-        /* "Z"$str -> datetime.  tok.md:222-227 pins "PZ"$\: over ONE input
-         * ("20191122-11:11:11.123" -> 2019.11.22T11:11:11.123): Z shares P's
-         * accepted shapes at ms display precision, so reuse q_tok_ts (the
-         * single P parser) and convert ns -> fractional days.  Unparseable /
-         * invalid -> 0Nz, never an error (tok contract). */
-        int64_t ns;
-        if (!q_tok_ts(p, len, &ns))
-            return ray_typed_null(-RAY_DATETIME);
-        return ray_datetime((double)ns / 86400000000000.0);
-    }
-    case RAY_BYTE_ONLY: {
-        /* "X"$ reads the string as HEX ("X"$"42" -> 0x42, ref/tok.md).
-         * Unparseable or > 0xff -> 0x00 (derived): tok.md pins out-of-
-         * domain -> typed null, and byte HAS no null (basics/datatypes.md),
-         * so its zero value stands in. */
-        uint64_t v = 0;
-        size_t i = 0;
-        for (; i < len; i++) {
-            char c = p[i];
-            int d = (c >= '0' && c <= '9') ? c - '0'
-                  : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                  : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-            if (d < 0) break;
-            v = (v << 4) | (uint64_t)d;
-            if (v > 0xff) break;
-        }
-        if (len == 0 || i != len || v > 0xff) return ray_u8(0);
-        return ray_u8((uint8_t)v);
-    }
-    case RAY_GUID: {
-        /* "G"$str -> guid (basics/datatypes.md §Guid).  Tok contract:
-         * unparseable / wrong-shape -> typed null 0Ng, never an error (base
-         * ray_cast_fn "GUID" ERRORS on bad input, so parse here).  Canonical
-         * 36-char UUID only; IPv4/IPv6 forms deferred (see q_tok_uuid). */
-        uint8_t bytes[16];
-        if (!q_tok_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
-        return ray_guid(bytes);
-    }
-    case RAY_MINUTE: {
-        /* "U"$str -> minute, FLOOR to the minute we are in (ref/tok.md:61
-         * "U"$"12:13:14" -> 12:13; cast.md:168-170 truncation rule). */
-        int64_t ns;
-        if (!q_tok_clock_ns(p, len, &ns))
-            return ray_typed_null(-RAY_MINUTE);
-        return ray_minute(ns / 60000000000LL);
-    }
-    case RAY_SECOND: {
-        /* "V"$str -> second, floor (derived — mirrors "U"$). */
-        int64_t ns;
-        if (!q_tok_clock_ns(p, len, &ns))
-            return ray_typed_null(-RAY_SECOND);
-        return ray_second(ns / 1000000000LL);
-    }
-    case RAY_TIMESPAN: {
-        /* "N"$str -> timespan; grammar in q_tok_timespan_ns.  Unparseable /
-         * out-of-range -> 0Nn (tok contract). */
-        int64_t ns;
-        if (!q_tok_timespan_ns(p, len, &ns))
-            return ray_typed_null(-RAY_TIMESPAN);
-        return ray_timespan(ns);
-    }
-    default:
-        return ray_error("nyi", "$: char Tok is deferred");
-    }
+    return q_tok(tag, tp, tp ? (size_t)tn : 0);
 }
 
 /* q `w$s` PAD (ref/pad.md): a LONG width w left-justifies the string s in a
