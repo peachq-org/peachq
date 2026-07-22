@@ -19,6 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_parse.h"
+#include "qlang/q_scan.h"    /* q_scan_temporal, num_el — literal magnitudes */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ns.h"       /* q_ns_current, q_ns_is_unqualifiable */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
@@ -244,10 +245,7 @@ static Tokens g_toks = { NULL, 0 };
  * if any magnitude was fractional).  Nulls / integer infinities are Specials
  * that widen to the chosen type's sentinel. */
 
-typedef enum { EL_INT, EL_FLOAT, EL_NULL, EL_PINF, EL_NINF, EL_DATE, EL_TIME,
-               EL_TS, EL_MONTH, EL_MINUTE, EL_SECOND, EL_TIMESPAN,
-               EL_DT /* datetime: f64 days in .f (feat/q-datetime) */ } el_kind;
-typedef struct { el_kind kind; int64_t i; double f; int forces_float; } num_el;
+/* el_kind/num_el live in q_scan.h (the scanner owns the element type). */
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
  * float context.  Returns bytes consumed (0 = not a Special). */
@@ -265,12 +263,6 @@ static int scan_special(const char *s, int p, num_el *out) {
     return (q + 2) - p;
 }
 
-/* Length of the digit run starting at s[p]. */
-static int dig_run(const char *s, int p) {
-    int n = 0;
-    while (CLASS[(uint8_t)s[p + n]] & CL_DIGIT) n++;
-    return n;
-}
 
 /* Scan one magnitude at src[*p] into *out; return 1 on success, 0 on no match. */
 static int scan_one_num(const char *src, int *p, num_el *out) {
@@ -278,328 +270,17 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
     int used = scan_special(src, *p, out);
     if (used) { *p += used; return 1; }
 
-    /* Date literal magnitude: strictly yyyy.mm.dd (4-2-2 digits — every
-     * published-doc spelling is zero-padded), next byte neither digit nor
-     * another dot.  Checked BEFORE the float peek, which would otherwise eat
-     * `2000.01` and strand `.01` (the pre-date 'type failure).  Exactly ONE
-     * dot stays a float: kdb's bare `2000.01` IS the float 2000.01 (a month
-     * literal needs the `m` suffix, and month has no engine type).  A leading
-     * sign the SCANNER already classified as glued (neg_sign / vector
-     * elements) negates the day count: kdb `-2012.01.01` is 1988.01.01.
-     * Invalid civil dates (2000.13.01, 2000.02.30, 0000.01.01) die rather
-     * than fall back to the float-strand mess. */
+    /* Temporal magnitudes (date/timestamp/datetime/month/time/timespan/
+     * second/minute) — q_scan.c is the single home; a malformed shape dies
+     * here with the scanner's message (invalid civil dates never fall back
+     * to the float mess). */
     {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        if (dig_run(src, q) == 4 && src[q + 4] == '.' &&
-            dig_run(src, q + 5) == 2 && src[q + 7] == '.' &&
-            dig_run(src, q + 8) == 2 &&
-            !(CLASS[(uint8_t)src[q + 10]] & CL_DIGIT) && src[q + 10] != '.') {
-            int64_t y = (src[q]     - '0') * 1000 + (src[q + 1] - '0') * 100
-                      + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
-            int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
-            int64_t d  = (src[q + 8] - '0') * 10 + (src[q + 9] - '0');
-            if (!q_date_valid(y, mo, d)) q_die("bad date");
-            if (src[q + 10] == 'D') {
-                /* Timestamp literal: dateDtimespan (datatypes.md row 12).
-                 * Full clock HH:MM:SS required (cast.md pins both the
-                 * fraction-less 2015.10.28D03:55:58 and the 9-digit
-                 * 2014.11.22D17:43:40.123456789); a fraction of 1..9 digits
-                 * right-pads to nanoseconds.  The part after D is a TIMESPAN
-                 * (no 24h cap — hours normalize through the ns count), so
-                 * only mm/ss >= 60 die, mirroring the time-literal arm.
-                 * Shorter tod forms (bare D / D12 / D12:00) are deferred; an
-                 * invalid tod after D dies rather than half-matching a date
-                 * and stranding the tail (the invalid-civil-date rule). */
-                int r = q + 11;
-                if (!(dig_run(src, r) == 2 && src[r + 2] == ':' &&
-                      dig_run(src, r + 3) == 2 && src[r + 5] == ':' &&
-                      dig_run(src, r + 6) == 2))
-                    q_die("bad timestamp");
-                int64_t h  = (src[r]     - '0') * 10 + (src[r + 1] - '0');
-                int64_t mi = (src[r + 3] - '0') * 10 + (src[r + 4] - '0');
-                int64_t s  = (src[r + 6] - '0') * 10 + (src[r + 7] - '0');
-                if (mi >= 60 || s >= 60) q_die("bad timestamp");
-                int64_t frac = 0;
-                int end = r + 8;
-                if (src[end] == '.') {
-                    int fd = dig_run(src, end + 1);
-                    if (fd < 1 || fd > 9) q_die("bad timestamp");
-                    for (int k = 0; k < fd; k++)
-                        frac = frac * 10 + (src[end + 1 + k] - '0');
-                    for (int k = fd; k < 9; k++) frac *= 10;
-                    end += 1 + fd;
-                }
-                int64_t tod = (h * 3600 + mi * 60 + s) * 1000000000LL + frac;
-                out->kind = EL_TS;
-                out->i = q_ts_compose(q_days_from_civil(y, mo, d), tod);
-                if (neg) out->i = -out->i;
-                *p = end;
-                return 1;
-            }
-            if (src[q + 10] == 'T') {
-                /* Datetime literal: dateTtime (datatypes.md row 15, q type
-                 * 15).  Full clock HH:MM:SS required (cast.md:172 pins the
-                 * fraction-less 2017.08.23T23:50:12); a fraction of 1..3
-                 * digits right-pads to MILLISECONDS (the time-literal rule —
-                 * tok.md:227 pins the .123 form; display is always ms).
-                 * Unlike the D timestamp arm the clock is a TIME OF DAY, so
-                 * hours >= 24 die alongside mm/ss >= 60.  Payload = f64 days
-                 * since 2000.01.01, fraction = tod/86400000ms. */
-                int r = q + 11;
-                if (!(dig_run(src, r) == 2 && src[r + 2] == ':' &&
-                      dig_run(src, r + 3) == 2 && src[r + 5] == ':' &&
-                      dig_run(src, r + 6) == 2))
-                    q_die("bad datetime");
-                int64_t h  = (src[r]     - '0') * 10 + (src[r + 1] - '0');
-                int64_t mi = (src[r + 3] - '0') * 10 + (src[r + 4] - '0');
-                int64_t sec = (src[r + 6] - '0') * 10 + (src[r + 7] - '0');
-                if (h >= 24 || mi >= 60 || sec >= 60) q_die("bad datetime");
-                int64_t ms = 0;
-                int end = r + 8;
-                if (src[end] == '.') {
-                    int fd = dig_run(src, end + 1);
-                    if (fd < 1 || fd > 3) q_die("bad datetime");
-                    for (int k = 0; k < fd; k++)
-                        ms = ms * 10 + (src[end + 1 + k] - '0');
-                    for (int k = fd; k < 3; k++) ms *= 10;
-                    end += 1 + fd;
-                }
-                double tod = ((double)(h * 3600 + mi * 60 + sec) * 1000.0 +
-                              (double)ms) / 86400000.0;
-                out->kind = EL_DT;
-                out->f = (double)q_days_from_civil(y, mo, d) + tod;
-                if (neg) out->f = -out->f;   /* glued sign negates the payload
-                                              * (the kdb date-literal rule;
-                                              * derived for the T form) */
-                *p = end;
-                return 1;
-            }
-            out->kind = EL_DATE;
-            out->i = q_days_from_civil(y, mo, d);
-            if (neg) out->i = -out->i;
-            *p = q + 10;
-            return 1;
-        }
+        const char *terr = NULL;
+        int tm = q_scan_temporal(src, p, out, &terr);
+        if (tm < 0) q_die(terr);
+        if (tm) return 1;
     }
 
-    /* Month-SHAPED magnitude: yyyy.mm (4-2 digits), terminator neither digit
-     * nor dot nor an exponent continuation.  UNLIKE date, the month shape IS
-     * a valid float spelling (kdb bare `2000.01` is the float 2000.01; only
-     * the trailing `m` letter makes it a month), so this arm cannot commit:
-     * it records BOTH the month payload (.i = months since 2000.01) and the
-     * float twin (.f) with forces_float=1 — the `m` context in
-     * scan_num_literal reads .i, every other context reverts to the float via
-     * el_to_float's EL_MONTH arm.  A glued sign negates the payload (the
-     * kdb date-literal rule).  An invalid civil month (2000.13 / 2000.00)
-     * stays a float — EXCEPT when the very next byte is the `m` letter
-     * (2000.13m), which can only be a malformed month literal: die, mirroring
-     * the date arm's invalid-civil rule.  Year 0000 is out of the kdb domain
-     * and stays a float. */
-    {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        if (dig_run(src, q) == 4 && src[q + 4] == '.' &&
-            dig_run(src, q + 5) == 2 &&
-            src[q + 7] != '.' &&
-            !((src[q + 7] == 'e' || src[q + 7] == 'E') &&
-              (src[q + 8] == '+' || src[q + 8] == '-' ||
-               (src[q + 8] >= '0' && src[q + 8] <= '9')))) {
-            int64_t y  = (src[q]     - '0') * 1000 + (src[q + 1] - '0') * 100
-                       + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
-            int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
-            int valid = (y >= 1 && mo >= 1 && mo <= 12);
-            if (!valid && src[q + 7] == 'm') q_die("bad number");
-            if (valid) {
-                size_t rem2 = strlen(src + *p);
-                double fv; size_t u = ray_parse_f64(src + *p, rem2, &fv);
-                if (u == (size_t)(q + 7 - *p)) {   /* float twin spans yyyy.mm */
-                    out->kind = EL_MONTH;
-                    out->i = (y - 2000) * 12 + (mo - 1);
-                    if (neg) out->i = -out->i;
-                    out->f = fv;
-                    out->forces_float = 1;
-                    *p = q + 7;
-                    return 1;
-                }
-            }
-        }
-    }
-
-    /* Time literal magnitude: HH:MM:SS.f (2-2-2 clock digits + a dot + 1..3
-     * fractional digits, padded to milliseconds).  Checked before the float
-     * peek for the same reason as date.  The 1..3-digit gate is THE
-     * disambiguation from the adjacent temporal shapes (basics/syntax.md):
-     * timespan `00:00:00.000000000` has 9 fractional digits (>=4 -> this shape
-     * fails -> falls through to today's name-error, deferred); second
-     * `00:00:00` and minute `00:00` have no `.f` and also stay name-errors
-     * (minute/second/timespan have no engine type yet).  kdb accepts 1..3
-     * fractional digits and pads to ms (`.1`->100, `.11`->110, `.111`->111);
-     * time always DISPLAYS 3 fractional digits.  kdb time == i32 milliseconds
-     * of day (the base RAY_TIME payload).  A leading sign already glued by the
-     * scanner negates the ms count.  m>=60 / s>=60 die rather than fall to the
-     * float mess. */
-    {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        /* The clock-digit / ':' / '.' checks short-circuit BEFORE reading the
-         * fractional run, so dig_run(q+9) is only reached once src[q+8]=='.' is
-         * confirmed in-bounds (else a short input overruns the buffer). */
-        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
-            dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
-            dig_run(src, q + 6) == 2 && src[q + 8] == '.') {
-            int fd = dig_run(src, q + 9);         /* fractional-digit run length */
-            if (fd >= 1 && fd <= 3) {
-                int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-                int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-                int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
-                int64_t ms = 0;                   /* fractional -> milliseconds */
-                for (int k = 0; k < fd; k++) ms = ms * 10 + (src[q + 9 + k] - '0');
-                for (int k = fd; k < 3; k++) ms *= 10; /* right-pad to 3 digits */
-                if (mi >= 60 || s >= 60) q_die("bad time");
-                out->kind = EL_TIME;
-                out->i = h * 3600000 + mi * 60000 + s * 1000 + ms;
-                if (neg) out->i = -out->i;
-                *p = q + 9 + fd;
-                return 1;
-            }
-            if (fd >= 4 && fd <= 9) {
-                /* Timespan clock form: HH:MM:SS. + 4..9 fractional digits,
-                 * right-padded to nanoseconds (the pinned spelling is the
-                 * 9-digit 12:00:00.000000000, datatypes.md:134; 4..8 derived
-                 * — mirrors the timestamp arm's 1..9 pad). */
-                int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-                int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-                int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
-                int64_t ns = 0;
-                for (int k = 0; k < fd; k++) ns = ns * 10 + (src[q + 9 + k] - '0');
-                for (int k = fd; k < 9; k++) ns *= 10;
-                if (mi >= 60 || s >= 60) q_die("bad timespan");
-                out->kind = EL_TIMESPAN;
-                out->i = (h * 3600 + mi * 60 + s) * 1000000000LL + ns;
-                if (neg) out->i = -out->i;
-                *p = q + 9 + fd;
-                return 1;
-            }
-        }
-    }
-
-    /* Second literal magnitude: HH:MM:SS with the terminator neither '.'
-     * (time / timespan clock-frac shapes above) nor ':' nor a digit
-     * (basics/syntax.md:90).  The three clock shapes are mutually
-     * exclusive by terminator, so ordering here is not load-bearing. */
-    {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
-            dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
-            dig_run(src, q + 6) == 2 &&
-            src[q + 8] != '.' && src[q + 8] != ':' &&
-            !(CLASS[(uint8_t)src[q + 8]] & CL_DIGIT)) {
-            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-            int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-            int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
-            if (mi >= 60 || s >= 60) q_die("bad second");
-            out->kind = EL_SECOND;
-            out->i = h * 3600 + mi * 60 + s;
-            if (neg) out->i = -out->i;
-            *p = q + 8;
-            return 1;
-        }
-    }
-
-    /* Minute literal magnitude: HH:MM with the terminator neither ':'
-     * (second/time shapes) nor '.' nor a digit (basics/syntax.md:89). */
-    {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        if (dig_run(src, q) == 2 && src[q + 2] == ':' &&
-            dig_run(src, q + 3) == 2 &&
-            src[q + 5] != ':' && src[q + 5] != '.' &&
-            !(CLASS[(uint8_t)src[q + 5]] & CL_DIGIT)) {
-            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-            int64_t mm = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-            if (mm >= 60) q_die("bad minute");
-            out->kind = EL_MINUTE;
-            out->i = h * 60 + mm;
-            if (neg) out->i = -out->i;
-            *p = q + 5;
-            return 1;
-        }
-    }
-
-    /* Timespan D-form: digits 'D' [HH[:MM[:SS[.f{1,9}]]]] (interfaces
-     * usage 0D00:05 / 0D00:00:10; day-count payload derived).  Only
-     * matches when 'D' is followed by exactly-2 clock digits whose next
-     * byte does not continue a name, or by a byte that cannot continue a
-     * name at all — `1D45x` stays a name juxtaposition and `0Dabc` stays
-     * `0` + `Dabc` (the no-churn rule).  Hour overflow normalizes through
-     * the ns count (`123D45` -> 124D21:…, the timestamp-arm D24 rule).
-     * The date arm ran first, so `2000.01.01D…` never reaches here. */
-    {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        int dd = dig_run(src, q);
-        if (dd >= 1 && src[q + dd] == 'D') {
-            int r = q + dd + 1;
-            int hd = dig_run(src, r);
-            int matched = 0;
-            int64_t days = 0, tod_s = 0, ns = 0;
-            for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
-            if (hd == 2) {
-                int64_t h = (src[r] - '0') * 10 + (src[r + 1] - '0');
-                int e = r + 2;
-                int64_t mi = 0, ss = 0;
-                if (src[e] == ':' && dig_run(src, e + 1) == 2) {
-                    mi = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
-                    e += 3;
-                    if (src[e] == ':' && dig_run(src, e + 1) == 2) {
-                        ss = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
-                        e += 3;
-                        if (src[e] == '.') {
-                            int fd = dig_run(src, e + 1);
-                            if (fd < 1 || fd > 9) q_die("bad timespan");
-                            for (int k = 0; k < fd; k++)
-                                ns = ns * 10 + (src[e + 1 + k] - '0');
-                            for (int k = fd; k < 9; k++) ns *= 10;
-                            e += 1 + fd;
-                        }
-                    }
-                }
-                if (mi >= 60 || ss >= 60) q_die("bad timespan");
-                /* A name byte right after the clock digits means this was
-                 * a name after all (e.g. 1D45x) — not a timespan. */
-                if (!(CLASS[(uint8_t)src[e]] & CL_DIGIT) &&
-                    !((src[e] >= 'a' && src[e] <= 'z') ||
-                      (src[e] >= 'A' && src[e] <= 'Z') || src[e] == '_')) {
-                    tod_s = h * 3600 + mi * 60 + ss;
-                    out->kind = EL_TIMESPAN;
-                    out->i = (days * 86400 + tod_s) * 1000000000LL + ns;
-                    if (neg) out->i = -out->i;
-                    *p = e;
-                    matched = 1;
-                }
-            } else if (hd == 0 &&
-                       !((src[r] >= 'a' && src[r] <= 'z') ||
-                         (src[r] >= 'A' && src[r] <= 'Z') ||
-                         src[r] == '_' || src[r] == '.' || src[r] == ':')) {
-                /* Bare dD day count (kdb 1D; derived — no doc example uses
-                 * a bare form as input, PR-noted). */
-                out->kind = EL_TIMESPAN;
-                out->i = days * 86400000000000LL;
-                if (neg) out->i = -out->i;
-                *p = q + dd + 1;
-                matched = 1;
-            }
-            if (matched) return 1;
-        }
-    }
 
     /* Decide float vs int: a float magnitude contains '.' or an exponent among
      * its own bytes (before the next whitespace / letter).  Peek the digit run. */
