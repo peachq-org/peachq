@@ -22,10 +22,8 @@
 #include "qlang/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
 #include "qlang/q_calendar.h" /* q_calendar_ts_compose — timestamp vector literals */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
-#include "qlang/q_ns.h"       /* q_ns_current, q_ns_is_unqualifiable */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/q_deriv.h"    /* q_proj_new — 104h derived-verb carriers */
-#include "qlang/q_dotz.h"     /* q_dotz_ipc_hook_index — .z.p* handler aliases */
 #include "lang/env.h"        /* ray_fn_name; ray_sym_is_ipc_hook — IPC hook slots */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
@@ -1884,7 +1882,7 @@ int q_symvec_contains_id(ray_t *v, int64_t id) {
  * By (`by k:expr`) degrades to a name!expr DICT, the same shape Select uses, so
  * ql_qsql_exec skips it and it lowers via the Select path (keyed-table result).
  * Consumes the bk/bv refs.  Returns an OWNED value. */
-static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, int *bnamed, int nb) {
+static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
     int all_bare = 1;
     for (int i = 0; i < nb; i++)
         if (bnamed[i] || !(bv[i] && bv[i]->type == -RAY_SYM &&
