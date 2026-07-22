@@ -23,7 +23,7 @@
  * src/ops/join.c machinery); this section only prepares rowid-augmented key
  * tables, reorders the engine's match relation to kdb row order, and
  * assembles result columns by vector gather.  Keyed-table primitives are the
- * single-home helpers (q_is_keyed_table in ops/q_list.c, q_bang_enkey in q_bang.c,
+ * single-home helpers (q_table_is_keyed in ops/q_table.c, q_bang_enkey in q_bang.c,
  * q_table_flatten) — never redefined.  Refcounts: wrapper args BORROWED, results OWNED;
  * ray_list_append/ray_table_add_col RETAIN (release local after);
  * ray_table_get_col* return BORROWED columns. */
@@ -358,7 +358,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
         if (x) ray_retain(x);
         return x ? x : ray_error("type", "lj: nil lhs");
     }
-    if (q_is_keyed_table(x)) {             /* keyed lhs: unkey, join, re-key */
+    if (q_table_is_keyed(x)) {             /* keyed lhs: unkey, join, re-key */
         ray_t* xk = ray_dict_keys(x);                      /* borrowed */
         int64_t nkeys = ray_table_ncols(xk);
         ray_t* xp = q_table_flatten(x);
@@ -372,7 +372,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
     }
     if (!x || x->type != RAY_TABLE)
         return ray_error("type", "lj: left operand must be a table");
-    if (!q_is_keyed_table(y))
+    if (!q_table_is_keyed(y))
         return ray_error("type", "lj: right operand must be a keyed table");
     ray_t* yk = ray_dict_keys(y);                          /* borrowed */
     ray_t* yv = ray_dict_vals(y);                          /* borrowed */
@@ -627,7 +627,7 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
 
 static ray_t* qj_uj_core(ray_t* x, ray_t* y, int mode) {
     if (!x || !y) return ray_error("type", "uj: nil operand");
-    if (q_is_keyed_table(x) && q_is_keyed_table(y))
+    if (q_table_is_keyed(x) && q_table_is_keyed(y))
         return qj_ktbl_merge(x, y, mode);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE)
         return qj_uj_unkeyed(x, y);
@@ -769,7 +769,7 @@ ray_t* q_ajf0_wrap(ray_t** args, int64_t n) {
 ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
     if (!t || t->type != RAY_TABLE)
         return ray_error("type", "asof: left operand must be a table");
-    if (d && d->type == RAY_DICT && !q_is_keyed_table(d)) {
+    if (d && d->type == RAY_DICT && !q_table_is_keyed(d)) {
         /* dict -> 1-row table, then unwrap the single result row to a dict */
         ray_t* dk = ray_dict_keys(d);                      /* borrowed */
         ray_t* dv = ray_dict_vals(d);                      /* borrowed */
@@ -970,7 +970,7 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
  * otherwise); extra keytbl columns are ignored; result preserves keytbl row
  * order (first match per row); a miss yields a null row. */
 ray_t* q_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
-    if (!q_is_keyed_table(kt) || !keytbl || keytbl->type != RAY_TABLE)
+    if (!q_table_is_keyed(kt) || !keytbl || keytbl->type != RAY_TABLE)
         return ray_error("type", "index: keyed-table lookup expects a key table");
     ray_t* kk = ray_dict_keys(kt);                         /* borrowed */
     ray_t* kv = ray_dict_vals(kt);                         /* borrowed */
