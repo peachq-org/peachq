@@ -77,7 +77,7 @@ static int q_is_keyword(const char* w, int32_t len) {
     return ray_env_has_name(w, (int64_t)len);
 }
 
-int32_t q_highlight(char* dst, int32_t dst_cap, const char* buf, int32_t buf_len,
+static int32_t repl_highlight(char* dst, int32_t dst_cap, const char* buf, int32_t buf_len,
                     int32_t match_pos1, int32_t match_pos2) {
     (void)match_pos1;
     (void)match_pos2;
@@ -371,7 +371,7 @@ static void q_repl_interactive(FILE* out, FILE* err) {
     snprintf(g_live_hist_path, sizeof g_live_hist_path, "%s", hist_path);
     g_live_term = t;
     ray_hist_load(&t->hist, hist_path);
-    ray_term_set_highlighter(t, q_highlight);
+    ray_term_set_highlighter(t, repl_highlight);
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
     ray_term_set_continuation_fn(t, q_no_continuation);  /* kdb: line-at-a-time */
 
@@ -687,7 +687,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
         const char* hp = q_hist_path(hist_buf, sizeof hist_buf);
         snprintf(c->hist_path, sizeof c->hist_path, "%s", hp);
         ray_hist_load(&t->hist, c->hist_path);
-        ray_term_set_highlighter(t, q_highlight);
+        ray_term_set_highlighter(t, repl_highlight);
         ray_term_set_prompt(t, "q)", 2);
         ray_term_set_continuation_fn(t, q_no_continuation);
         ray_term_install_signals(t);
