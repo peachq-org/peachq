@@ -102,10 +102,12 @@ ray_t* q_while_fn(ray_t** args, int64_t n);
 
 /* ---- defined in ops/q_io.c ---- */
 ray_t* q_filetext_wrap(ray_t* x, ray_t* y);
+ray_t* q_setenv_wrap(ray_t* x, ray_t* y);
+
+/* ---- defined in ops/q_str.c ---- */
 ray_t* q_like_wrap(ray_t* x, ray_t* pattern);
 ray_t* q_ss_wrap(ray_t* s, ray_t* p);
 ray_t* q_getenv_wrap(ray_t* x);
-ray_t* q_setenv_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_join.c ---- */
 ray_t* q_lj_wrap(ray_t* x, ray_t* y);
@@ -211,7 +213,14 @@ ray_t* q_hopen_wrap(ray_t* x);                                /* used by: apply,
 ray_t* q_hclose_wrap(ray_t* x);                               /* used by: apply, registry */
 ray_t* q_hsym_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_read0_wrap(ray_t* x);                                /* used by: builtins, registry */
+
+/* ---- defined in ops/q_str.c ---- */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);                   /* used by: builtins, registry */
+typedef ray_t* (*q_str_leaf_fn)(ray_t* x, int64_t arg);
+/* atomic-through-containers walk: LIST per element, DICT over values, TABLE
+ * over columns; all else (incl. RAY_STR vectors) -> leaf(x, arg).  collapse
+ * != 0 runs q_collapse_list on each rebuilt LIST level (tok/cast). */
+ray_t* q_str_walk(ray_t* x, q_str_leaf_fn leaf, int64_t arg, int collapse);/* used by: dollar */
 
 /* ---- defined in ops/q_join.c ---- */
 int qj_same_schema(ray_t* a, ray_t* b);                       /* used by: table */
