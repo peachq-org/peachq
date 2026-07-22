@@ -161,7 +161,7 @@ static ray_t* distribute_retry(ray_t* head, ray_t* result, ray_t** args, int64_t
  * broadcast; dict/table distribution on 'type) — what makes q.q's
  * `.q.reciprocal:%[1;]` match the retired C wrapper on vectors/dicts/tables.
  * Args/carrier borrowed; returns owned (or an owned error). */
-static ray_t* deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
+static ray_t* deriv_apply(ray_t* carrier, ray_t* const* args, int64_t n) {
     q_deriv_kind k = q_deriv_kind_of(carrier);
     ray_t* base = q_deriv_base(carrier);            /* borrowed */
     if (!base) return NULL;
