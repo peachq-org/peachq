@@ -12,4 +12,11 @@
 
 ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n);
 
+/* The q `@` / `.` VARY registry entrypoints (manifest rows in q_ops.c):
+ * 2 args Apply/Index; 3 args Trap (callable head) or Amend (data head);
+ * 4 args quaternary Amend.  Bodies live here with the noun dispatcher —
+ * ref/apply.md + ref/amend.md. */
+ray_t* q_at_wrap(ray_t** args, int64_t n);
+ray_t* q_dot_wrap(ray_t** args, int64_t n);
+
 #endif /* Q_APPLY_H */
