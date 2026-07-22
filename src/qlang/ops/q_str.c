@@ -1,6 +1,6 @@
 /* ops/q_str.c — the q string-verb bodies: string / upper / lower / trim
  * family (env-bound in q_builtins_register) + the search trio like / ss /
- * ssr (manifest wraps).  Evicted from q_builtins.c + q_wrap_io.c so the
+ * ssr (manifest wraps).  Evicted from q_builtins.c + ops/q_io.c so the
  * registration hub registers and the string domain lives once. */
 #include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_text_bytes) */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
