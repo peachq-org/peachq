@@ -242,6 +242,12 @@ ray_t* q_registry_funsql_bang_value(void);
  * `l` retained). */
 ray_t* q_collapse_list(ray_t* l);
 
+/* v[i] as an OWNED atom/element (borrows v): the scalar-int fast path over
+ * vectors/lists (direct payload read, no index-atom allocation, no collapse);
+ * generic ray_at indexing for every other shape.  The ONE element-read home
+ * shared by the amend engines (q_apply.c) and the iterators (ops/q_iter.c). */
+ray_t* q_registry_elem_at(ray_t* v, int64_t i);
+
 /* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
  * appears in q-space; values in flight are charv; columns stay pooled). ---- */
 
