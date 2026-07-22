@@ -79,17 +79,7 @@ void q_sys_seed_init(void) {
  * re-tune worker threads for `\s`.  Those commands store + report the kdb-true
  * value only; the effect itself is a tracked PLAN.md gap.  Faking a
  * side-effect would be worse than an honest store-and-report. */
-static int32_t g_con_rows,  g_con_cols;   /* \c console size  (default 25 80)   */
 static int32_t g_http_rows, g_http_cols;  /* \C HTTP size     (default 36 2000) */
-
-/* Whether the q console DISPLAY truncates by `\c` (width per line + a height
- * row-cap), applied by q_fmt.c's console emitter (q_fmt_console).  ON by
- * default (kdb clips a fresh console at 25 80).  The ONE carve-out is a pure
- * non-tty SCRIPT LOAD (`./q file.q </dev/null`, the qscript harness) — a batch
- * context, NOT a display — where qmain DISARMS clipping so a script's
- * `show`/`.z.f` renders full-width.  The doctest runner + the interactive REPL
- * leave it ON (fresh-per-runtime default). */
-static int32_t g_con_trunc;               /* 0 = unlimited display, 1 = clip by \c */
 static int32_t g_gc_mode;                 /* \g gc mode       (default 0)       */
 static int64_t g_utc_offset;              /* \o UTC offset    (default 0N)      */
 static int32_t g_week_offset;             /* \W week offset   (default 2)       */
@@ -114,8 +104,7 @@ static int64_t g_listen_sel = -1;
 void q_sys_cfg_init(void) {
     g_own_process = 0;
     g_exiting = 0;
-    g_con_rows  = 25; g_con_cols  = 80;
-    g_con_trunc = 1;             /* display clipping ARMED at the 25 80 default */
+    q_console_clip_set(25, 80);  /* `\c` clip ARMED at the 25 80 default (q_console.c) */
     g_http_rows = 36; g_http_cols = 2000;
     g_gc_mode   = 0;
     g_utc_offset = NULL_I64;     /* 0N — "use the machine offset" (deferred) */
@@ -625,36 +614,26 @@ static ray_t* h_w(size_t alen) {
 
 /* `\c` / `\C` — console / HTTP display size (rows cols).  `\c`→`25 80`,
  * `\C`→`36 2000`; a set coerces each value to [10,2000] (syscmds.md).  `\c`
- * clips the q console DISPLAY (q_fmt.c q_fmt_console: width per line + a
- * height row-cap); a `\c size` setter (re-)ARMS clipping (g_con_trunc) so a
- * transcript that set it stays clipped.  `\C` (HTTP size) display wrapping is
- * still DEFERRED (openq has no HTTP renderer yet). */
+ * clips the q console DISPLAY — its state, coercion and arming now live in
+ * q_console.c (q_console_clip_set); this syscmd just forwards.  `\C` (HTTP
+ * size) display wrapping is still DEFERRED (openq has no HTTP renderer yet),
+ * so clamp_cc coerces the `\C` values here. */
 static int64_t clamp_cc(int64_t v) {
     return v < 10 ? 10 : v > 2000 ? 2000 : v;
 }
 static ray_t* h_c(const char* rest, size_t restlen) {
     int64_t p[2];
     int cnt = parse_ints(rest, restlen, p, 2);
-    if (cnt == 0) return pair_i64(g_con_rows, g_con_cols);   /* getter */
-    if (cnt >= 2) {                                            /* setter */
-        g_con_rows = (int32_t) clamp_cc(p[0]);
-        g_con_cols = (int32_t) clamp_cc(p[1]);
-        g_con_trunc = 1;                    /* an explicit \c (re-)arms clipping */
+    if (cnt == 0) {                                           /* getter */
+        int32_t r, c;
+        q_console_clip(&r, &c);
+        return pair_i64(r, c);
     }
+    if (cnt >= 2)                                             /* setter (coerces + arms) */
+        q_console_clip_set(p[0], p[1]);
     return NULL;                                              /* silent */
 }
 
-/* Display-clipping accessors (read by q_fmt.c's console emitter).
- * q_con_display fills the rows/cols out-params with the live `\c` size and
- * returns true iff clipping is armed. */
-bool q_con_display(int32_t* rows, int32_t* cols) {
-    if (rows) *rows = g_con_rows;
-    if (cols) *cols = g_con_cols;
-    return g_con_trunc != 0;
-}
-/* Disarm display clipping — qmain calls this for a pure non-tty SCRIPT LOAD (a
- * batch context, so `.z.f`/script output renders full-width). */
-void q_con_display_disable(void) { g_con_trunc = 0; }
 static ray_t* h_C(const char* rest, size_t restlen) {
     int64_t p[2];
     int cnt = parse_ints(rest, restlen, p, 2);

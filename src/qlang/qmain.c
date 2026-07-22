@@ -167,12 +167,14 @@ int main(int argc, char** argv) {
      * so a fresh interactive tty REPL and a piped `printf … | ./q` truncate at
      * the 25 80 default (kdb-true).  The ONE carve-out: a PURE non-tty SCRIPT
      * LOAD (`./q file.q </dev/null`, the qscript/daemon shape) is a BATCH
-     * context, NOT a display — DISARM clipping so the script's `show`/`.z.f`
-     * (an absolute path, often > 80 chars) renders full-width.  A tty that
+     * context, NOT a display — widen the clip to the documented 2000 ceiling
+     * (basics/syscmds.md `\c`: values coerce to [10,2000]) so the script's
+     * `show`/`.z.f` (an absolute path, often > 80 chars) renders full-width.
+     * kdb has no off-switch, so the ceiling IS the batch idiom.  A tty that
      * drops to the REPL after the script, or an explicit `\c` in the script,
-     * keeps/re-arms clipping. */
+     * resets/re-arms the size. */
     if (script != NULL && !stdin_tty)
-        q_con_display_disable();
+        q_console_clip_set(2000, 2000);
 
     int script_rc = 0;
     if (script)

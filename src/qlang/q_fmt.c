@@ -6,7 +6,6 @@
 #include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
-#include "qlang/q_sys.h"   /* q_con_display — live `\c rows cols` clip state */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
 #include "ops/ops.h"     /* ray_is_lazy/materialize — pipe renderer solidify */
@@ -1084,7 +1083,7 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
     qp_out o = { buf, bufsz, 0, 0 };
 
     int32_t crows = 0, ccols = 0;
-    bool armed = q_con_display(&crows, &ccols);
+    bool armed = q_console_clip(&crows, &ccols);
     if (armed && (crows < 10 || ccols < 10 || ccols > 2000)) armed = false;
     int32_t cols = armed ? ccols : 0;
 
@@ -1148,7 +1147,7 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
      * q_fmt (`string`, `-3!`, CSV, every cell) shares and must keep legacy. */
     if (q_console_pipe_on() && fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz); return; }
     int32_t rows = 0, cols = 0;
-    int armed = q_con_display(&rows, &cols) && !g_clip_active;
+    int armed = q_console_clip(&rows, &cols) && !g_clip_active;
     if (armed && val && val->type == RAY_LIST && list_is_parse_tree(val, 0))
         armed = 0;                             /* parse display NEVER clips */
     if (!armed || rows < 10 || cols < 10 || cols > 2000) {
