@@ -323,22 +323,7 @@ static ray_t* q_cast_str(ray_t* x) {
     return ray_error("type", "$: cannot cast to char");
 }
 
-/* Boxed list: cast per element, then collapse a homogeneous run to a vector. */
-static ray_t* q_cast_distribute(int8_t tag, ray_t* x) {
-    int64_t n = ray_len(x);
-    ray_t** e = (ray_t**)ray_data(x);
-    ray_t* out = ray_list_new(n);
-    if (RAY_IS_ERR(out)) return out;
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* r = q_dollar_cast(tag, e[i]);
-        if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
-        out = ray_list_append(out, r);   /* append retains */
-        ray_release(r);
-    }
-    ray_t* c = q_collapse_list(out);
-    ray_release(out);
-    return c;
-}
+static ray_t* cast_leaf(ray_t* x, int64_t tag) { return q_dollar_cast((int8_t)tag, x); }
 
 /* Integer targets (I64/I32/I16): kdb ROUNDS floats (rint = IEEE nearest/
  * ties-even: `long$3.7 -> 4, "j"$2.5 -> 2, `int$6.6 -> 7 — KX ref pins) where
@@ -514,8 +499,10 @@ static ray_t* q_cast_sym(ray_t* x) {
  * -Werror refuse to build a target no arm states. */
 ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     /* Both precede the switch by ORDER, not preference: "c"$ packs a boxed list
-     * into ONE string, so it must beat the generic per-element distribution. */
-    if (tag == RAY_CHARV) return q_charv_out(q_cast_str(x));
+     * into ONE string, so it must beat the generic per-element distribution —
+     * but dict/table still descend (the walker below reaches this arm per value). */
+    if (tag == RAY_CHARV && !(x && (x->type == RAY_DICT || x->type == RAY_TABLE)))
+        return q_charv_out(q_cast_str(x));
     /* numeric cast of char text = code points (`int$"ABC" -> 65 66 67i;
      * `float$"AC" -> 65 67f, ref/log.md:101) — via the byte cast, then cast. */
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV) &&
@@ -527,7 +514,8 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
         ray_release(b);
         return r;
     }
-    if (x && x->type == RAY_LIST) return q_cast_distribute(tag, x);
+    if (x && (x->type == RAY_LIST || x->type == RAY_DICT || x->type == RAY_TABLE))
+        return q_str_walk(x, cast_leaf, tag, 1);   /* cast is atomic (ref/cast.md) */
 
     switch ((ray_type_e)tag) {
     case RAY_CHARV: break;                   /* hoisted above: packs boxed lists */
@@ -555,26 +543,19 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
  * distribute. */
-ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
-    if (x && (x->type == RAY_LIST || x->type == RAY_STR)) {
+static ray_t* tok_leaf(ray_t* x, int64_t tag) {
+    if (x->type == RAY_STR) {            /* string vector: tok each element */
         int64_t n = ray_len(x);
-        ray_t* out = ray_list_new(n);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
-            ray_t* xi;
-            if (x->type == RAY_LIST) {
-                xi = ((ray_t**)ray_data(x))[i];
-                ray_retain(xi);
-            } else {
-                size_t sl = 0;
-                const char* sp = ray_str_vec_get(x, i, &sl);
-                xi = ray_str(sp ? sp : "", sp ? sl : 0);
-            }
-            ray_t* r = q_dollar_tok(tag, xi);
-            ray_release(xi);
+            size_t sl = 0;
+            const char* sp = ray_str_vec_get(x, i, &sl);
+            ray_t* r = q_tok((int8_t)tag, sp ? sp : "", sp ? sl : 0);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
             ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
         }
         ray_t* c = q_collapse_list(out);
         ray_release(out);
@@ -583,88 +564,17 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
     const char* tp; int64_t tn;
     if (!q_text_bytes(x, &tp, &tn))
         return ray_error("type", "$: Tok right operand must be a string");
-    return q_tok(tag, tp, tp ? (size_t)tn : 0);
+    return q_tok((int8_t)tag, tp, tp ? (size_t)tn : 0);
+}
+ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
+    return q_str_walk(x, tok_leaf, tag, 1);
 }
 
 /* q `w$s` PAD (ref/pad.md): a LONG width w left-justifies the string s in a
  * field of |w| spaces (w<0 right-justifies); longer strings truncate to |w|.
- * Atomic through the container types (a LIST of strings pads each; DICT over
- * values; TABLE over columns).  Non-string leaves are a 'type error. */
-ray_t* q_dollar_pad(int64_t w, ray_t* x) {
-    if (!x) return ray_error("type", "$: pad nil");
-    if (x->type == RAY_CHARV || x->type == -RAY_CHARV) {   /* char text -> charv */
-        const char* p; int64_t pn;
-        (void)q_text_bytes(x, &p, &pn);
-        int64_t width = w < 0 ? -w : w;
-        int right = w < 0;
-        int64_t copy = pn < width ? pn : width;
-        char stack[256];
-        char* b = (width < (int64_t)sizeof stack) ? stack : malloc((size_t)width + 1);
-        if (!b) return ray_error("wsfull", "$: out of memory");
-        memset(b, ' ', (size_t)width);
-        if (right) memcpy(b + (width - copy), p, (size_t)copy);
-        else       memcpy(b, p, (size_t)copy);
-        ray_t* r = ray_charv(b, width);
-        if (b != stack) free(b);
-        return r;
-    }
-    if (x->type == -RAY_STR) {
-        int64_t width = w < 0 ? -w : w;
-        int right = w < 0;                 /* w<0 -> right-justify */
-        const char* p = ray_str_ptr(x);
-        int64_t n = (int64_t)ray_str_len(x);
-        int64_t copy = n < width ? n : width;
-        char stack[256];
-        char* b = (width < (int64_t)sizeof stack) ? stack : malloc((size_t)width + 1);
-        if (!b) return ray_error("wsfull", "$: out of memory");
-        memset(b, ' ', (size_t)width);
-        if (right) memcpy(b + (width - copy), p, (size_t)copy);   /* text at right */
-        else       memcpy(b, p, (size_t)copy);                    /* text at left  */
-        ray_t* r = ray_str(b, (size_t)width);
-        if (b != stack) free(b);
-        return r;
-    }
-    if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
-        ray_t* out = ray_list_new(n > 0 ? n : 1);
-        if (RAY_IS_ERR(out)) return out;
-        for (int64_t i = 0; i < n; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* e = ray_at_fn(x, ia);
-            ray_release(ia);
-            if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
-            ray_t* r = q_dollar_pad(w, e);
-            ray_release(e);
-            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
-            out = ray_list_append(out, r);
-            ray_release(r);
-            if (RAY_IS_ERR(out)) return out;
-        }
-        return out;
-    }
-    if (x->type == RAY_DICT) {
-        ray_t* k = ray_dict_keys(x);
-        ray_t* v = ray_dict_vals(x);
-        if (!k || !v) return ray_error("type", "$: bad dict");
-        ray_t* nv = q_dollar_pad(w, v);
-        if (!nv || RAY_IS_ERR(nv)) return nv;
-        ray_retain(k);
-        return ray_dict_new(k, nv);
-    }
-    if (x->type == RAY_TABLE) {
-        int64_t nc = ray_table_ncols(x);
-        ray_t* out = ray_table_new(nc);
-        if (RAY_IS_ERR(out)) return out;
-        for (int64_t c = 0; c < nc; c++) {
-            ray_t* col = ray_table_get_col_idx(x, c);
-            ray_t* ncol = q_dollar_pad(w, col);
-            if (!ncol || RAY_IS_ERR(ncol)) { ray_release(out); return ncol; }
-            out = ray_table_add_col(out, ray_table_col_name(x, c), ncol);
-            ray_release(ncol);
-            if (!out || RAY_IS_ERR(out)) return out;
-        }
-        return out;
-    }
+ * String-atomic through the containers via q_str_walk; non-string leaves are
+ * a 'type error.  Output mirrors the input's string form (charv vs -RAY_STR). */
+static ray_t* pad_leaf(ray_t* x, int64_t w) {
     if (x->type == RAY_STR) {            /* string vector -> pad each element */
         int64_t n = ray_len(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
@@ -672,7 +582,8 @@ ray_t* q_dollar_pad(int64_t w, ray_t* x) {
         for (int64_t i = 0; i < n; i++) {
             size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
             ray_t* s = ray_str(p ? p : "", p ? sn : 0);
-            ray_t* r = q_dollar_pad(w, s);
+            if (!s || RAY_IS_ERR(s)) { ray_release(out); return s; }
+            ray_t* r = pad_leaf(s, w);
             ray_release(s);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
@@ -681,7 +592,23 @@ ray_t* q_dollar_pad(int64_t w, ray_t* x) {
         }
         return out;
     }
-    return ray_error("type", "$: pad expects a string");
+    const char* p; int64_t pn;
+    if (!q_text_bytes(x, &p, &pn)) return ray_error("type", "$: pad expects a string");
+    if (w == INT64_MIN) return ray_error("limit", "$: pad width");   /* -w is UB */
+    int64_t width = w < 0 ? -w : w;
+    int64_t copy = pn < width ? pn : width;
+    char stack[256];
+    char* b = (width < (int64_t)sizeof stack) ? stack : malloc((size_t)width + 1);
+    if (!b) return ray_error("wsfull", "$: out of memory");
+    memset(b, ' ', (size_t)width);
+    memcpy(w < 0 ? b + (width - copy) : b, p, (size_t)copy);   /* w<0: text at right */
+    ray_t* r = (x->type == -RAY_STR) ? ray_str(b, (size_t)width)
+                                     : ray_charv(b, width);
+    if (b != stack) free(b);
+    return r;
+}
+ray_t* q_dollar_pad(int64_t w, ray_t* x) {
+    return q_str_walk(x, pad_leaf, w, 0);
 }
 
 /* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list) — openq has
