@@ -20,7 +20,9 @@
 .Q.res:.Q.c.res;
 .Q.hg:.Q.c.hg;
 .Q.hp:.Q.c.hp;
-.Q.gz:.Q.c.gz;
+/ .Q.gz/.Q.ts: the bang is the single C home (`-35!`/`-34!`, the q.k spellings); .Q.ts packs Apply's two args.
+.Q.gz:-35!;
+.Q.ts:{-34!(x;y)};
 
 / ---- Constants (ref/dotq.md) ----
 .Q.b6:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

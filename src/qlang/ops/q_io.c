@@ -464,6 +464,23 @@ static int ft_quote_append(char** buf, size_t* w, size_t* cap,
     return 1;
 }
 
+/* `-14!x` quote escape (basics/internal.md: prepare data for CSV export) — ONE
+ * cell through the Save-Text quote rule above, delimiter fixed at ','. */
+ray_t* q_io_csv_quote(ray_t* x) {
+    const char* p;
+    int64_t n;
+    if (!q_text_bytes(x, &p, &n)) return ray_error("type", NULL);
+    char* buf = NULL;
+    size_t w = 0, cap = 0;
+    if (!ft_quote_append(&buf, &w, &cap, p, (size_t)n, ',')) {
+        free(buf);
+        return ray_error("wsfull", NULL);
+    }
+    ray_t* r = ray_charv(buf ? buf : "", (int64_t)w);
+    free(buf);
+    return r;
+}
+
 static ray_t* ft_prepare(char delim, ray_t* y) {
     /* columns + optional names */
     int64_t nc = 0;

@@ -83,6 +83,11 @@ void   q_sys_own_process(bool on);
  * (a doctest per-file runtime teardown is not a process exit). */
 void   q_sys_exit(int code);
 
+/* `.Q.ts[f;args]` / `-34!(f;args)` — Apply `.[f;args]` under the SAME time+space
+ * measurement `\ts` uses; returns the 2-list ((ms;bytes); result) or the
+ * propagated apply error (ref/dotq.md#ts-time-and-space). */
+ray_t* q_sys_ts_apply(ray_t* f, ray_t* args);
+
 /* The q-owned `system "…"` verb (bound by q_builtins_register as a QK_ENV row):
  * prepends `\` and passes straight through q_sys_run(capture=1), so
  * `system "X"` ≡ `\X` for every command — one path, no special cases. */
