@@ -1,11 +1,11 @@
-/* ops/q_applyiter.c — iterators (each, each-both, each-prior, over/scan),
- * lambda carrier (q.fn, ret/sig), the imperative control constructs
- * (q.seq/if/do/while), and the registry specials' accessors.
+/* ops/q_applyiter.c — iterators (each, each-both, each-prior, over/scan) and
+ * the imperative control constructs (q.seq/if/do/while) + the truth plumbing.
  *
  * DISSOLVING (owner D-ruling 2026-07-22, PR #277 seam map): bucket A
- * (amend/trap/@-. bodies) moved to q_apply.c; buckets B (fn-value machinery
- * -> q_deriv.c), C (registry accessors -> q_registry.c) and D (iterators ->
- * ops/q_iter.c, which deletes this file) follow in the stacked PRs. */
+ * (amend/trap/@-. bodies) moved to q_apply.c; bucket B (fn-value machinery +
+ * lambda carrier/ret) to q_deriv.c; bucket C (registry specials' accessors +
+ * init/teardown + the `'x` signal channel) to q_registry.c.  Bucket D moves
+ * the iterators/control bodies below to ops/q_iter.c, deleting this file. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — truthiness via ONE type judgment */
@@ -454,82 +454,6 @@ ray_t* q_over_kw(ray_t* f, ray_t* x)  { ray_t* a[2] = { f, x }; return q_over_wr
 ray_t* q_scan_kw(ray_t* f, ray_t* x)  { ray_t* a[2] = { f, x }; return q_scan_wrap(a, 2); }
 ray_t* q_prior_kw(ray_t* f, ray_t* x) { ray_t* a[2] = { f, x }; return q_prior_wrap(a, 2); }
 
-ray_t* g_scan_value     = NULL;
-ray_t* g_over_value     = NULL;
-ray_t* g_eachboth_value = NULL;
-ray_t* g_prior_value    = NULL;
-ray_t* g_mkderiv2_value = NULL;
-ray_t* g_mkopproj_value = NULL;
-
-ray_t* q_registry_scan_value(void)     { return g_scan_value;     }  /* borrowed */
-ray_t* q_registry_over_value(void)     { return g_over_value;     }  /* borrowed */
-ray_t* q_registry_eachboth_value(void) { return g_eachboth_value; }  /* borrowed */
-ray_t* q_registry_prior_value(void)    { return g_prior_value;    }  /* borrowed */
-ray_t* q_registry_mkderiv2_value(void) { return g_mkderiv2_value; }  /* borrowed */
-ray_t* q_registry_mkopproj_value(void) { return g_mkopproj_value; }  /* borrowed */
-
-ray_t* g_list_value   = NULL;
-ray_t* g_table_value  = NULL;
-ray_t* g_keyed_table_value = NULL;
-ray_t* g_select_value = NULL;
-ray_t* g_delete_value = NULL;   /* q.delete: string `delete` statement executor */
-ray_t* g_exec_value   = NULL;   /* q.exec:   string `exec`   statement executor */
-ray_t* g_compose_value = NULL;
-ray_t* g_funsql_select_value = NULL;
-ray_t* g_funsql_bang_value   = NULL;
-ray_t* g_lambda_value        = NULL;
-
-ray_t* q_registry_lambda_value(void) { return g_lambda_value; }  /* borrowed */
-
-ray_t* g_ret_value = NULL;
-ray_t* g_sig_value = NULL;
-_Thread_local ray_t* g_qsig_payload = NULL;
-
-/* Full text of the most recent `'x` signal.  The ≤7-char error class in
- * err->sdata truncates, but kdb Trap hands the handler the WHOLE message, so
- * q_sig_fn stashes the untruncated text here (mirroring the q.ret payload).
- * Owned by the caller; NULL if the last error was not a q signal. */
-ray_t* q_registry_sig_take(void) {
-    ray_t* v = g_qsig_payload;
-    g_qsig_payload = NULL;
-    return v;
-}
-
-void q_registry_sig_clear(void) {
-    if (g_qsig_payload) { ray_release(g_qsig_payload); g_qsig_payload = NULL; }
-}
-
-/* `'x` Signal (ref/signal.md): abort with error class = the sym spelling /
- * string text (ray_error copies, 7-char sdata cap — kdb's own classes are
- * short for the same reason).  The full untruncated text is stashed for Trap
- * (q_registry_sig_take). */
-ray_t* q_sig_fn(ray_t* x) {
-    char cls[8] = "signal";
-    ray_t* full = NULL;                 /* owned full-text string, or NULL */
-    if (x && x->type == -RAY_SYM) {
-        ray_t* s = ray_sym_str(x->i64);
-        if (s) {
-            size_t l = ray_str_len(s); size_t c = l > 7 ? 7 : l;
-            memcpy(cls, ray_str_ptr(s), c); cls[c] = '\0';
-            full = ray_str(ray_str_ptr(s), l);
-            ray_release(s);
-        }
-    } else if (x) {
-        const char* p; int64_t l;                     /* string / charv / char atom */
-        if (q_text_bytes(x, &p, &l)) {
-            size_t c = (size_t)l > 7 ? 7 : (size_t)l;
-            memcpy(cls, p, c); cls[c] = '\0';
-            full = ray_str(p, (size_t)l);
-        }
-    }
-    if (g_qsig_payload) ray_release(g_qsig_payload);
-    g_qsig_payload = full;              /* owned (or NULL) */
-    return ray_error(cls, NULL);
-}
-
-ray_t* q_registry_ret_value(void) { return g_ret_value; }   /* borrowed */
-ray_t* q_registry_sig_value(void) { return g_sig_value; }   /* borrowed */
-
 /* ===== q imperative control constructs =====================================
  * The `;` statement sequence and the `if` / `do` / `while` control words are
  * SPECIAL FORMS (basics/control.md, ref/{if,do,while}.md): they receive their
@@ -541,10 +465,6 @@ ray_t* q_registry_sig_value(void) { return g_sig_value; }   /* borrowed */
  * null; `;` returns its LAST statement's value.  This is the q-layer home for
  * the semantics (CLAUDE.md rule 4) — rayfall's own `if`/`do` differ (triadic
  * cond / scope-pushing progn) so they are NOT reused here. */
-ray_t* g_seq_value   = NULL;
-ray_t* g_if_value    = NULL;
-ray_t* g_do_value    = NULL;
-ray_t* g_while_value = NULL;
 
 /* Evaluate an if/while test arg and decide it at the one truthiness home. */
 static int ctl_truth(ray_t* arg, ray_t** err) {
@@ -620,36 +540,4 @@ ray_t* q_while_fn(ray_t** args, int64_t n) {
         if (err) return err;
     }
     return RAY_NULL_OBJ;
-}
-
-ray_t* q_registry_seq_value(void)   { return g_seq_value; }    /* borrowed */
-ray_t* q_registry_if_value(void)    { return g_if_value; }     /* borrowed */
-ray_t* q_registry_do_value(void)    { return g_do_value; }     /* borrowed */
-ray_t* q_registry_while_value(void) { return g_while_value; }  /* borrowed */
-
-ray_t* q_registry_funsql_select_value(void) { return g_funsql_select_value; }
-ray_t* q_registry_funsql_bang_value(void)   { return g_funsql_bang_value; }
-
-ray_t* q_registry_select_value(void) {
-    return g_select_value;   /* borrowed; NULL before init */
-}
-
-ray_t* q_registry_delete_value(void) { return g_delete_value; }   /* borrowed; NULL before init */
-
-ray_t* q_registry_exec_value(void) { return g_exec_value; }       /* borrowed; NULL before init */
-
-ray_t* q_registry_compose_value(void) {
-    return g_compose_value;  /* borrowed; NULL before init */
-}
-
-ray_t* q_registry_list_value(void) {
-    return g_list_value;   /* borrowed; NULL before init */
-}
-
-ray_t* q_registry_keyed_table_value(void) {
-    return g_keyed_table_value;  /* borrowed; NULL before init */
-}
-
-ray_t* q_registry_table_value(void) {
-    return g_table_value;  /* borrowed; NULL before init */
 }
