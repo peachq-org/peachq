@@ -55,8 +55,7 @@ int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix
 ray_t* q_sum_wrap(ray_t* x);
 
 /* ---- defined in ops/q_applyiter.c ---- */
-ray_t* q_at_wrap(ray_t** args, int64_t n);
-ray_t* q_dot_wrap(ray_t** args, int64_t n);
+/* (q_at_wrap / q_dot_wrap moved to q_apply.c — declared in q_apply.h) */
 ray_t* q_each_wrap(ray_t* f, ray_t* x);
 ray_t* q_eachboth_wrap(ray_t** args, int64_t n);
 ray_t* q_prior_wrap(ray_t** args, int64_t n);
@@ -181,9 +180,8 @@ int q_vec_is_float(ray_t* x);                                 /* used by: list *
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
 
 /* ---- defined in ops/q_applyiter.c ---- */
-int q_is_fn_value(ray_t* x);                                  /* used by: builtins, io */
-int q_values_match(ray_t* a, ray_t* b);                       /* used by: list */
-ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k);              /* used by: value, io */
+int q_is_fn_value(ray_t* x);                                  /* used by: builtins, str, apply */
+ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k);              /* used by: value, str, apply */
 ray_t* q_over_wrap(ray_t** args, int64_t n);                  /* used by: lower, registry */
 ray_t* q_registry_scan_value(void);                           /* used by: fmt, lower, value */
 ray_t* q_registry_over_value(void);                           /* used by: fmt, lower, value */

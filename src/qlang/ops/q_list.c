@@ -345,14 +345,14 @@ static ray_t* dict_drop_keys(ray_t* d, ray_t* ks) {
         if (!ke || RAY_IS_ERR(ke)) { ray_release(ok); ray_release(ov); return ke ? ke : ray_error("type", NULL); }
         int hit = 0;
         if (nk < 0) {
-            hit = q_values_match(ke, ks);
+            hit = ks && (ke == ks || atom_eq(ke, ks));
         } else {
             for (int64_t j = 0; j < nk && !hit; j++) {
                 ray_t* ja = ray_i64(j);
                 ray_t* kj = ray_at_fn(ks, ja);       /* owned */
                 ray_release(ja);
                 if (kj && !RAY_IS_ERR(kj)) {
-                    hit = q_values_match(ke, kj);
+                    hit = ke == kj || atom_eq(ke, kj);
                     ray_release(kj);
                 } else if (kj) {
                     ray_release(ke); ray_release(ok); ray_release(ov);
@@ -819,7 +819,7 @@ static int seq_has_item(ray_t* y, ray_t* v) {
         ray_t* ye = ray_at_fn(y, ia);                /* owned item */
         ray_release(ia);
         if (!ye || RAY_IS_ERR(ye)) { if (ye) ray_release(ye); continue; }
-        int hit = q_values_match(ye, v);
+        int hit = v && (ye == v || atom_eq(ye, v));
         ray_release(ye);
         if (hit) return 1;
     }
@@ -1190,7 +1190,7 @@ ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
 static int64_t list_find_item(ray_t* x, ray_t* v, int64_t cnt) {
     ray_t** ex = (ray_t**)ray_data(x);
     for (int64_t i = 0; i < cnt; i++)
-        if (ex[i] && q_values_match(ex[i], v)) return i;
+        if (ex[i] && v && (ex[i] == v || atom_eq(ex[i], v))) return i;
     return cnt;
 }
 
