@@ -55,3 +55,21 @@ static bool g_pipe_on;
 void q_console_pipe_enable(void)  { g_pipe_on = true; }
 void q_console_pipe_disable(void) { g_pipe_on = false; }
 bool q_console_pipe_on(void)      { return g_pipe_on; }
+
+
+/* ---- `\c` console DISPLAY clip STATE (config beside the sink) ------------- */
+
+static int32_t g_con_rows = 25, g_con_cols = 80;  /* live `\c` size (default 25 80) */
+static int32_t g_con_trunc = 1;                   /* 0 = unlimited, 1 = clip by `\c` */
+
+bool q_console_clip(int32_t* rows, int32_t* cols) {
+    if (rows) *rows = g_con_rows;
+    if (cols) *cols = g_con_cols;
+    return g_con_trunc != 0;
+}
+
+void q_console_clip_set(int64_t rows, int64_t cols) {
+    g_con_rows = (int32_t)(rows < 10 ? 10 : rows > 2000 ? 2000 : rows);
+    g_con_cols = (int32_t)(cols < 10 ? 10 : cols > 2000 ? 2000 : cols);
+    g_con_trunc = 1;
+}
