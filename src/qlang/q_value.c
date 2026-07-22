@@ -133,14 +133,14 @@ ray_t* q_value_resolve_owned(ray_t* symv) {
 }
 
 /* Single-apply a resolved head VALUE to argc data args (borrowed).  Value-object
- * apply: args are DATA — q_call_n routes callables (call_fn1/2, carrier/lambda-
+ * apply: args are DATA — q_deriv_call_n routes callables (call_fn1/2, carrier/lambda-
  * aware) and INDEXES a noun head, never re-evaluating the args.  argc==0 => the
  * head itself (retained).  Returns owned result or RAY_ERROR. */
 static ray_t* value_apply_head(ray_t* head, ray_t** args, int64_t argc) {
     if (!head) return ray_error("type", "value: nil head");
     if (argc == 0) { ray_retain(head); return head; }
     if (argc > 64) return ray_error("limit", "value: too many args");
-    return q_call_n(head, args, argc);            /* borrowed args, owned result */
+    return q_deriv_call_n(head, args, argc);            /* borrowed args, owned result */
 }
 
 /* True iff `base` is one of the six adverb HOF values a q derived function
