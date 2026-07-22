@@ -702,11 +702,14 @@ static ray_t* call_builtin2(ray_t* head, ray_t* a, ray_t* b) {
     return fn(a, b);
 }
 
-/* d op e — key-union / upsert.  Result keys = keys of `a` in order, then keys
- * of `b` absent from `a`; matching keys combine via `op`, others pass through.
- * Mirrors q_eachboth_dict's key-donor discipline (retain keys before
- * ray_dict_new). */
-static ray_t* dict_union(ray_t* head, ray_t* a, ray_t* b) {
+/* d op e — key-union / upsert (ref/add.md "Implicit iteration").  Result keys
+ * = keys of `a` in order, then keys of `b` absent from `a`; matching keys
+ * combine via `combine(f, va, vb)`, others pass through.  THE one key-alignment
+ * walk: the atomic-dyadic distribution shim uses it with the builtin-kernel
+ * combiner, and each-both over two dicts (ops/q_iter.c, D7) composes on it with
+ * a general-fn combiner — never a positional zip. */
+ray_t* q_apply_dict_union(ray_t* head, ray_t* a, ray_t* b,
+                          q_apply_combine2 combine) {
     ray_t* ka = ray_dict_keys(a);        /* borrowed */
     ray_t* kb = ray_dict_keys(b);        /* borrowed */
     if (!ka || !kb) return ray_error("type", "dict op: malformed dictionary");
@@ -730,7 +733,7 @@ static ray_t* dict_union(ray_t* head, ray_t* a, ray_t* b) {
         ray_t* vb = ray_dict_get(b, k);          /* owned or NULL */
         ray_t* rv;
         if (vb) {
-            rv = call_builtin2(head, va, vb);
+            rv = combine(head, va, vb);
             ray_release(va); ray_release(vb);
             if (!rv || RAY_IS_ERR(rv)) { ray_release(k); ray_release(okeys); ray_release(ovals); return rv ? rv : ray_error("type", NULL); }
         } else {
@@ -860,7 +863,7 @@ static ray_t* dict_distribute(ray_t* head, ray_t** args, int64_t n) {
         if (a && a->type != RAY_DICT && b && b->type != RAY_DICT) return NULL;
         bool ad = a && a->type == RAY_DICT;
         bool bd = b && b->type == RAY_DICT;
-        if (ad && bd) return dict_union(head, a, b);
+        if (ad && bd) return q_apply_dict_union(head, a, b, call_builtin2);
         ray_t* d = ad ? a : b;
         ray_t* keys = ray_dict_keys(d);          /* borrowed */
         ray_t* vals = ray_dict_vals(d);          /* borrowed */
