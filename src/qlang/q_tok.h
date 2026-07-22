@@ -10,6 +10,14 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "rayforce.h"   /* ray_t — q_tok() returns a constructed value */
+
+/* THE Tok entry (ref/tok.md): parse string p[0..len) as a value of the tag
+ * type.  Owns the whole contract ONCE: leading/trailing blanks trimmed;
+ * unparseable / out-of-domain -> typed null, never an error.  Covers every
+ * designator letter (numerics, bool, byte-hex, sym, guid, temporals); shape
+ * distribution over lists stays with the caller ($: q_dollar_tok). */
+ray_t* q_tok(int8_t tag, const char* p, size_t len);
 
 /* One scanned literal magnitude (the parser's element).  Q_TOK_EL_MONTH carries
  * BOTH the month payload (.i) and its float twin (.f): bare `2000.01` is the
