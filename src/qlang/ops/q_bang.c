@@ -289,11 +289,11 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -23:  /* memory map: mmap-backed objects                          */
         case -24:  /* reval: restricted eval — PARKED.  q_value_wrap under a
                     * restricted flag is ~5 lines, but a fully-enforced reval
-                    * needs the RAY_FN_RESTRICTED gate inside q_call_n / dot_apply
-                    * (ops/q_applyiter.c) so a nested `value (f;a;b;c)` / `.[f;args]`
-                    * of a restricted VARY cannot bypass it (codex r1/r2 P1).  That
-                    * file is owned by the concurrent S2 dissolution — do NOT edit.
-                    * Reintroduce -24! once the gate lands there (PLAN.md).        */
+                    * needs the RAY_FN_RESTRICTED gate inside q_deriv_call_n
+                    * (q_deriv.c) / dot_apply (q_apply.c) so a nested
+                    * `value (f;a;b;c)` / `.[f;args]` of a restricted VARY cannot
+                    * bypass it (codex r1/r2 P1).  Reintroduce -24! once the gate
+                    * lands there (PLAN.md).                                       */
         case -25:  /* async broadcast: IPC handles + loop                      */
         case -26:  /* SSL: TLS                                                  */
         case -30:  /* deferred response: IPC + .z.w/.z.W                       */
