@@ -148,7 +148,7 @@ static ray_t* value_apply_head(ray_t* head, ray_t** args, int64_t argc) {
  * one of these is a DERIVED FUNCTION (value -> the iterator's argument); over
  * anything else it is a plain PROJECTION (value -> function + bound args).  The
  * env HOF ids are interned once (lazy), mirroring q_deriv's marker cache. */
-static int value_is_adverb_hof(ray_t* base) {
+static int value_is_adverb_hof(const ray_t* base) {
     if (!base) return 0;
     /* Re-intern the env HOF ids per call: the sym table is recreated per runtime
      * (q_runtime_destroy tears it down), so a `static` id cache would go STALE for

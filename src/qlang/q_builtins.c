@@ -10,8 +10,6 @@
 #include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
 #include "qlang/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
-#include "qlang/net/q_gz.h"        /* .Q.c.gz — gzip deflate/inflate seam */
-#include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
 #include "qlang/q_registry_internal.h" /* q_registry_init + q_deriv_is_fn_value (shared; brings q_registry.h) */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
