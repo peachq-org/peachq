@@ -15,6 +15,7 @@
 #include "qlang/q_dotz.h"     /* q_dotz_init/resolve/destroy — `.z.*` resolver */
 #include "qlang/q_ns.h"       /* q_ns_reset — `\d` context state */
 #include "qlang/q_sys.h"      /* q_sys_seed_init — `\S` constant-seed contract */
+#include "qlang/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_parse.h"    /* q_parse, q_lower — embedded-bootstrap loader */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
@@ -151,6 +152,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         q_ns_reset();          /* fresh runtime starts in the root context */
         q_sys_seed_init();     /* kdb constant-seed-at-startup contract (\S) */
         q_sys_cfg_init();      /* \P/\c/\C/\g/\o/\W/\e/\s defaults per runtime */
+        q_handles_init();      /* fd-keyed handle registry (file/fifo/socket open-time) */
         q_builtins_register();
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
          * process-constant argv values once and install the name-load hook. */
@@ -172,6 +174,7 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
     ray_eval_set_name_hook(NULL);    /* detach `.z.*` before its values die */
+    q_handles_destroy();       /* drop handle records (open_args refs) before the env */
     q_dotz_destroy();          /* free the `.z.*` argv snapshots */
     q_registry_destroy();      /* free verb snapshots before the env goes away */
     q_deriv_reset_markers();   /* marker sym-ids die with this runtime's table */
