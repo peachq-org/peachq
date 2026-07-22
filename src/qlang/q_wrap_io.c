@@ -6,6 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_dollar.h" /* q_cast_designator, q_dollar_tok — Tok column parses */
 #include "qlang/q_builtins.h" /* q_string_fn — 0: Prepare Text cell text */
 #include "qlang/q_sys.h"
 #include "lang/eval.h"      /* ray_eval_get_restricted, ray_read_file_fn/ray_write_file_fn */
@@ -729,14 +730,14 @@ static ray_t* q_ft_fields(ray_t* fields, const char* r, size_t n, char delim) {
 /* Parse one field per its column recipe.  OWNED atom/string. */
 static ray_t* q_ft_parse_field(ray_t* field, int8_t tag, int is_str) {
     if (is_str) { ray_retain(field); return field; }
-    return q_tok_to(tag, field);
+    return q_dollar_tok(tag, field);
 }
 
 /* Collapse a column accumulator: '*' columns stay lists of strings; typed
- * columns Tok-parse (q_tok_to distributes over lists) then collapse. */
+ * columns Tok-parse (q_dollar_tok distributes over lists) then collapse. */
 static ray_t* q_ft_finish_col(ray_t* colacc, int8_t tag, int is_str) {
     if (is_str) { ray_retain(colacc); return colacc; }
-    ray_t* parsed = q_tok_to(tag, colacc);
+    ray_t* parsed = q_dollar_tok(tag, colacc);
     if (!parsed || RAY_IS_ERR(parsed)) return parsed;
     ray_t* v = q_collapse_list(parsed);                     /* owned */
     ray_release(parsed);
@@ -1062,7 +1063,7 @@ static ray_t* q_ft_kv(const char* spec, size_t sn, ray_t* y) {
             ray_release(keys); ray_release(vals);
             return ray_error("oom", NULL);
         }
-        ray_t* ka = q_tok_to(ktag, k);
+        ray_t* ka = q_dollar_tok(ktag, k);
         ray_release(k);
         if (!ka || RAY_IS_ERR(ka)) { ray_release(v); ray_release(keys); ray_release(vals); return ka ? ka : ray_error("oom", NULL); }
         keys = ray_list_append(keys, ka);

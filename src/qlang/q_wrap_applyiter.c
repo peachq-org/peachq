@@ -7,6 +7,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_dollar.h" /* q_dollar_cast — truthiness via ONE type judgment */
 #include "qlang/q_apply.h" /* q_apply_noun — @/. noun arms */
 #include "qlang/q_deriv.h" /* q_proj_new, q_compose_new, q_lambda_carrier_new — 104h carriers */
 #include "lang/env.h"      /* ray_env_get */
@@ -663,7 +664,7 @@ ray_t* q_prior_wrap(ray_t** args, int64_t n) {
  * condition (`do` takes a COUNT, not a truthiness, and keeps its own gate).
  * Owner ruling 2026-07-15, the authority where the docs are silent on the error
  * codes: materialize -> exclude float/real -> cast with the SAME fn `"b"$` uses
- * -> boolean ATOM = 1b, else 'type.  Deciding via q_cast_to keeps ONE type
+ * -> boolean ATOM = 1b, else 'type.  Deciding via q_dollar_cast keeps ONE type
  * judgment; the ATOM check subsumes an arity gate ("b"$1 2 -> 11b, a vector).
  * float/real go BEFORE the cast: the cast accepts them ("b"$1.5 -> 1b) but
  * ref/if.md:20 / ref/while.md:21 require "an atom of integral type".
@@ -676,7 +677,7 @@ static int q_truth(ray_t* v, ray_t** err) {
     if (RAY_IS_ERR(v)) { *err = v; return 0; }
     int8_t t = v->type < 0 ? (int8_t)-v->type : v->type;
     if (t == RAY_F64 || t == RAY_F32) { ray_release(v); *err = ray_error("type", NULL); return 0; }
-    ray_t* b = q_cast_to(RAY_BOOL, v);
+    ray_t* b = q_dollar_cast(RAY_BOOL, v);
     ray_release(v);
     if (!b || RAY_IS_ERR(b)) { *err = b ? b : ray_error("type", NULL); return 0; }
     if (b->type != -RAY_BOOL) { ray_release(b); *err = ray_error("type", NULL); return 0; }
