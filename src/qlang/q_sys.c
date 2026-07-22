@@ -414,7 +414,7 @@ static ray_t* h_l(const char* arg, size_t alen) {
  * uses (q_parse → q_lower → ray_eval), `reps` times, discarding each result.
  * On success fills *ms with the TOTAL wall-clock milliseconds and *bytes with
  * the space metric, then returns NULL; a parse/lower/eval error returns the
- * OWNED error instead (ms/bytes untouched).  The `:n` repetition form is kdb's
+ * OWNED error instead (ms/bytes then meaningless).  The `:n` repetition form is kdb's
  * `do[n; e]` — execution repeated, so we parse+lower ONCE and re-evaluate the
  * lowered tree (ray_eval is read-only on the AST; re-running it re-runs the
  * program, assignments and all).  Runtime dispatch is allowed to parse here —
@@ -429,6 +429,18 @@ static ray_t* h_l(const char* arg, size_t alen) {
  * are NOT counted, and the ASan debug allocator inflates the number versus a
  * release build.  Tests pin only shape + sign (space > 0 for an allocating
  * expr), never a golden byte count. */
+typedef struct { ray_mem_stats_t mem; int64_t t0; } tsmeas_t;
+static void ts_begin(tsmeas_t* m) { ray_mem_stats(&m->mem); m->t0 = ray_profile_now_ns(); }
+/* Call with the result STILL LIVE — the space metric is the net-alloc delta. */
+static void ts_end(const tsmeas_t* m, double* ms, int64_t* bytes) {
+    int64_t t1 = ray_profile_now_ns();
+    ray_mem_stats_t after;
+    ray_mem_stats(&after);
+    *ms = (double)(t1 - m->t0) / 1e6;
+    int64_t d = (int64_t)after.bytes_allocated - (int64_t)m->mem.bytes_allocated;
+    *bytes = d < 0 ? 0 : d;
+}
+
 static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
                           double* ms, int64_t* bytes) {
     if (reps < 0) reps = 0;                              /* `\t:0` → do[0;e] = no runs */
@@ -450,9 +462,8 @@ static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) return ast;
 
-    ray_mem_stats_t before, after;
-    ray_mem_stats(&before);
-    int64_t t0  = ray_profile_now_ns();
+    tsmeas_t m;
+    ts_begin(&m);
     ray_t*  r   = NULL;
     ray_t*  err = NULL;
     for (int64_t k = 0; k < reps; k++) {
@@ -461,15 +472,33 @@ static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
         if (ray_is_lazy(r)) r = ray_lazy_materialize(r);
         if (r && RAY_IS_ERR(r)) { err = r; r = NULL; break; }
     }
-    int64_t t1 = ray_profile_now_ns();
-    ray_mem_stats(&after);                               /* last result still live */
+    ts_end(&m, ms, bytes);                               /* last result still live */
     ray_release(ast);
     if (r) ray_release(r);
     if (err) return err;                                 /* propagate the eval error */
-    *ms = (double)(t1 - t0) / 1e6;
-    int64_t d = (int64_t)after.bytes_allocated - (int64_t)before.bytes_allocated;
-    *bytes = d < 0 ? 0 : d;
     return NULL;
+}
+
+/* See q_sys.h.  `.Q.ts[f;args]` / `-34!(f;args)` (ref/dotq.md#ts-time-and-space):
+ * `.[f;args]` under the SAME measurement `\ts` uses -> ((ms;bytes); result). */
+ray_t* q_sys_ts_apply(ray_t* f, ray_t* args) {
+    ray_t*   fa[2] = { f, args };
+    double   ms;
+    int64_t  bytes;
+    tsmeas_t m;
+    ts_begin(&m);
+    ray_t* r = q_dot_wrap(fa, 2);
+    if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
+    ts_end(&m, &ms, &bytes);                             /* result still live */
+    if (!r) return ray_error("type", NULL);
+    if (RAY_IS_ERR(r)) return r;
+    ray_t* ts  = pair_i64((int64_t)ms, bytes);
+    ray_t* out = ray_list_new(2);
+    out = ray_list_append(out, ts);
+    ray_release(ts);
+    out = ray_list_append(out, r);
+    ray_release(r);
+    return out;
 }
 
 /* `\t` — timer OR expression timing (basics/syscmds.md), disambiguated by the

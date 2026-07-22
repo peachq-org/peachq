@@ -18,6 +18,7 @@
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
+#include "qlang/q_sys.h"        /* q_sys_ts_apply — `-34!` (.Q.ts) */
 #include "qlang/net/q_net.h"   /* q_net_host / q_net_addr — `-12!`/`-13!` */
 #include "lang/eval.h"          /* ray_eval_get_restricted — `-7!` file gate */
 #include <rayforce.h>
@@ -116,6 +117,14 @@ static ray_t* h_hcount(ray_t* y) {
     ray_release(path);
     if (sz < 0) return ray_error("io", NULL);
     return ray_i64(sz);
+}
+
+/* -34!(f;args) — .Q.ts, functional `\ts` (ref/dotq.md#ts-time-and-space).
+ * The one operand packs Apply's two: unpack and delegate to the q_sys home. */
+static ray_t* h_timespace(ray_t* y) {
+    if (!y || y->type != RAY_LIST || ray_len(y) != 2)
+        return ray_error("type", NULL);
+    return q_sys_ts_apply(ray_list_get(y, 0), ray_list_get(y, 1));
 }
 
 /* Format one double to `places` decimals with IEEE754 rounding (C's %.*f is
@@ -254,6 +263,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -9:  return h_deser(y);
         case -12: return q_net_host(y);
         case -13: return q_net_addr(y);
+        case -14: return q_io_csv_quote(y);
         case -15: return q_md5_fn(y);
         case -16: return h_refcnt(y);
         case -18: return h_zip(y);
@@ -262,6 +272,8 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -31: return q_json_serialize(y);
         case -32: return q_dotq_btoa_fn(y);
         case -33: return q_dotq_sha1_fn(y);
+        case -34: return h_timespace(y);
+        case -35: return q_dotq_gz_fn(&y, 1);
 
         /* ---- placeholder inventory: known internal fn, not implemented -> 'nyi.
          * Kept as EXPLICIT cases so the -N! id map stays documented in code.
@@ -270,18 +282,21 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -4:   /* tokens: scanner token list                                */
         case -10:  /* type enum: enumerations                                   */
         case -11:  /* streaming execute: logging + .z.ps                        */
-        case -14:  /* quote escape: CSV quote escaping                          */
         case -19:  /* set / compress file (AMBIGUOUS doc — see PR Deferrals)    */
         case -20:  /* .Q.gc: garbage collect                                    */
         case -21:  /* compression stats: codec + file compress                 */
         case -22:  /* uncompressed length: serde length shortcut               */
         case -23:  /* memory map: mmap-backed objects                          */
-        case -24:  /* reval: restricted eval                                    */
+        case -24:  /* reval: restricted eval — PARKED.  q_value_wrap under a
+                    * restricted flag is ~5 lines, but a fully-enforced reval
+                    * needs the RAY_FN_RESTRICTED gate inside q_call_n / dot_apply
+                    * (ops/q_applyiter.c) so a nested `value (f;a;b;c)` / `.[f;args]`
+                    * of a restricted VARY cannot bypass it (codex r1/r2 P1).  That
+                    * file is owned by the concurrent S2 dissolution — do NOT edit.
+                    * Reintroduce -24! once the gate lands there (PLAN.md).        */
         case -25:  /* async broadcast: IPC handles + loop                      */
         case -26:  /* SSL: TLS                                                  */
         case -30:  /* deferred response: IPC + .z.w/.z.W                       */
-        case -34:  /* .Q.ts: time and space                                     */
-        case -35:  /* .Q.gz: gzip                                               */
         case -36:  /* load master key: OpenSSL/DARE                            */
         case -37:  /* .Q.prf0: code profiler                                    */
         case -38:  /* socket table: sockets                                     */
