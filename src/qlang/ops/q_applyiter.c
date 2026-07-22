@@ -65,47 +65,8 @@ ray_t* q_each_wrap(ray_t* f, ray_t* x) {
  * keyword wrappers delegate to.  Every function operand is applied through
  * call_fn1/call_fn2, which fall through to q_apply_noun for 100h lambda and
  * 104h projection carriers — so lambdas, native ops and projections all work.
- *
- * Rank of a q value: 1 monadic, 2 dyadic, -1 ambiguous (native vary). */
-static int fn_rank(ray_t* f) {
-    if (!f) return -1;
-    switch (f->type) {
-    case RAY_UNARY:  return 1;
-    case RAY_BINARY: return 2;
-    case RAY_VARY:   return -1;
-    case RAY_LAMBDA: return (int)ray_len(LAMBDA_PARAMS(f));
-    default: break;
-    }
-    q_deriv_kind k = q_deriv_kind_of(f);
-    if (k == Q_DERIV_LAMBDA) return q_deriv_valence(f);
-    if (k == Q_DERIV_MONAD)  return 1;
-    if (k == Q_DERIV_PROJ) {
-        uint64_t m = q_deriv_hole_mask(f);
-        int c = 0; while (m) { c += (int)(m & 1u); m >>= 1; }
-        return c;              /* effective rank = open holes */
-    }
-    return -1;
-}
-
-/* True iff x is a callable q value (native fn or carrier) — distinguishes the
- * `while` test-function argument of `/` `\` from a numeric do-count. */
-int q_is_fn_value(ray_t* x) {
-    if (!x) return 0;
-    if (x->type == RAY_UNARY || x->type == RAY_BINARY ||
-        x->type == RAY_VARY  || x->type == RAY_LAMBDA) return 1;
-    return q_deriv_kind_of(x) != Q_DERIV_NONE;
-}
-
-/* Apply f to k args (borrowed).  1/2 route via call_fn1/2 (carrier-aware);
- * k>=3 via the noun dispatcher (lambda/proj carriers) or a native vary. */
-ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k) {
-    if (k == 1) return call_fn1(f, a[0]);
-    if (k == 2) return call_fn2(f, a[0], a[1]);
-    if (f && f->type == RAY_VARY) return ((ray_vary_fn)(uintptr_t)f->i64)(a, k);
-    ray_t* r = q_apply_noun(f, a, k);
-    if (r) return r;
-    return ray_error("rank", "each-both: cannot apply to %lld args", (long long)k);
-}
+ * The fn-value utilities (rank / callable-test / generic apply) live with
+ * the carriers in q_deriv.c (bucket B). */
 
 /* ---- each-both  x f'y ------------------------------------------------------ */
 static ray_t* eachboth_apply(ray_t* f, ray_t** ops, int64_t k);
@@ -134,7 +95,7 @@ static ray_t* eachboth_dict(ray_t* f, ray_t* x, ray_t* y) {
  * of mis-zipping a lambda/projection CARRIER (a RAY_LIST) against the data. */
 static int op_is_atom(ray_t* v) {
     if (!v || op_is_dict(v)) return 0;
-    return ray_is_atom(v) || q_is_fn_value(v);
+    return ray_is_atom(v) || q_deriv_is_fn_value(v);
 }
 
 static ray_t* eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
@@ -144,7 +105,7 @@ static ray_t* eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
         if (!op_is_atom(ops[j])) all_atom = 0;
     }
     if (any_dict && k == 2) return eachboth_dict(f, ops[0], ops[1]);
-    if (all_atom) return q_call_n(f, ops, k);      /* all atoms -> one result */
+    if (all_atom) return q_deriv_call_n(f, ops, k);      /* all atoms -> one result */
 
     int64_t L = -1;
     for (int64_t j = 0; j < k; j++) {
@@ -165,7 +126,7 @@ static ray_t* eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
         }
         /* Force BEFORE releasing the operands the lazy may borrow (r2 review;
          * the ray_map_fn discipline). */
-        ray_t* r = ray_lazy_materialize(q_call_n(f, a, kk));
+        ray_t* r = ray_lazy_materialize(q_deriv_call_n(f, a, kk));
         for (int64_t j = 0; j < kk; j++) if (owned & (1u << j)) ray_release(a[j]);
         if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : ray_error("type", NULL); }
         out = ray_list_append(out, r);
@@ -407,7 +368,7 @@ static int acc_is_coll(ray_t* x) {
 /* `/` over — reduce / converge / do / while by operand shape and f rank. */
 ray_t* q_over_wrap(ray_t** args, int64_t n) {
     ray_t* f = args[0];
-    int rank = fn_rank(f);
+    int rank = q_deriv_fn_rank(f);
     if (n == 2) {
         ray_t* x = args[1];
         if (rank == 1) return converge(f, x, 0);
@@ -427,7 +388,7 @@ ray_t* q_over_wrap(ray_t** args, int64_t n) {
     }
     if (n == 3) {
         ray_t* a = args[1], *x = args[2];
-        if (q_is_fn_value(a))  return i_while(f, a, x, 0);
+        if (q_deriv_is_fn_value(a))  return i_while(f, a, x, 0);
         if (rank == 1)         return ntimes(f, as_i64(a), x, 0);
         ray_t* fa[3] = { f, a, x };
         return ray_lazy_materialize(ray_fold_fn(fa, 3));              /* seeded reduce */
@@ -438,7 +399,7 @@ ray_t* q_over_wrap(ray_t** args, int64_t n) {
 /* `\` scan — like over but every step is retained. */
 ray_t* q_scan_wrap(ray_t** args, int64_t n) {
     ray_t* f = args[0];
-    int rank = fn_rank(f);
+    int rank = q_deriv_fn_rank(f);
     if (n == 2) {
         ray_t* x = args[1];
         if (rank == 1) return converge(f, x, 1);
@@ -480,7 +441,7 @@ ray_t* q_scan_wrap(ray_t** args, int64_t n) {
     }
     if (n == 3) {
         ray_t* a = args[1], *x = args[2];
-        if (q_is_fn_value(a))  return i_while(f, a, x, 1);
+        if (q_deriv_is_fn_value(a))  return i_while(f, a, x, 1);
         if (rank == 1)         return ntimes(f, as_i64(a), x, 1);
         return seeded_scan(f, a, x, 0);
     }
@@ -492,46 +453,6 @@ ray_t* q_scan_wrap(ray_t** args, int64_t n) {
 ray_t* q_over_kw(ray_t* f, ray_t* x)  { ray_t* a[2] = { f, x }; return q_over_wrap(a, 2); }
 ray_t* q_scan_kw(ray_t* f, ray_t* x)  { ray_t* a[2] = { f, x }; return q_scan_wrap(a, 2); }
 ray_t* q_prior_kw(ray_t* f, ray_t* x) { ray_t* a[2] = { f, x }; return q_prior_wrap(a, 2); }
-
-/* Build a BINARY derived-verb carrier at EVAL time: `hof` with `f` bound in
- * slot 0 and two data operands open.  Used to lower `(f/:)` / `(f\:)` when the
- * operand f is an expression (a lambda) that must be EVALUATED to a value
- * first — a lower-time q_proj would capture the raw `(q.fn …)` tree.  `x f/: y`
- * then == map-right(f;x;y), which lets a stacked outer adverb (`f/:\:`) drive
- * it through map-left. */
-ray_t* q_mkderiv2(ray_t* hof, ray_t* f) {
-    ray_t* args[3] = { f, NULL, NULL };
-    return q_proj_new(hof, args, 3, 0x6u, 2);
-}
-
-/* q.mkopproj — build a projection carrier over an `@`/`.` operator with an
- * ELIDED argument (`@[count;;-1]`, `type @[;;0h]`), at EVAL time so the bound
- * (non-hole) args are already VALUES: a name-ref `count` or a lambda literal
- * `{x+1}` has been evaluated before it is bound.  This is what distinguishes
- * an elision (project) from an explicit `::` (amend/trap data) — the parser
- * only lowers a genuine bracket elision here (q_parse.c ql_project).  Args:
- *   [0] base — the @/. VARY value (the carrier's base)
- *   [1] n    — total slot count
- *   [2] mask — hole bitmask over slots 0..n-1
- *   [3..k)   — the non-hole bound values, in slot order
- * Returns an owned .q.proj carrier (kdb 104h). */
-ray_t* q_mkopproj(ray_t** args, int64_t k) {
-    if (k < 3) return ray_error("rank", "q.mkopproj: need base, n, mask");
-    ray_t* base = args[0];
-    int64_t n; int64_t m;
-    if (!q_strict_i64(args[1], &n) || !q_strict_i64(args[2], &m))
-        return ray_error("type", "q.mkopproj: n/mask");
-    if (n < 1 || n > 60) return ray_error("rank", "q.mkopproj: bad slot count");
-    uint64_t mask = (uint64_t)m;
-    ray_t* slots[64];
-    int64_t j = 3; int holes = 0;
-    for (int64_t i = 0; i < n; i++) {
-        if (mask & (1ull << i)) { slots[i] = NULL; holes++; }
-        else                    { slots[i] = (j < k) ? args[j++] : NULL; }
-    }
-    if (holes == 0) return ray_error("rank", "q.mkopproj: no holes");
-    return q_proj_new(base, slots, n, mask, holes);   /* retains base + slots */
-}
 
 ray_t* g_scan_value     = NULL;
 ray_t* g_over_value     = NULL;
@@ -554,64 +475,15 @@ ray_t* g_select_value = NULL;
 ray_t* g_delete_value = NULL;   /* q.delete: string `delete` statement executor */
 ray_t* g_exec_value   = NULL;   /* q.exec:   string `exec`   statement executor */
 ray_t* g_compose_value = NULL;
-
-/* q `'[f;g;…]` compose builder — a normal VARY (args are the resolved function
- * VALUES): boxes them into a Q_DERIV_COMPOSE carrier (q_deriv.c). */
-ray_t* q_compose_fn(ray_t** args, int64_t n) {
-    if (n < 1) return ray_error("rank", "': compose needs at least one function");
-    return q_compose_new(args, n);
-}
 ray_t* g_funsql_select_value = NULL;
 ray_t* g_funsql_bang_value   = NULL;
 ray_t* g_lambda_value        = NULL;
-
-/* q.fn — SPECIAL FORM behind every q lambda literal.  q_lower rewrites the
- * parser's `{`-marker node to (q.fn src params body...); at eval this
- * delegates lambda creation to the base env `fn` form (same params/body
- * calling convention) and wraps the resulting RAY_LAMBDA in the 100h
- * .q.lambda carrier that carries q valence + verbatim source for display.
- * kdb caps lambdas at 8 arguments -> 'params — signalled HERE (not at parse:
- * qdoc error rows only match lower/eval errors). */
-ray_t* q_fn_make(ray_t** args, int64_t n) {
-    if (n < 3 || !args[0] || args[0]->type != -RAY_STR ||
-        !args[1] || args[1]->type != RAY_SYM)
-        return ray_error("type", "q.fn: malformed lambda node");
-    int64_t rank = ray_len(args[1]);
-    if (rank > 8)
-        return ray_error("params", "'params: lambdas take at most 8 arguments");
-    ray_t* fnv = ray_env_get(ray_sym_intern("fn", 2));       /* borrowed */
-    if (!fnv || fnv->type != RAY_VARY)
-        return ray_error("type", "q.fn: base fn form unavailable");
-    ray_t* lam = ((ray_vary_fn)(uintptr_t)fnv->i64)(args + 1, n - 1);
-    if (!lam || RAY_IS_ERR(lam)) return lam;
-    ray_t* c = q_lambda_carrier_new(lam, (int)rank, args[0]);
-    ray_release(lam);                       /* carrier holds its own ref */
-    return c;
-}
 
 ray_t* q_registry_lambda_value(void) { return g_lambda_value; }  /* borrowed */
 
 ray_t* g_ret_value = NULL;
 ray_t* g_sig_value = NULL;
-_Thread_local ray_t* g_qret_payload = NULL;
 _Thread_local ray_t* g_qsig_payload = NULL;
-
-/* `:x` early return (basics/function-notation.md#explicit-return).  The body
- * must unwind NOW: eval aborts a lambda body on any RAY_ERROR, so we ride
- * the error path with the reserved class "q.ret" and stash the payload in a
- * thread-local for the innermost q_lambda_apply to take. */
-ray_t* q_ret_fn(ray_t* x) {
-    if (g_qret_payload) { ray_release(g_qret_payload); g_qret_payload = NULL; }
-    if (x) ray_retain(x);
-    g_qret_payload = x;
-    return ray_error("q.ret", NULL);
-}
-
-ray_t* q_lambda_ret_take(void) {
-    ray_t* v = g_qret_payload;      /* owned by the caller now */
-    g_qret_payload = NULL;
-    return v;
-}
 
 /* Full text of the most recent `'x` signal.  The ≤7-char error class in
  * err->sdata truncates, but kdb Trap hands the handler the WHOLE message, so

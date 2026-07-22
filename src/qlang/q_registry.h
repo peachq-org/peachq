@@ -193,11 +193,6 @@ ray_t* q_registry_if_value(void);
 ray_t* q_registry_do_value(void);
 ray_t* q_registry_while_value(void);
 
-/* Take (and clear) the thread-local early-return payload stashed by a `:x`
- * statement — called by lambda_apply when call_lambda comes back with the
- * reserved "q.ret" error class.  Returns an OWNED value or NULL. */
-ray_t* q_lambda_ret_take(void);
-
 /* Take (and clear) / clear the thread-local full-text payload stashed by a
  * `'x` signal — Trap hands the handler the whole message, not the ≤7-char
  * error class.  q_registry_sig_take returns an OWNED string or NULL. */
