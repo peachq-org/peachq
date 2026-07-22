@@ -14,6 +14,8 @@
 .q.differ:{not(~':)x}
 / ref/md5.md: verbatim q.k spelling — the -15! internal fn (q_bang.c -> q_md5_fn)
 .q.md5:(-15!)
+/ ref/hcount.md: file size in bytes — the -7! internal fn (q_bang.c -> h_hcount)
+.q.hcount:(-7!)
 / ref/med.md "equivalent to {avg x (iasc x)@floor .5*-1 0+count x,:()}";
 / the atom-listify is spelled 1#x (`,:()` amend unsupported; `(),x` boxes)
 .q.med:{x:$[0h>type x;1#x;x];avg x (iasc x)@floor .5*-1 0+count x}
