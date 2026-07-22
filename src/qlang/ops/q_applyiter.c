@@ -1,4 +1,4 @@
-/* q_wrap_applyiter.c — amend/apply/trap (@ and . ternary+), iterators (each-both,
+/* ops/q_applyiter.c — amend/apply/trap (@ and . ternary+), iterators (each-both,
  * each-prior, over/scan), lambda carrier (q.fn, ret/sig), and
  * the imperative control constructs (q.seq/if/do/while)
  *

@@ -110,7 +110,7 @@ static ray_t* keyed_table_lookup(ray_t* d, ray_t* idx) {
         if (all) hit = r;
     }
     /* hit -> that row of the value table; miss -> the typed all-null row.
-     * Both are q_table_row_at (the universal row-dict arm, q_wrap_table.c):
+     * Both are q_table_row_at (the universal row-dict arm, ops/q_table.c):
      * a miss is just an out-of-range row. */
     return q_table_row_at(vtab, hit);
 }
@@ -711,7 +711,7 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
                 next = dict_lookup(cur, args[i]);
             } else if (cur->type == RAY_TABLE) {
                 if (!args[i] || RAY_IS_NULL(args[i])) { ray_release(cur); return NULL; }
-                /* integer atom/vector -> the universal row gather (q_wrap_table.c:
+                /* integer atom/vector -> the universal row gather (ops/q_table.c:
                  * char columns byte-permuted, misses null-filled); anything else
                  * (sym -> column, ...) declines to the historic ray_at arms. */
                 next = q_table_at(cur, args[i]);

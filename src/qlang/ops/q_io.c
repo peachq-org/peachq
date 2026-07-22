@@ -1,4 +1,4 @@
-/* q_wrap_io.c — io wrappers: hopen/hclose (IPC client), File Text (0: hsym read0,
+/* ops/q_io.c — io wrappers: hopen/hclose (IPC client), File Text (0: hsym read0,
  * save/prepare/load-csv/load-fixed/kv), like/ss/ssr, getenv/setenv
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared

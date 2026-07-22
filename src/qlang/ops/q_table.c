@@ -1,4 +1,4 @@
-/* q_wrap_table.c — table verbs: flip/keys/xkey/xgroup/ungroup, insert/upsert,
+/* ops/q_table.c — table verbs: flip/keys/xkey/xgroup/ungroup, insert/upsert,
  * key, set, set-ops (distinct/union/inter/except/cross),
  * and the shared right-to-left context builder (list/table literals)
  *
@@ -25,7 +25,7 @@
 /* ===== table verbs (feat/q-table-verbs) ====================================
  * flip/keys/xkey/xasc/xdesc/xgroup/ungroup/insert/upsert + the
  * table arms of distinct/union/inter/except.  All built over the wave-4
- * keyed primitives (q_is_keyed_table in q_wrap_list.c, q_bang_enkey in q_bang.c,
+ * keyed primitives (q_is_keyed_table in ops/q_list.c, q_bang_enkey in q_bang.c,
  * q_table_flatten) — NEVER duplicated (the #56 failure mode).  Row-equality is boxed q-match
  * compares: O(n^2) wrapper-tier code at test scale by design (single-home
  * principle; SIMD paths belong to the engine).                              */
@@ -92,7 +92,7 @@ static ray_t* q_table_reorder(ray_t* t, const int64_t* names, int64_t n) {
  * (basics/application.md "Indexing out of bounds") is null-fill: a miss
  * yields the typed null of each column (char -> the blank " "; LIST -> the
  * null of the first item's type).  The vector arm is qj_table_gather_idx
- * (q_wrap_join.c) — ONE gather home for joins, funsql scatters and row
+ * (ops/q_join.c) — ONE gather home for joins, funsql scatters and row
  * indexing alike. */
 
 /* t[row] -> the ROW DICT.  An out-of-range/negative/null row (miss) yields

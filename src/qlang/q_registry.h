@@ -303,7 +303,7 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n);
 ray_t* q_keyed_lookup_rows(ray_t* kt, ray_t* keytbl);
 
 /* Universal table row indexing (uniform-structure-dispatch stage 0; defined
- * in q_wrap_table.c).  q_table_at: t[idx] for an integer atom (-> the row
+ * in ops/q_table.c).  q_table_at: t[idx] for an integer atom (-> the row
  * dict) or an integer vector (-> row gather, misses null-filled per the
  * basics/application.md out-of-bounds law); returns NULL to DECLINE any
  * other index shape.  q_table_row_at: the row-dict arm — row < 0 (incl.
