@@ -325,43 +325,13 @@ ray_t* q_read0_wrap(ray_t* x);
 ray_t* q_hopen_wrap(ray_t* x);
 ray_t* q_hclose_wrap(ray_t* x);
 
-/* ===== q cast home ==========================================================
- * THE q-layer conversion entry points (reuse mandate): future q-semantics
- * work that needs a conversion (bool-widening in arithmetic, promotion in
- * mixed-type ops, ...) MUST call q_cast_to with a rayfall type tag rather
- * than growing its own conversion — the only sanctioned exception is a
- * profiled hot path with a specialized SIMD/vectorized kernel (base arith.c's
- * as_i64/as_f64 atom coercions are that carve-out).
- *
- * q_cast_designator: resolve a q cast/Tok designator value to a rayfall type
- *   tag.  Accepts a sym name (`long`float`int`short`boolean`real`symbol), a
- *   single-char string ("j" "f" "i" "h" "b" "e" "s"; upper-case = Tok), or a
- *   short atom holding the kdb type number (positive = cast, negative = Tok
- *   per ref/tok.md — the rayfall tags already equal the kdb numbers).  The
- *   null symbol ` is Tok "S".  *is_tok is set to 1 for Tok (string-parse)
- *   designators.  Returns 0 (RAY_LIST — never a valid target) for unknown or
- *   deferred designators (byte/guid/char/temporals, and the 0h/"*" identity).
- * q_cast_to: convert x to the tag type with q semantics.  Exactly: RAY_LIST
- *   distributes per element (collapsed); float ATOMS and float VECTORS
- *   pre-round via rint (kdb ties-even) for integer targets; symbol target is
- *   identity on syms and 'nyi otherwise; every other input delegates to base
- *   ray_cast_fn (typed vectors included).  Returns owned; 'nyi error for
- *   deferred targets (F32/char/byte/guid/temporals).
- * q_tok_to: parse string atom(s) to the tag type (kdb Tok, ref/tok.md).
- *   Leading/trailing blanks are trimmed; unparseable or out-of-range parses
- *   yield the TYPED NULL (never an error); lists and string vectors
- *   distribute (implicit recursion stops at strings, not atoms). */
-int8_t q_cast_designator(ray_t* t, int* is_tok);
-ray_t* q_cast_to(int8_t tag, ray_t* x);
-ray_t* q_tok_to(int8_t tag, ray_t* x);
-
 /* ===== q calendar home (date) ==============================================
  * kdb date == base RAY_DATE payload: i32 days since 2000.01.01, proleptic
  * Gregorian (qdocs basics/datatypes.md).  q_days_from_civil is Hinnant's
  * days_from_civil (public domain) rebased from the unix epoch by -10957;
  * q_date_valid pins the kdb literal domain 0001.01.01..9999.12.31 with real
  * (leap-aware) month lengths.  Shared by the literal scanner (q_parse) and
- * "D"$ Tok (q_tok_to) — ONE conversion home, per the reuse mandate above. */
+ * "D"$ Tok (q_dollar_tok) — ONE conversion home, per q_dollar.h's mandate. */
 int64_t q_days_from_civil(int64_t y, int64_t m, int64_t d);
 int     q_date_valid(int64_t y, int64_t m, int64_t d);
 
