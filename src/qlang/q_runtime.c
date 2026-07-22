@@ -60,7 +60,7 @@ static ray_t* q_bootstrap_eval(const char* src) {
  * would win over the q.q keyword.  When root NAME is already bound, rebind it
  * to the q.q value too — in the q runtime the q keyword IS the name's meaning
  * (engine code calls its kernels by function, not by env name). */
-static int q_bootstrap_dotq_line(const char* s) {
+static int bootstrap_dotq_line(const char* s) {
     if (strncmp(s, ".q.", 3) != 0) return 0;
     const char* p = s + 3;
     while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
@@ -82,7 +82,7 @@ static int q_bootstrap_dotq_line(const char* s) {
  * (rule 6), silently; blank/`/`-comment lines skipped, `.q.name:` lines take the
  * privileged binder, errors reported, never fatal.  Called for the q.q+dotq.q
  * bundle and then the always-on `.h` constants (h.q). */
-static void q_bootstrap_load_src(const char* p) {
+static void bootstrap_load_src(const char* p) {
     char line[4096];
     while (*p) {
         const char* nl = strchr(p, '\n');
@@ -103,7 +103,7 @@ static void q_bootstrap_load_src(const char* p) {
         if (*s == '\0' || *s == '/')   /* blank line or leading `/` comment */
             continue;
 
-        if (q_bootstrap_dotq_line(s))  /* q.q keyword -> privileged binder */
+        if (bootstrap_dotq_line(s))  /* q.q keyword -> privileged binder */
             continue;
         ray_t* r = q_bootstrap_eval(line);
         if (r) ray_release(r);
@@ -156,9 +156,9 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
          * process-constant argv values once and install the name-load hook. */
         q_dotz_init(argc, argv);
         ray_eval_set_name_hook(q_name_resolve);
-        q_bootstrap_load_src(OPENQ_BOOTSTRAP);  /* embedded .q stdlib, post-registry (rule 6) */
-        q_bootstrap_load_src(OPENQ_H_BOOTSTRAP); /* `.h` constants (h.q), always-on beside dotq */
-        q_bootstrap_load_src(OPENQ_J_BOOTSTRAP); /* `.j` JSON ns (j.q), delegates to -29!/-31! bangs */
+        bootstrap_load_src(OPENQ_BOOTSTRAP);  /* embedded .q stdlib, post-registry (rule 6) */
+        bootstrap_load_src(OPENQ_H_BOOTSTRAP); /* `.h` constants (h.q), always-on beside dotq */
+        bootstrap_load_src(OPENQ_J_BOOTSTRAP); /* `.j` JSON ns (j.q), delegates to -29!/-31! bangs */
         /* QK_QSRC manifest cells (infix q.q keywords) snapshot their `.q`
          * definitions now that the bootstrap has bound them. */
         if (q_registry_bind_qsrc() != RAY_OK)

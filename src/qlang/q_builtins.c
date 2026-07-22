@@ -54,13 +54,13 @@ ray_t* q_parse_builtin_fn(ray_t* x) {
  * rayfall's `show`, which uses the rayfall formatter (`[1 2 3]`) rather than
  * q_fmt.  qdoc/repl print nothing for the null result, so the row shows only
  * the buffered display. */
-static ray_t* q_show_fn(ray_t* x) {
+static ray_t* show_fn(ray_t* x) {
     q_console_show(x);
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
 
-static ray_t* q_id_table(ray_t* x) {
+static ray_t* id_table(ray_t* x) {
     int64_t nc = ray_table_ncols(x);
     ray_t* out = ray_table_new(nc);
     int64_t stack[64];
@@ -77,7 +77,7 @@ static ray_t* q_id_table(ray_t* x) {
     return out;
 }
 
-static ray_t* q_id_dict(ray_t* x) {
+static ray_t* id_dict(ray_t* x) {
     ray_t* k = ray_dict_keys(x);
     ray_t* v = ray_dict_vals(x);
     if (!k || k->type != RAY_SYM)
@@ -102,11 +102,11 @@ static ray_t* q_id_dict(ray_t* x) {
     return ray_dict_new(nk, v);   /* consumes nk, retained v */
 }
 
-static ray_t* q_id_fn(ray_t* x) {
+static ray_t* id_fn(ray_t* x) {
     if (!x) return ray_error("type", ".Q.id: nil");
     if (x->type == -RAY_SYM) return ray_sym(q_name_sanitize(x->i64));
-    if (x->type == RAY_TABLE) return q_id_table(x);
-    if (x->type == RAY_DICT)  return q_id_dict(x);
+    if (x->type == RAY_TABLE) return id_table(x);
+    if (x->type == RAY_DICT)  return id_dict(x);
     return ray_error("type", ".Q.id: expects a symbol, table, or dictionary");
 }
 
@@ -118,7 +118,7 @@ static ray_unary_fn g_base_count = NULL;
 /* q `type` on FUNCTION values only — 100h lambda, 104h projection, 102h
  * operator (ref/datatypes.md).  Everything else stays on the base verb; the
  * full q type map is cast/type.qcmd territory. */
-static ray_t* q_type_fn(ray_t* x) {
+static ray_t* type_fn(ray_t* x) {
     if (x) {
         /* Function-VALUE carriers first: they are RAY_LISTs under the hood, so
          * the raw-tag path below would wrongly report them as 0h (general
@@ -152,7 +152,7 @@ static ray_t* q_type_fn(ray_t* x) {
  * `meta`'s `t` column).  Exhaustive switch over the ABSOLUTE type tag; 0 for
  * tags with no char (list 0, guid-gap 3, out-of-band).  Lowercase = the element
  * char; `.Q.ty` uppercases it for a uniform list of vectors. */
-static char q_type_char(int8_t tag) {
+static char type_char(int8_t tag) {
     int t = tag < 0 ? -tag : tag;                   /* int arith: |INT8_MIN|==128, no UB */
     if (t <= 0 || t >= RAY_TYPE_COUNT) return 0;    /* list 0, gap 3 & out-of-band: no char */
     switch ((ray_type_e)t) {                        /* exhaustive: a new member demands a lane */
@@ -184,7 +184,7 @@ static char q_type_char(int8_t tag) {
  * element type (kdb `.Q.ty` upper-case case, e.g. `3 2#3 4 5` or
  * `("abc";"de")`).  *elt receives that element tag (RAY_STR for a list of
  * char-vector strings). */
-static int q_uniform_list(ray_t* x, int8_t* elt) {
+static int uniform_list(ray_t* x, int8_t* elt) {
     if (!x || x->type != RAY_LIST) return 0;
     int64_t n = ray_len(x);
     if (n == 0) return 0;
@@ -208,9 +208,9 @@ static int q_uniform_list(ray_t* x, int8_t* elt) {
 char q_ty_char(ray_t* x) {
     int8_t elt;
     if (x && x->type == -RAY_STR) return 'c';                       /* char-vec shim */
-    if (x && ray_is_vec(x))       return q_type_char((int8_t)x->type);
-    if (q_uniform_list(x, &elt)) {
-        char lc = q_type_char(elt);
+    if (x && ray_is_vec(x))       return type_char((int8_t)x->type);
+    if (uniform_list(x, &elt)) {
+        char lc = type_char(elt);
         return (char)(lc ? (lc - 'a' + 'A') : ' ');
     }
     return ' ';
@@ -327,7 +327,7 @@ static ray_t* q_remote_eval_str(const char* src, size_t len) {
  * re-assert here: ipc_dispatch sets ray_eval_get_restricted() around the whole
  * dispatch, and any restricted primitive reached by the apply (`hopen`,
  * `system`…) self-checks it — the exact contract the string hook relies on. */
-static ray_t* q_remote_apply(ray_t* list) {
+static ray_t* remote_apply(ray_t* list) {
     return q_value_wrap(list);
 }
 
@@ -340,7 +340,7 @@ void q_builtins_register(void) {
     /* Remote strings (IPC/journal) evaluate as q from now on. */
     ray_eval_set_remote_str_fn(q_remote_eval_str);
     /* Remote (func;args) value-apply (IPC): single value-object apply via q `value`. */
-    ray_eval_set_remote_apply_fn(q_remote_apply);
+    ray_eval_set_remote_apply_fn(remote_apply);
     bind_unary("parse", q_parse_builtin_fn);
     /* q keywords with no rayfall counterpart — q-owned env bindings (same
      * mechanism as `parse`), snapshotted by the registry as QK_ENV rows. */
@@ -361,7 +361,7 @@ void q_builtins_register(void) {
     bind_vary ("ajf0",   q_ajf0_wrap);
     bind_vary ("wj",     q_wj_wrap);
     bind_vary ("wj1",    q_wj1_wrap);
-    bind_unary("show",   q_show_fn);
+    bind_unary("show",   show_fn);
     /* `system "…"` — q-owned string form; single-homes with the `\`-slash
      * dispatcher (q_sys.c). QK_ENV row in q_ops.c snapshots this binding. */
     bind_unary("system", q_system_fn);
@@ -390,7 +390,7 @@ void q_builtins_register(void) {
     capture_base("type",  &g_base_type,  &type_attrs);
     capture_base("count", &g_base_count, &count_attrs);
     {
-        ray_t* tv = ray_fn_unary("type", type_attrs, q_type_fn);
+        ray_t* tv = ray_fn_unary("type", type_attrs, type_fn);
         ray_env_bind(ray_sym_intern("type", 4), tv);
         ray_release(tv);
         ray_t* cv = ray_fn_unary("count", count_attrs, q_count_fn);
@@ -436,7 +436,7 @@ void q_builtins_register(void) {
      * dotq.q delegates `.Q.btoa:-32!` / `.Q.sha1:-33!` (the bang is the single
      * home).  .Q.c.atob stays C-bound — it has no bang twin. */
     static const struct { const char* name; ray_unary_fn fn; } dotq_c_unary[] = {
-        { ".Q.c.id",   q_id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   },
+        { ".Q.c.id",   id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   },
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */

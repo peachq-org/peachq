@@ -57,7 +57,7 @@ int q_vec_is_num(ray_t* x) {
 typedef enum { RS_SUMS, RS_PRDS, RS_MAXS, RS_MINS, RS_AVGS } q_rs_kind;
 
 /* running max/min over the bytes of a q string (kdb `maxs "genie"`). */
-static ray_t* q_runscan_str(ray_t* x, q_rs_kind k) {
+static ray_t* runscan_str(ray_t* x, q_rs_kind k) {
     const char* p = ray_str_ptr(x);
     size_t n = ray_str_len(x);
     char stackb[256];
@@ -74,10 +74,10 @@ static ray_t* q_runscan_str(ray_t* x, q_rs_kind k) {
     return r;
 }
 
-static ray_t* q_runscan(ray_t* x, q_rs_kind k) {
+static ray_t* runscan(ray_t* x, q_rs_kind k) {
     if (!x) return ray_error("type", "running scan: nil");
     if (x->type == -RAY_STR) {
-        if (k==RS_MAXS || k==RS_MINS) return q_runscan_str(x, k);
+        if (k==RS_MAXS || k==RS_MINS) return runscan_str(x, k);
         return ray_error("type", "running scan: non-numeric");
     }
     if (ray_is_atom(x)) {                 /* atom returned unchanged (avgs->float) */
@@ -124,11 +124,11 @@ static ray_t* q_runscan(ray_t* x, q_rs_kind k) {
     }
     return out;
 }
-ray_t* q_sums_wrap(ray_t* x){ return q_runscan(x, RS_SUMS); }
-ray_t* q_prds_wrap(ray_t* x){ return q_runscan(x, RS_PRDS); }
-ray_t* q_maxs_wrap(ray_t* x){ return q_runscan(x, RS_MAXS); }
-ray_t* q_mins_wrap(ray_t* x){ return q_runscan(x, RS_MINS); }
-ray_t* q_avgs_wrap(ray_t* x){ return q_runscan(x, RS_AVGS); }
+ray_t* q_sums_wrap(ray_t* x){ return runscan(x, RS_SUMS); }
+ray_t* q_prds_wrap(ray_t* x){ return runscan(x, RS_PRDS); }
+ray_t* q_maxs_wrap(ray_t* x){ return runscan(x, RS_MAXS); }
+ray_t* q_mins_wrap(ray_t* x){ return runscan(x, RS_MINS); }
+ray_t* q_avgs_wrap(ray_t* x){ return runscan(x, RS_AVGS); }
 
 /* q `ratios x` — pairwise ratio: r[0]=x[0], r[i]=x[i] % x[i-1] (float). */
 ray_t* q_ratios_wrap(ray_t* x) {
@@ -273,7 +273,7 @@ ray_t* q_wavg_wrap(ray_t* x, ray_t* y) {
  * window (sum/count 0, others null).  mavg is q.q-hosted (msum%mcount). */
 typedef enum { MW_SUM, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
 
-static ray_t* q_mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
+static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     int64_t N;
     ray_t* err = q_i64_or_err(nx, &N, "m-window: n");
     if (err) return err;
@@ -319,11 +319,11 @@ static ray_t* q_mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     }
     return out;
 }
-ray_t* q_msum_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_SUM); }
-ray_t* q_mmax_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_MAX); }
-ray_t* q_mmin_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_MIN); }
-ray_t* q_mcount_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_COUNT); }
-ray_t* q_mdev_wrap(ray_t* n, ray_t* x){ return q_mwin(n, x, MW_DEV); }
+ray_t* q_msum_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_SUM); }
+ray_t* q_mmax_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_MAX); }
+ray_t* q_mmin_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_MIN); }
+ray_t* q_mcount_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_COUNT); }
+ray_t* q_mdev_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_DEV); }
 
 /* q `a ema x` — exponential moving average: e[0]=x[0], e[i]=a*x[i]+(1-a)*e[i-1].
  * `a` is a float atom (the smoothing factor). */
@@ -406,7 +406,7 @@ ray_t* q_neg_wrap(ray_t* x) {
  * whose own paths rely on sym-0-as-empty.  Drives `q_null_wrap` for both the
  * atom path and the per-element `atomic_map_unary` recursion (nested lists /
  * symbol vectors reconstruct null-sym atoms via collection_elem). */
-static ray_t* q_nil_fn(ray_t* x) {
+static ray_t* nil_fn(ray_t* x) {
     if (q_is_null_sym(x)) return ray_bool(true);
     return ray_nil_fn(x);
 }
@@ -473,7 +473,7 @@ ray_t* q_enlist_wrap_vary(ray_t** args, int64_t n) {
 }
 
 ray_t* q_null_wrap(ray_t* x) {
-    ray_t* r = is_collection(x) ? atomic_map_unary(q_nil_fn, x) : q_nil_fn(x);
+    ray_t* r = is_collection(x) ? atomic_map_unary(nil_fn, x) : nil_fn(x);
     if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
     ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
     ray_release(r);
