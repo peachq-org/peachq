@@ -137,7 +137,7 @@ static ray_t* h_format(ray_t* arg) {
  * columns into a keyed table (RAY_DICT keycols-table -> valcols-table).
  * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
 ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
-    if (!y || (y->type != RAY_TABLE && !q_is_keyed_table(y)))
+    if (!y || (y->type != RAY_TABLE && !q_table_is_keyed(y)))
         return ray_error("type", "!: enkey/unkey needs a table");
     ray_t* flat = q_table_flatten(y);
     if (!flat || RAY_IS_ERR(flat)) return flat;

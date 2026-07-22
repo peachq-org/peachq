@@ -116,7 +116,7 @@ static ray_t* keyed_table_lookup(ray_t* d, ray_t* idx) {
 }
 
 static ray_t* dict_lookup(ray_t* d, ray_t* idx) {
-    if (q_is_keyed_table(d)) return keyed_table_lookup(d, idx);
+    if (q_table_is_keyed(d)) return keyed_table_lookup(d, idx);
     ray_t* vals = ray_dict_vals(d);                  /* borrowed accessor */
     int8_t vt = dict_val_null_type(vals);
 
@@ -440,7 +440,7 @@ static ray_t* q_dict_distribute(ray_t* head, ray_t** args, int64_t n) {
          * a keyed table (a RAY_DICT) does not fall into the reduce. */
         if (d && d->type == RAY_TABLE)
             return q_table_distribute(head, d, NULL, 0);
-        if (d && d->type == RAY_DICT && q_is_keyed_table(d)) {
+        if (d && d->type == RAY_DICT && q_table_is_keyed(d)) {
             ray_t* vt = ray_dict_vals(d);        /* value table, borrowed */
             if (!vt || vt->type != RAY_TABLE) return NULL;
             return q_table_distribute(head, vt, NULL, 0);

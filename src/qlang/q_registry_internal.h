@@ -52,9 +52,6 @@ ray_t* q_ema_wrap(ray_t* a, ray_t* x);
 ray_t* q_mmu_wrap(ray_t* x, ray_t* y);                        /* matrix multiply / dot product — used by: math, dollar */
 enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };                     /* RAGGED is mmu-shaped: mmu owns its 'length */
 int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix, else QMMU_*; *first = count(-first) — used by: dollar */
-ray_t* q_neg_wrap(ray_t* x);
-ray_t* q_raze_wrap(ray_t* x);
-ray_t* q_within_wrap(ray_t* x, ray_t* y);
 ray_t* q_sum_wrap(ray_t* x);
 
 /* ---- defined in ops/q_applyiter.c ---- */
@@ -103,11 +100,11 @@ ray_t* q_while_fn(ray_t** args, int64_t n);
 /* ---- defined in ops/q_io.c ---- */
 ray_t* q_filetext_wrap(ray_t* x, ray_t* y);
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y);
+ray_t* q_getenv_wrap(ray_t* x);
 
 /* ---- defined in ops/q_str.c ---- */
 ray_t* q_like_wrap(ray_t* x, ray_t* pattern);
 ray_t* q_ss_wrap(ray_t* s, ray_t* p);
-ray_t* q_getenv_wrap(ray_t* x);
 
 /* ---- defined in ops/q_join.c ---- */
 ray_t* q_lj_wrap(ray_t* x, ray_t* y);
@@ -128,6 +125,11 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y);
 ray_t* q_iasc_wrap(ray_t* x);
 ray_t* q_idesc_wrap(ray_t* x);
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
+ray_t* q_raze_wrap(ray_t* x);
+ray_t* q_where_wrap(ray_t* x);
+ray_t* q_reverse_wrap(ray_t* x);
+
+/* ---- defined in ops/q_rand.c ---- */
 ray_t* q_roll_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_math.c ---- */
@@ -144,8 +146,8 @@ ray_t* q_xexp_wrap(ray_t* x, ray_t* y);
 ray_t* q_xlog_wrap(ray_t* x, ray_t* y);
 ray_t* q_eq_wrap(ray_t* a, ray_t* b);
 ray_t* q_ne_wrap(ray_t* a, ray_t* b);
-ray_t* q_where_wrap(ray_t* x);
-ray_t* q_reverse_wrap(ray_t* x);
+ray_t* q_neg_wrap(ray_t* x);
+ray_t* q_within_wrap(ray_t* x, ray_t* y);
 ray_t* q_vs_wrap(ray_t* x, ray_t* y);
 ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 
@@ -179,7 +181,6 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: 
 double q_velem_f(ray_t* x, int64_t i, int* isnull);           /* used by: list */
 int q_vec_is_float(ray_t* x);                                 /* used by: list */
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
-ray_t* q_null_wrap(ray_t* x);                                 /* used by: registry, math */
 
 /* ---- defined in ops/q_applyiter.c ---- */
 int q_is_fn_value(ray_t* x);                                  /* used by: builtins, io */
@@ -230,23 +231,28 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, 
 /* ---- defined in ops/q_list.c ---- */
 ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry */
-ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);    /* used by: math */
+ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);    /* single-file since the corridor pass — staticize candidate */
+ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: registry, agg, join */
 ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, table */
-int q_is_keyed_table(ray_t* y);                               /* used by: apply, builtins, agg, join, math, table */
-ray_t* q_table_flatten(ray_t* y);                             /* used by: ops, join, table */
+ray_t* q_list_find(ray_t* x, ray_t* y);                       /* used by: rand */
 
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
 int q_match_rec(ray_t* a, ray_t* b);                          /* used by: table */
 ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
-ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
-ray_t* q_dict_vals_vec(ray_t* d, int* owned);                 /* used by: list */
-int q_is_null_sym(ray_t* x);                                  /* used by: agg */
+ray_t* q_null_wrap(ray_t* x);                                 /* used by: registry, fmt_pipe */
+int q_is_null_sym(ray_t* x);                                  /* single-file since the corridor pass — staticize candidate */
 ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io */
 
+/* ---- defined in ops/q_rand.c ---- */
+void q_rand_seed(int64_t n);                                  /* used by: sys */
+
 /* ---- defined in ops/q_table.c ---- */
-ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, agg, list, math */
+ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, list, math */
+int q_table_is_keyed(ray_t* y);                               /* used by: apply, agg, bang, dotq, join, list, rand */
+ray_t* q_table_flatten(ray_t* y);                             /* used by: bang, join */
+ray_t* q_table_dict_vals(ray_t* d, int* owned);               /* used by: list */
 ray_t* qj_item(ray_t* x, int64_t i);                          /* used by: join */
 ray_t* qj_gen_item(ray_t* x, int64_t i);                      /* used by: join */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y);                       /* used by: dotz, lower, registry */
