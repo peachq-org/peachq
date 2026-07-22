@@ -24,8 +24,8 @@
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
 #include "qlang/q_fmt.h"        /* q_console_write — 1/-1/2/-2 console handles */
 #include "core/ipc.h"           /* ray_ipc_handle_of_fd — q true-fd handle -> selector id */
-#include "qlang/q_ws.h"         /* q_ws_client_open — ws:// hsym-apply */
-#include "qlang/q_http_client.h" /* q_http_raw_client — http:// hsym-apply */
+#include "qlang/net/q_ws.h"         /* q_ws_client_open — ws:// hsym-apply */
+#include "qlang/net/q_http_client.h" /* q_http_raw_client — http:// hsym-apply */
 #include "ops/ops.h"            /* ray_is_lazy / ray_lazy_materialize — DAG agg results */
 #include <string.h>
 

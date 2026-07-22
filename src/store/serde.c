@@ -39,7 +39,7 @@
 #  include <unistd.h>
 #endif
 #include "lang/format.h"
-#include "qlang/q_wire.h"   /* THE codec (serde mode) — kb/serialization grammar + ext band */
+#include "qlang/net/q_wire.h"   /* THE codec (serde mode) — kb/serialization grammar + ext band */
 #include <string.h>
 #include <stdio.h>
 
