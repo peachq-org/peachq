@@ -33,11 +33,10 @@ src/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 src/qlang/pq_gen.h: src/qlang/pq.q tools/gen-bootstrap.sh
 	SYMBOL=OPENQ_PQ_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/pq.q
 
-# FORCE: no prerequisite list detects a DELETED asset. gen-assets.sh writes
-# atomically, so the header mtime only moves when the bytes do.
-.PHONY: force-html-assets
-force-html-assets: ;
-src/qlang/html_assets_gen.h: force-html-assets tools/gen-assets.sh
+# Dirs in the prerequisite list: deleting an asset bumps its directory's mtime,
+# which a file-only list cannot see. A no-change make must not touch this rule.
+HTML_ASSET_DEPS := $(shell find src/qlang/html -type f -o -type d 2>/dev/null)
+src/qlang/html_assets_gen.h: tools/gen-assets.sh $(HTML_ASSET_DEPS)
 	@tools/gen-assets.sh $@ src/qlang/html
 
 BUILD_DIR = build
@@ -110,6 +109,10 @@ $(BUILD_DIR)/third_party/%.o: third_party/%.c
 $(BUILD_DIR)/third_party/miniz/miniz.o: third_party/miniz/miniz.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(RAY_MINIZ_DEFS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+# Header discipline, qlang-scoped: frozen base src/ must not need edits to pass.
+$(BUILD_DIR)/src/qlang/%.o: CFLAGS += -Wmissing-prototypes
+$(BUILD_DIR)/src/qlang/%.win.o: WIN_CFLAGS += -Wmissing-prototypes
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
