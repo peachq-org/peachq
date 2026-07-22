@@ -18,6 +18,15 @@ ray_t* q_string_fn(ray_t* x);
 ray_t* q_parse_builtin_fn(ray_t* x);
 ray_t* q_md5_fn(ray_t* x);
 ray_t* q_dotq_btoa_fn(ray_t* x);
+ray_t* q_dotq_atob_fn(ray_t* x);
+ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc);
+
+/* The string-verb bodies (ops/q_str.c): env-bound by q_builtins_register. */
+ray_t* q_upper_fn(ray_t* x);
+ray_t* q_lower_fn(ray_t* x);
+ray_t* q_trim_fn(ray_t* x);
+ray_t* q_ltrim_fn(ray_t* x);
+ray_t* q_rtrim_fn(ray_t* x);
 
 /* q `.Q.sha1` — SHA-1 digest of a string/byte vector as a 20-byte bytestream.
  * Exported so the `-33!` bang alias routes to this same stable C single home
