@@ -15,6 +15,7 @@
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/q_parse.h"    /* q_parse / q_lower — `\t expr` / `\ts expr` timing */
+#include "qlang/q_apply.h"    /* q_dot_wrap — `.[f;args]` apply for `-34!`/.Q.ts */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
