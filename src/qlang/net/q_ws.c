@@ -8,7 +8,7 @@
 #include "qlang/net/q_http.h"      /* q_http_send_all — bounded sends */
 #include "qlang/q_dotz.h"      /* the `.z.ws`/`.z.wo`/`.z.wc` handler slots */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
-#include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler output */
+#include "qlang/q_console.h"   /* q_console_str/_reset — drain handler output */
 #include "lang/internal.h"     /* call_fn1 */
 #include "mem/sys.h"
 #include "picohttpparser.h"

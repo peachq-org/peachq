@@ -5,7 +5,7 @@
 #include "qlang/q_dotz.h"
 #include "qlang/q_deriv.h"     /* q_deriv_kind_of / q_deriv_base — unwrap {…} carrier */
 #include "qlang/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
-#include "qlang/q_fmt.h"       /* q_console_str/_reset — drain .z.ts show/0N! output */
+#include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts show/0N! output */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get / ray_fn_unary */
 #include "lang/eval.h"         /* RAY_FN_NONE — .z.ts timer thunk attrs */

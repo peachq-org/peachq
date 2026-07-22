@@ -179,7 +179,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
  * q-spelling here, the single home for empty-vec display (q_fmt) + `meta`/`key`
  * type rows. LIST/STR have no scalar vector-type name (a STR vector is a list of
  * strings in the provisional model); the -RAY_STR atom shim names `char` at the
- * call sites (q_fmt_pipe/q_key_wrap). */
+ * call sites (q_console pipe render/q_key_wrap). */
 const char* q_type_qname(int8_t t) {
     switch ((ray_type_e)t) {
     case RAY_BOOL:      return "boolean";
