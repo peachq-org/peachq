@@ -6,6 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_sum_fn, ray_mul_fn, ray_neg_fn, ray_enlist_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_unary/binary, make_f64, is_collection, ray_error */
 #include "lang/format.h"   /* ray_type_name — error messages */
@@ -524,9 +525,9 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
         /* base ray_within_fn has no i64-temporal arm; the payload is i64, so
          * relabel both sides through the one cast home and delegate (the
          * same-byte-rep TIMESTAMP<->I64 relabel, builtins.c). */
-        ray_t* vi = q_cast_to(RAY_I64, vals);
+        ray_t* vi = q_dollar_cast(RAY_I64, vals);
         if (!vi || RAY_IS_ERR(vi)) { if (vals_owned) ray_release(vals_owned); return vi; }
-        ray_t* yi = q_cast_to(RAY_I64, y);
+        ray_t* yi = q_dollar_cast(RAY_I64, y);
         if (!yi || RAY_IS_ERR(yi)) {
             ray_release(vi);
             if (vals_owned) ray_release(vals_owned);
