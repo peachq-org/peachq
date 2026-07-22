@@ -181,6 +181,7 @@ ray_t* q_hclose_wrap(ray_t* x);                               /* used by: apply,
 ray_t* q_hsym_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_read0_wrap(ray_t* x);                                /* used by: builtins, registry */
 ray_t* q_read1_wrap(ray_t* x);                                /* used by: builtins, registry */
+ray_t* q_hdel_wrap(ray_t* x);                                 /* used by: builtins, registry */
 
 /* ---- defined in ops/q_str.c ---- */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);                   /* used by: builtins, registry */
