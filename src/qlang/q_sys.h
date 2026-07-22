@@ -4,7 +4,7 @@
  * (working / silent get-set / 'nyi).
  * CONTRACT (value-or-throw, 2026-07-16): a syscmd RETURNS AN OWNED q value
  * (NULL = silent) or an OWNED error — callers never branch on result kinds.
- * Exit (`\\`, `exit x` → q_exit) and the raw console shell (unknown `\cmd`)
+ * Exit (`\\`, `exit x` → q_sys_exit) and the raw console shell (unknown `\cmd`)
  * are functions the shared path calls; whether they may act on the PROCESS is
  * the q_sys_own_process capability, OFF by default and enabled only by the
  * real `q` binary — so the one-process doctest runner and the argv-less wasm
@@ -77,7 +77,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture);
 ray_t* q_sys_line(const char* line, size_t n, int print_value,
                   char* buf, size_t cap);
 
-/* Capability: may `\`-commands act on the PROCESS (exit(3) via q_exit; raw
+/* Capability: may `\`-commands act on the PROCESS (exit(3) via q_sys_exit; raw
  * console shell on an unknown `\cmd`)?  OFF by default and reset per runtime
  * (q_sys_cfg_init); only qmain.c enables it.  NOT gated: the `system "…"`
  * capture shell — a computation returning data, relied on by the doctest
@@ -90,7 +90,7 @@ void   q_sys_own_process(bool on);
  * The handler cannot cancel or rewrite the exit (reentry exits with the
  * ORIGINAL code).  Capability off → returns silently WITHOUT firing `.z.exit`
  * (a doctest per-file runtime teardown is not a process exit). */
-void   q_exit(int code);
+void   q_sys_exit(int code);
 
 /* The q-owned `system "…"` verb (bound by q_builtins_register as a QK_ENV row):
  * prepends `\` and passes straight through q_sys_run(capture=1), so

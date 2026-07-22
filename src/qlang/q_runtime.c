@@ -28,7 +28,7 @@
 
 /* One q line -> owned value; NULL after a stderr report (never fatal).
  * Refcounts mirror q_repl.c run_one_line (q_lower consumes its input AST). */
-static ray_t* q_bootstrap_eval(const char* src) {
+static ray_t* bootstrap_eval(const char* src) {
     ray_t* ast = q_parse(src);
     if (RAY_IS_ERR(ast)) {
         fprintf(stderr, "q bootstrap: parse error: %s\n", src);
@@ -67,8 +67,8 @@ static int bootstrap_dotq_line(const char* s) {
            (*p >= '0' && *p <= '9') || *p == '_')
         p++;
     if (p == s + 3 || *p != ':') return 0;
-    ray_t* v = q_bootstrap_eval(p + 1);
-    if (!v) return 1;                       /* reported by q_bootstrap_eval */
+    ray_t* v = bootstrap_eval(p + 1);
+    if (!v) return 1;                       /* reported by bootstrap_eval */
     if (ray_env_bind(ray_sym_intern(s, (size_t)(p - s)), v) != RAY_OK)
         fprintf(stderr, "q bootstrap: bind error: %s\n", s);
     int64_t bare = ray_sym_intern(s + 3, (size_t)(p - s - 3));
@@ -105,7 +105,7 @@ static void bootstrap_load_src(const char* p) {
 
         if (bootstrap_dotq_line(s))  /* q.q keyword -> privileged binder */
             continue;
-        ray_t* r = q_bootstrap_eval(line);
+        ray_t* r = bootstrap_eval(line);
         if (r) ray_release(r);
     }
 }
@@ -116,7 +116,7 @@ static void bootstrap_load_src(const char* p) {
  * functional-form literals need the element to evaluate).  Fires only on an
  * env MISS, so every env-bound name keeps its meaning; registry handouts are
  * BORROWED — retain before returning the owned ref the hook contract wants. */
-static ray_t* q_name_resolve(int64_t sym_id) {
+static ray_t* name_resolve(int64_t sym_id) {
     ray_t* v = q_dotz_resolve(sym_id);
     if (v) return v;
     ray_t* name = ray_sym_str(sym_id);   /* borrowed arena string */
@@ -155,7 +155,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
          * process-constant argv values once and install the name-load hook. */
         q_dotz_init(argc, argv);
-        ray_eval_set_name_hook(q_name_resolve);
+        ray_eval_set_name_hook(name_resolve);
         bootstrap_load_src(OPENQ_BOOTSTRAP);  /* embedded .q stdlib, post-registry (rule 6) */
         bootstrap_load_src(OPENQ_H_BOOTSTRAP); /* `.h` constants (h.q), always-on beside dotq */
         bootstrap_load_src(OPENQ_J_BOOTSTRAP); /* `.j` JSON ns (j.q), delegates to -29!/-31! bangs */

@@ -23,7 +23,7 @@ typedef struct {
 /* Run every example in `path` against the CURRENT rayforce runtime (the caller
  * owns it — one fresh runtime per file gives the "shared session per file"
  * default).  With verbose != 0, each failing example is written to `out`. */
-qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
+qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
                             int verbose, FILE* out);
 
 #endif /* QDOC_H */
