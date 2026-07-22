@@ -7,7 +7,7 @@
  *    fns (the `-N!` home; q names delegate `name:-N!`), N>=0 enkey; else dict. 
  * 
  * It contains one fully generic ``ray_t* q_bang(ray_t* x, ray_t* y)`` that works on ray_t objects and exactly matches q public API.
- * and for each significant operation it exposes a specialized function with types where possible e.g. ``q_bang_dispatch(int64_t id, ray_t* y)``  ``ray_t* q_bang_make_dict(ray_t* x, ray_t* y)`` 
+ * and for each significant operation it exposes a specialized function with types where possible e.g. ``q_bang_dispatch(int64_t id, ray_t* y)``, ``q_bang_enkey(int64_t nkey, ray_t* y)``.
  * These more specific names are for reuse in the code base. Having the specific types also helps. 
  */
 #include "qlang/q_bang.h"
@@ -162,7 +162,7 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
  * NOT a dict; enlist first).  One `count` gate covers vector!vector AND
  * table!table (rows).  ()!() is the empty dict; a keyed table is a table!table
  * dict.  vals pass through as-is (rayfall `dict` broadcasts/boxes). */
-ray_t* q_bang_make_dict(ray_t* x, ray_t* y) {
+static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
     if (q_count_long(x) != q_count_long(y))
         return ray_error("length", "!: key and value counts must match");
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
@@ -260,5 +260,5 @@ ray_t* q_bang(ray_t* x, ray_t* y) {
     if (!x || !y) return ray_error("type", "!: nil operand");
     if (q_is_int_atom(x))
         return q_bang_dispatch(RAY_ATOM_IS_NULL(x) ? NULL_I64 : q_iatom_val(x), y);
-    return q_bang_make_dict(x, y);
+    return bang_make_dict(x, y);
 }
