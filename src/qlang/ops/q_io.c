@@ -338,6 +338,81 @@ static ray_t* read0_wrap_impl(ray_t* x) {
     return ray_error("type", "read0: expected a file symbol or (filesymbol;offset[;length])");
 }
 
+/* q `read1 x` — ref/read1.md.  File sym -> whole content as bytes; (f;o) ->
+ * bytes from offset o to EOF; (f;o;n) -> up to n bytes from o (short read at
+ * EOF, offsets clamped).  fseek/fread streams just the slice, so .Q.fsn's
+ * lump loop costs O(z) per call, not O(file).  Fifo handles (`read1(fifo;n)`)
+ * are deferred 'nyi alongside the fifo:// transport (hopen_norm_descriptor). */
+static ray_t* read1_slice(ray_t* pathstr, int64_t off, int64_t want) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    const char* p = ray_str_ptr(pathstr);
+    if (!p) return ray_error("domain", "read1: empty path");
+    FILE* fp = fopen(p, "rb");
+    if (!fp) return ray_error("io", NULL);
+    long sz;
+    if (fseek(fp, 0, SEEK_END) != 0 || (sz = ftell(fp)) < 0) {
+        fclose(fp);
+        return ray_error("io", NULL);
+    }
+    if (off > sz) off = sz;
+    int64_t take = (want < 0 || want > sz - off) ? sz - off : want;
+    size_t got = 0;
+    uint8_t* buf = NULL;
+    if (take > 0) {
+        buf = (uint8_t*)malloc((size_t)take);
+        if (!buf) { fclose(fp); return ray_error("oom", NULL); }
+        if (fseek(fp, (long)off, SEEK_SET) != 0) {
+            free(buf); fclose(fp);
+            return ray_error("io", NULL);
+        }
+        got = fread(buf, 1, (size_t)take, fp);
+    }
+    fclose(fp);
+    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, buf, (int64_t)got);
+    free(buf);
+    return out;
+}
+static ray_t* read1_wrap_impl(ray_t* x);
+ray_t* q_read1_wrap(ray_t* x) {
+    ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
+    ray_t* r = read1_wrap_impl(xs);
+    ray_release(xs);
+    return r;
+}
+static ray_t* read1_wrap_impl(ray_t* x) {
+    if (x && x->type == -RAY_SYM) {
+        ray_t* path = ft_path(x);
+        if (!path) return ray_error("type", "read1: expected a file symbol `:path");
+        ray_t* r = read1_slice(path, 0, -1);
+        ray_release(path);
+        return r;
+    }
+    if (x && x->type == RAY_LIST && (ray_len(x) == 2 || ray_len(x) == 3)) {
+        ray_t** e = (ray_t**)ray_data(x);
+        int three = ray_len(x) == 3;
+        if (e[0] && e[0]->type == -RAY_SYM) {
+            ray_t* path = ft_path(e[0]);
+            if (!path) return ray_error("type", "read1: x");
+            int64_t off, want = -1;
+            if (!q_strict_i64(e[1], &off) || (three && !q_strict_i64(e[2], &want))) {
+                ray_release(path);
+                return ray_error("type", "read1: offset/length");
+            }
+            if (off < 0 || (three && want < 0)) {
+                ray_release(path);
+                return ray_error("domain", "read1: offset/length");
+            }
+            ray_t* r = read1_slice(path, off, three ? want : -1);
+            ray_release(path);
+            return r;
+        }
+        return ray_error("nyi", "read1: fifo handles are deferred");
+    }
+    if (x && q_is_int_atom(x))
+        return ray_error("nyi", "read1: fifo/connection handles are deferred");
+    return ray_error("type", "read1: expected a file symbol or (filesymbol;offset[;length])");
+}
+
 /* ---- Save Text: `:path 0: strings -------------------------------------- */
 static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
     ray_t* path = ft_path(fsym);
