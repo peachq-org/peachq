@@ -1,9 +1,10 @@
-/* q_wrap_castcal.c — the cast/tok home ($ casts, string scans, pad)
- *
- * Split from q_registry.c (2026-07-14) — pure function moves; the shared
- * internal surface lives in q_registry_internal.h.  See q_registry.h for
- * the registry contract.  The `value` verb and the calendar home moved to
- * q_value.c / q_calendar.c (castcal split, 2026-07-22). */
+/* q_dollar — the single C home for the `$` verb (contract: q_dollar.h).
+ * PURE value semantics: values -> values, no env/runtime state.  q_dollar is
+ * the generic registry row; q_dollar_pad / q_dollar_cast / q_dollar_tok /
+ * q_dollar_enum / q_dollar_mmu are the per-operation homes, exposed with types
+ * for reuse.  The per-target q_cast_* matrix and the general int-atom helpers
+ * (q_is_int_atom, q_iatom_val, ...) live here too (q_registry_internal.h). */
+#include "qlang/q_dollar.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */
 #include "lang/internal.h"  /* ray_typed_null, ray_guid, ray_str_vec_get, ray_error */
@@ -13,9 +14,8 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ===== q cast home (see q_registry.h for the reuse contract) ===============
- * Designator resolution is separate from conversion so C callers (future
- * bool-widening / promotion work) can invoke q_cast_to(tag, x) directly. */
+/* Designator resolution is separate from conversion so C callers (future
+ * bool-widening / promotion work) can invoke q_dollar_cast(tag, x) directly. */
 
 /* Is vector tag `t` legal as a ROW INDEX (uniform-structure-dispatch §2.2:
  * any int-backed index indexes)?  Returns the element width in bytes so
@@ -108,8 +108,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32:
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM: case RAY_CHARV:
         case RAY_GUID:      /* cast.md:20 `2h "g" `guid` are one designator row;
-                             * `-2h$"uuid"` = guid Tok (q_tok_to parses it). The
-                             * `2h$` CAST stays deferred at q_cast_to. */
+                             * `-2h$"uuid"` = guid Tok (q_dollar_tok parses it). The
+                             * `2h$` CAST stays deferred at q_dollar_cast. */
         RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return (int8_t)n;
         case RAY_LIST:      /* 0h is Identity (cast.md:40), not a cast tag — deferred */
@@ -330,7 +330,7 @@ static ray_t* q_cast_distribute(int8_t tag, ray_t* x) {
     ray_t* out = ray_list_new(n);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t i = 0; i < n; i++) {
-        ray_t* r = q_cast_to(tag, e[i]);
+        ray_t* r = q_dollar_cast(tag, e[i]);
         if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
         out = ray_list_append(out, r);   /* append retains */
         ray_release(r);
@@ -507,12 +507,12 @@ static ray_t* q_cast_sym(ray_t* x) {
     return ray_error("nyi", "$: cast to symbol is deferred (use `$ / \"S\"$ on strings)");
 }
 
-/* The ONE cast home (contract: q_registry.h).  Dispatch is on the TARGET tag:
+/* The ONE cast home (contract: q_dollar.h).  Dispatch is on the TARGET tag:
  * every target gets an arm naming the helper that owns it (the SOURCE types
  * live in that helper), or delegates to base ray_cast_fn where kdb and rayfall
  * already agree.  The switch has NO `default:`, so -Wall (=> -Wswitch) +
  * -Werror refuse to build a target no arm states. */
-ray_t* q_cast_to(int8_t tag, ray_t* x) {
+ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     /* Both precede the switch by ORDER, not preference: "c"$ packs a boxed list
      * into ONE string, so it must beat the generic per-element distribution. */
     if (tag == RAY_CHARV) return q_charv_out(q_cast_str(x));
@@ -523,7 +523,7 @@ ray_t* q_cast_to(int8_t tag, ray_t* x) {
          tag == RAY_F32 || tag == RAY_F64)) {
         ray_t* b = q_cast_u8(x);
         if (!b || RAY_IS_ERR(b)) return b;
-        ray_t* r = q_cast_to(tag, b);
+        ray_t* r = q_dollar_cast(tag, b);
         ray_release(b);
         return r;
     }
@@ -816,7 +816,7 @@ static int q_ts_scan(const char* p, size_t len, int64_t* out) {
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
  * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
  * distribute. */
-ray_t* q_tok_to(int8_t tag, ray_t* x) {
+ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
     if (x && (x->type == RAY_LIST || x->type == RAY_STR)) {
         int64_t n = ray_len(x);
         ray_t* out = ray_list_new(n);
@@ -831,7 +831,7 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
                 const char* sp = ray_str_vec_get(x, i, &sl);
                 xi = ray_str(sp ? sp : "", sp ? sl : 0);
             }
-            ray_t* r = q_tok_to(tag, xi);
+            ray_t* r = q_dollar_tok(tag, xi);
             ray_release(xi);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
@@ -993,7 +993,7 @@ ray_t* q_tok_to(int8_t tag, ray_t* x) {
  * field of |w| spaces (w<0 right-justifies); longer strings truncate to |w|.
  * Atomic through the container types (a LIST of strings pads each; DICT over
  * values; TABLE over columns).  Non-string leaves are a 'type error. */
-static ray_t* q_pad(int64_t w, ray_t* x) {
+ray_t* q_dollar_pad(int64_t w, ray_t* x) {
     if (!x) return ray_error("type", "$: pad nil");
     if (x->type == RAY_CHARV || x->type == -RAY_CHARV) {   /* char text -> charv */
         const char* p; int64_t pn;
@@ -1036,7 +1036,7 @@ static ray_t* q_pad(int64_t w, ray_t* x) {
             ray_t* e = ray_at_fn(x, ia);
             ray_release(ia);
             if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
-            ray_t* r = q_pad(w, e);
+            ray_t* r = q_dollar_pad(w, e);
             ray_release(e);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
@@ -1049,7 +1049,7 @@ static ray_t* q_pad(int64_t w, ray_t* x) {
         ray_t* k = ray_dict_keys(x);
         ray_t* v = ray_dict_vals(x);
         if (!k || !v) return ray_error("type", "$: bad dict");
-        ray_t* nv = q_pad(w, v);
+        ray_t* nv = q_dollar_pad(w, v);
         if (!nv || RAY_IS_ERR(nv)) return nv;
         ray_retain(k);
         return ray_dict_new(k, nv);
@@ -1060,7 +1060,7 @@ static ray_t* q_pad(int64_t w, ray_t* x) {
         if (RAY_IS_ERR(out)) return out;
         for (int64_t c = 0; c < nc; c++) {
             ray_t* col = ray_table_get_col_idx(x, c);
-            ray_t* ncol = q_pad(w, col);
+            ray_t* ncol = q_dollar_pad(w, col);
             if (!ncol || RAY_IS_ERR(ncol)) { ray_release(out); return ncol; }
             out = ray_table_add_col(out, ray_table_col_name(x, c), ncol);
             ray_release(ncol);
@@ -1075,7 +1075,7 @@ static ray_t* q_pad(int64_t w, ray_t* x) {
         for (int64_t i = 0; i < n; i++) {
             size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
             ray_t* s = ray_str(p ? p : "", p ? sn : 0);
-            ray_t* r = q_pad(w, s);
+            ray_t* r = q_dollar_pad(w, s);
             ray_release(s);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
@@ -1087,14 +1087,31 @@ static ray_t* q_pad(int64_t w, ray_t* x) {
     return ray_error("type", "$: pad expects a string");
 }
 
-/* q `t$x` — Cast/Tok dispatcher.  Multi-designator LHS ("fiij", `int`float,
- * 5 6h, (`int;"i";6h)) zips elementwise over x (ref/cast.md pins
- * (`int;"i";6h)$10 -> 10 10 10i: an ATOM rhs is broadcast).  Single
- * designators resolve via q_cast_designator and dispatch to the shared
- * q_cast_to / q_tok_to (the ONE conversion home — see q_registry.h).  A LONG
- * width LHS (`9$"foo"`) is PAD, not a cast — intercepted before designators. */
-ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
-    if (t && t->type == -RAY_I64) return q_pad(t->i64, x);
+/* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list) — openq has
+ * no enum domains, so the whole form is a 'nyi stub awaiting them. */
+ray_t* q_dollar_enum(ray_t* x, ray_t* y) {
+    (void)x; (void)y;
+    return ray_error("nyi", "$: enumerate (no enum domains)");
+}
+
+/* `$` as matrix multiply / dot product (ref/mmu.md: `$` is mmu's glyph form).
+ * Same home as the `mmu` keyword; q_dollar dispatches here only when BOTH
+ * operands mmu-classify, so every non-mmu shape keeps its cast-path behavior. */
+ray_t* q_dollar_mmu(ray_t* x, ray_t* y) {
+    return q_mmu_wrap(x, y);
+}
+
+/* q `t$x` — the `$` verb (contract: q_dollar.h).  LEFT-operand dispatch:
+ * a LONG width is PAD; mmu-shaped float operands (both sides) are matrix
+ * multiply; a multi-designator LHS ("fiij", `int`float, 5 6h, (`int;"i";6h))
+ * zips elementwise over x (ref/cast.md pins (`int;"i";6h)$10 -> 10 10 10i: an
+ * ATOM rhs is broadcast); a single designator resolves via q_cast_designator
+ * into q_dollar_cast / q_dollar_tok; a non-designator sym is Enumerate. */
+ray_t* q_dollar(ray_t* t, ray_t* x) {
+    if (t && t->type == -RAY_I64) return q_dollar_pad(t->i64, x);
+    int64_t k;
+    if (q_mmu_class(t, &k) != QMMU_BAD && q_mmu_class(x, &k) != QMMU_BAD)
+        return q_dollar_mmu(t, x);   /* ragged included: mmu owns its 'length */
     int multi = t && ((t->type == -RAY_STR && ray_str_len(t) > 1) ||
                       (t->type == RAY_CHARV && ray_len(t) > 1) ||
                       t->type == RAY_SYM || t->type == RAY_I16 ||
@@ -1123,7 +1140,7 @@ ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
                 ray_release(idx);
             } else { xi = x; ray_retain(xi); }  /* atom rhs broadcasts */
             if (!xi || RAY_IS_ERR(xi)) { ray_release(ti); ray_release(out); return xi; }
-            ray_t* r = q_cast_wrap(ti, xi);
+            ray_t* r = q_dollar(ti, xi);
             ray_release(ti);
             ray_release(xi);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
@@ -1136,11 +1153,13 @@ ray_t* q_cast_wrap(ray_t* t, ray_t* x) {
     }
     int is_tok = 0;
     int8_t tag = q_cast_designator(t, &is_tok);
-    if (!tag)
+    if (!tag) {
+        if (t && t->type == -RAY_SYM) return q_dollar_enum(t, x);
         return ray_error("nyi", "$: unsupported cast designator (deferred)");
+    }
     /* `10h$`/`` `char$``/`"c"$` all land here with is_tok=0 and reinterpret via
-     * q_cast_to; only the UPPERCASE char token `"C"$` carries is_tok=1 and stays
-     * a deferred char-Tok — q_tok_to's default errors 'nyi (pinned by the
+     * q_dollar_cast; only the UPPERCASE char token `"C"$` carries is_tok=1 and stays
+     * a deferred char-Tok — q_dollar_tok's default errors 'nyi (pinned by the
      * cast_tok_deferred unit test), so no RAY_STR special-case is needed here. */
-    return is_tok ? q_tok_to(tag, x) : q_cast_to(tag, x);
+    return is_tok ? q_dollar_tok(tag, x) : q_dollar_cast(tag, x);
 }

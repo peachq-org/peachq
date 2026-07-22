@@ -33,6 +33,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* wrapper decls for the QR_FN* recipes (brings q_ops.h) */
 #include "qlang/q_bang.h"               /* q_bang — the `!` row */
+#include "qlang/q_dollar.h"             /* q_dollar — the `$` row */
 #include <string.h>
 
 /* ===== deterministic / sideeffect AUDIT (feat/q-ops-introspection) =========
@@ -174,7 +175,7 @@ static const q_op_t Q_OPS[] = {
      * ROUNDING; Tok string-parse and unknown designators deferred); the
      * bracket cond form `$[c;t;f]` (3+ args) is a q_lower rewrite onto
      * rayfall `if`, not a registry cell. */
-    { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_cast_wrap), NULL, 1, 0, "atomic" },
+    { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "atomic" },
     /* monadic `@`/`.` stay QR_NONE: `@x` type-of is blocked on the q type
      * renumber; `.x` (value/get) comes with handles/namespaces.  Ternary+
      * Trap/Amend forms are deferred cells (error today via arity).  Family
