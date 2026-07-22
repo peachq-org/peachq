@@ -4,10 +4,10 @@
   #define _GNU_SOURCE            /* openat / O_NOFOLLOW / O_DIRECTORY */
 #endif
 #include <rayforce.h>
-#include "qlang/q_http.h"
-#include "qlang/q_gz.h"        /* q_gz_deflate — `form?` response gzip (#6) */
+#include "qlang/net/q_http.h"
+#include "qlang/net/q_gz.h"        /* q_gz_deflate — `form?` response gzip (#6) */
 #include "qlang/q_dotz.h"      /* q_dotz_zph — the `.z.ph` handler slot */
-#include "qlang/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
+#include "qlang/net/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler show output */
 #include "lang/env.h"          /* ray_env_get / ray_sym_intern — `.h.HOME` / `.h.ty` */

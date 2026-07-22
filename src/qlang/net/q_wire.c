@@ -1,7 +1,7 @@
 /* q_wire — kdb IPC wire-format codec.  Format contract + clean-room
  * provenance: see q_wire.h.  No frozen-base file is touched: this is a
  * q-layer TU; `-8!`/`-9!` dispatch lives in q_registry.c's `!` wrapper. */
-#include "qlang/q_wire.h"
+#include "qlang/net/q_wire.h"
 #include "qlang/q_deriv.h"      /* lambda carrier inspectors */
 #include "qlang/q_registry.h"   /* q_collapse_list */
 #include "qlang/q_parse.h"      /* q_parse/q_lower — lambda decode (RUNTIME only) */
