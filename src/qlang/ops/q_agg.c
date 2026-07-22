@@ -1,4 +1,4 @@
-/* q_wrap_agg.c — running/weighted/covariance/moving-window aggregates (wave 5),
+/* ops/q_agg.c — running/weighted/covariance/moving-window aggregates (wave 5),
  * neg/raze/enlist/null/within, and the list-arm sum wrapper
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared

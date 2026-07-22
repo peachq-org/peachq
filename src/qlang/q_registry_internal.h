@@ -34,7 +34,7 @@ ray_t* q_exec_exec(ray_t** args, int64_t n);                  /* used by: regist
 
 /* ===== 2. REGISTRY ENTRYPOINTS — q_registry.c builders only ============= */
 
-/* ---- defined in q_wrap_agg.c ---- */
+/* ---- defined in ops/q_agg.c ---- */
 ray_t* q_sums_wrap(ray_t* x);
 ray_t* q_prds_wrap(ray_t* x);
 ray_t* q_maxs_wrap(ray_t* x);
@@ -57,7 +57,7 @@ ray_t* q_raze_wrap(ray_t* x);
 ray_t* q_within_wrap(ray_t* x, ray_t* y);
 ray_t* q_sum_wrap(ray_t* x);
 
-/* ---- defined in q_wrap_applyiter.c ---- */
+/* ---- defined in ops/q_applyiter.c ---- */
 ray_t* q_at_wrap(ray_t** args, int64_t n);
 ray_t* q_dot_wrap(ray_t** args, int64_t n);
 ray_t* q_each_wrap(ray_t* f, ray_t* x);
@@ -100,14 +100,14 @@ ray_t* q_if_fn(ray_t** args, int64_t n);
 ray_t* q_do_fn(ray_t** args, int64_t n);
 ray_t* q_while_fn(ray_t** args, int64_t n);
 
-/* ---- defined in q_wrap_io.c ---- */
+/* ---- defined in ops/q_io.c ---- */
 ray_t* q_filetext_wrap(ray_t* x, ray_t* y);
 ray_t* q_like_wrap(ray_t* x, ray_t* pattern);
 ray_t* q_ss_wrap(ray_t* s, ray_t* p);
 ray_t* q_getenv_wrap(ray_t* x);
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y);
 
-/* ---- defined in q_wrap_join.c ---- */
+/* ---- defined in ops/q_join.c ---- */
 ray_t* q_lj_wrap(ray_t* x, ray_t* y);
 ray_t* q_ljf_wrap(ray_t* x, ray_t* y);
 ray_t* q_ij_wrap(ray_t* x, ray_t* y);
@@ -117,7 +117,7 @@ ray_t* q_uj_wrap(ray_t* x, ray_t* y);
 ray_t* q_ujf_wrap(ray_t* x, ray_t* y);
 ray_t* q_asof_wrap(ray_t* t, ray_t* d);
 
-/* ---- defined in q_wrap_list.c ---- */
+/* ---- defined in ops/q_list.c ---- */
 ray_t* q_drop_wrap(ray_t* n, ray_t* list);
 ray_t* q_cut_wrap(ray_t* n, ray_t* x);
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
@@ -147,7 +147,7 @@ ray_t* q_reverse_wrap(ray_t* x);
 ray_t* q_vs_wrap(ray_t* x, ray_t* y);
 ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 
-/* ---- defined in q_wrap_table.c ---- */
+/* ---- defined in ops/q_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y);
 ray_t* q_xgroup_wrap(ray_t* x, ray_t* y);
@@ -173,13 +173,13 @@ ray_t* q_collapse_list(ray_t* l);                             /* used by: apply,
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, applyiter, value */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, lower, applyiter, join */
 
-/* ---- defined in q_wrap_agg.c ---- */
+/* ---- defined in ops/q_agg.c ---- */
 double q_velem_f(ray_t* x, int64_t i, int* isnull);           /* used by: list */
 int q_vec_is_float(ray_t* x);                                 /* used by: list */
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
 ray_t* q_null_wrap(ray_t* x);                                 /* used by: registry, math */
 
-/* ---- defined in q_wrap_applyiter.c ---- */
+/* ---- defined in ops/q_applyiter.c ---- */
 int q_is_fn_value(ray_t* x);                                  /* used by: builtins, io */
 int q_values_match(ray_t* a, ray_t* b);                       /* used by: list */
 ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k);              /* used by: value, io */
@@ -206,19 +206,19 @@ int q_is_int_vec(ray_t* x);                                   /* used by: io, li
 int64_t q_ivec_get(ray_t* v, int64_t i);                      /* used by: io, list */
 int64_t q_iatom_val(ray_t* x);                                /* used by: io, list, table */
 
-/* ---- defined in q_wrap_io.c ---- */
+/* ---- defined in ops/q_io.c ---- */
 ray_t* q_hopen_wrap(ray_t* x);                                /* used by: apply, registry */
 ray_t* q_hclose_wrap(ray_t* x);                               /* used by: apply, registry */
 ray_t* q_hsym_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_read0_wrap(ray_t* x);                                /* used by: builtins, registry */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);                   /* used by: builtins, registry */
 
-/* ---- defined in q_wrap_join.c ---- */
+/* ---- defined in ops/q_join.c ---- */
 int qj_same_schema(ray_t* a, ray_t* b);                       /* used by: table */
 ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: table, list */
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, table */
 
-/* ---- defined in q_wrap_list.c ---- */
+/* ---- defined in ops/q_list.c ---- */
 ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry */
 ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);    /* used by: math */
@@ -236,7 +236,7 @@ ray_t* q_dict_vals_vec(ray_t* d, int* owned);                 /* used by: list *
 int q_is_null_sym(ray_t* x);                                  /* used by: agg */
 ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io */
 
-/* ---- defined in q_wrap_table.c ---- */
+/* ---- defined in ops/q_table.c ---- */
 ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, agg, list, math */
 ray_t* qj_item(ray_t* x, int64_t i);                          /* used by: join */
 ray_t* qj_gen_item(ray_t* x, int64_t i);                      /* used by: join */
