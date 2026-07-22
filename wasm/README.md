@@ -74,7 +74,7 @@ require("./wasm/peachq.js")().then(M => {
 
 ## Notes / constraints
 
-- **Native build unaffected.** This target compiles the same `src/*/*.c`
+- **Native build unaffected.** This target compiles the same `RAY_LIB_SRC`
   library sources with `emcc` instead of `clang`; it does not touch the root
   `Makefile`, the frozen manifest, or any source file.
 - **No networking.** `src/core/ipc.c` (TCP server/client, `select`/`fd_set`) is
