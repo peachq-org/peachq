@@ -1,13 +1,12 @@
-/* ops/q_agg.c — running/weighted/covariance/moving-window aggregates (wave 5),
- * neg/raze/enlist/null/within, and the list-arm sum wrapper
+/* ops/q_agg.c — running/weighted/covariance/moving-window aggregates (wave 5)
+ * and the list-arm sum wrapper
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
-#include "lang/eval.h"     /* ray_sum_fn, ray_mul_fn, ray_neg_fn, ray_enlist_fn — engine arms */
+#include "lang/eval.h"     /* ray_sum_fn, ray_mul_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_unary/binary, make_f64, is_collection, ray_error */
 #include "lang/format.h"   /* ray_type_name — error messages */
 #include "table/sym.h"     /* RAY_SYM_W64 */
@@ -170,7 +169,7 @@ ray_t* q_prd_wrap(ray_t* x) {
         return ray_error("type", "prd: expects numeric values, got %s",
                          ray_type_name(x->type));
     if (ray_is_atom(x)) { ray_retain(x); return x; }   /* doc: atom unchanged */
-    if (q_is_keyed_table(x))                           /* prd k == prd value t */
+    if (q_table_is_keyed(x))                           /* prd k == prd value t */
         return q_prd_wrap(ray_dict_vals(x));           /* vals borrowed — fine */
     if (x->type == RAY_TABLE) {                        /* per-column dict */
         int64_t nc = ray_table_ncols(x);
@@ -346,207 +345,6 @@ ray_t* q_ema_wrap(ray_t* a, ray_t* x) {
         o[i] = e;
     }
     return out;
-}
-
-/* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
- * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
- * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
- * ray_neg_fn rejects temporals — so the date arm lives here and every other
- * input delegates.  Registered ATOMIC: eval's atomic_map_unary maps vectors
- * element-wise and its typed-out path already carries RAY_DATE, so a date
- * vector comes back a date vector.  time/timestamp arms arrive with their
- * datatypes (deferred). */
-ray_t* q_neg_wrap(ray_t* x) {
-    if (x && x->type == -RAY_DATE) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_date(-(int64_t)x->i32);
-    }
-    if (x && x->type == -RAY_MINUTE) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_minute(-(int64_t)x->i32);
-    }
-    if (x && x->type == -RAY_SECOND) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_second(-(int64_t)x->i32);
-    }
-    if (x && x->type == -RAY_TIMESPAN) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_timespan(-x->i64);
-    }
-    if (x && x->type == -RAY_MONTH) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_month(-(int64_t)x->i32);
-    }
-    if (x && x->type == -RAY_DATETIME) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_datetime(-x->f64);
-    }
-    /* kdb `neg` promotes a boolean to INT and negates (`neg 1b` -> -1i);
-     * base ray_neg_fn rejects bools.  Registered ATOMIC, so a bool vector
-     * arrives here element-wise and the i32 atoms collapse to an i32 vector. */
-    if (x && x->type == -RAY_BOOL)
-        return ray_i32(-(int32_t)(x->b8 ? 1 : 0));
-    return ray_neg_fn(x);
-}
-
-/* q `null x` — elementwise null test.  Drives the engine's atomic `nil?`
- * (ray_nil_fn) through atomic_map_unary so it broadcasts over typed vectors
- * AND nested general lists at every depth; collection_elem reconstructs
- * typed-null atoms, so nulls are SEEN (unlike other atomics, which stay
- * null-avoiding via the dispatch guards).  Registered RAY_FN_NONE — NOT
- * ATOMIC — so it receives the whole argument here and owns the collapse: a
- * heterogeneous input list yields a homogeneous bool-atom run that
- * q_collapse_list folds to a bool vector (`null (1;\`a;2.5;"x")` -> 0000b),
- * while a nested list yields a list of bool VECTORS that q_collapse_list
- * leaves intact (multi-line, `null (0N 1;2 0N)` -> 10b / 01b). */
-/* q-layer null test: the base engine's `ray_nil_fn` treats sym id 0 as the
- * EMPTY symbol (a value, include/rayforce.h SYM case), but q treats the null
- * symbol `` ` `` AS null (`null \`` -> 1b).  This wrapper special-cases the
- * null symbol here in the q layer so the divergence stays out of base rayfall,
- * whose own paths rely on sym-0-as-empty.  Drives `q_null_wrap` for both the
- * atom path and the per-element `atomic_map_unary` recursion (nested lists /
- * symbol vectors reconstruct null-sym atoms via collection_elem). */
-static ray_t* nil_fn(ray_t* x) {
-    if (q_is_null_sym(x)) return ray_bool(true);
-    return ray_nil_fn(x);
-}
-
-/* q `raze x` — base ray_raze_fn plus the kdb atom arm: an atom comes back as
- * a 1-item list (ref/raze.md `raze 42` -> ,42).  Everything else delegates. */
-ray_t* ray_raze_fn(ray_t* x);                        /* base (ops/builtins.c) */
-ray_t* q_raze_wrap(ray_t* x) {
-    /* strings are kdb char LISTS (rank 1) — never the atom arm */
-    if (x && ray_is_atom(x) && x->type != -RAY_STR) {
-        ray_t* l = ray_list_new(1);
-        if (RAY_IS_ERR(l)) return l;
-        l = ray_list_append(l, x);                   /* retains x */
-        if (RAY_IS_ERR(l)) return l;
-        ray_t* c = q_collapse_list(l);               /* owned */
-        ray_release(l);
-        return c;
-    }
-    return ray_raze_fn(x);
-}
-
-/* q `enlist` — base ray_enlist_fn plus the kdb dict arm: enlist of a bare
- * dict is a 1-ROW TABLE (ref/enlist.md: `` enlist `a`b`c!(1;2 3; 4) ``
- * displays a table whose b cell is 2 3).  Construction: the dict with each
- * value ENLISTED (1-item column; atoms collapse to typed 1-vecs, vector
- * cells stay boxed) flipped through the one flip home.  Env-bound by
- * q_builtins_register BEFORE registry init, so the `,` monadic QK_ENV
- * snapshot picks this wrapper up too. */
-ray_t* ray_enlist_fn(ray_t** args, int64_t n);       /* base (ops/builtins.c) */
-ray_t* q_enlist_wrap_vary(ray_t** args, int64_t n) {
-    if (n == 1 && args[0] && args[0]->type == RAY_DICT && !q_is_keyed_table(args[0])) {
-        ray_t* d = args[0];
-        ray_t* k = ray_dict_keys(d);                 /* borrowed */
-        ray_t* v = ray_dict_vals(d);                 /* borrowed */
-        if (!k || !v) return ray_error("type", "enlist: malformed dictionary");
-        int64_t nd = ray_dict_len(d);
-        ray_t* ev = ray_list_new(nd > 0 ? nd : 1);
-        if (RAY_IS_ERR(ev)) return ev;
-        for (int64_t i = 0; i < nd; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* cell = ray_at_fn(v, ia);          /* owned */
-            ray_release(ia);
-            if (!cell || RAY_IS_ERR(cell)) { ray_release(ev); return cell ? cell : ray_error("type", NULL); }
-            ray_t* col = ray_list_new(1);
-            if (RAY_IS_ERR(col)) { ray_release(cell); ray_release(ev); return col; }
-            col = ray_list_append(col, cell);        /* retains */
-            ray_release(cell);
-            if (RAY_IS_ERR(col)) { ray_release(ev); return col; }
-            ray_t* cc = q_collapse_list(col);        /* atoms -> typed 1-vec */
-            ray_release(col);
-            if (!cc || RAY_IS_ERR(cc)) { ray_release(ev); return cc ? cc : ray_error("type", NULL); }
-            ev = ray_list_append(ev, cc);            /* retains */
-            ray_release(cc);
-            if (RAY_IS_ERR(ev)) return ev;
-        }
-        ray_retain(k);                               /* dict_new consumes */
-        ray_t* ed = ray_dict_new(k, ev);             /* consumes k + ev */
-        if (!ed || RAY_IS_ERR(ed)) return ed ? ed : ray_error("type", NULL);
-        ray_t* t = q_flip_wrap(ed);                  /* owned table */
-        ray_release(ed);
-        return t;
-    }
-    return ray_enlist_fn(args, n);
-}
-
-ray_t* q_null_wrap(ray_t* x) {
-    ray_t* r = is_collection(x) ? atomic_map_unary(nil_fn, x) : nil_fn(x);
-    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
-    ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
-    ray_release(r);
-    return c;
-}
-
-/* q `x within y` — bounds check (ref/within.md: 1 3 10 6 4 within 2 6 ->
- * 01011b; inclusive).  Base ray_within_fn takes VECTOR vals only and reads
- * the range buffer at the vals' element width, so: an atom x is enlisted
- * (via list+collapse) and the answer unwrapped back to a bool atom, and the
- * two element widths must agree ('type — a silent misread otherwise).  The
- * flip-of-pairs range form and mixed-width operands are deferred cells. */
-ray_t* q_within_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "within: nil operand");
-    if (!ray_is_vec(y) || ray_len(y) != 2)
-        return ray_error("type", "within: range must be a 2-item vector");
-    ray_t* vals = x;
-    ray_t* vals_owned = NULL;
-    if (ray_is_atom(x)) {
-        ray_t* l = ray_list_new(1);
-        if (RAY_IS_ERR(l)) return l;
-        l = ray_list_append(l, x);
-        if (RAY_IS_ERR(l)) return l;
-        vals_owned = q_collapse_list(l);
-        ray_release(l);
-        if (!vals_owned || RAY_IS_ERR(vals_owned))
-            return vals_owned ? vals_owned : ray_error("type", NULL);
-        if (!ray_is_vec(vals_owned)) {           /* strings & friends: deferred */
-            ray_release(vals_owned);
-            return ray_error("type", "within: unsupported value type (deferred)");
-        }
-        vals = vals_owned;
-    }
-    if (!ray_is_vec(vals)) {
-        if (vals_owned) ray_release(vals_owned);
-        return ray_error("type", "within: unsupported value type (deferred)");
-    }
-    /* Base ray_within_fn dispatches on vals->type ONLY and reads the range
-     * buffer as that element type, so ANY type mismatch — not just a width
-     * mismatch — would silently reinterpret raw bits (codex: 1 2 within
-     * 1.5 2.5 read the doubles as int64 -> 00b).  Same-type operands only;
-     * mixed-type coercion is a deferred cell (error, never a wrong answer). */
-    if (vals->type != y->type) {
-        if (vals_owned) ray_release(vals_owned);
-        return ray_error("type", "within: value/range types must match (mixed-type deferred)");
-    }
-    ray_t* r;
-    if (vals->type == RAY_TIMESTAMP) {
-        /* base ray_within_fn has no i64-temporal arm; the payload is i64, so
-         * relabel both sides through the one cast home and delegate (the
-         * same-byte-rep TIMESTAMP<->I64 relabel, builtins.c). */
-        ray_t* vi = q_dollar_cast(RAY_I64, vals);
-        if (!vi || RAY_IS_ERR(vi)) { if (vals_owned) ray_release(vals_owned); return vi; }
-        ray_t* yi = q_dollar_cast(RAY_I64, y);
-        if (!yi || RAY_IS_ERR(yi)) {
-            ray_release(vi);
-            if (vals_owned) ray_release(vals_owned);
-            return yi;
-        }
-        r = ray_within_fn(vi, yi);
-        ray_release(vi);
-        ray_release(yi);
-    } else {
-        r = ray_within_fn(vals, y);
-    }
-    if (!vals_owned) return r;                    /* vector x: pass through */
-    ray_release(vals_owned);
-    if (!r || RAY_IS_ERR(r)) return r;
-    ray_t* idx = ray_i64(0);                      /* atom x: unwrap 1-vec */
-    ray_t* a = ray_at_fn(r, idx);
-    ray_release(idx);
-    ray_release(r);
-    return a;
 }
 
 /* q `sum x` — LIST arm sums the items (kdb: `sum(2013.03.15;18:55:40.686)`

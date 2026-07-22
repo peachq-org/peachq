@@ -3,7 +3,7 @@
  * Evicted from q_builtins.c; the type-letter kernel (q_ty_char) stays there. */
 #include "qlang/q_builtins.h"   /* q_ty_char + this file's decls */
 #include "qlang/q_ops.h"        /* q_ops_table — the .Q.ops source */
-#include "qlang/q_registry.h"   /* q_is_keyed_table — .Q.qt keyed arm */
+#include "qlang/q_registry.h"   /* q_table_is_keyed — .Q.qt keyed arm */
 #include "qlang/q_fmt.h"        /* .Q.s — the q console display string */
 #include "lang/internal.h"
 #include "table/sym.h"
@@ -24,7 +24,7 @@ ray_t* q_dotq_ty_fn(ray_t* x) {
 /* (.Q.qt x) — is-table predicate (ref/dotq.md `qt`): 1b if x is a table
  * (simple OR keyed), else 0b. */
 ray_t* q_dotq_qt_fn(ray_t* x) {
-    return ray_bool(x && (x->type == RAY_TABLE || q_is_keyed_table(x)));
+    return ray_bool(x && (x->type == RAY_TABLE || q_table_is_keyed(x)));
 }
 
 /* (.Q.qp x) — is-partitioned predicate (ref/dotq.md `qp`): partitioned table
