@@ -6,6 +6,7 @@
  * (q_is_int_atom, q_iatom_val, ...) live here too (q_registry_internal.h). */
 #include "qlang/ops/q_dollar.h"
 #include "qlang/q_tok.h"   /* q_tok — THE Tok entry */
+#include "qlang/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */
 #include "lang/internal.h"  /* ray_typed_null, ray_guid, ray_str_vec_get, ray_error */

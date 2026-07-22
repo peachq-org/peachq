@@ -2,7 +2,7 @@
  * Section 1: the literal-magnitude scanner the code parser calls.
  * Section 2: the `$` Tok whole-string scanners.  Both sit on q_calendar.c. */
 #include "qlang/q_tok.h"
-#include "qlang/q_registry.h"  /* q_calendar_days_from_civil, q_calendar_date_valid, q_calendar_ts_compose(_checked) */
+#include "qlang/q_calendar.h"  /* q_calendar_days_from_civil, q_calendar_date_valid, q_calendar_ts_compose(_checked) */
 #include "core/numparse.h"     /* ray_parse_f64/i64 — float twin + numeric Tok */
 #include "lang/internal.h"      /* ray_typed_null, ray_guid, ray_error — q_tok() values */
 #include <string.h>

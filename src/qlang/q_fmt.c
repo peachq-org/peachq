@@ -3,6 +3,7 @@
 #include "qlang/q_fmt_internal.h" /* q_fmt_cell — shared with the pipe renderer */
 #include "qlang/q_console.h"  /* q_console_pipe_* — the `--nonlegacy` display config */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
+#include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "qlang/q_sys.h"   /* q_con_display — live `\c rows cols` clip state */
