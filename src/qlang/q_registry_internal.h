@@ -148,8 +148,6 @@ ray_t* q_eq_wrap(ray_t* a, ray_t* b);
 ray_t* q_ne_wrap(ray_t* a, ray_t* b);
 ray_t* q_neg_wrap(ray_t* x);
 ray_t* q_within_wrap(ray_t* x, ray_t* y);
-ray_t* q_vs_wrap(ray_t* x, ray_t* y);
-ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
@@ -222,6 +220,11 @@ typedef ray_t* (*q_str_leaf_fn)(ray_t* x, int64_t arg);
  * over columns; all else (incl. RAY_STR vectors) -> leaf(x, arg).  collapse
  * != 0 runs q_collapse_list on each rebuilt LIST level (tok/cast). */
 ray_t* q_str_walk(ray_t* x, q_str_leaf_fn leaf, int64_t arg, int collapse);/* used by: dollar */
+ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io, vs_sv */
+
+/* ---- defined in ops/q_vs_sv.c ---- */
+ray_t* q_vs_wrap(ray_t* x, ray_t* y);
+ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_join.c ---- */
 int qj_same_schema(ray_t* a, ray_t* b);                       /* used by: table */
@@ -242,8 +245,7 @@ ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, r
 int q_match_rec(ray_t* a, ray_t* b);                          /* used by: table */
 ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
 ray_t* q_null_wrap(ray_t* x);                                 /* used by: registry, fmt_pipe */
-int q_is_null_sym(ray_t* x);                                  /* single-file since the corridor pass — staticize candidate */
-ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io */
+int q_is_null_sym(ray_t* x);                                  /* used by: vs_sv */
 
 /* ---- defined in ops/q_rand.c ---- */
 void q_rand_seed(int64_t n);                                  /* used by: sys */
