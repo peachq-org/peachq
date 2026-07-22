@@ -4,7 +4,7 @@
  * q_dollar_enum / q_dollar_mmu are the per-operation homes, exposed with types
  * for reuse.  The per-target q_cast_* matrix and the general int-atom helpers
  * (q_is_int_atom, q_iatom_val, ...) live here too (q_registry_internal.h). */
-#include "qlang/q_dollar.h"
+#include "qlang/ops/q_dollar.h"
 #include "qlang/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */
