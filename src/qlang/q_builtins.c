@@ -12,7 +12,7 @@
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #include "qlang/net/q_gz.h"        /* .Q.c.gz — gzip deflate/inflate seam */
 #include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
-#include "qlang/q_registry_internal.h" /* q_registry_init + q_is_fn_value (shared; brings q_registry.h) */
+#include "qlang/q_registry_internal.h" /* q_registry_init + q_deriv_is_fn_value (shared; brings q_registry.h) */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
@@ -220,7 +220,7 @@ char q_ty_char(ray_t* x) {
 /* q `count` of any function value is 1 (kdb: functions are atoms) — the
  * carrier is a RAY_LIST, so the base count would leak its slot count. */
 ray_t* q_count_fn(ray_t* x) {
-    if (q_is_fn_value(x)) return ray_i64(1);
+    if (q_deriv_is_fn_value(x)) return ray_i64(1);
     return g_base_count ? g_base_count(x)
                         : ray_error("type", "count: base verb missing");
 }

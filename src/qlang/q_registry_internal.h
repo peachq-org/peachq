@@ -63,8 +63,6 @@ ray_t* q_scan_wrap(ray_t** args, int64_t n);
 ray_t* q_over_kw(ray_t* f, ray_t* x);
 ray_t* q_scan_kw(ray_t* f, ray_t* x);
 ray_t* q_prior_kw(ray_t* f, ray_t* x);
-ray_t* q_mkderiv2(ray_t* hof, ray_t* f);
-ray_t* q_mkopproj(ray_t** args, int64_t k);
 extern ray_t* g_scan_value;
 extern ray_t* g_over_value;
 extern ray_t* g_eachboth_value;
@@ -78,14 +76,10 @@ extern ray_t* g_select_value;
 extern ray_t* g_delete_value;
 extern ray_t* g_exec_value;
 extern ray_t* g_compose_value;
-ray_t* q_compose_fn(ray_t** args, int64_t n);
 extern ray_t* g_lambda_value;
-ray_t* q_fn_make(ray_t** args, int64_t n);
 extern ray_t* g_ret_value;
 extern ray_t* g_sig_value;
-extern _Thread_local ray_t* g_qret_payload;
 extern _Thread_local ray_t* g_qsig_payload;
-ray_t* q_ret_fn(ray_t* x);
 ray_t* q_sig_fn(ray_t* x);
 extern ray_t* g_seq_value;
 extern ray_t* g_if_value;
@@ -180,8 +174,6 @@ int q_vec_is_float(ray_t* x);                                 /* used by: list *
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
 
 /* ---- defined in ops/q_applyiter.c ---- */
-int q_is_fn_value(ray_t* x);                                  /* used by: builtins, str, apply */
-ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k);              /* used by: value, str, apply */
 ray_t* q_over_wrap(ray_t** args, int64_t n);                  /* used by: lower, registry */
 ray_t* q_registry_scan_value(void);                           /* used by: fmt, lower, value */
 ray_t* q_registry_over_value(void);                           /* used by: fmt, lower, value */
