@@ -12,6 +12,7 @@
 #include "qlang/q_repl.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
+#include "qlang/q_console.h"
 #include "qlang/q_ns.h"       /* q_ns_prompt — namespaces */
 #include "qlang/q_sys.h"      /* q_sys_is_cmd / q_sys_line — `\`-command glue */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
