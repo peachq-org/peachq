@@ -26,7 +26,14 @@ void q_console_pipe_enable(void);
 void q_console_pipe_disable(void);
 bool q_console_pipe_on(void);
 
-
-
+/* `\c` console DISPLAY clip (config beside the sink — base doctrine, format.h).
+ * q_console_clip fills rows/cols with the live `\c` size and returns true iff
+ * clipping is armed; q_fmt.c's console emitter reads it.  q_console_clip_set is
+ * the ONE setter — the `\c` syscmd (q_sys.c) and startup call it; it coerces
+ * each value to the documented [10,2000] range (basics/syscmds.md `\c`) and
+ * ARMS clipping.  kdb has no off-switch — the range ceiling (2000) is the
+ * batch idiom, so there is no disable. */
+bool q_console_clip(int32_t* rows, int32_t* cols);
+void q_console_clip_set(int64_t rows, int64_t cols);
 
 #endif /* Q_CONSOLE_H */
