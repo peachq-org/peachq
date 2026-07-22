@@ -9,8 +9,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_sys.h"
 #include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
-#include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`); q_console_str/reset (timed-expr side effects) */
-#include "qlang/q_fmt_pipe.h" /* q_pipe_on/enable/disable — `\nonlegacy` display toggle */
+#include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
+#include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
@@ -725,10 +725,10 @@ static ray_t* h_s(const char* arg, size_t alen) {
  * shows the state as a boolean (`1b`/`0b`, like bare `\c`); `1`/`0`/`1b`/`0b`
  * sets it, silent.  A non-boolean arg is a bare `'type` (a boolean is expected). */
 static ray_t* h_nonlegacy(const char* arg, size_t alen) {
-    if (alen == 0) return ray_bool(q_pipe_on());     /* getter → 1b/0b */
+    if (alen == 0) return ray_bool(q_console_pipe_on());     /* getter → 1b/0b */
     size_t n = (alen == 2 && arg[1] == 'b') ? 1 : alen;   /* strip the 1b/0b literal */
     if (n != 1 || (arg[0] != '0' && arg[0] != '1')) return ray_error("type", NULL);
-    if (arg[0] == '1') q_pipe_enable(); else q_pipe_disable();
+    if (arg[0] == '1') q_console_pipe_enable(); else q_console_pipe_disable();
     return NULL;                                     /* setter: silent */
 }
 
