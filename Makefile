@@ -40,12 +40,14 @@ force-html-assets: ;
 src/qlang/html_assets_gen.h: force-html-assets tools/gen-assets.sh
 	@tools/gen-assets.sh $@ src/qlang/html
 
+BUILD_DIR = build
+
 # Both suffixes: a .win.o inherits none of the .o target's prerequisites, which is
 # how the mingw build broke while the native one was already fixed.
-src/qlang/q_runtime.o src/qlang/q_runtime.win.o: \
+$(BUILD_DIR)/src/qlang/q_runtime.o $(BUILD_DIR)/src/qlang/q_runtime.win.o: \
     src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/j_gen.h
-src/qlang/q_pq.o      src/qlang/q_pq.win.o:      src/qlang/pq_gen.h
-src/qlang/q_http.o    src/qlang/q_http.win.o:    src/qlang/html_assets_gen.h
+$(BUILD_DIR)/src/qlang/q_pq.o   $(BUILD_DIR)/src/qlang/q_pq.win.o:   src/qlang/pq_gen.h
+$(BUILD_DIR)/src/qlang/q_http.o $(BUILD_DIR)/src/qlang/q_http.win.o: src/qlang/html_assets_gen.h
 
 STD      = c17
 Q_TARGET = q
@@ -69,7 +71,7 @@ DEFS    = -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MIN
 # Changes daily, so scoped to the four objects that read it — otherwise every
 # cached object misses at midnight.
 DATE_DEF   = -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
-DATE_STEMS = src/app/repl src/ops/system src/qlang/q_dotz src/qlang/qmain
+DATE_STEMS = $(addprefix $(BUILD_DIR)/,src/app/repl src/ops/system src/qlang/q_dotz src/qlang/qmain)
 $(addsuffix .o,$(DATE_STEMS)) $(addsuffix .win.o,$(DATE_STEMS)): DEFS += $(DATE_DEF)
 INCLUDES = $(RAY_INCLUDES)
 DEPFLAGS = -MMD -MP
@@ -93,21 +95,24 @@ CFLAGS  ?= $(RELEASE_CFLAGS)
 LDFLAGS ?=
 
 LIB_SRC = $(RAY_LIB_SRC) $(RAY_VENDOR_SRC)
-LIB_OBJ    = $(LIB_SRC:.c=.o)
-Q_MAIN_OBJ = src/qlang/qmain.o
+LIB_OBJ    = $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.o))
+Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/qmain.o
 DEPS = $(LIB_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d)
 
 .DEFAULT_GOAL := all
 all: $(Q_TARGET)
 
 # Vendored TUs: not ours to fix, and -Wextra on them fails the build.
-third_party/%.o: third_party/%.c
+$(BUILD_DIR)/third_party/%.o: third_party/%.c
+	@mkdir -p $(dir $@)
 	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
-third_party/miniz/miniz.o: third_party/miniz/miniz.c
+$(BUILD_DIR)/third_party/miniz/miniz.o: third_party/miniz/miniz.c
+	@mkdir -p $(dir $@)
 	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(RAY_MINIZ_DEFS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
-%.o: %.c
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 $(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ)
@@ -123,17 +128,20 @@ WIN_CFLAGS  = $(WARNS) -std=$(STD) -O2 \
 WIN_LIBS    = -lws2_32 -lm
 # iocp_win.c provides ray_poll_* on Windows; linking the iocp.c stub too is a
 # multiple-definition error.
-WIN_LIB_OBJ    = $(filter-out src/core/iocp.win.o, $(LIB_SRC:.c=.win.o))
+WIN_LIB_OBJ    = $(filter-out $(BUILD_DIR)/src/core/iocp.win.o, $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.win.o)))
 WIN_Q_MAIN_OBJ = $(Q_MAIN_OBJ:.o=.win.o)
 WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
 
-third_party/%.win.o: third_party/%.c
+$(BUILD_DIR)/third_party/%.win.o: third_party/%.c
+	@mkdir -p $(dir $@)
 	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
-third_party/miniz/miniz.win.o: third_party/miniz/miniz.c
+$(BUILD_DIR)/third_party/miniz/miniz.win.o: third_party/miniz/miniz.c
+	@mkdir -p $(dir $@)
 	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) -Wno-error $(RAY_MINIZ_DEFS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
-%.win.o: %.c
+$(BUILD_DIR)/%.win.o: %.c
+	@mkdir -p $(dir $@)
 	$(WIN_CC) -c $(WIN_CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
@@ -142,8 +150,7 @@ q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
 win: q.exe
 
 clean::
-	-rm -f $(LIB_OBJ) $(Q_MAIN_OBJ) $(DEPS)
-	-rm -f $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_DEPS)
+	-rm -rf $(BUILD_DIR)
 	-rm -f $(Q_TARGET) q.exe $(RAY_GEN_HDRS)
 
 version:
