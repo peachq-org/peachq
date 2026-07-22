@@ -58,6 +58,128 @@ static int     g_count    = 0;
 static bool    g_inited   = false;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
 
+/* ===== registry SPECIALS — internal (spelling-less) fn-values ==============
+ * ONE plain data table drives four things: the g_specials[] slots, the init
+ * build loop (its error path written once), the teardown release loop, and
+ * the 22 borrowed-ref accessors below.  A new special is ONE row.  A plain
+ * table + loop is deliberate (owner ruling 2026-07-22, over a token-pasting
+ * X-macro): the accessors and bodies stay greppable, ctags-visible and
+ * debugger-legible.  Every value also carries RAY_FN_Q_LOWER (stamped by the
+ * build loop); accessors return BORROWED refs, NULL before init. */
+enum {
+    SPEC_scan, SPEC_over, SPEC_eachboth, SPEC_prior, SPEC_mkderiv2, SPEC_mkopproj,
+    SPEC_list, SPEC_table, SPEC_keyed_table, SPEC_select, SPEC_delete, SPEC_exec,
+    SPEC_compose, SPEC_funsql_select, SPEC_funsql_bang, SPEC_lambda, SPEC_ret,
+    SPEC_sig, SPEC_seq, SPEC_if, SPEC_do, SPEC_while, SPEC_N
+};
+
+enum spec_kind { SK_UNARY, SK_BINARY, SK_VARY };   /* -> ray_fn_unary/binary/vary */
+
+static ray_t* sig_fn(ray_t* x);   /* body homed with the signal channel below */
+
+typedef struct { const char* wire; uint8_t kind; uint32_t flags; void* fn; } q_special_t;
+
+static const q_special_t SPECIALS[SPEC_N] = {
+    [SPEC_scan]          = { "scan",            SK_VARY,   RAY_FN_NONE,         (void*)q_scan_wrap },
+    [SPEC_over]          = { "over",            SK_VARY,   RAY_FN_NONE,         (void*)q_over_wrap },
+    [SPEC_eachboth]      = { "each-both",       SK_VARY,   RAY_FN_NONE,         (void*)q_eachboth_wrap },
+    [SPEC_prior]         = { "each-prior",      SK_VARY,   RAY_FN_NONE,         (void*)q_prior_wrap },
+    [SPEC_mkderiv2]      = { "q.mkderiv2",      SK_BINARY, RAY_FN_NONE,         (void*)q_deriv_mkderiv2 },
+    [SPEC_mkopproj]      = { "q.mkopproj",      SK_VARY,   RAY_FN_NONE,         (void*)q_deriv_mkopproj },
+    /* ctx constructor heads: SPECIAL_FORM so q_ctx_build gets the raw element
+     * trees and evaluates them right-to-left inside a pushed scope */
+    [SPEC_list]          = { "list",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_list_build },
+    [SPEC_table]         = { "table",           SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_table_build },
+    [SPEC_keyed_table]   = { "keyed-table",     SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_keyed_table_build },
+    /* CONDEMNED: eval-unification stage 3 deletes with q_funsql.c */
+    [SPEC_select]        = { "q.select",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_select_exec },
+    [SPEC_delete]        = { "q.delete",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_delete_exec },
+    [SPEC_exec]          = { "q.exec",          SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_exec_exec },
+    /* compose builder — a NORMAL vary (args are resolved function values) */
+    [SPEC_compose]       = { "q.compose",       SK_VARY,   RAY_FN_NONE,         (void*)q_compose_fn },
+    /* CONDEMNED: eval-unification stage 3 deletes with q_funsql.c */
+    [SPEC_funsql_select] = { "q.funsql.select", SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_funsql_select },
+    [SPEC_funsql_bang]   = { "q.funsql.bang",   SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_funsql_bang },
+    [SPEC_lambda]        = { "q.fn",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_deriv_fn_make },
+    [SPEC_ret]           = { "q.ret",           SK_UNARY,  RAY_FN_NONE,         (void*)q_ret_fn },
+    [SPEC_sig]           = { "q.sig",           SK_UNARY,  RAY_FN_NONE,         (void*)sig_fn },
+    /* imperative control — SPECIAL_FORM: args arrive unevaluated, the body
+     * drives its own lazy left-to-right evaluation (basics/control.md) */
+    [SPEC_seq]           = { "q.seq",           SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_seq_fn },
+    [SPEC_if]            = { "q.if",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_if_fn },
+    [SPEC_do]            = { "q.do",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_do_fn },
+    [SPEC_while]         = { "q.while",         SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_while_fn },
+};
+_Static_assert(sizeof SPECIALS / sizeof SPECIALS[0] == SPEC_N, "SPECIALS row count must match SPEC_* enum");
+
+static ray_t* g_specials[SPEC_N];
+
+ray_t* q_registry_scan_value(void)          { return g_specials[SPEC_scan]; }          /* borrowed */
+ray_t* q_registry_over_value(void)          { return g_specials[SPEC_over]; }
+ray_t* q_registry_eachboth_value(void)      { return g_specials[SPEC_eachboth]; }
+ray_t* q_registry_prior_value(void)         { return g_specials[SPEC_prior]; }
+ray_t* q_registry_mkderiv2_value(void)      { return g_specials[SPEC_mkderiv2]; }
+ray_t* q_registry_mkopproj_value(void)      { return g_specials[SPEC_mkopproj]; }
+ray_t* q_registry_list_value(void)          { return g_specials[SPEC_list]; }
+ray_t* q_registry_table_value(void)         { return g_specials[SPEC_table]; }
+ray_t* q_registry_keyed_table_value(void)   { return g_specials[SPEC_keyed_table]; }
+ray_t* q_registry_select_value(void)        { return g_specials[SPEC_select]; }
+ray_t* q_registry_delete_value(void)        { return g_specials[SPEC_delete]; }
+ray_t* q_registry_exec_value(void)          { return g_specials[SPEC_exec]; }
+ray_t* q_registry_compose_value(void)       { return g_specials[SPEC_compose]; }
+ray_t* q_registry_funsql_select_value(void) { return g_specials[SPEC_funsql_select]; }
+ray_t* q_registry_funsql_bang_value(void)   { return g_specials[SPEC_funsql_bang]; }
+ray_t* q_registry_lambda_value(void)        { return g_specials[SPEC_lambda]; }
+ray_t* q_registry_ret_value(void)           { return g_specials[SPEC_ret]; }
+ray_t* q_registry_sig_value(void)           { return g_specials[SPEC_sig]; }
+ray_t* q_registry_seq_value(void)           { return g_specials[SPEC_seq]; }
+ray_t* q_registry_if_value(void)            { return g_specials[SPEC_if]; }
+ray_t* q_registry_do_value(void)            { return g_specials[SPEC_do]; }
+ray_t* q_registry_while_value(void)         { return g_specials[SPEC_while]; }
+
+/* ---- the `'x` signal channel (registry-lifecycle thread-local state) ------
+ * The <=7-char error class in err->sdata truncates, but kdb Trap hands the
+ * handler the WHOLE message, so sig_fn stashes the untruncated text here
+ * (mirroring the q.ret payload in q_deriv.c).  take returns OWNED or NULL. */
+static _Thread_local ray_t* qsig_payload = NULL;
+
+ray_t* q_registry_sig_take(void) {
+    ray_t* v = qsig_payload;
+    qsig_payload = NULL;
+    return v;
+}
+
+void q_registry_sig_clear(void) {
+    if (qsig_payload) { ray_release(qsig_payload); qsig_payload = NULL; }
+}
+
+/* `'x` Signal (ref/signal.md): abort with error class = the sym spelling /
+ * string text (ray_error copies, 7-char sdata cap — kdb's own classes are
+ * short for the same reason).  Full untruncated text stashed for Trap. */
+static ray_t* sig_fn(ray_t* x) {
+    char cls[8] = "signal";
+    ray_t* full = NULL;                 /* owned full-text string, or NULL */
+    if (x && x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);
+        if (s) {
+            size_t l = ray_str_len(s); size_t c = l > 7 ? 7 : l;
+            memcpy(cls, ray_str_ptr(s), c); cls[c] = '\0';
+            full = ray_str(ray_str_ptr(s), l);
+            ray_release(s);
+        }
+    } else if (x) {
+        const char* p; int64_t l;                     /* string / charv / char atom */
+        if (q_text_bytes(x, &p, &l)) {
+            size_t c = (size_t)l > 7 ? 7 : (size_t)l;
+            memcpy(cls, p, c); cls[c] = '\0';
+            full = ray_str(p, (size_t)l);
+        }
+    }
+    if (qsig_payload) ray_release(qsig_payload);
+    qsig_payload = full;                /* owned (or NULL) */
+    return ray_error(cls, NULL);
+}
+
 /* ---- shared q-name sanitization (.Q.id + construction clash repair) ------ */
 
 static int name_char_ok(char c) {
@@ -494,135 +616,21 @@ ray_err_t q_registry_init(void) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
-    /* internal (spelling-less) values consumed by q_lower / the parser */
-    g_scan_value = ray_fn_vary("scan", RAY_FN_NONE | RAY_FN_Q_LOWER, q_scan_wrap);
-    if (!g_scan_value || RAY_IS_ERR(g_scan_value)) {
-        g_scan_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_over_value = ray_fn_vary("over", RAY_FN_NONE | RAY_FN_Q_LOWER, q_over_wrap);
-    if (!g_over_value || RAY_IS_ERR(g_over_value)) {
-        g_over_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_eachboth_value = ray_fn_vary("each-both", RAY_FN_NONE | RAY_FN_Q_LOWER, q_eachboth_wrap);
-    if (!g_eachboth_value || RAY_IS_ERR(g_eachboth_value)) {
-        g_eachboth_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_prior_value = ray_fn_vary("each-prior", RAY_FN_NONE | RAY_FN_Q_LOWER, q_prior_wrap);
-    if (!g_prior_value || RAY_IS_ERR(g_prior_value)) {
-        g_prior_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_mkderiv2_value = ray_fn_binary("q.mkderiv2", RAY_FN_NONE | RAY_FN_Q_LOWER, q_deriv_mkderiv2);
-    if (!g_mkderiv2_value || RAY_IS_ERR(g_mkderiv2_value)) {
-        g_mkderiv2_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_mkopproj_value = ray_fn_vary("q.mkopproj", RAY_FN_NONE | RAY_FN_Q_LOWER, q_deriv_mkopproj);
-    if (!g_mkopproj_value || RAY_IS_ERR(g_mkopproj_value)) {
-        g_mkopproj_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    /* Both ctx constructor heads are SPECIAL_FORM: q_ctx_build must receive the
-     * raw element trees to evaluate them right-to-left inside a pushed scope. */
-    g_list_value = ray_fn_vary("list",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_list_build);
-    if (!g_list_value || RAY_IS_ERR(g_list_value)) {
-        g_list_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_table_value = ray_fn_vary("table",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_table_build);
-    if (!g_table_value || RAY_IS_ERR(g_table_value)) {
-        g_table_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_keyed_table_value = ray_fn_vary("keyed-table",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_keyed_table_build);
-    if (!g_keyed_table_value || RAY_IS_ERR(g_keyed_table_value)) {
-        g_keyed_table_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_select_value = ray_fn_vary("q.select",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_select_exec);
-    if (!g_select_value || RAY_IS_ERR(g_select_value)) {
-        g_select_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_delete_value = ray_fn_vary("q.delete",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_delete_exec);
-    if (!g_delete_value || RAY_IS_ERR(g_delete_value)) {
-        g_delete_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_exec_value = ray_fn_vary("q.exec",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_exec_exec);
-    if (!g_exec_value || RAY_IS_ERR(g_exec_value)) {
-        g_exec_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    /* compose builder — a NORMAL vary (args are the resolved function values). */
-    g_compose_value = ray_fn_vary("q.compose", RAY_FN_Q_LOWER, q_compose_fn);
-    if (!g_compose_value || RAY_IS_ERR(g_compose_value)) {
-        g_compose_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    /* functional qSQL executors — SPECIAL FORMs: they receive t/c/b/a
-     * UNEVALUATED and evaluate them internally (funsql_operand), so the `()`
-     * empty marker (parser `::` name-ref) does not trip ray_eval's name check. */
-    g_funsql_select_value = ray_fn_vary("q.funsql.select",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_funsql_select);
-    if (!g_funsql_select_value || RAY_IS_ERR(g_funsql_select_value)) {
-        g_funsql_select_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_funsql_bang_value = ray_fn_vary("q.funsql.bang",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_funsql_bang);
-    if (!g_funsql_bang_value || RAY_IS_ERR(g_funsql_bang_value)) {
-        g_funsql_bang_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_lambda_value = ray_fn_vary("q.fn",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_deriv_fn_make);
-    if (!g_lambda_value || RAY_IS_ERR(g_lambda_value)) {
-        g_lambda_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_ret_value = ray_fn_unary("q.ret", RAY_FN_Q_LOWER, q_ret_fn);
-    if (!g_ret_value || RAY_IS_ERR(g_ret_value)) {
-        g_ret_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_sig_value = ray_fn_unary("q.sig", RAY_FN_Q_LOWER, q_sig_fn);
-    if (!g_sig_value || RAY_IS_ERR(g_sig_value)) {
-        g_sig_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_seq_value = ray_fn_vary("q.seq",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_seq_fn);
-    if (!g_seq_value || RAY_IS_ERR(g_seq_value)) {
-        g_seq_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_if_value = ray_fn_vary("q.if",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_if_fn);
-    if (!g_if_value || RAY_IS_ERR(g_if_value)) {
-        g_if_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_do_value = ray_fn_vary("q.do",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_do_fn);
-    if (!g_do_value || RAY_IS_ERR(g_do_value)) {
-        g_do_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
-    }
-    g_while_value = ray_fn_vary("q.while",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_while_fn);
-    if (!g_while_value || RAY_IS_ERR(g_while_value)) {
-        g_while_value = NULL;
-        g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+    /* internal (spelling-less) specials — ONE build loop over SPECIALS[]; the
+     * failed-build error path is written once (RAY_FN_Q_LOWER stamped here). */
+    for (int s = 0; s < SPEC_N; s++) {
+        const q_special_t* sp = &SPECIALS[s];
+        uint8_t attrs = (uint8_t)(sp->flags | RAY_FN_Q_LOWER);
+        ray_t* v;
+        switch ((enum spec_kind)sp->kind) {
+        case SK_UNARY:  v = ray_fn_unary (sp->wire, attrs, (ray_unary_fn)sp->fn);  break;
+        case SK_BINARY: v = ray_fn_binary(sp->wire, attrs, (ray_binary_fn)sp->fn); break;
+        default:        v = ray_fn_vary  (sp->wire, attrs, (ray_vary_fn)sp->fn);   break;
+        }
+        if (!v || RAY_IS_ERR(v)) {
+            g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+        }
+        g_specials[s] = v;
     }
     g_building = false;
     g_inited   = true;
@@ -724,30 +732,10 @@ void q_registry_destroy(void) {
     ray_serde_set_fn_hooks(NULL, NULL);   /* hooks read g_entries — detach first */
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
-    if (g_scan_value)  { ray_release(g_scan_value);  g_scan_value  = NULL; }
-    if (g_over_value)     { ray_release(g_over_value);     g_over_value     = NULL; }
-    if (g_eachboth_value) { ray_release(g_eachboth_value); g_eachboth_value = NULL; }
-    if (g_prior_value)    { ray_release(g_prior_value);    g_prior_value    = NULL; }
-    if (g_mkderiv2_value) { ray_release(g_mkderiv2_value); g_mkderiv2_value = NULL; }
-    if (g_mkopproj_value) { ray_release(g_mkopproj_value); g_mkopproj_value = NULL; }
-    if (g_list_value)   { ray_release(g_list_value);   g_list_value   = NULL; }
-    if (g_table_value)  { ray_release(g_table_value);  g_table_value  = NULL; }
-    if (g_keyed_table_value) { ray_release(g_keyed_table_value); g_keyed_table_value = NULL; }
-    if (g_select_value) { ray_release(g_select_value); g_select_value = NULL; }
-    if (g_delete_value) { ray_release(g_delete_value); g_delete_value = NULL; }
-    if (g_exec_value)   { ray_release(g_exec_value);   g_exec_value   = NULL; }
-    if (g_compose_value) { ray_release(g_compose_value); g_compose_value = NULL; }
-    if (g_funsql_select_value) { ray_release(g_funsql_select_value); g_funsql_select_value = NULL; }
-    if (g_funsql_bang_value)   { ray_release(g_funsql_bang_value);   g_funsql_bang_value   = NULL; }
-    if (g_lambda_value)        { ray_release(g_lambda_value);        g_lambda_value        = NULL; }
-    if (g_ret_value)           { ray_release(g_ret_value);           g_ret_value           = NULL; }
-    if (g_sig_value)           { ray_release(g_sig_value);           g_sig_value           = NULL; }
-    if (g_seq_value)           { ray_release(g_seq_value);           g_seq_value           = NULL; }
-    if (g_if_value)            { ray_release(g_if_value);            g_if_value            = NULL; }
-    if (g_do_value)            { ray_release(g_do_value);            g_do_value            = NULL; }
-    if (g_while_value)         { ray_release(g_while_value);         g_while_value         = NULL; }
+    for (int s = 0; s < SPEC_N; s++)
+        if (g_specials[s]) { ray_release(g_specials[s]); g_specials[s] = NULL; }
     { ray_t* stale = q_deriv_ret_take(); if (stale) ray_release(stale); }
-    if (g_qsig_payload)        { ray_release(g_qsig_payload);        g_qsig_payload        = NULL; }
+    q_registry_sig_clear();
     g_count  = 0;
     g_inited = false;
 }
