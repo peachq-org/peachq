@@ -29,7 +29,7 @@ int  q_fmt_prec(void)      { return g_print_prec; }
 /* Name-ref syms of these chars print bare (kdb `(/;+)`, basics/parsetrees.md). */
 static const char Q_VERBS[] = ":+-*%!&|<>=~,^#_$?@./\\'";
 
-static int q_sym_bare(const char* nm, size_t l) {
+static int sym_bare(const char* nm, size_t l) {
     if (l == 1 && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
     if (l == 2 && nm[1] == ':' && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
     return 0;
@@ -200,7 +200,7 @@ static void qe_sym(ray_t* val) {
     ray_t* s = ray_sym_str(val->i64);
     const char* nm = ray_str_ptr(s);
     size_t l = ray_str_len(s);
-    int bare = q_sym_bare(nm, l) && !(val->attrs & 0x20 /* Q_ATTR_QUOTED */);
+    int bare = sym_bare(nm, l) && !(val->attrs & 0x20 /* Q_ATTR_QUOTED */);
     if (!bare) qe_putc('`');
     qe_putn(nm, l);
     ray_release(s);
@@ -234,7 +234,7 @@ void q_console_reset(void) { g_console_len = 0; if (g_console) g_console[0] = '\
 
 const char* q_console_str(void) { return g_console ? g_console : ""; }
 
-static void q_console_append(const char* s, size_t n) {
+static void console_append(const char* s, size_t n) {
     if (g_console_len + n + 1 > g_console_cap) {
         size_t nc = g_console_cap ? g_console_cap * 2 : 256;
         while (nc < g_console_len + n + 1) nc *= 2;
@@ -248,30 +248,30 @@ static void q_console_append(const char* s, size_t n) {
 }
 
 /* g_console buffer for the host to drain; in an IPC handler (no host drain) straight to stdout, kdb's server-console behaviour. */
-static void q_console_emit(const char* s, size_t n) {
+static void console_emit(const char* s, size_t n) {
     if (ray_ipc_current_handle() >= 0) {
         fwrite(s, 1, n, stdout);
         fflush(stdout);
     } else {
-        q_console_append(s, n);
+        console_append(s, n);
     }
 }
 
 void q_console_show(ray_t* val) {
     char buf[8192]; buf[0] = '\0';
     q_fmt_console(val, buf, sizeof buf);   /* `show` obeys the `\c` display clip */
-    q_console_emit(buf, strlen(buf));
-    q_console_emit("\n", 1);
+    console_emit(buf, strlen(buf));
+    console_emit("\n", 1);
 }
 
-void q_console_write(const char* s, size_t n) { q_console_emit(s, n); }
+void q_console_write(const char* s, size_t n) { console_emit(s, n); }
 
 /* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`; NO trailing spaces. */
 
 #define QF_MAXCOL 64
 
 /* Uniformly-singleton nested column collapses (`1| 10`); mixed keeps `,50`. */
-static int q_col_uniform_singleton(ray_t* col) {
+static int col_uniform_singleton(ray_t* col) {
     if (!col || col->type != RAY_LIST) return 0;
     int64_t n = ray_len(col);
     if (n == 0) return 0;
@@ -326,13 +326,13 @@ void q_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
         snprintf(out, outsz, "%d", c->u8 ? 1 : 0);
     } else {
         q_fmt(c, out, outsz);
-        if (out[0] == ',' && q_col_uniform_singleton(col))
+        if (out[0] == ',' && col_uniform_singleton(col))
             memmove(out, out + 1, strlen(out));
     }
     ray_release(c);
 }
 
-static void q_table_widths(ray_t* tbl, int64_t nc, int64_t nr,
+static void table_widths(ray_t* tbl, int64_t nc, int64_t nr,
                            int* widths, char hdr[][64]) {
     for (int64_t c = 0; c < nc; c++) {
         ray_t* s = ray_sym_str(ray_table_col_name(tbl, c));
@@ -349,14 +349,14 @@ static void q_table_widths(ray_t* tbl, int64_t nc, int64_t nr,
     }
 }
 
-static void q_table_grid(int64_t nc, const int* widths, char hdr[][64]) {
+static void table_grid(int64_t nc, const int* widths, char hdr[][64]) {
     for (int64_t c = 0; c < nc; c++) {
         if (c) qe_putc(' ');
         qe_pad(hdr[c], widths[c]);
     }
 }
 
-static int64_t q_size_rows(int64_t nr) {
+static int64_t size_rows(int64_t nr) {
     int64_t cr = qe_clip_rows();
     return (cr && cr < nr) ? cr : nr;
 }
@@ -368,9 +368,9 @@ static void q_fmt_table(ray_t* tbl) {
     if (nc > QF_MAXCOL) nc = QF_MAXCOL;
     int  widths[QF_MAXCOL];
     char hdr[QF_MAXCOL][64];
-    q_table_widths(tbl, nc, q_size_rows(nr), widths, hdr);
+    table_widths(tbl, nc, size_rows(nr), widths, hdr);
 
-    q_table_grid(nc, widths, hdr);
+    table_grid(nc, widths, hdr);
     qe_trim();
     qe_putc('\n');
     int total = (int)(nc - 1);
@@ -389,7 +389,7 @@ static void q_fmt_table(ray_t* tbl) {
     }
 }
 
-static void q_fmt_keyed(ray_t* kt, ray_t* vt) {
+static void fmt_keyed(ray_t* kt, ray_t* vt) {
     int64_t knc = ray_table_ncols(kt), knr = ray_table_nrows(kt);
     int64_t vnc = ray_table_ncols(vt), vnr = ray_table_nrows(vt);
     int64_t nr  = knr < vnr ? knr : vnr;
@@ -397,12 +397,12 @@ static void q_fmt_keyed(ray_t* kt, ray_t* vt) {
     if (vnc > QF_MAXCOL) vnc = QF_MAXCOL;
     int  kw[QF_MAXCOL], vw[QF_MAXCOL];
     char kh[QF_MAXCOL][64], vh[QF_MAXCOL][64];
-    q_table_widths(kt, knc, q_size_rows(nr), kw, kh);
-    q_table_widths(vt, vnc, q_size_rows(nr), vw, vh);
+    table_widths(kt, knc, size_rows(nr), kw, kh);
+    table_widths(vt, vnc, size_rows(nr), vw, vh);
 
-    q_table_grid(knc, kw, kh);
+    table_grid(knc, kw, kh);
     qe_putc('|'); qe_putc(' ');
-    q_table_grid(vnc, vw, vh);
+    table_grid(vnc, vw, vh);
     qe_trim();
     qe_putc('\n');
     int kt_tot = (int)(knc - 1); for (int64_t c = 0; c < knc; c++) kt_tot += kw[c];
@@ -431,7 +431,7 @@ static void q_fmt_keyed(ray_t* kt, ray_t* vt) {
 }
 
 /* Integer-backed sentinels (kdb datatypes table): MIN->0N, MAX->0W, -MAX->-0W, + suffix (0=bare). */
-static int q_sentinel_tok(int64_t v, int width, char suffix, char* out, size_t n) {
+static int sentinel_tok(int64_t v, int width, char suffix, char* out, size_t n) {
     int64_t vmax = (width == 2) ? INT16_MAX : (width == 4) ? INT32_MAX : INT64_MAX;
     const char* base = (v == -vmax - 1) ? "0N" : (v == vmax) ? "0W"
                      : (v == -vmax)     ? "-0W" : NULL;
@@ -441,8 +441,8 @@ static int q_sentinel_tok(int64_t v, int width, char suffix, char* out, size_t n
     return 1;
 }
 
-static void q_int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
-    if (q_sentinel_tok(v, width, suffix, out, n)) return;
+static void int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
+    if (sentinel_tok(v, width, suffix, out, n)) return;
     char sfx[2] = { suffix, '\0' };
     snprintf(out, n, "%lld%s", (long long)v, sfx);
 }
@@ -477,7 +477,7 @@ static int fmt_tok_is_bare_int(const char* tok) {
 }
 
 /* Payload via a temp base atom (base fmt owns the math); consumes `a`. */
-static void q_tok_via_atom(ray_t* a, char* out, size_t n) {
+static void tok_via_atom(ray_t* a, char* out, size_t n) {
     out[0] = '\0';
     if (a && !RAY_IS_ERR(a)) {
         ray_fallback(a, out, n);
@@ -486,16 +486,16 @@ static void q_tok_via_atom(ray_t* a, char* out, size_t n) {
 }
 
 /* Date payload; out-of-civil-range displays 0000.00.00 (datatypes.md). */
-static void q_date_payload(int64_t v, char* out, size_t n) {
+static void date_payload(int64_t v, char* out, size_t n) {
     if (v < q_calendar_days_from_civil(1, 1, 1) || v > q_calendar_days_from_civil(9999, 12, 31)) {
         snprintf(out, n, "0000.00.00");
         return;
     }
-    q_tok_via_atom(ray_date(v), out, n);
+    tok_via_atom(ray_date(v), out, n);
 }
 
 /* Month payload: months since 2000.01; outside year [1,9999] -> `0000.00`. */
-static void q_month_payload(int64_t p, char* out, size_t n) {
+static void month_payload(int64_t p, char* out, size_t n) {
     int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
     int64_t m = 1 + (p % 12 + 12) % 12;
     if (y < 1 || y > 9999) { snprintf(out, n, "0000.00"); return; }
@@ -503,7 +503,7 @@ static void q_month_payload(int64_t p, char* out, size_t n) {
 }
 
 /* GUID: 8-4-4-4-12 lowercase hex; null = zero UUID, never 0Ng (datatypes.md). */
-static void q_guid_tok(const uint8_t* b16, char* out, size_t n) {
+static void guid_tok(const uint8_t* b16, char* out, size_t n) {
     if (n == 0) return;
     static const char hx[] = "0123456789abcdef";
     static const int groups[] = {4, 2, 2, 2, 6};
@@ -521,14 +521,14 @@ static void q_guid_tok(const uint8_t* b16, char* out, size_t n) {
 
 /* Datetime (f64 — Q_TTOK width 0): NaN->0Nz (no live 0Wz, 2026-07-09);
  * out-of-range -> 0000.00.00T00:00:00.000; ms precision (tok.md:227). */
-static void q_datetime_tok(double v, char* out, size_t n) {
+static void datetime_tok(double v, char* out, size_t n) {
     if (v != v) { snprintf(out, n, "0Nz"); return; }
     if (v < (double)q_calendar_days_from_civil(1, 1, 1) ||
         v >= (double)(q_calendar_days_from_civil(9999, 12, 31) + 1)) {
         snprintf(out, n, "0000.00.00T00:00:00.000");
         return;
     }
-    q_tok_via_atom(ray_datetime(v), out, n);
+    tok_via_atom(ray_datetime(v), out, n);
 }
 
 /* THE temporal token table: sentinel suffix (0=bare), once-per-value trailing
@@ -543,8 +543,8 @@ typedef struct {
 } q_ttok_t;
 
 static const q_ttok_t Q_TTOK[] = {
-    { RAY_DATE,      'd', 0,   4, NULL,          q_date_payload },
-    { RAY_MONTH,      0,  'm', 4, NULL,          q_month_payload },
+    { RAY_DATE,      'd', 0,   4, NULL,          date_payload },
+    { RAY_MONTH,      0,  'm', 4, NULL,          month_payload },
     { RAY_TIME,      't', 0,   4, ray_time,      NULL },
     { RAY_MINUTE,    'u', 0,   4, ray_minute,    NULL },
     { RAY_SECOND,    'v', 0,   4, ray_second,    NULL },
@@ -553,28 +553,28 @@ static const q_ttok_t Q_TTOK[] = {
     { RAY_DATETIME,   0,  0,   0, NULL,          NULL },
 };
 
-static const q_ttok_t* q_ttok_find(int8_t t) {
+static const q_ttok_t* ttok_find(int8_t t) {
     for (size_t i = 0; i < sizeof Q_TTOK / sizeof *Q_TTOK; i++)
         if (Q_TTOK[i].type == t) return &Q_TTOK[i];
     return NULL;
 }
 
-static void q_ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i,
+static void ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i,
                         char* out, size_t n) {
     if (r->width == 0) {
-        q_datetime_tok(i < 0 ? v->f64 : ((const double*)ray_data(v))[i], out, n);
+        datetime_tok(i < 0 ? v->f64 : ((const double*)ray_data(v))[i], out, n);
         return;
     }
     int64_t x = (i < 0)
         ? (r->width == 4 ? (int64_t)v->i32 : v->i64)
         : (r->width == 4 ? (int64_t)((const int32_t*)ray_data(v))[i]
                          : ((const int64_t*)ray_data(v))[i]);
-    if (q_sentinel_tok(x, r->width, r->sfx, out, n)) return;
+    if (sentinel_tok(x, r->width, r->sfx, out, n)) return;
     if (r->payload) { r->payload(x, out, n); return; }
-    q_tok_via_atom(r->ctor(x), out, n);
+    tok_via_atom(r->ctor(x), out, n);
 }
 
-static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
+static void fmt_dict_key(ray_t* key, char* out, size_t cap) {
     out[0] = '\0';
     if (!key || RAY_IS_ERR(key)) return;
 
@@ -595,7 +595,7 @@ static void q_fmt_dict_key(ray_t* key, char* out, size_t cap) {
         int64_t v = (key->type == -RAY_I16) ? (int64_t)key->i16
                   : (key->type == -RAY_I32) ? (int64_t)key->i32
                   : key->i64;
-        q_int_tok(v, width, 0, out, cap);
+        int_tok(v, width, 0, out, cap);
         return;
     }
     if (key->type == -RAY_F32 || key->type == -RAY_F64) {
@@ -617,7 +617,7 @@ static void qe_join(const char* tok, int first) {
  * display is byte-for-byte contract, CLAUDE.md rule 2, never clips).  Tree
  * iff head is a ctor, fn value, name-ref sym (0x20 clear) or clause list. */
 #define Q_ATTR_QUOTED 0x20
-static int q_list_is_parse_tree(ray_t* v, int depth) {
+static int list_is_parse_tree(ray_t* v, int depth) {
     if (!v || v->type != RAY_LIST || depth > 64) return 0;
     int64_t n = ray_len(v);
     if (n < 1) return 0;
@@ -627,7 +627,7 @@ static int q_list_is_parse_tree(ray_t* v, int depth) {
     if (h->type == RAY_UNARY || h->type == RAY_BINARY || h->type == RAY_VARY)
         return 1;
     if (h->type == -RAY_SYM && !(h->attrs & Q_ATTR_QUOTED)) return 1;
-    if (h->type == RAY_LIST) return q_list_is_parse_tree(h, depth + 1);
+    if (h->type == RAY_LIST) return list_is_parse_tree(h, depth + 1);
     return 0;
 }
 
@@ -635,13 +635,13 @@ static int q_list_is_parse_tree(ray_t* v, int depth) {
  * stays bare-0x (byte_impl.qcmd:120 pin), so it names no `byte$()`. Composing on
  * the single home means the #209 value-band guard there transitively protects
  * empty-vec display — no parallel table to keep in sync. */
-static const char* q_empty_vec_qname(int8_t type) {
+static const char* empty_vec_qname(int8_t type) {
     if (type == RAY_BYTE_ONLY) return NULL;
     return q_type_qname(type);
 }
 
 /* Escape one byte kdb-style — THE display-inverse of the scanner decode. */
-static size_t q_char_esc(unsigned char ch, char out[8]) {
+static size_t char_esc(unsigned char ch, char out[8]) {
     switch (ch) {
     case '"':  out[0] = '\\'; out[1] = '"';  return 2;
     case '\\': out[0] = '\\'; out[1] = '\\'; return 2;
@@ -657,12 +657,12 @@ static size_t q_char_esc(unsigned char ch, char out[8]) {
 
 /* Quoted-text renderer over raw bytes — shared by the -RAY_STR atom form and
  * the charv vector/atom forms. */
-static void q_fmt_qtext(const char* p, size_t n, char* buf, size_t bufsz) {
+static void fmt_qtext(const char* p, size_t n, char* buf, size_t bufsz) {
     size_t w = 0;
     if (w + 1 < bufsz) buf[w++] = '"';
     for (size_t i = 0; i < n && w + 6 < bufsz; i++) {
         char e[8];
-        size_t el = q_char_esc((unsigned char)p[i], e);
+        size_t el = char_esc((unsigned char)p[i], e);
         memcpy(buf + w, e, el);
         w += el;
     }
@@ -670,14 +670,14 @@ static void q_fmt_qtext(const char* p, size_t n, char* buf, size_t bufsz) {
     buf[w < bufsz ? w : bufsz - 1] = '\0';
 }
 
-static void q_fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
+static void fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
     const char* p = ray_str_ptr(val);
     size_t n = ray_str_len(val);
     size_t w = 0;
     if (w + 1 < bufsz) buf[w++] = '"';
     for (size_t i = 0; i < n && w + 6 < bufsz; i++) {
         char e[8];
-        size_t el = q_char_esc((unsigned char)p[i], e);
+        size_t el = char_esc((unsigned char)p[i], e);
         memcpy(buf + w, e, el);
         w += el;
     }
@@ -692,13 +692,13 @@ static void qe_qstring(ray_t* val) {
     for (size_t i = 0; i < n; i++) {
         if (qe_line_done()) break;               /* clip: line already decided */
         char e[8];
-        qe_putn(e, q_char_esc((unsigned char)p[i], e));
+        qe_putn(e, char_esc((unsigned char)p[i], e));
     }
     qe_putc('"');
 }
 
 /* Alignable = space-separated element types; bool/byte rows print whole. */
-static int q_matrix_alignable(int8_t type) {
+static int matrix_alignable(int8_t type) {
     return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
            type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
            type == RAY_DATE || type == RAY_TIME || type == RAY_TIMESTAMP ||
@@ -706,12 +706,12 @@ static int q_matrix_alignable(int8_t type) {
            type == RAY_DATETIME;
 }
 
-static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
+static void matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
     out[0] = '\0';
     switch (rv->type) {
-    case RAY_I16: q_int_tok((int64_t)((const int16_t*)ray_data(rv))[c], 2, 0, out, outsz); break;
-    case RAY_I32: q_int_tok((int64_t)((const int32_t*)ray_data(rv))[c], 4, 0, out, outsz); break;
-    case RAY_I64: q_int_tok(((const int64_t*)ray_data(rv))[c],          8, 0, out, outsz); break;
+    case RAY_I16: int_tok((int64_t)((const int16_t*)ray_data(rv))[c], 2, 0, out, outsz); break;
+    case RAY_I32: int_tok((int64_t)((const int32_t*)ray_data(rv))[c], 4, 0, out, outsz); break;
+    case RAY_I64: int_tok(((const int64_t*)ray_data(rv))[c],          8, 0, out, outsz); break;
     case RAY_F32: q_float_tok((double)((const float*)ray_data(rv))[c],  1, out, outsz); break;
     case RAY_F64: q_float_tok(((const double*)ray_data(rv))[c],         0, out, outsz); break;
     case RAY_SYM: {
@@ -729,32 +729,32 @@ static void q_matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
         } else if (a->type == -RAY_STR) {
             if (ray_str_len(a) == 1 && outsz > 1) {
                 out[0] = ',';
-                q_fmt_qstring(a, out + 1, outsz - 1);
+                fmt_qstring(a, out + 1, outsz - 1);
             } else
-                q_fmt_qstring(a, out, outsz);
+                fmt_qstring(a, out, outsz);
         } else if (a->type == -RAY_CHARV) {
-            q_fmt_qtext((const char*)&a->u8, 1, out, outsz);
+            fmt_qtext((const char*)&a->u8, 1, out, outsz);
         } else if (a->type == RAY_CHARV) {
             if (ray_len(a) == 1 && outsz > 1) {
                 out[0] = ',';
-                q_fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
+                fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
             } else
-                q_fmt_qtext((const char*)ray_data(a), (size_t)ray_len(a), out, outsz);
+                fmt_qtext((const char*)ray_data(a), (size_t)ray_len(a), out, outsz);
         } else
             q_fmt(a, out, outsz);
         break;
     }
     default: {
-        const q_ttok_t* tr = q_ttok_find(rv->type);
-        if (tr) q_ttok_elem(tr, rv, c, out, outsz);
+        const q_ttok_t* tr = ttok_find(rv->type);
+        if (tr) ttok_elem(tr, rv, c, out, outsz);
         break;
     }
     }
 }
 
-static int q_matrix_row_ok(ray_t* r) {
+static int matrix_row_ok(ray_t* r) {
     if (!r || RAY_IS_ERR(r)) return 0;
-    if (r->type > 0 && ray_is_vec(r) && q_matrix_alignable(r->type)) return 1;
+    if (r->type > 0 && ray_is_vec(r) && matrix_alignable(r->type)) return 1;
     if (r->type == RAY_LIST) {
         ray_t** it = (ray_t**)ray_data(r);
         int64_t n = ray_len(r);
@@ -769,27 +769,27 @@ static int q_matrix_row_ok(ray_t* r) {
 }
 
 /* e[0..n) is >=2 same-length alignable rows: a LEFT-aligned matrix (ref/mmu.md). */
-static int q_is_matrix(ray_t** e, int64_t n) {
+static int is_matrix(ray_t** e, int64_t n) {
     if (n < 2) return 0;
-    if (!q_matrix_row_ok(e[0])) return 0;
+    if (!matrix_row_ok(e[0])) return 0;
     int64_t w = ray_len(e[0]);
     if (w == 0) return 0;
     for (int64_t i = 1; i < n; i++)
-        if (!q_matrix_row_ok(e[i]) || ray_len(e[i]) != w) return 0;
+        if (!matrix_row_ok(e[i]) || ray_len(e[i]) != w) return 0;
     return 1;
 }
 
-static void q_fmt_matrix(ray_t** e, int64_t nr) {
+static void fmt_matrix(ray_t** e, int64_t nr) {
     int64_t nc = ray_len(e[0]);
     /* no fixed column cap; clip-armed sizing scans showable rows only */
     int  stackw[64];
     int* widths = (nc <= 64) ? stackw : malloc((size_t)(nc > 0 ? nc : 1) * sizeof(int));
     if (!widths) return;
-    int64_t nr_size = q_size_rows(nr);
+    int64_t nr_size = size_rows(nr);
     for (int64_t c = 0; c < nc; c++) {
         int w = 0;
         for (int64_t r = 0; r < nr_size; r++) {
-            char cb[512]; q_matrix_cell(e[r], c, cb, sizeof cb);
+            char cb[512]; matrix_cell(e[r], c, cb, sizeof cb);
             int l = (int)strlen(cb); if (l > w) w = l;
         }
         widths[c] = w;
@@ -799,7 +799,7 @@ static void q_fmt_matrix(ray_t** e, int64_t nr) {
         if (r) qe_putc('\n');
         for (int64_t c = 0; c < nc; c++) {
             if (c) qe_putc(' ');
-            char cb[512]; q_matrix_cell(e[r], c, cb, sizeof cb);
+            char cb[512]; matrix_cell(e[r], c, cb, sizeof cb);
             qe_pad(cb, widths[c]);                    /* left-align */
         }
         qe_trim();                                    /* no trailing spaces */
@@ -810,7 +810,7 @@ static void q_fmt_matrix(ray_t** e, int64_t nr) {
 static void q_fmt_body(ray_t* val);   /* fwd */
 
 /* Attributed vectors get `` `s#`` (q_attr_letter — shared with `attr`); table columns stay bare via q_cell. */
-static void q_fmt_render(ray_t* val) {
+static void fmt_render(ray_t* val) {
     if (!val) return;
     char al = q_attr_letter(val);              /* 0 unless an attributed vector */
     if (al) {
@@ -823,7 +823,7 @@ static void q_fmt_render(ray_t* val) {
 void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0 || !buf) return;
     qe_push(buf, bufsz, 0);
-    q_fmt_render(val);
+    fmt_render(val);
     qe_pop();
 }
 
@@ -836,7 +836,7 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     if (q_pipe_on() && q_pipe_is_table(val)) { q_pipe_console(val, buf, bufsz); return; }
     int32_t rows = 0, cols = 0;
     int armed = q_con_display(&rows, &cols) && !g_clip_active;
-    if (armed && val && val->type == RAY_LIST && q_list_is_parse_tree(val, 0))
+    if (armed && val && val->type == RAY_LIST && list_is_parse_tree(val, 0))
         armed = 0;                             /* parse display NEVER clips */
     if (!armed || rows < 10 || cols < 10 || cols > 2000) {
         q_fmt(val, buf, bufsz);
@@ -847,7 +847,7 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     g_clip.nlines = 0;    g_clip.stop = 0;
     g_clip.llen = g_clip.llog = g_clip.ltrail = 0;
     qe_push(buf, bufsz, 1);
-    q_fmt_render(val);
+    fmt_render(val);
     qe_pop();
     g_clip_active = 0;
 }
@@ -866,7 +866,7 @@ static void q_fmt_body(ray_t* val) {
     if (val->type == -RAY_CHARV) {
         char e[8];
         qe_putc('"');
-        qe_putn(e, q_char_esc(val->u8, e));
+        qe_putn(e, char_esc(val->u8, e));
         qe_putc('"');
         return;
     }
@@ -878,7 +878,7 @@ static void q_fmt_body(ray_t* val) {
         for (int64_t i = 0; i < n; i++) {
             if (qe_line_done()) break;
             char e[8];
-            qe_putn(e, q_char_esc((unsigned char)p[i], e));
+            qe_putn(e, char_esc((unsigned char)p[i], e));
         }
         qe_putc('"');
         return;
@@ -886,7 +886,7 @@ static void q_fmt_body(ray_t* val) {
 
     /* empty typed vector: `` `type$() `` (byte keeps its bare-0x arm) */
     if (val->type > 0 && ray_is_vec(val) && ray_len(val) == 0) {
-        const char* qn = q_empty_vec_qname(val->type);
+        const char* qn = empty_vec_qname(val->type);
         if (qn) { qe_printf("`%s$()", qn); return; }
     }
 
@@ -913,9 +913,9 @@ static void q_fmt_body(ray_t* val) {
             char elem[2048]; elem[0] = '\0';
             if (n == 1 || (it->type == -RAY_STR && ray_str_len(it) == 1)) {
                 elem[0] = ',';
-                q_fmt_qstring(it, elem + 1, sizeof elem - 1);
+                fmt_qstring(it, elem + 1, sizeof elem - 1);
             } else
-                q_fmt_qstring(it, elem, sizeof elem);
+                fmt_qstring(it, elem, sizeof elem);
             ray_release(it);
             if (i) qe_putc('\n');
             qe_puts(elem);
@@ -940,10 +940,10 @@ static void q_fmt_body(ray_t* val) {
 
     {
         char tok[64]; tok[0] = '\0';
-        const q_ttok_t* tr = (val->type < 0) ? q_ttok_find((int8_t)-val->type)
+        const q_ttok_t* tr = (val->type < 0) ? ttok_find((int8_t)-val->type)
                                              : NULL;
         if (tr) {
-            q_ttok_elem(tr, val, -1, tok, sizeof tok);
+            ttok_elem(tr, val, -1, tok, sizeof tok);
             qe_puts(tok);
             if (tr->vsfx) qe_putc(tr->vsfx);
             return;
@@ -951,16 +951,16 @@ static void q_fmt_body(ray_t* val) {
         switch (val->type) {
         case -RAY_BOOL: qe_printf("%db", val->u8 ? 1 : 0);                 return;
         case -RAY_BYTE_ONLY: qe_printf("0x%02x", val->u8);                      return;
-        case -RAY_I16:  q_int_tok((int64_t)val->i16, 2, 'h', tok, sizeof tok);
+        case -RAY_I16:  int_tok((int64_t)val->i16, 2, 'h', tok, sizeof tok);
                         qe_puts(tok);                                      return;
-        case -RAY_I32:  q_int_tok((int64_t)val->i32, 4, 'i', tok, sizeof tok);
+        case -RAY_I32:  int_tok((int64_t)val->i32, 4, 'i', tok, sizeof tok);
                         qe_puts(tok);                                      return;
-        case -RAY_I64:  q_int_tok(val->i64,          8, 0,   tok, sizeof tok);
+        case -RAY_I64:  int_tok(val->i64,          8, 0,   tok, sizeof tok);
                         qe_puts(tok);                                      return;
         case -RAY_GUID: {
             const uint8_t* b16 = val->obj ? (const uint8_t*)ray_data(val->obj)
                                           : (const uint8_t*)ray_data(val);
-            q_guid_tok(b16, tok, sizeof tok);
+            guid_tok(b16, tok, sizeof tok);
             qe_puts(tok);
             return;
         }
@@ -1010,7 +1010,7 @@ static void q_fmt_body(ray_t* val) {
         for (int64_t i = 0; i < n && !qe_line_done(); i++) {
             if (i) qe_putc(' ');
             char e[40];
-            q_guid_tok(d + i * 16, e, sizeof e);
+            guid_tok(d + i * 16, e, sizeof e);
             if (qe_fits(strlen(e))) qe_puts(e);
         }
         return;
@@ -1026,7 +1026,7 @@ static void q_fmt_body(ray_t* val) {
             int64_t v = (width == 2) ? (int64_t)((const int16_t*)ray_data(val))[i]
                       : (width == 4) ? (int64_t)((const int32_t*)ray_data(val))[i]
                       :                ((const int64_t*)ray_data(val))[i];
-            q_int_tok(v, width, 0, e, sizeof e);   /* bare — no per-element suffix */
+            int_tok(v, width, 0, e, sizeof e);   /* bare — no per-element suffix */
             qe_join(e, i == 0);
         }
         if (vsuf) qe_putc(vsuf);
@@ -1036,13 +1036,13 @@ static void q_fmt_body(ray_t* val) {
      * type char (`m`) — the other temporals' full tokens self-identify,
      * sentinels included (`2000.01.01 0Nd`) */
     {
-        const q_ttok_t* tr = q_ttok_find(val->type);
+        const q_ttok_t* tr = ttok_find(val->type);
         if (tr) {
             int64_t n = ray_len(val);
             if (n == 1) qe_putc(',');                      /* enlist: ,2000.01.01 */
             for (int64_t i = 0; i < n && !qe_line_done(); i++) {
                 char e[64];
-                q_ttok_elem(tr, val, i, e, sizeof e);
+                ttok_elem(tr, val, i, e, sizeof e);
                 qe_join(e, i == 0);
             }
             if (tr->vsfx) qe_putc(tr->vsfx);
@@ -1142,7 +1142,7 @@ static void q_fmt_body(ray_t* val) {
         ray_t* kk = ray_dict_keys(val);
         ray_t* vv = ray_dict_vals(val);
         if (kk && vv && kk->type == RAY_TABLE && vv->type == RAY_TABLE) {
-            q_fmt_keyed(kk, vv);
+            fmt_keyed(kk, vv);
             return;
         }
     }
@@ -1160,7 +1160,7 @@ static void q_fmt_body(ray_t* val) {
             for (int64_t i = 0; i < ray_len(v) && sym_col; i++)
                 if (!vel[i] || vel[i]->type != -RAY_SYM) sym_col = 0;
         }
-        int64_t n_size = q_size_rows(n);   /* clip-armed: size showable rows only */
+        int64_t n_size = size_rows(n);   /* clip-armed: size showable rows only */
         for (int pass = 0; pass < 2; pass++) {
             int64_t n_pass = (pass == 0) ? n_size : n;
             for (int64_t i = 0; i < n_pass; i++) {
@@ -1168,7 +1168,7 @@ static void q_fmt_body(ray_t* val) {
                 ray_t* ke = ray_at_fn(k, ia);
                 ray_release(ia);
                 char kb[256]; kb[0] = '\0';
-                q_fmt_dict_key(ke, kb, sizeof kb);
+                fmt_dict_key(ke, kb, sizeof kb);
                 if (ke && !RAY_IS_ERR(ke)) ray_release(ke);
                 size_t kl = strlen(kb);
                 if (pass == 0) {
@@ -1182,10 +1182,10 @@ static void q_fmt_body(ray_t* val) {
                 if (ve && !RAY_IS_ERR(ve)) {
                     /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`) */
                     if (sym_col && ve->type == -RAY_SYM)
-                        q_fmt_dict_key(ve, vb, sizeof vb);
+                        fmt_dict_key(ve, vb, sizeof vb);
                     else if (ve->type == -RAY_BOOL)
                         /* bool ATOM rows BARE; vectors keep `100b` */
-                        q_fmt_dict_key(ve, vb, sizeof vb);
+                        fmt_dict_key(ve, vb, sizeof vb);
                     else
                         q_fmt(ve, vb, sizeof vb);
                 }
@@ -1217,7 +1217,7 @@ static void q_fmt_body(ray_t* val) {
             qe_puts(elem);
             return;
         }
-        if (q_is_matrix(e, n)) { q_fmt_matrix(e, n); return; }
+        if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
         for (int64_t i = 0; i < n; i++) {
             if (qe_done()) break;                /* height cap hit — early exit */
             char elem[2048]; elem[0] = '\0';
@@ -1233,7 +1233,7 @@ static void q_fmt_body(ray_t* val) {
 
 /* Bounded append for the krepr assemblers; returns the new write position
  * (reserves 2 bytes for a closing paren + NUL). */
-static size_t q_krepr_cat(char* buf, size_t bufsz, size_t pos, const char* s) {
+static size_t krepr_cat(char* buf, size_t bufsz, size_t pos, const char* s) {
     size_t el = strlen(s);
     if (pos + el + 2 > bufsz) el = bufsz > pos + 2 ? bufsz - pos - 2 : 0;
     memcpy(buf + pos, s, el);
@@ -1249,21 +1249,21 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
     if (val->type == -RAY_STR) {
         if (ray_str_len(val) == 1 && bufsz > 1) {
             buf[0] = ',';
-            q_fmt_qstring(val, buf + 1, bufsz - 1);
+            fmt_qstring(val, buf + 1, bufsz - 1);
         } else
-            q_fmt_qstring(val, buf, bufsz);
+            fmt_qstring(val, buf, bufsz);
         return;
     }
     if (val->type == -RAY_CHARV) {                 /* char atom: "a" */
-        q_fmt_qtext((const char*)&val->u8, 1, buf, bufsz);
+        fmt_qtext((const char*)&val->u8, 1, buf, bufsz);
         return;
     }
     if (val->type == RAY_CHARV) {                  /* charv: "abc" / ,"a" */
         if (ray_len(val) == 1 && bufsz > 1) {
             buf[0] = ',';
-            q_fmt_qtext((const char*)ray_data(val), 1, buf + 1, bufsz - 1);
+            fmt_qtext((const char*)ray_data(val), 1, buf + 1, bufsz - 1);
         } else
-            q_fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
+            fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
         return;
     }
     if (val->type == RAY_DICT) {
@@ -1308,7 +1308,7 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             if (i && pos + 1 < bufsz) buf[pos++] = ';';
             char eb[2048]; eb[0] = '\0';
             q_fmt_krepr(e[i], eb, sizeof eb);
-            pos = q_krepr_cat(buf, bufsz, pos, eb);
+            pos = krepr_cat(buf, bufsz, pos, eb);
         }
         if (pos + 1 < bufsz) buf[pos++] = ')';
         buf[pos] = '\0';
@@ -1329,13 +1329,13 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             char eb[2048];
             if (n > 1 && it->type == -RAY_STR && ray_str_len(it) == 1) {
                 eb[0] = ',';
-                q_fmt_qstring(it, eb + 1, sizeof eb - 1);
+                fmt_qstring(it, eb + 1, sizeof eb - 1);
             } else if (it->type == RAY_CHARV || it->type == -RAY_CHARV) {
                 q_fmt_krepr(it, eb, sizeof eb);
             } else
-                q_fmt_qstring(it, eb, sizeof eb);
+                fmt_qstring(it, eb, sizeof eb);
             ray_release(it);
-            pos = q_krepr_cat(buf, bufsz, pos, eb);
+            pos = krepr_cat(buf, bufsz, pos, eb);
         }
         if (n > 1 && pos + 1 < bufsz) buf[pos++] = ')';
         buf[pos] = '\0';

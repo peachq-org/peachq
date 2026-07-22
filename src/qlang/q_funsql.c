@@ -23,7 +23,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-static void q_select_rename_temps(ray_t* tbl, ray_t* tempnames, ray_t* realnames) {
+static void select_rename_temps(ray_t* tbl, ray_t* tempnames, ray_t* realnames) {
     if (!tbl || tbl->type != RAY_TABLE ||
         !tempnames || tempnames->type != RAY_SYM ||
         !realnames || realnames->type != RAY_SYM)
@@ -74,7 +74,7 @@ ray_t* q_select_exec(ray_t** args, int64_t n) {
     ray_t* keys = (n >= 2) ? args[1] : NULL;
     int64_t nk = (keys && keys->type == RAY_SYM) ? ray_len(keys) : 0;
     if (nk == 0 || res->type != RAY_TABLE) {
-        if (n >= 4) q_select_rename_temps(res, args[2], args[3]);
+        if (n >= 4) select_rename_temps(res, args[2], args[3]);
         return res;
     }
 
@@ -102,7 +102,7 @@ ray_t* q_select_exec(ray_t** args, int64_t n) {
     ray_release(res);
     if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
     if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
-    if (n >= 4) q_select_rename_temps(vt, args[2], args[3]);
+    if (n >= 4) select_rename_temps(vt, args[2], args[3]);
     ray_t* keyed = ray_dict_new(kt, vt);   /* consumes kt, vt */
     return funsql_sort_keyed(keyed);       /* kdb `by`: groups ascending by key (consumes) */
 }
@@ -1103,7 +1103,7 @@ static ray_t* q_funsql_bang_impl(ray_t* t, ray_t* c, ray_t* b, ray_t* a) {
 
 /* SPECIAL-FORM entry points: evaluate the four operands (mapping `()`→null),
  * dispatch, then release the evaluated operands. */
-static ray_t* q_funsql_dispatch(ray_t** args, int64_t n,
+static ray_t* funsql_dispatch(ray_t** args, int64_t n,
                                 ray_t* (*impl)(ray_t*, ray_t*, ray_t*, ray_t*),
                                 const char* glyph) {
     if (n != 4) return ray_error("rank", "%s[t;c;b;a]: expects 4 args, got %lld", glyph, (long long)n);
@@ -1122,10 +1122,10 @@ static ray_t* q_funsql_dispatch(ray_t** args, int64_t n,
 }
 
 ray_t* q_funsql_select(ray_t** args, int64_t n) {
-    return q_funsql_dispatch(args, n, q_funsql_select_impl, "?");
+    return funsql_dispatch(args, n, q_funsql_select_impl, "?");
 }
 ray_t* q_funsql_bang(ray_t** args, int64_t n) {
-    return q_funsql_dispatch(args, n, q_funsql_bang_impl, "!");
+    return funsql_dispatch(args, n, q_funsql_bang_impl, "!");
 }
 
 /* String `delete` statement executor.  Lowered from the symbolic (!;`t;c;0b;a)
