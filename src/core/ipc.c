@@ -81,9 +81,9 @@
 #include "mem/sys.h"
 #include "ops/ops.h"
 #include "store/journal.h"
-#include "qlang/q_wire.h"
-#include "qlang/q_http.h"
-#include "qlang/q_ws.h"
+#include "qlang/net/q_wire.h"
+#include "qlang/net/q_http.h"
+#include "qlang/net/q_ws.h"
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
