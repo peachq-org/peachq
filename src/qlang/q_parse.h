@@ -27,6 +27,11 @@ ray_t* q_parse(const char* src);
  * q_parse — nodes are rewritten in place / swapped. */
 ray_t* q_lower(ray_t* ast);
 
+/* Test probe (test/q_qsql_normalize.c): scan `src` as a bare clause phrase in
+ * scan-context `ctx`, normalized to the `verb` slot shape.  Not on any runtime
+ * path.  Returns OWNED. */
+ray_t* q_qsql_normalize_probe(const char* src, int ctx, int verb);
+
 /* True iff the (pre-lower) statement's RESULT is an assignment's — the q
  * console prints nothing for `a:5` (statement sequences check their LAST
  * statement).  Consulted by the REPL/qdoc before printing. */
