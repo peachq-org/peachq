@@ -191,7 +191,7 @@ static void run_example(const char* input, const char* expect,
     if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
     char errcls[8];
     int want_error = expect_is_error(expect, errcls, sizeof errcls);
-    int is_assign = q_ast_is_assign(ast);   /* pre-lower shape */
+    int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) {
         if (want_error && error_row_matches(ast, errcls)) {
@@ -276,7 +276,7 @@ static void run_example(const char* input, const char* expect,
     }
 }
 
-qdoc_result_t qdoc_run_file(const char* path, qdoc_mode_t mode,
+qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
                             int verbose, FILE* out) {
     qdoc_result_t r = {0};
 

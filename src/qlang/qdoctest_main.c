@@ -127,7 +127,7 @@ static int is_doc(const char* path) {
 /* Run one file against a fresh runtime; verbose goes to `out`. */
 static qdoc_result_t run_file(const char* path, FILE* out) {
     ray_runtime_t* rt = q_runtime_create(0, NULL);   /* fresh per file */
-    qdoc_result_t r = qdoc_run_file(path, g_mode, g_verbose || out != stdout,
+    qdoc_result_t r = q_qdoc_run_file(path, g_mode, g_verbose || out != stdout,
                                     out);
     if (rt) q_runtime_destroy(rt);
     return r;
