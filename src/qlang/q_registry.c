@@ -60,12 +60,12 @@ static bool    g_building = false;   /* debug re-entry guard (see header note) *
 
 /* ---- shared q-name sanitization (.Q.id + construction clash repair) ------ */
 
-static int q_name_char_ok(char c) {
+static int name_char_ok(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
 }
 
-static int q_name_is_keyword_reserved(int64_t sym_id) {
+static int name_is_keyword_reserved(int64_t sym_id) {
     ray_t* s = ray_sym_str(sym_id);
     if (!s) return 0;
     const char* p = ray_str_ptr(s);
@@ -82,14 +82,14 @@ static int q_name_is_keyword_reserved(int64_t sym_id) {
     return hit;
 }
 
-static int q_name_prev_contains(const int64_t* previous, int64_t n_previous,
+static int name_prev_contains(const int64_t* previous, int64_t n_previous,
                                 int64_t sym_id) {
     for (int64_t i = 0; i < n_previous; i++)
         if (previous[i] == sym_id) return 1;
     return 0;
 }
 
-static int64_t q_name_append_suffix(int64_t sym_id, int64_t suffix) {
+static int64_t name_append_suffix(int64_t sym_id, int64_t suffix) {
     ray_t* s = ray_sym_str(sym_id);
     if (!s) return sym_id;
     const char* p = ray_str_ptr(s);
@@ -119,7 +119,7 @@ int64_t q_name_sanitize(int64_t sym_id) {
     if (!buf) { ray_release(s); return ray_sym_intern_runtime("a", 1); }
     size_t w = 0;
     for (size_t i = 0; i < n; i++)
-        if (q_name_char_ok(p[i])) buf[w++] = p[i];
+        if (name_char_ok(p[i])) buf[w++] = p[i];
     if (w == 0) buf[w++] = 'a';
     if (buf[0] == '_' || (buf[0] >= '0' && buf[0] <= '9')) {
         memmove(buf + 1, buf, w);
@@ -135,12 +135,12 @@ int64_t q_name_sanitize(int64_t sym_id) {
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous,
                      int check_reserved) {
     int64_t base = sym_id;
-    if (check_reserved && q_name_is_keyword_reserved(base))
-        base = q_name_append_suffix(base, 1);
-    if (!q_name_prev_contains(previous, n_previous, base)) return base;
+    if (check_reserved && name_is_keyword_reserved(base))
+        base = name_append_suffix(base, 1);
+    if (!name_prev_contains(previous, n_previous, base)) return base;
     for (int64_t i = 1; i < INT64_MAX; i++) {
-        int64_t cand = q_name_append_suffix(base, i);
-        if (!q_name_prev_contains(previous, n_previous, cand)) return cand;
+        int64_t cand = name_append_suffix(base, i);
+        if (!name_prev_contains(previous, n_previous, cand)) return cand;
     }
     return base;
 }
@@ -282,7 +282,7 @@ ray_t* q_str_in(ray_t* x) {
  * rc==1, else a fresh list); DICT -> values converted (fresh dict unless
  * nothing converts, or values are a TABLE = keyed table -> untouched); TABLE
  * and everything else pass through (columns stay pooled below the boundary). */
-static bool q_charv_out_needed(ray_t* r) {
+static bool charv_out_needed(ray_t* r) {
     if (!r) return false;
     if (ray_is_lazy(r)) return false;    /* deferred DAG values: never walk */
     if (r->type == -RAY_STR || r->type == RAY_STR) return true;
@@ -291,11 +291,11 @@ static bool q_charv_out_needed(ray_t* r) {
             * their -RAY_STR source is an internal carrier, never a value */
         ray_t** e = (ray_t**)ray_data(r);
         for (int64_t i = 0; i < ray_len(r); i++)
-            if (q_charv_out_needed(e[i])) return true;
+            if (charv_out_needed(e[i])) return true;
     }
     if (r->type == RAY_DICT) {
         ray_t* vals = ray_dict_vals(r);
-        return vals && vals->type != RAY_TABLE && q_charv_out_needed(vals);
+        return vals && vals->type != RAY_TABLE && charv_out_needed(vals);
     }
     return false;
 }
@@ -324,7 +324,7 @@ ray_t* q_charv_out(ray_t* r) {
         ray_release(r);
         return out;
     }
-    if (r->type == RAY_LIST && q_charv_out_needed(r)) {
+    if (r->type == RAY_LIST && charv_out_needed(r)) {
         int64_t n = ray_len(r);
         ray_t** e = (ray_t**)ray_data(r);
         if (r->rc == 1) {                        /* sole owner: rewrite in place */
@@ -350,7 +350,7 @@ ray_t* q_charv_out(ray_t* r) {
     }
     if (r->type == RAY_DICT) {
         ray_t* vals = ray_dict_vals(r);          /* borrowed */
-        if (vals && vals->type != RAY_TABLE && q_charv_out_needed(vals)) {
+        if (vals && vals->type != RAY_TABLE && charv_out_needed(vals)) {
             ray_retain(vals);
             ray_t* nv = q_charv_out(vals);       /* consumes our retain */
             if (RAY_IS_ERR(nv)) { ray_release(r); return nv; }
@@ -436,7 +436,7 @@ static ray_err_t add_entry(const char* name, q_valence_t valence,
  * spelling-less values (scan/list) have no provenance and fall through to
  * the env path — documented, not silently wrong (env scan/list exist). */
 
-static int q_serde_fn_writer(ray_t* fn, char out[16]) {
+static int serde_fn_writer(ray_t* fn, char out[16]) {
     if (!fn || !(fn->attrs & RAY_FN_Q_LOWER)) return 0;
     q_provenance_t pv;
     if (!q_registry_provenance(fn, &pv) || !pv.is_wrapper) return 0;
@@ -444,7 +444,7 @@ static int q_serde_fn_writer(ray_t* fn, char out[16]) {
     return n > 0 && n < 16;
 }
 
-static ray_t* q_serde_fn_reader(const char* name) {
+static ray_t* serde_fn_reader(const char* name) {
     if (!name || name[0] != 'q' || name[1] != '!') return NULL;
     const char* sp = name + 2;
     const char* bang = strrchr(sp, '!');
@@ -609,7 +609,7 @@ ray_err_t q_registry_init(void) {
     }
     g_building = false;
     g_inited   = true;
-    ray_serde_set_fn_hooks(q_serde_fn_writer, q_serde_fn_reader);
+    ray_serde_set_fn_hooks(serde_fn_writer, serde_fn_reader);
     return RAY_OK;
 }
 

@@ -31,7 +31,7 @@
 /* Parse+lower+eval a q source string to a value (runtime-only; the registry is
  * warm here — rule 6 forbids q_parse in BUILDERS, not runtime wrappers, per the
  * q_select_exec precedent).  Returns owned value or RAY_ERROR. */
-static ray_t* q_value_eval_str(ray_t* strv) {
+static ray_t* value_eval_str(ray_t* strv) {
     const char* sp = ray_str_ptr(strv);
     size_t sl = ray_str_len(strv);
     char* s = malloc(sl + 1);
@@ -52,7 +52,7 @@ static ray_t* q_value_eval_str(ray_t* strv) {
  * the variable it names").  Order: env (user vars + builtins) for the full name;
  * else strip a leading `.q.` and retry env; else the registry keyword table
  * (monadic then dyadic).  Returns a BORROWED ref (env/registry own it) or NULL. */
-static ray_t* q_value_resolve_sym(ray_t* symv) {
+static ray_t* value_resolve_sym(ray_t* symv) {
     if (!symv || symv->type != -RAY_SYM) return NULL;
     ray_t* s = ray_sym_str(symv->i64);
     if (!s) return NULL;
@@ -75,7 +75,7 @@ static ray_t* q_value_resolve_sym(ray_t* symv) {
 
 /* Owned-resolution variant for `get`/`value`/`key` sym arms — the q-namespace
  * views SYNTHESIZE fresh dicts, so this returns OWNED refs on every path (the
- * borrowed q_value_resolve_sym contract stays untouched):
+ * borrowed value_resolve_sym contract stays untouched):
  *   `.        -> root context dict (user vars, no :: placeholder)
  *   `.foo     -> context dict with the leading :: placeholder
  *   `..name   -> the ROOT variable `name` (k-style root qualification)
@@ -121,7 +121,7 @@ ray_t* q_value_resolve_sym_owned(ray_t* symv) {
         return v;
     }
     ray_release(s);
-    ray_t* v = q_value_resolve_sym(symv);         /* borrowed */
+    ray_t* v = value_resolve_sym(symv);         /* borrowed */
     if (!v) return NULL;
     ray_retain(v);
     return v;                                     /* owned from here on */
@@ -136,7 +136,7 @@ ray_t* q_value_resolve_owned(ray_t* symv) {
  * apply: args are DATA — q_call_n routes callables (call_fn1/2, carrier/lambda-
  * aware) and INDEXES a noun head, never re-evaluating the args.  argc==0 => the
  * head itself (retained).  Returns owned result or RAY_ERROR. */
-static ray_t* q_value_apply_head(ray_t* head, ray_t** args, int64_t argc) {
+static ray_t* value_apply_head(ray_t* head, ray_t** args, int64_t argc) {
     if (!head) return ray_error("type", "value: nil head");
     if (argc == 0) { ray_retain(head); return head; }
     if (argc > 64) return ray_error("limit", "value: too many args");
@@ -148,7 +148,7 @@ static ray_t* q_value_apply_head(ray_t* head, ray_t** args, int64_t argc) {
  * one of these is a DERIVED FUNCTION (value -> the iterator's argument); over
  * anything else it is a plain PROJECTION (value -> function + bound args).  The
  * env HOF ids are interned once (lazy), mirroring q_deriv's marker cache. */
-static int q_value_is_adverb_hof(ray_t* base) {
+static int value_is_adverb_hof(ray_t* base) {
     if (!base) return 0;
     /* Re-intern the env HOF ids per call: the sym table is recreated per runtime
      * (q_runtime_destroy tears it down), so a `static` id cache would go STALE for
@@ -196,7 +196,7 @@ ray_t* q_value_wrap(ray_t* x) {
         ray_t* base   = q_deriv_base(x);              /* borrowed, idx 1 */
         int64_t n     = ray_len(x);
         ray_t** e     = (ray_t**)ray_data(x);
-        if (q_value_is_adverb_hof(base)) {
+        if (value_is_adverb_hof(base)) {
             /* derived function -> the argument of the iterator (idx 4).  The
              * adverb-derived carrier always binds EXACTLY the inner value there
              * (q_lower builds it as `(hof; V, hole)`); assert the invariant so a
@@ -231,11 +231,11 @@ ray_t* q_value_wrap(ray_t* x) {
     }
 
     /* ---- string / char vector -> evaluate as q source ---- */
-    if (x->type == -RAY_STR) return q_value_eval_str(x);
+    if (x->type == -RAY_STR) return value_eval_str(x);
     if (x->type == RAY_CHARV || x->type == -RAY_CHARV) {
         ray_t* s = q_str_of_charv(x);
         if (!s || RAY_IS_ERR(s)) return s ? s : ray_error("oom", NULL);
-        ray_t* r = q_value_eval_str(s);
+        ray_t* r = value_eval_str(s);
         ray_release(s);
         return r;
     }
@@ -249,7 +249,7 @@ ray_t* q_value_wrap(ray_t* x) {
         if (head && head->type == -RAY_SYM) {         /* form 2: symbol head */
             ray_t* hv = q_value_resolve_sym_owned(head);  /* OWNED (or NULL) */
             if (!hv) return ray_error("name", "value: unresolved symbol head");
-            ray_t* r = q_value_apply_head(hv, e + 1, n - 1);
+            ray_t* r = value_apply_head(hv, e + 1, n - 1);
             ray_release(hv);
             return r;
         }
@@ -257,14 +257,14 @@ ray_t* q_value_wrap(ray_t* x) {
                      head->type == -RAY_CHARV)) {
             ray_t* hs = head->type != -RAY_STR ? q_str_of_charv(head)
                                                : (ray_retain(head), head);
-            ray_t* hv = q_value_eval_str(hs);         /* form 3: string head */
+            ray_t* hv = value_eval_str(hs);         /* form 3: string head */
             ray_release(hs);
             if (!hv || RAY_IS_ERR(hv)) return hv ? hv : ray_error("parse", NULL);
-            ray_t* r = q_value_apply_head(hv, e + 1, n - 1);
+            ray_t* r = value_apply_head(hv, e + 1, n - 1);
             ray_release(hv);
             return r;
         }
-        return q_value_apply_head(head, e + 1, n - 1);  /* form 1: value head */
+        return value_apply_head(head, e + 1, n - 1);  /* form 1: value head */
     }
 
     /* ---- dict -> vals (collapsed) ---- */
