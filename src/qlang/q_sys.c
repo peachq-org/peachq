@@ -3,7 +3,7 @@
  * region) feeding a SWITCH on the command char (the q_dotz.c z_slot_ptr idiom),
  * each case calling its handler with only the arguments it needs.  A handler
  * returns an OWNED value (NULL = silent) or an OWNED error — including `\\`
- * (q_exit) and the unknown-token shell miss, both gated by the g_own_process
+ * (q_sys_exit) and the unknown-token shell miss, both gated by the g_own_process
  * capability rather than by the caller.  \d and \v/\f/\a lean on q_ns.c
  * (context state + member enumeration); \S owns its seed state here. */
 #define _POSIX_C_SOURCE 200809L
@@ -133,10 +133,10 @@ void q_sys_own_process(bool on) { g_own_process = on ? 1 : 0; }
 
 /* See q_sys.h.  `.z.exit` runs AFTER the console is restored (its 0N! output
  * must land on a cooked terminal) and cannot cancel or rewrite the exit: a
- * reentrant q_exit from inside the handler skips it and exits with the
+ * reentrant q_sys_exit from inside the handler skips it and exits with the
  * ORIGINAL code (dotz.md: "The handler cannot cancel the exit"). */
 static int g_exit_code;
-void q_exit(int code) {
+void q_sys_exit(int code) {
     if (!g_own_process) return;
     if (g_exiting) exit(g_exit_code);
     g_exiting  = 1;
@@ -936,9 +936,9 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 'z': case 'E': case 'r': case 'T':
             case 'u': case 'x': case '1': case '2': case '_':
                 return h_getset(alen);
-            /* \\ quit — q_exit is capability-gated (a real process exits firing
+            /* \\ quit — q_sys_exit is capability-gated (a real process exits firing
              * .z.exit; an embedder returns silently, kdb-true either way). */
-            case '\\': q_exit(0); return NULL;
+            case '\\': q_sys_exit(0); return NULL;
         }
     } else if (cmd_len == 2 && cmd[0] == 't' && cmd[1] == 's') {
         return h_ts(alen, rest, restlen, rep);                   /* time and space      */

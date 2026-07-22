@@ -969,7 +969,7 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
  * Contract: keytbl must contain ALL of kt's key columns by name ('type
  * otherwise); extra keytbl columns are ignored; result preserves keytbl row
  * order (first match per row); a miss yields a null row. */
-ray_t* q_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
+ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
     if (!q_table_is_keyed(kt) || !keytbl || keytbl->type != RAY_TABLE)
         return ray_error("type", "index: keyed-table lookup expects a key table");
     ray_t* kk = ray_dict_keys(kt);                         /* borrowed */

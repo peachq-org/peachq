@@ -33,7 +33,7 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo);
  * stdin_tty != 0 drives the line-editor console (same behaviour as
  * q_repl_run's interactive mode); 0 drives the piped transcript loop (prompt
  * + echo, identical output shape to the fgets loop).  `\\` / `exit x`
- * terminate inside the eval (q_exit).  On stdin EOF: when have_listener != 0
+ * terminate inside the eval (q_sys_exit).  On stdin EOF: when have_listener != 0
  * the loop keeps running so IPC clients stay served (the daemon shape);
  * otherwise the loop exits.
  *
@@ -62,6 +62,6 @@ void q_repl_mark_listener_active(void);
  * leading-whitespace trim — an indented line is not a prompt.  A console/loader
  * affordance, applied at line-intake (run_one_line), never in the parser.
  * Exposed for direct unit testing (test/q_repl_strip.c). */
-const char* q_strip_repl_prompt(const char* s);
+const char* q_repl_strip_prompt(const char* s);
 
 #endif /* Q_REPL_H */
