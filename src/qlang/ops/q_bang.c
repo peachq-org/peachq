@@ -16,7 +16,8 @@
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/net/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
-#include "qlang/q_fmt.h"        /* q_fmt_krepr / q_console_write — `-3!`, .Q.s1, 0N! */
+#include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
+#include "qlang/q_console.h"    /* q_console_write — 0N! */
 #include <rayforce.h>
 #include <stdint.h>
 #include <stdio.h>

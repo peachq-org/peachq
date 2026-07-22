@@ -22,7 +22,7 @@
 #include "qlang/q_deriv.h"      /* q_deriv_kind_of (carrier arm, Task 5) */
 #include "lang/eval.h"          /* ray_at_fn */
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
-#include "qlang/q_fmt.h"        /* q_console_write — 1/-1/2/-2 console handles */
+#include "qlang/q_console.h"    /* q_console_write — 1/-1/2/-2 console handles */
 #include "core/ipc.h"           /* ray_ipc_handle_of_fd — q true-fd handle -> selector id */
 #include "qlang/net/q_ws.h"         /* q_ws_client_open — ws:// hsym-apply */
 #include "qlang/net/q_http_client.h" /* q_http_raw_client — http:// hsym-apply */
