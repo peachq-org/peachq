@@ -38,4 +38,18 @@ ray_t* q_dotq_sha1_fn(ray_t* x);
  * q_count_long is the int64 specialization for callers wanting the number. */
 ray_t* q_count_fn(ray_t* x);
 int64_t q_count_long(ray_t* x);
+
+/* Type letter of one value as `.Q.ty`/`meta` see it — the type-fact kernel
+ * kept here; ops/q_dotq.c and ops/q_table.c consume it. */
+char q_ty_char(ray_t* x);
+
+/* The .Q introspection surface (ops/q_dotq.c) + table introspection
+ * (ops/q_table.c): bound by q_builtins_register. */
+ray_t* q_dotq_ty_fn(ray_t* x);
+ray_t* q_dotq_qt_fn(ray_t* x);
+ray_t* q_dotq_qp_fn(ray_t* x);
+ray_t* q_dotq_s_fn(ray_t* x);
+ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs);
+ray_t* q_cols_fn(ray_t* x);
+ray_t* q_meta_fn(ray_t* x);
 #endif /* Q_BUILTINS_H */
