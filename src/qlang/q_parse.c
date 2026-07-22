@@ -19,7 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_parse.h"
-#include "qlang/q_scan.h"    /* q_scan_temporal, num_el — literal magnitudes */
+#include "qlang/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ns.h"       /* q_ns_current, q_ns_is_unqualifiable */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
@@ -245,11 +245,11 @@ static Tokens g_toks = { NULL, 0 };
  * if any magnitude was fractional).  Nulls / integer infinities are Specials
  * that widen to the chosen type's sentinel. */
 
-/* el_kind/num_el live in q_scan.h (the scanner owns the element type). */
+/* q_tok_el_kind/q_tok_el live in q_tok.h (the scanner owns the element type). */
 
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
  * float context.  Returns bytes consumed (0 = not a Special). */
-static int scan_special(const char *s, int p, num_el *out) {
+static int scan_special(const char *s, int p, q_tok_el *out) {
     int neg = (s[p] == '-');
     int q = p + (neg ? 1 : 0);
     if (s[q] != '0') return 0;
@@ -259,24 +259,24 @@ static int scan_special(const char *s, int p, num_el *out) {
     if (neg && is_null) return 0;            /* -0N is not a literal */
     out->forces_float = (k == 'n' || k == 'w');
     out->i = 0; out->f = 0.0;
-    out->kind = is_null ? EL_NULL : (neg ? EL_NINF : EL_PINF);
+    out->kind = is_null ? Q_TOK_EL_NULL : (neg ? Q_TOK_EL_NINF : Q_TOK_EL_PINF);
     return (q + 2) - p;
 }
 
 
 /* Scan one magnitude at src[*p] into *out; return 1 on success, 0 on no match. */
-static int scan_one_num(const char *src, int *p, num_el *out) {
+static int scan_one_num(const char *src, int *p, q_tok_el *out) {
     out->forces_float = 0;
     int used = scan_special(src, *p, out);
     if (used) { *p += used; return 1; }
 
     /* Temporal magnitudes (date/timestamp/datetime/month/time/timespan/
-     * second/minute) — q_scan.c is the single home; a malformed shape dies
+     * second/minute) — q_tok.c is the single home; a malformed shape dies
      * here with the scanner's message (invalid civil dates never fall back
      * to the float mess). */
     {
         const char *terr = NULL;
-        int tm = q_scan_temporal(src, p, out, &terr);
+        int tm = q_tok_temporal(src, p, out, &terr);
         if (tm < 0) q_die(terr);
         if (tm) return 1;
     }
@@ -302,54 +302,54 @@ static int scan_one_num(const char *src, int *p, num_el *out) {
     if (is_float) {
         double v; size_t u = ray_parse_f64(src + *p, rem, &v);
         if (u == 0) return 0;
-        *p += (int)u; out->kind = EL_FLOAT; out->f = v; out->forces_float = 1;
+        *p += (int)u; out->kind = Q_TOK_EL_FLOAT; out->f = v; out->forces_float = 1;
         return 1;
     }
     int64_t v; size_t u = ray_parse_i64(src + *p, rem, &v);
     if (u == 0) return 0;
-    *p += (int)u; out->kind = EL_INT; out->i = v;
+    *p += (int)u; out->kind = Q_TOK_EL_INT; out->i = v;
     return 1;
 }
 
 /* Widen the long sentinels/inf to a narrow int width (2 or 4 bytes). */
-static int64_t narrow_special(el_kind k, int width) {
+static int64_t narrow_special(q_tok_el_kind k, int width) {
     int64_t vmin = (width == 2) ? INT16_MIN : (width == 4) ? INT32_MIN : INT64_MIN;
     int64_t vmax = (width == 2) ? INT16_MAX : (width == 4) ? INT32_MAX : INT64_MAX;
-    if (k == EL_NULL) return vmin;
-    if (k == EL_PINF) return vmax;
-    return -vmax;   /* EL_NINF */
+    if (k == Q_TOK_EL_NULL) return vmin;
+    if (k == Q_TOK_EL_PINF) return vmax;
+    return -vmax;   /* Q_TOK_EL_NINF */
 }
 
-/* Resolve one element to an int64 in the given integer width.  EL_DATE holds
- * its day count in .i (only reachable in the width-4 date context); EL_MONTH
+/* Resolve one element to an int64 in the given integer width.  Q_TOK_EL_DATE holds
+ * its day count in .i (only reachable in the width-4 date context); Q_TOK_EL_MONTH
  * holds its month payload in .i (only reachable in the width-4 month
  * context — everywhere else it reverts to its float twin first). */
-static int64_t el_to_int(const num_el *e, int width) {
-    if (e->kind == EL_INT || e->kind == EL_DATE || e->kind == EL_TIME ||
-        e->kind == EL_TS || e->kind == EL_MONTH || e->kind == EL_MINUTE ||
-        e->kind == EL_SECOND || e->kind == EL_TIMESPAN) return e->i;
-    if (e->kind == EL_FLOAT) return (int64_t)e->f;
+static int64_t el_to_int(const q_tok_el *e, int width) {
+    if (e->kind == Q_TOK_EL_INT || e->kind == Q_TOK_EL_DATE || e->kind == Q_TOK_EL_TIME ||
+        e->kind == Q_TOK_EL_TS || e->kind == Q_TOK_EL_MONTH || e->kind == Q_TOK_EL_MINUTE ||
+        e->kind == Q_TOK_EL_SECOND || e->kind == Q_TOK_EL_TIMESPAN) return e->i;
+    if (e->kind == Q_TOK_EL_FLOAT) return (int64_t)e->f;
     return narrow_special(e->kind, width);
 }
 
-/* Resolve one element to a double (float context).  EL_MONTH must return its
+/* Resolve one element to a double (float context).  Q_TOK_EL_MONTH must return its
  * float TWIN (.f), not the month payload — a bare `2000.01` is the float
  * 2000.01, and the payload (0) would silently replace it (review C1).
- * EL_PINF/EL_NINF (`0w`/`-0w`) PARSE but canonicalize to the float null —
+ * Q_TOK_EL_PINF/Q_TOK_EL_NINF (`0w`/`-0w`) PARSE but canonicalize to the float null —
  * the single-null float model (owner ruling 2026-07-09): no live infinity is
  * ever created, exactly the datetime 0Wz -> 0Nz precedent.  Display is `0n`
  * where kdb shows `0w` (documented divergence, cases.tsv + ARCHITECTURE.md). */
-static double el_to_float(const num_el *e) {
-    if (e->kind == EL_NULL) return NULL_F64;
-    if (e->kind == EL_PINF || e->kind == EL_NINF) return NULL_F64;
-    if (e->kind == EL_MONTH) return e->f;
-    return (e->kind == EL_FLOAT) ? e->f : (double)e->i;
+static double el_to_float(const q_tok_el *e) {
+    if (e->kind == Q_TOK_EL_NULL) return NULL_F64;
+    if (e->kind == Q_TOK_EL_PINF || e->kind == Q_TOK_EL_NINF) return NULL_F64;
+    if (e->kind == Q_TOK_EL_MONTH) return e->f;
+    return (e->kind == Q_TOK_EL_FLOAT) ? e->f : (double)e->i;
 }
 
 /* True iff this element lands on the float NULL in a float context (a real
  * null OR a canonicalized infinity) — drives the vector null bitmap. */
-static int el_float_is_null(const num_el *e) {
-    return e->kind == EL_NULL || e->kind == EL_PINF || e->kind == EL_NINF;
+static int el_float_is_null(const q_tok_el *e) {
+    return e->kind == Q_TOK_EL_NULL || e->kind == Q_TOK_EL_PINF || e->kind == Q_TOK_EL_NINF;
 }
 
 /* Read an optional trailing type letter (b/h/i/j/e/f, plus gated d) at
@@ -365,25 +365,25 @@ static int el_float_is_null(const num_el *e) {
  * 0Wp, -0Wp; plain-int forms like kdb's `0p`/`42p` are deferred with the
  * same no-churn rationale). */
 static void read_type_letter(const char *src, int *p, char *letter,
-                             const num_el *last) {
+                             const q_tok_el *last) {
     char c = src[*p];
-    int date_ok = last && (last->kind == EL_DATE || last->kind == EL_NULL ||
-                           last->kind == EL_PINF || last->kind == EL_NINF);
-    int guid_ok = last && last->kind == EL_NULL;   /* only 0Ng (guid has no inf) */
-    int time_ok = last && (last->kind == EL_TIME || last->kind == EL_NULL ||
-                           last->kind == EL_PINF || last->kind == EL_NINF);
-    int ts_ok = last && (last->kind == EL_TS || last->kind == EL_NULL ||
-                         last->kind == EL_PINF || last->kind == EL_NINF);
-    int month_ok = last && (last->kind == EL_MONTH || last->kind == EL_NULL ||
-                            last->kind == EL_PINF || last->kind == EL_NINF);
-    int minute_ok = last && (last->kind == EL_MINUTE || last->kind == EL_NULL ||
-                             last->kind == EL_PINF || last->kind == EL_NINF);
-    int second_ok = last && (last->kind == EL_SECOND || last->kind == EL_NULL ||
-                             last->kind == EL_PINF || last->kind == EL_NINF);
-    int timespan_ok = last && (last->kind == EL_TIMESPAN || last->kind == EL_NULL ||
-                               last->kind == EL_PINF || last->kind == EL_NINF);
-    int dt_ok = last && (last->kind == EL_DT || last->kind == EL_NULL ||
-                         last->kind == EL_PINF || last->kind == EL_NINF);
+    int date_ok = last && (last->kind == Q_TOK_EL_DATE || last->kind == Q_TOK_EL_NULL ||
+                           last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
+    int guid_ok = last && last->kind == Q_TOK_EL_NULL;   /* only 0Ng (guid has no inf) */
+    int time_ok = last && (last->kind == Q_TOK_EL_TIME || last->kind == Q_TOK_EL_NULL ||
+                           last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
+    int ts_ok = last && (last->kind == Q_TOK_EL_TS || last->kind == Q_TOK_EL_NULL ||
+                         last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
+    int month_ok = last && (last->kind == Q_TOK_EL_MONTH || last->kind == Q_TOK_EL_NULL ||
+                            last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
+    int minute_ok = last && (last->kind == Q_TOK_EL_MINUTE || last->kind == Q_TOK_EL_NULL ||
+                             last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
+    int second_ok = last && (last->kind == Q_TOK_EL_SECOND || last->kind == Q_TOK_EL_NULL ||
+                             last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
+    int timespan_ok = last && (last->kind == Q_TOK_EL_TIMESPAN || last->kind == Q_TOK_EL_NULL ||
+                               last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
+    int dt_ok = last && (last->kind == Q_TOK_EL_DT || last->kind == Q_TOK_EL_NULL ||
+                         last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
     if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
               (c == 'g' && guid_ok) || (c == 't' && time_ok) ||
               (c == 'p' && ts_ok) || (c == 'm' && month_ok) ||
@@ -444,7 +444,7 @@ static ray_t *scan_byte_literal(const char *src, int *p) {
 static ray_t *scan_num_literal(const char *src, int *p) {
     if (byte_lit_starts(src, *p)) return scan_byte_literal(src, p);
     int start = *p;
-    num_el buf[MAX_VEC]; int m = 0;
+    q_tok_el buf[MAX_VEC]; int m = 0;
     char letter = 0;
     if (!scan_one_num(src, p, &buf[m++])) q_die("bad number");
     read_type_letter(src, p, &letter, &buf[m - 1]);
@@ -453,7 +453,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         while (CLASS[(uint8_t)src[sp]] & CL_WS) sp++;
         if (sp == *p) break;                     /* no space => run ended */
         if (byte_lit_starts(src, sp)) break;     /* byte literal: own noun */
-        num_el e; int q = sp;
+        q_tok_el e; int q = sp;
         if (!scan_one_num(src, &q, &e)) break;   /* not another magnitude */
         if (m >= MAX_VEC) q_die("numeric literal too long");
         *p = q; buf[m++] = e;
@@ -476,12 +476,12 @@ static ray_t *scan_num_literal(const char *src, int *p) {
 
     /* Guid context: a `g` suffix on a 0N Special (0Ng).  Guid's only literal is
      * the null (basics/datatypes.md §Guid: "no literal entry for a guid"); every
-     * element must be EL_NULL.  Atom -> typed null (16 zero bytes); a multi-0N
+     * element must be Q_TOK_EL_NULL.  Atom -> typed null (16 zero bytes); a multi-0N
      * run with the g suffix builds an all-null guid vector via the same
      * strand-suffix rule as `1 2h` (derived). */
     if (letter == 'g') {
         for (int i = 0; i < m; i++)
-            if (buf[i].kind != EL_NULL) q_die("bad number");
+            if (buf[i].kind != Q_TOK_EL_NULL) q_die("bad number");
         if (m == 1) return ray_typed_null(-RAY_GUID);
         ray_t *vec = ray_vec_new(RAY_GUID, m);
         if (vec && !RAY_IS_ERR(vec)) {
@@ -494,35 +494,35 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     /* Timestamp context: a `p` suffix (0Np / 0Wp / -0Wp) or any dateDtod
      * magnitude.  kdb timestamp == i64 nanoseconds since 2000.01.01 (the
      * base RAY_TIMESTAMP payload): Specials narrow width-8, a plain int is a
-     * raw ns count, an EL_DATE strand-mate promotes days -> ns (saturating —
+     * raw ns count, an Q_TOK_EL_DATE strand-mate promotes days -> ns (saturating —
      * checked BEFORE the date arm so a mixed date+timestamp strand promotes
      * instead of truncating ns into an i32 date), a fractional magnitude or
-     * an EL_TIME mate dies (unpinned corner: error beats a wrong answer). */
+     * an Q_TOK_EL_TIME mate dies (unpinned corner: error beats a wrong answer). */
     int is_ts = (letter == 'p');
     for (int i = 0; i < m && !is_ts; i++)
-        if (buf[i].kind == EL_TS) is_ts = 1;
+        if (buf[i].kind == Q_TOK_EL_TS) is_ts = 1;
     if (is_ts) {
         for (int i = 0; i < m; i++)
             /* lowercase `0np` is the K-ism synonym of `0Np` — a typed null,
              * not a fractional magnitude (see the date arm below). */
-            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
-                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
-                (buf[i].forces_float && buf[i].kind != EL_NULL))
+            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_TIME ||
+                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
+                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
+                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                 q_die("bad number");
         int64_t t[MAX_VEC];
         for (int i = 0; i < m; i++)
-            t[i] = (buf[i].kind == EL_DATE)
-                 ? q_ts_compose(buf[i].i, 0)
+            t[i] = (buf[i].kind == Q_TOK_EL_DATE)
+                 ? q_calendar_ts_compose(buf[i].i, 0)
                  : el_to_int(&buf[i], 8);
         if (m == 1) {
-            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIMESTAMP);
+            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_TIMESTAMP);
             return ray_timestamp(t[0]);
         }
         ray_t *vec = ray_vec_from_raw(RAY_TIMESTAMP, t, m);
         if (vec && !RAY_IS_ERR(vec)) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
         }
         return vec;
     }
@@ -534,19 +534,19 @@ static ray_t *scan_num_literal(const char *src, int *p) {
      * typed runs).  A fractional magnitude can never be a date. */
     int is_date = (letter == 'd');
     for (int i = 0; i < m && !is_date; i++)
-        if (buf[i].kind == EL_DATE) is_date = 1;
+        if (buf[i].kind == Q_TOK_EL_DATE) is_date = 1;
     if (is_date) {
         for (int i = 0; i < m; i++)
             /* forces_float on a NULL element is just the lowercase `0n` spelling
              * (openq accepts `0nd` as a K-ism synonym of `0Nd`); it is a typed
              * null, not a fractional magnitude, so it does NOT bar the date. */
-            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_TIME ||
-                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
-                (buf[i].forces_float && buf[i].kind != EL_NULL))
+            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_TIME ||
+                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
+                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
+                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                 q_die("bad number");
         if (m == 1) {
-            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_DATE);
+            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_DATE);
             return ray_date(el_to_int(&buf[0], 4));
         }
         int32_t t[MAX_VEC];
@@ -554,7 +554,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         ray_t *vec = ray_vec_from_raw(RAY_DATE, t, m);
         if (vec && !RAY_IS_ERR(vec)) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
         }
         return vec;
     }
@@ -566,18 +566,18 @@ static ray_t *scan_num_literal(const char *src, int *p) {
      * time). */
     int is_time = (letter == 't');
     for (int i = 0; i < m && !is_time; i++)
-        if (buf[i].kind == EL_TIME) is_time = 1;
+        if (buf[i].kind == Q_TOK_EL_TIME) is_time = 1;
     if (is_time) {
         for (int i = 0; i < m; i++)
             /* lowercase `0nt` is the K-ism synonym of `0Nt` — a typed null, not
              * a fractional magnitude (see the date arm above). */
-            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
-                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
-                (buf[i].forces_float && buf[i].kind != EL_NULL))
+            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
+                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
+                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
+                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                 q_die("bad number");
         if (m == 1) {
-            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIME);
+            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_TIME);
             return ray_time(el_to_int(&buf[0], 4));
         }
         int32_t t[MAX_VEC];
@@ -585,31 +585,31 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         ray_t *vec = ray_vec_from_raw(RAY_TIME, t, m);
         if (vec && !RAY_IS_ERR(vec)) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
         }
         return vec;
     }
 
     /* Month context: ONLY the `m` suffix (0Nm / 0Wm / -0Wm / 2000.01m) — a
      * month-shaped magnitude alone is NOT a commitment (bare `2000.01` is the
-     * float; EL_MONTH elements revert to their float twins below).  kdb month
+     * float; Q_TOK_EL_MONTH elements revert to their float twins below).  kdb month
      * == i32 months since 2000.01 (payload (y-2000)*12+(mo-1)): Specials
      * narrow to the width-4 sentinels and a plain int widens as a raw month
      * count (the date-arm rule).  A genuine fractional magnitude or a foreign
      * temporal mate can never be a month. */
     if (letter == 'm') {
         for (int i = 0; i < m; i++)
-            /* EL_MONTH itself carries forces_float=1 (the float-twin machinery)
+            /* Q_TOK_EL_MONTH itself carries forces_float=1 (the float-twin machinery)
              * and is VALID here; lowercase `0nm` is the K-ism null synonym. */
-            if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
-                buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
-                buf[i].kind == EL_MINUTE || buf[i].kind == EL_SECOND ||
-                buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
-                (buf[i].forces_float && buf[i].kind != EL_MONTH &&
-                 buf[i].kind != EL_NULL))
+            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
+                buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
+                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
+                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
+                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_MONTH &&
+                 buf[i].kind != Q_TOK_EL_NULL))
                 q_die("bad number");
         if (m == 1) {
-            if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_MONTH);
+            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_MONTH);
             return ray_month(el_to_int(&buf[0], 4));
         }
         int32_t t[MAX_VEC];
@@ -617,7 +617,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         ray_t *vec = ray_vec_from_raw(RAY_MONTH, t, m);
         if (vec && !RAY_IS_ERR(vec)) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
         }
         return vec;
     }
@@ -630,17 +630,17 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     {
         int is_minute = (letter == 'u');
         for (int i = 0; i < m && !is_minute; i++)
-            if (buf[i].kind == EL_MINUTE) is_minute = 1;
+            if (buf[i].kind == Q_TOK_EL_MINUTE) is_minute = 1;
         if (is_minute) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
-                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
-                    buf[i].kind == EL_MONTH || buf[i].kind == EL_SECOND ||
-                    buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
-                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
+                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
+                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_SECOND ||
+                    buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
+                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                     q_die("bad number");
             if (m == 1) {
-                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_MINUTE);
+                if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_MINUTE);
                 return ray_minute(el_to_int(&buf[0], 4));
             }
             int32_t t[MAX_VEC];
@@ -648,7 +648,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             ray_t *vec = ray_vec_from_raw(RAY_MINUTE, t, m);
             if (vec && !RAY_IS_ERR(vec)) {
                 for (int i = 0; i < m; i++)
-                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                    if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
             }
             return vec;
         }
@@ -659,17 +659,17 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     {
         int is_second = (letter == 'v');
         for (int i = 0; i < m && !is_second; i++)
-            if (buf[i].kind == EL_SECOND) is_second = 1;
+            if (buf[i].kind == Q_TOK_EL_SECOND) is_second = 1;
         if (is_second) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
-                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
-                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
-                    buf[i].kind == EL_TIMESPAN || buf[i].kind == EL_DT ||
-                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
+                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
+                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_MINUTE ||
+                    buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
+                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                     q_die("bad number");
             if (m == 1) {
-                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_SECOND);
+                if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_SECOND);
                 return ray_second(el_to_int(&buf[0], 4));
             }
             int32_t t[MAX_VEC];
@@ -677,7 +677,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             ray_t *vec = ray_vec_from_raw(RAY_SECOND, t, m);
             if (vec && !RAY_IS_ERR(vec)) {
                 for (int i = 0; i < m; i++)
-                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                    if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
             }
             return vec;
         }
@@ -690,25 +690,25 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     {
         int is_timespan = (letter == 'n');
         for (int i = 0; i < m && !is_timespan; i++)
-            if (buf[i].kind == EL_TIMESPAN) is_timespan = 1;
+            if (buf[i].kind == Q_TOK_EL_TIMESPAN) is_timespan = 1;
         if (is_timespan) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
-                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
-                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
-                    buf[i].kind == EL_SECOND || buf[i].kind == EL_DT ||
-                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
+                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
+                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_MINUTE ||
+                    buf[i].kind == Q_TOK_EL_SECOND || buf[i].kind == Q_TOK_EL_DT ||
+                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                     q_die("bad number");
             int64_t t[MAX_VEC];
             for (int i = 0; i < m; i++) t[i] = el_to_int(&buf[i], 8);
             if (m == 1) {
-                if (buf[0].kind == EL_NULL) return ray_typed_null(-RAY_TIMESPAN);
+                if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_TIMESPAN);
                 return ray_timespan(t[0]);
             }
             ray_t *vec = ray_vec_from_raw(RAY_TIMESPAN, t, m);
             if (vec && !RAY_IS_ERR(vec)) {
                 for (int i = 0; i < m; i++)
-                    if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+                    if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
             }
             return vec;
         }
@@ -725,29 +725,29 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     {
         int is_dt = (letter == 'z');
         for (int i = 0; i < m && !is_dt; i++)
-            if (buf[i].kind == EL_DT) is_dt = 1;
+            if (buf[i].kind == Q_TOK_EL_DT) is_dt = 1;
         if (is_dt) {
             for (int i = 0; i < m; i++)
-                if (buf[i].kind == EL_FLOAT || buf[i].kind == EL_DATE ||
-                    buf[i].kind == EL_TIME || buf[i].kind == EL_TS ||
-                    buf[i].kind == EL_MONTH || buf[i].kind == EL_MINUTE ||
-                    buf[i].kind == EL_SECOND || buf[i].kind == EL_TIMESPAN ||
-                    (buf[i].forces_float && buf[i].kind != EL_NULL))
+                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
+                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
+                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_MINUTE ||
+                    buf[i].kind == Q_TOK_EL_SECOND || buf[i].kind == Q_TOK_EL_TIMESPAN ||
+                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                     q_die("bad number");
             if (m == 1) {
-                if (buf[0].kind != EL_DT)   /* 0Nz / 0Wz / -0Wz -> the null */
+                if (buf[0].kind != Q_TOK_EL_DT)   /* 0Nz / 0Wz / -0Wz -> the null */
                     return ray_typed_null(-RAY_DATETIME);
                 return ray_datetime(buf[0].f);
             }
             double t[MAX_VEC];
             for (int i = 0; i < m; i++)
-                t[i] = (buf[i].kind == EL_DT) ? buf[i].f
-                     : (buf[i].kind == EL_INT) ? (double)buf[i].i
+                t[i] = (buf[i].kind == Q_TOK_EL_DT) ? buf[i].f
+                     : (buf[i].kind == Q_TOK_EL_INT) ? (double)buf[i].i
                      : NULL_F64;             /* Specials -> NaN null slots */
             ray_t *vec = ray_vec_from_raw(RAY_DATETIME, t, m);
             if (vec && !RAY_IS_ERR(vec)) {
                 for (int i = 0; i < m; i++)
-                    if (buf[i].kind != EL_DT && buf[i].kind != EL_INT)
+                    if (buf[i].kind != Q_TOK_EL_DT && buf[i].kind != Q_TOK_EL_INT)
                         ray_vec_set_null(vec, i, true);
             }
             return vec;
@@ -808,7 +808,7 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     }
     if (vec && !RAY_IS_ERR(vec) && type == RAY_I64) {
         for (int i = 0; i < m; i++)
-            if (buf[i].kind == EL_NULL) ray_vec_set_null(vec, i, true);
+            if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
     }
     return vec;
 }
@@ -869,7 +869,7 @@ static Tokens scan(const char *src) {
          * (File Binary / Dynamic Load — tokenized identically; without a
          * manifest row the name stays a name-ref per the registry-miss rule).
          * A single digit glued to ':' can never start a clock literal (minute
-         * / second / time / timespan all need dig_run == 2 before ':'), so
+         * / second / time / timespan all need tok_dig_run == 2 before ':'), so
          * this is unambiguous.  `0::` is left alone (the second ':' would be
          * a monadic marker / assign shape, not the verb). */
         if ((c == '0' || c == '1' || c == '2') &&

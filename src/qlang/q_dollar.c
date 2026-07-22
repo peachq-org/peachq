@@ -5,7 +5,7 @@
  * for reuse.  The per-target q_cast_* matrix and the general int-atom helpers
  * (q_is_int_atom, q_iatom_val, ...) live here too (q_registry_internal.h). */
 #include "qlang/q_dollar.h"
-#include "qlang/q_scan.h"   /* the Tok string scanners (q_date_scan, q_ts_scan, ...) */
+#include "qlang/q_tok.h"   /* the Tok string scanners (q_tok_date, q_tok_ts, ...) */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */
 #include "lang/internal.h"  /* ray_typed_null, ray_guid, ray_str_vec_get, ray_error */
@@ -446,7 +446,7 @@ static ray_t* q_cast_u8(ray_t* x) {
 static ray_t* q_cast_timestamp(ray_t* x) {
     if (x && x->type == -RAY_DATE) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(q_ts_compose((int64_t)x->i32, 0));
+        return ray_timestamp(q_calendar_ts_compose((int64_t)x->i32, 0));
     }
     if (x && x->type == RAY_DATE) {
         int64_t n = ray_len(x);
@@ -457,7 +457,7 @@ static ray_t* q_cast_timestamp(ray_t* x) {
         for (int64_t i = 0; i < n; i++) {
             int isnull = (d[i] == INT32_MIN);
             ((int64_t*)ray_data(out))[i] =
-                isnull ? 0 : q_ts_compose((int64_t)d[i], 0);
+                isnull ? 0 : q_calendar_ts_compose((int64_t)d[i], 0);
             if (isnull) ray_vec_set_null(out, i, true);
         }
         return out;
@@ -619,15 +619,15 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
         /* Unparseable / invalid civil date / out-of-domain -> 0Nd, never an
          * error (tok.md pins "D"$"2147483648" -> 0Nd). */
         int64_t y, mo, d;
-        if (!q_date_scan(p, len, &y, &mo, &d) || !q_date_valid(y, mo, d))
+        if (!q_tok_date(p, len, &y, &mo, &d) || !q_calendar_date_valid(y, mo, d))
             return ray_typed_null(-RAY_DATE);
-        return ray_date(q_days_from_civil(y, mo, d));
+        return ray_date(q_calendar_days_from_civil(y, mo, d));
     }
     case RAY_MONTH: {
         /* "M"$str -> month (ref/tok.md).  Unparseable / out-of-domain -> 0Nm,
          * never an error (tok contract, mirrors "D"$). */
         int64_t mo;
-        if (!q_month_scan(p, len, &mo))
+        if (!q_tok_month(p, len, &mo))
             return ray_typed_null(-RAY_MONTH);
         return ray_month(mo);
     }
@@ -635,7 +635,7 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
         /* "T"$str -> time (ref/tok.md).  Unparseable / out-of-domain -> 0Nt,
          * never an error (base ray_cast_fn errors on a bad string). */
         int32_t ms;
-        if (!q_time_scan(p, len, &ms))
+        if (!q_tok_time(p, len, &ms))
             return ray_typed_null(-RAY_TIME);
         return ray_time(ms);
     }
@@ -643,18 +643,18 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
         /* "P"$str -> timestamp (ref/tok.md Â§Timestamps).  Unparseable /
          * out-of-range -> 0Np, never an error (tok contract). */
         int64_t ns;
-        if (!q_ts_scan(p, len, &ns))
+        if (!q_tok_ts(p, len, &ns))
             return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(ns);
     }
     case RAY_DATETIME: {
         /* "Z"$str -> datetime.  tok.md:222-227 pins "PZ"$\: over ONE input
          * ("20191122-11:11:11.123" -> 2019.11.22T11:11:11.123): Z shares P's
-         * accepted shapes at ms display precision, so reuse q_ts_scan (the
+         * accepted shapes at ms display precision, so reuse q_tok_ts (the
          * single P parser) and convert ns -> fractional days.  Unparseable /
          * invalid -> 0Nz, never an error (tok contract). */
         int64_t ns;
-        if (!q_ts_scan(p, len, &ns))
+        if (!q_tok_ts(p, len, &ns))
             return ray_typed_null(-RAY_DATETIME);
         return ray_datetime((double)ns / 86400000000000.0);
     }
@@ -681,31 +681,31 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
         /* "G"$str -> guid (basics/datatypes.md §Guid).  Tok contract:
          * unparseable / wrong-shape -> typed null 0Ng, never an error (base
          * ray_cast_fn "GUID" ERRORS on bad input, so parse here).  Canonical
-         * 36-char UUID only; IPv4/IPv6 forms deferred (see q_parse_uuid). */
+         * 36-char UUID only; IPv4/IPv6 forms deferred (see q_tok_uuid). */
         uint8_t bytes[16];
-        if (!q_parse_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
+        if (!q_tok_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
         return ray_guid(bytes);
     }
     case RAY_MINUTE: {
         /* "U"$str -> minute, FLOOR to the minute we are in (ref/tok.md:61
          * "U"$"12:13:14" -> 12:13; cast.md:168-170 truncation rule). */
         int64_t ns;
-        if (!q_clock_scan_ns(p, len, &ns))
+        if (!q_tok_clock_ns(p, len, &ns))
             return ray_typed_null(-RAY_MINUTE);
         return ray_minute(ns / 60000000000LL);
     }
     case RAY_SECOND: {
         /* "V"$str -> second, floor (derived — mirrors "U"$). */
         int64_t ns;
-        if (!q_clock_scan_ns(p, len, &ns))
+        if (!q_tok_clock_ns(p, len, &ns))
             return ray_typed_null(-RAY_SECOND);
         return ray_second(ns / 1000000000LL);
     }
     case RAY_TIMESPAN: {
-        /* "N"$str -> timespan; grammar in q_timespan_scan_ns.  Unparseable /
+        /* "N"$str -> timespan; grammar in q_tok_timespan_ns.  Unparseable /
          * out-of-range -> 0Nn (tok contract). */
         int64_t ns;
-        if (!q_timespan_scan_ns(p, len, &ns))
+        if (!q_tok_timespan_ns(p, len, &ns))
             return ray_typed_null(-RAY_TIMESPAN);
         return ray_timespan(ns);
     }

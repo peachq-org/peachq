@@ -468,7 +468,7 @@ void q_float_tok(double v, int f32, char* out, size_t n) {
 }
 
 /* Digit-only token — the shape test behind the f64 `f` suffix (`256f`). */
-static int q_tok_is_bare_int(const char* tok) {
+static int fmt_tok_is_bare_int(const char* tok) {
     if (*tok == '-') tok++;
     if (!*tok) return 0;
     for (; *tok; tok++)
@@ -487,7 +487,7 @@ static void q_tok_via_atom(ray_t* a, char* out, size_t n) {
 
 /* Date payload; out-of-civil-range displays 0000.00.00 (datatypes.md). */
 static void q_date_payload(int64_t v, char* out, size_t n) {
-    if (v < q_days_from_civil(1, 1, 1) || v > q_days_from_civil(9999, 12, 31)) {
+    if (v < q_calendar_days_from_civil(1, 1, 1) || v > q_calendar_days_from_civil(9999, 12, 31)) {
         snprintf(out, n, "0000.00.00");
         return;
     }
@@ -523,8 +523,8 @@ static void q_guid_tok(const uint8_t* b16, char* out, size_t n) {
  * out-of-range -> 0000.00.00T00:00:00.000; ms precision (tok.md:227). */
 static void q_datetime_tok(double v, char* out, size_t n) {
     if (v != v) { snprintf(out, n, "0Nz"); return; }
-    if (v < (double)q_days_from_civil(1, 1, 1) ||
-        v >= (double)(q_days_from_civil(9999, 12, 31) + 1)) {
+    if (v < (double)q_calendar_days_from_civil(1, 1, 1) ||
+        v >= (double)(q_calendar_days_from_civil(9999, 12, 31) + 1)) {
         snprintf(out, n, "0000.00.00T00:00:00.000");
         return;
     }
@@ -969,7 +969,7 @@ static void q_fmt_body(ray_t* val) {
         case -RAY_F64: {
             /* digit-only tokens take `f` (`5f`); `3e+11` self-identifies */
             q_float_tok(val->f64, 0, tok, sizeof tok);
-            if (q_tok_is_bare_int(tok)) {
+            if (fmt_tok_is_bare_int(tok)) {
                 size_t l = strlen(tok);
                 if (l + 1 < sizeof tok) { tok[l] = 'f'; tok[l + 1] = '\0'; }
             }
@@ -1061,7 +1061,7 @@ static void q_fmt_body(ray_t* val) {
             char e[64];
             q_float_tok(v, is64 ? 0 : 1, e, sizeof e);
             qe_join(e, i == 0);
-            if (!q_tok_is_bare_int(e)) all_whole = 0;
+            if (!fmt_tok_is_bare_int(e)) all_whole = 0;
         }
         /* all-digit-token f64 vectors take ONE trailing `f` (`1 2 3f`); a
          * clipped early exit's stale all_whole is swallowed past the dots */
