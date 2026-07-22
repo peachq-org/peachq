@@ -515,12 +515,12 @@ ray_err_t q_registry_init(void) {
         g_prior_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
-    g_mkderiv2_value = ray_fn_binary("q.mkderiv2", RAY_FN_NONE | RAY_FN_Q_LOWER, q_mkderiv2);
+    g_mkderiv2_value = ray_fn_binary("q.mkderiv2", RAY_FN_NONE | RAY_FN_Q_LOWER, q_deriv_mkderiv2);
     if (!g_mkderiv2_value || RAY_IS_ERR(g_mkderiv2_value)) {
         g_mkderiv2_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
-    g_mkopproj_value = ray_fn_vary("q.mkopproj", RAY_FN_NONE | RAY_FN_Q_LOWER, q_mkopproj);
+    g_mkopproj_value = ray_fn_vary("q.mkopproj", RAY_FN_NONE | RAY_FN_Q_LOWER, q_deriv_mkopproj);
     if (!g_mkopproj_value || RAY_IS_ERR(g_mkopproj_value)) {
         g_mkopproj_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
@@ -585,7 +585,7 @@ ray_err_t q_registry_init(void) {
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
     }
     g_lambda_value = ray_fn_vary("q.fn",
-                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_fn_make);
+                       RAY_FN_SPECIAL_FORM | RAY_FN_Q_LOWER, q_deriv_fn_make);
     if (!g_lambda_value || RAY_IS_ERR(g_lambda_value)) {
         g_lambda_value = NULL;
         g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
@@ -746,7 +746,7 @@ void q_registry_destroy(void) {
     if (g_if_value)            { ray_release(g_if_value);            g_if_value            = NULL; }
     if (g_do_value)            { ray_release(g_do_value);            g_do_value            = NULL; }
     if (g_while_value)         { ray_release(g_while_value);         g_while_value         = NULL; }
-    if (g_qret_payload)        { ray_release(g_qret_payload);        g_qret_payload        = NULL; }
+    { ray_t* stale = q_deriv_ret_take(); if (stale) ray_release(stale); }
     if (g_qsig_payload)        { ray_release(g_qsig_payload);        g_qsig_payload        = NULL; }
     g_count  = 0;
     g_inited = false;

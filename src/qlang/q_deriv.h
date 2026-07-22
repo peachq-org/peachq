@@ -76,4 +76,33 @@ uint64_t     q_deriv_hole_mask(const ray_t* v);   /* Q_DERIV_PROJ only    */
 int          q_deriv_valence(const ray_t* v);     /* effective valence    */
 ray_t*       q_lambda_src(const ray_t* v);        /* Q_DERIV_LAMBDA only; borrowed */
 
+/* ---- fn-value machinery (bucket B of the applyiter dissolution) ----
+ * Callable classification + generic apply over native fn types AND the
+ * carriers — ONE home beside the carrier representation. */
+
+/* Rank of a q value: 1 monadic, 2 dyadic, -1 ambiguous (native vary);
+ * a projection's rank is its open-hole count. */
+int q_deriv_fn_rank(ray_t* f);
+
+/* True iff x is a callable q value (native fn, lambda, or any carrier). */
+int q_deriv_is_fn_value(ray_t* x);
+
+/* Apply f to k borrowed args: 1/2 via call_fn1/2 (carrier-aware, atomic
+ * broadcast + hook tails), k>=3 via native VARY or the noun dispatcher. */
+ray_t* q_deriv_call_n(ray_t* f, ray_t** a, int64_t k);
+
+/* Eval-time carrier builders (the q.mkderiv2 / q.mkopproj / q.compose /
+ * q.fn registry values' bodies — built at EVAL time so lambda operands are
+ * already values). */
+ray_t* q_deriv_mkderiv2(ray_t* hof, ray_t* f);
+ray_t* q_deriv_mkopproj(ray_t** args, int64_t k);
+ray_t* q_compose_fn(ray_t** args, int64_t n);
+ray_t* q_deriv_fn_make(ray_t** args, int64_t n);
+
+/* `:x` early return: q_ret_fn stashes the payload thread-local and unwinds
+ * via the reserved "q.ret" error class; q_deriv_ret_take takes (and clears)
+ * it — called by q_apply.c's lambda application on that class.  OWNED. */
+ray_t* q_ret_fn(ray_t* x);
+ray_t* q_deriv_ret_take(void);
+
 #endif /* Q_DERIV_H */

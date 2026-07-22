@@ -18,7 +18,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_apply.h"
-#include "qlang/q_registry_internal.h" /* q_registry.h + the split's shared surface (q_is_fn_value, q_call_n) */
+#include "qlang/q_registry_internal.h" /* q_registry.h + the split's shared surface (q_deriv_is_fn_value, q_deriv_call_n) */
 #include "qlang/q_deriv.h"      /* q_deriv_kind_of (carrier arm, Task 5) */
 #include "lang/eval.h"          /* ray_at_fn */
 #include "lang/format.h"        /* ray_type_name — amend error messages */
@@ -223,13 +223,13 @@ static ray_t* deriv_apply(ray_t* carrier, ray_t** args, int64_t n) {
 static ray_t* i_call_lambda(ray_t* lam, ray_t** args, int64_t n) {
     /* Drop any stale payload first (a q.ret swallowed by a user trap), so
      * the class check below can never be spoofed into returning old data. */
-    ray_t* stale = q_lambda_ret_take();
+    ray_t* stale = q_deriv_ret_take();
     if (stale) ray_release(stale);
     ray_t* r = call_lambda(lam, args, n);
     if (r && RAY_IS_ERR(r) && r->slen == 5 && memcmp(r->sdata, "q.ret", 5) == 0) {
         /* genuine `:x` always stashed a payload (a bare `:` stashes `::`);
          * a user-forged '"q.ret" signal has none and propagates as an error */
-        ray_t* v = q_lambda_ret_take();               /* owned, or NULL */
+        ray_t* v = q_deriv_ret_take();               /* owned, or NULL */
         if (v) { ray_release(r); return v; }
     }
     return r;
@@ -563,7 +563,7 @@ static ray_t* trap_finish(ray_t* r, ray_t* e) {
     if (!text) { const char* c = ray_err_code(r); text = ray_str(c ? c : "", c ? strlen(c) : 0); }
     text = q_charv_out(text);                        /* handler receives a charv */
     ray_error_free(r);
-    if (!q_is_fn_value(e)) { ray_release(text); ray_retain(e); return e; }
+    if (!q_deriv_is_fn_value(e)) { ray_release(text); ray_retain(e); return e; }
     ray_t* hr = call_fn1(e, text);
     ray_release(text);
     return hr;
@@ -573,7 +573,7 @@ static ray_t* trap_finish(ray_t* r, ray_t* e) {
 static ray_t* trap(ray_t* f, ray_t* x, ray_t* e) {
     q_registry_sig_clear();                          /* drop stale payload */
     ray_t* args[1] = { x };
-    ray_t* r = q_call_n(f, args, 1);
+    ray_t* r = q_deriv_call_n(f, args, 1);
     return trap_finish(r, e);
 }
 
@@ -586,7 +586,7 @@ static ray_t* trap_dot(ray_t* g, ray_t* gx, ray_t* e) {
     if (k < 1 || k > 8) return ray_error("rank", ".: 1..8 trap args");
     ray_t* a[8];
     for (int64_t i = 0; i < k; i++) a[i] = q_registry_elem_at(gx, i);   /* owned */
-    ray_t* r = ray_lazy_materialize(q_call_n(g, a, k));
+    ray_t* r = ray_lazy_materialize(q_deriv_call_n(g, a, k));
     for (int64_t i = 0; i < k; i++) ray_release(a[i]);
     return trap_finish(r, e);
 }
@@ -618,7 +618,7 @@ static ray_t* at_apply2(ray_t* f, ray_t* x) {
 ray_t* q_at_wrap(ray_t** args, int64_t n) {
     if (n == 2) return at_apply2(args[0], args[1]);
     if (n == 3) {
-        if (q_is_fn_value(args[0])) return trap(args[0], args[1], args[2]);
+        if (q_deriv_is_fn_value(args[0])) return trap(args[0], args[1], args[2]);
         return amend_at(args[0], args[1], args[2], NULL);
     }
     if (n == 4) return amend_at(args[0], args[1], args[2], args[3]);
@@ -669,7 +669,7 @@ static ray_t* dot_apply(ray_t* f, ray_t* a) {
 ray_t* q_dot_wrap(ray_t** args, int64_t n) {
     if (n == 2) return dot_apply(args[0], args[1]);
     if (n == 3) {
-        if (q_is_fn_value(args[0])) return trap_dot(args[0], args[1], args[2]);
+        if (q_deriv_is_fn_value(args[0])) return trap_dot(args[0], args[1], args[2]);
         return amend_dot(args[0], args[1], args[2], NULL);
     }
     if (n == 4) return amend_dot(args[0], args[1], args[2], args[3]);
