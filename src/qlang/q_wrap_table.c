@@ -10,7 +10,7 @@
 #include "qlang/q_ns.h"    /* q_ns_key_roster, q_ns_ctx_dict/root_dict, q_ns_is_context */
 #include "qlang/q_apply.h" /* q_apply_noun */
 #include "qlang/q_deriv.h" /* q_deriv_kind_of/base, Q_DERIV_LAMBDA */
-#include "qlang/q_wire.h"  /* -8!/-9! serde arms on dyadic ! */
+#include "qlang/net/q_wire.h"  /* -8!/-9! serde arms on dyadic ! */
 #include "qlang/q_bang.h"  /* q_bang_dispatch — the `-N!` internal-fn manifest */
 #include "qlang/q_dotz.h"  /* q_dotz_ipc_hook_index, q_dotz_zts_set — .z.* handler arms */
 #include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
