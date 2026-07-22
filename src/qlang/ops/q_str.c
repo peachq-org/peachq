@@ -1,7 +1,8 @@
 /* ops/q_str.c — the q string-verb bodies: string / upper / lower / trim
  * family (env-bound in q_builtins_register) + the search trio like / ss /
- * ssr (manifest wraps).  Evicted from q_builtins.c + ops/q_io.c so the
- * registration hub registers and the string domain lives once. */
+ * ssr (manifest wraps) + the shared line-splitter q_str_split_lines.
+ * Evicted from q_builtins.c + ops/q_io.c so the registration hub registers
+ * and the string domain lives once. */
 #include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_text_bytes) */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
 #include "qlang/q_fmt.h"               /* q_float_tok — string's float leaf */
@@ -413,3 +414,31 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     return out;
 }
 
+/* newline / host-line-separator split: split on '\n', strip a trailing '\r'
+ * from each line, drop a single trailing empty line (kdb ` vs read-lines). */
+ray_t* q_str_split_lines(const char* y, size_t yl) {
+    ray_t* out = ray_list_new(4);
+    if (RAY_IS_ERR(out)) return out;
+    size_t seg = 0;
+    for (size_t i = 0; i <= yl; i++) {
+        if (i == yl || y[i] == '\n') {
+            size_t end = i;
+            if (end > seg && y[end - 1] == '\r') end--;   /* strip CR */
+            ray_t* s = ray_str(y + seg, end - seg);
+            out = ray_list_append(out, s); ray_release(s);
+            if (RAY_IS_ERR(out)) return out;
+            seg = i + 1;
+            if (i == yl) break;
+        }
+    }
+    /* drop a single trailing empty produced by a terminal '\n' */
+    int64_t n = ray_len(out);
+    if (n >= 1) {
+        ray_t** e = (ray_t**)ray_data(out);
+        if (e[n - 1]->type == -RAY_STR && ray_str_len(e[n - 1]) == 0) {
+            ray_release(e[n - 1]);
+            out->len = n - 1;
+        }
+    }
+    return out;
+}
