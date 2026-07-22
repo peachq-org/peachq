@@ -535,6 +535,7 @@ static const q_op_t Q_OPS[] = {
     { "0:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-text", q_filetext_wrap), NULL, 1, 1, "none" },
     { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic" },
     { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none" },
+    { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none" },
     /* ---- environment variables (feat/q-getenv-setenv, ref/getenv.md) ----
      * `getenv` is a monadic prefix keyword (sym -> value string, "" unset);
      * `setenv` is a dyadic infix keyword (`sym setenv str`), so it MUST be
