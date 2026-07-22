@@ -36,7 +36,7 @@ static ray_t* string_leaf(ray_t* x, int64_t arg) {
     /* Float atoms take THE q float->text leaf (q_fmt_float, \P-honouring) in
      * suffix-free mode — never rayfall's base formatter, whose ".0" padding /
      * 0Nf null are rayfall conventions, not q's.  0: Prepare Text inherits
-     * this arm through q_ft_cell_text -> q_string_fn. */
+     * this arm through ft_cell_text -> q_string_fn. */
     if (x->type == -RAY_F64 || x->type == -RAY_F32) {   /* F32 atoms store f64 */
         char tok[64];
         double v = (x->type == -RAY_F32) ? (double)(float)x->f64 : x->f64;

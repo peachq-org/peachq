@@ -194,7 +194,7 @@ ray_t* q_registry_do_value(void);
 ray_t* q_registry_while_value(void);
 
 /* Take (and clear) the thread-local early-return payload stashed by a `:x`
- * statement — called by q_lambda_apply when call_lambda comes back with the
+ * statement — called by lambda_apply when call_lambda comes back with the
  * reserved "q.ret" error class.  Returns an OWNED value or NULL. */
 ray_t* q_lambda_ret_take(void);
 
@@ -300,7 +300,7 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n);
 /* Keyed-table lookup by a table of key rows (`y[select a,b from x]`) — the
  * q_apply.c table-index arm.  keytbl must carry ALL key columns by name;
  * extra columns ignored; keytbl row order preserved; miss => null row. */
-ray_t* q_keyed_lookup_rows(ray_t* kt, ray_t* keytbl);
+ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl);
 
 /* Universal table row indexing (uniform-structure-dispatch stage 0; defined
  * in ops/q_table.c).  q_table_at: t[idx] for an integer atom (-> the row
@@ -348,13 +348,13 @@ int     q_calendar_ts_compose_checked(int64_t days, int64_t tod_ns, int64_t* out
 int64_t q_calendar_ts_compose(int64_t days, int64_t tod_ns);
 
 /* q-name sanitization shared by .Q.id and openq construction paths that must
- * repair name clashes.  q_name_sanitize returns an interned symbol id for the
+ * repair name clashes.  q_registry_name_sanitize returns an interned symbol id for the
  * `.Q.id` atom rule.  q_name_dedup takes an already-sanitized/generated symbol
  * and resolves reserved-word and previous-name clashes by appending 1,2,...
  * using the same table/dict column-name rule. */
-int64_t q_name_sanitize(int64_t sym_id);
+int64_t q_registry_name_sanitize(int64_t sym_id);
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous,
                      int check_reserved);
-ray_t* q_name_reserved_words(void);
+ray_t* q_registry_name_reserved_words(void);
 
 #endif /* Q_REGISTRY_H */

@@ -240,8 +240,8 @@ int main(int argc, char** argv) {
     /* Natural end-of-session (stdin EOF / script end) is a process exit too:
      * route it through THE exit home, so `.z.exit` fires exactly once with the
      * exit status (dotz.md) on EVERY session exit — `\\`/`exit x` never reach
-     * here (q_exit already terminated).  q_exit does not return; the OS
+     * here (q_sys_exit already terminated).  q_sys_exit does not return; the OS
      * reclaims the poll/runtime (same as the `exit x` path, kdb-true). */
-    q_exit(script_rc);
+    q_sys_exit(script_rc);
     return script_rc;   /* unreachable */
 }

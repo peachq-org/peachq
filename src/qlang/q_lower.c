@@ -1,7 +1,7 @@
 /* q_lower.c — the ADR-0003 lowering pass, split from q_parse.c (2026-07-14,
  * pure moves): adverbs->HOFs, assignment->set, cond/control words, lambda
  * carriers, qSQL select/exec/delete + functional-form lowering, context
- * qualification (namespaces), and the public q_lower / q_ast_is_assign.
+ * qualification (namespaces), and the public q_lower / q_lower_ast_is_assign.
  * Shared parser<->lowerer internals live in q_parse_internal.h. */
 #define _POSIX_C_SOURCE 200809L
 
@@ -441,7 +441,7 @@ static ray_t *ql_assign(ray_t **slot, int in_lambda) {
      * + q-lambda-carrier unwrap run — the env special-form `set` (ray_set_fn)
      * stores the carrier verbatim into a plain env binding, which the C callers
      * (ipc.c hook_lookup / the `.z.ts` timer thunk — both bare-lambda only, and a
-     * different slot) never see.  q_ast_is_assign already flagged the pre-lower
+     * different slot) never see.  q_lower_ast_is_assign already flagged the pre-lower
      * `:` shape, so REPL/qdoc output stays suppressed after this head swap. */
     size_t nsl = ray_str_len(ns);
     const char* nsp = ray_str_ptr(ns);
@@ -1510,10 +1510,10 @@ ray_t *q_lower(ray_t *ast) {
     return ast;
 }
 
-/* q_ast_is_assign — see q_parse.h.  Checks the PRE-lower shape: head is the
+/* q_lower_ast_is_assign — see q_parse.h.  Checks the PRE-lower shape: head is the
  * name-ref `:`/`::` with a sym binding target; a `;` statement sequence asks
  * its last statement. */
-int q_ast_is_assign(const ray_t *cast) {
+int q_lower_ast_is_assign(const ray_t *cast) {
     ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
     if (!ast || ast->type != RAY_LIST || ray_len(ast) < 1) return 0;
     ray_t **e = (ray_t **)ray_data(ast);
@@ -1532,7 +1532,7 @@ int q_ast_is_assign(const ray_t *cast) {
     ray_release(s);
     if (is_semi) {
         int64_t n = ray_len(ast);
-        return n >= 2 ? q_ast_is_assign(e[n - 1]) : 0;
+        return n >= 2 ? q_lower_ast_is_assign(e[n - 1]) : 0;
     }
     if (!(is_colon || is_modasg) || ray_len(ast) != 3) return 0;
     ray_t *t = e[1];

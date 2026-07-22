@@ -40,7 +40,7 @@ int q_dotz_ipc_hook_index(const char* name, size_t len);
  *                RETAINS its own ref, unwraps a q `{…}` carrier, NULL clears.
  *   q_dotz_get — BORROWED read-back for the C fire consumers (q_http.c/q_ws.c),
  *                NULL = unset.  (q_dotz_resolve retains it for q read-back.)
- * Who FIRES each (never from dotz.c): `.z.ts` the poll timer, `.z.exit` q_exit
+ * Who FIRES each (never from dotz.c): `.z.ts` the poll timer, `.z.exit` q_sys_exit
  * (q_sys.c), `.z.p*`/`.z.ac` q_http.c, `.z.w*` q_ws.c. */
 bool   q_dotz_set(const char* name, size_t len, ray_t* val);
 ray_t* q_dotz_get(const char* name, size_t len);

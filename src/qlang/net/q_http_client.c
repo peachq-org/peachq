@@ -49,7 +49,7 @@ static int scan_ok(const char* p, size_t n) {   /* no control / CR / LF bytes */
     return 1;
 }
 
-int q_http_url_parse(const char* url, size_t n, q_http_url_t* out) {
+int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out) {
     if (!url || !out) return -1;
     memset(out, 0, sizeof *out);
     if (n && url[0] == ':') { url++; n--; }        /* strip kdb handle ':' */
@@ -410,7 +410,7 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
     if (url_of(urlv, urlbuf, sizeof urlbuf, &un) != 0)
         return ray_error("type", NULL);
     q_http_url_t u;
-    if (q_http_url_parse(urlbuf, un, &u) != 0) return ray_error("domain", NULL);
+    if (q_http_client_url_parse(urlbuf, un, &u) != 0) return ray_error("domain", NULL);
     if (u.scheme == 1) return ray_error("nyi", NULL);        /* https: TLS tier */
 
     /* Authorization header (optional) */
@@ -502,7 +502,7 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
  * response is framed by the reader as if it had a body (the reader is
  * method-agnostic, inherited from #223) — an accepted limitation for this
  * escape hatch. */
-ray_t* q_http_raw_client(ray_t* hsym, ray_t* request) {
+ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
     if (!request || !q_text_bytes(request, &reqp, &reqn)) return ray_error("type", NULL);
@@ -515,8 +515,8 @@ ray_t* q_http_raw_client(ray_t* hsym, ray_t* request) {
     size_t sn = ray_str_len(nm);
     if (sn < 1 || s[0] != ':') return ray_error("domain", NULL);
 
-    q_http_url_t u;                       /* q_http_url_parse strips the ':' */
-    if (q_http_url_parse(s, sn, &u) != 0) return ray_error("domain", NULL);
+    q_http_url_t u;                       /* q_http_client_url_parse strips the ':' */
+    if (q_http_client_url_parse(s, sn, &u) != 0) return ray_error("domain", NULL);
     if (u.scheme == 1) return ray_error("nyi", NULL);        /* https: TLS tier */
 
     const char* err = "conn";
