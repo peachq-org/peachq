@@ -26,10 +26,51 @@
 /* ===== table verbs (feat/q-table-verbs) ====================================
  * flip/keys/xkey/xasc/xdesc/xgroup/ungroup/insert/upsert + the
  * table arms of distinct/union/inter/except.  All built over the wave-4
- * keyed primitives (q_is_keyed_table in ops/q_list.c, q_bang_enkey in q_bang.c,
- * q_table_flatten) — NEVER duplicated (the #56 failure mode).  Row-equality is boxed q-match
+ * keyed primitives (q_table_is_keyed / q_table_flatten above, q_bang_enkey
+ * in q_bang.c) — NEVER duplicated (the #56 failure mode).  Row-equality is boxed q-match
  * compares: O(n^2) wrapper-tier code at test scale by design (single-home
  * principle; SIMD paths belong to the engine).                              */
+
+/* A keyed table is a RAY_DICT whose keys AND values are both tables.
+ * Exported (q_registry.h). */
+int q_table_is_keyed(ray_t* y) {
+    if (!y || y->type != RAY_DICT) return 0;
+    ray_t* k = ray_dict_keys(y);
+    ray_t* v = ray_dict_vals(y);
+    return k && v && k->type == RAY_TABLE && v->type == RAY_TABLE;
+}
+
+/* Flatten a plain-or-keyed table to a single plain table (key cols then value
+ * cols).  Returns owned. */
+ray_t* q_table_flatten(ray_t* y) {
+    if (y->type == RAY_TABLE) { ray_retain(y); return y; }
+    ray_t* kt = ray_dict_keys(y);          /* borrowed */
+    ray_t* vt = ray_dict_vals(y);          /* borrowed */
+    int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
+    ray_t* out = ray_table_new(knc + vnc > 0 ? knc + vnc : 1);
+    for (int64_t c = 0; c < knc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(kt, c), ray_table_get_col_idx(kt, c));
+    for (int64_t c = 0; c < vnc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(vt, c), ray_table_get_col_idx(vt, c));
+    return out;
+}
+
+/* Borrow-or-collapse a dict's VALUES for a kernel call: a typed vector passes
+ * through BORROWED (*owned=0); a boxed list collapses (q_collapse_list, owned
+ * result, *owned=1) so homogeneous literal dicts hit the typed kernels.
+ * Caller releases iff *owned.  NULL on a malformed dict. */
+ray_t* q_table_dict_vals(ray_t* d, int* owned) {
+    *owned = 0;
+    ray_t* vals = ray_dict_vals(d);              /* borrowed accessor */
+    if (!vals) return NULL;
+    if (vals->type == RAY_LIST) {
+        ray_t* c = q_collapse_list(vals);        /* owned */
+        if (c && !RAY_IS_ERR(c)) { *owned = 1; return c; }
+        if (c) ray_release(c);
+        return vals;                             /* uncollapsible: borrowed */
+    }
+    return vals;
+}
 
 /* Extract symbol ids from a -RAY_SYM atom / RAY_SYM vector / LIST of sym
  * atoms.  Returns count, or -1 on a non-symbol operand.  cap-bounded. */
@@ -210,7 +251,7 @@ static int row_eq(ray_t* ta, int64_t ra, ray_t* tb, int64_t rb, int64_t ncmp) {
 /* Row count of a plain OR keyed table (keyed via its key table — never trust
  * ray_len on a string-atom column). */
 static int64_t any_nrows(ray_t* t) {
-    if (q_is_keyed_table(t)) return ray_table_nrows(ray_dict_keys(t));
+    if (q_table_is_keyed(t)) return ray_table_nrows(ray_dict_keys(t));
     return ray_table_nrows(t);
 }
 
@@ -245,10 +286,10 @@ static ray_t* table_operand(ray_t* y, int64_t* sym_out) {
     if (!y) return NULL;
     if (y->type == -RAY_SYM) {
         ray_t* g = ray_env_get(y->i64);
-        if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) { *sym_out = y->i64; return g; }
+        if (g && (g->type == RAY_TABLE || q_table_is_keyed(g))) { *sym_out = y->i64; return g; }
         return NULL;
     }
-    if (y->type == RAY_TABLE || q_is_keyed_table(y)) return y;
+    if (y->type == RAY_TABLE || q_table_is_keyed(y)) return y;
     return NULL;
 }
 
@@ -276,7 +317,7 @@ ray_t* q_flip_wrap(ray_t* x) {
         }
         return ray_dict_new(k, v);                        /* consumes both */
     }
-    if (q_is_keyed_table(x)) return ray_error("rank", "flip: keyed table");
+    if (q_table_is_keyed(x)) return ray_error("rank", "flip: keyed table");
     if (x->type == RAY_DICT) {
         ray_t* k = ray_dict_keys(x);                      /* borrowed */
         ray_t* v = ray_dict_vals(x);                      /* borrowed */
@@ -367,7 +408,7 @@ ray_t* q_keys_wrap(ray_t* x) {
     if (!t) return ray_error("type", "keys: expects a table");
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, 1);
     if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
-    if (q_is_keyed_table(t)) {
+    if (q_table_is_keyed(t)) {
         ray_t* kt = ray_dict_keys(t);                     /* borrowed */
         int64_t knc = ray_table_ncols(kt);
         for (int64_t c = 0; c < knc; c++) {
@@ -614,7 +655,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
     if (nc <= 0) return ray_error("type", "insert/upsert: target has no columns");
     if (nc > 64) return ray_error("limit", "insert/upsert: too many columns");
 
-    if (y->type == RAY_TABLE || q_is_keyed_table(y)) {
+    if (y->type == RAY_TABLE || q_table_is_keyed(y)) {
         ray_t* src = q_table_flatten(y);
         if (!src || RAY_IS_ERR(src)) return src;
         int64_t snc = ray_table_ncols(src);
@@ -842,15 +883,15 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
         return ray_error("type", "insert: target must be a table name (symbol)");
     ray_t* g = ray_env_get(x->i64);                       /* borrowed */
     if (!g) {                                             /* create */
-        if (y && (y->type == RAY_TABLE || q_is_keyed_table(y))) {
+        if (y && (y->type == RAY_TABLE || q_table_is_keyed(y))) {
             ray_env_bind(x->i64, y);                      /* retains */
             return idx_range(0, any_nrows(y));
         }
         return ray_error("type", "insert: unbound target needs a table value");
     }
-    if (!(g->type == RAY_TABLE || q_is_keyed_table(g)))
+    if (!(g->type == RAY_TABLE || q_table_is_keyed(g)))
         return ray_error("type", "insert: target is not a table");
-    int keyed = q_is_keyed_table(g);
+    int keyed = q_table_is_keyed(g);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(g)) : 0;
     ray_t* flat = q_table_flatten(g);
     if (!flat || RAY_IS_ERR(flat)) return flat;
@@ -972,14 +1013,14 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     ray_t* t = table_operand(x, &sym);
     if (!t) {
         if (x && x->type == -RAY_SYM && !ray_env_get(x->i64) &&
-            y && (y->type == RAY_TABLE || q_is_keyed_table(y))) {
+            y && (y->type == RAY_TABLE || q_table_is_keyed(y))) {
             ray_env_bind(x->i64, y);                      /* create, like insert */
             ray_retain(x);
             return x;
         }
         return ray_error("type", "upsert: expects a table or table name");
     }
-    int keyed = q_is_keyed_table(t);
+    int keyed = q_table_is_keyed(t);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(t)) : 0;
     ray_t* flat = q_table_flatten(t);
     if (!flat || RAY_IS_ERR(flat)) return flat;
@@ -1044,15 +1085,15 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     if (x && y && x->type == RAY_TABLE && y->type == RAY_TABLE &&
         !qj_same_schema(x, y))
         return ray_error("mismatch", ",: tables do not conform");
-    if (q_is_keyed_table(x) && q_is_keyed_table(y))
+    if (q_table_is_keyed(x) && q_table_is_keyed(y))
         return qj_ktbl_merge(x, y, 0);     /* upsert: y records win wholesale */
-    if (x && x->type == RAY_TABLE && y && y->type == RAY_DICT && !q_is_keyed_table(y))
+    if (x && x->type == RAY_TABLE && y && y->type == RAY_DICT && !q_table_is_keyed(y))
         return q_upsert_wrap(x, y);
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
      * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
     {
-        int xd = x && x->type == RAY_DICT && !q_is_keyed_table(x);
-        int yd = y && y->type == RAY_DICT && !q_is_keyed_table(y);
+        int xd = x && x->type == RAY_DICT && !q_table_is_keyed(x);
+        int yd = y && y->type == RAY_DICT && !q_table_is_keyed(y);
         if (xd != yd)
             return ray_error("type", ",: cannot join a dictionary with a non-dictionary");
     }
@@ -1475,7 +1516,7 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
     /* dict arm (ref/inter.md): the common VALUE items of two dicts, as a
      * list — recurse on the value lists (boxed whole-item membership). */
     if (x->type == RAY_DICT && y->type == RAY_DICT &&
-        !q_is_keyed_table(x) && !q_is_keyed_table(y)) {
+        !q_table_is_keyed(x) && !q_table_is_keyed(y)) {
         ray_t* vx = ray_dict_vals(x);                      /* borrowed */
         ray_t* vy = ray_dict_vals(y);                      /* borrowed */
         if (!vx || !vy) return ray_error("type", "inter: malformed dict");
@@ -1836,7 +1877,7 @@ static ray_t* table_colnames(ray_t* x) {
 static ray_t* table_bi_deref(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* g = ray_env_get(x->i64);                 /* borrowed */
-        if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) return g;
+        if (g && (g->type == RAY_TABLE || q_table_is_keyed(g))) return g;
     }
     return x;
 }

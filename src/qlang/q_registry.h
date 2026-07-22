@@ -75,7 +75,7 @@ ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);
 
 /* True iff y is a keyed table: a RAY_DICT whose keys AND values are both
  * tables (the wave-4 shape shared by the table verbs and q_builtins). */
-int q_is_keyed_table(ray_t* y);
+int q_table_is_keyed(ray_t* y);
 
 /* wire pass 3: registry-blessed null-tolerant dyadics (`!` internal-fn
  * band, `~` match) — consulted by q_apply_noun when ray_eval's binary
@@ -118,7 +118,7 @@ ray_t* q_attr_wrap(ray_t* x);
 /* q `enlist` vary wrapper (base ray_enlist_fn + dict -> 1-row table arm) —
  * env-bound by q_builtins_register before registry init (q_value_wrap
  * precedent) so both `enlist` and monadic `,` share it. */
-ray_t* q_enlist_wrap_vary(ray_t** args, int64_t n);
+ray_t* q_enlist_wrap(ray_t** args, int64_t n);
 
 /* Context-aware symbol resolution (q namespaces): `. / `.foo synthesize the
  * root/context dict views; `..name root-qualifies; a plain name resolves in
