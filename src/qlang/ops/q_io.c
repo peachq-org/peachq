@@ -15,6 +15,7 @@
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
 #include "store/fileio.h"   /* ray_mkdir_p — 0: Save Text missing dirs */
 #include "core/ipc.h"       /* ray_ipc_fd_of_handle/handle_of_fd — q true-fd handles */
+#include "qlang/q_handles.h" /* q_handles_open/close/read1 + socket registration — the handle authority */
 #include <stdio.h>          /* snprintf */
 #include <string.h>
 #include <stdlib.h>         /* getenv/setenv, calloc/realloc */
@@ -105,6 +106,45 @@ static ray_t* hopen_connstr(ray_t* c) {
                      ray_type_name(c ? c->type : 0));
 }
 
+/* Classify a hopen descriptor into a transport (handle-registry Phase 1).  `s`/`n`
+ * are the raw descriptor bytes (leading colon conventions intact).  On FILE/FIFO,
+ * path and plen receive the filesystem path inside `s`.  IPC covers `::port`,
+ * `:host:port[:user:pass]`, a bare `:port`, and the deferred `scheme://` forms
+ * (the existing hopen_norm_descriptor rejects those with 'nyi); a `:fifo://path`
+ * is a FIFO and any other `:path` is a FILE. */
+enum { HT_IPC = 0, HT_FILE = 1, HT_FIFO = 2, HT_FIFO_NYI = 3 };
+static int hopen_transport(const char* s, size_t n, const char** path, size_t* plen) {
+    *path = s; *plen = n;
+    if (n >= 2 && s[0] == ':' && s[1] == ':') return HT_IPC;   /* ::port localhost */
+    size_t off = (n >= 1 && s[0] == ':') ? 1 : 0;
+    const char* r = s + off;
+    size_t      rn = n - off;
+    if (rn >= 5 && memcmp(r, "fifo:", 5) == 0) {
+        if (rn >= 7 && r[5] == '/' && r[6] == '/') { *path = r + 7; *plen = rn - 7; return HT_FIFO; }
+        /* single-colon `fifo:path (read1.md): kdb's non-blocking fifo open is
+         * NYI here — Phase-1 O_RDONLY would hang without a writer, and falling
+         * through to FILE would create a junk file named "fifo:path". */
+        return HT_FIFO_NYI;
+    }
+    static const char* const sch[] = { "unixs://", "unix://", "tcps://" };
+    for (size_t i = 0; i < sizeof sch / sizeof *sch; i++)
+        if (rn >= strlen(sch[i]) && memcmp(r, sch[i], strlen(sch[i])) == 0) return HT_IPC;
+    int alldig = rn > 0;
+    for (size_t i = 0; i < rn; i++) if (r[i] < '0' || r[i] > '9') { alldig = 0; break; }
+    if (alldig) return HT_IPC;                                 /* bare :port */
+    int64_t c1 = -1;
+    for (size_t i = 0; i < rn; i++) if (r[i] == ':') { c1 = (int64_t)i; break; }
+    if (c1 >= 0) {                                             /* host:PORT[...] iff field2 numeric */
+        size_t fs = (size_t)c1 + 1, fe = fs;
+        while (fe < rn && r[fe] != ':') fe++;
+        int port = fe > fs;
+        for (size_t i = fs; i < fe; i++) if (r[i] < '0' || r[i] > '9') { port = 0; break; }
+        if (port) return HT_IPC;
+    }
+    *path = r; *plen = rn;
+    return HT_FILE;
+}
+
 /* q `hopen y` — connect, return an int handle.  Restricted connections must not
  * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
@@ -132,6 +172,24 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
         pair_to   = ray_i64(q_ivec_get(x, 1));
         conn = pair_conn; timeout = pair_to;
     }
+    /* File/FIFO transport (Phase 1): a `:path` / `:fifo://path` descriptor opens a
+     * filesystem fd directly, never an IPC socket.  A bare int port / `::port` /
+     * `:host:port` classifies IPC and falls through. */
+    if (conn && (conn->type == -RAY_STR || conn->type == -RAY_SYM)) {
+        const char* ds; size_t dn;
+        if (conn->type == -RAY_STR) { ds = ray_str_ptr(conn); dn = ray_str_len(conn); }
+        else { ray_t* s = ray_sym_str(conn->i64);              /* borrowed — do not release */
+               ds = s ? ray_str_ptr(s) : NULL; dn = s ? ray_str_len(s) : 0; }
+        const char* path; size_t plen;
+        int ht = ds ? hopen_transport(ds, dn, &path, &plen) : HT_IPC;
+        if (ht != HT_IPC) {
+            if (pair_conn) ray_release(pair_conn);
+            if (pair_to)   ray_release(pair_to);
+            if (ht == HT_FIFO_NYI)
+                return ray_error("nyi", "hopen: fifo: descriptor form not supported yet (use `:fifo://path)");
+            return q_handles_open(path, plen, ht == HT_FIFO);
+        }
+    }
     ray_t* cs = hopen_connstr(conn);                   /* owned or error */
     if (!cs || RAY_IS_ERR(cs)) {
         if (pair_conn) ray_release(pair_conn);
@@ -153,6 +211,12 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
         tv = make_i64(tmo);
         args[1] = tv; nargs = 2;
     }
+    /* Snapshot the descriptor for the socket registry BEFORE cs is released (the
+     * fd it keys off is only known after the connect + fd translation below). */
+    char descbuf[640];
+    size_t desclen = ray_str_len(cs);
+    if (desclen >= sizeof descbuf) desclen = sizeof descbuf - 1;
+    memcpy(descbuf, ray_str_ptr(cs), desclen);
     ray_t* h = ray_hopen_fn(args, nargs);                /* owned handle or error */
     ray_release(cs);
     if (tv)        ray_release(tv);
@@ -178,26 +242,22 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
         if (cr) ray_release(cr);
         return ray_error("io", "hopen: connection lost");
     }
+    /* Outbound socket: capture the open-time metadata (redacted descriptor,
+     * user).  The Phase-2 byte/msg counters + last-activity live in the frozen
+     * read/write path and are NOT captured here. */
+    (void)q_handles_register(fd, Q_HANDLE_SOCKET, 1, descbuf, desclen);  /* best-effort: the socket works via the IPC path regardless */
     return make_i64(fd);
 }
 
-/* q `hclose h` — translate the q fd handle back to the poll selector id and
- * route to `.ipc.close` (ray_hclose_fn).  Restricted connections are refused,
- * matching hopen / the handle-apply path.  A q handle is the socket fd; map it
- * to the selector id the primitive expects.  A handle that is not a live IPC
- * connection (already closed, or a console handle) is a no-op, matching kdb's
- * tolerance of hclose on a dead handle. */
+/* q `hclose h` — validate the handle, then delegate the file/fifo-vs-IPC
+ * dispatch to q_handles_close (q_handles.c, the sole handle authority).
+ * Restricted connections are refused, matching hopen / the handle-apply path. */
 ray_t* q_hclose_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     int64_t qh;
     if (!q_strict_i64(x, &qh) || RAY_ATOM_IS_NULL(x) || qh <= 0)
         return ray_error("type", "hclose: h");
-    int64_t id = ray_ipc_handle_of_fd(qh);
-    if (id < 0) return RAY_NULL_OBJ;          /* not a live handle — no-op */
-    ray_t* raw = make_i64(id);
-    ray_t* r = ray_hclose_fn(raw);
-    ray_release(raw);
-    return r;
+    return q_handles_close(qh);
 }
 
 /* ===== File Text: `0:` + hsym + read0 (feat/q-file-text) ====================
@@ -387,6 +447,16 @@ static ray_t* read1_wrap_impl(ray_t* x) {
         ray_release(path);
         return r;
     }
+    /* read1(handle;count): an all-int (h;count) pair collapses to a homogeneous
+     * int VECTOR (not a RAY_LIST) — the fifo-handle streaming form `.Q.fpn` uses.
+     * q_handles_read1 answers NULL unless fd is a registered fifo (a Phase-1
+     * file handle is a write/append fd — read a file via `read1 `:path`). */
+    if (x && q_is_int_vec(x) && ray_len(x) == 2) {
+        ray_t* c = ray_i64(q_ivec_get(x, 1));
+        ray_t* r = q_handles_read1(q_ivec_get(x, 0), c);
+        ray_release(c);
+        if (r) return r;
+    }
     if (x && x->type == RAY_LIST && (ray_len(x) == 2 || ray_len(x) == 3)) {
         ray_t** e = (ray_t**)ray_data(x);
         int three = ray_len(x) == 3;
@@ -405,6 +475,12 @@ static ray_t* read1_wrap_impl(ray_t* x) {
             ray_t* r = read1_slice(path, off, three ? want : -1);
             ray_release(path);
             return r;
+        }
+        if (!three && e[0] && q_is_int_atom(e[0])) {   /* read1(handle;count), fifo only */
+            int64_t fd;
+            if (!q_strict_i64(e[0], &fd)) return ray_error("type", "read1: handle");
+            ray_t* r = q_handles_read1(fd, e[1]);
+            if (r) return r;
         }
         return ray_error("nyi", "read1: fifo handles are deferred");
     }
