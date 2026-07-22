@@ -7,6 +7,7 @@
 #include "qlang/ops/q_dollar.h"
 #include "qlang/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
+#include "ops/temporal.h"  /* ray_temporal_extract — base calendar decomposition */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */
 #include "lang/internal.h"  /* ray_typed_null, ray_guid, ray_str_vec_get, ray_error */
@@ -626,6 +627,160 @@ ray_t* q_dollar_mmu(ray_t* x, ray_t* y) {
     return q_mmu_wrap(x, y);
 }
 
+/* `$` temporal-component extraction (ref/cast.md:133-142).  A symbol from
+ * `year`mm`dd`hh`uu`ss`week names a field of a temporal value; `month` is NOT
+ * here — it is a TYPE designator (q_cast_designator resolves it to RAY_MONTH,
+ * so `month$ts` already yields the month datatype).  Return TYPES differ:
+ * year/mm/dd/hh/uu/ss -> int, week -> date. */
+typedef enum {
+    QCOMP_YEAR, QCOMP_MM, QCOMP_DD, QCOMP_HH, QCOMP_UU, QCOMP_SS, QCOMP_WEEK
+} q_comp_e;
+
+static int component_of_sym(ray_t* t) {
+    if (!t || t->type != -RAY_SYM) return -1;
+    ray_t* s = ray_sym_str(t->i64);
+    if (!s) return -1;
+    const char* nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int r = -1;
+    if      (l == 4 && !memcmp(nm, "year", 4)) r = QCOMP_YEAR;
+    else if (l == 2 && !memcmp(nm, "mm",   2)) r = QCOMP_MM;
+    else if (l == 2 && !memcmp(nm, "dd",   2)) r = QCOMP_DD;
+    else if (l == 2 && !memcmp(nm, "hh",   2)) r = QCOMP_HH;
+    else if (l == 2 && !memcmp(nm, "uu",   2)) r = QCOMP_UU;
+    else if (l == 2 && !memcmp(nm, "ss",   2)) r = QCOMP_SS;
+    else if (l == 4 && !memcmp(nm, "week", 4)) r = QCOMP_WEEK;
+    ray_release(s);
+    return r;
+}
+
+/* ref/cast.md:155 validity matrix (`month` column omitted — type-cast path). */
+static int component_valid(int8_t t, q_comp_e c) {
+    int is_date  = (c == QCOMP_YEAR || c == QCOMP_MM);
+    int is_wkdd  = (c == QCOMP_WEEK || c == QCOMP_DD);
+    int is_clock = (c == QCOMP_HH || c == QCOMP_UU || c == QCOMP_SS);
+    switch ((ray_type_e)t) {
+    case RAY_TIMESTAMP: case RAY_DATETIME: return 1;
+    case RAY_MONTH: return is_date;
+    case RAY_DATE:  return is_date || is_wkdd;
+    case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: case RAY_TIME:
+        return is_clock;
+    default: return 0;
+    }
+}
+
+/* One temporal value (native payload) -> (days since 2000.01.01, nanosecond of
+ * day in [0,86400e9)).  time-of-day types reduce modulo their own unit first so
+ * the ns multiply cannot overflow i64 at the inf sentinels. */
+static void temporal_parts(int8_t t, int64_t raw, double rawf,
+                             int64_t* days, int64_t* tod_ns) {
+    const int64_t NSDAY = 86400000000000LL;
+    switch ((ray_type_e)t) {
+    case RAY_TIMESTAMP: { int64_t d = raw / NSDAY, r = raw % NSDAY;
+        if (r < 0) { r += NSDAY; d--; } *days = d; *tod_ns = r; break; }
+    case RAY_DATETIME: { int64_t d = (int64_t)floor(rawf);   /* floor, not round:
+        ref/cast.md:168 narrowing truncates */
+        int64_t r = (int64_t)((rawf - (double)d) * (double)NSDAY);  /* [0,NSDAY) */
+        *days = d; *tod_ns = r; break; }
+    case RAY_DATE:  *days = raw; *tod_ns = 0; break;
+    case RAY_MONTH: *days = month_payload_as_days(raw); *tod_ns = 0; break;
+    case RAY_TIMESPAN: *days = 0; *tod_ns = raw; break;   /* signed duration ns */
+    case RAY_MINUTE: *days = 0;
+        *tod_ns = (((raw % 1440) + 1440) % 1440) * 60000000000LL; break;
+    case RAY_SECOND: *days = 0;
+        *tod_ns = (((raw % 86400) + 86400) % 86400) * 1000000000LL; break;
+    case RAY_TIME: *days = 0;
+        *tod_ns = (((raw % 86400000) + 86400000) % 86400000) * 1000000LL; break;
+    default: *days = 0; *tod_ns = 0; break;
+    }
+}
+
+/* days/tod -> the extracted scalar; *rtag is the RESULT tag (RAY_I32/RAY_DATE).
+ * Calendar fields (year/mm/dd) reuse the frozen base decomposition — the same
+ * ray_temporal_extract the dot accessor uses — via a throwaway RAY_DATE mirror,
+ * so the Hinnant civil_from_days lives in ONE place.  Clock fields stay a
+ * SIGNED inline division: timespan is an unbounded signed duration and the base
+ * HOUR/MINUTE/SECOND wrap+cap it at 24h (0D25:00:00 -> 25, never 1). */
+static int64_t component_value(q_comp_e c, int64_t days, int64_t tod, int8_t* rtag) {
+    if (c == QCOMP_WEEK) { *rtag = RAY_DATE; return q_calendar_week_start(days); }
+    *rtag = RAY_I32;
+    switch (c) {
+    case QCOMP_YEAR: case QCOMP_MM: case QCOMP_DD: {
+        int field = c == QCOMP_YEAR ? RAY_EXTRACT_YEAR
+                  : c == QCOMP_MM   ? RAY_EXTRACT_MONTH : RAY_EXTRACT_DAY;
+        ray_t* mirror = ray_date(days);
+        ray_t* got = ray_temporal_extract(mirror, field);
+        int64_t v = got->i64;
+        ray_release(mirror); ray_release(got);
+        return v;
+    }
+    case QCOMP_HH: return tod / 3600000000000LL;
+    case QCOMP_UU: return (tod / 60000000000LL) % 60;
+    default:       return (tod / 1000000000LL) % 60;   /* SS */
+    }
+}
+
+static int64_t temporal_raw_atom(int8_t at, ray_t* x) {
+    return RAY_IS_TEMPORAL64(at) ? x->i64 : (int64_t)x->i32;
+}
+static int64_t temporal_raw_vec(int8_t at, const void* base, int64_t i) {
+    return RAY_IS_TEMPORAL64(at) ? ((const int64_t*)base)[i]
+                                 : (int64_t)((const int32_t*)base)[i];
+}
+
+/* Atomic component leaf (through lists/dicts/tables via q_str_walk); an
+ * invalid (component, temporal-type) pair per the matrix is a 'type error
+ * (the doc pins the valid set, not the invalid-pair result — honest refusal
+ * beats a fabricated value). */
+static ray_t* component_leaf(ray_t* x, int64_t comp) {
+    q_comp_e c = (q_comp_e)comp;
+    if (!x) return ray_error("type", "$: temporal component of nil");
+    int8_t at = x->type < 0 ? (int8_t)-x->type : x->type;
+    int temporal = RAY_IS_TEMPORAL32(at) || RAY_IS_TEMPORAL64(at) ||
+                   RAY_IS_TEMPORALF(at);
+    if (!temporal) return ray_error("type", "$: temporal component of non-temporal");
+    if (!component_valid(at, c))
+        return ray_error("type", "$: component invalid for this temporal type");
+    /* A non-finite DATETIME (canonically 0n) has no meaningful field AND would
+     * make floor()/(int64_t) UB — treat it as null, like the sentinel. */
+    int datetimef = RAY_IS_TEMPORALF(at);
+    if (x->type < 0) {
+        int8_t rtag = (c == QCOMP_WEEK) ? RAY_DATE : RAY_I32;
+        if (RAY_ATOM_IS_NULL(x) || (datetimef && !isfinite(x->f64)))
+            return ray_typed_null((int8_t)-rtag);
+        int64_t days, tod;
+        double rawf = datetimef ? x->f64 : 0.0;
+        temporal_parts(at, temporal_raw_atom(at, x), rawf, &days, &tod);
+        int64_t v = component_value(c, days, tod, &rtag);
+        return rtag == RAY_DATE ? ray_date(v) : ray_i32((int32_t)v);
+    }
+    int8_t rtag = (c == QCOMP_WEEK) ? RAY_DATE : RAY_I32;
+    int64_t n = ray_len(x);
+    ray_t* out = ray_vec_new(rtag, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    const void* base = ray_data(x);
+    const double* fbase = (const double*)base;
+    for (int64_t i = 0; i < n; i++) {
+        if (ray_vec_is_null(x, i) || (datetimef && !isfinite(fbase[i]))) {
+            ray_vec_set_null(out, i, true); continue;
+        }
+        int64_t days, tod;
+        double rawf = datetimef ? fbase[i] : 0.0;
+        temporal_parts(at, temporal_raw_vec(at, base, i), rawf, &days, &tod);
+        int8_t rt; int64_t v = component_value(c, days, tod, &rt);
+        ((int32_t*)ray_data(out))[i] = (int32_t)v;   /* date + int both i32-stored */
+    }
+    return out;
+}
+
+/* `sym$temporal` component extraction; NULL if `sym` names no component. */
+static ray_t* component_extract(ray_t* t, ray_t* x) {
+    int c = component_of_sym(t);
+    if (c < 0) return NULL;
+    return q_str_walk(x, component_leaf, c, 1);
+}
+
 /* q `t$x` — the `$` verb (contract: q_dollar.h).  LEFT-operand dispatch:
  * a LONG width is PAD; mmu-shaped float operands (both sides) are matrix
  * multiply; a multi-designator LHS ("fiij", `int`float, 5 6h, (`int;"i";6h))
@@ -679,7 +834,11 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
     int is_tok = 0;
     int8_t tag = q_cast_designator(t, &is_tok);
     if (!tag) {
-        if (t && t->type == -RAY_SYM) return q_dollar_enum(t, x);
+        if (t && t->type == -RAY_SYM) {
+            ray_t* comp = component_extract(t, x);   /* year/mm/dd/hh/uu/ss/week */
+            if (comp) return comp;
+            return q_dollar_enum(t, x);
+        }
         return ray_error("nyi", "$: unsupported cast designator (deferred)");
     }
     /* `10h$`/`` `char$``/`"c"$` all land here with is_tok=0 and reinterpret via
