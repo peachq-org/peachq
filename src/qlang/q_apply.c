@@ -23,8 +23,7 @@
 #include "lang/eval.h"          /* ray_at_fn */
 #include "lang/format.h"        /* ray_type_name — amend error messages */
 #include "lang/internal.h"      /* call_lambda — 100h lambda-carrier application */
-#include "qlang/q_console.h"    /* q_console_write — 1/-1/2/-2 console handles */
-#include "core/ipc.h"           /* ray_ipc_handle_of_fd — q true-fd handle -> selector id */
+#include "qlang/q_handles.h"    /* q_handles_apply — the sole handle authority */
 #include "qlang/net/q_ws.h"         /* q_ws_client_open — ws:// hsym-apply */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw — http:// hsym-apply */
 #include "ops/ops.h"            /* ray_is_lazy / ray_lazy_materialize — DAG agg results */
@@ -924,63 +923,15 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n) {
 
     if (n < 1) return NULL;
 
-    /* IPC handle-as-verb application (feat/q-ipc-client, Phase D).  An int atom
-     * applied to a payload is a kdb IPC send: a POSITIVE handle sends SYNC
-     * (`.ipc.send` -> deserialized response); a NEGATIVE handle (from `neg h`)
-     * sends ASYNC (`.ipc.post` -> `::`).  A q connection handle IS the socket fd
-     * (kdb-faithful, >= 3 — 0/1/2 reserved for console/stdout/stderr); translate
-     * `|q handle|` (the fd) back to the poll selector id the .ipc.* primitives
-     * expect.  Only the single-payload form `h x` is handled (n==1); `h[a;b]`
-     * keeps its existing decline.  The `.ipc.*` primitives are RAY_FN_RESTRICTED
-     * and we call them directly, so re-assert the restricted check (a restricted
-     * remote connection must not drive handles).  q handle 0 (console) and
-     * null/INT_MIN decline. */
+    /* Handle-as-verb application (`h x`): an int atom head IS a handle apply —
+     * console/file/fifo/socket dispatch lives wholly in q_handles_apply
+     * (q_handles.c, the sole handle authority; this file knows no kinds).
+     * Only the single-payload form is a handle apply (n==1); `h[a;b]` keeps
+     * its existing decline.  An int-null head maps onto the int-null qh values
+     * q_handles_apply rejects. */
     if ((head->type == -RAY_I64 || head->type == -RAY_I32) && n == 1) {
         int64_t qh = (head->type == -RAY_I64) ? head->i64 : (int64_t)head->i32;
-        /* Console text-write handles (kdb basics/handles.md; feat/q-file-text):
-         * 1/-1 stdout, 2/-2 stderr — both route to the q console sink so the
-         * REPL/qdoctest see the text.  A NEGATIVE handle appends '\n' after
-         * each string; positive writes raw.  Payload: a string or a list of
-         * strings.  Returns the handle (kdb chains `-1 sums "ab";`). */
-        if (!RAY_ATOM_IS_NULL(head) && (qh == 1 || qh == -1 || qh == 2 || qh == -2)) {
-            ray_t* y = args[0];
-            int nl = qh < 0;
-            const char* yp; int64_t yn;
-            if (y && q_text_bytes(y, &yp, &yn)) {
-                q_console_write(yp, (size_t)yn);
-                if (nl) q_console_write("\n", 1);
-            } else if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
-                int64_t m = ray_len(y);
-                for (int64_t i = 0; i < m; i++) {
-                    ray_t* ia = ray_i64(i);
-                    ray_t* it = ray_at_fn(y, ia);
-                    ray_release(ia);
-                    if (!it || RAY_IS_ERR(it)) return it ? it : ray_error("oom", NULL);
-                    const char* ip; int64_t in_;
-                    if (!q_text_bytes(it, &ip, &in_)) {
-                        ray_release(it);
-                        return ray_error("type", "handle write: expected strings");
-                    }
-                    q_console_write(ip, (size_t)in_);
-                    if (nl) q_console_write("\n", 1);
-                    ray_release(it);
-                }
-            } else
-                return ray_error("type", "handle write: expected a string or list of strings");
-            return make_i64(qh);
-        }
-        if (ray_eval_get_restricted()) return ray_error("access", "restricted");
-        if (RAY_ATOM_IS_NULL(head) || qh == 0 || qh == INT64_MIN)
-            return ray_error("type", "handle apply: invalid handle %lld", (long long)qh);
-        int64_t fd  = (qh > 0) ? qh : -qh;         /* q handle is the socket fd */
-        int64_t raw = ray_ipc_handle_of_fd(fd);    /* fd -> poll selector id */
-        if (raw < 0)
-            return ray_error("type", "handle apply: invalid handle %lld", (long long)qh);
-        ray_t*  rawh  = make_i64(raw);
-        ray_t*  r     = (qh > 0) ? ray_hsend_fn(rawh, args[0])   /* sync  */
-                                 : ray_hpost_fn(rawh, args[0]);  /* async */
-        ray_release(rawh);
-        return r;
+        return q_handles_apply(qh, args[0]);
     }
 
     /* Raw native VARY fn values (e.g. the @/. amend-trap wrappers) reach this
