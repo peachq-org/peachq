@@ -4,8 +4,8 @@
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
 #include <rayforce.h>
-#include "qlang/q_ws.h"
-#include "qlang/q_http.h"      /* q_http_send_all — bounded sends */
+#include "qlang/net/q_ws.h"
+#include "qlang/net/q_http.h"      /* q_http_send_all — bounded sends */
 #include "qlang/q_dotz.h"      /* the `.z.ws`/`.z.wo`/`.z.wc` handler slots */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
 #include "qlang/q_fmt.h"       /* q_console_str/_reset — drain handler output */
