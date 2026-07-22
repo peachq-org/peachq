@@ -13,6 +13,9 @@
 .Q.btoa:-32!;
 .Q.atob:.Q.c.atob;
 .Q.sha1:-33!;
+/ .Q.host/.Q.addr: ref/dotq.md — the bang is the single C home (`-12!`/`-13!`, q.k spells them exactly so).
+.Q.host:-12!;
+.Q.addr:-13!;
 .Q.ops:.Q.c.ops;
 .Q.res:.Q.c.res;
 .Q.hg:.Q.c.hg;
