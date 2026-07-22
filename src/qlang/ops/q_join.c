@@ -1,4 +1,4 @@
-/* q_wrap_join.c — the q join family (feat/q-joins-rebuild): lj/ljf ij/ijf ej uj/ujf
+/* ops/q_join.c — the q join family (feat/q-joins-rebuild): lj/ljf ij/ijf ej uj/ujf
  * pj aj-family asof wj/wj1 + keyed-table lookup
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
@@ -23,7 +23,7 @@
  * src/ops/join.c machinery); this section only prepares rowid-augmented key
  * tables, reorders the engine's match relation to kdb row order, and
  * assembles result columns by vector gather.  Keyed-table primitives are the
- * single-home helpers (q_is_keyed_table in q_wrap_list.c, q_bang_enkey in q_bang.c,
+ * single-home helpers (q_is_keyed_table in ops/q_list.c, q_bang_enkey in q_bang.c,
  * q_table_flatten) — never redefined.  Refcounts: wrapper args BORROWED, results OWNED;
  * ray_list_append/ray_table_add_col RETAIN (release local after);
  * ray_table_get_col* return BORROWED columns. */
