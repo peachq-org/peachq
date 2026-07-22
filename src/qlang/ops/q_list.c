@@ -1,4 +1,4 @@
-/* q_wrap_list.c — list verbs: reshape/take/drop/cut, column attributes,
+/* ops/q_list.c — list verbs: reshape/take/drop/cut, column attributes,
  * rotate/sublist/next/prev/fills/fill/in, sort/grade/bucket, deal/generate
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared

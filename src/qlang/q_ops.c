@@ -252,7 +252,7 @@ static const q_op_t Q_OPS[] = {
     { "cross", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("cross", q_cross_wrap), NULL, 1, 0, "structural" },
     /* ---- q join family (feat/q-joins-rebuild) ----
      * Dyadic infix keywords over the engine hash/asof join (pair-relation
-     * core in q_wrap_join.c: rowid-augmented key tables through
+     * core in ops/q_join.c: rowid-augmented key tables through
      * ray_left_join_fn / ray_asof_join_fn, kdb-ordered, gather-assembled).
      * Family: structural (schema-defining; border ruling in the AUDIT). */
     { "lj",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("lj", q_lj_wrap),   NULL, 1, 0, "structural" },
@@ -287,7 +287,7 @@ static const q_op_t Q_OPS[] = {
     { "xbar",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("xbar", q_xbar_wrap), NULL, 1, 0, "atomic" },
     /* ---- Wave 5: running scans (monadic prefix keywords) — all doc-labelled
      * uniform (ref/{sum,prd,max,min,avg}.md); null discipline at the bodies
-     * (q_wrap_agg.c).  `ratios` is a border case: its page's LABEL says
+     * (ops/q_agg.c).  `ratios` is a border case: its page's LABEL says
      * aggregate, its documented behaviour is uniform (see FAMILY AUDIT). ---- */
     { "sums",  QLEX_KW_PREFIX, QR_FN1("sums", q_sums_wrap),    QR_NONE,           NULL, 1, 0, "map" },
     { "prds",  QLEX_KW_PREFIX, QR_FN1("prds", q_prds_wrap),    QR_NONE,           NULL, 1, 0, "map" },
@@ -479,7 +479,7 @@ static const q_op_t Q_OPS[] = {
     /* `reciprocal` is self-hosted in q.q (`.q.reciprocal:%[1;]`) — no row. */
     { "signum",    QLEX_KW_PREFIX, QR_FN1("signum", q_signum_wrap), QR_NONE, NULL, 1, 0, "atomic" },
     { "ceiling",   QLEX_KW_PREFIX, QR_FN1A("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic" },
-    /* ---- table verbs (feat/q-table-verbs) — all wrappers in q_wrap_table.c
+    /* ---- table verbs (feat/q-table-verbs) — all wrappers in ops/q_table.c
      * EXCEPT xcol/xcols, which are q.q derivations over `.Q.ft` (QR_QSRC:
      * bound post-bootstrap; the row is only what keeps them infix).
      * The wrappers build over the wave-4 keyed primitives (q_bang_enkey/
