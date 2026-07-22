@@ -18,11 +18,14 @@
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
+#include "qlang/net/q_net.h"   /* q_net_host / q_net_addr — `-12!`/`-13!` */
+#include "lang/eval.h"          /* ray_eval_get_restricted — `-7!` file gate */
 #include <rayforce.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ---- multi-statement handlers (VALUE-shaped: borrowed y, OWNED return) ----- */
 
@@ -76,6 +79,43 @@ static ray_t* h_s1(ray_t* y) {
 static ray_t* h_refcnt(ray_t* y) {
     if (!y) return ray_error("type", "-16!: nil argument");
     return ray_i64((int64_t)y->rc);
+}
+
+/* -7!x hcount — ref/hcount.md: file symbol -> size in bytes as a long.  Path
+ * norms follow the io family: `:path file sym (leading ':' stripped), charv
+ * path tolerated like hopen.  A missing/unstatable file -> 'io (kdb pins
+ * path:oserr, unrepresentable in 7-byte codes — the read0 precedent). */
+static ray_t* h_hcount(ray_t* y) {
+    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    ray_t* xs = q_str_in(y);            /* charv path -> legacy STR form */
+    ray_t* path = NULL;                 /* OWNED RAY_STR, NUL-terminated */
+    const char* p = NULL;
+    size_t n = 0;
+    if (xs && xs->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(xs->i64);               /* borrowed */
+        if (s) { p = ray_str_ptr(s); n = ray_str_len(s); }
+    } else if (xs && xs->type == -RAY_STR) {
+        p = ray_str_ptr(xs);
+        n = ray_str_len(xs);
+    }
+    if (p) {                            /* empty path stats and fails -> 'io */
+        if (n > 0 && p[0] == ':') { p++; n--; }
+        path = ray_str(p, n);
+    }
+    ray_release(xs);
+    if (!path) return ray_error("type", NULL);
+    if (RAY_IS_ERR(path)) return path;
+    int64_t sz = -1;
+#ifdef RAY_OS_WINDOWS
+    struct _stat64 st;                  /* 64-bit twin: st_size past 2 GiB */
+    if (_stat64(ray_str_ptr(path), &st) == 0) sz = (int64_t)st.st_size;
+#else
+    struct stat st;
+    if (stat(ray_str_ptr(path), &st) == 0) sz = (int64_t)st.st_size;
+#endif
+    ray_release(path);
+    if (sz < 0) return ray_error("io", NULL);
+    return ray_i64(sz);
 }
 
 /* Format one double to `places` decimals with IEEE754 rounding (C's %.*f is
@@ -209,8 +249,11 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -3:  return h_s1(y);
         case -5:  return q_parse_builtin_fn(y);
         case -6:  return q_value_wrap(y);
+        case -7:  return h_hcount(y);
         case -8:  return q_wire_serialize(y, Q_WIRE_ASYNC);
         case -9:  return h_deser(y);
+        case -12: return q_net_host(y);
+        case -13: return q_net_addr(y);
         case -15: return q_md5_fn(y);
         case -16: return h_refcnt(y);
         case -18: return h_zip(y);
@@ -225,11 +268,8 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
          * (No per-verb string — bare 'nyi, per the no-embedded-error-strings
          * ruling; the comment carries the id's doc name / blocking reason.) */
         case -4:   /* tokens: scanner token list                                */
-        case -7:   /* hcount: file size                                         */
         case -10:  /* type enum: enumerations                                   */
         case -11:  /* streaming execute: logging + .z.ps                        */
-        case -12:  /* .Q.host: ip -> hostname                                   */
-        case -13:  /* .Q.addr: ip/host -> int                                   */
         case -14:  /* quote escape: CSV quote escaping                          */
         case -19:  /* set / compress file (AMBIGUOUS doc — see PR Deferrals)    */
         case -20:  /* .Q.gc: garbage collect                                    */
