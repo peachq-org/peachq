@@ -61,6 +61,7 @@
  *   hclose  — closes an IPC connection (ref/hopen.md).
  *   0:      — File Text: Save Text writes / Load CSV reads a file (ref/file-text.md).
  *   read0   — reads a file's lines (ref/read0.md).
+ *   hdel    — deletes a file or (empty) folder (ref/hdel.md).
  *   setenv  — sets a process environment variable (ref/getenv.md).
  * (getenv READS the environment — deterministic given the process env, no
  * mutation — so it is NOT flagged; value/get resolve data purely, the
@@ -536,6 +537,7 @@ static const q_op_t Q_OPS[] = {
     { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic" },
     { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none" },
     { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none" },
+    { "hdel",   QLEX_KW_PREFIX, QR_FN1("hdel", q_hdel_wrap),   QR_NONE,           NULL, 1, 1, "none" },
     /* ---- environment variables (feat/q-getenv-setenv, ref/getenv.md) ----
      * `getenv` is a monadic prefix keyword (sym -> value string, "" unset);
      * `setenv` is a dyadic infix keyword (`sym setenv str`), so it MUST be
