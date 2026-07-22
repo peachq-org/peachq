@@ -32,8 +32,8 @@
  * q_is_kw_verb memcmp, now manifest-driven). */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* wrapper decls for the QR_FN* recipes (brings q_ops.h) */
-#include "qlang/q_bang.h"               /* q_bang — the `!` row */
-#include "qlang/q_dollar.h"             /* q_dollar — the `$` row */
+#include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
+#include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
 #include <string.h>
 
 /* ===== deterministic / sideeffect AUDIT (feat/q-ops-introspection) =========
