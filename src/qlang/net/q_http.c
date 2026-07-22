@@ -623,7 +623,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
 
     ray_t* r = call_fn1(fn, arg);
     ray_release(arg);
-    /* drain handler show/0N! to the server console (q_zts_tick pattern) */
+    /* drain handler show/0N! to the server console (zts_tick pattern) */
     { const char* con = q_console_str();
       if (con && *con) { fputs(con, stdout); fflush(stdout); }
       q_console_reset(); }

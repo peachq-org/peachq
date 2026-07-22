@@ -67,7 +67,7 @@ static ray_t* id_table(ray_t* x) {
     int64_t* used = (nc <= 64) ? stack : (int64_t*)malloc((size_t)nc * sizeof(int64_t));
     if (!used) { ray_release(out); return ray_error("wsfull", ".Q.id: out of memory"); }
     for (int64_t c = 0; c < nc; c++) {
-        int64_t nm = q_name_sanitize(ray_table_col_name(x, c));
+        int64_t nm = q_registry_name_sanitize(ray_table_col_name(x, c));
         nm = q_name_dedup(nm, used, c, 1);
         used[c] = nm;
         out = ray_table_add_col(out, nm, ray_table_get_col_idx(x, c));
@@ -90,7 +90,7 @@ static ray_t* id_dict(ray_t* x) {
     for (int64_t i = 0; i < n; i++) {
         ray_t* ks = ray_sym_vec_cell(k, i);
         int64_t id = ray_sym_intern_runtime(ray_str_ptr(ks), ray_str_len(ks));
-        id = q_name_sanitize(id);
+        id = q_registry_name_sanitize(id);
         id = q_name_dedup(id, used, i, 1);
         used[i] = id;
         nk = ray_vec_append(nk, &id);
@@ -104,7 +104,7 @@ static ray_t* id_dict(ray_t* x) {
 
 static ray_t* id_fn(ray_t* x) {
     if (!x) return ray_error("type", ".Q.id: nil");
-    if (x->type == -RAY_SYM) return ray_sym(q_name_sanitize(x->i64));
+    if (x->type == -RAY_SYM) return ray_sym(q_registry_name_sanitize(x->i64));
     if (x->type == RAY_TABLE) return id_table(x);
     if (x->type == RAY_DICT)  return id_dict(x);
     return ray_error("type", ".Q.id: expects a symbol, table, or dictionary");
@@ -228,7 +228,7 @@ ray_t* q_count_fn(ray_t* x) {
 /* C-long specialization of q_count_fn: the count as an int64 (-1 on error),
  * for callers that want the number rather than a q value.  Consumes the
  * intermediate count value. */
-int64_t q_count_long(ray_t* x) {
+int64_t q_builtins_count_long(ray_t* x) {
     ray_t* c = q_count_fn(x);
     if (!c || RAY_IS_ERR(c)) { ray_release(c); return -1; }
     int64_t n = c->i64;
@@ -272,7 +272,7 @@ static void bind_value(const char* name, ray_t* val) {
  * on the server console) and reset so it can't bleed into later requests.
  * Returns an OWNED value; parse/lower/eval errors return as owned errors
  * (the IPC layer serializes them as -128h responses). */
-static ray_t* q_remote_eval_str(const char* src, size_t len) {
+static ray_t* remote_eval_str(const char* src, size_t len) {
     /* A leading `\` is a system command, not q source: kdb runs a solo `\l`/`\p`
      * received on the wire.  `system"X"` is exactly `\X`, so strip the `\` and
      * reuse q_system_fn — single-homing q_sys_run, the restricted-mode guard,
@@ -299,7 +299,7 @@ static ray_t* q_remote_eval_str(const char* src, size_t len) {
      * value (basics/ipc.md: `h"fn:{2+x}"` displays nothing).  Checked on the
      * PRE-lower shape — q_lower rewrites assignment into a `set` application —
      * which is why q_repl.c/qdoc.c ask here too. */
-    const int is_assign = q_ast_is_assign(ast);
+    const int is_assign = q_lower_ast_is_assign(ast);
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) return ast;
     ray_t* r = ray_eval(ast);
@@ -338,7 +338,7 @@ void q_builtins_register(void) {
      * clears it before the runtime dies. */
     ray_eval_set_apply_hook(q_apply_noun);
     /* Remote strings (IPC/journal) evaluate as q from now on. */
-    ray_eval_set_remote_str_fn(q_remote_eval_str);
+    ray_eval_set_remote_str_fn(remote_eval_str);
     /* Remote (func;args) value-apply (IPC): single value-object apply via q `value`. */
     ray_eval_set_remote_apply_fn(remote_apply);
     bind_unary("parse", q_parse_builtin_fn);
@@ -446,7 +446,7 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.ops", q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
     bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
-    bind_value(".Q.c.res", q_name_reserved_words());
+    bind_value(".Q.c.res", q_registry_name_reserved_words());
     /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
     /* .j JSON namespace (.j.j/.j.k/.j.jd) is defined in q — src/qlang/j.q, loaded
      * at q_runtime_create; the C homes are the `-31!`/`-29!` bangs (q_bang.c). */

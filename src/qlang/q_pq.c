@@ -78,7 +78,7 @@ static ray_t* pq_tree_fn(ray_t* x) {
 }
 
 /* Eval one q source line via the q pipeline (q_parse -> q_lower -> ray_eval),
- * mirroring q_runtime.c q_bootstrap_eval. OWNED value, or NULL on error
+ * mirroring q_runtime.c bootstrap_eval. OWNED value, or NULL on error
  * (reported to stderr — non-fatal per line, like the embedded bootstrap). */
 static ray_t* pq_eval(const char* src) {
     ray_t* ast = q_parse(src);

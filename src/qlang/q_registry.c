@@ -109,7 +109,7 @@ static int64_t name_append_suffix(int64_t sym_id, int64_t suffix) {
     return out;
 }
 
-int64_t q_name_sanitize(int64_t sym_id) {
+int64_t q_registry_name_sanitize(int64_t sym_id) {
     ray_t* s = ray_sym_str(sym_id);
     if (!s) return ray_sym_intern_runtime("a", 1);
     const char* p = ray_str_ptr(s);
@@ -145,7 +145,7 @@ int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous
     return base;
 }
 
-ray_t* q_name_reserved_words(void) {
+ray_t* q_registry_name_reserved_words(void) {
     int nop = 0;
     const q_op_t* ops = q_ops_table(&nop);
     int n = 0;

@@ -206,7 +206,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
                      (int)(rn - schlen), rest + schlen);
     if (m <= 0 || (size_t)m >= sizeof urlbuf) return ray_error("domain", NULL);
     q_http_url_t u;
-    if (q_http_url_parse(urlbuf, (size_t)m, &u) != 0) return ray_error("domain", NULL);
+    if (q_http_client_url_parse(urlbuf, (size_t)m, &u) != 0) return ray_error("domain", NULL);
 
     /* 16 random key bytes -> base64 Sec-WebSocket-Key (a fresh nonce, RFC §4.1).
      * From /dev/urandom on POSIX; xorshift(clock+addr) fallback.  The expected

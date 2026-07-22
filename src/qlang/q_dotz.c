@@ -299,9 +299,9 @@ static int64_t z_now_ns(int local) {
  * periodic push).  It is NOT an `.ipc.on.*` connection hook, so it does not use
  * env.c's frozen ipc-hook carve-out — it lives in this q-layer slot, set via
  * q_setg_wrap and read back via q_dotz_resolve.  The single forwarding thunk
- * (q_zts_tick) is registered ONCE per `\t N` and resolves the CURRENT `.z.ts`
+ * (zts_tick) is registered ONCE per `\t N` and resolves the CURRENT `.z.ts`
  * each fire, so re-assigning `.z.ts` takes effect with no re-registration. */
-static ray_t* q_zts_tick(ray_t* tick) {
+static ray_t* zts_tick(ray_t* tick) {
     (void)tick;                                  /* fire_expired's monotonic ms — kdb passes local ts */
     if (!q_sys_timer_active()) return NULL;      /* stopped (incl. reentrant \t 0) → no-op */
     ray_t* fn = g_zts;
@@ -325,7 +325,7 @@ static ray_t* q_zts_tick(ray_t* tick) {
 /* The ONE home for the settable `.z.*` handler name->slot mapping: q_dotz_get
  * (the C fire consumers) and q_dotz_set (the write path) both route through it,
  * so nothing outside dotz.c needs per-slot functions.  Who FIRES each (never
- * from here): `.z.ts` the poll-loop timer, `.z.exit` q_exit (q_sys.c),
+ * from here): `.z.ts` the poll-loop timer, `.z.exit` q_sys_exit (q_sys.c),
  * `.z.ph`/`.z.pp`/`.z.ac`/`.z.pm` q_http.c, `.z.ws`/`.z.wo`/`.z.wc` q_ws.c. */
 static ray_t** z_slot_ptr(const char* nm, size_t l) {
     if (l == 7 && memcmp(nm, ".z.exit", 7) == 0) return &g_zexit;
@@ -388,7 +388,7 @@ void q_dotz_exit_fire(int code) {
 }
 
 ray_t* q_dotz_timer_thunk(void) {
-    return ray_fn_unary(".z.ts", RAY_FN_NONE, q_zts_tick);
+    return ray_fn_unary(".z.ts", RAY_FN_NONE, zts_tick);
 }
 
 void q_dotz_init(int argc, char** argv) {
@@ -435,7 +435,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
     size_t      n = ray_str_len(name);
 
     /* Everything this resolver knows is `.z.*` — reject other names up front
-     * (they fall to env/registry in q_name_resolve). */
+     * (they fall to env/registry in name_resolve). */
     if (n < 4 || p[0] != '.' || p[1] != 'z' || p[2] != '.') return NULL;
 
     ray_t* out = NULL;

@@ -29,7 +29,7 @@ typedef struct {
  * host, over-long components, control/CR/LF bytes (request-injection guard),
  * bracketed IPv6 literals (deferred), and port overflow.  Fragment (`#...`) is
  * dropped; query (`?...`) is kept in path.  Returns 0 ok, -1 malformed. */
-int q_http_url_parse(const char* url, size_t n, q_http_url_t* out);
+int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out);
 
 /* Extract the body from a COMPLETE response buffer (headers + framed body).
  * On success sets status and body/body_len (body points into buf; a chunked
@@ -73,6 +73,6 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs);
  * -> 'nyi (TLS tier).  Reuses the #223 connect (30s) + send/read (30s) budgets
  * and the 32 MiB cap.  PROVISIONAL pre-C3: the return is a string ATOM.  hsym +
  * request are BORROWED; returns owned (or an owned bare-class ray_error). */
-ray_t* q_http_raw_client(ray_t* hsym, ray_t* request);
+ray_t* q_http_client_raw(ray_t* hsym, ray_t* request);
 
 #endif /* Q_HTTP_CLIENT_H */

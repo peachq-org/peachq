@@ -44,7 +44,7 @@ ray_t* q_proj_new(ray_t* base, ray_t** args, int64_t argc, uint64_t hole_mask,
                   int eff_valence);
 
 /* Monadic-marked verb `base:` (e.g. `+:`).  Retains `base`. */
-ray_t* q_monadic_mark(ray_t* base);
+ray_t* q_deriv_monadic_mark(ray_t* base);
 
 /* Composition `'[f;g;…]`: a carrier over the function values `fns[0..nf)` in
  * left-to-right order.  Applied, the RIGHTMOST function consumes all supplied
@@ -53,9 +53,9 @@ ray_t* q_monadic_mark(ray_t* base);
 ray_t* q_compose_new(ray_t** fns, int64_t nf);
 
 /* Number of composed functions in a Q_DERIV_COMPOSE carrier (0 otherwise). */
-int64_t q_compose_count(const ray_t* v);
+int64_t q_deriv_compose_count(const ray_t* v);
 /* Borrowed i-th composed function (0-based, left-to-right). */
-ray_t* q_compose_fn_at(const ray_t* v, int64_t i);
+ray_t* q_deriv_compose_fn_at(const ray_t* v, int64_t i);
 
 /* q lambda value `{...}`: base is the rayfall RAY_LAMBDA, `rank` its q valence,
  * `src` the verbatim `{...}` source text (the kdb display form).  Retains

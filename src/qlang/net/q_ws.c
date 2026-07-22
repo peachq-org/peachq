@@ -182,7 +182,7 @@ static void ws_close_send(ray_sock_t fd, int code, int mask) {
 
 /* ---- `.z.ws`/`.z.wo`/`.z.wc` dispatch ---- */
 
-/* Drain handler show/0N! output — nothing else drains here (q_zts_tick). */
+/* Drain handler show/0N! output — nothing else drains here (zts_tick). */
 static void ws_console_drain(void) {
     const char* con = q_console_str();
     if (con && *con) { fputs(con, stdout); fflush(stdout); }
