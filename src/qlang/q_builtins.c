@@ -12,7 +12,7 @@
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #include "qlang/net/q_gz.h"        /* .Q.c.gz — gzip deflate/inflate seam */
 #include "qlang/q_ops.h"      /* q_ops_table — .Q.ops introspection source */
-#include "qlang/q_registry.h" /* q_registry_init */
+#include "qlang/q_registry_internal.h" /* q_registry_init + q_is_fn_value (shared; brings q_registry.h) */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_fmt.h"      /* q_console_show — show's display sink; q_float_tok — string's float leaf */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
@@ -114,13 +114,6 @@ static ray_t* q_id_fn(ray_t* x) {
 
 static ray_unary_fn g_base_type  = NULL;
 static ray_unary_fn g_base_count = NULL;
-
-static int q_is_fn_value(ray_t* x) {
-    if (!x) return 0;
-    if (q_deriv_kind_of(x) != Q_DERIV_NONE) return 1;
-    return x->type == RAY_LAMBDA || x->type == RAY_UNARY ||
-           x->type == RAY_BINARY || x->type == RAY_VARY;
-}
 
 /* q `type` on FUNCTION values only — 100h lambda, 104h projection, 102h
  * operator (ref/datatypes.md).  Everything else stays on the base verb; the
