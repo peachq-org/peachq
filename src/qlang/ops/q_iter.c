@@ -1,31 +1,25 @@
-/* ops/q_applyiter.c — iterators (each, each-both, each-prior, over/scan) and
- * the imperative control constructs (q.seq/if/do/while) + the truth plumbing.
+/* ops/q_iter.c — the q iterators (each, each-both ', each-prior ':, over /,
+ * scan \) and the imperative control constructs (q.seq/if/do/while + the one
+ * shared truthiness home), the tail of the applyiter dissolution (owner
+ * ruling 2026-07-22, PR #277 seam map).  Bucket A moved the amend/trap/@-.
+ * bodies to q_apply.c; bucket B the fn-value machinery + lambda carrier/ret
+ * to q_deriv.c; bucket C the registry specials' accessors + the `'x` signal
+ * channel to q_registry.c.  These wrapper bodies ARE the build recipes the
+ * registry SPECIALS[] table binds — declared in q_registry_internal.h.
  *
- * DISSOLVING (owner D-ruling 2026-07-22, PR #277 seam map): bucket A
- * (amend/trap/@-. bodies) moved to q_apply.c; bucket B (fn-value machinery +
- * lambda carrier/ret) to q_deriv.c; bucket C (registry specials' accessors +
- * init/teardown + the `'x` signal channel) to q_registry.c.  Bucket D moves
- * the iterators/control bodies below to ops/q_iter.c, deleting this file. */
+ * Lazy-step discipline (every apply site here): a step result may be a LAZY
+ * DAG node BORROWING an operand the site is about to release —
+ * ray_lazy_materialize before the release/store (it passes non-lazy, NULL and
+ * error inputs straight through; D3). */
 #define _POSIX_C_SOURCE 200809L
-#include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_registry_internal.h" /* wrapper decls + q_registry.h (elem_at, collapse, provenance) + q_ops.h */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — truthiness via ONE type judgment */
-#include "qlang/q_apply.h" /* q_apply_noun — @/. noun arms */
-#include "qlang/q_deriv.h" /* q_proj_new, q_compose_new, q_lambda_carrier_new — 104h carriers */
-#include "lang/env.h"      /* ray_env_get */
-#include "lang/eval.h"     /* ray_eval; ray_fold_fn/ray_map_fn/ray_scan_fn HOFs; RAY_FN_SPECIAL_FORM, LAMBDA_PARAMS */
+#include "qlang/q_apply.h" /* q_apply_noun; q_apply_dict_union — each-both's dict key alignment (D7) */
+#include "qlang/q_deriv.h" /* q_deriv_fn_rank / q_deriv_is_fn_value / q_deriv_call_n */
+#include "lang/eval.h"     /* ray_eval; ray_fold_fn/ray_map_fn/ray_scan_fn HOFs */
 #include "lang/internal.h" /* call_fn1/2, atom_eq, as_i64, ray_error */
-#include "lang/format.h"   /* ray_type_name — error messages */
-#include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize — control forms */
-#include "table/sym.h"     /* ray_sym_intern_runtime */
+#include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize */
 #include <stdint.h>        /* uintptr_t */
-#include <string.h>        /* memcpy, strlen */
-
-/* Bucket-A moves (2026-07-22, D1): the amend/trap/@-. bodies now live in
- * q_apply.c beside the noun dispatcher; the element-read fast path is
- * q_registry_elem_at (q_registry.c, D4).  Lazy-step discipline: a step
- * result may be a LAZY DAG node BORROWING an operand the site is about to
- * release — ray_lazy_materialize before the release/store (it passes
- * non-lazy, NULL and error inputs straight through; D3). */
 
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
@@ -73,11 +67,23 @@ static ray_t* eachboth_apply(ray_t* f, ray_t** ops, int64_t k);
 
 static int op_is_dict(ray_t* v) { return v && v->type == RAY_DICT; }
 
-/* dict each-both (binary): keys come from the dict side; a non-dict operand
- * pairs with the dict's VALUES (kdb: d+'10 20 conforms values, keys kept).
- * Mixed operands previously dispatched ray_dict_vals(non-dict)=NULL straight
- * into a crash (codex round-2 P1). */
+/* each-both's per-key combiner: the general fn apply, lazy-materialized
+ * inside the walk (the operands are released right after). */
+static ray_t* eb_combine(ray_t* f, ray_t* va, ray_t* vb) {
+    return ray_lazy_materialize(call_fn2(f, va, vb));
+}
+
+/* dict each-both (binary).  TWO DICTS KEY-ALIGN exactly like the atomic
+ * dyadics (D7 fix, 2026-07-22; ref/add.md "Implicit iteration" upsert
+ * semantics, ref/maps.md "corresponding items"): matching keys combine via f,
+ * absentees pass through — composed on q_apply.c's ONE key-union walk, never a
+ * positional zip.  A mixed dict/non-dict pair conforms the non-dict operand to
+ * the dict's VALUES (kdb: d+'10 20 pairs value-wise, keys kept).  Mixed
+ * operands previously dispatched ray_dict_vals(non-dict)=NULL straight into a
+ * crash (codex round-2 P1). */
 static ray_t* eachboth_dict(ray_t* f, ray_t* x, ray_t* y) {
+    if (op_is_dict(x) && op_is_dict(y))
+        return q_apply_dict_union(f, x, y, eb_combine);
     ray_t* kd = op_is_dict(x) ? x : y;     /* key donor */
     ray_t* xk = ray_dict_keys(kd);           /* borrowed */
     if (!xk) return ray_error("type", "each-both: malformed dictionary");
