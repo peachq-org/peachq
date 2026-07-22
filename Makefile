@@ -5,7 +5,7 @@
 CC      ?= cc
 
 RAY_ENTRY_SRC = src/app/main.c src/qlang/qmain.c src/qlang/qdoctest_main.c
-RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c))
+RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/ops/*.c))
 
 RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
                  third_party/picohttpparser/picohttpparser.c \
