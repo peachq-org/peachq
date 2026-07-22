@@ -7,6 +7,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_builtins.h"   /* q_ty_char — meta column letters */
 #include "qlang/q_ns.h"    /* q_ns_key_roster, q_ns_ctx_dict/root_dict, q_ns_is_context */
 #include "qlang/q_apply.h" /* q_apply_noun */
 #include "qlang/q_deriv.h" /* q_deriv_kind_of/base, Q_DERIV_LAMBDA */
@@ -1788,6 +1789,142 @@ ray_t* q_keyed_table_build(ray_t** args, int64_t n) {
     }
     ray_release(tbl);
     if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+    return ray_dict_new(kt, vt);   /* consumes kt, vt */
+}
+
+/* ===== table introspection: cols / meta (evicted from q_builtins.c) ===== */
+/* Column name ids of a table as a RAY_SYM vector.  A keyed table (RAY_DICT of
+ * key-table -> value-table) yields key cols ++ value cols. */
+static ray_t* table_colnames(ray_t* x) {
+    if (x->type == RAY_TABLE) {
+        int64_t nc = ray_table_ncols(x);
+        ray_t* out = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        for (int64_t c = 0; c < nc; c++) {
+            int64_t nm = ray_table_col_name(x, c);
+            out = ray_vec_append(out, &nm);
+            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        }
+        return out;
+    }
+    if (x->type == RAY_DICT) {
+        ray_t* kt = ray_dict_keys(x);      /* borrowed */
+        ray_t* vt = ray_dict_vals(x);      /* borrowed */
+        if (!kt || !vt || kt->type != RAY_TABLE || vt->type != RAY_TABLE)
+            return ray_error("type", "cols: expects a table");
+        int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
+        ray_t* out = ray_sym_vec_new(RAY_SYM_W64, knc + vnc > 0 ? knc + vnc : 1);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        for (int64_t c = 0; c < knc; c++) {
+            int64_t nm = ray_table_col_name(kt, c);
+            out = ray_vec_append(out, &nm);
+            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        }
+        for (int64_t c = 0; c < vnc; c++) {
+            int64_t nm = ray_table_col_name(vt, c);
+            out = ray_vec_append(out, &nm);
+            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        }
+        return out;
+    }
+    return ray_error("type", "cols: expects a table");
+}
+
+/* Resolve a by-name table operand (cols`t / meta`t): a -RAY_SYM naming a
+ * global plain/keyed table resolves to it (borrowed); else x unchanged. */
+static ray_t* table_bi_deref(ray_t* x) {
+    if (x && x->type == -RAY_SYM) {
+        ray_t* g = ray_env_get(x->i64);                 /* borrowed */
+        if (g && (g->type == RAY_TABLE || q_is_keyed_table(g))) return g;
+    }
+    return x;
+}
+
+/* (cols x) — column names of a table as a symbol vector. */
+ray_t* q_cols_fn(ray_t* x) {
+    if (!x) return ray_error("type", "cols: nil");
+    return table_colnames(table_bi_deref(x));
+}
+
+/* Flatten a plain-or-keyed table to a single plain RAY_TABLE (key cols first).
+ * Returns owned (retained for a plain table). */
+static ray_t* table_meta_flatten(ray_t* x) {
+    if (x->type == RAY_TABLE) { ray_retain(x); return x; }
+    if (x->type != RAY_DICT) return ray_error("type", "meta: expects a table");
+    ray_t* kt = ray_dict_keys(x);          /* borrowed */
+    ray_t* vt = ray_dict_vals(x);          /* borrowed */
+    if (!kt || !vt || kt->type != RAY_TABLE || vt->type != RAY_TABLE)
+        return ray_error("type", "meta: expects a table");
+    int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
+    ray_t* out = ray_table_new(knc + vnc > 0 ? knc + vnc : 1);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    for (int64_t c = 0; c < knc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(kt, c), ray_table_get_col_idx(kt, c));
+    for (int64_t c = 0; c < vnc && !RAY_IS_ERR(out); c++)
+        out = ray_table_add_col(out, ray_table_col_name(vt, c), ray_table_get_col_idx(vt, c));
+    return out;
+}
+
+/* (meta x) — table metadata keyed by column name.  Builds the keyed table
+ * (c) -> (t; f; a): `c` column names, `t` per-column type char (via the
+ * single-home map), `f`/`a` blank (foreign-keys/attributes are out of scope).
+ * The result is a RAY_DICT from a 1-col key table to a 3-col value table —
+ * "a keyed table is just a dictionary from one table to another" (q_fmt
+ * renders it `k| v`). */
+ray_t* q_meta_fn(ray_t* x) {
+    if (!x) return ray_error("type", "meta: nil");
+    ray_t* flat = table_meta_flatten(table_bi_deref(x));
+    if (!flat || RAY_IS_ERR(flat)) return flat;
+    int64_t nc = ray_table_ncols(flat);
+    int64_t cap = nc > 0 ? nc : 1;
+    ray_t* cvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* c: names          */
+    ray_t* fvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* f: blank per col  */
+    ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* a: blank per col  */
+    char stackt[64];
+    char* tbuf = (cap <= (int64_t)sizeof stackt) ? stackt : (char*)malloc((size_t)cap);
+    if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
+        !avec || RAY_IS_ERR(avec) || !tbuf) {
+        if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
+        if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
+        if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
+        if (tbuf && tbuf != stackt) free(tbuf);
+        ray_release(flat);
+        return ray_error("wsfull", "meta: out of memory");
+    }
+    int64_t blank = ray_sym_intern_runtime("", 0);
+    int ok = 1;
+    for (int64_t c = 0; c < nc && ok; c++) {
+        int64_t nm = ray_table_col_name(flat, c);
+        ray_t* col = ray_table_get_col_idx(flat, c);   /* borrowed */
+        tbuf[c] = q_ty_char(col);
+        cvec = ray_vec_append(cvec, &nm);
+        fvec = ray_vec_append(fvec, &blank);
+        avec = ray_vec_append(avec, &blank);
+        if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
+            !avec || RAY_IS_ERR(avec)) ok = 0;
+    }
+    ray_release(flat);
+    ray_t* tstr = ok ? ray_str(tbuf, (size_t)nc) : NULL;
+    if (tbuf != stackt) free(tbuf);
+    if (!ok || !tstr || RAY_IS_ERR(tstr)) {
+        if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
+        if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
+        if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
+        if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
+        return ray_error("wsfull", "meta: build failed");
+    }
+    /* key table: c ; value table: t f a  -> keyed table dict */
+    ray_t* kt = ray_table_new(1);
+    kt = ray_table_add_col(kt, ray_sym_intern("c", 1), cvec);
+    ray_release(cvec);
+    ray_t* vt = ray_table_new(3);
+    vt = ray_table_add_col(vt, ray_sym_intern("t", 1), tstr); ray_release(tstr);
+    if (!RAY_IS_ERR(vt)) { vt = ray_table_add_col(vt, ray_sym_intern("f", 1), fvec); }
+    ray_release(fvec);
+    if (!RAY_IS_ERR(vt)) { vt = ray_table_add_col(vt, ray_sym_intern("a", 1), avec); }
+    ray_release(avec);
+    if (RAY_IS_ERR(kt)) { if (!RAY_IS_ERR(vt)) ray_release(vt); return kt; }
     if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
     return ray_dict_new(kt, vt);   /* consumes kt, vt */
 }
