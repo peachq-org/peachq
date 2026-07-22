@@ -40,3 +40,11 @@ int64_t q_calendar_ts_compose(int64_t days, int64_t tod_ns) {
     return ((__int128)days * 86400000000000LL + tod_ns) < 0 ? -INT64_MAX
                                                             : INT64_MAX;
 }
+
+/* 2000.01.01 is a Saturday; shift the epoch so Monday==0, floor to the week.
+ * `week` has no base ray_temporal_extract field, so the cast keeps this q-side
+ * (calendar year/mm/dd and clock hh/uu/ss decode elsewhere). */
+int64_t q_calendar_week_start(int64_t days) {
+    int64_t dow = (((days + 5) % 7) + 7) % 7;   /* 0=Mon .. 6=Sun */
+    return days - dow;
+}

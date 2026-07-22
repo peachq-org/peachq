@@ -219,7 +219,15 @@ ray_t* ray_extract_ss_fn(ray_t* x)     { return ray_temporal_extract(x, RAY_EXTR
 ray_t* ray_extract_hh_fn(ray_t* x)     { return ray_temporal_extract(x, RAY_EXTRACT_HOUR); }
 ray_t* ray_extract_minute_fn(ray_t* x) { return ray_temporal_extract(x, RAY_EXTRACT_MINUTE); }
 ray_t* ray_extract_yyyy_fn(ray_t* x)   { return ray_temporal_extract(x, RAY_EXTRACT_YEAR); }
-ray_t* ray_extract_mm_fn(ray_t* x)     { return ray_temporal_extract(x, RAY_EXTRACT_MONTH); }
+/* `mm` is MONTH on a value carrying a month (date/timestamp), MINUTE on a pure
+ * time-of-day — owner ruling reconciling kb/programming-idioms.md (`time.mm` ->
+ * minute) with ref/cast.md (`mm` -> month).  TIME is the only extract-accepted
+ * type without a month component. */
+ray_t* ray_extract_mm_fn(ray_t* x) {
+    int8_t t = x ? (x->type < 0 ? (int8_t)-x->type : x->type) : 0;
+    return ray_temporal_extract(x, t == RAY_TIME ? RAY_EXTRACT_MINUTE
+                                                 : RAY_EXTRACT_MONTH);
+}
 ray_t* ray_extract_dd_fn(ray_t* x)     { return ray_temporal_extract(x, RAY_EXTRACT_DAY); }
 ray_t* ray_extract_dow_fn(ray_t* x)    { return ray_temporal_extract(x, RAY_EXTRACT_DOW); }
 ray_t* ray_extract_doy_fn(ray_t* x)    { return ray_temporal_extract(x, RAY_EXTRACT_DOY); }
@@ -644,16 +652,55 @@ static time_t ray_epoch_offset(void) {
     return (time_t)946684800;
 }
 
+/* `.date` / `.time` project a date/time/timestamp onto its DATE (day count)
+ * or TIME (ms-of-day) PORTION, returning the corresponding q datatype — not a
+ * truncated timestamp (the old behaviour returned RAY_TIMESTAMP for both, so
+ * `ts.date` mis-typed as timestamp and `ts.time` lost the ms field).  Atom ->
+ * atom, vector -> vector; nulls propagate. */
+static int64_t rte_day_of_us(int64_t us) {
+    int64_t days = us / RTE_USEC_PER_DAY;
+    if (us < 0 && us % RTE_USEC_PER_DAY != 0) days--;
+    return days;
+}
+static int64_t rte_ms_of_us(int64_t us) {
+    int64_t day_us = us % RTE_USEC_PER_DAY;
+    if (day_us < 0) day_us += RTE_USEC_PER_DAY;
+    return day_us / 1000LL;
+}
+static ray_t* temporal_datetime_part(ray_t* input, bool want_time) {
+    int8_t rtag = want_time ? RAY_TIME : RAY_DATE;
+    if (input->type < 0) {
+        if (RAY_ATOM_IS_NULL(input)) return ray_typed_null((int8_t)-rtag);
+        int64_t us = rte_to_us(input->type, input->i64);
+        int64_t v = want_time ? rte_ms_of_us(us) : rte_day_of_us(us);
+        return want_time ? ray_time(v) : ray_date(v);
+    }
+    int8_t t = input->type;
+    int64_t len = input->len;
+    ray_t* result = ray_vec_new(rtag, len > 0 ? len : 1);
+    if (!result || RAY_IS_ERR(result)) return result;
+    result->len = len;
+    int32_t* out = (int32_t*)ray_data(result);
+    const char* base = (const char*)ray_data(input);
+    bool in32 = (t == RAY_DATE || t == RAY_TIME);
+    for (int64_t i = 0; i < len; i++) {
+        if (ray_vec_is_null(input, i)) { ray_vec_set_null(result, i, true); continue; }
+        int64_t raw = in32 ? (int64_t)((const int32_t*)base)[i]
+                           : ((const int64_t*)base)[i];
+        int64_t us = rte_to_us(t, raw);
+        out[i] = (int32_t)(want_time ? rte_ms_of_us(us) : rte_day_of_us(us));
+    }
+    return result;
+}
+
 /* (date 'local) or (date 'global) — returns current date as DATE atom.
- * Overloaded: if arg is a DATE / TIME / TIMESTAMP value or vector,
- * returns `arg` truncated to the day boundary (RAY_TIMESTAMP result).
- * This lets `(date ts)` and `ts.date` both flow through the registered
- * unary builtin with no special-case detour. */
+ * Overloaded: a DATE / TIME / TIMESTAMP value or vector projects onto its DATE
+ * portion (RAY_DATE result), so `(date ts)` and `ts.date` share this path. */
 ray_t* ray_date_clock_fn(ray_t* arg) {
     if (arg) {
         int8_t t = arg->type < 0 ? (int8_t)-arg->type : arg->type;
         if (t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP)
-            return ray_temporal_truncate(arg, RAY_EXTRACT_DAY);
+            return temporal_datetime_part(arg, false);
     }
     bool local = !is_global_arg(arg);
     time_t now = time(NULL);
@@ -678,13 +725,13 @@ ray_t* ray_date_clock_fn(ray_t* arg) {
 }
 
 /* (time 'local) or (time 'global) — returns current time as TIME atom.
- * Overloaded same way as ray_date_clock_fn: temporal argument ⇒
- * truncate to second boundary (RAY_TIMESTAMP); symbol / default ⇒ clock. */
+ * Overloaded same way as ray_date_clock_fn: a temporal argument projects onto
+ * its TIME portion (ms-of-day, RAY_TIME result); symbol / default ⇒ clock. */
 ray_t* ray_time_clock_fn(ray_t* arg) {
     if (arg) {
         int8_t t = arg->type < 0 ? (int8_t)-arg->type : arg->type;
         if (t == RAY_DATE || t == RAY_TIME || t == RAY_TIMESTAMP)
-            return ray_temporal_truncate(arg, RAY_EXTRACT_SECOND);
+            return temporal_datetime_part(arg, true);
     }
     bool local = !is_global_arg(arg);
     time_t now = time(NULL);
