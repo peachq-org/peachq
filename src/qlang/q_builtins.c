@@ -369,6 +369,7 @@ void q_builtins_register(void) {
      * name-ref through the env (the ssr precedent — same C fn as the registry
      * row); `csv` is kdb's comma global (ref/file-text.md `csv 0: t`). */
     bind_unary("read0",  q_read0_wrap);
+    bind_unary("read1",  q_read1_wrap);
     bind_value("csv",    ray_str(",", 1));
     /* Table introspection — q-owned, snapshotted by the registry's QK_ENV rows
      * (q_ops.c) so the parser embeds these over the base env `meta`/(absent)
