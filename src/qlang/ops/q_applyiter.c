@@ -7,7 +7,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_dollar.h" /* q_dollar_cast — truthiness via ONE type judgment */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — truthiness via ONE type judgment */
 #include "qlang/q_apply.h" /* q_apply_noun — @/. noun arms */
 #include "qlang/q_deriv.h" /* q_proj_new, q_compose_new, q_lambda_carrier_new — 104h carriers */
 #include "lang/env.h"      /* ray_env_get */
