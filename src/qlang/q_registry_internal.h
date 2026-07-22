@@ -26,7 +26,7 @@
 #include "qlang/q_ops.h"
 
 /* ===== 1. q_funsql.c retirement seam (see file header there) ============ */
-ray_t* q_select_exec(ray_t** args, int64_t n);                /* used by: lower, registry, castcal */
+ray_t* q_select_exec(ray_t** args, int64_t n);                /* used by: lower, registry */
 ray_t* q_funsql_select(ray_t** args, int64_t n);              /* used by: lower, registry */
 ray_t* q_funsql_bang(ray_t** args, int64_t n);                /* used by: lower, registry */
 ray_t* q_delete_exec(ray_t** args, int64_t n);                /* used by: registry */
@@ -170,8 +170,8 @@ ray_t* q_keyed_table_build(ray_t** args, int64_t n);
 
 /* ---- defined in q_registry.c ---- */
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, funsql, table */
-ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, funsql, json, wire, agg, applyiter, castcal, io, join, list, math, table */
-ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, applyiter, castcal */
+ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, funsql, json, wire, agg, applyiter, castcal, io, join, list, math, table, value */
+ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, applyiter, value */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, lower, applyiter, join */
 
 /* ---- defined in q_wrap_agg.c ---- */
@@ -183,18 +183,19 @@ ray_t* q_null_wrap(ray_t* x);                                 /* used by: regist
 /* ---- defined in q_wrap_applyiter.c ---- */
 int q_is_fn_value(ray_t* x);                                  /* used by: builtins, io */
 int q_values_match(ray_t* a, ray_t* b);                       /* used by: list */
-ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k);              /* used by: castcal, io */
+ray_t* q_call_n(ray_t* f, ray_t** a, int64_t k);              /* used by: value, io */
 ray_t* q_over_wrap(ray_t** args, int64_t n);                  /* used by: lower, registry */
-ray_t* q_registry_scan_value(void);                           /* used by: fmt, lower, castcal */
-ray_t* q_registry_over_value(void);                           /* used by: fmt, lower, castcal */
-ray_t* q_registry_prior_value(void);                          /* used by: fmt, lower, castcal */
+ray_t* q_registry_scan_value(void);                           /* used by: fmt, lower, value */
+ray_t* q_registry_over_value(void);                           /* used by: fmt, lower, value */
+ray_t* q_registry_prior_value(void);                          /* used by: fmt, lower, value */
 extern ray_t* g_funsql_select_value;                          /* used by: funsql, registry */
 extern ray_t* g_funsql_bang_value;                            /* used by: funsql, registry */
 ray_t* q_registry_list_value(void);                           /* used by: fmt, lower, parse, join */
 
-/* ---- defined in q_wrap_castcal.c ---- */
+/* ---- defined in q_value.c (q_value_wrap is public — q_registry.h) ---- */
 ray_t* q_value_resolve_sym_owned(ray_t* symv);                /* used by: table */
-ray_t* q_value_wrap(ray_t* x);                                /* used by: bang, builtins, registry */
+
+/* ---- defined in q_wrap_castcal.c ---- */
 int8_t q_cast_designator(ray_t* t, int* is_tok);              /* used by: io */
 const char* q_type_qname(int8_t t);                           /* used by: table */
 ray_t* q_cast_to(int8_t tag, ray_t* x);                       /* used by: agg, applyiter, list */
