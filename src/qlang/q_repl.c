@@ -222,7 +222,7 @@ static int32_t repl_highlight(char* dst, int32_t dst_cap, const char* buf, int32
  *
  * Reads are in-bounds on any NUL-terminated string: s[1] is only reached when
  * s[0]=='q' (so s[0] != '\0'), and s[2] only when s[1]==')' (so s[1] != '\0'). */
-const char* q_strip_repl_prompt(const char* s) {
+const char* q_repl_strip_prompt(const char* s) {
     while (s[0] == 'q' && s[1] == ')' && s[2] != ')')
         s += 2;
     return s;
@@ -243,7 +243,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
      * line — covers REPL (piped + interactive) and the `q file.q` loader, all
      * of which funnel through here.  Adjust n by the bytes we advanced past. */
     {
-        const char* stripped = q_strip_repl_prompt(s);
+        const char* stripped = q_repl_strip_prompt(s);
         n -= (size_t)(stripped - s);
         s = stripped;
     }
@@ -277,7 +277,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
         return;
     }
 
-    int is_assign = q_ast_is_assign(ast);   /* pre-lower shape */
+    int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
     ast = q_lower(ast);
     if (RAY_IS_ERR(ast)) {
         const char* code = (const char*)ast->sdata;
@@ -340,7 +340,7 @@ static const char* i_hist_path(char* buf, size_t cap) {
     return ".qhist";
 }
 
-/* The live non-poll interactive terminal (repl_interactive), so q_exit can
+/* The live non-poll interactive terminal (repl_interactive), so q_sys_exit can
  * restore it + save history from inside an eval (q_repl_console_close).  The
  * poll flavour's terminal lives in g_q_poll_repl and is closed there. */
 static ray_term_t* g_live_term;
@@ -448,7 +448,7 @@ static void repl_interactive(FILE* out, FILE* err) {
  *   - piped: a line accumulator over plain read(2); each complete line is
  *            processed with the same prompt/echo shape as the fgets loop so
  *            the transcript is unchanged.
- * `\\` / `exit x` terminate inside the eval (q_exit — kdb: process exit).
+ * `\\` / `exit x` terminate inside the eval (q_sys_exit — kdb: process exit).
  * EOF keeps the loop serving IPC when a listener is live, else exits. */
 
 /* A `\p N` (or startup `-p`) listener makes this process a server even if it
@@ -483,7 +483,7 @@ static void poll_close_term(q_poll_repl_t* c) {
     c->term = NULL;
 }
 
-/* See q_repl.h — q_exit's console teardown: whichever REPL flavour holds a
+/* See q_repl.h — q_sys_exit's console teardown: whichever REPL flavour holds a
  * live terminal, restore it and save history BEFORE `.z.exit` runs (its 0N!
  * output must land on a cooked terminal).  Idempotent; no-op when piped. */
 void q_repl_console_close(void) {
@@ -580,7 +580,7 @@ static void pipe_prompt(q_poll_repl_t* c) {
 }
 
 /* Process one complete piped line (prompt already showing, mirrors the fgets
- * loop's prompt-then-read order).  `\\`/`exit x` terminate inside q_exit, so
+ * loop's prompt-then-read order).  `\\`/`exit x` terminate inside q_sys_exit, so
  * there is no quit signal to propagate. */
 static void pipe_line(q_poll_repl_t* c, char* line, size_t n) {
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
@@ -773,7 +773,7 @@ int q_repl_run_file(const char* path, FILE* out, FILE* err) {
      *  - a trimmed singleton `/` opens a `/`..`\` block comment (skip to a
      *    trimmed singleton `\`); a trimmed singleton `\` (outside a block) EXITS
      *    the script (load-time syntax); `\\` / `exit x` evaluate normally and
-     *    terminate the PROCESS via q_exit (kdb-true).
+     *    terminate the PROCESS via q_sys_exit (kdb-true).
      * Continuation fragments are joined with '\n' (now whitespace to the
      * scanner), so each fragment's trailing `/ comment` ends at its own newline. */
     static char acc[1 << 16];               /* one logical line (joined) */
