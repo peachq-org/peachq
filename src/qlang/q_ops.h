@@ -1,4 +1,4 @@
-/* q op manifest — the SINGLE authoritative table of every in-scope q verb.
+/* q op manifest — the SINGLE authoritative table of every C-rostered q verb.
  *
  * One source, two consumers (spec 2026-07-03-q-op-registry-complete-design.md,
  * "Bootstrap — split lexical metadata from runtime values"):
@@ -8,12 +8,15 @@
  *      (name, valence) -> ray_t function value + q-surface provenance, by
  *      iterating q_ops_table().
  *
- * Scope: every rostered q verb, including the type-dispatch glyphs (`! ? $ @ .
- * _`, landed in 2c-2+).  A registry miss still means "not resolvable at that
- * valence."  Cells whose q semantics have NO clean rayfall target stay QR_NONE
- * rather than a guessed binding — currently `|` dyadic (element-wise max),
- * monadic `%` (reciprocal glyph), monadic `$`/`@`/`.`/`^`, and the reserved
- * `any`/`all` rows; qSQL forms are q_lower rewrites, not registry cells. */
+ * Scope: every C-rostered q verb, including the type-dispatch glyphs (`! ? $ @ .
+ * _`, landed in 2c-2+).  NOT every q KEYWORD: q.q-hosted keywords with no lexer
+ * or registry involvement (rand, med, md5, ...) have no row — they resolve as
+ * `.q` entries and are reserved via the dynamic `.q` probe (q_lower/q_ns).
+ * A registry miss still means "not resolvable at that valence."  Cells whose
+ * q semantics have NO clean rayfall target stay QR_NONE rather than a guessed
+ * binding — currently `|` dyadic (element-wise max), monadic `%` (reciprocal
+ * glyph), monadic `$`/`@`/`.`/`^`, and the reserved `any`/`all` rows; qSQL
+ * forms are q_lower rewrites, not registry cells. */
 #ifndef Q_OPS_H
 #define Q_OPS_H
 
@@ -79,18 +82,14 @@ typedef struct {
 
 /* One manifest row: a q verb, its lexical class, its monadic/dyadic build recipes
  * (QR_* above), and the introspection metadata surfaced verbatim as the `.Q.ops[]`
- * columns.  Per-field notes are trailing; two things are load-bearing up front:
- *  - deterministic/sideeffect/family/doc/docsrc/syntax/example are PURE METADATA —
- *    no verb behaviour reads them.  Every row sets all fields explicitly
- *    (-Wmissing-field-initializers).  Classification rosters + border rulings live
- *    in q_ops.c (the deterministic/sideeffect AUDIT and FAMILY AUDIT blocks); the
- *    `family` vocabulary is atomic|map|aggregate|index|rowid|structural|irregular|
- *    none (defs: actionable-plans/2026-07-15-uniform-structure-dispatch.md).
- *  - doc/docsrc/syntax/example are GENERATED from qdocs/ by tools/qdocs/ (docgen +
- *    examplegen) and committed — read at run time, never re-derived (no file IO on
- *    the REPL path).  NEVER hand-edit a derived string (a rewording cannot be told
- *    from a fabrication — re-run the generator), EXCEPT the four HAND-AUTHORED
- *    iterators `/ \ ': <>` (paraphrased, docsrc NULL — tools/qdocs/qdocs-docmap.pins.tsv `=`). */
+ * columns.  deterministic/sideeffect/family are PURE METADATA — no verb behaviour
+ * reads them.  Every row sets all fields explicitly (-Wmissing-field-initializers).
+ * Classification rosters + border rulings live in q_ops.c (the deterministic/
+ * sideeffect AUDIT and FAMILY AUDIT blocks); the `family` vocabulary is
+ * atomic|map|aggregate|index|rowid|structural|irregular|none (defs:
+ * actionable-plans/2026-07-15-uniform-structure-dispatch.md).  Per-verb help
+ * strings live OUTSIDE the binary in docs/q-ops-help.tsv (archival, keyed by
+ * name, loaded by nothing). */
 typedef struct {
     const char*  name;          /* q surface spelling — the lookup key + registry provenance */
     q_lex_class  lex;           /* how the scanner treats the token (QLEX_* above) */
@@ -100,10 +99,6 @@ typedef struct {
     uint8_t      deterministic; /* 0 iff any valence is nondeterministic (rand/deal/?-roll); else 1 */
     uint8_t      sideeffect;    /* 1 iff eval has an observable effect (assign/mutate/IPC/system/I/O); else 0 */
     const char*  family;        /* structure-dispatch family (see above); pure metadata */
-    const char*  doc;           /* one-line help, verbatim from qdocs; NULL = undocumented (pins.tsv `-`) */
-    const char*  docsrc;        /* qdocs ref/ page path+anchor doc came from; NULL when doc is NULL or hand-authored */
-    const char*  syntax;        /* one-line ```syntax form, verbatim from the docsrc page's first fence; else NULL */
-    const char*  example;       /* one-line `expr -> output` from RUNNING ./q (qdocs-example.tsv); NULL when none */
 } q_op_t;
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
@@ -114,9 +109,9 @@ const q_op_t* q_ops_table(int* n);
  * when q knows none (callers fall back to the doc's generic-() rule). */
 ray_t* q_ops_acc_identity(const char* spelling);
 
-/* The manifest row named s[0..len), or NULL if the name is not a q verb.  The
- * one lookup into Q_OPS[] by spelling (rule 3: never an env lookup by q
- * spelling); `\h` reads the doc column through it. */
+/* The manifest row named s[0..len), or NULL if the name is not a C-rostered
+ * verb (q.q-hosted keywords have no row).  The one lookup into Q_OPS[] by
+ * spelling (rule 3: never an env lookup by q spelling). */
 const q_op_t* q_ops_find(const char* s, int len);
 
 /* True iff s[0..len) is a keyword usable as an INFIX verb (i.e. a QLEX_KW_INFIX
