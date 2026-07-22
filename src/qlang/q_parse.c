@@ -53,7 +53,7 @@ static _Noreturn void q_die(const char *msg) {
 /* ===== ray_t leaf builders =================================================== */
 
 /* name reference (ATTR_QUOTED clear): resolved by eval */
-static ray_t *q_name(const char *s, int len) {
+static ray_t *i_name(const char *s, int len) {
     return ray_sym(ray_sym_intern_runtime(s, (size_t)len));
 }
 
@@ -113,7 +113,7 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
 /* True iff a sym spells a glyph verb (1 char from VERB_CHARS, optionally with
  * the monadic marker) — used to keep bare-verb embedding away from user
  * names, which must stay env-resolved name-refs. */
-static int q_sym_is_glyph(ray_t *sym);   /* defined after VERB_CHARS */
+static int sym_is_glyph(ray_t *sym);   /* defined after VERB_CHARS */
 
 /* generic null :: — the elided-argument hole */
 ray_t *q_null(void) {
@@ -123,14 +123,14 @@ ray_t *q_null(void) {
 /* An ELIDED bracket-call slot `f[a;;b]` — a projection hole.  Same `::`
  * spelling (so every existing hole check still matches), plus Q_ATTR_HOLE so
  * the @/. lowering can tell it from an explicit `::` value. */
-static ray_t *q_hole(void) {
+static ray_t *hole(void) {
     ray_t *x = q_null();
     if (x && !RAY_IS_ERR(x)) x->attrs |= Q_ATTR_HOLE;
     return x;
 }
 
 /* symbol literal (ATTR_QUOTED set) */
-static ray_t *q_symlit(const char *s, int len) {
+static ray_t *symlit(const char *s, int len) {
     ray_t *x = ray_sym(ray_sym_intern_runtime(s, (size_t)len));
     if (x && !RAY_IS_ERR(x)) x->attrs |= Q_ATTR_QUOTED;
     return x;
@@ -171,7 +171,7 @@ const char VERB_CHARS[] = ":+-*%!&|<>=~,^#_$?@.";
 
 const char *ADVERB_NAMES[] = { "'", "/", "\\", "':", "/:", "\\:" };
 
-static int q_sym_is_glyph(ray_t *sym) {
+static int sym_is_glyph(ray_t *sym) {
     if (!sym || sym->type != -RAY_SYM || (sym->attrs & Q_ATTR_QUOTED)) return 0;
     ray_t *s = ray_sym_str(sym->i64);
     if (!s) return 0;
@@ -901,7 +901,7 @@ static Tokens scan(const char *src) {
                 EMIT(T_VERB, q_verb_name(src + start, len));
                 noun_pos = 0;
             } else {
-                EMIT(T_NOUN, q_name(src + start, len));
+                EMIT(T_NOUN, i_name(src + start, len));
                 noun_pos = 1;
             }
         }
@@ -987,7 +987,7 @@ static Tokens scan(const char *src) {
                     while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) || src[p] == '.') p++;
                 }
                 if (count == 0) {
-                    first = q_symlit(src + s, p - s);
+                    first = symlit(src + s, p - s);
                 } else if (count == 1) {
                     vec = ray_sym_vec_new(RAY_SYM_W64, 4);
                     ray_t *fs = ray_sym_str(first->i64);
@@ -1364,7 +1364,7 @@ static P parse_base(Parser *p) {
                 ray_release(e);
                 /* a parenthesized lone glyph verb `(+)` is the bare-verb VALUE
                  * (dyadic row); user names keep their name-ref. */
-                if (q_sym_is_glyph(only)) only = q_embed(only, Q_DYADIC);
+                if (sym_is_glyph(only)) only = q_embed(only, Q_DYADIC);
                 return (P){ R_NOUN, only };
             }
             ray_release(e);
@@ -1666,7 +1666,7 @@ static P parse_term(Parser *p, QCtx ctx) {
                 if (es[i]) { w = ray_list_append(w, es[i]); }
                 /* an elided bracket slot is a projection hole (Q_ATTR_HOLE),
                  * distinct from an explicit `::` value in the same position */
-                else       { ray_t *nul = q_hole(); w = ray_list_append(w, nul); ray_release(nul); }
+                else       { ray_t *nul = hole(); w = ray_list_append(w, nul); ray_release(nul); }
             }
             ray_release(e);
             t.v = w; t.role = R_NOUN;
@@ -1763,7 +1763,7 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
      * standing as the rhs OPERAND (`+ -` applies + to the - value) embeds its
      * dyadic row (bare-verb-as-value convention). */
     if (t.role == R_VERB) t.v = q_embed(t.v, Q_MONADIC);
-    if (e.role == R_VERB && q_sym_is_glyph(e.v)) e.v = q_embed(e.v, Q_DYADIC);
+    if (e.role == R_VERB && sym_is_glyph(e.v)) e.v = q_embed(e.v, Q_DYADIC);
     ray_t *xs[2] = { t.v, e.v };
     return (P){ R_NOUN, q_list(xs, 2) };
 }

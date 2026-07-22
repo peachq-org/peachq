@@ -26,7 +26,7 @@
  * indices wrap modulo `total` (reshape recycling); else sequential in-range
  * (chunk / cut).  A string gathers chars into a new string; a vector/list
  * gathers via ray_at_fn over an i64 index vector.  Borrows x. */
-static ray_t* q_gather(ray_t* x, int64_t start, int64_t count, int64_t total,
+static ray_t* gather(ray_t* x, int64_t start, int64_t count, int64_t total,
                        int recycle) {
     if (count < 0) count = 0;
     if (x && x->type == -RAY_STR) {
@@ -62,7 +62,7 @@ static ray_t* q_gather(ray_t* x, int64_t start, int64_t count, int64_t total,
  * row-major into a matrix (2-D case).  A 0N dimension is INFERRED (chunk into
  * that stride, ragged last row); otherwise x is RECYCLED to fill.  Ranks other
  * than 2 fall back to rayfall range-take (unchanged behaviour).  Borrows both. */
-static ray_t* q_reshape(ray_t* shape, ray_t* x) {
+static ray_t* i_reshape(ray_t* shape, ray_t* x) {
     int64_t nd = ray_len(shape);
     if (nd != 2) return ray_take_fn(x, shape);
     const int64_t* dv = (const int64_t*)ray_data(shape);
@@ -88,7 +88,7 @@ static ray_t* q_reshape(ray_t* shape, ray_t* x) {
     for (int64_t r = 0; r < rows; r++) {
         int64_t start = r * cols, rc = cols;
         if (chunk && start + rc > total) rc = total - start;   /* ragged last */
-        ray_t* row = q_gather(x, start, rc, total, !chunk);
+        ray_t* row = gather(x, start, rc, total, !chunk);
         if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : ray_error("domain", "#: reshape"); }
         out = ray_list_append(out, row);
         ray_release(row);
@@ -139,7 +139,7 @@ ray_t* q_attr_wrap(ray_t* x) {
  * (unique not distinct OR parted not contiguous — SHARED), `'type` (wrong type
  * / non-numeric).  There is deliberately NO `p-fail` (ref set-attribute.md).
  * Consumes err, returns a fresh error; passes oom/unexpected codes through. */
-static ray_t* q_attr_remap_err(ray_t* err, char letter) {
+static ray_t* attr_remap_err(ray_t* err, char letter) {
     const char* code = ray_err_code(err);
     const char* sig = NULL;
     if (code) {
@@ -175,7 +175,7 @@ static bool q_no_dup_nulls(ray_t* v) {
  * primitives (ray_attr_numeric_class / verify / ray_idx_hash_fn /
  * ray_attr_stamp_marker) so rayfall's native `.attr.*` is untouched.  Borrows
  * base (stays owned by the caller); returns an owned result carrying RAW engine
- * error codes (caller remaps via q_attr_remap_err). */
+ * error codes (caller remaps via attr_remap_err). */
 static ray_t* q_attr_compose(ray_t* base, char letter) {
     int cls = ray_attr_numeric_class(base->type);
     if (cls < 0) return ray_error("type", NULL);
@@ -200,7 +200,7 @@ static ray_t* q_attr_compose(ray_t* base, char letter) {
  * through the rayfall-native engine setter (sorted marker / grouped hash already
  * match kdb); `u`/`p` are composed in q (q_attr_compose) so the kdb accelerator
  * policy stays out of the frozen engine.  Borrows both args. */
-static ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
+static ray_t* attr_set_dispatch(ray_t* n, ray_t* vec) {
     char letter = '?';                               /* unknown -> 'type */
     ray_t* s = ray_sym_str(n->i64);                  /* owned -RAY_STR */
     if (s) {
@@ -219,7 +219,7 @@ static ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
         if (!base || RAY_IS_ERR(base)) return base ? base : ray_error("oom", NULL);
         ray_t* r = q_attr_compose(base, letter);     /* borrows base */
         ray_release(base);
-        if (r && RAY_IS_ERR(r)) return q_attr_remap_err(r, letter);
+        if (r && RAY_IS_ERR(r)) return attr_remap_err(r, letter);
         return r;
     }
     case 's': attr_name = "sorted";  break;
@@ -238,11 +238,11 @@ static ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
     ray_t* r = ray_attr_set_fn(nm, base);             /* borrows nm, base */
     ray_release(nm);
     ray_release(base);
-    if (r && RAY_IS_ERR(r)) return q_attr_remap_err(r, letter);
+    if (r && RAY_IS_ERR(r)) return attr_remap_err(r, letter);
     return r;
 }
 
-/* Public (test-facing) entry over q_attr_set_dispatch: build the single-char
+/* Public (test-facing) entry over attr_set_dispatch: build the single-char
  * symbol the `#` set-attribute arm expects and dispatch.  letter 0 clears.
  * Borrows vec; returns owned.  Lets the acceleration C-unit exercise the real q
  * u#/p# compose path (find-hash + marker) rather than the reverted engine call. */
@@ -250,31 +250,31 @@ ray_t* q_attr_set_letter(char letter, ray_t* vec) {
     char s1[1]; s1[0] = letter;
     int64_t id = ray_sym_intern_runtime(letter ? s1 : "", letter ? 1 : 0);
     ray_t* n = ray_sym(id);                           /* owned -RAY_SYM */
-    ray_t* r = q_attr_set_dispatch(n, vec);           /* borrows n, vec */
+    ray_t* r = attr_set_dispatch(n, vec);           /* borrows n, vec */
     ray_release(n);
     return r;
 }
 
 /* q `n # list` — take.  A SYMBOL ATOM left arg against a simple vector is
- * set-attribute (q_attr_set_dispatch) — the only meaning, since you cannot
+ * set-attribute (attr_set_dispatch) — the only meaning, since you cannot
  * key-take from a flat vector; a symbol atom against a dict/table stays
  * key/column take (falls through).  An int-VECTOR left arg (len>=2) is RESHAPE
  * (matrix); an atom is take.  rayfall ray_take_fn(vec, n) has the opposite arg
  * order, so swap.  Borrows both args (does not release them). */
 ray_t* q_take_wrap(ray_t* n, ray_t* list) {
     if (n && n->type == -RAY_SYM && list && ray_is_vec(list))
-        return q_attr_set_dispatch(n, list);
+        return attr_set_dispatch(n, list);
     if (n && n->type == RAY_I64 && ray_len(n) >= 2) {
         if (list && ray_is_atom(list)) {         /* n1 n2#atom — TYPE-BLIND: kdb
                                                   * reshapes any atom by cycling
                                                   * its enlist (ints/bytes/chars) */
             ray_t* v = ray_enlist_fn(&list, 1);
             if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("oom", NULL);
-            ray_t* r = q_reshape(n, v);
+            ray_t* r = i_reshape(n, v);
             ray_release(v);
             return r;
         }
-        return q_reshape(n, list);
+        return i_reshape(n, list);
     }
     return ray_take_fn(list, n);
 }
@@ -306,7 +306,7 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
  * OWNED table via qj_table_gather_idx — the same single-home gather `t[0 2]`
  * reaches through q_apply_noun (char columns byte-permuted, misses
  * null-filled).  The result is never collapsed: tables stay tables. */
-static ray_t* q_row_gather(ray_t* t, int64_t start, int64_t count, int recycle) {
+static ray_t* row_gather(ray_t* t, int64_t start, int64_t count, int recycle) {
     int64_t n = ray_table_nrows(t);
     int64_t* p = (int64_t*)malloc((size_t)(count > 0 ? count : 1) * sizeof(int64_t));
     if (!p) return ray_error("wsfull", "take: out of memory");
@@ -324,7 +324,7 @@ static ray_t* q_row_gather(ray_t* t, int64_t start, int64_t count, int recycle) 
  * keys not present are ignored (ref/drop.md `` `a _ `a`b`c!1 2 3 ``).
  * Borrows both; returns an owned dict.  Same append/release discipline as
  * q_dict_union (q_apply.c). */
-static ray_t* q_dict_drop_keys(ray_t* d, ray_t* ks) {
+static ray_t* dict_drop_keys(ray_t* d, ray_t* ks) {
     ray_t* dk = ray_dict_keys(d);                    /* borrowed */
     ray_t* dv = ray_dict_vals(d);                    /* borrowed */
     if (!dk || !dv) return ray_error("type", "_ (drop): malformed dictionary");
@@ -400,23 +400,23 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
         /* keys _ d — sym atom / sym vector / int vector lhs drops entries by
          * key (other lhs kinds keep today's error tail) */
         if (n && (n->type == -RAY_SYM || n->type == RAY_SYM || q_is_int_vec(n)))
-            return q_dict_drop_keys(list, n);
+            return dict_drop_keys(list, n);
     }
     /* d _ key — dict lhs drops the entry at an ATOM key; a vector rhs is
      * 'type (ref/drop.md pins `(`a`b`c!1 2 3) _ `a`b` -> 'type). */
     if (n && n->type == RAY_DICT && !q_is_keyed_table(n)) {
         if (list && ray_is_atom(list))
-            return q_dict_drop_keys(n, list);
+            return dict_drop_keys(n, list);
         return ray_error("type", "_: key");
     }
     /* syms _ t — table column-drop (ref/drop.md `` `a`b _ t ``): sym-VECTOR
      * lhs only (a sym ATOM lhs on a table stays 'type — pinned rows).  One
      * home: flip -> dict key-drop -> flip back (q_flip_wrap owns its results;
-     * q_dict_drop_keys borrows both args). */
+     * dict_drop_keys borrows both args). */
     if (n && n->type == RAY_SYM && list && list->type == RAY_TABLE) {
         ray_t* d = q_flip_wrap(list);                /* owned dict */
         if (!d || RAY_IS_ERR(d)) return d;
-        ray_t* rd = q_dict_drop_keys(d, n);          /* owned dict */
+        ray_t* rd = dict_drop_keys(d, n);          /* owned dict */
         ray_release(d);
         if (!rd || RAY_IS_ERR(rd)) return rd;
         ray_t* rt = q_flip_wrap(rd);                 /* owned table */
@@ -469,7 +469,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
             prev = p;
             ray_t* slice;
             if (list->type == RAY_TABLE) {           /* table cut: row slices */
-                slice = q_row_gather(list, p, nxt - p, 0);
+                slice = row_gather(list, p, nxt - p, 0);
             } else {
                 int64_t rng[2] = { p, nxt - p };
                 ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
@@ -500,7 +500,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     if (k >= 0) { start = (k < len) ? k : len; amount = len - start; }
     else        { start = 0; amount = len + k; if (amount < 0) amount = 0; }
     if (list->type == RAY_TABLE)                     /* rows stay a table */
-        return q_row_gather(list, start, amount, 0);
+        return row_gather(list, start, amount, 0);
     int64_t rng[2] = { start, amount };
     ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
     if (RAY_IS_ERR(range)) return range;
@@ -526,7 +526,7 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
         for (int64_t r = 0; r < rows; r++) {
             int64_t start = r * sz, rc = sz;
             if (start + rc > total) rc = total - start;
-            ray_t* row = q_gather(x, start, rc, total, 0);   /* chunk, no recycle */
+            ray_t* row = gather(x, start, rc, total, 0);   /* chunk, no recycle */
             if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : ray_error("domain", "cut"); }
             out = ray_list_append(out, row);
             ray_release(row);
@@ -672,7 +672,7 @@ ray_t* q_fills_wrap(ray_t* x) {
 /* Whole-item scan: does any ITEM of container y match v (kdb `~`)?  Indexes
  * via ray_at_fn so typed vectors (STR lists-of-strings included) and boxed
  * lists share one home.  Borrows both. */
-static int q_seq_has_item(ray_t* y, ray_t* v) {
+static int seq_has_item(ray_t* y, ray_t* v) {
     int64_t n = ray_len(y);
     for (int64_t i = 0; i < n; i++) {
         ray_t* ia = ray_i64(i);
@@ -692,15 +692,15 @@ static int q_seq_has_item(ray_t* y, ray_t* v) {
  * is a deferred refinement — the `type` ledger rows that need it are blocked by
  * a separate `0n 2 3i` parse bug and split out).  Symbol fill is a distinct
  * path.  Dict / `fills` forward-fill / table / fill-scan forms are deferred. */
-static int q_is_float_t(int8_t t) {
+static int is_float_t(int8_t t) {
     return t == RAY_F64 || t == RAY_F32 || t == -RAY_F64 || t == -RAY_F32;
 }
-static int q_is_num_t(int8_t t) {
+static int is_num_t(int8_t t) {
     return t == RAY_BOOL || t == RAY_BYTE_ONLY || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
            t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_BYTE_ONLY || t == -RAY_I16 ||
            t == -RAY_I32 || t == -RAY_I64 || t == -RAY_F32 || t == -RAY_F64;
 }
-static int q_is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
+static int is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
 
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);   /* joins wave */
 
@@ -713,8 +713,8 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     int xatom = ray_is_atom(x), yatom = ray_is_atom(y);
 
     /* ---- symbol fill ---- */
-    if (q_is_sym_t(x->type) || q_is_sym_t(y->type)) {
-        if (!q_is_sym_t(x->type) || !q_is_sym_t(y->type))
+    if (is_sym_t(x->type) || is_sym_t(y->type)) {
+        if (!is_sym_t(x->type) || !is_sym_t(y->type))
             return ray_error("type", "^: symbol fill needs symbol operands");
         /* length follows y when it is a vector; a scalar y broadcasts to the
          * length of a vector x (`` `a`b`c^` `` -> 3 items), matching the
@@ -750,9 +750,9 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     }
 
     /* ---- numeric fill ---- */
-    if (!q_is_num_t(x->type) || !q_is_num_t(y->type))
+    if (!is_num_t(x->type) || !is_num_t(y->type))
         return ray_error("type", "^: unsupported operand types (dict/table/list fill deferred)");
-    int is_float = q_is_float_t(x->type) || q_is_float_t(y->type);
+    int is_float = is_float_t(x->type) || is_float_t(y->type);
     int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
     if (!xatom && !yatom && ray_len(x) != ray_len(y))
         return ray_error("length", "^: operand lengths must match");
@@ -805,8 +805,8 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
              * Per-item only when x is boxed OVER y's simple-vector items —
              * e.g. list-of-strings in list-of-strings. */
             if (x->type != RAY_LIST || e[0]->type == RAY_LIST || e[0]->type == RAY_TABLE)
-                return ray_bool(q_seq_has_item(y, x) != 0);
-        } else if (ray_is_atom(x)) return ray_bool(q_seq_has_item(y, x) != 0);
+                return ray_bool(seq_has_item(y, x) != 0);
+        } else if (ray_is_atom(x)) return ray_bool(seq_has_item(y, x) != 0);
         int64_t nx = ray_len(x);                     /* left-atomic over x */
         ray_t* outl = ray_list_new(nx > 0 ? nx : 1);
         if (RAY_IS_ERR(outl)) return outl;
@@ -828,12 +828,12 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
     }
     /* STR-vector y (openq list-of-strings): whole-item membership -> atom */
     if (y->type == RAY_STR && x->type == -RAY_STR)
-        return ray_bool(q_seq_has_item(y, x) != 0);
+        return ray_bool(seq_has_item(y, x) != 0);
     /* mixed numeric families (ref/in.md Mixed argument types): allowed only
      * against an ATOM or 1-item y — elementwise numeric equality (q_velem_f
      * reads both families; nulls never match). */
-    if (q_is_num_t(x->type) && q_is_num_t(y->type)) {
-        int xf = q_is_float_t(x->type), yf = q_is_float_t(y->type);
+    if (is_num_t(x->type) && is_num_t(y->type)) {
+        int xf = is_float_t(x->type), yf = is_float_t(y->type);
         if (xf != yf) {
             if (!ray_is_atom(y) && ray_len(y) != 1)
                 return ray_error("type", "in: mixed numeric types need an atom or 1-item right arg");
@@ -879,7 +879,7 @@ ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
 
 /* Unary sibling of q_env_call2 (guid roll/deal routes through the audited
  * env `guid` value).  Borrowed arg; returns owned. */
-static ray_t* q_env_call1(const char* nm, ray_t* a) {
+static ray_t* env_call1(const char* nm, ray_t* a) {
     ray_t* f = ray_env_get(ray_sym_intern(nm, strlen(nm)));
     if (!f || f->type != RAY_UNARY)
         return ray_error("type", "%s: env builtin missing", nm);
@@ -912,7 +912,7 @@ ray_t* q_table_flatten(ray_t* y) {
 
 /* ===== q grade / bucket family ============================================
  * GRADE IS THE PRIMITIVE: iasc/idesc own ordering for every structure (vector →
- * ray_iasc_fn; dict → keys by the value grade; table/keyed → q_grade_table), and
+ * ray_iasc_fn; dict → keys by the value grade; table/keyed → grade_table), and
  * asc/desc/rank/xrank/xasc/xdesc are q.q derivations over them (index once, ONE
  * gather).  xbar is an arg-swap over ray_xbar_fn.  DEFERRED (error, never a
  * wrong answer): the `s#` attribute on asc results — the attr-take arm accepts
@@ -921,7 +921,7 @@ ray_t* q_table_flatten(ray_t* y) {
 
 /* Reorder a keys-or-vals vector by a grade-index vector (owned grade), then
  * collapse the boxed result back to a typed vector.  Releases `grade`. */
-static ray_t* q_reindex_collapse(ray_t* vec, ray_t* grade) {
+static ray_t* reindex_collapse(ray_t* vec, ray_t* grade) {
     if (!grade || RAY_IS_ERR(grade)) return grade;
     ray_t* boxed = ray_at_fn(vec, grade);
     ray_release(grade);
@@ -947,7 +947,7 @@ static ray_t* q_reindex_collapse(ray_t* vec, ray_t* grade) {
  * the kernel's unstable small-array path cannot then reorder.  Columns are graded
  * in right-to-left chunks and the chunk grades composed (minor-first, the LSD-radix
  * argument), lifting the kernel's 16-key cap. */
-static ray_t* q_grade_table(ray_t* t, int desc) {
+static ray_t* grade_table(ray_t* t, int desc) {
     int64_t nc = ray_table_ncols(t);
     int64_t nr = ray_table_nrows(t);
     if (nc <= 0) return ray_error("type", NULL);
@@ -973,7 +973,7 @@ static ray_t* q_grade_table(ray_t* t, int desc) {
             ray_t* col = ray_table_get_col_idx(t, c);         /* borrowed */
             if (col && perm) {
                 ray_retain(perm);
-                col = q_reindex_collapse(col, perm);          /* owned copy */
+                col = reindex_collapse(col, perm);          /* owned copy */
             }
             if (!col || RAY_IS_ERR(col)) {
                 g = col ? col : ray_error("type", NULL);
@@ -998,7 +998,7 @@ static ray_t* q_grade_table(ray_t* t, int desc) {
         }
         /* Fold the chunk grade into the running permutation: perm = perm[g] */
         if (perm) {
-            ray_t* np = q_reindex_collapse(perm, g);          /* releases g */
+            ray_t* np = reindex_collapse(perm, g);          /* releases g */
             ray_release(perm);
             perm = np;
         } else {
@@ -1016,14 +1016,14 @@ static ray_t* q_grade_table(ray_t* t, int desc) {
 /* Grade a dict's VALUE vector.  Dict vals are stored as a boxed RAY_LIST, so
  * collapse to a typed vector before grading (a genuinely mixed value list can't
  * collapse and ray_iasc_fn errors → the by-type-number sort is DEFERRED). */
-static ray_t* q_dict_value_grade(ray_t* vals, int desc) {
+static ray_t* dict_value_grade(ray_t* vals, int desc) {
     ray_t* cv = (vals && vals->type == RAY_LIST) ? q_collapse_list(vals) : NULL;
     ray_t* use = cv ? cv : vals;
     /* A KEYED table's value is a table — grade its rows, not its columns (this is
      * what lets the dict law carry keyed tables: `asc kt` gathers key+value rows
      * by the grade of the value rows, per ref/asc.md's non-key-column rule). */
     if (use && use->type == RAY_TABLE) {
-        ray_t* g = q_grade_table(use, desc);
+        ray_t* g = grade_table(use, desc);
         if (cv) ray_release(cv);
         return g;
     }
@@ -1044,22 +1044,22 @@ static ray_t* q_dict_value_grade(ray_t* vals, int desc) {
 
 /* q `iasc`/`idesc` on a DICT — return the KEYS in ascending / descending VALUE
  * order (kdb ref/asc.md grade form: `iasc d` grades the values, indexes keys). */
-static ray_t* q_grade_dict(ray_t* d, int desc) {
+static ray_t* grade_dict(ray_t* d, int desc) {
     ray_t* keys = ray_dict_keys(d);      /* borrowed */
     ray_t* vals = ray_dict_vals(d);      /* borrowed */
     if (!keys || !vals) return ray_error("type", "iasc/idesc: malformed dict");
-    ray_t* grade = q_dict_value_grade(vals, desc);
-    return q_reindex_collapse(keys, grade);             /* releases grade */
+    ray_t* grade = dict_value_grade(vals, desc);
+    return reindex_collapse(keys, grade);             /* releases grade */
 }
 
 ray_t* q_iasc_wrap(ray_t* x) {
-    if (x && x->type == RAY_DICT)  return q_grade_dict(x, 0);
-    if (x && x->type == RAY_TABLE) return q_grade_table(x, 0);
+    if (x && x->type == RAY_DICT)  return grade_dict(x, 0);
+    if (x && x->type == RAY_TABLE) return grade_table(x, 0);
     return ray_iasc_fn(x);
 }
 ray_t* q_idesc_wrap(ray_t* x) {
-    if (x && x->type == RAY_DICT)  return q_grade_dict(x, 1);
-    if (x && x->type == RAY_TABLE) return q_grade_table(x, 1);
+    if (x && x->type == RAY_DICT)  return grade_dict(x, 1);
+    if (x && x->type == RAY_TABLE) return grade_table(x, 1);
     return ray_idesc_fn(x);
 }
 
@@ -1080,7 +1080,7 @@ ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
  * class; chosen to mirror the docs' n<=8 bound).  distinct (deal) draws by
  * generate-and-retry with a linear scan over accepted ids — fine at the
  * 16^m<=4.3e9 space for practical n; n>16^m is 'length. */
-static ray_t* q_gen_syms(int64_t n, ray_t* ysym, int distinct) {
+static ray_t* gen_syms(int64_t n, ray_t* ysym, int distinct) {
     static const char letters[] = "abcdefghijklmnop";
     ray_t* nm = ray_sym_str(ysym->i64);
     if (!nm || RAY_IS_ERR(nm))
@@ -1128,7 +1128,7 @@ static ray_t* q_gen_syms(int64_t n, ray_t* ysym, int distinct) {
 /* n?f — uniform floats in [0,y); result is y's type (F64 float / F32 real).
  * 62 random bits give the fraction; a rounding hit at the top is clamped
  * back below y so the [0,y) contract holds exactly. */
-static ray_t* q_gen_floats(int64_t n, ray_t* y) {
+static ray_t* gen_floats(int64_t n, ray_t* y) {
     double fy;
     int f32 = (y->type == -RAY_F32);
     if (!q_strict_f64(y, &fy) || fy != fy || fy < 0)
@@ -1152,7 +1152,7 @@ static ray_t* q_gen_floats(int64_t n, ray_t* y) {
 }
 
 /* n?0b — random booleans (01b). */
-static ray_t* q_gen_bits(int64_t n) {
+static ray_t* gen_bits(int64_t n) {
     ray_t* out = ray_vec_new(RAY_BOOL, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -1161,7 +1161,7 @@ static ray_t* q_gen_bits(int64_t n) {
 }
 
 /* n?0x0 — random bytes 0x00-0xff. */
-static ray_t* q_gen_bytes(int64_t n) {
+static ray_t* gen_bytes(int64_t n) {
     ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -1174,7 +1174,7 @@ static ray_t* q_gen_bytes(int64_t n) {
  * composed from multiple calls.  The engine's sentinel values (0N=INT_MIN,
  * -0W=INT_MIN+1, 0W=INT_MAX) are never generated (rejection loop) — a roll
  * must not fabricate nulls/infinities (decision recorded in the plan). */
-static ray_t* q_gen_longs(int64_t n) {
+static ray_t* gen_longs(int64_t n) {
     ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -1192,7 +1192,7 @@ static ray_t* q_gen_longs(int64_t n) {
     return out;
 }
 
-static ray_t* q_gen_ints(int64_t n) {
+static ray_t* gen_ints(int64_t n) {
     ray_t* out = ray_vec_new(RAY_I32, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -1213,7 +1213,7 @@ static ray_t* q_gen_ints(int64_t n) {
  * its start, so compose 63 bits from 15-bit chunks (the portable floor) and
  * reject draws past the last whole multiple of m (exact uniform, no modulo
  * bias; rejection odds < 1/2 per draw). */
-static int64_t q_rand_below(int64_t m) {
+static int64_t rand_below(int64_t m) {
     const uint64_t span = 1ULL << 63;
     const uint64_t limit = span - span % (uint64_t)m;
     uint64_t u;
@@ -1233,12 +1233,12 @@ static int64_t q_rand_below(int64_t m) {
  * there.  y=0 degenerates
  * to all-zero items (the float row's y*0 behaviour); y<0 or null -> the
  * pinned float-bound class 'domain. */
-static ray_t* q_gen_temporal(int64_t n, ray_t* y) {
+static ray_t* gen_temporal(int64_t n, ray_t* y) {
     int8_t tag = (int8_t)-y->type;
     ray_t* v;
     if (RAY_IS_TEMPORALF(tag)) {              /* datetime rides the float roll
                                                * (q_strict_f64 reads its payload) */
-        v = q_gen_floats(n, y);
+        v = gen_floats(n, y);
     } else {
         int64_t m = RAY_IS_TEMPORAL64(tag) ? y->i64 : (int64_t)y->i32;
         if (m < 0) return ray_error("domain", "?: bound");   /* nulls are negative sentinels */
@@ -1246,7 +1246,7 @@ static ray_t* q_gen_temporal(int64_t n, ray_t* y) {
         if (RAY_IS_ERR(v)) return v;
         v->len = n;
         int64_t* d = (int64_t*)ray_data(v);
-        for (int64_t i = 0; i < n; i++) d[i] = m ? q_rand_below(m) : 0;
+        for (int64_t i = 0; i < n; i++) d[i] = m ? rand_below(m) : 0;
     }
     if (!v || RAY_IS_ERR(v)) return v;
     ray_t* r = q_dollar_cast(tag, v);
@@ -1257,7 +1257,7 @@ static ray_t* q_gen_temporal(int64_t n, ray_t* y) {
 /* n?" " — chars drawn from .Q.a (ref/deal.md y-table row `" " -> .Q.a`).
  * Result is a RAY_STR atom = the string model's char list (provisional,
  * ARCHITECTURE.md). */
-static ray_t* q_gen_chars(int64_t n) {
+static ray_t* gen_chars(int64_t n) {
     char stackb[1024];
     char* b = (n < (int64_t)sizeof stackb) ? stackb : malloc((size_t)n + 1);
     if (!b) return ray_error("wsfull", "?: out of memory");
@@ -1270,7 +1270,7 @@ static ray_t* q_gen_chars(int64_t n) {
 /* Deal n distinct values from [0,total) — partial Fisher-Yates over `til total`,
  * take the first n (kdb deal / permute; uses the same libc rand() the roll path
  * does).  n<=total required.  Result is an owned I64 vector. */
-static ray_t* q_deal_indices(int64_t n, int64_t total) {
+static ray_t* deal_indices(int64_t n, int64_t total) {
     if (n < 0) return ray_error("domain", "?: deal count must be non-negative");
     if (n > total) return ray_error("length", "?: cannot deal %lld from %lld",
                                     (long long)n, (long long)total);
@@ -1289,8 +1289,8 @@ static ray_t* q_deal_indices(int64_t n, int64_t total) {
 }
 
 /* Deal/permute n indices then gather them from the list y (collapsed). */
-static ray_t* q_deal_pick(int64_t n, ray_t* y) {
-    ray_t* idx = q_deal_indices(n, ray_len(y));
+static ray_t* deal_pick(int64_t n, ray_t* y) {
+    ray_t* idx = deal_indices(n, ray_len(y));
     if (!idx || RAY_IS_ERR(idx)) return idx;
     ray_t* out = ray_at_fn(y, idx);
     ray_release(idx);
@@ -1305,13 +1305,13 @@ static ray_t* q_deal_pick(int64_t n, ray_t* y) {
  *                 shapes are remapped to count here.
  *   n ? int    -> roll: n randoms in [0,int)  (rayfall rand)
  *   n ? list   -> pick: n random indices gathered from the list
- *   -n ? m / 0N ? m -> deal / permute (q_deal_indices)
+ *   -n ? m / 0N ? m -> deal / permute (deal_indices)
  *   generate arms (`m sym, float, temporal, " ", 0b, 0x0, 0, 0i, 0Ng) ->
  *   q_gen_* above.  Deferred cells (error, never a wrong answer): short y,
  *   non-" " char pick (string model), deal of 0/0i. */
 /* First index of x (a boxed list) whose ITEM whole-matches v, else cnt
  * (the kdb miss).  Borrows both. */
-static int64_t q_list_find_item(ray_t* x, ray_t* v, int64_t cnt) {
+static int64_t list_find_item(ray_t* x, ray_t* v, int64_t cnt) {
     ray_t** ex = (ray_t**)ray_data(x);
     for (int64_t i = 0; i < cnt; i++)
         if (ex[i] && q_values_match(ex[i], v)) return i;
@@ -1358,13 +1358,13 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             out->len = ny;
             int64_t* o = (int64_t*)ray_data(out);
             for (int64_t j = 0; j < ny; j++)
-                o[j] = e[j] ? q_list_find_item(x, e[j], cnt) : cnt;
+                o[j] = e[j] ? list_find_item(x, e[j], cnt) : cnt;
             return out;
         }
         if (x_ranked && y && !ray_is_atom(y) && ray_is_vec(y) && y->type != RAY_LIST) {
             /* list-of-lists x, SIMPLE vector y: whole-y match (`u?10 2 -6`
              * -> 1). */
-            return ray_i64(q_list_find_item(x, y, cnt));
+            return ray_i64(list_find_item(x, y, cnt));
         }
         if (x->type != RAY_LIST && ray_is_vec(x) && y && y->type == RAY_LIST) {
             /* simple-vector x, list y whose first item is a list: RIGHT-
@@ -1413,15 +1413,15 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {
             int64_t m = q_iatom_val(y);
             if (m < 0) return ray_error("type", "?: permute n");
-            return q_deal_indices(m, m);
+            return deal_indices(m, m);
         }
-        if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return q_deal_pick(ray_len(y), y);
+        if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return deal_pick(ray_len(y), y);
         return ray_error("nyi", "?: permute y");
     }
     int deal = nx < 0;
     int64_t n = deal ? -nx : nx;
     if (y && (ray_is_vec(y) || y->type == RAY_LIST)) {
-        if (deal) return q_deal_pick(n, y);     /* -n?list — deal, no replacement */
+        if (deal) return deal_pick(n, y);     /* -n?list — deal, no replacement */
         /* n?list — pick.  Indices draw via the engine KERNEL directly
          * (ray_rand_fn), not the env name — the bootstrap shadow-rebinds root
          * `rand` to `.q.rand`. */
@@ -1450,7 +1450,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         case RAY_BOOL:
             if (deal) return ray_error("type", "?: deal y");
             if (y->b8) return ray_error("nyi", "?: y");   /* roll defined for 0b only */
-            return q_gen_bits(n);               /* n?0b */
+            return gen_bits(n);               /* n?0b */
         case RAY_GUID: {                        /* n?0Ng / -n?0Ng — env guid.
              * Deal reuses the same generator: distinctness rests on the
              * 122-bit space (collisions negligible); kdb's process/time deal
@@ -1458,25 +1458,25 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             if (!RAY_ATOM_IS_NULL(y))
                 return ray_error("type", "?: y");   /* guid generate needs 0Ng */
             ray_t* cnt = ray_i64(n);
-            ray_t* g = q_env_call1("guid", cnt);
+            ray_t* g = env_call1("guid", cnt);
             ray_release(cnt);
             return g;
         }
         case RAY_BYTE_ONLY:
             if (deal) return ray_error("type", "?: deal y");
             if (y->u8) return ray_error("nyi", "?: y");   /* roll defined for 0x0 only */
-            return q_gen_bytes(n);              /* n?0x0 */
+            return gen_bytes(n);              /* n?0x0 */
         case RAY_I16:
             return ray_error("nyi", "?: y");    /* short roll/deal deferred */
         case RAY_I32: case RAY_I64: {
             if (!RAY_ATOM_IS_NULL(y) && q_iatom_val(y) == 0) {  /* n?0 / n?0i full-range */
                 if (deal) return ray_error("nyi", "?: deal 0");
-                return (y->type == -RAY_I64) ? q_gen_longs(n) : q_gen_ints(n);
+                return (y->type == -RAY_I64) ? gen_longs(n) : gen_ints(n);
             }
             if (deal) {                         /* -n?m — deal, no replacement */
                 int64_t m = q_iatom_val(y);
                 if (m <= 0) return ray_error("domain", "?: deal m");
-                return q_deal_indices(n, m);
+                return deal_indices(n, m);
             }
             ray_t* cnt = ray_i64(n);            /* n?m — roll via the kernel */
             ray_t* r = ray_rand_fn(cnt, y);
@@ -1485,25 +1485,25 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         }
         case RAY_F32: case RAY_F64:
             if (deal) return ray_error("type", "?: deal y");
-            return q_gen_floats(n, y);          /* n?f uniform [0,y) */
+            return gen_floats(n, y);          /* n?f uniform [0,y) */
         case RAY_STR:                           /* legacy 1-char string blank */
             if (deal) return ray_error("type", "?: deal y");
             if (ray_str_len(y) == 1 && ray_str_ptr(y)[0] == ' ')
-                return q_gen_chars(n);
+                return gen_chars(n);
             return ray_error("nyi", "?: y");
         case RAY_CHARV:                         /* char atom: only `" "` has a
              * roll law (-> .Q.a); pick-from-string is a stage-2+ cell. */
             if (deal) return ray_error("type", "?: deal y");
-            if (y->u8 == ' ') return q_charv_out(q_gen_chars(n));
+            if (y->u8 == ' ') return q_charv_out(gen_chars(n));
             return ray_error("nyi", "?: y");
         case RAY_SYM:
-            return q_gen_syms(n, y, deal);      /* n?`m sym roll / deal */
+            return gen_syms(n, y, deal);      /* n?`m sym roll / deal */
         case RAY_TIMESTAMP: case RAY_MONTH: case RAY_DATE: case RAY_DATETIME:
         case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: case RAY_TIME:
             /* the doc's "float, temporal" row is Roll-only -> deal is 'type
              * exactly as the float arm above */
             if (deal) return ray_error("type", "?: deal y");
-            return q_gen_temporal(n, y);
+            return gen_temporal(n, y);
         }
     }
     return ray_error("nyi", "?: y");   /* structural atom y (lambda, ...): no roll law */

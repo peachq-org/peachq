@@ -55,18 +55,18 @@ static const char* const Q_SQL_WORDS[] = {
     "select", "exec", "update", "delete", "from", "by",
 };
 
-static int q_is_word(char c) {
+static int is_word(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
 }
 
-static int q_is_digit(char c) { return c >= '0' && c <= '9'; }
+static int is_digit(char c) { return c >= '0' && c <= '9'; }
 
-static int q_is_op(char c) {
+static int is_op(char c) {
     return strchr(":+-*%!&|<>=~,^#_$?@.", c) != NULL && c != '\0';
 }
 
-static int q_is_keyword(const char* w, int32_t len) {
+static int is_keyword(const char* w, int32_t len) {
     /* qSQL statement keywords (pure syntax, not env functions) ... */
     for (size_t i = 0; i < sizeof(Q_SQL_WORDS) / sizeof(Q_SQL_WORDS[0]); i++) {
         if ((int32_t)strlen(Q_SQL_WORDS[i]) == len &&
@@ -111,7 +111,7 @@ static int32_t repl_highlight(char* dst, int32_t dst_cap, const char* buf, int32
             int32_t j = i + 1;
             if (j < buf_len && buf[j] == ':') /* `:handle */
                 j++;
-            while (j < buf_len && (q_is_word(buf[j]) || buf[j] == '.' || buf[j] == ':'))
+            while (j < buf_len && (is_word(buf[j]) || buf[j] == '.' || buf[j] == ':'))
                 j++;
             QHL_LIT(QHL_SYMBOL);
             QHL_PUT(buf + i, j - i);
@@ -145,14 +145,14 @@ static int32_t repl_highlight(char* dst, int32_t dst_cap, const char* buf, int32
          * scan pulls in the usual q numeric tails (dot, exponent, and the
          * type-suffix letters h/i/j/e/f/p/n/z/u/v/t/b) so 2019.01m, 1.5e3
          * and 42j read as one token. */
-        int num_start = q_is_digit(c) ||
-                        (c == '.' && i + 1 < buf_len && q_is_digit(buf[i + 1]));
-        int prev_word = (i > 0 && q_is_word(buf[i - 1]));
+        int num_start = is_digit(c) ||
+                        (c == '.' && i + 1 < buf_len && is_digit(buf[i + 1]));
+        int prev_word = (i > 0 && is_word(buf[i - 1]));
         if (num_start && !prev_word) {
             int32_t j = i + 1;
             while (j < buf_len) {
                 char d = buf[j];
-                if (q_is_digit(d) || d == '.' || strchr("hijefpnzuvtb", d))
+                if (is_digit(d) || d == '.' || strchr("hijefpnzuvtb", d))
                     j++;
                 else if ((d == 'e' || d == 'E') && j + 1 < buf_len &&
                          (buf[j + 1] == '+' || buf[j + 1] == '-'))
@@ -168,12 +168,12 @@ static int32_t repl_highlight(char* dst, int32_t dst_cap, const char* buf, int32
         }
 
         /* Word: keyword/verb (green) or plain identifier. */
-        if (q_is_word(c) && !q_is_digit(c)) {
+        if (is_word(c) && !is_digit(c)) {
             int32_t j = i + 1;
-            while (j < buf_len && q_is_word(buf[j]))
+            while (j < buf_len && is_word(buf[j]))
                 j++;
             int32_t wlen = j - i;
-            if (q_is_keyword(buf + i, wlen)) {
+            if (is_keyword(buf + i, wlen)) {
                 QHL_LIT(QHL_KEYWORD);
                 QHL_PUT(buf + i, wlen);
                 QHL_LIT(QHL_RESET);
@@ -185,7 +185,7 @@ static int32_t repl_highlight(char* dst, int32_t dst_cap, const char* buf, int32
         }
 
         /* Standalone operator / adverb char. */
-        if (q_is_op(c)) {
+        if (is_op(c)) {
             QHL_LIT(QHL_OP);
             QHL_PUT(&c, 1);
             QHL_LIT(QHL_RESET);
@@ -329,7 +329,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
 
 /* Locate the q history file: $HOME/.qhist, or a bare ".qhist" in the CWD
  * when $HOME is unset.  Returns a pointer into the caller-supplied buffer. */
-static const char* q_hist_path(char* buf, size_t cap) {
+static const char* i_hist_path(char* buf, size_t cap) {
     const char* home = getenv("HOME");
     if (home && *home) {
         int len = snprintf(buf, cap, "%s/.qhist", home);
@@ -339,7 +339,7 @@ static const char* q_hist_path(char* buf, size_t cap) {
     return ".qhist";
 }
 
-/* The live non-poll interactive terminal (q_repl_interactive), so q_exit can
+/* The live non-poll interactive terminal (repl_interactive), so q_exit can
  * restore it + save history from inside an eval (q_repl_console_close).  The
  * poll flavour's terminal lives in g_q_poll_repl and is closed there. */
 static ray_term_t* g_live_term;
@@ -353,13 +353,13 @@ static char g_live_hist_path[4108];
  * separator inside parens as an open expression — e.g. `(1 2 3;4 5)` dropped
  * into a `…` continuation prompt instead of evaluating.  Returning 0 means
  * "never incomplete". */
-static int32_t q_no_continuation(const char* mbuf, int32_t mbuf_len,
+static int32_t no_continuation(const char* mbuf, int32_t mbuf_len,
                                  const char* buf, int32_t buf_len) {
     (void)mbuf; (void)mbuf_len; (void)buf; (void)buf_len;
     return 0;
 }
 
-static void q_repl_interactive(FILE* out, FILE* err) {
+static void repl_interactive(FILE* out, FILE* err) {
     ray_term_t* t = ray_term_create();
     if (!t) {
         fprintf(err, "q: terminal init failed\n");
@@ -367,13 +367,13 @@ static void q_repl_interactive(FILE* out, FILE* err) {
     }
 
     char hist_buf[4096];
-    const char* hist_path = q_hist_path(hist_buf, sizeof hist_buf);
+    const char* hist_path = i_hist_path(hist_buf, sizeof hist_buf);
     snprintf(g_live_hist_path, sizeof g_live_hist_path, "%s", hist_path);
     g_live_term = t;
     ray_hist_load(&t->hist, hist_path);
     ray_term_set_highlighter(t, repl_highlight);
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
-    ray_term_set_continuation_fn(t, q_no_continuation);  /* kdb: line-at-a-time */
+    ray_term_set_continuation_fn(t, no_continuation);  /* kdb: line-at-a-time */
 
     /* SIGINT/console-ctrl plumbing (mirrors rayforce's repl.c contract):
      * at the prompt interrupts stay raw keypresses (0x03 clears the line);
@@ -443,7 +443,7 @@ static void q_repl_interactive(FILE* out, FILE* err) {
  *
  * Two stdin flavours share one context:
  *   - tty:   ray_term_getc/feed per byte (read_fn) + line dispatch (data_fn),
- *            byte-for-byte the q_repl_interactive behaviour.
+ *            byte-for-byte the repl_interactive behaviour.
  *   - piped: a line accumulator over plain read(2); each complete line is
  *            processed with the same prompt/echo shape as the fgets loop so
  *            the transcript is unchanged.
@@ -474,7 +474,7 @@ typedef struct {
 static q_poll_repl_t g_q_poll_repl;
 
 /* Restore the terminal + save history exactly once (idempotent). */
-static void q_poll_close_term(q_poll_repl_t* c) {
+static void poll_close_term(q_poll_repl_t* c) {
     if (!c->term)
         return;
     ray_hist_save(&c->term->hist, c->hist_path);
@@ -486,7 +486,7 @@ static void q_poll_close_term(q_poll_repl_t* c) {
  * live terminal, restore it and save history BEFORE `.z.exit` runs (its 0N!
  * output must land on a cooked terminal).  Idempotent; no-op when piped. */
 void q_repl_console_close(void) {
-    q_poll_close_term(&g_q_poll_repl);
+    poll_close_term(&g_q_poll_repl);
     if (g_live_term) {
         ray_hist_save(&g_live_term->hist, g_live_hist_path);
         ray_term_destroy(g_live_term);
@@ -496,7 +496,7 @@ void q_repl_console_close(void) {
 
 /* --- tty flavour: same callbacks shape as repl.c's repl_read/repl_on_data --- */
 
-static ray_t* q_poll_tty_read(ray_poll_t* poll, ray_selector_t* sel) {
+static ray_t* poll_tty_read(ray_poll_t* poll, ray_selector_t* sel) {
     q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
     ray_term_t*    t = c->term;
 
@@ -529,7 +529,7 @@ static ray_t* q_poll_tty_read(ray_poll_t* poll, ray_selector_t* sel) {
 eof:
     /* Ctrl-D: restore the terminal; with a live listener keep serving IPC
      * clients (the historic REPL-then-serve shape), else exit the loop. */
-    q_poll_close_term(c);
+    poll_close_term(c);
     if (c->have_listener)
         ray_poll_deregister(poll, sel->id);
     else
@@ -537,7 +537,7 @@ eof:
     return NULL;
 }
 
-static ray_t* q_poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
+static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
     q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
     ray_t* line = (ray_t*)data;
 
@@ -550,7 +550,7 @@ static ray_t* q_poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data)
         return NULL;
     }
 
-    /* Interrupt window: identical bracket to q_repl_interactive — Ctrl-C is
+    /* Interrupt window: identical bracket to repl_interactive — Ctrl-C is
      * SIGINT only while the eval runs; run_one_line reports it as 'stop. */
     ray_term_clear_interrupt();
     ray_eval_clear_interrupt();
@@ -571,7 +571,7 @@ static ray_t* q_poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data)
 
 /* --- piped flavour: fgets-loop transcript over poll-driven read(2) --- */
 
-static void q_pipe_prompt(q_poll_repl_t* c) {
+static void pipe_prompt(q_poll_repl_t* c) {
     char prompt[80];
     q_ns_prompt(prompt, sizeof prompt);
     fputs(prompt, c->out);
@@ -581,7 +581,7 @@ static void q_pipe_prompt(q_poll_repl_t* c) {
 /* Process one complete piped line (prompt already showing, mirrors the fgets
  * loop's prompt-then-read order).  `\\`/`exit x` terminate inside q_exit, so
  * there is no quit signal to propagate. */
-static void q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
+static void pipe_line(q_poll_repl_t* c, char* line, size_t n) {
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
         n--;
     line[n] = '\0';
@@ -593,22 +593,22 @@ static void q_pipe_line(q_poll_repl_t* c, char* line, size_t n) {
 
     if (n)
         run_one_line(line, n, c->out, c->err, 1);
-    q_pipe_prompt(c);
+    pipe_prompt(c);
 }
 
 /* Single-home stdin-EOF handling.  Reached from BOTH a draining read()==0
  * (EPOLLIN) and a bare EPOLLHUP (an empty pipe whose writer closed reports HUP
- * with NO EPOLLIN, so the read_fn never runs — see q_poll_stdin_hup).  Flush any
+ * with NO EPOLLIN, so the read_fn never runs — see poll_stdin_hup).  Flush any
  * partial final line, then a CLIENT (no listener) exits the poll loop while a
  * SERVER deregisters stdin and keeps serving IPC.  Idempotent via eof_done so an
  * EPOLLIN|EPOLLHUP event can't double-process (double prompt / double-free). */
-static void q_poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_t* c) {
+static void poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_t* c) {
     if (c->eof_done) return;
     c->eof_done = 1;
     if (c->acc_len) {   /* final line without a trailing newline */
         size_t n = c->acc_len;
         c->acc_len = 0;
-        q_pipe_line(c, c->acc, n);
+        pipe_line(c, c->acc, n);
     }
     fputc('\n', c->out);   /* fgets loop prints '\n' after the EOF prompt */
     fflush(c->out);
@@ -622,11 +622,11 @@ static void q_poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_
  * frozen epoll loop's default HUP action is a bare deregister — for a client
  * that strands ray_poll_run with poll->code still < 0 (an idle hang, the whole
  * point of Bundle 3).  Route HUP through the same EOF path instead. */
-static void q_poll_stdin_hup(ray_poll_t* poll, ray_selector_t* sel) {
-    if (sel && sel->data) q_poll_stdin_eof(poll, sel, (q_poll_repl_t*)sel->data);
+static void poll_stdin_hup(ray_poll_t* poll, ray_selector_t* sel) {
+    if (sel && sel->data) poll_stdin_eof(poll, sel, (q_poll_repl_t*)sel->data);
 }
 
-static ray_t* q_poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
+static ray_t* poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
     q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
     char tmp[1024];
 
@@ -641,7 +641,7 @@ static ray_t* q_poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
     }
 
     if (rd == 0) {
-        q_poll_stdin_eof(poll, sel, c);
+        poll_stdin_eof(poll, sel, c);
         return NULL;
     }
 
@@ -653,7 +653,7 @@ static ray_t* q_poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
                 c->acc[c->acc_len++] = tmp[i];
             size_t n = c->acc_len;
             c->acc_len = 0;
-            q_pipe_line(c, c->acc, n);
+            pipe_line(c, c->acc, n);
         } else {
             c->acc[c->acc_len++] = tmp[i];
         }
@@ -673,7 +673,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
     reg.fd       = STDIN_FILENO;
     reg.type     = RAY_SEL_STDIN;
     reg.data     = c;
-    reg.error_fn = q_poll_stdin_hup;   /* HUP → same EOF path (else a client hangs) */
+    reg.error_fn = poll_stdin_hup;   /* HUP → same EOF path (else a client hangs) */
 
     if (stdin_tty) {
         ray_term_t* t = ray_term_create();
@@ -681,22 +681,22 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
             fprintf(err, "q: terminal init failed\n");
             return -1;
         }
-        /* Same setup as q_repl_interactive: q history, q highlighter, kdb
+        /* Same setup as repl_interactive: q history, q highlighter, kdb
          * `q)` prompt, line-at-a-time (no continuation), SIGINT plumbing. */
         char hist_buf[4096];
-        const char* hp = q_hist_path(hist_buf, sizeof hist_buf);
+        const char* hp = i_hist_path(hist_buf, sizeof hist_buf);
         snprintf(c->hist_path, sizeof c->hist_path, "%s", hp);
         ray_hist_load(&t->hist, c->hist_path);
         ray_term_set_highlighter(t, repl_highlight);
         ray_term_set_prompt(t, "q)", 2);
-        ray_term_set_continuation_fn(t, q_no_continuation);
+        ray_term_set_continuation_fn(t, no_continuation);
         ray_term_install_signals(t);
         c->term = t;
-        reg.read_fn = q_poll_tty_read;
-        reg.data_fn = q_poll_tty_data;
+        reg.read_fn = poll_tty_read;
+        reg.data_fn = poll_tty_data;
     } else {
         c->echo = 1;   /* piped transcript: echo input after the prompt */
-        reg.read_fn = q_poll_pipe_read;
+        reg.read_fn = poll_pipe_read;
     }
 
     if (ray_poll_register(poll, &reg) < 0) {
@@ -712,20 +712,20 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
     if (c->term)
         ray_term_begin(c->term);   /* draw the first prompt */
     else
-        q_pipe_prompt(c);
+        pipe_prompt(c);
 
     ray_poll_run(poll);
 
     /* Loop exited with the console still live (e.g. a remote-initiated
      * exit): restore the terminal before returning. */
-    q_poll_close_term(c);
+    poll_close_term(c);
     return 0;
 }
 
 void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
     /* Interactive TTY (echo == 0): reuse rayforce's line editor. */
     if (echo == 0) {
-        q_repl_interactive(out, err);
+        repl_interactive(out, err);
         return;
     }
 

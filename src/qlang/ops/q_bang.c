@@ -83,7 +83,7 @@ static ray_t* h_refcnt(ray_t* y) {
  * A large-magnitude float can need more than the stack buffer (the integer
  * part is unbounded), so allocate exactly what snprintf reports rather than
  * truncating. */
-static ray_t* q_bang_fmt_one(int places, double y) {
+static ray_t* bang_fmt_one(int places, double y) {
     char stackbuf[512];
     int m = snprintf(stackbuf, sizeof stackbuf, "%.*f", places, y);
     if (m < 0) return ray_charv("", 0);
@@ -114,14 +114,14 @@ static ray_t* h_format(ray_t* arg) {
     int places = (int)places64;
     if (!y) return ray_error("type", "-27!: nil float argument");
     if (y->type == -RAY_F64) {                 /* float atom -> one string */
-        return q_bang_fmt_one(places, y->f64);
+        return bang_fmt_one(places, y->f64);
     }
     if (y->type == RAY_F64) {                  /* float vector -> list of strings */
         int64_t len = ray_len(y);
         const double* d = (const double*)ray_data(y);
         ray_t* out = ray_list_new(len);
         for (int64_t i = 0; i < len; i++) {
-            ray_t* s = q_bang_fmt_one(places, d[i]);
+            ray_t* s = bang_fmt_one(places, d[i]);
             if (RAY_IS_ERR(s)) { ray_release(out); return s; }
             ray_list_append(out, s);
             ray_release(s);
@@ -185,7 +185,7 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
 /* `0N!x` — debug print: write x's single-line k-repr to the console sink and pass
  * x through unchanged (ref/display.md; file-text.md pins the repr).  Borrowed y in,
  * OWNED y out — the retain balances the caller's release of the result. */
-static ray_t* q_bang_show(ray_t* y) {
+static ray_t* bang_show(ray_t* y) {
     char buf[8192]; buf[0] = '\0';
     q_fmt_krepr(y, buf, sizeof buf);
     q_console_write(buf, strlen(buf));
@@ -202,7 +202,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         return q_bang_enkey(id, y);
     }
     switch (id) {
-        case NULL_I64: return q_bang_show(y);   /* 0N!x — debug print, pass through */
+        case NULL_I64: return bang_show(y);   /* 0N!x — debug print, pass through */
         case -1:  return q_hsym_wrap(y);
         case -2:  return q_attr_wrap(y);
         case -3:  return h_s1(y);

@@ -18,7 +18,7 @@
  * terminated C string. q_parse / ray_eval_str need termination; a charv's
  * bytes are not guaranteed terminated. On failure returns NULL and sets *err
  * to an owned RAY_ERROR the caller returns as-is. Free the result with free(). */
-static char* q_pq_src_dup(ray_t* x, ray_t** err) {
+static char* pq_src_dup(ray_t* x, ray_t** err) {
     const char* sp; int64_t sn;
     if (!q_text_bytes(x, &sp, &sn)) { *err = ray_error("type", "pq: expects a string"); return NULL; }
     if (!sp) { *err = ray_error("domain", "pq: bad source string"); return NULL; }
@@ -35,9 +35,9 @@ static char* q_pq_src_dup(ray_t* x, ray_t** err) {
  * return the value as-is. Results are RAW engine values (exotic rayfall shapes
  * may display oddly through q_fmt — accepted; internal hatch). Errors propagate
  * as ordinary q errors. */
-static ray_t* q_pq_ray_fn(ray_t* x) {
+static ray_t* pq_ray_fn(ray_t* x) {
     ray_t* err = NULL;
-    char* src = q_pq_src_dup(x, &err);
+    char* src = pq_src_dup(x, &err);
     if (!src) return err;
     ray_t* r = ray_eval_str(src);
     free(src);
@@ -48,9 +48,9 @@ static ray_t* q_pq_ray_fn(ray_t* x) {
 /* (.pq.c.parse str) — the RAW pre-lower AST rendered in RAYFORCE-native
  * notation via ray_fmt (unlike `parse`, which renders q notation). Returns a q
  * char-vector so the tree text is composable. */
-static ray_t* q_pq_parse_fn(ray_t* x) {
+static ray_t* pq_parse_fn(ray_t* x) {
     ray_t* err = NULL;
-    char* src = q_pq_src_dup(x, &err);
+    char* src = pq_src_dup(x, &err);
     if (!src) return err;
     ray_t* ast = q_parse(src);
     free(src);
@@ -63,9 +63,9 @@ static ray_t* q_pq_parse_fn(ray_t* x) {
 /* (.pq.c.tree str) — the POST-lower tree (exactly what ray_eval receives)
  * rendered via ray_fmt (rayforce-native). q_lower rewrites the fresh q_parse
  * AST in place (sole-owner). Returns a q char-vector. */
-static ray_t* q_pq_tree_fn(ray_t* x) {
+static ray_t* pq_tree_fn(ray_t* x) {
     ray_t* err = NULL;
-    char* src = q_pq_src_dup(x, &err);
+    char* src = pq_src_dup(x, &err);
     if (!src) return err;
     ray_t* ast = q_parse(src);
     free(src);
@@ -80,7 +80,7 @@ static ray_t* q_pq_tree_fn(ray_t* x) {
 /* Eval one q source line via the q pipeline (q_parse -> q_lower -> ray_eval),
  * mirroring q_runtime.c q_bootstrap_eval. OWNED value, or NULL on error
  * (reported to stderr — non-fatal per line, like the embedded bootstrap). */
-static ray_t* q_pq_eval(const char* src) {
+static ray_t* pq_eval(const char* src) {
     ray_t* ast = q_parse(src);
     if (RAY_IS_ERR(ast)) { fprintf(stderr, "pq load: parse error: %s\n", src); ray_error_free(ast); return NULL; }
     ast = q_lower(ast);
@@ -97,7 +97,7 @@ static ray_t* q_pq_eval(const char* src) {
  * pq.q so the `.pq.ray:.pq.c.ray` alias resolves. Returns RAY_OK, else the
  * bind error (e.g. `.pq` pre-exists as a non-dict → 'type) so the loader can
  * fail fast without a partial install. */
-static ray_err_t q_pq_bind_one(const char* name, int nlen, ray_t* (*fn)(ray_t*)) {
+static ray_err_t pq_bind_one(const char* name, int nlen, ray_t* (*fn)(ray_t*)) {
     ray_t* v = ray_fn_unary(name, RAY_FN_NONE, fn);
     if (RAY_IS_ERR(v)) { ray_error_free(v); return RAY_ERR_OOM; }  /* ray_fn_unary → owned 'oom on failure */
     ray_err_t rc = ray_env_bind(ray_sym_intern(name, nlen), v);
@@ -105,16 +105,16 @@ static ray_err_t q_pq_bind_one(const char* name, int nlen, ray_t* (*fn)(ray_t*))
     return rc;
 }
 
-static ray_err_t q_pq_bind_natives(void) {
-    ray_err_t rc = q_pq_bind_one(".pq.c.ray", 9, q_pq_ray_fn);
+static ray_err_t pq_bind_natives(void) {
+    ray_err_t rc = pq_bind_one(".pq.c.ray", 9, pq_ray_fn);
     if (rc != RAY_OK) return rc;
-    rc = q_pq_bind_one(".pq.c.parse", 11, q_pq_parse_fn);
+    rc = pq_bind_one(".pq.c.parse", 11, pq_parse_fn);
     if (rc != RAY_OK) return rc;                                   /* fail fast: no partial install */
-    return q_pq_bind_one(".pq.c.tree", 10, q_pq_tree_fn);
+    return pq_bind_one(".pq.c.tree", 10, pq_tree_fn);
 }
 
 void q_pq_load(void) {
-    if (q_pq_bind_natives() != RAY_OK) {   /* fail fast: no partial install */
+    if (pq_bind_natives() != RAY_OK) {   /* fail fast: no partial install */
         fprintf(stderr, "pq load: native bind failed (.pq occupied?)\n");
         return;
     }
@@ -129,7 +129,7 @@ void q_pq_load(void) {
         const char* s = line;
         while (*s == ' ' || *s == '\t') s++;
         if (*s == '\0' || *s == '/') continue;   /* blank / `/` comment */
-        ray_t* r = q_pq_eval(line);
+        ray_t* r = pq_eval(line);
         if (r) ray_release(r);
     }
 }

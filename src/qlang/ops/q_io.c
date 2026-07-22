@@ -37,7 +37,7 @@ ray_t* q_exit_wrap(ray_t* x) {
  * accepts an int PORT (localhost), a "host:port[:user:pass]" STRING or the
  * equivalent hsym SYMBOL (both with the kdb "::PORT"/":host:port" leading-colon
  * conventions — the leading-`:` scanner lexes `` `::5000 ``/`` `:host:port `` as
- * one colon-bearing symbol, so both surfaces reach q_hopen_norm_descriptor and
+ * one colon-bearing symbol, so both surfaces reach hopen_norm_descriptor and
  * share ONE parser), or a 2-list (conn; timeout-ms).  DEFERRED (clean 'nyi, not
  * a silent TCP attempt): the transport schemes `unix://` / `tcps://` /
  * `unixs://` / `fifo://` (need a transport layer openq lacks) and FILE-handle
@@ -49,7 +49,7 @@ ray_t* q_exit_wrap(ray_t* x) {
  * and rejects the not-yet-supported transport schemes with a clean 'nyi (so
  * BOTH the string and symbol surfaces decline them the same way, rather than
  * feeding e.g. "unix://5000" into a TCP connect).  Owned RAY_STR or error. */
-static ray_t* q_hopen_norm_descriptor(const char* s, size_t n) {
+static ray_t* hopen_norm_descriptor(const char* s, size_t n) {
     if (n > 512) return ray_error("domain", "hopen: descriptor too long");
     /* Strip the leading-colon marker: "::rest" localhost, single ":rest" strip 1. */
     const char* rest = s;
@@ -79,7 +79,7 @@ static ray_t* q_hopen_norm_descriptor(const char* s, size_t n) {
 /* Normalize a connection descriptor (int atom, string atom, or hsym symbol)
  * into the "host:port[:user:password]" form .ipc.open expects.  Owned RAY_STR
  * or error. */
-static ray_t* q_hopen_connstr(ray_t* c) {
+static ray_t* hopen_connstr(ray_t* c) {
     if (q_is_int_atom(c)) {
         int64_t p = q_iatom_val(c);
         if (p <= 0 || p > 65535)
@@ -91,14 +91,14 @@ static ray_t* q_hopen_connstr(ray_t* c) {
         return ray_str(buf, (size_t)m);
     }
     if (c && c->type == -RAY_STR)
-        return q_hopen_norm_descriptor(ray_str_ptr(c), ray_str_len(c));
+        return hopen_norm_descriptor(ray_str_ptr(c), ray_str_len(c));
     if (c && c->type == -RAY_SYM) {
         /* ray_sym_str returns a BORROWED interned string (table/sym.c) — do NOT
          * release it (that over-releases the sym table's own ref; the q_apply.c
-         * `:path` precedent).  q_hopen_norm_descriptor copies out a new atom. */
+         * `:path` precedent).  hopen_norm_descriptor copies out a new atom. */
         ray_t* nm = ray_sym_str(c->i64);
         if (!nm) return ray_error("type", "hopen: bad symbol handle");
-        return q_hopen_norm_descriptor(ray_str_ptr(nm), ray_str_len(nm));
+        return hopen_norm_descriptor(ray_str_ptr(nm), ray_str_len(nm));
     }
     return ray_error("type",
                      "hopen: expected an int port or a \"host:port\" string, got %s",
@@ -108,14 +108,14 @@ static ray_t* q_hopen_connstr(ray_t* c) {
 /* q `hopen y` — connect, return an int handle.  Restricted connections must not
  * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
-static ray_t* q_hopen_wrap_impl(ray_t* x);
+static ray_t* hopen_wrap_impl(ray_t* x);
 ray_t* q_hopen_wrap(ray_t* x) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
-    ray_t* r = q_hopen_wrap_impl(xs);
+    ray_t* r = hopen_wrap_impl(xs);
     ray_release(xs);
     return r;
 }
-static ray_t* q_hopen_wrap_impl(ray_t* x) {
+static ray_t* hopen_wrap_impl(ray_t* x) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     ray_t* conn      = x;
     ray_t* timeout   = NULL;
@@ -132,7 +132,7 @@ static ray_t* q_hopen_wrap_impl(ray_t* x) {
         pair_to   = ray_i64(q_ivec_get(x, 1));
         conn = pair_conn; timeout = pair_to;
     }
-    ray_t* cs = q_hopen_connstr(conn);                   /* owned or error */
+    ray_t* cs = hopen_connstr(conn);                   /* owned or error */
     if (!cs || RAY_IS_ERR(cs)) {
         if (pair_conn) ray_release(pair_conn);
         if (pair_to)   ray_release(pair_to);
@@ -216,7 +216,7 @@ ray_t* q_hclose_wrap(ray_t* x) {
 
 /* file symbol -> OWNED RAY_STR filesystem path (leading ':' stripped), or
  * NULL when x is not a `:path symbol. */
-static ray_t* q_ft_path(ray_t* x) {
+static ray_t* ft_path(ray_t* x) {
     if (!x || x->type != -RAY_SYM) return NULL;
     ray_t* s = ray_sym_str(x->i64);                       /* borrowed */
     if (!s) return NULL;
@@ -227,14 +227,14 @@ static ray_t* q_ft_path(ray_t* x) {
 }
 
 /* Read a whole file (restricted-guarded).  OWNED RAY_STR or error. */
-static ray_t* q_ft_read_all(ray_t* pathstr) {
+static ray_t* ft_read_all(ray_t* pathstr) {
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");
     return ray_read_file_fn(pathstr);
 }
 
 /* q `hsym x` — sym atom/vector -> file symbol: prefix ':' unless already
  * present (ref/hsym.md). */
-static int64_t q_hsym_id(const char* p, size_t n) {
+static int64_t hsym_id(const char* p, size_t n) {
     if (n > 0 && p[0] == ':') return ray_sym_intern_runtime(p, n);
     char* buf = (char*)malloc(n + 1);
     if (!buf) return ray_sym_intern_runtime(":", 1);
@@ -245,21 +245,21 @@ static int64_t q_hsym_id(const char* p, size_t n) {
     return id;
 }
 /* Exported (q_registry.h) so the `-1!` internal-fn alias single-homes here. */
-static ray_t* q_hsym_wrap_impl(ray_t* x);
+static ray_t* hsym_wrap_impl(ray_t* x);
 ray_t* q_hsym_wrap(ray_t* x) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
-    ray_t* r = q_hsym_wrap_impl(xs);
+    ray_t* r = hsym_wrap_impl(xs);
     ray_release(xs);
     return r;
 }
-static ray_t* q_hsym_wrap_impl(ray_t* x) {
+static ray_t* hsym_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);                   /* borrowed */
         if (!s) return ray_error("type", "hsym: bad symbol");
         const char* p = ray_str_ptr(s);
         size_t n = ray_str_len(s);
         if (n > 0 && p[0] == ':') { ray_retain(x); return x; }
-        return ray_sym(q_hsym_id(p, n));
+        return ray_sym(hsym_id(p, n));
     }
     if (x && x->type == RAY_SYM) {
         int64_t n = ray_len(x);
@@ -268,7 +268,7 @@ static ray_t* q_hsym_wrap_impl(ray_t* x) {
         for (int64_t i = 0; i < n; i++) {
             ray_t* c = ray_sym_vec_cell(x, i);            /* borrowed domain atom */
             if (!c) { ray_release(out); return ray_error("type", "hsym: bad symbol"); }
-            int64_t id = q_hsym_id(ray_str_ptr(c), ray_str_len(c));
+            int64_t id = hsym_id(ray_str_ptr(c), ray_str_len(c));
             out = ray_vec_append(out, &id);
             if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
         }
@@ -283,18 +283,18 @@ static ray_t* q_hsym_wrap_impl(ray_t* x) {
  * line break (the doc pins `read0(`:foo;6)` -> "world" on a file ending \n);
  * (f;o;n) -> exactly n chars from o (clamped).  Console (0) and fifo handles
  * are deferred 'nyi.  Offsets accept 0 (superset of the doc wording). */
-static ray_t* q_read0_wrap_impl(ray_t* x);
+static ray_t* read0_wrap_impl(ray_t* x);
 ray_t* q_read0_wrap(ray_t* x) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
-    ray_t* r = q_read0_wrap_impl(xs);
+    ray_t* r = read0_wrap_impl(xs);
     ray_release(xs);
     return q_charv_out(r);              /* lines cross as char vectors */
 }
-static ray_t* q_read0_wrap_impl(ray_t* x) {
+static ray_t* read0_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
-        ray_t* path = q_ft_path(x);
+        ray_t* path = ft_path(x);
         if (!path) return ray_error("type", "read0: expected a file symbol `:path");
-        ray_t* all = q_ft_read_all(path);
+        ray_t* all = ft_read_all(path);
         ray_release(path);
         if (!all || RAY_IS_ERR(all)) return all;
         ray_t* lines = q_str_split_lines(ray_str_ptr(all), ray_str_len(all));
@@ -305,7 +305,7 @@ static ray_t* q_read0_wrap_impl(ray_t* x) {
         ray_t** e = (ray_t**)ray_data(x);
         int three = ray_len(x) == 3;
         if (e[0] && e[0]->type == -RAY_SYM) {
-            ray_t* path = q_ft_path(e[0]);
+            ray_t* path = ft_path(e[0]);
             if (!path) return ray_error("type", "read0: x");
             int64_t off, want = -1;
             if (!q_strict_i64(e[1], &off) || (three && !q_strict_i64(e[2], &want))) {
@@ -316,7 +316,7 @@ static ray_t* q_read0_wrap_impl(ray_t* x) {
                 ray_release(path);
                 return ray_error("domain", "read0: offset/length");
             }
-            ray_t* all = q_ft_read_all(path);
+            ray_t* all = ft_read_all(path);
             ray_release(path);
             if (!all || RAY_IS_ERR(all)) return all;
             const char* p = ray_str_ptr(all);
@@ -339,8 +339,8 @@ static ray_t* q_read0_wrap_impl(ray_t* x) {
 }
 
 /* ---- Save Text: `:path 0: strings -------------------------------------- */
-static ray_t* q_ft_save_text(ray_t* fsym, ray_t* y) {
-    ray_t* path = q_ft_path(fsym);
+static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
+    ray_t* path = ft_path(fsym);
     if (!path) return ray_error("type", "0:: bad file symbol");
     if (ray_eval_get_restricted()) { ray_release(path); return ray_error("access", "restricted"); }
     if (!y || !(y->type == RAY_LIST || y->type == RAY_STR)) {
@@ -433,7 +433,7 @@ static ray_t* q_ft_cell_text(ray_t* atom) {
 /* Quote rule (doc): a cell containing the delimiter or a line break is
  * embraced with '"' and every embedded '"' doubled; otherwise raw.  Appends
  * the (possibly embraced) cell to *buf/(w..cap).  Returns 0 on OOM. */
-static int q_ft_quote_append(char** buf, size_t* w, size_t* cap,
+static int ft_quote_append(char** buf, size_t* w, size_t* cap,
                              const char* c, size_t n, char delim) {
     int embrace = 0;
     size_t extra = 2;
@@ -464,7 +464,7 @@ static int q_ft_quote_append(char** buf, size_t* w, size_t* cap,
     return 1;
 }
 
-static ray_t* q_ft_prepare(char delim, ray_t* y) {
+static ray_t* ft_prepare(char delim, ray_t* y) {
     /* columns + optional names */
     int64_t nc = 0;
     ray_t* namev = NULL;                 /* borrowed via table introspection */
@@ -507,7 +507,7 @@ static ray_t* q_ft_prepare(char delim, ray_t* y) {
             }
             int64_t nm = ray_table_col_name(y, c);
             ray_t* ns = ray_sym_str(nm);                   /* borrowed */
-            if (!ns || !q_ft_quote_append(&buf, &w, &cap, ray_str_ptr(ns), ray_str_len(ns), delim)) {
+            if (!ns || !ft_quote_append(&buf, &w, &cap, ray_str_ptr(ns), ray_str_len(ns), delim)) {
                 free(buf); ray_release(out);
                 return ray_error("oom", NULL);
             }
@@ -528,15 +528,15 @@ static ray_t* q_ft_prepare(char delim, ray_t* y) {
             int ok;
             if (col->type == -RAY_STR) {                   /* char column: one char */
                 char ch = ray_str_ptr(col)[i];
-                ok = q_ft_quote_append(&buf, &w, &cap, &ch, 1, delim);
+                ok = ft_quote_append(&buf, &w, &cap, &ch, 1, delim);
             } else if (col->type == RAY_CHARV) {           /* char column (charv) */
                 char ch = ((const char*)ray_data(col))[i];
-                ok = q_ft_quote_append(&buf, &w, &cap, &ch, 1, delim);
+                ok = ft_quote_append(&buf, &w, &cap, &ch, 1, delim);
             } else if (col->type == RAY_LIST) {            /* string column */
                 ray_t** it = (ray_t**)ray_data(col);
                 const char* cp; int64_t cn;
                 if (!q_text_bytes(it[i], &cp, &cn)) { cp = ""; cn = 0; }
-                ok = q_ft_quote_append(&buf, &w, &cap, cp, (size_t)cn, delim);
+                ok = ft_quote_append(&buf, &w, &cap, cp, (size_t)cn, delim);
             } else {
                 ray_t* ia = ray_i64(i);
                 ray_t* atom = ray_at_fn(col, ia);
@@ -546,7 +546,7 @@ static ray_t* q_ft_prepare(char delim, ray_t* y) {
                 ray_release(atom);
                 if (!cs || RAY_IS_ERR(cs)) { free(buf); ray_release(out); return cs ? cs : ray_error("oom", NULL); }
                 if (cs->type != -RAY_STR) { ray_release(cs); free(buf); ray_release(out); return ray_error("type", "0:: unformattable cell"); }
-                ok = q_ft_quote_append(&buf, &w, &cap, ray_str_ptr(cs), ray_str_len(cs), delim);
+                ok = ft_quote_append(&buf, &w, &cap, ray_str_ptr(cs), ray_str_len(cs), delim);
                 ray_release(cs);
             }
             if (!ok) { free(buf); ray_release(out); return ray_error("oom", NULL); }
@@ -564,7 +564,7 @@ static ray_t* q_ft_prepare(char delim, ray_t* y) {
 
 /* Type char -> Tok tag via THE cast home (q_cast_designator; upper case =
  * Tok).  '*' keeps the field a string, ' ' skips the column, unknown -> 0. */
-static int8_t q_ft_tag(char c, int* is_str, int* is_skip) {
+static int8_t ft_tag(char c, int* is_str, int* is_skip) {
     *is_str = 0; *is_skip = 0;
     if (c == ' ') { *is_skip = 1; return 0; }
     if (c == '*') { *is_str = 1; return 0; }
@@ -580,7 +580,7 @@ static int8_t q_ft_tag(char c, int* is_str, int* is_skip) {
 /* Normalize the RIGHT operand of Load CSV / Load Fixed into an OWNED
  * RAY_LIST of row strings.  *single = 1 for the one-string-no-newline form
  * (kdb returns a list of parsed ATOMS for it, not columns). */
-static ray_t* q_ft_rows(ray_t* y, int* single) {
+static ray_t* ft_rows(ray_t* y, int* single) {
     *single = 0;
     if (!y) return ray_error("type", "0:: nil right operand");
     if (y->type == -RAY_STR) {
@@ -594,9 +594,9 @@ static ray_t* q_ft_rows(ray_t* y, int* single) {
         return out;
     }
     if (y->type == -RAY_SYM) {
-        ray_t* path = q_ft_path(y);
+        ray_t* path = ft_path(y);
         if (!path) return ray_error("type", "0:: expected a file symbol `:path");
-        ray_t* all = q_ft_read_all(path);
+        ray_t* all = ft_read_all(path);
         ray_release(path);
         if (!all || RAY_IS_ERR(all)) return all;
         ray_t* rows = q_str_split_lines(ray_str_ptr(all), ray_str_len(all));
@@ -608,14 +608,14 @@ static ray_t* q_ft_rows(ray_t* y, int* single) {
         ray_t** e = y->type == RAY_LIST ? (ray_t**)ray_data(y) : NULL;
         /* (filesymbol; offset[; length]) chunk form */
         if (e && n >= 2 && n <= 3 && e[0] && e[0]->type == -RAY_SYM) {
-            ray_t* path = q_ft_path(e[0]);
+            ray_t* path = ft_path(e[0]);
             if (!path) return ray_error("type", "0:: x");
             int64_t off, want = -1;
             if (!q_strict_i64(e[1], &off) || (n == 3 && !q_strict_i64(e[2], &want))) {
                 ray_release(path);
                 return ray_error("type", "0:: offset/length");
             }
-            ray_t* all = q_ft_read_all(path);
+            ray_t* all = ft_read_all(path);
             ray_release(path);
             if (!all || RAY_IS_ERR(all)) return all;
             const char* p = ray_str_ptr(all);
@@ -650,7 +650,7 @@ static ray_t* q_ft_rows(ray_t* y, int* single) {
 
 /* flag=1 (embedded line returns): merge physical rows whose quotes are
  * unbalanced with the following row, restoring the '\n'.  Owns+returns. */
-static ray_t* q_ft_merge_quoted(ray_t* rows) {
+static ray_t* ft_merge_quoted(ray_t* rows) {
     int64_t n = ray_len(rows);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) { ray_release(rows); return out; }
@@ -692,7 +692,7 @@ static ray_t* q_ft_merge_quoted(ray_t* rows) {
 
 /* Split one row into fields on a delimiter; '"'-opened fields are
  * quote-scanned ('""' -> literal '"').  Appends OWNED strings to `fields`. */
-static ray_t* q_ft_fields(ray_t* fields, const char* r, size_t n, char delim) {
+static ray_t* ft_fields(ray_t* fields, const char* r, size_t n, char delim) {
     size_t i = 0;
     for (;;) {
         char* fb = (char*)malloc(n + 1);
@@ -728,14 +728,14 @@ static ray_t* q_ft_fields(ray_t* fields, const char* r, size_t n, char delim) {
 }
 
 /* Parse one field per its column recipe.  OWNED atom/string. */
-static ray_t* q_ft_parse_field(ray_t* field, int8_t tag, int is_str) {
+static ray_t* ft_parse_field(ray_t* field, int8_t tag, int is_str) {
     if (is_str) { ray_retain(field); return field; }
     return q_dollar_tok(tag, field);
 }
 
 /* Collapse a column accumulator: '*' columns stay lists of strings; typed
  * columns Tok-parse (q_dollar_tok distributes over lists) then collapse. */
-static ray_t* q_ft_finish_col(ray_t* colacc, int8_t tag, int is_str) {
+static ray_t* ft_finish_col(ray_t* colacc, int8_t tag, int is_str) {
     if (is_str) { ray_retain(colacc); return colacc; }
     ray_t* parsed = q_dollar_tok(tag, colacc);
     if (!parsed || RAY_IS_ERR(parsed)) return parsed;
@@ -744,7 +744,7 @@ static ray_t* q_ft_finish_col(ray_t* colacc, int8_t tag, int is_str) {
     return v;
 }
 
-static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y) {
+static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y) {
     const char* ts = ray_str_ptr(types);
     size_t nt = ray_str_len(types);
     if (nt == 0) return ray_error("type", "0:: empty types string");
@@ -783,7 +783,7 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
     int* fskip = (int*)malloc(nt * sizeof(int));
     if (!tags || !fstr || !fskip) { free(tags); free(fstr); free(fskip); return ray_error("oom", NULL); }
     for (size_t j = 0; j < nt; j++) {
-        tags[j] = q_ft_tag(ts[j], &fstr[j], &fskip[j]);
+        tags[j] = ft_tag(ts[j], &fstr[j], &fskip[j]);
         if (!tags[j] && !fstr[j] && !fskip[j]) {
             char bad = ts[j];
             free(tags); free(fstr); free(fskip);
@@ -793,10 +793,10 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
         }
     }
     int single = 0;
-    ray_t* rows = q_ft_rows(y, &single);
+    ray_t* rows = ft_rows(y, &single);
     if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
     if (embed_nl) {
-        rows = q_ft_merge_quoted(rows);
+        rows = ft_merge_quoted(rows);
         if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
     }
     ray_t** rp = (ray_t**)ray_data(rows);
@@ -806,7 +806,7 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
         /* one delimited string -> list of parsed atoms */
         ray_t* fields = ray_list_new((int64_t)nt);
         if (RAY_IS_ERR(fields)) { result = fields; goto done; }
-        fields = q_ft_fields(fields, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
+        fields = ft_fields(fields, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
         if (RAY_IS_ERR(fields)) { result = fields; goto done; }
         ray_t** fp = (ray_t**)ray_data(fields);
         int64_t nf = ray_len(fields);
@@ -816,7 +816,7 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
         for (size_t j = 0; j < nt && !RAY_IS_ERR(out); j++) {
             if (fskip[j]) continue;
             ray_t* f = (int64_t)j < nf ? fp[j] : empty;     /* borrowed */
-            ray_t* a = q_ft_parse_field(f, tags[j], fstr[j]);
+            ray_t* a = ft_parse_field(f, tags[j], fstr[j]);
             if (!a || RAY_IS_ERR(a)) { ray_release(empty); ray_release(fields); ray_release(out); result = a ? a : ray_error("oom", NULL); goto done; }
             out = ray_list_append(out, a);
             ray_release(a);
@@ -851,7 +851,7 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
         for (int64_t i = first; i < nrows; i++) {
             ray_t* fields = ray_list_new((int64_t)nt);
             if (!RAY_IS_ERR(fields))
-                fields = q_ft_fields(fields, ray_str_ptr(rp[i]), ray_str_len(rp[i]), delim);
+                fields = ft_fields(fields, ray_str_ptr(rp[i]), ray_str_len(rp[i]), delim);
             if (RAY_IS_ERR(fields)) {
                 for (int64_t z = 0; z < nout; z++) ray_release(acc[z]);
                 free(acc); ray_release(empty);
@@ -878,7 +878,7 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
                 if (fskip[t]) continue;
                 if (++seen == z) { j = (int64_t)t; break; }
             }
-            ray_t* col = q_ft_finish_col(acc[z], tags[j], fstr[j]);
+            ray_t* col = ft_finish_col(acc[z], tags[j], fstr[j]);
             if (!col || RAY_IS_ERR(col)) {
                 ray_release(cols);
                 cols = col ? col : ray_error("oom", NULL);
@@ -894,7 +894,7 @@ static ray_t* q_ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* 
         /* header: first row = column names -> table */
         ray_t* nmf = ray_list_new((int64_t)nt);
         if (!RAY_IS_ERR(nmf) && nrows > 0)
-            nmf = q_ft_fields(nmf, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
+            nmf = ft_fields(nmf, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
         if (RAY_IS_ERR(nmf)) { ray_release(cols); result = nmf; goto done; }
         ray_t** np = (ray_t**)ray_data(nmf);
         int64_t nn = ray_len(nmf);
@@ -919,7 +919,7 @@ done:
     return result;
 }
 
-static ray_t* q_ft_load_fixed(ray_t* types, ray_t* widths, ray_t* y) {
+static ray_t* ft_load_fixed(ray_t* types, ray_t* widths, ray_t* y) {
     const char* ts = ray_str_ptr(types);
     size_t nt = ray_str_len(types);
     if (nt == 0 || (int64_t)nt != ray_len(widths))
@@ -934,14 +934,14 @@ static ray_t* q_ft_load_fixed(ray_t* types, ray_t* widths, ray_t* y) {
     int* fskip = (int*)malloc(nt * sizeof(int));
     if (!tags || !fstr || !fskip) { free(tags); free(fstr); free(fskip); return ray_error("oom", NULL); }
     for (size_t j = 0; j < nt; j++) {
-        tags[j] = q_ft_tag(ts[j], &fstr[j], &fskip[j]);
+        tags[j] = ft_tag(ts[j], &fstr[j], &fskip[j]);
         if (!tags[j] && !fstr[j] && !fskip[j]) {
             free(tags); free(fstr); free(fskip);
             return ray_error("type", "0:: bad column type char");
         }
     }
     int single = 0;
-    ray_t* rows = q_ft_rows(y, &single);
+    ray_t* rows = ft_rows(y, &single);
     if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
     ray_t** rp = (ray_t**)ray_data(rows);
     int64_t nrows = ray_len(rows);
@@ -986,7 +986,7 @@ static ray_t* q_ft_load_fixed(ray_t* types, ray_t* widths, ray_t* y) {
         int64_t z = 0;
         for (size_t j = 0; j < nt && !RAY_IS_ERR(cols); j++) {
             if (fskip[j]) continue;
-            ray_t* col = q_ft_finish_col(acc[z], tags[j], fstr[j]);
+            ray_t* col = ft_finish_col(acc[z], tags[j], fstr[j]);
             if (!col || RAY_IS_ERR(col)) {
                 ray_release(cols);
                 cols = col ? col : ray_error("oom", NULL);
@@ -1007,7 +1007,7 @@ done:
 }
 
 /* ---- Key-Value Pairs: "K f [*] r" 0: string ------------------------------ */
-static ray_t* q_ft_kv(const char* spec, size_t sn, ray_t* y) {
+static ray_t* ft_kv(const char* spec, size_t sn, ray_t* y) {
     char ktype = spec[0];
     int star = sn == 4;
     if (star && spec[2] != '*') return ray_error("type", "0:: bad key-value spec");
@@ -1018,7 +1018,7 @@ static ray_t* q_ft_kv(const char* spec, size_t sn, ray_t* y) {
     int8_t ktag;
     {
         int is_str = 0, is_skip = 0;
-        ktag = q_ft_tag(ktype, &is_str, &is_skip);
+        ktag = ft_tag(ktype, &is_str, &is_skip);
         if (!ktag) return ray_error("type", "0:: bad key-value key type");
     }
     const char* p = ray_str_ptr(y);
@@ -1092,12 +1092,12 @@ static ray_t* q_ft_kv(const char* spec, size_t sn, ray_t* y) {
 
 
 /* ---- the `0:` dispatcher -------------------------------------------------- */
-static ray_t* q_filetext_impl(ray_t* x, ray_t* y);
+static ray_t* filetext_impl(ray_t* x, ray_t* y);
 /* x-normalize preserving the bare-vs-ENLISTED delimiter distinction the
  * charv model carries natively: char ATOM -> 1-char STR (bare delim); charv
  * len-1 -> boxed 1-list of a 1-char STR (the legacy enlisted form, header
  * row); other charv -> STR (types/kv spec); LIST -> per-element.  Owned. */
-static ray_t* q_ft_norm_x(ray_t* x) {
+static ray_t* ft_norm_x(ray_t* x) {
     if (x && x->type == -RAY_CHARV) { char c = (char)x->u8; return ray_str(&c, 1); }
     if (x && x->type == RAY_CHARV) {
         if (ray_len(x) == 1) {
@@ -1117,7 +1117,7 @@ static ray_t* q_ft_norm_x(ray_t* x) {
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (!out || RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
-            ray_t* c = q_ft_norm_x(e[i]);
+            ray_t* c = ft_norm_x(e[i]);
             if (!c) { ray_retain(e[i]); c = e[i]; }
             if (RAY_IS_ERR(c)) { ray_release(out); return c; }
             out = ray_list_append(out, c);
@@ -1130,28 +1130,28 @@ static ray_t* q_ft_norm_x(ray_t* x) {
     return x;
 }
 ray_t* q_filetext_wrap(ray_t* x, ray_t* y) {
-    ray_t* xs = q_ft_norm_x(x); ray_t* ys = q_str_in(y);
-    ray_t* r = q_filetext_impl(xs, ys);
+    ray_t* xs = ft_norm_x(x); ray_t* ys = q_str_in(y);
+    ray_t* r = filetext_impl(xs, ys);
     ray_release(xs); ray_release(ys);
     return q_charv_out(r);              /* parsed strings cross as charv */
 }
-static ray_t* q_filetext_impl(ray_t* x, ray_t* y) {
+static ray_t* filetext_impl(ray_t* x, ray_t* y) {
     if (!x) return ray_error("type", "0:: nil left operand");
-    if (x->type == -RAY_SYM) return q_ft_save_text(x, y);
+    if (x->type == -RAY_SYM) return ft_save_text(x, y);
     if (x->type == -RAY_STR) {
         const char* s = ray_str_ptr(x);
         size_t n = ray_str_len(x);
-        if (n == 1) return q_ft_prepare(s[0], y);
+        if (n == 1) return ft_prepare(s[0], y);
         if ((n == 3 || n == 4) && (s[0] == 'S' || s[0] == 'I' || s[0] == 'J'))
-            return q_ft_kv(s, n, y);
+            return ft_kv(s, n, y);
         return ray_error("type", "0:: bad left operand");
     }
     if (x->type == RAY_LIST && (ray_len(x) == 2 || ray_len(x) == 3)) {
         ray_t** e = (ray_t**)ray_data(x);
         if (e[0] && e[0]->type == -RAY_STR) {
             if (ray_len(x) == 2 && q_is_int_vec(e[1]))
-                return q_ft_load_fixed(e[0], e[1], y);
-            return q_ft_load_csv(e[0], e[1], ray_len(x) == 3 ? e[2] : NULL, y);
+                return ft_load_fixed(e[0], e[1], y);
+            return ft_load_csv(e[0], e[1], ray_len(x) == 3 ? e[2] : NULL, y);
         }
     }
     return ray_error("type", "0:: unsupported left operand");
@@ -1162,14 +1162,14 @@ static ray_t* q_filetext_impl(ray_t* x, ray_t* y) {
  * null (kdb: setenv's result displays as nothing in the console).  The base
  * ray_setenv_fn takes two -RAY_STR args and echoes y retained; coerce the sym
  * name to a string, discard that echo, and return :: to match kdb. */
-static ray_t* q_setenv_impl(ray_t* x, ray_t* y);
+static ray_t* setenv_impl(ray_t* x, ray_t* y);
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y) {
     ray_t* ys = q_str_in(y);
-    ray_t* r = q_setenv_impl(x, ys);
+    ray_t* r = setenv_impl(x, ys);
     ray_release(ys);
     return r;
 }
-static ray_t* q_setenv_impl(ray_t* x, ray_t* y) {
+static ray_t* setenv_impl(ray_t* x, ray_t* y) {
     /* .os.setenv is RAY_FN_RESTRICTED; re-assert here (calling the C fn directly
      * bypasses the eval-layer check — the q_hopen_wrap/file-wrapper precedent). */
     if (ray_eval_get_restricted()) return ray_error("access", "restricted");

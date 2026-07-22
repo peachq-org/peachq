@@ -154,14 +154,14 @@ void q_exit(int code) {
 #endif
 
 /* Whole-span signed-int parse: 1 iff ray_parse_i64 (numparse.c) consumes ALL of [s,s+len). */
-static int q_parse_i64(const char* s, size_t len, int64_t* out) {
+static int parse_i64(const char* s, size_t len, int64_t* out) {
     return len > 0 && ray_parse_i64(s, len, out) == len;
 }
 
 /* Parse up to `max` whitespace-separated base-10 integers from [s,s+len),
  * stopping at the first non-integer token (e.g. a trailing `/ comment`).
  * Returns the count stored into out[]. */
-static int q_parse_ints(const char* s, size_t len, int64_t* out, int max) {
+static int parse_ints(const char* s, size_t len, int64_t* out, int max) {
     int cnt = 0; size_t i = 0;
     while (cnt < max && i < len) {
         while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
@@ -169,14 +169,14 @@ static int q_parse_ints(const char* s, size_t len, int64_t* out, int max) {
         while (i < len && s[i] != ' ' && s[i] != '\t') i++;
         if (i == t0) break;
         int64_t v;
-        if (!q_parse_i64(s + t0, i - t0, &v)) break;
+        if (!parse_i64(s + t0, i - t0, &v)) break;
         out[cnt++] = v;
     }
     return cnt;
 }
 
 /* Build a two-element typed vector for the pair-valued getters (`\c`/`\C`). */
-static ray_t* q_pair_i64(int64_t a, int64_t b) {
+static ray_t* pair_i64(int64_t a, int64_t b) {
     ray_t* v = ray_vec_new(RAY_I64, 2);
     if (RAY_IS_ERR(v)) return v;
     v = ray_vec_append(v, &a);
@@ -211,7 +211,7 @@ static ray_t* h_S(const char* arg, size_t alen) {
     if (alen == 2 && arg[0] == '0' && arg[1] == 'N')  /* `\S 0N` — live state */
         return ray_error("nyi", "\\S 0N: libc rand state is not readable");
     int64_t v;
-    if (!q_parse_i64(arg, alen, &v))
+    if (!parse_i64(arg, alen, &v))
         return ray_error("parse", NULL);         /* non-integer arg (unpinned) */
     /* The seed is an INT (`\S` displays it as one): out-of-int-range values
      * and the 0Ni sentinel are rejected, never silently truncated (codex P2,
@@ -329,7 +329,7 @@ static ray_t* h_p(const char* arg, size_t alen) {
     bool port_auto = (alen == 2 && arg[0] == '0' && (arg[1] == 'W' || arg[1] == 'w'));
     int64_t v = 0;
     if (!port_auto) {
-        if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+        if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
         if (v < 0 || v > 65535) return ray_error("domain", NULL);
     }
     if (!port_auto && v == 0) {                          /* `\p 0` — stop listening */
@@ -443,7 +443,7 @@ static ray_t* h_l(const char* arg, size_t alen) {
  * are NOT counted, and the ASan debug allocator inflates the number versus a
  * release build.  Tests pin only shape + sign (space > 0 for an allocating
  * expr), never a golden byte count. */
-static ray_t* q_time_expr(const char* expr, size_t len, int64_t reps,
+static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
                           double* ms, int64_t* bytes) {
     if (reps < 0) reps = 0;                              /* `\t:0` → do[0;e] = no runs */
     /* q_parse wants a NUL-terminated C string; expr is a slice of the line. */
@@ -512,7 +512,7 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
     bool      expr_form = (rep >= 0);
     int64_t   v         = 0;
     if (!expr_form) {
-        if (!q_parse_i64(arg, alen, &v)) {
+        if (!parse_i64(arg, alen, &v)) {
             expr_form = true;                            /* non-integer first token */
         } else {
             const char* p   = rest + alen;               /* just past the 1st token */
@@ -524,7 +524,7 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
     if (expr_form) {                                     /* `\t exp` / `\t:n exp` */
         double  ms;
         int64_t bytes;
-        ray_t*  err = q_time_expr(rest, restlen, rep < 0 ? 1 : rep, &ms, &bytes);
+        ray_t*  err = time_expr(rest, restlen, rep < 0 ? 1 : rep, &ms, &bytes);
         if (err) return err;
         return ray_i64((int64_t)ms);                     /* kdb shows whole ms */
     }
@@ -574,15 +574,15 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
  * expression (n times for the `:n` form, kdb `do[n; exp]`) and returns the
  * `(ms; bytes)` 2-long vector rendered by normal q display (`7 2621568`).
  * Unlike `\t`, `\ts` has NO integer-timer form — every argument is a timed
- * expression, including a lone integer (`\ts 42`).  See q_time_expr for the
+ * expression, including a lone integer (`\ts 42`).  See time_expr for the
  * space-metric divergence from kdb. */
 static ray_t* h_ts(size_t alen, const char* rest, size_t restlen, int64_t rep) {
     if (alen == 0) return ray_error("nyi", NULL);        /* `\ts` needs an expression */
     double  ms;
     int64_t bytes;
-    ray_t*  err = q_time_expr(rest, restlen, rep < 0 ? 1 : rep, &ms, &bytes);
+    ray_t*  err = time_expr(rest, restlen, rep < 0 ? 1 : rep, &ms, &bytes);
     if (err) return err;
-    return q_pair_i64((int64_t)ms, bytes);               /* `(ms; bytes)` 2-long */
+    return pair_i64((int64_t)ms, bytes);               /* `(ms; bytes)` 2-long */
 }
 
 /* `\P` — display precision.  `\P`→`7i`; `\P n` sets n∈[0,17] (0 = max = 17),
@@ -590,7 +590,7 @@ static ray_t* h_ts(size_t alen, const char* rest, size_t restlen, int64_t rep) {
 static ray_t* h_P(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(q_fmt_prec());          /* getter */
     int64_t v;
-    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     /* Range [0,17].  syscmds.md does not specify the out-of-range action, so
      * we make it a silent no-op leaving precision unchanged — we neither
      * corrupt state nor pin an unverified value (rule 9 / clean-room). */
@@ -632,16 +632,16 @@ static ray_t* h_w(size_t alen) {
  * height row-cap); a `\c size` setter (re-)ARMS clipping (g_con_trunc) so a
  * transcript that set it stays clipped.  `\C` (HTTP size) display wrapping is
  * still DEFERRED (openq has no HTTP renderer yet). */
-static int64_t q_clamp_cc(int64_t v) {
+static int64_t clamp_cc(int64_t v) {
     return v < 10 ? 10 : v > 2000 ? 2000 : v;
 }
 static ray_t* h_c(const char* rest, size_t restlen) {
     int64_t p[2];
-    int cnt = q_parse_ints(rest, restlen, p, 2);
-    if (cnt == 0) return q_pair_i64(g_con_rows, g_con_cols);   /* getter */
+    int cnt = parse_ints(rest, restlen, p, 2);
+    if (cnt == 0) return pair_i64(g_con_rows, g_con_cols);   /* getter */
     if (cnt >= 2) {                                            /* setter */
-        g_con_rows = (int32_t)q_clamp_cc(p[0]);
-        g_con_cols = (int32_t)q_clamp_cc(p[1]);
+        g_con_rows = (int32_t) clamp_cc(p[0]);
+        g_con_cols = (int32_t) clamp_cc(p[1]);
         g_con_trunc = 1;                    /* an explicit \c (re-)arms clipping */
     }
     return NULL;                                              /* silent */
@@ -660,11 +660,11 @@ bool q_con_display(int32_t* rows, int32_t* cols) {
 void q_con_display_disable(void) { g_con_trunc = 0; }
 static ray_t* h_C(const char* rest, size_t restlen) {
     int64_t p[2];
-    int cnt = q_parse_ints(rest, restlen, p, 2);
-    if (cnt == 0) return q_pair_i64(g_http_rows, g_http_cols);
+    int cnt = parse_ints(rest, restlen, p, 2);
+    if (cnt == 0) return pair_i64(g_http_rows, g_http_cols);
     if (cnt >= 2) {
-        g_http_rows = (int32_t)q_clamp_cc(p[0]);
-        g_http_cols = (int32_t)q_clamp_cc(p[1]);
+        g_http_rows = (int32_t) clamp_cc(p[0]);
+        g_http_cols = (int32_t) clamp_cc(p[1]);
     }
     return NULL;
 }
@@ -674,7 +674,7 @@ static ray_t* h_C(const char* rest, size_t restlen) {
 static ray_t* h_g(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_gc_mode);
     int64_t v;
-    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     if (v != 0 && v != 1) return NULL;               /* only 0|1 valid */
     g_gc_mode = (int32_t)v;
     ray_t* g = ray_gc_fn(NULL, 0);                   /* stub call (reuse) */
@@ -687,7 +687,7 @@ static ray_t* h_g(const char* arg, size_t alen) {
 static ray_t* h_o(const char* arg, size_t alen) {
     if (alen == 0) return ray_i64(g_utc_offset);     /* 0N default, or set value */
     int64_t v;
-    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     g_utc_offset = v;
     return NULL;
 }
@@ -697,7 +697,7 @@ static ray_t* h_o(const char* arg, size_t alen) {
 static ray_t* h_W(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_week_offset);
     int64_t v;
-    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     g_week_offset = (int32_t)v;
     return NULL;
 }
@@ -707,7 +707,7 @@ static ray_t* h_W(const char* arg, size_t alen) {
 static ray_t* h_e(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_err_trap);
     int64_t v;
-    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     if (v < 0 || v > 2) return NULL;                 /* modes 0|1|2 */
     g_err_trap = (int32_t)v;
     return NULL;
@@ -718,7 +718,7 @@ static ray_t* h_e(const char* arg, size_t alen) {
 static ray_t* h_s(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_sec_threads);
     int64_t v;
-    if (!q_parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
     g_sec_threads = (int32_t)v;
     return NULL;
 }
@@ -742,7 +742,7 @@ static ray_t* h_nonlegacy(const char* arg, size_t alen) {
  * FS / network, and silence is kdb's display for a succeeding command (banked
  * rows like dict/key's `\mkdir foo` -> "" pin it).  `rem`/`rlen` is a SLICE
  * of the console line; copied NUL-terminated before system(). */
-static ray_t* q_sys_shell(const char* rem, size_t rlen) {
+static ray_t* sys_shell(const char* rem, size_t rlen) {
     if (!g_own_process) return NULL;
     char   stackbuf[1024];
     char*  cmd = stackbuf;
@@ -766,7 +766,7 @@ static ray_t* q_sys_shell(const char* rem, size_t rlen) {
  * throws 'os (ref/system.md `@[system;"ls egg";…]` -> "error - os"); stderr is
  * NOT captured (popen "r" reads stdout only).  Ownership-heavy: every failure
  * path releases the partial list, the current row, and both scratch buffers. */
-static ray_t* q_sys_shell_capture(const char* rem, size_t rlen) {
+static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
     char   stackbuf[1024];
     char*  cmd = stackbuf;
     ray_t* blk = NULL;
@@ -892,7 +892,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
         size_t d0 = i;
         while (i < n && line[i] != ' ' && line[i] != '\t') i++;
         int64_t rv;
-        if (q_parse_i64(line + d0, i - d0, &rv) && rv >= 0) rep = rv;
+        if (parse_i64(line + d0, i - d0, &rv) && rv >= 0) rep = rv;
     }
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
     size_t a0 = i;
@@ -954,8 +954,8 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
     }
 
     /* Unrecognized command → shell out on the raw remainder (token..EOL). */
-    return capture ? q_sys_shell_capture(line + rem0, n - rem0)
-                   : q_sys_shell(line + rem0, n - rem0);
+    return capture ? sys_shell_capture(line + rem0, n - rem0)
+                   : sys_shell(line + rem0, n - rem0);
 }
 
 /* See q_sys.h — the shared console glue.  Console side effects come FIRST in
