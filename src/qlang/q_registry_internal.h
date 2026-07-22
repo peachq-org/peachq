@@ -55,7 +55,10 @@ int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix
 ray_t* q_sum_wrap(ray_t* x);
 
 /* ---- defined in ops/q_applyiter.c ---- */
-/* (q_at_wrap / q_dot_wrap moved to q_apply.c — declared in q_apply.h) */
+/* (q_at_wrap / q_dot_wrap moved to q_apply.c — declared in q_apply.h; the
+ * registry specials' accessors + the `'x` signal channel moved to
+ * q_registry.c — accessors declared in q_registry.h.  The SPECIALS[] table
+ * in q_registry.c binds these wrapper bodies as its build recipes.) */
 ray_t* q_each_wrap(ray_t* f, ray_t* x);
 ray_t* q_eachboth_wrap(ray_t** args, int64_t n);
 ray_t* q_prior_wrap(ray_t** args, int64_t n);
@@ -63,28 +66,6 @@ ray_t* q_scan_wrap(ray_t** args, int64_t n);
 ray_t* q_over_kw(ray_t* f, ray_t* x);
 ray_t* q_scan_kw(ray_t* f, ray_t* x);
 ray_t* q_prior_kw(ray_t* f, ray_t* x);
-extern ray_t* g_scan_value;
-extern ray_t* g_over_value;
-extern ray_t* g_eachboth_value;
-extern ray_t* g_prior_value;
-extern ray_t* g_mkderiv2_value;
-extern ray_t* g_mkopproj_value;
-extern ray_t* g_list_value;
-extern ray_t* g_table_value;
-extern ray_t* g_keyed_table_value;
-extern ray_t* g_select_value;
-extern ray_t* g_delete_value;
-extern ray_t* g_exec_value;
-extern ray_t* g_compose_value;
-extern ray_t* g_lambda_value;
-extern ray_t* g_ret_value;
-extern ray_t* g_sig_value;
-extern _Thread_local ray_t* g_qsig_payload;
-ray_t* q_sig_fn(ray_t* x);
-extern ray_t* g_seq_value;
-extern ray_t* g_if_value;
-extern ray_t* g_do_value;
-extern ray_t* g_while_value;
 ray_t* q_seq_fn(ray_t** args, int64_t n);
 ray_t* q_if_fn(ray_t** args, int64_t n);
 ray_t* q_do_fn(ray_t** args, int64_t n);
@@ -175,12 +156,7 @@ int q_vec_is_num(ray_t* x);                                   /* used by: list *
 
 /* ---- defined in ops/q_applyiter.c ---- */
 ray_t* q_over_wrap(ray_t** args, int64_t n);                  /* used by: lower, registry */
-ray_t* q_registry_scan_value(void);                           /* used by: fmt, lower, value */
-ray_t* q_registry_over_value(void);                           /* used by: fmt, lower, value */
-ray_t* q_registry_prior_value(void);                          /* used by: fmt, lower, value */
-extern ray_t* g_funsql_select_value;                          /* used by: funsql, registry */
-extern ray_t* g_funsql_bang_value;                            /* used by: funsql, registry */
-ray_t* q_registry_list_value(void);                           /* used by: fmt, lower, parse, join */
+/* (the q_registry_*_value accessors live in q_registry.c — decls in q_registry.h) */
 
 /* ---- defined in q_value.c (q_value_wrap is public — q_registry.h) ---- */
 ray_t* q_value_resolve_sym_owned(ray_t* symv);                /* used by: table */
