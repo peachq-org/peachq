@@ -3,7 +3,8 @@
  * Section 2: the `$` Tok whole-string scanners.  Both sit on q_calendar.c. */
 #include "qlang/q_tok.h"
 #include "qlang/q_registry.h"  /* q_calendar_days_from_civil, q_calendar_date_valid, q_calendar_ts_compose(_checked) */
-#include "core/numparse.h"     /* ray_parse_f64 — the month float twin */
+#include "core/numparse.h"     /* ray_parse_f64/i64 — float twin + numeric Tok */
+#include "lang/internal.h"      /* ray_typed_null, ray_guid, ray_error — q_tok() values */
 #include <string.h>
 
 static int tok_digit(char c) { return c >= '0' && c <= '9'; }
@@ -624,4 +625,119 @@ int q_tok_month(const char* p, size_t len, int64_t* months) {
     if (!ok || mo < 1 || mo > 12 || y < 1 || y > 9999) return 0;
     *months = (y - 2000) * 12 + (mo - 1);
     return 1;
+}
+
+/* ===== 3. the Tok entry — contract in q_tok.h, stated once ===== */
+ray_t* q_tok(int8_t tag, const char* p, size_t len) {
+    while (len && *p == ' ') { p++; len--; }
+    while (len && p[len - 1] == ' ') len--;
+    switch (tag) {
+    case RAY_SYM:
+        return ray_sym(ray_sym_intern(len ? p : "", len));
+    case RAY_BOOL:   /* truthy set pinned by ref/tok.md: "txyTXY1" */
+        return ray_bool(len == 1 && strchr("1TtXxYy", p[0]) != NULL);
+    case RAY_F64: case RAY_F32: {
+        double v = 0;
+        size_t used = len ? ray_parse_f64(p, len, &v) : 0;
+        if (used != len || len == 0) return ray_typed_null((int8_t)-tag);
+        return tag == RAY_F64 ? ray_f64(v) : ray_f32((float)v);
+    }
+    case RAY_I64: case RAY_I32: case RAY_I16: {
+        int64_t v = 0;
+        size_t used = len ? ray_parse_i64(p, len, &v) : 0;
+        if (used != len || len == 0) return ray_typed_null((int8_t)-tag);
+        /* Out-of-domain bounds are ±INT*_MAX, NOT INT*_MIN: the exact minimum
+         * IS the null sentinel (0N/0Ni/0Nh) and must never round-trip as an
+         * accepted value. */
+        if (tag == RAY_I64)
+            return (v == INT64_MIN)
+                 ? ray_typed_null(-RAY_I64) : ray_i64(v);
+        if (tag == RAY_I32)
+            return (v > INT32_MAX || v < -INT32_MAX)
+                 ? ray_typed_null(-RAY_I32) : ray_i32((int32_t)v);
+        return (v > INT16_MAX || v < -INT16_MAX)
+             ? ray_typed_null(-RAY_I16) : ray_i16((int16_t)v);
+    }
+    case RAY_DATE: {
+        /* invalid civil date included (tok.md pins "D"$"2147483648" -> 0Nd) */
+        int64_t y, mo, d;
+        if (!q_tok_date(p, len, &y, &mo, &d) || !q_calendar_date_valid(y, mo, d))
+            return ray_typed_null(-RAY_DATE);
+        return ray_date(q_calendar_days_from_civil(y, mo, d));
+    }
+    case RAY_MONTH: {
+        int64_t mo;
+        if (!q_tok_month(p, len, &mo))
+            return ray_typed_null(-RAY_MONTH);
+        return ray_month(mo);
+    }
+    case RAY_TIME: {
+        int32_t ms;
+        if (!q_tok_time(p, len, &ms))
+            return ray_typed_null(-RAY_TIME);
+        return ray_time(ms);
+    }
+    case RAY_TIMESTAMP: {
+        int64_t ns;
+        if (!q_tok_ts(p, len, &ns))
+            return ray_typed_null(-RAY_TIMESTAMP);
+        return ray_timestamp(ns);
+    }
+    case RAY_DATETIME: {
+        /* tok.md:222-227 pins "PZ"$\: over ONE input: Z shares P's accepted
+         * shapes at ms display precision — reuse q_tok_ts (the single P
+         * parser) and convert ns -> fractional days. */
+        int64_t ns;
+        if (!q_tok_ts(p, len, &ns))
+            return ray_typed_null(-RAY_DATETIME);
+        return ray_datetime((double)ns / 86400000000000.0);
+    }
+    case RAY_BYTE_ONLY: {
+        /* "X"$ reads HEX ("X"$"42" -> 0x42, ref/tok.md).  Unparseable or
+         * > 0xff -> 0x00 (derived): byte HAS no null (basics/datatypes.md),
+         * so its zero value stands in for the typed null. */
+        uint64_t v = 0;
+        size_t i = 0;
+        for (; i < len; i++) {
+            char c = p[i];
+            int d = (c >= '0' && c <= '9') ? c - '0'
+                  : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                  : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (d < 0) break;
+            v = (v << 4) | (uint64_t)d;
+            if (v > 0xff) break;
+        }
+        if (len == 0 || i != len || v > 0xff) return ray_u8(0);
+        return ray_u8((uint8_t)v);
+    }
+    case RAY_GUID: {
+        /* Canonical 36-char UUID only; base ray_cast_fn "GUID" ERRORS on bad
+         * input, so parse here; IPv4/IPv6 forms deferred (see q_tok_uuid). */
+        uint8_t bytes[16];
+        if (!q_tok_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
+        return ray_guid(bytes);
+    }
+    case RAY_MINUTE: {
+        /* FLOOR to the containing minute (ref/tok.md:61 "U"$"12:13:14" ->
+         * 12:13; cast.md:168-170 truncation rule). */
+        int64_t ns;
+        if (!q_tok_clock_ns(p, len, &ns))
+            return ray_typed_null(-RAY_MINUTE);
+        return ray_minute(ns / 60000000000LL);
+    }
+    case RAY_SECOND: {
+        int64_t ns;
+        if (!q_tok_clock_ns(p, len, &ns))
+            return ray_typed_null(-RAY_SECOND);
+        return ray_second(ns / 1000000000LL);
+    }
+    case RAY_TIMESPAN: {
+        int64_t ns;
+        if (!q_tok_timespan_ns(p, len, &ns))
+            return ray_typed_null(-RAY_TIMESPAN);
+        return ray_timespan(ns);
+    }
+    default:
+        return ray_error("nyi", "$: char Tok is deferred");
+    }
 }
