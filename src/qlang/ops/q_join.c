@@ -6,7 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_bang.h"  /* q_bang_enkey — keyed-result construction */
+#include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
 #include "lang/env.h"      /* ray_env_get */
 #include "lang/eval.h"     /* ray_eval; ray_left_join_fn, ray_window_join*_fn */
 #include "lang/internal.h" /* ray_asof_join_fn, ray_concat_fn, ray_vec_set_null, ray_error */

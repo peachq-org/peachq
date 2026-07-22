@@ -6,7 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_dollar.h" /* q_cast_designator, q_dollar_tok — Tok column parses */
+#include "qlang/ops/q_dollar.h" /* q_cast_designator, q_dollar_tok — Tok column parses */
 #include "qlang/q_builtins.h" /* q_string_fn — 0: Prepare Text cell text */
 #include "qlang/q_sys.h"
 #include "lang/eval.h"      /* ray_eval_get_restricted, ray_read_file_fn/ray_write_file_fn */
