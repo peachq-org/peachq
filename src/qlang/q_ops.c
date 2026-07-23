@@ -32,7 +32,7 @@
  * q_is_kw_verb memcmp, now manifest-driven). */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* wrapper decls for the QR_FN* recipes (brings q_ops.h) */
-#include "qlang/q_apply.h"                  /* q_at_wrap / q_dot_wrap — the `@` `.` rows */
+#include "qlang/eval/q_eval.h"              /* q_eval_at_wrap / q_eval_dot_wrap — the `@` `.` rows */
 #include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
 #include <string.h>
@@ -175,15 +175,15 @@ static const q_op_t Q_OPS[] = {
     /* monadic `$` stays QR_NONE: `$x` is the cast-vs-cond ambiguity, deferred.
      * Dyadic `$` is Cast ("an atomic function", ref/cast.md; kdb float->int
      * ROUNDING; Tok string-parse and unknown designators deferred); the
-     * bracket cond form `$[c;t;f]` (3+ args) is a q_lower rewrite onto
-     * rayfall `if`, not a registry cell. */
+     * bracket cond form `$[c;t;f]` (3+ args) is a q_eval control form, not a
+     * registry cell. */
     { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "atomic", NULL },
     /* monadic `@`/`.` stay QR_NONE: `@x` type-of is blocked on the q type
      * renumber; `.x` (value/get) comes with handles/namespaces.  Ternary+
      * Trap/Amend forms are deferred cells (error today via arity).  Family
      * none: Apply/Index ARE the application machinery (spec §5), not lifted. */
-    { "@",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("at", q_at_wrap),    NULL, 1, 0, "none", NULL },
-    { ".",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("apply", q_dot_wrap), NULL, 1, 0, "none", NULL },
+    { "@",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("at", q_eval_at_wrap),    NULL, 1, 0, "none", NULL },
+    { ".",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("apply", q_eval_dot_wrap), NULL, 1, 0, "none", NULL },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("div"),     NULL, 1, 0, "atomic", NULL },
     /* q `x mod y` — modulus (ref/mod.md, atomic).  PURE RENAME: rayfall `%` IS
@@ -198,7 +198,7 @@ static const q_op_t Q_OPS[] = {
     { "xlog",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("xlog", q_xlog_wrap), NULL, 1, 0, "atomic", NULL },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
      * collapse, since map returns a boxed list where q wants a simple vec). */
-    { "each",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("map", q_each_wrap), "map", 1, 0, "none", NULL },
+    { "each",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("map", q_hof_nyi_wrap), "map", 1, 0, "none", NULL },
     /* q `x in y` — membership (ref/in.md: left-atomic comparison): typed-
      * vector y via base ray_in_fn; generic-list y is whole-item, rank-
      * sensitive.  rowid: needs item equality (set-op predicate). */
@@ -335,10 +335,10 @@ static const q_op_t Q_OPS[] = {
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
      * do/while by f rank; prior is unary each-prior; peach == each. */
-    { "over",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("over", q_over_kw), "fold", 1, 0, "none", NULL },
-    { "scan",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("scan-kw", q_scan_kw), "scan", 1, 0, "none", NULL },
-    { "prior", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("prior", q_prior_kw), "prior", 1, 0, "none", NULL },
-    { "peach", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("peach", q_each_wrap), "map", 1, 0, "none", NULL },
+    { "over",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("over", q_hof_nyi_wrap), "fold", 1, 0, "none", NULL },
+    { "scan",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("scan-kw", q_hof_nyi_wrap), "scan", 1, 0, "none", NULL },
+    { "prior", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("prior", q_hof_nyi_wrap), "prior", 1, 0, "none", NULL },
+    { "peach", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("peach", q_hof_nyi_wrap), "map", 1, 0, "none", NULL },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     { "neg",     QLEX_KW_PREFIX, QR_FN1A("neg", q_neg_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
     /* q `til` — generator (atom -> vector; no structure input, family none);
@@ -393,11 +393,11 @@ static const q_op_t Q_OPS[] = {
      * path, which sorts — so it too is a wrapper, not a rename (audited:
      * `distinct 2 3 7 3 5 3` must be 2 3 7 5, env distinct gives 2 3 5 7). */
     { "key",     QLEX_KW_PREFIX, QR_FN1("key", q_key_wrap),    QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
+    { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_value_nyi_fn), QR_NONE,          NULL, 1, 0, "structural", NULL },
     /* q `get` is a SYNONYM of `value` (ref/get.md: "completely interchangeable")
-     * — same q_value_wrap, one home.  `nam set y` writes the named global
+     * — same 'nyi stub, one home.  `nam set y` writes the named global
      * (sym-handle assign / `. context restore); file forms are 'nyi cells. */
-    { "get",     QLEX_KW_PREFIX, QR_FN1("value", q_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
+    { "get",     QLEX_KW_PREFIX, QR_FN1("value", q_value_nyi_fn), QR_NONE,          NULL, 1, 0, "structural", NULL },
     { "set",     QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("set-g", q_setg_wrap), NULL, 1, 1, "none", NULL },
     { "distinct",QLEX_KW_PREFIX, QR_FN1("distinct", q_distinct_wrap), QR_NONE,    NULL, 1, 0, "rowid", NULL },
     /* q `rand x` == {first 1?x} — self-hosted in q.q verbatim from ref/rand.md;
@@ -520,7 +520,7 @@ static const q_op_t Q_OPS[] = {
      * (conn;timeout) into the `.ipc.open` string API and returns the connection's
      * socket fd as the handle (kdb-faithful — 0/1/2 reserved, connections at 3+);
      * `hclose` translates it back and routes to `.ipc.close`.  The sync/async send
-     * verb `h"query"` is handle-as-verb application (q_apply.c int-head arm), not a
+     * verb `h"query"` is handle-as-verb application (the apply module's int-head arm), not a
      * manifest row.  Both are monadic prefix keywords (KW_PREFIX). ---- */
     { "hopen",  QLEX_KW_PREFIX, QR_FN1("hopen", q_hopen_wrap),   QR_NONE, NULL, 1, 1, "none", NULL },
     { "hclose", QLEX_KW_PREFIX, QR_FN1("hclose", q_hclose_wrap), QR_NONE, NULL, 1, 1, "none", NULL },
@@ -548,12 +548,9 @@ static const q_op_t Q_OPS[] = {
      * wrappers, not QR_ENV renames. */
     { "getenv", QLEX_KW_PREFIX, QR_FN1("getenv", q_getenv_wrap), QR_NONE,         NULL, 1, 0, "none", NULL },
     { "setenv", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("setenv", q_setenv_wrap), NULL, 1, 1, "none", NULL },
-    /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
-     * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
-     * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
-     * q each-left, verified against examples/rfl).  Each-prior `':` still has
-     * no rayfall counterpart (the scan-* variants are fold-style, not
-     * pairwise) — DEFERRED, still lexer-classified. ---- */
+    /* ---- adverbs — native q_eval/apply-module arms dispatch on the
+     * adverb_hof cell (`'` map, `/` fold; `\` `':` `/:` `\:` still 'nyi
+     * pending their rebuild wave). ---- */
     { "'",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map",       1, 0, "none", NULL },
     { "/",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "fold",      1, 0, "none", NULL },
     { "\\",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "scan",      1, 0, "none", NULL },

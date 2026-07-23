@@ -11,11 +11,12 @@
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler show output */
 #include "lang/env.h"          /* ray_env_get / ray_sym_intern — `.h.HOME` / `.h.ty` */
-#include "lang/internal.h"     /* call_fn1 */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "core/runtime.h"      /* __VM — env lookups require a bound per-thread VM */
 #include "mem/sys.h"
 #include "table/dict.h"        /* ray_dict_find_sym — `.h.ty` override probe */
 #include "picohttpparser.h"
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -621,7 +622,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
     ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
 
-    ray_t* r = call_fn1(fn, arg);
+    ray_t* r = q_eval_apply_value(fn, &arg, 1);
     ray_release(arg);
     /* drain handler show/0N! to the server console (zts_tick pattern) */
     { const char* con = q_console_str();
@@ -762,7 +763,7 @@ static int zac_gate(ray_sock_t fd, ray_t* fn, const char* target, size_t tlen,
     ray_t* arg = zh_build_arg(NULL, 0, target, tlen, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return ZAC_DONE; }
 
-    ray_t* r = call_fn1(fn, arg);
+    ray_t* r = q_eval_apply_value(fn, &arg, 1);
     ray_release(arg);
     { const char* con = q_console_str();     /* drain handler show/0N! */
       if (con && *con) { fputs(con, stdout); fflush(stdout); }
