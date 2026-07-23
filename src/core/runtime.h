@@ -47,6 +47,7 @@ typedef struct {
     ray_t**  vals;     /* -> vals_inline, or heap once grown */
     int32_t  cap;
     int32_t  count;
+    bool     barrier;  /* lookup stops here: frames below are invisible */
 } ray_scope_frame_t;
 
 /* ===== Per-thread VM =====
