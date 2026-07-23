@@ -11,12 +11,13 @@
  * Scope: every C-rostered q verb, including the type-dispatch glyphs (`! ? $ @ .
  * _`, landed in 2c-2+).  NOT every q KEYWORD: q.q-hosted keywords with no lexer
  * or registry involvement (rand, med, md5, ...) have no row — they resolve as
- * `.q` entries and are reserved via the dynamic `.q` probe (q_lower/q_ns).
+ * `.q` entries (q_eval's bare-name `.q.<name>` fallback).
  * A registry miss still means "not resolvable at that valence."  Cells whose
  * q semantics have NO clean rayfall target stay QR_NONE rather than a guessed
  * binding — currently `|` dyadic (element-wise max), monadic `%` (reciprocal
  * glyph), monadic `$`/`@`/`.`/`^`, and the reserved `any`/`all` rows; qSQL
- * forms are q_lower rewrites, not registry cells. */
+ * statement forms are parse shapes awaiting the plan-router wave, not
+ * registry cells. */
 #ifndef Q_OPS_H
 #define Q_OPS_H
 
@@ -84,7 +85,7 @@ typedef struct {
  * (QR_* above), and the introspection metadata surfaced verbatim as the `.Q.ops[]`
  * columns.  deterministic/sideeffect stay PURE METADATA; family, mono and the
  * keyword-row adverb_hof became OPERATIVE with the eval-rebuild skeleton — the
- * fresh apply module (src/qlang/eval/) dispatches its family lifts, `/`-
+ * apply module (src/qlang/eval/) dispatches its family lifts, `/`-
  * monomorphization and native HOF routing on them (legacy eval still reads
  * none).  Every row sets all fields explicitly (-Wmissing-field-initializers).
  * Classification rosters + border rulings live in q_ops.c (the deterministic/
@@ -100,10 +101,10 @@ typedef struct q_op {
     q_recipe_t   dyad;          /* dyadic  build recipe */
     const char*  adverb_hof;    /* adverb rows: the rayfall HOF the adverb IS (' map, / fold, \ scan).
                                  * Keyword-HOF rows (each/peach/over/scan/prior) also set it so the
-                                 * fresh evaluator routes them to native adverb arms; else NULL */
+                                 * evaluator routes them to native adverb arms; else NULL */
     uint8_t      deterministic; /* 0 iff any valence is nondeterministic (rand/deal/?-roll); else 1 */
     uint8_t      sideeffect;    /* 1 iff eval has an observable effect (assign/mutate/IPC/system/I/O); else 0 */
-    const char*  family;        /* structure-dispatch family (see above); consumed by the fresh apply module */
+    const char*  family;        /* structure-dispatch family (see above); consumed by the apply module */
     const char*  mono;          /* dyad rows: keyword whose kernel a `/`-derivation monomorphizes to
                                  * (`+`->sum `*`->prd `|`->max `&`->min `,`->raze); else NULL */
 } q_op_t;
