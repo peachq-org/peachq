@@ -203,13 +203,78 @@ static ray_t* seq_eval(ray_t** e, int64_t n) {
     return r;
 }
 
+/* `a[i;…]:v` / `a[i;…]op:v` (ref/assign.md Indexed assign): rhs first, then
+ * indices RTL; an op-assign READS through the one apply/index primitive and
+ * combines; the write goes through the apply module's amend; rebinding uses
+ * the same locality rule as plain assignment.  Returns the assigned value. */
+static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
+                             const q_op_t* oprow, ray_t* rhs) {
+    ray_t** te = (ray_t**)ray_data(target);
+    int64_t k = ray_len(target) - 1;
+    if (k < 1 || k > EVAL_MAX_ARGS || !nameref(te[0]))
+        return ray_error("nyi", NULL);
+    ray_t* s = ray_sym_str(te[0]->i64);
+    if (!s) return ray_error("type", NULL);
+    int reserved = q_ops_is_reserved(ray_str_ptr(s), (int)ray_str_len(s));
+    int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
+    ray_release(s);
+    if (reserved) return ray_error("assign", NULL);
+    ray_t* rv = q_eval(rhs);
+    if (RAY_IS_ERR(rv)) return rv;
+    rv = store_mat(rv);
+    if (RAY_IS_ERR(rv)) return rv;
+    ray_t* idxv[EVAL_MAX_ARGS];
+    ray_t* err = eval_args_rtl(te + 1, k, idxv);
+    if (err) { ray_release(rv); return err; }
+    ray_t* ret = NULL;
+    ray_t* cur = name_value(te[0], NULL);
+    if (RAY_IS_ERR(cur)) { ret = cur; cur = NULL; }
+    ray_t* nv = NULL;
+    if (!ret && opv) {
+        ray_t* old = q_eval_apply_value(cur, idxv, k);
+        if (!RAY_IS_ERR(old)) old = store_mat(old);
+        if (RAY_IS_ERR(old)) ret = old;
+        else {
+            ray_t* av[2] = { old, rv };
+            nv = q_eval_apply(opv, oprow, av, 2);
+            ray_release(old);
+            if (!RAY_IS_ERR(nv)) nv = store_mat(nv);
+            if (RAY_IS_ERR(nv)) { ret = nv; nv = NULL; }
+        }
+    } else if (!ret) {
+        ray_retain(rv);
+        nv = rv;
+    }
+    if (!ret) {
+        ray_t* amended = q_eval_apply_amend(cur, idxv, k, nv);
+        if (RAY_IS_ERR(amended)) { ray_release(nv); ret = amended; }
+        else {
+            int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
+            int local = in_frame &&
+                        (!is_global || ray_env_get_local(te[0]->i64) != NULL);
+            ray_err_t e2 = local ? ray_env_set_local(te[0]->i64, amended)
+                                 : ray_env_set(te[0]->i64, amended);
+            ray_release(amended);
+            if (e2 != RAY_OK) { ray_release(nv); ret = ray_error("assign", NULL); }
+            else ret = nv;                           /* the assigned value */
+        }
+    }
+    if (cur) ray_release(cur);
+    release_args(idxv, k);
+    ray_release(rv);
+    return ret;
+}
+
 /* `:`/`::` assignment.  `:` inside a lambda frame binds a local; `::` and
  * dotted names are global — UNLESS the `::` name is an argument or already
  * defined as a local, which assigns the local and leaves the global alone
  * (function-notation.md "Name scope").  Returns the assigned value. */
 static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
-    if (!nameref(target))
-        return ray_error("nyi", NULL);              /* indexed assign: punt */
+    if (!nameref(target)) {
+        if (target && target->type == RAY_LIST && ray_len(target) >= 2)
+            return indexed_assign(is_global, target, NULL, NULL, rhs);
+        return ray_error("nyi", NULL);
+    }
     ray_t* s = ray_sym_str(target->i64);
     if (!s) return ray_error("type", NULL);
     int reserved = q_ops_is_reserved(ray_str_ptr(s), (int)ray_str_len(s));
@@ -326,7 +391,11 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     if (!opv || !(opv->type == RAY_UNARY || opv->type == RAY_BINARY ||
                   opv->type == RAY_VARY))
         return NULL;                                 /* not an op: -> 'name path */
-    if (!nameref(target)) return ray_error("nyi", NULL);
+    if (!nameref(target)) {
+        if (target && target->type == RAY_LIST && ray_len(target) >= 2)
+            return indexed_assign(0, target, opv, row, rhs);
+        return ray_error("nyi", NULL);
+    }
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
     const q_op_t* trow = NULL;
