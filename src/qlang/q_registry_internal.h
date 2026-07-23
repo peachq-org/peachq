@@ -72,7 +72,7 @@ ray_t* q_ujf_wrap(ray_t* x, ray_t* y);
 ray_t* q_asof_wrap(ray_t* t, ray_t* d);
 
 /* ---- defined in ops/q_list.c ---- */
-ray_t* q_drop_wrap(ray_t* n, ray_t* list);
+ray_t* q_drop_wrap(ray_t* n, ray_t* list);                    /* also shared: index (splice) */
 ray_t* q_cut_wrap(ray_t* n, ray_t* x);
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
 ray_t* q_fills_wrap(ray_t* x);
@@ -110,7 +110,7 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y);
 ray_t* q_ungroup_wrap(ray_t* x);
 ray_t* q_insert_wrap(ray_t* x, ray_t* y);
 ray_t* q_upsert_wrap(ray_t* x, ray_t* y);
-ray_t* q_join_wrap(ray_t* x, ray_t* y);
+ray_t* q_join_wrap(ray_t* x, ray_t* y);                       /* also shared: index (splice, dict insert) */
 ray_t* q_except_wrap(ray_t* x, ray_t* y);
 ray_t* q_key_wrap(ray_t* x);
 ray_t* q_distinct_wrap(ray_t* x);
@@ -122,7 +122,7 @@ ray_t* q_cross_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in q_registry.c ---- */
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, table */
-ray_t* q_collapse_list(ray_t* l);                             /* used by: eval, builtins, fmt, json, wire, agg, dollar, io, join, list, math, table */
+ray_t* q_collapse_list(ray_t* l);                             /* used by: eval, builtins, fmt, json, wire, agg, dollar, io, join, list, math, table, index */
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, parse, agg */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, join */
 
@@ -166,7 +166,7 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, 
 
 /* ---- defined in ops/q_list.c ---- */
 ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
-ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry */
+ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry, index */
 ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);    /* single-file since the corridor pass — staticize candidate */
 ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: registry, agg, join */
@@ -185,12 +185,23 @@ void q_rand_seed(int64_t n);                                  /* used by: sys */
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, list, math */
-int q_table_is_keyed(ray_t* y);                               /* used by: apply, agg, bang, dotq, join, list, rand */
+int q_table_is_keyed(ray_t* y);                               /* used by: apply, agg, bang, dotq, join, list, rand, index */
 ray_t* q_table_flatten(ray_t* y);                             /* used by: bang, join */
 ray_t* q_table_dict_vals(ray_t* d, int* owned);               /* used by: list */
 ray_t* qj_item(ray_t* x, int64_t i);                          /* used by: join */
 ray_t* qj_gen_item(ray_t* x, int64_t i);                      /* used by: join */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y);                       /* used by: dotz, lower, registry */
 ray_t* q_exit_wrap(ray_t* x);                                 /* used by: ops */
+
+/* Verb bodies must not touch the environment — name resolution/binding is
+ * the evaluator's (and bootstrap's) domain.  Legitimate owners and the
+ * grandfathered ops/ offenders define Q_OPS_ENV_GRANDFATHER (dated one-line
+ * reason at the define) before including this header.  The env/eval headers
+ * are pre-included so their declarations precede the poison. */
+#ifndef Q_OPS_ENV_GRANDFATHER
+#include "lang/env.h"
+#include "lang/eval.h"
+#pragma GCC poison ray_env_get ray_env_set ray_env_bind ray_env_bind_flat ray_env_resolve
+#endif
 
 #endif

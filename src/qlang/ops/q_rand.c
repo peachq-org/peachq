@@ -5,6 +5,7 @@
  * Split from ops/q_list.c (corridor pass, 2026-07-22) — pure function moves;
  * the shared internal surface lives in q_registry_internal.h. */
 #define _POSIX_C_SOURCE 200809L
+#define Q_OPS_ENV_GRANDFATHER /* grandfathered 2026-07-23: 2 env uses (seed state) — q-index PR audit */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
