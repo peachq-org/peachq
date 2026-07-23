@@ -18,24 +18,15 @@
  * Requires an initialised rayforce runtime (symbol interning). */
 ray_t* q_parse(const char* src);
 
-/* q-lower entrypoint (ADR 0003 pipeline stage).  The one call every eval path
- * uses between q_parse and ray_eval to turn the q-AST into a runnable tree:
- * dyadic verb-head resolution, adverb applications onto rayfall HOFs, and
- * assignment (`:`/`::` -> set/let with the reserved-verb 'assign invariant).
- * May return a RAY_ERROR (consuming `ast`) — callers must error-check.
- * PRECONDITION: `ast` is the uniquely-owned (rc==1) tree straight from
- * q_parse — nodes are rewritten in place / swapped. */
-ray_t* q_lower(ray_t* ast);
-
 /* Test probe (test/q_qsql_normalize.c): scan `src` as a bare clause phrase in
  * scan-context `ctx`, normalized to the `verb` slot shape.  Not on any runtime
  * path.  Returns OWNED. */
 ray_t* q_qsql_normalize_probe(const char* src, int ctx, int verb);
 
-/* True iff the (pre-lower) statement's RESULT is an assignment's — the q
- * console prints nothing for `a:5` (statement sequences check their LAST
- * statement).  Consulted by the REPL/qdoc before printing. */
-int q_lower_ast_is_assign(const ray_t* ast);
+/* True iff the statement's RESULT is an assignment's — the q console prints
+ * nothing for `a:5` (statement sequences check their LAST statement).
+ * Consulted by the REPL/qdoc/remote-eval before printing. */
+int q_parse_is_assign(const ray_t* ast);
 
 /* Fill the top-level `;`-headed statement list's C-NULL slots (empty
  * statements) with empty general lists, IN PLACE: kdb `parse ";"` is

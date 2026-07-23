@@ -84,6 +84,7 @@
 #include "qlang/net/q_wire.h"
 #include "qlang/net/q_http.h"
 #include "qlang/net/q_ws.h"
+#include "qlang/eval/q_eval.h"   /* q_eval_apply_value — RAY_QFN hook firing */
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -346,8 +347,19 @@ static ray_t* hook_lookup(int idx) {
     int64_t sym = ray_sym_ipc_hook(idx);
     if (sym < 0) return NULL;
     ray_t* fn = ray_env_get(sym);
-    if (!fn || fn->type != RAY_LAMBDA) return NULL;
+    /* rayfall lambdas AND q RAY_QFN carriers both fire (hook_fire below) */
+    if (!fn || (fn->type != RAY_LAMBDA && fn->type != RAY_QFN)) return NULL;
     return fn;
+}
+
+/* Fire a hook value: q carriers go through the q value-apply entry, engine
+ * lambdas through the base call path (ipc.c is openq-owned — the one
+ * core-file consumer of the q apply seam). */
+static ray_t* hook_fire(ray_t* fn, ray_t** args, int64_t n) {
+    if (fn->type == RAY_QFN) return q_eval_apply_value(fn, args, n);
+    if (n == 1) return call_fn1(fn, args[0]);
+    if (n == 2) return call_fn2(fn, args[0], args[1]);
+    return call_lambda(fn, args, n);
 }
 
 /* Call a single-arg hook for lifecycle events (on.open / on.close).
@@ -364,7 +376,7 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
     int64_t prev = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(handle, poll ? poll : prev_poll);
-    ray_t* r = call_fn1(fn, arg);
+    ray_t* r = hook_fire(fn, &arg, 1);
     ipc_ctx_set(prev, prev_poll);
     if (r && RAY_IS_ERR(r)) {
         const char* name = (idx == IPC_HOOK_OPEN) ? ".ipc.on.open" : ".ipc.on.close";
@@ -412,7 +424,7 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle,
     int64_t prev = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(handle, poll ? poll : prev_poll);
-    ray_t* r = call_fn1(fn, arg);
+    ray_t* r = hook_fire(fn, &arg, 1);
     ipc_ctx_set(prev, prev_poll);
     if (r && RAY_IS_ERR(r))
         fprintf(stderr, "ipc: .ipc.on.badmsg hook raised an error (handle=%lld)\n",
@@ -460,7 +472,8 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     int64_t prev = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(handle, poll ? poll : prev_poll);
-    ray_t* r = call_fn2(fn, u, p);
+    ray_t* up[2] = { u, p };
+    ray_t* r = hook_fire(fn, up, 2);
     ipc_ctx_set(prev, prev_poll);
     ray_release(u);
     ray_release(p);
@@ -590,7 +603,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
             ray_release(msg);
             msg = s;
         }
-        result = call_fn1(hook, msg);
+        result = hook_fire(hook, &msg, 1);
         ray_release(msg);
         /* Async errors have nowhere to go on the wire (async never sends
          * a response) — log + drop so the operator sees the hook
