@@ -35,6 +35,7 @@
 #include "qlang/eval/q_eval.h"              /* q_eval_at_wrap / q_eval_dot_wrap — the `@` `.` rows */
 #include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
+#include "qlang/ops/q_index.h"              /* q_index_assign_wrap — the `:` row */
 #include <string.h>
 
 /* ===== deterministic / sideeffect AUDIT (feat/q-ops-introspection) =========
@@ -117,6 +118,9 @@
  * metadata).  ss/ssr consume a whole string as a search domain -> `none`.
  * ========================================================================== */
 
+/* trailing name_lift zero-defaults on unflagged rows (no 166-row churn) */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 static const q_op_t Q_OPS[] = {
     /* name    lex            monadic-recipe             dyadic-recipe            hof  det eff family mono */
     /* ---- arithmetic / compare glyphs — dyadics all doc-labelled atomic
@@ -178,12 +182,19 @@ static const q_op_t Q_OPS[] = {
      * bracket cond form `$[c;t;f]` (3+ args) is a q_eval control form, not a
      * registry cell. */
     { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "atomic", NULL },
+    /* `:` Assign as an operand VALUE — the dyad returning its rhs, so amend's
+     * replace form (`@[x;i;:;v]`, ref/amend.md "If v is Assign (:) ...") is
+     * plain composition.  Assignment/return stay SYNTAX: q_embed never embeds
+     * a colon head, so this row is reachable only in operand position. */
+    { ":",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("assign", q_index_assign_wrap), NULL, 1, 0, "none", NULL },
     /* monadic `@`/`.` stay QR_NONE: `@x` type-of is blocked on the q type
-     * renumber; `.x` (value/get) comes with handles/namespaces.  Ternary+
-     * Trap/Amend forms are deferred cells (error today via arity).  Family
-     * none: Apply/Index ARE the application machinery (spec §5), not lifted. */
-    { "@",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("at", q_eval_at_wrap),    NULL, 1, 0, "none", NULL },
-    { ".",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("apply", q_eval_dot_wrap), NULL, 1, 0, "none", NULL },
+     * renumber; `.x` (value/get) comes with handles/namespaces.  Dyadic rows
+     * are the full overload matrix (2 Apply/Index, 3 Trap-on-callable /
+     * Amend-ternary, 4 Amend — machinery: ops/q_index.c).  Family none:
+     * Apply/Index ARE the application machinery (spec §5), not lifted.
+     * name_lift: a sym-atom d in the amend forms names a global. */
+    { "@",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("at", q_eval_at_wrap),    NULL, 1, 1, "none", NULL, .name_lift = 1 },
+    { ".",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("apply", q_eval_dot_wrap), NULL, 1, 1, "none", NULL, .name_lift = 1 },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("div"),     NULL, 1, 0, "atomic", NULL },
     /* q `x mod y` — modulus (ref/mod.md, atomic).  PURE RENAME: rayfall `%` IS
@@ -558,6 +569,7 @@ static const q_op_t Q_OPS[] = {
     { "/:",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-right", 1, 0, "none", NULL },
     { "\\:",   QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-left",  1, 0, "none", NULL },
 };
+#pragma GCC diagnostic pop
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
 
 /* Accumulator identity elements (ref/accumulators.md:261-267 unary-seed,
