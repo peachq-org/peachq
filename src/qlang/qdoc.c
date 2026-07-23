@@ -3,6 +3,7 @@
 
 #include "qlang/qdoc.h"
 #include "qlang/q_parse.h"
+#include "qlang/eval/q_eval.h"   /* Q_EVAL=fresh dual-runtime switch */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/q_ns.h"     /* q_ns_prompt — namespace transcripts */
@@ -192,24 +193,30 @@ static void run_example(const char* input, const char* expect,
     char errcls[8];
     int want_error = expect_is_error(expect, errcls, sizeof errcls);
     int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
-    ast = q_lower(ast);
-    if (RAY_IS_ERR(ast)) {
-        if (want_error && error_row_matches(ast, errcls)) {
+    ray_t* res;
+    if (q_eval_fresh_enabled()) {                 /* Q_EVAL=fresh: no q_lower */
+        res = q_eval(ast);
+        ray_release(ast);
+    } else {
+        ast = q_lower(ast);
+        if (RAY_IS_ERR(ast)) {
+            if (want_error && error_row_matches(ast, errcls)) {
+                ray_release(ast);
+                classify(r, 1);
+                return;
+            }
+            char ne[QD_OUT];
+            normalize(expect, ne, sizeof ne);
             ray_release(ast);
-            classify(r, 1);
+            classify(r, 0);
+            if (verbose)
+                fprintf(out, "  q)%.200s\n    FAIL(lower) got \"<error>\" want \"%.200s\"\n",
+                        input, ne);
             return;
         }
-        char ne[QD_OUT];
-        normalize(expect, ne, sizeof ne);
+        res = ray_eval(ast);
         ray_release(ast);
-        classify(r, 0);
-        if (verbose)
-            fprintf(out, "  q)%.200s\n    FAIL(lower) got \"<error>\" want \"%.200s\"\n",
-                    input, ne);
-        return;
     }
-    ray_t* res = ray_eval(ast);
-    ray_release(ast);
     if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
 
     /* An eval error is a failure — NOT empty output that could match an empty

@@ -11,6 +11,7 @@
 
 #include "qlang/q_repl.h"
 #include "qlang/q_parse.h"
+#include "qlang/eval/q_eval.h"   /* Q_EVAL=fresh dual-runtime switch */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/q_ns.h"       /* q_ns_prompt — namespaces */
@@ -278,15 +279,21 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
     }
 
     int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
-    ast = q_lower(ast);
-    if (RAY_IS_ERR(ast)) {
-        const char* code = (const char*)ast->sdata;
-        fprintf(err, "error: %s\n", (code && *code) ? code : "lower");
+    ray_t* r;
+    if (q_eval_fresh_enabled()) {                 /* Q_EVAL=fresh: no q_lower */
+        r = q_eval(ast);
         ray_release(ast);
-        return;
+    } else {
+        ast = q_lower(ast);
+        if (RAY_IS_ERR(ast)) {
+            const char* code = (const char*)ast->sdata;
+            fprintf(err, "error: %s\n", (code && *code) ? code : "lower");
+            ray_release(ast);
+            return;
+        }
+        r = ray_eval(ast);
+        ray_release(ast);
     }
-    ray_t* r = ray_eval(ast);
-    ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
 

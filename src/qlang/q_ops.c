@@ -118,91 +118,91 @@
  * ========================================================================== */
 
 static const q_op_t Q_OPS[] = {
-    /* name    lex            monadic-recipe             dyadic-recipe            hof  det eff family */
+    /* name    lex            monadic-recipe             dyadic-recipe            hof  det eff family mono */
     /* ---- arithmetic / compare glyphs — dyadics all doc-labelled atomic
      * (ref/{add,subtract,multiply,divide,greater-than,less-than,equal,
      * not-equal}.md) ---- */
     /* monadic `+` is flip — a k-ism accepted as a deliberate superset (valid q
      * spells it `flip`, same q_flip_wrap — the `_`/floor precedent).  Family
      * is the dyadic Add; monadic flip is structural (the `flip` row). */
-    { "+",     QLEX_GLYPH,     QR_FN1("flip", q_flip_wrap),    QR_ENV("+"),       NULL, 1, 0, "atomic" },
-    { "-",     QLEX_GLYPH,     QR_FN1A("neg", q_neg_wrap),     QR_ENV("-"),       NULL, 1, 0, "atomic" },
+    { "+",     QLEX_GLYPH,     QR_FN1("flip", q_flip_wrap),    QR_ENV("+"),       NULL, 1, 0, "atomic", "sum" },
+    { "-",     QLEX_GLYPH,     QR_FN1A("neg", q_neg_wrap),     QR_ENV("-"),       NULL, 1, 0, "atomic", NULL },
     /* `*` monadic is first (aggregate — the `first` row); family = dyadic. */
-    { "*",     QLEX_GLYPH,     QR_ENV("first"),                QR_ENV("*"),       NULL, 1, 0, "atomic" },
-    { "%",     QLEX_GLYPH,     QR_NONE,                        QR_ENV("/"),       NULL, 1, 0, "atomic" },
+    { "*",     QLEX_GLYPH,     QR_ENV("first"),                QR_ENV("*"),       NULL, 1, 0, "atomic", "prd" },
+    { "%",     QLEX_GLYPH,     QR_NONE,                        QR_ENV("/"),       NULL, 1, 0, "atomic", NULL },
     /* monadic `<`/`>` are grade up/down (rowid — the iasc/idesc rows); shared
      * wrapper adds the DICT arm (keys in value order); family = dyadic. */
-    { "<",     QLEX_GLYPH,     QR_FN1("iasc", q_iasc_wrap),    QR_ENV("<"),       NULL, 1, 0, "atomic" },
-    { ">",     QLEX_GLYPH,     QR_FN1("idesc", q_idesc_wrap),  QR_ENV(">"),       NULL, 1, 0, "atomic" },
-    { "<=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV("<="),      NULL, 1, 0, "atomic" },
-    { ">=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV(">="),      NULL, 1, 0, "atomic" },
+    { "<",     QLEX_GLYPH,     QR_FN1("iasc", q_iasc_wrap),    QR_ENV("<"),       NULL, 1, 0, "atomic", NULL },
+    { ">",     QLEX_GLYPH,     QR_FN1("idesc", q_idesc_wrap),  QR_ENV(">"),       NULL, 1, 0, "atomic", NULL },
+    { "<=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV("<="),      NULL, 1, 0, "atomic", NULL },
+    { ">=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV(">="),      NULL, 1, 0, "atomic", NULL },
     /* `=` monadic is group (rowid — the `group` row); family = dyadic Equal. */
-    { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic" },
-    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic" },
+    { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic", NULL },
+    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic", NULL },
     /* ---- structural glyphs ---- */
     /* `#` monadic is count (aggregate — the `count` row); family = dyadic
      * Take, the L4 pilot op (`-3#t`).  The arg-swap lives in q_take_wrap. */
-    { "#",     QLEX_GLYPH,     QR_ENV("count"),                QR_FN2("take", q_take_wrap), NULL, 1, 0, "index" },
+    { "#",     QLEX_GLYPH,     QR_ENV("count"),                QR_FN2("take", q_take_wrap), NULL, 1, 0, "index", NULL },
     /* monadic `_` is a K-ism (valid q spells it `floor`, atomic) — accepting
      * it is a deliberate SUPERSET of q source; the VALUE is kdb-identical
      * (kdb's own floor IS k `_:`).  Family = dyadic Drop (L4). */
-    { "_",     QLEX_GLYPH,     QR_FN1A("floor", q_floor_wrap), QR_FN2("drop", q_drop_wrap), NULL, 1, 0, "index" },
+    { "_",     QLEX_GLYPH,     QR_FN1A("floor", q_floor_wrap), QR_FN2("drop", q_drop_wrap), NULL, 1, 0, "index", NULL },
     /* `|` dyadic (max) is a deferred cell (atomic when it lands); family =
      * monadic reverse (L4 — spec §2). */
-    { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_NONE,           NULL, 1, 0, "index" },
+    { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_NONE,           NULL, 1, 0, "index", "max" },
     /* `&` monadic is where (index — the `where` row, a §9 border); family =
      * dyadic Lesser/min (atomic, ref/lesser.md). */
-    { "&",     QLEX_GLYPH,     QR_FN1("where", q_where_wrap),  QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic" },
+    { "&",     QLEX_GLYPH,     QR_FN1("where", q_where_wrap),  QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", "min" },
     /* `,` — enlist / join: both construct structure (table,record-dict is
      * upsert semantics — see q_join_wrap). */
-    { ",",     QLEX_GLYPH,     QR_ENV("enlist"),               QR_FN2("concat", q_join_wrap), NULL, 1, 0, "structural" },
+    { ",",     QLEX_GLYPH,     QR_ENV("enlist"),               QR_FN2("concat", q_join_wrap), NULL, 1, 0, "structural", "raze" },
     /* `~` monadic is not (atomic); family = dyadic Match — reduces to one
      * bool atom (near-border: does NOT follow the L3 value-law; see AUDIT). */
-    { "~",     QLEX_GLYPH,     QR_ENV("not"),                  QR_FN2("match", q_match_wrap), NULL, 1, 0, "aggregate" },
+    { "~",     QLEX_GLYPH,     QR_ENV("not"),                  QR_FN2("match", q_match_wrap), NULL, 1, 0, "aggregate", NULL },
     /* q `x^y` — fill: coalesce nulls in y with x ("Fill is an atomic
      * function", ref/fill.md).  `^` already lexes as a verb glyph
      * (VERB_CHARS); this row gives it a registry value.  Monadic `^x`
      * (kdb: null-of-type / `fills` sans forward-fill) is a deferred cell. */
-    { "^",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic" },
+    { "^",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic", NULL },
     /* ---- type-dispatch glyphs (2c-2) ---- */
     /* monadic `!` (dict keys) is a K-ism accepted as a deliberate superset
      * (valid q spells it `key`, same value — the `_`/floor precedent). */
-    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FN2("dict", q_bang), NULL, 1, 0, "structural" },
+    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FN2("dict", q_bang), NULL, 1, 0, "structural", NULL },
     /* monadic `?` (distinct, rowid — the `distinct` row) is likewise a K-ism
      * superset.  Family = dyadic roll/deal/find (L4 pilot: `-3?t`); the dict
      * entries-axis collision is spec §9.1 (see AUDIT). */
-    { "?",     QLEX_GLYPH,     QR_FN1("distinct", q_distinct_wrap), QR_FN2("rand", q_roll_wrap), NULL, 0, 0, "index" },
+    { "?",     QLEX_GLYPH,     QR_FN1("distinct", q_distinct_wrap), QR_FN2("rand", q_roll_wrap), NULL, 0, 0, "index", NULL },
     /* monadic `$` stays QR_NONE: `$x` is the cast-vs-cond ambiguity, deferred.
      * Dyadic `$` is Cast ("an atomic function", ref/cast.md; kdb float->int
      * ROUNDING; Tok string-parse and unknown designators deferred); the
      * bracket cond form `$[c;t;f]` (3+ args) is a q_lower rewrite onto
      * rayfall `if`, not a registry cell. */
-    { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "atomic" },
+    { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "atomic", NULL },
     /* monadic `@`/`.` stay QR_NONE: `@x` type-of is blocked on the q type
      * renumber; `.x` (value/get) comes with handles/namespaces.  Ternary+
      * Trap/Amend forms are deferred cells (error today via arity).  Family
      * none: Apply/Index ARE the application machinery (spec §5), not lifted. */
-    { "@",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("at", q_at_wrap),    NULL, 1, 0, "none" },
-    { ".",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("apply", q_dot_wrap), NULL, 1, 0, "none" },
+    { "@",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("at", q_at_wrap),    NULL, 1, 0, "none", NULL },
+    { ".",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("apply", q_dot_wrap), NULL, 1, 0, "none", NULL },
     /* ---- keyword-infix ---- */
-    { "div",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("div"),     NULL, 1, 0, "atomic" },
+    { "div",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("div"),     NULL, 1, 0, "atomic", NULL },
     /* q `x mod y` — modulus (ref/mod.md, atomic).  PURE RENAME: rayfall `%` IS
      * floored modulo with the sign following the divisor, exactly kdb mod
      * (audited live: -3 -2 mod 3 -> 0 1; 7 mod -2 -> -1; -7 mod -2.5 -> -2;
      * null passes through) — the mirror trick of q `%` -> rayfall `/`.  Base
      * `%` is registered RAY_FN_ATOMIC, so vector/dict broadcast comes free. */
-    { "mod",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("%"),       NULL, 1, 0, "atomic" },
+    { "mod",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("%"),       NULL, 1, 0, "atomic", NULL },
     /* q `x xexp y` / `x xlog y` — dyadic atomic libm wrappers (ref/exp.md,
      * ref/log.md: both atomic); null/divergence details at the bodies. */
-    { "xexp",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("xexp", q_xexp_wrap), NULL, 1, 0, "atomic" },
-    { "xlog",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("xlog", q_xlog_wrap), NULL, 1, 0, "atomic" },
+    { "xexp",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("xexp", q_xexp_wrap), NULL, 1, 0, "atomic", NULL },
+    { "xlog",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("xlog", q_xlog_wrap), NULL, 1, 0, "atomic", NULL },
     /* q `f each x` == `f'x`: a dyadic wrapper over rayfall map (+ vector
      * collapse, since map returns a boxed list where q wants a simple vec). */
-    { "each",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("map", q_each_wrap), NULL, 1, 0, "none" },
+    { "each",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("map", q_each_wrap), "map", 1, 0, "none", NULL },
     /* q `x in y` — membership (ref/in.md: left-atomic comparison): typed-
      * vector y via base ray_in_fn; generic-list y is whole-item, rank-
      * sensitive.  rowid: needs item equality (set-op predicate). */
-    { "in",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "rowid" },
+    { "in",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "rowid", NULL },
     /* q `and` — keyword spelling of `&` (element-wise min / logical AND,
      * ref/and.md, ref/lesser.md: atomic).  REUSES the SAME q_min2_wrap kernel
      * the glyph `&` routes to — no new logic.  Numeric/bool are kdb-true
@@ -211,71 +211,71 @@ static const q_op_t Q_OPS[] = {
      * new logic).  Monadic cell stays QR_NONE: q `and` is dyadic-only, so
      * prefix `and x` misses and eval falls through to rayfall's scalar `and`
      * special form (DEFERRED edge — a monadic wrapper would be new logic). */
-    { "and",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic" },
+    { "and",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", NULL },
     /* q `x within y` — inclusive bounds check (ref/within.md: "left-uniform",
      * i.e. conforms to x — the atomic law on the left operand); wrapper
      * because base ray_within_fn is vector-vals-only and width-blind. */
-    { "within",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("within", q_within_wrap), NULL, 1, 0, "atomic" },
+    { "within",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("within", q_within_wrap), NULL, 1, 0, "atomic", NULL },
     /* q `n cut x` — chunk (int atom) / positional cut (int vector).  Border
      * ruling: index (see FAMILY AUDIT). */
-    { "cut",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("cut", q_cut_wrap), NULL, 1, 0, "index" },
+    { "cut",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("cut", q_cut_wrap), NULL, 1, 0, "index", NULL },
     /* q `n rotate x` / `n sublist x` — dyadic infix keywords (ref/rotate.md
      * "uniform" / ref/sublist.md) — both pure index-space gathers (L4).
      * Not KW_INFIX -> the scanner would split `n rotate x` into two
      * statements, so the manifest row is what makes them infix; the VALUE is
      * the q.q derivation over `#`/`_` (QR_QSRC: bound post-bootstrap). */
-    { "rotate",QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("rotate"), NULL, 1, 0, "index" },
-    { "sublist",QLEX_KW_INFIX, QR_NONE,                        QR_QSRC("sublist"), NULL, 1, 0, "index" },
+    { "rotate",QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("rotate"), NULL, 1, 0, "index", NULL },
+    { "sublist",QLEX_KW_INFIX, QR_NONE,                        QR_QSRC("sublist"), NULL, 1, 0, "index", NULL },
     /* q `x vs y` / `x sv y` — split-join / base-encode family (dyadic infix
      * keywords; wrappers, native -RAY_STR + sym + base + byte).  Monadic form
      * is out of scope (kdb `vs`/`sv` are strictly dyadic).  Codecs: none. */
-    { "vs",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("vs", q_vs_wrap), NULL, 1, 0, "none" },
-    { "sv",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("sv", q_sv_wrap), NULL, 1, 0, "none" },
+    { "vs",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("vs", q_vs_wrap), NULL, 1, 0, "none", NULL },
+    { "sv",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("sv", q_sv_wrap), NULL, 1, 0, "none", NULL },
     /* ---- set operations (feat/q-setops) — rowid (item identity, spec §3) ---- */
     /* q `x except y` — items of x not in y, x-duplicates and order KEPT
      * (ref/except.md).  rayfall's ray_except_fn is exactly this for lists;
      * the q_except_wrap adds a TABLE-pair arm (row membership) and delegates
      * everything else to ray_except_fn unchanged (was a pure QR_ENV row
      * pre-table-verbs).  Target stays "except" for provenance/serde. */
-    { "except",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("except", q_except_wrap), NULL, 1, 0, "rowid" },
+    { "except",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("except", q_except_wrap), NULL, 1, 0, "rowid", NULL },
     /* q `x union y` == `distinct x,y` — WRAPPER: rayfall union keeps
      * x-duplicates, kdb dedups the whole join (ref/union.md). */
-    { "union", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("union", q_union_wrap), NULL, 1, 0, "rowid" },
+    { "union", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("union", q_union_wrap), NULL, 1, 0, "rowid", NULL },
     /* q `x inter y` — items of x that are in y, x-duplicates and order KEPT
      * (ref/inter.md: "uses the result of x in y to return items from x").
      * rayfall spells it `sect` (ray_sect_fn) and is exactly this for lists;
      * the thin wrapper only guards dict/table operands 'nyi (rayfall sect
      * returns a wrong-shaped dict there; kdb returns common values). */
-    { "inter", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("sect", q_inter_wrap), NULL, 1, 0, "rowid" },
+    { "inter", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("sect", q_inter_wrap), NULL, 1, 0, "rowid", NULL },
     /* q `x cross y` == {raze x,/:\:y} — Cartesian product WRAPPER (no
      * rayfall cartesian primitive; composes item access + q join).  String
      * and dict/table operands are deferred cells (ref/cross.md).  Border
      * ruling: structural (see FAMILY AUDIT). */
-    { "cross", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("cross", q_cross_wrap), NULL, 1, 0, "structural" },
+    { "cross", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("cross", q_cross_wrap), NULL, 1, 0, "structural", NULL },
     /* ---- q join family (feat/q-joins-rebuild) ----
      * Dyadic infix keywords over the engine hash/asof join (pair-relation
      * core in ops/q_join.c: rowid-augmented key tables through
      * ray_left_join_fn / ray_asof_join_fn, kdb-ordered, gather-assembled).
      * Family: structural (schema-defining; border ruling in the AUDIT). */
-    { "lj",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("lj", q_lj_wrap),   NULL, 1, 0, "structural" },
-    { "ljf",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ljf", q_ljf_wrap), NULL, 1, 0, "structural" },
-    { "ij",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ij", q_ij_wrap),   NULL, 1, 0, "structural" },
-    { "ijf",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ijf", q_ijf_wrap), NULL, 1, 0, "structural" },
-    { "uj",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("uj", q_uj_wrap),   NULL, 1, 0, "structural" },
-    { "ujf",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ujf", q_ujf_wrap), NULL, 1, 0, "structural" },
-    { "pj",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("pj", q_pj_wrap),   NULL, 1, 0, "structural" },
-    { "asof",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("asof", q_asof_wrap), NULL, 1, 0, "structural" },
+    { "lj",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("lj", q_lj_wrap),   NULL, 1, 0, "structural", NULL },
+    { "ljf",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ljf", q_ljf_wrap), NULL, 1, 0, "structural", NULL },
+    { "ij",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ij", q_ij_wrap),   NULL, 1, 0, "structural", NULL },
+    { "ijf",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ijf", q_ijf_wrap), NULL, 1, 0, "structural", NULL },
+    { "uj",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("uj", q_uj_wrap),   NULL, 1, 0, "structural", NULL },
+    { "ujf",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ujf", q_ujf_wrap), NULL, 1, 0, "structural", NULL },
+    { "pj",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("pj", q_pj_wrap),   NULL, 1, 0, "structural", NULL },
+    { "asof",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("asof", q_asof_wrap), NULL, 1, 0, "structural", NULL },
     /* Bracket-form joins (ej[c;t1;t2], aj[...], wj[w;f;t;spec]): triadic-plus
      * prefix keywords — q-owned env VARY bindings (q_builtins_register),
      * snapshotted here as QR_ENV rows (the ssr precedent: the parser
      * name-refs `ej[a;b;c]`, so it resolves through the env). */
-    { "ej",    QLEX_KW_PREFIX, QR_ENV("ej"),                   QR_NONE,           NULL, 1, 0, "structural" },
-    { "aj",    QLEX_KW_PREFIX, QR_ENV("aj"),                   QR_NONE,           NULL, 1, 0, "structural" },
-    { "aj0",   QLEX_KW_PREFIX, QR_ENV("aj0"),                  QR_NONE,           NULL, 1, 0, "structural" },
-    { "ajf",   QLEX_KW_PREFIX, QR_ENV("ajf"),                  QR_NONE,           NULL, 1, 0, "structural" },
-    { "ajf0",  QLEX_KW_PREFIX, QR_ENV("ajf0"),                 QR_NONE,           NULL, 1, 0, "structural" },
-    { "wj",    QLEX_KW_PREFIX, QR_ENV("wj"),                   QR_NONE,           NULL, 1, 0, "structural" },
-    { "wj1",   QLEX_KW_PREFIX, QR_ENV("wj1"),                  QR_NONE,           NULL, 1, 0, "structural" },
+    { "ej",    QLEX_KW_PREFIX, QR_ENV("ej"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "aj",    QLEX_KW_PREFIX, QR_ENV("aj"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "aj0",   QLEX_KW_PREFIX, QR_ENV("aj0"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "ajf",   QLEX_KW_PREFIX, QR_ENV("ajf"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "ajf0",  QLEX_KW_PREFIX, QR_ENV("ajf0"),                 QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "wj",    QLEX_KW_PREFIX, QR_ENV("wj"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "wj1",   QLEX_KW_PREFIX, QR_ENV("wj1"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* ---- sort / bucket family (feat/q-sort-rank) — dyadic infix ----
      * `bin`/`binr` reuse rayfall verbatim (same arg order: sorted-vec left,
      * value right; ordering-based search -> rowid).  `xrank` is a q.q
@@ -283,29 +283,29 @@ static const q_op_t Q_OPS[] = {
      * ordering essence puts it in rowid).  `xbar` is an ARG-SWAP wrapper
      * (rayfall xbar is (col,bucket); q spells it (bucket,col)) — "xbar is
      * atomic" (ref/xbar.md).  All infix so `a verb b` is one stmt. */
-    { "bin",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("bin"),     NULL, 1, 0, "rowid" },
-    { "binr",  QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("binr"),    NULL, 1, 0, "rowid" },
-    { "xrank", QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("xrank"),  NULL, 1, 0, "rowid" },
-    { "xbar",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("xbar", q_xbar_wrap), NULL, 1, 0, "atomic" },
+    { "bin",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("bin"),     NULL, 1, 0, "rowid", NULL },
+    { "binr",  QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("binr"),    NULL, 1, 0, "rowid", NULL },
+    { "xrank", QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("xrank"),  NULL, 1, 0, "rowid", NULL },
+    { "xbar",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("xbar", q_xbar_wrap), NULL, 1, 0, "atomic", NULL },
     /* ---- Wave 5: running scans (monadic prefix keywords) — all doc-labelled
      * uniform (ref/{sum,prd,max,min,avg}.md); null discipline at the bodies
      * (ops/q_agg.c).  `ratios` is a border case: its page's LABEL says
      * aggregate, its documented behaviour is uniform (see FAMILY AUDIT). ---- */
-    { "sums",  QLEX_KW_PREFIX, QR_FN1("sums", q_sums_wrap),    QR_NONE,           NULL, 1, 0, "map" },
-    { "prds",  QLEX_KW_PREFIX, QR_FN1("prds", q_prds_wrap),    QR_NONE,           NULL, 1, 0, "map" },
+    { "sums",  QLEX_KW_PREFIX, QR_FN1("sums", q_sums_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "prds",  QLEX_KW_PREFIX, QR_FN1("prds", q_prds_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
     /* q `prd x` — the multiply-over fold twin of prds (ref/prd.md: aggregate):
      * nulls are 1s, bool vector -> int, list-of-lists element-wise, dict/table
      * implicit iteration.  Wrapper (no rayfall product aggregate). */
-    { "prd",   QLEX_KW_PREFIX, QR_FN1("prd", q_prd_wrap),      QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "maxs",  QLEX_KW_PREFIX, QR_FN1("maxs", q_maxs_wrap),    QR_NONE,           NULL, 1, 0, "map" },
-    { "mins",  QLEX_KW_PREFIX, QR_FN1("mins", q_mins_wrap),    QR_NONE,           NULL, 1, 0, "map" },
-    { "avgs",  QLEX_KW_PREFIX, QR_FN1("avgs", q_avgs_wrap),    QR_NONE,           NULL, 1, 0, "map" },
-    { "ratios",QLEX_KW_PREFIX, QR_FN1("ratios", q_ratios_wrap),QR_NONE,           NULL, 1, 0, "map" },
+    { "prd",   QLEX_KW_PREFIX, QR_FN1("prd", q_prd_wrap),      QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "maxs",  QLEX_KW_PREFIX, QR_FN1("maxs", q_maxs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "mins",  QLEX_KW_PREFIX, QR_FN1("mins", q_mins_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "avgs",  QLEX_KW_PREFIX, QR_FN1("avgs", q_avgs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "ratios",QLEX_KW_PREFIX, QR_FN1("ratios", q_ratios_wrap),QR_NONE,           NULL, 1, 0, "map", NULL },
     /* ---- Wave 5: weighted (dyadic infix keywords) — aggregates
      * (ref/sum.md wsum, ref/avg.md wavg).  wsum is q.q-hosted; wavg stays a
      * wrapper (its composition's bool-multiply path measured 16x slower). ---- */
-    { "wsum",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("wsum"),   NULL, 1, 0, "aggregate" },
-    { "wavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("wavg", q_wavg_wrap), NULL, 1, 0, "aggregate" },
+    { "wsum",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("wsum"),   NULL, 1, 0, "aggregate", NULL },
+    { "wavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("wavg", q_wavg_wrap), NULL, 1, 0, "aggregate", NULL },
     /* ---- Wave 5: statistical (renames of audited base aggregates; all
      * doc-labelled aggregate — ref/{med,var,dev,cor,cov}.md) ----
      * kdb `var`/`dev` are POPULATION (÷n); rayfall `var`/`stddev` are SAMPLE
@@ -314,62 +314,62 @@ static const q_op_t Q_OPS[] = {
     /* `med` is self-hosted in q.q (ref/med.md docs formula) — no row; the
      * bootstrap shadow-rebind points root `med` at `.q.med` (the engine env
      * `med` would otherwise win name resolution). */
-    { "var",   QLEX_KW_PREFIX, QR_ENV("var_pop"),              QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "svar",  QLEX_KW_PREFIX, QR_ENV("var"),                  QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "sdev",  QLEX_KW_PREFIX, QR_ENV("stddev"),               QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "cor",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("pearson_corr"), NULL, 1, 0, "aggregate" },
-    { "cov",   QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("cov"),    NULL, 1, 0, "aggregate" },
-    { "scov",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("scov"),   NULL, 1, 0, "aggregate" },
+    { "var",   QLEX_KW_PREFIX, QR_ENV("var_pop"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "svar",  QLEX_KW_PREFIX, QR_ENV("var"),                  QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "sdev",  QLEX_KW_PREFIX, QR_ENV("stddev"),               QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "cor",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("pearson_corr"), NULL, 1, 0, "aggregate", NULL },
+    { "cov",   QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("cov"),    NULL, 1, 0, "aggregate", NULL },
+    { "scov",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("scov"),   NULL, 1, 0, "aggregate", NULL },
     /* ---- Wave 5: sliding m-windows + ema (dyadic infix keywords) — all
      * doc-labelled uniform (ref/{sum,avg,max,min,dev,count,ema}.md) ---- */
-    { "msum",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("msum", q_msum_wrap), NULL, 1, 0, "map" },
-    { "mavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("mavg"),   NULL, 1, 0, "map" },
-    { "mmax",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmax", q_mmax_wrap), NULL, 1, 0, "map" },
-    { "mmin",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmin", q_mmin_wrap), NULL, 1, 0, "map" },
-    { "mcount",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mcount", q_mcount_wrap), NULL, 1, 0, "map" },
-    { "mdev",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mdev", q_mdev_wrap), NULL, 1, 0, "map" },
-    { "ema",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ema", q_ema_wrap), NULL, 1, 0, "map" },
+    { "msum",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("msum", q_msum_wrap), NULL, 1, 0, "map", NULL },
+    { "mavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("mavg"),   NULL, 1, 0, "map", NULL },
+    { "mmax",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmax", q_mmax_wrap), NULL, 1, 0, "map", NULL },
+    { "mmin",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmin", q_mmin_wrap), NULL, 1, 0, "map", NULL },
+    { "mcount",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mcount", q_mcount_wrap), NULL, 1, 0, "map", NULL },
+    { "mdev",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mdev", q_mdev_wrap), NULL, 1, 0, "map", NULL },
+    { "ema",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ema", q_ema_wrap), NULL, 1, 0, "map", NULL },
     /* mmu (matrix multiply / dot product) — bespoke matrix op owning its own
      * shape logic (family none, like @ .); the `$` matmul overload is deferred. */
-    { "mmu",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmu", q_mmu_wrap), NULL, 1, 0, "none" },
+    { "mmu",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmu", q_mmu_wrap), NULL, 1, 0, "none", NULL },
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
      * do/while by f rank; prior is unary each-prior; peach == each. */
-    { "over",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("over", q_over_kw), NULL, 1, 0, "none" },
-    { "scan",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("scan-kw", q_scan_kw), NULL, 1, 0, "none" },
-    { "prior", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("prior", q_prior_kw), NULL, 1, 0, "none" },
-    { "peach", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("peach", q_each_wrap), NULL, 1, 0, "none" },
+    { "over",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("over", q_over_kw), "fold", 1, 0, "none", NULL },
+    { "scan",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("scan-kw", q_scan_kw), "scan", 1, 0, "none", NULL },
+    { "prior", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("prior", q_prior_kw), "prior", 1, 0, "none", NULL },
+    { "peach", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("peach", q_each_wrap), "map", 1, 0, "none", NULL },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
-    { "neg",     QLEX_KW_PREFIX, QR_FN1A("neg", q_neg_wrap),   QR_NONE,           NULL, 1, 0, "atomic" },
+    { "neg",     QLEX_KW_PREFIX, QR_FN1A("neg", q_neg_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
     /* q `til` — generator (atom -> vector; no structure input, family none);
      * kdb accepts a boolean (`til 1b` -> ,0), base ray_til_fn is int-only. */
-    { "til",     QLEX_KW_PREFIX, QR_FN1("til", q_til_wrap),    QR_NONE,           NULL, 1, 0, "none" },
-    { "count",   QLEX_KW_PREFIX, QR_ENV("count"),              QR_NONE,           NULL, 1, 0, "aggregate" },
+    { "til",     QLEX_KW_PREFIX, QR_FN1("til", q_til_wrap),    QR_NONE,           NULL, 1, 0, "none", NULL },
+    { "count",   QLEX_KW_PREFIX, QR_ENV("count"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* first/last — aggregates (ref/first.md: "first is an aggregate"). */
-    { "first",   QLEX_KW_PREFIX, QR_ENV("first"),              QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "last",    QLEX_KW_PREFIX, QR_ENV("last"),               QR_NONE,           NULL, 1, 0, "aggregate" },
+    { "first",   QLEX_KW_PREFIX, QR_ENV("first"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "last",    QLEX_KW_PREFIX, QR_ENV("last"),               QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* q `n xprev x` — n-item shift (ref/next.md: right-uniform), null-filling
      * the vacated end; dyadic infix like rotate.  L4 index: a shift IS a
      * gather by shifted indices (spec §2 lists next/prev/xprev in the index
      * family).  `next`/`prev` are its unit shifts, self-hosted in q.q
      * (`.q.next:xprev[-1;]` / `.q.prev:xprev[1;]`) — no manifest rows. */
-    { "xprev",   QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("xprev", q_xprev_wrap), NULL, 1, 0, "index" },
+    { "xprev",   QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("xprev", q_xprev_wrap), NULL, 1, 0, "index", NULL },
     /* q `fills x` — forward-fill nulls (ref/fill.md: uniform; the `^\`
      * fill-scan).  Computes values (not a gather) -> map. */
-    { "fills",   QLEX_KW_PREFIX, QR_FN1("fills", q_fills_wrap), QR_NONE,          NULL, 1, 0, "map" },
+    { "fills",   QLEX_KW_PREFIX, QR_FN1("fills", q_fills_wrap), QR_NONE,          NULL, 1, 0, "map", NULL },
     /* q `where x` — the L4 index-space generator (border ruling: index —
      * see FAMILY AUDIT); int-vector replicate + bool-mask forms at the body. */
-    { "where",   QLEX_KW_PREFIX, QR_FN1("where", q_where_wrap), QR_NONE,          NULL, 1, 0, "index" },
-    { "reverse", QLEX_KW_PREFIX, QR_ENV("reverse"),            QR_NONE,           NULL, 1, 0, "index" },
+    { "where",   QLEX_KW_PREFIX, QR_FN1("where", q_where_wrap), QR_NONE,          NULL, 1, 0, "index", NULL },
+    { "reverse", QLEX_KW_PREFIX, QR_ENV("reverse"),            QR_NONE,           NULL, 1, 0, "index", NULL },
     /* q `sum` over a boxed LIST sums the items (`sum(dates;times)` ->
      * timestamps, ref/file-text.md); rayfall sum is vector-only, so wrapper.
      * NB the wrapper is deliberately NOT RAY_FN_AGGR — the eval aggregate
      * fast path claims AGGR fns before the wrapper runs and 'types on a boxed
      * list-of-vectors; name-routing (RAY_FN_Q_LOWER + aux "sum") keeps
      * query/DAG behaviour. */
-    { "sum",     QLEX_KW_PREFIX, QR_FN1("sum", q_sum_wrap),    QR_NONE,           NULL, 1, 0, "aggregate" },
+    { "sum",     QLEX_KW_PREFIX, QR_FN1("sum", q_sum_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* group — rowid (item equality; spec §3 lists it; a §9 border flag). */
-    { "group",   QLEX_KW_PREFIX, QR_ENV("group"),              QR_NONE,           NULL, 1, 0, "rowid" },
+    { "group",   QLEX_KW_PREFIX, QR_ENV("group"),              QR_NONE,           NULL, 1, 0, "rowid", NULL },
     /* ---- grade: THE ordering primitive — monadic prefix; rowid (spec §3
      * row-identity, the #174 stable-grade kernel) ----
      * iasc/idesc own ordering for EVERY structure (vector -> ray_iasc_fn; dict
@@ -380,26 +380,26 @@ static const q_op_t Q_OPS[] = {
      * (prefix names resolve via .q); xasc/xdesc/xrank keep infix rows (QR_QSRC).
      * The `s#` attribute stays a divergence: the attr-take arm accepts long
      * vectors only, so asc cannot set it without regressing symbol sorts. */
-    { "iasc",    QLEX_KW_PREFIX, QR_FN1("iasc", q_iasc_wrap),  QR_NONE,           NULL, 1, 0, "rowid" },
-    { "idesc",   QLEX_KW_PREFIX, QR_FN1("idesc", q_idesc_wrap), QR_NONE,          NULL, 1, 0, "rowid" },
-    { "avg",     QLEX_KW_PREFIX, QR_ENV("avg"),                QR_NONE,           NULL, 1, 0, "aggregate" },
+    { "iasc",    QLEX_KW_PREFIX, QR_FN1("iasc", q_iasc_wrap),  QR_NONE,           NULL, 1, 0, "rowid", NULL },
+    { "idesc",   QLEX_KW_PREFIX, QR_FN1("idesc", q_idesc_wrap), QR_NONE,          NULL, 1, 0, "rowid", NULL },
+    { "avg",     QLEX_KW_PREFIX, QR_ENV("avg"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* q `floor` returns LONGS from floats (kdb `floor 3.7` is 3j); rayfall's
      * env floor keeps f64, so this is the q_floor_wrap, not a rename. */
-    { "floor",   QLEX_KW_PREFIX, QR_FN1A("floor", q_floor_wrap), QR_NONE,         NULL, 1, 0, "atomic" },
+    { "floor",   QLEX_KW_PREFIX, QR_FN1A("floor", q_floor_wrap), QR_NONE,         NULL, 1, 0, "atomic", NULL },
     /* q dict accessors: `key`/`value` are wrappers (dict-only in 2c-2 —
      * the file-handle/namespace/enumeration overloads are deferred cells);
      * `distinct` must preserve FIRST-OCCURRENCE order (kdb ref/distinct.md),
      * while rayfall's distinct routes typed vectors through the DAG group
      * path, which sorts — so it too is a wrapper, not a rename (audited:
      * `distinct 2 3 7 3 5 3` must be 2 3 7 5, env distinct gives 2 3 5 7). */
-    { "key",     QLEX_KW_PREFIX, QR_FN1("key", q_key_wrap),    QR_NONE,           NULL, 1, 0, "structural" },
-    { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_value_wrap), QR_NONE,          NULL, 1, 0, "structural" },
+    { "key",     QLEX_KW_PREFIX, QR_FN1("key", q_key_wrap),    QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
     /* q `get` is a SYNONYM of `value` (ref/get.md: "completely interchangeable")
      * — same q_value_wrap, one home.  `nam set y` writes the named global
      * (sym-handle assign / `. context restore); file forms are 'nyi cells. */
-    { "get",     QLEX_KW_PREFIX, QR_FN1("value", q_value_wrap), QR_NONE,          NULL, 1, 0, "structural" },
-    { "set",     QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("set-g", q_setg_wrap), NULL, 1, 1, "none" },
-    { "distinct",QLEX_KW_PREFIX, QR_FN1("distinct", q_distinct_wrap), QR_NONE,    NULL, 1, 0, "rowid" },
+    { "get",     QLEX_KW_PREFIX, QR_FN1("value", q_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
+    { "set",     QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("set-g", q_setg_wrap), NULL, 1, 1, "none", NULL },
+    { "distinct",QLEX_KW_PREFIX, QR_FN1("distinct", q_distinct_wrap), QR_NONE,    NULL, 1, 0, "rowid", NULL },
     /* q `rand x` == {first 1?x} — self-hosted in q.q verbatim from ref/rand.md;
      * no row.  The bootstrap shadow-rebind points root `rand` at `.q.rand`
      * (rayfall's env `rand` is dyadic and would otherwise win name
@@ -409,9 +409,9 @@ static const q_op_t Q_OPS[] = {
      * string is atomic (ref/string.md: "atomic … iterates through
      * dictionaries and tables"); upper/lower likewise elementwise.  Atomic
      * here is at STRING granularity (see the FAMILY AUDIT caveat). */
-    { "string",  QLEX_KW_PREFIX, QR_ENV("string"),             QR_NONE,           NULL, 1, 0, "atomic" },
-    { "upper",   QLEX_KW_PREFIX, QR_ENV("upper"),              QR_NONE,           NULL, 1, 0, "atomic" },
-    { "lower",   QLEX_KW_PREFIX, QR_ENV("lower"),              QR_NONE,           NULL, 1, 0, "atomic" },
+    { "string",  QLEX_KW_PREFIX, QR_ENV("string"),             QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "upper",   QLEX_KW_PREFIX, QR_ENV("upper"),              QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "lower",   QLEX_KW_PREFIX, QR_ENV("lower"),              QR_NONE,           NULL, 1, 0, "atomic", NULL },
     /* ---- string trim / hash / search family (feat/q-string-fns) ----
      * trim/ltrim/rtrim are q-owned env unaries (q_builtins_register),
      * snapshotted here as QR_ENV prefix rows (same mechanism as `string`).
@@ -421,49 +421,49 @@ static const q_op_t Q_OPS[] = {
      * NO row: it is `.q.md5:(-15!)` in q.q (reserved via the dynamic `.q`
      * probe), the C body q_md5_fn reached through the `!` internal-fn arm.
      * `like`/`ss` are dyadic infix; `ssr` is a triadic-prefix wrapper. */
-    { "trim",    QLEX_KW_PREFIX, QR_ENV("trim"),               QR_NONE,           NULL, 1, 0, "atomic" },
-    { "ltrim",   QLEX_KW_PREFIX, QR_ENV("ltrim"),              QR_NONE,           NULL, 1, 0, "atomic" },
-    { "rtrim",   QLEX_KW_PREFIX, QR_ENV("rtrim"),              QR_NONE,           NULL, 1, 0, "atomic" },
-    { "like",    QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("like", q_like_wrap), NULL, 1, 0, "atomic" },
-    { "ss",      QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("ss", q_ss_wrap), NULL, 1, 0, "none" },
-    { "ssr",     QLEX_KW_PREFIX, QR_ENV("ssr"),                QR_NONE,           NULL, 1, 0, "none" },
-    { "show",    QLEX_KW_PREFIX, QR_ENV("show"),               QR_NONE,           NULL, 1, 1, "none" },
+    { "trim",    QLEX_KW_PREFIX, QR_ENV("trim"),               QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "ltrim",   QLEX_KW_PREFIX, QR_ENV("ltrim"),              QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "rtrim",   QLEX_KW_PREFIX, QR_ENV("rtrim"),              QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "like",    QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("like", q_like_wrap), NULL, 1, 0, "atomic", NULL },
+    { "ss",      QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("ss", q_ss_wrap), NULL, 1, 0, "none", NULL },
+    { "ssr",     QLEX_KW_PREFIX, QR_ENV("ssr"),                QR_NONE,           NULL, 1, 0, "none", NULL },
+    { "show",    QLEX_KW_PREFIX, QR_ENV("show"),               QR_NONE,           NULL, 1, 1, "none", NULL },
     /* `system "…"` — q-owned env unary (q_builtins_register), snapshotted here
      * so the parser embeds it; passes through q_sys_run (q_sys.c). */
-    { "system",  QLEX_KW_PREFIX, QR_ENV("system"),             QR_NONE,           NULL, 1, 1, "none" },
+    { "system",  QLEX_KW_PREFIX, QR_ENV("system"),             QR_NONE,           NULL, 1, 1, "none", NULL },
     /* `exit x` — process termination via q_sys_exit (q_sys.c: `.z.exit`, then
      * exit(x); capability-gated so doctest/wasm runtimes survive it). */
-    { "exit",    QLEX_KW_PREFIX, QR_FN1("exit", q_exit_wrap), QR_NONE,           NULL, 1, 1, "none" },
+    { "exit",    QLEX_KW_PREFIX, QR_FN1("exit", q_exit_wrap), QR_NONE,           NULL, 1, 1, "none", NULL },
     /* table introspection — q-owned bindings (q_builtins_register), snapshotted
      * here so the parser embeds them over the base env `meta`. */
-    { "meta",    QLEX_KW_PREFIX, QR_ENV("meta"),               QR_NONE,           NULL, 1, 0, "structural" },
-    { "cols",    QLEX_KW_PREFIX, QR_ENV("cols"),               QR_NONE,           NULL, 1, 0, "structural" },
+    { "meta",    QLEX_KW_PREFIX, QR_ENV("meta"),               QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "cols",    QLEX_KW_PREFIX, QR_ENV("cols"),               QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* q `attr x` — column attribute as a single symbol (ref/set-attribute.md,
      * ref/attr.md).  Monadic wrapper over the engine's `.attr.get`, collapsing
      * the full-name sym vector to kdb's one letter.  The set/clear side is the
      * `#` verb's symbol-atom arm (q_take_wrap), not a row here. */
-    { "attr",    QLEX_KW_PREFIX, QR_FN1("attr", q_attr_wrap),  QR_NONE,           NULL, 1, 0, "structural" },
+    { "attr",    QLEX_KW_PREFIX, QR_FN1("attr", q_attr_wrap),  QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* ---- additional monadic pass-through keywords (rayfall name == q name,
      * audited kdb-true element-wise / aggregate semantics; atomic labels per
      * ref/{abs,exp,log,sqrt,null}.md, aggregate per ref/{dev,max,min}.md). See
      * docs/recipes/add-q-keyword-verb.md. ---- */
-    { "abs",     QLEX_KW_PREFIX, QR_ENV("abs"),                QR_NONE,           NULL, 1, 0, "atomic" },
+    { "abs",     QLEX_KW_PREFIX, QR_ENV("abs"),                QR_NONE,           NULL, 1, 0, "atomic", NULL },
     /* q `null x` — elementwise null test (ref/null.md: atomic).  Routes to
      * the engine's atomic `nil?` (RAY_FN_ATOMIC): broadcasts over vectors and
      * nested lists at every depth.  The wrapper collapses a homogeneous
      * top-level bool-atom run (heterogeneous input list) to a bool vector
      * for kdb-true display. */
-    { "null",    QLEX_KW_PREFIX, QR_FN1("nil?", q_null_wrap),  QR_NONE,           NULL, 1, 0, "atomic" },
-    { "dev",     QLEX_KW_PREFIX, QR_ENV("dev"),                QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "exp",     QLEX_KW_PREFIX, QR_ENV("exp"),                QR_NONE,           NULL, 1, 0, "atomic" },
-    { "log",     QLEX_KW_PREFIX, QR_ENV("log"),                QR_NONE,           NULL, 1, 0, "atomic" },
-    { "max",     QLEX_KW_PREFIX, QR_ENV("max"),                QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "min",     QLEX_KW_PREFIX, QR_ENV("min"),                QR_NONE,           NULL, 1, 0, "aggregate" },
+    { "null",    QLEX_KW_PREFIX, QR_FN1("nil?", q_null_wrap),  QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "dev",     QLEX_KW_PREFIX, QR_ENV("dev"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "exp",     QLEX_KW_PREFIX, QR_ENV("exp"),                QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "log",     QLEX_KW_PREFIX, QR_ENV("log"),                QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "max",     QLEX_KW_PREFIX, QR_ENV("max"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "min",     QLEX_KW_PREFIX, QR_ENV("min"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* rank == iasc iasc (ref/rank.md) — the grade family, rowid. */
     /* q `raze x` — flattens one level of structure (ref/raze.md; base
      * ray_raze_fn plus the kdb atom arm `raze 42` -> ,42). */
-    { "raze",    QLEX_KW_PREFIX, QR_FN1("raze", q_raze_wrap),  QR_NONE,           NULL, 1, 0, "structural" },
-    { "sqrt",    QLEX_KW_PREFIX, QR_ENV("sqrt"),               QR_NONE,           NULL, 1, 0, "atomic" },
+    { "raze",    QLEX_KW_PREFIX, QR_FN1("raze", q_raze_wrap),  QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "sqrt",    QLEX_KW_PREFIX, QR_ENV("sqrt"),               QR_NONE,           NULL, 1, 0, "atomic", NULL },
     /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm, no
      * rayfall counterpart (rayfall has exp/log/sqrt but not the trig set).
      * All monadic KW_PREFIX, doc-labelled atomic (ref/{trig,
@@ -472,15 +472,15 @@ static const q_op_t Q_OPS[] = {
      * NOT rayfall `ceil` (f64).  `signum` is family-atomic but built WITHOUT
      * RAY_FN_ATOMIC — it drives its own broadcast so a top-level boxed-list
      * result collapses to an int vector (see q_signum_wrap). */
-    { "sin",       QLEX_KW_PREFIX, QR_FN1A("sin", q_sin_wrap),   QR_NONE, NULL, 1, 0, "atomic" },
-    { "cos",       QLEX_KW_PREFIX, QR_FN1A("cos", q_cos_wrap),   QR_NONE, NULL, 1, 0, "atomic" },
-    { "tan",       QLEX_KW_PREFIX, QR_FN1A("tan", q_tan_wrap),   QR_NONE, NULL, 1, 0, "atomic" },
-    { "asin",      QLEX_KW_PREFIX, QR_FN1A("asin", q_asin_wrap), QR_NONE, NULL, 1, 0, "atomic" },
-    { "acos",      QLEX_KW_PREFIX, QR_FN1A("acos", q_acos_wrap), QR_NONE, NULL, 1, 0, "atomic" },
-    { "atan",      QLEX_KW_PREFIX, QR_FN1A("atan", q_atan_wrap), QR_NONE, NULL, 1, 0, "atomic" },
+    { "sin",       QLEX_KW_PREFIX, QR_FN1A("sin", q_sin_wrap),   QR_NONE, NULL, 1, 0, "atomic", NULL },
+    { "cos",       QLEX_KW_PREFIX, QR_FN1A("cos", q_cos_wrap),   QR_NONE, NULL, 1, 0, "atomic", NULL },
+    { "tan",       QLEX_KW_PREFIX, QR_FN1A("tan", q_tan_wrap),   QR_NONE, NULL, 1, 0, "atomic", NULL },
+    { "asin",      QLEX_KW_PREFIX, QR_FN1A("asin", q_asin_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
+    { "acos",      QLEX_KW_PREFIX, QR_FN1A("acos", q_acos_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
+    { "atan",      QLEX_KW_PREFIX, QR_FN1A("atan", q_atan_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
     /* `reciprocal` is self-hosted in q.q (`.q.reciprocal:%[1;]`) — no row. */
-    { "signum",    QLEX_KW_PREFIX, QR_FN1("signum", q_signum_wrap), QR_NONE, NULL, 1, 0, "atomic" },
-    { "ceiling",   QLEX_KW_PREFIX, QR_FN1A("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic" },
+    { "signum",    QLEX_KW_PREFIX, QR_FN1("signum", q_signum_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
+    { "ceiling",   QLEX_KW_PREFIX, QR_FN1A("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
     /* ---- table verbs (feat/q-table-verbs) — all wrappers in ops/q_table.c
      * EXCEPT xcol/xcols, which are q.q derivations over `.Q.ft` (QR_QSRC:
      * bound post-bootstrap; the row is only what keeps them infix).
@@ -493,17 +493,17 @@ static const q_op_t Q_OPS[] = {
      * rearrange the structures (structural, spec §3); xasc/xdesc sort (rowid —
      * q.q derivations grading the named columns, then ONE row gather);
      * xgroup groups (rowid — border ruling in the AUDIT). */
-    { "flip",   QLEX_KW_PREFIX, QR_FN1("flip", q_flip_wrap),   QR_NONE,           NULL, 1, 0, "structural" },
-    { "keys",   QLEX_KW_PREFIX, QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 1, 0, "structural" },
-    { "ungroup",QLEX_KW_PREFIX, QR_FN1("ungroup", q_ungroup_wrap), QR_NONE,       NULL, 1, 0, "structural" },
-    { "xkey",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xkey", q_xkey_wrap), NULL, 1, 0, "structural" },
-    { "xcol",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcol"),   NULL, 1, 0, "structural" },
-    { "xcols",  QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcols"),  NULL, 1, 0, "structural" },
-    { "xasc",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xasc"),   NULL, 1, 0, "rowid" },
-    { "xdesc",  QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xdesc"),  NULL, 1, 0, "rowid" },
-    { "xgroup", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid" },
-    { "insert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 1, 1, "structural" },
-    { "upsert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("upsert", q_upsert_wrap), NULL, 1, 1, "structural" },
+    { "flip",   QLEX_KW_PREFIX, QR_FN1("flip", q_flip_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "keys",   QLEX_KW_PREFIX, QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "ungroup",QLEX_KW_PREFIX, QR_FN1("ungroup", q_ungroup_wrap), QR_NONE,       NULL, 1, 0, "structural", NULL },
+    { "xkey",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xkey", q_xkey_wrap), NULL, 1, 0, "structural", NULL },
+    { "xcol",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcol"),   NULL, 1, 0, "structural", NULL },
+    { "xcols",  QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcols"),  NULL, 1, 0, "structural", NULL },
+    { "xasc",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xasc"),   NULL, 1, 0, "rowid", NULL },
+    { "xdesc",  QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xdesc"),  NULL, 1, 0, "rowid", NULL },
+    { "xgroup", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid", NULL },
+    { "insert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 1, 1, "structural", NULL },
+    { "upsert", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("upsert", q_upsert_wrap), NULL, 1, 1, "structural", NULL },
     /* each-prior mnemonics `deltas` ((-':)x) and `differ` (not(~':)x) are
      * self-hosted in q.q — no rows (both ride the each-prior HOF the C
      * wrappers called anyway; measured parity). */
@@ -513,8 +513,8 @@ static const q_op_t Q_OPS[] = {
      * reserved and fix the lexical class; the VALUE comes from `.q`.
      * NB: `or` is the keyword spelling of `|`-max and still waits for `|`-max
      * (a valueless QLEX_KW_INFIX row would expose rayfall's scalar `or`). */
-    { "any",     QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate" },
-    { "all",     QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate" },
+    { "any",     QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "all",     QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* ---- IPC client verbs (feat/q-ipc-client, Phase D) — thin wrappers over the
      * kdb-speaking `.ipc.*` primitives (Phase C).  `hopen` normalizes int|string|
      * (conn;timeout) into the `.ipc.open` string API and returns the connection's
@@ -522,8 +522,8 @@ static const q_op_t Q_OPS[] = {
      * `hclose` translates it back and routes to `.ipc.close`.  The sync/async send
      * verb `h"query"` is handle-as-verb application (q_apply.c int-head arm), not a
      * manifest row.  Both are monadic prefix keywords (KW_PREFIX). ---- */
-    { "hopen",  QLEX_KW_PREFIX, QR_FN1("hopen", q_hopen_wrap),   QR_NONE, NULL, 1, 1, "none" },
-    { "hclose", QLEX_KW_PREFIX, QR_FN1("hclose", q_hclose_wrap), QR_NONE, NULL, 1, 1, "none" },
+    { "hopen",  QLEX_KW_PREFIX, QR_FN1("hopen", q_hopen_wrap),   QR_NONE, NULL, 1, 1, "none", NULL },
+    { "hclose", QLEX_KW_PREFIX, QR_FN1("hclose", q_hclose_wrap), QR_NONE, NULL, 1, 1, "none", NULL },
     /* ---- File Text (feat/q-file-text) — the `0:` operator + companions.
      * `0:` is tokenized by the scanner's digit-colon arm (a single 0/1/2
      * glued to ':' can never start a clock literal) and dispatches on the
@@ -533,11 +533,11 @@ static const q_op_t Q_OPS[] = {
      * name-refs ('name)).  `read0` is also env-bound by q_builtins for the
      * bracket-call form (the ssr/value precedent).  `hsym` is elementwise
      * over sym atoms/vectors (ref/hsym.md: atom or vector). */
-    { "0:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-text", q_filetext_wrap), NULL, 1, 1, "none" },
-    { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic" },
-    { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none" },
-    { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none" },
-    { "hdel",   QLEX_KW_PREFIX, QR_FN1("hdel", q_hdel_wrap),   QR_NONE,           NULL, 1, 1, "none" },
+    { "0:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-text", q_filetext_wrap), NULL, 1, 1, "none", NULL },
+    { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none", NULL },
+    { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL },
+    { "hdel",   QLEX_KW_PREFIX, QR_FN1("hdel", q_hdel_wrap),   QR_NONE,           NULL, 1, 1, "none", NULL },
     /* ---- environment variables (feat/q-getenv-setenv, ref/getenv.md) ----
      * `getenv` is a monadic prefix keyword (sym -> value string, "" unset);
      * `setenv` is a dyadic infix keyword (`sym setenv str`), so it MUST be
@@ -546,20 +546,20 @@ static const q_op_t Q_OPS[] = {
      * C primitives (ray_getenv_fn/ray_setenv_fn) via wrappers that coerce the
      * q symbol arg to the -RAY_STR the C wants — a real divergence, so QR_FN
      * wrappers, not QR_ENV renames. */
-    { "getenv", QLEX_KW_PREFIX, QR_FN1("getenv", q_getenv_wrap), QR_NONE,         NULL, 1, 0, "none" },
-    { "setenv", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("setenv", q_setenv_wrap), NULL, 1, 1, "none" },
+    { "getenv", QLEX_KW_PREFIX, QR_FN1("getenv", q_getenv_wrap), QR_NONE,         NULL, 1, 0, "none", NULL },
+    { "setenv", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("setenv", q_setenv_wrap), NULL, 1, 1, "none", NULL },
     /* ---- adverbs — q adverbs ARE rayfall higher-order fns (no bespoke object).
      * `+/` lowers to fold over `+` (q_lower); `/:`/`\:` ARE map-right/map-left
      * (src/ops/collection.c:2279 — map-left iterates LEFT holding right =
      * q each-left, verified against examples/rfl).  Each-prior `':` still has
      * no rayfall counterpart (the scan-* variants are fold-style, not
      * pairwise) — DEFERRED, still lexer-classified. ---- */
-    { "'",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map",       1, 0, "none" },
-    { "/",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "fold",      1, 0, "none" },
-    { "\\",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "scan",      1, 0, "none" },
-    { "':",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  NULL,        1, 0, "none" },
-    { "/:",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-right", 1, 0, "none" },
-    { "\\:",   QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-left",  1, 0, "none" },
+    { "'",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map",       1, 0, "none", NULL },
+    { "/",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "fold",      1, 0, "none", NULL },
+    { "\\",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "scan",      1, 0, "none", NULL },
+    { "':",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  NULL,        1, 0, "none", NULL },
+    { "/:",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-right", 1, 0, "none", NULL },
+    { "\\:",   QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-left",  1, 0, "none", NULL },
 };
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
 

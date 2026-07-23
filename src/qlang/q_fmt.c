@@ -6,6 +6,7 @@
 #include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
 #include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_carrier_fmt — RAY_QFN display */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
 #include "ops/ops.h"     /* ray_is_lazy/materialize — pipe renderer solidify */
@@ -1170,6 +1171,15 @@ static void q_fmt_body(ray_t* val) {
     /* generic null prints `::` (top-level silence is the CALLER's rule) */
     if (RAY_IS_NULL(val)) {
         qe_puts("::");
+        return;
+    }
+
+    /* fresh-evaluator RAY_QFN carrier: lambda source / F+adverb / proj */
+    if (val->type == RAY_QFN) {
+        char cb[512];
+        cb[0] = '\0';
+        if (q_eval_apply_carrier_fmt(val, cb, sizeof cb))
+            qe_puts(cb);
         return;
     }
 
