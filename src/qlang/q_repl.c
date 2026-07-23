@@ -11,14 +11,13 @@
 
 #include "qlang/q_repl.h"
 #include "qlang/q_parse.h"
-#include "qlang/eval/q_eval.h"   /* Q_EVAL=fresh dual-runtime switch */
+#include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/q_ns.h"       /* q_ns_prompt — namespaces */
-#include "qlang/q_sys.h"      /* q_sys_is_cmd / q_sys_line — `\`-command glue */
+#include "qlang/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
-#include "lang/eval.h"      /* ray_eval */
+#include "lang/eval.h"      /* ray_eval_is_interrupted */
 #include "lang/env.h"       /* ray_env_has_name — live env-derived name highlight */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
@@ -278,22 +277,9 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
         return;
     }
 
-    int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
-    ray_t* r;
-    if (q_eval_fresh_enabled()) {                 /* Q_EVAL=fresh: no q_lower */
-        r = q_eval(ast);
-        ray_release(ast);
-    } else {
-        ast = q_lower(ast);
-        if (RAY_IS_ERR(ast)) {
-            const char* code = (const char*)ast->sdata;
-            fprintf(err, "error: %s\n", (code && *code) ? code : "lower");
-            ray_release(ast);
-            return;
-        }
-        r = ray_eval(ast);
-        ray_release(ast);
-    }
+    int is_assign = q_parse_is_assign(ast);
+    ray_t* r = q_eval(ast);
+    ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
 
@@ -431,7 +417,7 @@ static void repl_interactive(FILE* out, FILE* err) {
         /* `\d` may have switched context: refresh the prompt (q.foo). */
         {
             char prompt[80];
-            int pl = q_ns_prompt(prompt, sizeof prompt);
+            int pl = q_sys_prompt(prompt, sizeof prompt);
             ray_term_set_prompt(t, prompt, pl);
         }
         ray_term_begin(t);
@@ -570,7 +556,7 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
     /* `\d` may have switched context: refresh the prompt (q.foo). */
     {
         char prompt[80];
-        int  pl = q_ns_prompt(prompt, sizeof prompt);
+        int  pl = q_sys_prompt(prompt, sizeof prompt);
         ray_term_set_prompt(c->term, prompt, pl);
     }
     ray_term_begin(c->term);
@@ -581,7 +567,7 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
 
 static void pipe_prompt(q_poll_repl_t* c) {
     char prompt[80];
-    q_ns_prompt(prompt, sizeof prompt);
+    q_sys_prompt(prompt, sizeof prompt);
     fputs(prompt, c->out);
     fflush(c->out);
 }
@@ -744,7 +730,7 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
 
     for (;;) {
         char prompt[80];
-        q_ns_prompt(prompt, sizeof prompt);
+        q_sys_prompt(prompt, sizeof prompt);
         fputs(prompt, out);
         fflush(out);
 

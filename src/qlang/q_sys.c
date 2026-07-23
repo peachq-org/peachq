@@ -4,18 +4,17 @@
  * each case calling its handler with only the arguments it needs.  A handler
  * returns an OWNED value (NULL = silent) or an OWNED error — including `\\`
  * (q_sys_exit) and the unknown-token shell miss, both gated by the g_own_process
- * capability rather than by the caller.  \d and \v/\f/\a lean on q_ns.c
- * (context state + member enumeration); \S owns its seed state here. */
+ * capability rather than by the caller.  \d owns the current-context state
+ * here; \S owns its seed state here. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_sys.h"
-#include "qlang/q_ns.h"       /* q_ns_current / q_ns_switch / q_ns_list */
+#include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
-#include "qlang/q_parse.h"    /* q_parse / q_lower — `\t expr` / `\ts expr` timing */
-#include "qlang/q_apply.h"    /* q_dot_wrap — `.` apply for `\ts expr` and `-34!`/.Q.ts */
+#include "qlang/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
@@ -53,6 +52,53 @@
  * gc trigger is a no-op stub returning 0 — `\g` reports the mode; real
  * collection is deferred (rule 9). */
 ray_t* ray_gc_fn(ray_t** args, int64_t n);
+
+/* ---- `\d` current-context POINTER + prompt (nothing more) ----------------
+ * Dotted-name storage/resolution is the engine's env dicts, independent of
+ * this state; `\d` today changes only the prompt and the `\d` getter —
+ * qualifying UNQUALIFIED name resolution/assignment against the current
+ * context is a recorded rebuild-wave gap (scoping wave). */
+static char g_ctx[64];
+
+void q_sys_ctx_reset(void) { g_ctx[0] = '\0'; }
+
+const char* q_sys_ctx_current(void) { return g_ctx; }
+
+int q_sys_prompt(char* buf, size_t cap) {
+    int n = snprintf(buf, cap, "q%s)", g_ctx);
+    return (n < 0 || (size_t)n >= cap) ? 0 : n;
+}
+
+static int ctx_ident_ok(const char* p, size_t len) {
+    if (len == 0) return 0;
+    if (!((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')))
+        return 0;
+    for (size_t i = 1; i < len; i++) {
+        char c = p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 1;
+}
+
+static ray_t* ctx_switch(const char* name, size_t len) {
+    if (len == 1 && name[0] == '.') {          /* `\d .` — back to root */
+        g_ctx[0] = '\0';
+        return NULL;
+    }
+    /* One level below root only (kdb limitation, q4m3 §12.7): `.ident`. */
+    if (len >= 2 && len < sizeof g_ctx && name[0] == '.' &&
+        ctx_ident_ok(name + 1, len - 1)) {
+        memcpy(g_ctx, name, len);
+        g_ctx[len] = '\0';
+        return NULL;
+    }
+    /* kdb signals the offending name itself: `\d .jab.util` -> '.jab.util */
+    char cls[64];
+    snprintf(cls, sizeof cls, "%.*s", (int)(len < 63 ? len : 63), name);
+    return ray_error(cls, NULL);
+}
 
 /* ---- `\S` random-seed state (moved from q_ns.c; \S is its only consumer) ----
  * The rand() stream CONTRACT (constant default seed, one stream, the guid
@@ -182,14 +228,14 @@ static ray_t* pair_i64(int64_t a, int64_t b) {
 
 static ray_t* h_d(const char* arg, size_t alen) {
     if (alen == 0) {                             /* `\d` — show current */
-        const char* c = q_ns_current();
+        const char* c = q_sys_ctx_current();
         ray_t* s = (*c) ? ray_sym(ray_sym_intern(c, strlen(c)))
                         : ray_sym(ray_sym_intern(".", 1));
         /* DATA sym, not a name-ref: keeps its backtick in q_fmt (`.) */
         if (s && !RAY_IS_ERR(s)) s->attrs |= 0x20; /* Q_ATTR_QUOTED */
         return s;
     }
-    return q_ns_switch(arg, alen);               /* NULL (silent) or error */
+    return ctx_switch(arg, alen);                /* NULL (silent) or error */
 }
 
 static ray_t* h_S(const char* arg, size_t alen) {
@@ -412,14 +458,14 @@ static ray_t* h_l(const char* arg, size_t alen) {
 
 /* ---- expression timing (`\t expr`, `\t:n`, `\ts expr`, `\ts:n`) ------------
  * Time a q expression string by running it through the SAME pipeline the REPL
- * uses (q_parse → q_lower → ray_eval), `reps` times, discarding each result.
- * On success fills *ms with the TOTAL wall-clock milliseconds and *bytes with
- * the space metric, then returns NULL; a parse/lower/eval error returns the
- * OWNED error instead (ms/bytes then meaningless).  The `:n` repetition form is kdb's
- * `do[n; e]` — execution repeated, so we parse+lower ONCE and re-evaluate the
- * lowered tree (ray_eval is read-only on the AST; re-running it re-runs the
- * program, assignments and all).  Runtime dispatch is allowed to parse here —
- * the rule-6 prohibition is on registry BUILDERS, not a warm-registry handler.
+ * uses (q_parse → q_eval), `reps` times, discarding each result.  On success
+ * fills *ms with the TOTAL wall-clock milliseconds and *bytes with the space
+ * metric, then returns NULL; a parse/eval error returns the OWNED error
+ * instead (ms/bytes then meaningless).  The `:n` repetition form is kdb's
+ * `do[n; e]` — execution repeated, so we parse ONCE and re-evaluate the tree
+ * (q_eval is read-only on the AST; re-running it re-runs the program,
+ * assignments and all).  Runtime dispatch is allowed to parse here — the
+ * rule-6 prohibition is on registry BUILDERS, not a warm-registry handler.
  *
  * SPACE METRIC — DIVERGES FROM kdb (owner ruling 2026-07-14, best-effort):
  * kdb's `\ts` reports the PEAK transient workspace a computation touches; openq
@@ -460,8 +506,6 @@ static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
     ray_t* ast = q_parse(s);                             /* strips a trailing /comment */
     if (blk) ray_free(blk);
     if (RAY_IS_ERR(ast)) return ast;
-    ast = q_lower(ast);
-    if (RAY_IS_ERR(ast)) return ast;
 
     tsmeas_t m;
     ts_begin(&m);
@@ -469,7 +513,7 @@ static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
     ray_t*  err = NULL;
     for (int64_t k = 0; k < reps; k++) {
         if (r) { ray_release(r); r = NULL; }             /* keep only the last result */
-        r = ray_eval(ast);
+        r = q_eval(ast);
         if (ray_is_lazy(r)) r = ray_lazy_materialize(r);
         if (r && RAY_IS_ERR(r)) { err = r; r = NULL; break; }
     }
@@ -488,7 +532,7 @@ ray_t* q_sys_ts_apply(ray_t* f, ray_t* args) {
     int64_t  bytes;
     tsmeas_t m;
     ts_begin(&m);
-    ray_t* r = q_dot_wrap(fa, 2);
+    ray_t* r = q_eval_dot_wrap(fa, 2);
     if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
     ts_end(&m, &ms, &bytes);                             /* result still live */
     if (!r) return ray_error("type", NULL);
@@ -921,9 +965,12 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
     if (cmd_len == 1) {
         switch (cmd[0]) {
             case 'd': return h_d(arg, alen);
-            case 'v': return q_ns_list('v', arg, alen);          /* namespace vars      */
-            case 'f': return q_ns_list('f', arg, alen);          /* namespace functions */
-            case 'a': return q_ns_list('a', arg, alen);          /* namespace tables    */
+            case 'v':                                            /* namespace vars      */
+            case 'f':                                            /* namespace functions */
+            case 'a': return ray_error("nyi", NULL);             /* namespace tables —
+                                                                  * member enumeration
+                                                                  * re-lands with the
+                                                                  * scoping wave */
             case 'S': return h_S(arg, alen);                     /* random seed         */
             case 'P': return h_P(arg, alen);                     /* display precision   */
             case 'c': return h_c(rest, restlen);                 /* console size        */

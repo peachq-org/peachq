@@ -3,7 +3,8 @@
  * privileged binder — pq members live in the USER `.pq` namespace. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_pq.h"
-#include "qlang/q_parse.h"     /* q_parse, q_lower — the q eval pipeline */
+#include "qlang/q_parse.h"     /* q_parse — the q eval pipeline */
+#include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */
 #include "qlang/pq_gen.h"      /* OPENQ_PQ_BOOTSTRAP — codegen'd from src/qlang/pq.q */
 #include "lang/env.h"          /* ray_fn_unary, ray_env_bind, ray_sym_intern */
 #include "lang/eval.h"         /* ray_eval, ray_eval_str, RAY_FN_NONE */
@@ -45,7 +46,7 @@ static ray_t* pq_ray_fn(ray_t* x) {
                  * (the q apply layer treats NULL as a legitimate void result) */
 }
 
-/* (.pq.c.parse str) — the RAW pre-lower AST rendered in RAYFORCE-native
+/* (.pq.c.parse str) — the raw parse tree rendered in RAYFORCE-native
  * notation via ray_fmt (unlike `parse`, which renders q notation). Returns a q
  * char-vector so the tree text is composable. */
 static ray_t* pq_parse_fn(ray_t* x) {
@@ -60,9 +61,9 @@ static ray_t* pq_parse_fn(ray_t* x) {
     return q_charv_out(repr);   /* consumes repr, returns owned q charv */
 }
 
-/* (.pq.c.tree str) — the POST-lower tree (exactly what ray_eval receives)
- * rendered via ray_fmt (rayforce-native). q_lower rewrites the fresh q_parse
- * AST in place (sole-owner). Returns a q char-vector. */
+/* (.pq.c.tree str) — the EVAL tree (exactly what q_eval receives — the raw
+ * parse tree, one pipeline) rendered via ray_fmt (rayforce-native).
+ * Returns a q char-vector. */
 static ray_t* pq_tree_fn(ray_t* x) {
     ray_t* err = NULL;
     char* src = pq_src_dup(x, &err);
@@ -70,22 +71,18 @@ static ray_t* pq_tree_fn(ray_t* x) {
     ray_t* ast = q_parse(src);
     free(src);
     if (RAY_IS_ERR(ast)) return ast;
-    ray_t* low = q_lower(ast);          /* in place, no retain first */
-    if (RAY_IS_ERR(low)) return low;
-    ray_t* repr = ray_fmt(low, 0);
-    ray_release(low);
+    ray_t* repr = ray_fmt(ast, 0);
+    ray_release(ast);
     return q_charv_out(repr);
 }
 
-/* Eval one q source line via the q pipeline (q_parse -> q_lower -> ray_eval),
- * mirroring q_runtime.c bootstrap_eval. OWNED value, or NULL on error
- * (reported to stderr — non-fatal per line, like the embedded bootstrap). */
+/* Eval one q source line via the q pipeline (q_parse -> q_eval), mirroring
+ * q_runtime.c bootstrap_eval. OWNED value, or NULL on error (reported to
+ * stderr — non-fatal per line, like the embedded bootstrap). */
 static ray_t* pq_eval(const char* src) {
     ray_t* ast = q_parse(src);
     if (RAY_IS_ERR(ast)) { fprintf(stderr, "pq load: parse error: %s\n", src); ray_error_free(ast); return NULL; }
-    ast = q_lower(ast);
-    if (RAY_IS_ERR(ast)) { fprintf(stderr, "pq load: lower error: %s\n", src); ray_release(ast); return NULL; }
-    ray_t* r = ray_eval(ast);
+    ray_t* r = q_eval(ast);
     ray_release(ast);
     if (RAY_IS_ERR(r)) { fprintf(stderr, "pq load: eval error: %s\n", src); ray_error_free(r); return NULL; }
     return r;

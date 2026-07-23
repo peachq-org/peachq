@@ -257,7 +257,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -2:  return q_attr_wrap(y);
         case -3:  return h_s1(y);
         case -5:  return q_parse_builtin_fn(y);
-        case -6:  return q_value_wrap(y);
+        case -6:  return q_value_nyi_fn(y);
         case -7:  return h_hcount(y);
         case -8:  return q_wire_serialize(y, Q_WIRE_ASYNC);
         case -9:  return h_deser(y);
@@ -287,13 +287,10 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -21:  /* compression stats: codec + file compress                 */
         case -22:  /* uncompressed length: serde length shortcut               */
         case -23:  /* memory map: mmap-backed objects                          */
-        case -24:  /* reval: restricted eval — PARKED.  q_value_wrap under a
-                    * restricted flag is ~5 lines, but a fully-enforced reval
-                    * needs the RAY_FN_RESTRICTED gate inside q_deriv_call_n
-                    * (q_deriv.c) / dot_apply (q_apply.c) so a nested
-                    * `value (f;a;b;c)` / `.[f;args]` of a restricted VARY cannot
-                    * bypass it (codex r1/r2 P1).  Reintroduce -24! once the gate
-                    * lands there (PLAN.md).                                       */
+        case -24:  /* reval: restricted eval — PARKED with `value` itself
+                    * (eval-rebuild cutover); needs the RAY_FN_RESTRICTED gate
+                    * inside the fresh apply module so a nested value-apply of
+                    * a restricted VARY cannot bypass it (codex r1/r2 P1).      */
         case -25:  /* async broadcast: IPC handles + loop                      */
         case -26:  /* SSL: TLS                                                  */
         case -30:  /* deferred response: IPC + .z.w/.z.W                       */
