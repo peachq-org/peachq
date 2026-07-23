@@ -63,11 +63,21 @@ static size_t prompt_prefix_len(const char* line) {
 /* Error-expectation rows: an expected output whose FIRST line starts with `'`
  * (kdb error display: 'type) asserts the example ERRORS.  Only the first
  * line is consulted — newer kdb appends stack-trace lines we deliberately do
- * not support yet, so trailing lines are ignored by construction.  Default
- * is LENIENT (any eval/lower error matches); QDOC_STRICT_ERRORS=1 also
- * requires the error CLASS to equal the word after the quote ('type ->
- * code "type").  Returns 1 and fills cls[] (may be empty) when the row is an
- * error expectation. */
+ * not support yet, so trailing lines are ignored by construction.
+ *
+ * Matching contract (see error_row_matches):
+ *   - DEFAULT is STRICT: the error CLASS must equal the word after the quote
+ *     ('type -> the error's 7-byte code "type").  This is the project thesis
+ *     ("error text match kdb"); a row expecting 'type no longer passes on 'name.
+ *   - `'error` is the sanctioned ANY-ERROR wildcard: kdb has no class named
+ *     `error`, so a row whose first line is exactly `'error` matches ANY error.
+ *     Use it for honest "this errors, class not doc-determinable" claims.
+ *   - Bare `'` (no class word) also matches any error — it asserts nothing to
+ *     check against.
+ *   - QDOC_LENIENT_ERRORS=1 restores the old any-error behaviour for debugging.
+ *
+ * Returns 1 and fills cls[] (may be empty) when the row is an error
+ * expectation. */
 static int expect_is_error(const char* expect, char* cls, size_t csz) {
     const char* p = expect;
     while (*p == ' ' || *p == '\t') p++;
@@ -82,15 +92,17 @@ static int expect_is_error(const char* expect, char* cls, size_t csz) {
     return 1;
 }
 
-static int strict_errors(void) {
-    const char* e = getenv("QDOC_STRICT_ERRORS");
+static int lenient_errors(void) {
+    const char* e = getenv("QDOC_LENIENT_ERRORS");
     return e && *e && *e != '0';
 }
 
 /* Match an actual error object against an error-expectation row.  The error
  * class lives in the RAY_ERROR's sdata (same field q_repl prints). */
 static int error_row_matches(ray_t* err, const char* cls) {
-    if (!strict_errors() || !cls[0]) return 1;          /* lenient: any error */
+    if (lenient_errors()) return 1;                     /* debug escape: any error */
+    if (!cls[0]) return 1;                              /* bare `'`: any error */
+    if (strcmp(cls, "error") == 0) return 1;            /* `'error` wildcard */
     const char* code = (const char*)err->sdata;
     return code && strncmp(code, cls, 7) == 0;
 }

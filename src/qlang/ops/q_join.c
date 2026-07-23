@@ -6,6 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_err.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
 #include "lang/env.h"      /* ray_env_get */
 #include "lang/eval.h"     /* ray_eval; ray_left_join_fn, ray_window_join*_fn */
@@ -55,7 +56,7 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
         int64_t sl = (int64_t)ray_str_len(col);
         char stackb[1024];
         char* b = (n < (int64_t)sizeof stackb) ? stackb : malloc((size_t)n + 1);
-        if (!b) return ray_error("wsfull", "join: out of memory");
+        if (!b) return q_err(QE_WSFULL);
         for (int64_t i = 0; i < n; i++)
             b[i] = (idx[i] < 0 || idx[i] >= sl) ? ' ' : sp[idx[i]];
         ray_t* r = ray_str(b, (size_t)n);
@@ -83,7 +84,7 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
     }
     ray_t* g = ray_at_fn(col, iv);
     ray_release(iv);
-    if (!g || RAY_IS_ERR(g)) return g ? g : ray_error("type", NULL);
+    if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
     if (g->type == RAY_LIST) {
         ray_t* cg = q_collapse_list(g);
         ray_release(g);
@@ -100,7 +101,7 @@ ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n) {
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
         ray_t* col = ray_table_get_col_idx(t, c);          /* borrowed */
         ray_t* cg = qj_col_gather(col, idx, n);
-        if (!cg || RAY_IS_ERR(cg)) { ray_release(out); return cg ? cg : ray_error("type", NULL); }
+        if (!cg || RAY_IS_ERR(cg)) { ray_release(out); return cg ? cg : q_err(QE_TYPE); }
         out = ray_table_add_col(out, ray_table_col_name(t, c), cg);
         ray_release(cg);
     }
@@ -159,7 +160,7 @@ static ray_t* qj_keyid_table(ray_t* t, ray_t* keys, int64_t rid_sym) {
         ray_t* col = ray_table_get_col(t, ke[i]->i64);     /* borrowed */
         if (!col) {
             ray_release(out);
-            return ray_error("type", "join: key column not found in table");
+            return q_err(QE_TYPE);
         }
         out = ray_table_add_col(out, ke[i]->i64, col);
         if (RAY_IS_ERR(out)) return out;
@@ -180,24 +181,24 @@ static int64_t qj_join_pairs(ray_t* x, ray_t* y, ray_t* keys,
     int64_t lrid = qj_tmp_colname("qjl", x, y);
     int64_t rrid = qj_tmp_colname("qjr", x, y);
     ray_t* lk = qj_keyid_table(x, keys, lrid);
-    if (!lk || RAY_IS_ERR(lk)) { *err = lk ? lk : ray_error("type", NULL); return -1; }
+    if (!lk || RAY_IS_ERR(lk)) { *err = lk ? lk : q_err(QE_TYPE); return -1; }
     ray_t* rk = qj_keyid_table(y, keys, rrid);
-    if (!rk || RAY_IS_ERR(rk)) { ray_release(lk); *err = rk ? rk : ray_error("type", NULL); return -1; }
+    if (!rk || RAY_IS_ERR(rk)) { ray_release(lk); *err = rk ? rk : q_err(QE_TYPE); return -1; }
     ray_t* args[3] = { keys, lk, rk };
     ray_t* res = ray_left_join_fn(args, 3);
     ray_release(lk);
     ray_release(rk);
-    if (!res || RAY_IS_ERR(res)) { *err = res ? res : ray_error("type", NULL); return -1; }
+    if (!res || RAY_IS_ERR(res)) { *err = res ? res : q_err(QE_TYPE); return -1; }
     ray_t* lc = ray_table_get_col(res, lrid);              /* borrowed */
     ray_t* rc = ray_table_get_col(res, rrid);              /* borrowed */
     if (!lc || !rc || lc->type != RAY_I64 || rc->type != RAY_I64) {
         ray_release(res);
-        *err = ray_error("type", "join: engine relation missing rowid columns");
+        *err = q_err(QE_TYPE);
         return -1;
     }
     int64_t np = ray_len(lc);
     qj_pair_t* pairs = (qj_pair_t*)malloc((size_t)(np > 0 ? np : 1) * sizeof(qj_pair_t));
-    if (!pairs) { ray_release(res); *err = ray_error("wsfull", "join: out of memory"); return -1; }
+    if (!pairs) { ray_release(res); *err = q_err(QE_WSFULL); return -1; }
     const int64_t* lv = (const int64_t*)ray_data(lc);
     const int64_t* rv = (const int64_t*)ray_data(rc);
     for (int64_t i = 0; i < np; i++) {
@@ -229,12 +230,12 @@ static int64_t* qj_first_map(const qj_pair_t* pairs, int64_t np, int64_t nx) {
  * reads boxed items. */
 static ray_t* qj_fill_col(ray_t* xc, ray_t* gy, int64_t nx) {
     ray_t* cat = ray_concat_fn(xc, gy);
-    if (!cat || RAY_IS_ERR(cat)) return cat ? cat : ray_error("type", NULL);
+    if (!cat || RAY_IS_ERR(cat)) return cat ? cat : q_err(QE_TYPE);
     int64_t* idx2 = (int64_t*)malloc((size_t)(nx > 0 ? nx : 1) * sizeof(int64_t));
-    if (!idx2) { ray_release(cat); return ray_error("wsfull", "join: out of memory"); }
+    if (!idx2) { ray_release(cat); return q_err(QE_WSFULL); }
     for (int64_t i = 0; i < nx; i++) {
         ray_t* yi = qj_gen_item(gy, i);
-        if (!yi || RAY_IS_ERR(yi)) { free(idx2); ray_release(cat); return yi ? yi : ray_error("type", NULL); }
+        if (!yi || RAY_IS_ERR(yi)) { free(idx2); ray_release(cat); return yi ? yi : q_err(QE_TYPE); }
         idx2[i] = qj_atom_is_qnull(yi) ? i : nx + i;
         ray_release(yi);
     }
@@ -254,9 +255,9 @@ static ray_t* qj_merge_col(ray_t* xc, ray_t* yc, const int64_t* fmap,
                            int64_t nx, int mode) {
     if (mode == 0) {
         ray_t* cat = ray_concat_fn(xc, yc);
-        if (!cat || RAY_IS_ERR(cat)) return cat ? cat : ray_error("type", NULL);
+        if (!cat || RAY_IS_ERR(cat)) return cat ? cat : q_err(QE_TYPE);
         int64_t* idx2 = (int64_t*)malloc((size_t)(nx > 0 ? nx : 1) * sizeof(int64_t));
-        if (!idx2) { ray_release(cat); return ray_error("wsfull", "join: out of memory"); }
+        if (!idx2) { ray_release(cat); return q_err(QE_WSFULL); }
         for (int64_t i = 0; i < nx; i++)
             idx2[i] = (fmap[i] >= 0) ? nx + fmap[i] : i;
         ray_t* r = qj_col_gather(cat, idx2, nx);
@@ -265,7 +266,7 @@ static ray_t* qj_merge_col(ray_t* xc, ray_t* yc, const int64_t* fmap,
         return r;
     }
     ray_t* gy = qj_col_gather(yc, fmap, nx);       /* miss -> null cell */
-    if (!gy || RAY_IS_ERR(gy)) return gy ? gy : ray_error("type", NULL);
+    if (!gy || RAY_IS_ERR(gy)) return gy ? gy : q_err(QE_TYPE);
     ray_t* r;
     if (mode == 1) {
         r = qj_fill_col(xc, gy, nx);               /* y nulls keep x, type-safe */
@@ -273,11 +274,11 @@ static ray_t* qj_merge_col(ray_t* xc, ray_t* yc, const int64_t* fmap,
         ray_t* zero = ray_i64(0);
         ray_t* zf = q_fill_wrap(zero, gy);         /* 0^gathered (pj is numeric) */
         ray_release(zero);
-        if (!zf || RAY_IS_ERR(zf)) { ray_release(gy); return zf ? zf : ray_error("type", NULL); }
+        if (!zf || RAY_IS_ERR(zf)) { ray_release(gy); return zf ? zf : q_err(QE_TYPE); }
         /* env `+` is ATOMIC — the raw fn pointer wants eval's broadcast, so
          * apply (+; xc; zf) through ray_eval (vectors self-evaluate). */
         ray_t* plus = ray_env_get(ray_sym_intern("+", 1));  /* borrowed */
-        if (!plus) { ray_release(zf); ray_release(gy); return ray_error("type", "pj: + builtin missing"); }
+        if (!plus) { ray_release(zf); ray_release(gy); return q_err(QE_TYPE); }
         ray_t* app = ray_list_new(3);
         if (RAY_IS_ERR(app)) { ray_release(zf); ray_release(gy); return app; }
         app = ray_list_append(app, plus);
@@ -299,7 +300,7 @@ static ray_t* qj_key_syms(ray_t* ykeys_tbl) {
     if (RAY_IS_ERR(keys)) return keys;
     for (int64_t i = 0; i < nk; i++) {
         ray_t* s = ray_sym(ray_table_col_name(ykeys_tbl, i));
-        if (!s || RAY_IS_ERR(s)) { ray_release(keys); return s ? s : ray_error("type", NULL); }
+        if (!s || RAY_IS_ERR(s)) { ray_release(keys); return s ? s : q_err(QE_TYPE); }
         keys = ray_list_append(keys, s);
         ray_release(s);
         if (RAY_IS_ERR(keys)) return keys;
@@ -356,7 +357,7 @@ static ray_t* qj_norm_keys(ray_t* c) {
 static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
     if (y && y->type == RAY_LIST && ray_len(y) == 0) {     /* x lj () -> x */
         if (x) ray_retain(x);
-        return x ? x : ray_error("type", "lj: nil lhs");
+        return x ? x : q_err(QE_TYPE);
     }
     if (q_table_is_keyed(x)) {             /* keyed lhs: unkey, join, re-key */
         ray_t* xk = ray_dict_keys(x);                      /* borrowed */
@@ -371,13 +372,13 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
         return kr;
     }
     if (!x || x->type != RAY_TABLE)
-        return ray_error("type", "lj: left operand must be a table");
+        return q_err(QE_TYPE);
     if (!q_table_is_keyed(y))
-        return ray_error("type", "lj: right operand must be a keyed table");
+        return q_err(QE_TYPE);
     ray_t* yk = ray_dict_keys(y);                          /* borrowed */
     ray_t* yv = ray_dict_vals(y);                          /* borrowed */
     ray_t* keys = qj_key_syms(yk);
-    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : ray_error("type", NULL);
+    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : q_err(QE_TYPE);
     ray_t* yflat = q_table_flatten(y);
     if (!yflat || RAY_IS_ERR(yflat)) { ray_release(keys); return yflat; }
     qj_pair_t* pairs; ray_t* err;
@@ -386,7 +387,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
     int64_t nx = ray_table_nrows(x);
     int64_t* fmap = qj_first_map(pairs, np, nx);
     free(pairs);
-    if (!fmap) { ray_release(keys); ray_release(yflat); return ray_error("wsfull", "lj: out of memory"); }
+    if (!fmap) { ray_release(keys); ray_release(yflat); return q_err(QE_WSFULL); }
     int64_t nxc = ray_table_ncols(x);
     int64_t nyv = ray_table_ncols(yv);
     ray_t* out = ray_table_new(nxc + nyv);
@@ -400,7 +401,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
         if (yc) {
             ray_t* m = qj_merge_col(xc, ray_table_get_col(yflat, nm), fmap, nx,
                                     mode);
-            if (!m || RAY_IS_ERR(m)) { ray_release(out); out = m ? m : ray_error("type", NULL); break; }
+            if (!m || RAY_IS_ERR(m)) { ray_release(out); out = m ? m : q_err(QE_TYPE); break; }
             out = ray_table_add_col(out, nm, m);
             ray_release(m);
         } else {
@@ -413,13 +414,13 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
         int64_t nm = ray_table_col_name(yv, c);
         if (ray_table_get_col(x, nm)) continue;            /* shared: merged above */
         ray_t* g = qj_col_gather(ray_table_get_col(yflat, nm), fmap, nx);
-        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : ray_error("type", NULL); break; }
+        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : q_err(QE_TYPE); break; }
         if (mode == 2) {
             ray_t* zero = ray_i64(0);
             ray_t* zf = q_fill_wrap(zero, g);
             ray_release(zero);
             ray_release(g);
-            if (!zf || RAY_IS_ERR(zf)) { ray_release(out); out = zf ? zf : ray_error("type", NULL); break; }
+            if (!zf || RAY_IS_ERR(zf)) { ray_release(out); out = zf ? zf : q_err(QE_TYPE); break; }
             g = zf;
         }
         out = ray_table_add_col(out, nm, g);
@@ -431,7 +432,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
         int64_t m = 0;
         for (int64_t i = 0; i < nx; i++) if (fmap[i] >= 0) m++;
         int64_t* idx = (int64_t*)malloc((size_t)(m > 0 ? m : 1) * sizeof(int64_t));
-        if (!idx) { ray_release(out); out = ray_error("wsfull", "ij: out of memory"); }
+        if (!idx) { ray_release(out); out = q_err(QE_WSFULL); }
         else {
             int64_t w = 0;
             for (int64_t i = 0; i < nx; i++) if (fmap[i] >= 0) idx[w++] = i;
@@ -459,9 +460,9 @@ ray_t* q_pj_wrap(ray_t* x, ray_t* y)  { return qj_lj_core(x, y, 2, 0); }
  * values fill from t2.  Both tables plain. */
 static ray_t* qj_ej_impl(ray_t* c, ray_t* t1, ray_t* t2) {
     if (!t1 || t1->type != RAY_TABLE || !t2 || t2->type != RAY_TABLE)
-        return ray_error("type", "ej: both operands must be tables");
+        return q_err(QE_TYPE);
     ray_t* keys = qj_norm_keys(c);
-    if (!keys) return ray_error("type", "ej: column spec must be symbol name(s)");
+    if (!keys) return q_err(QE_TYPE);
     qj_pair_t* pairs; ray_t* err;
     int64_t np = qj_join_pairs(t1, t2, keys, &pairs, &err);
     if (np < 0) { ray_release(keys); return err; }
@@ -472,7 +473,7 @@ static ray_t* qj_ej_impl(ray_t* c, ray_t* t1, ray_t* t2) {
     int64_t* ri = (int64_t*)malloc((size_t)(m > 0 ? m : 1) * sizeof(int64_t));
     if (!li || !ri) {
         free(li); free(ri); free(pairs); ray_release(keys);
-        return ray_error("wsfull", "ej: out of memory");
+        return q_err(QE_WSFULL);
     }
     int64_t w = 0;
     for (int64_t p = 0; p < np; p++)
@@ -488,7 +489,7 @@ static ray_t* qj_ej_impl(ray_t* c, ray_t* t1, ray_t* t2) {
         ray_t* src = t2c ? t2c : ray_table_get_col_idx(t1, col);   /* borrowed */
         const int64_t* map = t2c ? ri : li;
         ray_t* g = qj_col_gather(src, map, m);
-        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : ray_error("type", NULL); break; }
+        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : q_err(QE_TYPE); break; }
         out = ray_table_add_col(out, nm, g);
         ray_release(g);
     }
@@ -496,7 +497,7 @@ static ray_t* qj_ej_impl(ray_t* c, ray_t* t1, ray_t* t2) {
         int64_t nm = ray_table_col_name(t2, col);
         if (ray_table_get_col(t1, nm)) continue;           /* shared: above */
         ray_t* g = qj_col_gather(ray_table_get_col_idx(t2, col), ri, m);
-        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : ray_error("type", NULL); break; }
+        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : q_err(QE_TYPE); break; }
         out = ray_table_add_col(out, nm, g);
         ray_release(g);
     }
@@ -506,7 +507,7 @@ static ray_t* qj_ej_impl(ray_t* c, ray_t* t1, ray_t* t2) {
 }
 
 ray_t* q_ej_wrap(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("rank", "ej: expects [c;t1;t2], got %lld args", (long long)n);
+    if (n != 3) return q_err(QE_RANK);
     return qj_ej_impl(args[0], args[1], args[2]);
 }
 
@@ -521,7 +522,7 @@ static ray_t* qj_uj_unkeyed(ray_t* x, ray_t* y) {
     int64_t nx = ray_table_nrows(x), ny = ray_table_nrows(y);
     int64_t nxc = ray_table_ncols(x), nyc = ray_table_ncols(y);
     int64_t* xi = (int64_t*)malloc((size_t)(nx + ny > 0 ? nx + ny : 1) * sizeof(int64_t));
-    if (!xi) return ray_error("wsfull", "uj: out of memory");
+    if (!xi) return q_err(QE_WSFULL);
     ray_t* out = ray_table_new(nxc + nyc);
     if (RAY_IS_ERR(out)) { free(xi); return out; }
     /* x-side columns (shared ones concat with y's; x-only null-pad below y) */
@@ -536,7 +537,7 @@ static ray_t* qj_uj_unkeyed(ray_t* x, ray_t* y) {
             for (int64_t i = 0; i < nx + ny; i++) xi[i] = (i < nx) ? i : -1;
             col = qj_col_gather(xc, xi, nx + ny);
         }
-        if (!col || RAY_IS_ERR(col)) { ray_release(out); out = col ? col : ray_error("type", NULL); break; }
+        if (!col || RAY_IS_ERR(col)) { ray_release(out); out = col ? col : q_err(QE_TYPE); break; }
         out = ray_table_add_col(out, nm, col);
         ray_release(col);
     }
@@ -546,7 +547,7 @@ static ray_t* qj_uj_unkeyed(ray_t* x, ray_t* y) {
         if (ray_table_get_col(x, nm)) continue;
         for (int64_t i = 0; i < nx + ny; i++) xi[i] = (i < nx) ? -1 : i - nx;
         ray_t* col = qj_col_gather(ray_table_get_col_idx(y, c), xi, nx + ny);
-        if (!col || RAY_IS_ERR(col)) { ray_release(out); out = col ? col : ray_error("type", NULL); break; }
+        if (!col || RAY_IS_ERR(col)) { ray_release(out); out = col ? col : q_err(QE_TYPE); break; }
         out = ray_table_add_col(out, nm, col);
         ray_release(col);
     }
@@ -560,18 +561,18 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
     ray_t* xk = ray_dict_keys(x);                          /* borrowed */
     ray_t* yk = ray_dict_keys(y);                          /* borrowed */
     if (!qj_same_schema(xk, yk))
-        return ray_error("type", "uj: key columns must match");
+        return q_err(QE_TYPE);
     int64_t nkeys = ray_table_ncols(xk);
     ray_t* xf = q_table_flatten(x);
     if (!xf || RAY_IS_ERR(xf)) return xf;
     /* part 1: x rows merged/extended with y's columns (full lj shape) */
     ray_t* part1 = qj_lj_core(xf, y, mode, 0);
-    if (!part1 || RAY_IS_ERR(part1)) { ray_release(xf); return part1 ? part1 : ray_error("type", NULL); }
+    if (!part1 || RAY_IS_ERR(part1)) { ray_release(xf); return part1 ? part1 : q_err(QE_TYPE); }
     /* part 2: y rows with no x key match, aligned to part1's schema */
     ray_t* yf = q_table_flatten(y);
     if (!yf || RAY_IS_ERR(yf)) { ray_release(xf); ray_release(part1); return yf; }
     ray_t* keys = qj_key_syms(yk);
-    if (!keys || RAY_IS_ERR(keys)) { ray_release(xf); ray_release(part1); ray_release(yf); return keys ? keys : ray_error("type", NULL); }
+    if (!keys || RAY_IS_ERR(keys)) { ray_release(xf); ray_release(part1); ray_release(yf); return keys ? keys : q_err(QE_TYPE); }
     qj_pair_t* pairs; ray_t* err;
     int64_t np = qj_join_pairs(yf, xf, keys, &pairs, &err);
     ray_release(keys);
@@ -580,13 +581,13 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
     int64_t ny = ray_table_nrows(yf);
     int64_t* rmap = qj_first_map(pairs, np, ny);
     free(pairs);
-    if (!rmap) { ray_release(part1); ray_release(yf); return ray_error("wsfull", "uj: out of memory"); }
+    if (!rmap) { ray_release(part1); ray_release(yf); return q_err(QE_WSFULL); }
     int64_t nu = 0;
     for (int64_t i = 0; i < ny; i++) if (rmap[i] < 0) nu++;
     ray_t* out = part1;
     if (nu > 0) {
         int64_t* uidx = (int64_t*)malloc((size_t)nu * sizeof(int64_t));
-        if (!uidx) { free(rmap); ray_release(part1); ray_release(yf); return ray_error("wsfull", "uj: out of memory"); }
+        if (!uidx) { free(rmap); ray_release(part1); ray_release(yf); return q_err(QE_WSFULL); }
         int64_t w = 0;
         for (int64_t i = 0; i < ny; i++) if (rmap[i] < 0) uidx[w++] = i;
         int64_t npc = ray_table_ncols(part1);
@@ -600,38 +601,38 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
             } else {
                 /* x-only column: nu nulls typed by part1's column */
                 int64_t* nid = (int64_t*)malloc((size_t)nu * sizeof(int64_t));
-                if (!nid) { col = ray_error("wsfull", "uj: out of memory"); }
+                if (!nid) { col = q_err(QE_WSFULL); }
                 else {
                     for (int64_t i = 0; i < nu; i++) nid[i] = -1;
                     col = qj_col_gather(ray_table_get_col_idx(part1, c), nid, nu);
                     free(nid);
                 }
             }
-            if (!col || RAY_IS_ERR(col)) { ray_release(part2); part2 = col ? col : ray_error("type", NULL); break; }
+            if (!col || RAY_IS_ERR(col)) { ray_release(part2); part2 = col ? col : q_err(QE_TYPE); break; }
             part2 = ray_table_add_col(part2, nm, col);
             ray_release(col);
         }
         free(uidx);
-        if (!part2 || RAY_IS_ERR(part2)) { free(rmap); ray_release(part1); ray_release(yf); return part2 ? part2 : ray_error("type", NULL); }
+        if (!part2 || RAY_IS_ERR(part2)) { free(rmap); ray_release(part1); ray_release(yf); return part2 ? part2 : q_err(QE_TYPE); }
         out = ray_concat_fn(part1, part2);
         ray_release(part1);
         ray_release(part2);
     }
     free(rmap);
     ray_release(yf);
-    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("type", NULL);
+    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_TYPE);
     ray_t* kr = q_bang_enkey(nkeys, out);
     ray_release(out);
     return kr;
 }
 
 static ray_t* qj_uj_core(ray_t* x, ray_t* y, int mode) {
-    if (!x || !y) return ray_error("type", "uj: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     if (q_table_is_keyed(x) && q_table_is_keyed(y))
         return qj_ktbl_merge(x, y, mode);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE)
         return qj_uj_unkeyed(x, y);
-    return ray_error("type", "uj: operands must be both keyed or both unkeyed tables");
+    return q_err(QE_TYPE);
 }
 
 ray_t* q_uj_wrap(ray_t* x, ray_t* y)  { return qj_uj_core(x, y, 0); }
@@ -650,20 +651,20 @@ static int64_t* qj_aj_map(ray_t* keys, ray_t* t1, ray_t* t2, ray_t** err) {
     *err = NULL;
     int64_t rid = qj_tmp_colname("ajr", t1, t2);
     ray_t* rk = qj_keyid_table(t2, keys, rid);
-    if (!rk || RAY_IS_ERR(rk)) { *err = rk ? rk : ray_error("type", NULL); return NULL; }
+    if (!rk || RAY_IS_ERR(rk)) { *err = rk ? rk : q_err(QE_TYPE); return NULL; }
     ray_t* args[3] = { keys, t1, rk };
     ray_t* res = ray_asof_join_fn(args, 3);
     ray_release(rk);
-    if (!res || RAY_IS_ERR(res)) { *err = res ? res : ray_error("type", NULL); return NULL; }
+    if (!res || RAY_IS_ERR(res)) { *err = res ? res : q_err(QE_TYPE); return NULL; }
     ray_t* rc = ray_table_get_col(res, rid);               /* borrowed */
     int64_t n1 = ray_table_nrows(t1);
     if (!rc || rc->type != RAY_I64 || ray_len(rc) != n1) {
         ray_release(res);
-        *err = ray_error("type", "aj: engine relation missing rowid column");
+        *err = q_err(QE_TYPE);
         return NULL;
     }
     int64_t* map = (int64_t*)malloc((size_t)(n1 > 0 ? n1 : 1) * sizeof(int64_t));
-    if (!map) { ray_release(res); *err = ray_error("wsfull", "aj: out of memory"); return NULL; }
+    if (!map) { ray_release(res); *err = q_err(QE_WSFULL); return NULL; }
     const int64_t* rv = (const int64_t*)ray_data(rc);
     for (int64_t i = 0; i < n1; i++) map[i] = (rv[i] == NULL_I64) ? -1 : rv[i];
     ray_release(res);
@@ -675,11 +676,11 @@ static int64_t* qj_aj_map(ray_t* keys, ray_t* t1, ray_t* t2, ray_t** err) {
  * misses keep t1's value on SHARED columns (ajf/ajf0). */
 static ray_t* qj_aj_core(ray_t* c, ray_t* t1, ray_t* t2, int t0mode, int fill) {
     if (!t1 || t1->type != RAY_TABLE || !t2 || t2->type != RAY_TABLE)
-        return ray_error("type", "aj: both operands must be tables");
+        return q_err(QE_TYPE);
     ray_t* keys = qj_norm_keys(c);
     if (!keys || ray_len(keys) < 1) {
         if (keys) ray_release(keys);
-        return ray_error("type", "aj: column spec must be symbol name(s)");
+        return q_err(QE_TYPE);
     }
     ray_t** ke = (ray_t**)ray_data(keys);
     int64_t time_sym = ke[ray_len(keys) - 1]->i64;
@@ -699,7 +700,7 @@ static ray_t* qj_aj_core(ray_t* c, ray_t* t1, ray_t* t2, int t0mode, int fill) {
                 /* aj0: actual t2 time; ajf0 fills the misses from t1 */
                 ray_t* tt = ray_table_get_col(t2, nm);     /* borrowed */
                 ray_t* gt = tt ? qj_col_gather(tt, map, n1)
-                               : ray_error("type", "aj: time column missing in t2");
+                               : q_err(QE_TYPE);
                 if (gt && !RAY_IS_ERR(gt) && fill) {
                     ray_t* f = qj_fill_col(xc, gt, n1);
                     ray_release(gt);
@@ -727,7 +728,7 @@ static ray_t* qj_aj_core(ray_t* c, ray_t* t1, ray_t* t2, int t0mode, int fill) {
                 g = xc;
             }
         }
-        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : ray_error("type", NULL); break; }
+        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : q_err(QE_TYPE); break; }
         out = ray_table_add_col(out, nm, g);
         ray_release(g);
     }
@@ -735,7 +736,7 @@ static ray_t* qj_aj_core(ray_t* c, ray_t* t1, ray_t* t2, int t0mode, int fill) {
         int64_t nm = ray_table_col_name(t2, col);
         if (qj_sym_in_list(keys, nm) || ray_table_get_col(t1, nm)) continue;
         ray_t* g = qj_col_gather(ray_table_get_col_idx(t2, col), map, n1);
-        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : ray_error("type", NULL); break; }
+        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : q_err(QE_TYPE); break; }
         out = ray_table_add_col(out, nm, g);
         ray_release(g);
     }
@@ -745,19 +746,19 @@ static ray_t* qj_aj_core(ray_t* c, ray_t* t1, ray_t* t2, int t0mode, int fill) {
 }
 
 ray_t* q_aj_wrap(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("rank", "aj: expects [c;t1;t2], got %lld args", (long long)n);
+    if (n != 3) return q_err(QE_RANK);
     return qj_aj_core(args[0], args[1], args[2], 0, 0);
 }
 ray_t* q_aj0_wrap(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("rank", "aj0: expects [c;t1;t2], got %lld args", (long long)n);
+    if (n != 3) return q_err(QE_RANK);
     return qj_aj_core(args[0], args[1], args[2], 1, 0);
 }
 ray_t* q_ajf_wrap(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("rank", "ajf: expects [c;t1;t2], got %lld args", (long long)n);
+    if (n != 3) return q_err(QE_RANK);
     return qj_aj_core(args[0], args[1], args[2], 0, 1);
 }
 ray_t* q_ajf0_wrap(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("rank", "ajf0: expects [c;t1;t2], got %lld args", (long long)n);
+    if (n != 3) return q_err(QE_RANK);
     return qj_aj_core(args[0], args[1], args[2], 1, 1);
 }
 
@@ -768,13 +769,13 @@ ray_t* q_ajf0_wrap(ray_t** args, int64_t n) {
  * Direction: LEFT = d, RIGHT = t under the same engine asof matching. */
 ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
     if (!t || t->type != RAY_TABLE)
-        return ray_error("type", "asof: left operand must be a table");
+        return q_err(QE_TYPE);
     if (d && d->type == RAY_DICT && !q_table_is_keyed(d)) {
         /* dict -> 1-row table, then unwrap the single result row to a dict */
         ray_t* dk = ray_dict_keys(d);                      /* borrowed */
         ray_t* dv = ray_dict_vals(d);                      /* borrowed */
         if (!dk || !dv || (dk->type != RAY_SYM && dk->type != RAY_LIST))
-            return ray_error("type", "asof: dict keys must be symbols");
+            return q_err(QE_TYPE);
         int64_t nk = ray_len(dk);
         ray_t* dt = ray_table_new(nk > 0 ? nk : 1);
         if (RAY_IS_ERR(dt)) return dt;
@@ -783,10 +784,10 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
             if (!ks || RAY_IS_ERR(ks) || ks->type != -RAY_SYM) {
                 if (ks) ray_release(ks);
                 ray_release(dt);
-                return ray_error("type", "asof: dict keys must be symbols");
+                return q_err(QE_TYPE);
             }
             ray_t* val = qj_item(dv, i);
-            if (!val || RAY_IS_ERR(val)) { ray_release(ks); ray_release(dt); return val ? val : ray_error("type", NULL); }
+            if (!val || RAY_IS_ERR(val)) { ray_release(ks); ray_release(dt); return val ? val : q_err(QE_TYPE); }
             ray_t* l = ray_list_new(1);
             if (RAY_IS_ERR(l)) { ray_release(val); ray_release(ks); ray_release(dt); return l; }
             l = ray_list_append(l, val);
@@ -794,7 +795,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
             if (RAY_IS_ERR(l)) { ray_release(ks); ray_release(dt); return l; }
             ray_t* colv = q_collapse_list(l);
             ray_release(l);
-            if (!colv || RAY_IS_ERR(colv)) { ray_release(ks); ray_release(dt); return colv ? colv : ray_error("type", NULL); }
+            if (!colv || RAY_IS_ERR(colv)) { ray_release(ks); ray_release(dt); return colv ? colv : q_err(QE_TYPE); }
             dt = ray_table_add_col(dt, ks->i64, colv);
             ray_release(ks);
             ray_release(colv);
@@ -806,16 +807,16 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
         /* single row -> col!value dict */
         int64_t nc = ray_table_ncols(rows);
         ray_t* okeys = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
-        if (!okeys || RAY_IS_ERR(okeys)) { ray_release(rows); return okeys ? okeys : ray_error("oom", NULL); }
+        if (!okeys || RAY_IS_ERR(okeys)) { ray_release(rows); return okeys ? okeys : q_err(QE_OOM); }
         ray_t* ovals = ray_list_new(nc > 0 ? nc : 1);
         if (RAY_IS_ERR(ovals)) { ray_release(okeys); ray_release(rows); return ovals; }
         for (int64_t ci = 0; ci < nc; ci++) {
             int64_t nm = ray_table_col_name(rows, ci);
             okeys = ray_vec_append(okeys, &nm);
-            if (!okeys || RAY_IS_ERR(okeys)) { ray_release(ovals); ray_release(rows); return okeys ? okeys : ray_error("oom", NULL); }
+            if (!okeys || RAY_IS_ERR(okeys)) { ray_release(ovals); ray_release(rows); return okeys ? okeys : q_err(QE_OOM); }
             ray_t* col = ray_table_get_col_idx(rows, ci);  /* borrowed */
             ray_t* cell = qj_item(col, 0);
-            if (!cell || RAY_IS_ERR(cell)) { ray_release(okeys); ray_release(ovals); ray_release(rows); return cell ? cell : ray_error("type", NULL); }
+            if (!cell || RAY_IS_ERR(cell)) { ray_release(okeys); ray_release(ovals); ray_release(rows); return cell ? cell : q_err(QE_TYPE); }
             ovals = ray_list_append(ovals, cell);
             ray_release(cell);
             if (RAY_IS_ERR(ovals)) { ray_release(okeys); ray_release(rows); return ovals; }
@@ -823,7 +824,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
         ray_release(rows);
         ray_t* cvals = q_collapse_list(ovals);
         ray_release(ovals);
-        if (!cvals || RAY_IS_ERR(cvals)) { ray_release(okeys); return cvals ? cvals : ray_error("type", NULL); }
+        if (!cvals || RAY_IS_ERR(cvals)) { ray_release(okeys); return cvals ? cvals : q_err(QE_TYPE); }
         /* construct through the audited env dict builder (the same one `!`
          * uses) so the result is structurally identical to a `!`-made dict */
         ray_t* r = q_env_call2("dict", okeys, cvals);
@@ -832,9 +833,9 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
         return r;
     }
     if (!d || d->type != RAY_TABLE)
-        return ray_error("type", "asof: right operand must be a dict or table");
+        return q_err(QE_TYPE);
     ray_t* keys = qj_key_syms(d);
-    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : ray_error("type", NULL);
+    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : q_err(QE_TYPE);
     ray_t* err;
     int64_t* map = qj_aj_map(keys, d, t, &err);            /* LEFT = d, RIGHT = t */
     if (!map) { ray_release(keys); return err; }
@@ -846,7 +847,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
         int64_t nm = ray_table_col_name(t, col);
         if (qj_sym_in_list(keys, nm)) continue;            /* remaining cols only */
         ray_t* g = qj_col_gather(ray_table_get_col_idx(t, col), map, nd);
-        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : ray_error("type", NULL); break; }
+        if (!g || RAY_IS_ERR(g)) { ray_release(out); out = g ? g : q_err(QE_TYPE); break; }
         out = ray_table_add_col(out, nm, g);
         ray_release(g);
     }
@@ -870,44 +871,43 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
  * The `(::;`c)` raw-window form is 'nyi: the engine's bare-column arm emits
  * null placeholders — an error beats a wrong answer. */
 static ray_t* qj_wj_core(ray_t** args, int64_t n, int mode) {
-    const char* nm = mode ? "wj1" : "wj";
-    if (n != 4) return ray_error("rank", "%s: expects [w;f;t;(q;aggs..)], got %lld args", nm, (long long)n);
+    if (n != 4) return q_err(QE_RANK);
     ray_t* w = args[0];
     ray_t* f = args[1];
     ray_t* t = args[2];
     ray_t* spec = args[3];
     if (!w || w->type != RAY_LIST || ray_len(w) != 2)
-        return ray_error("type", "%s: w must be a (lo;hi) pair of time vectors", nm);
+        return q_err(QE_TYPE);
     if (!t || t->type != RAY_TABLE)
-        return ray_error("type", "%s: t must be a table", nm);
+        return q_err(QE_TYPE);
     if (!spec || spec->type != RAY_LIST || ray_len(spec) < 2)
-        return ray_error("type", "%s: last arg must be (q;(f;c)..)", nm);
+        return q_err(QE_TYPE);
     ray_t* keys = qj_norm_keys(f);
     if (!keys || ray_len(keys) < 2) {
         if (keys) ray_release(keys);
-        return ray_error("type", "%s: f must name equality key(s) plus the time key", nm);
+        return q_err(QE_TYPE);
     }
     ray_t** se = (ray_t**)ray_data(spec);
     ray_t* qt = se[0];
     if (!qt || qt->type != RAY_TABLE) {
         ray_release(keys);
-        return ray_error("type", "%s: aggregation source must be a table", nm);
+        return q_err(QE_TYPE);
     }
     /* keys as a plain SYM vector (engine reads cells by width helpers) */
     int64_t nk = ray_len(keys);
     ray_t** ke = (ray_t**)ray_data(keys);
     ray_t* kv = ray_sym_vec_new(RAY_SYM_W64, nk);
-    if (!kv || RAY_IS_ERR(kv)) { ray_release(keys); return kv ? kv : ray_error("oom", NULL); }
+    if (!kv || RAY_IS_ERR(kv)) { ray_release(keys); return kv ? kv : q_err(QE_OOM); }
     for (int64_t i = 0; i < nk; i++) {
         int64_t id = ke[i]->i64;
         kv = ray_vec_append(kv, &id);
-        if (!kv || RAY_IS_ERR(kv)) { ray_release(keys); return kv ? kv : ray_error("oom", NULL); }
+        if (!kv || RAY_IS_ERR(kv)) { ray_release(keys); return kv ? kv : q_err(QE_OOM); }
     }
     ray_release(keys);
     /* agg dict from the (fnvalue; `col) pairs */
     int64_t na = ray_len(spec) - 1;
     ray_t* dk = ray_sym_vec_new(RAY_SYM_W64, na > 0 ? na : 1);
-    if (!dk || RAY_IS_ERR(dk)) { ray_release(kv); return dk ? dk : ray_error("oom", NULL); }
+    if (!dk || RAY_IS_ERR(dk)) { ray_release(kv); return dk ? dk : q_err(QE_OOM); }
     ray_t* dv = ray_list_new(na > 0 ? na : 1);
     if (RAY_IS_ERR(dv)) { ray_release(dk); ray_release(kv); return dv; }
     for (int64_t a = 0; a < na; a++) {
@@ -916,20 +916,20 @@ static ray_t* qj_wj_core(ray_t** args, int64_t n, int mode) {
                          ? (ray_t**)ray_data(pr) : NULL;
         if (!pe || !pe[1] || pe[1]->type != -RAY_SYM) {
             ray_release(dk); ray_release(dv); ray_release(kv);
-            return ray_error("type", "%s: aggregations must be (fn;`col) pairs", nm);
+            return q_err(QE_TYPE);
         }
         q_provenance_t p;
         if (!pe[0] || !q_registry_provenance(pe[0], &p) || p.valence != Q_MONADIC) {
             ray_release(dk); ray_release(dv); ray_release(kv);
-            return ray_error("nyi", "%s: aggregation must be a named builtin (raw `::` windows deferred)", nm);
+            return q_err(QE_NYI);
         }
         int64_t col_id = pe[1]->i64;
         dk = ray_vec_append(dk, &col_id);
-        if (!dk || RAY_IS_ERR(dk)) { ray_release(dv); ray_release(kv); return dk ? dk : ray_error("oom", NULL); }
+        if (!dk || RAY_IS_ERR(dk)) { ray_release(dv); ray_release(kv); return dk ? dk : q_err(QE_OOM); }
         ray_t* op = ray_sym(ray_sym_intern_runtime(p.spelling, strlen(p.spelling)));
-        if (!op || RAY_IS_ERR(op)) { ray_release(dk); ray_release(dv); ray_release(kv); return op ? op : ray_error("oom", NULL); }
+        if (!op || RAY_IS_ERR(op)) { ray_release(dk); ray_release(dv); ray_release(kv); return op ? op : q_err(QE_OOM); }
         ray_t* cs = ray_sym(col_id);
-        if (!cs || RAY_IS_ERR(cs)) { ray_release(op); ray_release(dk); ray_release(dv); ray_release(kv); return cs ? cs : ray_error("oom", NULL); }
+        if (!cs || RAY_IS_ERR(cs)) { ray_release(op); ray_release(dk); ray_release(dv); ray_release(kv); return cs ? cs : q_err(QE_OOM); }
         ray_t* pair = ray_list_new(2);
         if (RAY_IS_ERR(pair)) { ray_release(op); ray_release(cs); ray_release(dk); ray_release(dv); ray_release(kv); return pair; }
         pair = ray_list_append(pair, op);
@@ -942,7 +942,7 @@ static ray_t* qj_wj_core(ray_t** args, int64_t n, int mode) {
         if (RAY_IS_ERR(dv)) { ray_release(dk); ray_release(kv); return dv; }
     }
     ray_t* aggd = ray_dict_new(dk, dv);                    /* consumes both */
-    if (!aggd || RAY_IS_ERR(aggd)) { ray_release(kv); return aggd ? aggd : ray_error("type", NULL); }
+    if (!aggd || RAY_IS_ERR(aggd)) { ray_release(kv); return aggd ? aggd : q_err(QE_TYPE); }
     /* intervals: wrap (lo;hi) as a list-constructor application so the
      * special form's arg-eval rebuilds (not applies) it */
     ray_t** we = (ray_t**)ray_data(w);
@@ -971,11 +971,11 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
  * order (first match per row); a miss yields a null row. */
 ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
     if (!q_table_is_keyed(kt) || !keytbl || keytbl->type != RAY_TABLE)
-        return ray_error("type", "index: keyed-table lookup expects a key table");
+        return q_err(QE_TYPE);
     ray_t* kk = ray_dict_keys(kt);                         /* borrowed */
     ray_t* kv = ray_dict_vals(kt);                         /* borrowed */
     ray_t* keys = qj_key_syms(kk);
-    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : ray_error("type", NULL);
+    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : q_err(QE_TYPE);
     /* all key columns must exist in keytbl (by name) */
     {
         int64_t nk = ray_len(keys);
@@ -983,7 +983,7 @@ ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
         for (int64_t i = 0; i < nk; i++)
             if (!ray_table_get_col(keytbl, ke[i]->i64)) {
                 ray_release(keys);
-                return ray_error("type", "index: key column missing from lookup table");
+                return q_err(QE_TYPE);
             }
     }
     ray_t* kflat = q_table_flatten(kt);
@@ -996,7 +996,7 @@ ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
     int64_t* fmap = qj_first_map(pairs, np, nx);
     free(pairs);
     ray_release(keys);
-    if (!fmap) return ray_error("wsfull", "index: out of memory");
+    if (!fmap) return q_err(QE_WSFULL);
     ray_t* out = qj_table_gather_idx(kv, fmap, nx);
     free(fmap);
     return out;

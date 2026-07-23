@@ -4,6 +4,7 @@
  * Evicted from q_builtins.c + ops/q_io.c so the registration hub registers
  * and the string domain lives once. */
 #include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_text_bytes) */
+#include "qlang/q_err.h"
 #include "qlang/eval/q_eval.h"         /* q_eval_apply_is_fn / q_eval_apply_value — ssr fn replacement */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
 #include "qlang/q_fmt.h"               /* q_fmt_float — string's float leaf */
@@ -22,12 +23,12 @@
  * strings (`string 192 168 1 23` -> ("192";"168";"1";"23")) — the base
  * formatter would instead render the whole vector as one bracketed string. */
 ray_t* q_string_fn(ray_t* x) {
-    if (!x) return ray_error("type", "string: nil");
+    if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_charv("::", 2);   /* its display form
                                                       * (owner ruling 2026-07-23) */
     if (x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);        /* borrowed */
-        if (!s) return ray_error("type", "string: bad symbol");
+        if (!s) return q_err(QE_TYPE);
         return q_charv_of_str(s);              /* `ibm -> "ibm" (charv) */
     }
     if (x->type == -RAY_STR) { ray_retain(x); return x; }
@@ -72,7 +73,7 @@ static void str_case_bytes(const char* p, size_t n, char* b, int up) {
         b[i] = (char)(up ? toupper((unsigned char)p[i]) : tolower((unsigned char)p[i]));
 }
 static ray_t* str_case_leaf(ray_t* x, int64_t up) {
-    if (!x) return ray_error("type", "%s: nil", up ? "upper" : "lower");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_CHARV)                       /* char atom stays an atom */
         return ray_char((uint8_t)(up ? toupper(x->u8) : tolower(x->u8)));
     if (x->type == RAY_CHARV) {                      /* char vector, in place-of-copy */
@@ -87,7 +88,7 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
         size_t n = ray_str_len(x);
         char stack[256];
         char* b = (n < sizeof stack) ? stack : malloc(n + 1);
-        if (!b) return ray_error("wsfull", "%s: out of memory", up ? "upper" : "lower");
+        if (!b) return q_err(QE_WSFULL);
         str_case_bytes(p, n, b, up);
         ray_t* r = ray_str(b, n);
         if (b != stack) free(b);
@@ -95,12 +96,12 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
     }
     if (x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);   /* borrowed */
-        if (!s) return ray_error("type", "%s: bad symbol", up ? "upper" : "lower");
+        if (!s) return q_err(QE_TYPE);
         const char* p = ray_str_ptr(s);
         size_t n = ray_str_len(s);
         char stack[256];
         char* b = (n < sizeof stack) ? stack : malloc(n + 1);
-        if (!b) return ray_error("wsfull", "%s: out of memory", up ? "upper" : "lower");
+        if (!b) return q_err(QE_WSFULL);
         str_case_bytes(p, n, b, up);
         int64_t id = ray_sym_intern(b, n);
         if (b != stack) free(b);
@@ -116,7 +117,7 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
             size_t sn = s ? ray_str_len(s) : 0;
             char stack[256];
             char* b = (sn < sizeof stack) ? stack : malloc(sn + 1);
-            if (!b) { ray_release(out); return ray_error("wsfull", "%s: oom", up ? "upper" : "lower"); }
+            if (!b) { ray_release(out); return q_err(QE_WSFULL); }
             str_case_bytes(p, sn, b, up);
             int64_t id = ray_sym_intern(b, sn);
             if (b != stack) free(b);
@@ -133,7 +134,7 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
             size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
             char stack[256];
             char* b = (sn < sizeof stack) ? stack : malloc(sn + 1);
-            if (!b) { ray_release(out); return ray_error("wsfull", "%s: oom", up ? "upper" : "lower"); }
+            if (!b) { ray_release(out); return q_err(QE_WSFULL); }
             str_case_bytes(p ? p : "", p ? sn : 0, b, up);
             ray_t* r = ray_str(b, p ? sn : 0);
             if (b != stack) free(b);
@@ -143,7 +144,7 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
         }
         return out;
     }
-    return ray_error("type", "%s: expects a string or symbol", up ? "upper" : "lower");
+    return q_err(QE_TYPE);
 }
 ray_t* q_upper_fn(ray_t* x) { return str_case_leaf(x, 1); }
 ray_t* q_lower_fn(ray_t* x) { return str_case_leaf(x, 0); }
@@ -155,7 +156,7 @@ ray_t* q_lower_fn(ray_t* x) { return str_case_leaf(x, 0); }
 static int str_is_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
-    if (!x) return ray_error("type", "trim: nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_STR) {
         const char* p = ray_str_ptr(x);
         size_t n = ray_str_len(x), a = 0, b = n;
@@ -279,7 +280,7 @@ static int64_t str_glob_fixed_at(const char* s, size_t sn, size_t pos,
 ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
     const char* sp; int64_t sn64; const char* pp; int64_t pn64;
     if (!q_text_bytes(s, &sp, &sn64) || !q_text_bytes(p, &pp, &pn64))
-        return ray_error("type", "ss: expects string arguments");
+        return q_err(QE_TYPE);
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
     ray_t* out = ray_vec_new(RAY_I64, 8);
     if (RAY_IS_ERR(out)) return out;
@@ -301,23 +302,23 @@ ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
  * glob pattern p in s.  r is either a replacement string, or a function
  * applied to each matched substring (kdb: `ssr[s;"t?r";upper]`). */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
-    if (n != 3) return ray_error("rank", "ssr: expects 3 args");
+    if (n != 3) return q_err(QE_RANK);
     ray_t* s = args[0]; ray_t* p = args[1]; ray_t* r = args[2];
     const char* sp; int64_t sn64; const char* pp; int64_t pn64;
     if (!q_text_bytes(s, &sp, &sn64) || !q_text_bytes(p, &pp, &pn64))
-        return ray_error("type", "ssr: s and p must be strings");
+        return q_err(QE_TYPE);
     int r_is_fn = q_eval_apply_is_fn(r);
     { const char* rp_; int64_t rn_;
       if (!r_is_fn && !q_text_bytes(r, &rp_, &rn_))
-          return ray_error("type", "ssr: replacement must be a string or function"); }
+          return q_err(QE_TYPE); }
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
     size_t cap = sn + 16, blen = 0;
     char* b = (char*)malloc(cap);
-    if (!b) return ray_error("wsfull", "ssr: out of memory");
+    if (!b) return q_err(QE_WSFULL);
     #define SSR_PUSH(PTR, L) do { \
         size_t _l = (L); \
         if (blen + _l > cap) { cap = (blen + _l) * 2; char* nb = (char*)realloc(b, cap); \
-            if (!nb) { free(b); return ray_error("wsfull", "ssr: out of memory"); } b = nb; } \
+            if (!nb) { free(b); return q_err(QE_WSFULL); } b = nb; } \
         memcpy(b + blen, (PTR), _l); blen += _l; } while (0)
     ray_t* err = NULL;
     size_t i = 0;
@@ -334,7 +335,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
                 ray_release(sub);
                 if (!rep || RAY_IS_ERR(rep)) { err = rep; break; }
                 { const char* qp; int64_t qn;
-                  if (!q_text_bytes(rep, &qp, &qn)) { ray_release(rep); err = ray_error("type", "ssr: replacement fn must return a string"); break; }
+                  if (!q_text_bytes(rep, &qp, &qn)) { ray_release(rep); err = q_err(QE_TYPE); break; }
                   SSR_PUSH(qp, (size_t)qn); }
                 ray_release(rep);
             } else {

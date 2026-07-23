@@ -5,6 +5,7 @@
  * record. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_handles.h"
+#include "qlang/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_text_bytes, q_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
@@ -146,9 +147,9 @@ int64_t q_handles_user_sym(int64_t fd) {
 /* POSIX open, NOT .ipc.open (IPC-only).  Handle = the real fd; registered so
  * apply/hclose/read1 recognise it.  Restricted mode refuses (writes the fs). */
 ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
-    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     char* p = (char*)malloc(plen + 1);
-    if (!p) return ray_error("oom", NULL);
+    if (!p) return q_err(QE_OOM);
     memcpy(p, path, plen); p[plen] = '\0';
     if (!is_fifo) {                  /* hopen.md: a missing filepath "is created,
                                       * including directories" (fifos must exist) */
@@ -162,18 +163,18 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
     }
     int flags = is_fifo ? O_RDONLY : (O_WRONLY | O_CREAT | O_APPEND);
     int fd = open(p, flags, 0666);
-    if (fd < 0) { free(p); return ray_error("io", NULL); }
+    if (fd < 0) { free(p); return q_err(QE_IO); }
     if (fd < 3) {                    /* std fds closed: 0 is rejected by dispatch,
                                       * 1/2 are console handles — force fd >= 3 */
         int hi = fcntl(fd, F_DUPFD, 3);
         close(fd);
-        if (hi < 0) { free(p); return ray_error("io", NULL); }
+        if (hi < 0) { free(p); return q_err(QE_IO); }
         fd = hi;
     }
     if (!q_handles_register((int64_t)fd, is_fifo ? Q_HANDLE_FIFO : Q_HANDLE_FILE, 1, p, plen)) {
         close(fd);                   /* an unregistered raw handle is unusable — fail cleanly */
         free(p);
-        return ray_error("oom", NULL);
+        return q_err(QE_OOM);
     }
     free(p);
     return make_i64((int64_t)fd);
@@ -204,8 +205,8 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
     if (y && y->type == RAY_BYTE_ONLY) { yp = (const char*)ray_data(y); yn = ray_len(y); }
     else if (!(y && q_text_bytes(y, &yp, &yn))) yp = NULL;
     if (yp) {
-        if (yn > 0 && write_all(fd, yp, yn) < 0) return ray_error("io", NULL);
-        if (nl && write_all(fd, "\n", 1) < 0) return ray_error("io", NULL);
+        if (yn > 0 && write_all(fd, yp, yn) < 0) return q_err(QE_IO);
+        if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
         return make_i64(qh);
     }
     if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
@@ -214,16 +215,16 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
             ray_t* ia = make_i64(i);
             ray_t* it = ray_at_fn(y, ia);
             ray_release(ia);
-            if (!it || RAY_IS_ERR(it)) return it ? it : ray_error("oom", NULL);
+            if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
             const char* ip; int64_t in_;
-            if (!q_text_bytes(it, &ip, &in_)) { ray_release(it); return ray_error("type", "handle write: expected strings"); }
-            if (in_ > 0 && write_all(fd, ip, in_) < 0) { ray_release(it); return ray_error("io", NULL); }
+            if (!q_text_bytes(it, &ip, &in_)) { ray_release(it); return q_err(QE_TYPE); }
+            if (in_ > 0 && write_all(fd, ip, in_) < 0) { ray_release(it); return q_err(QE_IO); }
             ray_release(it);
-            if (nl && write_all(fd, "\n", 1) < 0) return ray_error("io", NULL);
+            if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
         }
         return make_i64(qh);
     }
-    return ray_error("type", "handle write: expected a string or list of strings");
+    return q_err(QE_TYPE);
 }
 
 /* Console handles (kdb basics/handles.md): 1/-1 stdout, 2/-2 stderr, routed
@@ -240,18 +241,18 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
             ray_t* ia = make_i64(i);
             ray_t* it = ray_at_fn(y, ia);
             ray_release(ia);
-            if (!it || RAY_IS_ERR(it)) return it ? it : ray_error("oom", NULL);
+            if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
             const char* ip; int64_t in_;
             if (!q_text_bytes(it, &ip, &in_)) {
                 ray_release(it);
-                return ray_error("type", "handle write: expected strings");
+                return q_err(QE_TYPE);
             }
             q_console_write(ip, (size_t)in_);
             if (nl) q_console_write("\n", 1);
             ray_release(it);
         }
     } else
-        return ray_error("type", "handle write: expected a string or list of strings");
+        return q_err(QE_TYPE);
     return make_i64(qh);
 }
 
@@ -267,21 +268,21 @@ ray_t* q_handles_apply(int64_t qh, ray_t* y) {
     if (afd >= 3) {
         int hk = q_handles_kind(afd);
         if (hk == Q_HANDLE_FILE) {
-            if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+            if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
             return raw_write(qh, y);
         }
         if (hk == Q_HANDLE_FIFO) {
-            if (ray_eval_get_restricted()) return ray_error("access", "restricted");
-            return ray_error("nyi", "handle apply: fifo write handles are deferred (Phase 1 fifo is read-only)");
+            if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+            return q_err(QE_NYI);
         }
     }
-    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (qh == 0 || qh == INT64_MIN || qh == INT32_MIN)   /* console-0 / int nulls */
-        return ray_error("type", "handle apply: invalid handle %lld", (long long)qh);
+        return q_err(QE_TYPE);
     int64_t fd  = (qh > 0) ? qh : -qh;         /* q handle is the socket fd */
     int64_t raw = ray_ipc_handle_of_fd(fd);    /* fd -> poll selector id */
     if (raw < 0)
-        return ray_error("type", "handle apply: invalid handle %lld", (long long)qh);
+        return q_err(QE_TYPE);
     ray_t* rawh = make_i64(raw);
     ray_t* r    = (qh > 0) ? ray_hsend_fn(rawh, y)   /* sync  */
                            : ray_hpost_fn(rawh, y);  /* async */
@@ -315,13 +316,13 @@ ray_t* q_handles_close(int64_t qh) {
 ray_t* q_handles_read1(int64_t fd, ray_t* count) {
     if (q_handles_kind(fd) != Q_HANDLE_FIFO) return NULL;
     int64_t want;
-    if (!q_strict_i64(count, &want)) return ray_error("type", "read1: length");
-    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (!q_strict_i64(count, &want)) return q_err(QE_TYPE);
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (want <= 0) want = 65536;
     uint8_t* buf = (uint8_t*)malloc((size_t)want);
-    if (!buf) return ray_error("oom", NULL);
+    if (!buf) return q_err(QE_OOM);
     ssize_t got = read((int)fd, buf, (size_t)want);
-    if (got < 0) { free(buf); return ray_error("io", NULL); }
+    if (got < 0) { free(buf); return q_err(QE_IO); }
     ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, buf, (int64_t)got);
     free(buf);
     return out;

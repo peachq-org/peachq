@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/eval/q_eval.h"
+#include "qlang/q_err.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_parse_internal.h"
@@ -35,7 +36,7 @@
 /* kind lives in aux[0] — the i64 union slot IS len for the slot count */
 static ray_t* car_new(int kind, int64_t nslots) {
     ray_t* c = ray_alloc((size_t)nslots * sizeof(ray_t*));
-    if (!c) return ray_error("oom", NULL);
+    if (!c) return q_err(QE_OOM);
     c->type = RAY_QFN;
     c->attrs = 0;
     c->len = nslots;
@@ -66,7 +67,7 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
     if (child && !RAY_IS_ERR(child)) { car_slots(c)[i] = child; return c; }
     ray_release(c);
     if (child) return child;
-    return ray_error("oom", NULL);
+    return q_err(QE_OOM);
 }
 
 /* lambda carrier: [params symvec, body list, src string] */
@@ -75,7 +76,7 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
     ray_t* b = ray_list_new(nbody > 0 ? nbody : 1);
     for (int64_t i = 0; i < nbody; i++)
         b = ray_list_append(b, body[i]);
-    if (!b || RAY_IS_ERR(b)) return b ? b : ray_error("oom", NULL);
+    if (!b || RAY_IS_ERR(b)) return b ? b : q_err(QE_OOM);
     ray_t* c = car_new(Q_EVAL_CAR_LAMBDA, 3);
     if (RAY_IS_ERR(c)) { ray_release(b); return c; }
     ray_t** s = car_slots(c);
@@ -290,7 +291,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
         for (int64_t i = 1; i < len; i++) {
             if ((i & 0xFFF) == 0 && ray_eval_is_interrupted()) {
                 ray_release(vec);
-                return ray_error("stop", NULL);
+                return q_err(QE_STOP);
             }
             ray_t* e = q_registry_elem_at(arg, i);
             ray_t* r = RAY_IS_ERR(e) ? e : fn(e);
@@ -298,7 +299,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
             if (RAY_IS_ERR(r)) { ray_release(vec); return r; }
             if (store_elem(vec, i, r) != 0) {
                 ray_release(r); ray_release(vec);
-                return ray_error("type", NULL);
+                return q_err(QE_TYPE);
             }
             ray_release(r);
         }
@@ -332,7 +333,7 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
     if (!lc && !rc) return fn(l, r);
     int64_t len;
     if (lc && rc) {
-        if (ray_len(l) != ray_len(r)) return ray_error("length", NULL);
+        if (ray_len(l) != ray_len(r)) return q_err(QE_LENGTH);
         len = ray_len(l);
     } else {
         len = lc ? ray_len(l) : ray_len(r);
@@ -387,18 +388,18 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
         for (int64_t i = 1; i < len; i++) {
             if ((i & 0xFFF) == 0 && ray_eval_is_interrupted()) {
                 ray_release(vec);
-                return ray_error("stop", NULL);
+                return q_err(QE_STOP);
             }
             ray_t* a = lc ? q_registry_elem_at(l, i) : l;
             ray_t* b = rc ? q_registry_elem_at(r, i) : r;
-            ray_t* e = (RAY_IS_ERR(a) || RAY_IS_ERR(b)) ? ray_error("type", NULL)
+            ray_t* e = (RAY_IS_ERR(a) || RAY_IS_ERR(b)) ? q_err(QE_TYPE)
                                                         : fn(a, b);
             if (lc && a != e) ray_release(a);
             if (rc && b != e) ray_release(b);
             if (RAY_IS_ERR(e)) { ray_release(vec); return e; }
             if (store_elem(vec, i, e) != 0) {
                 ray_release(e); ray_release(vec);
-                return ray_error("type", NULL);
+                return q_err(QE_TYPE);
             }
             ray_release(e);
         }
@@ -432,7 +433,7 @@ static ray_t* table_percol(ray_t* t, ray_t* (*colfn)(void* ctx, ray_t* col),
         ray_t* r = store_mat(colfn(ctx, col));
         if (!r || RAY_IS_ERR(r)) {
             ray_release(out);
-            return r ? r : ray_error("type", NULL);
+            return r ? r : q_err(QE_TYPE);
         }
         out = ray_table_add_col(out, ray_table_col_name(t, c), r);
         ray_release(r);
@@ -445,7 +446,7 @@ static ray_t* atomic1_col(void* ctx, ray_t* col) {
 }
 
 static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
-    if (!x) return ray_error("type", NULL);
+    if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_DICT) {
         ray_t* nv = atomic1(f, ray_dict_vals(x));
         if (RAY_IS_ERR(nv)) return nv;
@@ -463,7 +464,7 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
  * singletons pass through) */
 static ray_t* atomic2_dicts(ray_binary_fn f, ray_t* x, ray_t* y) {
     ray_t* uk = ray_union_fn(ray_dict_keys(x), ray_dict_keys(y));
-    if (!uk || RAY_IS_ERR(uk)) return uk ? uk : ray_error("type", NULL);
+    if (!uk || RAY_IS_ERR(uk)) return uk ? uk : q_err(QE_TYPE);
     int64_t n = ray_len(uk);
     ray_t* vx = ray_dict_vals(x);
     ray_t* vy = ray_dict_vals(y);
@@ -488,7 +489,7 @@ static ray_t* atomic2_dicts(ray_binary_fn f, ray_t* x, ray_t* y) {
         if (!r || RAY_IS_ERR(r)) {
             ray_release(out);
             ray_release(uk);
-            return r ? r : ray_error("type", NULL);
+            return r ? r : q_err(QE_TYPE);
         }
         out = ray_list_append(out, r);
         ray_release(r);
@@ -505,13 +506,13 @@ static ray_t* atomic2_col(void* vctx, ray_t* col) {
 }
 
 static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", NULL);
+    if (!x || !y) return q_err(QE_TYPE);
     int xd = x->type == RAY_DICT, yd = y->type == RAY_DICT;
     if (xd && yd) return atomic2_dicts(f, x, y);
     if (xd || yd) {
         ray_t* d = xd ? x : y;
         ray_t* o = xd ? y : x;
-        if (o->type == RAY_TABLE) return ray_error("nyi", NULL);
+        if (o->type == RAY_TABLE) return q_err(QE_NYI);
         ray_t* nv = xd ? atomic2(f, ray_dict_vals(d), o)
                        : atomic2(f, o, ray_dict_vals(d));
         if (RAY_IS_ERR(nv)) return nv;
@@ -523,7 +524,7 @@ static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
         int xt = x->type == RAY_TABLE;
         ray_t* t = xt ? x : y;
         ray_t* o = xt ? y : x;
-        if (o->type == RAY_TABLE || is_coll(o)) return ray_error("nyi", NULL);
+        if (o->type == RAY_TABLE || is_coll(o)) return q_err(QE_NYI);
         a2ctx ctx = { f, o, !xt };
         return table_percol(t, atomic2_col, &ctx);
     }
@@ -553,7 +554,7 @@ static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
         }
         return ray_dict_new(ks, collapse(vs));
     }
-    return ray_error("type", NULL);
+    return q_err(QE_TYPE);
 }
 
 /* ===== L2 map lift ======================================================= */
@@ -581,7 +582,7 @@ static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* x) {
         }
         return out;
     }
-    return ray_error("type", NULL);
+    return q_err(QE_TYPE);
 }
 
 /* ===== kernel invocation ================================================= */
@@ -598,36 +599,36 @@ static ray_t* force_arg(ray_t* fv, ray_t* a, int* owned) {
 }
 
 static ray_t* call_kernel(ray_t* fv, ray_t** args, int64_t n) {
-    if (fv->attrs & RAY_FN_SPECIAL_FORM) return ray_error("nyi", NULL);
+    if (fv->attrs & RAY_FN_SPECIAL_FORM) return q_err(QE_NYI);
     if (fv->type == RAY_UNARY) {
-        if (n != 1) return ray_error("rank", NULL);
+        if (n != 1) return q_err(QE_RANK);
         int o;
         ray_t* a = force_arg(fv, args[0], &o);
-        if (!a || RAY_IS_ERR(a)) return a ? a : ray_error("type", NULL);
+        if (!a || RAY_IS_ERR(a)) return a ? a : q_err(QE_TYPE);
         ray_t* r = ((ray_unary_fn)(uintptr_t)fv->i64)(a);
         if (o) ray_release(a);
-        return r ? r : ray_error("type", NULL);
+        return r ? r : q_err(QE_TYPE);
     }
     if (fv->type == RAY_BINARY) {
-        if (n != 2) return ray_error("rank", NULL);
+        if (n != 2) return q_err(QE_RANK);
         int oa, ob;
         ray_t* a = force_arg(fv, args[0], &oa);
-        if (!a || RAY_IS_ERR(a)) return a ? a : ray_error("type", NULL);
+        if (!a || RAY_IS_ERR(a)) return a ? a : q_err(QE_TYPE);
         ray_t* b = force_arg(fv, args[1], &ob);
         if (!b || RAY_IS_ERR(b)) {
             if (oa) ray_release(a);
-            return b ? b : ray_error("type", NULL);
+            return b ? b : q_err(QE_TYPE);
         }
         ray_t* r = ((ray_binary_fn)(uintptr_t)fv->i64)(a, b);
         if (oa) ray_release(a);
         if (ob) ray_release(b);
-        return r ? r : ray_error("type", NULL);
+        return r ? r : q_err(QE_TYPE);
     }
     if (fv->type == RAY_VARY) {
         ray_t* r = ((ray_vary_fn)(uintptr_t)fv->i64)(args, n);
-        return r ? r : ray_error("type", NULL);
+        return r ? r : q_err(QE_TYPE);
     }
-    return ray_error("type", NULL);
+    return q_err(QE_TYPE);
 }
 
 /* ===== L4 index lift: op t = t @ op til count t (ONE gather) ============= */
@@ -637,13 +638,13 @@ static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
     ray_t* nrv = ray_i64(ray_table_nrows(t));
     ray_t* til = ray_til_fn(nrv);
     ray_release(nrv);
-    if (!til || RAY_IS_ERR(til)) return til ? til : ray_error("type", NULL);
+    if (!til || RAY_IS_ERR(til)) return til ? til : q_err(QE_TYPE);
     ray_t* iargs[2];
     if (n == 2) { iargs[0] = args[0]; iargs[1] = til; }
     else        { iargs[0] = til; }
     ray_t* idx = call_kernel(fv, iargs, n);
     ray_release(til);
-    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("type", NULL);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_TYPE);
     int64_t nc = ray_table_ncols(t);
     ray_t* out = ray_table_new(nc);
     for (int64_t c = 0; c < nc; c++) {
@@ -651,7 +652,7 @@ static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
         if (!g || RAY_IS_ERR(g)) {
             ray_release(out);
             ray_release(idx);
-            return g ? g : ray_error("type", NULL);
+            return g ? g : q_err(QE_TYPE);
         }
         out = ray_table_add_col(out, ray_table_col_name(t, c), g);
         ray_release(g);
@@ -663,12 +664,12 @@ static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
 /* ===== adverbs: native application + manifest monomorphization =========== */
 
 static ray_t* fold_over(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
-    if (!is_coll(x)) return ray_error("nyi", NULL);   /* converge/do: punt */
+    if (!is_coll(x)) return q_err(QE_NYI);   /* converge/do: punt */
     int64_t len = ray_len(x);
     if (len == 0) {
         if (seed) { ray_retain(seed); return seed; }
         ray_t* id = frow ? q_ops_acc_identity(frow->name) : NULL;
-        return id ? id : ray_error("nyi", NULL);
+        return id ? id : q_err(QE_NYI);
     }
     ray_t* acc;
     int64_t i0;
@@ -710,7 +711,7 @@ static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
 
 ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const q_op_t* frow,
                            ray_t** args, int64_t n) {
-    if (!fv) return ray_error("type", NULL);
+    if (!fv) return q_err(QE_TYPE);
     if (adv == 1) {                                        /* `/` over */
         if (n == 1) {
             /* mono column: f/ of a registered dyad IS its aggregate kernel.
@@ -727,10 +728,10 @@ ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const q_op_t* frow,
             return fold_over(fv, frow, NULL, args[0]);
         }
         if (n == 2) return fold_over(fv, frow, args[0], args[1]);
-        return ray_error("rank", NULL);
+        return q_err(QE_RANK);
     }
     if (adv == 0 && n == 1) return each1(fv, frow, args[0]);
-    return ray_error("nyi", NULL);          /* \ ': /: \: — native arms later */
+    return q_err(QE_NYI);          /* \ ': /: \: — native arms later */
 }
 
 /* keyword-HOF row (each/peach/over/scan/prior): adverb_hof -> adv id */
@@ -759,7 +760,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     ray_t* body = c[1];
     /* barrier frame: strictly-local resolution (function-notation.md) —
      * the body sees its params/locals and globals, never a caller frame */
-    if (ray_env_push_scope_barrier() != RAY_OK) return ray_error("stack", NULL);
+    if (ray_env_push_scope_barrier() != RAY_OK) return q_err(QE_STACK);
     for (int64_t i = 0; i < n; i++) {
         ray_t* p = q_registry_elem_at(params, i);          /* sym atom */
         if (p && !RAY_IS_ERR(p)) {
@@ -791,12 +792,12 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
     int64_t rank = ray_len(proj) - 2;
     ray_t* merged[APPLY_MAX_ARGS];
     int64_t ai = 0, holes = 0;
-    if (rank > APPLY_MAX_ARGS) return ray_error("rank", NULL);
+    if (rank > APPLY_MAX_ARGS) return q_err(QE_RANK);
     for (int64_t i = 0; i < rank; i++) {
         merged[i] = (!c[2 + i] && ai < n) ? args[ai++] : c[2 + i];
         if (!merged[i]) holes++;
     }
-    if (ai < n) return ray_error("rank", NULL);
+    if (ai < n) return q_err(QE_RANK);
     if (holes > 0) return proj_new(fv, row, merged, rank, rank);
     return q_eval_apply(fv, row, merged, rank);
 }
@@ -837,7 +838,7 @@ static int8_t dict_val_null_type(ray_t* vals) {
  * hit returns the stored value; a miss the typed null of the dict's VALUE
  * type.  A vector of keys loops with those miss semantics, then collapses. */
 static ray_t* dict_lookup(ray_t* d, ray_t* idx) {
-    if (q_table_is_keyed(d)) return ray_error("nyi", NULL);
+    if (q_table_is_keyed(d)) return q_err(QE_NYI);
     ray_t* vals = ray_dict_vals(d);                  /* borrowed accessor */
     int8_t vt = dict_val_null_type(vals);
     if (ray_is_vec(idx) || idx->type == RAY_LIST) {
@@ -879,13 +880,13 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
             (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
             if (n == 1 && is_text_atom(args[0]))
                 return q_ws_client_open(head, args[0]);
-            return ray_error("type", NULL);
+            return q_err(QE_TYPE);
         }
         if ((sl >= 8 && memcmp(sp, ":http://", 8) == 0) ||
             (sl >= 9 && memcmp(sp, ":https://", 9) == 0)) {
             if (n == 1 && is_text_atom(args[0]))
                 return q_http_client_raw(head, args[0]);
-            return ray_error("type", NULL);
+            return q_err(QE_TYPE);
         }
         /* one-shot sync IPC (ref/hopen.md): connect -> send -> close */
         if (n == 1 && args[0] &&
@@ -898,12 +899,12 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
             ray_release(h);
             return r;
         }
-        return ray_error("type", NULL);              /* file handle: no apply */
+        return q_err(QE_TYPE);              /* file handle: no apply */
     }
     ray_t* v = ray_env_resolve(head->i64);           /* owned or NULL */
-    if (!v) return ray_error("type", NULL);
+    if (!v) return q_err(QE_TYPE);
     if (RAY_IS_ERR(v)) return v;
-    if (v->type == -RAY_SYM) { ray_release(v); return ray_error("type", NULL); }
+    if (v->type == -RAY_SYM) { ray_release(v); return q_err(QE_TYPE); }
     ray_t* r = q_eval_apply_value(v, args, n);
     ray_release(v);
     return r;
@@ -917,7 +918,7 @@ static ray_t* step1(ray_t* cur, ray_t* idx) {
         return r ? r : ray_at_fn(cur, idx);
     }
     if (!(ray_is_vec(cur) || cur->type == RAY_LIST))
-        return ray_error("type", NULL);
+        return q_err(QE_TYPE);
     return gather(cur, idx);
 }
 
@@ -933,7 +934,7 @@ static ray_t* all_items(ray_t* v, ray_t** ix, int64_t k) {
         if (r != e && e && !RAY_IS_ERR(e)) ray_release(e);
         if (!r || RAY_IS_ERR(r)) {
             ray_release(out);
-            return r ? r : ray_error("type", NULL);
+            return r ? r : q_err(QE_TYPE);
         }
         out = ray_list_append(out, r);
         ray_release(r);
@@ -945,14 +946,14 @@ static ray_t* all_items(ray_t* v, ray_t** ix, int64_t k) {
  * elided index selects all at its depth; a list index distributes
  * (m[0 1;1] is (m[0;1];m[1;1])); an atom drills one level. */
 static ray_t* at_depth(ray_t* v, ray_t** ix, int64_t k) {
-    if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("type", NULL);
+    if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
     if (k <= 0) { ray_retain(v); return v; }
     ray_t* i0 = ix[0];
     if (!i0 || RAY_IS_NULL(i0)) {
         if (v->type == RAY_DICT && !q_table_is_keyed(v))
             return all_items(ray_dict_vals(v), ix + 1, k - 1);
         if (v->type == RAY_DICT || v->type == RAY_TABLE)
-            return ray_error("nyi", NULL);
+            return q_err(QE_NYI);
         if (k == 1) { ray_retain(v); return v; }
         return all_items(v, ix + 1, k - 1);
     }
@@ -966,14 +967,14 @@ static ray_t* at_depth(ray_t* v, ray_t** ix, int64_t k) {
             ray_t* e = q_registry_elem_at(i0, j);
             if (!e || RAY_IS_ERR(e)) {
                 ray_release(out);
-                return e ? e : ray_error("type", NULL);
+                return e ? e : q_err(QE_TYPE);
             }
             tmp[0] = e;
             ray_t* r = store_mat(at_depth(v, tmp, k));
             ray_release(e);
             if (!r || RAY_IS_ERR(r)) {
                 ray_release(out);
-                return r ? r : ray_error("type", NULL);
+                return r ? r : q_err(QE_TYPE);
             }
             out = ray_list_append(out, r);
             ray_release(r);
@@ -981,14 +982,14 @@ static ray_t* at_depth(ray_t* v, ray_t** ix, int64_t k) {
         return collapse(out);
     }
     ray_t* nx = step1(v, i0);
-    if (!nx || RAY_IS_ERR(nx)) return nx ? nx : ray_error("type", NULL);
+    if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_TYPE);
     ray_t* r = at_depth(nx, ix + 1, k - 1);
     ray_release(nx);
     return r;
 }
 
 static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
-    if (n < 1) return ray_error("rank", NULL);
+    if (n < 1) return q_err(QE_RANK);
     /* handle-as-verb (`h x`): console/file/fifo/socket dispatch lives wholly
      * in q_handles_apply (the sole handle authority) */
     if ((v->type == -RAY_I64 || v->type == -RAY_I32) && n == 1 && args[0]) {
@@ -1005,7 +1006,7 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     }
     if (!(v->type == RAY_DICT || v->type == RAY_TABLE ||
           ray_is_vec(v) || v->type == RAY_LIST))
-        return ray_error("type", NULL);
+        return q_err(QE_TYPE);
     /* a list with elided items applies as a function of that rank — args
      * SUBSTITUTE into the null slots and the result stays a general list
      * (basics/application.md "Applying a list with elided items") */
@@ -1015,7 +1016,7 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
         for (int64_t j = 0; j < len; j++)
             if (it[j] && RAY_IS_NULL(it[j])) nulls++;
         if (nulls > 0) {
-            if (n != nulls) return ray_error("rank", NULL);
+            if (n != nulls) return q_err(QE_RANK);
             ray_t* out = ray_list_new(len > 0 ? len : 1);
             int64_t ai = 0;
             for (int64_t j = 0; j < len; j++) {
@@ -1030,9 +1031,9 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
             return out;
         }
     }
-    if (n > APPLY_MAX_ARGS) return ray_error("rank", NULL);
+    if (n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* r = at_depth(v, args, n);
-    if (!r || RAY_IS_ERR(r)) return r ? r : ray_error("type", NULL);
+    if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
     return q_charv_out(r);     /* boundary-out: charv, never physical STR */
 }
 
@@ -1042,14 +1043,14 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
  * cur/val borrowed; owned result. */
 
 static ray_t* amend_at(ray_t* cur, ray_t** ix, int64_t k, ray_t* val) {
-    if (k <= 0 || !cur || RAY_IS_ERR(cur)) return ray_error("type", NULL);
+    if (k <= 0 || !cur || RAY_IS_ERR(cur)) return q_err(QE_TYPE);
     ray_t* i0 = ix[0];
     if (!i0 || RAY_IS_NULL(i0) || is_coll(i0) || is_container(i0))
-        return ray_error("nyi", NULL);   /* `::`/vector-path amend: later wave */
-    if (!int_atom(i0)) return ray_error("type", NULL);
+        return q_err(QE_NYI);   /* `::`/vector-path amend: later wave */
+    if (!int_atom(i0)) return q_err(QE_TYPE);
     int64_t idx = qe_elem_i64(i0);
     if (cur->type == RAY_LIST) {
-        if (idx < 0 || idx >= ray_len(cur)) return ray_error("index", NULL);
+        if (idx < 0 || idx >= ray_len(cur)) return q_err(QE_INDEX);
         ray_t* nv;
         if (k == 1) {
             ray_retain(val);
@@ -1057,41 +1058,41 @@ static ray_t* amend_at(ray_t* cur, ray_t** ix, int64_t k, ray_t* val) {
             if (RAY_IS_ERR(nv)) return nv;
         } else {
             nv = amend_at(((ray_t**)ray_data(cur))[idx], ix + 1, k - 1, val);
-            if (!nv || RAY_IS_ERR(nv)) return nv ? nv : ray_error("type", NULL);
+            if (!nv || RAY_IS_ERR(nv)) return nv ? nv : q_err(QE_TYPE);
         }
         ray_retain(cur);
         ray_t* nl = ray_list_set(cur, idx, nv);      /* cows; consumes on ok */
         ray_release(nv);
         if (!nl || RAY_IS_ERR(nl)) {
             ray_release(cur);                        /* cow-fail leaves cur */
-            return nl ? nl : ray_error("oom", NULL);
+            return nl ? nl : q_err(QE_OOM);
         }
         return nl;
     }
     if (ray_is_vec(cur) && cur->type != RAY_STR && cur->type != RAY_SYM) {
-        if (k != 1) return ray_error("type", NULL);
-        if (idx < 0 || idx >= ray_len(cur)) return ray_error("index", NULL);
-        if (!ray_is_atom(val)) return ray_error("type", NULL);
+        if (k != 1) return q_err(QE_TYPE);
+        if (idx < 0 || idx >= ray_len(cur)) return q_err(QE_INDEX);
+        if (!ray_is_atom(val)) return q_err(QE_TYPE);
         if (!RAY_ATOM_IS_NULL(val) && (int8_t)-val->type != cur->type)
-            return ray_error("type", NULL);
+            return q_err(QE_TYPE);
         ray_retain(cur);
         ray_t* nv = ray_cow(cur);
         if (!nv || RAY_IS_ERR(nv)) {
             ray_release(cur);                        /* cow-fail leaves cur */
-            return nv ? nv : ray_error("oom", NULL);
+            return nv ? nv : q_err(QE_OOM);
         }
         if (store_elem(nv, idx, val) != 0) {
             ray_release(nv);
-            return ray_error("type", NULL);
+            return q_err(QE_TYPE);
         }
         if (!RAY_ATOM_IS_NULL(val)) ray_vec_set_null(nv, idx, false);
         return nv;
     }
-    return ray_error("nyi", NULL);       /* sym-vec/dict/table amend: later */
+    return q_err(QE_NYI);       /* sym-vec/dict/table amend: later */
 }
 
 ray_t* q_eval_apply_amend(ray_t* cur, ray_t** ix, int64_t k, ray_t* val) {
-    if (k < 1 || k > APPLY_MAX_ARGS) return ray_error("rank", NULL);
+    if (k < 1 || k > APPLY_MAX_ARGS) return q_err(QE_RANK);
     return amend_at(cur, ix, k, val);
 }
 
@@ -1127,9 +1128,9 @@ static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
 }
 
 ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
-    if (!fv || RAY_IS_ERR(fv)) return ray_error("type", NULL);
-    if (ray_eval_is_interrupted()) return ray_error("stop", NULL);
-    if (n < 0 || n > APPLY_MAX_ARGS) return ray_error("rank", NULL);
+    if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
+    if (ray_eval_is_interrupted()) return q_err(QE_STOP);
+    if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
 
     int kind = q_eval_apply_carrier_kind(fv);
     if (kind == Q_EVAL_CAR_PROJ) return proj_call(fv, args, n);
@@ -1170,7 +1171,7 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
         kind == Q_EVAL_CAR_LAMBDA)
         return lambda_call(fv, args, 0);
     if (rank >= 0 && n < rank) return proj_new(fv, row, args, n, rank);
-    if (rank >= 0 && n > rank) return ray_error("rank", NULL);
+    if (rank >= 0 && n > rank) return q_err(QE_RANK);
 
     if (kind == Q_EVAL_CAR_LAMBDA) return lambda_call(fv, args, n);
 
@@ -1247,7 +1248,7 @@ static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row) 
 }
 
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
-    if (!head || RAY_IS_ERR(head)) return ray_error("type", NULL);
+    if (!head || RAY_IS_ERR(head)) return q_err(QE_TYPE);
     if (q_eval_apply_is_fn(head)) {
         const q_op_t* row = NULL;
         if (is_fnval(head)) head = apply_valence_sibling(head, n, &row);
@@ -1269,7 +1270,7 @@ static ray_t* trap_catch(ray_t* r, ray_t* e) {
     ray_t* msg = ray_charv(code ? code : "",
                            code ? (int64_t)strlen(code) : 0);
     ray_error_free(r);
-    if (!msg || RAY_IS_ERR(msg)) return msg ? msg : ray_error("oom", NULL);
+    if (!msg || RAY_IS_ERR(msg)) return msg ? msg : q_err(QE_OOM);
     ray_t* c = store_mat(q_eval_apply(e, NULL, &msg, 1));
     ray_release(msg);
     return c;
@@ -1283,7 +1284,7 @@ ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
         ray_t* r = store_mat(q_eval_apply_value(args[0], &args[1], 1));
         return trap_catch(r, args[2]);
     }
-    return ray_error("nyi", NULL);
+    return q_err(QE_NYI);
 }
 
 /* `v . vx` — the rhs is the ARGUMENT LIST; a callable spread-applies over
@@ -1294,19 +1295,19 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
         ray_t* r = q_eval_dot_wrap(args, 2);
         return trap_catch(r, args[2]);
     }
-    if (n != 2) return ray_error("nyi", NULL);       /* amend: later wave */
+    if (n != 2) return q_err(QE_NYI);       /* amend: later wave */
     ray_t* a = args[1];
     if (!a || (!ray_is_vec(a) && a->type != RAY_LIST))
-        return ray_error("type", NULL);
+        return q_err(QE_TYPE);
     int64_t k = ray_len(a);
-    if (k < 1 || k > 8) return ray_error("rank", NULL);
+    if (k < 1 || k > 8) return q_err(QE_RANK);
     ray_t* av[8];
     for (int64_t i = 0; i < k; i++) {
         av[i] = q_registry_elem_at(a, i);            /* owned */
         if (!av[i] || RAY_IS_ERR(av[i])) {
             ray_t* err = av[i];
             for (int64_t j = 0; j < i; j++) ray_release(av[j]);
-            return err ? err : ray_error("type", NULL);
+            return err ? err : q_err(QE_TYPE);
         }
     }
     ray_t* r = store_mat(q_eval_apply_value(args[0], av, k));
@@ -1320,19 +1321,19 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
  * Only 0 is false; nulls cast to 1b.  CONSUMES v. */
 int q_eval_apply_truthy(ray_t* v, ray_t** err) {
     *err = NULL;
-    if (!v) { *err = ray_error("type", NULL); return 0; }
+    if (!v) { *err = q_err(QE_TYPE); return 0; }
     v = ray_lazy_materialize(v);
     if (RAY_IS_ERR(v)) { *err = v; return 0; }
     int8_t t = v->type < 0 ? (int8_t)-v->type : v->type;
     if (t == RAY_F64 || t == RAY_F32) {
         ray_release(v);
-        *err = ray_error("type", NULL);
+        *err = q_err(QE_TYPE);
         return 0;
     }
     ray_t* b = q_dollar_cast(RAY_BOOL, v);
     ray_release(v);
-    if (!b || RAY_IS_ERR(b)) { *err = b ? b : ray_error("type", NULL); return 0; }
-    if (b->type != -RAY_BOOL) { ray_release(b); *err = ray_error("type", NULL); return 0; }
+    if (!b || RAY_IS_ERR(b)) { *err = b ? b : q_err(QE_TYPE); return 0; }
+    if (b->type != -RAY_BOOL) { ray_release(b); *err = q_err(QE_TYPE); return 0; }
     int go = b->b8 != 0;
     ray_release(b);
     return go;

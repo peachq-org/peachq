@@ -2,6 +2,7 @@
  * (btoa/atob), SHA-1, and the .Q.c.gz seam wrapper.  Evicted from
  * q_builtins.c; the shared text-bytes probe lives here with its users. */
 #include "qlang/q_builtins.h"   /* the codec decls (q_md5_fn, q_dotq_*) */
+#include "qlang/q_err.h"
 #include "qlang/q_registry.h"   /* q_text_bytes */
 #include "qlang/net/q_gz.h"         /* q_gz_deflate/inflate — .Q.c.gz seam */
 #include "lang/internal.h"      /* ray_error, ray_vec_from_raw */
@@ -66,10 +67,10 @@ static int codec_md5_compute(const uint8_t* msg, size_t len, uint8_t out[16]) {
 /* Exported (q_builtins.h) so the `-15!` internal-fn alias single-homes here. */
 ray_t* q_md5_fn(ray_t* x) {
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "md5: expects a string");
+    if (!q_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     uint8_t digest[16];
     if (!codec_md5_compute((const uint8_t*)sp, (size_t)sn, digest))
-        return ray_error("wsfull", "md5: out of memory");
+        return q_err(QE_WSFULL);
     return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 16);
 }
 
@@ -210,10 +211,10 @@ static int codec_sha1_compute(const uint8_t* msg, size_t n, uint8_t out[20]) {
 ray_t* q_dotq_btoa_fn(ray_t* x) {
     const uint8_t* p; size_t n;
     if (!codec_bytes_of(x, &p, &n))
-        return ray_error("type", ".Q.btoa: expects a string or byte vector");
+        return q_err(QE_TYPE);
     size_t olen = 0;
     char* enc = codec_b64_encode(p, n, &olen);
-    if (!enc) return ray_error("wsfull", ".Q.btoa: out of memory");
+    if (!enc) return q_err(QE_WSFULL);
     ray_t* r = ray_str(enc, olen);
     free(enc);
     return r;
@@ -224,11 +225,11 @@ ray_t* q_dotq_btoa_fn(ray_t* x) {
 ray_t* q_dotq_atob_fn(ray_t* x) {
     const uint8_t* p; size_t n;
     if (!codec_bytes_of(x, &p, &n))
-        return ray_error("type", ".Q.atob: expects a string or byte vector");
+        return q_err(QE_TYPE);
     size_t olen = 0; int bad = 0;
     uint8_t* dec = codec_b64_decode((const char*)p, n, &olen, &bad);
-    if (bad) return ray_error("domain", ".Q.atob: invalid base64 padding");
-    if (!dec) return ray_error("wsfull", ".Q.atob: out of memory");
+    if (bad) return q_err(QE_DOMAIN);
+    if (!dec) return q_err(QE_WSFULL);
     ray_t* r = ray_vec_from_raw(RAY_BYTE_ONLY, dec, (int64_t)olen);
     free(dec);
     return r;
@@ -240,10 +241,10 @@ ray_t* q_dotq_atob_fn(ray_t* x) {
 ray_t* q_dotq_sha1_fn(ray_t* x) {
     const uint8_t* p; size_t n;
     if (!codec_bytes_of(x, &p, &n))
-        return ray_error("type", ".Q.sha1: expects a string or byte vector");
+        return q_err(QE_TYPE);
     uint8_t digest[20];
     if (!codec_sha1_compute(p, n, digest))
-        return ray_error("wsfull", ".Q.sha1: out of memory");
+        return q_err(QE_WSFULL);
     return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 20);
 }
 
@@ -259,26 +260,26 @@ ray_t* q_dotq_sha1_fn(ray_t* x) {
  * Framing lives in q_gz.c; list/atom refs here are BORROWED (never released) and
  * the constructors copy before the malloc'd buffer is freed. */
 ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc) {
-    if (argc != 1) return ray_error("rank", NULL);       /* VARY is a unary facade */
+    if (argc != 1) return q_err(QE_RANK);       /* VARY is a unary facade */
     ray_t* x = args[0];
-    if (!x) return ray_error("type", NULL);
+    if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_bool(1);              /* .Q.gz[::] — capability */
     if (x->type == RAY_LIST && ray_len(x) == 2) {        /* deflate */
         ray_t* cl  = ray_list_get(x, 0);                 /* borrowed */
         ray_t* cbv = ray_list_get(x, 1);                 /* borrowed */
-        if (!cl || cl->type != -RAY_I64) return ray_error("type", NULL);
-        if (cl->i64 < 1 || cl->i64 > 9) return ray_error("domain", NULL);  /* before the int cast */
+        if (!cl || cl->type != -RAY_I64) return q_err(QE_TYPE);
+        if (cl->i64 < 1 || cl->i64 > 9) return q_err(QE_DOMAIN);  /* before the int cast */
         const uint8_t* p; size_t n;
-        if (!codec_bytes_of(cbv, &p, &n)) return ray_error("type", NULL);
+        if (!codec_bytes_of(cbv, &p, &n)) return q_err(QE_TYPE);
         size_t olen = 0; const char* err = NULL;
         uint8_t* out = q_gz_deflate(p, n, (int)cl->i64, &olen, &err);
         if (!out) return ray_error(err ? err : "wsfull", NULL);
         ray_t* r = ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
         free(out);
-        return r ? r : ray_error("wsfull", NULL);
+        return r ? r : q_err(QE_WSFULL);
     }
     const uint8_t* p; size_t n;                          /* inflate */
-    if (!codec_bytes_of(x, &p, &n)) return ray_error("type", NULL);
+    if (!codec_bytes_of(x, &p, &n)) return q_err(QE_TYPE);
     size_t olen = 0; const char* err = NULL;
     uint8_t* out = q_gz_inflate(p, n, &olen, &err);
     if (!out) return ray_error(err ? err : "domain", NULL);
@@ -286,5 +287,5 @@ ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc) {
     ray_t* r = textin ? ray_charv((const char*)out, (int64_t)olen)
                       : ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
     free(out);
-    return r ? r : ray_error("wsfull", NULL);
+    return r ? r : q_err(QE_WSFULL);
 }

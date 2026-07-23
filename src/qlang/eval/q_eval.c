@@ -14,6 +14,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/eval/q_eval.h"
+#include "qlang/q_err.h"
 #include "qlang/q_parse_internal.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
@@ -58,12 +59,8 @@ static int adv_id(ray_t* x) {
 }
 
 static ray_t* name_error(int64_t id) {
-    ray_t* nm = ray_sym_str(id);
-    ray_t* e = nm ? ray_error("name", "'%.*s' undefined",
-                              (int)ray_str_len(nm), ray_str_ptr(nm))
-                  : ray_error("name", NULL);
-    if (nm) ray_release(nm);
-    return e;
+    (void)id;   /* kdb names the undefined sym; we emit bare 'name (recorded gap) */
+    return q_err(QE_NAME);
 }
 
 /* Name resolution with the base name hook INLINED (finding 6 / carve-eval
@@ -139,7 +136,7 @@ static ray_t* head_name_value(ray_t* sym, int64_t argc, const q_op_t** row_out) 
 /* adverb operand -> VALUE (+ row): `+/` derives from the DYAD */
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    if (!F) return ray_error("type", NULL);
+    if (!F) return q_err(QE_TYPE);
     if (F->type == RAY_UNARY || F->type == RAY_BINARY || F->type == RAY_VARY) {
         if (row_out) *row_out = q_registry_row_of(F, Q_DYADIC);
         ray_retain(F);
@@ -212,13 +209,13 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
     ray_t** te = (ray_t**)ray_data(target);
     int64_t k = ray_len(target) - 1;
     if (k < 1 || k > EVAL_MAX_ARGS || !nameref(te[0]))
-        return ray_error("nyi", NULL);
+        return q_err(QE_NYI);
     ray_t* s = ray_sym_str(te[0]->i64);
-    if (!s) return ray_error("type", NULL);
+    if (!s) return q_err(QE_TYPE);
     int reserved = q_ops_is_reserved(ray_str_ptr(s), (int)ray_str_len(s));
     int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
     ray_release(s);
-    if (reserved) return ray_error("assign", NULL);
+    if (reserved) return q_err(QE_ASSIGN);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
     rv = store_mat(rv);
@@ -255,7 +252,7 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
             ray_err_t e2 = local ? ray_env_set_local(te[0]->i64, amended)
                                  : ray_env_set(te[0]->i64, amended);
             ray_release(amended);
-            if (e2 != RAY_OK) { ray_release(nv); ret = ray_error("assign", NULL); }
+            if (e2 != RAY_OK) { ray_release(nv); ret = q_err(QE_ASSIGN); }
             else ret = nv;                           /* the assigned value */
         }
     }
@@ -273,14 +270,14 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     if (!nameref(target)) {
         if (target && target->type == RAY_LIST && ray_len(target) >= 2)
             return indexed_assign(is_global, target, NULL, NULL, rhs);
-        return ray_error("nyi", NULL);
+        return q_err(QE_NYI);
     }
     ray_t* s = ray_sym_str(target->i64);
-    if (!s) return ray_error("type", NULL);
+    if (!s) return q_err(QE_TYPE);
     int reserved = q_ops_is_reserved(ray_str_ptr(s), (int)ray_str_len(s));
     int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
     ray_release(s);
-    if (reserved) return ray_error("assign", NULL);
+    if (reserved) return q_err(QE_ASSIGN);
     ray_t* v = q_eval(rhs);
     if (RAY_IS_ERR(v)) return v;
     int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
@@ -288,7 +285,7 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
                 (!is_global || ray_env_get_local(target->i64) != NULL);
     ray_err_t err = local ? ray_env_set_local(target->i64, v)
                           : ray_env_set(target->i64, v);
-    if (err != RAY_OK) { ray_release(v); return ray_error("assign", NULL); }
+    if (err != RAY_OK) { ray_release(v); return q_err(QE_ASSIGN); }
     return v;
 }
 
@@ -367,7 +364,7 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
     int64_t times;
     int ok = cnt && !RAY_ATOM_IS_NULL(cnt) && q_strict_i64(cnt, &times);
     ray_release(cnt);
-    if (!ok || times < 0) return ray_error("type", NULL);
+    if (!ok || times < 0) return q_err(QE_TYPE);
     for (int64_t k = 0; k < times; k++) {
         ray_t* err = ctl_run_body(e, 1, n);
         if (err) return err;
@@ -394,7 +391,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     if (!nameref(target)) {
         if (target && target->type == RAY_LIST && ray_len(target) >= 2)
             return indexed_assign(0, target, opv, row, rhs);
-        return ray_error("nyi", NULL);
+        return q_err(QE_NYI);
     }
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
@@ -418,14 +415,14 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     }
     ray_err_t err = local ? ray_env_set_local(target->i64, nv)
                           : ray_env_set(target->i64, nv);
-    if (err != RAY_OK) { ray_release(nv); return ray_error("assign", NULL); }
+    if (err != RAY_OK) { ray_release(nv); return q_err(QE_ASSIGN); }
     return nv;                                       /* q returns the NEW value */
 }
 
 /* paren list literal: elements RTL, boxed build + collapse */
 static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* argv[EVAL_MAX_ARGS];
-    if (n > EVAL_MAX_ARGS) return ray_error("limit", NULL);
+    if (n > EVAL_MAX_ARGS) return q_err(QE_LIMIT);
     for (int64_t i = n - 1; i >= 0; i--) {
         argv[i] = e[i] ? store_mat(q_eval(e[i])) : RAY_NULL_OBJ;
         if (RAY_IS_ERR(argv[i])) {
@@ -451,7 +448,7 @@ static ray_t* table_lit(ray_t** defs, int64_t n) {
     int64_t names[EVAL_MAX_ARGS];
     ray_t* cols[EVAL_MAX_ARGS];
     int64_t id_colon = sym_id_of(":");
-    if (n > EVAL_MAX_ARGS) return ray_error("limit", NULL);
+    if (n > EVAL_MAX_ARGS) return q_err(QE_LIMIT);
     for (int64_t i = n - 1; i >= 0; i--) {
         ray_t* d = defs[i];
         ray_t* v = NULL;
@@ -466,12 +463,12 @@ static ray_t* table_lit(ray_t** defs, int64_t n) {
             nm = d->i64;
             v = name_value(d, NULL);
         }
-        if (!v) v = ray_error("nyi", NULL);
+        if (!v) v = q_err(QE_NYI);
         if (nm < 0 || RAY_IS_ERR(v)) {
             for (int64_t j = i + 1; j < n; j++) ray_release(cols[j]);
             if (RAY_IS_ERR(v)) return v;
             ray_release(v);
-            return ray_error("nyi", NULL);
+            return q_err(QE_NYI);
         }
         names[i] = nm;
         cols[i] = v;
@@ -483,7 +480,7 @@ static ray_t* table_lit(ray_t** defs, int64_t n) {
             cols[i]->type != RAY_TABLE) {
             int64_t cl = ray_len(cols[i]);
             if (nrows < 0) nrows = cl;
-            else if (cl != nrows) out = ray_error("length", NULL);
+            else if (cl != nrows) out = q_err(QE_LENGTH);
         }
     }
     if (nrows < 0) nrows = 1;
@@ -498,7 +495,7 @@ static ray_t* table_lit(ray_t** defs, int64_t n) {
             owned = 1;
             if (!col || RAY_IS_ERR(col)) {
                 ray_release(out);
-                out = col ? col : ray_error("type", NULL);
+                out = col ? col : q_err(QE_TYPE);
                 break;
             }
         }
@@ -513,15 +510,15 @@ static ray_t* table_lit(ray_t** defs, int64_t n) {
 static ray_t* lambda_lit(ray_t* node) {
     int64_t n = ray_len(node);
     ray_t** e = (ray_t**)ray_data(node);
-    if (n < 3) return ray_error("parse", NULL);
+    if (n < 3) return q_err(QE_PARSE);
     return q_eval_apply_lambda_new(e[2], e + 3, n - 3, e[1]);
 }
 
 ray_t* q_eval(ray_t* node) {
     if (!node) return RAY_NULL_OBJ;
     if (RAY_IS_ERR(node)) return node;
-    if (ray_eval_is_interrupted()) return ray_error("stop", NULL);
-    if (++g_depth > EVAL_MAX_DEPTH) { g_depth--; return ray_error("limit", NULL); }
+    if (ray_eval_is_interrupted()) return q_err(QE_STOP);
+    if (++g_depth > EVAL_MAX_DEPTH) { g_depth--; return q_err(QE_LIMIT); }
     int64_t id_semi   = sym_id_of(";");
     int64_t id_colon  = sym_id_of(":");
     int64_t id_gcolon = sym_id_of("::");
@@ -546,7 +543,7 @@ ray_t* q_eval(ray_t* node) {
         /* literal-ctor interception seam (header note) */
         if (h == q_registry_list_value())  { ret = list_lit(e + 1, n - 1); goto out; }
         if (h == q_registry_table_value()) { ret = table_lit(e + 1, n - 1); goto out; }
-        if (h == q_registry_keyed_table_value()) { ret = ray_error("nyi", NULL); goto out; }
+        if (h == q_registry_keyed_table_value()) { ret = q_err(QE_NYI); goto out; }
 
         if (nameref(h)) {
             if (h->i64 == id_semi) { ret = seq_eval(e + 1, n - 1); goto out; }
@@ -584,7 +581,7 @@ ray_t* q_eval(ray_t* node) {
                 ray_t* argv[EVAL_MAX_ARGS];
                 if (argc > EVAL_MAX_ARGS) {
                     ray_release(F);
-                    ret = ray_error("rank", NULL);
+                    ret = q_err(QE_RANK);
                     goto out;
                 }
                 ray_t* err = eval_args_rtl(e + 1, argc, argv);
@@ -616,7 +613,7 @@ ray_t* q_eval(ray_t* node) {
                 if (val) row = q_registry_row_of(h, val);
             }
         } else {
-            ret = ray_error("type", NULL);
+            ret = q_err(QE_TYPE);
             goto out;
         }
         if (RAY_IS_ERR(fv)) { ret = fv; goto out; }
@@ -625,7 +622,7 @@ ray_t* q_eval(ray_t* node) {
         ray_t* argv[EVAL_MAX_ARGS];
         if (argc > EVAL_MAX_ARGS) {
             ray_release(fv);
-            ret = ray_error("rank", NULL);
+            ret = q_err(QE_RANK);
             goto out;
         }
         ray_t* err = eval_args_rtl(e + 1, argc, argv);

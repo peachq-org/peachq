@@ -10,6 +10,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_repl.h"
+#include "qlang/q_err.h"   /* q_err_class — full class name for console display */
 #include "qlang/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/q_fmt.h"
@@ -262,7 +263,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
             if (buf[strlen(buf) - 1] != '\n') fputc('\n', out);
         }
         if (sr) {
-            const char* code = (const char*)sr->sdata;
+            const char* code = q_err_class(sr);
             fprintf(err, "error: %s\n", (code && *code) ? code : "syscmd");
             ray_error_free(sr);
         }
@@ -304,7 +305,7 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
     }
 
     if (RAY_IS_ERR(r)) {
-        const char* code = (const char*)r->sdata;
+        const char* code = q_err_class(r);
         fprintf(err, "error: %s\n", (code && *code) ? code : "eval");
         ray_error_free(r);
         return;
