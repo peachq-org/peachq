@@ -10,6 +10,7 @@
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_apply_value — THE eval pipeline */
 #include "qlang/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
+#define Q_OPS_ENV_GRANDFATHER /* legitimate owner: THE bootstrap/binding home */
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */

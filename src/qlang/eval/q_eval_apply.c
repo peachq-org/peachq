@@ -20,6 +20,7 @@
 #include "qlang/net/q_ws.h"
 #include "qlang/net/q_http_client.h"
 #include "qlang/ops/q_dollar.h"
+#include "qlang/ops/q_index.h"
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "lang/internal.h"   /* call_lambda — bare engine-lambda application */
@@ -180,7 +181,7 @@ static int64_t qe_elem_i64(ray_t* e) {
     return e->i64;
 }
 
-static int store_elem(ray_t* vec, int64_t i, ray_t* e) {
+int q_eval_apply_store_elem(ray_t* vec, int64_t i, ray_t* e) {
     if (vec->type == RAY_CHARV) {
         ((uint8_t*)ray_data(vec))[i] =
             RAY_ATOM_IS_NULL(e) ? 0x20 : (uint8_t)qe_elem_i64(e);
@@ -286,7 +287,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
-        store_elem(vec, 0, e0);
+        q_eval_apply_store_elem(vec, 0, e0);
         ray_release(e0);
         for (int64_t i = 1; i < len; i++) {
             if ((i & 0xFFF) == 0 && ray_eval_is_interrupted()) {
@@ -297,7 +298,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
             ray_t* r = RAY_IS_ERR(e) ? e : fn(e);
             if (r != e) ray_release(e);
             if (RAY_IS_ERR(r)) { ray_release(vec); return r; }
-            if (store_elem(vec, i, r) != 0) {
+            if (q_eval_apply_store_elem(vec, i, r) != 0) {
                 ray_release(r); ray_release(vec);
                 return q_err(QE_TYPE);
             }
@@ -383,7 +384,7 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
-        store_elem(vec, 0, e0);
+        q_eval_apply_store_elem(vec, 0, e0);
         ray_release(e0);
         for (int64_t i = 1; i < len; i++) {
             if ((i & 0xFFF) == 0 && ray_eval_is_interrupted()) {
@@ -397,7 +398,7 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
             if (lc && a != e) ray_release(a);
             if (rc && b != e) ray_release(b);
             if (RAY_IS_ERR(e)) { ray_release(vec); return e; }
-            if (store_elem(vec, i, e) != 0) {
+            if (q_eval_apply_store_elem(vec, i, e) != 0) {
                 ray_release(e); ray_release(vec);
                 return q_err(QE_TYPE);
             }
@@ -802,65 +803,10 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
     return q_eval_apply(fv, row, merged, rank);
 }
 
-/* ===== noun-head indexing (re-homed from the retired q_apply_noun) =======
- * ONE indexing primitive per structure — dict miss-typed lookup, table row
- * gather (q_table_at), vector/list gather — drilled one step per arg;
- * results cross into q-space through q_charv_out.  Keyed-table-by-value
- * stays 'nyi (rebuild wave). */
-
-/* one indexing step: v[idx].  ray_at null-fills out-of-range; a collection
- * index yields a boxed list -> collapse to the typed vector. */
-static ray_t* gather(ray_t* v, ray_t* idx) {
-    ray_t* r = ray_at_fn(v, idx);
-    if (!r || RAY_IS_ERR(r)) return r;
-    if (r->type == RAY_LIST) return collapse(r);
-    return r;
-}
-
-/* the typed-null type for a dict's values: a typed vector gives its element
- * type; a homogeneous boxed list of atoms gives their shared type; anything
- * mixed -> 0 (generic null, kdb's mixed-value dict miss). */
-static int8_t dict_val_null_type(ray_t* vals) {
-    if (!vals) return 0;
-    if (ray_is_vec(vals)) return (int8_t)-vals->type;
-    if (vals->type == RAY_LIST && ray_len(vals) > 0) {
-        ray_t** e = (ray_t**)ray_data(vals);
-        if (!e[0] || e[0]->type >= 0) return 0;
-        int8_t t = e[0]->type;
-        for (int64_t i = 1; i < ray_len(vals); i++)
-            if (!e[i] || e[i]->type != t) return 0;
-        return t;
-    }
-    return 0;
-}
-
-/* dict arm — DIRECT lookup (not ray_at, whose miss path hardcodes 0Nl): a
- * hit returns the stored value; a miss the typed null of the dict's VALUE
- * type.  A vector of keys loops with those miss semantics, then collapses. */
-static ray_t* dict_lookup(ray_t* d, ray_t* idx) {
-    if (q_table_is_keyed(d)) return q_err(QE_NYI);
-    ray_t* vals = ray_dict_vals(d);                  /* borrowed accessor */
-    int8_t vt = dict_val_null_type(vals);
-    if (ray_is_vec(idx) || idx->type == RAY_LIST) {
-        int64_t kn = ray_len(idx);
-        ray_t* out = ray_list_new(kn > 0 ? kn : 1);
-        for (int64_t i = 0; i < kn; i++) {
-            ray_t* k = q_registry_elem_at(idx, i);
-            if (!k || RAY_IS_ERR(k)) { ray_release(out); return k; }
-            ray_t* v = ray_dict_get(d, k);
-            ray_release(k);
-            if (!v) v = vt ? ray_typed_null(vt)
-                           : (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ);
-            out = ray_list_append(out, v);
-            ray_release(v);
-        }
-        return collapse(out);
-    }
-    ray_t* v = ray_dict_get(d, idx);                 /* owned, or C NULL */
-    if (v) return v;
-    return vt ? ray_typed_null(vt)
-              : (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ);
-}
+/* ===== noun-head application ============================================
+ * APPLICATION concerns only (handles, sym heads, elided lists, the string
+ * boundary) — all DATA indexing is ops/q_index.c, the one index/amend home;
+ * results cross into q-space through q_charv_out. */
 
 static int is_text_atom(ray_t* v) {
     return v && (v->type == -RAY_STR || v->type == RAY_CHARV ||
@@ -910,84 +856,6 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
     return r;
 }
 
-/* one indexing step at the current depth (vector-capable per structure) */
-static ray_t* step1(ray_t* cur, ray_t* idx) {
-    if (cur->type == RAY_DICT) return dict_lookup(cur, idx);
-    if (cur->type == RAY_TABLE) {
-        ray_t* r = q_table_at(cur, idx);
-        return r ? r : ray_at_fn(cur, idx);
-    }
-    if (!(ray_is_vec(cur) || cur->type == RAY_LIST))
-        return q_err(QE_TYPE);
-    return gather(cur, idx);
-}
-
-static ray_t* at_depth(ray_t* v, ray_t** ix, int64_t k);
-
-/* null index = select ALL at this depth, continue each item with the rest */
-static ray_t* all_items(ray_t* v, ray_t** ix, int64_t k) {
-    int64_t len = ray_len(v);
-    ray_t* out = ray_list_new(len > 0 ? len : 1);
-    for (int64_t j = 0; j < len; j++) {
-        ray_t* e = q_registry_elem_at(v, j);
-        ray_t* r = (!e || RAY_IS_ERR(e)) ? e : store_mat(at_depth(e, ix, k));
-        if (r != e && e && !RAY_IS_ERR(e)) ray_release(e);
-        if (!r || RAY_IS_ERR(r)) {
-            ray_release(out);
-            return r ? r : q_err(QE_TYPE);
-        }
-        out = ray_list_append(out, r);
-        ray_release(r);
-    }
-    return collapse(out);
-}
-
-/* Index at depth (ref/apply.md "Nulls in i" + the general case): a null/
- * elided index selects all at its depth; a list index distributes
- * (m[0 1;1] is (m[0;1];m[1;1])); an atom drills one level. */
-static ray_t* at_depth(ray_t* v, ray_t** ix, int64_t k) {
-    if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
-    if (k <= 0) { ray_retain(v); return v; }
-    ray_t* i0 = ix[0];
-    if (!i0 || RAY_IS_NULL(i0)) {
-        if (v->type == RAY_DICT && !q_table_is_keyed(v))
-            return all_items(ray_dict_vals(v), ix + 1, k - 1);
-        if (v->type == RAY_DICT || v->type == RAY_TABLE)
-            return q_err(QE_NYI);
-        if (k == 1) { ray_retain(v); return v; }
-        return all_items(v, ix + 1, k - 1);
-    }
-    if (k == 1) return step1(v, i0);
-    if (is_coll(i0)) {
-        ray_t* tmp[APPLY_MAX_ARGS];
-        memcpy(tmp + 1, ix + 1, (size_t)(k - 1) * sizeof *tmp);
-        int64_t len = ray_len(i0);
-        ray_t* out = ray_list_new(len > 0 ? len : 1);
-        for (int64_t j = 0; j < len; j++) {
-            ray_t* e = q_registry_elem_at(i0, j);
-            if (!e || RAY_IS_ERR(e)) {
-                ray_release(out);
-                return e ? e : q_err(QE_TYPE);
-            }
-            tmp[0] = e;
-            ray_t* r = store_mat(at_depth(v, tmp, k));
-            ray_release(e);
-            if (!r || RAY_IS_ERR(r)) {
-                ray_release(out);
-                return r ? r : q_err(QE_TYPE);
-            }
-            out = ray_list_append(out, r);
-            ray_release(r);
-        }
-        return collapse(out);
-    }
-    ray_t* nx = step1(v, i0);
-    if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_TYPE);
-    ray_t* r = at_depth(nx, ix + 1, k - 1);
-    ray_release(nx);
-    return r;
-}
-
 static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (n < 1) return q_err(QE_RANK);
     /* handle-as-verb (`h x`): console/file/fifo/socket dispatch lives wholly
@@ -1032,68 +900,9 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
         }
     }
     if (n > APPLY_MAX_ARGS) return q_err(QE_RANK);
-    ray_t* r = at_depth(v, args, n);
+    ray_t* r = q_index_at(v, args, n);               /* the ONE index home */
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
     return q_charv_out(r);     /* boundary-out: charv, never physical STR */
-}
-
-/* ===== indexed amend (ref/assign.md Indexed assign) ======================
- * Cow the spine, write the path leaf: lists via ray_list_set, typed vectors
- * via cow + the ONE element-store (kdb-strict: no silent narrowing).
- * cur/val borrowed; owned result. */
-
-static ray_t* amend_at(ray_t* cur, ray_t** ix, int64_t k, ray_t* val) {
-    if (k <= 0 || !cur || RAY_IS_ERR(cur)) return q_err(QE_TYPE);
-    ray_t* i0 = ix[0];
-    if (!i0 || RAY_IS_NULL(i0) || is_coll(i0) || is_container(i0))
-        return q_err(QE_NYI);   /* `::`/vector-path amend: later wave */
-    if (!int_atom(i0)) return q_err(QE_TYPE);
-    int64_t idx = qe_elem_i64(i0);
-    if (cur->type == RAY_LIST) {
-        if (idx < 0 || idx >= ray_len(cur)) return q_err(QE_INDEX);
-        ray_t* nv;
-        if (k == 1) {
-            ray_retain(val);
-            nv = store_mat(val);
-            if (RAY_IS_ERR(nv)) return nv;
-        } else {
-            nv = amend_at(((ray_t**)ray_data(cur))[idx], ix + 1, k - 1, val);
-            if (!nv || RAY_IS_ERR(nv)) return nv ? nv : q_err(QE_TYPE);
-        }
-        ray_retain(cur);
-        ray_t* nl = ray_list_set(cur, idx, nv);      /* cows; consumes on ok */
-        ray_release(nv);
-        if (!nl || RAY_IS_ERR(nl)) {
-            ray_release(cur);                        /* cow-fail leaves cur */
-            return nl ? nl : q_err(QE_OOM);
-        }
-        return nl;
-    }
-    if (ray_is_vec(cur) && cur->type != RAY_STR && cur->type != RAY_SYM) {
-        if (k != 1) return q_err(QE_TYPE);
-        if (idx < 0 || idx >= ray_len(cur)) return q_err(QE_INDEX);
-        if (!ray_is_atom(val)) return q_err(QE_TYPE);
-        if (!RAY_ATOM_IS_NULL(val) && (int8_t)-val->type != cur->type)
-            return q_err(QE_TYPE);
-        ray_retain(cur);
-        ray_t* nv = ray_cow(cur);
-        if (!nv || RAY_IS_ERR(nv)) {
-            ray_release(cur);                        /* cow-fail leaves cur */
-            return nv ? nv : q_err(QE_OOM);
-        }
-        if (store_elem(nv, idx, val) != 0) {
-            ray_release(nv);
-            return q_err(QE_TYPE);
-        }
-        if (!RAY_ATOM_IS_NULL(val)) ray_vec_set_null(nv, idx, false);
-        return nv;
-    }
-    return q_err(QE_NYI);       /* sym-vec/dict/table amend: later */
-}
-
-ray_t* q_eval_apply_amend(ray_t* cur, ray_t** ix, int64_t k, ray_t* val) {
-    if (k < 1 || k > APPLY_MAX_ARGS) return q_err(QE_RANK);
-    return amend_at(cur, ix, k, val);
 }
 
 /* ===== q_eval_apply: the single entry ==================================== */
@@ -1276,26 +1085,75 @@ static ray_t* trap_catch(ray_t* r, ray_t* e) {
     return c;
 }
 
-/* `f@x` — Apply At / Index At; `@[f;x;e]` traps a CALLABLE f (noun-first
- * amend forms stay 'nyi — later wave). */
+/* Name-form amend, gated by the manifest name_lift flag — NEVER by
+ * sym-sniffing in verb bodies (sym atoms are legal data).  The env's ref is
+ * STOLEN for the call so a sole global amends IN PLACE (ref/amend.md handle
+ * d: "modifies the item/s of its reference, and returns the handle");
+ * correctness never depends on the steal — rc decides at store time.  A
+ * mid-amend error restores the binding.  NULL = the form is not lifted. */
+static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
+    if (!row || !row->name_lift || !args[0] || args[0]->type != -RAY_SYM)
+        return NULL;
+    ray_t* s = ray_sym_str(args[0]->i64);
+    int isfile = s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
+    if (s) ray_release(s);
+    if (isfile) return q_err(QE_NYI);       /* `:path on-disk amend: file wave */
+    int64_t id = args[0]->i64;
+    ray_t* cur = ray_env_get(id);                    /* borrowed global */
+    if (!cur || RAY_IS_ERR(cur)) return q_err(QE_DOMAIN);   /* not a handle */
+    ray_retain(cur);                                 /* the consumable ref */
+    int stole = ray_env_set(id, RAY_NULL_OBJ) == RAY_OK;    /* env drops its ref */
+    ray_t* y = n == 4 ? args[3] : NULL;
+    ray_t* r = dot ? q_index_amend_dot(cur, args[1], args[2], y)
+                   : q_index_amend_at(cur, args[1], args[2], y);
+    if (!r || RAY_IS_ERR(r)) {
+        if (stole) ray_env_set(id, cur);             /* restore the binding */
+        ray_release(cur);
+        return r ? r : q_err(QE_TYPE);
+    }
+    ray_err_t e = ray_env_set(id, r);                /* retains */
+    ray_release(r);
+    if (e != RAY_OK) return q_err(QE_ASSIGN);
+    ray_retain(args[0]);
+    return args[0];                                  /* the handle comes back */
+}
+
+/* value-form amend: PURE — the retain forces the store to path-copy, so the
+ * caller's d is atomically intact even on error */
+static ray_t* amend_value(ray_t** args, int64_t n, int dot) {
+    ray_t* l = name_lift(q_ops_find(dot ? "." : "@", 1), args, n, dot);
+    if (l) return l;
+    ray_t* y = n == 4 ? args[3] : NULL;
+    ray_retain(args[0]);
+    ray_t* r = dot ? q_index_amend_dot(args[0], args[1], args[2], y)
+                   : q_index_amend_at(args[0], args[1], args[2], y);
+    if (!r || RAY_IS_ERR(r)) ray_release(args[0]);   /* amend kept our ref */
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* `@` — the overload matrix (ref/apply.md + ref/amend.md): 2 args Apply At /
+ * Index At; 3 args on a callable head Trap At; 3-4 args on a data head
+ * Amend At (machinery: ops/q_index.c; a sym-atom d name-lifts). */
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
     if (n == 2) return store_mat(q_eval_apply_value(args[0], &args[1], 1));
     if (n == 3 && q_eval_apply_is_fn(args[0])) {
         ray_t* r = store_mat(q_eval_apply_value(args[0], &args[1], 1));
         return trap_catch(r, args[2]);
     }
-    return q_err(QE_NYI);
+    if (n == 3 || n == 4) return amend_value(args, n, 0);
+    return q_err(QE_RANK);
 }
 
-/* `v . vx` — the rhs is the ARGUMENT LIST; a callable spread-applies over
- * its items, a noun depth-indexes (m . 1 2 is m[1;2]).  `.[f;vx;e]` traps
- * a callable f; noun-first amend forms stay 'nyi. */
+/* `.` — 2 args: a callable spread-applies over the rhs list, a noun
+ * depth-indexes (m . 1 2 is m[1;2]); 3 args callable Trap; 3-4 args data
+ * head Amend (i is the path list). */
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     if (n == 3 && q_eval_apply_is_fn(args[0])) {
         ray_t* r = q_eval_dot_wrap(args, 2);
         return trap_catch(r, args[2]);
     }
-    if (n != 2) return q_err(QE_NYI);       /* amend: later wave */
+    if (n == 3 || n == 4) return amend_value(args, n, 1);
+    if (n != 2) return q_err(QE_RANK);
     ray_t* a = args[1];
     if (!a || (!ray_is_vec(a) && a->type != RAY_LIST))
         return q_err(QE_TYPE);

@@ -107,6 +107,11 @@ typedef struct q_op {
     const char*  family;        /* structure-dispatch family (see above); consumed by the apply module */
     const char*  mono;          /* dyad rows: keyword whose kernel a `/`-derivation monomorphizes to
                                  * (`+`->sum `*`->prd `|`->max `&`->min `,`->raze); else NULL */
+    uint8_t      name_lift;     /* 1: a sym-atom first arg in this row's amend forms NAMES a global —
+                                 * the apply seam resolves it, runs the pure form, rebinds, returns
+                                 * the sym (ref/amend.md handle d).  Flag-gated, never sym-sniffed:
+                                 * sym atoms are legal data.  Trailing field, zero-default: only
+                                 * lifted rows set it (designated init; insert/upsert adopt later). */
 } q_op_t;
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */

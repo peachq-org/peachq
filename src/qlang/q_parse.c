@@ -94,6 +94,9 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
     if (!s) return sym;
     const char *nm = ray_str_ptr(s);
     size_t nl = ray_str_len(s);
+    /* `:`/`::` heads are assignment/return SYNTAX (the walker dispatches on
+     * the colon sym); the `:` registry row serves operand position only */
+    if (nm[0] == ':') { ray_release(s); return sym; }
     if (val == Q_MONADIC && nl == 2 && nm[1] == ':') nl = 1;   /* "+:" -> "+" */
     ray_t *hit = q_registry_lookup_name(nm, nl, val);
     ray_release(s);
@@ -1662,7 +1665,22 @@ static P parse_term(Parser *p, QCtx ctx) {
             w = ray_list_append(w, t.v);
             ray_release(t.v);
             for (int64_t i = 0; i < en; i++) {
-                if (es[i]) { w = ray_list_append(w, es[i]); }
+                if (es[i]) {
+                    /* a LONE glyph verb filling a slot is the operator VALUE
+                     * — its dyadic row (`@[x;i;*;y]` passes Multiply), the
+                     * bare-verb-as-value convention parens use; `:` stays a
+                     * name-ref (q_embed's colon guard) */
+                    ray_t *slot = es[i];
+                    if (slot->type == -RAY_SYM && !(slot->attrs & Q_ATTR_QUOTED) &&
+                        sym_is_glyph(slot)) {
+                        ray_retain(slot);
+                        slot = q_embed(slot, Q_DYADIC);
+                        w = ray_list_append(w, slot);
+                        ray_release(slot);
+                    } else {
+                        w = ray_list_append(w, slot);
+                    }
+                }
                 /* an elided bracket slot is a projection hole (Q_ATTR_HOLE),
                  * distinct from an explicit `::` value in the same position */
                 else       { ray_t *nul = hole(); w = ray_list_append(w, nul); ray_release(nul); }
@@ -1693,7 +1711,11 @@ static P parse_e(Parser *p, QCtx ctx) {
      * rebuild-wave gap (the node evals to a 'name red today). */
     if (p->lambda_depth > 0) {
         Token *rt = cur(p);
-        if (rt->kind == T_VERB && rt->len == 1 && p->src[rt->start] == ':') {
+        /* a LONE `:` (next token closes the expression) is the assign-verb
+         * OPERAND (`{@[x;1;:;"Z"]}`, ref/amend.md), not an early return */
+        TKind nk = p->t.t[p->pos + 1].kind;
+        if (rt->kind == T_VERB && rt->len == 1 && p->src[rt->start] == ':' &&
+            nk != T_SEMI && nk != T_RBRACK && nk != T_RPAREN && nk != T_RBRACE) {
             adv(p);
             P e = parse_e(p, ctx);
             ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
