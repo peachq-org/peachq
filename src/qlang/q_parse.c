@@ -1728,9 +1728,24 @@ static P parse_e(Parser *p, QCtx ctx) {
 }
 
 static P parse_e_from(Parser *p, P t, QCtx ctx) {
+    Token *ut = cur(p);
     P u = parse_term(p, ctx);
 
     if (u.role == R_NONE) return t;
+
+    /* SPACED `x ::` is APPLICATION — `::` a noun operand, the generic-null
+     * VALUE (owner ruling 2026-07-23: `(::)~value ::` is 1b); only GLUED
+     * `x::…` keeps global-assign.  Demote the verb to a noun and fall into
+     * the ordinary juxtaposition build below. */
+    if (t.role == R_NOUN && u.role == R_VERB && u.v &&
+        u.v->type == -RAY_SYM && ut->kind == T_VERB && ut->len == 2 &&
+        p->src[ut->start] == ':' && p->src[ut->start + 1] == ':' &&
+        ut->start > 0 && (p->src[ut->start - 1] == ' ' ||
+                          p->src[ut->start - 1] == '\t')) {
+        ray_release(u.v);
+        u.v = RAY_NULL_OBJ;
+        u.role = R_NOUN;
+    }
 
     if (t.role == R_NOUN && u.role == R_VERB) {
         P e = parse_e(p, ctx);
@@ -1766,6 +1781,26 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
      * dyadic row (bare-verb-as-value convention). */
     if (t.role == R_VERB) t.v = q_embed(t.v, Q_MONADIC);
     if (e.role == R_VERB && sym_is_glyph(e.v)) e.v = q_embed(e.v, Q_DYADIC);
+    /* JUXTAPOSED paren-glyph on a DATA operand takes its unary meaning —
+     * `(,)2` is `,2`, `(-)5` is `-5` (owner ruling 2026-07-23); bracket-apply
+     * `+[10]` stays a projection (assign/apply-forms contract) and a fn-value
+     * operand keeps the dyad ((+)(*) pins (+;*) — parse/cases.tsv). */
+    if (t.role == R_NOUN && t.v && t.v->type == RAY_BINARY &&
+        e.role == R_NOUN && e.v &&
+        !(e.v->type == RAY_UNARY || e.v->type == RAY_BINARY ||
+          e.v->type == RAY_VARY)) {
+        const q_op_t *drow = q_registry_row_of(t.v, Q_DYADIC);
+        if (drow && drow->name) {
+            ray_t *mv = q_registry_lookup_name(drow->name, strlen(drow->name),
+                                               Q_MONADIC);
+            if (mv && (mv->type == RAY_UNARY || mv->type == RAY_BINARY ||
+                       mv->type == RAY_VARY)) {
+                ray_retain(mv);
+                ray_release(t.v);
+                t.v = mv;
+            }
+        }
+    }
     ray_t *xs[2] = { t.v, e.v };
     return (P){ R_NOUN, q_list(xs, 2) };
 }
