@@ -33,10 +33,14 @@ ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const struct q_op* frow,
  * result OWNED. */
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
 
-/* `@` / `.` manifest-row entrypoints (q_ops.c): 2 args Apply/Index; the
- * ternary/quaternary trap+amend forms are 'nyi until their rebuild wave. */
+/* `@` / `.` manifest-row entrypoints (q_ops.c): 2 args Apply/Index; 3 args
+ * Trap on a callable head; noun-head amend forms are 'nyi until their wave. */
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n);
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n);
+
+/* indexed-assign amend (ref/assign.md): write val at path ix[0..k) of cur —
+ * cow the spine, kdb-strict leaf store.  cur/val borrowed; owned result. */
+ray_t* q_eval_apply_amend(ray_t* cur, ray_t** ix, int64_t k, ray_t* val);
 
 /* THE truthiness home (owner ruling 2026-07-15): materialize -> exclude
  * float/real -> `"b"$` cast -> boolean ATOM; only 0 is false, nulls are true.
