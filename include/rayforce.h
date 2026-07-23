@@ -157,6 +157,12 @@ typedef enum {
 #define RAY_UNARY     101   /* Unary builtin: ray_t* (*)(ray_t*) */
 #define RAY_BINARY    102   /* Binary builtin: ray_t* (*)(ray_t*, ray_t*) */
 #define RAY_VARY      103   /* Variadic builtin: ray_t* (*)(ray_t**, int64_t) */
+#define RAY_QFN       105   /* openq q-eval carrier (lambda/projection/derived
+                             * verb; future query plan): len ray_t* child slots
+                             * in ray_data (C-NULL = projection hole), kind in
+                             * aux[0].  104 is RAY_LAZY (ops/ops.h).  Opaque to
+                             * the engine except the release walk; serde/wire
+                             * refuse it via their totality fallbacks. */
 #define RAY_ERROR     127   /* Error object: 8-byte packed ASCII code in sdata */
 #define RAY_NULL      126   /* Null / void — singleton static object */
 
