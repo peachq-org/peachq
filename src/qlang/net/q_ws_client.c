@@ -9,6 +9,7 @@
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
 #include <rayforce.h>
+#include "qlang/q_err.h"
 #include "qlang/net/q_ws.h"
 #include "qlang/net/q_http_client.h"   /* q_http_url_t + connect/send seams (#223) */
 #include "qlang/q_builtins.h"      /* q_dotq_sha1_fn / q_dotq_btoa_fn */
@@ -170,9 +171,9 @@ static int64_t ws_content_length(const struct phr_header* h, size_t nh) {
  * never reallocs, so the two appends cannot fail. */
 static ray_t* ws_pair(ray_t* handle, const char* resp, size_t rlen) {
     ray_t* rs = ray_charv(resp, (int64_t)rlen);
-    if (!rs || RAY_IS_ERR(rs)) { ray_release(handle); return rs ? rs : ray_error("oom", NULL); }
+    if (!rs || RAY_IS_ERR(rs)) { ray_release(handle); return rs ? rs : q_err(QE_OOM); }
     ray_t* out = ray_list_new(2);
-    if (!out || RAY_IS_ERR(out)) { ray_release(handle); ray_release(rs); return out ? out : ray_error("oom", NULL); }
+    if (!out || RAY_IS_ERR(out)) { ray_release(handle); ray_release(rs); return out ? out : q_err(QE_OOM); }
     out = ray_list_append(out, handle);   /* retains */
     out = ray_list_append(out, rs);
     ray_release(handle);
@@ -181,32 +182,32 @@ static ray_t* ws_pair(ray_t* handle, const char* resp, size_t rlen) {
 }
 
 ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
-    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
-    if (!request || !q_text_bytes(request, &reqp, &reqn)) return ray_error("type", NULL);
-    if (!hsym || hsym->type != -RAY_SYM) return ray_error("type", NULL);
+    if (!request || !q_text_bytes(request, &reqp, &reqn)) return q_err(QE_TYPE);
+    if (!hsym || hsym->type != -RAY_SYM) return q_err(QE_TYPE);
 
     /* hsym text (BORROWED interned string) -> ":ws://..." */
     ray_t* nm = ray_sym_str(hsym->i64);
-    if (!nm) return ray_error("type", NULL);
+    if (!nm) return q_err(QE_TYPE);
     const char* s = ray_str_ptr(nm);
     size_t sn = ray_str_len(nm);
-    if (sn < 1 || s[0] != ':') return ray_error("domain", NULL);
+    if (sn < 1 || s[0] != ':') return q_err(QE_DOMAIN);
     const char* rest = s + 1; size_t rn = sn - 1;         /* strip leading ':' */
 
     size_t schlen;
     if      (rn >= 5 && memcmp(rest, "ws://", 5) == 0)  schlen = 5;
-    else if (rn >= 6 && memcmp(rest, "wss://", 6) == 0) return ray_error("nyi", NULL); /* D-A */
-    else return ray_error("domain", NULL);
+    else if (rn >= 6 && memcmp(rest, "wss://", 6) == 0) return q_err(QE_NYI); /* D-A */
+    else return q_err(QE_DOMAIN);
 
     /* Reuse the #223 URL parser by mapping ws://->http:// (same authority +
      * user:pass@ + default port 80 grammar). */
     char urlbuf[600];
     int m = snprintf(urlbuf, sizeof urlbuf, "http://%.*s",
                      (int)(rn - schlen), rest + schlen);
-    if (m <= 0 || (size_t)m >= sizeof urlbuf) return ray_error("domain", NULL);
+    if (m <= 0 || (size_t)m >= sizeof urlbuf) return q_err(QE_DOMAIN);
     q_http_url_t u;
-    if (q_http_client_url_parse(urlbuf, (size_t)m, &u) != 0) return ray_error("domain", NULL);
+    if (q_http_client_url_parse(urlbuf, (size_t)m, &u) != 0) return q_err(QE_DOMAIN);
 
     /* 16 random key bytes -> base64 Sec-WebSocket-Key (a fresh nonce, RFC §4.1).
      * From /dev/urandom on POSIX; xorshift(clock+addr) fallback.  The expected
@@ -225,25 +226,25 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
             rawkey[i] = (uint8_t)((x * 0x2545F4914F6CDD1DULL) >> 56); }
     }
     ray_t* keyin = ray_str((const char*)rawkey, 16);
-    if (!keyin || RAY_IS_ERR(keyin)) return keyin ? keyin : ray_error("oom", NULL);
+    if (!keyin || RAY_IS_ERR(keyin)) return keyin ? keyin : q_err(QE_OOM);
     ray_t* keyb64 = q_dotq_btoa_fn(keyin);
     ray_release(keyin);
-    if (!keyb64 || RAY_IS_ERR(keyb64)) return keyb64 ? keyb64 : ray_error("oom", NULL);
+    if (!keyb64 || RAY_IS_ERR(keyb64)) return keyb64 ? keyb64 : q_err(QE_OOM);
 
     static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     size_t kl = ray_str_len(keyb64);
-    if (kl > 64) { ray_release(keyb64); return ray_error("limit", NULL); }
+    if (kl > 64) { ray_release(keyb64); return q_err(QE_LIMIT); }
     char cat[64 + sizeof guid];
     memcpy(cat, ray_str_ptr(keyb64), kl);
     memcpy(cat + kl, guid, sizeof guid - 1);
     ray_t* catin = ray_str(cat, kl + sizeof guid - 1);
-    if (!catin || RAY_IS_ERR(catin)) { ray_release(keyb64); return catin ? catin : ray_error("oom", NULL); }
+    if (!catin || RAY_IS_ERR(catin)) { ray_release(keyb64); return catin ? catin : q_err(QE_OOM); }
     ray_t* dig = q_dotq_sha1_fn(catin);
     ray_release(catin);
-    if (!dig || RAY_IS_ERR(dig)) { ray_release(keyb64); return dig ? dig : ray_error("oom", NULL); }
+    if (!dig || RAY_IS_ERR(dig)) { ray_release(keyb64); return dig ? dig : q_err(QE_OOM); }
     ray_t* accept = q_dotq_btoa_fn(dig);
     ray_release(dig);
-    if (!accept || RAY_IS_ERR(accept)) { ray_release(keyb64); return accept ? accept : ray_error("oom", NULL); }
+    if (!accept || RAY_IS_ERR(accept)) { ray_release(keyb64); return accept ? accept : q_err(QE_OOM); }
 
     /* Optional Basic-auth header from user:pass@ (in-tree base64 via .Q.btoa). */
     char authhdr[512]; authhdr[0] = '\0';
@@ -251,7 +252,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
         ray_t* uin = ray_str(u.userinfo, strlen(u.userinfo));
         ray_t* enc = (uin && !RAY_IS_ERR(uin)) ? q_dotq_btoa_fn(uin) : uin;
         if (uin && !RAY_IS_ERR(uin)) ray_release(uin);
-        if (!enc || RAY_IS_ERR(enc)) { ray_release(keyb64); ray_release(accept); return enc ? enc : ray_error("oom", NULL); }
+        if (!enc || RAY_IS_ERR(enc)) { ray_release(keyb64); ray_release(accept); return enc ? enc : q_err(QE_OOM); }
         snprintf(authhdr, sizeof authhdr, "Authorization: Basic %.*s\r\n",
                  (int)ray_str_len(enc), ray_str_ptr(enc));
         ray_release(enc);
@@ -267,7 +268,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     else if (uqn >= 2 && memcmp(uq + uqn - 2, "\r\n", 2) == 0) head = uqn;
     size_t reqcap = head + 640 + kl;
     char* req = (char*)malloc(reqcap);
-    if (!req) { ray_release(keyb64); ray_release(accept); return ray_error("oom", NULL); }
+    if (!req) { ray_release(keyb64); ray_release(accept); return q_err(QE_OOM); }
     memcpy(req, uq, head);
     int extra = snprintf(req + head, reqcap - head,
         "Upgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -275,7 +276,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
         (int)kl, ray_str_ptr(keyb64), authhdr);
     ray_release(keyb64);
     if (extra <= 0 || (size_t)(head + extra) >= reqcap) {
-        free(req); ray_release(accept); return ray_error("limit", NULL);
+        free(req); ray_release(accept); return q_err(QE_LIMIT);
     }
     size_t reqlen = head + (size_t)extra;
 
@@ -285,7 +286,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     if (fd == RAY_INVALID_SOCK) { free(req); ray_release(accept); return ray_error(err, NULL); }
     int64_t deadline = ws_now_ms() + Q_WS_HS_MS;
     if (q_http_client_send_all(fd, req, reqlen, deadline) != 0) {
-        free(req); ray_release(accept); ray_sock_close(fd); return ray_error("conn", NULL);
+        free(req); ray_release(accept); ray_sock_close(fd); return q_err(QE_CONN);
     }
     free(req);
     size_t rlen = 0;
@@ -296,7 +297,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     int minor, status; const char* msg; size_t mlen, nh = 32;
     struct phr_header h[32];
     int pr = phr_parse_response(resp, rlen, &minor, &status, &msg, &mlen, h, &nh, 0);
-    if (pr <= 0) { ray_release(accept); free(resp); ray_sock_close(fd); return ray_error("conn", NULL); }
+    if (pr <= 0) { ray_release(accept); free(resp); ray_sock_close(fd); return q_err(QE_CONN); }
 
     if (status != 101) {                                  /* clean upgrade failure */
         int64_t cl = ws_content_length(h, nh);            /* -1 = close-framed */
@@ -319,21 +320,21 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
              ah && ah->value_len == ray_str_len(accept) &&
              memcmp(ah->value, ray_str_ptr(accept), ah->value_len) == 0;
     ray_release(accept);
-    if (!ok) { free(resp); ray_sock_close(fd); return ray_error("conn", NULL); }
+    if (!ok) { free(resp); ray_sock_close(fd); return q_err(QE_CONN); }
 
     /* Success: register the fd as a client WS poll handle. */
     q_ws_conn_t* c = q_ws_conn_new_role(1);
-    if (!c) { free(resp); ray_sock_close(fd); return ray_error("oom", NULL); }
+    if (!c) { free(resp); ray_sock_close(fd); return q_err(QE_OOM); }
     int64_t id = ray_ws_client_register(fd, c);
-    if (id < 0) { q_ws_conn_free(c); free(resp); ray_sock_close(fd); return ray_error("conn", NULL); }
+    if (id < 0) { q_ws_conn_free(c); free(resp); ray_sock_close(fd); return q_err(QE_CONN); }
     int64_t sockfd = ray_ipc_fd_of_handle(id);            /* kdb handle == the fd */
     ray_t* handle = ray_i32((int32_t)(sockfd >= 0 ? sockfd : id));
     if (!handle || RAY_IS_ERR(handle)) {                  /* unwind the registration */
         ray_ipc_close(id); free(resp);
-        return handle ? handle : ray_error("oom", NULL);
+        return handle ? handle : q_err(QE_OOM);
     }
     ray_t* r = ws_pair(handle, resp, rlen);               /* (handle;resp) */
     free(resp);
-    if (!r || RAY_IS_ERR(r)) { ray_ipc_close(id); return r ? r : ray_error("oom", NULL); }
+    if (!r || RAY_IS_ERR(r)) { ray_ipc_close(id); return r ? r : q_err(QE_OOM); }
     return r;
 }

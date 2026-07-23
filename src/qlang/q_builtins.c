@@ -6,6 +6,7 @@
  * registration site — so `parse` overrides rayfall's lisp parse in the env. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
+#include "qlang/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_apply_value — THE eval pipeline */
 #include "qlang/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
@@ -31,18 +32,18 @@
 /* Exported (q_builtins.h) so the `-5!` internal-fn alias single-homes here. */
 ray_t* q_parse_builtin_fn(ray_t* x) {
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "parse expects a string");
+    if (!q_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t sl = (size_t)sn;
-    if (!sp) return ray_error("domain", "parse: bad source string");
+    if (!sp) return q_err(QE_DOMAIN);
     char* src = malloc(sl + 1);
-    if (!src) return ray_error("wsfull", "parse: out of memory");
+    if (!src) return q_err(QE_WSFULL);
     memcpy(src, sp, sl);
     src[sl] = '\0';
     ray_t* ast = q_parse(src);
     free(src);
     /* handed out as DATA: empty statements become () (kdb parse ";") */
     if (ast && !RAY_IS_ERR(ast)) q_ast_fill_empty_stmts(ast);
-    return ast ? ast : ray_error("parse", NULL);
+    return ast ? ast : q_err(QE_PARSE);
 }
 
 
@@ -62,7 +63,7 @@ static ray_t* id_table(ray_t* x) {
     ray_t* out = ray_table_new(nc);
     int64_t stack[64];
     int64_t* used = (nc <= 64) ? stack : (int64_t*)malloc((size_t)nc * sizeof(int64_t));
-    if (!used) { ray_release(out); return ray_error("wsfull", ".Q.id: out of memory"); }
+    if (!used) { ray_release(out); return q_err(QE_WSFULL); }
     for (int64_t c = 0; c < nc; c++) {
         int64_t nm = q_registry_name_sanitize(ray_table_col_name(x, c));
         nm = q_name_dedup(nm, used, c, 1);
@@ -78,12 +79,12 @@ static ray_t* id_dict(ray_t* x) {
     ray_t* k = ray_dict_keys(x);
     ray_t* v = ray_dict_vals(x);
     if (!k || k->type != RAY_SYM)
-        return ray_error("type", ".Q.id: dictionary keys must be symbols");
+        return q_err(QE_TYPE);
     int64_t n = ray_len(k);
     ray_t* nk = ray_sym_vec_new(RAY_SYM_W64, n);
     int64_t stack[64];
     int64_t* used = (n <= 64) ? stack : (int64_t*)malloc((size_t)n * sizeof(int64_t));
-    if (!used) { ray_release(nk); return ray_error("wsfull", ".Q.id: out of memory"); }
+    if (!used) { ray_release(nk); return q_err(QE_WSFULL); }
     for (int64_t i = 0; i < n; i++) {
         ray_t* ks = ray_sym_vec_cell(k, i);
         int64_t id = ray_sym_intern_runtime(ray_str_ptr(ks), ray_str_len(ks));
@@ -94,17 +95,17 @@ static ray_t* id_dict(ray_t* x) {
         if (!nk || RAY_IS_ERR(nk)) break;
     }
     if (used != stack) free(used);
-    if (!nk || RAY_IS_ERR(nk)) return nk ? nk : ray_error("oom", NULL);
+    if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_OOM);
     ray_retain(v);
     return ray_dict_new(nk, v);   /* consumes nk, retained v */
 }
 
 static ray_t* id_fn(ray_t* x) {
-    if (!x) return ray_error("type", ".Q.id: nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_SYM) return ray_sym(q_registry_name_sanitize(x->i64));
     if (x->type == RAY_TABLE) return id_table(x);
     if (x->type == RAY_DICT)  return id_dict(x);
-    return ray_error("type", ".Q.id: expects a symbol, table, or dictionary");
+    return q_err(QE_TYPE);
 }
 
 /* ---- function-value introspection (stage 2): type / count / value ------- */
@@ -145,7 +146,7 @@ static ray_t* type_fn(ray_t* x) {
         return ray_i16(x->type);
     }
     return g_base_type ? g_base_type(x)
-                       : ray_error("type", "type: base verb missing");
+                       : q_err(QE_TYPE);
 }
 
 /* ---- type-char map + table introspection (type-output feature) ----------- */
@@ -224,7 +225,7 @@ char q_ty_char(ray_t* x) {
 ray_t* q_count_fn(ray_t* x) {
     if (x && q_eval_apply_is_fn(x)) return ray_i64(1);
     return g_base_count ? g_base_count(x)
-                        : ray_error("type", "count: base verb missing");
+                        : q_err(QE_TYPE);
 }
 
 /* C-long specialization of q_count_fn: the count as an int64 (-1 on error),
@@ -282,7 +283,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
      * is drained to the server console just like the q path. */
     if (len > 0 && src[0] == '\\') {
         ray_t* arg = ray_str(src + 1, len - 1);   /* the command minus its leading `\` */
-        if (!arg) return ray_error("oom", "remote eval: out of memory");
+        if (!arg) return q_err(QE_OOM);
         ray_t* r = q_system_fn(arg);
         ray_release(arg);
         { const char* con = q_console_str();
@@ -291,7 +292,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
         return r;
     }
     char* tmp = (char*)ray_sys_alloc(len + 1);
-    if (!tmp) return ray_error("oom", "remote eval: out of memory");
+    if (!tmp) return q_err(QE_OOM);
     memcpy(tmp, src, len);
     tmp[len] = '\0';
     ray_t* ast = q_parse(tmp);
@@ -330,28 +331,28 @@ ray_t* q_value_nyi_fn(ray_t* x) {
     /* the identity-arg arm only: `value ::` -> `::` (ref/identity.md);
      * everything else stays 'nyi */
     if (x && RAY_IS_NULL(x)) { ray_retain(x); return x; }
-    return ray_error("nyi", NULL);
+    return q_err(QE_NYI);
 }
 
 /* keyword-HOF recipe stub (q_registry_internal.h note) */
 ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x) {
     (void)f; (void)x;
-    return ray_error("nyi", NULL);
+    return q_err(QE_NYI);
 }
 
 static ray_t* remote_apply(ray_t* list) {
     if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
         ray_len(list) < 1)
-        return ray_error("type", NULL);
+        return q_err(QE_TYPE);
     int64_t n = ray_len(list);
     ray_t* head = q_registry_elem_at(list, 0);            /* owned */
-    if (!head || RAY_IS_ERR(head)) return head ? head : ray_error("type", NULL);
+    if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_TYPE);
     /* string-source head ("+", "{x*2}"): parse + eval to its value */
     if (head->type == -RAY_STR || head->type == RAY_CHARV) {
         const char* sp; int64_t sn;
         if (q_text_bytes(head, &sp, &sn)) {
             char* z = malloc((size_t)sn + 1);
-            if (!z) { ray_release(head); return ray_error("wsfull", NULL); }
+            if (!z) { ray_release(head); return q_err(QE_WSFULL); }
             memcpy(z, sp, (size_t)sn);
             z[sn] = '\0';
             ray_t* ast = q_parse(z);
@@ -368,14 +369,14 @@ static ray_t* remote_apply(ray_t* list) {
     }
     ray_t* argv[8];
     int64_t argc = n - 1;
-    if (argc > 8) { ray_release(head); return ray_error("rank", NULL); }
+    if (argc > 8) { ray_release(head); return q_err(QE_RANK); }
     for (int64_t i = 0; i < argc; i++) {
         argv[i] = q_registry_elem_at(list, i + 1);        /* owned */
         if (!argv[i] || RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
             for (int64_t j = 0; j < i; j++) ray_release(argv[j]);
             ray_release(head);
-            return err ? err : ray_error("type", NULL);
+            return err ? err : q_err(QE_TYPE);
         }
     }
     ray_t* r;

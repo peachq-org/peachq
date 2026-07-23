@@ -6,6 +6,7 @@
 #define _POSIX_C_SOURCE 200809L   /* getaddrinfo/getnameinfo under -std=c17 */
 #endif
 #include "qlang/net/q_net.h"
+#include "qlang/q_err.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -35,9 +36,9 @@ static void wsa_ensure(void) {}
 #endif
 
 ray_t* q_net_addr(ray_t* y) {
-    if (!y || y->type != -RAY_SYM) return ray_error("type", NULL);
+    if (!y || y->type != -RAY_SYM) return q_err(QE_TYPE);
     ray_t* s = ray_sym_str(y->i64);                    /* borrowed */
-    if (!s) return ray_error("type", NULL);
+    if (!s) return q_err(QE_TYPE);
     char name[256];
     size_t n = ray_str_len(s);
     if (n == 0 || n >= sizeof name) return ray_i32(-1);
@@ -60,7 +61,7 @@ ray_t* q_net_addr(ray_t* y) {
 }
 
 ray_t* q_net_host(ray_t* y) {
-    if (!y || y->type != -RAY_I32) return ray_error("type", NULL);
+    if (!y || y->type != -RAY_I32) return q_err(QE_TYPE);
     wsa_ensure();
     struct sockaddr_in sin;
     memset(&sin, 0, sizeof sin);

@@ -2,6 +2,7 @@
  * provenance: see q_wire.h.  No frozen-base file is touched: this is a
  * q-layer TU; `-8!`/`-9!` dispatch lives in q_registry.c's `!` wrapper. */
 #include "qlang/net/q_wire.h"
+#include "qlang/q_err.h"      /* q_err / q_err_class — full class on the wire */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde */
 #include "qlang/q_registry.h"   /* q_collapse_list */
 #include "qlang/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
@@ -36,7 +37,7 @@ static int wbuf_reserve(q_wire_wbuf_t* b, size_t need) {
     size_t cap = b->cap ? b->cap : 64;
     while (cap < b->len + need) cap *= 2;
     uint8_t* p = (uint8_t*)ray_realloc_raw(b->p, cap);
-    if (!p) return wbuf_fail(b, ray_error("wsfull", "q_wire: out of memory"));
+    if (!p) return wbuf_fail(b, q_err(QE_WSFULL));
     b->p = p;
     b->cap = cap;
     return 0;
@@ -89,7 +90,7 @@ static int w_cstr(q_wire_wbuf_t* b, const char* s, size_t n) {
 /* Vector length as the wire's int32 count ('limit beyond 2^31-1). */
 static int w_count(q_wire_wbuf_t* b, int64_t len) {
     if (len < 0 || len > INT32_MAX)
-        return wbuf_fail(b, ray_error("limit", "q_wire: vector length %lld exceeds wire int32", (long long)len));
+        return wbuf_fail(b, q_err(QE_LIMIT));
     return w_i32(b, (int32_t)len);
 }
 
@@ -113,16 +114,17 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
      * read-side conflation.  The wire path refuses C NULL outright. */
     if (!x) {
         if (b->serde) return (w_u8(b, 101) || w_u8(b, 0)) ? -1 : 0;
-        return wbuf_fail(b, ray_error("type", "q_wire: nil value"));
+        return wbuf_fail(b, q_err(QE_TYPE));
     }
     if (g_wire_depth >= Q_WIRE_MAX_DEPTH)
-        return wbuf_fail(b, ray_error("limit", "q_wire: nesting exceeds max depth %d", Q_WIRE_MAX_DEPTH));
+        return wbuf_fail(b, q_err(QE_LIMIT));
     g_wire_depth++;
     int rc = -1;
 
-    /* error -128h */
+    /* error -128h — kdb sends the FULL class string (q_err_class recovers the
+     * untruncated name from the stamped enum, e.g. 'mismatch' not 'mismatc'). */
     if (RAY_IS_ERR(x)) {
-        const char* code = ray_err_code(x);
+        const char* code = q_err_class(x);
         rc = (w_u8(b, 0x80) || w_cstr(b, code, strlen(code))) ? -1 : 0;
         goto out;
     }
@@ -141,7 +143,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
                   w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src))) ? -1 : 0;
             goto out;
         }
-        rc = wbuf_fail(b, ray_error("nyi", "q_wire: carrier serialization not yet implemented"));
+        rc = wbuf_fail(b, q_err(QE_NYI));
         goto out;
     }
 
@@ -191,7 +193,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
                 size_t n = 0;
                 const char* s = ray_str_vec_get(x, i, &n);
                 if (n > INT32_MAX) {
-                    rc = wbuf_fail(b, ray_error("limit", "q_wire: string cell exceeds int32"));
+                    rc = wbuf_fail(b, q_err(QE_LIMIT));
                     break;
                 }
                 rc = (w_i32(b, (int32_t)n) || w_raw(b, s ? s : "", n)) ? -1 : 0;
@@ -226,7 +228,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
                 /* SERDE: an internal STR atom (lambda-source carrier) must
                  * come back -RAY_STR, not charv — its own ext record. */
                 if (n > INT32_MAX) {
-                    rc = wbuf_fail(b, ray_error("limit", "q_wire: str atom length %zu exceeds wire int32", n));
+                    rc = wbuf_fail(b, q_err(QE_LIMIT));
                     goto out;
                 }
                 rc = (w_u8(b, Q_WIRE_EXT_STRATOM) || w_i32(b, (int32_t)n) ||
@@ -259,7 +261,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             rc = (w_u8(b, 0xf6) || w_u8(b, x->u8)) ? -1 : 0;
             goto out;
         }
-        rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
+        rc = wbuf_fail(b, q_err(QE_NYI));
         goto out;
     }
 
@@ -277,7 +279,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         ray_t* schema = slots[0];                     /* I64 vec of name ids */
         ray_t* cols   = slots[1];                     /* RAY_LIST of columns */
         if (!schema || schema->type != RAY_I64 || !cols || cols->type != RAY_LIST) {
-            rc = wbuf_fail(b, ray_error("type", "q_wire: malformed table slots"));
+            rc = wbuf_fail(b, q_err(QE_TYPE));
             goto out;
         }
         if (w_u8(b, 98) || w_u8(b, 0) || w_u8(b, 99)) goto out;
@@ -374,7 +376,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     }
     /* value band exhausted above; an out-of-band tag (INDEX 97, or the sparse
      * gap 3) falls here — same 'nyi the old `default:` returned. */
-    rc = wbuf_fail(b, ray_error("nyi", "q_wire: type %d has no kdb wire tag", (int)t));
+    rc = wbuf_fail(b, q_err(QE_NYI));
     goto out;
 
 out:
@@ -387,14 +389,14 @@ ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype) {
     /* 8-byte header placeholder: endian=LE, msgtype, uncompressed, pad, len */
     uint8_t hdr[8] = { 0x01, msgtype, 0x00, 0x00, 0, 0, 0, 0 };
     if (w_raw(&b, hdr, 8) || q_wire_write_obj(&b, x)) {
-        ray_t* e = b.err ? b.err : ray_error("type", "q_wire: serialize failed");
+        ray_t* e = b.err ? b.err : q_err(QE_TYPE);
         b.err = NULL;
         q_wire_wbuf_free(&b);
         return e;
     }
     if (b.len > INT32_MAX) {
         q_wire_wbuf_free(&b);
-        return ray_error("limit", "q_wire: message exceeds int32 length");
+        return q_err(QE_LIMIT);
     }
     uint32_t total = (uint32_t)b.len;
     b.p[4] = (uint8_t)total;
@@ -479,7 +481,7 @@ static double f64_canon(double v) { return isinf(v) ? NULL_F64 : v; }
 static float  f32_canon(float v)  { return isinf(v) ? NULL_F32 : v; }
 
 static ray_t* trunc_err(const char* what) {
-    return ray_error("domain", "q_wire: truncated frame reading %s", what);
+    return q_err(QE_DOMAIN);
 }
 
 static ray_t* rd_obj(rcur_t* c);
@@ -493,9 +495,9 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     int32_t count = r_i32(c);
     uint8_t esz = ray_type_sizes[(uint8_t)t];
     if (count < 0 || (uint64_t)count * esz > c->rem)
-        return ray_error("domain", "q_wire: vector count %d out of range", (int)count);
+        return q_err(QE_DOMAIN);
     ray_t* v = ray_vec_new(t, count);
-    if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("wsfull", NULL);
+    if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
     v->len = count;
     uint8_t* d = (uint8_t*)ray_data(v);
     memcpy(d, c->p, (size_t)count * esz);
@@ -548,7 +550,7 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         if (!r_need(c, 1)) return trunc_err("builtin valence");
         uint8_t valence = r_u8(c);
         if (valence != RAY_UNARY && valence != RAY_BINARY && valence != RAY_VARY)
-            return ray_error("domain", "q_wire: bad builtin valence %d", (int)valence);
+            return q_err(QE_DOMAIN);
         const char* s; size_t n;
         if (r_cstr(c, &s, &n)) return trunc_err("builtin name");
         char name[16];
@@ -560,7 +562,7 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
             if (hooked) return hooked;    /* owned by contract */
         }
         ray_t* fn = ray_env_get(ray_sym_intern(name, n));
-        if (!fn) return ray_error("name", "q_wire: builtin '%s' not in environment", name);
+        if (!fn) return q_err(QE_NAME);
         ray_retain(fn);
         return fn;
     }
@@ -568,11 +570,11 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         if (!r_need(c, 1)) return trunc_err("lambda attrs");
         uint8_t attrs = r_u8(c);
         ray_t* params = rd_obj(c);
-        if (!params || RAY_IS_ERR(params)) return params ? params : ray_error("domain", NULL);
+        if (!params || RAY_IS_ERR(params)) return params ? params : q_err(QE_DOMAIN);
         ray_t* body = rd_obj(c);
-        if (!body || RAY_IS_ERR(body)) { ray_release(params); return body ? body : ray_error("domain", NULL); }
+        if (!body || RAY_IS_ERR(body)) { ray_release(params); return body ? body : q_err(QE_DOMAIN); }
         ray_t* lam = ray_alloc(7 * sizeof(ray_t*));
-        if (!lam || RAY_IS_ERR(lam)) { ray_release(params); ray_release(body); return lam ? lam : ray_error("wsfull", NULL); }
+        if (!lam || RAY_IS_ERR(lam)) { ray_release(params); ray_release(body); return lam ? lam : q_err(QE_WSFULL); }
         lam->type  = RAY_LAMBDA;
         lam->attrs = attrs & (uint8_t)~RAY_ATTR_SLICE;
         lam->len   = 0;
@@ -587,15 +589,15 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         int32_t count = r_i32(c);
         /* every cell needs at least its 4-byte length prefix */
         if (count < 0 || (uint64_t)count * 4 > c->rem)
-            return ray_error("domain", "q_wire: str vector count %d out of range", (int)count);
+            return q_err(QE_DOMAIN);
         ray_t* v = ray_vec_new(RAY_STR, count);
-        if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("wsfull", NULL);
+        if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
         for (int32_t i = 0; i < count; i++) {
             if (!r_need(c, 4)) { ray_release(v); return trunc_err("str cell length"); }
             int32_t n = r_i32(c);
-            if (n < 0 || (uint64_t)n > c->rem) { ray_release(v); return ray_error("domain", "q_wire: str cell length %d out of range", (int)n); }
+            if (n < 0 || (uint64_t)n > c->rem) { ray_release(v); return q_err(QE_DOMAIN); }
             v = ray_str_vec_append(v, (const char*)c->p, (size_t)n);
-            if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("wsfull", NULL);
+            if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
             c->p += (size_t)n; c->rem -= (size_t)n;
         }
         if (attrs & RAY_ATTR_HAS_NULLS) v->attrs |= RAY_ATTR_HAS_NULLS;
@@ -612,7 +614,7 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         if (!r_need(c, 4)) return trunc_err("str atom length");
         int32_t n = r_i32(c);
         if (n < 0 || (uint64_t)n > c->rem)
-            return ray_error("domain", "q_wire: str atom length %d out of range", (int)n);
+            return q_err(QE_DOMAIN);
         ray_t* s = ray_str((const char*)c->p, (size_t)n);
         c->p += (size_t)n; c->rem -= (size_t)n;
         return s;
@@ -621,11 +623,11 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         if (!r_need(c, 1)) return trunc_err("typed null");
         int8_t nt = (int8_t)r_u8(c);
         if (nt != -RAY_BOOL && nt != -RAY_BYTE_ONLY)
-            return ray_error("domain", "q_wire: typed-null ext for type %d", (int)nt);
+            return q_err(QE_DOMAIN);
         return ray_typed_null(nt);
     }
     default:
-        return ray_error("domain", "q_wire: reserved extension tag %d", (int)tag);
+        return q_err(QE_DOMAIN);
     }
 }
 
@@ -634,7 +636,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
     uint8_t raw = r_u8(c);
     if (raw >= Q_WIRE_EXT_TAG_FIRST && raw <= Q_WIRE_EXT_TAG_LAST) {
         if (c->serde) return rd_ext(c, raw);
-        return ray_error("domain", "q_wire: unsupported wire type %d", (int)(int8_t)raw);
+        return q_err(QE_DOMAIN);
     }
     int8_t t = (int8_t)raw;
 
@@ -696,7 +698,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         case RAY_LIST: break;   /* dead: -t >= 1, tag 0 is never an atom — named for totality */
         case RAY_STR: break;    /* wire byte -21 is not a kdb tag (STR is physical-only) */
         }
-        return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
+        return q_err(QE_DOMAIN);
     }
 
     /* ---- vectors ---- */
@@ -710,7 +712,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             (void)r_u8(c);
             int32_t count = r_i32(c);
             if (count < 0 || (uint64_t)count > c->rem)
-                return ray_error("domain", "q_wire: char vector count %d out of range", (int)count);
+                return q_err(QE_DOMAIN);
             ray_t* sa = ray_str((const char*)c->p, (size_t)count);
             c->p += (size_t)count; c->rem -= (size_t)count;
             return sa;
@@ -721,9 +723,9 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             (void)r_u8(c);
             int32_t count = r_i32(c);
             if (count < 0 || (uint64_t)count > c->rem)
-                return ray_error("domain", "q_wire: sym vector count %d out of range", (int)count);
+                return q_err(QE_DOMAIN);
             ray_t* v = ray_vec_new(RAY_SYM, count);   /* W64 runtime-domain */
-            if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("wsfull", NULL);
+            if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
             v->len = count;
             int64_t* ids = (int64_t*)ray_data(v);
             for (int32_t i = 0; i < count; i++) {
@@ -736,7 +738,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         default: {
             uint8_t esz = ray_type_sizes[(uint8_t)t];
             if (esz == 0)
-                return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
+                return q_err(QE_DOMAIN);
             return rd_fixed_vec(c, t);
         }
         }
@@ -748,15 +750,15 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         uint8_t attrs = r_u8(c);
         int32_t count = r_i32(c);
         if (count < 0 || (uint64_t)count > c->rem)    /* every element >= 1 byte */
-            return ray_error("domain", "q_wire: list count %d out of range", (int)count);
+            return q_err(QE_DOMAIN);
         ray_t* l = ray_list_new(count);
-        if (!l || RAY_IS_ERR(l)) return l ? l : ray_error("wsfull", NULL);
+        if (!l || RAY_IS_ERR(l)) return l ? l : q_err(QE_WSFULL);
         for (int32_t i = 0; i < count; i++) {
             ray_t* e = rd_obj(c);
-            if (!e || RAY_IS_ERR(e)) { ray_release(l); return e ? e : ray_error("domain", NULL); }
+            if (!e || RAY_IS_ERR(e)) { ray_release(l); return e ? e : q_err(QE_DOMAIN); }
             l = ray_list_append(l, e);
             ray_release(e);
-            if (!l || RAY_IS_ERR(l)) return l ? l : ray_error("wsfull", NULL);
+            if (!l || RAY_IS_ERR(l)) return l ? l : q_err(QE_WSFULL);
         }
         if (c->serde) {
             /* engine boxing is value state: no collapse; restore the engine
@@ -770,16 +772,16 @@ static ray_t* rd_obj_inner(rcur_t* c) {
     }
     case 99: case 127: {                              /* dict / sorted dict */
         ray_t* k = rd_obj(c);
-        if (!k || RAY_IS_ERR(k)) return k ? k : ray_error("domain", NULL);
+        if (!k || RAY_IS_ERR(k)) return k ? k : q_err(QE_DOMAIN);
         ray_t* v = rd_obj(c);
-        if (!v || RAY_IS_ERR(v)) { ray_release(k); return v ? v : ray_error("domain", NULL); }
+        if (!v || RAY_IS_ERR(v)) { ray_release(k); return v ? v : q_err(QE_DOMAIN); }
         int64_t kl = k->type == RAY_TABLE ? ray_table_nrows(k)
                    : (ray_is_vec(k) || k->type == RAY_LIST) ? ray_len(k) : -1;
         int64_t vl = v->type == RAY_TABLE ? ray_table_nrows(v)
                    : (ray_is_vec(v) || v->type == RAY_LIST) ? ray_len(v) : -1;
         if (kl < 0 || vl < 0 || kl != vl) {
             ray_release(k); ray_release(v);
-            return ray_error("length", "q_wire: dict key/value counts must match");
+            return q_err(QE_LENGTH);
         }
         return ray_dict_new(k, v);                    /* consumes both */
     }
@@ -787,18 +789,18 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (!r_need(c, 2)) return trunc_err("table header");
         (void)r_u8(c);                                /* attrs */
         if (r_u8(c) != 99)
-            return ray_error("domain", "q_wire: table body must be a dict");
+            return q_err(QE_DOMAIN);
         ray_t* keys = rd_obj(c);
-        if (!keys || RAY_IS_ERR(keys)) return keys ? keys : ray_error("domain", NULL);
+        if (!keys || RAY_IS_ERR(keys)) return keys ? keys : q_err(QE_DOMAIN);
         if (keys->type != RAY_SYM) {
             ray_release(keys);
-            return ray_error("domain", "q_wire: table column names must be a sym vector");
+            return q_err(QE_DOMAIN);
         }
         ray_t* cols = rd_obj(c);
-        if (!cols || RAY_IS_ERR(cols)) { ray_release(keys); return cols ? cols : ray_error("domain", NULL); }
+        if (!cols || RAY_IS_ERR(cols)) { ray_release(keys); return cols ? cols : q_err(QE_DOMAIN); }
         if (cols->type != RAY_LIST || cols->len != keys->len) {
             ray_release(keys); ray_release(cols);
-            return ray_error("domain", "q_wire: table column list malformed");
+            return q_err(QE_DOMAIN);
         }
         ray_t* tbl = ray_table_new(keys->len);
         for (int64_t i = 0; i < keys->len && tbl && !RAY_IS_ERR(tbl); i++)
@@ -806,23 +808,23 @@ static ray_t* rd_obj_inner(rcur_t* c) {
                                     ray_list_get(cols, i));   /* col NOT consumed */
         ray_release(keys);
         ray_release(cols);
-        return tbl ? tbl : ray_error("wsfull", NULL);
+        return tbl ? tbl : q_err(QE_WSFULL);
     }
     case 100: {                                       /* lambda: context + source */
         const char* ctx; size_t ctxn;
         if (r_cstr(c, &ctx, &ctxn)) return trunc_err("lambda context");
         ray_t* src = rd_obj(c);
-        if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("domain", NULL);
+        if (!src || RAY_IS_ERR(src)) return src ? src : q_err(QE_DOMAIN);
         if (src->type == RAY_CHARV || src->type == -RAY_CHARV) {
             /* decoded char vector -> the internal -RAY_STR source carrier */
             ray_t* s2 = q_str_of_charv(src);
             ray_release(src);
             src = s2;
-            if (!src || RAY_IS_ERR(src)) return src ? src : ray_error("oom", NULL);
+            if (!src || RAY_IS_ERR(src)) return src ? src : q_err(QE_OOM);
         }
         if (src->type != -RAY_STR) {
             ray_release(src);
-            return ray_error("domain", "q_wire: lambda body must be a char vector");
+            return q_err(QE_DOMAIN);
         }
         size_t n = ray_str_len(src);
         const char* sp = ray_str_ptr(src);
@@ -830,15 +832,15 @@ static ray_t* rd_obj_inner(rcur_t* c) {
          * unevaluated at definition time, so this cannot run arbitrary code. */
         if (n < 2 || sp[0] != '{') {
             ray_release(src);
-            return ray_error("domain", "q_wire: lambda source must be a {..} literal");
+            return q_err(QE_DOMAIN);
         }
         char* z = (char*)ray_alloc_raw(n + 1);
-        if (!z) { ray_release(src); return ray_error("wsfull", NULL); }
+        if (!z) { ray_release(src); return q_err(QE_WSFULL); }
         memcpy(z, sp, n); z[n] = 0;
         ray_release(src);
         ray_t* ast = q_parse(z);
         ray_free_raw(z);
-        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : ray_error("parse", NULL);
+        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : q_err(QE_PARSE);
         ray_t* lam = q_eval(ast);
         ray_release(ast);
         return lam;
@@ -847,16 +849,16 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (!r_need(c, 1)) return trunc_err("unary primitive");
         uint8_t which = r_u8(c);
         if (which == 0) return RAY_NULL_OBJ;
-        return ray_error("nyi", "q_wire: unary primitive %d", (int)which);
+        return q_err(QE_NYI);
     }
     default:
-        return ray_error("domain", "q_wire: unsupported wire type %d", (int)t);
+        return q_err(QE_DOMAIN);
     }
 }
 
 static ray_t* rd_obj(rcur_t* c) {
     if (g_wire_depth >= Q_WIRE_MAX_DEPTH)
-        return ray_error("domain", "q_wire: nesting exceeds max depth %d", Q_WIRE_MAX_DEPTH);
+        return q_err(QE_DOMAIN);
     g_wire_depth++;
     ray_t* r = rd_obj_inner(c);
     g_wire_depth--;
@@ -900,14 +902,14 @@ int q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde) {
 
 ray_t* q_wire_compress(ray_t* frame) {
     if (!frame || frame->type != RAY_BYTE_ONLY)
-        return ray_error("type", "q_wire: compress expects a byte vector");
+        return q_err(QE_TYPE);
     const uint8_t* y = (const uint8_t*)ray_data(frame);
     size_t t = (size_t)frame->len;
     if (t <= 2000) { ray_retain(frame); return frame; }     /* kdb threshold */
     int be = (y[0] == 0x00);                                /* frame's byte order */
     size_t e = t / 2;                                       /* under-half cap */
     uint8_t* z = (uint8_t*)ray_alloc_raw(e);
-    if (!z) return ray_error("wsfull", NULL);
+    if (!z) return q_err(QE_WSFULL);
     uint8_t i = 0;
     int g;
     size_t f = 0, h0 = 0, h = 0, c = 12, d = 12, p = 0, q, r, s0 = 0, s = 8;
@@ -962,18 +964,18 @@ ray_t* q_wire_compress(ray_t* frame) {
  * bounds-checked — corrupt frames return 'domain, never scribble. */
 ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
     if (plen < 6)
-        return ray_error("domain", "q_wire: compressed frame too short");
+        return q_err(QE_DOMAIN);
     uint32_t usz = frame_be
         ? ((uint32_t)pl[0] << 24 | (uint32_t)pl[1] << 16 | (uint32_t)pl[2] << 8 | pl[3])
         : ((uint32_t)pl[3] << 24 | (uint32_t)pl[2] << 16 | (uint32_t)pl[1] << 8 | pl[0]);
     if (usz < 9 || usz > Q_WIRE_ZIP_MAX)
-        return ray_error("domain", "q_wire: bad uncompressed length %u", (unsigned)usz);
+        return q_err(QE_DOMAIN);
     if ((uint64_t)usz - 8 > (uint64_t)(plen - 4) * 86)      /* bomb guard */
-        return ray_error("domain", "q_wire: impossible compression ratio");
+        return q_err(QE_DOMAIN);
     /* dst mirrors c.java's whole-frame buffer: [0..8) is the never-written
      * header region, zeroed so a corrupt back-reference reads zeros in-bounds. */
     uint8_t* dst = (uint8_t*)ray_alloc_raw(usz);
-    if (!dst) return ray_error("wsfull", NULL);
+    if (!dst) return q_err(QE_WSFULL);
     memset(dst, 0, 8);
     size_t n = 0, r = 0, f = 0, s = 8, p = 8, d = 4;
     uint32_t i = 0;
@@ -1008,34 +1010,33 @@ ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
     return out;
 corrupt:
     ray_free_raw(dst);
-    return ray_error("domain", "q_wire: corrupt compressed frame");
+    return q_err(QE_DOMAIN);
 }
 
 ray_t* q_wire_deserialize(ray_t* bytes) {
     if (!bytes || bytes->type != RAY_BYTE_ONLY)
-        return ray_error("type", "q_wire: -9! expects a byte vector");
+        return q_err(QE_TYPE);
     const uint8_t* p = (const uint8_t*)ray_data(bytes);
     int64_t n = bytes->len;
     if (n < 9)
-        return ray_error("domain", "q_wire: frame shorter than header");
+        return q_err(QE_DOMAIN);
     int frame_be;
     if (p[0] == 0x01)      frame_be = 0;
     else if (p[0] == 0x00) frame_be = 1;
-    else return ray_error("domain", "q_wire: bad endianness byte 0x%02x", p[0]);
+    else return q_err(QE_DOMAIN);
     if (p[2] > 1)
-        return ray_error("domain", "q_wire: bad compressed byte 0x%02x", p[2]);
+        return q_err(QE_DOMAIN);
     uint32_t total = frame_be
         ? ((uint32_t)p[4] << 24 | (uint32_t)p[5] << 16 | (uint32_t)p[6] << 8 | p[7])
         : ((uint32_t)p[7] << 24 | (uint32_t)p[6] << 16 | (uint32_t)p[5] << 8 | p[4]);
     if ((int64_t)total != n)
-        return ray_error("domain", "q_wire: frame length %u does not match %lld bytes",
-                         (unsigned)total, (long long)n);
+        return q_err(QE_DOMAIN);
     const uint8_t* body = p + 8;
     size_t blen = (size_t)(n - 8);
     ray_t* ub = NULL;
     if (p[2] == 1) {
         ub = q_wire_uncompress_payload(body, blen, frame_be);
-        if (!ub || RAY_IS_ERR(ub)) return ub ? ub : ray_error("wsfull", NULL);
+        if (!ub || RAY_IS_ERR(ub)) return ub ? ub : q_err(QE_WSFULL);
         body = (const uint8_t*)ray_data(ub);
         blen = (size_t)ub->len;
     }
@@ -1051,8 +1052,7 @@ ray_t* q_wire_deserialize(ray_t* bytes) {
      * a decode-failure error passes through untouched. */
     if (r && c.rem != 0 && (!RAY_IS_ERR(r) || c.top_err_ok)) {
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
-        r = ray_error("domain", "q_wire: %lld trailing payload bytes",
-                      (long long)c.rem);
+        r = q_err(QE_DOMAIN);
     }
     if (ub) ray_release(ub);
     return r;
