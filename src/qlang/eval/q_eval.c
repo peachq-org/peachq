@@ -22,7 +22,6 @@
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "ops/ops.h"
-#include <stdlib.h>
 #include <string.h>
 
 #define EVAL_MAX_ARGS  60
@@ -38,31 +37,13 @@ static int nameref(ray_t* x) {
     return x && x->type == -RAY_SYM && !(x->attrs & Q_ATTR_QUOTED);
 }
 
-/* Hole detection, head-dependent (the retired ql_project's rule):
- *   HOLES_ELISION — only a bracket-ELIDED slot (Q_ATTR_HOLE) projects; a
- *     plain `::` is data (noun indexing, the `@`/`.` amend/trap operands —
- *     an EXPLICIT `(::)` embeds the null VALUE, never a sym, so the tree
- *     keeps the two apart).
- *   HOLES_NULLREF — any unquoted `::` name-ref projects too: the postfix
- *     projection forms (`1+`, `-15!`, `(3+)`) parse their missing operand
- *     as a plain `::` sym. */
-enum { HOLES_ELISION = 0, HOLES_NULLREF = 1 };
-
+/* Hole detection: ONLY a parse-marked slot (Q_ATTR_HOLE — bracket elision
+ * `f[;2]` or the postfix forms' missing operand `1+`) projects.  A plain
+ * `::` is uniformly DATA, the generic null, under every head — kdb passes
+ * an explicit `::` argument to the callee (ref/dotq.md `.Q.en[::;t1]`). */
 static int is_hole(ray_t* x) {
     return x && x->type == -RAY_SYM && (x->attrs & Q_ATTR_HOLE) &&
            !(x->attrs & Q_ATTR_QUOTED);
-}
-
-static int is_hole_mode(ray_t* x, int mode) {
-    if (is_hole(x)) return 1;
-    if (mode != HOLES_NULLREF) return 0;
-    if (!x || x->type != -RAY_SYM || (x->attrs & Q_ATTR_QUOTED)) return 0;
-    ray_t* s = ray_sym_str(x->i64);
-    if (!s) return 0;
-    int r = ray_str_len(s) == 2 && ray_str_ptr(s)[0] == ':' &&
-            ray_str_ptr(s)[1] == ':';
-    ray_release(s);
-    return r;
 }
 
 /* adverb spelling -> id (0=' 1=/ 2=\ 3=': 4=/: 5=\:), else -1.
@@ -183,10 +164,10 @@ static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
 /* args RIGHT-to-left into argv (owned; holes stay C-NULL).  On error the
  * already-evaluated tail (indices > i) is released.  A LONE elided slot is
  * `f[]` — kdb applies to the generic null, only `;`-elision projects. */
-static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv, int mode) {
+static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv) {
     for (int64_t i = argc - 1; i >= 0; i--) {
         if (is_hole(e[i]) && argc == 1) { argv[i] = RAY_NULL_OBJ; continue; }
-        if (is_hole_mode(e[i], mode)) { argv[i] = NULL; continue; }
+        if (is_hole(e[i])) { argv[i] = NULL; continue; }
         argv[i] = q_eval(e[i]);
         if (RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
@@ -223,7 +204,9 @@ static ray_t* seq_eval(ray_t** e, int64_t n) {
 }
 
 /* `:`/`::` assignment.  `:` inside a lambda frame binds a local; `::` and
- * dotted names are global.  Returns the assigned value. */
+ * dotted names are global — UNLESS the `::` name is an argument or already
+ * defined as a local, which assigns the local and leaves the global alone
+ * (function-notation.md "Name scope").  Returns the assigned value. */
 static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     if (!nameref(target))
         return ray_error("nyi", NULL);              /* indexed assign: punt */
@@ -235,7 +218,9 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     if (reserved) return ray_error("assign", NULL);
     ray_t* v = q_eval(rhs);
     if (RAY_IS_ERR(v)) return v;
-    int local = !is_global && !dotted && q_eval_apply_frame_depth() > 0;
+    int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
+    int local = in_frame &&
+                (!is_global || ray_env_get_local(target->i64) != NULL);
     ray_err_t err = local ? ray_env_set_local(target->i64, v)
                           : ray_env_set(target->i64, v);
     if (err != RAY_OK) { ray_release(v); return ray_error("assign", NULL); }
@@ -533,7 +518,7 @@ ray_t* q_eval(ray_t* node) {
                     ret = ray_error("rank", NULL);
                     goto out;
                 }
-                ray_t* err = eval_args_rtl(e + 1, argc, argv, HOLES_ELISION);
+                ray_t* err = eval_args_rtl(e + 1, argc, argv);
                 if (err) { ray_release(F); ret = err; goto out; }
                 ret = q_eval_apply_adverb(adv, F, frow, argv, argc);
                 release_args(argv, argc);
@@ -574,18 +559,7 @@ ray_t* q_eval(ray_t* node) {
             ret = ray_error("rank", NULL);
             goto out;
         }
-        /* callable heads project on plain `::` operands (postfix forms);
-         * `@`/`.` and noun heads treat `::` as data (amend/trap, indexing) */
-        int mode = HOLES_ELISION;
-        if (fv && !RAY_IS_ERR(fv) &&
-            !(row && row->name[1] == '\0' &&
-              (row->name[0] == '@' || row->name[0] == '.')) &&
-            ((fv->type == RAY_UNARY || fv->type == RAY_BINARY ||
-              fv->type == RAY_VARY) && !(fv->attrs & RAY_FN_SPECIAL_FORM)))
-            mode = HOLES_NULLREF;
-        if (fv && (fv->type == RAY_QFN || fv->type == RAY_LAMBDA))
-            mode = HOLES_NULLREF;
-        ray_t* err = eval_args_rtl(e + 1, argc, argv, mode);
+        ray_t* err = eval_args_rtl(e + 1, argc, argv);
         if (err) { ray_release(fv); ret = err; goto out; }
         ret = q_eval_apply(fv, row, argv, argc);
         release_args(argv, argc);

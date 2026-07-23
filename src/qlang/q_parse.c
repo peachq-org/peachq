@@ -1734,7 +1734,10 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
 
     if (t.role == R_NOUN && u.role == R_VERB) {
         P e = parse_e(p, ctx);
-        ray_t *rhs = e.v ? e.v : q_null();
+        /* postfix form (`1+`, `-15!`): the missing rhs is a projection HOLE,
+         * the same Q_ATTR_HOLE marker bracket elisions carry — an explicit
+         * `::` operand stays plain and evaluates to the generic-null VALUE */
+        ray_t *rhs = e.v ? e.v : hole();
         u.v = q_embed(u.v, Q_DYADIC);          /* infix head: the dyadic row */
         ray_t *xs[3] = { u.v, t.v, rhs };
         return (P){ R_NOUN, q_list(xs, 3) };
