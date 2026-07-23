@@ -8,6 +8,7 @@
  * here; \S owns its seed state here. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_sys.h"
+#include "qlang/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
@@ -242,15 +243,15 @@ static ray_t* h_S(const char* arg, size_t alen) {
     if (alen == 0)                               /* `\S` — last-initialized seed */
         return ray_i32(g_last_seed);
     if (alen == 2 && arg[0] == '0' && arg[1] == 'N')  /* `\S 0N` — live state */
-        return ray_error("nyi", "\\S 0N: libc rand state is not readable");
+        return q_err(QE_NYI);
     int64_t v;
     if (!parse_i64(arg, alen, &v))
-        return ray_error("parse", NULL);         /* non-integer arg (unpinned) */
+        return q_err(QE_PARSE);         /* non-integer arg (unpinned) */
     /* The seed is an INT (`\S` displays it as one): out-of-int-range values
      * and the 0Ni sentinel are rejected, never silently truncated (codex P2,
      * 2026-07-09). */
     if (v <= INT32_MIN || v > INT32_MAX)
-        return ray_error("parse", NULL);
+        return q_err(QE_PARSE);
     q_rand_seed(v);                              /* `\S n` — re-initialize */
     g_last_seed = (int32_t)v;
     return NULL;                                 /* silent, like `\d ns` */
@@ -267,13 +268,13 @@ static ray_t* h_S(const char* arg, size_t alen) {
  * value for) can't yet report the value → honest 'nyi.
  *
  * The remaining commands that print a VALUE even in their arg-form or are
- * getter-only — \B (pending views) — inline `ray_error("nyi", NULL)` in the
+ * getter-only — \B (pending views) — inline `q_err(QE_NYI)` in the
  * switch: there is no silent form to match, so 'nyi is both honest and non-
  * regressing, the observable "known but not implemented" signal distinct from
  * an unknown-token shell-out. */
 static ray_t* h_getset(size_t alen) {
     if (alen > 0) return NULL;                   /* setter/action form → silent */
-    return ray_error("nyi", NULL);               /* getter form → not yet */
+    return q_err(QE_NYI);               /* getter form → not yet */
 }
 
 /* `\b` — views.  openq has no view mechanism; the owner ruling (2026-07-15) is
@@ -362,8 +363,8 @@ static ray_t* h_p(const char* arg, size_t alen) {
     bool port_auto = (alen == 2 && arg[0] == '0' && (arg[1] == 'W' || arg[1] == 'w'));
     int64_t v = 0;
     if (!port_auto) {
-        if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
-        if (v < 0 || v > 65535) return ray_error("domain", NULL);
+        if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
+        if (v < 0 || v > 65535) return q_err(QE_DOMAIN);
     }
     if (!port_auto && v == 0) {                          /* `\p 0` — stop listening */
         ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
@@ -374,7 +375,7 @@ static ray_t* h_p(const char* arg, size_t alen) {
     }
     /* Bind/readback/state-swap single-homed in q_sys_listen (shared with startup
      * `-p`).  0 → no poll (qdoctest) / bind-listen / readback failure → `'io`. */
-    if (!q_sys_listen(port_auto ? 0 : (uint16_t)v)) return ray_error("io", NULL);
+    if (!q_sys_listen(port_auto ? 0 : (uint16_t)v)) return q_err(QE_IO);
     return NULL;                                          /* setter: silent */
 }
 
@@ -385,13 +386,13 @@ static ray_t* h_p(const char* arg, size_t alen) {
 static ray_t* h_cd(const char* arg, size_t alen) {
     if (alen == 0) {                                     /* getter: current dir */
         char buf[PATH_MAX];
-        if (!getcwd(buf, sizeof buf)) return ray_error("os", NULL);
+        if (!getcwd(buf, sizeof buf)) return q_err(QE_OS);
         return ray_str(buf, strlen(buf));                /* char vector */
     }
-    if (alen >= PATH_MAX) return ray_error("os", NULL);
+    if (alen >= PATH_MAX) return q_err(QE_OS);
     char path[PATH_MAX];
     memcpy(path, arg, alen); path[alen] = '\0';
-    if (chdir(path) != 0) return ray_error("os", NULL);
+    if (chdir(path) != 0) return q_err(QE_OS);
     return NULL;                                          /* setter: silent */
 }
 
@@ -415,7 +416,7 @@ static int l_is_regular_readable(const char* p) {
  * defers the directory / splayed-table / serialized-object load forms.  Getter
  * form (no arg) stays 'nyi.  `system "l …"` single-homes through here. */
 static ray_t* h_l(const char* arg, size_t alen) {
-    if (alen == 0) return ray_error("nyi", NULL);        /* `\l` (bare) — reload cwd, deferred */
+    if (alen == 0) return q_err(QE_NYI);        /* `\l` (bare) — reload cwd, deferred */
     if (alen >= PATH_MAX) return NULL;
     char lit[PATH_MAX];
     memcpy(lit, arg, alen); lit[alen] = '\0';
@@ -497,7 +498,7 @@ static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
     ray_t* blk = NULL;
     if (len + 1 > sizeof stackbuf) {
         blk = ray_alloc(len + 1);
-        if (!blk) return ray_error("oom", NULL);
+        if (!blk) return q_err(QE_OOM);
         s = (char*)ray_data(blk);
     }
     memcpy(s, expr, len);
@@ -535,7 +536,7 @@ ray_t* q_sys_ts_apply(ray_t* f, ray_t* args) {
     ray_t* r = q_eval_dot_wrap(fa, 2);
     if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
     ts_end(&m, &ms, &bytes);                             /* result still live */
-    if (!r) return ray_error("type", NULL);
+    if (!r) return q_err(QE_TYPE);
     if (RAY_IS_ERR(r)) return r;
     ray_t* ts  = pair_i64((int64_t)ms, bytes);
     ray_t* out = ray_list_new(2);
@@ -589,10 +590,10 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
         return ray_i64((int64_t)ms);                     /* kdb shows whole ms */
     }
 
-    if (v < 0) return ray_error("domain", NULL);
+    if (v < 0) return q_err(QE_DOMAIN);
     /* Overflow guard: ray_timers_add computes now+tic_ms with no check (a UBSan
      * trap on a huge value).  Cap at INT32_MAX ms (~24.8 days) — generous. */
-    if (v > 2147483647LL) return ray_error("domain", NULL);
+    if (v > 2147483647LL) return q_err(QE_DOMAIN);
     ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
     if (v == 0) {                                        /* stop (silent) */
         if (poll && poll->timers && g_timer_id >= 0)
@@ -601,10 +602,10 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
         g_timer_ms = 0;
         return NULL;
     }
-    if (!poll) return ray_error("io", NULL);             /* no event poll (qdoctest) */
+    if (!poll) return q_err(QE_IO);             /* no event poll (qdoctest) */
     if (!poll->timers) {
         poll->timers = ray_timers_create(16);
-        if (!poll->timers) return ray_error("oom", NULL);
+        if (!poll->timers) return q_err(QE_OOM);
     }
     /* Replace any existing timer.  Set state to OFF first so an add-failure
      * below leaves an honest "no timer" state, not a stale id. */
@@ -613,10 +614,10 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
     g_timer_id = -1;
     g_timer_ms = 0;
     ray_t* thunk = q_dotz_timer_thunk();                 /* rc=1 */
-    if (!thunk || RAY_IS_ERR(thunk)) return thunk ? thunk : ray_error("oom", NULL);
+    if (!thunk || RAY_IS_ERR(thunk)) return thunk ? thunk : q_err(QE_OOM);
     int64_t id = ray_timers_add((ray_timers_t*)poll->timers, v, /*num=*/0, thunk);
     ray_release(thunk);                                  /* add RETAINED its own ref */
-    if (id < 0) return ray_error("oom", NULL);           /* state already off */
+    if (id < 0) return q_err(QE_OOM);           /* state already off */
     g_timer_id = id;
     g_timer_ms = v;
     /* Deliberately NO process-keepalive here.  Timers fire whenever the poll
@@ -637,7 +638,7 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
  * expression, including a lone integer (`\ts 42`).  See time_expr for the
  * space-metric divergence from kdb. */
 static ray_t* h_ts(size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    if (alen == 0) return ray_error("nyi", NULL);        /* `\ts` needs an expression */
+    if (alen == 0) return q_err(QE_NYI);        /* `\ts` needs an expression */
     double  ms;
     int64_t bytes;
     ray_t*  err = time_expr(rest, restlen, rep < 0 ? 1 : rep, &ms, &bytes);
@@ -650,7 +651,7 @@ static ray_t* h_ts(size_t alen, const char* rest, size_t restlen, int64_t rep) {
 static ray_t* h_P(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(q_fmt_prec());          /* getter */
     int64_t v;
-    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     /* Range [0,17].  syscmds.md does not specify the out-of-range action, so
      * we make it a silent no-op leaving precision unchanged — we neither
      * corrupt state nor pin an unverified value (rule 9 / clean-room). */
@@ -666,7 +667,7 @@ static ray_t* h_P(const char* arg, size_t alen) {
  * host-variable; the ledger pins type/count, not the numbers.  `\w 0|1|n` (sym
  * stats / limit-set) is deferred → 'nyi. */
 static ray_t* h_w(size_t alen) {
-    if (alen != 0) return ray_error("nyi", NULL);
+    if (alen != 0) return q_err(QE_NYI);
     ray_mem_stats_t st;
     ray_mem_stats(&st);
     int64_t vals[6] = {
@@ -724,7 +725,7 @@ static ray_t* h_C(const char* rest, size_t restlen) {
 static ray_t* h_g(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_gc_mode);
     int64_t v;
-    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     if (v != 0 && v != 1) return NULL;               /* only 0|1 valid */
     g_gc_mode = (int32_t)v;
     ray_t* g = ray_gc_fn(NULL, 0);                   /* stub call (reuse) */
@@ -737,7 +738,7 @@ static ray_t* h_g(const char* arg, size_t alen) {
 static ray_t* h_o(const char* arg, size_t alen) {
     if (alen == 0) return ray_i64(g_utc_offset);     /* 0N default, or set value */
     int64_t v;
-    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     g_utc_offset = v;
     return NULL;
 }
@@ -747,7 +748,7 @@ static ray_t* h_o(const char* arg, size_t alen) {
 static ray_t* h_W(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_week_offset);
     int64_t v;
-    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     g_week_offset = (int32_t)v;
     return NULL;
 }
@@ -757,7 +758,7 @@ static ray_t* h_W(const char* arg, size_t alen) {
 static ray_t* h_e(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_err_trap);
     int64_t v;
-    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     if (v < 0 || v > 2) return NULL;                 /* modes 0|1|2 */
     g_err_trap = (int32_t)v;
     return NULL;
@@ -768,7 +769,7 @@ static ray_t* h_e(const char* arg, size_t alen) {
 static ray_t* h_s(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_sec_threads);
     int64_t v;
-    if (!parse_i64(arg, alen, &v)) return ray_error("parse", NULL);
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     g_sec_threads = (int32_t)v;
     return NULL;
 }
@@ -780,7 +781,7 @@ static ray_t* h_s(const char* arg, size_t alen) {
 static ray_t* h_nonlegacy(const char* arg, size_t alen) {
     if (alen == 0) return ray_bool(q_console_pipe_on());     /* getter → 1b/0b */
     size_t n = (alen == 2 && arg[1] == 'b') ? 1 : alen;   /* strip the 1b/0b literal */
-    if (n != 1 || (arg[0] != '0' && arg[0] != '1')) return ray_error("type", NULL);
+    if (n != 1 || (arg[0] != '0' && arg[0] != '1')) return q_err(QE_TYPE);
     if (arg[0] == '1') q_console_pipe_enable(); else q_console_pipe_disable();
     return NULL;                                     /* setter: silent */
 }
@@ -799,7 +800,7 @@ static ray_t* sys_shell(const char* rem, size_t rlen) {
     ray_t* blk = NULL;
     if (rlen + 1 > sizeof stackbuf) {
         blk = ray_alloc(rlen + 1);
-        if (!blk) return ray_error("oom", NULL);
+        if (!blk) return q_err(QE_OOM);
         cmd = (char*)ray_data(blk);
     }
     memcpy(cmd, rem, rlen);
@@ -822,7 +823,7 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
     ray_t* blk = NULL;
     if (rlen + 1 > sizeof stackbuf) {
         blk = ray_alloc(rlen + 1);
-        if (!blk) return ray_error("oom", NULL);
+        if (!blk) return q_err(QE_OOM);
         cmd = (char*)ray_data(blk);
     }
     memcpy(cmd, rem, rlen);
@@ -830,19 +831,19 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
 
     FILE* p = popen(cmd, "r");
     if (blk) ray_free(blk);
-    if (!p) return ray_error("os", NULL);
+    if (!p) return q_err(QE_OS);
 
     /* Slurp all stdout into a growable buffer. */
     size_t cap = 4096, len = 0;
     char*  out = (char*)malloc(cap);
-    if (!out) { pclose(p); return ray_error("oom", NULL); }
+    if (!out) { pclose(p); return q_err(QE_OOM); }
     size_t got;
     char   rbuf[4096];
     while ((got = fread(rbuf, 1, sizeof rbuf, p)) > 0) {
         if (len + got > cap) {
             while (len + got > cap) cap *= 2;
             char* nb = (char*)realloc(out, cap);
-            if (!nb) { free(out); pclose(p); return ray_error("oom", NULL); }
+            if (!nb) { free(out); pclose(p); return q_err(QE_OOM); }
             out = nb;
         }
         memcpy(out + len, rbuf, got);
@@ -857,7 +858,7 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
     if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
 #endif
         free(out);
-        return ray_error("os", NULL);                    /* nonzero / signalled */
+        return q_err(QE_OS);                    /* nonzero / signalled */
     }
 
     /* Split on '\n', dropping a trailing '\r' per line (LF + associated CR
@@ -871,7 +872,7 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
         size_t end = j;
         if (end > i && out[end - 1] == '\r') end--;      /* strip associated CR */
         ray_t* row = ray_str(out + i, end - i);
-        if (!row || RAY_IS_ERR(row)) { ray_release(list); free(out); return row ? row : ray_error("oom", NULL); }
+        if (!row || RAY_IS_ERR(row)) { ray_release(list); free(out); return row ? row : q_err(QE_OOM); }
         list = ray_list_append(list, row);               /* retains row */
         ray_release(row);                                /* drop our local ref */
         if (RAY_IS_ERR(list)) { free(out); return list; }
@@ -886,9 +887,9 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
  * token shells via popen, stdout -> list of char vectors.  `system` is a
  * restricted primitive under IPC reval (kdb blocks it) -> 'access. */
 ray_t* q_system_fn(ray_t* x) {
-    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", "system expects a string");
+    if (!q_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t sl = (size_t)sn;
 
     char   stackbuf[1024];
@@ -896,7 +897,7 @@ ray_t* q_system_fn(ray_t* x) {
     ray_t* blk = NULL;
     if (sl + 2 > sizeof stackbuf) {                      /* '\' + cmd + NUL */
         blk = ray_alloc(sl + 2);
-        if (!blk) return ray_error("oom", NULL);
+        if (!blk) return q_err(QE_OOM);
         buf = (char*)ray_data(blk);
     }
     buf[0] = '\\';
@@ -918,7 +919,7 @@ bool q_sys_is_cmd(const char* line, size_t n) {
 ray_t* q_sys_run(const char* line, size_t n, int capture) {
     size_t i = 0;
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
-    if (i >= n || line[i] != '\\') return ray_error("type", NULL);  /* caller guard: q_sys_is_cmd */
+    if (i >= n || line[i] != '\\') return q_err(QE_TYPE);  /* caller guard: q_sys_is_cmd */
     i++;
 
     /* Command token = run of chars that are neither whitespace nor `:`.  The
@@ -967,7 +968,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 'd': return h_d(arg, alen);
             case 'v':                                            /* namespace vars      */
             case 'f':                                            /* namespace functions */
-            case 'a': return ray_error("nyi", NULL);             /* namespace tables —
+            case 'a': return q_err(QE_NYI);             /* namespace tables —
                                                                   * member enumeration
                                                                   * re-lands with the
                                                                   * scoping wave */
@@ -985,7 +986,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 'p': return h_p(arg, alen);                     /* listening port      */
             case 't': return h_t(arg, alen, rest, restlen, rep); /* timer / \t exp      */
             case 'b': return h_b();                              /* views — empty (owner ruling) */
-            case 'B': return ray_error("nyi", NULL);             /* pending views — getter-only  */
+            case 'B': return q_err(QE_NYI);             /* pending views — getter-only  */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
              * \z date-parse, \E TLS, \r replicate, \T timeout, \u user-pwd,
              * \x expunge, \1 stdout, \2 stderr, \_ hide-q-code. */

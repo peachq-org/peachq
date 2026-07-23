@@ -7,13 +7,13 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_err.h"
 #include "qlang/q_builtins.h"   /* q_ty_char — meta column letters */
 #include "qlang/ops/q_bang.h"  /* q_bang_dispatch — the `-N!` internal-fn manifest */
 #include "qlang/q_dotz.h"  /* q_dotz_ipc_hook_index, q_dotz_zts_set — .z.* handler arms */
 #include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
 #include "lang/eval.h"     /* ray_eval; ray_list_fn, ray_except_fn, ray_sect_fn, ray_take_fn */
 #include "lang/internal.h" /* ray_concat_fn, ray_typed_null, ray_error */
-#include "lang/format.h"   /* ray_type_name — error messages */
 #include "table/sym.h"     /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
 #include <stdio.h>         /* snprintf, rename */
 #include <string.h>
@@ -111,7 +111,7 @@ static ray_t* table_reorder(ray_t* t, const int64_t* names, int64_t n) {
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
         int64_t c = col_index(t, names[i]);
-        if (c < 0) { ray_release(out); return ray_error("length", "column not found"); }
+        if (c < 0) { ray_release(out); return q_err(QE_LENGTH); }
         out = ray_table_add_col(out, names[i], ray_table_get_col_idx(t, c));
     }
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
@@ -141,11 +141,11 @@ ray_t* q_table_row_at(ray_t* t, int64_t row) {
     int64_t nr = ray_table_nrows(t);
     int hit = row >= 0 && row < nr;
     ray_t* names = ray_vec_new(RAY_SYM, nc > 0 ? nc : 1);
-    if (!names || RAY_IS_ERR(names)) return names ? names : ray_error("oom", NULL);
+    if (!names || RAY_IS_ERR(names)) return names ? names : q_err(QE_OOM);
     names->len = nc;
     int64_t* nd = (int64_t*)ray_data(names);
     ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
-    if (!vals || RAY_IS_ERR(vals)) { ray_release(names); return vals ? vals : ray_error("oom", NULL); }
+    if (!vals || RAY_IS_ERR(vals)) { ray_release(names); return vals ? vals : q_err(QE_OOM); }
     for (int64_t c = 0; c < nc; c++) {
         nd[c] = ray_table_col_name(t, c);
         ray_t* col = ray_table_get_col_idx(t, c);            /* borrowed */
@@ -174,16 +174,16 @@ ray_t* q_table_row_at(ray_t* t, int64_t row) {
             ray_release(ia);
         } else {
             ray_release(names); ray_release(vals);
-            return ray_error("type", "at: malformed table column");
+            return q_err(QE_TYPE);
         }
-        if (!cell || RAY_IS_ERR(cell)) { ray_release(names); ray_release(vals); return cell ? cell : ray_error("type", NULL); }
+        if (!cell || RAY_IS_ERR(cell)) { ray_release(names); ray_release(vals); return cell ? cell : q_err(QE_TYPE); }
         vals = ray_list_append(vals, cell);
         ray_release(cell);
         if (RAY_IS_ERR(vals)) { ray_release(names); return vals; }
     }
     ray_t* cv = q_collapse_list(vals);
     ray_release(vals);
-    if (!cv || RAY_IS_ERR(cv)) { ray_release(names); return cv ? cv : ray_error("type", NULL); }
+    if (!cv || RAY_IS_ERR(cv)) { ray_release(names); return cv ? cv : q_err(QE_TYPE); }
     return ray_dict_new(names, cv);                          /* consumes both */
 }
 
@@ -202,7 +202,7 @@ ray_t* q_table_at(ray_t* t, ray_t* idx) {
     int64_t n = ray_len(idx);
     int64_t nr = ray_table_nrows(t);
     int64_t* ids = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
-    if (!ids) return ray_error("wsfull", "at: out of memory");
+    if (!ids) return q_err(QE_WSFULL);
     for (int64_t i = 0; i < n; i++) {
         int64_t v;
         switch (w) {                                         /* width, never tag (spec §2.2) */
@@ -297,40 +297,40 @@ static ray_t* table_operand(ray_t* y, int64_t* sym_out) {
  * Keyed tables, atoms, and an all-atom list are 'rank DEFERRED cells (the
  * all-atom arm is a choice, not verified kdb behaviour). */
 ray_t* q_flip_wrap(ray_t* x) {
-    if (!x) return ray_error("type", "flip: nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) {
         int64_t nc = ray_table_ncols(x);
         ray_t* k = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
-        if (!k || RAY_IS_ERR(k)) return k ? k : ray_error("oom", NULL);
+        if (!k || RAY_IS_ERR(k)) return k ? k : q_err(QE_OOM);
         ray_t* v = ray_list_new(nc > 0 ? nc : 1);
         if (RAY_IS_ERR(v)) { ray_release(k); return v; }
         for (int64_t c = 0; c < nc; c++) {
             int64_t nm = ray_table_col_name(x, c);
             k = ray_vec_append(k, &nm);
-            if (!k || RAY_IS_ERR(k)) { ray_release(v); return k ? k : ray_error("oom", NULL); }
+            if (!k || RAY_IS_ERR(k)) { ray_release(v); return k ? k : q_err(QE_OOM); }
             v = ray_list_append(v, ray_table_get_col_idx(x, c));   /* retains */
             if (RAY_IS_ERR(v)) { ray_release(k); return v; }
         }
         return ray_dict_new(k, v);                        /* consumes both */
     }
-    if (q_table_is_keyed(x)) return ray_error("rank", "flip: keyed table");
+    if (q_table_is_keyed(x)) return q_err(QE_RANK);
     if (x->type == RAY_DICT) {
         ray_t* k = ray_dict_keys(x);                      /* borrowed */
         ray_t* v = ray_dict_vals(x);                      /* borrowed */
         if (!k || k->type != RAY_SYM || !v)
-            return ray_error("type", "flip: dict must map symbols to columns");
+            return q_err(QE_TYPE);
         int64_t nc = ray_len(k);
         if (!(v->type == RAY_LIST || ray_is_vec(v)) || ray_len(v) != nc)
-            return ray_error("length", "flip: key and value counts differ");
+            return q_err(QE_LENGTH);
         /* pass 1: L = shared vector length (atoms broadcast; all-atom -> 1) */
         int64_t L = -1;
         for (int64_t c = 0; c < nc; c++) {
             ray_t* ia = ray_i64(c); ray_t* col = ray_at_fn(v, ia); ray_release(ia);
-            if (!col || RAY_IS_ERR(col)) return col ? col : ray_error("oom", NULL);
+            if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_OOM);
             if (!ray_is_atom(col)) {
                 int64_t l = ray_len(col);
                 if (L < 0) L = l;
-                else if (l != L) { ray_release(col); return ray_error("length", "flip: column lengths differ"); }
+                else if (l != L) { ray_release(col); return q_err(QE_LENGTH); }
             }
             ray_release(col);
         }
@@ -342,12 +342,12 @@ ray_t* q_flip_wrap(ray_t* x) {
             ray_t* s = ray_sym_vec_cell(k, c);
             int64_t nm = s ? ray_sym_intern_runtime(ray_str_ptr(s), ray_str_len(s)) : 0;
             ray_t* ia = ray_i64(c); ray_t* col = ray_at_fn(v, ia); ray_release(ia);
-            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : ray_error("oom", NULL); }
+            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
             if (ray_is_atom(col)) {
                 ray_t* b = bcast_col(col, L);
                 ray_release(col);
                 col = b;
-                if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : ray_error("oom", NULL); }
+                if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
             }
             out = ray_table_add_col(out, nm, col);
             ray_release(col);
@@ -364,10 +364,10 @@ ray_t* q_flip_wrap(ray_t* x) {
             if (it && (ray_is_vec(it) || it->type == RAY_LIST)) {
                 int64_t l = ray_len(it);
                 if (L < 0) L = l;
-                else if (l != L) return ray_error("length", "flip: row lengths differ");
+                else if (l != L) return q_err(QE_LENGTH);
             }
         }
-        if (L < 0) return ray_error("rank", "flip: needs at least one list item");
+        if (L < 0) return q_err(QE_RANK);
         ray_t* out = ray_list_new(L > 0 ? L : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t r = 0; r < L; r++) {
@@ -379,21 +379,21 @@ ray_t* q_flip_wrap(ray_t* x) {
                 if (it && (ray_is_vec(it) || it->type == RAY_LIST)) {
                     ray_t* ia = ray_i64(r); cell = ray_at_fn(it, ia); ray_release(ia);
                 } else { cell = it; if (cell) ray_retain(cell); }
-                if (!cell || RAY_IS_ERR(cell)) { ray_release(rowl); ray_release(out); return cell ? cell : ray_error("oom", NULL); }
+                if (!cell || RAY_IS_ERR(cell)) { ray_release(rowl); ray_release(out); return cell ? cell : q_err(QE_OOM); }
                 rowl = ray_list_append(rowl, cell);
                 ray_release(cell);
                 if (RAY_IS_ERR(rowl)) { ray_release(out); return rowl; }
             }
             ray_t* rowc = q_collapse_list(rowl);
             ray_release(rowl);
-            if (!rowc || RAY_IS_ERR(rowc)) { ray_release(out); return rowc ? rowc : ray_error("oom", NULL); }
+            if (!rowc || RAY_IS_ERR(rowc)) { ray_release(out); return rowc ? rowc : q_err(QE_OOM); }
             out = ray_list_append(out, rowc);
             ray_release(rowc);
             if (RAY_IS_ERR(out)) return out;
         }
         return out;
     }
-    return ray_error("rank", "flip: unsupported operand");
+    return q_err(QE_RANK);
 }
 
 /* q `keys x` — key column names (empty sym vector if unkeyed; table by value
@@ -401,16 +401,16 @@ ray_t* q_flip_wrap(ray_t* x) {
 ray_t* q_keys_wrap(ray_t* x) {
     int64_t sym;
     ray_t* t = table_operand(x, &sym);
-    if (!t) return ray_error("type", "keys: expects a table");
+    if (!t) return q_err(QE_TYPE);
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, 1);
-    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
     if (q_table_is_keyed(t)) {
         ray_t* kt = ray_dict_keys(t);                     /* borrowed */
         int64_t knc = ray_table_ncols(kt);
         for (int64_t c = 0; c < knc; c++) {
             int64_t nm = ray_table_col_name(kt, c);
             out = ray_vec_append(out, &nm);
-            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+            if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         }
     }
     return out;
@@ -421,10 +421,10 @@ ray_t* q_keys_wrap(ray_t* x) {
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
     int64_t names[64];
     int64_t n = sym_ids(x, names, 64);
-    if (n < 0) return ray_error("type", "xkey: keys must be symbols");
+    if (n < 0) return q_err(QE_TYPE);
     int64_t sym;
     ray_t* t = table_operand(y, &sym);
-    if (!t) return ray_error("type", "xkey: expects a table");
+    if (!t) return q_err(QE_TYPE);
     ray_t* flat = q_table_flatten(t);
     if (!flat || RAY_IS_ERR(flat)) return flat;
     ray_t* keyed;
@@ -452,10 +452,10 @@ ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
 ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
     int64_t names[64];
     int64_t nk = sym_ids(x, names, 64);
-    if (nk <= 0) return ray_error("type", "xgroup: expects symbol column names");
+    if (nk <= 0) return q_err(QE_TYPE);
     int64_t sym;
     ray_t* t = table_operand(y, &sym);
-    if (!t) return ray_error("type", "xgroup: expects a table");
+    if (!t) return q_err(QE_TYPE);
     ray_t* flat = q_table_flatten(t);
     if (!flat || RAY_IS_ERR(flat)) return flat;
     ray_t* reord = table_reorder(flat, names, nk);      /* key cols first */
@@ -466,7 +466,7 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
     /* group ids by first occurrence (boxed compare, test-scale O(n*g)) */
     int64_t* gid = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
     int64_t* rep = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
-    if (!gid || !rep) { free(gid); free(rep); ray_release(reord); return ray_error("wsfull", "xgroup: out of memory"); }
+    if (!gid || !rep) { free(gid); free(rep); ray_release(reord); return q_err(QE_WSFULL); }
     int64_t ng = 0;
     for (int64_t r = 0; r < nr; r++) {
         int64_t g = -1;
@@ -483,14 +483,14 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
             ray_t* ia = ray_i64(rep[j]);
             ray_t* cell = ray_at_fn(ray_table_get_col_idx(reord, c), ia);
             ray_release(ia);
-            if (!cell || RAY_IS_ERR(cell)) { ray_release(acc); acc = cell ? cell : ray_error("oom", NULL); break; }
+            if (!cell || RAY_IS_ERR(cell)) { ray_release(acc); acc = cell ? cell : q_err(QE_OOM); break; }
             acc = ray_list_append(acc, cell);
             ray_release(cell);
         }
         if (RAY_IS_ERR(acc)) { ray_release(kt); kt = acc; break; }
         ray_t* cc = q_collapse_list(acc);
         ray_release(acc);
-        if (!cc || RAY_IS_ERR(cc)) { ray_release(kt); kt = cc ? cc : ray_error("oom", NULL); break; }
+        if (!cc || RAY_IS_ERR(cc)) { ray_release(kt); kt = cc ? cc : q_err(QE_OOM); break; }
         kt = ray_table_add_col(kt, ray_table_col_name(reord, c), cc);
         ray_release(cc);
     }
@@ -509,11 +509,11 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
             if (RAY_IS_ERR(idx)) { ray_release(acc); acc = idx; break; }
             ray_t* grp = ray_at_fn(ray_table_get_col_idx(reord, c), idx);
             ray_release(idx);
-            if (!grp || RAY_IS_ERR(grp)) { ray_release(acc); acc = grp ? grp : ray_error("oom", NULL); break; }
+            if (!grp || RAY_IS_ERR(grp)) { ray_release(acc); acc = grp ? grp : q_err(QE_OOM); break; }
             ray_t* gc;
             if (grp->type == RAY_LIST) { gc = q_collapse_list(grp); ray_release(grp); }
             else gc = grp;
-            if (!gc || RAY_IS_ERR(gc)) { ray_release(acc); acc = gc ? gc : ray_error("oom", NULL); break; }
+            if (!gc || RAY_IS_ERR(gc)) { ray_release(acc); acc = gc ? gc : q_err(QE_OOM); break; }
             acc = ray_list_append(acc, gc);
             ray_release(gc);
         }
@@ -533,12 +533,12 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
 ray_t* q_ungroup_wrap(ray_t* x) {
     int64_t sym;
     ray_t* t = table_operand(x, &sym);
-    if (!t) return ray_error("type", "ungroup: expects a table");
+    if (!t) return q_err(QE_TYPE);
     ray_t* flat = q_table_flatten(t);
     if (!flat || RAY_IS_ERR(flat)) return flat;
     int64_t nc = ray_table_ncols(flat);
     int64_t nr = ray_table_nrows(flat);
-    if (nc > 64) { ray_release(flat); return ray_error("limit", "ungroup: too many columns"); }
+    if (nc > 64) { ray_release(flat); return q_err(QE_LIMIT); }
     ray_t* acc[64];
     for (int64_t c = 0; c < nc; c++) {
         acc[c] = ray_list_new(nr > 0 ? nr : 1);
@@ -558,12 +558,12 @@ ray_t* q_ungroup_wrap(ray_t* x) {
                 ray_t* ia = ray_i64(r);
                 ray_t* cell = ray_at_fn(col, ia);
                 ray_release(ia);
-                if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : ray_error("oom", NULL); break; }
+                if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
                 int64_t l = cell->type == -RAY_STR ? (int64_t)ray_str_len(cell)
                           : (ray_is_vec(cell) || cell->type == RAY_LIST) ? ray_len(cell) : 1;
                 ray_release(cell);
                 if (cnt < 0) cnt = l;
-                else if (l != cnt) err = ray_error("length", "ungroup: nested cell lengths differ");
+                else if (l != cnt) err = q_err(QE_LENGTH);
             }
         }
         if (err) break;
@@ -573,13 +573,13 @@ ray_t* q_ungroup_wrap(ray_t* x) {
             ray_t* ia = ray_i64(r);
             ray_t* cell = ray_at_fn(col, ia);
             ray_release(ia);
-            if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : ray_error("oom", NULL); break; }
+            if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
             if (col && col->type == RAY_LIST) {           /* explode nested cell */
                 for (int64_t i = 0; i < cnt && !err; i++) {
                     ray_t* ib = ray_i64(i);
                     ray_t* e = ray_at_fn(cell, ib);
                     ray_release(ib);
-                    if (!e || RAY_IS_ERR(e)) { err = e ? e : ray_error("oom", NULL); break; }
+                    if (!e || RAY_IS_ERR(e)) { err = e ? e : q_err(QE_OOM); break; }
                     acc[c] = ray_list_append(acc[c], e);
                     ray_release(e);
                     if (RAY_IS_ERR(acc[c])) err = acc[c];
@@ -608,7 +608,7 @@ ray_t* q_ungroup_wrap(ray_t* x) {
                 out = ray_table_add_col(out, ray_table_col_name(flat, c), cc);
             } else {
                 ray_release(out);
-                out = cc ? cc : ray_error("oom", NULL);
+                out = cc ? cc : q_err(QE_OOM);
                 cc = NULL;
             }
         }
@@ -646,10 +646,10 @@ static ray_t* null_cell_like(ray_t* col) {
  *     cover; partial: unknown keys ignored, missing columns null-filled).
  *   - 1-column target: an atom/vector payload IS the column. */
 static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
-    if (!y) return ray_error("type", "insert/upsert: nil payload");
+    if (!y) return q_err(QE_TYPE);
     int64_t nc = ray_table_ncols(flat);
-    if (nc <= 0) return ray_error("type", "insert/upsert: target has no columns");
-    if (nc > 64) return ray_error("limit", "insert/upsert: too many columns");
+    if (nc <= 0) return q_err(QE_TYPE);
+    if (nc > 64) return q_err(QE_LIMIT);
 
     if (y->type == RAY_TABLE || q_table_is_keyed(y)) {
         ray_t* src = q_table_flatten(y);
@@ -658,7 +658,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
         for (int64_t c = 0; c < snc; c++) {
             if (col_index(flat, ray_table_col_name(src, c)) < 0) {
                 ray_release(src);
-                return ray_error("mismatch", NULL);
+                return q_err(QE_MISMATCH);
             }
         }
         int64_t nr = ray_table_nrows(src);
@@ -670,7 +670,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
                 out = ray_table_add_col(out, nm, ray_table_get_col_idx(src, sc));
                 continue;
             }
-            if (!partial) { ray_release(out); ray_release(src); return ray_error("mismatch", NULL); }
+            if (!partial) { ray_release(out); ray_release(src); return q_err(QE_MISMATCH); }
             ray_t* acc = ray_list_new(nr > 0 ? nr : 1);
             for (int64_t r = 0; r < nr && !RAY_IS_ERR(acc); r++) {
                 ray_t* nl = null_cell_like(ray_table_get_col_idx(flat, c));
@@ -680,7 +680,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
             if (RAY_IS_ERR(acc)) { ray_release(out); ray_release(src); return acc; }
             ray_t* cc = q_collapse_list(acc);
             ray_release(acc);
-            if (!cc || RAY_IS_ERR(cc)) { ray_release(out); ray_release(src); return cc ? cc : ray_error("oom", NULL); }
+            if (!cc || RAY_IS_ERR(cc)) { ray_release(out); ray_release(src); return cc ? cc : q_err(QE_OOM); }
             out = ray_table_add_col(out, nm, cc);
             ray_release(cc);
         }
@@ -691,14 +691,14 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
     if (y->type == RAY_DICT) {
         ray_t* dk = ray_dict_keys(y);                     /* borrowed */
         if (!dk || dk->type != RAY_SYM)
-            return ray_error("type", "insert/upsert: dict row keys must be symbols");
+            return q_err(QE_TYPE);
         if (!partial) {
             int64_t dn = ray_len(dk);
             for (int64_t i = 0; i < dn; i++) {
                 /* borrowed domain atom — never released (table/sym.h) */
                 ray_t* s = ray_sym_vec_cell(dk, i);
                 int64_t id = s ? ray_sym_intern_runtime(ray_str_ptr(s), ray_str_len(s)) : 0;
-                if (col_index(flat, id) < 0) return ray_error("mismatch", NULL);
+                if (col_index(flat, id) < 0) return q_err(QE_MISMATCH);
             }
         }
         ray_t* out = ray_table_new(nc);
@@ -708,13 +708,13 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
             ray_t* cellv = ray_dict_get(y, ka);           /* owned or NULL */
             ray_release(ka);
             if (!cellv) {
-                if (!partial) { ray_release(out); return ray_error("mismatch", NULL); }
+                if (!partial) { ray_release(out); return q_err(QE_MISMATCH); }
                 cellv = null_cell_like(ray_table_get_col_idx(flat, c));
             }
             if (RAY_IS_ERR(cellv)) { ray_release(out); return cellv; }
             ray_t* col = bcast_col(cellv, 1);
             ray_release(cellv);
-            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : ray_error("oom", NULL); }
+            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
             out = ray_table_add_col(out, nm, col);
             ray_release(col);
         }
@@ -725,7 +725,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
         ray_t* col;
         if (ray_is_atom(y)) col = bcast_col(y, 1);
         else { ray_retain(y); col = y; }
-        if (!col || RAY_IS_ERR(col)) return col ? col : ray_error("oom", NULL);
+        if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_OOM);
         ray_t* out = ray_table_new(1);
         if (!RAY_IS_ERR(out)) out = ray_table_add_col(out, ray_table_col_name(flat, 0), col);
         ray_release(col);
@@ -733,7 +733,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
     }
 
     if (y->type != RAY_LIST && !ray_is_vec(y))
-        return ray_error("type", "insert/upsert: unsupported payload");
+        return q_err(QE_TYPE);
 
     int64_t ny = ray_len(y);
 
@@ -743,11 +743,11 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
             ray_t* ia = ray_i64(c);
             ray_t* it = ray_at_fn(y, ia);
             ray_release(ia);
-            if (!it || RAY_IS_ERR(it)) return it ? it : ray_error("oom", NULL);
+            if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
             if (!ray_is_atom(it)) {
                 int64_t l = ray_len(it);
                 if (L < 0) L = l;
-                else if (l != L) { ray_release(it); return ray_error("length", NULL); }
+                else if (l != L) { ray_release(it); return q_err(QE_LENGTH); }
             }
             ray_release(it);
         }
@@ -757,11 +757,11 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
             ray_t* ia = ray_i64(c);
             ray_t* it = ray_at_fn(y, ia);
             ray_release(ia);
-            if (!it || RAY_IS_ERR(it)) { ray_release(out); return it ? it : ray_error("oom", NULL); }
+            if (!it || RAY_IS_ERR(it)) { ray_release(out); return it ? it : q_err(QE_OOM); }
             ray_t* col;
             if (ray_is_atom(it)) { col = bcast_col(it, L); ray_release(it); }
             else col = it;
-            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : ray_error("oom", NULL); }
+            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
             out = ray_table_add_col(out, ray_table_col_name(flat, c), col);
             ray_release(col);
         }
@@ -787,14 +787,14 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
             if (!rec || RAY_IS_ERR(rec) ||
                 !(ray_is_vec(rec) || rec->type == RAY_LIST) || ray_len(rec) != nc) {
                 if (rec && RAY_IS_ERR(rec)) err = rec;
-                else { if (rec) ray_release(rec); err = ray_error("length", NULL); }
+                else { if (rec) ray_release(rec); err = q_err(QE_LENGTH); }
                 break;
             }
             for (int64_t c = 0; c < nc && !err; c++) {
                 ray_t* ib = ray_i64(c);
                 ray_t* cell = ray_at_fn(rec, ib);
                 ray_release(ib);
-                if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : ray_error("oom", NULL); break; }
+                if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
                 accs[c] = ray_list_append(accs[c], cell);
                 ray_release(cell);
                 if (RAY_IS_ERR(accs[c])) { err = accs[c]; accs[c] = NULL; }
@@ -815,7 +815,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
                     out = ray_table_add_col(out, ray_table_col_name(flat, c), cc);
                 } else {
                     ray_release(out);
-                    out = cc ? cc : ray_error("oom", NULL);
+                    out = cc ? cc : q_err(QE_OOM);
                     cc = NULL;
                 }
             }
@@ -839,7 +839,7 @@ static ray_t* table_append(ray_t* flat, ray_t* rows) {
                 ray_t* oc = ray_table_get_col_idx(flat, c);
                 ray_t* pc = ray_table_get_col_idx(rows, c);
                 if (oc && pc && ray_is_vec(oc) && pc->type != oc->type)
-                    return ray_error("type", NULL);
+                    return q_err(QE_TYPE);
             }
         }
         ray_t* out = ray_table_new(nc > 0 ? nc : 1);
@@ -857,14 +857,14 @@ static ray_t* table_append(ray_t* flat, ray_t* rows) {
             ray_t* oc = ray_table_get_col_idx(flat, c);
             ray_t* pc = ray_table_get_col_idx(rows, c);
             if (oc && pc && ray_is_vec(oc) && pc->type != oc->type)
-                return ray_error("type", NULL);
+                return q_err(QE_TYPE);
         }
     }
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
         ray_t* joined = q_env_call2("concat", ray_table_get_col_idx(flat, c),
                                               ray_table_get_col_idx(rows, c));
-        if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : ray_error("oom", NULL); }
+        if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : q_err(QE_OOM); }
         out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
         ray_release(joined);
     }
@@ -876,23 +876,23 @@ static ray_t* table_append(ray_t* flat, ray_t* rows) {
  * target: key collision -> 'insert.  Returns inserted row indices. */
 ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
-        return ray_error("type", "insert: target must be a table name (symbol)");
+        return q_err(QE_TYPE);
     ray_t* g = ray_env_get(x->i64);                       /* borrowed */
     if (!g) {                                             /* create */
         if (y && (y->type == RAY_TABLE || q_table_is_keyed(y))) {
             ray_env_bind(x->i64, y);                      /* retains */
             return idx_range(0, any_nrows(y));
         }
-        return ray_error("type", "insert: unbound target needs a table value");
+        return q_err(QE_TYPE);
     }
     if (!(g->type == RAY_TABLE || q_table_is_keyed(g)))
-        return ray_error("type", "insert: target is not a table");
+        return q_err(QE_TYPE);
     int keyed = q_table_is_keyed(g);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(g)) : 0;
     ray_t* flat = q_table_flatten(g);
     if (!flat || RAY_IS_ERR(flat)) return flat;
     ray_t* rows = rows_normalize(flat, y, 0);
-    if (!rows || RAY_IS_ERR(rows)) { ray_release(flat); return rows ? rows : ray_error("oom", NULL); }
+    if (!rows || RAY_IS_ERR(rows)) { ray_release(flat); return rows ? rows : q_err(QE_OOM); }
     int64_t before = ray_table_nrows(flat);
     int64_t added  = ray_table_nrows(rows);
     if (keyed) {                                          /* collision -> 'insert */
@@ -902,7 +902,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
             for (int64_t e = 0; e < kn; e++)
                 if (row_eq(rows, r, kt, e, nkey)) {
                     ray_release(rows); ray_release(flat);
-                    return ray_error("insert", NULL);
+                    return q_err(QE_INSERT);
                 }
     }
     ray_t* nf = table_append(flat, rows);
@@ -924,7 +924,7 @@ static ray_t* keyed_upsert_flat(ray_t* flat, int64_t nkey, ray_t* rows) {
     int64_t nc = ray_table_ncols(flat);
     int64_t n0 = ray_table_nrows(flat);
     int64_t na = ray_table_nrows(rows);
-    if (nc > 64) return ray_error("limit", "upsert: too many columns");
+    if (nc > 64) return q_err(QE_LIMIT);
     ray_t* colv[64];
     for (int64_t c = 0; c < nc; c++) colv[c] = NULL;
     ray_t* err = NULL;
@@ -935,7 +935,7 @@ static ray_t* keyed_upsert_flat(ray_t* flat, int64_t nkey, ray_t* rows) {
             ray_t* ia = ray_i64(r);
             ray_t* cell = ray_at_fn(ray_table_get_col_idx(flat, c), ia);
             ray_release(ia);
-            if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : ray_error("oom", NULL); break; }
+            if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
             colv[c] = ray_list_append(colv[c], cell);
             ray_release(cell);
             if (RAY_IS_ERR(colv[c])) { err = colv[c]; colv[c] = NULL; }
@@ -950,7 +950,7 @@ static ray_t* keyed_upsert_flat(ray_t* flat, int64_t nkey, ray_t* rows) {
                 ray_t* ia = ray_i64(r);
                 ray_t* nv = ray_at_fn(ray_table_get_col_idx(rows, c), ia);
                 ray_release(ia);
-                if (!nv || RAY_IS_ERR(nv)) { err = nv ? nv : ray_error("oom", NULL); break; }
+                if (!nv || RAY_IS_ERR(nv)) { err = nv ? nv : q_err(QE_OOM); break; }
                 ray_t** cells = (ray_t**)ray_data(colv[c]);
                 eq = cell_eq(cells[e], nv);
                 ray_release(nv);
@@ -961,7 +961,7 @@ static ray_t* keyed_upsert_flat(ray_t* flat, int64_t nkey, ray_t* rows) {
             ray_t* ia = ray_i64(r);
             ray_t* nv = ray_at_fn(ray_table_get_col_idx(rows, c), ia);
             ray_release(ia);
-            if (!nv || RAY_IS_ERR(nv)) { err = nv ? nv : ray_error("oom", NULL); break; }
+            if (!nv || RAY_IS_ERR(nv)) { err = nv ? nv : q_err(QE_OOM); break; }
             if (hit >= 0) {
                 if (c >= nkey) {                          /* update value cells */
                     ray_t** cells = (ray_t**)ray_data(colv[c]);
@@ -992,7 +992,7 @@ static ray_t* keyed_upsert_flat(ray_t* flat, int64_t nkey, ray_t* rows) {
                 out = ray_table_add_col(out, ray_table_col_name(flat, c), cc);
             } else {
                 ray_release(out);
-                out = cc ? cc : ray_error("oom", NULL);
+                out = cc ? cc : q_err(QE_OOM);
                 cc = NULL;
             }
         }
@@ -1014,14 +1014,14 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
             ray_retain(x);
             return x;
         }
-        return ray_error("type", "upsert: expects a table or table name");
+        return q_err(QE_TYPE);
     }
     int keyed = q_table_is_keyed(t);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(t)) : 0;
     ray_t* flat = q_table_flatten(t);
     if (!flat || RAY_IS_ERR(flat)) return flat;
     ray_t* rows = rows_normalize(flat, y, 1);
-    if (!rows || RAY_IS_ERR(rows)) { ray_release(flat); return rows ? rows : ray_error("oom", NULL); }
+    if (!rows || RAY_IS_ERR(rows)) { ray_release(flat); return rows ? rows : q_err(QE_OOM); }
     ray_t* nf = keyed ? keyed_upsert_flat(flat, nkey, rows)
                       : table_append(flat, rows);
     ray_release(flat); ray_release(rows);
@@ -1080,7 +1080,7 @@ int    qj_same_schema(ray_t* a, ray_t* b);                /* fwd */
 ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     if (x && y && x->type == RAY_TABLE && y->type == RAY_TABLE &&
         !qj_same_schema(x, y))
-        return ray_error("mismatch", ",: tables do not conform");
+        return q_err(QE_MISMATCH);
     if (q_table_is_keyed(x) && q_table_is_keyed(y))
         return qj_ktbl_merge(x, y, 0);     /* upsert: y records win wholesale */
     if (x && x->type == RAY_TABLE && y && y->type == RAY_DICT && !q_table_is_keyed(y))
@@ -1091,7 +1091,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
         int xd = x && x->type == RAY_DICT && !q_table_is_keyed(x);
         int yd = y && y->type == RAY_DICT && !q_table_is_keyed(y);
         if (xd != yd)
-            return ray_error("type", ",: cannot join a dictionary with a non-dictionary");
+            return q_err(QE_TYPE);
     }
     ray_t* r = ray_concat_fn(x, y);
     if (r && !RAY_IS_ERR(r)) return r;
@@ -1134,7 +1134,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
 static ray_t* table_member_idx(ray_t* x, ray_t* y, int keep_present) {
     int64_t nrx = ray_table_nrows(x), nry = ray_table_nrows(y);
     int64_t ncx = ray_table_ncols(x);
-    if (ncx != ray_table_ncols(y)) return ray_error("mismatch", NULL);
+    if (ncx != ray_table_ncols(y)) return q_err(QE_MISMATCH);
     ray_t* idx = ray_vec_new(RAY_I64, nrx > 0 ? nrx : 1);
     if (RAY_IS_ERR(idx)) return idx;
     idx->len = 0;
@@ -1144,7 +1144,7 @@ static ray_t* table_member_idx(ray_t* x, ray_t* y, int keep_present) {
             found = row_eq(x, r, y, e, ncx);
         if (found == keep_present) {
             idx = ray_vec_append(idx, &r);
-            if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+            if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
         }
     }
     return idx;
@@ -1161,7 +1161,7 @@ static ray_t* table_gather(ray_t* t, ray_t* idx) {
             ray_release(col);
             col = cc;
         }
-        if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : ray_error("oom", NULL); }
+        if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
         out = ray_table_add_col(out, ray_table_col_name(t, c), col);
         ray_release(col);
     }
@@ -1184,7 +1184,7 @@ static ray_t* table_distinct(ray_t* t) {
             dup = row_eq(t, r, t, kept[j], nc);
         if (!dup) {
             idx = ray_vec_append(idx, &r);
-            if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+            if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
         }
     }
     ray_t* out = table_gather(t, idx);
@@ -1201,10 +1201,10 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
     /* keyed tables / dicts are deferred cells — the base list kernel would
      * mangle the dict structure (mirror of the inter guard). */
     if ((x && x->type == RAY_DICT) || (y && y->type == RAY_DICT))
-        return ray_error("nyi", "except: dict/keyed-table operands deferred");
+        return q_err(QE_NYI);
     if (x && x->type == RAY_TABLE && y && y->type == RAY_TABLE) {
         ray_t* idx = table_member_idx(x, y, 0);
-        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
         ray_t* r = table_gather(x, idx);
         ray_release(idx);
         return r;
@@ -1234,22 +1234,22 @@ ray_t* q_key_wrap(ray_t* x) {
         return q_til_wrap(x);                       /* key n == til n */
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);
-        if (!s) return ray_error("type", "key: bad symbol");
+        if (!s) return q_err(QE_TYPE);
         const char* nm = ray_str_ptr(s);
         size_t l = ray_str_len(s);
         if (l == 0) {
             ray_release(s);
             /* `` ` `` roster synthesis died with q_ns (cutover 2026-07-23);
              * a dict-namespace enumeration re-lands with the scoping wave */
-            return ray_error("nyi", NULL);
+            return q_err(QE_NYI);
         }
         if (nm[0] == ':') {
             ray_release(s);
-            return ray_error("nyi", "key: file handles deferred (file-I/O wave)");
+            return q_err(QE_NYI);
         }
         if (l == 1 && nm[0] == '.') {           /* `. — root objects: nyi (as above) */
             ray_release(s);
-            return ray_error("nyi", NULL);
+            return q_err(QE_NYI);
         }
         ray_release(s);
         /* named variable / namespace: dict (incl. a context's dict) -> keys;
@@ -1259,7 +1259,7 @@ ray_t* q_key_wrap(ray_t* x) {
         if (RAY_IS_ERR(v)) return v;
         if (v->type == RAY_DICT) {
             ray_t* k = ray_dict_keys(v);
-            if (!k) { ray_release(v); return ray_error("type", "key: nil keys"); }
+            if (!k) { ray_release(v); return q_err(QE_TYPE); }
             ray_retain(k);
             ray_release(v);
             return k;
@@ -1269,9 +1269,9 @@ ray_t* q_key_wrap(ray_t* x) {
         return x;
     }
     if (!x || x->type != RAY_DICT)
-        return ray_error("type", "key: expects a dict (other forms deferred)");
+        return q_err(QE_TYPE);
     ray_t* k = ray_dict_keys(x);                /* borrowed */
-    if (!k) return ray_error("type", "key: nil keys");
+    if (!k) return q_err(QE_TYPE);
     ray_retain(k);
     return k;
 }
@@ -1286,18 +1286,18 @@ ray_t* q_key_wrap(ray_t* x) {
  * file-I/O wave: 'nyi.  Returns the handle (kdb returns nam). */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
-        return ray_error("nyi", "set: only symbol handles (file forms deferred)");
+        return q_err(QE_NYI);
     ray_t* s = ray_sym_str(x->i64);
-    if (!s) return ray_error("type", "set: bad symbol");
+    if (!s) return q_err(QE_TYPE);
     const char* nm = ray_str_ptr(s);
     size_t l = ray_str_len(s);
     if (l == 0) {
         ray_release(s);
-        return ray_error("type", "set: empty name");
+        return q_err(QE_TYPE);
     }
     if (nm[0] == ':') {
         ray_release(s);
-        return ray_error("nyi", "set: file handles deferred (file-I/O wave)");
+        return q_err(QE_NYI);
     }
     int is_root = (l == 1 && nm[0] == '.');
     /* Restore semantics: a single-segment `.foo` handle (kdb creates the
@@ -1319,7 +1319,7 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
                 if (k && !RAY_IS_ERR(k)) ray_release(k);
                 if (v && !RAY_IS_ERR(v)) ray_release(v);
                 ray_release(s);
-                return ray_error("type", "set: context dict needs symbol keys");
+                return q_err(QE_TYPE);
             }
             ray_t* ks = ray_sym_str(k->i64);
             if (!ks || ray_str_len(ks) == 0) {  /* :: placeholder — skip */
@@ -1343,7 +1343,7 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
             ray_release(v);
             if (err == RAY_ERR_RESERVED) {
                 ray_release(s);
-                return ray_error("reserve", "set: '%s' is reserved", full);
+                return q_err(QE_RESERVE);
             }
             if (err != RAY_OK) {
                 ray_release(s);
@@ -1356,7 +1356,7 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
     }
     if (is_root) {                              /* `. set non-dict: no reading */
         ray_release(s);
-        return ray_error("type", "set: root handle takes a dictionary");
+        return q_err(QE_TYPE);
     }
     /* Settable `.z.*` handler slots (`.z.ts`/`.z.exit`/`.z.p*`/`.z.w*`/`.z.ac`) —
      * NOT `.ipc.on.*` hooks.  dotz.c owns the name->slot dispatch AND the
@@ -1378,7 +1378,7 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
     ray_release(s);
     ray_err_t err = ray_env_set(tgt, y);        /* plain/dotted global assign */
     if (err == RAY_ERR_RESERVED)
-        return ray_error("reserve", "set: name is reserved");
+        return q_err(QE_RESERVE);
     if (err != RAY_OK)
         return ray_error(ray_err_code_str(err), "set: assign failed");
     ray_retain(x);
@@ -1393,13 +1393,12 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
  * distinct uses), collapsed back to a typed vector.  String operands are
  * a deferred cell (string model); atoms are kdb 'type. */
 ray_t* q_distinct_wrap(ray_t* x) {
-    if (!x) return ray_error("type", "distinct: nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) return table_distinct(x);   /* row dedup */
     if (x->type == -RAY_STR)
-        return ray_error("nyi", "distinct: string operand deferred (string model)");
+        return q_err(QE_NYI);
     if (!ray_is_vec(x) && x->type != RAY_LIST)
-        return ray_error("type", "distinct: expects a list, got %s",
-                         ray_type_name(x->type));
+        return q_err(QE_TYPE);
     int64_t n = ray_len(x);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
@@ -1429,13 +1428,13 @@ ray_t* q_distinct_wrap(ray_t* x) {
  * distinct wrapper defers (strings, tables) defer here too: error, never a
  * wrong answer. */
 ray_t* q_union_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "union: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     /* keyed tables / dicts are deferred cells (mirror of the inter guard). */
     if (x->type == RAY_DICT || y->type == RAY_DICT)
-        return ray_error("nyi", "union: dict/keyed-table operands deferred");
+        return q_err(QE_NYI);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* distinct of t,u */
         ray_t* j = q_env_call2("concat", x, y);
-        if (!j || RAY_IS_ERR(j)) return j ? j : ray_error("oom", NULL);
+        if (!j || RAY_IS_ERR(j)) return j ? j : q_err(QE_OOM);
         ray_t* r = table_distinct(j);
         ray_release(j);
         return r;
@@ -1453,10 +1452,10 @@ ray_t* q_union_wrap(ray_t* x, ray_t* y) {
  * VALUES as a list — so dict/table operands are guarded 'nyi (error, never a
  * wrong answer); everything else delegates to ray_sect_fn. */
 ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "inter: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* rows of x in y */
         ray_t* idx = table_member_idx(x, y, 1);
-        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
         ray_t* r = table_gather(x, idx);
         ray_release(idx);
         return r;
@@ -1467,12 +1466,12 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
         !q_table_is_keyed(x) && !q_table_is_keyed(y)) {
         ray_t* vx = ray_dict_vals(x);                      /* borrowed */
         ray_t* vy = ray_dict_vals(y);                      /* borrowed */
-        if (!vx || !vy) return ray_error("type", "inter: malformed dict");
+        if (!vx || !vy) return q_err(QE_TYPE);
         return q_inter_wrap(vx, vy);
     }
     if (x->type == RAY_DICT || x->type == RAY_TABLE ||
         y->type == RAY_DICT || y->type == RAY_TABLE)
-        return ray_error("nyi", "inter: dict/keyed-table operands deferred");
+        return q_err(QE_NYI);
     /* generic-list operands: whole-ITEM membership scan (base ray_sect_fn
      * flattens/mangles boxed items) — kdb keeps x items (dups kept) in y. */
     if (x->type == RAY_LIST || y->type == RAY_LIST) {
@@ -1483,11 +1482,11 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < nx; i++) {
             ray_t* xi = qj_item(x, i);
-            if (!xi || RAY_IS_ERR(xi)) { ray_release(out); return xi ? xi : ray_error("type", NULL); }
+            if (!xi || RAY_IS_ERR(xi)) { ray_release(out); return xi ? xi : q_err(QE_TYPE); }
             int found = 0;
             for (int64_t j = 0; j < ny && !found; j++) {
                 ray_t* yj = qj_item(y, j);
-                if (!yj || RAY_IS_ERR(yj)) { ray_release(xi); ray_release(out); return yj ? yj : ray_error("type", NULL); }
+                if (!yj || RAY_IS_ERR(yj)) { ray_release(xi); ray_release(out); return yj ? yj : q_err(QE_TYPE); }
                 found = q_match_rec(xi, yj);
                 ray_release(yj);
             }
@@ -1513,26 +1512,26 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
  * openq strings are -RAY_STR atoms — string model) and dict/table cross
  * (kdb cross-joins tables). */
 ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "cross: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     if (x->type == RAY_DICT || y->type == RAY_DICT)
-        return ray_error("nyi", "cross: dict operands deferred");
+        return q_err(QE_NYI);
     /* table cross table: the cartesian-product table (ref/cross.md) */
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
         for (int64_t c = 0; c < ray_table_ncols(y); c++)
             if (ray_table_get_col(x, ray_table_col_name(y, c)))
-                return ray_error("type", "cross: tables share a column name");
+                return q_err(QE_TYPE);
         int64_t nxr = ray_table_nrows(x), nyr = ray_table_nrows(y);
         int64_t n = nxr * nyr;
         int64_t* xi = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
         int64_t* yi = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
-        if (!xi || !yi) { free(xi); free(yi); return ray_error("wsfull", "cross: out of memory"); }
+        if (!xi || !yi) { free(xi); free(yi); return q_err(QE_WSFULL); }
         for (int64_t i = 0; i < n; i++) { xi[i] = i / nyr; yi[i] = i % nyr; }
         ray_t* xt = qj_table_gather_idx(x, xi, n);
         free(xi);
-        if (!xt || RAY_IS_ERR(xt)) { free(yi); return xt ? xt : ray_error("type", NULL); }
+        if (!xt || RAY_IS_ERR(xt)) { free(yi); return xt ? xt : q_err(QE_TYPE); }
         ray_t* yt = qj_table_gather_idx(y, yi, n);
         free(yi);
-        if (!yt || RAY_IS_ERR(yt)) { ray_release(xt); return yt ? yt : ray_error("type", NULL); }
+        if (!yt || RAY_IS_ERR(yt)) { ray_release(xt); return yt ? yt : q_err(QE_TYPE); }
         for (int64_t c = 0; c < ray_table_ncols(yt); c++) {
             ray_t* col = ray_table_get_col_idx(yt, c);     /* borrowed */
             xt = ray_table_add_col(xt, ray_table_col_name(yt, c), col);
@@ -1542,23 +1541,23 @@ ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
         return xt;
     }
     if (x->type == RAY_TABLE || y->type == RAY_TABLE)
-        return ray_error("type", "cross: both operands must be tables (or neither)");
+        return q_err(QE_TYPE);
     /* strings iterate their CHARS; atoms act as 1-item lists (qj_gen_*) */
     int64_t nx = qj_gen_len(x), ny = qj_gen_len(y);
     if (nx < 0 || ny < 0)
-        return ray_error("type", "cross: unsupported operand types");
+        return q_err(QE_TYPE);
     ray_t* out = ray_list_new(nx * ny > 0 ? nx * ny : 1);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t i = 0; i < nx; i++) {
         ray_t* a = qj_gen_item(x, i);
-        if (!a || RAY_IS_ERR(a)) { ray_release(out); return a ? a : ray_error("type", NULL); }
+        if (!a || RAY_IS_ERR(a)) { ray_release(out); return a ? a : q_err(QE_TYPE); }
         for (int64_t j = 0; j < ny; j++) {
             ray_t* b = qj_gen_item(y, j);
-            if (!b || RAY_IS_ERR(b)) { ray_release(a); ray_release(out); return b ? b : ray_error("type", NULL); }
+            if (!b || RAY_IS_ERR(b)) { ray_release(a); ray_release(out); return b ? b : q_err(QE_TYPE); }
             /* pair items joined with q `,` (boxed fallback for mixed types) */
             ray_t* p = q_join_wrap(a, b);
             ray_release(b);
-            if (!p || RAY_IS_ERR(p)) { ray_release(a); ray_release(out); return p ? p : ray_error("type", NULL); }
+            if (!p || RAY_IS_ERR(p)) { ray_release(a); ray_release(out); return p ? p : q_err(QE_TYPE); }
             out = ray_list_append(out, p);
             ray_release(p);
             if (RAY_IS_ERR(out)) { ray_release(a); return out; }
@@ -1577,11 +1576,11 @@ static ray_t* table_colnames(ray_t* x) {
     if (x->type == RAY_TABLE) {
         int64_t nc = ray_table_ncols(x);
         ray_t* out = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
-        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         for (int64_t c = 0; c < nc; c++) {
             int64_t nm = ray_table_col_name(x, c);
             out = ray_vec_append(out, &nm);
-            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+            if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         }
         return out;
     }
@@ -1589,23 +1588,23 @@ static ray_t* table_colnames(ray_t* x) {
         ray_t* kt = ray_dict_keys(x);      /* borrowed */
         ray_t* vt = ray_dict_vals(x);      /* borrowed */
         if (!kt || !vt || kt->type != RAY_TABLE || vt->type != RAY_TABLE)
-            return ray_error("type", "cols: expects a table");
+            return q_err(QE_TYPE);
         int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
         ray_t* out = ray_sym_vec_new(RAY_SYM_W64, knc + vnc > 0 ? knc + vnc : 1);
-        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         for (int64_t c = 0; c < knc; c++) {
             int64_t nm = ray_table_col_name(kt, c);
             out = ray_vec_append(out, &nm);
-            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+            if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         }
         for (int64_t c = 0; c < vnc; c++) {
             int64_t nm = ray_table_col_name(vt, c);
             out = ray_vec_append(out, &nm);
-            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+            if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         }
         return out;
     }
-    return ray_error("type", "cols: expects a table");
+    return q_err(QE_TYPE);
 }
 
 /* Resolve a by-name table operand (cols`t / meta`t): a -RAY_SYM naming a
@@ -1620,7 +1619,7 @@ static ray_t* table_bi_deref(ray_t* x) {
 
 /* (cols x) — column names of a table as a symbol vector. */
 ray_t* q_cols_fn(ray_t* x) {
-    if (!x) return ray_error("type", "cols: nil");
+    if (!x) return q_err(QE_TYPE);
     return table_colnames(table_bi_deref(x));
 }
 
@@ -1628,14 +1627,14 @@ ray_t* q_cols_fn(ray_t* x) {
  * Returns owned (retained for a plain table). */
 static ray_t* table_meta_flatten(ray_t* x) {
     if (x->type == RAY_TABLE) { ray_retain(x); return x; }
-    if (x->type != RAY_DICT) return ray_error("type", "meta: expects a table");
+    if (x->type != RAY_DICT) return q_err(QE_TYPE);
     ray_t* kt = ray_dict_keys(x);          /* borrowed */
     ray_t* vt = ray_dict_vals(x);          /* borrowed */
     if (!kt || !vt || kt->type != RAY_TABLE || vt->type != RAY_TABLE)
-        return ray_error("type", "meta: expects a table");
+        return q_err(QE_TYPE);
     int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
     ray_t* out = ray_table_new(knc + vnc > 0 ? knc + vnc : 1);
-    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
     for (int64_t c = 0; c < knc && !RAY_IS_ERR(out); c++)
         out = ray_table_add_col(out, ray_table_col_name(kt, c), ray_table_get_col_idx(kt, c));
     for (int64_t c = 0; c < vnc && !RAY_IS_ERR(out); c++)
@@ -1650,7 +1649,7 @@ static ray_t* table_meta_flatten(ray_t* x) {
  * "a keyed table is just a dictionary from one table to another" (q_fmt
  * renders it `k| v`). */
 ray_t* q_meta_fn(ray_t* x) {
-    if (!x) return ray_error("type", "meta: nil");
+    if (!x) return q_err(QE_TYPE);
     ray_t* flat = table_meta_flatten(table_bi_deref(x));
     if (!flat || RAY_IS_ERR(flat)) return flat;
     int64_t nc = ray_table_ncols(flat);
@@ -1667,7 +1666,7 @@ ray_t* q_meta_fn(ray_t* x) {
         if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
         if (tbuf && tbuf != stackt) free(tbuf);
         ray_release(flat);
-        return ray_error("wsfull", "meta: out of memory");
+        return q_err(QE_WSFULL);
     }
     int64_t blank = ray_sym_intern_runtime("", 0);
     int ok = 1;
@@ -1689,7 +1688,7 @@ ray_t* q_meta_fn(ray_t* x) {
         if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
         if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
         if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
-        return ray_error("wsfull", "meta: build failed");
+        return q_err(QE_WSFULL);
     }
     /* key table: c ; value table: t f a  -> keyed table dict */
     ray_t* kt = ray_table_new(1);

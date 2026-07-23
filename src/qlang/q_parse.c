@@ -19,6 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_parse.h"
+#include "qlang/q_err.h"
 #include "qlang/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
 #include "qlang/q_calendar.h" /* q_calendar_ts_compose — timestamp vector literals */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
@@ -42,10 +43,9 @@
  * kparser die()s (exit) on malformed input.  A REPL must not exit, so a
  * malformed parse longjmps back to q_parse, which returns a ray_error. */
 static jmp_buf q_err_jmp;
-static char    q_err_buf[128];
 
 static _Noreturn void q_die(const char *msg) {
-    snprintf(q_err_buf, sizeof q_err_buf, "%s", msg);
+    (void)msg;   /* class-only errors (bare 'parse); msg documents the call site */
     longjmp(q_err_jmp, 1);
 }
 
@@ -2220,14 +2220,14 @@ static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
  * runtime path — the migration wires parse_query, not this.  Returns OWNED. */
 ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
     if (!q_registry_ready())
-        return ray_error("init", "q_qsql_normalize_probe: registry not initialized");
+        return q_err(QE_INIT);
     init_class();
     g_toks.t = NULL; g_toks.n = 0;
     if (setjmp(q_err_jmp)) {
         qsql_pend_unwind();
         free_tokens(g_toks);
         g_toks.t = NULL; g_toks.n = 0;
-        return ray_error("parse", "%s", q_err_buf);
+        return q_err(QE_PARSE);
     }
     Tokens ts = scan(src);
     Parser p = { .src = src, .t = ts, .pos = 0, .xyz_mask = NULL, .lambda_depth = 0 };
@@ -2267,7 +2267,7 @@ ray_t *q_parse(const char *src) {
      * than silently emit a mixed sym/value tree.  Every q entry point
      * bootstraps via q_runtime_create, which initializes the registry. */
     if (!q_registry_ready())
-        return ray_error("init", "q_parse: op registry not initialized");
+        return q_err(QE_INIT);
     /* System-command line: a statement starting with '\' (kdb's column-0
      * convention).  `\t`/`\ts expr` time the expression via the base `timeit`
      * special form (kdb returns ms; timing rows are never byte-pinned).  Every
@@ -2289,7 +2289,7 @@ ray_t *q_parse(const char *src) {
             if ((is_t || is_ts) && *rest) {
                 size_t rl = strlen(rest);
                 char* buf = (char*)malloc(rl + 8);
-                if (!buf) return ray_error("wsfull", "q_parse: out of memory");
+                if (!buf) return q_err(QE_WSFULL);
                 memcpy(buf, "timeit ", 7);
                 memcpy(buf + 7, rest, rl + 1);
                 ray_t* prog = q_parse(buf);      /* buf starts "timeit ": no recursion */
@@ -2310,7 +2310,7 @@ ray_t *q_parse(const char *src) {
         free_tokens(g_toks);
         g_toks.t = NULL;
         g_toks.n = 0;
-        return ray_error("parse", "%s", q_err_buf);
+        return q_err(QE_PARSE);
     }
 
     Tokens ts = scan(src);
@@ -2320,7 +2320,7 @@ ray_t *q_parse(const char *src) {
         ray_release(e);
         free_tokens(ts);
         g_toks.t = NULL; g_toks.n = 0;
-        return ray_error("parse", "unexpected token");
+        return q_err(QE_PARSE);
     }
     ray_t *prog = seq_of(e);
     free_tokens(ts);
