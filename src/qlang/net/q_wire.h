@@ -48,7 +48,7 @@
  *   - Attribute bytes emit as 0x00 (openq has no s/u/p/g attrs yet) and
  *     are ignored on read; sorted-dict 0x7f decodes as a plain dict.
  *   - Lambdas serialize their SOURCE text (the .q.lambda carrier's `src`);
- *     decoding re-evaluates it (q_parse → q_lower → ray_eval), so it
+ *     decoding re-evaluates it (q_parse → q_eval), so it
  *     requires a warm q registry (runtime-only, like the `value` wrapper).
  *   - Engine values with no kdb tag (builtin fn values, projections,
  *     RAY_INDEX, graph/HNSW handles, lazies) refuse the wire with 'nyi.
