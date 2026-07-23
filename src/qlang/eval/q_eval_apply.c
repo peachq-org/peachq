@@ -1,7 +1,7 @@
 /* q_eval_apply — the apply module, THE one dispatch home (see q_eval.h).
- * Owns valence/rank, projections, RAY_QFN carriers, native adverbs + the
- * manifest mono column, the L1-L4 family lifts (manifest family column),
- * kernel invocation and result construction.  The atomic vector maps are
+ * Owns valence/rank, projections, composition, RAY_QFN carriers, native
+ * adverbs + the manifest mono column, the L1-L4 family lifts (manifest
+ * family column), kernel invocation and result construction.  The atomic vector maps are
  * transcribed from the carve-eval quarry (base eval.c atomic_map_*): kept
  * empty-input zero-atom probe, typed-output probe, int-width promotion,
  * boxed fallback, error-trim.  Kernel-library extraction of the base
@@ -118,6 +118,17 @@ static ray_t* proj_new(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n,
         if (args[i]) ray_retain(args[i]);
         s[2 + i] = args[i];
     }
+    return c;
+}
+
+/* composition carrier (ref/apply.md Composition): [u, g] — u unary */
+static ray_t* comp_new(ray_t* u, ray_t* g) {
+    ray_t* c = car_new(Q_EVAL_CAR_COMP, 2);
+    if (RAY_IS_ERR(c)) return c;
+    ray_retain(u);
+    car_slots(c)[0] = u;
+    ray_retain(g);
+    car_slots(c)[1] = g;
     return c;
 }
 
@@ -746,7 +757,9 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     ray_t** c = car_slots(lam);
     ray_t* params = c[0];
     ray_t* body = c[1];
-    if (ray_env_push_scope() != RAY_OK) return ray_error("stack", NULL);
+    /* barrier frame: strictly-local resolution (function-notation.md) —
+     * the body sees its params/locals and globals, never a caller frame */
+    if (ray_env_push_scope_barrier() != RAY_OK) return ray_error("stack", NULL);
     for (int64_t i = 0; i < n; i++) {
         ray_t* p = q_registry_elem_at(params, i);          /* sym atom */
         if (p && !RAY_IS_ERR(p)) {
@@ -951,6 +964,27 @@ static int64_t rank_of(ray_t* fv) {
     return -1;                              /* vary / deriv: no fixed rank */
 }
 
+/* a value that composes when a unary is juxtaposed onto it: an `@`/`.`
+ * projection (`count@`, `(%).`) or an existing composition (`u v w@`) */
+static int comp_tail(ray_t* x) {
+    int k = q_eval_apply_carrier_kind(x);
+    if (k == Q_EVAL_CAR_COMP) return 1;
+    if (k != Q_EVAL_CAR_PROJ) return 0;
+    const q_op_t* row = row_unbox(car_slots(x)[1]);
+    return row && row->name[1] == '\0' &&
+           (row->name[0] == '@' || row->name[0] == '.');
+}
+
+static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
+    ray_t** c = car_slots(comp);
+    ray_t* inner = q_eval_apply(c[1], NULL, args, n);
+    if (RAY_IS_ERR(inner)) return inner;
+    ray_t* r = q_eval_apply(c[0], q_registry_row_of(c[0], Q_MONADIC),
+                            &inner, 1);
+    ray_release(inner);
+    return r;
+}
+
 ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return ray_error("type", NULL);
     if (ray_eval_is_interrupted()) return ray_error("stop", NULL);
@@ -963,18 +997,30 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
         return q_eval_apply_adverb((int)c[2]->i64, c[0], row_unbox(c[1]),
                                    args, n);
     }
+    if (kind == Q_EVAL_CAR_COMP) return comp_call(fv, args, n);
     if (!kind && !is_fnval(fv)) {
+        /* the generic null is Identity: `(::) x` / `::[x]` returns x
+         * (ref/identity.md) — 101h is a unary primitive, not a noun */
+        if (RAY_IS_NULL(fv) && n == 1 && args[0]) {
+            ray_retain(args[0]);
+            return args[0];
+        }
         /* bare ENGINE lambda (rayfall-defined .rfl/serde values): base call */
         if (fv->type == RAY_LAMBDA) return call_lambda(fv, args, n);
         return noun_index(fv, args, n);
     }
+
+    /* ref/apply.md Composition: `u v w@` — a UNARY on an `@`/`.` projection
+     * (or a composition) COMPOSES rather than applying to the fn value */
+    if (n == 1 && fv->type == RAY_UNARY && comp_tail(args[0]))
+        return comp_new(fv, args[0]);
 
     int64_t holes = 0;
     for (int64_t i = 0; i < n; i++)
         if (!args[i]) holes++;
     int64_t rank = rank_of(fv);
     if (holes > 0) {
-        if (rank < 0) return ray_error("nyi", NULL);   /* vary projection */
+        if (rank < 0) rank = n;   /* vary/deriv: project at the called rank */
         return proj_new(fv, row, args, n, rank);
     }
     if (rank >= 0 && n < rank) return proj_new(fv, row, args, n, rank);
@@ -1140,6 +1186,13 @@ int q_eval_apply_carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
         else if (c[0]) q_fmt(c[0], fb, sizeof fb);
         snprintf(buf, bufsz, "%s%s", fb,
                  (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
+        return 1;
+    }
+    if (kind == Q_EVAL_CAR_COMP) {
+        char ub[128] = "", gb[128] = "";
+        if (c[0]) q_fmt(c[0], ub, sizeof ub);
+        if (c[1]) q_fmt(c[1], gb, sizeof gb);
+        snprintf(buf, bufsz, "%s %s", ub, gb);
         return 1;
     }
     char fb[128] = "";

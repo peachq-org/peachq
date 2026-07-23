@@ -194,6 +194,7 @@ static ray_t* env_lookup_flat(int64_t sym_id) {
         for (int32_t i = 0; i < f->count; i++) {
             if (f->keys[i] == sym_id) return f->vals[i];
         }
+        if (f->barrier) break;   /* q strict locality: caller frames hidden */
     }
     for (int32_t i = 0; i < g_env.count; i++) {
         if (g_env.keys[i] == sym_id) return g_env.vals[i];
@@ -302,6 +303,7 @@ ray_t* ray_env_resolve(int64_t sym_id) {
                     break;
                 }
             }
+            if (f->barrier) break;
         }
         if (!fn) {
             for (int32_t k = 0; k < g_env.count; k++) {
@@ -632,8 +634,24 @@ ray_err_t ray_env_push_scope(void) {
     f->vals = f->vals_inline;
     f->cap = RAY_FRAME_CAP;
     f->count = 0;
+    f->barrier = false;
     __VM->scope_depth++;
     return RAY_OK;
+}
+
+/* Function-frame variant: names below this frame are invisible to lookup
+ * (q's strictly-local rule); frames pushed ABOVE it still see it. */
+ray_err_t ray_env_push_scope_barrier(void) {
+    ray_err_t err = ray_env_push_scope();
+    if (err == RAY_OK)
+        __VM->scope_stack[__VM->scope_depth - 1].barrier = true;
+    return err;
+}
+
+/* Borrowed ref from the TOP frame only (a function's own params/locals),
+ * NULL when absent or no frame is live. */
+ray_t* ray_env_get_local(int64_t sym_id) {
+    return lookup_top_frame(sym_id);
 }
 
 void ray_env_pop_scope(void) {

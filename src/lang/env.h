@@ -137,6 +137,13 @@ void ray_env_pop_scope(void);
 int32_t   ray_env_scope_depth(void);
 ray_err_t ray_env_set_local(int64_t sym_id, ray_t* val);
 
+/* Barrier frame: name lookup stops at this frame instead of walking the
+ * frames below it (q function frames are strictly local; frames pushed
+ * above a barrier — e.g. query column scopes — still see it).  get_local
+ * reads the TOP frame only and returns a BORROWED ref (or NULL). */
+ray_err_t ray_env_push_scope_barrier(void);
+ray_t*    ray_env_get_local(int64_t sym_id);
+
 /* Compiled-lambda local materialization (OP_SCOPE_BEGIN / OP_SCOPE_END).
  * bind: push a fresh frame and bind syms[i] -> slots[i] (NULL slots —
  * let-locals whose initializer hasn't run yet — are skipped) plus
