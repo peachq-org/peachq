@@ -73,6 +73,22 @@ ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence);
  * matches parser behaviour and is intentional. */
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);
 
+/* (value, manifest-row) pair lookup for the fresh evaluator (eval-rebuild
+ * finding 2: family/mono attach at registration, keyed per entry — never
+ * recovered post-hoc through q_registry_provenance's first-spelling rule).
+ * Same borrowed-value contract as q_registry_lookup; *row_out gets the
+ * entry's Q_OPS[] row (NULL only for values with no manifest row). */
+struct q_op;
+ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
+                             const struct q_op** row_out);
+
+/* Manifest row for a PARSER-EMBEDDED head value at the given valence.
+ * Exact for wrapper/QSRC cells (unique objects).  A pass-through env value
+ * aliased by several rows at that valence returns NULL — ambiguous by
+ * construction (the `#`-monadic vs `count` class); the fresh apply module
+ * then dispatches on the value's own attrs (RAY_FN_ATOMIC) alone. */
+const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
+
 /* True iff y is a keyed table: a RAY_DICT whose keys AND values are both
  * tables (the wave-4 shape shared by the table verbs and q_builtins). */
 int q_table_is_keyed(ray_t* y);

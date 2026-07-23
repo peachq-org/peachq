@@ -18,6 +18,7 @@
 #include "qlang/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_parse.h"    /* q_parse, q_lower — embedded-bootstrap loader */
+#include "qlang/eval/q_eval.h" /* q_eval_fresh_enabled — hook uninstall */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
 #include "qlang/h_gen.h"      /* OPENQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
 #include "qlang/j_gen.h"      /* OPENQ_J_BOOTSTRAP — codegen'd from src/qlang/j.q (`.j` JSON ns) */
@@ -165,6 +166,14 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
          * definitions now that the bootstrap has bound them. */
         if (q_registry_bind_qsrc() != RAY_OK)
             fprintf(stderr, "q bootstrap: qsrc registry bind failed\n");
+        /* Q_EVAL=fresh: the bootstrap above ran on the legacy pipeline and
+         * needed the hooks; the fresh evaluator never calls ray_eval, and any
+         * kernel that strays into base plumbing must see PLAIN rayfall — no
+         * silent q dispatch (eval-rebuild finding 3).  Legacy keeps them. */
+        if (q_eval_fresh_enabled()) {
+            ray_eval_set_apply_hook(NULL);
+            ray_eval_set_name_hook(NULL);
+        }
     }
     return rt;
 }

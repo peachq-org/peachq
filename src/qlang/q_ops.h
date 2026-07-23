@@ -82,23 +82,30 @@ typedef struct {
 
 /* One manifest row: a q verb, its lexical class, its monadic/dyadic build recipes
  * (QR_* above), and the introspection metadata surfaced verbatim as the `.Q.ops[]`
- * columns.  deterministic/sideeffect/family are PURE METADATA — no verb behaviour
- * reads them.  Every row sets all fields explicitly (-Wmissing-field-initializers).
+ * columns.  deterministic/sideeffect stay PURE METADATA; family, mono and the
+ * keyword-row adverb_hof became OPERATIVE with the eval-rebuild skeleton — the
+ * fresh apply module (src/qlang/eval/) dispatches its family lifts, `/`-
+ * monomorphization and native HOF routing on them (legacy eval still reads
+ * none).  Every row sets all fields explicitly (-Wmissing-field-initializers).
  * Classification rosters + border rulings live in q_ops.c (the deterministic/
  * sideeffect AUDIT and FAMILY AUDIT blocks); the `family` vocabulary is
  * atomic|map|aggregate|index|rowid|structural|irregular|none (defs:
  * actionable-plans/2026-07-15-uniform-structure-dispatch.md).  Per-verb help
  * strings live OUTSIDE the binary in docs/q-ops-help.tsv (archival, keyed by
  * name, loaded by nothing). */
-typedef struct {
+typedef struct q_op {
     const char*  name;          /* q surface spelling — the lookup key + registry provenance */
     q_lex_class  lex;           /* how the scanner treats the token (QLEX_* above) */
     q_recipe_t   mon;           /* monadic build recipe (QR_NONE = no value at this valence) */
     q_recipe_t   dyad;          /* dyadic  build recipe */
-    const char*  adverb_hof;    /* adverb rows: the rayfall HOF the adverb IS (' map, / fold, \ scan); else NULL */
+    const char*  adverb_hof;    /* adverb rows: the rayfall HOF the adverb IS (' map, / fold, \ scan).
+                                 * Keyword-HOF rows (each/peach/over/scan/prior) also set it so the
+                                 * fresh evaluator routes them to native adverb arms; else NULL */
     uint8_t      deterministic; /* 0 iff any valence is nondeterministic (rand/deal/?-roll); else 1 */
     uint8_t      sideeffect;    /* 1 iff eval has an observable effect (assign/mutate/IPC/system/I/O); else 0 */
-    const char*  family;        /* structure-dispatch family (see above); pure metadata */
+    const char*  family;        /* structure-dispatch family (see above); consumed by the fresh apply module */
+    const char*  mono;          /* dyad rows: keyword whose kernel a `/`-derivation monomorphizes to
+                                 * (`+`->sum `*`->prd `|`->max `&`->min `,`->raze); else NULL */
 } q_op_t;
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
