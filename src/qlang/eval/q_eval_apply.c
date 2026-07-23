@@ -1035,12 +1035,30 @@ int q_eval_apply_is_fn(ray_t* v) {
            q_eval_apply_carrier_kind(v) != 0;
 }
 
+/* Ambivalent-operator promotion for value-apply: a bare operator resolves to
+ * its MONADIC registry value, so `("+";2;3)` hands the rank-1 head 2 args.
+ * Swap to the same-spelling DYADIC sibling — but ONLY for wrapper values, whose
+ * provenance is exact; a shared pass-through (monadic `#`==`count`) carries only
+ * its first alias and could mis-route, so those (and monadic-only verbs) 'rank. */
+static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row) {
+    if (head->type == RAY_UNARY && n == 2) {
+        q_provenance_t pv;
+        if (q_registry_provenance(head, &pv) && pv.is_wrapper && pv.spelling) {
+            ray_t* sib = q_registry_lookup_row(
+                ray_sym_intern_runtime(pv.spelling, strlen(pv.spelling)),
+                Q_DYADIC, row);
+            if (sib && is_fnval(sib)) return sib;
+        }
+    }
+    *row = q_registry_row_of(head, n == 1 ? Q_MONADIC : Q_DYADIC);
+    return head;
+}
+
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
     if (!head || RAY_IS_ERR(head)) return ray_error("type", NULL);
     if (q_eval_apply_is_fn(head)) {
         const q_op_t* row = NULL;
-        if (is_fnval(head))
-            row = q_registry_row_of(head, n == 1 ? Q_MONADIC : Q_DYADIC);
+        if (is_fnval(head)) head = apply_valence_sibling(head, n, &row);
         return q_eval_apply(head, row, args, n);
     }
     return noun_index(head, args, n);
