@@ -4,7 +4,7 @@
  * Evicted from q_builtins.c + ops/q_io.c so the registration hub registers
  * and the string domain lives once. */
 #include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_text_bytes) */
-#include "qlang/q_deriv.h"             /* q_deriv_is_fn_value, q_deriv_call_n — ssr's fn replacement */
+#include "qlang/eval/q_eval.h"         /* q_eval_apply_is_fn / q_eval_apply_value — ssr fn replacement */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
 #include "qlang/q_fmt.h"               /* q_fmt_float — string's float leaf */
 #include "lang/internal.h"             /* ray_like_fn, ray_error */
@@ -304,7 +304,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     const char* sp; int64_t sn64; const char* pp; int64_t pn64;
     if (!q_text_bytes(s, &sp, &sn64) || !q_text_bytes(p, &pp, &pn64))
         return ray_error("type", "ssr: s and p must be strings");
-    int r_is_fn = q_deriv_is_fn_value(r);
+    int r_is_fn = q_eval_apply_is_fn(r);
     { const char* rp_; int64_t rn_;
       if (!r_is_fn && !q_text_bytes(r, &rp_, &rn_))
           return ray_error("type", "ssr: replacement must be a string or function"); }
@@ -328,7 +328,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
             if (r_is_fn) {
                 ray_t* sub = ray_charv(sp + i, m);      /* matched text, in flight */
                 ray_t* one[1] = { sub };
-                ray_t* rep = q_deriv_call_n(r, one, 1);
+                ray_t* rep = q_eval_apply_value(r, one, 1);
                 ray_release(sub);
                 if (!rep || RAY_IS_ERR(rep)) { err = rep; break; }
                 { const char* qp; int64_t qn;

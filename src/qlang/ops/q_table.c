@@ -8,8 +8,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_builtins.h"   /* q_ty_char — meta column letters */
-#include "qlang/q_ns.h"    /* q_ns_key_roster, q_ns_ctx_dict/root_dict, q_ns_is_context */
-#include "qlang/q_deriv.h" /* q_deriv_kind_of/base, Q_DERIV_LAMBDA */
 #include "qlang/ops/q_bang.h"  /* q_bang_dispatch — the `-N!` internal-fn manifest */
 #include "qlang/q_dotz.h"  /* q_dotz_ipc_hook_index, q_dotz_zts_set — .z.* handler arms */
 #include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
@@ -1214,19 +1212,6 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
     return ray_except_fn(x, y);
 }
 
-/* wire pass 3: registry-blessed null-tolerant dyadics.  ray_eval's binary
- * null gate (tree-walk + VM op_call2) offers a RAY_NULL_OBJ-operand
- * application to the apply hook before raising 'type; q_apply_noun consults
- * this to decide whether the head may run (`-8!(::)` serialize via the `!`
- * internal-fn band, `x~(::)` match).  Everything else declines -> the
- * historic 'type stands.  Fn-pointer identity keeps this single-homed with
- * the wrappers themselves (registry values are immutable snapshots). */
-int q_fn_null_ok(const ray_t* fn) {
-    if (!fn || fn->type != RAY_BINARY) return 0;
-    ray_binary_fn p = (ray_binary_fn)(uintptr_t)fn->i64;
-    return p == q_bang || p == q_match_wrap;
-}
-
 /* q `key x` (ref/key.md) — dict keys, plus the name/namespace overloads:
  *   `` ` ``      -> root context roster (namespaces other than .z)
  *   `` `. ``     -> objects in the root (user variable names)
@@ -1252,40 +1237,24 @@ ray_t* q_key_wrap(ray_t* x) {
         if (!s) return ray_error("type", "key: bad symbol");
         const char* nm = ray_str_ptr(s);
         size_t l = ray_str_len(s);
-        if (l == 0) { ray_release(s); return q_ns_key_roster(); }
+        if (l == 0) {
+            ray_release(s);
+            /* `` ` `` roster synthesis died with q_ns (cutover 2026-07-23);
+             * a dict-namespace enumeration re-lands with the scoping wave */
+            return ray_error("nyi", NULL);
+        }
         if (nm[0] == ':') {
             ray_release(s);
             return ray_error("nyi", "key: file handles deferred (file-I/O wave)");
         }
-        if (l == 1 && nm[0] == '.') {           /* `. — root objects */
+        if (l == 1 && nm[0] == '.') {           /* `. — root objects: nyi (as above) */
             ray_release(s);
-            ray_t* d = q_ns_root_dict();
-            if (!d || RAY_IS_ERR(d)) return d ? d : ray_error("oom", NULL);
-            ray_t* k = ray_dict_keys(d);        /* borrowed from owned d */
-            if (!k) { ray_release(d); return ray_error("type", "key: nil keys"); }
-            ray_retain(k);
-            ray_release(d);
-            return k;
-        }
-        if (l >= 2 && nm[0] == '.' && nm[1] != '.') {
-            /* root OR nested handle (codex round-3 P2): q_ns_ctx_dict walks
-             * the dotted path and decides context-ness itself. */
-            ray_t* d = q_ns_ctx_dict(nm, l);    /* owned, placeholder first */
-            if (d) {
-                ray_release(s);
-                if (RAY_IS_ERR(d)) return d;
-                ray_t* k = ray_dict_keys(d);
-                if (!k) { ray_release(d); return ray_error("type", "key: nil keys"); }
-                ray_retain(k);
-                ray_release(d);
-                return k;
-            }
-            /* not a context — fall through to the named-variable arm */
+            return ray_error("nyi", NULL);
         }
         ray_release(s);
-        /* named variable (context-aware): dict -> keys; bound -> the sym
-         * itself; unbound -> () (ref/key.md "whether a name exists"). */
-        ray_t* v = q_value_resolve_sym_owned(x);
+        /* named variable / namespace: dict (incl. a context's dict) -> keys;
+         * bound -> the sym itself; unbound -> () (ref/key.md). */
+        ray_t* v = ray_env_resolve(x->i64);
         if (!v) return ray_list_new(1);         /* () — empty general list */
         if (RAY_IS_ERR(v)) return v;
         if (v->type == RAY_DICT) {
@@ -1331,12 +1300,11 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         return ray_error("nyi", "set: file handles deferred (file-I/O wave)");
     }
     int is_root = (l == 1 && nm[0] == '.');
-    /* Restore semantics: any single-segment `.foo` handle (kdb creates the
-     * context), and a NESTED handle only when it ALREADY names a context
-     * (codex round-3 P2) — so `.foo.a set 1 2!3 4` keeps binding the data
-     * dict instead of erroring on non-symbol keys. */
+    /* Restore semantics: a single-segment `.foo` handle (kdb creates the
+     * context).  A NESTED handle always binds the data dict as-is — the
+     * context-ness probe died with q_ns (cutover 2026-07-23). */
     int is_ctx  = (!is_root && l >= 2 && nm[0] == '.' && nm[1] != '.' &&
-                   (!memchr(nm + 1, '.', l - 1) || q_ns_is_context(nm, l)));
+                   !memchr(nm + 1, '.', l - 1));
     if ((is_root || is_ctx) && y && y->type == RAY_DICT) {
         /* context restore: upsert each member under the target root */
         ray_t* dk = ray_dict_keys(y);           /* borrowed */
@@ -1400,23 +1368,15 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         return x;
     }
     /* kdb `.z.p*` connection-handler aliases resolve to the SAME `.ipc.on.*`
-     * slot that ipc.c's hook_lookup reads (one slot, two spellings).  AND
-     * hook_lookup accepts only a bare RAY_LAMBDA, whereas a q `{…}` is a
-     * `.q.lambda` carrier — so unwrap the carrier to its base lambda before
-     * binding, or the hook silently never fires.  This unwrap also fixes the
-     * NATIVE `.ipc.on.*` spelling, which had the same q-carrier gap.  (Computed
-     * BEFORE ray_release(s): `nm` points into `s`.) */
+     * slot that ipc.c's hook_lookup reads (one slot, two spellings).  A q
+     * `{…}` binds AS-IS: RAY_QFN carriers fire through the value-apply seam
+     * (ipc.c hook_fire).  (Computed BEFORE ray_release(s): `nm` points into
+     * `s`.) */
     int64_t tgt = x->i64;
     int hk = q_dotz_ipc_hook_index(nm, l);
     if (hk >= 0) tgt = ray_sym_ipc_hook(hk);
-    ray_t* bind_val = y;
-    if ((hk >= 0 || ray_sym_is_ipc_hook(tgt)) && y &&
-        y->type == RAY_LIST && q_deriv_kind_of(y) == Q_DERIV_LAMBDA) {
-        ray_t* base = q_deriv_base(y);          /* borrowed bare RAY_LAMBDA */
-        if (base) bind_val = base;
-    }
     ray_release(s);
-    ray_err_t err = ray_env_set(tgt, bind_val); /* plain/dotted global assign */
+    ray_err_t err = ray_env_set(tgt, y);        /* plain/dotted global assign */
     if (err == RAY_ERR_RESERVED)
         return ray_error("reserve", "set: name is reserved");
     if (err != RAY_OK)
@@ -1608,218 +1568,6 @@ ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
     ray_t* c = q_collapse_list(out);
     ray_release(out);
     return c;
-}
-
-/* ---- shared right-to-left CONTEXT builder (list + table def) --------------
- *
- * THE MANDATE (specs/2026-07-04-table-def.md): list definition `(…)` and table
- * definition `([] …)` are ONE mechanism, not two.  Evaluating either opens an
- * env scope, processes the element expressions RIGHT-TO-LEFT (so `x:e` binds x
- * INTO the scope before a leftward bare `x` RESOLVES from it — this is WHY
- * `(aa; aa:11 12 13)` yields the value twice and `(bb:11 12 13; bb)` errors
- * `'bb`), then pops the scope and assembles: `(…)` → the list of element values
- * (then the existing collapse-to-vector); `([] …)` → a table whose columns are
- * the per-element assignment targets.
- *
- * Both constructor heads are RAY_FN_SPECIAL_FORM: a special form is the only
- * seam that hands a builtin the raw (unevaluated) element trees, which the
- * builder needs so the element `x:e` bindings evaluate inside the scope it
- * pushes.  (Engine arg-eval is right-to-left everywhere since the 2026-07-14
- * RTL fix, so the special form is no longer about ordering — only scoping.)
- * q_lower lowers a plain `:` inside a ctx literal to `let` (writes the pushed
- * frame), so the assignments are scoped, not leaked to the global env. */
-
-static int64_t expr_rightmost_name(ray_t* el) {
-    if (!el) return -1;
-    if (el->type == -RAY_SYM && !(el->attrs & 0x20 /* Q_ATTR_QUOTED */))
-        return el->i64;
-    if (el->type == RAY_LIST) {
-        ray_t** e = (ray_t**)ray_data(el);
-        for (int64_t i = ray_len(el) - 1; i >= 0; i--) {
-            int64_t id = expr_rightmost_name(e[i]);
-            if (id >= 0) return id;
-        }
-    }
-    return -1;
-}
-
-/* If `el` is a lowered assignment node `(set/let name val)`, return the target
- * sym-id; else if `el` is a bare unquoted name-ref sym, return its id (a bare
- * column reference); else use the expression's rightmost name token when one is
- * available, falling back to generated `x`, `x1`, ... names. */
-static int64_t ctx_colname(ray_t* el) {
-    if (!el) return -1;
-    if (el->type == -RAY_SYM && !(el->attrs & 0x20 /* Q_ATTR_QUOTED */))
-        return el->i64;
-    if (el->type == RAY_LIST && ray_len(el) == 3) {
-        ray_t** e = (ray_t**)ray_data(el);
-        ray_t* h = e[0];
-        if (h && h->type == RAY_BINARY) {
-            const char* nm = ray_fn_name(h);
-            if (nm && (strcmp(nm, "set") == 0 || strcmp(nm, "let") == 0) &&
-                e[1] && e[1]->type == -RAY_SYM && !(e[1]->attrs & 0x20))
-                return e[1]->i64;
-        }
-    }
-    return expr_rightmost_name(el);
-}
-
-static int64_t ctx_generated_name(int64_t ordinal) {
-    if (ordinal == 0) return ray_sym_intern_runtime("x", 1);
-    char buf[32];
-    int n = snprintf(buf, sizeof buf, "x%lld", (long long)ordinal);
-    return ray_sym_intern_runtime(buf, (size_t)n);
-}
-
-/* The shared builder.  `elems[0..n)` are the UNEVALUATED element trees. */
-static ray_t* q_ctx_build(ray_t** elems, int64_t n, int as_table) {
-    if (ray_env_push_scope() != RAY_OK) return ray_error("oom", NULL);
-
-    ray_t**  vals  = (n > 0) ? (ray_t**)calloc((size_t)n, sizeof(ray_t*))   : NULL;
-    int64_t* names = (as_table && n > 0)
-                        ? (int64_t*)malloc((size_t)n * sizeof(int64_t)) : NULL;
-    if (n > 0 && (!vals || (as_table && !names))) {
-        free(vals); free(names); ray_env_pop_scope();
-        return ray_error("wsfull", "ctx: out of memory");
-    }
-
-    ray_t* err = NULL;
-    for (int64_t i = n - 1; i >= 0; i--) {
-        if (as_table) names[i] = ctx_colname(elems[i]);
-        ray_t* v = ray_eval(elems[i]);            /* binds `x:e` into the scope */
-        if (!v) v = ray_error("type", "ctx: null element");
-        if (RAY_IS_ERR(v)) { err = v; break; }
-        vals[i] = v;
-    }
-
-    ray_env_pop_scope();
-
-    if (err) {
-        for (int64_t i = 0; i < n; i++) if (vals[i]) ray_release(vals[i]);
-        free(vals); free(names);
-        return err;
-    }
-
-    ray_t* out;
-    if (!as_table) {
-        ray_t* l = ray_list_fn(vals, n);          /* borrows; retains each */
-        if (l && !RAY_IS_ERR(l)) { out = q_collapse_list(l); ray_release(l); }
-        else                     { out = l; }
-    } else {
-        /* Row count comes from the vector/list columns, which must all share one
-         * length (mismatch -> 'length).  A scalar-atom column BROADCASTS to that
-         * length (kdb: `([]a:1 2 3;b:0)` -> b is 0 0 0); all-scalar -> 1 row. */
-        int64_t nrows = -1;
-        ray_t* err2 = NULL;
-        for (int64_t i = 0; i < n; i++) {
-            ray_t* col = vals[i];
-            if (col && (ray_is_vec(col) || col->type == RAY_LIST)) {
-                int64_t clen = ray_len(col);
-                if (nrows < 0) nrows = clen;
-                else if (clen != nrows) {
-                    err2 = ray_error("length", "([]…): column length mismatch");
-                    break;
-                }
-            } else if (!col || col->type >= 0) {
-                err2 = ray_error("type", "([]…): column must be a vector or list");
-                break;
-            }
-        }
-        if (err2) { out = err2; }
-        else {
-            if (nrows < 0) nrows = 1;
-            out = ray_table_new(n);
-            int64_t used_stack[64];
-            int64_t* used = (n <= 64) ? used_stack : (int64_t*)malloc((size_t)n * sizeof(int64_t));
-            if (!used) {
-                ray_release(out);
-                out = ray_error("wsfull", "([]...): out of memory");
-            }
-            int64_t gen = 0;
-            for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
-                int64_t nm;
-                if (names[i] < 0) {
-                    /* Anonymous column: openq invents x, x1, … and dedups to a
-                     * free name (the user supplied none, so this never errors). */
-                    nm = ctx_generated_name(gen++);
-                    nm = q_name_dedup(nm, used, i, 0);
-                } else {
-                    /* User-given name: taken VERBATIM — no .Q.id-style sanitize
-                     * or reserved-word repair (that is opt-in via .Q.id).  A
-                     * duplicate is an error, matching kdb (not silently renamed). */
-                    nm = names[i];
-                    for (int64_t j = 0; j < i; j++) {
-                        if (used[j] == nm) {
-                            ray_release(out);
-                            out = ray_error("dup", "([]…): duplicate column name");
-                            break;
-                        }
-                    }
-                    if (RAY_IS_ERR(out)) break;
-                }
-                used[i] = nm;
-                ray_t* col = vals[i]; int owned = 0;
-                if (col && col->type < 0) {              /* scalar -> broadcast */
-                    ray_t* nn = ray_i64(nrows);
-                    col = ray_take_fn(col, nn); ray_release(nn); owned = 1;
-                    if (!col || RAY_IS_ERR(col)) {
-                        ray_release(out); out = col ? col : ray_error("type", "broadcast");
-                        break;
-                    }
-                }
-                out = ray_table_add_col(out, nm, col);
-                if (owned) ray_release(col);
-            }
-            if (used && used != used_stack) free(used);
-        }
-    }
-
-    for (int64_t i = 0; i < n; i++) if (vals[i]) ray_release(vals[i]);
-    free(vals); free(names);
-    return out;
-}
-
-/* q paren-list literal `(1;2;3)` head — see q_ctx_build.  The parser embeds
- * this value at the head of every multi-element paren list, which is what
- * DISAMBIGUATES a literal from the shape-identical bracket-index call (v;i) —
- * the distinction only exists at parse time. */
-ray_t* q_list_build(ray_t** args, int64_t n) {
-    return q_ctx_build(args, n, 0);
-}
-
-/* q table literal `([] a:…; b:…)` head — see q_ctx_build. */
-ray_t* q_table_build(ray_t** args, int64_t n) {
-    return q_ctx_build(args, n, 1);
-}
-
-/* q keyed-table literal `([k1:…;k2:…] v1:…; v2:…)` head.  args[0] is an int
- * atom = the KEY column count; args[1..] are the column-def trees (key columns
- * first, then value columns).  All columns are built as ONE table (so value
- * columns can reference key columns via the shared build scope — q_ctx_build's
- * cross-column binding), then split into a key-columns table and a
- * value-columns table joined into a RAY_DICT: "a keyed table is just a
- * dictionary from one table to another" (q_fmt renders it `k| v`). */
-ray_t* q_keyed_table_build(ray_t** args, int64_t n) {
-    if (n < 1 || !args[0] || args[0]->type != -RAY_I64)
-        return ray_error("parse", "keyed-table literal: missing key count");
-    int64_t nk = args[0]->i64;
-    ray_t* tbl = q_ctx_build(args + 1, n - 1, 1);
-    if (!tbl || RAY_IS_ERR(tbl)) return tbl;
-    if (tbl->type != RAY_TABLE) { ray_release(tbl); return ray_error("type", "keyed-table literal: not a table"); }
-    int64_t nc = ray_table_ncols(tbl);
-    if (nk < 0 || nk > nc) { ray_release(tbl); return ray_error("length", "keyed-table literal: bad key count"); }
-    ray_t* kt = ray_table_new(nk > 0 ? nk : 1);
-    ray_t* vt = ray_table_new(nc - nk > 0 ? nc - nk : 1);
-    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
-        int64_t nm  = ray_table_col_name(tbl, c);
-        ray_t*  col = ray_table_get_col_idx(tbl, c);   /* borrowed; add retains */
-        if (c < nk) kt = ray_table_add_col(kt, nm, col);
-        else        vt = ray_table_add_col(vt, nm, col);
-    }
-    ray_release(tbl);
-    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
-    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
-    return ray_dict_new(kt, vt);   /* consumes kt, vt */
 }
 
 /* ===== table introspection: cols / meta (evicted from q_builtins.c) ===== */

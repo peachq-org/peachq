@@ -93,11 +93,6 @@ const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
  * tables (the wave-4 shape shared by the table verbs and q_builtins). */
 int q_table_is_keyed(ray_t* y);
 
-/* wire pass 3: registry-blessed null-tolerant dyadics (`!` internal-fn
- * band, `~` match) — consulted by q_apply_noun when ray_eval's binary
- * null gate offers a RAY_NULL_OBJ-operand application to the apply hook. */
-int q_fn_null_ok(const ray_t* fn);
-
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
@@ -109,15 +104,6 @@ int q_fn_null_ok(const ray_t* fn);
  * not from this value-keyed lookup. */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);
 
-/* q `value` — the full form matrix (ref/value.md): dict->vals, symbol->variable,
- * string->eval, list->single apply/index, projection->(fn;args), derived->iterator
- * arg, operator->opcode, lambda->structure.  Exposed so q_builtins can ALSO env-
- * bind it (like string/meta/type): the parser embeds the registry copy at `value`
- * application heads, but a bare `value` used as a HOF operand (`value each …`) is
- * env-resolved, and without this override it would hit rayfall's dict-only native
- * `value`.  Both bindings call this one function (single home, rule 4). */
-ray_t* q_value_wrap(ray_t* x);
-
 /* q `hsym x` / `attr x` verb implementations — exported so the q_bang.c
  * internal-fn aliases (`-1!` -> hsym, `-2!` -> attr) route to the SAME single
  * home the registry verb uses (Direction B, bang-ops-internal-status.md). */
@@ -125,109 +111,26 @@ ray_t* q_hsym_wrap(ray_t* x);
 ray_t* q_attr_wrap(ray_t* x);
 
 /* q `enlist` vary wrapper (base ray_enlist_fn + dict -> 1-row table arm) —
- * env-bound by q_builtins_register before registry init (q_value_wrap
- * precedent) so both `enlist` and monadic `,` share it. */
+ * env-bound by q_builtins_register before registry init so both `enlist`
+ * and monadic `,` share it. */
 ray_t* q_enlist_wrap(ray_t** args, int64_t n);
-
-/* Context-aware symbol resolution (q namespaces): `. / `.foo synthesize the
- * root/context dict views; `..name root-qualifies; a plain name resolves in
- * the current `\d` context first.  Returns an OWNED ref or NULL when the
- * name doesn't resolve.  Used by q_apply's symbol-handle arm. */
-ray_t* q_value_resolve_owned(ray_t* symv);
 
 /* Release every retained entry and reset.  Idempotent; also serves as
  * partial-cleanup on a failed init.  Must run before ray_env_destroy. */
 void q_registry_destroy(void);
 
-/* The internal scan value (rayfall scan + collapse) q_lower embeds for the
- * `\` adverb.  Borrowed; NULL before q_registry_init.  Not a roster row —
- * it has no q spelling of its own. */
-ray_t* q_registry_scan_value(void);
-
-/* Internal (spelling-less) HOF values q_lower embeds at adverb heads (wave-2):
- *   over      — `/` : reduce / converge / do / while
- *   each-both — `'` dyadic: zip a binary over conforming operands
- *   each-prior— `':`: apply a binary between each item and its predecessor
- * Borrowed; NULL before q_registry_init. */
-ray_t* q_registry_over_value(void);
-ray_t* q_registry_eachboth_value(void);
-ray_t* q_registry_prior_value(void);
-
-/* Binary helper (map-right/map-left-value, f) -> a 2-hole derived-verb carrier,
- * built at EVAL time so a lambda operand is a real value.  q_lower embeds it to
- * lower `(f/:)` / `(f\:)` as VALUES (stacked-adverb `f/:\:`).  Borrowed. */
-ray_t* q_registry_mkderiv2_value(void);
-
-/* Builder (base@/., n, mask, bound-values…) -> a projection carrier over an
- * `@`/`.` operator with ELIDED args, built at EVAL time so the bound args are
- * evaluated (name-ref / lambda-literal become their value).  q_lower embeds it
- * to lower `@[count;;-1]` / `type @[;;0h]`.  Borrowed. */
-ray_t* q_registry_mkopproj_value(void);
-
-/* The internal paren-list constructor (list + collapse) the PARSER embeds at
- * the head of every multi-element paren list `(1;2;3)` — the head value is
- * what distinguishes a literal from the shape-identical index call (v;i).
- * q_fmt hides this head, so the tree still displays (1;2;3).  Borrowed;
- * NULL before q_registry_init. */
+/* PARSER-EMBEDDED marker heads (borrowed; NULL before q_registry_init).
+ * q_eval intercepts the literal-ctor values by pointer identity and builds
+ * natively; q_fmt hides them in display.
+ *   list        — paren-list literal `(1;2;3)` (the head value is what
+ *                 distinguishes a literal from the shape-identical (v;i))
+ *   table       — table literal `([] a:…; b:…)`
+ *   keyed-table — keyed-table literal `([k:…] v:…)` (args[0] = key count)
+ *   compose     — `'[f;g;…]` bracket form ('nyi until the adverb wave) */
 ray_t* q_registry_list_value(void);
-
-/* The internal table constructor `([] a:…; b:…)` the PARSER embeds at the head
- * of every table literal.  Shares the right-to-left context machinery with the
- * paren-list value (q_ctx_build) — list and table def are ONE mechanism.
- * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_table_value(void);
-
-/* The internal keyed-table constructor `([k:…] v:…)` head the PARSER embeds.
- * args[0] is the key-column count; the columns follow (keys then values).
- * Builds a RAY_DICT (key-cols table -> value-cols table).  Borrowed; NULL
- * before q_registry_init. */
 ray_t* q_registry_keyed_table_value(void);
-
-/* The q.fn special-form value behind every lambda literal (borrowed; NULL
- * before init).  q_lower embeds it at the head of lowered `{...}` nodes. */
-ray_t* q_registry_lambda_value(void);
-
-/* `:x` early return and `'x` signal (borrowed; NULL before init).  q_lower
- * embeds them at the head of the parser's .q.ret / .q.sig statement nodes. */
-ray_t* q_registry_ret_value(void);
-ray_t* q_registry_sig_value(void);
-
-/* q imperative control constructs (borrowed; NULL before init).  q_lower
- * embeds these special-form values at the head of the parser's `;` statement
- * sequence and its `if` / `do` / `while` control-word bracket applications.
- * They receive their statement args UNEVALUATED (lazy, left-to-right, side
- * effects persist, no lexical scope). */
-ray_t* q_registry_seq_value(void);
-ray_t* q_registry_if_value(void);
-ray_t* q_registry_do_value(void);
-ray_t* q_registry_while_value(void);
-
-/* Take (and clear) / clear the thread-local full-text payload stashed by a
- * `'x` signal — Trap hands the handler the whole message, not the ≤7-char
- * error class.  q_registry_sig_take returns an OWNED string or NULL. */
-ray_t* q_registry_sig_take(void);
-void   q_registry_sig_clear(void);
-
-/* The `q.select` / `q.delete` / `q.exec` special forms q_lower embeds when it
- * lowers the string qSQL statements.  Executors are 'nyi stubs since the
- * eval-rebuild demolition (spec 2026-07-23); the qSQL plan/router wave
- * re-lands them.  Borrowed; NULL before q_registry_init. */
-ray_t* q_registry_select_value(void);
-ray_t* q_registry_delete_value(void);
-ray_t* q_registry_exec_value(void);
-
-/* The `'[f;g;…]` compose builder the PARSER embeds at the head of a compose
- * bracket form.  A regular (arg-evaluating) vary fn: ray_eval resolves the
- * function operands, then it boxes them into a Q_DERIV_COMPOSE carrier.
- * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_compose_value(void);
-
-/* The functional-qSQL executor values q_lower embeds at the head of a rank-4
- * `?[t;c;b;a]` (select/exec) or `![t;c;b;a]` (update/delete) application.
- * 'nyi stubs since the demolition (spec 2026-07-23) — see the q.select note.
- * Borrowed; NULL before q_registry_init. */
-ray_t* q_registry_funsql_select_value(void);
-ray_t* q_registry_funsql_bang_value(void);
 
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
  * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
@@ -240,7 +143,7 @@ ray_t* q_collapse_list(ray_t* l);
 /* v[i] as an OWNED atom/element (borrows v): the scalar-int fast path over
  * vectors/lists (direct payload read, no index-atom allocation, no collapse);
  * generic ray_at indexing for every other shape.  The ONE element-read home
- * shared by the amend engines (q_apply.c) and the iterators (ops/q_iter.c). */
+ * shared across the q layer (the apply module, wrappers, codecs). */
 ray_t* q_registry_elem_at(ray_t* v, int64_t i);
 
 /* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
@@ -299,7 +202,7 @@ ray_t* q_wj_wrap(ray_t** args, int64_t n);
 ray_t* q_wj1_wrap(ray_t** args, int64_t n);
 
 /* Keyed-table lookup by a table of key rows (`y[select a,b from x]`) — the
- * q_apply.c table-index arm.  keytbl must carry ALL key columns by name;
+ * keyed-table row-set lookup arm.  keytbl must carry ALL key columns by name;
  * extra columns ignored; keytbl row order preserved; miss => null row. */
 ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl);
 
@@ -318,7 +221,7 @@ ray_t* q_table_row_at(ray_t* t, int64_t row);
 ray_t* q_read0_wrap(ray_t* x);
 
 /* q `hopen`/`hclose` IPC client wrappers (feat/q-ipc-client; hsym Bundle 2b).
- * Exposed so q_apply.c's one-shot sync request (`` `:host:port "query" ``) can
+ * Exposed so the apply module's one-shot sync request (`` `:host:port "query" ``) can
  * REUSE the exact hopen normalization + restricted gate + fd/selector handle
  * translation rather than duplicating them.  q_hopen_wrap: descriptor/port ->
  * owned int fd handle (or error, incl. clean 'nyi for deferred transports).

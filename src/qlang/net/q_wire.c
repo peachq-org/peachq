@@ -2,9 +2,9 @@
  * provenance: see q_wire.h.  No frozen-base file is touched: this is a
  * q-layer TU; `-8!`/`-9!` dispatch lives in q_registry.c's `!` wrapper. */
 #include "qlang/net/q_wire.h"
-#include "qlang/q_deriv.h"      /* lambda carrier inspectors */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde */
 #include "qlang/q_registry.h"   /* q_collapse_list */
-#include "qlang/q_parse.h"      /* q_parse/q_lower — lambda decode (RUNTIME only) */
+#include "qlang/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
 #include "table/sym.h"          /* ray_sym_vec_cell */
 #include "mem/heap.h"           /* RAY_ATTR_HAS_NULLS */
@@ -131,28 +131,18 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         rc = (w_u8(b, 101) || w_u8(b, 0)) ? -1 : 0;
         goto out;
     }
-    /* q derived-verb carriers — WIRE mode only.  In serde mode ALL carriers
-     * (lambda/projection/monad) are ordinary boxed lists and serialize
-     * STRUCTURALLY (marker sym + fields; the base RAY_LAMBDA goes through
-     * ext 201, builtin bases through ext 200) — exact rebuild, no q-registry
-     * dependence at journal replay, matching v4.  On the wire, a lambda
-     * carrier is kdb 100h (context + source) and projections are 'nyi. */
-    switch (b->serde ? Q_DERIV_NONE : q_deriv_kind_of(x)) {
-    case Q_DERIV_LAMBDA: {
-        ray_t* src = q_lambda_src(x);                 /* borrowed */
-        if (!src || src->type != -RAY_STR) {
-            rc = wbuf_fail(b, ray_error("type", "q_wire: lambda carrier without source"));
+    /* RAY_QFN carriers — lambdas serialize BY SOURCE as kdb 100h (context +
+     * source text; decode re-evaluates through q_parse -> q_eval); projection
+     * and derived-verb carriers are 'nyi on both wire and serde. */
+    if (x->type == RAY_QFN) {
+        ray_t* src = q_eval_apply_lambda_src(x);      /* borrowed */
+        if (!b->serde && src) {
+            rc = (w_u8(b, 100) || w_u8(b, 0) /* root context "" */ ||
+                  w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src))) ? -1 : 0;
             goto out;
         }
-        rc = (w_u8(b, 100) || w_u8(b, 0) /* root context "" */ ||
-              w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src))) ? -1 : 0;
+        rc = wbuf_fail(b, ray_error("nyi", "q_wire: carrier serialization not yet implemented"));
         goto out;
-    }
-    case Q_DERIV_PROJ:
-    case Q_DERIV_MONAD:
-        rc = wbuf_fail(b, ray_error("nyi", "q_wire: derived-verb/projection serialization (104h) not yet implemented"));
-        goto out;
-    default: break;
     }
 
     int8_t t = x->type;
@@ -849,9 +839,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_t* ast = q_parse(z);
         ray_free_raw(z);
         if (!ast || RAY_IS_ERR(ast)) return ast ? ast : ray_error("parse", NULL);
-        ast = q_lower(ast);
-        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : ray_error("parse", NULL);
-        ray_t* lam = ray_eval(ast);
+        ray_t* lam = q_eval(ast);
         ray_release(ast);
         return lam;
     }

@@ -9,7 +9,7 @@
 #include "qlang/q_dotz.h"      /* the `.z.ws`/`.z.wo`/`.z.wc` handler slots */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler output */
-#include "lang/internal.h"     /* call_fn1 */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "mem/sys.h"
 #include "picohttpparser.h"
 #include <string.h>
@@ -191,7 +191,7 @@ static void ws_console_drain(void) {
 
 static void ws_hook_fire(ray_t* fn, ray_t* arg, const char* name) {
     ray_retain(fn);                       /* survive a re-assign mid-call */
-    ray_t* r = call_fn1(fn, arg);
+    ray_t* r = q_eval_apply_value(fn, &arg, 1);
     ray_release(fn);
     ws_console_drain();
     if (r) {

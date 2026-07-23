@@ -43,24 +43,14 @@ enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };                     /* RAGGED is mmu-s
 int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix, else QMMU_*; *first = count(-first) — used by: dollar */
 ray_t* q_sum_wrap(ray_t* x);
 
-/* ---- defined in ops/q_iter.c ---- */
-/* The iterator + control-form wrapper bodies stay declared HERE (the manifest's
- * linkage twin): the Q_OPS[] over/scan/prior/peach rows and the registry
- * SPECIALS[] table both bind these pointers as build recipes.  (q_at_wrap /
- * q_dot_wrap moved to q_apply.c — declared in q_apply.h; the registry specials'
- * accessors + the `'x` signal channel moved to q_registry.c — accessors
- * declared in q_registry.h.) */
-ray_t* q_each_wrap(ray_t* f, ray_t* x);
-ray_t* q_eachboth_wrap(ray_t** args, int64_t n);
-ray_t* q_prior_wrap(ray_t** args, int64_t n);
-ray_t* q_scan_wrap(ray_t** args, int64_t n);
-ray_t* q_over_kw(ray_t* f, ray_t* x);
-ray_t* q_scan_kw(ray_t* f, ray_t* x);
-ray_t* q_prior_kw(ray_t* f, ray_t* x);
-ray_t* q_seq_fn(ray_t** args, int64_t n);
-ray_t* q_if_fn(ray_t** args, int64_t n);
-ray_t* q_do_fn(ray_t** args, int64_t n);
-ray_t* q_while_fn(ray_t** args, int64_t n);
+/* ---- defined in q_builtins.c ---- */
+/* 'nyi recipe stubs (rule 3: rows keep their spellings; the bodies died in
+ * the eval-rebuild cutover).  q_value_nyi_fn: `value`/`get`/`-6!`.  q_hof_nyi_wrap:
+ * the keyword-HOF rows (each/peach/over/scan/prior) — the fresh apply module
+ * routes their n==2 applications to native adverb arms BEFORE the recipe
+ * value could run, so these fire only on off-shape applications. */
+ray_t* q_value_nyi_fn(ray_t* x);
+ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x);
 
 /* ---- defined in ops/q_io.c ---- */
 ray_t* q_filetext_wrap(ray_t* x, ray_t* y);
@@ -127,29 +117,19 @@ ray_t* q_distinct_wrap(ray_t* x);
 ray_t* q_union_wrap(ray_t* x, ray_t* y);
 ray_t* q_inter_wrap(ray_t* x, ray_t* y);
 ray_t* q_cross_wrap(ray_t* x, ray_t* y);
-ray_t* q_list_build(ray_t** args, int64_t n);
-ray_t* q_table_build(ray_t** args, int64_t n);
-ray_t* q_keyed_table_build(ray_t** args, int64_t n);
 
 /* ===== 2. SHARED HELPERS — the lateral-dependency map =================== */
 
 /* ---- defined in q_registry.c ---- */
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, table */
-ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, json, wire, agg, iter, dollar, io, join, list, math, table, value */
-ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, iter, value */
-bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, lower, iter, join */
+ray_t* q_collapse_list(ray_t* l);                             /* used by: eval, builtins, fmt, json, wire, agg, dollar, io, join, list, math, table */
+ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, parse, agg */
+bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, join */
 
 /* ---- defined in ops/q_agg.c ---- */
 double q_velem_f(ray_t* x, int64_t i, int* isnull);           /* used by: list */
 int q_vec_is_float(ray_t* x);                                 /* used by: list */
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
-
-/* ---- defined in ops/q_iter.c ---- */
-ray_t* q_over_wrap(ray_t** args, int64_t n);                  /* used by: lower, registry */
-/* (the q_registry_*_value accessors live in q_registry.c — decls in q_registry.h) */
-
-/* ---- defined in q_value.c (q_value_wrap is public — q_registry.h) ---- */
-ray_t* q_value_resolve_sym_owned(ray_t* symv);                /* used by: table */
 
 /* ---- defined in q_dollar.c (the `$` verb API is public — q_dollar.h) ---- */
 const char* q_type_qname(int8_t t);                           /* used by: table */

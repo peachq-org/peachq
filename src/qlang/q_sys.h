@@ -26,6 +26,14 @@ void q_sys_seed_init(void);
  * the next. */
 void q_sys_cfg_init(void);
 
+/* `\d` current-context POINTER (prompt + getter only — it does not yet
+ * qualify name resolution; scoping wave).  reset = back to root (q_runtime
+ * lifecycle); current = "" at root else the dotted name; prompt writes
+ * "q)"/"q.foo)" into buf and returns its length (0 on overflow). */
+void        q_sys_ctx_reset(void);
+const char* q_sys_ctx_current(void);
+int         q_sys_prompt(char* buf, size_t cap);
+
 /* True iff a `\t N` timer is currently armed (interval > 0).  The `.z.ts`
  * forwarding thunk (q_dotz.c) consults it to no-op after a reentrant `\t 0`
  * that could not delete the in-flight (popped) timer. */
