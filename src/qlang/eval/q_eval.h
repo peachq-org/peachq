@@ -47,9 +47,11 @@ int q_eval_apply_truthy(ray_t* v, ray_t** err);
  * carrier) — the q_deriv_is_fn_value successor. */
 int q_eval_apply_is_fn(ray_t* v);
 
-/* RAY_QFN carriers (lambda/projection/derived verb): child slots in
- * ray_data, kind in aux[0]; serde/wire refuse them via totality fallbacks. */
-enum { Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2, Q_EVAL_CAR_DERIV = 3 };
+/* RAY_QFN carriers (lambda/projection/derived verb/composition): child
+ * slots in ray_data, kind in aux[0]; serde/wire refuse them via totality
+ * fallbacks. */
+enum { Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2, Q_EVAL_CAR_DERIV = 3,
+       Q_EVAL_CAR_COMP = 4 };
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
                                ray_t* src);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
