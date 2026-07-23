@@ -117,6 +117,9 @@ static ray_unary_fn g_base_count = NULL;
  * full q type map is cast/type.qcmd territory. */
 static ray_t* type_fn(ray_t* x) {
     if (x) {
+        /* generic null: 101h unary primitive (ref/datatypes.md), never the
+         * internal RAY_NULL tag */
+        if (RAY_IS_NULL(x)) return ray_i16(101);
         /* RAY_QFN carriers first: kdb 100h lambda, 104h projection, 106+adv
          * derived verb (f' 106h … f\: 111h — ref/datatypes.md). */
         switch (q_eval_apply_carrier_kind(x)) {
@@ -324,7 +327,9 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
 /* `value`/`get`/`-6!` — 'nyi stub (rule 3: the manifest row keeps its
  * spelling; the q_value.c single-apply home retired at the cutover). */
 ray_t* q_value_nyi_fn(ray_t* x) {
-    (void)x;
+    /* the identity-arg arm only: `value ::` -> `::` (ref/identity.md);
+     * everything else stays 'nyi */
+    if (x && RAY_IS_NULL(x)) { ray_retain(x); return x; }
     return ray_error("nyi", NULL);
 }
 
