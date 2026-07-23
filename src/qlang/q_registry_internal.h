@@ -3,19 +3,15 @@
  * are exported ONLY so the sibling .c files of the split can keep calling
  * them.  NOT public API — do not include outside src/qlang.
  *
- * Three blocks:
- *   1. q_funsql.c retirement seam — the functional-qSQL executor's WHOLE
- *      exported surface.  eval-unification stage 3 retires q_funsql.c by
- *      deleting the file once these five lose their last caller; keep the
- *      seam from growing.
- *   2. REGISTRY ENTRYPOINTS — wrapper bodies living in q_wrap_*.c, referenced
+ * Two blocks:
+ *   1. REGISTRY ENTRYPOINTS — wrapper bodies living in q_wrap_*.c, referenced
  *      ONLY as manifest build recipes: the Q_OPS[] rows (q_ops.c) carry these
  *      function pointers in their QR_FN* recipes, and q_registry.c's generic
  *      build_wrapper binds them into immutable fn-values (or init/teardown-
  *      managed singletons).  Do not re-staticize (that would move the bodies
  *      back into the monolith); new wrapper => declare it here, define it in
  *      the domain file, point a QR_FN* manifest row at it.
- *   3. SHARED HELPERS — called from sibling files beyond the registry
+ *   2. SHARED HELPERS — called from sibling files beyond the registry
  *      builders (the defining file typically calls them too); each line
  *      names the consumers.  This block IS the split's lateral-dependency
  *      map: a new cross-file caller means updating the "used by" note (and
@@ -25,14 +21,7 @@
 #include "qlang/q_registry.h"
 #include "qlang/q_ops.h"
 
-/* ===== 1. q_funsql.c retirement seam (see file header there) ============ */
-ray_t* q_select_exec(ray_t** args, int64_t n);                /* used by: lower, registry */
-ray_t* q_funsql_select(ray_t** args, int64_t n);              /* used by: lower, registry */
-ray_t* q_funsql_bang(ray_t** args, int64_t n);                /* used by: lower, registry */
-ray_t* q_delete_exec(ray_t** args, int64_t n);                /* used by: registry */
-ray_t* q_exec_exec(ray_t** args, int64_t n);                  /* used by: registry */
-
-/* ===== 2. REGISTRY ENTRYPOINTS — q_registry.c builders only ============= */
+/* ===== 1. REGISTRY ENTRYPOINTS — q_registry.c builders only ============= */
 
 /* ---- defined in ops/q_agg.c ---- */
 ray_t* q_sums_wrap(ray_t* x);
@@ -103,7 +92,6 @@ ray_t* q_idesc_wrap(ray_t* x);
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
 ray_t* q_raze_wrap(ray_t* x);
 ray_t* q_where_wrap(ray_t* x);
-ray_t* q_reverse_wrap(ray_t* x);
 
 /* ---- defined in ops/q_rand.c ---- */
 ray_t* q_roll_wrap(ray_t* x, ray_t* y);
@@ -143,11 +131,11 @@ ray_t* q_list_build(ray_t** args, int64_t n);
 ray_t* q_table_build(ray_t** args, int64_t n);
 ray_t* q_keyed_table_build(ray_t** args, int64_t n);
 
-/* ===== 3. SHARED HELPERS — the lateral-dependency map =================== */
+/* ===== 2. SHARED HELPERS — the lateral-dependency map =================== */
 
 /* ---- defined in q_registry.c ---- */
-int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, funsql, table */
-ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, funsql, json, wire, agg, iter, dollar, io, join, list, math, table, value */
+int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, table */
+ray_t* q_collapse_list(ray_t* l);                             /* used by: apply, builtins, fmt, json, wire, agg, iter, dollar, io, join, list, math, table, value */
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, lower, parse, runtime, agg, iter, value */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, lower, iter, join */
 
@@ -185,11 +173,6 @@ ray_t* q_hdel_wrap(ray_t* x);                                 /* used by: builti
 
 /* ---- defined in ops/q_str.c ---- */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);                   /* used by: builtins, registry */
-typedef ray_t* (*q_str_leaf_fn)(ray_t* x, int64_t arg);
-/* atomic-through-containers walk: LIST per element, DICT over values, TABLE
- * over columns; all else (incl. RAY_STR vectors) -> leaf(x, arg).  collapse
- * != 0 runs q_collapse_list on each rebuilt LIST level (tok/cast). */
-ray_t* q_str_walk(ray_t* x, q_str_leaf_fn leaf, int64_t arg, int collapse);/* used by: dollar */
 ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io, vs_sv */
 
 /* ---- defined in ops/q_vs_sv.c ---- */
