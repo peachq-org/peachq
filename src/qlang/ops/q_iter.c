@@ -14,7 +14,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* wrapper decls + q_registry.h (elem_at, collapse, provenance) + q_ops.h */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — truthiness via ONE type judgment */
-#include "qlang/q_apply.h" /* q_apply_noun; q_apply_dict_union — each-both's dict key alignment (D7) */
+#include "qlang/q_apply.h" /* q_apply_noun */
 #include "qlang/q_deriv.h" /* q_deriv_fn_rank / q_deriv_is_fn_value / q_deriv_call_n */
 #include "lang/eval.h"     /* ray_eval; ray_fold_fn/ray_map_fn/ray_scan_fn HOFs */
 #include "lang/internal.h" /* call_fn1/2, atom_eq, as_i64, ray_error */
@@ -24,26 +24,6 @@
 /* q `f each x` — rayfall map, then collapse the boxed result to a simple
  * vector (kdb: `neg each 1 2 3` is -1 -2 -3, type 7h, not a general list). */
 ray_t* q_each_wrap(ray_t* f, ray_t* x) {
-    /* table arm: q iterates a table's ROWS (`count each t` -> 2 2 2) — each
-     * row is the t[i] row dict; keyed tables are a deferred cell. */
-    if (x && x->type == RAY_TABLE) {
-        int64_t n = ray_table_nrows(x);
-        ray_t* outl = ray_list_new(n > 0 ? n : 1);
-        if (RAY_IS_ERR(outl)) return outl;
-        for (int64_t i = 0; i < n; i++) {
-            ray_t* row = q_table_row_at(x, i);       /* owned row dict (char-column safe) */
-            if (!row || RAY_IS_ERR(row)) { ray_release(outl); return row; }
-            ray_t* r = ray_lazy_materialize(call_fn1(f, row));
-            ray_release(row);
-            if (!r || RAY_IS_ERR(r)) { ray_release(outl); return r; }
-            outl = ray_list_append(outl, r);         /* retains */
-            ray_release(r);
-            if (RAY_IS_ERR(outl)) return outl;
-        }
-        ray_t* c = q_collapse_list(outl);
-        ray_release(outl);
-        return c;
-    }
     ray_t* args[2] = { f, x };
     ray_t* r = ray_map_fn(args, 2);
     if (!r || RAY_IS_ERR(r)) return r;
@@ -63,37 +43,8 @@ ray_t* q_each_wrap(ray_t* f, ray_t* x) {
  * the carriers in q_deriv.c (bucket B). */
 
 /* ---- each-both  x f'y ------------------------------------------------------ */
-static ray_t* eachboth_apply(ray_t* f, ray_t** ops, int64_t k);
-
 static int op_is_dict(ray_t* v) { return v && v->type == RAY_DICT; }
 
-/* each-both's per-key combiner: the general fn apply, lazy-materialized
- * inside the walk (the operands are released right after). */
-static ray_t* eb_combine(ray_t* f, ray_t* va, ray_t* vb) {
-    return ray_lazy_materialize(call_fn2(f, va, vb));
-}
-
-/* dict each-both (binary).  TWO DICTS KEY-ALIGN exactly like the atomic
- * dyadics (D7 fix, 2026-07-22; ref/add.md "Implicit iteration" upsert
- * semantics, ref/maps.md "corresponding items"): matching keys combine via f,
- * absentees pass through — composed on q_apply.c's ONE key-union walk, never a
- * positional zip.  A mixed dict/non-dict pair conforms the non-dict operand to
- * the dict's VALUES (kdb: d+'10 20 pairs value-wise, keys kept).  Mixed
- * operands previously dispatched ray_dict_vals(non-dict)=NULL straight into a
- * crash (codex round-2 P1). */
-static ray_t* eachboth_dict(ray_t* f, ray_t* x, ray_t* y) {
-    if (op_is_dict(x) && op_is_dict(y))
-        return q_apply_dict_union(f, x, y, eb_combine);
-    ray_t* kd = op_is_dict(x) ? x : y;     /* key donor */
-    ray_t* xk = ray_dict_keys(kd);           /* borrowed */
-    if (!xk) return ray_error("type", "each-both: malformed dictionary");
-    ray_t* ops[2] = { op_is_dict(x) ? ray_dict_vals(x) : x,
-                      op_is_dict(y) ? ray_dict_vals(y) : y };
-    ray_t* rv = eachboth_apply(f, ops, 2);
-    if (!rv || RAY_IS_ERR(rv)) return rv;
-    ray_retain(xk);
-    return ray_dict_new(xk, rv);             /* consumes keys + vals */
-}
 /* An each-both operand "conforms as an atom" (broadcast, not zipped) when it
  * is a true atom OR a callable FUNCTION VALUE.  A function has no depth (kdb
  * `count` on a lambda is 'type), so `.'` / `f'` broadcast the function operand
@@ -110,7 +61,7 @@ static ray_t* eachboth_apply(ray_t* f, ray_t** ops, int64_t k) {
         if (op_is_dict(ops[j])) any_dict = 1;
         if (!op_is_atom(ops[j])) all_atom = 0;
     }
-    if (any_dict && k == 2) return eachboth_dict(f, ops[0], ops[1]);
+    if (any_dict) return ray_error("nyi", "each-both: dict operands");
     if (all_atom) return q_deriv_call_n(f, ops, k);      /* all atoms -> one result */
 
     int64_t L = -1;
@@ -200,15 +151,7 @@ ray_t* q_prior_wrap(ray_t** args, int64_t n) {
     ray_t* seed; int seed_owned = 0;
     if (n == 3) seed = args[1];
     else { seed = prior_seed(f, x); seed_owned = 1; }
-    ray_t* r;
-    if (x && x->type == RAY_DICT) {
-        ray_t* k = ray_dict_keys(x);
-        ray_t* rv = prior_over_vec(f, seed, ray_dict_vals(x));
-        if (!rv || RAY_IS_ERR(rv)) r = rv;
-        else { ray_retain(k); r = ray_dict_new(k, rv); }
-    } else {
-        r = prior_over_vec(f, seed, x);
-    }
+    ray_t* r = prior_over_vec(f, seed, x);
     if (seed_owned) ray_release(seed);
     return r;
 }

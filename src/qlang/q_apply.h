@@ -19,13 +19,4 @@ ray_t* q_apply_noun(ray_t* head, ray_t** args, int64_t n);
 ray_t* q_at_wrap(ray_t** args, int64_t n);
 ray_t* q_dot_wrap(ray_t** args, int64_t n);
 
-/* THE dict key-alignment walk (ref/add.md "Implicit iteration" upsert
- * semantics): result keys = a's in order then b's absentees; matching keys
- * combine via `combine(f, va, vb)` (owned result), others pass through.
- * Shared by the atomic-dyadic distribution shim (builtin-kernel combiner) and
- * each-both over two dicts (general-fn combiner, D7). */
-typedef ray_t* (*q_apply_combine2)(ray_t* f, ray_t* va, ray_t* vb);
-ray_t* q_apply_dict_union(ray_t* f, ray_t* a, ray_t* b,
-                          q_apply_combine2 combine);
-
 #endif /* Q_APPLY_H */

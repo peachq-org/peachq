@@ -82,13 +82,6 @@ int q_table_is_keyed(ray_t* y);
  * null gate offers a RAY_NULL_OBJ-operand application to the apply hook. */
 int q_fn_null_ok(const ray_t* fn);
 
-/* Distribution veto: the dict function-distribution shim consults this before
- * retrying a 'type-failed builtin over a dict's values.  Returns 1 when the
- * WRAPPER owns that operand shape end-to-end and the retry must not happen
- * (q `,`: `10,d` is 'type per ref/join.md — a bare dict joins only with a
- * dict; dict,dict and keyed-table pairs still distribute/union). */
-int q_fn_dict_distribute_veto(const ray_t* fn, ray_t** args, int64_t n);
-
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
@@ -199,21 +192,12 @@ ray_t* q_registry_while_value(void);
 ray_t* q_registry_sig_take(void);
 void   q_registry_sig_clear(void);
 
-/* The qSQL SELECT adapter value q_lower embeds when it lowers the functional
- * 5-list (?;`t;c;b;a) onto the base ray_select engine.  Special form; its two
- * operands are the rayfall query dict and the by-key column-name sym vector.
- * Borrowed; NULL before q_registry_init. */
+/* The `q.select` / `q.delete` / `q.exec` special forms q_lower embeds when it
+ * lowers the string qSQL statements.  Executors are 'nyi stubs since the
+ * eval-rebuild demolition (spec 2026-07-23); the qSQL plan/router wave
+ * re-lands them.  Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_select_value(void);
-
-/* The `q.delete` special form q_lower embeds when it lowers the symbolic string
- * delete tree (!;`t;c;0b;a) — the executor drives q_funsql_bang_impl (delete
- * rows / delete columns / namespace expunge).  Borrowed; NULL before init. */
 ray_t* q_registry_delete_value(void);
-
-/* The `q.exec` special form q_lower embeds when it lowers the symbolic string
- * exec tree (?;`t;c;b;a) — the executor drives q_funsql_select_impl (the SAME
- * result-shaping engine as the functional `?[t;c;b;a]` exec), so the string and
- * functional exec forms are equivalent.  Borrowed; NULL before init. */
 ray_t* q_registry_exec_value(void);
 
 /* The `'[f;g;…]` compose builder the PARSER embeds at the head of a compose
@@ -223,9 +207,9 @@ ray_t* q_registry_exec_value(void);
 ray_t* q_registry_compose_value(void);
 
 /* The functional-qSQL executor values q_lower embeds at the head of a rank-4
- * `?[t;c;b;a]` (select/exec) or `![t;c;b;a]` (update/delete) application.  They
- * are regular (arg-evaluating) vary fns — ray_eval evaluates the four operands
- * to VALUES first.  Borrowed; NULL before q_registry_init. */
+ * `?[t;c;b;a]` (select/exec) or `![t;c;b;a]` (update/delete) application.
+ * 'nyi stubs since the demolition (spec 2026-07-23) — see the q.select note.
+ * Borrowed; NULL before q_registry_init. */
 ray_t* q_registry_funsql_select_value(void);
 ray_t* q_registry_funsql_bang_value(void);
 

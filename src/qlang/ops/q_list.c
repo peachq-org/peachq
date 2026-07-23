@@ -301,127 +301,7 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
     return tv;
 }
 
-/* Gather table rows [start, start+count) (recycle=1 wraps cyclically) into an
- * OWNED table via qj_table_gather_idx — the same single-home gather `t[0 2]`
- * reaches through q_apply_noun (char columns byte-permuted, misses
- * null-filled).  The result is never collapsed: tables stay tables. */
-static ray_t* row_gather(ray_t* t, int64_t start, int64_t count, int recycle) {
-    int64_t n = ray_table_nrows(t);
-    int64_t* p = (int64_t*)malloc((size_t)(count > 0 ? count : 1) * sizeof(int64_t));
-    if (!p) return ray_error("wsfull", "take: out of memory");
-    for (int64_t i = 0; i < count; i++) {
-        int64_t j = start + i;
-        if (recycle && n > 0) j = ((j % n) + n) % n;
-        p[i] = j;
-    }
-    ray_t* r = qj_table_gather_idx(t, p, count);     /* owned */
-    free(p);
-    return r;
-}
-
-/* d without the entries for keys ks (atom or vector) — kdb Drop is tolerant:
- * keys not present are ignored (ref/drop.md `` `a _ `a`b`c!1 2 3 ``).
- * Borrows both; returns an owned dict.  Same append/release discipline as
- * q_dict_union (q_apply.c). */
-static ray_t* dict_drop_keys(ray_t* d, ray_t* ks) {
-    ray_t* dk = ray_dict_keys(d);                    /* borrowed */
-    ray_t* dv = ray_dict_vals(d);                    /* borrowed */
-    if (!dk || !dv) return ray_error("type", "_ (drop): malformed dictionary");
-    int64_t nd = ray_dict_len(d);
-    int64_t nk = (ks && (ray_is_vec(ks) || ks->type == RAY_LIST)) ? ray_len(ks) : -1;
-    ray_t* ok = ray_list_new(nd > 0 ? nd : 1);
-    ray_t* ov = ray_list_new(nd > 0 ? nd : 1);
-    if (!ok || !ov) {
-        if (ok) ray_release(ok);
-        if (ov) ray_release(ov);
-        return ray_error("oom", NULL);
-    }
-    for (int64_t i = 0; i < nd; i++) {
-        ray_t* ia = ray_i64(i);
-        ray_t* ke = ray_at_fn(dk, ia);               /* owned key */
-        ray_release(ia);
-        if (!ke || RAY_IS_ERR(ke)) { ray_release(ok); ray_release(ov); return ke ? ke : ray_error("type", NULL); }
-        int hit = 0;
-        if (nk < 0) {
-            hit = ks && (ke == ks || atom_eq(ke, ks));
-        } else {
-            for (int64_t j = 0; j < nk && !hit; j++) {
-                ray_t* ja = ray_i64(j);
-                ray_t* kj = ray_at_fn(ks, ja);       /* owned */
-                ray_release(ja);
-                if (kj && !RAY_IS_ERR(kj)) {
-                    hit = ke == kj || atom_eq(ke, kj);
-                    ray_release(kj);
-                } else if (kj) {
-                    ray_release(ke); ray_release(ok); ray_release(ov);
-                    return kj;
-                }
-            }
-        }
-        if (hit) { ray_release(ke); continue; }
-        ray_t* ja2 = ray_i64(i);
-        ray_t* ve = ray_at_fn(dv, ja2);              /* owned value */
-        ray_release(ja2);
-        if (!ve || RAY_IS_ERR(ve)) { ray_release(ke); ray_release(ok); ray_release(ov); return ve ? ve : ray_error("type", NULL); }
-        ok = ray_list_append(ok, ke);
-        ov = ray_list_append(ov, ve);
-        ray_release(ke);
-        ray_release(ve);
-    }
-    ray_t* ck = q_typed_empty_like(q_collapse_list(ok), dk);
-    ray_t* cv = q_typed_empty_like(q_collapse_list(ov), dv);
-    ray_release(ok);
-    ray_release(ov);
-    if (!ck || RAY_IS_ERR(ck)) { if (cv && !RAY_IS_ERR(cv)) ray_release(cv); return ck ? ck : ray_error("type", NULL); }
-    if (!cv || RAY_IS_ERR(cv)) { ray_release(ck); return cv ? cv : ray_error("type", NULL); }
-    return ray_dict_new(ck, cv);                     /* consumes both */
-}
-
 ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
-    /* ---- dict arms (ref/drop.md) — claimed BEFORE the int-vector cut arm so
-     * `1 2 _ intkeyed_dict` is a key-drop, and before the int-atom count tail
-     * so `1_d` drops ENTRIES (keys and values together), never values-only. */
-    int64_t dk;
-    if (list && list->type == RAY_DICT && !q_table_is_keyed(list)) {
-        /* n _ d — int ATOM drops the first/last n entries */
-        if (q_strict_i64(n, &dk) && !RAY_ATOM_IS_NULL(n)) {
-            ray_t* k = ray_dict_keys(list);          /* borrowed */
-            ray_t* v = ray_dict_vals(list);          /* borrowed */
-            if (!k || !v) return ray_error("type", "_: dict");
-            ray_t* rk = q_drop_wrap(n, k);
-            if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);
-            if (!rk || RAY_IS_ERR(rk)) return rk;
-            ray_t* rv = q_drop_wrap(n, v);
-            if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
-            if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
-            return ray_dict_new(rk, rv);             /* consumes both */
-        }
-        /* keys _ d — sym atom / sym vector / int vector lhs drops entries by
-         * key (other lhs kinds keep today's error tail) */
-        if (n && (n->type == -RAY_SYM || n->type == RAY_SYM || q_is_int_vec(n)))
-            return dict_drop_keys(list, n);
-    }
-    /* d _ key — dict lhs drops the entry at an ATOM key; a vector rhs is
-     * 'type (ref/drop.md pins `(`a`b`c!1 2 3) _ `a`b` -> 'type). */
-    if (n && n->type == RAY_DICT && !q_table_is_keyed(n)) {
-        if (list && ray_is_atom(list))
-            return dict_drop_keys(n, list);
-        return ray_error("type", "_: key");
-    }
-    /* syms _ t — table column-drop (ref/drop.md `` `a`b _ t ``): sym-VECTOR
-     * lhs only (a sym ATOM lhs on a table stays 'type — pinned rows).  One
-     * home: flip -> dict key-drop -> flip back (q_flip_wrap owns its results;
-     * dict_drop_keys borrows both args). */
-    if (n && n->type == RAY_SYM && list && list->type == RAY_TABLE) {
-        ray_t* d = q_flip_wrap(list);                /* owned dict */
-        if (!d || RAY_IS_ERR(d)) return d;
-        ray_t* rd = dict_drop_keys(d, n);          /* owned dict */
-        ray_release(d);
-        if (!rd || RAY_IS_ERR(rd)) return rd;
-        ray_t* rt = q_flip_wrap(rd);                 /* owned table */
-        ray_release(rd);
-        return rt;
-    }
     /* x _ i — delete the item at index i (ref/drop.md `0 1 ... 8 _ 5`):
      * list/vector lhs, int-ATOM rhs.  Two clamped range-takes joined; an
      * out-of-range index returns x unchanged (Drop is tolerant). */
@@ -450,11 +330,9 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
      * Positions non-decreasing within 0..len; result is a boxed list of
      * slices (kdb 0h). */
     if (q_is_int_vec(n)) {
-        if (!list || (!ray_is_vec(list) && list->type != RAY_LIST &&
-                      list->type != RAY_TABLE))
+        if (!list || (!ray_is_vec(list) && list->type != RAY_LIST))
             return ray_error("type", "_: x");
-        int64_t len = (list->type == RAY_TABLE) ? ray_table_nrows(list)
-                                                : ray_len(list);
+        int64_t len = ray_len(list);
         int64_t np = ray_len(n);
         ray_t* out = ray_list_new(np > 0 ? np : 1);
         int64_t prev = 0;
@@ -466,16 +344,11 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
                 return ray_error("domain", "_: positions");
             }
             prev = p;
-            ray_t* slice;
-            if (list->type == RAY_TABLE) {           /* table cut: row slices */
-                slice = row_gather(list, p, nxt - p, 0);
-            } else {
-                int64_t rng[2] = { p, nxt - p };
-                ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
-                if (RAY_IS_ERR(range)) { ray_release(out); return range; }
-                slice = ray_take_fn(list, range);
-                ray_release(range);
-            }
+            int64_t rng[2] = { p, nxt - p };
+            ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
+            if (RAY_IS_ERR(range)) { ray_release(out); return range; }
+            ray_t* slice = ray_take_fn(list, range);
+            ray_release(range);
             if (!slice || RAY_IS_ERR(slice)) { ray_release(out); return slice; }
             out = ray_list_append(out, slice);
             ray_release(slice);
@@ -489,8 +362,6 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     int64_t len;
     if (list->type == -RAY_STR)
         len = (int64_t)ray_str_len(list);           /* SSO-safe string length */
-    else if (list->type == RAY_TABLE)
-        len = ray_table_nrows(list);                 /* count-drop is a row drop */
     else if (ray_is_vec(list) || list->type == RAY_LIST)
         len = ray_len(list);                         /* typed vector / boxed list */
     else
@@ -498,8 +369,6 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     int64_t start, amount;
     if (k >= 0) { start = (k < len) ? k : len; amount = len - start; }
     else        { start = 0; amount = len + k; if (amount < 0) amount = 0; }
-    if (list->type == RAY_TABLE)                     /* rows stay a table */
-        return row_gather(list, start, amount, 0);
     int64_t rng[2] = { start, amount };
     ray_t* range = ray_vec_from_raw(RAY_I64, rng, 2);
     if (RAY_IS_ERR(range)) return range;
@@ -611,24 +480,6 @@ ray_t* q_til_wrap(ray_t* x) {
  * ray_where_fn handles the boolean-mask form, so delegate for it and anything
  * else.  Result is a long vector (kdb).  Negative counts are 'domain. */
 ray_t* q_where_wrap(ray_t* x) {
-    /* where d — keys replicated by the (int/bool) values (ref/where.md):
-     * `where `a`b`c!1 0 2` -> `a`c`c; a bool-valued dict (comparison result)
-     * gives the keys where true.  Key-indexing shape keys[where vals], NOT
-     * value distribution. */
-    if (x && x->type == RAY_DICT && !q_table_is_keyed(x)) {
-        ray_t* keys = ray_dict_keys(x);            /* borrowed */
-        if (!keys) return ray_error("type", "where: malformed dictionary");
-        int vo = 0;
-        ray_t* vv = q_table_dict_vals(x, &vo);
-        if (!vv) return ray_error("type", "where: malformed dictionary");
-        ray_t* w = q_where_wrap(vv);               /* bool mask or int counts */
-        if (vo) ray_release(vv);
-        if (!w || RAY_IS_ERR(w)) return w;
-        ray_t* r = ray_at_fn(keys, w);
-        ray_release(w);
-        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_collapse_list(r), keys); ray_release(r); return c; }
-        return r;
-    }
     if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
         int64_t n = ray_len(x);
         int64_t total = 0;
@@ -655,29 +506,11 @@ ray_t* q_where_wrap(ray_t* x) {
     return ray_where_fn(x);
 }
 
-/* q `reverse x` / monadic `|` — a dict reverses ENTRIES (keys and values
- * together, ref/reverse.md: "on dictionaries, reverses the keys"); everything
- * else delegates to base reverse unchanged. */
-ray_t* q_reverse_wrap(ray_t* x) {
-    if (x && x->type == RAY_DICT && !q_table_is_keyed(x)) {
-        ray_t* k = ray_dict_keys(x);                 /* borrowed */
-        ray_t* v = ray_dict_vals(x);                 /* borrowed */
-        if (!k || !v) return ray_error("type", "reverse: malformed dictionary");
-        ray_t* rk = ray_reverse_fn(k);
-        if (rk && ray_is_lazy(rk)) rk = ray_lazy_materialize(rk);   /* dict slots must be concrete */
-        if (!rk || RAY_IS_ERR(rk)) return rk;
-        ray_t* rv = ray_reverse_fn(v);
-        if (rv && ray_is_lazy(rv)) rv = ray_lazy_materialize(rv);
-        if (!rv || RAY_IS_ERR(rv)) { ray_release(rk); return rv; }
-        return ray_dict_new(rk, rv);                 /* consumes both */
-    }
-    return ray_reverse_fn(x);
-}
 
 /* ===== q list verbs: xprev / fill (`^`) ====================================
  * ref next.md, fill.md; deferred forms error, never wrong-answer
  * (*-deferred.qcmd companions).  `rotate` and `sublist` are self-hosted in
- * q.q over `#`/`_` — the table arms ride q_drop_wrap's row-drop tail. */
+ * q.q over `#`/`_`. */
 
 /* q `n xprev x` — n-item shift, null-filling the vacated end (ref/next.md:
  * +n is prev-by-n, -n is next); `next`/`prev` are its q.q unit shifts, so
@@ -763,7 +596,7 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
  * the last non-null sym id (id 0 IS q's null sym, same test as q_fill_wrap).
  * Atoms pass through; other shapes are deferred cells. */
 ray_t* q_fills_wrap(ray_t* x) {
-    if (x && ray_is_atom(x) && x->type != RAY_DICT) { ray_retain(x); return x; }
+    if (x && ray_is_atom(x)) { ray_retain(x); return x; }
     if (x && x->type == RAY_SYM) {
         int64_t n = ray_len(x);
         ray_t* outl = ray_list_new(n > 0 ? n : 1);
