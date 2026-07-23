@@ -7,10 +7,10 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_err.h"
 #include "lang/env.h"      /* ray_env_get — q_env_call2 */
 #include "lang/eval.h"     /* ray_take_fn, ray_in_fn, ray_find_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
-#include "lang/format.h"   /* ray_type_name — error messages */
 #include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize */
 #include "ops/idxop.h"     /* .attr.* engine calls: ray_attr_*, RAY_IDX_*, RAY_MARK_* (column attributes) */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — ? find miss remap */
@@ -33,7 +33,7 @@ static ray_t* gather(ray_t* x, int64_t start, int64_t count, int64_t total,
         char stackb[1024];
         char* b = (count < (int64_t)sizeof stackb) ? stackb
                                                     : malloc((size_t)count + 1);
-        if (!b) return ray_error("wsfull", "#: out of memory");
+        if (!b) return q_err(QE_WSFULL);
         for (int64_t i = 0; i < count; i++)
             b[i] = sp[recycle && total ? ((start + i) % total) : (start + i)];
         ray_t* row = ray_str(b, (size_t)count);
@@ -43,7 +43,7 @@ static ray_t* gather(ray_t* x, int64_t start, int64_t count, int64_t total,
     int64_t stacki[1024];
     int64_t* ix = (count <= 1024) ? stacki
                                   : malloc((size_t)(count ? count : 1) * sizeof(int64_t));
-    if (!ix) return ray_error("wsfull", "#: out of memory");
+    if (!ix) return q_err(QE_WSFULL);
     for (int64_t i = 0; i < count; i++)
         ix[i] = recycle && total ? ((start + i) % total) : (start + i);
     ray_t* idx = ray_vec_from_raw(RAY_I64, ix, count);
@@ -68,27 +68,27 @@ static ray_t* i_reshape(ray_t* shape, ray_t* x) {
     int64_t d0 = dv[0], d1 = dv[1];
     int is_str = (x && x->type == -RAY_STR);
     int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
-    if (total <= 0) return ray_error("length", "#: reshape of empty");
+    if (total <= 0) return q_err(QE_LENGTH);
     int64_t rows, cols, chunk = 0;
     if (d0 == NULL_I64 && d1 != NULL_I64) {   /* 0N dimension -> inferred stride */
-        if (d1 <= 0) return ray_error("length", "#: inferred reshape needs a positive stride");
+        if (d1 <= 0) return q_err(QE_LENGTH);
         cols = d1; rows = (total + cols - 1) / cols; chunk = 1;
     } else if (d1 == NULL_I64 && d0 != NULL_I64) {
-        if (d0 <= 0) return ray_error("length", "#: inferred reshape needs a positive stride");
+        if (d0 <= 0) return q_err(QE_LENGTH);
         rows = d0; cols = (total + rows - 1) / rows; chunk = 1;
     } else if (d0 == NULL_I64 || d1 == NULL_I64) {
-        return ray_error("length", "#: 0N 0N reshape");
+        return q_err(QE_LENGTH);
     } else {
         rows = d0; cols = d1;
     }
-    if (rows < 0 || cols < 0) return ray_error("length", "#: negative shape");
+    if (rows < 0 || cols < 0) return q_err(QE_LENGTH);
     ray_t* out = ray_list_new(rows > 0 ? rows : 1);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t r = 0; r < rows; r++) {
         int64_t start = r * cols, rc = cols;
         if (chunk && start + rc > total) rc = total - start;   /* ragged last */
         ray_t* row = gather(x, start, rc, total, !chunk);
-        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : ray_error("domain", "#: reshape"); }
+        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : q_err(QE_DOMAIN); }
         out = ray_list_append(out, row);
         ray_release(row);
         if (RAY_IS_ERR(out)) return out;
@@ -177,14 +177,14 @@ static bool q_no_dup_nulls(ray_t* v) {
  * error codes (caller remaps via attr_remap_err). */
 static ray_t* q_attr_compose(ray_t* base, char letter) {
     int cls = ray_attr_numeric_class(base->type);
-    if (cls < 0) return ray_error("type", NULL);
+    if (cls < 0) return q_err(QE_TYPE);
     bool ok = (letter == 'u') ? (ray_attr_verify_distinct(base) && q_no_dup_nulls(base))
                               : ray_attr_verify_contiguous(base);
-    if (!ok) return ray_error("domain", NULL);
+    if (!ok) return q_err(QE_DOMAIN);
     uint8_t mark = (letter == 'u') ? RAY_MARK_UNIQUE : RAY_MARK_PARTED;
     if (cls == 1) {                              /* integer-family: find-hash + marker */
         ray_t* hv = ray_idx_hash_fn(base);       /* borrows base, owned out */
-        if (!hv || RAY_IS_ERR(hv)) return hv ? hv : ray_error("oom", NULL);
+        if (!hv || RAY_IS_ERR(hv)) return hv ? hv : q_err(QE_OOM);
         ray_t* w = ray_attr_stamp_marker(hv, mark);  /* borrows hv, owned out */
         ray_release(hv);
         return w;
@@ -215,7 +215,7 @@ static ray_t* attr_set_dispatch(ray_t* n, ray_t* vec) {
         /* kdb accelerator policy composed in q (see q_attr_compose).  `` `x# ``
          * REPLACES any prior attribute, so clear the base first. */
         ray_t* base = ray_attr_drop_fn(vec);         /* clear prior attr, owned */
-        if (!base || RAY_IS_ERR(base)) return base ? base : ray_error("oom", NULL);
+        if (!base || RAY_IS_ERR(base)) return base ? base : q_err(QE_OOM);
         ray_t* r = q_attr_compose(base, letter);     /* borrows base */
         ray_release(base);
         if (r && RAY_IS_ERR(r)) return attr_remap_err(r, letter);
@@ -223,7 +223,7 @@ static ray_t* attr_set_dispatch(ray_t* n, ray_t* vec) {
     }
     case 's': attr_name = "sorted";  break;
     case 'g': attr_name = "grouped"; break;
-    default:  return ray_error("type", NULL);        /* `z#vec etc. */
+    default:  return q_err(QE_TYPE);        /* `z#vec etc. */
     }
     int64_t aid = ray_sym_intern_runtime(attr_name, strlen(attr_name));
     ray_t* nm = ray_sym(aid);                         /* owned -RAY_SYM */
@@ -233,7 +233,7 @@ static ray_t* attr_set_dispatch(ray_t* n, ray_t* vec) {
      * then set on the cleared base.  ray_attr_drop_fn borrows vec and returns an
      * owned (possibly COW'd) result; ray_attr_set_fn borrows that base. */
     ray_t* base = ray_attr_drop_fn(vec);              /* owned */
-    if (!base || RAY_IS_ERR(base)) { ray_release(nm); return base ? base : ray_error("oom", NULL); }
+    if (!base || RAY_IS_ERR(base)) { ray_release(nm); return base ? base : q_err(QE_OOM); }
     ray_t* r = ray_attr_set_fn(nm, base);             /* borrows nm, base */
     ray_release(nm);
     ray_release(base);
@@ -268,7 +268,7 @@ ray_t* q_take_wrap(ray_t* n, ray_t* list) {
                                                   * reshapes any atom by cycling
                                                   * its enlist (ints/bytes/chars) */
             ray_t* v = ray_enlist_fn(&list, 1);
-            if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("oom", NULL);
+            if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_OOM);
             ray_t* r = i_reshape(n, v);
             ray_release(v);
             return r;
@@ -331,7 +331,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
      * slices (kdb 0h). */
     if (q_is_int_vec(n)) {
         if (!list || (!ray_is_vec(list) && list->type != RAY_LIST))
-            return ray_error("type", "_: x");
+            return q_err(QE_TYPE);
         int64_t len = ray_len(list);
         int64_t np = ray_len(n);
         ray_t* out = ray_list_new(np > 0 ? np : 1);
@@ -341,7 +341,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
             int64_t nxt = (i + 1 < np) ? q_ivec_get(n, i + 1) : len;
             if (p < 0 || p > len || nxt < p || nxt > len || (i > 0 && p < prev)) {
                 ray_release(out);
-                return ray_error("domain", "_: positions");
+                return q_err(QE_DOMAIN);
             }
             prev = p;
             int64_t rng[2] = { p, nxt - p };
@@ -358,14 +358,14 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     int64_t k;
     ray_t* err = q_i64_or_err(n, &k, "_: n");
     if (err) return err;
-    if (!list) return ray_error("type", "_: x");
+    if (!list) return q_err(QE_TYPE);
     int64_t len;
     if (list->type == -RAY_STR)
         len = (int64_t)ray_str_len(list);           /* SSO-safe string length */
     else if (ray_is_vec(list) || list->type == RAY_LIST)
         len = ray_len(list);                         /* typed vector / boxed list */
     else
-        return ray_error("type", "_: x");
+        return q_err(QE_TYPE);
     int64_t start, amount;
     if (k >= 0) { start = (k < len) ? k : len; amount = len - start; }
     else        { start = 0; amount = len + k; if (amount < 0) amount = 0; }
@@ -383,11 +383,11 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
 ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
     int64_t sz;
     if (q_strict_i64(n, &sz)) {
-        if (sz <= 0) return ray_error("domain", "cut: n");
+        if (sz <= 0) return q_err(QE_DOMAIN);
         int is_str = (x && x->type == -RAY_STR);
         int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
         if (!x || (!is_str && !ray_is_vec(x) && x->type != RAY_LIST))
-            return ray_error("type", "cut: x");
+            return q_err(QE_TYPE);
         int64_t rows = (total + sz - 1) / sz;
         ray_t* out = ray_list_new(rows > 0 ? rows : 1);
         if (RAY_IS_ERR(out)) return out;
@@ -395,7 +395,7 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
             int64_t start = r * sz, rc = sz;
             if (start + rc > total) rc = total - start;
             ray_t* row = gather(x, start, rc, total, 0);   /* chunk, no recycle */
-            if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : ray_error("domain", "cut"); }
+            if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : q_err(QE_DOMAIN); }
             out = ray_list_append(out, row);
             ray_release(row);
             if (RAY_IS_ERR(out)) return out;
@@ -432,7 +432,7 @@ ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
         ray_t* d = args[0];
         ray_t* k = ray_dict_keys(d);                 /* borrowed */
         ray_t* v = ray_dict_vals(d);                 /* borrowed */
-        if (!k || !v) return ray_error("type", "enlist: malformed dictionary");
+        if (!k || !v) return q_err(QE_TYPE);
         int64_t nd = ray_dict_len(d);
         ray_t* ev = ray_list_new(nd > 0 ? nd : 1);
         if (RAY_IS_ERR(ev)) return ev;
@@ -440,7 +440,7 @@ ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
             ray_t* ia = ray_i64(i);
             ray_t* cell = ray_at_fn(v, ia);          /* owned */
             ray_release(ia);
-            if (!cell || RAY_IS_ERR(cell)) { ray_release(ev); return cell ? cell : ray_error("type", NULL); }
+            if (!cell || RAY_IS_ERR(cell)) { ray_release(ev); return cell ? cell : q_err(QE_TYPE); }
             ray_t* col = ray_list_new(1);
             if (RAY_IS_ERR(col)) { ray_release(cell); ray_release(ev); return col; }
             col = ray_list_append(col, cell);        /* retains */
@@ -448,14 +448,14 @@ ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
             if (RAY_IS_ERR(col)) { ray_release(ev); return col; }
             ray_t* cc = q_collapse_list(col);        /* atoms -> typed 1-vec */
             ray_release(col);
-            if (!cc || RAY_IS_ERR(cc)) { ray_release(ev); return cc ? cc : ray_error("type", NULL); }
+            if (!cc || RAY_IS_ERR(cc)) { ray_release(ev); return cc ? cc : q_err(QE_TYPE); }
             ev = ray_list_append(ev, cc);            /* retains */
             ray_release(cc);
             if (RAY_IS_ERR(ev)) return ev;
         }
         ray_retain(k);                               /* dict_new consumes */
         ray_t* ed = ray_dict_new(k, ev);             /* consumes k + ev */
-        if (!ed || RAY_IS_ERR(ed)) return ed ? ed : ray_error("type", NULL);
+        if (!ed || RAY_IS_ERR(ed)) return ed ? ed : q_err(QE_TYPE);
         ray_t* t = q_flip_wrap(ed);                  /* owned table */
         ray_release(ed);
         return t;
@@ -487,7 +487,7 @@ ray_t* q_where_wrap(ray_t* x) {
             int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
                       : (x->type == RAY_I32) ? (int64_t)((const int32_t*)ray_data(x))[i]
                       : (int64_t)((const int16_t*)ray_data(x))[i];
-            if (c < 0) return ray_error("domain", "where: negative count");
+            if (c < 0) return q_err(QE_DOMAIN);
             total += c;
         }
         ray_t* out = ray_vec_new(RAY_I64, total);
@@ -520,7 +520,7 @@ ray_t* q_where_wrap(ray_t* x) {
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     int64_t k;   /* strict cast owns the type axis; 0N rejected here */
     if (!q_strict_i64(nx, &k) || RAY_ATOM_IS_NULL(nx))
-        return ray_error("type", "xprev: n");
+        return q_err(QE_TYPE);
     if (x && x->type == RAY_LIST) {
         /* fill = 0#first (a take that cannot empty degrades to ()) */
         int64_t len = ray_len(x);
@@ -555,7 +555,7 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
         if (x->type == -RAY_STR) { s = ray_str_ptr(x); len = (int64_t)ray_str_len(x); }
         char stackb[256];
         char* b = (len <= (int64_t)sizeof stackb) ? stackb : malloc((size_t)(len > 0 ? len : 1));
-        if (!b) return ray_error("oom", NULL);
+        if (!b) return q_err(QE_OOM);
         for (int64_t i = 0; i < len; i++) {
             int64_t j = i - k;
             b[i] = (j >= 0 && j < len) ? s[j] : ' ';   /* char null is the blank */
@@ -565,11 +565,11 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
         return r;
     }
     if (!x || !ray_is_vec(x))
-        return ray_error("nyi", "xprev: only simple vectors, strings and lists (dict/table deferred)");
+        return q_err(QE_NYI);
     int8_t t = x->type;
     if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
           RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
-        return ray_error("nyi", "xprev: %s vectors are deferred", ray_type_name(t));
+        return q_err(QE_NYI);
     int64_t len = ray_len(x);
     size_t esz = ray_type_sizes[(uint8_t)t];
     ray_t* out = ray_vec_new(t, len > 0 ? len : 1);
@@ -620,7 +620,7 @@ ray_t* q_fills_wrap(ray_t* x) {
         return c;
     }
     if (!x || !q_vec_is_num(x))
-        return ray_error("nyi", "fills: numeric or symbol vector (dict/table deferred)");
+        return q_err(QE_NYI);
     int isf = q_vec_is_float(x);
     int64_t n = ray_len(x);
     ray_t* out = ray_vec_new(isf ? RAY_F64 : RAY_I64, n > 0 ? n : 1);
@@ -676,7 +676,7 @@ static int is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);   /* joins wave */
 
 ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "^: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     /* keyed^keyed is the uj merge with fill semantics (ref/coalesce.md:
      * y records update x's, but y NULLS don't overwrite). */
     if (q_table_is_keyed(x) && q_table_is_keyed(y))
@@ -686,13 +686,13 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     /* ---- symbol fill ---- */
     if (is_sym_t(x->type) || is_sym_t(y->type)) {
         if (!is_sym_t(x->type) || !is_sym_t(y->type))
-            return ray_error("type", "^: symbol fill needs symbol operands");
+            return q_err(QE_TYPE);
         /* length follows y when it is a vector; a scalar y broadcasts to the
          * length of a vector x (`` `a`b`c^` `` -> 3 items), matching the
          * numeric branch below. */
         int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
         if (!xatom && !yatom && ray_len(x) != len)
-            return ray_error("length", "^: operand lengths must match");
+            return q_err(QE_LENGTH);
         ray_t* outl = ray_list_new(len > 0 ? len : 1);
         if (RAY_IS_ERR(outl)) return outl;
         for (int64_t i = 0; i < len; i++) {
@@ -722,11 +722,11 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
 
     /* ---- numeric fill ---- */
     if (!is_num_t(x->type) || !is_num_t(y->type))
-        return ray_error("type", "^: unsupported operand types (dict/table/list fill deferred)");
+        return q_err(QE_TYPE);
     int is_float = is_float_t(x->type) || is_float_t(y->type);
     int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
     if (!xatom && !yatom && ray_len(x) != ray_len(y))
-        return ray_error("length", "^: operand lengths must match");
+        return q_err(QE_LENGTH);
     if (xatom && yatom) {                        /* scalar^scalar -> atom */
         int yn; double yv = q_velem_f(y, 0, &yn);
         if (!yn) return is_float ? ray_f64(yv) : ray_i64((int64_t)yv);
@@ -764,7 +764,7 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
  * (elementwise equality); longer/empty mixed vectors are 'type.  A 1-char
  * string x against string y unwraps the base char row to an ATOM bool. */
 ray_t* q_in_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "in: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     if (y->type == RAY_LIST) {
         int64_t ny = ray_len(y);
         ray_t** e = (ray_t**)ray_data(y);
@@ -807,7 +807,7 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
         int xf = is_float_t(x->type), yf = is_float_t(y->type);
         if (xf != yf) {
             if (!ray_is_atom(y) && ray_len(y) != 1)
-                return ray_error("type", "in: mixed numeric types need an atom or 1-item right arg");
+                return q_err(QE_TYPE);
             int yn; double yv = q_velem_f(y, 0, &yn);
             if (ray_is_atom(x)) {
                 int nu; double v = q_velem_f(x, 0, &nu);
@@ -844,7 +844,7 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
 ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
     ray_t* f = ray_env_get(ray_sym_intern(nm, strlen(nm)));
     if (!f || f->type != RAY_BINARY)
-        return ray_error("type", "%s: env builtin missing", nm);
+        return q_err(QE_TYPE);
     return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
 }
 
@@ -888,14 +888,14 @@ static ray_t* reindex_collapse(ray_t* vec, ray_t* grade) {
 static ray_t* grade_table(ray_t* t, int desc) {
     int64_t nc = ray_table_ncols(t);
     int64_t nr = ray_table_nrows(t);
-    if (nc <= 0) return ray_error("type", NULL);
+    if (nc <= 0) return q_err(QE_TYPE);
     if (nr == 0) {
         ray_t* g = ray_vec_new(RAY_I64, 0);
         if (g && !RAY_IS_ERR(g)) g->len = 0;
         return g;
     }
     ray_t* idx = ray_vec_new(RAY_I64, nr);           /* til nr — the tiebreaker key */
-    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
     idx->len = nr;
     int64_t* ip = (int64_t*)ray_data(idx);
     for (int64_t i = 0; i < nr; i++) ip[i] = i;
@@ -914,7 +914,7 @@ static ray_t* grade_table(ray_t* t, int desc) {
                 col = reindex_collapse(col, perm);          /* owned copy */
             }
             if (!col || RAY_IS_ERR(col)) {
-                g = col ? col : ray_error("type", NULL);
+                g = col ? col : q_err(QE_TYPE);
                 break;
             }
             cols[c - lo] = col;
@@ -932,7 +932,7 @@ static ray_t* grade_table(ray_t* t, int desc) {
         if (!g || RAY_IS_ERR(g)) {
             if (perm) ray_release(perm);
             ray_release(idx);
-            return g ? g : ray_error("oom", NULL);
+            return g ? g : q_err(QE_OOM);
         }
         /* Fold the chunk grade into the running permutation: perm = perm[g] */
         if (perm) {
@@ -944,7 +944,7 @@ static ray_t* grade_table(ray_t* t, int desc) {
         }
         if (!perm || RAY_IS_ERR(perm)) {
             ray_release(idx);
-            return perm ? perm : ray_error("oom", NULL);
+            return perm ? perm : q_err(QE_OOM);
         }
     }
     ray_release(idx);
@@ -985,7 +985,7 @@ static ray_t* dict_value_grade(ray_t* vals, int desc) {
 static ray_t* grade_dict(ray_t* d, int desc) {
     ray_t* keys = ray_dict_keys(d);      /* borrowed */
     ray_t* vals = ray_dict_vals(d);      /* borrowed */
-    if (!keys || !vals) return ray_error("type", "iasc/idesc: malformed dict");
+    if (!keys || !vals) return q_err(QE_TYPE);
     ray_t* grade = dict_value_grade(vals, desc);
     return reindex_collapse(keys, grade);             /* releases grade */
 }
@@ -1033,10 +1033,10 @@ ray_t* q_list_find(ray_t* x, ray_t* y) {
      * their own (deferred) path. */
     if (x && x->type == RAY_DICT && !q_table_is_keyed(x)) {
         ray_t* keys = ray_dict_keys(x);              /* borrowed */
-        if (!keys) return ray_error("type", "?: dict");
+        if (!keys) return q_err(QE_TYPE);
         int vo = 0;
         ray_t* vv = q_table_dict_vals(x, &vo);
-        if (!vv) return ray_error("type", "?: dict");
+        if (!vv) return q_err(QE_TYPE);
         ray_t* i = q_list_find(vv, y);               /* find arm: miss -> count */
         if (vo) ray_release(vv);
         if (!i || RAY_IS_ERR(i)) return i;
@@ -1114,5 +1114,5 @@ ray_t* q_list_find(ray_t* x, ray_t* y) {
         }
         return i;
     }
-    return ray_error("type", "?: x");   /* unreachable: q_roll_wrap routes only find shapes here */
+    return q_err(QE_TYPE);   /* unreachable: q_roll_wrap routes only find shapes here */
 }

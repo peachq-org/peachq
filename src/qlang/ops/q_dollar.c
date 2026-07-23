@@ -5,6 +5,7 @@
  * for reuse.  The per-target q_cast_* matrix and the general int-atom helpers
  * (q_is_int_atom, q_iatom_val, ...) live here too (q_registry_internal.h). */
 #include "qlang/ops/q_dollar.h"
+#include "qlang/q_err.h"
 #include "qlang/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
 #include "ops/temporal.h"  /* ray_temporal_extract — base calendar decomposition */
@@ -71,10 +72,10 @@ int q_strict_f64(ray_t* x, double* out) {
  * an owned 'type error carrying `what` — short site context, "verb: role".
  * The silent probe form above is for dispatch sites (failure = next arm). */
 ray_t* q_i64_or_err(ray_t* x, int64_t* out, const char* what) {
-    return q_strict_i64(x, out) ? NULL : ray_error("type", what);
+    return q_strict_i64(x, out) ? NULL : q_err(QE_TYPE);
 }
 ray_t* q_f64_or_err(ray_t* x, double* out, const char* what) {
-    return q_strict_f64(x, out) ? NULL : ray_error("type", what);
+    return q_strict_f64(x, out) ? NULL : q_err(QE_TYPE);
 }
 
 /* Type-facts helpers (I64/I32/I16 only — vs/sv base-encode domain). */
@@ -228,7 +229,7 @@ static const char* tag_rayname(int8_t tag) {
  * (LIST/GUID/F32 targets). */
 static ray_t* cast_delegate(int8_t tag, ray_t* x) {
     const char* nm = tag_rayname(tag);
-    if (!nm) return ray_error("nyi", "$: unsupported cast designator (deferred)");
+    if (!nm) return q_err(QE_NYI);
     ray_t* ts = ray_sym(ray_sym_intern(nm, strlen(nm)));
     if (!ts || RAY_IS_ERR(ts)) return ts;
     ray_t* r = ray_cast_fn(ts, x);
@@ -245,7 +246,7 @@ static ray_t* cast_delegate(int8_t tag, ray_t* x) {
  * new ladder: q_strict_i64 = ints + int-backed temporals, q_strict_f64 adds
  * F64/F32/DATETIME. */
 static ray_t* cast_bool(ray_t* x) {
-    if (!x) return ray_error("type", "$: boolean");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_BOOL || x->type == RAY_BOOL) { ray_retain(x); return x; }
     int64_t i;
     if (q_strict_i64(x, &i)) return ray_bool(i != 0);
@@ -259,7 +260,7 @@ static ray_t* cast_bool(ray_t* x) {
     /* An atom reaching here (guid, sym) has no boolean law.  Atoms never
      * delegate: that re-enters the null-propagation being intercepted, which is
      * how 0Ng returned 0b while a non-null guid errored. */
-    if (x->type < 0) return ray_error("type", "$: boolean");
+    if (x->type < 0) return q_err(QE_TYPE);
     /* base cast_vec_numeric has no F32 source arm for ANY target, so the q
      * layer supplies it — exactly as the integer targets already do. */
     if (x->type == RAY_F32) {
@@ -293,7 +294,7 @@ static ray_t* cast_str(ray_t* x) {
     if (q_is_int_vec(x)) {
         int64_t n = ray_len(x);
         char* buf = (char*)malloc(n ? (size_t)n : 1);
-        if (!buf) return ray_error("wsfull", "$: char cast");
+        if (!buf) return q_err(QE_WSFULL);
         for (int64_t i = 0; i < n; i++)
             buf[i] = (char)q_ivec_get(x, i);
         ray_t* r = ray_str(buf, (size_t)n);
@@ -304,7 +305,7 @@ static ray_t* cast_str(ray_t* x) {
         int64_t n = ray_len(x);
         ray_t** e = (ray_t**)ray_data(x);
         char* buf = (char*)malloc(n ? (size_t)n : 1);
-        if (!buf) return ray_error("wsfull", "$: out of memory");
+        if (!buf) return q_err(QE_WSFULL);
         for (int64_t i = 0; i < n; i++) {
             ray_t* ei = e[i];
             int64_t v;
@@ -315,14 +316,14 @@ static ray_t* cast_str(ray_t* x) {
             else if (ei && ei->type == -RAY_STR && ray_str_len(ei) == 1)
                 v = (unsigned char)ray_str_ptr(ei)[0];
             else if (ei && ei->type == -RAY_CHARV) v = ei->u8;
-            else { free(buf); return ray_error("type", "$: cannot cast list element to char"); }
+            else { free(buf); return q_err(QE_TYPE); }
             buf[i] = (char)v;
         }
         ray_t* r = ray_str(buf, (size_t)n);
         free(buf);
         return r;
     }
-    return ray_error("type", "$: cannot cast to char");
+    return q_err(QE_TYPE);
 }
 
 /* Integer targets (I64/I32/I16): kdb ROUNDS floats (rint = IEEE nearest/
@@ -479,7 +480,7 @@ static ray_t* cast_timestamp(ray_t* x) {
      * shape is a deferred cell (designator-audit decision, plan 2026-07-07). */
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32 ||
               x->type == RAY_F64  || x->type == RAY_F32))
-        return ray_error("nyi", "$: float->timestamp cast is deferred");
+        return q_err(QE_NYI);
     return cast_delegate(RAY_TIMESTAMP, x);
 }
 
@@ -489,7 +490,7 @@ static ray_t* cast_sym(ray_t* x) {
         ray_retain(x);
         return x;
     }
-    return ray_error("nyi", "$: cast to symbol is deferred (use `$ / \"S\"$ on strings)");
+    return q_err(QE_NYI);
 }
 
 /* The ONE cast home (contract: q_dollar.h).  Dispatch is on the TARGET tag:
@@ -559,7 +560,7 @@ static ray_t* tok_leaf(ray_t* x, int64_t tag) {
     }
     const char* tp; int64_t tn;
     if (!q_text_bytes(x, &tp, &tn))
-        return ray_error("type", "$: Tok right operand must be a string");
+        return q_err(QE_TYPE);
     return q_tok((int8_t)tag, tp, tp ? (size_t)tn : 0);
 }
 ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
@@ -589,13 +590,13 @@ static ray_t* pad_leaf(ray_t* x, int64_t w) {
         return out;
     }
     const char* p; int64_t pn;
-    if (!q_text_bytes(x, &p, &pn)) return ray_error("type", "$: pad expects a string");
-    if (w == INT64_MIN) return ray_error("limit", "$: pad width");   /* -w is UB */
+    if (!q_text_bytes(x, &p, &pn)) return q_err(QE_TYPE);
+    if (w == INT64_MIN) return q_err(QE_LIMIT);   /* -w is UB */
     int64_t width = w < 0 ? -w : w;
     int64_t copy = pn < width ? pn : width;
     char stack[256];
     char* b = (width < (int64_t)sizeof stack) ? stack : malloc((size_t)width + 1);
-    if (!b) return ray_error("wsfull", "$: out of memory");
+    if (!b) return q_err(QE_WSFULL);
     memset(b, ' ', (size_t)width);
     memcpy(w < 0 ? b + (width - copy) : b, p, (size_t)copy);   /* w<0: text at right */
     ray_t* r = (x->type == -RAY_STR) ? ray_str(b, (size_t)width)
@@ -611,7 +612,7 @@ ray_t* q_dollar_pad(int64_t w, ray_t* x) {
  * no enum domains, so the whole form is a 'nyi stub awaiting them. */
 ray_t* q_dollar_enum(ray_t* x, ray_t* y) {
     (void)x; (void)y;
-    return ray_error("nyi", "$: enumerate (no enum domains)");
+    return q_err(QE_NYI);
 }
 
 /* `$` as matrix multiply / dot product (ref/mmu.md: `$` is mmu's glyph form).
@@ -728,13 +729,13 @@ static int64_t temporal_raw_vec(int8_t at, const void* base, int64_t i) {
  * beats a fabricated value). */
 static ray_t* component_leaf(ray_t* x, int64_t comp) {
     q_comp_e c = (q_comp_e)comp;
-    if (!x) return ray_error("type", "$: temporal component of nil");
+    if (!x) return q_err(QE_TYPE);
     int8_t at = x->type < 0 ? (int8_t)-x->type : x->type;
     int temporal = RAY_IS_TEMPORAL32(at) || RAY_IS_TEMPORAL64(at) ||
                    RAY_IS_TEMPORALF(at);
-    if (!temporal) return ray_error("type", "$: temporal component of non-temporal");
+    if (!temporal) return q_err(QE_TYPE);
     if (!component_valid(at, c))
-        return ray_error("type", "$: component invalid for this temporal type");
+        return q_err(QE_TYPE);
     /* A non-finite DATETIME (canonically 0n) has no meaningful field AND would
      * make floor()/(int64_t) UB — treat it as null, like the sentinel. */
     int datetimef = RAY_IS_TEMPORALF(at);
@@ -794,7 +795,7 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
         int64_t n = (t->type == -RAY_STR) ? (int64_t)ray_str_len(t) : ray_len(t);
         int x_is_list = x && (ray_is_vec(x) || x->type == RAY_LIST);
         if (x_is_list && ray_len(x) != n)
-            return ray_error("length", "$: designator/operand length mismatch");
+            return q_err(QE_LENGTH);
         ray_t* out = ray_list_new(n);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
@@ -833,7 +834,7 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
             if (comp) return comp;
             return q_dollar_enum(t, x);
         }
-        return ray_error("nyi", "$: unsupported cast designator (deferred)");
+        return q_err(QE_NYI);
     }
     /* `10h$`/`` `char$``/`"c"$` all land here with is_tok=0 and reinterpret via
      * q_dollar_cast; only the UPPERCASE char token `"C"$` carries is_tok=1 and stays
