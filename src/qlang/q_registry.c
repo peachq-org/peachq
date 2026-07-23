@@ -29,6 +29,7 @@
  * parser-flip enforcement extends. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_err.h"
 #include "ops/ops.h"       /* ray_is_lazy — DAG guard in q_charv_out */
 #include "lang/env.h"      /* ray_env_get; ray_fn_unary/binary/vary — building the fn-values */
 #include "lang/eval.h"     /* RAY_FN_ATOMIC/SPECIAL_FORM/Q_LOWER — attrs stamped on built values */
@@ -71,7 +72,7 @@ enum spec_kind { SK_UNARY, SK_BINARY, SK_VARY };   /* -> ray_fn_unary/binary/var
 
 static ray_t* spec_nyi(ray_t** args, int64_t n) {
     (void)args; (void)n;
-    return ray_error("nyi", NULL);
+    return q_err(QE_NYI);
 }
 
 typedef struct { const char* wire; uint8_t kind; uint32_t flags; void* fn; } q_special_t;
@@ -188,12 +189,12 @@ ray_t* q_registry_name_reserved_words(void) {
     for (int i = 0; i < nop; i++)
         if (ops[i].lex != QLEX_GLYPH && ops[i].lex != QLEX_ADVERB) n++;
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n);
-    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
     for (int i = 0; i < nop; i++) {
         if (ops[i].lex == QLEX_GLYPH || ops[i].lex == QLEX_ADVERB) continue;
         int64_t id = ray_sym_intern_runtime(ops[i].name, strlen(ops[i].name));
         out = ray_vec_append(out, &id);
-        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
     }
     return out;
 }
@@ -282,14 +283,14 @@ ray_t* q_registry_elem_at(ray_t* v, int64_t i) {
  * (stage-0 audit §2) — zero-copy stays a later constructor-internal option. */
 ray_t* q_charv_of_str(ray_t* s) {
     if (!s || RAY_IS_ERR(s)) return s;               /* errors pass through (no-op rc) */
-    if (s->type != -RAY_STR) return ray_error("type", "charv: expects a string atom");
+    if (s->type != -RAY_STR) return q_err(QE_TYPE);
     return ray_charv(ray_str_ptr(s), (int64_t)ray_str_len(s));
 }
 
 ray_t* q_str_of_charv(ray_t* x) {
     if (!x || RAY_IS_ERR(x)) return x;               /* errors pass through (no-op rc) */
     if (x->type == -RAY_CHARV) { char c = (char)x->u8; return ray_str(&c, 1); }
-    if (x->type != RAY_CHARV) return ray_error("type", "charv: expects char text");
+    if (x->type != RAY_CHARV) return q_err(QE_TYPE);
     return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
 }
 
@@ -316,7 +317,7 @@ ray_t* q_str_in(ray_t* x) {
                            e[i]->type == RAY_LIST);
         if (!any) { ray_retain(x); return x; }
         ray_t* out = ray_list_new(n);
-        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         for (int64_t i = 0; i < n; i++) {
             ray_t* c = q_str_in(e[i]);
             if (RAY_IS_ERR(c)) { ray_release(out); return c; }
@@ -362,7 +363,7 @@ ray_t* q_charv_out(ray_t* r) {
     if (r->type == RAY_STR) {                    /* extracted column -> 0h list */
         int64_t n = ray_len(r);
         ray_t* out = ray_list_new(n);
-        if (!out || RAY_IS_ERR(out)) { ray_release(r); return out ? out : ray_error("oom", NULL); }
+        if (!out || RAY_IS_ERR(out)) { ray_release(r); return out ? out : q_err(QE_OOM); }
         for (int64_t i = 0; i < n; i++) {
             size_t sl = 0;
             const char* sp = ray_str_vec_get(r, i, &sl);
@@ -387,7 +388,7 @@ ray_t* q_charv_out(ray_t* r) {
             return r;
         }
         ray_t* out = ray_list_new(n);
-        if (!out || RAY_IS_ERR(out)) { ray_release(r); return out ? out : ray_error("oom", NULL); }
+        if (!out || RAY_IS_ERR(out)) { ray_release(r); return out ? out : q_err(QE_OOM); }
         for (int64_t i = 0; i < n; i++) {
             ray_retain(e[i]);
             ray_t* c = q_charv_out(e[i]);

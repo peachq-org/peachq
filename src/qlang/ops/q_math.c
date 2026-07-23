@@ -6,10 +6,10 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64/as_i64, is_numeric, RAY_IS_TEMPORAL64, ray_error */
-#include "lang/format.h"   /* ray_type_name — error messages */
 #include "table/sym.h"     /* ray_sym_str — q_is_null_sym */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
@@ -20,7 +20,7 @@
  * Ints/bools pass through; f64 null -> long null.  RAY_FN_ATOMIC maps it
  * element-wise over float vectors. */
 ray_t* q_floor_wrap(ray_t* x) {
-    if (!x) return ray_error("type", "_ (floor): nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_F64) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_I64);
         return ray_i64((int64_t)floor(x->f64));
@@ -34,8 +34,7 @@ ray_t* q_floor_wrap(ray_t* x) {
         ray_retain(x);
         return x;
     }
-    return ray_error("type", "_ (floor): expects a numeric, got %s",
-                     ray_type_name(x->type));
+    return q_err(QE_TYPE);
 }
 
 /* ---- atomic unary math (feat/q-math-atomic) — implement-via-libm ----
@@ -49,11 +48,10 @@ ray_t* q_floor_wrap(ray_t* x) {
  * -> typed float null out (kdb: sin/cos/asin/... of a null is null). */
 #define Q_LIBM_UNARY(NAME, FN, GLYPH)                                          \
     ray_t* NAME(ray_t* x) {                                                    \
-        if (!x) return ray_error("type", GLYPH ": nil");                       \
+        if (!x) return q_err(QE_TYPE);                       \
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);              \
         if (is_numeric(x)) return make_f64(FN(as_f64(x)));                     \
-        return ray_error("type", GLYPH ": expects a numeric argument, got %s", \
-                         ray_type_name(x->type));                              \
+        return q_err(QE_TYPE);                              \
     }
 Q_LIBM_UNARY(q_sin_wrap,  sin,  "sin")
 Q_LIBM_UNARY(q_cos_wrap,  cos,  "cos")
@@ -70,7 +68,7 @@ Q_LIBM_UNARY(q_atan_wrap, atan, "atan")
  * `signum 1999.12.31` -> -1i — a pre-epoch date is negative), and every typed
  * null is null (-1i). */
 static ray_t* signum_atom(ray_t* x) {
-    if (!x) return ray_error("type", "signum: nil");
+    if (!x) return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x)) return ray_i32(-1);
     if (x->type < 0 && RAY_IS_TEMPORAL32(-x->type)) {
         int32_t v = x->i32;
@@ -92,8 +90,7 @@ static ray_t* signum_atom(ray_t* x) {
         double v = as_f64(x);
         return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
     }
-    return ray_error("type", "signum: expects a numeric argument, got %s",
-                     ray_type_name(x->type));
+    return q_err(QE_TYPE);
 }
 
 /* Broadcast + collapse carrier (the q_null_wrap pattern): registered
@@ -114,7 +111,7 @@ ray_t* q_signum_wrap(ray_t* x) {
  * to i64 exactly like q_floor_wrap.  Ints/bools pass through; f64 null -> long
  * null. */
 ray_t* q_ceiling_wrap(ray_t* x) {
-    if (!x) return ray_error("type", "ceiling: nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_F64) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_I64);
         return ray_i64((int64_t)ceil(x->f64));
@@ -128,8 +125,7 @@ ray_t* q_ceiling_wrap(ray_t* x) {
         ray_retain(x);
         return x;
     }
-    return ray_error("type", "ceiling: expects a numeric argument, got %s",
-                     ray_type_name(x->type));
+    return q_err(QE_TYPE);
 }
 
 /* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
@@ -212,13 +208,11 @@ ray_t* q_null_wrap(ray_t* x) {
  * make_f64 (single-null model; kdb shows 0w — documented divergence).
  * Domain is numeric-only: ref/exp.md's table rejects char args. */
 ray_t* q_xexp_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "xexp: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     if (!is_numeric(x) && !RAY_ATOM_IS_NULL(x))
-        return ray_error("type", "xexp: expects numeric arguments, got %s",
-                         ray_type_name(x->type));
+        return q_err(QE_TYPE);
     if (!is_numeric(y) && !RAY_ATOM_IS_NULL(y))
-        return ray_error("type", "xexp: expects numeric arguments, got %s",
-                         ray_type_name(y->type));
+        return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x) || RAY_ATOM_IS_NULL(y))
         return ray_typed_null(-RAY_F64);
     return make_f64(exp(as_f64(y) * log(as_f64(x))));
@@ -249,7 +243,7 @@ static int xlog_operand(ray_t* v, double* out) {
 ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
     double xf, yf;
     if (!xlog_operand(x, &xf) || !xlog_operand(y, &yf))
-        return ray_error("type", "xlog: expects numeric or char arguments");
+        return q_err(QE_TYPE);
     if ((x->type != -RAY_STR && RAY_ATOM_IS_NULL(x)) ||
         (y->type != -RAY_STR && RAY_ATOM_IS_NULL(y)))
         return ray_typed_null(-RAY_F64);
@@ -280,12 +274,12 @@ int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* 
 ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
     int64_t kx, ky;                                     /* count-first (matrix) / count (vec) */
     int xc = q_mmu_class(x, &kx), yc = q_mmu_class(y, &ky);
-    if (xc == QMMU_BAD || yc == QMMU_BAD) return ray_error("type", NULL);
-    if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return ray_error("length", NULL);
-    if (kx != ray_len(y)) return ray_error("length", NULL);          /* count y must match */
+    if (xc == QMMU_BAD || yc == QMMU_BAD) return q_err(QE_TYPE);
+    if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return q_err(QE_LENGTH);
+    if (kx != ray_len(y)) return q_err(QE_LENGTH);          /* count y must match */
 
     ray_t* ycols = yc ? q_flip_wrap(y) : NULL;          /* owned: cols of y as f64 vecs */
-    if (yc && (!ycols || RAY_IS_ERR(ycols))) return ycols ? ycols : ray_error("oom", NULL);
+    if (yc && (!ycols || RAY_IS_ERR(ycols))) return ycols ? ycols : q_err(QE_OOM);
     ray_t** rowv = xc ? (ray_t**)ray_data(x) : NULL;
     ray_t** colv = yc ? (ray_t**)ray_data(ycols) : NULL;
     int64_t R = xc ? ray_len(x) : 1;                    /* result rows (dropped if x is a vec) */
@@ -297,15 +291,15 @@ ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
     /* matrix . matrix -> list of R f64 vecs, each length C */
     if (xc && yc) {
         ray_t* out = ray_list_new(R > 0 ? R : 1);
-        if (!out || RAY_IS_ERR(out)) { ray_release(ycols); return out ? out : ray_error("oom", NULL); }
+        if (!out || RAY_IS_ERR(out)) { ray_release(ycols); return out ? out : q_err(QE_OOM); }
         for (int64_t i = 0; i < R; i++) {
             ray_t* row = ray_vec_new(RAY_F64, C > 0 ? C : 1);
-            if (!row || RAY_IS_ERR(row)) { ray_release(out); ray_release(ycols); return row ? row : ray_error("oom", NULL); }
+            if (!row || RAY_IS_ERR(row)) { ray_release(out); ray_release(ycols); return row ? row : q_err(QE_OOM); }
             row->len = C;
             double* od = (double*)ray_data(row);
             for (int64_t j = 0; j < C; j++) {
                 ray_t* d = ray_inner_prod_fn(rowv[i], colv[j]);
-                if (!d || RAY_IS_ERR(d)) { ray_release(row); ray_release(out); ray_release(ycols); return d ? d : ray_error("oom", NULL); }
+                if (!d || RAY_IS_ERR(d)) { ray_release(row); ray_release(out); ray_release(ycols); return d ? d : q_err(QE_OOM); }
                 od[j] = as_f64(d); ray_release(d);
             }
             out = ray_list_append(out, row); ray_release(row);   /* append RETAINS */
@@ -318,12 +312,12 @@ ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
     /* exactly one matrix operand -> f64 vec (the other axis drops) */
     int64_t n = xc ? R : C;
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1);
-    if (!out || RAY_IS_ERR(out)) { if (ycols) ray_release(ycols); return out ? out : ray_error("oom", NULL); }
+    if (!out || RAY_IS_ERR(out)) { if (ycols) ray_release(ycols); return out ? out : q_err(QE_OOM); }
     out->len = n;
     double* od = (double*)ray_data(out);
     for (int64_t k = 0; k < n; k++) {
         ray_t* d = ray_inner_prod_fn(xc ? rowv[k] : x, yc ? colv[k] : y);
-        if (!d || RAY_IS_ERR(d)) { ray_release(out); if (ycols) ray_release(ycols); return d ? d : ray_error("oom", NULL); }
+        if (!d || RAY_IS_ERR(d)) { ray_release(out); if (ycols) ray_release(ycols); return d ? d : q_err(QE_OOM); }
         od[k] = as_f64(d); ray_release(d);
     }
     if (ycols) ray_release(ycols);
@@ -342,11 +336,10 @@ static ray_t* str_cmp_vec(ray_t* a, ray_t* b, int eq) {
     const char* pa = ray_str_ptr(a); size_t la = ray_str_len(a);
     const char* pb = ray_str_ptr(b); size_t lb = ray_str_len(b);
     if (la != lb)
-        return ray_error("length", "%s: string lengths must match, got %zu and %zu",
-                         eq ? "=" : "<>", la, lb);
+        return q_err(QE_LENGTH);
     uint8_t stack[128];
     uint8_t* bits = (la <= sizeof stack) ? stack : (uint8_t*)malloc(la ? la : 1);
-    if (!bits) return ray_error("wsfull", "=: out of memory");
+    if (!bits) return q_err(QE_WSFULL);
     for (size_t i = 0; i < la; i++)
         bits[i] = (uint8_t)(eq ? (pa[i] == pb[i]) : (pa[i] != pb[i]));
     ray_t* r = ray_vec_from_raw(RAY_BOOL, bits, (int64_t)la);
@@ -377,7 +370,7 @@ ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
  * vector/scalar and vector/vector cases are mapped by eval over atom pairs. */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b) {
     if (!a || !b || !ray_is_atom(a) || !ray_is_atom(b))
-        return ray_error("type", "&: expects numeric atoms");
+        return q_err(QE_TYPE);
     if (a->type == -RAY_BOOL && b->type == -RAY_BOOL)
         return ray_bool(a->b8 && b->b8);
     if (a->type == -RAY_F64 || b->type == -RAY_F64 ||
@@ -394,7 +387,7 @@ ray_t* q_min2_wrap(ray_t* a, ray_t* b) {
         int64_t bv = (b->type == -RAY_BOOL) ? b->b8 : as_i64(b);
         return ray_i64(av <= bv ? av : bv);
     }
-    return ray_error("type", "&: unsupported operands");
+    return q_err(QE_TYPE);
 }
 
 /* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
@@ -475,9 +468,9 @@ ray_t* q_match_wrap(ray_t* a, ray_t* b) {
  * two element widths must agree ('type — a silent misread otherwise).  The
  * flip-of-pairs range form and mixed-width operands are deferred cells. */
 ray_t* q_within_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "within: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     if (!ray_is_vec(y) || ray_len(y) != 2)
-        return ray_error("type", "within: range must be a 2-item vector");
+        return q_err(QE_TYPE);
     ray_t* vals = x;
     ray_t* vals_owned = NULL;
     if (ray_is_atom(x)) {
@@ -488,16 +481,16 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
         vals_owned = q_collapse_list(l);
         ray_release(l);
         if (!vals_owned || RAY_IS_ERR(vals_owned))
-            return vals_owned ? vals_owned : ray_error("type", NULL);
+            return vals_owned ? vals_owned : q_err(QE_TYPE);
         if (!ray_is_vec(vals_owned)) {           /* strings & friends: deferred */
             ray_release(vals_owned);
-            return ray_error("type", "within: unsupported value type (deferred)");
+            return q_err(QE_TYPE);
         }
         vals = vals_owned;
     }
     if (!ray_is_vec(vals)) {
         if (vals_owned) ray_release(vals_owned);
-        return ray_error("type", "within: unsupported value type (deferred)");
+        return q_err(QE_TYPE);
     }
     /* Base ray_within_fn dispatches on vals->type ONLY and reads the range
      * buffer as that element type, so ANY type mismatch — not just a width
@@ -506,7 +499,7 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
      * mixed-type coercion is a deferred cell (error, never a wrong answer). */
     if (vals->type != y->type) {
         if (vals_owned) ray_release(vals_owned);
-        return ray_error("type", "within: value/range types must match (mixed-type deferred)");
+        return q_err(QE_TYPE);
     }
     ray_t* r;
     if (vals->type == RAY_TIMESTAMP) {

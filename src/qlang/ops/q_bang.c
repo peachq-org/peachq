@@ -11,6 +11,7 @@
  * These more specific names are for reuse in the code base. Having the specific types also helps. 
  */
 #include "qlang/ops/q_bang.h"
+#include "qlang/q_err.h"
 #include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_strict_i64,
                                          * q_is_int_atom, q_iatom_val, q_table_flatten, q_env_call2 */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
@@ -32,7 +33,7 @@
 
 static ray_t* h_deser(ray_t* y) {                       /* -9! from bytes */
     if (!y || y->type != RAY_BYTE_ONLY)
-        return ray_error("type", "-9!: expects a byte vector");
+        return q_err(QE_TYPE);
     return q_wire_deserialize(y);
 }
 
@@ -55,7 +56,7 @@ static ray_t* h_zip(ray_t* y) {                         /* -18! compress bytes *
 static ray_t* h_s1(ray_t* y) {
     size_t cap = 8192;
     char* buf = malloc(cap);
-    if (!buf) return ray_error("wsfull", "-3!: out of memory");
+    if (!buf) return q_err(QE_WSFULL);
     for (;;) {
         buf[0] = '\0';
         q_fmt_krepr(y, buf, cap);
@@ -67,7 +68,7 @@ static ray_t* h_s1(ray_t* y) {
         }
         cap *= 2;
         char* nb = realloc(buf, cap);
-        if (!nb) { free(buf); return ray_error("wsfull", "-3!: out of memory"); }
+        if (!nb) { free(buf); return q_err(QE_WSFULL); }
         buf = nb;
     }
 }
@@ -78,7 +79,7 @@ static ray_t* h_s1(ray_t* y) {
  * pins openq's ACTUAL number (smoked), and the PR Decisions flag the gap — we
  * do NOT fabricate kdb's count. */
 static ray_t* h_refcnt(ray_t* y) {
-    if (!y) return ray_error("type", "-16!: nil argument");
+    if (!y) return q_err(QE_TYPE);
     return ray_i64((int64_t)y->rc);
 }
 
@@ -87,7 +88,7 @@ static ray_t* h_refcnt(ray_t* y) {
  * path tolerated like hopen.  A missing/unstatable file -> 'io (kdb pins
  * path:oserr, unrepresentable in 7-byte codes — the read0 precedent). */
 static ray_t* h_hcount(ray_t* y) {
-    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* xs = q_str_in(y);            /* charv path -> legacy STR form */
     ray_t* path = NULL;                 /* OWNED RAY_STR, NUL-terminated */
     const char* p = NULL;
@@ -104,7 +105,7 @@ static ray_t* h_hcount(ray_t* y) {
         path = ray_str(p, n);
     }
     ray_release(xs);
-    if (!path) return ray_error("type", NULL);
+    if (!path) return q_err(QE_TYPE);
     if (RAY_IS_ERR(path)) return path;
     int64_t sz = -1;
 #ifdef RAY_OS_WINDOWS
@@ -115,7 +116,7 @@ static ray_t* h_hcount(ray_t* y) {
     if (stat(ray_str_ptr(path), &st) == 0) sz = (int64_t)st.st_size;
 #endif
     ray_release(path);
-    if (sz < 0) return ray_error("io", NULL);
+    if (sz < 0) return q_err(QE_IO);
     return ray_i64(sz);
 }
 
@@ -123,7 +124,7 @@ static ray_t* h_hcount(ray_t* y) {
  * The one operand packs Apply's two: unpack and delegate to the q_sys home. */
 static ray_t* h_timespace(ray_t* y) {
     if (!y || y->type != RAY_LIST || ray_len(y) != 2)
-        return ray_error("type", NULL);
+        return q_err(QE_TYPE);
     return q_sys_ts_apply(ray_list_get(y, 0), ray_list_get(y, 1));
 }
 
@@ -139,7 +140,7 @@ static ray_t* bang_fmt_one(int places, double y) {
     if (m < 0) return ray_charv("", 0);
     if ((size_t)m < sizeof stackbuf) return ray_charv(stackbuf, (int64_t)m);
     char* heap = malloc((size_t)m + 1);
-    if (!heap) return ray_error("wsfull", "-27!: out of memory");
+    if (!heap) return q_err(QE_WSFULL);
     snprintf(heap, (size_t)m + 1, "%.*f", places, y);
     ray_t* r = ray_charv(heap, (int64_t)m);
     free(heap);
@@ -152,17 +153,17 @@ static ray_t* bang_fmt_one(int places, double y) {
  * rounding, ignoring \P. */
 static ray_t* h_format(ray_t* arg) {
     if (!arg || arg->type != RAY_LIST || ray_len(arg) != 2)
-        return ray_error("type", "-27!: expects a 2-element (places;y) list");
+        return q_err(QE_TYPE);
     ray_t* px = ray_list_get(arg, 0);    /* borrowed */
     ray_t* y  = ray_list_get(arg, 1);    /* borrowed */
     int64_t places64;
     if (px && px->type == -RAY_BOOL) places64 = px->b8;
     else if (!q_strict_i64(px, &places64))
-        return ray_error("type", "-27!: places");
+        return q_err(QE_TYPE);
     if (places64 < 0) places64 = 0;
     if (places64 > 320) places64 = 320;       /* guard the snprintf width */
     int places = (int)places64;
-    if (!y) return ray_error("type", "-27!: nil float argument");
+    if (!y) return q_err(QE_TYPE);
     if (y->type == -RAY_F64) {                 /* float atom -> one string */
         return bang_fmt_one(places, y->f64);
     }
@@ -178,7 +179,7 @@ static ray_t* h_format(ray_t* arg) {
         }
         return out;
     }
-    return ray_error("type", "-27!: y");
+    return q_err(QE_TYPE);
 }
 
 /* ---- the non-negative band: enkey / dict-make ------------------------------ */
@@ -188,12 +189,12 @@ static ray_t* h_format(ray_t* arg) {
  * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
 ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
     if (!y || (y->type != RAY_TABLE && !q_table_is_keyed(y)))
-        return ray_error("type", "!: enkey/unkey needs a table");
+        return q_err(QE_TYPE);
     ray_t* flat = q_table_flatten(y);
     if (!flat || RAY_IS_ERR(flat)) return flat;
     int64_t nc = ray_table_ncols(flat);
     if (nkey <= 0) return flat;                 /* unkey */
-    if (nkey >= nc) { ray_release(flat); return ray_error("length", "!: key count exceeds columns"); }
+    if (nkey >= nc) { ray_release(flat); return q_err(QE_LENGTH); }
     ray_t* kt = ray_table_new(nkey);
     ray_t* vt = ray_table_new(nc - nkey);
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
@@ -214,7 +215,7 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
  * dict.  vals pass through as-is (rayfall `dict` broadcasts/boxes). */
 static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
     if (q_builtins_count_long(x) != q_builtins_count_long(y))
-        return ray_error("length", "!: key and value counts must match");
+        return q_err(QE_LENGTH);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
         ray_retain(x);
         ray_retain(y);
@@ -228,7 +229,7 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
     }
     if ((ray_is_vec(x) || x->type == RAY_LIST) && (ray_is_vec(y) || y->type == RAY_LIST))
         return q_env_call2("dict", x, y);
-    return ray_error("type", "!: key and value must be lists");
+    return q_err(QE_TYPE);
 }
 
 
@@ -298,10 +299,10 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -37:  /* .Q.prf0: code profiler                                    */
         case -38:  /* socket table: sockets                                     */
         case -120: /* memory domain: .m namespace                               */
-            return ray_error("nyi", NULL);
+            return q_err(QE_NYI);
 
         default:   /* unknown id -> not an internal function -> 'nyi           */
-            return ray_error("nyi", NULL);
+            return q_err(QE_NYI);
     }
 }
 
@@ -310,7 +311,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
  * canonicalizes to NULL_I64 so every null width lands on the one `0N!` show case;
  * a plain 0N already IS NULL_I64.  Everything else is a dict. */
 ray_t* q_bang(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "!: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     if (q_is_int_atom(x))
         return q_bang_dispatch(RAY_ATOM_IS_NULL(x) ? NULL_I64 : q_iatom_val(x), y);
     return bang_make_dict(x, y);

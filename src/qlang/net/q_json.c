@@ -14,6 +14,7 @@
  * Pure q-layer: no frozen-base edits. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/net/q_json.h"
+#include "qlang/q_err.h"
 #include "qlang/q_registry.h" /* q_collapse_list */
 #include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
 #include "table/sym.h"        /* ray_sym_vec_cell */
@@ -37,7 +38,6 @@ typedef struct {
     size_t cap;
     int    oom;
     int    nyi;
-    int8_t nyi_type;
 } jbuf;
 
 static int jbuf_reserve(jbuf* b, size_t extra) {
@@ -125,7 +125,8 @@ static void j_emit(jbuf* b, ray_t* x);
 
 /* An unimplemented type: latch the flag so the whole serialize fails 'nyi. */
 static void j_nyi(jbuf* b, int8_t t) {
-    if (!b->nyi) { b->nyi = 1; b->nyi_type = t; }
+    (void)t;
+    if (!b->nyi) b->nyi = 1;
 }
 
 /* One atom (x->type < 0). */
@@ -314,13 +315,13 @@ static void j_emit(jbuf* b, ray_t* x) {
 }
 
 ray_t* q_json_serialize(ray_t* x) {
-    if (!x) return ray_error("type", ".j.j: nil");
+    if (!x) return q_err(QE_TYPE);
     jbuf b = {0};
     j_emit(&b, x);
-    if (b.oom) { free(b.p); return ray_error("wsfull", ".j.j: out of memory"); }
+    if (b.oom) { free(b.p); return q_err(QE_WSFULL); }
     if (b.nyi) {
         free(b.p);
-        return ray_error("nyi", ".j.j: unimplemented type %d", (int)b.nyi_type);
+        return q_err(QE_NYI);
     }
     ray_t* r = ray_charv(b.p ? b.p : "", (int64_t)b.len);
     free(b.p);
@@ -384,22 +385,21 @@ static ray_t* jk_node(yyjson_val* v) {
             return ray_dict_new(keys, cvals);              /* consumes keys + cvals */
         }
         default:
-            return ray_error("parse", ".j.k: unsupported JSON value");
+            return q_err(QE_PARSE);
     }
 }
 
 ray_t* q_json_deserialize(ray_t* x) {
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return ray_error("type", ".j.k expects a string");
+    if (!q_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t n = (size_t)sn;
     char* buf = malloc(n + 1);
-    if (!buf) return ray_error("wsfull", ".j.k: out of memory");
+    if (!buf) return q_err(QE_WSFULL);
     if (n) memcpy(buf, sp, n);
     buf[n] = '\0';
-    yyjson_read_err err;
-    yyjson_doc* doc = yyjson_read_opts(buf, n, YYJSON_READ_ALLOW_INF_AND_NAN, NULL, &err);
+    yyjson_doc* doc = yyjson_read_opts(buf, n, YYJSON_READ_ALLOW_INF_AND_NAN, NULL, NULL);
     if (!doc) {
-        ray_t* e = ray_error("parse", ".j.k: %s (pos %zu)", err.msg ? err.msg : "invalid JSON", err.pos);
+        ray_t* e = q_err(QE_PARSE);
         free(buf);
         return e;
     }

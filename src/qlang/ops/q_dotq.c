@@ -2,6 +2,7 @@
  * (via the .Q.c.* C seam) and .Q.ops (the manifest as a read-only table).
  * Evicted from q_builtins.c; the type-letter kernel (q_ty_char) stays there. */
 #include "qlang/q_builtins.h"   /* q_ty_char + this file's decls */
+#include "qlang/q_err.h"
 #include "qlang/q_ops.h"        /* q_ops_table — the .Q.ops source */
 #include "qlang/q_registry.h"   /* q_table_is_keyed — .Q.qt keyed arm */
 #include "qlang/q_fmt.h"        /* .Q.s — the q console display string */
@@ -59,14 +60,14 @@ ray_t* q_dotq_qp_fn(ray_t* x) {
 ray_t* q_dotq_s_fn(ray_t* x) {
     size_t cap = 8192;
     char* buf = malloc(cap);
-    if (!buf) return ray_error("wsfull", ".Q.s: out of memory");
+    if (!buf) return q_err(QE_WSFULL);
     buf[0] = '\0';
     q_fmt_console(x, buf, cap);                      /* `.Q.s` OBEYS `\c` */
     size_t len = strlen(buf);
     while (cap < (1u << 24)) {                       /* grow until length settles */
         size_t ncap = cap * 2;
         char* nb = realloc(buf, ncap);
-        if (!nb) { free(buf); return ray_error("wsfull", ".Q.s: out of memory"); }
+        if (!nb) { free(buf); return q_err(QE_WSFULL); }
         buf = nb;
         cap = ncap;
         buf[0] = '\0';
@@ -76,7 +77,7 @@ ray_t* q_dotq_s_fn(ray_t* x) {
         len = nlen;
     }
     char* out = malloc(len + 2);
-    if (!out) { free(buf); return ray_error("wsfull", ".Q.s: out of memory"); }
+    if (!out) { free(buf); return q_err(QE_WSFULL); }
     memcpy(out, buf, len);
     out[len] = '\n';                                 /* console line terminator */
     ray_t* r = ray_str(out, len + 1);
@@ -135,7 +136,7 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
         if (!cols[i] || RAY_IS_ERR(cols[i])) {
             for (int j = 0; j < 7; j++)
                 if (cols[j] && !RAY_IS_ERR(cols[j])) ray_release(cols[j]);
-            return ray_error("wsfull", ".Q.ops: out of memory");
+            return q_err(QE_WSFULL);
         }
     int ok = 1;
     for (int i = 0; i < n && ok; i++) {
@@ -163,7 +164,7 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
     if (!ok) {
         for (int j = 0; j < 7; j++)
             if (built[j] && !RAY_IS_ERR(built[j])) ray_release(built[j]);
-        return ray_error("wsfull", ".Q.ops: build failed");
+        return q_err(QE_WSFULL);
     }
     static const char* colnames[7] =
         { "name", "lexclass", "monadic", "dyadic", "deterministic", "sideeffect",

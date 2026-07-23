@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
 #include <rayforce.h>
+#include "qlang/q_err.h"
 #include "qlang/net/q_http_client.h"
 #include "qlang/net/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
@@ -408,17 +409,17 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
 {
     char urlbuf[1280]; size_t un;
     if (url_of(urlv, urlbuf, sizeof urlbuf, &un) != 0)
-        return ray_error("type", NULL);
+        return q_err(QE_TYPE);
     q_http_url_t u;
-    if (q_http_client_url_parse(urlbuf, un, &u) != 0) return ray_error("domain", NULL);
-    if (u.scheme == 1) return ray_error("nyi", NULL);        /* https: TLS tier */
+    if (q_http_client_url_parse(urlbuf, un, &u) != 0) return q_err(QE_DOMAIN);
+    if (u.scheme == 1) return q_err(QE_NYI);        /* https: TLS tier */
 
     /* Authorization header (optional) */
     char authhdr[512]; authhdr[0] = '\0';
     if (u.userinfo[0]) {
         char enc[400];
         if (b64(u.userinfo, strlen(u.userinfo), enc, sizeof enc) < 0)
-            return ray_error("limit", NULL);
+            return q_err(QE_LIMIT);
         snprintf(authhdr, sizeof authhdr, "Authorization: Basic %s\r\n", enc);
     }
     /* Host: include non-default port */
@@ -431,7 +432,7 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
     char req[2048];
     int rl;
     if (mime) {
-        if (!scan_ok(mime, mime_len)) return ray_error("domain", NULL);   /* injection guard */
+        if (!scan_ok(mime, mime_len)) return q_err(QE_DOMAIN);   /* injection guard */
         rl = snprintf(req, sizeof req,
             "POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
             "Accept-Encoding: gzip\r\n"
@@ -443,7 +444,7 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
             "Accept-Encoding: gzip\r\n%s\r\n",
             u.path, hosthdr, authhdr);
     }
-    if (rl < 0 || (size_t)rl >= sizeof req) return ray_error("limit", NULL);
+    if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
 
     const char* err = "conn";
     ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);
@@ -482,12 +483,12 @@ ray_t* q_dotq_hg_fn(ray_t* x) {
 }
 
 ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
-    if (nargs != 3) return ray_error("rank", NULL);
+    if (nargs != 3) return q_err(QE_RANK);
     ray_t* mimev = args[1];
     ray_t* bodyv = args[2];
     const char* mp; int64_t ml; const char* bp; int64_t bl;
-    if (!mimev || !q_text_bytes(mimev, &mp, &ml)) return ray_error("type", NULL);
-    if (!bodyv || !q_text_bytes(bodyv, &bp, &bl)) return ray_error("type", NULL);
+    if (!mimev || !q_text_bytes(mimev, &mp, &ml)) return q_err(QE_TYPE);
+    if (!bodyv || !q_text_bytes(bodyv, &bp, &bl)) return q_err(QE_TYPE);
     return http_do(args[0], mp, (size_t)ml, bp, (size_t)bl);
 }
 
@@ -503,21 +504,21 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
  * method-agnostic, inherited from #223) — an accepted limitation for this
  * escape hatch. */
 ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
-    if (ray_eval_get_restricted()) return ray_error("access", "restricted");
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
-    if (!request || !q_text_bytes(request, &reqp, &reqn)) return ray_error("type", NULL);
-    if (!hsym || hsym->type != -RAY_SYM) return ray_error("type", NULL);
+    if (!request || !q_text_bytes(request, &reqp, &reqn)) return q_err(QE_TYPE);
+    if (!hsym || hsym->type != -RAY_SYM) return q_err(QE_TYPE);
 
     /* hsym text (BORROWED interned string) -> ":http://host[:port]" */
     ray_t* nm = ray_sym_str(hsym->i64);
-    if (!nm) return ray_error("type", NULL);
+    if (!nm) return q_err(QE_TYPE);
     const char* s = ray_str_ptr(nm);
     size_t sn = ray_str_len(nm);
-    if (sn < 1 || s[0] != ':') return ray_error("domain", NULL);
+    if (sn < 1 || s[0] != ':') return q_err(QE_DOMAIN);
 
     q_http_url_t u;                       /* q_http_client_url_parse strips the ':' */
-    if (q_http_client_url_parse(s, sn, &u) != 0) return ray_error("domain", NULL);
-    if (u.scheme == 1) return ray_error("nyi", NULL);        /* https: TLS tier */
+    if (q_http_client_url_parse(s, sn, &u) != 0) return q_err(QE_DOMAIN);
+    if (u.scheme == 1) return q_err(QE_NYI);        /* https: TLS tier */
 
     const char* err = "conn";
     ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);

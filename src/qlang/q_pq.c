@@ -3,6 +3,7 @@
  * privileged binder — pq members live in the USER `.pq` namespace. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_pq.h"
+#include "qlang/q_err.h"
 #include "qlang/q_parse.h"     /* q_parse — the q eval pipeline */
 #include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */
 #include "qlang/pq_gen.h"      /* OPENQ_PQ_BOOTSTRAP — codegen'd from src/qlang/pq.q */
@@ -21,11 +22,11 @@
  * to an owned RAY_ERROR the caller returns as-is. Free the result with free(). */
 static char* pq_src_dup(ray_t* x, ray_t** err) {
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) { *err = ray_error("type", "pq: expects a string"); return NULL; }
-    if (!sp) { *err = ray_error("domain", "pq: bad source string"); return NULL; }
+    if (!q_text_bytes(x, &sp, &sn)) { *err = q_err(QE_TYPE); return NULL; }
+    if (!sp) { *err = q_err(QE_DOMAIN); return NULL; }
     size_t sl = (size_t)sn;
     char* src = malloc(sl + 1);
-    if (!src) { *err = ray_error("wsfull", "pq: out of memory"); return NULL; }
+    if (!src) { *err = q_err(QE_WSFULL); return NULL; }
     memcpy(src, sp, sl);
     src[sl] = '\0';
     return src;
