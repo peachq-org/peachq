@@ -34,13 +34,14 @@ ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const struct q_op* frow,
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
 
 /* `@` / `.` manifest-row entrypoints (q_ops.c): 2 args Apply/Index; 3 args
- * Trap on a callable head; noun-head amend forms are 'nyi until their wave. */
+ * Trap on a callable head, Amend ternary on a data head; 4 args Amend
+ * quaternary (machinery: ops/q_index.c; a sym-atom d name-lifts). */
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n);
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n);
 
-/* indexed-assign amend (ref/assign.md): write val at path ix[0..k) of cur —
- * cow the spine, kdb-strict leaf store.  cur/val borrowed; owned result. */
-ray_t* q_eval_apply_amend(ray_t* cur, ray_t** ix, int64_t k, ray_t* val);
+/* the ONE typed-vector element writer (result construction + amend leaves):
+ * 0 on success, -1 when the width isn't reachable (callers splice). */
+int q_eval_apply_store_elem(ray_t* vec, int64_t i, ray_t* e);
 
 /* THE truthiness home (owner ruling 2026-07-15): materialize -> exclude
  * float/real -> `"b"$` cast -> boolean ATOM; only 0 is false, nulls are true.

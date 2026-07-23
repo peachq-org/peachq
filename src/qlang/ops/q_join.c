@@ -5,6 +5,7 @@
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
+#define Q_OPS_ENV_GRANDFATHER /* grandfathered 2026-07-23: 2 env uses — q-index PR audit */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */

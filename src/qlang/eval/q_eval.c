@@ -18,8 +18,10 @@
 #include "qlang/q_parse_internal.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
+#define Q_OPS_ENV_GRANDFATHER /* legitimate owner: THE evaluator (name resolution/rebinding) */
 #include "qlang/q_registry_internal.h"   /* q_strict_i64 — the do-count judgment */
 #include "qlang/q_dotz.h"
+#include "qlang/ops/q_index.h"
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "ops/ops.h"
@@ -201,11 +203,12 @@ static ray_t* seq_eval(ray_t** e, int64_t n) {
 }
 
 /* `a[i;…]:v` / `a[i;…]op:v` (ref/assign.md Indexed assign): rhs first, then
- * indices RTL; an op-assign READS through the one apply/index primitive and
- * combines; the write goes through the apply module's amend; rebinding uses
- * the same locality rule as plain assignment.  Returns the assigned value. */
+ * indices RTL; the write IS the one amend home — resolve the name, amend the
+ * path (`a[i]op:v` ≡ .[a;i;op;v], so repeat-accumulation holds), rebind under
+ * the plain-assignment locality rule.  Plain form returns the assigned rhs;
+ * an op-assign values as the NEW a[i] (ref/assign.md: `1+a[2]+:5` is 8). */
 static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
-                             const q_op_t* oprow, ray_t* rhs) {
+                             ray_t* rhs) {
     ray_t** te = (ray_t**)ray_data(target);
     int64_t k = ray_len(target) - 1;
     if (k < 1 || k > EVAL_MAX_ARGS || !nameref(te[0]))
@@ -225,38 +228,22 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
     if (err) { ray_release(rv); return err; }
     ray_t* ret = NULL;
     ray_t* cur = name_value(te[0], NULL);
-    if (RAY_IS_ERR(cur)) { ret = cur; cur = NULL; }
-    ray_t* nv = NULL;
-    if (!ret && opv) {
-        ray_t* old = q_eval_apply_value(cur, idxv, k);
-        if (!RAY_IS_ERR(old)) old = store_mat(old);
-        if (RAY_IS_ERR(old)) ret = old;
-        else {
-            ray_t* av[2] = { old, rv };
-            nv = q_eval_apply(opv, oprow, av, 2);
-            ray_release(old);
-            if (!RAY_IS_ERR(nv)) nv = store_mat(nv);
-            if (RAY_IS_ERR(nv)) { ret = nv; nv = NULL; }
-        }
-    } else if (!ret) {
-        ray_retain(rv);
-        nv = rv;
-    }
+    if (RAY_IS_ERR(cur)) ret = cur;
     if (!ret) {
-        ray_t* amended = q_eval_apply_amend(cur, idxv, k, nv);
-        if (RAY_IS_ERR(amended)) { ray_release(nv); ret = amended; }
-        else {
+        ray_t* amended = q_index_amend(cur, idxv, k, opv, rv);
+        if (RAY_IS_ERR(amended)) { ray_release(cur); ret = amended; }
+        else {                                       /* cur consumed on success */
             int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
             int local = in_frame &&
                         (!is_global || ray_env_get_local(te[0]->i64) != NULL);
             ray_err_t e2 = local ? ray_env_set_local(te[0]->i64, amended)
                                  : ray_env_set(te[0]->i64, amended);
+            if (e2 != RAY_OK) ret = q_err(QE_ASSIGN);
+            else if (!opv) { ray_retain(rv); ret = rv; }
+            else ret = store_mat(q_eval_apply_value(amended, idxv, k));
             ray_release(amended);
-            if (e2 != RAY_OK) { ray_release(nv); ret = q_err(QE_ASSIGN); }
-            else ret = nv;                           /* the assigned value */
         }
     }
-    if (cur) ray_release(cur);
     release_args(idxv, k);
     ray_release(rv);
     return ret;
@@ -269,7 +256,7 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
 static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     if (!nameref(target)) {
         if (target && target->type == RAY_LIST && ray_len(target) >= 2)
-            return indexed_assign(is_global, target, NULL, NULL, rhs);
+            return indexed_assign(is_global, target, NULL, rhs);
         return q_err(QE_NYI);
     }
     ray_t* s = ray_sym_str(target->i64);
@@ -390,7 +377,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
         return NULL;                                 /* not an op: -> 'name path */
     if (!nameref(target)) {
         if (target && target->type == RAY_LIST && ray_len(target) >= 2)
-            return indexed_assign(0, target, opv, row, rhs);
+            return indexed_assign(0, target, opv, rhs);
         return q_err(QE_NYI);
     }
     ray_t* rv = q_eval(rhs);
