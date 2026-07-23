@@ -30,7 +30,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_deriv.h" /* q_deriv_kind_of — carrier guard in q_charv_out */
-#include "ops/ops.h"       /* ray_is_lazy — DAG guard in q_charv_out */             /* q_deriv_kind_of — carrier guard in q_charv_out */
+#include "ops/ops.h"       /* ray_is_lazy — DAG guard in q_charv_out */
 #include "lang/env.h"      /* ray_env_get; ray_fn_unary/binary/vary — building the fn-values */
 #include "lang/eval.h"     /* RAY_FN_ATOMIC/SPECIAL_FORM/Q_LOWER — attrs stamped on built values */
 #include "lang/internal.h" /* ray_error, ray_sym_str, ray_vec_set_null */
@@ -77,6 +77,14 @@ enum spec_kind { SK_UNARY, SK_BINARY, SK_VARY };   /* -> ray_fn_unary/binary/var
 
 static ray_t* sig_fn(ray_t* x);   /* body homed with the signal channel below */
 
+/* qSQL execution stub — the q_funsql.c executor was demolished (eval rebuild,
+ * spec 2026-07-23); select/exec/delete and ?[t;c;b;a]/![t;c;b;a] re-land as a
+ * logical plan + backend router in the qSQL wave. */
+static ray_t* qsql_nyi(ray_t** args, int64_t n) {
+    (void)args; (void)n;
+    return ray_error("nyi", NULL);
+}
+
 typedef struct { const char* wire; uint8_t kind; uint32_t flags; void* fn; } q_special_t;
 
 static const q_special_t SPECIALS[SPEC_N] = {
@@ -91,15 +99,14 @@ static const q_special_t SPECIALS[SPEC_N] = {
     [SPEC_list]          = { "list",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_list_build },
     [SPEC_table]         = { "table",           SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_table_build },
     [SPEC_keyed_table]   = { "keyed-table",     SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_keyed_table_build },
-    /* CONDEMNED: eval-unification stage 3 deletes with q_funsql.c */
-    [SPEC_select]        = { "q.select",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_select_exec },
-    [SPEC_delete]        = { "q.delete",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_delete_exec },
-    [SPEC_exec]          = { "q.exec",          SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_exec_exec },
+    /* qSQL executors: 'nyi stubs until the plan-router wave (spec 2026-07-23) */
+    [SPEC_select]        = { "q.select",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
+    [SPEC_delete]        = { "q.delete",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
+    [SPEC_exec]          = { "q.exec",          SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
     /* compose builder — a NORMAL vary (args are resolved function values) */
     [SPEC_compose]       = { "q.compose",       SK_VARY,   RAY_FN_NONE,         (void*)q_compose_fn },
-    /* CONDEMNED: eval-unification stage 3 deletes with q_funsql.c */
-    [SPEC_funsql_select] = { "q.funsql.select", SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_funsql_select },
-    [SPEC_funsql_bang]   = { "q.funsql.bang",   SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_funsql_bang },
+    [SPEC_funsql_select] = { "q.funsql.select", SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
+    [SPEC_funsql_bang]   = { "q.funsql.bang",   SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
     [SPEC_lambda]        = { "q.fn",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_deriv_fn_make },
     [SPEC_ret]           = { "q.ret",           SK_UNARY,  RAY_FN_NONE,         (void*)q_ret_fn },
     [SPEC_sig]           = { "q.sig",           SK_UNARY,  RAY_FN_NONE,         (void*)sig_fn },

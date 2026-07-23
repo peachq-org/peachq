@@ -325,8 +325,6 @@ static ray_t* cast_str(ray_t* x) {
     return ray_error("type", "$: cannot cast to char");
 }
 
-static ray_t* cast_leaf(ray_t* x, int64_t tag) { return q_dollar_cast((int8_t)tag, x); }
-
 /* Integer targets (I64/I32/I16): kdb ROUNDS floats (rint = IEEE nearest/
  * ties-even: `long$3.7 -> 4, "j"$2.5 -> 2, `int$6.6 -> 7 — KX ref pins) where
  * rayfall `as` truncates, so pre-round here; the rest is base's. */
@@ -500,10 +498,9 @@ static ray_t* cast_sym(ray_t* x) {
  * already agree.  The switch has NO `default:`, so -Wall (=> -Wswitch) +
  * -Werror refuse to build a target no arm states. */
 ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
-    /* Both precede the switch by ORDER, not preference: "c"$ packs a boxed list
-     * into ONE string, so it must beat the generic per-element distribution —
-     * but dict/table still descend (the walker below reaches this arm per value). */
-    if (tag == RAY_CHARV && !(x && (x->type == RAY_DICT || x->type == RAY_TABLE)))
+    /* Precedes the switch by ORDER, not preference: "c"$ packs a boxed list
+     * into ONE string, so it must beat the per-tag arms. */
+    if (tag == RAY_CHARV)
         return q_charv_out(cast_str(x));
     /* numeric cast of char text = code points (`int$"ABC" -> 65 66 67i;
      * `float$"AC" -> 65 67f, ref/log.md:101) — via the byte cast, then cast. */
@@ -516,9 +513,6 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
         ray_release(b);
         return r;
     }
-    if (x && (x->type == RAY_LIST || x->type == RAY_DICT || x->type == RAY_TABLE))
-        return q_str_walk(x, cast_leaf, tag, 1);   /* cast is atomic (ref/cast.md) */
-
     switch ((ray_type_e)tag) {
     case RAY_CHARV: break;                   /* hoisted above: packs boxed lists */
     case RAY_LIST: break;                    /* tag 0 is not a cast designator */
@@ -569,13 +563,13 @@ static ray_t* tok_leaf(ray_t* x, int64_t tag) {
     return q_tok((int8_t)tag, tp, tp ? (size_t)tn : 0);
 }
 ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
-    return q_str_walk(x, tok_leaf, tag, 1);
+    return tok_leaf(x, tag);
 }
 
 /* q `w$s` PAD (ref/pad.md): a LONG width w left-justifies the string s in a
  * field of |w| spaces (w<0 right-justifies); longer strings truncate to |w|.
- * String-atomic through the containers via q_str_walk; non-string leaves are
- * a 'type error.  Output mirrors the input's string form (charv vs -RAY_STR). */
+ * Non-string operands are a 'type error.  Output mirrors the input's string
+ * form (charv vs -RAY_STR). */
 static ray_t* pad_leaf(ray_t* x, int64_t w) {
     if (x->type == RAY_STR) {            /* string vector -> pad each element */
         int64_t n = ray_len(x);
@@ -610,7 +604,7 @@ static ray_t* pad_leaf(ray_t* x, int64_t w) {
     return r;
 }
 ray_t* q_dollar_pad(int64_t w, ray_t* x) {
-    return q_str_walk(x, pad_leaf, w, 0);
+    return pad_leaf(x, w);
 }
 
 /* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list) — openq has
@@ -728,7 +722,7 @@ static int64_t temporal_raw_vec(int8_t at, const void* base, int64_t i) {
                                  : (int64_t)((const int32_t*)base)[i];
 }
 
-/* Atomic component leaf (through lists/dicts/tables via q_str_walk); an
+/* Temporal component over an atom or simple vector; an
  * invalid (component, temporal-type) pair per the matrix is a 'type error
  * (the doc pins the valid set, not the invalid-pair result — honest refusal
  * beats a fabricated value). */
@@ -778,7 +772,7 @@ static ray_t* component_leaf(ray_t* x, int64_t comp) {
 static ray_t* component_extract(ray_t* t, ray_t* x) {
     int c = component_of_sym(t);
     if (c < 0) return NULL;
-    return q_str_walk(x, component_leaf, c, 1);
+    return component_leaf(x, c);
 }
 
 /* q `t$x` — the `$` verb (contract: q_dollar.h).  LEFT-operand dispatch:

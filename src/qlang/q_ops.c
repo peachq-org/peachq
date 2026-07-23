@@ -149,7 +149,7 @@ static const q_op_t Q_OPS[] = {
     { "_",     QLEX_GLYPH,     QR_FN1A("floor", q_floor_wrap), QR_FN2("drop", q_drop_wrap), NULL, 1, 0, "index" },
     /* `|` dyadic (max) is a deferred cell (atomic when it lands); family =
      * monadic reverse (L4 — spec §2). */
-    { "|",     QLEX_GLYPH,     QR_FN1("reverse", q_reverse_wrap), QR_NONE,        NULL, 1, 0, "index" },
+    { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_NONE,           NULL, 1, 0, "index" },
     /* `&` monadic is where (index — the `where` row, a §9 border); family =
      * dyadic Lesser/min (atomic, ref/lesser.md). */
     { "&",     QLEX_GLYPH,     QR_FN1("where", q_where_wrap),  QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic" },
@@ -360,7 +360,7 @@ static const q_op_t Q_OPS[] = {
     /* q `where x` — the L4 index-space generator (border ruling: index —
      * see FAMILY AUDIT); int-vector replicate + bool-mask forms at the body. */
     { "where",   QLEX_KW_PREFIX, QR_FN1("where", q_where_wrap), QR_NONE,          NULL, 1, 0, "index" },
-    { "reverse", QLEX_KW_PREFIX, QR_FN1("reverse", q_reverse_wrap), QR_NONE,      NULL, 1, 0, "index" },
+    { "reverse", QLEX_KW_PREFIX, QR_ENV("reverse"),            QR_NONE,           NULL, 1, 0, "index" },
     /* q `sum` over a boxed LIST sums the items (`sum(dates;times)` ->
      * timestamps, ref/file-text.md); rayfall sum is vector-only, so wrapper.
      * NB the wrapper is deliberately NOT RAY_FN_AGGR — the eval aggregate

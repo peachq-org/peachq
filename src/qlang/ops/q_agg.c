@@ -9,7 +9,6 @@
 #include "lang/eval.h"     /* ray_sum_fn, ray_mul_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_unary/binary, make_f64, is_collection, ray_error */
 #include "lang/format.h"   /* ray_type_name — error messages */
-#include "table/sym.h"     /* RAY_SYM_W64 */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
 #include <stdlib.h>        /* malloc, free */
 
@@ -159,42 +158,14 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y);   /* fwd — prd's nulls-as-1 fill */
  * an atom is returned unchanged; a numeric vector folds to its product with
  * NULLS TREATED AS 1s (`prd 2 3 0N 7` -> 42); a BOOL vector returns an int
  * (`prd 101b` -> 0i); a list of lists multiplies element-wise (`prd (1 2 3 4;
- * 2 3 5 7)` -> 2 6 15 28 — the fold over the registered atomic multiply);
- * a dict folds over its value list (`prd d` -> 40 105 18); a table returns a
- * per-column dict (`prd t` -> a| 630 …), a keyed table folds its VALUE table
- * (`prd k` — implicit-iteration section).  Non-numeric -> 'type. */
+ * 2 3 5 7)` -> 2 6 15 28 — the fold over the registered atomic multiply).
+ * Non-numeric -> 'type. */
 ray_t* q_prd_wrap(ray_t* x) {
     if (!x) return ray_error("type", "prd: nil");
     if (x->type == -RAY_STR || x->type == RAY_SYM)
         return ray_error("type", "prd: expects numeric values, got %s",
                          ray_type_name(x->type));
     if (ray_is_atom(x)) { ray_retain(x); return x; }   /* doc: atom unchanged */
-    if (q_table_is_keyed(x))                           /* prd k == prd value t */
-        return q_prd_wrap(ray_dict_vals(x));           /* vals borrowed — fine */
-    if (x->type == RAY_TABLE) {                        /* per-column dict */
-        int64_t nc = ray_table_ncols(x);
-        ray_t* k = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
-        if (!k || RAY_IS_ERR(k)) return k ? k : ray_error("oom", NULL);
-        ray_t* v = ray_list_new(nc > 0 ? nc : 1);
-        if (RAY_IS_ERR(v)) { ray_release(k); return v; }
-        for (int64_t c = 0; c < nc; c++) {
-            int64_t nm = ray_table_col_name(x, c);
-            k = ray_vec_append(k, &nm);
-            if (!k || RAY_IS_ERR(k)) { ray_release(v); return k ? k : ray_error("oom", NULL); }
-            ray_t* p = q_prd_wrap(ray_table_get_col_idx(x, c));
-            if (!p || RAY_IS_ERR(p)) { ray_release(k); ray_release(v);
-                                       return p ? p : ray_error("type", NULL); }
-            v = ray_list_append(v, p);                 /* retains */
-            ray_release(p);
-            if (RAY_IS_ERR(v)) { ray_release(k); return v; }
-        }
-        ray_t* cv = q_collapse_list(v);                /* owned */
-        ray_release(v);
-        if (!cv || RAY_IS_ERR(cv)) { ray_release(k); return cv; }
-        return ray_dict_new(k, cv);                    /* consumes both */
-    }
-    if (x->type == RAY_DICT)                           /* fold the value list */
-        return q_prd_wrap(ray_dict_vals(x));           /* vals borrowed — fine */
     if (x->type == RAY_LIST) {                         /* element-wise fold */
         int64_t n = ray_len(x);
         ray_t** e = (ray_t**)ray_data(x);
