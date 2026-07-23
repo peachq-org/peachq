@@ -9,7 +9,8 @@
 #include "qlang/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
-#include "lang/internal.h" /* atomic_map_unary, as_f64/as_i64, is_numeric, RAY_IS_TEMPORAL64, ray_error */
+#include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric, is_temporal, make_f64 */
+#include "qlang/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool */
 #include "table/sym.h"     /* ray_sym_str — q_is_null_sym */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
@@ -64,29 +65,14 @@ Q_LIBM_UNARY(q_atan_wrap, atan, "atan")
 /* q `signum x` — sign as INT (i32): null or negative -> -1i, zero -> 0i,
  * positive -> 1i (ref/signum.md).  Kdb ALWAYS returns int, whatever the input
  * width.  A float null (0n) tests as null -> -1i (kdb treats null as negative).
- * TEMPORAL atoms sign their underlying payload (ref/signum.md pins
- * `signum 1999.12.31` -> -1i — a pre-epoch date is negative), and every typed
- * null is null (-1i). */
+ * Every numeric OR temporal lane reads through as_f64 (which owns the payload
+ * per type, incl. the three temporal lanes) — the sign is exact for all of
+ * them, so the type-ladder collapses to one admission + one read
+ * (`signum 1999.12.31` -> -1i, a pre-epoch date is negative). */
 static ray_t* signum_atom(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x)) return ray_i32(-1);
-    if (x->type < 0 && RAY_IS_TEMPORAL32(-x->type)) {
-        int32_t v = x->i32;
-        return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
-    }
-    if (x->type < 0 && RAY_IS_TEMPORAL64(-x->type)) {
-        int64_t v = x->i64;
-        return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
-    }
-    if (x->type == -RAY_DATETIME) {                    /* f64-payload temporal */
-        double v = x->f64;
-        return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
-    }
-    if (is_numeric(x)) {
-        /* as_f64 handles BOOL + every int/float width and preserves the sign
-         * exactly (only magnitude precision is lost, irrelevant to sign), so
-         * one branch covers all numeric atoms — avoids as_i64's missing BOOL
-         * case (codex review). */
+    if (q_type_is_numeric_or_temporal(x)) {
         double v = as_f64(x);
         return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
     }
@@ -128,44 +114,29 @@ ray_t* q_ceiling_wrap(ray_t* x) {
     return q_err(QE_TYPE);
 }
 
-/* q `neg` / monadic `-` — negate.  kdb negates a date's underlying day count
- * PRESERVING the type (function_neg.qcmd: neg 2000.01.01 2012.01.01 ->
- * 2000.01.01 1988.01.01; 0Wd <-> -0Wd; 0Nd passes through), where base
- * ray_neg_fn rejects temporals — so the date arm lives here and every other
- * input delegates.  Registered ATOMIC: eval's atomic_map_unary maps vectors
- * element-wise and its typed-out path already carries RAY_DATE, so a date
- * vector comes back a date vector.  time/timestamp arms arrive with their
- * datatypes (deferred). */
+/* q `neg` / monadic `-` (ref/neg.md domain b g x h i j e f c s p m d z n u v t):
+ * negate any temporal type-PRESERVING and a bool promoting to INT (range b->i),
+ * by reading the lane, negating, and letting the ONE cast home rebuild the
+ * range type (neg 2000.01.01 2012.01.01 -> 2000.01.01 1988.01.01; 0Wd <-> -0Wd;
+ * neg 12:00:00.000 -> -12:00:00.000).  The whole temporal domain is admitted by
+ * ONE predicate — the six-arm gate is gone: TIME/TIMESTAMP were OUR deferral,
+ * not kdb's (ref/neg.md's range pins t->t, p->p).  ints/floats/nulls delegate
+ * to the base kernel (its INT_MIN->null width guards).  Registered ATOMIC, so a
+ * vector arrives element-wise.  Two lanes: f64-backed (DATETIME, bool) vs
+ * i64-backed (the int temporals); a temporal's only INT64_MIN is its null,
+ * caught first. */
 ray_t* q_neg_wrap(ray_t* x) {
-    if (x && x->type == -RAY_DATE) {
+    if (x && (is_temporal(x) || RAY_IS_TEMPORALF(-x->type) || q_type_is_bool(x))) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_date(-(int64_t)x->i32);
+        int8_t tag = -x->type;
+        int8_t out = q_type_is_bool(x) ? RAY_I32 : tag;
+        ray_t* p = (q_type_is_bool(x) || RAY_IS_TEMPORALF(tag)) ? ray_f64(-as_f64(x))
+                                                                : ray_i64(-q_type_as_i64(x));
+        if (RAY_IS_ERR(p)) return p;
+        ray_t* r = q_dollar_cast(out, p);
+        ray_release(p);
+        return r;
     }
-    if (x && x->type == -RAY_MINUTE) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_minute(-(int64_t)x->i32);
-    }
-    if (x && x->type == -RAY_SECOND) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_second(-(int64_t)x->i32);
-    }
-    if (x && x->type == -RAY_TIMESPAN) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_timespan(-x->i64);
-    }
-    if (x && x->type == -RAY_MONTH) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_month(-(int64_t)x->i32);
-    }
-    if (x && x->type == -RAY_DATETIME) {
-        if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-        return ray_datetime(-x->f64);
-    }
-    /* kdb `neg` promotes a boolean to INT and negates (`neg 1b` -> -1i);
-     * base ray_neg_fn rejects bools.  Registered ATOMIC, so a bool vector
-     * arrives here element-wise and the i32 atoms collapse to an i32 vector. */
-    if (x && x->type == -RAY_BOOL)
-        return ray_i32(-(int32_t)(x->b8 ? 1 : 0));
     return ray_neg_fn(x);
 }
 
