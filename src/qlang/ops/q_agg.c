@@ -6,9 +6,9 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
+#include "qlang/q_err.h"
 #include "lang/eval.h"     /* ray_sum_fn, ray_mul_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_unary/binary, make_f64, is_collection, ray_error */
-#include "lang/format.h"   /* ray_type_name — error messages */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
 #include <stdlib.h>        /* malloc, free */
 
@@ -60,7 +60,7 @@ static ray_t* runscan_str(ray_t* x, q_rs_kind k) {
     size_t n = ray_str_len(x);
     char stackb[256];
     char* b = (n <= sizeof stackb) ? stackb : malloc(n ? n : 1);
-    if (!b) return ray_error("wsfull", "maxs: out of memory");
+    if (!b) return q_err(QE_WSFULL);
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)p[i];
         if (i == 0) b[i] = (char)c;
@@ -73,17 +73,17 @@ static ray_t* runscan_str(ray_t* x, q_rs_kind k) {
 }
 
 static ray_t* runscan(ray_t* x, q_rs_kind k) {
-    if (!x) return ray_error("type", "running scan: nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_STR) {
         if (k==RS_MAXS || k==RS_MINS) return runscan_str(x, k);
-        return ray_error("type", "running scan: non-numeric");
+        return q_err(QE_TYPE);
     }
     if (ray_is_atom(x)) {                 /* atom returned unchanged (avgs->float) */
         if (k == RS_AVGS) { int nu; double v = q_velem_f(x, 0, &nu);
                             return nu ? ray_typed_null(-RAY_F64) : ray_f64(v); }
         ray_retain(x); return x;
     }
-    if (!q_vec_is_num(x)) return ray_error("type", "running scan: non-numeric list");
+    if (!q_vec_is_num(x)) return q_err(QE_TYPE);
     int64_t n = ray_len(x);
     if (k == RS_AVGS) {
         ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
@@ -130,9 +130,9 @@ ray_t* q_avgs_wrap(ray_t* x){ return runscan(x, RS_AVGS); }
 
 /* q `ratios x` — pairwise ratio: r[0]=x[0], r[i]=x[i] % x[i-1] (float). */
 ray_t* q_ratios_wrap(ray_t* x) {
-    if (!x) return ray_error("type", "ratios: nil");
+    if (!x) return q_err(QE_TYPE);
     if (ray_is_atom(x)) { ray_retain(x); return x; }
-    if (!q_vec_is_num(x)) return ray_error("type", "ratios: non-numeric list");
+    if (!q_vec_is_num(x)) return q_err(QE_TYPE);
     int64_t n = ray_len(x);
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
     double* o = (double*)ray_data(out);
@@ -161,10 +161,9 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y);   /* fwd — prd's nulls-as-1 fill */
  * 2 3 5 7)` -> 2 6 15 28 — the fold over the registered atomic multiply).
  * Non-numeric -> 'type. */
 ray_t* q_prd_wrap(ray_t* x) {
-    if (!x) return ray_error("type", "prd: nil");
+    if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_STR || x->type == RAY_SYM)
-        return ray_error("type", "prd: expects numeric values, got %s",
-                         ray_type_name(x->type));
+        return q_err(QE_TYPE);
     if (ray_is_atom(x)) { ray_retain(x); return x; }   /* doc: atom unchanged */
     if (x->type == RAY_LIST) {                         /* element-wise fold */
         int64_t n = ray_len(x);
@@ -176,26 +175,25 @@ ray_t* q_prd_wrap(ray_t* x) {
         ray_t* one = ray_i64(1);
         ray_t* acc = q_fill_wrap(one, e[0]);
         if (!acc || RAY_IS_ERR(acc)) { ray_release(one);
-                                       return acc ? acc : ray_error("type", NULL); }
+                                       return acc ? acc : q_err(QE_TYPE); }
         for (int64_t i = 1; i < n; i++) {
             ray_t* fi = q_fill_wrap(one, e[i]);
             if (!fi || RAY_IS_ERR(fi)) { ray_release(acc); ray_release(one);
-                                         return fi ? fi : ray_error("type", NULL); }
+                                         return fi ? fi : q_err(QE_TYPE); }
             /* ray_mul_fn is the ATOM kernel; atomic_map_binary is eval's
              * broadcast (vector*vector, atom*vector, nested) around it. */
             ray_t* nx = atomic_map_binary(ray_mul_fn, acc, fi);
             ray_release(fi);
             ray_release(acc);
             if (!nx || RAY_IS_ERR(nx)) { ray_release(one);
-                                         return nx ? nx : ray_error("type", NULL); }
+                                         return nx ? nx : q_err(QE_TYPE); }
             acc = nx;
         }
         ray_release(one);
         return acc;
     }
     if (!q_vec_is_num(x))
-        return ray_error("type", "prd: expects numeric values, got %s",
-                         ray_type_name(x->type));
+        return q_err(QE_TYPE);
     int64_t n = ray_len(x);
     if (q_vec_is_float(x)) {
         double acc = 1;
@@ -219,13 +217,13 @@ ray_t* q_prd_wrap(ray_t* x) {
  * composition's bool-multiply denominator measured 16x slower (2026-07-15).
  * wsum/cov/scov are q.q-hosted (their doc formulas ride engine kernels). */
 ray_t* q_wavg_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return ray_error("type", "wsum/wavg: nil operand");
+    if (!x || !y) return q_err(QE_TYPE);
     int xatom = ray_is_atom(x);
-    if (!q_vec_is_num(y) && !ray_is_atom(y)) return ray_error("type", "wsum/wavg: numeric args only");
-    if (!xatom && !q_vec_is_num(x)) return ray_error("type", "wsum/wavg: numeric args only");
+    if (!q_vec_is_num(y) && !ray_is_atom(y)) return q_err(QE_TYPE);
+    if (!xatom && !q_vec_is_num(x)) return q_err(QE_TYPE);
     int64_t n = ray_is_atom(y) ? (xatom ? 1 : ray_len(x)) : ray_len(y);
     if (!xatom && !ray_is_atom(y) && ray_len(x) != ray_len(y))
-        return ray_error("length", "wsum/wavg: length mismatch");
+        return q_err(QE_LENGTH);
     double sp = 0, sw = 0;
     for (int64_t i = 0; i < n; i++) {
         int xn, yn;
@@ -249,7 +247,7 @@ static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     if (err) return err;
     if (!x || !q_vec_is_num(x)) {
         if (x && ray_is_atom(x)) { ray_retain(x); return x; }
-        return ray_error("type", "m-window: x");
+        return q_err(QE_TYPE);
     }
     int64_t n = ray_len(x);
     int isf = q_vec_is_float(x);
@@ -298,11 +296,11 @@ ray_t* q_mdev_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_DEV); }
 /* q `a ema x` — exponential moving average: e[0]=x[0], e[i]=a*x[i]+(1-a)*e[i-1].
  * `a` is a float atom (the smoothing factor). */
 ray_t* q_ema_wrap(ray_t* a, ray_t* x) {
-    if (!a || !ray_is_atom(a)) return ray_error("type", "ema: smoothing factor must be an atom");
+    if (!a || !ray_is_atom(a)) return q_err(QE_TYPE);
     int an; double alpha = q_velem_f(a, 0, &an);
     if (!x || !q_vec_is_num(x)) {
         if (x && ray_is_atom(x)) { ray_retain(x); return x; }
-        return ray_error("type", "ema: numeric vector rhs");
+        return q_err(QE_TYPE);
     }
     int64_t n = ray_len(x);
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
@@ -326,14 +324,14 @@ ray_t* q_sum_wrap(ray_t* x) {
         /* fold q `+` over the items via call_fn2 (the ATOMIC dispatch —
          * ray_add_fn alone is the atom kernel; vectors broadcast in eval). */
         ray_t* plus = q_registry_lookup_name("+", 1, Q_DYADIC);   /* borrowed */
-        if (!plus) return ray_error("type", "sum: + unavailable");
+        if (!plus) return q_err(QE_TYPE);
         ray_t** e = (ray_t**)ray_data(x);
         ray_t* acc = e[0];
         ray_retain(acc);
         for (int64_t i = 1; i < ray_len(x); i++) {
             ray_t* nx = call_fn2(plus, acc, e[i]);
             ray_release(acc);
-            if (!nx || RAY_IS_ERR(nx)) return nx ? nx : ray_error("oom", NULL);
+            if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
             acc = nx;
         }
         return acc;
