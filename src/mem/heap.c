@@ -692,6 +692,15 @@ static void ray_release_owned_refs(ray_t* v) {
             if (LAMBDA_DBG(v)) ray_release(LAMBDA_DBG(v));
             return;
         }
+        if (v->type == RAY_QFN) {
+            /* q-eval carrier: len child slots, C-NULL = projection hole */
+            ray_t** slots = (ray_t**)ray_data(v);
+            for (int64_t i = 0; i < v->len; i++) {
+                if (slots[i] && !RAY_IS_ERR(slots[i]))
+                    ray_release(slots[i]);
+            }
+            return;
+        }
         if (v->type == RAY_LAZY) {
             ray_graph_t* g = RAY_LAZY_GRAPH(v);
             if (g) {
@@ -812,6 +821,14 @@ bool ray_retain_owned_refs(ray_t* v) {
             if (LAMBDA_DBG(v)) ray_retain(LAMBDA_DBG(v));
             return true;
         }
+        if (v->type == RAY_QFN) {
+            ray_t** slots = (ray_t**)ray_data(v);
+            for (int64_t i = 0; i < v->len; i++) {
+                if (slots[i] && !RAY_IS_ERR(slots[i]))
+                    ray_retain(slots[i]);
+            }
+            return true;
+        }
         /* Lazy handles own their graph uniquely — no retain on copy */
         if (v->type == RAY_LAZY) return true;
         /* HNSW handle owns its ray_hnsw_t uniquely.  Deep-clone the index
@@ -922,6 +939,11 @@ static void ray_detach_owned_refs(ray_t* v) {
             for (int i = 0; i < 4; i++) slots[i] = NULL;
             LAMBDA_NFO(v) = NULL;
             LAMBDA_DBG(v) = NULL;
+            return;
+        }
+        if (v->type == RAY_QFN) {
+            ray_t** slots = (ray_t**)ray_data(v);
+            for (int64_t i = 0; i < v->len; i++) slots[i] = NULL;
             return;
         }
         if (v->type == RAY_LAZY) {
