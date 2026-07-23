@@ -909,6 +909,84 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
     return r;
 }
 
+/* one indexing step at the current depth (vector-capable per structure) */
+static ray_t* step1(ray_t* cur, ray_t* idx) {
+    if (cur->type == RAY_DICT) return dict_lookup(cur, idx);
+    if (cur->type == RAY_TABLE) {
+        ray_t* r = q_table_at(cur, idx);
+        return r ? r : ray_at_fn(cur, idx);
+    }
+    if (!(ray_is_vec(cur) || cur->type == RAY_LIST))
+        return ray_error("type", NULL);
+    return gather(cur, idx);
+}
+
+static ray_t* at_depth(ray_t* v, ray_t** ix, int64_t k);
+
+/* null index = select ALL at this depth, continue each item with the rest */
+static ray_t* all_items(ray_t* v, ray_t** ix, int64_t k) {
+    int64_t len = ray_len(v);
+    ray_t* out = ray_list_new(len > 0 ? len : 1);
+    for (int64_t j = 0; j < len; j++) {
+        ray_t* e = q_registry_elem_at(v, j);
+        ray_t* r = (!e || RAY_IS_ERR(e)) ? e : store_mat(at_depth(e, ix, k));
+        if (r != e && e && !RAY_IS_ERR(e)) ray_release(e);
+        if (!r || RAY_IS_ERR(r)) {
+            ray_release(out);
+            return r ? r : ray_error("type", NULL);
+        }
+        out = ray_list_append(out, r);
+        ray_release(r);
+    }
+    return collapse(out);
+}
+
+/* Index at depth (ref/apply.md "Nulls in i" + the general case): a null/
+ * elided index selects all at its depth; a list index distributes
+ * (m[0 1;1] is (m[0;1];m[1;1])); an atom drills one level. */
+static ray_t* at_depth(ray_t* v, ray_t** ix, int64_t k) {
+    if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("type", NULL);
+    if (k <= 0) { ray_retain(v); return v; }
+    ray_t* i0 = ix[0];
+    if (!i0 || RAY_IS_NULL(i0)) {
+        if (v->type == RAY_DICT && !q_table_is_keyed(v))
+            return all_items(ray_dict_vals(v), ix + 1, k - 1);
+        if (v->type == RAY_DICT || v->type == RAY_TABLE)
+            return ray_error("nyi", NULL);
+        if (k == 1) { ray_retain(v); return v; }
+        return all_items(v, ix + 1, k - 1);
+    }
+    if (k == 1) return step1(v, i0);
+    if (is_coll(i0)) {
+        ray_t* tmp[APPLY_MAX_ARGS];
+        memcpy(tmp + 1, ix + 1, (size_t)(k - 1) * sizeof *tmp);
+        int64_t len = ray_len(i0);
+        ray_t* out = ray_list_new(len > 0 ? len : 1);
+        for (int64_t j = 0; j < len; j++) {
+            ray_t* e = q_registry_elem_at(i0, j);
+            if (!e || RAY_IS_ERR(e)) {
+                ray_release(out);
+                return e ? e : ray_error("type", NULL);
+            }
+            tmp[0] = e;
+            ray_t* r = store_mat(at_depth(v, tmp, k));
+            ray_release(e);
+            if (!r || RAY_IS_ERR(r)) {
+                ray_release(out);
+                return r ? r : ray_error("type", NULL);
+            }
+            out = ray_list_append(out, r);
+            ray_release(r);
+        }
+        return collapse(out);
+    }
+    ray_t* nx = step1(v, i0);
+    if (!nx || RAY_IS_ERR(nx)) return nx ? nx : ray_error("type", NULL);
+    ray_t* r = at_depth(nx, ix + 1, k - 1);
+    ray_release(nx);
+    return r;
+}
+
 static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (n < 1) return ray_error("rank", NULL);
     /* handle-as-verb (`h x`): console/file/fifo/socket dispatch lives wholly
@@ -928,30 +1006,93 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (!(v->type == RAY_DICT || v->type == RAY_TABLE ||
           ray_is_vec(v) || v->type == RAY_LIST))
         return ray_error("type", NULL);
-    ray_t* cur = v;
-    ray_retain(cur);
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* next;
-        if (!args[i] || RAY_IS_NULL(args[i])) {      /* `::` slice: later wave */
-            ray_release(cur);
-            return ray_error("nyi", NULL);
+    /* a list with elided items applies as a function of that rank — args
+     * SUBSTITUTE into the null slots and the result stays a general list
+     * (basics/application.md "Applying a list with elided items") */
+    if (v->type == RAY_LIST) {
+        ray_t** it = (ray_t**)ray_data(v);
+        int64_t len = ray_len(v), nulls = 0;
+        for (int64_t j = 0; j < len; j++)
+            if (it[j] && RAY_IS_NULL(it[j])) nulls++;
+        if (nulls > 0) {
+            if (n != nulls) return ray_error("rank", NULL);
+            ray_t* out = ray_list_new(len > 0 ? len : 1);
+            int64_t ai = 0;
+            for (int64_t j = 0; j < len; j++) {
+                ray_t* e = (it[j] && RAY_IS_NULL(it[j])) ? args[ai++] : it[j];
+                if (!e) e = RAY_NULL_OBJ;
+                ray_retain(e);
+                e = store_mat(e);
+                if (RAY_IS_ERR(e)) { ray_release(out); return e; }
+                out = ray_list_append(out, e);
+                ray_release(e);
+            }
+            return out;
         }
-        if (cur->type == RAY_DICT) {
-            next = dict_lookup(cur, args[i]);
-        } else if (cur->type == RAY_TABLE) {
-            /* integer atom/vector -> the universal row gather (ops/q_table.c);
-             * anything else (sym -> column, ...) takes the ray_at arms */
-            next = q_table_at(cur, args[i]);
-            if (!next) next = ray_at_fn(cur, args[i]);
-        } else {
-            next = gather(cur, args[i]);             /* vec/list/mid-path atom */
-        }
-        ray_release(cur);
-        if (!next || RAY_IS_ERR(next))
-            return next ? next : ray_error("type", NULL);
-        cur = next;
     }
-    return q_charv_out(cur);   /* boundary-out: charv, never physical STR */
+    if (n > APPLY_MAX_ARGS) return ray_error("rank", NULL);
+    ray_t* r = at_depth(v, args, n);
+    if (!r || RAY_IS_ERR(r)) return r ? r : ray_error("type", NULL);
+    return q_charv_out(r);     /* boundary-out: charv, never physical STR */
+}
+
+/* ===== indexed amend (ref/assign.md Indexed assign) ======================
+ * Cow the spine, write the path leaf: lists via ray_list_set, typed vectors
+ * via cow + the ONE element-store (kdb-strict: no silent narrowing).
+ * cur/val borrowed; owned result. */
+
+static ray_t* amend_at(ray_t* cur, ray_t** ix, int64_t k, ray_t* val) {
+    if (k <= 0 || !cur || RAY_IS_ERR(cur)) return ray_error("type", NULL);
+    ray_t* i0 = ix[0];
+    if (!i0 || RAY_IS_NULL(i0) || is_coll(i0) || is_container(i0))
+        return ray_error("nyi", NULL);   /* `::`/vector-path amend: later wave */
+    if (!int_atom(i0)) return ray_error("type", NULL);
+    int64_t idx = qe_elem_i64(i0);
+    if (cur->type == RAY_LIST) {
+        if (idx < 0 || idx >= ray_len(cur)) return ray_error("index", NULL);
+        ray_t* nv;
+        if (k == 1) {
+            ray_retain(val);
+            nv = store_mat(val);
+            if (RAY_IS_ERR(nv)) return nv;
+        } else {
+            nv = amend_at(((ray_t**)ray_data(cur))[idx], ix + 1, k - 1, val);
+            if (!nv || RAY_IS_ERR(nv)) return nv ? nv : ray_error("type", NULL);
+        }
+        ray_retain(cur);
+        ray_t* nl = ray_list_set(cur, idx, nv);      /* cows; consumes on ok */
+        ray_release(nv);
+        if (!nl || RAY_IS_ERR(nl)) {
+            ray_release(cur);                        /* cow-fail leaves cur */
+            return nl ? nl : ray_error("oom", NULL);
+        }
+        return nl;
+    }
+    if (ray_is_vec(cur) && cur->type != RAY_STR && cur->type != RAY_SYM) {
+        if (k != 1) return ray_error("type", NULL);
+        if (idx < 0 || idx >= ray_len(cur)) return ray_error("index", NULL);
+        if (!ray_is_atom(val)) return ray_error("type", NULL);
+        if (!RAY_ATOM_IS_NULL(val) && (int8_t)-val->type != cur->type)
+            return ray_error("type", NULL);
+        ray_retain(cur);
+        ray_t* nv = ray_cow(cur);
+        if (!nv || RAY_IS_ERR(nv)) {
+            ray_release(cur);                        /* cow-fail leaves cur */
+            return nv ? nv : ray_error("oom", NULL);
+        }
+        if (store_elem(nv, idx, val) != 0) {
+            ray_release(nv);
+            return ray_error("type", NULL);
+        }
+        if (!RAY_ATOM_IS_NULL(val)) ray_vec_set_null(nv, idx, false);
+        return nv;
+    }
+    return ray_error("nyi", NULL);       /* sym-vec/dict/table amend: later */
+}
+
+ray_t* q_eval_apply_amend(ray_t* cur, ray_t** ix, int64_t k, ray_t* val) {
+    if (k < 1 || k > APPLY_MAX_ARGS) return ray_error("rank", NULL);
+    return amend_at(cur, ix, k, val);
 }
 
 /* ===== q_eval_apply: the single entry ==================================== */
@@ -1023,6 +1164,11 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
         if (rank < 0) rank = n;   /* vary/deriv: project at the called rank */
         return proj_new(fv, row, args, n, rank);
     }
+    /* f[] on a niladic lambda: the lone `::` argument means "no arguments"
+     * (learn/views.md `{[];}[]` evaluates) */
+    if (rank == 0 && n == 1 && args[0] && RAY_IS_NULL(args[0]) &&
+        kind == Q_EVAL_CAR_LAMBDA)
+        return lambda_call(fv, args, 0);
     if (rank >= 0 && n < rank) return proj_new(fv, row, args, n, rank);
     if (rank >= 0 && n > rank) return ray_error("rank", NULL);
 
@@ -1110,16 +1256,45 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
     return noun_index(head, args, n);
 }
 
-/* `f@x` — Apply At / Index At; trap/amend forms are rebuild-wave 'nyi. */
+/* Trap (ref/apply.md): on error, a callable/null catch applies to the error
+ * text, a noun catch is returned as the value.  Consumes r; e borrowed. */
+static ray_t* trap_catch(ray_t* r, ray_t* e) {
+    if (!r || !RAY_IS_ERR(r)) return r;
+    if (!q_eval_apply_is_fn(e) && !RAY_IS_NULL(e)) {
+        ray_error_free(r);
+        ray_retain(e);
+        return e;
+    }
+    const char* code = ray_err_code(r);
+    ray_t* msg = ray_charv(code ? code : "",
+                           code ? (int64_t)strlen(code) : 0);
+    ray_error_free(r);
+    if (!msg || RAY_IS_ERR(msg)) return msg ? msg : ray_error("oom", NULL);
+    ray_t* c = store_mat(q_eval_apply(e, NULL, &msg, 1));
+    ray_release(msg);
+    return c;
+}
+
+/* `f@x` — Apply At / Index At; `@[f;x;e]` traps a CALLABLE f (noun-first
+ * amend forms stay 'nyi — later wave). */
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
     if (n == 2) return store_mat(q_eval_apply_value(args[0], &args[1], 1));
+    if (n == 3 && q_eval_apply_is_fn(args[0])) {
+        ray_t* r = store_mat(q_eval_apply_value(args[0], &args[1], 1));
+        return trap_catch(r, args[2]);
+    }
     return ray_error("nyi", NULL);
 }
 
 /* `v . vx` — the rhs is the ARGUMENT LIST; a callable spread-applies over
- * its items, a noun depth-indexes (m . 1 2 is m[1;2]). */
+ * its items, a noun depth-indexes (m . 1 2 is m[1;2]).  `.[f;vx;e]` traps
+ * a callable f; noun-first amend forms stay 'nyi. */
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
-    if (n != 2) return ray_error("nyi", NULL);       /* trap/amend: later wave */
+    if (n == 3 && q_eval_apply_is_fn(args[0])) {
+        ray_t* r = q_eval_dot_wrap(args, 2);
+        return trap_catch(r, args[2]);
+    }
+    if (n != 2) return ray_error("nyi", NULL);       /* amend: later wave */
     ray_t* a = args[1];
     if (!a || (!ray_is_vec(a) && a->type != RAY_LIST))
         return ray_error("type", NULL);
@@ -1195,10 +1370,30 @@ int q_eval_apply_carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
         snprintf(buf, bufsz, "%s %s", ub, gb);
         return 1;
     }
-    char fb[128] = "";
+    /* projection: verbatim head + the bound-argument echo, holes empty —
+     * {x+y}[1;], +[;2] (kdb shape, owner ruling 2026-07-23) */
+    char fb[256] = "";
     const q_op_t* frow = row_unbox(c[1]);
     if (frow) snprintf(fb, sizeof fb, "%s", frow->name);
     else if (c[0]) q_fmt(c[0], fb, sizeof fb);
-    snprintf(buf, bufsz, "%s[...]", fb);
+    size_t off = 0;
+    int64_t slots = ray_len(v) - 2;
+    #define PUT(...) do { \
+        if (off < bufsz) { \
+            int w = snprintf(buf + off, bufsz - off, __VA_ARGS__); \
+            off += (w > 0) ? (size_t)w : 0; \
+        } \
+    } while (0)
+    PUT("%s[", fb);
+    for (int64_t i = 0; i < slots; i++) {
+        if (i) PUT(";");
+        if (c[2 + i]) {
+            char ab[128] = "";
+            q_fmt(c[2 + i], ab, sizeof ab);
+            PUT("%s", ab);
+        }
+    }
+    PUT("]");
+    #undef PUT
     return 1;
 }
