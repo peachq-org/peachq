@@ -23,7 +23,7 @@
 #include "qlang/q_calendar.h" /* q_calendar_ts_compose — timestamp vector literals */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
-#include "qlang/q_deriv.h"    /* q_proj_new — 104h derived-verb carriers */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_carrier_kind — fn-value probe */
 #include "lang/env.h"        /* ray_fn_name; ray_sym_is_ipc_hook — IPC hook slots */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
@@ -1396,7 +1396,7 @@ static P parse_base(Parser *p) {
          * src is the VERBATIM `{...}` span (kdb echoes it byte-for-byte);
          * params is a RAY_SYM vector — explicit signature, or x/y/z inferred
          * by highest implicit used (min rank 1), or empty for `{[] ...}`.
-         * q_lower rewrites the marker head onto the registry `.q.fn` value. */
+         * q_eval builds the RAY_QFN lambda carrier from this shape. */
         int lb_start = tk->start;
         adv(p);
         ray_t *params = NULL;              /* NULL until signed / inferred */
@@ -1689,8 +1689,8 @@ static P parse_e(Parser *p, QCtx ctx) {
     /* Lambda-body early return `:expr` (basics/function-notation.md): a bare
      * `:` at expression START inside a lambda body.  Infix assignment never
      * reaches here with a leading `:` (its lhs noun is consumed first), and
-     * `::` is len 2.  Emits (.q.ret expr); q_lower swaps the head for the
-     * registry q.ret value. */
+     * `::` is len 2.  Emits (.q.ret expr) — early return under q_eval is a
+     * rebuild-wave gap (the node evals to a 'name red today). */
     if (p->lambda_depth > 0) {
         Token *rt = cur(p);
         if (rt->kind == T_VERB && rt->len == 1 && p->src[rt->start] == ':') {
@@ -1806,16 +1806,13 @@ static ray_t *qsql_enlist(ray_t *v) {
 }
 
 /* A callable VALUE usable as a select/exec/update phrase head: a builtin verb
- * (RAY_UNARY/BINARY/VARY), a bare RAY_LAMBDA, OR a q lambda / derived-verb
- * CARRIER (a RAY_LIST whose q_deriv_kind_of is set — a named q `{…}` binds in
- * the env as such a carrier, NOT a bare RAY_LAMBDA).  Mirrors funsql_is_fn in
- * q_registry.c so the string and functional qSQL forms agree on what a phrase
- * head is: `select f price` embeds the `f` value rather than demoting it to a
- * column symbol (qsql-status roadmap #2). */
+ * (RAY_UNARY/BINARY/VARY), a bare RAY_LAMBDA, or a RAY_QFN carrier (a named
+ * q `{…}` binds in the env as one) — so `select f price` embeds the `f`
+ * value rather than demoting it to a column symbol. */
 static inline int qsql_is_fn_value(const ray_t *v) {
     if (!v) return 0;
     if (v->type >= RAY_LAMBDA && v->type <= RAY_VARY) return 1;
-    if (v->type == RAY_LIST && q_deriv_kind_of(v) != Q_DERIV_NONE) return 1;
+    if (q_eval_apply_carrier_kind(v)) return 1;
     return 0;
 }
 
@@ -1912,7 +1909,7 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
  * nodes, bare name-refs and constraint exprs — NOT the functional slot shapes
  * the query engine + lowering consume.  qsql_normalize_phrases converts a raw
  * phrase list into EXACTLY the slot the clones produce, so `parse` display,
- * q_lower and the funsql engine are all unchanged.
+ * display and the downstream consumers are all unchanged.
  *
  * The one representational nuance: the real parser embeds a fn-VALUE at every
  * infix GLYPH head (`>` in `price>10`), whereas the clone left that head a bare
@@ -2297,4 +2294,37 @@ ray_t *q_parse(const char *src) {
      * ray_eval() self-evaluates it, rather than every caller having to treat a
      * bare C NULL specially. */
     return prog ? prog : RAY_NULL_OBJ;
+}
+
+/* q_parse_is_assign — see q_parse.h.  Head is the name-ref `:`/`::` (or the
+ * modified-assign `<op>:`) with a name/indexed-name target; a `;` statement
+ * sequence asks its last statement. */
+int q_parse_is_assign(const ray_t *cast) {
+    ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
+    if (!ast || ast->type != RAY_LIST || ray_len(ast) < 1) return 0;
+    ray_t **e = (ray_t **)ray_data(ast);
+    ray_t *h = e[0];
+    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t *s = ray_sym_str(h->i64);
+    if (!s) return 0;
+    const char *nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    int is_semi  = (l == 1 && nm[0] == ';');
+    int is_colon = (l == 1 && nm[0] == ':') ||
+                   (l == 2 && nm[0] == ':' && nm[1] == ':');
+    int is_modasg = (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
+    ray_release(s);
+    if (is_semi) {
+        int64_t n = ray_len(ast);
+        return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
+    }
+    if (!(is_colon || is_modasg) || ray_len(ast) != 3) return 0;
+    ray_t *t = e[1];
+    if (t && t->type == -RAY_SYM && !(t->attrs & Q_ATTR_QUOTED)) return 1;
+    /* indexed assignment `name[i;…]:v` is silent too — kdb console */
+    if (t && t->type == RAY_LIST && ray_len(t) >= 2) {
+        ray_t *th = ((ray_t **)ray_data(t))[0];
+        return th && th->type == -RAY_SYM && !(th->attrs & Q_ATTR_QUOTED);
+    }
+    return 0;
 }

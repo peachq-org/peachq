@@ -11,25 +11,22 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_builtins.h"
 #include "qlang/q_registry.h"
-#include "qlang/q_deriv.h"    /* q_deriv_reset_markers — per-runtime sym-id cache */
-#include "qlang/q_dotz.h"     /* q_dotz_init/resolve/destroy — `.z.*` resolver */
-#include "qlang/q_ns.h"       /* q_ns_reset — `\d` context state */
-#include "qlang/q_sys.h"      /* q_sys_seed_init — `\S` constant-seed contract */
+#include "qlang/q_dotz.h"     /* q_dotz_init/destroy — `.z.*` resolver */
+#include "qlang/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
-#include "qlang/q_parse.h"    /* q_parse, q_lower — embedded-bootstrap loader */
-#include "qlang/eval/q_eval.h" /* q_eval_fresh_enabled — hook uninstall */
+#include "qlang/q_parse.h"    /* q_parse — embedded-bootstrap loader */
+#include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
 #include "qlang/h_gen.h"      /* OPENQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
 #include "qlang/j_gen.h"      /* OPENQ_J_BOOTSTRAP — codegen'd from src/qlang/j.q (`.j` JSON ns) */
 #include "lang/env.h"         /* ray_env_bind — `.q.*` keyword bindings */
-#include "lang/eval.h"        /* ray_eval_set_apply_hook / _name_hook / ray_eval */
+#include "lang/eval.h"        /* ray_eval_set_remote_* teardown */
 #include <rayforce.h>
 #include <stdio.h>            /* fprintf, stderr — bootstrap diagnostics */
 #include <string.h>           /* memcpy, strchr, strlen, strncmp — line split */
 
-/* One q line -> owned value; NULL after a stderr report (never fatal).
- * Refcounts mirror q_repl.c run_one_line (q_lower consumes its input AST). */
+/* One q line -> owned value; NULL after a stderr report (never fatal). */
 static ray_t* bootstrap_eval(const char* src) {
     ray_t* ast = q_parse(src);
     if (RAY_IS_ERR(ast)) {
@@ -37,13 +34,7 @@ static ray_t* bootstrap_eval(const char* src) {
         ray_error_free(ast);
         return NULL;
     }
-    ast = q_lower(ast);
-    if (RAY_IS_ERR(ast)) {
-        fprintf(stderr, "q bootstrap: lower error: %s\n", src);
-        ray_release(ast);
-        return NULL;
-    }
-    ray_t* r = ray_eval(ast);
+    ray_t* r = q_eval(ast);
     ray_release(ast);
     if (RAY_IS_ERR(r)) {
         fprintf(stderr, "q bootstrap: eval error: %s\n", src);
@@ -112,35 +103,6 @@ static void bootstrap_load_src(const char* p) {
     }
 }
 
-/* Name-load resolver: `.z.*` computed names first, then — stage-1 general
- * eval (2026-07-11) — a REGISTRY fallback so a bare q keyword verb stands as
- * a noun exactly as kdb's does (`sums` alone is the unary value; `(sums;`x)`
- * functional-form literals need the element to evaluate).  Fires only on an
- * env MISS, so every env-bound name keeps its meaning; registry handouts are
- * BORROWED — retain before returning the owned ref the hook contract wants. */
-static ray_t* name_resolve(int64_t sym_id) {
-    ray_t* v = q_dotz_resolve(sym_id);
-    if (v) return v;
-    ray_t* name = ray_sym_str(sym_id);   /* borrowed arena string */
-    if (!name) return NULL;
-    const char* p = ray_str_ptr(name);
-    size_t      n = ray_str_len(name);
-    /* KEYWORD verbs only: kdb lets `sums` stand bare as a noun, but a bare
-     * GLYPH (`#`, `,`, `+`) is k-syntax and must stay an error (`',`) — see
-     * the q-verb-forms rule.  Glyph values are reachable as `(#)` etc. */
-    if (n == 0 || !((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')))
-        return NULL;
-    ray_t* hit = q_registry_lookup_name(p, n, Q_MONADIC);
-    if (!hit) hit = q_registry_lookup_name(p, n, Q_DYADIC);
-    if (!hit) {
-        /* unbound bare name -> `.q.<name>` (kdb: keywords ARE .q entries) */
-        hit = q_ns_dotq_get(p, n);               /* borrowed or NULL */
-        if (!hit) return NULL;
-    }
-    ray_retain(hit);
-    return hit;
-}
-
 ray_runtime_t* q_runtime_create(int argc, char** argv) {
     /* q owns dotted namespaces for user code, and real q has no .sys/.os/.ipc:
      * suppress the rayfall system-plumbing namespaces for this runtime, then
@@ -150,15 +112,15 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
     ray_runtime_t* rt = ray_runtime_create(argc, argv);
     ray_set_load_rayfall_ns(true);
     if (rt) {
-        q_ns_reset();          /* fresh runtime starts in the root context */
+        q_sys_ctx_reset();     /* fresh runtime starts in the root context */
         q_sys_seed_init();     /* kdb constant-seed-at-startup contract (\S) */
         q_sys_cfg_init();      /* \P/\c/\C/\g/\o/\W/\e/\s defaults per runtime */
         q_handles_init();      /* fd-keyed handle registry (file/fifo/socket open-time) */
         q_builtins_register();
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
-         * process-constant argv values once and install the name-load hook. */
+         * process-constant argv values once; q_eval resolves them directly
+         * (no base name hook — one pipeline, cutover 2026-07-23). */
         q_dotz_init(argc, argv);
-        ray_eval_set_name_hook(name_resolve);
         bootstrap_load_src(OPENQ_BOOTSTRAP);  /* embedded .q stdlib, post-registry (rule 6) */
         bootstrap_load_src(OPENQ_H_BOOTSTRAP); /* `.h` constants (h.q), always-on beside dotq */
         bootstrap_load_src(OPENQ_J_BOOTSTRAP); /* `.j` JSON ns (j.q), delegates to -29!/-31! bangs */
@@ -166,28 +128,17 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
          * definitions now that the bootstrap has bound them. */
         if (q_registry_bind_qsrc() != RAY_OK)
             fprintf(stderr, "q bootstrap: qsrc registry bind failed\n");
-        /* Q_EVAL=fresh: the bootstrap above ran on the legacy pipeline and
-         * needed the hooks; the fresh evaluator never calls ray_eval, and any
-         * kernel that strays into base plumbing must see PLAIN rayfall — no
-         * silent q dispatch (eval-rebuild finding 3).  Legacy keeps them. */
-        if (q_eval_fresh_enabled()) {
-            ray_eval_set_apply_hook(NULL);
-            ray_eval_set_name_hook(NULL);
-        }
     }
     return rt;
 }
 
 void q_runtime_destroy(ray_runtime_t* rt) {
-    ray_eval_set_apply_hook(NULL);   /* detach the q dispatcher first */
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
-    ray_eval_set_name_hook(NULL);    /* detach `.z.*` before its values die */
     q_handles_destroy();       /* drop handle records (open_args refs) before the env */
     q_dotz_destroy();          /* free the `.z.*` argv snapshots */
     q_registry_destroy();      /* free verb snapshots before the env goes away */
-    q_deriv_reset_markers();   /* marker sym-ids die with this runtime's table */
-    q_ns_reset();              /* drop the `\d` context with its runtime */
+    q_sys_ctx_reset();         /* drop the `\d` context with its runtime */
     q_console_pipe_disable();          /* reset the `\nonlegacy` display global — the
                                 * process-wide pipe mode never leaks into the next
                                 * runtime (fresh-per-file doctest, wasm re-init) */

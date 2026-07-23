@@ -6,11 +6,10 @@
  * registration site — so `parse` overrides rayfall's lisp parse in the env. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
-#include "qlang/q_apply.h"    /* q_apply_noun — the noun-head dispatcher */
-#include "qlang/q_deriv.h"    /* carrier inspectors — fn-value introspection */
+#include "qlang/eval/q_eval.h" /* q_eval / q_eval_apply_value — THE eval pipeline */
 #include "qlang/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
-#include "qlang/q_registry_internal.h" /* q_registry_init + q_deriv_is_fn_value (shared; brings q_registry.h) */
+#include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
@@ -118,14 +117,16 @@ static ray_unary_fn g_base_count = NULL;
  * full q type map is cast/type.qcmd territory. */
 static ray_t* type_fn(ray_t* x) {
     if (x) {
-        /* Function-VALUE carriers first: they are RAY_LISTs under the hood, so
-         * the raw-tag path below would wrongly report them as 0h (general
-         * list). */
-        switch (q_deriv_kind_of(x)) {
-        case Q_DERIV_LAMBDA:  return ray_i16(100);
-        case Q_DERIV_PROJ:    return ray_i16(104);
-        case Q_DERIV_MONAD:   return ray_i16(102);
-        case Q_DERIV_COMPOSE: return ray_i16(105);
+        /* RAY_QFN carriers first: kdb 100h lambda, 104h projection, 106+adv
+         * derived verb (f' 106h … f\: 111h — ref/datatypes.md). */
+        switch (q_eval_apply_carrier_kind(x)) {
+        case Q_EVAL_CAR_LAMBDA: return ray_i16(100);
+        case Q_EVAL_CAR_PROJ:   return ray_i16(104);
+        case Q_EVAL_CAR_DERIV: {
+            ray_t** c = (ray_t**)ray_data(x);
+            int adv = c[2] ? (int)c[2]->i64 : 0;
+            return ray_i16((int16_t)(106 + (adv >= 0 && adv < 6 ? adv : 0)));
+        }
         default: break;
         }
         if (x->type == RAY_LAMBDA) return ray_i16(100);
@@ -215,10 +216,10 @@ char q_ty_char(ray_t* x) {
 }
 
 
-/* q `count` of any function value is 1 (kdb: functions are atoms) — the
- * carrier is a RAY_LIST, so the base count would leak its slot count. */
+/* q `count` of any function value is 1 (kdb: functions are atoms) — a
+ * carrier's raw len is its slot count, which must never leak. */
 ray_t* q_count_fn(ray_t* x) {
-    if (q_deriv_is_fn_value(x)) return ray_i64(1);
+    if (x && q_eval_apply_is_fn(x)) return ray_i64(1);
     return g_base_count ? g_base_count(x)
                         : ray_error("type", "count: base verb missing");
 }
@@ -263,13 +264,13 @@ static void bind_value(const char* name, ray_t* val) {
     ray_release(val);
 }
 
-/* Remote-source string eval (IPC request payloads, journal replay): the q
- * pipeline, mirroring q_repl.c run_one_line — q_parse -> q_lower ->
- * ray_eval -> materialize.  Buffered q console output (`show`, 0N!) is
- * drained to the SERVER's stdout after each eval (kdb prints show output
- * on the server console) and reset so it can't bleed into later requests.
- * Returns an OWNED value; parse/lower/eval errors return as owned errors
- * (the IPC layer serializes them as -128h responses). */
+/* Remote-source string eval (IPC request payloads, journal replay): the ONE
+ * q pipeline, mirroring q_repl.c run_one_line — q_parse -> q_eval ->
+ * materialize.  Buffered q console output (`show`, 0N!) is drained to the
+ * SERVER's stdout after each eval (kdb prints show output on the server
+ * console) and reset so it can't bleed into later requests.  Returns an
+ * OWNED value; parse/eval errors return as owned errors (the IPC layer
+ * serializes them as -128h responses). */
 static ray_t* remote_eval_str(const char* src, size_t len) {
     /* A leading `\` is a system command, not q source: kdb runs a solo `\l`/`\p`
      * received on the wire.  `system"X"` is exactly `\X`, so strip the `\` and
@@ -294,13 +295,10 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     ray_sys_free(tmp);
     if (RAY_IS_ERR(ast)) return ast;
     /* A trailing assignment answers with the generic null, not the assigned
-     * value (basics/ipc.md: `h"fn:{2+x}"` displays nothing).  Checked on the
-     * PRE-lower shape — q_lower rewrites assignment into a `set` application —
-     * which is why q_repl.c/qdoc.c ask here too. */
-    const int is_assign = q_lower_ast_is_assign(ast);
-    ast = q_lower(ast);
-    if (RAY_IS_ERR(ast)) return ast;
-    ray_t* r = ray_eval(ast);
+     * value (basics/ipc.md: `h"fn:{2+x}"` displays nothing) — the same
+     * q_parse_is_assign judgment q_repl.c/qdoc.c make. */
+    const int is_assign = q_parse_is_assign(ast);
+    ray_t* r = q_eval(ast);
     ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
@@ -316,28 +314,83 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
 }
 
 /* Remote (func;args) value-apply (IPC request payloads): the kdb value/apply
- * wire shape.  Reuse the single-home q `value` (q_value_wrap), which already
- * does a SINGLE list-apply — resolving a symbol head (`sum`), a string-source
- * head (`"+"`), a value head, or a 100h lambda carrier (`{x*2}`) — and applies
- * it to the already-evaluated tail args, NEVER re-evaluating them (ADR-0004:
- * value, not eval).  `list` is BORROWED (the ipc layer releases it); q_value_wrap
- * does not consume it and returns an OWNED value.  Restricted mode needs no
- * re-assert here: ipc_dispatch sets ray_eval_get_restricted() around the whole
- * dispatch, and any restricted primitive reached by the apply (`hopen`,
- * `system`…) self-checks it — the exact contract the string hook relies on. */
+ * wire shape — a SINGLE list-apply of the head to the already-evaluated tail
+ * args, NEVER re-evaluating them (ADR-0004: value, not eval), through the ONE
+ * public apply entry (q_eval_apply_value).  A sym/string head resolves/parses
+ * to its value first.  `list` is BORROWED (the ipc layer releases it); the
+ * result is OWNED.  Restricted mode needs no re-assert here: ipc_dispatch
+ * sets it around the whole dispatch, and any restricted primitive reached by
+ * the apply self-checks it. */
+/* `value`/`get`/`-6!` — 'nyi stub (rule 3: the manifest row keeps its
+ * spelling; the q_value.c single-apply home retired at the cutover). */
+ray_t* q_value_nyi_fn(ray_t* x) {
+    (void)x;
+    return ray_error("nyi", NULL);
+}
+
+/* keyword-HOF recipe stub (q_registry_internal.h note) */
+ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x) {
+    (void)f; (void)x;
+    return ray_error("nyi", NULL);
+}
+
 static ray_t* remote_apply(ray_t* list) {
-    return q_value_wrap(list);
+    if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
+        ray_len(list) < 1)
+        return ray_error("type", NULL);
+    int64_t n = ray_len(list);
+    ray_t* head = q_registry_elem_at(list, 0);            /* owned */
+    if (!head || RAY_IS_ERR(head)) return head ? head : ray_error("type", NULL);
+    /* string-source head ("+", "{x*2}"): parse + eval to its value */
+    if (head->type == -RAY_STR || head->type == RAY_CHARV) {
+        const char* sp; int64_t sn;
+        if (q_text_bytes(head, &sp, &sn)) {
+            char* z = malloc((size_t)sn + 1);
+            if (!z) { ray_release(head); return ray_error("wsfull", NULL); }
+            memcpy(z, sp, (size_t)sn);
+            z[sn] = '\0';
+            ray_t* ast = q_parse(z);
+            free(z);
+            ray_release(head);
+            if (RAY_IS_ERR(ast)) return ast;
+            head = q_eval(ast);
+            ray_release(ast);
+            if (RAY_IS_ERR(head)) return head;
+        }
+    } else if (head->type == -RAY_SYM) {                  /* `sum -> its value */
+        ray_t* v = ray_env_resolve(head->i64);
+        if (v) { ray_release(head); head = v; }
+    }
+    ray_t* argv[8];
+    int64_t argc = n - 1;
+    if (argc > 8) { ray_release(head); return ray_error("rank", NULL); }
+    for (int64_t i = 0; i < argc; i++) {
+        argv[i] = q_registry_elem_at(list, i + 1);        /* owned */
+        if (!argv[i] || RAY_IS_ERR(argv[i])) {
+            ray_t* err = argv[i];
+            for (int64_t j = 0; j < i; j++) ray_release(argv[j]);
+            ray_release(head);
+            return err ? err : ray_error("type", NULL);
+        }
+    }
+    ray_t* r;
+    if (argc == 0) {                                      /* (f) -> f[] = f@:: */
+        ray_t* nil = RAY_NULL_OBJ;
+        r = q_eval_apply_value(head, &nil, 1);
+    } else {
+        r = q_eval_apply_value(head, argv, argc);
+    }
+    if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
+    for (int64_t j = 0; j < argc; j++) ray_release(argv[j]);
+    ray_release(head);
+    return r;
 }
 
 
 void q_builtins_register(void) {
-    /* Noun-head application (indexing, dict/table lookup, 104h carriers):
-     * register the q dispatcher into eval's apply hook.  q_runtime_destroy
-     * clears it before the runtime dies. */
-    ray_eval_set_apply_hook(q_apply_noun);
     /* Remote strings (IPC/journal) evaluate as q from now on. */
     ray_eval_set_remote_str_fn(remote_eval_str);
-    /* Remote (func;args) value-apply (IPC): single value-object apply via q `value`. */
+    /* Remote (func;args) value-apply (IPC): the one public apply entry. */
     ray_eval_set_remote_apply_fn(remote_apply);
     bind_unary("parse", q_parse_builtin_fn);
     /* q keywords with no rayfall counterpart — q-owned env bindings (same
@@ -397,12 +450,10 @@ void q_builtins_register(void) {
         ray_env_bind(ray_sym_intern("count", 5), cv);
         ray_release(cv);
     }
-    /* `value` — env-bind the q wrapper (the q_value_wrap manifest row) so a BARE `value`
-     * used as a HOF operand (`value each (::;+;-;*;%)`) resolves to q semantics,
-     * not rayfall's dict-only native `value`.  Application heads still embed the
-     * registry copy; both call q_value_wrap (single home).  Bound before
-     * q_registry_init like the other q-owned overrides. */
-    bind_unary("value", q_value_wrap);
+    /* `value` — 'nyi stub (the q_value.c single-apply home died in the
+     * eval-rebuild cutover; `value` re-derives on the fresh core later).
+     * Env-bound so a bare `value` operand and the manifest row share it. */
+    bind_unary("value", q_value_nyi_fn);
     /* `enlist` — q dict arm (1-row table); the `,` monadic QK_ENV snapshot
      * inherits it (bound before q_registry_init, q_value_wrap precedent). */
     bind_vary ("enlist", q_enlist_wrap);

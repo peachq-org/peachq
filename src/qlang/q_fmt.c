@@ -5,7 +5,6 @@
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
-#include "qlang/q_deriv.h"    /* q_deriv_kind_of — 104h carrier display */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_carrier_fmt — RAY_QFN display */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
@@ -1174,7 +1173,7 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* fresh-evaluator RAY_QFN carrier: lambda source / F+adverb / proj */
+    /* RAY_QFN carrier: lambda verbatim source / F+adverb / projection */
     if (val->type == RAY_QFN) {
         char cb[512];
         cb[0] = '\0';
@@ -1406,55 +1405,6 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    if (q_deriv_kind_of(val) == Q_DERIV_LAMBDA) {   /* verbatim q source */
-        ray_t* s = q_lambda_src(val);
-        if (s && s->type == -RAY_STR) {
-            qe_putn(ray_str_ptr(s), ray_str_len(s));
-            return;
-        }
-    }
-
-    /* 104h carrier: bound-verb + adverb glyph (+/); base = the HOF value */
-    if (q_deriv_kind_of(val) == Q_DERIV_PROJ && ray_len(val) >= 5) {
-        ray_t* base = q_deriv_base(val);
-        ray_t* v0   = ((ray_t**)ray_data(val))[4];
-        const char* g = NULL;
-        if (base == q_registry_over_value() ||
-            base == ray_env_get(ray_sym_intern("fold", 4)))            g = "/";
-        else if (base == q_registry_scan_value())                      g = "\\";
-        else if (base == q_registry_lookup_name("each", 4, Q_DYADIC))  g = "'";
-        else if (base == q_registry_prior_value())                     g = "':";
-        else if (base == ray_env_get(ray_sym_intern("map-right", 9)))  g = "/:";
-        else if (base == ray_env_get(ray_sym_intern("map-left", 8)))   g = "\\:";
-        if (g && v0) {
-            char vb[256]; vb[0] = '\0';
-            q_fmt(v0, vb, sizeof vb);
-            qe_puts(vb);
-            qe_puts(g);
-            return;
-        }
-        /* general projection: base[a0;a1;...] with hole slots EMPTY */
-        {
-            uint64_t mask  = q_deriv_hole_mask(val);
-            int64_t  slots = ray_len(val) - 4;
-            ray_t**  e     = (ray_t**)ray_data(val);
-            char bb[512]; bb[0] = '\0';
-            q_fmt(base, bb, sizeof bb);
-            qe_puts(bb);
-            qe_putc('[');
-            for (int64_t i = 0; i < slots && qe_fits(2); i++) {
-                if (i) qe_putc(';');
-                if (!(mask & (1ull << i))) {
-                    char ab[256]; ab[0] = '\0';
-                    q_fmt(e[4 + i], ab, sizeof ab);
-                    qe_puts(ab);
-                }
-            }
-            qe_putc(']');
-            return;
-        }
-    }
-
     if (val->type == RAY_TABLE) {
         q_fmt_table(val);
         return;
@@ -1609,8 +1559,6 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         }
     }
     if (val->type == RAY_LIST) {
-        /* deriv carriers are lists structurally but display as functions */
-        if (q_deriv_kind_of(val) != Q_DERIV_NONE) { q_fmt(val, buf, bufsz); return; }
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
         ray_t* tv = q_registry_table_value();   /* hidden table-literal head */

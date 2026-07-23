@@ -3,12 +3,10 @@
 
 #include "qlang/qdoc.h"
 #include "qlang/q_parse.h"
-#include "qlang/eval/q_eval.h"   /* Q_EVAL=fresh dual-runtime switch */
+#include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/q_ns.h"     /* q_ns_prompt — namespace transcripts */
-#include "qlang/q_sys.h"    /* q_sys_is_cmd / q_sys_line — `\`-command glue */
-#include "lang/eval.h"      /* ray_eval */
+#include "qlang/q_sys.h"    /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <string.h>
@@ -116,7 +114,7 @@ static void run_example(const char* input, const char* expect,
     int prompt_ok = 1;
     if (tprompt && *tprompt) {
         char live[80];
-        q_ns_prompt(live, sizeof live);
+        q_sys_prompt(live, sizeof live);
         prompt_ok = (strcmp(tprompt, live) == 0);
     }
 
@@ -162,11 +160,8 @@ static void run_example(const char* input, const char* expect,
         ray_t* past = q_parse(input);
         if (!RAY_IS_ERR(past)) {
             r->parsed++;
-            past = q_lower(past);
-            if (!RAY_IS_ERR(past)) {
-                ray_t* pres = ray_eval(past);
-                ray_release(pres);
-            }
+            ray_t* pres = q_eval(past);
+            ray_release(pres);
             ray_release(past);
         }
         classify(r, 0);
@@ -192,31 +187,9 @@ static void run_example(const char* input, const char* expect,
     if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
     char errcls[8];
     int want_error = expect_is_error(expect, errcls, sizeof errcls);
-    int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
-    ray_t* res;
-    if (q_eval_fresh_enabled()) {                 /* Q_EVAL=fresh: no q_lower */
-        res = q_eval(ast);
-        ray_release(ast);
-    } else {
-        ast = q_lower(ast);
-        if (RAY_IS_ERR(ast)) {
-            if (want_error && error_row_matches(ast, errcls)) {
-                ray_release(ast);
-                classify(r, 1);
-                return;
-            }
-            char ne[QD_OUT];
-            normalize(expect, ne, sizeof ne);
-            ray_release(ast);
-            classify(r, 0);
-            if (verbose)
-                fprintf(out, "  q)%.200s\n    FAIL(lower) got \"<error>\" want \"%.200s\"\n",
-                        input, ne);
-            return;
-        }
-        res = ray_eval(ast);
-        ray_release(ast);
-    }
+    int is_assign = q_parse_is_assign(ast);
+    ray_t* res = q_eval(ast);
+    ray_release(ast);
     if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
 
     /* An eval error is a failure — NOT empty output that could match an empty

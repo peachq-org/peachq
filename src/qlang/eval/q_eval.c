@@ -1,12 +1,13 @@
 /* q_eval walker — see q_eval.h.  jq-EvalOp shape: visit -> resolve heads
  * (registry by valence, then env / `.z` / `.q`) -> eval-time forms (`;` seq,
- * `:`/`::` assign, `{` capture, literal-ctor interception) -> eval args
- * RIGHT-to-left (#177: mid-line `x:e` binds before a leftward read; error
- * unwinds release the evaluated tail) -> q_eval_apply.
+ * `:`/`::`/`op:` assign, `$[c;t;f]` + if/do/while control, `{` capture,
+ * literal-ctor interception) -> eval args RIGHT-to-left (#177: mid-line `x:e`
+ * binds before a leftward read; error unwinds release the evaluated tail) ->
+ * q_eval_apply.
  *
  * LITERAL-CTOR SEAM (finding 1, deferred parser change): the parser embeds
  * the registry list/table ctor VALUES at literal heads, and those special
- * forms evaluate their element trees through base ray_eval — unusable here.
+ * forms evaluated their element trees through base ray_eval — unusable here.
  * The walker intercepts the ctor heads BY POINTER IDENTITY and builds
  * literals natively; the follow-up PR makes the parser emit literal nodes
  * the q evaluator owns, retiring this seam. */
@@ -16,8 +17,8 @@
 #include "qlang/q_parse_internal.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
+#include "qlang/q_registry_internal.h"   /* q_strict_i64 — the do-count judgment */
 #include "qlang/q_dotz.h"
-#include "qlang/q_ns.h"
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "ops/ops.h"
@@ -29,13 +30,6 @@
 
 static _Thread_local int g_depth;
 
-/* no caching: the C-unit harness toggles the flag between in-process
- * runtimes, and getenv is nowhere near a hot path here */
-int q_eval_fresh_enabled(void) {
-    const char* m = getenv("Q_EVAL");
-    return m && strcmp(m, "fresh") == 0;
-}
-
 static int64_t sym_id_of(const char* s) {
     return ray_sym_intern_runtime(s, strlen(s));
 }
@@ -44,9 +38,31 @@ static int nameref(ray_t* x) {
     return x && x->type == -RAY_SYM && !(x->attrs & Q_ATTR_QUOTED);
 }
 
+/* Hole detection, head-dependent (the retired ql_project's rule):
+ *   HOLES_ELISION — only a bracket-ELIDED slot (Q_ATTR_HOLE) projects; a
+ *     plain `::` is data (noun indexing, the `@`/`.` amend/trap operands —
+ *     an EXPLICIT `(::)` embeds the null VALUE, never a sym, so the tree
+ *     keeps the two apart).
+ *   HOLES_NULLREF — any unquoted `::` name-ref projects too: the postfix
+ *     projection forms (`1+`, `-15!`, `(3+)`) parse their missing operand
+ *     as a plain `::` sym. */
+enum { HOLES_ELISION = 0, HOLES_NULLREF = 1 };
+
 static int is_hole(ray_t* x) {
     return x && x->type == -RAY_SYM && (x->attrs & Q_ATTR_HOLE) &&
            !(x->attrs & Q_ATTR_QUOTED);
+}
+
+static int is_hole_mode(ray_t* x, int mode) {
+    if (is_hole(x)) return 1;
+    if (mode != HOLES_NULLREF) return 0;
+    if (!x || x->type != -RAY_SYM || (x->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t* s = ray_sym_str(x->i64);
+    if (!s) return 0;
+    int r = ray_str_len(s) == 2 && ray_str_ptr(s)[0] == ':' &&
+            ray_str_ptr(s)[1] == ':';
+    ray_release(s);
+    return r;
 }
 
 /* adverb spelling -> id (0=' 1=/ 2=\ 3=': 4=/: 5=\:), else -1.
@@ -94,11 +110,19 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
     if (v) return v;
     v = q_dotz_resolve(id);                  /* owned */
     if (v) return v;
+    /* bare identifier -> `.q.<name>` (kdb: keywords ARE .q entries) */
     nm = ray_sym_str(id);
     if (nm) {
-        ray_t* hit = q_ns_dotq_get(ray_str_ptr(nm), (size_t)ray_str_len(nm));
+        const char* p = ray_str_ptr(nm);
+        size_t n = ray_str_len(nm);
+        char full[64];
+        if (n > 0 && n + 3 < sizeof full && !memchr(p, '.', n)) {
+            memcpy(full, ".q.", 3);
+            memcpy(full + 3, p, n);
+            ray_release(nm);
+            return ray_env_resolve(ray_sym_intern_runtime(full, n + 3));
+        }
         ray_release(nm);
-        if (hit) { ray_retain(hit); return hit; }
     }
     return NULL;
 }
@@ -157,11 +181,12 @@ static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
 }
 
 /* args RIGHT-to-left into argv (owned; holes stay C-NULL).  On error the
- * already-evaluated tail (indices > i) is released.  A LONE hole is `f[]`
- * — kdb applies to the generic null, only `;`-elision projects. */
-static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv) {
+ * already-evaluated tail (indices > i) is released.  A LONE elided slot is
+ * `f[]` — kdb applies to the generic null, only `;`-elision projects. */
+static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv, int mode) {
     for (int64_t i = argc - 1; i >= 0; i--) {
-        if (is_hole(e[i])) { argv[i] = (argc == 1) ? RAY_NULL_OBJ : NULL; continue; }
+        if (is_hole(e[i]) && argc == 1) { argv[i] = RAY_NULL_OBJ; continue; }
+        if (is_hole_mode(e[i], mode)) { argv[i] = NULL; continue; }
         argv[i] = q_eval(e[i]);
         if (RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
@@ -217,6 +242,132 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     return v;
 }
 
+/* ===== control forms (basics/control.md, ref/{cond,if,do,while}.md) ======
+ * Eval-time forms: statement args arrive UNEVALUATED and are driven lazily,
+ * left-to-right, side effects persisting (no lexical scope of their own);
+ * conditions decide at the ONE truthiness home (q_eval_apply_truthy). */
+
+/* evaluate a test tree and decide it; 0 with *err set on failure */
+static int ctl_truth(ray_t* test, ray_t** err) {
+    return q_eval_apply_truthy(q_eval(test), err);
+}
+
+/* evaluate e[from..n) for their side effects; owned error on failure */
+static ray_t* ctl_run_body(ray_t** e, int64_t from, int64_t n) {
+    for (int64_t i = from; i < n; i++) {
+        if (!e[i]) continue;
+        ray_t* r = q_eval(e[i]);
+        if (RAY_IS_ERR(r)) return r;
+        ray_release(r);
+    }
+    return NULL;
+}
+
+/* `$[c1;t1;...;f]` — pairs decide left to right; a trailing lone expr is the
+ * else; an even expr count with no hit returns the generic null. */
+static ray_t* cond_eval(ray_t** e, int64_t n) {
+    int64_t i = 0;
+    while (i + 1 < n) {
+        ray_t* err = NULL;
+        int go = ctl_truth(e[i], &err);
+        if (err) return err;
+        if (go) return q_eval(e[i + 1]);
+        i += 2;
+    }
+    if (i < n) return q_eval(e[i]);
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
+
+/* `$`-headed with >= 3 args is Cond: the parser embeds the DYADIC registry
+ * value (the cast wrapper) at every `$[...]` head; a still-unresolved `$`
+ * name-ref is matched by spelling. */
+static int dollar_head(ray_t* h) {
+    if (!h) return 0;
+    if (nameref(h)) return h->i64 == sym_id_of("$");
+    if (h->type == RAY_BINARY) {
+        const q_op_t* row = q_registry_row_of(h, Q_DYADIC);
+        return row && row->name[0] == '$' && row->name[1] == '\0';
+    }
+    return 0;
+}
+
+/* if[t;…] / while[t;…] — generic-null result (ref/if.md, ref/while.md) */
+static ray_t* if_eval(ray_t** e, int64_t n, int loop) {
+    for (;;) {
+        ray_t* err = NULL;
+        int go = n >= 1 && ctl_truth(e[0], &err);
+        if (err) return err;
+        if (!go) break;
+        err = ctl_run_body(e, 1, n);
+        if (err) return err;
+        if (!loop) break;
+    }
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
+
+/* do[n;…] — n a non-negative integer atom (ref/do.md) */
+static ray_t* do_eval(ray_t** e, int64_t n) {
+    if (n < 1) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
+    ray_t* cnt = q_eval(e[0]);
+    if (RAY_IS_ERR(cnt)) return cnt;
+    cnt = store_mat(cnt);
+    if (RAY_IS_ERR(cnt)) return cnt;
+    int64_t times;
+    int ok = cnt && !RAY_ATOM_IS_NULL(cnt) && q_strict_i64(cnt, &times);
+    ray_release(cnt);
+    if (!ok || times < 0) return ray_error("type", NULL);
+    for (int64_t k = 0; k < times; k++) {
+        ray_t* err = ctl_run_body(e, 1, n);
+        if (err) return err;
+    }
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
+
+/* modified assignment `x op: y` == `x: x op y` — head `<op>:` where op is a
+ * registry dyad; name targets only (indexed mod-assign: rebuild wave) */
+static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
+    ray_t* s = ray_sym_str(h->i64);
+    if (!s) return NULL;
+    const char* nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    if (l < 2 || nm[l - 1] != ':' || nm[0] == ':') { ray_release(s); return NULL; }
+    const q_op_t* row = NULL;
+    ray_t* opv = q_registry_lookup_row(
+        ray_sym_intern_runtime(nm, l - 1), Q_DYADIC, &row);
+    ray_release(s);
+    if (!opv || !(opv->type == RAY_UNARY || opv->type == RAY_BINARY ||
+                  opv->type == RAY_VARY))
+        return NULL;                                 /* not an op: -> 'name path */
+    if (!nameref(target)) return ray_error("nyi", NULL);
+    ray_t* rv = q_eval(rhs);
+    if (RAY_IS_ERR(rv)) return rv;
+    const q_op_t* trow = NULL;
+    ray_t* cur = name_value(target, &trow);
+    if (RAY_IS_ERR(cur)) { ray_release(rv); return cur; }
+    ray_t* av[2] = { cur, rv };
+    ray_t* nv = q_eval_apply(opv, row, av, 2);
+    ray_release(cur);
+    ray_release(rv);
+    if (RAY_IS_ERR(nv)) return nv;
+    nv = store_mat(nv);
+    if (RAY_IS_ERR(nv)) return nv;
+    int local = q_eval_apply_frame_depth() > 0;
+    if (local) {
+        ray_t* snm = ray_sym_str(target->i64);
+        if (snm) {
+            if (ray_str_len(snm) > 0 && ray_str_ptr(snm)[0] == '.') local = 0;
+            ray_release(snm);
+        }
+    }
+    ray_err_t err = local ? ray_env_set_local(target->i64, nv)
+                          : ray_env_set(target->i64, nv);
+    if (err != RAY_OK) { ray_release(nv); return ray_error("assign", NULL); }
+    return nv;                                       /* q returns the NEW value */
+}
+
 /* paren list literal: elements RTL, boxed build + collapse */
 static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* argv[EVAL_MAX_ARGS];
@@ -239,7 +390,7 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
     return c;
 }
 
-/* table literal `([]a:…;b:…)`: col defs are pre-lower (:;name;expr) trees;
+/* table literal `([]a:…;b:…)`: col defs are raw parser (:;name;expr) trees;
  * exprs RTL, atoms broadcast.  Punted vs q_ctx_build: anonymous columns,
  * cross-column name scope. */
 static ray_t* table_lit(ray_t** defs, int64_t n) {
@@ -350,6 +501,13 @@ ray_t* q_eval(ray_t* node) {
                 goto out;
             }
             if (h->i64 == id_brace) { ret = lambda_lit(node); goto out; }
+            if (h->i64 == sym_id_of("if"))    { ret = if_eval(e + 1, n - 1, 0); goto out; }
+            if (h->i64 == sym_id_of("while")) { ret = if_eval(e + 1, n - 1, 1); goto out; }
+            if (h->i64 == sym_id_of("do"))    { ret = do_eval(e + 1, n - 1); goto out; }
+            if (n == 3) {
+                ray_t* ma = modassign_eval(h, e[1], e[2]);
+                if (ma) { ret = ma; goto out; }
+            }
             int adv = adv_id(h);
             if (adv >= 0 && n == 2) {               /* bare (adv;F) value */
                 const q_op_t* frow = NULL;
@@ -375,7 +533,7 @@ ray_t* q_eval(ray_t* node) {
                     ret = ray_error("rank", NULL);
                     goto out;
                 }
-                ray_t* err = eval_args_rtl(e + 1, argc, argv);
+                ray_t* err = eval_args_rtl(e + 1, argc, argv, HOLES_ELISION);
                 if (err) { ray_release(F); ret = err; goto out; }
                 ret = q_eval_apply_adverb(adv, F, frow, argv, argc);
                 release_args(argv, argc);
@@ -383,6 +541,9 @@ ray_t* q_eval(ray_t* node) {
                 goto out;
             }
         }
+
+        /* `$[c;t;f;...]` Cond — claimed BEFORE argument evaluation (lazy) */
+        if (n >= 4 && dollar_head(h)) { ret = cond_eval(e + 1, n - 1); goto out; }
 
         /* general application: resolve head, args RTL, one q_eval_apply */
         const q_op_t* row = NULL;
@@ -413,7 +574,18 @@ ray_t* q_eval(ray_t* node) {
             ret = ray_error("rank", NULL);
             goto out;
         }
-        ray_t* err = eval_args_rtl(e + 1, argc, argv);
+        /* callable heads project on plain `::` operands (postfix forms);
+         * `@`/`.` and noun heads treat `::` as data (amend/trap, indexing) */
+        int mode = HOLES_ELISION;
+        if (fv && !RAY_IS_ERR(fv) &&
+            !(row && row->name[1] == '\0' &&
+              (row->name[0] == '@' || row->name[0] == '.')) &&
+            ((fv->type == RAY_UNARY || fv->type == RAY_BINARY ||
+              fv->type == RAY_VARY) && !(fv->attrs & RAY_FN_SPECIAL_FORM)))
+            mode = HOLES_NULLREF;
+        if (fv && (fv->type == RAY_QFN || fv->type == RAY_LAMBDA))
+            mode = HOLES_NULLREF;
+        ray_t* err = eval_args_rtl(e + 1, argc, argv, mode);
         if (err) { ray_release(fv); ret = err; goto out; }
         ret = q_eval_apply(fv, row, argv, argc);
         release_args(argv, argc);

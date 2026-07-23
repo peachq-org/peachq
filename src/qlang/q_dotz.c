@@ -3,13 +3,12 @@
 #define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r for the clock producers */
 #endif
 #include "qlang/q_dotz.h"
-#include "qlang/q_deriv.h"     /* q_deriv_kind_of / q_deriv_base — unwrap {…} carrier */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "qlang/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts show/0N! output */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get / ray_fn_unary */
 #include "lang/eval.h"         /* RAY_FN_NONE — .z.ts timer thunk attrs */
-#include "lang/internal.h"     /* call_fn1 — .z.ts timer dispatch */
 #include "core/ipc.h"          /* ray_ipc_current_handle / ray_ipc_fd_of_handle — .z.w */
 #include <rayforce.h>
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
@@ -308,7 +307,7 @@ static ray_t* zts_tick(ray_t* tick) {
     if (!fn) return NULL;                         /* .z.ts unset → no-op */
     ray_retain(fn);                               /* survive a re-assign mid-call */
     ray_t* ts = ray_timestamp(z_now_ns(1));       /* .z.P local timestamp arg */
-    ray_t* r  = call_fn1(fn, ts);
+    ray_t* r  = q_eval_apply_value(fn, &ts, 1);
     ray_release(ts);
     ray_release(fn);
     /* Drain any show/0N! console output the handler produced to the SERVER
@@ -354,16 +353,12 @@ ray_t* q_dotz_get(const char* name, size_t len) {
 }
 
 /* Assign a settable handler by name — returns true iff `name` IS one (caller
- * then stops; else it falls to the `.ipc.on.*` / plain-env path).  Retains its
- * own ref; unwraps a q `{…}` lambda carrier to its base RAY_LAMBDA (call_fn1
- * fires a bare lambda, never the apply-hook carrier).  Passing NULL clears. */
+ * then stops; else it falls to the `.ipc.on.*` / plain-env path).  Retains
+ * its own ref; RAY_QFN carriers are stored AS-IS — the fire sites apply them
+ * through q_eval_apply_value.  Passing NULL clears. */
 bool q_dotz_set(const char* name, size_t len, ray_t* val) {
     ray_t** slot = z_slot_ptr(name, len);
     if (!slot) return false;
-    if (val && val->type == RAY_LIST && q_deriv_kind_of(val) == Q_DERIV_LAMBDA) {
-        ray_t* base = q_deriv_base(val);        /* borrowed bare RAY_LAMBDA */
-        if (base) val = base;
-    }
     if (val) ray_retain(val);
     if (*slot) ray_release(*slot);
     *slot = val;
@@ -378,7 +373,7 @@ void q_dotz_exit_fire(int code) {
     if (!fn) return;
     ray_retain(fn);                      /* survive a re-assign mid-call */
     ray_t* arg = ray_i64(code);
-    ray_t* r = call_fn1(fn, arg);
+    ray_t* r = q_eval_apply_value(fn, &arg, 1);
     ray_release(arg);
     ray_release(fn);
     if (r) ray_release(r);

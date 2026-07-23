@@ -29,7 +29,6 @@
  * parser-flip enforcement extends. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_deriv.h" /* q_deriv_kind_of — carrier guard in q_charv_out */
 #include "ops/ops.h"       /* ray_is_lazy — DAG guard in q_charv_out */
 #include "lang/env.h"      /* ray_env_get; ray_fn_unary/binary/vary — building the fn-values */
 #include "lang/eval.h"     /* RAY_FN_ATOMIC/SPECIAL_FORM/Q_LOWER — attrs stamped on built values */
@@ -60,28 +59,17 @@ static bool    g_inited   = false;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
 
 /* ===== registry SPECIALS — internal (spelling-less) fn-values ==============
- * ONE plain data table drives four things: the g_specials[] slots, the init
- * build loop (its error path written once), the teardown release loop, and
- * the 22 borrowed-ref accessors below.  A new special is ONE row.  A plain
- * table + loop is deliberate (owner ruling 2026-07-22, over a token-pasting
- * X-macro): the accessors and bodies stay greppable, ctags-visible and
- * debugger-legible.  Every value also carries RAY_FN_Q_LOWER (stamped by the
- * build loop); accessors return BORROWED refs, NULL before init. */
-enum {
-    SPEC_scan, SPEC_over, SPEC_eachboth, SPEC_prior, SPEC_mkderiv2, SPEC_mkopproj,
-    SPEC_list, SPEC_table, SPEC_keyed_table, SPEC_select, SPEC_delete, SPEC_exec,
-    SPEC_compose, SPEC_funsql_select, SPEC_funsql_bang, SPEC_lambda, SPEC_ret,
-    SPEC_sig, SPEC_seq, SPEC_if, SPEC_do, SPEC_while, SPEC_N
-};
+ * ONE plain data table drives the g_specials[] slots, the init build loop,
+ * the teardown release loop, and the borrowed-ref accessors below.  Since the
+ * eval-rebuild cutover the survivors are PARSER-EMBEDDED MARKER heads: q_eval
+ * intercepts them by pointer identity (literal ctors) or leaves them 'nyi
+ * (compose, its wave pending) — the bodies never run, so all share spec_nyi.
+ * Accessors return BORROWED refs, NULL before init. */
+enum { SPEC_list, SPEC_table, SPEC_keyed_table, SPEC_compose, SPEC_N };
 
 enum spec_kind { SK_UNARY, SK_BINARY, SK_VARY };   /* -> ray_fn_unary/binary/vary */
 
-static ray_t* sig_fn(ray_t* x);   /* body homed with the signal channel below */
-
-/* qSQL execution stub — the q_funsql.c executor was demolished (eval rebuild,
- * spec 2026-07-23); select/exec/delete and ?[t;c;b;a]/![t;c;b;a] re-land as a
- * logical plan + backend router in the qSQL wave. */
-static ray_t* qsql_nyi(ray_t** args, int64_t n) {
+static ray_t* spec_nyi(ray_t** args, int64_t n) {
     (void)args; (void)n;
     return ray_error("nyi", NULL);
 }
@@ -89,104 +77,22 @@ static ray_t* qsql_nyi(ray_t** args, int64_t n) {
 typedef struct { const char* wire; uint8_t kind; uint32_t flags; void* fn; } q_special_t;
 
 static const q_special_t SPECIALS[SPEC_N] = {
-    [SPEC_scan]          = { "scan",            SK_VARY,   RAY_FN_NONE,         (void*)q_scan_wrap },
-    [SPEC_over]          = { "over",            SK_VARY,   RAY_FN_NONE,         (void*)q_over_wrap },
-    [SPEC_eachboth]      = { "each-both",       SK_VARY,   RAY_FN_NONE,         (void*)q_eachboth_wrap },
-    [SPEC_prior]         = { "each-prior",      SK_VARY,   RAY_FN_NONE,         (void*)q_prior_wrap },
-    [SPEC_mkderiv2]      = { "q.mkderiv2",      SK_BINARY, RAY_FN_NONE,         (void*)q_deriv_mkderiv2 },
-    [SPEC_mkopproj]      = { "q.mkopproj",      SK_VARY,   RAY_FN_NONE,         (void*)q_deriv_mkopproj },
-    /* ctx constructor heads: SPECIAL_FORM so q_ctx_build gets the raw element
-     * trees and evaluates them right-to-left inside a pushed scope */
-    [SPEC_list]          = { "list",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_list_build },
-    [SPEC_table]         = { "table",           SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_table_build },
-    [SPEC_keyed_table]   = { "keyed-table",     SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_keyed_table_build },
-    /* qSQL executors: 'nyi stubs until the plan-router wave (spec 2026-07-23) */
-    [SPEC_select]        = { "q.select",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
-    [SPEC_delete]        = { "q.delete",        SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
-    [SPEC_exec]          = { "q.exec",          SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
-    /* compose builder — a NORMAL vary (args are resolved function values) */
-    [SPEC_compose]       = { "q.compose",       SK_VARY,   RAY_FN_NONE,         (void*)q_compose_fn },
-    [SPEC_funsql_select] = { "q.funsql.select", SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
-    [SPEC_funsql_bang]   = { "q.funsql.bang",   SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)qsql_nyi },
-    [SPEC_lambda]        = { "q.fn",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_deriv_fn_make },
-    [SPEC_ret]           = { "q.ret",           SK_UNARY,  RAY_FN_NONE,         (void*)q_ret_fn },
-    [SPEC_sig]           = { "q.sig",           SK_UNARY,  RAY_FN_NONE,         (void*)sig_fn },
-    /* imperative control — SPECIAL_FORM: args arrive unevaluated, the body
-     * drives its own lazy left-to-right evaluation (basics/control.md) */
-    [SPEC_seq]           = { "q.seq",           SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_seq_fn },
-    [SPEC_if]            = { "q.if",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_if_fn },
-    [SPEC_do]            = { "q.do",            SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_do_fn },
-    [SPEC_while]         = { "q.while",         SK_VARY,   RAY_FN_SPECIAL_FORM, (void*)q_while_fn },
+    /* ctx constructor heads: SPECIAL_FORM markers — q_eval builds literals
+     * natively after intercepting these by pointer */
+    [SPEC_list]        = { "list",        SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
+    [SPEC_table]       = { "table",       SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
+    [SPEC_keyed_table] = { "keyed-table", SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
+    /* compose `'[f;g;…]` head — carrier rebuild is an adverb-wave item */
+    [SPEC_compose]     = { "q.compose",   SK_VARY, RAY_FN_NONE,         (void*)spec_nyi },
 };
 _Static_assert(sizeof SPECIALS / sizeof SPECIALS[0] == SPEC_N, "SPECIALS row count must match SPEC_* enum");
 
 static ray_t* g_specials[SPEC_N];
 
-ray_t* q_registry_scan_value(void)          { return g_specials[SPEC_scan]; }          /* borrowed */
-ray_t* q_registry_over_value(void)          { return g_specials[SPEC_over]; }
-ray_t* q_registry_eachboth_value(void)      { return g_specials[SPEC_eachboth]; }
-ray_t* q_registry_prior_value(void)         { return g_specials[SPEC_prior]; }
-ray_t* q_registry_mkderiv2_value(void)      { return g_specials[SPEC_mkderiv2]; }
-ray_t* q_registry_mkopproj_value(void)      { return g_specials[SPEC_mkopproj]; }
-ray_t* q_registry_list_value(void)          { return g_specials[SPEC_list]; }
+ray_t* q_registry_list_value(void)          { return g_specials[SPEC_list]; }          /* borrowed */
 ray_t* q_registry_table_value(void)         { return g_specials[SPEC_table]; }
 ray_t* q_registry_keyed_table_value(void)   { return g_specials[SPEC_keyed_table]; }
-ray_t* q_registry_select_value(void)        { return g_specials[SPEC_select]; }
-ray_t* q_registry_delete_value(void)        { return g_specials[SPEC_delete]; }
-ray_t* q_registry_exec_value(void)          { return g_specials[SPEC_exec]; }
 ray_t* q_registry_compose_value(void)       { return g_specials[SPEC_compose]; }
-ray_t* q_registry_funsql_select_value(void) { return g_specials[SPEC_funsql_select]; }
-ray_t* q_registry_funsql_bang_value(void)   { return g_specials[SPEC_funsql_bang]; }
-ray_t* q_registry_lambda_value(void)        { return g_specials[SPEC_lambda]; }
-ray_t* q_registry_ret_value(void)           { return g_specials[SPEC_ret]; }
-ray_t* q_registry_sig_value(void)           { return g_specials[SPEC_sig]; }
-ray_t* q_registry_seq_value(void)           { return g_specials[SPEC_seq]; }
-ray_t* q_registry_if_value(void)            { return g_specials[SPEC_if]; }
-ray_t* q_registry_do_value(void)            { return g_specials[SPEC_do]; }
-ray_t* q_registry_while_value(void)         { return g_specials[SPEC_while]; }
-
-/* ---- the `'x` signal channel (registry-lifecycle thread-local state) ------
- * The <=7-char error class in err->sdata truncates, but kdb Trap hands the
- * handler the WHOLE message, so sig_fn stashes the untruncated text here
- * (mirroring the q.ret payload in q_deriv.c).  take returns OWNED or NULL. */
-static _Thread_local ray_t* qsig_payload = NULL;
-
-ray_t* q_registry_sig_take(void) {
-    ray_t* v = qsig_payload;
-    qsig_payload = NULL;
-    return v;
-}
-
-void q_registry_sig_clear(void) {
-    if (qsig_payload) { ray_release(qsig_payload); qsig_payload = NULL; }
-}
-
-/* `'x` Signal (ref/signal.md): abort with error class = the sym spelling /
- * string text (ray_error copies, 7-char sdata cap — kdb's own classes are
- * short for the same reason).  Full untruncated text stashed for Trap. */
-static ray_t* sig_fn(ray_t* x) {
-    char cls[8] = "signal";
-    ray_t* full = NULL;                 /* owned full-text string, or NULL */
-    if (x && x->type == -RAY_SYM) {
-        ray_t* s = ray_sym_str(x->i64);
-        if (s) {
-            size_t l = ray_str_len(s); size_t c = l > 7 ? 7 : l;
-            memcpy(cls, ray_str_ptr(s), c); cls[c] = '\0';
-            full = ray_str(ray_str_ptr(s), l);
-            ray_release(s);
-        }
-    } else if (x) {
-        const char* p; int64_t l;                     /* string / charv / char atom */
-        if (q_text_bytes(x, &p, &l)) {
-            size_t c = (size_t)l > 7 ? 7 : (size_t)l;
-            memcpy(cls, p, c); cls[c] = '\0';
-            full = ray_str(p, (size_t)l);
-        }
-    }
-    if (qsig_payload) ray_release(qsig_payload);
-    qsig_payload = full;                /* owned (or NULL) */
-    return ray_error(cls, NULL);
-}
 
 /* ---- shared q-name sanitization (.Q.id + construction clash repair) ------ */
 
@@ -434,8 +340,6 @@ static bool charv_out_needed(ray_t* r) {
     if (ray_is_lazy(r)) return false;    /* deferred DAG values: never walk */
     if (r->type == -RAY_STR || r->type == RAY_STR) return true;
     if (r->type == RAY_LIST) {
-        if (q_deriv_kind_of(r) != Q_DERIV_NONE) return false;  /* fn carriers:
-            * their -RAY_STR source is an internal carrier, never a value */
         ray_t** e = (ray_t**)ray_data(r);
         for (int64_t i = 0; i < ray_len(r); i++)
             if (charv_out_needed(e[i])) return true;
@@ -535,7 +439,7 @@ static ray_t* build_env(const char* env_name) {
  * q string/arg-swap semantics), and `_`->"drop" has no env binding at all.  This
  * is NOT reachable in stage 2a: with no parser flip, wrapper VALUES never become
  * user-visible or serializable — they exist only inside the registry and the
- * transient AST that q_lower feeds straight to eval.  (The pre-2a wrappers, named
+ * transient AST the evaluator consumes.  (The pre-2a wrappers, named
  * "="/"#"/"_", were equally non-round-trippable — env has no such names.)  2b,
  * which makes value heads user-visible, must teach serde to recognise
  * RAY_FN_Q_LOWER and re-derive the wrapper from the registry; that fix has a
@@ -769,8 +673,6 @@ void q_registry_destroy(void) {
         if (g_entries[i].value) ray_release(g_entries[i].value);
     for (int s = 0; s < SPEC_N; s++)
         if (g_specials[s]) { ray_release(g_specials[s]); g_specials[s] = NULL; }
-    { ray_t* stale = q_deriv_ret_take(); if (stale) ray_release(stale); }
-    q_registry_sig_clear();
     g_count  = 0;
     g_inited = false;
 }
