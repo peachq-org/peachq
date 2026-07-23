@@ -1227,16 +1227,6 @@ int q_fn_null_ok(const ray_t* fn) {
     return p == q_bang || p == q_match_wrap;
 }
 
-/* The join wrapper owns the MIXED bare-dict shape ('type, ref/join.md
- * `10,d`); dict,dict (incl. keyed-table) pairs keep the shim's union path. */
-int q_fn_dict_distribute_veto(const ray_t* fn, ray_t** args, int64_t n) {
-    if (!fn || fn->type != RAY_BINARY || n != 2) return 0;
-    if ((ray_binary_fn)(uintptr_t)fn->i64 != q_join_wrap) return 0;
-    int xd = args[0] && args[0]->type == RAY_DICT;
-    int yd = args[1] && args[1]->type == RAY_DICT;
-    return xd != yd;                 /* exactly one dict side -> wrapper's 'type stands */
-}
-
 /* q `key x` (ref/key.md) — dict keys, plus the name/namespace overloads:
  *   `` ` ``      -> root context roster (namespaces other than .z)
  *   `` `. ``     -> objects in the root (user variable names)

@@ -20,10 +20,9 @@
  * remaining atoms reuse rayfall's formatter (string 42
  * -> "42").  VECTOR / LIST: q maps string over each item, yielding a LIST of
  * strings (`string 192 168 1 23` -> ("192";"168";"1";"23")) — the base
- * formatter would instead render the whole vector as one bracketed string.
- * string is atomic through dicts and tables (ref/string.md:29) — q_str_walk. */
-static ray_t* string_leaf(ray_t* x, int64_t arg) {
-    (void)arg;
+ * formatter would instead render the whole vector as one bracketed string. */
+ray_t* q_string_fn(ray_t* x) {
+    if (!x) return ray_error("type", "string: nil");
     if (x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);        /* borrowed */
         if (!s) return ray_error("type", "string: bad symbol");
@@ -63,61 +62,9 @@ static ray_t* string_leaf(ray_t* x, int64_t arg) {
     }
     return out;
 }
-ray_t* q_string_fn(ray_t* x) { return q_str_walk(x, string_leaf, 0, 0); }
-
-/* q_str_walk — the atomic-through-containers walker (contract at its decl);
- * clients: case/trim/string here, pad/Tok/cast in q_dollar.c. */
-ray_t* q_str_walk(ray_t* x, q_str_leaf_fn leaf, int64_t arg, int collapse) {
-    if (!x) return ray_error("type", "walk: nil");
-    if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
-        ray_t* out = ray_list_new(n > 0 ? n : 1);
-        if (RAY_IS_ERR(out)) return out;
-        for (int64_t i = 0; i < n; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* e = ray_at_fn(x, ia);
-            ray_release(ia);
-            if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
-            ray_t* r = q_str_walk(e, leaf, arg, collapse);
-            ray_release(e);
-            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
-            out = ray_list_append(out, r);
-            ray_release(r);
-            if (RAY_IS_ERR(out)) return out;
-        }
-        if (!collapse) return out;
-        ray_t* c = q_collapse_list(out);
-        ray_release(out);
-        return c;
-    }
-    if (x->type == RAY_DICT) {
-        ray_t* k = ray_dict_keys(x);   /* borrowed */
-        ray_t* v = ray_dict_vals(x);   /* borrowed */
-        if (!k || !v) return ray_error("type", "walk: bad dict");
-        ray_t* nv = q_str_walk(v, leaf, arg, collapse);
-        if (!nv || RAY_IS_ERR(nv)) return nv;
-        ray_retain(k);
-        return ray_dict_new(k, nv);    /* consumes k + nv */
-    }
-    if (x->type == RAY_TABLE) {
-        int64_t nc = ray_table_ncols(x);
-        ray_t* out = ray_table_new(nc);
-        if (RAY_IS_ERR(out)) return out;
-        for (int64_t c = 0; c < nc; c++) {
-            ray_t* col = ray_table_get_col_idx(x, c);   /* borrowed */
-            ray_t* ncol = q_str_walk(col, leaf, arg, collapse);
-            if (!ncol || RAY_IS_ERR(ncol)) { ray_release(out); return ncol; }
-            out = ray_table_add_col(out, ray_table_col_name(x, c), ncol);
-            ray_release(ncol);
-            if (!out || RAY_IS_ERR(out)) return out;
-        }
-        return out;
-    }
-    return leaf(x, arg);
-}
 
 /* upper / lower — ASCII case shift for a string atom, a symbol atom, and the
- * string/symbol VECTOR forms; the container types recurse via q_str_walk. */
+ * string/symbol VECTOR forms. */
 static void str_case_bytes(const char* p, size_t n, char* b, int up) {
     for (size_t i = 0; i < n; i++)
         b[i] = (char)(up ? toupper((unsigned char)p[i]) : tolower((unsigned char)p[i]));
@@ -196,13 +143,13 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
     }
     return ray_error("type", "%s: expects a string or symbol", up ? "upper" : "lower");
 }
-ray_t* q_upper_fn(ray_t* x) { return q_str_walk(x, str_case_leaf, 1, 0); }
-ray_t* q_lower_fn(ray_t* x) { return q_str_walk(x, str_case_leaf, 0, 0); }
+ray_t* q_upper_fn(ray_t* x) { return str_case_leaf(x, 1); }
+ray_t* q_lower_fn(ray_t* x) { return str_case_leaf(x, 0); }
 
 /* trim / ltrim / rtrim — mode 0=both, 1=leading only, 2=trailing only.
  * A string atom strips ASCII whitespace; a simple (non-string) vector strips
  * leading/trailing NULLs (kdb's `trim 0N 0N 1 2 0N` -> 1 2); any other atom
- * passes through unchanged (`trim 42` -> 42).  Containers recurse. */
+ * passes through unchanged (`trim 42` -> 42). */
 static int str_is_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
@@ -259,25 +206,16 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
     ray_retain(x);              /* atom passthrough (trim 42 -> 42) */
     return x;
 }
-ray_t* q_trim_fn (ray_t* x) { return q_str_walk(x, str_trim_leaf, 0, 0); }
-ray_t* q_ltrim_fn(ray_t* x) { return q_str_walk(x, str_trim_leaf, 1, 0); }
-ray_t* q_rtrim_fn(ray_t* x) { return q_str_walk(x, str_trim_leaf, 2, 0); }
+ray_t* q_trim_fn (ray_t* x) { return str_trim_leaf(x, 0); }
+ray_t* q_ltrim_fn(ray_t* x) { return str_trim_leaf(x, 1); }
+ray_t* q_rtrim_fn(ray_t* x) { return str_trim_leaf(x, 2); }
 
 /* ===== string search family: like / ss / ssr (feat/q-string-fns) =========== */
 
 /* q `x like p` — glob match.  Reuses ray_like_fn for sym/str atoms and
- * vectors; a DICT maps the match over its values (kdb: keys kept). */
+ * vectors. */
 ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
-    if (x && x->type == RAY_DICT) {
-        ray_t* k = ray_dict_keys(x);   /* borrowed */
-        ray_t* v = ray_dict_vals(x);   /* borrowed */
-        if (!k || !v) return ray_error("type", "like: bad dict");
-        ray_t* nv = q_like_wrap(v, pattern);
-        if (!nv || RAY_IS_ERR(nv)) return nv;
-        ray_retain(k);
-        return ray_dict_new(k, nv);    /* consumes k + nv */
-    }
-    if (x && x->type == RAY_LIST) {    /* boxed list (e.g. dict values) */
+    if (x && x->type == RAY_LIST) {    /* boxed list */
         int64_t n = ray_len(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
