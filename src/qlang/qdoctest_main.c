@@ -2,7 +2,11 @@
  * transcripts) against the q engine.
  *
  *   qdoctest [--syntax-only] [--verbose] [--skip-file PATH]
- *            [--qcmd-only] [--results PATH] FILE|DIR...
+ *            [--qcmd-only] [--results PATH] [--emit DIR] FILE|DIR...
+ *
+ * --emit DIR: mirror each file's ACTUAL output for its MISMATCHING examples to
+ * DIR/<path> (see qdoc.h).  Fully-matching files write nothing, so diffing two
+ * emit trees shows exactly which examples a change moved.
  *
  * --syntax-only: only check each example parses (default: parse + eval + match
  * the expected output, whitespace-insensitive).  One fresh runtime per file
@@ -38,6 +42,7 @@ extern void ray_runtime_destroy(ray_runtime_t* rt);
 static qdoc_mode_t   g_mode    = QDOC_EVAL_MATCH;
 static int           g_verbose = 0;
 static int           g_qcmd_only = 0;  /* --qcmd-only: collect *.qcmd, ignore .md */
+static const char*   g_emit    = NULL; /* --emit DIR: actual-output mirror */
 static qdoc_result_t g_tot     = {0};
 static int           g_files   = 0;
 static int           g_skipped = 0;   /* pages skipped via the skip-list */
@@ -127,8 +132,8 @@ static int is_doc(const char* path) {
 /* Run one file against a fresh runtime; verbose goes to `out`. */
 static qdoc_result_t run_file(const char* path, FILE* out) {
     ray_runtime_t* rt = q_runtime_create(0, NULL);   /* fresh per file */
-    qdoc_result_t r = q_qdoc_run_file(path, g_mode, g_verbose || out != stdout,
-                                    out);
+    qdoc_result_t r = q_qdoc_run_file_emit(path, g_mode,
+                                         g_verbose || out != stdout, out, g_emit);
     if (rt) q_runtime_destroy(rt);
     return r;
 }
@@ -231,6 +236,8 @@ int main(int argc, char** argv) {
             skip_load(argv[++i]);
         else if (!strcmp(argv[i], "--results") && i + 1 < argc)
             results_path = argv[++i];
+        else if (!strcmp(argv[i], "--emit") && i + 1 < argc)
+            g_emit = argv[++i];
         else if (ntargets < (int)(sizeof targets / sizeof *targets))
             targets[ntargets++] = argv[i];
     }
@@ -238,7 +245,7 @@ int main(int argc, char** argv) {
     if (!ntargets) {
         fprintf(stderr, "usage: qdoctest [--syntax-only] [--verbose] "
                         "[--skip-file PATH] [--qcmd-only] [--results PATH] "
-                        "FILE|DIR...\n");
+                        "[--emit DIR] FILE|DIR...\n");
         skip_free();
         return 2;
     }

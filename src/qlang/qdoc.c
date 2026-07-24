@@ -8,6 +8,7 @@
 #include "qlang/q_console.h"
 #include "qlang/q_sys.h"    /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
+#include "store/fileio.h"   /* ray_mkdir_p — --emit mirrors the source tree */
 #include <rayforce.h>
 #include <string.h>
 #include <unistd.h>
@@ -36,6 +37,44 @@ static void normalize(const char* s, char* out, size_t osz) {
 static int ends_with(const char* s, const char* suf) {
     size_t a = strlen(s), b = strlen(suf);
     return a >= b && strcmp(s + a - b, suf) == 0;
+}
+
+/* --emit sink: the ACTUAL output of every MISMATCHING example, written as a
+ * .qcmd-shaped transcript at <dir>/<path>.  Opened lazily on the first
+ * mismatch, so a file that matches everywhere writes nothing and simply
+ * DISAPPEARS from the emit tree — an empty diff means nothing moved.
+ * Partial by construction (mismatches only): a diff register, not a runnable
+ * transcript. */
+typedef struct { const char* dir; const char* path; FILE* f; int dead; } qd_emit_t;
+
+static void emit_row(qd_emit_t* em, const char* prompt, const char* input,
+                     const char* actual) {
+    if (!em || !em->dir || em->dead) return;
+    if (!em->f) {
+        char full[PATH_MAX];
+        if (snprintf(full, sizeof full, "%s/%s", em->dir, em->path) >= (int)sizeof full) {
+            em->dead = 1;
+            return;
+        }
+        char* slash = strrchr(full, '/');
+        if (slash) { *slash = '\0'; (void)ray_mkdir_p(full); *slash = '/'; }
+        if (!(em->f = fopen(full, "w"))) { em->dead = 1; return; }
+    }
+    fprintf(em->f, "%s%s\n", (prompt && *prompt) ? prompt : "q)", input);
+    if (actual && *actual) {
+        char na[QD_OUT];
+        normalize(actual, na, sizeof na);   /* the form the gate compares */
+        if (*na) fprintf(em->f, "%s\n", na);
+    }
+}
+
+/* Error rows emit kdb's own display (`'type`) so the transcript stays q. */
+static void emit_err(qd_emit_t* em, const char* prompt, const char* input,
+                     ray_t* err) {
+    char buf[16];
+    const char* code = err ? (const char*)err->sdata : NULL;
+    snprintf(buf, sizeof buf, "'%.7s", code ? code : "error");
+    emit_row(em, prompt, input, buf);
 }
 
 /* Input-prompt prefix: `q)` or `q.<ident>)` (namespace transcripts after
@@ -115,7 +154,7 @@ static void classify(qdoc_result_t* r, int ok) {
 static void run_example(const char* input, const char* expect,
                         const char* tprompt, qdoc_mode_t mode,
                         int verbose, FILE* out, const char* path,
-                        qdoc_result_t* r) {
+                        qdoc_result_t* r, qd_emit_t* em) {
     r->examples++;
     q_console_reset();   /* drop any show/0N! output from a prior example */
 
@@ -145,9 +184,14 @@ static void run_example(const char* input, const char* expect,
         }
         char errcls[8];
         int want_error = expect_is_error(expect, errcls, sizeof errcls);
+        char gotcls[16];
+        int  was_err = 0;
         int ok;
         if (sr) {
             ok = want_error && error_row_matches(sr, errcls);
+            const char* code = (const char*)sr->sdata;
+            snprintf(gotcls, sizeof gotcls, "'%.7s", code ? code : "error");
+            was_err = 1;
             snprintf(got, sizeof got, "<error>");
             ray_error_free(sr);
         } else if (want_error) {
@@ -160,6 +204,7 @@ static void run_example(const char* input, const char* expect,
         }
         ok = ok && prompt_ok;
         classify(r, ok);
+        if (!ok && prompt_ok) emit_row(em, tprompt, input, was_err ? gotcls : got);
         if (!ok && verbose)
             fprintf(out, "  q)%.200s\n    FAIL(syscmd%s) got \"%.200s\" want \"%.200s\"\n",
                     input, prompt_ok ? "" : ":prompt", got, expect);
@@ -186,6 +231,7 @@ static void run_example(const char* input, const char* expect,
     ray_t* ast = q_parse(input);
     if (RAY_IS_ERR(ast)) {
         classify(r, 0);
+        emit_err(em, tprompt, input, ast);
         if (verbose) fprintf(out, "  q)%.200s\n    FAIL(parse)\n", input);
         return;
     }
@@ -215,6 +261,7 @@ static void run_example(const char* input, const char* expect,
         }
         char ne[QD_OUT];
         normalize(expect, ne, sizeof ne);
+        emit_err(em, tprompt, input, res);
         ray_release(res);
         classify(r, 0);
         if (verbose)
@@ -229,6 +276,7 @@ static void run_example(const char* input, const char* expect,
         got_ok[0] = '\0';
         if (!RAY_IS_NULL(res) && !is_assign) q_fmt(res, got_ok, sizeof got_ok);
         ray_release(res);
+        emit_row(em, tprompt, input, got_ok);
         classify(r, 0);
         if (verbose)
             fprintf(out, "  q)%.200s\n    FAIL(eval) got \"%.200s\" want error '%s\n",
@@ -262,14 +310,15 @@ static void run_example(const char* input, const char* expect,
         classify(r, 1);
     } else {
         classify(r, 0);
+        emit_row(em, tprompt, input, got);
         if (verbose)
             fprintf(out, "  q)%.200s\n    FAIL(eval) got \"%.200s\" want \"%.200s\"\n",
                     input, ng, ne);
     }
 }
 
-qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
-                            int verbose, FILE* out) {
+static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
+                              int verbose, FILE* out, qd_emit_t* em) {
     qdoc_result_t r = {0};
 
     /* Fixture resolution for `\l name` (h_l's QHOME search): point QHOME at the
@@ -329,7 +378,7 @@ qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
     char tprompt[80] = {0};
     int  have = 0;
 
-#define FLUSH() do { if (have) { run_example(input, expect, tprompt, mode, verbose, out, path, &r); \
+#define FLUSH() do { if (have) { run_example(input, expect, tprompt, mode, verbose, out, path, &r, em); \
                                  have = 0; expect[0] = '\0'; } } while (0)
 
     while (fgets(line, sizeof line, f)) {
@@ -385,5 +434,42 @@ qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
         close(cwd_fd);
     }
 #endif
+    return r;
+}
+
+qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
+                            int verbose, FILE* out) {
+    return run_path(path, mode, verbose, out, NULL);
+}
+
+/* Suites whose output IS a clock or an allocation counter: they differ every
+ * run, so emitting them would leave the committed tree permanently dirty and
+ * train readers to ignore it.  Nothing diffable was ever in them. */
+static const char* const emit_volatile[] = {
+    "test/q/dotq/bv.qcmd",      "test/q/dotq/dpts.qcmd",
+    "test/q/dotq/fc.qcmd",      "test/q/io/file-text.qcmd",
+    "test/q/phrases/temp.qcmd", "test/q/syscmd/o.qcmd",
+};
+
+static int is_volatile(const char* path) {
+    for (size_t i = 0; i < sizeof emit_volatile / sizeof *emit_volatile; i++)
+        if (ends_with(path, emit_volatile[i])) return 1;
+    return 0;
+}
+
+/* Mirror relative to the corpus root, so test/q/list/take.qcmd emits at
+ * <dir>/list/take.qcmd.  Non-corpus targets (docs) keep their path. */
+static const char* emit_rel(const char* path) {
+    const char* p = strstr(path, "test/q/");
+    return p ? p + 7 : path;
+}
+
+qdoc_result_t q_qdoc_run_file_emit(const char* path, qdoc_mode_t mode,
+                                 int verbose, FILE* out, const char* emit_dir) {
+    if (!emit_dir || !*emit_dir || is_volatile(path))
+        return run_path(path, mode, verbose, out, NULL);
+    qd_emit_t em = { .dir = emit_dir, .path = emit_rel(path) };
+    qdoc_result_t r = run_path(path, mode, verbose, out, &em);
+    if (em.f) fclose(em.f);
     return r;
 }
