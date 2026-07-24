@@ -254,6 +254,38 @@ ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k) {
     return index_r(x, ix[0], ix + 1, k - 1);
 }
 
+/* `_` drop's dict arms (ref/drop.md).  An int-atom left count-drops entries
+ * (first n, or last |n| when n<0) by dropping n from the key and value vectors
+ * and rebuilding.  Otherwise drop named entries: the doc's sub-dictionary
+ * extraction `(key d) except keys` re-indexed as d[remaining].  The dict may be
+ * either operand; a dict LEFT only drops an atom key (a right-hand key VECTOR is
+ * 'type, ref/drop.md).  NULL = neither operand a dict (the wrapper falls through). */
+ray_t* q_index_drop_dict(ray_t* n, ray_t* list) {
+    ray_t *d, *keys;
+    if (list && list->type == RAY_DICT && !q_type_is_keyed(list)) {
+        int64_t cnt;
+        if (q_type_strict_i64(n, &cnt)) {
+            ray_t* nk = q_drop_wrap(n, ray_dict_keys(list));
+            if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_TYPE);
+            ray_t* nv = q_drop_wrap(n, ray_dict_vals(list));
+            if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv ? nv : q_err(QE_TYPE); }
+            return ray_dict_new(nk, nv);
+        }
+        d = list; keys = n;
+    } else if (n && n->type == RAY_DICT && !q_type_is_keyed(n)) {
+        if (!list || !ray_is_atom(list)) return q_err(QE_TYPE);
+        d = n; keys = list;
+    } else {
+        return NULL;
+    }
+    ray_t* rem = ray_except_fn(ray_dict_keys(d), keys);
+    if (!rem || RAY_IS_ERR(rem)) return rem ? rem : q_err(QE_TYPE);
+    ray_t* nv = q_index_at(d, &rem, 1);
+    if (!nv || RAY_IS_ERR(nv)) { ray_release(rem); return nv ? nv : q_err(QE_TYPE); }
+    nv = q_typed_empty_like(nv, ray_dict_vals(d));   /* dropping every key keeps the value type */
+    return ray_dict_new(rem, nv);
+}
+
 /* ===== the amend recursion =============================================== */
 
 static ray_t* amend_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
