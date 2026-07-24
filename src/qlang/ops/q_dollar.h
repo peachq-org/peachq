@@ -20,9 +20,10 @@ ray_t* q_dollar(ray_t* x, ray_t* y);
  * ("j" "f" "i" "h" "b" "e" "s"; upper-case = Tok), or a short atom holding the
  * kdb type number (positive = cast, negative = Tok per ref/tok.md — the
  * rayfall tags already equal the kdb numbers).  The null symbol ` is Tok "S".
- * *is_tok is set to 1 for Tok (string-parse) designators.  Returns 0
- * (RAY_LIST — never a valid target) for unknown or deferred designators. */
-int8_t q_cast_designator(ray_t* t, int* is_tok);
+ * *is_tok is set to 1 for Tok (string-parse) designators.  *is_identity (may be
+ * NULL) is set to 1 for the `0h`/`"*"` Identity designators (cast.md:40).
+ * Returns 0 (RAY_LIST — never a valid target) for unknown/identity/deferred. */
+int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity);
 
 /* Convert x to the tag type with q semantics.  Exactly: RAY_LIST distributes
  * per element (collapsed); float ATOMS and float VECTORS pre-round via rint
