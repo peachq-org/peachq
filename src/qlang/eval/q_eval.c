@@ -187,12 +187,6 @@ static void release_args(ray_t** argv, int64_t argc) {
         if (argv[i]) ray_release(argv[i]);
 }
 
-/* literal elements are stored into containers: materialize boundary */
-static ray_t* store_mat(ray_t* r) {
-    if (r && ray_is_lazy(r)) return ray_lazy_materialize(r);
-    return r;
-}
-
 /* `;` statement sequence: LEFT-to-right; the sequence's value is its LAST
  * statement's — an empty statement yields the silent null, so `2+2;` prints
  * nothing (kdb console; parser_pinned_defects.qcmd defect 3). */
@@ -227,7 +221,7 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
     if (reserved) return q_err(QE_ASSIGN);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
-    rv = store_mat(rv);
+    rv = q_eval_apply_concrete(rv);
     if (RAY_IS_ERR(rv)) return rv;
     ray_t* idxv[EVAL_MAX_ARGS];
     ray_t* err = eval_args_rtl(te + 1, k, idxv);
@@ -246,7 +240,7 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
                                  : ray_env_set(te[0]->i64, amended);
             if (e2 != RAY_OK) ret = q_err(QE_ASSIGN);
             else if (!opv) { ray_retain(rv); ret = rv; }
-            else ret = store_mat(q_eval_apply_value(amended, idxv, k));
+            else ret = q_eval_apply_concrete(q_eval_apply_value(amended, idxv, k));
             ray_release(amended);
         }
     }
@@ -271,8 +265,9 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
     ray_release(s);
     if (reserved) return q_err(QE_ASSIGN);
-    ray_t* v = q_eval(rhs);
+    ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
+    Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
     int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
     int local = in_frame &&
                 (!is_global || ray_env_get_local(target->i64) != NULL);
@@ -405,7 +400,7 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
     if (n < 1) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
     ray_t* cnt = q_eval(e[0]);
     if (RAY_IS_ERR(cnt)) return cnt;
-    cnt = store_mat(cnt);
+    cnt = q_eval_apply_concrete(cnt);
     if (RAY_IS_ERR(cnt)) return cnt;
     int64_t times;
     int ok = cnt && !RAY_ATOM_IS_NULL(cnt) && q_type_strict_i64(cnt, &times);
@@ -449,7 +444,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     ray_release(cur);
     ray_release(rv);
     if (RAY_IS_ERR(nv)) return nv;
-    nv = store_mat(nv);
+    nv = q_eval_apply_concrete(nv);
     if (RAY_IS_ERR(nv)) return nv;
     int local = q_eval_apply_frame_depth() > 0;
     if (local) {
@@ -470,7 +465,7 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* argv[EVAL_MAX_ARGS];
     if (n > EVAL_MAX_ARGS) return q_err(QE_LIMIT);
     for (int64_t i = n - 1; i >= 0; i--) {
-        argv[i] = e[i] ? store_mat(q_eval(e[i])) : RAY_NULL_OBJ;
+        argv[i] = e[i] ? q_eval_apply_concrete(q_eval(e[i])) : RAY_NULL_OBJ;
         if (RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
             for (int64_t j = i + 1; j < n; j++) ray_release(argv[j]);
@@ -478,8 +473,10 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
         }
     }
     ray_t* l = ray_list_new(n > 0 ? n : 1);
-    for (int64_t i = 0; i < n; i++)
+    for (int64_t i = 0; i < n; i++) {
+        Q_ASSERT_CONCRETE(argv[i]);        /* container-append tripwire */
         l = ray_list_append(l, argv[i]);
+    }
     release_args(argv, n);
     if (RAY_IS_ERR(l)) return l;
     ray_t* c = q_list_collapse(l);

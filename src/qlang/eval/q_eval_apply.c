@@ -28,6 +28,7 @@
 #include "ops/ops.h"
 #include "table/dict.h"
 #include "table/sym.h"
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -162,13 +163,17 @@ static ray_t* collapse(ray_t* l) {          /* consumes l, returns owned */
     return c;
 }
 
-/* materialize boundary: values STORED INTO CONTAINERS leave the DAG here
- * (design-doc obligation 2; the graph-steal rule applies once, at this one
- * home).  Consumes r. */
-static ray_t* store_mat(ray_t* r) {
+/* THE force home (materialization phase 1): the ONLY site that turns a lazy
+ * DAG handle into a concrete value (ray_lazy_materialize CONSUMES its input and
+ * is a no-op on a concrete value).  Errors/NULL pass through. */
+ray_t* q_eval_apply_concrete(ray_t* r) {
     if (r && ray_is_lazy(r)) return ray_lazy_materialize(r);
     return r;
 }
+
+#ifdef DEBUG
+void q_eval_apply_assert_concrete(ray_t* v) { assert(!ray_is_lazy(v)); }
+#endif
 
 /* ===== result construction (carve-eval quarry: internal.h trims) ========= */
 
@@ -427,9 +432,9 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
 /* ===== L1/L2 atomic lifts over containers ================================ */
 
 /* the per-column walk lives in the table home (q_table_map_cols); these colfns
- * own the DAG materialization (store_mat) at the store boundary. */
+ * force each column at the container-append boundary (q_eval_apply_concrete). */
 static ray_t* atomic1_col(void* ctx, ray_t* col) {
-    return store_mat(atomic1((ray_unary_fn)(uintptr_t)ctx, col));
+    return q_eval_apply_concrete(atomic1((ray_unary_fn)(uintptr_t)ctx, col));
 }
 
 static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
@@ -488,7 +493,7 @@ typedef struct { ray_binary_fn f; ray_t* other; int other_left; } a2ctx;
 
 static ray_t* atomic2_col(void* vctx, ray_t* col) {
     a2ctx* c = (a2ctx*)vctx;
-    return store_mat(c->other_left ? atomic2(c->f, c->other, col)
+    return q_eval_apply_concrete(c->other_left ? atomic2(c->f, c->other, col)
                                    : atomic2(c->f, col, c->other));
 }
 
@@ -532,7 +537,7 @@ static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
         ray_t* vs = ray_list_new(nc > 0 ? nc : 1);
         for (int64_t c = 0; c < nc; c++) {
             ray_t* col = ray_table_get_col_idx(x, c);      /* borrowed */
-            ray_t* r = store_mat(q_eval_apply(fv, row, &col, 1));
+            ray_t* r = q_eval_apply_concrete(q_eval_apply(fv, row, &col, 1));
             if (RAY_IS_ERR(r)) { ray_release(ks); ray_release(vs); return r; }
             int64_t nm = ray_table_col_name(x, c);
             ks = ray_vec_append(ks, &nm);
@@ -551,7 +556,7 @@ static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* x) {
         ray_t* v = ray_dict_vals(x);
         ray_t* nv;
         if (q_type_is_keyed(x)) nv = map1(fv, row, v);
-        else                     nv = store_mat(q_eval_apply(fv, row, &v, 1));
+        else                     nv = q_eval_apply_concrete(q_eval_apply(fv, row, &v, 1));
         if (RAY_IS_ERR(nv)) return nv;
         ray_t* k = ray_dict_keys(x);
         ray_retain(k);
@@ -562,7 +567,7 @@ static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* x) {
         ray_t* out = ray_table_new(nc);
         for (int64_t c = 0; c < nc; c++) {
             ray_t* col = ray_table_get_col_idx(x, c);
-            ray_t* r = store_mat(q_eval_apply(fv, row, &col, 1));
+            ray_t* r = q_eval_apply_concrete(q_eval_apply(fv, row, &col, 1));
             if (RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_table_add_col(out, ray_table_col_name(x, c), r);
             ray_release(r);
@@ -574,14 +579,20 @@ static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* x) {
 
 /* ===== kernel invocation ================================================= */
 
-/* materialize a lazy arg for a non-lazy-aware kernel (call_fn idiom) */
+/* boundary seam + wrapper-entry tripwire (materialization phase 1): a wrapper
+ * body receives ONLY concrete args, so force here and assert the postcondition
+ * (ASan-enforced — a phase-2 leak trips it).  A lazy-AWARE kernel (sum et al.)
+ * is the exception: it takes the handle to chain the DAG, and is the one
+ * RAY_FN_LAZY_AWARE reader. */
 static ray_t* force_arg(ray_t* fv, ray_t* a, int* owned) {
     *owned = 0;
-    if (a && !(fv->attrs & RAY_FN_LAZY_AWARE) && ray_is_lazy(a)) {
+    if (fv->attrs & RAY_FN_LAZY_AWARE) return a;
+    if (a && ray_is_lazy(a)) {
         ray_retain(a);
-        a = ray_lazy_materialize(a);
+        a = q_eval_apply_concrete(a);
         *owned = 1;
     }
+    Q_ASSERT_CONCRETE(a);
     return a;
 }
 
@@ -687,7 +698,7 @@ static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
     ray_t* l = ray_list_new(len > 0 ? len : 1);
     for (int64_t i = 0; i < len; i++) {
         ray_t* ei = q_index_elem_at(x, i);
-        ray_t* r = store_mat(q_eval_apply(fv, frow, &ei, 1));
+        ray_t* r = q_eval_apply_concrete(q_eval_apply(fv, frow, &ei, 1));
         ray_release(ei);
         if (RAY_IS_ERR(r)) { ray_release(l); return r; }
         l = ray_list_append(l, r);
@@ -877,7 +888,7 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
                 ray_t* e = (it[j] && RAY_IS_NULL(it[j])) ? args[ai++] : it[j];
                 if (!e) e = RAY_NULL_OBJ;
                 ray_retain(e);
-                e = store_mat(e);
+                e = q_eval_apply_concrete(e);
                 if (RAY_IS_ERR(e)) { ray_release(out); return e; }
                 out = ray_list_append(out, e);
                 ray_release(e);
@@ -922,7 +933,7 @@ static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
     return r;
 }
 
-ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
     if (ray_eval_is_interrupted()) return q_err(QE_STOP);
     if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
@@ -1021,6 +1032,15 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     return call_kernel(fv, args, n);
 }
 
+/* THE materialization dial (Future A default, materialization phase 1): every
+ * verb/kernel application funnels through here, so forcing the result is what
+ * makes phase 1 FULL materialization — no lazy handle ever becomes a q value.
+ * Deleting the q_eval_apply_concrete call is exactly the phase-2 / Future B (partial
+ * fusion) flip; the boundary seams then catch lazy at each observable edge. */
+ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+    return q_eval_apply_concrete(apply_inner(fv, row, args, n));
+}
+
 /* ===== the public value-apply seam ======================================= */
 
 int q_eval_apply_is_fn(ray_t* v) {
@@ -1071,7 +1091,7 @@ static ray_t* trap_catch(ray_t* r, ray_t* e) {
                            code ? (int64_t)strlen(code) : 0);
     ray_error_free(r);
     if (!msg || RAY_IS_ERR(msg)) return msg ? msg : q_err(QE_OOM);
-    ray_t* c = store_mat(q_eval_apply(e, NULL, &msg, 1));
+    ray_t* c = q_eval_apply_concrete(q_eval_apply(e, NULL, &msg, 1));
     ray_release(msg);
     return c;
 }
@@ -1126,9 +1146,9 @@ static ray_t* amend_value(ray_t** args, int64_t n, int dot) {
  * Index At; 3 args on a callable head Trap At; 3-4 args on a data head
  * Amend At (machinery: ops/q_index.c; a sym-atom d name-lifts). */
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
-    if (n == 2) return store_mat(q_eval_apply_value(args[0], &args[1], 1));
+    if (n == 2) return q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
     if (n == 3 && q_eval_apply_is_fn(args[0])) {
-        ray_t* r = store_mat(q_eval_apply_value(args[0], &args[1], 1));
+        ray_t* r = q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
         return trap_catch(r, args[2]);
     }
     if (n == 3 || n == 4) return amend_value(args, n, 0);
@@ -1159,7 +1179,7 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
             return err ? err : q_err(QE_TYPE);
         }
     }
-    ray_t* r = store_mat(q_eval_apply_value(args[0], av, k));
+    ray_t* r = q_eval_apply_concrete(q_eval_apply_value(args[0], av, k));
     for (int64_t j = 0; j < k; j++) ray_release(av[j]);
     return r;
 }
@@ -1171,7 +1191,7 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
 int q_eval_apply_truthy(ray_t* v, ray_t** err) {
     *err = NULL;
     if (!v) { *err = q_err(QE_TYPE); return 0; }
-    v = ray_lazy_materialize(v);
+    v = q_eval_apply_concrete(v);                     /* boundary seam: truthiness */
     if (RAY_IS_ERR(v)) { *err = v; return 0; }
     int8_t t = v->type < 0 ? (int8_t)-v->type : v->type;
     if (t == RAY_F64 || t == RAY_F32) {

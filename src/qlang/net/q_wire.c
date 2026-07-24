@@ -3,7 +3,8 @@
  * q-layer TU; `-8!`/`-9!` dispatch lives in q_registry.c's `!` wrapper. */
 #include "qlang/net/q_wire.h"
 #include "qlang/q_err.h"      /* q_err / q_err_class — full class on the wire */
-#include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
+                                 * q_eval_apply_concrete — the IPC boundary force */
 #include "qlang/q_registry.h"   /* q_list_collapse */
 #include "qlang/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
@@ -385,6 +386,8 @@ out:
 }
 
 ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype) {
+    ray_retain(x);
+    x = q_eval_apply_concrete(x);              /* IPC boundary seam: no lazy on the wire */
     q_wire_wbuf_t b = {0};
     /* 8-byte header placeholder: endian=LE, msgtype, uncompressed, pad, len */
     uint8_t hdr[8] = { 0x01, msgtype, 0x00, 0x00, 0, 0, 0, 0 };
@@ -392,8 +395,10 @@ ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype) {
         ray_t* e = b.err ? b.err : q_err(QE_TYPE);
         b.err = NULL;
         q_wire_wbuf_free(&b);
+        ray_release(x);
         return e;
     }
+    ray_release(x);
     if (b.len > INT32_MAX) {
         q_wire_wbuf_free(&b);
         return q_err(QE_LIMIT);
