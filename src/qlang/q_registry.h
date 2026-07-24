@@ -139,6 +139,11 @@ ray_t* q_list_collapse(ray_t* l);
  * (apply, dollar) reach it without the poisoned q_registry_internal.h. */
 ray_t* q_table_map_cols(ray_t* (*colfn)(void* ctx, ray_t* col), void* ctx, ray_t* t);
 
+/* An EMPTY boxed result inherits `proto`'s element type, so a selection that
+ * takes nothing keeps its domain.  DEFINED in ops/q_list.c; declared here (like
+ * q_list_collapse) for the env-using apply module. */
+ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);
+
 /* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
  * appears in q-space; values in flight are charv; columns stay pooled).
  * DEFINED in ops/q_str.c; declared here (env-safe public reach). ---- */

@@ -224,11 +224,13 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */
     }
-    /* `()!()` — rayfall's dict rejects the empty general list, so build it
-     * directly: empty general-list keys, empty boxed vals. */
-    if (x->type == RAY_LIST && ray_len(x) == 0 && ray_len(y) == 0) {
+    /* An EMPTY dict is built directly: rayfall's dict rejects the empty general
+     * list (`()!()`) and drops a typed empty's domain, but `` type value
+     * (`long$())!`symbol$() `` must stay 11h. */
+    if (q_builtins_count_long(y) == 0) {
         ray_retain(x);
-        return ray_dict_new(x, ray_list_new(0)); /* consumes x + fresh empty list */
+        ray_retain(y);
+        return ray_dict_new(x, y);               /* consumes both retains */
     }
     ray_t* ex = NULL;
     ray_t* ey = NULL;
