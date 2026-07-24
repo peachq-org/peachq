@@ -2,9 +2,10 @@
  * PURE value semantics: values -> values, no env/runtime state.  q_dollar is
  * the generic registry row; q_dollar_pad / q_dollar_cast / q_dollar_tok /
  * q_dollar_enum / q_dollar_mmu are the per-operation homes, exposed with types
- * for reuse.  The per-target q_cast_* matrix and the general int-atom helpers
- * (q_is_int_atom, q_iatom_val, ...) live here too (q_registry_internal.h). */
+ * for reuse.  The per-target q_cast_* matrix lives here too; the int-atom
+ * admission helpers and tag<->name vocabulary moved to q_type.c (q_type.h). */
 #include "qlang/ops/q_dollar.h"
+#include "qlang/q_type.h"  /* int/float admission + q_type_rayname vocabulary */
 #include "qlang/q_err.h"
 #include "qlang/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
@@ -19,82 +20,6 @@
 
 /* Designator resolution is separate from conversion so C callers (future
  * bool-widening / promotion work) can invoke q_dollar_cast(tag, x) directly. */
-
-/* Is vector tag `t` legal as a ROW INDEX (uniform-structure-dispatch §2.2:
- * any int-backed index indexes)?  Returns the element width in bytes so
- * consumers key on WIDTH, never enumerate tags: 8/4/2 read signed, 1 reads
- * unsigned (U8); 0 = not an int index.  SYM is i64-backed but EXCLUDED —
- * a sym index means column access, never a row.  BOOL is excluded pending
- * a doc citation for boolean indexing.  Atom callers pass -atom->type;
- * every accepted ATOM stores its payload in .i64 (vec/atom.c), so as_i64's
- * fallback reads it correctly. */
-int q_int_index_width(int8_t t) {
-    switch (t) {
-    case RAY_I64: return 8;
-    case RAY_I32: return 4;
-    case RAY_I16: return 2;
-    case RAY_BYTE_ONLY: return 1;
-    default:
-        if (RAY_IS_TEMPORAL64(t)) return 8;   /* timestamp, timespan */
-        if (RAY_IS_TEMPORAL32(t)) return 4;   /* month date minute second time */
-        return 0;
-    }
-}
-
-/* Strict cast: cast-or-fail, TYPE-strict (an integral-valued float refuses);
- * typed nulls pass through as sentinel payloads — value checks stay at the
- * call site.  Accepted set = the q_int_index_width law: I64/I32/I16/U8 +
- * int-backed temporal ATOMS; never sym/bool/float/structures.
- * Returns 1 + *out, or 0 on refusal. */
-int q_strict_i64(ray_t* x, int64_t* out) {
-    if (!x || x->type >= 0) return 0;
-    switch (q_int_index_width((int8_t)-x->type)) {
-    case 8: *out = x->i64;          return 1;
-    case 4: *out = (int64_t)x->i32; return 1;
-    case 2: *out = (int64_t)x->i16; return 1;
-    case 1: *out = (int64_t)x->u8;  return 1;
-    default: return 0;
-    }
-}
-
-/* Float twin: F64/F32/DATETIME (f64-slot payloads) + the q_strict_i64 set. */
-int q_strict_f64(ray_t* x, double* out) {
-    if (!x || x->type >= 0) return 0;
-    if (x->type == -RAY_F64 || RAY_IS_TEMPORALF(-x->type)) { *out = x->f64; return 1; }
-    if (x->type == -RAY_F32) { *out = (double)(float)x->f64; return 1; }
-    int64_t v;
-    if (!q_strict_i64(x, &v)) return 0;
-    *out = (double)v;
-    return 1;
-}
-
-/* Throwing gates for TERMINAL sites (failure = error): NULL on success, else
- * an owned 'type error carrying `what` — short site context, "verb: role".
- * The silent probe form above is for dispatch sites (failure = next arm). */
-ray_t* q_i64_or_err(ray_t* x, int64_t* out, const char* what) {
-    return q_strict_i64(x, out) ? NULL : q_err(QE_TYPE);
-}
-ray_t* q_f64_or_err(ray_t* x, double* out, const char* what) {
-    return q_strict_f64(x, out) ? NULL : q_err(QE_TYPE);
-}
-
-/* Type-facts helpers (I64/I32/I16 only — vs/sv base-encode domain). */
-int q_is_int_atom(ray_t* x) {
-    return x && (x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16);
-}
-int q_is_int_vec(ray_t* x) {
-    return x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16);
-}
-int64_t q_ivec_get(ray_t* v, int64_t i) {
-    const void* d = ray_data(v);
-    return v->type == RAY_I64 ? ((const int64_t*)d)[i]
-         : v->type == RAY_I32 ? (int64_t)((const int32_t*)d)[i]
-                              : (int64_t)((const int16_t*)d)[i];
-}
-int64_t q_iatom_val(ray_t* x) {
-    return x->type == -RAY_I64 ? x->i64
-         : x->type == -RAY_I32 ? (int64_t)x->i32 : (int64_t)x->i16;
-}
 
 int8_t q_cast_designator(ray_t* t, int* is_tok) {
     *is_tok = 0;
@@ -175,60 +100,10 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
     return 0;
 }
 
-/* RAY vector type -> q type-name (ref/key.md "type of a vector"). Mirrors the
- * cast-designator name map above for every castable tag; `guid` is display-only
- * (no `$`guid designator, so it has no entry there). No `default:` — total over
- * the value band (#209): a new datatype refuses to build until it names its
- * q-spelling here, the single home for empty-vec display (q_fmt) + `meta`/`key`
- * type rows. LIST/STR have no scalar vector-type name (a STR vector is a list of
- * strings in the provisional model); the -RAY_STR atom shim names `char` at the
- * call sites (q_console pipe render/q_key_wrap). */
-const char* q_type_qname(int8_t t) {
-    switch ((ray_type_e)t) {
-    case RAY_BOOL:      return "boolean";
-    case RAY_BYTE_ONLY: return "byte";
-    case RAY_I16:       return "short";
-    case RAY_I32:       return "int";
-    case RAY_I64:       return "long";
-    case RAY_F32:       return "real";
-    case RAY_F64:       return "float";
-    case RAY_SYM:       return "symbol";
-    case RAY_GUID:      return "guid";       /* `key 0#0Ng` -> `guid (was a gap) */
-    case RAY_DATE:      return "date";
-    case RAY_MONTH:     return "month";
-    case RAY_MINUTE:    return "minute";
-    case RAY_SECOND:    return "second";
-    case RAY_TIME:      return "time";
-    case RAY_TIMESPAN:  return "timespan";
-    case RAY_TIMESTAMP: return "timestamp";
-    case RAY_DATETIME:  return "datetime";
-    case RAY_CHARV: return "char";
-    case RAY_LIST: case RAY_STR: return NULL;   /* boxed / physical: unnamed */
-    }
-    return NULL;   /* unreachable: value band is exhausted above */
-}
-
-/* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
-static const char* tag_rayname(int8_t tag) {
-    switch (tag) {
-    case RAY_BOOL: return "BOOL"; case RAY_BYTE_ONLY: return "U8";
-    case RAY_I16:  return "I16";  case RAY_I32: return "I32";
-    case RAY_I64:  return "I64";  case RAY_F64: return "F64";
-    case RAY_DATE: return "DATE"; case RAY_TIME: return "TIME";
-    case RAY_MONTH: return "MONTH";
-    case RAY_MINUTE: return "MINUTE";
-    case RAY_SECOND: return "SECOND";
-    case RAY_TIMESPAN: return "TIMESPAN";
-    case RAY_TIMESTAMP: return "TIMESTAMP";
-    case RAY_DATETIME: return "DATETIME";
-    default:       return NULL;
-    }
-}
-
 /* tag -> base `as` spelling, then delegate; 'nyi when the tag has no spelling
  * (LIST/GUID/F32 targets). */
 static ray_t* cast_delegate(int8_t tag, ray_t* x) {
-    const char* nm = tag_rayname(tag);
+    const char* nm = q_type_rayname(tag);
     if (!nm) return q_err(QE_NYI);
     ray_t* ts = ray_sym(ray_sym_intern(nm, strlen(nm)));
     if (!ts || RAY_IS_ERR(ts)) return ts;
@@ -243,15 +118,15 @@ static ray_t* cast_delegate(int8_t tag, ray_t* x) {
  * (builtins.c:1334), contradicting its OWN vector arm `_v != 0`
  * (builtins.c:1004): "b"$0N -> 0b vs "b"$enlist 0N -> ,1b.  Intercepted here
  * because builtins.c is frozen.  Sources ride the #187 strict-cast home, not a
- * new ladder: q_strict_i64 = ints + int-backed temporals, q_strict_f64 adds
+ * new ladder: q_type_strict_i64 = ints + int-backed temporals, q_type_strict_f64 adds
  * F64/F32/DATETIME. */
 static ray_t* cast_bool(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_BOOL || x->type == RAY_BOOL) { ray_retain(x); return x; }
     int64_t i;
-    if (q_strict_i64(x, &i)) return ray_bool(i != 0);
+    if (q_type_strict_i64(x, &i)) return ray_bool(i != 0);
     double d;
-    if (q_strict_f64(x, &d)) return ray_bool(d != 0.0);   /* 0n is NaN; NaN != 0 -> 1b */
+    if (q_type_strict_f64(x, &d)) return ray_bool(d != 0.0);   /* 0n is NaN; NaN != 0 -> 1b */
     /* string atom: emptiness, not a numeric law — the provisional string model
      * (ARCHITECTURE.md) owns it; preserved verbatim from base's arm. */
     if (x->type == -RAY_STR) return ray_bool(ray_str_len(x) > 0);
@@ -279,7 +154,7 @@ static ray_t* cast_bool(ray_t* x) {
  * chars, producing a native string (openq has no char-atom type distinct from
  * a 1-char string).  Runs BEFORE the generic RAY_LIST distribution so a boxed
  * integer list packs into ONE string rather than a list of 1-char strings
- * (q_collapse_list refuses to pack -RAY_STR atoms). */
+ * (q_list_collapse refuses to pack -RAY_STR atoms). */
 static ray_t* cast_str(ray_t* x) {
     if (x && x->type == -RAY_STR) { ray_retain(x); return x; }   /* identity */
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV)) {  /* charv identity */
@@ -288,15 +163,15 @@ static ray_t* cast_str(ray_t* x) {
     if (x && x->type == RAY_BYTE_ONLY)                                  /* byte vec */
         return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
     if (x && x->type == -RAY_BYTE_ONLY) return ray_char(x->u8);  /* byte atom -> char atom */
-    if (q_is_int_atom(x)) {
-        return ray_char((uint8_t)q_iatom_val(x));   /* `char$65 -> "A" (atom) */
+    if (q_type_is_int_atom(x)) {
+        return ray_char((uint8_t)q_type_iatom_val(x));   /* `char$65 -> "A" (atom) */
     }
-    if (q_is_int_vec(x)) {
+    if (q_type_is_int_vec(x)) {
         int64_t n = ray_len(x);
         char* buf = (char*)malloc(n ? (size_t)n : 1);
         if (!buf) return q_err(QE_WSFULL);
         for (int64_t i = 0; i < n; i++)
-            buf[i] = (char)q_ivec_get(x, i);
+            buf[i] = (char)q_type_ivec_get(x, i);
         ray_t* r = ray_str(buf, (size_t)n);
         free(buf);
         return r;
@@ -502,7 +377,7 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     /* Precedes the switch by ORDER, not preference: "c"$ packs a boxed list
      * into ONE string, so it must beat the per-tag arms. */
     if (tag == RAY_CHARV)
-        return q_charv_out(cast_str(x));
+        return q_str_charv_out(cast_str(x));
     /* numeric cast of char text = code points (`int$"ABC" -> 65 66 67i;
      * `float$"AC" -> 65 67f, ref/log.md:101) — via the byte cast, then cast. */
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV) &&
@@ -554,12 +429,12 @@ static ray_t* tok_leaf(ray_t* x, int64_t tag) {
             ray_release(r);
             if (RAY_IS_ERR(out)) return out;
         }
-        ray_t* c = q_collapse_list(out);
+        ray_t* c = q_list_collapse(out);
         ray_release(out);
         return c;
     }
     const char* tp; int64_t tn;
-    if (!q_text_bytes(x, &tp, &tn))
+    if (!q_str_text_bytes(x, &tp, &tn))
         return q_err(QE_TYPE);
     return q_tok((int8_t)tag, tp, tp ? (size_t)tn : 0);
 }
@@ -590,7 +465,7 @@ static ray_t* pad_leaf(ray_t* x, int64_t w) {
         return out;
     }
     const char* p; int64_t pn;
-    if (!q_text_bytes(x, &p, &pn)) return q_err(QE_TYPE);
+    if (!q_str_text_bytes(x, &p, &pn)) return q_err(QE_TYPE);
     if (w == INT64_MIN) return q_err(QE_LIMIT);   /* -w is UB */
     int64_t width = w < 0 ? -w : w;
     int64_t copy = pn < width ? pn : width;
@@ -822,7 +697,7 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
             out = ray_list_append(out, r);
             ray_release(r);
         }
-        ray_t* c = q_collapse_list(out);
+        ray_t* c = q_list_collapse(out);
         ray_release(out);
         return c;
     }
