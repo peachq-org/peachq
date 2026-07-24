@@ -6,7 +6,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_handles.h"
 #include "qlang/q_err.h"
-#include "qlang/q_registry_internal.h" /* q_text_bytes, q_strict_i64 */
+#include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i64, ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
@@ -203,7 +203,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
     int nl = qh < 0;
     const char* yp; int64_t yn;
     if (y && y->type == RAY_BYTE_ONLY) { yp = (const char*)ray_data(y); yn = ray_len(y); }
-    else if (!(y && q_text_bytes(y, &yp, &yn))) yp = NULL;
+    else if (!(y && q_str_text_bytes(y, &yp, &yn))) yp = NULL;
     if (yp) {
         if (yn > 0 && write_all(fd, yp, yn) < 0) return q_err(QE_IO);
         if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
@@ -217,7 +217,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
             ray_release(ia);
             if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
             const char* ip; int64_t in_;
-            if (!q_text_bytes(it, &ip, &in_)) { ray_release(it); return q_err(QE_TYPE); }
+            if (!q_str_text_bytes(it, &ip, &in_)) { ray_release(it); return q_err(QE_TYPE); }
             if (in_ > 0 && write_all(fd, ip, in_) < 0) { ray_release(it); return q_err(QE_IO); }
             ray_release(it);
             if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
@@ -232,7 +232,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
 static ray_t* console_write_h(int64_t qh, ray_t* y) {
     int nl = qh < 0;
     const char* yp; int64_t yn;
-    if (y && q_text_bytes(y, &yp, &yn)) {
+    if (y && q_str_text_bytes(y, &yp, &yn)) {
         q_console_write(yp, (size_t)yn);
         if (nl) q_console_write("\n", 1);
     } else if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
@@ -243,7 +243,7 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
             ray_release(ia);
             if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
             const char* ip; int64_t in_;
-            if (!q_text_bytes(it, &ip, &in_)) {
+            if (!q_str_text_bytes(it, &ip, &in_)) {
                 ray_release(it);
                 return q_err(QE_TYPE);
             }
@@ -316,7 +316,7 @@ ray_t* q_handles_close(int64_t qh) {
 ray_t* q_handles_read1(int64_t fd, ray_t* count) {
     if (q_handles_kind(fd) != Q_HANDLE_FIFO) return NULL;
     int64_t want;
-    if (!q_strict_i64(count, &want)) return q_err(QE_TYPE);
+    if (!q_type_strict_i64(count, &want)) return q_err(QE_TYPE);
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (want <= 0) want = 65536;
     uint8_t* buf = (uint8_t*)malloc((size_t)want);
