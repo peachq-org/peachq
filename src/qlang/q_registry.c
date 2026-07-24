@@ -66,7 +66,7 @@ static bool    g_building = false;   /* debug re-entry guard (see header note) *
  * intercepts them by pointer identity (literal ctors) or leaves them 'nyi
  * (compose, its wave pending) — the bodies never run, so all share spec_nyi.
  * Accessors return BORROWED refs, NULL before init. */
-enum { SPEC_list, SPEC_table, SPEC_keyed_table, SPEC_compose, SPEC_N };
+enum { SPEC_list, SPEC_compose, SPEC_N };
 
 enum spec_kind { SK_UNARY, SK_BINARY, SK_VARY };   /* -> ray_fn_unary/binary/vary */
 
@@ -78,11 +78,9 @@ static ray_t* spec_nyi(ray_t** args, int64_t n) {
 typedef struct { const char* wire; uint8_t kind; uint32_t flags; void* fn; } q_special_t;
 
 static const q_special_t SPECIALS[SPEC_N] = {
-    /* ctx constructor heads: SPECIAL_FORM markers — q_eval builds literals
-     * natively after intercepting these by pointer */
+    /* ctx constructor head: SPECIAL_FORM marker — q_eval builds the literal
+     * natively after intercepting it by pointer */
     [SPEC_list]        = { "list",        SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
-    [SPEC_table]       = { "table",       SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
-    [SPEC_keyed_table] = { "keyed-table", SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
     /* compose `'[f;g;…]` head — carrier rebuild is an adverb-wave item */
     [SPEC_compose]     = { "q.compose",   SK_VARY, RAY_FN_NONE,         (void*)spec_nyi },
 };
@@ -91,8 +89,6 @@ _Static_assert(sizeof SPECIALS / sizeof SPECIALS[0] == SPEC_N, "SPECIALS row cou
 static ray_t* g_specials[SPEC_N];
 
 ray_t* q_registry_list_value(void)          { return g_specials[SPEC_list]; }          /* borrowed */
-ray_t* q_registry_table_value(void)         { return g_specials[SPEC_table]; }
-ray_t* q_registry_keyed_table_value(void)   { return g_specials[SPEC_keyed_table]; }
 ray_t* q_registry_compose_value(void)       { return g_specials[SPEC_compose]; }
 
 /* ---- shared q-name sanitization (.Q.id + construction clash repair) ------ */

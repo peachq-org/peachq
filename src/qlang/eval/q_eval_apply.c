@@ -999,7 +999,12 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     const char* fam = row ? row->family : NULL;
     if (fam) {
         if (strcmp(fam, "atomic") == 0) {
-            if (n == 1 && fv->type == RAY_UNARY)
+            /* on a TWO-VALENCE row `family` describes the DYAD (q_ops.c
+             * FAMILY AUDIT, the `+` row note): its monadic sibling (`+:`
+             * flip, `<:` iasc) reaches the kernel whole unless the recipe
+             * marks it atomic itself (`-:` neg) */
+            if (n == 1 && fv->type == RAY_UNARY &&
+                (row->dyad.kind == QK_NONE || row->mon.atomic))
                 return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
             if (n == 2 && fv->type == RAY_BINARY)
                 return atomic2((ray_binary_fn)(uintptr_t)fv->i64,
