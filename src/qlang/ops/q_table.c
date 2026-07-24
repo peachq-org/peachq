@@ -29,6 +29,25 @@
  * compares: O(n^2) wrapper-tier code at test scale by design (single-home
  * principle; SIMD paths belong to the engine).                              */
 
+/* THE per-column table walk: apply `colfn` to each column (borrowed), add the
+ * owned result under the same name; first error aborts + propagates.  rc-careful
+ * (colfn result released after add); colfn owns any lazy-materialization. */
+ray_t* q_table_map_cols(ray_t* (*colfn)(void* ctx, ray_t* col), void* ctx, ray_t* t) {
+    int64_t nc = ray_table_ncols(t);
+    ray_t* out = ray_table_new(nc);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = ray_table_get_col_idx(t, c);          /* borrowed */
+        ray_t* r = colfn(ctx, col);
+        if (!r || RAY_IS_ERR(r)) {
+            ray_release(out);
+            return r ? r : q_err(QE_TYPE);
+        }
+        out = ray_table_add_col(out, ray_table_col_name(t, c), r);
+        ray_release(r);
+    }
+    return out;
+}
+
 /* Flatten a plain-or-keyed table to a single plain table (key cols then value
  * cols).  Returns owned. */
 ray_t* q_table_flatten(ray_t* y) {

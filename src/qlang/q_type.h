@@ -42,6 +42,9 @@ const char* q_type_rayname(int8_t tag);
 /* Int-index width in bytes for tag t (8/4/2/1), 0 = not an int index. */
 int q_type_int_index_width(int8_t t);
 
+/* The empty typed vector of tag (sym vectors need their width ctor). */
+ray_t* q_type_empty(int8_t tag);
+
 /* Strict int/float lane admission (cast-or-fail; typed nulls pass as
  * sentinels): 1 + *out on success, 0 on refusal. */
 int q_type_strict_i64(ray_t* x, int64_t* out);
