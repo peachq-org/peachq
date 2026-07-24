@@ -5,10 +5,10 @@
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_carrier_fmt — RAY_QFN display */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_carrier_fmt — RAY_QFN display;
+                                * q_eval_apply_concrete — the display boundary force */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
-#include "ops/ops.h"     /* ray_is_lazy/materialize — pipe renderer solidify */
 #include "ops/hash.h"    /* ray_hash_bytes — pipe digest distinct keys */
 #include "core/types.h"  /* ray_elem_size — pipe digest */
 
@@ -909,11 +909,10 @@ static bool qp_is_numeric(int8_t t) {
            t == RAY_F32 || t == RAY_F64;
 }
 
-/* An aggregate over a vector returns a LAZY DAG handle — settle it before read.
- * ray_lazy_materialize CONSUMES its input (cf. src/ops/sort.c): never released
- * on top of this. */
+/* Display boundary seam (materialization phase 1): settle a lazy DAG handle
+ * before read.  q_eval_apply_concrete CONSUMES its input (cf. src/ops/sort.c). */
 static ray_t* qp_solid(ray_t* v) {
-    return ray_is_lazy(v) ? ray_lazy_materialize(v) : v;
+    return q_eval_apply_concrete(v);
 }
 
 static int64_t qp_agg_i64(ray_t* v, int64_t dflt) {
