@@ -21,6 +21,23 @@ ray_t* q_eval(ray_t* node);
  * `row` is fv's manifest row when known, NULL otherwise. */
 ray_t* q_eval_apply(ray_t* fv, const struct q_op* row, ray_t** args, int64_t n);
 
+/* THE materialization boundary (materialization phase 1, design 2026-07-24):
+ * the ONE home for the force operation.  A lazy DAG handle is forced to a
+ * concrete value; a concrete value (or error/NULL) passes through untouched.
+ * CONSUMES v (args-borrowed/result-owned): a lazy input is released by the
+ * force, a concrete input is returned as-is. */
+ray_t* q_eval_apply_concrete(ray_t* v);
+
+/* Debug tripwire (design obligation d): the "no RAY_LAZY crosses an observable
+ * boundary" invariant, machine-enforced by the ASan gate.  Compiled out (no
+ * release cost) unless DEBUG. */
+#ifdef DEBUG
+void q_eval_apply_assert_concrete(ray_t* v);
+#define Q_ASSERT_CONCRETE(v) q_eval_apply_assert_concrete(v)
+#else
+#define Q_ASSERT_CONCRETE(v) ((void)(v))
+#endif
+
 /* Native adverb application (adv: 0=' 1=/ 2=\ 3=': 4=/: 5=\:). */
 ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const struct q_op* frow,
                            ray_t** args, int64_t n);
