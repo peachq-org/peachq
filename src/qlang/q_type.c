@@ -99,6 +99,12 @@ const char* q_type_rayname(int8_t tag) {
     }
 }
 
+/* The empty typed vector of tag (sym vectors need their width ctor). */
+ray_t* q_type_empty(int8_t tag) {
+    return tag == RAY_SYM ? ray_sym_vec_new(RAY_SYM_W64, 0)
+                          : ray_vec_new(tag, 0);
+}
+
 /* ---- int/float admission (which numeric lane may a verb read) ------------- */
 
 /* Is vector tag `t` legal as a ROW INDEX (uniform-structure-dispatch §2.2:

@@ -9,6 +9,7 @@
 #define Q_OPS_ENV_GRANDFATHER /* grandfathered 2026-07-23: 2 env uses — q-index PR audit */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
+#include "qlang/q_type.h"  /* q_type_empty — the one typed-empty ctor */
 #include "lang/env.h"      /* ray_env_get — q_env_call2 */
 #include "lang/eval.h"     /* ray_take_fn, ray_in_fn, ray_find_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
@@ -356,8 +357,7 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
     if (!collapsed || RAY_IS_ERR(collapsed)) return collapsed;
     if (collapsed->type != RAY_LIST || ray_len(collapsed) != 0) return collapsed;
     if (!proto || !ray_is_vec(proto) || proto->type == RAY_LIST) return collapsed;
-    ray_t* tv = (proto->type == RAY_SYM) ? ray_sym_vec_new(RAY_SYM_W64, 0)
-                                         : ray_vec_new(proto->type, 0);
+    ray_t* tv = q_type_empty(proto->type);
     if (!tv || RAY_IS_ERR(tv)) { if (tv) ray_release(tv); return collapsed; }
     ray_release(collapsed);
     return tv;

@@ -25,21 +25,22 @@ ray_t* q_dollar(ray_t* x, ray_t* y);
  * Returns 0 (RAY_LIST — never a valid target) for unknown/identity/deferred. */
 int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity);
 
-/* Convert x to the tag type with q semantics.  Exactly: RAY_LIST distributes
- * per element (collapsed); float ATOMS and float VECTORS pre-round via rint
- * (kdb ties-even) for integer targets; symbol target is identity on syms and
- * 'nyi otherwise; every other input delegates to base ray_cast_fn (typed
- * vectors included).  Returns owned; 'nyi error for deferred targets. */
+/* Convert x to the tag type with q semantics: a boxed list distributes per
+ * element (collapsed); float sources pre-round via rint (kdb ties-even) for
+ * integer targets; symbol target is identity on syms and Tok on strings; "c"$
+ * packs an int list into one string; an empty general list becomes the typed
+ * empty.  Typed vectors are cast WHOLE.  Returns owned; 'nyi for deferred. */
 ray_t* q_dollar_cast(int8_t tag, ray_t* x);
 
-/* Parse string atom(s) to the tag type (kdb Tok, ref/tok.md).  Leading/
- * trailing blanks are trimmed; unparseable or out-of-range parses yield the
- * TYPED NULL (never an error); lists and string vectors distribute (implicit
- * recursion stops at strings, not atoms). */
+/* Parse string(s) to the tag type (kdb Tok, ref/tok.md).  Leading/trailing
+ * blanks are trimmed; unparseable or out-of-range parses yield the TYPED NULL
+ * (never an error).  Recursion stops at strings, not atoms: boxed lists and
+ * string columns distribute; a non-string leaf is a 'type error.  Owned. */
 ray_t* q_dollar_tok(int8_t tag, ray_t* x);
 
 /* q `w$s` pad (ref/pad.md): left-justify s in |w| spaces (w<0 right-justifies),
- * truncating longer strings; atomic through lists/dicts/tables. */
+ * truncating longer strings.  Strings are the units: lists, dicts and string
+ * columns distribute; a non-string leaf is a 'type error.  Returns owned. */
 ray_t* q_dollar_pad(int64_t w, ray_t* x);
 
 /* Enumerate `x$y` (sym lhs naming a domain list) — 'nyi: no enum domains. */
