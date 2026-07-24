@@ -1,6 +1,6 @@
 /* q_eval walker — see q_eval.h.  jq-EvalOp shape: visit -> resolve heads
  * (registry by valence, then env / `.z` / `.q`) -> eval-time forms (`;` seq,
- * `:`/`::`/`op:` assign, `$[c;t;f]` + if/do/while control, `{` capture,
+ * `:`/`::`/`op:` assign, `$[c;t;f]` + if/do/while control,
  * literal-ctor interception) -> eval args RIGHT-to-left (#177: mid-line `x:e`
  * binds before a leftward read; error unwinds release the evaluated tail) ->
  * q_eval_apply.
@@ -36,8 +36,16 @@ static int64_t sym_id_of(const char* s) {
     return ray_sym_intern_runtime(s, strlen(s));
 }
 
+/* A sym ATOM in a tree is ALWAYS a name reference (parsetrees.md:80): the
+ * parser emits sym CONSTANTS enlisted (,`x), so trees are attr-free data —
+ * two identical-printing trees mean the same thing. */
 static int nameref(ray_t* x) {
-    return x && x->type == -RAY_SYM && !(x->attrs & Q_ATTR_QUOTED);
+    return x && x->type == -RAY_SYM;
+}
+
+/* the enlisted-constant unwrap's tree shape: a 1-element sym vector */
+static int sym_const(ray_t* x) {
+    return x && x->type == RAY_SYM && ray_len(x) == 1;
 }
 
 /* Hole detection: ONLY a parse-marked slot (Q_ATTR_HOLE — bracket elision
@@ -45,8 +53,7 @@ static int nameref(ray_t* x) {
  * `::` is uniformly DATA, the generic null, under every head — kdb passes
  * an explicit `::` argument to the callee (ref/dotq.md `.Q.en[::;t1]`). */
 static int is_hole(ray_t* x) {
-    return x && x->type == -RAY_SYM && (x->attrs & Q_ATTR_HOLE) &&
-           !(x->attrs & Q_ATTR_QUOTED);
+    return x && x->type == -RAY_SYM && (x->attrs & Q_ATTR_HOLE);
 }
 
 /* adverb spelling -> id (0=' 1=/ 2=\ 3=': 4=/: 5=\:), else -1.
@@ -109,7 +116,6 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
 
 static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    if (sym->attrs & Q_ATTR_QUOTED) { ray_retain(sym); return sym; }
     if (sym->i64 == sym_id_of("::")) return RAY_NULL_OBJ;
     ray_t* v = resolve(sym->i64, row_out);
     return v ? v : name_error(sym->i64);
@@ -119,17 +125,15 @@ static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
  * the verb table is authoritative), then general resolution */
 static ray_t* head_name_value(ray_t* sym, int64_t argc, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    if (!(sym->attrs & Q_ATTR_QUOTED)) {
-        q_valence_t val = (argc == 1) ? Q_MONADIC : (argc == 2) ? Q_DYADIC : 0;
-        if (val) {
-            const q_op_t* row = NULL;
-            ray_t* v = q_registry_lookup_row(sym->i64, val, &row);
-            if (v && (v->type == RAY_UNARY || v->type == RAY_BINARY ||
-                      v->type == RAY_VARY)) {
-                if (row_out) *row_out = row;
-                ray_retain(v);
-                return v;
-            }
+    q_valence_t val = (argc == 1) ? Q_MONADIC : (argc == 2) ? Q_DYADIC : 0;
+    if (val) {
+        const q_op_t* row = NULL;
+        ray_t* v = q_registry_lookup_row(sym->i64, val, &row);
+        if (v && (v->type == RAY_UNARY || v->type == RAY_BINARY ||
+                  v->type == RAY_VARY)) {
+            if (row_out) *row_out = row;
+            ray_retain(v);
+            return v;
         }
     }
     return name_value(sym, row_out);
@@ -144,7 +148,7 @@ static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
         ray_retain(F);
         return F;
     }
-    if (F->type == -RAY_SYM && !(F->attrs & Q_ATTR_QUOTED)) {
+    if (F->type == -RAY_SYM) {
         const q_op_t* row = NULL;
         ray_t* v = q_registry_lookup_row(F->i64, Q_DYADIC, &row);
         if (v && (v->type == RAY_UNARY || v->type == RAY_BINARY ||
@@ -189,11 +193,13 @@ static ray_t* store_mat(ray_t* r) {
     return r;
 }
 
-/* `;` statement sequence: LEFT-to-right, empty slots are no-ops */
+/* `;` statement sequence: LEFT-to-right; the sequence's value is its LAST
+ * statement's — an empty statement yields the silent null, so `2+2;` prints
+ * nothing (kdb console; parser_pinned_defects.qcmd defect 3). */
 static ray_t* seq_eval(ray_t** e, int64_t n) {
     ray_t* r = RAY_NULL_OBJ;
     for (int64_t i = 0; i < n; i++) {
-        if (!e[i]) continue;
+        if (!e[i]) { ray_release(r); r = RAY_NULL_OBJ; continue; }
         ray_t* nr = q_eval(e[i]);
         if (RAY_IS_ERR(nr)) { ray_release(r); return nr; }
         ray_release(r);
@@ -274,6 +280,59 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
                           : ray_env_set(target->i64, v);
     if (err != RAY_OK) { ray_release(v); return q_err(QE_ASSIGN); }
     return v;
+}
+
+/* `value`/`get` (ref/value.md; get is the synonym).  q `eval` needs no body
+ * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
+ * ONCE, non-recursively: a string parses+evaluates in the current context, a
+ * sym atom names a variable, a dict yields its values, and a list applies
+ * its first item (string/sym heads evaluated first, ref/value.md) to the
+ * rest AS LITERALS — nested trees stay data.  value of a TYPED vector
+ * (incl. the enlisted constant ,`x) is doc-silent: 'nyi, never a guess. */
+ray_t* q_eval_value_wrap(ray_t* x) {
+    if (!x) return q_err(QE_TYPE);
+    if (RAY_IS_NULL(x)) { ray_retain(x); return x; }     /* value :: -> :: */
+    if (x->type == -RAY_SYM) return name_value(x, NULL);
+    if (x->type == RAY_CHARV || x->type == -RAY_CHARV || x->type == -RAY_STR) {
+        const char* p; int64_t n;
+        if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);
+        char* z = (char*)ray_alloc_raw((size_t)n + 1);
+        if (!z) return q_err(QE_WSFULL);
+        memcpy(z, p, (size_t)n);
+        z[n] = 0;
+        ray_t* ast = q_parse(z);
+        ray_free_raw(z);
+        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : q_err(QE_PARSE);
+        ray_t* r = q_eval(ast);
+        ray_release(ast);
+        return r;
+    }
+    if (x->type == RAY_DICT) {
+        ray_t* v = ray_dict_vals(x);
+        ray_retain(v);
+        return v;
+    }
+    if (x->type == RAY_LIST && ray_len(x) >= 1) {
+        int64_t argc = ray_len(x) - 1;
+        if (argc > EVAL_MAX_ARGS) return q_err(QE_RANK);
+        ray_t** e = (ray_t**)ray_data(x);
+        ray_t* h = e[0];
+        if (!h) return q_err(QE_TYPE);
+        ray_t* fv;
+        if (h->type == -RAY_SYM || h->type == RAY_CHARV ||
+            h->type == -RAY_CHARV)
+            fv = q_eval_value_wrap(h);
+        else {
+            ray_retain(h);
+            fv = h;
+        }
+        if (RAY_IS_ERR(fv)) return fv;
+        if (argc == 0) return fv;                        /* 1-item list: the item */
+        ray_t* r = q_eval_apply_value(fv, e + 1, argc);
+        ray_release(fv);
+        return r;
+    }
+    return q_err(QE_NYI);       /* enumeration/lambda-structure/view arms: deferred */
 }
 
 /* ===== control forms (basics/control.md, ref/{cond,if,do,while}.md) ======
@@ -428,14 +487,6 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
     return c;
 }
 
-/* lambda literal ({; src; params; body...) -> RAY_QFN carrier */
-static ray_t* lambda_lit(ray_t* node) {
-    int64_t n = ray_len(node);
-    ray_t** e = (ray_t**)ray_data(node);
-    if (n < 3) return q_err(QE_PARSE);
-    return q_eval_apply_lambda_new(e[2], e + 3, n - 3, e[1]);
-}
-
 ray_t* q_eval(ray_t* node) {
     if (!node) return RAY_NULL_OBJ;
     if (RAY_IS_ERR(node)) return node;
@@ -444,11 +495,16 @@ ray_t* q_eval(ray_t* node) {
     int64_t id_semi   = sym_id_of(";");
     int64_t id_colon  = sym_id_of(":");
     int64_t id_gcolon = sym_id_of("::");
-    int64_t id_brace  = sym_id_of("{");
 
     ray_t* ret;
     if (node->type == -RAY_SYM) {
         ret = name_value(node, NULL);
+        goto out;
+    }
+    /* the enlisted sym-constant unwrap (parsetrees.md:26: eval enlist`x -> `x):
+     * a 1-element sym vector in tree position IS the sym atom constant */
+    if (sym_const(node)) {
+        ret = q_index_elem_at(node, 0);
         goto out;
     }
     if (node->type != RAY_LIST || ray_len(node) == 0) {
@@ -471,7 +527,6 @@ ray_t* q_eval(ray_t* node) {
                 ret = assign_eval(h->i64 == id_gcolon, e[1], e[2]);
                 goto out;
             }
-            if (h->i64 == id_brace) { ret = lambda_lit(node); goto out; }
             if (h->i64 == sym_id_of("if"))    { ret = if_eval(e + 1, n - 1, 0); goto out; }
             if (h->i64 == sym_id_of("while")) { ret = if_eval(e + 1, n - 1, 1); goto out; }
             if (h->i64 == sym_id_of("do"))    { ret = do_eval(e + 1, n - 1); goto out; }
@@ -488,6 +543,16 @@ ray_t* q_eval(ray_t* node) {
                 ray_release(F);
                 goto out;
             }
+        }
+
+        /* An enlisted node is a CONSTANT: eval of a 1-element list is its item
+         * UNEVALUATED — enlist is the quote of parse trees (parsetrees.md:26
+         * eval enlist`a`b`c -> `a`b`c; funsql where-slots ,,(op;…) must reach
+         * `?` as data).  The typed twin (,`x -> `x) is sym_const above. */
+        if (n == 1) {
+            ret = h ? h : RAY_NULL_OBJ;
+            ray_retain(ret);
+            goto out;
         }
 
         /* adverb-headed application ((adv;F); args...) — native, no HOF */
@@ -521,7 +586,7 @@ ray_t* q_eval(ray_t* node) {
         ray_t* fv;
         if (h && h->type == -RAY_SYM) {
             fv = head_name_value(h, n - 1, &row);
-        } else if (h && h->type == RAY_LIST) {
+        } else if (h && (h->type == RAY_LIST || sym_const(h))) {
             fv = q_eval(h);
         } else if (h) {
             ray_retain(h);                          /* embedded value / noun */
