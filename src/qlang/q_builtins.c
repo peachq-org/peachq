@@ -199,6 +199,9 @@ char q_ty_char(ray_t* x) {
  * carrier's raw len is its slot count, which must never leak. */
 ray_t* q_count_fn(ray_t* x) {
     if (x && q_eval_apply_is_fn(x)) return ray_i64(1);
+    /* a mapping's count is its DOMAIN's count — one rule for a plain dict and a
+     * keyed table, whose domain is a table (borrowed ref: do not release). */
+    if (x && x->type == RAY_DICT) return q_count_fn(ray_dict_keys(x));
     return g_base_count ? g_base_count(x)
                         : q_err(QE_TYPE);
 }
