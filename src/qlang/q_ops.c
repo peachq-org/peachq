@@ -180,7 +180,9 @@ static const q_op_t Q_OPS[] = {
      * Dyadic `$` is Cast ("an atomic function", ref/cast.md; kdb float->int
      * ROUNDING; Tok string-parse and unknown designators deferred); the
      * bracket cond form `$[c;t;f]` (3+ args) is a q_eval control form, not a
-     * registry cell. */
+     * registry cell.  KNOWN GAP: the atomic lift distributes `$` into char
+     * VECTORS, shattering whole-string forms (`$"ab", "J"$"12" — ref/tok.md);
+     * the `$`-redesign PR (direct self-recursion per overload) owns the fix. */
     { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "atomic", NULL },
     /* `:` Assign as an operand VALUE — the dyad returning its rhs, so amend's
      * replace form (`@[x;i;:;v]`, ref/amend.md "If v is Assign (:) ...") is
@@ -397,18 +399,21 @@ static const q_op_t Q_OPS[] = {
     /* q `floor` returns LONGS from floats (kdb `floor 3.7` is 3j); rayfall's
      * env floor keeps f64, so this is the q_floor_wrap, not a rename. */
     { "floor",   QLEX_KW_PREFIX, QR_FN1A("floor", q_floor_wrap), QR_NONE,         NULL, 1, 0, "atomic", NULL },
-    /* q dict accessors: `key`/`value` are wrappers (dict-only in 2c-2 —
-     * the file-handle/namespace/enumeration overloads are deferred cells);
+    /* `key` is a wrapper (dict arm; file-handle/namespace/enumeration
+     * overloads are deferred cells); `value`/`get`/`eval` bind the evaluator's
+     * own homes (rows below).
      * `distinct` must preserve FIRST-OCCURRENCE order (kdb ref/distinct.md),
      * while rayfall's distinct routes typed vectors through the DAG group
      * path, which sorts — so it too is a wrapper, not a rename (audited:
      * `distinct 2 3 7 3 5 3` must be 2 3 7 5, env distinct gives 2 3 5 7). */
     { "key",     QLEX_KW_PREFIX, QR_FN1("key", q_key_wrap),    QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_value_nyi_fn), QR_NONE,          NULL, 1, 0, "structural", NULL },
+    { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
     /* q `get` is a SYNONYM of `value` (ref/get.md: "completely interchangeable")
-     * — same 'nyi stub, one home.  `nam set y` writes the named global
-     * (sym-handle assign / `. context restore); file forms are 'nyi cells. */
-    { "get",     QLEX_KW_PREFIX, QR_FN1("value", q_value_nyi_fn), QR_NONE,          NULL, 1, 0, "structural", NULL },
+     * — one home.  `nam set y` writes the named global (sym-handle assign /
+     * `. context restore); file-read forms are deferred cells ('name today).
+     * `eval` has NO row: like md5/hcount it is q.q-hosted over its internal
+     * (.q.eval:(-6!), the q_bang.c arm -> q_eval; basics/internal.md). */
+    { "get",     QLEX_KW_PREFIX, QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
     { "set",     QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("set-g", q_setg_wrap), NULL, 1, 1, "none", NULL },
     { "distinct",QLEX_KW_PREFIX, QR_FN1("distinct", q_distinct_wrap), QR_NONE,    NULL, 1, 0, "rowid", NULL },
     /* q `rand x` == {first 1?x} — self-hosted in q.q verbatim from ref/rand.md;
