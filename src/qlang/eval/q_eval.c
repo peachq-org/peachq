@@ -428,71 +428,6 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
     return c;
 }
 
-/* table literal `([]a:…;b:…)`: col defs are raw parser (:;name;expr) trees;
- * exprs RTL, atoms broadcast.  Punted vs q_ctx_build: anonymous columns,
- * cross-column name scope. */
-static ray_t* table_lit(ray_t** defs, int64_t n) {
-    int64_t names[EVAL_MAX_ARGS];
-    ray_t* cols[EVAL_MAX_ARGS];
-    int64_t id_colon = sym_id_of(":");
-    if (n > EVAL_MAX_ARGS) return q_err(QE_LIMIT);
-    for (int64_t i = n - 1; i >= 0; i--) {
-        ray_t* d = defs[i];
-        ray_t* v = NULL;
-        int64_t nm = -1;
-        if (d && d->type == RAY_LIST && ray_len(d) == 3) {
-            ray_t** de = (ray_t**)ray_data(d);
-            if (nameref(de[0]) && de[0]->i64 == id_colon && nameref(de[1])) {
-                nm = de[1]->i64;
-                v = store_mat(q_eval(de[2]));
-            }
-        } else if (nameref(d)) {
-            nm = d->i64;
-            v = name_value(d, NULL);
-        }
-        if (!v) v = q_err(QE_NYI);
-        if (nm < 0 || RAY_IS_ERR(v)) {
-            for (int64_t j = i + 1; j < n; j++) ray_release(cols[j]);
-            if (RAY_IS_ERR(v)) return v;
-            ray_release(v);
-            return q_err(QE_NYI);
-        }
-        names[i] = nm;
-        cols[i] = v;
-    }
-    int64_t nrows = -1;
-    ray_t* out = NULL;
-    for (int64_t i = 0; i < n && !out; i++) {
-        if (cols[i]->type >= 0 && cols[i]->type != RAY_DICT &&
-            cols[i]->type != RAY_TABLE) {
-            int64_t cl = ray_len(cols[i]);
-            if (nrows < 0) nrows = cl;
-            else if (cl != nrows) out = q_err(QE_LENGTH);
-        }
-    }
-    if (nrows < 0) nrows = 1;
-    if (!out) out = ray_table_new(n);
-    for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
-        ray_t* col = cols[i];
-        int owned = 0;
-        if (col->type < 0) {                        /* atom -> broadcast */
-            ray_t* nn = ray_i64(nrows);
-            col = ray_take_fn(col, nn);
-            ray_release(nn);
-            owned = 1;
-            if (!col || RAY_IS_ERR(col)) {
-                ray_release(out);
-                out = col ? col : q_err(QE_TYPE);
-                break;
-            }
-        }
-        out = ray_table_add_col(out, names[i], col);
-        if (owned) ray_release(col);
-    }
-    release_args(cols, n);
-    return out;
-}
-
 /* lambda literal ({; src; params; body...) -> RAY_QFN carrier */
 static ray_t* lambda_lit(ray_t* node) {
     int64_t n = ray_len(node);
@@ -529,8 +464,6 @@ ray_t* q_eval(ray_t* node) {
 
         /* literal-ctor interception seam (header note) */
         if (h == q_registry_list_value())  { ret = list_lit(e + 1, n - 1); goto out; }
-        if (h == q_registry_table_value()) { ret = table_lit(e + 1, n - 1); goto out; }
-        if (h == q_registry_keyed_table_value()) { ret = q_err(QE_NYI); goto out; }
 
         if (nameref(h)) {
             if (h->i64 == id_semi) { ret = seq_eval(e + 1, n - 1); goto out; }
