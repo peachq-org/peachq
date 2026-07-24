@@ -116,16 +116,13 @@ ray_t* q_enlist_wrap(ray_t** args, int64_t n);
 void q_registry_destroy(void);
 
 /* PARSER-EMBEDDED marker heads (borrowed; NULL before q_registry_init).
- * q_eval intercepts the literal-ctor values by pointer identity and builds
- * natively; q_fmt hides them in display.
- *   list        — paren-list literal `(1;2;3)` (the head value is what
- *                 distinguishes a literal from the shape-identical (v;i))
- *   table       — table literal `([] a:…; b:…)`
- *   keyed-table — keyed-table literal `([k:…] v:…)` (args[0] = key count)
- *   compose     — `'[f;g;…]` bracket form ('nyi until the adverb wave) */
+ * q_eval intercepts the literal-ctor value by pointer identity and builds
+ * natively; q_fmt renders it `enlist` (table literals need no marker — they
+ * parse to plain dict-then-flip trees).
+ *   list    — paren-list literal `(1;2;3)` (the head value is what
+ *             distinguishes a literal from the shape-identical (v;i))
+ *   compose — `'[f;g;…]` bracket form ('nyi until the adverb wave) */
 ray_t* q_registry_list_value(void);
-ray_t* q_registry_table_value(void);
-ray_t* q_registry_keyed_table_value(void);
 ray_t* q_registry_compose_value(void);
 
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
