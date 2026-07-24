@@ -24,7 +24,6 @@
 / infix keywords (lexer row stays; registry cell rebound from these post-load)
 / `max 0,`/`max 1,` stand in for k's `0|`/`1|` (dyadic | lands in wave 3)
 .q.sublist:{$[2=count x;x[0]_((sum x)&count y)#y;0<=x;(x&count y)#y;(max 0,x+count y)_y]}
-.q.rotate:{(k _ y),(k:x mod max 1,count y)#y}
 .q.wsum:{sum x*"f"$y}
 .q.cov:{avg[x*y]-avg[x]*avg y}
 .q.scov:{cov[x;y]*count[x]%-1+count x}

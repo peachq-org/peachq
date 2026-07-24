@@ -73,6 +73,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d);
 /* ---- defined in ops/q_list.c ---- */
 ray_t* q_drop_wrap(ray_t* n, ray_t* list);                    /* also shared: index (splice) */
 ray_t* q_cut_wrap(ray_t* n, ray_t* x);
+ray_t* q_rotate_wrap(ray_t* n, ray_t* x);
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
 ray_t* q_fills_wrap(ray_t* x);
 ray_t* q_in_wrap(ray_t* x, ray_t* y);
@@ -154,7 +155,7 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, 
 ray_t* q_list_collapse(ray_t* l);                             /* also declared in q_registry.h (env-safe public reach) — used by: eval, builtins, fmt, json, wire, agg, dollar, io, join, list, math, table, index */
 ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry, index */
-ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);    /* single-file since the corridor pass — staticize candidate */
+/* q_typed_empty_like: declared in q_registry.h (env-safe reach) — used by: index, apply */
 ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: registry, agg, join */
 ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, table */
