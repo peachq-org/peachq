@@ -17,6 +17,7 @@
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/net/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
+#include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
 #include "qlang/q_sys.h"        /* q_sys_ts_apply — `-34!` (.Q.ts) */
@@ -209,10 +210,12 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
     return ray_dict_new(kt, vt);
 }
 
-/* q `x!y` — dict make.  x and y must be equal-length LISTS (kdb: atom!atom is
- * NOT a dict; enlist first).  One `count` gate covers vector!vector AND
- * table!table (rows).  ()!() is the empty dict; a keyed table is a table!table
- * dict.  vals pass through as-is (rayfall `dict` broadcasts/boxes). */
+/* q `x!y` — dict make.  One `count` gate covers vector!vector AND table!table
+ * (rows).  An ATOM side enlists to its 1-item list — the SCALAR dict
+ * (ref/key.md pins `key `a _ `a!1` -> `symbol$()`; the table-literal tree
+ * (+:;(!;,`x;(enlist;e))) evaluates through this arm).  ()!() is the empty
+ * dict; a keyed table is a table!table dict.  vals pass through as-is
+ * (rayfall `dict` broadcasts/boxes). */
 static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
     if (q_builtins_count_long(x) != q_builtins_count_long(y))
         return q_err(QE_LENGTH);
@@ -227,9 +230,25 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
         ray_retain(x);
         return ray_dict_new(x, ray_list_new(0)); /* consumes x + fresh empty list */
     }
-    if ((ray_is_vec(x) || x->type == RAY_LIST) && (ray_is_vec(y) || y->type == RAY_LIST))
-        return q_env_call2("dict", x, y);
-    return q_err(QE_TYPE);
+    ray_t* ex = NULL;
+    ray_t* ey = NULL;
+    if (x->type < 0) {                           /* data atom -> its 1-item list */
+        ex = q_enlist_wrap(&x, 1);
+        if (RAY_IS_ERR(ex)) return ex;
+        x = ex;
+    }
+    if (y->type < 0) {
+        ey = q_enlist_wrap(&y, 1);
+        if (RAY_IS_ERR(ey)) { if (ex) ray_release(ex); return ey; }
+        y = ey;
+    }
+    ray_t* r = ((ray_is_vec(x) || x->type == RAY_LIST) &&
+                (ray_is_vec(y) || y->type == RAY_LIST))
+                   ? q_env_call2("dict", x, y)
+                   : q_err(QE_TYPE);
+    if (ex) ray_release(ex);
+    if (ey) ray_release(ey);
+    return r;
 }
 
 
@@ -258,7 +277,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -2:  return q_attr_wrap(y);
         case -3:  return h_s1(y);
         case -5:  return q_parse_builtin_fn(y);
-        case -6:  return q_value_nyi_fn(y);
+        case -6:  return q_eval(y);              /* internal.md: -6! is eval */
         case -7:  return h_hcount(y);
         case -8:  return q_wire_serialize(y, Q_WIRE_ASYNC);
         case -9:  return h_deser(y);
