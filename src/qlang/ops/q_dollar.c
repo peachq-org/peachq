@@ -21,8 +21,9 @@
 /* Designator resolution is separate from conversion so C callers (future
  * bool-widening / promotion work) can invoke q_dollar_cast(tag, x) directly. */
 
-int8_t q_cast_designator(ray_t* t, int* is_tok) {
+int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
     *is_tok = 0;
+    if (is_identity) *is_identity = 0;
     if (!t) return 0;
     if (t->type == -RAY_I16) {          /* kdb type number == rayfall tag */
         if (RAY_ATOM_IS_NULL(t)) return 0;
@@ -40,7 +41,8 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
                              * `2h$` CAST stays deferred at q_dollar_cast. */
         RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return (int8_t)n;
-        case RAY_LIST:      /* 0h is Identity (cast.md:40), not a cast tag — deferred */
+        case RAY_LIST:      /* 0h is Identity (cast.md:40): returns y unchanged */
+            if (is_identity) *is_identity = 1;
             return 0;
         case RAY_STR:       /* 21h: physical storage tag, never a q designator */
             return 0;
@@ -67,7 +69,9 @@ int8_t q_cast_designator(ray_t* t, int* is_tok) {
         case 'n': return RAY_TIMESPAN;
         case 'z': return RAY_DATETIME;
         case 'c': return RAY_CHARV; /* char cast: "c"$x reinterprets as chars */
-        default:  return 0;       /* "*" identity: deferred */
+        case '*': if (is_identity) *is_identity = 1;  /* Identity (cast.md:40) */
+                  return 0;
+        default:  return 0;
         }
     }
     if (t->type == -RAY_SYM) {
@@ -201,9 +205,11 @@ static ray_t* cast_str(ray_t* x) {
     return q_err(QE_TYPE);
 }
 
-/* Integer targets (I64/I32/I16): kdb ROUNDS floats (rint = IEEE nearest/
- * ties-even: `long$3.7 -> 4, "j"$2.5 -> 2, `int$6.6 -> 7 — KX ref pins) where
- * rayfall `as` truncates, so pre-round here; the rest is base's. */
+/* Integer targets (I64/I32/I16): kdb ROUNDS floats HALF-TO-EVEN (banker's:
+ * `long$3.7 -> 4, "j"$2.5 -> 2, `int$6.6 -> 7 — cast.md ex + the banked golden
+ * cond/cast_cond_simple:9) where rayfall `as` truncates, so pre-round via rint()
+ * here; the rest is base's.  (The timestored guide's `int$100.5 -> 101 is a
+ * third-party error — real kdb gives 100 by banker's rounding.) */
 /* Real (float32) target.  Base rayfall has an `as float` (F64) arm but no
  * `real`/F32 one, so `"e"$` used to 'nyi. Reuse the base F64 cast (handles every
  * numeric input + string parse, exactly like `"f"$`), then narrow F64 -> F32. */
@@ -265,9 +271,11 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
 /* Byte target.  kdb `"x"$str` maps CHARS to bytes ("x"$"abc" -> 0x616263,
  * ref/cast.md #byte); base's U8 STR arm parses decimal text instead — pre-empt
  * it.  One char = char atom -> byte ATOM; else a byte vector of the raw chars
- * (empty string -> empty byte vector).  Byte joins the integer family for
- * float rounding (derived — byte float-cast is unpinned); float null -> 0x00:
- * byte has no null (basics/datatypes.md blank column). */
+ * (empty string -> empty byte vector).  Integer sources take the low byte
+ * (modular: "x"$3 4 5 -> 0x030405, cast.qcmd) — base's U8 arm passes int
+ * VECTORS through untouched, so own them here.  Byte joins the integer family
+ * for float rounding (derived — byte float-cast is unpinned); float null ->
+ * 0x00: byte has no null (basics/datatypes.md blank column). */
 static ray_t* cast_u8(ray_t* x) {
     if (x && x->type == -RAY_STR) {
         const char* sp = ray_str_ptr(x);
@@ -293,6 +301,16 @@ static ray_t* cast_u8(ray_t* x) {
                             : (double)((const float*)ray_data(x))[i];
             ((uint8_t*)ray_data(out))[i] = isnan(v) ? 0 : (uint8_t)(int64_t)rint(v);
         }
+        return out;
+    }
+    if (q_type_is_int_atom(x)) return ray_u8((uint8_t)q_type_iatom_val(x));
+    if (q_type_is_int_vec(x)) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = n;
+        uint8_t* d = (uint8_t*)ray_data(out);
+        for (int64_t i = 0; i < n; i++) d[i] = (uint8_t)q_type_ivec_get(x, i);
         return out;
     }
     return cast_delegate(RAY_BYTE_ONLY, x);
@@ -701,9 +719,12 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
         ray_release(out);
         return c;
     }
-    int is_tok = 0;
-    int8_t tag = q_cast_designator(t, &is_tok);
+    int is_tok = 0, is_identity = 0;
+    int8_t tag = q_cast_designator(t, &is_tok, &is_identity);
     if (!tag) {
+        /* Identity (cast.md:40): `0h`/`"*"` returns y (string y -> Tok, deferred
+         * with the string-boundary lift). */
+        if (is_identity) { ray_retain(x); return x; }
         if (t && t->type == -RAY_SYM) {
             ray_t* comp = component_extract(t, x);   /* year/mm/dd/hh/uu/ss/week */
             if (comp) return comp;

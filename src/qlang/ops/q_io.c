@@ -750,7 +750,7 @@ static int8_t ft_tag(char c, int* is_str, int* is_skip) {
     ray_t* d = ray_str(&c, 1);
     if (!d || RAY_IS_ERR(d)) return 0;
     int is_tok = 0;
-    int8_t tag = q_cast_designator(d, &is_tok);
+    int8_t tag = q_cast_designator(d, &is_tok, NULL);
     ray_release(d);
     return is_tok ? tag : 0;
 }
