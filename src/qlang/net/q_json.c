@@ -15,7 +15,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/net/q_json.h"
 #include "qlang/q_err.h"
-#include "qlang/q_registry.h" /* q_collapse_list */
+#include "qlang/q_registry.h" /* q_list_collapse */
 #include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
@@ -160,7 +160,7 @@ static void j_key(jbuf* b, ray_t* k) {
         return;
     }
     { const char* kp; int64_t kn;
-      if (k && k->type != -RAY_SYM && q_text_bytes(k, &kp, &kn)) { jbuf_str(b, kp, (size_t)kn); return; } }
+      if (k && k->type != -RAY_SYM && q_str_text_bytes(k, &kp, &kn)) { jbuf_str(b, kp, (size_t)kn); return; } }
     /* numeric / other key: render its JSON, quote if not already a string */
     size_t start = b->len;
     int wrap = 1;
@@ -357,7 +357,7 @@ static ray_t* jk_node(yyjson_val* v) {
                 ray_release(c);                           /* drop local ref */
                 if (RAY_IS_ERR(lst)) return lst;
             }
-            ray_t* col = q_collapse_list(lst);            /* homogeneous -> typed vector */
+            ray_t* col = q_list_collapse(lst);            /* homogeneous -> typed vector */
             ray_release(lst);
             return col;
         }
@@ -379,7 +379,7 @@ static ray_t* jk_node(yyjson_val* v) {
                 ray_release(cv);
                 if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
             }
-            ray_t* cvals = q_collapse_list(vals);
+            ray_t* cvals = q_list_collapse(vals);
             ray_release(vals);
             if (RAY_IS_ERR(cvals)) { ray_release(keys); return cvals; }
             return ray_dict_new(keys, cvals);              /* consumes keys + cvals */
@@ -391,7 +391,7 @@ static ray_t* jk_node(yyjson_val* v) {
 
 ray_t* q_json_deserialize(ray_t* x) {
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
+    if (!q_str_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t n = (size_t)sn;
     char* buf = malloc(n + 1);
     if (!buf) return q_err(QE_WSFULL);

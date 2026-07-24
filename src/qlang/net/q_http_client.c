@@ -11,7 +11,7 @@
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
-#include "qlang/q_registry.h"   /* q_text_bytes — charv/legacy text accessor */
+#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/legacy text accessor */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -391,7 +391,7 @@ static int b64(const char* s, size_t n, char* out, size_t outsz) {
 static int url_of(ray_t* x, char* out, size_t outsz, size_t* n) {
     const char* p; size_t l;
     int64_t tl;
-    if (x && q_text_bytes(x, &p, &tl)) { l = (size_t)tl; }
+    if (x && q_str_text_bytes(x, &p, &tl)) { l = (size_t)tl; }
     else if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);   /* borrowed */
         if (!s) return -1;
@@ -487,8 +487,8 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
     ray_t* mimev = args[1];
     ray_t* bodyv = args[2];
     const char* mp; int64_t ml; const char* bp; int64_t bl;
-    if (!mimev || !q_text_bytes(mimev, &mp, &ml)) return q_err(QE_TYPE);
-    if (!bodyv || !q_text_bytes(bodyv, &bp, &bl)) return q_err(QE_TYPE);
+    if (!mimev || !q_str_text_bytes(mimev, &mp, &ml)) return q_err(QE_TYPE);
+    if (!bodyv || !q_str_text_bytes(bodyv, &bp, &bl)) return q_err(QE_TYPE);
     return http_do(args[0], mp, (size_t)ml, bp, (size_t)bl);
 }
 
@@ -506,7 +506,7 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
 ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
-    if (!request || !q_text_bytes(request, &reqp, &reqn)) return q_err(QE_TYPE);
+    if (!request || !q_str_text_bytes(request, &reqp, &reqn)) return q_err(QE_TYPE);
     if (!hsym || hsym->type != -RAY_SYM) return q_err(QE_TYPE);
 
     /* hsym text (BORROWED interned string) -> ":http://host[:port]" */

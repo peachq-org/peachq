@@ -19,7 +19,7 @@
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
 #define Q_OPS_ENV_GRANDFATHER /* legitimate owner: THE evaluator (name resolution/rebinding) */
-#include "qlang/q_registry_internal.h"   /* q_strict_i64 — the do-count judgment */
+#include "qlang/q_registry_internal.h"   /* q_type_strict_i64 — the do-count judgment */
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_index.h"
 #include "lang/eval.h"
@@ -349,7 +349,7 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
     cnt = store_mat(cnt);
     if (RAY_IS_ERR(cnt)) return cnt;
     int64_t times;
-    int ok = cnt && !RAY_ATOM_IS_NULL(cnt) && q_strict_i64(cnt, &times);
+    int ok = cnt && !RAY_ATOM_IS_NULL(cnt) && q_type_strict_i64(cnt, &times);
     ray_release(cnt);
     if (!ok || times < 0) return q_err(QE_TYPE);
     for (int64_t k = 0; k < times; k++) {
@@ -423,7 +423,7 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
         l = ray_list_append(l, argv[i]);
     release_args(argv, n);
     if (RAY_IS_ERR(l)) return l;
-    ray_t* c = q_collapse_list(l);
+    ray_t* c = q_list_collapse(l);
     ray_release(l);
     return c;
 }

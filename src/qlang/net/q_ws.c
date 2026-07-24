@@ -14,7 +14,7 @@
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
-#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
+#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/string text accessor */
 #include <time.h>
 #ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN
@@ -417,7 +417,7 @@ int q_ws_send(q_ws_conn_t* c, ray_sock_t fd, ray_t* msg) {
     int mask = c && c->role == Q_WS_CLIENT;      /* client masks; server plain */
     if (!msg || RAY_IS_NULL(msg)) return 0;      /* neg[h][] flush -> no-op */
     { const char* tp; int64_t tn;                /* charv OR legacy STR text */
-      if (q_text_bytes(msg, &tp, &tn))
+      if (q_str_text_bytes(msg, &tp, &tn))
           return ws_frame_send(fd, Q_WS_OP_TEXT, tp, (size_t)tn,
                                Q_WS_DATA_SECS, mask); }
     if (msg->type == RAY_BYTE_ONLY)

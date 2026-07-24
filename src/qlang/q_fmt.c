@@ -919,7 +919,7 @@ static ray_t* qp_solid(ray_t* v) {
 static int64_t qp_agg_i64(ray_t* v, int64_t dflt) {
     v = qp_solid(v);
     if (!v || RAY_IS_ERR(v)) { if (v) ray_release(v); return dflt; }
-    int64_t r = q_is_int_atom(v) && !RAY_ATOM_IS_NULL(v) ? q_iatom_val(v) : dflt;
+    int64_t r = q_type_is_int_atom(v) && !RAY_ATOM_IS_NULL(v) ? q_type_iatom_val(v) : dflt;
     ray_release(v);
     return r;
 }
@@ -1545,8 +1545,8 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         ray_t* vv = ray_dict_vals(val);
         if (kk && vv && !(kk->type == RAY_TABLE && vv->type == RAY_TABLE)) {
             /* boxed homogeneous runs collapse to typed vectors (`1 2`) */
-            ray_t* ck = q_collapse_list(kk);   /* owned */
-            ray_t* cv = q_collapse_list(vv);   /* owned */
+            ray_t* ck = q_list_collapse(kk);   /* owned */
+            ray_t* cv = q_list_collapse(vv);   /* owned */
             char kb[2048]; kb[0] = '\0';
             char vb[2048]; vb[0] = '\0';
             q_fmt_krepr(ck, kb, sizeof kb);
