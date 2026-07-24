@@ -134,6 +134,11 @@ ray_t* q_registry_compose_value(void);
  * (net/, apply) reach it without the poisoned q_registry_internal.h. */
 ray_t* q_list_collapse(ray_t* l);
 
+/* THE per-column table walk (colfn owns any lazy-materialize).  DEFINED in
+ * ops/q_table.c; declared here (like q_list_collapse) so env-using callers
+ * (apply, dollar) reach it without the poisoned q_registry_internal.h. */
+ray_t* q_table_map_cols(ray_t* (*colfn)(void* ctx, ray_t* col), void* ctx, ray_t* t);
+
 /* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
  * appears in q-space; values in flight are charv; columns stay pooled).
  * DEFINED in ops/q_str.c; declared here (env-safe public reach). ---- */
