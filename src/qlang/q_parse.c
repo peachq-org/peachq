@@ -12,7 +12,7 @@
  *   n v e   -> (v; n; e)
  *   t e     -> (t; e)         (lone term collapses to t)
  *   t[E]    -> (t; e1; ...)
- *   {E}     -> (`{; body)
+ *   {E}     -> the RAY_QFN carrier VALUE (built at parse)
  *   tA      -> (`A; t)
  */
 
@@ -136,6 +136,29 @@ static ray_t *symlit(const char *s, int len) {
     ray_t *x = ray_sym(ray_sym_intern_runtime(s, (size_t)len));
     if (x && !RAY_IS_ERR(x)) x->attrs |= Q_ATTR_QUOTED;
     return x;
+}
+
+/* Sym CONSTANTS entering a tree are visibly enlisted (parsetrees.md:80 — a
+ * bare sym in a tree is a name reference): atom -> 1-elem sym vector (,`x),
+ * vector -> 1-elem general list (,`a`b`c).  The scanner's Q_ATTR_QUOTED mark
+ * stays token-internal; the emitted tree is attr-free data.  Consumes v. */
+static ray_t *noun_tree_value(ray_t *v) {
+    if (!v || RAY_IS_ERR(v)) return v;
+    if (v->type == -RAY_SYM && (v->attrs & Q_ATTR_QUOTED)) {
+        ray_t *vec = ray_sym_vec_new(RAY_SYM_W64, 1);
+        ray_t *s = ray_sym_str(v->i64);
+        vec = q_symvec_append(vec, ray_str_ptr(s), (int)ray_str_len(s));
+        ray_release(s);
+        ray_release(v);
+        return vec;
+    }
+    if (v->type == RAY_SYM) {
+        ray_t *l = ray_list_new(1);
+        l = ray_list_append(l, v);
+        ray_release(v);
+        return l;
+    }
+    return v;
 }
 
 /* Append one interned symbol id into a RAY_SYM vector (W64 index width: no
@@ -1317,7 +1340,7 @@ static P parse_base(Parser *p) {
             else if (c == 'y') *p->xyz_mask |= 2;
             else if (c == 'z') *p->xyz_mask |= 4;
         }
-        ray_t *v = tk->k; tk->k = NULL;
+        ray_t *v = noun_tree_value(tk->k); tk->k = NULL;
         adv(p);
         return (P){ R_NOUN, v };
     }
@@ -1360,8 +1383,14 @@ static P parse_base(Parser *p) {
          * a value expression (e.g. an assignment RHS). */
         if (ray_len(e) > 1) {
             ray_t **slots = (ray_t **)ray_data(e);
-            for (int64_t i = 0; i < ray_len(e); i++)
-                if (!slots[i]) slots[i] = q_null();
+            for (int64_t i = 0; i < ray_len(e); i++) {
+                if (!slots[i]) { slots[i] = q_null(); continue; }
+                /* a LONE glyph verb element is the operator VALUE — its
+                 * dyadic row (`(+;7;3)` carries Add; eval (+;7;3) -> 10),
+                 * the same bare-verb-as-value convention bracket slots use */
+                if (sym_is_glyph(slots[i]))
+                    slots[i] = q_embed(slots[i], Q_DYADIC);
+            }
         }
         if (ray_len(e) == 1) {
             ray_t **slots = (ray_t **)ray_data(e);
@@ -1416,12 +1445,13 @@ static P parse_base(Parser *p) {
         return (P){ R_NOUN, e };
     }
     case T_LBRACE: {
-        /* Lambda literal `{[sig] stmt;...}` -> marker node
-         *   ({ src params stmt...)
-         * src is the VERBATIM `{...}` span (kdb echoes it byte-for-byte);
-         * params is a RAY_SYM vector — explicit signature, or x/y/z inferred
-         * by highest implicit used (min rank 1), or empty for `{[] ...}`.
-         * q_eval builds the RAY_QFN lambda carrier from this shape. */
+        /* Lambda literal `{[sig] stmt;...}` -> the RAY_QFN carrier VALUE,
+         * built AT PARSE (value-heads-at-parse; kdb parse of a lambda returns
+         * the function atom).  src is the VERBATIM `{...}` span (kdb echoes
+         * it byte-for-byte); params is a RAY_SYM vector — explicit signature,
+         * or x/y/z inferred by highest implicit used (min rank 1), or empty
+         * for `{[] ...}`.  No env capture: q lambdas resolve globals at CALL
+         * time (the carrier holds only params/body/src). */
         int lb_start = tk->start;
         adv(p);
         ray_t *params = NULL;              /* NULL until signed / inferred */
@@ -1467,19 +1497,15 @@ static P parse_base(Parser *p) {
         }
         int64_t bn = ray_len(e);
         ray_t **bs = (ray_t **)ray_data(e);
-        ray_t *w = ray_list_new(bn + 3);
-        ray_t *m = q_marker("{");
-        w = ray_list_append(w, m);      ray_release(m);
-        w = ray_list_append(w, src);    ray_release(src);
-        w = ray_list_append(w, params); ray_release(params);
-        for (int64_t i = 0; i < bn; i++) {
-            /* empty statements (`{2*x;}`) become `::` name-refs: ray_fn
-             * retains every body expr, so a C NULL here would be fatal */
-            if (bs[i]) { w = ray_list_append(w, bs[i]); }
-            else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
-        }
+        /* empty statements (`{2*x;}`) become `::` name-refs: the carrier
+         * retains every body expr, so a C NULL here would be fatal */
+        for (int64_t i = 0; i < bn; i++)
+            if (!bs[i]) bs[i] = q_null();
+        ray_t *fn = q_eval_apply_lambda_new(params, bs, bn, src);
+        ray_release(src);
+        ray_release(params);
         ray_release(e);
-        return (P){ R_NOUN, w };
+        return (P){ R_NOUN, fn };
     }
     case T_ADVERB: {
         /* Compose `'[f;g;…]` — the `'` adverb in BRACKET form composes
@@ -2040,13 +2066,8 @@ static ray_t *qsql_convert_head(ray_t *h) {
 static ray_t *qsql_convert_expr(ray_t *x) {
     if (!x) return q_null();
     if (x->type == -RAY_SYM) {
-        if (x->attrs & Q_ATTR_QUOTED) {            /* `sym literal -> ,`sym */
-            ray_t *vec = ray_sym_vec_new(RAY_SYM_W64, 1);
-            ray_t *s = ray_sym_str(x->i64);
-            vec = q_symvec_append(vec, ray_str_ptr(s), (int)ray_str_len(s));
-            ray_release(s);
-            return vec;
-        }
+        /* `sym constants arrive pre-wrapped (,`sym) from noun_tree_value and
+         * pass through the tail below; a sym ATOM here is always a name-ref. */
         ray_t *ev = NULL;                          /* standalone name-ref */
         ray_t *s = ray_sym_str(x->i64);
         if (s) { ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s),
@@ -2057,6 +2078,17 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     if (x->type == RAY_LIST) {
         int64_t n = ray_len(x);
         ray_t **e = (ray_t **)ray_data(x);
+        /* An ENLISTED symvec constant (the parser's ,`a`b wrap) degrades to
+         * the BARE symvec: kdb keeps it enlisted (funsql.md:69 `c1 in `b`c` =
+         * (in;`c1;enlist[`b`c])), but the FROZEN ray_select / ql_qsql lowering
+         * can only consume a bare typed symvec in a constraint / phrase-value
+         * slot — the enlisted general list errors 'type/'domain at eval.  A
+         * recorded openq lang-divergence (PLAN.md); the kdb-true `s in `a`b`
+         * parse row stays RED-below-floor until the engine unwraps it. */
+        if (n == 1 && e[0] && e[0]->type == RAY_SYM) {
+            ray_retain(e[0]);
+            return e[0];
+        }
         ray_t *node = ray_list_new(n > 0 ? n : 1);
         if (n >= 1 && e[0] == q_registry_list_value()) {
             /* paren literal -> (enlist; e1; …): the monadic enlist VALUE head so
@@ -2079,19 +2111,7 @@ static ray_t *qsql_convert_expr(ray_t *x) {
         }
         return node;
     }
-    /* A symbol-VECTOR data literal (`` `a`b``) SHOULD be enlisted to distinguish
-     * it from a column list (qdocs funsql.md:69: "To distinguish symbol atoms and
-     * vectors from columns, enlist them" -> `c1 in `b`c` = `(in;`c1;enlist[`b`c])`),
-     * exactly as the atom branch enlists `` `a`` -> ,`a.  We do NOT, because the
-     * enlisted form is a 1-element GENERAL list (`enlist `a`b`, type 0h) and the
-     * FROZEN ray_select / ql_qsql lowering can only consume a BARE typed symvec in
-     * a constraint / phrase-value slot — the enlisted general-list errors 'type/
-     * 'domain at eval (unlike the atom enlist, whose result is a typed 1-symvec).
-     * So a bare symvec passes through un-enlisted (openq lang-divergence, tracked
-     * in PLAN.md): parse-display diverges from kdb but eval stays correct.  The
-     * `s in `a`b` parse row is pinned kdb-true (,,(in;`s;,`a`b)) and sits RED-
-     * below-floor until the engine can un-wrap an enlisted symvec value. */
-    ray_retain(x);                                 /* symvec / number / literal */
+    ray_retain(x);        /* number / vector literal (incl. the ,`x atom wrap) */
     return x;
 }
 
