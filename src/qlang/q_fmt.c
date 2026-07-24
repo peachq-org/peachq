@@ -586,7 +586,7 @@ static int list_is_parse_tree(ray_t* v, int depth) {
     if (n < 1) return 0;
     ray_t* h = ((ray_t**)ray_data(v))[0];
     if (!h) return 0;
-    if (h == q_registry_list_value() || h == q_registry_table_value()) return 1;
+    if (h == q_registry_list_value()) return 1;
     if (h->type == RAY_UNARY || h->type == RAY_BINARY || h->type == RAY_VARY)
         return 1;
     if (h->type == -RAY_SYM && !(h->attrs & Q_ATTR_QUOTED)) return 1;
@@ -1472,13 +1472,11 @@ static void q_fmt_body(ray_t* val) {
 
     /* General list, kdb-true: one item per line, each a single-line k-repr —
      * parse trees and values alike (basics/parsetrees.md; implicit-iteration
-     * .md pins nested items inline `(110b;0b)`).  TABLE-ctor head hidden;
-     * one item = `,x`; rectangular = aligned matrix (ref/mmu.md). */
+     * .md pins nested items inline `(110b;0b)`).  One item = `,x`;
+     * rectangular = aligned matrix (ref/mmu.md). */
     if (val->type == RAY_LIST) {
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
-        ray_t* tv = q_registry_table_value();
-        if (tv && n >= 1 && e[0] == tv) { e++; n--; }
         /* a bare constructor (parse "()") is the empty-list application */
         if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
         if (n == 0) { qe_puts("()"); return; }
@@ -1561,8 +1559,6 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
     if (val->type == RAY_LIST) {
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
-        ray_t* tv = q_registry_table_value();   /* hidden table-literal head */
-        if (tv && n >= 1 && e[0] == tv) { e++; n--; }
         if (n == 0 || (n == 1 && e[0] == q_registry_list_value())) {
             snprintf(buf, bufsz, "()");
             return;

@@ -1235,6 +1235,67 @@ static ray_t *try_parse_qsql(Parser *p) {
     return NULL;
 }
 
+/* ===== table literal -> kdb's dict-then-flip parse tree ====================
+ * (owner ruling 2026-07-24).  Column-name rule: `c:e` -> c, a bare name-ref
+ * keeps its name, anything else derives x (deduped x,x1,… by q_name_dedup —
+ * cases.tsv row `([] til 10)`; ChangesIn4.1.md `([0;1;2])`). */
+
+static int sym_is_nameref(ray_t *v) {
+    return v && v->type == -RAY_SYM && !(v->attrs & Q_ATTR_QUOTED);
+}
+
+/* the registry value for spelling s at valence v (q_embed's policy); q_parse
+ * fails fast on a cold registry, so a miss cannot occur here */
+static ray_t *table_lit_head(const char *s, q_valence_t v) {
+    return q_embed(ray_sym(ray_sym_intern_runtime(s, strlen(s))), v);
+}
+
+/* (!;a;b) — consumes a,b */
+static ray_t *table_lit_bang(ray_t *a, ray_t *b) {
+    ray_t *xs[3] = { table_lit_head("!", Q_DYADIC), a, b };
+    return q_list(xs, 3);
+}
+
+/* col defs -> the dictionary arm (!;names;(enlist;e…)); consumes defs */
+static ray_t *table_lit_dict(ray_t *defs) {
+    ray_t *lv = q_registry_list_value();
+    if (!lv) q_die("table literal: registry not initialized");
+    int64_t n = ray_len(defs);
+    ray_t **ds = (ray_t **)ray_data(defs);
+    int64_t id_colon = ray_sym_intern_runtime(":", 1);
+    int64_t id_x     = ray_sym_intern_runtime("x", 1);
+    ray_t *keys = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
+    ray_t *vals = ray_list_new(n + 1);
+    vals = ray_list_append(vals, lv);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t *d = ds[i], *ex = d;
+        int64_t nm = -1;
+        if (d && d->type == RAY_LIST && ray_len(d) == 3) {
+            ray_t **de = (ray_t **)ray_data(d);
+            if (sym_is_nameref(de[0]) && de[0]->i64 == id_colon &&
+                sym_is_nameref(de[1])) {
+                nm = de[1]->i64;
+                ex = de[2];
+            }
+        } else if (sym_is_nameref(d)) {
+            nm = d->i64;
+        }
+        if (nm < 0)
+            nm = q_name_dedup(id_x, (int64_t *)ray_data(keys), i, 0);
+        keys = ray_vec_append(keys, &nm);
+        if (ex) { vals = ray_list_append(vals, ex); }
+        else    { ray_t *nul = q_null(); vals = ray_list_append(vals, nul); ray_release(nul); }
+    }
+    ray_release(defs);
+    return table_lit_bang(keys, vals);
+}
+
+/* col defs -> (+:;(!;…)) — flip of the dictionary arm; consumes defs */
+static ray_t *table_lit_flip(ray_t *defs) {
+    ray_t *xs[2] = { table_lit_head("+", Q_MONADIC), table_lit_dict(defs) };
+    return q_list(xs, 2);
+}
+
 static P parse_base(Parser *p) {
     Token *tk = cur(p);
     /* A qSQL template may stand as a primary term (an operand), e.g. the
@@ -1267,68 +1328,29 @@ static P parse_base(Parser *p) {
     }
     case T_LPAREN: {
         adv(p);
-        /* Table literal `([] col:vals; …)` — a paren whose first token is `[`.
-         * The bracketed section holds KEY columns (empty here = unkeyed); the
-         * body is a `;`-separated column-def sequence.  Emits (table_value;
-         * col1; col2; …) — the SAME shape as a paren list but with the table
-         * constructor head, so the shared right-to-left context builder
-         * (q_ctx_build, table mode) assembles the columns.  q_fmt hides the
-         * head. */
+        /* Table literal `([k…] c1:e1; …)` — a paren whose first token is `[`.
+         * Emits kdb's dict-then-flip parse tree: unkeyed (+:;(!;…)); keyed
+         * keytab!valtab; NO value columns (`([a:`A;c:`C])`, xcol's rename
+         * map) = the DICTIONARY literal (ref/cols.md; ChangesIn4.1.md). */
         if (at(p, T_LBRACK)) {
             adv(p);                                   /* consume '[' */
             if (at(p, T_RBRACK)) {
-                /* UNKEYED table literal `([] col:…; …)` — empty key section. */
                 expect(p, T_RBRACK, "expected ']' in table literal");
-                ray_t *tv = q_registry_table_value();
-                if (!tv) q_die("table literal: registry not initialized");
                 ray_t *cols = parse_E(p, Q_NONE);
                 expect(p, T_RPAREN, "expected ')'");
-                int64_t cn = ray_len(cols);
-                ray_t **cs = (ray_t **)ray_data(cols);
-                ray_t *w = ray_list_new(cn + 1);
-                w = ray_list_append(w, tv);
-                for (int64_t i = 0; i < cn; i++) {
-                    if (cs[i]) { w = ray_list_append(w, cs[i]); }
-                    else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
-                }
-                ray_release(cols);
-                return (P){ R_NOUN, w };
+                return (P){ R_NOUN, table_lit_flip(cols) };
             }
-            /* KEYED table literal `([k1:…;k2:…] v1:…; …)` — a non-empty key
-             * section.  Parse the key column defs, then the value column defs,
-             * and emit (keyed-table-value; key-count; keycol…; valcol…).  The
-             * builder splits them into a key-cols table and value-cols table
-             * joined as a RAY_DICT (q_fmt renders `k| v`). */
-            ray_t *ktv = q_registry_keyed_table_value();
-            if (!ktv) q_die("keyed table literal: registry not initialized");
             ray_t *kcols = parse_E(p, Q_NONE);
             expect(p, T_RBRACK, "expected ']' in keyed table literal");
-            /* kdb accepts an optional `;` between the key bracket and the
-             * first value column — `([a:`x`y];b:10 20)` == `([a:`x`y]b:10 20)`
-             * (insert.qcmd/upsert.qcmd spell it with the semicolon).  An
-             * ALL-KEY literal `([a:`A;c:`C])` has NO value columns (used as
-             * xcol's rename map, ref/cols.md) — emit an empty vcols list. */
+            /* optional `;` after `]` — `([a:`x`y];b:10 20)` == `([a:`x`y]b:10 20)` */
             if (at(p, T_SEMI)) adv(p);
-            ray_t *vcols = at(p, T_RPAREN) ? ray_list_new(1) : parse_E(p, Q_NONE);
+            if (at(p, T_RPAREN)) {
+                expect(p, T_RPAREN, "expected ')'");
+                return (P){ R_NOUN, table_lit_dict(kcols) };
+            }
+            ray_t *vcols = parse_E(p, Q_NONE);
             expect(p, T_RPAREN, "expected ')'");
-            int64_t kn = ray_len(kcols), vn = ray_len(vcols);
-            ray_t **ks = (ray_t **)ray_data(kcols);
-            ray_t **vs = (ray_t **)ray_data(vcols);
-            ray_t *w = ray_list_new(kn + vn + 2);
-            w = ray_list_append(w, ktv);
-            ray_t *knv = ray_i64(kn);
-            w = ray_list_append(w, knv); ray_release(knv);
-            for (int64_t i = 0; i < kn; i++) {
-                if (ks[i]) { w = ray_list_append(w, ks[i]); }
-                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
-            }
-            for (int64_t i = 0; i < vn; i++) {
-                if (vs[i]) { w = ray_list_append(w, vs[i]); }
-                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
-            }
-            ray_release(kcols);
-            ray_release(vcols);
-            return (P){ R_NOUN, w };
+            return (P){ R_NOUN, table_lit_bang(table_lit_flip(kcols), table_lit_flip(vcols)) };
         }
         ray_t *e = parse_E(p, Q_NONE);
         expect(p, T_RPAREN, "expected ')'");
