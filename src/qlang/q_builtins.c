@@ -14,6 +14,8 @@
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
+#include "qlang/q_type.h"     /* q_type_of — the `type` verb's type-number home */
+#include "qlang/ops/q_index.h" /* q_index_elem_at — the element-read home */
 #include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "lang/format.h"    /* ray_fmt — q string cast */
@@ -33,7 +35,7 @@
 /* Exported (q_builtins.h) so the `-5!` internal-fn alias single-homes here. */
 ray_t* q_parse_builtin_fn(ray_t* x) {
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
+    if (!q_str_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t sl = (size_t)sn;
     if (!sp) return q_err(QE_DOMAIN);
     char* src = malloc(sl + 1);
@@ -114,38 +116,10 @@ static ray_t* id_fn(ray_t* x) {
 static ray_unary_fn g_base_type  = NULL;
 static ray_unary_fn g_base_count = NULL;
 
-/* q `type` on FUNCTION values only — 100h lambda, 104h projection, 102h
- * operator (ref/datatypes.md).  Everything else stays on the base verb; the
- * full q type map is cast/type.qcmd territory. */
+/* q `type` verb: the type-number knowledge lives in q_type_of (the type
+ * axis home); this arm keeps only the base-verb fallback for NULL x. */
 static ray_t* type_fn(ray_t* x) {
-    if (x) {
-        /* generic null: 101h unary primitive (ref/datatypes.md), never the
-         * internal RAY_NULL tag */
-        if (RAY_IS_NULL(x)) return ray_i16(101);
-        /* RAY_QFN carriers first: kdb 100h lambda, 104h projection, 106+adv
-         * derived verb (f' 106h … f\: 111h — ref/datatypes.md). */
-        switch (q_eval_apply_carrier_kind(x)) {
-        case Q_EVAL_CAR_LAMBDA: return ray_i16(100);
-        case Q_EVAL_CAR_PROJ:   return ray_i16(104);
-        case Q_EVAL_CAR_DERIV: {
-            ray_t** c = (ray_t**)ray_data(x);
-            int adv = c[2] ? (int)c[2]->i64 : 0;
-            return ray_i16((int16_t)(106 + (adv >= 0 && adv < 6 ? adv : 0)));
-        }
-        default: break;
-        }
-        if (x->type == RAY_LAMBDA) return ray_i16(100);
-        if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY)
-            return ray_i16(102);
-        /* q's `type` IS the internal tag: openq's type tags already ARE kdb's
-         * type numbers (include/rayforce.h — long 7, sym 11, list 0, table 98,
-         * dict 99) and atoms are stored NEGATIVE (`-7h` long atom vs `7h` long
-         * vector).  This replaces the rayfall SYMBOL the base `type` returned
-         * (` `i64 `/` `I64 `/` `LIST `).  NB a native -RAY_STR string reports
-         * -10h (char ATOM); kdb's char VECTOR is 10h — a documented string-model
-         * divergence (ARCHITECTURE.md), pinned in cast/type-deferred.qcmd. */
-        return ray_i16(x->type);
-    }
+    if (x) return ray_i16(q_type_of(x));
     return g_base_type ? g_base_type(x)
                        : q_err(QE_TYPE);
 }
@@ -346,12 +320,12 @@ static ray_t* remote_apply(ray_t* list) {
         ray_len(list) < 1)
         return q_err(QE_TYPE);
     int64_t n = ray_len(list);
-    ray_t* head = q_registry_elem_at(list, 0);            /* owned */
+    ray_t* head = q_index_elem_at(list, 0);            /* owned */
     if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_TYPE);
     /* string-source head ("+", "{x*2}"): parse + eval to its value */
     if (head->type == -RAY_STR || head->type == RAY_CHARV) {
         const char* sp; int64_t sn;
-        if (q_text_bytes(head, &sp, &sn)) {
+        if (q_str_text_bytes(head, &sp, &sn)) {
             char* z = malloc((size_t)sn + 1);
             if (!z) { ray_release(head); return q_err(QE_WSFULL); }
             memcpy(z, sp, (size_t)sn);
@@ -372,7 +346,7 @@ static ray_t* remote_apply(ray_t* list) {
     int64_t argc = n - 1;
     if (argc > 8) { ray_release(head); return q_err(QE_RANK); }
     for (int64_t i = 0; i < argc; i++) {
-        argv[i] = q_registry_elem_at(list, i + 1);        /* owned */
+        argv[i] = q_index_elem_at(list, i + 1);        /* owned */
         if (!argv[i] || RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
             for (int64_t j = 0; j < i; j++) ray_release(argv[j]);

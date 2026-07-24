@@ -14,6 +14,7 @@
 #include "qlang/q_err.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
+#include "qlang/q_type.h"     /* q_type_is_keyed — the type axis home */
 #include "qlang/q_parse_internal.h"
 #include "qlang/q_fmt.h"
 #include "qlang/q_handles.h"
@@ -156,7 +157,7 @@ static int int_atom(ray_t* v) {
 }
 
 static ray_t* collapse(ray_t* l) {          /* consumes l, returns owned */
-    ray_t* c = q_collapse_list(l);
+    ray_t* c = q_list_collapse(l);
     ray_release(l);
     return c;
 }
@@ -277,7 +278,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
         return ray_vec_new(RAY_I64, 0);
     }
 
-    ray_t* e0_in = q_registry_elem_at(arg, 0);
+    ray_t* e0_in = q_index_elem_at(arg, 0);
     ray_t* e0 = unary_elem(fn, e0_in);
     if (e0 != e0_in) ray_release(e0_in);
     if (RAY_IS_ERR(e0)) return e0;
@@ -294,7 +295,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
                 ray_release(vec);
                 return q_err(QE_STOP);
             }
-            ray_t* e = q_registry_elem_at(arg, i);
+            ray_t* e = q_index_elem_at(arg, i);
             ray_t* r = RAY_IS_ERR(e) ? e : fn(e);
             if (r != e) ray_release(e);
             if (RAY_IS_ERR(r)) { ray_release(vec); return r; }
@@ -311,7 +312,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
     out = ray_list_append(out, e0);
     ray_release(e0);
     for (int64_t i = 1; i < len; i++) {
-        ray_t* e = q_registry_elem_at(arg, i);
+        ray_t* e = q_index_elem_at(arg, i);
         ray_t* r = unary_elem(fn, e);
         if (r != e) ray_release(e);
         if (RAY_IS_ERR(r)) { ray_release(out); return r; }
@@ -356,8 +357,8 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
         return ray_vec_new(RAY_I64, 0);
     }
 
-    ray_t* a0 = lc ? q_registry_elem_at(l, 0) : l;
-    ray_t* b0 = rc ? q_registry_elem_at(r, 0) : r;
+    ray_t* a0 = lc ? q_index_elem_at(l, 0) : l;
+    ray_t* b0 = rc ? q_index_elem_at(r, 0) : r;
     ray_t* e0 = binary_elem(fn, a0, b0);
     if (lc && a0 != e0) ray_release(a0);
     if (rc && b0 != e0) ray_release(b0);
@@ -391,8 +392,8 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
                 ray_release(vec);
                 return q_err(QE_STOP);
             }
-            ray_t* a = lc ? q_registry_elem_at(l, i) : l;
-            ray_t* b = rc ? q_registry_elem_at(r, i) : r;
+            ray_t* a = lc ? q_index_elem_at(l, i) : l;
+            ray_t* b = rc ? q_index_elem_at(r, i) : r;
             ray_t* e = (RAY_IS_ERR(a) || RAY_IS_ERR(b)) ? q_err(QE_TYPE)
                                                         : fn(a, b);
             if (lc && a != e) ray_release(a);
@@ -411,8 +412,8 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
     out = ray_list_append(out, e0);
     ray_release(e0);
     for (int64_t i = 1; i < len; i++) {
-        ray_t* a = lc ? q_registry_elem_at(l, i) : l;
-        ray_t* b = rc ? q_registry_elem_at(r, i) : r;
+        ray_t* a = lc ? q_index_elem_at(l, i) : l;
+        ray_t* b = rc ? q_index_elem_at(r, i) : r;
         ray_t* e = binary_elem(fn, a, b);
         if (lc && a != e) ray_release(a);
         if (rc && b != e) ray_release(b);
@@ -471,21 +472,21 @@ static ray_t* atomic2_dicts(ray_binary_fn f, ray_t* x, ray_t* y) {
     ray_t* vy = ray_dict_vals(y);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t j = 0; j < n; j++) {
-        ray_t* k = q_registry_elem_at(uk, j);
+        ray_t* k = q_index_elem_at(uk, j);
         int64_t ix = ray_dict_find_idx(x, k);
         int64_t iy = ray_dict_find_idx(y, k);
         ray_release(k);
         ray_t* r;
         if (ix >= 0 && iy >= 0) {
-            ray_t* ex = q_registry_elem_at(vx, ix);
-            ray_t* ey = q_registry_elem_at(vy, iy);
+            ray_t* ex = q_index_elem_at(vx, ix);
+            ray_t* ey = q_index_elem_at(vy, iy);
             r = binary_elem(f, ex, ey);
             if (r != ex) ray_release(ex);
             if (r != ey) ray_release(ey);
         } else if (ix >= 0) {
-            r = q_registry_elem_at(vx, ix);
+            r = q_index_elem_at(vx, ix);
         } else {
-            r = q_registry_elem_at(vy, iy);
+            r = q_index_elem_at(vy, iy);
         }
         if (!r || RAY_IS_ERR(r)) {
             ray_release(out);
@@ -536,7 +537,7 @@ static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
 
 static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
     if (x && x->type == RAY_DICT) {
-        if (q_table_is_keyed(x)) return agg1(fv, row, ray_dict_vals(x));
+        if (q_type_is_keyed(x)) return agg1(fv, row, ray_dict_vals(x));
         ray_t* v = ray_dict_vals(x);
         return q_eval_apply(fv, row, &v, 1);
     }
@@ -564,7 +565,7 @@ static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* x) {
     if (x && x->type == RAY_DICT) {
         ray_t* v = ray_dict_vals(x);
         ray_t* nv;
-        if (q_table_is_keyed(x)) nv = map1(fv, row, v);
+        if (q_type_is_keyed(x)) nv = map1(fv, row, v);
         else                     nv = store_mat(q_eval_apply(fv, row, &v, 1));
         if (RAY_IS_ERR(nv)) return nv;
         ray_t* k = ray_dict_keys(x);
@@ -675,9 +676,9 @@ static ray_t* fold_over(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     ray_t* acc;
     int64_t i0;
     if (seed) { ray_retain(seed); acc = seed; i0 = 0; }
-    else      { acc = q_registry_elem_at(x, 0); i0 = 1; }
+    else      { acc = q_index_elem_at(x, 0); i0 = 1; }
     for (int64_t i = i0; i < len; i++) {
-        ray_t* ei = q_registry_elem_at(x, i);
+        ray_t* ei = q_index_elem_at(x, i);
         ray_t* av[2] = { acc, ei };
         ray_t* nx = q_eval_apply(fv, frow, av, 2);
         ray_release(ei);
@@ -700,7 +701,7 @@ static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
     int64_t len = ray_len(x);
     ray_t* l = ray_list_new(len > 0 ? len : 1);
     for (int64_t i = 0; i < len; i++) {
-        ray_t* ei = q_registry_elem_at(x, i);
+        ray_t* ei = q_index_elem_at(x, i);
         ray_t* r = store_mat(q_eval_apply(fv, frow, &ei, 1));
         ray_release(ei);
         if (RAY_IS_ERR(r)) { ray_release(l); return r; }
@@ -763,7 +764,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
      * the body sees its params/locals and globals, never a caller frame */
     if (ray_env_push_scope_barrier() != RAY_OK) return q_err(QE_STACK);
     for (int64_t i = 0; i < n; i++) {
-        ray_t* p = q_registry_elem_at(params, i);          /* sym atom */
+        ray_t* p = q_index_elem_at(params, i);          /* sym atom */
         if (p && !RAY_IS_ERR(p)) {
             ray_env_set_local(p->i64, args[i]);            /* retains */
             ray_release(p);
@@ -806,7 +807,7 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
 /* ===== noun-head application ============================================
  * APPLICATION concerns only (handles, sym heads, elided lists, the string
  * boundary) — all DATA indexing is ops/q_index.c, the one index/amend home;
- * results cross into q-space through q_charv_out. */
+ * results cross into q-space through q_str_charv_out. */
 
 static int is_text_atom(ray_t* v) {
     return v && (v->type == -RAY_STR || v->type == RAY_CHARV ||
@@ -866,7 +867,7 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     }
     if (v->type == -RAY_SYM) return sym_head_apply(v, args, n);
     if (v->type == -RAY_STR) {           /* stray physical string: convert, retry */
-        ray_t* cv = q_charv_of_str(v);
+        ray_t* cv = q_str_charv_of_str(v);
         if (!cv || RAY_IS_ERR(cv)) return cv;
         ray_t* r = noun_index(cv, args, n);
         ray_release(cv);
@@ -902,7 +903,7 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* r = q_index_at(v, args, n);               /* the ONE index home */
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
-    return q_charv_out(r);     /* boundary-out: charv, never physical STR */
+    return q_str_charv_out(r);     /* boundary-out: charv, never physical STR */
 }
 
 /* ===== q_eval_apply: the single entry ==================================== */
@@ -1161,7 +1162,7 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     if (k < 1 || k > 8) return q_err(QE_RANK);
     ray_t* av[8];
     for (int64_t i = 0; i < k; i++) {
-        av[i] = q_registry_elem_at(a, i);            /* owned */
+        av[i] = q_index_elem_at(a, i);            /* owned */
         if (!av[i] || RAY_IS_ERR(av[i])) {
             ray_t* err = av[i];
             for (int64_t j = 0; j < i; j++) ray_release(av[j]);

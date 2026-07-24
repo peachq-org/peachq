@@ -12,8 +12,8 @@
  */
 #include "qlang/ops/q_bang.h"
 #include "qlang/q_err.h"
-#include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_strict_i64,
-                                         * q_is_int_atom, q_iatom_val, q_table_flatten, q_env_call2 */
+#include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_type_strict_i64,
+                                         * q_type_is_int_atom, q_type_iatom_val, q_table_flatten, q_env_call2 */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/net/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
@@ -158,7 +158,7 @@ static ray_t* h_format(ray_t* arg) {
     ray_t* y  = ray_list_get(arg, 1);    /* borrowed */
     int64_t places64;
     if (px && px->type == -RAY_BOOL) places64 = px->b8;
-    else if (!q_strict_i64(px, &places64))
+    else if (!q_type_strict_i64(px, &places64))
         return q_err(QE_TYPE);
     if (places64 < 0) places64 = 0;
     if (places64 > 320) places64 = 320;       /* guard the snprintf width */
@@ -188,7 +188,7 @@ static ray_t* h_format(ray_t* arg) {
  * columns into a keyed table (RAY_DICT keycols-table -> valcols-table).
  * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
 ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
-    if (!y || (y->type != RAY_TABLE && !q_table_is_keyed(y)))
+    if (!y || (y->type != RAY_TABLE && !q_type_is_keyed(y)))
         return q_err(QE_TYPE);
     ray_t* flat = q_table_flatten(y);
     if (!flat || RAY_IS_ERR(flat)) return flat;
@@ -312,7 +312,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
  * a plain 0N already IS NULL_I64.  Everything else is a dict. */
 ray_t* q_bang(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
-    if (q_is_int_atom(x))
-        return q_bang_dispatch(RAY_ATOM_IS_NULL(x) ? NULL_I64 : q_iatom_val(x), y);
+    if (q_type_is_int_atom(x))
+        return q_bang_dispatch(RAY_ATOM_IS_NULL(x) ? NULL_I64 : q_type_iatom_val(x), y);
     return bang_make_dict(x, y);
 }
