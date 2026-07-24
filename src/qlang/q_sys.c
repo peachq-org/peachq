@@ -32,7 +32,7 @@
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
 #include <limits.h>          /* PATH_MAX */
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
-#include "qlang/q_registry.h" /* q_text_bytes / q_charv_out — charv text accessors */
+#include "qlang/q_registry.h" /* q_str_text_bytes / q_str_charv_out — charv text accessors */
 #include "qlang/q_registry_internal.h" /* q_rand_seed — the rng stream home */
 #ifndef RAY_OS_WINDOWS
 #include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
@@ -889,7 +889,7 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
 ray_t* q_system_fn(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
+    if (!q_str_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t sl = (size_t)sn;
 
     char   stackbuf[1024];
@@ -907,7 +907,7 @@ ray_t* q_system_fn(ray_t* x) {
     ray_t* out = q_sys_run(buf, sl + 1, 1);
     if (blk) ray_free(blk);
     if (!out) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }  /* silent -> generic null */
-    return q_charv_out(out);            /* captured lines cross as char vectors */
+    return q_str_charv_out(out);            /* captured lines cross as char vectors */
 }
 
 bool q_sys_is_cmd(const char* line, size_t n) {

@@ -35,7 +35,7 @@
   #include <errno.h>
 #endif
 #include <time.h>
-#include "qlang/q_registry.h"   /* q_text_bytes — charv/string text accessor */
+#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/string text accessor */
 
 #define Q_HTTP_MAX_HEADERS 64
 #define Q_HTTP_MAX_PATH    1024
@@ -190,13 +190,13 @@ static ray_t* http_env_get(int64_t sym_id) {
 }
 
 /* Copy a q text value's bytes (charv / char atom / string atom, via
- * q_text_bytes — never a RAY_STR column) into out[] (NUL-terminated) iff every
+ * q_str_text_bytes — never a RAY_STR column) into out[] (NUL-terminated) iff every
  * byte is a safe, non-control character (>= 0x20 and != 0x7f).  Rejects CR/LF
  * (HTTP header injection) and embedded NUL (silent truncation).  false = wrong
  * type / empty / oversize / control byte -> caller uses its own fallback. */
 static bool http_str_atom_safe(ray_t* v, char* out, size_t outsz) {
     const char* s; int64_t sn;
-    if (!v || RAY_IS_ERR(v) || !q_text_bytes(v, &s, &sn)) return false;
+    if (!v || RAY_IS_ERR(v) || !q_str_text_bytes(v, &s, &sn)) return false;
     size_t n = (size_t)sn;
     if (n == 0 || n >= outsz) return false;
     for (size_t i = 0; i < n; i++) {
@@ -228,7 +228,7 @@ bool q_http_zac_parse(const ray_t* r, int64_t* status_out,
         default: return false;
     }
     { const char* pp; int64_t pn;               /* charv or legacy STR text */
-      if (!q_text_bytes(pv, &pp, &pn)) return false;
+      if (!q_str_text_bytes(pv, &pp, &pn)) return false;
       *status_out = st;
       *pay_out    = pp;
       *paylen_out = (size_t)pn; }
@@ -630,7 +630,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
       q_console_reset(); }
 
     { const char* rp; int64_t rn;
-      if (r && !RAY_IS_ERR(r) && q_text_bytes(r, &rp, &rn)) {
+      if (r && !RAY_IS_ERR(r) && q_str_text_bytes(r, &rp, &rn)) {
         uint8_t* gz = NULL; size_t gn = 0;
         if (may_gzip && accept_encoding_has_gzip(hdrs, nh))
             gz = http_gzip_response(rp, (size_t)rn, &gn);  /* NULL -> send verbatim */

@@ -30,7 +30,7 @@ static int is_coll(ray_t* v) {
 }
 
 static ray_t* collapse(ray_t* l) {                   /* consumes l */
-    ray_t* c = q_collapse_list(l);
+    ray_t* c = q_list_collapse(l);
     ray_release(l);
     return c;
 }
@@ -38,6 +38,23 @@ static ray_t* collapse(ray_t* l) {                   /* consumes l */
 static ray_t* mat(ray_t* r) {                        /* consumes r */
     if (r && ray_is_lazy(r)) return ray_lazy_materialize(r);
     return r;
+}
+
+/* v[i] as an owned atom/element (borrowed v): direct payload read for
+ * vectors/lists (collection_elem — no index atom, no ray_at_fn dispatch);
+ * generic indexing for every other shape.  alloc==0 results are BORROWED
+ * list slots — retain, never release (r0 review).  The one element-read home. */
+ray_t* q_index_elem_at(ray_t* v, int64_t i) {
+    if (v && (ray_is_vec(v) || v->type == RAY_LIST)) {
+        int alloc = 0;
+        ray_t* e = collection_elem(v, i, &alloc);
+        if (e && !RAY_IS_ERR(e)) { if (!alloc) ray_retain(e); return e; }
+        if (e && alloc) ray_release(e);   /* allocated error: generic fallback */
+    }
+    ray_t* ia = ray_i64(i);
+    ray_t* e  = ray_at_fn(v, ia);   /* owned */
+    ray_release(ia);
+    return e;
 }
 
 /* one join operand for a single item: atoms join natively, else boxed */
@@ -69,17 +86,17 @@ static ray_t* miss_null(ray_t* c) {
  * write mode a miss/OOB is 'index (a path must exist to be amended). */
 static ray_t* index_level(ray_t* x, ray_t* i, int write) {
     if (x->type == RAY_DICT) {
-        if (q_table_is_keyed(x)) return q_err(QE_NYI);
+        if (q_type_is_keyed(x)) return q_err(QE_NYI);
         int64_t ki = ray_dict_find_idx(x, i);
         ray_t* vals = ray_dict_slots(x)[1];
         if (ki < 0) return write ? q_err(QE_INDEX) : miss_null(vals);
-        return q_registry_elem_at(vals, ki);
+        return q_index_elem_at(vals, ki);
     }
     if (!is_coll(x)) return q_err(QE_TYPE);
     int64_t ix;
     if (!idx_i64(i, &ix)) return q_err(QE_TYPE);
     if (ix < 0 || ix >= ray_len(x)) return write ? q_err(QE_INDEX) : miss_null(x);
-    return q_registry_elem_at(x, ix);
+    return q_index_elem_at(x, ix);
 }
 
 /* (i#x),item,(i+1)_x — the store for shapes the element writer can't reach
@@ -194,7 +211,7 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
     int64_t n = ray_len(src);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t j = 0; j < n; j++) {
-        ray_t* ej = q_registry_elem_at(src, j);
+        ray_t* ej = q_index_elem_at(src, j);
         ray_t* r;
         if (!ej || RAY_IS_ERR(ej)) r = ej ? ej : q_err(QE_TYPE);
         else if (!i) r = elem_rest(ej, rest, k);     /* consumes ej */
@@ -208,7 +225,7 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
 
 static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     if (!i0 || RAY_IS_NULL(i0)) {                    /* `::`: identity / all */
-        if (x->type == RAY_DICT && !q_table_is_keyed(x))
+        if (x->type == RAY_DICT && !q_type_is_keyed(x))
             return index_map(ray_dict_slots(x)[1], NULL, rest, k);
         if (x->type == RAY_DICT || x->type == RAY_TABLE) return q_err(QE_NYI);
         if (!is_coll(x)) return q_err(QE_TYPE);
@@ -257,7 +274,7 @@ static ray_t* conform(ray_t* y, int64_t n, int64_t j) {
     if (!y) return NULL;
     if (!is_coll(y)) { ray_retain(y); return y; }
     if (ray_len(y) != n) return q_err(QE_LENGTH);
-    return q_registry_elem_at(y, j);
+    return q_index_elem_at(y, j);
 }
 
 /* Amend Entire: the selection is x itself.  x consumed on success. */
@@ -302,8 +319,8 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
     for (int64_t j = 0; j < n && !err; j++) {
         ray_t* yj = conform(y, n, j);
         if (yj && RAY_IS_ERR(yj)) { err = yj; break; }
-        ray_t* kj = sel  ? q_registry_elem_at(sel, j)
-                  : keys ? q_registry_elem_at(keys, j)
+        ray_t* kj = sel  ? q_index_elem_at(sel, j)
+                  : keys ? q_index_elem_at(keys, j)
                          : ray_i64(j);
         if (!kj || RAY_IS_ERR(kj)) err = kj ? kj : q_err(QE_OOM);
         else {
@@ -325,7 +342,7 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
 
 static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
                          ray_t* f, ray_t* y) {
-    if (x->type == RAY_TABLE || q_table_is_keyed(x)) return q_err(QE_NYI);
+    if (x->type == RAY_TABLE || q_type_is_keyed(x)) return q_err(QE_NYI);
     if (!is_coll(x) && x->type != RAY_DICT) return q_err(QE_TYPE);
     if (!i0 || RAY_IS_NULL(i0)) return amend_seq(x, NULL, rest, k, f, y);
     if (is_coll(i0)) return amend_seq(x, i0, rest, k, f, y);
@@ -353,7 +370,7 @@ static ray_t* amend_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
  * non-handle ATOM d selects d itself — top level only, mid-path atoms 'type */
 ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y) {
     if (!x || RAY_IS_ERR(x)) return q_err(QE_TYPE);
-    if (x->type == RAY_TABLE || q_table_is_keyed(x)) return q_err(QE_NYI);
+    if (x->type == RAY_TABLE || q_type_is_keyed(x)) return q_err(QE_NYI);
     if (x->type == -RAY_SYM) return q_err(QE_DOMAIN);
     if (k <= 0 || (!is_coll(x) && x->type != RAY_DICT))
         return amend_entire(x, f, y);
@@ -374,7 +391,7 @@ ray_t* q_index_amend_dot(ray_t* x, ray_t* i, ray_t* f, ray_t* y) {
     ray_t* r = NULL;
     int64_t got = 0;
     for (; got < k; got++) {
-        ix[got] = q_registry_elem_at(i, got);
+        ix[got] = q_index_elem_at(i, got);
         if (!ix[got] || RAY_IS_ERR(ix[got])) {
             r = ix[got] ? ix[got] : q_err(QE_TYPE);
             break;

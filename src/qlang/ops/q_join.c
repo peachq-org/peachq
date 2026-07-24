@@ -25,7 +25,7 @@
  * src/ops/join.c machinery); this section only prepares rowid-augmented key
  * tables, reorders the engine's match relation to kdb row order, and
  * assembles result columns by vector gather.  Keyed-table primitives are the
- * single-home helpers (q_table_is_keyed in ops/q_table.c, q_bang_enkey in q_bang.c,
+ * single-home helpers (q_type_is_keyed in ops/q_table.c, q_bang_enkey in q_bang.c,
  * q_table_flatten) — never redefined.  Refcounts: wrapper args BORROWED, results OWNED;
  * ray_list_append/ray_table_add_col RETAIN (release local after);
  * ray_table_get_col* return BORROWED columns. */
@@ -87,7 +87,7 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
     ray_release(iv);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
     if (g->type == RAY_LIST) {
-        ray_t* cg = q_collapse_list(g);
+        ray_t* cg = q_list_collapse(g);
         ray_release(g);
         return cg;
     }
@@ -360,7 +360,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
         if (x) ray_retain(x);
         return x ? x : q_err(QE_TYPE);
     }
-    if (q_table_is_keyed(x)) {             /* keyed lhs: unkey, join, re-key */
+    if (q_type_is_keyed(x)) {             /* keyed lhs: unkey, join, re-key */
         ray_t* xk = ray_dict_keys(x);                      /* borrowed */
         int64_t nkeys = ray_table_ncols(xk);
         ray_t* xp = q_table_flatten(x);
@@ -374,7 +374,7 @@ static ray_t* qj_lj_core(ray_t* x, ray_t* y, int mode, int inner) {
     }
     if (!x || x->type != RAY_TABLE)
         return q_err(QE_TYPE);
-    if (!q_table_is_keyed(y))
+    if (!q_type_is_keyed(y))
         return q_err(QE_TYPE);
     ray_t* yk = ray_dict_keys(y);                          /* borrowed */
     ray_t* yv = ray_dict_vals(y);                          /* borrowed */
@@ -629,7 +629,7 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
 
 static ray_t* qj_uj_core(ray_t* x, ray_t* y, int mode) {
     if (!x || !y) return q_err(QE_TYPE);
-    if (q_table_is_keyed(x) && q_table_is_keyed(y))
+    if (q_type_is_keyed(x) && q_type_is_keyed(y))
         return qj_ktbl_merge(x, y, mode);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE)
         return qj_uj_unkeyed(x, y);
@@ -771,7 +771,7 @@ ray_t* q_ajf0_wrap(ray_t** args, int64_t n) {
 ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
     if (!t || t->type != RAY_TABLE)
         return q_err(QE_TYPE);
-    if (d && d->type == RAY_DICT && !q_table_is_keyed(d)) {
+    if (d && d->type == RAY_DICT && !q_type_is_keyed(d)) {
         /* dict -> 1-row table, then unwrap the single result row to a dict */
         ray_t* dk = ray_dict_keys(d);                      /* borrowed */
         ray_t* dv = ray_dict_vals(d);                      /* borrowed */
@@ -794,7 +794,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
             l = ray_list_append(l, val);
             ray_release(val);
             if (RAY_IS_ERR(l)) { ray_release(ks); ray_release(dt); return l; }
-            ray_t* colv = q_collapse_list(l);
+            ray_t* colv = q_list_collapse(l);
             ray_release(l);
             if (!colv || RAY_IS_ERR(colv)) { ray_release(ks); ray_release(dt); return colv ? colv : q_err(QE_TYPE); }
             dt = ray_table_add_col(dt, ks->i64, colv);
@@ -823,7 +823,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
             if (RAY_IS_ERR(ovals)) { ray_release(okeys); ray_release(rows); return ovals; }
         }
         ray_release(rows);
-        ray_t* cvals = q_collapse_list(ovals);
+        ray_t* cvals = q_list_collapse(ovals);
         ray_release(ovals);
         if (!cvals || RAY_IS_ERR(cvals)) { ray_release(okeys); return cvals ? cvals : q_err(QE_TYPE); }
         /* construct through the audited env dict builder (the same one `!`
@@ -971,7 +971,7 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
  * otherwise); extra keytbl columns are ignored; result preserves keytbl row
  * order (first match per row); a miss yields a null row. */
 ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
-    if (!q_table_is_keyed(kt) || !keytbl || keytbl->type != RAY_TABLE)
+    if (!q_type_is_keyed(kt) || !keytbl || keytbl->type != RAY_TABLE)
         return q_err(QE_TYPE);
     ray_t* kk = ray_dict_keys(kt);                         /* borrowed */
     ray_t* kv = ray_dict_vals(kt);                         /* borrowed */
