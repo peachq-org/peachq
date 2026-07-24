@@ -104,6 +104,15 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
     return 0;
 }
 
+/* Cast/Tok of the empty general list -> q_type_empty(tag) (`long$() / `$()).
+ * A general list carries no element to infer from, so the target tag names the
+ * empty result's domain. */
+static int is_empty_list(ray_t* x) {
+    return x && x->type == RAY_LIST && ray_len(x) == 0;
+}
+
+static ray_t* cast_u8(ray_t* x);
+
 /* tag -> base `as` spelling, then delegate; 'nyi when the tag has no spelling
  * (LIST/GUID/F32 targets). */
 static ray_t* cast_delegate(int8_t tag, ray_t* x) {
@@ -127,15 +136,20 @@ static ray_t* cast_delegate(int8_t tag, ray_t* x) {
 static ray_t* cast_bool(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_BOOL || x->type == RAY_BOOL) { ray_retain(x); return x; }
+    /* text: chars ARE bytes (string-C3), so "b"$ is per-char nonzero-code —
+     * "b"$" ",.Q.an -> 64#1b (cast/cast golden).  Truthiness keeps its own
+     * string-emptiness law at its one home (q_eval_apply_truthy). */
+    if (x->type == RAY_CHARV || x->type == -RAY_CHARV || x->type == -RAY_STR) {
+        ray_t* b = cast_u8(x);
+        if (!b || RAY_IS_ERR(b)) return b;
+        ray_t* r = cast_bool(b);
+        ray_release(b);
+        return r;
+    }
     int64_t i;
     if (q_type_strict_i64(x, &i)) return ray_bool(i != 0);
     double d;
     if (q_type_strict_f64(x, &d)) return ray_bool(d != 0.0);   /* 0n is NaN; NaN != 0 -> 1b */
-    /* string atom: emptiness, not a numeric law — the provisional string model
-     * (ARCHITECTURE.md) owns it; preserved verbatim from base's arm. */
-    if (x->type == -RAY_STR) return ray_bool(ray_str_len(x) > 0);
-    if (x->type == RAY_CHARV) return ray_bool(ray_len(x) > 0);  /* same emptiness law */
-    if (x->type == -RAY_CHARV) return ray_bool(1);              /* a char is non-empty */
     /* An atom reaching here (guid, sym) has no boolean law.  Atoms never
      * delegate: that re-enters the null-propagation being intercepted, which is
      * how 0Ng returned 0b while a non-null guid errored. */
@@ -156,9 +170,9 @@ static ray_t* cast_bool(ray_t* x) {
 
 /* char cast (`10h$`/`` `char$``/`"c"$`): reinterpret an integer/byte value as
  * chars, producing a native string (openq has no char-atom type distinct from
- * a 1-char string).  Runs BEFORE the generic RAY_LIST distribution so a boxed
- * integer list packs into ONE string rather than a list of 1-char strings
- * (q_list_collapse refuses to pack -RAY_STR atoms). */
+ * a 1-char string).  The boxed-list arm packs into ONE string, so "c"$ must
+ * beat q_dollar_cast's RAY_LIST distribution (which would build a list of
+ * 1-char strings — q_list_collapse refuses to pack them). */
 static ray_t* cast_str(ray_t* x) {
     if (x && x->type == -RAY_STR) { ray_retain(x); return x; }   /* identity */
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV)) {  /* charv identity */
@@ -377,12 +391,17 @@ static ray_t* cast_timestamp(ray_t* x) {
     return cast_delegate(RAY_TIMESTAMP, x);
 }
 
-/* Symbol target: `symbol$sym is identity; every other source is deferred. */
+/* Symbol target: `symbol$sym is identity; strings follow the Tok law
+ * (ref/tok.md Symbols: `$"hello" -> `hello, blanks trimmed, `$"" -> `) —
+ * the cast/tok distinction has no doc-visible difference for sym targets.
+ * Every other source is deferred. */
 static ray_t* cast_sym(ray_t* x) {
     if (x && (x->type == -RAY_SYM || x->type == RAY_SYM)) {
         ray_retain(x);
         return x;
     }
+    const char* p; int64_t n;
+    if (x && q_str_text_bytes(x, &p, &n)) return q_tok(RAY_SYM, p, (size_t)n);
     return q_err(QE_NYI);
 }
 
@@ -392,8 +411,10 @@ static ray_t* cast_sym(ray_t* x) {
  * already agree.  The switch has NO `default:`, so -Wall (=> -Wswitch) +
  * -Werror refuse to build a target no arm states. */
 ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
+    if (is_empty_list(x)) return q_type_empty(tag);
     /* Precedes the switch by ORDER, not preference: "c"$ packs a boxed list
-     * into ONE string, so it must beat the per-tag arms. */
+     * into ONE string, so it must beat the per-tag arms AND the RAY_LIST
+     * distribution below. */
     if (tag == RAY_CHARV)
         return q_str_charv_out(cast_str(x));
     /* numeric cast of char text = code points (`int$"ABC" -> 65 66 67i;
@@ -406,6 +427,24 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
         ray_t* r = q_dollar_cast(tag, b);
         ray_release(b);
         return r;
+    }
+    /* general (boxed) list: cast each element, then collapse — typed vectors
+     * are leaves the switch below hits WHOLE (vectorized kernels). */
+    if (x && x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n);
+        if (RAY_IS_ERR(out)) return out;
+        ray_t** e = (ray_t**)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* r = q_dollar_cast(tag, e[i]);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : q_err(QE_TYPE); }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        ray_t* c = q_list_collapse(out);
+        ray_release(out);
+        return c;
     }
     switch ((ray_type_e)tag) {
     case RAY_CHARV: break;                   /* hoisted above: packs boxed lists */
@@ -431,17 +470,34 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
 
 /* kdb Tok (ref/tok.md): parse a string as a value of the tag type.  Leading/
  * trailing blanks are trimmed; unparseable or out-of-range -> typed null.
- * Implicit recursion stops at STRINGS, not atoms: lists / string vectors
- * distribute. */
-static ray_t* tok_leaf(ray_t* x, int64_t tag) {
-    if (x->type == RAY_STR) {            /* string vector: tok each element */
+ * Recursion stops at STRINGS, not atoms: boxed lists and physical string
+ * columns distribute per element; a non-string leaf is a 'type error. */
+static ray_t* tok_leaf(int8_t tag, ray_t* x) {
+    if (is_empty_list(x)) return q_type_empty(tag);
+    if (x->type == RAY_LIST) {           /* boxed list: tok each element */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n);
+        if (RAY_IS_ERR(out)) return out;
+        ray_t** e = (ray_t**)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* r = tok_leaf(tag, e[i]);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : q_err(QE_TYPE); }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        ray_t* c = q_list_collapse(out);
+        ray_release(out);
+        return c;
+    }
+    if (x->type == RAY_STR) {            /* physical string column: tok each */
         int64_t n = ray_len(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
             size_t sl = 0;
             const char* sp = ray_str_vec_get(x, i, &sl);
-            ray_t* r = q_tok((int8_t)tag, sp ? sp : "", sp ? sl : 0);
+            ray_t* r = q_tok(tag, sp ? sp : "", sp ? sl : 0);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
             ray_release(r);
@@ -454,18 +510,32 @@ static ray_t* tok_leaf(ray_t* x, int64_t tag) {
     const char* tp; int64_t tn;
     if (!q_str_text_bytes(x, &tp, &tn))
         return q_err(QE_TYPE);
-    return q_tok((int8_t)tag, tp, tp ? (size_t)tn : 0);
+    return q_tok(tag, tp, tp ? (size_t)tn : 0);
 }
 ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
-    return tok_leaf(x, tag);
+    return tok_leaf(tag, x);
 }
 
 /* q `w$s` PAD (ref/pad.md): a LONG width w left-justifies the string s in a
  * field of |w| spaces (w<0 right-justifies); longer strings truncate to |w|.
  * Non-string operands are a 'type error.  Output mirrors the input's string
  * form (charv vs -RAY_STR). */
-static ray_t* pad_leaf(ray_t* x, int64_t w) {
-    if (x->type == RAY_STR) {            /* string vector -> pad each element */
+static ray_t* pad_leaf(int64_t w, ray_t* x) {
+    if (x->type == RAY_LIST) {           /* boxed list -> pad each element */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        ray_t** e = (ray_t**)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* r = pad_leaf(w, e[i]);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : q_err(QE_TYPE); }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (x->type == RAY_STR) {            /* physical string column -> pad each */
         int64_t n = ray_len(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
@@ -473,7 +543,7 @@ static ray_t* pad_leaf(ray_t* x, int64_t w) {
             size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
             ray_t* s = ray_str(p ? p : "", p ? sn : 0);
             if (!s || RAY_IS_ERR(s)) { ray_release(out); return s; }
-            ray_t* r = pad_leaf(s, w);
+            ray_t* r = pad_leaf(w, s);
             ray_release(s);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
@@ -498,7 +568,7 @@ static ray_t* pad_leaf(ray_t* x, int64_t w) {
     return r;
 }
 ray_t* q_dollar_pad(int64_t w, ray_t* x) {
-    return pad_leaf(x, w);
+    return pad_leaf(w, x);
 }
 
 /* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list) — openq has
@@ -623,6 +693,22 @@ static int64_t temporal_raw_vec(int8_t at, const void* base, int64_t i) {
 static ray_t* component_leaf(ray_t* x, int64_t comp) {
     q_comp_e c = (q_comp_e)comp;
     if (!x) return q_err(QE_TYPE);
+    if (x->type == RAY_LIST) {           /* boxed list -> component each element */
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        ray_t** e = (ray_t**)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* r = component_leaf(e[i], comp);
+            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r ? r : q_err(QE_TYPE); }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        ray_t* col = q_list_collapse(out);
+        ray_release(out);
+        return col;
+    }
     int8_t at = x->type < 0 ? (int8_t)-x->type : x->type;
     int temporal = RAY_IS_TEMPORAL32(at) || RAY_IS_TEMPORAL64(at) ||
                    RAY_IS_TEMPORALF(at);
@@ -669,13 +755,32 @@ static ray_t* component_extract(ray_t* t, ray_t* x) {
     return component_leaf(x, c);
 }
 
-/* q `t$x` — the `$` verb (contract: q_dollar.h).  LEFT-operand dispatch:
- * a LONG width is PAD; mmu-shaped float operands (both sides) are matrix
- * multiply; a multi-designator LHS ("fiij", `int`float, 5 6h, (`int;"i";6h))
- * zips elementwise over x (ref/cast.md pins (`int;"i";6h)$10 -> 10 10 10i: an
- * ATOM rhs is broadcast); a single designator resolves via q_cast_designator
- * into q_dollar_cast / q_dollar_tok; a non-designator sym is Enumerate. */
+/* `$` over a table: q_table_map_cols walks the columns; this colfn re-enters
+ * q_dollar so each column re-classifies against the designator carried in ctx. */
+static ray_t* dollar_col(void* ctx, ray_t* col) {
+    return q_dollar((ray_t*)ctx, col);
+}
+
+/* q `t$x` — the `$` verb (contract: q_dollar.h).  Family "none": receives
+ * WHOLE args and self-distributes.  DICT/TABLE are UNIFORM structure — handled
+ * once here by re-entering q_dollar per value/column (keys/colnames kept), so
+ * every overload inherits them.  Then LEFT-operand dispatch: a LONG width is
+ * PAD; mmu-shaped float operands (both sides) are matrix multiply; a
+ * multi-designator LHS ("fiij", `int`float, 5 6h, (`int;"i";6h)) zips over x,
+ * RE-ENTERING q_dollar per pair (ref/cast.md pins (`int;"i";6h)$10 -> 10 10
+ * 10i: an ATOM rhs is broadcast); a single designator resolves via
+ * q_cast_designator into q_dollar_cast / q_dollar_tok, each of which owns its
+ * own string/list boundary; a non-designator sym is a temporal component or
+ * Enumerate.  LIST stays inside the leaves so it cannot preempt the mmu form. */
 ray_t* q_dollar(ray_t* t, ray_t* x) {
+    if (x && x->type == RAY_DICT) {
+        ray_t* nv = q_dollar(t, ray_dict_vals(x));
+        if (!nv || RAY_IS_ERR(nv)) return nv ? nv : q_err(QE_TYPE);
+        ray_t* keys = ray_dict_keys(x);
+        ray_retain(keys);
+        return ray_dict_new(keys, nv);                 /* consumes both */
+    }
+    if (x && x->type == RAY_TABLE) return q_table_map_cols(dollar_col, t, x);
     if (t && t->type == -RAY_I64) return q_dollar_pad(t->i64, x);
     int64_t k;
     if (q_mmu_class(t, &k) != QMMU_BAD && q_mmu_class(x, &k) != QMMU_BAD)
@@ -722,8 +827,8 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
     int is_tok = 0, is_identity = 0;
     int8_t tag = q_cast_designator(t, &is_tok, &is_identity);
     if (!tag) {
-        /* Identity (cast.md:40): `0h`/`"*"` returns y (string y -> Tok, deferred
-         * with the string-boundary lift). */
+        /* Identity (cast.md:40): `0h`/`"*"` returns y ("and y is not a
+         * string" — the string-y Tok arm is a deferred divergence). */
         if (is_identity) { ray_retain(x); return x; }
         if (t && t->type == -RAY_SYM) {
             ray_t* comp = component_extract(t, x);   /* year/mm/dd/hh/uu/ss/week */
@@ -733,8 +838,8 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
         return q_err(QE_NYI);
     }
     /* `10h$`/`` `char$``/`"c"$` all land here with is_tok=0 and reinterpret via
-     * q_dollar_cast; only the UPPERCASE char token `"C"$` carries is_tok=1 and stays
-     * a deferred char-Tok — q_dollar_tok's default errors 'nyi (pinned by the
-     * cast_tok_deferred unit test), so no RAY_STR special-case is needed here. */
+     * q_dollar_cast; only the UPPERCASE char token `"C"$` carries is_tok=1 and
+     * stays a deferred char-Tok — q_tok's default errors 'nyi (pinned by the
+     * cast_tok_deferred unit test). */
     return is_tok ? q_dollar_tok(tag, x) : q_dollar_cast(tag, x);
 }
