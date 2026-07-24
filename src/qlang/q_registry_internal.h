@@ -20,6 +20,7 @@
 #define Q_REGISTRY_INTERNAL_H
 #include "qlang/q_registry.h"
 #include "qlang/q_ops.h"
+#include "qlang/q_type.h"   /* the type + null axes home — re-exported to ops/ */
 
 /* ===== 1. REGISTRY ENTRYPOINTS — q_registry.c builders only ============= */
 
@@ -122,7 +123,6 @@ ray_t* q_cross_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in q_registry.c ---- */
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous, int check_reserved);/* used by: builtins, table */
-ray_t* q_collapse_list(ray_t* l);                             /* used by: eval, builtins, fmt, json, wire, agg, dollar, io, join, list, math, table, index */
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence);/* used by: builtins, fmt, parse, agg */
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: fmt, join */
 
@@ -130,18 +130,6 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out);/* used by: 
 double q_velem_f(ray_t* x, int64_t i, int* isnull);           /* used by: list */
 int q_vec_is_float(ray_t* x);                                 /* used by: list */
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
-
-/* ---- defined in q_dollar.c (the `$` verb API is public — q_dollar.h) ---- */
-const char* q_type_qname(int8_t t);                           /* used by: table */
-int    q_int_index_width(int8_t t);                           /* used by: table */
-int    q_strict_i64(ray_t* x, int64_t* out);                  /* strict-cast probe (type-judgment home) — used by: iter, bang, io, list */
-int    q_strict_f64(ray_t* x, double* out);                   /* used by: list */
-ray_t* q_i64_or_err(ray_t* x, int64_t* out, const char* what);/* throwing gate — used by: agg, io, list */
-ray_t* q_f64_or_err(ray_t* x, double* out, const char* what); /* f64 twin (no gate site yet) */
-int q_is_int_atom(ray_t* x);                                  /* used by: io, table */
-int q_is_int_vec(ray_t* x);                                   /* used by: io, list */
-int64_t q_ivec_get(ray_t* v, int64_t i);                      /* used by: io, list */
-int64_t q_iatom_val(ray_t* x);                                /* used by: io, list, table */
 
 /* ---- defined in ops/q_io.c ---- */
 ray_t* q_hopen_wrap(ray_t* x);                                /* used by: apply, registry */
@@ -165,6 +153,7 @@ ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: 
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, table */
 
 /* ---- defined in ops/q_list.c ---- */
+ray_t* q_list_collapse(ray_t* l);                             /* also declared in q_registry.h (env-safe public reach) — used by: eval, builtins, fmt, json, wire, agg, dollar, io, join, list, math, table, index */
 ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry, index */
 ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);    /* single-file since the corridor pass — staticize candidate */
@@ -177,15 +166,12 @@ ray_t* q_list_find(ray_t* x, ray_t* y);                       /* used by: rand *
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
 int q_match_rec(ray_t* a, ray_t* b);                          /* used by: table */
 ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
-ray_t* q_null_wrap(ray_t* x);                                 /* used by: registry, fmt_pipe */
-int q_is_null_sym(ray_t* x);                                  /* used by: vs_sv */
 
 /* ---- defined in ops/q_rand.c ---- */
 void q_rand_seed(int64_t n);                                  /* used by: sys */
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, list, math */
-int q_table_is_keyed(ray_t* y);                               /* used by: apply, agg, bang, dotq, join, list, rand, index */
 ray_t* q_table_flatten(ray_t* y);                             /* used by: bang, join */
 ray_t* q_table_dict_vals(ray_t* d, int* owned);               /* used by: list */
 ray_t* qj_item(ray_t* x, int64_t i);                          /* used by: join */
