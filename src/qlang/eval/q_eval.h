@@ -39,6 +39,10 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n);
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n);
 
+/* `value`/`get` one-apply body (ref/value.md); q `eval` is .q.eval:(-6!),
+ * the q_bang.c internal arm over q_eval (basics/internal.md). */
+ray_t* q_eval_value_wrap(ray_t* x);
+
 /* the ONE typed-vector element writer (result construction + amend leaves):
  * 0 on success, -1 when the width isn't reachable (callers splice). */
 int q_eval_apply_store_elem(ray_t* vec, int64_t i, ray_t* e);
