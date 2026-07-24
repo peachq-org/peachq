@@ -228,6 +228,7 @@ static void ray_fallback(ray_t* val, char* buf, size_t bufsz) {
 
 void q_fmt(ray_t* val, char* buf, size_t bufsz);   /* fwd */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);   /* fwd (impl at EOF) */
+static size_t char_esc(unsigned char ch, char out[8]);   /* fwd — fmt_dict_key shares it */
 
 /* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`; NO trailing spaces. */
 
@@ -549,6 +550,12 @@ static void fmt_dict_key(ray_t* key, char* out, size_t cap) {
         }
         return;
     }
+    if (key->type == -RAY_CHARV) {   /* char-atom key bare `m|` (strips the quotes), sharing the char-escape path so control/non-ASCII bytes stay safe */
+        char e[8];
+        size_t el = char_esc(key->u8, e);
+        if (el < cap) { memcpy(out, e, el); out[el] = '\0'; }
+        return;
+    }
     if (key->type == -RAY_BOOL) {
         snprintf(out, cap, "%d", key->u8 ? 1 : 0);
         return;
@@ -612,7 +619,8 @@ static size_t char_esc(unsigned char ch, char out[8]) {
     case '\t': out[0] = '\\'; out[1] = 't';  return 2;
     case '\r': out[0] = '\\'; out[1] = 'r';  return 2;
     default:
-        if (ch < 32) return (size_t)snprintf(out, 8, "\\%03o", ch);
+        /* non-printable + non-ASCII bytes octal-escaped `\ooo` (basics/datatypes.md) */
+        if (ch < 32 || ch > 126) return (size_t)snprintf(out, 8, "\\%03o", ch);
         out[0] = (char)ch;
         return 1;
     }
@@ -1550,8 +1558,10 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             q_fmt_krepr(cv, vb, sizeof vb);
             ray_release(ck);
             ray_release(cv);
-            if (kb[0] == ',') snprintf(buf, bufsz, "(%s)!%s", kb, vb);
-            else              snprintf(buf, bufsz, "%s!%s", kb, vb);
+            /* left operand of `!` needs parens when compound so the string re-parses:
+             * an enlist `,x` or a `$`-form typed empty `` `long$() `` (else RTL binds `$` wrong) */
+            if (kb[0] == ',' || strchr(kb, '$')) snprintf(buf, bufsz, "(%s)!%s", kb, vb);
+            else                                 snprintf(buf, bufsz, "%s!%s", kb, vb);
             return;
         }
     }
