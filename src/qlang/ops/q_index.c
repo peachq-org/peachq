@@ -269,6 +269,7 @@ ray_t* q_index_drop_dict(ray_t* n, ray_t* list) {
             if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_TYPE);
             ray_t* nv = q_drop_wrap(n, ray_dict_vals(list));
             if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv ? nv : q_err(QE_TYPE); }
+            nv = q_typed_empty_like(nv, ray_dict_vals(list));   /* dropping every entry keeps the value type */
             return ray_dict_new(nk, nv);
         }
         d = list; keys = n;
