@@ -18,7 +18,7 @@
 #include "core/sock.h"
 #include "table/sym.h"             /* ray_sym_str */
 #include "picohttpparser.h"
-#include "qlang/q_registry.h"   /* q_text_bytes — charv/legacy text accessor */
+#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/legacy text accessor */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,7 +184,7 @@ static ray_t* ws_pair(ray_t* handle, const char* resp, size_t rlen) {
 ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
-    if (!request || !q_text_bytes(request, &reqp, &reqn)) return q_err(QE_TYPE);
+    if (!request || !q_str_text_bytes(request, &reqp, &reqn)) return q_err(QE_TYPE);
     if (!hsym || hsym->type != -RAY_SYM) return q_err(QE_TYPE);
 
     /* hsym text (BORROWED interned string) -> ":ws://..." */

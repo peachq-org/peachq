@@ -11,7 +11,6 @@
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric, is_temporal, make_f64 */
 #include "qlang/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool */
-#include "table/sym.h"     /* ray_sym_str — q_is_null_sym */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
 #include <stdlib.h>        /* malloc, free */
@@ -79,7 +78,7 @@ static ray_t* signum_atom(ray_t* x) {
     return q_err(QE_TYPE);
 }
 
-/* Broadcast + collapse carrier (the q_null_wrap pattern): registered
+/* Broadcast + collapse carrier: registered
  * RAY_FN_NONE so THIS wrapper drives the broadcast, letting a top-level boxed
  * list of i32 atoms collapse to an int vector — kdb shows `signum (0n;0N;0Nt)`
  * as ONE `-1 -1 -1i` line, not one atom per line. */
@@ -87,7 +86,7 @@ ray_t* q_signum_wrap(ray_t* x) {
     ray_t* r = is_collection(x) ? atomic_map_unary(signum_atom, x)
                                 : signum_atom(x);
     if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
-    ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
+    ray_t* c = q_list_collapse(r);   /* owned: retains-or-builds */
     ray_release(r);
     return c;
 }
@@ -138,36 +137,6 @@ ray_t* q_neg_wrap(ray_t* x) {
         return r;
     }
     return ray_neg_fn(x);
-}
-
-/* q `null x` — elementwise null test.  Drives the engine's atomic `nil?`
- * (ray_nil_fn) through atomic_map_unary so it broadcasts over typed vectors
- * AND nested general lists at every depth; collection_elem reconstructs
- * typed-null atoms, so nulls are SEEN (unlike other atomics, which stay
- * null-avoiding via the dispatch guards).  Registered RAY_FN_NONE — NOT
- * ATOMIC — so it receives the whole argument here and owns the collapse: a
- * heterogeneous input list yields a homogeneous bool-atom run that
- * q_collapse_list folds to a bool vector (`null (1;\`a;2.5;"x")` -> 0000b),
- * while a nested list yields a list of bool VECTORS that q_collapse_list
- * leaves intact (multi-line, `null (0N 1;2 0N)` -> 10b / 01b). */
-/* q-layer null test: the base engine's `ray_nil_fn` treats sym id 0 as the
- * EMPTY symbol (a value, include/rayforce.h SYM case), but q treats the null
- * symbol `` ` `` AS null (`null \`` -> 1b).  This wrapper special-cases the
- * null symbol here in the q layer so the divergence stays out of base rayfall,
- * whose own paths rely on sym-0-as-empty.  Drives `q_null_wrap` for both the
- * atom path and the per-element `atomic_map_unary` recursion (nested lists /
- * symbol vectors reconstruct null-sym atoms via collection_elem). */
-static ray_t* nil_fn(ray_t* x) {
-    if (q_is_null_sym(x)) return ray_bool(true);
-    return ray_nil_fn(x);
-}
-
-ray_t* q_null_wrap(ray_t* x) {
-    ray_t* r = is_collection(x) ? atomic_map_unary(nil_fn, x) : nil_fn(x);
-    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
-    ray_t* c = q_collapse_list(r);   /* owned: retains-or-builds */
-    ray_release(r);
-    return c;
 }
 
 /* ---- dyadic atomic math (feat/q-math-parse-display) ----------------------
@@ -449,7 +418,7 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
         if (RAY_IS_ERR(l)) return l;
         l = ray_list_append(l, x);
         if (RAY_IS_ERR(l)) return l;
-        vals_owned = q_collapse_list(l);
+        vals_owned = q_list_collapse(l);
         ray_release(l);
         if (!vals_owned || RAY_IS_ERR(vals_owned))
             return vals_owned ? vals_owned : q_err(QE_TYPE);
@@ -499,14 +468,4 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
     ray_release(idx);
     ray_release(r);
     return a;
-}
-
-
-/* q treats the null symbol ` AS null — shared predicate (agg's null verb,
- * ops/q_vs_sv.c dispatch). */
-int q_is_null_sym(ray_t* x) {
-    if (!x || x->type != -RAY_SYM) return 0;
-    ray_t* s = ray_sym_str(x->i64);
-    int z = s && ray_str_len(s) == 0;
-    return z;
 }

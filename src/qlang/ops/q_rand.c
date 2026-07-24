@@ -87,7 +87,7 @@ static ray_t* gen_syms(int64_t n, ray_t* ysym, int distinct) {
 static ray_t* gen_floats(int64_t n, ray_t* y) {
     double fy;
     int f32 = (y->type == -RAY_F32);
-    if (!q_strict_f64(y, &fy) || fy != fy || fy < 0)
+    if (!q_type_strict_f64(y, &fy) || fy != fy || fy < 0)
         return q_err(QE_DOMAIN);
     ray_t* out = ray_vec_new(f32 ? RAY_F32 : RAY_F64, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
@@ -193,7 +193,7 @@ static ray_t* gen_temporal(int64_t n, ray_t* y) {
     int8_t tag = (int8_t)-y->type;
     ray_t* v;
     if (RAY_IS_TEMPORALF(tag)) {              /* datetime rides the float roll
-                                               * (q_strict_f64 reads its payload) */
+                                               * (q_type_strict_f64 reads its payload) */
         v = gen_floats(n, y);
     } else {
         int64_t m = RAY_IS_TEMPORAL64(tag) ? y->i64 : (int64_t)y->i32;
@@ -249,7 +249,7 @@ static ray_t* deal_pick(int64_t n, ray_t* y) {
     if (!idx || RAY_IS_ERR(idx)) return idx;
     ray_t* out = ray_at_fn(y, idx);
     ray_release(idx);
-    if (out && out->type == RAY_LIST) { ray_t* c = q_collapse_list(out); ray_release(out); return c; }
+    if (out && out->type == RAY_LIST) { ray_t* c = q_list_collapse(out); ray_release(out); return c; }
     return out;
 }
 
@@ -272,14 +272,14 @@ static ray_t* env_call1(const char* nm, ray_t* a) {
  *   gen_* above.  Deferred cells (error, never a wrong answer): short y,
  *   non-" " char pick (string model), deal of 0/0i. */
 ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
-    if (x && ((x->type == RAY_DICT && !q_table_is_keyed(x)) ||
+    if (x && ((x->type == RAY_DICT && !q_type_is_keyed(x)) ||
               ray_is_vec(x) || x->type == RAY_LIST))
         return q_list_find(x, y);           /* find / dict reverse lookup */
     int64_t nx;
-    if (!q_strict_i64(x, &nx)) return q_err(QE_TYPE);
+    if (!q_type_strict_i64(x, &nx)) return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x)) {                  /* 0N ? y — permute all items */
         if (y && (y->type == -RAY_I64 || y->type == -RAY_I32)) {
-            int64_t m = q_iatom_val(y);
+            int64_t m = q_type_iatom_val(y);
             if (m < 0) return q_err(QE_TYPE);
             return deal_indices(m, m);
         }
@@ -302,7 +302,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         ray_t* out = ray_at_fn(y, idx);
         ray_release(idx);
         if (out && out->type == RAY_LIST) {
-            ray_t* c = q_collapse_list(out);
+            ray_t* c = q_list_collapse(out);
             ray_release(out);
             return c;
         }
@@ -337,12 +337,12 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         case RAY_I16:
             return q_err(QE_NYI);    /* short roll/deal deferred */
         case RAY_I32: case RAY_I64: {
-            if (!RAY_ATOM_IS_NULL(y) && q_iatom_val(y) == 0) {  /* n?0 / n?0i full-range */
+            if (!RAY_ATOM_IS_NULL(y) && q_type_iatom_val(y) == 0) {  /* n?0 / n?0i full-range */
                 if (deal) return q_err(QE_NYI);
                 return (y->type == -RAY_I64) ? gen_longs(n) : gen_ints(n);
             }
             if (deal) {                         /* -n?m — deal, no replacement */
-                int64_t m = q_iatom_val(y);
+                int64_t m = q_type_iatom_val(y);
                 if (m <= 0) return q_err(QE_DOMAIN);
                 return deal_indices(n, m);
             }
@@ -362,7 +362,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         case RAY_CHARV:                         /* char atom: only `" "` has a
              * roll law (-> .Q.a); pick-from-string is a stage-2+ cell. */
             if (deal) return q_err(QE_TYPE);
-            if (y->u8 == ' ') return q_charv_out(gen_chars(n));
+            if (y->u8 == ' ') return q_str_charv_out(gen_chars(n));
             return q_err(QE_NYI);
         case RAY_SYM:
             return gen_syms(n, y, deal);      /* n?`m sym roll / deal */

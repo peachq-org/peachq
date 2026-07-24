@@ -13,7 +13,7 @@
 #include <stdio.h>             /* fprintf, stderr — gate diagnostics */
 #include <string.h>            /* strchr, memcpy, strlen */
 #include <stdlib.h>            /* malloc, free */
-#include "qlang/q_registry.h"   /* q_text_bytes, q_charv_out — text accessors */
+#include "qlang/q_registry.h"   /* q_str_text_bytes, q_str_charv_out — text accessors */
 #include "lang/format.h"        /* ray_fmt — rayforce-native tree display */
 
 /* Copy a q text arg (charv / char atom / -RAY_STR) into a malloc'd NUL-
@@ -22,7 +22,7 @@
  * to an owned RAY_ERROR the caller returns as-is. Free the result with free(). */
 static char* pq_src_dup(ray_t* x, ray_t** err) {
     const char* sp; int64_t sn;
-    if (!q_text_bytes(x, &sp, &sn)) { *err = q_err(QE_TYPE); return NULL; }
+    if (!q_str_text_bytes(x, &sp, &sn)) { *err = q_err(QE_TYPE); return NULL; }
     if (!sp) { *err = q_err(QE_DOMAIN); return NULL; }
     size_t sl = (size_t)sn;
     char* src = malloc(sl + 1);
@@ -59,7 +59,7 @@ static ray_t* pq_parse_fn(ray_t* x) {
     if (RAY_IS_ERR(ast)) return ast;   /* q parse error -> q error, as-is */
     ray_t* repr = ray_fmt(ast, 0);
     ray_release(ast);
-    return q_charv_out(repr);   /* consumes repr, returns owned q charv */
+    return q_str_charv_out(repr);   /* consumes repr, returns owned q charv */
 }
 
 /* (.pq.c.tree str) — the EVAL tree (exactly what q_eval receives — the raw
@@ -74,7 +74,7 @@ static ray_t* pq_tree_fn(ray_t* x) {
     if (RAY_IS_ERR(ast)) return ast;
     ray_t* repr = ray_fmt(ast, 0);
     ray_release(ast);
-    return q_charv_out(repr);
+    return q_str_charv_out(repr);
 }
 
 /* Eval one q source line via the q pipeline (q_parse -> q_eval), mirroring

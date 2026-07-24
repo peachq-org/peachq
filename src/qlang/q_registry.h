@@ -89,10 +89,6 @@ ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
  * then dispatches on the value's own attrs (RAY_FN_ATOMIC) alone. */
 const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
 
-/* True iff y is a keyed table: a RAY_DICT whose keys AND values are both
- * tables (the wave-4 shape shared by the table verbs and q_builtins). */
-int q_table_is_keyed(ray_t* y);
-
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
@@ -137,21 +133,17 @@ ray_t* q_registry_compose_value(void);
  * are simple vectors, not general lists).  Mixed types, non-atom elements,
  * string atoms (a list of strings IS kdb 0h) and non-lists are returned
  * unchanged.  Borrows `l`; always returns an OWNED value (a fresh vector, or
- * `l` retained). */
-ray_t* q_collapse_list(ray_t* l);
-
-/* v[i] as an OWNED atom/element (borrows v): the scalar-int fast path over
- * vectors/lists (direct payload read, no index-atom allocation, no collapse);
- * generic ray_at indexing for every other shape.  The ONE element-read home
- * shared across the q layer (the apply module, wrappers, codecs). */
-ray_t* q_registry_elem_at(ray_t* v, int64_t i);
+ * `l` retained).  DEFINED in ops/q_list.c; declared here so env-using callers
+ * (net/, apply) reach it without the poisoned q_registry_internal.h. */
+ray_t* q_list_collapse(ray_t* l);
 
 /* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
- * appears in q-space; values in flight are charv; columns stay pooled). ---- */
+ * appears in q-space; values in flight are charv; columns stay pooled).
+ * DEFINED in ops/q_str.c; declared here (env-safe public reach). ---- */
 
 /* THE single-home STR->charv constructor.  MATERIALIZES (one O(len) memcpy);
  * borrows s, returns an owned fresh charv vector (always a vector). */
-ray_t* q_charv_of_str(ray_t* s);
+ray_t* q_str_charv_of_str(ray_t* s);
 
 /* charv vector or char atom -> owned -RAY_STR atom (for engine internals that
  * need pooled/NUL-terminated physical form).  Borrows x. */
@@ -159,12 +151,12 @@ ray_t* q_str_of_charv(ray_t* x);
 
 /* Text-bytes accessor over all q text forms: -RAY_STR atom, charv vector,
  * char atom.  Borrowed pointer valid while x lives; false = not text. */
-bool q_text_bytes(ray_t* x, const char** p, int64_t* n);
+bool q_str_text_bytes(ray_t* x, const char** p, int64_t* n);
 
 /* Boundary-out walk: CONSUMES r, returns owned.  -RAY_STR atom -> charv;
  * RAY_STR vector -> 0h list of charv; LIST/DICT values converted (in place
  * only at rc==1); TABLE (incl. keyed-table value side) passes untouched. */
-ray_t* q_charv_out(ray_t* r);
+ray_t* q_str_charv_out(ray_t* r);
 
 /* Inverse adapter for legacy string-verb bodies: BORROWS x, returns OWNED
  * legacy form (charv/char atom -> -RAY_STR atom, LIST recursed). */

@@ -243,7 +243,7 @@ typedef enum { MW_SUM, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
 
 static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     int64_t N;
-    ray_t* err = q_i64_or_err(nx, &N, "m-window: n");
+    ray_t* err = q_type_i64_or_err(nx, &N, "m-window: n");
     if (err) return err;
     if (!x || !q_vec_is_num(x)) {
         if (x && ray_is_atom(x)) { ray_retain(x); return x; }

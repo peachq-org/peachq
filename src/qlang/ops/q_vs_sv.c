@@ -1,7 +1,7 @@
 /* ops/q_vs_sv.c — the q `vs` / `sv` split-join / base-encode family, a
  * graduated family home like q_bang.c / q_dollar.c.  Evicted from
  * ops/q_math.c (2026-07-22). */
-#include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_str_in/q_charv_out) */
+#include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_str_in/q_str_charv_out) */
 #include "qlang/q_err.h"
 #include "lang/internal.h" /* ray_error */
 #include "table/sym.h"     /* ray_sym_str, ray_sym_vec_cell, ray_sym_intern_runtime */
@@ -129,7 +129,7 @@ static ray_t* base_decompose_vec(ray_t* base, int64_t v) {
     int64_t* d = (int64_t*)ray_data(out);
     uint64_t u = (uint64_t)v;
     for (int64_t i = n - 1; i >= 0; i--) {
-        int64_t bi = q_ivec_get(base, i);
+        int64_t bi = q_type_ivec_get(base, i);
         if (bi <= 0) { d[i] = (int64_t)u; u = 0; }
         else { d[i] = (int64_t)(u % (uint64_t)bi); u /= (uint64_t)bi; }
     }
@@ -143,7 +143,7 @@ ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
     if (xs != x || ys != y) {
         ray_t* r = vs_impl(xs, ys);
         ray_release(xs); ray_release(ys);
-        return q_charv_out(r);
+        return q_str_charv_out(r);
     }
     ray_release(xs); ray_release(ys);
     return vs_impl(x, y);
@@ -157,7 +157,7 @@ static ray_t* vs_impl(ray_t* x, ray_t* y) {
         return str_split(ray_str_ptr(y), ray_str_len(y),
                            ray_str_ptr(x), ray_str_len(x));
     }
-    if (q_is_null_sym(x)) {
+    if (q_type_is_null_sym(x)) {
         if (y->type == -RAY_STR)
             return q_str_split_lines(ray_str_ptr(y), ray_str_len(y));
         if (y->type == -RAY_SYM) return sym_split(y);
@@ -174,15 +174,15 @@ static ray_t* vs_impl(ray_t* x, ray_t* y) {
         return q_err(QE_TYPE);
     }
     /* --- integer base decompose --- */
-    if (q_is_int_atom(x)) {
-        int64_t base = q_iatom_val(x);
-        if (q_is_int_atom(y)) return base_decompose_atom(base, q_iatom_val(y));
-        if (q_is_int_vec(y)) {                     /* matrix: pad to max width */
+    if (q_type_is_int_atom(x)) {
+        int64_t base = q_type_iatom_val(x);
+        if (q_type_is_int_atom(y)) return base_decompose_atom(base, q_type_iatom_val(y));
+        if (q_type_is_int_vec(y)) {                     /* matrix: pad to max width */
             int64_t m = ray_len(y);
             ray_t* cols = ray_list_new(m > 0 ? m : 1);
             int64_t maxw = 1;
             for (int64_t j = 0; j < m; j++) {
-                ray_t* c = base_decompose_atom(base, q_ivec_get(y, j));
+                ray_t* c = base_decompose_atom(base, q_type_ivec_get(y, j));
                 if (RAY_IS_ERR(c)) { ray_release(cols); return c; }
                 if (ray_len(c) > maxw) maxw = ray_len(c);
                 cols = ray_list_append(cols, c); ray_release(c);
@@ -204,8 +204,8 @@ static ray_t* vs_impl(ray_t* x, ray_t* y) {
         }
         return q_err(QE_TYPE);
     }
-    if (q_is_int_vec(x)) {
-        if (q_is_int_atom(y)) return base_decompose_vec(x, q_iatom_val(y));
+    if (q_type_is_int_vec(x)) {
+        if (q_type_is_int_atom(y)) return base_decompose_vec(x, q_type_iatom_val(y));
         return q_err(QE_NYI);
     }
     return q_err(QE_TYPE);
@@ -305,7 +305,7 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y) {
     if (xs != x || ys != y) {
         ray_t* r = sv_impl(xs, ys);
         ray_release(xs); ray_release(ys);
-        return q_charv_out(r);
+        return q_str_charv_out(r);
     }
     ray_release(xs); ray_release(ys);
     return sv_impl(x, y);
@@ -315,7 +315,7 @@ static ray_t* sv_impl(ray_t* x, ray_t* y) {
     /* --- string join --- */
     if (x->type == -RAY_STR)
         return str_join(y, ray_str_ptr(x), ray_str_len(x), 0);
-    if (q_is_null_sym(x)) {
+    if (q_type_is_null_sym(x)) {
         if (y->type == RAY_SYM) return sym_join(y);            /* sym join */
         return str_join(y, "\n", 1, 1);                        /* host lines */
     }
@@ -330,27 +330,27 @@ static ray_t* sv_impl(ray_t* x, ray_t* y) {
         return q_err(QE_TYPE);
     }
     /* --- integer base compose (Horner) --- */
-    if (q_is_int_atom(x)) {
-        int64_t base = q_iatom_val(x);
-        if (!q_is_int_vec(y) && y->type != RAY_BOOL)
+    if (q_type_is_int_atom(x)) {
+        int64_t base = q_type_iatom_val(x);
+        if (!q_type_is_int_vec(y) && y->type != RAY_BOOL)
             return q_err(QE_TYPE);
         int64_t n = ray_len(y);
         int64_t acc = 0;
         for (int64_t i = 0; i < n; i++) {
             int64_t d = (y->type == RAY_BOOL) ? ((const uint8_t*)ray_data(y))[i]
-                                              : q_ivec_get(y, i);
+                                              : q_type_ivec_get(y, i);
             acc = acc * base + d;
         }
         return ray_i64(acc);
     }
     /* --- mixed-radix compose (vector base) --- */
-    if (q_is_int_vec(x)) {
-        if (!q_is_int_vec(y)) return q_err(QE_TYPE);
+    if (q_type_is_int_vec(x)) {
+        if (!q_type_is_int_vec(y)) return q_err(QE_TYPE);
         int64_t n = ray_len(y), bn = ray_len(x);
         if (n != bn) return q_err(QE_LENGTH);
         int64_t acc = 0;
         for (int64_t i = 0; i < n; i++)
-            acc = acc * q_ivec_get(x, i) + q_ivec_get(y, i);
+            acc = acc * q_type_ivec_get(x, i) + q_type_ivec_get(y, i);
         return ray_i64(acc);
     }
     return q_err(QE_TYPE);

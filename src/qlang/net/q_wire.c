@@ -4,7 +4,7 @@
 #include "qlang/net/q_wire.h"
 #include "qlang/q_err.h"      /* q_err / q_err_class — full class on the wire */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde */
-#include "qlang/q_registry.h"   /* q_collapse_list */
+#include "qlang/q_registry.h"   /* q_list_collapse */
 #include "qlang/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
 #include "table/sym.h"          /* ray_sym_vec_cell */
@@ -353,7 +353,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
          * never collapse, and carry the engine attrs byte (QUOTED lists
          * are journaled expression trees). */
         if (!b->serde) {
-            ray_t* cx = q_collapse_list(x);
+            ray_t* cx = q_list_collapse(x);
             if (cx && !RAY_IS_ERR(cx) && cx->type != RAY_LIST) {
                 rc = q_wire_write_obj(b, cx);
                 ray_release(cx);
@@ -766,7 +766,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             l->attrs |= attrs & (uint8_t)~RAY_ATTR_SLICE;
             return l;
         }
-        ray_t* out = q_collapse_list(l);              /* owned; parser-identical shape */
+        ray_t* out = q_list_collapse(l);              /* owned; parser-identical shape */
         ray_release(l);
         return out;
     }

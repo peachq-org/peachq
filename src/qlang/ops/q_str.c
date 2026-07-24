@@ -3,17 +3,160 @@
  * ssr (manifest wraps) + the shared line-splitter q_str_split_lines.
  * Evicted from q_builtins.c + ops/q_io.c so the registration hub registers
  * and the string domain lives once. */
-#include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_text_bytes) */
+#include "qlang/q_registry_internal.h" /* wrap decls + the string-C3 boundary decls */
 #include "qlang/q_err.h"
 #include "qlang/eval/q_eval.h"         /* q_eval_apply_is_fn / q_eval_apply_value — ssr fn replacement */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
 #include "qlang/q_fmt.h"               /* q_fmt_float — string's float leaf */
-#include "lang/internal.h"             /* ray_like_fn, ray_error */
+#include "lang/internal.h"             /* ray_like_fn, ray_error, ray_str_vec_get */
 #include "lang/format.h"               /* ray_fmt — base formatter fallback */
+#include "ops/ops.h"                   /* ray_is_lazy — DAG guard in q_str_charv_out */
 #include "table/sym.h"                 /* ray_sym_str — sym renders bare */
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+
+/* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
+ * appears in q-space; values in flight are charv; columns stay pooled) ---- */
+
+/* MATERIALIZES (one O(len) memcpy), never a view: engine amend writes through
+ * slices and SSO atoms (<=6 bytes, header-inline) cannot be slice parents
+ * (stage-0 audit §2) — zero-copy stays a later constructor-internal option. */
+ray_t* q_str_charv_of_str(ray_t* s) {
+    if (!s || RAY_IS_ERR(s)) return s;               /* errors pass through (no-op rc) */
+    if (s->type != -RAY_STR) return q_err(QE_TYPE);
+    return ray_charv(ray_str_ptr(s), (int64_t)ray_str_len(s));
+}
+
+ray_t* q_str_of_charv(ray_t* x) {
+    if (!x || RAY_IS_ERR(x)) return x;               /* errors pass through (no-op rc) */
+    if (x->type == -RAY_CHARV) { char c = (char)x->u8; return ray_str(&c, 1); }
+    if (x->type != RAY_CHARV) return q_err(QE_TYPE);
+    return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
+}
+
+bool q_str_text_bytes(ray_t* x, const char** p, int64_t* n) {
+    if (!x || RAY_IS_ERR(x)) return false;
+    if (x->type == -RAY_STR)  { *p = ray_str_ptr(x); *n = (int64_t)ray_str_len(x); return true; }
+    if (x->type == RAY_CHARV) { *p = (const char*)ray_data(x); *n = ray_len(x); return true; }
+    if (x->type == -RAY_CHARV){ *p = (const char*)&x->u8; *n = 1; return true; }
+    return false;
+}
+
+/* Inverse adapter for legacy string-verb bodies (vs/sv/like/ss/ssr...):
+ * BORROWS x, returns OWNED legacy form — charv/char atom -> -RAY_STR atom;
+ * LIST elements converted recursively; everything else retained as-is. */
+ray_t* q_str_in(ray_t* x) {
+    if (!x || RAY_IS_ERR(x)) { if (x) ray_retain(x); return x; }
+    if (x->type == RAY_CHARV || x->type == -RAY_CHARV) return q_str_of_charv(x);
+    if (x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t** e = (ray_t**)ray_data(x);
+        bool any = false;
+        for (int64_t i = 0; i < n && !any; i++)
+            any = e[i] && (e[i]->type == RAY_CHARV || e[i]->type == -RAY_CHARV ||
+                           e[i]->type == RAY_LIST);
+        if (!any) { ray_retain(x); return x; }
+        ray_t* out = ray_list_new(n);
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* c = q_str_in(e[i]);
+            if (RAY_IS_ERR(c)) { ray_release(out); return c; }
+            out = ray_list_append(out, c);
+            if (c) ray_release(c);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    ray_retain(x);
+    return x;
+}
+
+/* Boundary-out walk (consumes r, returns owned): -RAY_STR atom -> charv;
+ * RAY_STR vector -> 0h list of charv; LIST -> elements converted (in place at
+ * rc==1, else a fresh list); DICT -> values converted (fresh dict unless
+ * nothing converts, or values are a TABLE = keyed table -> untouched); TABLE
+ * and everything else pass through (columns stay pooled below the boundary). */
+static bool charv_out_needed(ray_t* r) {
+    if (!r) return false;
+    if (ray_is_lazy(r)) return false;    /* deferred DAG values: never walk */
+    if (r->type == -RAY_STR || r->type == RAY_STR) return true;
+    if (r->type == RAY_LIST) {
+        ray_t** e = (ray_t**)ray_data(r);
+        for (int64_t i = 0; i < ray_len(r); i++)
+            if (charv_out_needed(e[i])) return true;
+    }
+    if (r->type == RAY_DICT) {
+        ray_t* vals = ray_dict_vals(r);
+        return vals && vals->type != RAY_TABLE && charv_out_needed(vals);
+    }
+    return false;
+}
+
+ray_t* q_str_charv_out(ray_t* r) {
+    if (!r || RAY_IS_ERR(r)) return r;
+    if (ray_is_lazy(r)) return r;        /* deferred DAG values: never walk */
+    if (r->type == -RAY_STR) {
+        ray_t* v = q_str_charv_of_str(r);
+        ray_release(r);
+        return v;
+    }
+    if (r->type == RAY_STR) {                    /* extracted column -> 0h list */
+        int64_t n = ray_len(r);
+        ray_t* out = ray_list_new(n);
+        if (!out || RAY_IS_ERR(out)) { ray_release(r); return out ? out : q_err(QE_OOM); }
+        for (int64_t i = 0; i < n; i++) {
+            size_t sl = 0;
+            const char* sp = ray_str_vec_get(r, i, &sl);
+            ray_t* cv = ray_charv(sp ? sp : "", (int64_t)sl);
+            if (RAY_IS_ERR(cv)) { ray_release(out); ray_release(r); return cv; }
+            out = ray_list_append(out, cv);
+            ray_release(cv);
+            if (RAY_IS_ERR(out)) { ray_release(r); return out; }
+        }
+        ray_release(r);
+        return out;
+    }
+    if (r->type == RAY_LIST && charv_out_needed(r)) {
+        int64_t n = ray_len(r);
+        ray_t** e = (ray_t**)ray_data(r);
+        if (r->rc == 1) {                        /* sole owner: rewrite in place */
+            for (int64_t i = 0; i < n; i++) {
+                ray_t* c = q_str_charv_out(e[i]);    /* consumes the slot's ref */
+                if (RAY_IS_ERR(c)) { e[i] = RAY_NULL_OBJ; ray_release(r); return c; }
+                e[i] = c;
+            }
+            return r;
+        }
+        ray_t* out = ray_list_new(n);
+        if (!out || RAY_IS_ERR(out)) { ray_release(r); return out ? out : q_err(QE_OOM); }
+        for (int64_t i = 0; i < n; i++) {
+            ray_retain(e[i]);
+            ray_t* c = q_str_charv_out(e[i]);
+            if (RAY_IS_ERR(c)) { ray_release(out); ray_release(r); return c; }
+            out = ray_list_append(out, c);
+            ray_release(c);
+            if (RAY_IS_ERR(out)) { ray_release(r); return out; }
+        }
+        ray_release(r);
+        return out;
+    }
+    if (r->type == RAY_DICT) {
+        ray_t* vals = ray_dict_vals(r);          /* borrowed */
+        if (vals && vals->type != RAY_TABLE && charv_out_needed(vals)) {
+            ray_retain(vals);
+            ray_t* nv = q_str_charv_out(vals);       /* consumes our retain */
+            if (RAY_IS_ERR(nv)) { ray_release(r); return nv; }
+            ray_t* keys = ray_dict_keys(r);      /* borrowed */
+            ray_retain(keys);                    /* dict_new consumes both */
+            ray_t* nd = ray_dict_new(keys, nv);
+            ray_release(r);
+            return nd;
+        }
+        return r;
+    }
+    return r;
+}
 
 
 /* (string x) — q cast-to-string.  ATOM: a sym renders bare (`ibm -> "ibm"),
@@ -29,7 +172,7 @@ ray_t* q_string_fn(ray_t* x) {
     if (x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);        /* borrowed */
         if (!s) return q_err(QE_TYPE);
-        return q_charv_of_str(s);              /* `ibm -> "ibm" (charv) */
+        return q_str_charv_of_str(s);              /* `ibm -> "ibm" (charv) */
     }
     if (x->type == -RAY_STR) { ray_retain(x); return x; }
     if (x->type == -RAY_CHARV)                                 /* string "a" -> ,"a" */
@@ -46,7 +189,7 @@ ray_t* q_string_fn(ray_t* x) {
         q_fmt_float(v, 0, tok, sizeof tok);   /* narrow reals like display does */
         return ray_charv(tok, (int64_t)strlen(tok));
     }
-    if (!ray_is_vec(x)) return q_charv_out(ray_fmt(x, 0));   /* remaining atoms */
+    if (!ray_is_vec(x)) return q_str_charv_out(ray_fmt(x, 0));   /* remaining atoms */
     /* vector: per-element string */
     int64_t n = ray_len(x);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
@@ -202,7 +345,7 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
         ray_t* r = ray_at_fn(x, idx);
         ray_release(idx);
         if (!r || RAY_IS_ERR(r)) return r;
-        ray_t* c = q_collapse_list(r);   /* boxed slice -> typed vector display */
+        ray_t* c = q_list_collapse(r);   /* boxed slice -> typed vector display */
         ray_release(r);
         return c;
     }
@@ -234,7 +377,7 @@ ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
             ray_release(r);
             if (RAY_IS_ERR(out)) return out;
         }
-        ray_t* c = q_collapse_list(out);   /* homogeneous bool run -> bool vec */
+        ray_t* c = q_list_collapse(out);   /* homogeneous bool run -> bool vec */
         ray_release(out);
         return c;
     }
@@ -279,7 +422,7 @@ static int64_t str_glob_fixed_at(const char* s, size_t sn, size_t pos,
  * pattern p in the string s (overlapping, kdb-true).  Returns a long vector. */
 ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
     const char* sp; int64_t sn64; const char* pp; int64_t pn64;
-    if (!q_text_bytes(s, &sp, &sn64) || !q_text_bytes(p, &pp, &pn64))
+    if (!q_str_text_bytes(s, &sp, &sn64) || !q_str_text_bytes(p, &pp, &pn64))
         return q_err(QE_TYPE);
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
     ray_t* out = ray_vec_new(RAY_I64, 8);
@@ -305,11 +448,11 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     if (n != 3) return q_err(QE_RANK);
     ray_t* s = args[0]; ray_t* p = args[1]; ray_t* r = args[2];
     const char* sp; int64_t sn64; const char* pp; int64_t pn64;
-    if (!q_text_bytes(s, &sp, &sn64) || !q_text_bytes(p, &pp, &pn64))
+    if (!q_str_text_bytes(s, &sp, &sn64) || !q_str_text_bytes(p, &pp, &pn64))
         return q_err(QE_TYPE);
     int r_is_fn = q_eval_apply_is_fn(r);
     { const char* rp_; int64_t rn_;
-      if (!r_is_fn && !q_text_bytes(r, &rp_, &rn_))
+      if (!r_is_fn && !q_str_text_bytes(r, &rp_, &rn_))
           return q_err(QE_TYPE); }
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
     size_t cap = sn + 16, blen = 0;
@@ -335,12 +478,12 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
                 ray_release(sub);
                 if (!rep || RAY_IS_ERR(rep)) { err = rep; break; }
                 { const char* qp; int64_t qn;
-                  if (!q_text_bytes(rep, &qp, &qn)) { ray_release(rep); err = q_err(QE_TYPE); break; }
+                  if (!q_str_text_bytes(rep, &qp, &qn)) { ray_release(rep); err = q_err(QE_TYPE); break; }
                   SSR_PUSH(qp, (size_t)qn); }
                 ray_release(rep);
             } else {
                 const char* rp2; int64_t rn2;
-                (void)q_text_bytes(r, &rp2, &rn2);
+                (void)q_str_text_bytes(r, &rp2, &rn2);
                 SSR_PUSH(rp2, (size_t)rn2);
             }
             i += (m > 0) ? (size_t)m : 1;   /* advance past the match */
