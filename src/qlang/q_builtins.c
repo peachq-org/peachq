@@ -300,15 +300,6 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
  * result is OWNED.  Restricted mode needs no re-assert here: ipc_dispatch
  * sets it around the whole dispatch, and any restricted primitive reached by
  * the apply self-checks it. */
-/* `value`/`get`/`-6!` — 'nyi stub (rule 3: the manifest row keeps its
- * spelling; the q_value.c single-apply home retired at the cutover). */
-ray_t* q_value_nyi_fn(ray_t* x) {
-    /* the identity-arg arm only: `value ::` -> `::` (ref/identity.md);
-     * everything else stays 'nyi */
-    if (x && RAY_IS_NULL(x)) { ray_retain(x); return x; }
-    return q_err(QE_NYI);
-}
-
 /* keyword-HOF recipe stub (q_registry_internal.h note) */
 ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x) {
     (void)f; (void)x;
@@ -431,12 +422,11 @@ void q_builtins_register(void) {
         ray_env_bind(ray_sym_intern("count", 5), cv);
         ray_release(cv);
     }
-    /* `value` — 'nyi stub (the q_value.c single-apply home died in the
-     * eval-rebuild cutover; `value` re-derives on the fresh core later).
-     * Env-bound so a bare `value` operand and the manifest row share it. */
-    bind_unary("value", q_value_nyi_fn);
+    /* `value` — the one-apply home (eval/q_eval.c).  Env-bound so a bare
+     * `value` operand and the manifest row share it. */
+    bind_unary("value", q_eval_value_wrap);
     /* `enlist` — q dict arm (1-row table); the `,` monadic QK_ENV snapshot
-     * inherits it (bound before q_registry_init, q_value_wrap precedent). */
+     * inherits it (bound before q_registry_init, q_eval_value_wrap precedent). */
     bind_vary ("enlist", q_enlist_wrap);
     /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
      * The registry is the authoritative, immutable verb source; it snapshots

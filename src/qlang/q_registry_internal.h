@@ -45,12 +45,10 @@ int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix
 ray_t* q_sum_wrap(ray_t* x);
 
 /* ---- defined in q_builtins.c ---- */
-/* 'nyi recipe stubs (rule 3: rows keep their spellings; the bodies died in
- * the eval-rebuild cutover).  q_value_nyi_fn: `value`/`get`/`-6!`.  q_hof_nyi_wrap:
+/* 'nyi recipe stub (rule 3: rows keep their spellings).  q_hof_nyi_wrap:
  * the keyword-HOF rows (each/peach/over/scan/prior) — the fresh apply module
  * routes their n==2 applications to native adverb arms BEFORE the recipe
  * value could run, so these fire only on off-shape applications. */
-ray_t* q_value_nyi_fn(ray_t* x);
 ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x);
 
 /* ---- defined in ops/q_io.c ---- */
