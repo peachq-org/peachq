@@ -84,6 +84,16 @@ ray_t* q_list_collapse(ray_t* l) {
 
 /* ---- wrappers (bespoke q semantics over a rayfall primitive) ---- */
 
+/* Item count of a countable shape.  A q string is a -RAY_STR atom whose count
+ * lives in ray_str_len, NOT the ->len union field (which aliases the SSO
+ * {slen,sdata} bytes), so ray_len would be garbage for it.  0 = not countable. */
+static int seq_len(ray_t* x, int64_t* out) {
+    if (!x) return 0;
+    if (x->type == -RAY_STR) { *out = (int64_t)ray_str_len(x); return 1; }
+    if (ray_is_vec(x) || x->type == RAY_LIST) { *out = ray_len(x); return 1; }
+    return 0;
+}
+
 /* Gather `count` elements from x starting at logical index `start`.  recycle:
  * indices wrap modulo `total` (reshape recycling); else sequential in-range
  * (chunk / cut).  A string gathers chars into a new string; a vector/list
@@ -345,9 +355,7 @@ ray_t* q_take_wrap(ray_t* n, ray_t* list) {
  * first n elements; n<0 drops the last |n|.  Implemented as a range-take
  * ray_take_fn(list, (start; amount)), which clamps at the ends.  Borrows args.
  *
- * Length is derived string-aware: a q string is a -RAY_STR atom whose char
- * count lives in ray_str_len, NOT the ->len union field (which aliases the SSO
- * {slen,sdata} bytes), so ray_len would be garbage for strings. */
+ * Length comes from seq_len (string-aware). */
 /* q_list_collapse leaves a ZERO-length boxed list untyped (no element to infer
  * from); an empty selection must instead inherit the PROTO's element type so it
  * keeps its domain (codex r3: `` type key `a _ `a!1 `` must be 11h / `` `symbol$()
@@ -428,14 +436,8 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     int64_t k;
     ray_t* err = q_type_i64_or_err(n, &k, "_: n");
     if (err) return err;
-    if (!list) return q_err(QE_TYPE);
     int64_t len;
-    if (list->type == -RAY_STR)
-        len = (int64_t)ray_str_len(list);           /* SSO-safe string length */
-    else if (ray_is_vec(list) || list->type == RAY_LIST)
-        len = ray_len(list);                         /* typed vector / boxed list */
-    else
-        return q_err(QE_TYPE);
+    if (!seq_len(list, &len)) return q_err(QE_TYPE);
     int64_t start, amount;
     if (k >= 0) { start = (k < len) ? k : len; amount = len - start; }
     else        { start = 0; amount = len + k; if (amount < 0) amount = 0; }
@@ -447,6 +449,19 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     return r;
 }
 
+/* q `n rotate x` — x read from item n, wrapping (ref/rotate.md); a negative n
+ * rotates right.  ONE cyclic gather, which is also what makes it an index
+ * derivation: container structure is the family-"index" lift's, so x arrives
+ * here a vector/list/string.  Borrows both args. */
+ray_t* q_rotate_wrap(ray_t* n, ray_t* x) {
+    int64_t k, len;
+    if (q_type_strict_i64(n, &k) && seq_len(x, &len)) {
+        if (len <= 0) { ray_retain(x); return x; }
+        return gather(x, ((k % len) + len) % len, len, len, 1);
+    }
+    return q_err(QE_TYPE);
+}
+
 /* q `n cut x` — cut into pieces (kdb ref/cut).  An int ATOM chunks x into
  * groups of n (ragged last group: `4 cut til 10` -> (0 1 2 3;4 5 6 7;8 9)).
  * An int VECTOR is a positional cut — identical to `_`, so delegate.  Borrows. */
@@ -454,10 +469,8 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
     int64_t sz;
     if (q_type_strict_i64(n, &sz)) {
         if (sz <= 0) return q_err(QE_DOMAIN);
-        int is_str = (x && x->type == -RAY_STR);
-        int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
-        if (!x || (!is_str && !ray_is_vec(x) && x->type != RAY_LIST))
-            return q_err(QE_TYPE);
+        int64_t total;
+        if (!seq_len(x, &total)) return q_err(QE_TYPE);
         int64_t rows = (total + sz - 1) / sz;
         ray_t* out = ray_list_new(rows > 0 ? rows : 1);
         if (RAY_IS_ERR(out)) return out;

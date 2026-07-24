@@ -86,7 +86,6 @@ static ray_t* miss_null(ray_t* c) {
  * write mode a miss/OOB is 'index (a path must exist to be amended). */
 static ray_t* index_level(ray_t* x, ray_t* i, int write) {
     if (x->type == RAY_DICT) {
-        if (q_type_is_keyed(x)) return q_err(QE_NYI);
         int64_t ki = ray_dict_find_idx(x, i);
         ray_t* vals = ray_dict_slots(x)[1];
         if (ki < 0) return write ? q_err(QE_INDEX) : miss_null(vals);
@@ -223,6 +222,22 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
     return collapse(out);
 }
 
+/* Keyed-table read.  A keyed table is a dict whose domain is a TABLE, so with
+ * ONE key column the domain reduces to that column and the dict law holds
+ * unchanged — `d[x] ~ v[k?x]`, "dictionary indexing uses Find to search the
+ * keys" (basics/dictsandtables.md Indexing).  Find carries atom-vs-vector shape
+ * and answers a miss with the count, so the out-of-range gather yields the null
+ * row with no special case.  A wider key needs row-wise Find on the domain. */
+static ray_t* keyed_at(ray_t* x, ray_t* i) {
+    ray_t* keys = ray_dict_slots(x)[0];
+    if (ray_table_ncols(keys) != 1) return q_err(QE_NYI);
+    ray_t* pos = ray_find_fn(ray_table_get_col_idx(keys, 0), i);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
+    ray_t* r = q_index_at(ray_dict_slots(x)[1], &pos, 1);
+    ray_release(pos);
+    return r;
+}
+
 static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     if (!i0 || RAY_IS_NULL(i0)) {                    /* `::`: identity / all */
         if (x->type == RAY_DICT && !q_type_is_keyed(x))
@@ -237,6 +252,7 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
         if (!nx) nx = ray_at_fn(x, i0);
         return elem_rest(nx, rest, k);
     }
+    if (q_type_is_keyed(x)) return elem_rest(keyed_at(x, i0), rest, k);
     if (is_coll(i0)) return index_map(x, i0, rest, k);
     return elem_rest(index_level(x, i0, 0), rest, k);
 }
