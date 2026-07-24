@@ -349,15 +349,19 @@ ray_t* q_take_wrap(ray_t* n, ray_t* list) {
  * count lives in ray_str_len, NOT the ->len union field (which aliases the SSO
  * {slen,sdata} bytes), so ray_len would be garbage for strings. */
 /* q_list_collapse leaves a ZERO-length boxed list untyped (no element to infer
- * from); key-indexing selections must instead inherit the PROTO vector's type
- * so an empty result keeps its domain (codex r3: `` type key `a _ `a!1 `` must
- * be 11h / `` `symbol$() ``, not 0h / `()`).  Consumes `collapsed`, borrows
+ * from); an empty selection must instead inherit the PROTO's element type so it
+ * keeps its domain (codex r3: `` type key `a _ `a!1 `` must be 11h / `` `symbol$()
+ * ``, not 0h / `()`).  The proto is either a typed vector or — for a dict value
+ * side, stored boxed — a list collapsed here to recover its type (heterogeneous
+ * lists stay RAY_LIST and fall through untouched).  Consumes `collapsed`, borrows
  * `proto`; passes errors and non-empty results through untouched. */
 ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
     if (!collapsed || RAY_IS_ERR(collapsed)) return collapsed;
     if (collapsed->type != RAY_LIST || ray_len(collapsed) != 0) return collapsed;
-    if (!proto || !ray_is_vec(proto) || proto->type == RAY_LIST) return collapsed;
-    ray_t* tv = q_type_empty(proto->type);
+    ray_t* cp = (proto && proto->type == RAY_LIST) ? q_list_collapse(proto) : NULL;
+    ray_t* p  = cp ? cp : proto;
+    ray_t* tv = (p && ray_is_vec(p) && p->type != RAY_LIST) ? q_type_empty(p->type) : NULL;
+    if (cp) ray_release(cp);
     if (!tv || RAY_IS_ERR(tv)) { if (tv) ray_release(tv); return collapsed; }
     ray_release(collapsed);
     return tv;
