@@ -14,6 +14,7 @@
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize */
 #include "ops/idxop.h"     /* .attr.* engine calls: ray_attr_*, RAY_IDX_*, RAY_MARK_* (column attributes) */
+#include "qlang/ops/q_index.h" /* q_index_drop_dict — drop's dict arms (index home owns dict structure) */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — ? find miss remap */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 */
 #include <stdint.h>        /* uintptr_t */
@@ -363,6 +364,10 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
 }
 
 ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
+    /* dict arms (ref/drop.md) — the index home owns dict structure; NULL means
+     * neither operand is a dict, so fall through to the list/vector arms. */
+    ray_t* dd = q_index_drop_dict(n, list);
+    if (dd) return dd;
     /* x _ i — delete the item at index i (ref/drop.md `0 1 ... 8 _ 5`):
      * list/vector lhs, int-ATOM rhs.  Two clamped range-takes joined; an
      * out-of-range index returns x unchanged (Drop is tolerant). */
