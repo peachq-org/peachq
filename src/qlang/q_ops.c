@@ -91,8 +91,10 @@
  * landing PR):
  *   cut    -> index   (position arithmetic + gather; output is slices, the
  *                      L4 gather composed per cut point — ref/cut.md)
- *   where  -> index   (the L4 index-space GENERATOR; dict arm = keys gathered
- *                      by `where value d`, the entries-axis law — ref/where.md)
+ *   where  -> none    (an index-space GENERATOR, but its dict arm is the keys
+ *                      gathered by `where value d` — an index off the RANGE,
+ *                      not off `til count d`, so it is NOT the L4 positional
+ *                      law the index family now carries — ref/where.md)
  *   group  -> rowid   (needs item equality; spec §3 lists group in
  *                      row-identity explicitly — ref/group.md)
  *   ?      -> index   (deal/roll on a table = random-index gather; the dict
@@ -239,9 +241,11 @@ static const q_op_t Q_OPS[] = {
     /* q `n rotate x` / `n sublist x` — dyadic infix keywords (ref/rotate.md
      * "uniform" / ref/sublist.md) — both pure index-space gathers (L4).
      * Not KW_INFIX -> the scanner would split `n rotate x` into two
-     * statements, so the manifest row is what makes them infix; the VALUE is
-     * the q.q derivation over `#`/`_` (QR_QSRC: bound post-bootstrap). */
-    { "rotate",QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("rotate"), NULL, 1, 0, "index", NULL },
+     * statements, so the manifest row is what makes them infix.  rotate is a
+     * WRAPPER, not the q.q derivation it once was: a QSRC lambda short-circuits
+     * family dispatch, so only a manifest value can reach the index lift and
+     * learn dicts/tables/keyed tables from the one law. */
+    { "rotate",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("rotate", q_rotate_wrap), NULL, 1, 0, "index", NULL },
     { "sublist",QLEX_KW_INFIX, QR_NONE,                        QR_QSRC("sublist"), NULL, 1, 0, "index", NULL },
     /* q `x vs y` / `x sv y` — split-join / base-encode family (dyadic infix
      * keywords; wrappers, native -RAY_STR + sym + base + byte).  Monadic form
@@ -374,9 +378,12 @@ static const q_op_t Q_OPS[] = {
     /* q `fills x` — forward-fill nulls (ref/fill.md: uniform; the `^\`
      * fill-scan).  Computes values (not a gather) -> map. */
     { "fills",   QLEX_KW_PREFIX, QR_FN1("fills", q_fills_wrap), QR_NONE,          NULL, 1, 0, "map", NULL },
-    /* q `where x` — the L4 index-space generator (border ruling: index —
-     * see FAMILY AUDIT); int-vector replicate + bool-mask forms at the body. */
-    { "where",   QLEX_KW_PREFIX, QR_FN1("where", q_where_wrap), QR_NONE,          NULL, 1, 0, "index", NULL },
+    /* q `where x` — an index-space generator, but NOT the L4 one: its entries
+     * index comes from `where value d`, never from `til count d`, so the
+     * positional lift would silently mis-answer it.  family none until the
+     * values-derived arm lands (see FAMILY AUDIT); int-vector replicate +
+     * bool-mask forms at the body. */
+    { "where",   QLEX_KW_PREFIX, QR_FN1("where", q_where_wrap), QR_NONE,          NULL, 1, 0, "none", NULL },
     { "reverse", QLEX_KW_PREFIX, QR_ENV("reverse"),            QR_NONE,           NULL, 1, 0, "index", NULL },
     /* q `sum` over a boxed LIST sums the items (`sum(dates;times)` ->
      * timestamps, ref/file-text.md); rayfall sum is vector-only, so wrapper.

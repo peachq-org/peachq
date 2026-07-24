@@ -13,6 +13,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/q_err.h"
 #include "qlang/q_ops.h"
+#include "qlang/q_builtins.h"  /* q_builtins_count_long — q `count` for C callers */
 #include "qlang/q_registry.h"
 #include "qlang/q_type.h"     /* q_type_is_keyed — the type axis home */
 #include "qlang/q_parse_internal.h"
@@ -20,6 +21,7 @@
 #include "qlang/q_handles.h"
 #include "qlang/net/q_ws.h"
 #include "qlang/net/q_http_client.h"
+#include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
 #include "qlang/ops/q_index.h"
 #include "lang/eval.h"
@@ -629,34 +631,47 @@ static ray_t* call_kernel(ray_t* fv, ray_t** args, int64_t n) {
     return q_err(QE_TYPE);
 }
 
-/* ===== L4 index lift: op t = t @ op til count t (ONE gather) ============= */
+/* ===== L4 index lift: op x = x @ op til count x (ONE gather) =============
+ * A dictionary is ENTRIES — domain!range — and a keyed table is the same law
+ * with a TABLE in each slot (basics/dictsandtables.md), so one index derived
+ * from the DOMAIN's count drives both halves and the container is rebuilt
+ * from them. */
+
+/* gather x at idx through the one index home; an empty selection keeps x's
+ * element type (`` type key `a _ `a!1 `` is 11h, not 0h) */
+static ray_t* gather_at(ray_t* x, ray_t* idx) {
+    ray_t* g = q_eval_apply_concrete(q_index_at(x, &idx, 1));
+    return q_typed_empty_like(g, x);
+}
 
 static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
-    ray_t* t = (n == 2) ? args[1] : args[0];
-    ray_t* nrv = ray_i64(ray_table_nrows(t));
+    ray_t* x = (n == 2) ? args[1] : args[0];
+    ray_t* dom = (x->type == RAY_DICT) ? ray_dict_keys(x) : NULL;
+    int64_t n_ent = q_builtins_count_long(dom ? dom : x);   /* q count, one home */
+    if (n_ent < 0) return q_err(QE_TYPE);
+    ray_t* nrv = ray_i64(n_ent);
     ray_t* til = ray_til_fn(nrv);
     ray_release(nrv);
     if (!til || RAY_IS_ERR(til)) return til ? til : q_err(QE_TYPE);
     ray_t* iargs[2];
     if (n == 2) { iargs[0] = args[0]; iargs[1] = til; }
     else        { iargs[0] = til; }
-    ray_t* idx = call_kernel(fv, iargs, n);
+    /* the index is a VALUE the gather consumes, never a chain link */
+    ray_t* idx = q_eval_apply_concrete(call_kernel(fv, iargs, n));
     ray_release(til);
     if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_TYPE);
-    int64_t nc = ray_table_ncols(t);
-    ray_t* out = ray_table_new(nc);
-    for (int64_t c = 0; c < nc; c++) {
-        ray_t* g = ray_at_fn(ray_table_get_col_idx(t, c), idx);
-        if (!g || RAY_IS_ERR(g)) {
-            ray_release(out);
-            ray_release(idx);
-            return g ? g : q_err(QE_TYPE);
-        }
-        out = ray_table_add_col(out, ray_table_col_name(t, c), g);
-        ray_release(g);
+    ray_t* r = gather_at(dom ? dom : x, idx);
+    if (dom && r && !RAY_IS_ERR(r)) {
+        ray_t* nv = gather_at(ray_dict_vals(x), idx);
+        /* rebuild through the `!` home, so a lifted slice is representationally
+         * the dict `(op key d)!(op value d)` builds — the L4 law is `~`-true */
+        ray_t* nd = (nv && !RAY_IS_ERR(nv)) ? q_bang(r, nv) : nv;
+        ray_release(r);
+        if (nv) ray_release(nv);
+        r = nd;
     }
     ray_release(idx);
-    return out;
+    return r ? r : q_err(QE_TYPE);
 }
 
 /* ===== adverbs: native application + manifest monomorphization =========== */
@@ -1012,10 +1027,11 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                    is_container(args[0])) {
             return map1(fv, row, args[0]);
         } else if (strcmp(fam, "index") == 0) {
-            if (n == 1 && args[0] && args[0]->type == RAY_TABLE)
+            /* as for `atomic`, a two-valence row's family describes the DYAD —
+             * the monadic sibling (`#:` count, `_:` floor) derives no index */
+            if (n == 1 && row->dyad.kind == QK_NONE && is_container(args[0]))
                 return index_lift(fv, args, 1);
-            if (n == 2 && args[1] && args[1]->type == RAY_TABLE &&
-                int_atom(args[0]))
+            if (n == 2 && is_container(args[1]) && int_atom(args[0]))
                 return index_lift(fv, args, 2);
         }
     } else if (fv->attrs & RAY_FN_ATOMIC) {
