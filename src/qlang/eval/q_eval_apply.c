@@ -426,25 +426,10 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
 
 /* ===== L1/L2 atomic lifts over containers ================================ */
 
-static ray_t* table_percol(ray_t* t, ray_t* (*colfn)(void* ctx, ray_t* col),
-                           void* ctx) {
-    int64_t nc = ray_table_ncols(t);
-    ray_t* out = ray_table_new(nc);
-    for (int64_t c = 0; c < nc; c++) {
-        ray_t* col = ray_table_get_col_idx(t, c);          /* borrowed */
-        ray_t* r = store_mat(colfn(ctx, col));
-        if (!r || RAY_IS_ERR(r)) {
-            ray_release(out);
-            return r ? r : q_err(QE_TYPE);
-        }
-        out = ray_table_add_col(out, ray_table_col_name(t, c), r);
-        ray_release(r);
-    }
-    return out;
-}
-
+/* the per-column walk lives in the table home (q_table_map_cols); these colfns
+ * own the DAG materialization (store_mat) at the store boundary. */
 static ray_t* atomic1_col(void* ctx, ray_t* col) {
-    return atomic1((ray_unary_fn)(uintptr_t)ctx, col);
+    return store_mat(atomic1((ray_unary_fn)(uintptr_t)ctx, col));
 }
 
 static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
@@ -457,7 +442,7 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
         return ray_dict_new(k, nv);                        /* consumes both */
     }
     if (x->type == RAY_TABLE)
-        return table_percol(x, atomic1_col, (void*)(uintptr_t)f);
+        return q_table_map_cols(atomic1_col, (void*)(uintptr_t)f, x);
     if (is_coll(x)) return map_unary(f, x);
     return f(x);
 }
@@ -503,8 +488,8 @@ typedef struct { ray_binary_fn f; ray_t* other; int other_left; } a2ctx;
 
 static ray_t* atomic2_col(void* vctx, ray_t* col) {
     a2ctx* c = (a2ctx*)vctx;
-    return c->other_left ? atomic2(c->f, c->other, col)
-                         : atomic2(c->f, col, c->other);
+    return store_mat(c->other_left ? atomic2(c->f, c->other, col)
+                                   : atomic2(c->f, col, c->other));
 }
 
 static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
@@ -528,7 +513,7 @@ static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
         ray_t* o = xt ? y : x;
         if (o->type == RAY_TABLE || is_coll(o)) return q_err(QE_NYI);
         a2ctx ctx = { f, o, !xt };
-        return table_percol(t, atomic2_col, &ctx);
+        return q_table_map_cols(atomic2_col, &ctx, t);
     }
     return map_binary(f, x, y);
 }
@@ -1193,6 +1178,15 @@ int q_eval_apply_truthy(ray_t* v, ray_t** err) {
         ray_release(v);
         *err = q_err(QE_TYPE);
         return 0;
+    }
+    /* strings decide by EMPTINESS — the provisional string model's divergence
+     * (kdb 'types on char vectors); the "b"$ cast is per-char and can't. */
+    {
+        const char* p; int64_t n;
+        if (q_str_text_bytes(v, &p, &n)) {
+            ray_release(v);
+            return n > 0;
+        }
     }
     ray_t* b = q_dollar_cast(RAY_BOOL, v);
     ray_release(v);

@@ -116,6 +116,11 @@
  * `atomic` at STRING granularity — the elementwise unit is the whole string,
  * now a RAY_CHARV vector (string-C3; this audit predates C3 and is pure
  * metadata).  ss/ssr consume a whole string as a search domain -> `none`.
+ * Self-distributing exception: `$` is family `none` because it is MULTI-CONCEPT
+ * (Cast/Tok/Pad/mmu/enum) — one glyph, no one lift law.  It receives WHOLE args
+ * and each overload recurses with its OWN boundary (Cast leaves at typed
+ * vectors, Tok/Pad at strings); an exception-catalogue member, its container
+ * probes live in q_dollar.c (see tools/lint-type-axis.sh BOTTOM_BAND).
  * ========================================================================== */
 
 /* trailing name_lift zero-defaults on unflagged rows (no 166-row churn) */
@@ -177,13 +182,12 @@ static const q_op_t Q_OPS[] = {
      * entries-axis collision is spec §9.1 (see AUDIT). */
     { "?",     QLEX_GLYPH,     QR_FN1("distinct", q_distinct_wrap), QR_FN2("rand", q_roll_wrap), NULL, 0, 0, "index", NULL },
     /* monadic `$` stays QR_NONE: `$x` is the cast-vs-cond ambiguity, deferred.
-     * Dyadic `$` is Cast ("an atomic function", ref/cast.md; kdb float->int
-     * ROUNDING; Tok string-parse and unknown designators deferred); the
-     * bracket cond form `$[c;t;f]` (3+ args) is a q_eval control form, not a
-     * registry cell.  KNOWN GAP: the atomic lift distributes `$` into char
-     * VECTORS, shattering whole-string forms (`$"ab", "J"$"12" — ref/tok.md);
-     * the `$`-redesign PR (direct self-recursion per overload) owns the fix. */
-    { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "atomic", NULL },
+     * Dyadic `$` is MULTI-CONCEPT (Cast/Tok/Pad/mmu/enum) so family "none":
+     * one glyph has no one lift law, so the apply hands q_dollar WHOLE args and
+     * each overload SELF-RECURSES with its own boundary (ruling 2026-07-24 —
+     * cast leaves at typed vectors, Tok/Pad at strings).  The bracket cond form
+     * `$[c;t;f]` (3+ args) is a q_eval control form, not a registry cell. */
+    { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "none", NULL },
     /* `:` Assign as an operand VALUE — the dyad returning its rhs, so amend's
      * replace form (`@[x;i;:;v]`, ref/amend.md "If v is Assign (:) ...") is
      * plain composition.  Assignment/return stay SYNTAX: q_embed never embeds
@@ -343,7 +347,7 @@ static const q_op_t Q_OPS[] = {
     { "mdev",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mdev", q_mdev_wrap), NULL, 1, 0, "map", NULL },
     { "ema",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ema", q_ema_wrap), NULL, 1, 0, "map", NULL },
     /* mmu (matrix multiply / dot product) — bespoke matrix op owning its own
-     * shape logic (family none, like @ .); the `$` matmul overload is deferred. */
+     * shape logic (family none, like @ .); `$` reaches it via q_dollar_mmu. */
     { "mmu",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmu", q_mmu_wrap), NULL, 1, 0, "none", NULL },
     /* iterator mnemonic keywords (wave-2): infix `f over/scan/prior/peach x`,
      * same lexical treatment as `each`.  over/scan dispatch reduce/converge/
