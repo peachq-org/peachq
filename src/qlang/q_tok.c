@@ -384,8 +384,7 @@ static int tok_hexval(char c) {
 /* Parse a CANONICAL 36-char UUID (8-4-4-4-12, hyphens at 8/13/18/23, hex
  * elsewhere, case-insensitive) into out[16].  Returns 1 on success, 0 on any
  * shape/char mismatch.  kdb "G"$ ALSO accepts IPv4/IPv6 address forms
- * (test/q/cast/tok.qcmd, skiplisted) — DEFERRED here (see PLAN.md); those
- * inputs fail this shape check and Tok returns 0Ng. */
+ * (tok.md #ip-address) — those fall through to tok_ip_guid below. */
 int q_tok_uuid(const char* p, size_t len, uint8_t out[16]) {
     if (len != 36) return 0;
     int bi = 0;
@@ -402,6 +401,93 @@ int q_tok_uuid(const char* p, size_t len, uint8_t out[16]) {
         i += 2;
     }
     return bi == 16;
+}
+
+/* Parse p[0..len) as a dotted-quad IPv4 (four decimal octets 0..255, three
+ * dots, nothing else).  Returns 1 + oct[0..3], 0 on any shape/range mismatch. */
+static int tok_ipv4_octets(const char* p, size_t len, uint8_t oct[4]) {
+    size_t i = 0;
+    for (int n = 0; n < 4; n++) {
+        if (i >= len || p[i] < '0' || p[i] > '9') return 0;
+        int v = 0, dig = 0;
+        while (i < len && p[i] >= '0' && p[i] <= '9') {
+            v = v * 10 + (p[i] - '0'); i++;
+            if (++dig > 3 || v > 255) return 0;
+        }
+        oct[n] = (uint8_t)v;
+        if (n < 3) { if (i >= len || p[i] != '.') return 0; i++; }
+    }
+    return i == len;
+}
+
+/* IPv4 dotted-quad -> big-endian 32-bit ("I"$"192.168.1.34" -> -1062731486i,
+ * tok.md #ipv4-address-as-int).  Returns 1 + *out, 0 on mismatch. */
+int q_tok_ipv4(const char* p, size_t len, uint32_t* out) {
+    uint8_t o[4];
+    if (!tok_ipv4_octets(p, len, o)) return 0;
+    *out = ((uint32_t)o[0] << 24) | ((uint32_t)o[1] << 16) |
+           ((uint32_t)o[2] << 8) | (uint32_t)o[3];
+    return 1;
+}
+
+/* IPv6 text -> 16 bytes (tok.md #ipv6-address-as-guid).  Handles the full
+ * 8-group form, `::` zero-compression (at most one), and a trailing dotted-quad
+ * (v4-mapped, e.g. "::FFFF:192.0.2.1").  Returns 1 + out, 0 on any mismatch. */
+static int tok_ipv6(const char* p, size_t len, uint8_t out[16]) {
+    if (len == 0) return 0;
+    uint8_t head[16], tail[16];
+    int hn = 0, tn = 0, seen_gap = 0;
+    uint8_t* cur = head; int* cn = &hn;
+    size_t i = 0;
+    if (len >= 2 && p[0] == ':' && p[1] == ':') { seen_gap = 1; cur = tail; cn = &tn; i = 2; }
+    else if (p[0] == ':') return 0;
+    while (i < len) {
+        size_t start = i;
+        while (i < len && tok_hexval(p[i]) >= 0) i++;
+        if (i < len && p[i] == '.') {                 /* trailing dotted-quad */
+            uint8_t o4[4];
+            if (!tok_ipv4_octets(p + start, len - start, o4) || *cn + 4 > 16) return 0;
+            memcpy(cur + *cn, o4, 4); *cn += 4;
+            i = len; break;
+        }
+        size_t glen = i - start;
+        if (glen == 0 || glen > 4 || *cn + 2 > 16) return 0;
+        uint16_t g = 0;
+        for (size_t k = start; k < i; k++) g = (uint16_t)((g << 4) | tok_hexval(p[k]));
+        cur[(*cn)++] = (uint8_t)(g >> 8);
+        cur[(*cn)++] = (uint8_t)(g & 0xff);
+        if (i == len) break;
+        if (p[i] != ':') return 0;
+        i++;
+        if (i < len && p[i] == ':') {                 /* the "::" gap */
+            if (seen_gap) return 0;
+            seen_gap = 1; cur = tail; cn = &tn; i++;
+        } else if (i == len) return 0;                /* trailing single colon */
+    }
+    if (seen_gap) {
+        if (hn + tn >= 16) return 0;              /* `::` must compress >=1 group */
+        memset(out, 0, 16);
+        memcpy(out, head, (size_t)hn);
+        memcpy(out + 16 - tn, tail, (size_t)tn);
+    } else {
+        if (hn != 16) return 0;
+        memcpy(out, head, 16);
+    }
+    return 1;
+}
+
+/* "G"$ IP-address forms -> 16-byte guid: a bare dotted-quad maps to ::ffff:v4
+ * ("192.0.2.1" -> 00000000-0000-0000-0000-ffffc0000201), else IPv6.  Returns
+ * 1 + out, 0 on mismatch (caller yields 0Ng). */
+static int tok_ip_guid(const char* p, size_t len, uint8_t out[16]) {
+    uint8_t o4[4];
+    if (tok_ipv4_octets(p, len, o4)) {
+        memset(out, 0, 16);
+        out[10] = 0xff; out[11] = 0xff;
+        out[12] = o4[0]; out[13] = o4[1]; out[14] = o4[2]; out[15] = o4[3];
+        return 1;
+    }
+    return tok_ipv6(p, len, out);
 }
 
 /* "T"$ time-string scan (ref/tok.md).  Two forms, both -> i32 ms of day:
@@ -644,6 +730,8 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
         return tag == RAY_F64 ? ray_f64(v) : ray_f32((float)v);
     }
     case RAY_I64: case RAY_I32: case RAY_I16: {
+        uint32_t ip;                          /* "I"$ dotted-quad -> IPv4 int */
+        if (tag == RAY_I32 && q_tok_ipv4(p, len, &ip)) return ray_i32((int32_t)ip);
         int64_t v = 0;
         size_t used = len ? ray_parse_i64(p, len, &v) : 0;
         if (used != len || len == 0) return ray_typed_null((int8_t)-tag);
@@ -712,10 +800,11 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
         return ray_u8((uint8_t)v);
     }
     case RAY_GUID: {
-        /* Canonical 36-char UUID only; base ray_cast_fn "GUID" ERRORS on bad
-         * input, so parse here; IPv4/IPv6 forms deferred (see q_tok_uuid). */
+        /* Canonical 36-char UUID, else an IPv4/IPv6 address (tok.md #ip-address);
+         * base ray_cast_fn "GUID" ERRORS on bad input, so parse here. */
         uint8_t bytes[16];
-        if (!q_tok_uuid(p, len, bytes)) return ray_typed_null(-RAY_GUID);
+        if (!q_tok_uuid(p, len, bytes) && !tok_ip_guid(p, len, bytes))
+            return ray_typed_null(-RAY_GUID);
         return ray_guid(bytes);
     }
     case RAY_MINUTE: {
