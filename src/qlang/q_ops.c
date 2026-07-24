@@ -149,7 +149,7 @@ static const q_op_t Q_OPS[] = {
     { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic", NULL },
     { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic", NULL },
     /* ---- structural glyphs ---- */
-    /* `#` monadic is count (aggregate — the `count` row); family = dyadic
+    /* `#` monadic is count (family `none` — see the `count` row); family = dyadic
      * Take, the L4 pilot op (`-3#t`).  The arg-swap lives in q_take_wrap. */
     { "#",     QLEX_GLYPH,     QR_ENV("count"),                QR_FN2("take", q_take_wrap), NULL, 1, 0, "index", NULL },
     /* monadic `_` is a K-ism (valid q spells it `floor`, atomic) — accepting
@@ -361,7 +361,7 @@ static const q_op_t Q_OPS[] = {
     /* q `til` — generator (atom -> vector; no structure input, family none);
      * kdb accepts a boolean (`til 1b` -> ,0), base ray_til_fn is int-only. */
     { "til",     QLEX_KW_PREFIX, QR_FN1("til", q_til_wrap),    QR_NONE,           NULL, 1, 0, "none", NULL },
-    { "count",   QLEX_KW_PREFIX, QR_ENV("count"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "count",   QLEX_KW_PREFIX, QR_ENV("count"),              QR_NONE,           NULL, 1, 0, "none",      NULL },
     /* first/last — aggregates (ref/first.md: "first is an aggregate"). */
     { "first",   QLEX_KW_PREFIX, QR_ENV("first"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     { "last",    QLEX_KW_PREFIX, QR_ENV("last"),               QR_NONE,           NULL, 1, 0, "aggregate", NULL },
