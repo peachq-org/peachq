@@ -20,6 +20,66 @@
 #include <string.h>
 #include <stdlib.h>        /* malloc/free */
 
+/* ---- collapse: homogeneous atom list -> typed vector (q_registry_internal.h) ---- */
+
+ray_t* q_list_collapse(ray_t* l) {
+    if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || ray_len(l) == 0) {
+        if (l) ray_retain(l);
+        return l;
+    }
+    int64_t n = ray_len(l);
+    ray_t** e = (ray_t**)ray_data(l);
+    int8_t t = e[0] ? e[0]->type : 0;
+    if (t >= 0 || t == -RAY_STR) { ray_retain(l); return l; }   /* not a scalar-atom run */
+    for (int64_t i = 1; i < n; i++)
+        if (!e[i] || e[i]->type != t) { ray_retain(l); return l; }
+
+    if (t == -RAY_SYM) {
+        ray_t* vec = ray_sym_vec_new(RAY_SYM_W64, n);
+        if (RAY_IS_ERR(vec)) return vec;
+        for (int64_t i = 0; i < n; i++) vec = ray_vec_append(vec, &e[i]->i64);
+        return vec;
+    }
+
+    ray_t* vec = ray_vec_new(-t, n);
+    if (RAY_IS_ERR(vec)) return vec;
+    int64_t nulls = 0;
+    for (int64_t i = 0; i < n; i++) {
+        /* Switch the recovered POSITIVE tag, exhaustive over ray_type_e (no
+         * default) so a future member demands a lane (#209 guard).  Only the
+         * non-i64 reads live here; i64/temporal tags AND any out-of-enum tag
+         * fall to the shared i64 append below — byte-identical to the old
+         * default (U8 LE-aliased).  LIST/STR/SYM are dead arms (filtered above). */
+        bool appended = false;
+        switch ((ray_type_e)-t) {
+        case RAY_BOOL: vec = ray_vec_append(vec, &e[i]->b8);  appended = true; break;
+        case RAY_I16:  vec = ray_vec_append(vec, &e[i]->i16); appended = true; break;
+        case RAY_I32:  vec = ray_vec_append(vec, &e[i]->i32); appended = true; break;
+        case RAY_F32: { float f = (float)e[i]->f64;           /* F32 atom stores f64 */
+                        vec = ray_vec_append(vec, &f); appended = true; } break;
+        case RAY_F64:
+        case RAY_DATETIME:
+                       vec = ray_vec_append(vec, &e[i]->f64); appended = true; break;
+        case RAY_GUID: {                                      /* 16-byte payload, not i64 */
+            const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
+            vec = ray_vec_append(vec, g); appended = true;
+        } break;
+        RAY_BYTE_CASES: /* explicit u8 read — byte + char atoms store the payload
+                         * in u8; no LE-aliasing through the shared i64 append */
+                       vec = ray_vec_append(vec, &e[i]->u8); appended = true; break;
+        case RAY_I64:  case RAY_TIMESTAMP: case RAY_MONTH:
+        case RAY_DATE: case RAY_TIMESPAN: case RAY_MINUTE:    case RAY_SECOND:
+        case RAY_TIME: case RAY_LIST: case RAY_STR: case RAY_SYM:
+                       break;
+        }
+        if (!appended) vec = ray_vec_append(vec, &e[i]->i64);   /* i64/temporal + out-of-enum */
+        if (RAY_IS_ERR(vec)) return vec;
+        if (RAY_ATOM_IS_NULL(e[i])) { ray_vec_set_null(vec, i, true); nulls++; }
+    }
+    (void)nulls;
+    return vec;
+}
+
 /* ---- wrappers (bespoke q semantics over a rayfall primitive) ---- */
 
 /* Gather `count` elements from x starting at logical index `start`.  recycle:
@@ -53,7 +113,7 @@ static ray_t* gather(ray_t* x, int64_t start, int64_t count, int64_t total,
     ray_t* row = ray_at_fn(x, idx);       /* boxed list of atoms */
     ray_release(idx);
     if (!row || RAY_IS_ERR(row)) return row;
-    ray_t* c = q_collapse_list(row);      /* -> typed vector when homogeneous */
+    ray_t* c = q_list_collapse(row);      /* -> typed vector when homogeneous */
     ray_release(row);
     return c;
 }
@@ -286,7 +346,7 @@ ray_t* q_take_wrap(ray_t* n, ray_t* list) {
  * Length is derived string-aware: a q string is a -RAY_STR atom whose char
  * count lives in ray_str_len, NOT the ->len union field (which aliases the SSO
  * {slen,sdata} bytes), so ray_len would be garbage for strings. */
-/* q_collapse_list leaves a ZERO-length boxed list untyped (no element to infer
+/* q_list_collapse leaves a ZERO-length boxed list untyped (no element to infer
  * from); key-indexing selections must instead inherit the PROTO vector's type
  * so an empty result keeps its domain (codex r3: `` type key `a _ `a!1 `` must
  * be 11h / `` `symbol$() ``, not 0h / `()`).  Consumes `collapsed`, borrows
@@ -308,7 +368,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
      * out-of-range index returns x unchanged (Drop is tolerant). */
     int64_t i;
     if (n && (ray_is_vec(n) || n->type == RAY_LIST) && n->type != RAY_DICT &&
-        q_strict_i64(list, &i)) {
+        q_type_strict_i64(list, &i)) {
         int64_t len = ray_len(n);
         if (i < 0 || i >= len) { ray_retain(n); return n; }
         int64_t r1[2] = { 0, i }, r2[2] = { i + 1, len - i - 1 };
@@ -330,7 +390,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
     /* q cut: int-VECTOR lhs — `2 4_v` slices [p0,p1) then [p_last,end).
      * Positions non-decreasing within 0..len; result is a boxed list of
      * slices (kdb 0h). */
-    if (q_is_int_vec(n)) {
+    if (q_type_is_int_vec(n)) {
         if (!list || (!ray_is_vec(list) && list->type != RAY_LIST))
             return q_err(QE_TYPE);
         int64_t len = ray_len(list);
@@ -338,8 +398,8 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
         ray_t* out = ray_list_new(np > 0 ? np : 1);
         int64_t prev = 0;
         for (int64_t i = 0; i < np; i++) {
-            int64_t p = q_ivec_get(n, i);
-            int64_t nxt = (i + 1 < np) ? q_ivec_get(n, i + 1) : len;
+            int64_t p = q_type_ivec_get(n, i);
+            int64_t nxt = (i + 1 < np) ? q_type_ivec_get(n, i + 1) : len;
             if (p < 0 || p > len || nxt < p || nxt > len || (i > 0 && p < prev)) {
                 ray_release(out);
                 return q_err(QE_DOMAIN);
@@ -357,7 +417,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
         return out;
     }
     int64_t k;
-    ray_t* err = q_i64_or_err(n, &k, "_: n");
+    ray_t* err = q_type_i64_or_err(n, &k, "_: n");
     if (err) return err;
     if (!list) return q_err(QE_TYPE);
     int64_t len;
@@ -383,7 +443,7 @@ ray_t* q_drop_wrap(ray_t* n, ray_t* list) {
  * An int VECTOR is a positional cut — identical to `_`, so delegate.  Borrows. */
 ray_t* q_cut_wrap(ray_t* n, ray_t* x) {
     int64_t sz;
-    if (q_strict_i64(n, &sz)) {
+    if (q_type_strict_i64(n, &sz)) {
         if (sz <= 0) return q_err(QE_DOMAIN);
         int is_str = (x && x->type == -RAY_STR);
         int64_t total = is_str ? (int64_t)ray_str_len(x) : (x ? ray_len(x) : 0);
@@ -414,7 +474,7 @@ ray_t* q_raze_wrap(ray_t* x) {
         if (RAY_IS_ERR(l)) return l;
         l = ray_list_append(l, x);                   /* retains x */
         if (RAY_IS_ERR(l)) return l;
-        ray_t* c = q_collapse_list(l);               /* owned */
+        ray_t* c = q_list_collapse(l);               /* owned */
         ray_release(l);
         return c;
     }
@@ -429,7 +489,7 @@ ray_t* q_raze_wrap(ray_t* x) {
  * q_builtins_register BEFORE registry init, so the `,` monadic QK_ENV
  * snapshot picks this wrapper up too. */
 ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
-    if (n == 1 && args[0] && args[0]->type == RAY_DICT && !q_table_is_keyed(args[0])) {
+    if (n == 1 && args[0] && args[0]->type == RAY_DICT && !q_type_is_keyed(args[0])) {
         ray_t* d = args[0];
         ray_t* k = ray_dict_keys(d);                 /* borrowed */
         ray_t* v = ray_dict_vals(d);                 /* borrowed */
@@ -447,7 +507,7 @@ ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
             col = ray_list_append(col, cell);        /* retains */
             ray_release(cell);
             if (RAY_IS_ERR(col)) { ray_release(ev); return col; }
-            ray_t* cc = q_collapse_list(col);        /* atoms -> typed 1-vec */
+            ray_t* cc = q_list_collapse(col);        /* atoms -> typed 1-vec */
             ray_release(col);
             if (!cc || RAY_IS_ERR(cc)) { ray_release(ev); return cc ? cc : q_err(QE_TYPE); }
             ev = ray_list_append(ev, cc);            /* retains */
@@ -520,7 +580,7 @@ ray_t* q_where_wrap(ray_t* x) {
  * with `0#first` of the ORIGINAL (`prev (1 2;"abc";`ibm)` -> (`long$();1 2;"abc")). */
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     int64_t k;   /* strict cast owns the type axis; 0N rejected here */
-    if (!q_strict_i64(nx, &k) || RAY_ATOM_IS_NULL(nx))
+    if (!q_type_strict_i64(nx, &k) || RAY_ATOM_IS_NULL(nx))
         return q_err(QE_TYPE);
     if (x && x->type == RAY_LIST) {
         /* fill = 0#first (a take that cannot empty degrades to ()) */
@@ -552,7 +612,7 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     }
     if (x && (x->type == -RAY_STR || x->type == RAY_CHARV)) {
         const char* s; int64_t len;
-        (void)q_text_bytes(x, &s, &len);
+        (void)q_str_text_bytes(x, &s, &len);
         if (x->type == -RAY_STR) { s = ray_str_ptr(x); len = (int64_t)ray_str_len(x); }
         char stackb[256];
         char* b = (len <= (int64_t)sizeof stackb) ? stackb : malloc((size_t)(len > 0 ? len : 1));
@@ -616,7 +676,7 @@ ray_t* q_fills_wrap(ray_t* x) {
             ray_release(oe);
             if (RAY_IS_ERR(outl)) return outl;
         }
-        ray_t* c = q_collapse_list(outl);
+        ray_t* c = q_list_collapse(outl);
         ray_release(outl);
         return c;
     }
@@ -680,7 +740,7 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     /* keyed^keyed is the uj merge with fill semantics (ref/coalesce.md:
      * y records update x's, but y NULLS don't overwrite). */
-    if (q_table_is_keyed(x) && q_table_is_keyed(y))
+    if (q_type_is_keyed(x) && q_type_is_keyed(y))
         return qj_ktbl_merge(x, y, 1);
     int xatom = ray_is_atom(x), yatom = ray_is_atom(y);
 
@@ -713,7 +773,7 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
             outl = ray_list_append(outl, se); ray_release(se);
             if (RAY_IS_ERR(outl)) return outl;
         }
-        ray_t* c = q_collapse_list(outl); ray_release(outl);
+        ray_t* c = q_list_collapse(outl); ray_release(outl);
         if (yatom && xatom) {                    /* scalar^scalar -> atom */
             ray_t* ia = ray_i64(0); ray_t* a = ray_at_fn(c, ia); ray_release(ia); ray_release(c);
             return a;
@@ -794,7 +854,7 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
             ray_release(r);
             if (RAY_IS_ERR(outl)) return outl;
         }
-        ray_t* c = q_collapse_list(outl);
+        ray_t* c = q_list_collapse(outl);
         ray_release(outl);
         return c;
     }
@@ -866,7 +926,7 @@ static ray_t* reindex_collapse(ray_t* vec, ray_t* grade) {
     ray_release(grade);
     if (!boxed || RAY_IS_ERR(boxed)) return boxed;
     if (boxed->type == RAY_LIST) {
-        ray_t* c = q_collapse_list(boxed);
+        ray_t* c = q_list_collapse(boxed);
         ray_release(boxed);
         return c;
     }
@@ -956,7 +1016,7 @@ static ray_t* grade_table(ray_t* t, int desc) {
  * collapse to a typed vector before grading (a genuinely mixed value list can't
  * collapse and ray_iasc_fn errors → the by-type-number sort is DEFERRED). */
 static ray_t* dict_value_grade(ray_t* vals, int desc) {
-    ray_t* cv = (vals && vals->type == RAY_LIST) ? q_collapse_list(vals) : NULL;
+    ray_t* cv = (vals && vals->type == RAY_LIST) ? q_list_collapse(vals) : NULL;
     ray_t* use = cv ? cv : vals;
     /* A KEYED table's value is a table — grade its rows, not its columns (this is
      * what lets the dict law carry keyed tables: `asc kt` gathers key+value rows
@@ -967,7 +1027,7 @@ static ray_t* dict_value_grade(ray_t* vals, int desc) {
         return g;
     }
     /* Empty dict (e.g. `asc 0#d`): an empty value list can't be graded by
-     * ray_iasc_fn (it needs a typed vector, and q_collapse_list leaves an empty
+     * ray_iasc_fn (it needs a typed vector, and q_list_collapse leaves an empty
      * RAY_LIST as-is), so return an empty long grade — reindexing then yields an
      * empty dict / key list, matching kdb (codex review). */
     if (use && (ray_is_vec(use) || use->type == RAY_LIST) && ray_len(use) == 0) {
@@ -1032,7 +1092,7 @@ ray_t* q_list_find(ray_t* x, ray_t* y) {
      * count vals, and ray_at_fn null-fills that out-of-range key index — the
      * typed null of the key domain, kdb's miss result.  Keyed tables keep
      * their own (deferred) path. */
-    if (x && x->type == RAY_DICT && !q_table_is_keyed(x)) {
+    if (x && x->type == RAY_DICT && !q_type_is_keyed(x)) {
         ray_t* keys = ray_dict_keys(x);              /* borrowed */
         if (!keys) return q_err(QE_TYPE);
         int vo = 0;
@@ -1043,7 +1103,7 @@ ray_t* q_list_find(ray_t* x, ray_t* y) {
         if (!i || RAY_IS_ERR(i)) return i;
         ray_t* r = ray_at_fn(keys, i);
         ray_release(i);
-        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_collapse_list(r), keys); ray_release(r); return c; }
+        if (r && r->type == RAY_LIST) { ray_t* c = q_typed_empty_like(q_list_collapse(r), keys); ray_release(r); return c; }
         return r;
     }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
