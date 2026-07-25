@@ -88,7 +88,9 @@ static inline void env_unlock(void) {
     atomic_store_explicit(&g_env_lock, 0, memory_order_release);
 }
 
-#define ENV_CAP 1024
+/* Every lookup scans `count`, never ENV_CAP, so the cap costs static memory
+ * only — 1024 was below what real q programs bind (a 2285-global `set'`). */
+#define ENV_CAP 8192
 
 static struct {
     int64_t keys[ENV_CAP];

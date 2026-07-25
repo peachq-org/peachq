@@ -588,26 +588,29 @@ static const q_op_t Q_OPS[] = {
      * wrappers, not QR_ENV renames. */
     { "getenv", QLEX_KW_PREFIX, QR_FN1("getenv", q_getenv_wrap), QR_NONE,         NULL, 1, 0, "none", NULL },
     { "setenv", QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("setenv", q_setenv_wrap), NULL, 1, 1, "none", NULL },
-    /* ---- adverbs — native q_eval/apply-module arms dispatch on the
-     * adverb_hof cell (`'` map, `/` fold; `\` `':` `/:` `\:` still 'nyi
-     * pending their rebuild wave). ---- */
+    /* ---- adverbs — native q_eval/apply-module arms; the maps (`'` `':`
+     * `/:` `\:`) landed with stage 1, `\` scan is still 'nyi.  `':` is
+     * variadic: Each Prior on a rank-2 value, Each Parallel on a rank-1 one
+     * (ref/maps.md), and the cell names the dyadic reading. ---- */
     { "'",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map",       1, 0, "none", NULL },
     { "/",     QLEX_ADVERB,    QR_NONE,  QR_NONE,  "fold",      1, 0, "none", NULL },
     { "\\",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "scan",      1, 0, "none", NULL },
-    { "':",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  NULL,        1, 0, "none", NULL },
+    { "':",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "prior",     1, 0, "none", NULL },
     { "/:",    QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-right", 1, 0, "none", NULL },
     { "\\:",   QLEX_ADVERB,    QR_NONE,  QR_NONE,  "map-left",  1, 0, "none", NULL },
 };
 #pragma GCC diagnostic pop
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
 
-/* Accumulator identity elements (ref/accumulators.md:261-267 unary-seed,
- * 420-428 empty-Over): the manifest owns this per-verb knowledge, beside the
- * rows it annotates — never a spelling switch in a wrapper (rule 3). */
+/* The identity elements q knows (ref/accumulators.md:261-267 unary-seed,
+ * 420-428 empty-Over; ref/maps.md:259-272 the Each Prior seed): the manifest
+ * owns this per-verb knowledge, beside the rows it annotates — never a
+ * spelling switch in a wrapper (rule 3). */
 ray_t* q_ops_acc_identity(const char* spelling) {
     if (!spelling || !spelling[0] || spelling[1] != '\0') return NULL;
     switch (spelling[0]) {
     case '+': return ray_i64(0);
+    case '-': return ray_i64(0);
     case '*': return ray_i64(1);
     case ',': return ray_list_new(0);
     default:  return NULL;
