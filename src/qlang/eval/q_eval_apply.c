@@ -154,14 +154,6 @@ static int is_container(ray_t* v) {
     return v && (v->type == RAY_DICT || v->type == RAY_TABLE);
 }
 
-/* THE iteration domain — what an iterator's ITEMS are.  A table joins the
- * collections here because "the items of a table are its rows" (ref/count.md),
- * each row a dictionary; every other lift keeps reading `is_coll`, where a
- * table is columns (the index law) or an atom. */
-static int is_iter(ray_t* v) {
-    return is_coll(v) || (v && !RAY_IS_ERR(v) && v->type == RAY_TABLE);
-}
-
 static int int_atom(ray_t* v) {
     return v && (v->type == -RAY_I64 || v->type == -RAY_I32 ||
                  v->type == -RAY_I16);
@@ -811,7 +803,7 @@ static ray_t* acc_empty(ray_t* fv, const q_op_t* frow, ray_t* seed, int keep,
 /* item i of an iterated argument; a non-collection is held whole and
  * broadcast, as for the maps (`{x+y*z}\[1000 2000;5 10 15 20;3]`, :355) */
 static ray_t* acc_item(ray_t* v, int64_t i) {
-    if (!is_iter(v)) { ray_retain(v); return v; }
+    if (!q_type_is_iter(v)) { ray_retain(v); return v; }
     return q_index_elem_at(v, i);
 }
 
@@ -836,7 +828,7 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
             ray_release(iv[p]);
             iv[p] = dv;
         }
-        if (!is_iter(iv[p])) continue;
+        if (!q_type_is_iter(iv[p])) continue;
         int64_t c = q_count_long(iv[p]);
         if (len < 0 || c > len) len = c;
     }
@@ -927,7 +919,7 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     }
     ray_t* mv = (x->type == RAY_LIST) ? NULL : acc_mono(frow, keep, &mrow);
     ray_t* r;
-    if (is_iter(x) && q_count_long(x) == 0) {
+    if (q_type_is_iter(x) && q_count_long(x) == 0) {
         r = acc_empty(fv, frow, NULL, keep, mv != NULL);
         if (!r) r = q_eval_apply(mv, mrow, &x, 1);
     } else if (mv)
@@ -993,7 +985,7 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
     for (int64_t p = 0; p < n; p++) {
         ray_retain(args[p]);
         av[p] = q_eval_apply_concrete(args[p]);   /* an iterated DAG has no items */
-        if (!(mask >> p & 1) || !is_iter(av[p])) continue;
+        if (!(mask >> p & 1) || !q_type_is_iter(av[p])) continue;
         iter |= (uint64_t)1 << p;
         /* the scan must run to the end so every av[p] is populated for the
          * release below — so record the FIRST mismatch only (an error is an
@@ -1083,7 +1075,7 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         if (!prev) { prev = RAY_NULL_OBJ; ray_retain(prev); }
     }
     ray_t* r;
-    if (!is_iter(x)) {
+    if (!q_type_is_iter(x)) {
         ray_t* av[2] = { x, prev };
         r = q_eval_apply(fv, frow, av, 2);
     } else {
