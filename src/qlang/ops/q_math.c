@@ -1,5 +1,5 @@
 /* q_math.c — atomic unary/dyadic math (libm family, xexp/xlog), comparison
- * wrappers (= <> & ~), and neg/null/within
+ * wrappers (= <> & ~), and neg/null
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
@@ -401,71 +401,3 @@ ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     return ray_bool(q_match_rec(a, b));
 }
 
-/* q `x within y` — bounds check (ref/within.md: 1 3 10 6 4 within 2 6 ->
- * 01011b; inclusive).  Base ray_within_fn takes VECTOR vals only and reads
- * the range buffer at the vals' element width, so: an atom x is enlisted
- * (via list+collapse) and the answer unwrapped back to a bool atom, and the
- * two element widths must agree ('type — a silent misread otherwise).  The
- * flip-of-pairs range form and mixed-width operands are deferred cells. */
-ray_t* q_within_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return q_err(QE_TYPE);
-    if (!ray_is_vec(y) || ray_len(y) != 2)
-        return q_err(QE_TYPE);
-    ray_t* vals = x;
-    ray_t* vals_owned = NULL;
-    if (ray_is_atom(x)) {
-        ray_t* l = ray_list_new(1);
-        if (RAY_IS_ERR(l)) return l;
-        l = ray_list_append(l, x);
-        if (RAY_IS_ERR(l)) return l;
-        vals_owned = q_list_collapse(l);
-        ray_release(l);
-        if (!vals_owned || RAY_IS_ERR(vals_owned))
-            return vals_owned ? vals_owned : q_err(QE_TYPE);
-        if (!ray_is_vec(vals_owned)) {           /* strings & friends: deferred */
-            ray_release(vals_owned);
-            return q_err(QE_TYPE);
-        }
-        vals = vals_owned;
-    }
-    if (!ray_is_vec(vals)) {
-        if (vals_owned) ray_release(vals_owned);
-        return q_err(QE_TYPE);
-    }
-    /* Base ray_within_fn dispatches on vals->type ONLY and reads the range
-     * buffer as that element type, so ANY type mismatch — not just a width
-     * mismatch — would silently reinterpret raw bits (codex: 1 2 within
-     * 1.5 2.5 read the doubles as int64 -> 00b).  Same-type operands only;
-     * mixed-type coercion is a deferred cell (error, never a wrong answer). */
-    if (vals->type != y->type) {
-        if (vals_owned) ray_release(vals_owned);
-        return q_err(QE_TYPE);
-    }
-    ray_t* r;
-    if (vals->type == RAY_TIMESTAMP) {
-        /* base ray_within_fn has no i64-temporal arm; the payload is i64, so
-         * relabel both sides through the one cast home and delegate (the
-         * same-byte-rep TIMESTAMP<->I64 relabel, builtins.c). */
-        ray_t* vi = q_dollar_cast(RAY_I64, vals);
-        if (!vi || RAY_IS_ERR(vi)) { if (vals_owned) ray_release(vals_owned); return vi; }
-        ray_t* yi = q_dollar_cast(RAY_I64, y);
-        if (!yi || RAY_IS_ERR(yi)) {
-            ray_release(vi);
-            if (vals_owned) ray_release(vals_owned);
-            return yi;
-        }
-        r = ray_within_fn(vi, yi);
-        ray_release(vi);
-        ray_release(yi);
-    } else {
-        r = ray_within_fn(vals, y);
-    }
-    if (!vals_owned) return r;                    /* vector x: pass through */
-    ray_release(vals_owned);
-    if (!r || RAY_IS_ERR(r)) return r;
-    ray_t* idx = ray_i64(0);                      /* atom x: unwrap 1-vec */
-    ray_t* a = ray_at_fn(r, idx);
-    ray_release(idx);
-    ray_release(r);
-    return a;
-}
