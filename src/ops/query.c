@@ -3716,7 +3716,7 @@ static ray_t* count_distinct_per_group_groups(ray_t* inner_expr, ray_t* tbl,
 }
 
 /* Width-agnostic key reader: read row `idx` of a group-key column as
- * int64_t.  Same coverage as the KEY_READ macro inside ray_select_fn,
+ * int64_t.  Same coverage as the RAY_KEY_READ macro inside ray_select_fn,
  * lifted to file scope so the parallel row→gid probe worker can use it. */
 static inline int64_t key_read_i64(const void* d, int64_t idx,
                                    int8_t bt, uint8_t attrs) {
@@ -6077,7 +6077,7 @@ by_dict_done:
          * the HT layout (wide_key_mask), so it uses the parallel DAG
          * path *except* for queries with non-aggregate expressions
          * (the non-agg scatter still requires 8-byte-packable key
-         * reads through its KEY_READ macro). */
+         * reads through its RAY_KEY_READ macro). */
         int use_eval_group = 0;
         if (by_key_sym >= 0) {
             ray_t* key_col = ray_table_get_col(tbl, by_key_sym);
@@ -8893,7 +8893,7 @@ by_dict_done:
                  * comparable scalar key into an int64_t so linear
                  * scans can use equality.  For floats we bitcast so
                  * NaN and -0/+0 match the DAG's hash-equality. */
-                #define KEY_READ(dst, vec, base_type, idx) do {                \
+                #define RAY_KEY_READ(dst, vec, base_type, idx) do {            \
                     const void* _d = ray_data(vec);                            \
                     switch (base_type) {                                       \
                     case RAY_BOOL:                                             \
@@ -8927,9 +8927,9 @@ by_dict_done:
                     }                                                          \
                 } while (0)
 
-                /* Whitelist of key types supported by KEY_READ.  Any
+                /* Whitelist of key types supported by RAY_KEY_READ.  Any
                  * other type (LIST, STR, GUID, unknown) must error out —
-                 * otherwise KEY_READ silently returns 0 and collapses
+                 * otherwise RAY_KEY_READ silently returns 0 and collapses
                  * all rows into a single (wrong) group.  LIST/STR/GUID
                  * are already routed through use_eval_group earlier;
                  * this is the last-line defense for future additions. */
@@ -8982,7 +8982,7 @@ by_dict_done:
                  * STR keys resolve via descriptors+pool below, not gk[]. */
                 if (okt != RAY_STR)
                     for (int64_t gi = 0; gi < n_groups; gi++)
-                        KEY_READ(gk[gi], grp_key, gkt, gi);
+                        RAY_KEY_READ(gk[gi], grp_key, gkt, gi);
 
                 /* Build row→group_id map.  Rows whose key isn't in the
                  * surviving group set get row_gid = -1 and are skipped.
@@ -9212,7 +9212,7 @@ by_dict_done:
                     } else {
                         for (int64_t r = 0; r < nrows; r++) {
                             int64_t rv;
-                            KEY_READ(rv, scan_key, okt, r);
+                            RAY_KEY_READ(rv, scan_key, okt, r);
                             uint64_t h = (uint64_t)rv * 0x9E3779B97F4A7C15ULL;
                             h ^= h >> 33;
                             uint64_t s = h & mask;
@@ -9232,7 +9232,7 @@ by_dict_done:
                     scratch_free(gk_idx_hdr);
                     if (gk64_hdr) scratch_free(gk64_hdr);
                 }
-                #undef KEY_READ
+                #undef RAY_KEY_READ
 
                 /* When path A was taken (no materialisation), the probe
                  * above looked up gids for every row in the original
