@@ -26,6 +26,13 @@ int q_type_is_numeric_or_temporal(ray_t* x);
  * test, not an inline type probe in a verb wrapper. */
 int q_type_is_bool(ray_t* x);
 
+/* Numeric-family lane predicates over a raw TAG (vector or atom): "is this the
+ * float family" / "is this any numeric family". Tag-shaped rather than value-
+ * shaped because their callers compare two operands' families (`in`'s mixed-
+ * family rule, `^` fill's result-type lattice) before touching a payload. */
+int q_type_is_float_tag(int8_t t);
+int q_type_is_num_tag(int8_t t);
+
 /* The kdb type number of a value (the `type` verb's knowledge): function
  * values map to 100h/102h/104h/106+adv, everything else IS its internal tag.
  * Callers must handle NULL x themselves (base-verb fallback). */
@@ -59,8 +66,24 @@ int q_type_is_int_vec(ray_t* x);
 int64_t q_type_ivec_get(ray_t* v, int64_t i);
 int64_t q_type_iatom_val(ray_t* x);
 
+/* True iff x is a table — the row-collection shape the row-wise verbs ask for. */
+int q_type_is_table(ray_t* x);
+
 /* True iff y is a keyed table: a RAY_DICT whose keys AND values are tables. */
 int q_type_is_keyed(ray_t* y);
+
+/* A plain key!value dict (a dict that is NOT a keyed table). */
+int q_type_is_plain_dict(ray_t* x);
+
+/* The physical STR atom lane (string-C3): rank-wise a char LIST, not a scalar. */
+int q_type_is_str_atom(ray_t* x);
+
+/* Are v's ITEMS themselves collections — a list of lists rather than a flat run
+ * of atoms?  THE rank axis: the search family reads it to pick a haystack's
+ * search rank (find.md — a rank-n haystack looks for rank n-1 objects) and to
+ * tell a record from a run of rows.  A STR atom counts as a collection: kdb
+ * strings are char LISTS. */
+int q_type_is_nested(ray_t* v);
 
 /* q treats the null symbol ` AS null (base sym-0 is the empty symbol). */
 int q_type_is_null_sym(ray_t* x);
