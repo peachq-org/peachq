@@ -461,9 +461,9 @@ static const q_op_t Q_OPS[] = {
      * NO row: it is `.q.md5:(-15!)` in q.q (reserved via the dynamic `.q`
      * probe), the C body q_md5_fn reached through the `!` internal-fn arm.
      * `like`/`ss` are dyadic infix; `ssr` is a triadic-prefix wrapper. */
-    { "trim",    QLEX_KW_PREFIX, QR_ENV("trim"),               QR_NONE,           NULL, 1, 0, "atomic", NULL },
-    { "ltrim",   QLEX_KW_PREFIX, QR_ENV("ltrim"),              QR_NONE,           NULL, 1, 0, "atomic", NULL },
-    { "rtrim",   QLEX_KW_PREFIX, QR_ENV("rtrim"),              QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "trim",    QLEX_KW_PREFIX, QR_ENV("trim"),               QR_NONE,           NULL, 1, 0, "none", NULL },
+    { "ltrim",   QLEX_KW_PREFIX, QR_ENV("ltrim"),              QR_NONE,           NULL, 1, 0, "none", NULL },
+    { "rtrim",   QLEX_KW_PREFIX, QR_ENV("rtrim"),              QR_NONE,           NULL, 1, 0, "none", NULL },
     { "like",    QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("like", q_like_wrap), NULL, 1, 0, "none", NULL },
     { "ss",      QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("ss", q_ss_wrap), NULL, 1, 0, "none", NULL },
     { "ssr",     QLEX_KW_PREFIX, QR_ENV("ssr"),                QR_NONE,           NULL, 1, 0, "none", NULL },
