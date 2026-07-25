@@ -144,6 +144,11 @@ ray_t* q_table_map_cols(ray_t* (*colfn)(void* ctx, ray_t* col), void* ctx, ray_t
  * q_list_collapse) for the env-using apply module. */
 ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);
 
+/* `~` as a C predicate — THE match home, so Converge's stop test inherits the
+ * one comparison tolerance.  DEFINED in ops/q_math.c; declared here (like
+ * q_list_collapse) for the env-using apply module. */
+int q_match_rec(ray_t* a, ray_t* b);
+
 /* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
  * appears in q-space; values in flight are charv; columns stay pooled).
  * DEFINED in ops/q_str.c; declared here (env-safe public reach). ---- */

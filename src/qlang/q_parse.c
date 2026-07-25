@@ -1529,7 +1529,9 @@ static P parse_base(Parser *p) {
             w = ray_list_append(w, cv);
             for (int64_t i = 0; i < an; i++) {
                 if (as[i]) { w = ray_list_append(w, as[i]); }
-                else       { ray_t *nul = q_null(); w = ray_list_append(w, nul); ray_release(nul); }
+                /* `'[;]` elides to project the COMPOSE value itself — the
+                 * same projection hole a bracket call marks, not a `::` value */
+                else       { ray_t *nul = hole(); w = ray_list_append(w, nul); ray_release(nul); }
             }
             ray_release(args);
             return (P){ R_NOUN, w };
