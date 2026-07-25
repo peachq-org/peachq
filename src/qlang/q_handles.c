@@ -8,6 +8,7 @@
 #include "qlang/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
+#include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i64, ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "table/sym.h"       /* ray_sym_intern_runtime */
@@ -16,12 +17,12 @@
 #include <rayforce.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <fcntl.h>           /* open — file/fifo transport handles */
 #include <unistd.h>          /* read/write/close — raw handle IO */
 #include <errno.h>           /* EINTR — short-write retry loop */
-
-#define RAY_EPOCH_UNIX_SECS 946684800LL   /* 2000.01.01 UTC, unix secs (q_dotz.c twin) */
+#ifdef RAY_OS_WINDOWS
+#include <io.h>              /* _dup/_close — msvcrt has no fcntl/F_DUPFD */
+#endif
 
 typedef struct {
     int64_t       fd;
@@ -49,13 +50,6 @@ void q_handles_destroy(void) {
     }
     free(g_recs);
     g_recs = NULL; g_cap = 0; g_n = 0;
-}
-
-static int64_t now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    int64_t unix_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-    return unix_ns - RAY_EPOCH_UNIX_SECS * 1000000000LL;
 }
 
 static int64_t find_slot(int64_t fd) {
@@ -115,7 +109,7 @@ int q_handles_register(int64_t fd, q_handle_kind kind, int initiated_out,
     g_recs[existing].kind          = kind;
     g_recs[existing].initiated_out = initiated_out;
     g_recs[existing].user_sym      = user_sym;
-    g_recs[existing].open_time_ns  = now_ns();
+    g_recs[existing].open_time_ns  = q_dotz_now_ns(0);
     g_recs[existing].open_args     = red;
     return 1;
 }
@@ -144,6 +138,22 @@ int64_t q_handles_user_sym(int64_t fd) {
 
 /* ---- open: file/fifo transport (hopen `:path` / `:fifo://path`) ---------- */
 
+#ifndef O_BINARY
+#define O_BINARY 0           /* only Windows has a text mode to opt out of */
+#endif
+
+/* fcntl(fd, F_DUPFD, 3) — a duplicate >= 3, fd left open for the caller. */
+#ifdef RAY_OS_WINDOWS
+static int dup_above_std(int fd) {
+    int low[3], n = 0, hi;
+    while ((hi = _dup(fd)) >= 0 && hi < 3) low[n++] = hi;
+    while (n--) _close(low[n]);
+    return hi;
+}
+#else
+static int dup_above_std(int fd) { return fcntl(fd, F_DUPFD, 3); }
+#endif
+
 /* POSIX open, NOT .ipc.open (IPC-only).  Handle = the real fd; registered so
  * apply/hclose/read1 recognise it.  Restricted mode refuses (writes the fs). */
 ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
@@ -161,12 +171,13 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
             p[cut - 1] = '/';
         }
     }
-    int flags = is_fifo ? O_RDONLY : (O_WRONLY | O_CREAT | O_APPEND);
+    int flags = O_BINARY |           /* a handle writes/reads bytes VERBATIM */
+                (is_fifo ? O_RDONLY : (O_WRONLY | O_CREAT | O_APPEND));
     int fd = open(p, flags, 0666);
     if (fd < 0) { free(p); return q_err(QE_IO); }
     if (fd < 3) {                    /* std fds closed: 0 is rejected by dispatch,
                                       * 1/2 are console handles — force fd >= 3 */
-        int hi = fcntl(fd, F_DUPFD, 3);
+        int hi = dup_above_std(fd);
         close(fd);
         if (hi < 0) { free(p); return q_err(QE_IO); }
         fd = hi;
