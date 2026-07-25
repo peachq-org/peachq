@@ -76,7 +76,6 @@ ray_t* q_cut_wrap(ray_t* n, ray_t* x);
 ray_t* q_rotate_wrap(ray_t* n, ray_t* x);
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
 ray_t* q_fills_wrap(ray_t* x);
-ray_t* q_in_wrap(ray_t* x, ray_t* y);
 ray_t* q_iasc_wrap(ray_t* x);
 ray_t* q_idesc_wrap(ray_t* x);
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
@@ -85,6 +84,13 @@ ray_t* q_where_wrap(ray_t* x);
 
 /* ---- defined in ops/q_rand.c ---- */
 ray_t* q_roll_wrap(ray_t* x, ray_t* y);
+
+/* ---- defined in ops/q_search.c ---- */
+ray_t* q_within_wrap(ray_t* x, ray_t* y);
+ray_t* q_in_wrap(ray_t* x, ray_t* y);
+ray_t* q_search_find(ray_t* x, ray_t* y);                     /* used by: rand */
+ray_t* q_bin_wrap(ray_t* x, ray_t* y);
+ray_t* q_binr_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_sin_wrap(ray_t* x);
@@ -101,7 +107,6 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y);
 ray_t* q_eq_wrap(ray_t* a, ray_t* b);
 ray_t* q_ne_wrap(ray_t* a, ray_t* b);
 ray_t* q_neg_wrap(ray_t* x);
-ray_t* q_within_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
@@ -159,7 +164,6 @@ ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, r
 ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: registry, agg, join */
 ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, table */
-ray_t* q_list_find(ray_t* x, ray_t* y);                       /* used by: rand */
 
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
