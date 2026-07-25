@@ -264,7 +264,7 @@ static ray_t* env_call1(const char* nm, ray_t* a) {
 
 /* q `x?y` — roll / deal / pick / generate + the find dispatch (type-dispatch
  * on the operands).
- *   list ? y   -> find (q_list_find, ops/q_list.c — dict reverse lookup rides it)
+ *   list ? y   -> find (q_search_find, ops/q_search.c — dict reverse lookup rides it)
  *   n ? int    -> roll: n randoms in [0,int)  (rayfall rand)
  *   n ? list   -> pick: n random indices gathered from the list
  *   -n ? m / 0N ? m -> deal / permute (deal_indices)
@@ -272,9 +272,9 @@ static ray_t* env_call1(const char* nm, ray_t* a) {
  *   gen_* above.  Deferred cells (error, never a wrong answer): short y,
  *   non-" " char pick (string model), deal of 0/0i. */
 ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
-    if (x && ((x->type == RAY_DICT && !q_type_is_keyed(x)) ||
+    if (x && (x->type == RAY_DICT || q_type_is_table(x) ||
               ray_is_vec(x) || x->type == RAY_LIST))
-        return q_list_find(x, y);           /* find / dict reverse lookup */
+        return q_search_find(x, y);         /* find / dict + keyed reverse lookup */
     int64_t nx;
     if (!q_type_strict_i64(x, &nx)) return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x)) {                  /* 0N ? y — permute all items */

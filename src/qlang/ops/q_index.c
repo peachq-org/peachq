@@ -1,6 +1,8 @@
 /* q_index — the one-code-path index/amend family (contract in q_index.h). */
 #include "qlang/ops/q_index.h"
+#include "qlang/ops/q_bang.h"   /* q_bang — the `!` verb, which rebuilds a selection */
 #include "qlang/eval/q_eval.h"
+#include "qlang/q_builtins.h"   /* q_builtins_count_long — THE count owner */
 #include "qlang/q_err.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_registry_internal.h"
@@ -222,16 +224,23 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
     return collapse(out);
 }
 
-/* Keyed-table read.  A keyed table is a dict whose domain is a TABLE, so with
- * ONE key column the domain reduces to that column and the dict law holds
- * unchanged — `d[x] ~ v[k?x]`, "dictionary indexing uses Find to search the
- * keys" (basics/dictsandtables.md Indexing).  Find carries atom-vs-vector shape
- * and answers a miss with the count, so the out-of-range gather yields the null
- * row with no special case.  A wider key needs row-wise Find on the domain. */
+/* Keyed-table read.  A keyed table is a dict whose domain is a TABLE, so the
+ * dict law reads through unchanged — `d[x] ~ v[k?x]`, "dictionary indexing uses
+ * Find to search the keys" (basics/dictsandtables.md Indexing) — with the
+ * table-domain Find doing the searching.
+ *
+ * kb/faq.md "Indexing a keyed table" gives the two forms and nothing else:
+ * a SINGLE ROW of the key (`` ku `Tom`Lagos `` -> one dictionary, a flat list
+ * carrying one element per key column) or a SUBLIST of it (a table, or a list
+ * of key rows -> a table).  So a flat list is one COMPOUND key, never a run of
+ * keys; `` s 2 3 `` is 'length because two elements do not make a one-column key
+ * row (ref/dotq.md `.Q.ft`).  An atom is that same single row at width one.
+ * Find's miss answer is the count, so an absent key gathers out of range and
+ * yields the null row with no special case (`` kt `Jack`London ``). */
 static ray_t* keyed_at(ray_t* x, ray_t* i) {
-    ray_t* keys = ray_dict_slots(x)[0];
-    if (ray_table_ncols(keys) != 1) return q_err(QE_NYI);
-    ray_t* pos = ray_find_fn(ray_table_get_col_idx(keys, 0), i);
+    ray_t* probe = ray_is_atom(i) ? ray_enlist_fn(&i, 1) : NULL;    /* owned */
+    ray_t* pos = q_search_find(ray_dict_slots(x)[0], probe ? probe : i);
+    if (probe) ray_release(probe);
     if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
     ray_t* r = q_index_at(ray_dict_slots(x)[1], &pos, 1);
     ray_release(pos);
@@ -269,6 +278,103 @@ ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k) {
     if (k <= 0) { ray_retain(x); return x; }
     return index_r(x, ix[0], ix + 1, k - 1);
 }
+
+/* ===== `#` / `_` on the entries axis ======================================
+ * One index derived from the DOMAIN drives both halves and `!` rebuilds it —
+ * the same law for a dict (vector domain), a keyed table (table domain) and,
+ * through `flip`, a table's columns.
+ *
+ * The two verbs read the index differently.  Take answers in PROBE order and
+ * so may repeat or reorder entries (ref/take.md "returns matching rows");
+ * Drop answers in DOMAIN order, each unselected entry once.  Both ignore a key
+ * the search missed, which is why `` `b`x _ d `` drops d of `b` alone
+ * (basics/dictsandtables.md). */
+
+/* one search position, whether Find answered with an atom or a run; -1 for
+ * anything that is not an int lane, which entries_index reads as "no entry" */
+static int64_t search_pos_at(ray_t* pos, int64_t j) {
+    if (ray_is_atom(pos)) return q_type_is_int_atom(pos) ? q_type_iatom_val(pos) : -1;
+    return q_type_is_int_vec(pos) ? q_type_ivec_get(pos, j) : -1;
+}
+
+/* The found positions in probe order (take), or the unfound domain positions in
+ * domain order (drop).  Find answers a miss with the count, so "found" is just
+ * "in range".  Consumes nothing; owned i64 vector. */
+static ray_t* entries_index(ray_t* pos, int64_t n, int drop) {
+    int64_t m = ray_is_atom(pos) ? 1 : ray_len(pos);
+    ray_t* out = ray_vec_new(RAY_I64, (drop ? n : m) > 0 ? (drop ? n : m) : 1);
+    if (RAY_IS_ERR(out)) return out;
+    int64_t* o = (int64_t*)ray_data(out);
+    int64_t c = 0;
+    if (!drop) {
+        for (int64_t j = 0; j < m; j++) {
+            int64_t p = search_pos_at(pos, j);
+            if (p >= 0 && p < n) o[c++] = p;
+        }
+    } else {
+        char* hit = calloc((size_t)(n > 0 ? n : 1), 1);
+        if (!hit) { ray_release(out); return q_err(QE_OOM); }
+        for (int64_t j = 0; j < m; j++) {
+            int64_t p = search_pos_at(pos, j);
+            if (p >= 0 && p < n) hit[p] = 1;
+        }
+        for (int64_t p = 0; p < n; p++)
+            if (!hit[p]) o[c++] = p;
+        free(hit);
+    }
+    out->len = c;
+    return out;
+}
+
+/* an empty selection keeps the source's element type (`` type key `a _ `a!1 ``
+ * is 11h, not 0h) */
+static ray_t* entries_gather(ray_t* x, ray_t* idx) {
+    return q_typed_empty_like(q_index_at(x, &idx, 1), x);
+}
+
+static ray_t* entries_select(ray_t* dom, ray_t* rng, ray_t* x, int drop) {
+    ray_t* pos = q_search_find(dom, x);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
+    ray_t* idx = entries_index(pos, q_builtins_count_long(dom), drop);
+    ray_release(pos);
+    if (RAY_IS_ERR(idx)) return idx;
+    ray_t* nk = entries_gather(dom, idx);
+    ray_t* nv = (nk && !RAY_IS_ERR(nk)) ? entries_gather(rng, idx) : NULL;
+    ray_release(idx);
+    ray_t* r = (nv && !RAY_IS_ERR(nv)) ? q_bang(nk, nv) : (nv ? nv : nk);
+    if (nk && r != nk) ray_release(nk);
+    if (nv && r != nv) ray_release(nv);
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* a table IS `flip` of its column dict, so column take/drop is the entries law
+ * with the flip on either side */
+static ray_t* cols_select(ray_t* x, ray_t* t, int drop) {
+    ray_t* fd = q_flip_wrap(t);                              /* owned */
+    if (!fd || RAY_IS_ERR(fd)) return fd ? fd : q_err(QE_TYPE);
+    ray_t* nd = q_type_is_plain_dict(fd)
+                    ? entries_select(ray_dict_keys(fd), ray_dict_vals(fd), x, drop)
+                    : q_err(QE_TYPE);
+    ray_release(fd);
+    if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
+    ray_t* r = q_flip_wrap(nd);
+    ray_release(nd);
+    return r;
+}
+
+/* NULL = not an entries selection, the wrapper's fall-through signal. */
+static ray_t* entries_verb(ray_t* x, ray_t* y, int drop) {
+    if (!x || !y || ray_is_atom(x)) return NULL;
+    if (q_type_is_keyed(y))                                  /* ([]k:…)#kt */
+        return entries_select(ray_dict_slots(y)[0], ray_dict_slots(y)[1], x, drop);
+    if (x->type != RAY_SYM) return NULL;
+    if (y->type == RAY_TABLE) return cols_select(x, y, drop);
+    if (y->type == RAY_DICT) return entries_select(ray_dict_keys(y), ray_dict_vals(y), x, drop);
+    return NULL;
+}
+
+ray_t* q_index_entries_take(ray_t* x, ray_t* y) { return entries_verb(x, y, 0); }
+ray_t* q_index_entries_drop(ray_t* x, ray_t* y) { return entries_verb(x, y, 1); }
 
 /* `_` drop's dict arms (ref/drop.md).  An int-atom left count-drops entries
  * (first n, or last |n| when n<0) by dropping n from the key and value vectors
