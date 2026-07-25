@@ -114,6 +114,17 @@
  *                      output shape — vs xkey which is pure structural)
  *   cross  -> structural (generates the product structure; no identity, no
  *                      index law — ref/cross.md)
+ *   count  -> none    (a mapping counts its DOMAIN, so the L3 `agg value d`
+ *                      law is wrong for it — ref/count.md; landed 44d86eb4,
+ *                      recorded here 2026-07-24)
+ *   within -> none    (ref/within.md labels it "left-uniform", but the label
+ *                      describes only the LEFT operand: y is BOUNDS — an
+ *                      ordered pair, or the flip of a list of ordered pairs —
+ *                      which no lift law conforms against x.  Declaring it
+ *                      atomic conformed x with (lo;hi) and broke every
+ *                      documented form.  The wrapper takes whole args and
+ *                      composes `(x>=y 0)&x<=y 1`, so the atomic lift on the
+ *                      COMPARISONS supplies every shape)
  * String-model caveat: string/upper/lower/trim/ltrim/rtrim/like classify
  * `atomic` at STRING granularity — the elementwise unit is the whole string,
  * now a RAY_CHARV vector (string-C3; this audit predates C3 and is pure
@@ -231,10 +242,10 @@ static const q_op_t Q_OPS[] = {
      * prefix `and x` misses and eval falls through to rayfall's scalar `and`
      * special form (DEFERRED edge — a monadic wrapper would be new logic). */
     { "and",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", NULL },
-    /* q `x within y` — inclusive bounds check (ref/within.md: "left-uniform",
-     * i.e. conforms to x — the atomic law on the left operand); wrapper
-     * because base ray_within_fn is vector-vals-only and width-blind. */
-    { "within",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("within", q_within_wrap), NULL, 1, 0, "atomic", NULL },
+    /* q `x within y` — inclusive bounds check (ref/within.md).  y is BOUNDS,
+     * not an operand conforming to x, so no lift law fits: family `none` and
+     * the wrapper takes whole args.  Border ruling: see FAMILY AUDIT. */
+    { "within",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("within", q_within_wrap), NULL, 1, 0, "none", NULL },
     /* q `n cut x` — chunk (int atom) / positional cut (int vector).  Border
      * ruling: index (see FAMILY AUDIT). */
     { "cut",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("cut", q_cut_wrap), NULL, 1, 0, "index", NULL },
@@ -298,14 +309,16 @@ static const q_op_t Q_OPS[] = {
     { "wj",    QLEX_KW_PREFIX, QR_ENV("wj"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
     { "wj1",   QLEX_KW_PREFIX, QR_ENV("wj1"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* ---- sort / bucket family (feat/q-sort-rank) — dyadic infix ----
-     * `bin`/`binr` reuse rayfall verbatim (same arg order: sorted-vec left,
-     * value right; ordering-based search -> rowid).  `xrank` is a q.q
+     * `bin`/`binr` search a sorted domain (sorted-vec left, value right;
+     * ordering-based search -> rowid), bodied in ops/q_search.c — the base
+     * kernels are i64-only, so the q surface takes its order from the `<`
+     * verb instead.  `xrank` is a q.q
      * derivation over the grade (QR_QSRC; ref/xrank.md "right-uniform" — the
      * ordering essence puts it in rowid).  `xbar` is an ARG-SWAP wrapper
      * (rayfall xbar is (col,bucket); q spells it (bucket,col)) — "xbar is
      * atomic" (ref/xbar.md).  All infix so `a verb b` is one stmt. */
-    { "bin",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("bin"),     NULL, 1, 0, "rowid", NULL },
-    { "binr",  QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("binr"),    NULL, 1, 0, "rowid", NULL },
+    { "bin",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("bin", q_bin_wrap),   NULL, 1, 0, "rowid", NULL },
+    { "binr",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("binr", q_binr_wrap), NULL, 1, 0, "rowid", NULL },
     { "xrank", QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("xrank"),  NULL, 1, 0, "rowid", NULL },
     { "xbar",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("xbar", q_xbar_wrap), NULL, 1, 0, "atomic", NULL },
     /* ---- Wave 5: running scans (monadic prefix keywords) — all doc-labelled
