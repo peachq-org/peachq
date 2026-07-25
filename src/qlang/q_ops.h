@@ -107,6 +107,10 @@ typedef struct q_op {
     const char*  family;        /* structure-dispatch family (see above); consumed by the apply module */
     const char*  mono;          /* dyad rows: keyword whose kernel a `/`-derivation monomorphizes to
                                  * (`+`->sum `*`->prd `|`->max `&`->min `,`->raze); else NULL */
+    const char*  mono_scan;     /* the same for a `\`-derivation (`+`->sums `&`->mins).  Its OWN
+                                 * column, never `mono`+"s": `,` reduces to raze and scans to
+                                 * nothing, so the spelling rule would name a verb that does not
+                                 * exist.  Zero-default; only rows with a running twin set it. */
     uint8_t      name_lift;     /* 1: a sym-atom first arg in this row's amend forms NAMES a global —
                                  * the apply seam resolves it, runs the pure form, rebinds, returns
                                  * the sym (ref/amend.md handle d).  Flag-gated, never sym-sniffed:

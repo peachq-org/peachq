@@ -167,7 +167,7 @@ ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, 
 
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
-int q_match_rec(ray_t* a, ray_t* b);                          /* used by: table */
+/* q_match_rec: declared in q_registry.h (env-safe reach) — used by: table, apply */
 ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
 
 /* ---- defined in ops/q_rand.c ---- */

@@ -140,17 +140,17 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 static const q_op_t Q_OPS[] = {
-    /* name    lex            monadic-recipe             dyadic-recipe            hof  det eff family mono */
+    /* name    lex            monadic-recipe             dyadic-recipe            hof  det eff family mono (mono_scan designated) */
     /* ---- arithmetic / compare glyphs — dyadics all doc-labelled atomic
      * (ref/{add,subtract,multiply,divide,greater-than,less-than,equal,
      * not-equal}.md) ---- */
     /* monadic `+` is flip — a k-ism accepted as a deliberate superset (valid q
      * spells it `flip`, same q_flip_wrap — the `_`/floor precedent).  Family
      * is the dyadic Add; monadic flip is structural (the `flip` row). */
-    { "+",     QLEX_GLYPH,     QR_FN1("flip", q_flip_wrap),    QR_ENV("+"),       NULL, 1, 0, "atomic", "sum" },
+    { "+",     QLEX_GLYPH,     QR_FN1("flip", q_flip_wrap),    QR_ENV("+"),       NULL, 1, 0, "atomic", "sum", .mono_scan = "sums" },
     { "-",     QLEX_GLYPH,     QR_FN1A("neg", q_neg_wrap),     QR_ENV("-"),       NULL, 1, 0, "atomic", NULL },
     /* `*` monadic is first (aggregate — the `first` row); family = dyadic. */
-    { "*",     QLEX_GLYPH,     QR_ENV("first"),                QR_ENV("*"),       NULL, 1, 0, "atomic", "prd" },
+    { "*",     QLEX_GLYPH,     QR_ENV("first"),                QR_ENV("*"),       NULL, 1, 0, "atomic", "prd", .mono_scan = "prds" },
     { "%",     QLEX_GLYPH,     QR_NONE,                        QR_ENV("/"),       NULL, 1, 0, "atomic", NULL },
     /* monadic `<`/`>` are grade up/down (rowid — the iasc/idesc rows); shared
      * wrapper adds the DICT arm (keys in value order); family = dyadic. */
@@ -171,10 +171,10 @@ static const q_op_t Q_OPS[] = {
     { "_",     QLEX_GLYPH,     QR_FN1A("floor", q_floor_wrap), QR_FN2("drop", q_drop_wrap), NULL, 1, 0, "index", NULL },
     /* `|` dyadic (max) is a deferred cell (atomic when it lands); family =
      * monadic reverse (L4 — spec §2). */
-    { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_NONE,           NULL, 1, 0, "index", "max" },
+    { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_NONE,           NULL, 1, 0, "index", "max", .mono_scan = "maxs" },
     /* `&` monadic is where (index — the `where` row, a §9 border); family =
      * dyadic Lesser/min (atomic, ref/lesser.md). */
-    { "&",     QLEX_GLYPH,     QR_FN1("where", q_where_wrap),  QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", "min" },
+    { "&",     QLEX_GLYPH,     QR_FN1("where", q_where_wrap),  QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", "min", .mono_scan = "mins" },
     /* `,` — enlist / join: both construct structure (table,record-dict is
      * upsert semantics — see q_join_wrap). */
     { ",",     QLEX_GLYPH,     QR_ENV("enlist"),               QR_FN2("concat", q_join_wrap), NULL, 1, 0, "structural", "raze" },
