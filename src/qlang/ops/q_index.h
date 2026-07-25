@@ -8,7 +8,13 @@
  * a level reads as identity when last / all-items otherwise, and writes as
  * all indices.  Naive recursion is the sanctioned shape — speed returns later
  * as recognized cases INSIDE this path, never as a second path.  Tables read
- * by pure delegation to q_table_at; table/keyed writes are 'nyi (table wave).
+ * by pure delegation to q_table_at.  A table's index TYPE picks its axis at
+ * every level — a sym names a COLUMN (the column dict's level ops, since a
+ * table is `flip` of that dict), an int a ROW — so `` t[0;`b] `` and
+ * `` t[`b;0] `` reach the same cell.  A keyed table is a dict with a TABLE
+ * domain: Find locates the key row, a hit rewrites that row of the value
+ * table, and an absent key EXTENDS both halves (the dictionary upsert law,
+ * ref/assign.md); an absent ROW does not extend ('index, the list law).
  *
  * Ownership: reads borrow.  Amend entries CONSUME d on success (rc==1 nodes
  * mutate in place at store time — persistent path-copying otherwise) and
