@@ -210,6 +210,17 @@ ray_t* q_count_fn(ray_t* x) {
  * for callers that want the number rather than a q value.  Consumes the
  * intermediate count value. */
 int64_t q_builtins_count_long(ray_t* x) {
+    /* Allocation-free lane for the shapes the ITERATORS ask about: they call
+     * this once per application, and applications nest, so building a count
+     * value here costs a malloc per outer item (integration/i078 went 5.9s ->
+     * 15.4s when the adverb arms started routing through the boxed path).
+     * Same answers as q_count_fn below, which still owns every other shape. */
+    if (x && !RAY_IS_ERR(x) && !q_eval_apply_is_fn(x)) {
+        if (x->type == RAY_DICT)  return q_builtins_count_long(ray_dict_keys(x));
+        if (x->type == RAY_TABLE) return ray_table_nrows(x);
+        if (x->type == RAY_LIST || (ray_is_vec(x) && x->type != RAY_STR))
+            return ray_len(x);
+    }
     ray_t* c = q_count_fn(x);
     if (!c || RAY_IS_ERR(c)) { ray_release(c); return -1; }
     int64_t n = c->i64;
