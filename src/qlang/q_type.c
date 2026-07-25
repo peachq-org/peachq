@@ -229,6 +229,12 @@ int q_type_is_nested(ray_t* v) {
     return r;
 }
 
+int q_type_is_iter(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return 0;
+    return v->type == RAY_LIST || v->type == RAY_TABLE ||
+           (ray_is_vec(v) && v->type != RAY_STR);
+}
+
 /* ---- null axis (owner-ruled: null is not math) --------------------------- */
 
 /* q treats the null symbol ` AS null — shared predicate (the `null` verb,
