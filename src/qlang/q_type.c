@@ -5,6 +5,7 @@
 #include "qlang/q_type.h"
 #include "qlang/q_err.h"          /* q_err / QE_TYPE — the throwing gates */
 #include "qlang/eval/q_eval.h"    /* q_eval_apply_carrier_kind — fn-value type */
+#include "qlang/ops/q_index.h"    /* q_index_elem_at — THE element-read home */
 #include "lang/internal.h"        /* as_i64, is_numeric/is_temporal, is_collection,
                                    * atomic_map_unary, ray_nil_fn */
 #include "table/sym.h"            /* ray_sym_str — the null-symbol divergence */
@@ -22,6 +23,16 @@ int q_type_is_numeric_or_temporal(ray_t* x) {
 
 int q_type_is_bool(ray_t* x) {
     return x->type == -RAY_BOOL;
+}
+
+int q_type_is_float_tag(int8_t t) {
+    return t == RAY_F64 || t == RAY_F32 || t == -RAY_F64 || t == -RAY_F32;
+}
+
+int q_type_is_num_tag(int8_t t) {
+    return t == RAY_BOOL || t == RAY_BYTE_ONLY || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
+           t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_BYTE_ONLY || t == -RAY_I16 ||
+           t == -RAY_I32 || t == -RAY_I64 || t == -RAY_F32 || t == -RAY_F64;
 }
 
 /* ---- the kdb type number of a value (the `type` verb's knowledge) --------- */
@@ -183,12 +194,39 @@ int64_t q_type_iatom_val(ray_t* x) {
 
 /* ---- keyed-table shape (a type question, owner-ruled) -------------------- */
 
+int q_type_is_table(ray_t* x) {
+    return x && x->type == RAY_TABLE;
+}
+
 /* A keyed table is a RAY_DICT whose keys AND values are both tables. */
 int q_type_is_keyed(ray_t* y) {
     if (!y || y->type != RAY_DICT) return 0;
     ray_t* k = ray_dict_keys(y);
     ray_t* v = ray_dict_vals(y);
     return k && v && k->type == RAY_TABLE && v->type == RAY_TABLE;
+}
+
+/* A dict that is NOT a keyed table — the plain key!value shape, whose entries
+ * axis the search verbs read (find's reverse lookup, bin's sorted values). */
+int q_type_is_plain_dict(ray_t* x) {
+    return x && x->type == RAY_DICT && !q_type_is_keyed(x);
+}
+
+/* The physical STR atom lane (string-C3): q-invisible storage that reads back
+ * as an ITEM of a string column.  Rank-wise it is a char LIST, not a scalar,
+ * so rank-sensitive verbs must ask this rather than probe the tag. */
+int q_type_is_str_atom(ray_t* x) {
+    return x && x->type == -RAY_STR;
+}
+
+/* ---- rank axis (contract: q_type.h) -------------------------------------- */
+
+int q_type_is_nested(ray_t* v) {
+    if (!v || ray_is_atom(v) || ray_len(v) == 0) return 0;
+    ray_t* e0 = q_index_elem_at(v, 0);
+    int r = e0 && !RAY_IS_ERR(e0) && (!ray_is_atom(e0) || q_type_is_str_atom(e0));
+    if (e0) ray_release(e0);
+    return r;
 }
 
 /* ---- null axis (owner-ruled: null is not math) --------------------------- */
