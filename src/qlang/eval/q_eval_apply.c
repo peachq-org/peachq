@@ -159,6 +159,26 @@ static int int_atom(ray_t* v) {
                  v->type == -RAY_I16);
 }
 
+/* An iterated dict argument IS its values — for the maps, and for the
+ * accumulators by ref/accumulators.md:414 ("Over ... reduces lists AND
+ * DICTIONARIES to atoms").  A keyed table is a dict whose value side is a
+ * TABLE: distributing there is entries-shaped (#324's index lift), a different
+ * law, so it is not admitted here. */
+static ray_t* plain_dict_vals(ray_t* x) {
+    if (!x || x->type != RAY_DICT) return NULL;
+    ray_t* v = ray_dict_vals(x);
+    return (v && v->type != RAY_TABLE) ? v : NULL;
+}
+
+/* re-key a UNIFORM result (each, scan, prior) onto x's keys; consumes r.  An
+ * aggregate (over) does NOT re-key — it has reduced to an atom. */
+static ray_t* dict_rekey(ray_t* x, ray_t* r) {
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* k = ray_dict_keys(x);
+    ray_retain(k);
+    return ray_dict_new(k, r);
+}
+
 static ray_t* collapse(ray_t* l) {          /* consumes l, returns owned */
     ray_t* c = q_list_collapse(l);
     ray_release(l);
@@ -678,28 +698,281 @@ static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
 
 static int64_t rank_of(ray_t* fv);
 
-static ray_t* fold_over(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
-    if (!is_coll(x)) return q_err(QE_NYI);   /* converge/do: punt */
-    int64_t len = ray_len(x);
+/* ----- accumulators: Scan and Over (ref/accumulators.md) -----------------
+ * "They have the same syntax and perform the same computation.  But where the
+ * Scan-derived functions return the result of each evaluation, those of Over
+ * return only the last" (:37) — so ONE engine carries a `keep` flag and every
+ * arm below is shared.  `acc_t` is that running result. */
+typedef struct { int keep; ray_t* list; ray_t* last; } acc_t;
+
+static void acc_init(acc_t* a, int keep) {
+    a->keep = keep;
+    a->list = keep ? ray_list_new(0) : NULL;
+    a->last = NULL;
+}
+
+/* borrows v; returns an owned error when the append failed, else NULL */
+static ray_t* acc_push(acc_t* a, ray_t* v) {
+    if (a->last) ray_release(a->last);
+    ray_retain(v);
+    a->last = v;
+    if (!a->keep) return NULL;
+    a->list = ray_list_append(a->list, v);
+    if (!RAY_IS_ERR(a->list)) return NULL;
+    ray_t* e = a->list;
+    a->list = NULL;
+    return e;
+}
+
+/* the owned result; an owned `err` wins and the partials are dropped */
+static ray_t* acc_finish(acc_t* a, ray_t* err) {
+    ray_t* r = err;
+    if (!r && a->keep) { r = collapse(a->list); a->list = NULL; }
+    if (!r) { r = a->last; a->last = NULL; }
+    if (a->list) ray_release(a->list);
+    if (a->last) ray_release(a->last);
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* Converge: evaluate until two successive results match, or one matches x
+ * (:97).  `~` is the match home, so tolerance is decided in one place. */
+static ray_t* acc_converge(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
+    acc_t a;
+    acc_init(&a, keep);
+    ray_retain(x);
+    ray_t* x0 = q_eval_apply_concrete(x);
+    ray_t* cur = x0;
+    ray_retain(cur);
+    ray_t* err = acc_push(&a, cur);
+    while (!err) {
+        ray_t* nx = q_eval_apply(fv, frow, &cur, 1);
+        if (RAY_IS_ERR(nx)) { err = nx; break; }
+        int stop = q_match_rec(nx, cur) || q_match_rec(nx, x0);
+        ray_release(cur);
+        cur = nx;
+        if (stop) break;
+        err = acc_push(&a, cur);
+    }
+    ray_release(cur);
+    ray_release(x0);
+    return acc_finish(&a, err);
+}
+
+/* Do (:134) and While (:193): x is the first result, then `n` more, or one per
+ * pass while the unary truth map `t` holds on the running result. */
+static ray_t* acc_iterate(ray_t* fv, const q_op_t* frow, ray_t* t, int64_t n,
+                          ray_t* x, int keep) {
+    const q_op_t* trow = (t && is_fnval(t)) ? q_registry_row_of(t, Q_MONADIC)
+                                           : NULL;
+    acc_t a;
+    acc_init(&a, keep);
+    ray_retain(x);
+    ray_t* cur = q_eval_apply_concrete(x);
+    ray_t* err = acc_push(&a, cur);
+    for (int64_t i = 0; !err && (t || i < n); i++) {
+        if (t) {
+            int go = q_eval_apply_truthy(q_eval_apply(t, trow, &cur, 1), &err);
+            if (err || !go) break;
+        }
+        ray_t* nx = q_eval_apply(fv, frow, &cur, 1);
+        ray_release(cur);
+        if (RAY_IS_ERR(nx)) { cur = NULL; err = nx; break; }
+        cur = nx;
+        err = acc_push(&a, cur);
+    }
+    if (cur) ray_release(cur);
+    return acc_finish(&a, err);
+}
+
+/* Empty right argument (:385), the value never evaluated.  With a seed Scan
+ * and Over diverge: Over reduces to the left argument (:445) where Scan, being
+ * uniform, returns `()` (:405).  Applied as a unary they agree and the answer
+ * comes from the VALUE — its identity element, else (for a list value) an
+ * empty of its own type, else `()`.  NULL means "let the registered aggregate
+ * answer": `|`/`&` monomorphize but have no doc-published identity. */
+static ray_t* acc_empty(ray_t* fv, const q_op_t* frow, ray_t* seed, int keep,
+                        int has_mono) {
+    if (seed) {
+        if (keep) return ray_list_new(0);
+        ray_retain(seed);
+        return seed;
+    }
+    ray_t* id = frow ? q_ops_acc_identity(frow->name) : NULL;
+    if (id) return id;
+    return has_mono ? NULL : q_typed_empty_like(ray_list_new(0), fv);
+}
+
+/* item i of an iterated argument; a non-collection is held whole and
+ * broadcast, as for the maps (`{x+y*z}\[1000 2000;5 10 15 20;3]`, :355) */
+static ray_t* acc_item(ray_t* v, int64_t i) {
+    if (!is_coll(v)) { ray_retain(v); return v; }
+    return q_index_elem_at(v, i);
+}
+
+/* Binary and higher-rank values (:217, :322): the running left argument is
+ * `seed`, or — applied as a unary with no known identity — the first item,
+ * which is then the first result (:272).  it[0..nit) are the iterated
+ * arguments; the count is the longest of them. */
+static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
+                         ray_t** it, int64_t nit, int keep) {
+    if (nit < 1 || nit + 1 > APPLY_MAX_ARGS) return q_err(QE_RANK);
+    ray_t* iv[APPLY_MAX_ARGS];
+    ray_t* av[APPLY_MAX_ARGS];
+    ray_t* dk = NULL;                 /* first dict argument: the result's keys */
+    int64_t len = -1;
+    for (int64_t p = 0; p < nit; p++) {
+        ray_retain(it[p]);
+        iv[p] = q_eval_apply_concrete(it[p]);   /* an iterated DAG has no items */
+        ray_t* dv = plain_dict_vals(iv[p]);
+        if (dv) {                     /* iterate the VALUES, not the entries */
+            ray_retain(dv);
+            if (!dk) { dk = iv[p]; ray_retain(dk); }
+            ray_release(iv[p]);
+            iv[p] = dv;
+        }
+        if (!is_coll(iv[p])) continue;
+        int64_t c = ray_len(iv[p]);
+        if (len < 0 || c > len) len = c;
+    }
+    ray_t* r;
     if (len == 0) {
-        if (seed) { ray_retain(seed); return seed; }
+        r = acc_empty(fv, frow, seed, keep, 0);      /* :385, seeded branch */
+    } else if (len < 0) {
+        /* nothing to iterate over: one evaluation, and the result stays an
+         * atom — the derived function is uniform */
+        if (seed) {
+            av[0] = seed;
+            for (int64_t p = 0; p < nit; p++) av[p + 1] = iv[p];
+            r = q_eval_apply(fv, frow, av, nit + 1);
+        } else {
+            ray_retain(iv[0]);
+            r = iv[0];
+        }
+    } else {
+        acc_t a;
+        acc_init(&a, keep);
+        ray_t* err = NULL;
+        ray_t* cur;
+        int64_t i0 = 0;
+        if (seed) { ray_retain(seed); cur = seed; }
+        else      { cur = acc_item(iv[0], 0); i0 = 1; err = acc_push(&a, cur); }
+        for (int64_t i = i0; !err && i < len; i++) {
+            av[0] = cur;
+            for (int64_t p = 0; p < nit; p++) av[p + 1] = acc_item(iv[p], i);
+            ray_t* nx = q_eval_apply(fv, frow, av, nit + 1);
+            for (int64_t p = 0; p < nit; p++) ray_release(av[p + 1]);
+            ray_release(cur);
+            if (RAY_IS_ERR(nx)) { cur = NULL; err = nx; break; }
+            cur = nx;
+            err = acc_push(&a, cur);
+        }
+        if (cur) ray_release(cur);
+        r = acc_finish(&a, err);
+    }
+    for (int64_t p = 0; p < nit; p++) ray_release(iv[p]);
+    if (dk) {
+        if (keep) r = dict_rekey(dk, r);
+        ray_release(dk);
+    }
+    return r;
+}
+
+/* An accumulator's value may be a function, a list or a dictionary — the last
+ * two being finite-state machines (:59) whose rank is their depth: a simple
+ * vector maps one index, a list of lists two (`7 m\c`, :252). */
+static int64_t acc_rank(ray_t* fv) {
+    if (fv->type == RAY_LIST)
+        return (ray_len(fv) && is_coll(((ray_t**)ray_data(fv))[0])) ? 2 : 1;
+    if (is_container(fv) || ray_is_vec(fv)) return 1;
+    return rank_of(fv);
+}
+
+/* The manifest mono column: `f/` of a registered dyad IS its aggregate kernel
+ * — `+/` joins the DAG as OP_SUM where a naive fold would materialize and go
+ * scalar.  `\` reads its OWN column: `,` reduces to raze and scans to nothing,
+ * so no spelling rule derives one from the other. */
+static const char* acc_mono_name(const q_op_t* frow, int keep) {
+    return !frow ? NULL : (keep ? frow->mono_scan : frow->mono);
+}
+
+static ray_t* acc_mono(const q_op_t* frow, int keep, const q_op_t** mrow) {
+    const char* nm = acc_mono_name(frow, keep);
+    if (!nm) return NULL;
+    ray_t* mv = q_registry_lookup_row(
+        ray_sym_intern_runtime(nm, strlen(nm)), Q_MONADIC, mrow);
+    return (mv && is_fnval(mv)) ? mv : NULL;
+}
+
+/* Unary application of a non-unary value (:259): the seed is the value's
+ * identity element when q knows one, else the first item — which is then the
+ * first result. */
+static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
+    ray_retain(x);
+    x = q_eval_apply_concrete(x);              /* materialize at the boundary */
+    const q_op_t* mrow = NULL;
+    /* boxed lists take the native fold — the aggregate wrappers' boxed arms
+     * ride base call_fn plumbing (finding 5) */
+    ray_t* dv = plain_dict_vals(x);
+    if (dv) {                    /* the values are the domain; Scan re-keys */
+        ray_t* dr = acc_unary(fv, frow, dv, keep);
+        if (keep) dr = dict_rekey(x, dr);
+        ray_release(x);
+        return dr;
+    }
+    ray_t* mv = (x->type == RAY_LIST) ? NULL : acc_mono(frow, keep, &mrow);
+    ray_t* r;
+    if (is_coll(x) && ray_len(x) == 0) {
+        r = acc_empty(fv, frow, NULL, keep, mv != NULL);
+        if (!r) r = q_eval_apply(mv, mrow, &x, 1);
+    } else if (mv)
+        r = q_eval_apply(mv, mrow, &x, 1);
+    else if (is_container(x))
+        r = q_err(QE_NYI);              /* dict distribution: a later stage */
+    else {
         ray_t* id = frow ? q_ops_acc_identity(frow->name) : NULL;
-        return id ? id : q_err(QE_NYI);
+        r = acc_reduce(fv, frow, id, &x, 1, keep);
+        if (id) ray_release(id);
     }
-    ray_t* acc;
-    int64_t i0;
-    if (seed) { ray_retain(seed); acc = seed; i0 = 0; }
-    else      { acc = q_index_elem_at(x, 0); i0 = 1; }
-    for (int64_t i = i0; i < len; i++) {
-        ray_t* ei = q_index_elem_at(x, i);
-        ray_t* av[2] = { acc, ei };
-        ray_t* nx = q_eval_apply(fv, frow, av, 2);
-        ray_release(ei);
-        ray_release(acc);
-        if (RAY_IS_ERR(nx)) return nx;
-        acc = nx;
+    ray_release(x);
+    return r;
+}
+
+/* Scan `\` and Over `/`: one classifier over the doc's own taxonomy — the
+ * value's rank picks unary-value control flow (Converge / Do / While, :81)
+ * or the reduction of a binary-or-higher value (:217, :322). */
+static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
+                        int64_t n, int keep) {
+    if (n < 1) return q_err(QE_RANK);
+    /* the mono column is the ROW's property and is read before the value:
+     * `|`'s dyad is a deferred cell, so its operand value is monadic `reverse`
+     * and a rank test would read Converge where the manifest says max */
+    if (n == 1 && acc_mono_name(frow, keep))
+        return acc_unary(fv, frow, args[0], keep);
+    /* a LIST value applied as a unary to an empty argument yields an empty of
+     * the VALUE's own type, unevaluated (:436) — this outranks the rank test,
+     * which would otherwise read a simple vector as a Converge machine */
+    if (n == 1 && !q_eval_apply_is_fn(fv) && is_coll(args[0]) &&
+        ray_len(args[0]) == 0)
+        return q_typed_empty_like(ray_list_new(0), fv);
+    int64_t rank = acc_rank(fv);
+    /* a variadic value reads as the UNARY form in both binary shapes:
+     * `5 enlist\1` (:151) is Do-5 of unary enlist, not enlist[5;1].  Past two
+     * arguments there is no unary reading left and a variadic ternary
+     * (`ssr\[s;x;y]`) reduces */
+    if (rank == 1 || (rank < 0 && n <= 2)) {
+        if (n == 1) return acc_converge(fv, frow, args[0], keep);
+        if (n != 2) return q_err(QE_RANK);
+        /* the left argument separates the two binary forms: an integer counts
+         * the passes, anything else is the unary truth map (:95) */
+        if (!int_atom(args[0]))
+            return acc_iterate(fv, frow, args[0], 0, args[1], keep);
+        int64_t k = q_type_as_i64(args[0]);
+        if (k < 0) return q_err(QE_DOMAIN);
+        return acc_iterate(fv, frow, NULL, k, args[1], keep);
     }
-    return acc;
+    if (n == 1) return acc_unary(fv, frow, args[0], keep);
+    if (rank >= 2 && n != rank) return q_err(QE_RANK);
+    return acc_reduce(fv, frow, args[0], args + 1, n - 1, keep);
 }
 
 /* Each, Each Left and Each Right are ONE law (ref/maps.md: `x f\:y` is
@@ -748,14 +1021,43 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
 }
 
 static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
-    if (x && x->type == RAY_DICT) {
-        ray_t* nv = each1(fv, frow, ray_dict_vals(x));
-        if (RAY_IS_ERR(nv)) return nv;
-        ray_t* k = ray_dict_keys(x);
-        ray_retain(k);
-        return ray_dict_new(k, nv);
-    }
+    ray_t* dv = plain_dict_vals(x);
+    if (dv) return dict_rekey(x, each1(fv, frow, dv));
     return map_zip(fv, frow, &x, 1, 1);
+}
+
+/* Case (ref/maps.md "Case"): an INTEGER VECTOR at the `'` head is not a value
+ * to apply — per index it picks WHICH argument to read, r[i] = args[sel[i]][i].
+ * Atom arguments are infinitely repeated and extra arguments are not a rank
+ * error, so the count comes from the selector alone. */
+static int int_vec(ray_t* v) {
+    return v && (v->type == RAY_I64 || v->type == RAY_I32 ||
+                 v->type == RAY_I16);
+}
+
+static ray_t* case_apply(ray_t* sel, ray_t** args, int64_t n) {
+    if (n < 1 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
+    ray_t* av[APPLY_MAX_ARGS];
+    for (int64_t p = 0; p < n; p++) {
+        ray_retain(args[p]);
+        av[p] = q_eval_apply_concrete(args[p]);   /* a picked-from DAG has no items */
+    }
+    int64_t len = ray_len(sel);
+    ray_t* l = ray_list_new(len);
+    for (int64_t i = 0; i < len && !RAY_IS_ERR(l); i++) {
+        ray_t* si = q_index_elem_at(sel, i);
+        int64_t k = int_atom(si) ? q_type_as_i64(si) : -1;
+        ray_release(si);
+        ray_t* e;
+        if (k < 0 || k >= n || !av[k]) e = q_err(QE_INDEX);
+        else if (is_coll(av[k])) e = q_index_elem_at(av[k], i);
+        else { ray_retain(av[k]); e = av[k]; }
+        if (RAY_IS_ERR(e)) { ray_release(l); l = e; break; }
+        l = ray_list_append(l, e);
+        ray_release(e);
+    }
+    for (int64_t p = 0; p < n; p++) ray_release(av[p]);
+    return RAY_IS_ERR(l) ? l : collapse(l);
 }
 
 /* Each Prior: fv between each item and the one before it.  Applied as a
@@ -763,7 +1065,9 @@ static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
  * value's identity element when q knows one, else `first 0#x` (ref/maps.md
  * Each Prior). */
 static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
-    if (is_container(x)) return q_err(QE_NYI);   /* dict distribution: later stage */
+    ray_t* dv = plain_dict_vals(x);              /* prior is uniform: re-keys */
+    if (dv) return dict_rekey(x, prior_each(fv, frow, seed, dv));
+    if (is_container(x)) return q_err(QE_NYI);   /* tables: the entries law */
     ray_retain(x);
     x = q_eval_apply_concrete(x);
     ray_t* prev = seed;
@@ -811,25 +1115,9 @@ ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const q_op_t* frow,
         ray_release(d);
         return p;
     }
-    if (adv == 1) {                                        /* `/` over */
-        if (n == 1) {
-            /* mono column: f/ of a registered dyad IS its aggregate kernel.
-             * Boxed lists take the native fold instead — the aggregate
-             * wrappers' boxed arms ride base call_fn plumbing (finding 5). */
-            if (frow && frow->mono && args[0] && args[0]->type != RAY_LIST) {
-                const q_op_t* mrow = NULL;
-                ray_t* mv = q_registry_lookup_row(
-                    ray_sym_intern_runtime(frow->mono, strlen(frow->mono)),
-                    Q_MONADIC, &mrow);
-                if (mv && is_fnval(mv))
-                    return q_eval_apply(mv, mrow, args, 1);
-            }
-            return fold_over(fv, frow, NULL, args[0]);
-        }
-        if (n == 2) return fold_over(fv, frow, args[0], args[1]);
-        return q_err(QE_RANK);
-    }
+    if (adv == 1 || adv == 2) return acc_apply(fv, frow, args, n, adv == 2);
     if (adv == 0) {                                        /* `'` each */
+        if (int_vec(fv)) return case_apply(fv, args, n);
         if (n == 1) return each1(fv, frow, args[0]);
         return map_zip(fv, frow, args, n, ~(uint64_t)0);
     }
@@ -843,7 +1131,7 @@ ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const q_op_t* frow,
     }
     if (adv == 4 && n == 2) return map_zip(fv, frow, args, 2, 2);   /* /: right */
     if (adv == 5 && n == 2) return map_zip(fv, frow, args, 2, 1);   /* \: left  */
-    return q_err(QE_NYI);          /* `\` scan + the vs/sv unary forms: later */
+    return q_err(QE_NYI);                    /* the vs/sv unary forms: later */
 }
 
 /* keyword-HOF row (each/peach/over/scan/prior): adverb_hof -> adv id */
@@ -1057,6 +1345,32 @@ static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
     return r;
 }
 
+/* `'` in BRACKET form with VALUES (ref/compose.md): one value derives Each
+ * (`'[count]` is `count'`), two or more COMPOSE — right to left, each outer
+ * value unary, the derived rank the innermost value's. */
+static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row);
+
+static ray_t* compose_apply(ray_t** args, int64_t n) {
+    if (n < 1) return q_err(QE_RANK);
+    for (int64_t i = 0; i < n; i++)
+        if (!q_eval_apply_is_fn(args[i])) return q_err(QE_TYPE);
+    if (n == 1)
+        return q_eval_apply_deriv_new(0, args[0],
+                                      is_fnval(args[0])
+                                          ? q_registry_row_of(args[0], Q_MONADIC)
+                                          : NULL);
+    ray_t* r = args[n - 1];
+    ray_retain(r);
+    for (int64_t i = n - 2; i >= 0; i--) {
+        int64_t k = rank_of(args[i]);
+        ray_t* c = (k >= 0 && k != 1) ? q_err(QE_RANK) : comp_new(args[i], r);
+        ray_release(r);
+        if (RAY_IS_ERR(c)) return c;
+        r = c;
+    }
+    return r;
+}
+
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
     if (ray_eval_is_interrupted()) return q_err(QE_STOP);
@@ -1094,6 +1408,33 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (holes > 0) {
         if (rank < 0) rank = n;   /* vary/deriv: project at the called rank */
         return proj_new(fv, row, args, n, rank);
+    }
+    if (fv == q_registry_compose_value()) return compose_apply(args, n);
+    /* ref/apply.md Composition, the glyph form: `(0|+)` is the projection
+     * `0|` ON `+`, not max of a function value.  Only single-glyph rows, and
+     * not the ones that legitimately CONSUME a function (`@` `.` apply, `,`
+     * `!` build structure from it, `~` `?` compare/search it). */
+    if (row && !row->adverb_hof && n == 2 && row->name[1] == '\0' &&
+        !strchr("@.,!~?", row->name[0]) && q_eval_apply_is_fn(args[1]) &&
+        !q_eval_apply_is_fn(args[0])) {
+        ray_t* h[2] = { args[0], NULL };
+        ray_t* p = proj_new(fv, row, h, 2, 2);
+        if (RAY_IS_ERR(p)) return p;
+        /* a bare glyph operand arrives as the MONADIC sibling (name
+         * resolution prefers it) but q spells a bare glyph dyadic — `(0|+)`
+         * is `0|` on Add, rank 2.  The glyph and its keyword monad share one
+         * value, so `(0|neg)` reads dyadic too: unpinned by any doc row */
+        const q_op_t* grow = q_registry_row_of(args[1], Q_MONADIC);
+        ray_t* g = args[1];
+        if (grow && grow->name[1] == '\0' && rank_of(g) == 1) {
+            const q_op_t* drow = NULL;
+            ray_t* sib = q_registry_lookup_row(
+                ray_sym_intern_runtime(grow->name, 1), Q_DYADIC, &drow);
+            if (sib && is_fnval(sib)) g = sib;
+        }
+        ray_t* c = comp_new(p, g);
+        ray_release(p);
+        return c;
     }
     /* f[] on a niladic lambda: the lone `::` argument means "no arguments"
      * (learn/views.md `{[];}[]` evaluates) */
