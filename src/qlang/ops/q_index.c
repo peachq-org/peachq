@@ -47,6 +47,8 @@ static ray_t* mat(ray_t* r) {                        /* consumes r */
  * generic indexing for every other shape.  alloc==0 results are BORROWED
  * list slots — retain, never release (r0 review).  The one element-read home. */
 ray_t* q_index_elem_at(ray_t* v, int64_t i) {
+    if (v && v->type == RAY_TABLE)      /* the items of a table are its ROWS */
+        return q_table_row_at(v, i);
     if (v && (ray_is_vec(v) || v->type == RAY_LIST)) {
         int alloc = 0;
         ray_t* e = collection_elem(v, i, &alloc);
