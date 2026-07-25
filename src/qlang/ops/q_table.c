@@ -1106,7 +1106,16 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
             return q_err(QE_TYPE);
     }
     ray_t* r = ray_concat_fn(x, y);
-    if (r && !RAY_IS_ERR(r)) return r;
+    if (r && !RAY_IS_ERR(r)) {
+        /* `()` is Join's IDENTITY and identity must not retype: base concat
+         * boxes the untyped empty into the result, so `(),2` came back 0h
+         * where kdb says 7h.  That is the seed the `,` accumulator starts from
+         * (ref/accumulators.md:264), so every partial inherited the boxing.
+         * The collapse home already leaves mixed lists (`1 2,"a"`) alone. */
+        ray_t* c = q_list_collapse(r);
+        ray_release(r);
+        return c;
+    }
     if (!x || !y) return r;
     /* boxed-list fallback — ONLY when a char/string operand is involved
      * (ref/join.md "otherwise a mixed list"; ref/cross.md needs `2 10,"a"`
