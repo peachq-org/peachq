@@ -256,7 +256,7 @@ static ray_t* z_k(void) {   /* `.z.k` — build/release date (kdb .z.k) */
  * `a:.z.t; costly[]; .z.t-a` requires re-sampling, never a per-block cache — and
  * at NANOSECOND resolution (clock_gettime), so sub-second deltas are visible
  * (the engine's second-granularity (date)/(time)/(timestamp) clock fns can't do
- * that).  All ten derive from one `z_now_ns` read. */
+ * that).  All ten derive from one `q_dotz_now_ns` read. */
 #define RAY_EPOCH_UNIX_SECS 946684800LL          /* 2000.01.01 00:00:00 UTC, unix secs */
 #define RAY_NS_PER_DAY      86400000000000LL
 
@@ -264,7 +264,7 @@ static ray_t* z_k(void) {   /* `.z.k` — build/release date (kdb .z.k) */
  * (local=0) or local wall-clock (local=1).  Local offset is derived portably
  * (no tm_gmtoff): mktime of the UTC fields interprets them as local, so the
  * signed difference from the real instant IS the east-of-UTC offset. */
-static int64_t z_now_ns(int local) {
+int64_t q_dotz_now_ns(int local) {
     struct timespec ts;
 #ifdef RAY_OS_WINDOWS
     /* Windows has no clock_gettime(CLOCK_REALTIME).  FILETIME counts 100ns
@@ -306,7 +306,7 @@ static ray_t* zts_tick(ray_t* tick) {
     ray_t* fn = g_zts;
     if (!fn) return NULL;                         /* .z.ts unset → no-op */
     ray_retain(fn);                               /* survive a re-assign mid-call */
-    ray_t* ts = ray_timestamp(z_now_ns(1));       /* .z.P local timestamp arg */
+    ray_t* ts = ray_timestamp(q_dotz_now_ns(1));       /* .z.P local timestamp arg */
     ray_t* r  = q_eval_apply_value(fn, &ts, 1);
     ray_release(ts);
     ray_release(fn);
@@ -452,19 +452,19 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'w': out = z_w(); break;
             case 'K': out = z_K(); break;
             case 'k': out = z_k(); break;
-            /* one-line producers inlined; z_now_ns(0)=UTC, (1)=local */
+            /* one-line producers inlined; q_dotz_now_ns(0)=UTC, (1)=local */
             case 'q': out = ray_bool(g_quiet); break;                            /* .z.q quiet */
             case 'i': out = ray_i64((int64_t)getpid()); break;                   /* .z.i pid   */
-            case 'p': out = ray_timestamp(z_now_ns(0)); break;                   /* .z.p / .z.P */
-            case 'P': out = ray_timestamp(z_now_ns(1)); break;
-            case 'd': out = ray_date((int64_t)(z_now_ns(0) / RAY_NS_PER_DAY)); break;    /* .z.d / .z.D */
-            case 'D': out = ray_date((int64_t)(z_now_ns(1) / RAY_NS_PER_DAY)); break;
-            case 't': out = ray_time((z_now_ns(0) % RAY_NS_PER_DAY) / 1000000LL); break; /* .z.t / .z.T */
-            case 'T': out = ray_time((z_now_ns(1) % RAY_NS_PER_DAY) / 1000000LL); break;
-            case 'n': out = ray_timespan(z_now_ns(0) % RAY_NS_PER_DAY); break;           /* .z.n / .z.N */
-            case 'N': out = ray_timespan(z_now_ns(1) % RAY_NS_PER_DAY); break;
-            case 'z': out = ray_datetime((double)z_now_ns(0) / (double)RAY_NS_PER_DAY); break; /* .z.z / .z.Z */
-            case 'Z': out = ray_datetime((double)z_now_ns(1) / (double)RAY_NS_PER_DAY); break;
+            case 'p': out = ray_timestamp(q_dotz_now_ns(0)); break;                   /* .z.p / .z.P */
+            case 'P': out = ray_timestamp(q_dotz_now_ns(1)); break;
+            case 'd': out = ray_date((int64_t)(q_dotz_now_ns(0) / RAY_NS_PER_DAY)); break;    /* .z.d / .z.D */
+            case 'D': out = ray_date((int64_t)(q_dotz_now_ns(1) / RAY_NS_PER_DAY)); break;
+            case 't': out = ray_time((q_dotz_now_ns(0) % RAY_NS_PER_DAY) / 1000000LL); break; /* .z.t / .z.T */
+            case 'T': out = ray_time((q_dotz_now_ns(1) % RAY_NS_PER_DAY) / 1000000LL); break;
+            case 'n': out = ray_timespan(q_dotz_now_ns(0) % RAY_NS_PER_DAY); break;           /* .z.n / .z.N */
+            case 'N': out = ray_timespan(q_dotz_now_ns(1) % RAY_NS_PER_DAY); break;
+            case 'z': out = ray_datetime((double)q_dotz_now_ns(0) / (double)RAY_NS_PER_DAY); break; /* .z.z / .z.Z */
+            case 'Z': out = ray_datetime((double)q_dotz_now_ns(1) / (double)RAY_NS_PER_DAY); break;
         }
     }
 
