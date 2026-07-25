@@ -15,7 +15,7 @@
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize */
 #include "ops/idxop.h"     /* .attr.* engine calls: ray_attr_*, RAY_IDX_*, RAY_MARK_* (column attributes) */
-#include "qlang/ops/q_index.h" /* q_index_drop_dict — drop's dict arms (index home owns dict structure) */
+#include "qlang/ops/q_index.h" /* q_index_elem_at (the element read), q_index_drop_dict — drop's dict arms */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — sorted-vector null probe */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 */
 #include <stdint.h>        /* uintptr_t */
@@ -24,7 +24,7 @@
 
 /* ---- collapse: homogeneous atom list -> typed vector (q_registry_internal.h) ---- */
 
-ray_t* q_list_collapse(ray_t* l) {
+static ray_t* atom_run_collapse(ray_t* l) {
     if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || ray_len(l) == 0) {
         if (l) ray_retain(l);
         return l;
@@ -80,6 +80,65 @@ ray_t* q_list_collapse(ray_t* l) {
     }
     (void)nulls;
     return vec;
+}
+
+/* THE dict-rows builder: n plain sym-keyed dicts with MATCHING keys are the
+ * table they spell (basics/glossary.md — a table "is also a list of
+ * dictionaries with the same keys").  Per key the cells gather into one column
+ * typed by the ATOM-RUN collapse alone: homogeneous goes typed, anything else
+ * stays a legal boxed column.  The row law must NOT recurse into the cells —
+ * a table-valued column has no representation here and would break the flip's
+ * length accounting.  NULL = not that shape, so the caller keeps its list. */
+static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
+    if (n < 1) return NULL;
+    ray_t* k0 = NULL;
+    for (int64_t r = 0; r < n; r++) {
+        ray_t* d = rows[r];
+        if (!d || d->type != RAY_DICT || q_type_is_keyed(d)) return NULL;
+        ray_t* k = ray_dict_keys(d);
+        if (!k || k->type != RAY_SYM || !ray_dict_vals(d)) return NULL;
+        if (!r) k0 = k;
+        else if (!q_match_rec(k0, k)) return NULL;   /* same names, same order */
+    }
+    int64_t nc = ray_len(k0);
+    ray_t* cols = ray_list_new(nc > 0 ? nc : 1);
+    if (RAY_IS_ERR(cols)) return cols;
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = ray_list_new(n);
+        for (int64_t r = 0; r < n && !RAY_IS_ERR(col); r++) {
+            ray_t* cell = q_index_elem_at(ray_dict_vals(rows[r]), c);
+            if (!cell || RAY_IS_ERR(cell)) {
+                ray_release(col); ray_release(cols);
+                return cell ? cell : q_err(QE_TYPE);
+            }
+            col = ray_list_append(col, cell);
+            ray_release(cell);
+        }
+        if (RAY_IS_ERR(col)) { ray_release(cols); return col; }
+        ray_t* cc = atom_run_collapse(col);
+        ray_release(col);
+        if (!cc || RAY_IS_ERR(cc)) { ray_release(cols); return cc ? cc : q_err(QE_TYPE); }
+        cols = ray_list_append(cols, cc);
+        ray_release(cc);
+        if (RAY_IS_ERR(cols)) return cols;
+    }
+    ray_retain(k0);                              /* dict_new consumes both */
+    ray_t* d = ray_dict_new(k0, cols);
+    if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_TYPE);
+    ray_t* t = q_flip_wrap(d);
+    ray_release(d);
+    return t;
+}
+
+ray_t* q_list_collapse(ray_t* l) {
+    if (l && !RAY_IS_ERR(l) && l->type == RAY_LIST && ray_len(l) > 0) {
+        ray_t** e = (ray_t**)ray_data(l);
+        if (e[0] && e[0]->type == RAY_DICT) {   /* a run of like rows IS a table */
+            ray_t* tb = dict_rows_table(e, ray_len(l));
+            if (tb) return tb;
+        }
+    }
+    return atom_run_collapse(l);
 }
 
 /* ---- wrappers (bespoke q semantics over a rayfall primitive) ---- */
@@ -511,43 +570,13 @@ ray_t* q_raze_wrap(ray_t* x) {
 
 /* q `enlist` — base ray_enlist_fn plus the kdb dict arm: enlist of a bare
  * dict is a 1-ROW TABLE (ref/enlist.md: `` enlist `a`b`c!(1;2 3; 4) ``
- * displays a table whose b cell is 2 3).  Construction: the dict with each
- * value ENLISTED (1-item column; atoms collapse to typed 1-vecs, vector
- * cells stay boxed) flipped through the one flip home.  Env-bound by
- * q_builtins_register BEFORE registry init, so the `,` monadic QK_ENV
- * snapshot picks this wrapper up too. */
+ * displays a table whose b cell is 2 3) — the one-row case of the shared
+ * dict-rows builder.  Env-bound by q_builtins_register BEFORE registry init,
+ * so the `,` monadic QK_ENV snapshot picks this wrapper up too. */
 ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
     if (n == 1 && args[0] && args[0]->type == RAY_DICT && !q_type_is_keyed(args[0])) {
-        ray_t* d = args[0];
-        ray_t* k = ray_dict_keys(d);                 /* borrowed */
-        ray_t* v = ray_dict_vals(d);                 /* borrowed */
-        if (!k || !v) return q_err(QE_TYPE);
-        int64_t nd = ray_dict_len(d);
-        ray_t* ev = ray_list_new(nd > 0 ? nd : 1);
-        if (RAY_IS_ERR(ev)) return ev;
-        for (int64_t i = 0; i < nd; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* cell = ray_at_fn(v, ia);          /* owned */
-            ray_release(ia);
-            if (!cell || RAY_IS_ERR(cell)) { ray_release(ev); return cell ? cell : q_err(QE_TYPE); }
-            ray_t* col = ray_list_new(1);
-            if (RAY_IS_ERR(col)) { ray_release(cell); ray_release(ev); return col; }
-            col = ray_list_append(col, cell);        /* retains */
-            ray_release(cell);
-            if (RAY_IS_ERR(col)) { ray_release(ev); return col; }
-            ray_t* cc = q_list_collapse(col);        /* atoms -> typed 1-vec */
-            ray_release(col);
-            if (!cc || RAY_IS_ERR(cc)) { ray_release(ev); return cc ? cc : q_err(QE_TYPE); }
-            ev = ray_list_append(ev, cc);            /* retains */
-            ray_release(cc);
-            if (RAY_IS_ERR(ev)) return ev;
-        }
-        ray_retain(k);                               /* dict_new consumes */
-        ray_t* ed = ray_dict_new(k, ev);             /* consumes k + ev */
-        if (!ed || RAY_IS_ERR(ed)) return ed ? ed : q_err(QE_TYPE);
-        ray_t* t = q_flip_wrap(ed);                  /* owned table */
-        ray_release(ed);
-        return t;
+        ray_t* t = dict_rows_table(args, 1);         /* non-sym keys are no table */
+        return t ? t : q_err(QE_TYPE);
     }
     return ray_enlist_fn(args, n);
 }

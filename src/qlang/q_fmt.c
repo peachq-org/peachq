@@ -2,6 +2,7 @@
 #include "qlang/q_fmt.h"
 #include "qlang/q_fmt_internal.h" /* q_fmt_cell — shared with the pipe renderer */
 #include "qlang/q_console.h"  /* q_console_pipe_* — the `--nonlegacy` display config */
+#include "qlang/q_builtins.h" /* q_builtins_count_long — THE count owner */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
@@ -1429,7 +1430,10 @@ static void q_fmt_body(ray_t* val) {
     if (val->type == RAY_DICT) {            /* dict: `key| value` rows */
         ray_t* k = ray_dict_keys(val);          /* borrowed */
         ray_t* v = ray_dict_vals(val);          /* borrowed */
-        int64_t n = k ? ray_len(k) : 0;
+        /* entries, not slots: a TABLE domain (the iterators re-key onto one)
+         * counts its rows, which ray_len does not report */
+        int64_t n = k ? q_builtins_count_long(k) : 0;
+        if (n < 0) n = 0;
         size_t maxk = 0;
         /* uniform sym value column prints BARE (ref/apply.md); mixed keeps ` */
         int sym_col = v && v->type == RAY_SYM;
