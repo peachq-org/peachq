@@ -7,6 +7,13 @@
  * capability rather than by the caller.  \d owns the current-context state
  * here; \S owns its seed state here. */
 #define _POSIX_C_SOURCE 200809L
+/* winsock2.h must precede EVERY windows.h (core/profile.h pulls one in) or
+ * mingw silently falls back to the winsock v1 declarations. */
+#ifdef RAY_OS_WINDOWS
+  #define WIN32_LEAN_AND_MEAN
+  #include <winsock2.h>
+  #include <ws2tcpip.h>      /* socklen_t */
+#endif
 #include "qlang/q_sys.h"
 #include "qlang/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
@@ -40,11 +47,7 @@
 
 /* `\p 0W` reads the OS-chosen port back off the listener fd (getsockname),
  * mirroring qmain.c's startup `-p 0W` path — the two share one readiness line. */
-#ifdef RAY_OS_WINDOWS
-  #define WIN32_LEAN_AND_MEAN
-  #include <winsock2.h>
-  #include <ws2tcpip.h>       /* socklen_t */
-#else
+#ifndef RAY_OS_WINDOWS
   #include <sys/socket.h>
   #include <netinet/in.h>
 #endif
