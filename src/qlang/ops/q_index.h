@@ -22,8 +22,9 @@
 
 /* v[i] as an OWNED atom/element (borrows v): the scalar-int fast path over
  * vectors/lists (direct payload read, no index-atom allocation, no collapse);
- * generic ray_at indexing for every other shape.  The ONE element-read home
- * shared across the q layer (the apply module, wrappers, codecs). */
+ * a TABLE's item is its ROW DICT (ref/count.md, q_table_row_at); generic ray_at
+ * indexing for every other shape.  The ONE element-read home shared across the
+ * q layer (the apply module, wrappers, codecs). */
 ray_t* q_index_elem_at(ray_t* v, int64_t i);
 
 /* read at depth: x . ix[0..k) (k==0 -> x).  Borrows all; owned result. */

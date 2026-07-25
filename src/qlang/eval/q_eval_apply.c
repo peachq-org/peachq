@@ -13,7 +13,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/q_err.h"
 #include "qlang/q_ops.h"
-#include "qlang/q_builtins.h"  /* q_builtins_count_long — q `count` for C callers */
+#include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
 #include "qlang/q_registry.h"
 #include "qlang/q_type.h"     /* q_type_is_keyed — the type axis home */
 #include "qlang/q_parse_internal.h"
@@ -154,6 +154,14 @@ static int is_container(ray_t* v) {
     return v && (v->type == RAY_DICT || v->type == RAY_TABLE);
 }
 
+/* THE iteration domain — what an iterator's ITEMS are.  A table joins the
+ * collections here because "the items of a table are its rows" (ref/count.md),
+ * each row a dictionary; every other lift keeps reading `is_coll`, where a
+ * table is columns (the index law) or an atom. */
+static int is_iter(ray_t* v) {
+    return is_coll(v) || (v && !RAY_IS_ERR(v) && v->type == RAY_TABLE);
+}
+
 static int int_atom(ray_t* v) {
     return v && (v->type == -RAY_I64 || v->type == -RAY_I32 ||
                  v->type == -RAY_I16);
@@ -161,13 +169,11 @@ static int int_atom(ray_t* v) {
 
 /* An iterated dict argument IS its values — for the maps, and for the
  * accumulators by ref/accumulators.md:414 ("Over ... reduces lists AND
- * DICTIONARIES to atoms").  A keyed table is a dict whose value side is a
- * TABLE: distributing there is entries-shaped (#324's index lift), a different
- * law, so it is not admitted here. */
-static ray_t* plain_dict_vals(ray_t* x) {
-    if (!x || x->type != RAY_DICT) return NULL;
-    ray_t* v = ray_dict_vals(x);
-    return (v && v->type != RAY_TABLE) ? v : NULL;
+ * DICTIONARIES to atoms").  A keyed table is a dict too: its values are a
+ * table, whose own items are rows, so the two laws compose and it needs no
+ * arm of its own. */
+static ray_t* iter_dict_vals(ray_t* x) {
+    return (x && x->type == RAY_DICT) ? ray_dict_vals(x) : NULL;
 }
 
 /* re-key a UNIFORM result (each, scan, prior) onto x's keys; consumes r.  An
@@ -667,7 +673,7 @@ static ray_t* gather_at(ray_t* x, ray_t* idx) {
 static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
     ray_t* x = (n == 2) ? args[1] : args[0];
     ray_t* dom = (x->type == RAY_DICT) ? ray_dict_keys(x) : NULL;
-    int64_t n_ent = q_builtins_count_long(dom ? dom : x);   /* q count, one home */
+    int64_t n_ent = q_count_long(dom ? dom : x);   /* q count, one home */
     if (n_ent < 0) return q_err(QE_TYPE);
     ray_t* nrv = ray_i64(n_ent);
     ray_t* til = ray_til_fn(nrv);
@@ -805,7 +811,7 @@ static ray_t* acc_empty(ray_t* fv, const q_op_t* frow, ray_t* seed, int keep,
 /* item i of an iterated argument; a non-collection is held whole and
  * broadcast, as for the maps (`{x+y*z}\[1000 2000;5 10 15 20;3]`, :355) */
 static ray_t* acc_item(ray_t* v, int64_t i) {
-    if (!is_coll(v)) { ray_retain(v); return v; }
+    if (!is_iter(v)) { ray_retain(v); return v; }
     return q_index_elem_at(v, i);
 }
 
@@ -823,15 +829,15 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
     for (int64_t p = 0; p < nit; p++) {
         ray_retain(it[p]);
         iv[p] = q_eval_apply_concrete(it[p]);   /* an iterated DAG has no items */
-        ray_t* dv = plain_dict_vals(iv[p]);
+        ray_t* dv = iter_dict_vals(iv[p]);
         if (dv) {                     /* iterate the VALUES, not the entries */
             ray_retain(dv);
             if (!dk) { dk = iv[p]; ray_retain(dk); }
             ray_release(iv[p]);
             iv[p] = dv;
         }
-        if (!is_coll(iv[p])) continue;
-        int64_t c = ray_len(iv[p]);
+        if (!is_iter(iv[p])) continue;
+        int64_t c = q_count_long(iv[p]);
         if (len < 0 || c > len) len = c;
     }
     ray_t* r;
@@ -912,7 +918,7 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     const q_op_t* mrow = NULL;
     /* boxed lists take the native fold — the aggregate wrappers' boxed arms
      * ride base call_fn plumbing (finding 5) */
-    ray_t* dv = plain_dict_vals(x);
+    ray_t* dv = iter_dict_vals(x);
     if (dv) {                    /* the values are the domain; Scan re-keys */
         ray_t* dr = acc_unary(fv, frow, dv, keep);
         if (keep) dr = dict_rekey(x, dr);
@@ -921,13 +927,11 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     }
     ray_t* mv = (x->type == RAY_LIST) ? NULL : acc_mono(frow, keep, &mrow);
     ray_t* r;
-    if (is_coll(x) && ray_len(x) == 0) {
+    if (is_iter(x) && q_count_long(x) == 0) {
         r = acc_empty(fv, frow, NULL, keep, mv != NULL);
         if (!r) r = q_eval_apply(mv, mrow, &x, 1);
     } else if (mv)
         r = q_eval_apply(mv, mrow, &x, 1);
-    else if (is_container(x))
-        r = q_err(QE_NYI);              /* dict distribution: a later stage */
     else {
         ray_t* id = frow ? q_ops_acc_identity(frow->name) : NULL;
         r = acc_reduce(fv, frow, id, &x, 1, keep);
@@ -989,13 +993,13 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
     for (int64_t p = 0; p < n; p++) {
         ray_retain(args[p]);
         av[p] = q_eval_apply_concrete(args[p]);   /* an iterated DAG has no items */
-        if (!(mask >> p & 1) || !is_coll(av[p])) continue;
+        if (!(mask >> p & 1) || !is_iter(av[p])) continue;
         iter |= (uint64_t)1 << p;
         /* the scan must run to the end so every av[p] is populated for the
          * release below — so record the FIRST mismatch only (an error is an
          * allocation the refcount system does not track: overwriting leaks) */
-        if (len < 0) len = ray_len(av[p]);
-        else if (len != ray_len(av[p]) && !r) r = q_err(QE_LENGTH);
+        if (len < 0) len = q_count_long(av[p]);
+        else if (len != q_count_long(av[p]) && !r) r = q_err(QE_LENGTH);
     }
     if (!r && len < 0) r = q_eval_apply(fv, frow, av, n);
     /* a map is uniform: an empty iterated side returns the GENERIC empty list
@@ -1021,7 +1025,7 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
 }
 
 static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
-    ray_t* dv = plain_dict_vals(x);
+    ray_t* dv = iter_dict_vals(x);
     if (dv) return dict_rekey(x, each1(fv, frow, dv));
     return map_zip(fv, frow, &x, 1, 1);
 }
@@ -1065,9 +1069,8 @@ static ray_t* case_apply(ray_t* sel, ray_t** args, int64_t n) {
  * value's identity element when q knows one, else `first 0#x` (ref/maps.md
  * Each Prior). */
 static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
-    ray_t* dv = plain_dict_vals(x);              /* prior is uniform: re-keys */
+    ray_t* dv = iter_dict_vals(x);               /* prior is uniform: re-keys */
     if (dv) return dict_rekey(x, prior_each(fv, frow, seed, dv));
-    if (is_container(x)) return q_err(QE_NYI);   /* tables: the entries law */
     ray_retain(x);
     x = q_eval_apply_concrete(x);
     ray_t* prev = seed;
@@ -1075,14 +1078,16 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     else {
         prev = frow ? q_ops_acc_identity(frow->name) : NULL;
         if (!prev && ray_is_vec(x)) prev = ray_typed_null((int8_t)-x->type);
+        /* `first 0#x` for a table is its all-null row — the out-of-range read */
+        if (!prev && x->type == RAY_TABLE) prev = q_index_elem_at(x, q_count_long(x));
         if (!prev) { prev = RAY_NULL_OBJ; ray_retain(prev); }
     }
     ray_t* r;
-    if (!is_coll(x)) {
+    if (!is_iter(x)) {
         ray_t* av[2] = { x, prev };
         r = q_eval_apply(fv, frow, av, 2);
     } else {
-        int64_t len = ray_len(x);
+        int64_t len = q_count_long(x);
         ray_t* l = ray_list_new(len);
         for (int64_t i = 0; i < len; i++) {
             ray_t* cur = q_index_elem_at(x, i);
