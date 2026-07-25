@@ -676,6 +676,8 @@ static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
 
 /* ===== adverbs: native application + manifest monomorphization =========== */
 
+static int64_t rank_of(ray_t* fv);
+
 static ray_t* fold_over(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     if (!is_coll(x)) return q_err(QE_NYI);   /* converge/do: punt */
     int64_t len = ray_len(x);
@@ -700,6 +702,51 @@ static ray_t* fold_over(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     return acc;
 }
 
+/* Each, Each Left and Each Right are ONE law (ref/maps.md: `x f\:y` is
+ * `f[;y] each x`).  `mask` names the ITERATED positions — fixed by the
+ * operator, never auto-detected — read at i; every other position is held
+ * whole, and a non-collection in a masked slot leaves nothing to iterate. */
+static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
+                      uint64_t mask) {
+    if (n < 1 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
+    ray_t* av[APPLY_MAX_ARGS];
+    uint64_t iter = 0;
+    int64_t len = -1;
+    ray_t* r = NULL;
+    for (int64_t p = 0; p < n; p++) {
+        ray_retain(args[p]);
+        av[p] = q_eval_apply_concrete(args[p]);   /* an iterated DAG has no items */
+        if (!(mask >> p & 1) || !is_coll(av[p])) continue;
+        iter |= (uint64_t)1 << p;
+        /* the scan must run to the end so every av[p] is populated for the
+         * release below — so record the FIRST mismatch only (an error is an
+         * allocation the refcount system does not track: overwriting leaks) */
+        if (len < 0) len = ray_len(av[p]);
+        else if (len != ray_len(av[p]) && !r) r = q_err(QE_LENGTH);
+    }
+    if (!r && len < 0) r = q_eval_apply(fv, frow, av, n);
+    /* a map is uniform: an empty iterated side returns the GENERIC empty list
+     * without an evaluation — `type (2*')til 0` is 0h, not 7h (ref/maps.md) */
+    if (!r && len == 0) r = ray_list_new(0);
+    if (!r) {
+        ray_t* l = ray_list_new(len);
+        ray_t* ev[APPLY_MAX_ARGS];
+        for (int64_t i = 0; i < len; i++) {
+            for (int64_t p = 0; p < n; p++)
+                ev[p] = (iter >> p & 1) ? q_index_elem_at(av[p], i) : av[p];
+            ray_t* e = q_eval_apply_concrete(q_eval_apply(fv, frow, ev, n));
+            for (int64_t p = 0; p < n; p++)
+                if (iter >> p & 1) ray_release(ev[p]);
+            if (RAY_IS_ERR(e)) { ray_release(l); l = e; break; }
+            l = ray_list_append(l, e);
+            ray_release(e);
+        }
+        r = RAY_IS_ERR(l) ? l : collapse(l);
+    }
+    for (int64_t p = 0; p < n; p++) ray_release(av[p]);
+    return r;
+}
+
 static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
     if (x && x->type == RAY_DICT) {
         ray_t* nv = each1(fv, frow, ray_dict_vals(x));
@@ -708,23 +755,62 @@ static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
         ray_retain(k);
         return ray_dict_new(k, nv);
     }
-    if (!is_coll(x)) return q_eval_apply(fv, frow, &x, 1);
-    int64_t len = ray_len(x);
-    ray_t* l = ray_list_new(len > 0 ? len : 1);
-    for (int64_t i = 0; i < len; i++) {
-        ray_t* ei = q_index_elem_at(x, i);
-        ray_t* r = q_eval_apply_concrete(q_eval_apply(fv, frow, &ei, 1));
-        ray_release(ei);
-        if (RAY_IS_ERR(r)) { ray_release(l); return r; }
-        l = ray_list_append(l, r);
-        ray_release(r);
+    return map_zip(fv, frow, &x, 1, 1);
+}
+
+/* Each Prior: fv between each item and the one before it.  Applied as a
+ * binary the left argument IS the seed; applied as a unary the seed is the
+ * value's identity element when q knows one, else `first 0#x` (ref/maps.md
+ * Each Prior). */
+static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
+    if (is_container(x)) return q_err(QE_NYI);   /* dict distribution: later stage */
+    ray_retain(x);
+    x = q_eval_apply_concrete(x);
+    ray_t* prev = seed;
+    if (prev) ray_retain(prev);
+    else {
+        prev = frow ? q_ops_acc_identity(frow->name) : NULL;
+        if (!prev && ray_is_vec(x)) prev = ray_typed_null((int8_t)-x->type);
+        if (!prev) { prev = RAY_NULL_OBJ; ray_retain(prev); }
     }
-    return collapse(l);
+    ray_t* r;
+    if (!is_coll(x)) {
+        ray_t* av[2] = { x, prev };
+        r = q_eval_apply(fv, frow, av, 2);
+    } else {
+        int64_t len = ray_len(x);
+        ray_t* l = ray_list_new(len);
+        for (int64_t i = 0; i < len; i++) {
+            ray_t* cur = q_index_elem_at(x, i);
+            ray_t* av[2] = { cur, prev };
+            ray_t* e = q_eval_apply_concrete(q_eval_apply(fv, frow, av, 2));
+            ray_release(prev);
+            prev = cur;
+            if (RAY_IS_ERR(e)) { ray_release(l); l = e; break; }
+            l = ray_list_append(l, e);
+            ray_release(e);
+        }
+        r = RAY_IS_ERR(l) ? l : collapse(l);
+    }
+    ray_release(prev);
+    ray_release(x);
+    return r;
 }
 
 ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const q_op_t* frow,
                            ray_t** args, int64_t n) {
     if (!fv) return q_err(QE_TYPE);
+    /* an elided argument projects the DERIVED value, not the underlying one:
+     * `2*'` is Each on a projection of `*`, and only the empty case tells them
+     * apart (`type (2*')til 0` is 0h where `type (2*)til 0` is 7h) */
+    for (int64_t i = 0; i < n; i++) {
+        if (args[i]) continue;
+        ray_t* d = q_eval_apply_deriv_new(adv, fv, frow);
+        if (RAY_IS_ERR(d)) return d;
+        ray_t* p = proj_new(d, NULL, args, n, n);
+        ray_release(d);
+        return p;
+    }
     if (adv == 1) {                                        /* `/` over */
         if (n == 1) {
             /* mono column: f/ of a registered dyad IS its aggregate kernel.
@@ -743,8 +829,21 @@ ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const q_op_t* frow,
         if (n == 2) return fold_over(fv, frow, args[0], args[1]);
         return q_err(QE_RANK);
     }
-    if (adv == 0 && n == 1) return each1(fv, frow, args[0]);
-    return q_err(QE_NYI);          /* \ ': /: \: — native arms later */
+    if (adv == 0) {                                        /* `'` each */
+        if (n == 1) return each1(fv, frow, args[0]);
+        return map_zip(fv, frow, args, n, ~(uint64_t)0);
+    }
+    if (adv == 3) {                                        /* `':` */
+        /* a rank-1 value makes `':` Each Parallel, a rank-2 one Each Prior
+         * (ref/maps.md); we have no secondary tasks, so parallel IS each */
+        if (n == 1 && rank_of(fv) == 1) return each1(fv, frow, args[0]);
+        if (n == 1) return prior_each(fv, frow, NULL, args[0]);
+        if (n == 2) return prior_each(fv, frow, args[0], args[1]);
+        return q_err(QE_RANK);
+    }
+    if (adv == 4 && n == 2) return map_zip(fv, frow, args, 2, 2);   /* /: right */
+    if (adv == 5 && n == 2) return map_zip(fv, frow, args, 2, 1);   /* \: left  */
+    return q_err(QE_NYI);          /* `\` scan + the vs/sv unary forms: later */
 }
 
 /* keyword-HOF row (each/peach/over/scan/prior): adverb_hof -> adv id */
@@ -922,8 +1021,18 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
 static int64_t rank_of(ray_t* fv) {
     if (fv->type == RAY_UNARY) return 1;
     if (fv->type == RAY_BINARY) return 2;
-    if (q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_LAMBDA)
+    int kind = q_eval_apply_carrier_kind(fv);
+    if (kind == Q_EVAL_CAR_LAMBDA)
         return car_slots(fv)[0] ? ray_len(car_slots(fv)[0]) : 0;
+    /* a projection's rank is the slots it still wants; a composition's is its
+     * inner value's (`mmu[;b]` is unary, so `':` reads it as Each Parallel) */
+    if (kind == Q_EVAL_CAR_PROJ) {
+        int64_t slots = ray_len(fv) - 2, holes = 0;
+        for (int64_t i = 0; i < slots; i++)
+            if (!car_slots(fv)[2 + i]) holes++;
+        return holes;
+    }
+    if (kind == Q_EVAL_CAR_COMP) return rank_of(car_slots(fv)[1]);
     return -1;                              /* vary / deriv: no fixed rank */
 }
 
