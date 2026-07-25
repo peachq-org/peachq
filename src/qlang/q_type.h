@@ -85,6 +85,11 @@ int q_type_is_str_atom(ray_t* x);
  * strings are char LISTS. */
 int q_type_is_nested(ray_t* v);
 
+/* THE iteration domain — what pairs one-for-one with a value's ITEMS.  A table
+ * joins the collections here ("the items of a table are its rows", ref/count.md);
+ * the INDEX law, reading a table as an axis pair, keeps its own is_coll. */
+int q_type_is_iter(ray_t* v);
+
 /* q treats the null symbol ` AS null (base sym-0 is the empty symbol). */
 int q_type_is_null_sym(ray_t* x);
 
