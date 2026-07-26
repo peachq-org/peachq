@@ -78,9 +78,19 @@ static int q_is_kw_verb(const char *s, int len) {
     return q_lex_is_kw_infix(s, len);
 }
 
-/* marker heads ("{", ";", adverb names): name-ref syms */
+/* marker heads ("{", ";"): name-ref syms */
 ray_t *q_marker(const char *s) {
     return ray_sym(ray_sym_intern_runtime(s, strlen(s)));
+}
+
+/* An iterator IS a value (103h, basics/datatypes.md), so the scanner hands
+ * the parser the immutable registry value rather than a name-ref marker —
+ * term position, postfix position and `(/;+)` then agree by construction. */
+static ray_t *iter_value(int adv) {
+    ray_t *v = q_registry_iter_value(adv);
+    if (!v) q_die("iterator: registry not initialized");
+    ray_retain(v);
+    return v;
 }
 
 /* Embed the registry function VALUE for a verb sym at the given valence — the
@@ -1067,7 +1077,7 @@ static Tokens scan(const char *src) {
             p++;
             int two = (src[p] == ':');
             if (two) p++;
-            EMIT(T_ADVERB, q_marker(ADVERB_NAMES[base + (two ? 3 : 0)]));
+            EMIT(T_ADVERB, iter_value(base + (two ? 3 : 0)));
             noun_pos = 0;
         }
         else {
@@ -1536,7 +1546,12 @@ static P parse_base(Parser *p) {
             ray_release(args);
             return (P){ R_NOUN, w };
         }
-        return EMPTY;
+        /* otherwise a bare iterator in TERM position is its own VALUE — the
+         * `\` of `type each(…;\;…)` (basics/datatypes.md) */
+        ray_t *iv = tk->k;
+        tk->k = NULL;
+        adv(p);
+        return (P){ R_NOUN, iv };
     }
     default:
         return EMPTY;
@@ -1774,11 +1789,14 @@ static P parse_e(Parser *p, QCtx ctx) {
         }
     }
     /* Signal `'expr` (ref/signal.md): a bare `'` adverb at expression start
-     * that is NOT the compose form `'[f;g]`.  Emits (.q.sig expr). */
+     * that is NOT the compose form `'[f;g]`.  Emits (.q.sig expr).  With
+     * nothing to signal (`(';/;\)`) the `'` is the ITERATOR VALUE instead. */
     {
         Token *st = cur(p);
+        TKind nk = st->kind == T_EOF ? T_EOF : p->t.t[p->pos + 1].kind;
         if (st->kind == T_ADVERB && st->len == 1 && p->src[st->start] == '\'' &&
-            p->t.t[p->pos + 1].kind != T_LBRACK) {
+            nk != T_LBRACK && nk != T_SEMI && nk != T_RPAREN &&
+            nk != T_RBRACK && nk != T_RBRACE && nk != T_EOF) {
             adv(p);
             P e = parse_e(p, ctx);
             ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
