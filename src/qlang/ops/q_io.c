@@ -1,5 +1,5 @@
 /* ops/q_io.c — io wrappers: hopen/hclose (IPC client), File Text (0: hsym read0,
- * save/prepare/load-csv/load-fixed/kv), like/ss/ssr, getenv/setenv
+ * save/prepare/load-csv/load-fixed/kv), getenv/setenv
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
@@ -11,7 +11,7 @@
 #include "qlang/q_builtins.h" /* q_string_fn — 0: Prepare Text cell text */
 #include "qlang/q_sys.h"
 #include "lang/eval.h"      /* ray_eval_get_restricted, ray_read_file_fn/ray_write_file_fn */
-#include "lang/internal.h"  /* ray_hopen_fn/ray_hclose_fn, ray_like_fn, ray_getenv_fn/ray_setenv_fn, make_i64 */
+#include "lang/internal.h"  /* ray_hopen_fn/ray_hclose_fn, ray_getenv_fn/ray_setenv_fn, make_i64 */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
 #include "store/fileio.h"   /* ray_mkdir_p — 0: Save Text missing dirs */
 #include "core/ipc.h"       /* ray_ipc_fd_of_handle/handle_of_fd — q true-fd handles */
