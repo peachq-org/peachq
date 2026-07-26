@@ -5,7 +5,8 @@
  * needs a conversion MUST call q_dollar_cast with a rayfall type tag rather
  * than growing its own conversion — the only sanctioned exception is a
  * profiled hot path with a specialized SIMD/vectorized kernel (base arith.c's
- * as_i64/as_f64 atom coercions are that carve-out). */
+ * as_i64/as_f64 atom coercions are that carve-out).  Which tag a MIXED-TYPE
+ * pair should land on is a separate law, q_type_common (q_type.h). */
 #ifndef Q_DOLLAR_H
 #define Q_DOLLAR_H
 

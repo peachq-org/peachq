@@ -10,6 +10,8 @@
                                    * atomic_map_unary, ray_nil_fn */
 #include "table/sym.h"            /* ray_sym_str — the null-symbol divergence */
 #include "qlang/q_registry.h"     /* q_list_collapse — q_null_wrap collapse */
+#include "core/types.h"           /* RAY_TYPE_COUNT — the tag-indexed matrix bound */
+#include <string.h>               /* memchr/memset — matrix bake-out (init only) */
 
 int64_t q_type_as_i64(ray_t* x) {
     if (RAY_IS_TEMPORAL32(-x->type)) return (int64_t)x->i32;
@@ -110,6 +112,102 @@ const char* q_type_rayname(int8_t tag) {
     case RAY_DATETIME: return "DATETIME";
     default:       return NULL;
     }
+}
+
+char q_type_char(int8_t tag) {
+    int t = tag < 0 ? -tag : tag;                   /* int arith: |INT8_MIN|==128, no UB */
+    if (t <= 0 || t >= RAY_TYPE_COUNT) return 0;    /* list 0, gap 3 & out-of-band: no char */
+    switch ((ray_type_e)t) {                        /* exhaustive: a new member demands a lane */
+    case RAY_LIST:      return 0;                   /* unreachable: filtered above */
+    case RAY_BOOL:      return 'b';
+    case RAY_GUID:      return 'g';
+    case RAY_BYTE_ONLY: return 'x';
+    case RAY_I16:       return 'h';
+    case RAY_I32:       return 'i';
+    case RAY_I64:       return 'j';
+    case RAY_F32:       return 'e';
+    case RAY_F64:       return 'f';
+    case RAY_STR:       return 'c';   /* physical string storage: still char text */
+    case RAY_CHARV:     return 'c';
+    case RAY_SYM:       return 's';
+    case RAY_TIMESTAMP: return 'p';
+    case RAY_MONTH:     return 'm';
+    case RAY_DATE:      return 'd';
+    case RAY_DATETIME:  return 'z';
+    case RAY_TIMESPAN:  return 'n';
+    case RAY_MINUTE:    return 'u';
+    case RAY_SECOND:    return 'v';
+    case RAY_TIME:      return 't';
+    }
+    return 0;   /* SEL(20) etc.: no type char (unchanged) */
+}
+
+/* ---- the mixed-pair result-type law (contract: q_type.h) ------------------
+ * Distinct from base's promote() (ops/graph.c), which answers "what C lane do I
+ * compute in" and collapses DATE to i32: this answers what the RESULT IS.
+ *
+ * The published table is kept as the DOC-SHAPED source below so a reviewer can
+ * diff it against the page line for line, and q_type_init bakes it into a
+ * tag-indexed array once — the lookup is a plain 2-D index on the family lift's
+ * per-element-pair path, and no tag list is written down twice (q_type_char is
+ * the one tag<->char owner, so a new datatype breaks ITS switch rather than
+ * silently falling out of a parallel table here). */
+
+/* Row/column order of the printed matrix. */
+static const char Q_COMMON_ORDER[] = "bgxhijefcspmdznuvt";
+
+/* ref/lesser.md + ref/greater.md "Domain and range", transcribed cell for cell
+ * (both pages print the same matrix).  '.' = no result type.
+ * NOT derived: the temporal block is one order (m<d<z<p<u<v<t<n) minus nine
+ * hole pairs, eight of which are "date-only x time-only" but `m`x`z` is a lone
+ * exception (`d`x`z` and `m`x`p` both resolve), so a rule would need an
+ * exception list to reproduce the page. */
+static const char* const Q_COMMON[18] = {
+    "b.xhijefc.pmdznuvt",   /* b */
+    "..................",   /* g */
+    "x.xhijefc.pmdznuvt",   /* x */
+    "h.hhijefc.pmdznuvt",   /* h */
+    "i.iiijefc.pmdznuvt",   /* i */
+    "j.jjjjefc.pmdznuvt",   /* j */
+    "e.eeeeefc.pmdznuvt",   /* e */
+    "f.ffffffc.pmdznuvt",   /* f */
+    "c.ccccccc.pmdznuvt",   /* c */
+    "..................",   /* s */
+    "p.ppppppp.ppppnuvt",   /* p */
+    "m.mmmmmmm.pmd.....",   /* m */
+    "d.ddddddd.pddz....",   /* d */
+    "z.zzzzzzz.p.zznuvt",   /* z */
+    "n.nnnnnnn.n..nnnnn",   /* n */
+    "u.uuuuuuu.u..unuvt",   /* u */
+    "v.vvvvvvv.v..vnvvt",   /* v */
+    "t.ttttttt.t..tnttt",   /* t */
+};
+
+static int8_t g_common[RAY_TYPE_COUNT][RAY_TYPE_COUNT];
+
+void q_type_init(void) {
+    int8_t pos[RAY_TYPE_COUNT], tag_of[sizeof Q_COMMON_ORDER];
+    memset(g_common, 0, sizeof g_common);
+    memset(pos, -1, sizeof pos);
+    memset(tag_of, 0, sizeof tag_of);
+    for (int t = 1; t < RAY_TYPE_COUNT; t++) {
+        if (t == RAY_STR) continue;   /* physical storage, q-invisible: not a row */
+        const char* c = memchr(Q_COMMON_ORDER, q_type_char((int8_t)t), 18);
+        if (!c) continue;
+        pos[t] = (int8_t)(c - Q_COMMON_ORDER);
+        tag_of[pos[t]] = (int8_t)t;
+    }
+    for (int a = 1; a < RAY_TYPE_COUNT; a++)
+        for (int b = 1; b < RAY_TYPE_COUNT; b++) {
+            if (pos[a] < 0 || pos[b] < 0) continue;
+            const char* c = memchr(Q_COMMON_ORDER, Q_COMMON[pos[a]][pos[b]], 18);
+            if (c) g_common[a][b] = tag_of[c - Q_COMMON_ORDER];
+        }
+}
+
+int8_t q_type_common(int8_t a, int8_t b) {
+    if (a < 1 || a >= RAY_TYPE_COUNT || b < 1 || b >= RAY_TYPE_COUNT) return 0;
+    return g_common[a][b];
 }
 
 /* The empty typed vector of tag (sym vectors need their width ctor). */

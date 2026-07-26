@@ -293,6 +293,12 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b);
 ray_t* ray_eq_fn(ray_t* a, ray_t* b);
 ray_t* ray_neq_fn(ray_t* a, ray_t* b);
 
+/* Lesser/Greater of two atoms: returns the WINNING OPERAND, owned, keeping that
+ * operand's type — any result-tag promotion is the caller's.  Errors propagate
+ * from the comparison. */
+ray_t* ray_min2_fn(ray_t* a, ray_t* b);
+ray_t* ray_max2_fn(ray_t* a, ray_t* b);
+
 /* Logic */
 ray_t* ray_and_fn(ray_t* a, ray_t* b);
 ray_t* ray_or_fn(ray_t* a, ray_t* b);
