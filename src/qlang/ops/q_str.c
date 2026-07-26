@@ -8,7 +8,7 @@
 #include "qlang/eval/q_eval.h"         /* q_eval_apply_is_fn / q_eval_apply_value — ssr fn replacement */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
 #include "qlang/q_fmt.h"               /* q_fmt_float — string's float leaf */
-#include "lang/internal.h"             /* ray_like_fn, ray_error, ray_str_vec_get */
+#include "lang/internal.h"             /* ray_str_vec_get — RAY_STR column reads */
 #include "lang/format.h"               /* ray_fmt — base formatter fallback */
 #include "ops/ops.h"                   /* ray_is_lazy — DAG guard in q_str_charv_out */
 #include "table/sym.h"                 /* ray_sym_str — sym renders bare */
@@ -43,7 +43,7 @@ bool q_str_text_bytes(ray_t* x, const char** p, int64_t* n) {
     return false;
 }
 
-/* Inverse adapter for legacy string-verb bodies (vs/sv/like/ss/ssr...):
+/* Inverse adapter for the legacy string-verb bodies (vs/sv):
  * BORROWS x, returns OWNED legacy form — charv/char atom -> -RAY_STR atom;
  * LIST elements converted recursively; everything else retained as-is. */
 ray_t* q_str_in(ray_t* x) {
@@ -356,12 +356,144 @@ ray_t* q_trim_fn (ray_t* x) { return str_trim_leaf(x, 0); }
 ray_t* q_ltrim_fn(ray_t* x) { return str_trim_leaf(x, 1); }
 ray_t* q_rtrim_fn(ray_t* x) { return str_trim_leaf(x, 2); }
 
-/* ===== string search family: like / ss / ssr (feat/q-string-fns) =========== */
+/* ===== the q pattern grammar: like / ss / ssr =============================
+ * basics/regex.md is the WHOLE grammar: `?` any char, `*` any sequence,
+ * `[...]` alternatives with an optional leading `^` negation and 0-9/a-z/A-Z
+ * ranges; inside a class `?` and `*` are literal.  q's own matcher, NOT the
+ * engine's fnmatch-flavoured ray_glob_match (which spells negation `!`). */
 
-/* q `x like p` — glob match.  Reuses ray_like_fn for sym/str atoms and
- * vectors. */
+static int str_pat_band(char c) {
+    if (c >= '0' && c <= '9') return 1;
+    if (c >= 'a' && c <= 'z') return 2;
+    if (c >= 'A' && c <= 'Z') return 3;
+    return 0;
+}
+
+/* One `[...]` token: *pi enters at the `[` and leaves past the `]`.  A `]`
+ * first in the class is a member; an unterminated class runs to the end. */
+static bool str_pat_class(const char* p, size_t pn, size_t* pi, char c) {
+    size_t i = *pi + 1;
+    bool neg = false, hit = false, first = true;
+    if (i < pn && p[i] == '^') { neg = true; i++; }
+    for (; i < pn && (first || p[i] != ']'); first = false) {
+        int band = str_pat_band(p[i]);
+        if (i + 2 < pn && p[i + 1] == '-' && band && str_pat_band(p[i + 2]) == band &&
+            p[i] <= p[i + 2]) {
+            if (c >= p[i] && c <= p[i + 2]) hit = true;
+            i += 3;
+        } else {
+            if (c == p[i]) hit = true;
+            i++;
+        }
+    }
+    if (i < pn && p[i] == ']') i++;
+    *pi = i;
+    return hit != neg;
+}
+
+/* One token, one input char — so a match's width is the pattern's alone. */
+static size_t str_pat_width(const char* p, size_t pn) {
+    size_t i = 0, w = 0;
+    while (i < pn) {
+        if (p[i] == '[') (void)str_pat_class(p, pn, &i, '\0');
+        else i++;
+        w++;
+    }
+    return w;
+}
+
+/* Star-free p anchored at s[pos..); *end takes the first unconsumed index. */
+static bool str_pat_run(const char* s, size_t sn, size_t pos,
+                        const char* p, size_t pn, size_t* end) {
+    size_t si = pos, pi = 0;
+    while (pi < pn) {
+        if (si >= sn) return false;
+        if (p[pi] == '?') { pi++; si++; }
+        else if (p[pi] == '[') { if (!str_pat_class(p, pn, &pi, s[si])) return false; si++; }
+        else if (p[pi] == s[si]) { pi++; si++; }
+        else return false;
+    }
+    if (end) *end = si;
+    return true;
+}
+
+/* Positions of the stars OUTSIDE any class — `[*]` is a literal star. */
+static size_t str_pat_stars(const char* p, size_t pn, size_t* at, size_t max) {
+    size_t i = 0, n = 0;
+    while (i < pn) {
+        if (p[i] == '[') { (void)str_pat_class(p, pn, &i, '\0'); continue; }
+        if (p[i] == '*') { if (n < max) at[n] = i; n++; }
+        i++;
+    }
+    return n;
+}
+
+/* Whole-string match.  q's `like` affords ONE floating segment — `A*B` (both
+ * ends anchored) or `*B*` (one scan).  A second, the doc's `*the*the`, is
+ * "too difficult": return false, *out unset, and the caller says 'nyi. */
+static bool str_pat_like(const char* s, size_t sn, const char* p, size_t pn, bool* out) {
+    size_t at[3], ns = str_pat_stars(p, pn, at, 3);
+    if (ns > 2 || (ns == 2 && !(at[0] == 0 && at[1] == pn - 1))) return false;
+    if (ns == 0) {
+        size_t end = 0;
+        *out = str_pat_run(s, sn, 0, p, pn, &end) && end == sn;
+        return true;
+    }
+    if (ns == 2) {                                    /* *B* — B floats */
+        const char* b = p + 1;
+        size_t bn = pn - 2, w = str_pat_width(b, bn);
+        *out = false;
+        for (size_t i = 0; !*out && i + w <= sn; i++)
+            *out = str_pat_run(s, sn, i, b, bn, NULL);
+        return true;
+    }
+    {                                                 /* A*B — both anchored */
+        const char *pre = p, *suf = p + at[0] + 1;
+        size_t pren = at[0], sufn = pn - at[0] - 1;
+        size_t pw = str_pat_width(pre, pren), sw = str_pat_width(suf, sufn), end = 0;
+        *out = pw + sw <= sn && str_pat_run(s, sn, 0, pre, pren, &end) &&
+               str_pat_run(s, sn, sn - sw, suf, sufn, &end) && end == sn;
+        return true;
+    }
+}
+
+/* ss/ssr take neither a star nor an empty pattern — both are 'length. */
+static bool str_pat_fixed(const char* p, size_t pn) {
+    size_t at[1];
+    return pn > 0 && str_pat_stars(p, pn, at, 1) == 0;
+}
+
+/* The text of a value that IS one string — charv, char atom, or sym atom. */
+static bool str_pat_text(ray_t* x, const char** p, int64_t* n) {
+    if (x && x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);               /* borrowed */
+        *p = s ? ray_str_ptr(s) : "";
+        *n = s ? (int64_t)ray_str_len(s) : 0;
+        return true;
+    }
+    return q_str_text_bytes(x, p, n);
+}
+
+static ray_t* str_like_leaf(ray_t* x, const char* pp, size_t pn) {
+    const char* sp; int64_t sn; bool m;
+    if (!str_pat_text(x, &sp, &sn)) return q_err(QE_TYPE);
+    if (!str_pat_like(sp, (size_t)sn, pp, pn, &m)) return q_err(QE_NYI);
+    return ray_bool(m);
+}
+
+/* ref/like.md "Implicit iteration": lists of strings or symbols, and dicts
+ * with them as values.  No doc row reaches a table, so a table is 'type. */
 ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
-    if (x && x->type == RAY_LIST) {    /* boxed list */
+    const char* pp; int64_t pn;
+    if (!x || !q_str_text_bytes(pattern, &pp, &pn)) return q_err(QE_TYPE);
+    if (x->type == RAY_DICT) {
+        ray_t* v = q_like_wrap(ray_dict_vals(x), pattern);
+        if (!v || RAY_IS_ERR(v)) return v;
+        ray_t* k = ray_dict_keys(x);
+        ray_retain(k);
+        return ray_dict_new(k, v);
+    }
+    if (x->type == RAY_LIST || x->type == RAY_SYM || x->type == RAY_STR) {
         int64_t n = ray_len(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
@@ -370,7 +502,8 @@ ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
             ray_t* e = ray_at_fn(x, ia);
             ray_release(ia);
             if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
-            ray_t* r = q_like_wrap(e, pattern);
+            ray_t* r = (x->type == RAY_LIST) ? q_like_wrap(e, pattern)
+                                             : str_like_leaf(e, pp, (size_t)pn);
             ray_release(e);
             if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_list_append(out, r);
@@ -381,58 +514,21 @@ ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
         ray_release(out);
         return c;
     }
-    { /* charv leaf/pattern -> legacy -RAY_STR forms for the engine matcher */
-        ray_t* xs = q_str_in(x); ray_t* ps = q_str_in(pattern);
-        ray_t* r = ray_like_fn(xs, ps);
-        ray_release(xs); ray_release(ps);
-        return r;
-    }
+    return str_like_leaf(x, pp, (size_t)pn);
 }
 
-/* Match glob pattern p[0..pn) anchored at s[pos..sn), where every pattern
- * token consumes exactly one input char: `?` (any), `[..]`/`[^..]` (class,
- * optional negation), or a literal.  The variable-width `*` form is not used
- * by q's ss/ssr, so a bare `*` is treated literally.  Returns the number of
- * input chars consumed on a full match, or -1 on mismatch. */
-static int64_t str_glob_fixed_at(const char* s, size_t sn, size_t pos,
-                               const char* p, size_t pn) {
-    size_t si = pos, pi = 0;
-    while (pi < pn) {
-        if (si >= sn) return -1;
-        char pc = p[pi];
-        if (pc == '?') { pi++; si++; continue; }
-        if (pc == '[') {
-            size_t j = pi + 1;
-            int neg = 0;
-            if (j < pn && p[j] == '^') { neg = 1; j++; }
-            int matched = 0;
-            for (; j < pn && p[j] != ']'; j++)
-                if (p[j] == s[si]) matched = 1;
-            if (j < pn) j++;              /* skip ']' */
-            if (matched == neg) return -1;
-            pi = j; si++; continue;
-        }
-        if (pc != s[si]) return -1;       /* literal */
-        pi++; si++;
-    }
-    return (int64_t)(si - pos);
-}
-
-/* q `s ss p` — string search: 0-based start index of every match of the glob
- * pattern p in the string s (overlapping, kdb-true).  Returns a long vector. */
+/* 0-based start index of every match of p in s, overlapping (kdb-true). */
 ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
     const char* sp; int64_t sn64; const char* pp; int64_t pn64;
     if (!q_str_text_bytes(s, &sp, &sn64) || !q_str_text_bytes(p, &pp, &pn64))
         return q_err(QE_TYPE);
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
+    if (!str_pat_fixed(pp, pn)) return q_err(QE_LENGTH);
+    size_t w = str_pat_width(pp, pn);
     ray_t* out = ray_vec_new(RAY_I64, 8);
     if (RAY_IS_ERR(out)) return out;
-    if (pn == 0) return out;                       /* empty pattern -> no hits */
-    /* str_glob_fixed_at anchors at each position; the match WIDTH differs from
-     * the pattern's byte length (a `[..]` class is 1 input char), so iterate
-     * every start position and let the matcher enforce bounds. */
-    for (size_t i = 0; i < sn; i++) {
-        if (str_glob_fixed_at(sp, sn, i, pp, pn) >= 0) {
+    for (size_t i = 0; i + w <= sn; i++) {
+        if (str_pat_run(sp, sn, i, pp, pn, NULL)) {
             int64_t idx = (int64_t)i;
             out = ray_vec_append(out, &idx);
             if (RAY_IS_ERR(out)) return out;
@@ -442,7 +538,7 @@ ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
 }
 
 /* q `ssr[s;p;r]` — replace every (non-overlapping, left-to-right) match of the
- * glob pattern p in s.  r is either a replacement string, or a function
+ * pattern p in s.  r is either a replacement string, or a function
  * applied to each matched substring (kdb: `ssr[s;"t?r";upper]`). */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     if (n != 3) return q_err(QE_RANK);
@@ -455,6 +551,8 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
       if (!r_is_fn && !q_str_text_bytes(r, &rp_, &rn_))
           return q_err(QE_TYPE); }
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
+    if (!str_pat_fixed(pp, pn)) return q_err(QE_LENGTH);
+    size_t w = str_pat_width(pp, pn);
     size_t cap = sn + 16, blen = 0;
     char* b = (char*)malloc(cap);
     if (!b) return q_err(QE_WSFULL);
@@ -466,13 +564,10 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     ray_t* err = NULL;
     size_t i = 0;
     while (i < sn) {
-        /* str_glob_fixed_at bounds-checks internally (si>=sn -> -1) and a `[..]`
-         * class is multiple pattern bytes but ONE input char, so do NOT gate on
-         * `i + pn <= sn` (that rejected bracket-class matches near the end). */
-        int64_t m = pn ? str_glob_fixed_at(sp, sn, i, pp, pn) : -1;
-        if (m >= 0) {
+        bool m = i + w <= sn && str_pat_run(sp, sn, i, pp, pn, NULL);
+        if (m) {
             if (r_is_fn) {
-                ray_t* sub = ray_charv(sp + i, m);      /* matched text, in flight */
+                ray_t* sub = ray_charv(sp + i, (int64_t)w); /* matched text, in flight */
                 ray_t* one[1] = { sub };
                 ray_t* rep = q_eval_apply_value(r, one, 1);
                 ray_release(sub);
@@ -486,7 +581,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
                 (void)q_str_text_bytes(r, &rp2, &rn2);
                 SSR_PUSH(rp2, (size_t)rn2);
             }
-            i += (m > 0) ? (size_t)m : 1;   /* advance past the match */
+            i += w;                         /* advance past the match */
         } else {
             SSR_PUSH(sp + i, 1);
             i++;
