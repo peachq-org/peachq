@@ -1334,6 +1334,8 @@ static int64_t rank_of(ray_t* fv) {
     return -1;                              /* vary / deriv: no fixed rank */
 }
 
+int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
+
 /* a value that composes when a unary is juxtaposed onto it: an `@`/`.`
  * projection (`count@`, `(%).`) or an existing composition (`u v w@`) */
 static int comp_tail(ray_t* x) {
