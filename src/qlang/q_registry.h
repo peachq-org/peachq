@@ -121,9 +121,15 @@ void q_registry_destroy(void);
  * parse to plain dict-then-flip trees).
  *   list    — paren-list literal `(1;2;3)` (the head value is what
  *             distinguishes a literal from the shape-identical (v;i))
- *   compose — `'[f;g;…]` bracket form ('nyi until the adverb wave) */
+ *   compose — `'[f;g;…]` bracket form (the apply module's compose_apply) */
 ray_t* q_registry_list_value(void);
 ray_t* q_registry_compose_value(void);
+
+/* The six ITERATOR values (103h) by adverb id (0=' 1=/ 2=\ 3=': 4=/: 5=\:);
+ * borrowed, NULL before q_registry_init or out of range.  The parser emits
+ * these for a `'`/`/`/`\`/`':`/`/:`/`\:` token in BOTH term and postfix
+ * position, so `+/`, `(/;+)` and `(/)[+]` are one shape. */
+ray_t* q_registry_iter_value(int adv);
 
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
  * typed vector (kdb semantics: map/each/scan results and paren-lists of atoms
