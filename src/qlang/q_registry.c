@@ -37,6 +37,7 @@
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 — name interning */
 #include "store/serde.h"   /* ray_serde_set_fn_hooks — fn-value serde round-trip */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_iter_new — the iterator carriers */
+#include "qlang/q_type.h"  /* q_type_init — bakes the result-type matrix */
 #include <assert.h>
 #include <stdint.h>        /* INT64_MAX */
 #include <stdio.h>         /* snprintf */
@@ -300,6 +301,7 @@ static ray_t* serde_fn_reader(const char* name) {
 
 ray_err_t q_registry_init(void) {
     if (g_inited) return RAY_OK;   /* idempotent */
+    q_type_init();                 /* the result-type matrix, before any verb runs */
     g_count    = 0;
     g_building = true;
     int n = 0;

@@ -1480,15 +1480,19 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         }
     }
 
+    /* on a TWO-VALENCE row `family` describes the DYAD (q_ops.c FAMILY AUDIT,
+     * the `+` row note), so a monad that is atomic in its own right (`-:` neg,
+     * `~:` not under Match's aggregate row) says so on ITS recipe (QR_FN1A)
+     * and lifts whatever family the dyad claims. */
+    if (row && n == 1 && row->mon.atomic && fv->type == RAY_UNARY)
+        return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
+
     const char* fam = row ? row->family : NULL;
     if (fam) {
         if (strcmp(fam, "atomic") == 0) {
-            /* on a TWO-VALENCE row `family` describes the DYAD (q_ops.c
-             * FAMILY AUDIT, the `+` row note): its monadic sibling (`+:`
-             * flip, `<:` iasc) reaches the kernel whole unless the recipe
-             * marks it atomic itself (`-:` neg) */
-            if (n == 1 && fv->type == RAY_UNARY &&
-                (row->dyad.kind == QK_NONE || row->mon.atomic))
+            /* the monadic sibling of an atomic dyad (`+:` flip, `<:` iasc)
+             * reaches the kernel whole — only a one-valence row lifts here */
+            if (n == 1 && fv->type == RAY_UNARY && row->dyad.kind == QK_NONE)
                 return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
             if (n == 2 && fv->type == RAY_BINARY)
                 return atomic2((ray_binary_fn)(uintptr_t)fv->i64,
