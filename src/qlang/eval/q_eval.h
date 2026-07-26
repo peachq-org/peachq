@@ -87,6 +87,8 @@ ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
 ray_t* q_eval_apply_iter_new(int adv);
 int    q_eval_apply_iter_id(ray_t* v);
 int    q_eval_apply_carrier_kind(const ray_t* v);   /* 0 = not a carrier */
+/* the value's arity as dispatch sees it; -1 when it has no fixed rank */
+int64_t q_eval_apply_rank(ray_t* v);
 int    q_eval_apply_frame_depth(void);              /* lambda frames live */
 ray_t* q_eval_apply_lambda_src(ray_t* v);           /* BORROWED -RAY_STR source,
                                                      * NULL unless a lambda carrier
