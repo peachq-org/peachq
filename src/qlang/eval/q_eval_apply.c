@@ -106,6 +106,18 @@ ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const q_op_t* frow) {
     return car_put(c, 2, ray_i64(adv));
 }
 
+/* iterator carrier: [adv atom] — the operand-less iterator value (103h) */
+ray_t* q_eval_apply_iter_new(int adv) {
+    ray_t* c = car_new(Q_EVAL_CAR_ITER, 1);
+    if (RAY_IS_ERR(c)) return c;
+    return car_put(c, 0, ray_i64(adv));
+}
+
+int q_eval_apply_iter_id(ray_t* v) {
+    return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_ITER
+               ? (int)car_slots(v)[0]->i64 : -1;
+}
+
 /* projection carrier: [fv, fv-row box, slot0..slotR-1]; holes = C NULL */
 static ray_t* proj_new(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n,
                        int64_t rank) {
@@ -1318,6 +1330,7 @@ static int64_t rank_of(ray_t* fv) {
         return holes;
     }
     if (kind == Q_EVAL_CAR_COMP) return rank_of(car_slots(fv)[1]);
+    if (kind == Q_EVAL_CAR_ITER) return 1;  /* exactly one operand */
     return -1;                              /* vary / deriv: no fixed rank */
 }
 
@@ -1340,6 +1353,16 @@ static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
                             &inner, 1);
     ray_release(inner);
     return r;
+}
+
+/* An iterator value applied to its one operand IS the derived function —
+ * `(/)[+]`, `+/` and the literal `(/;+)` are all this one call. */
+static ray_t* iter_call(ray_t* it, ray_t** args, int64_t n) {
+    if (n != 1) return q_err(QE_RANK);
+    if (!args[0]) return proj_new(it, NULL, args, n, 1);
+    const q_op_t* frow = is_fnval(args[0])
+                             ? q_registry_row_of(args[0], Q_DYADIC) : NULL;
+    return q_eval_apply_deriv_new(q_eval_apply_iter_id(it), args[0], frow);
 }
 
 /* `'` in BRACKET form with VALUES (ref/compose.md): one value derives Each
@@ -1381,6 +1404,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                                    args, n);
     }
     if (kind == Q_EVAL_CAR_COMP) return comp_call(fv, args, n);
+    if (kind == Q_EVAL_CAR_ITER) return iter_call(fv, args, n);
     if (!kind && !is_fnval(fv)) {
         /* the generic null is Identity: `(::) x` / `::[x]` returns x
          * (ref/identity.md) — 101h is a unary primitive, not a noun */
@@ -1693,6 +1717,12 @@ int q_eval_apply_carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
                      ray_str_ptr(src));
         else
             snprintf(buf, bufsz, "{..}");
+        return 1;
+    }
+    if (kind == Q_EVAL_CAR_ITER) {
+        int adv = (int)c[0]->i64;
+        snprintf(buf, bufsz, "%s",
+                 (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
         return 1;
     }
     if (kind == Q_EVAL_CAR_DERIV) {

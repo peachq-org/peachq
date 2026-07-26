@@ -77,10 +77,15 @@ int q_eval_apply_is_fn(ray_t* v);
  * slots in ray_data, kind in aux[0]; serde/wire refuse them via totality
  * fallbacks. */
 enum { Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2, Q_EVAL_CAR_DERIV = 3,
-       Q_EVAL_CAR_COMP = 4 };
+       Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5 };
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
                                ray_t* src);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
+/* An iterator IS a value (103h, basics/datatypes.md); a derived function is
+ * that value applied to its ONE operand.  `_iter_id` reads the adverb id
+ * back out (-1 when v is not an iterator). */
+ray_t* q_eval_apply_iter_new(int adv);
+int    q_eval_apply_iter_id(ray_t* v);
 int    q_eval_apply_carrier_kind(const ray_t* v);   /* 0 = not a carrier */
 int    q_eval_apply_frame_depth(void);              /* lambda frames live */
 ray_t* q_eval_apply_lambda_src(ray_t* v);           /* BORROWED -RAY_STR source,
