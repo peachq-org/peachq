@@ -124,39 +124,8 @@ static ray_t* type_fn(ray_t* x) {
                        : q_err(QE_TYPE);
 }
 
-/* ---- type-char map + table introspection (type-output feature) ----------- */
-
-/* Single home for the kdb type-number -> type-char map (ref/dotq.md `.Q.ty`,
- * `meta`'s `t` column).  Exhaustive switch over the ABSOLUTE type tag; 0 for
- * tags with no char (list 0, guid-gap 3, out-of-band).  Lowercase = the element
- * char; `.Q.ty` uppercases it for a uniform list of vectors. */
-static char type_char(int8_t tag) {
-    int t = tag < 0 ? -tag : tag;                   /* int arith: |INT8_MIN|==128, no UB */
-    if (t <= 0 || t >= RAY_TYPE_COUNT) return 0;    /* list 0, gap 3 & out-of-band: no char */
-    switch ((ray_type_e)t) {                        /* exhaustive: a new member demands a lane */
-    case RAY_LIST:      return 0;                   /* unreachable: filtered above */
-    case RAY_BOOL:      return 'b';
-    case RAY_GUID:      return 'g';
-    case RAY_BYTE_ONLY: return 'x';
-    case RAY_I16:       return 'h';
-    case RAY_I32:       return 'i';
-    case RAY_I64:       return 'j';
-    case RAY_F32:       return 'e';
-    case RAY_F64:       return 'f';
-    case RAY_STR:       return 'c';   /* physical string storage: still char text */
-    case RAY_CHARV:     return 'c';
-    case RAY_SYM:       return 's';
-    case RAY_TIMESTAMP: return 'p';
-    case RAY_MONTH:     return 'm';
-    case RAY_DATE:      return 'd';
-    case RAY_DATETIME:  return 'z';
-    case RAY_TIMESPAN:  return 'n';
-    case RAY_MINUTE:    return 'u';
-    case RAY_SECOND:    return 'v';
-    case RAY_TIME:      return 't';
-    }
-    return 0;   /* SEL(20) etc.: no type char (unchanged) */
-}
+/* ---- table introspection (type-output feature) --------------------------- */
+/* The tag -> type-char map is q_type_char (q_type.c, the type-axis home). */
 
 /* True iff x is a uniform, matrix-mappable list of simple vectors of ONE
  * element type (kdb `.Q.ty` upper-case case, e.g. `3 2#3 4 5` or
@@ -186,9 +155,9 @@ static int uniform_list(ray_t* x, int8_t* elt) {
 char q_ty_char(ray_t* x) {
     int8_t elt;
     if (x && x->type == -RAY_STR) return 'c';                       /* char-vec shim */
-    if (x && ray_is_vec(x))       return type_char((int8_t)x->type);
+    if (x && ray_is_vec(x))       return q_type_char((int8_t)x->type);
     if (uniform_list(x, &elt)) {
-        char lc = type_char(elt);
+        char lc = q_type_char(elt);
         return (char)(lc ? (lc - 'a' + 'A') : ' ');
     }
     return ' ';
@@ -462,6 +431,13 @@ void q_builtins_register(void) {
             assert(v != NULL);
             ray_env_bind(ray_sym_intern(nm, strlen(nm)), v);             /* retains */
         }
+        /* `not` is the keyword spelling of `~:` and must be the SAME value, not
+         * a second row: sharing one object keeps kdb's `~:` parse-tree spelling
+         * (provenance is value-keyed) and shadows base's `not`, which reduces a
+         * vector to one truthiness bool instead of ref/not.md's per-item 0b/1b. */
+        ray_t* nv = q_registry_lookup_name("~", 1, Q_MONADIC);
+        assert(nv != NULL);
+        ray_env_bind(ray_sym_intern("not", 3), nv);
     }
     /* .Q.c.* — the raw C primitives behind the .Q namespace (internal/unstable).
      * dotq.q delegates each public `.Q.<name>` to these (rule 6, loaded next) →
