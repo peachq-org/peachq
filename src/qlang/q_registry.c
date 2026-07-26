@@ -36,6 +36,7 @@
 #include "lang/internal.h" /* ray_sym_str — name display */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 — name interning */
 #include "store/serde.h"   /* ray_serde_set_fn_hooks — fn-value serde round-trip */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_iter_new — the iterator carriers */
 #include <assert.h>
 #include <stdint.h>        /* INT64_MAX */
 #include <stdio.h>         /* snprintf */
@@ -62,9 +63,9 @@ static bool    g_building = false;   /* debug re-entry guard (see header note) *
 /* ===== registry SPECIALS — internal (spelling-less) fn-values ==============
  * ONE plain data table drives the g_specials[] slots, the init build loop,
  * the teardown release loop, and the borrowed-ref accessors below.  Since the
- * eval-rebuild cutover the survivors are PARSER-EMBEDDED MARKER heads: q_eval
- * intercepts them by pointer identity (literal ctors) or leaves them 'nyi
- * (compose, its wave pending) — the bodies never run, so all share spec_nyi.
+ * eval-rebuild cutover the survivors are PARSER-EMBEDDED MARKER heads that
+ * the evaluator intercepts by pointer identity (the literal ctor in q_eval,
+ * compose in the apply module) — the bodies never run, so all share spec_nyi.
  * Accessors return BORROWED refs, NULL before init. */
 enum { SPEC_list, SPEC_compose, SPEC_N };
 
@@ -81,15 +82,22 @@ static const q_special_t SPECIALS[SPEC_N] = {
     /* ctx constructor head: SPECIAL_FORM marker — q_eval builds the literal
      * natively after intercepting it by pointer */
     [SPEC_list]        = { "list",        SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
-    /* compose `'[f;g;…]` head — carrier rebuild is an adverb-wave item */
+    /* compose `'[f;g;…]` head — the apply module's compose_apply claims it */
     [SPEC_compose]     = { "q.compose",   SK_VARY, RAY_FN_NONE,         (void*)spec_nyi },
 };
 _Static_assert(sizeof SPECIALS / sizeof SPECIALS[0] == SPEC_N, "SPECIALS row count must match SPEC_* enum");
 
 static ray_t* g_specials[SPEC_N];
 
+/* the six iterator values (adv 0=' 1=/ 2=\ 3=': 4=/: 5=\:) — immutable
+ * singletons like the specials, so `~` settles them on pointer identity */
+static ray_t* g_iters[6];
+
 ray_t* q_registry_list_value(void)          { return g_specials[SPEC_list]; }          /* borrowed */
 ray_t* q_registry_compose_value(void)       { return g_specials[SPEC_compose]; }
+ray_t* q_registry_iter_value(int adv) {
+    return (adv >= 0 && adv < 6) ? g_iters[adv] : NULL;
+}
 
 /* ---- shared q-name sanitization (.Q.id + construction clash repair) ------ */
 
@@ -324,6 +332,14 @@ ray_err_t q_registry_init(void) {
         }
         g_specials[s] = v;
     }
+    for (int a = 0; a < 6; a++) {
+        ray_t* v = q_eval_apply_iter_new(a);
+        if (!v || RAY_IS_ERR(v)) {
+            if (v) ray_release(v);
+            g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
+        }
+        g_iters[a] = v;
+    }
     g_building = false;
     g_inited   = true;
     ray_serde_set_fn_hooks(serde_fn_writer, serde_fn_reader);
@@ -452,6 +468,8 @@ void q_registry_destroy(void) {
         if (g_entries[i].value) ray_release(g_entries[i].value);
     for (int s = 0; s < SPEC_N; s++)
         if (g_specials[s]) { ray_release(g_specials[s]); g_specials[s] = NULL; }
+    for (int a = 0; a < 6; a++)
+        if (g_iters[a]) { ray_release(g_iters[a]); g_iters[a] = NULL; }
     g_count  = 0;
     g_inited = false;
 }

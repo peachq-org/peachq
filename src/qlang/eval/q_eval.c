@@ -56,11 +56,14 @@ static int is_hole(ray_t* x) {
     return x && x->type == -RAY_SYM && (x->attrs & Q_ATTR_HOLE);
 }
 
-/* adverb spelling -> id (0=' 1=/ 2=\ 3=': 4=/: 5=\:), else -1.
- * Re-interned per call: the sym table is recreated per runtime, so a static
- * id cache goes stale across the C-unit harness's runtimes (interning an
- * existing spelling is a cheap hash hit). */
+/* adverb id (0=' 1=/ 2=\ 3=': 4=/: 5=\:), else -1.  The parser emits the
+ * ITERATOR VALUE, so that is the live reading; the sym spelling is still
+ * honoured for hand-built trees.  Re-interned per call: the sym table is
+ * recreated per runtime, so a static id cache goes stale across the C-unit
+ * harness's runtimes (interning an existing spelling is a cheap hash hit). */
 static int adv_id(ray_t* x) {
+    int it = q_eval_apply_iter_id(x);
+    if (it >= 0) return it;
     if (!nameref(x)) return -1;
     for (int i = 0; i < 6; i++)
         if (x->i64 == sym_id_of(ADVERB_NAMES[i])) return i;
@@ -531,8 +534,12 @@ ray_t* q_eval(ray_t* node) {
                 ray_t* ma = modassign_eval(h, e[1], e[2]);
                 if (ma) { ret = ma; goto out; }
             }
+        }
+
+        {   /* bare (iterator;F) — the derived value; F resolves as the
+             * OPERAND (dyadic-preferring), never as a plain argument */
             int adv = adv_id(h);
-            if (adv >= 0 && n == 2) {               /* bare (adv;F) value */
+            if (adv >= 0 && n == 2) {
                 const q_op_t* frow = NULL;
                 ray_t* F = operand_value(e[1], &frow);
                 if (RAY_IS_ERR(F)) { ret = F; goto out; }

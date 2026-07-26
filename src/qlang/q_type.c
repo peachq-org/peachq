@@ -37,9 +37,10 @@ int q_type_is_num_tag(int8_t t) {
 
 /* ---- the kdb type number of a value (the `type` verb's knowledge) --------- */
 
-/* q `type` as the kdb short: FUNCTION values report 100h lambda / 104h
- * projection / 106+adv derived / 102h operator / 101h generic-null unary; every
- * other value's internal tag ALREADY IS its kdb type number (include/rayforce.h:
+/* q `type` as the kdb short: FUNCTION values report 100h lambda / 102h
+ * operator / 103h iterator / 104h projection / 106+adv derived / 101h
+ * generic-null unary; every other value's internal tag ALREADY IS its kdb
+ * type number (include/rayforce.h:
  * long 7, sym 11, list 0, table 98, dict 99), atoms stored NEGATIVE. A native
  * -RAY_STR string reports -10h (char ATOM) vs kdb's 10h char VECTOR — a recorded
  * string-model divergence (ARCHITECTURE.md; cast/type-deferred.qcmd). Callers on
@@ -49,6 +50,7 @@ int8_t q_type_of(ray_t* x) {
     switch (q_eval_apply_carrier_kind(x)) {
     case Q_EVAL_CAR_LAMBDA: return 100;
     case Q_EVAL_CAR_PROJ:   return 104;
+    case Q_EVAL_CAR_ITER:   return 103;
     case Q_EVAL_CAR_DERIV: {
         ray_t** c = (ray_t**)ray_data(x);
         int adv = c[2] ? (int)c[2]->i64 : 0;
