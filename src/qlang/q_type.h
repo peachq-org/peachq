@@ -46,6 +46,22 @@ const char* q_type_qname(int8_t t);
  * tag has no cast-delegation spelling. */
 const char* q_type_rayname(int8_t tag);
 
+/* THE single tag -> type-char map (ref/dotq.md `.Q.ty`, `meta`'s `t` column).
+ * Absolute or negative tag; 0 for tags with no char.  Lowercase = the element
+ * char; `.Q.ty` uppercases it for a uniform list of vectors. */
+char q_type_char(int8_t tag);
+
+/* THE q result-type law for a mixed-type pair — what TYPE the result carries
+ * (`d&j` -> d), per the "Domain and range" matrix in ref/lesser.md.  Takes
+ * VECTOR-form tags; 0 = the pair has no result type (the guid and symbol rows),
+ * which every caller must reject.  O(1); q_type_init must have run. */
+int8_t q_type_common(int8_t a, int8_t b);
+
+/* Bakes the published matrix into its tag-indexed form.  Idempotent, depends on
+ * nothing but compile-time constants; called from q_registry_init so it is done
+ * before any verb can run. */
+void q_type_init(void);
+
 /* Int-index width in bytes for tag t (8/4/2/1), 0 = not an int index. */
 int q_type_int_index_width(int8_t t);
 

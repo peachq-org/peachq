@@ -70,6 +70,18 @@ int sym_atom_cmp(ray_t* a, ray_t* b) {
     return r;
 }
 
+/* Atoms as_i64 reads EXACTLY.  A double cannot separate longs past 2^53
+ * (9007199254740993 > 9007199254740992 read as equal), and min2/max2 turn that
+ * into a wrong VALUE, not just a wrong flag — so an all-integer pair compares
+ * on the integer lane, as ray_eq_fn already does.  Bools and the i32-backed
+ * temporals stay on the f64 tail: exact there, and as_i64's fallback is not. */
+static inline int int_cmp_lane(ray_t* x) {
+    return x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16 ||
+           ray_is_bytelike(-x->type);
+}
+#define INT_CMP_LANE(a, b, op) \
+    if (int_cmp_lane(a) && int_cmp_lane(b)) return make_bool(as_i64(a) op as_i64(b) ? 1 : 0)
+
 /* Comparison */
 ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c > 0 ? 1 : 0); }
@@ -94,6 +106,7 @@ ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
     if (na && nb) return make_bool(0);       /* null == null → not > */
     if (na) return make_bool(0);             /* null > X → false */
     if (nb) return make_bool(1);             /* X > null → true */
+    INT_CMP_LANE(a, b, >);
     return make_bool(as_f64(a) > as_f64(b) ? 1 : 0);
 }
 
@@ -119,6 +132,7 @@ ray_t* ray_lt_fn(ray_t* a, ray_t* b) {
     if (na && nb) return make_bool(0);       /* null == null → not < */
     if (na) return make_bool(1);             /* null < X → true */
     if (nb) return make_bool(0);             /* X < null → false */
+    INT_CMP_LANE(a, b, <);
     return make_bool(as_f64(a) < as_f64(b) ? 1 : 0);
 }
 
@@ -145,6 +159,7 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
     if (na && nb) return make_bool(1);       /* null == null → >= true */
     if (na) return make_bool(0);             /* null >= X → false */
     if (nb) return make_bool(1);             /* X >= null → true */
+    INT_CMP_LANE(a, b, >=);
     return make_bool(as_f64(a) >= as_f64(b) ? 1 : 0);
 }
 
@@ -171,9 +186,26 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
     if (na && nb) return make_bool(1);       /* null == null → <= true */
     if (na) return make_bool(1);             /* null <= X → true */
     if (nb) return make_bool(0);             /* X <= null → false */
+    INT_CMP_LANE(a, b, <=);
     return make_bool(as_f64(a) <= as_f64(b) ? 1 : 0);
 }
 
+
+/* Lesser/Greater pick an OPERAND rather than deciding a bool, so they route
+ * through the ordering above: min2/max2 can never disagree with </>.  These are
+ * the eager twins of the OP_MIN2/OP_MAX2 DAG nodes (ops/graph.c), which had
+ * builders but no kernel. */
+static ray_t* cmp_pick(ray_t* a, ray_t* b, int want_lt) {
+    ray_t* c = want_lt ? ray_lt_fn(a, b) : ray_gt_fn(a, b);
+    if (RAY_IS_ERR(c)) return c;
+    ray_t* w = c->b8 ? a : b;
+    ray_release(c);
+    ray_retain(w);
+    return w;
+}
+
+ray_t* ray_min2_fn(ray_t* a, ray_t* b) { return cmp_pick(a, b, 1); }
+ray_t* ray_max2_fn(ray_t* a, ray_t* b) { return cmp_pick(a, b, 0); }
 
 ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
     /* Handle null forms (RAY_NULL_OBJ, typed null atoms) */
