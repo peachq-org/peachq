@@ -107,6 +107,7 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y);
 ray_t* q_eq_wrap(ray_t* a, ray_t* b);
 ray_t* q_ne_wrap(ray_t* a, ray_t* b);
 ray_t* q_neg_wrap(ray_t* x);
+ray_t* q_not_wrap(ray_t* x);
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
@@ -167,6 +168,7 @@ ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, 
 
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
+ray_t* q_max2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
 /* q_match_rec: declared in q_registry.h (env-safe reach) — used by: table, apply */
 ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
 

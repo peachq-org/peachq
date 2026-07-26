@@ -12,15 +12,13 @@
  *   - q `=`/`<>` dyadic wrap rayfall `==`/`!=` (char-string element-wise case);
  *     q `#`/`_` dyadic are arg-swap `take` / count-`drop` wrappers.
  *   - q `,` dyadic is join -> rayfall `concat`.
- * DEFERRED (QR_NONE — no clean rayfall target, do NOT guess): `|` dyadic
- *   (max: rayfall has NO dyadic element-wise max — `max` is register_unary
- *   AGGREGATE, `and`/`or` are register_vary scalar special forms — so wiring
- *   it needs a q_max2_wrap twin of q_min2_wrap = new logic, HELD), monadic `%`
- *   (reciprocal: no builtin).  Dyadic `&` is the q_min2_wrap recipe
- *   (element-wise min / bool-and) — the `and` keyword reuses it.  `any`/`all`
+ * DEFERRED (QR_NONE — no clean rayfall target, do NOT guess): monadic `%`
+ *   (reciprocal: no builtin).  Dyadic `&`/`|` are the q_min2_wrap/q_max2_wrap
+ *   recipes (Lesser/Greater over ray_min2_fn/ray_max2_fn plus the ref/lesser.md
+ *   result-type matrix) — the `and`/`or` keywords reuse them.  `any`/`all`
  *   keep QR_NONE rows to reserve the name and fix the lexical class, but they
  *   are no longer deferred — their VALUE is self-hosted in q.q (see their rows
- *   below); `or` (|-max keyword) is not rostered until `|`-max lands.
+ *   below).
  *
  * Wrapper recipes carry the wrapper FUNCTION POINTER directly (QR_FN*); the
  * bodies live in the domain q_wrap_*.c files and are documented THERE — the
@@ -169,18 +167,19 @@ static const q_op_t Q_OPS[] = {
      * it is a deliberate SUPERSET of q source; the VALUE is kdb-identical
      * (kdb's own floor IS k `_:`).  Family = dyadic Drop (L4). */
     { "_",     QLEX_GLYPH,     QR_FN1A("floor", q_floor_wrap), QR_FN2("drop", q_drop_wrap), NULL, 1, 0, "index", NULL },
-    /* `|` dyadic (max) is a deferred cell (atomic when it lands); family =
-     * monadic reverse (L4 — spec §2). */
-    { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_NONE,           NULL, 1, 0, "index", "max", .mono_scan = "maxs" },
+    /* `|` monadic is reverse (index — the `reverse` row); family = dyadic
+     * Greater/max (atomic, ref/greater.md). */
+    { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_FN2A("or", q_max2_wrap), NULL, 1, 0, "atomic", "max", .mono_scan = "maxs" },
     /* `&` monadic is where (index — the `where` row, a §9 border); family =
      * dyadic Lesser/min (atomic, ref/lesser.md). */
     { "&",     QLEX_GLYPH,     QR_FN1("where", q_where_wrap),  QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", "min", .mono_scan = "mins" },
     /* `,` — enlist / join: both construct structure (table,record-dict is
      * upsert semantics — see q_join_wrap). */
     { ",",     QLEX_GLYPH,     QR_ENV("enlist"),               QR_FN2("concat", q_join_wrap), NULL, 1, 0, "structural", "raze" },
-    /* `~` monadic is not (atomic); family = dyadic Match — reduces to one
+    /* `~` monadic is not (ATOMIC — declared on the recipe, since the family
+     * column below speaks for the DYAD); family = dyadic Match — reduces to one
      * bool atom (near-border: does NOT follow the L3 value-law; see AUDIT). */
-    { "~",     QLEX_GLYPH,     QR_ENV("not"),                  QR_FN2("match", q_match_wrap), NULL, 1, 0, "aggregate", NULL },
+    { "~",     QLEX_GLYPH,     QR_FN1A("not", q_not_wrap),     QR_FN2("match", q_match_wrap), NULL, 1, 0, "aggregate", NULL },
     /* q `x^y` — fill: coalesce nulls in y with x ("Fill is an atomic
      * function", ref/fill.md).  `^` already lexes as a verb glyph
      * (VERB_CHARS); this row gives it a registry value.  Monadic `^x`
@@ -233,15 +232,12 @@ static const q_op_t Q_OPS[] = {
      * vector y via base ray_in_fn; generic-list y is whole-item, rank-
      * sensitive.  rowid: needs item equality (set-op predicate). */
     { "in",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "rowid", NULL },
-    /* q `and` — keyword spelling of `&` (element-wise min / logical AND,
-     * ref/and.md, ref/lesser.md: atomic).  REUSES the SAME q_min2_wrap kernel
-     * the glyph `&` routes to — no new logic.  Numeric/bool are kdb-true
-     * (`2 and 3`->2, `1010b and 1100b`->1000b); the char-min arm (`"sat" and
-     * "cow"`->"cat") is a shared q_min2_wrap gap (DEFERRED, needs a char arm =
-     * new logic).  Monadic cell stays QR_NONE: q `and` is dyadic-only, so
-     * prefix `and x` misses and eval falls through to rayfall's scalar `and`
-     * special form (DEFERRED edge — a monadic wrapper would be new logic). */
+    /* q `and`/`or` — keyword spellings of `&`/`|` (ref/lesser.md,
+     * ref/greater.md: atomic), REUSING the same wrappers the glyphs route to.
+     * Monadic cells stay QR_NONE: both are dyadic-only in q, so prefix `and x`
+     * misses and eval falls through to rayfall's scalar special form. */
     { "and",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", NULL },
+    { "or",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("or", q_max2_wrap), NULL, 1, 0, "atomic", NULL },
     /* q `x within y` — inclusive bounds check (ref/within.md).  y is BOUNDS,
      * not an operand conforming to x, so no lift law fits: family `none` and
      * the wrapper takes whole args.  Border ruling: see FAMILY AUDIT. */

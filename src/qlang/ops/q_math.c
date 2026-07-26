@@ -306,28 +306,37 @@ ray_t* q_ne_wrap(ray_t* a, ray_t* b) {
     return ray_neq_fn(a, b);
 }
 
-/* q dyadic `&` — min / boolean-and.  The wrapper is registered ATOMIC, so
- * vector/scalar and vector/vector cases are mapped by eval over atom pairs. */
-ray_t* q_min2_wrap(ray_t* a, ray_t* b) {
+/* q dyadic `&`/`|` — Lesser/Greater: min/max, and on flags boolean and/or.
+ * ref/lesser.md gives "the lesser of their underlying VALUES returned as the
+ * higher of the two TYPES" — a compare-and-retag, never a promoted
+ * computation, so the whole domain is one ordering probe (ray_min2_fn) plus
+ * the printed result-type matrix (q_type_common) discharged through THE cast
+ * home.  Registered ATOMIC: eval maps the vector/dict/table shapes. */
+static ray_t* minmax2(ray_t* a, ray_t* b, int want_min) {
     if (!a || !b || !ray_is_atom(a) || !ray_is_atom(b))
         return q_err(QE_TYPE);
-    if (a->type == -RAY_BOOL && b->type == -RAY_BOOL)
-        return ray_bool(a->b8 && b->b8);
-    if (a->type == -RAY_F64 || b->type == -RAY_F64 ||
-        a->type == -RAY_F32 || b->type == -RAY_F32) {
-        double av = as_f64(a);
-        double bv = as_f64(b);
-        return ray_f64(av <= bv ? av : bv);
-    }
-    if ((a->type == -RAY_I64 || a->type == -RAY_I32 || a->type == -RAY_I16 ||
-         a->type == -RAY_BYTE_ONLY || a->type == -RAY_BOOL) &&
-        (b->type == -RAY_I64 || b->type == -RAY_I32 || b->type == -RAY_I16 ||
-         b->type == -RAY_BYTE_ONLY || b->type == -RAY_BOOL)) {
-        int64_t av = (a->type == -RAY_BOOL) ? a->b8 : as_i64(a);
-        int64_t bv = (b->type == -RAY_BOOL) ? b->b8 : as_i64(b);
-        return ray_i64(av <= bv ? av : bv);
-    }
-    return q_err(QE_TYPE);
+    int8_t ta = (int8_t)-a->type, tb = (int8_t)-b->type;
+    int8_t t = q_type_common(ta, tb);
+    if (!t) return q_err(QE_TYPE);
+    ray_t* r = want_min ? ray_min2_fn(a, b) : ray_max2_fn(a, b);
+    /* the matrix diagonal is the identity, so a same-tag pair needs no retag */
+    if (ta == tb || !r || RAY_IS_ERR(r)) return r;
+    ray_t* c = q_dollar_cast(t, r);
+    ray_release(r);
+    return c;
+}
+
+ray_t* q_min2_wrap(ray_t* a, ray_t* b) { return minmax2(a, b, 1); }
+ray_t* q_max2_wrap(ray_t* a, ray_t* b) { return minmax2(a, b, 0); }
+
+/* q `not x` — "0b where x is not equal to zero, and 1b otherwise" (ref/not.md).
+ * That IS `x=0`: ray_eq_fn already owns every lane's zero, the null rule
+ * ("nulls and infinities never equal zero") and the symbol refusal. */
+ray_t* q_not_wrap(ray_t* x) {
+    ray_t* z = ray_i64(0);
+    ray_t* r = ray_eq_fn(x, z);
+    ray_release(z);
+    return r;
 }
 
 /* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
