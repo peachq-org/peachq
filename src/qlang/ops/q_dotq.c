@@ -1,11 +1,15 @@
 /* ops/q_dotq.c — the .Q introspection surface: .Q.ty / .Q.qt / .Q.qp / .Q.s
- * (via the .Q.c.* C seam) and .Q.ops (the manifest as a read-only table).
+ * (via the .Q.c.* C seam) and .Q.ops (the whole verb surface as a read-only
+ * table: the C manifest unioned with the q-source stdlib).
  * Evicted from q_builtins.c; the type-letter kernel (q_ty_char) stays there. */
 #include "qlang/q_builtins.h"   /* q_ty_char + this file's decls */
 #include "qlang/q_err.h"
 #include "qlang/q_ops.h"        /* q_ops_table — the .Q.ops source */
 #include "qlang/q_type.h"       /* q_type_is_keyed — .Q.qt keyed arm */
 #include "qlang/q_fmt.h"        /* .Q.s — the q console display string */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_rank — .Q.ops q-side valence */
+#include "qlang/q_registry.h"   /* q_registry_qsrc_ns — the `.q` roster */
+#include "table/dict.h"         /* ray_dict_find_sym — the `.q` roster probe */
 #include "lang/internal.h"
 #include "table/sym.h"
 #include <string.h>
@@ -86,29 +90,28 @@ ray_t* q_dotq_s_fn(ray_t* x) {
     return r;
 }
 
-/* ---- .Q.ops — Q_OPS[] as a read-only introspection table ------------------
- * (.Q.ops[]) materializes the verb manifest (src/qlang/q_ops.c) as a fresh
- * unkeyed table each call, so user code can query the op roster without any
- * path into the immutable registry — mutating the returned table cannot change
- * how verbs resolve.  OWNER RULING 2026-07-14: lives under `.Q` (openq
- * extension entry beside .Q.qt/.Q.qp; kdb has no .Q.ops).  Columns:
- *   name          sym   verb spelling
- *   lexclass      sym   `glyph / `kw_infix / `kw_prefix / `adverb (QLEX_*)
- *   monadic       bool  1b iff Q_OPS gives a build recipe at the monadic slot
- *                       (mon.kind != QK_NONE).  NB for the VARY prefix-keyword
- *                       verbs (ej/aj/wj/... — QR_ENV in the monadic slot) this
- *                       means "resolvable in prefix/bracket position", NOT that
- *                       the verb is strictly arity-1; true arity is not modelled
- *                       in the manifest.
- *   dyadic        bool  1b iff Q_OPS gives a build recipe at the dyadic slot
- *   deterministic bool  1b unless the verb's result is nondeterministic
- *   sideeffect    bool  1b iff evaluation performs an observable side effect
- *   family        sym   structure-dispatch family (`atomic`map`aggregate`index
- *                       `rowid`structural`irregular`none — q_ops.h vocabulary,
- *                       FAMILY AUDIT in q_ops.c; pure metadata this stage)
- * Per-verb help strings live in docs/q-ops-help.tsv (archival, not in the binary).
- * The x argument (`.Q.ops[]` passes `::`) is ignored — the table is constant
- * per build, keyed only off the static manifest. */
+/* ---- .Q.ops — the whole verb surface as a read-only introspection table ----
+ * (.Q.ops[]) materializes the roster fresh each call, so user code can query it
+ * without any path into the immutable registry — mutating the returned table
+ * cannot change how verbs resolve.  OWNER RULING 2026-07-14: lives under `.Q`
+ * (openq extension beside .Q.qt/.Q.qp; kdb has no .Q.ops).
+ * The surface has TWO homes and this is their UNION (`impl` says which):
+ *   `c  a Q_OPS[] row (src/qlang/q_ops.c) carrying a C build recipe;
+ *   `q  the definition is q source in q.q.  Prefix keywords defined there get
+ *       NO manifest row by design (docs/adding-q-function-guide.md) — the bare
+ *       name resolves through `.q` — so they are gathered from that namespace,
+ *       as are the QK_QSRC rows (a lexer row over a q.q body).
+ * Columns: name lexclass monadic dyadic deterministic sideeffect family impl.
+ * `monadic`/`dyadic` for an `impl`q` row is the RANK of the value that actually
+ * runs (0b/0b when it has no fixed rank); for an `impl`c` row it is "the
+ * manifest gives a recipe at that slot" — for the VARY prefix keywords
+ * (ej/aj/wj...) that means "resolvable in prefix position", not arity 1.
+ * `deterministic`/`sideeffect`/`family` are manifest data: an `impl`q` row with
+ * no manifest row of its own carries the neutral 1b/0b, NOT an audit, and a NULL
+ * family — `none is an operative lift-law value (exception-catalogue membership),
+ * so family is inapplicable here, not unclassified.
+ * Per-verb help strings live in docs/q-ops-help.tsv (archival, not the binary).
+ * The x argument (`.Q.ops[]` passes `::`) is ignored. */
 static const char* dotq_lexclass_name(q_lex_class c) {
     switch (c) {
     case QLEX_GLYPH:     return "glyph";
@@ -119,61 +122,78 @@ static const char* dotq_lexclass_name(q_lex_class c) {
     return "unknown";
 }
 
+#define DOTQ_OPS_NCOLS 8
+
+static void dotq_ops_row(ray_t** c, int* ok, int64_t nm, const char* lex,
+                         uint8_t mon, uint8_t dya, uint8_t det, uint8_t eff,
+                         const char* fam, const char* impl) {
+    if (!*ok) return;
+    int64_t lexi = ray_sym_intern(lex, strlen(lex));
+    int64_t fami = ray_sym_intern(fam, strlen(fam));
+    int64_t impi = ray_sym_intern(impl, strlen(impl));
+    const void* cell[DOTQ_OPS_NCOLS] =
+        { &nm, &lexi, &mon, &dya, &det, &eff, &fami, &impi };
+    for (int i = 0; i < DOTQ_OPS_NCOLS; i++) {
+        c[i] = ray_vec_append(c[i], cell[i]);
+        if (!c[i] || RAY_IS_ERR(c[i])) { *ok = 0; return; }
+    }
+}
+
 ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
     (void)args; (void)nargs;                   /* `.Q.ops[]` / `.Q.ops x` — arg ignored */
     int n = 0;
     const q_op_t* ops = q_ops_table(&n);
-    int64_t cap = n > 0 ? n : 1;
-    ray_t* name = ray_sym_vec_new(RAY_SYM_W64, cap);
-    ray_t* lexc = ray_sym_vec_new(RAY_SYM_W64, cap);
-    ray_t* mon  = ray_vec_new(RAY_BOOL, cap);
-    ray_t* dya  = ray_vec_new(RAY_BOOL, cap);
-    ray_t* det  = ray_vec_new(RAY_BOOL, cap);
-    ray_t* eff  = ray_vec_new(RAY_BOOL, cap);
-    ray_t* fam  = ray_sym_vec_new(RAY_SYM_W64, cap);
-    ray_t* cols[7] = { name, lexc, mon, dya, det, eff, fam };
-    for (int i = 0; i < 7; i++)
-        if (!cols[i] || RAY_IS_ERR(cols[i])) {
-            for (int j = 0; j < 7; j++)
-                if (cols[j] && !RAY_IS_ERR(cols[j])) ray_release(cols[j]);
-            return q_err(QE_WSFULL);
-        }
-    int ok = 1;
+    ray_t* ns   = q_registry_qsrc_ns();            /* borrowed */
+    ray_t* nsk  = ns ? ray_dict_keys(ns) : NULL;   /* borrowed */
+    ray_t* nsv  = ns ? ray_dict_vals(ns) : NULL;   /* borrowed */
+    int64_t nsn = nsk ? ray_len(nsk) : 0;
+    int64_t cap = n + nsn > 0 ? n + nsn : 1;
+    ray_t* c[DOTQ_OPS_NCOLS];
+    for (int i = 0; i < DOTQ_OPS_NCOLS; i++)
+        c[i] = (i == 2 || i == 3 || i == 4 || i == 5) ? ray_vec_new(RAY_BOOL, cap)
+                                                      : ray_sym_vec_new(RAY_SYM_W64, cap);
+    uint8_t* taken = calloc(nsn > 0 ? (size_t)nsn : 1, 1);
+    int ok = taken != NULL;
+    for (int i = 0; i < DOTQ_OPS_NCOLS; i++)
+        if (!c[i] || RAY_IS_ERR(c[i])) ok = 0;
     for (int i = 0; i < n && ok; i++) {
-        int64_t nm  = ray_sym_intern(ops[i].name, strlen(ops[i].name));
-        const char* lc = dotq_lexclass_name(ops[i].lex);
-        int64_t lci = ray_sym_intern(lc, strlen(lc));
+        int64_t nm = ray_sym_intern(ops[i].name, strlen(ops[i].name));
         uint8_t bm = ops[i].mon.kind  != QK_NONE;
         uint8_t bd = ops[i].dyad.kind != QK_NONE;
-        uint8_t bt = ops[i].deterministic ? 1 : 0;
-        uint8_t be = ops[i].sideeffect ? 1 : 0;
-        int64_t fmi = ray_sym_intern(ops[i].family, strlen(ops[i].family));
-        name = ray_vec_append(name, &nm);
-        lexc = ray_vec_append(lexc, &lci);
-        mon  = ray_vec_append(mon,  &bm);
-        dya  = ray_vec_append(dya,  &bd);
-        det  = ray_vec_append(det,  &bt);
-        eff  = ray_vec_append(eff,  &be);
-        fam  = ray_vec_append(fam,  &fmi);
-        if (!name || RAY_IS_ERR(name) || !lexc || RAY_IS_ERR(lexc) ||
-            !mon || RAY_IS_ERR(mon) || !dya || RAY_IS_ERR(dya) ||
-            !det || RAY_IS_ERR(det) || !eff || RAY_IS_ERR(eff) ||
-            !fam || RAY_IS_ERR(fam)) ok = 0;
+        /* a row is q-implemented only when NO slot carries a C recipe */
+        int has_c = (ops[i].mon.kind  != QK_NONE && ops[i].mon.kind  != QK_QSRC) ||
+                    (ops[i].dyad.kind != QK_NONE && ops[i].dyad.kind != QK_QSRC);
+        int64_t qi = has_c ? -1 : ray_dict_find_sym(ns, nm);
+        if (qi >= 0) {
+            taken[qi] = 1;
+            int64_t r = q_eval_apply_rank(ray_list_get(nsv, qi));
+            bm = r == 1;
+            bd = r == 2;
+        }
+        dotq_ops_row(c, &ok, nm, dotq_lexclass_name(ops[i].lex), bm, bd,
+                     ops[i].deterministic != 0, ops[i].sideeffect != 0,
+                     ops[i].family, qi >= 0 ? "q" : "c");
     }
-    ray_t* built[7] = { name, lexc, mon, dya, det, eff, fam };
+    for (int64_t j = 0; j < nsn && ok; j++) {
+        if (taken[j]) continue;
+        int64_t r = q_eval_apply_rank(ray_list_get(nsv, j));
+        dotq_ops_row(c, &ok, ray_read_sym(ray_data(nsk), j, RAY_SYM, nsk->attrs),
+                     "kw_prefix", r == 1, r == 2, 1, 0, "", "q");
+    }
+    free(taken);
     if (!ok) {
-        for (int j = 0; j < 7; j++)
-            if (built[j] && !RAY_IS_ERR(built[j])) ray_release(built[j]);
+        for (int i = 0; i < DOTQ_OPS_NCOLS; i++)
+            if (c[i] && !RAY_IS_ERR(c[i])) ray_release(c[i]);
         return q_err(QE_WSFULL);
     }
-    static const char* colnames[7] =
+    static const char* colnames[DOTQ_OPS_NCOLS] =
         { "name", "lexclass", "monadic", "dyadic", "deterministic", "sideeffect",
-          "family" };
-    ray_t* t = ray_table_new(7);
-    for (int i = 0; i < 7; i++) {
+          "family", "impl" };
+    ray_t* t = ray_table_new(DOTQ_OPS_NCOLS);
+    for (int i = 0; i < DOTQ_OPS_NCOLS; i++) {
         if (!RAY_IS_ERR(t))               /* stop adding once errored... */
-            t = ray_table_add_col(t, ray_sym_intern(colnames[i], strlen(colnames[i])), built[i]);
-        ray_release(built[i]);            /* ...but always drop our ref (add_col retains) */
+            t = ray_table_add_col(t, ray_sym_intern(colnames[i], strlen(colnames[i])), c[i]);
+        ray_release(c[i]);                /* ...but always drop our ref (add_col retains) */
     }
     return t;
 }

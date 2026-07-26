@@ -398,6 +398,11 @@ ray_err_t q_registry_bind_qsrc(void) {
     return RAY_OK;
 }
 
+ray_t* q_registry_qsrc_ns(void) {
+    ray_t* v = ray_env_get(ray_sym_intern(".q", 2));      /* borrowed */
+    return (v && !RAY_IS_ERR(v) && v->type == RAY_DICT) ? v : NULL;
+}
+
 ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence) {
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].sym_id == sym_id && g_entries[i].valence == valence)
