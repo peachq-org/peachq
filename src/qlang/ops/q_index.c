@@ -374,11 +374,15 @@ static ray_t* keyed_at(ray_t* x, ray_t* i) {
 
 static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     if (!i0 || RAY_IS_NULL(i0)) {                    /* `::`: identity / all */
+        /* `x[::]` IS x for every structure (ref/identity.md; ref/apply.md:151
+         * "selects the entire left argument"); an ATOM is not applicable, so it
+         * keeps signalling 'type (identity.qcmd pins `3[::]`). */
+        if (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE)
+            return q_err(QE_TYPE);
+        if (k == 0) { ray_retain(x); return x; }
         if (x->type == RAY_DICT && !q_type_is_keyed(x))
             return index_map(ray_dict_slots(x)[1], NULL, rest, k);
         if (x->type == RAY_DICT || x->type == RAY_TABLE) return q_err(QE_NYI);
-        if (!is_coll(x)) return q_err(QE_TYPE);
-        if (k == 0) { ray_retain(x); return x; }
         return index_map(x, NULL, rest, k);
     }
     if (x->type == RAY_TABLE) {                      /* pure delegation */
