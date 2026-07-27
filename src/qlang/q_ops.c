@@ -112,6 +112,12 @@
  *                      output shape — vs xkey which is pure structural)
  *   cross  -> structural (generates the product structure; no identity, no
  *                      index law — ref/cross.md)
+ *   # _    -> none    (take/drop ARE index gathers, but the left arg picks the
+ *                      arm — int atom, int vector reshape, sym vector keys,
+ *                      table keys — so the lift's `op til count x` question is
+ *                      only ever asked of ONE of them.  Their container laws
+ *                      live in the wrapper, which is why `(count t)#t` is `t[::]`
+ *                      and not a materialised `til`; ruled 2026-07-27)
  *   count  -> none    (a mapping counts its DOMAIN, so the L3 `agg value d`
  *                      law is wrong for it — ref/count.md; landed 44d86eb4,
  *                      recorded here 2026-07-24)
@@ -160,13 +166,14 @@ static const q_op_t Q_OPS[] = {
     { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic", NULL },
     { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic", NULL },
     /* ---- structural glyphs ---- */
-    /* `#` monadic is count (family `none` — see the `count` row); family = dyadic
-     * Take, the L4 pilot op (`-3#t`).  The arg-swap lives in q_take_wrap. */
-    { "#",     QLEX_GLYPH,     QR_ENV("count"),                QR_FN2("take", q_take_wrap), NULL, 1, 0, "index", NULL },
+    /* `#` monadic is count (family `none` — see the `count` row); dyadic Take is
+     * `none` too (FAMILY AUDIT): its left arg SELECTS the arm, so a container
+     * must reach q_take_wrap whole. */
+    { "#",     QLEX_GLYPH,     QR_ENV("count"),                QR_FN2("take", q_take_wrap), NULL, 1, 0, "none", NULL },
     /* monadic `_` is a K-ism (valid q spells it `floor`, atomic) — accepting
      * it is a deliberate SUPERSET of q source; the VALUE is kdb-identical
-     * (kdb's own floor IS k `_:`).  Family = dyadic Drop (L4). */
-    { "_",     QLEX_GLYPH,     QR_FN1A("floor", q_floor_wrap), QR_FN2("drop", q_drop_wrap), NULL, 1, 0, "index", NULL },
+     * (kdb's own floor IS k `_:`).  Dyadic Drop is `none` for Take's reason. */
+    { "_",     QLEX_GLYPH,     QR_FN1A("floor", q_floor_wrap), QR_FN2("drop", q_drop_wrap), NULL, 1, 0, "none", NULL },
     /* `|` monadic is reverse (index — the `reverse` row); family = dyadic
      * Greater/max (atomic, ref/greater.md). */
     { "|",     QLEX_GLYPH,     QR_ENV("reverse"),              QR_FN2A("or", q_max2_wrap), NULL, 1, 0, "atomic", "max", .mono_scan = "maxs" },
