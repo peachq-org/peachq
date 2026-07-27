@@ -70,15 +70,19 @@ ray_t* q_uj_wrap(ray_t* x, ray_t* y);
 ray_t* q_ujf_wrap(ray_t* x, ray_t* y);
 ray_t* q_asof_wrap(ray_t* t, ray_t* d);
 
-/* ---- defined in ops/q_list.c ---- */
+/* ---- defined in ops/q_takedrop.c ---- */
 ray_t* q_drop_wrap(ray_t* n, ray_t* list);                    /* also shared: index (splice) */
 ray_t* q_cut_wrap(ray_t* n, ray_t* x);
 ray_t* q_rotate_wrap(ray_t* n, ray_t* x);
-ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
-ray_t* q_fills_wrap(ray_t* x);
+
+/* ---- defined in ops/q_sort.c ---- */
 ray_t* q_iasc_wrap(ray_t* x);
 ray_t* q_idesc_wrap(ray_t* x);
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
+
+/* ---- defined in ops/q_list.c ---- */
+ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
+ray_t* q_fills_wrap(ray_t* x);
 ray_t* q_raze_wrap(ray_t* x);
 ray_t* q_where_wrap(ray_t* x);
 
@@ -157,10 +161,16 @@ int qj_same_schema(ray_t* a, ray_t* b);                       /* used by: table 
 ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: table, list */
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, table */
 
+/* ---- defined in ops/q_attr.c ---- */
+ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
+ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec);               /* used by: takedrop (`#`'s set-attribute arm) */
+/* q_attr_letter / q_attr_set_letter: declared in q_registry.h — used by: fmt, tests */
+
+/* ---- defined in ops/q_takedrop.c ---- */
+ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry, index */
+
 /* ---- defined in ops/q_list.c ---- */
 ray_t* q_list_collapse(ray_t* l);                             /* also declared in q_registry.h (env-safe public reach) — used by: eval, builtins, fmt, json, wire, agg, dollar, io, join, list, math, table, index */
-ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
-ray_t* q_take_wrap(ray_t* n, ray_t* list);                    /* used by: ops, registry, index */
 /* q_typed_empty_like: declared in q_registry.h (env-safe reach) — used by: index, apply */
 ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: registry, agg, join */
