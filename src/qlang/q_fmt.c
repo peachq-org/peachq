@@ -678,7 +678,22 @@ static int matrix_alignable(int8_t type) {
            type == RAY_DATETIME;
 }
 
-static void matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
+/* A row of syms prints BARE (`2 4#`Arthur..`); a sym inside a MIXED row keeps
+ * its backtick — there it is the only thing telling `x from a char. */
+static int row_all_sym(ray_t* v) {
+    if (!v) return 0;
+    if (v->type == RAY_SYM) return 1;
+    if (v->type != RAY_LIST) return 0;
+    int64_t n = ray_len(v);
+    if (n == 0) return 0;
+    ray_t** e = (ray_t**)ray_data(v);
+    for (int64_t i = 0; i < n; i++)
+        if (!e[i] || e[i]->type != -RAY_SYM) return 0;
+    return 1;
+}
+
+/* `bare` = row_all_sym(rv), computed ONCE per row by the caller. */
+static void matrix_cell(ray_t* rv, int64_t c, int bare, char* out, size_t outsz) {
     out[0] = '\0';
     switch (rv->type) {
     case RAY_I16: int_tok((int64_t)((const int16_t*)ray_data(rv))[c], 2, 0, out, outsz); break;
@@ -697,7 +712,9 @@ static void matrix_cell(ray_t* rv, int64_t c, char* out, size_t outsz) {
         if (!a) break;
         if (a->type == -RAY_SYM) {
             ray_t* s = ray_sym_str(a->i64);   /* borrowed */
-            if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
+            const char* tick = bare ? "" : "`";
+            if (s) snprintf(out, outsz, "%s%.*s", tick,
+                            (int)ray_str_len(s), ray_str_ptr(s));
         } else if (a->type == -RAY_STR) {
             if (ray_str_len(a) == 1 && outsz > 1) {
                 out[0] = ',';
@@ -740,6 +757,26 @@ static int matrix_row_ok(ray_t* r) {
     return 0;
 }
 
+/* One row into a buffer: cells space-joined, each padded to w[c] (w NULL =
+ * unpadded); trailing pad trimmed.  THE row renderer, shared by the matrix,
+ * the dict value column and the enlist arm. */
+static void matrix_row_str(ray_t* row, int64_t nc, const int* w,
+                           char* out, size_t outsz) {
+    size_t pos = 0;
+    int bare = row_all_sym(row);
+    out[0] = '\0';
+    for (int64_t c = 0; c < nc; c++) {
+        char cb[512]; matrix_cell(row, c, bare, cb, sizeof cb);
+        if (c && pos + 1 < outsz) out[pos++] = ' ';
+        int l = (int)strlen(cb);
+        int pad = w ? w[c] : l;
+        for (int k = 0; k < pad && pos + 1 < outsz; k++)
+            out[pos++] = (k < l) ? cb[k] : ' ';
+    }
+    while (pos > 0 && out[pos - 1] == ' ') pos--;
+    out[pos] = '\0';
+}
+
 /* e[0..n) is >=2 same-length alignable rows: a LEFT-aligned matrix (ref/mmu.md). */
 static int is_matrix(ray_t** e, int64_t n) {
     if (n < 2) return 0;
@@ -751,27 +788,34 @@ static int is_matrix(ray_t** e, int64_t n) {
     return 1;
 }
 
+/* Column widths over nr rows; NULL on OOM.  Caller frees unless == stackw. */
+static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int* stackw, int64_t stackn) {
+    int* w = (nc <= stackn) ? stackw : malloc((size_t)(nc > 0 ? nc : 1) * sizeof(int));
+    if (!w) return NULL;
+    for (int64_t c = 0; c < nc; c++) w[c] = 0;
+    for (int64_t r = 0; r < nr; r++) {          /* rows outer: one row_all_sym each */
+        int bare = row_all_sym(e[r]);
+        for (int64_t c = 0; c < nc; c++) {
+            char cb[512]; matrix_cell(e[r], c, bare, cb, sizeof cb);
+            int l = (int)strlen(cb); if (l > w[c]) w[c] = l;
+        }
+    }
+    return w;
+}
+
 static void fmt_matrix(ray_t** e, int64_t nr) {
     int64_t nc = ray_len(e[0]);
     /* no fixed column cap; clip-armed sizing scans showable rows only */
     int  stackw[64];
-    int* widths = (nc <= 64) ? stackw : malloc((size_t)(nc > 0 ? nc : 1) * sizeof(int));
+    int* widths = matrix_widths(e, size_rows(nr), nc, stackw, 64);
     if (!widths) return;
-    int64_t nr_size = size_rows(nr);
-    for (int64_t c = 0; c < nc; c++) {
-        int w = 0;
-        for (int64_t r = 0; r < nr_size; r++) {
-            char cb[512]; matrix_cell(e[r], c, cb, sizeof cb);
-            int l = (int)strlen(cb); if (l > w) w = l;
-        }
-        widths[c] = w;
-    }
     for (int64_t r = 0; r < nr; r++) {
         if (qe_done()) break;                    /* height cap hit — early exit */
         if (r) qe_putc('\n');
+        int bare = row_all_sym(e[r]);
         for (int64_t c = 0; c < nc; c++) {
             if (c) qe_putc(' ');
-            char cb[512]; matrix_cell(e[r], c, cb, sizeof cb);
+            char cb[512]; matrix_cell(e[r], c, bare, cb, sizeof cb);
             qe_pad(cb, widths[c]);                    /* left-align */
         }
         qe_trim();                                    /* no trailing spaces */
@@ -1444,6 +1488,15 @@ static void q_fmt_body(ray_t* val) {
                 if (!vel[i] || vel[i]->type != -RAY_SYM) sym_col = 0;
         }
         int64_t n_size = size_rows(n);   /* clip-armed: size showable rows only */
+        /* value rows column-align like a matrix (compare/lesser.qcmd `d&5`) */
+        int  dstackw[64];
+        int* dw = NULL;
+        int64_t dnc = 0;
+        if (v && v->type == RAY_LIST && ray_len(v) == n &&
+            is_matrix((ray_t**)ray_data(v), n)) {
+            dnc = ray_len(((ray_t**)ray_data(v))[0]);
+            dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, dstackw, 64);
+        }
         for (int pass = 0; pass < 2; pass++) {
             int64_t n_pass = (pass == 0) ? n_size : n;
             for (int64_t i = 0; i < n_pass; i++) {
@@ -1459,6 +1512,13 @@ static void q_fmt_body(ray_t* val) {
                     continue;
                 }
                 char vb[1024]; vb[0] = '\0';
+                if (dw) {
+                    matrix_row_str(((ray_t**)ray_data(v))[i], dnc, dw, vb, sizeof vb);
+                    size_t aneed = (i ? 1 : 0) + maxk + 2 + strlen(vb);
+                    if (!qe_fits(aneed)) break;
+                    qe_printf("%s%-*s| %s", i ? "\n" : "", (int)maxk, kb, vb);
+                    continue;
+                }
                 ray_t* ja = ray_i64(i);
                 ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
                 ray_release(ja);
@@ -1478,6 +1538,7 @@ static void q_fmt_body(ray_t* val) {
                 qe_printf("%s%-*s| %s", i ? "\n" : "", (int)maxk, kb, vb);
             }
         }
+        if (dw && dw != dstackw) free(dw);
         return;
     }
 
