@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/eval/q_eval.h"
+#include "qlang/eval/q_funsql.h"  /* the `?`/`!` matrix entry points (fnv_matrix_value) */
 #include "qlang/q_err.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
@@ -187,6 +188,22 @@ static ray_t* dict_rekey(ray_t* x, ray_t* r) {
     ray_t* k = ray_dict_keys(x);
     ray_retain(k);
     return ray_dict_new(k, r);
+}
+
+/* the FNV overload matrices (`?` `!` `@` `.`): VARY values whose classic
+ * reading is the DYAD — they project below rank 2 and fold/scan as dyads */
+static int fnv_matrix_row(const struct q_op* r) {
+    return r && r->dyad.kind == QK_FN && r->dyad.arity == 0;
+}
+
+/* value-side twin, by entry-point identity — O(1) where a registry row_of
+ * scan on every monadic VARY apply (enlist!) would tax the hot path */
+static int fnv_matrix_value(const ray_t* fv) {
+    uintptr_t f = (uintptr_t)fv->i64;
+    return f == (uintptr_t)q_funsql_ques_wrap ||
+           f == (uintptr_t)q_funsql_bang_wrap ||
+           f == (uintptr_t)q_eval_at_wrap ||
+           f == (uintptr_t)q_eval_dot_wrap;
 }
 
 static ray_t* collapse(ray_t* l) {          /* consumes l, returns owned */
@@ -963,6 +980,7 @@ static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
         ray_len(args[0]) == 0)
         return q_typed_empty_like(ray_list_new(0), fv);
     int64_t rank = acc_rank(fv);
+    if (rank < 0 && fnv_matrix_row(frow)) rank = 2;   /* `(!/)x` reduces */
     /* a variadic value reads as the UNARY form in both binary shapes:
      * `5 enlist\1` (:151) is Do-5 of unary enlist, not enlist[5;1].  Past two
      * arguments there is no unary reading left and a variadic ternary
@@ -1466,6 +1484,12 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return lambda_call(fv, args, 0);
     if (rank >= 0 && n < rank) return proj_new(fv, row, args, n, rank);
     if (rank >= 0 && n > rank) return q_err(QE_RANK);
+    /* a manifest FNV overload matrix applied below its minimum rank PROJECTS
+     * like any operator (kdb `?[x]` is `?[x;]`) */
+    if (fv->type == RAY_VARY && n < 2 && fnv_matrix_value(fv)) {
+        const q_op_t* vrow = row ? row : q_registry_row_of(fv, Q_DYADIC);
+        return proj_new(fv, vrow, args, n, 2);
+    }
 
     if (kind == Q_EVAL_CAR_LAMBDA) return lambda_call(fv, args, n);
 

@@ -126,10 +126,12 @@ static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
 }
 
 /* application-head name: registry at the call's valence first (rule 3 —
- * the verb table is authoritative), then general resolution */
+ * the verb table is authoritative), then general resolution.  argc>2 reads
+ * the DYADIC cell too: an overload-matrix VARY (`?` `!` `@` `.`) IS the
+ * verb's higher-rank value (funsql keyword trees carry sym heads). */
 static ray_t* head_name_value(ray_t* sym, int64_t argc, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    q_valence_t val = (argc == 1) ? Q_MONADIC : (argc == 2) ? Q_DYADIC : 0;
+    q_valence_t val = (argc == 1) ? Q_MONADIC : (argc >= 2) ? Q_DYADIC : 0;
     if (val) {
         const q_op_t* row = NULL;
         ray_t* v = q_registry_lookup_row(sym->i64, val, &row);
