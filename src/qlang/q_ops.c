@@ -31,6 +31,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* wrapper decls for the QR_FN* recipes (brings q_ops.h) */
 #include "qlang/eval/q_eval.h"              /* q_eval_at_wrap / q_eval_dot_wrap — the `@` `.` rows */
+#include "qlang/eval/q_funsql.h"            /* q_funsql_ques_wrap / q_funsql_bang_wrap — `?` `!` */
 #include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
 #include "qlang/ops/q_index.h"              /* q_index_assign_wrap — the `:` row */
@@ -195,11 +196,19 @@ static const q_op_t Q_OPS[] = {
     /* ---- type-dispatch glyphs (2c-2) ---- */
     /* monadic `!` (dict keys) is a K-ism accepted as a deliberate superset
      * (valid q spells it `key`, same value — the `_`/floor precedent). */
-    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FN2("dict", q_bang), NULL, 1, 0, "structural", NULL },
+    /* The dyad is a VARY overload matrix (the `@`/`.` precedent): n==2 the
+     * classic q_bang dict-make/enkey/internal band, n==4 functional
+     * Update/Delete (basics/funsql.md); family "structural" is documentation
+     * only — no lift arm dispatches on it. */
+    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FNV("dict", q_funsql_bang_wrap), NULL, 1, 0, "structural", NULL },
     /* monadic `?` (distinct, rowid — the `distinct` row) is likewise a K-ism
      * superset.  Family = dyadic roll/deal/find (L4 pilot: `-3?t`); the dict
      * entries-axis collision is spec §9.1 (see AUDIT). */
-    { "?",     QLEX_GLYPH,     QR_FN1("distinct", q_distinct_wrap), QR_FN2("rand", q_roll_wrap), NULL, 0, 0, "index", NULL },
+    /* The dyad is a VARY overload matrix: n==2 roll/deal/find (q_roll_wrap),
+     * n==3 Simple Exec / Vector Conditional, n==4..6 Select/Exec
+     * (basics/funsql.md).  family "index" is KEPT OPERATIVE: the n==2
+     * container lift (`-3?t`) reads it before the kernel runs. */
+    { "?",     QLEX_GLYPH,     QR_FN1("distinct", q_distinct_wrap), QR_FNV("rand", q_funsql_ques_wrap), NULL, 0, 0, "index", NULL },
     /* monadic `$` stays QR_NONE: `$x` is the cast-vs-cond ambiguity, deferred.
      * Dyadic `$` is MULTI-CONCEPT (Cast/Tok/Pad/mmu/enum) so family "none":
      * one glyph has no one lift law, so the apply hands q_dollar WHOLE args and
