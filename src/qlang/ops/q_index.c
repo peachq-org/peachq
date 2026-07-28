@@ -385,12 +385,24 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
         if (x->type == RAY_DICT || x->type == RAY_TABLE) return q_err(QE_NYI);
         return index_map(x, NULL, rest, k);
     }
+    /* a TABLE domain probes by ROW whatever the range holds (`group t` gathered
+     * into a plain column is still looked up by keyed_at's Find) */
+    if (x->type == RAY_DICT && q_type_is_table(ray_dict_slots(x)[0]))
+        return elem_rest(keyed_at(x, i0), rest, k);
+    /* Index AT a dictionary: `x[d] ~ (key d)!x[value d]` (ref/fby.md prints it
+     * as `dat group grp`).  Reads off the INDEX, so it outranks x's own shape. */
+    if (q_type_is_plain_dict(i0)) {
+        ray_t* v = index_r(x, ray_dict_slots(i0)[1], rest, k);
+        if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
+        ray_t* r = q_bang(ray_dict_slots(i0)[0], v);
+        ray_release(v);
+        return r;
+    }
     if (x->type == RAY_TABLE) {                      /* pure delegation */
         ray_t* nx = q_table_at(x, i0);
         if (!nx) nx = ray_at_fn(x, i0);
         return elem_rest(nx, rest, k);
     }
-    if (q_type_is_keyed(x)) return elem_rest(keyed_at(x, i0), rest, k);
     if (is_coll(i0)) return index_map(x, i0, rest, k);
     return elem_rest(index_level(x, i0, 0), rest, k);
 }
