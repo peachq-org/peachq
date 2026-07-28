@@ -49,16 +49,4 @@ ray_t* q_index_amend_dot(ray_t* x, ray_t* i, ray_t* f, ray_t* y);
  * `@[x;i;:;v]` needs no special case (ref/amend.md "If v is Assign (:)"). */
 ray_t* q_index_assign_wrap(ray_t* x, ray_t* y);
 
-/* `_` drop's dict arms (ref/drop.md): count-drop entries (int-atom left) or
- * drop named entries via `(key d) except keys` re-indexed through q_index_at.
- * NULL when neither operand is a dict — the drop wrapper's fall-through signal. */
-ray_t* q_index_drop_dict(ray_t* n, ray_t* list);
-
-/* `#` / `_` on the ENTRIES axis: one index off the domain applied to both
- * halves, take keeping what Find found and drop the complement.  Covers keyed
- * tables (ref/take.md Keyed table) and a table's columns; plain-dict DROP stays
- * with q_index_drop_dict above.  NULL = not an entries selection. */
-ray_t* q_index_entries_take(ray_t* x, ray_t* y);
-ray_t* q_index_entries_drop(ray_t* x, ray_t* y);
-
 #endif /* QLANG_OPS_Q_INDEX_H */
