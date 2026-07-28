@@ -111,6 +111,13 @@ int q_type_is_str_atom(ray_t* x);
  * strings are char LISTS. */
 int q_type_is_nested(ray_t* v);
 
+/* The same axis read for CONFORMABILITY rather than for item rank: does ANY item
+ * make v rank-2 under flip?  `flip` broadcasts atoms, so `(3;1 2)` is as rank-2
+ * as `(1 2;3)` and the L3 aggregate lift must claim both — where is_nested,
+ * probing item 0 only, sees a flat run.  A physical STR atom is storage, not a
+ * rank-2 axis, so this one excludes it. */
+int q_type_any_nested_item(ray_t* v);
+
 /* THE iteration domain — what pairs one-for-one with a value's ITEMS.  A table
  * joins the collections here ("the items of a table are its rows", ref/count.md);
  * the INDEX law, reading a table as an axis pair, keeps its own is_coll. */

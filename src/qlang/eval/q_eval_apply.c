@@ -575,6 +575,56 @@ static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
 
 /* ===== L3 aggregate lift ================================================= */
 
+/* a manifest row's registry value at one valence (borrowed) + its row */
+static ray_t* manifest_value(const q_op_t* r, q_valence_t v, const q_op_t** out) {
+    return !r ? NULL
+              : q_registry_lookup_row(
+                    ray_sym_intern_runtime(r->name, strlen(r->name)), v, out);
+}
+
+/* `agg each flip x` — literally: the 4.1t traverse-columns law (ref/dev.md,
+ * ref/var.md), spelled with the same two primitives the docs spell it with */
+static ray_t* agg_columns(ray_t* fv, const q_op_t* row, ray_t* x) {
+    const q_op_t* frow = NULL;
+    ray_t* fl = manifest_value(q_ops_find("flip", 4), Q_MONADIC, &frow);
+    if (!fl) return q_err(QE_TYPE);
+    ray_t* f = q_eval_apply(fl, frow, &x, 1);   /* ragged input 'length here */
+    if (!f || RAY_IS_ERR(f)) return f ? f : q_err(QE_TYPE);
+    ray_t* r = q_eval_apply_adverb(0 /* `'` each */, fv, row, &f, 1);
+    ray_release(f);
+    return r;
+}
+
+/* THE rank-2 arm.  The fold group reduces the OUTER axis with its atomic dyad,
+ * so null propagation is the DYAD's (basics/math.md "Aggregating nulls");
+ * QNEST_MEAN scales that fold by the outer count (ref/avg.md). */
+static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
+    if (row->nested == QNEST_COLUMNS) return agg_columns(fv, row, x);
+    const q_op_t* drow = NULL;
+    ray_t* dv = manifest_value(q_ops_nested_dyad(row), Q_DYADIC, &drow);
+    if (!dv) return q_err(QE_TYPE);
+    int64_t n = ray_len(x);
+    ray_t* r = q_index_elem_at(x, 0);
+    for (int64_t i = 1; i < n && r && !RAY_IS_ERR(r); i++) {
+        ray_t* e = q_index_elem_at(x, i);
+        ray_t* a[2] = { r, e };
+        ray_t* t = q_eval_apply(dv, drow, a, 2);
+        ray_release(r);
+        ray_release(e);
+        r = t;
+    }
+    if (row->nested != QNEST_MEAN || !r || RAY_IS_ERR(r))
+        return r ? r : q_err(QE_TYPE);
+    const q_op_t* prow = NULL;
+    ray_t* pv = manifest_value(q_ops_find("%", 1), Q_DYADIC, &prow);
+    ray_t* cnt = ray_i64(n);
+    ray_t* a[2] = { r, cnt };
+    ray_t* m = pv ? q_eval_apply(pv, prow, a, 2) : q_err(QE_TYPE);
+    ray_release(r);
+    ray_release(cnt);
+    return m;
+}
+
 static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
     if (x && x->type == RAY_DICT) {
         if (q_type_is_keyed(x)) return agg1(fv, row, ray_dict_vals(x));
@@ -596,6 +646,7 @@ static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
         }
         return ray_dict_new(ks, collapse(vs));
     }
+    if (row && row->nested && q_type_any_nested_item(x)) return agg_nested(fv, row, x);
     return q_err(QE_TYPE);
 }
 
@@ -1523,7 +1574,8 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                 return atomic2((ray_binary_fn)(uintptr_t)fv->i64,
                                args[0], args[1]);
         } else if (strcmp(fam, "aggregate") == 0 && n == 1 &&
-                   is_container(args[0])) {
+                   (is_container(args[0]) ||
+                    (row->nested && q_type_any_nested_item(args[0])))) {
             return agg1(fv, row, args[0]);
         } else if (strcmp(fam, "map") == 0 && n == 1 &&
                    is_container(args[0])) {
