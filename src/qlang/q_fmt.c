@@ -683,6 +683,7 @@ static void qe_qstring(ray_t* val) {
 static int matrix_alignable(int8_t type) {
     return type == RAY_I16 || type == RAY_I32 || type == RAY_I64 ||
            type == RAY_F32 || type == RAY_F64 || type == RAY_SYM ||
+           type == RAY_CHARV ||
            type == RAY_DATE || type == RAY_TIME || type == RAY_TIMESTAMP ||
            type == RAY_MINUTE || type == RAY_SECOND || type == RAY_TIMESPAN ||
            type == RAY_DATETIME;
@@ -716,6 +717,7 @@ static void matrix_cell(ray_t* rv, int64_t c, int bare, char* out, size_t outsz)
         if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
         break;
     }
+    case RAY_CHARV: snprintf(out, outsz, "%c", ((const char*)ray_data(rv))[c]); break;
     case RAY_LIST: {
         /* boxed row of atoms: syms BARE, strings quoted (len-1 as ,"c") */
         ray_t* a = ((ray_t**)ray_data(rv))[c];
@@ -793,9 +795,15 @@ static int is_matrix(ray_t** e, int64_t n) {
     if (!matrix_row_ok(e[0])) return 0;
     int64_t w = ray_len(e[0]);
     if (w == 0) return 0;
-    for (int64_t i = 1; i < n; i++)
+    int all_charv = e[0]->type == RAY_CHARV;
+    for (int64_t i = 1; i < n; i++) {
         if (!matrix_row_ok(e[i]) || ray_len(e[i]) != w) return 0;
-    return 1;
+        if (e[i]->type != RAY_CHARV) all_charv = 0;
+    }
+    /* all-charv is the STRING-LIST idiom, not a char matrix: `("Gfg";"is")`
+     * stays quoted per row (.Q.opt, .j.k), while a charv MIXED with another
+     * row is cells (ref/sublist.md:36 `b| x y z`). */
+    return !all_charv;
 }
 
 /* Column widths over nr rows; NULL on OOM.  Caller frees unless == stackw. */
