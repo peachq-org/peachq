@@ -220,7 +220,11 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
 static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
     if (q_builtins_count_long(x) != q_builtins_count_long(y))
         return q_err(QE_LENGTH);
-    if (x->type == RAY_TABLE && y->type == RAY_TABLE) {
+    /* kdb's rule is TOTAL on equal counts (basics/dictsandtables.md): a table
+     * or dict on either side pairs as-is — table!table is the keyed table,
+     * `t!list` keys by rows, `list!t` the xtab shape (ref/exec.md). */
+    if (q_type_is_table(x) || q_type_is_table(y) ||
+        q_type_is_dict(x) || q_type_is_dict(y)) {
         ray_retain(x);
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */
