@@ -79,6 +79,8 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
         case RAY_F64:
         RAY_TEMPORALF_CASES:
                             return ray_hash_f64(((const double*)data)[i]);
+        /* widen so a real and an f64 of the same value land in one bucket */
+        case RAY_F32:       return ray_hash_f64((double)((const float*)data)[i]);
         case RAY_DATE:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_MONTH:     return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
         case RAY_TIME:      return ray_hash_i64((int64_t)((const int32_t*)data)[i]);
@@ -149,6 +151,7 @@ static int hs_eq_rows(ray_t* a_src, int64_t ai, int8_t at, void* a_data,
             case RAY_F64:
             RAY_TEMPORALF_CASES:
                                 return ((const double*)a_data)[ai] == ((const double*)b_data)[bi];
+            case RAY_F32:       return ((const float*)a_data)[ai] == ((const float*)b_data)[bi];
             RAY_TEMPORAL32_CASES:     return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
             case RAY_TIMESTAMP: return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
             case RAY_SYM: {
@@ -726,7 +729,8 @@ int atom_eq(ray_t* a, ray_t* b) {
     case -RAY_I32:  return a->i32 == b->i32;
     case -RAY_I16:  return a->i16 == b->i16;
     RAY_BYTE_ATOM_CASES: return a->u8 == b->u8;
-    case -RAY_F64:  return a->f64 == b->f64;
+    case -RAY_F64:
+    case -RAY_F32:  return a->f64 == b->f64;   /* real atoms carry f64 too */
     case -RAY_BOOL: return a->b8 == b->b8;
     case -RAY_SYM:  return a->i64 == b->i64;
     case -RAY_DATE: case -RAY_TIME: case -RAY_MONTH:

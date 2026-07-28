@@ -87,7 +87,7 @@ static inline ray_t* make_bool(uint8_t v) {
 
 /* Helpers to extract numeric value as double */
 static inline int is_numeric(ray_t* x) {
-    return x->type == -RAY_I64 || x->type == -RAY_F64 ||
+    return x->type == -RAY_I64 || x->type == -RAY_F64 || x->type == -RAY_F32 ||
            x->type == -RAY_I16 || x->type == -RAY_I32 ||
            ray_is_bytelike(-x->type) || x->type == -RAY_BOOL;
 }
@@ -145,6 +145,12 @@ static inline int64_t temporal_as_ns(ray_t* x) {
 /* Extract integer value from any integer atom as int64_t */
 static inline int64_t as_i64(ray_t* x) {
     if (x->type == -RAY_I64)  return x->i64;
+    /* Real reads RANGE-GUARDED: ref/add.md row `e` puts real on the temporal-offset
+     * path, which reads this lane, and float->int outside int64 is UB now that ±0we
+     * are live values (guard shape borrowed from ray_idiv_fn). */
+    if (x->type == -RAY_F32)
+        return (x->f64 >= -9223372036854775808.0 && x->f64 < 9223372036854775808.0)
+                   ? (int64_t)x->f64 : NULL_I64;
     if (x->type == -RAY_I32)  return (int64_t)x->i32;
     if (x->type == -RAY_I16)  return (int64_t)x->i16;
     if (ray_is_bytelike(-x->type))   return (int64_t)x->u8;
@@ -153,6 +159,7 @@ static inline int64_t as_i64(ray_t* x) {
 
 static inline double as_f64(ray_t* x) {
     if (x->type == -RAY_F64) return x->f64;
+    if (x->type == -RAY_F32) return x->f64;   /* real atoms carry the payload in f64 */
     if (x->type == -RAY_I64) return (double)x->i64;
     if (x->type == -RAY_I32) return (double)x->i32;
     if (x->type == -RAY_I16) return (double)x->i16;
@@ -166,7 +173,8 @@ static inline double as_f64(ray_t* x) {
 }
 
 static inline int is_float_op(ray_t* a, ray_t* b) {
-    return a->type == -RAY_F64 || b->type == -RAY_F64;
+    return a->type == -RAY_F64 || b->type == -RAY_F64 ||
+           a->type == -RAY_F32 || b->type == -RAY_F32;
 }
 
 /* ══════════════════════════════════════════
@@ -179,6 +187,8 @@ static inline int is_float_op(ray_t* a, ray_t* b) {
 static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
     if (a->type == -RAY_F64 || b->type == -RAY_F64)
         return ray_typed_null(-RAY_F64);
+    if (a->type == -RAY_F32 || b->type == -RAY_F32)
+        return ray_typed_null(-RAY_F32);
     if (a->type == -RAY_I64 || b->type == -RAY_I64)
         return ray_typed_null(-RAY_I64);
     if (a->type == -RAY_I32 || b->type == -RAY_I32)
@@ -219,6 +229,24 @@ static inline int8_t promote_int_type_right(ray_t* a, ray_t* b) {
     if (at == -RAY_I32 || at == -RAY_I16 || ray_is_bytelike(-at) || at == -RAY_I64)
         return at;
     return -RAY_I64;
+}
+
+/* Float result type for a pair, ref/add.md "Range and domains" row/col `e`: real
+ * with any int-family operand stays real, real with float widens to float.
+ * Lives here, beside promote_int_type, because its only callers are the base
+ * arith kernels — a q_type.c home would invert the link direction and split one
+ * promotion law across two files. */
+static inline int8_t promote_float_type(int8_t at, int8_t bt) {
+    if (at == -RAY_F64 || bt == -RAY_F64) return -RAY_F64;
+    return (at == -RAY_F32 || bt == -RAY_F32) ? -RAY_F32 : -RAY_F64;
+}
+
+/* Result atom for a float lane.  The real arm narrows through `float`, so a real
+ * result carries real precision and an IEEE single overflow reaches +/-infinity
+ * (+/-0we); NaN canonicalizes, mirroring make_f64's one-representation invariant. */
+static inline ray_t* make_typed_float(int8_t atom_type, double val) {
+    if (atom_type != -RAY_F32) return make_f64(val);
+    return ray_f32(__builtin_isnan(val) ? NULL_F32 : (float)val);
 }
 
 /* Create a result atom of the given type from an int64_t value */
@@ -327,6 +355,7 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
     switch (coll->type) {
         case RAY_I64:       return ray_i64(((int64_t*)d)[i]);
         case RAY_F64:       return ray_f64(((double*)d)[i]);
+        case RAY_F32:       return ray_f32(((float*)d)[i]);
         case RAY_I32:       return ray_i32(((int32_t*)d)[i]);
         case RAY_I16:       return ray_i16(((int16_t*)d)[i]);
         case RAY_BOOL:      return ray_bool(((bool*)d)[i]);
@@ -368,6 +397,7 @@ static inline int64_t elem_as_i64(ray_t* elem) {
     if (ray_is_bytelike(-elem->type))   return (int64_t)elem->u8;
     if (elem->type == -RAY_F64 ||
         RAY_IS_TEMPORALF(-elem->type)) return (int64_t)elem->f64;
+    if (elem->type == -RAY_F32)  return as_i64(elem);   /* one guarded real read */
     return elem->i64;
 }
 
@@ -392,6 +422,8 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
                 ((int32_t*)ray_data(vec))[i] = NULL_I32; break;
             case RAY_I16:
                 ((int16_t*)ray_data(vec))[i] = NULL_I16; break;
+            case RAY_F32:
+                ((float*)ray_data(vec))[i] = NULL_F32; break;
             default: {
                 int esz = ray_elem_size(vec->type);
                 memset((char*)ray_data(vec) + i * esz, 0, esz);
@@ -404,6 +436,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
     switch (vec->type) {
         case RAY_I64:       ((int64_t*)ray_data(vec))[i]  = elem_as_i64(elem); return 0;
         case RAY_F64:       ((double*)ray_data(vec))[i]    = (elem->type == -RAY_F64) ? elem->f64 : (double)elem_as_i64(elem); return 0;
+        case RAY_F32:       ((float*)ray_data(vec))[i]     = (float)as_f64(elem); return 0;
         case RAY_I32:       ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_I16:       ((int16_t*)ray_data(vec))[i]   = (int16_t)elem_as_i64(elem); return 0;
         case RAY_BOOL:      ((bool*)ray_data(vec))[i]      = elem->b8;  return 0;

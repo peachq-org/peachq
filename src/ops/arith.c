@@ -197,7 +197,9 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
                          ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return null_for_promoted(a, b);
-    if (is_float_op(a, b)) return make_f64(as_f64(a) + as_f64(b));
+    if (is_float_op(a, b))
+        return make_typed_float(promote_float_type(a->type, b->type),
+                                as_f64(a) + as_f64(b));
     int8_t rt = promote_int_type(a, b);
     return make_typed_int(rt, as_i64(a) + as_i64(b));
 }
@@ -311,7 +313,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     if (is_float_op(a, b)) {
         double r = as_f64(a) - as_f64(b);
         if (r == 0.0) r = 0.0; /* normalize -0.0 to +0.0 */
-        return make_f64(r);
+        return make_typed_float(promote_float_type(a->type, b->type), r);
     }
     int8_t rt = promote_int_type_right(a, b);
     return make_typed_int(rt, as_i64(a) - as_i64(b));
@@ -376,7 +378,9 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
                          ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return null_for_promoted(a, b);
-    if (is_float_op(a, b)) return make_f64(as_f64(a) * as_f64(b));
+    if (is_float_op(a, b))
+        return make_typed_float(promote_float_type(a->type, b->type),
+                                as_f64(a) * as_f64(b));
     int8_t rt = promote_int_type(a, b);
     return make_typed_int(rt, as_i64(a) * as_i64(b));
 }
@@ -461,9 +465,13 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
         /* a is u8 but b is not u8 — treat as integer, result follows b's type */
     }
 
-    /* Null propagation and division by zero: null type follows RIGHT operand */
+    /* Null propagation and division by zero: null type follows RIGHT operand.
+     * ref/mod.md's grid is asymmetric, so mod cannot share promote_float_type:
+     * row `e` is f (a real LEFT operand yields float), while an int row with
+     * col `e` is e — which "follows RIGHT" already gives. */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) {
-        int8_t rt = (b->type == -RAY_F64 || a->type == -RAY_F64) ? -RAY_F64 : b->type;
+        int8_t rt = (b->type == -RAY_F64 || a->type == -RAY_F64 ||
+                     a->type == -RAY_F32) ? -RAY_F64 : b->type;
         return ray_typed_null(rt);
     }
 
@@ -471,13 +479,16 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
     if (is_float_op(a, b)) {
         double av = as_f64(a), bv = as_f64(b);
         if (bv == 0.0) {
-            int8_t rt = (b->type == -RAY_F64 || a->type == -RAY_F64) ? -RAY_F64 : b->type;
+            int8_t rt = (b->type == -RAY_F64 || a->type == -RAY_F64 ||
+                         a->type == -RAY_F32) ? -RAY_F64 : b->type;
             return ray_typed_null(rt);
         }
         double result = av - bv * floor(av / bv);
         /* Snap tiny residual to 0 */
         if (fabs(result) < 1e-12 || fabs(result - fabs(bv)) < 1e-12) result = bv > 0 ? 0.0 : -0.0;
-        if (b->type == -RAY_F64 || a->type == -RAY_F64) return make_f64(result);
+        if (b->type == -RAY_F64 || a->type == -RAY_F64 || a->type == -RAY_F32)
+            return make_f64(result);
+        if (b->type == -RAY_F32) return make_typed_float(-RAY_F32, result);
         if (b->type == -RAY_I32) return make_i32((int32_t)(int64_t)result);
         if (b->type == -RAY_I16) return make_i16((int16_t)(int64_t)result);
         return make_i64((int64_t)result);
@@ -501,7 +512,9 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
 
 ray_t* ray_neg_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-    if (x->type == -RAY_F64) return make_f64(-x->f64);
+    /* ref/neg.md domain `e` -> range `e`; f64 and f32 atoms share the f64 slot. */
+    if (x->type == -RAY_F64 || x->type == -RAY_F32)
+        return make_typed_float(x->type, -x->f64);
     /* INT_MIN is the lone overflow case for signed negation: -INT_MIN
      * doesn't fit in the same width.  By convention, surface this
      * as a typed null of the same width — preserving type, avoiding UB,
@@ -552,7 +565,9 @@ ray_t* ray_ceil_fn(ray_t* x) {
  * result from abs!) and `(abs INT_MIN)` UB simultaneously. */
 ray_t* ray_abs_fn(ray_t* x) {
     if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
-    if (x->type == -RAY_F64) return make_f64(fabs(x->f64));
+    /* ref/abs.md domain `e` -> range `e`. */
+    if (x->type == -RAY_F64 || x->type == -RAY_F32)
+        return make_typed_float(x->type, fabs(x->f64));
     if (x->type == -RAY_I64) {
         if (RAY_UNLIKELY(x->i64 == INT64_MIN)) return ray_typed_null(-RAY_I64);
         return make_i64(x->i64 < 0 ? -x->i64 : x->i64);
