@@ -16,7 +16,9 @@
 #include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y file form */
 #include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
 #include "lang/eval.h"     /* ray_eval; ray_list_fn, ray_except_fn, ray_sect_fn, ray_take_fn */
-#include "lang/internal.h" /* ray_concat_fn, ray_typed_null, ray_error */
+#include "lang/internal.h" /* ray_concat_fn, ray_typed_null, ray_error, ray_group_fn */
+#include "qlang/ops/q_index.h" /* q_index_at / q_index_elem_at — group's key gathers */
+#include "ops/agg_engine.h"    /* agg_group_keys — the one dense group core */
 #include "table/sym.h"     /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
 #include <stdio.h>         /* snprintf, rename */
 #include <string.h>
@@ -539,6 +541,101 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
     if (RAY_IS_ERR(kt)) { if (vt && !RAY_IS_ERR(vt)) ray_release(vt); return kt; }
     if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
     return ray_dict_new(kt, vt);                          /* consumes both */
+}
+
+/* q `group x` — one law for every shape (ref/group.md; funsql waves 1-2):
+ * vector/list -> base hash kernel; dict -> `(key d) group value d` (each index
+ * list maps through the keys); table -> `(distinct t)!(row-index lists)`,
+ * first-occurrence order — dense-hashed via agg_group_keys when every column
+ * is int64/sym/str-readable, boxed row-compare fallback otherwise. */
+static ray_t* table_gather(ray_t* t, ray_t* idx);      /* fwd (set-ops block) */
+
+static ray_t* group_table(ray_t* t) {
+    int64_t nc = ray_table_ncols(t);
+    int64_t nr = ray_table_nrows(t);
+    int64_t* gid = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
+    int64_t* rep = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
+    if (!gid || !rep) { free(gid); free(rep); return q_err(QE_WSFULL); }
+    int64_t ng = 0;
+    int dense = nc >= 1 && nc <= 16 && nr > 0;
+    for (int64_t c = 0; c < nc && dense; c++)
+        dense = q_type_is_dense_group_col(ray_table_get_col_idx(t, c));
+    if (dense) {
+        ray_t* kcols[16];
+        for (int64_t c = 0; c < nc; c++) kcols[c] = ray_table_get_col_idx(t, c);
+        agg_groups_t g;
+        if (agg_group_keys(kcols, (uint8_t)nc, nr, &g) != 0) {
+            free(gid); free(rep);
+            return q_err(QE_WSFULL);
+        }
+        for (int64_t r = 0; r < nr; r++) gid[r] = (int64_t)g.gids[r];
+        ng = g.ngroups;
+        for (int64_t j = 0; j < ng; j++) rep[j] = g.first_row[j];
+        agg_groups_free(&g);
+    } else {
+        for (int64_t r = 0; r < nr; r++) {
+            int64_t g = -1;
+            for (int64_t j = 0; j < ng && g < 0; j++)
+                if (row_eq(t, r, t, rep[j], nc)) g = j;
+            if (g < 0) { rep[ng] = r; g = ng++; }
+            gid[r] = g;
+        }
+    }
+    ray_t* repv = ray_vec_new(RAY_I64, ng > 0 ? ng : 1);
+    if (RAY_IS_ERR(repv)) { free(gid); free(rep); return repv; }
+    repv->len = ng;
+    memcpy(ray_data(repv), rep, sizeof(int64_t) * (size_t)(ng > 0 ? ng : 1));
+    ray_t* kt = table_gather(t, repv);                    /* ≡ distinct t */
+    ray_release(repv);
+    if (!kt || RAY_IS_ERR(kt)) { free(gid); free(rep); return kt ? kt : q_err(QE_OOM); }
+    int64_t* cnt = rep;                       /* rep is done — reuse as counts */
+    memset(cnt, 0, sizeof(int64_t) * (size_t)(ng > 0 ? ng : 1));
+    for (int64_t r = 0; r < nr; r++) cnt[gid[r]]++;
+    ray_t* vals = ray_list_new(ng > 0 ? ng : 1);
+    ray_t** vs = (ray_t**)ray_data(vals);
+    for (int64_t j = 0; j < ng && !RAY_IS_ERR(vals); j++) {
+        ray_t* iv = ray_vec_new(RAY_I64, cnt[j] > 0 ? cnt[j] : 1);
+        if (RAY_IS_ERR(iv)) { ray_release(vals); vals = iv; break; }
+        iv->len = 0;
+        vals = ray_list_append(vals, iv);
+        ray_release(iv);
+    }
+    if (RAY_IS_ERR(vals)) { free(gid); free(rep); ray_release(kt); return vals; }
+    vs = (ray_t**)ray_data(vals);
+    for (int64_t r = 0; r < nr; r++) {
+        ray_t* iv = vs[gid[r]];
+        ((int64_t*)ray_data(iv))[iv->len++] = r;
+    }
+    free(gid); free(rep);
+    return ray_dict_new(kt, vals);
+}
+
+ray_t* q_group_wrap(ray_t* x) {
+    if (!x) return q_err(QE_TYPE);
+    if (q_type_is_table(x)) return group_table(x);
+    if (q_type_is_dict(x)) {
+        ray_t* g = q_group_wrap(ray_dict_vals(x));        /* group the range */
+        if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
+        ray_t* keys = ray_dict_keys(x);
+        ray_t* gv = ray_dict_vals(g);
+        int64_t ng = ray_len(gv);
+        ray_t* nv = ray_list_new(ng > 0 ? ng : 1);
+        for (int64_t j = 0; j < ng && !RAY_IS_ERR(nv); j++) {
+            ray_t* iv = q_index_elem_at(gv, j);
+            ray_t* m = (iv && !RAY_IS_ERR(iv)) ? q_index_at(keys, &iv, 1) : iv;
+            if (m != iv && iv) ray_release(iv);
+            if (m) { ray_t* c = q_list_collapse(m); ray_release(m); m = c; }
+            if (!m || RAY_IS_ERR(m)) { ray_release(nv); nv = m ? m : q_err(QE_OOM); break; }
+            nv = ray_list_append(nv, m);
+            ray_release(m);
+        }
+        if (RAY_IS_ERR(nv)) { ray_release(g); return nv; }
+        ray_t* gk = ray_dict_keys(g);
+        ray_retain(gk);
+        ray_release(g);
+        return ray_dict_new(gk, nv);
+    }
+    return ray_group_fn(x);
 }
 
 /* q `ungroup x` — inverse of xgroup: explode nested list columns, repeating
@@ -1108,6 +1205,22 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     }
     ray_t* r = ray_concat_fn(x, y);
     if (r && !RAY_IS_ERR(r)) {
+        /* dict upsert-union: the merged VALUES unify like any join result
+         * (`~` is type-strict, so `(update c:3 from `a`b!1 2)~`a`b`c!1 2 3`
+         * needs vector values) */
+        if (q_type_is_dict(r) && !q_type_is_keyed(r)) {
+            ray_t* v = ray_dict_vals(r);                       /* borrowed */
+            ray_t* cv = v ? q_list_collapse(v) : NULL;         /* no-op off-list */
+            if (cv && !RAY_IS_ERR(cv) && cv != v) {
+                ray_t* k = ray_dict_keys(r);
+                ray_retain(k);                        /* dict_new consumes both */
+                ray_t* nd = ray_dict_new(k, cv);
+                ray_release(r);
+                return nd ? nd : q_err(QE_TYPE);
+            }
+            if (cv) ray_release(cv);
+            return r;
+        }
         /* `()` is Join's IDENTITY and identity must not retype: base concat
          * boxes the untyped empty into the result, so `(),2` came back 0h
          * where kdb says 7h.  That is the seed the `,` accumulator starts from

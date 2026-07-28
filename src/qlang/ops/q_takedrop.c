@@ -9,6 +9,7 @@
 #include "lang/eval.h"     /* ray_take_fn — see take_kernel */
 #include "lang/internal.h" /* ray_enlist_fn — reshape's atom arm */
 #include "qlang/ops/q_index.h"
+#include "qlang/eval/q_funsql.h" /* the entries-axis selection home */
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -157,26 +158,50 @@ static ray_t* cut_at(ray_t* pos, ray_t* y) {
     return out;
 }
 
+/* kdb unifies a homogeneous take-of-mixed result to a typed vector (`~` is
+ * type-strict per ref/match.md, yet misc/aoc/2016/day17.q's `3 3 in 2#'q`
+ * terminates — so 2#(3;3;"s") must be 7h, not 0h) */
+static ray_t* take_unify(ray_t* r) {
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
+    ray_t* c = q_list_collapse(r);
+    ray_release(r);
+    return c;
+}
+
 /* q `x # y` — Take (ref/take.md); borrows both args */
 ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     if (x && x->type == -RAY_SYM && y && ray_is_vec(y))
         return q_attr_set_dispatch(x, y);              /* `s#v — set attribute */
     if (q_type_is_int_vec(x) && ray_len(x) >= 2) return reshape(x, y);
-    ray_t* es = q_index_entries_take(x, y);   /* dict keys / table cols / keyed */
+    ray_t* es = q_funsql_entries_take(x, y);  /* dict keys / table cols / keyed */
     if (es) return es;
     int64_t n;
     if (q_type_is_int_vec(x) && ray_len(x) == 1)
         n = q_type_ivec_get(x, 0);            /* V3.4: a rank-1 shape is n#y */
     else if (!q_type_strict_i64(x, &n))
-        return take_kernel(y, x);
-    return take_run(y, n);
+        return take_unify(take_kernel(y, x));
+    return take_unify(take_run(y, n));
 }
 
 /* q `x _ y` — Drop (ref/drop.md); borrows both args */
 ray_t* q_drop_wrap(ray_t* x, ray_t* y) {
-    ray_t* dd = q_index_drop_dict(x, y);
-    if (dd) return dd;
-    ray_t* es = q_index_entries_drop(x, y);   /* keyed tables + table columns */
+    if (y && q_type_is_plain_dict(y)) {
+        int64_t cnt;
+        if (q_type_strict_i64(x, &cnt)) {     /* n _ d ≡ (n _ key d)!(n _ value d) */
+            ray_t* nk = q_drop_wrap(x, ray_dict_keys(y));
+            if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_TYPE);
+            ray_t* nv = q_drop_wrap(x, ray_dict_vals(y));
+            if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv ? nv : q_err(QE_TYPE); }
+            nv = q_typed_empty_like(nv, ray_dict_vals(y));   /* dropping every entry keeps the value type */
+            return ray_dict_new(nk, nv);
+        }
+        return q_funsql_dict_drop_keys(x, y);
+    }
+    if (x && q_type_is_plain_dict(x)) {       /* dict LEFT drops an atom key only */
+        if (!y || !ray_is_atom(y)) return q_err(QE_TYPE);
+        return q_funsql_dict_drop_keys(y, x);
+    }
+    ray_t* es = q_funsql_entries_drop(x, y);  /* keyed tables + table columns */
     if (es) return es;
     int64_t i;
     if (x && (ray_is_vec(x) || x->type == RAY_LIST) &&

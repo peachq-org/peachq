@@ -91,6 +91,12 @@ int q_type_is_keyed(ray_t* y);
 /* A plain key!value dict (a dict that is NOT a keyed table). */
 int q_type_is_plain_dict(ray_t* x);
 
+/* any dictionary, keyed table included (entries-axis laws) */
+int q_type_is_dict(ray_t* x);
+
+/* column the dense group core (agg_group_keys) can read as an int64/str key */
+int q_type_is_dense_group_col(ray_t* c);
+
 /* The physical STR atom lane (string-C3): rank-wise a char LIST, not a scalar. */
 int q_type_is_str_atom(ray_t* x);
 
