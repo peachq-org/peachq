@@ -271,7 +271,7 @@ ray_t* q_hclose_wrap(ray_t* x) {
 
 /* file symbol -> OWNED RAY_STR filesystem path (leading ':' stripped), or
  * NULL when x is not a `:path symbol. */
-static ray_t* ft_path(ray_t* x) {
+ray_t* q_io_file_path(ray_t* x) {
     if (!x || x->type != -RAY_SYM) return NULL;
     ray_t* s = ray_sym_str(x->i64);                       /* borrowed */
     if (!s) return NULL;
@@ -346,7 +346,7 @@ ray_t* q_read0_wrap(ray_t* x) {
 }
 static ray_t* read0_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
-        ray_t* path = ft_path(x);
+        ray_t* path = q_io_file_path(x);
         if (!path) return q_err(QE_TYPE);
         ray_t* all = ft_read_all(path);
         ray_release(path);
@@ -359,7 +359,7 @@ static ray_t* read0_wrap_impl(ray_t* x) {
         ray_t** e = (ray_t**)ray_data(x);
         int three = ray_len(x) == 3;
         if (e[0] && e[0]->type == -RAY_SYM) {
-            ray_t* path = ft_path(e[0]);
+            ray_t* path = q_io_file_path(e[0]);
             if (!path) return q_err(QE_TYPE);
             int64_t off, want = -1;
             if (!q_type_strict_i64(e[1], &off) || (three && !q_type_strict_i64(e[2], &want))) {
@@ -392,12 +392,9 @@ static ray_t* read0_wrap_impl(ray_t* x) {
     return q_err(QE_TYPE);
 }
 
-/* q `read1 x` — ref/read1.md.  File sym -> whole content as bytes; (f;o) ->
- * bytes from offset o to EOF; (f;o;n) -> up to n bytes from o (short read at
- * EOF, offsets clamped).  fseek/fread streams just the slice, so .Q.fsn's
- * lump loop costs O(z) per call, not O(file).  Fifo handles (`read1(fifo;n)`)
- * are deferred 'nyi alongside the fifo:// transport (hopen_norm_descriptor). */
-static ray_t* read1_slice(ray_t* pathstr, int64_t off, int64_t want) {
+/* fseek/fread streams just the slice, so .Q.fsn's lump loop costs O(z) per
+ * call, not O(file) — and a header sniff costs its few bytes. */
+ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
@@ -426,6 +423,10 @@ static ray_t* read1_slice(ray_t* pathstr, int64_t off, int64_t want) {
     free(buf);
     return out;
 }
+/* q `read1 x` — ref/read1.md.  File sym -> whole content as bytes; (f;o) ->
+ * bytes from offset o to EOF; (f;o;n) -> up to n bytes from o (short read at
+ * EOF, offsets clamped).  Fifo handles (`read1(fifo;n)`) are deferred 'nyi
+ * alongside the fifo:// transport (hopen_norm_descriptor). */
 static ray_t* read1_wrap_impl(ray_t* x);
 ray_t* q_read1_wrap(ray_t* x) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
@@ -435,9 +436,9 @@ ray_t* q_read1_wrap(ray_t* x) {
 }
 static ray_t* read1_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
-        ray_t* path = ft_path(x);
+        ray_t* path = q_io_file_path(x);
         if (!path) return q_err(QE_TYPE);
-        ray_t* r = read1_slice(path, 0, -1);
+        ray_t* r = q_io_read_slice(path, 0, -1);
         ray_release(path);
         return r;
     }
@@ -455,7 +456,7 @@ static ray_t* read1_wrap_impl(ray_t* x) {
         ray_t** e = (ray_t**)ray_data(x);
         int three = ray_len(x) == 3;
         if (e[0] && e[0]->type == -RAY_SYM) {
-            ray_t* path = ft_path(e[0]);
+            ray_t* path = q_io_file_path(e[0]);
             if (!path) return q_err(QE_TYPE);
             int64_t off, want = -1;
             if (!q_type_strict_i64(e[1], &off) || (three && !q_type_strict_i64(e[2], &want))) {
@@ -466,7 +467,7 @@ static ray_t* read1_wrap_impl(ray_t* x) {
                 ray_release(path);
                 return q_err(QE_DOMAIN);
             }
-            ray_t* r = read1_slice(path, off, three ? want : -1);
+            ray_t* r = q_io_read_slice(path, off, three ? want : -1);
             ray_release(path);
             return r;
         }
@@ -490,7 +491,7 @@ static ray_t* read1_wrap_impl(ray_t* x) {
  * WRITES the filesystem, so restricted mode refuses (the file-verb precedent). */
 ray_t* q_hdel_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    ray_t* path = ft_path(x);            /* NULL unless a `:path symbol atom */
+    ray_t* path = q_io_file_path(x);            /* NULL unless a `:path symbol atom */
     if (!path) return q_err(QE_TYPE);
     int rc = remove(ray_str_ptr(path));  /* ray_str path is NUL-terminated */
     ray_release(path);
@@ -501,7 +502,7 @@ ray_t* q_hdel_wrap(ray_t* x) {
 
 /* ---- Save Text: `:path 0: strings -------------------------------------- */
 static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
-    ray_t* path = ft_path(fsym);
+    ray_t* path = q_io_file_path(fsym);
     if (!path) return q_err(QE_TYPE);
     if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
     if (!y || !(y->type == RAY_LIST || y->type == RAY_STR)) {
@@ -772,7 +773,7 @@ static ray_t* ft_rows(ray_t* y, int* single) {
         return out;
     }
     if (y->type == -RAY_SYM) {
-        ray_t* path = ft_path(y);
+        ray_t* path = q_io_file_path(y);
         if (!path) return q_err(QE_TYPE);
         ray_t* all = ft_read_all(path);
         ray_release(path);
@@ -786,7 +787,7 @@ static ray_t* ft_rows(ray_t* y, int* single) {
         ray_t** e = y->type == RAY_LIST ? (ray_t**)ray_data(y) : NULL;
         /* (filesymbol; offset[; length]) chunk form */
         if (e && n >= 2 && n <= 3 && e[0] && e[0]->type == -RAY_SYM) {
-            ray_t* path = ft_path(e[0]);
+            ray_t* path = q_io_file_path(e[0]);
             if (!path) return q_err(QE_TYPE);
             int64_t off, want = -1;
             if (!q_type_strict_i64(e[1], &off) || (n == 3 && !q_type_strict_i64(e[2], &want))) {
