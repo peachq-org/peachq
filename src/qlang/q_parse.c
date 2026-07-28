@@ -8,7 +8,8 @@
  * retains, so each freshly-built child is released after append — the same
  * discipline as src/lang/parse.c:parse_list).
  *
- * AST shapes (heads are rayforce name-reference syms, so eval resolves them):
+ * AST shapes (a verb head is its embedded registry VALUE; only a non-verb name
+ * stays a reference sym for eval to resolve):
  *   n v e   -> (v; n; e)
  *   t e     -> (t; e)         (lone term collapses to t)
  *   t[E]    -> (t; e1; ...)
@@ -24,7 +25,7 @@
 #include "qlang/q_calendar.h" /* q_calendar_ts_compose — timestamp vector literals */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_carrier_kind — fn-value probe */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
 #include "lang/env.h"        /* ray_fn_name; ray_sym_is_ipc_hook — IPC hook slots */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
@@ -111,12 +112,9 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
     ray_t *hit = q_registry_lookup_name(nm, nl, val);
     ray_release(s);
     if (!hit) return sym;
-    /* q.q-hosted cells (QK_QSRC) hold CARRIER values (lambdas/projections),
-     * not ray_fn objects; an embedded carrier would be re-walked by eval as an
-     * expression tree.  Those verbs stay name-ref syms — eval's name path
-     * resolves them to the same registry value and applies via the hook. */
-    if (hit->type != RAY_UNARY && hit->type != RAY_BINARY && hit->type != RAY_VARY)
-        return sym;
+    /* q.q-hosted (QK_QSRC) carriers embed too: eval retains a non-sym head as a
+     * value rather than re-walking it (#351) */
+    if (!q_eval_apply_is_fn(hit)) return sym;
     ray_retain(hit);
     ray_release(sym);
     return hit;
@@ -2234,6 +2232,12 @@ static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
     if (verb != QSQL_V_EXEC) return qsql_norm_dict(phrases);
     int64_t n = ray_len(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
+    /* `by 0b` is already a functional b-value: pass it through so exec takes the
+     * select (table) shape — ref/exec.md:96 */
+    if (n == 1 && ph[0] && ph[0]->type == -RAY_BOOL) {
+        ray_retain(ph[0]);
+        return ph[0];
+    }
     ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS]; int bnamed[QSQL_MAXCOLS];
     int nb = 0;
     for (int64_t i = 0; i < n && nb < QSQL_MAXCOLS; i++) {
