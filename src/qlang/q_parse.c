@@ -1676,7 +1676,11 @@ static P parse_query(Parser *p) {
     /* the in-flight raw slots are now all NULL / consumed — retire the guard. */
     qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
 
-    head = (verb == QSQL_V_SELECT || verb == QSQL_V_EXEC) ? q_verb('?') : q_verb('!');
+    /* the VALUE head (value-heads-at-parse): the same immutable registry cell
+     * the functional spelling carries — never a bare sym name-ref */
+    head = q_embed((verb == QSQL_V_SELECT || verb == QSQL_V_EXEC) ? q_verb('?')
+                                                                  : q_verb('!'),
+                   Q_DYADIC);
     node = ray_list_new(5);
     node = ray_list_append(node, head); ray_release(head);
     node = ray_list_append(node, t);    ray_release(t);
