@@ -321,6 +321,9 @@ static ray_t* minmax2(ray_t* a, ray_t* b, int want_min) {
     ray_t* r = want_min ? ray_min2_fn(a, b) : ray_max2_fn(a, b);
     /* the matrix diagonal is the identity, so a same-tag pair needs no retag */
     if (ta == tb || !r || RAY_IS_ERR(r)) return r;
+    /* min2/max2 PICK an operand, so the winner's tag is ta or tb by identity —
+     * when it already is the result tag the retag is a no-op too. */
+    if (((r == a) ? ta : tb) == t) return r;
     ray_t* c = q_dollar_cast(t, r);
     ray_release(r);
     return c;
