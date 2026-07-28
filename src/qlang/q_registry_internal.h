@@ -124,6 +124,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y);                       /* also shared: in
 ray_t* q_except_wrap(ray_t* x, ray_t* y);
 ray_t* q_key_wrap(ray_t* x);
 ray_t* q_distinct_wrap(ray_t* x);
+ray_t* q_group_wrap(ray_t* x);
 ray_t* q_union_wrap(ray_t* x, ray_t* y);
 ray_t* q_inter_wrap(ray_t* x, ray_t* y);
 ray_t* q_cross_wrap(ray_t* x, ray_t* y);
