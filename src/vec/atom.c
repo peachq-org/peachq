@@ -23,7 +23,7 @@
 
 #include "atom.h"
 #include "lang/format.h"  /* ray_type_name */
-#include <math.h>         /* isfinite — datetime non-finite canonicalization */
+#include <math.h>         /* isnan — datetime NaN-null canonicalization */
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -228,15 +228,14 @@ ray_t* ray_timespan(int64_t val) {
     return v;
 }
 
-/* datetime: f64 days since 2000.01.01, fraction = time of day.  Single-null
- * float model (owner decision 2026-07-09): non-finite payloads canonicalize
- * to the one NaN null here — the constructor is the single home, so no
- * producer (scanner, casts, arith) can mint a live 0Wz. */
+/* datetime: f64 days since 2000.01.01, fraction = time of day.  Live-infinity
+ * model (2026-07-28): ±Inf is the live 0Wz/-0Wz; only NaN is null (0Nz),
+ * canonicalized to the exact NULL_F64 bit pattern here, the single home. */
 ray_t* ray_datetime(double val) {
     ray_t* v = ray_alloc(0);
     if (RAY_IS_ERR(v)) return v;
     v->type = -RAY_DATETIME;
-    v->f64  = isfinite(val) ? val : NULL_F64;
+    v->f64  = isnan(val) ? NULL_F64 : val;
     return v;
 }
 

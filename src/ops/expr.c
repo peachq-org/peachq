@@ -918,15 +918,14 @@ static void expr_exec_binary(uint8_t opcode, uint8_t null_aware, int8_t dt, void
             #undef F64_ISN
             return;
         }
-        /* Single-null float model: canonicalize every non-finite F64 result
-         * (NaN OR ±Inf, incl. overflow) to NULL_F64 via ray_f64_fin (branchless
-         * compare+select — stays auto-vectorized).  DIV/MOD keep the explicit
-         * divisor==0 guard (avoids the FPU NaN slow path) and wrap the value. */
+        /* Live-infinity model (2026-07-28): elementwise F64 lanes are raw IEEE
+         * — ±inf is a value (1%0 -> 0w), NaN results read as null (0%0 -> 0n)
+         * via the post-scan's x!=x test.  MOD keeps its divisor guard. */
         switch (opcode) {
-            case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = ray_f64_fin(a[j] + b[j]); break;
-            case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = ray_f64_fin(a[j] - b[j]); break;
-            case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = ray_f64_fin(a[j] * b[j]); break;
-            case OP_DIV: for (int64_t j = 0; j < n; j++) d[j] = b[j] != 0.0 ? ray_f64_fin(a[j] / b[j]) : NULL_F64; break;
+            case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = a[j] + b[j]; break;
+            case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = a[j] - b[j]; break;
+            case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = a[j] * b[j]; break;
+            case OP_DIV: for (int64_t j = 0; j < n; j++) d[j] = a[j] / b[j]; break;
             case OP_MOD: for (int64_t j = 0; j < n; j++) {
                 if (b[j] == 0.0) { d[j] = NULL_F64; continue; }
                 double m = fmod(a[j], b[j]);
@@ -1139,16 +1138,13 @@ static void expr_exec_unary(uint8_t opcode, uint8_t null_aware, int8_t dt, void*
         if (t1 == RAY_F64) {
             const double* a = (const double*)ap;
             switch (opcode) {
-                /* NEG/ABS/CEIL/FLOOR/ROUND of a finite value are finite (and a
-                 * NaN sentinel input stays NaN through them), so they need no
-                 * fin-canonicalization.  SQRT/LOG/EXP can map a finite input to
-                 * a non-finite (sqrt(<0)=NaN, log(0)=-Inf, exp(big)=Inf) →
-                 * canonicalize to NULL_F64 (single-null float model). */
+                /* Live-infinity model: raw libm — log(0) -> -0w, exp(big) ->
+                 * 0w, sqrt(<0) -> NaN which reads as null (0n). */
                 case OP_NEG:   for (int64_t j = 0; j < n; j++) d[j] = -a[j]; break;
                 case OP_ABS:   for (int64_t j = 0; j < n; j++) d[j] = fabs(a[j]); break;
-                case OP_SQRT:  for (int64_t j = 0; j < n; j++) d[j] = ray_f64_fin(sqrt(a[j])); break;
-                case OP_LOG:   for (int64_t j = 0; j < n; j++) d[j] = ray_f64_fin(log(a[j])); break;
-                case OP_EXP:   for (int64_t j = 0; j < n; j++) d[j] = ray_f64_fin(exp(a[j])); break;
+                case OP_SQRT:  for (int64_t j = 0; j < n; j++) d[j] = sqrt(a[j]); break;
+                case OP_LOG:   for (int64_t j = 0; j < n; j++) d[j] = log(a[j]); break;
+                case OP_EXP:   for (int64_t j = 0; j < n; j++) d[j] = exp(a[j]); break;
                 case OP_CEIL:  for (int64_t j = 0; j < n; j++) d[j] = ceil(a[j]); break;
                 case OP_FLOOR: for (int64_t j = 0; j < n; j++) d[j] = floor(a[j]); break;
                 case OP_ROUND: for (int64_t j = 0; j < n; j++) d[j] = round(a[j]); break;
@@ -1697,14 +1693,11 @@ static bool expr_last_op_divmod_i64(const ray_expr_t* expr) {
     return true;
 }
 
-/* Single-null float model: the fused F64 kernels canonicalize any non-finite
- * result (overflow → ±Inf, div/mod-by-zero, sqrt(<0), log(≤0), exp(overflow))
- * to NULL_F64 in-buffer.  Detect when the last instruction is such an F64
- * producer so the caller runs the cheap post-scan that flips HAS_NULLS for any
- * 0Nf lane.  Used to set HAS_NULLS conservatively from the op shape (no
- * per-element scan — the scan is a full extra memory pass that regressed the
- * hot float kernels ~50%); see the call site.  Matches the fallback path's
- * shape-based flagging so VM ≡ fallback. */
+/* Detect when the last instruction is an F64 producer whose lanes can yield
+ * a NaN (0%0, mod-by-zero, sqrt(<0), null operand) so the caller runs the
+ * cheap post-scan that flips HAS_NULLS for any NaN lane — gated by op shape
+ * so pure-finite programs skip the extra memory pass.  Matches the fallback
+ * path's flagging so VM ≡ fallback. */
 static bool expr_last_op_produces_f64_null(const ray_expr_t* expr) {
     if (expr->out_type != RAY_F64 || expr->n_ins == 0) return false;
     const expr_ins_t* last = &expr->ins[expr->n_ins - 1];
@@ -1789,17 +1782,14 @@ static ray_t* expr_eval_full_parted(const ray_expr_t* expr, int64_t nrows) {
     }
     if (expr_last_op_overflows_i64(expr) || expr_last_op_divmod_i64(expr))
         mark_i64_overflow_as_null(out, 0, nrows);
-    /* Single-null float model: flip HAS_NULLS PRECISELY if an F64 producer
-     * canonicalized a non-finite result to NULL_F64 in-buffer.  Scan-based (not
-     * conservative-by-shape) so a pure-finite result keeps HAS_NULLS unset —
-     * critical because this fused output is often an input to the NEXT op /
-     * aggregate, and a spurious HAS_NULLS would force that consumer onto the
-     * slow null-aware path (measured: conservative flagging regressed chained
-     * float kernels catastrophically by poisoning inputs).  This output is
-     * produced once (post-join of all morsels) so the single pass here is not
-     * the per-op hot loop; mirrors the i64-overflow mark above. */
+    /* Flip HAS_NULLS PRECISELY if an F64 producer wrote a NaN lane.
+     * Scan-based (not conservative-by-shape) so a pure-finite result keeps
+     * HAS_NULLS unset — a spurious attr would force downstream consumers
+     * onto the slow null-aware path (measured: conservative flagging
+     * regressed chained float kernels catastrophically).  Runs once
+     * post-join of all morsels; mirrors the i64-overflow mark above. */
     if (expr_last_op_produces_f64_null(expr))
-        mark_f64_nonfinite_as_null(out, 0, nrows);
+        mark_f64_nan_as_null(out, 0, nrows);
     /* Conservative "may contain nulls" — REQUIRED, not cosmetic: group.c
      * feeds this vec to aggregates whose check-free fast path is gated on
      * the attr; a missing attr with sentinel lanes = wrong aggregates. */
@@ -1830,17 +1820,14 @@ ray_t* expr_eval_full(const ray_expr_t* expr, int64_t nrows) {
 
     if (expr_last_op_overflows_i64(expr) || expr_last_op_divmod_i64(expr))
         mark_i64_overflow_as_null(out, 0, nrows);
-    /* Single-null float model: flip HAS_NULLS PRECISELY if an F64 producer
-     * canonicalized a non-finite result to NULL_F64 in-buffer.  Scan-based (not
-     * conservative-by-shape) so a pure-finite result keeps HAS_NULLS unset —
-     * critical because this fused output is often an input to the NEXT op /
-     * aggregate, and a spurious HAS_NULLS would force that consumer onto the
-     * slow null-aware path (measured: conservative flagging regressed chained
-     * float kernels catastrophically by poisoning inputs).  This output is
-     * produced once (post-join of all morsels) so the single pass here is not
-     * the per-op hot loop; mirrors the i64-overflow mark above. */
+    /* Flip HAS_NULLS PRECISELY if an F64 producer wrote a NaN lane.
+     * Scan-based (not conservative-by-shape) so a pure-finite result keeps
+     * HAS_NULLS unset — a spurious attr would force downstream consumers
+     * onto the slow null-aware path (measured: conservative flagging
+     * regressed chained float kernels catastrophically).  Runs once
+     * post-join of all morsels; mirrors the i64-overflow mark above. */
     if (expr_last_op_produces_f64_null(expr))
-        mark_f64_nonfinite_as_null(out, 0, nrows);
+        mark_f64_nan_as_null(out, 0, nrows);
     /* Conservative "may contain nulls" — REQUIRED, not cosmetic: group.c
      * feeds this vec to aggregates whose check-free fast path is gated on
      * the attr; a missing attr with sentinel lanes = wrong aggregates. */
@@ -2214,14 +2201,13 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             double* src = (double*)m.morsel_ptr;
             double* dst = (double*)((char*)ray_data(result) + out_off * sizeof(double));
             switch (opc) {
-                /* Single-null float model: SQRT/LOG/EXP can map finite→non-finite
-                 * → canonicalize to NULL_F64 (HAS_NULLS via post-scan below).
-                 * NEG/ABS/CEIL/FLOOR/ROUND of finite stay finite. */
+                /* Live-infinity model: raw libm (log(0) -> -0w, exp(big) ->
+                 * 0w); NaN results read as null via the post-scan below. */
                 case OP_NEG:   for (int64_t i=0;i<n;i++) dst[i] = -src[i]; break;
                 case OP_ABS:   for (int64_t i=0;i<n;i++) dst[i] = fabs(src[i]); break;
-                case OP_SQRT:  for (int64_t i=0;i<n;i++) dst[i] = ray_f64_fin(sqrt(src[i])); break;
-                case OP_LOG:   for (int64_t i=0;i<n;i++) dst[i] = ray_f64_fin(log(src[i])); break;
-                case OP_EXP:   for (int64_t i=0;i<n;i++) dst[i] = ray_f64_fin(exp(src[i])); break;
+                case OP_SQRT:  for (int64_t i=0;i<n;i++) dst[i] = sqrt(src[i]); break;
+                case OP_LOG:   for (int64_t i=0;i<n;i++) dst[i] = log(src[i]); break;
+                case OP_EXP:   for (int64_t i=0;i<n;i++) dst[i] = exp(src[i]); break;
                 case OP_CEIL:  for (int64_t i=0;i<n;i++) dst[i] = ceil(src[i]); break;
                 case OP_FLOOR: for (int64_t i=0;i<n;i++) dst[i] = floor(src[i]); break;
                 case OP_ROUND: for (int64_t i=0;i<n;i++) dst[i] = round(src[i]); break;
@@ -2267,9 +2253,9 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             double* dst = (double*)((char*)ray_data(result) + out_off * sizeof(double));
             switch (opc) {
                 case OP_NEG:  for (int64_t i=0;i<n;i++) dst[i]=-(double)src[i]; break;
-                case OP_SQRT: for (int64_t i=0;i<n;i++) dst[i]=ray_f64_fin(sqrt((double)src[i])); break;
-                case OP_LOG:  for (int64_t i=0;i<n;i++) dst[i]=ray_f64_fin(log((double)src[i])); break;
-                case OP_EXP:  for (int64_t i=0;i<n;i++) dst[i]=ray_f64_fin(exp((double)src[i])); break;
+                case OP_SQRT: for (int64_t i=0;i<n;i++) dst[i]=sqrt((double)src[i]); break;
+                case OP_LOG:  for (int64_t i=0;i<n;i++) dst[i]=log((double)src[i]); break;
+                case OP_EXP:  for (int64_t i=0;i<n;i++) dst[i]=exp((double)src[i]); break;
                 default:      for (int64_t i=0;i<n;i++) dst[i]=(double)src[i]; break;
             }
             out_off += n;
@@ -2450,15 +2436,13 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         (op->opcode == OP_NEG || op->opcode == OP_ABS))
         mark_i64_overflow_as_null(result, 0, len);
 
-    /* Single-null float model: SQRT/LOG/EXP can map a finite input to a
-     * non-finite result, canonicalized to NULL_F64 in-buffer.  Flip HAS_NULLS
-     * PRECISELY (scan only when the shape can produce a 0Nf) so a pure-finite
-     * result doesn't poison downstream consumers; precise also matches the
-     * fused path (VM ≡ fallback).  These transcendental ops are not the hot
-     * add/sub/mul/div perf-gate kernels, so the single pass is acceptable. */
+    /* SQRT/LOG can map a finite input to a NaN (sqrt(<0), log(<0)) —
+     * flip HAS_NULLS precisely, matching the fused path (VM ≡ fallback).
+     * These transcendental ops are not the hot perf-gate kernels, so the
+     * single pass is acceptable. */
     if (out_type == RAY_F64 &&
         (op->opcode == OP_SQRT || op->opcode == OP_LOG || op->opcode == OP_EXP))
-        mark_f64_nonfinite_as_null(result, 0, len);
+        mark_f64_nan_as_null(result, 0, len);
 
     return result;
 }
@@ -2770,27 +2754,24 @@ static void binary_range(ray_op_t* op, int8_t out_type,
     if (out_type == RAY_F64) {
         double* odst = (double*)dst;
         switch (op->opcode) {
-            /* Single-null float model: canonicalize non-finite F64 results
-             * (overflow → ±Inf, div/mod-by-zero → NaN) to NULL_F64.  Mirrors
-             * the fused kernel so VM ≡ fallback bit-for-bit.  HAS_NULLS is set
-             * conservatively from the op shape at the tail of the caller. */
-            case OP_ADD:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=ray_f64_fin(lv+rv); } break;
-            case OP_SUB:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=ray_f64_fin(lv-rv); } break;
-            case OP_MUL:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=ray_f64_fin(lv*rv); } break;
-            case OP_DIV:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=rv!=0.0?ray_f64_fin(lv/rv):NULL_F64; } break;
+            /* Live-infinity model: raw IEEE lanes — ±inf survives (1%0 -> 0w,
+             * overflow -> ±0w); NaN results (0%0) read as null via the x!=x
+             * scan below.  Mirrors the fused kernel so VM ≡ fallback. */
+            case OP_ADD:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv+rv; } break;
+            case OP_SUB:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv-rv; } break;
+            case OP_MUL:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv*rv; } break;
+            case OP_DIV:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv/rv; } break;
             case OP_IDIV: for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=rv!=0.0?ray_f64_fin(floor(lv/rv)):NULL_F64; } break;
             case OP_MOD:  for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); double r; if(rv!=0.0){r=fmod(lv,rv);if(r&&((r>0)!=(rv>0)))r+=rv; r=ray_f64_fin(r);}else r=NULL_F64; odst[i]=r; } break;
             case OP_MIN2: for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv<rv?lv:rv; } break;
             case OP_MAX2: for (int64_t i=0;i<n;i++) { double lv=LV_READ(i),rv=RV_READ(i); odst[i]=lv>rv?lv:rv; } break;
             default:      for (int64_t i=0;i<n;i++) odst[i]=0.0; break;
         }
-        /* Single-null float model: PRECISE HAS_NULLS, zero extra memory pass.
-         * The producing arithmetic ops (ADD/SUB/MUL/DIV/IDIV/MOD) may have
-         * canonicalized an overflow/0-divisor result to NULL_F64; scan the
-         * range JUST written (odst[0..n] is hot in L1/L2, so this is near-free
-         * vs a cold post-scan) and atomically OR HAS_NULLS iff a 0Nf actually
-         * exists.  Precise (no input poisoning) AND no separate pass — keeps
-         * the hot float kernels within noise and matches the fused path. */
+        /* PRECISE HAS_NULLS, zero extra memory pass: arithmetic may have
+         * produced a NaN (0%0, null operand); scan the range JUST written
+         * (hot in L1/L2, near-free vs a cold post-scan) and atomically OR
+         * HAS_NULLS iff one exists.  x!=x is false for ±inf — live
+         * infinities never read as nulls. */
         if (op->opcode == OP_ADD || op->opcode == OP_SUB || op->opcode == OP_MUL ||
             op->opcode == OP_DIV || op->opcode == OP_IDIV || op->opcode == OP_MOD) {
             int any_nan = 0;
@@ -3150,10 +3131,12 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             fix_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len, op->opcode);
     }
 
-    /* Div/mod: mark zero-divisor positions as null.
-     * The morsel loop writes 0 for b==0 but can't set bitmap nulls. */
+    /* Idiv/mod: mark zero-divisor positions as null (integer-null semantics).
+     * The morsel loop writes 0 for b==0 but can't set bitmap nulls.  F64
+     * OP_DIV is exempt: divide-by-zero is a live ±inf (or NaN for 0%0,
+     * caught by the in-lane scan), never a forced null. */
     uint16_t opc = op->opcode;
-    if (opc == OP_DIV || opc == OP_IDIV || opc == OP_MOD) {
+    if (opc == OP_IDIV || opc == OP_MOD || (opc == OP_DIV && out_type != RAY_F64)) {
         if (!r_scalar) {
             int8_t rt = rhs->type;
             if (rt == RAY_I64 || RAY_IS_TEMPORAL64(rt)) {
@@ -3180,10 +3163,9 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
         }
     }
 
-    /* Single-null float model: HAS_NULLS for newly-produced 0Nf is set
-     * PRECISELY inside binary_range's F64 block (hot-cache scan of the range it
-     * just wrote, atomic-OR into result->attrs) — no separate cold pass, no
-     * input poisoning.  Nothing to do here. */
+    /* HAS_NULLS for newly-produced NaN lanes is set PRECISELY inside
+     * binary_range's F64 block (hot-cache scan of the range it just wrote,
+     * atomic-OR into result->attrs).  Nothing to do here. */
 
     return result;
 }

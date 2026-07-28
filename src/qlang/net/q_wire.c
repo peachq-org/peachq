@@ -12,7 +12,6 @@
 #include "mem/heap.h"           /* RAY_ATTR_HAS_NULLS */
 #include "store/serde.h"        /* fn-serde hook getters (serde mode ext 200) */
 #include "lang/env.h"           /* ray_fn_name, ray_env_get */
-#include <math.h>               /* isinf */
 #include <stdint.h>
 #include <string.h>
 
@@ -481,10 +480,6 @@ static int r_cstr(rcur_t* c, const char** s, size_t* n) {
     return 0;
 }
 
-/* The engine's float model has no 0w: canonicalize ±Inf to NaN (null). */
-static double f64_canon(double v) { return isinf(v) ? NULL_F64 : v; }
-static float  f32_canon(float v)  { return isinf(v) ? NULL_F32 : v; }
-
 static ray_t* trunc_err(const char* what) {
     return q_err(QE_DOMAIN);
 }
@@ -522,9 +517,9 @@ ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap) {
     case RAY_I64: RAY_TEMPORAL64_CASES: { int64_t* e = (int64_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I64) { has_nulls = true; break; } } break;
     case RAY_F32: { float* e = (float*)d;
-        for (int32_t i = 0; i < count; i++) { e[i] = f32_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
+        for (int32_t i = 0; i < count; i++) if (e[i] != e[i]) { has_nulls = true; break; } } break;
     case RAY_F64: RAY_TEMPORALF_CASES: { double* e = (double*)d;
-        for (int32_t i = 0; i < count; i++) { e[i] = f64_canon(e[i]); if (e[i] != e[i]) has_nulls = true; } } break;
+        for (int32_t i = 0; i < count; i++) if (e[i] != e[i]) { has_nulls = true; break; } } break;
     /* no in-band sentinel: bool/byte have no null; GUID's all-zero-payload null
      * is only knowable from the serde attrs flag (restored below).  CHARV's
      * blank "null" is an ordinary byte and never sets the flag. */
@@ -680,8 +675,8 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         case RAY_I16: if (!r_need(c, 2)) return trunc_err("short"); return ray_i16(r_i16(c));
         case RAY_I32: if (!r_need(c, 4)) return trunc_err("int");   return ray_i32(r_i32(c));
         case RAY_I64: if (!r_need(c, 8)) return trunc_err("long");  return ray_i64(r_i64(c));
-        case RAY_F32: if (!r_need(c, 4)) return trunc_err("real");  return ray_f32(f32_canon(r_f32(c)));
-        case RAY_F64: if (!r_need(c, 8)) return trunc_err("float"); return ray_f64(f64_canon(r_f64(c)));
+        case RAY_F32: if (!r_need(c, 4)) return trunc_err("real");  return ray_f32(r_f32(c));
+        case RAY_F64: if (!r_need(c, 8)) return trunc_err("float"); return ray_f64(r_f64(c));
         case RAY_CHARV: {                             /* wire -10 -> char atom */
             if (!r_need(c, 1)) return trunc_err("char");
             uint8_t ch = r_u8(c);
@@ -699,7 +694,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             return ray_sym(ray_sym_intern(s, n));
         }
         case RAY_TIMESTAMP: if (!r_need(c, 8)) return trunc_err("timestamp"); return ray_timestamp(r_i64(c));
-        case RAY_DATETIME: if (!r_need(c, 8)) return trunc_err("datetime"); return ray_datetime(f64_canon(r_f64(c)));
+        case RAY_DATETIME: if (!r_need(c, 8)) return trunc_err("datetime"); return ray_datetime(r_f64(c));
         case RAY_DATE: if (!r_need(c, 4)) return trunc_err("date"); return ray_date((int64_t)r_i32(c));
         case RAY_TIME: if (!r_need(c, 4)) return trunc_err("time"); return ray_time((int64_t)r_i32(c));
         case RAY_MONTH: if (!r_need(c, 4)) return trunc_err("month"); return ray_month((int64_t)r_i32(c));
