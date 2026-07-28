@@ -312,6 +312,25 @@ int q_type_is_plain_dict(ray_t* x) {
     return x && x->type == RAY_DICT && !q_type_is_keyed(x);
 }
 
+/* Any dictionary, keyed table included — for laws on the entries axis that
+ * cover both (group's dict arm, `!`'s equal-count totality). */
+int q_type_is_dict(ray_t* x) {
+    return x && x->type == RAY_DICT;
+}
+
+/* Column readable by the dense group core (agg_group_keys' int64/sym/str key
+ * lanes, src/ops/agg_engine.c) — anything else takes a boxed row-compare. */
+int q_type_is_dense_group_col(ray_t* c) {
+    switch (c ? c->type : RAY_LIST) {
+        case RAY_I64: RAY_TEMPORAL64_CASES:
+        case RAY_I32: RAY_TEMPORAL32_CASES:
+        case RAY_I16: RAY_BYTE_CASES: case RAY_BOOL:
+        case RAY_SYM: case RAY_STR:
+            return 1;
+        default: return 0;
+    }
+}
+
 /* The physical STR atom lane (string-C3): q-invisible storage that reads back
  * as an ITEM of a string column.  Rank-wise it is a char LIST, not a scalar,
  * so rank-sensitive verbs must ask this rather than probe the tag. */
