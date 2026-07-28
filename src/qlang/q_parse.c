@@ -387,9 +387,11 @@ static int el_float_is_null(const q_tok_el *e) {
 }
 
 /* Read an optional trailing type letter (b/h/i/j/e/f, plus gated d) at
- * src[*p].  The whole literal shares one type, but each element in the source
- * may carry the suffix (q prints `0Nh 0Wh -0Wh 42h`), so we accept a letter
- * after every element and require them to agree.
+ * src[*p].  The whole literal shares one type and q prints only ONE trailing
+ * suffix (`0N 32767 -32767 42h` — there is no display for short infinity,
+ * basics/datatypes.md:254-259).  We nonetheless ACCEPT a letter after every
+ * element and require them to agree; rejecting the per-item form is deferred
+ * to the grammar cluster (PLAN.md).
  *
  * `d` (date) is accepted ONLY after a Special or a date magnitude (0Nd, 0Wd,
  * -0Wd, 2000.01.01d) — never after plain digits, so corpus tokens like `3d`
@@ -822,7 +824,6 @@ static ray_t *scan_num_literal(const char *src, int *p) {
 
     /* Integer context: h=i16, i=i32, j/none=i64. */
     int width = (letter == 'h') ? 2 : (letter == 'i') ? 4 : 8;
-    int8_t type = (width == 2) ? RAY_I16 : (width == 4) ? RAY_I32 : RAY_I64;
     if (m == 1) {
         int64_t v = el_to_int(&buf[0], width);
         if (width == 2) return ray_i16((int16_t)v);
@@ -843,7 +844,8 @@ static ray_t *scan_num_literal(const char *src, int *p) {
         for (int i = 0; i < m; i++) t[i] = (int16_t)el_to_int(&buf[i], 2);
         vec = ray_vec_from_raw(RAY_I16, t, m);
     }
-    if (vec && !RAY_IS_ERR(vec) && type == RAY_I64) {
+    /* Without HAS_NULLS a reduction cannot tell 0Ni/0Nh from data. */
+    if (vec && !RAY_IS_ERR(vec)) {
         for (int i = 0; i < m; i++)
             if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
     }
