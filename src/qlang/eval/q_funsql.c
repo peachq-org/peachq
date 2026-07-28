@@ -841,12 +841,6 @@ static ray_t* bang_qsql(ray_t** args) {
         return q_err(QE_TYPE);
     }
     ray_t* r;
-    ray_t* aen = NULL;    /* the keyword lowering's ,`x collapses to a lone sym */
-    if (a && a->type == -RAY_SYM) {
-        aen = q_enlist_wrap(&a, 1);
-        if (!aen || RAY_IS_ERR(aen)) { ray_release(src); return aen ? aen : q_err(QE_TYPE); }
-        a = aen;
-    }
     int64_t nk = 0;                 /* keyed source: re-key the result */
     if (q_type_is_dict(src) && !q_type_is_keyed(src)) {
         if (q_type_is_dict(a))      r = update_dict(a, b, c, src);
@@ -895,7 +889,6 @@ static ray_t* bang_qsql(ray_t** args) {
         }
         ray_release(t);
     }
-    if (aen) ray_release(aen);
     ray_release(src);
     if (name >= 0 && r && !RAY_IS_ERR(r)) {
         /* name form (law 21): amend in place, hand back the name */
