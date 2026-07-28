@@ -395,10 +395,14 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     }
 }
 
-/* Integer-backed sentinels (kdb datatypes table): MIN->0N, MAX->0W, -MAX->-0W, + suffix (0=bare). */
+/* Integer-backed sentinels (kdb datatypes table): MIN->0N, MAX->0W, -MAX->-0W, + suffix (0=bare).
+ * "There is no display for short infinity" (basics/datatypes.md:254-259: 0Wh -> 32767h): the
+ * h width prints its ±MAX as digits.  Its NULL still displays 0Nh. */
 static int sentinel_tok(int64_t v, int width, char suffix, char* out, size_t n) {
     int64_t vmax = (width == 2) ? INT16_MAX : (width == 4) ? INT32_MAX : INT64_MAX;
-    const char* base = (v == -vmax - 1) ? "0N" : (v == vmax) ? "0W"
+    const char* base = (v == -vmax - 1) ? "0N"
+                     : (width == 2)     ? NULL
+                     : (v == vmax)      ? "0W"
                      : (v == -vmax)     ? "-0W" : NULL;
     if (!base) return 0;
     char sfx[2] = { suffix, '\0' };
