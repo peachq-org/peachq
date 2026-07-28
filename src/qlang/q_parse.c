@@ -2026,12 +2026,15 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
             b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
             ray_release(s);
         } else {
+            /* a by-symbol VECTOR constant is enlisted like every symvec in a
+             * tree (parsetrees.md): ,`a`b evals once to the functional b */
             b = ray_sym_vec_new(RAY_SYM_W64, nb);
             for (int i = 0; i < nb; i++) {
                 ray_t *s = ray_sym_str(bv[i]->i64);
                 b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
                 ray_release(s);
             }
+            b = qsql_enlist(b);
         }
         for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
         return b;
@@ -2107,16 +2110,12 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     if (x->type == RAY_LIST) {
         int64_t n = ray_len(x);
         ray_t **e = (ray_t **)ray_data(x);
-        /* An ENLISTED symvec constant (the parser's ,`a`b wrap) degrades to
-         * the BARE symvec: kdb keeps it enlisted (funsql.md:69 `c1 in `b`c` =
-         * (in;`c1;enlist[`b`c])), but the FROZEN ray_select / ql_qsql lowering
-         * can only consume a bare typed symvec in a constraint / phrase-value
-         * slot — the enlisted general list errors 'type/'domain at eval.  A
-         * recorded openq lang-divergence (PLAN.md); the kdb-true `s in `a`b`
-         * parse row stays RED-below-floor until the engine unwraps it. */
+        /* An ENLISTED symvec constant (the parser's ,`a`b wrap) passes through
+         * whole: kdb keeps it enlisted (funsql.md:69 `c1 in `b`c` =
+         * (in;`c1;enlist[`b`c])) and one phrase eval yields the symvec. */
         if (n == 1 && e[0] && e[0]->type == RAY_SYM) {
-            ray_retain(e[0]);
-            return e[0];
+            ray_retain(x);
+            return x;
         }
         ray_t *node = ray_list_new(n > 0 ? n : 1);
         if (n >= 1 && e[0] == q_registry_list_value()) {
