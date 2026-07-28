@@ -190,8 +190,9 @@ static ray_t* dict_rekey(ray_t* x, ray_t* r) {
     return ray_dict_new(k, r);
 }
 
-/* the FNV overload matrices (`?` `!` `@` `.`): VARY values whose classic
- * reading is the DYAD — they project below rank 2 and fold/scan as dyads */
+/* the FNV overload matrices (`?` `!` `@` `.`): QR_FNV-recipe VARY values
+ * (FNV = fn-at-vary-arity, not the hash) whose classic reading is the DYAD —
+ * they project below rank 2 and fold/scan as dyads */
 static int fnv_matrix_row(const struct q_op* r) {
     return r && r->dyad.kind == QK_FN && r->dyad.arity == 0;
 }
