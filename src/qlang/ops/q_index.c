@@ -223,8 +223,8 @@ static ray_t* table_level(ray_t* t, ray_t* i, int write) {
     return q_index_elem_at(t, ix);           /* the item of a table is its row */
 }
 
-/* Both writes are ONE write to the column dict (a table is `flip` of it, the law
- * cols_select already runs): at a sym that dict's own store, so a new column
+/* Both writes are ONE write to the column dict (a table is `flip` of it — the
+ * entries-axis law): at a sym that dict's own store, so a new column
  * extends; at a row the same store run per column — `t[i]:d` is
  * `` t[key d; i]:value d ``, so a row dict addresses its OWN keys. */
 static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v) {
