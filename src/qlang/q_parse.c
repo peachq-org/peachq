@@ -1676,7 +1676,11 @@ static P parse_query(Parser *p) {
     /* the in-flight raw slots are now all NULL / consumed — retire the guard. */
     qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
 
-    head = (verb == QSQL_V_SELECT || verb == QSQL_V_EXEC) ? q_verb('?') : q_verb('!');
+    /* the VALUE head (value-heads-at-parse): the same immutable registry cell
+     * the functional spelling carries — never a bare sym name-ref */
+    head = q_embed((verb == QSQL_V_SELECT || verb == QSQL_V_EXEC) ? q_verb('?')
+                                                                  : q_verb('!'),
+                   Q_DYADIC);
     node = ray_list_new(5);
     node = ray_list_append(node, head); ray_release(head);
     node = ray_list_append(node, t);    ray_release(t);
@@ -2015,14 +2019,22 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
     if (all_bare) {
         ray_t *b;
         if (nb == 1) {
-            b = ray_sym(bv[0]->i64);                 /* bare group-by symbol */
+            /* the tree QUOTES the group-by symbol constant (parsetrees.md):
+             * one eval of `,`n` yields the functional b-value `n */
+            ray_t *s = ray_sym_str(bv[0]->i64);
+            b = ray_sym_vec_new(RAY_SYM_W64, 1);
+            b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
+            ray_release(s);
         } else {
+            /* a by-symbol VECTOR constant is enlisted like every symvec in a
+             * tree (parsetrees.md): ,`a`b evals once to the functional b */
             b = ray_sym_vec_new(RAY_SYM_W64, nb);
             for (int i = 0; i < nb; i++) {
                 ray_t *s = ray_sym_str(bv[i]->i64);
                 b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
                 ray_release(s);
             }
+            b = qsql_enlist(b);
         }
         for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
         return b;
@@ -2098,16 +2110,12 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     if (x->type == RAY_LIST) {
         int64_t n = ray_len(x);
         ray_t **e = (ray_t **)ray_data(x);
-        /* An ENLISTED symvec constant (the parser's ,`a`b wrap) degrades to
-         * the BARE symvec: kdb keeps it enlisted (funsql.md:69 `c1 in `b`c` =
-         * (in;`c1;enlist[`b`c])), but the FROZEN ray_select / ql_qsql lowering
-         * can only consume a bare typed symvec in a constraint / phrase-value
-         * slot — the enlisted general list errors 'type/'domain at eval.  A
-         * recorded openq lang-divergence (PLAN.md); the kdb-true `s in `a`b`
-         * parse row stays RED-below-floor until the engine unwraps it. */
+        /* An ENLISTED symvec constant (the parser's ,`a`b wrap) passes through
+         * whole: kdb keeps it enlisted (funsql.md:69 `c1 in `b`c` =
+         * (in;`c1;enlist[`b`c])) and one phrase eval yields the symvec. */
         if (n == 1 && e[0] && e[0]->type == RAY_SYM) {
-            ray_retain(e[0]);
-            return e[0];
+            ray_retain(x);
+            return x;
         }
         ray_t *node = ray_list_new(n > 0 ? n : 1);
         if (n >= 1 && e[0] == q_registry_list_value()) {
@@ -2189,15 +2197,28 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
     return qsql_build_dict(aliases, vals, na);       /* consumes aliases/vals */
 }
 
-/* exec select-phrase `a`: omitted -> `()`; a single unnamed column -> the bare
- * value; named / multiple -> a name!expr dict (kdb exec.md). */
+/* exec select-phrase `a`: omitted -> `()`; a single unnamed column -> the
+ * QUOTED bare value (parsetrees.md: constants are enlisted, so one eval of
+ * the slot yields the functional a-value — a col sym as `,`c1`, a computed
+ * expr as its enlisted tree); named / multiple -> a name!expr dict. */
 static ray_t *qsql_norm_exec_a(ray_t *phrases) {
     int64_t n = ray_len(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     if (n == 0) return ray_list_new(0);
     ray_t *name = NULL, *val = NULL;
-    if (n == 1 && !qsql_phrase_alias(ph[0], &name, &val))
-        return qsql_convert_expr(ph[0]);             /* single unnamed column */
+    if (n == 1 && !qsql_phrase_alias(ph[0], &name, &val)) {
+        ray_t *v = qsql_convert_expr(ph[0]);
+        if (!v || RAY_IS_ERR(v)) return v;
+        if (v->type == -RAY_SYM) {
+            ray_t *s = ray_sym_str(v->i64);
+            ray_t *sv = ray_sym_vec_new(RAY_SYM_W64, 1);
+            sv = q_symvec_append(sv, ray_str_ptr(s), (int)ray_str_len(s));
+            ray_release(s);
+            ray_release(v);
+            return sv;
+        }
+        return qsql_enlist(v);
+    }
     return qsql_norm_dict(phrases);                  /* named / multiple -> dict */
 }
 
@@ -2239,7 +2260,10 @@ static ray_t *qsql_norm_where(ray_t *phrases) {
     return qsql_enlist(clist);                        /* enlist(list); consumes clist */
 }
 
-/* delete column-list `a`: the bare col names as a symbol VECTOR (kdb funsql). */
+/* delete column-list `a`: the col names as a symbol VECTOR, ENLISTED like every
+ * symvec constant in a tree (parsetrees.md "lists of symbols are enlisted" —
+ * `,,`b`), so one eval of the slot yields the functional symvec.  A bare 1-elem
+ * symvec would instead eval to the ATOM (parsetrees.md:26 eval enlist`x -> `x). */
 static ray_t *qsql_norm_delete_a(ray_t *phrases) {
     int64_t n = ray_len(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
@@ -2251,7 +2275,7 @@ static ray_t *qsql_norm_delete_a(ray_t *phrases) {
         a = q_symvec_append(a, ray_str_ptr(s), (int)ray_str_len(s));
         ray_release(s);
     }
-    return a;
+    return qsql_enlist(a);
 }
 
 /* Normalize a raw phrase list into the functional slot the clones emit.
