@@ -441,12 +441,9 @@ RAY_INLINE int64_t fast_i64(const char* p, size_t len, bool* is_null) {
 RAY_INLINE double fast_f64(const char* p, size_t len, bool* is_null) {
     double v = 0.0;
     size_t n = ray_parse_f64(p, len, &v);
-    /* STAGE 2 (single-null float model): ray_parse_f64 already canonicalizes
-     * any non-finite parse ("inf"/"nan"/"1e400") to NULL_F64 (0Nf).  Treat
-     * an unparseable cell OR a canonical 0Nf as null so the column's
-     * HAS_NULLS / null bitmap is marked the same way as a blank cell — the
-     * F64 domain is {finite} ∪ {0Nf}, and a 0Nf row reads as nil?.
-     * `v != v` is the model's null test (true only for the NaN-bit 0Nf). */
+    /* Live-infinity model: a ±inf cell ("0w"/"inf"/"1e400") is a VALUE; an
+     * unparseable cell or a NaN cell ("nan") is null.  `v != v` is the null
+     * test — false for ±inf. */
     *is_null = (n == 0 || n != len || v != v);
     return *is_null ? NULL_F64 : v;
 }
@@ -3051,7 +3048,8 @@ static void csv_write_timestamp(csv_writer_t* w, int64_t ns) {
 
 static void csv_write_f64(csv_writer_t* w, double v) {
     if (isnan(v)) { cw_puts(w, "nan"); return; }
-    if (isinf(v)) { cw_puts(w, v < 0 ? "-inf" : "inf"); return; }
+    /* q text form (string 0w -> "0w", basics/datatypes.md); reader accepts it. */
+    if (isinf(v)) { cw_puts(w, v < 0 ? "-0w" : "0w"); return; }
     /* %.17g is the standard round-trip format; wrap in cw_printf so
      * a 64-byte buffer stack overflow guards the write. */
     cw_printf(w, "%.17g", v);
