@@ -22,6 +22,7 @@
 #include "qlang/q_registry_internal.h"   /* q_type_strict_i64 — the do-count judgment */
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_index.h"
+#include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "ops/ops.h"
@@ -266,8 +267,10 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     if (!s) return q_err(QE_TYPE);
     int reserved = q_ops_is_reserved(ray_str_ptr(s), (int)ray_str_len(s));
     int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
+    int zd_nyi = q_dotz_write_is_nyi(ray_str_ptr(s), ray_str_len(s));
     ray_release(s);
     if (reserved) return q_err(QE_ASSIGN);
+    if (zd_nyi) return q_err(QE_NYI);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
@@ -283,6 +286,7 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
 /* `value`/`get` (ref/value.md; get is the synonym).  q `eval` needs no body
  * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
  * ONCE, non-recursively: a string parses+evaluates in the current context, a
+ * `:path sym READS THAT FILE (ref/get.md — kdb's get IS value), any other
  * sym atom names a variable, a dict yields its values, and a list applies
  * its first item (string/sym heads evaluated first, ref/value.md) to the
  * rest AS LITERALS — nested trees stay data.  value of a TYPED vector
@@ -290,7 +294,10 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
 ray_t* q_eval_value_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) { ray_retain(x); return x; }     /* value :: -> :: */
-    if (x->type == -RAY_SYM) return name_value(x, NULL);
+    if (x->type == -RAY_SYM) {
+        ray_t* f = q_wirefile_read(x);       /* NULL unless a `:path sym */
+        return f ? f : name_value(x, NULL);
+    }
     if (x->type == RAY_CHARV || x->type == -RAY_CHARV || x->type == -RAY_STR) {
         const char* p; int64_t n;
         if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);

@@ -13,6 +13,7 @@
 #include "qlang/q_builtins.h"   /* q_ty_char — meta column letters */
 #include "qlang/ops/q_bang.h"  /* q_bang_dispatch — the `-N!` internal-fn manifest */
 #include "qlang/q_dotz.h"  /* q_dotz_ipc_hook_index, q_dotz_zts_set — .z.* handler arms */
+#include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y file form */
 #include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
 #include "lang/eval.h"     /* ray_eval; ray_list_fn, ray_except_fn, ray_sect_fn, ray_take_fn */
 #include "lang/internal.h" /* ray_concat_fn, ray_typed_null, ray_error */
@@ -1303,8 +1304,9 @@ ray_t* q_key_wrap(ray_t* x) {
  *                       (the empty-sym :: placeholder entry is skipped)
  *   `. set d         -> restore root variables from dict d
  *   `.foo set 42     -> plain rebind: WIPES the context (q4m3's gotcha)
- * File handles (`:path) and the compressed/splay list forms are the
- * file-I/O wave: 'nyi.  Returns the handle (kdb returns nam). */
+ *   `:f set y        -> write a kdb+ flat file (q_wirefile_write)
+ * The splayed form and the compressed (file;lbs;alg;lvl) left-arguments are a
+ * later wave: 'nyi.  Returns the handle (kdb returns nam). */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
         return q_err(QE_NYI);
@@ -1316,9 +1318,10 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         ray_release(s);
         return q_err(QE_TYPE);
     }
-    if (nm[0] == ':') {
+    if (nm[0] == ':') {                         /* file handle: q_wirefile writes it */
         ray_release(s);
-        return q_err(QE_NYI);
+        ray_t* r = q_wirefile_write(x, y);
+        return r ? r : q_err(QE_TYPE);
     }
     int is_root = (l == 1 && nm[0] == '.');
     /* Restore semantics: a single-segment `.foo` handle (kdb creates the
@@ -1383,6 +1386,10 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
      * NOT `.ipc.on.*` hooks.  dotz.c owns the name->slot dispatch AND the
      * {…}-carrier unwrap (call_fn1 fires a bare lambda); q_dotz_set declines any
      * non-handler name so it falls through to the `.ipc.on.*`/plain-env path. */
+    if (q_dotz_write_is_nyi(nm, l)) {
+        ray_release(s);
+        return q_err(QE_NYI);
+    }
     if (q_dotz_set(nm, l, y)) {
         ray_release(s);
         ray_retain(x);

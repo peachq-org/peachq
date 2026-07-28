@@ -130,6 +130,11 @@ void q_wire_wbuf_free(q_wire_wbuf_t* b);
  * Returns an owned value or a RAY_ERROR. */
 ray_t* q_wire_read_obj(const uint8_t* buf, size_t len, size_t* consumed, int swap);
 
+/* Materialize a fixed-width vector from `count` raw kdb payload elements at p,
+ * which the caller has already bounds-checked; swap when the source was
+ * big-endian.  Owned, with RAY_ATTR_HAS_NULLS set (invariant 16.4). */
+ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap);
+
 /* ---- serde mode (RAY_SERDE_WIRE_VERSION 5, storage/journal) ----
  * Same grammar as the wire PLUS the extension band above, MINUS the wire's
  * q-observable normalizations: boxed lists are never collapsed (engine

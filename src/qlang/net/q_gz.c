@@ -110,3 +110,22 @@ uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
     *err = NULL;
     return out;
 }
+
+int q_gz_inflate_zlib(const uint8_t* src, size_t src_len,
+                      uint8_t* out, size_t out_cap,
+                      size_t* out_len, size_t* consumed, const char** err) {
+    if (!src || src_len < 2 || !out || out_cap == 0) { *err = "domain"; return -1; }
+    tinfl_decompressor d;
+    tinfl_init(&d);
+    size_t in_sz = src_len, out_sz = out_cap;
+    /* PARSE_ZLIB_HEADER also consumes and checks the trailing adler32, so a
+     * DONE status means the stream ended cleanly and in_sz is its true width. */
+    tinfl_status st = tinfl_decompress(&d, src, &in_sz, out, out, &out_sz,
+                                       TINFL_FLAG_PARSE_ZLIB_HEADER |
+                                       TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    if (st != TINFL_STATUS_DONE) { *err = "domain"; return -1; }
+    *out_len = out_sz;
+    *consumed = in_sz;
+    *err = NULL;
+    return 0;
+}
