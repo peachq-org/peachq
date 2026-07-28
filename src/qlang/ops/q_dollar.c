@@ -259,9 +259,8 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
         /* ±inf saturates to the target's ±0W (`long$0w` -> 0W; the infinity
          * corresponding to numeric x is min 0#x, ref/cast.md). */
         if (isinf(x->f64)) {
-            int64_t w = (tag == RAY_I64) ? INT64_MAX
-                      : (tag == RAY_I32) ? INT32_MAX : INT16_MAX;
-            if (x->f64 < 0) w = -w;
+            int64_t w = 0;
+            ray_type_inf(tag, x->f64 > 0, &w);
             if (tag == RAY_I64) return ray_i64(w);
             if (tag == RAY_I32) return ray_i32((int32_t)w);
             return ray_i16((int16_t)w);
@@ -283,11 +282,8 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
             int isnull = isnan(v);
             int64_t iv;
             if (isnull) iv = 0;
-            else if (isinf(v)) {
-                iv = (tag == RAY_I64) ? INT64_MAX
-                   : (tag == RAY_I32) ? INT32_MAX : INT16_MAX;
-                if (v < 0) iv = -iv;
-            } else iv = (int64_t)rint(v);
+            else if (isinf(v)) ray_type_inf(tag, v > 0, &iv);
+            else iv = (int64_t)rint(v);
             if      (tag == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
             else if (tag == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
             else                     ((int16_t*)ray_data(out))[i] = (int16_t)iv;
@@ -306,6 +302,11 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
  * VECTORS through untouched, so own them here.  Byte joins the integer family
  * for float rounding (derived — byte float-cast is unpinned); float null ->
  * 0x00: byte has no null (basics/datatypes.md blank column). */
+/* ref/cast.md:120 — longs greater than 0wi cast to 0xff. */
+static uint8_t cast_u8_scalar(int64_t v) {
+    return v > INT32_MAX ? 0xff : (uint8_t)v;
+}
+
 static ray_t* cast_u8(ray_t* x) {
     if (x && x->type == -RAY_STR) {
         const char* sp = ray_str_ptr(x);
@@ -333,14 +334,14 @@ static ray_t* cast_u8(ray_t* x) {
         }
         return out;
     }
-    if (q_type_is_int_atom(x)) return ray_u8((uint8_t)q_type_iatom_val(x));
+    if (q_type_is_int_atom(x)) return ray_u8(cast_u8_scalar(q_type_iatom_val(x)));
     if (q_type_is_int_vec(x)) {
         int64_t n = ray_len(x);
         ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
         uint8_t* d = (uint8_t*)ray_data(out);
-        for (int64_t i = 0; i < n; i++) d[i] = (uint8_t)q_type_ivec_get(x, i);
+        for (int64_t i = 0; i < n; i++) d[i] = cast_u8_scalar(q_type_ivec_get(x, i));
         return out;
     }
     return cast_delegate(RAY_BYTE_ONLY, x);
@@ -376,8 +377,10 @@ static ray_t* cast_timestamp(ray_t* x) {
      * Sentinels map across (0Nt -> 0Np, +-0Wt -> +-0Wp). */
     if (x && x->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_TIMESTAMP);
-        if (x->i32 == INT32_MAX)  return ray_timestamp(INT64_MAX);
-        if (x->i32 == -INT32_MAX) return ray_timestamp(-INT64_MAX);
+        int64_t src, dst;
+        ray_type_inf(RAY_TIME, x->i32 > 0, &src);
+        if (x->i32 == src && ray_type_inf(RAY_TIMESTAMP, x->i32 > 0, &dst))
+            return ray_timestamp(dst);
         return ray_timestamp((int64_t)x->i32 * 1000000LL);
     }
     if (x && x->type == RAY_TIME) {
@@ -387,11 +390,12 @@ static ray_t* cast_timestamp(ray_t* x) {
         out->len = n;
         const int32_t* d = (const int32_t*)ray_data(x);
         for (int64_t i = 0; i < n; i++) {
-            int isnull = (d[i] == INT32_MIN);
+            int isnull = (d[i] == NULL_I32);
+            int64_t src, dst = 0;
+            ray_type_inf(RAY_TIME, d[i] > 0, &src);
             ((int64_t*)ray_data(out))[i] =
                 isnull ? 0
-                : (d[i] == INT32_MAX)  ? INT64_MAX
-                : (d[i] == -INT32_MAX) ? -INT64_MAX
+                : (d[i] == src && ray_type_inf(RAY_TIMESTAMP, d[i] > 0, &dst)) ? dst
                 : (int64_t)d[i] * 1000000LL;
             if (isnull) ray_vec_set_null(out, i, true);
         }

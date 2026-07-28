@@ -47,7 +47,7 @@ static inline int32_t date_years_by_days(int yy) {
 
 /* Decode: days-since-epoch → year/month/day */
 static inline void date_to_ymd(int32_t days, int* y, int* m, int* d) {
-    int32_t offset = days + date_years_by_days(RAY_DATE_EPOCH - 1);
+    int32_t offset = (int32_t)((uint32_t)days + (uint32_t)date_years_by_days(RAY_DATE_EPOCH - 1));
     double approx = (double)offset / 365.2425;
     int32_t years = (int32_t)(approx >= 0.0 ? approx + 0.5 : approx - 0.5);
 

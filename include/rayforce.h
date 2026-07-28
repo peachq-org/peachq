@@ -505,6 +505,26 @@ ray_t* ray_typed_null(int8_t type);
 #define NULL_F32  ((float)__builtin_nanf(""))
 #define NULL_F64  (__builtin_nan(""))
 
+/* Per-type INFINITY payload — the sibling of ray_typed_null, sharing its
+ * width groupings.  Integer-backed types only (the float lanes have real
+ * ±Inf); INT<w>_MIN is the null, so the infinity is ±INT<w>_MAX
+ * (basics/datatypes.md: infinities "map to int_min+1 and int_max, with 0N
+ * as int_min", and the type table's 0Wh/0Wi/0W/0Wp/0Wm/0Wd/0Wn/0Wu/0Wv/0Wt
+ * column).  `type` is the POSITIVE tag.  false leaves *out untouched:
+ * bool/byte/char/guid/sym have no infinity pinned by the docs. */
+static inline bool ray_type_inf(int8_t type, bool positive, int64_t* out) {
+    int64_t inf;
+    switch (type) {
+        case RAY_I64: case RAY_TIMESTAMP: case RAY_TIMESPAN: inf = INT64_MAX; break;
+        case RAY_I32: case RAY_MONTH: case RAY_DATE: case RAY_TIME:
+        case RAY_MINUTE: case RAY_SECOND:                    inf = INT32_MAX; break;
+        case RAY_I16:                                        inf = INT16_MAX; break;
+        default:                                             return false;
+    }
+    *out = positive ? inf : -inf;
+    return true;
+}
+
 /* Atom null check.  RAY_NULL_OBJ is the untyped null singleton.
  * Typed atoms with a defined NULL_* sentinel use payload-compare;
  * types without a sentinel (BOOL/U8/F32) fall back to the
