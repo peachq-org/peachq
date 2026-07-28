@@ -557,6 +557,245 @@ static ray_t* vec_cond(ray_t* b, ray_t* x, ray_t* y) {
 }
 
 
+/* ===== `!` rank 4: Update / Delete (wave 4) ============================== */
+
+/* a fresh column of v's null, length n (update.md: a created column has
+ * nulls wherever the Where phrase did not reach) */
+static ray_t* null_col_like(ray_t* v, int64_t n) {
+    int8_t ty = ray_is_atom(v) ? v->type : ray_is_vec(v) ? (int8_t)-v->type : 0;
+    ray_t* na = ty ? ray_typed_null(ty) : NULL;
+    if (!na) { na = RAY_NULL_OBJ; ray_retain(na); }
+    ray_t* nn = ray_i64(n);
+    ray_t* col = q_take_wrap(nn, na);
+    ray_release(nn);
+    ray_release(na);
+    return col;
+}
+
+/* law 20's per-column step: the existing column (or a fresh null column)
+ * amended at rows through Amend At — an atom broadcasts, a uniform result
+ * scatters pairwise to the ORIGINAL positions. */
+static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
+    /* cur owned; consumed on success, released here on error */
+    ray_t* r = q_index_amend_at(cur, rows, NULL, v);
+    if (!r || RAY_IS_ERR(r)) {
+        ray_release(cur);
+        return r ? r : q_err(QE_TYPE);
+    }
+    return r;
+}
+
+static ray_t* upd_col_start(ray_t* t, int64_t nm, ray_t* v) {
+    ray_t* cur = ray_table_get_col(t, nm);              /* borrowed or NULL */
+    if (cur) { ray_retain(cur); return cur; }
+    return null_col_like(v, q_count_long(t));
+}
+
+/* the updated columns as names!cols; grouped when b names groups */
+static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
+    ray_t* keys = ray_dict_keys(a);
+    ray_t* rng = ray_dict_vals(a);
+    int64_t nc = q_count_long(rng);
+    ray_t* cols = ray_list_new(nc > 0 ? nc : 1);
+    for (int64_t j = 0; j < nc && !RAY_IS_ERR(cols); j++) {
+        ray_t* nm = q_index_elem_at(keys, j);
+        ray_t* tree = q_index_elem_at(rng, j);
+        ray_t* cur = NULL;
+        ray_t* err = NULL;
+        if (!nm || RAY_IS_ERR(nm) || !tree || RAY_IS_ERR(tree)) {
+            err = q_err(QE_TYPE);
+        } else if (!gidxs) {                             /* ungrouped */
+            ray_t* v = phrase_eval(tree, t, idx);
+            if (!v || RAY_IS_ERR(v)) err = v ? v : q_err(QE_TYPE);
+            else {
+                cur = upd_amend(upd_col_start(t, nm->i64, v), idx, v);
+                if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
+                ray_release(v);
+            }
+        } else {                                         /* grouped (law 20) */
+            int64_t ng = ray_len(gidxs);
+            ray_t** gi = (ray_t**)ray_data(gidxs);
+            for (int64_t k = 0; k < ng && !err; k++) {
+                ray_t* v = phrase_eval(tree, t, gi[k]);
+                if (!v || RAY_IS_ERR(v)) { err = v ? v : q_err(QE_TYPE); break; }
+                if (!cur) cur = upd_col_start(t, nm->i64, v);
+                cur = upd_amend(cur, gi[k], v);
+                if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
+                ray_release(v);
+            }
+            if (!err && !cur) {                          /* zero groups */
+                ray_t* c0 = ray_table_get_col(t, nm->i64);
+                if (c0) { ray_retain(c0); cur = c0; }
+                else err = q_err(QE_TYPE);
+            }
+        }
+        if (nm && !RAY_IS_ERR(nm)) ray_release(nm);
+        if (tree && !RAY_IS_ERR(tree)) ray_release(tree);
+        if (err) { ray_release(cols); return err; }
+        cols = ray_list_append(cols, cur);
+        ray_release(cur);
+    }
+    if (RAY_IS_ERR(cols)) return cols;
+    ray_t* d = q_bang(keys, cols);
+    ray_release(cols);
+    return d;
+}
+
+/* Update on a table (law 20): amended columns then `flip (flip t),newcols` —
+ * the dict-join right-override creates absent sel-key columns. */
+static ray_t* update_table(ray_t* a, ray_t* b, ray_t* t, ray_t* idx) {
+    ray_t* gidxs = NULL;
+    ray_t* g = NULL;
+    int grouped = !(is_bool_atom(b, 0) || is_empty_gen(b));
+    if (grouped) {
+        ray_t* trees = NULL;
+        ray_t* names = by_specs(b, &trees);
+        if (!names || RAY_IS_ERR(names)) return names ? names : q_err(QE_TYPE);
+        g = by_group(names, trees, t, idx, &gidxs);
+        ray_release(names);
+        ray_release(trees);
+        if (RAY_IS_ERR(g)) return g;
+    }
+    ray_t* nd = upd_cols(a, t, idx, gidxs);
+    if (g) { ray_release(gidxs); ray_release(g); }
+    if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
+    ray_t* cd = q_flip_wrap(t);
+    ray_t* merged = (cd && !RAY_IS_ERR(cd)) ? q_join_wrap(cd, nd) : cd;
+    if (cd && !RAY_IS_ERR(cd) && merged != cd) ray_release(cd);
+    ray_release(nd);
+    if (!merged || RAY_IS_ERR(merged)) return merged ? merged : q_err(QE_TYPE);
+    ray_t* out = q_flip_wrap(merged);
+    ray_release(merged);
+    return out;
+}
+
+/* update on a plain dict: entries bind as the namespace; result is the
+ * dict-join right-override d,a-evaluated (ref/update.md; by -> 'type 4.1) */
+static ray_t* update_dict(ray_t* a, ray_t* b, ray_t* c, ray_t* d) {
+    if (!(is_bool_atom(b, 0) || is_empty_gen(b))) return q_err(QE_TYPE);
+    if (!is_empty_gen(c)) return q_err(QE_NYI);
+    if (ray_env_push_scope() != RAY_OK) return q_err(QE_STACK);
+    ray_t* dk = ray_dict_keys(d);
+    ray_t* dv = ray_dict_vals(d);
+    int64_t n = q_count_long(dk);
+    for (int64_t j = 0; j < n; j++) {
+        ray_t* k = q_index_elem_at(dk, j);
+        ray_t* v = q_index_elem_at(dv, j);
+        if (k && !RAY_IS_ERR(k) && k->type == -RAY_SYM && v && !RAY_IS_ERR(v))
+            ray_env_set_local(k->i64, v);
+        if (k && !RAY_IS_ERR(k)) ray_release(k);
+        if (v && !RAY_IS_ERR(v)) ray_release(v);
+    }
+    ray_t* rng = ray_dict_vals(a);
+    int64_t nc = q_count_long(rng);
+    ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
+    for (int64_t j = 0; j < nc && !RAY_IS_ERR(vals); j++) {
+        ray_t* tree = q_index_elem_at(rng, j);
+        ray_t* v = (tree && !RAY_IS_ERR(tree))
+                       ? q_eval_apply_concrete(q_eval(tree)) : tree;
+        if (tree && v != tree) ray_release(tree);
+        if (!v || RAY_IS_ERR(v)) { ray_release(vals); vals = v ? v : q_err(QE_TYPE); break; }
+        vals = ray_list_append(vals, v);
+        ray_release(v);
+    }
+    ray_env_pop_scope();
+    if (RAY_IS_ERR(vals)) return vals;
+    ray_t* nd = q_bang(ray_dict_keys(a), vals);
+    ray_release(vals);
+    if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
+    ray_t* r = q_join_wrap(d, nd);
+    ray_release(nd);
+    return r;
+}
+
+/* is a the delete-columns shape: a non-empty symbol vector */
+static int is_symvec(ray_t* a) { return a && a->type == RAY_SYM; }
+
+static ray_t* bang_qsql(ray_t** args) {
+    ray_t* tslot = args[0];
+    ray_t* c = args[1];
+    ray_t* b = args[2];
+    ray_t* a = args[3];
+    int64_t name = -1;
+    ray_t* src;
+    if (tslot && tslot->type == -RAY_SYM) {
+        name = tslot->i64;
+        src = ray_env_resolve(name);
+        if (!src) return q_err(QE_NAME);
+        if (RAY_IS_ERR(src)) return src;
+    } else if (tslot) {
+        ray_retain(src = tslot);
+    } else {
+        return q_err(QE_TYPE);
+    }
+    ray_t* r;
+    ray_t* aen = NULL;    /* the keyword lowering's ,`x collapses to a lone sym */
+    if (a && a->type == -RAY_SYM) {
+        aen = q_enlist_wrap(&a, 1);
+        if (!aen || RAY_IS_ERR(aen)) { ray_release(src); return aen ? aen : q_err(QE_TYPE); }
+        a = aen;
+    }
+    int64_t nk = 0;                 /* keyed source: re-key the result */
+    if (q_type_is_dict(src) && !q_type_is_keyed(src)) {
+        if (q_type_is_dict(a))      r = update_dict(a, b, c, src);
+        else if (is_symvec(a) && is_empty_gen(c)) r = q_drop_wrap(a, src);
+        else                        r = q_err(QE_NYI);
+    } else {
+        ray_t* t = src;
+        if (q_type_is_keyed(src)) {
+            nk = ray_table_ncols(ray_dict_keys(src));
+            t = q_bang_enkey(0, src);               /* law 24: unkey */
+            if (!t || RAY_IS_ERR(t)) { ray_release(src); return t ? t : q_err(QE_TYPE); }
+        } else if (q_type_is_table(src)) {
+            ray_retain(t);
+        } else {
+            ray_release(src);
+            return q_err(QE_TYPE);
+        }
+        if (is_symvec(a) && ray_len(a) > 0 && is_empty_gen(c)) {
+            r = q_drop_wrap(a, t);                  /* law 18: cols ≡ a _ t */
+            nk = 0;                                 /* dropping may hit keys */
+        } else {
+            ray_t* idx0 = til_count(t);
+            ray_t* idx = RAY_IS_ERR(idx0) ? idx0 : where_fold(c, t, idx0);
+            if (idx != idx0 && !RAY_IS_ERR(idx0)) ray_release(idx0);
+            if (RAY_IS_ERR(idx)) r = idx;
+            else if (q_type_is_dict(a)) {           /* UPDATE */
+                r = update_table(a, b, t, idx);
+                ray_release(idx);
+            } else if (is_empty_gen(a) || (is_symvec(a) && ray_len(a) == 0)) {
+                /* law 19: delete rows ≡ the complement select */
+                ray_t* full = til_count(t);
+                ray_t* keep = RAY_IS_ERR(full) ? full : q_except_wrap(full, idx);
+                if (full != keep && !RAY_IS_ERR(full)) ray_release(full);
+                r = (keep && !RAY_IS_ERR(keep)) ? gather(t, keep) : keep;
+                if (keep && !RAY_IS_ERR(keep) && r != keep) ray_release(keep);
+                ray_release(idx);
+            } else {
+                ray_release(idx);
+                r = q_err(QE_TYPE);
+            }
+        }
+        if (nk > 0 && r && !RAY_IS_ERR(r)) {
+            ray_t* rk = q_bang_enkey(nk, r);
+            ray_release(r);
+            r = rk;
+        }
+        ray_release(t);
+    }
+    if (aen) ray_release(aen);
+    ray_release(src);
+    if (name >= 0 && r && !RAY_IS_ERR(r)) {
+        /* name form (law 21): amend in place, hand back the name */
+        if (ray_env_set(name, r) != RAY_OK) { ray_release(r); return q_err(QE_ASSIGN); }
+        ray_release(r);
+        ray_retain(tslot);
+        return tslot;
+    }
+    return r;
+}
+
+
 ray_t* q_funsql_ques_wrap(ray_t** args, int64_t n) {
     if (n == 2) return q_roll_wrap(args[0], args[1]);
     if (n == 3) {
@@ -570,6 +809,6 @@ ray_t* q_funsql_ques_wrap(ray_t** args, int64_t n) {
 
 ray_t* q_funsql_bang_wrap(ray_t** args, int64_t n) {
     if (n == 2) return q_bang(args[0], args[1]);
-    if (n == 4) return q_err(QE_NYI);            /* update/delete: wave 4 */
+    if (n == 4) return bang_qsql(args);
     return q_err(QE_RANK);
 }
