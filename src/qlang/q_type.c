@@ -216,6 +216,11 @@ ray_t* q_type_empty(int8_t tag) {
                           : ray_vec_new(tag, 0);
 }
 
+int8_t q_type_elem_tag(ray_t* x) {
+    if (!x) return 0;
+    return ray_is_atom(x) ? x->type : ray_is_vec(x) ? (int8_t)-x->type : 0;
+}
+
 /* ---- int/float admission (which numeric lane may a verb read) ------------- */
 
 /* Is vector tag `t` legal as a ROW INDEX (uniform-structure-dispatch §2.2:
