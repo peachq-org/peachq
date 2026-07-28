@@ -1205,6 +1205,22 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     }
     ray_t* r = ray_concat_fn(x, y);
     if (r && !RAY_IS_ERR(r)) {
+        /* dict upsert-union: the merged VALUES unify like any join result
+         * (`~` is type-strict, so `(update c:3 from `a`b!1 2)~`a`b`c!1 2 3`
+         * needs vector values) */
+        if (q_type_is_dict(r) && !q_type_is_keyed(r)) {
+            ray_t* v = ray_dict_vals(r);                       /* borrowed */
+            ray_t* cv = v ? q_list_collapse(v) : NULL;         /* no-op off-list */
+            if (cv && !RAY_IS_ERR(cv) && cv != v) {
+                ray_t* k = ray_dict_keys(r);
+                ray_retain(k);                        /* dict_new consumes both */
+                ray_t* nd = ray_dict_new(k, cv);
+                ray_release(r);
+                return nd ? nd : q_err(QE_TYPE);
+            }
+            if (cv) ray_release(cv);
+            return r;
+        }
         /* `()` is Join's IDENTITY and identity must not retype: base concat
          * boxes the untyped empty into the result, so `(),2` came back 0h
          * where kdb says 7h.  That is the seed the `,` accumulator starts from
