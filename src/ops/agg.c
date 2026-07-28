@@ -215,7 +215,12 @@ static ray_t* agg_parted_minmax(ray_t* x, int want_max) {
             }
         }
     }
-    if (!found) return ray_typed_null(-base);
+    /* Same all-null identity as the flat lanes (ref/min.md:21, ref/max.md:19). */
+    if (!found) {
+        if (base == RAY_F64) return make_f64(want_max ? -INFINITY : INFINITY);
+        if (!ray_type_inf(base, !want_max, &best_i))
+            return ray_typed_null(-base);
+    }
     if (base == RAY_F64) return make_f64(best_f);
     return agg_atom_i64_for_type(base, best_i);
 }
@@ -374,9 +379,8 @@ ray_t* ray_min_fn(ray_t* x) {
                     int64_t mn = INT64_MAX;
                     for (uint32_t g = 0; g < n_chunks; g++)
                         if (mins[g] < mn) mn = mins[g];
-                    /* Long lane identity is 0W; narrower ints keep null
-                     * (integer-infinity absorption out of scope). */
-                    if (mn == INT64_MAX && x->type != RAY_I64)
+                    /* All-null identity is the type's infinity (ref/min.md:21). */
+                    if (mn == INT64_MAX && !ray_type_inf(x->type, true, &mn))
                         return ray_typed_null(-x->type);
                     /* Preserve the column's storage width on the result. */
                     switch (x->type) {
@@ -438,12 +442,10 @@ ray_t* ray_max_fn(ray_t* x) {
                     int64_t mx = INT64_MIN;
                     for (uint32_t g = 0; g < n_chunks; g++)
                         if (maxs[g] > mx) mx = maxs[g];
-                    /* Long lane identity is -0W (= -INT64_MAX, not the 0N
-                     * sentinel INT64_MIN); narrower ints keep null. */
-                    if (mx == INT64_MIN) {
-                        if (x->type == RAY_I64) return ray_i64(-INT64_MAX);
+                    /* All-null identity is the type's -infinity (ref/max.md:19);
+                     * note -INT<w>_MAX, not the 0N sentinel INT<w>_MIN. */
+                    if (mx == INT64_MIN && !ray_type_inf(x->type, false, &mx))
                         return ray_typed_null(-x->type);
-                    }
                     switch (x->type) {
                     case RAY_BOOL:      return ray_bool((bool)mx);
                     case RAY_BYTE_ONLY: return ray_u8((uint8_t)mx);
