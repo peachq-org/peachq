@@ -2015,7 +2015,12 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
     if (all_bare) {
         ray_t *b;
         if (nb == 1) {
-            b = ray_sym(bv[0]->i64);                 /* bare group-by symbol */
+            /* the tree QUOTES the group-by symbol constant (parsetrees.md):
+             * one eval of `,`n` yields the functional b-value `n */
+            ray_t *s = ray_sym_str(bv[0]->i64);
+            b = ray_sym_vec_new(RAY_SYM_W64, 1);
+            b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
+            ray_release(s);
         } else {
             b = ray_sym_vec_new(RAY_SYM_W64, nb);
             for (int i = 0; i < nb; i++) {
@@ -2189,15 +2194,28 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
     return qsql_build_dict(aliases, vals, na);       /* consumes aliases/vals */
 }
 
-/* exec select-phrase `a`: omitted -> `()`; a single unnamed column -> the bare
- * value; named / multiple -> a name!expr dict (kdb exec.md). */
+/* exec select-phrase `a`: omitted -> `()`; a single unnamed column -> the
+ * QUOTED bare value (parsetrees.md: constants are enlisted, so one eval of
+ * the slot yields the functional a-value — a col sym as `,`c1`, a computed
+ * expr as its enlisted tree); named / multiple -> a name!expr dict. */
 static ray_t *qsql_norm_exec_a(ray_t *phrases) {
     int64_t n = ray_len(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     if (n == 0) return ray_list_new(0);
     ray_t *name = NULL, *val = NULL;
-    if (n == 1 && !qsql_phrase_alias(ph[0], &name, &val))
-        return qsql_convert_expr(ph[0]);             /* single unnamed column */
+    if (n == 1 && !qsql_phrase_alias(ph[0], &name, &val)) {
+        ray_t *v = qsql_convert_expr(ph[0]);
+        if (!v || RAY_IS_ERR(v)) return v;
+        if (v->type == -RAY_SYM) {
+            ray_t *s = ray_sym_str(v->i64);
+            ray_t *sv = ray_sym_vec_new(RAY_SYM_W64, 1);
+            sv = q_symvec_append(sv, ray_str_ptr(s), (int)ray_str_len(s));
+            ray_release(s);
+            ray_release(v);
+            return sv;
+        }
+        return qsql_enlist(v);
+    }
     return qsql_norm_dict(phrases);                  /* named / multiple -> dict */
 }
 
