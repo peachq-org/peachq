@@ -1,15 +1,15 @@
 /* q_wasm — the browser/JS entry points for openq's WebAssembly build.
  *
  * Exposes a tiny, stable C ABI that drives openq's real q pipeline
- * (q_parse -> q_lower -> ray_eval -> materialize -> q_fmt), the same
- * sequence src/qlang/q_repl.c:run_one_line uses for the native REPL.
+ * (q_parse -> q_eval -> materialize -> q_fmt), the same sequence
+ * src/qlang/q_repl.c:run_one_line uses for the native REPL.
  * Compiled only by Makefile.wasm with emcc; never part of the native build. */
 #define _POSIX_C_SOURCE 200809L   /* expose strdup (string.h) + setenv (stdlib.h) */
 #include "qlang/q_runtime.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
 #include "qlang/q_sys.h"  /* q_sys_is_cmd / q_sys_line — `\`-command glue */
-#include "lang/eval.h"    /* ray_eval */
+#include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "ops/ops.h"      /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <stdio.h>        /* snprintf */
@@ -74,16 +74,8 @@ char* q_wasm_eval(const char* src) {
         return strdup("parse error");
     }
 
-    int is_assign = q_lower_ast_is_assign(ast);   /* pre-lower shape */
-    ast = q_lower(ast);
-    if (RAY_IS_ERR(ast)) {
-        const char* code = (const char*)ast->sdata;
-        char buf[128];
-        snprintf(buf, sizeof buf, "error: %s", (code && *code) ? code : "lower");
-        ray_release(ast);
-        return strdup(buf);
-    }
-    ray_t* r = ray_eval(ast);
+    int is_assign = q_parse_is_assign(ast);
+    ray_t* r = q_eval(ast);          /* THE pipeline — mirrors q_repl.c run_one_line */
     ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
