@@ -102,11 +102,14 @@ static int64_t rte_extract_one(int64_t us, int field) {
  * TIMESTAMP as µs, which made (yyyy ts) decode to absurd years (26204
  * on 2024-03-15) — a 1000× unit mismatch. */
 static inline int64_t rte_to_us(int8_t type, int64_t raw) {
-    if (type == RAY_DATE || type == -RAY_DATE) return raw * RTE_USEC_PER_DAY;
-    if (type == RAY_TIME || type == -RAY_TIME) return raw * 1000LL;
-    /* RAY_TIMESTAMP / -RAY_TIMESTAMP: ns → µs (floor toward -inf). */
-    return raw >= 0 ? raw / 1000LL
-                    : -(((-raw) + 999LL) / 1000LL);
+    if (type == RAY_DATE || type == -RAY_DATE)
+        return (int64_t)((uint64_t)raw * (uint64_t)RTE_USEC_PER_DAY);
+    if (type == RAY_TIME || type == -RAY_TIME)
+        return (int64_t)((uint64_t)raw * 1000ULL);
+    /* RAY_TIMESTAMP / -RAY_TIMESTAMP: ns → µs (floor toward -inf).  Negating
+     * raw would be UB at INT64_MIN (= 0Np), so floor via the remainder. */
+    int64_t q = raw / 1000LL, r = raw % 1000LL;
+    return r < 0 ? q - 1 : q;
 }
 
 /* Inverse of rte_to_us for TIMESTAMP output paths (truncate). */

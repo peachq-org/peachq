@@ -2046,17 +2046,14 @@ static ray_t* reduction_f_result(double v, int8_t t) {
 static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
                                        double fval, int64_t ival, ray_t* src) {
     int8_t out_type = op->out_type ? op->out_type : in_type;
-    /* Empty / all-null identity is the type's infinity, not null: min -> 0w,
-     * max -> -0w; long lane 0W/-0W (ref/min.md:21 "if the argument has only
-     * nulls, the result is infinity", ref/max.md:19).  Narrower int types
-     * keep the null identity (integer-infinity absorption is out of scope). */
+    /* Empty / all-null identity is the type's infinity, not null (ref/min.md:21
+     * "if the argument has only nulls, the result is infinity", ref/max.md:19). */
     if (out_type == RAY_F64 || RAY_IS_TEMPORALF(out_type)) {
         if (!found) fval = (op->opcode == OP_MIN) ? INFINITY : -INFINITY;
         return reduction_f_result(fval, out_type);
     }
-    if (!found && out_type == RAY_I64)
-        return ray_i64(op->opcode == OP_MIN ? INT64_MAX : -INT64_MAX);
-    if (!found) return ray_typed_null(-out_type);
+    if (!found && !ray_type_inf(out_type, op->opcode == OP_MIN, &ival))
+        return ray_typed_null(-out_type);
     return reduction_i64_result(ival, out_type, out_type == RAY_SYM ? src : NULL);
 }
 
