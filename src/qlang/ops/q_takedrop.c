@@ -157,6 +157,16 @@ static ray_t* cut_at(ray_t* pos, ray_t* y) {
     return out;
 }
 
+/* kdb unifies a homogeneous take-of-mixed result to a typed vector (`~` is
+ * type-strict per ref/match.md, yet misc/aoc/2016/day17.q's `3 3 in 2#'q`
+ * terminates — so 2#(3;3;"s") must be 7h, not 0h) */
+static ray_t* take_unify(ray_t* r) {
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
+    ray_t* c = q_list_collapse(r);
+    ray_release(r);
+    return c;
+}
+
 /* q `x # y` — Take (ref/take.md); borrows both args */
 ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     if (x && x->type == -RAY_SYM && y && ray_is_vec(y))
@@ -168,8 +178,8 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     if (q_type_is_int_vec(x) && ray_len(x) == 1)
         n = q_type_ivec_get(x, 0);            /* V3.4: a rank-1 shape is n#y */
     else if (!q_type_strict_i64(x, &n))
-        return take_kernel(y, x);
-    return take_run(y, n);
+        return take_unify(take_kernel(y, x));
+    return take_unify(take_run(y, n));
 }
 
 /* q `x _ y` — Drop (ref/drop.md); borrows both args */
