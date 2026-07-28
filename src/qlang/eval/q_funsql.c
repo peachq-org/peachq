@@ -853,6 +853,11 @@ static ray_t* bang_qsql(ray_t** args) {
         }
         if (is_symvec(a) && ray_len(a) > 0 && is_empty_gen(c)) {
             r = entries_verb(a, t, 1);              /* law 18: cols ≡ a _ t */
+            /* a table stripped of EVERY column has no domain (an emptied dict does) */
+            if (r && !RAY_IS_ERR(r) && ray_table_ncols(r) == 0) {
+                ray_release(r);
+                r = q_err(QE_DOMAIN);
+            }
             nk = 0;                                 /* dropping may hit keys */
         } else {
             ray_t* idx0 = til_count(t);
