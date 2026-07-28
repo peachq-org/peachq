@@ -370,21 +370,20 @@ static int64_t el_to_int(const q_tok_el *e, int width) {
 /* Resolve one element to a double (float context).  Q_TOK_EL_MONTH must return its
  * float TWIN (.f), not the month payload — a bare `2000.01` is the float
  * 2000.01, and the payload (0) would silently replace it (review C1).
- * Q_TOK_EL_PINF/Q_TOK_EL_NINF (`0w`/`-0w`) PARSE but canonicalize to the float null —
- * the single-null float model (owner ruling 2026-07-09): no live infinity is
- * ever created, exactly the datetime 0Wz -> 0Nz precedent.  Display is `0n`
- * where kdb shows `0w` (documented divergence, cases.tsv + ARCHITECTURE.md). */
+ * Q_TOK_EL_PINF/Q_TOK_EL_NINF (`0w`/`-0w`) are LIVE ±inf — the live-infinity
+ * model (2026-07-28), reversing the 2026-07-09 canonicalization. */
 static double el_to_float(const q_tok_el *e) {
     if (e->kind == Q_TOK_EL_NULL) return NULL_F64;
-    if (e->kind == Q_TOK_EL_PINF || e->kind == Q_TOK_EL_NINF) return NULL_F64;
+    if (e->kind == Q_TOK_EL_PINF) return INFINITY;
+    if (e->kind == Q_TOK_EL_NINF) return -INFINITY;
     if (e->kind == Q_TOK_EL_MONTH) return e->f;
     return (e->kind == Q_TOK_EL_FLOAT) ? e->f : (double)e->i;
 }
 
-/* True iff this element lands on the float NULL in a float context (a real
- * null OR a canonicalized infinity) — drives the vector null bitmap. */
+/* True iff this element is the float NULL — drives the vector null bitmap.
+ * ±inf are live values, never nulls (live-infinity model 2026-07-28). */
 static int el_float_is_null(const q_tok_el *e) {
-    return e->kind == Q_TOK_EL_NULL || e->kind == Q_TOK_EL_PINF || e->kind == Q_TOK_EL_NINF;
+    return e->kind == Q_TOK_EL_NULL;
 }
 
 /* Read an optional trailing type letter (b/h/i/j/e/f, plus gated d) at
@@ -752,11 +751,10 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     /* Datetime context: a `z` suffix (0Nz / 0Wz / -0Wz) or any dateTtod
      * magnitude.  kdb datetime == f64 days since 2000.01.01, fraction = time
      * of day (datatypes.md row 15; DEPRECATED in kdb, landed for drop-in
-     * fidelity).  Specials all canonicalize to the NaN null — the single-null
-     * float model (owner ruling 2026-07-09): 0Wz/-0Wz PARSE but become 0Nz,
-     * exactly the documented 0w divergence.  A plain int widens as a raw day
-     * count (the date-arm rule); a genuine fractional magnitude or a foreign
-     * temporal mate dies (error beats a wrong answer). */
+     * fidelity).  0Nz is the NaN null; 0Wz/-0Wz are LIVE ±inf (live-infinity
+     * model 2026-07-28).  A plain int widens as a raw day count (the
+     * date-arm rule); a genuine fractional magnitude or a foreign temporal
+     * mate dies (error beats a wrong answer). */
     {
         int is_dt = (letter == 'z');
         for (int i = 0; i < m && !is_dt; i++)
@@ -770,7 +768,9 @@ static ray_t *scan_num_literal(const char *src, int *p) {
                     (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
                     q_die("bad number");
             if (m == 1) {
-                if (buf[0].kind != Q_TOK_EL_DT)   /* 0Nz / 0Wz / -0Wz -> the null */
+                if (buf[0].kind == Q_TOK_EL_PINF) return ray_datetime(INFINITY);
+                if (buf[0].kind == Q_TOK_EL_NINF) return ray_datetime(-INFINITY);
+                if (buf[0].kind != Q_TOK_EL_DT)   /* 0Nz -> the null */
                     return ray_typed_null(-RAY_DATETIME);
                 return ray_datetime(buf[0].f);
             }
@@ -778,11 +778,13 @@ static ray_t *scan_num_literal(const char *src, int *p) {
             for (int i = 0; i < m; i++)
                 t[i] = (buf[i].kind == Q_TOK_EL_DT) ? buf[i].f
                      : (buf[i].kind == Q_TOK_EL_INT) ? (double)buf[i].i
-                     : NULL_F64;             /* Specials -> NaN null slots */
+                     : (buf[i].kind == Q_TOK_EL_PINF) ? INFINITY
+                     : (buf[i].kind == Q_TOK_EL_NINF) ? -INFINITY
+                     : NULL_F64;             /* 0Nz -> NaN null slot */
             ray_t *vec = ray_vec_from_raw(RAY_DATETIME, t, m);
             if (vec && !RAY_IS_ERR(vec)) {
                 for (int i = 0; i < m; i++)
-                    if (buf[i].kind != Q_TOK_EL_DT && buf[i].kind != Q_TOK_EL_INT)
+                    if (buf[i].kind == Q_TOK_EL_NULL)
                         ray_vec_set_null(vec, i, true);
             }
             return vec;

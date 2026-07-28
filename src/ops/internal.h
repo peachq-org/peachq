@@ -1316,14 +1316,14 @@ static inline double ray_f64_fin(double r) {
     return (__builtin_fabs(r) <= DBL_MAX) ? r : NULL_F64;
 }
 
-/* Post-pass for fused/fallback F64 kernels that may have canonicalized a
- * non-finite result to NULL_F64 (NaN) in-buffer: scan [off,off+len) and set
- * RAY_ATTR_HAS_NULLS if any lane is a NaN sentinel.  Mirrors
- * mark_i64_overflow_as_null (which relies on the sentinel already being in
- * the payload — here NULL_F64 is too, so we only flip the attr).  Single
- * pass, memory-bound, branchless inner test; caller invokes single-threaded
- * after pool dispatch joins. */
-static inline void mark_f64_nonfinite_as_null(ray_t* result, int64_t off, int64_t len) {
+/* Post-pass for fused/fallback F64 kernels whose lanes may have produced a
+ * NaN (0%0, sqrt(<0), null operand): scan [off,off+len) and set
+ * RAY_ATTR_HAS_NULLS if any lane is NaN.  ±inf lanes are live values and
+ * never match (live-infinity model 2026-07-28).  Mirrors
+ * mark_i64_overflow_as_null (payload already the sentinel; only the attr
+ * flips).  Single pass, memory-bound; caller invokes single-threaded after
+ * pool dispatch joins. */
+static inline void mark_f64_nan_as_null(ray_t* result, int64_t off, int64_t len) {
     const double* d = (const double*)ray_data(result) + off;
     for (int64_t i = 0; i < len; i++) {
         if (RAY_UNLIKELY(d[i] != d[i])) { result->attrs |= RAY_ATTR_HAS_NULLS; return; }

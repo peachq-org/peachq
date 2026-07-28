@@ -181,7 +181,7 @@ static ray_t* vec_binary_metric(metric_kind_t kind, ray_t* a, ray_t* b) {
             out[i] = ray_f64_fin(row_score(kind, row, q, q_norm, dim));
         }
         ray_sys_free(q);
-        mark_f64_nonfinite_as_null(result, 0, n);
+        mark_f64_nan_as_null(result, 0, n);
         return result;
     }
 
@@ -228,7 +228,7 @@ ray_t* ray_norm_fn(ray_t* x) {
             }
             out[i] = ray_f64_fin(sqrt(s));
         }
-        mark_f64_nonfinite_as_null(result, 0, n);
+        mark_f64_nan_as_null(result, 0, n);
         return result;
     }
     if (!rayvec_is_numeric(x))

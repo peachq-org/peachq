@@ -51,7 +51,10 @@ typedef struct {
 } reduce_acc_t;
 
 static void reduce_acc_init(reduce_acc_t* acc) {
-    acc->sum_f = 0; acc->min_f = DBL_MAX; acc->max_f = -DBL_MAX;
+    /* ±INFINITY inits (not ±DBL_MAX): live ±inf data must win the compare
+     * (min of {+inf} is +inf), and cnt>0 — not the init sentinel — decides
+     * whether anything was seen (live-infinity model, 2026-07-28). */
+    acc->sum_f = 0; acc->min_f = INFINITY; acc->max_f = -INFINITY;
     acc->prod_f = 1.0; acc->first_f = 0; acc->last_f = 0; acc->sum_sq_f = 0;
     acc->sum_i = 0; acc->min_i = INT64_MAX; acc->max_i = INT64_MIN;
     acc->prod_i = 1; acc->first_i = 0; acc->last_i = 0; acc->sum_sq_i = 0;
@@ -2043,11 +2046,17 @@ static ray_t* reduction_f_result(double v, int8_t t) {
 static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
                                        double fval, int64_t ival, ray_t* src) {
     int8_t out_type = op->out_type ? op->out_type : in_type;
+    /* Empty / all-null identity is the type's infinity, not null: min -> 0w,
+     * max -> -0w; long lane 0W/-0W (ref/min.md:21 "if the argument has only
+     * nulls, the result is infinity", ref/max.md:19).  Narrower int types
+     * keep the null identity (integer-infinity absorption is out of scope). */
+    if (out_type == RAY_F64 || RAY_IS_TEMPORALF(out_type)) {
+        if (!found) fval = (op->opcode == OP_MIN) ? INFINITY : -INFINITY;
+        return reduction_f_result(fval, out_type);
+    }
+    if (!found && out_type == RAY_I64)
+        return ray_i64(op->opcode == OP_MIN ? INT64_MAX : -INT64_MAX);
     if (!found) return ray_typed_null(-out_type);
-    /* Single-null float model: min/max of finite inputs is finite, but guard
-     * against an ±Inf init sentinel surfacing as a value. */
-    if (out_type == RAY_F64 || RAY_IS_TEMPORALF(out_type))
-        return reduction_f_result(ray_f64_fin(fval), out_type);
     return reduction_i64_result(ival, out_type, out_type == RAY_SYM ? src : NULL);
 }
 
@@ -2208,14 +2217,14 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
         ray_t* result;
         switch (op->opcode) {
-            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(ray_f64_fin(merged.sum_f)) : (in_type == RAY_TIME ? ray_time(merged.sum_i) : ray_i64(merged.sum_i)); break;
-            case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(ray_f64_fin(merged.prod_f)) : ray_i64(merged.prod_i); break;
+            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : (in_type == RAY_TIME ? ray_time(merged.sum_i) : ray_i64(merged.sum_i)); break;
+            case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : ray_i64(merged.prod_i); break;
             case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i, input); break;
             case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i, input); break;
             /* COUNT returns total length including nulls — matches ray_count_fn's
              * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
             case OP_COUNT: result = ray_i64(scan_n); break;
-            case OP_AVG:   result = merged.cnt > 0 ? ray_f64(ray_f64_fin((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt)) : ray_typed_null(-RAY_F64); break;
+            case OP_AVG:   result = merged.cnt > 0 ? ray_f64((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt) : ray_typed_null(-RAY_F64); break;
             case OP_FIRST: result = merged.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(merged.first_f, in_type) : reduction_i64_result(merged.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
             case OP_LAST:  result = merged.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(merged.last_f, in_type) : reduction_i64_result(merged.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
             case OP_VAR: case OP_VAR_POP:
@@ -2231,7 +2240,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                 else if (op->opcode == OP_VAR) val = var_pop * merged.cnt / (merged.cnt - 1);
                 else if (op->opcode == OP_STDDEV_POP) val = sqrt(var_pop);
                 else val = sqrt(var_pop * merged.cnt / (merged.cnt - 1));
-                result = ray_f64(ray_f64_fin(val));
+                result = ray_f64(val);
                 break;
             }
             default:       result = ray_error("nyi", NULL); break;
@@ -2247,14 +2256,14 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (sel_idx_block) ray_release(sel_idx_block);
 
     switch (op->opcode) {
-        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(ray_f64_fin(acc.sum_f)) : (in_type == RAY_TIME ? ray_time(acc.sum_i) : ray_i64(acc.sum_i));
-        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(ray_f64_fin(acc.prod_f)) : ray_i64(acc.prod_i);
+        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : (in_type == RAY_TIME ? ray_time(acc.sum_i) : ray_i64(acc.sum_i));
+        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : ray_i64(acc.prod_i);
         case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i, input);
         case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i, input);
         /* COUNT returns total length including nulls — matches ray_count_fn's
          * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
         case OP_COUNT: return ray_i64(scan_n);
-        case OP_AVG:   return acc.cnt > 0 ? ray_f64(ray_f64_fin((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt)) : ray_typed_null(-RAY_F64);
+        case OP_AVG:   return acc.cnt > 0 ? ray_f64((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt) : ray_typed_null(-RAY_F64);
         case OP_FIRST: return acc.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(acc.first_f, in_type) : reduction_i64_result(acc.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
         case OP_LAST:  return acc.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(acc.last_f, in_type) : reduction_i64_result(acc.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
         case OP_VAR: case OP_VAR_POP:
@@ -2270,7 +2279,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             else if (op->opcode == OP_VAR) val = var_pop * acc.cnt / (acc.cnt - 1);
             else if (op->opcode == OP_STDDEV_POP) val = sqrt(var_pop);
             else val = sqrt(var_pop * acc.cnt / (acc.cnt - 1));
-            return ray_f64(ray_f64_fin(val));
+            return ray_f64(val);
         }
         default:       return ray_error("nyi", NULL);
     }
