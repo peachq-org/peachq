@@ -367,14 +367,17 @@ ray_t* ray_min_fn(ray_t* x) {
                     double mn = INFINITY;
                     for (uint32_t g = 0; g < n_chunks; g++)
                         if (mins[g] < mn) mn = mins[g];
-                    if (mn == INFINITY) return ray_typed_null(-RAY_F64);
+                    /* All-null/empty min identity IS +inf (ref/min.md:21). */
                     return make_f64(mn);
                 } else {
                     const int64_t* mins = (const int64_t*)ray_data(ix->u.chunk_zone.mins);
                     int64_t mn = INT64_MAX;
                     for (uint32_t g = 0; g < n_chunks; g++)
                         if (mins[g] < mn) mn = mins[g];
-                    if (mn == INT64_MAX) return ray_typed_null(-x->type);
+                    /* Long lane identity is 0W; narrower ints keep null
+                     * (integer-infinity absorption out of scope). */
+                    if (mn == INT64_MAX && x->type != RAY_I64)
+                        return ray_typed_null(-x->type);
                     /* Preserve the column's storage width on the result. */
                     switch (x->type) {
                     case RAY_BOOL:      return ray_bool((bool)mn);
@@ -409,7 +412,8 @@ ray_t* ray_min_fn(ray_t* x) {
         double v = as_f64(elems[i]);
         if (!found || v < fmin) { fmin = v; imin = elems[i]->type == -RAY_I64 ? elems[i]->i64 : 0; found = 1; }
     }
-    if (!found) return ray_typed_null(has_float ? -RAY_F64 : -RAY_I64);
+    /* All-null identity is the infinity: 0w / 0W (ref/min.md:21). */
+    if (!found) return has_float ? make_f64(INFINITY) : make_i64(INT64_MAX);
     return has_float ? make_f64(fmin) : make_i64(imin);
 }
 
@@ -427,14 +431,19 @@ ray_t* ray_max_fn(ray_t* x) {
                     double mx = -INFINITY;
                     for (uint32_t g = 0; g < n_chunks; g++)
                         if (maxs[g] > mx) mx = maxs[g];
-                    if (mx == -INFINITY) return ray_typed_null(-RAY_F64);
+                    /* All-null/empty max identity IS -inf (ref/max.md:19). */
                     return make_f64(mx);
                 } else {
                     const int64_t* maxs = (const int64_t*)ray_data(ix->u.chunk_zone.maxs);
                     int64_t mx = INT64_MIN;
                     for (uint32_t g = 0; g < n_chunks; g++)
                         if (maxs[g] > mx) mx = maxs[g];
-                    if (mx == INT64_MIN) return ray_typed_null(-x->type);
+                    /* Long lane identity is -0W (= -INT64_MAX, not the 0N
+                     * sentinel INT64_MIN); narrower ints keep null. */
+                    if (mx == INT64_MIN) {
+                        if (x->type == RAY_I64) return ray_i64(-INT64_MAX);
+                        return ray_typed_null(-x->type);
+                    }
                     switch (x->type) {
                     case RAY_BOOL:      return ray_bool((bool)mx);
                     case RAY_BYTE_ONLY: return ray_u8((uint8_t)mx);
@@ -468,7 +477,8 @@ ray_t* ray_max_fn(ray_t* x) {
         double v = as_f64(elems[i]);
         if (!found || v > fmax) { fmax = v; imax = elems[i]->type == -RAY_I64 ? elems[i]->i64 : 0; found = 1; }
     }
-    if (!found) return ray_typed_null(has_float ? -RAY_F64 : -RAY_I64);
+    /* All-null identity is the negative infinity: -0w / -0W (ref/max.md:19). */
+    if (!found) return has_float ? make_f64(-INFINITY) : make_i64(-INT64_MAX);
     return has_float ? make_f64(fmax) : make_i64(imax);
 }
 
