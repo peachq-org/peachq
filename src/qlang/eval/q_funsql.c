@@ -24,7 +24,7 @@ static int is_empty_gen(ray_t* v) {
 }
 
 static int is_bool_atom(ray_t* v, int truth) {
-    return v && v->type == -RAY_BOOL && (v->b8 != 0) == truth;
+    return v && q_type_is_bool(v) && (v->b8 != 0) == truth;
 }
 
 static ray_t* til_count(ray_t* t) {
