@@ -163,7 +163,7 @@ static const q_op_t Q_OPS[] = {
     { "<=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV("<="),      NULL, 1, 0, "atomic", NULL },
     { ">=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV(">="),      NULL, 1, 0, "atomic", NULL },
     /* `=` monadic is group (rowid — the `group` row); family = dyadic Equal. */
-    { "=",     QLEX_GLYPH,     QR_ENV("group"),                QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic", NULL },
+    { "=",     QLEX_GLYPH,     QR_FN1("group", q_group_wrap),  QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic", NULL },
     { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic", NULL },
     /* ---- structural glyphs ---- */
     /* `#` monadic is count (family `none` — see the `count` row); dyadic Take is
@@ -408,8 +408,10 @@ static const q_op_t Q_OPS[] = {
      * list-of-vectors; name-routing (RAY_FN_Q_LOWER + aux "sum") keeps
      * query/DAG behaviour. */
     { "sum",     QLEX_KW_PREFIX, QR_FN1("sum", q_sum_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL },
-    /* group — rowid (item equality; spec §3 lists it; a §9 border flag). */
-    { "group",   QLEX_KW_PREFIX, QR_ENV("group"),              QR_NONE,           NULL, 1, 0, "rowid", NULL },
+    /* group — rowid (item equality; spec §3 lists it; a §9 border flag).
+     * Wrapper: the dict/table arms (funsql wave 1) — vectors still delegate
+     * to the base hash kernel inside q_group_wrap. */
+    { "group",   QLEX_KW_PREFIX, QR_FN1("group", q_group_wrap), QR_NONE,          NULL, 1, 0, "rowid", NULL },
     /* ---- grade: THE ordering primitive — monadic prefix; rowid (spec §3
      * row-identity, the #174 stable-grade kernel) ----
      * iasc/idesc own ordering for EVERY structure (vector -> ray_iasc_fn; dict
