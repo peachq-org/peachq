@@ -28,6 +28,10 @@
 .q.cov:{avg[x*y]-avg[x]*avg y}
 .q.scov:{cov[x;y]*count[x]%-1+count x}
 .q.mavg:{(x msum y)%x mcount y}
+/ ref/fby.md prints the law: `(sum each dat group grp)grp`; x is the (aggr;d)
+/ pair.  Since V2.7 an aggregate may answer a LIST per group — then the results
+/ go back to their own rows, the raze un-permuted by iasc of the razed indices.
+.q.fby:{[x;y] g:group y; r:(first x) each (last x) g; $[0h>type first value r; r y; (raze value r) iasc raze value g]}
 
 / ---- wave 3: the sort wave — every sort verb derives from the grade ----
 / ref/asc.md: atom = already sorted (carries the RAY_STR atom too); 99h = dict AND keyed
