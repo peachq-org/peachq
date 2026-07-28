@@ -1631,8 +1631,10 @@ static P parse_query(Parser *p) {
     /* select-phrase list (a): stops at by / from */
     a = parse_phrase_list(p, Q_SELECT);
 
-    /* optional by-phrase list (b): stops at from */
+    /* optional by-phrase list (b): stops at from.  delete has NO By clause
+     * (ref/delete.md's template omits it; kdb rejects at parse) */
     if (qtok_sym_is(cur(p), "by")) {
+        if (verb == QSQL_V_DELETE) q_die("qsql: by is not a delete clause");
         adv(p);
         b = parse_phrase_list(p, Q_BY);
         if (ray_len(b) == 0) q_die("qsql: empty by phrase");
