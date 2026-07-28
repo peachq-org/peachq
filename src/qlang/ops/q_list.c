@@ -16,7 +16,7 @@
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize */
 #include "ops/idxop.h"     /* .attr.* engine calls: ray_attr_*, RAY_IDX_*, RAY_MARK_* (column attributes) */
-#include "qlang/ops/q_index.h" /* q_index_elem_at (the element read), q_index_drop_dict — drop's dict arms */
+#include "qlang/ops/q_index.h" /* q_index_elem_at — the element read */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — sorted-vector null probe */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 */
 #include <stdint.h>        /* uintptr_t */
