@@ -22,4 +22,13 @@ uint8_t* q_gz_deflate(const uint8_t* src, size_t src_len, int level,
 uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
                       size_t* out_len, const char** err);
 
+/* Inflate ONE RFC 1950 zlib stream from src into out[0..out_cap), verifying
+ * its adler32.  A zlib stream is self-terminating, so *consumed
+ * reports the input bytes it used and anything after it is left untouched —
+ * which is how q_wirefile chains kxzipped blocks.  Returns 0, or -1 with *err
+ * a bare class as above. */
+int q_gz_inflate_zlib(const uint8_t* src, size_t src_len,
+                      uint8_t* out, size_t out_cap,
+                      size_t* out_len, size_t* consumed, const char** err);
+
 #endif /* Q_GZ_H */
