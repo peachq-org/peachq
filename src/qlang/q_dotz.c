@@ -356,6 +356,13 @@ ray_t* q_dotz_get(const char* name, size_t len) {
  * then stops; else it falls to the `.ipc.on.*` / plain-env path).  Retains
  * its own ref; RAY_QFN carriers are stored AS-IS — the fire sites apply them
  * through q_eval_apply_value.  Passing NULL clears. */
+/* `.z.zd` is the compression setting (ref/dotz.md).  q_wirefile never writes a
+ * compressed file, so accepting the assignment would yield a silently
+ * uncompressed one — fail at the point of the mistake instead. */
+bool q_dotz_write_is_nyi(const char* name, size_t len) {
+    return len == 5 && memcmp(name, ".z.zd", 5) == 0;
+}
+
 bool q_dotz_set(const char* name, size_t len, ray_t* val) {
     ray_t** slot = z_slot_ptr(name, len);
     if (!slot) return false;

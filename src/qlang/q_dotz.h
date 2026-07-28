@@ -46,6 +46,10 @@ bool   q_dotz_set(const char* name, size_t len, ray_t* val);
 ray_t* q_dotz_get(const char* name, size_t len);
 void   q_dotz_exit_fire(int code);
 
+/* True for a `.z.*` name whose SETTING is 'nyi, so both write paths (`:`
+ * assignment and `set`) refuse it instead of storing a value nothing reads. */
+bool   q_dotz_write_is_nyi(const char* name, size_t len);
+
 /* A fresh RAY_UNARY fn-value (rc=1) that, each time the poll timer fires it,
  * resolves the CURRENT `.z.ts` binding and calls it with a fresh LOCAL
  * timestamp (`.z.P`).  Unset `.z.ts` (or a stopped timer) → no-op.  Used by the
