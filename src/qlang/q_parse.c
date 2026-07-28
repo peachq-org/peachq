@@ -2257,7 +2257,10 @@ static ray_t *qsql_norm_where(ray_t *phrases) {
     return qsql_enlist(clist);                        /* enlist(list); consumes clist */
 }
 
-/* delete column-list `a`: the bare col names as a symbol VECTOR (kdb funsql). */
+/* delete column-list `a`: the col names as a symbol VECTOR, ENLISTED like every
+ * symvec constant in a tree (parsetrees.md "lists of symbols are enlisted" —
+ * `,,`b`), so one eval of the slot yields the functional symvec.  A bare 1-elem
+ * symvec would instead eval to the ATOM (parsetrees.md:26 eval enlist`x -> `x). */
 static ray_t *qsql_norm_delete_a(ray_t *phrases) {
     int64_t n = ray_len(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
@@ -2269,7 +2272,7 @@ static ray_t *qsql_norm_delete_a(ray_t *phrases) {
         a = q_symvec_append(a, ray_str_ptr(s), (int)ray_str_len(s));
         ray_release(s);
     }
-    return a;
+    return qsql_enlist(a);
 }
 
 /* Normalize a raw phrase list into the functional slot the clones emit.
