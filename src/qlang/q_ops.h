@@ -96,6 +96,22 @@ typedef struct {
  * actionable-plans/2026-07-15-uniform-structure-dispatch.md).  Per-verb help
  * strings live OUTSIDE the binary in docs/q-ops-help.tsv (archival, keyed by
  * name, loaded by nothing). */
+/* Rank-2 sub-law of an `aggregate` row — what the L3 lift does with a NESTED
+ * argument (a dict's rank-2 values, or a plain nested list).  Zero-default is
+ * "no rank-2 law": first/last reduce to an ITEM, not a column (ref/first.md). */
+typedef enum {
+    QNEST_NONE = 0,
+    QNEST_FOLD,     /* reduce the OUTER axis with the atomic dyad this row is the
+                     * `mono` of, so nulls propagate through the dyad rather than
+                     * being re-implemented.  Exactly basics/math.md's roster
+                     * `avg min max sum` — "for nested x these functions preserve
+                     * the nulls" (`max (1 2;0N 4)` is `1 4`, `min` is `0N 2`) */
+    QNEST_MEAN,     /* QNEST_FOLD over `+`, scaled by the outer count — ref/avg.md
+                     * "If x is a nested list, null items make the average null" */
+    QNEST_COLUMNS   /* agg each flip x: the 4.1t "traverse columns of tables and
+                     * general/anymap/nested lists" rule (ref/dev.md, ref/var.md) */
+} q_nested_law;
+
 typedef struct q_op {
     const char*  name;          /* q surface spelling — the lookup key + registry provenance */
     q_lex_class  lex;           /* how the scanner treats the token (QLEX_* above) */
@@ -118,6 +134,8 @@ typedef struct q_op {
                                  * the sym (ref/amend.md handle d).  Flag-gated, never sym-sniffed:
                                  * sym atoms are legal data.  Trailing field, zero-default: only
                                  * lifted rows set it (designated init; insert/upsert adopt later). */
+    uint8_t      nested;        /* aggregate rows: the QNEST_* rank-2 sub-law above.  Trailing
+                                 * field, zero-default (designated init). */
 } q_op_t;
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
@@ -132,6 +150,11 @@ ray_t* q_ops_acc_identity(const char* spelling);
  * verb (q.q-hosted keywords have no row).  The one lookup into Q_OPS[] by
  * spelling (rule 3: never an env lookup by q spelling). */
 const q_op_t* q_ops_find(const char* s, int len);
+
+/* The atomic-dyad row that folds `row`'s outer axis under QNEST_FOLD/QNEST_MEAN
+ * — the `mono` column read BACKWARDS (`sum`->`+`, `max`->`|`), so the sub-law
+ * derives from the manifest and needs no roster.  NULL for the other laws. */
+const q_op_t* q_ops_nested_dyad(const q_op_t* row);
 
 /* True iff s[0..len) is a keyword usable as an INFIX verb (i.e. a QLEX_KW_INFIX
  * row).  Replaces the hardcoded memcmp("div") in the scanner.  Static-only: no

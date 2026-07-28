@@ -70,8 +70,10 @@
 
 /* ===== FAMILY AUDIT (uniform-structure-dispatch stage 0 metadata) ==========
  * Every row carries a `family` (vocabulary: q_ops.h; spec: actionable-plans/
- * 2026-07-15-uniform-structure-dispatch.md §2/§3).  PURE METADATA — nothing
- * dispatches on it yet.  Classification is per the verb's qdocs page; where
+ * 2026-07-15-uniform-structure-dispatch.md §2/§3).  OPERATIVE since the eval
+ * rebuild: the apply module's family lifts dispatch on it (q_eval_apply.c, the
+ * `fam` block), the `aggregate` rows adding a `nested` rank-2 sub-law
+ * (QNEST_*).  Classification is per the verb's qdocs page; where
  * the page carries an explicit rank label ("X is an atomic/uniform/aggregate
  * function") that label is cited at the row group and FOLLOWED — with exactly
  * ONE exception, `ratios`, whose label contradicts its own examples (the
@@ -342,7 +344,10 @@ static const q_op_t Q_OPS[] = {
     /* q `prd x` — the multiply-over fold twin of prds (ref/prd.md: aggregate):
      * nulls are 1s, bool vector -> int, list-of-lists element-wise, dict/table
      * implicit iteration.  Wrapper (no rayfall product aggregate). */
-    { "prd",   QLEX_KW_PREFIX, QR_FN1("prd", q_prd_wrap),      QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    /* QNEST_COLUMNS, not QNEST_FOLD: basics/math.md's null-preserving roster is
+     * `avg min max sum` — prd keeps nulls-as-1s nested too (`prd (1 0N;2 3)`
+     * is `2 3`), which is exactly the per-column law. */
+    { "prd",   QLEX_KW_PREFIX, QR_FN1("prd", q_prd_wrap),      QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_COLUMNS },
     { "maxs",  QLEX_KW_PREFIX, QR_FN1("maxs", q_maxs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
     { "mins",  QLEX_KW_PREFIX, QR_FN1("mins", q_mins_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
     { "avgs",  QLEX_KW_PREFIX, QR_FN1("avgs", q_avgs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
@@ -359,10 +364,12 @@ static const q_op_t Q_OPS[] = {
      * `var_pop`, q `svar`->`var`, q `sdev`->`stddev`, q `dev` stays `dev`. */
     /* `med` is self-hosted in q.q (ref/med.md docs formula) — no row; the
      * bootstrap shadow-rebind points root `med` at `.q.med` (the engine env
-     * `med` would otherwise win name resolution). */
-    { "var",   QLEX_KW_PREFIX, QR_ENV("var_pop"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL },
-    { "svar",  QLEX_KW_PREFIX, QR_ENV("var"),                  QR_NONE,           NULL, 1, 0, "aggregate", NULL },
-    { "sdev",  QLEX_KW_PREFIX, QR_ENV("stddev"),               QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+     * `med` would otherwise win name resolution).  It takes NO rank-2 sub-law:
+     * ref/med.md's own `med t` is `a|3 b|-6`, the middle ITEM (row) — not the
+     * per-column median that `each flip` would give. */
+    { "var",   QLEX_KW_PREFIX, QR_ENV("var_pop"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_COLUMNS },
+    { "svar",  QLEX_KW_PREFIX, QR_ENV("var"),                  QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_COLUMNS },
+    { "sdev",  QLEX_KW_PREFIX, QR_ENV("stddev"),               QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_COLUMNS },
     { "cor",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("pearson_corr"), NULL, 1, 0, "aggregate", NULL },
     { "cov",   QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("cov"),    NULL, 1, 0, "aggregate", NULL },
     { "scov",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("scov"),   NULL, 1, 0, "aggregate", NULL },
@@ -419,7 +426,7 @@ static const q_op_t Q_OPS[] = {
      * fast path claims AGGR fns before the wrapper runs and 'types on a boxed
      * list-of-vectors; name-routing (RAY_FN_Q_LOWER + aux "sum") keeps
      * query/DAG behaviour. */
-    { "sum",     QLEX_KW_PREFIX, QR_FN1("sum", q_sum_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "sum",     QLEX_KW_PREFIX, QR_FN1("sum", q_sum_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD },
     /* group — rowid (item equality; spec §3 lists it; a §9 border flag).
      * Wrapper: the dict/table arms (funsql wave 1) — vectors still delegate
      * to the base hash kernel inside q_group_wrap. */
@@ -436,7 +443,7 @@ static const q_op_t Q_OPS[] = {
      * vectors only, so asc cannot set it without regressing symbol sorts. */
     { "iasc",    QLEX_KW_PREFIX, QR_FN1("iasc", q_iasc_wrap),  QR_NONE,           NULL, 1, 0, "rowid", NULL },
     { "idesc",   QLEX_KW_PREFIX, QR_FN1("idesc", q_idesc_wrap), QR_NONE,          NULL, 1, 0, "rowid", NULL },
-    { "avg",     QLEX_KW_PREFIX, QR_ENV("avg"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "avg",     QLEX_KW_PREFIX, QR_ENV("avg"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_MEAN },
     /* q `floor` returns LONGS from floats (kdb `floor 3.7` is 3j); rayfall's
      * env floor keeps f64, so this is the q_floor_wrap, not a rename. */
     { "floor",   QLEX_KW_PREFIX, QR_FN1A("floor", q_floor_wrap), QR_NONE,         NULL, 1, 0, "atomic", NULL },
@@ -511,11 +518,11 @@ static const q_op_t Q_OPS[] = {
      * top-level bool-atom run (heterogeneous input list) to a bool vector
      * for kdb-true display. */
     { "null",    QLEX_KW_PREFIX, QR_FN1("nil?", q_null_wrap),  QR_NONE,           NULL, 1, 0, "atomic", NULL },
-    { "dev",     QLEX_KW_PREFIX, QR_ENV("dev"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "dev",     QLEX_KW_PREFIX, QR_ENV("dev"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_COLUMNS },
     { "exp",     QLEX_KW_PREFIX, QR_ENV("exp"),                QR_NONE,           NULL, 1, 0, "atomic", NULL },
     { "log",     QLEX_KW_PREFIX, QR_ENV("log"),                QR_NONE,           NULL, 1, 0, "atomic", NULL },
-    { "max",     QLEX_KW_PREFIX, QR_ENV("max"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
-    { "min",     QLEX_KW_PREFIX, QR_ENV("min"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "max",     QLEX_KW_PREFIX, QR_ENV("max"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD },
+    { "min",     QLEX_KW_PREFIX, QR_ENV("min"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD },
     /* rank == iasc iasc (ref/rank.md) — the grade family, rowid. */
     /* q `raze x` — flattens one level of structure (ref/raze.md; base
      * ray_raze_fn plus the kdb atom arm `raze 42` -> ,42). */
@@ -659,6 +666,18 @@ const q_op_t* q_ops_find(const char* s, int len) {
 }
 
 int q_ops_is_reserved(const char* s, int len) { return q_ops_find(s, len) != NULL; }
+
+const q_op_t* q_ops_nested_dyad(const q_op_t* row) {
+    /* QNEST_MEAN is the `+` fold scaled by the count, so it borrows sum's dyad */
+    const char* agg = !row ? NULL
+                    : row->nested == QNEST_FOLD ? row->name
+                    : row->nested == QNEST_MEAN ? "sum"
+                                                : NULL;
+    if (!agg) return NULL;
+    for (int i = 0; i < N_Q_OPS; i++)
+        if (Q_OPS[i].mono && strcmp(Q_OPS[i].mono, agg) == 0) return &Q_OPS[i];
+    return NULL;
+}
 
 /* Operator->integer opcode (`value +` -> 1) is DEFERRED: the opcode is a property
  * of the FUNCTION IDENTITY, not the spelling (`get`/`value` are two names for ONE
