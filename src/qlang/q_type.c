@@ -353,6 +353,18 @@ int q_type_is_nested(ray_t* v) {
     return r;
 }
 
+int q_type_any_nested_item(ray_t* v) {
+    if (!v || v->type != RAY_LIST) return 0;
+    int64_t n = ray_len(v);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* e = q_index_elem_at(v, i);
+        int c = e && !RAY_IS_ERR(e) && !ray_is_atom(e) && e->type != RAY_STR;
+        if (e) ray_release(e);
+        if (c) return 1;
+    }
+    return 0;
+}
+
 int q_type_is_iter(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return 0;
     return v->type == RAY_LIST || v->type == RAY_TABLE ||
