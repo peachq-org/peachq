@@ -366,6 +366,9 @@ static const q_op_t Q_OPS[] = {
     { "cor",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("pearson_corr"), NULL, 1, 0, "aggregate", NULL },
     { "cov",   QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("cov"),    NULL, 1, 0, "aggregate", NULL },
     { "scov",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("scov"),   NULL, 1, 0, "aggregate", NULL },
+    /* fby: family `none` — the LEFT arg is the PAIR `(aggr;d)`, which must reach
+     * the derivation whole; q.q-hosted because ref/fby.md prints the spelling. */
+    { "fby",   QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("fby"),    NULL, 1, 0, "none", NULL },
     /* ---- Wave 5: sliding m-windows + ema (dyadic infix keywords) — all
      * doc-labelled uniform (ref/{sum,avg,max,min,dev,count,ema}.md) ---- */
     { "msum",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("msum", q_msum_wrap), NULL, 1, 0, "map", NULL },

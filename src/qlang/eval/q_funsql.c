@@ -18,7 +18,6 @@
 #include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn */
 #include "table/dict.h"                /* ray_dict_slots — keyed-table halves */
 #include <stdlib.h>
-#include <string.h>
 
 
 static int is_empty_gen(ray_t* v) {
@@ -127,9 +126,13 @@ static ray_t* sel_cols(ray_t* rng, ray_t* t, ray_t* idx, int conform) {
     return vals;
 }
 
-/* Law 8: a phrase-columns result table IS `flip names!cols`. */
-static ray_t* cols_table(ray_t* names, ray_t* rng, ray_t* t, ray_t* idx) {
-    ray_t* vals = sel_cols(rng, t, idx, 1);
+/* Law 8: a phrase-columns result table IS `flip names!cols` — and `flip` IS
+ * the conform law, so a Select hands it the RAW phrase values: an atom beside
+ * a column rides that column's length, and phrases that ALL gave atoms make
+ * the one-row aggregate table (`select sum a from ([]a:1 2 3)` is a single 6,
+ * basics/qsql.md).  A By key instead spans the rows, so it conforms first. */
+static ray_t* cols_table(ray_t* names, ray_t* rng, ray_t* t, ray_t* idx, int conform) {
+    ray_t* vals = sel_cols(rng, t, idx, conform);
     if (RAY_IS_ERR(vals)) return vals;
     ray_t* d = q_bang(names, vals);
     ray_release(vals);
@@ -140,7 +143,7 @@ static ray_t* cols_table(ray_t* names, ray_t* rng, ray_t* t, ray_t* idx) {
 }
 
 static ray_t* sel_table(ray_t* a, ray_t* t, ray_t* idx) {
-    return cols_table(ray_dict_keys(a), ray_dict_vals(a), t, idx);
+    return cols_table(ray_dict_keys(a), ray_dict_vals(a), t, idx, 0);
 }
 
 /* Exec at b=() (law 11): () -> last row; sym/tree -> value; dict unconformed */
@@ -236,12 +239,13 @@ static ray_t* by_specs(ray_t* b, ray_t** trees_out) {
     return sv;
 }
 
-/* per group: the ORIGINAL row numbers, idx@positions (law 14) */
-static ray_t* by_orig_idx(ray_t* idx, ray_t* gv) {
+/* per group: the ORIGINAL row numbers, idx@positions (law 14) — the groups
+ * taken in `ord` order, so every by-consumer is handed law 15 already done */
+static ray_t* by_orig_idx(ray_t* idx, ray_t* gv, ray_t* ord) {
     int64_t ng = ray_len(gv);
     ray_t* out = ray_list_new(ng > 0 ? ng : 1);
     for (int64_t j = 0; j < ng && !RAY_IS_ERR(out); j++) {
-        ray_t* pos = q_index_elem_at(gv, j);
+        ray_t* pos = q_index_elem_at(gv, q_type_ivec_get(ord, j));
         ray_t* gi = (pos && !RAY_IS_ERR(pos)) ? gather(idx, pos) : pos;
         if (pos && gi != pos) ray_release(pos);
         if (!gi || RAY_IS_ERR(gi)) { ray_release(out); return gi ? gi : q_err(QE_TYPE); }
@@ -303,45 +307,46 @@ static ray_t* by_last_idx(ray_t* gidxs) {
     return out;
 }
 
-/* grouped state shared by every by-consumer: g = group(by-table over idx)
- * (laws 2+14), gidxs = original rows per group.  Owned out-params. */
+/* grouped state shared by every by-consumer (laws 2+14): the by-table's
+ * distinct rows as the owned key TABLE, and the original rows per group as
+ * *gidxs_out.  Both come back ASCENDING BY KEY — law 15 is a By law, so it
+ * belongs here, once, and not in each consumer; `group` itself keeps its
+ * definitional first-occurrence order (ref/group.md). */
 static ray_t* by_group(ray_t* names, ray_t* trees, ray_t* t, ray_t* idx,
                        ray_t** gidxs_out) {
     *gidxs_out = NULL;
-    ray_t* bt = cols_table(names, trees, t, idx);
+    ray_t* bt = cols_table(names, trees, t, idx, 1);
     if (!bt || RAY_IS_ERR(bt)) return bt ? bt : q_err(QE_TYPE);
     ray_t* g = q_group_wrap(bt);
     ray_release(bt);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
-    ray_t* gidxs = by_orig_idx(idx, ray_dict_vals(g));
-    if (RAY_IS_ERR(gidxs)) { ray_release(g); return gidxs; }
+    ray_t* ord = q_iasc_wrap(ray_dict_keys(g));
+    if (!ord || RAY_IS_ERR(ord)) { ray_release(g); return ord ? ord : q_err(QE_TYPE); }
+    ray_t* gidxs = by_orig_idx(idx, ray_dict_vals(g), ord);
+    ray_t* kt = RAY_IS_ERR(gidxs) ? gidxs : gather(ray_dict_keys(g), ord);
+    ray_release(ord);
+    ray_release(g);
+    if (RAY_IS_ERR(gidxs)) return gidxs;
+    if (!kt || RAY_IS_ERR(kt)) { ray_release(gidxs); return kt ? kt : q_err(QE_TYPE); }
     *gidxs_out = gidxs;
-    return g;
+    return kt;
 }
 
-/* Select-by (b a dict — the keyword By lowering): result keyed ascending by
- * its key (law 15), built by the `!` table!table law; a=() takes the last
- * row per group minus the by-named columns (select.md); a sym gives the
- * dict shape (funsql.md "Group by a dictionary"). */
+/* Select-by (b a dict — the keyword By lowering): result keyed by the group
+ * key (already ascending — law 15 lives in by_group), built by the `!`
+ * table!table law; a=() takes the last row per group minus the by-named
+ * columns (select.md); a sym gives the dict shape (funsql.md "Group by a
+ * dictionary"). */
 static ray_t* by_select(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
                         ray_t* idx) {
     ray_t* gidxs = NULL;
-    ray_t* g = by_group(names, trees, t, idx, &gidxs);
-    if (RAY_IS_ERR(g)) return g;
-    ray_t* kt = ray_dict_keys(g);                       /* borrowed */
-    ray_t* ord = q_iasc_wrap(kt);                       /* law 15 */
-    ray_t* kt2 = (ord && !RAY_IS_ERR(ord)) ? gather(kt, ord) : ord;
-    if (ord && kt2 != ord && !RAY_IS_ERR(ord)) { /* keep ord */ } else ord = NULL;
-    ray_t* r = NULL;
-    if (!kt2 || RAY_IS_ERR(kt2)) {
-        r = kt2 ? kt2 : q_err(QE_TYPE);
-        kt2 = NULL;
-    } else if (is_empty_gen(a)) {                       /* last row per group */
+    ray_t* kt = by_group(names, trees, t, idx, &gidxs);
+    if (RAY_IS_ERR(kt)) return kt;
+    ray_t* r;
+    if (is_empty_gen(a)) {                              /* last row per group */
         ray_t* li = by_last_idx(gidxs);
-        ray_t* li2 = RAY_IS_ERR(li) ? li : gather(li, ord);
-        if (!RAY_IS_ERR(li) && li2 != li) ray_release(li);
-        ray_t* rows = (li2 && !RAY_IS_ERR(li2)) ? gather(t, li2) : li2;
-        if (li2 && !RAY_IS_ERR(li2) && rows != li2) ray_release(li2);
+        ray_t* rows = RAY_IS_ERR(li) ? li : gather(t, li);
+        if (!RAY_IS_ERR(li) && rows != li) ray_release(li);
         if (!rows || RAY_IS_ERR(rows)) r = rows ? rows : q_err(QE_TYPE);
         else {
             ray_t* tcols = q_cols_fn(rows);
@@ -353,55 +358,35 @@ static ray_t* by_select(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
             if (keep && !RAY_IS_ERR(keep) && vt != keep) ray_release(keep);
             ray_release(rows);
             if (!vt || RAY_IS_ERR(vt)) r = vt ? vt : q_err(QE_TYPE);
-            else r = q_bang(kt2, vt), ray_release(vt);
+            else r = q_bang(kt, vt), ray_release(vt);
         }
     } else if (q_type_is_dict(a)) {
         ray_t* vcols = by_cols(ray_dict_vals(a), t, gidxs);
-        ray_t* v2;                        /* law-15 order: EACH column @ ord */
-        if (RAY_IS_ERR(vcols)) v2 = vcols;
-        else {
-            int64_t nc = ray_len(vcols);
-            v2 = ray_list_new(nc > 0 ? nc : 1);
-            for (int64_t j = 0; j < nc && !RAY_IS_ERR(v2); j++) {
-                ray_t* cv = q_index_elem_at(vcols, j);
-                ray_t* cr = (cv && !RAY_IS_ERR(cv)) ? gather(cv, ord) : cv;
-                if (cv && cr != cv) ray_release(cv);
-                if (!cr || RAY_IS_ERR(cr)) { ray_release(v2); v2 = cr ? cr : q_err(QE_TYPE); break; }
-                v2 = ray_list_append(v2, cr);
-                ray_release(cr);
-            }
-            ray_release(vcols);
-        }
-        ray_t* vt = (v2 && !RAY_IS_ERR(v2)) ? named_table(ray_dict_keys(a), v2)
-                                            : v2;
-        if (v2 && !RAY_IS_ERR(v2) && vt != v2) ray_release(v2);
+        ray_t* vt = RAY_IS_ERR(vcols) ? vcols
+                    : named_table(ray_dict_keys(a), vcols);
+        if (!RAY_IS_ERR(vcols) && vt != vcols) ray_release(vcols);
         if (!vt || RAY_IS_ERR(vt)) r = vt ? vt : q_err(QE_TYPE);
-        else r = q_bang(kt2, vt), ray_release(vt);
+        else r = q_bang(kt, vt), ray_release(vt);
     } else {                                            /* a sym/tree -> dict */
         ray_t* vl = by_col(a, t, gidxs);
-        ray_t* v2 = RAY_IS_ERR(vl) ? vl : gather(vl, ord);
-        if (!RAY_IS_ERR(vl) && v2 != vl) ray_release(vl);
-        if (!v2 || RAY_IS_ERR(v2)) r = v2 ? v2 : q_err(QE_TYPE);
-        else r = q_bang(kt2, v2), ray_release(v2);
+        if (!vl || RAY_IS_ERR(vl)) r = vl ? vl : q_err(QE_TYPE);
+        else r = q_bang(kt, vl), ray_release(vl);
     }
-    if (kt2) ray_release(kt2);
-    if (ord) ray_release(ord);
+    ray_release(kt);
     ray_release(gidxs);
-    ray_release(g);
     return r;
 }
 
-/* Exec-by, b a sym ATOM: plain dict keyed by the column's distinct values in
- * FIRST-OCCURRENCE order (law 16, the group law; ordering doc-undecidable —
- * gaps register item 4); a=dict keys by a one-ANONYMOUS-column table
+/* Exec-by, b a sym ATOM: plain dict keyed by the column's distinct values,
+ * ascending like Select-by (law 15 — the hand-curated qsql/exec ledger decides
+ * what the docs leave open); a=dict keys by a one-ANONYMOUS-column table
  * (funsql.md "Group by column"). */
 static ray_t* by_exec_atom(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
                            ray_t* idx) {
     if (is_empty_gen(a)) return q_err(QE_NYI);          /* matrix "-" */
     ray_t* gidxs = NULL;
-    ray_t* g = by_group(names, trees, t, idx, &gidxs);
-    if (RAY_IS_ERR(g)) return g;
-    ray_t* kt = ray_dict_keys(g);                       /* 1-col distinct */
+    ray_t* kt = by_group(names, trees, t, idx, &gidxs); /* 1-col distinct */
+    if (RAY_IS_ERR(kt)) return kt;
     ray_t* r;
     if (q_type_is_dict(a)) {
         ray_t* vcols = by_cols(ray_dict_vals(a), t, gidxs);
@@ -426,7 +411,7 @@ static ray_t* by_exec_atom(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
         }
     }
     ray_release(gidxs);
-    ray_release(g);
+    ray_release(kt);
     return r;
 }
 
@@ -674,7 +659,7 @@ ray_t* q_funsql_dict_drop_keys(ray_t* keys, ray_t* d) { return dict_drop_keys(ke
 /* a fresh column of v's null, length n (update.md: a created column has
  * nulls wherever the Where phrase did not reach) */
 static ray_t* null_col_like(ray_t* v, int64_t n) {
-    int8_t ty = ray_is_atom(v) ? v->type : ray_is_vec(v) ? (int8_t)-v->type : 0;
+    int8_t ty = q_type_elem_tag(v);
     ray_t* na = ty ? ray_typed_null(ty) : NULL;
     if (!na) { na = RAY_NULL_OBJ; ray_retain(na); }
     ray_t* nn = ray_i64(n);
@@ -697,9 +682,16 @@ static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
     return r;
 }
 
-static ray_t* upd_col_start(ray_t* t, int64_t nm, ray_t* v) {
+/* What the amend starts from.  `full` = the update reaches EVERY row, so no
+ * value of the old column survives and its type has no claim — a fresh null
+ * column of the PHRASE's type is why `update avg weight by city from p` turns
+ * an int column float (ref/update.md By phrase: the groups partition the whole
+ * table).  Under a Where phrase the live column stands and "new values must
+ * have the type of the column being amended"; a result naming no element type
+ * (a nested column) claims nothing either way. */
+static ray_t* upd_col_start(ray_t* t, int64_t nm, ray_t* v, int full) {
     ray_t* cur = ray_table_get_col(t, nm);              /* borrowed or NULL */
-    if (cur) { ray_retain(cur); return cur; }
+    if (cur && !(full && q_type_elem_tag(v))) { ray_retain(cur); return cur; }
     return null_col_like(v, q_count_long(t));
 }
 
@@ -708,6 +700,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
     ray_t* keys = ray_dict_keys(a);
     ray_t* rng = ray_dict_vals(a);
     int64_t nc = q_count_long(rng);
+    int full = q_count_long(idx) == q_count_long(t);
     ray_t* cols = ray_list_new(nc > 0 ? nc : 1);
     for (int64_t j = 0; j < nc && !RAY_IS_ERR(cols); j++) {
         ray_t* nm = q_index_elem_at(keys, j);
@@ -720,7 +713,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
             ray_t* v = phrase_eval(tree, t, idx);
             if (!v || RAY_IS_ERR(v)) err = v ? v : q_err(QE_TYPE);
             else {
-                cur = upd_amend(upd_col_start(t, nm->i64, v), idx, v);
+                cur = upd_amend(upd_col_start(t, nm->i64, v, full), idx, v);
                 if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
                 ray_release(v);
             }
@@ -730,7 +723,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
             for (int64_t k = 0; k < ng && !err; k++) {
                 ray_t* v = phrase_eval(tree, t, gi[k]);
                 if (!v || RAY_IS_ERR(v)) { err = v ? v : q_err(QE_TYPE); break; }
-                if (!cur) cur = upd_col_start(t, nm->i64, v);
+                if (!cur) cur = upd_col_start(t, nm->i64, v, full);
                 cur = upd_amend(cur, gi[k], v);
                 if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
                 ray_release(v);
@@ -757,19 +750,19 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
  * the dict-join right-override creates absent sel-key columns. */
 static ray_t* update_table(ray_t* a, ray_t* b, ray_t* t, ray_t* idx) {
     ray_t* gidxs = NULL;
-    ray_t* g = NULL;
+    ray_t* kt = NULL;
     int grouped = !(is_bool_atom(b, 0) || is_empty_gen(b));
     if (grouped) {
         ray_t* trees = NULL;
         ray_t* names = by_specs(b, &trees);
         if (!names || RAY_IS_ERR(names)) return names ? names : q_err(QE_TYPE);
-        g = by_group(names, trees, t, idx, &gidxs);
+        kt = by_group(names, trees, t, idx, &gidxs);
         ray_release(names);
         ray_release(trees);
-        if (RAY_IS_ERR(g)) return g;
+        if (RAY_IS_ERR(kt)) return kt;
     }
     ray_t* nd = upd_cols(a, t, idx, gidxs);
-    if (g) { ray_release(gidxs); ray_release(g); }
+    if (kt) { ray_release(gidxs); ray_release(kt); }
     if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
     ray_t* cd = q_flip_wrap(t);
     ray_t* merged = (cd && !RAY_IS_ERR(cd)) ? q_join_wrap(cd, nd) : cd;
