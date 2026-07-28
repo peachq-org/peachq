@@ -201,7 +201,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         return make_typed_float(promote_float_type(a->type, b->type),
                                 as_f64(a) + as_f64(b));
     int8_t rt = promote_int_type(a, b);
-    return make_typed_int(rt, as_i64(a) + as_i64(b));
+    return make_typed_int(rt, wrap_add64(as_i64(a), as_i64(b)));
 }
 
 ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
@@ -316,7 +316,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
         return make_typed_float(promote_float_type(a->type, b->type), r);
     }
     int8_t rt = promote_int_type_right(a, b);
-    return make_typed_int(rt, as_i64(a) - as_i64(b));
+    return make_typed_int(rt, wrap_sub64(as_i64(a), as_i64(b)));
 }
 
 ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
@@ -382,7 +382,7 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
         return make_typed_float(promote_float_type(a->type, b->type),
                                 as_f64(a) * as_f64(b));
     int8_t rt = promote_int_type(a, b);
-    return make_typed_int(rt, as_i64(a) * as_i64(b));
+    return make_typed_int(rt, wrap_mul64(as_i64(a), as_i64(b)));
 }
 
 ray_t* ray_div_fn(ray_t* a, ray_t* b) {
