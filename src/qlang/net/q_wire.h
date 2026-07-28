@@ -41,10 +41,10 @@
  *     producer path — identical to kdb 12h; raw payload, no conversion.
  *     RAY_DATE (days since 2000-01-01) and RAY_TIME (ms since midnight)
  *     are also bit-identical to kdb 14h/19h.
- *   - Sentinel nulls map 1:1 (INT_MIN family / NaN).  The reader
- *     canonicalizes inbound ±Inf floats to NaN (the engine's sentinel-null
- *     float model has no 0w) and sets RAY_ATTR_HAS_NULLS when a decoded
- *     fixed-width vector contains sentinels (invariant 16.4, vec.h).
+ *   - Sentinel nulls map 1:1 (INT_MIN family / NaN).  ±Inf floats pass
+ *     through raw in BOTH directions (live-infinity model 2026-07-28); the
+ *     reader sets RAY_ATTR_HAS_NULLS when a decoded fixed-width vector
+ *     contains sentinels (invariant 16.4, vec.h).
  *   - Attribute bytes emit as 0x00 (openq has no s/u/p/g attrs yet) and
  *     are ignored on read; sorted-dict 0x7f decodes as a plain dict.
  *   - Lambdas serialize their SOURCE text (the .q.lambda carrier's `src`);

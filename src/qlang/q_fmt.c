@@ -412,12 +412,17 @@ static void int_tok(int64_t v, int width, char suffix, char* out, size_t n) {
     snprintf(out, n, "%lld%s", (long long)v, sfx);
 }
 
-/* Float token: NaN->0n/0Ne; wholes within `\P` print integral (`5`), past
+/* Float token: NaN->0n/0Ne, ±inf->0w/-0w (0we/-0we for reals — the display
+ * form, datatypes/real.qcmd); wholes within `\P` print integral (`5`), past
  * the horizon exponent-form (timespan.qcmd:162 pins 3e+11); else %.*g.  The
  * 10^prec horizon must be EXACT powers of 10 (pow() drift would move the
- * `\P 7` boundary off 1e7).  Infinities: out of scope (sentinel-null). */
+ * `\P 7` boundary off 1e7). */
 void q_fmt_float(double v, int f32, char* out, size_t n) {
     if (isnan(v)) { snprintf(out, n, f32 ? "0Ne" : "0n"); return; }
+    if (isinf(v)) {
+        snprintf(out, n, "%s%s", v < 0 ? "-0w" : "0w", f32 ? "e" : "");
+        return;
+    }
     int prec = g_print_prec ? g_print_prec : 17;
     static const double POW10[18] = {
         1e0,1e1,1e2,1e3,1e4,1e5,1e6,1e7,1e8,1e9,
@@ -484,10 +489,11 @@ static void guid_tok(const uint8_t* b16, char* out, size_t n) {
     out[pos < n ? pos : n - 1] = '\0';
 }
 
-/* Datetime (f64 — Q_TTOK width 0): NaN->0Nz (no live 0Wz, 2026-07-09);
- * out-of-range -> 0000.00.00T00:00:00.000; ms precision (tok.md:227). */
+/* Datetime (f64 — Q_TTOK width 0): NaN->0Nz, ±inf->0Wz/-0Wz (live 0Wz,
+ * 2026-07-28); out-of-range -> 0000.00.00T00:00:00.000; ms (tok.md:227). */
 static void datetime_tok(double v, char* out, size_t n) {
     if (v != v) { snprintf(out, n, "0Nz"); return; }
+    if (isinf(v)) { snprintf(out, n, v < 0 ? "-0Wz" : "0Wz"); return; }
     if (v < (double)q_calendar_days_from_civil(1, 1, 1) ||
         v >= (double)(q_calendar_days_from_civil(9999, 12, 31) + 1)) {
         snprintf(out, n, "0000.00.00T00:00:00.000");

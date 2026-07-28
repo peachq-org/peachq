@@ -97,14 +97,15 @@ static void jbuf_int(jbuf* b, long long v) {
     if (n > 0) jbuf_putn(b, t, (size_t)n);
 }
 
-/* Float -> JSON number.  NaN/inf (structurally impossible as .j.j input, but
- * guarded) -> `null`.  Whole-valued floats render WITHOUT a decimal point
- * (dotj.md anchor: `.j.j -0w 0 1 2 3 0w` -> `[-inf,0,1,2,3,inf]`, the finite
- * elements as `0 1 2 3`).  Non-whole values use the shortest `%g` precision
- * that re-parses exactly — kdb-flavoured and guarantees fixed-point idempotence
+/* Float -> JSON number.  NaN -> `null`; ±inf -> the bare `inf`/`-inf` tokens
+ * (dotj.md anchor: `.j.j -0w 0 1 2 3 0w` -> `[-inf,0,1,2,3,inf]`).  Whole-
+ * valued floats render WITHOUT a decimal point (the finite elements as
+ * `0 1 2 3`).  Non-whole values use the shortest `%g` precision that
+ * re-parses exactly — kdb-flavoured and guarantees fixed-point idempotence
  * (format o parse o format == format). */
 static void jbuf_flt(jbuf* b, double v) {
-    if (isnan(v) || isinf(v)) { jbuf_puts(b, "null"); return; }
+    if (isnan(v)) { jbuf_puts(b, "null"); return; }
+    if (isinf(v)) { jbuf_puts(b, v < 0 ? "-inf" : "inf"); return; }
     if (v == 0.0) { jbuf_putc(b, '0'); return; }        /* also normalises -0 */
     if (v == floor(v) && fabs(v) < 1e15) {
         char t[32];
@@ -340,7 +341,7 @@ static ray_t* jk_node(yyjson_val* v) {
             return ray_bool(yyjson_get_bool(v));
         case YYJSON_TYPE_NUM: {
             double d = yyjson_get_num(v);
-            return isfinite(d) ? ray_f64(d) : ray_f64(NULL_F64);  /* inf/nan -> 0n */
+            return isnan(d) ? ray_f64(NULL_F64) : ray_f64(d);  /* inf lives; nan -> 0n */
         }
         case YYJSON_TYPE_STR:
             return ray_charv(yyjson_get_str(v), (int64_t)yyjson_get_len(v));

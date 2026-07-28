@@ -396,10 +396,8 @@ ray_t* ray_div_fn(ray_t* a, ray_t* b) {
                          ray_type_name(a->type), ray_type_name(b->type));
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
         return ray_typed_null(-RAY_F64);
-    double bv = as_f64(b);
-    if (bv == 0.0)
-        return ray_typed_null(-RAY_F64);
-    return make_f64(as_f64(a) / bv);
+    /* IEEE divide: 1%0 -> 0w, -1%0 -> -0w, 0%0 -> 0n (live-infinity model). */
+    return make_f64(as_f64(a) / as_f64(b));
 }
 
 ray_t* ray_idiv_fn(ray_t* a, ray_t* b) {

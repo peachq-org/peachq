@@ -256,6 +256,16 @@ static ray_t* q_cast_real(ray_t* x) {
 static ray_t* cast_int(int8_t tag, ray_t* x) {
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-tag);
+        /* ±inf saturates to the target's ±0W (`long$0w` -> 0W; the infinity
+         * corresponding to numeric x is min 0#x, ref/cast.md). */
+        if (isinf(x->f64)) {
+            int64_t w = (tag == RAY_I64) ? INT64_MAX
+                      : (tag == RAY_I32) ? INT32_MAX : INT16_MAX;
+            if (x->f64 < 0) w = -w;
+            if (tag == RAY_I64) return ray_i64(w);
+            if (tag == RAY_I32) return ray_i32((int32_t)w);
+            return ray_i16((int16_t)w);
+        }
         double r = rint(x->f64);              /* F32 atoms store f64 payload */
         if (tag == RAY_I64) return ray_i64((int64_t)r);
         if (tag == RAY_I32) return ray_i32((int32_t)r);
@@ -271,7 +281,13 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
             double v = is64 ? ((const double*)ray_data(x))[i]
                             : (double)((const float*)ray_data(x))[i];
             int isnull = isnan(v);
-            int64_t iv = isnull ? 0 : (int64_t)rint(v);
+            int64_t iv;
+            if (isnull) iv = 0;
+            else if (isinf(v)) {
+                iv = (tag == RAY_I64) ? INT64_MAX
+                   : (tag == RAY_I32) ? INT32_MAX : INT16_MAX;
+                if (v < 0) iv = -iv;
+            } else iv = (int64_t)rint(v);
             if      (tag == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
             else if (tag == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
             else                     ((int16_t*)ray_data(out))[i] = (int16_t)iv;

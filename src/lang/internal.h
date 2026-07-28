@@ -54,13 +54,10 @@ static inline ray_t* make_f64(double v) {
     ray_t* obj = ray_alloc(0);
     if (!obj) return ray_error("oom", NULL);
     obj->type = -RAY_F64;
-    /* Single-null float model: any non-finite F64 result (NaN OR ±Inf)
-     * canonicalizes to NULL_F64 at produce time — Inf is not a value.
-     * make_f64 is the atom-construction choke for all scalar/atom math
-     * (arith.c add/sub/mul/div/mod/sqrt/log/exp/pow/neg/abs/round/...),
-     * so canonicalizing here covers every atom produce site.  Known-finite
-     * callers (int→f64 cast) are unaffected: a finite value stays finite. */
-    obj->f64 = __builtin_isfinite(v) ? v : NULL_F64;
+    /* Live-infinity float model (2026-07-28, reverses single-null 2026-07-09):
+     * ±Inf are ordinary values; ONLY NaN is null, canonicalized to the exact
+     * NULL_F64 bit pattern so null tests / hashing see one representation. */
+    obj->f64 = __builtin_isnan(v) ? NULL_F64 : v;
     return obj;
 }
 
