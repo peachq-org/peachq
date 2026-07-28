@@ -1313,12 +1313,6 @@ static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
         }
         ray_release(cast);
     }
-    /* STAGE 2 (ingest/cast → F64 vector): the per-element recursion routes
-     * STR→F64 through make_f64, which canonicalizes any non-finite parse
-     * (strtod "inf"/"1e400"/"nan") to NULL_F64 (0Nf).  cast_vec_copy_nulls
-     * below only propagates *source* nulls, so a 0Nf produced from a
-     * non-null source cell would not flip HAS_NULLS.  Scan the F64 output
-     * and set HAS_NULLS if any canonical 0Nf was produced. */
     /* Invariant 16.4: scan the output for any reserved sentinel produced by
      * the cast (narrowing/truncation, or STR→F64 0Nf canonicalization) that
      * is not a *source* null cast_vec_copy_nulls would carry. */
@@ -1452,11 +1446,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             char* end;
             double v = strtod(sp, &end);
             if (end == sp) return ray_error("domain", "as: cannot parse str as f64");
-            /* STAGE 2 (ingest/cast STR→F64): canonicalize at the ingest entry
-             * point.  strtod("inf")/strtod("1e400")/strtod("nan") would yield a
-             * non-finite F64; make_f64 maps every non-finite to NULL_F64 (0Nf),
-             * closing the single-null float model on the cast surface.  An atom
-             * 0Nf is itself the null — there is no HAS_NULLS attr to set. */
+            /* Live-infinity model: strtod "inf"/"1e400" stays ±inf; only a
+             * NaN parse canonicalizes to NULL_F64 (in make_f64). */
             return make_f64(v);
         }
         /* Vector cast */
@@ -1589,9 +1580,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
     /* Cast to DATETIME/datetime (f64 payload = days since 2000.01.01,
      * fraction = time of day).  kdb `z`: 15h$42 -> 2000.02.12T00:00:00.000
      * (ref/cast.md:57) — numbers are day counts; date -> whole days;
-     * timestamp -> fractional days.  Non-finite payloads canonicalize to
-     * the NaN null inside ray_datetime (single-null float model, owner
-     * ruling 2026-07-09). */
+     * timestamp -> fractional days.  NaN payloads canonicalize to the null
+     * inside ray_datetime; ±inf stays the live 0Wz (2026-07-28). */
     if (cast_match(tname, tlen, "DATETIME") || cast_match(tname, tlen, "datetime")) {
         ray_release(s);
         if (val->type == -RAY_DATETIME) { ray_retain(val); return val; }
