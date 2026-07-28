@@ -68,6 +68,10 @@ int q_type_int_index_width(int8_t t);
 /* The empty typed vector of tag (sym vectors need their width ctor). */
 ray_t* q_type_empty(int8_t tag);
 
+/* The ELEMENT tag of a value — an atom's own tag, a vector's negated one;
+ * 0 for every other shape, which has no single element type to name. */
+int8_t q_type_elem_tag(ray_t* x);
+
 /* Strict int/float lane admission (cast-or-fail; typed nulls pass as
  * sentinels): 1 + *out on success, 0 on refusal. */
 int q_type_strict_i64(ray_t* x, int64_t* out);
