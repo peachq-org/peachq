@@ -125,24 +125,6 @@ static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
     return v ? v : name_error(sym->i64);
 }
 
-/* application-head name: registry at the call's valence first (rule 3 —
- * the verb table is authoritative), then general resolution */
-static ray_t* head_name_value(ray_t* sym, int64_t argc, const q_op_t** row_out) {
-    if (row_out) *row_out = NULL;
-    q_valence_t val = (argc == 1) ? Q_MONADIC : (argc == 2) ? Q_DYADIC : 0;
-    if (val) {
-        const q_op_t* row = NULL;
-        ray_t* v = q_registry_lookup_row(sym->i64, val, &row);
-        if (v && (v->type == RAY_UNARY || v->type == RAY_BINARY ||
-                  v->type == RAY_VARY)) {
-            if (row_out) *row_out = row;
-            ray_retain(v);
-            return v;
-        }
-    }
-    return name_value(sym, row_out);
-}
-
 /* adverb operand -> VALUE (+ row): `+/` derives from the DYAD */
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
@@ -596,7 +578,7 @@ ray_t* q_eval(ray_t* node) {
         const q_op_t* row = NULL;
         ray_t* fv;
         if (h && h->type == -RAY_SYM) {
-            fv = head_name_value(h, n - 1, &row);
+            fv = name_value(h, &row);
         } else if (h && (h->type == RAY_LIST || sym_const(h))) {
             fv = q_eval(h);
         } else if (h) {
