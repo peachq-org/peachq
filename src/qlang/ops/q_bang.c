@@ -17,6 +17,7 @@
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/net/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
+#include "qlang/net/q_wirefile.h"   /* q_wirefile_stats — `-21!` compression stats */
 #include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
@@ -244,8 +245,14 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
         if (RAY_IS_ERR(ey)) { if (ex) ray_release(ex); return ey; }
         y = ey;
     }
-    ray_t* r = ((ray_is_vec(x) || x->type == RAY_LIST) &&
-                (ray_is_vec(y) || y->type == RAY_LIST))
+    /* Two typed vectors make a dict whose VALUES stay that vector: kdb has no
+     * boxed homogeneous list, so `type value `a`b!1 2` is 7h, not 0h.  rayfall's
+     * `dict` explodes every value into a RAY_LIST — right for a mixed y, wrong
+     * here, and the boxing survives into `~` (which compares the raw slots). */
+    ray_t* r = (ray_is_vec(x) && ray_is_vec(y))
+                   ? (ray_retain(x), ray_retain(y), ray_dict_new(x, y))
+               : ((ray_is_vec(x) || x->type == RAY_LIST) &&
+                  (ray_is_vec(y) || y->type == RAY_LIST))
                    ? q_env_call2("dict", x, y)
                    : q_err(QE_TYPE);
     if (ex) ray_release(ex);
@@ -295,6 +302,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -32: return q_dotq_btoa_fn(y);
         case -33: return q_dotq_sha1_fn(y);
         case -34: return h_timespace(y);
+        case -21: return q_wirefile_stats(y);
         case -35: return q_dotq_gz_fn(&y, 1);
 
         /* ---- placeholder inventory: known internal fn, not implemented -> 'nyi.
@@ -306,7 +314,6 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -11:  /* streaming execute: logging + .z.ps                        */
         case -19:  /* set / compress file (AMBIGUOUS doc — see PR Deferrals)    */
         case -20:  /* .Q.gc: garbage collect                                    */
-        case -21:  /* compression stats: codec + file compress                 */
         case -22:  /* uncompressed length: serde length shortcut               */
         case -23:  /* memory map: mmap-backed objects                          */
         case -24:  /* reval: restricted eval — PARKED with `value` itself
