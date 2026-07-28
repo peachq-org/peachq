@@ -491,25 +491,16 @@ static ray_t* trunc_err(const char* what) {
 
 static ray_t* rd_obj(rcur_t* c);
 
-/* Fixed-width vector body: attrs(ignored) count payload.  Scalars are
- * byte-swapped for BE frames; float payloads canonicalized; the sentinel
- * scan sets RAY_ATTR_HAS_NULLS (invariant 16.4, vec.h). */
-static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
-    if (!r_need(c, 5)) return trunc_err("vector header");
-    uint8_t wattrs = r_u8(c);                         /* wire mode: ignored */
-    int32_t count = r_i32(c);
+ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap) {
     uint8_t esz = ray_type_sizes[(uint8_t)t];
-    if (count < 0 || (uint64_t)count * esz > c->rem)
-        return q_err(QE_DOMAIN);
+    if (count < 0 || esz == 0) return q_err(QE_DOMAIN);
     ray_t* v = ray_vec_new(t, count);
     if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
     v->len = count;
     uint8_t* d = (uint8_t*)ray_data(v);
-    memcpy(d, c->p, (size_t)count * esz);
-    c->p += (size_t)count * esz;
-    c->rem -= (size_t)count * esz;
-    if (c->swap && esz > 1 && t != RAY_GUID) {
-        for (int32_t i = 0; i < count; i++) {
+    memcpy(d, p, (size_t)count * esz);
+    if (swap && esz > 1 && t != RAY_GUID) {
+        for (int64_t i = 0; i < count; i++) {
             uint8_t* e = d + (size_t)i * esz;
             switch (esz) {
             case 2: { uint16_t u; memcpy(&u, e, 2); u = __builtin_bswap16(u); memcpy(e, &u, 2); } break;
@@ -538,10 +529,25 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
      * is only knowable from the serde attrs flag (restored below).  CHARV's
      * blank "null" is an ordinary byte and never sets the flag. */
     case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_GUID: case RAY_CHARV: break;
-    /* never reach rd_fixed_vec: STR/SYM decode on their own paths; LIST is not fixed. */
+    /* never reach here: STR/SYM decode on their own paths; LIST is not fixed. */
     case RAY_LIST: case RAY_STR: case RAY_SYM: break;
     }
     if (has_nulls) v->attrs |= RAY_ATTR_HAS_NULLS;
+    return v;
+}
+
+/* Fixed-width vector body: attrs(ignored) count payload. */
+static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
+    if (!r_need(c, 5)) return trunc_err("vector header");
+    uint8_t wattrs = r_u8(c);                         /* wire mode: ignored */
+    int32_t count = r_i32(c);
+    uint8_t esz = ray_type_sizes[(uint8_t)t];
+    if (count < 0 || (uint64_t)count * esz > c->rem)
+        return q_err(QE_DOMAIN);
+    ray_t* v = q_wire_fixed_vec(t, c->p, count, c->swap);
+    if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
+    c->p += (size_t)count * esz;
+    c->rem -= (size_t)count * esz;
     /* serde mode: the flag also covers nulls the scan can't see (GUID
      * all-zero sentinel) — restore it from the frame. */
     if (c->serde && (wattrs & RAY_ATTR_HAS_NULLS)) v->attrs |= RAY_ATTR_HAS_NULLS;
