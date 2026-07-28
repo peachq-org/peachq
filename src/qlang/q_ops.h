@@ -78,6 +78,8 @@ typedef struct {
 #define QR_FN1A(t, f) { QK_FN,   (t),  (q_wrap_fn_t)(f),   1, 1 }
 #define QR_FN2(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   2, 0 }
 #define QR_FN2A(t, f) { QK_FN,   (t),  (q_wrap_fn_t)(f),   2, 1 }
+/* FNV = FN at Vary arity (ray_vary_fn, args+n), NOT the FNV hash: one entry
+ * point per overloaded glyph (`?` `!` `@` `.`) dispatching on call rank */
 #define QR_FNV(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   0, 0 }
 #define QR_QSRC(t)    { QK_QSRC, (t),  NULL,               0, 0 }
 
