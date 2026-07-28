@@ -15,7 +15,9 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_index.h"
 #include "lang/env.h"
-#include "lang/internal.h"             /* ray_til_fn, ray_typed_null */
+#include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn */
+#include "table/dict.h"                /* ray_dict_slots — keyed-table halves */
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -557,6 +559,116 @@ static ray_t* vec_cond(ray_t* b, ray_t* x, ray_t* y) {
 }
 
 
+/* ===== `#` / `_` on the entries axis ======================================
+ * One index derived from the DOMAIN drives both halves and `!` rebuilds it —
+ * the same law for a dict (vector domain), a keyed table (table domain) and,
+ * through `flip`, a table's columns.
+ *
+ * The two verbs read the index differently.  Take answers in PROBE order and
+ * so may repeat or reorder entries (ref/take.md "returns matching rows");
+ * Drop answers in DOMAIN order, each unselected entry once.  Both ignore a key
+ * the search missed, which is why `` `b`x _ d `` drops d of `b` alone
+ * (basics/dictsandtables.md). */
+
+/* one search position, whether Find answered with an atom or a run; -1 for
+ * anything that is not an int lane, which entries_index reads as "no entry" */
+static int64_t search_pos_at(ray_t* pos, int64_t j) {
+    if (ray_is_atom(pos)) return q_type_is_int_atom(pos) ? q_type_iatom_val(pos) : -1;
+    return q_type_is_int_vec(pos) ? q_type_ivec_get(pos, j) : -1;
+}
+
+/* The found positions in probe order (take), or the unfound domain positions in
+ * domain order (drop).  Find answers a miss with the count, so "found" is just
+ * "in range".  Consumes nothing; owned i64 vector. */
+static ray_t* entries_index(ray_t* pos, int64_t n, int drop) {
+    int64_t m = ray_is_atom(pos) ? 1 : ray_len(pos);
+    ray_t* out = ray_vec_new(RAY_I64, (drop ? n : m) > 0 ? (drop ? n : m) : 1);
+    if (RAY_IS_ERR(out)) return out;
+    int64_t* o = (int64_t*)ray_data(out);
+    int64_t c = 0;
+    if (!drop) {
+        for (int64_t j = 0; j < m; j++) {
+            int64_t p = search_pos_at(pos, j);
+            if (p >= 0 && p < n) o[c++] = p;
+        }
+    } else {
+        char* hit = calloc((size_t)(n > 0 ? n : 1), 1);
+        if (!hit) { ray_release(out); return q_err(QE_OOM); }
+        for (int64_t j = 0; j < m; j++) {
+            int64_t p = search_pos_at(pos, j);
+            if (p >= 0 && p < n) hit[p] = 1;
+        }
+        for (int64_t p = 0; p < n; p++)
+            if (!hit[p]) o[c++] = p;
+        free(hit);
+    }
+    out->len = c;
+    return out;
+}
+
+/* an empty selection keeps the source's element type (`` type key `a _ `a!1 ``
+ * is 11h, not 0h) */
+static ray_t* entries_gather(ray_t* x, ray_t* idx) {
+    return q_typed_empty_like(q_index_at(x, &idx, 1), x);
+}
+
+static ray_t* entries_select(ray_t* dom, ray_t* rng, ray_t* x, int drop) {
+    ray_t* pos = q_search_find(dom, x);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
+    ray_t* idx = entries_index(pos, q_count_long(dom), drop);
+    ray_release(pos);
+    if (RAY_IS_ERR(idx)) return idx;
+    ray_t* nk = entries_gather(dom, idx);
+    ray_t* nv = (nk && !RAY_IS_ERR(nk)) ? entries_gather(rng, idx) : NULL;
+    ray_release(idx);
+    ray_t* r = (nv && !RAY_IS_ERR(nv)) ? q_bang(nk, nv) : (nv ? nv : nk);
+    if (nk && r != nk) ray_release(nk);
+    if (nv && r != nv) ray_release(nv);
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* a table IS `flip` of its column dict, so column take/drop is the entries law
+ * with the flip on either side */
+static ray_t* cols_select(ray_t* x, ray_t* t, int drop) {
+    ray_t* fd = q_flip_wrap(t);                              /* owned */
+    if (!fd || RAY_IS_ERR(fd)) return fd ? fd : q_err(QE_TYPE);
+    ray_t* nd = q_type_is_plain_dict(fd)
+                    ? entries_select(ray_dict_keys(fd), ray_dict_vals(fd), x, drop)
+                    : q_err(QE_TYPE);
+    ray_release(fd);
+    if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
+    ray_t* r = q_flip_wrap(nd);
+    ray_release(nd);
+    return r;
+}
+
+/* NULL = not an entries selection, the wrapper's fall-through signal. */
+static ray_t* entries_verb(ray_t* x, ray_t* y, int drop) {
+    if (!x || !y || ray_is_atom(x)) return NULL;
+    if (q_type_is_keyed(y))                                  /* ([]k:…)#kt */
+        return entries_select(ray_dict_slots(y)[0], ray_dict_slots(y)[1], x, drop);
+    if (x->type != RAY_SYM) return NULL;
+    if (y->type == RAY_TABLE) return cols_select(x, y, drop);
+    if (y->type == RAY_DICT) return entries_select(ray_dict_keys(y), ray_dict_vals(y), x, drop);
+    return NULL;
+}
+
+/* drop named entries: the doc's sub-dictionary extraction `(key d) except keys`
+ * re-indexed as d[remaining] (ref/drop.md) */
+static ray_t* dict_drop_keys(ray_t* keys, ray_t* d) {
+    ray_t* rem = ray_except_fn(ray_dict_keys(d), keys);
+    if (!rem || RAY_IS_ERR(rem)) return rem ? rem : q_err(QE_TYPE);
+    ray_t* nv = q_index_at(d, &rem, 1);
+    if (!nv || RAY_IS_ERR(nv)) { ray_release(rem); return nv ? nv : q_err(QE_TYPE); }
+    nv = q_typed_empty_like(nv, ray_dict_vals(d));   /* dropping every key keeps the value type */
+    return ray_dict_new(rem, nv);
+}
+
+ray_t* q_funsql_entries_take(ray_t* x, ray_t* y) { return entries_verb(x, y, 0); }
+ray_t* q_funsql_entries_drop(ray_t* x, ray_t* y) { return entries_verb(x, y, 1); }
+ray_t* q_funsql_dict_drop_keys(ray_t* keys, ray_t* d) { return dict_drop_keys(keys, d); }
+
+
 /* ===== `!` rank 4: Update / Delete (wave 4) ============================== */
 
 /* a fresh column of v's null, length n (update.md: a created column has
@@ -738,7 +850,7 @@ static ray_t* bang_qsql(ray_t** args) {
     int64_t nk = 0;                 /* keyed source: re-key the result */
     if (q_type_is_dict(src) && !q_type_is_keyed(src)) {
         if (q_type_is_dict(a))      r = update_dict(a, b, c, src);
-        else if (is_symvec(a) && is_empty_gen(c)) r = q_drop_wrap(a, src);
+        else if (is_symvec(a) && is_empty_gen(c)) r = dict_drop_keys(a, src);
         else                        r = q_err(QE_NYI);
     } else {
         ray_t* t = src;
@@ -753,7 +865,7 @@ static ray_t* bang_qsql(ray_t** args) {
             return q_err(QE_TYPE);
         }
         if (is_symvec(a) && ray_len(a) > 0 && is_empty_gen(c)) {
-            r = q_drop_wrap(a, t);                  /* law 18: cols ≡ a _ t */
+            r = entries_verb(a, t, 1);              /* law 18: cols ≡ a _ t */
             nk = 0;                                 /* dropping may hit keys */
         } else {
             ray_t* idx0 = til_count(t);
