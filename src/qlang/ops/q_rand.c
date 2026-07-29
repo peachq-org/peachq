@@ -5,12 +5,10 @@
  * Split from ops/q_list.c (corridor pass, 2026-07-22) — pure function moves;
  * the shared internal surface lives in q_registry_internal.h. */
 #define _POSIX_C_SOURCE 200809L
-#define Q_OPS_ENV_GRANDFATHER /* grandfathered 2026-07-23: 2 env uses (seed state) — q-index PR audit */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
-#include "lang/env.h"      /* ray_env_get — env_call1 (guid roll/deal) */
-#include "lang/internal.h" /* ray_rand_fn, RAY_IS_TEMPORAL64, ray_error */
+#include "lang/internal.h" /* ray_rand_fn, ray_guid_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "table/sym.h"     /* ray_sym_intern, RAY_SYM_W64 — sym generate */
 #include <math.h>          /* nextafter/nextafterf — float roll clamp */
 #include <stdint.h>        /* INT32/64 MIN/MAX */
@@ -253,15 +251,6 @@ static ray_t* deal_pick(int64_t n, ray_t* y) {
     return out;
 }
 
-/* Unary sibling of q_env_call2 (guid roll/deal routes through the audited
- * env `guid` value).  Borrowed arg; returns owned. */
-static ray_t* env_call1(const char* nm, ray_t* a) {
-    ray_t* f = ray_env_get(ray_sym_intern(nm, strlen(nm)));
-    if (!f || f->type != RAY_UNARY)
-        return q_err(QE_TYPE);
-    return ((ray_unary_fn)(uintptr_t)f->i64)(a);
-}
-
 /* q `x?y` — roll / deal / pick / generate + the find dispatch (type-dispatch
  * on the operands).
  *   list ? y   -> find (q_search_find, ops/q_search.c — dict reverse lookup rides it)
@@ -326,7 +315,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             if (!RAY_ATOM_IS_NULL(y))
                 return q_err(QE_TYPE);   /* guid generate needs 0Ng */
             ray_t* cnt = ray_i64(n);
-            ray_t* g = env_call1("guid", cnt);
+            ray_t* g = ray_guid_fn(cnt);
             ray_release(cnt);
             return g;
         }

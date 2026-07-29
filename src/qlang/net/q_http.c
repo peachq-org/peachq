@@ -10,9 +10,8 @@
 #include "qlang/net/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler show output */
-#include "lang/env.h"          /* ray_env_get / ray_sym_intern — `.h.HOME` / `.h.ty` */
+#include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty` */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
-#include "core/runtime.h"      /* __VM — env lookups require a bound per-thread VM */
 #include "mem/sys.h"
 #include "table/dict.h"        /* ray_dict_find_sym — `.h.ty` override probe */
 #include "picohttpparser.h"
@@ -180,13 +179,9 @@ static bool str_ieq(const char* s, size_t n, const char* lower_tok) {
 }
 
 
-/* Read a name from the global q env, but ONLY when a per-thread VM is bound —
- * ray_env_get walks the scope stack via __VM and derefs it unconditionally.  The
- * live server always serves on the runtime's main thread (VM bound), so `.h.*`
- * resolves; a caller with no bound VM degrades to the octet-stream default
- * instead of crashing.  Borrowed ref (never release). */
+/* `.h.*` reads come from q's env (flat keys, no VM dependency).  Borrowed. */
 static ray_t* http_env_get(int64_t sym_id) {
-    return __VM ? ray_env_get(sym_id) : NULL;
+    return q_env_get(sym_id);
 }
 
 /* Copy a q text value's bytes (charv / char atom / string atom, via

@@ -26,6 +26,7 @@
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
+#include "qlang/q_env.h"     /* q_env_get — qSQL phrase-head values */
 #include "lang/env.h"        /* ray_fn_name; ray_sym_is_ipc_hook — IPC hook slots */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
@@ -2086,7 +2087,7 @@ static ray_t *qsql_convert_head(ray_t *h) {
     ray_t *s = ray_sym_str(h->i64);
     if (s) { ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), Q_MONADIC);
              ray_release(s); }
-    if (!ev) ev = ray_env_get(h->i64);             /* borrowed */
+    if (!ev) ev = q_env_get(h->i64);               /* borrowed */
     if (qsql_is_fn_value(ev)) { ray_retain(ev); return ev; }
     ray_retain(h);
     return h;                                       /* not a fn: leave name-ref */

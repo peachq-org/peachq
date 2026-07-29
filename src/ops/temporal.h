@@ -81,4 +81,10 @@ ray_t* ray_extract_dd_fn(ray_t* x);
 ray_t* ray_extract_dow_fn(ray_t* x);
 ray_t* ray_extract_doy_fn(ray_t* x);
 
+/* Dotted-segment sym → the unary accessor kernel: the extract wrappers
+ * above plus the date/time clocks (`ts.hh`, `d.dd`, `p.date`).  NULL when
+ * the segment is not an accessor — the ONE spelling roster for dotted-walk
+ * resolvers. */
+ray_t* (*ray_temporal_accessor(int64_t sym_id))(ray_t*);
+
 #endif /* RAY_OPS_TEMPORAL_H */

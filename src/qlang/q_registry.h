@@ -259,8 +259,10 @@ int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous
                      int check_reserved);
 ray_t* q_registry_name_reserved_words(void);
 
-/* The `.q` roster (BORROWED dict), NULL before q.q loads — introspection reads
- * the namespace here rather than opening its own path to the env from ops/. */
+/* The `.q` roster: an OWNED derived namespace view (caller releases; the
+ * leading empty-sym :: marker entry rides along), NULL before q.q loads —
+ * introspection reads the namespace here rather than opening its own path to
+ * the env from ops/. */
 ray_t* q_registry_qsrc_ns(void);
 
 #endif /* Q_REGISTRY_H */

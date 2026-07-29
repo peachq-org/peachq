@@ -6,7 +6,7 @@
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
-#define Q_OPS_ENV_GRANDFATHER /* grandfathered 2026-07-23: 13 env uses (views/meta churn) — q-index PR audit */
+#define Q_OPS_ENV_GRANDFATHER /* the .ipc.on.* six-slot callback seam: ray_env_set on hook syms only */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
 #include "qlang/q_type.h"       /* q_type_is_keyed / q_type_qname / q_type_iatom_val */
@@ -14,7 +14,8 @@
 #include "qlang/ops/q_bang.h"  /* q_bang_dispatch — the `-N!` internal-fn manifest */
 #include "qlang/q_dotz.h"  /* q_dotz_ipc_hook_index, q_dotz_zts_set — .z.* handler arms */
 #include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y file form */
-#include "lang/env.h"      /* ray_env_bind/set, ray_env_push/pop_scope, ray_sym_ipc_hook */
+#include "qlang/q_env.h"   /* the q K-tree — every name read/bind below */
+#include "lang/env.h"      /* ray_env_set + ray_sym_ipc_hook — the .ipc.on.* seam ONLY */
 #include "lang/eval.h"     /* ray_eval; ray_list_fn, ray_except_fn, ray_sect_fn, ray_take_fn */
 #include "lang/internal.h" /* ray_concat_fn, ray_typed_null, ray_error, ray_group_fn */
 #include "qlang/ops/q_index.h" /* q_index_at / q_index_elem_at — group's key gathers */
@@ -296,7 +297,7 @@ static ray_t* table_operand(ray_t* y, int64_t* sym_out) {
     *sym_out = -1;
     if (!y) return NULL;
     if (y->type == -RAY_SYM) {
-        ray_t* g = ray_env_get(y->i64);
+        ray_t* g = q_env_get(y->i64);
         if (g && (g->type == RAY_TABLE || q_type_is_keyed(g))) { *sym_out = y->i64; return g; }
         return NULL;
     }
@@ -453,7 +454,7 @@ ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
         if (!keyed || RAY_IS_ERR(keyed)) return keyed;
     }
     if (sym >= 0) {
-        ray_env_bind(sym, keyed);                         /* retains */
+        q_env_set(sym, keyed);                            /* retains */
         ray_release(keyed);
         ray_retain(y);
         return y;
@@ -972,8 +973,8 @@ static ray_t* table_append(ray_t* flat, ray_t* rows) {
     }
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
-        ray_t* joined = q_env_call2("concat", ray_table_get_col_idx(flat, c),
-                                              ray_table_get_col_idx(rows, c));
+        ray_t* joined = ray_concat_fn(ray_table_get_col_idx(flat, c),
+                                             ray_table_get_col_idx(rows, c));
         if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : q_err(QE_OOM); }
         out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
         ray_release(joined);
@@ -987,10 +988,10 @@ static ray_t* table_append(ray_t* flat, ray_t* rows) {
 ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
         return q_err(QE_TYPE);
-    ray_t* g = ray_env_get(x->i64);                       /* borrowed */
+    ray_t* g = q_env_get(x->i64);                         /* borrowed */
     if (!g) {                                             /* create */
         if (y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
-            ray_env_bind(x->i64, y);                      /* retains */
+            q_env_set(x->i64, y);                         /* retains */
             return idx_range(0, any_nrows(y));
         }
         return q_err(QE_TYPE);
@@ -1022,7 +1023,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (keyed) { nt = q_bang_enkey(nkey, nf); ray_release(nf); }
     else nt = nf;
     if (!nt || RAY_IS_ERR(nt)) return nt;
-    ray_env_bind(x->i64, nt);                             /* retains */
+    q_env_set(x->i64, nt);                                /* retains */
     ray_release(nt);
     return idx_range(before, added);
 }
@@ -1118,9 +1119,9 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     int64_t sym;
     ray_t* t = table_operand(x, &sym);
     if (!t) {
-        if (x && x->type == -RAY_SYM && !ray_env_get(x->i64) &&
+        if (x && x->type == -RAY_SYM && !q_env_get(x->i64) &&
             y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
-            ray_env_bind(x->i64, y);                      /* create, like insert */
+            q_env_set(x->i64, y);                         /* create, like insert */
             ray_retain(x);
             return x;
         }
@@ -1141,7 +1142,7 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     else nt = nf;
     if (!nt || RAY_IS_ERR(nt)) return nt;
     if (sym >= 0) {
-        ray_env_bind(sym, nt);                            /* retains */
+        q_env_set(sym, nt);                               /* retains */
         ray_release(nt);
         ray_retain(x);
         return x;
@@ -1382,14 +1383,33 @@ ray_t* q_key_wrap(ray_t* x) {
             ray_release(s);
             return q_err(QE_NYI);
         }
-        if (l == 1 && nm[0] == '.') {           /* `. — root objects: nyi (as above) */
+        if (l == 1 && nm[0] == '.') {           /* `. — root objects, marker-free
+                                                 * (ref/key.md: `key `.` lists names
+                                                 * only; namespaces keep the marker) */
             ray_release(s);
-            return q_err(QE_NYI);
+            ray_t* root = q_env_resolve(x->i64);
+            if (!root || root->type != RAY_DICT) {
+                if (root) ray_release(root);
+                return q_err(QE_NYI);
+            }
+            ray_t* marker = ray_sym(ray_sym_intern_runtime("", 0));
+            if (!marker || RAY_IS_ERR(marker)) {
+                ray_release(root);
+                return marker ? marker : q_err(QE_WSFULL);
+            }
+            ray_t* bare = ray_dict_remove(root, marker);   /* consumes root */
+            ray_release(marker);
+            if (!bare || RAY_IS_ERR(bare)) return bare ? bare : q_err(QE_WSFULL);
+            ray_t* rk = ray_dict_keys(bare);
+            if (!rk) { ray_release(bare); return q_err(QE_TYPE); }
+            ray_retain(rk);
+            ray_release(bare);
+            return rk;
         }
         ray_release(s);
         /* named variable / namespace: dict (incl. a context's dict) -> keys;
          * bound -> the sym itself; unbound -> () (ref/key.md). */
-        ray_t* v = ray_env_resolve(x->i64);
+        ray_t* v = q_env_resolve(x->i64);
         if (!v) return ray_list_new(1);         /* () — empty general list */
         if (RAY_IS_ERR(v)) return v;
         if (v->type == RAY_DICT) {
@@ -1413,10 +1433,9 @@ ray_t* q_key_wrap(ray_t* x) {
 
 /* q `nam set y` (ref/get.md) — assign a global through a symbol handle:
  *   `a set 42        -> bind the global (dotted names create contexts)
- *   `.foo set d      -> restore a context: upsert every member of dict d
- *                       (the empty-sym :: placeholder entry is skipped)
+ *   `.foo set d      -> ordinary rebind, `:`-identical — the old namespace
+ *                       dict goes with the name (no splat: dict model)
  *   `. set d         -> restore root variables from dict d
- *   `.foo set 42     -> plain rebind: WIPES the context (q4m3's gotcha)
  *   `:f set y        -> write a kdb+ flat file (q_wirefile_write)
  * The splayed form and the compressed (file;lbs;alg;lvl) left-arguments are a
  * later wave: 'nyi.  Returns the handle (kdb returns nam). */
@@ -1437,13 +1456,8 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         return r ? r : q_err(QE_TYPE);
     }
     int is_root = (l == 1 && nm[0] == '.');
-    /* Restore semantics: a single-segment `.foo` handle (kdb creates the
-     * context).  A NESTED handle always binds the data dict as-is — the
-     * context-ness probe died with q_ns (cutover 2026-07-23). */
-    int is_ctx  = (!is_root && l >= 2 && nm[0] == '.' && nm[1] != '.' &&
-                   !memchr(nm + 1, '.', l - 1));
-    if ((is_root || is_ctx) && y && y->type == RAY_DICT) {
-        /* context restore: upsert each member under the target root */
+    if (is_root && y && y->type == RAY_DICT) {
+        /* root restore: upsert each member as a plain global */
         ray_t* dk = ray_dict_keys(y);           /* borrowed */
         ray_t* dv = ray_dict_vals(y);           /* borrowed */
         int64_t n = ray_dict_len(y);
@@ -1459,32 +1473,14 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
                 return q_err(QE_TYPE);
             }
             ray_t* ks = ray_sym_str(k->i64);
-            if (!ks || ray_str_len(ks) == 0) {  /* :: placeholder — skip */
-                if (ks) ray_release(ks);
-                ray_release(k);
-                ray_release(v);
-                continue;
-            }
-            char full[192];
-            full[0] = '\0';                   /* error paths print `full` */
-            int fl = is_root
-                ? snprintf(full, sizeof full, "%.*s",
-                           (int)ray_str_len(ks), ray_str_ptr(ks))
-                : snprintf(full, sizeof full, "%.*s.%.*s", (int)l, nm,
-                           (int)ray_str_len(ks), ray_str_ptr(ks));
-            ray_release(ks);
+            int skip = !ks || ray_str_len(ks) == 0;   /* :: placeholder */
+            if (ks) ray_release(ks);
+            ray_err_t err = skip ? RAY_OK : q_env_set(k->i64, v);
             ray_release(k);
-            ray_err_t err = (fl > 0 && (size_t)fl < sizeof full)
-                ? ray_env_set(ray_sym_intern(full, (size_t)fl), v)
-                : RAY_ERR_TYPE;
             ray_release(v);
-            if (err == RAY_ERR_RESERVED) {
-                ray_release(s);
-                return q_err(QE_RESERVE);
-            }
             if (err != RAY_OK) {
                 ray_release(s);
-                return ray_error(ray_err_code_str(err), "set: '%s' failed", full);
+                return ray_error(ray_err_code_str(err), "set: assign failed");
             }
         }
         ray_release(s);
@@ -1508,18 +1504,16 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
         ray_retain(x);
         return x;
     }
-    /* kdb `.z.p*` connection-handler aliases resolve to the SAME `.ipc.on.*`
-     * slot that ipc.c's hook_lookup reads (one slot, two spellings).  A q
-     * `{…}` binds AS-IS: RAY_QFN carriers fire through the value-apply seam
-     * (ipc.c hook_fire).  (Computed BEFORE ray_release(s): `nm` points into
-     * `s`.) */
-    int64_t tgt = x->i64;
+    /* kdb `.z.p*` connection-handler aliases write the `.ipc.on.*` slot that
+     * ipc.c's hook_lookup reads — the six-slot callback table stays in
+     * RAYFALL's env (the one deliberate seam; a direct `.ipc.on.*` set no
+     * longer reaches it, closing the write-side leak).  A q `{…}` binds
+     * AS-IS: RAY_QFN carriers fire through the value-apply seam (ipc.c
+     * hook_fire).  (hk computed BEFORE ray_release(s): `nm` points into `s`.) */
     int hk = q_dotz_ipc_hook_index(nm, l);
-    if (hk >= 0) tgt = ray_sym_ipc_hook(hk);
     ray_release(s);
-    ray_err_t err = ray_env_set(tgt, y);        /* plain/dotted global assign */
-    if (err == RAY_ERR_RESERVED)
-        return q_err(QE_RESERVE);
+    ray_err_t err = hk >= 0 ? ray_env_set(ray_sym_ipc_hook(hk), y)
+                            : q_env_set(x->i64, y);
     if (err != RAY_OK)
         return ray_error(ray_err_code_str(err), "set: assign failed");
     ray_retain(x);
@@ -1574,7 +1568,7 @@ ray_t* q_union_wrap(ray_t* x, ray_t* y) {
     if (x->type == RAY_DICT || y->type == RAY_DICT)
         return q_err(QE_NYI);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* distinct of t,u */
-        ray_t* j = q_env_call2("concat", x, y);
+        ray_t* j = ray_concat_fn(x, y);
         if (!j || RAY_IS_ERR(j)) return j ? j : q_err(QE_OOM);
         ray_t* r = table_distinct(j);
         ray_release(j);
@@ -1752,7 +1746,7 @@ static ray_t* table_colnames(ray_t* x) {
  * global plain/keyed table resolves to it (borrowed); else x unchanged. */
 static ray_t* table_bi_deref(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
-        ray_t* g = ray_env_get(x->i64);                 /* borrowed */
+        ray_t* g = q_env_get(x->i64);                   /* borrowed */
         if (g && (g->type == RAY_TABLE || q_type_is_keyed(g))) return g;
     }
     return x;
