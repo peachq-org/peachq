@@ -1,22 +1,20 @@
-/* q_builtins — register q's own builtins into the rayforce env.
- *
- * q reuses rayfall's eval/value/show as-is (they operate on ray_t), but needs
- * its own q-syntax `parse` (rayfall's `parse` reads lisp).  We bind names via
- * the public ray_fn_* / ray_env_bind API — never touching the frozen builtin
- * registration site — so `parse` overrides rayfall's lisp parse in the env. */
+/* q_builtins — register q's own builtins into q's env (q_env), and install
+ * the remote-eval hooks.  Rayfall's env is a bootstrap-only kernel catalogue:
+ * capture_base and the registry snapshot it here, then q never consults it. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
 #include "qlang/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_apply_value — THE eval pipeline */
 #include "qlang/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
-#define Q_OPS_ENV_GRANDFATHER /* legitimate owner: THE bootstrap/binding home */
+#define Q_OPS_ENV_GRANDFATHER /* base-kernel snapshots (capture_base) read the bootstrap catalogue */
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
+#include "qlang/q_env.h"      /* q_env_bind — q's own name surface */
 #include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the element-read home */
-#include "lang/env.h"       /* ray_fn_unary, ray_env_bind */
+#include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "lang/format.h"    /* ray_fmt — q string cast */
 #include "table/sym.h"      /* ray_sym_vec_cell */
@@ -211,18 +209,18 @@ static void capture_base(const char* name, ray_unary_fn* out, uint8_t* attrs) {
 
 static void bind_unary(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    ray_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
     ray_release(obj);
 }
 
 static void bind_vary(const char* name, ray_vary_fn fn) {
     ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
-    ray_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
     ray_release(obj);
 }
 
 static void bind_value(const char* name, ray_t* val) {
-    ray_env_bind(ray_sym_intern(name, strlen(name)), val);
+    q_env_bind(ray_sym_intern(name, strlen(name)), val);
     ray_release(val);
 }
 
@@ -312,9 +310,12 @@ static ray_t* remote_apply(ray_t* list) {
             ray_release(ast);
             if (RAY_IS_ERR(head)) return head;
         }
-    } else if (head->type == -RAY_SYM) {                  /* `sum -> its value */
-        ray_t* v = ray_env_resolve(head->i64);
-        if (v) { ray_release(head); head = v; }
+    } else if (head->type == -RAY_SYM) {   /* `sum -> its value (registry-first,
+                                            * the evaluator's resolution order) */
+        ray_t* v = q_eval_value_wrap(head);
+        if (RAY_IS_ERR(v)) { ray_release(head); return v; }
+        ray_release(head);
+        head = v;
     }
     ray_t* argv[8];
     int64_t argc = n - 1;
@@ -399,10 +400,10 @@ void q_builtins_register(void) {
     capture_base("count", &g_base_count, &count_attrs);
     {
         ray_t* tv = ray_fn_unary("type", type_attrs, type_fn);
-        ray_env_bind(ray_sym_intern("type", 4), tv);
+        q_env_bind(ray_sym_intern("type", 4), tv);
         ray_release(tv);
         ray_t* cv = ray_fn_unary("count", count_attrs, q_count_fn);
-        ray_env_bind(ray_sym_intern("count", 5), cv);
+        q_env_bind(ray_sym_intern("count", 5), cv);
         ray_release(cv);
     }
     /* `value` — the one-apply home (eval/q_eval.c).  Env-bound so a bare
@@ -429,7 +430,7 @@ void q_builtins_register(void) {
             ray_t* v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC); /* borrowed */
             if (!v) fprintf(stderr, "q_builtins: registry miss for %s\n", nm);
             assert(v != NULL);
-            ray_env_bind(ray_sym_intern(nm, strlen(nm)), v);             /* retains */
+            q_env_bind(ray_sym_intern(nm, strlen(nm)), v);               /* retains */
         }
         /* `not` is the keyword spelling of `~:` and must be the SAME value, not
          * a second row: sharing one object keeps kdb's `~:` parse-tree spelling
@@ -437,7 +438,7 @@ void q_builtins_register(void) {
          * vector to one truthiness bool instead of ref/not.md's per-item 0b/1b. */
         ray_t* nv = q_registry_lookup_name("~", 1, Q_MONADIC);
         assert(nv != NULL);
-        ray_env_bind(ray_sym_intern("not", 3), nv);
+        q_env_bind(ray_sym_intern("not", 3), nv);
     }
     /* .Q.c.* — the raw C primitives behind the .Q namespace (internal/unstable).
      * dotq.q delegates each public `.Q.<name>` to these (rule 6, loaded next) →
