@@ -31,7 +31,8 @@
 #define Q_OPS_ENV_GRANDFATHER /* legitimate owner: registry QR_ENV recipes snapshot env values */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
-#include "lang/env.h"      /* ray_env_get; ray_fn_unary/binary/vary — building the fn-values */
+#include "qlang/q_env.h"   /* q_env_get — q-bound builtins are snapshot sources too */
+#include "lang/env.h"      /* ray_env_get (bootstrap catalogue); ray_fn_unary/binary/vary */
 #include "lang/eval.h"     /* RAY_FN_ATOMIC/SPECIAL_FORM/Q_LOWER — attrs stamped on built values */
 #include "lang/internal.h" /* ray_sym_str — name display */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 — name interning */
@@ -206,11 +207,15 @@ ray_t* q_registry_name_reserved_words(void) {
 
 /* ---- value builders keyed by manifest build-kind ---- */
 
-/* Identity/rename-reuse: snapshot an existing rayfall builtin value by name and
- * retain it (the registry owns one ref).  Returns NULL if the audited source is
- * absent — a real bug, so q_registry_init fails fast. */
+/* Identity/rename-reuse: snapshot a builtin value by name — q's own bindings
+ * (q_builtins) first, then the rayfall kernel catalogue (the ONE bootstrap
+ * window where it is still consulted) — and retain it (the registry owns one
+ * ref).  Returns NULL if the audited source is absent — a real bug, so
+ * q_registry_init fails fast. */
 static ray_t* build_env(const char* env_name) {
-    ray_t* e = ray_env_get(ray_sym_intern(env_name, strlen(env_name)));
+    int64_t id = ray_sym_intern(env_name, strlen(env_name));
+    ray_t* e = q_env_get(id);
+    if (!e) e = ray_env_get(id);
     if (!e) return NULL;
     ray_retain(e);
     return e;
@@ -368,7 +373,7 @@ static ray_err_t bind_qsrc_one(const q_op_t* op, q_valence_t valence,
     if (tl + 3 >= sizeof full) return RAY_ERR_DOMAIN;
     memcpy(full, ".q.", 3);
     memcpy(full + 3, r->target, tl);
-    ray_t* val = ray_env_get(ray_sym_intern(full, tl + 3));   /* borrowed */
+    ray_t* val = q_env_get(ray_sym_intern(full, tl + 3));     /* borrowed */
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN;       /* q.q drift bug */
     ray_retain(val);
     entry_t* e    = &g_entries[g_count++];
@@ -400,9 +405,16 @@ ray_err_t q_registry_bind_qsrc(void) {
     return RAY_OK;
 }
 
+/* MARKER-FREE `.q` roster: the stored namespace dict minus its ` -> ::
+ * entry, so callers never re-derive "is this the marker" per key. */
 ray_t* q_registry_qsrc_ns(void) {
-    ray_t* v = ray_env_get(ray_sym_intern(".q", 2));      /* borrowed */
-    return (v && !RAY_IS_ERR(v) && v->type == RAY_DICT) ? v : NULL;
+    ray_t* v = q_env_ns_view(ray_sym_intern(".q", 2));    /* owned stored dict */
+    if (!v || RAY_IS_ERR(v) || v->type != RAY_DICT) return NULL;
+    ray_t* marker = ray_sym(ray_sym_intern("", 0));
+    if (!marker || RAY_IS_ERR(marker)) { ray_release(v); return NULL; }
+    ray_t* d = ray_dict_remove(v, marker);                /* consumes v */
+    ray_release(marker);
+    return (d && !RAY_IS_ERR(d)) ? d : NULL;
 }
 
 ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence) {
