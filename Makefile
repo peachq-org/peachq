@@ -123,10 +123,31 @@ $(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ)
 
 # --- Windows cross-build (mingw-w64): make win --------------------------------
 # RAY_OS_WINDOWS on the command line because some files test it before the
-# platform header is visible; no -march, target CPU unknown.
+# platform header is visible.
+#
+# Optimisation parity with RELEASE_CFLAGS (2026-07-29): the win build was plain
+# -O2 while the native release build also got -march, unrolling and the relaxed
+# float flags, so q.exe shipped slower for no stated reason.  Two notes on why
+# this set is the safe one:
+#   - -march defaults to the x86-64-v2 baseline (SSE4.2/POPCNT, Nehalem 2008)
+#     rather than v3, because the target CPU is unknown and a v3 binary SIGILLs
+#     on a pre-AVX2 machine.  Override for known-modern targets:
+#     make win RAY_WIN_MARCH=x86-64-v3
+#   - the float flags are exactly the native set, which deliberately EXCLUDES
+#     -ffinite-math-only / -ffast-math: the live-infinity model (2026-07-28)
+#     needs +-Inf to stay ordinary values and NaN to stay the null.  Parity also
+#     stops q.exe and ./q disagreeing on float results.
+# WIN_OPT is the ONE home for the win optimisation set: Makefile.dev redefines
+# WIN_CFLAGS (stricter warnings, dev tree only) and references this, so the two
+# WIN_CFLAGS definitions cannot drift on optimisation.
+RAY_WIN_MARCH ?= x86-64-v2
+RAY_WIN_JOBS  ?= 4
+WIN_OPT = -O2 -march=$(RAY_WIN_MARCH) -funroll-loops -fomit-frame-pointer \
+  -fno-math-errno -fassociative-math -ffp-contract=fast -fno-signed-zeros \
+  -fno-trapping-math
 WIN_CROSS  ?= x86_64-w64-mingw32-
 WIN_CC      = $(WIN_CROSS)gcc
-WIN_CFLAGS  = $(WARNS) -std=$(STD) -O2 \
+WIN_CFLAGS  = $(WARNS) -std=$(STD) $(WIN_OPT) \
   -DRAY_OS_WINDOWS=1 -D_WIN32_WINNT=0x0A00 -D__USE_MINGW_ANSI_STDIO=1
 WIN_LIBS    = -lws2_32 -lm
 # iocp_win.c provides ray_poll_* on Windows; linking the iocp.c stub too is a
@@ -150,7 +171,10 @@ $(BUILD_DIR)/%.win.o: %.c
 q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
 	$(WIN_CC) $(WIN_CFLAGS) -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS)
 
-win: q.exe
+# Recursive so the -j lands on the object rules even when the outer make is
+# serial (win-smoke and the bare `make win` both go through here).
+win:
+	+@$(MAKE) --no-print-directory -j$(RAY_WIN_JOBS) q.exe
 
 clean::
 	-rm -rf $(BUILD_DIR)
