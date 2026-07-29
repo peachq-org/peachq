@@ -5,8 +5,6 @@
  * on take/drop; by rides the group core; update is dict update over Amend At;
  * delete is drop / complement select.  Order: From-Where-By-Select-Limit. */
 #define _POSIX_C_SOURCE 200809L
-#define Q_OPS_ENV_GRANDFATHER /* legitimate owner: From-resolve + phrase scopes are eval-side name resolution */
-
 #include "qlang/eval/q_funsql.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/q_err.h"
@@ -14,7 +12,7 @@
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_index.h"
-#include "lang/env.h"
+#include "qlang/q_env.h"
 #include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn */
 #include "table/dict.h"                /* ray_dict_slots — keyed-table halves */
 #include <stdlib.h>
@@ -44,7 +42,7 @@ static ray_t* gather(ray_t* x, ray_t* idx) {
 static ray_t* ques_from(ray_t* t) {
     if (!t) return q_err(QE_TYPE);
     if (t->type == -RAY_SYM) {
-        ray_t* v = ray_env_resolve(t->i64);
+        ray_t* v = q_env_resolve(t->i64);
         if (!v) return q_err(QE_NAME);
         if (RAY_IS_ERR(v)) return v;
         ray_t* r = ques_from(v);
@@ -60,18 +58,18 @@ static ray_t* ques_from(ray_t* t) {
 /* Law 4: THE evaluator runs the phrase inside one NON-barrier scope (qsql.md
  * name order: column -> enclosing locals -> global); virtual `i` = idx. */
 static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
-    if (ray_env_push_scope() != RAY_OK) return q_err(QE_STACK);
+    if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
     int64_t nc = ray_table_ncols(t);
     for (int64_t c = 0; c < nc && !err; c++) {
         ray_t* g = gather(ray_table_get_col_idx(t, c), idx);
         if (!g || RAY_IS_ERR(g)) { err = g ? g : q_err(QE_TYPE); break; }
-        ray_env_set_local(ray_table_col_name(t, c), g);        /* retains */
+        q_env_local_set(ray_table_col_name(t, c), g);        /* retains */
         ray_release(g);
     }
-    if (!err) ray_env_set_local(ray_sym_intern_runtime("i", 1), idx);
+    if (!err) q_env_local_set(ray_sym_intern_runtime("i", 1), idx);
     ray_t* r = err ? err : q_eval_apply_concrete(q_eval(tree));
-    ray_env_pop_scope();
+    q_env_frame_pop();
     return r;
 }
 
@@ -779,7 +777,7 @@ static ray_t* update_table(ray_t* a, ray_t* b, ray_t* t, ray_t* idx) {
 static ray_t* update_dict(ray_t* a, ray_t* b, ray_t* c, ray_t* d) {
     if (!(is_bool_atom(b, 0) || is_empty_gen(b))) return q_err(QE_TYPE);
     if (!is_empty_gen(c)) return q_err(QE_NYI);
-    if (ray_env_push_scope() != RAY_OK) return q_err(QE_STACK);
+    if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* dk = ray_dict_keys(d);
     ray_t* dv = ray_dict_vals(d);
     int64_t n = q_count_long(dk);
@@ -787,7 +785,7 @@ static ray_t* update_dict(ray_t* a, ray_t* b, ray_t* c, ray_t* d) {
         ray_t* k = q_index_elem_at(dk, j);
         ray_t* v = q_index_elem_at(dv, j);
         if (k && !RAY_IS_ERR(k) && k->type == -RAY_SYM && v && !RAY_IS_ERR(v))
-            ray_env_set_local(k->i64, v);
+            q_env_local_set(k->i64, v);
         if (k && !RAY_IS_ERR(k)) ray_release(k);
         if (v && !RAY_IS_ERR(v)) ray_release(v);
     }
@@ -803,7 +801,7 @@ static ray_t* update_dict(ray_t* a, ray_t* b, ray_t* c, ray_t* d) {
         vals = ray_list_append(vals, v);
         ray_release(v);
     }
-    ray_env_pop_scope();
+    q_env_frame_pop();
     if (RAY_IS_ERR(vals)) return vals;
     ray_t* nd = q_bang(ray_dict_keys(a), vals);
     ray_release(vals);
@@ -825,7 +823,7 @@ static ray_t* bang_qsql(ray_t** args) {
     ray_t* src;
     if (tslot && tslot->type == -RAY_SYM) {
         name = tslot->i64;
-        src = ray_env_resolve(name);
+        src = q_env_resolve(name);
         if (!src) return q_err(QE_NAME);
         if (RAY_IS_ERR(src)) return src;
     } else if (tslot) {
@@ -890,7 +888,7 @@ static ray_t* bang_qsql(ray_t** args) {
     ray_release(src);
     if (name >= 0 && r && !RAY_IS_ERR(r)) {
         /* name form (law 21): amend in place, hand back the name */
-        if (ray_env_set(name, r) != RAY_OK) { ray_release(r); return q_err(QE_ASSIGN); }
+        if (q_env_set(name, r) != RAY_OK) { ray_release(r); return q_err(QE_ASSIGN); }
         ray_release(r);
         ray_retain(tslot);
         return tslot;
